@@ -16,6 +16,7 @@ set(USE_STATIC_BOOST OFF CACHE BOOL "Use shared library version of Boost")
 set(USE_SYSTEM_CEF ON CACHE BOOL "Use the version of cef from your OS (only tested with Ubuntu)")
 set(CASPARCG_BINARY_NAME "casparcg" CACHE STRING "Custom name of the binary to build (this disables some install files)")
 set(ENABLE_AVX2 OFF CACHE BOOL "Enable the AVX2 instruction set (requires a CPU that supports it)")
+set(ENABLE_VULKAN OFF CACHE BOOL "Enable Vulkan support")
 
 # Determine build (target) platform
 SET (PLATFORM_FOLDER_NAME "linux")
@@ -41,21 +42,23 @@ if(NOT SFML_FOUND)
     find_package(SFML 2 COMPONENTS graphics system window REQUIRED)
 endif()
 
-find_package(Vulkan REQUIRED)
+IF (ENABLE_VULKAN)
+    find_package(Vulkan REQUIRED)
 
-FetchContent_Declare(vk_bootstrap
-        URL ${CASPARCG_DOWNLOAD_MIRROR}/vk-bootstrap/vk-bootstrap-1.4.328.tar.gz
-        URL_HASH SHA256=3be0220de218dc3e692aeac552b2953860a0e0a48257f4a61c3f1c1472674744
-        DOWNLOAD_DIR ${CASPARCG_DOWNLOAD_CACHE}
-        )
-FetchContent_MakeAvailable(vk_bootstrap)
+    FetchContent_Declare(vk_bootstrap
+            URL ${CASPARCG_DOWNLOAD_MIRROR}/vk-bootstrap/vk-bootstrap-1.4.328.tar.gz
+            URL_HASH SHA256=3be0220de218dc3e692aeac552b2953860a0e0a48257f4a61c3f1c1472674744
+            DOWNLOAD_DIR ${CASPARCG_DOWNLOAD_CACHE}
+            )
+    FetchContent_MakeAvailable(vk_bootstrap)
 
-FetchContent_Declare(vma
-        URL ${CASPARCG_DOWNLOAD_MIRROR}/VulkanMemoryAllocator/VulkanMemoryAllocator-3.3.0.tar.gz
-        URL_HASH SHA256=c4f6bbe6b5a45c2eb610ca9d231158e313086d5b1a40c9922cb42b597419b14e
-        DOWNLOAD_DIR ${CASPARCG_DOWNLOAD_CACHE}
-)
-FetchContent_MakeAvailable(vma)
+    FetchContent_Declare(vma
+            URL ${CASPARCG_DOWNLOAD_MIRROR}/VulkanMemoryAllocator/VulkanMemoryAllocator-3.3.0.tar.gz
+            URL_HASH SHA256=c4f6bbe6b5a45c2eb610ca9d231158e313086d5b1a40c9922cb42b597419b14e
+            DOWNLOAD_DIR ${CASPARCG_DOWNLOAD_CACHE}
+    )
+    FetchContent_MakeAvailable(vma)
+endif()
 
 
 find_package(X11 REQUIRED)
@@ -157,7 +160,12 @@ ENDIF ()
 
 ADD_COMPILE_OPTIONS (-fnon-call-exceptions) # Allow signal handler to throw exception
 
-ADD_COMPILE_OPTIONS (-Wno-deprecated-declarations -Wno-write-strings -Wno-multichar -Wno-cpp -Werror -Wno-nonnull -Wno-nullability-completeness)
+ADD_COMPILE_OPTIONS (-Wno-deprecated-declarations -Wno-write-strings -Wno-multichar -Wno-cpp -Werror)
+
+IF (ENABLE_VULKAN)
+    ADD_COMPILE_OPTIONS (-Wno-nonnull -Wno-nullability-completeness)
+ENDIF()
+
 IF (CMAKE_CXX_COMPILER_ID MATCHES "GNU")
     ADD_COMPILE_OPTIONS (-Wno-terminate)
 ELSEIF (CMAKE_CXX_COMPILER_ID MATCHES "Clang")
