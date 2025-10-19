@@ -151,6 +151,22 @@ target_link_directories(GLEW::glew INTERFACE ${glew_SOURCE_DIR}/lib/Release/x64)
 target_link_libraries(GLEW::glew INTERFACE glew32)
 casparcg_add_runtime_dependency("${glew_SOURCE_DIR}/bin/Release/x64/glew32.dll")
 
+find_package(Vulkan REQUIRED)
+
+FetchContent_Declare(vk_bootstrap
+		URL ${CASPARCG_DOWNLOAD_MIRROR}/vk-bootstrap/vk-bootstrap-1.4.328.zip
+		URL_HASH SHA256=10f257c30a0a49d30b28a72cf3a7942d93a61f977adaa04bee29304c6506dc12
+		DOWNLOAD_DIR ${CASPARCG_DOWNLOAD_CACHE}
+		)
+FetchContent_MakeAvailable(vk_bootstrap)
+
+FetchContent_Declare(vma
+		URL ${CASPARCG_DOWNLOAD_MIRROR}/VulkanMemoryAllocator/VulkanMemoryAllocator-3.3.0.zip
+		URL_HASH SHA256=81755d8fcb411b97292c6682e828501315db319374c7c34ba6e1226452c6c392
+		DOWNLOAD_DIR ${CASPARCG_DOWNLOAD_CACHE}
+)
+FetchContent_MakeAvailable(vma)
+
 # SFML
 FetchContent_Declare(sfml
 	URL ${CASPARCG_DOWNLOAD_MIRROR}/sfml/SFML-2.6.2-windows-vc17-64-bit.zip

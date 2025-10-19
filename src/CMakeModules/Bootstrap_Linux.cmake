@@ -40,6 +40,24 @@ find_package(SFML 3 COMPONENTS Graphics System Window QUIET)
 if(NOT SFML_FOUND)
     find_package(SFML 2 COMPONENTS graphics system window REQUIRED)
 endif()
+
+find_package(Vulkan REQUIRED)
+
+FetchContent_Declare(vk_bootstrap
+        URL ${CASPARCG_DOWNLOAD_MIRROR}/vk-bootstrap/vk-bootstrap-1.4.328.tar.gz
+        URL_HASH SHA256=3be0220de218dc3e692aeac552b2953860a0e0a48257f4a61c3f1c1472674744
+        DOWNLOAD_DIR ${CASPARCG_DOWNLOAD_CACHE}
+        )
+FetchContent_MakeAvailable(vk_bootstrap)
+
+FetchContent_Declare(vma
+        URL ${CASPARCG_DOWNLOAD_MIRROR}/VulkanMemoryAllocator/VulkanMemoryAllocator-3.3.0.tar.gz
+        URL_HASH SHA256=c4f6bbe6b5a45c2eb610ca9d231158e313086d5b1a40c9922cb42b597419b14e
+        DOWNLOAD_DIR ${CASPARCG_DOWNLOAD_CACHE}
+)
+FetchContent_MakeAvailable(vma)
+
+
 find_package(X11 REQUIRED)
 
 if (ENABLE_HTML)
@@ -139,7 +157,7 @@ ENDIF ()
 
 ADD_COMPILE_OPTIONS (-fnon-call-exceptions) # Allow signal handler to throw exception
 
-ADD_COMPILE_OPTIONS (-Wno-deprecated-declarations -Wno-write-strings -Wno-multichar -Wno-cpp -Werror)
+ADD_COMPILE_OPTIONS (-Wno-deprecated-declarations -Wno-write-strings -Wno-multichar -Wno-cpp -Werror -Wno-nonnull -Wno-nullability-completeness)
 IF (CMAKE_CXX_COMPILER_ID MATCHES "GNU")
     ADD_COMPILE_OPTIONS (-Wno-terminate)
 ELSEIF (CMAKE_CXX_COMPILER_ID MATCHES "Clang")
@@ -149,3 +167,5 @@ ELSEIF (CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     message(STATUS "ADDING: -DTBB_USE_GLIBCXX_VERSION=${TBB_USE_GLIBCXX_VERSION}")
     add_definitions(-DTBB_USE_GLIBCXX_VERSION=${TBB_USE_GLIBCXX_VERSION})
 ENDIF ()
+
+set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -D_DEBUG")
