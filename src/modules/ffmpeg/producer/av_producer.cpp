@@ -557,8 +557,13 @@ struct Filter
         }
 
         if (media_type == AVMEDIA_TYPE_VIDEO) {
-            FF(avfilter_graph_create_filter(
-                &sink, avfilter_get_by_name("buffersink"), "out", nullptr, nullptr, graph.get()));
+            // avfilter_graph_alloc_filter allocates without initializing, so options can be set
+            // before avfilter_init_str — required since FFmpeg 8.x where pix_fmts is no longer
+            // a runtime-settable option on an already-initialized buffersink.
+            sink = avfilter_graph_alloc_filter(graph.get(), avfilter_get_by_name("buffersink"), "out");
+            if (!sink)
+                CASPAR_THROW_EXCEPTION(ffmpeg_error_t() << boost::errinfo_errno(ENOMEM)
+                                                        << msg_info_t("failed to allocate buffersink"));
 
 #ifdef _MSC_VER
 #pragma warning(push)
@@ -596,9 +601,12 @@ struct Filter
 #ifdef _MSC_VER
 #pragma warning(pop)
 #endif
+            FF(avfilter_init_str(sink, nullptr));
         } else if (media_type == AVMEDIA_TYPE_AUDIO) {
-            FF(avfilter_graph_create_filter(
-                &sink, avfilter_get_by_name("abuffersink"), "out", nullptr, nullptr, graph.get()));
+            sink = avfilter_graph_alloc_filter(graph.get(), avfilter_get_by_name("abuffersink"), "out");
+            if (!sink)
+                CASPAR_THROW_EXCEPTION(ffmpeg_error_t() << boost::errinfo_errno(ENOMEM)
+                                                        << msg_info_t("failed to allocate abuffersink"));
 #ifdef _MSC_VER
 #pragma warning(push)
 #pragma warning(disable : 4245)
@@ -613,6 +621,7 @@ struct Filter
 #ifdef _MSC_VER
 #pragma warning(pop)
 #endif
+            FF(avfilter_init_str(sink, nullptr));
         } else {
             CASPAR_THROW_EXCEPTION(ffmpeg_error_t()
                                    << boost::errinfo_errno(EINVAL) << msg_info_t("invalid output media type"));

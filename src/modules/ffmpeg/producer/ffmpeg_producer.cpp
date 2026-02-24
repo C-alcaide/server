@@ -325,6 +325,47 @@ spl::shared_ptr<core::frame_producer> create_producer(const core::frame_producer
     boost::ireplace_all(filter_str, L"DEINTERLACE_LQ", L"SEPARATEFIELDS");
     boost::ireplace_all(filter_str, L"DEINTERLACE", L"YADIF=0:-1");
 
+    auto ocio_config  = get_param(L"OCIO_CONFIG", params, L"");
+    auto ocio_input   = get_param(L"OCIO_INPUT", params, L"");
+    auto ocio_output  = get_param(L"OCIO_OUTPUT", params, L"");
+    auto ocio_display = get_param(L"OCIO_DISPLAY", params, L"");
+    auto ocio_view    = get_param(L"OCIO_VIEW", params, L"");
+
+    const bool ocio_cs_mode   = !ocio_config.empty() && !ocio_input.empty() && !ocio_output.empty();
+    const bool ocio_disp_mode = !ocio_config.empty() && !ocio_input.empty() && !ocio_display.empty() && !ocio_view.empty();
+
+    if (ocio_cs_mode || ocio_disp_mode) {
+        // avfilter_graph_parse2 has TWO levels of av_get_token parsing.
+        // Level 1 (graphparser): av_get_token(opts, "[],;") - a single '\' escapes the next char,
+        //   consuming the backslash. So '\:' -> ':' (bare, no longer escaped).
+        // Level 2 (ff_filter_opt_parse): av_opt_get_key_value with pair_sep ':', uses av_get_token
+        //   with term ':'. After level 1 there is no '\' left, so bare ':' splits the value.
+        // Fix: use '\\:' in the string sent to avfilter_graph_parse2.
+        //   Level 1: '\\:' -> '\:' (backslash is escaped, colon comes through as-is).
+        //   Level 2: '\:' -> ':' (the colon is now correctly escaped at this level).
+        // Same double-escaping applies to literal backslashes in values.
+        auto avfilter_escape = [](const std::wstring& val) {
+            std::wstring escaped = val;
+            boost::replace_all(escaped, L"\\", L"\\\\\\\\"); // \ -> \\\\  (4 backslashes -> 2 -> 1)
+            boost::replace_all(escaped, L":", L"\\\\:");     // : -> \\:   (2 backslashes + colon -> \: -> :)
+            return escaped;
+        };
+
+        std::wstring ocio_filter = L"ocio=config=" + avfilter_escape(ocio_config)
+                                 + L":input="      + avfilter_escape(ocio_input);
+        if (ocio_disp_mode) {
+            ocio_filter += L":display=" + avfilter_escape(ocio_display)
+                         + L":view="    + avfilter_escape(ocio_view);
+        } else {
+            ocio_filter += L":output=" + avfilter_escape(ocio_output);
+        }
+
+        if (!filter_str.empty()) {
+            filter_str += L",";
+        }
+        filter_str += ocio_filter;
+    }
+
     std::optional<std::int64_t> start;
     std::optional<std::int64_t> seek2;
     std::optional<std::int64_t> duration;

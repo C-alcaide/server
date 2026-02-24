@@ -87,31 +87,53 @@ add_definitions( -DBOOST_CONFIG_SUPPRESS_OUTDATED_MESSAGE )
 add_definitions( -DBOOST_COROUTINES_NO_DEPRECATION_WARNING )
 add_definitions( -DBOOST_LOCALE_HIDE_AUTO_PTR )
 
-# FFMPEG
+# FFMPEG (local build with libopencolorio support)
 casparcg_add_external_project(ffmpeg-lib)
-ExternalProject_Add(ffmpeg-lib
-	URL ${CASPARCG_DOWNLOAD_MIRROR}/ffmpeg/ffmpeg-7.0.2-full_build-shared.7z
-	URL_HASH MD5=c5127aeed36a9a86dd3b84346be182f8
-	DOWNLOAD_DIR ${CASPARCG_DOWNLOAD_CACHE}
-	CONFIGURE_COMMAND ""
-	BUILD_COMMAND ""
-	INSTALL_COMMAND ""
+
+set(FFMPEG_LOCAL_PATH "D:/Github/FFmpeg" CACHE PATH "Path to local FFmpeg build")
+
+# Dummy target so dependency ordering still works without a download step
+add_custom_target(ffmpeg-lib)
+
+set(FFMPEG_INCLUDE_PATH "${FFMPEG_LOCAL_PATH}")
+set(FFMPEG_BIN_PATH "${FFMPEG_LOCAL_PATH}")
+link_directories(
+	"${FFMPEG_LOCAL_PATH}/libavcodec"
+	"${FFMPEG_LOCAL_PATH}/libavformat"
+	"${FFMPEG_LOCAL_PATH}/libavutil"
+	"${FFMPEG_LOCAL_PATH}/libavfilter"
+	"${FFMPEG_LOCAL_PATH}/libavdevice"
+	"${FFMPEG_LOCAL_PATH}/libswscale"
+	"${FFMPEG_LOCAL_PATH}/libswresample"
 )
-ExternalProject_Get_Property(ffmpeg-lib SOURCE_DIR)
-set(FFMPEG_INCLUDE_PATH "${SOURCE_DIR}/include")
-set(FFMPEG_BIN_PATH "${SOURCE_DIR}/bin")
-link_directories("${SOURCE_DIR}/lib")
-casparcg_add_runtime_dependency("${FFMPEG_BIN_PATH}/avcodec-61.dll")
-casparcg_add_runtime_dependency("${FFMPEG_BIN_PATH}/avdevice-61.dll")
-casparcg_add_runtime_dependency("${FFMPEG_BIN_PATH}/avfilter-10.dll")
-casparcg_add_runtime_dependency("${FFMPEG_BIN_PATH}/avformat-61.dll")
-casparcg_add_runtime_dependency("${FFMPEG_BIN_PATH}/avutil-59.dll")
-casparcg_add_runtime_dependency("${FFMPEG_BIN_PATH}/postproc-58.dll")
-casparcg_add_runtime_dependency("${FFMPEG_BIN_PATH}/swresample-5.dll")
-casparcg_add_runtime_dependency("${FFMPEG_BIN_PATH}/swscale-8.dll")
+casparcg_add_runtime_dependency("${FFMPEG_BIN_PATH}/avcodec-62.dll")
+casparcg_add_runtime_dependency("${FFMPEG_BIN_PATH}/avdevice-62.dll")
+casparcg_add_runtime_dependency("${FFMPEG_BIN_PATH}/avfilter-11.dll")
+casparcg_add_runtime_dependency("${FFMPEG_BIN_PATH}/avformat-62.dll")
+casparcg_add_runtime_dependency("${FFMPEG_BIN_PATH}/avutil-60.dll")
+casparcg_add_runtime_dependency("${FFMPEG_BIN_PATH}/swresample-6.dll")
+casparcg_add_runtime_dependency("${FFMPEG_BIN_PATH}/swscale-9.dll")
 # for scanner:
 casparcg_add_runtime_dependency("${FFMPEG_BIN_PATH}/ffmpeg.exe")
 casparcg_add_runtime_dependency("${FFMPEG_BIN_PATH}/ffprobe.exe")
+
+# MSYS2/MinGW64 runtime DLLs required by FFmpeg 8.x and OpenColorIO 2.5
+set(MSYS2_BIN_PATH "C:/msys64/mingw64/bin" CACHE PATH "Path to MSYS2 MinGW64 bin directory")
+# OpenColorIO and its dependencies
+casparcg_add_runtime_dependency("${MSYS2_BIN_PATH}/libOpenColorIO_2_5.dll")
+casparcg_add_runtime_dependency("${MSYS2_BIN_PATH}/libImath-3_2.dll")
+casparcg_add_runtime_dependency("${MSYS2_BIN_PATH}/libminizip-ng-1.dll")
+casparcg_add_runtime_dependency("${MSYS2_BIN_PATH}/libyaml-cpp.dll")
+casparcg_add_runtime_dependency("${MSYS2_BIN_PATH}/libexpat-1.dll")
+casparcg_add_runtime_dependency("${MSYS2_BIN_PATH}/liblzma-5.dll")
+casparcg_add_runtime_dependency("${MSYS2_BIN_PATH}/libzstd.dll")
+casparcg_add_runtime_dependency("${MSYS2_BIN_PATH}/libbz2-1.dll")
+casparcg_add_runtime_dependency("${MSYS2_BIN_PATH}/zlib1.dll")
+casparcg_add_runtime_dependency("${MSYS2_BIN_PATH}/libiconv-2.dll")
+# MinGW GCC runtime (must match the toolchain used to build FFmpeg/OCIO)
+casparcg_add_runtime_dependency("${MSYS2_BIN_PATH}/libgcc_s_seh-1.dll")
+casparcg_add_runtime_dependency("${MSYS2_BIN_PATH}/libstdc++-6.dll")
+casparcg_add_runtime_dependency("${MSYS2_BIN_PATH}/libwinpthread-1.dll")
 
 get_property(is_multi_config GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
 
