@@ -1,6 +1,7 @@
 #include "av_producer.h"
 
 #include "av_input.h"
+#include "filter_param_tween.h"
 
 #include "../util/av_assert.h"
 #include "../util/av_util.h"
@@ -699,6 +700,14 @@ struct AVProducer::Impl
     std::string afilter_;
     std::string vfilter_;
 
+    // Per-parameter animation state for VFPARAM / AFPARAM CALL commands.
+    // Keyed by [filter_type_name][param_name].  Accessed from the AMCP thread
+    // (set_filter_param) and the decode thread (apply_filter_param_tweens),
+    // so protected by param_tween_mutex_.
+    std::map<std::string, std::map<std::string, FilterParamTween>> video_param_tweens_;
+    std::map<std::string, std::map<std::string, FilterParamTween>> audio_param_tweens_;
+    mutable boost::mutex                                           param_tween_mutex_;
+
     int                              seekable_ = 2;
     core::frame_geometry::scale_mode scale_mode_;
     int64_t                          frame_count_    = 0;
@@ -972,6 +981,12 @@ struct AVProducer::Impl
             graph_->set_value("buffer", static_cast<double>(buffer_.size()) / static_cast<double>(buffer_capacity_));
 
             boost::range::rotate(audio_cadence, std::end(audio_cadence) - 1);
+
+            // Tick all animated filter parameters and push updated values into
+            // the live filter graph via avfilter_graph_send_command.
+            // Called here because both video and audio filter futures have been
+            // get()-ed above, so the graph is idle and safe to command.
+            apply_filter_param_tweens();
         }
     }
 
@@ -1227,6 +1242,14 @@ struct AVProducer::Impl
 
     void reset(int64_t start_time)
     {
+        // Discard animated parameters — their AVFilterContext* pointers are
+        // about to be invalidated by the graph rebuild.
+        {
+            boost::lock_guard<boost::mutex> lock(param_tween_mutex_);
+            video_param_tweens_.clear();
+            audio_param_tweens_.clear();
+        }
+
         video_filter_ = Filter(vfilter_, input_, decoders_, start_time, AVMEDIA_TYPE_VIDEO, format_desc_);
         audio_filter_ = Filter(afilter_, input_, decoders_, start_time, AVMEDIA_TYPE_AUDIO, format_desc_);
 
@@ -1250,6 +1273,79 @@ struct AVProducer::Impl
             decoders_.erase(key);
         }
     }
+
+    // -------------------------------------------------------------------------
+    // VFPARAM / AFPARAM: per-frame tween tick + avfilter_graph_send_command
+    // Called once per produced frame from the decode thread (run loop), after
+    // both video and audio filter futures have been awaited, so no concurrent
+    // filter graph access is in flight at that point.
+    // -------------------------------------------------------------------------
+    void apply_filter_param_tweens()
+    {
+        boost::lock_guard<boost::mutex> lock(param_tween_mutex_);
+        char res_buf[512];
+
+        auto apply = [&](std::map<std::string, std::map<std::string, FilterParamTween>>& tweens,
+                         AVFilterGraph*                                                   fgraph) {
+            if (!fgraph)
+                return;
+            for (auto& filter_entry : tweens) {
+                const auto& fname = filter_entry.first;
+                for (auto& param_entry : filter_entry.second) {
+                    const auto& pname = param_entry.first;
+                    auto&       tween = param_entry.second;
+
+                    tween.tick();
+                    const auto val     = tween.fetch();
+                    const auto val_str = std::to_string(val);
+
+                    const auto ret = avfilter_graph_send_command(
+                        fgraph, fname.c_str(), pname.c_str(), val_str.c_str(), res_buf, sizeof(res_buf), 0);
+
+                    if (ret < 0 && ret != AVERROR(ENOSYS)) {
+                        constexpr size_t errbuf_size = 128;
+                        char errbuf[errbuf_size];
+                        av_strerror(ret, errbuf, errbuf_size);
+                        CASPAR_LOG(warning)
+                            << "[ffmpeg] VFPARAM send_command(" << fname << ", " << pname << "=" << val_str
+                            << ") failed: " << errbuf;
+                    }
+                }
+            }
+        };
+
+        apply(video_param_tweens_, video_filter_.graph.get());
+        apply(audio_param_tweens_, audio_filter_.graph.get());
+    }
+
+  public:
+    void set_filter_param(bool                is_video,
+                          const std::string&  filter_name,
+                          const std::string&  param_name,
+                          double              value,
+                          int                 duration_frames,
+                          const std::wstring& tween_name)
+    {
+        boost::lock_guard<boost::mutex> lock(param_tween_mutex_);
+        auto& tweens = is_video ? video_param_tweens_ : audio_param_tweens_;
+        tweens[filter_name][param_name].set_target(value, duration_frames, tween_name);
+    }
+    
+    // -------------------------------------------------------------------------
+    
+    void set_vfilter(const std::string& filter)
+    {
+        vfilter_ = filter;
+        seek(time());
+    }
+
+    void set_afilter(const std::string& filter)
+    {
+        afilter_ = filter;
+        seek(time());
+    }
+
+    // -------------------------------------------------------------------------
 
     std::string print() const
     {
@@ -1326,6 +1422,29 @@ AVProducer& AVProducer::duration(int64_t duration)
 }
 
 int64_t AVProducer::duration() const { return impl_->duration().value_or(std::numeric_limits<int64_t>::max()); }
+
+AVProducer& AVProducer::set_vfilter(const std::string& filter)
+{
+    impl_->set_vfilter(filter);
+    return *this;
+}
+
+AVProducer& AVProducer::set_afilter(const std::string& filter)
+{
+    impl_->set_afilter(filter);
+    return *this;
+}
+
+AVProducer& AVProducer::set_filter_param(bool                is_video,
+                                         const std::string&  filter_name,
+                                         const std::string&  param_name,
+                                         double              value,
+                                         int                 duration_frames,
+                                         const std::wstring& tween)
+{
+    impl_->set_filter_param(is_video, filter_name, param_name, value, duration_frames, tween);
+    return *this;
+}
 
 core::monitor::state AVProducer::state() const
 {

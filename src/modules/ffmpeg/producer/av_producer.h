@@ -44,6 +44,33 @@ class AVProducer
     AVProducer& duration(int64_t duration);
     int64_t     duration() const;
 
+    /**
+     * Replace the entire video or audio filter string and seek back to the
+     * current playback position so the graph is rebuilt immediately.
+     * Any active VFPARAM/AFPARAM tweens are cleared by the rebuild.
+     */
+    AVProducer& set_vfilter(const std::string& filter);
+    AVProducer& set_afilter(const std::string& filter);
+
+    /**
+     * Animate a single numeric parameter of an in-graph filter without
+     * rebuilding the filter graph.  Uses avfilter_graph_send_command()
+     * under the hood, driven by the same easing system as MIXER commands.
+     *
+     * @param is_video       true = video graph, false = audio graph.
+     * @param filter_name    FFmpeg filter type name (e.g. "v360", "eq").
+     * @param param_name     Parameter / option name (e.g. "yaw", "pitch").
+     * @param value          Target numeric value.
+     * @param duration_frames Number of frames to reach target (0 = instant).
+     * @param tween          Easing name (e.g. L"linear", L"easeinsine").
+     */
+    AVProducer& set_filter_param(bool                is_video,
+                                 const std::string&  filter_name,
+                                 const std::string&  param_name,
+                                 double              value,
+                                 int                 duration_frames,
+                                 const std::wstring& tween);
+
     caspar::core::monitor::state state() const;
 
   private:
