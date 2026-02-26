@@ -1324,6 +1324,48 @@ std::future<std::wstring> mixer_perspective_command(command_context& ctx)
     return make_ready_future<std::wstring>(L"202 MIXER OK\r\n");
 }
 
+std::future<std::wstring> mixer_projection_command(command_context& ctx)
+{
+    static const double PI = 3.141592653589793;
+    static const double DEG2RAD = PI / 180.0;
+    static const double RAD2DEG = 180.0 / PI;
+
+    if (ctx.parameters.empty()) {
+        auto transform2 = get_current_transform(ctx).share();
+        return std::async(std::launch::deferred, [transform2]() -> std::wstring {
+            auto projection = transform2.get().image_transform.projection;
+            return L"201 MIXER OK\r\n" + std::to_wstring(projection.yaw * RAD2DEG) + L" " +
+                   std::to_wstring(projection.pitch * RAD2DEG) + L" " +
+                   std::to_wstring(projection.roll * RAD2DEG) + L" " +
+                   std::to_wstring(projection.fov * RAD2DEG) + L"\r\n";
+        });
+    }
+
+    transforms_applier transforms(ctx);
+    int                duration = ctx.parameters.size() > 4 ? std::stoi(ctx.parameters[4]) : 0;
+    std::wstring       tween    = ctx.parameters.size() > 5 ? ctx.parameters[5] : L"linear";
+    double             yaw      = std::stod(ctx.parameters.at(0)) * DEG2RAD;
+    double             pitch    = std::stod(ctx.parameters.at(1)) * DEG2RAD;
+    double             roll     = std::stod(ctx.parameters.at(2)) * DEG2RAD;
+    double             fov      = std::stod(ctx.parameters.at(3)) * DEG2RAD;
+
+    transforms.add(stage::transform_tuple_t(
+        ctx.layer_index(),
+        [=](frame_transform transform) -> frame_transform {
+            transform.image_transform.projection.enable = (fov > 0.0);
+            transform.image_transform.projection.yaw    = yaw;
+            transform.image_transform.projection.pitch  = pitch;
+            transform.image_transform.projection.roll   = roll;
+            transform.image_transform.projection.fov    = fov;
+            return transform;
+        },
+        duration,
+        tween));
+    transforms.apply();
+
+    return make_ready_future<std::wstring>(L"202 MIXER OK\r\n");
+}
+
 std::future<std::wstring> mixer_volume_command(command_context& ctx)
 {
     return single_double_animatable_mixer_command(
@@ -1783,6 +1825,7 @@ void register_commands(std::shared_ptr<amcp_command_repository_wrapper>& repo)
     repo->register_channel_command(L"Mixer Commands", L"MIXER CROP", mixer_crop_command, 0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER ROTATION", mixer_rotation_command, 0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER PERSPECTIVE", mixer_perspective_command, 0);
+    repo->register_channel_command(L"Mixer Commands", L"MIXER PROJECTION", mixer_projection_command, 0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER VOLUME", mixer_volume_command, 0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER MASTERVOLUME", mixer_mastervolume_command, 0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER GRID", mixer_grid_command, 1);

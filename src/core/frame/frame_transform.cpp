@@ -103,6 +103,11 @@ image_transform image_transform::tween(double                 time,
         do_tween(time, source.chroma.spill_suppress_saturation, dest.chroma.spill_suppress_saturation, duration, tween);
     result.chroma.enable    = dest.chroma.enable;
     result.chroma.show_mask = dest.chroma.show_mask;
+    result.projection.enable = dest.projection.enable;
+    result.projection.yaw    = do_tween(time, source.projection.yaw, dest.projection.yaw, duration, tween);
+    result.projection.pitch  = do_tween(time, source.projection.pitch, dest.projection.pitch, duration, tween);
+    result.projection.roll   = do_tween(time, source.projection.roll, dest.projection.roll, duration, tween);
+    result.projection.fov    = do_tween(time, source.projection.fov, dest.projection.fov, duration, tween);
     result.is_key           = source.is_key || dest.is_key;
     result.invert           = source.invert || dest.invert;
     result.is_mix           = source.is_mix || dest.is_mix;
@@ -145,7 +150,10 @@ bool operator==(const image_transform& lhs, const image_transform& rhs)
                eq(lhs.chroma.softness, rhs.chroma.softness) &&
                eq(lhs.chroma.spill_suppress, rhs.chroma.spill_suppress) &&
                eq(lhs.chroma.spill_suppress_saturation, rhs.chroma.spill_suppress_saturation) && lhs.crop == rhs.crop &&
-               lhs.perspective == rhs.perspective ||
+               lhs.perspective == rhs.perspective &&
+               lhs.projection.enable == rhs.projection.enable && eq(lhs.projection.yaw, rhs.projection.yaw) &&
+               eq(lhs.projection.pitch, rhs.projection.pitch) && eq(lhs.projection.roll, rhs.projection.roll) &&
+               eq(lhs.projection.fov, rhs.projection.fov) &&
            lhs.enable_geometry_modifiers == rhs.enable_geometry_modifiers;
 }
 

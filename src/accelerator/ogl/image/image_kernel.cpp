@@ -239,6 +239,17 @@ struct image_kernel::impl
             shader_->set("chroma", false);
         }
 
+        if (transforms.image_transform.projection.enable) {
+            shader_->set("is_360", true);
+            shader_->set("view_yaw", static_cast<float>(transforms.image_transform.projection.yaw));
+            shader_->set("view_pitch", static_cast<float>(transforms.image_transform.projection.pitch));
+            shader_->set("view_roll", static_cast<float>(transforms.image_transform.projection.roll));
+            shader_->set("view_fov", static_cast<float>(transforms.image_transform.projection.fov));
+            shader_->set("aspect_ratio", static_cast<float>(params.aspect_ratio));
+        } else {
+            shader_->set("is_360", false);
+        }
+
         // Setup blend_func
 
         if (transforms.image_transform.is_key) {

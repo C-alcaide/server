@@ -59,6 +59,15 @@ struct levels final
     double max_output = 1.0;
 };
 
+struct projection final
+{
+    bool   enable = false;
+    double yaw    = 0.0;
+    double pitch  = 0.0;
+    double roll   = 0.0;
+    double fov    = 1.57079632679;
+};
+
 struct corners final
 {
     std::array<double, 2> ul = {0.0, 0.0};
@@ -96,6 +105,7 @@ struct image_transform final
     corners               perspective;
     core::levels          levels;
     core::chroma          chroma;
+    core::projection      projection;
 
     bool             is_key      = false;
     bool             invert      = false;

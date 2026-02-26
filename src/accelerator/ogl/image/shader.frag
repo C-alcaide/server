@@ -43,6 +43,13 @@ uniform float		chroma_softness;
 uniform float		chroma_spill_suppress;
 uniform float		chroma_spill_suppress_saturation;
 
+uniform bool  is_360;
+uniform float view_yaw;   // in radians
+uniform float view_pitch; // in radians
+uniform float view_roll;  // in radians
+uniform float view_fov;   // Vertical FOV in radians
+uniform float aspect_ratio; // Screen aspect ratio (width/height)
+
 /*
 ** Contrast, saturation, brightness
 ** Code of this function is from TGM's shader pack
@@ -450,69 +457,109 @@ vec4 ycbcra_to_rgba(float Y, float Cb, float Cr, float A)
     return vec4(color_matrix * YCbCr / 255, A).bgra;
 }
 
+const float PI = 3.14159265359;
+
+vec2 get_equirect_uv(vec2 screen_uv) {
+    // 1. Convert Screen UV (0..1) to Normalized Device Coordinates (-1..1)
+    vec2 ndc = screen_uv * 2.0 - 1.0;
+    
+    // 2. Calculate View Vector (Rectilinear Projection)
+    // Assume scale is based on vertical FOV
+    float scale = tan(view_fov * 0.5);
+    vec3 dir = vec3(ndc.x * scale * aspect_ratio, ndc.y * scale, -1.0);
+    dir = normalize(dir);
+
+    // 3. Rotation Matrices
+    // Roll (Z)
+    float cr = cos(view_roll); float sr = sin(view_roll);
+    mat3 rot_z = mat3(cr, -sr, 0.0, sr, cr, 0.0, 0.0, 0.0, 1.0);
+    
+    // Pitch (X)
+    float cp = cos(view_pitch); float sp = sin(view_pitch);
+    mat3 rot_x = mat3(1.0, 0.0, 0.0, 0.0, cp, -sp, 0.0, sp, cp);
+    
+    // Yaw (Y)
+    float cy = cos(view_yaw); float sy = sin(view_yaw);
+    mat3 rot_y = mat3(cy, 0.0, sy, 0.0, 1.0, 0.0, -sy, 0.0, cy);
+
+    // Apply rotations: Yaw * Pitch * Roll * dir
+    dir = rot_y * rot_x * rot_z * dir;
+
+    // 4. Convert 3D Vector to Spherical Coordinates (Longitude/Latitude)
+    float theta = atan(dir.x, -dir.z); // Longitude (-PI to PI)
+    float phi = asin(dir.y);           // Latitude (-PI/2 to PI/2)
+
+    // 5. Map to Equirectangular UV (0..1)
+    vec2 uv;
+    uv.x = 0.5 + theta / (2.0 * PI);
+    uv.y = 0.5 + phi / PI;
+    
+    return uv;
+}
+
 vec4 get_sample(sampler2D sampler, vec2 coords)
 {
     return texture(sampler, coords);
 }
 
-vec4 get_rgba_color()
+vec4 get_rgba_color(vec2 uv)
 {
     switch(pixel_format)
     {
     case 0:		//gray
-        return vec4(get_sample(plane[0], TexCoord.st / TexCoord.q).rrr * precision_factor[0], 1.0);
+        return vec4(get_sample(plane[0], uv).rrr * precision_factor[0], 1.0);
     case 1:		//bgra,
-        return get_sample(plane[0], TexCoord.st / TexCoord.q).bgra * precision_factor[0];
+        return get_sample(plane[0], uv).bgra * precision_factor[0];
     case 2:		//rgba,
-        return get_sample(plane[0], TexCoord.st / TexCoord.q).rgba * precision_factor[0];
+        return get_sample(plane[0], uv).rgba * precision_factor[0];
     case 3:		//argb,
-        return get_sample(plane[0], TexCoord.st / TexCoord.q).argb * precision_factor[0];
+        return get_sample(plane[0], uv).argb * precision_factor[0];
     case 4:		//abgr,
-        return get_sample(plane[0], TexCoord.st / TexCoord.q).gbar * precision_factor[0];
+        return get_sample(plane[0], uv).gbar * precision_factor[0];
     case 5:		//ycbcr,
         {
-            float y  = get_sample(plane[0], TexCoord.st / TexCoord.q).r * precision_factor[0];
-            float cb = get_sample(plane[1], TexCoord.st / TexCoord.q).r * precision_factor[1];
-            float cr = get_sample(plane[2], TexCoord.st / TexCoord.q).r * precision_factor[2];
+            float y  = get_sample(plane[0], uv).r * precision_factor[0];
+            float cb = get_sample(plane[1], uv).r * precision_factor[1];
+            float cr = get_sample(plane[2], uv).r * precision_factor[2];
             return ycbcra_to_rgba(y, cb, cr, 1.0);
         }
     case 6:		//ycbcra
         {
-            float y  = get_sample(plane[0], TexCoord.st / TexCoord.q).r * precision_factor[0];
-            float cb = get_sample(plane[1], TexCoord.st / TexCoord.q).r * precision_factor[1];
-            float cr = get_sample(plane[2], TexCoord.st / TexCoord.q).r * precision_factor[2];
-            float a  = get_sample(plane[3], TexCoord.st / TexCoord.q).r * precision_factor[3];
+            float y  = get_sample(plane[0], uv).r * precision_factor[0];
+            float cb = get_sample(plane[1], uv).r * precision_factor[1];
+            float cr = get_sample(plane[2], uv).r * precision_factor[2];
+            float a  = get_sample(plane[3], uv).r * precision_factor[3];
             return ycbcra_to_rgba(y, cb, cr, a);
         }
     case 7:		//luma
         {
-            vec3 y3 = get_sample(plane[0], TexCoord.st / TexCoord.q).rrr * precision_factor[0];
+            vec3 y3 = get_sample(plane[0], uv).rrr * precision_factor[0];
             return vec4((y3-0.065)/0.859, 1.0);
         }
     case 8:		//bgr,
-        return vec4(get_sample(plane[0], TexCoord.st / TexCoord.q).bgr * precision_factor[0], 1.0);
+        return vec4(get_sample(plane[0], uv).bgr * precision_factor[0], 1.0);
     case 9:		//rgb,
-        return vec4(get_sample(plane[0], TexCoord.st / TexCoord.q).rgb * precision_factor[0], 1.0);
+        return vec4(get_sample(plane[0], uv).rgb * precision_factor[0], 1.0);
 	case 10:	// uyvy
 		{
-			float y = get_sample(plane[0], TexCoord.st / TexCoord.q).g * precision_factor[0];
-			float cb = get_sample(plane[1], TexCoord.st / TexCoord.q).b * precision_factor[1];
-			float cr = get_sample(plane[1], TexCoord.st / TexCoord.q).r * precision_factor[1];
+			float y = get_sample(plane[0], uv).g * precision_factor[0];
+			float cb = get_sample(plane[1], uv).b * precision_factor[1];
+			float cr = get_sample(plane[1], uv).r * precision_factor[1];
 			return ycbcra_to_rgba(y, cb, cr, 1.0);
 		}
     case 11:    // gbrp
         {
-            float g  = get_sample(plane[0], TexCoord.st / TexCoord.q).r * precision_factor[0];
-            float b = get_sample(plane[1], TexCoord.st / TexCoord.q).r * precision_factor[1];
-            float r = get_sample(plane[2], TexCoord.st / TexCoord.q).r * precision_factor[2];
+            float g  = get_sample(plane[0], uv).r * precision_factor[0];
+            float b = get_sample(plane[1], uv).r * precision_factor[1];
+            float r = get_sample(plane[2], uv).r * precision_factor[2];
 			return vec4(b, g, r, 1.0);
         }
     case 12:    // gbrap
         {
-            float g  = get_sample(plane[0], TexCoord.st / TexCoord.q).r * precision_factor[0];
-            float b = get_sample(plane[1], TexCoord.st / TexCoord.q).r * precision_factor[1];
-            float r = get_sample(plane[2], TexCoord.st / TexCoord.q).r * precision_factor[2];
-            float a  = get_sample(plane[3], TexCoord.st / TexCoord.q).r * precision_factor[3];
+            float g  = get_sample(plane[0], uv).r * precision_factor[0];
+            float b = get_sample(plane[1], uv).r * precision_factor[1];
+            float r = get_sample(plane[2], uv).r * precision_factor[2];
+            float a  = get_sample(plane[3], uv).r * precision_factor[3];
 			return vec4(b, g, r, a);
         }
     }
@@ -521,7 +568,11 @@ vec4 get_rgba_color()
 
 void main()
 {
-    vec4 color = get_rgba_color();
+    vec2 uv = TexCoord.st / TexCoord.q;
+    if (is_360) {
+        uv = get_equirect_uv(uv);
+    }
+    vec4 color = get_rgba_color(uv);
     if (is_straight_alpha)
         color.rgb *= color.a;
     if (chroma)
