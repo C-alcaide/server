@@ -108,6 +108,8 @@ image_transform image_transform::tween(double                 time,
     result.projection.pitch  = do_tween(time, source.projection.pitch, dest.projection.pitch, duration, tween);
     result.projection.roll   = do_tween(time, source.projection.roll, dest.projection.roll, duration, tween);
     result.projection.fov    = do_tween(time, source.projection.fov, dest.projection.fov, duration, tween);
+    result.color_grade         = dest.color_grade;
+    result.color_grade.exposure = static_cast<float>(do_tween(time, static_cast<double>(source.color_grade.exposure), static_cast<double>(dest.color_grade.exposure), duration, tween));
     result.is_key           = source.is_key || dest.is_key;
     result.invert           = source.invert || dest.invert;
     result.is_mix           = source.is_mix || dest.is_mix;
@@ -154,6 +156,13 @@ bool operator==(const image_transform& lhs, const image_transform& rhs)
                lhs.projection.enable == rhs.projection.enable && eq(lhs.projection.yaw, rhs.projection.yaw) &&
                eq(lhs.projection.pitch, rhs.projection.pitch) && eq(lhs.projection.roll, rhs.projection.roll) &&
                eq(lhs.projection.fov, rhs.projection.fov) &&
+               lhs.color_grade.enable == rhs.color_grade.enable &&
+               lhs.color_grade.input_transfer == rhs.color_grade.input_transfer &&
+               lhs.color_grade.input_gamut == rhs.color_grade.input_gamut &&
+               lhs.color_grade.tone_mapping == rhs.color_grade.tone_mapping &&
+               lhs.color_grade.output_gamut == rhs.color_grade.output_gamut &&
+               lhs.color_grade.output_transfer == rhs.color_grade.output_transfer &&
+               eq(static_cast<double>(lhs.color_grade.exposure), static_cast<double>(rhs.color_grade.exposure)) &&
            lhs.enable_geometry_modifiers == rhs.enable_geometry_modifiers;
 }
 

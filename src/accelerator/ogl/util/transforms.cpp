@@ -73,6 +73,9 @@ void apply_transform_colour_values(core::image_transform& self, const core::imag
     if (other.projection.enable) {
         self.projection = other.projection;
     }
+    if (other.color_grade.enable) {
+        self.color_grade = other.color_grade;
+    }
 }
 
 bool is_default_perspective(const core::corners& perspective)

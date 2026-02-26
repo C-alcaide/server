@@ -50,6 +50,15 @@ uniform float view_roll;  // in radians
 uniform float view_fov;   // Vertical FOV in radians
 uniform float aspect_ratio; // Screen aspect ratio (width/height)
 
+// Color Grading (ACES workflow)
+uniform bool  color_grading;
+uniform int   input_transfer;    // 0=linear,1=srgb,2=rec709,3=pq,4=hlg,5=logc3,6=slog3
+uniform int   output_transfer;
+uniform mat3  input_to_working;  // input gamut → ACEScg (AP1)
+uniform mat3  working_to_output; // ACEScg (AP1) → output gamut
+uniform int   tone_mapping_op;   // 0=none,1=reinhard,2=aces_filmic,3=aces_rrt
+uniform float exposure;          // linear exposure multiplier
+
 /*
 ** Contrast, saturation, brightness
 ** Code of this function is from TGM's shader pack
@@ -457,6 +466,81 @@ vec4 ycbcra_to_rgba(float Y, float Cb, float Cr, float A)
     return vec4(color_matrix * YCbCr / 255, A).bgra;
 }
 
+// ---- Color Grading: EOTFs (encoded → linear) ----
+float eotf_srgb(float x)   { return x <= 0.04045  ? x / 12.92 : pow((x + 0.055) / 1.055, 2.4); }
+float eotf_rec709(float x) { return x < 0.081     ? x / 4.5   : pow((x + 0.099) / 1.099, 1.0 / 0.45); }
+float eotf_pq(float x) {
+    const float m1 = 0.1593017578125, m2 = 78.84375;
+    const float c1 = 0.8359375, c2 = 18.8515625, c3 = 18.6875;
+    float xp = pow(max(x, 0.0), 1.0 / m2);
+    return pow(max(xp - c1, 0.0) / (c2 - c3 * xp), 1.0 / m1) * (10000.0 / 100.0);
+}
+float eotf_hlg(float x) {
+    const float a = 0.17883277, b = 0.28466892, c = 0.55991073;
+    return x <= 0.5 ? (x * x) / 3.0 : (exp((x - c) / a) + b) / 12.0;
+}
+float eotf_logc3(float x) {
+    const float a = 5.555556, b = 0.052272, c = 0.247190, d = 0.385537, e = 5.367655, f = 0.092809;
+    return x > e * 0.010591 + f ? (pow(10.0, (x - d) / c) - b) / a : (x - f) / e;
+}
+float eotf_slog3(float x) {
+    const float cut = 171.2102946929 / 1023.0;
+    return x >= cut ? pow(10.0, (x - 0.410557184750733) / 0.341132524981570) * 0.18 + 0.01
+                    : (x - 95.0 / 1023.0) * 0.01 / (cut - 95.0 / 1023.0);
+}
+vec3 apply_eotf(vec3 rgb, int t) {
+    switch (t) {
+        case 1: return vec3(eotf_srgb(rgb.r),  eotf_srgb(rgb.g),  eotf_srgb(rgb.b));
+        case 2: return vec3(eotf_rec709(rgb.r), eotf_rec709(rgb.g), eotf_rec709(rgb.b));
+        case 3: return vec3(eotf_pq(rgb.r),    eotf_pq(rgb.g),    eotf_pq(rgb.b));
+        case 4: return vec3(eotf_hlg(rgb.r),   eotf_hlg(rgb.g),   eotf_hlg(rgb.b));
+        case 5: return vec3(eotf_logc3(rgb.r), eotf_logc3(rgb.g), eotf_logc3(rgb.b));
+        case 6: return vec3(eotf_slog3(rgb.r), eotf_slog3(rgb.g), eotf_slog3(rgb.b));
+        default: return rgb;
+    }
+}
+// ---- Color Grading: OETFs (linear → encoded) ----
+float oetf_srgb(float x)   { return x <= 0.0031308 ? x * 12.92 : 1.055 * pow(max(x, 0.0), 1.0 / 2.4) - 0.055; }
+float oetf_rec709(float x) { return x < 0.018      ? x * 4.5   : 1.099 * pow(max(x, 0.0), 0.45) - 0.099; }
+float oetf_pq(float x) {
+    const float m1 = 0.1593017578125, m2 = 78.84375;
+    const float c1 = 0.8359375, c2 = 18.8515625, c3 = 18.6875;
+    float xn = pow(clamp(x * 100.0 / 10000.0, 0.0, 1.0), m1);
+    return pow((c1 + c2 * xn) / (1.0 + c3 * xn), m2);
+}
+float oetf_hlg(float x) {
+    const float a = 0.17883277, b = 0.28466892, c = 0.55991073;
+    x = max(x, 0.0);
+    return x <= 1.0 / 12.0 ? sqrt(3.0 * x) : a * log(12.0 * x - b) + c;
+}
+vec3 apply_oetf(vec3 rgb, int t) {
+    rgb = max(rgb, vec3(0.0));
+    switch (t) {
+        case 1: return vec3(oetf_srgb(rgb.r),  oetf_srgb(rgb.g),  oetf_srgb(rgb.b));
+        case 2: return vec3(oetf_rec709(rgb.r), oetf_rec709(rgb.g), oetf_rec709(rgb.b));
+        case 3: return vec3(oetf_pq(rgb.r),    oetf_pq(rgb.g),    oetf_pq(rgb.b));
+        case 4: return vec3(oetf_hlg(rgb.r),   oetf_hlg(rgb.g),   oetf_hlg(rgb.b));
+        default: return rgb;
+    }
+}
+// ---- Color Grading: Tone Mapping ----
+vec3 tonemap_reinhard(vec3 v)    { return v / (v + 1.0); }
+vec3 tonemap_aces_filmic(vec3 x) { return clamp((x*(2.51*x+0.03))/(x*(2.43*x+0.59)+0.14), 0.0, 1.0); }
+vec3 tonemap_aces_rrt(vec3 v) {
+    v *= 0.6;
+    vec3 a = v * (v + 0.0245786) - 0.000090537;
+    vec3 b = v * (0.983729 * v + 0.432951) + 0.238081;
+    return clamp(a / b, 0.0, 1.0);
+}
+vec3 apply_tone_mapping(vec3 rgb, int op) {
+    switch (op) {
+        case 1: return tonemap_reinhard(rgb);
+        case 2: return tonemap_aces_filmic(rgb);
+        case 3: return tonemap_aces_rrt(rgb);
+        default: return rgb;
+    }
+}
+
 const float PI = 3.14159265359;
 
 vec2 get_equirect_uv(vec2 screen_uv) {
@@ -573,6 +657,16 @@ void main()
         uv = get_equirect_uv(uv);
     }
     vec4 color = get_rgba_color(uv);
+    if (color_grading) {
+        vec3 rgb  = color.rgb;
+        rgb       = apply_eotf(rgb, input_transfer);
+        rgb       = input_to_working * rgb;
+        rgb      *= exposure;
+        rgb       = apply_tone_mapping(rgb, tone_mapping_op);
+        rgb       = working_to_output * rgb;
+        rgb       = apply_oetf(rgb, output_transfer);
+        color.rgb = rgb;
+    }
     if (is_straight_alpha)
         color.rgb *= color.a;
     if (chroma)

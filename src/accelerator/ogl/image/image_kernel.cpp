@@ -38,6 +38,7 @@
 #include <GL/glew.h>
 
 #include <array>
+#include <algorithm>
 #include <cmath>
 
 namespace caspar::accelerator::ogl {
@@ -248,6 +249,57 @@ struct image_kernel::impl
             shader_->set("aspect_ratio", static_cast<float>(params.aspect_ratio));
         } else {
             shader_->set("is_360", false);
+        }
+
+        // Color grading: ACES-based gamut/transfer/tonemapping pipeline
+        // Gamut index: 0=bt709, 1=bt2020, 2=dcip3_d65, 3=aces_ap0, 4=aces_ap1(acescg), 5=arri_wg3, 6=sgamut3_cine
+        // Transfer:    0=linear, 1=srgb, 2=rec709, 3=pq, 4=hlg, 5=logc3, 6=slog3
+        // Tonemapping: 0=none, 1=reinhard, 2=aces_filmic, 3=aces_rrt
+        static const float k_to_working[7][9] = {
+            // bt709 → ACEScg (AP1) — from ACES OCIO config
+            {0.6131516f,  0.3395148f,  0.0472947f,  0.0701011f,  0.9162792f,  0.0136197f,  0.0206177f,  0.1095763f,  0.8698060f},
+            // bt2020 → ACEScg
+            {0.7951281f,  0.1643585f,  0.0405134f,  0.0234399f,  0.9415642f,  0.0349959f,  0.0036186f,  0.0613513f,  0.9350301f},
+            // dcip3 d65 → ACEScg
+            {0.8224549f,  0.1774521f, -0.0000070f,  0.0332021f,  0.9618927f,  0.0049052f,  0.0170512f,  0.0723025f,  0.9106463f},
+            // aces_ap0 → ACEScg (AP1)
+            {1.4514393f, -0.2362486f, -0.0153674f, -0.3194787f,  1.1765407f, -0.0083099f, -0.0153694f,  0.0183597f,  1.0023859f},
+            // aces_ap1 identity
+            {1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f},
+            // arri wide gamut 3 → ACEScg
+            {0.6954522f,  0.1446577f,  0.1598901f,  0.0439823f,  0.8591788f,  0.0968389f, -0.0055023f,  0.0040678f,  1.0014345f},
+            // sony sgamut3.cine → ACEScg
+            {0.7112957f,  0.1903613f,  0.0983436f,  0.0406952f,  0.8550396f,  0.1042651f, -0.0025079f,  0.0085993f,  0.9939086f}
+        };
+        static const float k_to_output[7][9] = {
+            // ACEScg → bt709
+            { 1.7050585f, -0.6217876f, -0.0832709f, -0.1302597f,  1.1407927f, -0.0105330f, -0.0240003f, -0.1289711f,  1.1529714f},
+            // ACEScg → bt2020
+            { 1.2746843f, -0.2692490f, -0.0054353f, -0.0293524f,  1.0763680f, -0.0470156f, -0.0160993f, -0.0606079f,  1.0767072f},
+            // ACEScg → dcip3 d65
+            { 1.2239840f, -0.2239840f,  0.0000000f, -0.0421197f,  1.0421197f,  0.0000000f, -0.0196576f, -0.0787093f,  1.0983669f},
+            // ACEScg → aces_ap0
+            { 0.6954522f,  0.1446577f,  0.1598901f,  0.0439823f,  0.8591788f,  0.0968389f, -0.0055023f,  0.0040678f,  1.0014345f},
+            // ACEScg identity (ap1)
+            { 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f},
+            // ACEScg → arri wide gamut 3 (approximate inverse)
+            { 1.4514393f, -0.2362486f, -0.0153674f, -0.3194787f,  1.1765407f, -0.0083099f, -0.0153694f,  0.0183597f,  1.0023859f},
+            // ACEScg → sgamut3.cine (approximate inverse)
+            { 1.4087253f, -0.3132873f, -0.0954380f, -0.0667453f,  1.1571781f, -0.0904328f, -0.0057800f, -0.0066708f,  1.0124508f}
+        };
+        const auto& cg = transforms.image_transform.color_grade;
+        if (cg.enable) {
+            int ig = std::min(std::max(cg.input_gamut,  0), 6);
+            int og = std::min(std::max(cg.output_gamut, 0), 6);
+            shader_->set("color_grading",     true);
+            shader_->set("input_transfer",    cg.input_transfer);
+            shader_->set("output_transfer",   cg.output_transfer);
+            shader_->set("tone_mapping_op",   cg.tone_mapping);
+            shader_->set("exposure",          cg.exposure);
+            shader_->set_matrix3("input_to_working",  k_to_working[ig]);
+            shader_->set_matrix3("working_to_output", k_to_output[og]);
+        } else {
+            shader_->set("color_grading", false);
         }
 
         // Setup blend_func

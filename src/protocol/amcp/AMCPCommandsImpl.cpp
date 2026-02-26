@@ -1366,6 +1366,92 @@ std::future<std::wstring> mixer_projection_command(command_context& ctx)
     return make_ready_future<std::wstring>(L"202 MIXER OK\r\n");
 }
 
+static int parse_transfer_fn(const std::wstring& s)
+{
+    if (boost::iequals(s, L"SRGB"))   return 1;
+    if (boost::iequals(s, L"REC709")) return 2;
+    if (boost::iequals(s, L"PQ"))     return 3;
+    if (boost::iequals(s, L"HLG"))    return 4;
+    if (boost::iequals(s, L"LOGC3"))  return 5;
+    if (boost::iequals(s, L"SLOG3"))  return 6;
+    return 0; // LINEAR
+}
+
+static int parse_gamut_fn(const std::wstring& s)
+{
+    if (boost::iequals(s, L"BT2020"))        return 1;
+    if (boost::iequals(s, L"DCIP3"))         return 2;
+    if (boost::iequals(s, L"ACES_AP0"))      return 3;
+    if (boost::iequals(s, L"ACES_AP1"))      return 4;
+    if (boost::iequals(s, L"ACESCG"))        return 4;
+    if (boost::iequals(s, L"ARRI_WG3"))      return 5;
+    if (boost::iequals(s, L"SGAMUT3_CINE"))  return 6;
+    return 0; // BT709
+}
+
+static int parse_tonemapping_fn(const std::wstring& s)
+{
+    if (boost::iequals(s, L"REINHARD"))    return 1;
+    if (boost::iequals(s, L"ACES_FILMIC")) return 2;
+    if (boost::iequals(s, L"ACES_RRT"))   return 3;
+    return 0; // NONE
+}
+
+std::future<std::wstring> mixer_colorspace_command(command_context& ctx)
+{
+    if (ctx.parameters.empty()) {
+        auto transform2 = get_current_transform(ctx).share();
+        return std::async(std::launch::deferred, [transform2]() -> std::wstring {
+            auto cg = transform2.get().image_transform.color_grade;
+            return L"201 MIXER OK\r\n" +
+                   std::to_wstring(static_cast<int>(cg.enable)) + L" " +
+                   std::to_wstring(cg.input_transfer) + L" " + std::to_wstring(cg.input_gamut) + L" " +
+                   std::to_wstring(cg.tone_mapping) + L" " + std::to_wstring(cg.output_gamut) + L" " +
+                   std::to_wstring(cg.output_transfer) + L" " + std::to_wstring(cg.exposure) + L"\r\n";
+        });
+    }
+
+    // MIXER 1-1 COLORSPACE [input_transfer] [input_gamut] [tonemapping] [output_gamut] [output_transfer] [exposure]
+    // Disable with: MIXER 1-1 COLORSPACE NONE
+    transforms_applier transforms(ctx);
+
+    if (boost::iequals(ctx.parameters.at(0), L"NONE")) {
+        transforms.add(stage::transform_tuple_t(
+            ctx.layer_index(),
+            [](frame_transform t) { t.image_transform.color_grade.enable = false; return t; },
+            0,
+            L"linear"));
+        transforms.apply();
+        return make_ready_future<std::wstring>(L"202 MIXER OK\r\n");
+    }
+
+    int   it       = parse_transfer_fn(ctx.parameters.at(0));
+    int   ig       = ctx.parameters.size() > 1 ? parse_gamut_fn(ctx.parameters.at(1))       : 0;
+    int   tm       = ctx.parameters.size() > 2 ? parse_tonemapping_fn(ctx.parameters.at(2)) : 0;
+    int   og       = ctx.parameters.size() > 3 ? parse_gamut_fn(ctx.parameters.at(3))       : 0;
+    int   ot       = ctx.parameters.size() > 4 ? parse_transfer_fn(ctx.parameters.at(4))    : 1;
+    float exposure = ctx.parameters.size() > 5 ? std::stof(ctx.parameters.at(5))            : 1.0f;
+
+    transforms.add(stage::transform_tuple_t(
+        ctx.layer_index(),
+        [=](frame_transform transform) -> frame_transform {
+            auto& cg           = transform.image_transform.color_grade;
+            cg.enable          = true;
+            cg.input_transfer  = it;
+            cg.input_gamut     = ig;
+            cg.tone_mapping    = tm;
+            cg.output_gamut    = og;
+            cg.output_transfer = ot;
+            cg.exposure        = exposure;
+            return transform;
+        },
+        0,
+        L"linear"));
+    transforms.apply();
+
+    return make_ready_future<std::wstring>(L"202 MIXER OK\r\n");
+}
+
 std::future<std::wstring> mixer_volume_command(command_context& ctx)
 {
     return single_double_animatable_mixer_command(
@@ -1825,8 +1911,9 @@ void register_commands(std::shared_ptr<amcp_command_repository_wrapper>& repo)
     repo->register_channel_command(L"Mixer Commands", L"MIXER CROP", mixer_crop_command, 0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER ROTATION", mixer_rotation_command, 0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER PERSPECTIVE", mixer_perspective_command, 0);
-    repo->register_channel_command(L"Mixer Commands", L"MIXER PROJECTION", mixer_projection_command, 0);
-    repo->register_channel_command(L"Mixer Commands", L"MIXER VOLUME", mixer_volume_command, 0);
+    repo->register_channel_command(L"Mixer Commands", L"MIXER PROJECTION",  mixer_projection_command,  0);
+    repo->register_channel_command(L"Mixer Commands", L"MIXER COLORSPACE",  mixer_colorspace_command,  1);
+    repo->register_channel_command(L"Mixer Commands", L"MIXER VOLUME",      mixer_volume_command,       0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER MASTERVOLUME", mixer_mastervolume_command, 0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER GRID", mixer_grid_command, 1);
     repo->register_channel_command(L"Mixer Commands", L"MIXER COMMIT", mixer_commit_command, 0);

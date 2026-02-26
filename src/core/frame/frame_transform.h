@@ -68,6 +68,20 @@ struct projection final
     double fov    = 1.57079632679;
 };
 
+// Transfer: 0=linear,1=srgb,2=rec709,3=pq(st2084),4=hlg,5=logc3(arri),6=slog3(sony)
+// Gamut:    0=bt709,1=bt2020,2=dcip3_d65,3=aces_ap0,4=aces_ap1(acescg),5=arri_wg3,6=sgamut3_cine
+// Tonemapping: 0=none,1=reinhard,2=aces_filmic,3=aces_rrt
+struct color_grade final
+{
+    bool  enable          = false;
+    int   input_transfer  = 0;
+    int   input_gamut     = 0;
+    int   tone_mapping    = 0;
+    int   output_gamut    = 0;
+    int   output_transfer = 0;
+    float exposure        = 1.0f;
+};
+
 struct corners final
 {
     std::array<double, 2> ul = {0.0, 0.0};
@@ -106,6 +120,7 @@ struct image_transform final
     core::levels          levels;
     core::chroma          chroma;
     core::projection      projection;
+    core::color_grade     color_grade;
 
     bool             is_key      = false;
     bool             invert      = false;
