@@ -1397,6 +1397,37 @@ static int parse_tonemapping_fn(const std::wstring& s)
     return 0; // NONE
 }
 
+static std::wstring to_wstring_transfer(int t) {
+    switch(t) {
+        case 1: return L"SRGB";
+        case 2: return L"REC709";
+        case 3: return L"PQ";
+        case 4: return L"HLG";
+        case 5: return L"LOGC3";
+        case 6: return L"SLOG3";
+        default: return L"LINEAR";
+    }
+}
+static std::wstring to_wstring_gamut(int g) {
+    switch(g) {
+        case 1: return L"BT2020";
+        case 2: return L"DCIP3";
+        case 3: return L"ACES_AP0";
+        case 4: return L"ACES_AP1"; // ACEScg
+        case 5: return L"ARRI_WG3";
+        case 6: return L"SGAMUT3_CINE";
+        default: return L"BT709";
+    }
+}
+static std::wstring to_wstring_tonemap(int tm) {
+    switch(tm) {
+        case 1: return L"REINHARD";
+        case 2: return L"ACES_FILMIC";
+        case 3: return L"ACES_RRT";
+        default: return L"NONE";
+    }
+}
+
 std::future<std::wstring> mixer_colorspace_command(command_context& ctx)
 {
     if (ctx.parameters.empty()) {
@@ -1404,10 +1435,14 @@ std::future<std::wstring> mixer_colorspace_command(command_context& ctx)
         return std::async(std::launch::deferred, [transform2]() -> std::wstring {
             auto cg = transform2.get().image_transform.color_grade;
             return L"201 MIXER OK\r\n" +
-                   std::to_wstring(static_cast<int>(cg.enable)) + L" " +
-                   std::to_wstring(cg.input_transfer) + L" " + std::to_wstring(cg.input_gamut) + L" " +
-                   std::to_wstring(cg.tone_mapping) + L" " + std::to_wstring(cg.output_gamut) + L" " +
-                   std::to_wstring(cg.output_transfer) + L" " + std::to_wstring(cg.exposure) + L"\r\n";
+                   (cg.enable ? (
+                       to_wstring_transfer(cg.input_transfer) + L" " + 
+                       to_wstring_gamut(cg.input_gamut) + L" " +
+                       to_wstring_tonemap(cg.tone_mapping) + L" " +
+                       to_wstring_gamut(cg.output_gamut) + L" " +
+                       to_wstring_transfer(cg.output_transfer) + L" " + 
+                       std::to_wstring(cg.exposure)
+                   ) : std::wstring(L"NONE")) + L"\r\n";
         });
     }
 
@@ -1912,7 +1947,7 @@ void register_commands(std::shared_ptr<amcp_command_repository_wrapper>& repo)
     repo->register_channel_command(L"Mixer Commands", L"MIXER ROTATION", mixer_rotation_command, 0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER PERSPECTIVE", mixer_perspective_command, 0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER PROJECTION",  mixer_projection_command,  0);
-    repo->register_channel_command(L"Mixer Commands", L"MIXER COLORSPACE",  mixer_colorspace_command,  1);
+    repo->register_channel_command(L"Mixer Commands", L"MIXER COLORSPACE",  mixer_colorspace_command,  0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER VOLUME",      mixer_volume_command,       0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER MASTERVOLUME", mixer_mastervolume_command, 0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER GRID", mixer_grid_command, 1);

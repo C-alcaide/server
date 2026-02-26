@@ -54,8 +54,8 @@ uniform float aspect_ratio; // Screen aspect ratio (width/height)
 uniform bool  color_grading;
 uniform int   input_transfer;    // 0=linear,1=srgb,2=rec709,3=pq,4=hlg,5=logc3,6=slog3
 uniform int   output_transfer;
-uniform mat3  input_to_working;  // input gamut → ACEScg (AP1)
-uniform mat3  working_to_output; // ACEScg (AP1) → output gamut
+uniform mat3  input_to_working;  // input gamut -> ACEScg (AP1)
+uniform mat3  working_to_output; // ACEScg (AP1) -> output gamut
 uniform int   tone_mapping_op;   // 0=none,1=reinhard,2=aces_filmic,3=aces_rrt
 uniform float exposure;          // linear exposure multiplier
 
@@ -466,7 +466,7 @@ vec4 ycbcra_to_rgba(float Y, float Cb, float Cr, float A)
     return vec4(color_matrix * YCbCr / 255, A).bgra;
 }
 
-// ---- Color Grading: EOTFs (encoded → linear) ----
+// ---- Color Grading: EOTFs (encoded -> linear) ----
 float eotf_srgb(float x)   { return x <= 0.04045  ? x / 12.92 : pow((x + 0.055) / 1.055, 2.4); }
 float eotf_rec709(float x) { return x < 0.081     ? x / 4.5   : pow((x + 0.099) / 1.099, 1.0 / 0.45); }
 float eotf_pq(float x) {
@@ -499,7 +499,7 @@ vec3 apply_eotf(vec3 rgb, int t) {
         default: return rgb;
     }
 }
-// ---- Color Grading: OETFs (linear → encoded) ----
+// ---- Color Grading: OETFs (linear -> encoded) ----
 float oetf_srgb(float x)   { return x <= 0.0031308 ? x * 12.92 : 1.055 * pow(max(x, 0.0), 1.0 / 2.4) - 0.055; }
 float oetf_rec709(float x) { return x < 0.018      ? x * 4.5   : 1.099 * pow(max(x, 0.0), 0.45) - 0.099; }
 float oetf_pq(float x) {
