@@ -67,6 +67,8 @@ void apply_transform_colour_values(core::image_transform& self, const core::imag
         std::min(other.chroma.spill_suppress_saturation, self.chroma.spill_suppress_saturation);
     self.is_key |= other.is_key;
     self.invert |= other.invert;
+    self.flip_h ^= other.flip_h;
+    self.flip_v ^= other.flip_v;
     self.is_mix |= other.is_mix;
     self.blend_mode = std::max(self.blend_mode, other.blend_mode);
     self.layer_depth += other.layer_depth;
@@ -75,6 +77,44 @@ void apply_transform_colour_values(core::image_transform& self, const core::imag
     }
     if (other.color_grade.enable) {
         self.color_grade = other.color_grade;
+    }
+
+    // White balance: additive combination
+    self.temperature += other.temperature;
+    self.tint        += other.tint;
+
+    // Lift/Midtone/Gain: additive lift, multiplicative midtone+gain
+    for (int i = 0; i < 3; ++i) {
+        self.lift[i]    += other.lift[i];
+        self.midtone[i] *= other.midtone[i];
+        self.gain[i]    *= other.gain[i];
+    }
+
+    // Hue shift: additive
+    self.hue_shift += other.hue_shift;
+
+    // Tone balance: additive
+    self.shadows    += other.shadows;
+    self.highlights += other.highlights;
+
+    // Per-channel RGB levels: intersect input range, multiply gamma, intersect output range (per-channel)
+    if (other.per_channel_levels.enable) {
+        self.per_channel_levels.enable = true;
+        auto merge_ch = [](core::rgb_levels_channel& s, const core::rgb_levels_channel& o) {
+            s.min_input  = std::max(s.min_input,  o.min_input);
+            s.max_input  = std::min(s.max_input,  o.max_input);
+            s.gamma     *= o.gamma;
+            s.min_output = std::max(s.min_output, o.min_output);
+            s.max_output = std::min(s.max_output, o.max_output);
+        };
+        merge_ch(self.per_channel_levels.r, other.per_channel_levels.r);
+        merge_ch(self.per_channel_levels.g, other.per_channel_levels.g);
+        merge_ch(self.per_channel_levels.b, other.per_channel_levels.b);
+    }
+
+    // Tone curves: if other has curves enabled, override self (curves don't compose additively)
+    if (other.curves.enable) {
+        self.curves = other.curves;
     }
 }
 

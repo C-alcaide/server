@@ -103,15 +103,52 @@ image_transform image_transform::tween(double                 time,
         do_tween(time, source.chroma.spill_suppress_saturation, dest.chroma.spill_suppress_saturation, duration, tween);
     result.chroma.enable    = dest.chroma.enable;
     result.chroma.show_mask = dest.chroma.show_mask;
-    result.projection.enable = dest.projection.enable;
-    result.projection.yaw    = do_tween(time, source.projection.yaw, dest.projection.yaw, duration, tween);
-    result.projection.pitch  = do_tween(time, source.projection.pitch, dest.projection.pitch, duration, tween);
-    result.projection.roll   = do_tween(time, source.projection.roll, dest.projection.roll, duration, tween);
-    result.projection.fov    = do_tween(time, source.projection.fov, dest.projection.fov, duration, tween);
+    result.projection.enable   = dest.projection.enable;
+    result.projection.yaw      = do_tween(time, source.projection.yaw,      dest.projection.yaw,      duration, tween);
+    result.projection.pitch    = do_tween(time, source.projection.pitch,    dest.projection.pitch,    duration, tween);
+    result.projection.roll     = do_tween(time, source.projection.roll,     dest.projection.roll,     duration, tween);
+    result.projection.fov      = do_tween(time, source.projection.fov,      dest.projection.fov,      duration, tween);
+    result.projection.offset_x = do_tween(time, source.projection.offset_x, dest.projection.offset_x, duration, tween);
+    result.projection.offset_y = do_tween(time, source.projection.offset_y, dest.projection.offset_y, duration, tween);
     result.color_grade         = dest.color_grade;
     result.color_grade.exposure = static_cast<float>(do_tween(time, static_cast<double>(source.color_grade.exposure), static_cast<double>(dest.color_grade.exposure), duration, tween));
+    result.temperature    = do_tween(time, source.temperature, dest.temperature, duration, tween);
+    result.tint           = do_tween(time, source.tint,        dest.tint,        duration, tween);
+    for (int i = 0; i < 3; ++i) {
+        result.lift[i]    = do_tween(time, source.lift[i],    dest.lift[i],    duration, tween);
+        result.midtone[i] = do_tween(time, source.midtone[i], dest.midtone[i], duration, tween);
+        result.gain[i]    = do_tween(time, source.gain[i],    dest.gain[i],    duration, tween);
+    }
+    result.hue_shift   = do_tween(time, source.hue_shift,   dest.hue_shift,   duration, tween);
+    result.shadows     = do_tween(time, source.shadows,     dest.shadows,     duration, tween);
+    result.highlights  = do_tween(time, source.highlights,  dest.highlights,  duration, tween);
+
+    // Per-channel RGB levels — tweened
+    auto rl = [&](double s, double d) { return do_tween(time, s, d, duration, tween); };
+    result.per_channel_levels.enable         = dest.per_channel_levels.enable;
+    result.per_channel_levels.r.min_input    = rl(source.per_channel_levels.r.min_input,  dest.per_channel_levels.r.min_input);
+    result.per_channel_levels.r.max_input    = rl(source.per_channel_levels.r.max_input,  dest.per_channel_levels.r.max_input);
+    result.per_channel_levels.r.gamma        = rl(source.per_channel_levels.r.gamma,      dest.per_channel_levels.r.gamma);
+    result.per_channel_levels.r.min_output   = rl(source.per_channel_levels.r.min_output, dest.per_channel_levels.r.min_output);
+    result.per_channel_levels.r.max_output   = rl(source.per_channel_levels.r.max_output, dest.per_channel_levels.r.max_output);
+    result.per_channel_levels.g.min_input    = rl(source.per_channel_levels.g.min_input,  dest.per_channel_levels.g.min_input);
+    result.per_channel_levels.g.max_input    = rl(source.per_channel_levels.g.max_input,  dest.per_channel_levels.g.max_input);
+    result.per_channel_levels.g.gamma        = rl(source.per_channel_levels.g.gamma,      dest.per_channel_levels.g.gamma);
+    result.per_channel_levels.g.min_output   = rl(source.per_channel_levels.g.min_output, dest.per_channel_levels.g.min_output);
+    result.per_channel_levels.g.max_output   = rl(source.per_channel_levels.g.max_output, dest.per_channel_levels.g.max_output);
+    result.per_channel_levels.b.min_input    = rl(source.per_channel_levels.b.min_input,  dest.per_channel_levels.b.min_input);
+    result.per_channel_levels.b.max_input    = rl(source.per_channel_levels.b.max_input,  dest.per_channel_levels.b.max_input);
+    result.per_channel_levels.b.gamma        = rl(source.per_channel_levels.b.gamma,      dest.per_channel_levels.b.gamma);
+    result.per_channel_levels.b.min_output   = rl(source.per_channel_levels.b.min_output, dest.per_channel_levels.b.min_output);
+    result.per_channel_levels.b.max_output   = rl(source.per_channel_levels.b.max_output, dest.per_channel_levels.b.max_output);
+
+    // Tone curves — snapped to destination (control-point sets can't be interpolated)
+    result.curves = dest.curves;
+
     result.is_key           = source.is_key || dest.is_key;
     result.invert           = source.invert || dest.invert;
+    result.flip_h           = dest.flip_h;
+    result.flip_v           = dest.flip_v;
     result.is_mix           = source.is_mix || dest.is_mix;
     result.blend_mode       = std::max(source.blend_mode, dest.blend_mode);
     result.layer_depth      = dest.layer_depth;
@@ -143,7 +180,9 @@ bool operator==(const image_transform& lhs, const image_transform& rhs)
                boost::range::equal(lhs.fill_scale, rhs.fill_scale, eq) &&
                boost::range::equal(lhs.clip_translation, rhs.clip_translation, eq) &&
                boost::range::equal(lhs.clip_scale, rhs.clip_scale, eq) && eq(lhs.angle, rhs.angle) &&
-               lhs.is_key == rhs.is_key && lhs.invert == rhs.invert && lhs.is_mix == rhs.is_mix &&
+               lhs.is_key == rhs.is_key && lhs.invert == rhs.invert &&
+               lhs.flip_h == rhs.flip_h && lhs.flip_v == rhs.flip_v &&
+               lhs.is_mix == rhs.is_mix &&
                lhs.blend_mode == rhs.blend_mode && lhs.layer_depth == rhs.layer_depth &&
                lhs.chroma.enable == rhs.chroma.enable && lhs.chroma.show_mask == rhs.chroma.show_mask &&
                eq(lhs.chroma.target_hue, rhs.chroma.target_hue) && eq(lhs.chroma.hue_width, rhs.chroma.hue_width) &&
@@ -163,6 +202,42 @@ bool operator==(const image_transform& lhs, const image_transform& rhs)
                lhs.color_grade.output_gamut == rhs.color_grade.output_gamut &&
                lhs.color_grade.output_transfer == rhs.color_grade.output_transfer &&
                eq(static_cast<double>(lhs.color_grade.exposure), static_cast<double>(rhs.color_grade.exposure)) &&
+               eq(lhs.temperature, rhs.temperature) && eq(lhs.tint, rhs.tint) &&
+               boost::range::equal(lhs.lift,    rhs.lift,    eq) &&
+               boost::range::equal(lhs.midtone, rhs.midtone, eq) &&
+               boost::range::equal(lhs.gain,    rhs.gain,    eq) &&
+               eq(lhs.hue_shift, rhs.hue_shift) &&
+               eq(lhs.shadows, rhs.shadows) && eq(lhs.highlights, rhs.highlights) &&
+               lhs.per_channel_levels.enable        == rhs.per_channel_levels.enable &&
+               eq(lhs.per_channel_levels.r.min_input,  rhs.per_channel_levels.r.min_input)  &&
+               eq(lhs.per_channel_levels.r.max_input,  rhs.per_channel_levels.r.max_input)  &&
+               eq(lhs.per_channel_levels.r.gamma,      rhs.per_channel_levels.r.gamma)      &&
+               eq(lhs.per_channel_levels.r.min_output, rhs.per_channel_levels.r.min_output) &&
+               eq(lhs.per_channel_levels.r.max_output, rhs.per_channel_levels.r.max_output) &&
+               eq(lhs.per_channel_levels.g.min_input,  rhs.per_channel_levels.g.min_input)  &&
+               eq(lhs.per_channel_levels.g.max_input,  rhs.per_channel_levels.g.max_input)  &&
+               eq(lhs.per_channel_levels.g.gamma,      rhs.per_channel_levels.g.gamma)      &&
+               eq(lhs.per_channel_levels.g.min_output, rhs.per_channel_levels.g.min_output) &&
+               eq(lhs.per_channel_levels.g.max_output, rhs.per_channel_levels.g.max_output) &&
+               eq(lhs.per_channel_levels.b.min_input,  rhs.per_channel_levels.b.min_input)  &&
+               eq(lhs.per_channel_levels.b.max_input,  rhs.per_channel_levels.b.max_input)  &&
+               eq(lhs.per_channel_levels.b.gamma,      rhs.per_channel_levels.b.gamma)      &&
+               eq(lhs.per_channel_levels.b.min_output, rhs.per_channel_levels.b.min_output) &&
+               eq(lhs.per_channel_levels.b.max_output, rhs.per_channel_levels.b.max_output) &&
+               lhs.curves.enable == rhs.curves.enable &&
+               [&]() {
+                   auto cc_eq = [](const core::curve_channel& a, const core::curve_channel& b) {
+                       if (a.count != b.count) return false;
+                       for (int i = 0; i < a.count; ++i)
+                           if (std::abs(a.points[i].x - b.points[i].x) >= 5e-8 ||
+                               std::abs(a.points[i].y - b.points[i].y) >= 5e-8) return false;
+                       return true;
+                   };
+                   return cc_eq(lhs.curves.master, rhs.curves.master) &&
+                          cc_eq(lhs.curves.red,    rhs.curves.red)    &&
+                          cc_eq(lhs.curves.green,  rhs.curves.green)  &&
+                          cc_eq(lhs.curves.blue,   rhs.curves.blue);
+               }() &&
            lhs.enable_geometry_modifiers == rhs.enable_geometry_modifiers;
 }
 

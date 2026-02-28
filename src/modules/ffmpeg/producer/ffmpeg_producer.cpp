@@ -96,6 +96,10 @@ struct ffmpeg_producer : public core::frame_producer
     {
     }
 
+    // Post-construction helpers called from create_producer
+    void pingpong(bool pp)    { producer_->pingpong(pp); }
+    void speed(double spd)    { producer_->speed(spd); }
+
     ~ffmpeg_producer()
     {
         std::thread([producer = std::move(producer_)]() mutable {
@@ -123,8 +127,9 @@ struct ffmpeg_producer : public core::frame_producer
 
     std::uint32_t nb_frames() const override
     {
-        return producer_->loop() ? std::numeric_limits<std::uint32_t>::max()
-                                 : static_cast<std::uint32_t>(producer_->duration());
+        return (producer_->loop() || producer_->pingpong())
+                   ? std::numeric_limits<std::uint32_t>::max()
+                   : static_cast<std::uint32_t>(producer_->duration());
     }
 
     bool is_ready() override { return producer_->is_ready(); }
@@ -219,6 +224,16 @@ struct ffmpeg_producer : public core::frame_producer
 
             producer_->set_filter_param(is_video, filter_name, param_name, target_value, duration_frames, tween_name);
             result = params.at(3);
+        } else if (boost::iequals(cmd, L"speed")) {
+            if (!value.empty()) {
+                producer_->speed(boost::lexical_cast<double>(value));
+            }
+            result = std::to_wstring(producer_->speed());
+        } else if (boost::iequals(cmd, L"pingpong")) {
+            if (!value.empty()) {
+                producer_->pingpong(boost::lexical_cast<bool>(value));
+            }
+            result = std::to_wstring(producer_->pingpong());
         } else {
             CASPAR_THROW_EXCEPTION(invalid_argument());
         }
@@ -335,7 +350,10 @@ spl::shared_ptr<core::frame_producer> create_producer(const core::frame_producer
 
     auto seekable = get_param(L"SEEKABLE", params, static_cast<int>(2));
 
-    auto loop = contains_param(L"LOOP", params);
+    auto loop     = contains_param(L"LOOP", params);
+    auto pingpong = contains_param(L"PINGPONG", params);
+    auto speed    = get_param(L"SPEED", params, static_cast<double>(1.0));
+    auto has_speed = contains_param(L"SPEED", params);
 
     auto seek = get_param(L"SEEK", params, static_cast<uint32_t>(0));
     auto in   = get_param(L"IN", params, seek);
@@ -379,18 +397,23 @@ spl::shared_ptr<core::frame_producer> create_producer(const core::frame_producer
     auto afilter = get_param(L"AF", params, get_param(L"FILTER", params, L""));
 
     try {
-        return spl::make_shared<ffmpeg_producer>(dependencies.frame_factory,
-                                                 dependencies.format_desc,
-                                                 name,
-                                                 path,
-                                                 vfilter,
-                                                 afilter,
-                                                 start,
-                                                 seek2,
-                                                 duration,
-                                                 loop,
-                                                 seekable,
-                                                 scale_mode);
+        auto prod = spl::make_shared<ffmpeg_producer>(dependencies.frame_factory,
+                                                      dependencies.format_desc,
+                                                      name,
+                                                      path,
+                                                      vfilter,
+                                                      afilter,
+                                                      start,
+                                                      seek2,
+                                                      duration,
+                                                      loop,
+                                                      seekable,
+                                                      scale_mode);
+        if (pingpong)
+            prod->pingpong(true);
+        if (has_speed)
+            prod->speed(speed);
+        return prod;
     } catch (...) {
         CASPAR_LOG_CURRENT_EXCEPTION();
     }

@@ -7,7 +7,9 @@ This feature set introduces GPU-accelerated ACES (Academy Color Encoding System)
 1. [360° Equirectangular Projection](#-equirectangular-projection)
 2. [360° Projection Offset](#-projection-offset)
 3. [Playback Speed Control](#playback-speed-control)
-4. [ACES Color Management](#aces-color-management)
+4. [Ping-Pong Loop](#ping-pong-loop)
+5. [Flip (Mirror)](#flip-mirror)
+6. [ACES Color Management](#aces-color-management)
 
 ## 360° Equirectangular Projection
 
@@ -102,17 +104,27 @@ MIXER 1-10 PROJECTION_OFFSET 0.0 0.3
 
 ---
 
----
-
 ## Playback Speed Control
 
 Real-time playback speed control on any FFmpeg-loaded clip. Speed can be changed at any time without reloading the source, and the OSC position/duration state remains accurate throughout.
 
 ### AMCP Command
 
+Speed can be set at load/play time as a parameter, or changed at runtime via `CALL`:
+
 ```bash
-CALL [channel]-[layer] SPEED [value]   # Set speed
-CALL [channel]-[layer] SPEED           # Query current speed
+PLAY [channel]-[layer] [clip] SPEED [value]    # load and play at given speed
+LOAD [channel]-[layer] [clip] SPEED [value]    # pre-load at given speed
+CALL [channel]-[layer] SPEED [value]           # change speed on the running clip
+CALL [channel]-[layer] SPEED                   # query current speed
+```
+
+`SPEED` can be combined with other `PLAY`/`LOAD` flags:
+
+```bash
+PLAY 1-10 MyClip LOOP SPEED 0.5
+PLAY 1-10 MyClip IN 25 OUT 200 SPEED 2.0
+PLAY 1-10 MyClip PINGPONG SPEED 0.5
 ```
 
 ### Parameters
@@ -198,18 +210,115 @@ CALL 1-10 SPEED 1.0
 CALL 1-10 SPEED
 ```
 
-**8. Yo-yo loop (forward then reverse)**
+---
+
+## Ping-Pong Loop
+
+Automatically reverses playback direction each time a clip boundary is reached, creating a seamless back-and-forth loop without any manual command timing. This is fully frame-accurate — the direction flip happens deterministically inside `next_frame()` the moment the boundary is crossed.
+
+### AMCP Command
+
+Ping-pong can be set at load/play time or toggled at runtime via `CALL`:
+
 ```bash
-CALL 1-10 LOOP 1
-CALL 1-10 SPEED 1.0    # plays forward to end, then...
-CALL 1-10 SPEED -1.0   # ...reverse back to start
+PLAY  [channel]-[layer] [clip] PINGPONG            # load and play with ping-pong
+LOAD  [channel]-[layer] [clip] PINGPONG            # pre-load with ping-pong
+CALL  [channel]-[layer] PINGPONG [1|0]             # enable / disable at runtime
+CALL  [channel]-[layer] PINGPONG                   # query current state
+```
+
+`PINGPONG` and `SPEED` can be combined with other `PLAY`/`LOAD` flags in the usual way:
+
+```bash
+PLAY 1-10 MyClip PINGPONG IN 25 OUT 200
+PLAY 1-10 MyClip PINGPONG SPEED 0.5
+```
+
+### Behaviour
+
+- Playback oscillates continuously between the IN point and the OUT point (or the full clip if neither is set).
+- The absolute speed magnitude is preserved on every flip. `CALL 1-10 SPEED 0.5` with ping-pong enabled produces slow-motion bouncing.
+- Ping-pong implies continuous looping — `LOOP` is not needed and has no additional effect when `PINGPONG` is set.
+- **Codec note**: The reverse leg of each bounce has the same codec limitations as `SPEED -1.0`. Intra-only codecs (ProRes, DNxHD, MJPEG) give the smoothest results.
+
+### Usage Examples
+
+**1. Enable ping-pong at normal speed**
+```bash
+CALL 1-10 PINGPONG 1
+```
+
+**2. Ping-pong at half speed**
+```bash
+CALL 1-10 SPEED 0.5
+CALL 1-10 PINGPONG 1
+```
+
+**3. Disable ping-pong (resumes forward looping if LOOP is set)**
+```bash
+CALL 1-10 PINGPONG 0
+```
+
+**4. Query current state**
+```bash
+CALL 1-10 PINGPONG
 ```
 
 ### OSC State
 
-Speed is published to the OSC tree:
+Both speed and ping-pong state are published to the OSC tree:
 ```
 /channel/1/stage/layer/10/speed
+/channel/1/stage/layer/10/pingpong
+```
+
+---
+
+## Flip (Mirror)
+
+GPU-accelerated horizontal and/or vertical mirror applied per-layer at no performance cost. Works on all layer types — standard clips, live inputs, and 360° layers equally. The flip is applied to the final UV sample coordinates, so it correctly mirrors the output image regardless of any other transforms on the layer.
+
+### AMCP Command
+
+```bash
+MIXER [channel]-[layer] FLIP [mode]    # Set flip mode
+MIXER [channel]-[layer] FLIP           # Query current mode
+```
+
+### Parameters
+
+| Parameter | Description |
+| :--- | :--- |
+| **H** | Horizontal mirror — left becomes right |
+| **V** | Vertical mirror — top becomes bottom |
+| **HV** | Both axes — equivalent to a 180° rotation |
+| **NONE** | Reset — no mirror (default) |
+
+### Usage Examples
+
+**1. Mirror a layer horizontally**
+```bash
+MIXER 1-10 FLIP H
+```
+
+**2. Mirror vertically**
+```bash
+MIXER 1-10 FLIP V
+```
+
+**3. Both axes**
+```bash
+MIXER 1-10 FLIP HV
+```
+
+**4. Reset**
+```bash
+MIXER 1-10 FLIP NONE
+```
+
+**5. Query current state**
+```bash
+MIXER 1-10 FLIP
 ```
 
 ---

@@ -1366,6 +1366,75 @@ std::future<std::wstring> mixer_projection_command(command_context& ctx)
     return make_ready_future<std::wstring>(L"202 MIXER OK\r\n");
 }
 
+std::future<std::wstring> mixer_projection_offset_command(command_context& ctx)
+{
+    if (ctx.parameters.empty()) {
+        auto transform2 = get_current_transform(ctx).share();
+        return std::async(std::launch::deferred, [transform2]() -> std::wstring {
+            auto proj = transform2.get().image_transform.projection;
+            return L"201 MIXER OK\r\n" + std::to_wstring(proj.offset_x) + L" " +
+                   std::to_wstring(proj.offset_y) + L"\r\n";
+        });
+    }
+
+    transforms_applier transforms(ctx);
+    int          duration = ctx.parameters.size() > 2 ? std::stoi(ctx.parameters[2]) : 0;
+    std::wstring tween    = ctx.parameters.size() > 3 ? ctx.parameters[3] : L"linear";
+    double       offset_x = std::stod(ctx.parameters.at(0));
+    double       offset_y = std::stod(ctx.parameters.at(1));
+
+    transforms.add(stage::transform_tuple_t(
+        ctx.layer_index(),
+        [=](frame_transform transform) -> frame_transform {
+            transform.image_transform.projection.offset_x = offset_x;
+            transform.image_transform.projection.offset_y = offset_y;
+            return transform;
+        },
+        duration,
+        tween));
+    transforms.apply();
+
+    return make_ready_future<std::wstring>(L"202 MIXER OK\r\n");
+}
+
+std::future<std::wstring> mixer_flip_command(command_context& ctx)
+{
+    if (ctx.parameters.empty()) {
+        auto transform2 = get_current_transform(ctx).share();
+        return std::async(std::launch::deferred, [transform2]() -> std::wstring {
+            auto& t = transform2.get().image_transform;
+            std::wstring val = L"NONE";
+            if (t.flip_h && t.flip_v) val = L"HV";
+            else if (t.flip_h)        val = L"H";
+            else if (t.flip_v)        val = L"V";
+            return L"201 MIXER OK\r\n" + val + L"\r\n";
+        });
+    }
+
+    bool flip_h = false;
+    bool flip_v = false;
+    const auto& arg = ctx.parameters.at(0);
+    if (boost::iequals(arg, L"H"))                                    { flip_h = true; }
+    else if (boost::iequals(arg, L"V"))                               { flip_v = true; }
+    else if (boost::iequals(arg, L"HV") || boost::iequals(arg, L"VH")) { flip_h = true; flip_v = true; }
+    else if (arg == L"1")                                             { flip_h = true; }  // 1 = H-flip (mirror)
+    // else NONE / 0 / anything unrecognised -> both false
+
+    transforms_applier transforms(ctx);
+    transforms.add(stage::transform_tuple_t(
+        ctx.layer_index(),
+        [=](frame_transform transform) -> frame_transform {
+            transform.image_transform.flip_h = flip_h;
+            transform.image_transform.flip_v = flip_v;
+            return transform;
+        },
+        0,
+        tweener(L"linear")));
+    transforms.apply();
+
+    return make_ready_future<std::wstring>(L"202 MIXER OK\r\n");
+}
+
 static int parse_transfer_fn(const std::wstring& s)
 {
     if (boost::iequals(s, L"SRGB"))   return 1;
@@ -1484,6 +1553,309 @@ std::future<std::wstring> mixer_colorspace_command(command_context& ctx)
         L"linear"));
     transforms.apply();
 
+    return make_ready_future<std::wstring>(L"202 MIXER OK\r\n");
+}
+
+// ---------- Per-channel triple-value animatable helper ----------------------
+
+template <typename Getter, typename Setter>
+std::future<std::wstring> triple_double_animatable_mixer_command(command_context&  ctx,
+                                                                  const Getter&    getter,
+                                                                  const Setter&    setter)
+{
+    if (ctx.parameters.empty()) {
+        auto transform2 = get_current_transform(ctx).share();
+        return std::async(std::launch::deferred, [transform2, getter]() -> std::wstring {
+            auto arr = getter(transform2.get());
+            return L"201 MIXER OK\r\n" +
+                   std::to_wstring(arr[0]) + L" " +
+                   std::to_wstring(arr[1]) + L" " +
+                   std::to_wstring(arr[2]) + L"\r\n";
+        });
+    }
+
+    transforms_applier transforms(ctx);
+    double       r        = std::stod(ctx.parameters.at(0));
+    double       g        = std::stod(ctx.parameters.at(1));
+    double       b        = std::stod(ctx.parameters.at(2));
+    int          duration = ctx.parameters.size() > 3 ? std::stoi(ctx.parameters[3]) : 0;
+    std::wstring tween    = ctx.parameters.size() > 4 ? ctx.parameters[4] : L"linear";
+
+    transforms.add(stage::transform_tuple_t(
+        ctx.layer_index(),
+        [=](frame_transform transform) -> frame_transform {
+            setter(transform, r, g, b);
+            return transform;
+        },
+        duration,
+        tween));
+    transforms.apply();
+
+    return make_ready_future<std::wstring>(L"202 MIXER OK\r\n");
+}
+
+// ---------- New color-grading commands (DaVinci Resolve-style) ---------------
+
+std::future<std::wstring> mixer_whitebalance_command(command_context& ctx)
+{
+    if (ctx.parameters.empty()) {
+        auto transform2 = get_current_transform(ctx).share();
+        return std::async(std::launch::deferred, [transform2]() -> std::wstring {
+            auto t = transform2.get().image_transform;
+            return L"201 MIXER OK\r\n" + std::to_wstring(t.temperature) + L" " +
+                   std::to_wstring(t.tint) + L"\r\n";
+        });
+    }
+
+    transforms_applier transforms(ctx);
+    double       temperature = std::stod(ctx.parameters.at(0));
+    double       tint        = std::stod(ctx.parameters.at(1));
+    int          duration    = ctx.parameters.size() > 2 ? std::stoi(ctx.parameters[2]) : 0;
+    std::wstring tween       = ctx.parameters.size() > 3 ? ctx.parameters[3] : L"linear";
+
+    transforms.add(stage::transform_tuple_t(
+        ctx.layer_index(),
+        [=](frame_transform transform) -> frame_transform {
+            transform.image_transform.temperature = temperature;
+            transform.image_transform.tint        = tint;
+            return transform;
+        },
+        duration,
+        tween));
+    transforms.apply();
+
+    return make_ready_future<std::wstring>(L"202 MIXER OK\r\n");
+}
+
+// MIXER LIFT r g b [duration tween]  -- per-channel shadow offset (-0.5..+0.5)
+std::future<std::wstring> mixer_lift_command(command_context& ctx)
+{
+    return triple_double_animatable_mixer_command(
+        ctx,
+        [](const frame_transform& t) { return t.image_transform.lift; },
+        [](frame_transform& t, double r, double g, double b) {
+            t.image_transform.lift = {r, g, b};
+        });
+}
+
+// MIXER MIDTONE r g b [duration tween]  -- per-channel midtone power (0.1..4, DaVinci "Gamma" wheel)
+std::future<std::wstring> mixer_midtone_command(command_context& ctx)
+{
+    return triple_double_animatable_mixer_command(
+        ctx,
+        [](const frame_transform& t) { return t.image_transform.midtone; },
+        [](frame_transform& t, double r, double g, double b) {
+            t.image_transform.midtone = {r, g, b};
+        });
+}
+
+// MIXER GAIN r g b [duration tween]  -- per-channel highlight multiplier (0..4, DaVinci "Gain" wheel)
+std::future<std::wstring> mixer_gain_command(command_context& ctx)
+{
+    return triple_double_animatable_mixer_command(
+        ctx,
+        [](const frame_transform& t) { return t.image_transform.gain; },
+        [](frame_transform& t, double r, double g, double b) {
+            t.image_transform.gain = {r, g, b};
+        });
+}
+
+// MIXER HUESHIFT degrees [duration tween]  -- global hue rotation (-180..+180)
+std::future<std::wstring> mixer_hueshift_command(command_context& ctx)
+{
+    return single_double_animatable_mixer_command(
+        ctx,
+        [](const frame_transform& t) { return t.image_transform.hue_shift; },
+        [](frame_transform& t, double value) { t.image_transform.hue_shift = value; });
+}
+
+// MIXER TONEBALANCE shadows highlights [duration tween]  -- shadow/highlight tonal separation
+std::future<std::wstring> mixer_tonebalance_command(command_context& ctx)
+{
+    if (ctx.parameters.empty()) {
+        auto transform2 = get_current_transform(ctx).share();
+        return std::async(std::launch::deferred, [transform2]() -> std::wstring {
+            auto t = transform2.get().image_transform;
+            return L"201 MIXER OK\r\n" + std::to_wstring(t.shadows) + L" " +
+                   std::to_wstring(t.highlights) + L"\r\n";
+        });
+    }
+
+    transforms_applier transforms(ctx);
+    double       shadows    = std::stod(ctx.parameters.at(0));
+    double       highlights = std::stod(ctx.parameters.at(1));
+    int          duration   = ctx.parameters.size() > 2 ? std::stoi(ctx.parameters[2]) : 0;
+    std::wstring tween      = ctx.parameters.size() > 3 ? ctx.parameters[3] : L"linear";
+
+    transforms.add(stage::transform_tuple_t(
+        ctx.layer_index(),
+        [=](frame_transform transform) -> frame_transform {
+            transform.image_transform.shadows    = shadows;
+            transform.image_transform.highlights = highlights;
+            return transform;
+        },
+        duration,
+        tween));
+    transforms.apply();
+
+    return make_ready_future<std::wstring>(L"202 MIXER OK\r\n");
+}
+
+// MIXER RGBLEVELS — per-channel independent levels
+// Query:  MIXER 1-1 RGBLEVELS
+// Reset:  MIXER 1-1 RGBLEVELS RESET
+// Set:    MIXER 1-1 RGBLEVELS r_min_in r_max_in r_gamma r_min_out r_max_out
+//                             g_min_in g_max_in g_gamma g_min_out g_max_out
+//                             b_min_in b_max_in b_gamma b_min_out b_max_out  [dur tween]
+std::future<std::wstring> mixer_rgblevels_command(command_context& ctx)
+{
+    if (ctx.parameters.empty()) {
+        auto t2 = get_current_transform(ctx).share();
+        return std::async(std::launch::deferred, [t2]() -> std::wstring {
+            const auto& rl = t2.get().image_transform.per_channel_levels;
+            if (!rl.enable)
+                return L"201 MIXER OK\r\nDISABLED\r\n";
+            auto f   = [](double v) { return std::to_wstring(v); };
+            auto row = [&](const core::rgb_levels_channel& c) {
+                return f(c.min_input) + L" " + f(c.max_input) + L" " +
+                       f(c.gamma)     + L" " + f(c.min_output) + L" " + f(c.max_output);
+            };
+            return L"201 MIXER OK\r\n" + row(rl.r) + L" " + row(rl.g) + L" " + row(rl.b) + L"\r\n";
+        });
+    }
+
+    if (boost::iequals(ctx.parameters.at(0), L"RESET")) {
+        transforms_applier transforms(ctx);
+        transforms.add(stage::transform_tuple_t(
+            ctx.layer_index(),
+            [](frame_transform t) { t.image_transform.per_channel_levels = core::rgb_levels{}; return t; },
+            0, L"linear"));
+        transforms.apply();
+        return make_ready_future<std::wstring>(L"202 MIXER OK\r\n");
+    }
+
+    transforms_applier transforms(ctx);
+    core::rgb_levels rl;
+    rl.enable       = true;
+    rl.r.min_input  = std::stod(ctx.parameters.at(0));
+    rl.r.max_input  = std::stod(ctx.parameters.at(1));
+    rl.r.gamma      = std::stod(ctx.parameters.at(2));
+    rl.r.min_output = std::stod(ctx.parameters.at(3));
+    rl.r.max_output = std::stod(ctx.parameters.at(4));
+    rl.g.min_input  = std::stod(ctx.parameters.at(5));
+    rl.g.max_input  = std::stod(ctx.parameters.at(6));
+    rl.g.gamma      = std::stod(ctx.parameters.at(7));
+    rl.g.min_output = std::stod(ctx.parameters.at(8));
+    rl.g.max_output = std::stod(ctx.parameters.at(9));
+    rl.b.min_input  = std::stod(ctx.parameters.at(10));
+    rl.b.max_input  = std::stod(ctx.parameters.at(11));
+    rl.b.gamma      = std::stod(ctx.parameters.at(12));
+    rl.b.min_output = std::stod(ctx.parameters.at(13));
+    rl.b.max_output = std::stod(ctx.parameters.at(14));
+    int          duration = ctx.parameters.size() > 15 ? std::stoi(ctx.parameters[15]) : 0;
+    std::wstring tween    = ctx.parameters.size() > 16 ? ctx.parameters[16]            : L"linear";
+
+    transforms.add(stage::transform_tuple_t(
+        ctx.layer_index(),
+        [=](frame_transform transform) -> frame_transform {
+            transform.image_transform.per_channel_levels = rl;
+            return transform;
+        },
+        duration,
+        tween));
+    transforms.apply();
+    return make_ready_future<std::wstring>(L"202 MIXER OK\r\n");
+}
+
+// MIXER CURVES — per-channel + master tone curves via Catmull-Rom spline control points
+// Query all:      MIXER 1-1 CURVES
+// Query channel:  MIXER 1-1 CURVES R|G|B|MASTER
+// Reset all:      MIXER 1-1 CURVES RESET
+// Set channel:    MIXER 1-1 CURVES R|G|B|MASTER x1 y1 x2 y2 [...up to 16 pairs]
+//                 (min 2 pairs; x values must be in 0..1 ascending order)
+std::future<std::wstring> mixer_curves_command(command_context& ctx)
+{
+    if (ctx.parameters.empty()) {
+        auto t2 = get_current_transform(ctx).share();
+        return std::async(std::launch::deferred, [t2]() -> std::wstring {
+            const auto& cv = t2.get().image_transform.curves;
+            if (!cv.enable)
+                return L"201 MIXER OK\r\nDISABLED\r\n";
+            auto dump = [](const core::curve_channel& c) -> std::wstring {
+                std::wstring s;
+                for (int i = 0; i < c.count; ++i)
+                    s += std::to_wstring(c.points[i].x) + L" " + std::to_wstring(c.points[i].y) + L" ";
+                return s;
+            };
+            return L"201 MIXER OK\r\nMASTER " + dump(cv.master) +
+                   L"\r\nR "     + dump(cv.red)   +
+                   L"\r\nG "     + dump(cv.green) +
+                   L"\r\nB "     + dump(cv.blue)  + L"\r\n";
+        });
+    }
+
+    if (boost::iequals(ctx.parameters.at(0), L"RESET")) {
+        transforms_applier transforms(ctx);
+        transforms.add(stage::transform_tuple_t(
+            ctx.layer_index(),
+            [](frame_transform t) { t.image_transform.curves = core::tone_curves{}; return t; },
+            0, L"linear"));
+        transforms.apply();
+        return make_ready_future<std::wstring>(L"202 MIXER OK\r\n");
+    }
+
+    const std::wstring& ch_str = ctx.parameters.at(0);
+    int ch = -1;
+    if      (boost::iequals(ch_str, L"MASTER"))                                ch = 0;
+    else if (boost::iequals(ch_str, L"R") || boost::iequals(ch_str, L"RED"))   ch = 1;
+    else if (boost::iequals(ch_str, L"G") || boost::iequals(ch_str, L"GREEN")) ch = 2;
+    else if (boost::iequals(ch_str, L"B") || boost::iequals(ch_str, L"BLUE"))  ch = 3;
+
+    if (ch < 0)
+        return make_ready_future<std::wstring>(L"400 ERROR\r\n");
+
+    if (ctx.parameters.size() == 1) {
+        auto t2 = get_current_transform(ctx).share();
+        return std::async(std::launch::deferred, [t2, ch]() -> std::wstring {
+            const auto& cv = t2.get().image_transform.curves;
+            const core::curve_channel& cc = (ch == 0) ? cv.master
+                                          : (ch == 1) ? cv.red
+                                          : (ch == 2) ? cv.green
+                                          :              cv.blue;
+            std::wstring s = L"201 MIXER OK\r\n";
+            for (int i = 0; i < cc.count; ++i)
+                s += std::to_wstring(cc.points[i].x) + L" " + std::to_wstring(cc.points[i].y) + L" ";
+            return s + L"\r\n";
+        });
+    }
+
+    int n_params = static_cast<int>(ctx.parameters.size()) - 1;
+    if (n_params < 4 || n_params % 2 != 0 || n_params / 2 > 16)
+        return make_ready_future<std::wstring>(L"400 ERROR\r\n");
+
+    core::curve_channel new_cc;
+    new_cc.count = n_params / 2;
+    for (int i = 0; i < new_cc.count; ++i) {
+        new_cc.points[i].x = std::stod(ctx.parameters.at(1 + i * 2));
+        new_cc.points[i].y = std::stod(ctx.parameters.at(2 + i * 2));
+    }
+
+    transforms_applier transforms(ctx);
+    transforms.add(stage::transform_tuple_t(
+        ctx.layer_index(),
+        [=](frame_transform transform) -> frame_transform {
+            auto& cv = transform.image_transform.curves;
+            cv.enable = true;
+            switch (ch) {
+                case 0: cv.master = new_cc; break;
+                case 1: cv.red    = new_cc; break;
+                case 2: cv.green  = new_cc; break;
+                case 3: cv.blue   = new_cc; break;
+            }
+            return transform;
+        },
+        0, L"linear"));
+    transforms.apply();
     return make_ready_future<std::wstring>(L"202 MIXER OK\r\n");
 }
 
@@ -1946,8 +2318,18 @@ void register_commands(std::shared_ptr<amcp_command_repository_wrapper>& repo)
     repo->register_channel_command(L"Mixer Commands", L"MIXER CROP", mixer_crop_command, 0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER ROTATION", mixer_rotation_command, 0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER PERSPECTIVE", mixer_perspective_command, 0);
-    repo->register_channel_command(L"Mixer Commands", L"MIXER PROJECTION",  mixer_projection_command,  0);
-    repo->register_channel_command(L"Mixer Commands", L"MIXER COLORSPACE",  mixer_colorspace_command,  0);
+    repo->register_channel_command(L"Mixer Commands", L"MIXER PROJECTION",        mixer_projection_command,        0);
+    repo->register_channel_command(L"Mixer Commands", L"MIXER PROJECTION_OFFSET", mixer_projection_offset_command, 0);
+    repo->register_channel_command(L"Mixer Commands", L"MIXER FLIP",             mixer_flip_command,              0);
+    repo->register_channel_command(L"Mixer Commands", L"MIXER COLORSPACE",        mixer_colorspace_command,        0);
+    repo->register_channel_command(L"Mixer Commands", L"MIXER WHITEBALANCE", mixer_whitebalance_command, 0);
+    repo->register_channel_command(L"Mixer Commands", L"MIXER LIFT",         mixer_lift_command,         0);
+    repo->register_channel_command(L"Mixer Commands", L"MIXER MIDTONE",      mixer_midtone_command,      0);
+    repo->register_channel_command(L"Mixer Commands", L"MIXER GAIN",         mixer_gain_command,         0);
+    repo->register_channel_command(L"Mixer Commands", L"MIXER HUESHIFT",     mixer_hueshift_command,     0);
+    repo->register_channel_command(L"Mixer Commands", L"MIXER TONEBALANCE",  mixer_tonebalance_command,  0);
+    repo->register_channel_command(L"Mixer Commands", L"MIXER RGBLEVELS",    mixer_rgblevels_command,    0);
+    repo->register_channel_command(L"Mixer Commands", L"MIXER CURVES",       mixer_curves_command,       0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER VOLUME",      mixer_volume_command,       0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER MASTERVOLUME", mixer_mastervolume_command, 0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER GRID", mixer_grid_command, 1);

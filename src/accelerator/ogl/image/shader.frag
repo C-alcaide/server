@@ -7,6 +7,7 @@ uniform sampler2D	background;
 uniform sampler2D	plane[4];
 uniform sampler2D	local_key;
 uniform sampler2D	layer_key;
+uniform sampler2D	curve_lut_tex;
 
 uniform bool        is_straight_alpha;
 
@@ -19,6 +20,8 @@ uniform int			keyer;
 uniform int			pixel_format;
 
 uniform bool        invert;
+uniform bool        flip_h;  // mirror left <-> right
+uniform bool        flip_v;  // mirror top  <-> bottom
 uniform float		opacity;
 uniform bool		levels;
 uniform float		min_input;
@@ -44,11 +47,13 @@ uniform float		chroma_spill_suppress;
 uniform float		chroma_spill_suppress_saturation;
 
 uniform bool  is_360;
-uniform float view_yaw;   // in radians
-uniform float view_pitch; // in radians
-uniform float view_roll;  // in radians
-uniform float view_fov;   // Vertical FOV in radians
-uniform float aspect_ratio; // Screen aspect ratio (width/height)
+uniform float view_yaw;      // in radians
+uniform float view_pitch;    // in radians
+uniform float view_roll;     // in radians
+uniform float view_fov;      // Vertical FOV in radians
+uniform float aspect_ratio;  // Screen aspect ratio (width/height)
+uniform float view_offset_x; // NDC lens-shift: +1 = pan right
+uniform float view_offset_y; // NDC lens-shift: +1 = pan up
 
 // Color Grading (ACES workflow)
 uniform bool  color_grading;
@@ -58,6 +63,39 @@ uniform mat3  input_to_working;  // input gamut -> ACEScg (AP1)
 uniform mat3  working_to_output; // ACEScg (AP1) -> output gamut
 uniform int   tone_mapping_op;   // 0=none,1=reinhard,2=aces_filmic,3=aces_rrt
 uniform float exposure;          // linear exposure multiplier
+
+// White balance
+uniform bool  white_balance;
+uniform float wb_temperature;   // -1..+1 (neg=cool/blue, pos=warm/orange)
+uniform float wb_tint;          // -1..+1 (neg=magenta, pos=green)
+
+// Lift / Midtone / Gain (3-way color corrector: DaVinci Resolve primary wheels)
+uniform bool  lmg_enable;
+uniform vec3  lmg_lift;         // shadow offset per channel, default vec3(0)
+uniform vec3  lmg_midtone;      // midtone power per channel,  default vec3(1)
+uniform vec3  lmg_gain;         // highlight multiplier per channel, default vec3(1)
+
+// Hue shift
+uniform bool  hue_shift_enable;
+uniform float hue_shift_degrees;  // -180..+180
+
+// Tonal balance (shadows / highlights)
+uniform bool  tonebalance_enable;
+uniform float tb_shadows;     // -1..+1
+uniform float tb_highlights;  // -1..+1
+
+// Per-channel RGB Levels (independent levels per R, G, B channel)
+uniform bool  rgb_levels_enable;
+uniform float rgb_levels_min_input[3];   // [0]=R [1]=G [2]=B
+uniform float rgb_levels_max_input[3];
+uniform float rgb_levels_gamma[3];
+uniform float rgb_levels_min_output[3];
+uniform float rgb_levels_max_output[3];
+
+// Tone Curves: per-channel 1D LUTs (256 entries) built on the CPU from control points
+// using Fritsch-Carlson monotone cubic Hermite splines.
+uniform bool  curves_enable;
+// curve LUT data is in curve_lut_tex (sampler2D 256x1 RGBA32F: r=R-curve, g=G-curve, b=B-curve, a=master-curve)
 
 /*
 ** Contrast, saturation, brightness
@@ -400,6 +438,102 @@ vec4 ChromaOnCustomColor(vec4 c)
 
 
 
+// ---- White Balance ----
+// temp: -1=cool (blue), +1=warm (orange); tint_val: -1=magenta, +1=green
+vec3 apply_white_balance(vec3 c, float temp, float tint_val)
+{
+    // NOTE: shader internal convention is color.r=Blue_displayed, color.b=Red_displayed
+    // (all formats go through a .bgra swizzle; fragColor=color.bgra restores at output)
+    // So warm = more Red = more color.b, less Blue = less color.r
+    c.b = clamp(c.b + temp     * 0.20, 0.0, 1.0);  // warm -> boost color.b (= Red displayed)
+    c.g = clamp(c.g + tint_val * 0.10, 0.0, 1.0);
+    c.r = clamp(c.r - temp     * 0.20, 0.0, 1.0);  // warm -> reduce color.r (= Blue displayed)
+    return c;
+}
+
+// ---- Lift / Midtone / Gain (3-way color corrector) ----
+// Mirrors DaVinci Resolve's Lift/Gamma/Gain primary wheels.
+// lift:    per-channel shadow offset  (-0.5..+0.5, default 0)
+// midtone: per-channel midtone power  (0.1..4.0,   default 1)
+// gain:    per-channel highlight mult (0..4.0,      default 1)
+vec3 apply_lmg(vec3 c, vec3 lift, vec3 midtone, vec3 gain)
+{
+    c = clamp(c * gain + lift, 0.0, 1.0);
+    c = pow(c, max(vec3(0.01), 1.0 / midtone));
+    return c;
+}
+
+// ---- Hue Shift ----
+vec3 apply_hue_shift(vec3 c, float degrees)
+{
+    vec3 hsv = rgb2hsv(c);
+    hsv.x    = fract(hsv.x + degrees / 360.0);
+    return hsv2rgb(hsv);
+}
+
+// ---- Tonal Balance (Shadows / Highlights separation) ----
+// Mirrors DaVinci Resolve's Shadows and Highlights sliders.
+// shadows   > 0 lifts dark areas;    shadows   < 0 crushes them.
+// highlights > 0 lifts bright areas; highlights < 0 crushes them.
+vec3 apply_tone_balance(vec3 c, float shadows, float highlights)
+{
+    float lum         = dot(c, vec3(0.2126, 0.7152, 0.0722));
+    float shadow_mask = 1.0 - smoothstep(0.0, 0.6, lum);
+    float hl_mask     = smoothstep(0.4, 1.0, lum);
+    c = clamp(c + vec3(shadows    * 0.5 * shadow_mask), 0.0, 1.0);
+    c = clamp(c + vec3(highlights * 0.5 * hl_mask),     0.0, 1.0);
+    return c;
+}
+
+// ---- Per-channel RGB Levels ----
+// Applies independent input range, gamma, and output range per R, G, B channel.
+vec3 apply_rgb_levels(vec3 c)
+{
+    // R
+    c.r = clamp((c.r - rgb_levels_min_input[0]) / max(rgb_levels_max_input[0] - rgb_levels_min_input[0], 0.0001), 0.0, 1.0);
+    c.r = pow(c.r, 1.0 / max(rgb_levels_gamma[0], 0.01));
+    c.r = mix(rgb_levels_min_output[0], rgb_levels_max_output[0], c.r);
+    // G
+    c.g = clamp((c.g - rgb_levels_min_input[1]) / max(rgb_levels_max_input[1] - rgb_levels_min_input[1], 0.0001), 0.0, 1.0);
+    c.g = pow(c.g, 1.0 / max(rgb_levels_gamma[1], 0.01));
+    c.g = mix(rgb_levels_min_output[1], rgb_levels_max_output[1], c.g);
+    // B
+    c.b = clamp((c.b - rgb_levels_min_input[2]) / max(rgb_levels_max_input[2] - rgb_levels_min_input[2], 0.0001), 0.0, 1.0);
+    c.b = pow(c.b, 1.0 / max(rgb_levels_gamma[2], 0.01));
+    c.b = mix(rgb_levels_min_output[2], rgb_levels_max_output[2], c.b);
+    return c;
+}
+
+// ---- Tone Curves: bilinear sample of a 256-entry float LUT ----
+// ch: 0=R, 1=G, 2=B, 3=Master
+float sample_lut_256(float val, int ch)
+{
+    float s  = clamp(val, 0.0, 1.0) * 255.0;
+    int   lo = int(s);
+    int   hi = min(lo + 1, 255);
+    float f  = fract(s);
+    vec4 lo4 = texelFetch(curve_lut_tex, ivec2(lo, 0), 0);
+    vec4 hi4 = texelFetch(curve_lut_tex, ivec2(hi, 0), 0);
+    vec4 v4  = mix(lo4, hi4, f);
+    if (ch == 0) return v4.r;
+    if (ch == 1) return v4.g;
+    if (ch == 2) return v4.b;
+    return v4.a;
+}
+
+vec3 apply_curves(vec3 c)
+{
+    // Per-channel curves first
+    c.r = sample_lut_256(c.r, 0);
+    c.g = sample_lut_256(c.g, 1);
+    c.b = sample_lut_256(c.b, 2);
+    // Master curve applied as global tone (same remap to each channel)
+    c.r = sample_lut_256(c.r, 3);
+    c.g = sample_lut_256(c.g, 3);
+    c.b = sample_lut_256(c.b, 3);
+    return c;
+}
+
 vec3 get_blend_color(vec3 back, vec3 fore)
 {
     switch(blend_mode)
@@ -546,6 +680,8 @@ const float PI = 3.14159265359;
 vec2 get_equirect_uv(vec2 screen_uv) {
     // 1. Convert Screen UV (0..1) to Normalized Device Coordinates (-1..1)
     vec2 ndc = screen_uv * 2.0 - 1.0;
+    // Lens-shift: slide the viewport across the sphere without changing orientation
+    ndc -= vec2(view_offset_x, view_offset_y);
     
     // 2. Calculate View Vector (Rectilinear Projection)
     // Assume scale is based on vertical FOV
@@ -656,6 +792,8 @@ void main()
     if (is_360) {
         uv = get_equirect_uv(uv);
     }
+    if (flip_h) uv.x = 1.0 - uv.x;
+    if (flip_v) uv.y = 1.0 - uv.y;
     vec4 color = get_rgba_color(uv);
     if (color_grading) {
         vec3 rgb  = color.rgb;
@@ -675,6 +813,18 @@ void main()
         color.rgb = LevelsControl(color.rgb, min_input, gamma, max_input, min_output, max_output);
     if(csb)
         color.rgb = ContrastSaturationBrightness(color, brt, sat, con);
+    if (white_balance)
+        color.rgb = apply_white_balance(color.rgb, wb_temperature, wb_tint);
+    if (lmg_enable)
+        color.rgb = apply_lmg(color.rgb, lmg_lift, lmg_midtone, lmg_gain);
+    if (hue_shift_enable)
+        color.rgb = apply_hue_shift(color.rgb, hue_shift_degrees);
+    if (tonebalance_enable)
+        color.rgb = apply_tone_balance(color.rgb, tb_shadows, tb_highlights);
+    if (rgb_levels_enable)
+        color.rgb = apply_rgb_levels(color.rgb);
+    if (curves_enable)
+        color.rgb = apply_curves(color.rgb);
     if(has_local_key)
         color *= texture(local_key, TexCoord2.st).r;
     if(has_layer_key)

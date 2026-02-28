@@ -61,11 +61,13 @@ struct levels final
 
 struct projection final
 {
-    bool   enable = false;
-    double yaw    = 0.0;
-    double pitch  = 0.0;
-    double roll   = 0.0;
-    double fov    = 1.57079632679;
+    bool   enable   = false;
+    double yaw      = 0.0;
+    double pitch    = 0.0;
+    double roll     = 0.0;
+    double fov      = 1.57079632679;
+    double offset_x = 0.0;  // NDC lens-shift: +1 = pan right, -1 = pan left
+    double offset_y = 0.0;  // NDC lens-shift: +1 = pan up,    -1 = pan down
 };
 
 // Transfer: 0=linear,1=srgb,2=rec709,3=pq(st2084),4=hlg,5=logc3(arri),6=slog3(sony)
@@ -80,6 +82,47 @@ struct color_grade final
     int   output_gamut    = 0;
     int   output_transfer = 0;
     float exposure        = 1.0f;
+};
+
+// ---- Per-channel RGB Levels ------------------------------------------------
+struct rgb_levels_channel final
+{
+    double min_input  = 0.0;
+    double max_input  = 1.0;
+    double gamma      = 1.0;
+    double min_output = 0.0;
+    double max_output = 1.0;
+};
+
+struct rgb_levels final
+{
+    bool               enable = false;
+    rgb_levels_channel r;
+    rgb_levels_channel g;
+    rgb_levels_channel b;
+};
+
+// ---- Tone Curves (per-channel + master, up to 16 control points each) ------
+struct curve_point final
+{
+    double x = 0.0;
+    double y = 0.0;
+};
+
+// count == 0 means "identity" — the LUT builder returns a linear ramp.
+struct curve_channel final
+{
+    int                         count = 0;
+    std::array<curve_point, 16> points{};
+};
+
+struct tone_curves final
+{
+    bool          enable = false;
+    curve_channel master;  // applied as global tone to every channel after per-channel
+    curve_channel red;
+    curve_channel green;
+    curve_channel blue;
 };
 
 struct corners final
@@ -122,8 +165,30 @@ struct image_transform final
     core::projection      projection;
     core::color_grade     color_grade;
 
+    // White balance (temperature/tint)
+    double temperature = 0.0;  // -1..+1  (neg=cool/blue, pos=warm/orange)
+    double tint        = 0.0;  // -1..+1  (neg=magenta, pos=green)
+
+    // Lift / Midtone / Gain — per-channel 3-way color corrector (DaVinci-style)
+    std::array<double, 3> lift    = {0.0, 0.0, 0.0};  // shadow offset,      default 0
+    std::array<double, 3> midtone = {1.0, 1.0, 1.0};  // midtone power,      default 1
+    std::array<double, 3> gain    = {1.0, 1.0, 1.0};  // highlight mult,     default 1
+
+    // Hue shift (degrees, -180..+180)
+    double hue_shift = 0.0;
+
+    // Tonal balance (shadows / highlights separation)
+    double shadows    = 0.0;  // -1..+1
+    double highlights = 0.0;  // -1..+1
+
+    // Per-channel RGB levels and tone curves
+    core::rgb_levels  per_channel_levels;
+    core::tone_curves curves;
+
     bool             is_key      = false;
     bool             invert      = false;
+    bool             flip_h      = false;  // horizontal mirror (left ↔ right)
+    bool             flip_v      = false;  // vertical mirror   (top ↔ bottom)
     bool             is_mix      = false;
     core::blend_mode blend_mode  = blend_mode::normal;
     int              layer_depth = 0;

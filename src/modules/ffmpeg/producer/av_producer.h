@@ -44,6 +44,22 @@ class AVProducer
     AVProducer& duration(int64_t duration);
     int64_t     duration() const;
 
+    // Playback speed multiplier.
+    //   1.0  = normal,  0.5 = half-speed,  0.0 = freeze
+    //  -1.0  = reverse at normal speed,  -0.5 = reverse at half-speed
+    // Reverse works cleanly on intra-only codecs (ProRes, DNxHD, MJPEG).
+    // On long-GOP (H.264/HEVC) each backward step seeks from the nearest
+    // keyframe, so performance and smoothness degrade significantly.
+    // Audio is not resampled at any speed; it will repeat or skip frames.
+    AVProducer& speed(double speed);
+    double      speed() const;
+
+    // Ping-pong loop: automatically reverses direction at each end.
+    // Requires no separate LOOP command — ping-pong implies continuous looping.
+    // Speed magnitude is preserved on each direction flip.
+    AVProducer& pingpong(bool enable);
+    bool        pingpong() const;
+
     /**
      * Replace the entire video or audio filter string and seek back to the
      * current playback position so the graph is rebuilt immediately.
