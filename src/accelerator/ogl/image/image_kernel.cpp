@@ -318,8 +318,28 @@ struct image_kernel::impl
             shader_->set("is_360", false);
         }
 
+        // Curved screen compensation — dispatched independently of 360 mode
+        shader_->set("is_curved",         transforms.image_transform.projection.curve_enable);
+        shader_->set("screen_curve_type", static_cast<int>(transforms.image_transform.projection.curve_type));
+        shader_->set("screen_arc",        static_cast<float>(transforms.image_transform.projection.screen_arc));
+
+        if (transforms.image_transform.blur.enable) {
+            shader_->set("blur_enable", true);
+            shader_->set("blur_radius", static_cast<float>(transforms.image_transform.blur.radius));
+            shader_->set("blur_type",   static_cast<int>(transforms.image_transform.blur.type));
+            shader_->set("blur_angle",  static_cast<float>(transforms.image_transform.blur.angle));
+            shader_->set("blur_center", static_cast<float>(transforms.image_transform.blur.center[0]),
+                         static_cast<float>(transforms.image_transform.blur.center[1]));
+            shader_->set("blur_tilt",   static_cast<float>(transforms.image_transform.blur.tilt_y),
+                         static_cast<float>(transforms.image_transform.blur.tilt_h));
+            shader_->set("target_size", static_cast<float>(params.target_width), static_cast<float>(params.target_height));
+        } else {
+            shader_->set("blur_enable", false);
+        }
+
         // Color grading: ACES-based gamut/transfer/tonemapping pipeline
         // Gamut index: 0=bt709, 1=bt2020, 2=dcip3_d65, 3=aces_ap0, 4=aces_ap1(acescg), 5=arri_wg3, 6=sgamut3_cine
+
         // Transfer:    0=linear, 1=srgb, 2=rec709, 3=pq, 4=hlg, 5=logc3, 6=slog3
         // Tonemapping: 0=none, 1=reinhard, 2=aces_filmic, 3=aces_rrt
         static const float k_to_working[7][9] = {

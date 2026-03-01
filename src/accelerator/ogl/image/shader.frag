@@ -55,6 +55,11 @@ uniform float aspect_ratio;  // Screen aspect ratio (width/height)
 uniform float view_offset_x; // NDC lens-shift: +1 = pan right
 uniform float view_offset_y; // NDC lens-shift: +1 = pan up
 
+// Curved screen compensation
+uniform bool  is_curved;          // true when curve compensation is active
+uniform int   screen_curve_type;  // 0=flat, 1=cylinder (horizontal), 2=sphere (radial)
+uniform float screen_arc;         // total arc angle in radians
+
 // Color Grading (ACES workflow)
 uniform bool  color_grading;
 uniform int   input_transfer;    // 0=linear,1=srgb,2=rec709,3=pq,4=hlg,5=logc3,6=slog3
@@ -96,6 +101,15 @@ uniform float rgb_levels_max_output[3];
 // using Fritsch-Carlson monotone cubic Hermite splines.
 uniform bool  curves_enable;
 // curve LUT data is in curve_lut_tex (sampler2D 256x1 RGBA32F: r=R-curve, g=G-curve, b=B-curve, a=master-curve)
+
+// Blur
+uniform bool  blur_enable;
+uniform float blur_radius;
+uniform int   blur_type; // 0=gaussian, 1=box, 2=directional, 3=zoom, 4=tilt_shift, 5=lens
+uniform float blur_angle;
+uniform vec2  blur_center;
+uniform vec2  blur_tilt;
+uniform vec2  target_size;
 
 /*
 ** Contrast, saturation, brightness
@@ -677,16 +691,81 @@ vec3 apply_tone_mapping(vec3 rgb, int op) {
 
 const float PI = 3.14159265359;
 
+// ---- Curved screen UV warp for flat (non-360) content ----
+// Compensates for a curved destination screen by applying the inverse of the
+// angular distortion the screen introduces, so that straight content lines
+// appear straight to a viewer sitting at the focus point of the arc.
+//   screen_curve_type 1 = horizontal cylinder  (arc applies left-right only)
+//   screen_curve_type 2 = full sphere/dome     (arc applies radially)
+//   screen_arc = total arc in radians  (positive = convex away from viewer,
+//                                       negative = concave toward viewer)
+vec2 apply_curve_warp(vec2 uv) {
+    if (abs(screen_arc) < 0.0001)
+        return uv;
+    vec2 ndc = uv * 2.0 - 1.0;
+    ndc.x *= aspect_ratio;  // bring into isotropic NDC space
+    float abs_half_arc = abs(screen_arc) * 0.5;
+    if (screen_curve_type == 1) {
+        // Cylinder: each screen column subtends an even angle across the arc.
+        // Convex (positive arc): compress edges inward.  Inverse rectilinear:
+        //   uv_src.x = tan(ang) / tan(arc/2)   (maps back to the content pixel)
+        // Concave (negative arc): expand edges outward — the inverse operation.
+        float ang_x  = ndc.x * abs_half_arc;
+        float warped = tan(ang_x) / tan(abs_half_arc);
+        ndc.x = (screen_arc >= 0.0) ? warped : (2.0 * ndc.x - warped);
+    } else if (screen_curve_type == 2) {
+        // Sphere/dome: each pixel is at a radial angle from the screen centre.
+        // Convex: compress; Concave: expand.
+        float r = length(ndc);
+        if (r > 0.0001) {
+            float ang    = r * abs_half_arc;
+            float r_conv = tan(ang) / tan(abs_half_arc);
+            float r_warp = (screen_arc >= 0.0) ? r_conv : (2.0 * r - r_conv);
+            ndc          = (ndc / r) * r_warp;
+        }
+    }
+    ndc.x /= aspect_ratio;
+    return ndc * 0.5 + 0.5;
+}
+
 vec2 get_equirect_uv(vec2 screen_uv) {
     // 1. Convert Screen UV (0..1) to Normalized Device Coordinates (-1..1)
     vec2 ndc = screen_uv * 2.0 - 1.0;
     // Lens-shift: slide the viewport across the sphere without changing orientation
     ndc -= vec2(view_offset_x, view_offset_y);
-    
-    // 2. Calculate View Vector (Rectilinear Projection)
-    // Assume scale is based on vertical FOV
-    float scale = tan(view_fov * 0.5);
-    vec3 dir = vec3(ndc.x * scale * aspect_ratio, ndc.y * scale, -1.0);
+
+    // 2. Calculate View Vector
+    // Two independent parameters control the 360 projection:
+    //   screen_arc  — physical arc of the curved screen (degrees of sphere swept);
+    //                 changing this alters the curvature / angular density of pixels.
+    //   view_fov    — virtual camera zoom; scale = tan(fov/2), unit zoom at fov = 90°
+    //                 (scale = 1).  Smaller fov → zoomed in; larger fov → zoomed out.
+    // For cylinder/sphere modes the horizontal angle for pixel NDC x is:
+    //   angle_h = ndc.x * (screen_arc/2) * scale
+    // This gives screen_arc full control over geometry and scale full control over zoom.
+    float scale = tan(view_fov * 0.5);  // zoom factor; 1.0 at 90° FOV
+    vec3 dir;
+    if (screen_curve_type == 1) {
+        // Horizontal cylinder: NDC x maps linearly to viewing angle on the cylinder.
+        // screen_arc sets the angular span at the screen edges; scale zooms content.
+        // Negative screen_arc flips the horizontal direction (concave vs convex).
+        float angle_h = ndc.x * screen_arc * 0.5 * scale;
+        dir = vec3(sin(angle_h), ndc.y * scale, -cos(angle_h));
+    } else if (screen_curve_type == 2) {
+        // Full sphere/dome: radial angle from screen centre determines look direction.
+        // screen_arc and scale combine as in the cylinder case, applied radially.
+        float r = length(ndc);
+        if (r > 0.0001) {
+            float angle = r * screen_arc * 0.5 * scale;
+            vec2 d = ndc / r;
+            dir = vec3(d.x * sin(angle), d.y * sin(angle), -cos(angle));
+        } else {
+            dir = vec3(0.0, 0.0, -1.0);
+        }
+    } else {
+        // Flat screen — standard rectilinear (gnomonic) projection.
+        dir = vec3(ndc.x * scale * aspect_ratio, ndc.y * scale, -1.0);
+    }
     dir = normalize(dir);
 
     // 3. Rotation Matrices
@@ -783,56 +862,232 @@ vec4 get_rgba_color(vec2 uv)
 			return vec4(b, g, r, a);
         }
     }
-    return vec4(0.0, 0.0, 0.0, 0.0);
+        return vec4(0.0, 0.0, 0.0, 0.0);
+}
+
+vec4 get_blurred_color(vec2 uv)
+{
+    if (!blur_enable || blur_radius < 0.5) return get_rgba_color(uv);
+
+    vec2 texelSize = 1.0 / target_size;
+    vec4 totalColor = vec4(0.0);
+    float totalWeight = 0.0;
+
+    // GAUSSIAN BLUR (2D Spiral with Gaussian weights)
+    if (blur_type == 0)
+    {
+        int iSamples = int(clamp(blur_radius * 3.0, 16.0, 120.0));
+        float sigma = blur_radius / 2.0;
+        for (int i = 0; i < iSamples; i++) {
+            float t = float(i) / max(float(iSamples - 1), 1.0);
+            float radius = sqrt(t) * blur_radius;
+            float theta = float(i) * 2.39996323; // Golden angle
+            vec2 offset = vec2(cos(theta), sin(theta)) * radius * texelSize;
+            float weight = exp(-(radius*radius) / (2.0 * sigma * sigma));
+            totalColor += get_rgba_color(uv + offset) * weight;
+            totalWeight += weight;
+        }
+    }
+    // BOX BLUR (True 2D Box with performance-bounded steps)
+    else if (blur_type == 1)
+    {
+        int steps = min(int(blur_radius), 6);
+        float stepSize = blur_radius / max(float(steps), 1.0);
+        for (int y = -steps; y <= steps; y++) {
+            for (int x = -steps; x <= steps; x++) {
+                vec2 offset = vec2(float(x), float(y)) * stepSize * texelSize;
+                totalColor += get_rgba_color(uv + offset);
+                totalWeight += 1.0;
+            }
+        }
+    }
+    // DIRECTIONAL BLUR (Motion Blur)
+    else if (blur_type == 2)
+    {
+        float angleRad = radians(blur_angle);
+        vec2 dir = vec2(cos(angleRad), sin(angleRad));
+        int iSamples = int(clamp(blur_radius * 2.0, 16.0, 100.0));
+        for (int i = 0; i < iSamples; i++) {
+            float t = (float(i) / max(float(iSamples - 1), 1.0)) - 0.5; // -0.5 to 0.5
+            vec2 offset = dir * (t * blur_radius * 2.0 * texelSize);
+            totalColor += get_rgba_color(uv + offset);
+            totalWeight += 1.0;
+        }
+    }
+    // ZOOM BLUR
+    else if (blur_type == 3)
+    {
+        vec2 center = blur_center;
+        vec2 toPixel = uv - center;
+        float strength = blur_radius * 0.01;
+        int iSamples = int(clamp(blur_radius * 2.0, 16.0, 100.0));
+        for (int i = 0; i < iSamples; i++) {
+            float scale = 1.0 - strength * (float(i) / max(float(iSamples - 1), 1.0));
+            totalColor += get_rgba_color(center + toPixel * scale);
+            totalWeight += 1.0;
+        }
+    }
+    // TILT-SHIFT (Variable blur based on Y position/mask)
+    else if (blur_type == 4)
+    {
+        float angleRad = radians(blur_angle);
+        vec2 normal = vec2(sin(angleRad), cos(angleRad));
+        // Distance from center line
+        float dist = abs(dot(uv - blur_center, normal) - (blur_tilt.x - 0.5));
+
+        float focus_width = blur_tilt.y;
+        float blurAmount = smoothstep(focus_width * 0.5, focus_width * 0.5 + 0.2, dist) * blur_radius;
+
+        if (blurAmount < 0.5) return get_rgba_color(uv);
+
+        int iSamples = int(clamp(blurAmount * 2.0, 16.0, 100.0));
+        for (int i = 0; i < iSamples; i++) {
+            float t = float(i) / max(float(iSamples - 1), 1.0);
+            float radius = sqrt(t) * blurAmount;
+            float theta = float(i) * 2.39996323;
+            vec2 offset = vec2(cos(theta), sin(theta)) * radius * texelSize;
+            totalColor += get_rgba_color(uv + offset);
+            totalWeight += 1.0;
+        }
+    }
+    // LENS (Cinematic Bokeh)
+    else if (blur_type == 5)
+    {
+        float noise = fract(sin(dot(uv, vec2(12.9898, 78.233))) * 43758.5453);
+        float dither_theta = noise * 6.2831853;
+
+        int iSamples = int(clamp(blur_radius * 8.0, 32.0, 400.0)); // Very high quality
+        for (int i = 0; i < iSamples; i++) {
+            float t = float(i) / max(float(iSamples - 1), 1.0);
+            float radius = sqrt(t) * blur_radius;
+            float theta = dither_theta + float(i) * 2.39996323; // Golden angle with dither
+            vec2 offset = vec2(cos(theta), sin(theta)) * radius * texelSize;
+
+            vec4 col = get_rgba_color(uv + offset);
+
+            // Optical intensity mapping for distinct highlight bokeh
+            float lum = dot(col.rgb, vec3(0.299, 0.587, 0.114));
+            float weight = 1.0 + pow(max(lum - 0.3, 0.0), 3.0) * 15.0;
+
+            // Optical ring weighting (brighter towards edge)
+            weight *= mix(0.3, 1.0, t);
+
+            totalColor += col * weight;
+            totalWeight += weight;
+        }
+    }
+
+    if (totalWeight > 0.0)
+        return totalColor / totalWeight;
+
+    return get_rgba_color(uv);
 }
 
 void main()
 {
-    vec2 uv = TexCoord.st / TexCoord.q;
+    vec2 base_uv = TexCoord.st / TexCoord.q;
+    vec4 col;
     if (is_360) {
-        uv = get_equirect_uv(uv);
+        // 360° equirectangular path — curve type used inside get_equirect_uv()
+        vec2 uv_rect = get_equirect_uv(base_uv);
+        if (flip_h) uv_rect.s = 1.0 - uv_rect.s;
+        if (flip_v) uv_rect.t = 1.0 - uv_rect.t;
+        col = get_blurred_color(uv_rect);
+    } else if (is_curved) {
+        // Flat content on curved screen — apply tangent UV warp
+        vec2 uv_warped = apply_curve_warp(base_uv);
+        if (flip_h) uv_warped.s = 1.0 - uv_warped.s;
+        if (flip_v) uv_warped.t = 1.0 - uv_warped.t;
+        col = get_blurred_color(uv_warped);
+    } else {
+        vec2 uv_flipped = base_uv;
+        if (flip_h) uv_flipped.s = 1.0 - uv_flipped.s;
+        if (flip_v) uv_flipped.t = 1.0 - uv_flipped.t;
+        col = get_blurred_color(uv_flipped);
     }
-    if (flip_h) uv.x = 1.0 - uv.x;
-    if (flip_v) uv.y = 1.0 - uv.y;
-    vec4 color = get_rgba_color(uv);
+    
+    // Convert input -> working space (Linear ACEScg usually)
     if (color_grading) {
-        vec3 rgb  = color.rgb;
-        rgb       = apply_eotf(rgb, input_transfer);
-        rgb       = input_to_working * rgb;
-        rgb      *= exposure;
-        rgb       = apply_tone_mapping(rgb, tone_mapping_op);
-        rgb       = working_to_output * rgb;
-        rgb       = apply_oetf(rgb, output_transfer);
-        color.rgb = rgb;
+        // EOTF: encoded -> linear (unless input is already linear)
+        // We assume input_transfer applies to the RGB data directly.
+        // For ACES, we might want to linearize first.
+        col.rgb = apply_eotf(col.rgb, input_transfer);
+        
+        // Gamut mapping: Input Gamut -> Working Gamut
+        col.rgb = input_to_working * col.rgb;
     }
-    if (is_straight_alpha)
-        color.rgb *= color.a;
-    if (chroma)
-        color = chroma_key(color);
-    if(levels)
-        color.rgb = LevelsControl(color.rgb, min_input, gamma, max_input, min_output, max_output);
-    if(csb)
-        color.rgb = ContrastSaturationBrightness(color, brt, sat, con);
-    if (white_balance)
-        color.rgb = apply_white_balance(color.rgb, wb_temperature, wb_tint);
-    if (lmg_enable)
-        color.rgb = apply_lmg(color.rgb, lmg_lift, lmg_midtone, lmg_gain);
-    if (hue_shift_enable)
-        color.rgb = apply_hue_shift(color.rgb, hue_shift_degrees);
-    if (tonebalance_enable)
-        color.rgb = apply_tone_balance(color.rgb, tb_shadows, tb_highlights);
-    if (rgb_levels_enable)
-        color.rgb = apply_rgb_levels(color.rgb);
-    if (curves_enable)
-        color.rgb = apply_curves(color.rgb);
-    if(has_local_key)
-        color *= texture(local_key, TexCoord2.st).r;
-    if(has_layer_key)
-        color *= texture(layer_key, TexCoord2.st).r;
-    color *= opacity;
+    
+    // Apply White Balance
+    if (white_balance) {
+        col.rgb = apply_white_balance(col.rgb, wb_temperature, wb_tint);
+    }
+
+    // Apply Lift/Midtone/Gain
+    if (lmg_enable) {
+        col.rgb = apply_lmg(col.rgb, lmg_lift, lmg_midtone, lmg_gain);
+    }
+
+    // Apply Hue Shift
+    if (hue_shift_enable) {
+        col.rgb = apply_hue_shift(col.rgb, hue_shift_degrees);
+    }
+
+    // Apply Tonal Balance
+    if (tonebalance_enable) {
+        col.rgb = apply_tone_balance(col.rgb, tb_shadows, tb_highlights);
+    }
+    
+    // Apply RGB Levels
+    if (rgb_levels_enable) {
+        col.rgb = apply_rgb_levels(col.rgb);
+    }
+
+    // Apply Tone Curves
+    if (curves_enable) {
+        col.rgb = apply_curves(col.rgb);
+    }
+
+    // Legacy Levels / CSB
+	if (levels)
+		col.rgb = LevelsControl(col.rgb, min_input, gamma, max_input, min_output, max_output);
+
+	if (csb)
+		col.rgb = ContrastSaturationBrightness(col, brt, sat, con);
+
     if (invert)
-        color = 1.0 - color;
-    if (blend_mode >= 0)
-        color = blend(color);
-    fragColor = color.bgra;
+        col.rgb = 1.0 - col.rgb;
+
+	col.a *= opacity;
+
+    if (has_local_key)
+        col.a *= texture(local_key, TexCoord2.st).r;
+
+    if (has_layer_key)
+        col.a *= texture(layer_key, TexCoord2.st).r;
+
+    if (blend_mode != 0 || keyer != 0)
+        col = blend(col);
+
+    if (chroma)
+        col = chroma_key(col);
+
+    // Convert working space -> output space
+    if (color_grading) {
+         // Tone Mapping (LDR compression)
+        if (tone_mapping_op > 0) {
+            col.rgb *= exposure;
+            col.rgb = apply_tone_mapping(col.rgb, tone_mapping_op);
+        }
+        
+        // Gamut mapping: Working Gamut -> Output Gamut
+        col.rgb = working_to_output * col.rgb;
+        
+        // OETF: linear -> encoded
+        col.rgb = apply_oetf(col.rgb, output_transfer);
+    }
+    
+	if (is_straight_alpha && col.a > 0.0)
+		col.rgb /= col.a;
+
+	fragColor = col.bgra;
 }

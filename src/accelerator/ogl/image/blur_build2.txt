@@ -1,0 +1,12 @@
+The `draw` function in `image_kernel.cpp` has access to `params.target_width` and `params.target_height`.
+
+Since I can modify `image_kernel.cpp`, I can simply add:
+```cpp
+shader_->set("target_size", static_cast<float>(params.target_width), static_cast<float>(params.target_height));
+```
+to the `if (transforms.image_transform.blur.enable)` block.
+
+Plan:
+1.  Verify `shader.h` allows passing two floats (implied by `blur_tilt` setting which passes 2 floats).
+2.  Add `shader_->set("target_size", ...)` in `image_kernel.cpp`.
+3.  Then update the shader to use this uniform.

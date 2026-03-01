@@ -75,8 +75,17 @@ void apply_transform_colour_values(core::image_transform& self, const core::imag
     if (other.projection.enable) {
         self.projection = other.projection;
     }
+    // Curved screen compensation merges independently of 360 mode
+    if (other.projection.curve_enable) {
+        self.projection.curve_type = other.projection.curve_type;
+        self.projection.screen_arc = other.projection.screen_arc;
+    }
+    self.projection.curve_enable |= other.projection.curve_enable;
     if (other.color_grade.enable) {
         self.color_grade = other.color_grade;
+    }
+    if (other.blur.enable) {
+        self.blur = other.blur;
     }
 
     // White balance: additive combination

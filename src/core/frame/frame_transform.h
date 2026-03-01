@@ -59,15 +59,21 @@ struct levels final
     double max_output = 1.0;
 };
 
+enum class screen_curve_type { flat = 0, cylinder = 1, sphere = 2 };
+
 struct projection final
 {
-    bool   enable   = false;
-    double yaw      = 0.0;
-    double pitch    = 0.0;
-    double roll     = 0.0;
-    double fov      = 1.57079632679;
-    double offset_x = 0.0;  // NDC lens-shift: +1 = pan right, -1 = pan left
-    double offset_y = 0.0;  // NDC lens-shift: +1 = pan up,    -1 = pan down
+    bool              enable       = false;
+    double            yaw          = 0.0;
+    double            pitch        = 0.0;
+    double            roll         = 0.0;
+    double            fov          = 1.57079632679;
+    double            offset_x     = 0.0;  // NDC lens-shift: +1 = pan right, -1 = pan left
+    double            offset_y     = 0.0;  // NDC lens-shift: +1 = pan up,    -1 = pan down
+    // Curved screen compensation — independent of 360 mode
+    bool              curve_enable = false;
+    screen_curve_type curve_type   = screen_curve_type::flat;
+    double            screen_arc   = 0.0;  // total arc in radians (horizontal for cylinder, radial for sphere)
 };
 
 // Transfer: 0=linear,1=srgb,2=rec709,3=pq(st2084),4=hlg,5=logc3(arri),6=slog3(sony)
@@ -139,6 +145,27 @@ struct rectangle final
     std::array<double, 2> lr = {1.0, 1.0};
 };
 
+enum class blur_type : int
+{
+    gaussian    = 0,
+    box         = 1,
+    directional = 2,
+    zoom        = 3,
+    tilt_shift  = 4,
+    lens        = 5
+};
+
+struct blur_config final
+{
+    bool                  enable = false;
+    double                radius = 0.0;
+    blur_type             type   = blur_type::gaussian;
+    double                angle  = 0.0;
+    std::array<double, 2> center = {0.5, 0.5};
+    double                tilt_y = 0.5;
+    double                tilt_h = 0.2;
+};
+
 struct image_transform final
 {
     double opacity    = 1.0;
@@ -184,6 +211,7 @@ struct image_transform final
     // Per-channel RGB levels and tone curves
     core::rgb_levels  per_channel_levels;
     core::tone_curves curves;
+    blur_config       blur;
 
     bool             is_key      = false;
     bool             invert      = false;

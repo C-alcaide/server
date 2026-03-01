@@ -103,14 +103,17 @@ image_transform image_transform::tween(double                 time,
         do_tween(time, source.chroma.spill_suppress_saturation, dest.chroma.spill_suppress_saturation, duration, tween);
     result.chroma.enable    = dest.chroma.enable;
     result.chroma.show_mask = dest.chroma.show_mask;
-    result.projection.enable   = dest.projection.enable;
-    result.projection.yaw      = do_tween(time, source.projection.yaw,      dest.projection.yaw,      duration, tween);
-    result.projection.pitch    = do_tween(time, source.projection.pitch,    dest.projection.pitch,    duration, tween);
-    result.projection.roll     = do_tween(time, source.projection.roll,     dest.projection.roll,     duration, tween);
-    result.projection.fov      = do_tween(time, source.projection.fov,      dest.projection.fov,      duration, tween);
-    result.projection.offset_x = do_tween(time, source.projection.offset_x, dest.projection.offset_x, duration, tween);
-    result.projection.offset_y = do_tween(time, source.projection.offset_y, dest.projection.offset_y, duration, tween);
-    result.color_grade         = dest.color_grade;
+    result.projection.enable       = dest.projection.enable;
+    result.projection.yaw          = do_tween(time, source.projection.yaw,      dest.projection.yaw,      duration, tween);
+    result.projection.pitch        = do_tween(time, source.projection.pitch,    dest.projection.pitch,    duration, tween);
+    result.projection.roll         = do_tween(time, source.projection.roll,     dest.projection.roll,     duration, tween);
+    result.projection.fov          = do_tween(time, source.projection.fov,      dest.projection.fov,      duration, tween);
+    result.projection.offset_x     = do_tween(time, source.projection.offset_x, dest.projection.offset_x, duration, tween);
+    result.projection.offset_y     = do_tween(time, source.projection.offset_y, dest.projection.offset_y, duration, tween);
+    result.projection.curve_enable = dest.projection.curve_enable;
+    result.projection.curve_type   = dest.projection.curve_type;
+    result.projection.screen_arc   = do_tween(time, source.projection.screen_arc, dest.projection.screen_arc, duration, tween);
+    result.color_grade             = dest.color_grade;
     result.color_grade.exposure = static_cast<float>(do_tween(time, static_cast<double>(source.color_grade.exposure), static_cast<double>(dest.color_grade.exposure), duration, tween));
     result.temperature    = do_tween(time, source.temperature, dest.temperature, duration, tween);
     result.tint           = do_tween(time, source.tint,        dest.tint,        duration, tween);
@@ -144,6 +147,15 @@ image_transform image_transform::tween(double                 time,
 
     // Tone curves — snapped to destination (control-point sets can't be interpolated)
     result.curves = dest.curves;
+
+    result.blur.enable    = source.blur.enable || dest.blur.enable;
+    result.blur.type      = dest.blur.type;
+    result.blur.radius    = do_tween(time, source.blur.radius, dest.blur.radius, duration, tween);
+    result.blur.angle     = do_tween(time, source.blur.angle, dest.blur.angle, duration, tween);
+    result.blur.center[0] = do_tween(time, source.blur.center[0], dest.blur.center[0], duration, tween);
+    result.blur.center[1] = do_tween(time, source.blur.center[1], dest.blur.center[1], duration, tween);
+    result.blur.tilt_y    = do_tween(time, source.blur.tilt_y, dest.blur.tilt_y, duration, tween);
+    result.blur.tilt_h    = do_tween(time, source.blur.tilt_h, dest.blur.tilt_h, duration, tween);
 
     result.is_key           = source.is_key || dest.is_key;
     result.invert           = source.invert || dest.invert;
@@ -195,6 +207,9 @@ bool operator==(const image_transform& lhs, const image_transform& rhs)
                lhs.projection.enable == rhs.projection.enable && eq(lhs.projection.yaw, rhs.projection.yaw) &&
                eq(lhs.projection.pitch, rhs.projection.pitch) && eq(lhs.projection.roll, rhs.projection.roll) &&
                eq(lhs.projection.fov, rhs.projection.fov) &&
+               lhs.projection.curve_enable == rhs.projection.curve_enable &&
+               lhs.projection.curve_type   == rhs.projection.curve_type   &&
+               eq(lhs.projection.screen_arc, rhs.projection.screen_arc)   &&
                lhs.color_grade.enable == rhs.color_grade.enable &&
                lhs.color_grade.input_transfer == rhs.color_grade.input_transfer &&
                lhs.color_grade.input_gamut == rhs.color_grade.input_gamut &&
@@ -238,7 +253,14 @@ bool operator==(const image_transform& lhs, const image_transform& rhs)
                           cc_eq(lhs.curves.green,  rhs.curves.green)  &&
                           cc_eq(lhs.curves.blue,   rhs.curves.blue);
                }() &&
-           lhs.enable_geometry_modifiers == rhs.enable_geometry_modifiers;
+                 lhs.blur.enable == rhs.blur.enable &&
+                 eq(lhs.blur.radius, rhs.blur.radius) &&
+                 lhs.blur.type == rhs.blur.type &&
+                 eq(lhs.blur.angle, rhs.blur.angle) &&
+                 boost::range::equal(lhs.blur.center, rhs.blur.center, eq) &&
+                 eq(lhs.blur.tilt_y, rhs.blur.tilt_y) &&
+                 eq(lhs.blur.tilt_h, rhs.blur.tilt_h) &&
+                 lhs.enable_geometry_modifiers == rhs.enable_geometry_modifiers;
 }
 
 bool operator!=(const image_transform& lhs, const image_transform& rhs) { return !(lhs == rhs); }
