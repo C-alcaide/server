@@ -111,6 +111,22 @@ uniform vec2  blur_center;
 uniform vec2  blur_tilt;
 uniform vec2  target_size;
 
+// 2D Shape overlay (MIXER SHAPE)
+uniform bool  shape_enable;
+uniform int   shape_type;          // 0=rect, 1=rounded_rect, 2=circle, 3=ellipse
+uniform int   shape_fill_type;     // 0=solid, 1=linear, 2=radial, 3=conic
+uniform vec2  shape_center;        // normalised 0-1
+uniform vec2  shape_size;          // normalised 0-1 (full width/height of bounding box)
+uniform float shape_corner_radius; // normalised; used by rounded_rect
+uniform float shape_softness;      // AA feather
+uniform vec4  shape_color1;        // RGBA stop 1
+uniform vec4  shape_color2;        // RGBA stop 2
+uniform float shape_gradient_angle;    // degrees; for linear fill
+uniform vec2  shape_gradient_center;   // normalised; for radial/conic
+uniform bool  shape_stroke_enable;
+uniform float shape_stroke_width;  // normalised
+uniform vec4  shape_stroke_color;  // RGBA
+
 /*
 ** Contrast, saturation, brightness
 ** Code of this function is from TGM's shader pack
@@ -983,6 +999,90 @@ vec4 get_blurred_color(vec2 uv)
     return get_rgba_color(uv);
 }
 
+// ---------------------------------------------------------------------------
+// 2D Shape SDF helpers
+// ---------------------------------------------------------------------------
+
+float sdf_box(vec2 p, vec2 b)
+{
+    vec2 d = abs(p) - b;
+    return length(max(d, 0.0)) + min(max(d.x, d.y), 0.0);
+}
+
+float sdf_rounded_box(vec2 p, vec2 b, float r)
+{
+    vec2 d = abs(p) - b + r;
+    return length(max(d, 0.0)) + min(max(d.x, d.y), 0.0) - r;
+}
+
+float sdf_circle(vec2 p, float r)
+{
+    return length(p) - r;
+}
+
+// Iterative ellipse SDF approximation (Hálvgaard, 2020)
+float sdf_ellipse(vec2 p, vec2 ab)
+{
+    p = abs(p);
+    if (p.x > p.y) { p = p.yx; ab = ab.yx; }
+    float l = ab.y * ab.y - ab.x * ab.x;
+    float m = ab.x * p.x / l;
+    float n = ab.y * p.y / l;
+    float m2 = m * m;
+    float n2 = n * n;
+    float c = (m2 + n2 - 1.0) / 3.0;
+    float c3 = c * c * c;
+    float q = c3 + m2 * n2 * 2.0;
+    float d = c3 + m2 * n2;
+    float g = m + m * n2;
+    float co;
+    if (d < 0.0) {
+        float h = acos(q / c3) / 3.0;
+        float s = cos(h);
+        float t = sin(h) * sqrt(3.0);
+        float rx = sqrt(-c * (s + t + 2.0) + m2);
+        float ry = sqrt(-c * (s - t + 2.0) + m2);
+        co = (ry + sign(l) * rx + abs(g) / (rx * ry) - m) / 2.0;
+    } else {
+        float h = 2.0 * m * n * sqrt(d);
+        float s = sign(q + h) * pow(abs(q + h), 1.0 / 3.0);
+        float u = sign(q - h) * pow(abs(q - h), 1.0 / 3.0);
+        float rx = -s - u - c * 4.0 + 2.0 * m2;
+        float ry = (s - u) * sqrt(3.0);
+        float rm = sqrt(rx * rx + ry * ry);
+        co = (ry / sqrt(rm - rx) + 2.0 * g / rm - m) / 2.0;
+    }
+    vec2 r = ab * vec2(co, sqrt(1.0 - co * co));
+    return length(r - p) * sign(p.y - r.y);
+}
+
+// Compute gradient mix factor t for the given fill type.
+float shape_gradient_t(vec2 uv)
+{
+    if (shape_fill_type == 1) {
+        // Linear: project uv onto the gradient direction
+        float rad = shape_gradient_angle * 3.14159265 / 180.0;
+        vec2  dir = vec2(cos(rad), sin(rad));
+        return dot(uv - 0.5, dir) + 0.5;
+    } else if (shape_fill_type == 2) {
+        // Radial: distance from gradient_center, normalised to 0.5 radius
+        return length(uv - shape_gradient_center) / 0.5;
+    } else if (shape_fill_type == 3) {
+        // Conic: angle sweep around gradient_center
+        vec2 d = uv - shape_gradient_center;
+        return (atan(d.y, d.x) / (2.0 * 3.14159265)) + 0.5;
+    }
+    return 0.0; // solid — t unused
+}
+
+vec4 shape_compute_fill(vec2 uv)
+{
+    if (shape_fill_type == 0)
+        return shape_color1;
+    float t = clamp(shape_gradient_t(uv), 0.0, 1.0);
+    return mix(shape_color1, shape_color2, t);
+}
+
 void main()
 {
     vec2 base_uv = TexCoord.st / TexCoord.q;
@@ -1006,6 +1106,9 @@ void main()
         col = get_blurred_color(uv_flipped);
     }
     
+    if (is_straight_alpha)
+        col.rgb *= col.a;
+
     // Convert input -> working space (Linear ACEScg usually)
     if (color_grading) {
         // EOTF: encoded -> linear (unless input is already linear)
@@ -1016,7 +1119,6 @@ void main()
         // Gamut mapping: Input Gamut -> Working Gamut
         col.rgb = input_to_working * col.rgb;
     }
-    
     // Apply White Balance
     if (white_balance) {
         col.rgb = apply_white_balance(col.rgb, wb_temperature, wb_tint);
@@ -1057,7 +1159,37 @@ void main()
     if (invert)
         col.rgb = 1.0 - col.rgb;
 
-	col.a *= opacity;
+    // Shape overlay composite (before opacity so the whole layer, including shape, respects MIXER OPACITY)
+    if (shape_enable) {
+        vec2 uv       = TexCoord2.st;          // 0-1 screen-space from vertex shader
+        vec2 p        = uv - shape_center;     // position relative to shape centre
+        vec2 half_size = shape_size * 0.5;
+
+        float d;
+        if      (shape_type == 0) d = sdf_box(p, half_size);
+        else if (shape_type == 1) d = sdf_rounded_box(p, half_size, shape_corner_radius);
+        else if (shape_type == 2) d = sdf_circle(p, half_size.x);
+        else                      d = sdf_ellipse(p, half_size);
+
+        // Anti-aliased inside mask
+        float fill_alpha = 1.0 - smoothstep(-shape_softness, 0.0, d);
+
+        // Gradient fill
+        vec4 fill = shape_compute_fill(uv);
+
+        // Stroke ring: |d| < stroke_width, clipped to the shape interior
+        if (shape_stroke_enable && shape_stroke_width > 0.0) {
+            float ring_alpha = (1.0 - smoothstep(-shape_softness, 0.0, abs(d) - shape_stroke_width)) * fill_alpha;
+            fill = mix(fill, shape_stroke_color, ring_alpha * shape_stroke_color.a);
+        }
+
+        // Porter-Duff "over" composite (straight alpha)
+        float ca  = fill.a * fill_alpha;
+        col.rgb   = col.rgb * (1.0 - ca) + fill.rgb * ca;
+        col.a     = col.a   * (1.0 - ca) + ca;
+    }
+
+	col *= opacity;
 
     if (has_local_key)
         col.a *= texture(local_key, TexCoord2.st).r;
@@ -1065,8 +1197,7 @@ void main()
     if (has_layer_key)
         col.a *= texture(layer_key, TexCoord2.st).r;
 
-    if (blend_mode != 0 || keyer != 0)
-        col = blend(col);
+    col = blend(col);
 
     if (chroma)
         col = chroma_key(col);
@@ -1086,8 +1217,5 @@ void main()
         col.rgb = apply_oetf(col.rgb, output_transfer);
     }
     
-	if (is_straight_alpha && col.a > 0.0)
-		col.rgb /= col.a;
-
 	fragColor = col.bgra;
 }

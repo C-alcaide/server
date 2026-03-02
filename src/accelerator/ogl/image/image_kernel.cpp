@@ -547,6 +547,31 @@ struct image_kernel::impl
             }
         }
 
+        // Shape overlay
+        {
+            const auto& sh = transforms.image_transform.shape;
+            if (sh.enable) {
+                shader_->set("shape_enable",      true);
+                shader_->set("shape_type",        static_cast<int>(sh.type));
+                shader_->set("shape_fill_type",   static_cast<int>(sh.fill_type));
+                shader_->set("shape_center",      sh.center[0], sh.center[1]);
+                shader_->set("shape_size",        sh.size[0],   sh.size[1]);
+                shader_->set("shape_corner_radius", sh.corner_radius);
+                shader_->set("shape_softness",    sh.edge_softness);
+                shader_->set("shape_color1",      sh.color1[0], sh.color1[1], sh.color1[2], sh.color1[3]);
+                shader_->set("shape_color2",      sh.color2[0], sh.color2[1], sh.color2[2], sh.color2[3]);
+                shader_->set("shape_gradient_angle",    sh.gradient_angle);
+                shader_->set("shape_gradient_center",   sh.gradient_center[0],
+                                                        sh.gradient_center[1]);
+                shader_->set("shape_stroke_enable", sh.stroke_enable);
+                shader_->set("shape_stroke_width",  sh.stroke_width);
+                shader_->set("shape_stroke_color",  sh.stroke_color[0], sh.stroke_color[1],
+                                                    sh.stroke_color[2], sh.stroke_color[3]);
+            } else {
+                shader_->set("shape_enable", false);
+            }
+        }
+
         // Setup drawing area
 
         GL(glViewport(0, 0, params.background->width(), params.background->height()));

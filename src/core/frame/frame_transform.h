@@ -166,6 +166,42 @@ struct blur_config final
     double                tilt_h = 0.2;
 };
 
+// Shape types for MIXER SHAPE
+enum class shape_type : int
+{
+    rect         = 0,
+    rounded_rect = 1,
+    circle       = 2,
+    ellipse      = 3
+};
+
+// Fill types for MIXER SHAPE
+enum class shape_fill_type : int
+{
+    solid   = 0,
+    linear  = 1,
+    radial  = 2,
+    conic   = 3
+};
+
+struct shape_config final
+{
+    bool                  enable          = false;
+    shape_type            type            = shape_type::rect;
+    std::array<double, 2> center          = {0.5, 0.5};   // normalised 0-1
+    std::array<double, 2> size            = {0.5, 0.5};   // normalised 0-1
+    double                corner_radius   = 0.0;          // normalised; used by rounded_rect
+    double                edge_softness   = 0.005;        // AA feather width
+    shape_fill_type       fill_type       = shape_fill_type::solid;
+    std::array<double, 4> color1          = {1.0, 1.0, 1.0, 1.0}; // RGBA
+    std::array<double, 4> color2          = {0.0, 0.0, 0.0, 0.0}; // RGBA
+    double                gradient_angle  = 0.0;          // degrees; for linear fill
+    std::array<double, 2> gradient_center = {0.5, 0.5};  // normalised; for radial/conic
+    bool                  stroke_enable   = false;
+    double                stroke_width    = 0.0;          // normalised
+    std::array<double, 4> stroke_color    = {1.0, 1.0, 1.0, 1.0}; // RGBA
+};
+
 struct image_transform final
 {
     double opacity    = 1.0;
@@ -212,6 +248,7 @@ struct image_transform final
     core::rgb_levels  per_channel_levels;
     core::tone_curves curves;
     blur_config       blur;
+    shape_config      shape;
 
     bool             is_key      = false;
     bool             invert      = false;

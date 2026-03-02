@@ -87,6 +87,9 @@ void apply_transform_colour_values(core::image_transform& self, const core::imag
     if (other.blur.enable) {
         self.blur = other.blur;
     }
+    if (other.shape.enable) {
+        self.shape = other.shape;
+    }
 
     // White balance: additive combination
     self.temperature += other.temperature;

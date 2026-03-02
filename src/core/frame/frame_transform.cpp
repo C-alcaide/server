@@ -157,6 +157,27 @@ image_transform image_transform::tween(double                 time,
     result.blur.tilt_y    = do_tween(time, source.blur.tilt_y, dest.blur.tilt_y, duration, tween);
     result.blur.tilt_h    = do_tween(time, source.blur.tilt_h, dest.blur.tilt_h, duration, tween);
 
+    // Shape
+    result.shape.enable           = dest.shape.enable;
+    result.shape.type             = dest.shape.type;
+    result.shape.fill_type        = dest.shape.fill_type;
+    result.shape.stroke_enable    = dest.shape.stroke_enable;
+    result.shape.center[0]        = do_tween(time, source.shape.center[0],        dest.shape.center[0],        duration, tween);
+    result.shape.center[1]        = do_tween(time, source.shape.center[1],        dest.shape.center[1],        duration, tween);
+    result.shape.size[0]          = do_tween(time, source.shape.size[0],          dest.shape.size[0],          duration, tween);
+    result.shape.size[1]          = do_tween(time, source.shape.size[1],          dest.shape.size[1],          duration, tween);
+    result.shape.corner_radius    = do_tween(time, source.shape.corner_radius,    dest.shape.corner_radius,    duration, tween);
+    result.shape.edge_softness    = do_tween(time, source.shape.edge_softness,    dest.shape.edge_softness,    duration, tween);
+    result.shape.gradient_angle   = do_tween(time, source.shape.gradient_angle,   dest.shape.gradient_angle,   duration, tween);
+    result.shape.gradient_center[0] = do_tween(time, source.shape.gradient_center[0], dest.shape.gradient_center[0], duration, tween);
+    result.shape.gradient_center[1] = do_tween(time, source.shape.gradient_center[1], dest.shape.gradient_center[1], duration, tween);
+    result.shape.stroke_width     = do_tween(time, source.shape.stroke_width,     dest.shape.stroke_width,     duration, tween);
+    for (int i = 0; i < 4; ++i) {
+        result.shape.color1[i]       = do_tween(time, source.shape.color1[i],       dest.shape.color1[i],       duration, tween);
+        result.shape.color2[i]       = do_tween(time, source.shape.color2[i],       dest.shape.color2[i],       duration, tween);
+        result.shape.stroke_color[i] = do_tween(time, source.shape.stroke_color[i], dest.shape.stroke_color[i], duration, tween);
+    }
+
     result.is_key           = source.is_key || dest.is_key;
     result.invert           = source.invert || dest.invert;
     result.flip_h           = dest.flip_h;
@@ -260,6 +281,20 @@ bool operator==(const image_transform& lhs, const image_transform& rhs)
                  boost::range::equal(lhs.blur.center, rhs.blur.center, eq) &&
                  eq(lhs.blur.tilt_y, rhs.blur.tilt_y) &&
                  eq(lhs.blur.tilt_h, rhs.blur.tilt_h) &&
+                 lhs.shape.enable        == rhs.shape.enable &&
+                 lhs.shape.type          == rhs.shape.type &&
+                 lhs.shape.fill_type     == rhs.shape.fill_type &&
+                 lhs.shape.stroke_enable == rhs.shape.stroke_enable &&
+                 boost::range::equal(lhs.shape.center,          rhs.shape.center,          eq) &&
+                 boost::range::equal(lhs.shape.size,            rhs.shape.size,            eq) &&
+                 eq(lhs.shape.corner_radius, rhs.shape.corner_radius) &&
+                 eq(lhs.shape.edge_softness, rhs.shape.edge_softness) &&
+                 boost::range::equal(lhs.shape.color1,          rhs.shape.color1,          eq) &&
+                 boost::range::equal(lhs.shape.color2,          rhs.shape.color2,          eq) &&
+                 eq(lhs.shape.gradient_angle, rhs.shape.gradient_angle) &&
+                 boost::range::equal(lhs.shape.gradient_center, rhs.shape.gradient_center, eq) &&
+                 eq(lhs.shape.stroke_width, rhs.shape.stroke_width) &&
+                 boost::range::equal(lhs.shape.stroke_color,    rhs.shape.stroke_color,    eq) &&
                  lhs.enable_geometry_modifiers == rhs.enable_geometry_modifiers;
 }
 

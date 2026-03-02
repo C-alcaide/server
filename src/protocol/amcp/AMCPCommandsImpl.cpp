@@ -1115,6 +1115,164 @@ std::future<std::wstring> mixer_blur_command(command_context& ctx)
     return make_ready_future<std::wstring>(L"202 MIXER OK\r\n");
 }
 
+// ---------------------------------------------------------------------------
+// MIXER SHAPE helpers
+// ---------------------------------------------------------------------------
+
+static core::shape_type parse_shape_type(const std::wstring& s)
+{
+    if (boost::iequals(s, L"ROUNDED_RECT") || boost::iequals(s, L"ROUNDEDRECT")) return core::shape_type::rounded_rect;
+    if (boost::iequals(s, L"CIRCLE"))   return core::shape_type::circle;
+    if (boost::iequals(s, L"ELLIPSE"))  return core::shape_type::ellipse;
+    return core::shape_type::rect;
+}
+
+static std::wstring shape_type_to_string(core::shape_type t)
+{
+    switch (t) {
+        case core::shape_type::rounded_rect: return L"ROUNDED_RECT";
+        case core::shape_type::circle:       return L"CIRCLE";
+        case core::shape_type::ellipse:      return L"ELLIPSE";
+        default:                             return L"RECT";
+    }
+}
+
+static core::shape_fill_type parse_fill_type(const std::wstring& s)
+{
+    if (boost::iequals(s, L"LINEAR")) return core::shape_fill_type::linear;
+    if (boost::iequals(s, L"RADIAL")) return core::shape_fill_type::radial;
+    if (boost::iequals(s, L"CONIC"))  return core::shape_fill_type::conic;
+    return core::shape_fill_type::solid;
+}
+
+static std::wstring fill_type_to_string(core::shape_fill_type t)
+{
+    switch (t) {
+        case core::shape_fill_type::linear: return L"LINEAR";
+        case core::shape_fill_type::radial: return L"RADIAL";
+        case core::shape_fill_type::conic:  return L"CONIC";
+        default:                            return L"SOLID";
+    }
+}
+
+// Parse #RRGGBBAA or #RRGGBB hex string into RGBA doubles [0,1].
+static std::array<double, 4> parse_hex_color(const std::wstring& hex)
+{
+    std::wstring s = hex;
+    if (!s.empty() && s[0] == L'#') s = s.substr(1);
+    if (s.size() == 6) s += L"FF";
+    if (s.size() < 8) return {1.0, 1.0, 1.0, 1.0};
+    auto h2d = [&](int pos) -> double {
+        return static_cast<double>(std::stoul(s.substr(pos, 2), nullptr, 16)) / 255.0;
+    };
+    return {h2d(0), h2d(2), h2d(4), h2d(6)};
+}
+
+// Format RGBA doubles back to #RRGGBBAA
+static std::wstring rgba_to_hex(const std::array<double, 4>& c)
+{
+    auto d2b = [](double v) -> unsigned int { return static_cast<unsigned int>(std::round(v * 255.0)); };
+    wchar_t buf[16];
+    swprintf(buf, 16, L"#%02X%02X%02X%02X", d2b(c[0]), d2b(c[1]), d2b(c[2]), d2b(c[3]));
+    return buf;
+}
+
+std::future<std::wstring> mixer_shape_command(command_context& ctx)
+{
+    // --- Query mode ---
+    if (ctx.parameters.empty()) {
+        auto transform2 = get_current_transform(ctx).share();
+        return std::async(std::launch::deferred, [transform2]() -> std::wstring {
+            auto sh = transform2.get().image_transform.shape;
+            if (!sh.enable)
+                return L"201 MIXER OK\r\nNONE\r\n";
+            return L"201 MIXER OK\r\n" +
+                   shape_type_to_string(sh.type) + L" " +
+                   std::to_wstring(sh.center[0]) + L" " + std::to_wstring(sh.center[1]) + L" " +
+                   std::to_wstring(sh.size[0])   + L" " + std::to_wstring(sh.size[1])   + L" " +
+                   L"CORNER_RADIUS "   + std::to_wstring(sh.corner_radius)    + L" " +
+                   L"SOFTNESS "        + std::to_wstring(sh.edge_softness)    + L" " +
+                   L"FILL "            + fill_type_to_string(sh.fill_type)    + L" " +
+                   L"COLOR1 "          + rgba_to_hex(sh.color1)               + L" " +
+                   L"COLOR2 "          + rgba_to_hex(sh.color2)               + L" " +
+                   L"ANGLE "           + std::to_wstring(sh.gradient_angle)   + L" " +
+                   L"GRADIENT_CENTER " + std::to_wstring(sh.gradient_center[0]) + L" "
+                                       + std::to_wstring(sh.gradient_center[1]) + L" " +
+                   L"STROKE "          + std::to_wstring(sh.stroke_width) + L" " + rgba_to_hex(sh.stroke_color) +
+                   L"\r\n";
+        });
+    }
+
+    // --- Disable ---
+    if (boost::iequals(ctx.parameters.at(0), L"NONE")) {
+        transforms_applier transforms(ctx);
+        transforms.add(stage::transform_tuple_t(
+            ctx.layer_index(),
+            [](frame_transform transform) -> frame_transform {
+                transform.image_transform.shape = core::shape_config{};
+                return transform;
+            },
+            0, L"linear"));
+        transforms.apply();
+        return make_ready_future<std::wstring>(L"202 MIXER OK\r\n");
+    }
+
+    // --- Set mode ---
+    // Minimum: MIXER 1-1 SHAPE <type> <cx> <cy> <w> <h> [keywords...] [DURATION d] [TWEEN t]
+    if (ctx.parameters.size() < 5)
+        CASPAR_THROW_EXCEPTION(user_error() << msg_info(L"MIXER SHAPE requires at least: type cx cy w h"));
+
+    core::shape_config sh;
+    sh.enable = true;
+    sh.type   = parse_shape_type(ctx.parameters.at(0));
+    sh.center = { std::stod(ctx.parameters.at(1)), std::stod(ctx.parameters.at(2)) };
+    sh.size   = { std::stod(ctx.parameters.at(3)), std::stod(ctx.parameters.at(4)) };
+
+    int          duration = 0;
+    std::wstring tween    = L"linear";
+
+    // Parse keyword arguments (order-independent, start at index 5)
+    for (std::size_t i = 5; i < ctx.parameters.size(); ++i) {
+        const auto& kw = ctx.parameters[i];
+        if (boost::iequals(kw, L"CORNER_RADIUS") && i + 1 < ctx.parameters.size())
+            sh.corner_radius = std::stod(ctx.parameters[++i]);
+        else if (boost::iequals(kw, L"SOFTNESS") && i + 1 < ctx.parameters.size())
+            sh.edge_softness = std::stod(ctx.parameters[++i]);
+        else if (boost::iequals(kw, L"FILL") && i + 1 < ctx.parameters.size())
+            sh.fill_type = parse_fill_type(ctx.parameters[++i]);
+        else if (boost::iequals(kw, L"COLOR1") && i + 1 < ctx.parameters.size())
+            sh.color1 = parse_hex_color(ctx.parameters[++i]);
+        else if (boost::iequals(kw, L"COLOR2") && i + 1 < ctx.parameters.size())
+            sh.color2 = parse_hex_color(ctx.parameters[++i]);
+        else if (boost::iequals(kw, L"ANGLE") && i + 1 < ctx.parameters.size())
+            sh.gradient_angle = std::stod(ctx.parameters[++i]);
+        else if (boost::iequals(kw, L"GRADIENT_CENTER") && i + 2 < ctx.parameters.size()) {
+            sh.gradient_center[0] = std::stod(ctx.parameters[++i]);
+            sh.gradient_center[1] = std::stod(ctx.parameters[++i]);
+        } else if (boost::iequals(kw, L"STROKE") && i + 2 < ctx.parameters.size()) {
+            sh.stroke_enable = true;
+            sh.stroke_width  = std::stod(ctx.parameters[++i]);
+            sh.stroke_color  = parse_hex_color(ctx.parameters[++i]);
+        } else if (boost::iequals(kw, L"DURATION") && i + 1 < ctx.parameters.size())
+            duration = std::stoi(ctx.parameters[++i]);
+        else if (boost::iequals(kw, L"TWEEN") && i + 1 < ctx.parameters.size())
+            tween = ctx.parameters[++i];
+    }
+
+    transforms_applier transforms(ctx);
+    transforms.add(stage::transform_tuple_t(
+        ctx.layer_index(),
+        [sh](frame_transform transform) -> frame_transform {
+            transform.image_transform.shape = sh;
+            return transform;
+        },
+        duration,
+        tween));
+    transforms.apply();
+
+    return make_ready_future<std::wstring>(L"202 MIXER OK\r\n");
+}
+
 template <typename Getter, typename Setter>
 std::future<std::wstring>
 single_double_animatable_mixer_command(command_context& ctx, const Getter& getter, const Setter& setter)
@@ -2434,6 +2592,7 @@ void register_commands(std::shared_ptr<amcp_command_repository_wrapper>& repo)
     repo->register_channel_command(L"Mixer Commands", L"MIXER CHROMA", mixer_chroma_command, 0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER BLEND", mixer_blend_command, 0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER BLUR", mixer_blur_command, 0);
+    repo->register_channel_command(L"Mixer Commands", L"MIXER SHAPE", mixer_shape_command, 0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER OPACITY", mixer_opacity_command, 0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER BRIGHTNESS", mixer_brightness_command, 0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER SATURATION", mixer_saturation_command, 0);

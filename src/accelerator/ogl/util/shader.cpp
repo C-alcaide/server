@@ -135,6 +135,15 @@ struct shader::impl
                        static_cast<float>(value2)));  // fixed: was value1
     }
 
+    void set(const std::string& name, double value0, double value1, double value2, double value3)
+    {
+        GL(glUniform4f(get_uniform_location(name.c_str()),
+                       static_cast<float>(value0),
+                       static_cast<float>(value1),
+                       static_cast<float>(value2),
+                       static_cast<float>(value3)));
+    }
+
     void set(const std::string& name, double value)
     {
         GL(glUniform1f(get_uniform_location(name.c_str()), static_cast<float>(value)));
@@ -164,6 +173,10 @@ void shader::set(const std::string& name, double value0, double value1) { impl_-
 void shader::set(const std::string& name, double value0, double value1, double value2)
 {
     impl_->set(name, value0, value1, value2);
+}
+void shader::set(const std::string& name, double value0, double value1, double value2, double value3)
+{
+    impl_->set(name, value0, value1, value2, value3);
 }
 void  shader::set(const std::string& name, double value) { impl_->set(name, value); }
 void  shader::set_matrix3(const std::string& name, const float* value) { impl_->set_matrix3(name, value); }
