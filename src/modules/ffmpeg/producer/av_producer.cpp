@@ -5,6 +5,12 @@
 #include "../util/av_assert.h"
 #include "../util/av_util.h"
 
+extern "C" {
+#include <libavutil/pixdesc.h>  // Required for av_get_pix_fmt_name
+#include <libavutil/samplefmt.h> // Required for av_get_sample_fmt_name
+#include <libavutil/opt.h>       // Required for av_opt_set_array and AV_OPT_TYPE_*
+}
+
 #include <boost/exception/exception.hpp>
 #include <boost/format.hpp>
 #include <boost/property_tree/ptree.hpp>
@@ -152,6 +158,17 @@ class Decoder
     explicit Decoder(AVStream* stream)
         : st(stream)
     {
+        // Workaround: Map VMX codec tag manually if not detected
+        if (stream->codecpar->codec_id == AV_CODEC_ID_NONE || stream->codecpar->codec_id == AV_CODEC_ID_RAWVIDEO) {
+            // Check for VMX tags: 'VMX\0' (0x00584D56) or 'VMX ' (0x20584D56)
+            if (stream->codecpar->codec_tag == 0x00584D56 || stream->codecpar->codec_tag == 0x20584D56) {
+                const AVCodec* vmx_codec = avcodec_find_decoder_by_name("libvmx");
+                if (vmx_codec) {
+                    stream->codecpar->codec_id = vmx_codec->id;
+                }
+            }
+        }
+
         const auto codec = get_decoder(stream->codecpar->codec_id);
 
         if (!codec) {
@@ -166,6 +183,12 @@ class Decoder
         }
 
         FF(avcodec_parameters_to_context(ctx.get(), stream->codecpar));
+
+        // Workaround: VMX codec parameters often lack pixel format until first frame is decoded.
+        // Force a default of BGR0 to allow filter graph initialization.
+        if (ctx->codec_id == AV_CODEC_ID_VMX && ctx->pix_fmt == AV_PIX_FMT_NONE) {
+            ctx->pix_fmt = AV_PIX_FMT_BGR0;
+        }
 
         if (stream->metadata != NULL) {
             auto entry = av_dict_get(stream->metadata, "alpha_mode", NULL, AV_DICT_MATCH_CASE);
@@ -557,9 +580,6 @@ struct Filter
         }
 
         if (media_type == AVMEDIA_TYPE_VIDEO) {
-            FF(avfilter_graph_create_filter(
-                &sink, avfilter_get_by_name("buffersink"), "out", nullptr, nullptr, graph.get()));
-
 #ifdef _MSC_VER
 #pragma warning(push)
 #pragma warning(disable : 4245)
@@ -592,24 +612,43 @@ struct Filter
                                               AV_PIX_FMT_GBRAP,
                                               AV_PIX_FMT_GBRAP16,
                                               AV_PIX_FMT_NONE};
-            FF(av_opt_set_int_list(sink, "pix_fmts", pix_fmts, -1, AV_OPT_SEARCH_CHILDREN));
+            
+            sink = avfilter_graph_alloc_filter(graph.get(), avfilter_get_by_name("buffersink"), "out");
+            if (!sink) FF(AVERROR(ENOMEM));
+
+            // Set 'pixel_formats' properly via av_opt_set_array (FFmpeg 7.0+)
+            int nb_pix = 0;
+            while (pix_fmts[nb_pix] != AV_PIX_FMT_NONE) nb_pix++;
+            FF(av_opt_set_array(sink, "pixel_formats", AV_OPT_SEARCH_CHILDREN, 0, nb_pix, AV_OPT_TYPE_PIXEL_FMT, pix_fmts));
+
+            FF(avfilter_init_str(sink, nullptr));
+
 #ifdef _MSC_VER
 #pragma warning(pop)
 #endif
         } else if (media_type == AVMEDIA_TYPE_AUDIO) {
-            FF(avfilter_graph_create_filter(
-                &sink, avfilter_get_by_name("abuffersink"), "out", nullptr, nullptr, graph.get()));
 #ifdef _MSC_VER
 #pragma warning(push)
 #pragma warning(disable : 4245)
 #endif
             const AVSampleFormat sample_fmts[] = {AV_SAMPLE_FMT_S32, AV_SAMPLE_FMT_NONE};
-            FF(av_opt_set_int_list(sink, "sample_fmts", sample_fmts, -1, AV_OPT_SEARCH_CHILDREN));
+            
+            sink = avfilter_graph_alloc_filter(graph.get(), avfilter_get_by_name("abuffersink"), "out");
+            if (!sink) FF(AVERROR(ENOMEM));
 
-            FF(av_opt_set_int(sink, "all_channel_counts", 1, AV_OPT_SEARCH_CHILDREN));
+            // Set 'sample_formats' properly via av_opt_set_array
+            int nb_sample = 0;
+            while (sample_fmts[nb_sample] != AV_SAMPLE_FMT_NONE) nb_sample++;
+            FF(av_opt_set_array(sink, "sample_formats", AV_OPT_SEARCH_CHILDREN, 0, nb_sample, AV_OPT_TYPE_SAMPLE_FMT, sample_fmts));
 
+            // 'all_channel_counts' is deprecated. Modern ffmpeg usually negotiates automatically.
+            
             const int sample_rates[] = {format_desc.audio_sample_rate, -1};
-            FF(av_opt_set_int_list(sink, "sample_rates", sample_rates, -1, AV_OPT_SEARCH_CHILDREN));
+            
+            // Set 'samplerates' properly via av_opt_set_array
+            FF(av_opt_set_array(sink, "samplerates", AV_OPT_SEARCH_CHILDREN, 0, 1, AV_OPT_TYPE_INT, sample_rates));
+
+            FF(avfilter_init_str(sink, nullptr));
 #ifdef _MSC_VER
 #pragma warning(pop)
 #endif

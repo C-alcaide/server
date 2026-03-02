@@ -33,21 +33,29 @@ set(CONFIG_VERSION_GIT_HASH "N/A")
 if(DEFINED ENV{GIT_HASH} AND NOT $ENV{GIT_HASH} STREQUAL "")
     set(CONFIG_VERSION_GIT_HASH "$ENV{GIT_HASH}")
 elseif(GIT_FOUND AND EXISTS "${PROJECT_SOURCE_DIR}/../.git")
+    message(STATUS "Getting git hash...")
     execute_process(
             COMMAND "${GIT_EXECUTABLE}" rev-parse --verify --short HEAD
             WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}/../"
             OUTPUT_VARIABLE CONFIG_VERSION_GIT_HASH
             OUTPUT_STRIP_TRAILING_WHITESPACE
     )
+    message(STATUS "Git hash: ${CONFIG_VERSION_GIT_HASH}")
 endif()
 
+message(STATUS "Checking CPU count...")
 cmake_host_system_information(RESULT CONFIG_CPU_COUNT QUERY NUMBER_OF_PHYSICAL_CORES)
+message(STATUS "CPU count: ${CONFIG_CPU_COUNT}")
 
 include(CasparCG_Util)
+message(STATUS "Configuring version.h...")
 configure_file("${PROJECT_SOURCE_DIR}/version.tmpl" "${CMAKE_BINARY_DIR}/generated/version.h")
+message(STATUS "Configuring version.h done.")
 
 if(MSVC)
+    message(STATUS "Including Bootstrap_Windows...")
     include(Bootstrap_Windows)
+
 else ()
     include(Bootstrap_Linux)
 

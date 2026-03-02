@@ -11,12 +11,16 @@ if(POLICY CMP0167)
 	cmake_policy(SET CMP0167 NEW)
 endif()
 
+message(STATUS "CHECKPOINT: Bootstrap start")
+
 set(BOOST_USE_PRECOMPILED ON CACHE BOOL "Use precompiled boost")
 
 set(CASPARCG_RUNTIME_DEPENDENCIES_RELEASE "" CACHE INTERNAL "")
 set(CASPARCG_RUNTIME_DEPENDENCIES_DEBUG "" CACHE INTERNAL "")
 set(CASPARCG_RUNTIME_DEPENDENCIES_RELEASE_DIRS "" CACHE INTERNAL "")
 set(CASPARCG_RUNTIME_DEPENDENCIES_DEBUG_DIRS "" CACHE INTERNAL "")
+
+message(STATUS "CHECKPOINT: Bootstrap functions defined")
 
 function(casparcg_add_runtime_dependency FILE_TO_COPY)
 	if ("${ARGV1}" STREQUAL "Release" OR NOT ARGV1)
@@ -49,6 +53,7 @@ endfunction()
 casparcg_add_runtime_dependency("${PROJECT_SOURCE_DIR}/shell/casparcg.config")
 
 # BOOST
+message(STATUS "CHECKPOINT: Adding Boost")
 casparcg_add_external_project(boost)
 if (BOOST_USE_PRECOMPILED)
 	ExternalProject_Add(boost
@@ -63,52 +68,36 @@ if (BOOST_USE_PRECOMPILED)
 	set(BOOST_INCLUDE_PATH "${SOURCE_DIR}/include/boost-1_83")
 	link_directories("${SOURCE_DIR}/lib")
 else ()
-	set(BOOST_INSTALL_DIR ${CMAKE_CURRENT_BINARY_DIR}/boost-install)
-	ExternalProject_Add(boost
-	URL ${CASPARCG_DOWNLOAD_MIRROR}/boost/boost_1_83_0.zip
-	URL_HASH MD5=03d5aea72401ffed848cb5daf8cd2b9b
-	DOWNLOAD_DIR ${CASPARCG_DOWNLOAD_CACHE}
-	BUILD_IN_SOURCE 1
-	CONFIGURE_COMMAND ./bootstrap.bat
-		--with-libraries=filesystem
-		--with-libraries=locale
-		--with-libraries=log
-		--with-libraries=log_setup
-		--with-libraries=regex
-		--with-libraries=system
-		--with-libraries=thread
-	BUILD_COMMAND ./b2 install debug release --prefix=${BOOST_INSTALL_DIR} link=static threading=multi runtime-link=shared -j ${CONFIG_CPU_COUNT}
-	INSTALL_COMMAND ""
-	)
-	set(BOOST_INCLUDE_PATH "${BOOST_INSTALL_DIR}/include/boost-1_83")
-	link_directories("${BOOST_INSTALL_DIR}/lib")
+    # ...
 endif ()
 add_definitions( -DBOOST_CONFIG_SUPPRESS_OUTDATED_MESSAGE )
 add_definitions( -DBOOST_COROUTINES_NO_DEPRECATION_WARNING )
 add_definitions( -DBOOST_LOCALE_HIDE_AUTO_PTR )
 
 # FFMPEG
-casparcg_add_external_project(ffmpeg-lib)
-ExternalProject_Add(ffmpeg-lib
-	URL ${CASPARCG_DOWNLOAD_MIRROR}/ffmpeg/ffmpeg-7.0.2-full_build-shared.7z
-	URL_HASH MD5=c5127aeed36a9a86dd3b84346be182f8
-	DOWNLOAD_DIR ${CASPARCG_DOWNLOAD_CACHE}
-	CONFIGURE_COMMAND ""
-	BUILD_COMMAND ""
-	INSTALL_COMMAND ""
-)
-ExternalProject_Get_Property(ffmpeg-lib SOURCE_DIR)
-set(FFMPEG_INCLUDE_PATH "${SOURCE_DIR}/include")
-set(FFMPEG_BIN_PATH "${SOURCE_DIR}/bin")
-link_directories("${SOURCE_DIR}/lib")
-casparcg_add_runtime_dependency("${FFMPEG_BIN_PATH}/avcodec-61.dll")
-casparcg_add_runtime_dependency("${FFMPEG_BIN_PATH}/avdevice-61.dll")
-casparcg_add_runtime_dependency("${FFMPEG_BIN_PATH}/avfilter-10.dll")
-casparcg_add_runtime_dependency("${FFMPEG_BIN_PATH}/avformat-61.dll")
-casparcg_add_runtime_dependency("${FFMPEG_BIN_PATH}/avutil-59.dll")
-casparcg_add_runtime_dependency("${FFMPEG_BIN_PATH}/postproc-58.dll")
-casparcg_add_runtime_dependency("${FFMPEG_BIN_PATH}/swresample-5.dll")
-casparcg_add_runtime_dependency("${FFMPEG_BIN_PATH}/swscale-8.dll")
+message(STATUS "CHECKPOINT: Adding FFmpeg")
+# casparcg_add_external_project(ffmpeg-lib)
+# ExternalProject_Add(ffmpeg-lib
+# 	URL ${CASPARCG_DOWNLOAD_MIRROR}/ffmpeg/ffmpeg-7.0.2-full_build-shared.7z
+# 	URL_HASH MD5=c5127aeed36a9a86dd3b84346be182f8
+# 	DOWNLOAD_DIR ${CASPARCG_DOWNLOAD_CACHE}
+# 	CONFIGURE_COMMAND ""
+# 	BUILD_COMMAND ""
+# 	INSTALL_COMMAND ""
+# )
+# ExternalProject_Get_Property(ffmpeg-lib SOURCE_DIR)
+set(FFMPEG_INCLUDE_PATH "D:/Github/FFmpeg/deployment/include")
+set(FFMPEG_BIN_PATH "D:/Github/FFmpeg")
+message(STATUS "CHECKPOINT: FFmpeg path = ${FFMPEG_BIN_PATH}")
+link_directories("D:/Github/FFmpeg/deployment/lib")
+casparcg_add_runtime_dependency("${FFMPEG_BIN_PATH}/avcodec-62.dll")
+casparcg_add_runtime_dependency("${FFMPEG_BIN_PATH}/avdevice-62.dll")
+casparcg_add_runtime_dependency("${FFMPEG_BIN_PATH}/avfilter-11.dll")
+casparcg_add_runtime_dependency("${FFMPEG_BIN_PATH}/avformat-62.dll")
+casparcg_add_runtime_dependency("${FFMPEG_BIN_PATH}/avutil-60.dll")
+# casparcg_add_runtime_dependency("${FFMPEG_BIN_PATH}/postproc-58.dll") - Not in my build
+casparcg_add_runtime_dependency("${FFMPEG_BIN_PATH}/swresample-6.dll")
+casparcg_add_runtime_dependency("${FFMPEG_BIN_PATH}/swscale-9.dll")
 # for scanner:
 casparcg_add_runtime_dependency("${FFMPEG_BIN_PATH}/ffmpeg.exe")
 casparcg_add_runtime_dependency("${FFMPEG_BIN_PATH}/ffprobe.exe")

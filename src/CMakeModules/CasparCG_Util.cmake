@@ -7,7 +7,11 @@ ENDFUNCTION()
 # Mark a project as depending on all of the ExternalProjects, to ensure build order
 FUNCTION(casparcg_add_build_dependencies TARGET)
 	if (CASPARCG_EXTERNAL_PROJECTS)
-		ADD_DEPENDENCIES (${TARGET} ${CASPARCG_EXTERNAL_PROJECTS})
+        foreach(_dep ${CASPARCG_EXTERNAL_PROJECTS})
+            if (TARGET ${_dep})
+		        ADD_DEPENDENCIES (${TARGET} ${_dep})
+            endif()
+        endforeach()
 	endif()
 ENDFUNCTION()
 
@@ -41,7 +45,11 @@ FUNCTION (casparcg_add_library TARGET)
 
 	if (CASPARCG_EXTERNAL_PROJECTS)
 		# Setup dependency on ExternalProject
-		ADD_DEPENDENCIES (${TARGET} ${CASPARCG_EXTERNAL_PROJECTS})
+        foreach(_dep ${CASPARCG_EXTERNAL_PROJECTS})
+            if (TARGET ${_dep})
+		        ADD_DEPENDENCIES (${TARGET} ${_dep})
+            endif()
+        endforeach()
 	endif()
 
 ENDFUNCTION ()

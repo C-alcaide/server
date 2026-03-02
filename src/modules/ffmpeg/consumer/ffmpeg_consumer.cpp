@@ -24,6 +24,10 @@
 #include "../util/av_assert.h"
 #include "../util/av_util.h"
 
+extern "C" {
+#include <libavutil/opt.h>
+}
+
 #include <common/bit_depth.h>
 #include <common/diagnostics/graph.h>
 #include <common/env.h>
@@ -130,6 +134,18 @@ struct Stream
             if (it != stream_options.end()) {
                 codec = avcodec_find_encoder_by_name(it->second.c_str());
                 stream_options.erase(it);
+            } else if (suffix == ":v") {
+                const auto v_it = options.find("vcodec");
+                if (v_it != options.end()) {
+                    codec = avcodec_find_encoder_by_name(v_it->second.c_str());
+                    options.erase(v_it);
+                }
+            } else if (suffix == ":a") {
+                const auto a_it = options.find("acodec");
+                if (a_it != options.end()) {
+                    codec = avcodec_find_encoder_by_name(a_it->second.c_str());
+                    options.erase(a_it);
+                }
             }
         }
 
@@ -207,8 +223,10 @@ struct Stream
         }
 
         if (codec->type == AVMEDIA_TYPE_VIDEO) {
-            FF(avfilter_graph_create_filter(
-                &sink, avfilter_get_by_name("buffersink"), "out", nullptr, nullptr, graph.get()));
+            // Allocate the filter but do not initialize it yet
+            sink = avfilter_graph_alloc_filter(graph.get(), avfilter_get_by_name("buffersink"), "out");
+            if (!sink)
+                FF(AVERROR(ENOMEM));
 
 #ifdef _MSC_VER
 #pragma warning(push)
@@ -217,27 +235,66 @@ struct Stream
             // TODO codec->profiles
             // TODO FF(av_opt_set_int_list(sink, "framerates", codec->supported_framerates, { 0, 0 },
             // AV_OPT_SEARCH_CHILDREN));
-            FF(av_opt_set_int_list(sink, "pix_fmts", codec->pix_fmts, -1, AV_OPT_SEARCH_CHILDREN));
+
+            // Use av_opt_set_array for pixel_formats (FFmpeg 7.0+)
+            if (codec->pix_fmts) {
+                int nb_pix = 0;
+                while (codec->pix_fmts[nb_pix] != AV_PIX_FMT_NONE) nb_pix++;
+                if (nb_pix > 0) {
+                     FF(av_opt_set_array(sink, "pixel_formats", AV_OPT_SEARCH_CHILDREN, 0, nb_pix, AV_OPT_TYPE_PIXEL_FMT, codec->pix_fmts));
+                }
+            }
 #ifdef _MSC_VER
 #pragma warning(pop)
 #endif
+            // Now initialize the filter
+            FF(avfilter_init_str(sink, nullptr));
+
         } else if (codec->type == AVMEDIA_TYPE_AUDIO) {
-            FF(avfilter_graph_create_filter(
-                &sink, avfilter_get_by_name("abuffersink"), "out", nullptr, nullptr, graph.get()));
+            // Allocate the filter but do not initialize it yet
+            sink = avfilter_graph_alloc_filter(graph.get(), avfilter_get_by_name("abuffersink"), "out");
+            if (!sink)
+                FF(AVERROR(ENOMEM));
+
 #ifdef _MSC_VER
 #pragma warning(push)
 #pragma warning(disable : 4245)
 #endif
             // TODO codec->profiles
-            FF(av_opt_set_int_list(sink, "sample_fmts", codec->sample_fmts, -1, AV_OPT_SEARCH_CHILDREN));
-            FF(av_opt_set_int_list(sink, "sample_rates", codec->supported_samplerates, 0, AV_OPT_SEARCH_CHILDREN));
+            
+            // Set sample_formats using av_opt_set_array
+            if (codec->sample_fmts) {
+                int nb_sample = 0;
+                while (codec->sample_fmts[nb_sample] != AV_SAMPLE_FMT_NONE) nb_sample++;
+                if (nb_sample > 0) {
+                     FF(av_opt_set_array(sink, "sample_formats", AV_OPT_SEARCH_CHILDREN, 0, nb_sample, AV_OPT_TYPE_SAMPLE_FMT, codec->sample_fmts));
+                }
+            }
 
-            // TODO: need to translate codec->ch_layouts into something that can be passed via av_opt_set_*
-            // FF(av_opt_set_chlayout(sink, "ch_layouts", codec->ch_layouts, AV_OPT_SEARCH_CHILDREN));
+            // Set samplerates using av_opt_set_array
+            if (codec->supported_samplerates) {
+                int nb_rate = 0;
+                while (codec->supported_samplerates[nb_rate] != 0) nb_rate++;
+                if (nb_rate > 0) {
+                     FF(av_opt_set_array(sink, "samplerates", AV_OPT_SEARCH_CHILDREN, 0, nb_rate, AV_OPT_TYPE_INT, codec->supported_samplerates));
+                }
+            }
+
+            // Set channel_layouts
+            if (codec->ch_layouts) {
+                int nb_layouts = 0;
+                while (codec->ch_layouts[nb_layouts].nb_channels) nb_layouts++;
+                if (nb_layouts > 0) {
+                     FF(av_opt_set_array(sink, "channel_layouts", AV_OPT_SEARCH_CHILDREN, 0, nb_layouts, AV_OPT_TYPE_CHLAYOUT, codec->ch_layouts));
+                }
+            }
 
 #ifdef _MSC_VER
 #pragma warning(pop)
 #endif
+            // Now initialize the filter
+            FF(avfilter_init_str(sink, nullptr));
+
         } else {
             CASPAR_THROW_EXCEPTION(ffmpeg_error_t()
                                    << boost::errinfo_errno(EINVAL) << msg_info_t("invalid output media type"));
@@ -314,6 +371,12 @@ struct Stream
         }
 
         FF(avcodec_parameters_from_context(st->codecpar, enc.get()));
+        
+        // Force VMX codec tag to prevent it being written as rawvideo in AVI,
+        // which causes read errors (invalid buffer size) in newer FFmpeg versions.
+        if (st->codecpar->codec_id == AV_CODEC_ID_VMX) {
+             st->codecpar->codec_tag = MKTAG('V', 'M', 'X', ' ');
+        }
 
         if (codec->type == AVMEDIA_TYPE_AUDIO && !(codec->capabilities & AV_CODEC_CAP_VARIABLE_FRAME_SIZE)) {
             av_buffersink_set_frame_size(sink, enc->frame_size);

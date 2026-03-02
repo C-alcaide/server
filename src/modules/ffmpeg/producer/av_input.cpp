@@ -151,12 +151,35 @@ void Input::internal_reset()
         FF(av_dict_set(&options, "rw_timeout", "60000000", 0)); // 60 second IO timeout
     }
 
+    // Increase probe size and analyze duration to handle high-bitrate or obscure codecs
+    // Default is 5000000 (5MB). We increase to 50MB and 10 seconds.
+    FF(av_dict_set(&options, "probesize", "50000000", 0));
+    FF(av_dict_set(&options, "analyzeduration", "10000000", 0));
+
     AVFormatContext* ic             = avformat_alloc_context();
     ic->interrupt_callback.callback = Input::interrupt_cb;
     ic->interrupt_callback.opaque   = this;
 
     FF(avformat_open_input(&ic, filename_.c_str(), input_format, &options));
     auto ic2 = std::shared_ptr<AVFormatContext>(ic, [](AVFormatContext* ctx) { avformat_close_input(&ctx); });
+
+    // Workaround: Manually map VMX codec tag if the demuxer missed it.
+    // This allows avformat_find_stream_info to use the correct decoder for probing.
+    for (unsigned int i = 0; i < ic->nb_streams; i++) {
+        AVStream* st = ic->streams[i];
+        if (st->codecpar->codec_id == AV_CODEC_ID_NONE || st->codecpar->codec_id == AV_CODEC_ID_RAWVIDEO) {
+            // Check for VMX tags: 'VMX\0' (0x584D56) or 'VMX ' (0x20584D56)
+            // Note: 0x584D56 is 5786966 in decimal
+            if (st->codecpar->codec_tag == 0x584D56 || st->codecpar->codec_tag == 0x00584D56 || st->codecpar->codec_tag == 0x20584D56) {
+                st->codecpar->codec_id = AV_CODEC_ID_VMX;
+                // Force a pixel format to help probe/decoder
+                if (st->codecpar->format == AV_PIX_FMT_NONE) {
+                    st->codecpar->format = AV_PIX_FMT_BGR0;
+                }
+                CASPAR_LOG(info) << "av_input[" << filename_ << "] Forced VMX codec for VMX tag";
+            }
+        }
+    }
 
     for (auto& p : to_map(&options)) {
         CASPAR_LOG(warning) << "av_input[" + filename_ + "]" << " Unused option " << p.first << "=" << p.second;
