@@ -24,6 +24,10 @@
 #include "../util/av_assert.h"
 #include "../util/av_util.h"
 
+#include <chrono>
+#include <sstream>
+#include <iomanip>
+
 extern "C" {
 #include <libavutil/opt.h>
 }
@@ -236,14 +240,9 @@ struct Stream
             // TODO FF(av_opt_set_int_list(sink, "framerates", codec->supported_framerates, { 0, 0 },
             // AV_OPT_SEARCH_CHILDREN));
 
-            // Use av_opt_set_array for pixel_formats (FFmpeg 7.0+)
-            if (codec->pix_fmts) {
-                int nb_pix = 0;
-                while (codec->pix_fmts[nb_pix] != AV_PIX_FMT_NONE) nb_pix++;
-                if (nb_pix > 0) {
-                     FF(av_opt_set_array(sink, "pixel_formats", AV_OPT_SEARCH_CHILDREN, 0, nb_pix, AV_OPT_TYPE_PIXEL_FMT, codec->pix_fmts));
-                }
-            }
+            // Use av_opt_set_int_list for pix_fmts
+            FF(av_opt_set_int_list(sink, "pix_fmts", codec->pix_fmts, AV_PIX_FMT_NONE, AV_OPT_SEARCH_CHILDREN));
+
 #ifdef _MSC_VER
 #pragma warning(pop)
 #endif
@@ -262,32 +261,16 @@ struct Stream
 #endif
             // TODO codec->profiles
             
-            // Set sample_formats using av_opt_set_array
-            if (codec->sample_fmts) {
-                int nb_sample = 0;
-                while (codec->sample_fmts[nb_sample] != AV_SAMPLE_FMT_NONE) nb_sample++;
-                if (nb_sample > 0) {
-                     FF(av_opt_set_array(sink, "sample_formats", AV_OPT_SEARCH_CHILDREN, 0, nb_sample, AV_OPT_TYPE_SAMPLE_FMT, codec->sample_fmts));
-                }
-            }
+            // Set sample_fmts using av_opt_set_int_list
+            FF(av_opt_set_int_list(sink, "sample_fmts", codec->sample_fmts, AV_SAMPLE_FMT_NONE, AV_OPT_SEARCH_CHILDREN));
 
-            // Set samplerates using av_opt_set_array
-            if (codec->supported_samplerates) {
-                int nb_rate = 0;
-                while (codec->supported_samplerates[nb_rate] != 0) nb_rate++;
-                if (nb_rate > 0) {
-                     FF(av_opt_set_array(sink, "samplerates", AV_OPT_SEARCH_CHILDREN, 0, nb_rate, AV_OPT_TYPE_INT, codec->supported_samplerates));
-                }
-            }
+            // Set samplerates using av_opt_set_int_list
+            // Note: supported_samplerates is terminated by 0
+            FF(av_opt_set_int_list(sink, "sample_rates", codec->supported_samplerates, 0, AV_OPT_SEARCH_CHILDREN));
 
             // Set channel_layouts
-            if (codec->ch_layouts) {
-                int nb_layouts = 0;
-                while (codec->ch_layouts[nb_layouts].nb_channels) nb_layouts++;
-                if (nb_layouts > 0) {
-                     FF(av_opt_set_array(sink, "channel_layouts", AV_OPT_SEARCH_CHILDREN, 0, nb_layouts, AV_OPT_TYPE_CHLAYOUT, codec->ch_layouts));
-                }
-            }
+            // TODO: need to translate codec->ch_layouts into something that can be passed via av_opt_set_*
+            // FF(av_opt_set_chlayout(sink, "ch_layouts", codec->ch_layouts, AV_OPT_SEARCH_CHILDREN));
 
 #ifdef _MSC_VER
 #pragma warning(pop)
@@ -371,12 +354,6 @@ struct Stream
         }
 
         FF(avcodec_parameters_from_context(st->codecpar, enc.get()));
-        
-        // Force VMX codec tag to prevent it being written as rawvideo in AVI,
-        // which causes read errors (invalid buffer size) in newer FFmpeg versions.
-        if (st->codecpar->codec_id == AV_CODEC_ID_VMX) {
-             st->codecpar->codec_tag = MKTAG('V', 'M', 'X', ' ');
-        }
 
         if (codec->type == AVMEDIA_TYPE_AUDIO && !(codec->capabilities & AV_CODEC_CAP_VARIABLE_FRAME_SIZE)) {
             av_buffersink_set_frame_size(sink, enc->frame_size);
@@ -457,6 +434,11 @@ struct ffmpeg_consumer : public core::frame_consumer
     std::thread                                                                              frame_thread_;
 
     common::bit_depth depth_;
+
+    // FPS counter
+    std::chrono::steady_clock::time_point last_fps_update_;
+    int                     frames_since_update_ = 0;
+    double                  current_fps_ = 0.0;
 
   public:
     ffmpeg_consumer(std::string path, std::string args, bool realtime, common::bit_depth depth)
@@ -679,6 +661,23 @@ struct ffmpeg_consumer : public core::frame_consumer
 
     std::future<bool> send(core::video_field field, core::const_frame frame) override
     {
+        // FPS Calc
+        auto now = std::chrono::steady_clock::now();
+        frames_since_update_++;
+        auto duration_sec = std::chrono::duration_cast<std::chrono::duration<double>>(now - last_fps_update_).count();
+        
+        if (duration_sec >= 1.0) {
+            current_fps_ = (double)frames_since_update_ / duration_sec;
+            frames_since_update_ = 0;
+            last_fps_update_ = now;
+            
+            std::wstringstream stats;
+            stats.precision(2);
+            stats << std::fixed;
+            stats << u16(print()) << L" Fps: " << current_fps_;
+            graph_->set_text(stats.str());
+        }
+
         // TODO - field alignment
 
         {

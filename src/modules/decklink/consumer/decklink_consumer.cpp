@@ -31,6 +31,10 @@
 
 #include "../util/util.h"
 
+#include <chrono>
+#include <sstream>
+#include <iomanip>
+
 #include <core/consumer/channel_info.h>
 #include <core/consumer/frame_consumer.h>
 #include <core/frame/frame.h>
@@ -642,6 +646,12 @@ struct decklink_consumer final : public IDeckLinkVideoOutputCallback
 
     spl::shared_ptr<diagnostics::graph> graph_;
     caspar::timer                       tick_timer_;
+
+    // FPS counter
+    std::chrono::steady_clock::time_point last_fps_update_;
+    int                     frames_since_update_ = 0;
+    double                  current_fps_ = 0.0;
+
     reference_signal_detector           reference_signal_detector_{output_};
     // std::atomic<int64_t>                                  scheduled_frames_completed_{0};
     std::vector<std::unique_ptr<decklink_secondary_port>> secondary_port_contexts_;
@@ -1082,6 +1092,23 @@ struct decklink_consumer final : public IDeckLinkVideoOutputCallback
 
     bool send(core::video_field field, core::const_frame frame)
     {
+        // FPS Calc
+        auto now = std::chrono::steady_clock::now();
+        frames_since_update_++;
+        auto duration_sec = std::chrono::duration_cast<std::chrono::duration<double>>(now - last_fps_update_).count();
+        
+        if (duration_sec >= 1.0) {
+            current_fps_ = (double)frames_since_update_ / duration_sec;
+            frames_since_update_ = 0;
+            last_fps_update_ = now;
+            
+            std::wstringstream stats;
+            stats.precision(2);
+            stats << std::fixed;
+            stats << print() << L" Fps: " << current_fps_;
+            graph_->set_text(stats.str());
+        }
+
         {
             std::lock_guard<std::mutex> lock(exception_mutex_);
             if (exception_ != nullptr) {

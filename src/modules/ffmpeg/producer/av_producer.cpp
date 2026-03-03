@@ -32,6 +32,10 @@ extern "C" {
 #include <core/frame/frame_factory.h>
 #include <core/monitor/monitor.h>
 
+#include <chrono>
+#include <sstream>
+#include <iomanip>
+
 #ifdef _MSC_VER
 #pragma warning(push)
 #pragma warning(disable : 4244)
@@ -158,17 +162,6 @@ class Decoder
     explicit Decoder(AVStream* stream)
         : st(stream)
     {
-        // Workaround: Map VMX codec tag manually if not detected
-        if (stream->codecpar->codec_id == AV_CODEC_ID_NONE || stream->codecpar->codec_id == AV_CODEC_ID_RAWVIDEO) {
-            // Check for VMX tags: 'VMX\0' (0x00584D56) or 'VMX ' (0x20584D56)
-            if (stream->codecpar->codec_tag == 0x00584D56 || stream->codecpar->codec_tag == 0x20584D56) {
-                const AVCodec* vmx_codec = avcodec_find_decoder_by_name("libvmx");
-                if (vmx_codec) {
-                    stream->codecpar->codec_id = vmx_codec->id;
-                }
-            }
-        }
-
         const auto codec = get_decoder(stream->codecpar->codec_id);
 
         if (!codec) {
@@ -183,12 +176,6 @@ class Decoder
         }
 
         FF(avcodec_parameters_to_context(ctx.get(), stream->codecpar));
-
-        // Workaround: VMX codec parameters often lack pixel format until first frame is decoded.
-        // Force a default of BGR0 to allow filter graph initialization.
-        if (ctx->codec_id == AV_CODEC_ID_VMX && ctx->pix_fmt == AV_PIX_FMT_NONE) {
-            ctx->pix_fmt = AV_PIX_FMT_BGR0;
-        }
 
         if (stream->metadata != NULL) {
             auto entry = av_dict_get(stream->metadata, "alpha_mode", NULL, AV_DICT_MATCH_CASE);
@@ -616,11 +603,9 @@ struct Filter
             sink = avfilter_graph_alloc_filter(graph.get(), avfilter_get_by_name("buffersink"), "out");
             if (!sink) FF(AVERROR(ENOMEM));
 
-            // Set 'pixel_formats' properly via av_opt_set_array (FFmpeg 7.0+)
-            int nb_pix = 0;
-            while (pix_fmts[nb_pix] != AV_PIX_FMT_NONE) nb_pix++;
-            FF(av_opt_set_array(sink, "pixel_formats", AV_OPT_SEARCH_CHILDREN, 0, nb_pix, AV_OPT_TYPE_PIXEL_FMT, pix_fmts));
-
+            // Set 'pixel_formats' properly via av_opt_set_int_list
+            FF(av_opt_set_int_list(sink, "pix_fmts", pix_fmts, AV_PIX_FMT_NONE, AV_OPT_SEARCH_CHILDREN));
+            
             FF(avfilter_init_str(sink, nullptr));
 
 #ifdef _MSC_VER
@@ -636,17 +621,13 @@ struct Filter
             sink = avfilter_graph_alloc_filter(graph.get(), avfilter_get_by_name("abuffersink"), "out");
             if (!sink) FF(AVERROR(ENOMEM));
 
-            // Set 'sample_formats' properly via av_opt_set_array
-            int nb_sample = 0;
-            while (sample_fmts[nb_sample] != AV_SAMPLE_FMT_NONE) nb_sample++;
-            FF(av_opt_set_array(sink, "sample_formats", AV_OPT_SEARCH_CHILDREN, 0, nb_sample, AV_OPT_TYPE_SAMPLE_FMT, sample_fmts));
+            FF(av_opt_set_int_list(sink, "sample_fmts", sample_fmts, AV_SAMPLE_FMT_NONE, AV_OPT_SEARCH_CHILDREN));
 
             // 'all_channel_counts' is deprecated. Modern ffmpeg usually negotiates automatically.
             
             const int sample_rates[] = {format_desc.audio_sample_rate, -1};
             
-            // Set 'samplerates' properly via av_opt_set_array
-            FF(av_opt_set_array(sink, "samplerates", AV_OPT_SEARCH_CHILDREN, 0, 1, AV_OPT_TYPE_INT, sample_rates));
+            FF(av_opt_set_int_list(sink, "sample_rates", sample_rates, -1, AV_OPT_SEARCH_CHILDREN));
 
             FF(avfilter_init_str(sink, nullptr));
 #ifdef _MSC_VER
@@ -734,6 +715,8 @@ struct AVProducer::Impl
     std::atomic<int64_t> input_duration_{AV_NOPTS_VALUE};
     std::atomic<int64_t> seek_{AV_NOPTS_VALUE};
     std::atomic<bool>    loop_{false};
+    bool                 growing_{false};
+    std::atomic<double>  speed_{1.0};
 
     std::string afilter_;
     std::string vfilter_;
@@ -757,6 +740,11 @@ struct AVProducer::Impl
 
     int latency_ = 0;
 
+    // FPS counter
+    std::chrono::steady_clock::time_point last_fps_update_;
+    int                     frames_since_update_ = 0;
+    double                  current_fps_ = 0.0;
+
     boost::thread thread_;
 
     Impl(std::shared_ptr<core::frame_factory> frame_factory,
@@ -770,13 +758,14 @@ struct AVProducer::Impl
          std::optional<int64_t>               duration,
          bool                                 loop,
          int                                  seekable,
-         core::frame_geometry::scale_mode     scale_mode)
+         core::frame_geometry::scale_mode     scale_mode,
+         bool                                 growing)
         : frame_factory_(frame_factory)
         , format_desc_(format_desc)
         , format_tb_({format_desc.duration, format_desc.time_scale * format_desc.field_count})
         , name_(name)
         , path_(path)
-        , input_(path, graph_, seekable >= 0 && seekable < 2 ? std::optional<bool>(false) : std::optional<bool>())
+        , input_(path, graph_, seekable >= 0 && seekable < 2 ? std::optional<bool>(false) : std::optional<bool>(), growing)
         , start_(start ? av_rescale_q(*start, format_tb_, TIME_BASE_Q) : AV_NOPTS_VALUE)
         , duration_(duration ? av_rescale_q(*duration, format_tb_, TIME_BASE_Q) : AV_NOPTS_VALUE)
         , loop_(loop)
@@ -784,6 +773,7 @@ struct AVProducer::Impl
         , vfilter_(vfilter)
         , seekable_(seekable)
         , scale_mode_(scale_mode)
+        , growing_(growing)
         , video_executor_(L"video-executor")
         , audio_executor_(L"audio-executor")
     {
@@ -906,8 +896,8 @@ struct AVProducer::Impl
                 start       = start != AV_NOPTS_VALUE ? start : 0;
                 auto end    = duration != AV_NOPTS_VALUE ? start + duration : INT64_MAX;
                 auto time   = frame.pts != AV_NOPTS_VALUE ? frame.pts + frame.duration : 0;
-                buffer_eof_ = (video_filter_.eof && audio_filter_.eof) ||
-                              av_rescale_q(time, TIME_BASE_Q, format_tb_) >= av_rescale_q(end, TIME_BASE_Q, format_tb_);
+                buffer_eof_ = !growing_ && ((video_filter_.eof && audio_filter_.eof) ||
+                              av_rescale_q(time, TIME_BASE_Q, format_tb_) >= av_rescale_q(end, TIME_BASE_Q, format_tb_));
 
                 if (buffer_eof_) {
                     if (loop_ && frame_count_ > 2) {
@@ -1016,7 +1006,12 @@ struct AVProducer::Impl
 
     void update_state()
     {
-        graph_->set_text(u16(print()));
+        std::wstringstream stats;
+        stats.precision(2);
+        stats << std::fixed;
+        stats << u16(print()) << L" Fps: " << current_fps_;
+        graph_->set_text(stats.str());
+
         boost::lock_guard<boost::mutex> lock(state_mutex_);
         state_["file/clip"] = {start().value_or(0) / format_desc_.fps, duration().value_or(0) / format_desc_.fps};
         state_["file/time"] = {time() / format_desc_.fps, file_duration().value_or(0) / format_desc_.fps};
@@ -1052,22 +1047,57 @@ struct AVProducer::Impl
 
     core::draw_frame next_frame(const core::video_field field)
     {
+        // FPS Calc
+        auto now = std::chrono::steady_clock::now();
+        frames_since_update_++;
+        auto duration_sec = std::chrono::duration_cast<std::chrono::duration<double>>(now - last_fps_update_).count();
+        
+        if (duration_sec >= 1.0) {
+            current_fps_ = (double)frames_since_update_ / duration_sec;
+            frames_since_update_ = 0;
+            last_fps_update_ = now;
+        }
+
         CASPAR_SCOPE_EXIT { update_state(); };
 
         boost::lock_guard<boost::mutex> lock(buffer_mutex_);
 
-        if (buffer_.empty() || (frame_flush_ && buffer_.size() < 4)) {
+        // Speed Logic
+        if (std::abs(speed_ - 1.0) > 0.01) {
+            if (!buffer_.empty()) {
+                frame_          = buffer_[0].frame;
+                frame_time_     = buffer_[0].pts;
+                frame_duration_ = buffer_[0].duration;
+                frame_flush_    = false;
+
+                buffer_.pop_front();
+                buffer_cond_.notify_all();
+
+                graph_->set_value("buffer",
+                                  static_cast<double>(buffer_.size()) / static_cast<double>(buffer_capacity_));
+
+                if (frame_time_ != AV_NOPTS_VALUE && frame_duration_ != AV_NOPTS_VALUE) {
+                    seek_ = frame_time_ + static_cast<int64_t>(frame_duration_ * speed_);
+                }
+                return frame_;
+            }
+            return core::draw_frame::still(frame_);
+        }
+
+        if (buffer_.empty() || (frame_flush_ && buffer_.size() < (growing_ ? 1 : 4))) {
             auto start    = start_.load();
             auto duration = duration_.load();
 
             start    = start != AV_NOPTS_VALUE ? start : 0;
             auto end = duration != AV_NOPTS_VALUE ? start + duration : INT64_MAX;
 
-            if (buffer_eof_ && !frame_flush_) {
-                if (frame_time_ < end && frame_duration_ != AV_NOPTS_VALUE) {
-                    frame_time_ += frame_duration_;
-                } else if (frame_time_ < end) {
-                    frame_time_ = input_duration_;
+            if ((buffer_eof_ || growing_) && !frame_flush_) {
+                if (buffer_eof_) {
+                    if (frame_time_ < end && frame_duration_ != AV_NOPTS_VALUE) {
+                        frame_time_ += frame_duration_;
+                    } else if (frame_time_ < end) {
+                        frame_time_ = input_duration_;
+                    }
                 }
                 return core::draw_frame::still(frame_);
             }
@@ -1136,6 +1166,15 @@ struct AVProducer::Impl
     }
 
     bool loop() const { return loop_; }
+
+    void speed(double speed)
+    {
+        CASPAR_SCOPE_EXIT { update_state(); };
+
+        speed_ = speed;
+    }
+
+    double speed() const { return speed_; }
 
     void start(int64_t start)
     {
@@ -1312,7 +1351,8 @@ AVProducer::AVProducer(std::shared_ptr<core::frame_factory> frame_factory,
                        std::optional<int64_t>               duration,
                        std::optional<bool>                  loop,
                        int                                  seekable,
-                       core::frame_geometry::scale_mode     scale_mode)
+                       core::frame_geometry::scale_mode     scale_mode,
+                       bool                                 growing)
     : impl_(new Impl(std::move(frame_factory),
                      std::move(format_desc),
                      std::move(name),
@@ -1324,7 +1364,8 @@ AVProducer::AVProducer(std::shared_ptr<core::frame_factory> frame_factory,
                      std::move(duration),
                      std::move(loop.value_or(false)),
                      seekable,
-                     scale_mode))
+                     scale_mode,
+                     growing))
 {
 }
 
@@ -1347,6 +1388,14 @@ AVProducer& AVProducer::loop(bool loop)
 }
 
 bool AVProducer::loop() const { return impl_->loop(); }
+
+AVProducer& AVProducer::speed(double speed)
+{
+    impl_->speed(speed);
+    return *this;
+}
+
+double AVProducer::speed() const { return impl_->speed(); }
 
 AVProducer& AVProducer::start(int64_t start)
 {

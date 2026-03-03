@@ -26,7 +26,8 @@ class AVProducer
                std::optional<int64_t>               duration,
                std::optional<bool>                  loop,
                int                                  seekable,
-               core::frame_geometry::scale_mode     scale_mode);
+               core::frame_geometry::scale_mode     scale_mode,
+               bool                                 growing = false);
 
     core::draw_frame prev_frame(const core::video_field field);
     core::draw_frame next_frame(const core::video_field field);
@@ -37,6 +38,9 @@ class AVProducer
 
     AVProducer& loop(bool loop);
     bool        loop() const;
+
+    AVProducer& speed(double speed);
+    double      speed() const;
 
     AVProducer& start(int64_t start);
     int64_t     start() const;

@@ -25,6 +25,10 @@
 
 #include "../util/util.h"
 
+#include <chrono>
+#include <sstream>
+#include <iomanip>
+
 #include <common/diagnostics/graph.h>
 #include <common/except.h>
 #include <common/executor.h>
@@ -476,6 +480,11 @@ class decklink_producer : public IDeckLinkInputCallback
 
     core::draw_frame last_frame_;
 
+    // FPS counter
+    std::chrono::steady_clock::time_point last_fps_update_;
+    int                     frames_since_update_ = 0;
+    double                  current_fps_ = 0.0;
+
     int                                                        buffer_capacity_ = 4;
     std::deque<std::pair<core::draw_frame, core::video_field>> buffer_;
     mutable std::mutex                                         buffer_mutex_;
@@ -837,6 +846,23 @@ class decklink_producer : public IDeckLinkInputCallback
 
     core::draw_frame get_frame(const core::video_field field, bool use_last_frame)
     {
+        // FPS Calc
+        auto now = std::chrono::steady_clock::now();
+        frames_since_update_++;
+        auto duration_sec = std::chrono::duration_cast<std::chrono::duration<double>>(now - last_fps_update_).count();
+        
+        if (duration_sec >= 1.0) {
+            current_fps_ = (double)frames_since_update_ / duration_sec;
+            frames_since_update_ = 0;
+            last_fps_update_ = now;
+            
+            std::wstringstream stats;
+            stats.precision(2);
+            stats << std::fixed;
+            stats << print() << L" Fps: " << current_fps_;
+            graph_->set_text(stats.str());
+        }
+
         if (exception_ != nullptr) {
             std::rethrow_exception(exception_);
         }

@@ -24,7 +24,7 @@ namespace caspar { namespace ffmpeg {
 class Input
 {
   public:
-    Input(const std::string& filename, std::shared_ptr<diagnostics::graph> graph, std::optional<bool> seekable);
+    Input(const std::string& filename, std::shared_ptr<diagnostics::graph> graph, std::optional<bool> seekable, bool growing = false);
     ~Input();
 
     static int interrupt_cb(void* ctx);
@@ -44,6 +44,7 @@ class Input
     void internal_reset();
 
     std::optional<bool> seekable_;
+    bool                growing_;
 
     std::string                         filename_;
     std::shared_ptr<diagnostics::graph> graph_;

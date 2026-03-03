@@ -24,6 +24,9 @@
 #include "common/os/thread.h"
 #include "video_channel.h"
 
+#include <chrono>
+#include <sstream>
+
 #include "video_format.h"
 
 #include "consumer/channel_info.h"
@@ -68,6 +71,10 @@ struct video_channel::impl final
     std::shared_ptr<core::stage> stage_;
 
     uint64_t frame_counter_ = 0;
+
+    std::chrono::steady_clock::time_point last_fps_update_ = std::chrono::steady_clock::now();
+    int                                   frames_since_update_ = 0;
+    double                                current_fps_ = 0.0;
 
     std::function<void(core::monitor::state)> tick_;
 
@@ -127,6 +134,16 @@ struct video_channel::impl final
 
             while (!abort_request_) {
                 try {
+                    frames_since_update_++;
+                    auto   now          = std::chrono::steady_clock::now();
+                    double duration_sec = std::chrono::duration_cast<std::chrono::duration<double>>(now - last_fps_update_).count();
+
+                    if (duration_sec >= 1.0) {
+                        current_fps_         = frames_since_update_ / duration_sec;
+                        frames_since_update_ = 0;
+                        last_fps_update_     = now;
+                    }
+
                     graph_->set_text(print());
 
                     frame_counter_ += 1;
@@ -231,8 +248,12 @@ struct video_channel::impl final
 
     std::wstring print() const
     {
-        return L"video_channel[" + std::to_wstring(channel_info_.index) + L"|" + stage_->video_format_desc().name +
-               L"]";
+        std::wstringstream stats;
+        stats.precision(2);
+        stats << std::fixed;
+        stats << L"Fps: " << current_fps_ << L" video_channel[" << channel_info_.index << L"|" << stage_->video_format_desc().name
+              << L"]";
+        return stats.str();
     }
 
     int index() const { return channel_info_.index; }

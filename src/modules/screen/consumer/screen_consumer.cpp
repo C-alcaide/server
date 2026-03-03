@@ -59,6 +59,10 @@
 #include "../util/x11_util.h"
 #endif
 
+#include <chrono>
+#include <sstream>
+#include <iomanip>
+
 #include "consumer_screen_fragment.h"
 #include "consumer_screen_vertex.h"
 #include <accelerator/ogl/util/shader.h>
@@ -156,6 +160,11 @@ struct screen_consumer
 
     spl::shared_ptr<diagnostics::graph> graph_;
     caspar::timer                       tick_timer_;
+
+    // FPS counter
+    std::chrono::steady_clock::time_point last_fps_update_;
+    int                     frames_since_update_ = 0;
+    double                  current_fps_ = 0.0;
 
     tbb::concurrent_bounded_queue<core::const_frame> frame_buffer_;
 
@@ -422,6 +431,23 @@ struct screen_consumer
 
     std::future<bool> send(core::video_field field, const core::const_frame& frame)
     {
+        // FPS Calc
+        auto now = std::chrono::steady_clock::now();
+        frames_since_update_++;
+        auto duration_sec = std::chrono::duration_cast<std::chrono::duration<double>>(now - last_fps_update_).count();
+        
+        if (duration_sec >= 1.0) {
+            current_fps_ = (double)frames_since_update_ / duration_sec;
+            frames_since_update_ = 0;
+            last_fps_update_ = now;
+            
+            std::wstringstream stats;
+            stats.precision(2);
+            stats << std::fixed;
+            stats << print() << L" Fps: " << current_fps_;
+            graph_->set_text(stats.str());
+        }
+
         const int MAX_TRIES = 3;
         int       count     = 0;
         while (count++ < MAX_TRIES && is_running_) {
@@ -432,10 +458,10 @@ struct screen_consumer
         }
 
         if (count == MAX_TRIES) {
-            graph_->set_tag(diagnostics::tag_severity::WARNING, "dropped-frame");
+             graph_->set_tag(diagnostics::tag_severity::WARNING, "dropped-frame");
         }
 
-        return make_ready_future(is_running_.load());
+        return caspar::make_ready_future(is_running_.load());
     }
 
     std::wstring channel_and_format() const

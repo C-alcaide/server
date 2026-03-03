@@ -8,6 +8,9 @@
 #include <common/param.h>
 #include <common/scope_exit.h>
 
+#include <thread>
+#include <chrono>
+
 #include <boost/algorithm/string/case_conv.hpp>
 #include <boost/filesystem.hpp>
 
@@ -26,10 +29,11 @@ extern "C" {
 
 namespace caspar { namespace ffmpeg {
 
-Input::Input(const std::string& filename, std::shared_ptr<diagnostics::graph> graph, std::optional<bool> seekable)
+Input::Input(const std::string& filename, std::shared_ptr<diagnostics::graph> graph, std::optional<bool> seekable, bool growing)
     : filename_(filename)
     , graph_(graph)
     , seekable_(seekable)
+    , growing_(growing)
 {
     graph_->set_color("seek", diagnostics::color(1.0f, 0.5f, 0.0f));
     graph_->set_color("input", diagnostics::color(0.7f, 0.4f, 0.4f));
@@ -58,6 +62,13 @@ Input::Input(const std::string& filename, std::shared_ptr<diagnostics::graph> gr
                     } else if (ret == AVERROR(EAGAIN)) {
                         boost::this_thread::yield();
                     } else if (ret == AVERROR_EOF) {
+                        if (growing_) {
+                            if (ic_->pb) {
+                                avio_seek(ic_->pb, 0, SEEK_CUR);
+                            }
+                            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                            continue;
+                        }
                         eof_   = true;
                         packet = nullptr;
                     } else {
@@ -162,24 +173,6 @@ void Input::internal_reset()
 
     FF(avformat_open_input(&ic, filename_.c_str(), input_format, &options));
     auto ic2 = std::shared_ptr<AVFormatContext>(ic, [](AVFormatContext* ctx) { avformat_close_input(&ctx); });
-
-    // Workaround: Manually map VMX codec tag if the demuxer missed it.
-    // This allows avformat_find_stream_info to use the correct decoder for probing.
-    for (unsigned int i = 0; i < ic->nb_streams; i++) {
-        AVStream* st = ic->streams[i];
-        if (st->codecpar->codec_id == AV_CODEC_ID_NONE || st->codecpar->codec_id == AV_CODEC_ID_RAWVIDEO) {
-            // Check for VMX tags: 'VMX\0' (0x584D56) or 'VMX ' (0x20584D56)
-            // Note: 0x584D56 is 5786966 in decimal
-            if (st->codecpar->codec_tag == 0x584D56 || st->codecpar->codec_tag == 0x00584D56 || st->codecpar->codec_tag == 0x20584D56) {
-                st->codecpar->codec_id = AV_CODEC_ID_VMX;
-                // Force a pixel format to help probe/decoder
-                if (st->codecpar->format == AV_PIX_FMT_NONE) {
-                    st->codecpar->format = AV_PIX_FMT_BGR0;
-                }
-                CASPAR_LOG(info) << "av_input[" << filename_ << "] Forced VMX codec for VMX tag";
-            }
-        }
-    }
 
     for (auto& p : to_map(&options)) {
         CASPAR_LOG(warning) << "av_input[" + filename_ + "]" << " Unused option " << p.first << "=" << p.second;

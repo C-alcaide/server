@@ -1,6 +1,10 @@
 cmake_minimum_required (VERSION 3.28)
 project("modules")
 
+if (MSVC)
+    add_subdirectory(vmx)
+endif()
+
 add_subdirectory(image)
 add_subdirectory(ffmpeg)
 add_subdirectory(oal)
@@ -15,6 +19,7 @@ endif ()
 
 if (MSVC)
 	add_subdirectory(flash)
-	add_subdirectory(bluefish)
+    # add_subdirectory(vmx) moved to top to prioritize over ffmpeg
+    add_subdirectory(bluefish)
 endif()
 
