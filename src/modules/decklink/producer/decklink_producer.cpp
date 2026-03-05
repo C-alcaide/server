@@ -25,6 +25,8 @@
 
 #include "../util/util.h"
 
+#include <common/env.h>
+#include <boost/property_tree/ptree.hpp>
 #include <common/diagnostics/graph.h>
 #include <common/except.h>
 #include <common/executor.h>
@@ -68,12 +70,55 @@ extern "C" {
 #include <boost/format.hpp>
 
 #include <mutex>
+#include <thread>
+#include <atomic>
+#include <map>
+#include <condition_variable>
 
 #include "../decklink_api.h"
 
 using namespace caspar::ffmpeg;
 
 namespace caspar { namespace decklink {
+
+class decklink_producer; // Forward declaration
+
+class DeckLinkSyncManager
+{
+    struct Group
+    {
+        std::vector<decklink_producer*> producers;
+        size_t                          expected_peers = 1;
+        bool                            started        = false;
+        std::mutex                      mutex;
+    };
+
+    std::map<int, std::shared_ptr<Group>> groups_;
+    std::mutex                            manager_mutex_;
+    std::thread                           monitor_thread_;
+    std::atomic<bool>                     monitoring_{false};
+
+    DeckLinkSyncManager() = default;
+
+    void start_monitor_loop();
+
+  public:
+    static DeckLinkSyncManager& instance()
+    {
+        static DeckLinkSyncManager instance;
+        return instance;
+    }
+
+    ~DeckLinkSyncManager()
+    {
+        monitoring_ = false;
+        if (monitor_thread_.joinable())
+            monitor_thread_.join();
+    }
+
+    void register_producer(int group_id, int peers, decklink_producer* producer);
+    void unregister_producer(int group_id, decklink_producer* producer);
+};
 
 struct Filter
 {
@@ -474,6 +519,10 @@ class decklink_producer : public IDeckLinkInputCallback
     bool has_signal_;
     bool hdr_;
 
+    int sync_group_ = 0;
+    int sync_peers_ = 1;
+    friend class DeckLinkSyncManager;
+
     core::draw_frame last_frame_;
 
     int                                                        buffer_capacity_ = 4;
@@ -503,7 +552,9 @@ class decklink_producer : public IDeckLinkInputCallback
                       std::string                                 afilter,
                       const std::wstring&                         format,
                       bool                                        freeze_on_lost,
-                      bool                                        hdr)
+                      bool                                        hdr,
+                      int                                         sync_group,
+                      int                                         sync_peers)
         : device_index_(device_index)
         , format_desc_(std::move(format_desc))
         , frame_factory_(frame_factory)
@@ -513,6 +564,8 @@ class decklink_producer : public IDeckLinkInputCallback
         , input_format(format_desc_)
         , vfilter_(std::move(vfilter))
         , afilter_(std::move(afilter))
+        , sync_group_(sync_group)
+        , sync_peers_(sync_peers)
     {
         // use user-provided format if available, or choose the channel's output format
         if (!format.empty()) {
@@ -547,6 +600,23 @@ class decklink_producer : public IDeckLinkInputCallback
             flags = 0;
         }
 
+        if (sync_group_ > 0) {
+            flags |= bmdVideoInputSynchronizeToCaptureGroup;
+            CASPAR_LOG(info) << print() << " Joining Sync Group " << sync_group_ << " (Expect " << sync_peers_
+                             << " peers)";
+
+            if (m_deckLinkConfig) {
+                // Should potentially check error code
+                m_deckLinkConfig->SetInt(bmdDeckLinkConfigCaptureGroup, (int64_t)sync_group_);
+            } else {
+                // Try to query it if not available (attributes_ is ProfileAttributes, we need Configuration)
+                com_ptr<IDeckLinkConfiguration> config;
+                if (SUCCEEDED(decklink_->QueryInterface(IID_IDeckLinkConfiguration, (void**)&config))) {
+                    config->SetInt(bmdDeckLinkConfigCaptureGroup, (int64_t)sync_group_);
+                }
+            }
+        }
+
         if (FAILED(input_->EnableVideoInput(mode_->GetDisplayMode(), get_pixel_format2(hdr_), flags))) {
             CASPAR_THROW_EXCEPTION(caspar_exception() << msg_info(print() + L" Could not enable video input.")
                                                       << boost::errinfo_api_function("EnableVideoInput"));
@@ -564,16 +634,47 @@ class decklink_producer : public IDeckLinkInputCallback
                                                       << boost::errinfo_api_function("SetCallback"));
         }
 
-        if (FAILED(input_->StartStreams())) {
-            CASPAR_THROW_EXCEPTION(caspar_exception() << msg_info(print() + L" Unable to start input stream.")
-                                                      << boost::errinfo_api_function("StartStreams"));
+        if (sync_group_ > 0) {
+            // Register with Sync Manager and wait for it to start us
+            DeckLinkSyncManager::instance().register_producer(sync_group_, sync_peers_, this);
+        } else {
+            if (FAILED(input_->StartStreams())) {
+                CASPAR_THROW_EXCEPTION(caspar_exception() << msg_info(print() + L" Unable to start input stream.")
+                                                          << boost::errinfo_api_function("StartStreams"));
+            }
         }
 
         CASPAR_LOG(info) << print() << L" Initialized";
     }
 
+    // Called by SyncManager
+    bool check_signal_locked() const
+    {
+        int64_t                  locked = 0;
+        com_ptr<IDeckLinkStatus> status;
+        if (SUCCEEDED(decklink_->QueryInterface(IID_IDeckLinkStatus, (void**)&status))) {
+            if (SUCCEEDED(status->GetInt(bmdDeckLinkStatusVideoInputSignalLocked, &locked))) {
+                return locked != 0;
+            }
+        }
+        return false;
+    }
+
+    void start_streams()
+    {
+        if (FAILED(input_->StartStreams())) {
+            CASPAR_LOG(error) << print() << " Failed to start synchronized stream";
+        } else {
+            CASPAR_LOG(info) << print() << " Started synchronized stream";
+        }
+    }
+
     ~decklink_producer()
     {
+        if (sync_group_ > 0) {
+            DeckLinkSyncManager::instance().unregister_producer(sync_group_, this);
+        }
+
         if (input_ != nullptr) {
             input_->StopStreams();
             input_->DisableVideoInput();
@@ -986,6 +1087,27 @@ spl::shared_ptr<core::frame_producer> create_producer(const core::frame_producer
     auto vfilter = boost::to_lower_copy(get_param(L"VF", params, filter_str));
     auto afilter = boost::to_lower_copy(get_param(L"AF", params, get_param(L"FILTER", params, L"")));
 
+    auto sync_group = get_param(L"SYNC_GROUP", params, 0);
+    auto sync_peers = get_param(L"SYNC_PEERS", params, 1);
+
+    if (sync_group == 0 && device_index > 0) {
+        try {
+            auto& pt = env::properties();
+            // CasparCG decklink sync config structure is configuration.decklink-sync.device-1...
+            std::wstring base_key = L"configuration.decklink-sync.device-" + std::to_wstring(device_index);
+            
+            // Check if key exists using get_optional, as get throws if key not found and default value overload might not work for path
+            // The get with default value works for paths
+            sync_group = pt.get<int>(base_key + L".group", 0);
+            
+            if (sync_group != 0) {
+                sync_peers = pt.get<int>(base_key + L".peers", 1);
+            }
+        } catch (...) {
+            // Ignore config error
+        }
+    }
+
     return spl::make_shared<decklink_producer_proxy>(dependencies.format_desc,
                                                      dependencies.frame_factory,
                                                      dependencies.format_repository,
@@ -995,6 +1117,87 @@ spl::shared_ptr<core::frame_producer> create_producer(const core::frame_producer
                                                      length,
                                                      format_str,
                                                      freeze_on_lost,
-                                                     hdr);
+                                                     hdr,
+                                                     sync_group,
+                                                     sync_peers);
 }
+
+void DeckLinkSyncManager::register_producer(int group_id, int peers, decklink_producer* producer)
+{
+    std::lock_guard<std::mutex> lock(manager_mutex_);
+    if (groups_.find(group_id) == groups_.end()) {
+        groups_[group_id]                 = std::make_shared<Group>();
+        groups_[group_id]->expected_peers = peers;
+    }
+    auto group = groups_[group_id];
+
+    std::lock_guard<std::mutex> g_lock(group->mutex);
+    group->producers.push_back(producer);
+
+    // If we have enough producers registered, make sure monitor thread is running
+    if (group->producers.size() >= group->expected_peers && !monitoring_) {
+        monitoring_     = true;
+        monitor_thread_ = std::thread(&DeckLinkSyncManager::start_monitor_loop, this);
+        monitor_thread_.detach();
+    }
+}
+
+void DeckLinkSyncManager::unregister_producer(int group_id, decklink_producer* producer)
+{
+    std::lock_guard<std::mutex> lock(manager_mutex_);
+    auto                        it = groups_.find(group_id);
+    if (it != groups_.end()) {
+        std::lock_guard<std::mutex> g_lock(it->second->mutex);
+        auto&                       vec = it->second->producers;
+        vec.erase(std::remove(vec.begin(), vec.end(), producer), vec.end());
+    }
+}
+
+void DeckLinkSyncManager::start_monitor_loop()
+{
+    while (monitoring_) {
+        // Simple polling loop
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+        std::lock_guard<std::mutex> lock(manager_mutex_);
+        if (groups_.empty())
+            continue;
+
+        for (auto& [id, group] : groups_) {
+            std::lock_guard<std::mutex> g_lock(group->mutex);
+            if (group->started)
+                continue;
+
+            // Check if we have enough peers registered
+            if (group->producers.size() < group->expected_peers)
+                continue;
+
+            bool          all_locked   = true;
+            bool          any_unlocked = false;
+            for (auto* p : group->producers) {
+                if (!p->check_signal_locked()) {
+                    all_locked   = false;
+                    any_unlocked = true;
+                    break;
+                }
+            }
+
+            if (all_locked && !group->producers.empty()) {
+                // All signals present. Start capture on the leader (first device)
+                // The driver will start all other devices in the same capture group simultaneously.
+                CASPAR_LOG(info) << "Sync Group " << id << ": All signals locked. Starting synchronized capture.";
+                group->producers[0]->start_streams();
+                group->started = true;
+
+                // Mark the rest as started too (logically) so we don't try again
+                for (size_t i = 1; i < group->producers.size(); ++i) {
+                     // We don't call StartStreams on slaves in sync group
+                     // Logic for them is implicit
+                     CASPAR_LOG(info) << "Sync Group " << id << ": Peer " << i << " started implicitly.";
+                }
+            }
+        }
+    }
+}
+
 }} // namespace caspar::decklink

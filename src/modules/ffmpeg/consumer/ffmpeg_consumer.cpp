@@ -24,6 +24,9 @@
 #include "../util/av_assert.h"
 #include "../util/av_util.h"
 
+// Include LTC Module
+#include "../../ltc/ltc_input.h"
+
 #include <common/bit_depth.h>
 #include <common/diagnostics/graph.h>
 #include <common/env.h>
@@ -92,6 +95,8 @@ struct Stream
 
     std::shared_ptr<AVCodecContext> enc = nullptr;
     AVStream*                       st  = nullptr;
+    bool                            is_ltc = false;
+    uint32_t                        last_frame_number = 0;
 
     Stream(AVFormatContext*                    oc,
            std::string                         suffix,
@@ -101,6 +106,21 @@ struct Stream
            common::bit_depth                   depth,
            std::map<std::string, std::string>& options)
     {
+        if (codec_id == AV_CODEC_ID_TIMECODE) {
+            is_ltc = true;
+            st = avformat_new_stream(oc, nullptr);
+            if (!st) {
+                 FF_RET(AVERROR(ENOMEM), "avformat_new_stream");
+            }
+            
+            st->codecpar->codec_type = AVMEDIA_TYPE_DATA;
+            st->codecpar->codec_tag  = MKTAG('t', 'm', 'c', 'd');
+            st->codecpar->codec_id   = AV_CODEC_ID_TIMECODE;
+            st->time_base            = av_inv_q(format_desc.framerate);
+            // st->avg_frame_rate is usually not set for data streams but maybe good for ref
+            return;
+        }
+
         std::map<std::string, std::string> stream_options;
 
         {
@@ -329,6 +349,30 @@ struct Stream
 
         const auto [in_frame, video_pts, audio_pts] = data;
 
+        if (is_ltc) {
+             if (!in_frame) return;
+
+             pkt = alloc_packet();
+             // 4 bytes payload, big endian frame count typically for TMCD
+             FF(av_new_packet(pkt.get(), 4));
+             pkt->stream_index = st->index;
+             pkt->pts = video_pts;
+             pkt->dts = video_pts;
+             pkt->duration = 1;
+             
+             // Get current LTC frame number or extrapolate
+             uint32_t current_fn = caspar::ltc::LTCInput::instance().get_current_frame_number(25); // assuming 25?
+             
+             // QuickTime tmcd uses Big Endian u32 frame count
+             pkt->data[0] = (current_fn >> 24) & 0xFF;
+             pkt->data[1] = (current_fn >> 16) & 0xFF;
+             pkt->data[2] = (current_fn >> 8) & 0xFF;
+             pkt->data[3] = (current_fn) & 0xFF;
+
+             cb(std::move(pkt));
+             return;
+        }
+
         if (in_frame) {
             if (enc->codec_type == AVMEDIA_TYPE_VIDEO) {
                 frame      = make_av_video_frame(in_frame, format_desc);
@@ -483,6 +527,13 @@ struct ffmpeg_consumer : public core::frame_consumer
 
                     FF(avformat_alloc_output_context2(
                         &oc, nullptr, !format.empty() ? format.c_str() : nullptr, path_.c_str()));
+                }
+                
+                // LTC Metadata Injection
+                if (options.count("ltc") > 0 || options.count("TIMECODE_SOURCE") > 0) {
+                     std::string tc = caspar::ltc::LTCInput::instance().get_current_timecode_string();
+                     av_dict_set(&oc->metadata, "timecode", tc.c_str(), 0);
+                     CASPAR_LOG(info) << "Injected Start Timecode: " << tc;
                 }
 
                 CASPAR_SCOPE_EXIT { avformat_free_context(oc); };
