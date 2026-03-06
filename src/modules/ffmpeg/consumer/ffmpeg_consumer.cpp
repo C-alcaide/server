@@ -32,6 +32,7 @@
 #include <common/env.h>
 #include <common/executor.h>
 #include <common/future.h>
+#include <common/log.h>
 #include <common/memory.h>
 #include <common/scope_exit.h>
 #include <common/timer.h>
@@ -75,6 +76,7 @@ extern "C" {
 #include <tbb/concurrent_queue.h>
 #include <tbb/parallel_for.h>
 #include <tbb/parallel_invoke.h>
+#include <common/os/thread.h>
 
 #include <memory>
 #include <optional>
@@ -485,6 +487,8 @@ struct ffmpeg_consumer : public core::frame_consumer
         graph_->set_text(print());
 
         frame_thread_ = std::thread([=] {
+            caspar::set_thread_name(L"ffmpeg_consumer_frame_thread");
+            caspar::set_thread_realtime_priority();
             try {
                 std::map<std::string, std::string> options;
                 {
@@ -678,6 +682,7 @@ struct ffmpeg_consumer : public core::frame_consumer
 
         if (!frame_buffer_.try_push({frame, video_pts, audio_pts})) {
             graph_->set_tag(diagnostics::tag_severity::WARNING, "dropped-frame");
+            CASPAR_LOG(warning) << "Dropped frame in ffmpeg consumer [" << path_ << "]";
         }
 
         video_pts += 1;
