@@ -2,8 +2,11 @@
 #include <string>
 #include <vector>
 #include <mutex>
+#include <core/module_dependencies.h>
 
 namespace caspar { namespace ltc {
+    void init(const core::module_dependencies& dependencies);
+    
     class LTCInput {
     public: 
         static LTCInput& instance();

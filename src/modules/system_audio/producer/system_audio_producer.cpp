@@ -1,18 +1,21 @@
+#define NOMINMAX  // prevent Windows min/max macro conflicts with std::numeric_limits
 #include <core/frame/frame_factory.h>
+#include <core/frame/frame.h>
 #include <core/producer/frame_producer.h>
 #include <core/video_format.h>
-#include <core/frame/pixel_format.h> // Ensure definition for pixel_format_desc
+#include <core/frame/pixel_format.h>
 #include <core/frame/draw_frame.h>
 #include <common/executor.h>
 #include <common/memory.h>
 #include <common/array.h>
 #include <common/log.h>
+#include <common/utf.h>
 
 #include "system_audio_producer.h"
 
-// miniaudio implementation details
-#define MA_API static
-#define MINIAUDIO_IMPLEMENTATION
+// miniaudio types needed for device selection — implementation is in system_audio_enumerate.cpp
+#define MA_NO_DECODING
+#define MA_NO_ENCODING
 #include "../miniaudio.h"
 
 #include <iostream>
@@ -87,7 +90,7 @@ public:
     {
         // Convert device name to utf8 (Simple cast, assumes ASCII mostly)
         if (!device_name.empty()) {
-            device_name_u8 = std::string(device_name.begin(), device_name.end());
+            device_name_u8 = caspar::u8(device_name);
         }
 
         if (ma_context_init(NULL, 0, NULL, &context) != MA_SUCCESS) {
@@ -182,8 +185,10 @@ public:
             }
         }
         
-        core::pixel_format_desc pix_desc_ = core::pixel_format_desc::from_video_format(format_desc.format);
-        auto frame = frame_factory_->create_frame(this, pix_desc_);
+        // Build a minimal 1×1 BGRA video frame to carry the audio data
+        core::pixel_format_desc pfd(core::pixel_format::bgra);
+        pfd.planes.emplace_back(1, 1, 4);  // 1×1 BGRA
+        auto frame = frame_factory_->create_frame(this, pfd);
         
         // Populate audio data
         // Using vector move constructor for caspar::array to handle memory safely

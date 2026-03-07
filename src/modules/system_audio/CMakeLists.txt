@@ -4,6 +4,7 @@ project(system_audio)
 casparcg_add_module_project(system_audio
     SOURCES 
         system_audio.cpp
+        system_audio_enumerate.cpp
         producer/system_audio_producer.cpp
     INIT_FUNCTION "system_audio::init"
 )

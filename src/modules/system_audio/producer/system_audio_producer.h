@@ -23,19 +23,19 @@ public:
     std::wstring         name() const override;
     core::monitor::state state() const override;
     bool                 is_ready() override { return true; }
-    
-    bool         is_looping() const override { return false; }
-    void         set_looping(bool /*loop*/) override {}
-    bool         is_seekable() const override { return false; }
-    void         seek(int64_t /*to*/) override {}
-    int64_t      duration() const override { return -1; }
-    int64_t      time() const override { return -1; }
-    int          index() const override { return 1000; }
-    
-    bool has_synchronization_clock() const override { return false; }
+
+    // Non-standard producer extras (no override — not in frame_producer base)
+    bool    is_looping() const { return false; }
+    void    set_looping(bool /*loop*/) {}
+    bool    is_seekable() const { return false; }
+    void    seek(int64_t /*to*/) {}
+    int64_t duration() const { return -1; }
+    int64_t time() const { return -1; }
+    int     index() const { return 1000; }
+    bool    has_synchronization_clock() const { return false; }
 
 private:
-    struct impl;
+    class impl;
     std::unique_ptr<impl> impl_;
 };
 

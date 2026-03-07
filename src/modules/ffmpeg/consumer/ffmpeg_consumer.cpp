@@ -108,17 +108,17 @@ struct Stream
            common::bit_depth                   depth,
            std::map<std::string, std::string>& options)
     {
-        if (codec_id == AV_CODEC_ID_TIMECODE) {
+        if (codec_id == AV_CODEC_ID_SMPTE_KLV) {
             is_ltc = true;
             st = avformat_new_stream(oc, nullptr);
             if (!st) {
                  FF_RET(AVERROR(ENOMEM), "avformat_new_stream");
             }
-            
+
             st->codecpar->codec_type = AVMEDIA_TYPE_DATA;
             st->codecpar->codec_tag  = MKTAG('t', 'm', 'c', 'd');
-            st->codecpar->codec_id   = AV_CODEC_ID_TIMECODE;
-            st->time_base            = av_inv_q(format_desc.framerate);
+            st->codecpar->codec_id   = AV_CODEC_ID_SMPTE_KLV;
+            st->time_base            = av_make_q(format_desc.framerate.denominator(), format_desc.framerate.numerator());
             // st->avg_frame_rate is usually not set for data streams but maybe good for ref
             return;
         }

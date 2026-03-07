@@ -23,9 +23,13 @@
 
 #include <core/module_dependencies.h>
 
+#include <string>
+#include <vector>
+
 namespace caspar { namespace decklink {
 
-std::wstring get_version();
-void         init(const core::module_dependencies& dependencies);
+std::wstring                 get_version();
+std::vector<std::wstring>    device_list();
+void                         init(const core::module_dependencies& dependencies);
 
 }} // namespace caspar::decklink

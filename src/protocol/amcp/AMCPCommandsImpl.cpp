@@ -32,6 +32,8 @@
 #include "amcp_args.h"
 
 #include "../../modules/ltc/ltc_input.h"
+#include "../../modules/decklink/decklink.h"
+#include "../../modules/system_audio/system_audio.h"
 
 #include <common/env.h>
 
@@ -1650,6 +1652,28 @@ std::wstring diag_command(command_context& ctx)
     return L"202 DIAG OK\r\n";
 }
 
+std::wstring info_decklink_command(command_context& ctx)
+{
+    std::wstringstream replyString;
+    std::vector<std::wstring> devices = caspar::decklink::device_list();
+    replyString << L"200 INFO DECKLINK OK\r\n";
+    for (const auto& dev : devices)
+        replyString << dev << L"\r\n";
+    replyString << L"\r\n";
+    return replyString.str();
+}
+
+std::wstring info_audio_devices_command(command_context& ctx)
+{
+    std::wstringstream replyString;
+    std::vector<std::wstring> devices = caspar::system_audio::enumerate_capture_devices();
+    replyString << L"200 INFO AUDIO DEVICES OK\r\n";
+    for (const auto& dev : devices)
+        replyString << dev << L"\r\n";
+    replyString << L"\r\n";
+    return replyString.str();
+}
+
 std::wstring bye_command(command_context& ctx)
 {
     ctx.client->disconnect();
@@ -1851,6 +1875,8 @@ void register_commands(std::shared_ptr<amcp_command_repository_wrapper>& repo)
     repo->register_command(L"Query Commands", L"INFO CONFIG", info_config_command, 0);
     repo->register_command(L"Query Commands", L"INFO PATHS", info_paths_command, 0);
     repo->register_command(L"Query Commands", L"INFO LTC", info_ltc_command, 0);
+    repo->register_command(L"Query Commands", L"INFO DECKLINK", info_decklink_command, 0);
+    repo->register_command(L"Query Commands", L"INFO AUDIO DEVICES", info_audio_devices_command, 0);
     repo->register_command(L"LTC Commands", L"LTC LOAD", ltc_load_command, 1);
     repo->register_command(L"Query Commands", L"GL INFO", gl_info_command, 0);
     repo->register_command(L"Query Commands", L"GL GC", gl_gc_command, 0);

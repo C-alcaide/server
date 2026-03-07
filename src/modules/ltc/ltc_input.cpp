@@ -14,8 +14,15 @@
 #include <common/utf.h>
 #include <boost/property_tree/ptree.hpp>
 
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable: 4244)
+#endif
 #define MINIAUDIO_IMPLEMENTATION
 #include "miniaudio.h"
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
 
 namespace caspar { namespace ltc {
     
@@ -51,16 +58,18 @@ class LTCInputImpl {
             // Write to decoder
             // miniaudio f32 -> ltc expects float (if supported) or u8
             // libltc decoder.c supports float
-            ltc_decoder_write_float(self->decoder, (const float*)pInput, frameCount, 0); 
+            ltc_decoder_write_float(self->decoder, (float*)pInput, frameCount, 0); 
             
             // We use a temporary object to hold the read result
-            SMPTETimecode temp_tc;
+            LTCFrameExt temp_frame;
             bool got_frame = false;
-            while(ltc_decoder_read(self->decoder, &temp_tc)) {
+            while(ltc_decoder_read(self->decoder, &temp_frame)) {
                got_frame = true;
             }
 
             if (got_frame) {
+                SMPTETimecode temp_tc;
+                ltc_frame_to_time(&temp_tc, &temp_frame.ltc, 1);
                 std::lock_guard<std::mutex> lock(self->timecode_mutex);
                 self->last_timecode = temp_tc;
                 self->valid_signal = true;
@@ -224,7 +233,11 @@ public:
             return false; 
         }
 
-        if (ma_device_init(&context, &deviceConfig, pDeviceID, &device) != MA_SUCCESS) { // NOTE: ma_device_init takes pDeviceID as 3rd arg for context-based init
+        if (pDeviceID) {
+            deviceConfig.capture.pDeviceID = pDeviceID;
+        }
+
+        if (ma_device_init(&context, &deviceConfig, &device) != MA_SUCCESS) { // NOTE: ma_device_init takes pDeviceID within config
              std::cerr << "Failed to init device\n";
              return false;
         }
@@ -325,7 +338,7 @@ bool LTCInput::set_capture_device(const std::string& name) { return LTCInputImpl
 std::string LTCInput::get_current_device_name() { return LTCInputImpl::instance().get_current_device_name(); }
 bool LTCInput::is_using_system_clock() { return LTCInputImpl::instance().is_using_system_clock(); }
 
-void init() {
+void init(const core::module_dependencies& dependencies) {
     LTCInput::instance().start();
 }
 
