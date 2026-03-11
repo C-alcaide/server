@@ -1,8 +1,9 @@
 #include <core/frame/frame_factory.h>
 #include <core/producer/frame_producer.h>
 #include <core/video_format.h>
-#include <core/frame/pixel_format.h> // Ensure definition for pixel_format_desc
+#include <core/frame/pixel_format.h>
 #include <core/frame/draw_frame.h>
+#include <core/frame/frame.h>
 #include <common/executor.h>
 #include <common/memory.h>
 #include <common/array.h>
@@ -10,10 +11,12 @@
 
 #include "system_audio_producer.h"
 
-// miniaudio implementation details
 #define MA_API static
 #define MINIAUDIO_IMPLEMENTATION
+#pragma warning(push)
+#pragma warning(disable : 4244)
 #include "../miniaudio.h"
+#pragma warning(pop)
 
 #include <iostream>
 #include <mutex>
@@ -182,8 +185,9 @@ public:
             }
         }
         
-        core::pixel_format_desc pix_desc_ = core::pixel_format_desc::from_video_format(format_desc.format);
-        auto frame = frame_factory_->create_frame(this, pix_desc_);
+        core::pixel_format_desc pix_desc(core::pixel_format::bgra);
+        pix_desc.planes.push_back(core::pixel_format_desc::plane(format_desc_.width, format_desc_.height, 4));
+        auto frame = frame_factory_->create_frame(this, pix_desc);
         
         // Populate audio data
         // Using vector move constructor for caspar::array to handle memory safely

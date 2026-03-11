@@ -810,11 +810,7 @@ class decklink_producer : public IDeckLinkInputCallback
             CASPAR_LOG(info) << print() << " Joining Sync Group " << sync_group_ << " (Expect " << sync_peers_
                              << " peers)";
 
-            if (m_deckLinkConfig) {
-                // Should potentially check error code
-                m_deckLinkConfig->SetInt(bmdDeckLinkConfigCaptureGroup, (int64_t)sync_group_);
-            } else {
-                // Try to query it if not available (attributes_ is ProfileAttributes, we need Configuration)
+            {
                 com_ptr<IDeckLinkConfiguration> config;
                 if (SUCCEEDED(decklink_->QueryInterface(IID_IDeckLinkConfiguration, (void**)&config))) {
                     config->SetInt(bmdDeckLinkConfigCaptureGroup, (int64_t)sync_group_);
@@ -1219,7 +1215,9 @@ class decklink_producer_proxy : public core::frame_producer
                                      uint32_t                                    length,
                                      const std::wstring&                         format,
                                      bool                                        freeze_on_lost,
-                                     bool                                        hdr)
+                                     bool                                        hdr,
+                                     int                                         sync_group = 0,
+                                     int                                         sync_peers = 1)
         : length_(length)
         , executor_(L"decklink_producer[" + std::to_wstring(device_index) + L"]")
     {
@@ -1235,7 +1233,9 @@ class decklink_producer_proxy : public core::frame_producer
                                                   afilter,
                                                   format,
                                                   freeze_on_lost,
-                                                  hdr));
+                                                  hdr,
+                                                  sync_group,
+                                                  sync_peers));
         });
     }
 

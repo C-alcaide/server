@@ -23,16 +23,6 @@ public:
     std::wstring         name() const override;
     core::monitor::state state() const override;
     bool                 is_ready() override { return true; }
-    
-    bool         is_looping() const override { return false; }
-    void         set_looping(bool /*loop*/) override {}
-    bool         is_seekable() const override { return false; }
-    void         seek(int64_t /*to*/) override {}
-    int64_t      duration() const override { return -1; }
-    int64_t      time() const override { return -1; }
-    int          index() const override { return 1000; }
-    
-    bool has_synchronization_clock() const override { return false; }
 
 private:
     struct impl;

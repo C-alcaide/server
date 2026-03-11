@@ -15,7 +15,10 @@
 #include <boost/property_tree/ptree.hpp>
 
 #define MINIAUDIO_IMPLEMENTATION
+#pragma warning(push)
+#pragma warning(disable : 4244)
 #include "miniaudio.h"
+#pragma warning(pop)
 
 namespace caspar { namespace ltc {
     
@@ -51,12 +54,14 @@ class LTCInputImpl {
             // Write to decoder
             // miniaudio f32 -> ltc expects float (if supported) or u8
             // libltc decoder.c supports float
-            ltc_decoder_write_float(self->decoder, (const float*)pInput, frameCount, 0); 
+            ltc_decoder_write_float(self->decoder, const_cast<float*>(static_cast<const float*>(pInput)), frameCount, 0); 
             
-            // We use a temporary object to hold the read result
-            SMPTETimecode temp_tc;
+            // We use LTCFrameExt for the decoder read, then convert to SMPTETimecode
+            LTCFrameExt ltc_frame;
             bool got_frame = false;
-            while(ltc_decoder_read(self->decoder, &temp_tc)) {
+            SMPTETimecode temp_tc = {0};
+            while(ltc_decoder_read(self->decoder, &ltc_frame)) {
+               ltc_frame_to_time(&temp_tc, &ltc_frame.ltc, 0);
                got_frame = true;
             }
 
@@ -224,7 +229,11 @@ public:
             return false; 
         }
 
-        if (ma_device_init(&context, &deviceConfig, pDeviceID, &device) != MA_SUCCESS) { // NOTE: ma_device_init takes pDeviceID as 3rd arg for context-based init
+        if (pDeviceID != NULL) {
+            deviceConfig.capture.pDeviceID = pDeviceID;
+        }
+
+        if (ma_device_init(&context, &deviceConfig, &device) != MA_SUCCESS) { // 3-arg form for miniaudio
              std::cerr << "Failed to init device\n";
              return false;
         }
