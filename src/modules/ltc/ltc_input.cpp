@@ -1,6 +1,7 @@
 #include <ltc.h>
 #include <decoder.h>
 #include "ltc_input.h"
+#include "ltc.h"
 #include <mutex>
 #include <atomic>
 #include <string>
@@ -14,7 +15,6 @@
 #include <common/utf.h>
 #include <boost/property_tree/ptree.hpp>
 
-#define MINIAUDIO_IMPLEMENTATION
 #pragma warning(push)
 #pragma warning(disable : 4244)
 #include "miniaudio.h"
@@ -334,7 +334,7 @@ bool LTCInput::set_capture_device(const std::string& name) { return LTCInputImpl
 std::string LTCInput::get_current_device_name() { return LTCInputImpl::instance().get_current_device_name(); }
 bool LTCInput::is_using_system_clock() { return LTCInputImpl::instance().is_using_system_clock(); }
 
-void init() {
+void init(const core::module_dependencies&) {
     LTCInput::instance().start();
 }
 

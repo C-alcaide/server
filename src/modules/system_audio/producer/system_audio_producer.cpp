@@ -8,10 +8,10 @@
 #include <common/memory.h>
 #include <common/array.h>
 #include <common/log.h>
+#include <common/utf.h>
 
 #include "system_audio_producer.h"
 
-#define MA_API static
 #define MINIAUDIO_IMPLEMENTATION
 #pragma warning(push)
 #pragma warning(disable : 4244)
@@ -88,9 +88,8 @@ public:
         : frame_factory_(dependencies.frame_factory)
         , format_desc(dependencies.format_desc)
     {
-        // Convert device name to utf8 (Simple cast, assumes ASCII mostly)
         if (!device_name.empty()) {
-            device_name_u8 = std::string(device_name.begin(), device_name.end());
+            device_name_u8 = caspar::u8(device_name);
         }
 
         if (ma_context_init(NULL, 0, NULL, &context) != MA_SUCCESS) {

@@ -8,6 +8,7 @@ set(LIBLTC_SOURCES
     ${LIBLTC_ROOT}/src/ltc.c
     ${LIBLTC_ROOT}/src/timecode.c
     ${LIBLTC_ROOT}/src/decoder.c
+    ${LIBLTC_ROOT}/src/encoder.c
 )
 
 casparcg_add_module_project(ltc
