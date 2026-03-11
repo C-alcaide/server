@@ -16,6 +16,8 @@ add_subdirectory(artnet)
 if (ENABLE_HTML)
 	add_subdirectory(html)
 endif ()
+add_subdirectory(ltc)
+add_subdirectory(system_audio)
 
 if (MSVC)
 	add_subdirectory(flash)
