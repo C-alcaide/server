@@ -1,8 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 project(ltc)
 
-# Point this to your libltc path
-set(LIBLTC_ROOT "../../../../../libltc")
+set(LIBLTC_ROOT "D:/Github/libltc" CACHE PATH "Path to the libltc root directory")
 
 # Add libltc sources directly to avoid external build steps
 set(LIBLTC_SOURCES
