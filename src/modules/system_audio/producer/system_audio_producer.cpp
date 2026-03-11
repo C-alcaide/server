@@ -186,7 +186,7 @@ public:
         }
         
         core::pixel_format_desc pix_desc(core::pixel_format::bgra);
-        pix_desc.planes.push_back(core::pixel_format_desc::plane(format_desc_.width, format_desc_.height, 4));
+        pix_desc.planes.push_back(core::pixel_format_desc::plane(format_desc.width, format_desc.height, 4));
         auto frame = frame_factory_->create_frame(this, pix_desc);
         
         // Populate audio data
