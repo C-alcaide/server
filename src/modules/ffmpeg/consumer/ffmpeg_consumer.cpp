@@ -35,6 +35,12 @@ extern "C" {
 // Include LTC Module
 #include "../../ltc/ltc_input.h"
 
+// AV_CODEC_ID_TIMECODE was removed in FFmpeg 7; define a local sentinel for tmcd-stream detection.
+// The actual stream codec_id is set to AV_CODEC_ID_NONE — FFmpeg 7 identifies tmcd tracks by codec_tag.
+#ifndef AV_CODEC_ID_TIMECODE
+constexpr AVCodecID AV_CODEC_ID_TIMECODE = static_cast<AVCodecID>(0x17800);
+#endif
+
 #include <common/bit_depth.h>
 #include <common/diagnostics/graph.h>
 #include <common/env.h>
@@ -125,8 +131,9 @@ struct Stream
             
             st->codecpar->codec_type = AVMEDIA_TYPE_DATA;
             st->codecpar->codec_tag  = MKTAG('t', 'm', 'c', 'd');
-            st->codecpar->codec_id   = AV_CODEC_ID_TIMECODE;
-            st->time_base            = av_inv_q(format_desc.framerate);
+            st->codecpar->codec_id   = AV_CODEC_ID_NONE; // tmcd identified by tag in FFmpeg 7+
+            st->time_base            = av_inv_q(AVRational{format_desc.framerate.numerator(),
+                                                           format_desc.framerate.denominator()});
             // st->avg_frame_rate is usually not set for data streams but maybe good for ref
             return;
         }

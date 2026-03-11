@@ -2,7 +2,13 @@ cmake_minimum_required (VERSION 3.28)
 project("modules")
 
 if (MSVC)
-    add_subdirectory(vmx)
+    set(LIBVMX_ROOT "D:/Github/libvmx" CACHE PATH "Path to the libvmx root directory")
+    if (EXISTS "${LIBVMX_ROOT}/build/Release/libvmx.lib" OR EXISTS "${LIBVMX_ROOT}/build/libvmx.lib")
+        add_subdirectory(vmx)
+        message(STATUS "VMX module enabled (libvmx found at ${LIBVMX_ROOT})")
+    else()
+        message(WARNING "VMX module DISABLED - libvmx.lib not found at ${LIBVMX_ROOT}/build/. Set LIBVMX_ROOT to enable.")
+    endif()
 endif()
 
 add_subdirectory(image)
@@ -21,7 +27,6 @@ add_subdirectory(system_audio)
 
 if (MSVC)
 	add_subdirectory(flash)
-    # add_subdirectory(vmx) moved to top to prioritize over ffmpeg
     add_subdirectory(bluefish)
 endif()
 
