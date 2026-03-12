@@ -236,13 +236,17 @@ cudaError_t prores_encode_frame(
     const int mbs  = ctx->mbs_per_slice;
     const int spr  = ctx->slices_per_row;
     const int T    = 256;
-    const int luma_blocks  = (ctx->height / 8) * (ctx->width  / 8);
-    const int chroma_blocks= (ctx->height / 8) * (ctx->width  / 16);
+    // Use the number of MB rows that fit in the allocated slice buffer.
+    // kHeight=1080 gives 135 DCT rows but only 67 full MB rows (1072 px);
+    // the 68th MB row would overflow the slice buffer, so cap at 134 DCT rows.
+    const int mb_rows_enc  = ctx->num_slices / spr;
+    const int luma_blocks  = mb_rows_enc * 2 * (ctx->width  / 8);
+    const int chroma_blocks= mb_rows_enc * 2 * (ctx->width  / 16);
 
     // Luma: coeffs_slice[0..4*mbs-1 per slice]
     k_interleave_luma<<<(luma_blocks + T - 1) / T, T, 0, stream>>>(
         ctx->d_coeffs_y, ctx->d_coeffs_slice,
-        ctx->width / 8, ctx->height / 8, mbs, spr);
+        ctx->width / 8, mb_rows_enc * 2, mbs, spr);
 
     // Cb: coeffs_slice[4*mbs..6*mbs-1 per slice]
     // Each slice's Cb region starts 4*mbs blocks after the slice's Y region.
@@ -250,13 +254,13 @@ cudaError_t prores_encode_frame(
     int16_t *d_cb_base = ctx->d_coeffs_slice + (ptrdiff_t)4 * mbs * 64;
     k_interleave_chroma<<<(chroma_blocks + T - 1) / T, T, 0, stream>>>(
         ctx->d_coeffs_cb, d_cb_base,
-        ctx->width / 16, ctx->height / 8, mbs, spr);
+        ctx->width / 16, mb_rows_enc * 2, mbs, spr);
 
     // Cr: coeffs_slice[6*mbs..8*mbs-1 per slice]
     int16_t *d_cr_base = ctx->d_coeffs_slice + (ptrdiff_t)6 * mbs * 64;
     k_interleave_chroma<<<(chroma_blocks + T - 1) / T, T, 0, stream>>>(
         ctx->d_coeffs_cr, d_cr_base,
-        ctx->width / 16, ctx->height / 8, mbs, spr);
+        ctx->width / 16, mb_rows_enc * 2, mbs, spr);
 
     // 6. Entropy coding (two-pass: count â†’ prefix-sum â†’ write)
     cuda_prores_enc_frame_raw(

@@ -128,7 +128,7 @@ static void enc_ctx_create(ProResFrameCtx &ctx, int profile, int mbs_per_slice =
     ctx.height         = kHeight;
     ctx.profile        = profile;
     ctx.q_scale        = 8;
-    ctx.is_interlaced  = true; // 1080i50 = top-field-first
+    ctx.is_interlaced  = false; // encode 1080i50 as progressive 1080p25 (single picture per frame)
 
     int mb_cols = kWidth  / 16;
     int mb_rows = kHeight / 16;
