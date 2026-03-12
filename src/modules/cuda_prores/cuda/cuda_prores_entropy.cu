@@ -190,10 +190,9 @@ __global__ void k_count_bits(
 __global__ void k_bits_to_bytes(uint32_t *v, int n)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
-    // Round bits up to the nearest EVEN number of bytes (2-byte / 16-bit alignment).
-    // ProRes requires each colour component to be 2-byte aligned so that
-    // the seek table can store size/2 as a uint16 (decoder reads entry << 1).
-    if (i < n) v[i] = ((v[i] + 15u) >> 4) << 1;
+    // Round bits up to the nearest byte.
+    // The seek table stores raw byte sizes (FFmpeg convention: entry = actual bytes).
+    if (i < n) v[i] = (v[i] + 7u) >> 3;
 }
 
 // ─── Compute per-slice total byte sizes ───────────────────────────────────────

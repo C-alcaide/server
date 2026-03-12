@@ -236,17 +236,17 @@ cudaError_t prores_encode_frame(
     const int mbs  = ctx->mbs_per_slice;
     const int spr  = ctx->slices_per_row;
     const int T    = 256;
-    // Use the number of MB rows that fit in the allocated slice buffer.
-    // kHeight=1080 gives 135 DCT rows but only 67 full MB rows (1072 px);
-    // the 68th MB row would overflow the slice buffer, so cap at 134 DCT rows.
-    const int mb_rows_enc  = ctx->num_slices / spr;
-    const int luma_blocks  = mb_rows_enc * 2 * (ctx->width  / 8);
-    const int chroma_blocks= mb_rows_enc * 2 * (ctx->width  / 16);
+    // luma_blocks / chroma_blocks are bounded by the ACTUAL DCT data in the input
+    // buffers (ctx->height rows), never by num_slices which may include a padded
+    // bottom MB row (e.g. 1080 → 68 MB rows but only 135 real DCT rows).
+    // The padded row's bottom-half coefficient slots stay zero (caller zeroed them).
+    const int luma_blocks  = (ctx->height / 8) * (ctx->width  / 8);
+    const int chroma_blocks= (ctx->height / 8) * (ctx->width  / 16);
 
     // Luma: coeffs_slice[0..4*mbs-1 per slice]
     k_interleave_luma<<<(luma_blocks + T - 1) / T, T, 0, stream>>>(
         ctx->d_coeffs_y, ctx->d_coeffs_slice,
-        ctx->width / 8, mb_rows_enc * 2, mbs, spr);
+        ctx->width / 8, ctx->height / 8, mbs, spr);
 
     // Cb: coeffs_slice[4*mbs..6*mbs-1 per slice]
     // Each slice's Cb region starts 4*mbs blocks after the slice's Y region.
@@ -254,13 +254,13 @@ cudaError_t prores_encode_frame(
     int16_t *d_cb_base = ctx->d_coeffs_slice + (ptrdiff_t)4 * mbs * 64;
     k_interleave_chroma<<<(chroma_blocks + T - 1) / T, T, 0, stream>>>(
         ctx->d_coeffs_cb, d_cb_base,
-        ctx->width / 16, mb_rows_enc * 2, mbs, spr);
+        ctx->width / 16, ctx->height / 8, mbs, spr);
 
     // Cr: coeffs_slice[6*mbs..8*mbs-1 per slice]
     int16_t *d_cr_base = ctx->d_coeffs_slice + (ptrdiff_t)6 * mbs * 64;
     k_interleave_chroma<<<(chroma_blocks + T - 1) / T, T, 0, stream>>>(
         ctx->d_coeffs_cr, d_cr_base,
-        ctx->width / 16, mb_rows_enc * 2, mbs, spr);
+        ctx->width / 16, ctx->height / 8, mbs, spr);
 
     // 6. Entropy coding (two-pass: count â†’ prefix-sum â†’ write)
     cuda_prores_enc_frame_raw(
@@ -308,13 +308,11 @@ cudaError_t prores_encode_frame(
     int phdr_bytes = build_picture_header(p, ctx->num_slices, mbs);
     p += phdr_bytes;
 
-    // (e) Slice seek table: ProRes stores (slice_bytes / 2) as uint16.
-    //     Decoders (FFmpeg, QuickTime) read the entry and shift left 1 to recover
-    //     the byte count.  k_bits_to_bytes already rounds each component to an even
-    //     byte count, so slice sizes are always even and >> 1 is exact.
+    // (e) Slice seek table: FFmpeg proresdec reads each entry as a direct byte count
+    //     (no shift).  Store raw slice byte sizes as uint16.
     for (int i = 0; i < ctx->num_slices; i++) {
         uint32_t sz = h_offsets[i + 1] - h_offsets[i];
-        write_u16(p, (uint16_t)(sz >> 1));
+        write_u16(p, (uint16_t)sz);
         p += 2;
     }
     cudaFreeHost(h_offsets);
@@ -474,10 +472,10 @@ cudaError_t prores_encode_frame_444(
     int phdr_bytes = build_picture_header(p, ctx->num_slices, mbs);
     p += phdr_bytes;
 
-    // ProRes seek table stores size/2; decoder reads entry << 1.
+    // FFmpeg proresdec reads each seek entry as a direct byte count (no shift).
     for (int i = 0; i < ctx->num_slices; i++) {
         uint32_t sz = h_offsets[i + 1] - h_offsets[i];
-        write_u16(p, (uint16_t)(sz >> 1)); p += 2;
+        write_u16(p, (uint16_t)sz); p += 2;
     }
     cudaFreeHost(h_offsets);
 
