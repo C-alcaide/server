@@ -19,10 +19,18 @@
 // Build:
 //   Part of the gen_colorbars target in tests_standalone/CMakeLists.txt
 // Run:
-//   gen_colorbars.exe [output_dir]
-//   Output: <output_dir>\colorbars_1080p25_hq.mov
+//   gen_colorbars.exe [output_dir] [profile]
+//   profile: proxy | lt | standard | hq (default) | 4444
+//   Output: <output_dir>\colorbars_1080p25_<profile>.mov
 //
 // Timecode: starts at 01:00:00:00 (tmcd track in .mov)
+//
+// Apple ProRes target data rates for 1920x1080 (Apple ProRes White Paper):
+//   proxy  :  45 Mb/s   lt      : 102 Mb/s
+//   standard: 147 Mb/s  hq      : 220 Mb/s  (all @ 29.97 fps)
+// NOTE: ProRes is constant-quality VBR.  Stated rates apply to typical broadcast
+// content.  Flat synthetic frames compress smaller; film grain is applied here
+// to drive AC energy toward representative broadcast complexity levels.
 //
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -72,12 +80,63 @@ static constexpr uint16_t Y_BLACK = 64;
 static constexpr uint16_t C_NEUTRAL = 512;
 
 // ---------------------------------------------------------------------------
+// Apple ProRes profile table.
+//
+// bits_per_mb is derived from the Apple ProRes White Paper target data rates
+// for 1920x1080 @ 29.97 fps:  target_Mbps * 1e6 / (29.97 * 8160 MBs/frame).
+//
+// This constant is RESOLUTION- and FPS-INDEPENDENT: the number of MBs in a
+// frame scales with resolution, so the correct bitrate results automatically
+// for any resolution / frame-rate combination.
+//
+// Example: HQ bits_per_mb=899, 1920x1080 @ 25fps
+//   8160 MBs * 899 bits/MB * 25 fps / 1e6 = 183.6 Mb/s  (Apple spec: 220*25/29.97=183.5)
+// ---------------------------------------------------------------------------
+struct ProResProfileInfo {
+    const char *name;        // prores_ks option value
+    uint32_t    fourcc;      // .mov codec tag
+    int         bits_per_mb; // Apple quantisation budget per 16x16 MB
+};
+
+static const ProResProfileInfo PROFILE_INFO[] = {
+    //   name         fourcc      bits_per_mb   apple_target
+    { "proxy",    0x6170636Fu, 184  },  // apco   45 Mb/s @ 1080p/29.97
+    { "lt",       0x61706373u, 417  },  // apcs  102 Mb/s
+    { "standard", 0x6170636Eu, 601  },  // apcn  147 Mb/s
+    { "hq",       0x61706368u, 899  },  // apch  220 Mb/s
+    { "4444",     0x61703468u, 1350 },  // ap4h ~330 Mb/s (approximate)
+};
+static const int N_PROFILES = 5;
+
+// ---------------------------------------------------------------------------
+// Film grain — fast deterministic per-pixel noise (xorshift hash).
+// Produces the same pattern every run (reproducible), varies per frame.
+// Drives AC DCT energy so the encoded file has complexity representative of
+// typical broadcast content, rather than the near-zero AC of flat test bars.
+// ---------------------------------------------------------------------------
+static inline int grain_pixel(int x, int y, int frame_idx, int amplitude)
+{
+    uint32_t h = (uint32_t)x;
+    h ^= (uint32_t)y          * 2654435761u;
+    h ^= (uint32_t)frame_idx  * 1234567891u;
+    h ^= h >> 16; h *= 0x45d9f3bu; h ^= h >> 16;
+    return ((int)(h & 0xFF) - 128) * amplitude / 128;
+}
+
+static inline uint16_t apply_grain(uint16_t base, int x, int y, int frame_idx, int amplitude)
+{
+    if (amplitude == 0) return base;
+    int v = (int)base + grain_pixel(x, y, frame_idx, amplitude);
+    return (uint16_t)(v < 64 ? 64 : v > 940 ? 940 : v);
+}
+
+// ---------------------------------------------------------------------------
 // Fill one YUV422P10LE frame with the test pattern.
 //   frame        — pre-allocated AVFrame (av_frame_get_buffer called by caller)
 //   frame_index  — 0-based frame number (drives animation)
 //   fps          — frames per second (25)
 // ---------------------------------------------------------------------------
-static void fill_frame(AVFrame *frame, int frame_index, int fps)
+static void fill_frame(AVFrame *frame, int frame_index, int fps, int grain_amplitude)
 {
     const int W = frame->width;
     const int H = frame->height;
@@ -111,7 +170,7 @@ static void fill_frame(AVFrame *frame, int frame_index, int fps)
                 const int  dx  = x - ball_cx;
                 const bool in_ball = (dx * dx + dy * dy) <= ball_r2;
 
-                Y_row[x] = in_ball ? Y_WHITE : BARS[bar].y;
+                Y_row[x] = apply_grain(in_ball ? Y_WHITE : BARS[bar].y, x, y, frame_index, grain_amplitude);
 
                 // Chroma samples are at even x positions (YUV422 = 1 Cb/Cr per 2 Y)
                 if ((x & 1) == 0) {
@@ -138,7 +197,7 @@ static void fill_frame(AVFrame *frame, int frame_index, int fps)
         } else if (y < mid_end) {
             // ── Sweep bar (white left of sweep_x, black right) ───────────────
             for (int x = 0; x < W; ++x) {
-                Y_row[x] = (x < sweep_x) ? Y_WHITE : Y_BLACK;
+                Y_row[x] = apply_grain((x < sweep_x) ? Y_WHITE : Y_BLACK, x, y, frame_index, grain_amplitude);
                 if ((x & 1) == 0) {
                     Cb_row[x >> 1] = C_NEUTRAL;
                     Cr_row[x >> 1] = C_NEUTRAL;
@@ -147,7 +206,8 @@ static void fill_frame(AVFrame *frame, int frame_index, int fps)
         } else {
             // ── Full luma ramp  Y=64 → Y=940 ──────────────────────────────────
             for (int x = 0; x < W; ++x) {
-                Y_row[x] = (uint16_t)(Y_BLACK + (uint32_t)(x) * (Y_WHITE - Y_BLACK) / (uint32_t)(W - 1));
+                const uint16_t ramp_y = (uint16_t)(Y_BLACK + (uint32_t)(x) * (Y_WHITE - Y_BLACK) / (uint32_t)(W - 1));
+                Y_row[x] = apply_grain(ramp_y, x, y, frame_index, grain_amplitude);
                 if ((x & 1) == 0) {
                     Cb_row[x >> 1] = C_NEUTRAL;
                     Cr_row[x >> 1] = C_NEUTRAL;
@@ -162,14 +222,29 @@ static void fill_frame(AVFrame *frame, int frame_index, int fps)
 // ---------------------------------------------------------------------------
 int main(int argc, char **argv)
 {
-    const std::string out_dir = (argc > 1) ? argv[1] : ".";
-    const std::string out_path = out_dir + "\\colorbars_1080p25_hq.mov";
+    const std::string out_dir  = (argc > 1) ? argv[1] : ".";
+    const char *profile_arg      = (argc > 2) ? argv[2] : "hq";
+
+    // Resolve profile (default to hq)
+    const ProResProfileInfo *prof = &PROFILE_INFO[3];
+    for (int i = 0; i < N_PROFILES; ++i) {
+        if (std::string(PROFILE_INFO[i].name) == profile_arg) {
+            prof = &PROFILE_INFO[i];
+            break;
+        }
+    }
+
+    const std::string out_path = out_dir + "\\colorbars_1080p25_" + prof->name + ".mov";
     const std::wstring wout_path(out_path.begin(), out_path.end());
 
-    const int WIDTH       = 1920;
-    const int HEIGHT      = 1080;
-    const int FPS         = 25;
-    const int NUM_FRAMES  = 5 * FPS;  // 5 seconds
+    const int WIDTH      = 1920;
+    const int HEIGHT     = 1080;
+    const int FPS        = 25;
+    const int NUM_FRAMES = 5 * FPS;   // 5 seconds
+    // Film grain amplitude: ±40 luma units (~4.6% of 10-bit signal swing = ~1.5 IRE).
+    // Adds broadband AC energy so each profile encodes at speeds representative of
+    // real broadcast content rather than near-zero-bitrate flat bars.
+    const int GRAIN_AMP  = 40;
 
     // ── Open the encoder ────────────────────────────────────────────────────
     const AVCodec *codec = avcodec_find_encoder_by_name("prores_ks");
@@ -183,8 +258,11 @@ int main(int argc, char **argv)
     enc->pix_fmt   = AV_PIX_FMT_YUV422P10LE;
     AVRational tb  = {1, FPS};
     enc->time_base = tb;
-    av_opt_set(enc->priv_data, "profile", "hq", 0);  // ProRes 422 HQ → 'apch'
-    av_opt_set(enc->priv_data, "vendor",  "apl0", 0); // Apple vendor tag (cosmetic)
+    av_opt_set(enc->priv_data, "profile", prof->name, 0);
+    // Set quantisation budget from Apple's ProRes White Paper target bitrate.
+    // For typical broadcast content this produces approximately the stated Mb/s.
+    av_opt_set_int(enc->priv_data, "bits_per_mb", prof->bits_per_mb, 0);
+    av_opt_set(enc->priv_data, "vendor", "apl0", 0); // Apple vendor tag
 
     if (avcodec_open2(enc, codec, nullptr) < 0) {
         fprintf(stderr, "[gen_colorbars] avcodec_open2 failed\n");
@@ -198,7 +276,7 @@ int main(int argc, char **argv)
     vi.height        = HEIGHT;
     vi.timebase_num  = 1;
     vi.timebase_den  = (uint32_t)FPS;
-    vi.prores_fourcc = 0x61706368u;  // 'apch' — ProRes 422 HQ
+    vi.prores_fourcc = prof->fourcc;  // set per-profile (apco/apcs/apcn/apch/ap4h)
     vi.color.color_primaries   = 1;  // BT.709
     vi.color.transfer_function = 1;  // BT.709
     vi.color.color_matrix      = 1;  // BT.709
@@ -229,7 +307,7 @@ int main(int argc, char **argv)
         av_frame_make_writable(frame);
         frame->pts = f;
 
-        fill_frame(frame, f, FPS);
+        fill_frame(frame, f, FPS, GRAIN_AMP);
 
         if (avcodec_send_frame(enc, frame) < 0) {
             fprintf(stderr, "[gen_colorbars] avcodec_send_frame failed at frame %d\n", f);

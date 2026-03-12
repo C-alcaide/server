@@ -68,6 +68,12 @@ static std::vector<uint8_t> make_dummy_prores_frame(int width, int height, int p
     AVRational tb  = {1, 25};
     enc->time_base = tb;
     av_opt_set(enc->priv_data, "profile", pname, 0);
+    // Set quantisation budget from Apple's ProRes White Paper target data rates
+    // for 1920x1080 @ 29.97fps: target_Mbps * 1e6 / (29.97 * 8160 MBs/frame).
+    // Resolution- and fps-independent: MBs/frame scales with resolution.
+    static const int BITS_PER_MB[5] = { 184, 417, 601, 899, 1350 };  // proxy..4444
+    if (profile >= 0 && profile < 5)
+        av_opt_set_int(enc->priv_data, "bits_per_mb", BITS_PER_MB[profile], 0);
 
     if (avcodec_open2(enc, codec, nullptr) < 0) {
         avcodec_free_context(&enc);
