@@ -18,6 +18,7 @@ echo === Running test_bgra_convert ===
 "%BUILD_DIR%\test_bgra_convert.exe"
 echo.
 echo === Running test_timecode_roundtrip ===
+set "PATH=%BUILD_DIR%\_deps\ffmpeg_prebuilt-src\bin;%PATH%"
 "%BUILD_DIR%\test_timecode_roundtrip.exe" "%TEMP%"
 echo.
 echo === All tests done ===

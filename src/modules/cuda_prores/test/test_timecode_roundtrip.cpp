@@ -38,90 +38,75 @@
 #include "../muxer/mov_muxer.h"
 #include "../timecode.h"
 
+extern "C" {
+#include <libavcodec/avcodec.h>
+#include <libavutil/frame.h>
+#include <libavutil/opt.h>
+}
+
 // ---------------------------------------------------------------------------
-// Build a minimal but structurally valid ProRes 422 frame bitstream.
-// The frame contains: frame header + picture header + empty slice data.
-// It will decode to garbage but is parseable by ffprobe.
+// Build a valid ProRes 422 frame using FFmpeg's prores_ks encoder.
+// Produces a real, decodable black frame that any ProRes player can handle.
 // ---------------------------------------------------------------------------
 static std::vector<uint8_t> make_dummy_prores_frame(int width, int height, int profile)
 {
-    static const uint8_t QUANT_LUMA_HQ[64] = {
-         4, 4, 4, 4, 4, 4, 4, 4,
-         4, 4, 4, 4, 4, 4, 4, 4,
-         4, 4, 4, 4, 4, 4, 4, 4,
-        4, 4, 4, 4, 4, 4, 4, 4,
-        4, 4, 4, 4, 8, 8, 8, 8,
-        4, 4, 8, 8, 8, 8, 8,16,
-        8, 8,16,16,16,16,16,16,
-       16,16,16,16,16,16,16,16,
-    };
-    static const uint8_t QUANT_CHROMA_HQ[64] = {
-         4, 4, 4, 4, 4, 4, 4, 4,
-         4, 4, 4, 4, 4, 4, 4, 4,
-         4, 4, 4, 4, 4, 4, 4, 4,
-        4, 4, 4, 4, 4, 4, 4, 4,
-        4, 4, 4, 4, 8, 8, 8, 8,
-        4, 4, 8, 8, 8, 8, 8,16,
-        8, 8,16,16,16,16,16,16,
-       16,16,16,16,16,16,16,16,
-    };
+    static const char *profile_names[] = { "proxy", "lt", "standard", "hq", "4444" };
+    const char *pname = (profile >= 0 && profile < 5) ? profile_names[profile] : "hq";
 
-    std::vector<uint8_t> out;
-    out.reserve(512);
+    const AVCodec *codec = avcodec_find_encoder_by_name("prores_ks");
+    if (!codec) {
+        fprintf(stderr, "[TC] prores_ks encoder not found in FFmpeg\n");
+        return {};
+    }
 
-    auto put8  = [&](uint8_t v) { out.push_back(v); };
-    auto put16 = [&](uint16_t v) { out.push_back(v >> 8); out.push_back(v & 0xFF); };
-    auto put32 = [&](uint32_t v) {
-        out.push_back((v >> 24) & 0xFF); out.push_back((v >> 16) & 0xFF);
-        out.push_back((v >>  8) & 0xFF); out.push_back( v        & 0xFF);
-    };
+    AVCodecContext *enc = avcodec_alloc_context3(codec);
+    if (!enc) return {};
 
-    // Frame size placeholder (4 bytes, big-endian)
-    size_t frame_size_pos = out.size();
-    put32(0);
-    // 'icpf' magic
-    out.push_back('i'); out.push_back('c'); out.push_back('p'); out.push_back('f');
+    enc->width     = width;
+    enc->height    = height;
+    enc->pix_fmt   = AV_PIX_FMT_YUV422P10LE;
+    AVRational tb  = {1, 25};
+    enc->time_base = tb;
+    av_opt_set(enc->priv_data, "profile", pname, 0);
 
-    // Picture header
-    size_t hdr_size_pos = out.size();
-    // hdr_size (2 bytes, filled later)
-    put16(0);
-    // version (2 bytes)
-    put16(0);
-    // encoder ID 'CUDA'
-    out.push_back('C'); out.push_back('U'); out.push_back('D'); out.push_back('A');
-    // width, height
-    put16((uint16_t)width); put16((uint16_t)height);
-    // chroma_format (0x82 = 4:2:2), frame_type (0=prog), aspect, primaries, trc, matrix
-    put8(0x82); put8(0); put8(0); put8(1); put8(1); put8(1);
-    // source_format, alpha_depth, reserved
-    uint8_t src_fmt = (width >= 3840) ? 5 : (width >= 1920 ? 3 : 1);
-    put8(src_fmt); put8(0); put8(0);
-    // luma quant matrix flag + data
-    put8(1);
-    for (int i = 0; i < 64; i++) out.push_back(QUANT_LUMA_HQ[i]);
-    // chroma quant matrix flag + data
-    put8(1);
-    for (int i = 0; i < 64; i++) out.push_back(QUANT_CHROMA_HQ[i]);
+    if (avcodec_open2(enc, codec, nullptr) < 0) {
+        avcodec_free_context(&enc);
+        fprintf(stderr, "[TC] avcodec_open2 failed for prores_ks\n");
+        return {};
+    }
 
-    // Patch picture header size
-    uint16_t hdr_sz = (uint16_t)(out.size() - hdr_size_pos);
-    out[hdr_size_pos]     = hdr_sz >> 8;
-    out[hdr_size_pos + 1] = hdr_sz & 0xFF;
+    AVFrame *frame = av_frame_alloc();
+    frame->format = enc->pix_fmt;
+    frame->width  = width;
+    frame->height = height;
+    frame->pts    = 0;
+    av_frame_get_buffer(frame, 0);
+    av_frame_make_writable(frame);
 
-    // Slice offset table: 0 slices → no entries (empty frame)
-    // (A real encoder would emit slice data here; we emit a minimal valid structure)
+    // Black frame: Y=64 (limited-range black 10-bit), Cb=Cr=512 (neutral)
+    for (int y = 0; y < height; y++) {
+        uint16_t *Y  = reinterpret_cast<uint16_t *>(frame->data[0] + y * frame->linesize[0]);
+        uint16_t *Cb = reinterpret_cast<uint16_t *>(frame->data[1] + y * frame->linesize[1]);
+        uint16_t *Cr = reinterpret_cast<uint16_t *>(frame->data[2] + y * frame->linesize[2]);
+        for (int x = 0; x < width;   x++) Y[x]  = 64;
+        for (int x = 0; x < width/2; x++) Cb[x] = Cr[x] = 512;
+    }
 
-    // Patch frame size
-    uint32_t total = (uint32_t)out.size();
-    out[frame_size_pos]     = (total >> 24) & 0xFF;
-    out[frame_size_pos + 1] = (total >> 16) & 0xFF;
-    out[frame_size_pos + 2] = (total >>  8) & 0xFF;
-    out[frame_size_pos + 3] =  total        & 0xFF;
+    avcodec_send_frame(enc, frame);
+    av_frame_free(&frame);
 
-    (void)profile;
-    return out;
+    AVPacket *pkt = av_packet_alloc();
+    std::vector<uint8_t> result;
+    if (avcodec_receive_packet(enc, pkt) == 0) {
+        result.assign(pkt->data, pkt->data + pkt->size);
+        av_packet_unref(pkt);
+    }
+    av_packet_free(&pkt);
+    avcodec_free_context(&enc);
+    return result;
 }
+
+
 
 // ---------------------------------------------------------------------------
 // Helper: run ffprobe and capture stdout
