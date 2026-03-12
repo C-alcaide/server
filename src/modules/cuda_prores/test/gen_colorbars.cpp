@@ -19,9 +19,11 @@
 // Build:
 //   Part of the gen_colorbars target in tests_standalone/CMakeLists.txt
 // Run:
-//   gen_colorbars.exe [output_dir] [profile]
-//   profile: proxy | lt | standard | hq (default) | 4444
-//   Output: <output_dir>\colorbars_1080p25_<profile>.mov
+//   gen_colorbars.exe [output_dir] [profile] [hdr_mode]
+//   profile:  proxy | lt | standard | hq (default) | 4444
+//   hdr_mode: sdr (default) | hlg | pq
+//   Output: <output_dir>\colorbars_1080p25_<profile>_<hdr_mode>.mov
+//            (sdr omitted from filename for backward compatibility)
 //
 // Timecode: starts at 01:00:00:00 (tmcd track in .mov)
 //
@@ -249,8 +251,9 @@ static void fill_frame(AVFrame *frame, int frame_index, int fps, int grain_ampli
 // ---------------------------------------------------------------------------
 int main(int argc, char **argv)
 {
-    const std::string out_dir  = (argc > 1) ? argv[1] : ".";
-    const char *profile_arg      = (argc > 2) ? argv[2] : "hq";
+    const std::string out_dir   = (argc > 1) ? argv[1] : ".";
+    const char *profile_arg     = (argc > 2) ? argv[2] : "hq";
+    const char *hdr_arg         = (argc > 3) ? argv[3] : "sdr";
 
     // Resolve profile (default to hq)
     const ProResProfileInfo *prof = &PROFILE_INFO[3];
@@ -261,7 +264,18 @@ int main(int argc, char **argv)
         }
     }
 
-    const std::string out_path = out_dir + "\\colorbars_1080p25_" + prof->name + ".mov";
+    // Resolve HDR mode: sdr | hlg | pq
+    const std::string hdr_mode = hdr_arg;
+    const bool is_hlg = (hdr_mode == "hlg");
+    const bool is_pq  = (hdr_mode == "pq");
+    if (!is_hlg && !is_pq && hdr_mode != "sdr") {
+        fprintf(stderr, "[gen_colorbars] Unknown hdr_mode '%s'  (sdr|hlg|pq)\n", hdr_arg);
+        return 1;
+    }
+
+    // SDR omitted from filename for backward compat; HDR modes appended.
+    const std::string hdr_suffix = (is_hlg || is_pq) ? ("_" + hdr_mode) : "";
+    const std::string out_path = out_dir + "\\colorbars_1080p25_" + prof->name + hdr_suffix + ".mov";
     const std::wstring wout_path(out_path.begin(), out_path.end());
 
     const int WIDTH      = 1920;
@@ -307,9 +321,34 @@ int main(int argc, char **argv)
     vi.timebase_num  = 1;
     vi.timebase_den  = (uint32_t)FPS;
     vi.prores_fourcc = prof->fourcc;  // set per-profile (apco/apcs/apcn/apch/ap4h)
-    vi.color.color_primaries   = 1;  // BT.709
-    vi.color.transfer_function = 1;  // BT.709
-    vi.color.color_matrix      = 1;  // BT.709
+
+    if (is_hlg) {
+        // HLG BT.2020 — ARIB STD-B67 transfer, BT.2020 primaries
+        vi.color.color_primaries   = 9;  // BT.2020
+        vi.color.transfer_function = 14; // HLG (ARIB STD-B67)
+        vi.color.color_matrix      = 9;  // BT.2020 non-constant luminance
+    } else if (is_pq) {
+        // PQ HDR10 — SMPTE ST 2084 transfer, BT.2020 primaries + mdcv/clli
+        vi.color.color_primaries   = 9;   // BT.2020
+        vi.color.transfer_function = 16;  // SMPTE ST 2084 (PQ)
+        vi.color.color_matrix      = 9;   // BT.2020
+        vi.color.has_hdr           = true;
+        // Mastering Display Colour Volume (SMPTE ST 2086)
+        // BT.2020 primaries in CIE xy * 50000: [0]=Green, [1]=Blue, [2]=Red
+        vi.color.mdcv_primaries_x[0] = 17000; vi.color.mdcv_primaries_y[0] = 34000; // Green
+        vi.color.mdcv_primaries_x[1] =  7500; vi.color.mdcv_primaries_y[1] =  3000; // Blue
+        vi.color.mdcv_primaries_x[2] = 34000; vi.color.mdcv_primaries_y[2] = 16000; // Red
+        vi.color.mdcv_white_x = 15635; vi.color.mdcv_white_y = 16450;  // D65
+        vi.color.mdcv_max_lum = 10000000; // 1000 cd/m2 * 10000
+        vi.color.mdcv_min_lum =       50; // 0.005 cd/m2 * 10000
+        vi.color.clli_max_cll  = 1000;
+        vi.color.clli_max_fall = 400;
+    } else {
+        // SDR BT.709
+        vi.color.color_primaries   = 1;  // BT.709
+        vi.color.transfer_function = 1;  // BT.709
+        vi.color.color_matrix      = 1;  // BT.709
+    }
 
     MovAudioTrackInfo ai{};
     ai.channels    = 2;
@@ -383,6 +422,7 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    fprintf(stdout, "[gen_colorbars] Done  →  %s\n", out_path.c_str());
+    fprintf(stdout, "[gen_colorbars] Done -> %s  [%s / %s]\n",
+            out_path.c_str(), prof->name, hdr_mode.c_str());
     return 0;
 }
