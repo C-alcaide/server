@@ -161,20 +161,34 @@ static constexpr uint8_t PRORES_QUANT_CHROMA[PRORES_PROFILE_COUNT][64] = {
 };
 
 // ---------------------------------------------------------------------------
-// ProRes scan order (coefficient reordering table)
-// Source: Apple ProRes White Paper, Table 2 — "Scan Order".
+// ProRes scan orders
+// Source: FFmpeg libavcodec/proresdata.c — ff_prores_progressive_scan and
+//         ff_prores_interlaced_scan.  These are NOT the JPEG zigzag.
 // Maps output-scan-index → natural-raster-index (r*8+c).
-// This differs from JPEG zigzag for ProRes-specific inter-block prediction.
 // ---------------------------------------------------------------------------
+
+// Progressive scan (default for all CasparCG frames).
 static constexpr uint8_t PRORES_SCAN_ORDER[64] = {
-     0,  1,  8, 16,  9,  2,  3, 10,
-    17, 24, 32, 25, 18, 11,  4,  5,
-    12, 19, 26, 33, 40, 48, 41, 34,
-    27, 20, 13,  6,  7, 14, 21, 28,
-    35, 42, 49, 56, 57, 50, 43, 36,
-    29, 22, 15, 23, 30, 37, 44, 51,
-    58, 59, 52, 45, 38, 31, 39, 46,
+     0,  1,  8,  9,  2,  3, 10, 11,
+    16, 17, 24, 25, 18, 19, 26, 27,
+     4,  5, 12, 20, 13,  6,  7, 14,
+    21, 28, 29, 22, 15, 23, 30, 31,
+    32, 33, 40, 48, 41, 34, 35, 42,
+    49, 56, 57, 50, 43, 36, 37, 44,
+    51, 58, 59, 52, 45, 38, 39, 46,
     53, 60, 61, 54, 47, 55, 62, 63,
+};
+
+// Interlaced scan — used when the frame-flags byte signals interlaced DCT.
+static constexpr uint8_t PRORES_SCAN_ORDER_INTERLACED[64] = {
+     0,  8,  1,  9, 16, 24, 17, 25,
+     2, 10,  3, 11, 18, 26, 19, 27,
+    32, 40, 33, 34, 41, 48, 56, 49,
+    42, 35, 43, 50, 57, 58, 51, 59,
+     4, 12,  5,  6, 13, 20, 28, 21,
+    14,  7, 15, 22, 29, 36, 44, 37,
+    30, 23, 31, 38, 45, 52, 60, 53,
+    46, 39, 47, 54, 61, 62, 55, 63,
 };
 
 // ---------------------------------------------------------------------------
@@ -195,7 +209,8 @@ static constexpr int PRORES_TARGET_MBPS[PRORES_PROFILE_COUNT] = {
 // ---------------------------------------------------------------------------
 __constant__ uint8_t c_quant_luma  [PRORES_PROFILE_COUNT][64];
 __constant__ uint8_t c_quant_chroma[PRORES_PROFILE_COUNT][64];
-__constant__ uint8_t c_scan_order  [64];
+__constant__ uint8_t c_scan_order            [64]; // progressive
+__constant__ uint8_t c_scan_order_interlaced [64]; // interlaced
 
 // Call once per CUDA context (before any encode kernel launch).
 inline cudaError_t prores_tables_upload()
@@ -207,7 +222,10 @@ inline cudaError_t prores_tables_upload()
     e = cudaMemcpyToSymbol(c_quant_chroma, PRORES_QUANT_CHROMA,
                            sizeof(PRORES_QUANT_CHROMA));
     if (e != cudaSuccess) return e;
-    e = cudaMemcpyToSymbol(c_scan_order,   PRORES_SCAN_ORDER,
+    e = cudaMemcpyToSymbol(c_scan_order, PRORES_SCAN_ORDER,
                            sizeof(PRORES_SCAN_ORDER));
+    if (e != cudaSuccess) return e;
+    e = cudaMemcpyToSymbol(c_scan_order_interlaced, PRORES_SCAN_ORDER_INTERLACED,
+                           sizeof(PRORES_SCAN_ORDER_INTERLACED));
     return e;
 }

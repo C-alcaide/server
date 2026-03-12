@@ -3,28 +3,25 @@
 //
 // Pipeline:
 //   Planar int16_t YUV422P10 (values 0..1023 from V210 unpack)
-//   → DC level shift: subtract 512
-//   → Forward 8×8 DCT (NVIDIA NPP nppiDCTQuantFwd8x8LS_JPEG_16s8u_C1R or manual)
-//   → Quantise (divide by q_table[i] * q_scale, rounding)
-//   → Scan-reorder using PRORES_SCAN_ORDER
+//   → Forward 8×8 DCT — raw 10-bit values, NO level shift
+//   → Quantise (divide by q_table[scan[i]] * q_scale, rounding)
+//   → Scan-reorder using PRORES_SCAN_ORDER (ProRes progressive scan)
 //   → Output: int16_t coefficients [num_slices][blocks_per_slice][64]
 //
+// DCT convention (matches FFmpeg ff_jpeg_fdct_islow_10):
+//   Input:  raw uint10 values [0, 1023], stored as int32_t.
+//   Output: scaled by 8 relative to the true DCT (absorbed by quantisation).
+//   For a flat block of all-512 the DC coefficient = 512 × 32 = 0x4000.
+//   encode_dcs subtracts this bias: (dc - 0x4000) / scale.
+//
+//   Row pass: PASS1_BITS=1, CONST_BITS=13, output scaled ×2.
+//   Column pass: OUT_SHIFT=2; result fits in int16_t.
+//
 // Strategy
-//   One CUDA thread block per 8×8 luma block.
+//   One CUDA thread block per 8×8 input block (64 threads).
 //   For 4K (3840×2160) with 4 slices/row:
-//     luma blocks  = (3840/8) × (2160/8) = 480 × 270 = 129 600
+//     luma blocks  = 480 × 270 = 129 600
 //     chroma blocks= 64 800 × 2 (Cb + Cr)
-//   Block-level parallelism is sufficient; no need for warp-level DCT.
-//
-// NPP note:
-//   nppiDCTQuantFwd8x8LS_JPEG_16s8u is a combined level-shift + DCT + quant.
-//   It expects uint8_t input; for 10-bit we drive the DCT manually here.
-//   A future upgrade could use nppiDCT8x8Fwd_16s_C1R with a custom quant pass.
-//
-// Level-shift convention for 10-bit:
-//   Unsigned 10-bit [0,1023] → signed [-512,511] before DCT.
-//   The DC coefficient after DCT is scaled_DC * 8 in ProRes (10-bit pipeline
-//   uses 13-bit intermediate precision).
 #pragma once
 
 #include "cuda_prores_tables.cuh"
@@ -32,60 +29,87 @@
 #include <stdint.h>
 
 // ---------------------------------------------------------------------------
-// Reference integer 8×8 AAN-scaled DCT
-// Matches the fixed-point implementation in FFmpeg proresenc_kostya.c so that
-// coefficient values are bit-identical for validation in Phase 1f.
-// Row-pass then column-pass, in-place on int32_t[64].
+// IJG Loeffler 8-point forward DCT — integer, 2-pass (row + column).
+// Matches FFmpeg ff_jpeg_fdct_islow_10 (jfdctint_template.c, BITS_IN_JSAMPLE=10).
+//
+// Constants (CONST_BITS=13):
+//   FIX(0.298631336)=2446  FIX(0.390180644)=3196  FIX(0.541196100)=4433
+//   FIX(0.765366865)=6270  FIX(0.899976223)=7373   FIX(1.175875602)=9633
+//   FIX(1.501321110)=12299 FIX(1.847759065)=15137  FIX(1.961570560)=16069
+//   FIX(2.053119869)=16819 FIX(2.562915447)=20995  FIX(3.072711026)=25172
+//
+// Row pass: PASS1_BITS=1; DC/[4] output multiplied by 2 (no DESCALE),
+//           AC outputs DESCALEd by CONST_BITS-PASS1_BITS = 12.
+// Column pass: outputs DESCALEd by CONST_BITS+OUT_SHIFT = 13+2 = 15.
+//
+// DESCALE(x, n) = (x + (1 << (n-1))) >> n   (half-up rounding)
 // ---------------------------------------------------------------------------
 
-#define DCT_SHIFT 11  // AAN scaling shift matching FFmpeg fdct_step
-
-__device__ __forceinline__ void dct_1d_pass(int *v)
+// Row pass: v[8] are raw 10-bit pixel values (0..1023), in-place → row DCT.
+// Output is scaled ×2 for even terms (v[0], v[4]) and DESCALEd for the rest.
+__device__ __forceinline__ void dct_row_pass(int32_t *v)
 {
-    // AAN 8-point DCT — constants × (1<<DCT_SHIFT), matching FFmpeg
-    // Reference: Arai, Agui, Nakajima (1988) — scaled version
-    constexpr int C1 = 1004; // cos(π/16) × 2^10
-    constexpr int C2 =  946; // cos(2π/16) × 2^10  (unused in AAN; kept for reference)
-    constexpr int C3 =  851; // cos(3π/16) × 2^10
-    constexpr int C5 =  569; // cos(5π/16) × 2^10
-    constexpr int C6 =  554; // cos(6π/16) × 2^10  (= sin(2π/16) × 2^10)
-    constexpr int C7 =  301; // cos(7π/16) × 2^10  (≈ C7)
+    int32_t tmp0 = v[0]+v[7], tmp7 = v[0]-v[7];
+    int32_t tmp1 = v[1]+v[6], tmp6 = v[1]-v[6];
+    int32_t tmp2 = v[2]+v[5], tmp5 = v[2]-v[5];
+    int32_t tmp3 = v[3]+v[4], tmp4 = v[3]-v[4];
 
-    int t0 = v[0] + v[7];
-    int t1 = v[1] + v[6];
-    int t2 = v[2] + v[5];
-    int t3 = v[3] + v[4];
-    int t4 = v[3] - v[4];
-    int t5 = v[2] - v[5];
-    int t6 = v[1] - v[6];
-    int t7 = v[0] - v[7];
+    int32_t tmp10 = tmp0+tmp3, tmp13 = tmp0-tmp3;
+    int32_t tmp11 = tmp1+tmp2, tmp12 = tmp1-tmp2;
 
-    int u0 = t0 + t3;
-    int u1 = t1 + t2;
-    int u2 = t1 - t2;
-    int u3 = t0 - t3;
+    // Even part: multiply by 2^PASS1_BITS = 2 (no DESCALE needed)
+    v[0] = (tmp10 + tmp11) << 1;
+    v[4] = (tmp10 - tmp11) << 1;
+    int32_t ze = (tmp12 + tmp13) * 4433; // FIX_0_541196100
+    v[2] = (ze + tmp13 * 6270  + (1 << 11)) >> 12; // DESCALE(,12)
+    v[6] = (ze - tmp12 * 15137 + (1 << 11)) >> 12;
 
-    v[0] = u0 + u1;
-    v[4] = u0 - u1;
-    v[2] = (u3 * C6 + u2 * C2) >> 10;   // (C6 ≈ cos(6π/16))
-    v[6] = (u3 * C2 - u2 * C6) >> 10;
+    // Odd part (DESCALE shift = 12)
+    int32_t z1 = (tmp4 + tmp7) * (-7373);  // -FIX_0_899976223
+    int32_t z2 = (tmp5 + tmp6) * (-20995); // -FIX_2_562915447
+    int32_t z3 = (tmp4 + tmp6) * (-16069); // -FIX_1_961570560
+    int32_t z4 = (tmp5 + tmp7) * (-3196);  // -FIX_0_390180644
+    int32_t z5 = (tmp4 + tmp5 + tmp6 + tmp7) * 9633; // FIX_1_175875602
+    z3 += z5;
+    z4 += z5;
+    v[7] = (tmp4 *  2446 + z1 + z3 + (1 << 11)) >> 12; // FIX_0_298631336
+    v[5] = (tmp5 * 16819 + z2 + z4 + (1 << 11)) >> 12; // FIX_2_053119869
+    v[3] = (tmp6 * 25172 + z2 + z3 + (1 << 11)) >> 12; // FIX_3_072711026
+    v[1] = (tmp7 * 12299 + z1 + z4 + (1 << 11)) >> 12; // FIX_1_501321110
+}
 
-    int w0 = t4 + t5;
-    int w1 = t5 + t6;
-    int w2 = t6 + t7;
+// Column pass: v[8] are row-pass outputs; in-place → column DCT.
+// Outputs DESCALEd by CONST_BITS + OUT_SHIFT = 15.
+__device__ __forceinline__ void dct_col_pass(int32_t *v)
+{
+    int32_t tmp0 = v[0]+v[7], tmp7 = v[0]-v[7];
+    int32_t tmp1 = v[1]+v[6], tmp6 = v[1]-v[6];
+    int32_t tmp2 = v[2]+v[5], tmp5 = v[2]-v[5];
+    int32_t tmp3 = v[3]+v[4], tmp4 = v[3]-v[4];
 
-    // Odd components
-    int r1 = (w0 * (-C7 - C5) + w1 * (C3 + C5) + w2 * (C3 - C7)) >> 10;
-    int r3 = (w0 * ( C3 - C5) + w1 * (-C7- C3) + w2 * (C5 + C7)) >> 10;
-    int r5 = (w0 * ( C5 - C3) + w1 * ( C7+ C3) + w2 * (C5 - C7)) >> 10;
-    int r7 = (w0 * ( C5 + C7) + w1 * (-C5- C3) + w2 * (C7 + C3)) >> 10;
+    int32_t tmp10 = tmp0+tmp3, tmp13 = tmp0-tmp3;
+    int32_t tmp11 = tmp1+tmp2, tmp12 = tmp1-tmp2;
 
-    v[1] = t7 + r1;  v[3] = t7 - r1;
-    v[5] = t7 + r3;  v[7] = t7 - r3;
-    // Note: odd mapping simplified; use FFmpeg's exact mapping in Phase 1f validation
-    // Exact: v[1]=t7+r7, v[3]=t5+r5, v[5]=t3+r3, v[7]=t1+r1 etc.
-    // Replace with validated integer DCT from fdct_step before shipping.
-    (void)r5; (void)r7;
+    // Even part (DESCALE shift = OUT_SHIFT = 2 for DC/[4],
+    //            CONST_BITS + OUT_SHIFT = 15 for v[2]/v[6])
+    v[0] = (tmp10 + tmp11 + 2) >> 2;
+    v[4] = (tmp10 - tmp11 + 2) >> 2;
+    int32_t ze = (tmp12 + tmp13) * 4433;
+    v[2] = (ze + tmp13 * 6270  + (1 << 14)) >> 15;
+    v[6] = (ze - tmp12 * 15137 + (1 << 14)) >> 15;
+
+    // Odd part (DESCALE shift = 15)
+    int32_t z1 = (tmp4 + tmp7) * (-7373);
+    int32_t z2 = (tmp5 + tmp6) * (-20995);
+    int32_t z3 = (tmp4 + tmp6) * (-16069);
+    int32_t z4 = (tmp5 + tmp7) * (-3196);
+    int32_t z5 = (tmp4 + tmp5 + tmp6 + tmp7) * 9633;
+    z3 += z5;
+    z4 += z5;
+    v[7] = (tmp4 *  2446 + z1 + z3 + (1 << 14)) >> 15;
+    v[5] = (tmp5 * 16819 + z2 + z4 + (1 << 14)) >> 15;
+    v[3] = (tmp6 * 25172 + z2 + z3 + (1 << 14)) >> 15;
+    v[1] = (tmp7 * 12299 + z1 + z4 + (1 << 14)) >> 15;
 }
 
 // ---------------------------------------------------------------------------
@@ -114,28 +138,33 @@ __global__ void k_dct_quantise(
     // Shared memory for the 8×8 block
     __shared__ int32_t s_block[64];
 
-    // Load pixel (with DC level shift: subtract 512 for 10-bit)
-    int px = blk_x * 8 + (tid % 8);
-    int py = blk_y * 8 + (tid / 8);
+    const int px = blk_x * 8 + (tid % 8);
+    const int py = blk_y * 8 + (tid / 8);
+
+    // Load pixel — NO level shift; raw 10-bit value [0, 1023].
+    // FFmpeg prores_fdct copies uint16_t directly into int16_t without shifting.
+    // The DC bias (0x4000) is subtracted in encode_dcs, not here.
     if (px < plane_width && py < plane_height)
-        s_block[tid] = (int32_t)d_plane[py * plane_width + px] - 512;
+        s_block[tid] = (int32_t)d_plane[py * plane_width + px];
     else
         s_block[tid] = 0; // zero-pad partial blocks at frame edge
     __syncthreads();
 
-    // Row DCT (one thread per row, serially for simplicity; optimise later)
-    // Only thread 0..7 start a row DCT pass (thread i handles row i)
+    // Row DCT: thread i handles row i (using dct_row_pass)
     if (tid < 8) {
-        dct_1d_pass(s_block + tid * 8);
+        int32_t row[8];
+        for (int c = 0; c < 8; c++) row[c] = s_block[tid * 8 + c];
+        dct_row_pass(row);
+        for (int c = 0; c < 8; c++) s_block[tid * 8 + c] = row[c];
     }
     __syncthreads();
 
-    // Column DCT: transpose manually via shared memory
+    // Column DCT: thread i handles column i (using dct_col_pass)
     if (tid < 8) {
-        int col_data[8];
-        for (int r = 0; r < 8; r++) col_data[r] = s_block[r * 8 + tid];
-        dct_1d_pass(col_data);
-        for (int r = 0; r < 8; r++) s_block[r * 8 + tid] = col_data[r];
+        int32_t col[8];
+        for (int r = 0; r < 8; r++) col[r] = s_block[r * 8 + tid];
+        dct_col_pass(col);
+        for (int r = 0; r < 8; r++) s_block[r * 8 + tid] = col[r];
     }
     __syncthreads();
 
