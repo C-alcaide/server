@@ -15,6 +15,25 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(CUDAToolkit REQUIRED)
 
+# ─── Windows SDK UCRT workaround ─────────────────────────────────────────────
+# When cmake is configured without a full VS developer environment (e.g. from a
+# restricted shell), CMAKE_CUDA_IMPLICIT_INCLUDE_DIRECTORIES may be empty and
+# nvcc wouldn't find corecrt.h / stdint.h from the Windows SDK UCRT.
+# Detect the latest installed SDK version and add it as a system include so
+# CUDA targets always compile correctly regardless of the shell environment.
+if(WIN32)
+    file(GLOB _sdk_versions
+         "C:/Program Files (x86)/Windows Kits/10/Include/10.*")
+    if(_sdk_versions)
+        list(SORT _sdk_versions)
+        list(GET  _sdk_versions -1 _sdk_latest)  # pick highest version
+        set(WINSDK_UCRT_INCLUDE "${_sdk_latest}/ucrt")
+        set(WINSDK_UM_INCLUDE   "${_sdk_latest}/um")
+        set(WINSDK_SHARED_INCLUDE "${_sdk_latest}/shared")
+        message(STATUS "Windows SDK UCRT: ${WINSDK_UCRT_INCLUDE}")
+    endif()
+endif()
+
 # ─── Paths ───────────────────────────────────────────────────────────────────
 set(MODULE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../src/modules/cuda_prores")
 set(CUDA_DIR   "${MODULE_DIR}/cuda")
@@ -79,11 +98,13 @@ add_executable(test_perf_benchmark
     ${CUDA_SOURCES})
 target_include_directories(test_perf_benchmark PRIVATE
     "${MODULE_DIR}"
-    "${CUDAToolkit_INCLUDE_DIRS}")
+    "${CUDAToolkit_INCLUDE_DIRS}"
+    "${FFMPEG_INCLUDE}")
 target_link_libraries(test_perf_benchmark PRIVATE
     CUDA::cudart_static
     CUDA::nppc
-    CUDA::nppist)
+    CUDA::nppist
+    ffmpeg)
 set_property(TARGET test_perf_benchmark PROPERTY CUDA_SEPARABLE_COMPILATION ON)
 set_property(TARGET test_perf_benchmark PROPERTY CUDA_RESOLVE_DEVICE_SYMBOLS ON)
 set_property(TARGET test_perf_benchmark PROPERTY CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}")
@@ -130,3 +151,16 @@ target_include_directories(test_timecode_roundtrip PRIVATE
     "${MODULE_DIR}"
     "${FFMPEG_INCLUDE}")
 target_link_libraries(test_timecode_roundtrip PRIVATE ffmpeg)
+
+# ─── Windows SDK UCRT system-include for all CUDA targets ────────────────────
+# nvcc may not inherit the host INCLUDE env var (especially from restricted
+# shells), so we forward the UCRT / um / shared dirs as system includes.
+# This is a no-op when the paths don't exist (Linux / CI).
+if(WIN32 AND DEFINED WINSDK_UCRT_INCLUDE AND EXISTS "${WINSDK_UCRT_INCLUDE}")
+    foreach(_cuda_tgt test_bgra_convert test_perf_benchmark test_prores_encode)
+        target_include_directories(${_cuda_tgt} SYSTEM PRIVATE
+            "${WINSDK_UCRT_INCLUDE}"
+            "${WINSDK_UM_INCLUDE}"
+            "${WINSDK_SHARED_INCLUDE}")
+    endforeach()
+endif()

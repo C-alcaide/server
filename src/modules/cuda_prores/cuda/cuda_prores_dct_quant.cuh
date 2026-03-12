@@ -120,11 +120,10 @@ __device__ __forceinline__ void dct_col_pass(int32_t *v)
 __global__ void k_dct_quantise(
     const int16_t * __restrict__ d_plane,  // input plane (Y, Cb, or Cr)
     int16_t       * __restrict__ d_out_coeffs, // output [num_blocks][64]
-    const uint8_t * __restrict__ d_quant,  // 64-element quant matrix (constant mem ptr)
     int plane_width,   // luma: width, chroma: width/2
     int plane_height,  // same for luma and chroma
     int q_scale,       // adaptive quality scale [1..31]; 1 = best quality
-    int profile,       // ProResProfile index (for future HDR/alpha paths)
+    int profile,       // ProResProfile index
     bool is_chroma)
 {
     // Each thread handles one coefficient position within the 8×8 block.
@@ -168,9 +167,11 @@ __global__ void k_dct_quantise(
     }
     __syncthreads();
 
-    // Quantise and scan-reorder
-    // read the quant value for this output position from __constant__ memory
-    uint8_t  q_val = d_quant[tid];
+    // Quantise and scan-reorder — look up quant table from __constant__ memory.
+    // Direct constant memory access is correct here; passing a host-side pointer
+    // to a __constant__ symbol as a kernel parameter would give a wrong address.
+    uint8_t  q_val = (is_chroma ? c_quant_chroma[profile][tid]
+                                : c_quant_luma  [profile][tid]);
     int32_t  denom = (int32_t)q_val * q_scale;
     // ProRes quantisation: round-half-away-from-zero, then clamp to int16_t
     int32_t  raw   = s_block[c_scan_order[tid]]; // scan reorder here
@@ -191,12 +192,10 @@ __global__ void k_dct_quantise(
 }
 
 // Launcher — call for luma plane then each chroma plane separately.
-// d_quant_const should be c_quant_luma[profile] or c_quant_chroma[profile]
-// (constant memory pointers can be passed as device pointers).
+// The kernel looks up the quant table from __constant__ memory directly.
 inline cudaError_t launch_dct_quantise(
     const int16_t  *d_plane,
     int16_t        *d_out_coeffs,
-    const uint8_t  *d_quant_const,
     int plane_width, int plane_height,
     int q_scale, int profile, bool is_chroma,
     cudaStream_t stream)
@@ -204,7 +203,7 @@ inline cudaError_t launch_dct_quantise(
     dim3 threads(64);
     dim3 blocks(plane_width / 8, plane_height / 8);
     k_dct_quantise<<<blocks, threads, 0, stream>>>(
-        d_plane, d_out_coeffs, d_quant_const,
+        d_plane, d_out_coeffs,
         plane_width, plane_height, q_scale, profile, is_chroma);
     return cudaGetLastError();
 }

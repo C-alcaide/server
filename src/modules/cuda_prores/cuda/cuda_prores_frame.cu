@@ -211,7 +211,6 @@ cudaError_t prores_encode_frame(
     // 2. DCT + quantise â€” luma
     err = launch_dct_quantise(
         ctx->d_y, ctx->d_coeffs_y,
-        c_quant_luma[ctx->profile],
         ctx->width, ctx->height,
         ctx->q_scale, ctx->profile, false, stream);
     if (err != cudaSuccess) return err;
@@ -219,7 +218,6 @@ cudaError_t prores_encode_frame(
     // 3. DCT + quantise — Cb
     err = launch_dct_quantise(
         ctx->d_cb, ctx->d_coeffs_cb,
-        c_quant_chroma[ctx->profile],
         ctx->width / 2, ctx->height,
         ctx->q_scale, ctx->profile, true, stream);
     if (err != cudaSuccess) return err;
@@ -227,7 +225,6 @@ cudaError_t prores_encode_frame(
     // 4. DCT + quantise — Cr
     err = launch_dct_quantise(
         ctx->d_cr, ctx->d_coeffs_cr,
-        c_quant_chroma[ctx->profile],
         ctx->width / 2, ctx->height,
         ctx->q_scale, ctx->profile, true, stream);
     if (err != cudaSuccess) return err;
@@ -367,7 +364,6 @@ cudaError_t prores_encode_frame_444(
     // 2. DCT + quantise — luma
     err = launch_dct_quantise(
         ctx->d_y, ctx->d_coeffs_y,
-        c_quant_luma[ctx->profile],
         ctx->width, ctx->height,
         ctx->q_scale, ctx->profile, false, stream);
     if (err != cudaSuccess) return err;
@@ -375,7 +371,6 @@ cudaError_t prores_encode_frame_444(
     // 3. DCT + quantise — Cb  (4444: FULL width, chroma quant table)
     err = launch_dct_quantise(
         ctx->d_cb, ctx->d_coeffs_cb,
-        c_quant_chroma[ctx->profile],
         ctx->width, ctx->height,    // full width — no /2
         ctx->q_scale, ctx->profile, true, stream);
     if (err != cudaSuccess) return err;
@@ -383,7 +378,6 @@ cudaError_t prores_encode_frame_444(
     // 4. DCT + quantise — Cr  (4444: FULL width, chroma quant table)
     err = launch_dct_quantise(
         ctx->d_cr, ctx->d_coeffs_cr,
-        c_quant_chroma[ctx->profile],
         ctx->width, ctx->height,    // full width
         ctx->q_scale, ctx->profile, true, stream);
     if (err != cudaSuccess) return err;
@@ -392,7 +386,6 @@ cudaError_t prores_encode_frame_444(
     if (ctx->has_alpha) {
         err = launch_dct_quantise(
             ctx->d_alpha, ctx->d_coeffs_alpha,
-            c_quant_luma[ctx->profile],
             ctx->width, ctx->height,
             ctx->q_scale, ctx->profile, false, stream);
         if (err != cudaSuccess) return err;
