@@ -304,10 +304,13 @@ cudaError_t prores_encode_frame(
     int phdr_bytes = build_picture_header(p, ctx->num_slices, mbs);
     p += phdr_bytes;
 
-    // (e) Slice seek table: one uint16_t per slice = slice byte size
+    // (e) Slice seek table: ProRes stores (slice_bytes / 2) as uint16.
+    //     Decoders (FFmpeg, QuickTime) read the entry and shift left 1 to recover
+    //     the byte count.  k_bits_to_bytes already rounds each component to an even
+    //     byte count, so slice sizes are always even and >> 1 is exact.
     for (int i = 0; i < ctx->num_slices; i++) {
         uint32_t sz = h_offsets[i + 1] - h_offsets[i];
-        write_u16(p, (uint16_t)sz);
+        write_u16(p, (uint16_t)(sz >> 1));
         p += 2;
     }
     cudaFreeHost(h_offsets);
@@ -467,9 +470,10 @@ cudaError_t prores_encode_frame_444(
     int phdr_bytes = build_picture_header(p, ctx->num_slices, mbs);
     p += phdr_bytes;
 
+    // ProRes seek table stores size/2; decoder reads entry << 1.
     for (int i = 0; i < ctx->num_slices; i++) {
         uint32_t sz = h_offsets[i + 1] - h_offsets[i];
-        write_u16(p, (uint16_t)sz); p += 2;
+        write_u16(p, (uint16_t)(sz >> 1)); p += 2;
     }
     cudaFreeHost(h_offsets);
 
