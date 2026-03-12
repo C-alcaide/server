@@ -700,14 +700,12 @@ bool MovMuxer::close() {
         FILE_ATTRIBUTE_NORMAL, nullptr);
     if (bf == INVALID_HANDLE_VALUE) return false;
 
-    // Back-patch little-endian 64-bit mdat size at offset (mdat_start_ - 8).
-    // We stored write_pos_ which is sector-aligned; real content end is exactly
-    // write_pos_ (no partial-sector waste is visible at this layer — the last
-    // sector is zero-padded, but file size reflects the actual position).
-    uint64_t mdat_hdr_at = mdat_start_ - 8; // offset of the extended-size field (8 bytes into the 16-byte mdat header)
-    // mdat total size = from start of mdat header (mdat_start_ - 16) to end of content
-    uint64_t mdat_header_start = mdat_start_ - 16; // size(4) + 'mdat'(4) + extended_size(8)
-    uint64_t mdat_total        = write_pos_ - mdat_header_start; // includes 16-byte header
+    // Back-patch mdat extended-size field.
+    // The mdat 16-byte header (size=1, 'mdat', 8-byte extended size) was written
+    // sector-aligned at (mdat_start_ - sector_size_).  The 8-byte extended-size
+    // field sits at byte offset +8 within that header sector.
+    uint64_t mdat_hdr_at = mdat_hdr_offset + 8; // = mdat_start_ - sector_size_ + 8
+    uint64_t mdat_total  = mdat_total_size;      // already computed correctly above
 
     // Seek to extended-size field
     LARGE_INTEGER li;
