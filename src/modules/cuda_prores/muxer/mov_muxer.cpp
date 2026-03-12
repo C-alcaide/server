@@ -272,6 +272,8 @@ void MovMuxer::write_video_trak(std::vector<uint8_t> &buf) {
                     put_u16(buf, 0); // version
                     put_u16(buf, 0); // revision
                     put_u32(buf, 0); // vendor
+                    put_u32(buf, 0); // temporal quality (pre-defined)
+                    put_u32(buf, 0); // spatial quality (pre-defined)
                     put_u16(buf, (uint16_t)video_.width);
                     put_u16(buf, (uint16_t)video_.height);
                     put_u32(buf, 0x00480000); // h DPI 72.0 fixed
