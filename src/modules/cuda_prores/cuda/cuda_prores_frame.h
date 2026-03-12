@@ -89,7 +89,7 @@ struct ProResFrameCtx {
     uint8_t  *d_bitstream;            // output encoded slice data (worst-case sized)
     uint32_t *d_slice_offsets;        // [num_slices + 1] byte offsets into d_bitstream
     uint32_t *d_slice_sizes;          // [num_slices] per-slice byte sizes (temp for CUB)
-    uint32_t *d_bit_counts;           // [num_slices * 3] Y/Cb/Cr bit counts per slice
+    uint32_t *d_bit_counts;           // [num_slices * 3] (422) or [num_slices * 4] (4444+alpha)
     void     *d_cub_temp;
     size_t    cub_temp_bytes;
 
@@ -98,14 +98,32 @@ struct ProResFrameCtx {
     size_t    h_frame_buf_size;
 
     int q_scale; // current adaptive quality scale [1..31]
+
+    // 4444 / 4444 XQ fields (zero-initialised for 422 profiles)
+    bool     is_4444;           // true for ProRes 4444 / 4444 XQ
+    bool     has_alpha;         // true ↔ input alpha plane is encoded
+    int16_t *d_alpha;           // [width * height] alpha input (raw 10-bit after expand)
+    int16_t *d_coeffs_alpha;    // [num_slices * 4 * mbs_per_slice * 64] alpha coeffs
 };
 
 // ---------------------------------------------------------------------------
-// Main encode entry point — defined in cuda_prores_frame.cu
+// Main encode entry points — defined in cuda_prores_frame.cu
 // ---------------------------------------------------------------------------
+
+// ProRes 422 (proxy / LT / standard / HQ):  input is V210 10-bit packed
 cudaError_t prores_encode_frame(
     ProResFrameCtx        *ctx,
     const uint32_t        *d_v210,
+    uint8_t               *h_out,
+    size_t                *out_size,
+    cudaStream_t           stream,
+    const ProResColorDesc *color);
+
+// ProRes 4444 / 4444 XQ:  input is BGRA8 (CasparCG mixer output)
+// ctx->is_4444 must be true; ctx->has_alpha controls alpha-plane encoding.
+cudaError_t prores_encode_frame_444(
+    ProResFrameCtx        *ctx,
+    const uint8_t         *d_bgra,
     uint8_t               *h_out,
     size_t                *out_size,
     cudaStream_t           stream,

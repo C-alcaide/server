@@ -2,12 +2,20 @@ cmake_minimum_required(VERSION 3.28)
 project(cuda_prores LANGUAGES CXX CUDA)
 
 # ─── CUDA configuration ─────────────────────────────────────────────────────
-# RTX A5000 = sm_86 (Ampere).  Add sm_80 (A100) and sm_89 (Ada) as extras.
-set(CMAKE_CUDA_ARCHITECTURES "86;80;89" CACHE STRING "CUDA architectures")
+# sm_52 = Maxwell (Quadro M4000), sm_61 = Pascal (P2000/P5000),
+# sm_80 = Ampere A100, sm_86 = RTX A5000/A4000, sm_89 = Ada L40/RTX 4000.
+# CUDA 12.9 supports all of these (Maxwell/Pascal dropped in CUDA 13.0).
+set(CMAKE_CUDA_ARCHITECTURES "52;61;80;86;89" CACHE STRING "CUDA architectures")
 
 # Separable compilation: required so device functions defined in .cuh files
 # can be called across translation units (e.g. rice/entropy/DCT).
 set(CMAKE_CUDA_SEPARABLE_COMPILATION ON)
+
+# CUDA 12.9 formally supports VS 2017-2022.  VS 2026 (MSVC 19.50) triggers a
+# version check in host_config.h; the flag below suppresses it.  The CUDA
+# constructs used here (basic kernels, CUB, __clz) are well within what the
+# newer compiler handles correctly.
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -allow-unsupported-compiler -Wno-deprecated-gpu-targets")
 
 # ─── Source lists ────────────────────────────────────────────────────────────
 set(CUDA_SOURCES
@@ -117,6 +125,7 @@ if (MSVC)
     )
     target_include_directories(test_prores_encode PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}
         ${CUDAToolkit_INCLUDE_DIRS}
         ${FFMPEG_INCLUDE_PATH}
         ../decklink
@@ -139,6 +148,7 @@ if (MSVC)
     )
     target_include_directories(test_bgra_convert PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}
         ${CUDAToolkit_INCLUDE_DIRS}
     )
     target_link_libraries(test_bgra_convert PRIVATE
@@ -157,6 +167,7 @@ if (MSVC)
     )
     target_include_directories(test_timecode_roundtrip PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}
         ${CUDAToolkit_INCLUDE_DIRS}
         ${FFMPEG_INCLUDE_PATH}
     )
@@ -172,6 +183,7 @@ if (MSVC)
     )
     target_include_directories(test_rice_entropy PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}
         ${CUDAToolkit_INCLUDE_DIRS}
     )
     # No CUDA runtime needed — pure CPU test
@@ -185,6 +197,7 @@ if (MSVC)
     )
     target_include_directories(test_perf_benchmark PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}
         ${CUDAToolkit_INCLUDE_DIRS}
     )
     target_link_libraries(test_perf_benchmark PRIVATE

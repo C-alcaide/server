@@ -7,6 +7,7 @@
 #include "cuda_prores_v210_unpack.cuh"
 #include "cuda_prores_dct_quant.cuh"
 #include "cuda_prores_entropy.cu"    // includes kernel definitions
+#include "cuda_bgra_to_yuva444p10.cuh"  // direct BGRA->4444P10 for ProRes 4444
 
 #include <cub/device/device_scan.cuh>
 #include <cuda_runtime.h>
@@ -52,6 +53,8 @@ static int build_frame_header(
     uint8_t               *dst,
     int                    width,
     int                    height,
+    bool                   is_4444,
+    bool                   has_alpha,
     const ProResColorDesc *color,
     const uint8_t         *quant_luma,
     const uint8_t         *quant_chroma)
@@ -62,12 +65,15 @@ static int build_frame_header(
     p[0]='C'; p[1]='U'; p[2]='D'; p[3]='A'; p += 4;  // [4..7] encoder tag
     write_u16(p, (uint16_t)width);  p += 2;  // [8..9]
     write_u16(p, (uint16_t)height); p += 2;  // [10..11]
-    write_u8(p++, 0x80);                 // [12] frame_flags: 422 progressive
+    // [12] frame_flags: bits[7:6] = chroma format (0b10=4:2:2, 0b00=4:4:4)
+    //                   bits[1:0] = frame type (0 = progressive)
+    write_u8(p++, is_4444 ? 0x00u : 0x80u);
     write_u8(p++, 0);                    // [13] reserved
     write_u8(p++, color->color_primaries);   // [14]
     write_u8(p++, color->transfer_function); // [15]
     write_u8(p++, color->color_matrix);      // [16]
-    write_u8(p++, 0);                    // [17] alpha = 0
+    // [17] alpha_channel_type: 0=none, 1=8-bit, 2=16-bit (ProRes 4444 standard)
+    write_u8(p++, (is_4444 && has_alpha) ? 2u : 0u);
     write_u8(p++, 0);                    // [18] reserved
     write_u8(p++, 0x03);                 // [19] matrix_flags: both matrices present
     memcpy(p, quant_luma,   64); p += 64;
@@ -290,7 +296,7 @@ cudaError_t prores_encode_frame(
     // (c) Frame header (150 bytes with quant matrices)
     const uint8_t *ql = PRORES_QUANT_LUMA[ctx->profile];
     const uint8_t *qc = PRORES_QUANT_CHROMA[ctx->profile];
-    int fhdr_bytes = build_frame_header(p, ctx->width, ctx->height, color, ql, qc);
+    int fhdr_bytes = build_frame_header(p, ctx->width, ctx->height, false, false, color, ql, qc);
     p += fhdr_bytes;
 
     // (d) Picture header (8 bytes)
@@ -318,6 +324,167 @@ cudaError_t prores_encode_frame(
     write_u32(pic_hdr_ptr + 1, pic_data_size);
 
     // (h) Patch frame size
+    uint32_t frame_bytes = (uint32_t)(p - h_out);
+    write_u32(frame_size_ptr, frame_bytes);
+
+    *out_size = (size_t)frame_bytes;
+    return cudaSuccess;
+}
+
+// ---------------------------------------------------------------------------
+// prores_encode_frame_444 — ProRes 4444 / 4444 XQ from a BGRA8 device buffer.
+//
+// ctx->is_4444 must be true.  ctx->has_alpha controls whether the alpha channel
+// in the BGRA input is DCT-encoded into the slice data.  Cb/Cr planes are
+// processed at full resolution (4:4:4 — no horizontal subsampling).
+//
+// Slice format (ProRes 4444, 8-byte header per Apple White Paper):
+//   [0x40]         1 byte  header_bits = 64
+//   [q_scale]      1 byte
+//   [Y_size  BE16] 2 bytes
+//   [Cb_size BE16] 2 bytes
+//   [A_size  BE16] 2 bytes  (0 when !has_alpha)
+//   Data order: Y bytes, Cb bytes, Cr bytes (implicit), A bytes
+// ---------------------------------------------------------------------------
+cudaError_t prores_encode_frame_444(
+    ProResFrameCtx        *ctx,
+    const uint8_t         *d_bgra,
+    uint8_t               *h_out,
+    size_t                *out_size,
+    cudaStream_t           stream,
+    const ProResColorDesc *color)
+{
+    cudaError_t err;
+
+    // 1. BGRA8 -> planar YUVA 4:4:4 10-bit  (skips V210 intermediate entirely)
+    err = launch_bgra_to_yuva444p10(
+        d_bgra,
+        ctx->d_y, ctx->d_cb, ctx->d_cr,
+        ctx->has_alpha ? ctx->d_alpha : nullptr,
+        ctx->width, ctx->height, stream);
+    if (err != cudaSuccess) return err;
+
+    // 2. DCT + quantise — luma
+    err = launch_dct_quantise(
+        ctx->d_y, ctx->d_coeffs_y,
+        c_quant_luma[ctx->profile],
+        ctx->width, ctx->height,
+        ctx->q_scale, ctx->profile, false, stream);
+    if (err != cudaSuccess) return err;
+
+    // 3. DCT + quantise — Cb  (4444: FULL width, chroma quant table)
+    err = launch_dct_quantise(
+        ctx->d_cb, ctx->d_coeffs_cb,
+        c_quant_chroma[ctx->profile],
+        ctx->width, ctx->height,    // full width — no /2
+        ctx->q_scale, ctx->profile, true, stream);
+    if (err != cudaSuccess) return err;
+
+    // 4. DCT + quantise — Cr  (4444: FULL width, chroma quant table)
+    err = launch_dct_quantise(
+        ctx->d_cr, ctx->d_coeffs_cr,
+        c_quant_chroma[ctx->profile],
+        ctx->width, ctx->height,    // full width
+        ctx->q_scale, ctx->profile, true, stream);
+    if (err != cudaSuccess) return err;
+
+    // 5. DCT + quantise — Alpha  (uses luma quant table, per Apple spec)
+    if (ctx->has_alpha) {
+        err = launch_dct_quantise(
+            ctx->d_alpha, ctx->d_coeffs_alpha,
+            c_quant_luma[ctx->profile],
+            ctx->width, ctx->height,
+            ctx->q_scale, ctx->profile, false, stream);
+        if (err != cudaSuccess) return err;
+    }
+
+    // 6. Interleave block coefficients into per-slice layout.
+    //    For 4444, all planes are full resolution, so k_interleave_luma can be
+    //    reused for Cb, Cr and Alpha (same 2x2 block-per-16x16-MB layout as Y).
+    const int mbs = ctx->mbs_per_slice;
+    const int spr = ctx->slices_per_row;
+    const int T   = 256;
+    const int all_blocks = (ctx->height / 8) * (ctx->width / 8);
+
+    // Y:     offsets [0       .. 4*mbs-1 ] per slice
+    k_interleave_luma<<<(all_blocks + T-1)/T, T, 0, stream>>>(
+        ctx->d_coeffs_y, ctx->d_coeffs_slice,
+        ctx->width / 8, ctx->height / 8, mbs, spr);
+
+    // Cb:    offsets [4*mbs   .. 8*mbs-1 ] per slice
+    int16_t *d_cb_base = ctx->d_coeffs_slice + (ptrdiff_t)4 * mbs * 64;
+    k_interleave_luma<<<(all_blocks + T-1)/T, T, 0, stream>>>(
+        ctx->d_coeffs_cb, d_cb_base,
+        ctx->width / 8, ctx->height / 8, mbs, spr);
+
+    // Cr:    offsets [8*mbs   .. 12*mbs-1] per slice
+    int16_t *d_cr_base = ctx->d_coeffs_slice + (ptrdiff_t)8 * mbs * 64;
+    k_interleave_luma<<<(all_blocks + T-1)/T, T, 0, stream>>>(
+        ctx->d_coeffs_cr, d_cr_base,
+        ctx->width / 8, ctx->height / 8, mbs, spr);
+
+    // Alpha: offsets [12*mbs  .. 16*mbs-1] per slice  (only when has_alpha)
+    if (ctx->has_alpha) {
+        int16_t *d_alpha_base = ctx->d_coeffs_slice + (ptrdiff_t)12 * mbs * 64;
+        k_interleave_luma<<<(all_blocks + T-1)/T, T, 0, stream>>>(
+            ctx->d_coeffs_alpha, d_alpha_base,
+            ctx->width / 8, ctx->height / 8, mbs, spr);
+    }
+
+    // 7. Two-pass entropy coding (4444)
+    cuda_prores_enc_frame_raw_444(
+        ctx->d_coeffs_slice,
+        ctx->num_slices,
+        mbs,
+        ctx->q_scale,
+        ctx->d_bitstream,
+        ctx->d_slice_offsets,
+        ctx->d_bit_counts,
+        ctx->d_slice_sizes,
+        ctx->d_cub_temp,
+        ctx->cub_temp_bytes,
+        stream,
+        ctx->has_alpha);
+
+    // 8. Sync and transfer slice offsets to host for seek table
+    uint32_t *h_offsets = nullptr;
+    cudaMallocHost(&h_offsets, (ctx->num_slices + 1) * sizeof(uint32_t));
+    cudaMemcpyAsync(h_offsets, ctx->d_slice_offsets,
+                    (ctx->num_slices + 1) * sizeof(uint32_t),
+                    cudaMemcpyDeviceToHost, stream);
+    cudaStreamSynchronize(stream);
+
+    const uint32_t total_slice_bytes = h_offsets[ctx->num_slices];
+
+    // 9. Assemble ProRes frame container  [frame_size][icpf][hdr][pic_hdr][seek][slices]
+    uint8_t *p = h_out;
+    uint8_t *frame_size_ptr = p; p += 4;
+    p[0]='i'; p[1]='c'; p[2]='p'; p[3]='f'; p += 4;
+
+    const uint8_t *ql = PRORES_QUANT_LUMA[ctx->profile];
+    const uint8_t *qc = PRORES_QUANT_CHROMA[ctx->profile];
+    int fhdr_bytes = build_frame_header(p, ctx->width, ctx->height,
+                                         true, ctx->has_alpha, color, ql, qc);
+    p += fhdr_bytes;
+
+    uint8_t *pic_hdr_ptr = p;
+    int phdr_bytes = build_picture_header(p, ctx->num_slices, mbs);
+    p += phdr_bytes;
+
+    for (int i = 0; i < ctx->num_slices; i++) {
+        uint32_t sz = h_offsets[i + 1] - h_offsets[i];
+        write_u16(p, (uint16_t)sz); p += 2;
+    }
+    cudaFreeHost(h_offsets);
+
+    cudaMemcpyAsync(p, ctx->d_bitstream, total_slice_bytes,
+                    cudaMemcpyDeviceToHost, stream);
+    cudaStreamSynchronize(stream);
+    p += total_slice_bytes;
+
+    uint32_t pic_data_size = (uint32_t)(p - pic_hdr_ptr);
+    write_u32(pic_hdr_ptr + 1, pic_data_size);
+
     uint32_t frame_bytes = (uint32_t)(p - h_out);
     write_u32(frame_size_ptr, frame_bytes);
 

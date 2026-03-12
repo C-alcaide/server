@@ -327,3 +327,183 @@ void cuda_prores_enc_frame_raw(
         d_coeffs_slice, d_slice_offsets, d_bit_counts, d_output,
         q_scale, mbs_per_slice, num_slices);
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ProRes 4444 / 4444 XQ entropy encoder
+//
+// Layout differences vs. 422:
+//   c_n = 4 * mbs_per_slice  (full-res chroma, not 2*mbs)
+//   a_n = 4 * mbs_per_slice  (alpha plane; zero if !has_alpha)
+//   stride = (4 + 4 + 4 + a_n/4) * mbs * 64
+//   d_bit_counts: 4 entries per slice  [Y, Cb, Cr, A]
+//
+// Slice header (8 bytes = 0x40 bits):
+//   [0x40]         header size in bits
+//   [q_scale]      quantiser
+//   [Y_size  BE16] luma byte count
+//   [Cb_size BE16] Cb byte count
+//   [A_size  BE16] alpha byte count (0 when !has_alpha)
+//   Data: Y bytes, Cb bytes, Cr bytes (implicit), A bytes
+// ═══════════════════════════════════════════════════════════════════════════
+
+__global__ void k_count_bits_444(
+    const int16_t *d_coeffs_slice,
+    uint32_t      *d_bit_counts,    // [num_slices * 4]
+    int            mbs_per_slice,
+    int            num_slices,
+    int            has_alpha)       // 0 or 1
+{
+    int s = blockIdx.x * blockDim.x + threadIdx.x;
+    if (s >= num_slices) return;
+
+    const int y_n = 4 * mbs_per_slice;
+    const int c_n = 4 * mbs_per_slice;  // full-res chroma
+    const int a_n = has_alpha ? 4 * mbs_per_slice : 0;
+    const ptrdiff_t stride = (ptrdiff_t)(y_n + c_n + c_n + a_n) * 64;
+
+    const int16_t *y_blks     = d_coeffs_slice + (ptrdiff_t)s * stride;
+    const int16_t *cb_blks    = y_blks  + (ptrdiff_t)y_n * 64;
+    const int16_t *cr_blks    = cb_blks + (ptrdiff_t)c_n * 64;
+    const int16_t *alpha_blks = cr_blks + (ptrdiff_t)c_n * 64;
+
+    d_bit_counts[s * 4 + 0] = (uint32_t)(encode_dc_plane(y_blks,  y_n, nullptr)
+                                        + encode_ac_plane(y_blks,  y_n, nullptr));
+    d_bit_counts[s * 4 + 1] = (uint32_t)(encode_dc_plane(cb_blks, c_n, nullptr)
+                                        + encode_ac_plane(cb_blks, c_n, nullptr));
+    d_bit_counts[s * 4 + 2] = (uint32_t)(encode_dc_plane(cr_blks, c_n, nullptr)
+                                        + encode_ac_plane(cr_blks, c_n, nullptr));
+    d_bit_counts[s * 4 + 3] = has_alpha
+        ? (uint32_t)(encode_dc_plane(alpha_blks, a_n, nullptr)
+                   + encode_ac_plane(alpha_blks, a_n, nullptr))
+        : 0u;
+}
+
+// Per-slice total bytes for 4444: 8-byte header + four planes.
+__global__ void k_compute_slice_sizes_444(
+    const uint32_t *d_byte_counts,  // [num_slices * 4], already byte-rounded
+    uint32_t       *d_sizes,        // [num_slices]
+    int             num_slices)
+{
+    int s = blockIdx.x * blockDim.x + threadIdx.x;
+    if (s >= num_slices) return;
+    d_sizes[s] = 8u + d_byte_counts[s * 4 + 0]   // 8-byte header (not 6)
+                    + d_byte_counts[s * 4 + 1]
+                    + d_byte_counts[s * 4 + 2]
+                    + d_byte_counts[s * 4 + 3];
+}
+
+__global__ void k_encode_slices_444(
+    const int16_t  *d_coeffs_slice,
+    const uint32_t *d_slice_offsets,
+    const uint32_t *d_byte_counts,    // [num_slices * 4]
+    uint8_t        *d_output,
+    int             q_scale,
+    int             mbs_per_slice,
+    int             num_slices,
+    int             has_alpha)
+{
+    int s = blockIdx.x * blockDim.x + threadIdx.x;
+    if (s >= num_slices) return;
+
+    const int y_n = 4 * mbs_per_slice;
+    const int c_n = 4 * mbs_per_slice;
+    const int a_n = has_alpha ? 4 * mbs_per_slice : 0;
+    const ptrdiff_t stride = (ptrdiff_t)(y_n + c_n + c_n + a_n) * 64;
+
+    const int16_t *y_blks     = d_coeffs_slice + (ptrdiff_t)s * stride;
+    const int16_t *cb_blks    = y_blks  + (ptrdiff_t)y_n * 64;
+    const int16_t *cr_blks    = cb_blks + (ptrdiff_t)c_n * 64;
+    const int16_t *alpha_blks = cr_blks + (ptrdiff_t)c_n * 64;
+
+    const uint32_t y_bytes  = d_byte_counts[s * 4 + 0];
+    const uint32_t cb_bytes = d_byte_counts[s * 4 + 1];
+    const uint32_t cr_bytes = d_byte_counts[s * 4 + 2];
+    const uint32_t a_bytes  = d_byte_counts[s * 4 + 3];
+
+    uint8_t *out = d_output + d_slice_offsets[s];
+
+    // 8-byte ProRes 4444 slice header
+    out[0] = 0x40;   // header_bits = 64 = 8 bytes
+    out[1] = (uint8_t)q_scale;
+    out[2] = (uint8_t)(y_bytes  >> 8);
+    out[3] = (uint8_t)(y_bytes  & 0xFF);
+    out[4] = (uint8_t)(cb_bytes >> 8);
+    out[5] = (uint8_t)(cb_bytes & 0xFF);
+    out[6] = (uint8_t)(a_bytes  >> 8);   // alpha_size (0 when !has_alpha)
+    out[7] = (uint8_t)(a_bytes  & 0xFF);
+
+    BitPacker bp;
+
+    // Y component
+    bp_init(&bp, out + 8);
+    encode_dc_plane(y_blks,  y_n, &bp);
+    encode_ac_plane(y_blks,  y_n, &bp);
+    bp_pad_byte(&bp);
+
+    // Cb component
+    bp_init(&bp, out + 8 + y_bytes);
+    encode_dc_plane(cb_blks, c_n, &bp);
+    encode_ac_plane(cb_blks, c_n, &bp);
+    bp_pad_byte(&bp);
+
+    // Cr component (size is implicit: total - 8 - y - cb - a)
+    bp_init(&bp, out + 8 + y_bytes + cb_bytes);
+    encode_dc_plane(cr_blks, c_n, &bp);
+    encode_ac_plane(cr_blks, c_n, &bp);
+    bp_pad_byte(&bp);
+
+    // Alpha component (placed after Cr, per Apple ProRes spec)
+    if (has_alpha) {
+        bp_init(&bp, out + 8 + y_bytes + cb_bytes + cr_bytes);
+        encode_dc_plane(alpha_blks, a_n, &bp);
+        encode_ac_plane(alpha_blks, a_n, &bp);
+        bp_pad_byte(&bp);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Host: run the 4444 two-pass entropy pipeline
+// d_bit_counts must be [num_slices * 4]
+// ---------------------------------------------------------------------------
+void cuda_prores_enc_frame_raw_444(
+    const int16_t *d_coeffs_slice,
+    int            num_slices,
+    int            mbs_per_slice,
+    int            q_scale,
+    uint8_t       *d_output,
+    uint32_t      *d_slice_offsets,
+    uint32_t      *d_bit_counts,    // [num_slices * 4]
+    uint32_t      *d_slice_sizes,
+    void          *d_cub_temp,
+    size_t         cub_temp_bytes,
+    cudaStream_t   stream,
+    bool           has_alpha)
+{
+    const int T = 128;
+    const int G = (num_slices + T - 1) / T;
+
+    // Pass 1: bit counts (4 entries per slice: Y, Cb, Cr, A)
+    k_count_bits_444<<<G, T, 0, stream>>>(
+        d_coeffs_slice, d_bit_counts, mbs_per_slice, num_slices, (int)has_alpha);
+
+    // Bit -> byte (ceil) for all 4 * num_slices entries
+    const int G4 = (num_slices * 4 + T - 1) / T;
+    k_bits_to_bytes<<<G4, T, 0, stream>>>(d_bit_counts, num_slices * 4);
+
+    // Per-slice total byte count = 8 (header) + Y + Cb + Cr + A
+    k_compute_slice_sizes_444<<<G, T, 0, stream>>>(d_bit_counts, d_slice_sizes, num_slices);
+
+    // Exclusive prefix sum -> per-slice byte offsets
+    cub::DeviceScan::ExclusiveSum(
+        d_cub_temp, cub_temp_bytes,
+        d_slice_sizes, d_slice_offsets,
+        num_slices, stream);
+
+    // Set total bytes at d_slice_offsets[num_slices]
+    k_set_total<<<1, 1, 0, stream>>>(d_slice_offsets, d_slice_sizes, num_slices);
+
+    // Pass 2: write slices
+    k_encode_slices_444<<<G, T, 0, stream>>>(
+        d_coeffs_slice, d_slice_offsets, d_bit_counts, d_output,
+        q_scale, mbs_per_slice, num_slices, (int)has_alpha);
+}

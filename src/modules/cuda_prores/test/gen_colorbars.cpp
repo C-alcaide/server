@@ -158,13 +158,18 @@ static void fill_frame(AVFrame *frame, int frame_index, int fps, int grain_ampli
     const int ball_r2   = ball_r * ball_r;
 
     // --- Sweep bar progress within the current second ---
-    // Position advances from 0 → W across one second, then resets.
     const int sweep_x = ((frame_index % fps) * W) / fps;
+
+    const bool is_444 = (frame->format == AV_PIX_FMT_YUVA444P10LE ||
+                         frame->format == AV_PIX_FMT_YUV444P10LE);
 
     for (int y = 0; y < H; ++y) {
         uint16_t *Y_row  = reinterpret_cast<uint16_t *>(frame->data[0] + y * frame->linesize[0]);
         uint16_t *Cb_row = reinterpret_cast<uint16_t *>(frame->data[1] + y * frame->linesize[1]);
         uint16_t *Cr_row = reinterpret_cast<uint16_t *>(frame->data[2] + y * frame->linesize[2]);
+        uint16_t *A_row  = (frame->data[3] && frame->linesize[3])
+                         ? reinterpret_cast<uint16_t *>(frame->data[3] + y * frame->linesize[3])
+                         : nullptr;
 
         if (y < top_end) {
             // ── Colour bars + rotating ball overlay ──────────────────────────
@@ -176,17 +181,18 @@ static void fill_frame(AVFrame *frame, int frame_index, int fps, int grain_ampli
 
                 Y_row[x] = apply_grain(in_ball ? Y_WHITE : BARS[bar].y, x, y, frame_index, grain_amplitude);
 
-                // Chroma samples are at even x positions (YUV422 = 1 Cb/Cr per 2 Y)
-                if ((x & 1) == 0) {
+                // Chroma: full-res for 4444, half-res (422) otherwise
+                if (is_444) {
+                    Cb_row[x] = in_ball ? C_NEUTRAL : BARS[bar].cb;
+                    Cr_row[x] = in_ball ? C_NEUTRAL : BARS[bar].cr;
+                } else if ((x & 1) == 0) {
                     const int cx = x >> 1;
-                    // Check both luma positions that share this chroma sample
                     const int dx1 = (x + 1) - ball_cx;
                     const bool in_ball_r = (dx1 * dx1 + dy * dy) <= ball_r2;
                     if (in_ball || in_ball_r) {
                         Cb_row[cx] = C_NEUTRAL;
                         Cr_row[cx] = C_NEUTRAL;
                     } else {
-                        // Average chroma when the pair straddles a bar boundary
                         const int bar_r = ((x + 1) * 7) / W;
                         if (bar == bar_r) {
                             Cb_row[cx] = BARS[bar].cb;
@@ -197,25 +203,42 @@ static void fill_frame(AVFrame *frame, int frame_index, int fps, int grain_ampli
                         }
                     }
                 }
+
+                // Alpha: animated ramp for 4444 — left stripe fully transparent,
+                // right stripe fully opaque, with a soft diagonal transition.
+                if (A_row) {
+                    const int alpha_x = x - (W / 4) - ((frame_index % fps) * W / (2 * fps));
+                    const int a = alpha_x < 0 ? 0 : (alpha_x > W / 4 ? 1023
+                                                : alpha_x * 1023 / (W / 4));
+                    A_row[x] = (uint16_t)a;
+                }
             }
         } else if (y < mid_end) {
-            // ── Sweep bar (white left of sweep_x, black right) ───────────────
+            // ── Sweep bar ───────────────────────────────────────────────────
             for (int x = 0; x < W; ++x) {
                 Y_row[x] = apply_grain((x < sweep_x) ? Y_WHITE : Y_BLACK, x, y, frame_index, grain_amplitude);
-                if ((x & 1) == 0) {
+                if (is_444) {
+                    Cb_row[x] = C_NEUTRAL;
+                    Cr_row[x] = C_NEUTRAL;
+                } else if ((x & 1) == 0) {
                     Cb_row[x >> 1] = C_NEUTRAL;
                     Cr_row[x >> 1] = C_NEUTRAL;
                 }
+                if (A_row) A_row[x] = 1023; // sweep section fully opaque
             }
         } else {
             // ── Full luma ramp  Y=64 → Y=940 ──────────────────────────────────
             for (int x = 0; x < W; ++x) {
                 const uint16_t ramp_y = (uint16_t)(Y_BLACK + (uint32_t)(x) * (Y_WHITE - Y_BLACK) / (uint32_t)(W - 1));
                 Y_row[x] = apply_grain(ramp_y, x, y, frame_index, grain_amplitude);
-                if ((x & 1) == 0) {
+                if (is_444) {
+                    Cb_row[x] = C_NEUTRAL;
+                    Cr_row[x] = C_NEUTRAL;
+                } else if ((x & 1) == 0) {
                     Cb_row[x >> 1] = C_NEUTRAL;
                     Cr_row[x >> 1] = C_NEUTRAL;
                 }
+                if (A_row) A_row[x] = 1023; // ramp section fully opaque
             }
         }
     }
@@ -258,9 +281,11 @@ int main(int argc, char **argv)
         return 1;
     }
     AVCodecContext *enc = avcodec_alloc_context3(codec);
+    const bool is_4444 = (prof->fourcc == 0x61703468u || prof->fourcc == 0x61703478u);
+
     enc->width     = WIDTH;
     enc->height    = HEIGHT;
-    enc->pix_fmt   = AV_PIX_FMT_YUV422P10LE;
+    enc->pix_fmt   = is_4444 ? AV_PIX_FMT_YUVA444P10LE : AV_PIX_FMT_YUV422P10LE;
     AVRational tb  = {1, FPS};
     enc->time_base = tb;
     av_opt_set(enc->priv_data, "profile", prof->name, 0);
@@ -342,9 +367,11 @@ int main(int argc, char **argv)
         tc.hours   = (uint8_t)((ts / 3600) % 24);
         muxer.write_timecode(tc);
 
-        if (f % FPS == 0 || f == NUM_FRAMES - 1)
+        if (f % FPS == 0 || f == NUM_FRAMES - 1) {
             fprintf(stdout, "[gen_colorbars] Frame %d/%d (%02d:%02d:%02d:%02d)\n",
                     f, NUM_FRAMES, tc.hours, tc.minutes, tc.seconds, tc.frames);
+            fflush(stdout);
+        }
     }
 
     av_packet_free(&pkt);

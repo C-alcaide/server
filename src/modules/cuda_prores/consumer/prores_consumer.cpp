@@ -83,10 +83,14 @@ static size_t v210_frame_bytes(int w, int h) {
 struct prores_config {
     std::wstring output_path;
     std::wstring filename_pattern; // e.g. L"prores_%04d.mov"
-    int          profile        = 3;     // 3=HQ
+    int          profile        = 3;     // 3=HQ, 4=4444
+    bool         has_alpha      = true;  // encode alpha plane for 4444
+    int          hdr_mode       = 0;     // 0=SDR_709, 1=HLG_BT2020, 2=PQ_HDR10
+    uint16_t     hdr_max_cll    = 1000;  // MaxCLL  nits (PQ only)
+    uint16_t     hdr_max_fall   = 400;   // MaxFALL nits (PQ only)
     bool         use_mxf        = false; // false=MOV
     int          device_index   = 0;     // CUDA device
-    int          slices_per_row = 4;     // 4 is good for 4K30
+    int          slices_per_row = 4;     // horizontal slices per MB row
 };
 
 // ---------------------------------------------------------------------------
@@ -100,25 +104,32 @@ struct FrameJob {
 };
 
 // ---------------------------------------------------------------------------
-// ProRes frame context helpers (mirrors test/test_prores_encode.cpp)
+// ProRes frame context helpers — allocate all device/host buffers
 // ---------------------------------------------------------------------------
 static void alloc_frame_ctx(ProResFrameCtx &ctx,
                              int width, int height, int profile,
-                             int slices_per_row)
+                             int slices_per_row,
+                             bool is_4444, bool has_alpha)
 {
     ctx.width          = width;
     ctx.height         = height;
     ctx.profile        = profile;
-    ctx.slices_per_row = slices_per_row;
+    ctx.is_4444        = is_4444;
+    ctx.has_alpha      = has_alpha;
     ctx.q_scale        = 8;
 
-    const int mb_w = width  / 8;
-    const int mb_h = height / 8;
-    ctx.num_slices       = (mb_w / slices_per_row) * mb_h;
-    ctx.blocks_per_slice = slices_per_row * 6;
+    // Derive macroblock geometry
+    ctx.slices_per_row = slices_per_row;
+    ctx.mbs_per_slice  = (width / 16) / slices_per_row;          // MB cols per slice
+    ctx.num_slices     = slices_per_row * ((height + 15) / 16);  // total slices
+
+    // blocks_per_slice: 422=8*mbs, 4444=12*mbs, 4444+alpha=16*mbs
+    const int bpm = is_4444 ? (has_alpha ? 16 : 12) : 8;
+    ctx.blocks_per_slice = ctx.mbs_per_slice * bpm;
 
     const int y_px = width * height;
-    const int c_px = (width / 2) * height;
+    const int c_px = is_4444 ? y_px : (width / 2) * height;  // 4444 chroma = full-res
+
     cuda_check_consumer(cudaMalloc(&ctx.d_y,  y_px * sizeof(int16_t)), "d_y");
     cuda_check_consumer(cudaMalloc(&ctx.d_cb, c_px * sizeof(int16_t)), "d_cb");
     cuda_check_consumer(cudaMalloc(&ctx.d_cr, c_px * sizeof(int16_t)), "d_cr");
@@ -128,17 +139,34 @@ static void alloc_frame_ctx(ProResFrameCtx &ctx,
 
     const size_t slice_elems = (size_t)ctx.num_slices * ctx.blocks_per_slice * 64;
     cuda_check_consumer(cudaMalloc(&ctx.d_coeffs_slice, slice_elems * sizeof(int16_t)), "d_coeffs_slice");
-    const size_t bs_size = slice_elems * sizeof(int16_t) * 2 + ctx.num_slices * 32;
-    cuda_check_consumer(cudaMalloc(&ctx.d_bitstream,     bs_size),                              "d_bitstream");
-    cuda_check_consumer(cudaMalloc(&ctx.d_slice_offsets, (ctx.num_slices + 1) * sizeof(uint32_t)), "d_slice_offsets");
-    cuda_check_consumer(cudaMalloc(&ctx.d_bit_counts,     ctx.num_slices * sizeof(uint32_t)),   "d_bit_counts");
 
-    ctx.cub_temp_bytes = 8 * 1024 * 1024; // 8 MB: sufficient up to ~32K slices
+    const size_t bs_size = slice_elems * sizeof(int16_t) * 2 + ctx.num_slices * 64;
+    cuda_check_consumer(cudaMalloc(&ctx.d_bitstream,     bs_size),                                   "d_bitstream");
+    cuda_check_consumer(cudaMalloc(&ctx.d_slice_offsets, (ctx.num_slices + 1) * sizeof(uint32_t)), "d_slice_offsets");
+    cuda_check_consumer(cudaMalloc(&ctx.d_slice_sizes,    ctx.num_slices      * sizeof(uint32_t)), "d_slice_sizes");
+
+    // 4 bit-count entries per slice for 4444+alpha, 3 otherwise
+    const int bcp = (is_4444 && has_alpha) ? 4 : 3;
+    cuda_check_consumer(cudaMalloc(&ctx.d_bit_counts, ctx.num_slices * bcp * sizeof(uint32_t)), "d_bit_counts");
+
+    ctx.cub_temp_bytes = 8 * 1024 * 1024;
     cuda_check_consumer(cudaMalloc(&ctx.d_cub_temp, ctx.cub_temp_bytes), "d_cub_temp");
 
-    const size_t frame_buf_size = (size_t)width * height * 4;
+    const size_t frame_buf_size = (size_t)width * height * 8; // headroom for 4444 HQ
     ctx.h_frame_buf_size = frame_buf_size;
     cuda_check_consumer(cudaMallocHost(&ctx.h_frame_buf, frame_buf_size), "h_frame_buf");
+
+    // 4444-specific planes
+    ctx.d_alpha        = nullptr;
+    ctx.d_coeffs_alpha = nullptr;
+    if (is_4444) {
+        cuda_check_consumer(cudaMalloc(&ctx.d_alpha, y_px * sizeof(int16_t)), "d_alpha");
+        if (has_alpha) {
+            const size_t alpha_elems = (size_t)ctx.num_slices * 4 * ctx.mbs_per_slice * 64;
+            cuda_check_consumer(cudaMalloc(&ctx.d_coeffs_alpha,
+                                           alpha_elems * sizeof(int16_t)), "d_coeffs_alpha");
+        }
+    }
 }
 
 static void free_frame_ctx(ProResFrameCtx &ctx)
@@ -146,9 +174,14 @@ static void free_frame_ctx(ProResFrameCtx &ctx)
     cudaFree(ctx.d_y);   cudaFree(ctx.d_cb);  cudaFree(ctx.d_cr);
     cudaFree(ctx.d_coeffs_y); cudaFree(ctx.d_coeffs_cb); cudaFree(ctx.d_coeffs_cr);
     cudaFree(ctx.d_coeffs_slice);
-    cudaFree(ctx.d_bitstream); cudaFree(ctx.d_slice_offsets); cudaFree(ctx.d_bit_counts);
+    cudaFree(ctx.d_bitstream);
+    cudaFree(ctx.d_slice_offsets);
+    cudaFree(ctx.d_slice_sizes);
+    cudaFree(ctx.d_bit_counts);
     cudaFree(ctx.d_cub_temp);
     cudaFreeHost(ctx.h_frame_buf);
+    if (ctx.d_alpha)        cudaFree(ctx.d_alpha);
+    if (ctx.d_coeffs_alpha) cudaFree(ctx.d_coeffs_alpha);
     std::memset(&ctx, 0, sizeof(ctx));
 }
 
@@ -187,33 +220,68 @@ public:
                             "cudaStreamCreateWithFlags");
 
         // Allocate GPU resources
+        const bool is_4444   = (cfg_.profile >= 4);
+        const bool has_alpha = (is_4444 && cfg_.has_alpha);
         alloc_frame_ctx(frame_ctx_, format_desc_.width, format_desc_.height,
-                        cfg_.profile, cfg_.slices_per_row);
+                        cfg_.profile, cfg_.slices_per_row, is_4444, has_alpha);
 
-        // Pinned staging buffers: BGRA (input) and V210 (intermediate)
+        // Pinned staging buffers: BGRA (input) and V210 (intermediate for 422)
         const size_t bgra_bytes = (size_t)format_desc_.width * format_desc_.height * 4;
         const size_t v210_bytes = v210_frame_bytes(format_desc_.width, format_desc_.height);
         cuda_check_consumer(cudaMallocHost(&h_bgra_, bgra_bytes),  "h_bgra_");
         cuda_check_consumer(cudaMalloc(&d_bgra_, bgra_bytes),      "d_bgra_");
-        cuda_check_consumer(cudaMalloc(&d_v210_, v210_bytes),      "d_v210_");
+        if (!is_4444)
+            cuda_check_consumer(cudaMalloc(&d_v210_, v210_bytes),  "d_v210_");
+
+        // Determine ProRes fourcc from profile
+        // Note: LT uses 'apcs' (0x61706373), NOT 'apcl'.
+        static const uint32_t PRORES_FOURCC[] = {
+            0x6170636Fu, // 'apco' Proxy
+            0x61706373u, // 'apcs' LT        (corrected from 'apcl')
+            0x6170636Eu, // 'apcn' Standard
+            0x61706368u, // 'apch' HQ
+            0x61703468u, // 'ap4h' 4444
+            0x61703478u, // 'ap4x' 4444 XQ
+        };
+        const uint32_t fourcc = PRORES_FOURCC[std::min(cfg_.profile, 5)];
+
+        // Build HDR color info for MOV/MXF muxer
+        MovColorInfo color_info{};
+        switch (cfg_.hdr_mode) {
+            default: // SDR Rec.709
+                color_info = { 1, 1, 1, false };
+                break;
+            case 1: // HLG BT.2020
+                color_info = { 9, 14, 9, false };
+                break;
+            case 2: { // PQ HDR10 — BT.2020 primaries, ST 2086
+                color_info.color_primaries   = 9;
+                color_info.transfer_function = 16;
+                color_info.color_matrix      = 9;
+                color_info.has_hdr           = true;
+                // BT.2020 display primaries (G, B, R) in units of 0.00002
+                color_info.mdcv_primaries_x[0] = 17000; // G x=0.170
+                color_info.mdcv_primaries_y[0] = 34000; // G y=0.340  (approx BT.2020 G)
+                color_info.mdcv_primaries_x[1] =  7500; // B x=0.0750
+                color_info.mdcv_primaries_y[1] =  2500; // B y=0.0250
+                color_info.mdcv_primaries_x[2] = 35400; // R x=0.708
+                color_info.mdcv_primaries_y[2] = 14600; // R y=0.292
+                color_info.mdcv_white_x = 15635; // D65 x=0.3127
+                color_info.mdcv_white_y = 16450; // D65 y=0.3290
+                color_info.mdcv_max_lum = (uint32_t)cfg_.hdr_max_cll  * 10000;
+                color_info.mdcv_min_lum = 50;    // 0.005 cd/m²
+                color_info.clli_max_cll  = cfg_.hdr_max_cll;
+                color_info.clli_max_fall = cfg_.hdr_max_fall;
+                break;
+            }
+        }
 
         // Derive output file path
-        // Build filename from pattern or default scheme
         const std::wstring filename =
             cfg_.filename_pattern.empty()
                 ? build_filename(frame_number_)
                 : cfg_.filename_pattern;
         const std::wstring full_path = cfg_.output_path + L"\\" + filename;
-
-        // Determine ProRes fourcc from profile
-        static const uint32_t PRORES_FOURCC[] = {
-            0x6170636Fu, // 'apco' Proxy
-            0x6170636Cu, // 'apcl' LT
-            0x6170636Eu, // 'apcn' Standard
-            0x61706368u, // 'apch' HQ
-            0x61703468u, // 'ap4h' 4444
-        };
-        const uint32_t fourcc = PRORES_FOURCC[std::min(cfg_.profile, 4)];
 
         // Open the muxer
         if (cfg_.use_mxf) {
@@ -222,7 +290,9 @@ public:
             vi.height = format_desc_.height;
             vi.frame_rate = { format_desc_.fps_den, format_desc_.fps_num };
             vi.prores_fourcc = fourcc;
-            vi.color = MXF_COLOR_SDR_709;
+            vi.color = (cfg_.hdr_mode == 1) ? MXF_COLOR_HDR_HLG
+                     : (cfg_.hdr_mode == 2) ? MXF_COLOR_HDR_PQ
+                     : MXF_COLOR_SDR_709;
 
             MxfAudioTrackInfo ai{};
             ai.channels    = 16;
@@ -240,10 +310,7 @@ public:
             vi.timebase_num = (uint32_t)format_desc_.fps_den; // duration per frame
             vi.timebase_den = (uint32_t)format_desc_.fps_num; // timescale
             vi.prores_fourcc = fourcc;
-            vi.color.color_primaries    = 1; // Rec.709
-            vi.color.transfer_function  = 1;
-            vi.color.color_matrix       = 1;
-            vi.color.has_hdr            = false;
+            vi.color = color_info;
 
             MovAudioTrackInfo ai{};
             ai.channels    = 16;
@@ -374,36 +441,49 @@ private:
             return false;
         }
 
-        // 3. BGRA → V210 conversion (on GPU)
-        err = launch_bgra_to_v210(d_bgra_, d_v210_, fmt.width, fmt.height, encode_stream_);
-        if (err != cudaSuccess) {
-            CASPAR_LOG(error) << L"[cuda_prores] launch_bgra_to_v210 failed: "
-                              << cudaGetErrorString(err);
-            return false;
-        }
+        // 3. BGRA -> encoded ProRes bitstream
+        static const ProResColorDesc k_sdr_709   = {1, 1, 1, {}, {}, 0, 0, 0, 0, 0, 0};
+        static const ProResColorDesc k_hlg_bt2020 = {9, 14, 9, {}, {}, 0, 0, 0, 0, 0, 0};
+        // For PQ we use 709 in the frame header; mdcv/clli live in the container
+        const ProResColorDesc *color_desc = (cfg_.hdr_mode == 1) ? &k_hlg_bt2020 : &k_sdr_709;
 
-        // If this is the first frame, set the start timecode on the MXF muxer
-        // (must happen before avformat_write_header, which is deferred to first write)
-        if (first_frame && mxf_muxer_ && job.tc.valid)
-            mxf_muxer_->set_start_timecode(job.tc);
-
-        // 4. ProRes encode (V210 → ProRes bitstream in h_frame_buf)
-        static const ProResColorDesc k_sdr_709 = {1, 1, 1, {}, {}, 0, 0, 0, 0, 0, 0};
         size_t encoded_size = 0;
-        err = prores_encode_frame(
-            &frame_ctx_,
-            (const uint32_t *)d_v210_,
-            frame_ctx_.h_frame_buf,
-            &encoded_size,
-            encode_stream_,
-            &k_sdr_709);
+        if (frame_ctx_.is_4444) {
+            // 4444 path: BGRA -> YUVA4444P10 -> DCT/quant -> entropy (no V210 step)
+            err = prores_encode_frame_444(
+                &frame_ctx_,
+                d_bgra_,
+                frame_ctx_.h_frame_buf,
+                &encoded_size,
+                encode_stream_,
+                color_desc);
+        } else {
+            // 422 path: BGRA -> V210 -> unpack -> DCT/quant -> entropy
+            err = launch_bgra_to_v210(d_bgra_, d_v210_, fmt.width, fmt.height, encode_stream_);
+            if (err != cudaSuccess) {
+                CASPAR_LOG(error) << L"[cuda_prores] launch_bgra_to_v210 failed: "
+                                  << cudaGetErrorString(err);
+                return false;
+            }
+            err = prores_encode_frame(
+                &frame_ctx_,
+                (const uint32_t *)d_v210_,
+                frame_ctx_.h_frame_buf,
+                &encoded_size,
+                encode_stream_,
+                color_desc);
+        }
         if (err != cudaSuccess) {
             CASPAR_LOG(error) << L"[cuda_prores] prores_encode_frame failed: "
                               << cudaGetErrorString(err);
             return false;
         }
 
-        // 5. Mux video frame
+        // Set MXF start timecode before first write
+        if (first_frame && mxf_muxer_ && job.tc.valid)
+            mxf_muxer_->set_start_timecode(job.tc);
+
+        // 4. Mux video frame
         if (mov_muxer_) {
             if (!mov_muxer_->write_video(frame_ctx_.h_frame_buf, encoded_size, job.frame_number))
                 return false;
@@ -447,7 +527,6 @@ private:
         if (h_bgra_) { cudaFreeHost(h_bgra_); h_bgra_ = nullptr; }
         if (d_bgra_) { cudaFree(d_bgra_);     d_bgra_ = nullptr; }
         if (d_v210_) { cudaFree(d_v210_);     d_v210_ = nullptr; }
-    }
 
     std::wstring build_filename(int64_t /*fn*/) const
     {
@@ -495,6 +574,13 @@ static prores_config parse_params(const std::vector<std::wstring>& params)
     cfg.profile     = caspar::get_param(L"PROFILE", params, 3);
     auto codec      = caspar::get_param(L"CODEC", params, std::wstring(L"MOV"));
     cfg.use_mxf     = boost::iequals(codec, L"MXF");
+    // HDR: HDR SDR|HLG|PQ  (default SDR)
+    auto hdr = boost::to_upper_copy(caspar::get_param(L"HDR", params, std::wstring(L"SDR")));
+    cfg.hdr_mode = boost::iequals(hdr, L"HLG") ? 1 : boost::iequals(hdr, L"PQ") ? 2 : 0;
+    cfg.hdr_max_cll  = (uint16_t)caspar::get_param(L"MAXCLL",  params, 1000);
+    cfg.hdr_max_fall = (uint16_t)caspar::get_param(L"MAXFALL", params, 400);
+    // ALPHA: 1|0 (default 1 for profile 4444)
+    cfg.has_alpha = (caspar::get_param(L"ALPHA", params, 1) != 0);
     return cfg;
 }
 
@@ -506,6 +592,11 @@ static prores_config parse_xml(const boost::property_tree::wptree& elem)
     cfg.profile          = elem.get(L"profile",  3);
     auto codec = elem.get(L"codec", std::wstring(L"mov"));
     cfg.use_mxf = boost::iequals(codec, L"mxf");
+    auto hdr = boost::to_upper_copy(elem.get(L"hdr", std::wstring(L"SDR")));
+    cfg.hdr_mode = boost::iequals(hdr, L"HLG") ? 1 : boost::iequals(hdr, L"PQ") ? 2 : 0;
+    cfg.hdr_max_cll  = (uint16_t)elem.get(L"max_cll",  1000);
+    cfg.hdr_max_fall = (uint16_t)elem.get(L"max_fall", 400);
+    cfg.has_alpha    = (elem.get(L"alpha", 1) != 0);
     return cfg;
 }
 
