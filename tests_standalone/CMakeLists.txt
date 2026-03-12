@@ -1,4 +1,10 @@
 cmake_minimum_required(VERSION 3.28)
+
+# CUDA 12.x does not officially support VS 2026 (MSVC 19.40+).
+# Pass -allow-unsupported-compiler via the initial cache so it is available
+# during CUDA compiler ID detection (before any target flags are evaluated).
+set(CMAKE_CUDA_FLAGS "-allow-unsupported-compiler" CACHE STRING "" FORCE)
+
 project(cuda_prores_tests LANGUAGES CXX CUDA)
 
 # ─── CUDA configuration ──────────────────────────────────────────────────────
@@ -51,7 +57,7 @@ set(CUDA_SOURCES
 # Pure CPU test — zero dependencies
 add_executable(test_rice_entropy "${TEST_DIR}/test_rice_entropy.cpp")
 target_include_directories(test_rice_entropy PRIVATE "${MODULE_DIR}")
-target_compile_features(test_rice_entropy PRIVATE cxx_std_17)
+# CXX_STANDARD 17 is inherited from CMAKE_CXX_STANDARD set above
 
 # ─── test_bgra_convert ───────────────────────────────────────────────────────
 # Tests the BGRA→V210 CUDA kernel only; no FFmpeg needed
@@ -102,6 +108,18 @@ target_link_libraries(test_prores_encode PRIVATE
 set_property(TARGET test_prores_encode PROPERTY CUDA_SEPARABLE_COMPILATION ON)
 set_property(TARGET test_prores_encode PROPERTY CUDA_RESOLVE_DEVICE_SYMBOLS ON)
 set_property(TARGET test_prores_encode PROPERTY CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}")
+
+# ─── gen_colorbars ────────────────────────────────────────────────────────────
+# Generates a 1920×1080 25fps ProRes 422 HQ .mov with EBU colour bars,
+# a rotating white circle, a sweep-bar, and a luma ramp for visual QC.
+add_executable(gen_colorbars
+    "${TEST_DIR}/gen_colorbars.cpp"
+    "${MODULE_DIR}/muxer/mov_muxer.cpp"
+    "${MODULE_DIR}/storage/async_file_writer.cpp")
+target_include_directories(gen_colorbars PRIVATE
+    "${MODULE_DIR}"
+    "${FFMPEG_INCLUDE}")
+target_link_libraries(gen_colorbars PRIVATE ffmpeg)
 
 # ─── test_timecode_roundtrip ──────────────────────────────────────────────────
 add_executable(test_timecode_roundtrip

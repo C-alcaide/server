@@ -3,7 +3,7 @@ call "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\v
 
 set BUILD_DIR=d:\Github\CasparCG-cuda\tests_standalone\build
 
-cmake --build "%BUILD_DIR%" --target test_rice_entropy test_bgra_convert test_perf_benchmark test_prores_encode test_timecode_roundtrip -j4
+cmake --build "%BUILD_DIR%" --target test_rice_entropy test_bgra_convert test_perf_benchmark test_prores_encode test_timecode_roundtrip gen_colorbars -j4
 
 if %ERRORLEVEL% neq 0 (
   echo === Build FAILED ===
