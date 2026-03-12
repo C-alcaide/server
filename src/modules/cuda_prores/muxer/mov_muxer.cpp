@@ -104,15 +104,27 @@ bool MovMuxer::open(const std::wstring &path,
     iocp_ = CreateIoCompletionPort(file_, nullptr, 0, 1);
     if (!iocp_) { CloseHandle(file_); return false; }
 
-    // Write ftyp atom
+    // Write ftyp atom followed by a 'free' padding atom that fills the rest of
+    // the sector.  Without padding, the zero bytes after ftyp look like a
+    // size=0 atom (ISO 14496-12 §4.2: size=0 means "extends to EOF"), which
+    // causes parsers to treat everything after byte 20 as padding and miss mdat/moov.
     std::vector<uint8_t> ftyp;
-    size_t s = 0;
     begin_atom(ftyp, "ftyp");
     // major brand 'qt  ', version 0, compatible brands
     ftyp.push_back('q'); ftyp.push_back('t'); ftyp.push_back(' '); ftyp.push_back(' ');
     put_u32(ftyp, 0); // minor version
     ftyp.push_back('q'); ftyp.push_back('t'); ftyp.push_back(' '); ftyp.push_back(' ');
     end_atom(ftyp, 0);
+    // Append 'free' atom covering the rest of the sector (sector_size - ftyp.size() bytes)
+    {
+        uint32_t free_size = (uint32_t)(sector_size - ftyp.size());
+        ftyp.push_back((free_size >> 24) & 0xFF);
+        ftyp.push_back((free_size >> 16) & 0xFF);
+        ftyp.push_back((free_size >>  8) & 0xFF);
+        ftyp.push_back( free_size        & 0xFF);
+        ftyp.push_back('f'); ftyp.push_back('r'); ftyp.push_back('e'); ftyp.push_back('e');
+        ftyp.resize(sector_size, 0); // zero-fill remainder of free atom
+    }
     if (!write_aligned(ftyp.data(), ftyp.size())) return false;
 
     // Begin mdat: write 8-byte header with size=0 (extended), back-patched at close
