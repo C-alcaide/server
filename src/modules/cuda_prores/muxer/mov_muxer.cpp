@@ -141,6 +141,34 @@ bool MovMuxer::write_audio(const int32_t *samples, int num_samples) {
     return true;
 }
 
+bool MovMuxer::write_timecode(const SmpteTimecode &tc) {
+    // Compute the frame count from 00:00:00:00 for this timecode value.
+    // fps = timebase_den / timebase_num (e.g. 25/1 → fps = 25).
+    const uint32_t fps = video_.timebase_den / video_.timebase_num;
+    const uint32_t frame_count = tc.to_frame_count(fps);
+
+    // Record drop-frame flag from the first call (must be consistent).
+    if (tc_samples_.empty())
+        tc_drop_frame_ = tc.drop_frame;
+
+    // Write the 4-byte big-endian frame count into mdat.
+    uint32_t be_fc = ((frame_count >> 24) & 0xFF) |
+                     (((frame_count >> 16) & 0xFF) << 8) |
+                     (((frame_count >>  8) & 0xFF) << 16) |
+                     ((frame_count & 0xFF) << 24);
+    // Store correctly as big-endian bytes
+    uint8_t tc_bytes[4] = {
+        (uint8_t)((frame_count >> 24) & 0xFF),
+        (uint8_t)((frame_count >> 16) & 0xFF),
+        (uint8_t)((frame_count >>  8) & 0xFF),
+        (uint8_t)( frame_count        & 0xFF),
+    };
+    uint64_t file_offset = write_pos_;
+    if (!write_aligned(tc_bytes, 4)) return false;
+    tc_samples_.push_back({frame_count, file_offset});
+    return true;
+}
+
 // ─── moov construction ───────────────────────────────────────────────────────
 
 void MovMuxer::write_video_trak(std::vector<uint8_t> &buf) {
@@ -453,6 +481,162 @@ void MovMuxer::write_audio_trak(std::vector<uint8_t> &buf) {
     end_atom(buf, trak_start);
 }
 
+void MovMuxer::write_tmcd_trak(std::vector<uint8_t> &buf) {
+    if (tc_samples_.empty()) return;
+
+    const uint32_t fps = video_.timebase_den / video_.timebase_num;
+
+    // Track ID 3 (video=1, audio=2, timecode=3)
+    size_t trak_start = buf.size(); begin_atom(buf, "trak");
+
+    // tkhd — track header
+    {   size_t s = buf.size(); begin_atom(buf, "tkhd");
+        put_u32(buf, 0x0000000F); // version=0, flags=enabled|in_movie|in_preview
+        put_u32(buf, 0); put_u32(buf, 0); // creation / modification time
+        put_u32(buf, 3); // track ID = 3
+        put_u32(buf, 0); // reserved
+        put_u32(buf, (uint32_t)tc_samples_.size()); // duration in movie timescale
+        put_u32(buf, 0); put_u32(buf, 0); // reserved
+        put_u16(buf, 0); put_u16(buf, 0); // layer, alt-group
+        put_u16(buf, 0); put_u16(buf, 0); // volume (0 for timecode), reserved
+        uint32_t mat[] = {0x00010000,0,0, 0,0x00010000,0, 0,0,0x40000000};
+        for (auto v : mat) put_u32(buf, v);
+        put_u32(buf, 0); put_u32(buf, 0); // width/height = 0 for timecode
+        end_atom(buf, s);
+    }
+
+    // mdia
+    {   size_t mdia_s = buf.size(); begin_atom(buf, "mdia");
+
+        // mdhd — media header
+        {   size_t s = buf.size(); begin_atom(buf, "mdhd");
+            put_u32(buf, 0); // version=0, flags=0
+            put_u32(buf, 0); put_u32(buf, 0); // creation, modification
+            put_u32(buf, video_.timebase_den); // timescale = fps numerator (e.g. 25)
+            put_u32(buf, (uint32_t)tc_samples_.size()); // duration = frame count
+            put_u16(buf, 0x55C4); // language = 'und'
+            put_u16(buf, 0);
+            end_atom(buf, s);
+        }
+
+        // hdlr — handler
+        {   size_t s = buf.size(); begin_atom(buf, "hdlr");
+            put_u32(buf, 0); put_u32(buf, 0); // version, pre_defined
+            // handler_type = 'tmcd'
+            buf.push_back('t'); buf.push_back('m'); buf.push_back('c'); buf.push_back('d');
+            put_u32(buf, 0); put_u32(buf, 0); put_u32(buf, 0); // reserved
+            // component name (Pascal string style, null-terminated)
+            const char *name = "Time Code Media Handler";
+            for (size_t i = 0; name[i]; i++) buf.push_back((uint8_t)name[i]);
+            buf.push_back(0);
+            end_atom(buf, s);
+        }
+
+        // minf — media information
+        {   size_t minf_s = buf.size(); begin_atom(buf, "minf");
+
+            // gmhd — General Media Header (used by QuickTime for timecode)
+            {   size_t s = buf.size(); begin_atom(buf, "gmhd");
+                // gmin — base media info header
+                {   size_t g = buf.size(); begin_atom(buf, "gmin");
+                    put_u32(buf, 0); // version + flags
+                    put_u16(buf, 0x0040); // graphics mode: copy
+                    put_u16(buf, 0x8000); put_u16(buf, 0x8000); put_u16(buf, 0x8000); // opcolor
+                    put_u16(buf, 0); put_u16(buf, 0); // balance, reserved
+                    end_atom(buf, g);
+                }
+                end_atom(buf, s);
+            }
+
+            // dinf → dref (self-contained)
+            {   size_t s = buf.size(); begin_atom(buf, "dinf");
+                size_t d = buf.size(); begin_atom(buf, "dref");
+                put_u32(buf, 0); put_u32(buf, 1);
+                size_t e = buf.size(); begin_atom(buf, "url ");
+                put_u32(buf, 1); // self-contained
+                end_atom(buf, e); end_atom(buf, d); end_atom(buf, s);
+            }
+
+            // stbl — sample table
+            {   size_t stbl_s = buf.size(); begin_atom(buf, "stbl");
+
+                // stsd — sample description
+                {   size_t s = buf.size(); begin_atom(buf, "stsd");
+                    put_u32(buf, 0); // version + flags
+                    put_u32(buf, 1); // entry count = 1
+
+                    // 'tmcd' sample description box
+                    size_t e = buf.size(); begin_atom(buf, "tmcd");
+                    // SampleEntry base fields
+                    put_bytes(buf, (const uint8_t*)"\0\0\0\0\0\0", 6); // reserved
+                    put_u16(buf, 1); // data-reference-index
+
+                    // TimeCodeSampleDescription fields
+                    put_u32(buf, 0); // reserved
+                    // flags: bit 0 = drop_frame, bit 1 = 24-hour, bit 2 = negative-times-ok
+                    uint32_t tc_flags = tc_drop_frame_ ? 0x0001u : 0x0000u;
+                    put_u32(buf, tc_flags);
+                    // timeScale: number of time units per second (= fps for integer rates)
+                    put_u32(buf, fps);
+                    // frameDuration: how many time units per frame (= 1 for integer fps)
+                    put_u32(buf, 1);
+                    // numberOfFrames: frames per second as 1-byte integer
+                    put_u8(buf, (uint8_t)fps);
+                    put_u8(buf, 0); // reserved
+
+                    // Optional 'name' box with a descriptive string
+                    {   size_t ns = buf.size(); begin_atom(buf, "name");
+                        const char *src = "CUDA-ProRes TC";
+                        for (size_t i = 0; src[i]; i++) buf.push_back((uint8_t)src[i]);
+                        buf.push_back(0);
+                        end_atom(buf, ns);
+                    }
+                    end_atom(buf, e); // tmcd stsd entry
+                    end_atom(buf, s); // stsd
+                }
+
+                // stts: all TC samples have duration 1 (one per video frame)
+                {   size_t s = buf.size(); begin_atom(buf, "stts");
+                    put_u32(buf, 0);
+                    put_u32(buf, 1); // one run entry
+                    put_u32(buf, (uint32_t)tc_samples_.size()); // count
+                    put_u32(buf, 1); // duration = 1 (each sample = 1 frame)
+                    end_atom(buf, s);
+                }
+
+                // stsc: 1 sample per chunk
+                {   size_t s = buf.size(); begin_atom(buf, "stsc");
+                    put_u32(buf, 0);
+                    put_u32(buf, 1);
+                    put_u32(buf, 1); put_u32(buf, 1); put_u32(buf, 1);
+                    end_atom(buf, s);
+                }
+
+                // stsz: each TC sample is 4 bytes
+                {   size_t s = buf.size(); begin_atom(buf, "stsz");
+                    put_u32(buf, 0);
+                    put_u32(buf, 4); // constant sample size = 4
+                    put_u32(buf, (uint32_t)tc_samples_.size());
+                    end_atom(buf, s);
+                }
+
+                // co64: file offsets of each TC sample chunk
+                {   size_t s = buf.size(); begin_atom(buf, "co64");
+                    put_u32(buf, 0);
+                    put_u32(buf, (uint32_t)tc_samples_.size());
+                    for (auto &t : tc_samples_) put_u64(buf, t.file_offset);
+                    end_atom(buf, s);
+                }
+
+                end_atom(buf, stbl_s);
+            }
+            end_atom(buf, minf_s);
+        }
+        end_atom(buf, mdia_s);
+    }
+    end_atom(buf, trak_start);
+}
+
 bool MovMuxer::close() {
     if (file_ == INVALID_HANDLE_VALUE) return false;
 
@@ -487,12 +671,19 @@ bool MovMuxer::close() {
         for (auto v : mat) put_u32(moov, v);
         put_u32(moov, 0); put_u32(moov, 0); put_u32(moov, 0); put_u32(moov, 0); // pre-defined
         put_u32(moov, 0); put_u32(moov, 0);
-        put_u32(moov, (uint32_t)(audio_samples_.empty() ? 2 : 3)); // next track ID
+        // next_track_id: 3 = {video, audio}; 4 = {video, audio, tmcd}
+        uint32_t next_tid = tc_samples_.empty() ? 3u : 4u;
+        if (audio_samples_.empty()) next_tid--;
+        put_u32(moov, next_tid);
         end_atom(moov, s);
     }
 
     write_video_trak(moov);
     write_audio_trak(moov);
+    write_tmcd_trak(moov);
+
+    // Determine next track ID (video=1, audio=2, timecode=3 if present)
+    // Already filled as part of mvhd — need to back-patch.
 
     end_atom(moov, moov_s);
 

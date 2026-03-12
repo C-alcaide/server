@@ -28,6 +28,7 @@
 #endif
 
 #include "cuda_pinned_allocator.h"
+#include "../timecode.h"
 
 #include <cuda_runtime.h>
 #include <functional>
@@ -42,7 +43,8 @@ struct CaptureToken {
     size_t         byte_size;       // actual frame bytes (may vary with format)
     uint32_t       width;
     uint32_t       height;
-    int64_t        timecode;        // absolute frame counter (0-based)
+    int64_t        frame_counter;   // absolute frame counter (0-based)
+    SmpteTimecode  tc;              // SMPTE RP188 timecode from SDI embeds
     cudaStream_t   copy_stream;     // stream used for the HostToDevice memcpy
     // For GPUDirect: the pinned host buffer backing this frame.
     // The encoder must call release_fn() when the token is fully consumed.

@@ -54,6 +54,12 @@ set(HEADER_SOURCES
 
     # Consumer
     consumer/prores_consumer.h
+
+    # Timecode
+    timecode.h
+
+    # BGRA->V210 CUDA kernel
+    cuda/cuda_bgra_to_v210.cuh
 )
 
 set(ALL_SOURCES ${CUDA_SOURCES} ${CPU_SOURCES} ${HEADER_SOURCES})
@@ -124,6 +130,71 @@ if (MSVC)
     set_property(TARGET test_prores_encode PROPERTY CUDA_SEPARABLE_COMPILATION ON)
     set_property(TARGET test_prores_encode PROPERTY CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}")
     set_target_properties(test_prores_encode PROPERTIES FOLDER "modules/tests")
+
+    # ── test_bgra_convert ─────────────────────────────────────────────────────
+    # Validates the BGRA→V210 CUDA kernel with solid-colour golden values.
+    add_executable(test_bgra_convert
+        test/test_bgra_convert.cpp
+        ${CUDA_SOURCES}
+    )
+    target_include_directories(test_bgra_convert PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CUDAToolkit_INCLUDE_DIRS}
+    )
+    target_link_libraries(test_bgra_convert PRIVATE
+        CUDA::cudart_static
+    )
+    set_property(TARGET test_bgra_convert PROPERTY CUDA_SEPARABLE_COMPILATION ON)
+    set_property(TARGET test_bgra_convert PROPERTY CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}")
+    set_target_properties(test_bgra_convert PROPERTIES FOLDER "modules/tests")
+
+    # ── test_timecode_roundtrip ───────────────────────────────────────────────
+    # CPU-only: writes a MOV with tmcd track and verifies with ffprobe.
+    add_executable(test_timecode_roundtrip
+        test/test_timecode_roundtrip.cpp
+        muxer/mov_muxer.cpp
+        storage/async_file_writer.cpp
+    )
+    target_include_directories(test_timecode_roundtrip PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CUDAToolkit_INCLUDE_DIRS}
+        ${FFMPEG_INCLUDE_PATH}
+    )
+    target_link_libraries(test_timecode_roundtrip PRIVATE
+        ffmpeg
+    )
+    set_target_properties(test_timecode_roundtrip PROPERTIES FOLDER "modules/tests")
+
+    # ── test_rice_entropy ─────────────────────────────────────────────────────
+    # CPU-only: validates Rice coding algorithm and FIRST_DC_CB parameters.
+    add_executable(test_rice_entropy
+        test/test_rice_entropy.cpp
+    )
+    target_include_directories(test_rice_entropy PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CUDAToolkit_INCLUDE_DIRS}
+    )
+    # No CUDA runtime needed — pure CPU test
+    set_target_properties(test_rice_entropy PROPERTIES FOLDER "modules/tests")
+
+    # ── test_perf_benchmark ───────────────────────────────────────────────────
+    # GPU throughput benchmark: encodes N frames per profile and reports fps/Mbps.
+    add_executable(test_perf_benchmark
+        test/test_perf_benchmark.cpp
+        ${CUDA_SOURCES}
+    )
+    target_include_directories(test_perf_benchmark PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CUDAToolkit_INCLUDE_DIRS}
+    )
+    target_link_libraries(test_perf_benchmark PRIVATE
+        CUDA::cudart_static
+        CUDA::nppc
+        CUDA::nppist
+    )
+    set_property(TARGET test_perf_benchmark PROPERTY CUDA_SEPARABLE_COMPILATION ON)
+    set_property(TARGET test_perf_benchmark PROPERTY CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}")
+    set_target_properties(test_perf_benchmark PROPERTIES FOLDER "modules/tests")
 endif()
 
 # ─── IDE organisation ────────────────────────────────────────────────────────

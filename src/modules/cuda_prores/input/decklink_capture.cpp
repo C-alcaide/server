@@ -254,13 +254,37 @@ HRESULT DecklinkCapture::VideoInputFrameArrived(
             // is AddRef'd.  The consumer calls release_fn() after GPU work.
             video->AddRef();
 
-            token.d_vram      = d_vram_[slot];
-            token.byte_size   = size;
-            token.width       = w;
-            token.height      = h;
-            token.timecode    = frame_counter_++;
-            token.copy_stream = copy_stream_;
-            token.release_fn  = [video]() { video->Release(); };
+            token.d_vram        = d_vram_[slot];
+            token.byte_size     = size;
+            token.width         = w;
+            token.height        = h;
+            token.frame_counter = frame_counter_++;
+            token.copy_stream   = copy_stream_;
+            token.release_fn    = [video]() { video->Release(); };
+
+            // Extract SMPTE RP188 timecode from embedded SDI ancillary data.
+            // Try RP188-Any first (covers both VITC and LTC); fall back to VITC.
+            {
+                IDeckLinkTimecode *tc_iface = nullptr;
+                HRESULT hr = video->GetTimecode(bmdTimecodeRP188Any, &tc_iface);
+                if ((FAILED(hr) || !tc_iface) && tc_iface) {
+                    tc_iface->Release();
+                    tc_iface = nullptr;
+                }
+                if (SUCCEEDED(hr) && tc_iface) {
+                    uint8_t h_tc = 0, m_tc = 0, s_tc = 0, f_tc = 0;
+                    if (SUCCEEDED(tc_iface->GetComponents(&h_tc, &m_tc, &s_tc, &f_tc))) {
+                        BMDTimecodeFlags flags = tc_iface->GetFlags();
+                        token.tc.hours      = h_tc;
+                        token.tc.minutes    = m_tc;
+                        token.tc.seconds    = s_tc;
+                        token.tc.frames     = f_tc;
+                        token.tc.drop_frame = (flags & bmdTimecodeIsDropFrame) != 0;
+                        token.tc.valid      = true;
+                    }
+                    tc_iface->Release();
+                }
+            }
         }
     }
 

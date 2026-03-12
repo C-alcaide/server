@@ -112,9 +112,33 @@ bool MxfMuxer::open(const wchar_t       *path,
     audio_stream_->time_base = { 1, audio_.sample_rate };
 
     // --- Write file header ------------------------------------------------
+    // NOTE: avformat_write_header() is deferred to the first write_video() call
+    // so that set_start_timecode() can be called after open() but before
+    // the first frame.  The header_written_ flag guards this.
+    return true;
+}
+
+// ─── set_start_timecode() ────────────────────────────────────────────────────
+
+void MxfMuxer::set_start_timecode(const SmpteTimecode &tc)
+{
+    start_tc_ = tc;
+    tc_set_   = true;
+}
+
+// ─── write_header_if_needed() ────────────────────────────────────────────────
+// Internal helper: write the MXF file header on the first write_video() call.
+
+static bool write_mxf_header(AVFormatContext *fmt_ctx, AVStream *video_stream,
+                              bool tc_set, const SmpteTimecode &start_tc)
+{
+    if (tc_set && start_tc.valid) {
+        char tc_str[16];
+        start_tc.to_string(tc_str, sizeof(tc_str));
+        av_dict_set(&video_stream->metadata, "timecode", tc_str, 0);
+    }
     AVDictionary *opts = nullptr;
-    // For MXF OP-Atom, pass operational_pattern option if needed
-    if (avformat_write_header(fmt_ctx_, &opts) < 0) {
+    if (avformat_write_header(fmt_ctx, &opts) < 0) {
         av_dict_free(&opts);
         fprintf(stderr, "[MxfMuxer] avformat_write_header failed\n");
         return false;
@@ -128,6 +152,14 @@ bool MxfMuxer::open(const wchar_t       *path,
 bool MxfMuxer::write_video(const uint8_t *data, size_t size, int64_t pts)
 {
     if (!fmt_ctx_ || !video_stream_) return false;
+
+    // Write the MXF header on the first call (deferred to allow set_start_timecode)
+    if (!header_written_) {
+        if (!write_mxf_header(fmt_ctx_, video_stream_, tc_set_, start_tc_))
+            return false;
+        header_written_ = true;
+    }
+
 
     AVPacket *pkt = av_packet_alloc();
     if (!pkt) return false;
@@ -193,6 +225,12 @@ bool MxfMuxer::write_audio(const int32_t *samples, int num_samples)
 bool MxfMuxer::close()
 {
     if (!fmt_ctx_) return false;
+
+    // If no frames were written, still write the header before the trailer
+    if (!header_written_) {
+        write_mxf_header(fmt_ctx_, video_stream_, tc_set_, start_tc_);
+        header_written_ = true;
+    }
 
     // Flush libavformat (writes footer partition if applicable)
     av_write_trailer(fmt_ctx_);

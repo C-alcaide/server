@@ -11,6 +11,7 @@
 //   MxfVideoTrackInfo v{ 3840, 2160, {1,25}, fourcc_HQ, color_SDR };
 //   MxfAudioTrackInfo a{ 16, 48000 };
 //   mxf.open(L"out.mxf", v, a);
+//   mxf.set_start_timecode(tc);   // optional; must be called before write_video()
 //   while (capturing) {
 //       mxf.write_video(prores_frame_data, prores_frame_size, frame_number);
 //       mxf.write_audio(pcm32_samples, sample_count_this_frame);
@@ -24,11 +25,13 @@ extern "C" {
 #include <libavformat/avformat.h>
 #include <libavcodec/avcodec.h>
 #include <libavutil/opt.h>
+#include <libavutil/timecode.h>
 #ifdef __cplusplus
 }
 #endif
 
 #include "../storage/async_file_writer.h"
+#include "../timecode.h"
 
 #include <string>
 #include <vector>
@@ -70,6 +73,12 @@ public:
               const char *format_name  = "mxf",
               size_t      sector_size  = 4096);
 
+    // Set SMPTE start timecode.  Must be called BEFORE the first write_video().
+    // The timecode is embedded in the MXF stream/container metadata via
+    // av_dict_set on the video stream before avformat_write_header().
+    // If not called, no timecode metadata is written.
+    void set_start_timecode(const SmpteTimecode &tc);
+
     bool write_video(const uint8_t *data, size_t size, int64_t pts);
     bool write_audio(const int32_t *samples, int num_samples);
     bool close();
@@ -89,6 +98,9 @@ private:
 
     MxfVideoTrackInfo video_;
     MxfAudioTrackInfo audio_;
+    SmpteTimecode     start_tc_;      // set via set_start_timecode(); applied at write_header
+    bool              tc_set_ = false;
+    bool              header_written_ = false;
     int64_t  video_pts_ = 0;
     int64_t  audio_pts_ = 0;
 

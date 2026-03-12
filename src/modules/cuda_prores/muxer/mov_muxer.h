@@ -1,11 +1,13 @@
 // mov_muxer.h
-// Minimal QuickTime .mov muxer for ProRes + embedded PCM audio.
+// Minimal QuickTime .mov muxer for ProRes + embedded PCM audio + SMPTE timecode.
 //
 // Write sequence:
 //   1. open()         — create file, write ftyp atom, open mdat
 //   2. write_video()  — write one encoded ProRes frame, accumulate stts/stsz/stco
 //   3. write_audio()  — write one PCM audio chunk, accumulate audio stts/stsz/stco
-//   4. close()        — back-patch mdat size, write moov tree
+//   4. write_timecode() — record SMPTE TC for this frame (called once per frame,
+//                         in sync with write_video); omit to disable tmcd track
+//   5. close()        — back-patch mdat size, write moov tree (incl. tmcd if set)
 //
 // Atom writer is self-contained with no external dependencies beyond Win32 and CRT.
 #pragma once
@@ -18,6 +20,8 @@
 #include <string>
 #include <vector>
 #include <memory>
+
+#include "../timecode.h"
 
 // ColorDesc mirrors ProResColorDesc for muxer-level metadata.
 struct MovColorInfo {
@@ -62,6 +66,12 @@ public:
     // Append one PCM audio chunk (interleaved PCM32 samples).
     bool write_audio(const int32_t *samples, int num_samples);
 
+    // Record the SMPTE timecode for the current frame.  Must be called once per
+    // frame, after write_video().  If never called, no 'tmcd' track is written.
+    // The first call establishes the start timecode; subsequent calls append per-
+    // frame values stored as big-endian uint32_t frame-count samples in mdat.
+    bool write_timecode(const SmpteTimecode &tc);
+
     // Flush, write moov, close file. Must be called exactly once on success.
     bool close();
 
@@ -89,10 +99,17 @@ private:
     OVERLAPPED ov_ = {};
     std::vector<uint8_t> write_buf_; // sector-aligned staging buffer for write
 
+    // Timecode track (optional QuickTime 'tmcd' track).
+    // Populated by write_timecode(); absent if never called.
+    struct TcSample { uint32_t frame_count; uint64_t file_offset; };
+    std::vector<TcSample> tc_samples_;
+    bool tc_drop_frame_ = false; // matches the first recorded SmpteTimecode
+
     bool write_aligned(const uint8_t *data, size_t size);
     void build_moov(std::vector<uint8_t> &moov_buf);
     void write_video_trak(std::vector<uint8_t> &buf);
     void write_audio_trak(std::vector<uint8_t> &buf);
+    void write_tmcd_trak (std::vector<uint8_t> &buf);
 
     // Atom builder helpers
     static void begin_atom(std::vector<uint8_t> &buf, const char *type);

@@ -2,8 +2,8 @@
 // Phase 1f standalone validation test.
 //
 // Reads a raw 4K 10-bit V210 file (one or more frames), runs the CUDA ProRes
-// encoder pipeline, writes a .mov file, then invokes ffprobe to confirm the
-// output is a valid QuickTime/ProRes container.
+// encoder pipeline, writes a .mov file with SMPTE timecode, then invokes
+// ffprobe to confirm the output is a valid QuickTime/ProRes container.
 //
 // Usage
 // ─────────────────────────────────────────────────────────────────────────────
@@ -18,6 +18,10 @@
 //            -profile:v 3 reference.mov
 //     ffmpeg -i output.mov -i reference.mov \
 //            -lavfi "[0:v][1:v]ssim=stats_file=ssim.txt" -f null -
+//
+//   To verify timecode track:
+//     ffprobe -v quiet -print_format json -show_streams <output.mov>
+//     # Look for codec_type="data" with "timecode" tag in the tags section.
 //
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -36,6 +40,7 @@
 #include "../cuda/cuda_prores_frame.h"
 #include "../cuda/cuda_prores_tables.cuh"
 #include "../muxer/mov_muxer.h"
+#include "../timecode.h"
 
 // ---------------------------------------------------------------------------
 // CUDA helper
@@ -271,6 +276,21 @@ int main(int argc, char *argv[])
             break;
         }
 
+        // Write SMPTE timecode for this frame (start at 10:00:00:00)
+        {
+            SmpteTimecode tc;
+            tc.valid      = true;
+            tc.drop_frame = false;
+            const uint32_t fps = 25;
+            const int64_t  fn  = 10 * 3600 * fps + frame_count; // start offset at 10hr
+            tc.frames  = (uint8_t)(fn % fps);
+            const int64_t ts = fn / fps;
+            tc.seconds = (uint8_t)(ts % 60);
+            tc.minutes = (uint8_t)((ts / 60) % 60);
+            tc.hours   = (uint8_t)((ts / 3600) % 24);
+            muxer.write_timecode(tc);
+        }
+
         if (frame_count % 25 == 0) {
             fprintf(stdout, "[Test] Encoded frame %d  (%zu bytes, %.2f Mbps)\n",
                     frame_count, out_size,
@@ -290,7 +310,7 @@ int main(int argc, char *argv[])
     fprintf(stdout, "[Test] Done — encoded %d frames → %s\n", frame_count, output_path);
 
     // -------------------------------------------------------------------
-    // Quick validation: run ffprobe to check container integrity
+    // Validation: run ffprobe to check container integrity + timecode track
     // -------------------------------------------------------------------
     char cmd[512];
     snprintf(cmd, sizeof(cmd),
@@ -302,6 +322,14 @@ int main(int argc, char *argv[])
         fprintf(stdout, "[Test] ffprobe OK — output file is a valid container\n");
     else
         fprintf(stderr, "[Test] ffprobe reported errors (exit %d)\n", ret);
+
+    // Additional: show timecode tag
+    snprintf(cmd, sizeof(cmd),
+             "ffprobe -v quiet -print_format json -show_streams "
+             "-show_format \"%s\" 2>&1 | findstr /i timecode",
+             output_path);
+    fprintf(stdout, "[Test] Checking timecode: %s\n", cmd);
+    system(cmd); // output is informational
 
     return (ret == 0 && frame_count > 0) ? 0 : 1;
 }
