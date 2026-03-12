@@ -174,6 +174,11 @@ __global__ void k_dct_quantise(
     int32_t  denom = (int32_t)q_val * q_scale;
     // ProRes quantisation: round-half-away-from-zero, then clamp to int16_t
     int32_t  raw   = s_block[c_scan_order[tid]]; // scan reorder here
+    // Subtract the DC bias before quantising the DC coefficient (tid==0,
+    // c_scan_order[0]==0).  FFmpeg's encode_dcs does (blocks[0] - 0x4000) / scale;
+    // a flat 512-value block produces DCT DC = 512*32 = 16384 = 0x4000, so
+    // bias removal yields DC=0 for a neutral-grey block.
+    if (tid == 0) raw -= 0x4000;
     int32_t  qcoef;
     if (denom == 0) {
         qcoef = 0;

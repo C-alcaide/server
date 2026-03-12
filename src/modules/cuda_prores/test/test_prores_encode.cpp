@@ -59,18 +59,20 @@ static void cuda_check(cudaError_t e, const char *ctx)
 // ---------------------------------------------------------------------------
 static void frame_ctx_create(ProResFrameCtx &ctx,
                               int width, int height, int profile,
-                              int slices_per_row = 4)
+                              int mbs_per_slice = 8)
 {
     ctx.width         = width;
     ctx.height        = height;
     ctx.profile       = profile;
-    ctx.slices_per_row = slices_per_row;
     ctx.q_scale       = 8; // mid-range quality
 
-    int mb_w = width  / 8;
-    int mb_h = height / 8;
-    ctx.num_slices       = (mb_w / slices_per_row) * mb_h;
-    ctx.blocks_per_slice = slices_per_row * 6; // 4 luma + 1 Cb + 1 Cr per MB
+    // ProRes uses 16×16 pixel macroblocks; mbs_per_slice must be a power of 2
+    int mb_cols = width  / 16;
+    int mb_rows = height / 16;
+    ctx.mbs_per_slice    = mbs_per_slice;
+    ctx.slices_per_row   = mb_cols / mbs_per_slice;
+    ctx.num_slices       = ctx.slices_per_row * mb_rows;
+    ctx.blocks_per_slice = 8 * mbs_per_slice; // 4Y + 2Cb + 2Cr per 16×16 MB
 
     // Planar input buffers
     int y_pixels   = width * height;
@@ -79,31 +81,29 @@ static void frame_ctx_create(ProResFrameCtx &ctx,
     cuda_check(cudaMalloc(&ctx.d_cb, c_pixels * sizeof(int16_t)), "d_cb");
     cuda_check(cudaMalloc(&ctx.d_cr, c_pixels * sizeof(int16_t)), "d_cr");
 
-    // DCT coefficient buffers
-    cuda_check(cudaMalloc(&ctx.d_coeffs_y,      y_pixels * sizeof(int16_t)), "d_coeffs_y");
-    cuda_check(cudaMalloc(&ctx.d_coeffs_cb,     c_pixels * sizeof(int16_t)), "d_coeffs_cb");
-    cuda_check(cudaMalloc(&ctx.d_coeffs_cr,     c_pixels * sizeof(int16_t)), "d_coeffs_cr");
+    // DCT coefficient buffers (one int16 per frequency × pixel)
+    cuda_check(cudaMalloc(&ctx.d_coeffs_y,  y_pixels * sizeof(int16_t)), "d_coeffs_y");
+    cuda_check(cudaMalloc(&ctx.d_coeffs_cb, c_pixels * sizeof(int16_t)), "d_coeffs_cb");
+    cuda_check(cudaMalloc(&ctx.d_coeffs_cr, c_pixels * sizeof(int16_t)), "d_coeffs_cr");
 
-    // Interleaved slice layout: [num_slices * blocks_per_slice * 64]
+    // Interleaved slice layout: [num_slices][blocks_per_slice * 64]
     size_t slice_elems = (size_t)ctx.num_slices * ctx.blocks_per_slice * 64;
     cuda_check(cudaMalloc(&ctx.d_coeffs_slice, slice_elems * sizeof(int16_t)), "d_coeffs_slice");
 
-    // Bitstream buffer: worst case = slice_elems * 2 bytes (entirely uncompressible coefficients)
-    size_t bs_size = slice_elems * sizeof(int16_t) * 2 + ctx.num_slices * 32;
-    cuda_check(cudaMalloc(&ctx.d_bitstream,     bs_size),                 "d_bitstream");
-    cuda_check(cudaMalloc(&ctx.d_slice_offsets, (ctx.num_slices + 1) * sizeof(uint32_t)), "d_offsets");
-    cuda_check(cudaMalloc(&ctx.d_bit_counts,     ctx.num_slices * sizeof(uint32_t)),      "d_bitcounts");
+    // Bitstream: worst case ≈ 2× uncompressed coefficients + per-slice headers
+    size_t bs_size = slice_elems * sizeof(int16_t) * 2 + (size_t)ctx.num_slices * 32;
+    cuda_check(cudaMalloc(&ctx.d_bitstream,     bs_size),                              "d_bitstream");
+    cuda_check(cudaMalloc(&ctx.d_slice_offsets, (size_t)(ctx.num_slices + 1) * sizeof(uint32_t)), "d_offsets");
+    cuda_check(cudaMalloc(&ctx.d_slice_sizes,   (size_t)ctx.num_slices       * sizeof(uint32_t)), "d_slice_sizes");
+    cuda_check(cudaMalloc(&ctx.d_bit_counts,    (size_t)ctx.num_slices * 3   * sizeof(uint32_t)), "d_bitcounts");
 
-    // CUB temp storage: query size then allocate
+    // CUB temp storage (generous over-allocation for simplicity)
     ctx.d_cub_temp     = nullptr;
-    ctx.cub_temp_bytes = 0;
-    // Pass nullptr first call to query required temp size — done via entropy.cu API.
-    // For test we over-allocate 8 MB.
     ctx.cub_temp_bytes = 8 * 1024 * 1024;
     cuda_check(cudaMalloc(&ctx.d_cub_temp, ctx.cub_temp_bytes), "d_cub_temp");
 
-    // Pinned output buffer
-    size_t frame_buf_size = (size_t)width * height * 4; // generous upper bound
+    // Pinned output buffer (generous upper bound)
+    size_t frame_buf_size = (size_t)width * height * 4;
     ctx.h_frame_buf_size  = frame_buf_size;
     cuda_check(cudaMallocHost(&ctx.h_frame_buf, frame_buf_size), "h_frame_buf");
 }
@@ -113,7 +113,8 @@ static void frame_ctx_destroy(ProResFrameCtx &ctx)
     cudaFree(ctx.d_y);            cudaFree(ctx.d_cb);          cudaFree(ctx.d_cr);
     cudaFree(ctx.d_coeffs_y);     cudaFree(ctx.d_coeffs_cb);   cudaFree(ctx.d_coeffs_cr);
     cudaFree(ctx.d_coeffs_slice);
-    cudaFree(ctx.d_bitstream);    cudaFree(ctx.d_slice_offsets); cudaFree(ctx.d_bit_counts);
+    cudaFree(ctx.d_bitstream);    cudaFree(ctx.d_slice_offsets);
+    cudaFree(ctx.d_slice_sizes);  cudaFree(ctx.d_bit_counts);
     cudaFree(ctx.d_cub_temp);
     cudaFreeHost(ctx.h_frame_buf);
     memset(&ctx, 0, sizeof(ctx));

@@ -91,19 +91,21 @@ struct ProResFrameCtx {
     // Frame dimensions
     int width, height;
     int profile;          // ProResProfile enum
-    int slices_per_row;   // typically 4 for 4K (configurable)
-    int num_slices;       // = slices_per_row * (height / 8)  [macroblock rows]
-    int blocks_per_slice; // luma + chroma blocks per slice
+    int mbs_per_slice;    // macroblock columns per slice (power of 2: 1,2,4,8)
+    int slices_per_row;   // = (width/16) / mbs_per_slice
+    int num_slices;       // = slices_per_row * (height/16)
+    int blocks_per_slice; // = 8 * mbs_per_slice  (4Y + 2Cb + 2Cr blocks per ProRes 16×16 MB)
 
     // Device buffers (all allocated by prores_frame_ctx_create)
     int16_t  *d_y,  *d_cb, *d_cr;    // unpacked planar input
     int16_t  *d_coeffs_y;             // DCT coefficients luma  [nblocks_y * 64]
     int16_t  *d_coeffs_cb;            // DCT coefficients Cb    [nblocks_c * 64]
     int16_t  *d_coeffs_cr;            // DCT coefficients Cr    [nblocks_c * 64]
-    int16_t  *d_coeffs_slice;         // interleaved slice layout [num_slices][bps*64]
+    int16_t  *d_coeffs_slice;         // interleaved: [num_slices][blocks_per_slice][64]
     uint8_t  *d_bitstream;            // output encoded slice data (worst-case sized)
-    uint32_t *d_slice_offsets;        // [num_slices + 1] byte offsets
-    uint32_t *d_bit_counts;           // [num_slices] temp for CUB scan
+    uint32_t *d_slice_offsets;        // [num_slices + 1] byte offsets into d_bitstream
+    uint32_t *d_slice_sizes;          // [num_slices] per-slice byte sizes (temp for CUB)
+    uint32_t *d_bit_counts;           // [num_slices * 3] Y/Cb/Cr bit counts per slice
     void     *d_cub_temp;
     size_t    cub_temp_bytes;
 

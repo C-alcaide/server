@@ -61,43 +61,79 @@ __device__ __forceinline__ int bp_bytes(const BitPacker *bp, const uint8_t *buf_
 }
 
 // ---------------------------------------------------------------------------
-// Adaptive Rice coding
+// ProRes hybrid Rice / exp-Golomb VLC coding
+//
+// Reference: FFmpeg libavcodec/proresenc_kostya.c encode_vlc_codeword()
+//            Apple ProRes White Paper §"Entropy Coding"
+//
+// Each codebook byte encodes three parameters:
+//   switch_bits = (codebook & 3) + 1   encoder-side (decoder uses cb & 3)
+//   rice_order  =  codebook >> 5
+//   exp_order   = (codebook >> 2) & 7
+//
+// Bitstream format — Rice path (val < switch_val):
+//   q = val >> rice_order   (quotient)
+//   prefix : q zero-bits then one 1-bit
+//   suffix : low rice_order bits of val (LSB → MSB in stream order)
+//
+// Bitstream format — exp-Golomb path (val >= switch_val):
+//   leading_zeros = exponent - exp_order + switch_bits
+//   then (exponent+1)-bit representation of adjusted value
 // ---------------------------------------------------------------------------
 
-// Count bits required to Rice-encode unsigned value val with parameter k.
-// Does NOT write anything — used in the counting (Pass 1) kernel.
-__device__ __forceinline__ int rice_count(unsigned val, int k)
+// Count bits needed for VLC codeword — no side effects.
+__device__ __forceinline__ unsigned vlc_count(unsigned codebook, unsigned val)
 {
-    // unary quotient length + terminating zero + k remainder bits
-    return (int)(val >> k) + 1 + k;
-}
+    unsigned sw = (codebook & 3u) + 1u;
+    unsigned ro = codebook >> 5;
+    unsigned eo = (codebook >> 2) & 7u;
+    unsigned sv = sw << ro;
 
-// Write Rice(k) codeword for unsigned value val.
-// Unary prefix: q one-bits then a zero; remainder: low k bits of val.
-__device__ void rice_encode(BitPacker *bp, unsigned val, int k)
-{
-    unsigned q = val >> k;
-
-    // Write unary part in chunks of ≤30 bits to stay within bp_put limits.
-    while (q >= 30) {
-        bp_put(bp, 0x3FFFFFFFu, 30);
-        q -= 30;
+    if (val >= sv) {
+        val -= sv - (1u << eo);
+        unsigned exp = 31u - __clz(val);        // floor(log2(val))
+        return exp * 2u - eo + sw + 1u;
+    } else {
+        return (val >> ro) + ro + 1u;
     }
-    if (q > 0)
-        bp_put(bp, (1u << q) - 1u, (int)q);
-    bp_put(bp, 0u, 1); // terminating zero
-
-    // Write k-bit remainder.
-    if (k > 0)
-        bp_put(bp, val & ((1u << k) - 1u), k);
 }
 
-// Update Rice parameter k based on the quotient of the just-encoded value.
-// ProRes adaptation: increment k when quotient is non-zero, decrement otherwise.
-// k is clamped to [0, 11].
-__device__ __forceinline__ void rice_adapt_k(int *k, unsigned val)
+// Write ProRes VLC codeword to BitPacker.
+__device__ void vlc_encode(BitPacker *bp, unsigned codebook, unsigned val)
 {
-    unsigned q = val >> *k;
-    if (q == 0) { if (*k > 0)   --(*k); }
-    else         { if (*k < 11)  ++(*k); }
+    unsigned sw = (codebook & 3u) + 1u;
+    unsigned ro = codebook >> 5;
+    unsigned eo = (codebook >> 2) & 7u;
+    unsigned sv = sw << ro;
+
+    if (val >= sv) {
+        // Exp-Golomb path
+        val -= sv - (1u << eo);
+        unsigned exp = 31u - __clz(val);
+        // Write leading zeros
+        unsigned nz = exp - eo + sw;
+        for (unsigned n = nz; n > 0u; ) {
+            int chunk = (n >= 30u) ? 30 : (int)n;
+            bp_put(bp, 0u, chunk);
+            n -= (unsigned)chunk;
+        }
+        // Write (exp+1)-bit value MSB-first
+        unsigned nb = exp + 1u;
+        if (nb > 30u) {
+            bp_put(bp, (val >> (nb - 30u)) & 0x3FFFFFFFu, 30);
+            nb -= 30u;
+        }
+        bp_put(bp, val & ((1u << nb) - 1u), (int)nb);
+    } else {
+        // Rice path: write q zero-bits, one 1-bit, then rice_order remainder
+        unsigned q = val >> ro;
+        for (unsigned n = q; n > 0u; ) {
+            int chunk = (n >= 30u) ? 30 : (int)n;
+            bp_put(bp, 0u, chunk);
+            n -= (unsigned)chunk;
+        }
+        bp_put(bp, 1u, 1);
+        if (ro)
+            bp_put(bp, val & ((1u << ro) - 1u), (int)ro);
+    }
 }
