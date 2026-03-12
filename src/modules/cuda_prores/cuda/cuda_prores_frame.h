@@ -99,6 +99,9 @@ struct ProResFrameCtx {
 
     int q_scale; // current adaptive quality scale [1..31]
 
+    // Interlaced capture (e.g. 1080i50): true = top-field-first interlaced
+    bool is_interlaced;
+
     // 4444 / 4444 XQ fields (zero-initialised for 422 profiles)
     bool     is_4444;           // true for ProRes 4444 / 4444 XQ
     bool     has_alpha;         // true ↔ input alpha plane is encoded

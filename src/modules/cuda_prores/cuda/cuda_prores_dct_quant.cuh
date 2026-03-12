@@ -124,7 +124,8 @@ __global__ void k_dct_quantise(
     int plane_height,  // same for luma and chroma
     int q_scale,       // adaptive quality scale [1..31]; 1 = best quality
     int profile,       // ProResProfile index
-    bool is_chroma)
+    bool is_chroma,
+    bool is_interlaced)
 {
     // Each thread handles one coefficient position within the 8×8 block.
     const int tid   = threadIdx.x; // 0..63
@@ -174,7 +175,7 @@ __global__ void k_dct_quantise(
                                 : c_quant_luma  [profile][tid]);
     int32_t  denom = (int32_t)q_val * q_scale;
     // ProRes quantisation: round-half-away-from-zero, then clamp to int16_t
-    int32_t  raw   = s_block[c_scan_order[tid]]; // scan reorder here
+    int32_t  raw   = s_block[(is_interlaced ? c_scan_order_interlaced : c_scan_order)[tid]]; // scan reorder
     // Subtract the DC bias before quantising the DC coefficient (tid==0,
     // c_scan_order[0]==0).  FFmpeg's encode_dcs does (blocks[0] - 0x4000) / scale;
     // a flat 512-value block produces DCT DC = 512*32 = 16384 = 0x4000, so
@@ -198,13 +199,14 @@ inline cudaError_t launch_dct_quantise(
     int16_t        *d_out_coeffs,
     int plane_width, int plane_height,
     int q_scale, int profile, bool is_chroma,
+    bool is_interlaced,
     cudaStream_t stream)
 {
     dim3 threads(64);
     dim3 blocks(plane_width / 8, plane_height / 8);
     k_dct_quantise<<<blocks, threads, 0, stream>>>(
         d_plane, d_out_coeffs,
-        plane_width, plane_height, q_scale, profile, is_chroma);
+        plane_width, plane_height, q_scale, profile, is_chroma, is_interlaced);
     return cudaGetLastError();
 }
 

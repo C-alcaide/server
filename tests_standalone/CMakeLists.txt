@@ -164,3 +164,57 @@ if(WIN32 AND DEFINED WINSDK_UCRT_INCLUDE AND EXISTS "${WINSDK_UCRT_INCLUDE}")
             "${WINSDK_SHARED_INCLUDE}")
     endforeach()
 endif()
+
+# ─── decklink_prores_capture ──────────────────────────────────────────────────
+# Multi-device live DeckLink capture + CUDA ProRes encode → .mov benchmark.
+# Windows-only (DeckLink COM API).
+#
+# Portability: CRT is linked statically (/MT) and CUDA runtime is
+# CUDA::cudart_static, so the .exe has no extra DLL dependencies beyond
+# DeckLink Desktop Video drivers (required for the COM server anyway).
+if(WIN32)
+    set(DECKLINK_INTEROP
+        "${CMAKE_CURRENT_SOURCE_DIR}/../src/modules/decklink/interop")
+
+    # Compile as CUDA so nvcc handles CUDA types and __constant__ externs
+    set_source_files_properties(
+        "${TEST_DIR}/decklink_prores_capture.cpp"
+        PROPERTIES LANGUAGE CUDA)
+
+    # DeckLinkAPI_i.c is a MIDL-generated file with extern "C" guards — compile
+    # as CXX because the project only enables CXX + CUDA (no C language enabled)
+    set_source_files_properties(
+        "${DECKLINK_INTEROP}/DeckLinkAPI_i.c"
+        PROPERTIES LANGUAGE CXX)
+
+    add_executable(decklink_prores_capture
+        "${TEST_DIR}/decklink_prores_capture.cpp"
+        "${DECKLINK_INTEROP}/DeckLinkAPI_i.c"   # CLSID/IID GUID definitions
+        ${CUDA_SOURCES}
+        "${MODULE_DIR}/muxer/mov_muxer.cpp"
+        "${MODULE_DIR}/storage/async_file_writer.cpp")
+
+    target_include_directories(decklink_prores_capture PRIVATE
+        "${MODULE_DIR}"
+        "${CUDAToolkit_INCLUDE_DIRS}"
+        "${DECKLINK_INTEROP}")
+
+    target_link_libraries(decklink_prores_capture PRIVATE
+        CUDA::cudart_static   # static cudart — no cudart.dll required on target
+        ole32 uuid)           # Windows COM — always present on Windows
+
+    # Static CRT: /MT so the .exe needs no vcruntime DLLs on target machines
+    set_property(TARGET decklink_prores_capture PROPERTY
+        MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
+    set_property(TARGET decklink_prores_capture PROPERTY CUDA_SEPARABLE_COMPILATION ON)
+    set_property(TARGET decklink_prores_capture PROPERTY CUDA_RESOLVE_DEVICE_SYMBOLS ON)
+    set_property(TARGET decklink_prores_capture PROPERTY CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}")
+
+    if(DEFINED WINSDK_UCRT_INCLUDE AND EXISTS "${WINSDK_UCRT_INCLUDE}")
+        target_include_directories(decklink_prores_capture SYSTEM PRIVATE
+            "${WINSDK_UCRT_INCLUDE}"
+            "${WINSDK_UM_INCLUDE}"
+            "${WINSDK_SHARED_INCLUDE}")
+    endif()
+endif()

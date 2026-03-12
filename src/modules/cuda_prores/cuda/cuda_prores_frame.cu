@@ -55,6 +55,7 @@ static int build_frame_header(
     int                    height,
     bool                   is_4444,
     bool                   has_alpha,
+    bool                   is_interlaced,
     const ProResColorDesc *color,
     const uint8_t         *quant_luma,
     const uint8_t         *quant_chroma)
@@ -66,8 +67,10 @@ static int build_frame_header(
     write_u16(p, (uint16_t)width);  p += 2;  // [8..9]
     write_u16(p, (uint16_t)height); p += 2;  // [10..11]
     // [12] frame_flags: bits[7:6] = chroma format (0b10=4:2:2, 0b00=4:4:4)
-    //                   bits[1:0] = frame type (0 = progressive)
-    write_u8(p++, is_4444 ? 0x00u : 0x80u);
+    //                   bits[1:0] = frame type (0=progressive, 1=tff interlaced, 2=bff interlaced)
+    uint8_t frame_flags = is_4444 ? 0x00u : 0x80u;
+    if (is_interlaced) frame_flags |= 0x01u;  // top-field-first for 1080i
+    write_u8(p++, frame_flags);
     write_u8(p++, 0);                    // [13] reserved
     write_u8(p++, color->color_primaries);   // [14]
     write_u8(p++, color->transfer_function); // [15]
@@ -212,21 +215,21 @@ cudaError_t prores_encode_frame(
     err = launch_dct_quantise(
         ctx->d_y, ctx->d_coeffs_y,
         ctx->width, ctx->height,
-        ctx->q_scale, ctx->profile, false, stream);
+        ctx->q_scale, ctx->profile, false, ctx->is_interlaced, stream);
     if (err != cudaSuccess) return err;
 
     // 3. DCT + quantise — Cb
     err = launch_dct_quantise(
         ctx->d_cb, ctx->d_coeffs_cb,
         ctx->width / 2, ctx->height,
-        ctx->q_scale, ctx->profile, true, stream);
+        ctx->q_scale, ctx->profile, true, ctx->is_interlaced, stream);
     if (err != cudaSuccess) return err;
 
     // 4. DCT + quantise — Cr
     err = launch_dct_quantise(
         ctx->d_cr, ctx->d_coeffs_cr,
         ctx->width / 2, ctx->height,
-        ctx->q_scale, ctx->profile, true, stream);
+        ctx->q_scale, ctx->profile, true, ctx->is_interlaced, stream);
     if (err != cudaSuccess) return err;
 
     // 5. Interleave block coefficients into per-slice layout
@@ -293,7 +296,7 @@ cudaError_t prores_encode_frame(
     // (c) Frame header (150 bytes with quant matrices)
     const uint8_t *ql = PRORES_QUANT_LUMA[ctx->profile];
     const uint8_t *qc = PRORES_QUANT_CHROMA[ctx->profile];
-    int fhdr_bytes = build_frame_header(p, ctx->width, ctx->height, false, false, color, ql, qc);
+    int fhdr_bytes = build_frame_header(p, ctx->width, ctx->height, false, false, ctx->is_interlaced, color, ql, qc);
     p += fhdr_bytes;
 
     // (d) Picture header (8 bytes)
@@ -365,21 +368,21 @@ cudaError_t prores_encode_frame_444(
     err = launch_dct_quantise(
         ctx->d_y, ctx->d_coeffs_y,
         ctx->width, ctx->height,
-        ctx->q_scale, ctx->profile, false, stream);
+        ctx->q_scale, ctx->profile, false, false, stream);
     if (err != cudaSuccess) return err;
 
     // 3. DCT + quantise — Cb  (4444: FULL width, chroma quant table)
     err = launch_dct_quantise(
         ctx->d_cb, ctx->d_coeffs_cb,
         ctx->width, ctx->height,    // full width — no /2
-        ctx->q_scale, ctx->profile, true, stream);
+        ctx->q_scale, ctx->profile, true, false, stream);
     if (err != cudaSuccess) return err;
 
     // 4. DCT + quantise — Cr  (4444: FULL width, chroma quant table)
     err = launch_dct_quantise(
         ctx->d_cr, ctx->d_coeffs_cr,
         ctx->width, ctx->height,    // full width
-        ctx->q_scale, ctx->profile, true, stream);
+        ctx->q_scale, ctx->profile, true, false, stream);
     if (err != cudaSuccess) return err;
 
     // 5. DCT + quantise — Alpha  (uses luma quant table, per Apple spec)
@@ -387,7 +390,7 @@ cudaError_t prores_encode_frame_444(
         err = launch_dct_quantise(
             ctx->d_alpha, ctx->d_coeffs_alpha,
             ctx->width, ctx->height,
-            ctx->q_scale, ctx->profile, false, stream);
+            ctx->q_scale, ctx->profile, false, false, stream);
         if (err != cudaSuccess) return err;
     }
 
@@ -457,7 +460,7 @@ cudaError_t prores_encode_frame_444(
     const uint8_t *ql = PRORES_QUANT_LUMA[ctx->profile];
     const uint8_t *qc = PRORES_QUANT_CHROMA[ctx->profile];
     int fhdr_bytes = build_frame_header(p, ctx->width, ctx->height,
-                                         true, ctx->has_alpha, color, ql, qc);
+                                         true, ctx->has_alpha, false, color, ql, qc);
     p += fhdr_bytes;
 
     uint8_t *pic_hdr_ptr = p;
