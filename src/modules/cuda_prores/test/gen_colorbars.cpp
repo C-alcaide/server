@@ -82,6 +82,54 @@ static constexpr uint16_t Y_BLACK = 64;
 static constexpr uint16_t C_NEUTRAL = 512;
 
 // ---------------------------------------------------------------------------
+// BT.2020 75% colour bar data for HDR modes.
+// y_lin: linear light [0,1] — fed into the OETF for the actual 10-bit Y code.
+// cb/cr: 10-bit narrow-range chroma using BT.2020 NCL matrix:
+//   Cb = 512 + 896*(B_lin-Y_lin)/1.8814   Cr = 512 + 896*(R_lin-Y_lin)/1.4746
+// ---------------------------------------------------------------------------
+struct Bar2020 { double y_lin; uint16_t cb, cr; };
+static const Bar2020 BARS_2020[7] = {
+    { 0.75000, 512, 512 },  // 75% White
+    { 0.70553, 176, 539 },  // 75% Yellow
+    { 0.55298, 606, 176 },  // 75% Cyan
+    { 0.50850, 270, 203 },  // 75% Green
+    { 0.24150, 754, 821 },  // 75% Magenta
+    { 0.19703, 418, 848 },  // 75% Red
+    { 0.04448, 848, 485 },  // 75% Blue
+};
+
+// ---------------------------------------------------------------------------
+// HDR OETFs — return 10-bit narrow-range luma (64..940).
+// HLG: Y_lin is scene-referred [0,1]; 1.0 = nominal ref white (~203 nits).
+// PQ : Y_lin is linear [0,1] where 1.0 = peak_nits.
+// Both follow BT.2100 narrow (limited) range, matching broadcast convention.
+// ---------------------------------------------------------------------------
+static uint16_t hlg_y_10bit(double Y_lin)
+{
+    double E;
+    if (Y_lin <= 0.0) { E = 0.0; }
+    else if (Y_lin <= 1.0/12.0) { E = std::sqrt(3.0 * Y_lin); }
+    else {
+        const double a=0.17883277, b=0.28466892, c=0.55991073;
+        E = a * std::log(12.0*Y_lin - b) + c;
+    }
+    E = E < 0.0 ? 0.0 : E > 1.0 ? 1.0 : E;
+    return (uint16_t)(64 + (int)(876.0 * E + 0.5));
+}
+
+static uint16_t pq_y_10bit(double Y_lin, double peak_nits)
+{
+    double nits = Y_lin * peak_nits;
+    if (nits <= 0.0) return 64;
+    const double m1=2610.0/16384.0, m2=2523.0/32.0;
+    const double c1=107.0/128.0,    c2=2413.0/128.0, c3=2392.0/128.0;
+    double E  = nits / 10000.0;
+    double Em1 = std::pow(E, m1);
+    double code = std::pow((c1 + c2*Em1) / (1.0 + c3*Em1), m2);
+    return (uint16_t)(64 + (int)(876.0 * code + 0.5));
+}
+
+// ---------------------------------------------------------------------------
 // Apple ProRes profile table.
 //
 // bits_per_mb is derived from the Apple ProRes White Paper target data rates
@@ -137,13 +185,19 @@ static inline uint16_t apply_grain(uint16_t base, int x, int y, int frame_idx, i
 }
 
 // ---------------------------------------------------------------------------
-// Fill one YUV422P10LE frame with the test pattern.
-//   frame        — pre-allocated AVFrame (av_frame_get_buffer called by caller)
-//   frame_index  — 0-based frame number (drives animation)
-//   fps          — frames per second (25)
+// Fill one frame with the test pattern.
+//   hdr_mode: 0=SDR BT.709, 1=HLG BT.2020, 2=PQ HDR10 BT.2020
+//
+// Layout (all modes):
+//   top 2/3  — 75% BT.709 / BT.2020 colour bars + rotating ball
+//   mid 1/6  — sweep bar  (SDR) / HDR peak ramp 100→1000 nits (HDR)
+//   bot 1/6  — luma ramp black→white (SDR) / black→ref-white (HDR)
 // ---------------------------------------------------------------------------
-static void fill_frame(AVFrame *frame, int frame_index, int fps, int grain_amplitude)
+static void fill_frame(AVFrame *frame, int frame_index, int fps,
+                       int grain_amplitude, int hdr_mode)
 {
+    // HDR PQ peak luminance for bars and ramp.
+    static constexpr double PQ_PEAK_NITS = 1000.0;  // matches declared MaxCLL
     const int W = frame->width;
     const int H = frame->height;
 
@@ -175,18 +229,30 @@ static void fill_frame(AVFrame *frame, int frame_index, int fps, int grain_ampli
 
         if (y < top_end) {
             // ── Colour bars + rotating ball overlay ──────────────────────────
+            // HDR modes use BT.2020 primaries + the appropriate OETF for luma.
             const int dy = y - ball_cy;
             for (int x = 0; x < W; ++x) {
                 const int  bar = (x * 7) / W;
                 const int  dx  = x - ball_cx;
                 const bool in_ball = (dx * dx + dy * dy) <= ball_r2;
 
-                Y_row[x] = apply_grain(in_ball ? Y_WHITE : BARS[bar].y, x, y, frame_index, grain_amplitude);
+                uint16_t luma_val;
+                if (hdr_mode == 0) {
+                    luma_val = in_ball ? Y_WHITE : BARS[bar].y;
+                } else if (hdr_mode == 1) { // HLG
+                    luma_val = in_ball ? hlg_y_10bit(1.0) : hlg_y_10bit(BARS_2020[bar].y_lin);
+                } else {                     // PQ
+                    luma_val = in_ball ? pq_y_10bit(1.0, PQ_PEAK_NITS)
+                                       : pq_y_10bit(BARS_2020[bar].y_lin, PQ_PEAK_NITS);
+                }
+                Y_row[x] = apply_grain(luma_val, x, y, frame_index, grain_amplitude);
 
-                // Chroma: full-res for 4444, half-res (422) otherwise
+                const uint16_t bar_cb = (hdr_mode == 0) ? BARS[bar].cb : BARS_2020[bar].cb;
+                const uint16_t bar_cr = (hdr_mode == 0) ? BARS[bar].cr : BARS_2020[bar].cr;
+
                 if (is_444) {
-                    Cb_row[x] = in_ball ? C_NEUTRAL : BARS[bar].cb;
-                    Cr_row[x] = in_ball ? C_NEUTRAL : BARS[bar].cr;
+                    Cb_row[x] = in_ball ? C_NEUTRAL : bar_cb;
+                    Cr_row[x] = in_ball ? C_NEUTRAL : bar_cr;
                 } else if ((x & 1) == 0) {
                     const int cx = x >> 1;
                     const int dx1 = (x + 1) - ball_cx;
@@ -197,17 +263,17 @@ static void fill_frame(AVFrame *frame, int frame_index, int fps, int grain_ampli
                     } else {
                         const int bar_r = ((x + 1) * 7) / W;
                         if (bar == bar_r) {
-                            Cb_row[cx] = BARS[bar].cb;
-                            Cr_row[cx] = BARS[bar].cr;
+                            Cb_row[cx] = bar_cb;
+                            Cr_row[cx] = bar_cr;
                         } else {
-                            Cb_row[cx] = (uint16_t)((BARS[bar].cb + BARS[bar_r].cb) / 2);
-                            Cr_row[cx] = (uint16_t)((BARS[bar].cr + BARS[bar_r].cr) / 2);
+                            const uint16_t rbar_cb = (hdr_mode==0) ? BARS[bar_r].cb : BARS_2020[bar_r].cb;
+                            const uint16_t rbar_cr = (hdr_mode==0) ? BARS[bar_r].cr : BARS_2020[bar_r].cr;
+                            Cb_row[cx] = (uint16_t)((bar_cb + rbar_cb) / 2);
+                            Cr_row[cx] = (uint16_t)((bar_cr + rbar_cr) / 2);
                         }
                     }
                 }
 
-                // Alpha: animated ramp for 4444 — left stripe fully transparent,
-                // right stripe fully opaque, with a soft diagonal transition.
                 if (A_row) {
                     const int alpha_x = x - (W / 4) - ((frame_index % fps) * W / (2 * fps));
                     const int a = alpha_x < 0 ? 0 : (alpha_x > W / 4 ? 1023
@@ -216,9 +282,22 @@ static void fill_frame(AVFrame *frame, int frame_index, int fps, int grain_ampli
                 }
             }
         } else if (y < mid_end) {
-            // ── Sweep bar ───────────────────────────────────────────────────
+            // ── SDR: animated sweep bar | HDR: peak luminance ramp ───────────
+            // HDR ramp steps from 100 nits (SDR reference white) up to peak
+            // (MaxCLL = 1000 nits for PQ, 100% scene light for HLG), making
+            // the HDR headroom visually distinct from the SDR sweep.
             for (int x = 0; x < W; ++x) {
-                Y_row[x] = apply_grain((x < sweep_x) ? Y_WHITE : Y_BLACK, x, y, frame_index, grain_amplitude);
+                uint16_t luma_val;
+                if (hdr_mode == 0) {
+                    luma_val = (x < sweep_x) ? Y_WHITE : Y_BLACK;
+                } else if (hdr_mode == 1) { // HLG: ramp 0.1 → 1.0 scene luminance
+                    const double t = (double)x / (double)(W - 1);
+                    luma_val = hlg_y_10bit(0.1 + 0.9 * t); // ~20 nits → ref-white
+                } else {                     // PQ: ramp 100 nits → 1000 nits
+                    const double t = (double)x / (double)(W - 1);
+                    luma_val = pq_y_10bit(0.1 + 0.9 * t, PQ_PEAK_NITS);
+                }
+                Y_row[x] = apply_grain(luma_val, x, y, frame_index, grain_amplitude);
                 if (is_444) {
                     Cb_row[x] = C_NEUTRAL;
                     Cr_row[x] = C_NEUTRAL;
@@ -226,12 +305,18 @@ static void fill_frame(AVFrame *frame, int frame_index, int fps, int grain_ampli
                     Cb_row[x >> 1] = C_NEUTRAL;
                     Cr_row[x >> 1] = C_NEUTRAL;
                 }
-                if (A_row) A_row[x] = 1023; // sweep section fully opaque
+                if (A_row) A_row[x] = 1023;
             }
         } else {
-            // ── Full luma ramp  Y=64 → Y=940 ──────────────────────────────────
+            // ── Luma ramp: black → ref-white (SDR Y=940; HLG/PQ equiv) ──────
+            uint16_t ramp_max;
+            if      (hdr_mode == 1) ramp_max = hlg_y_10bit(1.0);
+            else if (hdr_mode == 2) ramp_max = pq_y_10bit(1.0, PQ_PEAK_NITS);
+            else                    ramp_max = Y_WHITE;
+
             for (int x = 0; x < W; ++x) {
-                const uint16_t ramp_y = (uint16_t)(Y_BLACK + (uint32_t)(x) * (Y_WHITE - Y_BLACK) / (uint32_t)(W - 1));
+                const uint16_t ramp_y = (uint16_t)(Y_BLACK +
+                    (uint32_t)x * (ramp_max - Y_BLACK) / (uint32_t)(W - 1));
                 Y_row[x] = apply_grain(ramp_y, x, y, frame_index, grain_amplitude);
                 if (is_444) {
                     Cb_row[x] = C_NEUTRAL;
@@ -240,7 +325,7 @@ static void fill_frame(AVFrame *frame, int frame_index, int fps, int grain_ampli
                     Cb_row[x >> 1] = C_NEUTRAL;
                     Cr_row[x >> 1] = C_NEUTRAL;
                 }
-                if (A_row) A_row[x] = 1023; // ramp section fully opaque
+                if (A_row) A_row[x] = 1023;
             }
         }
     }
@@ -376,7 +461,8 @@ int main(int argc, char **argv)
         av_frame_make_writable(frame);
         frame->pts = f;
 
-        fill_frame(frame, f, FPS, GRAIN_AMP);
+        const int hdr_mode_int = is_pq ? 2 : is_hlg ? 1 : 0;
+        fill_frame(frame, f, FPS, GRAIN_AMP, hdr_mode_int);
 
         if (avcodec_send_frame(enc, frame) < 0) {
             fprintf(stderr, "[gen_colorbars] avcodec_send_frame failed at frame %d\n", f);
