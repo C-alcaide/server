@@ -280,8 +280,21 @@ void MovMuxer::write_video_trak(std::vector<uint8_t> &buf) {
                     put_u32(buf, 0x00480000); // v DPI 72.0 fixed
                     put_u32(buf, 0); // data size
                     put_u16(buf, 1); // frame count per sample
-                    // compressor name (32 bytes, Pascal string)
-                    const char *enc_name = "\x0BCUDA-ProRes";
+                    // compressor name (32 bytes, Pascal string).
+                    // Use the Apple-standard name for each ProRes fourcc so that
+                    // MediaInfo / QuickTime correctly identify the encoder variant.
+                    // Note: hex escapes in C++ greedily consume digits, so write the
+                    // length byte and literal text as separate adjacent string literals.
+                    const char *enc_name;
+                    switch (video_.prores_fourcc) {
+                        case 0x6170636Fu: enc_name = "\x16" "Apple ProRes 422 Proxy"; break; // apco
+                        case 0x61706373u: enc_name = "\x13" "Apple ProRes 422 LT";    break; // apcs
+                        case 0x6170636Eu: enc_name = "\x10" "Apple ProRes 422";       break; // apcn
+                        case 0x61706368u: enc_name = "\x13" "Apple ProRes 422 HQ";    break; // apch
+                        case 0x61703468u: enc_name = "\x11" "Apple ProRes 4444";      break; // ap4h
+                        case 0x61703478u: enc_name = "\x14" "Apple ProRes 4444 XQ";   break; // ap4x
+                        default:          enc_name = "\x0B" "CUDA-ProRes";             break;
+                    }
                     for (int i = 0; i < 32; i++)
                         buf.push_back(i < (int)strlen(enc_name) ? (uint8_t)enc_name[i] : 0);
                     put_u16(buf, 24); // depth

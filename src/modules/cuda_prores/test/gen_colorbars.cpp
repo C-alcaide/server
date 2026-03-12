@@ -96,15 +96,19 @@ struct ProResProfileInfo {
     const char *name;        // prores_ks option value
     uint32_t    fourcc;      // .mov codec tag
     int         bits_per_mb; // Apple quantisation budget per 16x16 MB
+    int         grain_amp;   // film grain amplitude for this profile
+    // Lower-quality profiles need more grain to reach Apple target bitrates.
+    // Higher-quality profiles encode faster and look better with less grain.
+    // Scale: 0 = no grain, 40 = ~1.5 IRE (4.6% of 10-bit swing)
 };
 
 static const ProResProfileInfo PROFILE_INFO[] = {
-    //   name         fourcc      bits_per_mb   apple_target
-    { "proxy",    0x6170636Fu, 184  },  // apco   45 Mb/s @ 1080p/29.97
-    { "lt",       0x61706373u, 417  },  // apcs  102 Mb/s
-    { "standard", 0x6170636Eu, 601  },  // apcn  147 Mb/s
-    { "hq",       0x61706368u, 899  },  // apch  220 Mb/s
-    { "4444",     0x61703468u, 1350 },  // ap4h ~330 Mb/s (approximate)
+    //   name         fourcc      bits_per_mb  grain_amp   apple_target
+    { "proxy",    0x6170636Fu, 184,  40 },  // apco  45 Mb/s — heavy grain to drive bitrate
+    { "lt",       0x61706373u, 417,  30 },  // apcs 102 Mb/s
+    { "standard", 0x6170636Eu, 601,  15 },  // apcn 147 Mb/s — moderate; faster encoder
+    { "hq",       0x61706368u, 899,   8 },  // apch 220 Mb/s — clean ref; fine quant dominates
+    { "4444",     0x61703468u, 1350,  6 },  // ap4h ~330 Mb/s
 };
 static const int N_PROFILES = 5;
 
@@ -240,11 +244,12 @@ int main(int argc, char **argv)
     const int WIDTH      = 1920;
     const int HEIGHT     = 1080;
     const int FPS        = 25;
-    const int NUM_FRAMES = 5 * FPS;   // 5 seconds
-    // Film grain amplitude: ±40 luma units (~4.6% of 10-bit signal swing = ~1.5 IRE).
-    // Adds broadband AC energy so each profile encodes at speeds representative of
-    // real broadcast content rather than near-zero-bitrate flat bars.
-    const int GRAIN_AMP  = 40;
+    const int NUM_FRAMES = 3 * FPS;   // 3 seconds — enough for visual inspection
+    // Film grain amplitude varies by profile:
+    // Lower-quality profiles (proxy/lt) need more grain to drive toward Apple target
+    // bitrates; higher-quality profiles (standard/hq) encode clean bars faster and
+    // bits_per_mb alone provides the spec-appropriate quality floor.
+    const int GRAIN_AMP = prof->grain_amp;
 
     // ── Open the encoder ────────────────────────────────────────────────────
     const AVCodec *codec = avcodec_find_encoder_by_name("prores_ks");
@@ -337,7 +342,7 @@ int main(int argc, char **argv)
         tc.hours   = (uint8_t)((ts / 3600) % 24);
         muxer.write_timecode(tc);
 
-        if (f % FPS == 0)
+        if (f % FPS == 0 || f == NUM_FRAMES - 1)
             fprintf(stdout, "[gen_colorbars] Frame %d/%d (%02d:%02d:%02d:%02d)\n",
                     f, NUM_FRAMES, tc.hours, tc.minutes, tc.seconds, tc.frames);
     }
