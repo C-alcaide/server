@@ -206,11 +206,22 @@ static constexpr int PRORES_TARGET_MBPS[PRORES_PROFILE_COUNT] = {
 
 // ---------------------------------------------------------------------------
 // CUDA constant memory (uploaded at encoder init)
+//
+// Define PRORES_TABLES_DEFINE_CONSTANTS before including this header in the
+// ONE translation unit that should own the definitions (cuda_prores_entropy.cu).
+// All other TUs get extern declarations only.
 // ---------------------------------------------------------------------------
+#ifdef PRORES_TABLES_DEFINE_CONSTANTS
 __constant__ uint8_t c_quant_luma  [PRORES_PROFILE_COUNT][64];
 __constant__ uint8_t c_quant_chroma[PRORES_PROFILE_COUNT][64];
 __constant__ uint8_t c_scan_order            [64]; // progressive
 __constant__ uint8_t c_scan_order_interlaced [64]; // interlaced
+#else
+extern __constant__ uint8_t c_quant_luma  [PRORES_PROFILE_COUNT][64];
+extern __constant__ uint8_t c_quant_chroma[PRORES_PROFILE_COUNT][64];
+extern __constant__ uint8_t c_scan_order            [64];
+extern __constant__ uint8_t c_scan_order_interlaced [64];
+#endif
 
 // Call once per CUDA context (before any encode kernel launch).
 inline cudaError_t prores_tables_upload()

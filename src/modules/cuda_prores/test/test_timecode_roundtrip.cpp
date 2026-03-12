@@ -136,6 +136,9 @@ static std::string ffprobe_json(const std::string &path)
     while (fgets(buf, sizeof(buf), fp))
         result += buf;
     _pclose(fp);
+    // Return empty if we didn't get valid JSON (e.g. ffprobe not in PATH)
+    if (result.find('{') == std::string::npos)
+        return {};
     return result;
 }
 

@@ -41,10 +41,6 @@
 
 #include "cuda_prores_tables.cuh"
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 // ---------------------------------------------------------------------------
 // Color metadata for HDR/HLG/SDR
 // ---------------------------------------------------------------------------
@@ -64,25 +60,13 @@ struct ProResColorDesc {
 };
 
 // Standard SDR Rec.709 preset
-static const ProResColorDesc COLOR_DESC_SDR_709 = {
-    .color_primaries   = 1,
-    .transfer_function = 1,
-    .color_matrix      = 1,
-};
+static const ProResColorDesc COLOR_DESC_SDR_709 = { 1, 1, 1 };
 
 // HDR HLG BT.2020
-static const ProResColorDesc COLOR_DESC_HDR_HLG = {
-    .color_primaries   = 9,
-    .transfer_function = 14,
-    .color_matrix      = 9,
-};
+static const ProResColorDesc COLOR_DESC_HDR_HLG = { 9, 14, 9 };
 
 // HDR PQ (HDR10)
-static const ProResColorDesc COLOR_DESC_HDR_PQ = {
-    .color_primaries   = 9,
-    .transfer_function = 16,
-    .color_matrix      = 9,
-};
+static const ProResColorDesc COLOR_DESC_HDR_PQ  = { 9, 16, 9 };
 
 // ---------------------------------------------------------------------------
 // Frame encoder context (GPU-side resources)
@@ -116,6 +100,13 @@ struct ProResFrameCtx {
     int q_scale; // current adaptive quality scale [1..31]
 };
 
-#ifdef __cplusplus
-}
-#endif
+// ---------------------------------------------------------------------------
+// Main encode entry point — defined in cuda_prores_frame.cu
+// ---------------------------------------------------------------------------
+cudaError_t prores_encode_frame(
+    ProResFrameCtx        *ctx,
+    const uint32_t        *d_v210,
+    uint8_t               *h_out,
+    size_t                *out_size,
+    cudaStream_t           stream,
+    const ProResColorDesc *color);

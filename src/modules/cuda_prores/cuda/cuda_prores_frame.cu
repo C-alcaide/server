@@ -1,6 +1,8 @@
 ﻿// cuda_prores_frame.cu
-// Frame-level orchestration: V210 unpack â†’ DCT+quant â†’ entropy â†’ header build
+// Frame-level orchestration: V210 unpack → DCT+quant → entropy → header build
 // ---------------------------------------------------------------------------
+// This TU owns the __constant__ table definitions for the entire encoder.
+#define PRORES_TABLES_DEFINE_CONSTANTS
 #include "cuda_prores_frame.h"
 #include "cuda_prores_v210_unpack.cuh"
 #include "cuda_prores_dct_quant.cuh"
@@ -203,23 +205,23 @@ cudaError_t prores_encode_frame(
     // 2. DCT + quantise â€” luma
     err = launch_dct_quantise(
         ctx->d_y, ctx->d_coeffs_y,
-        c_quant_luma + ctx->profile * 64,
+        c_quant_luma[ctx->profile],
         ctx->width, ctx->height,
         ctx->q_scale, ctx->profile, false, stream);
     if (err != cudaSuccess) return err;
 
-    // 3. DCT + quantise â€” Cb
+    // 3. DCT + quantise — Cb
     err = launch_dct_quantise(
         ctx->d_cb, ctx->d_coeffs_cb,
-        c_quant_chroma + ctx->profile * 64,
+        c_quant_chroma[ctx->profile],
         ctx->width / 2, ctx->height,
         ctx->q_scale, ctx->profile, true, stream);
     if (err != cudaSuccess) return err;
 
-    // 4. DCT + quantise â€” Cr
+    // 4. DCT + quantise — Cr
     err = launch_dct_quantise(
         ctx->d_cr, ctx->d_coeffs_cr,
-        c_quant_chroma + ctx->profile * 64,
+        c_quant_chroma[ctx->profile],
         ctx->width / 2, ctx->height,
         ctx->q_scale, ctx->profile, true, stream);
     if (err != cudaSuccess) return err;
