@@ -19,6 +19,10 @@
 //   mxf.close();
 #pragma once
 
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable: 4244)  // FFmpeg uses int→narrower conversions internally
+#endif
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -28,6 +32,9 @@ extern "C" {
 #include <libavutil/timecode.h>
 #ifdef __cplusplus
 }
+#endif
+#ifdef _MSC_VER
+#pragma warning(pop)
 #endif
 
 #include "../storage/async_file_writer.h"

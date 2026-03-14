@@ -128,33 +128,46 @@ static void enc_ctx_create(ProResFrameCtx &ctx, int profile, int mbs_per_slice =
     ctx.height         = kHeight;
     ctx.profile        = profile;
     ctx.q_scale        = 8;
-    ctx.is_interlaced  = false; // encode 1080i50 as progressive 1080p25 (single picture per frame)
+    ctx.is_interlaced  = true;  // 1080i50: encode as proper interlaced ProRes (TFF)
+    ctx.field_height   = kHeight / 2;  // 540 — one field per picture header
 
-    int mb_cols = kWidth  / 16;
-    int mb_rows = kHeight / 16;
+    int mb_cols = kWidth / 16;
+    // ceil(field_height/16): each picture encodes one 540-line field.
+    // ceil(540/16) = 34 MB rows → 15 × 34 = 510 slices per field.
+    int mb_rows = (ctx.field_height + 15) / 16;
     ctx.mbs_per_slice    = mbs_per_slice;
     ctx.slices_per_row   = mb_cols / mbs_per_slice;
-    ctx.num_slices       = ctx.slices_per_row * mb_rows;
+    ctx.num_slices       = ctx.slices_per_row * mb_rows;  // 510 per field
     ctx.blocks_per_slice = 8 * mbs_per_slice;
 
-    int y_px = kWidth * kHeight;
-    int c_px = (kWidth / 2) * kHeight;
+    // Plane buffers sized for one field (field_height lines).
+    int y_px = kWidth * ctx.field_height;
+    int c_px = (kWidth / 2) * ctx.field_height;
     cuda_check(cudaMalloc(&ctx.d_y,  y_px * sizeof(int16_t)), "d_y");
     cuda_check(cudaMalloc(&ctx.d_cb, c_px * sizeof(int16_t)), "d_cb");
     cuda_check(cudaMalloc(&ctx.d_cr, c_px * sizeof(int16_t)), "d_cr");
-    cuda_check(cudaMalloc(&ctx.d_coeffs_y,  y_px * sizeof(int16_t)), "d_coeffs_y");
-    cuda_check(cudaMalloc(&ctx.d_coeffs_cb, c_px * sizeof(int16_t)), "d_coeffs_cb");
-    cuda_check(cudaMalloc(&ctx.d_coeffs_cr, c_px * sizeof(int16_t)), "d_coeffs_cr");
+
+    // DCT coefficient buffers: ceiling block rows to handle partial last row
+    // (540 % 8 = 4 extra lines → ceiling gives 68 rows instead of 67).
+    int y_dct_blocks = ((ctx.field_height + 7) / 8) * (kWidth / 8);      // 68*240=16320
+    int c_dct_blocks = ((ctx.field_height + 7) / 8) * (kWidth / 16);     // 68*120=8160
+    cuda_check(cudaMalloc(&ctx.d_coeffs_y,  (size_t)y_dct_blocks * 64 * sizeof(int16_t)), "d_coeffs_y");
+    cuda_check(cudaMalloc(&ctx.d_coeffs_cb, (size_t)c_dct_blocks * 64 * sizeof(int16_t)), "d_coeffs_cb");
+    cuda_check(cudaMalloc(&ctx.d_coeffs_cr, (size_t)c_dct_blocks * 64 * sizeof(int16_t)), "d_coeffs_cr");
 
     size_t se = (size_t)ctx.num_slices * ctx.blocks_per_slice * 64;
     cuda_check(cudaMalloc(&ctx.d_coeffs_slice, se * sizeof(int16_t)), "d_coeffs_slice");
+    // Zero-init so the padded bottom half of the last field MB row encodes as black.
+    cuda_check(cudaMemset(ctx.d_coeffs_slice, 0, se * sizeof(int16_t)), "d_coeffs_slice_zero");
     size_t bs = se * sizeof(int16_t) * 2 + (size_t)ctx.num_slices * 32;
-    cuda_check(cudaMalloc(&ctx.d_bitstream,     bs),                                          "d_bitstream");
+    cuda_check(cudaMalloc(&ctx.d_bitstream,     bs),                                               "d_bitstream");
     cuda_check(cudaMalloc(&ctx.d_slice_offsets, (size_t)(ctx.num_slices + 1) * sizeof(uint32_t)), "d_offsets");
     cuda_check(cudaMalloc(&ctx.d_slice_sizes,   (size_t) ctx.num_slices       * sizeof(uint32_t)), "d_sizes");
     cuda_check(cudaMalloc(&ctx.d_bit_counts,    (size_t) ctx.num_slices * 3   * sizeof(uint32_t)), "d_bits");
     ctx.cub_temp_bytes = 8 * 1024 * 1024;
     cuda_check(cudaMalloc(&ctx.d_cub_temp, ctx.cub_temp_bytes), "d_cub");
+    // Host output: sized for 2 × (8-byte pic hdr + 510×2-byte seek + field data)
+    // plus frame header overhead.  kWidth*kHeight*4 (~8 MB) is ample for HQ.
     ctx.h_frame_buf_size = (size_t)kWidth * kHeight * 4;
     cuda_check(cudaMallocHost(&ctx.h_frame_buf, ctx.h_frame_buf_size), "h_frame");
 }
@@ -508,6 +521,7 @@ int main(int argc, char *argv[])
         vi.width = kWidth; vi.height = kHeight;
         vi.timebase_num  = 1;  vi.timebase_den = 25;
         vi.prores_fourcc = kFourccs[args.profile];
+        vi.is_interlaced = true;
         vi.color.color_primaries = 1; vi.color.transfer_function = 1;
         vi.color.color_matrix    = 1; vi.color.has_hdr            = false;
         MovAudioTrackInfo ai{};  // no audio — muxer omits audio track

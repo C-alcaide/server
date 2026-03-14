@@ -85,8 +85,88 @@ __global__ void k_v210_unpack(
     d_cr[c_base + 2] = Cr2;
 }
 
-// Convenience launcher: handles grid/block sizing and precondition check.
-// Returns cudaErrorInvalidValue if width is not a multiple of 6.
+// ---------------------------------------------------------------------------
+// Field-aware V210 unpack for interlaced frames.
+//
+// Extracts one field from an interlaced V210 frame into a half-height planar
+// buffer.  V210 delivers both fields interleaved line-by-line:
+//   field 0 (top / even) : full_row = 0, 2, 4, ...  → field_row 0, 1, 2, ...
+//   field 1 (bottom / odd): full_row = 1, 3, 5, ...  → field_row 0, 1, 2, ...
+//
+// Output planes hold field_height = full_height / 2 rows.
+// ---------------------------------------------------------------------------
+__global__ void k_v210_unpack_field(
+    const uint32_t * __restrict__ d_v210,
+    int16_t        * __restrict__ d_y,
+    int16_t        * __restrict__ d_cb,
+    int16_t        * __restrict__ d_cr,
+    int width,
+    int full_height,
+    int field)   // 0 = top (even rows), 1 = bottom (odd rows)
+{
+    const int words_per_row  = ((width + 5) / 6) * 4;
+    const int groups_per_row = width / 6;
+    const int field_height   = full_height / 2;
+    const int total_groups   = groups_per_row * field_height;
+
+    int gid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid >= total_groups) return;
+
+    int field_row = gid / groups_per_row;   // 0 .. field_height-1
+    int col6      = gid % groups_per_row;
+
+    // Map field row to the full-frame row
+    int full_row = field + field_row * 2;
+
+    const uint32_t *src = d_v210 + full_row * words_per_row + col6 * 4;
+
+    uint32_t w0 = src[0], w1 = src[1], w2 = src[2], w3 = src[3];
+
+    int16_t Cb0 = (int16_t)( w0        & 0x3FFu);
+    int16_t Y0  = (int16_t)((w0 >> 10) & 0x3FFu);
+    int16_t Cr0 = (int16_t)((w0 >> 20) & 0x3FFu);
+
+    int16_t Y1  = (int16_t)( w1        & 0x3FFu);
+    int16_t Cb1 = (int16_t)((w1 >> 10) & 0x3FFu);
+    int16_t Y2  = (int16_t)((w1 >> 20) & 0x3FFu);
+
+    int16_t Cr1 = (int16_t)( w2        & 0x3FFu);
+    int16_t Y3  = (int16_t)((w2 >> 10) & 0x3FFu);
+    int16_t Cb2 = (int16_t)((w2 >> 20) & 0x3FFu);
+
+    int16_t Y4  = (int16_t)( w3        & 0x3FFu);
+    int16_t Cr2 = (int16_t)((w3 >> 10) & 0x3FFu);
+    int16_t Y5  = (int16_t)((w3 >> 20) & 0x3FFu);
+
+    int y_base = field_row * width       + col6 * 6;
+    int c_base = field_row * (width / 2) + col6 * 3;
+
+    d_y[y_base + 0] = Y0; d_y[y_base + 1] = Y1; d_y[y_base + 2] = Y2;
+    d_y[y_base + 3] = Y3; d_y[y_base + 4] = Y4; d_y[y_base + 5] = Y5;
+
+    d_cb[c_base + 0] = Cb0; d_cb[c_base + 1] = Cb1; d_cb[c_base + 2] = Cb2;
+    d_cr[c_base + 0] = Cr0; d_cr[c_base + 1] = Cr1; d_cr[c_base + 2] = Cr2;
+}
+
+inline cudaError_t launch_v210_unpack_field(
+    const uint32_t *d_v210,
+    int16_t *d_y, int16_t *d_cb, int16_t *d_cr,
+    int width, int full_height,
+    int field, cudaStream_t stream)
+{
+    // width need not be a multiple of 6 — the kernel only writes full 6-pixel
+    // groups; remaining edge pixels (e.g. 2 for 1280) stay pre-zeroed by caller.
+    const int field_height = full_height / 2;
+    const int total_groups = (width / 6) * field_height;
+    int threads = 128;
+    int blocks  = (total_groups + threads - 1) / threads;
+    k_v210_unpack_field<<<blocks, threads, 0, stream>>>(
+        d_v210, d_y, d_cb, d_cr, width, full_height, field);
+    return cudaGetLastError();
+}
+
+// Convenience launcher: handles grid/block sizing.
+// width need not be a multiple of 6 — edge pixels stay pre-zeroed by caller.
 inline cudaError_t launch_v210_unpack(
     const uint32_t *d_v210,
     int16_t        *d_y,
@@ -95,7 +175,6 @@ inline cudaError_t launch_v210_unpack(
     int width, int height,
     cudaStream_t stream)
 {
-    if (width % 6 != 0) return cudaErrorInvalidValue;
     int total_groups = (width / 6) * height;
     int threads = 128;
     int blocks  = (total_groups + threads - 1) / threads;

@@ -10,20 +10,19 @@
 //
 // Architecture
 // ─────────────────────────────────────────────────────────────────────────────
-//  Pre-allocated ring of N=4 pinned buffers sized for the largest expected frame
+//  Auto-growing pool of pinned buffers sized for the largest expected frame
 //  (4K V210: 3840 × 2160 × 8/3 ≈ 20 971 520 bytes, rounded to 4MB boundary).
-//  AllocateBuffer() pops a free buffer from the ring.
-//  ReleaseBuffer() returns it.  If the ring is empty, a temporary cudaMallocHost
-//  allocation is made (shouldn't happen in normal operation).
+//  AllocateBuffer() pops a free buffer; if the pool is empty it grows by
+//  allocating one more slot (cudaMallocHost once, reused forever).
+//  ReleaseBuffer() returns the buffer to the pool.
+//  All allocated buffers are freed in the destructor.
 #pragma once
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
-
-// DeckLink API forward declaration so this header doesn't need the full SDK.
-struct IDeckLinkMemoryAllocator;
+#include <comutil.h>    // pulls in COM/RPC headers that define 'interface' keyword
 
 #include <cuda_runtime.h>
 #include <mutex>
@@ -31,11 +30,11 @@ struct IDeckLinkMemoryAllocator;
 #include <cstdint>
 #include <cassert>
 
-// DeckLink SDK COM interface (include path resolved by CMake)
+// DeckLink SDK COM interface (path resolved via ../decklink include added by CMakeLists.txt)
 #if defined(_MSC_VER)
-#include "../interop/DeckLinkAPI.h"
+#include "interop/DeckLinkAPI.h"
 #else
-#include "../linux_interop/DeckLinkAPI.h"
+#include "linux_interop/DeckLinkAPI.h"
 #endif
 
 class CudaPinnedAllocator final : public IDeckLinkMemoryAllocator {

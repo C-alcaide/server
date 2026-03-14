@@ -20,11 +20,13 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include <comutil.h>    // pulls in COM/RPC headers that define 'interface' keyword
 
 #if defined(_MSC_VER)
-#include "../interop/DeckLinkAPI.h"
+// Resolved via the ../decklink include path added by CMakeLists.txt
+#include "interop/DeckLinkAPI.h"
 #else
-#include "../linux_interop/DeckLinkAPI.h"
+#include "linux_interop/DeckLinkAPI.h"
 #endif
 
 #include "cuda_pinned_allocator.h"
@@ -43,6 +45,10 @@ struct CaptureToken {
     size_t         byte_size;       // actual frame bytes (may vary with format)
     uint32_t       width;
     uint32_t       height;
+    bool           is_interlaced  = false; // detected from VideoInputFormatChanged
+    bool           is_tff         = true;  // true = upper field first
+    int            timebase_num   = 1000;  // frame duration  (e.g. 1000 for 25 fps)
+    int            timebase_den   = 25000; // frame timescale (e.g. 25000 for 25 fps)
     int64_t        frame_counter;   // absolute frame counter (0-based)
     SmpteTimecode  tc;              // SMPTE RP188 timecode from SDI embeds
     cudaStream_t   copy_stream;     // stream used for the HostToDevice memcpy
@@ -84,7 +90,8 @@ public:
     void stop();
 
     // Device VRAM ring (device pointers; allocated in constructor)
-    static constexpr int kVramRingSize = 4;
+    static constexpr int kVramRingSize   = 4;   // GPU VRAM ring slots
+    static constexpr int kPinnedPoolSize  = 32;  // pinned host buffer pool (must cover DeckLink's pre-allocation ring)
 
     // IUnknown (minimal — lifetime managed by owner)
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID, void **) override { return E_NOINTERFACE; }
@@ -122,6 +129,12 @@ private:
 
     // Pinned host allocator
     std::unique_ptr<CudaPinnedAllocator> allocator_;
+
+    // Detected input format (set by VideoInputFormatChanged before first frame)
+    bool    detected_interlaced_   = false;
+    bool    detected_tff_          = true;
+    int     detected_timebase_num_ = 1000;
+    int     detected_timebase_den_ = 25000;
 
     int64_t frame_counter_ = 0;
     bool    running_       = false;

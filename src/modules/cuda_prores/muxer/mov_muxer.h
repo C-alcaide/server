@@ -40,6 +40,8 @@ struct MovVideoTrackInfo {
     int      width, height;
     uint32_t timebase_num, timebase_den; // frame rate as fraction (e.g. 1/25)
     uint32_t prores_fourcc;              // 'apco' / 'apcl' / 'apcn' / 'apch' / 'ap4h'
+    bool     is_interlaced = false;      // true → write 'fiel' atom
+    bool     is_tff        = true;       // true=TFF (detail=9), false=BFF (detail=14)
     MovColorInfo color;
 };
 

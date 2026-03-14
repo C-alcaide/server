@@ -8,6 +8,7 @@
 #include "cuda_prores_dct_quant.cuh"
 #include "cuda_prores_entropy.cu"    // includes kernel definitions
 #include "cuda_bgra_to_yuva444p10.cuh"  // direct BGRA->4444P10 for ProRes 4444
+#include "cuda_bgra_to_field422p10.cuh" // BGRA->YUV422P10 field extraction
 
 #include <cub/device/device_scan.cuh>
 #include <cuda_runtime.h>
@@ -56,6 +57,7 @@ static int build_frame_header(
     bool                   is_4444,
     bool                   has_alpha,
     bool                   is_interlaced,
+    bool                   is_tff,         // true=TFF (frame_type=1), false=BFF (frame_type=2)
     const ProResColorDesc *color,
     const uint8_t         *quant_luma,
     const uint8_t         *quant_chroma)
@@ -67,9 +69,11 @@ static int build_frame_header(
     write_u16(p, (uint16_t)width);  p += 2;  // [8..9]
     write_u16(p, (uint16_t)height); p += 2;  // [10..11]
     // [12] frame_flags: bits[7:6] = chroma format (0b10=4:2:2, 0b00=4:4:4)
-    //                   bits[1:0] = frame type (0=progressive, 1=tff interlaced, 2=bff interlaced)
+    //                   bits[3:2] = frame type (0=progressive, 1=tff interlaced, 2=bff interlaced)
+    //                   bits[5:4] and bits[1:0] = reserved
+    // NOTE: FFmpeg proresdec reads frame_type as (buf[12] >> 2) & 3 — bits [3:2].
     uint8_t frame_flags = is_4444 ? 0x00u : 0x80u;
-    if (is_interlaced) frame_flags |= 0x01u;  // top-field-first for 1080i
+    if (is_interlaced) frame_flags |= is_tff ? 0x04u : 0x08u;  // TFF=1, BFF=2 at bits[3:2]
     write_u8(p++, frame_flags);
     write_u8(p++, 0);                    // [13] reserved
     write_u8(p++, color->color_primaries);   // [14]
@@ -195,6 +199,10 @@ __global__ void k_interleave_chroma(
 
 // ---------------------------------------------------------------------------
 // Encode one frame from raw V210 device buffer to pinned host frame buffer.
+//
+// Interlaced 1080i50:  encodes both fields in two GPU passes then assembles
+// a single icpf box with two picture headers (TFF, frame_type=1).
+// Progressive:         existing single-pass path (unchanged).
 // ---------------------------------------------------------------------------
 cudaError_t prores_encode_frame(
     ProResFrameCtx       *ctx,
@@ -205,6 +213,136 @@ cudaError_t prores_encode_frame(
     const ProResColorDesc *color)
 {
     cudaError_t err;
+
+    // ── Interlaced path ────────────────────────────────────────────────────
+    if (ctx->is_interlaced) {
+        const int fh  = ctx->field_height;  // 540 for 1080i
+        const int ns  = ctx->num_slices;    // 510 per field  (ceil(540/16)*15)
+        const int mbs = ctx->mbs_per_slice;
+        const int spr = ctx->slices_per_row;
+        const int T   = 256;
+        // ceiling block rows so the partial last DCT block row is processed
+        const int blk_rows_y = (fh + 7) / 8;           // 68
+        const int blk_rows_c = (fh + 7) / 8;           // same (chroma has same row count, half cols)
+        const int luma_blocks   = blk_rows_y * (ctx->width / 8);
+        const int chroma_blocks = blk_rows_c * (ctx->width / 16);
+
+        // Per-field host offset arrays (pinned, allocated once per call)
+        uint32_t *h_off[2] = {};
+        cudaMallocHost(&h_off[0], (ns + 1) * sizeof(uint32_t));
+        cudaMallocHost(&h_off[1], (ns + 1) * sizeof(uint32_t));
+
+        // Staging for field 0 bitstream (field 1 stays on GPU until final memcpy)
+        uint8_t  *h_f0_bits = nullptr;
+        uint32_t  f0_bytes  = 0;
+
+        for (int field = 0; field < 2; field++) {
+            // 1. Unpack this field's lines into the half-height planes
+            err = launch_v210_unpack_field(d_v210,
+                                           ctx->d_y, ctx->d_cb, ctx->d_cr,
+                                           ctx->width, ctx->height, field, stream);
+            if (err != cudaSuccess) { cudaFreeHost(h_off[0]); cudaFreeHost(h_off[1]); return err; }
+
+            // 2. DCT + quantise (is_interlaced=true → uses interlaced scan order)
+            err = launch_dct_quantise(ctx->d_y,  ctx->d_coeffs_y,  ctx->width,     fh,
+                                      ctx->q_scale, ctx->profile, false, true, stream);
+            if (err != cudaSuccess) { cudaFreeHost(h_off[0]); cudaFreeHost(h_off[1]); return err; }
+            err = launch_dct_quantise(ctx->d_cb, ctx->d_coeffs_cb, ctx->width / 2, fh,
+                                      ctx->q_scale, ctx->profile, true,  true, stream);
+            if (err != cudaSuccess) { cudaFreeHost(h_off[0]); cudaFreeHost(h_off[1]); return err; }
+            err = launch_dct_quantise(ctx->d_cr, ctx->d_coeffs_cr, ctx->width / 2, fh,
+                                      ctx->q_scale, ctx->profile, true,  true, stream);
+            if (err != cudaSuccess) { cudaFreeHost(h_off[0]); cudaFreeHost(h_off[1]); return err; }
+
+            // 3. Interleave into per-slice layout (covers all ceiling block rows)
+            k_interleave_luma<<<(luma_blocks + T - 1) / T, T, 0, stream>>>(
+                ctx->d_coeffs_y, ctx->d_coeffs_slice,
+                ctx->width / 8, blk_rows_y, mbs, spr);
+
+            int16_t *d_cb_base = ctx->d_coeffs_slice + (ptrdiff_t)4 * mbs * 64;
+            k_interleave_chroma<<<(chroma_blocks + T - 1) / T, T, 0, stream>>>(
+                ctx->d_coeffs_cb, d_cb_base,
+                ctx->width / 16, blk_rows_c, mbs, spr);
+
+            int16_t *d_cr_base = ctx->d_coeffs_slice + (ptrdiff_t)6 * mbs * 64;
+            k_interleave_chroma<<<(chroma_blocks + T - 1) / T, T, 0, stream>>>(
+                ctx->d_coeffs_cr, d_cr_base,
+                ctx->width / 16, blk_rows_c, mbs, spr);
+
+            // 4. Entropy encode this field
+            cuda_prores_enc_frame_raw(
+                ctx->d_coeffs_slice, ns, mbs, ctx->q_scale,
+                ctx->d_bitstream, ctx->d_slice_offsets, ctx->d_bit_counts,
+                ctx->d_slice_sizes, ctx->d_cub_temp, ctx->cub_temp_bytes, stream);
+
+            // 5. Sync, retrieve slice sizes
+            cudaMemcpyAsync(h_off[field], ctx->d_slice_offsets,
+                            (ns + 1) * sizeof(uint32_t),
+                            cudaMemcpyDeviceToHost, stream);
+            cudaStreamSynchronize(stream);
+
+            if (field == 0) {
+                // Copy field 0 bitstream out before field 1 overwrites d_bitstream
+                f0_bytes = h_off[0][ns];
+                cudaMallocHost(&h_f0_bits, f0_bytes + 1);  // +1 avoids zero-size alloc
+                cudaMemcpy(h_f0_bits, ctx->d_bitstream, f0_bytes, cudaMemcpyDeviceToHost);
+            }
+        }
+
+        const uint32_t f1_bytes = h_off[1][ns];
+
+        // ── Assemble icpf box with two pictures ──────────────────────────
+        uint8_t *p = h_out;
+        uint8_t *frame_size_ptr = p; p += 4;
+        p[0]='i'; p[1]='c'; p[2]='p'; p[3]='f'; p += 4;
+
+        const uint8_t *ql = PRORES_QUANT_LUMA[ctx->profile];
+        const uint8_t *qc = PRORES_QUANT_CHROMA[ctx->profile];
+        // frame_type (TFF=1 / BFF=2) is derived from ctx->is_tff
+        int fhdr_bytes = build_frame_header(p, ctx->width, ctx->height,
+                                             false, false, true, ctx->is_tff, color, ql, qc);
+        p += fhdr_bytes;
+
+        // --- Picture 0: top field (even rows) ---
+        uint8_t *pic0_ptr = p;
+        p += build_picture_header(p, ns, mbs);
+        for (int i = 0; i < ns; i++) {
+            write_u16(p, (uint16_t)(h_off[0][i + 1] - h_off[0][i]));
+            p += 2;
+        }
+        memcpy(p, h_f0_bits, f0_bytes);
+        p += f0_bytes;
+        write_u32(pic0_ptr + 1, (uint32_t)(p - pic0_ptr));
+
+        // --- Picture 1: bottom field (odd rows) ---
+        uint8_t *pic1_ptr = p;
+        p += build_picture_header(p, ns, mbs);
+        for (int i = 0; i < ns; i++) {
+            write_u16(p, (uint16_t)(h_off[1][i + 1] - h_off[1][i]));
+            p += 2;
+        }
+        cudaMemcpy(p, ctx->d_bitstream, f1_bytes, cudaMemcpyDeviceToHost);
+        p += f1_bytes;
+        write_u32(pic1_ptr + 1, (uint32_t)(p - pic1_ptr));
+
+        // Patch frame size
+        write_u32(frame_size_ptr, (uint32_t)(p - h_out));
+        *out_size = (size_t)(p - h_out);
+
+        cudaFreeHost(h_off[0]);
+        cudaFreeHost(h_off[1]);
+        cudaFreeHost(h_f0_bits);
+        return cudaSuccess;
+    }
+
+    // ── Progressive path ───────────────────────────────────────────────────
+
+    // Phase 0d: zero-init plane buffers before V210 unpack so that edge pixels
+    // (width % 6 != 0, e.g. 1280-wide: last 2 luma samples never written by
+    // the unpack kernel) produce clean zero rather than stale VRAM values.
+    cudaMemsetAsync(ctx->d_y,  0, (size_t)ctx->width       * ctx->height * sizeof(int16_t), stream);
+    cudaMemsetAsync(ctx->d_cb, 0, (size_t)(ctx->width / 2) * ctx->height * sizeof(int16_t), stream);
+    cudaMemsetAsync(ctx->d_cr, 0, (size_t)(ctx->width / 2) * ctx->height * sizeof(int16_t), stream);
 
     // 1. V210 unpack
     err = launch_v210_unpack(d_v210, ctx->d_y, ctx->d_cb, ctx->d_cr,
@@ -300,7 +438,7 @@ cudaError_t prores_encode_frame(
     // (c) Frame header (150 bytes with quant matrices)
     const uint8_t *ql = PRORES_QUANT_LUMA[ctx->profile];
     const uint8_t *qc = PRORES_QUANT_CHROMA[ctx->profile];
-    int fhdr_bytes = build_frame_header(p, ctx->width, ctx->height, false, false, ctx->is_interlaced, color, ql, qc);
+    int fhdr_bytes = build_frame_header(p, ctx->width, ctx->height, false, false, false, false, color, ql, qc);
     p += fhdr_bytes;
 
     // (d) Picture header (8 bytes)
@@ -465,7 +603,7 @@ cudaError_t prores_encode_frame_444(
     const uint8_t *ql = PRORES_QUANT_LUMA[ctx->profile];
     const uint8_t *qc = PRORES_QUANT_CHROMA[ctx->profile];
     int fhdr_bytes = build_frame_header(p, ctx->width, ctx->height,
-                                         true, ctx->has_alpha, false, color, ql, qc);
+                                         true, ctx->has_alpha, false, false, color, ql, qc);
     p += fhdr_bytes;
 
     uint8_t *pic_hdr_ptr = p;
@@ -492,4 +630,191 @@ cudaError_t prores_encode_frame_444(
 
     *out_size = (size_t)frame_bytes;
     return cudaSuccess;
+}
+
+// ---------------------------------------------------------------------------
+// prores_encode_from_yuv_fields_422
+//
+// Interlaced ProRes 422 encoder that accepts pre-extracted half-height YUV422P10
+// field planes directly, bypassing the V210 unpack step.  Used by the full-stack
+// consumer which receives yadif-processed BGRA frames, extracts the real field
+// rows via k_bgra8/64_to_field422p10, and calls this function with both fields.
+//
+// ctx must be allocated for field_height (not full height).
+// ctx->is_interlaced = true, ctx->field_height = half of ctx->height.
+// ctx->is_tff controls the ProRes frame_type bit (TFF=1, BFF=2).
+//
+// d_y0/cb0/cr0 = picture 0 (temporal first field):
+//   TFF → top field (even rows), BFF → bottom field (odd rows)
+// d_y1/cb1/cr1 = picture 1 (temporal second field).
+// ---------------------------------------------------------------------------
+cudaError_t prores_encode_from_yuv_fields_422(
+    ProResFrameCtx        *ctx,
+    const int16_t         *d_y0,
+    const int16_t         *d_cb0,
+    const int16_t         *d_cr0,
+    const int16_t         *d_y1,
+    const int16_t         *d_cb1,
+    const int16_t         *d_cr1,
+    uint8_t               *h_out,
+    size_t                *out_size,
+    cudaStream_t           stream,
+    const ProResColorDesc *color)
+{
+    cudaError_t err;
+    const int fh  = ctx->field_height;
+    const int ns  = ctx->num_slices;
+    const int mbs = ctx->mbs_per_slice;
+    const int spr = ctx->slices_per_row;
+    const int T   = 256;
+
+    // Ceiling block rows to handle partial last MB row (e.g. 540 % 8 = 4)
+    const int blk_rows_y    = (fh + 7) / 8;
+    const int blk_rows_c    = (fh + 7) / 8;
+    const int luma_blocks   = blk_rows_y * (ctx->width / 8);
+    const int chroma_blocks = blk_rows_c * (ctx->width / 16);
+
+    uint32_t *h_off[2] = {nullptr, nullptr};
+    cudaMallocHost(&h_off[0], (ns + 1) * sizeof(uint32_t));
+    cudaMallocHost(&h_off[1], (ns + 1) * sizeof(uint32_t));
+
+    uint8_t  *h_f0_bits = nullptr;
+    uint32_t  f0_bytes  = 0;
+
+    const int16_t *field_y[2]  = {d_y0,  d_y1};
+    const int16_t *field_cb[2] = {d_cb0, d_cb1};
+    const int16_t *field_cr[2] = {d_cr0, d_cr1};
+
+    for (int field = 0; field < 2; ++field) {
+        // DCT + quantise directly from pre-extracted field planes (no V210 unpack)
+        err = launch_dct_quantise(field_y[field],  ctx->d_coeffs_y,  ctx->width,     fh,
+                                  ctx->q_scale, ctx->profile, false, true, stream);
+        if (err != cudaSuccess) { cudaFreeHost(h_off[0]); cudaFreeHost(h_off[1]); return err; }
+        err = launch_dct_quantise(field_cb[field], ctx->d_coeffs_cb, ctx->width / 2, fh,
+                                  ctx->q_scale, ctx->profile, true,  true, stream);
+        if (err != cudaSuccess) { cudaFreeHost(h_off[0]); cudaFreeHost(h_off[1]); return err; }
+        err = launch_dct_quantise(field_cr[field], ctx->d_coeffs_cr, ctx->width / 2, fh,
+                                  ctx->q_scale, ctx->profile, true,  true, stream);
+        if (err != cudaSuccess) { cudaFreeHost(h_off[0]); cudaFreeHost(h_off[1]); return err; }
+
+        // Interleave block coefficients into per-slice layout
+        k_interleave_luma<<<(luma_blocks + T - 1) / T, T, 0, stream>>>(
+            ctx->d_coeffs_y, ctx->d_coeffs_slice,
+            ctx->width / 8, blk_rows_y, mbs, spr);
+
+        int16_t *d_cb_base = ctx->d_coeffs_slice + (ptrdiff_t)4 * mbs * 64;
+        k_interleave_chroma<<<(chroma_blocks + T - 1) / T, T, 0, stream>>>(
+            ctx->d_coeffs_cb, d_cb_base,
+            ctx->width / 16, blk_rows_c, mbs, spr);
+
+        int16_t *d_cr_base = ctx->d_coeffs_slice + (ptrdiff_t)6 * mbs * 64;
+        k_interleave_chroma<<<(chroma_blocks + T - 1) / T, T, 0, stream>>>(
+            ctx->d_coeffs_cr, d_cr_base,
+            ctx->width / 16, blk_rows_c, mbs, spr);
+
+        // Entropy encode
+        cuda_prores_enc_frame_raw(
+            ctx->d_coeffs_slice, ns, mbs, ctx->q_scale,
+            ctx->d_bitstream, ctx->d_slice_offsets, ctx->d_bit_counts,
+            ctx->d_slice_sizes, ctx->d_cub_temp, ctx->cub_temp_bytes, stream);
+
+        // Sync and retrieve per-slice offsets
+        cudaMemcpyAsync(h_off[field], ctx->d_slice_offsets,
+                        (ns + 1) * sizeof(uint32_t), cudaMemcpyDeviceToHost, stream);
+        cudaStreamSynchronize(stream);
+
+        if (field == 0) {
+            f0_bytes = h_off[0][ns];
+            cudaMallocHost(&h_f0_bits, f0_bytes + 1);
+            cudaMemcpy(h_f0_bits, ctx->d_bitstream, f0_bytes, cudaMemcpyDeviceToHost);
+        }
+    }
+
+    const uint32_t f1_bytes = h_off[1][ns];
+
+    // Assemble icpf box with two picture headers
+    uint8_t *p = h_out;
+    uint8_t *frame_size_ptr_f = p; p += 4;
+    p[0]='i'; p[1]='c'; p[2]='p'; p[3]='f'; p += 4;
+
+    const uint8_t *ql = PRORES_QUANT_LUMA[ctx->profile];
+    const uint8_t *qc = PRORES_QUANT_CHROMA[ctx->profile];
+    int fhdr_bytes = build_frame_header(p, ctx->width, ctx->height,
+                                        false, false, true, ctx->is_tff, color, ql, qc);
+    p += fhdr_bytes;
+
+    // Picture 0
+    uint8_t *pic0_ptr = p;
+    p += build_picture_header(p, ns, mbs);
+    for (int i = 0; i < ns; i++) {
+        write_u16(p, (uint16_t)(h_off[0][i + 1] - h_off[0][i]));
+        p += 2;
+    }
+    memcpy(p, h_f0_bits, f0_bytes);
+    p += f0_bytes;
+    write_u32(pic0_ptr + 1, (uint32_t)(p - pic0_ptr));
+
+    // Picture 1
+    uint8_t *pic1_ptr = p;
+    p += build_picture_header(p, ns, mbs);
+    for (int i = 0; i < ns; i++) {
+        write_u16(p, (uint16_t)(h_off[1][i + 1] - h_off[1][i]));
+        p += 2;
+    }
+    cudaMemcpy(p, ctx->d_bitstream, f1_bytes, cudaMemcpyDeviceToHost);
+    p += f1_bytes;
+    write_u32(pic1_ptr + 1, (uint32_t)(p - pic1_ptr));
+
+    write_u32(frame_size_ptr_f, (uint32_t)(p - h_out));
+    *out_size = (size_t)(p - h_out);
+
+    cudaFreeHost(h_f0_bits);
+    cudaFreeHost(h_off[0]);
+    cudaFreeHost(h_off[1]);
+    return cudaSuccess;
+}
+
+// ---------------------------------------------------------------------------
+// Exported BGRA/V210 launch helpers
+// These wrappers are the only TU that includes the kernel .cuh headers, so
+// consumers include only cuda_prores_frame.h and call these instead of the
+// static-inline launchers directly.  This avoids nvlink "multiple definition"
+// errors under separable compilation.
+// ---------------------------------------------------------------------------
+cudaError_t prores_launch_bgra_to_v210(
+    const uint8_t *d_bgra,
+    uint32_t      *d_v210,
+    int            width,
+    int            height,
+    cudaStream_t   stream)
+{
+    return launch_bgra_to_v210(d_bgra, d_v210, width, height, stream);
+}
+
+cudaError_t prores_launch_bgra8_to_field422p10(
+    const uint8_t *d_bgra,
+    int16_t       *d_y,
+    int16_t       *d_cb,
+    int16_t       *d_cr,
+    int            width,
+    int            full_height,
+    int            field_parity,
+    cudaStream_t   stream)
+{
+    return launch_bgra8_to_field422p10(d_bgra, d_y, d_cb, d_cr,
+                                       width, full_height, field_parity, stream);
+}
+
+cudaError_t prores_launch_v210_unpack_field(
+    const uint32_t *d_v210,
+    int16_t        *d_y,
+    int16_t        *d_cb,
+    int16_t        *d_cr,
+    int             width,
+    int             full_height,
+    int             field,
+    cudaStream_t    stream)
+{
+    return launch_v210_unpack_field(d_v210, d_y, d_cb, d_cr,
+                                    width, full_height, field, stream);
 }

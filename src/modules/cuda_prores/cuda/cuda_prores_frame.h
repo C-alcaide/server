@@ -99,8 +99,11 @@ struct ProResFrameCtx {
 
     int q_scale; // current adaptive quality scale [1..31]
 
-    // Interlaced capture (e.g. 1080i50): true = top-field-first interlaced
-    bool is_interlaced;
+    // Interlaced capture (e.g. 1080i50): true = top-field-first interlaced.
+    // When true, field_height = height/2 and num_slices is per-field.
+    bool is_interlaced = false;
+    bool is_tff        = true;   // only meaningful when is_interlaced=true; default TFF
+    int  field_height  = 0;      // = height for progressive; = height/2 for interlaced
 
     // 4444 / 4444 XQ fields (zero-initialised for 422 profiles)
     bool     is_4444;           // true for ProRes 4444 / 4444 XQ
@@ -122,6 +125,25 @@ cudaError_t prores_encode_frame(
     cudaStream_t           stream,
     const ProResColorDesc *color);
 
+// ProRes 422 interlaced from pre-extracted YUV422P10 field planes.
+// Used by the full-stack consumer which receives yadif-processed BGRA fields
+// and extracts real field rows via k_bgra8/64_to_field422p10 before calling here.
+// ctx must be allocated for field_height (not full height); ctx->is_interlaced
+// and ctx->is_tff must be set correctly by the caller.
+// d_y0/cb0/cr0 = picture 0 (temporally first field), d_y1/cb1/cr1 = picture 1.
+cudaError_t prores_encode_from_yuv_fields_422(
+    ProResFrameCtx        *ctx,
+    const int16_t         *d_y0,
+    const int16_t         *d_cb0,
+    const int16_t         *d_cr0,
+    const int16_t         *d_y1,
+    const int16_t         *d_cb1,
+    const int16_t         *d_cr1,
+    uint8_t               *h_out,
+    size_t                *out_size,
+    cudaStream_t           stream,
+    const ProResColorDesc *color);
+
 // ProRes 4444 / 4444 XQ:  input is BGRA8 (CasparCG mixer output)
 // ctx->is_4444 must be true; ctx->has_alpha controls alpha-plane encoding.
 cudaError_t prores_encode_frame_444(
@@ -131,3 +153,34 @@ cudaError_t prores_encode_frame_444(
     size_t                *out_size,
     cudaStream_t           stream,
     const ProResColorDesc *color);
+
+// ---------------------------------------------------------------------------
+// BGRA/V210 conversion helpers — exported from cuda_prores_frame.cu so that
+// consumer TUs do not need to include the kernel .cuh headers directly.
+// ---------------------------------------------------------------------------
+cudaError_t prores_launch_bgra_to_v210(
+    const uint8_t *d_bgra,
+    uint32_t      *d_v210,
+    int            width,
+    int            height,
+    cudaStream_t   stream);
+
+cudaError_t prores_launch_bgra8_to_field422p10(
+    const uint8_t *d_bgra,
+    int16_t       *d_y,
+    int16_t       *d_cb,
+    int16_t       *d_cr,
+    int            width,
+    int            full_height,
+    int            field_parity,
+    cudaStream_t   stream);
+
+cudaError_t prores_launch_v210_unpack_field(
+    const uint32_t *d_v210,
+    int16_t        *d_y,
+    int16_t        *d_cb,
+    int16_t        *d_cr,
+    int             width,
+    int             full_height,
+    int             field,
+    cudaStream_t    stream);

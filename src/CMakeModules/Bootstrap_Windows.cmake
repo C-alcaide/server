@@ -106,6 +106,7 @@ casparcg_add_runtime_dependency("${FFMPEG_BIN_PATH}/avdevice-61.dll")
 casparcg_add_runtime_dependency("${FFMPEG_BIN_PATH}/avfilter-10.dll")
 casparcg_add_runtime_dependency("${FFMPEG_BIN_PATH}/avformat-61.dll")
 casparcg_add_runtime_dependency("${FFMPEG_BIN_PATH}/avutil-59.dll")
+casparcg_add_runtime_dependency("${FFMPEG_BIN_PATH}/postproc-58.dll")
 casparcg_add_runtime_dependency("${FFMPEG_BIN_PATH}/swresample-5.dll")
 casparcg_add_runtime_dependency("${FFMPEG_BIN_PATH}/swscale-8.dll")
 # for scanner:
@@ -161,6 +162,12 @@ FetchContent_MakeAvailable(sfml)
 list(APPEND CMAKE_PREFIX_PATH ${sfml_SOURCE_DIR}/lib/cmake/SFML)
 # set(SFML_STATIC_LIBRARIES TRUE)
 find_package(SFML 2 COMPONENTS graphics system window REQUIRED)
+
+# Force RelWithDebInfo to use the optimized release DLLs instead of SFML's debug variants
+foreach(_sfml_target sfml-graphics sfml-system sfml-window)
+    set_target_properties(${_sfml_target} PROPERTIES
+        MAP_IMPORTED_CONFIG_RELWITHDEBINFO Release)
+endforeach()
 
 casparcg_add_runtime_dependency_from_target(sfml-graphics)
 casparcg_add_runtime_dependency_from_target(sfml-system)

@@ -203,7 +203,12 @@ inline cudaError_t launch_dct_quantise(
     cudaStream_t stream)
 {
     dim3 threads(64);
-    dim3 blocks(plane_width / 8, plane_height / 8);
+    // Use ceiling division for block rows so that a partial last block row
+    // (e.g. field_height=540: 540/8=67 full rows but the 68th covers lines
+    // 536-543 with lines 540-543 zero-padded by the kernel's bounds check)
+    // is correctly processed.  For heights divisible by 8 (e.g. 1080, 720)
+    // this produces the same result as floor division.
+    dim3 blocks(plane_width / 8, (plane_height + 7) / 8);
     k_dct_quantise<<<blocks, threads, 0, stream>>>(
         d_plane, d_out_coeffs,
         plane_width, plane_height, q_scale, profile, is_chroma, is_interlaced);

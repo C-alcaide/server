@@ -18,10 +18,23 @@ set(CMAKE_CUDA_SEPARABLE_COMPILATION ON)
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -allow-unsupported-compiler -Wno-deprecated-gpu-targets")
 
 # ─── Source lists ────────────────────────────────────────────────────────────
-set(CUDA_SOURCES
-    cuda/cuda_prores_entropy.cu
+# Pure CUDA kernel TUs — no CasparCG core/common dependency.
+# Used by standalone test targets as well as the main module.
+set(CUDA_KERNEL_SOURCES
+    # cuda_prores_entropy.cu is #included by cuda_prores_frame.cu — do NOT list
+    # it as a separate compilation unit (would cause nvlink multiple-definition errors
+    # with separable compilation since the same device functions would be in two objects).
     cuda/cuda_prores_frame.cu
 )
+
+# CasparCG consumer TUs — depend on core/common (Boost, monitor, etc.).
+# Must NOT be included in standalone test targets.
+set(CUDA_CONSUMER_SOURCES
+    consumer/prores_consumer.cu
+    consumer/prores_bypass_consumer.cu
+)
+
+set(CUDA_SOURCES ${CUDA_KERNEL_SOURCES} ${CUDA_CONSUMER_SOURCES})
 
 set(CPU_SOURCES
     # Muxer
@@ -34,9 +47,6 @@ set(CPU_SOURCES
     # Input (DeckLink capture + allocator)
     input/cuda_pinned_allocator.cpp
     input/decklink_capture.cpp
-
-    # Consumer (CasparCG integration)
-    consumer/prores_consumer.cpp
 
     # Module entry point
     cuda_prores.cpp
@@ -62,12 +72,14 @@ set(HEADER_SOURCES
 
     # Consumer
     consumer/prores_consumer.h
+    consumer/prores_bypass_consumer.h
 
     # Timecode
     timecode.h
 
     # BGRA->V210 CUDA kernel
     cuda/cuda_bgra_to_v210.cuh
+    cuda/cuda_bgra_to_field422p10.cuh
 )
 
 set(ALL_SOURCES ${CUDA_SOURCES} ${CPU_SOURCES} ${HEADER_SOURCES})
@@ -117,9 +129,9 @@ endif()
 # ─── Standalone test target ──────────────────────────────────────────────────
 # Built separately; does NOT depend on CasparCG core/common.
 if (MSVC)
-    add_executable(test_prores_encode
+    add_executable(test_prores_encode EXCLUDE_FROM_ALL
         test/test_prores_encode.cpp
-        ${CUDA_SOURCES}
+        ${CUDA_KERNEL_SOURCES}
         muxer/mov_muxer.cpp
         storage/async_file_writer.cpp
     )
@@ -142,9 +154,9 @@ if (MSVC)
 
     # ── test_bgra_convert ─────────────────────────────────────────────────────
     # Validates the BGRA→V210 CUDA kernel with solid-colour golden values.
-    add_executable(test_bgra_convert
+    add_executable(test_bgra_convert EXCLUDE_FROM_ALL
         test/test_bgra_convert.cpp
-        ${CUDA_SOURCES}
+        ${CUDA_KERNEL_SOURCES}
     )
     target_include_directories(test_bgra_convert PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
@@ -160,7 +172,7 @@ if (MSVC)
 
     # ── test_timecode_roundtrip ───────────────────────────────────────────────
     # CPU-only: writes a MOV with tmcd track and verifies with ffprobe.
-    add_executable(test_timecode_roundtrip
+    add_executable(test_timecode_roundtrip EXCLUDE_FROM_ALL
         test/test_timecode_roundtrip.cpp
         muxer/mov_muxer.cpp
         storage/async_file_writer.cpp
@@ -178,7 +190,7 @@ if (MSVC)
 
     # ── test_rice_entropy ─────────────────────────────────────────────────────
     # CPU-only: validates Rice coding algorithm and FIRST_DC_CB parameters.
-    add_executable(test_rice_entropy
+    add_executable(test_rice_entropy EXCLUDE_FROM_ALL
         test/test_rice_entropy.cpp
     )
     target_include_directories(test_rice_entropy PRIVATE
@@ -191,9 +203,9 @@ if (MSVC)
 
     # ── test_perf_benchmark ───────────────────────────────────────────────────
     # GPU throughput benchmark: encodes N frames per profile and reports fps/Mbps.
-    add_executable(test_perf_benchmark
+    add_executable(test_perf_benchmark EXCLUDE_FROM_ALL
         test/test_perf_benchmark.cpp
-        ${CUDA_SOURCES}
+        ${CUDA_KERNEL_SOURCES}
     )
     target_include_directories(test_perf_benchmark PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}

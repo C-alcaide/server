@@ -39,8 +39,6 @@
 
 #include "../cuda/cuda_prores_frame.h"
 #include "../cuda/cuda_prores_tables.cuh"
-#include "../cuda/cuda_bgra_to_v210.cuh"
-#include "../cuda/cuda_bgra_to_field422p10.cuh"
 #include "../muxer/mov_muxer.h"
 #include "../muxer/mxf_muxer.h"
 #include "../timecode.h"
@@ -50,6 +48,7 @@
 #include <condition_variable>
 #include <cstring>
 #include <ctime>
+#include <filesystem>
 #include <future>
 #include <iomanip>
 #include <memory>
@@ -249,16 +248,6 @@ public:
                     int /*port_index*/) override
     {
         format_desc_ = format_desc;
-
-        // ProRes requires width divisible by 16 (macroblock boundary).
-        // V210 with widths that are not multiples of 6 (e.g. 1280 for 720p) are handled
-        // correctly — the frame planes are pre-zeroed before unpack so edge pixels are clean.
-        if (format_desc_.width % 16 != 0)
-            throw std::runtime_error(
-                "[cuda_prores] Incompatible channel format: width "
-                + std::to_string(format_desc_.width)
-                + " is not a multiple of 16. ProRes requires macroblock-aligned width.");
-
         prores_tables_upload();
 
         // Detect interlaced and field dominance from the channel format
@@ -361,12 +350,18 @@ public:
                 : cfg_.filename_pattern;
         const std::wstring full_path = cfg_.output_path + L"\\" + filename;
 
+        // Ensure output directory exists
+        std::error_code ec;
+        std::filesystem::create_directories(cfg_.output_path, ec);
+        if (ec)
+            CASPAR_LOG(warning) << L"[cuda_prores] Could not create directory: " << cfg_.output_path << L" (" << ec.message().c_str() << L")";
+
         // Open the muxer
         if (cfg_.use_mxf) {
             MxfVideoTrackInfo vi{};
             vi.width  = format_desc_.width;
             vi.height = format_desc_.height;
-            vi.frame_rate = { format_desc_.fps_den, format_desc_.fps_num };
+            vi.frame_rate = { format_desc_.duration, format_desc_.time_scale };
             vi.prores_fourcc = fourcc;
             vi.color = (cfg_.hdr_mode == 1) ? MXF_COLOR_HDR_HLG
                      : (cfg_.hdr_mode == 2) ? MXF_COLOR_HDR_PQ
@@ -385,8 +380,8 @@ public:
             MovVideoTrackInfo vi{};
             vi.width  = format_desc_.width;
             vi.height = format_desc_.height;
-            vi.timebase_num = (uint32_t)format_desc_.fps_den; // duration per frame
-            vi.timebase_den = (uint32_t)format_desc_.fps_num; // timescale
+            vi.timebase_num = (uint32_t)format_desc_.duration;   // duration per frame
+            vi.timebase_den = (uint32_t)format_desc_.time_scale; // timescale
             vi.prores_fourcc = fourcc;
             vi.is_interlaced = is_interlaced_;
             vi.is_tff        = is_tff_;
@@ -607,7 +602,7 @@ private:
             const int parity_b = is_tff_ ? 1 : 0;
 
             // Extract field A → d_field_a_y/cb/cr (picture 0 = temporal first)
-            err = launch_bgra8_to_field422p10(d_bgra_a_, d_field_a_y_, d_field_a_cb_, d_field_a_cr_,
+            err = prores_launch_bgra8_to_field422p10(d_bgra_a_, d_field_a_y_, d_field_a_cb_, d_field_a_cr_,
                                               fmt.width, fmt.height, parity_a, encode_stream_);
             if (err != cudaSuccess) {
                 CASPAR_LOG(error) << L"[cuda_prores] BGRA→field_a failed: " << cudaGetErrorString(err);
@@ -615,7 +610,7 @@ private:
             }
 
             // Extract field B → ctx.d_y/cb/cr (picture 1 = temporal second)
-            err = launch_bgra8_to_field422p10(d_bgra_, frame_ctx_.d_y, frame_ctx_.d_cb, frame_ctx_.d_cr,
+            err = prores_launch_bgra8_to_field422p10(d_bgra_, frame_ctx_.d_y, frame_ctx_.d_cb, frame_ctx_.d_cr,
                                               fmt.width, fmt.height, parity_b, encode_stream_);
             if (err != cudaSuccess) {
                 CASPAR_LOG(error) << L"[cuda_prores] BGRA→field_b failed: " << cudaGetErrorString(err);
@@ -651,7 +646,7 @@ private:
                 CASPAR_LOG(error) << L"[cuda_prores] cudaMemcpyAsync(bgra) failed: " << cudaGetErrorString(err);
                 return false;
             }
-            err = launch_bgra_to_v210(d_bgra_, d_v210_, fmt.width, fmt.height, encode_stream_);
+            err = prores_launch_bgra_to_v210(d_bgra_, d_v210_, fmt.width, fmt.height, encode_stream_);
             if (err != cudaSuccess) {
                 CASPAR_LOG(error) << L"[cuda_prores] launch_bgra_to_v210 failed: " << cudaGetErrorString(err);
                 return false;
@@ -691,8 +686,8 @@ private:
         // 6. Update diagnostics state
         {
             std::lock_guard<std::mutex> lock(state_mutex_);
-            state_[L"frame"]   = job.frame_number;
-            state_[L"profile"] = cfg_.profile;
+            state_[std::string("frame")]   = job.frame_number;
+            state_[std::string("profile")] = cfg_.profile;
         }
 
         return true;
@@ -801,21 +796,6 @@ static prores_config parse_params(const std::vector<std::wstring>& params)
 {
     prores_config cfg;
     cfg.output_path = caspar::get_param(L"PATH", params, L".");
-    // Strip control characters: AMCP processes C escape sequences in parameter
-    // strings, so Windows paths with backslashes arrive mangled
-    // (e.g. D:\recordings → D:<CR>ecordings).  Use forward slashes instead: D:/recordings
-    {
-        std::wstring clean;
-        clean.reserve(cfg.output_path.size());
-        bool had_ctrl = false;
-        for (wchar_t c : cfg.output_path) { if (c < L' ') had_ctrl = true; else clean += c; }
-        if (had_ctrl) {
-            CASPAR_LOG(warning) << L"[cuda_prores] PATH contained control characters — "
-                                   L"AMCP processes \\r, \\n etc. as C escape sequences. "
-                                   L"Use forward slashes in paths: D:/recordings";
-            cfg.output_path = std::move(clean);
-        }
-    }
     cfg.profile     = caspar::get_param(L"PROFILE", params, 3);
     auto codec      = caspar::get_param(L"CODEC", params, std::wstring(L"MOV"));
     cfg.use_mxf     = boost::iequals(codec, L"MXF");

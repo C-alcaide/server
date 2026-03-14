@@ -65,7 +65,6 @@ bool MovMuxer::write_aligned(const uint8_t *data, size_t size) {
     ov.Offset     = (DWORD)( write_pos_        & 0xFFFFFFFF);
     ov.OffsetHigh = (DWORD)((write_pos_ >> 32) & 0xFFFFFFFF);
 
-    DWORD written = 0;
     BOOL  ok = WriteFile(file_, write_buf_.data(), (DWORD)aligned, nullptr, &ov);
     if (!ok && GetLastError() != ERROR_IO_PENDING) return false;
 
@@ -164,11 +163,6 @@ bool MovMuxer::write_timecode(const SmpteTimecode &tc) {
         tc_drop_frame_ = tc.drop_frame;
 
     // Write the 4-byte big-endian frame count into mdat.
-    uint32_t be_fc = ((frame_count >> 24) & 0xFF) |
-                     (((frame_count >> 16) & 0xFF) << 8) |
-                     (((frame_count >>  8) & 0xFF) << 16) |
-                     ((frame_count & 0xFF) << 24);
-    // Store correctly as big-endian bytes
     uint8_t tc_bytes[4] = {
         (uint8_t)((frame_count >> 24) & 0xFF),
         (uint8_t)((frame_count >> 16) & 0xFF),
@@ -192,7 +186,7 @@ void MovMuxer::write_video_trak(std::vector<uint8_t> &buf) {
         put_u32(buf, 0); put_u32(buf, 0); // creation / modification time
         put_u32(buf, 1); // track ID = 1
         put_u32(buf, 0); // reserved
-        uint64_t total_duration = video_samples_.size(); // in movie timescale (= fps den)
+        uint64_t total_duration = (uint64_t)video_samples_.size() * video_.timebase_num; // ticks in movie timescale
         put_u32(buf, (uint32_t)total_duration);
         put_u32(buf, 0); put_u32(buf, 0); // reserved
         put_u16(buf, 0); put_u16(buf, 0); // layer, alt-group
@@ -213,7 +207,7 @@ void MovMuxer::write_video_trak(std::vector<uint8_t> &buf) {
             put_u32(buf, 0); // version=0
             put_u32(buf, 0); put_u32(buf, 0); // creation, modification
             put_u32(buf, video_.timebase_den); // timescale = fps numerator
-            put_u32(buf, (uint32_t)video_samples_.size()); // duration = frame count
+            put_u32(buf, (uint32_t)((uint64_t)video_samples_.size() * video_.timebase_num)); // duration in timescale ticks
             put_u16(buf, 0x55C4); // language = 'und'
             put_u16(buf, 0);      // pre-defined
             end_atom(buf, s);
@@ -309,6 +303,15 @@ void MovMuxer::write_video_trak(std::vector<uint8_t> &buf) {
                         end_atom(buf, cs);
                     }
 
+                    // fiel atom — signals interlaced content to QuickTime / FFmpeg
+                    // fields=2 (interlaced), detail=9 (TFF) or detail=14 (BFF)
+                    if (video_.is_interlaced) {
+                        size_t cs = buf.size(); begin_atom(buf, "fiel");
+                        buf.push_back(2);   // 2 = interlaced
+                        buf.push_back(video_.is_tff ? 9 : 14);
+                        end_atom(buf, cs);
+                    }
+
                     // HDR metadata atoms
                     if (video_.color.has_hdr) {
                         // mdcv
@@ -393,7 +396,8 @@ void MovMuxer::write_audio_trak(std::vector<uint8_t> &buf) {
         put_u32(buf, 0);
         uint64_t dur = 0;
         for (auto &e : audio_samples_) dur += e.duration;
-        put_u32(buf, (uint32_t)dur);
+        // tkhd duration must be in movie timescale (not audio sample rate)
+        put_u32(buf, (uint32_t)(dur * video_.timebase_den / audio_.sample_rate));
         put_u32(buf, 0); put_u32(buf, 0);
         put_u16(buf, 0); put_u16(buf, 0);
         put_u16(buf, 0x0100); put_u16(buf, 0); // volume = 1.0
@@ -522,7 +526,7 @@ void MovMuxer::write_tmcd_trak(std::vector<uint8_t> &buf) {
         put_u32(buf, 0); put_u32(buf, 0); // creation / modification time
         put_u32(buf, 3); // track ID = 3
         put_u32(buf, 0); // reserved
-        put_u32(buf, (uint32_t)tc_samples_.size()); // duration in movie timescale
+        put_u32(buf, (uint32_t)((uint64_t)tc_samples_.size() * video_.timebase_num)); // movie timescale ticks
         put_u32(buf, 0); put_u32(buf, 0); // reserved
         put_u16(buf, 0); put_u16(buf, 0); // layer, alt-group
         put_u16(buf, 0); put_u16(buf, 0); // volume (0 for timecode), reserved
@@ -689,8 +693,8 @@ bool MovMuxer::close() {
     // mvhd
     {   size_t s = moov.size(); begin_atom(moov, "mvhd");
         put_u32(moov, 0); put_u32(moov, 0); put_u32(moov, 0);
-        put_u32(moov, video_.timebase_den); // timescale = fps den * num ... use fps_num
-        put_u32(moov, (uint32_t)video_samples_.size()); // duration in timescale units
+        put_u32(moov, video_.timebase_den); // timescale
+        put_u32(moov, (uint32_t)((uint64_t)video_samples_.size() * video_.timebase_num)); // total ticks
         put_u32(moov, 0x00010000); // preferred rate
         put_u16(moov, 0x0100);     // preferred volume
         for (int i = 0; i < 10; i++) moov.push_back(0); // reserved

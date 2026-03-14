@@ -48,12 +48,13 @@ HRESULT CudaPinnedAllocator::AllocateBuffer(uint32_t bufferSize, void **allocate
         return S_OK;
     }
 
-    // Pool exhausted — allocate a temporary buffer.  Should not happen in
-    // normal operation (signals encode is falling behind capture).
-    fprintf(stderr, "[CudaPinnedAllocator] Pool exhausted — allocating temporary buffer\n");
+    // Pool empty — DeckLink requested more buffers than the initial pool size
+    // (common during signal lock when it pre-allocates its internal ring).
+    // Grow the pool by one slot; track it in all_ so it is freed at destruction.
     void *ptr = nullptr;
-    cudaError_t e = cudaMallocHost(&ptr, bufferSize);
+    cudaError_t e = cudaMallocHost(&ptr, max_frame_bytes_);
     if (e != cudaSuccess) return E_OUTOFMEMORY;
+    all_.push_back(ptr);
     *allocatedBuffer = ptr;
     return S_OK;
 }

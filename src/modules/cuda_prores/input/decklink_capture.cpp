@@ -97,7 +97,7 @@ DecklinkCapture::DecklinkCapture(int            device_index,
     // --- Pinned allocator --------------------------------------------------
     //  4K V210 frame size: row bytes = ceil(width/6)*16*4/3, worst case ~22 MB
     constexpr size_t kMaxFrameBytes = 22 * 1024 * 1024;
-    allocator_ = std::make_unique<CudaPinnedAllocator>(kMaxFrameBytes, kVramRingSize + 2);
+    allocator_ = std::make_unique<CudaPinnedAllocator>(kMaxFrameBytes, kPinnedPoolSize);
 
     // Register before EnableVideoInput so the first Allocate arrives in time
     if (FAILED(input_->SetVideoInputFrameMemoryAllocator(allocator_.get()))) {
@@ -149,7 +149,7 @@ bool DecklinkCapture::start()
     BMDVideoInputFlags flags = bmdVideoInputFlagDefault;
     if (group_id_ > 0 && config_) {
         HRESULT hr = config_->SetInt(bmdDeckLinkConfigCapturePassThroughMode,
-                                     bmdDeckLinkCapturePassThroughModeDirect);
+                                     bmdDeckLinkCapturePassthroughModeDirect);
         (void)hr; // best-effort
         // Enable synchronised capture group
         hr = config_->SetInt(bmdDeckLinkConfigSDIOutputLinkConfiguration, group_id_);
@@ -158,7 +158,10 @@ bool DecklinkCapture::start()
         fprintf(stdout, "[DecklinkCapture] Sync capture group %d enabled\n", group_id_);
     }
 
-    // Enable V210 10-bit video input
+    // Enable V210 10-bit video input with auto format detection.
+    // The hardware will call VideoInputFormatChanged() with the true display mode
+    // before delivering any frames, overriding whatever display_mode_ was passed in.
+    flags = static_cast<BMDVideoInputFlags>(flags | bmdVideoInputEnableFormatDetection);
     if (FAILED(input_->EnableVideoInput(display_mode_, bmdFormat10BitYUV, flags))) {
         fprintf(stderr, "[DecklinkCapture] EnableVideoInput failed\n");
         return false;
@@ -206,9 +209,32 @@ HRESULT DecklinkCapture::VideoInputFormatChanged(
 {
     if (!newMode) return S_OK;
     display_mode_ = newMode->GetDisplayMode();
-    fprintf(stdout, "[DecklinkCapture] Input format changed → %d x %d\n",
+
+    // Decode field dominance
+    const BMDFieldDominance dom = newMode->GetFieldDominance();
+    detected_interlaced_ = (dom == bmdUpperFieldFirst || dom == bmdLowerFieldFirst);
+    detected_tff_        = (dom != bmdLowerFieldFirst); // BFF -> false, all others -> true
+
+    // Decode frame rate
+    BMDTimeValue frameDuration = 1000;
+    BMDTimeScale timeScale     = 25000;
+    (void)newMode->GetFrameRate(&frameDuration, &timeScale);
+    detected_timebase_num_ = static_cast<int>(frameDuration);
+    detected_timebase_den_ = static_cast<int>(timeScale);
+
+    fprintf(stdout, "[DecklinkCapture] Input format detected -> %d x %d @ %.3g fps %s\n",
             static_cast<int>(newMode->GetWidth()),
-            static_cast<int>(newMode->GetHeight()));
+            static_cast<int>(newMode->GetHeight()),
+            static_cast<double>(timeScale) / static_cast<double>(frameDuration),
+            detected_interlaced_ ? (detected_tff_ ? "interlaced TFF" : "interlaced BFF") : "progressive");
+
+    // Restart streams so subsequent frames arrive in the newly-detected format
+    if (running_) {
+        input_->StopStreams();
+        input_->EnableVideoInput(display_mode_, bmdFormat10BitYUV,
+                                 bmdVideoInputEnableFormatDetection);
+        input_->StartStreams();
+    }
     return S_OK;
 }
 
@@ -224,6 +250,13 @@ HRESULT DecklinkCapture::VideoInputFrameArrived(
     // ---- Video ----
     CaptureToken token = {};
     if (video) {
+        // Drop frames delivered before DeckLink has locked onto the SDI signal.
+        // These arrive as black/garbage frames and must not be recorded.
+        const BMDFrameFlags frame_flags = video->GetFlags();
+        if (frame_flags & bmdFrameHasNoInputSource) {
+            return S_OK; // signal not yet locked — skip silently
+        }
+
         const uint32_t w    = static_cast<uint32_t>(video->GetWidth());
         const uint32_t h    = static_cast<uint32_t>(video->GetHeight());
         const size_t   size = static_cast<size_t>(video->GetRowBytes()) * h;
@@ -239,8 +272,12 @@ HRESULT DecklinkCapture::VideoInputFrameArrived(
             const int slot = vram_ring_head_ % kVramRingSize;
             ++vram_ring_head_;
 
-            // Async DMA: pinned host → device VRAM
-            // The consumer MUST call cudaStreamSynchronize(token.copy_stream) before reading d_vram.
+            // DMA: pinned host → device VRAM.
+            // We synchronize here on the DeckLink callback thread (~0.5 ms for
+            // 1080i at PCIe 3.0 x16) so that the pinned buffer is released back
+            // to DeckLink's ring immediately after the callback returns.
+            // This avoids pool exhaustion: without AddRef, DeckLink can freely
+            // reuse its pre-allocated ring slots without requesting more buffers.
             cudaError_t ce = cudaMemcpyAsync(d_vram_[slot], host_ptr, size,
                                              cudaMemcpyHostToDevice, copy_stream_);
             if (ce != cudaSuccess) {
@@ -248,11 +285,7 @@ HRESULT DecklinkCapture::VideoInputFrameArrived(
                         cudaGetErrorString(ce));
                 return S_OK; // drop frame
             }
-
-            // Keep the DeckLink frame alive until the async copy is consumed.
-            // The DeckLink allocator's pinned buffer is live as long as the frame
-            // is AddRef'd.  The consumer calls release_fn() after GPU work.
-            video->AddRef();
+            cudaStreamSynchronize(copy_stream_); // wait for copy to land before releasing host buffer
 
             token.d_vram        = d_vram_[slot];
             token.byte_size     = size;
@@ -260,7 +293,11 @@ HRESULT DecklinkCapture::VideoInputFrameArrived(
             token.height        = h;
             token.frame_counter = frame_counter_++;
             token.copy_stream   = copy_stream_;
-            token.release_fn    = [video]() { video->Release(); };
+            token.is_interlaced = detected_interlaced_;
+            token.is_tff        = detected_tff_;
+            token.timebase_num  = detected_timebase_num_;
+            token.timebase_den  = detected_timebase_den_;
+            // release_fn is empty: host buffer already freed at callback return
 
             // Extract SMPTE RP188 timecode from embedded SDI ancillary data.
             // Try RP188-Any first (covers both VITC and LTC); fall back to VITC.

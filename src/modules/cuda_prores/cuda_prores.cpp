@@ -4,6 +4,7 @@
 #include "cuda_prores.h"
 
 #include "consumer/prores_consumer.h"
+#include "consumer/prores_bypass_consumer.h"
 
 #include <common/log.h>
 
@@ -39,6 +40,12 @@ void init(const core::module_dependencies& dependencies)
     // Register XML preconfigured consumer (<cuda-prores> element in casparcg.config)
     dependencies.consumer_registry->register_preconfigured_consumer_factory(
         L"cuda-prores", create_preconfigured_consumer);
+
+    // Register bypass consumer (ADD 1 CUDA_PRORES_BYPASS DEVICE 1 PATH ...)
+    dependencies.consumer_registry->register_consumer_factory(
+        L"CUDA_PRORES_BYPASS Consumer", create_bypass_consumer);
+    dependencies.consumer_registry->register_preconfigured_consumer_factory(
+        L"cuda-prores-bypass", create_preconfigured_bypass_consumer);
 
     CASPAR_LOG(info) << L"[cuda_prores] Module initialised";
 }

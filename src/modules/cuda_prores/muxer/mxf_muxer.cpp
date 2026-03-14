@@ -2,6 +2,7 @@
 // MXF container muxer for ProRes + PCM32 audio via libavformat + AsyncFileWriter.
 #include "mxf_muxer.h"
 
+#include <cerrno>
 #include <cstring>
 #include <cstdio>
 #include <stdexcept>
@@ -13,7 +14,7 @@ int MxfMuxer::avio_write_packet(void *opaque, const uint8_t *buf, int buf_size)
 {
     auto *self = static_cast<MxfMuxer*>(opaque);
     if (!self->writer_.write(buf, (size_t)buf_size))
-        return AVERROR_IO;
+        return AVERROR(EIO);
     self->logical_offset_ += buf_size;
     return buf_size;
 }
