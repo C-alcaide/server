@@ -143,7 +143,6 @@ struct notchlc_producer_impl final : public core::frame_producer
                                               lz4_done_pq_;
     std::mutex                                lz4_done_mutex_;
     std::condition_variable                   lz4_done_cv_;
-    static constexpr int                      LZ4_DONE_CAP = 6;  // max depth before backpressure
 
     // Available slot pool: LZ4 workers pick a slot, GPU thread returns it.
     std::queue<int>                           slot_pool_;
@@ -471,10 +470,7 @@ struct notchlc_producer_impl final : public core::frame_producer
                 eof_item.epoch = rp.epoch;
                 eof_item.slot  = -1;
                 {
-                    std::unique_lock<std::mutex> lk(lz4_done_mutex_);
-                    lz4_done_cv_.wait(lk, [this] {
-                        return stop_flag_ || (int)lz4_done_pq_.size() < LZ4_DONE_CAP;
-                    });
+                    std::lock_guard<std::mutex> lk(lz4_done_mutex_);
                     if (!stop_flag_) lz4_done_pq_.push(std::move(eof_item));
                 }
                 lz4_done_cv_.notify_one();
@@ -522,11 +518,12 @@ struct notchlc_producer_impl final : public core::frame_producer
             }
 
             // ── Push to reorder buffer (min-heap on seq) ────────────────────
+            // NOTE: No capacity limit here — blocking while holding a slot while the
+            // GPU thread waits for a different seq causes a deadlock.  The slot pool
+            // (num_slots_ entries) is the natural backpressure: when all slots are
+            // in use the lz4 workers block on slot_pool_cv_ before even starting work.
             {
                 std::unique_lock<std::mutex> lk(lz4_done_mutex_);
-                lz4_done_cv_.wait(lk, [this] {
-                    return stop_flag_ || (int)lz4_done_pq_.size() < LZ4_DONE_CAP;
-                });
                 if (stop_flag_) {
                     std::lock_guard<std::mutex> slk(slot_pool_mutex_);
                     slot_pool_.push(slot);
