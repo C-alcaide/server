@@ -59,7 +59,9 @@
 
 namespace caspar { namespace cuda_notchlc {
 
-static constexpr int NUM_SLOTS     = 12;  // maximum slots; actual count is runtime-determined
+// 5 slots: perfectly balances 2 slots in ready_queue_, 1 in active render, and 2 available for LZ4 threads,
+// keeping memory footprints low to prevent Windows SysMem paging when multiple playbacks overlap.
+static constexpr int NUM_SLOTS     = 5;
 static constexpr int MAX_QUEUED    = 2;   // decoded frames buffered for renderer
 static constexpr int IO_QUEUE_CAP  = 2;  // raw packets buffered from disk
 
@@ -232,37 +234,14 @@ struct notchlc_producer_impl final : public core::frame_producer
             demuxer_->seek_to_frame(0);  // rewind so the read loop starts from the beginning
         }
 
-        // ── Adaptive slot count: scale down for large frames to avoid VRAM pressure ──
-        // Per-slot VRAM estimate (bytes):
-        //   d_compressed, d_uncompressed, nvcomp_temp ≈ max_compressed + max_uncompressed*2
-        //   d_y + d_u + d_v + d_a + d_bgra16          ≈ max_pixels * (4+4+4+4+8) * 2 bytes
-        //   d_y_bit_widths/offsets                     ≈ max_pixels / 8
-        //   GL texture (OGL VRAM, not cudaMalloc)      ≈ max_pixels * 8
-        {
-            const size_t vram_per_slot =
-                max_compressed + max_uncompressed * 2 +
-                max_pixels * 26 +           // YUVAx4 uint16 + bgra16 uint16 + OGL texture
-                max_pixels / 4;             // prefix-sum scratch
+        // ── Slot Configuration ───────────────────────────────────────────────────
+        
+        num_slots_ = NUM_SLOTS;
 
-            size_t free_vram = 0, total_vram = 0;
-            cudaMemGetInfo(&free_vram, &total_vram);
-
-            // Keep at least 1.5 GB free for the OS and CasparCG OGL stack.
-            const size_t reserve = 1536ull * 1024 * 1024;
-            const size_t usable  = (free_vram > reserve) ? free_vram - reserve : free_vram / 2;
-            
-            // To prevent overlapping playbacks (which temporarily halves free VRAM)
-            // from shrinking the slot pool too aggressively and starving the lz4 worker threads 
-            // (causing the alternating half-speed playback bug), we enforce a robust minimum block size.
-            num_slots_ = std::max(10, std::min(NUM_SLOTS, (int)(usable / vram_per_slot)));
-
-            CASPAR_LOG(info) << L"[notchlc_producer] VRAM: free="
-                             << free_vram / (1024*1024) << L" MB  per-slot~"
-                             << vram_per_slot / (1024*1024) << L" MB  max_compressed="
-                             << max_compressed / (1024*1024) << L" MB  max_uncompressed="
-                             << max_uncompressed / (1024*1024) << L" MB  slots="
-                             << num_slots_;
-        }
+        CASPAR_LOG(info) << L"[notchlc_producer] max_compressed="
+                         << max_compressed / (1024*1024) << L" MB  max_uncompressed="
+                         << max_uncompressed / (1024*1024) << L" MB  slots="
+                         << num_slots_;
 
         for (int i = 0; i < num_slots_; i++) {
             cudaError_t e = notchlc_decode_ctx_create(&slots_[i],
@@ -574,6 +553,7 @@ struct notchlc_producer_impl final : public core::frame_producer
         }
 #endif
 
+        int                  gl_slot           = 0;
         std::vector<int32_t> audio_accum;
         int                  audio_frame_idx   = 0;
         int64_t              video_frame_count = in_frame_;
@@ -687,8 +667,8 @@ struct notchlc_producer_impl final : public core::frame_producer
             caspar::timer decode_timer;
             cudaError_t   err = cudaSuccess;
 
-            if (!use_host_copy_ && cgt_[cur_slot]) {
-                CudaGLTexture& cgt = *cgt_[cur_slot];
+            if (!use_host_copy_ && cgt_[gl_slot]) {
+                CudaGLTexture& cgt = *cgt_[gl_slot];
                 cudaArray_t arr;
                 try { arr = cgt.map(ctx.stream); }
                 catch (const std::exception& ex) {
@@ -747,7 +727,7 @@ struct notchlc_producer_impl final : public core::frame_producer
 
             // ── Build frame ───────────────────────────────────────────────────
             core::draw_frame df;
-            if (!use_host_copy_ && cgt_[cur_slot]) {
+            if (!use_host_copy_ && cgt_[gl_slot]) {
                 core::pixel_format_desc pfd(core::pixel_format::rgba);
                 pfd.planes.push_back(core::pixel_format_desc::plane(
                     frame_info_.width, frame_info_.height, 4, common::bit_depth::bit16));
@@ -765,7 +745,7 @@ struct notchlc_producer_impl final : public core::frame_producer
                     std::move(img_vec),
                     std::move(audio_arr),
                     pfd,
-                    cgt_[cur_slot]->gl_texture()));
+                    cgt_[gl_slot]->gl_texture()));
             } else {
                 core::pixel_format_desc pfd(core::pixel_format::bgra);
                 pfd.planes.push_back(core::pixel_format_desc::plane(
@@ -780,7 +760,11 @@ struct notchlc_producer_impl final : public core::frame_producer
             queue_cv_.notify_one();
             ++video_frame_count;
 
-            // Return slot to pool AFTER frame is built (GL texture still needed until renderer swaps).
+            // WGL handles are decoupled from LZ4 slots. 
+            // We advance the WGL ring index ensuring we don't clobber what CasparCG is currently rendering.
+            gl_slot = (gl_slot + 1) % NUM_SLOTS;
+
+            // Return LZ4 cpu-decoder slot to pool AFTER WGL copy is fully completed.
             {
                 std::lock_guard<std::mutex> slk(slot_pool_mutex_);
                 slot_pool_.push(cur_slot);
