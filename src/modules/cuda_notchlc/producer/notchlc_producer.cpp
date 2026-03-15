@@ -343,6 +343,8 @@ struct notchlc_producer_impl final : public core::frame_producer
     }
 
     ~notchlc_producer_impl() override {
+        // Ensure stop is signalled even if request_stop() was not called first
+        // (defensive — the normal path via notchlc_producer always calls it).
         stop_flag_ = true;
         queue_cv_.notify_all();
         raw_cv_.notify_all();
@@ -901,6 +903,63 @@ struct notchlc_producer_impl final : public core::frame_producer
 
     std::wstring print() const override { return L"cuda_notchlc[" + path_ + L"]"; }
     std::wstring name()  const override { return L"cuda-notchlc"; }
+
+    // Called by the outer wrapper to signal that the producer is being replaced.
+    // Sets stop_flag_ and notifies all condition variables so that background threads
+    // unblock immediately.  The actual thread joins / CUDA cleanup happen in the
+    // destructor but on a background thread (see notchlc_producer below).
+    void request_stop()
+    {
+        stop_flag_ = true;
+        queue_cv_.notify_all();
+        raw_cv_.notify_all();
+        lz4_done_cv_.notify_all();
+        slot_pool_cv_.notify_all();
+    }
+};
+
+// ---------------------------------------------------------------------------
+// Thin wrapper that owns the impl as a shared_ptr and performs the thread-join
+// / CUDA cleanup asynchronously when destroyed, so that the CasparCG mixer
+// thread is never blocked by the old producer while a new one starts up.
+// ---------------------------------------------------------------------------
+struct notchlc_producer final : public core::frame_producer
+{
+    std::shared_ptr<notchlc_producer_impl> impl_;
+
+    explicit notchlc_producer(std::shared_ptr<notchlc_producer_impl> impl)
+        : impl_(std::move(impl)) {}
+
+    ~notchlc_producer() override
+    {
+        // Signal all threads to exit immediately so they stop doing work.
+        impl_->request_stop();
+
+        // Move the impl into a detached background thread so that the join()
+        // calls and CUDA/GL teardown happen off the mixer thread.  The impl
+        // stays alive (shared_ptr ref-count=1 inside the lambda) until the
+        // thread finishes and the lambda is destroyed.
+        auto impl = std::move(impl_);
+        std::thread([impl = std::move(impl)] () mutable {
+            // Destructor of notchlc_producer_impl joins all threads and
+            // releases CUDA/GL resources.  It will not call request_stop()
+            // again because stop_flag_ is already set and the notify_all()
+            // in the destructor is idempotent.
+            impl.reset();
+        }).detach();
+    }
+
+    core::draw_frame receive_impl(const core::video_field field, int extra) override
+    { return impl_->receive_impl(field, extra); }
+
+    bool is_ready() override { return impl_->is_ready(); }
+
+    std::future<std::wstring> call(const std::vector<std::wstring>& params) override
+    { return impl_->call(params); }
+
+    core::monitor::state state() const override { return impl_->state(); }
+    std::wstring print()         const override { return impl_->print(); }
+    std::wstring name()          const override { return impl_->name(); }
 };
 
 // ---------------------------------------------------------------------------
@@ -967,9 +1026,10 @@ create_notchlc_producer(const core::frame_producer_dependencies& deps,
     }
 
     try {
-        return spl::make_shared<notchlc_producer_impl>(
+        auto impl = std::make_shared<notchlc_producer_impl>(
             path, cuda_device, loop, color_matrix_override,
             start_frame, out_frame, deps);
+        return spl::make_shared<notchlc_producer>(std::move(impl));
     } catch (const std::exception& ex) {
         CASPAR_LOG(error) << L"[notchlc_producer] " << ex.what();
         return core::frame_producer::empty();
