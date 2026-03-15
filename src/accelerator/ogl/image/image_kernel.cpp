@@ -38,7 +38,10 @@
 #include <GL/glew.h>
 
 #include <array>
+#include <algorithm>
 #include <cmath>
+#include <utility>
+#include <vector>
 
 namespace caspar::accelerator::ogl {
 
@@ -78,6 +81,66 @@ bool is_outside_screen(const std::vector<core::frame_geometry::coord>& coords)
            boost::algorithm::all_of(y_coords, &is_above_screen) || boost::algorithm::all_of(y_coords, &is_below_screen);
 }
 
+// Builds a 256-entry 1D LUT from control points using Fritsch-Carlson monotone
+// cubic Hermite interpolation. Guarantees no overshoot (safe for color values).
+// If fewer than 2 points, returns a linear identity LUT.
+static std::array<float, 256> build_curve_lut(const core::curve_channel& cc)
+{
+    std::array<float, 256> lut;
+    if (cc.count < 2) {
+        for (int i = 0; i < 256; ++i) lut[i] = i / 255.0f;
+        return lut;
+    }
+    // Copy to a sortable vector of (x, y) pairs
+    std::vector<std::pair<double, double>> pts;
+    pts.reserve(cc.count);
+    for (int i = 0; i < cc.count; ++i)
+        pts.push_back({cc.points[i].x, cc.points[i].y});
+    std::sort(pts.begin(), pts.end());
+
+    int n = static_cast<int>(pts.size());
+    std::vector<double> dx(n - 1), dy(n - 1), delta(n - 1), m(n);
+    for (int i = 0; i < n - 1; ++i) {
+        dx[i]    = pts[i + 1].first  - pts[i].first;
+        dy[i]    = pts[i + 1].second - pts[i].second;
+        delta[i] = (dx[i] > 1e-10) ? dy[i] / dx[i] : 0.0;
+    }
+    // Tangents: endpoint slopes equal adjacent delta, interior = average
+    m[0]     = delta[0];
+    m[n - 1] = delta[n - 2];
+    for (int i = 1; i < n - 1; ++i)
+        m[i] = (delta[i - 1] + delta[i]) * 0.5;
+    // Fritsch-Carlson monotonicity correction
+    for (int i = 0; i < n - 1; ++i) {
+        if (std::abs(delta[i]) < 1e-10) { m[i] = m[i + 1] = 0.0; continue; }
+        double a = m[i]     / delta[i];
+        double b = m[i + 1] / delta[i];
+        double h = std::sqrt(a * a + b * b);
+        if (h > 3.0) { m[i] *= 3.0 / h; m[i + 1] *= 3.0 / h; }
+    }
+    // Evaluate at 256 uniform positions
+    for (int k = 0; k < 256; ++k) {
+        double t = k / 255.0;
+        if (t <= pts.front().first) { lut[k] = static_cast<float>(std::max(0.0, std::min(1.0, pts.front().second))); continue; }
+        if (t >= pts.back().first)  { lut[k] = static_cast<float>(std::max(0.0, std::min(1.0, pts.back().second)));  continue; }
+        int seg = 0;
+        for (int i = 0; i < n - 2; ++i)
+            if (t >= pts[i].first && t < pts[i + 1].first) { seg = i; break; }
+        double h_   = dx[seg];
+        double t_   = (h_ > 1e-10) ? (t - pts[seg].first) / h_ : 0.0;
+        double t2   = t_ * t_;
+        double t3   = t2 * t_;
+        double h00  = 2*t3 - 3*t2 + 1;
+        double h10  = t3  - 2*t2 + t_;
+        double h01  = -2*t3 + 3*t2;
+        double h11  = t3  - t2;
+        double val  = h00 * pts[seg].second  + h10 * h_ * m[seg]
+                    + h01 * pts[seg+1].second + h11 * h_ * m[seg+1];
+        lut[k] = static_cast<float>(std::max(0.0, std::min(1.0, val)));
+    }
+    return lut;
+}
+
 static const double epsilon = 0.001;
 
 struct image_kernel::impl
@@ -86,6 +149,7 @@ struct image_kernel::impl
     spl::shared_ptr<shader> shader_;
     GLuint                  vao_;
     GLuint                  vbo_;
+    GLuint                  curve_lut_tex_id_ = 0;
 
     explicit impl(const spl::shared_ptr<device>& ogl)
         : ogl_(ogl)
@@ -102,6 +166,8 @@ struct image_kernel::impl
         ogl_->dispatch_sync([&] {
             GL(glDeleteVertexArrays(1, &vao_));
             GL(glDeleteBuffers(1, &vbo_));
+            if (curve_lut_tex_id_)
+                GL(glDeleteTextures(1, &curve_lut_tex_id_));
         });
     }
 
@@ -239,6 +305,90 @@ struct image_kernel::impl
             shader_->set("chroma", false);
         }
 
+        if (transforms.image_transform.projection.enable) {
+            shader_->set("is_360", true);
+            shader_->set("view_yaw",      static_cast<float>(transforms.image_transform.projection.yaw));
+            shader_->set("view_pitch",    static_cast<float>(transforms.image_transform.projection.pitch));
+            shader_->set("view_roll",     static_cast<float>(transforms.image_transform.projection.roll));
+            shader_->set("view_fov",      static_cast<float>(transforms.image_transform.projection.fov));
+            shader_->set("view_offset_x", static_cast<float>(transforms.image_transform.projection.offset_x));
+            shader_->set("view_offset_y", static_cast<float>(transforms.image_transform.projection.offset_y));
+            shader_->set("aspect_ratio",  static_cast<float>(params.aspect_ratio));
+        } else {
+            shader_->set("is_360", false);
+        }
+
+        // Curved screen compensation — dispatched independently of 360 mode
+        shader_->set("is_curved",         transforms.image_transform.projection.curve_enable);
+        shader_->set("screen_curve_type", static_cast<int>(transforms.image_transform.projection.curve_type));
+        shader_->set("screen_arc",        static_cast<float>(transforms.image_transform.projection.screen_arc));
+
+        if (transforms.image_transform.blur.enable) {
+            shader_->set("blur_enable", true);
+            shader_->set("blur_radius", static_cast<float>(transforms.image_transform.blur.radius));
+            shader_->set("blur_type",   static_cast<int>(transforms.image_transform.blur.type));
+            shader_->set("blur_angle",  static_cast<float>(transforms.image_transform.blur.angle));
+            shader_->set("blur_center", static_cast<float>(transforms.image_transform.blur.center[0]),
+                         static_cast<float>(transforms.image_transform.blur.center[1]));
+            shader_->set("blur_tilt",   static_cast<float>(transforms.image_transform.blur.tilt_y),
+                         static_cast<float>(transforms.image_transform.blur.tilt_h));
+            shader_->set("target_size", static_cast<float>(params.target_width), static_cast<float>(params.target_height));
+        } else {
+            shader_->set("blur_enable", false);
+        }
+
+        // Color grading: ACES-based gamut/transfer/tonemapping pipeline
+        // Gamut index: 0=bt709, 1=bt2020, 2=dcip3_d65, 3=aces_ap0, 4=aces_ap1(acescg), 5=arri_wg3, 6=sgamut3_cine
+
+        // Transfer:    0=linear, 1=srgb, 2=rec709, 3=pq, 4=hlg, 5=logc3, 6=slog3
+        // Tonemapping: 0=none, 1=reinhard, 2=aces_filmic, 3=aces_rrt
+        static const float k_to_working[7][9] = {
+            // bt709 -> ACEScg (AP1) -- from ACES OCIO config
+            {0.6131516f,  0.3395148f,  0.0472947f,  0.0701011f,  0.9162792f,  0.0136197f,  0.0206177f,  0.1095763f,  0.8698060f},
+            // bt2020 -> ACEScg
+            {0.7951281f,  0.1643585f,  0.0405134f,  0.0234399f,  0.9415642f,  0.0349959f,  0.0036186f,  0.0613513f,  0.9350301f},
+            // dcip3 d65 -> ACEScg
+            {0.8224549f,  0.1774521f, -0.0000070f,  0.0332021f,  0.9618927f,  0.0049052f,  0.0170512f,  0.0723025f,  0.9106463f},
+            // aces_ap0 -> ACEScg (AP1)
+            {1.4514393f, -0.2362486f, -0.0153674f, -0.3194787f,  1.1765407f, -0.0083099f, -0.0153694f,  0.0183597f,  1.0023859f},
+            // aces_ap1 identity
+            {1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f},
+            // arri wide gamut 3 -> ACEScg
+            {0.6954522f,  0.1446577f,  0.1598901f,  0.0439823f,  0.8591788f,  0.0968389f, -0.0055023f,  0.0040678f,  1.0014345f},
+            // sony sgamut3.cine -> ACEScg
+            {0.7112957f,  0.1903613f,  0.0983436f,  0.0406952f,  0.8550396f,  0.1042651f, -0.0025079f,  0.0085993f,  0.9939086f}
+        };
+        static const float k_to_output[7][9] = {
+            // ACEScg -> bt709
+            { 1.7050585f, -0.6217876f, -0.0832709f, -0.1302597f,  1.1407927f, -0.0105330f, -0.0240003f, -0.1289711f,  1.1529714f},
+            // ACEScg -> bt2020
+            { 1.2746843f, -0.2692490f, -0.0054353f, -0.0293524f,  1.0763680f, -0.0470156f, -0.0160993f, -0.0606079f,  1.0767072f},
+            // ACEScg -> dcip3 d65
+            { 1.2239840f, -0.2239840f,  0.0000000f, -0.0421197f,  1.0421197f,  0.0000000f, -0.0196576f, -0.0787093f,  1.0983669f},
+            // ACEScg -> aces_ap0
+            { 0.6954522f,  0.1446577f,  0.1598901f,  0.0439823f,  0.8591788f,  0.0968389f, -0.0055023f,  0.0040678f,  1.0014345f},
+            // ACEScg identity (ap1)
+            { 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f},
+            // ACEScg -> arri wide gamut 3 (approximate inverse)
+            { 1.4514393f, -0.2362486f, -0.0153674f, -0.3194787f,  1.1765407f, -0.0083099f, -0.0153694f,  0.0183597f,  1.0023859f},
+            // ACEScg -> sgamut3.cine (approximate inverse)
+            { 1.4087253f, -0.3132873f, -0.0954380f, -0.0667453f,  1.1571781f, -0.0904328f, -0.0057800f, -0.0066708f,  1.0124508f}
+        };
+        const auto& cg = transforms.image_transform.color_grade;
+        if (cg.enable) {
+            int ig = std::min(std::max(cg.input_gamut,  0), 6);
+            int og = std::min(std::max(cg.output_gamut, 0), 6);
+            shader_->set("color_grading",     true);
+            shader_->set("input_transfer",    cg.input_transfer);
+            shader_->set("output_transfer",   cg.output_transfer);
+            shader_->set("tone_mapping_op",   cg.tone_mapping);
+            shader_->set("exposure",          cg.exposure);
+            shader_->set_matrix3("input_to_working",  k_to_working[ig]);
+            shader_->set_matrix3("working_to_output", k_to_output[og]);
+        } else {
+            shader_->set("color_grading", false);
+        }
+
         // Setup blend_func
 
         if (transforms.image_transform.is_key) {
@@ -251,7 +401,9 @@ struct image_kernel::impl
         shader_->set("keyer", params.keyer);
 
         // Setup image-adjustments
-        shader_->set("invert", transforms.image_transform.invert);
+        shader_->set("invert",  transforms.image_transform.invert);
+        shader_->set("flip_h",  transforms.image_transform.flip_h);
+        shader_->set("flip_v",  transforms.image_transform.flip_v);
 
         if (transforms.image_transform.levels.min_input > epsilon ||
             transforms.image_transform.levels.max_input < 1.0 - epsilon ||
@@ -278,6 +430,146 @@ struct image_kernel::impl
             shader_->set("con", transforms.image_transform.contrast);
         } else {
             shader_->set("csb", false);
+        }
+
+        // White balance
+        if (std::abs(transforms.image_transform.temperature) > epsilon ||
+            std::abs(transforms.image_transform.tint) > epsilon) {
+            shader_->set("white_balance",  true);
+            shader_->set("wb_temperature", static_cast<float>(transforms.image_transform.temperature));
+            shader_->set("wb_tint",        static_cast<float>(transforms.image_transform.tint));
+        } else {
+            shader_->set("white_balance", false);
+        }
+
+        // Lift / Midtone / Gain (per-channel 3-way color corrector)
+        {
+            const auto& lift    = transforms.image_transform.lift;
+            const auto& midtone = transforms.image_transform.midtone;
+            const auto& gain    = transforms.image_transform.gain;
+            bool lmg_active =
+                std::abs(lift[0]) > epsilon || std::abs(lift[1]) > epsilon || std::abs(lift[2]) > epsilon ||
+                std::abs(midtone[0] - 1.0) > epsilon || std::abs(midtone[1] - 1.0) > epsilon || std::abs(midtone[2] - 1.0) > epsilon ||
+                std::abs(gain[0]   - 1.0) > epsilon || std::abs(gain[1]   - 1.0) > epsilon || std::abs(gain[2]   - 1.0) > epsilon;
+            if (lmg_active) {
+                shader_->set("lmg_enable",  true);
+                // Shader internal: color.r=Blue_displayed, color.b=Red_displayed
+                // Upload as [B_param, G_param, R_param] so .r affects displayed Blue, .b affects displayed Red
+                shader_->set("lmg_lift",    lift[2],    lift[1],    lift[0]);
+                shader_->set("lmg_midtone", midtone[2], midtone[1], midtone[0]);
+                shader_->set("lmg_gain",    gain[2],    gain[1],    gain[0]);
+            } else {
+                shader_->set("lmg_enable", false);
+            }
+        }
+
+        // Hue shift
+        if (std::abs(transforms.image_transform.hue_shift) > epsilon) {
+            shader_->set("hue_shift_enable",  true);
+            shader_->set("hue_shift_degrees", static_cast<float>(transforms.image_transform.hue_shift));
+        } else {
+            shader_->set("hue_shift_enable", false);
+        }
+
+        // Tonal balance (shadows / highlights)
+        if (std::abs(transforms.image_transform.shadows) > epsilon ||
+            std::abs(transforms.image_transform.highlights) > epsilon) {
+            shader_->set("tonebalance_enable", true);
+            shader_->set("tb_shadows",    static_cast<float>(transforms.image_transform.shadows));
+            shader_->set("tb_highlights", static_cast<float>(transforms.image_transform.highlights));
+        } else {
+            shader_->set("tonebalance_enable", false);
+        }
+
+        // Per-channel RGB Levels
+        {
+            const auto& rl = transforms.image_transform.per_channel_levels;
+            if (rl.enable) {
+                shader_->set("rgb_levels_enable", true);
+                // Shader [0] -> color.r = Blue_displayed, [2] -> color.b = Red_displayed
+                // Map user's R channel -> index [2], B channel -> index [0]
+                shader_->set("rgb_levels_min_input[0]",  static_cast<float>(rl.b.min_input));
+                shader_->set("rgb_levels_min_input[1]",  static_cast<float>(rl.g.min_input));
+                shader_->set("rgb_levels_min_input[2]",  static_cast<float>(rl.r.min_input));
+                shader_->set("rgb_levels_max_input[0]",  static_cast<float>(rl.b.max_input));
+                shader_->set("rgb_levels_max_input[1]",  static_cast<float>(rl.g.max_input));
+                shader_->set("rgb_levels_max_input[2]",  static_cast<float>(rl.r.max_input));
+                shader_->set("rgb_levels_gamma[0]",      static_cast<float>(rl.b.gamma));
+                shader_->set("rgb_levels_gamma[1]",      static_cast<float>(rl.g.gamma));
+                shader_->set("rgb_levels_gamma[2]",      static_cast<float>(rl.r.gamma));
+                shader_->set("rgb_levels_min_output[0]", static_cast<float>(rl.b.min_output));
+                shader_->set("rgb_levels_min_output[1]", static_cast<float>(rl.g.min_output));
+                shader_->set("rgb_levels_min_output[2]", static_cast<float>(rl.r.min_output));
+                shader_->set("rgb_levels_max_output[0]", static_cast<float>(rl.b.max_output));
+                shader_->set("rgb_levels_max_output[1]", static_cast<float>(rl.g.max_output));
+                shader_->set("rgb_levels_max_output[2]", static_cast<float>(rl.r.max_output));
+            } else {
+                shader_->set("rgb_levels_enable", false);
+            }
+        }
+
+        // Tone Curves: build LUTs on CPU, pack into RGBA32F 256x1 texture
+        {
+            const auto& cv = transforms.image_transform.curves;
+            if (cv.enable) {
+                auto lut_r = build_curve_lut(cv.red);
+                auto lut_g = build_curve_lut(cv.green);
+                auto lut_b = build_curve_lut(cv.blue);
+                auto lut_m = build_curve_lut(cv.master);
+
+                // Pack 4 LUTs into interleaved RGBA data
+                // Channel 0 (.r) -> color.r = Blue_displayed -> store user's Blue LUT
+                // Channel 2 (.b) -> color.b = Red_displayed  -> store user's Red LUT
+                std::vector<float> rgba_data(256 * 4);
+                for (int i = 0; i < 256; ++i) {
+                    rgba_data[i * 4 + 0] = lut_b[i];  // .r slot = Blue displayed
+                    rgba_data[i * 4 + 1] = lut_g[i];  // .g slot = Green (unchanged)
+                    rgba_data[i * 4 + 2] = lut_r[i];  // .b slot = Red displayed
+                    rgba_data[i * 4 + 3] = lut_m[i];  // .a slot = master (unchanged)
+                }
+
+                // Create texture on first use
+                if (!curve_lut_tex_id_) {
+                    GL(glCreateTextures(GL_TEXTURE_2D, 1, &curve_lut_tex_id_));
+                    GL(glTextureStorage2D(curve_lut_tex_id_, 1, GL_RGBA32F, 256, 1));
+                    GL(glTextureParameteri(curve_lut_tex_id_, GL_TEXTURE_MIN_FILTER, GL_NEAREST));
+                    GL(glTextureParameteri(curve_lut_tex_id_, GL_TEXTURE_MAG_FILTER, GL_NEAREST));
+                    GL(glTextureParameteri(curve_lut_tex_id_, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE));
+                    GL(glTextureParameteri(curve_lut_tex_id_, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE));
+                }
+
+                GL(glTextureSubImage2D(curve_lut_tex_id_, 0, 0, 0, 256, 1, GL_RGBA, GL_FLOAT, rgba_data.data()));
+                GL(glBindTextureUnit(static_cast<int>(texture_id::curve_lut_tex), curve_lut_tex_id_));
+                shader_->set("curves_enable", true);
+                shader_->set("curve_lut_tex", static_cast<int>(texture_id::curve_lut_tex));
+            } else {
+                shader_->set("curves_enable", false);
+            }
+        }
+
+        // Shape overlay
+        {
+            const auto& sh = transforms.image_transform.shape;
+            if (sh.enable) {
+                shader_->set("shape_enable",      true);
+                shader_->set("shape_type",        static_cast<int>(sh.type));
+                shader_->set("shape_fill_type",   static_cast<int>(sh.fill_type));
+                shader_->set("shape_center",      sh.center[0], sh.center[1]);
+                shader_->set("shape_size",        sh.size[0],   sh.size[1]);
+                shader_->set("shape_corner_radius", sh.corner_radius);
+                shader_->set("shape_softness",    sh.edge_softness);
+                shader_->set("shape_color1",      sh.color1[0], sh.color1[1], sh.color1[2], sh.color1[3]);
+                shader_->set("shape_color2",      sh.color2[0], sh.color2[1], sh.color2[2], sh.color2[3]);
+                shader_->set("shape_gradient_angle",    sh.gradient_angle);
+                shader_->set("shape_gradient_center",   sh.gradient_center[0],
+                                                        sh.gradient_center[1]);
+                shader_->set("shape_stroke_enable", sh.stroke_enable);
+                shader_->set("shape_stroke_width",  sh.stroke_width);
+                shader_->set("shape_stroke_color",  sh.stroke_color[0], sh.stroke_color[1],
+                                                    sh.stroke_color[2], sh.stroke_color[3]);
+            } else {
+                shader_->set("shape_enable", false);
+            }
         }
 
         // Setup drawing area

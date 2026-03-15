@@ -36,10 +36,10 @@ Input::Input(const std::string& filename, std::shared_ptr<diagnostics::graph> gr
 
     buffer_.set_capacity(256);
     thread_ = boost::thread([=] {
-        try {
-            set_thread_name(L"[ffmpeg::av_producer::Input]");
+        set_thread_name(L"[ffmpeg::av_producer::Input]");
 
-            while (true) {
+        while (true) {
+            try {
                 auto packet = alloc_packet();
 
                 {
@@ -60,16 +60,28 @@ Input::Input(const std::string& filename, std::shared_ptr<diagnostics::graph> gr
                     } else if (ret == AVERROR_EOF) {
                         eof_   = true;
                         packet = nullptr;
-                    } else {
-                        FF_RET(ret, "av_read_frame");
+                    } else if (ret < 0) {
+                        // Instead of throwing an exception and permanently killing the read thread,
+                        // log the error and wait a moment before trying again or continuing.
+                        char errbuf[AV_ERROR_MAX_STRING_SIZE];
+                        av_strerror(ret, errbuf, sizeof(errbuf));
+                        CASPAR_LOG(warning) << "av_read_frame error: " << errbuf << " (" << ret << ") - treating as EOF";
+                        eof_   = true;
+                        packet = nullptr;
                     }
                 }
 
                 buffer_.push(std::move(packet));
                 graph_->set_value("input", (static_cast<double>(buffer_.size()) / buffer_.capacity()));
+            } catch (boost::thread_interrupted&) {
+                break;
+            } catch (const std::exception& e) {
+                CASPAR_LOG(error) << "[ffmpeg::av_producer::Input] Exception in read loop: " << e.what();
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            } catch (...) {
+                CASPAR_LOG(error) << "[ffmpeg::av_producer::Input] Unknown exception in read loop";
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
             }
-        } catch (...) {
-            CASPAR_LOG_CURRENT_EXCEPTION();
         }
     });
 }

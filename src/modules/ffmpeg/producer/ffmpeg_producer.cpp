@@ -96,6 +96,10 @@ struct ffmpeg_producer : public core::frame_producer
     {
     }
 
+    // Post-construction helpers called from create_producer
+    void pingpong(bool pp)    { producer_->pingpong(pp); }
+    void speed(double spd)    { producer_->speed(spd); }
+
     ~ffmpeg_producer()
     {
         std::thread([producer = std::move(producer_)]() mutable {
@@ -123,8 +127,9 @@ struct ffmpeg_producer : public core::frame_producer
 
     std::uint32_t nb_frames() const override
     {
-        return producer_->loop() ? std::numeric_limits<std::uint32_t>::max()
-                                 : static_cast<std::uint32_t>(producer_->duration());
+        return (producer_->loop() || producer_->pingpong())
+                   ? std::numeric_limits<std::uint32_t>::max()
+                   : static_cast<std::uint32_t>(producer_->duration());
     }
 
     bool is_ready() override { return producer_->is_ready(); }
@@ -184,6 +189,51 @@ struct ffmpeg_producer : public core::frame_producer
             producer_->seek(seek);
 
             result = std::to_wstring(seek);
+        } else if (boost::iequals(cmd, L"vf") || boost::iequals(cmd, L"af") || boost::iequals(cmd, L"filter")) {
+            // CALL 1-1 VF     "<filter_string>"
+            // CALL 1-1 AF     "<filter_string>"
+            // CALL 1-1 FILTER "<filter_string>"  (applies to both video and audio)
+            const bool set_video = !boost::iequals(cmd, L"af");
+            const bool set_audio = !boost::iequals(cmd, L"vf");
+
+            if (set_video)
+                producer_->set_vfilter(u8(value));
+            if (set_audio)
+                producer_->set_afilter(u8(value));
+
+            result = value;
+        } else if (boost::iequals(cmd, L"vfparam") || boost::iequals(cmd, L"afparam")) {
+            // CALL 1-1 VFPARAM <filter_type> <param_name> <value> [<duration_frames> [<tween>]]
+            // CALL 1-1 AFPARAM <filter_type> <param_name> <value> [<duration_frames> [<tween>]]
+            //
+            // Animates a single numeric parameter of a live filter without
+            // rebuilding the filter graph.  Uses avfilter_graph_send_command()
+            // driven by the same easing system as MIXER transformations.
+            //
+            // Example — pan a 360 video smoothly over 250 frames:
+            //   CALL 1-1 VFPARAM v360 yaw 90.0 250 easeinsine
+            if (params.size() < 4)
+                CASPAR_THROW_EXCEPTION(invalid_argument());
+
+            const bool        is_video       = boost::iequals(cmd, L"vfparam");
+            const std::string filter_name    = u8(params.at(1));
+            const std::string param_name     = u8(params.at(2));
+            const double      target_value   = boost::lexical_cast<double>(params.at(3));
+            const int         duration_frames = params.size() > 4 ? boost::lexical_cast<int>(params.at(4)) : 0;
+            const std::wstring tween_name    = params.size() > 5 ? params.at(5) : L"linear";
+
+            producer_->set_filter_param(is_video, filter_name, param_name, target_value, duration_frames, tween_name);
+            result = params.at(3);
+        } else if (boost::iequals(cmd, L"speed")) {
+            if (!value.empty()) {
+                producer_->speed(boost::lexical_cast<double>(value));
+            }
+            result = std::to_wstring(producer_->speed());
+        } else if (boost::iequals(cmd, L"pingpong")) {
+            if (!value.empty()) {
+                producer_->pingpong(boost::lexical_cast<bool>(value));
+            }
+            result = std::to_wstring(producer_->pingpong());
         } else {
             CASPAR_THROW_EXCEPTION(invalid_argument());
         }
@@ -300,7 +350,10 @@ spl::shared_ptr<core::frame_producer> create_producer(const core::frame_producer
 
     auto seekable = get_param(L"SEEKABLE", params, static_cast<int>(2));
 
-    auto loop = contains_param(L"LOOP", params);
+    auto loop     = contains_param(L"LOOP", params);
+    auto pingpong = contains_param(L"PINGPONG", params);
+    auto speed    = get_param(L"SPEED", params, static_cast<double>(1.0));
+    auto has_speed = contains_param(L"SPEED", params);
 
     auto seek = get_param(L"SEEK", params, static_cast<uint32_t>(0));
     auto in   = get_param(L"IN", params, seek);
@@ -344,18 +397,23 @@ spl::shared_ptr<core::frame_producer> create_producer(const core::frame_producer
     auto afilter = get_param(L"AF", params, get_param(L"FILTER", params, L""));
 
     try {
-        return spl::make_shared<ffmpeg_producer>(dependencies.frame_factory,
-                                                 dependencies.format_desc,
-                                                 name,
-                                                 path,
-                                                 vfilter,
-                                                 afilter,
-                                                 start,
-                                                 seek2,
-                                                 duration,
-                                                 loop,
-                                                 seekable,
-                                                 scale_mode);
+        auto prod = spl::make_shared<ffmpeg_producer>(dependencies.frame_factory,
+                                                      dependencies.format_desc,
+                                                      name,
+                                                      path,
+                                                      vfilter,
+                                                      afilter,
+                                                      start,
+                                                      seek2,
+                                                      duration,
+                                                      loop,
+                                                      seekable,
+                                                      scale_mode);
+        if (pingpong)
+            prod->pingpong(true);
+        if (has_speed)
+            prod->speed(speed);
+        return prod;
     } catch (...) {
         CASPAR_LOG_CURRENT_EXCEPTION();
     }

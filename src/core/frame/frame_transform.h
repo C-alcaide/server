@@ -59,6 +59,78 @@ struct levels final
     double max_output = 1.0;
 };
 
+enum class screen_curve_type { flat = 0, cylinder = 1, sphere = 2 };
+
+struct projection final
+{
+    bool              enable       = false;
+    double            yaw          = 0.0;
+    double            pitch        = 0.0;
+    double            roll         = 0.0;
+    double            fov          = 1.57079632679;
+    double            offset_x     = 0.0;  // NDC lens-shift: +1 = pan right, -1 = pan left
+    double            offset_y     = 0.0;  // NDC lens-shift: +1 = pan up,    -1 = pan down
+    // Curved screen compensation — independent of 360 mode
+    bool              curve_enable = false;
+    screen_curve_type curve_type   = screen_curve_type::flat;
+    double            screen_arc   = 0.0;  // total arc in radians (horizontal for cylinder, radial for sphere)
+};
+
+// Transfer: 0=linear,1=srgb,2=rec709,3=pq(st2084),4=hlg,5=logc3(arri),6=slog3(sony)
+// Gamut:    0=bt709,1=bt2020,2=dcip3_d65,3=aces_ap0,4=aces_ap1(acescg),5=arri_wg3,6=sgamut3_cine
+// Tonemapping: 0=none,1=reinhard,2=aces_filmic,3=aces_rrt
+struct color_grade final
+{
+    bool  enable          = false;
+    int   input_transfer  = 0;
+    int   input_gamut     = 0;
+    int   tone_mapping    = 0;
+    int   output_gamut    = 0;
+    int   output_transfer = 0;
+    float exposure        = 1.0f;
+};
+
+// ---- Per-channel RGB Levels ------------------------------------------------
+struct rgb_levels_channel final
+{
+    double min_input  = 0.0;
+    double max_input  = 1.0;
+    double gamma      = 1.0;
+    double min_output = 0.0;
+    double max_output = 1.0;
+};
+
+struct rgb_levels final
+{
+    bool               enable = false;
+    rgb_levels_channel r;
+    rgb_levels_channel g;
+    rgb_levels_channel b;
+};
+
+// ---- Tone Curves (per-channel + master, up to 16 control points each) ------
+struct curve_point final
+{
+    double x = 0.0;
+    double y = 0.0;
+};
+
+// count == 0 means "identity" — the LUT builder returns a linear ramp.
+struct curve_channel final
+{
+    int                         count = 0;
+    std::array<curve_point, 16> points{};
+};
+
+struct tone_curves final
+{
+    bool          enable = false;
+    curve_channel master;  // applied as global tone to every channel after per-channel
+    curve_channel red;
+    curve_channel green;
+    curve_channel blue;
+};
+
 struct corners final
 {
     std::array<double, 2> ul = {0.0, 0.0};
@@ -71,6 +143,63 @@ struct rectangle final
 {
     std::array<double, 2> ul = {0.0, 0.0};
     std::array<double, 2> lr = {1.0, 1.0};
+};
+
+enum class blur_type : int
+{
+    gaussian    = 0,
+    box         = 1,
+    directional = 2,
+    zoom        = 3,
+    tilt_shift  = 4,
+    lens        = 5
+};
+
+struct blur_config final
+{
+    bool                  enable = false;
+    double                radius = 0.0;
+    blur_type             type   = blur_type::gaussian;
+    double                angle  = 0.0;
+    std::array<double, 2> center = {0.5, 0.5};
+    double                tilt_y = 0.5;
+    double                tilt_h = 0.2;
+};
+
+// Shape types for MIXER SHAPE
+enum class shape_type : int
+{
+    rect         = 0,
+    rounded_rect = 1,
+    circle       = 2,
+    ellipse      = 3
+};
+
+// Fill types for MIXER SHAPE
+enum class shape_fill_type : int
+{
+    solid   = 0,
+    linear  = 1,
+    radial  = 2,
+    conic   = 3
+};
+
+struct shape_config final
+{
+    bool                  enable          = false;
+    shape_type            type            = shape_type::rect;
+    std::array<double, 2> center          = {0.5, 0.5};   // normalised 0-1
+    std::array<double, 2> size            = {0.5, 0.5};   // normalised 0-1
+    double                corner_radius   = 0.0;          // normalised; used by rounded_rect
+    double                edge_softness   = 0.005;        // AA feather width
+    shape_fill_type       fill_type       = shape_fill_type::solid;
+    std::array<double, 4> color1          = {1.0, 1.0, 1.0, 1.0}; // RGBA
+    std::array<double, 4> color2          = {0.0, 0.0, 0.0, 0.0}; // RGBA
+    double                gradient_angle  = 0.0;          // degrees; for linear fill
+    std::array<double, 2> gradient_center = {0.5, 0.5};  // normalised; for radial/conic
+    bool                  stroke_enable   = false;
+    double                stroke_width    = 0.0;          // normalised
+    std::array<double, 4> stroke_color    = {1.0, 1.0, 1.0, 1.0}; // RGBA
 };
 
 struct image_transform final
@@ -96,9 +225,35 @@ struct image_transform final
     corners               perspective;
     core::levels          levels;
     core::chroma          chroma;
+    core::projection      projection;
+    core::color_grade     color_grade;
+
+    // White balance (temperature/tint)
+    double temperature = 0.0;  // -1..+1  (neg=cool/blue, pos=warm/orange)
+    double tint        = 0.0;  // -1..+1  (neg=magenta, pos=green)
+
+    // Lift / Midtone / Gain — per-channel 3-way color corrector (DaVinci-style)
+    std::array<double, 3> lift    = {0.0, 0.0, 0.0};  // shadow offset,      default 0
+    std::array<double, 3> midtone = {1.0, 1.0, 1.0};  // midtone power,      default 1
+    std::array<double, 3> gain    = {1.0, 1.0, 1.0};  // highlight mult,     default 1
+
+    // Hue shift (degrees, -180..+180)
+    double hue_shift = 0.0;
+
+    // Tonal balance (shadows / highlights separation)
+    double shadows    = 0.0;  // -1..+1
+    double highlights = 0.0;  // -1..+1
+
+    // Per-channel RGB levels and tone curves
+    core::rgb_levels  per_channel_levels;
+    core::tone_curves curves;
+    blur_config       blur;
+    shape_config      shape;
 
     bool             is_key      = false;
     bool             invert      = false;
+    bool             flip_h      = false;  // horizontal mirror (left ↔ right)
+    bool             flip_v      = false;  // vertical mirror   (top ↔ bottom)
     bool             is_mix      = false;
     core::blend_mode blend_mode  = blend_mode::normal;
     int              layer_depth = 0;

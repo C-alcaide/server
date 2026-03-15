@@ -23,8 +23,11 @@
 #include "../util/device.h"
 #include "../util/shader.h"
 
+#pragma warning(push)
+#pragma warning(disable: 4838 4309)
 #include "ogl_image_fragment.h"
 #include "ogl_image_vertex.h"
+#pragma warning(pop)
 
 namespace caspar { namespace accelerator { namespace ogl {
 

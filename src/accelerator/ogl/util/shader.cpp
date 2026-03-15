@@ -132,7 +132,16 @@ struct shader::impl
         GL(glUniform3f(get_uniform_location(name.c_str()),
                        static_cast<float>(value0),
                        static_cast<float>(value1),
-                       static_cast<float>(value1)));
+                       static_cast<float>(value2)));  // fixed: was value1
+    }
+
+    void set(const std::string& name, double value0, double value1, double value2, double value3)
+    {
+        GL(glUniform4f(get_uniform_location(name.c_str()),
+                       static_cast<float>(value0),
+                       static_cast<float>(value1),
+                       static_cast<float>(value2),
+                       static_cast<float>(value3)));
     }
 
     void set(const std::string& name, double value)
@@ -142,6 +151,11 @@ struct shader::impl
     void set_matrix3(const std::string& name, const float* value)
     {
         GL(glUniformMatrix3fv(get_uniform_location(name.c_str()), 1, GL_TRUE, value));
+    }
+
+    void set_float_array(const std::string& name, const float* values, int count)
+    {
+        GL(glUniform1fv(get_uniform_location(name.c_str()), count, values));
     }
 
     void use() { GL(glUseProgramObjectARB(program_)); }
@@ -160,8 +174,13 @@ void shader::set(const std::string& name, double value0, double value1, double v
 {
     impl_->set(name, value0, value1, value2);
 }
+void shader::set(const std::string& name, double value0, double value1, double value2, double value3)
+{
+    impl_->set(name, value0, value1, value2, value3);
+}
 void  shader::set(const std::string& name, double value) { impl_->set(name, value); }
 void  shader::set_matrix3(const std::string& name, const float* value) { impl_->set_matrix3(name, value); }
+void  shader::set_float_array(const std::string& name, const float* values, int count) { impl_->set_float_array(name, values, count); }
 GLint shader::get_attrib_location(const char* name) { return impl_->get_attrib_location(name); }
 int   shader::id() const { return impl_->program_; }
 void  shader::use() const { impl_->use(); }
