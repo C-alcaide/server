@@ -281,13 +281,21 @@ struct notchlc_producer_impl final : public core::frame_producer
             try_alloc();
 
             if (num_slots_ < MIN_VIABLE_SLOTS) {
-                // Too few slots: previous producer is likely still releasing VRAM.
-                // Wait for its async teardown to complete (~100–200 ms) then retry.
+                // Too few slots — the previous producer is still releasing VRAM via
+                // its async teardown thread.  Poll every 100 ms for up to 3 s.
+                //
+                // WHY polling matters: if we give up too early the factory returns
+                // frame_producer::empty(), layer::play() sees an empty background and
+                // becomes a no-op, so the old producer stays in the foreground forever.
                 CASPAR_LOG(warning) << L"[notchlc_producer] Only " << num_slots_
-                    << L" CUDA slot(s) available; previous producer may still be releasing VRAM."
-                    << L"  Waiting 300 ms then retrying.";
-                std::this_thread::sleep_for(std::chrono::milliseconds(300));
-                try_alloc();
+                    << L" CUDA slot(s) free; waiting for previous producer to release VRAM";
+                for (int waited_ms = 0;
+                     waited_ms < 3000 && num_slots_ < MIN_VIABLE_SLOTS;
+                     waited_ms += 100)
+                {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    try_alloc();
+                }
             }
 
             if (num_slots_ == 0)
@@ -390,13 +398,41 @@ struct notchlc_producer_impl final : public core::frame_producer
         if (lz4_thread_c_.joinable()) lz4_thread_c_.join();
         if (lz4_thread_d_.joinable()) lz4_thread_d_.join();
         if (read_thread_.joinable())  read_thread_.join();
-        // The destructor runs on the stage executor thread (not the CUDA thread),
-        // so we must re-establish the CUDA device context before freeing GPU memory.
+
+        // ── GL cleanup on the OGL thread ─────────────────────────────────
+        // This MUST run on the OGL thread for two reasons:
+        //   1. glDeleteTextures / ogl::texture destructor requires an active GL context.
+        //   2. wglDeleteContext may not be thread-safe against wglShareLists called by
+        //      the new producer's constructor (both via the OGL device dispatcher).
+        // Always dispatch this regardless of use_host_copy_ — GL textures were created
+        // unconditionally in the constructor.
+        {
+            HGLRC hglrc_to_delete = std::exchange(shared_hglrc_, nullptr);
+            ogl_device_->dispatch_sync([this, hglrc_to_delete]() {
+                for (int i = 0; i < num_slots_; i++) gl_tex_[i].reset();
+#ifdef WIN32
+                if (hglrc_to_delete) wglDeleteContext(hglrc_to_delete);
+#endif
+            });
+        }
+
+        // ── CUDA cleanup ─────────────────────────────────────────────────
+        // Called either from the async teardown thread (which already called
+        // cudaSetDevice before impl.reset()) or defensively from any thread.
         cudaSetDevice(cuda_device_);
         for (int i = 0; i < num_slots_; i++) {
             cudaFreeHost(h_bgra16_[i]);
             if (slots_init_[i]) notchlc_decode_ctx_destroy(&slots_[i]);
         }
+    }
+
+    void request_stop()
+    {
+        stop_flag_ = true;
+        queue_cv_.notify_all();
+        raw_cv_.notify_all();
+        lz4_done_cv_.notify_all();
+        slot_pool_cv_.notify_all();
     }
 
     // ── I/O thread: reads packets from disk into raw_queue_ ─────────────────
@@ -828,9 +864,11 @@ struct notchlc_producer_impl final : public core::frame_producer
 #ifdef WIN32
         for (int i = 0; i < num_slots_; i++) cgt_[i].reset();
         if (shared_hglrc_) {
+            // Release this thread's claim on the shared context.
+            // wglDeleteContext is deferred to ~notchlc_producer_impl() which
+            // dispatches it to the OGL thread, ensuring it is serialised with
+            // the new producer's wglShareLists call and runs on the correct thread.
             wglMakeCurrent(nullptr, nullptr);
-            wglDeleteContext(shared_hglrc_);
-            shared_hglrc_ = nullptr;
         }
 #endif
     }
@@ -943,6 +981,58 @@ struct notchlc_producer_impl final : public core::frame_producer
 };
 
 // ---------------------------------------------------------------------------
+// Thin wrapper that owns the impl as a shared_ptr and performs the thread-join
+// / CUDA/GL cleanup asynchronously on a detached thread, so the stage executor
+// is never blocked while the mixer thread is waiting for it.
+//
+// Why this is needed: stage::operator()() calls executor_.invoke() (blocking).
+// The same stage executor thread calls layer::receive() every frame AND processes
+// PLAY/STOP commands.  When a new PLAY replaces the foreground producer, the old
+// producer's destructor runs on the stage executor.  A synchronous join of 6
+// threads there blocks the stage executor — and therefore the mixer — for up to
+// ~200 ms, showing as constant frame-time spikes.
+// ---------------------------------------------------------------------------
+struct notchlc_producer final : public core::frame_producer
+{
+    std::shared_ptr<notchlc_producer_impl> impl_;
+
+    explicit notchlc_producer(std::shared_ptr<notchlc_producer_impl> impl)
+        : impl_(std::move(impl)) {}
+
+    ~notchlc_producer() override
+    {
+        // Signal background threads immediately so they stop new work.
+        impl_->request_stop();
+
+        // Move the impl into a detached thread.  The thread owns the last
+        // shared_ptr reference; when the lambda exits the impl is destroyed
+        // (joins 6 threads, dispatches GL cleanup to OGL thread, frees CUDA).
+        //
+        // cudaSetDevice() must be called first: the teardown thread is brand-new
+        // and has no CUDA context.  Without it, cudaFree/cudaStreamDestroy return
+        // cudaErrorInvalidDevice silently and VRAM is never released.
+        const int cuda_dev = impl_->cuda_device_;
+        auto impl = std::move(impl_);
+        std::thread([impl = std::move(impl), cuda_dev]() mutable {
+            cudaSetDevice(cuda_dev);
+            impl.reset();
+        }).detach();
+    }
+
+    core::draw_frame receive_impl(const core::video_field field, int extra) override
+    { return impl_->receive_impl(field, extra); }
+
+    bool is_ready() override { return impl_->is_ready(); }
+
+    std::future<std::wstring> call(const std::vector<std::wstring>& params) override
+    { return impl_->call(params); }
+
+    core::monitor::state state() const override { return impl_->state(); }
+    std::wstring print()         const override { return impl_->print(); }
+    std::wstring name()          const override { return impl_->name(); }
+};
+
+// ---------------------------------------------------------------------------
 // Factory / registration
 // ---------------------------------------------------------------------------
 
@@ -1006,9 +1096,10 @@ create_notchlc_producer(const core::frame_producer_dependencies& deps,
     }
 
     try {
-        return spl::make_shared<notchlc_producer_impl>(
+        auto impl = std::make_shared<notchlc_producer_impl>(
             path, cuda_device, loop, color_matrix_override,
             start_frame, out_frame, deps);
+        return spl::make_shared<notchlc_producer>(std::move(impl));
     } catch (const std::exception& ex) {
         CASPAR_LOG(error) << L"[notchlc_producer] " << ex.what();
         return core::frame_producer::empty();
