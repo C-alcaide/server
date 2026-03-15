@@ -77,7 +77,8 @@ struct ffmpeg_producer : public core::frame_producer
                              std::optional<int64_t>               duration,
                              std::optional<bool>                  loop,
                              int                                  seekable,
-                             core::frame_geometry::scale_mode     scale_mode)
+                             core::frame_geometry::scale_mode     scale_mode,
+                             bool                                 growing)
         : filename_(filename)
         , frame_factory_(frame_factory)
         , format_desc_(format_desc)
@@ -92,7 +93,8 @@ struct ffmpeg_producer : public core::frame_producer
                                    duration,
                                    loop,
                                    seekable,
-                                   scale_mode))
+                                   scale_mode,
+                                   growing))
     {
     }
 
@@ -145,11 +147,19 @@ struct ffmpeg_producer : public core::frame_producer
         }
 
         if (boost::iequals(cmd, L"loop")) {
-            if (!value.empty()) {
-                producer_->loop(boost::lexical_cast<bool>(value));
+            if (params.size() > 1) {
+                producer_->loop(boost::lexical_cast<bool>(params.at(1)));
+                result = std::to_wstring(producer_->loop());
+            } else {
+                result = std::to_wstring(producer_->loop());
             }
-
-            result = std::to_wstring(producer_->loop());
+        } else if (boost::iequals(cmd, L"speed")) {
+            if (params.size() > 1) {
+                producer_->speed(boost::lexical_cast<double>(params.at(1)));
+                result = std::to_wstring(producer_->speed());
+            } else {
+                result = std::to_wstring(producer_->speed());
+            }
         } else if (boost::iequals(cmd, L"in") || boost::iequals(cmd, L"start")) {
             if (!value.empty()) {
                 producer_->start(boost::lexical_cast<int64_t>(value));
@@ -355,6 +365,8 @@ spl::shared_ptr<core::frame_producer> create_producer(const core::frame_producer
     auto speed    = get_param(L"SPEED", params, static_cast<double>(1.0));
     auto has_speed = contains_param(L"SPEED", params);
 
+    auto growing = contains_param(L"LIVE", params) || contains_param(L"GROWING", params);
+
     auto seek = get_param(L"SEEK", params, static_cast<uint32_t>(0));
     auto in   = get_param(L"IN", params, seek);
 
@@ -408,7 +420,8 @@ spl::shared_ptr<core::frame_producer> create_producer(const core::frame_producer
                                                       duration,
                                                       loop,
                                                       seekable,
-                                                      scale_mode);
+                                                      scale_mode,
+                                                      growing);
         if (pingpong)
             prod->pingpong(true);
         if (has_speed)

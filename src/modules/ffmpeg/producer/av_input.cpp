@@ -8,6 +8,9 @@
 #include <common/param.h>
 #include <common/scope_exit.h>
 
+#include <thread>
+#include <chrono>
+
 #include <boost/algorithm/string/case_conv.hpp>
 #include <boost/filesystem.hpp>
 
@@ -26,10 +29,11 @@ extern "C" {
 
 namespace caspar { namespace ffmpeg {
 
-Input::Input(const std::string& filename, std::shared_ptr<diagnostics::graph> graph, std::optional<bool> seekable)
+Input::Input(const std::string& filename, std::shared_ptr<diagnostics::graph> graph, std::optional<bool> seekable, bool growing)
     : filename_(filename)
     , graph_(graph)
     , seekable_(seekable)
+    , growing_(growing)
 {
     graph_->set_color("seek", diagnostics::color(1.0f, 0.5f, 0.0f));
     graph_->set_color("input", diagnostics::color(0.7f, 0.4f, 0.4f));
@@ -58,6 +62,13 @@ Input::Input(const std::string& filename, std::shared_ptr<diagnostics::graph> gr
                     } else if (ret == AVERROR(EAGAIN)) {
                         boost::this_thread::yield();
                     } else if (ret == AVERROR_EOF) {
+                        if (growing_) {
+                            if (ic_->pb) {
+                                avio_seek(ic_->pb, 0, SEEK_CUR);
+                            }
+                            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                            continue;
+                        }
                         eof_   = true;
                         packet = nullptr;
                     } else if (ret < 0) {
@@ -162,6 +173,11 @@ void Input::internal_reset()
         // TODO (fix) timeout?
         FF(av_dict_set(&options, "rw_timeout", "60000000", 0)); // 60 second IO timeout
     }
+
+    // Increase probe size and analyze duration to handle high-bitrate or obscure codecs
+    // Default is 5000000 (5MB). We increase to 50MB and 10 seconds.
+    FF(av_dict_set(&options, "probesize", "50000000", 0));
+    FF(av_dict_set(&options, "analyzeduration", "10000000", 0));
 
     AVFormatContext* ic             = avformat_alloc_context();
     ic->interrupt_callback.callback = Input::interrupt_cb;

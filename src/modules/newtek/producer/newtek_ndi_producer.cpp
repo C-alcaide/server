@@ -65,6 +65,10 @@ extern "C" {
 
 #include "../util/ndi.h"
 
+#include <chrono>
+#include <sstream>
+#include <iomanip>
+
 namespace caspar { namespace newtek {
 
 struct newtek_ndi_producer : public core::frame_producer
@@ -90,6 +94,11 @@ struct newtek_ndi_producer : public core::frame_producer
 
     int cadence_counter_;
     int cadence_length_;
+
+    // FPS counter
+    std::chrono::steady_clock::time_point last_fps_update_;
+    int                     frames_since_update_ = 0;
+    double                  current_fps_ = 0.0;
 
   public:
     explicit newtek_ndi_producer(spl::shared_ptr<core::frame_factory> frame_factory,
@@ -131,6 +140,23 @@ struct newtek_ndi_producer : public core::frame_producer
 
     core::draw_frame receive_impl(const core::video_field field, int nb_samples) override
     {
+        // FPS Calc
+        auto now = std::chrono::steady_clock::now();
+        frames_since_update_++;
+        auto duration_sec = std::chrono::duration_cast<std::chrono::duration<double>>(now - last_fps_update_).count();
+        
+        if (duration_sec >= 1.0) {
+            current_fps_ = (double)frames_since_update_ / duration_sec;
+            frames_since_update_ = 0;
+            last_fps_update_ = now;
+            
+            std::wstringstream stats;
+            stats.precision(2);
+            stats << std::fixed;
+            stats << print() << L" Fps: " << current_fps_;
+            graph_->set_text(stats.str());
+        }
+
         // TODO - fields
         graph_->set_value("tick-time", tick_timer_.elapsed() * format_desc_.fps * 0.5);
         tick_timer_.restart();

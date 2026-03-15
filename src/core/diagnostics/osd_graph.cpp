@@ -472,8 +472,8 @@ struct graph
         int max_fps = 0;
         for (auto it = lines_.begin(); it != lines_.end(); ++it)
             max_fps = std::max(max_fps, it->second.get_fps());
-        if (max_fps > 0)
-            text_str += L"  [" + std::to_wstring(max_fps) + L" fps]";
+        // if (max_fps > 0)
+        //    text_str += L"  [" + std::to_wstring(max_fps) + L" fps]";
 
         sf::Text text(text_str.c_str(), get_default_font(), text_size);
         text.setStyle(sf::Text::Italic);

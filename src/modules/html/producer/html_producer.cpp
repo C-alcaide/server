@@ -21,6 +21,10 @@
 
 #include "html_producer.h"
 
+#include <chrono>
+#include <sstream>
+#include <iomanip>
+
 #include <core/video_format.h>
 
 #include <core/frame/draw_frame.h>
@@ -143,6 +147,11 @@ class html_client
 
     CefRefPtr<CefBrowser> browser_;
 
+    // FPS counter
+    std::chrono::steady_clock::time_point last_fps_update_;
+    int                     frames_since_update_ = 0;
+    double                  current_fps_ = 0.0;
+
   public:
     html_client(spl::shared_ptr<core::frame_factory>       frame_factory,
                 const spl::shared_ptr<diagnostics::graph>& graph,
@@ -257,6 +266,23 @@ class html_client
 
     core::draw_frame receive(const core::video_field field)
     {
+        // FPS Calc
+        auto now = std::chrono::steady_clock::now();
+        frames_since_update_++;
+        auto duration_sec = std::chrono::duration_cast<std::chrono::duration<double>>(now - last_fps_update_).count();
+        
+        if (duration_sec >= 1.0) {
+            current_fps_ = (double)frames_since_update_ / duration_sec;
+            frames_since_update_ = 0;
+            last_fps_update_ = now;
+            
+            std::wstringstream stats;
+            stats.precision(2);
+            stats << std::fixed;
+            stats << print() << L" Fps: " << current_fps_;
+            graph_->set_text(stats.str());
+        }
+
         if (!try_pop(field)) {
             graph_->set_tag(diagnostics::tag_severity::SILENT, "late-frame");
             return core::draw_frame::still(last_frame_);

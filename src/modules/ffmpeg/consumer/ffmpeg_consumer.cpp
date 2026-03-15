@@ -24,11 +24,29 @@
 #include "../util/av_assert.h"
 #include "../util/av_util.h"
 
+#include <chrono>
+#include <sstream>
+#include <iomanip>
+
+extern "C" {
+#include <libavutil/opt.h>
+}
+
+// Include LTC Module
+#include "../../ltc/ltc_input.h"
+
+// AV_CODEC_ID_TIMECODE was removed in FFmpeg 7; define a local sentinel for tmcd-stream detection.
+// The actual stream codec_id is set to AV_CODEC_ID_NONE — FFmpeg 7 identifies tmcd tracks by codec_tag.
+#ifndef AV_CODEC_ID_TIMECODE
+constexpr AVCodecID AV_CODEC_ID_TIMECODE = static_cast<AVCodecID>(0x17800);
+#endif
+
 #include <common/bit_depth.h>
 #include <common/diagnostics/graph.h>
 #include <common/env.h>
 #include <common/executor.h>
 #include <common/future.h>
+#include <common/log.h>
 #include <common/memory.h>
 #include <common/scope_exit.h>
 #include <common/timer.h>
@@ -72,6 +90,7 @@ extern "C" {
 #include <tbb/concurrent_queue.h>
 #include <tbb/parallel_for.h>
 #include <tbb/parallel_invoke.h>
+#include <common/os/thread.h>
 
 #include <memory>
 #include <optional>
@@ -92,6 +111,8 @@ struct Stream
 
     std::shared_ptr<AVCodecContext> enc = nullptr;
     AVStream*                       st  = nullptr;
+    bool                            is_ltc = false;
+    uint32_t                        last_frame_number = 0;
 
     Stream(AVFormatContext*                    oc,
            std::string                         suffix,
@@ -101,6 +122,22 @@ struct Stream
            common::bit_depth                   depth,
            std::map<std::string, std::string>& options)
     {
+        if (codec_id == AV_CODEC_ID_TIMECODE) {
+            is_ltc = true;
+            st = avformat_new_stream(oc, nullptr);
+            if (!st) {
+                 FF_RET(AVERROR(ENOMEM), "avformat_new_stream");
+            }
+            
+            st->codecpar->codec_type = AVMEDIA_TYPE_DATA;
+            st->codecpar->codec_tag  = MKTAG('t', 'm', 'c', 'd');
+            st->codecpar->codec_id   = AV_CODEC_ID_NONE; // tmcd identified by tag in FFmpeg 7+
+            st->time_base            = av_inv_q(AVRational{format_desc.framerate.numerator(),
+                                                           format_desc.framerate.denominator()});
+            // st->avg_frame_rate is usually not set for data streams but maybe good for ref
+            return;
+        }
+
         std::map<std::string, std::string> stream_options;
 
         {
@@ -130,6 +167,18 @@ struct Stream
             if (it != stream_options.end()) {
                 codec = avcodec_find_encoder_by_name(it->second.c_str());
                 stream_options.erase(it);
+            } else if (suffix == ":v") {
+                const auto v_it = options.find("vcodec");
+                if (v_it != options.end()) {
+                    codec = avcodec_find_encoder_by_name(v_it->second.c_str());
+                    options.erase(v_it);
+                }
+            } else if (suffix == ":a") {
+                const auto a_it = options.find("acodec");
+                if (a_it != options.end()) {
+                    codec = avcodec_find_encoder_by_name(a_it->second.c_str());
+                    options.erase(a_it);
+                }
             }
         }
 
@@ -207,8 +256,10 @@ struct Stream
         }
 
         if (codec->type == AVMEDIA_TYPE_VIDEO) {
-            FF(avfilter_graph_create_filter(
-                &sink, avfilter_get_by_name("buffersink"), "out", nullptr, nullptr, graph.get()));
+            // Allocate the filter but do not initialize it yet
+            sink = avfilter_graph_alloc_filter(graph.get(), avfilter_get_by_name("buffersink"), "out");
+            if (!sink)
+                FF(AVERROR(ENOMEM));
 
 #ifdef _MSC_VER
 #pragma warning(push)
@@ -217,27 +268,45 @@ struct Stream
             // TODO codec->profiles
             // TODO FF(av_opt_set_int_list(sink, "framerates", codec->supported_framerates, { 0, 0 },
             // AV_OPT_SEARCH_CHILDREN));
-            FF(av_opt_set_int_list(sink, "pix_fmts", codec->pix_fmts, -1, AV_OPT_SEARCH_CHILDREN));
+
+            // Use av_opt_set_int_list for pix_fmts
+            FF(av_opt_set_int_list(sink, "pix_fmts", codec->pix_fmts, AV_PIX_FMT_NONE, AV_OPT_SEARCH_CHILDREN));
+
 #ifdef _MSC_VER
 #pragma warning(pop)
 #endif
+            // Now initialize the filter
+            FF(avfilter_init_str(sink, nullptr));
+
         } else if (codec->type == AVMEDIA_TYPE_AUDIO) {
-            FF(avfilter_graph_create_filter(
-                &sink, avfilter_get_by_name("abuffersink"), "out", nullptr, nullptr, graph.get()));
+            // Allocate the filter but do not initialize it yet
+            sink = avfilter_graph_alloc_filter(graph.get(), avfilter_get_by_name("abuffersink"), "out");
+            if (!sink)
+                FF(AVERROR(ENOMEM));
+
 #ifdef _MSC_VER
 #pragma warning(push)
 #pragma warning(disable : 4245)
 #endif
             // TODO codec->profiles
-            FF(av_opt_set_int_list(sink, "sample_fmts", codec->sample_fmts, -1, AV_OPT_SEARCH_CHILDREN));
+            
+            // Set sample_fmts using av_opt_set_int_list
+            FF(av_opt_set_int_list(sink, "sample_fmts", codec->sample_fmts, AV_SAMPLE_FMT_NONE, AV_OPT_SEARCH_CHILDREN));
+
+            // Set samplerates using av_opt_set_int_list
+            // Note: supported_samplerates is terminated by 0
             FF(av_opt_set_int_list(sink, "sample_rates", codec->supported_samplerates, 0, AV_OPT_SEARCH_CHILDREN));
 
+            // Set channel_layouts
             // TODO: need to translate codec->ch_layouts into something that can be passed via av_opt_set_*
             // FF(av_opt_set_chlayout(sink, "ch_layouts", codec->ch_layouts, AV_OPT_SEARCH_CHILDREN));
 
 #ifdef _MSC_VER
 #pragma warning(pop)
 #endif
+            // Now initialize the filter
+            FF(avfilter_init_str(sink, nullptr));
+
         } else {
             CASPAR_THROW_EXCEPTION(ffmpeg_error_t()
                                    << boost::errinfo_errno(EINVAL) << msg_info_t("invalid output media type"));
@@ -329,6 +398,30 @@ struct Stream
 
         const auto [in_frame, video_pts, audio_pts] = data;
 
+        if (is_ltc) {
+             if (!in_frame) return;
+
+             pkt = alloc_packet();
+             // 4 bytes payload, big endian frame count typically for TMCD
+             FF(av_new_packet(pkt.get(), 4));
+             pkt->stream_index = st->index;
+             pkt->pts = video_pts;
+             pkt->dts = video_pts;
+             pkt->duration = 1;
+             
+             // Get current LTC frame number or extrapolate
+             uint32_t current_fn = caspar::ltc::LTCInput::instance().get_current_frame_number(25); // assuming 25?
+             
+             // QuickTime tmcd uses Big Endian u32 frame count
+             pkt->data[0] = (current_fn >> 24) & 0xFF;
+             pkt->data[1] = (current_fn >> 16) & 0xFF;
+             pkt->data[2] = (current_fn >> 8) & 0xFF;
+             pkt->data[3] = (current_fn) & 0xFF;
+
+             cb(std::move(pkt));
+             return;
+        }
+
         if (in_frame) {
             if (enc->codec_type == AVMEDIA_TYPE_VIDEO) {
                 frame      = make_av_video_frame(in_frame, format_desc);
@@ -395,6 +488,11 @@ struct ffmpeg_consumer : public core::frame_consumer
 
     common::bit_depth depth_;
 
+    // FPS counter
+    std::chrono::steady_clock::time_point last_fps_update_;
+    int                     frames_since_update_ = 0;
+    double                  current_fps_ = 0.0;
+
   public:
     ffmpeg_consumer(std::string path, std::string args, bool realtime, common::bit_depth depth)
         : channel_index_([&] {
@@ -441,6 +539,8 @@ struct ffmpeg_consumer : public core::frame_consumer
         graph_->set_text(print());
 
         frame_thread_ = std::thread([=] {
+            caspar::set_thread_name(L"ffmpeg_consumer_frame_thread");
+            caspar::set_thread_realtime_priority();
             try {
                 std::map<std::string, std::string> options;
                 {
@@ -483,6 +583,13 @@ struct ffmpeg_consumer : public core::frame_consumer
 
                     FF(avformat_alloc_output_context2(
                         &oc, nullptr, !format.empty() ? format.c_str() : nullptr, path_.c_str()));
+                }
+                
+                // LTC Metadata Injection
+                if (options.count("ltc") > 0 || options.count("TIMECODE_SOURCE") > 0) {
+                     std::string tc = caspar::ltc::LTCInput::instance().get_current_timecode_string();
+                     av_dict_set(&oc->metadata, "timecode", tc.c_str(), 0);
+                     CASPAR_LOG(info) << "Injected Start Timecode: " << tc;
                 }
 
                 CASPAR_SCOPE_EXIT { avformat_free_context(oc); };
@@ -616,6 +723,23 @@ struct ffmpeg_consumer : public core::frame_consumer
 
     std::future<bool> send(core::video_field field, core::const_frame frame) override
     {
+        // FPS Calc
+        auto now = std::chrono::steady_clock::now();
+        frames_since_update_++;
+        auto duration_sec = std::chrono::duration_cast<std::chrono::duration<double>>(now - last_fps_update_).count();
+        
+        if (duration_sec >= 1.0) {
+            current_fps_ = (double)frames_since_update_ / duration_sec;
+            frames_since_update_ = 0;
+            last_fps_update_ = now;
+            
+            std::wstringstream stats;
+            stats.precision(2);
+            stats << std::fixed;
+            stats << u16(print()) << L" Fps: " << current_fps_;
+            graph_->set_text(stats.str());
+        }
+
         // TODO - field alignment
 
         {
@@ -627,6 +751,7 @@ struct ffmpeg_consumer : public core::frame_consumer
 
         if (!frame_buffer_.try_push({frame, video_pts, audio_pts})) {
             graph_->set_tag(diagnostics::tag_severity::WARNING, "dropped-frame");
+            CASPAR_LOG(warning) << "Dropped frame in ffmpeg consumer [" << path_ << "]";
         }
 
         video_pts += 1;

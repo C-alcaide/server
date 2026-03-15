@@ -841,6 +841,7 @@ struct AVProducer::Impl
     std::atomic<int64_t> seek_{AV_NOPTS_VALUE};
     std::atomic<bool>    loop_{false};
     std::atomic<bool>    pingpong_{false};  // ping-pong: auto-reverse at each end
+    bool                 growing_{false};
 
     std::string afilter_;
     std::string vfilter_;
@@ -877,6 +878,10 @@ struct AVProducer::Impl
 
     int latency_ = 0;
 
+    std::chrono::steady_clock::time_point last_fps_update_;
+    int                     frames_since_update_ = 0;
+    double                  current_fps_ = 0.0;
+
     boost::thread thread_;
 
     Impl(std::shared_ptr<core::frame_factory> frame_factory,
@@ -890,8 +895,10 @@ struct AVProducer::Impl
          std::optional<int64_t>               duration,
          bool                                 loop,
          int                                  seekable,
-         core::frame_geometry::scale_mode     scale_mode)
-        : frame_factory_(frame_factory)
+         core::frame_geometry::scale_mode     scale_mode,
+         bool                                 growing)
+        : growing_(growing)
+        , frame_factory_(frame_factory)
         , format_desc_(format_desc)
         , format_tb_({format_desc.duration, format_desc.time_scale * format_desc.field_count})
         , name_(name)
@@ -1069,8 +1076,8 @@ struct AVProducer::Impl
                         // This prevents an immediate EOF triggering before the decode pipeline produces the first result.
                         buffer_eof_ = false;
                     } else {
-                        buffer_eof_ = (video_filter_.eof && audio_filter_.eof) ||
-                                      av_rescale_q(time, TIME_BASE_Q, format_tb_) >= av_rescale_q(end, TIME_BASE_Q, format_tb_);
+                        buffer_eof_ = !growing_ && ((video_filter_.eof && audio_filter_.eof) ||
+                                      av_rescale_q(time, TIME_BASE_Q, format_tb_) >= av_rescale_q(end, TIME_BASE_Q, format_tb_));
                     }
 
                     if (buffer_eof_) {
@@ -1239,7 +1246,12 @@ struct AVProducer::Impl
 
     void update_state()
     {
-        graph_->set_text(u16(print()));
+        std::wstringstream stats;
+        stats.precision(2);
+        stats << std::fixed;
+        stats << u16(print()) << L" fps: " << current_fps_;
+        graph_->set_text(stats.str());
+
         boost::lock_guard<boost::mutex> lock(state_mutex_);
         state_["file/clip"] = {start().value_or(0) / format_desc_.fps, duration().value_or(0) / format_desc_.fps};
         state_["file/time"] = {time() / format_desc_.fps, file_duration().value_or(0) / format_desc_.fps};
@@ -1276,6 +1288,16 @@ struct AVProducer::Impl
 
     core::draw_frame next_frame(const core::video_field field)
     {
+        auto now = std::chrono::steady_clock::now();
+        frames_since_update_++;
+        auto duration_sec = std::chrono::duration_cast<std::chrono::duration<double>>(now - last_fps_update_).count();
+
+        if (duration_sec >= 1.0) {
+            current_fps_ = (double)frames_since_update_ / duration_sec;
+            frames_since_update_ = 0;
+            last_fps_update_ = now;
+        }
+
         CASPAR_SCOPE_EXIT { update_state(); };
 
         boost::lock_guard<boost::mutex> lock(buffer_mutex_);
@@ -1346,7 +1368,7 @@ struct AVProducer::Impl
             start    = start != AV_NOPTS_VALUE ? start : 0;
             auto end = duration != AV_NOPTS_VALUE ? start + duration : INT64_MAX;
 
-            if (buffer_eof_ && !frame_flush_ && !in_reverse) {
+            if ((buffer_eof_ || growing_) && !frame_flush_ && !in_reverse) {
                 if (pingpong_ && speed_.load() > 0.0) {
                     // Forward playback hit OUT point — flip to reverse.
                     // Seek buffer_capacity_ frames before the current position so
@@ -1927,7 +1949,8 @@ AVProducer::AVProducer(std::shared_ptr<core::frame_factory> frame_factory,
                        std::optional<int64_t>               duration,
                        std::optional<bool>                  loop,
                        int                                  seekable,
-                       core::frame_geometry::scale_mode     scale_mode)
+                       core::frame_geometry::scale_mode     scale_mode,
+                       bool                                 growing)
     : impl_(new Impl(std::move(frame_factory),
                      std::move(format_desc),
                      std::move(name),
@@ -1937,9 +1960,10 @@ AVProducer::AVProducer(std::shared_ptr<core::frame_factory> frame_factory,
                      std::move(start),
                      std::move(seek),
                      std::move(duration),
-                     std::move(loop.value_or(false)),
+                     loop.value_or(false),
                      seekable,
-                     scale_mode))
+                     scale_mode,
+                     growing))
 {
 }
 

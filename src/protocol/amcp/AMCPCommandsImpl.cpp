@@ -31,6 +31,8 @@
 #include "AMCPCommandQueue.h"
 #include "amcp_args.h"
 
+#include "../../modules/ltc/ltc_input.h"
+
 #include <common/env.h>
 
 #include <common/base64.h>
@@ -2420,6 +2422,46 @@ std::wstring info_paths_command(command_context& ctx)
     return replyString.str();
 }
 
+std::wstring info_ltc_command(command_context& ctx)
+{
+    boost::property_tree::wptree info;
+
+    info.add(L"ltc.timecode", caspar::u16(caspar::ltc::LTCInput::instance().get_current_timecode_string()));
+    
+    // Convert bool manually to string, property tree might output 0/1 or true/false depending on locale
+    info.add(L"ltc.valid", caspar::ltc::LTCInput::instance().is_valid() ? L"true" : L"false");
+    info.add(L"ltc.source", caspar::ltc::LTCInput::instance().is_using_system_clock() ? L"System Clock" : L"LTC");
+    info.add(L"ltc.device", caspar::u16(caspar::ltc::LTCInput::instance().get_current_device_name()));
+    
+    std::vector<std::string> devices = caspar::ltc::LTCInput::instance().get_capture_devices();
+    for (const auto& dev : devices) {
+        info.add(L"ltc.devices.device", caspar::u16(dev));
+    }
+
+    std::wstringstream replyString;
+    replyString << L"201 INFO LTC OK\r\n";
+
+    pt::xml_writer_settings<std::wstring> w(' ', 3);
+    pt::xml_parser::write_xml(replyString, info, w);
+
+    replyString << L"\r\n";
+    return replyString.str();
+}
+
+std::wstring ltc_load_command(command_context& ctx)
+{
+    if (ctx.parameters.size() < 1)
+        return L"400 ERROR\r\n";
+
+    std::string device_name = caspar::u8(ctx.parameters[0]);
+    
+    if (caspar::ltc::LTCInput::instance().set_capture_device(device_name)) {
+        return L"202 LTC LOAD OK\r\n";
+    }
+    
+    return L"404 LTC LOAD ERROR\r\n";
+}
+
 std::wstring diag_command(command_context& ctx)
 {
     core::diagnostics::osd::show_graphs(true);
@@ -2642,6 +2684,8 @@ void register_commands(std::shared_ptr<amcp_command_repository_wrapper>& repo)
     repo->register_command(L"Query Commands", L"INFO", info_command, 0);
     repo->register_command(L"Query Commands", L"INFO CONFIG", info_config_command, 0);
     repo->register_command(L"Query Commands", L"INFO PATHS", info_paths_command, 0);
+    repo->register_command(L"Query Commands", L"INFO LTC", info_ltc_command, 0);
+    repo->register_command(L"LTC Commands", L"LTC LOAD", ltc_load_command, 1);
     repo->register_command(L"Query Commands", L"GL INFO", gl_info_command, 0);
     repo->register_command(L"Query Commands", L"GL GC", gl_gc_command, 0);
 
