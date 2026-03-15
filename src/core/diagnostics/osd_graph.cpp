@@ -39,6 +39,8 @@
 #include <GL/glew.h>
 
 #include <atomic>
+#include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <filesystem>
 #include <list>
@@ -275,9 +277,13 @@ class line : public drawable
     boost::circular_buffer<sf::Vertex>                     line_data_{res_};
     boost::circular_buffer<std::optional<sf::VertexArray>> line_tags_{res_};
 
-    std::atomic<float> tick_data_;
-    std::atomic<bool>  tick_tag_;
-    std::atomic<int>   color_;
+    std::atomic<float>   tick_data_;
+    std::atomic<bool>    tick_tag_;
+    std::atomic<int>     color_;
+
+    std::atomic<int64_t> fps_start_time_{0};
+    std::atomic<int>     update_counter_{0};
+    std::atomic<int>     last_fps_{0};
 
     double x_delta_ = 1.0 / (static_cast<double>(res_) - 1.0);
 
@@ -287,6 +293,7 @@ class line : public drawable
         , tick_tag_(false)
         , color_(0xFFFFFFFF)
     {
+        fps_start_time_ = now_ms();
     }
 
     line(const line& other)
@@ -296,11 +303,41 @@ class line : public drawable
         , tick_data_(other.tick_data_.load())
         , tick_tag_(other.tick_tag_.load())
         , color_(other.color_.load())
+        , fps_start_time_(other.fps_start_time_.load())
+        , update_counter_(other.update_counter_.load())
+        , last_fps_(other.last_fps_.load())
         , x_delta_(other.x_delta_)
     {
     }
 
-    void set_value(float value) { tick_data_ = value; }
+    static int64_t now_ms()
+    {
+        using namespace std::chrono;
+        return duration_cast<milliseconds>(high_resolution_clock::now().time_since_epoch()).count();
+    }
+
+    void set_value(float value)
+    {
+        tick_data_ = value;
+        int updates = ++update_counter_;
+
+        int64_t now = now_ms();
+        double  el  = static_cast<double>(now - fps_start_time_.load()) / 1000.0;
+
+        if (el >= 1.0) {
+            last_fps_       = static_cast<int>(std::round(updates / el));
+            update_counter_ = 0;
+            fps_start_time_ = now;
+        }
+    }
+
+    int get_fps() const
+    {
+        double el = static_cast<double>(now_ms() - fps_start_time_.load()) / 1000.0;
+        if (el > 2.0)
+            return 0;
+        return last_fps_.load();
+    }
 
     void set_tag() { tick_tag_ = true; }
 
@@ -431,6 +468,12 @@ struct graph
             text_str   = text_;
             auto_reset = auto_reset_;
         }
+
+        int max_fps = 0;
+        for (auto it = lines_.begin(); it != lines_.end(); ++it)
+            max_fps = std::max(max_fps, it->second.get_fps());
+        if (max_fps > 0)
+            text_str += L"  [" + std::to_wstring(max_fps) + L" fps]";
 
         sf::Text text(text_str.c_str(), get_default_font(), text_size);
         text.setStyle(sf::Text::Italic);
