@@ -66,7 +66,6 @@ static constexpr int IO_QUEUE_CAP  = 2;  // raw packets buffered from disk
 // Item passed from io_loop → LZ4 workers → GPU thread.
 struct RawPacket {
     NotchLCPacket pkt;
-    double        ms_read = 0.0;  // disk read time (seconds)
     uint64_t      seq     = 0;    // monotonic sequence number (reset on seek)
     uint32_t      epoch   = 0;    // seek epoch when packet was queued
 };
@@ -76,13 +75,9 @@ struct Lz4DoneItem {
     uint64_t         seq     = 0;    // sequence number for reorder buffer
     uint32_t         epoch   = 0;    // seek epoch
     int              slot    = -1;
-    double           ms_read = 0.0;   // disk read time (seconds)
-    double           ms_lz4  = 0.0;   // LZ4 decompress time (seconds)
     NotchBlockHeader hdr     = {};
     size_t           actual_uncompressed = 0;
     std::vector<int32_t> audio_samples;
-    size_t           pkt_size          = 0;
-    uint32_t         uncompressed_size = 0;
 };
 
 // Min-heap comparator: ensures GPU thread always gets the lowest-seq item first.
@@ -403,9 +398,7 @@ struct notchlc_producer_impl final : public core::frame_producer
             if (seek_request_ >= 0) continue;
 
             // ── Read packet from disk ─────────────────────────────────────
-            caspar::timer read_timer;
             auto pkt = demuxer_->read_packet();
-            const double ms_read = read_timer.elapsed();
 
             if (pkt.is_eof) {
                 if (loop_) {
@@ -416,7 +409,7 @@ struct notchlc_producer_impl final : public core::frame_producer
                     // NOTE: pkt_seq NOT reset on loop; stays monotonic
                 } else {
                     const uint32_t cur_epoch = seek_epoch_.load(std::memory_order_relaxed);
-                    { std::lock_guard<std::mutex> lk(raw_mutex_); raw_queue_.push({std::move(pkt), ms_read, pkt_seq++, cur_epoch}); }
+                    { std::lock_guard<std::mutex> lk(raw_mutex_); raw_queue_.push({std::move(pkt), pkt_seq++, cur_epoch}); }
                     raw_cv_.notify_all();
                     std::unique_lock<std::mutex> lk(raw_mutex_);
                     raw_cv_.wait(lk, [this] { return stop_flag_ || seek_request_ >= 0; });
@@ -428,7 +421,7 @@ struct notchlc_producer_impl final : public core::frame_producer
             {
                 const uint32_t cur_epoch = seek_epoch_.load(std::memory_order_relaxed);
                 std::lock_guard<std::mutex> lk(raw_mutex_);
-                raw_queue_.push({std::move(pkt), ms_read, pkt_seq++, cur_epoch});
+                raw_queue_.push({std::move(pkt), pkt_seq++, cur_epoch});
             }
             raw_cv_.notify_one();
             ++io_frame_count;
@@ -505,13 +498,11 @@ struct notchlc_producer_impl final : public core::frame_producer
             NotchBlockHeader hdr = {};
             size_t actual_uncompressed = 0;
 
-            caspar::timer lz4_timer;
             cudaError_t err = notchlc_decode_cpu_phase(
                 &ctx,
                 rp.pkt.payload_data(), rp.pkt.payload_size(),
                 rp.pkt.uncompressed_size, rp.pkt.format,
                 hdr, actual_uncompressed);
-            const double ms_lz4 = lz4_timer.elapsed();
 
             if (err != cudaSuccess) {
                 CASPAR_LOG(warning) << L"[notchlc_producer] LZ4 cpu_phase failed slot=" << slot
@@ -546,13 +537,9 @@ struct notchlc_producer_impl final : public core::frame_producer
                 item.seq                 = rp.seq;
                 item.epoch               = rp.epoch;
                 item.slot                = slot;
-                item.ms_read             = rp.ms_read;
-                item.ms_lz4              = ms_lz4;
                 item.hdr                 = hdr;
                 item.actual_uncompressed = actual_uncompressed;
                 item.audio_samples       = std::move(rp.pkt.audio_samples);
-                item.pkt_size            = rp.pkt.payload_size();
-                item.uncompressed_size   = rp.pkt.uncompressed_size;
                 lz4_done_pq_.push(std::move(item));
             }
             lz4_done_cv_.notify_one();
@@ -591,10 +578,6 @@ struct notchlc_producer_impl final : public core::frame_producer
         int64_t              video_frame_count = in_frame_;
         uint32_t             seen_epoch  = seek_epoch_.load(std::memory_order_acquire);
         uint64_t             next_seq    = 0;  // monotonically increasing; resets only on user seek
-
-        // Timing accumulators — logged every 5 frames.
-        double t_read_acc = 0, t_decode_acc = 0, t_memcpy_acc = 0;
-        int    t_count    = 0;
 
         while (!stop_flag_) {
             // ── Wait for next in-sequence item from reorder buffer ────────
@@ -664,7 +647,6 @@ struct notchlc_producer_impl final : public core::frame_producer
                 video_frame_count = in_frame_;
                 audio_accum.clear();
                 audio_frame_idx   = 0;
-                t_read_acc = t_decode_acc = t_memcpy_acc = 0; t_count = 0;
                 {
                     std::lock_guard<std::mutex> rlk(queue_mutex_);
                     while (!ready_queue_.empty()) ready_queue_.pop();
@@ -720,10 +702,8 @@ struct notchlc_producer_impl final : public core::frame_producer
             } else {
                 err = notchlc_decode_gpu_phase(&ctx, item.hdr, item.actual_uncompressed, cm, nullptr);
                 if (err == cudaSuccess) {
-                    caspar::timer memcpy_timer;
                     const size_t out_bytes = (size_t)ctx.width * ctx.height * 4 * sizeof(uint16_t);
                     std::memcpy(h_bgra16_[cur_slot], ctx.d_bgra16, out_bytes);
-                    t_memcpy_acc += memcpy_timer.elapsed();
                 }
             }
 
@@ -806,21 +786,7 @@ struct notchlc_producer_impl final : public core::frame_producer
             }
             slot_pool_cv_.notify_one();
 
-            // ── Per-5-frame performance log ───────────────────────────────────
-            t_read_acc += item.ms_read; t_decode_acc += (item.ms_lz4 + ms_decode); ++t_count;
-            if (t_count >= 5) {
-                CASPAR_LOG(info)
-                    << L"[notchlc_producer] PERF avg/" << t_count << L"fr: "
-                    << L"disk=" << (t_read_acc / t_count * 1000.0) << L"ms "
-                    << L"lz4=" << (item.ms_lz4 * 1000.0) << L"ms "
-                    << L"gpu=" << (ms_decode * 1000.0) << L"ms "
-                    << L"memcpy=" << (t_memcpy_acc / t_count * 1000.0) << L"ms "
-                    << (use_host_copy_ ? L"[host-copy]" : L"[zero-copy]")
-                    << L"  pkt=" << (item.pkt_size / 1024 / 1024) << L"MB"
-                    << L"  uncmp=" << (item.uncompressed_size / 1024 / 1024) << L"MB";
-                t_read_acc = t_decode_acc = t_memcpy_acc = 0;
-                t_count = 0;
-            }
+
         }
 
 #ifdef WIN32
