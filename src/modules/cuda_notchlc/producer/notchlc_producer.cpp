@@ -232,42 +232,75 @@ struct notchlc_producer_impl final : public core::frame_producer
             demuxer_->seek_to_frame(0);  // rewind so the read loop starts from the beginning
         }
 
-        // ── Adaptive slot count: scale down for large frames to avoid VRAM pressure ──
-        // Per-slot VRAM estimate (bytes):
-        //   d_compressed, d_uncompressed, nvcomp_temp ≈ max_compressed + max_uncompressed*2
-        //   d_y + d_u + d_v + d_a + d_bgra16          ≈ max_pixels * (4+4+4+4+8) * 2 bytes
-        //   d_y_bit_widths/offsets                     ≈ max_pixels / 8
-        //   GL texture (OGL VRAM, not cudaMalloc)      ≈ max_pixels * 8
+        // ── CUDA decode contexts ─────────────────────────────────────────
+        // Allocate slots greedily rather than pre-estimating from cudaMemGetInfo().
+        //
+        // IMPORTANT: do NOT use cudaMemGetInfo() to decide slot count here.
+        // When a previous producer is being torn down asynchronously (on a
+        // background thread), its VRAM is still allocated at this point, making
+        // cudaMemGetInfo() return a pessimistically low "free" value.  If the
+        // previous producer had 12 slots of e.g. 400 MB each, cudaMemGetInfo()
+        // reports ~4.8 GB less free than reality, causing num_slots_ to collapse
+        // to 1 and producing the observed alternating slow/fast playback pattern.
+        //
+        // Instead: try to allocate up to NUM_SLOTS.  CUDA's allocator itself
+        // knows what's actually free.  If we get fewer than MIN_VIABLE_SLOTS
+        // it means the previous teardown is genuinely holding resources; wait
+        // briefly (previous teardown takes < 200 ms in practice) and retry.
         {
-            const size_t vram_per_slot =
-                max_compressed + max_uncompressed * 2 +
-                max_pixels * 26 +           // YUVAx4 uint16 + bgra16 uint16 + OGL texture
-                max_pixels / 4;             // prefix-sum scratch
+            static constexpr int MIN_VIABLE_SLOTS = 4;
 
-            size_t free_vram = 0, total_vram = 0;
-            cudaMemGetInfo(&free_vram, &total_vram);
+            auto try_alloc = [&]() {
+                // Destroy any partial slots from a previous attempt.
+                for (int i = 0; i < num_slots_; i++) {
+                    notchlc_decode_ctx_destroy(&slots_[i]);
+                    slots_init_[i] = false;
+                }
+                num_slots_ = 0;
 
-            // Keep at least 1.5 GB free for the OS and CasparCG OGL stack.
-            const size_t reserve = 1536ull * 1024 * 1024;
-            const size_t usable  = (free_vram > reserve) ? free_vram - reserve : free_vram / 2;
-            num_slots_ = std::max(1, std::min(NUM_SLOTS, (int)(usable / vram_per_slot)));
+                for (int i = 0; i < NUM_SLOTS; i++) {
+                    cudaError_t e = notchlc_decode_ctx_create(&slots_[i],
+                        frame_info_.width, frame_info_.height,
+                        max_compressed, max_uncompressed);
+                    if (e == cudaErrorMemoryAllocation) {
+                        CASPAR_LOG(info) << L"[notchlc_producer] VRAM full at slot " << i
+                                         << L"; will use " << i << L" slots.";
+                        break;
+                    }
+                    if (e != cudaSuccess)
+                        CASPAR_THROW_EXCEPTION(std::runtime_error(
+                            std::string("[notchlc_producer] notchlc_decode_ctx_create: ")
+                            + cudaGetErrorString(e)));
+                    slots_init_[i] = true;
+                    ++num_slots_;
+                }
+            };
 
-            CASPAR_LOG(info) << L"[notchlc_producer] VRAM: free="
-                             << free_vram / (1024*1024) << L" MB  per-slot~"
-                             << vram_per_slot / (1024*1024) << L" MB  max_compressed="
-                             << max_compressed / (1024*1024) << L" MB  max_uncompressed="
-                             << max_uncompressed / (1024*1024) << L" MB  slots="
-                             << num_slots_;
-        }
+            try_alloc();
 
-        for (int i = 0; i < num_slots_; i++) {
-            cudaError_t e = notchlc_decode_ctx_create(&slots_[i],
-                frame_info_.width, frame_info_.height,
-                max_compressed, max_uncompressed);
-            if (e != cudaSuccess)
+            if (num_slots_ < MIN_VIABLE_SLOTS) {
+                // Too few slots: previous producer is likely still releasing VRAM.
+                // Wait for its async teardown to complete (~100–200 ms) then retry.
+                CASPAR_LOG(warning) << L"[notchlc_producer] Only " << num_slots_
+                    << L" CUDA slot(s) available; previous producer may still be releasing VRAM."
+                    << L"  Waiting 300 ms then retrying.";
+                std::this_thread::sleep_for(std::chrono::milliseconds(300));
+                try_alloc();
+            }
+
+            if (num_slots_ == 0)
                 CASPAR_THROW_EXCEPTION(std::runtime_error(
-                    std::string("[notchlc_producer] notchlc_decode_ctx_create: ") + cudaGetErrorString(e)));
-            slots_init_[i] = true;
+                    "[notchlc_producer] No CUDA VRAM available for any decode slot"));
+
+            {
+                size_t free_vram = 0, total_vram = 0;
+                cudaMemGetInfo(&free_vram, &total_vram);
+                CASPAR_LOG(info) << L"[notchlc_producer] VRAM: free="
+                                 << free_vram / (1024*1024) << L" MB  max_compressed="
+                                 << max_compressed / (1024*1024) << L" MB  max_uncompressed="
+                                 << max_uncompressed / (1024*1024) << L" MB  slots="
+                                 << num_slots_;
+            }
         }
 
         // Pre-fill the slot pool with all created slot indices.
