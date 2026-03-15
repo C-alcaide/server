@@ -84,3 +84,14 @@ cudaError_t prores_decode_frame(
     int               color_matrix,
     bool              is_interlaced,
     cudaArray_t       d_gl_array);       // mapped cudaArray from CudaGLTexture::map()
+
+// Headless variant — outputs to a plain host buffer instead of a GL texture.
+// Useful for unit tests and offline processing (no OpenGL context required).
+// h_bgra16_out must point to at least ctx->width * ctx->height * 4 * sizeof(uint16_t) bytes.
+cudaError_t prores_decode_frame_to_host(
+    ProResDecodeCtx*  ctx,
+    const uint8_t*    h_icpf_data,
+    size_t            icpf_size,
+    int               color_matrix,
+    bool              is_interlaced,
+    uint16_t*         h_bgra16_out);     // host output: width*height*4 uint16_t

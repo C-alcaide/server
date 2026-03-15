@@ -25,6 +25,9 @@ set(CUDA_KERNEL_SOURCES
     # it as a separate compilation unit (would cause nvlink multiple-definition errors
     # with separable compilation since the same device functions would be in two objects).
     cuda/cuda_prores_frame.cu
+
+    # ProRes decoder kernels
+    cuda/cuda_prores_decode.cu
 )
 
 # CasparCG consumer TUs — depend on core/common (Boost, monitor, etc.).
@@ -47,6 +50,10 @@ set(CPU_SOURCES
     # Input (DeckLink capture + allocator)
     input/cuda_pinned_allocator.cpp
     input/decklink_capture.cpp
+
+    # Producer (ProRes decoder)
+    producer/prores_demuxer.cpp
+    producer/prores_producer.cpp
 
     # Module entry point
     cuda_prores.cpp
@@ -76,6 +83,16 @@ set(HEADER_SOURCES
 
     # Timecode
     timecode.h
+
+    # ProRes decoder
+    cuda/cuda_prores_bitreader.cuh
+    cuda/cuda_prores_entropy_decode.cuh
+    cuda/cuda_prores_idct.cuh
+    cuda/cuda_prores_to_bgra16.cuh
+    cuda/cuda_prores_decode.h
+    producer/prores_demuxer.h
+    producer/prores_producer.h
+    util/cuda_gl_texture.h
 
     # BGRA->V210 CUDA kernel
     cuda/cuda_bgra_to_v210.cuh
@@ -116,6 +133,8 @@ target_link_libraries(cuda_prores PRIVATE
     CUDA::nppist
     # FFmpeg (via the CasparCG ffmpeg target which re-exports the libs)
     ffmpeg
+    # GLEW — needed transitively because accelerator/ogl/util/device.h includes <GL/glew.h>
+    GLEW::glew
 )
 
 if (MSVC)

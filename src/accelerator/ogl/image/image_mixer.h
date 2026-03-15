@@ -31,6 +31,7 @@
 #include <core/video_format.h>
 
 #include <future>
+#include <memory>
 
 namespace caspar { namespace accelerator { namespace ogl {
 
@@ -61,6 +62,9 @@ class image_mixer final : public core::image_mixer
     void              visit(const core::const_frame& frame) override;
     void              pop() override;
     common::bit_depth depth() const override;
+
+    // Expose the underlying OGL device for CUDA-GL interop producers.
+    std::shared_ptr<class device> get_ogl_device() const;
 
   private:
     struct impl;

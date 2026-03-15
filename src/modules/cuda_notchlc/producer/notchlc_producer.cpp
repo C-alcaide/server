@@ -250,7 +250,11 @@ struct notchlc_producer_impl final : public core::frame_producer
             // Keep at least 1.5 GB free for the OS and CasparCG OGL stack.
             const size_t reserve = 1536ull * 1024 * 1024;
             const size_t usable  = (free_vram > reserve) ? free_vram - reserve : free_vram / 2;
-            num_slots_ = std::max(1, std::min(NUM_SLOTS, (int)(usable / vram_per_slot)));
+            
+            // To prevent overlapping playbacks (which temporarily halves free VRAM)
+            // from shrinking the slot pool too aggressively and starving the lz4 worker threads 
+            // (causing the alternating half-speed playback bug), we enforce a robust minimum block size.
+            num_slots_ = std::max(10, std::min(NUM_SLOTS, (int)(usable / vram_per_slot)));
 
             CASPAR_LOG(info) << L"[notchlc_producer] VRAM: free="
                              << free_vram / (1024*1024) << L" MB  per-slot~"

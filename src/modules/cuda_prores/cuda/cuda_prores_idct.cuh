@@ -246,18 +246,13 @@ __global__ void k_prores_idct_dequant(
         slice_col        = mb_col_in_plane / mbs_per_slice;
         mb_col_in_slice  = mb_col_in_plane % mbs_per_slice;
         mb_row           = blk_y >> 1;
-        int brow_mb      = blk_y & 1;  // row within MB (0 or 1)
-        int bcol_mb      = blk_x & 1;  // col within MB (0 or 1)
-        // In the encoder's k_dct_quantise, luma blocks within a slice are indexed:
-        //   blk_idx (in slice) = block_row_in_slice * (2*mbs_per_slice) + block_col_in_slice
-        // block_col_in_slice = mb_col_in_slice * 2 + bcol_mb
-        // block_row_in_slice = mb_row_in_slice * 2 + brow_mb  (mb_row_in_slice = 0 for progressive 422)
-        // But ProRes 422 MBs span full 16 rows, so 2 block rows per MB:
-        //   For single-field progressive: all MBs in a row share mb_row_in_slice=0 in the slice.
-        //   The slice's blocks_per_row = 2 * mbs_per_slice.
-        //   blocks are arranged: [row 0 of all MBs in slice][row 1 of all MBs in slice]
-        //   i.e., block_in_slice = brow_mb * (2*mbs_per_slice) + mb_col_in_slice*2 + bcol_mb
-        block_in_slice = brow_mb * (2 * mbs_per_slice) + mb_col_in_slice * 2 + bcol_mb;
+        int brow_mb      = blk_y & 1;  // row within MB (0=top, 1=bottom)
+        int bcol_mb      = blk_x & 1;  // col within MB (0=left, 1=right)
+        // Apple ProRes spec (and FFmpeg): blocks within a slice are in
+        // within-MB order: for each MB m (0..M-1), the 4 luma blocks are
+        //   block = 4*m + brow_mb*2 + bcol_mb
+        // i.e., MB0[TL,TR,BL,BR], MB1[TL,TR,BL,BR], ...
+        block_in_slice = mb_col_in_slice * 4 + brow_mb * 2 + bcol_mb;
     } else {
         // Chroma
         mb_col_in_plane = blk_x;
@@ -265,9 +260,11 @@ __global__ void k_prores_idct_dequant(
         mb_col_in_slice = blk_x % mbs_per_slice;
         mb_row          = blk_y >> 1;
         int brow_mb     = blk_y & 1;
-        // Chroma: 1 block per MB column per row direction
-        // block_in_slice = brow_mb * mbs_per_slice + mb_col_in_slice
-        block_in_slice  = brow_mb * mbs_per_slice + mb_col_in_slice;
+        // Apple ProRes spec: chroma blocks within a slice are in
+        // within-MB order: for each MB m (0..M-1), the 2 chroma blocks are
+        //   block = 2*m + brow_mb
+        // i.e., MB0[top, bottom], MB1[top, bottom], ...
+        block_in_slice  = mb_col_in_slice * 2 + brow_mb;
     }
 
     int slice_idx = mb_row * slices_per_row + slice_col;
@@ -287,18 +284,18 @@ __global__ void k_prores_idct_dequant(
     const uint8_t q_val = is_chroma ? c_quant_chroma[profile][tid]
                                     : c_quant_luma  [profile][tid];
 
-    // ── Dequantise and unscan into shared memory ───────────────────────────
+    // ── Dequantise into shared memory ──────────────────────────────────────
     __shared__ int32_t s_block[64];
 
-    // Encoder: d_out_coeffs[blk * 64 + j] = quantised coeff for natural pos c_scan_order[j]
-    // So: nat_pos = c_scan_order[j], and the quant was q_val = quant[j] (at scan position j).
-    // We dequantise: s_block[c_scan_order[j]] = slice_comp[j] * q_val * q_scale
+    // The entropy decoder (decode_ac_plane) writes coefficients at buffer index
+    // = natural raster position (block[b*64 + scan[i]] where scan[i] = nat_pos).
+    // So slice_comp[tid] = quantised coefficient for natural position `tid`.
+    // c_quant_luma/chroma is also stored in natural raster order, so
+    // q_val = quant[tid] is the correct quantisation value for this position.
+    // No scan-order remapping is needed here; place directly at s_block[tid].
     {
-        const int nat_pos = is_interlaced
-            ? (int)c_scan_order_interlaced[tid]
-            : (int)c_scan_order[tid];
         int32_t dequant = (int32_t)slice_comp[tid] * ((int32_t)q_val * q_scale);
-        s_block[nat_pos] = dequant;
+        s_block[tid] = dequant;
     }
     __syncthreads();
 

@@ -4,9 +4,11 @@
 // Pipeline:
 //   Planar int16_t YUV422P10 (values 0..1023 from V210 unpack)
 //   → Forward 8×8 DCT — raw 10-bit values, NO level shift
-//   → Quantise (divide by q_table[scan[i]] * q_scale, rounding)
-//   → Scan-reorder using PRORES_SCAN_ORDER (ProRes progressive scan)
+//   → Quantise (divide by q_table[nat_pos] * q_scale, rounding)
+//     where nat_pos = c_scan_order[scan_pos] — natural raster position
+//   → Scan-reorder into output buffer: output[scan_pos] = qcoef at nat_pos
 //   → Output: int16_t coefficients [num_slices][blocks_per_slice][64]
+//     indexed by scan_pos (matches ProRes bitstream / entropy encoder input)
 //
 // DCT convention (matches FFmpeg ff_jpeg_fdct_islow_10):
 //   Input:  raw uint10 values [0, 1023], stored as int32_t.
@@ -168,14 +170,17 @@ __global__ void k_dct_quantise(
     }
     __syncthreads();
 
-    // Quantise and scan-reorder — look up quant table from __constant__ memory.
-    // Direct constant memory access is correct here; passing a host-side pointer
-    // to a __constant__ symbol as a kernel parameter would give a wrong address.
-    uint8_t  q_val = (is_chroma ? c_quant_chroma[profile][tid]
-                                : c_quant_luma  [profile][tid]);
+    // Quantise with scan-reorder — use the natural raster position for both the
+    // coefficient read and the quantisation matrix lookup.  The quant matrices
+    // are stored in natural raster order (PRORES_QUANT_LUMA / CHROMA), so we
+    // must index them by natural position, not scan position.  This matches the
+    // convention used by the entropy decoder and IDCT (both indexed by nat_pos).
+    const int nat_pos_q = (is_interlaced ? c_scan_order_interlaced : c_scan_order)[tid];
+    uint8_t  q_val = (is_chroma ? c_quant_chroma[profile][nat_pos_q]
+                                : c_quant_luma  [profile][nat_pos_q]);
     int32_t  denom = (int32_t)q_val * q_scale;
     // ProRes quantisation: round-half-away-from-zero, then clamp to int16_t
-    int32_t  raw   = s_block[(is_interlaced ? c_scan_order_interlaced : c_scan_order)[tid]]; // scan reorder
+    int32_t  raw   = s_block[nat_pos_q]; // coefficient at natural position
     // Subtract the DC bias before quantising the DC coefficient (tid==0,
     // c_scan_order[0]==0).  FFmpeg's encode_dcs does (blocks[0] - 0x4000) / scale;
     // a flat 512-value block produces DCT DC = 512*32 = 16384 = 0x4000, so

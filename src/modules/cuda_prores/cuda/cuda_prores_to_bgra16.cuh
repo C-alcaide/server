@@ -78,6 +78,21 @@
 #define BT709_CB_TO_G  -1795584  // -27.40 * 65536
 #define BT709_CR_TO_G  -4491264  // -68.53 * 65536
 #define BT709_CB_TO_B  17802432  // 271.64 * 65536
+//
+// BT.601 (ITU-R BT.601 / SMPTE-C, CICP matrix 5 or 6):
+//   Kr=0.299, Kg=0.587, Kb=0.114
+//   R_full = 74.81*y + 65535/448*1.402*cr
+//          = 74.81*y + 205.09*cr
+//   G_full = 74.81*y - 65535/448*0.344136*cb - 65535/448*0.714136*cr
+//          = 74.81*y - 50.33*cb - 104.47*cr
+//   B_full = 74.81*y + 65535/448*1.772*cb
+//          = 74.81*y + 259.21*cb
+//   As Q16:
+#define BT601_Y_SCALE   4899072  // same Y scale
+#define BT601_CR_TO_R  13440512  // 205.09 * 65536
+#define BT601_CB_TO_G  -3298304  // -50.33 * 65536
+#define BT601_CR_TO_G  -6849792  // -104.47 * 65536
+#define BT601_CB_TO_B  16991232  // 259.21 * 65536
 
 // ─── Kernel ──────────────────────────────────────────────────────────────────
 //
@@ -91,7 +106,7 @@ __global__ void k_ycbcr422p10_to_bgra16(
     uint16_t*      __restrict__ d_bgra16,
     int width,
     int height,
-    int color_matrix)   // 9 = BT.2020, else BT.709
+    int color_matrix)   // 9=BT.2020, 5/6=BT.601, else BT.709
 {
     const int x = blockIdx.x * blockDim.x + threadIdx.x;
     const int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -114,8 +129,14 @@ __global__ void k_ycbcr422p10_to_bgra16(
         r = (y64 + (int64_t)icr * BT2020_CR_TO_R) >> 16;
         g = (y64 + (int64_t)icb * BT2020_CB_TO_G + (int64_t)icr * BT2020_CR_TO_G) >> 16;
         b = (y64 + (int64_t)icb * BT2020_CB_TO_B) >> 16;
+    } else if (color_matrix == 5 || color_matrix == 6) {
+        // BT.601 (5=EBU/PAL, 6=SMPTE-C/NTSC)
+        int64_t y64  = (int64_t)iy  * BT601_Y_SCALE;
+        r = (y64 + (int64_t)icr * BT601_CR_TO_R) >> 16;
+        g = (y64 + (int64_t)icb * BT601_CB_TO_G + (int64_t)icr * BT601_CR_TO_G) >> 16;
+        b = (y64 + (int64_t)icb * BT601_CB_TO_B) >> 16;
     } else {
-        // BT.709 (default)
+        // BT.709 (default — covers code 1, unspecified 0, and any unknown value)
         int64_t y64  = (int64_t)iy  * BT709_Y_SCALE;
         r = (y64 + (int64_t)icr * BT709_CR_TO_R) >> 16;
         g = (y64 + (int64_t)icb * BT709_CB_TO_G + (int64_t)icr * BT709_CR_TO_G) >> 16;

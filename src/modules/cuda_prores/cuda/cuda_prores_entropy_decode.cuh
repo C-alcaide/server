@@ -205,25 +205,37 @@ __device__ void decode_ac_plane(BitReader* br, int16_t* blocks, int n_blocks,
 //   [4..5]  Cb_size (BE16)
 //   Cr_size = slice_size - 6 - Y_size - Cb_size
 //
-// mbs_per_slice: macroblock columns per slice (power of 2)
+// mbs_per_slice: maximum macroblock columns per slice (power of 2; from picture header)
 // num_slices   : total number of slices in this picture
-// ---------------------------------------------------------------------------
+// mb_width     : frame width in macroblocks (= ceil(frame_width / 16))
+// slices_per_row : number of slices per MB row (= ceil(mb_width / mbs_per_slice))
+// ---------------------------------------------------------------------------  
 __global__ void k_prores_entropy_decode(
     const uint8_t* __restrict__ d_frame_data,
-    const uint32_t* __restrict__ d_slice_starts,   // byte offset per slice
-    const uint16_t* __restrict__ d_slice_sizes,    // byte size per slice
+    const uint32_t* __restrict__ d_slice_starts,   // byte offset per slice     
+    const uint16_t* __restrict__ d_slice_sizes,    // byte size per slice       
     int16_t*        __restrict__ d_dec_coeffs,      // output
     uint8_t*        __restrict__ d_q_scales,        // output: q_scale per slice
     int mbs_per_slice,
     int num_slices,
+    int mb_width,
+    int slices_per_row,
     bool is_interlaced)
 {
     const int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= num_slices) return;
 
-    const int y_n  = 4 * mbs_per_slice;  // luma   8×8 blocks per slice
-    const int cb_n = 2 * mbs_per_slice;  // chroma 8×8 blocks per slice
-    const int cr_n = cb_n;
+    // Compute the actual number of MBs in this slice (last slice in each row
+    // may have fewer MBs than mbs_per_slice if mb_width is not a multiple).
+    const int s_col = s % slices_per_row;
+    const int mbs_actual = min(mbs_per_slice, mb_width - s_col * mbs_per_slice);
+
+    // Fixed stride uses mbs_per_slice (the maximum) so all slices have the
+    // same coeff_stride in d_dec_coeffs.  Only the DECODE CALLS use mbs_actual.
+    const int y_n_max  = 4 * mbs_per_slice;
+    const int cb_n_max = 2 * mbs_per_slice;
+    const int y_n_act  = 4 * mbs_actual;  // actual blocks to decode
+    const int cb_n_act = 2 * mbs_actual;
 
     // Slice data pointer.
     const uint8_t* slice = d_frame_data + d_slice_starts[s];
@@ -252,14 +264,15 @@ __global__ void k_prores_entropy_decode(
 
     d_q_scales[s] = q_scale;
 
-    // ── Coefficient buffer for this slice ─────────────────────────────────
-    const ptrdiff_t stride = (ptrdiff_t)(y_n + cb_n + cr_n) * 64;
+    // ── Coefficient buffer for this slice (fixed stride = mbs_per_slice) ──
+    const ptrdiff_t stride = (ptrdiff_t)(y_n_max + cb_n_max + cb_n_max) * 64;
     int16_t* y_blks  = d_dec_coeffs + (ptrdiff_t)s * stride;
-    int16_t* cb_blks = y_blks  + (ptrdiff_t)y_n  * 64;
-    int16_t* cr_blks = cb_blks + (ptrdiff_t)cb_n * 64;
+    int16_t* cb_blks = y_blks  + (ptrdiff_t)y_n_max * 64;
+    int16_t* cr_blks = cb_blks + (ptrdiff_t)cb_n_max * 64;
 
-    // Zero all coefficients (AC positions default to 0; DC set by decode_dc_plane).
-    for (int i = 0; i < (y_n + cb_n + cr_n) * 64; i++) {
+    // Zero all coefficients (use the full fixed-stride allocation so all
+    // positions, including unused slots of partial slices, are zeroed).
+    for (int i = 0; i < (y_n_max + cb_n_max + cb_n_max) * 64; i++) {
         y_blks[i] = 0;
     }
 
@@ -270,24 +283,24 @@ __global__ void k_prores_entropy_decode(
     {
         BitReader br;
         br_init(&br, slice + hdr_bytes, (unsigned)y_size);
-        decode_dc_plane(&br, y_blks, y_n);
-        decode_ac_plane(&br, y_blks, y_n, scan);
+        decode_dc_plane(&br, y_blks, y_n_act);   // decode only actual blocks
+        decode_ac_plane(&br, y_blks, y_n_act, scan);
     }
 
     // ── Cb ───────────────────────────────────────────────────────────────
     if (cb_size > 0) {
         BitReader br;
         br_init(&br, slice + hdr_bytes + y_size, (unsigned)cb_size);
-        decode_dc_plane(&br, cb_blks, cb_n);
-        decode_ac_plane(&br, cb_blks, cb_n, scan);
+        decode_dc_plane(&br, cb_blks, cb_n_act);
+        decode_ac_plane(&br, cb_blks, cb_n_act, scan);
     }
 
     // ── Cr ───────────────────────────────────────────────────────────────
     if (cr_size > 0) {
         BitReader br;
         br_init(&br, slice + hdr_bytes + y_size + cb_size, (unsigned)cr_size);
-        decode_dc_plane(&br, cr_blks, cr_n);
-        decode_ac_plane(&br, cr_blks, cr_n, scan);
+        decode_dc_plane(&br, cr_blks, cb_n_act);
+        decode_ac_plane(&br, cr_blks, cb_n_act, scan);
     }
 }
 
@@ -300,6 +313,8 @@ inline cudaError_t launch_entropy_decode(
     uint8_t*        d_q_scales,
     int             mbs_per_slice,
     int             num_slices,
+    int             mb_width,
+    int             slices_per_row,
     bool            is_interlaced,
     cudaStream_t    stream)
 {
@@ -308,6 +323,6 @@ inline cudaError_t launch_entropy_decode(
     k_prores_entropy_decode<<<grid, BLOCK, 0, stream>>>(
         d_frame_data, d_slice_starts, d_slice_sizes,
         d_dec_coeffs, d_q_scales,
-        mbs_per_slice, num_slices, is_interlaced);
+        mbs_per_slice, num_slices, mb_width, slices_per_row, is_interlaced);
     return cudaGetLastError();
 }

@@ -5,6 +5,7 @@
 
 #include "consumer/prores_consumer.h"
 #include "consumer/prores_bypass_consumer.h"
+#include "producer/prores_producer.h"
 
 #include <common/log.h>
 
@@ -22,15 +23,15 @@ void init(const core::module_dependencies& dependencies)
             cudaDeviceProp p;
             if (cudaGetDeviceProperties(&p, i) == cudaSuccess) {
                 CASPAR_LOG(info) << L"  [" << i << L"] " << p.name
-                                 << L" — sm_"
+                                 << L" -- sm_"
                                  << p.major << p.minor
-                                 << L" — "
+                                 << L" -- "
                                  << (p.totalGlobalMem / (1024 * 1024))
                                  << L" MB";
             }
         }
     } else {
-        CASPAR_LOG(warning) << L"[cuda_prores] No CUDA devices found — consumer will be unavailable";
+        CASPAR_LOG(warning) << L"[cuda_prores] No CUDA devices found -- consumer will be unavailable";
     }
 
     // Register AMCP consumer (responds to: ADD 1-10 CUDA_PRORES ...)
@@ -46,6 +47,9 @@ void init(const core::module_dependencies& dependencies)
         L"CUDA_PRORES_BYPASS Consumer", create_bypass_consumer);
     dependencies.consumer_registry->register_preconfigured_consumer_factory(
         L"cuda-prores-bypass", create_preconfigured_bypass_consumer);
+
+    // Register ProRes decoder producer (PLAY 1-1 CUDA_PRORES FILE x.mov)
+    register_prores_producer(dependencies);
 
     CASPAR_LOG(info) << L"[cuda_prores] Module initialised";
 }

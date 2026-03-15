@@ -152,12 +152,96 @@ target_include_directories(test_timecode_roundtrip PRIVATE
     "${FFMPEG_INCLUDE}")
 target_link_libraries(test_timecode_roundtrip PRIVATE ffmpeg)
 
+# ─── test_prores_decode ──────────────────────────────────────────────────────
+# Pixel-accuracy comparison: CUDA decoder vs. FFmpeg software reference.
+# Generates synthetic ProRes frames internally — no input files needed.
+#
+# Uses:
+#   cuda_prores_decode.cu  — orchestration (entropy → IDCT → colour → memcpy)
+#   tables_owner.cu        — defines the __constant__ table symbols
+#   test_prores_decode.cpp — test driver (compiled as CUDA for <<<>>> syntax)
+set_source_files_properties("${TEST_DIR}/test_prores_decode.cpp"
+    PROPERTIES LANGUAGE CUDA)
+
+add_executable(test_prores_decode
+    "${TEST_DIR}/test_prores_decode.cpp"
+    "${TEST_DIR}/tables_owner.cu"
+    "${CUDA_DIR}/cuda_prores_decode.cu"
+)
+target_include_directories(test_prores_decode PRIVATE
+    "${MODULE_DIR}"
+    "${CUDAToolkit_INCLUDE_DIRS}"
+    "${FFMPEG_INCLUDE}"
+)
+target_link_libraries(test_prores_decode PRIVATE
+    CUDA::cudart_static
+    CUDA::nppc
+    CUDA::nppist
+    ffmpeg
+)
+set_property(TARGET test_prores_decode PROPERTY CUDA_SEPARABLE_COMPILATION ON)
+set_property(TARGET test_prores_decode PROPERTY CUDA_RESOLVE_DEVICE_SYMBOLS ON)
+set_property(TARGET test_prores_decode PROPERTY CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}")
+
+# ─── test_prores_demux_decode ────────────────────────────────────────────────
+# End-to-end pipeline test:
+#   FFmpeg encode + avformat mux → real .mov on disk
+#   → libavformat demux → CUDA decode → pixel accuracy vs FFmpeg sw reference
+# Also tests: EOF loop (seek-to-start), audio extraction from container.
+# Compiled as CUDA because it includes cuda_prores_decode.h (CUDA types).
+set_source_files_properties("${TEST_DIR}/test_prores_demux_decode.cpp"
+    PROPERTIES LANGUAGE CUDA)
+
+add_executable(test_prores_demux_decode
+    "${TEST_DIR}/test_prores_demux_decode.cpp"
+    "${TEST_DIR}/tables_owner.cu"
+    "${CUDA_DIR}/cuda_prores_decode.cu"
+)
+target_include_directories(test_prores_demux_decode PRIVATE
+    "${MODULE_DIR}"
+    "${CUDAToolkit_INCLUDE_DIRS}"
+    "${FFMPEG_INCLUDE}"
+)
+target_link_libraries(test_prores_demux_decode PRIVATE
+    CUDA::cudart_static
+    CUDA::nppc
+    CUDA::nppist
+    ffmpeg
+)
+set_property(TARGET test_prores_demux_decode PROPERTY CUDA_SEPARABLE_COMPILATION ON)
+set_property(TARGET test_prores_demux_decode PROPERTY CUDA_RESOLVE_DEVICE_SYMBOLS ON)
+set_property(TARGET test_prores_demux_decode PROPERTY CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}")
+
+# ─── test_prores_encode_roundtrip ────────────────────────────────────────────
+# Encoder regression test:
+#   Synthetic YUV422P10LE → pack V210 on host → CUDA-encode (Proxy + HQ)
+#   → FFmpeg sw-decode → compare decoded YUV to original → PSNR ≥ threshold
+# Verifies the quant-matrix index fix didn't introduce pixel errors.
+set_source_files_properties("${TEST_DIR}/test_prores_encode_roundtrip.cpp"
+    PROPERTIES LANGUAGE CUDA)
+
+add_executable(test_prores_encode_roundtrip
+    "${TEST_DIR}/test_prores_encode_roundtrip.cpp"
+    ${CUDA_SOURCES})
+target_include_directories(test_prores_encode_roundtrip PRIVATE
+    "${MODULE_DIR}"
+    "${CUDAToolkit_INCLUDE_DIRS}"
+    "${FFMPEG_INCLUDE}")
+target_link_libraries(test_prores_encode_roundtrip PRIVATE
+    CUDA::cudart_static
+    CUDA::nppc
+    CUDA::nppist
+    ffmpeg)
+set_property(TARGET test_prores_encode_roundtrip PROPERTY CUDA_SEPARABLE_COMPILATION ON)
+set_property(TARGET test_prores_encode_roundtrip PROPERTY CUDA_RESOLVE_DEVICE_SYMBOLS ON)
+set_property(TARGET test_prores_encode_roundtrip PROPERTY CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}")
+
 # ─── Windows SDK UCRT system-include for all CUDA targets ────────────────────
 # nvcc may not inherit the host INCLUDE env var (especially from restricted
 # shells), so we forward the UCRT / um / shared dirs as system includes.
 # This is a no-op when the paths don't exist (Linux / CI).
 if(WIN32 AND DEFINED WINSDK_UCRT_INCLUDE AND EXISTS "${WINSDK_UCRT_INCLUDE}")
-    foreach(_cuda_tgt test_bgra_convert test_perf_benchmark test_prores_encode)
+    foreach(_cuda_tgt test_bgra_convert test_perf_benchmark test_prores_encode test_prores_decode test_prores_demux_decode test_prores_encode_roundtrip)
         target_include_directories(${_cuda_tgt} SYSTEM PRIVATE
             "${WINSDK_UCRT_INCLUDE}"
             "${WINSDK_UM_INCLUDE}"

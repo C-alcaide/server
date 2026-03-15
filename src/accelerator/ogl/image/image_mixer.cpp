@@ -303,17 +303,31 @@ struct image_mixer::impl
         item.transforms = transform_stack_.back();
         item.geometry   = frame.geometry();
 
-        auto textures_ptr = std::any_cast<std::shared_ptr<std::vector<future_texture>>>(frame.opaque());
-
-        if (textures_ptr) {
-            item.textures = *textures_ptr;
+        if (auto direct_core_tex = frame.texture()) {
+            // Zero-copy path: producer pre-decoded directly into a GL texture
+            // (CUDA decoder via CudaGLTexture + shared WGL context).
+            // opaque_ is empty for these frames so the any_cast below must be skipped.
+            auto ogl_tex = std::dynamic_pointer_cast<texture>(direct_core_tex);
+            if (ogl_tex) {
+                item.textures.emplace_back(make_ready_future(std::shared_ptr<texture>(std::move(ogl_tex))).share());
+            } else {
+                CASPAR_LOG(warning) << L"[image_mixer] frame.texture() is not an ogl::texture -- skipping frame";
+            }
         } else {
-            for (int n = 0; n < static_cast<int>(item.pix_desc.planes.size()); ++n) {
-                item.textures.emplace_back(ogl_->copy_async(frame.image_data(n),
-                                                            item.pix_desc.planes[n].width,
-                                                            item.pix_desc.planes[n].height,
-                                                            item.pix_desc.planes[n].stride,
-                                                            item.pix_desc.planes[n].depth));
+            // Normal path: opaque_ holds the pre-uploaded future_texture vector set by the commit callback.
+            auto textures_ptr = frame.opaque().has_value()
+                ? std::any_cast<std::shared_ptr<std::vector<future_texture>>>(frame.opaque())
+                : nullptr;
+            if (textures_ptr) {
+                item.textures = *textures_ptr;
+            } else {
+                for (int n = 0; n < static_cast<int>(item.pix_desc.planes.size()); ++n) {
+                    item.textures.emplace_back(ogl_->copy_async(frame.image_data(n),
+                                                                item.pix_desc.planes[n].width,
+                                                                item.pix_desc.planes[n].height,
+                                                                item.pix_desc.planes[n].stride,
+                                                                item.pix_desc.planes[n].depth));
+                }
             }
         }
 
@@ -399,5 +413,7 @@ image_mixer::create_frame(const void* tag, const core::pixel_format_desc& desc, 
 }
 
 common::bit_depth image_mixer::depth() const { return impl_->depth(); }
+
+std::shared_ptr<device> image_mixer::get_ogl_device() const { return impl_->ogl_; }
 
 }}} // namespace caspar::accelerator::ogl

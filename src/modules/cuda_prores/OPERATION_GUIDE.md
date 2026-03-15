@@ -1,15 +1,143 @@
-# CasparCG CUDA ProRes Consumer — Operation Guide
+# CasparCG CUDA ProRes — Operation Guide
 
 ## Overview
 
-The module provides two independent consumers:
+The module provides two recording consumers **and** a GPU-accelerated ProRes playback producer:
 
-| Consumer | AMCP keyword | Consumer slot | Use case |
-|---|---|---|---|
-| **CUDA_PRORES** | `CUDA_PRORES` | 1 | Records the channel compositor output — requires a `PLAY` source on the channel |
-| **CUDA_PRORES_BYPASS** | `CUDA_PRORES_BYPASS` | 2 | Records direct SDI input from a DeckLink device — no `PLAY` needed |
+| Role | AMCP keyword | Use case |
+|---|---|---|
+| **Producer** | `PLAY 1-1 CUDA_PRORES <file>` | GPU-decode a ProRes `.mov`/`.mxf`/`.mkv` file for playout |
+| **Consumer** | `ADD 1 CUDA_PRORES …` | GPU-encode the channel compositor output to ProRes |
+| **Bypass consumer** | `ADD 1 CUDA_PRORES_BYPASS …` | GPU-encode a raw DeckLink SDI input directly to ProRes |
 
-Both encode on the GPU (NVIDIA CUDA) to an Apple-compliant ProRes bitstream and mux into `.mov` or `.mxf`.
+All three share the same GPU encode/decode kernel pipeline (NVIDIA CUDA).  Consumers write `.mov` or `.mxf` files; the producer reads them back.
+
+---
+
+## CUDA_PRORES Producer (Playback)
+
+The ProRes producer uses CUDA to GPU-decode ProRes frames and feeds them into the CasparCG compositor via the zero-copy CUDA-GL interop path (Windows) or a host-copy fallback (Linux / when `wglShareLists` fails).  Audio is decoded by libavcodec from the same container and delivered at the channel's native cadence.
+
+### PLAY Command Syntax
+
+```
+PLAY <channel>-<layer> CUDA_PRORES <filename>
+    [LOOP]
+    [SEEK  <frame>]
+    [IN    <frame>]
+    [START <frame>]
+    [OUT   <frame>]
+    [LENGTH <frames>]
+    [COLOR_MATRIX  709|2020|601|AUTO]
+    [DEVICE <cuda-index>]
+    [FILE <filename>]
+```
+
+`<filename>` is a path relative to the CasparCG **media** folder (or an absolute path).  Extension may be omitted; `.mov`, `.mxf`, `.mkv`, `.mp4` are probed in that order.
+
+| Parameter | Default | Description |
+|---|---|---|
+| `LOOP` | off | Loop playback. On EOF (or OUT) the producer seeks back to `IN`/`SEEK` instead of reopening the file. |
+| `SEEK` (or `IN` or `START`) | `0` | First frame to play (0-based frame index). Seek is applied before the read thread starts — the first delivered frame is exactly this frame. |
+| `OUT` | end of file | Exclusive stop frame. Playback stops (or loops) just *before* this frame. |
+| `LENGTH` | rest of file | Frame count from the `SEEK`/`IN` position. Converted to `OUT = IN + LENGTH` internally. Ignored if `OUT` is also given. |
+| `COLOR_MATRIX` | `AUTO` | Override the colour matrix embedded in the ProRes file. `709` = BT.709, `601` = BT.601, `2020` = BT.2020, `AUTO` = use per-frame metadata (default). Useful when the file has wrong or absent matrix metadata. |
+| `DEVICE` | `0` | CUDA GPU index (0-based). Selects which GPU decodes. |
+| `FILE` | — | Explicit keyword form; equivalent to placing the filename positionally. |
+
+### CALL — Seek and Loop Control
+
+```
+CALL <channel>-<layer> seek <target> [<offset>]
+CALL <channel>-<layer> loop [0|1]
+```
+
+**`seek` target values:**
+
+| Target | Meaning |
+|---|---|
+| `<integer>` | Absolute frame number (0-based) |
+| `rel` or `current` | Current frame position (useful with an offset) |
+| `start` or `in` | Frame 0 (rewind to beginning) |
+| `end` | Last frame of the file |
+
+**Optional offset** (third parameter): a signed integer added to the resolved target.
+
+Examples:
+```
+CALL 1-10 seek 250              ; jump to frame 250
+CALL 1-10 seek rel +25          ; advance 25 frames
+CALL 1-10 seek rel -25          ; rewind 25 frames
+CALL 1-10 seek start            ; rewind to beginning
+CALL 1-10 seek end              ; jump to last frame
+CALL 1-10 loop                  ; query loop state → returns "0" or "1"
+CALL 1-10 loop 1                ; enable loop
+CALL 1-10 loop 0                ; disable loop
+```
+
+Seek is non-blocking: it posts a `seek_request_` to the read thread, which flushes the output queue and seeks at the next opportunity (within one frame interval).
+
+### OSC State Keys
+
+The ProRes producer publishes OSC state at the standard CasparCG monitor path `/channel/<ch>/stage/<layer>/`:
+
+| OSC key | Value | Description |
+|---|---|---|
+| `file/name` | string | Filename (without directory path) |
+| `file/path` | string | Full absolute file path |
+| `file/time` | `[current_s, total_s]` | Current playback position and total duration in seconds |
+| `file/loop` | bool | Current loop state |
+| `width` | int | Frame width in pixels |
+| `height` | int | Frame height in pixels |
+
+These match the keys published by CasparCG's built-in FFmpeg `av_producer`, so existing monitoring software works without changes.
+
+### Diagnostics Graph
+
+The ProRes producer registers a diagnostics graph with the following tracks:
+
+| Track | Colour | Meaning |
+|---|---|---|
+| `frame-time` | Bright green | Inter-receive call interval as a fraction of frame period. Should stay near 0.5 (normalised by `hz × 0.5`). |
+| `decode-time` | Dark green | CUDA decode time as a fraction of frame period. Should stay well below 1.0. |
+| `queue-fill` | Blue | Output queue fill level as a fraction of `MAX_QUEUED`. |
+| `dropped` | Red flash | A frame was dropped — decode took too long or the queue was full. |
+
+The graph title updates every frame and shows:
+```
+clip.mov  125 / 700  |  5.0s / 28.0s  |  25.0fps
+```
+(filename · current frame / total frames · current time / total time · current output fps)
+
+### Producer Examples
+
+```amcp
+; Basic playback
+PLAY 1-10 CUDA_PRORES colorbars_hq
+
+; Loop from frame 50 to frame 200
+PLAY 1-10 CUDA_PRORES colorbars_hq LOOP IN 50 OUT 200
+
+; Play exactly 500 frames starting at frame 100
+PLAY 1-10 CUDA_PRORES colorbars_hq SEEK 100 LENGTH 500
+
+; Force BT.601 colour matrix (e.g. SD content tagged as 709)
+PLAY 1-10 CUDA_PRORES sd_clip COLOR_MATRIX 601
+
+; Stop playback
+STOP 1-10
+
+; Live seek while playing
+CALL 1-10 seek 0
+CALL 1-10 seek rel +25
+CALL 1-10 loop 1
+```
+
+---
+
+## Recording Consumers
+
+Both consumers encode on the GPU (NVIDIA CUDA) to an Apple-compliant ProRes bitstream and mux into `.mov` or `.mxf`.
 
 ---
 
@@ -26,7 +154,7 @@ Both encode on the GPU (NVIDIA CUDA) to an Apple-compliant ProRes bitstream and 
 
 ---
 
-## AMCP Parameters — CUDA_PRORES
+## AMCP Parameters — CUDA_PRORES (Consumer)
 
 ```
 ADD <channel> CUDA_PRORES
@@ -55,7 +183,7 @@ ADD <channel> CUDA_PRORES
 | `MAXCLL` | `1000` | Maximum Content Light Level in nits. Used only with `HDR PQ`. |
 | `MAXFALL` | `400` | Maximum Frame-Average Light Level in nits. Used only with `HDR PQ`. |
 
-**Note:** `CUDA_PRORES` always occupies consumer slot **1** on the channel. Only one CUDA_PRORES consumer can be active per channel at a time.
+**Note:** `CUDA_PRORES` (consumer) always occupies consumer slot **1** on the channel. Only one CUDA_PRORES consumer can be active per channel at a time. The `CUDA_PRORES` producer (`PLAY`) and consumer (`ADD`) are independent — both can be active simultaneously on the same or different channels.
 
 ---
 
@@ -72,7 +200,7 @@ All parameters above apply, plus:
 
 ---
 
-## Command Examples
+## Consumer Command Examples
 
 ### Standard recording (compositor output → HQ ProRes)
 

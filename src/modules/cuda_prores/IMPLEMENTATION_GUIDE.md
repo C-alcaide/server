@@ -1,8 +1,22 @@
-# CUDA ProRes Encoder — Implementation Guide
+# CUDA ProRes — Implementation Guide
 
 ## Overview
 
-This is a real-time GPU-accelerated [Apple ProRes](https://www.apple.com/final-cut-pro/docs/Apple_ProRes_White_Paper.pdf) encoder integrated into CasparCG as a **bypass consumer**.  The encoder accepts raw **V210** (10-bit packed 4:2:2 YCbCr) frames directly from a Blackmagic DeckLink SDI input, runs the entire encode pipeline on the GPU, and writes conformant `.mov` or `.mxf` files to disk — bypassing the CasparCG GPU mixer entirely.
+This module provides three components sharing the same GPU ProRes encode/decode kernel pipeline:
+
+| Component | Role |
+|---|---|
+| **Bypass Consumer** (`CUDA_PRORES_BYPASS`) | Real-time GPU encoder fed by DeckLink SDI V210 capture |
+| **Mixer Consumer** (`CUDA_PRORES`) | Real-time GPU encoder fed by the CasparCG compositor |
+| **ProRes Producer** (`PLAY … CUDA_PRORES`) | GPU-accelerated ProRes decoder for playout |
+
+---
+
+## Part 1 — GPU Encoder (Bypass Consumer)
+
+### Overview
+
+The bypass encoder accepts raw **V210** (10-bit packed 4:2:2 YCbCr) frames directly from a Blackmagic DeckLink SDI input, runs the entire encode pipeline on the GPU, and writes conformant `.mov` or `.mxf` files to disk — bypassing the CasparCG GPU mixer entirely.
 
 **Key properties:**
 - Registered as AMCP consumer `CUDA_PRORES_BYPASS`
@@ -88,7 +102,7 @@ This means the channel can be 720p50 while recording a 1080i50 input — the MOV
 
 ---
 
-## Source Files
+## Source Files — Encoder / Consumer
 
 | File | Role |
 |---|---|
@@ -752,3 +766,288 @@ decklink_prores_capture.exe [options]
 
 Output filename: `d{N}_{DeviceName}_{profile}.mov`  
 Example: `d1_DeckLink_8K_Pro_1_hq.mov`
+
+---
+
+## Part 2 — CUDA ProRes Producer (Decoder)
+
+### Overview
+
+The ProRes producer (`prores_producer.cpp`) is a `core::frame_producer` that decodes ProRes
+files on the GPU and feeds frames into the CasparCG compositor.  It uses the same CUDA decode
+kernels as the encoder but in reverse, and delivers frames via the zero-copy CUDA-GL interop
+path (Windows) or a pinned host-copy fallback.
+
+**Key properties:**
+- Registered as AMCP producer keyword `CUDA_PRORES`
+- Activated by: `PLAY 1-1 CUDA_PRORES <filename>`
+- Supports MOV, MXF, MKV, MP4 containers via libavformat demuxing
+- Zero-copy CUDA→GL interop path via shared WGL context (avoids PCIe D→H→D round-trip)
+- Non-blocking seek via `seek_request_` atomic flag consumed in `read_loop()`
+- IN/OUT/LENGTH frame range limiting; loop via `seek_to_frame()` (no demuxer reopen)
+- Color matrix per-frame metadata + optional AMCP override (BT.709 / BT.601 / BT.2020)
+
+---
+
+### Source Files — Producer
+
+| File | Role |
+|---|---|
+| `producer/prores_producer.h` | Public API: `register_prores_producer()` declaration |
+| `producer/prores_producer.cpp` | `prores_producer_impl` struct; `create_prores_producer()` factory; `register_prores_producer()` |
+| `producer/prores_demuxer.h` | `ProResDemuxer` class; `ProResFrameInfo`; `ProResPacket`; `seek_to_frame()` declaration |
+| `producer/prores_demuxer.cpp` | libavformat-based container reader; `seek_to_frame()` using `av_rescale_q`; audio decode |
+| `cuda/cuda_prores_decode.h/.cu` | `ProResDecodeCtx`; `prores_decode_frame()` (zero-copy); `prores_decode_frame_to_host()` |
+| `util/cuda_gl_texture.h` | `CudaGLTexture`: wraps `cudaGraphicsGLRegisterImage`, `map()`, `unmap()` |
+
+---
+
+### Pipeline
+
+```
+libavformat (ProResDemuxer::read_packet())
+        │  ProResPacket {data=icpf bytes, audio_samples}
+        ▼
+read_loop() [on read_thread_]
+        │
+        │  [seek_request_ >= 0] → demuxer_->seek_to_frame(target)
+        │                          flush ready_queue_, reset counters
+        ▼
+  prores_decode_frame / prores_decode_frame_to_host
+        │  Windows zero-copy path:
+        │    CudaGLTexture::map() → cudaArray
+        │    CUDA kernels write BGRA16 directly into GL texture
+        │    CudaGLTexture::unmap()
+        │    pixel_format::rgba  (no extra swizzle — correct BGRA convention)
+        │
+        │  Host-copy fallback:
+        │    CUDA kernels write BGRA16 to pinned h_bgra16_[slot]
+        │    frame_factory_->create_frame() + memcpy
+        │    pixel_format::bgra  (.bgra swizzle matches PBO upload format)
+        ▼
+  ready_queue_  (MAX_QUEUED=2 slots, 5 decode slots total)
+        ▼
+receive_impl() [on CasparCG output thread]
+        │  video_field::b → return cached_frame_  (25p on 50i field dedup)
+        │  video_field::a → pop from ready_queue_, cache, return
+        │  Updates DIAG frame-time, graph title, fps counter
+        ▼
+  core::draw_frame → CasparCG compositor
+```
+
+---
+
+### ProResDemuxer — `seek_to_frame()`
+
+```cpp
+bool ProResDemuxer::impl::seek_to_frame(int64_t frame_number) {
+    AVStream* st = video_stream;
+    int64_t pts = av_rescale_q(frame_number,
+                               av_inv_q(st->avg_frame_rate),
+                               st->time_base);
+    audio_buf_.clear();
+    avcodec_flush_buffers(audio_ctx_);  // prevent stale samples after seek
+    return av_seek_frame(fmt_ctx_, video_stream_idx, pts,
+                         AVSEEK_FLAG_BACKWARD) >= 0;
+}
+```
+
+`av_rescale_q` converts a 0-based frame index to a PTS value in the video stream's time base.
+`AVSEEK_FLAG_BACKWARD` ensures the seek lands on or before the target frame; `read_packet()`
+skips any stale non-video packets that follow.
+
+---
+
+### `seek_request_` Atomic — Non-Blocking Seek
+
+The read loop uses a priority check at the top of each iteration:
+
+```cpp
+while (true) {
+    std::unique_lock lk(queue_mutex_);
+    queue_cv_.wait(lk, [this] {
+        return stop_flag_ || ready_queue_.size() < MAX_QUEUED || seek_request_ >= 0;
+    });
+    const int64_t seek_target = seek_request_.exchange(-1LL);
+    if (seek_target >= 0) {
+        while (!ready_queue_.empty()) ready_queue_.pop();  // flush stale frames
+        stop_flag_ = false;     // cancel any EOF stop
+        lk.unlock(); queue_cv_.notify_all();
+        demuxer_->seek_to_frame(seek_target);
+        frame_count_ = video_frame_count = seek_target;
+        // reset audio/fps counters
+        continue;
+    }
+    if (stop_flag_) break;
+}
+```
+
+`call()` resolves the target frame and wakes the loop:
+```cpp
+// call() target resolution (seek):
+if      (val == L"rel" || val == L"current")   target = frame_count_.load();
+else if (val == L"start" || val == L"in")      target = 0;
+else if (val == L"end")                        target = total_frames_ - 1;
+else                                           target = lexical_cast<int64_t>(val);
+
+// Optional relative offset (params[2]): CALL 1-10 seek rel +25 / -25
+if (params.size() > 2) target += lexical_cast<int64_t>(params[2]);
+
+target = clamp(target, 0, total_frames_ - 1);
+seek_request_ = target;
+queue_cv_.notify_one();
+```
+
+The `rel` / `current` target is just `frame_count_` (the last frame handed to `receive_impl`); adding a positive or negative offset then gives you ±N-frame jog without needing to know the absolute position.
+
+This ensures a seek takes effect within one frame interval regardless of queue state or EOF.
+
+---
+
+### IN / OUT / LENGTH — Frame Range
+
+Set at open time from PLAY parameters.  Applied in two places:
+
+**1. Startup seek (before read thread starts):**
+```cpp
+if (in_frame_ > 0) {
+    demuxer_->seek_to_frame(in_frame_);
+    frame_count_ = in_frame_;
+}
+read_thread_ = std::thread([this] { read_loop(); });
+```
+
+**2. Per-frame OUT check (in read_loop after each decoded frame is pushed):**
+```cpp
+++video_frame_count;
+if (out_frame_ >= 0 && video_frame_count >= out_frame_) {
+    if (loop_) {
+        demuxer_->seek_to_frame(in_frame_);
+        video_frame_count = frame_count_ = in_frame_;
+        // reset audio/fps counters
+    } else {
+        stop_flag_ = true;
+    }
+    queue_cv_.notify_all();
+}
+```
+
+**3. EOF loop (also seeks rather than reopening demuxer):**
+```cpp
+if (pkt.is_eof) {
+    if (loop_) {
+        demuxer_->seek_to_frame(in_frame_);
+        video_frame_count = frame_count_ = in_frame_;
+    } else {
+        stop_flag_ = true;
+    }
+}
+```
+
+`LENGTH` is converted at parse time: `out_frame_ = in_frame_ + length_param`.
+
+---
+
+### Color Matrix Handling
+
+ProRes encodes the color matrix index in the frame header (byte 16):
+`1`=BT.709, `5`/`6`=BT.601, `9`=BT.2020-NCL, `0`=unspecified.
+
+The effective matrix passed to the CUDA decode kernels:
+```cpp
+const int cm = (color_matrix_override_ >= 0) ? color_matrix_override_
+                                              : (int)fi.color_matrix;
+prores_decode_frame(&ctx, pkt.data.data(), pkt.size, cm, ...);
+```
+
+The `COLOR_MATRIX` AMCP parameter maps:
+`709`/`BT709` → `1`, `601`/`BT601` → `6`, `2020`/`BT2020` → `9`, `AUTO` → `-1` (per-frame
+metadata).  Matrix `0` (unspecified) and other unknown values are treated as BT.709 by the
+decode kernel.
+
+---
+
+### R/B Channel Swap — Zero-Copy Path
+
+The CUDA decode kernels write raw BGRA16 bytes (B at offset 0, G at 1, R at 2, A at 3).
+When transferred via `cudaMemcpy2DToArrayAsync` into a `GL_RGBA16` cudaArray, OpenGL stores
+the values verbatim: R-slot = B_val, G-slot = G_val, B-slot = R_val.
+
+When the image mixer samples this texture it reads `(r, g, b, a)` = `(B_val, G_val, R_val,
+A_val)` — the BGRA convention that CasparCG expects.  Using `pixel_format::rgba` (identity
+swizzle) passes this through unchanged.  Using `pixel_format::bgra` would apply an *extra*
+R↔B swap, producing wrong colours.
+
+The **host-copy path** works differently: `glTextureSubImage2D` is called with
+`FORMAT=GL_BGRA`, so OpenGL swaps B↔R when storing to `GL_RGBA16`.  The texture then holds
+correct `(R_val, G_val, B_val, A_val)` in its slots, and `pixel_format::bgra` (`.bgra`
+swizzle) correctly re-swaps back to BGRA convention for the pipeline.
+
+---
+
+### DIAG Graph
+
+| Track | Formula | Notes |
+|---|---|---|
+| `frame-time` | `frame_timer_.elapsed() * format_desc_.hz * 0.5` | Updated on every `receive_impl` call (including B-field). Normalised: 1.0 = one frame period. |
+| `decode-time` | `decode_timer.elapsed() * format_desc_.fps * 0.5` | Measured per decoded frame in `read_loop`. |
+| `queue-fill` | `(ready_queue_.size() + 1) / (MAX_QUEUED + 1)` | Updated after each push. |
+| `dropped` | tag: WARNING | Emitted when CUDA decode returns a non-success error code. |
+
+Title format (updated on every A-field in `receive_impl`):
+```
+clip.mov  125 / 700  |  5.0s / 28.0s  |  25.0fps
+```
+- `125 / 700` = current frame / total frames (total omitted when unknown)
+- `5.0s / 28.0s` = elapsed / total duration (total omitted when unknown)
+- `25.0fps` = live output fps over a rolling ~1-second window
+
+---
+
+### Threading Model
+
+```
+Constructor thread (caller):
+  cudaSetDevice(cuda_device_)
+  ProResDemuxer::open()                — libavformat init
+  first read_packet()                  — probe frame geometry (ProResFrameInfo)
+  prores_decode_ctx_create() × NUM_SLOTS (5)
+  ogl_device_->dispatch_sync():
+    create NUM_SLOTS GL textures (GL_RGBA16)
+    [WIN32] wglShareLists(main_hglrc, shared_hglrc_)
+  [fallback] cudaMallocHost() × NUM_SLOTS  (host-copy path)
+  seek_to_frame(in_frame_)  if in_frame_ > 0
+  Launch read_thread_
+
+read_thread_  (name "prores-read"):
+  cudaSetDevice(cuda_device_)
+  [WIN32] wglMakeCurrent(hdc_, shared_hglrc_)
+  CudaGLTexture::register() × NUM_SLOTS
+  read_loop(): demux → decode → push to ready_queue_
+
+CasparCG output thread:
+  receive_impl()  — pops from ready_queue_, caches for B-field, returns draw_frame
+  call()          — sets seek_request_, notifies queue_cv_
+```
+
+---
+
+### Building (ProRes producer)
+
+```bat
+rem Build only the cuda_prores module and the CasparCG executable:
+cmake --build D:\Github\CasparCG-cuda\out\build\x64-RelWithDebInfo --target cuda_prores -j4
+cmake --build D:\Github\CasparCG-cuda\out\build\x64-RelWithDebInfo --target casparcg -j4
+```
+
+---
+
+### Producer Bugs Fixed
+
+| Bug | Symptom | Root cause | Fix |
+|---|---|---|---|
+| R/B channel swap (zero-copy) | Red and blue channels inverted on screen | `pixel_format::bgra` applied extra R↔B swizzle after CUDA wrote BGRA order | Changed to `pixel_format::rgba` for zero-copy path |
+| BT.601 files decoded as 709 | Washed-out / shifted colours on SD content | Only matrix values 1 and 9 handled; 5, 6, 0 fell through to 709 | Added BT.601 (5/6) and unspecified (0→709) handling |
+| Loop reopened demuxer | 1–2 frame glitch at loop point; IN position lost | `demuxer_ = make_unique<ProResDemuxer>(path_)` on every EOF | Changed to `seek_to_frame(in_frame_)` for both EOF and OUT |
+| Seek did not wake read thread | CALL seek had ~1 s latency on paused/stopped producer | `seek_request_` set but `queue_cv_` not notified | Added `queue_cv_.notify_one()` after setting `seek_request_` |
+| DIAG title showed 0.0 s | Title showed `0.0s / 0.0s` for files without duration metadata | `total_seconds_` only set if `duration_us() > 0`; display was unconditional | Conditional display: show `/ Xs` only when `total_seconds_ > 0` |
