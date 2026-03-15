@@ -972,12 +972,17 @@ struct notchlc_producer final : public core::frame_producer
         // calls and CUDA/GL teardown happen off the mixer thread.  The impl
         // stays alive (shared_ptr ref-count=1 inside the lambda) until the
         // thread finishes and the lambda is destroyed.
+        //
+        // CRITICAL: capture cuda_device_ before moving impl, and call
+        // cudaSetDevice() at the very start of the teardown thread.
+        // The teardown thread is a brand-new std::thread with no CUDA context.
+        // Without cudaSetDevice(), every cudaFree / cudaStreamDestroy inside
+        // notchlc_decode_ctx_destroy silently returns cudaErrorInvalidDevice
+        // and the VRAM is NEVER released — filling the GPU with each new PLAY.
+        const int cuda_dev = impl_->cuda_device_;
         auto impl = std::move(impl_);
-        std::thread([impl = std::move(impl)] () mutable {
-            // Destructor of notchlc_producer_impl joins all threads and
-            // releases CUDA/GL resources.  It will not call request_stop()
-            // again because stop_flag_ is already set and the notify_all()
-            // in the destructor is idempotent.
+        std::thread([impl = std::move(impl), cuda_dev] () mutable {
+            cudaSetDevice(cuda_dev);
             impl.reset();
         }).detach();
     }
