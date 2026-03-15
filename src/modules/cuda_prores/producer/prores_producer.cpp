@@ -58,6 +58,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <cmath>
 #include <thread>
 
 namespace caspar { namespace cuda_prores {
@@ -87,7 +88,7 @@ struct prores_producer_impl final : public core::frame_producer
     bool            slots_init_[NUM_SLOTS] = {};
 
     // GL textures created on OGL thread, shared with read_thread_ via shared WGL
-    // context so CUDA can write directly into them (zero PCIe D→H copy).
+    // context so CUDA can write directly into them (zero PCIe DÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢H copy).
     // Essential for 12K throughput where host-copy would saturate the PCIe bus.
     std::shared_ptr<accelerator::ogl::texture> gl_tex_[NUM_SLOTS];
     std::shared_ptr<CudaGLTexture>             cgt_   [NUM_SLOTS];
@@ -130,6 +131,10 @@ struct prores_producer_impl final : public core::frame_producer
     int64_t               in_frame_  = 0;       // initial play position (PLAY ... SEEK/IN n)
     int64_t               out_frame_ = -1;      // exclusive stop frame  (-1 = play to EOF)
 
+    std::atomic<double>   speed_{1.0};
+    std::atomic<bool>     pingpong_{false};
+    double                speed_accum_{0.0};
+
     mutable core::monitor::state monitor_state_;
 
     prores_producer_impl(const std::wstring& path, int cuda_device, bool loop,
@@ -166,8 +171,8 @@ struct prores_producer_impl final : public core::frame_producer
                 case 1: return L"BT.709";
                 case 5: case 6: return L"BT.601";
                 case 9: return L"BT.2020";
-                case 0: return L"unspecified (→BT.709)";
-                default: return L"unknown (→BT.709)";
+                case 0: return L"unspecified (ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢BT.709)";
+                default: return L"unknown (ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢BT.709)";
             }
         };
         CASPAR_LOG(info) << L"[prores_producer] " << frame_info_.width << L"x" << frame_info_.height
@@ -175,7 +180,7 @@ struct prores_producer_impl final : public core::frame_producer
                          << L" color_matrix=" << (int)frame_info_.color_matrix
                          << L" (" << matrix_name((int)frame_info_.color_matrix) << L")"
                          << (color_matrix_override_ >= 0
-                             ? (std::wstring(L" [OVERRIDDEN → ") + matrix_name(color_matrix_override_) + L"]")
+                             ? (std::wstring(L" [OVERRIDDEN ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ ") + matrix_name(color_matrix_override_) + L"]")
                              : std::wstring())
                          << (loop_      ? L" LOOP" : L"")
                          << (in_frame_  > 0  ? (L" IN="  + std::to_wstring(in_frame_))  : L"")
@@ -337,7 +342,7 @@ struct prores_producer_impl final : public core::frame_producer
                     return stop_flag_ || (int)ready_queue_.size() < MAX_QUEUED || seek_request_ >= 0;
                 });
 
-                // A seek request takes priority over everything — even a pending stop from EOF.
+                // A seek request takes priority over everything ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â even a pending stop from EOF.
                 const int64_t seek_target = seek_request_.exchange(-1LL);
                 if (seek_target >= 0) {
                     while (!ready_queue_.empty()) ready_queue_.pop();  // flush stale frames
@@ -359,9 +364,18 @@ struct prores_producer_impl final : public core::frame_producer
 
             auto pkt = demuxer_->read_packet();
 
+            double current_speed = speed_.load();
+
             // ~~ Loop / EOF ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
             if (pkt.is_eof) {
-                if (loop_) {
+                if (pingpong_.load()) {
+                    speed_.store(-current_speed);
+                    video_frame_count = std::max(0LL, frame_count_.load() - 1);
+                    demuxer_->seek_to_frame(video_frame_count);
+                    audio_accum.clear();
+                    audio_frame_idx   = 0;
+                    continue;
+                } else if (loop_) {
                     demuxer_->seek_to_frame(in_frame_);
                     video_frame_count = in_frame_;
                     frame_count_      = in_frame_;
@@ -457,7 +471,7 @@ struct prores_producer_impl final : public core::frame_producer
                 // sampled (B,G,R,A) through unchanged, which is the BGRA convention
                 // expected by the rest of the CasparCG pipeline.
                 // (pixel_format::bgra would apply an extra .bgra swizzle that causes
-                // the R↔B swap the user observes on the zero-copy path.)
+                // the RÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬ÂB swap the user observes on the zero-copy path.)
                 core::pixel_format_desc pfd(core::pixel_format::rgba);
                 // We still need one plane entry so the planes.empty() guard in
                 // image_mixer::visit does not skip us.  A matching dummy (zero-byte)
@@ -482,7 +496,7 @@ struct prores_producer_impl final : public core::frame_producer
             } else {
                 // Host-copy: upload BGRA16 through standard PBO path.
                 // glTextureSubImage2D is called with FORMAT[4]=GL_BGRA, which makes GL
-                // swap B↔R when storing into GL_RGBA16, so the texture has correct
+                // swap BÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬ÂR when storing into GL_RGBA16, so the texture has correct
                 // (R,G,B,A) slots.  pixel_format::bgra (case 1, .bgra swizzle) then
                 // re-swaps back to (B,G,R,A) = BGRA convention for the pipeline.
                 core::pixel_format_desc pfd(core::pixel_format::bgra);
@@ -495,15 +509,48 @@ struct prores_producer_impl final : public core::frame_producer
 
             { std::lock_guard<std::mutex> lk(queue_mutex_); ready_queue_.push(std::move(df)); }
             queue_cv_.notify_one();
-            ++video_frame_count;
+            
+            if (current_speed < 0.0) {
+                --video_frame_count;
+                demuxer_->seek_to_frame(video_frame_count);
+            } else {
+                ++video_frame_count;
+            }
+            
             slot = (slot + 1) % NUM_SLOTS;
 
             // ~~ OUT / LENGTH check ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-            if (out_frame_ >= 0 && video_frame_count >= out_frame_) {
-                if (loop_) {
+            if (current_speed >= 0.0 && out_frame_ >= 0 && video_frame_count >= out_frame_) {
+                if (pingpong_.load()) {
+                    speed_.store(-current_speed);
+                    video_frame_count = out_frame_ - 1;
+                    demuxer_->seek_to_frame(video_frame_count);
+                    audio_accum.clear();
+                    audio_frame_idx   = 0;
+                } else if (loop_) {
                     demuxer_->seek_to_frame(in_frame_);
                     video_frame_count = in_frame_;
                     frame_count_      = in_frame_;
+                    audio_accum.clear();
+                    audio_frame_idx   = 0;
+                    fps_frame_acc_    = 0;
+                    fps_window_timer_.restart();
+                } else {
+                    stop_flag_ = true;
+                }
+                queue_cv_.notify_all();
+            } else if (current_speed < 0.0 && video_frame_count < in_frame_) {
+                if (pingpong_.load()) {
+                    speed_.store(-current_speed);
+                    video_frame_count = in_frame_;
+                    demuxer_->seek_to_frame(video_frame_count);
+                    audio_accum.clear();
+                    audio_frame_idx   = 0;
+                } else if (loop_) {
+                    int64_t target = (out_frame_ >= 0) ? out_frame_ - 1 : std::max(0LL, total_frames_ - 1);
+                    demuxer_->seek_to_frame(target);
+                    video_frame_count = target;
+                    frame_count_      = target;
                     audio_accum.clear();
                     audio_frame_idx   = 0;
                     fps_frame_acc_    = 0;
@@ -538,6 +585,20 @@ struct prores_producer_impl final : public core::frame_producer
                 if (!val.empty())
                     loop_ = boost::lexical_cast<bool>(val);
                 result = loop_ ? L"1" : L"0";
+
+            } else if (boost::iequals(cmd, L"pingpong")) {
+                bool pp = pingpong_.load();
+                if (!val.empty())
+                    pp = boost::lexical_cast<bool>(val);
+                pingpong_.store(pp);
+                result = pp ? L"1" : L"0";
+
+            } else if (boost::iequals(cmd, L"speed")) {
+                double spd = speed_.load();
+                if (!val.empty())
+                    spd = boost::lexical_cast<double>(val);
+                speed_.store(spd);
+                result = boost::lexical_cast<std::wstring>(spd);
 
             } else if (boost::iequals(cmd, L"seek") && !val.empty()) {
                 int64_t target;
@@ -593,11 +654,28 @@ struct prores_producer_impl final : public core::frame_producer
         queue_cv_.wait_for(lk, std::chrono::milliseconds(40),
                            [this] { return !ready_queue_.empty() || stop_flag_; });
         if (ready_queue_.empty()) return cached_frame_;
+
+        double spd = speed_.load();
+        speed_accum_ += std::abs(spd);
+        int frames_to_advance = static_cast<int>(speed_accum_);
+        speed_accum_ -= static_cast<double>(frames_to_advance);
+
+        if (frames_to_advance == 0) {
+            lk.unlock();
+            // Mute the audio of duplicated frames to prevent ear-bleeding repetition
+            return cached_frame_ ? core::draw_frame::still(cached_frame_) : core::draw_frame{};
+        }
+
+        for (int i = 1; i < frames_to_advance && ready_queue_.size() > 1; ++i) {
+            ready_queue_.pop();
+        }
+
         cached_frame_ = std::move(ready_queue_.front());
         ready_queue_.pop();
         lk.unlock();
-        queue_cv_.notify_one();
-        auto fc = ++frame_count_;
+        queue_cv_.notify_all();
+
+        auto fc = (frame_count_ += (spd >= 0.0) ? frames_to_advance : -frames_to_advance);
 
         // Live FPS: count frames delivered; recompute every ~1 second
         ++fps_frame_acc_;
@@ -658,7 +736,7 @@ create_prores_producer(const core::frame_producer_dependencies& deps, const std:
 
     std::wstring path; int cuda_device = 0; bool loop = false; int color_matrix_override = -1;
     int64_t start_frame = 0, out_frame = -1, length_param = -1;
-    for (size_t i = 1; i < params.size(); ++i) {  // start at 1 — skip "CUDA_PRORES"
+    for (size_t i = 1; i < params.size(); ++i) {  // start at 1 ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â skip "CUDA_PRORES"
         const auto& p = params[i];
         if      (boost::iequals(p, L"LOOP"))                              { loop = true; }
         else if (boost::iequals(p, L"FILE")   && i+1 < params.size()) path        = params[++i];
@@ -677,7 +755,7 @@ create_prores_producer(const core::frame_producer_dependencies& deps, const std:
             else if (boost::iequals(val, L"601")   || boost::iequals(val, L"BT601"))  color_matrix_override = 6;
             else if (boost::iequals(val, L"AUTO"))                                     color_matrix_override = -1;
             else CASPAR_LOG(warning) << L"[prores_producer] Unknown COLOR_MATRIX value '" << val
-                                     << L"' — valid: 709, 2020, 601, AUTO. Using file metadata.";
+                                     << L"' ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â valid: 709, 2020, 601, AUTO. Using file metadata.";
         }
         else if (path.empty() && !p.empty() && p[0] != L'-')               path = p;
     }
