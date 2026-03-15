@@ -233,23 +233,11 @@ struct notchlc_producer_impl final : public core::frame_producer
         }
 
         // ── CUDA decode contexts ─────────────────────────────────────────
-        // Allocate slots greedily rather than pre-estimating from cudaMemGetInfo().
-        //
-        // IMPORTANT: do NOT use cudaMemGetInfo() to decide slot count here.
-        // When a previous producer is being torn down asynchronously (on a
-        // background thread), its VRAM is still allocated at this point, making
-        // cudaMemGetInfo() return a pessimistically low "free" value.  If the
-        // previous producer had 12 slots of e.g. 400 MB each, cudaMemGetInfo()
-        // reports ~4.8 GB less free than reality, causing num_slots_ to collapse
-        // to 1 and producing the observed alternating slow/fast playback pattern.
-        //
-        // Instead: try to allocate up to NUM_SLOTS.  CUDA's allocator itself
-        // knows what's actually free.  If we get fewer than MIN_VIABLE_SLOTS
-        // it means the previous teardown is genuinely holding resources; wait
-        // briefly (previous teardown takes < 200 ms in practice) and retry.
+        // Allocate slots greedily: try to allocate up to NUM_SLOTS contexts.
+        // Stop at the first cudaErrorMemoryAllocation (GPU full).
+        // We run alongside the still-playing old producer, so available VRAM
+        // is whatever remains after its slots.  We accept any count ≥ 1.
         {
-            static constexpr int MIN_VIABLE_SLOTS = 4;
-
             auto try_alloc = [&]() {
                 // Destroy any slots successfully created in a previous attempt.
                 for (int i = 0; i < num_slots_; i++) {
@@ -280,23 +268,24 @@ struct notchlc_producer_impl final : public core::frame_producer
 
             try_alloc();
 
-            if (num_slots_ < MIN_VIABLE_SLOTS) {
-                // Too few slots — the previous producer is still releasing VRAM via
-                // its async teardown thread.  Poll every 100 ms for up to 3 s.
-                //
-                // WHY polling matters: if we give up too early the factory returns
-                // frame_producer::empty(), layer::play() sees an empty background and
-                // becomes a no-op, so the old producer stays in the foreground forever.
-                CASPAR_LOG(warning) << L"[notchlc_producer] Only " << num_slots_
-                    << L" CUDA slot(s) free; waiting for previous producer to release VRAM";
-                for (int waited_ms = 0;
-                     waited_ms < 3000 && num_slots_ < MIN_VIABLE_SLOTS;
-                     waited_ms += 100)
-                {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                    try_alloc();
-                }
-            }
+            // NOTE: do NOT poll/retry here waiting for MIN_VIABLE_SLOTS.
+            // The constructor runs on the AMCP command thread (synchronously inside
+            // play_command/loadbg_command).  While it blocks, the old producer is
+            // still actively running as the stage foreground and its VRAM is
+            // legitimately in use.  The old producer's VRAM won't be freed until
+            // AFTER this constructor returns, stage->load() and stage->play()
+            // have been dispatched, the transition completes, and the old wrapper
+            // destructor fires.  Polling here is a deadlock: old VRAM can never
+            // become free while the AMCP thread is blocked inside this constructor.
+            //
+            // The right behaviour: allocate alongside the still-running old producer.
+            // CUDA's allocator gives us however many slots fit in remaining VRAM
+            // (typically 8-12 when an old producer holds 12 slots on a large GPU).
+            // We start with those slots, the old producer is torn down asynchronously
+            // (its teardown thread frees VRAM within ~200 ms), and normal throughput
+            // is restored after the first few frames.
+            //
+            // Throw only if CUDA gives us literally 0 slots (GPU is full).
 
             if (num_slots_ == 0)
                 CASPAR_THROW_EXCEPTION(std::runtime_error(
