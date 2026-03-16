@@ -271,6 +271,14 @@ std::shared_ptr<AVFrame> make_av_video_frame(const core::const_frame& frame, con
     av_frame->height              = format_desc.height;
 
     const auto is_16bit = planes[0].depth != common::bit_depth::bit8;
+
+    if (format != core::pixel_format::ycbcr && format != core::pixel_format::invalid) {
+        av_frame->color_range = AVCOL_RANGE_JPEG;
+        if (format != core::pixel_format::gray && format != core::pixel_format::luma) {
+            av_frame->colorspace = AVCOL_SPC_RGB;
+        }
+    }
+
     switch (format) {
         case core::pixel_format::rgb:
             av_frame->format = is_16bit ? AVPixelFormat::AV_PIX_FMT_RGB48 : AVPixelFormat::AV_PIX_FMT_RGB24;
