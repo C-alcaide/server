@@ -1,4 +1,34 @@
-#include "vmx_producer.h"
+/*
+ * Copyright (c) 2025 CasparCG Contributors
+ *
+ * This file is part of CasparCG (www.casparcg.com).
+ *
+ * CasparCG is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * CasparCG is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with CasparCG. If not, see <http://www.gnu.org/licenses/>.
+ *
+ * This module uses libvmx (https://github.com/openmediatransport/libvmx),
+ * licensed under MIT, which is compatible with GPL-3.
+ *
+ * Derived from the CasparCG replay module
+ * (https://github.com/krzyc/CasparCG-Server/tree/master/src/modules/replay).
+ * Copyright (c) 2011 Sveriges Television AB <info@casparcg.com>
+ * Copyright (c) 2013 Technical University of Lodz Multimedia Centre <office@cm.p.lodz.pl>
+ * Authors: Robert Nagy <ronag89@gmail.com>,
+ *          Jan Starzak <jan@ministryofgoodsteps.com>,
+ *          Krzysztof Pyrkosz <pyrkosz@o2.pl>
+ */
+
+#include "replay_producer.h"
 #include <iostream>
 #include <vector>
 #include <cstring>
@@ -21,10 +51,10 @@
 #include <cstdint>
 #include <algorithm>
 
-namespace caspar { namespace vmx {
+namespace caspar { namespace replay {
 
 // Helper for new format parsing
-static uint64_t parse_vmx_timestamp_helper_v2(const std::wstring& s, double fps) {
+static uint64_t parse_replay_timestamp_helper_v2(const std::wstring& s, double fps) {
     std::string s_utf8 = u8(s);
     using namespace boost::posix_time;
     // Format: yyyy-mm-dd-hh-mm-ss-ff
@@ -78,12 +108,12 @@ static uint64_t parse_vmx_timestamp_helper_v2(const std::wstring& s, double fps)
 }
 
 // Updated helper
-static std::pair<uint64_t, bool> parse_vmx_arg_extended(const std::wstring& s, double fps) {
+static std::pair<uint64_t, bool> parse_replay_arg_extended(const std::wstring& s, double fps) {
     if (s.empty() || s == L"0") return {0, false}; 
     
     // Check for separators indicating Time
     if (s.find(L':') != std::wstring::npos || s.find(L'-') != std::wstring::npos) {
-        uint64_t ts = parse_vmx_timestamp_helper_v2(s, fps);
+        uint64_t ts = parse_replay_timestamp_helper_v2(s, fps);
         return {ts, true}; // true = is_timestamp
     }
     
@@ -97,7 +127,7 @@ static std::pair<uint64_t, bool> parse_vmx_arg_extended(const std::wstring& s, d
 }
 
 // Helper to get formatted string
-static std::wstring format_vmx_timestamp(uint64_t timestamp_us, double fps) {
+static std::wstring format_replay_timestamp(uint64_t timestamp_us, double fps) {
     if (timestamp_us == 0) return L"0000-00-00-00-00-00-00";
     
     using namespace boost::posix_time;
@@ -129,10 +159,10 @@ static std::wstring format_vmx_timestamp(uint64_t timestamp_us, double fps) {
     return wss.str();
 }
 
-vmx_producer::vmx_producer(std::string path, spl::shared_ptr<core::frame_factory> frame_factory)
+replay_producer::replay_producer(std::string path, spl::shared_ptr<core::frame_factory> frame_factory)
     : path_(std::move(path))
     , frame_factory_(frame_factory)
-    , reader_(std::make_unique<VmxSegmentedReader>())
+    , reader_(std::make_unique<ReplaySegmentedReader>())
     , vmx_(nullptr)
 {
     // Resolve path relative to media folder if needed
@@ -188,14 +218,14 @@ vmx_producer::vmx_producer(std::string path, spl::shared_ptr<core::frame_factory
     }
 }
 
-vmx_producer::~vmx_producer()
+replay_producer::~replay_producer()
 {
     if (vmx_) VMX_Destroy(vmx_);
     // reader_ cleans up automatically
 }
 
 
-core::draw_frame vmx_producer::receive_impl(core::video_field field, int nb_samples)
+core::draw_frame replay_producer::receive_impl(core::video_field field, int nb_samples)
 {
     if (!vmx_) return core::draw_frame();
 
@@ -323,7 +353,7 @@ core::draw_frame vmx_producer::receive_impl(core::video_field field, int nb_samp
          state_["vmx/timestamp"] = std::to_wstring(timestamp);
          // Formatted timestamp
          if (timestamp > 0 && fps_ > 0) {
-             state_["vmx/timestamp_formatted"] = format_vmx_timestamp(timestamp, fps_);
+             state_["vmx/timestamp_formatted"] = format_replay_timestamp(timestamp, fps_);
          }
          
          if (read_buffer_.empty()) return current_frame_;
@@ -411,7 +441,7 @@ core::draw_frame vmx_producer::receive_impl(core::video_field field, int nb_samp
     return current_frame_;
 }
 
-std::future<std::wstring> vmx_producer::call(const std::vector<std::wstring>& params)
+std::future<std::wstring> replay_producer::call(const std::vector<std::wstring>& params)
 {
     using namespace caspar::common;
 
@@ -442,7 +472,7 @@ std::future<std::wstring> vmx_producer::call(const std::vector<std::wstring>& pa
                 frame_num_ = target;
                 
             } else {
-                std::pair<uint64_t, bool> arg = parse_vmx_arg_extended(params[1], fps_);
+                std::pair<uint64_t, bool> arg = parse_replay_arg_extended(params[1], fps_);
                 if (arg.second) {
                      // Arg is timestamp -> find frame
                      if (reader_) {
@@ -462,7 +492,7 @@ std::future<std::wstring> vmx_producer::call(const std::vector<std::wstring>& pa
          if (params.size() < 2)
             CASPAR_THROW_EXCEPTION(caspar::invalid_argument() << caspar::msg_info(L"Missing argument"));
          
-         auto arg = parse_vmx_arg_extended(params[1], fps_);
+         auto arg = parse_replay_arg_extended(params[1], fps_);
          if (arg.second) {
              if (reader_) in_point_ = (int64_t)reader_->SeekTimestamp(arg.first);
          } else {
@@ -474,7 +504,7 @@ std::future<std::wstring> vmx_producer::call(const std::vector<std::wstring>& pa
          if (params.size() < 2)
             CASPAR_THROW_EXCEPTION(caspar::invalid_argument() << caspar::msg_info(L"Missing argument"));
          
-         auto arg = parse_vmx_arg_extended(params[1], fps_);
+         auto arg = parse_replay_arg_extended(params[1], fps_);
          if (arg.second) {
              if (reader_) out_point_ = (int64_t)reader_->SeekTimestamp(arg.first);
          } else {
@@ -536,7 +566,7 @@ std::future<std::wstring> vmx_producer::call(const std::vector<std::wstring>& pa
                      // Loop
                      while (i < args.size()) {
                          // Check if args[i] is a timestamp/frame or a filename
-                         auto check = parse_vmx_arg_extended(args[i], fps);
+                         auto check = parse_replay_arg_extended(args[i], fps);
                          // Heuristic: If parsing returns valid val OR string is "0", it's a Value
                          bool is_val = (check.first != 0 || check.second || args[i] == L"0");
                          
@@ -563,7 +593,7 @@ std::future<std::wstring> vmx_producer::call(const std::vector<std::wstring>& pa
                          bool out_prov = false;
                          
                          if (i < args.size()) {
-                             auto check_in = parse_vmx_arg_extended(args[i], fps);
+                             auto check_in = parse_replay_arg_extended(args[i], fps);
                              bool is_val_in = (check_in.first != 0 || check_in.second || args[i] == L"0");
                              
                              if (is_val_in) {
@@ -573,7 +603,7 @@ std::future<std::wstring> vmx_producer::call(const std::vector<std::wstring>& pa
                                   
                                   // Try parse OUT
                                   if (i < args.size()) {
-                                      auto check_out = parse_vmx_arg_extended(args[i], fps);
+                                      auto check_out = parse_replay_arg_extended(args[i], fps);
                                       bool is_val_out = (check_out.first != 0 || check_out.second || args[i] == L"0");
                                       if (is_val_out) {
                                           out_arg = check_out;
@@ -585,7 +615,7 @@ std::future<std::wstring> vmx_producer::call(const std::vector<std::wstring>& pa
                          }
                          
                          // Resolve Job
-                        VmxSegmentedReader r;
+                        ReplaySegmentedReader r;
                         if (r.Open(input_p)) {
                               uint64_t final_in = 0;
                               uint64_t final_out = UINT64_MAX;
@@ -650,7 +680,7 @@ std::future<std::wstring> vmx_producer::call(const std::vector<std::wstring>& pa
     return caspar::make_ready_future(std::wstring(L"OK"));
 }
 
-void vmx_producer::configure(const std::vector<std::wstring>& params)
+void replay_producer::configure(const std::vector<std::wstring>& params)
 {
     // Skip index 0 (filename)
     for (size_t i = 1; i < params.size(); ++i) {
@@ -662,7 +692,7 @@ void vmx_producer::configure(const std::vector<std::wstring>& params)
             loop_ = true;
         } else if (p == L"IN") {
             if (i + 1 < params.size()) {
-                auto arg = parse_vmx_arg_extended(params[++i], fps_);
+                auto arg = parse_replay_arg_extended(params[++i], fps_);
                 if (arg.second) {
                     if (reader_) in_point_ = (int64_t)reader_->SeekTimestamp(arg.first);
                 } else {
@@ -671,7 +701,7 @@ void vmx_producer::configure(const std::vector<std::wstring>& params)
             }
         } else if (p == L"OUT") {
             if (i + 1 < params.size()) {
-                auto arg = parse_vmx_arg_extended(params[++i], fps_);
+                auto arg = parse_replay_arg_extended(params[++i], fps_);
                 if (arg.second) {
                     if (reader_) out_point_ = (int64_t)reader_->SeekTimestamp(arg.first);
                 } else {
@@ -692,7 +722,7 @@ void vmx_producer::configure(const std::vector<std::wstring>& params)
                         frame_num_ = target;
                     }
                 } else {
-                    auto arg = parse_vmx_arg_extended(val, fps_);
+                    auto arg = parse_replay_arg_extended(val, fps_);
                     if (arg.second) {
                         if (reader_) frame_num_ = (int64_t)reader_->SeekTimestamp(arg.first);
                     } else {
@@ -702,7 +732,7 @@ void vmx_producer::configure(const std::vector<std::wstring>& params)
             }
         } else if (p == L"LENGTH") {
              if (i + 1 < params.size()) {
-                 auto arg = parse_vmx_arg_extended(params[++i], fps_);
+                 auto arg = parse_replay_arg_extended(params[++i], fps_);
                  int64_t len = 0;
                  if (arg.second && fps_ > 0) {
                      len = (int64_t)((double)arg.first / 1000000.0 * fps_);
@@ -715,9 +745,9 @@ void vmx_producer::configure(const std::vector<std::wstring>& params)
     }
 }
 
-core::monitor::state vmx_producer::state() const { return state_; }
+core::monitor::state replay_producer::state() const { return state_; }
 
-bool vmx_producer::is_ready() 
+bool replay_producer::is_ready() 
 { 
     if (!vmx_) return false;
     if (!reader_) return false;

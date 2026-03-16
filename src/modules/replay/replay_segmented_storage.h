@@ -1,6 +1,36 @@
+/*
+ * Copyright (c) 2025 CasparCG Contributors
+ *
+ * This file is part of CasparCG (www.casparcg.com).
+ *
+ * CasparCG is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * CasparCG is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with CasparCG. If not, see <http://www.gnu.org/licenses/>.
+ *
+ * This module uses libvmx (https://github.com/openmediatransport/libvmx),
+ * licensed under MIT, which is compatible with GPL-3.
+ *
+ * The .mav/.idx file format and segmented storage strategy are derived from
+ * the CasparCG replay module
+ * (https://github.com/krzyc/CasparCG-Server/tree/master/src/modules/replay).
+ * Copyright (c) 2011 Sveriges Television AB <info@casparcg.com>
+ * Copyright (c) 2013 Technical University of Lodz Multimedia Centre <office@cm.p.lodz.pl>
+ * Authors: Jan Starzak <jan@ministryofgoodsteps.com>,
+ *          Krzysztof Pyrkosz <pyrkosz@o2.pl>
+ */
+
 #pragma once
 
-#include "vmx_extended_index.h"
+#include "replay_extended_index.h"
 #include <string>
 #include <vector>
 #include <deque>
@@ -8,12 +38,12 @@
 #include <cstdint>
 #include <boost/filesystem.hpp>
 
-namespace caspar { namespace vmx {
+namespace caspar { namespace replay {
 
-class VmxSegmentedWriter {
+class ReplaySegmentedWriter {
 public:
-    VmxSegmentedWriter();
-    ~VmxSegmentedWriter();
+    ReplaySegmentedWriter();
+    ~ReplaySegmentedWriter();
 
     /**
      * Start a new recording session.
@@ -64,10 +94,10 @@ private:
     uint64_t segment_duration_us_;
 };
 
-class VmxSegmentedReader {
+class ReplaySegmentedReader {
 public:
-    VmxSegmentedReader();
-    ~VmxSegmentedReader();
+    ReplaySegmentedReader();
+    ~ReplaySegmentedReader();
 
     /**
      * Opens a segmented recording by scanning the folder for matching segments.
@@ -114,7 +144,7 @@ private:
         boost::filesystem::path mav_path;
         boost::filesystem::path idx_path;
         
-        std::vector<vmx_index_entry_v2> indices;
+        std::vector<replay_index_entry_v2> indices;
         size_t global_start_frame; // The global frame index where this segment starts
     };
     std::vector<SegmentReadInfo> segments_;
@@ -149,7 +179,7 @@ public:
      * Exports a clip from the reader to a file using FFmpeg.
      * note: This is a blocking operation.
      */
-    static bool ExportClip(VmxSegmentedReader& reader, uint64_t start_time, uint64_t end_time, const boost::filesystem::path& output_path);
+    static bool ExportClip(ReplaySegmentedReader& reader, uint64_t start_time, uint64_t end_time, const boost::filesystem::path& output_path);
 };
 
 }}

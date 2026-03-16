@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.28)
-project(vmx)
+project(replay)
 
 include(FetchContent)
 FetchContent_Declare(
@@ -25,34 +25,34 @@ if(MSVC)
 endif()
 
 set(SOURCES
-    vmx_segmented_storage.cpp
-    vmx_segmented_storage.h
-    vmx_extended_index.h
-    vmx_file_operations.cpp
-    vmx_file_operations.h
-    vmx_consumer.cpp
-    vmx_consumer.h
-    vmx_producer.cpp
-    vmx_producer.h
-    vmx.cpp
-    vmx.h
+    replay_extended_index.h
+    replay_segmented_storage.cpp
+    replay_segmented_storage.h
+    replay_file_operations.cpp
+    replay_file_operations.h
+    replay_consumer.cpp
+    replay_consumer.h
+    replay_producer.cpp
+    replay_producer.h
+    replay.cpp
+    replay.h
 )
 
-casparcg_add_module_project(vmx
+casparcg_add_module_project(replay
     SOURCES ${SOURCES}
-    INIT_FUNCTION "vmx::init"
-    UNINIT_FUNCTION "vmx::uninit"
+    INIT_FUNCTION "replay::init"
+    UNINIT_FUNCTION "replay::uninit"
 )
 
-target_include_directories(vmx PRIVATE
+target_include_directories(replay PRIVATE
     ${CMAKE_SOURCE_DIR}/../../
     ${LIBVMX_ROOT}/src
 )
 
-target_link_libraries(vmx PRIVATE
+target_link_libraries(replay PRIVATE
     core
     common
     libvmx
 )
 
-set_target_properties(vmx PROPERTIES FOLDER modules)
+set_target_properties(replay PROPERTIES FOLDER modules)

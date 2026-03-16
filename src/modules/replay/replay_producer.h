@@ -1,3 +1,33 @@
+/*
+ * Copyright (c) 2025 CasparCG Contributors
+ *
+ * This file is part of CasparCG (www.casparcg.com).
+ *
+ * CasparCG is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * CasparCG is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with CasparCG. If not, see <http://www.gnu.org/licenses/>.
+ *
+ * This module uses libvmx (https://github.com/openmediatransport/libvmx),
+ * licensed under MIT, which is compatible with GPL-3.
+ *
+ * Derived from the CasparCG replay module
+ * (https://github.com/krzyc/CasparCG-Server/tree/master/src/modules/replay).
+ * Copyright (c) 2011 Sveriges Television AB <info@casparcg.com>
+ * Copyright (c) 2013 Technical University of Lodz Multimedia Centre <office@cm.p.lodz.pl>
+ * Authors: Robert Nagy <ronag89@gmail.com>,
+ *          Jan Starzak <jan@ministryofgoodsteps.com>,
+ *          Krzysztof Pyrkosz <pyrkosz@o2.pl>
+ */
+
 #pragma once
 
 #include <core/producer/frame_producer.h>
@@ -9,15 +39,15 @@
 #include <atomic>
 #include <thread>
 #include <vector>
-#include "vmx_segmented_storage.h"
+#include "replay_segmented_storage.h"
 #include "vmxcodec.h"
 
 // Link libvmx
 #pragma comment(lib, "libvmx.lib")
 
-namespace caspar { namespace vmx {
+namespace caspar { namespace replay {
 
-struct vmx_producer : public core::frame_producer
+struct replay_producer : public core::frame_producer
 {
     core::monitor::state    state_;
     mutable std::mutex      state_mutex_;
@@ -25,7 +55,7 @@ struct vmx_producer : public core::frame_producer
     std::string             path_;
     int                     channel_index_ = -1;
     
-    std::unique_ptr<VmxSegmentedReader> reader_;
+    std::unique_ptr<ReplaySegmentedReader> reader_;
 
     VMX_INSTANCE*           vmx_ = nullptr;
     int                     width_ = 0;
@@ -55,8 +85,8 @@ struct vmx_producer : public core::frame_producer
     core::draw_frame        current_frame_;
 
 public:
-    vmx_producer(std::string path, spl::shared_ptr<core::frame_factory> frame_factory);
-    ~vmx_producer();
+    replay_producer(std::string path, spl::shared_ptr<core::frame_factory> frame_factory);
+    ~replay_producer();
 
     core::draw_frame receive_impl(core::video_field field, int nb_samples) override;
     std::future<std::wstring> call(const std::vector<std::wstring>& params) override;

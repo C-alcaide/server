@@ -1,12 +1,34 @@
-#include "vmx.h"
-#include "vmx_producer.h"
-#include "vmx_consumer.h"
+/*
+ * Copyright (c) 2025 CasparCG Contributors
+ *
+ * This file is part of CasparCG (www.casparcg.com).
+ *
+ * CasparCG is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * CasparCG is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with CasparCG. If not, see <http://www.gnu.org/licenses/>.
+ *
+ * This module uses libvmx (https://github.com/openmediatransport/libvmx),
+ * licensed under MIT, which is compatible with GPL-3.
+ */
+
+#include "replay.h"
+#include "replay_producer.h"
+#include "replay_consumer.h"
 #include <boost/algorithm/string.hpp>
 #include <boost/filesystem.hpp>
 #include <common/env.h>
 #include <common/utf.h>
 
-namespace caspar { namespace vmx {
+namespace caspar { namespace replay {
 
 namespace {
 
@@ -47,7 +69,7 @@ spl::shared_ptr<core::frame_producer> create_producer(const core::frame_producer
     if (!is_mav) return core::frame_producer::empty();
     
     auto path = u8(path_w);
-    auto p = spl::make_shared<vmx_producer>(path, dependencies.frame_factory);
+    auto p = spl::make_shared<replay_producer>(path, dependencies.frame_factory);
     
     // Configure producer based on params (skip filename at 0)
     if (params.size() > 1) {
@@ -64,13 +86,13 @@ spl::shared_ptr<core::frame_consumer> create_consumer(const std::vector<std::wst
                                                   const std::vector<spl::shared_ptr<core::video_channel>>& channels,
                                                   const core::channel_info& channel_info)
 {
-    // Usage: ADD 1 VMX file [QUALITY]
-    // params[0] = VMX
+    // Usage: ADD 1 REPLAY file [QUALITY]
+    // params[0] = REPLAY
     // params[1] = filename
-    if (params.size() < 2 || (!boost::iequals(params.at(0), L"VMX"))) 
+    if (params.size() < 2 || (!boost::iequals(params.at(0), L"REPLAY"))) 
          return core::frame_consumer::empty();
     
-    // Careful: When removing, REMOVE 1 VMX file is called.
+    // Careful: When removing, REMOVE 1 REPLAY file is called.
     // The consumer factory is used to MATCH the consumer to remove as well?
     // In CasparCG, create_consumer is called to Create. 
     // To Remove, Core matches existing consumers.
@@ -111,15 +133,15 @@ spl::shared_ptr<core::frame_consumer> create_consumer(const std::vector<std::wst
         else if (boost::iequals(q, L"OMT_HQ")) quality = VMX_PROFILE_OMT_HQ;
     }
     
-    return spl::make_shared<vmx_consumer>(path, quality);
+    return spl::make_shared<replay_consumer>(path, quality);
 }
 
 }
 
 void init(const core::module_dependencies& dependencies)
 {
-    dependencies.producer_registry->register_producer_factory(L"VMX Producer", create_producer);
-    dependencies.consumer_registry->register_consumer_factory(L"VMX Consumer", create_consumer);
+    dependencies.producer_registry->register_producer_factory(L"Replay Producer", create_producer);
+    dependencies.consumer_registry->register_consumer_factory(L"Replay Consumer", create_consumer);
 }
 
 void uninit()

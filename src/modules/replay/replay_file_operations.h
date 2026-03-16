@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2026 Open Media Transport Contributors
+* Copyright (c) 2026 CasparCG Contributors
 *
 * This file is part of CasparCG (www.casparcg.com).
 *
@@ -15,6 +15,13 @@
 *
 * You should have received a copy of the GNU General Public License
 * along with CasparCG. If not, see <http://www.gnu.org/licenses/>.
+*
+* Derived from the CasparCG replay module
+* (https://github.com/krzyc/CasparCG-Server/tree/master/src/modules/replay).
+* Copyright (c) 2011 Sveriges Television AB <info@casparcg.com>
+* Copyright (c) 2013 Technical University of Lodz Multimedia Centre <office@cm.p.lodz.pl>
+* Authors: Jan Starzak <jan@ministryofgoodsteps.com>,
+*          Krzysztof Pyrkosz <pyrkosz@o2.pl>
 */
 
 #pragma once
@@ -27,10 +34,10 @@
 #define NOMINMAX
 #include <Windows.h>
 // Use WinAPI for file IO
-#define VMX_IO_WINAPI
+#define REPLAY_IO_WINAPI
 #endif
 
-#ifndef VMX_IO_WINAPI
+#ifndef REPLAY_IO_WINAPI
 
 #include "common/utf.h"
 
@@ -77,19 +84,19 @@
 #endif
 #endif
 
-#ifdef VMX_IO_WINAPI
-typedef HANDLE                          vmx_file_handle;
+#ifdef REPLAY_IO_WINAPI
+typedef HANDLE                          replay_file_handle;
 #define VMX_INVALID_HANDLE              INVALID_HANDLE_VALUE
-#define VMX_IO_WINAPI_FUNC(x)           ::x
+#define REPLAY_IO_WINAPI_FUNC(x)           ::x
 #else
-typedef FILE*                           vmx_file_handle;
+typedef FILE*                           replay_file_handle;
 #define VMX_INVALID_HANDLE              NULL
-#define VMX_IO_WINAPI_FUNC(x)           x
+#define REPLAY_IO_WINAPI_FUNC(x)           x
 #endif
 
-namespace caspar { namespace vmx {
+namespace caspar { namespace replay {
 
-    struct vmx_file_header {
+    struct replay_file_header {
         char                            magick[4]; // = 'OMAV'
         uint8_t                         version; // = 1 
         uint32_t                        width;
@@ -100,7 +107,7 @@ namespace caspar { namespace vmx {
     };
 
     // simplified structure for POD serialization
-    struct vmx_file_header_pod {
+    struct replay_file_header_pod {
         char                            magick[4]; // = 'OMAV'
         uint8_t                         version; // = 1
         uint32_t                        width;
@@ -110,25 +117,25 @@ namespace caspar { namespace vmx {
         int64_t                         time_ticks; // storage for ptime
     };
 
-    struct vmx_file_header_ex {
+    struct replay_file_header_ex {
         char                            video_fourcc[4]; // = 'VMX '
         char                            audio_fourcc[4]; // = 'in32'
 
         int                             audio_channels;
     };
 
-    vmx_file_handle safe_fopen(const wchar_t* filename, uint32_t mode, uint32_t shareFlags);
-    void safe_fclose(vmx_file_handle file_handle);
+    replay_file_handle safe_fopen(const wchar_t* filename, uint32_t mode, uint32_t shareFlags);
+    void safe_fclose(replay_file_handle file_handle);
     
-    void write_index_header(vmx_file_handle outfile_idx, const core::video_format_desc* format_desc, boost::posix_time::ptime start_timecode, int audio_channels);
-    void write_index(vmx_file_handle outfile_idx, long long offset);
+    void write_index_header(replay_file_handle outfile_idx, const core::video_format_desc* format_desc, boost::posix_time::ptime start_timecode, int audio_channels);
+    void write_index(replay_file_handle outfile_idx, long long offset);
     
     // Reads from file
-    long long read_index(vmx_file_handle infile_idx);
-    long long length_index(vmx_file_handle infile_idx);
-    int seek_index(vmx_file_handle infile_idx, long long frame, uint32_t origin);
+    long long read_index(replay_file_handle infile_idx);
+    long long length_index(replay_file_handle infile_idx);
+    int seek_index(replay_file_handle infile_idx, long long frame, uint32_t origin);
     
-    int read_index_header(vmx_file_handle infile_idx, vmx_file_header_pod* header);
-    int read_index_header_ex(vmx_file_handle infile_idx, vmx_file_header_ex* header);
+    int read_index_header(replay_file_handle infile_idx, replay_file_header_pod* header);
+    int read_index_header_ex(replay_file_handle infile_idx, replay_file_header_ex* header);
 
 }}

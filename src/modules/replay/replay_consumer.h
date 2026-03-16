@@ -1,3 +1,33 @@
+/*
+ * Copyright (c) 2025 CasparCG Contributors
+ *
+ * This file is part of CasparCG (www.casparcg.com).
+ *
+ * CasparCG is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * CasparCG is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with CasparCG. If not, see <http://www.gnu.org/licenses/>.
+ *
+ * This module uses libvmx (https://github.com/openmediatransport/libvmx),
+ * licensed under MIT, which is compatible with GPL-3.
+ *
+ * Derived from the CasparCG replay module
+ * (https://github.com/krzyc/CasparCG-Server/tree/master/src/modules/replay).
+ * Copyright (c) 2011 Sveriges Television AB <info@casparcg.com>
+ * Copyright (c) 2013 Technical University of Lodz Multimedia Centre <office@cm.p.lodz.pl>
+ * Authors: Robert Nagy <ronag89@gmail.com>,
+ *          Jan Starzak <jan@ministryofgoodsteps.com>,
+ *          Krzysztof Pyrkosz <pyrkosz@o2.pl>
+ */
+
 #pragma once
 
 #include <core/consumer/frame_consumer.h>
@@ -10,7 +40,7 @@
 #include <atomic>
 #include <thread>
 #include <vector>
-#include "vmx_segmented_storage.h"
+#include "replay_segmented_storage.h"
 #include <common/diagnostics/graph.h>
 
 // VMX Header
@@ -19,16 +49,16 @@
 // Link libvmx
 #pragma comment(lib, "libvmx.lib")
 
-namespace caspar { namespace vmx {
+namespace caspar { namespace replay {
 
-struct vmx_consumer : public core::frame_consumer
+struct replay_consumer : public core::frame_consumer
 {
     core::monitor::state    state_;
     mutable std::mutex      state_mutex_;
     std::string             path_;
     int                     channel_index_ = -1;
     
-    std::unique_ptr<VmxSegmentedWriter> writer_;
+    std::unique_ptr<ReplaySegmentedWriter> writer_;
     int                     max_duration_sec_;
     int                     segment_duration_sec_;
 
@@ -54,8 +84,8 @@ struct vmx_consumer : public core::frame_consumer
     spl::shared_ptr<diagnostics::graph> graph_;
 
 public:
-    vmx_consumer(std::string path, VMX_PROFILE quality);
-    ~vmx_consumer();
+    replay_consumer(std::string path, VMX_PROFILE quality);
+    ~replay_consumer();
 
     void initialize(const core::video_format_desc& format_desc,
                     const core::channel_info&      channel_info,

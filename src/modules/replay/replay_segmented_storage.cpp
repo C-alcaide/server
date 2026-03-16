@@ -1,4 +1,34 @@
-#include "vmx_segmented_storage.h"
+/*
+ * Copyright (c) 2025 CasparCG Contributors
+ *
+ * This file is part of CasparCG (www.casparcg.com).
+ *
+ * CasparCG is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * CasparCG is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with CasparCG. If not, see <http://www.gnu.org/licenses/>.
+ *
+ * This module uses libvmx (https://github.com/openmediatransport/libvmx),
+ * licensed under MIT, which is compatible with GPL-3.
+ *
+ * The .mav/.idx file format and segmented storage strategy are derived from
+ * the CasparCG replay module
+ * (https://github.com/krzyc/CasparCG-Server/tree/master/src/modules/replay).
+ * Copyright (c) 2011 Sveriges Television AB <info@casparcg.com>
+ * Copyright (c) 2013 Technical University of Lodz Multimedia Centre <office@cm.p.lodz.pl>
+ * Authors: Jan Starzak <jan@ministryofgoodsteps.com>,
+ *          Krzysztof Pyrkosz <pyrkosz@o2.pl>
+ */
+
+#include "replay_segmented_storage.h"
 #include <common/log.h>
 // Include vmxcodec.h for VMX_DecodeBGRA
 #include "vmxcodec.h"
@@ -22,13 +52,13 @@
 #define PCLOSE pclose
 #endif
 
-namespace caspar { namespace vmx {
+namespace caspar { namespace replay {
 
 // ----------------------------------------------------------------------------
-// VmxSegmentedWriter
+// ReplaySegmentedWriter
 // ----------------------------------------------------------------------------
 
-VmxSegmentedWriter::VmxSegmentedWriter()
+ReplaySegmentedWriter::ReplaySegmentedWriter()
     : max_duration_sec_(0)
     , is_open_(false)
     , current_segment_index_(-1)
@@ -39,12 +69,12 @@ VmxSegmentedWriter::VmxSegmentedWriter()
 {
 }
 
-VmxSegmentedWriter::~VmxSegmentedWriter()
+ReplaySegmentedWriter::~ReplaySegmentedWriter()
 {
     Close();
 }
 
-bool VmxSegmentedWriter::Open(const boost::filesystem::path& base_path, int max_duration_sec, int segment_duration_sec, int width, int height, double fps)
+bool ReplaySegmentedWriter::Open(const boost::filesystem::path& base_path, int max_duration_sec, int segment_duration_sec, int width, int height, double fps)
 {
     Close();
 
@@ -77,7 +107,7 @@ bool VmxSegmentedWriter::Open(const boost::filesystem::path& base_path, int max_
     return true;
 }
 
-void VmxSegmentedWriter::Close()
+void ReplaySegmentedWriter::Close()
 {
     if (file_mav_) {
         fclose(file_mav_);
@@ -91,7 +121,7 @@ void VmxSegmentedWriter::Close()
     segments_.clear();
 }
 
-void VmxSegmentedWriter::RotateSegment(uint64_t start_timestamp)
+void ReplaySegmentedWriter::RotateSegment(uint64_t start_timestamp)
 {
     if (file_mav_) fclose(file_mav_);
     if (file_idx_) fclose(file_idx_);
@@ -121,7 +151,7 @@ void VmxSegmentedWriter::RotateSegment(uint64_t start_timestamp)
     }
 
     // Write segment header
-    vmx_segment_header header;
+    replay_segment_header header;
     header.segment_index = current_segment_index_;
     header.start_timestamp = start_timestamp;
     header.end_timestamp = 0; // Updated later potentially, or not critical
@@ -141,7 +171,7 @@ void VmxSegmentedWriter::RotateSegment(uint64_t start_timestamp)
     segments_.push_back(info);
 }
 
-bool VmxSegmentedWriter::WriteFrame(const void* data, size_t size, uint64_t timestamp)
+bool ReplaySegmentedWriter::WriteFrame(const void* data, size_t size, uint64_t timestamp)
 {
     if (!is_open_) return false;
 
@@ -162,7 +192,7 @@ bool VmxSegmentedWriter::WriteFrame(const void* data, size_t size, uint64_t time
     fflush(file_mav_);
 
     // Write Index
-    vmx_index_entry_v2 entry;
+    replay_index_entry_v2 entry;
     entry.file_offset = offset;
     entry.timestamp = timestamp;
     fwrite(&entry, sizeof(entry), 1, file_idx_);
@@ -177,7 +207,7 @@ bool VmxSegmentedWriter::WriteFrame(const void* data, size_t size, uint64_t time
     return true;
 }
 
-void VmxSegmentedWriter::CleanupOldSegments()
+void ReplaySegmentedWriter::CleanupOldSegments()
 {
     if (max_duration_sec_ <= 0) return;
     
@@ -227,10 +257,10 @@ void VmxSegmentedWriter::CleanupOldSegments()
 }
 
 // ----------------------------------------------------------------------------
-// VmxSegmentedReader
+// ReplaySegmentedReader
 // ----------------------------------------------------------------------------
 
-VmxSegmentedReader::VmxSegmentedReader()
+ReplaySegmentedReader::ReplaySegmentedReader()
     : total_frames_(0)
     , total_duration_(0)
     , cached_file_mav_(nullptr)
@@ -238,12 +268,12 @@ VmxSegmentedReader::VmxSegmentedReader()
 {
 }
 
-VmxSegmentedReader::~VmxSegmentedReader()
+ReplaySegmentedReader::~ReplaySegmentedReader()
 {
     Close();
 }
 
-bool VmxSegmentedReader::Open(const boost::filesystem::path& base_path)
+bool ReplaySegmentedReader::Open(const boost::filesystem::path& base_path)
 {
     Close();
     base_path_ = base_path;
@@ -319,7 +349,7 @@ bool VmxSegmentedReader::Open(const boost::filesystem::path& base_path)
         if (!f) continue;
         
         // Read Header
-        vmx_segment_header header;
+        replay_segment_header header;
         if (fread(&header, sizeof(header), 1, f) != 1) {
             fclose(f);
             continue;
@@ -333,10 +363,10 @@ bool VmxSegmentedReader::Open(const boost::filesystem::path& base_path)
         long size = ftell(f);
         fseek(f, sizeof(header), SEEK_SET);
         
-        long entry_count = (size - sizeof(header)) / sizeof(vmx_index_entry_v2);
+        long entry_count = (size - sizeof(header)) / sizeof(replay_index_entry_v2);
         if (entry_count > 0) {
             seg.indices.resize(entry_count);
-            fread(seg.indices.data(), sizeof(vmx_index_entry_v2), entry_count, f);
+            fread(seg.indices.data(), sizeof(replay_index_entry_v2), entry_count, f);
 
             // Correct timestamps from entries
             seg.start_timestamp = seg.indices.front().timestamp;
@@ -356,7 +386,7 @@ bool VmxSegmentedReader::Open(const boost::filesystem::path& base_path)
     return !segments_.empty();
 }
 
-void VmxSegmentedReader::Close()
+void ReplaySegmentedReader::Close()
 {
     if (cached_file_mav_) {
         fclose(cached_file_mav_);
@@ -367,7 +397,7 @@ void VmxSegmentedReader::Close()
 }
 
 
-bool VmxSegmentedReader::GetTimestamp(size_t index, uint64_t& timestamp)
+bool ReplaySegmentedReader::GetTimestamp(size_t index, uint64_t& timestamp)
 {
     if (index >= total_frames_) return false;
 
@@ -387,7 +417,7 @@ bool VmxSegmentedReader::GetTimestamp(size_t index, uint64_t& timestamp)
     return true;
 }
 
-bool VmxSegmentedReader::GetFrame(size_t index, std::vector<uint8_t>& data, uint64_t& timestamp)
+bool ReplaySegmentedReader::GetFrame(size_t index, std::vector<uint8_t>& data, uint64_t& timestamp)
 {
     if (index >= total_frames_) return false;
 
@@ -444,14 +474,14 @@ bool VmxSegmentedReader::GetFrame(size_t index, std::vector<uint8_t>& data, uint
     return true;
 }
 
-size_t VmxSegmentedReader::SeekTimestamp(uint64_t timestamp)
+size_t ReplaySegmentedReader::SeekTimestamp(uint64_t timestamp)
 {
     // Find segment
     for(const auto& seg : segments_) {
         if (timestamp >= seg.start_timestamp && timestamp <= seg.end_timestamp) {
             // Binary search inside segment indices
             auto it = std::lower_bound(seg.indices.begin(), seg.indices.end(), timestamp,
-                [](const vmx_index_entry_v2& entry, uint64_t ts) {
+                [](const replay_index_entry_v2& entry, uint64_t ts) {
                     return entry.timestamp < ts;
                 });
             
@@ -466,9 +496,9 @@ size_t VmxSegmentedReader::SeekTimestamp(uint64_t timestamp)
     return total_frames_ - 1;
 }
 
-size_t VmxSegmentedReader::GetTotalFrames() const { return total_frames_; }
+size_t ReplaySegmentedReader::GetTotalFrames() const { return total_frames_; }
 
-void VmxSegmentedReader::Refresh() 
+void ReplaySegmentedReader::Refresh() 
 {
     if (segments_.empty()) {
         Open(base_path_);
@@ -488,7 +518,7 @@ void VmxSegmentedReader::Refresh()
 #endif
     if (f) {
         long long current_count = (long long)last_seg.indices.size();
-        long long offset = sizeof(vmx_segment_header) + (current_count * sizeof(vmx_index_entry_v2));
+        long long offset = sizeof(replay_segment_header) + (current_count * sizeof(replay_index_entry_v2));
         
         _fseeki64(f, 0, SEEK_END);
         long long file_size = _ftelli64(f);
@@ -496,11 +526,11 @@ void VmxSegmentedReader::Refresh()
         if (file_size > offset) {
             _fseeki64(f, offset, SEEK_SET);
             long long new_entries_bytes = file_size - offset;
-            long long new_count = new_entries_bytes / sizeof(vmx_index_entry_v2);
+            long long new_count = new_entries_bytes / sizeof(replay_index_entry_v2);
             
             if (new_count > 0) {
-                std::vector<vmx_index_entry_v2> buffer(new_count);
-                if (fread(buffer.data(), sizeof(vmx_index_entry_v2), new_count, f) == (size_t)new_count) {
+                std::vector<replay_index_entry_v2> buffer(new_count);
+                if (fread(buffer.data(), sizeof(replay_index_entry_v2), new_count, f) == (size_t)new_count) {
                     last_seg.indices.insert(last_seg.indices.end(), buffer.begin(), buffer.end());
                     if (!last_seg.indices.empty()) {
                         last_seg.end_timestamp = last_seg.indices.back().timestamp;
@@ -560,14 +590,14 @@ void VmxSegmentedReader::Refresh()
 #endif      
         if (!f2) break;
         
-        vmx_segment_header h;
+        replay_segment_header h;
         if (fread(&h, sizeof(h), 1, f2) != 1) { fclose(f2); break; }
         
         _fseeki64(f2, 0, SEEK_END);
         long long sz = _ftelli64(f2);
         _fseeki64(f2, sizeof(h), SEEK_SET);
         
-        long long count = (sz - sizeof(h)) / sizeof(vmx_index_entry_v2);
+        long long count = (sz - sizeof(h)) / sizeof(replay_index_entry_v2);
         if (count > 0) {
             SegmentReadInfo new_seg;
             new_seg.index = next_idx;
@@ -575,7 +605,7 @@ void VmxSegmentedReader::Refresh()
             new_seg.mav_path = mav_s;
             
             new_seg.indices.resize(count);
-            fread(new_seg.indices.data(), sizeof(vmx_index_entry_v2), count, f2);
+            fread(new_seg.indices.data(), sizeof(replay_index_entry_v2), count, f2);
             new_seg.start_timestamp = new_seg.indices.front().timestamp;
             new_seg.end_timestamp = new_seg.indices.back().timestamp;
             new_seg.global_start_frame = total_frames_;
@@ -594,11 +624,11 @@ void VmxSegmentedReader::Refresh()
     }
 }
 
-uint64_t VmxSegmentedReader::GetDuration() const { return total_duration_; }
+uint64_t ReplaySegmentedReader::GetDuration() const { return total_duration_; }
 
-int VmxSegmentedReader::GetWidth() const { return width_; }
-int VmxSegmentedReader::GetHeight() const { return height_; }
-double VmxSegmentedReader::GetFps() const { return fps_; }
+int ReplaySegmentedReader::GetWidth() const { return width_; }
+int ReplaySegmentedReader::GetHeight() const { return height_; }
+double ReplaySegmentedReader::GetFps() const { return fps_; }
 
 // ----------------------------------------------------------------------------
 // VmxTranscoder
@@ -609,7 +639,7 @@ bool VmxTranscoder::ExportJobs(const std::vector<ExportJob>& jobs, const boost::
     if (jobs.empty()) return false;
     
     // First job determines format
-    VmxSegmentedReader reader;
+    ReplaySegmentedReader reader;
     if (!reader.Open(jobs[0].input_path)) {
          std::cerr << "[VMX] Failed to open first input: " << jobs[0].input_path << std::endl;
          return false;
@@ -661,7 +691,7 @@ bool VmxTranscoder::ExportJobs(const std::vector<ExportJob>& jobs, const boost::
     int total_frames_exported = 0;
 
     for (const auto& job : jobs) {
-        VmxSegmentedReader current_reader;
+        ReplaySegmentedReader current_reader;
         // Construct full path if needed, usually input_path is absolute or relative to cwd
         if (!current_reader.Open(job.input_path)) {
              CASPAR_LOG(error) << L"[VMX] Failed to open input: " << job.input_path.wstring();
@@ -749,7 +779,7 @@ bool VmxTranscoder::ExportJobs(const std::vector<ExportJob>& jobs, const boost::
 
 }
 
-bool VmxTranscoder::ExportClip(VmxSegmentedReader& reader, uint64_t start_time, uint64_t end_time, const boost::filesystem::path& output_path)
+bool VmxTranscoder::ExportClip(ReplaySegmentedReader& reader, uint64_t start_time, uint64_t end_time, const boost::filesystem::path& output_path)
 {
     ExportJob job;
     job.input_path = reader.GetPath();

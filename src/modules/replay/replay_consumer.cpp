@@ -1,9 +1,34 @@
 /*
-* Custom VMX Consumer
-* Creates .mav + .idx files using libvmx directly
-*/
+ * Copyright (c) 2025 CasparCG Contributors
+ *
+ * This file is part of CasparCG (www.casparcg.com).
+ *
+ * CasparCG is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * CasparCG is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with CasparCG. If not, see <http://www.gnu.org/licenses/>.
+ *
+ * This module uses libvmx (https://github.com/openmediatransport/libvmx),
+ * licensed under MIT, which is compatible with GPL-3.
+ *
+ * Derived from the CasparCG replay module
+ * (https://github.com/krzyc/CasparCG-Server/tree/master/src/modules/replay).
+ * Copyright (c) 2011 Sveriges Television AB <info@casparcg.com>
+ * Copyright (c) 2013 Technical University of Lodz Multimedia Centre <office@cm.p.lodz.pl>
+ * Authors: Robert Nagy <ronag89@gmail.com>,
+ *          Jan Starzak <jan@ministryofgoodsteps.com>,
+ *          Krzysztof Pyrkosz <pyrkosz@o2.pl>
+ */
 
-#include "vmx_consumer.h"
+#include "replay_consumer.h"
 #include <iostream>
 #include <vector>
 #include <boost/lexical_cast.hpp>
@@ -15,11 +40,11 @@
 #include <chrono>
 #include <common/log.h>
 
-namespace caspar { namespace vmx {
+namespace caspar { namespace replay {
 
-vmx_consumer::vmx_consumer(std::string path, VMX_PROFILE quality)
+replay_consumer::replay_consumer(std::string path, VMX_PROFILE quality)
     : quality_(quality)
-    , writer_(std::make_unique<VmxSegmentedWriter>())
+    , writer_(std::make_unique<ReplaySegmentedWriter>())
     , max_duration_sec_(86400) // Default 24 hours
     , segment_duration_sec_(60) // Default 60 seconds
 {
@@ -168,7 +193,7 @@ vmx_consumer::vmx_consumer(std::string path, VMX_PROFILE quality)
     // Defer Open to initialize when we know format
 }
 
-vmx_consumer::~vmx_consumer()
+replay_consumer::~replay_consumer()
 {
     if (vmx_) {
         VMX_Destroy(vmx_);
@@ -176,7 +201,7 @@ vmx_consumer::~vmx_consumer()
     }
 }
 
-void vmx_consumer::initialize(const core::video_format_desc& format_desc,
+void replay_consumer::initialize(const core::video_format_desc& format_desc,
                     const core::channel_info&      channel_info,
                     int                            port_index)
 {
@@ -206,7 +231,7 @@ void vmx_consumer::initialize(const core::video_format_desc& format_desc,
     if (writer_) writer_->Open(base_p, max_duration_sec_, segment_duration_sec_, width_, height_, fps_);
 }
 
-std::future<bool> vmx_consumer::send(core::video_field field, const core::const_frame frame)
+std::future<bool> replay_consumer::send(core::video_field field, const core::const_frame frame)
 {
     if (!vmx_ || !writer_) return make_ready_future(false);
     
@@ -294,7 +319,7 @@ std::future<bool> vmx_consumer::send(core::video_field field, const core::const_
     return make_ready_future(true);
 }
 
-core::monitor::state vmx_consumer::state() const
+core::monitor::state replay_consumer::state() const
 {
     std::lock_guard<std::mutex> lock(state_mutex_);
     return state_;

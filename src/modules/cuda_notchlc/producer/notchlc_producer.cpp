@@ -1,3 +1,26 @@
+/*
+ * Copyright (c) 2025 CasparCG Contributors
+ *
+ * This file is part of CasparCG (www.casparcg.com).
+ *
+ * CasparCG is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * CasparCG is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with CasparCG. If not, see <http://www.gnu.org/licenses/>.
+ *
+ * This module requires the NVIDIA CUDA Toolkit (https://developer.nvidia.com/cuda-toolkit).
+ * NotchLC is a codec specification by Derivative Inc., available under the
+ * Creative Commons Attribution 4.0 International License.
+ */
+
 // notchlc_producer.cpp
 // CasparCG frame_producer for CUDA NotchLC decode.
 // Architecture mirrors cuda_prores/producer/prores_producer.cpp exactly;

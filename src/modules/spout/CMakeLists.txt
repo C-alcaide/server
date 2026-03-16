@@ -2,7 +2,14 @@ cmake_minimum_required(VERSION 3.28)
 project(spout)
 
 if(NOT DEFINED SPOUT_SDK_DIR)
-    set(SPOUT_SDK_DIR "D:/Github/Spout2/SPOUTSDK")
+    include(FetchContent)
+    FetchContent_Declare(
+        spout_sdk
+        GIT_REPOSITORY https://github.com/leadedge/Spout2.git
+        GIT_TAG        master
+    )
+    FetchContent_MakeAvailable(spout_sdk)
+    set(SPOUT_SDK_DIR "${spout_sdk_SOURCE_DIR}/SPOUTSDK")
 endif()
 
 set(SOURCES
