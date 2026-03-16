@@ -1,7 +1,24 @@
 cmake_minimum_required(VERSION 3.20)
 project(ltc)
 
-set(LIBLTC_ROOT "D:/Github/libltc" CACHE PATH "Path to the libltc root directory")
+include(FetchContent)
+FetchContent_Declare(
+    libltc
+    GIT_REPOSITORY https://github.com/x42/libltc.git
+    GIT_TAG        master
+)
+FetchContent_MakeAvailable(libltc)
+
+if(NOT miniaudio_POPULATED)
+    FetchContent_Declare(
+        miniaudio
+        GIT_REPOSITORY https://github.com/mackron/miniaudio.git
+        GIT_TAG        master
+    )
+    FetchContent_MakeAvailable(miniaudio)
+endif()
+
+set(LIBLTC_ROOT "${libltc_SOURCE_DIR}")
 
 # Add libltc sources directly to avoid external build steps
 set(LIBLTC_SOURCES
@@ -18,4 +35,7 @@ casparcg_add_module_project(ltc
     INIT_FUNCTION "ltc::init"
 )
 
-target_include_directories(ltc PRIVATE ${LIBLTC_ROOT}/src)
+target_include_directories(ltc PRIVATE 
+    ${LIBLTC_ROOT}/src
+    "${miniaudio_SOURCE_DIR}"
+)

@@ -15,7 +15,7 @@
 #define MINIAUDIO_IMPLEMENTATION
 #pragma warning(push)
 #pragma warning(disable : 4244)
-#include "../miniaudio.h"
+#include "miniaudio.h"
 #pragma warning(pop)
 
 #include <iostream>

@@ -1,7 +1,28 @@
 cmake_minimum_required(VERSION 3.28)
 project(vmx)
 
-set(LIBVMX_ROOT "D:/Github/libvmx" CACHE PATH "Path to the libvmx root directory")
+include(FetchContent)
+FetchContent_Declare(
+    libvmx_ext
+    GIT_REPOSITORY https://github.com/openmediatransport/libvmx.git
+    GIT_TAG        master
+)
+FetchContent_MakeAvailable(libvmx_ext)
+set(LIBVMX_ROOT "${libvmx_ext_SOURCE_DIR}")
+
+# Include sources to compile libvmx natively
+add_library(libvmx STATIC
+    ${LIBVMX_ROOT}/src/vmxcodec.cpp
+    ${LIBVMX_ROOT}/src/vmxcodec_x86.cpp
+    ${LIBVMX_ROOT}/src/vmxcodec_avx2.cpp
+)
+target_include_directories(libvmx PUBLIC ${LIBVMX_ROOT}/src)
+target_include_directories(libvmx PRIVATE ${CMAKE_SOURCE_DIR})
+target_compile_options(libvmx PRIVATE "/w" "/WX-")
+
+if(MSVC)
+    set_source_files_properties(${LIBVMX_ROOT}/src/vmxcodec_avx2.cpp PROPERTIES COMPILE_FLAGS "/arch:AVX2")
+endif()
 
 set(SOURCES
     vmx_segmented_storage.cpp
@@ -21,13 +42,6 @@ casparcg_add_module_project(vmx
     SOURCES ${SOURCES}
     INIT_FUNCTION "vmx::init"
     UNINIT_FUNCTION "vmx::uninit"
-)
-
-add_library(libvmx STATIC IMPORTED GLOBAL)
-set_target_properties(libvmx PROPERTIES
-    IMPORTED_LOCATION         "${LIBVMX_ROOT}/build/libvmx.lib"
-    IMPORTED_LOCATION_RELEASE "${LIBVMX_ROOT}/build/Release/libvmx.lib"
-    IMPORTED_LOCATION_DEBUG   "${LIBVMX_ROOT}/build/libvmx.lib"
 )
 
 target_include_directories(vmx PRIVATE
