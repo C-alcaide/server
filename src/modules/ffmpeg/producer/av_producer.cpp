@@ -205,23 +205,14 @@ class Decoder
                 ctx->pix_fmt = get_pix_fmt_with_alpha(ctx->pix_fmt);
         }
 
-        int thread_count = env::properties().get(L"configuration.ffmpeg.producer.threads", 0);
+        // Auto-detect optimal thread count (0) rather than potentially starving the
+        // mixer thread pool by overriding with arbitrarily high thread counts.
+        int thread_count = 0;
         FF(av_opt_set_int(ctx.get(), "threads", thread_count, 0));
 
         ctx->pkt_timebase = stream->time_base;
 
-        bool slice_threads = env::properties().get(L"configuration.ffmpeg.producer.slice-threads", true);
-
         if (ctx->codec_type == AVMEDIA_TYPE_VIDEO) {
-            // slice-threads=true  → FF_THREAD_SLICE only: decodes one large frame across all
-            //   cores in parallel slices. Lower per-frame latency but all threads fire at once,
-            //   which can starve the mixer on high thread counts.
-            // slice-threads=false → FFmpeg default (FF_THREAD_FRAME | FF_THREAD_SLICE): lets
-            //   FFmpeg choose; frame threading is used when the codec supports it, which spreads
-            //   CPU load more evenly but delays first output by thread_count frames.
-            if (slice_threads)
-                ctx->thread_type = FF_THREAD_SLICE;
-
             ctx->framerate           = av_guess_frame_rate(nullptr, stream, nullptr);
             ctx->sample_aspect_ratio = av_guess_sample_aspect_ratio(nullptr, stream, nullptr);
 
@@ -921,7 +912,7 @@ struct AVProducer::Impl
         graph_->set_color("buffer", diagnostics::color(1.0f, 1.0f, 0.0f));
 
         const int default_buffer_depth = std::max(1, static_cast<int>(format_desc_.fps) / 4);
-        buffer_capacity_ = env::properties().get(L"configuration.ffmpeg.producer.buffer-depth", default_buffer_depth);
+        buffer_capacity_ = default_buffer_depth;
         CASPAR_LOG(debug) << print() << " buffer-depth: " << buffer_capacity_;
 
         state_["file/name"] = u8(name_);
@@ -1702,8 +1693,7 @@ struct AVProducer::Impl
                 if (buffer_capacity_ < 15) buffer_capacity_ = 15;
             } else {
                 // Restore to the configured live forward latency minimum
-                buffer_capacity_ = env::properties().get(L"configuration.ffmpeg.producer.buffer-depth",
-                                                         std::max(1, static_cast<int>(format_desc_.fps) / 4));
+                buffer_capacity_ = std::max(1, static_cast<int>(format_desc_.fps) / 4);
             }
         }
     }
