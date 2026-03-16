@@ -30,5 +30,5 @@ add_subdirectory(system_audio)
 if (MSVC)
 	add_subdirectory(flash)
     add_subdirectory(bluefish)
+    add_subdirectory(spout)
 endif()
-
