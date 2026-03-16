@@ -169,6 +169,16 @@ void Input::internal_reset()
         FF(av_dict_set(&options, "seekable", *seekable_ ? "1" : "0", 0));
     }
 
+    if (!url_parts.first.empty() && 
+        (url_parts.first == L"srt" || url_parts.first == L"udp" || url_parts.first == L"rtp" || 
+         url_parts.first == L"rtmp" || url_parts.first == L"rtmps" || 
+         url_parts.first == L"http" || url_parts.first == L"https" || url_parts.first == L"tcp")) {
+        // Increase probesize to 50MB and analyzeduration to 15s to help catch 
+        // high-bitrate live streams joining mid-GOP that lack immediate SPS/PPS
+        FF(av_dict_set(&options, "probesize", "50000000", 0));
+        FF(av_dict_set(&options, "analyzeduration", "15000000", 0));
+    }
+
     if (input_format == nullptr) {
         // TODO (fix) timeout?
         FF(av_dict_set(&options, "rw_timeout", "60000000", 0)); // 60 second IO timeout
