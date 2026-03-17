@@ -161,6 +161,65 @@ CUDA requires PATH to include the CUDA bin directory before vcvars (already hand
 
 ---
 
+## Pitfalls & Past Build Errors
+
+Whenever a new build error is encountered and fixed, it is documented here so it is not repeated.
+
+---
+
+### #1 — `C1083: Cannot open include file: 'vector'` (and other STL/Win32 headers)
+
+**Symptom:** Every TU fails with fatal `C1083: Cannot open include file` for basic headers (`vector`, `memory`, `cstddef`, `Windows.h`).
+
+**Root cause:** `vcvars64.bat` is a thin stub (`@call vcvarsall.bat x64`). INCLUDE, LIB, and LIBPATH are set through nested `call` chains inside vcvarsall. When a build script runs `vcvars64.bat && set` in a subprocess and tries to re-inject the result into a new process, the nested-call-chain variables are not visible in the `set` output — so the injected environment is incomplete.
+
+**Fix:** Run `vcvars64.bat` and `cmake` in the **same** `cmd.exe` invocation:
+```
+cmd /c ""<vcvars64.bat>"" && cmake --build ...
+```
+See the "Only Working Build Method" section above.
+
+**Broken patterns to avoid:**
+```python
+# Subprocess env-capture — DO NOT USE
+result = subprocess.run('cmd /c vcvars64.bat && set', capture_output=True)
+env = parse(result.stdout)
+subprocess.run(['cmake', ...], env=env)  # misses nested-call vars
+```
+
+---
+
+### #2 — `pixel_format` cases inside a `color_space` switch (wrong enum type errors)
+
+**File:** `src/modules/ffmpeg/util/av_util.cpp` — `make_av_video_frame()`
+
+**Symptom:** 14 compile errors of the form:
+```
+error: this constant expression has type "caspar::core::pixel_format"
+       instead of the required "caspar::core::color_space" type
+```
+All `pixel_format::bgr`, `pixel_format::rgba`, etc. case labels were flagged.
+
+**Root cause:** When the `switch (pix_desc.color_space)` block was added to `make_av_video_frame()`, the `default:` case was left incomplete — it was missing `color_trc` assignment, `break;`, the closing `}` of the switch, and the closing `}` of the surrounding `if` block. As a result the compiler parsed the subsequent `switch (format)` cases as continuations of the `color_space` switch, producing enum-type mismatches for every `pixel_format` label.
+
+**Fix:** Complete the `default:` case and close all open blocks before the `switch (format)`:
+```cpp
+        default: // bt709
+            av_frame->color_primaries = AVCOL_PRI_BT709;
+            av_frame->color_trc       = AVCOL_TRC_BT709;  // ← was missing
+            break;                                          // ← was missing
+    }                                                       // ← close switch
+}                                                           // ← close if
+
+switch (format) {   // ← was missing the switch statement
+    case core::pixel_format::bgr:
+    ...
+```
+
+**Prevention:** When adding a new `switch` block inside an existing function that already has a `switch`, always verify brace balance before committing. The IntelliSense "wrong enum type" error is a reliable signal that a `switch` block was left open.
+
+---
+
 ## Committing build scripts themselves
 
 The scripts are tracked in git. After modifying any build script, commit:
