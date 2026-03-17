@@ -130,6 +130,22 @@ core::color_space get_color_space(const std::shared_ptr<AVFrame>& video)
     return result;
 }
 
+core::color_transfer get_color_transfer(const std::shared_ptr<AVFrame>& video)
+{
+    if (video) {
+        switch (video->color_trc) {
+            case AVColorTransferCharacteristic::AVCOL_TRC_SMPTE2084:
+                return core::color_transfer::pq;
+            case AVColorTransferCharacteristic::AVCOL_TRC_ARIB_STD_B67:
+                return core::color_transfer::hlg;
+            default:
+                break;
+        }
+    }
+
+    return core::color_transfer::sdr;
+}
+
 class Decoder
 {
     static enum AVPixelFormat get_hw_format(AVCodecContext* ctx, const enum AVPixelFormat* pix_fmts)
@@ -1076,7 +1092,7 @@ struct AVProducer::Impl
                             // We hit EOF while fast-forwarding to a seek target (the target was beyond the video).
                             // Render and push the very last dropped frame so we don't output a black screen.
                             last_dropped_frame.frame = core::draw_frame(
-                                make_frame(this, *frame_factory_, last_dropped_frame.video, last_dropped_frame.audio, get_color_space(last_dropped_frame.video), scale_mode_));
+                                make_frame(this, *frame_factory_, last_dropped_frame.video, last_dropped_frame.audio, get_color_space(last_dropped_frame.video), scale_mode_, false, get_color_transfer(last_dropped_frame.video)));
                             last_dropped_frame.frame_count = frame_count_++;
 
                             boost::unique_lock<boost::mutex> buffer_lock(buffer_mutex_);
@@ -1193,7 +1209,7 @@ struct AVProducer::Impl
                 }
 
                 frame.frame = core::draw_frame(
-                    make_frame(this, *frame_factory_, frame.video, frame.audio, get_color_space(frame.video), scale_mode_));
+                    make_frame(this, *frame_factory_, frame.video, frame.audio, get_color_space(frame.video), scale_mode_, false, get_color_transfer(frame.video)));
                 frame.frame_count = frame_count_++;
 
                 graph_->set_value("decode-time", decode_timer.elapsed() * format_desc_.fps * 0.5);

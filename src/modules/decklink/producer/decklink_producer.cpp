@@ -445,6 +445,25 @@ core::color_space get_color_space(IDeckLinkVideoInputFrame* video)
     return core::color_space::bt709;
 }
 
+core::color_transfer get_color_transfer(IDeckLinkVideoInputFrame* video)
+{
+    IDeckLinkVideoFrameMetadataExtensions* md = nullptr;
+
+    if (SUCCEEDED(video->QueryInterface(IID_IDeckLinkVideoFrameMetadataExtensions, (void**)&md))) {
+        auto     metadata = wrap_raw<com_ptr>(md, true);
+        LONGLONG eotf;
+        if (SUCCEEDED(md->GetInt(bmdDeckLinkFrameMetadataHDRElectroOpticalTransferFunc, &eotf))) {
+            if (eotf == 2) {
+                return core::color_transfer::pq;
+            } else if (eotf == 1) {
+                return core::color_transfer::hlg;
+            }
+        }
+    }
+
+    return core::color_transfer::sdr;
+}
+
 com_ptr<IDeckLinkDisplayMode> get_display_mode(const com_iface_ptr<IDeckLinkInput>& device,
                                                BMDDisplayMode                       format,
                                                BMDPixelFormat                       pix_fmt,
@@ -969,9 +988,10 @@ class decklink_producer : public IDeckLinkInputCallback
             graph_->set_value("tick-time", tick_timer_.elapsed() * format_desc_.hz * 0.5);
             tick_timer_.restart();
 
-            BMDTimeValue      in_video_pts = 0LL;
-            BMDTimeValue      in_audio_pts = 0LL;
-            core::color_space color_space  = core::color_space::bt709;
+            BMDTimeValue         in_video_pts   = 0LL;
+            BMDTimeValue         in_audio_pts   = 0LL;
+            core::color_space    color_space    = core::color_space::bt709;
+            core::color_transfer color_transfer = core::color_transfer::sdr;
 
             if (video) {
                 const auto flags = video->GetFlags();
@@ -981,7 +1001,8 @@ class decklink_producer : public IDeckLinkInputCallback
                     return S_OK;
                 }
 
-                color_space = get_color_space(video);
+                color_space    = get_color_space(video);
+                color_transfer = get_color_transfer(video);
                 auto src    = video_decoder_.decode(video, mode_);
 
                 BMDTimeValue duration;
@@ -1095,7 +1116,7 @@ class decklink_producer : public IDeckLinkInputCallback
                 graph_->set_value("in-sync", in_sync * 2.0 + 0.5);
                 graph_->set_value("out-sync", out_sync * 2.0 + 0.5);
 
-                auto frame = core::draw_frame(make_frame(this, *frame_factory_, av_video, av_audio, color_space));
+                auto frame = core::draw_frame(make_frame(this, *frame_factory_, av_video, av_audio, color_space, core::frame_geometry::scale_mode::stretch, false, color_transfer));
                 auto field = core::video_field::progressive;
                 if (format_desc_.field_count == 2) {
                     field = frame_count_ % 2 == 0 ? core::video_field::a : core::video_field::b;

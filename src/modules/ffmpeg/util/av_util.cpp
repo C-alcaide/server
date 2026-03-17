@@ -49,7 +49,8 @@ core::mutable_frame make_frame(void*                            tag,
                                std::shared_ptr<AVFrame>         audio,
                                core::color_space                color_space,
                                core::frame_geometry::scale_mode scale_mode,
-                               bool                             is_straight_alpha)
+                               bool                             is_straight_alpha,
+                               core::color_transfer             color_transfer)
 {
     std::vector<int> data_map; // TODO(perf) when using data_map, avoid uploading duplicate planes
 
@@ -58,6 +59,7 @@ core::mutable_frame make_frame(void*                            tag,
                     static_cast<AVPixelFormat>(video->format), video->width, video->height, data_map, color_space)
               : core::pixel_format_desc(core::pixel_format::invalid);
     pix_desc.is_straight_alpha = is_straight_alpha;
+    pix_desc.color_transfer    = color_transfer;
 
     auto frame = frame_factory.create_frame(tag, pix_desc);
     if (scale_mode != core::frame_geometry::scale_mode::stretch) {
@@ -276,6 +278,29 @@ std::shared_ptr<AVFrame> make_av_video_frame(const core::const_frame& frame, con
         av_frame->color_range = AVCOL_RANGE_JPEG;
         if (format != core::pixel_format::gray && format != core::pixel_format::luma) {
             av_frame->colorspace = AVCOL_SPC_RGB;
+        }
+    } else if (format == core::pixel_format::ycbcr || format == core::pixel_format::ycbcra) {
+        av_frame->color_range = AVCOL_RANGE_MPEG;
+        switch (pix_desc.color_space) {
+            case core::color_space::bt2020:
+                av_frame->color_primaries = AVCOL_PRI_BT2020;
+                av_frame->colorspace      = AVCOL_SPC_BT2020_NCL;
+                av_frame->color_trc       = (pix_desc.color_transfer == core::color_transfer::pq)
+                                                ? AVCOL_TRC_SMPTE2084
+                                            : (pix_desc.color_transfer == core::color_transfer::hlg)
+                                                ? AVCOL_TRC_ARIB_STD_B67
+                                                : AVCOL_TRC_BT709;
+                break;
+            case core::color_space::bt601:
+                av_frame->color_primaries = AVCOL_PRI_BT470BG;
+                av_frame->colorspace      = AVCOL_SPC_SMPTE170M;
+                av_frame->color_trc       = AVCOL_TRC_SMPTE170M;
+                break;
+            default: // bt709
+                av_frame->color_primaries = AVCOL_PRI_BT709;
+                av_frame->colorspace      = AVCOL_SPC_BT709;
+                av_frame->color_trc       = AVCOL_TRC_BT709;
+                break;
         }
     }
 

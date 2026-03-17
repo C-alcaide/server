@@ -53,6 +53,13 @@ enum class color_space
     bt2020,
 };
 
+enum class color_transfer
+{
+    sdr,
+    pq,
+    hlg,
+};
+
 struct pixel_format_desc final
 {
     struct plane
@@ -79,16 +86,20 @@ struct pixel_format_desc final
 
     pixel_format_desc() = default;
 
-    explicit pixel_format_desc(pixel_format format, core::color_space color_space = core::color_space::bt709)
+    explicit pixel_format_desc(pixel_format          format,
+                               core::color_space     color_space    = core::color_space::bt709,
+                               core::color_transfer  color_transfer = core::color_transfer::sdr)
         : format(format)
         , color_space(color_space)
+        , color_transfer(color_transfer)
     {
     }
 
-    pixel_format       format            = pixel_format::invalid;
-    bool               is_straight_alpha = false;
-    std::vector<plane> planes;
-    core::color_space  color_space = core::color_space::bt709;
+    pixel_format          format            = pixel_format::invalid;
+    bool                  is_straight_alpha = false;
+    std::vector<plane>    planes;
+    core::color_space     color_space    = core::color_space::bt709;
+    core::color_transfer  color_transfer = core::color_transfer::sdr;
 };
 
 }} // namespace caspar::core
