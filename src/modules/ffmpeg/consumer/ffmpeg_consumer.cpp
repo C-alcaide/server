@@ -120,7 +120,8 @@ struct Stream
            const core::video_format_desc&      format_desc,
            bool                                realtime,
            common::bit_depth                   depth,
-           std::map<std::string, std::string>& options)
+           std::map<std::string, std::string>& options,
+           core::color_space                   channel_cs = core::color_space::bt709)
     {
         if (codec_id == AV_CODEC_ID_TIMECODE) {
             is_ltc = true;
@@ -354,6 +355,24 @@ struct Stream
             enc->sample_aspect_ratio = av_buffersink_get_sample_aspect_ratio(sink);
             enc->time_base           = st->time_base;
             enc->pix_fmt             = static_cast<AVPixelFormat>(av_buffersink_get_format(sink));
+            enc->color_range         = AVCOL_RANGE_MPEG;
+            switch (channel_cs) {
+                case core::color_space::bt2020:
+                    enc->color_primaries = AVCOL_PRI_BT2020;
+                    enc->colorspace      = AVCOL_SPC_BT2020_NCL;
+                    enc->color_trc       = AVCOL_TRC_SMPTE2084;
+                    break;
+                case core::color_space::bt601:
+                    enc->color_primaries = AVCOL_PRI_BT470BG;
+                    enc->colorspace      = AVCOL_SPC_SMPTE170M;
+                    enc->color_trc       = AVCOL_TRC_SMPTE170M;
+                    break;
+                default: // bt709
+                    enc->color_primaries = AVCOL_PRI_BT709;
+                    enc->colorspace      = AVCOL_SPC_BT709;
+                    enc->color_trc       = AVCOL_TRC_BT709;
+                    break;
+            }
         } else if (codec->type == AVMEDIA_TYPE_AUDIO) {
             st->time_base = {1, av_buffersink_get_sample_rate(sink)};
 
@@ -599,7 +618,7 @@ struct ffmpeg_consumer : public core::frame_consumer
                     if (oc->oformat->video_codec == AV_CODEC_ID_H264 && options.find("preset:v") == options.end()) {
                         options["preset:v"] = "veryfast";
                     }
-                    video_stream.emplace(oc, ":v", oc->oformat->video_codec, format_desc, realtime_, depth_, options);
+                    video_stream.emplace(oc, ":v", oc->oformat->video_codec, format_desc, realtime_, depth_, options, channel_info.default_color_space);
 
                     {
                         std::lock_guard<std::mutex> lock(state_mutex_);
@@ -609,7 +628,7 @@ struct ffmpeg_consumer : public core::frame_consumer
 
                 std::optional<Stream> audio_stream;
                 if (oc->oformat->audio_codec != AV_CODEC_ID_NONE) {
-                    audio_stream.emplace(oc, ":a", oc->oformat->audio_codec, format_desc, realtime_, depth_, options);
+                    audio_stream.emplace(oc, ":a", oc->oformat->audio_codec, format_desc, realtime_, depth_, options, channel_info.default_color_space);
                 }
 
                 if (!(oc->oformat->flags & AVFMT_NOFILE)) {

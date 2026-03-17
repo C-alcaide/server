@@ -48,15 +48,17 @@ struct mixer::impl
     spl::shared_ptr<diagnostics::graph>  graph_;
     audio_mixer                          audio_mixer_{graph_};
     spl::shared_ptr<image_mixer>         image_mixer_;
+    core::color_space                    default_color_space_{core::color_space::bt709};
     std::queue<std::future<const_frame>> buffer_;
 
     impl(const impl&)            = delete;
     impl& operator=(const impl&) = delete;
 
-    impl(int channel_index, spl::shared_ptr<diagnostics::graph> graph, spl::shared_ptr<image_mixer> image_mixer)
+    impl(int channel_index, spl::shared_ptr<diagnostics::graph> graph, spl::shared_ptr<image_mixer> image_mixer, core::color_space default_color_space)
         : channel_index_(channel_index)
         , graph_(std::move(graph))
         , image_mixer_(std::move(image_mixer))
+        , default_color_space_(default_color_space)
     {
     }
 
@@ -85,8 +87,9 @@ struct mixer::impl
              graph  = graph_,
              depth,
              format_desc,
+             default_color_space = default_color_space_,
              tag = this]() mutable {
-                auto desc = pixel_format_desc(pixel_format::bgra);
+                auto desc = pixel_format_desc(pixel_format::bgra, default_color_space);
                 desc.planes.push_back(pixel_format_desc::plane(format_desc.width, format_desc.height, 4, depth));
                 std::vector<array<const uint8_t>> image_data;
                 auto                              tuple = std::move(result.get());
@@ -108,8 +111,8 @@ struct mixer::impl
     float get_master_volume() { return audio_mixer_.get_master_volume(); }
 };
 
-mixer::mixer(int channel_index, spl::shared_ptr<diagnostics::graph> graph, spl::shared_ptr<image_mixer> image_mixer)
-    : impl_(new impl(channel_index, std::move(graph), std::move(image_mixer)))
+mixer::mixer(int channel_index, spl::shared_ptr<diagnostics::graph> graph, spl::shared_ptr<image_mixer> image_mixer, core::color_space default_color_space)
+    : impl_(new impl(channel_index, std::move(graph), std::move(image_mixer), default_color_space))
 {
 }
 void        mixer::set_master_volume(float volume) { impl_->set_master_volume(volume); }

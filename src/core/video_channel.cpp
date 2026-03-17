@@ -114,7 +114,7 @@ struct video_channel::impl final
         : channel_info_(index, image_mixer->depth(), default_color_space)
         , output_(graph_, format_desc, channel_info_)
         , image_mixer_(std::move(image_mixer))
-        , mixer_(index, graph_, image_mixer_)
+        , mixer_(index, graph_, image_mixer_, default_color_space)
         , stage_(std::make_shared<core::stage>(index, graph_, format_desc))
         , tick_(std::move(tick))
     {

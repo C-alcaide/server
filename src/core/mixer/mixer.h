@@ -24,6 +24,7 @@
 #include <common/bit_depth.h>
 #include <common/memory.h>
 
+#include <core/frame/pixel_format.h>
 #include <core/fwd.h>
 #include <core/monitor/monitor.h>
 
@@ -41,7 +42,8 @@ class mixer final
   public:
     explicit mixer(int                                         channel_index,
                    spl::shared_ptr<caspar::diagnostics::graph> graph,
-                   spl::shared_ptr<image_mixer>                image_mixer);
+                   spl::shared_ptr<image_mixer>                image_mixer,
+                   core::color_space                           default_color_space = core::color_space::bt709);
 
     const_frame operator()(std::vector<draw_frame> frames, const video_format_desc& format_desc, int nb_samples);
 
