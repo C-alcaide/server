@@ -283,8 +283,21 @@ std::shared_ptr<AVFrame> make_av_video_frame(const core::const_frame& frame, con
         av_frame->color_range = AVCOL_RANGE_MPEG;
         switch (pix_desc.color_space) {
             case core::color_space::bt2020:
+                av_frame->colorspace = AVCOL_SPC_BT2020_NCL;
+                break;
+            case core::color_space::bt601:
+                av_frame->colorspace = AVCOL_SPC_SMPTE170M;
+                break;
+            default: // bt709
+                av_frame->colorspace = AVCOL_SPC_BT709;
+                break;
+        }
+    }
+
+    if (format != core::pixel_format::invalid) {
+        switch (pix_desc.color_space) {
+            case core::color_space::bt2020:
                 av_frame->color_primaries = AVCOL_PRI_BT2020;
-                av_frame->colorspace      = AVCOL_SPC_BT2020_NCL;
                 av_frame->color_trc       = (pix_desc.color_transfer == core::color_transfer::pq)
                                                 ? AVCOL_TRC_SMPTE2084
                                             : (pix_desc.color_transfer == core::color_transfer::hlg)
@@ -293,21 +306,16 @@ std::shared_ptr<AVFrame> make_av_video_frame(const core::const_frame& frame, con
                 break;
             case core::color_space::bt601:
                 av_frame->color_primaries = AVCOL_PRI_BT470BG;
-                av_frame->colorspace      = AVCOL_SPC_SMPTE170M;
                 av_frame->color_trc       = AVCOL_TRC_SMPTE170M;
                 break;
             default: // bt709
                 av_frame->color_primaries = AVCOL_PRI_BT709;
-                av_frame->colorspace      = AVCOL_SPC_BT709;
                 av_frame->color_trc       = AVCOL_TRC_BT709;
                 break;
         }
     }
 
     switch (format) {
-        case core::pixel_format::rgb:
-            av_frame->format = is_16bit ? AVPixelFormat::AV_PIX_FMT_RGB48 : AVPixelFormat::AV_PIX_FMT_RGB24;
-            break;
         case core::pixel_format::bgr:
             av_frame->format = is_16bit ? AVPixelFormat::AV_PIX_FMT_BGR48 : AVPixelFormat::AV_PIX_FMT_BGR24;
             break;
