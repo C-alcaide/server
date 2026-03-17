@@ -81,6 +81,10 @@ enum class video_format
     x4kDCIp5000,
     x4kDCIp5994,
     x4kDCIp6000,
+    x1080p10000,
+    x1080p12000,
+    x2160p10000,
+    x2160p12000,
     invalid,
     custom,
     count
