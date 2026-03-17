@@ -110,11 +110,12 @@ struct video_channel::impl final
          const core::video_format_desc&            format_desc,
          color_space                               default_color_space,
          std::unique_ptr<image_mixer>              image_mixer,
-         std::function<void(core::monitor::state)> tick)
-        : channel_info_(index, image_mixer->depth(), default_color_space)
+         std::function<void(core::monitor::state)> tick,
+         color_transfer                            default_color_transfer = color_transfer::sdr)
+        : channel_info_(index, image_mixer->depth(), default_color_space, default_color_transfer)
         , output_(graph_, format_desc, channel_info_)
         , image_mixer_(std::move(image_mixer))
-        , mixer_(index, graph_, image_mixer_, default_color_space)
+        , mixer_(index, graph_, image_mixer_, default_color_space, default_color_transfer)
         , stage_(std::make_shared<core::stage>(index, graph_, format_desc))
         , tick_(std::move(tick))
     {
@@ -270,8 +271,9 @@ video_channel::video_channel(int                                       index,
                              const core::video_format_desc&            format_desc,
                              color_space                               default_color_space,
                              std::unique_ptr<image_mixer>              image_mixer,
-                             std::function<void(core::monitor::state)> tick)
-    : impl_(new impl(index, format_desc, default_color_space, std::move(image_mixer), std::move(tick)))
+                             std::function<void(core::monitor::state)> tick,
+                             color_transfer                            default_color_transfer)
+    : impl_(new impl(index, format_desc, default_color_space, std::move(image_mixer), std::move(tick), default_color_transfer))
 {
 }
 video_channel::~video_channel() {}

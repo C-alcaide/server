@@ -121,7 +121,8 @@ struct Stream
            bool                                realtime,
            common::bit_depth                   depth,
            std::map<std::string, std::string>& options,
-           core::color_space                   channel_cs = core::color_space::bt709)
+           core::color_space                   channel_cs       = core::color_space::bt709,
+           core::color_transfer                channel_transfer = core::color_transfer::sdr)
     {
         if (codec_id == AV_CODEC_ID_TIMECODE) {
             is_ltc = true;
@@ -360,7 +361,9 @@ struct Stream
                 case core::color_space::bt2020:
                     enc->color_primaries = AVCOL_PRI_BT2020;
                     enc->colorspace      = AVCOL_SPC_BT2020_NCL;
-                    enc->color_trc       = AVCOL_TRC_SMPTE2084;
+                    enc->color_trc       = (channel_transfer == core::color_transfer::hlg)
+                                               ? AVCOL_TRC_ARIB_STD_B67
+                                               : AVCOL_TRC_SMPTE2084; // pq or default
                     break;
                 case core::color_space::bt601:
                     enc->color_primaries = AVCOL_PRI_BT470BG;
@@ -618,7 +621,7 @@ struct ffmpeg_consumer : public core::frame_consumer
                     if (oc->oformat->video_codec == AV_CODEC_ID_H264 && options.find("preset:v") == options.end()) {
                         options["preset:v"] = "veryfast";
                     }
-                    video_stream.emplace(oc, ":v", oc->oformat->video_codec, format_desc, realtime_, depth_, options, channel_info.default_color_space);
+                    video_stream.emplace(oc, ":v", oc->oformat->video_codec, format_desc, realtime_, depth_, options, channel_info.default_color_space, channel_info.default_color_transfer);
 
                     {
                         std::lock_guard<std::mutex> lock(state_mutex_);
@@ -628,7 +631,7 @@ struct ffmpeg_consumer : public core::frame_consumer
 
                 std::optional<Stream> audio_stream;
                 if (oc->oformat->audio_codec != AV_CODEC_ID_NONE) {
-                    audio_stream.emplace(oc, ":a", oc->oformat->audio_codec, format_desc, realtime_, depth_, options, channel_info.default_color_space);
+                    audio_stream.emplace(oc, ":a", oc->oformat->audio_codec, format_desc, realtime_, depth_, options, channel_info.default_color_space, channel_info.default_color_transfer);
                 }
 
                 if (!(oc->oformat->flags & AVFMT_NOFILE)) {

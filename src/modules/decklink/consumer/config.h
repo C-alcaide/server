@@ -118,7 +118,8 @@ struct configuration
     port_configuration              primary;
     std::vector<port_configuration> secondaries;
 
-    core::color_space      color_space = core::color_space::bt709;
+    core::color_space      color_space    = core::color_space::bt709;
+    core::color_transfer   color_transfer = core::color_transfer::sdr;
     hdr_meta_configuration hdr_meta;
 
     vanc_configuration vanc;

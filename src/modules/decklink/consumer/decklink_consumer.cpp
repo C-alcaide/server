@@ -263,6 +263,7 @@ class decklink_frame
     int                                          nb_samples_;
     const bool                                   hdr_;
     core::color_space                            color_space_;
+    core::color_transfer                         color_transfer_;
     hdr_meta_configuration                       hdr_metadata_;
     BMDFrameFlags                                flags_;
     BMDPixelFormat                               pix_fmt_;
@@ -278,7 +279,8 @@ class decklink_frame
                    int                           row_bytes,
                    bool                          vanc,
                    core::color_space             color_space,
-                   const hdr_meta_configuration& hdr_metadata)
+                   const hdr_meta_configuration& hdr_metadata,
+                   core::color_transfer          color_transfer = core::color_transfer::sdr)
         : format_desc_(std::move(format_desc))
         , data_(std::move(data))
         , nb_samples_(nb_samples)
@@ -286,6 +288,7 @@ class decklink_frame
         , pix_fmt_(pix_fmt)
         , row_bytes_(row_bytes)
         , color_space_(color_space)
+        , color_transfer_(color_transfer)
         , hdr_metadata_(hdr_metadata)
         , flags_(hdr ? bmdFrameFlagDefault | bmdFrameContainsHDRMetadata : bmdFrameFlagDefault)
         , vanc_(vanc ? create_ancillary_packets() : nullptr)
@@ -366,7 +369,7 @@ class decklink_frame
 
         switch (metadataID) {
             case bmdDeckLinkFrameMetadataHDRElectroOpticalTransferFunc:
-                *value = EOTF::HLG;
+                *value = (color_transfer_ == core::color_transfer::hlg) ? EOTF::HLG : EOTF::PQ;
                 break;
 
             case bmdDeckLinkFrameMetadataColorspace:
@@ -607,7 +610,8 @@ struct decklink_secondary_port final : public IDeckLinkVideoOutputCallback
                                format_strategy_->get_row_bytes(decklink_format_desc_.width),
                                false,
                                config_.color_space,
-                               config_.hdr_meta));
+                               config_.hdr_meta,
+                               config_.color_transfer));
         if (FAILED(output_->ScheduleVideoFrame(get_raw(packed_frame),
                                                display_time,
                                                decklink_format_desc_.duration,
@@ -1083,7 +1087,8 @@ struct decklink_consumer final : public IDeckLinkVideoOutputCallback
                                                                                     row_bytes,
                                                                                     config_.vanc.enable,
                                                                                     config_.color_space,
-                                                                                    config_.hdr_meta));
+                                                                                    config_.hdr_meta,
+                                                                                    config_.color_transfer));
 
         if (vanc_ && vanc_->has_data()) {
             auto ancillary_packets = iface_cast<IDeckLinkVideoFrameAncillaryPackets>(fill_frame);

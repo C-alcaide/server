@@ -83,6 +83,19 @@ core::color_space get_color_space(const std::wstring& str)
     CASPAR_THROW_EXCEPTION(user_error() << msg_info(L"Invalid decklink color-space, must be bt601, bt709 or bt2020"));
 }
 
+core::color_transfer get_color_transfer(const std::wstring& str)
+{
+    auto s = boost::to_lower_copy(str);
+    if (s == L"pq")
+        return core::color_transfer::pq;
+    else if (s == L"hlg")
+        return core::color_transfer::hlg;
+    else if (s == L"sdr")
+        return core::color_transfer::sdr;
+
+    CASPAR_THROW_EXCEPTION(user_error() << msg_info(L"Invalid color-transfer, must be sdr, pq or hlg"));
+}
+
 configuration parse_xml_config(const boost::property_tree::wptree&  ptree,
                                const core::video_format_repository& format_repository,
                                const core::channel_info&            channel_info)
@@ -171,6 +184,15 @@ configuration parse_xml_config(const boost::property_tree::wptree&  ptree,
     if (!color_space_str.empty())
         config.color_space = get_color_space(color_space_str);
 
+    config.color_transfer   = channel_info.default_color_transfer;
+    auto color_transfer_str = ptree.get(L"color-transfer", L"");
+    if (!color_transfer_str.empty())
+        config.color_transfer = get_color_transfer(color_transfer_str);
+
+    // Auto-enable HDR output flag when channel signals a non-SDR transfer on BT.2020
+    config.hdr = (config.color_space == core::color_space::bt2020 &&
+                  config.color_transfer != core::color_transfer::sdr);
+
     auto hdr_metadata = ptree.get_child_optional(L"hdr-metadata");
     if (hdr_metadata) {
         config.hdr_meta.min_dml  = hdr_metadata->get(L"min-dml", config.hdr_meta.min_dml);
@@ -217,7 +239,10 @@ configuration parse_amcp_config(const std::vector<std::wstring>&     params,
     config.embedded_audio   = contains_param(L"EMBEDDED_AUDIO", params);
     config.primary.key_only = contains_param(L"KEY_ONLY", params);
 
-    config.color_space = channel_info.default_color_space;
+    config.color_space    = channel_info.default_color_space;
+    config.color_transfer = channel_info.default_color_transfer;
+    config.hdr = (config.color_space == core::color_space::bt2020 &&
+                  config.color_transfer != core::color_transfer::sdr);
 
     return config;
 }

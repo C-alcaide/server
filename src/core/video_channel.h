@@ -75,7 +75,8 @@ class video_channel final
                            const video_format_desc&                  format_desc,
                            color_space                               default_color_space,
                            std::unique_ptr<image_mixer>              image_mixer,
-                           std::function<void(core::monitor::state)> on_tick);
+                           std::function<void(core::monitor::state)> on_tick,
+                           color_transfer                            default_color_transfer = color_transfer::sdr);
     ~video_channel();
 
     core::monitor::state state() const;
