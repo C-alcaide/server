@@ -484,6 +484,14 @@ struct prores_producer_impl final : public core::frame_producer
             }
 
             // ~~ Build frame ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+            // Map ProRes bitstream colour metadata into CasparCG pipeline metadata
+            const auto pfd_cs = (fi.color_matrix == 9)                        ? core::color_space::bt2020
+                              : (fi.color_matrix == 5 || fi.color_matrix == 6) ? core::color_space::bt601
+                              : core::color_space::bt709;
+            const auto pfd_ct = (fi.transfer_func == 16) ? core::color_transfer::pq
+                              : (fi.transfer_func == 14) ? core::color_transfer::hlg
+                              : core::color_transfer::sdr;
+
             core::draw_frame df;
             if (!use_host_copy_ && cgt_[slot]) {
                 // Zero-copy path: CUDA writes raw BGRA16 bytes via cudaMemcpy2DToArrayAsync
@@ -494,7 +502,7 @@ struct prores_producer_impl final : public core::frame_producer
                 // expected by the rest of the CasparCG pipeline.
                 // (pixel_format::bgra would apply an extra .bgra swizzle that causes
                 // the RÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬ÂB swap the user observes on the zero-copy path.)
-                core::pixel_format_desc pfd(core::pixel_format::rgba);
+                core::pixel_format_desc pfd(core::pixel_format::rgba, pfd_cs, pfd_ct);
                 // We still need one plane entry so the planes.empty() guard in
                 // image_mixer::visit does not skip us.  A matching dummy (zero-byte)
                 // image_data entry satisfies the const_frame invariant
@@ -521,7 +529,7 @@ struct prores_producer_impl final : public core::frame_producer
                 // swap BÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬ÂR when storing into GL_RGBA16, so the texture has correct
                 // (R,G,B,A) slots.  pixel_format::bgra (case 1, .bgra swizzle) then
                 // re-swaps back to (B,G,R,A) = BGRA convention for the pipeline.
-                core::pixel_format_desc pfd(core::pixel_format::bgra);
+                core::pixel_format_desc pfd(core::pixel_format::bgra, pfd_cs, pfd_ct);
                 pfd.planes.push_back(core::pixel_format_desc::plane(fi.width, fi.height, 4, common::bit_depth::bit16));
                 auto mf = frame_factory_->create_frame(this, pfd);
                 std::memcpy(mf.image_data(0).begin(), h_bgra16_[slot], mf.image_data(0).size());

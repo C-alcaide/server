@@ -118,7 +118,7 @@ struct bypass_config {
     std::wstring output_path;
     std::wstring filename_pattern;
     int          profile       = 3;     // 3=HQ, others=422
-    int          hdr_mode      = 0;     // 0=SDR_709
+    int          hdr_mode      = -1;    // -1=inherit from channel, 0=SDR_709, 1=HLG_BT2020, 2=PQ_HDR10
     uint16_t     hdr_max_cll   = 1000;
     uint16_t     hdr_max_fall  = 400;
     bool         use_mxf       = false;
@@ -795,8 +795,11 @@ static bypass_config parse_bypass_params(const std::vector<std::wstring>& params
     cfg.device_index  = caspar::get_param(L"DEVICE",  params, 1);
     auto codec        = caspar::get_param(L"CODEC",   params, std::wstring(L"MOV"));
     cfg.use_mxf       = boost::iequals(codec, L"MXF");
-    auto hdr          = boost::to_upper_copy(caspar::get_param(L"HDR", params, std::wstring(L"SDR")));
-    cfg.hdr_mode      = boost::iequals(hdr, L"HLG") ? 1 : boost::iequals(hdr, L"PQ") ? 2 : 0;
+    auto hdr_param    = caspar::get_param(L"HDR", params, std::wstring(L""));
+    if (!hdr_param.empty()) {
+        auto hdr = boost::to_upper_copy(hdr_param);
+        cfg.hdr_mode = boost::iequals(hdr, L"HLG") ? 1 : boost::iequals(hdr, L"PQ") ? 2 : 0;
+    }  // else hdr_mode stays -1 (inherit from channel_info at creation time)
     cfg.hdr_max_cll   = (uint16_t)caspar::get_param(L"MAXCLL",  params, 1000);
     cfg.hdr_max_fall  = (uint16_t)caspar::get_param(L"MAXFALL", params, 400);
     cfg.cuda_device   = caspar::get_param(L"CUDA_DEVICE", params, 0);
@@ -819,8 +822,10 @@ static bypass_config parse_bypass_xml(const boost::property_tree::wptree& elem)
     cfg.device_index     = elem.get(L"device",   1);
     auto codec = elem.get(L"codec", std::wstring(L"mov"));
     cfg.use_mxf = boost::iequals(codec, L"mxf");
-    auto hdr = boost::to_upper_copy(elem.get(L"hdr", std::wstring(L"SDR")));
-    cfg.hdr_mode    = boost::iequals(hdr, L"HLG") ? 1 : boost::iequals(hdr, L"PQ") ? 2 : 0;
+    auto hdr = boost::to_upper_copy(elem.get(L"hdr", std::wstring(L"")));
+    if (!hdr.empty())
+        cfg.hdr_mode    = boost::iequals(hdr, L"HLG") ? 1 : boost::iequals(hdr, L"PQ") ? 2 : 0;
+    // else hdr_mode stays -1 (inherit from channel_info at creation time)
     cfg.hdr_max_cll  = (uint16_t)elem.get(L"max_cll",  1000);
     cfg.hdr_max_fall = (uint16_t)elem.get(L"max_fall", 400);
     cfg.cuda_device  = elem.get(L"cuda_device", 0);
@@ -838,21 +843,37 @@ spl::shared_ptr<core::frame_consumer>
 create_bypass_consumer(const std::vector<std::wstring>& params,
                        const core::video_format_repository& /*format_repository*/,
                        const std::vector<spl::shared_ptr<core::video_channel>>& /*channels*/,
-                       const core::channel_info& /*channel_info*/)
+                       const core::channel_info& channel_info)
 {
     if (boost::to_upper_copy(params.at(0)) != L"CUDA_PRORES_BYPASS")
         return core::frame_consumer::empty();
 
-    return spl::make_shared<prores_bypass_consumer_impl>(parse_bypass_params(params), 2);
+    auto cfg = parse_bypass_params(params);
+    if (cfg.hdr_mode < 0) {
+        switch (channel_info.default_color_transfer) {
+            case core::color_transfer::pq:  cfg.hdr_mode = 2; break;
+            case core::color_transfer::hlg: cfg.hdr_mode = 1; break;
+            default:                        cfg.hdr_mode = 0; break;
+        }
+    }
+    return spl::make_shared<prores_bypass_consumer_impl>(std::move(cfg), 2);
 }
 
 spl::shared_ptr<core::frame_consumer>
 create_preconfigured_bypass_consumer(const boost::property_tree::wptree& element,
                                      const core::video_format_repository& /*format_repository*/,
                                      const std::vector<spl::shared_ptr<core::video_channel>>& /*channels*/,
-                                     const core::channel_info& /*channel_info*/)
+                                     const core::channel_info& channel_info)
 {
-    return spl::make_shared<prores_bypass_consumer_impl>(parse_bypass_xml(element), 2);
+    auto cfg = parse_bypass_xml(element);
+    if (cfg.hdr_mode < 0) {
+        switch (channel_info.default_color_transfer) {
+            case core::color_transfer::pq:  cfg.hdr_mode = 2; break;
+            case core::color_transfer::hlg: cfg.hdr_mode = 1; break;
+            default:                        cfg.hdr_mode = 0; break;
+        }
+    }
+    return spl::make_shared<prores_bypass_consumer_impl>(std::move(cfg), 2);
 }
 
 }} // namespace caspar::cuda_prores
