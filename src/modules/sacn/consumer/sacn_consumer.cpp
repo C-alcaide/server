@@ -23,12 +23,14 @@
 
 #include <common/future.h>
 #include <common/log.h>
+#include <common/param.h>
 #include <common/ptree.h>
 
 #include <core/consumer/channel_info.h>
 
 #include <boost/algorithm/string.hpp>
 #include <boost/asio.hpp>
+#include <boost/lexical_cast.hpp>
 #include <boost/property_tree/ptree.hpp>
 #include <boost/uuid/random_generator.hpp>
 #include <boost/uuid/uuid.hpp>
@@ -356,6 +358,62 @@ struct sacn_consumer : public core::frame_consumer
     }
 };
 
+static std::vector<fixture> get_fixtures_params(const std::vector<std::wstring>& params)
+{
+    std::vector<fixture> fixtures;
+
+    for (std::size_t i = 0; i < params.size(); ++i) {
+        if (!boost::iequals(params[i], L"FIXTURE"))
+            continue;
+
+        if (i + 9 >= params.size())
+            CASPAR_THROW_EXCEPTION(user_error() << msg_info(
+                L"FIXTURE requires 9 arguments: type start_addr count channels x y width height rotation"));
+
+        fixture f{};
+
+        std::wstring type = params[i + 1];
+        if (boost::iequals(type, L"DIMMER")) {
+            f.type = FixtureType::DIMMER;
+        } else if (boost::iequals(type, L"RGB")) {
+            f.type = FixtureType::RGB;
+        } else if (boost::iequals(type, L"RGBW")) {
+            f.type = FixtureType::RGBW;
+        } else {
+            CASPAR_THROW_EXCEPTION(user_error() << msg_info(L"Unknown fixture type: " + type));
+        }
+
+        int startAddress = boost::lexical_cast<int>(params[i + 2]);
+        if (startAddress < 1)
+            CASPAR_THROW_EXCEPTION(user_error() << msg_info(L"Fixture start address must be >= 1"));
+        f.startAddress = (unsigned short)(startAddress - 1);
+
+        int fixtureCount = boost::lexical_cast<int>(params[i + 3]);
+        if (fixtureCount < 1)
+            CASPAR_THROW_EXCEPTION(user_error() << msg_info(L"Fixture count must be >= 1"));
+        f.fixtureCount = (unsigned short)fixtureCount;
+
+        int fixtureChannels = boost::lexical_cast<int>(params[i + 4]);
+        if (fixtureChannels < (int)f.type)
+            CASPAR_THROW_EXCEPTION(user_error()
+                                   << msg_info(L"Fixture channels must be >= channel count for type"));
+        f.fixtureChannels = (unsigned short)fixtureChannels;
+
+        box b{};
+        b.x        = boost::lexical_cast<float>(params[i + 5]);
+        b.y        = boost::lexical_cast<float>(params[i + 6]);
+        b.width    = boost::lexical_cast<float>(params[i + 7]);
+        b.height   = boost::lexical_cast<float>(params[i + 8]);
+        b.rotation = boost::lexical_cast<float>(params[i + 9]);
+        f.fixtureBox = b;
+
+        fixtures.push_back(f);
+        i += 9;
+    }
+
+    return fixtures;
+}
+
 static std::vector<fixture> get_fixtures_ptree(const boost::property_tree::wptree& ptree)
 {
     std::vector<fixture> fixtures;
@@ -447,6 +505,41 @@ create_preconfigured_consumer(const boost::property_tree::wptree&               
         CASPAR_THROW_EXCEPTION(user_error() << msg_info(L"Refresh rate must be at least 1"));
 
     config.fixtures = get_fixtures_ptree(ptree);
+
+    return spl::make_shared<sacn_consumer>(config);
+}
+
+spl::shared_ptr<core::frame_consumer>
+create_consumer(const std::vector<std::wstring>&                          params,
+                const core::video_format_repository&                     format_repository,
+                const std::vector<spl::shared_ptr<core::video_channel>>& channels,
+                const core::channel_info&                                channel_info)
+{
+    if (params.empty() || !boost::iequals(params.at(0), L"SACN"))
+        return core::frame_consumer::empty();
+
+    if (channel_info.depth != common::bit_depth::bit8)
+        CASPAR_THROW_EXCEPTION(caspar_exception() << msg_info("sACN consumer only supports 8-bit color depth."));
+
+    configuration config;
+
+    config.universe     = get_param(L"UNIVERSE", params, config.universe);
+    config.host         = get_param(L"HOST", params, config.host);
+    config.port         = static_cast<unsigned short>(get_param(L"PORT", params, (int)config.port));
+    config.priority     = static_cast<uint8_t>(get_param(L"PRIORITY", params, (int)config.priority));
+    config.multicastTtl = get_param(L"MULTICAST-TTL", params, config.multicastTtl);
+    config.refreshRate  = get_param(L"REFRESH-RATE", params, config.refreshRate);
+
+    if (config.universe < 1 || config.universe > 63999)
+        CASPAR_THROW_EXCEPTION(user_error() << msg_info(L"sACN universe must be between 1 and 63999"));
+
+    if (config.priority < 1 || config.priority > 200)
+        CASPAR_THROW_EXCEPTION(user_error() << msg_info(L"sACN priority must be between 1 and 200"));
+
+    if (config.refreshRate < 1)
+        CASPAR_THROW_EXCEPTION(user_error() << msg_info(L"Refresh rate must be at least 1"));
+
+    config.fixtures = get_fixtures_params(params);
 
     return spl::make_shared<sacn_consumer>(config);
 }

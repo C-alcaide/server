@@ -31,6 +31,7 @@ namespace caspar { namespace sacn {
 
 void init(const core::module_dependencies& dependencies)
 {
+    dependencies.consumer_registry->register_consumer_factory(L"sACN Consumer", create_consumer);
     dependencies.consumer_registry->register_preconfigured_consumer_factory(L"sacn", create_preconfigured_consumer);
 }
 

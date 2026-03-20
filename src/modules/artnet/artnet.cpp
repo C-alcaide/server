@@ -33,6 +33,7 @@ namespace caspar { namespace artnet {
 
 void init(const core::module_dependencies& dependencies)
 {
+    dependencies.consumer_registry->register_consumer_factory(L"ArtNet Consumer", create_consumer);
     dependencies.consumer_registry->register_preconfigured_consumer_factory(L"artnet", create_preconfigured_consumer);
 }
 
