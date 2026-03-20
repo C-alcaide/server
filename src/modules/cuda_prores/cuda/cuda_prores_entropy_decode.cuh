@@ -21,7 +21,7 @@
  */
 
 // cuda_prores_entropy_decode.cuh
-// Inverse ProRes 422 VLC entropy decode — CUDA device functions.
+// Inverse ProRes 422/4444 VLC entropy decode — CUDA device functions.
 //
 // Exact inverse of cuda_prores_entropy.cu / cuda_prores_rice.cuh.
 // Bit-stream conventions:
@@ -33,7 +33,13 @@
 //
 // Produce output in the same format the encoder consumed:
 //   d_dec_coeffs[slice][block][64] — indices are scan positions 0..63
-//   d_dec_coeffs[s * (y_n+cb_n+cr_n)*64 + b*64 + scan_pos] = quantised coeff
+//   d_dec_coeffs[s * (y_n+cb_n+cr_n+a_n)*64 + b*64 + scan_pos] = quantised coeff
+//
+// ProRes 4444 differences:
+//   - cb_n = cr_n = a_n = 4 * mbs_per_slice  (full-width chroma + alpha plane)
+//   - Slice header is 8 bytes (not 6): bytes 6..7 = alpha_size (BE16)
+//   - cr_size = total - hdr_size - y_size - cb_size - alpha_size  (implicit)
+//   - Data order: [Y][Cb][Cr][Alpha]
 // ---------------------------------------------------------------------------
 #pragma once
 
@@ -207,29 +213,29 @@ __device__ void decode_ac_plane(BitReader* br, int16_t* blocks, int n_blocks,
     }
 }
 
-// ─── ProRes 422 slice decode kernel ─────────────────────────────────────────
+// ─── ProRes 422/4444 slice decode kernel ─────────────────────────────────────
 // One thread per slice.
 //
 // Input:
 //   d_frame_data  : full icpf frame data (device memory)
 //   d_slice_starts: byte offset from d_frame_data start to each slice's data
 //   d_slice_sizes : byte size of each slice
+//   is_444        : true for ProRes 4444 (full-width chroma + alpha plane)
 //
 // Output:
-//   d_dec_coeffs  : [num_slices][(y_n + cb_n + cr_n) * 64] int16_t
+//   d_dec_coeffs  : [num_slices][(y_n + cb_n + cr_n + a_n) * 64] int16_t
 //                   scan-ordered quantised coefficients (DC in [*][0])
 //   d_q_scales    : [num_slices] uint8_t  q_scale read from slice header
 //
-// Slice header (6 bytes):
-//   [0]     header_size_bits (= 48, i.e. 6*8 bytes of header)
-//   [1]     q_scale
-//   [2..3]  Y_size  (BE16, bytes of luma plane entropy data)
-//   [4..5]  Cb_size (BE16)
-//   Cr_size = slice_size - 6 - Y_size - Cb_size
+// Slice header:
+//   422:  6 bytes: [0]=hdr_size_bits(48) [1]=q_scale [2..3]=Y_size [4..5]=Cb_size
+//   4444: 8 bytes: same prefix + [6..7]=Alpha_size (BE16)
+//   Cr_size (implicit) = slice_size - hdr_bytes - Y_size - Cb_size - Alpha_size
+//   Data order within slice: [Y][Cb][Cr][Alpha]
 //
-// mbs_per_slice: maximum macroblock columns per slice (power of 2; from picture header)
-// num_slices   : total number of slices in this picture
-// mb_width     : frame width in macroblocks (= ceil(frame_width / 16))
+// mbs_per_slice  : maximum macroblock columns per slice (power of 2; from picture header)
+// num_slices     : total number of slices in this picture
+// mb_width       : frame width in macroblocks (= ceil(frame_width / 16))
 // slices_per_row : number of slices per MB row (= ceil(mb_width / mbs_per_slice))
 // ---------------------------------------------------------------------------  
 __global__ void k_prores_entropy_decode(
@@ -242,7 +248,8 @@ __global__ void k_prores_entropy_decode(
     int num_slices,
     int mb_width,
     int slices_per_row,
-    bool is_interlaced)
+    bool is_interlaced,
+    bool is_444)
 {
     const int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= num_slices) return;
@@ -254,10 +261,12 @@ __global__ void k_prores_entropy_decode(
 
     // Fixed stride uses mbs_per_slice (the maximum) so all slices have the
     // same coeff_stride in d_dec_coeffs.  Only the DECODE CALLS use mbs_actual.
-    const int y_n_max  = 4 * mbs_per_slice;
-    const int cb_n_max = 2 * mbs_per_slice;
-    const int y_n_act  = 4 * mbs_actual;  // actual blocks to decode
-    const int cb_n_act = 2 * mbs_actual;
+    // For 4444: chroma and alpha have the same block count as luma (4 per MB).
+    const int y_n_max     = 4 * mbs_per_slice;
+    const int cb_n_max    = is_444 ? 4 * mbs_per_slice : 2 * mbs_per_slice;
+    const int alpha_n_max = is_444 ? 4 * mbs_per_slice : 0;
+    const int y_n_act     = 4 * mbs_actual;
+    const int cb_n_act    = is_444 ? 4 * mbs_actual : 2 * mbs_actual;
 
     // Slice data pointer.
     const uint8_t* slice = d_frame_data + d_slice_starts[s];
@@ -266,35 +275,41 @@ __global__ void k_prores_entropy_decode(
     if (total < 6) return;
 
     // ── Slice header ─────────────────────────────────────────────────────
-    // byte 0: header_size_bits (typically 48 = 6*8)
+    // byte 0: header_size_bits (422: 48=6 bytes; 4444: 64=8 bytes)
     // byte 1: q_scale
     // bytes 2..3: Y_size (BE16)
     // bytes 4..5: Cb_size (BE16)
+    // bytes 6..7: Alpha_size (BE16, 4444 only; 0 for 422)
+    // Cr_size is implicit: total - hdr_bytes - Y - Cb - Alpha
     int  hdr_bytes = slice[0] / 8;          // header size in bytes
     if (hdr_bytes < 6 || hdr_bytes > total)
         return;
 
-    uint8_t q_scale = slice[1];
-    int     y_size  = ((int)slice[2] << 8) | slice[3];
-    int     cb_size = ((int)slice[4] << 8) | slice[5];
-    int     cr_size = total - hdr_bytes - y_size - cb_size;
+    uint8_t q_scale    = slice[1];
+    int     y_size     = ((int)slice[2] << 8) | slice[3];
+    int     cb_size    = ((int)slice[4] << 8) | slice[5];
+    int     alpha_size = 0;
+    if (is_444 && hdr_bytes >= 8)
+        alpha_size = ((int)slice[6] << 8) | slice[7];
+    int     cr_size    = total - hdr_bytes - y_size - cb_size - alpha_size;
 
-    if (y_size < 0 || cb_size < 0 || cr_size < 0)
+    if (y_size < 0 || cb_size < 0 || alpha_size < 0 || cr_size < 0)
         return;
-    if (hdr_bytes + y_size + cb_size + cr_size > total)
+    if (hdr_bytes + y_size + cb_size + cr_size + alpha_size > total)
         return;
 
     d_q_scales[s] = q_scale;
 
     // ── Coefficient buffer for this slice (fixed stride = mbs_per_slice) ──
-    const ptrdiff_t stride = (ptrdiff_t)(y_n_max + cb_n_max + cb_n_max) * 64;
-    int16_t* y_blks  = d_dec_coeffs + (ptrdiff_t)s * stride;
-    int16_t* cb_blks = y_blks  + (ptrdiff_t)y_n_max * 64;
-    int16_t* cr_blks = cb_blks + (ptrdiff_t)cb_n_max * 64;
+    const ptrdiff_t stride = (ptrdiff_t)(y_n_max + cb_n_max + cb_n_max + alpha_n_max) * 64;
+    int16_t* y_blks     = d_dec_coeffs + (ptrdiff_t)s * stride;
+    int16_t* cb_blks    = y_blks     + (ptrdiff_t)y_n_max  * 64;
+    int16_t* cr_blks    = cb_blks    + (ptrdiff_t)cb_n_max * 64;
+    int16_t* alpha_blks = cr_blks    + (ptrdiff_t)cb_n_max * 64;  // 4444 only
 
     // Zero all coefficients (use the full fixed-stride allocation so all
     // positions, including unused slots of partial slices, are zeroed).
-    for (int i = 0; i < (y_n_max + cb_n_max + cb_n_max) * 64; i++) {
+    for (int i = 0; i < (y_n_max + cb_n_max + cb_n_max + alpha_n_max) * 64; i++) {
         y_blks[i] = 0;
     }
 
@@ -324,6 +339,17 @@ __global__ void k_prores_entropy_decode(
         decode_dc_plane(&br, cr_blks, cb_n_act);
         decode_ac_plane(&br, cr_blks, cb_n_act, scan);
     }
+
+    // ── Alpha (ProRes 4444 only) ──────────────────────────────────────────
+    // Data order: [Y][Cb][Cr][Alpha] per Apple spec and FFmpeg proresdec2.c.
+    // Alpha uses luma-count blocks (4 per MB) and luma quantisation table.
+    if (is_444 && alpha_size > 0) {
+        BitReader br;
+        br_init(&br, slice + hdr_bytes + y_size + cb_size + cr_size,
+                (unsigned)alpha_size);
+        decode_dc_plane(&br, alpha_blks, y_n_act);
+        decode_ac_plane(&br, alpha_blks, y_n_act, scan);
+    }
 }
 
 // Convenience launcher.
@@ -338,6 +364,7 @@ inline cudaError_t launch_entropy_decode(
     int             mb_width,
     int             slices_per_row,
     bool            is_interlaced,
+    bool            is_444,
     cudaStream_t    stream)
 {
     constexpr int BLOCK = 256;
@@ -345,6 +372,6 @@ inline cudaError_t launch_entropy_decode(
     k_prores_entropy_decode<<<grid, BLOCK, 0, stream>>>(
         d_frame_data, d_slice_starts, d_slice_sizes,
         d_dec_coeffs, d_q_scales,
-        mbs_per_slice, num_slices, mb_width, slices_per_row, is_interlaced);
+        mbs_per_slice, num_slices, mb_width, slices_per_row, is_interlaced, is_444);
     return cudaGetLastError();
 }

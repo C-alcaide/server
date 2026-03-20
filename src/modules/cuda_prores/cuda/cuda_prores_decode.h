@@ -49,9 +49,13 @@ struct ProResDecodeCtx {
     int16_t*  d_dec_coeffs;      // [num_slices × coeff_stride] entropy decode output
     uint8_t*  d_q_scales;        // [num_slices] q_scale per slice
     int16_t*  d_y;               // [height × width]  planar luma
-    int16_t*  d_cb;              // [height × width/2] planar Cb
-    int16_t*  d_cr;              // [height × width/2] planar Cr
+    int16_t*  d_cb;              // [height × width/2] planar Cb  (422), [height × width] (4444)
+    int16_t*  d_cr;              // as d_cb
+    int16_t*  d_alpha;           // [height × width] planar alpha — ProRes 4444 only (nullptr for 422)
     uint16_t* d_bgra16;          // [height × width × 4] output (BGRA16)
+
+    // ── Misc ────────────────────────────────────────────────────────────────
+    bool      is_444;            // true when profile == 4 (ProRes 4444 / 4444 XQ)
 
     // ── Slice start table (built by CPU each frame) ─────────────────────────
     // Pinned host staging for the slice index (faster H→D transfer).

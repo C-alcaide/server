@@ -195,3 +195,85 @@ inline cudaError_t launch_ycbcr_to_bgra16(
         d_y, d_cb, d_cr, d_bgra16, width, height, color_matrix);
     return cudaGetLastError();
 }
+
+// ─── ProRes 4444 kernel: YCbCr 4:4:4 10-bit + alpha → BGRA 16-bit ──────────
+//
+// Differences from the 422 kernel:
+//   • No chroma subsampling: each pixel reads its own Cb/Cr (chroma_idx = luma_idx)
+//   • Real alpha plane: d_alpha[luma_idx] in limited-range 10-bit [64, 940].
+//     Alpha is scaled to 16-bit full range using the same Y scale factor.
+// ---------------------------------------------------------------------------
+__global__ void k_ycbcr444p10_to_bgra16(
+    const int16_t* __restrict__ d_y,
+    const int16_t* __restrict__ d_cb,
+    const int16_t* __restrict__ d_cr,
+    const int16_t* __restrict__ d_alpha,
+    uint16_t*      __restrict__ d_bgra16,
+    int width,
+    int height,
+    int color_matrix)
+{
+    const int x = blockIdx.x * blockDim.x + threadIdx.x;
+    const int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= width || y >= height) return;
+
+    const int luma_idx = y * width + x;
+
+    // Load and level-shift.  4:4:4 means chroma_idx == luma_idx.
+    int iy  = (int)d_y  [luma_idx] - 64;
+    int icb = (int)d_cb [luma_idx] - 512;
+    int icr = (int)d_cr [luma_idx] - 512;
+    int ia  = (int)d_alpha[luma_idx] - 64;   // [0, 876]
+
+    int64_t r, g, b;
+
+    if (color_matrix == 9) {
+        int64_t y64 = (int64_t)iy * BT2020_Y_SCALE;
+        r = (y64 + (int64_t)icr * BT2020_CR_TO_R) >> 16;
+        g = (y64 + (int64_t)icb * BT2020_CB_TO_G + (int64_t)icr * BT2020_CR_TO_G) >> 16;
+        b = (y64 + (int64_t)icb * BT2020_CB_TO_B) >> 16;
+    } else if (color_matrix == 5 || color_matrix == 6) {
+        int64_t y64 = (int64_t)iy * BT601_Y_SCALE;
+        r = (y64 + (int64_t)icr * BT601_CR_TO_R) >> 16;
+        g = (y64 + (int64_t)icb * BT601_CB_TO_G + (int64_t)icr * BT601_CR_TO_G) >> 16;
+        b = (y64 + (int64_t)icb * BT601_CB_TO_B) >> 16;
+    } else {
+        int64_t y64 = (int64_t)iy * BT709_Y_SCALE;
+        r = (y64 + (int64_t)icr * BT709_CR_TO_R) >> 16;
+        g = (y64 + (int64_t)icb * BT709_CB_TO_G + (int64_t)icr * BT709_CR_TO_G) >> 16;
+        b = (y64 + (int64_t)icb * BT709_CB_TO_B) >> 16;
+    }
+
+    // Scale alpha [0,876] → [0,65535] using the same Y scale.
+    int64_t a = ((int64_t)ia * BT709_Y_SCALE) >> 16;
+
+    auto clip16 = [](int64_t v) -> uint16_t {
+        return (uint16_t)(v < 0 ? 0 : (v > 65535 ? 65535 : v));
+    };
+
+    uint16_t* dst = d_bgra16 + luma_idx * 4;
+    dst[0] = clip16(b);
+    dst[1] = clip16(g);
+    dst[2] = clip16(r);
+    dst[3] = clip16(a);
+}
+
+// Launcher for ProRes 4444 (4:4:4 + real alpha).
+inline cudaError_t launch_ycbcr444_to_bgra16(
+    const int16_t* d_y,
+    const int16_t* d_cb,
+    const int16_t* d_cr,
+    const int16_t* d_alpha,
+    uint16_t*      d_bgra16,
+    int            width,
+    int            height,
+    int            color_matrix,
+    cudaStream_t   stream)
+{
+    dim3 threads(32, 16);
+    dim3 blocks((width  + 31) / 32,
+                (height + 15) / 16);
+    k_ycbcr444p10_to_bgra16<<<blocks, threads, 0, stream>>>(
+        d_y, d_cb, d_cr, d_alpha, d_bgra16, width, height, color_matrix);
+    return cudaGetLastError();
+}

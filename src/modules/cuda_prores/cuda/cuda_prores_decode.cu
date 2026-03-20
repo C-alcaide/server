@@ -86,13 +86,20 @@ cudaError_t prores_decode_ctx_create(ProResDecodeCtx* ctx,
     ctx->slices_per_row = slices_per_row;
     ctx->num_slices     = num_slices;
 
+    const bool is_444 = (profile == 4);
+    ctx->is_444 = is_444;
+
+    // For ProRes 422 variants: Cb/Cr are 4:2:2 (half-width).
+    // For ProRes 4444:         Cb/Cr/Alpha are 4:4:4 (full-width).
+    const int chroma_n_per_mb = is_444 ? 4 : 2;  // blocks per MB in chroma plane
     const int y_n  = 4 * mbs_per_slice;
-    const int cb_n = 2 * mbs_per_slice;
+    const int cb_n = chroma_n_per_mb * mbs_per_slice;
     const int cr_n = cb_n;
-    ctx->coeff_stride = (y_n + cb_n + cr_n) * 64;
+    const int a_n  = is_444 ? y_n : 0;           // alpha blocks (4444 only)
+    ctx->coeff_stride = (y_n + cb_n + cr_n + a_n) * 64;
 
     const size_t n_pix      = (size_t)width * height;
-    const size_t n_chroma   = (size_t)(width / 2) * height;
+    const size_t n_chroma   = is_444 ? n_pix : (size_t)(width / 2) * height;
     const size_t coeff_bytes = (size_t)num_slices * ctx->coeff_stride * sizeof(int16_t);
 
     CUDA_CHECK(cudaMalloc(&ctx->d_bitstream,   max_frame_bytes));
@@ -103,6 +110,9 @@ cudaError_t prores_decode_ctx_create(ProResDecodeCtx* ctx,
     CUDA_CHECK(cudaMalloc((void**)&ctx->d_y,            n_pix    * sizeof(int16_t)));
     CUDA_CHECK(cudaMalloc((void**)&ctx->d_cb,           n_chroma * sizeof(int16_t)));
     CUDA_CHECK(cudaMalloc((void**)&ctx->d_cr,           n_chroma * sizeof(int16_t)));
+    ctx->d_alpha = nullptr;
+    if (is_444)
+        CUDA_CHECK(cudaMalloc((void**)&ctx->d_alpha,    n_pix    * sizeof(int16_t)));
     CUDA_CHECK(cudaMalloc((void**)&ctx->d_bgra16,       n_pix * 4 * sizeof(uint16_t)));
 
     // Pinned host staging for slice index.
@@ -132,6 +142,7 @@ void prores_decode_ctx_destroy(ProResDecodeCtx* ctx)
     safe_free((void*&)ctx->d_y);
     safe_free((void*&)ctx->d_cb);
     safe_free((void*&)ctx->d_cr);
+    safe_free((void*&)ctx->d_alpha);
     safe_free((void*&)ctx->d_bgra16);
     safe_free_host((void*&)ctx->h_slice_starts);
     safe_free_host((void*&)ctx->h_slice_sizes);
@@ -240,11 +251,13 @@ cudaError_t prores_decode_frame(
         ctx->width / 16,           // mb_width
         ctx->slices_per_row,       // for partial-slice computation
         is_interlaced,
+        ctx->is_444,
         s));
 
     // ── 4a. IDCT+dequant — Luma ────────────────────────────────────────────
-    const int y_n  = 4 * ctx->mbs_per_slice;
-    const int cb_n = 2 * ctx->mbs_per_slice;
+    const int y_n      = 4 * ctx->mbs_per_slice;
+    const int cb_n     = (ctx->is_444 ? 4 : 2) * ctx->mbs_per_slice;
+    const int chroma_w = ctx->is_444 ? ctx->width : ctx->width / 2;
 
     CUDA_CHECK(launch_idct_dequant(
         ctx->d_dec_coeffs,
@@ -265,7 +278,7 @@ cudaError_t prores_decode_frame(
         ctx->d_dec_coeffs,
         ctx->d_q_scales,
         ctx->d_cb,
-        ctx->width / 2, ctx->height,
+        chroma_w, ctx->height,
         ctx->slices_per_row,
         ctx->mbs_per_slice,
         ctx->coeff_stride,
@@ -280,7 +293,7 @@ cudaError_t prores_decode_frame(
         ctx->d_dec_coeffs,
         ctx->d_q_scales,
         ctx->d_cr,
-        ctx->width / 2, ctx->height,
+        chroma_w, ctx->height,
         ctx->slices_per_row,
         ctx->mbs_per_slice,
         ctx->coeff_stride,
@@ -290,13 +303,39 @@ cudaError_t prores_decode_frame(
         is_interlaced,
         s));
 
+    // ── 4d. IDCT+dequant — Alpha (ProRes 4444 only) ───────────────────────
+    if (ctx->is_444) {
+        CUDA_CHECK(launch_idct_dequant(
+            ctx->d_dec_coeffs,
+            ctx->d_q_scales,
+            ctx->d_alpha,
+            ctx->width, ctx->height,
+            ctx->slices_per_row,
+            ctx->mbs_per_slice,
+            ctx->coeff_stride,
+            (y_n + cb_n + cb_n) * 64,  // comp_coeff_offset for Alpha
+            ctx->profile,
+            /*is_chroma=*/false,        // alpha uses luma quant table
+            is_interlaced,
+            s));
+    }
+
     // ── 5. YCbCr → BGRA16 ──────────────────────────────────────────────────
-    CUDA_CHECK(launch_ycbcr_to_bgra16(
-        ctx->d_y, ctx->d_cb, ctx->d_cr,
-        ctx->d_bgra16,
-        ctx->width, ctx->height,
-        color_matrix,
-        s));
+    if (ctx->is_444) {
+        CUDA_CHECK(launch_ycbcr444_to_bgra16(
+            ctx->d_y, ctx->d_cb, ctx->d_cr, ctx->d_alpha,
+            ctx->d_bgra16,
+            ctx->width, ctx->height,
+            color_matrix,
+            s));
+    } else {
+        CUDA_CHECK(launch_ycbcr_to_bgra16(
+            ctx->d_y, ctx->d_cb, ctx->d_cr,
+            ctx->d_bgra16,
+            ctx->width, ctx->height,
+            color_matrix,
+            s));
+    }
 
     // ── 6. D→D copy to GL texture (zero host transfer) ────────────────────
     // Each BGRA16 row is width * 8 bytes (4 channels × 2 bytes).
@@ -380,10 +419,12 @@ cudaError_t prores_decode_frame_async(
         ctx->width / 16,
         ctx->slices_per_row,
         is_interlaced,
+        ctx->is_444,
         s));
 
-    const int y_n  = 4 * ctx->mbs_per_slice;
-    const int cb_n = 2 * ctx->mbs_per_slice;
+    const int y_n      = 4 * ctx->mbs_per_slice;
+    const int cb_n     = (ctx->is_444 ? 4 : 2) * ctx->mbs_per_slice;
+    const int chroma_w = ctx->is_444 ? ctx->width : ctx->width / 2;
 
     CUDA_CHECK(launch_idct_dequant(
         ctx->d_dec_coeffs, ctx->d_q_scales, ctx->d_y,
@@ -393,22 +434,30 @@ cudaError_t prores_decode_frame_async(
 
     CUDA_CHECK(launch_idct_dequant(
         ctx->d_dec_coeffs, ctx->d_q_scales, ctx->d_cb,
-        ctx->width / 2, ctx->height, ctx->slices_per_row,
+        chroma_w, ctx->height, ctx->slices_per_row,
         ctx->mbs_per_slice, ctx->coeff_stride, y_n * 64,
         ctx->profile, true, is_interlaced, s));
 
     CUDA_CHECK(launch_idct_dequant(
         ctx->d_dec_coeffs, ctx->d_q_scales, ctx->d_cr,
-        ctx->width / 2, ctx->height, ctx->slices_per_row,
+        chroma_w, ctx->height, ctx->slices_per_row,
         ctx->mbs_per_slice, ctx->coeff_stride, (y_n + cb_n) * 64,
         ctx->profile, true, is_interlaced, s));
 
-    CUDA_CHECK(launch_ycbcr_to_bgra16(
-        ctx->d_y, ctx->d_cb, ctx->d_cr,
-        ctx->d_bgra16,
-        ctx->width, ctx->height,
-        color_matrix,
-        s));
+    if (ctx->is_444) {
+        CUDA_CHECK(launch_idct_dequant(
+            ctx->d_dec_coeffs, ctx->d_q_scales, ctx->d_alpha,
+            ctx->width, ctx->height, ctx->slices_per_row,
+            ctx->mbs_per_slice, ctx->coeff_stride, (y_n + cb_n + cb_n) * 64,
+            ctx->profile, false, is_interlaced, s));
+        CUDA_CHECK(launch_ycbcr444_to_bgra16(
+            ctx->d_y, ctx->d_cb, ctx->d_cr, ctx->d_alpha,
+            ctx->d_bgra16, ctx->width, ctx->height, color_matrix, s));
+    } else {
+        CUDA_CHECK(launch_ycbcr_to_bgra16(
+            ctx->d_y, ctx->d_cb, ctx->d_cr,
+            ctx->d_bgra16, ctx->width, ctx->height, color_matrix, s));
+    }
 
     const size_t row_bytes = (size_t)ctx->width * 4 * sizeof(uint16_t);
     CUDA_CHECK(cudaMemcpy2DToArrayAsync(
@@ -449,15 +498,16 @@ cudaError_t prores_decode_frame_to_host(
                                (size_t)ctx->num_slices * sizeof(uint16_t),
                                cudaMemcpyHostToDevice, s));
 
-    const int y_n  = 4 * ctx->mbs_per_slice;
-    const int cb_n = 2 * ctx->mbs_per_slice;
+    const int y_n      = 4 * ctx->mbs_per_slice;
+    const int cb_n     = (ctx->is_444 ? 4 : 2) * ctx->mbs_per_slice;
+    const int chroma_w = ctx->is_444 ? ctx->width : ctx->width / 2;
 
     CUDA_CHECK(launch_entropy_decode(
         ctx->d_bitstream, ctx->d_slice_starts, ctx->d_slice_sizes,
         ctx->d_dec_coeffs, ctx->d_q_scales,
         ctx->mbs_per_slice, ctx->num_slices,
         ctx->width / 16, ctx->slices_per_row,
-        is_interlaced, s));
+        is_interlaced, ctx->is_444, s));
 
     CUDA_CHECK(launch_idct_dequant(
         ctx->d_dec_coeffs, ctx->d_q_scales, ctx->d_y,
@@ -467,19 +517,30 @@ cudaError_t prores_decode_frame_to_host(
 
     CUDA_CHECK(launch_idct_dequant(
         ctx->d_dec_coeffs, ctx->d_q_scales, ctx->d_cb,
-        ctx->width / 2, ctx->height, ctx->slices_per_row,
+        chroma_w, ctx->height, ctx->slices_per_row,
         ctx->mbs_per_slice, ctx->coeff_stride, y_n * 64,
         ctx->profile, true, is_interlaced, s));
 
     CUDA_CHECK(launch_idct_dequant(
         ctx->d_dec_coeffs, ctx->d_q_scales, ctx->d_cr,
-        ctx->width / 2, ctx->height, ctx->slices_per_row,
+        chroma_w, ctx->height, ctx->slices_per_row,
         ctx->mbs_per_slice, ctx->coeff_stride, (y_n + cb_n) * 64,
         ctx->profile, true, is_interlaced, s));
 
-    CUDA_CHECK(launch_ycbcr_to_bgra16(
-        ctx->d_y, ctx->d_cb, ctx->d_cr,
-        ctx->d_bgra16, ctx->width, ctx->height, color_matrix, s));
+    if (ctx->is_444) {
+        CUDA_CHECK(launch_idct_dequant(
+            ctx->d_dec_coeffs, ctx->d_q_scales, ctx->d_alpha,
+            ctx->width, ctx->height, ctx->slices_per_row,
+            ctx->mbs_per_slice, ctx->coeff_stride, (y_n + cb_n + cb_n) * 64,
+            ctx->profile, false, is_interlaced, s));
+        CUDA_CHECK(launch_ycbcr444_to_bgra16(
+            ctx->d_y, ctx->d_cb, ctx->d_cr, ctx->d_alpha,
+            ctx->d_bgra16, ctx->width, ctx->height, color_matrix, s));
+    } else {
+        CUDA_CHECK(launch_ycbcr_to_bgra16(
+            ctx->d_y, ctx->d_cb, ctx->d_cr,
+            ctx->d_bgra16, ctx->width, ctx->height, color_matrix, s));
+    }
 
     // Copy linear BGRA16 from device to host (row-by-row, contiguous).
     const size_t row_bytes = (size_t)ctx->width * 4 * sizeof(uint16_t);
