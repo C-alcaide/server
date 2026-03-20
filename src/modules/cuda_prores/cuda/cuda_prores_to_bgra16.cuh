@@ -200,8 +200,9 @@ inline cudaError_t launch_ycbcr_to_bgra16(
 //
 // Differences from the 422 kernel:
 //   • No chroma subsampling: each pixel reads its own Cb/Cr (chroma_idx = luma_idx)
-//   • Real alpha plane: d_alpha[luma_idx] in limited-range 10-bit [64, 940].
-//     Alpha is scaled to 16-bit full range using the same Y scale factor.
+//   • Real alpha plane: d_alpha[luma_idx] in full-range 10-bit [0, 1023]
+//     (decoded by CPU unpack_alpha; NOT limited-range, NO level shift).
+//     Alpha is expanded to 16-bit by bit-replication: (ia<<6)|(ia>>4).
 // ---------------------------------------------------------------------------
 __global__ void k_ycbcr444p10_to_bgra16(
     const int16_t* __restrict__ d_y,
@@ -223,7 +224,7 @@ __global__ void k_ycbcr444p10_to_bgra16(
     int iy  = (int)d_y  [luma_idx] - 64;
     int icb = (int)d_cb [luma_idx] - 512;
     int icr = (int)d_cr [luma_idx] - 512;
-    int ia  = (int)d_alpha[luma_idx] - 64;   // [0, 876]
+    int ia  = (int)d_alpha[luma_idx];   // full-range 10-bit [0, 1023]
 
     int64_t r, g, b;
 
@@ -244,8 +245,8 @@ __global__ void k_ycbcr444p10_to_bgra16(
         b = (y64 + (int64_t)icb * BT709_CB_TO_B) >> 16;
     }
 
-    // Scale alpha [0,876] → [0,65535] using the same Y scale.
-    int64_t a = ((int64_t)ia * BT709_Y_SCALE) >> 16;
+    // Expand 10-bit full-range alpha → 16-bit by bit-replication.
+    uint16_t a16 = (uint16_t)((ia << 6) | (ia >> 4));
 
     auto clip16 = [](int64_t v) -> uint16_t {
         return (uint16_t)(v < 0 ? 0 : (v > 65535 ? 65535 : v));
@@ -255,7 +256,7 @@ __global__ void k_ycbcr444p10_to_bgra16(
     dst[0] = clip16(b);
     dst[1] = clip16(g);
     dst[2] = clip16(r);
-    dst[3] = clip16(a);
+    dst[3] = a16;
 }
 
 // Launcher for ProRes 4444 (4:4:4 + real alpha).

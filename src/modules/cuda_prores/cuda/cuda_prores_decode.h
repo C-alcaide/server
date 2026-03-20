@@ -61,7 +61,11 @@ struct ProResDecodeCtx {
     // Pinned host staging for the slice index (faster H→D transfer).
     uint32_t* h_slice_starts;    // pinned
     uint16_t* h_slice_sizes;     // pinned
-
+    // Pinned host buffer for CPU-decoded alpha (ProRes 4444 only).
+    // Alpha uses a different encoding (unpack_alpha RLE), NOT DCT.
+    // decoded as full-range 10-bit [0,1023]; uploaded via cudaMemcpyAsync.
+    int16_t*  h_alpha;           // pinned, n_pix elements; nullptr for 422
+    int       alpha_bits;        // 0=no alpha, 8=8-bit, 16=16-bit (from frame header)
     // ── Stream ──────────────────────────────────────────────────────────────
     cudaStream_t stream;
 

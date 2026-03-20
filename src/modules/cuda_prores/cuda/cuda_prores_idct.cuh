@@ -231,46 +231,43 @@ __global__ void k_prores_idct_dequant(
     int plane_height,                             // height
     int slices_per_row,                           // luma: (width/16)/mbs
     int mbs_per_slice,                            // mbs per slice
-    int coeff_stride,                             // (y_n+cb_n+cr_n)*64 per slice
+    int coeff_stride,                             // (y_n+cb_n+cr_n+a_n)*64 per slice
     int comp_coeff_offset,                        // offset in coeff_stride for this component
-    int comp_blocks_per_mb,  // 4 = luma-style layout (Y, or 4444 Cb/Cr/Alpha)
-                              // 2 = 422 chroma layout (Cb/Cr in 4:2:2)
+    int comp_blocks_per_mb,  // 4 = full-width plane (Y, 4444 Cb/Cr/Alpha); 2 = 422 half-width
+    bool is_chroma_col_major, // true for Cb/Cr in ProRes 4444 (block order TL,BL,TR,BR)
     int profile,
-    bool is_chroma,           // controls quant table: true → c_quant_chroma
+    bool is_chroma,           // controls quant table
     bool is_interlaced)
 {
-    const int tid   = threadIdx.x; // 0..63
-    const int blk_x = blockIdx.x;  // block column in plane (0 .. plane_width/8 - 1)
-    const int blk_y = blockIdx.y;  // block row    in plane (0 .. plane_height/8 - 1)
+    const int tid   = threadIdx.x;
+    const int blk_x = blockIdx.x;
+    const int blk_y = blockIdx.y;
 
     // ── Map (blk_x, blk_y) → (slice_idx, block_in_slice) ─────────────────
     //
-    // comp_blocks_per_mb == 4: luma-style.
-    //   Plane is full-width. Each MB = 16px wide = 2 columns of 8px blocks.
-    //   Used for: Y (all profiles), Cb/Cr/Alpha in ProRes 4444.
-    //   mb_col_in_plane = blk_x >> 1;  bcol_mb = blk_x & 1
-    //   block_in_slice  = 4 * mb_col_in_slice + brow_mb*2 + bcol_mb
-    //
-    // comp_blocks_per_mb == 2: 422 chroma-style.
-    //   Plane is width/2. Each MB = 8px wide = 1 column of 8px blocks.
-    //   Used for: Cb/Cr in ProRes 422 variants.
-    //   mb_col_in_plane = blk_x
-    //   block_in_slice  = 2 * mb_col_in_slice + brow_mb
+    // From FFmpeg proresdec.c:
+    //   Luma decode_slice_luma:   blocks TL,TR,BL,BR per MB → brow*2 + bcol (row-major)
+    //   Chroma decode_slice_chroma with log2_chroma_blocks_per_mb=2 (4444):
+    //     inner loop: for j in 0..1: idct_put(top), idct_put(bottom), dst+=8
+    //     → blocks order TL,BL,TR,BR per MB → bcol*2 + brow (col-major)
+    //   Chroma 422 (log2=1): TL,BL per MB (1 col) → brow
 
     int mb_col_in_plane, mb_col_in_slice, slice_col, mb_row;
     int block_in_slice;
 
     if (comp_blocks_per_mb == 4) {
-        // 4 blocks/MB: luma geometry (also 4444 chroma which is full-width).
         mb_col_in_plane = blk_x >> 1;
         slice_col        = mb_col_in_plane / mbs_per_slice;
         mb_col_in_slice  = mb_col_in_plane % mbs_per_slice;
         mb_row           = blk_y >> 1;
         int brow_mb      = blk_y & 1;
         int bcol_mb      = blk_x & 1;
-        block_in_slice   = mb_col_in_slice * 4 + brow_mb * 2 + bcol_mb;
+        // 4444 chroma: column-major; luma/alpha: row-major
+        int inner = is_chroma_col_major ? (bcol_mb * 2 + brow_mb)
+                                        : (brow_mb * 2 + bcol_mb);
+        block_in_slice   = mb_col_in_slice * 4 + inner;
     } else {
-        // 2 blocks/MB: 422 chroma geometry (half-width plane).
+        // 422 chroma: 2 blocks per MB (1 col × 2 rows of 8px each)
         mb_col_in_plane = blk_x;
         slice_col       = blk_x / mbs_per_slice;
         mb_col_in_slice = blk_x % mbs_per_slice;
@@ -362,7 +359,8 @@ inline cudaError_t launch_idct_dequant(
     int             profile,
     bool            is_chroma,
     bool            is_interlaced,
-    int             comp_blocks_per_mb,  // 4 = luma layout; 2 = 422 chroma layout
+    int             comp_blocks_per_mb,  // 4 = full-width; 2 = 422 half-width
+    bool            is_chroma_col_major, // true for Cb/Cr in ProRes 4444
     cudaStream_t    stream)
 {
     dim3 threads(64);
@@ -372,7 +370,7 @@ inline cudaError_t launch_idct_dequant(
         plane_width, plane_height,
         slices_per_row, mbs_per_slice,
         coeff_stride, comp_coeff_offset,
-        comp_blocks_per_mb,
+        comp_blocks_per_mb, is_chroma_col_major,
         profile, is_chroma, is_interlaced);
     return cudaGetLastError();
 }
