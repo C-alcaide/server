@@ -661,8 +661,38 @@ class SharedDeckLinkInput : public IDeckLinkInputCallback
                                                       BMDDetectedVideoInputFormatFlags flags) override
     {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
+
+        if (!enabled_)
+            return S_OK;
+
+        // Only react to display mode changes. Colorspace-only events (pixel format mismatch
+        // between requested and signal format) fire repeatedly and must be ignored — they
+        // would cause PauseStreams+StartStreams on every frame, resetting the stream clock to 0.
+        if (!(events & bmdVideoInputDisplayModeChanged))
+            return S_OK;
+
+        auto newMode = mode->GetDisplayMode();
+
+        // Guard against repeated format-detection callbacks for the same mode.
+        if (newMode == current_display_mode_)
+            return S_OK;
+
+        // BMD-recommended sequence: PauseStreams -> EnableVideoInput -> FlushStreams -> StartStreams
+        input_->PauseStreams();
+        if (SUCCEEDED(input_->EnableVideoInput(newMode, current_pixel_format_, bmdVideoInputEnableFormatDetection))) {
+            current_display_mode_ = newMode;
+        }
+        input_->FlushStreams();
+
+        // Notify listeners BEFORE StartStreams so they can update mode_ and rebuild filters.
+        // If StartStreams is called first, frames arrive with the new dimensions while mode_
+        // still holds the old value, causing the dimension-guard to discard every frame.
         for (auto cb : listeners_) {
             cb->VideoInputFormatChanged(events, mode, flags);
+        }
+
+        if (started_) {
+            input_->StartStreams();
         }
         return S_OK;
     }
@@ -915,7 +945,9 @@ class decklink_producer : public IDeckLinkInputCallback
             CASPAR_LOG(info) << print() << L" Input format changed from " << input_format.name << L" to "
                              << new_fmt.name;
 
-            input_->PauseStreams();
+            // Only update filter/decoder state here. Stream restart (EnableVideoInput,
+            // FlushStreams, StartStreams) is handled by SharedDeckLinkInput::VideoInputFormatChanged,
+            // which is the actual registered DeckLink callback and the only valid call site.
 
             // reinitializing filters because not all filters can handle on-the-fly format changes
             input_format = new_fmt;
@@ -926,21 +958,13 @@ class decklink_producer : public IDeckLinkInputCallback
             video_filter_ = Filter(vfilter_, AVMEDIA_TYPE_VIDEO, format_desc_, mode_, hdr_);
             audio_filter_ = Filter(afilter_, AVMEDIA_TYPE_AUDIO, format_desc_, mode_, hdr_);
 
-            // reinitializing video input with the new display mode
-            if (FAILED(
-                    input_->EnableVideoInput(newMode, get_pixel_format2(hdr_), bmdVideoInputEnableFormatDetection))) {
-                CASPAR_THROW_EXCEPTION(caspar_exception() << msg_info(print() + L" Unable to enable video input.")
-                                                          << boost::errinfo_api_function("EnableVideoInput"));
-            }
-
-            if (FAILED(input_->FlushStreams())) {
-                CASPAR_THROW_EXCEPTION(caspar_exception() << msg_info(print() + L" Unable to flush input stream.")
-                                                          << boost::errinfo_api_function("FlushStreams"));
-            }
-
-            if (FAILED(input_->StartStreams())) {
-                CASPAR_THROW_EXCEPTION(caspar_exception() << msg_info(print() + L" Unable to start input stream.")
-                                                          << boost::errinfo_api_function("StartStreams"));
+            // Reset sync state so the sync-drift check doesn't immediately fire with stale timestamps,
+            // and clear the buffer of any frames from the old format.
+            in_sync_  = 0.0;
+            out_sync_ = 0.0;
+            {
+                std::lock_guard<std::mutex> lock(buffer_mutex_);
+                buffer_.clear();
             }
             return S_OK;
         } catch (...) {
@@ -1001,6 +1025,14 @@ class decklink_producer : public IDeckLinkInputCallback
                     return S_OK;
                 }
 
+                // Discard transition frames from the previous format.
+                if (static_cast<long>(video->GetWidth())  != mode_->GetWidth() ||
+                    static_cast<long>(video->GetHeight()) != mode_->GetHeight()) {
+                    CASPAR_LOG(warning) << print() << L" Discarding frame " << video->GetWidth() << L"x" << video->GetHeight()
+                                       << L" expected " << mode_->GetWidth() << L"x" << mode_->GetHeight();
+                    return S_OK;
+                }
+
                 color_space    = get_color_space(video);
                 color_transfer = get_color_transfer(video);
                 auto src    = video_decoder_.decode(video, mode_);
@@ -1056,13 +1088,17 @@ class decklink_producer : public IDeckLinkInputCallback
 
                     // TODO (fix) this may get stuck if the decklink sends a frame of video or audio
 
-                    if (av_buffersink_get_frame_flags(video_filter_.sink, av_video.get(), AV_BUFFERSINK_FLAG_PEEK) <
-                        0) {
+                    int vret = av_buffersink_get_frame_flags(video_filter_.sink, av_video.get(), AV_BUFFERSINK_FLAG_PEEK);
+                    if (vret < 0) {
+                        if (vret != AVERROR(EAGAIN) && vret != AVERROR_EOF)
+                            CASPAR_LOG(warning) << print() << L" video filter sink error: " << vret;
                         return S_OK;
                     }
 
-                    if (av_buffersink_get_frame_flags(audio_filter_.sink, av_audio.get(), AV_BUFFERSINK_FLAG_PEEK) <
-                        0) {
+                    int aret = av_buffersink_get_frame_flags(audio_filter_.sink, av_audio.get(), AV_BUFFERSINK_FLAG_PEEK);
+                    if (aret < 0) {
+                        if (aret != AVERROR(EAGAIN) && aret != AVERROR_EOF)
+                            CASPAR_LOG(warning) << print() << L" audio filter sink error: " << aret;
                         return S_OK;
                     }
                 }
