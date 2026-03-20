@@ -271,6 +271,7 @@ cudaError_t prores_decode_frame(
         ctx->profile,
         /*is_chroma=*/false,
         is_interlaced,
+        4,            // comp_blocks_per_mb: Y always has 4 blocks/MB
         s));
 
     // ── 4b. IDCT+dequant — Cb ─────────────────────────────────────────────
@@ -286,6 +287,7 @@ cudaError_t prores_decode_frame(
         ctx->profile,
         /*is_chroma=*/true,
         is_interlaced,
+        ctx->is_444 ? 4 : 2,   // 4444 chroma uses luma-style geometry
         s));
 
     // ── 4c. IDCT+dequant — Cr ─────────────────────────────────────────────
@@ -301,6 +303,7 @@ cudaError_t prores_decode_frame(
         ctx->profile,
         /*is_chroma=*/true,
         is_interlaced,
+        ctx->is_444 ? 4 : 2,   // 4444 chroma uses luma-style geometry
         s));
 
     // ── 4d. IDCT+dequant — Alpha (ProRes 4444 only) ───────────────────────
@@ -317,6 +320,7 @@ cudaError_t prores_decode_frame(
             ctx->profile,
             /*is_chroma=*/false,        // alpha uses luma quant table
             is_interlaced,
+            4,  // Alpha always uses luma-style geometry (full-width, 4 blocks/MB)
             s));
     }
 
@@ -430,26 +434,26 @@ cudaError_t prores_decode_frame_async(
         ctx->d_dec_coeffs, ctx->d_q_scales, ctx->d_y,
         ctx->width, ctx->height, ctx->slices_per_row,
         ctx->mbs_per_slice, ctx->coeff_stride, 0,
-        ctx->profile, false, is_interlaced, s));
+        ctx->profile, false, is_interlaced, 4, s));
 
     CUDA_CHECK(launch_idct_dequant(
         ctx->d_dec_coeffs, ctx->d_q_scales, ctx->d_cb,
         chroma_w, ctx->height, ctx->slices_per_row,
         ctx->mbs_per_slice, ctx->coeff_stride, y_n * 64,
-        ctx->profile, true, is_interlaced, s));
+        ctx->profile, true, is_interlaced, ctx->is_444 ? 4 : 2, s));
 
     CUDA_CHECK(launch_idct_dequant(
         ctx->d_dec_coeffs, ctx->d_q_scales, ctx->d_cr,
         chroma_w, ctx->height, ctx->slices_per_row,
         ctx->mbs_per_slice, ctx->coeff_stride, (y_n + cb_n) * 64,
-        ctx->profile, true, is_interlaced, s));
+        ctx->profile, true, is_interlaced, ctx->is_444 ? 4 : 2, s));
 
     if (ctx->is_444) {
         CUDA_CHECK(launch_idct_dequant(
             ctx->d_dec_coeffs, ctx->d_q_scales, ctx->d_alpha,
             ctx->width, ctx->height, ctx->slices_per_row,
             ctx->mbs_per_slice, ctx->coeff_stride, (y_n + cb_n + cb_n) * 64,
-            ctx->profile, false, is_interlaced, s));
+            ctx->profile, false, is_interlaced, 4, s));
         CUDA_CHECK(launch_ycbcr444_to_bgra16(
             ctx->d_y, ctx->d_cb, ctx->d_cr, ctx->d_alpha,
             ctx->d_bgra16, ctx->width, ctx->height, color_matrix, s));
@@ -513,26 +517,26 @@ cudaError_t prores_decode_frame_to_host(
         ctx->d_dec_coeffs, ctx->d_q_scales, ctx->d_y,
         ctx->width, ctx->height, ctx->slices_per_row,
         ctx->mbs_per_slice, ctx->coeff_stride, 0,
-        ctx->profile, false, is_interlaced, s));
+        ctx->profile, false, is_interlaced, 4, s));
 
     CUDA_CHECK(launch_idct_dequant(
         ctx->d_dec_coeffs, ctx->d_q_scales, ctx->d_cb,
         chroma_w, ctx->height, ctx->slices_per_row,
         ctx->mbs_per_slice, ctx->coeff_stride, y_n * 64,
-        ctx->profile, true, is_interlaced, s));
+        ctx->profile, true, is_interlaced, ctx->is_444 ? 4 : 2, s));
 
     CUDA_CHECK(launch_idct_dequant(
         ctx->d_dec_coeffs, ctx->d_q_scales, ctx->d_cr,
         chroma_w, ctx->height, ctx->slices_per_row,
         ctx->mbs_per_slice, ctx->coeff_stride, (y_n + cb_n) * 64,
-        ctx->profile, true, is_interlaced, s));
+        ctx->profile, true, is_interlaced, ctx->is_444 ? 4 : 2, s));
 
     if (ctx->is_444) {
         CUDA_CHECK(launch_idct_dequant(
             ctx->d_dec_coeffs, ctx->d_q_scales, ctx->d_alpha,
             ctx->width, ctx->height, ctx->slices_per_row,
             ctx->mbs_per_slice, ctx->coeff_stride, (y_n + cb_n + cb_n) * 64,
-            ctx->profile, false, is_interlaced, s));
+            ctx->profile, false, is_interlaced, 4, s));
         CUDA_CHECK(launch_ycbcr444_to_bgra16(
             ctx->d_y, ctx->d_cb, ctx->d_cr, ctx->d_alpha,
             ctx->d_bgra16, ctx->width, ctx->height, color_matrix, s));
