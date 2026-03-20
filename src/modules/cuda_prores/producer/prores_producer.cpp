@@ -210,6 +210,10 @@ struct prores_producer_impl final : public core::frame_producer
         if (!ProResDemuxer::parse_frame_info(pkt.data.data(), (int)pkt.data.size(), frame_info_))
             CASPAR_THROW_EXCEPTION(std::runtime_error("[prores_producer] Bad ProRes header"));
 
+        // Profile is determined from the container codec tag (ap4h, ap4x, apcn...),
+        // not the icpf frame header — override the default from parse_frame_info.
+        frame_info_.profile = demuxer_->profile();
+
         const auto matrix_name = [](int m) -> const wchar_t* {
             switch (m) {
                 case 1: return L"BT.709";

@@ -105,6 +105,10 @@ class ProResDemuxer
     int  audio_sample_rate() const;
     int  audio_channels()    const;
 
+    // ProRes profile index derived from the container codec tag:
+    //   0=Proxy, 1=LT, 2=Standard, 3=HQ, 4=4444/4444XQ
+    int profile() const;
+
     // True if the stream has been opened successfully.
     bool valid() const;
 

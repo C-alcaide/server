@@ -413,5 +413,6 @@ bool ProResDemuxer::parse_frame_info(const uint8_t* data, int size,
 bool ProResDemuxer::has_audio()         const { return impl_->audio_idx >= 0; }
 int  ProResDemuxer::audio_sample_rate() const { return impl_->audio_sample_rate_; }
 int  ProResDemuxer::audio_channels()    const { return impl_->audio_channels_; }
+int  ProResDemuxer::profile()           const { return impl_->profile; }
 
 }} // namespace caspar::cuda_prores
