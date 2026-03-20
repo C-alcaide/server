@@ -330,9 +330,98 @@ cudaError_t prores_decode_frame(
 
     return cudaSuccess;
 }
+
 // ---------------------------------------------------------------------------
-// prores_decode_frame_to_host
+// prores_decode_frame_async
 // ---------------------------------------------------------------------------
+// Identical to prores_decode_frame but WITHOUT the final cudaStreamSynchronize.
+// All GPU work is queued to ctx->stream and returns immediately.
+// The caller MUST:
+//   1. Call cudaStreamSynchronize(ctx->stream) before accessing the GL texture.
+//   2. Call CudaGLTexture::unmap() only AFTER that sync.
+// This allows the caller to overlap CPU work (demuxer read, audio, frame alloc)
+// with the GPU decode of the current frame, forming a 2-stage pipeline that
+// eliminates the idle-GPU gap in the synchronous version.
+cudaError_t prores_decode_frame_async(
+    ProResDecodeCtx* ctx,
+    const uint8_t*   h_icpf_data,
+    size_t           icpf_size,
+    int              color_matrix,
+    bool             is_interlaced,
+    cudaArray_t      d_gl_array)
+{
+    cudaStream_t s = ctx->stream;
+
+    if (!build_slice_table(h_icpf_data, icpf_size,
+                           ctx->num_slices,
+                           ctx->h_slice_starts,
+                           ctx->h_slice_sizes)) {
+        PRORES_DEC_LOG_ERROR("[cuda_prores_decode] build_slice_table failed (async)");
+        return cudaErrorInvalidValue;
+    }
+
+    CUDA_CHECK(cudaMemcpyAsync(ctx->d_bitstream, h_icpf_data, icpf_size,
+                               cudaMemcpyHostToDevice, s));
+    CUDA_CHECK(cudaMemcpyAsync(ctx->d_slice_starts, ctx->h_slice_starts,
+                               (size_t)ctx->num_slices * sizeof(uint32_t),
+                               cudaMemcpyHostToDevice, s));
+    CUDA_CHECK(cudaMemcpyAsync(ctx->d_slice_sizes, ctx->h_slice_sizes,
+                               (size_t)ctx->num_slices * sizeof(uint16_t),
+                               cudaMemcpyHostToDevice, s));
+
+    CUDA_CHECK(launch_entropy_decode(
+        ctx->d_bitstream,
+        ctx->d_slice_starts,
+        ctx->d_slice_sizes,
+        ctx->d_dec_coeffs,
+        ctx->d_q_scales,
+        ctx->mbs_per_slice,
+        ctx->num_slices,
+        ctx->width / 16,
+        ctx->slices_per_row,
+        is_interlaced,
+        s));
+
+    const int y_n  = 4 * ctx->mbs_per_slice;
+    const int cb_n = 2 * ctx->mbs_per_slice;
+
+    CUDA_CHECK(launch_idct_dequant(
+        ctx->d_dec_coeffs, ctx->d_q_scales, ctx->d_y,
+        ctx->width, ctx->height, ctx->slices_per_row,
+        ctx->mbs_per_slice, ctx->coeff_stride, 0,
+        ctx->profile, false, is_interlaced, s));
+
+    CUDA_CHECK(launch_idct_dequant(
+        ctx->d_dec_coeffs, ctx->d_q_scales, ctx->d_cb,
+        ctx->width / 2, ctx->height, ctx->slices_per_row,
+        ctx->mbs_per_slice, ctx->coeff_stride, y_n * 64,
+        ctx->profile, true, is_interlaced, s));
+
+    CUDA_CHECK(launch_idct_dequant(
+        ctx->d_dec_coeffs, ctx->d_q_scales, ctx->d_cr,
+        ctx->width / 2, ctx->height, ctx->slices_per_row,
+        ctx->mbs_per_slice, ctx->coeff_stride, (y_n + cb_n) * 64,
+        ctx->profile, true, is_interlaced, s));
+
+    CUDA_CHECK(launch_ycbcr_to_bgra16(
+        ctx->d_y, ctx->d_cb, ctx->d_cr,
+        ctx->d_bgra16,
+        ctx->width, ctx->height,
+        color_matrix,
+        s));
+
+    const size_t row_bytes = (size_t)ctx->width * 4 * sizeof(uint16_t);
+    CUDA_CHECK(cudaMemcpy2DToArrayAsync(
+        d_gl_array,
+        0, 0,
+        ctx->d_bgra16,
+        row_bytes, row_bytes, (size_t)ctx->height,
+        cudaMemcpyDeviceToDevice,
+        s));
+
+    // No cudaStreamSynchronize -- caller is responsible.
+    return cudaSuccess;
+}
 cudaError_t prores_decode_frame_to_host(
     ProResDecodeCtx* ctx,
     const uint8_t*   h_icpf_data,

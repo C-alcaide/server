@@ -369,7 +369,9 @@ class decklink_frame
 
         switch (metadataID) {
             case bmdDeckLinkFrameMetadataHDRElectroOpticalTransferFunc:
-                *value = (color_transfer_ == core::color_transfer::hlg) ? EOTF::HLG : EOTF::PQ;
+                *value = (color_transfer_ == core::color_transfer::pq) ? EOTF::PQ
+                         : (color_transfer_ == core::color_transfer::hlg) ? EOTF::HLG
+                         : EOTF::SDR;
                 break;
 
             case bmdDeckLinkFrameMetadataColorspace:

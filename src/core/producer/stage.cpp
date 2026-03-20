@@ -33,6 +33,8 @@
 
 #include <core/frame/frame_transform.h>
 #include <core/producer/route/route_producer.h>
+#include <modules/keyframes/keyframe_registry.h>
+#include <modules/keyframes/keyframe_data.h>
 
 #include <boost/range/adaptors.hpp>
 
@@ -134,7 +136,26 @@ struct stage::impl : public std::enable_shared_from_this<impl>
             try {
                 for (auto& t : tweens_)
                     t.second.tick(1);
-
+                  {
+                      std::map<int, uint64_t> layer_frame_numbers;
+                      for (auto& layer_pair : layers_) {
+                          auto producer = layer_pair.second.foreground();
+                          if (producer.get() != nullptr)
+                              layer_frame_numbers[layer_pair.first] = producer->frame_number();
+                      }
+                      // Apply KF interpolated transforms directly to tweens_ HERE on the
+                      // stage executor thread, BEFORE rendering. This avoids the
+                      // executor::begin_invoke indirection that caused a 1-frame delay
+                      // and made the tween unavailable during the current render pass.
+                      caspar::keyframes::keyframe_registry::instance().auto_tick_all(
+                          channel_index_ - 1, layer_frame_numbers, format_desc_,
+                          [this](int layer, const caspar::keyframes::kf_state& s, unsigned int dur) {
+                          auto  src = tweens_[layer].fetch();
+                          auto  dst = src;
+                          caspar::keyframes::apply_state(s, dst.image_transform);
+                          tweens_[layer] = tweened_transform(src, dst, static_cast<int>(dur), tweener(L"linear"));
+                      });
+                  }
                 // build a map of layers that are sourced from route producers
                 std::map<int, std::pair<int, int>> routed_layers;
                 for (auto& p : layers_) {

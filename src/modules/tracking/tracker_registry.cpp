@@ -101,6 +101,15 @@ void tracker_registry::update_zoom_default_fov(int channel, int layer, double fo
     it->second.zoom_default_fov = fov_rad;
 }
 
+void tracker_registry::update_position_scale(int channel, int layer, double scale)
+{
+    std::lock_guard<std::mutex> lk(mutex_);
+    auto it = bindings_.find({channel, layer});
+    if (it == bindings_.end())
+        throw std::runtime_error("No binding at channel/layer");
+    it->second.position_scale = scale;
+}
+
 // ---- Data injection --------------------------------------------------------
 
 /// Compute effective FOV in radians from a raw zoom value and the binding params.
@@ -136,23 +145,28 @@ void tracker_registry::inject_transform(const tracker_binding& binding, const ca
     if (!stage)
         return; // channel has been destroyed
 
-    const int    layer = binding.layer_index;
-    const double pan   = data.pan * binding.pan_scale + binding.pan_offset;
-    const double tilt  = data.tilt * binding.tilt_scale + binding.tilt_offset;
-    const double roll  = data.roll + binding.roll_offset;
-    const double fov   = compute_fov(binding, data.zoom);
+    const int    layer     = binding.layer_index;
+    const double pan       = data.pan * binding.pan_scale + binding.pan_offset;
+    const double tilt      = data.tilt * binding.tilt_scale + binding.tilt_offset;
+    const double roll      = data.roll + binding.roll_offset;
+    const double fov       = compute_fov(binding, data.zoom);
+    const double offset_x  = data.x * binding.position_scale;
+    const double offset_y  = data.y * binding.position_scale;
 
     if (binding.mode == tracking_mode::mode_360) {
         // 360° equirectangular: set yaw / pitch / roll / fov on the projection struct.
-        // This mirrors exactly what mixer_projection_command does in AMCPCommandsImpl.cpp.
+        // X→offset_x and Y→offset_y provide horizontal/vertical lens-shift for
+        // camera parallax correction inside the sphere.
         stage->apply_transform(
             layer,
-            [pan, tilt, roll, fov](core::frame_transform t) -> core::frame_transform {
-                t.image_transform.projection.enable = (fov > 0.0);
-                t.image_transform.projection.yaw    = pan;
-                t.image_transform.projection.pitch  = tilt;
-                t.image_transform.projection.roll   = roll;
-                t.image_transform.projection.fov    = fov;
+            [pan, tilt, roll, fov, offset_x, offset_y](core::frame_transform t) -> core::frame_transform {
+                t.image_transform.projection.enable   = (fov > 0.0);
+                t.image_transform.projection.yaw      = pan;
+                t.image_transform.projection.pitch    = tilt;
+                t.image_transform.projection.roll     = roll;
+                t.image_transform.projection.fov      = fov;
+                t.image_transform.projection.offset_x = offset_x;
+                t.image_transform.projection.offset_y = offset_y;
                 return t;
             },
             0,
@@ -160,16 +174,16 @@ void tracker_registry::inject_transform(const tracker_binding& binding, const ca
     } else {
         // 2D mode: pan → fill_translation X, tilt → fill_translation Y (inverted so up = up),
         // roll → angle (radians), zoom → fill_scale (uniform).
-        // CasparCG MIXER FILL space: {0,0} with scale {1,1} = full screen (no offset).
-        // Positive pan moves the layer RIGHT; use negative pan_scale for counter-tracking.
-        // scale < 1.0 zooms out; use zoom_default_fov / current_fov so narrower = larger.
+        // Physical X/Y are added on top of the pan/tilt translation as position parallax:
+        //   camera moves right (+X) → content shifts right (+fill_translation.x)
+        //   camera moves up   (+Y) → camera Y up = same sign as tilt up → -fill_translation.y
         const double scale = (fov > 0.0) ? (binding.zoom_default_fov / fov) : 1.0;
         stage->apply_transform(
             layer,
-            [pan, tilt, roll, scale](core::frame_transform t) -> core::frame_transform {
+            [pan, tilt, roll, scale, offset_x, offset_y](core::frame_transform t) -> core::frame_transform {
                 t.image_transform.enable_geometry_modifiers = true;
-                t.image_transform.fill_translation[0]       = pan;
-                t.image_transform.fill_translation[1]       = -tilt; // invert: camera up → layer up
+                t.image_transform.fill_translation[0]       = pan + offset_x;
+                t.image_transform.fill_translation[1]       = -tilt - offset_y;
                 t.image_transform.angle                     = roll;
                 t.image_transform.fill_scale[0]             = scale;
                 t.image_transform.fill_scale[1]             = scale;

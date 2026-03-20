@@ -35,8 +35,11 @@ def main():
     # Build the cmake command
     cmake_cmd = f'cmake --build "{BUILD}" {target_args}'
 
-    # Chain inside a single cmd session so vcvars64 environment is active
-    full_cmd = f'cmd /c ""{VCVARS}"" && {cmake_cmd}'
+    # Chain inside a single cmd session so vcvars64 environment is active.
+    # Use 'call' (not 'cmd /c') because shell=True already spawns cmd.exe /c;
+    # using 'cmd /c' would create a child cmd that sets env vars and then exits
+    # before cmake runs, so the INCLUDE/LIB vars would be lost.
+    full_cmd = f'call "{VCVARS}" && {cmake_cmd}'
 
     print(f'Building targets: {targets}')
     print(f'Command: {cmake_cmd}')

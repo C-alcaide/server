@@ -96,6 +96,18 @@ struct tracker_binding
     /// If non-empty the formula above is replaced by linear interpolation.
     std::vector<zoom_entry> zoom_lookup;
 
+    // ------- Position mapping --------------------------------------
+    // Scale factor applied to raw X/Y/Z (mm) to produce NDC units.
+    //
+    // 360 mode:  X → projection.offset_x,  Y → projection.offset_y  (horizontal/vertical lens shift)
+    //            Z is not mapped (no depth concept inside an equirectangular sphere).
+    // 2D mode:   X → additional fill_translation.x parallax offset
+    //            Y → additional fill_translation.y parallax offset (inverted so up = up)
+    //            Z is not mapped (interacts poorly with zoom-based scale).
+    //
+    // Default 0.001 NDC/mm means 1 metre of camera travel ≈ 1.0 NDC of offset.
+    double position_scale = 0.001;
+
     /// Tracks which receiver this binding was registered on (for reference counting).
     receiver_handle receiver;
 };

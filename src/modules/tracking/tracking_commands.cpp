@@ -261,6 +261,7 @@ static std::wstring tracking_info_command(command_context& ctx)
     ss << L"ROLL_OFFSET "  << (binding->roll_offset * RAD2DEG_CMD)                    << L"\r\n";
     ss << L"ZOOM_FULL_RANGE " << binding->zoom_full_range                             << L"\r\n";
     ss << L"ZOOM_DEFAULT_FOV " << (binding->zoom_default_fov * RAD2DEG_CMD)           << L"\r\n";
+    ss << L"POSITION_SCALE "  << binding->position_scale                              << L"\r\n";
 
     if (latest) {
         ss << L"LAST_PAN "   << (latest->pan  * RAD2DEG_CMD) << L"\r\n";
@@ -363,6 +364,34 @@ static std::wstring tracking_default_fov_command(command_context& ctx)
 }
 
 // ---------------------------------------------------------------------------
+// TRACKING POSITION_SCALE — set the NDC-per-mm scale for X/Y camera position
+//
+// Controls how physical camera translation (in millimetres, from the tracking
+// protocol) is mapped to CasparCG NDC units:
+//   360 mode: X → projection.offset_x,  Y → projection.offset_y (lens-shift)
+//   2D mode:  X/Y added to fill_translation as parallax offset
+//
+// Default: 0.001  (1 metre = 1.0 NDC unit)
+// Use 0 to disable position translation while keeping pan/tilt/roll active.
+//
+// Syntax: TRACKING <ch>-<layer> POSITION_SCALE <scale>
+// ---------------------------------------------------------------------------
+static std::wstring tracking_position_scale_command(command_context& ctx)
+{
+    if (ctx.parameters.empty())
+        return L"400 TRACKING ERROR Expected: POSITION_SCALE <scale>\r\n";
+
+    try {
+        double scale = std::stod(ctx.parameters.at(0));
+        tracker_registry::instance().update_position_scale(
+            ctx.channel_index, ctx.layer_index(), scale);
+        return L"202 TRACKING OK\r\n";
+    } catch (const std::exception& e) {
+        return L"400 TRACKING ERROR " + caspar::u16(e.what()) + L"\r\n";
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Registration
 // ---------------------------------------------------------------------------
 
@@ -376,6 +405,7 @@ void register_amcp_commands(
     repo->register_channel_command(L"Tracking Commands", L"TRACKING SCALE",       tracking_scale_command,       3);
     repo->register_channel_command(L"Tracking Commands", L"TRACKING ZERO",        tracking_zero_command,        0);
     repo->register_channel_command(L"Tracking Commands", L"TRACKING DEFAULT_FOV", tracking_default_fov_command, 1);
+    repo->register_channel_command(L"Tracking Commands", L"TRACKING POSITION_SCALE", tracking_position_scale_command, 1);
     repo->register_channel_command(L"Tracking Commands", L"TRACKING INFO",        tracking_info_command,        0);
 
     // Global command (no channel required)

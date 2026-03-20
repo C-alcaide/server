@@ -361,9 +361,11 @@ struct Stream
                 case core::color_space::bt2020:
                     enc->color_primaries = AVCOL_PRI_BT2020;
                     enc->colorspace      = AVCOL_SPC_BT2020_NCL;
-                    enc->color_trc       = (channel_transfer == core::color_transfer::hlg)
+                    enc->color_trc       = (channel_transfer == core::color_transfer::pq)
+                                               ? AVCOL_TRC_SMPTE2084
+                                           : (channel_transfer == core::color_transfer::hlg)
                                                ? AVCOL_TRC_ARIB_STD_B67
-                                               : AVCOL_TRC_SMPTE2084; // pq or default
+                                               : AVCOL_TRC_BT709;
                     break;
                 case core::color_space::bt601:
                     enc->color_primaries = AVCOL_PRI_BT470BG;

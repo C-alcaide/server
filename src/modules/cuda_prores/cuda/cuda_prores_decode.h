@@ -107,6 +107,18 @@ cudaError_t prores_decode_frame(
     bool              is_interlaced,
     cudaArray_t       d_gl_array);       // mapped cudaArray from CudaGLTexture::map()
 
+// Async variant: submits all GPU work to ctx->stream WITHOUT the final
+// cudaStreamSynchronize.  The caller must sync ctx->stream before accessing
+// the GL texture and before calling CudaGLTexture::unmap().
+// Use this to pipeline GPU decode of frame N with CPU work for frame N-1.
+cudaError_t prores_decode_frame_async(
+    ProResDecodeCtx*  ctx,
+    const uint8_t*    h_icpf_data,
+    size_t            icpf_size,
+    int               color_matrix,
+    bool              is_interlaced,
+    cudaArray_t       d_gl_array);
+
 // Headless variant — outputs to a plain host buffer instead of a GL texture.
 // Useful for unit tests and offline processing (no OpenGL context required).
 // h_bgra16_out must point to at least ctx->width * ctx->height * 4 * sizeof(uint16_t) bytes.

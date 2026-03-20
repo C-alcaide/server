@@ -50,6 +50,7 @@ class tracker_registry
     void update_offset(int channel, int layer, double pan_rad, double tilt_rad, double roll_rad);
     void update_scale(int channel, int layer, double pan_scale, double tilt_scale, double zoom_full_range);
     void update_zoom_default_fov(int channel, int layer, double fov_rad);
+    void update_position_scale(int channel, int layer, double scale);
 
     // ----- Called by protocol receivers when a packet arrives -----------------
 

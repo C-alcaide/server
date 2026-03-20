@@ -167,18 +167,34 @@ struct ProResDemuxer::impl
         if (!pkt)
             throw std::runtime_error("av_packet_alloc");
 
+        int consecutive_errors = 0;
         for (;;) {
             int ret = av_read_frame(fmt_ctx, pkt);
             if (ret == AVERROR_EOF) {
-                av_packet_free(&pkt);
-                return seek_and_loop();
-            }
-            if (ret < 0) {
                 av_packet_free(&pkt);
                 ProResPacket out;
                 out.is_eof = true;
                 return out;
             }
+            if (ret < 0) {
+                // Transient errors (e.g. EAGAIN after a seek) — skip this packet
+                // and try the next one rather than signalling a false EOF.
+                // Bail out after too many consecutive errors to avoid an infinite loop
+                // on a truly unreadable file.
+                char errbuf[64];
+                av_strerror(ret, errbuf, sizeof(errbuf));
+                CASPAR_LOG(debug) << L"[prores_demuxer] av_read_frame transient error: " << errbuf << L" — retrying";
+                av_packet_unref(pkt);
+                if (++consecutive_errors > 32) {
+                    CASPAR_LOG(warning) << L"[prores_demuxer] Too many consecutive read errors — signalling EOF";
+                    av_packet_free(&pkt);
+                    ProResPacket out;
+                    out.is_eof = true;
+                    return out;
+                }
+                continue;
+            }
+            consecutive_errors = 0;
             // Decode audio packets and buffer them for the next video frame.
             if (pkt->stream_index == audio_idx && audio_codec_ctx_) {
                 decode_audio_pkt(pkt);

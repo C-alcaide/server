@@ -926,6 +926,7 @@ struct AVProducer::Impl
         graph_->set_color("frame-time", diagnostics::color(0.0f, 1.0f, 0.0f));
         graph_->set_color("decode-time", diagnostics::color(0.0f, 1.0f, 1.0f));
         graph_->set_color("buffer", diagnostics::color(1.0f, 1.0f, 0.0f));
+        graph_->set_color("fps", diagnostics::color(1.0f, 0.6f, 0.0f));
 
         const int default_buffer_depth = std::max(1, static_cast<int>(format_desc_.fps) / 4);
         buffer_capacity_ = default_buffer_depth;
@@ -1296,7 +1297,9 @@ struct AVProducer::Impl
     core::draw_frame next_frame(const core::video_field field)
     {
         auto now = std::chrono::steady_clock::now();
-        frames_since_update_++;
+        // frames_since_update_ is accumulated at actual consumption points below,
+        // not here, so the fps counter reflects real file frames consumed per second
+        // at any speed (e.g. speed=2 shows ~50fps on a 25fps channel).
         auto duration_sec = std::chrono::duration_cast<std::chrono::duration<double>>(now - last_fps_update_).count();
 
         if (duration_sec >= 1.0) {
@@ -1450,8 +1453,11 @@ struct AVProducer::Impl
                 speed_accum_ -= static_cast<double>(frames_to_step);
 
                 if (frames_to_step == 0) {
+                    // Slow-motion hold: no file frame consumed this tick.
                     return core::draw_frame::still(frame_);
                 }
+                // file frames consumed this tick (1 returned + frames_to_step-1 skipped)
+                frames_since_update_ += frames_to_step;
 
                 const int64_t start_l = start_.load() != AV_NOPTS_VALUE ? start_.load() : 0LL;
 
@@ -1543,15 +1549,20 @@ struct AVProducer::Impl
             speed_accum_ -= static_cast<double>(frames_to_advance);
 
             if (frames_to_advance == 0) {
-                // Slow motion: return current frame without consuming buffer
+                // Slow-motion hold: no file frame consumed this tick.
                 return core::draw_frame::still(frame_);
             }
 
-            // Fast-forward: discard (frames_to_advance - 1) intermediate frames
+            // Fast-forward: discard (frames_to_advance - 1) intermediate frames,
+            // tracking how many were actually available so fps is accurate when
+            // the buffer underflows.
+            int actually_consumed = 1;
             for (int i = 1; i < frames_to_advance && buffer_.size() > 1; ++i) {
                 buffer_.pop_front();
                 buffer_cond_.notify_all();
+                ++actually_consumed;
             }
+            frames_since_update_ += actually_consumed;
         }
 
         frame_          = buffer_[0].frame;
@@ -1563,6 +1574,14 @@ struct AVProducer::Impl
         buffer_cond_.notify_all();
 
         graph_->set_value("buffer", static_cast<double>(buffer_.size()) / static_cast<double>(buffer_capacity_));
+
+        // Normalised fps bar: 1.0 = decoder keeping up with requested speed.
+        // Target is channel_fps * |speed|; bar fills to 1.0 when on target.
+        {
+            const double target_fps = format_desc_.fps * std::max(0.01, std::abs(speed_.load()));
+            if (target_fps > 0.0 && current_fps_ > 0.0)
+                graph_->set_value("fps", std::min(1.0, current_fps_ / target_fps));
+        }
 
         return frame_;
     }
@@ -1599,7 +1618,15 @@ struct AVProducer::Impl
             boost::lock_guard<boost::mutex> lock(buffer_mutex_);
             buffer_.clear();
             rev_frames_.clear();
-            
+
+            // Pre-announce the seek position so that time() / frame_number() reflect
+            // the new position immediately — even on a paused layer where next_frame()
+            // is never called to update frame_time_ from the decoded buffer.
+            // target_pts (TIME_BASE_Q, relative to container start) is the same
+            // coordinate space that next_frame() uses for frame_time_, so this is
+            // exactly what next_frame() would set it to once it eventually runs.
+            frame_time_ = target_pts;
+
             if (speed_.load() < 0.0) {
                 // If the user seeks backward to a frame, we must actually seek the decode 
                 // thread to the START of the upcoming reverse batch so the requested frame

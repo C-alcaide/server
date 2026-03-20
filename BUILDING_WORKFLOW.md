@@ -220,7 +220,25 @@ switch (format) {   // ← was missing the switch statement
 
 ---
 
-## Committing build scripts themselves
+### #3 — `C1083: Cannot open include file: 'memory'` when running `python run_build.py`
+
+**Symptom:** Multiple TUs fail with `C1083: Cannot open include file` for basic STL headers (`<memory>`, `<chrono>`, `<exception>`, etc.) even though the toolchain exists at the configured path.
+
+**Root cause:** `run_build.py` was using `cmd /c "vcvars64.bat" && cmake` as the `full_cmd` string, then launching it with `shell=True`. `shell=True` on Windows prepends `cmd.exe /c`, so the actual execution becomes:
+```
+cmd.exe /c  cmd /c "vcvars64.bat"  &&  cmake
+```
+The outer `cmd.exe /c` sees the inner `cmd /c "vcvars64.bat"` as a **child process**. vcvars64 sets INCLUDE/LIB inside that child, then the child exits — the vars are lost. The outer cmd then runs `cmake` without any INCLUDE set.
+
+**Fix:** Use `call` instead of `cmd /c` so vcvars runs as a **subroutine** in the same cmd.exe session that `shell=True` spawned:
+```python
+full_cmd = f'call "{VCVARS}" && {cmake_cmd}'
+# (shell=True already wraps this in cmd.exe /c)
+```
+
+**Also fixed:** `build_now.bat` had the wrong VS path (`\2026\` instead of `\18\`), causing it to fail silently. Updated to `\18\`.
+
+---
 
 The scripts are tracked in git. After modifying any build script, commit:
 
