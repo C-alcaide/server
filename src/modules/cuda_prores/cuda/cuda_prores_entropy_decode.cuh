@@ -229,8 +229,11 @@ __device__ void decode_ac_plane(BitReader* br, int16_t* blocks, int n_blocks,
 //
 // Slice header:
 //   422:  6 bytes: [0]=hdr_size_bits(48) [1]=q_scale [2..3]=Y_size [4..5]=Cb_size
-//   4444: 8 bytes: same prefix + [6..7]=Alpha_size (BE16)
-//   Cr_size (implicit) = slice_size - hdr_bytes - Y_size - Cb_size - Alpha_size
+//         Cr_size is implicit: total - hdr_bytes - Y_size - Cb_size
+//   4444: 10 bytes: same prefix + [6..7]=Cr_size [8..9]=Alpha_size (both BE16)
+//         (header size = 80 bits = 10 bytes for 4444 slices)
+//   Per FFmpeg decode_slice_thread: Cr_size explicit if hdr_size > 7,
+//                                   Alpha_size explicit if hdr_size > 9.
 //   Data order within slice: [Y][Cb][Cr][Alpha]
 //
 // mbs_per_slice  : maximum macroblock columns per slice (power of 2; from picture header)
@@ -275,12 +278,13 @@ __global__ void k_prores_entropy_decode(
     if (total < 6) return;
 
     // ── Slice header ─────────────────────────────────────────────────────
-    // byte 0: header_size_bits (422: 48=6 bytes; 4444: 64=8 bytes)
-    // byte 1: q_scale
-    // bytes 2..3: Y_size (BE16)
-    // bytes 4..5: Cb_size (BE16)
-    // bytes 6..7: Alpha_size (BE16, 4444 only; 0 for 422)
-    // Cr_size is implicit: total - hdr_bytes - Y - Cb - Alpha
+    // Byte 0: header_size_bits (422: 48 = 6 bytes; 4444: 80 = 10 bytes)
+    // Byte 1: q_scale
+    // Bytes 2..3: Y_size (BE16)
+    // Bytes 4..5: Cb_size (BE16)
+    // Bytes 6..7: Cr_size (BE16) — explicit when hdr_bytes > 7
+    //             else implicit = total - hdr_bytes - Y - Cb
+    // Bytes 8..9: Alpha_size (BE16) — explicit for 4444 when hdr_bytes > 9
     int  hdr_bytes = slice[0] / 8;          // header size in bytes
     if (hdr_bytes < 6 || hdr_bytes > total)
         return;
@@ -288,10 +292,14 @@ __global__ void k_prores_entropy_decode(
     uint8_t q_scale    = slice[1];
     int     y_size     = ((int)slice[2] << 8) | slice[3];
     int     cb_size    = ((int)slice[4] << 8) | slice[5];
+    int     cr_size;
     int     alpha_size = 0;
-    if (is_444 && hdr_bytes >= 8)
-        alpha_size = ((int)slice[6] << 8) | slice[7];
-    int     cr_size    = total - hdr_bytes - y_size - cb_size - alpha_size;
+    if (hdr_bytes > 7)
+        cr_size = ((int)slice[6] << 8) | slice[7];
+    else
+        cr_size = total - hdr_bytes - y_size - cb_size;   // implicit (422 style)
+    if (is_444 && hdr_bytes > 9)
+        alpha_size = ((int)slice[8] << 8) | slice[9];
 
     if (y_size < 0 || cb_size < 0 || alpha_size < 0 || cr_size < 0)
         return;

@@ -320,8 +320,14 @@ static void decode_alpha_to_host(
 
         int y_size     = ((int)sl[2] << 8) | sl[3];
         int cb_size    = ((int)sl[4] << 8) | sl[5];
-        int alpha_size = (hdr_bytes >= 8) ? (((int)sl[6] << 8) | sl[7]) : 0;
-        int cr_size    = total - hdr_bytes - y_size - cb_size - alpha_size;
+        int cr_size;
+        int alpha_size = 0;
+        if (hdr_bytes > 7)
+            cr_size = ((int)sl[6] << 8) | sl[7];
+        else
+            cr_size = total - hdr_bytes - y_size - cb_size;
+        if (hdr_bytes > 9)
+            alpha_size = ((int)sl[8] << 8) | sl[9];
         if (y_size < 0 || cb_size < 0 || alpha_size < 0 || cr_size < 0) continue;
 
         int s_col           = s % slices_per_row;
