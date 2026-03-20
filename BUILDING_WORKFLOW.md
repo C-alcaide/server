@@ -240,6 +240,36 @@ full_cmd = f'call "{VCVARS}" && {cmake_cmd}'
 
 ---
 
+### #4 — `STATUS_ACCESS_VIOLATION` (0xC0000005) when switching CUDA producers on the same layer
+
+**Symptom:** CasparCG crashes with a fatal unhandled exception (code `3221225477` = `0xC0000005`) inside the NVIDIA GL driver (`nvoglv64.dll`) a few milliseconds after `LOAD OK` when a `LOAD 1-N CUDA_PRORES` (or `CUDA_NOTCHLC`) command is sent to a layer that already has the other producer playing:
+
+```
+[fatal] UNHANDLED EXCEPTION:
+[fatal] Address:00007FFA3D5287B7
+[fatal] Code:3221225477
+```
+
+**Root cause:** The stage executor runs asynchronously — it queues the producer swap and returns LOAD OK immediately. At that point:
+
+- The **new** producer's `read_thread_` is **already running** (started at the end of its constructor, before LOAD OK was sent).
+- The **old** producer's `read_thread_` is still alive and will call `cudaGraphicsUnregisterResource` during its exit cleanup a few ms later.
+
+These two threads race on the NVIDIA interop driver:
+
+```
+new read_thread_: wglMakeCurrent + cudaGraphicsGLRegisterImage (setup)
+old read_thread_: cudaGraphicsUnregisterResource + wglDeleteContext (teardown)
+```
+
+`cudaGraphicsGLRegisterImage` and `cudaGraphicsUnregisterResource` are **not thread-safe** when called concurrently from different threads, even for distinct GL textures. The driver dereferences a freed VA and crashes.
+
+**Fix:** Added `src/modules/cuda_gl_interop_lock.h` — a single process-wide `std::mutex` that both `prores_producer.cpp` and `notchlc_producer.cpp` acquire around the `cudaGraphicsGLRegisterImage` burst at `read_loop()` startup and the `cudaGraphicsUnregisterResource` burst at `read_loop()` cleanup. The mutex is **not** held during normal frame decode (map/unmap/submit), so there is zero steady-state performance impact.
+
+**Rule for future CUDA-GL producers:** Any new producer that calls `cudaGraphicsGLRegisterImage` or `cudaGraphicsUnregisterResource` must hold `caspar::cuda_gl_interop_mutex()` during those calls.
+
+---
+
 The scripts are tracked in git. After modifying any build script, commit:
 
 ```powershell
