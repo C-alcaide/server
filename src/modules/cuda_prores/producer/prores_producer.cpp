@@ -30,6 +30,7 @@
 #include "prores_demuxer.h"
 #include "../cuda/cuda_prores_decode.h"
 #include "../util/cuda_gl_texture.h"
+#include "../../cuda_gl_interop_lock.h"
 
 #include <accelerator/ogl/image/image_mixer.h>
 #include <accelerator/ogl/util/device.h>
@@ -406,6 +407,7 @@ struct prores_producer_impl final : public core::frame_producer
                 use_host_copy_ = true;
             } else {
                 try {
+                    std::lock_guard<std::mutex> gl_lk(caspar::cuda_gl_interop_mutex());
                     for (int i = 0; i < num_slots_; i++)
                         cgt_[i] = std::make_shared<CudaGLTexture>(gl_tex_[i]);
                     CASPAR_LOG(info) << L"[prores_producer] CUDA-GL interop active";
@@ -787,7 +789,12 @@ struct prores_producer_impl final : public core::frame_producer
 #ifdef WIN32
         // Cleanup: unregister CUDA-GL resources while the shared context is current,
         // then release the context so it can be deleted.
-        for (int i = 0; i < num_slots_; i++) cgt_[i].reset();
+        // Mutex guards against a concurrent cudaGraphicsGLRegisterImage from a
+        // newly-created producer whose read_thread_ started before our destructor ran.
+        {
+            std::lock_guard<std::mutex> gl_lk(caspar::cuda_gl_interop_mutex());
+            for (int i = 0; i < num_slots_; i++) cgt_[i].reset();
+        }
         if (shared_hglrc_) {
             wglMakeCurrent(nullptr, nullptr);
             wglDeleteContext(shared_hglrc_);

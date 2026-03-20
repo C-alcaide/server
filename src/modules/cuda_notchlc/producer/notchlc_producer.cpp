@@ -31,6 +31,7 @@
 #include "../cuda/notchlc_decode.h"
 #include "../cuda/notchlc_ycocg_to_bgra16.cuh"   // NOTCHLC_CM_* constants
 #include "../util/cuda_gl_texture.h"
+#include "../../cuda_gl_interop_lock.h"
 
 #include <accelerator/ogl/image/image_mixer.h>
 #include <accelerator/ogl/util/device.h>
@@ -631,6 +632,7 @@ struct notchlc_producer_impl final : public core::frame_producer
                 use_host_copy_ = true;
             } else {
                 try {
+                    std::lock_guard<std::mutex> gl_lk(caspar::cuda_gl_interop_mutex());
                     for (int i = 0; i < num_slots_; i++)
                         cgt_[i] = std::make_shared<CudaGLTexture>(gl_tex_[i]);
                     CASPAR_LOG(info) << L"[notchlc_producer] CUDA-GL interop active";
@@ -868,7 +870,10 @@ struct notchlc_producer_impl final : public core::frame_producer
         }
 
 #ifdef WIN32
-        for (int i = 0; i < num_slots_; i++) cgt_[i].reset();
+        {
+            std::lock_guard<std::mutex> gl_lk(caspar::cuda_gl_interop_mutex());
+            for (int i = 0; i < num_slots_; i++) cgt_[i].reset();
+        }
         if (shared_hglrc_) {
             wglMakeCurrent(nullptr, nullptr);
             wglDeleteContext(shared_hglrc_);
