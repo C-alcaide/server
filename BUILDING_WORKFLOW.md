@@ -270,6 +270,35 @@ old read_thread_: cudaGraphicsUnregisterResource + wglDeleteContext (teardown)
 
 ---
 
+### #5 — Adding AMCP `ADD` support to an XML-only consumer
+
+**Context:** ArtNet and sACN consumers only registered via `register_preconfigured_consumer_factory` (XML in caspar.config), not `register_consumer_factory` (AMCP ADD).
+
+**Pattern:** Add a `create_consumer(params, ...)` function that:
+1. Checks `params[0]` matches the keyword (return `frame_consumer::empty()` if not).
+2. Parses keyword-value pairs with `get_param<T>(L"KEY", params, default)` and `contains_param(L"FLAG", params)` from `<common/param.h>`.
+3. For structured sub-objects (fixtures), scan params for a sentinel keyword (e.g. `L"FIXTURE"`) then consume N following positional tokens via `boost::lexical_cast`.
+4. Register BOTH factories in `init()`:
+   ```cpp
+   dependencies.consumer_registry->register_consumer_factory(L"ArtNet Consumer", create_consumer);
+   dependencies.consumer_registry->register_preconfigured_consumer_factory(L"artnet", create_preconfigured_consumer);
+   ```
+5. In the header, add the new declaration alongside `create_preconfigured_consumer` and add `#include <core/fwd.h>` for `video_format_repository` and `video_channel`.
+
+**AMCP syntax for ArtNet (example):**
+```
+ADD 1 ARTNET UNIVERSE 0 HOST 127.0.0.1 PORT 6454 REFRESH-RATE 10 FIXTURE RGB 1 3 3 0.0 0.0 1920.0 100.0 0.0
+```
+
+**AMCP syntax for sACN (example):**
+```
+ADD 1 SACN UNIVERSE 1 HOST 127.0.0.1 PORT 5568 PRIORITY 100 MULTICAST-TTL 10 REFRESH-RATE 10 FIXTURE RGBW 1 6 4 0.0 0.0 1920.0 200.0 0.0
+```
+
+**Consumer indices (REMOVE command):** ArtNet = 1337, sACN = 1338 (hard-coded in `index()` overrides).
+
+---
+
 The scripts are tracked in git. After modifying any build script, commit:
 
 ```powershell
