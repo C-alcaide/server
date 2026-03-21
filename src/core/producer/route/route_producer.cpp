@@ -298,11 +298,14 @@ spl::shared_ptr<core::frame_producer> create_route_producer(const core::frame_pr
     auto layer   = what["LAYER"].matched ? std::stoi(what["LAYER"].str()) : -1;
 
     auto mode = core::route_mode::foreground;
+    auto raw  = false;
     if (layer >= 0) {
         if (contains_param(L"BACKGROUND", params))
             mode = core::route_mode::background;
         else if (contains_param(L"NEXT", params))
             mode = core::route_mode::next;
+        else if (contains_param(L"PREMIX", params))
+            raw = true;
     }
 
     auto channel_it =
@@ -316,7 +319,7 @@ spl::shared_ptr<core::frame_producer> create_route_producer(const core::frame_pr
 
     auto buffer = get_param(L"BUFFER", params, 0);
     auto rp     = spl::make_shared<route_producer>(
-        (*channel_it)->route(layer, mode), dependencies.format_desc, buffer, channel, layer);
+        (*channel_it)->route(layer, mode, raw), dependencies.format_desc, buffer, channel, layer);
     rp->connect_slot();
     return rp;
 }

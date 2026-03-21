@@ -51,7 +51,10 @@
 
 namespace caspar { namespace core {
 
-bool operator<(const route_id& a, const route_id& b) { return a.mode + (a.index << 2) < b.mode + (b.index << 2); }
+bool operator<(const route_id& a, const route_id& b)
+{
+    return std::tie(a.index, a.mode, a.raw) < std::tie(b.index, b.mode, b.raw);
+}
 
 struct video_channel::impl final
 {
@@ -95,6 +98,9 @@ struct video_channel::impl final
 
                 if (r.first.index == -1) {
                     route->signal(layer_frame.foreground1, layer_frame.foreground2);
+                } else if (r.first.raw) {
+                    // PREMIX route: deliver raw producer output before any mixer transforms
+                    route->signal(layer_frame.foreground1_raw, layer_frame.foreground2_raw);
                 } else if (r.first.mode == route_mode::background ||
                            (r.first.mode == route_mode::next && layer_frame.has_background)) {
                     route->signal(draw_frame::pop(layer_frame.background1), draw_frame::pop(layer_frame.background2));
@@ -220,13 +226,14 @@ struct video_channel::impl final
         thread_.join();
     }
 
-    std::shared_ptr<core::route> route(int index = -1, route_mode mode = route_mode::foreground)
+    std::shared_ptr<core::route> route(int index = -1, route_mode mode = route_mode::foreground, bool raw = false)
     {
         std::lock_guard<std::mutex> lock(routes_mutex_);
 
         route_id id = {};
         id.index    = index;
         id.mode     = mode;
+        id.raw      = raw;
 
         auto route = routes_[id].lock();
         if (!route) {
@@ -240,6 +247,9 @@ struct video_channel::impl final
                 route->name += L"/background";
             } else if (mode == route_mode::next) {
                 route->name += L"/next";
+            }
+            if (raw) {
+                route->name += L"/premix";
             }
             routes_[id] = route;
         }
@@ -288,6 +298,6 @@ int                                 video_channel::index() const { return impl_-
 channel_info         video_channel::get_consumer_channel_info() const { return impl_->get_consumer_channel_info(); };
 core::monitor::state video_channel::state() const { return impl_->state_; }
 
-std::shared_ptr<route> video_channel::route(int index, route_mode mode) { return impl_->route(index, mode); }
+std::shared_ptr<route> video_channel::route(int index, route_mode mode, bool raw) { return impl_->route(index, mode, raw); }
 
 }} // namespace caspar::core

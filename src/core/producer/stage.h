@@ -48,8 +48,10 @@ struct layer_frame
 {
     bool       is_interlaced;
     draw_frame foreground1;
+    draw_frame foreground1_raw; // raw producer output before mixer transforms are applied
     draw_frame background1;
     draw_frame foreground2;
+    draw_frame foreground2_raw; // raw producer output before mixer transforms are applied (field 2)
     draw_frame background2;
     bool       has_background;
 };

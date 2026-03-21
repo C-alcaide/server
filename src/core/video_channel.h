@@ -47,8 +47,9 @@ struct route_id
 {
     int        index;
     route_mode mode;
+    bool       raw = false; // if true, frames are routed before mixer transforms are applied
 
-    bool const operator==(const route_id& o) { return index == o.index && mode == o.mode; }
+    bool const operator==(const route_id& o) { return index == o.index && mode == o.mode && raw == o.raw; }
 };
 
 struct route
@@ -94,7 +95,7 @@ class video_channel final
 
     [[nodiscard]] channel_info get_consumer_channel_info() const;
 
-    std::shared_ptr<core::route> route(int index = -1, route_mode mode = route_mode::foreground);
+    std::shared_ptr<core::route> route(int index = -1, route_mode mode = route_mode::foreground, bool raw = false);
 
   private:
     struct impl;
