@@ -56,10 +56,6 @@ target_link_libraries(casparcg
 		GLEW::glew
 )
 
-if(ENABLE_VULKAN)
-	target_link_libraries(casparcg Vulkan::Vulkan)
-ENDIF()
-
 if (MSVC)
 	target_link_libraries(casparcg
 		Winmm.lib

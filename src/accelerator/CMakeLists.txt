@@ -121,7 +121,8 @@ target_precompile_headers(accelerator PRIVATE StdAfx.h)
 target_link_libraries(accelerator PRIVATE common core GLEW::glew sfml-window)
 
 IF(ENABLE_VULKAN)
-	target_link_libraries(accelerator PRIVATE vk-bootstrap::vk-bootstrap GPUOpen::VulkanMemoryAllocator Vulkan::Vulkan)
+	target_link_libraries(accelerator PRIVATE vk-bootstrap::vk-bootstrap GPUOpen::VulkanMemoryAllocator Vulkan::Headers)
+	target_compile_definitions(accelerator PUBLIC VULKAN_HPP_DISPATCH_LOADER_DYNAMIC=1)
 ENDIF()
 
 source_group(sources ./.*)

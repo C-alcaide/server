@@ -35,6 +35,8 @@
 #include <VkBootstrap.h>
 #include <vulkan/vulkan.hpp>
 
+VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
+
 #define VMA_STATIC_VULKAN_FUNCTIONS 0
 #define VMA_DYNAMIC_VULKAN_FUNCTIONS 1
 #define VMA_IMPLEMENTATION
@@ -171,6 +173,9 @@ struct device::impl : public std::enable_shared_from_this<impl>
         }
         _vkb_instance = instance_ret.value();
 
+        VULKAN_HPP_DEFAULT_DISPATCHER.init(_vkb_instance.fp_vkGetInstanceProcAddr);
+        VULKAN_HPP_DEFAULT_DISPATCHER.init(vk::Instance(_vkb_instance.instance));
+
         // Find suitable physical device
         auto gpu_selector = vkb::PhysicalDeviceSelector(_vkb_instance);
 
@@ -207,6 +212,7 @@ struct device::impl : public std::enable_shared_from_this<impl>
         }
         auto vkb_device   = device_res.value();
         _device           = vk::Device(vkb_device.device);
+        VULKAN_HPP_DEFAULT_DISPATCHER.init(_device);
         _queue            = vk::Queue(vkb_device.get_queue(vkb::QueueType::graphics).value());
         auto queue_family = vkb_device.get_queue_index(vkb::QueueType::graphics).value();
 
@@ -217,8 +223,8 @@ struct device::impl : public std::enable_shared_from_this<impl>
         _command_pool = _device.createCommandPool(pool_info);
 
         VmaVulkanFunctions vulkanFunctions    = {};
-        vulkanFunctions.vkGetInstanceProcAddr = &vkGetInstanceProcAddr;
-        vulkanFunctions.vkGetDeviceProcAddr   = &vkGetDeviceProcAddr;
+        vulkanFunctions.vkGetInstanceProcAddr = _vkb_instance.fp_vkGetInstanceProcAddr;
+        vulkanFunctions.vkGetDeviceProcAddr   = vkb_device.fp_vkGetDeviceProcAddr;
 
         VmaAllocatorCreateInfo allocatorCreateInfo = {};
         allocatorCreateInfo.flags                  = VMA_ALLOCATOR_CREATE_EXT_MEMORY_BUDGET_BIT;
