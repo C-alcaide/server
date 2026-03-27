@@ -164,7 +164,11 @@ struct device::impl : public std::enable_shared_from_this<impl>
                                     .set_app_name("CasparCG")
                                     .set_headless(true)
                                     .set_engine_name("CasparCG")
+#ifdef __APPLE__
+                                    .require_api_version(VK_API_VERSION_1_4);
+#else
                                     .require_api_version(VK_API_VERSION_1_3);
+#endif
         auto instance_ret = instance_builder.build();
         if (!instance_ret) {
             CASPAR_THROW_EXCEPTION(caspar_exception()

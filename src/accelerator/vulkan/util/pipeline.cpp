@@ -280,6 +280,10 @@ struct pipeline::impl
         for (int i = 0; i < 6; ++i) {
             textureInfos[i].sampler     = textureSampler_;
             textureInfos[i].imageView   = textures[i + 1];
+#ifdef __APPLE__
+            // moltenvk doesn't support nullDescriptors, so bind a dummy texture if the plane is not present
+            textureInfos[i].imageView   = textures[i + 1] ? textures[i + 1] : textures[1];
+#endif
             textureInfos[i].imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal;
         }
 

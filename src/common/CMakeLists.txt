@@ -22,6 +22,12 @@ if (MSVC)
 			os/windows/thread.cpp
 			os/windows/windows.h
 	)
+elseif (APPLE)
+	list(APPEND SOURCES
+			os/apple/filesystem.cpp
+			os/apple/prec_timer.cpp
+			os/apple/thread.cpp
+	)	
 else ()
 	list(APPEND SOURCES
 			os/linux/filesystem.cpp
@@ -63,7 +69,10 @@ set(HEADERS
 casparcg_add_library(common SOURCES ${SOURCES} ${HEADERS})
 target_include_directories(common PRIVATE ..)
 target_precompile_headers(common PRIVATE stdafx.h)
+
+if(NOT APPLE)
 target_link_libraries(common PRIVATE GLEW::glew)
+endif()
 
 source_group(sources ./*)
 source_group(sources\\gl gl/*)
