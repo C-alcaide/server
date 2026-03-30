@@ -179,21 +179,22 @@ struct device::impl : public std::enable_shared_from_this<impl>
         // Find suitable physical device
         auto gpu_selector = vkb::PhysicalDeviceSelector(_vkb_instance);
 
-        vk::PhysicalDeviceVulkan13Features features13;
-        features13.dynamicRendering = true;
-        features13.synchronization2 = true;
-
         vk::PhysicalDeviceVulkan12Features features12;
         features12.descriptorIndexing              = true;
         features12.descriptorBindingPartiallyBound = true;
 
-        vk::PhysicalDeviceVulkan14Features features14;
-        features14.dynamicRenderingLocalRead = true;
+        vk::PhysicalDeviceVulkan13Features features13;
+        features13.dynamicRendering = true;
+        features13.synchronization2 = true;
 
-        auto gpu_res = gpu_selector.set_minimum_version(1, 4)
+        vk::PhysicalDeviceDynamicRenderingLocalReadFeaturesKHR localReadFeatures;
+        localReadFeatures.dynamicRenderingLocalRead = true;
+
+        auto gpu_res = gpu_selector.set_minimum_version(1, 3)
                            .set_required_features_12(features12)
                            .set_required_features_13(features13)
-                           .set_required_features_14(features14)
+                           .add_required_extension(VK_KHR_DYNAMIC_RENDERING_LOCAL_READ_EXTENSION_NAME)
+                           .add_required_extension_features(localReadFeatures)
                            .select();
         if (!gpu_res) {
             CASPAR_THROW_EXCEPTION(caspar_exception()
@@ -210,8 +211,8 @@ struct device::impl : public std::enable_shared_from_this<impl>
             CASPAR_THROW_EXCEPTION(caspar_exception()
                                    << msg_info("Failed to create device: " + device_res.error().message()));
         }
-        auto vkb_device   = device_res.value();
-        _device           = vk::Device(vkb_device.device);
+        auto vkb_device = device_res.value();
+        _device         = vk::Device(vkb_device.device);
         VULKAN_HPP_DEFAULT_DISPATCHER.init(_device);
         _queue            = vk::Queue(vkb_device.get_queue(vkb::QueueType::graphics).value());
         auto queue_family = vkb_device.get_queue_index(vkb::QueueType::graphics).value();
@@ -228,7 +229,7 @@ struct device::impl : public std::enable_shared_from_this<impl>
 
         VmaAllocatorCreateInfo allocatorCreateInfo = {};
         allocatorCreateInfo.flags                  = VMA_ALLOCATOR_CREATE_EXT_MEMORY_BUDGET_BIT;
-        allocatorCreateInfo.vulkanApiVersion       = VK_API_VERSION_1_4;
+        allocatorCreateInfo.vulkanApiVersion       = VK_API_VERSION_1_3;
         allocatorCreateInfo.physicalDevice         = _physical_device;
         allocatorCreateInfo.device                 = _device;
         allocatorCreateInfo.instance               = _vkb_instance.instance;
