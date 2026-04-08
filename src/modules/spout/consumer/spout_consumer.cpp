@@ -239,20 +239,6 @@ struct spout_consumer_impl : public core::frame_consumer
             std::memcpy(out_buf_.data(), src, static_cast<size_t>(src_stride) * src_h);
         }
 
-        // Force full opacity. CasparCG's composited BGRA frames may carry
-        // alpha values from the internal compositing pipeline (e.g. < 255
-        // during transitions or when no layer is present). The screen consumer
-        // and JPEG bridge both discard the alpha channel, so they display
-        // correctly. Spout receivers that do DX alpha-compositing (e.g. the
-        // Spout Demo Receiver) will blend non-opaque pixels with their black
-        // background, producing a visible gradient/darkening. A broadcast
-        // output consumer should always deliver fully-opaque pixels.
-        {
-            uint8_t*       p   = out_buf_.data() + 3;       // first alpha byte
-            const uint8_t* end = out_buf_.data() + static_cast<size_t>(out_w_) * out_h_ * 4;
-            for (; p < end; p += 4) *p = 0xFF;
-        }
-
         // Send top-down BGRA data as-is. The Spout SDK (both GL-DX and CPU/DX
         // paths) expects top-down pixel data when bInvert=false:
         //   - CPU path (WriteDX11pixels): row 0 → DX texture row 0 (top) = correct
