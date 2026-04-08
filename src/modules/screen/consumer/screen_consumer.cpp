@@ -117,6 +117,9 @@ struct configuration
     colour_spaces   colour_space  = colour_spaces::RGB;
     bool            high_bitdepth = false;
     bool            gpu_texture   = false;
+    bool            no_taskbar    = false;
+    bool            closeable     = true;
+    bool            no_activate   = false;
 };
 
 struct frame
@@ -303,6 +306,26 @@ struct screen_consumer
 #endif
                 }
 
+#ifdef _MSC_VER
+                {
+                    HWND     hwnd = window_.getSystemHandle();
+                    LONG_PTR ex   = GetWindowLongPtr(hwnd, GWL_EXSTYLE);
+
+                    if (config_.no_taskbar) {
+                        ex = (ex | WS_EX_TOOLWINDOW) & ~(LONG_PTR)WS_EX_APPWINDOW;
+                        SetWindowLongPtr(hwnd, GWL_EXSTYLE, ex);
+                        // Style change requires a hide/show cycle to take effect
+                        ShowWindow(hwnd, SW_HIDE);
+                        ShowWindow(hwnd, SW_SHOW);
+                        ex = GetWindowLongPtr(hwnd, GWL_EXSTYLE); // refresh after show
+                    }
+
+                    if (config_.no_activate) {
+                        SetWindowLongPtr(hwnd, GWL_EXSTYLE, ex | WS_EX_NOACTIVATE);
+                    }
+                }
+#endif
+
                 if (glewInit() != GLEW_OK) {
                     CASPAR_THROW_EXCEPTION(gl::ogl_exception() << msg_info("Failed to initialize GLEW."));
                 }
@@ -390,7 +413,9 @@ struct screen_consumer
             if (e->is<sf::Event::Resized>()) {
                 calculate_aspect();
             } else if (e->is<sf::Event::Closed>()) {
-                is_running_ = false;
+                if (config_.closeable) {
+                    is_running_ = false;
+                }
             }
         }
 #else
@@ -400,7 +425,9 @@ struct screen_consumer
             if (e.type == sf::Event::Resized) {
                 calculate_aspect();
             } else if (e.type == sf::Event::Closed) {
-                is_running_ = false;
+                if (config_.closeable) {
+                    is_running_ = false;
+                }
             }
         }
 #endif
@@ -827,12 +854,27 @@ spl::shared_ptr<core::frame_consumer> create_consumer(const std::vector<std::wst
         }
     }
 
-    config.windowed    = !contains_param(L"FULLSCREEN", params);
-    config.gpu_texture = contains_param(L"GPU", params);
-    config.key_only    = contains_param(L"KEY_ONLY", params);
-    config.sbs_key     = contains_param(L"SBS_KEY", params);
-    config.interactive = !contains_param(L"NON_INTERACTIVE", params);
-    config.borderless  = contains_param(L"BORDERLESS", params);
+    config.windowed      = !contains_param(L"FULLSCREEN", params);
+    config.gpu_texture   = contains_param(L"GPU", params);
+    config.key_only      = contains_param(L"KEY_ONLY", params);
+    config.sbs_key       = contains_param(L"SBS_KEY", params);
+    config.interactive   = !contains_param(L"NON_INTERACTIVE", params);
+    config.borderless    = contains_param(L"BORDERLESS", params);
+    config.always_on_top = contains_param(L"ALWAYS_ON_TOP", params);
+    config.vsync         = contains_param(L"VSYNC", params);
+    config.no_taskbar    = contains_param(L"NO_TASKBAR", params);
+    config.closeable     = !contains_param(L"NO_CLOSE", params);
+    config.no_activate   = !config.interactive || contains_param(L"NO_ACTIVATE", params);
+
+    // MONITORING: convenience preset — borderless, always-on-top, taskbar-hidden, close-proof, no focus steal, no cursor
+    if (contains_param(L"MONITORING", params)) {
+        config.interactive   = false;
+        config.borderless    = true;
+        config.always_on_top = true;
+        config.no_taskbar    = true;
+        config.closeable     = false;
+        config.no_activate   = true;
+    }
 
     if (contains_param(L"NAME", params)) {
         config.name = get_param(L"NAME", params);
@@ -883,6 +925,9 @@ create_preconfigured_consumer(const boost::property_tree::wptree&               
     config.borderless    = ptree.get(L"borderless", config.borderless);
     config.always_on_top = ptree.get(L"always-on-top", config.always_on_top);
     config.gpu_texture   = ptree.get(L"gpu-texture", config.gpu_texture);
+    config.no_taskbar    = ptree.get(L"no-taskbar", config.no_taskbar);
+    config.closeable     = ptree.get(L"closeable", config.closeable);
+    config.no_activate   = ptree.get(L"no-activate", config.no_activate);
 
     auto colour_space_value = ptree.get(L"colour-space", L"RGB");
     config.colour_space     = configuration::colour_spaces::RGB;
