@@ -134,7 +134,7 @@ struct spout_consumer_impl : public core::frame_consumer
     int             out_w_ = 0;
     int             out_h_ = 0;
     bool            need_scale_ = false;
-    std::vector<uint8_t> out_buf_;   // row-flipped (and optionally scaled) BGRA
+    std::vector<uint8_t> out_buf_;   // top-down BGRA output buffer (scaled or native)
     SwsContext*     sws_ctx_ = nullptr;
 
     spl::shared_ptr<diagnostics::graph> graph_;
@@ -229,31 +229,28 @@ struct spout_consumer_impl : public core::frame_consumer
 
         if (need_scale_ && sws_ctx_) {
             // Scale into out_buf_ (top-down).
-            const uint8_t* sp[4] = { src,              nullptr, nullptr, nullptr };
-            const int      ss[4] = { src_stride,        0,       0,       0      };
-            uint8_t*       dp[4] = { out_buf_.data(),  nullptr, nullptr, nullptr };
-            const int      ds[4] = { out_stride,        0,       0,       0      };
+            const uint8_t* sp[4] = { src,             nullptr, nullptr, nullptr };
+            const int      ss[4] = { src_stride,       0,       0,       0      };
+            uint8_t*       dp[4] = { out_buf_.data(), nullptr, nullptr, nullptr };
+            const int      ds[4] = { out_stride,       0,       0,       0      };
             sws_scale(sws_ctx_, sp, ss, 0, src_h, dp, ds);
         } else {
-            // Native resolution: copy rows directly into out_buf_ (top-down first).
-            // We'll flip in-place below.
+            // Native resolution: copy rows directly into out_buf_ (top-down).
             std::memcpy(out_buf_.data(), src, static_cast<size_t>(src_stride) * src_h);
         }
 
-        // Flip rows in-place (top-down → bottom-up for Spout/GL receivers).
-        for (int y = 0; y < out_h_ / 2; ++y) {
-            uint8_t* a = out_buf_.data() + static_cast<size_t>(y)              * out_stride;
-            uint8_t* b = out_buf_.data() + static_cast<size_t>(out_h_ - 1 - y) * out_stride;
-            for (int x = 0; x < out_stride; ++x) {
-                a[x] ^= b[x]; b[x] ^= a[x]; a[x] ^= b[x];
-            }
-        }
-
+        // Send top-down BGRA data as-is. The Spout SDK (both GL-DX and CPU/DX
+        // paths) expects top-down pixel data when bInvert=false:
+        //   - CPU path (WriteDX11pixels): row 0 → DX texture row 0 (top) = correct
+        //   - GL path (WriteGLDXpixels): glTexSubImage2D row 0 → GL y=0 (bottom);
+        //     the GL-DX interop implicitly maps GL-bottom ↔ DX-top, so row 0 of
+        //     top-down data ends up at DX top = correct
+        // A manual Y-flip would reverse the correct orientation in both paths.
         sender_->SendImage(out_buf_.data(),
                            static_cast<unsigned int>(out_w_),
                            static_cast<unsigned int>(out_h_),
                            GL_BGRA_EXT,
-                           false);  // already bottom-up after flip
+                           false);  // bInvert=false: data is top-down, no extra flip needed
 
         graph_->set_value("frame-time", frame_timer_.elapsed() * 1000.0);
         return caspar::make_ready_future(true);
