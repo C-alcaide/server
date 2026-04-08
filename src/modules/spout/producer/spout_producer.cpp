@@ -35,6 +35,8 @@
 #include <mutex>
 #include <queue>
 #include <thread>
+#include <vector>
+#include <cstring>
 #include <iostream>
 #include <condition_variable>
 
@@ -110,8 +112,6 @@ class gl_context
 
 struct spout_producer : public core::frame_producer
 {
-    static std::atomic<int>              instances_;
-    const int                            instance_no_;
     const std::wstring                   name_;
     std::string                          sender_name_ascii_;
 
@@ -129,7 +129,6 @@ struct spout_producer : public core::frame_producer
     spout_producer(const core::frame_producer_dependencies& dependencies,
                    const std::wstring& name)
         : frame_factory_(dependencies.frame_factory)
-        , instance_no_(instances_++)
         , name_(name)
         , running_(true)
     {
@@ -173,62 +172,86 @@ struct spout_producer : public core::frame_producer
         }
 
         auto receiver = std::make_unique<Spout>();
-        
-        if (!sender_name_ascii_.empty()) {
-            receiver->SetReceiverName(sender_name_ascii_.c_str());
-        }
 
-        while (running_) 
+        if (!sender_name_ascii_.empty())
+            receiver->SetReceiverName(sender_name_ascii_.c_str());
+
+        // Persistent receive buffer — reallocated only when the sender changes resolution.
+        unsigned int     cur_w = 0, cur_h = 0;
+        std::vector<uint8_t> pixel_buf;
+
+        while (running_)
         {
             frame_timer_.restart();
             bool frame_received = false;
 
-            if (receiver->ReceiveTexture()) {
-                unsigned int width = receiver->GetSenderWidth();
-                unsigned int height = receiver->GetSenderHeight();
-                
-                if (width > 0 && height > 0) {
-                    AVFrame* av_frame = av_frame_alloc();
-                    av_frame->width = width;
-                    av_frame->height = height;
-                    av_frame->format = AV_PIX_FMT_BGRA;
-                    
-                    if (av_frame_get_buffer(av_frame, 32) >= 0) {
-                        if (receiver->ReceiveImage(av_frame->data[0], GL_BGRA_EXT, false, 0)) {
-                             AVFrame* audio_frame = av_frame_alloc();
-                             
-                             std::shared_ptr<AVFrame> shared_video(av_frame, [](AVFrame* f){ av_frame_free(&f); });
-                             std::shared_ptr<AVFrame> shared_audio(audio_frame, [](AVFrame* f){ av_frame_free(&f); });
-
-                             auto mframe = ffmpeg::make_frame(this, *frame_factory_, std::move(shared_video), std::move(shared_audio));
-                             core::draw_frame dframe(std::move(mframe));
-
-                             {
-                                 std::lock_guard<std::mutex> lock(frames_mutex_);
-                                 frames_.push(dframe);
-                                 if (frames_.size() > 5) frames_.pop();
-                             }
-                             frame_received = true;
-                        } else {
-                            av_frame_free(&av_frame);
-                        }
-                    } else {
-                         av_frame_free(&av_frame);
-                    }
+            // ---- (Re)connect phase -------------------------------------------------
+            // ReceiveTexture() is called ONLY here, when we don't yet have a valid
+            // connection or the sender changed resolution.  In steady state the loop
+            // skips directly to ReceiveImage() so we never do two receive calls per frame.
+            if (cur_w == 0 || cur_h == 0) {
+                if (receiver->ReceiveTexture()) {
+                    cur_w = receiver->GetSenderWidth();
+                    cur_h = receiver->GetSenderHeight();
+                    if (cur_w > 0 && cur_h > 0)
+                        pixel_buf.resize(static_cast<size_t>(cur_w) * cur_h * 4);
+                    else
+                        cur_w = cur_h = 0;
+                }
+                if (cur_w == 0) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                    continue;
                 }
             }
-            
-            graph_->set_value("frame-time", frame_timer_.elapsed() * 1000.0);
-            {
-               std::lock_guard<std::mutex> lock(frames_mutex_);
-               graph_->set_value("buffer-size", static_cast<double>(frames_.size()));
+
+            // ---- Steady-state receive phase ----------------------------------------
+            // bInvert=true: flip from OpenGL bottom-up to CasparCG top-down convention.
+            if (receiver->ReceiveImage(pixel_buf.data(), GL_BGRA_EXT, true, 0)) {
+                // Detect sender resolution change — will reconnect next iteration.
+                unsigned int new_w = receiver->GetSenderWidth();
+                unsigned int new_h = receiver->GetSenderHeight();
+                if (new_w != cur_w || new_h != cur_h) {
+                    cur_w = cur_h = 0;
+                    pixel_buf.clear();
+                } else {
+                    // Copy pixels into an AVFrame owned by the draw_frame.
+                    AVFrame* av_frame = av_frame_alloc();
+                    av_frame->width  = static_cast<int>(cur_w);
+                    av_frame->height = static_cast<int>(cur_h);
+                    av_frame->format = AV_PIX_FMT_BGRA;
+                    if (av_frame_get_buffer(av_frame, 32) >= 0) {
+                        std::memcpy(av_frame->data[0], pixel_buf.data(), pixel_buf.size());
+
+                        AVFrame* audio_frame = av_frame_alloc();
+                        std::shared_ptr<AVFrame> sv(av_frame,    [](AVFrame* f){ av_frame_free(&f); });
+                        std::shared_ptr<AVFrame> sa(audio_frame, [](AVFrame* f){ av_frame_free(&f); });
+
+                        auto mframe = ffmpeg::make_frame(this, *frame_factory_, std::move(sv), std::move(sa));
+
+                        std::lock_guard<std::mutex> lock(frames_mutex_);
+                        frames_.push(core::draw_frame(std::move(mframe)));
+                        if (frames_.size() > 5) frames_.pop();
+                        frame_received = true;
+                    } else {
+                        av_frame_free(&av_frame);
+                    }
+                }
+            } else if (!receiver->IsConnected()) {
+                // Sender disappeared — reset so we re-enter the connect phase.
+                cur_w = cur_h = 0;
+                pixel_buf.clear();
             }
 
-            if (!frame_received) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            graph_->set_value("frame-time", frame_timer_.elapsed() * 1000.0);
+            {
+                std::lock_guard<std::mutex> lock(frames_mutex_);
+                graph_->set_value("buffer-size", static_cast<double>(frames_.size()));
             }
+
+            if (!frame_received)
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
-        
+
         receiver->ReleaseReceiver();
     }
 
@@ -264,8 +287,6 @@ struct spout_producer : public core::frame_producer
         return !frames_.empty();
     }
 };
-
-std::atomic<int> spout_producer::instances_{0};
 
 spl::shared_ptr<core::frame_producer> create_spout_producer(
     const core::frame_producer_dependencies& dependencies,
