@@ -328,6 +328,13 @@ struct spout_consumer_impl : public core::frame_consumer
 
             if (!sender_) {
                 sender_ = std::make_unique<Spout>();
+                // Enable Spout frame counting so the frame-count semaphore is
+                // created and incremented on every SendImage call.  This allows
+                // the spout-bridge receiver to detect duplicate frames (via its
+                // hasNewFrame() semaphore peek) and skip redundant GPU readbacks.
+                // SetFrameCount(true) writes the registry key for future Spout
+                // instances and enables counting on this instance immediately.
+                sender_->SetFrameCount(true);
                 sender_->SetSenderName(sender_name_.c_str());
             }
 
