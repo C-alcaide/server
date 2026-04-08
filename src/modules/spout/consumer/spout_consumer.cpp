@@ -180,11 +180,14 @@ struct spout_consumer_impl : public core::frame_consumer
         const void* data = frame.image_data(0).data(); 
 
         sender_->SendImage(
-            reinterpret_cast<const unsigned char*>(data), 
-            static_cast<unsigned int>(width), 
-            static_cast<unsigned int>(height), 
-            GL_BGRA_EXT, 
-            false
+            reinterpret_cast<const unsigned char*>(data),
+            static_cast<unsigned int>(width),
+            static_cast<unsigned int>(height),
+            GL_BGRA_EXT,
+            true  // bInvert=true: CasparCG frames are top-down in CPU memory;
+                  // Spout shared textures are bottom-up (GL convention).
+                  // Flipping here produces a correctly-oriented texture for all
+                  // receivers including the Spout Demo Receiver.
         );
 
         // Update diagnostics
