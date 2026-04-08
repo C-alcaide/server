@@ -117,177 +117,177 @@ class gl_context
 
 } // namespace
 
-// Maximum Spout output dimensions — textures larger than this are downscaled.
-// Spout shared memory grows as W*H*4 bytes; very large textures (e.g. 6000×1700)
-// can cause GL driver failures or silent fallbacks that corrupt the image.
-static constexpr int SPOUT_MAX_W = 1920;
-static constexpr int SPOUT_MAX_H = 1080;
-
 struct spout_consumer_impl : public core::frame_consumer
 {
     static std::atomic<int>     instances_;
     std::string                 sender_name_;
     std::unique_ptr<Spout>      sender_;
     std::unique_ptr<gl_context> context_;
-    bool                        initialized_ = false;
     core::video_format_desc     format_desc_;
 
-    // Scaling state — reused across frames
-    int             spout_w_ = 0;
-    int             spout_h_ = 0;
-    std::vector<uint8_t> out_buf_;   // final BGRA bottom-up buffer sent to Spout
+    // Optional downscale cap (0 = no cap = native resolution).
+    // Set via AMCP: ADD x SPOUT "Name" MAX_WIDTH 1920 MAX_HEIGHT 1080
+    int max_w_ = 0;
+    int max_h_ = 0;
+
+    // Output dimensions (computed in initialize)
+    int             out_w_ = 0;
+    int             out_h_ = 0;
+    bool            need_scale_ = false;
+    std::vector<uint8_t> out_buf_;   // row-flipped (and optionally scaled) BGRA
     SwsContext*     sws_ctx_ = nullptr;
 
     spl::shared_ptr<diagnostics::graph> graph_;
     caspar::timer                       frame_timer_;
     const int                           instance_id_;
 
-    ~spout_consumer_impl()
-    {
-        if (sender_) {
-            sender_->ReleaseSender();
-        }
-        if (sws_ctx_) {
-            sws_freeContext(sws_ctx_);
-            sws_ctx_ = nullptr;
-        }
-    }
-
-    spout_consumer_impl(std::wstring name)
+    spout_consumer_impl(std::wstring name, int max_w, int max_h)
         : instance_id_(instances_++)
+        , max_w_(max_w)
+        , max_h_(max_h)
     {
-        // Simple manual conversion from wstring to string (lossy for non-ascii but sufficient for Spout names usually)
         sender_name_.reserve(name.length());
-        for(wchar_t c : name) {
+        for (wchar_t c : name)
             sender_name_.push_back(static_cast<char>(c));
-        }
 
-        if (sender_name_.empty()) {
+        if (sender_name_.empty())
             sender_name_ = "CasparCG Spout";
-        }
-        
+
         graph_ = spl::make_shared<diagnostics::graph>();
         graph_->set_text(print());
         graph_->set_color("frame-time", diagnostics::color(0.5f, 1.0f, 0.2f));
         diagnostics::register_graph(graph_);
     }
 
+    ~spout_consumer_impl()
+    {
+        if (sender_)
+            sender_->ReleaseSender();
+        if (sws_ctx_) {
+            sws_freeContext(sws_ctx_);
+            sws_ctx_ = nullptr;
+        }
+    }
+
     void initialize(const core::video_format_desc& format_desc, const core::channel_info& channel_info, int port_index) override
     {
         format_desc_ = format_desc;
 
-        // Compute output dimensions: preserve square pixel aspect ratio,
-        // capped to SPOUT_MAX_W × SPOUT_MAX_H.
-        // Use square_width/square_height so anamorphic modes display correctly.
-        const int sw = format_desc.square_width;
-        const int sh = format_desc.square_height;
+        // Default: native resolution.  With MAX_WIDTH/MAX_HEIGHT, downscale while
+        // preserving the square-pixel aspect ratio (square_width × square_height).
+        if (max_w_ > 0 || max_h_ > 0) {
+            const int sw = format_desc.square_width;
+            const int sh = format_desc.square_height;
+            double scale = 1.0;
+            if (max_w_ > 0 && sw > max_w_) scale = static_cast<double>(max_w_) / sw;
+            if (max_h_ > 0 && sh * scale > max_h_) scale = static_cast<double>(max_h_) / sh;
+            const int raw_w = static_cast<int>(sw * scale);
+            const int raw_h = static_cast<int>(sh * scale);
+            out_w_ = (std::max)(2, raw_w - (raw_w % 2));
+            out_h_ = (std::max)(2, raw_h - (raw_h % 2));
+            need_scale_ = (out_w_ != format_desc.width || out_h_ != format_desc.height);
+        } else {
+            out_w_ = format_desc.width;
+            out_h_ = format_desc.height;
+            need_scale_ = false;
+        }
 
-        double scale = 1.0;
-        if (sw > SPOUT_MAX_W) scale = static_cast<double>(SPOUT_MAX_W) / sw;
-        if (sh * scale > SPOUT_MAX_H) scale = static_cast<double>(SPOUT_MAX_H) / sh;
+        out_buf_.assign(static_cast<size_t>(out_w_) * out_h_ * 4, 0);
 
-        // Round down to nearest even (GPU textures prefer even dimensions).
-        // Use (std::max) form to prevent Windows.h min/max macro expansion.
-        const int raw_w = static_cast<int>(sw * scale);
-        const int raw_h = static_cast<int>(sh * scale);
-        spout_w_ = (std::max)(2, raw_w - (raw_w % 2));
-        spout_h_ = (std::max)(2, raw_h - (raw_h % 2));
-
-        out_buf_.assign(static_cast<size_t>(spout_w_) * spout_h_ * 4, 0);
-
-        // Recreate swscale context
-        if (sws_ctx_) { sws_freeContext(sws_ctx_); sws_ctx_ = nullptr; }
-        sws_ctx_ = sws_getContext(
-            format_desc.width,  format_desc.height,  AV_PIX_FMT_BGRA,
-            spout_w_,           spout_h_,            AV_PIX_FMT_BGRA,
-            SWS_BILINEAR, nullptr, nullptr, nullptr);
+        if (need_scale_) {
+            if (sws_ctx_) { sws_freeContext(sws_ctx_); sws_ctx_ = nullptr; }
+            sws_ctx_ = sws_getContext(
+                format_desc.width, format_desc.height, AV_PIX_FMT_BGRA,
+                out_w_,            out_h_,             AV_PIX_FMT_BGRA,
+                SWS_BILINEAR, nullptr, nullptr, nullptr);
+        }
     }
 
     std::future<bool> send(const core::video_field field, core::const_frame frame) override
     {
         frame_timer_.restart();
 
-        // Spout requires an active OpenGL context on the calling thread.
-        if (!context_) {
+        if (!context_)
             context_ = std::make_unique<gl_context>();
-        }
+        if (!context_->make_current())
+            return caspar::make_ready_future(false);
 
-        if (context_) { 
-             if(!context_->make_current()) {
-                 return caspar::make_ready_future(false);
-             }
-        }
-        
         if (!sender_) {
             sender_ = std::make_unique<Spout>();
             sender_->SetSenderName(sender_name_.c_str());
-            initialized_ = true;
         }
 
-        // Check if frame is valid
-        if (!frame.width() || !frame.height() || !sws_ctx_) return caspar::make_ready_future(true);
+        if (!frame.width() || !frame.height() || out_w_ == 0 || out_h_ == 0)
+            return caspar::make_ready_future(true);
 
-        // Source buffer: format_desc_.width × format_desc_.height, packed BGRA.
-        // (Mixer always produces packed BGRA; linesize == width*4.)
-        const int src_w = format_desc_.width;
-        const int src_linesize = src_w * 4;
-        const uint8_t* src = reinterpret_cast<const uint8_t*>(frame.image_data(0).data());
+        // Source: packed BGRA, width × height, row stride = width * 4.
+        const int      src_w        = format_desc_.width;
+        const int      src_h        = format_desc_.height;
+        const int      src_stride   = src_w * 4;
+        const uint8_t* src          = reinterpret_cast<const uint8_t*>(frame.image_data(0).data());
+        const int      out_stride   = out_w_ * 4;
 
-        // Scale down to spout_w_ × spout_h_ (square-pixel, fits in SPOUT_MAX).
-        // sws_scale writes top-down BGRA into out_buf_.
-        {
-            const uint8_t* src_planes[4] = { src, nullptr, nullptr, nullptr };
-            const int      src_strides[4] = { src_linesize, 0, 0, 0 };
-            uint8_t*       dst_planes[4] = { out_buf_.data(), nullptr, nullptr, nullptr };
-            const int      dst_strides[4] = { spout_w_ * 4, 0, 0, 0 };
-            sws_scale(sws_ctx_, src_planes, src_strides, 0, format_desc_.height,
-                      dst_planes, dst_strides);
+        if (need_scale_ && sws_ctx_) {
+            // Scale into out_buf_ (top-down).
+            const uint8_t* sp[4] = { src,              nullptr, nullptr, nullptr };
+            const int      ss[4] = { src_stride,        0,       0,       0      };
+            uint8_t*       dp[4] = { out_buf_.data(),  nullptr, nullptr, nullptr };
+            const int      ds[4] = { out_stride,        0,       0,       0      };
+            sws_scale(sws_ctx_, sp, ss, 0, src_h, dp, ds);
+        } else {
+            // Native resolution: copy rows directly into out_buf_ (top-down first).
+            // We'll flip in-place below.
+            std::memcpy(out_buf_.data(), src, static_cast<size_t>(src_stride) * src_h);
         }
 
-        // Flip rows in-place: CasparCG frames are top-down; Spout/GL expects bottom-up.
-        {
-            const int row_bytes = spout_w_ * 4;
-            for (int y = 0; y < spout_h_ / 2; ++y) {
-                uint8_t* a = out_buf_.data() + static_cast<size_t>(y)               * row_bytes;
-                uint8_t* b = out_buf_.data() + static_cast<size_t>(spout_h_ - 1 - y) * row_bytes;
-                // swap rows via XOR — no extra buffer needed
-                for (int x = 0; x < row_bytes; ++x) {
-                    a[x] ^= b[x]; b[x] ^= a[x]; a[x] ^= b[x];
-                }
+        // Flip rows in-place (top-down → bottom-up for Spout/GL receivers).
+        for (int y = 0; y < out_h_ / 2; ++y) {
+            uint8_t* a = out_buf_.data() + static_cast<size_t>(y)              * out_stride;
+            uint8_t* b = out_buf_.data() + static_cast<size_t>(out_h_ - 1 - y) * out_stride;
+            for (int x = 0; x < out_stride; ++x) {
+                a[x] ^= b[x]; b[x] ^= a[x]; a[x] ^= b[x];
             }
         }
 
-        sender_->SendImage(
-            out_buf_.data(),
-            static_cast<unsigned int>(spout_w_),
-            static_cast<unsigned int>(spout_h_),
-            GL_BGRA_EXT,
-            false  // already bottom-up after manual flip
-        );
+        sender_->SendImage(out_buf_.data(),
+                           static_cast<unsigned int>(out_w_),
+                           static_cast<unsigned int>(out_h_),
+                           GL_BGRA_EXT,
+                           false);  // already bottom-up after flip
 
-        // Update diagnostics
         graph_->set_value("frame-time", frame_timer_.elapsed() * 1000.0);
-
         return caspar::make_ready_future(true);
     }
-    
+
     std::wstring print() const override
     {
         std::wstring wname(sender_name_.begin(), sender_name_.end());
         return L"SPOUT Consumer: " + wname;
     }
-    
+
     std::wstring name() const override { return L"SPOUT"; }
-    
+
     int index() const override { return instance_id_; }
-    
-    caspar::core::monitor::state state() const override 
-    { 
-        return caspar::core::monitor::state(); 
-    }
+
+    caspar::core::monitor::state state() const override { return {}; }
 };
 
 std::atomic<int> spout_consumer_impl::instances_{0};
+
+// ── Helper: read optional integer param from AMCP token list ──────────────────
+static int get_int_param(const std::vector<std::wstring>& params,
+                         const std::wstring& key, int default_val = 0)
+{
+    for (size_t i = 0; i + 1 < params.size(); ++i) {
+        std::wstring upper = params[i];
+        std::transform(upper.begin(), upper.end(), upper.begin(), ::toupper);
+        if (upper == key) {
+            try { return std::stoi(params[i + 1]); }
+            catch (...) {}
+        }
+    }
+    return default_val;
+}
 
 spl::shared_ptr<core::frame_consumer> create_spout_consumer(
     const std::vector<std::wstring>&                         params,
@@ -295,16 +295,16 @@ spl::shared_ptr<core::frame_consumer> create_spout_consumer(
     const std::vector<spl::shared_ptr<core::video_channel>>& channels,
     const core::channel_info&                                channel_info)
 {
-    if (params.empty() || params[0] != L"SPOUT") {
+    if (params.empty() || params[0] != L"SPOUT")
         return core::frame_consumer::empty();
-    }
 
-    std::wstring name = L"";
-    if (params.size() > 1) {
-        name = params[1];
-    }
+    std::wstring name = (params.size() > 1) ? params[1] : L"";
 
-    return spl::make_shared<spout_consumer_impl>(name);
+    // Optional: ADD x SPOUT "Name" MAX_WIDTH 1920 MAX_HEIGHT 1080
+    const int max_w = get_int_param(params, L"MAX_WIDTH");
+    const int max_h = get_int_param(params, L"MAX_HEIGHT");
+
+    return spl::make_shared<spout_consumer_impl>(name, max_w, max_h);
 }
 
 }} // namespace caspar::spout
