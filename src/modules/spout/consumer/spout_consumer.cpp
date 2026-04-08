@@ -44,6 +44,15 @@
 #include <windows.h>
 #include <gl/GL.h>
 
+// FFmpeg for pixel-format conversion and downscaling
+#pragma warning(push)
+#pragma warning(disable: 4244)  // possible loss of data (FFmpeg internal macros)
+extern "C" {
+#include <libswscale/swscale.h>
+#include <libavutil/pixfmt.h>
+}
+#pragma warning(pop)
+
 namespace caspar { namespace spout {
 
 namespace {
@@ -108,6 +117,12 @@ class gl_context
 
 } // namespace
 
+// Maximum Spout output dimensions — textures larger than this are downscaled.
+// Spout shared memory grows as W*H*4 bytes; very large textures (e.g. 6000×1700)
+// can cause GL driver failures or silent fallbacks that corrupt the image.
+static constexpr int SPOUT_MAX_W = 1920;
+static constexpr int SPOUT_MAX_H = 1080;
+
 struct spout_consumer_impl : public core::frame_consumer
 {
     static std::atomic<int>     instances_;
@@ -116,11 +131,27 @@ struct spout_consumer_impl : public core::frame_consumer
     std::unique_ptr<gl_context> context_;
     bool                        initialized_ = false;
     core::video_format_desc     format_desc_;
-    std::vector<uint8_t>        flip_buf_;   // reused row-flip scratch buffer
+
+    // Scaling state — reused across frames
+    int             spout_w_ = 0;
+    int             spout_h_ = 0;
+    std::vector<uint8_t> out_buf_;   // final BGRA bottom-up buffer sent to Spout
+    SwsContext*     sws_ctx_ = nullptr;
 
     spl::shared_ptr<diagnostics::graph> graph_;
     caspar::timer                       frame_timer_;
     const int                           instance_id_;
+
+    ~spout_consumer_impl()
+    {
+        if (sender_) {
+            sender_->ReleaseSender();
+        }
+        if (sws_ctx_) {
+            sws_freeContext(sws_ctx_);
+            sws_ctx_ = nullptr;
+        }
+    }
 
     spout_consumer_impl(std::wstring name)
         : instance_id_(instances_++)
@@ -141,16 +172,35 @@ struct spout_consumer_impl : public core::frame_consumer
         diagnostics::register_graph(graph_);
     }
 
-    ~spout_consumer_impl()
-    {
-        if (sender_) {
-            sender_->ReleaseSender();
-        }
-    }
-
     void initialize(const core::video_format_desc& format_desc, const core::channel_info& channel_info, int port_index) override
     {
         format_desc_ = format_desc;
+
+        // Compute output dimensions: preserve square pixel aspect ratio,
+        // capped to SPOUT_MAX_W × SPOUT_MAX_H.
+        // Use square_width/square_height so anamorphic modes display correctly.
+        const int sw = format_desc.square_width;
+        const int sh = format_desc.square_height;
+
+        double scale = 1.0;
+        if (sw > SPOUT_MAX_W) scale = static_cast<double>(SPOUT_MAX_W) / sw;
+        if (sh * scale > SPOUT_MAX_H) scale = static_cast<double>(SPOUT_MAX_H) / sh;
+
+        // Round down to nearest even (GPU textures prefer even dimensions).
+        // Use (std::max) form to prevent Windows.h min/max macro expansion.
+        const int raw_w = static_cast<int>(sw * scale);
+        const int raw_h = static_cast<int>(sh * scale);
+        spout_w_ = (std::max)(2, raw_w - (raw_w % 2));
+        spout_h_ = (std::max)(2, raw_h - (raw_h % 2));
+
+        out_buf_.assign(static_cast<size_t>(spout_w_) * spout_h_ * 4, 0);
+
+        // Recreate swscale context
+        if (sws_ctx_) { sws_freeContext(sws_ctx_); sws_ctx_ = nullptr; }
+        sws_ctx_ = sws_getContext(
+            format_desc.width,  format_desc.height,  AV_PIX_FMT_BGRA,
+            spout_w_,           spout_h_,            AV_PIX_FMT_BGRA,
+            SWS_BILINEAR, nullptr, nullptr, nullptr);
     }
 
     std::future<bool> send(const core::video_field field, core::const_frame frame) override
@@ -170,51 +220,49 @@ struct spout_consumer_impl : public core::frame_consumer
         
         if (!sender_) {
             sender_ = std::make_unique<Spout>();
-            // Use instance name
             sender_->SetSenderName(sender_name_.c_str());
             initialized_ = true;
         }
 
         // Check if frame is valid
-        if(!frame.width() || !frame.height()) return caspar::make_ready_future(true);
+        if (!frame.width() || !frame.height() || !sws_ctx_) return caspar::make_ready_future(true);
 
-        // Use format_desc_ dimensions (logical video size) rather than
-        // frame.width()/height() which derive from planes[0] and may include
-        // GPU alignment padding, producing a wrong row stride and scrambled output.
-        const int logical_w    = format_desc_.width;
-        const int logical_h    = format_desc_.height;
-        const int dst_row_bytes = logical_w * 4;  // packed BGRA, no padding
-
-        // Source row stride: may be wider than logical_w due to GPU alignment.
-        // Use planes[0].linesize if available; fall back to logical_w * 4.
-        const auto& planes = frame.pixel_format_desc().planes;
-        const int src_linesize = (!planes.empty() && planes[0].linesize > 0)
-                                 ? planes[0].linesize
-                                 : dst_row_bytes;
-
+        // Source buffer: format_desc_.width × format_desc_.height, packed BGRA.
+        // (Mixer always produces packed BGRA; linesize == width*4.)
+        const int src_w = format_desc_.width;
+        const int src_linesize = src_w * 4;
         const uint8_t* src = reinterpret_cast<const uint8_t*>(frame.image_data(0).data());
 
-        // Flip rows: CasparCG frames are top-down in CPU memory; Spout shared
-        // textures use the GL bottom-up convention expected by all Spout receivers
-        // (including the Spout Demo Receiver). We flip explicitly here instead of
-        // relying on the SDK's bInvert flag to avoid any SDK-version ambiguity.
-        const size_t total_bytes = static_cast<size_t>(dst_row_bytes) * logical_h;
-        if (flip_buf_.size() < total_bytes)
-            flip_buf_.resize(total_bytes);
+        // Scale down to spout_w_ × spout_h_ (square-pixel, fits in SPOUT_MAX).
+        // sws_scale writes top-down BGRA into out_buf_.
+        {
+            const uint8_t* src_planes[4] = { src, nullptr, nullptr, nullptr };
+            const int      src_strides[4] = { src_linesize, 0, 0, 0 };
+            uint8_t*       dst_planes[4] = { out_buf_.data(), nullptr, nullptr, nullptr };
+            const int      dst_strides[4] = { spout_w_ * 4, 0, 0, 0 };
+            sws_scale(sws_ctx_, src_planes, src_strides, 0, format_desc_.height,
+                      dst_planes, dst_strides);
+        }
 
-        for (int y = 0; y < logical_h; ++y) {
-            std::memcpy(
-                flip_buf_.data() + static_cast<size_t>(y) * dst_row_bytes,
-                src             + static_cast<size_t>(logical_h - 1 - y) * src_linesize,
-                dst_row_bytes);
+        // Flip rows in-place: CasparCG frames are top-down; Spout/GL expects bottom-up.
+        {
+            const int row_bytes = spout_w_ * 4;
+            for (int y = 0; y < spout_h_ / 2; ++y) {
+                uint8_t* a = out_buf_.data() + static_cast<size_t>(y)               * row_bytes;
+                uint8_t* b = out_buf_.data() + static_cast<size_t>(spout_h_ - 1 - y) * row_bytes;
+                // swap rows via XOR — no extra buffer needed
+                for (int x = 0; x < row_bytes; ++x) {
+                    a[x] ^= b[x]; b[x] ^= a[x]; a[x] ^= b[x];
+                }
+            }
         }
 
         sender_->SendImage(
-            flip_buf_.data(),
-            static_cast<unsigned int>(logical_w),
-            static_cast<unsigned int>(logical_h),
+            out_buf_.data(),
+            static_cast<unsigned int>(spout_w_),
+            static_cast<unsigned int>(spout_h_),
             GL_BGRA_EXT,
-            false  // data is already bottom-up after our manual flip
+            false  // already bottom-up after manual flip
         );
 
         // Update diagnostics
