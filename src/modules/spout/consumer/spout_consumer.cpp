@@ -32,8 +32,10 @@
 #include <core/video_format.h>
 #include <memory>
 #include <atomic>
+#include <chrono>
 #include <mutex>
 #include <future>
+#include <sstream>
 #include <vector>
 #include <iostream>
 #include <algorithm>
@@ -153,6 +155,11 @@ struct spout_consumer_impl : public core::frame_consumer
     spl::shared_ptr<diagnostics::graph> graph_;
     caspar::timer                       frame_timer_;
 
+    // FPS counter — sampled on the calling thread once per second
+    std::chrono::steady_clock::time_point last_fps_update_{ std::chrono::steady_clock::now() };
+    int    frames_since_update_ = 0;
+    double current_fps_         = 0.0;
+
     // ── Map any CasparCG pixel_format_desc to the matching AVPixelFormat ──
     static AVPixelFormat caspar_to_av_fmt(const core::pixel_format_desc& pfd)
     {
@@ -207,7 +214,8 @@ struct spout_consumer_impl : public core::frame_consumer
 
         graph_ = spl::make_shared<diagnostics::graph>();
         graph_->set_text(print());
-        graph_->set_color("frame-time", diagnostics::color(0.5f, 1.0f, 0.2f));
+        graph_->set_color("frame-time",    diagnostics::color(0.5f, 1.0f, 0.2f));
+        graph_->set_color("dropped-frame", diagnostics::color(0.3f, 0.6f, 0.3f));
         diagnostics::register_graph(graph_);
     }
 
@@ -260,14 +268,31 @@ struct spout_consumer_impl : public core::frame_consumer
         if (src_fmt == AV_PIX_FMT_NONE)
             return caspar::make_ready_future(true);
 
+        // FPS counter — updated every second in the calling (video) thread.
+        {
+            auto now = std::chrono::steady_clock::now();
+            ++frames_since_update_;
+            const auto dur = std::chrono::duration_cast<std::chrono::duration<double>>(now - last_fps_update_).count();
+            if (dur >= 1.0) {
+                current_fps_         = frames_since_update_ / dur;
+                frames_since_update_ = 0;
+                last_fps_update_     = now;
+                std::wstringstream ss;
+                ss << std::fixed << std::setprecision(2) << print() << L" Fps: " << current_fps_;
+                graph_->set_text(ss.str());
+            }
+        }
+
         // Frame-drop: if the executor is still processing the previous frame,
         // skip this one rather than queueing it. This guarantees send() always
         // returns immediately and CasparCG's output pipeline is never stalled
         // by the cost of sws_scale (which can take 50+ ms for 6000×1700
         // GBRAP16LE). const_frame is ref-counted so capturing it by value in
         // the lambda extends its lifetime until the executor finishes with it.
-        if (busy_.exchange(true))
+        if (busy_.exchange(true)) {
+            graph_->set_tag(diagnostics::tag_severity::WARNING, "dropped-frame");
             return caspar::make_ready_future(true);  // drop — still processing previous
+        }
 
         frame_timer_.restart();
         executor_.begin_invoke([this, frame, src_fmt]() mutable {

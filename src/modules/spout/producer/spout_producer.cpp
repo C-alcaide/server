@@ -32,8 +32,10 @@
 #include <Spout.h>
 
 #include <atomic>
+#include <chrono>
 #include <mutex>
 #include <queue>
+#include <sstream>
 #include <thread>
 #include <vector>
 #include <cstring>
@@ -125,6 +127,11 @@ struct spout_producer : public core::frame_producer
 
     spl::shared_ptr<diagnostics::graph>  graph_;
     caspar::timer                        frame_timer_;
+
+    // FPS counter — updated in worker_loop when a frame is received
+    std::chrono::steady_clock::time_point last_fps_update_{ std::chrono::steady_clock::now() };
+    int    frames_since_update_ = 0;
+    double current_fps_         = 0.0;
 
     spout_producer(const core::frame_producer_dependencies& dependencies,
                    const std::wstring& name)
@@ -232,6 +239,19 @@ struct spout_producer : public core::frame_producer
                         frames_.push(core::draw_frame(std::move(mframe)));
                         if (frames_.size() > 5) frames_.pop();
                         frame_received = true;
+
+                        // FPS counter — updated here, inside worker thread.
+                        auto fps_now = std::chrono::steady_clock::now();
+                        ++frames_since_update_;
+                        const auto fps_dur = std::chrono::duration_cast<std::chrono::duration<double>>(fps_now - last_fps_update_).count();
+                        if (fps_dur >= 1.0) {
+                            current_fps_         = frames_since_update_ / fps_dur;
+                            frames_since_update_ = 0;
+                            last_fps_update_     = fps_now;
+                            std::wstringstream ss;
+                            ss << std::fixed << std::setprecision(2) << print() << L" Fps: " << current_fps_;
+                            graph_->set_text(ss.str());
+                        }
                     } else {
                         av_frame_free(&av_frame);
                     }
