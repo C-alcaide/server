@@ -131,15 +131,58 @@ struct spout_consumer_impl : public core::frame_consumer
     int max_h_ = 0;
 
     // Output dimensions (computed in initialize)
-    int             out_w_ = 0;
-    int             out_h_ = 0;
-    bool            need_scale_ = false;
-    std::vector<uint8_t> out_buf_;   // top-down BGRA output buffer (scaled or native)
-    SwsContext*     sws_ctx_ = nullptr;
+    int  out_w_ = 0;
+    int  out_h_ = 0;
+
+    std::vector<uint8_t> out_buf_;  // top-down BGRA8 output buffer
+
+    // swscale: lazily rebuilt in send() when format or dimensions change
+    AVPixelFormat src_av_fmt_ = AV_PIX_FMT_NONE;
+    SwsContext*   sws_ctx_    = nullptr;
 
     spl::shared_ptr<diagnostics::graph> graph_;
     caspar::timer                       frame_timer_;
     const int                           instance_id_;
+
+    // ── Map any CasparCG pixel_format_desc to the matching AVPixelFormat ──
+    static AVPixelFormat caspar_to_av_fmt(const core::pixel_format_desc& pfd)
+    {
+        using pf = core::pixel_format;
+        using bd = common::bit_depth;
+
+        if (pfd.planes.empty()) return AV_PIX_FMT_NONE;
+        const bool b16 = pfd.planes[0].depth != bd::bit8;
+
+        switch (pfd.format) {
+            case pf::bgra:  return b16 ? AV_PIX_FMT_BGRA64LE  : AV_PIX_FMT_BGRA;
+            case pf::rgba:  return b16 ? AV_PIX_FMT_RGBA64LE  : AV_PIX_FMT_RGBA;
+            case pf::argb:  return b16 ? AV_PIX_FMT_ARGB      : AV_PIX_FMT_ARGB;   // no 16-bit ARGB in FFmpeg
+            case pf::abgr:  return b16 ? AV_PIX_FMT_ABGR      : AV_PIX_FMT_ABGR;
+            case pf::bgr:   return b16 ? AV_PIX_FMT_BGR48LE   : AV_PIX_FMT_BGR24;
+            case pf::rgb:   return b16 ? AV_PIX_FMT_RGB48LE   : AV_PIX_FMT_RGB24;
+            case pf::gray:
+            case pf::luma:  return b16 ? AV_PIX_FMT_GRAY16LE  : AV_PIX_FMT_GRAY8;
+            case pf::gbrap: return b16 ? AV_PIX_FMT_GBRAP16LE : AV_PIX_FMT_GBRAP;
+            case pf::gbrp: {
+                if (!b16)                                      return AV_PIX_FMT_GBRP;
+                if (pfd.planes[0].depth == bd::bit10)          return AV_PIX_FMT_GBRP10LE;
+                if (pfd.planes[0].depth == bd::bit12)          return AV_PIX_FMT_GBRP12LE;
+                return AV_PIX_FMT_GBRP16LE;
+            }
+            case pf::ycbcr: {
+                if (pfd.planes.size() < 2) return AV_PIX_FMT_NONE;
+                const int yw = pfd.planes[0].width,  yh = pfd.planes[0].height;
+                const int cw = pfd.planes[1].width,  ch = pfd.planes[1].height;
+                if (ch == yh && cw == yw)           return b16 ? AV_PIX_FMT_YUV444P10LE : AV_PIX_FMT_YUV444P;
+                if (ch == yh && cw * 2 == yw)       return b16 ? AV_PIX_FMT_YUV422P10LE : AV_PIX_FMT_YUV422P;
+                if (ch * 2 == yh && cw * 2 == yw)   return b16 ? AV_PIX_FMT_YUV420P10LE : AV_PIX_FMT_YUV420P;
+                return AV_PIX_FMT_NONE;
+            }
+            case pf::ycbcra: return b16 ? AV_PIX_FMT_YUVA444P10LE : AV_PIX_FMT_YUVA444P;
+            case pf::uyvy:   return AV_PIX_FMT_UYVY422;
+            default:         return AV_PIX_FMT_NONE;
+        }
+    }
 
     spout_consumer_impl(std::wstring name, int max_w, int max_h)
         : instance_id_(instances_++)
@@ -173,8 +216,7 @@ struct spout_consumer_impl : public core::frame_consumer
     {
         format_desc_ = format_desc;
 
-        // Default: native resolution.  With MAX_WIDTH/MAX_HEIGHT, downscale while
-        // preserving the square-pixel aspect ratio (square_width × square_height).
+        // Compute output dimensions (native by default; capped if MAX_WIDTH/MAX_HEIGHT set).
         if (max_w_ > 0 || max_h_ > 0) {
             const int sw = format_desc.square_width;
             const int sh = format_desc.square_height;
@@ -185,22 +227,16 @@ struct spout_consumer_impl : public core::frame_consumer
             const int raw_h = static_cast<int>(sh * scale);
             out_w_ = (std::max)(2, raw_w - (raw_w % 2));
             out_h_ = (std::max)(2, raw_h - (raw_h % 2));
-            need_scale_ = (out_w_ != format_desc.width || out_h_ != format_desc.height);
         } else {
             out_w_ = format_desc.width;
             out_h_ = format_desc.height;
-            need_scale_ = false;
         }
 
         out_buf_.assign(static_cast<size_t>(out_w_) * out_h_ * 4, 0);
 
-        if (need_scale_) {
-            if (sws_ctx_) { sws_freeContext(sws_ctx_); sws_ctx_ = nullptr; }
-            sws_ctx_ = sws_getContext(
-                format_desc.width, format_desc.height, AV_PIX_FMT_BGRA,
-                out_w_,            out_h_,             AV_PIX_FMT_BGRA,
-                SWS_BILINEAR, nullptr, nullptr, nullptr);
-        }
+        // Force swscale rebuild on next frame (dimensions may have changed).
+        src_av_fmt_ = AV_PIX_FMT_NONE;
+        if (sws_ctx_) { sws_freeContext(sws_ctx_); sws_ctx_ = nullptr; }
     }
 
     std::future<bool> send(const core::video_field field, core::const_frame frame) override
@@ -220,37 +256,50 @@ struct spout_consumer_impl : public core::frame_consumer
         if (!frame.width() || !frame.height() || out_w_ == 0 || out_h_ == 0)
             return caspar::make_ready_future(true);
 
-        // Source: packed BGRA, width × height, row stride = width * 4.
-        const int      src_w        = format_desc_.width;
-        const int      src_h        = format_desc_.height;
-        const int      src_stride   = src_w * 4;
-        const uint8_t* src          = reinterpret_cast<const uint8_t*>(frame.image_data(0).data());
-        const int      out_stride   = out_w_ * 4;
+        const auto& pfd    = frame.pixel_format_desc();
+        const int   src_w  = format_desc_.width;
+        const int   src_h  = format_desc_.height;
 
-        if (need_scale_ && sws_ctx_) {
-            // Scale into out_buf_ (top-down).
-            const uint8_t* sp[4] = { src,             nullptr, nullptr, nullptr };
-            const int      ss[4] = { src_stride,       0,       0,       0      };
-            uint8_t*       dp[4] = { out_buf_.data(), nullptr, nullptr, nullptr };
-            const int      ds[4] = { out_stride,       0,       0,       0      };
-            sws_scale(sws_ctx_, sp, ss, 0, src_h, dp, ds);
-        } else {
-            // Native resolution: copy rows directly into out_buf_ (top-down).
-            std::memcpy(out_buf_.data(), src, static_cast<size_t>(src_stride) * src_h);
+        // Map the actual frame pixel format to AVPixelFormat so swscale can
+        // handle any CasparCG channel combination (8-bit BGRA, 16-bit GBRAP,
+        // YCbCr, etc.) and simultaneously rescale if MAX_WIDTH/MAX_HEIGHT is set.
+        const AVPixelFormat src_fmt = caspar_to_av_fmt(pfd);
+        if (src_fmt == AV_PIX_FMT_NONE)
+            return caspar::make_ready_future(true); // unsupported format, skip
+
+        // Rebuild swscale when format or output dimensions change.
+        if (src_fmt != src_av_fmt_ || !sws_ctx_) {
+            if (sws_ctx_) { sws_freeContext(sws_ctx_); sws_ctx_ = nullptr; }
+            src_av_fmt_ = src_fmt;
+            sws_ctx_ = sws_getContext(
+                src_w, src_h, src_fmt,
+                out_w_, out_h_, AV_PIX_FMT_BGRA,
+                SWS_BILINEAR, nullptr, nullptr, nullptr);
+            if (!sws_ctx_) return caspar::make_ready_future(true);
         }
 
-        // Send top-down BGRA data as-is. The Spout SDK (both GL-DX and CPU/DX
-        // paths) expects top-down pixel data when bInvert=false:
-        //   - CPU path (WriteDX11pixels): row 0 → DX texture row 0 (top) = correct
-        //   - GL path (WriteGLDXpixels): glTexSubImage2D row 0 → GL y=0 (bottom);
-        //     the GL-DX interop implicitly maps GL-bottom ↔ DX-top, so row 0 of
-        //     top-down data ends up at DX top = correct
-        // A manual Y-flip would reverse the correct orientation in both paths.
+        // Build per-plane source pointer/stride arrays from the frame's planes.
+        const uint8_t* sp[4] = {};
+        int            ss[4] = {};
+        const int nplanes = static_cast<int>(pfd.planes.size());
+        for (int n = 0; n < nplanes && n < 4; ++n) {
+            sp[n] = reinterpret_cast<const uint8_t*>(frame.image_data(n).data());
+            ss[n] = pfd.planes[n].linesize;
+        }
+
+        // Output: packed BGRA8 into out_buf_
+        uint8_t* dp[4] = { out_buf_.data(), nullptr, nullptr, nullptr };
+        int      ds[4] = { out_w_ * 4,      0,       0,       0       };
+
+        sws_scale(sws_ctx_, sp, ss, 0, src_h, dp, ds);
+
+        // Send top-down BGRA8 pixels. Spout SDK expects top-down data with
+        // bInvert=false (correct in both GL-DX and CPU-DX paths).
         sender_->SendImage(out_buf_.data(),
                            static_cast<unsigned int>(out_w_),
                            static_cast<unsigned int>(out_h_),
                            GL_BGRA_EXT,
-                           false);  // bInvert=false: data is top-down, no extra flip needed
+                           false);
 
         graph_->set_value("frame-time", frame_timer_.elapsed() * 1000.0);
         return caspar::make_ready_future(true);
