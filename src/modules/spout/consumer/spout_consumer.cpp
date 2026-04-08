@@ -140,6 +140,10 @@ struct spout_consumer_impl : public core::frame_consumer
     AVPixelFormat src_av_fmt_ = AV_PIX_FMT_NONE;
     SwsContext*   sws_ctx_    = nullptr;
 
+    // Dedicated thread for GL context + Spout + swscale work so send() returns
+    // immediately and never blocks CasparCG's video thread.
+    caspar::executor                    executor_;
+
     spl::shared_ptr<diagnostics::graph> graph_;
     caspar::timer                       frame_timer_;
     const int                           instance_id_;
@@ -188,6 +192,7 @@ struct spout_consumer_impl : public core::frame_consumer
         : instance_id_(instances_++)
         , max_w_(max_w)
         , max_h_(max_h)
+        , executor_(L"Spout Consumer")
     {
         sender_name_.reserve(name.length());
         for (wchar_t c : name)
@@ -204,6 +209,8 @@ struct spout_consumer_impl : public core::frame_consumer
 
     ~spout_consumer_impl()
     {
+        // Drain the executor before releasing resources it uses.
+        executor_.invoke([] {});
         if (sender_)
             sender_->ReleaseSender();
         if (sws_ctx_) {
@@ -241,68 +248,69 @@ struct spout_consumer_impl : public core::frame_consumer
 
     std::future<bool> send(const core::video_field field, core::const_frame frame) override
     {
-        frame_timer_.restart();
-
-        if (!context_)
-            context_ = std::make_unique<gl_context>();
-        if (!context_->make_current())
-            return caspar::make_ready_future(false);
-
-        if (!sender_) {
-            sender_ = std::make_unique<Spout>();
-            sender_->SetSenderName(sender_name_.c_str());
-        }
-
+        // Quick pre-checks on the calling (video) thread — no heavy work here.
         if (!frame.width() || !frame.height() || out_w_ == 0 || out_h_ == 0)
             return caspar::make_ready_future(true);
 
-        const auto& pfd    = frame.pixel_format_desc();
-        const int   src_w  = format_desc_.width;
-        const int   src_h  = format_desc_.height;
-
-        // Map the actual frame pixel format to AVPixelFormat so swscale can
-        // handle any CasparCG channel combination (8-bit BGRA, 16-bit GBRAP,
-        // YCbCr, etc.) and simultaneously rescale if MAX_WIDTH/MAX_HEIGHT is set.
+        const auto& pfd   = frame.pixel_format_desc();
         const AVPixelFormat src_fmt = caspar_to_av_fmt(pfd);
         if (src_fmt == AV_PIX_FMT_NONE)
-            return caspar::make_ready_future(true); // unsupported format, skip
+            return caspar::make_ready_future(true);
 
-        // Rebuild swscale when format or output dimensions change.
-        if (src_fmt != src_av_fmt_ || !sws_ctx_) {
-            if (sws_ctx_) { sws_freeContext(sws_ctx_); sws_ctx_ = nullptr; }
-            src_av_fmt_ = src_fmt;
-            sws_ctx_ = sws_getContext(
-                src_w, src_h, src_fmt,
-                out_w_, out_h_, AV_PIX_FMT_BGRA,
-                SWS_BILINEAR, nullptr, nullptr, nullptr);
-            if (!sws_ctx_) return caspar::make_ready_future(true);
-        }
+        // Capture what we need by value so the video thread can return
+        // immediately. executor_ owns a single thread so state (sws_ctx_,
+        // out_buf_, sender_, context_) is accessed from one thread only.
+        frame_timer_.restart();
+        return executor_.begin_invoke([this, frame, src_fmt]() -> bool {
+            const int src_w = format_desc_.width;
+            const int src_h = format_desc_.height;
 
-        // Build per-plane source pointer/stride arrays from the frame's planes.
-        const uint8_t* sp[4] = {};
-        int            ss[4] = {};
-        const int nplanes = static_cast<int>(pfd.planes.size());
-        for (int n = 0; n < nplanes && n < 4; ++n) {
-            sp[n] = reinterpret_cast<const uint8_t*>(frame.image_data(n).data());
-            ss[n] = pfd.planes[n].linesize;
-        }
+            if (!context_)
+                context_ = std::make_unique<gl_context>();
+            if (!context_->make_current())
+                return false;
 
-        // Output: packed BGRA8 into out_buf_
-        uint8_t* dp[4] = { out_buf_.data(), nullptr, nullptr, nullptr };
-        int      ds[4] = { out_w_ * 4,      0,       0,       0       };
+            if (!sender_) {
+                sender_ = std::make_unique<Spout>();
+                sender_->SetSenderName(sender_name_.c_str());
+            }
 
-        sws_scale(sws_ctx_, sp, ss, 0, src_h, dp, ds);
+            // Rebuild swscale when format or output dimensions change.
+            if (src_fmt != src_av_fmt_ || !sws_ctx_) {
+                if (sws_ctx_) { sws_freeContext(sws_ctx_); sws_ctx_ = nullptr; }
+                src_av_fmt_ = src_fmt;
+                sws_ctx_ = sws_getContext(
+                    src_w, src_h, src_fmt,
+                    out_w_, out_h_, AV_PIX_FMT_BGRA,
+                    SWS_BILINEAR, nullptr, nullptr, nullptr);
+                if (!sws_ctx_) return true;
+            }
 
-        // Send top-down BGRA8 pixels. Spout SDK expects top-down data with
-        // bInvert=false (correct in both GL-DX and CPU-DX paths).
-        sender_->SendImage(out_buf_.data(),
-                           static_cast<unsigned int>(out_w_),
-                           static_cast<unsigned int>(out_h_),
-                           GL_BGRA_EXT,
-                           false);
+            // Build per-plane source pointer/stride arrays.
+            const auto& pfd2 = frame.pixel_format_desc();
+            const uint8_t* sp[4] = {};
+            int            ss[4] = {};
+            const int nplanes = static_cast<int>(pfd2.planes.size());
+            for (int n = 0; n < nplanes && n < 4; ++n) {
+                sp[n] = reinterpret_cast<const uint8_t*>(frame.image_data(n).data());
+                ss[n] = pfd2.planes[n].linesize;
+            }
 
-        graph_->set_value("frame-time", frame_timer_.elapsed() * 1000.0);
-        return caspar::make_ready_future(true);
+            // Output: packed BGRA8 into out_buf_
+            uint8_t* dp[4] = { out_buf_.data(), nullptr, nullptr, nullptr };
+            int      ds[4] = { out_w_ * 4,      0,       0,       0       };
+            sws_scale(sws_ctx_, sp, ss, 0, src_h, dp, ds);
+
+            // Send top-down BGRA8 pixels.
+            sender_->SendImage(out_buf_.data(),
+                               static_cast<unsigned int>(out_w_),
+                               static_cast<unsigned int>(out_h_),
+                               GL_BGRA_EXT,
+                               false);
+
+            graph_->set_value("frame-time", frame_timer_.elapsed() * 1000.0);
+            return true;
+        });
     }
 
     std::wstring print() const override
