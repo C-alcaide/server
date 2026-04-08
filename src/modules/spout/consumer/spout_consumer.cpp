@@ -119,7 +119,6 @@ class gl_context
 
 struct spout_consumer_impl : public core::frame_consumer
 {
-    static std::atomic<int>     instances_;
     std::string                 sender_name_;
     std::unique_ptr<Spout>      sender_;
     std::unique_ptr<gl_context> context_;
@@ -153,7 +152,6 @@ struct spout_consumer_impl : public core::frame_consumer
 
     spl::shared_ptr<diagnostics::graph> graph_;
     caspar::timer                       frame_timer_;
-    const int                           instance_id_;
 
     // ── Map any CasparCG pixel_format_desc to the matching AVPixelFormat ──
     static AVPixelFormat caspar_to_av_fmt(const core::pixel_format_desc& pfd)
@@ -196,8 +194,7 @@ struct spout_consumer_impl : public core::frame_consumer
     }
 
     spout_consumer_impl(std::wstring name, int max_w, int max_h)
-        : instance_id_(instances_++)
-        , max_w_(max_w)
+        : max_w_(max_w)
         , max_h_(max_h)
         , executor_(L"Spout Consumer")
     {
@@ -340,12 +337,18 @@ struct spout_consumer_impl : public core::frame_consumer
 
     std::wstring name() const override { return L"SPOUT"; }
 
-    int index() const override { return instance_id_; }
+    int index() const override
+    {
+        // Derive a stable, deterministic index from the sender name.
+        // This ensures that the temporary probe consumer created by CasparCG
+        // when processing a REMOVE command returns the same index as the one
+        // originally registered via ADD — both use the same sender name.
+        // Range 10000–19999 avoids DeckLink(300+), Screen(600+), FFmpeg(100000+).
+        return 10000 + static_cast<int>(std::hash<std::string>{}(sender_name_) % 10000);
+    }
 
     caspar::core::monitor::state state() const override { return {}; }
 };
-
-std::atomic<int> spout_consumer_impl::instances_{0};
 
 // ── Helper: read optional integer param from AMCP token list ──────────────────
 static int get_int_param(const std::vector<std::wstring>& params,
