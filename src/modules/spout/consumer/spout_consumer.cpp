@@ -136,13 +136,20 @@ struct spout_consumer_impl : public core::frame_consumer
 
     std::vector<uint8_t> out_buf_;  // top-down BGRA8 output buffer
 
-    // swscale: lazily rebuilt in send() when format or dimensions change
+    // swscale: lazily rebuilt on executor when format or dimensions change
     AVPixelFormat src_av_fmt_ = AV_PIX_FMT_NONE;
     SwsContext*   sws_ctx_    = nullptr;
 
-    // Dedicated thread for GL context + Spout + swscale work so send() returns
-    // immediately and never blocks CasparCG's video thread.
+    // Dedicated thread for GL context + Spout + swscale work.
+    // send() ALWAYS returns make_ready_future(true) immediately so CasparCG's
+    // output pipeline is never stalled by the Spout consumer — even for large
+    // HDR channels where sws_scale takes many ms per frame.
+    //
+    // busy_ is an atomic flag: if the executor is still processing the previous
+    // frame when the next one arrives, we drop the incoming frame rather than
+    // queueing it. This caps latency and prevents backlog accumulation.
     caspar::executor                    executor_;
+    std::atomic<bool>                   busy_{ false };
 
     spl::shared_ptr<diagnostics::graph> graph_;
     caspar::timer                       frame_timer_;
@@ -209,7 +216,7 @@ struct spout_consumer_impl : public core::frame_consumer
 
     ~spout_consumer_impl()
     {
-        // Drain the executor before releasing resources it uses.
+        // Drain the executor before releasing resources it uses on its thread.
         executor_.invoke([] {});
         if (sender_)
             sender_->ReleaseSender();
@@ -252,23 +259,30 @@ struct spout_consumer_impl : public core::frame_consumer
         if (!frame.width() || !frame.height() || out_w_ == 0 || out_h_ == 0)
             return caspar::make_ready_future(true);
 
-        const auto& pfd   = frame.pixel_format_desc();
-        const AVPixelFormat src_fmt = caspar_to_av_fmt(pfd);
+        const AVPixelFormat src_fmt = caspar_to_av_fmt(frame.pixel_format_desc());
         if (src_fmt == AV_PIX_FMT_NONE)
             return caspar::make_ready_future(true);
 
-        // Capture what we need by value so the video thread can return
-        // immediately. executor_ owns a single thread so state (sws_ctx_,
-        // out_buf_, sender_, context_) is accessed from one thread only.
+        // Frame-drop: if the executor is still processing the previous frame,
+        // skip this one rather than queueing it. This guarantees send() always
+        // returns immediately and CasparCG's output pipeline is never stalled
+        // by the cost of sws_scale (which can take 50+ ms for 6000×1700
+        // GBRAP16LE). const_frame is ref-counted so capturing it by value in
+        // the lambda extends its lifetime until the executor finishes with it.
+        if (busy_.exchange(true))
+            return caspar::make_ready_future(true);  // drop — still processing previous
+
         frame_timer_.restart();
-        return executor_.begin_invoke([this, frame, src_fmt]() -> bool {
+        executor_.begin_invoke([this, frame, src_fmt]() mutable {
             const int src_w = format_desc_.width;
             const int src_h = format_desc_.height;
 
             if (!context_)
                 context_ = std::make_unique<gl_context>();
-            if (!context_->make_current())
-                return false;
+            if (!context_->make_current()) {
+                busy_ = false;
+                return;
+            }
 
             if (!sender_) {
                 sender_ = std::make_unique<Spout>();
@@ -279,11 +293,13 @@ struct spout_consumer_impl : public core::frame_consumer
             if (src_fmt != src_av_fmt_ || !sws_ctx_) {
                 if (sws_ctx_) { sws_freeContext(sws_ctx_); sws_ctx_ = nullptr; }
                 src_av_fmt_ = src_fmt;
+                // Use FAST_BILINEAR: much faster than BILINEAR for large frames;
+                // quality difference is imperceptible at monitor preview sizes.
                 sws_ctx_ = sws_getContext(
                     src_w, src_h, src_fmt,
                     out_w_, out_h_, AV_PIX_FMT_BGRA,
-                    SWS_BILINEAR, nullptr, nullptr, nullptr);
-                if (!sws_ctx_) return true;
+                    SWS_FAST_BILINEAR, nullptr, nullptr, nullptr);
+                if (!sws_ctx_) { busy_ = false; return; }
             }
 
             // Build per-plane source pointer/stride arrays.
@@ -309,8 +325,11 @@ struct spout_consumer_impl : public core::frame_consumer
                                false);
 
             graph_->set_value("frame-time", frame_timer_.elapsed() * 1000.0);
-            return true;
+            busy_ = false;
         });
+
+        // Always return immediately — never stall CasparCG's output pipeline.
+        return caspar::make_ready_future(true);
     }
 
     std::wstring print() const override
