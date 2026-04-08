@@ -27,6 +27,7 @@
 #include <common/diagnostics/graph.h>
 #include <common/timer.h>
 #include <core/frame/frame.h>
+#include <core/frame/pixel_format.h>
 #include <core/consumer/frame_consumer.h>
 #include <core/video_format.h>
 #include <memory>
@@ -37,6 +38,7 @@
 #include <iostream>
 #include <algorithm>
 #include <iterator>
+#include <cstring>
 
 // For Context Creation
 #include <windows.h>
@@ -113,6 +115,8 @@ struct spout_consumer_impl : public core::frame_consumer
     std::unique_ptr<Spout>      sender_;
     std::unique_ptr<gl_context> context_;
     bool                        initialized_ = false;
+    core::video_format_desc     format_desc_;
+    std::vector<uint8_t>        flip_buf_;   // reused row-flip scratch buffer
 
     spl::shared_ptr<diagnostics::graph> graph_;
     caspar::timer                       frame_timer_;
@@ -146,7 +150,7 @@ struct spout_consumer_impl : public core::frame_consumer
 
     void initialize(const core::video_format_desc& format_desc, const core::channel_info& channel_info, int port_index) override
     {
-       // Initialization logic can go here
+        format_desc_ = format_desc;
     }
 
     std::future<bool> send(const core::video_field field, core::const_frame frame) override
@@ -174,20 +178,43 @@ struct spout_consumer_impl : public core::frame_consumer
         // Check if frame is valid
         if(!frame.width() || !frame.height()) return caspar::make_ready_future(true);
 
-        auto width  = frame.width();
-        auto height = frame.height();
-        
-        const void* data = frame.image_data(0).data(); 
+        // Use format_desc_ dimensions (logical video size) rather than
+        // frame.width()/height() which derive from planes[0] and may include
+        // GPU alignment padding, producing a wrong row stride and scrambled output.
+        const int logical_w    = format_desc_.width;
+        const int logical_h    = format_desc_.height;
+        const int dst_row_bytes = logical_w * 4;  // packed BGRA, no padding
+
+        // Source row stride: may be wider than logical_w due to GPU alignment.
+        // Use planes[0].linesize if available; fall back to logical_w * 4.
+        const auto& planes = frame.pixel_format_desc().planes;
+        const int src_linesize = (!planes.empty() && planes[0].linesize > 0)
+                                 ? planes[0].linesize
+                                 : dst_row_bytes;
+
+        const uint8_t* src = reinterpret_cast<const uint8_t*>(frame.image_data(0).data());
+
+        // Flip rows: CasparCG frames are top-down in CPU memory; Spout shared
+        // textures use the GL bottom-up convention expected by all Spout receivers
+        // (including the Spout Demo Receiver). We flip explicitly here instead of
+        // relying on the SDK's bInvert flag to avoid any SDK-version ambiguity.
+        const size_t total_bytes = static_cast<size_t>(dst_row_bytes) * logical_h;
+        if (flip_buf_.size() < total_bytes)
+            flip_buf_.resize(total_bytes);
+
+        for (int y = 0; y < logical_h; ++y) {
+            std::memcpy(
+                flip_buf_.data() + static_cast<size_t>(y) * dst_row_bytes,
+                src             + static_cast<size_t>(logical_h - 1 - y) * src_linesize,
+                dst_row_bytes);
+        }
 
         sender_->SendImage(
-            reinterpret_cast<const unsigned char*>(data),
-            static_cast<unsigned int>(width),
-            static_cast<unsigned int>(height),
+            flip_buf_.data(),
+            static_cast<unsigned int>(logical_w),
+            static_cast<unsigned int>(logical_h),
             GL_BGRA_EXT,
-            true  // bInvert=true: CasparCG frames are top-down in CPU memory;
-                  // Spout shared textures are bottom-up (GL convention).
-                  // Flipping here produces a correctly-oriented texture for all
-                  // receivers including the Spout Demo Receiver.
+            false  // data is already bottom-up after our manual flip
         );
 
         // Update diagnostics
