@@ -195,12 +195,15 @@ struct device::impl : public std::enable_shared_from_this<impl>
                            .set_required_features_13(features13)
                            .add_required_extension(VK_KHR_DYNAMIC_RENDERING_LOCAL_READ_EXTENSION_NAME)
                            .add_required_extension_features(localReadFeatures)
+                           .prefer_gpu_device_type(vkb::PreferredDeviceType::discrete)
                            .select();
         if (!gpu_res) {
             CASPAR_THROW_EXCEPTION(caspar_exception()
                                    << msg_info("Failed to select physical device: " + gpu_res.error().message()));
         }
         _vkb_physical_device = gpu_res.value();
+
+        CASPAR_LOG(info) << "Selected Vulkan device: " << _vkb_physical_device.properties.deviceName;
 
         // Create the logical device
         auto device_builder = vkb::DeviceBuilder(_vkb_physical_device);
