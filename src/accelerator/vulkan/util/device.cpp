@@ -93,9 +93,6 @@ void transitionImageLayout(const vk::Image&        image,
                            vk::PipelineStageFlags2 dstStage,
                            vk::CommandBuffer       cmdBuffer)
 {
-    vk::PipelineStageFlags2 sourceStage;
-    vk::PipelineStageFlags2 destinationStage;
-
     auto range = vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1);
 
     vk::ImageMemoryBarrier2 barrier{};
@@ -558,7 +555,7 @@ struct device::impl : public std::enable_shared_from_this<impl>
                 std::memcpy(buf->data(), source.data(), source.size());
             }
 
-            auto tex    = create_texture(width, height, stride, depth, false);
+            auto tex = create_texture(width, height, stride, depth, false);
 
             vk::BufferImageCopy region(0,
                                        0,

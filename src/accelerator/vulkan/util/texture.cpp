@@ -33,10 +33,10 @@ struct texture::impl
     vk::DeviceMemory  memory_;
     vk::ImageView     imageView_;
     vk::Device        device_;
-    GLsizei           width_  = 0;
-    GLsizei           height_ = 0;
-    GLsizei           stride_ = 0;
-    GLsizei           size_   = 0;
+    int               width_  = 0;
+    int               height_ = 0;
+    int               stride_ = 0;
+    int               size_   = 0;
     common::bit_depth depth_;
 
     impl(const impl&)            = delete;

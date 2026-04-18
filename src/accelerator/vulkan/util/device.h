@@ -35,16 +35,6 @@ namespace caspar { namespace accelerator { namespace vulkan {
 
 struct draw_params;
 
-void transitionImageLayout(const vk::Image&        image,
-                           vk::Format              format,
-                           vk::ImageLayout         oldLayout,
-                           vk::AccessFlags2        srcAccessMask,
-                           vk::PipelineStageFlags2 srcStage,
-                           vk::ImageLayout         newLayout,
-                           vk::AccessFlags2        dstAccessMask,
-                           vk::PipelineStageFlags2 dstStage,
-                           vk::CommandBuffer       cmdBuffer);
-
 class image_kernel;
 
 class device final

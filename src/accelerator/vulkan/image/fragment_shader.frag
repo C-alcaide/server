@@ -54,15 +54,6 @@ layout(push_constant) uniform ParamsBlock {
     uint flags;
 };
 
-bool is_straight_alpha = (flags & is_straight_alpha_mask) == is_straight_alpha_mask;
-bool has_local_key = (flags & has_local_key_mask) == has_local_key_mask;
-bool has_layer_key  = (flags & has_layer_key_mask) == has_layer_key_mask;
-bool invert = (flags & invert_mask) == invert_mask;
-bool levels = (flags & levels_mask) == levels_mask;
-bool csb = (flags & csb_mask) == csb_mask;
-bool chroma = (flags & chroma_mask) == chroma_mask;
-bool chroma_show_mask = (flags & chroma_show_mask_mask) == chroma_show_mask_mask;
-
 const mat3[3] color_matrices = mat3[3](
                     mat3(1.0, 0.0, 1.402, 1.0, -0.344, -0.509, 1.0, 1.772, 0.0),
                     mat3(1.0, 0.0, 1.5748, 1.0, -0.1873, -0.4681, 1.0, 1.8556, 0.0),
@@ -74,9 +65,6 @@ const vec3[3] luma_coefficients = vec3[3](
                     vec3(0.2627, 0.6780, 0.0593)   // Rec. 2020
                 );
 
-mat3 color_matrix = transpose(color_matrices[color_space_index]);
-vec3 luma_coeff = luma_coefficients[color_space_index];
-
 /*
 ** Contrast, saturation, brightness
 ** Code of this function is from TGM's shader pack
@@ -85,6 +73,8 @@ vec3 luma_coeff = luma_coefficients[color_space_index];
 
 vec3 ContrastSaturationBrightness(vec4 color, float brt, float sat, float con)
 {
+    vec3 luma_coeff = luma_coefficients[color_space_index];
+    
     const float AvgLumR = 0.5;
     const float AvgLumG = 0.5;
     const float AvgLumB = 0.5;
@@ -323,7 +313,6 @@ vec3 BlendLuminosity(vec3 base, vec3 blend)
 //      by F. van den Bergh & V. Lalioti
 // but as a pixel shader algorithm.
 //
-vec4  grey_xfer  = vec4(luma_coeff, 0);
 
 // This allows us to implement the paper's alphaMap curve in software
 // rather than a largeish array
@@ -401,7 +390,7 @@ vec3 supress_spill(vec3 c)
 }
 
 // Key on any color
-vec4 ChromaOnCustomColor(vec4 c)
+vec4 ChromaOnCustomColor(vec4 c, bool show_mask)
 {
     vec3 hsv		= rgb2hsv(c.rgb);
     float distance	= ColorDistance(hsv);
@@ -411,7 +400,7 @@ vec4 ChromaOnCustomColor(vec4 c)
 
     suppressed *= alpha;
 
-    return chroma_show_mask ? vec4(suppressed.a, suppressed.a, suppressed.a, 1) : suppressed;
+    return show_mask ? vec4(suppressed.a, suppressed.a, suppressed.a, 1) : suppressed;
 }
 
 
@@ -466,13 +455,10 @@ vec4 blend(vec4 fore)
    }
 }
 
-vec4 chroma_key(vec4 c)
-{
-    return ChromaOnCustomColor(c);
-}
-
 vec4 ycbcra_to_rgba(float Y, float Cb, float Cr, float A)
 {
+    mat3 color_matrix = transpose(color_matrices[color_space_index]);
+
     const float luma_coefficient = 255.0/219.0;
     const float chroma_coefficient = 255.0/224.0;
 
@@ -554,11 +540,20 @@ vec4 get_rgba_color()
 
 void main()
 {
+    bool is_straight_alpha = (flags & is_straight_alpha_mask) == is_straight_alpha_mask;
+    bool has_local_key = (flags & has_local_key_mask) == has_local_key_mask;
+    bool has_layer_key  = (flags & has_layer_key_mask) == has_layer_key_mask;
+    bool invert = (flags & invert_mask) == invert_mask;
+    bool levels = (flags & levels_mask) == levels_mask;
+    bool csb = (flags & csb_mask) == csb_mask;
+    bool chroma = (flags & chroma_mask) == chroma_mask;
+    bool chroma_show_mask = (flags & chroma_show_mask_mask) == chroma_show_mask_mask;
+
     vec4 color = get_rgba_color();
     if (is_straight_alpha)
         color.rgb *= color.a;
     if (chroma)
-        color = chroma_key(color);
+        color = ChromaOnCustomColor(color, chroma_show_mask);
     if(levels)
         color.rgb = LevelsControl(color.rgb, min_input, gamma, max_input, min_output, max_output);
     if(csb)

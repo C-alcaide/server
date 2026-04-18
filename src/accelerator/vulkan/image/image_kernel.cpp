@@ -158,7 +158,7 @@ struct image_kernel::impl
         if (ctx.fence) {
             auto result = device.waitForFences(ctx.fence, true, 1000000000); // wait up to one second
             if (result == vk::Result::eTimeout) {
-                throw std::runtime_error("[Vulkan image_kernel] Timeout waiting for fence");
+                CASPAR_LOG(warning) << L"[Vulkan image_kernel] Timeout waiting for fence";
             }
             device.destroyFence(ctx.fence);
             ctx.fence = nullptr;
