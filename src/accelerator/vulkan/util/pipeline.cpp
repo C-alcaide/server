@@ -67,7 +67,8 @@ std::array<vk::VertexInputAttributeDescription, 2> get_attribute_descriptions(ui
     return attributeDescriptions;
 }
 
-const int DescriptorPoolSize = 10;
+const int DescriptorPoolSize = 64;
+const int BindlessTextureCount = 8;
 
 struct pipeline::impl
 {
@@ -90,43 +91,37 @@ struct pipeline::impl
 
     void setup_descriptors()
     {
-        // Create descriptor set layout
-        vk::DescriptorSetLayoutBinding planesLayoutBinding{};
-        planesLayoutBinding.binding         = 0;
-        planesLayoutBinding.descriptorType  = vk::DescriptorType::eCombinedImageSampler;
-        planesLayoutBinding.descriptorCount = 4;
-        planesLayoutBinding.stageFlags      = vk::ShaderStageFlagBits::eFragment;
+        // Binding 0: bindless texture array for planes (up to 4), local_key, and layer_key
+        vk::DescriptorSetLayoutBinding texturesLayoutBinding{};
+        texturesLayoutBinding.binding         = 0;
+        texturesLayoutBinding.descriptorType  = vk::DescriptorType::eCombinedImageSampler;
+        texturesLayoutBinding.descriptorCount = BindlessTextureCount;
+        texturesLayoutBinding.stageFlags      = vk::ShaderStageFlagBits::eFragment;
 
+        // Binding 1: input attachment for background
         vk::DescriptorSetLayoutBinding backgroundLayoutBinding{};
         backgroundLayoutBinding.binding         = 1;
         backgroundLayoutBinding.descriptorType  = vk::DescriptorType::eInputAttachment;
         backgroundLayoutBinding.descriptorCount = 1;
         backgroundLayoutBinding.stageFlags      = vk::ShaderStageFlagBits::eFragment;
 
-        vk::DescriptorSetLayoutBinding localKeyLayoutBinding{};
-        localKeyLayoutBinding.binding         = 2;
-        localKeyLayoutBinding.descriptorType  = vk::DescriptorType::eCombinedImageSampler;
-        localKeyLayoutBinding.descriptorCount = 1;
-        localKeyLayoutBinding.stageFlags      = vk::ShaderStageFlagBits::eFragment;
-
-        vk::DescriptorSetLayoutBinding layerKeyLayoutBinding{};
-        layerKeyLayoutBinding.binding         = 3;
-        layerKeyLayoutBinding.descriptorType  = vk::DescriptorType::eCombinedImageSampler;
-        layerKeyLayoutBinding.descriptorCount = 1;
-        layerKeyLayoutBinding.stageFlags      = vk::ShaderStageFlagBits::eFragment;
-
-        std::array bindings{planesLayoutBinding, backgroundLayoutBinding, localKeyLayoutBinding, layerKeyLayoutBinding};
-
         vk::DescriptorSetLayoutCreateInfo layoutInfo{};
+        std::array bindings{texturesLayoutBinding, backgroundLayoutBinding};
         layoutInfo.setBindings(bindings);
+
+        std::array<vk::DescriptorBindingFlags, 2> bindingFlags{vk::DescriptorBindingFlagBits::ePartiallyBound,
+                                                                vk::DescriptorBindingFlags{}};
+        vk::DescriptorSetLayoutBindingFlagsCreateInfo bindingFlagsInfo;
+        bindingFlagsInfo.setBindingFlags(bindingFlags);
+        layoutInfo.pNext = &bindingFlagsInfo;
 
         descriptorSetLayout_ = device_.createDescriptorSetLayout(layoutInfo);
 
         // Create descriptor pool
-        vk::DescriptorPoolSize samplerPoolSize(vk::DescriptorType::eCombinedImageSampler, 6 * DescriptorPoolSize);
+        vk::DescriptorPoolSize samplerPoolSize(vk::DescriptorType::eCombinedImageSampler, BindlessTextureCount * DescriptorPoolSize);
         vk::DescriptorPoolSize inputAttachmentPoolSize(vk::DescriptorType::eInputAttachment, 1 * DescriptorPoolSize);
 
-        vk::DescriptorPoolSize poolSizes[]{samplerPoolSize, inputAttachmentPoolSize};
+        std::array poolSizes{samplerPoolSize, inputAttachmentPoolSize};
 
         vk::DescriptorPoolCreateInfo poolInfo{};
         poolInfo.maxSets = DescriptorPoolSize;
@@ -271,68 +266,49 @@ struct pipeline::impl
 
     vk::DescriptorSet acquire_descriptor_set(const std::array<vk::ImageView, 7>& textures)
     {
+        // C++ textures array layout:
+        //   [0] = background attachment, [1..4] = planes, [5] = local_key, [6] = layer_key
+
+        // Shader bindless textures[N] layout:
+        //   [0..3] = planes, [4] = local_key, [5] = layer_key
+
         auto descriptorSet    = descriptorSets_[currentDescriptorSet_];
         currentDescriptorSet_ = (currentDescriptorSet_ + 1) % DescriptorPoolSize;
 
-        vk::DescriptorImageInfo imageInfo{};
-        imageInfo.sampler     = textureSampler_;
-        imageInfo.imageView   = nullptr;
-        imageInfo.imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal;
+        // Bind planes, local_key, and layer_key to the bindless texture array
+        std::array<vk::DescriptorImageInfo, 6> textureInfos;
+        for (int i = 0; i < 6; ++i) {
+            textureInfos[i].sampler     = textureSampler_;
+            textureInfos[i].imageView   = textures[i + 1];
+            textureInfos[i].imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal;
+        }
 
-        vk::DescriptorImageInfo attachmentInfo{};
-        attachmentInfo.imageLayout = vk::ImageLayout::eRenderingLocalRead;
-        attachmentInfo.imageView   = textures[4];
+        // Override samplers for local_key and layer_key to use nearest filtering
+        textureInfos[4].sampler = keySampler_;
+        textureInfos[5].sampler = keySampler_;
 
-        vk::DescriptorImageInfo localKeyInfo{};
-        localKeyInfo.sampler     = keySampler_;
-        localKeyInfo.imageView   = textures[5];
-        localKeyInfo.imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal;
+        vk::WriteDescriptorSet texturesWrite{};
+        texturesWrite.dstSet          = descriptorSet;
+        texturesWrite.dstBinding      = 0;
+        texturesWrite.dstArrayElement = 0;
+        texturesWrite.descriptorType  = vk::DescriptorType::eCombinedImageSampler;
+        texturesWrite.setImageInfo(textureInfos);
+        texturesWrite.descriptorCount = 6;
 
-        vk::DescriptorImageInfo layerKeyInfo{};
-        layerKeyInfo.sampler     = keySampler_;
-        layerKeyInfo.imageView   = textures[6];
-        layerKeyInfo.imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal;
+        // Bind background attachment as input attachment
+        vk::DescriptorImageInfo backgroundInfo{};
+        backgroundInfo.imageLayout = vk::ImageLayout::eRenderingLocalRead;
+        backgroundInfo.imageView   = textures[0];
 
-        std::vector<vk::DescriptorImageInfo> images(4, imageInfo);
-        images[0].imageView = textures[0];
-        images[1].imageView = textures[1];
-        images[2].imageView = textures[2];
-        images[3].imageView = textures[3];
+        vk::WriteDescriptorSet backgroundWrite{};
+        backgroundWrite.dstSet                    = descriptorSet;
+        backgroundWrite.dstBinding                = 1;
+        backgroundWrite.dstArrayElement           = 0;
+        backgroundWrite.descriptorType            = vk::DescriptorType::eInputAttachment;
+        backgroundWrite.setImageInfo(backgroundInfo);
 
-        vk::WriteDescriptorSet imageDescriptorWrite{};
-        imageDescriptorWrite.dstSet          = descriptorSet;
-        imageDescriptorWrite.dstBinding      = 0;
-        imageDescriptorWrite.dstArrayElement = 0;
-        imageDescriptorWrite.descriptorType  = vk::DescriptorType::eCombinedImageSampler;
-        imageDescriptorWrite.setImageInfo(images);
-        imageDescriptorWrite.descriptorCount = 4;
 
-        vk::WriteDescriptorSet backgroundDescriptorWrite{};
-        backgroundDescriptorWrite.dstSet          = descriptorSet;
-        backgroundDescriptorWrite.dstBinding      = 1;
-        backgroundDescriptorWrite.dstArrayElement = 0;
-        backgroundDescriptorWrite.descriptorType  = vk::DescriptorType::eInputAttachment;
-        backgroundDescriptorWrite.setImageInfo(attachmentInfo);
-        backgroundDescriptorWrite.descriptorCount = 1;
-
-        vk::WriteDescriptorSet localKeyDescriptorWrite{};
-        localKeyDescriptorWrite.dstSet          = descriptorSet;
-        localKeyDescriptorWrite.dstBinding      = 2;
-        localKeyDescriptorWrite.dstArrayElement = 0;
-        localKeyDescriptorWrite.descriptorType  = vk::DescriptorType::eCombinedImageSampler;
-        localKeyDescriptorWrite.setImageInfo(localKeyInfo);
-        localKeyDescriptorWrite.descriptorCount = 1;
-
-        vk::WriteDescriptorSet layerKeyDescriptorWrite{};
-        layerKeyDescriptorWrite.dstSet          = descriptorSet;
-        layerKeyDescriptorWrite.dstBinding      = 3;
-        layerKeyDescriptorWrite.dstArrayElement = 0;
-        layerKeyDescriptorWrite.descriptorType  = vk::DescriptorType::eCombinedImageSampler;
-        layerKeyDescriptorWrite.setImageInfo(layerKeyInfo);
-        layerKeyDescriptorWrite.descriptorCount = 1;
-
-        vk::WriteDescriptorSet descriptorWrites[]{
-            imageDescriptorWrite, backgroundDescriptorWrite, localKeyDescriptorWrite, layerKeyDescriptorWrite};
+        vk::WriteDescriptorSet descriptorWrites[]{ backgroundWrite, texturesWrite };
         device_.updateDescriptorSets(descriptorWrites, nullptr);
 
         return descriptorSet;

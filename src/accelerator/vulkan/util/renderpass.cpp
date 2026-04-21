@@ -77,16 +77,11 @@ void renderpass::draw(const draw_params& params)
         return;
     }
 
-    std::array<vk::ImageView, 7> textures = {params.textures[0]->view(),
-                                             params.textures[0]->view(),
-                                             params.textures[0]->view(),
-                                             params.textures[0]->view(),
-                                             attachment->view(),
-                                             params.textures[0]->view(),
-                                             params.textures[0]->view()};
+    std::array<vk::ImageView, 7> textures = {attachment->view(),
+                                             nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
 
     for (int n = 0; n < params.textures.size(); ++n) {
-        textures[n] = params.textures[n]->view();
+        textures[1+n] = params.textures[n]->view();
     }
     if (params.local_key) {
         textures[5] = params.local_key->view();

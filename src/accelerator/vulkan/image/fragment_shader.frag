@@ -1,17 +1,24 @@
 #version 450
 
 #extension GL_ARB_fragment_shader_interlock : enable
+#extension GL_EXT_nonuniform_qualifier : enable
 
 layout(location = 0) in vec4 TexCoord;
 layout(location = 1) in vec4 TexCoord2;
 
 layout(location = 0) out vec4 fragColor;
 
-layout(binding = 0) uniform sampler2D	plane[4];
-layout(input_attachment_index = 0, binding = 1) uniform subpassInput background;
-layout(binding = 2) uniform sampler2D local_key;
-layout(binding = 3) uniform sampler2D layer_key;
+// bindless texture array
+layout(binding = 0) uniform sampler2D	textures[8];
 
+layout(binding = 1, input_attachment_index = 0) uniform subpassInput background;
+
+const uint PLANE0 = 0;
+const uint PLANE1 = 1;
+const uint PLANE2 = 2;
+const uint PLANE3 = 3;
+const uint LOCAL_KEY = 4;
+const uint LAYER_KEY = 5;
 
 const uint is_straight_alpha_mask = 1u << 0;
 const uint has_local_key_mask = 1u << 1;
@@ -476,62 +483,64 @@ vec4 get_sample(sampler2D texSampler, vec2 coords)
 
 vec4 get_rgba_color()
 {
+    vec2 uv = TexCoord.st / TexCoord.q;
+
     switch(pixel_format)
     {
     case 0:		//gray
-        return vec4(get_sample(plane[0], TexCoord.st / TexCoord.q).rrr * precision_factor[0], 1.0);
+        return vec4(get_sample(textures[PLANE0], uv).rrr * precision_factor[0], 1.0);
     case 1:		//bgra,
-        return get_sample(plane[0], TexCoord.st / TexCoord.q).bgra * precision_factor[0];
+        return get_sample(textures[PLANE0], uv).bgra * precision_factor[0];
     case 2:		//rgba,
-        return get_sample(plane[0], TexCoord.st / TexCoord.q).rgba * precision_factor[0];
+        return get_sample(textures[PLANE0], uv).rgba * precision_factor[0];
     case 3:		//argb,
-        return get_sample(plane[0], TexCoord.st / TexCoord.q).argb * precision_factor[0];
+        return get_sample(textures[PLANE0], uv).argb * precision_factor[0];
     case 4:		//abgr,
-        return get_sample(plane[0], TexCoord.st / TexCoord.q).gbar * precision_factor[0];
+        return get_sample(textures[PLANE0], uv).gbar * precision_factor[0];
     case 5:		//ycbcr,
         {
-            float y  = get_sample(plane[0], TexCoord.st / TexCoord.q).r * precision_factor[0];
-            float cb = get_sample(plane[1], TexCoord.st / TexCoord.q).r * precision_factor[1];
-            float cr = get_sample(plane[2], TexCoord.st / TexCoord.q).r * precision_factor[2];
+            float y  = get_sample(textures[PLANE0], uv).r * precision_factor[0];
+            float cb = get_sample(textures[PLANE1], uv).r * precision_factor[1];
+            float cr = get_sample(textures[PLANE2], uv).r * precision_factor[2];
             return ycbcra_to_rgba(y, cb, cr, 1.0);
         }
     case 6:		//ycbcra
         {
-            float y  = get_sample(plane[0], TexCoord.st / TexCoord.q).r * precision_factor[0];
-            float cb = get_sample(plane[1], TexCoord.st / TexCoord.q).r * precision_factor[1];
-            float cr = get_sample(plane[2], TexCoord.st / TexCoord.q).r * precision_factor[2];
-            float a  = get_sample(plane[3], TexCoord.st / TexCoord.q).r * precision_factor[3];
+            float y  = get_sample(textures[PLANE0], uv).r * precision_factor[0];
+            float cb = get_sample(textures[PLANE1], uv).r * precision_factor[1];
+            float cr = get_sample(textures[PLANE2], uv).r * precision_factor[2];
+            float a  = get_sample(textures[PLANE3], uv).r * precision_factor[3];
             return ycbcra_to_rgba(y, cb, cr, a);
         }
     case 7:		//luma
         {
-            vec3 y3 = get_sample(plane[0], TexCoord.st / TexCoord.q).rrr * precision_factor[0];
+            vec3 y3 = get_sample(textures[PLANE0], uv).rrr * precision_factor[0];
             return vec4((y3-0.065)/0.859, 1.0);
         }
     case 8:		//bgr,
-        return vec4(get_sample(plane[0], TexCoord.st / TexCoord.q).bgr * precision_factor[0], 1.0);
+        return vec4(get_sample(textures[PLANE0], uv).bgr * precision_factor[0], 1.0);
     case 9:		//rgb,
-        return vec4(get_sample(plane[0], TexCoord.st / TexCoord.q).rgb * precision_factor[0], 1.0);
+        return vec4(get_sample(textures[PLANE0], uv).rgb * precision_factor[0], 1.0);
 	case 10:	// uyvy
 		{
-			float y = get_sample(plane[0], TexCoord.st / TexCoord.q).g * precision_factor[0];
-			float cb = get_sample(plane[1], TexCoord.st / TexCoord.q).b * precision_factor[1];
-			float cr = get_sample(plane[1], TexCoord.st / TexCoord.q).r * precision_factor[1];
+			float y  = get_sample(textures[PLANE0], uv).g * precision_factor[0];
+			float cb = get_sample(textures[PLANE1], uv).b * precision_factor[1];
+			float cr = get_sample(textures[PLANE1], uv).r * precision_factor[1];
 			return ycbcra_to_rgba(y, cb, cr, 1.0);
 		}
     case 11:    // gbrp
         {
-            float g  = get_sample(plane[0], TexCoord.st / TexCoord.q).r * precision_factor[0];
-            float b = get_sample(plane[1], TexCoord.st / TexCoord.q).r * precision_factor[1];
-            float r = get_sample(plane[2], TexCoord.st / TexCoord.q).r * precision_factor[2];
+            float g = get_sample(textures[PLANE0], uv).r * precision_factor[0];
+            float b = get_sample(textures[PLANE1], uv).r * precision_factor[1];
+            float r = get_sample(textures[PLANE2], uv).r * precision_factor[2];
 			return vec4(b, g, r, 1.0);
         }
     case 12:    // gbrap
         {
-            float g  = get_sample(plane[0], TexCoord.st / TexCoord.q).r * precision_factor[0];
-            float b = get_sample(plane[1], TexCoord.st / TexCoord.q).r * precision_factor[1];
-            float r = get_sample(plane[2], TexCoord.st / TexCoord.q).r * precision_factor[2];
-            float a  = get_sample(plane[3], TexCoord.st / TexCoord.q).r * precision_factor[3];
+            float g = get_sample(textures[PLANE0], uv).r * precision_factor[0];
+            float b = get_sample(textures[PLANE1], uv).r * precision_factor[1];
+            float r = get_sample(textures[PLANE2], uv).r * precision_factor[2];
+            float a = get_sample(textures[PLANE3], uv).r * precision_factor[3];
 			return vec4(b, g, r, a);
         }
     }
@@ -559,9 +568,9 @@ void main()
     if(csb)
         color.rgb = ContrastSaturationBrightness(color, brt, sat, con);
     if(has_local_key)
-        color *= texture(local_key, TexCoord2.st).r;
+        color *= texture(textures[LOCAL_KEY], TexCoord2.st).r;
     if(has_layer_key)
-        color *= texture(layer_key, TexCoord2.st).r;
+        color *= texture(textures[LAYER_KEY], TexCoord2.st).r;
     color *= opacity;
     if (invert)
         color = 1.0 - color;
