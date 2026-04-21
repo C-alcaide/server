@@ -136,9 +136,11 @@ struct device::impl : public std::enable_shared_from_this<impl>
     struct inflight_command_buffer
     {
         vk::CommandBuffer cmd;
-        vk::Fence         fence;
+        uint64_t          semaphore_value;
     };
     std::deque<inflight_command_buffer> _transfer_cmd_buffers;
+    vk::Semaphore                       _semaphore;
+    uint64_t                            _semaphore_value{0};
 
     io_context                             io_context_;
     decltype(make_work_guard(io_context_)) work_;
@@ -179,6 +181,7 @@ struct device::impl : public std::enable_shared_from_this<impl>
         vk::PhysicalDeviceVulkan12Features features12;
         features12.descriptorIndexing              = true;
         features12.descriptorBindingPartiallyBound = true;
+        features12.timelineSemaphore               = true;
 
         vk::PhysicalDeviceVulkan13Features features13;
         features13.dynamicRendering = true;
@@ -223,6 +226,13 @@ struct device::impl : public std::enable_shared_from_this<impl>
 
         _command_pool = _device.createCommandPool(pool_info);
 
+        vk::SemaphoreTypeCreateInfo timeline_info{};
+        timeline_info.semaphoreType = vk::SemaphoreType::eTimeline;
+        timeline_info.initialValue  = 0;
+        vk::SemaphoreCreateInfo semaphore_info{};
+        semaphore_info.pNext = &timeline_info;
+        _semaphore = _device.createSemaphore(semaphore_info);
+
         VmaVulkanFunctions vulkanFunctions    = {};
         vulkanFunctions.vkGetInstanceProcAddr = _vkb_instance.fp_vkGetInstanceProcAddr;
         vulkanFunctions.vkGetDeviceProcAddr   = vkb_device.fp_vkGetDeviceProcAddr;
@@ -265,10 +275,8 @@ struct device::impl : public std::enable_shared_from_this<impl>
             for (auto& pool : pools)
                 pool.clear();
 
-        for (auto& inflight : _transfer_cmd_buffers) {
-            _device.destroyFence(inflight.fence);
-            inflight.fence = nullptr;
-        }
+        _transfer_cmd_buffers.clear();
+        _device.destroySemaphore(_semaphore);
 
         _device.destroyCommandPool(_command_pool);
         vmaDestroyAllocator(_allocator);
@@ -332,19 +340,16 @@ struct device::impl : public std::enable_shared_from_this<impl>
         throw std::runtime_error("Failed to find suitable memory type");
     }
 
-    void submitSingleTimeCommands(std::function<void(const vk::CommandBuffer&)> func, bool wait = false)
+    uint64_t submitSingleTimeCommands(std::function<void(const vk::CommandBuffer&)> func)
     {
         vk::CommandBuffer cmd_buffer = nullptr;
-        vk::Fence         fence      = nullptr;
         if (_transfer_cmd_buffers.size() > 1) {
+            auto completed = _device.getSemaphoreCounterValue(_semaphore);
+
             // try to reuse the oldest existing command buffer
-            auto& inflight = _transfer_cmd_buffers.front();
-            auto  result   = _device.waitForFences(inflight.fence, VK_TRUE, 0);
-            if (result == vk::Result::eSuccess) {
-                cmd_buffer = inflight.cmd;
+            if (_transfer_cmd_buffers.front().semaphore_value <= completed) {
+                cmd_buffer = _transfer_cmd_buffers.front().cmd;
                 cmd_buffer.reset();
-                fence = inflight.fence;
-                _device.resetFences(inflight.fence);
                 _transfer_cmd_buffers.pop_front();
             }
         }
@@ -357,25 +362,25 @@ struct device::impl : public std::enable_shared_from_this<impl>
             allocInfo.commandBufferCount = 1;
 
             cmd_buffer = _device.allocateCommandBuffers(allocInfo)[0];
-            fence      = _device.createFence(vk::FenceCreateInfo{});
         }
 
         cmd_buffer.begin(vk::CommandBufferBeginInfo{vk::CommandBufferUsageFlagBits::eOneTimeSubmit});
         func(cmd_buffer);
         cmd_buffer.end();
 
+        auto                            signal_value = ++_semaphore_value;
+        vk::TimelineSemaphoreSubmitInfo timelineInfo{};
+        timelineInfo.setSignalSemaphoreValues(signal_value);
+
         vk::SubmitInfo submitInfo{};
         submitInfo.setCommandBuffers(cmd_buffer);
-        _queue.submit(submitInfo, fence);
+        submitInfo.setSignalSemaphores(_semaphore);
+        submitInfo.pNext = &timelineInfo;
+        _queue.submit(submitInfo);
 
-        _transfer_cmd_buffers.push_back({cmd_buffer, fence});
+        _transfer_cmd_buffers.push_back({cmd_buffer, signal_value});
 
-        if (wait) {
-            auto res = _device.waitForFences(fence, VK_TRUE, 1000000000);
-            if (res != vk::Result::eSuccess) {
-                CASPAR_LOG(warning) << L"[Vulkan] Wait for commands to finish failed";
-            }
-        }
+        return signal_value;
     }
 
     std::vector<vk::CommandBuffer> allocateCommandBuffers(uint32_t count)
@@ -587,17 +592,16 @@ struct device::impl : public std::enable_shared_from_this<impl>
                                           vk::AccessFlagBits2::eShaderRead,
                                           vk::PipelineStageFlagBits2::eFragmentShader,
                                           cmd);
-                },
-                true);
-            // TODO: return the fence and wait on it in the callers thread instead
+                });
 
+            // No need to wait here, GPU-GPU deps (the usage of this texture on the device) are enforced by the memory barriers
             return tex;
         });
     }
 
     std::future<array<const uint8_t>> copy_async(const std::shared_ptr<texture>& source)
     {
-        return spawn_async([this, source](yield_context yield) {
+        auto f = dispatch_async([this, source]() -> std::pair<std::shared_ptr<buffer>, uint64_t> {
             auto buf = create_buffer(source->size(), false);
 
             vk::CopyImageToBufferInfo2 copyInfo{};
@@ -613,7 +617,7 @@ struct device::impl : public std::enable_shared_from_this<impl>
                 vk::Extent3D{static_cast<uint32_t>(source->width()), static_cast<uint32_t>(source->height()), 1};
             copyInfo.setRegions(region);
 
-            submitSingleTimeCommands(
+            auto signal_value = submitSingleTimeCommands(
                 [&](vk::CommandBuffer cmd) {
                     transitionImageLayout(source->id(),
                                           vk::ImageLayout::eRenderingLocalRead,
@@ -625,9 +629,20 @@ struct device::impl : public std::enable_shared_from_this<impl>
                                           vk::PipelineStageFlagBits2::eHost,
                                           cmd);
                     cmd.copyImageToBuffer2(copyInfo);
-                },
-                true);
-            // TODO: return the fence and wait on it in the callers thread instead
+                });
+
+            return {buf, signal_value};
+        });
+
+        return std::async(std::launch::deferred, [this, f = std::move(f)]() mutable {
+            auto [buf, signal_value] = f.get();
+            vk::SemaphoreWaitInfo waitInfo{};
+            waitInfo.setSemaphores(_semaphore);
+            waitInfo.setValues(signal_value);
+            auto res = _device.waitSemaphores(waitInfo, 1000000000);
+            if (res != vk::Result::eSuccess) {
+                CASPAR_LOG(warning) << L"[Vulkan] Timeout waiting for readback semaphore";
+            }
 
             auto ptr  = reinterpret_cast<uint8_t*>(buf->data());
             auto size = buf->size();
