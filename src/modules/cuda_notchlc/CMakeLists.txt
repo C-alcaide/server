@@ -42,17 +42,17 @@ set_property(TARGET cuda_notchlc PROPERTY CUDA_RESOLVE_DEVICE_SYMBOLS ON)
 set_property(TARGET cuda_notchlc PROPERTY CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}")
 
 # ─── nvcomp ─────────────────────────────────────────────────────────────────
-# nvcomp v5.1 ships separate cmake configs for CUDA 12 and CUDA 13.
+# nvcomp v5.x ships separate cmake configs for CUDA 12 and CUDA 13.
 # Detect which CUDA toolkit is active and point to the matching cmake dir.
 if(CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL "13")
-    set(_NVCOMP_CMAKE_DIR "C:/Program Files/NVIDIA nvCOMP/v5.1/lib/13/cmake/nvcomp")
+    set(_NVCOMP_CMAKE_DIR "C:/Program Files/NVIDIA nvCOMP/v5.2/lib/13/cmake/nvcomp")
 else()
-    set(_NVCOMP_CMAKE_DIR "C:/Program Files/NVIDIA nvCOMP/v5.1/lib/12/cmake/nvcomp")
+    set(_NVCOMP_CMAKE_DIR "C:/Program Files/NVIDIA nvCOMP/v5.2/lib/12/cmake/nvcomp")
 endif()
 
 if(NOT EXISTS "${_NVCOMP_CMAKE_DIR}")
-    message(FATAL_ERROR "\n*** nvCOMP 5.1 not found at expected path: C:/Program Files/NVIDIA nvCOMP/v5.1 ***\n"
-                        "Please download nvCOMP 5.1 from NVIDIA's Developer Zone and extract/install it to this directory.\n"
+    message(FATAL_ERROR "\n*** nvCOMP 5.2 not found at expected path: C:/Program Files/NVIDIA nvCOMP/v5.2 ***\n"
+                        "Please download nvCOMP 5.2 from NVIDIA's Developer Zone and extract/install it to this directory.\n"
                         "(Alternatively, update the path in src/modules/cuda_notchlc/CMakeLists.txt)\n")
 endif()
 
@@ -67,7 +67,7 @@ find_package(CUDAToolkit REQUIRED)
 target_include_directories(cuda_notchlc PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CUDAToolkit_INCLUDE_DIRS}
-    "C:/Program Files/NVIDIA nvCOMP/v5.1/include"
+    "C:/Program Files/NVIDIA nvCOMP/v5.2/include"
     ${FFMPEG_INCLUDE_PATH}
 )
 
