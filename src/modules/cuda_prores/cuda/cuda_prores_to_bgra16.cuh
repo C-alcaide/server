@@ -63,58 +63,58 @@
 //   cr_n = Cr - 512       [−448 .. +448]
 //
 // The exact scale from limited 10-bit Y to 16-bit:
-//   65535 / 876 = 74.81...  ≈  Q16: 65535*65536/876 = 4,898,641/65536 ≈ 74.81 → Q16 = 4,898,560
+//   65535 / 876 = 74.81...  →  Q16: round(65535*65536/876) = 4,902,781
 //
-// For luma-to-R,G,B we combine the Y scale with the matrix coefficients
-// in a single Q16 multiplication.
+// For chroma, the full swing range is 896 (= 224*4, from code 64 to 960).
+// Chroma normalisation: E_Cr = cr_n / 896 ∈ [−0.5, +0.5].
+// The chroma scale to 16-bit is 65535 / 896 = 73.14...
+// We combine this with the BT matrix coefficients in a single Q16 multiply.
 //
 // BT.2020 non-constant luminance (ITU-R BT.2020):
-//   R_full = 65535/876 * (Y - 64) + 65535/448 * 1.4746 * (Cr - 512) / 2
-//     Note: the chroma scale is 65535/(448) because Cb/Cr range is ±448 for limited range.
-//   R_full = 74.81 * y_n + 65535/448 * 1.4746 * cr_n
-//           = 74.81 * y_n + 215.85 * cr_n
-//   G_full = 74.81 * y_n - 65535/448 * 0.1645 * cb_n - 65535/448 * 0.5713 * cr_n
-//           = 74.81 * y_n - 24.09 * cb_n - 83.65 * cr_n
-//   B_full = 74.81 * y_n + 65535/448 * 1.8814 * cb_n
-//           = 74.81 * y_n + 275.46 * cb_n
+//   R_full = 65535/876 * y_n + 65535/896 * 1.4746 * cr_n
+//          = 74.81 * y_n + 107.86 * cr_n
+//   G_full = 74.81 * y_n - 65535/896 * 0.1645 * cb_n - 65535/896 * 0.5713 * cr_n
+//          = 74.81 * y_n - 12.03 * cb_n - 41.78 * cr_n
+//   B_full = 74.81 * y_n + 65535/896 * 1.8814 * cb_n
+//          = 74.81 * y_n + 137.61 * cb_n
 //
 // As Q16 integers (multiply × 65536, round):
 //   BT.2020:
-#define BT2020_Y_SCALE   4899072  // 74.81 * 65536
-#define BT2020_CR_TO_R  14148864  // 215.85 * 65536
-#define BT2020_CB_TO_G  -1578560  // -24.09 * 65536  (note: positive numerator in formula: -0.1645*(65535/448))
-#define BT2020_CR_TO_G  -5479552  // -83.65 * 65536
-#define BT2020_CB_TO_B  18055168  // 275.46 * 65536
+#define BT2020_Y_SCALE   4902781  // round(65535*65536/876)
+#define BT2020_CR_TO_R   7074432  // 107.93 * 65536
+#define BT2020_CB_TO_G   -789280  // -12.04 * 65536
+#define BT2020_CR_TO_G  -2739776  // -41.78 * 65536
+#define BT2020_CB_TO_B   9027584  // 137.73 * 65536
 //
 // BT.709 (ITU-R BT.709):
 //   Kr=0.2126, Kg=0.7152, Kb=0.0722
-//   R_full = 74.81*(Y-64) + 65535/448*1.5748*(Cr-512)
-//          = 74.81*y + 230.36*cr
-//   G_full = 74.81*y - 65535/448*0.1873*cb - 65535/448*0.4681*cr
-//          = 74.81*y - 27.40*cb - 68.53*cr
-//   B_full = 74.81*y + 65535/448*1.8556*cb
-//          = 74.81*y + 271.64*cb
+//   R_full = 74.81*y_n + 65535/896*1.5748*cr_n
+//          = 74.81*y_n + 115.18*cr_n
+//   G_full = 74.81*y_n - 65535/896*0.1873*cb_n - 65535/896*0.4681*cr_n
+//          = 74.81*y_n - 13.70*cb_n - 34.24*cr_n
+//   B_full = 74.81*y_n + 65535/896*1.8556*cb_n
+//          = 74.81*y_n + 135.72*cb_n
 //   As Q16:
-#define BT709_Y_SCALE   4899072  // same Y scale
-#define BT709_CR_TO_R  15097792  // 230.36 * 65536
-#define BT709_CB_TO_G  -1795584  // -27.40 * 65536
-#define BT709_CR_TO_G  -4491264  // -68.53 * 65536
-#define BT709_CB_TO_B  17802432  // 271.64 * 65536
+#define BT709_Y_SCALE   4902781  // same Y scale
+#define BT709_CR_TO_R   7548896  // 115.18 * 65536
+#define BT709_CB_TO_G   -897792  // -13.70 * 65536
+#define BT709_CR_TO_G  -2245632  // -34.27 * 65536
+#define BT709_CB_TO_B   8901216  // 135.82 * 65536
 //
 // BT.601 (ITU-R BT.601 / SMPTE-C, CICP matrix 5 or 6):
 //   Kr=0.299, Kg=0.587, Kb=0.114
-//   R_full = 74.81*y + 65535/448*1.402*cr
-//          = 74.81*y + 205.09*cr
-//   G_full = 74.81*y - 65535/448*0.344136*cb - 65535/448*0.714136*cr
-//          = 74.81*y - 50.33*cb - 104.47*cr
-//   B_full = 74.81*y + 65535/448*1.772*cb
-//          = 74.81*y + 259.21*cb
+//   R_full = 74.81*y_n + 65535/896*1.402*cr_n
+//          = 74.81*y_n + 102.55*cr_n
+//   G_full = 74.81*y_n - 65535/896*0.344136*cb_n - 65535/896*0.714136*cr_n
+//          = 74.81*y_n - 25.17*cb_n - 52.24*cr_n
+//   B_full = 74.81*y_n + 65535/896*1.772*cb_n
+//          = 74.81*y_n + 129.60*cb_n
 //   As Q16:
-#define BT601_Y_SCALE   4899072  // same Y scale
-#define BT601_CR_TO_R  13440512  // 205.09 * 65536
-#define BT601_CB_TO_G  -3298304  // -50.33 * 65536
-#define BT601_CR_TO_G  -6849792  // -104.47 * 65536
-#define BT601_CB_TO_B  16991232  // 259.21 * 65536
+#define BT601_Y_SCALE   4902781  // same Y scale
+#define BT601_CR_TO_R   6720256  // 102.55 * 65536
+#define BT601_CB_TO_G  -1649152  // -25.17 * 65536
+#define BT601_CR_TO_G  -3424896  // -52.26 * 65536
+#define BT601_CB_TO_B   8495616  // 129.60 * 65536
 
 // ─── Kernel ──────────────────────────────────────────────────────────────────
 //
