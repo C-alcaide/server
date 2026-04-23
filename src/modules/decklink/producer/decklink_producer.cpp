@@ -520,7 +520,7 @@ class SharedDeckLinkInput : public IDeckLinkInputCallback
     com_ptr<IDeckLink>            decklink_;
     com_iface_ptr<IDeckLinkInput> input_;
 
-    std::recursive_mutex                  mutex_;
+    mutable std::recursive_mutex          mutex_;
     std::vector<IDeckLinkInputCallback*> listeners_;
 
     bool           enabled_          = false;
@@ -561,14 +561,10 @@ class SharedDeckLinkInput : public IDeckLinkInputCallback
     {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
         if (enabled_) {
-            if (displayMode != current_display_mode_ || pixelFormat != current_pixel_format_) {
-                CASPAR_LOG(info) << "SharedDeckLinkInput: Updating format for device " << device_index_;
-                if (FAILED(input_->EnableVideoInput(displayMode, pixelFormat, flags))) {
-                    CASPAR_THROW_EXCEPTION(ffmpeg_error_t() << boost::errinfo_api_function("EnableVideoInput"));
-                }
-                current_display_mode_ = displayMode;
-                current_pixel_format_ = pixelFormat;
-            }
+            // Already running — a second producer is joining the shared input.
+            // Do NOT call EnableVideoInput while streams are running; format detection
+            // already has the correct mode. The new listener will receive frames at
+            // the current format and can call get_current_display_mode() to initialize.
         } else {
             if (FAILED(input_->EnableVideoInput(displayMode, pixelFormat, flags))) {
                 CASPAR_THROW_EXCEPTION(ffmpeg_error_t() << boost::errinfo_api_function("EnableVideoInput"));
@@ -579,6 +575,12 @@ class SharedDeckLinkInput : public IDeckLinkInputCallback
             input_->SetCallback(this);
         }
         enable_ref_count_++;
+    }
+
+    BMDDisplayMode get_current_display_mode() const
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        return current_display_mode_;
     }
 
     void enable_audio_input(BMDAudioSampleRate sampleRate, BMDAudioSampleType sampleType, uint32_t channelCount)
@@ -868,6 +870,24 @@ class decklink_producer : public IDeckLinkInputCallback
         }
 
         shared_input_->enable_video_input(mode_->GetDisplayMode(), get_pixel_format2(hdr_), flags);
+
+        // If a prior producer already changed the format via auto-detection, the shared input
+        // is already at a different mode. Sync this producer's mode and filters accordingly
+        // so the dimension-guard doesn't discard all incoming frames.
+        {
+            auto actual_mode_bmd = shared_input_->get_current_display_mode();
+            if (actual_mode_bmd != mode_->GetDisplayMode()) {
+                mode_          = get_display_mode(input_, actual_mode_bmd, get_pixel_format2(hdr_), bmdSupportedVideoModeDefault);
+                video_filter_  = Filter(vfilter_, AVMEDIA_TYPE_VIDEO, format_desc_, mode_, hdr_);
+                audio_filter_  = Filter(afilter_, AVMEDIA_TYPE_AUDIO, format_desc_, mode_, hdr_);
+                video_decoder_ = Decoder(hdr_, mode_);
+                auto actual_fmt = get_caspar_video_format(actual_mode_bmd);
+                if (actual_fmt != core::video_format::invalid)
+                    input_format = format_repository_.find_format(actual_fmt);
+                in_sync_  = 0.0;
+                out_sync_ = 0.0;
+            }
+        }
 
         shared_input_->enable_audio_input(bmdAudioSampleRate48kHz,
                                           bmdAudioSampleType32bitInteger,
