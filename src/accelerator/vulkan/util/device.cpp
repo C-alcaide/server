@@ -146,7 +146,7 @@ struct device::impl : public std::enable_shared_from_this<impl>
     decltype(make_work_guard(io_context_)) work_;
     std::thread                            thread_;
 
-    impl()
+    explicit impl(const std::vector<vulkan_requirements_fn>& requirements)
         : work_(make_work_guard(io_context_))
     {
         CASPAR_LOG(info) << L"Initializing Vulkan Device.";
@@ -210,6 +210,11 @@ struct device::impl : public std::enable_shared_from_this<impl>
         vk::PhysicalDeviceRobustness2FeaturesEXT robustness2Features;
         robustness2Features.nullDescriptor = true;
         _vkb_physical_device.enable_extension_features_if_present(robustness2Features);
+
+        for (auto& fn : requirements) {
+            if (fn)
+                fn(_vkb_physical_device);
+        }
 
         // Create the logical device
         auto device_builder = vkb::DeviceBuilder(_vkb_physical_device);
@@ -768,8 +773,8 @@ struct device::impl : public std::enable_shared_from_this<impl>
     }
 };
 
-device::device()
-    : impl_(new impl())
+device::device(const std::vector<vulkan_requirements_fn>& requirements)
+    : impl_(new impl(requirements))
 {
 }
 device::~device() {}
