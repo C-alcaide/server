@@ -124,6 +124,7 @@ class context : public drawable
     int                                scroll_position_ = 0;
     bool                               dragging_        = false;
     int                                last_mouse_y_    = 0;
+    bool                               window_visible_  = false;
 
     executor executor_{L"diagnostics"};
 
@@ -154,7 +155,9 @@ class context : public drawable
                     new sf::RenderWindow(sf::VideoMode(RENDERING_WIDTH, RENDERING_WIDTH), "CasparCG Diagnostics"));
                 window_->setPosition(sf::Vector2i(0, 0));
                 window_->setActive();
-                window_->setVerticalSyncEnabled(true);
+                window_->setVerticalSyncEnabled(false);
+                window_->setVisible(false);
+                window_visible_  = false;
                 calculate_view_ = true;
                 glEnable(GL_BLEND);
                 glEnable(GL_LINE_SMOOTH);
@@ -206,6 +209,11 @@ class context : public drawable
             }
         }
 
+        if (!window_visible_ && !drawables_.empty()) {
+            window_->setVisible(true);
+            window_visible_ = true;
+        }
+
         window_->clear();
 
         if (calculate_view_) {
@@ -229,11 +237,10 @@ class context : public drawable
         window_->display();
 
         display_time_.restart();
+        std::this_thread::sleep_for(std::chrono::milliseconds(40));
         if (executor_.is_running()) {
             executor_.begin_invoke([this] { tick(); });
         }
-
-        std::this_thread::sleep_for(std::chrono::milliseconds(40));
     }
 
     void render(sf::RenderTarget& target, sf::RenderStates states) override
