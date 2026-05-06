@@ -488,6 +488,10 @@ struct screen_consumer
 
     std::future<bool> send(core::video_field field, const core::const_frame& frame)
     {
+        // Screen is a progressive display — skip field B on interlaced channels.
+        if (field == core::video_field::b)
+            return caspar::make_ready_future(is_running_.load());
+
         // FPS Calc
         auto now = std::chrono::steady_clock::now();
         frames_since_update_++;
