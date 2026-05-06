@@ -567,6 +567,7 @@ struct prores_producer_impl final : public core::frame_producer
                     flush_async_slot(prev_slot, true);
                     prev_slot = -1;
                     eof_paused_ = true;  // keep thread alive; a seek will revive it
+                    queue_cv_.notify_all();  // wake receive_impl so it doesn't block 40ms
                 }
                 continue;
             }
@@ -887,8 +888,10 @@ struct prores_producer_impl final : public core::frame_producer
 
         // First field or progressive: fetch the next decoded frame.
         std::unique_lock<std::mutex> lk(queue_mutex_);
-        queue_cv_.wait_for(lk, std::chrono::milliseconds(40),
-                           [this] { return !ready_queue_.empty() || stop_flag_; });
+        if (!eof_paused_) {
+            queue_cv_.wait_for(lk, std::chrono::milliseconds(40),
+                               [this] { return !ready_queue_.empty() || stop_flag_ || eof_paused_; });
+        }
         if (ready_queue_.empty()) {
             // Update title with the (possibly just-reset) frame_count_ so the diag
             // window shows the correct counter immediately after a loop seek,
@@ -909,7 +912,12 @@ struct prores_producer_impl final : public core::frame_producer
         }
 
         double spd = speed_.load();
-        speed_accum_ += std::abs(spd);
+        // Scale by file_fps/channel_fps so a 50fps file on a 25fps channel
+        // advances 2 file-frames per tick (real-time playback).
+        const double fps_ratio = (file_fps_ > 0.0 && format_desc_.fps > 0.0)
+                                     ? file_fps_ / format_desc_.fps
+                                     : 1.0;
+        speed_accum_ += std::abs(spd) * fps_ratio;
         int frames_to_advance = static_cast<int>(speed_accum_);
         speed_accum_ -= static_cast<double>(frames_to_advance);
 
@@ -972,8 +980,8 @@ struct prores_producer_impl final : public core::frame_producer
         graph_->set_text(title);
 
         // Normalised FPS bar: 1.0 = decoder keeping up with requested speed.
-        // Target is channel_fps * |speed|; bar fills to 1.0 when on target.
-        const double target_fps = format_desc_.fps * std::abs(spd);
+        // Target is file_fps * |speed|; bar fills to 1.0 when on target.
+        const double target_fps = file_fps_ * std::abs(spd);
         if (target_fps > 0.0 && fps_display_ > 0.0)
             graph_->set_value("fps", std::min(1.0, fps_display_ / target_fps));
 

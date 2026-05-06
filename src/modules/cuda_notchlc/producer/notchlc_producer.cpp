@@ -955,12 +955,19 @@ struct notchlc_producer_impl final : public core::frame_producer
             return cached_frame_ ? cached_frame_ : core::draw_frame{};
 
         std::unique_lock<std::mutex> lk(queue_mutex_);
-        queue_cv_.wait_for(lk, std::chrono::milliseconds(40),
-                           [this] { return !ready_queue_.empty() || stop_flag_; });
+        if (!eof_paused_) {
+            queue_cv_.wait_for(lk, std::chrono::milliseconds(40),
+                               [this] { return !ready_queue_.empty() || stop_flag_ || eof_paused_; });
+        }
         if (ready_queue_.empty()) return cached_frame_;
 
         double spd = speed_.load();
-        speed_accum_ += std::abs(spd);
+        // Scale by file_fps/channel_fps so a 50fps file on a 25fps channel
+        // advances 2 file-frames per tick (real-time playback).
+        const double fps_ratio = (file_fps_ > 0.0 && format_desc_.fps > 0.0)
+                                     ? file_fps_ / format_desc_.fps
+                                     : 1.0;
+        speed_accum_ += std::abs(spd) * fps_ratio;
         int frames_to_advance = static_cast<int>(speed_accum_);
         speed_accum_ -= static_cast<double>(frames_to_advance);
 
@@ -1017,8 +1024,8 @@ struct notchlc_producer_impl final : public core::frame_producer
             title += L"  |  " + [&]{ std::wostringstream s; s << std::fixed << std::setprecision(1) << fps_display_; return s.str(); }() + L"fps";
         graph_->set_text(title);
 
-        // Bar fills to 1.0 when the decoder keeps up with channel_fps * |speed|.
-        const double target_fps = format_desc_.fps * std::abs(spd);
+        // Bar fills to 1.0 when the decoder keeps up with file_fps * |speed|.
+        const double target_fps = file_fps_ * std::abs(spd);
         if (target_fps > 0.0 && fps_display_ > 0.0)
             graph_->set_value("fps", std::min(1.0, fps_display_ / target_fps));
 
