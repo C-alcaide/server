@@ -107,6 +107,12 @@ shared_texture_pool::shared_texture_pool(std::shared_ptr<accelerator::ogl::devic
         for (int i = 0; i < BUFFER_COUNT; ++i) {
             create_slot(slots_[i]);
         }
+
+        // Create FBOs for format-converting blit (16-bit pool from 8-bit source)
+        if (use_16bit_) {
+            glGenFramebuffers(1, &read_fbo_);
+            glGenFramebuffers(1, &draw_fbo_);
+        }
     });
 
     CASPAR_LOG(info) << L"[vulkan_output] Shared texture pool created: "
@@ -128,6 +134,12 @@ shared_texture_pool::shared_texture_pool(vulkan_device& vk_device,
         create_slot(slots_[i]);
     }
 
+    // Create FBOs for format-converting blit (16-bit pool from 8-bit source)
+    if (use_16bit_) {
+        glGenFramebuffers(1, &read_fbo_);
+        glGenFramebuffers(1, &draw_fbo_);
+    }
+
     CASPAR_LOG(info) << L"[vulkan_output] Shared texture pool created (affinity): "
                      << width_ << L"x" << height_ << L" (" << BUFFER_COUNT << L" slots)";
 }
@@ -139,11 +151,13 @@ shared_texture_pool::~shared_texture_pool()
             for (int i = 0; i < BUFFER_COUNT; ++i) {
                 destroy_slot(slots_[i]);
             }
+            if (read_fbo_) { glDeleteFramebuffers(1, &read_fbo_); read_fbo_ = 0; }
+            if (draw_fbo_) { glDeleteFramebuffers(1, &draw_fbo_); draw_fbo_ = 0; }
         });
     } else {
         // Affinity path: no GL context is current on this thread.
         // Only destroy VK-side and Win32 handles. GL resources (texture, memory object,
-        // semaphore) will be freed when the affinity GL context is destroyed.
+        // semaphore, FBOs) will be freed when the affinity GL context is destroyed.
         for (int i = 0; i < BUFFER_COUNT; ++i) {
             destroy_slot_vk_only(slots_[i]);
         }
@@ -297,20 +311,32 @@ void shared_texture_pool::destroy_slot_vk_only(slot& s)
     auto dev = vk_device_.device();
 
     // VK cleanup
-    if (s.vk_image_view != VK_NULL_HANDLE)
+    if (s.vk_image_view != VK_NULL_HANDLE) {
         vkDestroyImageView(dev, s.vk_image_view, nullptr);
-    if (s.vk_image != VK_NULL_HANDLE)
+        s.vk_image_view = VK_NULL_HANDLE;
+    }
+    if (s.vk_image != VK_NULL_HANDLE) {
         vkDestroyImage(dev, s.vk_image, nullptr);
-    if (s.vk_memory != VK_NULL_HANDLE)
+        s.vk_image = VK_NULL_HANDLE;
+    }
+    if (s.vk_memory != VK_NULL_HANDLE) {
         vkFreeMemory(dev, s.vk_memory, nullptr);
-    if (s.vk_semaphore != VK_NULL_HANDLE)
+        s.vk_memory = VK_NULL_HANDLE;
+    }
+    if (s.vk_semaphore != VK_NULL_HANDLE) {
         vkDestroySemaphore(dev, s.vk_semaphore, nullptr);
+        s.vk_semaphore = VK_NULL_HANDLE;
+    }
 
     // Handle cleanup
-    if (s.memory_handle)
+    if (s.memory_handle) {
         CloseHandle(s.memory_handle);
-    if (s.semaphore_handle)
+        s.memory_handle = nullptr;
+    }
+    if (s.semaphore_handle) {
         CloseHandle(s.semaphore_handle);
+        s.semaphore_handle = nullptr;
+    }
 }
 
 void shared_texture_pool::blit_from_texture(GLuint source_texture_id, int width, int height)
@@ -319,13 +345,27 @@ void shared_texture_pool::blit_from_texture(GLuint source_texture_id, int width,
     // This must be called on the OGL device thread
     auto& s = slots_[write_index_];
 
-    // Clamp to pool dimensions to prevent out-of-bounds glCopyImageSubData
+    // Clamp to pool dimensions to prevent out-of-bounds copy
     int clamped_w = (std::min)(width, static_cast<int>(width_));
     int clamped_h = (std::min)(height, static_cast<int>(height_));
 
-    glCopyImageSubData(source_texture_id, GL_TEXTURE_2D, 0, 0, 0, 0,
-                       s.gl_texture, GL_TEXTURE_2D, 0, 0, 0, 0,
-                       clamped_w, clamped_h, 1);
+    if (use_16bit_ && read_fbo_) {
+        // Format-converting blit via FBO (spec-compliant across all vendors).
+        // glCopyImageSubData requires matching texel sizes; RGBA8→RGBA16 is not
+        // portable. glBlitFramebuffer handles the format conversion correctly.
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, read_fbo_);
+        glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, source_texture_id, 0);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, draw_fbo_);
+        glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, s.gl_texture, 0);
+        glBlitFramebuffer(0, 0, clamped_w, clamped_h, 0, 0, clamped_w, clamped_h,
+                          GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    } else {
+        // Same-format copy (both RGBA8 or both RGBA16) — glCopyImageSubData is safe.
+        glCopyImageSubData(source_texture_id, GL_TEXTURE_2D, 0, 0, 0, 0,
+                           s.gl_texture, GL_TEXTURE_2D, 0, 0, 0, 0,
+                           clamped_w, clamped_h, 1);
+    }
 }
 
 void shared_texture_pool::signal_gl()
@@ -333,8 +373,8 @@ void shared_texture_pool::signal_gl()
     auto& s = slots_[write_index_];
 
     // Signal the semaphore after the blit completes
-    // GL_LAYOUT_GENERAL (0x958D from GL_EXT_semaphore)
-    GLenum dst_layout = 0x958D;
+    constexpr GLenum GL_LAYOUT_GENERAL_EXT = 0x958D; // from GL_EXT_semaphore
+    GLenum dst_layout = GL_LAYOUT_GENERAL_EXT;
     glSignalSemaphoreEXT_(s.gl_semaphore, 0, nullptr, 1, &s.gl_texture, &dst_layout);
 
     // Flush to ensure the signal is submitted to the GPU

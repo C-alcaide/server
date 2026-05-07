@@ -119,6 +119,10 @@ class shared_texture_pool
     slot                 slots_[BUFFER_COUNT];
     int                  write_index_ = 0;
     int                  read_index_  = 0;
+
+    // FBO pair for format-converting blit (used when use_16bit_ is true)
+    GLuint               read_fbo_  = 0;
+    GLuint               draw_fbo_  = 0;
 };
 
 }} // namespace caspar::vulkan_output
