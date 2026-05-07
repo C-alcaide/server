@@ -345,11 +345,6 @@ GLuint gpu_affinity_context::upload_frame(const uint8_t* pixels, int width, int 
     int previous_pbo = 1 - pbo_index_;
     pbo_index_ = previous_pbo; // Swap for next frame
 
-    // Upload previous frame's PBO → texture (async DMA, should be done by now)
-    glBindTexture(GL_TEXTURE_2D, upload_texture_);
-    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, pbo_[previous_pbo]);
-    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width_, height_, GL_BGRA, GL_UNSIGNED_BYTE, nullptr);
-
     // Map current PBO and copy new pixel data into it
     glBindBuffer(GL_PIXEL_UNPACK_BUFFER, pbo_[current_pbo]);
     glBufferData(GL_PIXEL_UNPACK_BUFFER, static_cast<GLsizeiptr>(width_) * height_ * 4,
@@ -369,8 +364,14 @@ GLuint gpu_affinity_context::upload_frame(const uint8_t* pixels, int width, int 
         glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER);
     }
 
-    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
-    glBindTexture(GL_TEXTURE_2D, 0);
+    // Upload PBO → texture. On the first frame, use the PBO we just filled (current)
+    // to avoid displaying uninitialized garbage from the previous PBO.
+    int upload_pbo = first_frame_ ? current_pbo : previous_pbo;
+    first_frame_ = false;
+
+    glBindTexture(GL_TEXTURE_2D, upload_texture_);
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, pbo_[upload_pbo]);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width_, height_, GL_BGRA, GL_UNSIGNED_BYTE, nullptr);
 
     return upload_texture_;
 }

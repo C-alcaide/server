@@ -108,6 +108,7 @@ class gpu_affinity_context
     GLuint upload_texture_ = 0;
     GLuint pbo_[2]         = {0, 0};
     int    pbo_index_      = 0; // Double-buffered PBO for async upload
+    bool   first_frame_    = true;
 
     // Device identification
     uint8_t device_luid_[8]    = {};
