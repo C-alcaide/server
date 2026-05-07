@@ -874,7 +874,7 @@ class vulkan_output_consumer : public core::frame_consumer
                 {0.8f, 0.0f, 0.8f, 1.0f}, // Magenta (output 5)
                 {0.8f, 0.8f, 0.0f, 1.0f}, // Yellow (output 6)
             };
-            int idx = (config_.output_index - 1) % 6;
+            int idx = std::max(0, config_.output_index - 1) % 6;
             VkClearColorValue clear_color = {{colors[idx][0], colors[idx][1], colors[idx][2], colors[idx][3]}};
             VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
             vkCmdClearColorImage(swapchain_.cmd_buffer, swapchain_.images[image_index],
