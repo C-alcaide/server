@@ -452,6 +452,10 @@ class vulkan_output_consumer : public core::frame_consumer
     {
         uint32_t count = 0;
         vkGetPhysicalDeviceSurfaceFormatsKHR(device_->physical_device(), swapchain_.surface, &count, nullptr);
+        if (count == 0) {
+            CASPAR_THROW_EXCEPTION(caspar_exception()
+                                   << msg_info("Surface reports zero available formats"));
+        }
         std::vector<VkSurfaceFormatKHR> formats(count);
         vkGetPhysicalDeviceSurfaceFormatsKHR(device_->physical_device(), swapchain_.surface, &count, formats.data());
 
@@ -710,6 +714,10 @@ class vulkan_output_consumer : public core::frame_consumer
             // Clamp destination end to swapchain bounds
             int dw = (std::min)(sw, dw_max - dx);
             int dh = (std::min)(sh, dh_max - dy);
+
+            // Degenerate region — skip blit entirely (returns zero-extent region)
+            if (sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0)
+                return blit;
 
             blit.srcOffsets[0] = {sx, sy, 0};
             blit.srcOffsets[1] = {sx + sw, sy + sh, 1};
@@ -1132,7 +1140,11 @@ class vulkan_output_consumer : public core::frame_consumer
         vkCmdPipelineBarrier(swapchain_.cmd_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
                              VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0, nullptr, 1, &present_barrier);
 
-        vkEndCommandBuffer(swapchain_.cmd_buffer);
+        if (vkEndCommandBuffer(swapchain_.cmd_buffer) != VK_SUCCESS) {
+            CASPAR_LOG(error) << print() << L" vkEndCommandBuffer failed — skipping frame.";
+            graph_->set_tag(diagnostics::tag_severity::WARNING, "dropped-frame");
+            return;
+        }
 
         // Submit — wait on shared pool semaphore too if zero-copy was used
         VkSemaphore          wait_semaphores[2] = {swapchain_.image_available, VK_NULL_HANDLE};
