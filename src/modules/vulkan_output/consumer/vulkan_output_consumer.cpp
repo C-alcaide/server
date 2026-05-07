@@ -616,6 +616,8 @@ class vulkan_output_consumer : public core::frame_consumer
 
     void present_loop()
     {
+        SetThreadDescription(GetCurrentThread(), L"Vulkan Present");
+
         // Wait until buffer has enough frames to satisfy the configured delay
         // before starting to present. This introduces a fixed N-frame latency
         // to video output, allowing operators to compensate for downstream

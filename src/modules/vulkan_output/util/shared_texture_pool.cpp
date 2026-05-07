@@ -280,8 +280,6 @@ void shared_texture_pool::create_slot(slot& s)
 
 void shared_texture_pool::destroy_slot(slot& s)
 {
-    auto dev = vk_device_.device();
-
     // GL cleanup
     if (s.gl_semaphore)
         glDeleteSemaphoresEXT_(1, &s.gl_semaphore);
