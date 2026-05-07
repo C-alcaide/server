@@ -29,6 +29,8 @@
 #include <GL/glew.h>
 #include <GL/wglew.h>
 
+#include <mutex>
+
 namespace caspar { namespace vulkan_output {
 
 namespace {
@@ -55,35 +57,32 @@ PFNGLIMPORTSEMAPHOREWIN32HANDLEEXTPROC glImportSemaphoreWin32HandleEXT_ = nullpt
 PFNGLSIGNALSEMAPHOREEXTPROC            glSignalSemaphoreEXT_           = nullptr;
 PFNGLWAITSEMAPHOREEXTPROC              glWaitSemaphoreEXT_             = nullptr;
 
-bool gl_ext_loaded = false;
+std::once_flag gl_ext_flag;
 
 void load_gl_extensions()
 {
-    if (gl_ext_loaded)
-        return;
+    std::call_once(gl_ext_flag, [] {
+        glCreateMemoryObjectsEXT_      = (PFNGLCREATEMEMORYOBJECTSEXTPROC)wglGetProcAddress("glCreateMemoryObjectsEXT");
+        glDeleteMemoryObjectsEXT_      = (PFNGLDELETEMEMORYOBJECTSEXTPROC)wglGetProcAddress("glDeleteMemoryObjectsEXT");
+        glImportMemoryWin32HandleEXT_  = (PFNGLIMPORTMEMORYWIN32HANDLEEXTPROC)wglGetProcAddress("glImportMemoryWin32HandleEXT");
+        glTextureStorageMem2DEXT_      = (PFNGLTEXTURESTORAGEMEM2DEXTPROC)wglGetProcAddress("glTextureStorageMem2DEXT");
 
-    glCreateMemoryObjectsEXT_      = (PFNGLCREATEMEMORYOBJECTSEXTPROC)wglGetProcAddress("glCreateMemoryObjectsEXT");
-    glDeleteMemoryObjectsEXT_      = (PFNGLDELETEMEMORYOBJECTSEXTPROC)wglGetProcAddress("glDeleteMemoryObjectsEXT");
-    glImportMemoryWin32HandleEXT_  = (PFNGLIMPORTMEMORYWIN32HANDLEEXTPROC)wglGetProcAddress("glImportMemoryWin32HandleEXT");
-    glTextureStorageMem2DEXT_      = (PFNGLTEXTURESTORAGEMEM2DEXTPROC)wglGetProcAddress("glTextureStorageMem2DEXT");
+        glGenSemaphoresEXT_             = (PFNGLGENSEMAPHORESEXTPROC)wglGetProcAddress("glGenSemaphoresEXT");
+        glDeleteSemaphoresEXT_          = (PFNGLDELETESEMAPHORESEXTPROC)wglGetProcAddress("glDeleteSemaphoresEXT");
+        glImportSemaphoreWin32HandleEXT_ = (PFNGLIMPORTSEMAPHOREWIN32HANDLEEXTPROC)wglGetProcAddress("glImportSemaphoreWin32HandleEXT");
+        glSignalSemaphoreEXT_           = (PFNGLSIGNALSEMAPHOREEXTPROC)wglGetProcAddress("glSignalSemaphoreEXT");
+        glWaitSemaphoreEXT_             = (PFNGLWAITSEMAPHOREEXTPROC)wglGetProcAddress("glWaitSemaphoreEXT");
 
-    glGenSemaphoresEXT_             = (PFNGLGENSEMAPHORESEXTPROC)wglGetProcAddress("glGenSemaphoresEXT");
-    glDeleteSemaphoresEXT_          = (PFNGLDELETESEMAPHORESEXTPROC)wglGetProcAddress("glDeleteSemaphoresEXT");
-    glImportSemaphoreWin32HandleEXT_ = (PFNGLIMPORTSEMAPHOREWIN32HANDLEEXTPROC)wglGetProcAddress("glImportSemaphoreWin32HandleEXT");
-    glSignalSemaphoreEXT_           = (PFNGLSIGNALSEMAPHOREEXTPROC)wglGetProcAddress("glSignalSemaphoreEXT");
-    glWaitSemaphoreEXT_             = (PFNGLWAITSEMAPHOREEXTPROC)wglGetProcAddress("glWaitSemaphoreEXT");
+        if (!glCreateMemoryObjectsEXT_ || !glImportMemoryWin32HandleEXT_ || !glTextureStorageMem2DEXT_) {
+            CASPAR_THROW_EXCEPTION(caspar_exception()
+                                   << msg_info("GL_EXT_memory_object_win32 not available on this GPU/driver"));
+        }
 
-    if (!glCreateMemoryObjectsEXT_ || !glImportMemoryWin32HandleEXT_ || !glTextureStorageMem2DEXT_) {
-        CASPAR_THROW_EXCEPTION(caspar_exception()
-                               << msg_info("GL_EXT_memory_object_win32 not available on this GPU/driver"));
-    }
-
-    if (!glGenSemaphoresEXT_ || !glImportSemaphoreWin32HandleEXT_ || !glSignalSemaphoreEXT_) {
-        CASPAR_THROW_EXCEPTION(caspar_exception()
-                               << msg_info("GL_EXT_semaphore_win32 not available on this GPU/driver"));
-    }
-
-    gl_ext_loaded = true;
+        if (!glGenSemaphoresEXT_ || !glImportSemaphoreWin32HandleEXT_ || !glSignalSemaphoreEXT_) {
+            CASPAR_THROW_EXCEPTION(caspar_exception()
+                                   << msg_info("GL_EXT_semaphore_win32 not available on this GPU/driver"));
+        }
+    });
 }
 
 } // namespace
