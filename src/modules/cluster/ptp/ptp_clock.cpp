@@ -50,7 +50,7 @@ port_identity generate_identity()
     for (auto& b : id.clock_identity) {
         b = static_cast<uint8_t>(dist(gen));
     }
-    id.port_number = 1;
+    id.port_number = htons(1); // Stored in network byte order (PTP wire format)
     return id;
 }
 
@@ -158,7 +158,11 @@ void ptp_clock::start()
 
     // Initialize Winsock
     WSADATA wsa;
-    WSAStartup(MAKEWORD(2, 2), &wsa);
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
+        CASPAR_LOG(error) << L"[cluster] WSAStartup failed";
+        running_ = false;
+        return;
+    }
 
     // Create sockets
     event_socket_   = static_cast<uintptr_t>(create_udp_socket(bind_address_, PTP_EVENT_PORT, multicast_group_));
@@ -202,6 +206,8 @@ void ptp_clock::stop()
         general_socket_ = static_cast<uintptr_t>(INVALID_SOCKET);
     }
 
+    WSACleanup();
+
     CASPAR_LOG(info) << L"[cluster] PTP clock stopped";
 }
 
@@ -237,6 +243,10 @@ void ptp_clock::master_loop()
     auto last_sync     = std::chrono::steady_clock::now();
     auto last_announce = last_sync;
 
+    WSAPOLLFD pfd = {};
+    pfd.fd     = static_cast<SOCKET>(event_socket_);
+    pfd.events = POLLIN;
+
     while (running_) {
         auto now = std::chrono::steady_clock::now();
 
@@ -252,7 +262,12 @@ void ptp_clock::master_loop()
             last_announce = now;
         }
 
-        // Listen for Delay_Req from clients
+        // Poll for Delay_Req from clients (non-blocking with short timeout)
+        int poll_result = WSAPoll(&pfd, 1, 10); // 10ms timeout — responsive to stop
+        if (poll_result <= 0) {
+            continue;
+        }
+
         char buffer[256];
         sockaddr_in sender_addr = {};
         int sender_len = sizeof(sender_addr);
@@ -353,38 +368,61 @@ void ptp_clock::client_loop()
 {
     auto last_delay_req = std::chrono::steady_clock::now();
 
+    WSAPOLLFD fds[2];
+    fds[0].fd     = static_cast<SOCKET>(event_socket_);
+    fds[0].events = POLLIN;
+    fds[1].fd     = static_cast<SOCKET>(general_socket_);
+    fds[1].events = POLLIN;
+
     while (running_) {
-        // Receive on event port (Sync messages)
-        char buffer[256];
-        int  received = recv(static_cast<SOCKET>(event_socket_), buffer, sizeof(buffer), 0);
+        // Poll both sockets with 100ms timeout
+        int poll_result = WSAPoll(fds, 2, 100);
+        if (poll_result < 0) {
+            CASPAR_LOG(warning) << L"[ptp_clock] WSAPoll failed: " << WSAGetLastError();
+            continue;
+        }
+
         int64_t recv_time = system_clock_ns();
 
-        if (received >= static_cast<int>(sizeof(ptp_header))) {
-            auto* hdr = reinterpret_cast<const ptp_header*>(buffer);
-            if (hdr->domain_number != domain_) {
-                continue;
-            }
+        // Check event port (Sync messages)
+        if (fds[0].revents & POLLIN) {
+            char buffer[256];
+            int  received = recv(fds[0].fd, buffer, sizeof(buffer), 0);
 
-            if (hdr->get_type() == message_type::sync && received >= static_cast<int>(sizeof(sync_message))) {
-                handle_sync(*reinterpret_cast<const sync_message*>(buffer), recv_time);
+            if (received >= static_cast<int>(sizeof(ptp_header))) {
+                auto* hdr = reinterpret_cast<const ptp_header*>(buffer);
+                if (hdr->domain_number == domain_ && !is_self_message(*hdr)) {
+                    if (hdr->get_type() == message_type::sync &&
+                        received >= static_cast<int>(sizeof(sync_message))) {
+                        auto& sync_msg = *reinterpret_cast<const sync_message*>(buffer);
+                        if (accept_master(sync_msg.header.source_port_identity)) {
+                            handle_sync(sync_msg, recv_time);
+                            last_sync_received_ = std::chrono::steady_clock::now();
+                        }
+                    }
+                }
             }
         }
 
-        // Receive on general port (Follow_Up, Delay_Resp)
-        received = recv(static_cast<SOCKET>(general_socket_), buffer, sizeof(buffer), 0);
+        // Check general port (Follow_Up, Delay_Resp)
+        if (fds[1].revents & POLLIN) {
+            char buffer[256];
+            int  received = recv(fds[1].fd, buffer, sizeof(buffer), 0);
 
-        if (received >= static_cast<int>(sizeof(ptp_header))) {
-            auto* hdr = reinterpret_cast<const ptp_header*>(buffer);
-            if (hdr->domain_number != domain_) {
-                continue;
-            }
-
-            if (hdr->get_type() == message_type::follow_up &&
-                received >= static_cast<int>(sizeof(follow_up_message))) {
-                handle_follow_up(*reinterpret_cast<const follow_up_message*>(buffer));
-            } else if (hdr->get_type() == message_type::delay_resp &&
-                       received >= static_cast<int>(sizeof(delay_resp_message))) {
-                handle_delay_resp(*reinterpret_cast<const delay_resp_message*>(buffer));
+            if (received >= static_cast<int>(sizeof(ptp_header))) {
+                auto* hdr = reinterpret_cast<const ptp_header*>(buffer);
+                if (hdr->domain_number == domain_ && !is_self_message(*hdr)) {
+                    if (hdr->get_type() == message_type::follow_up &&
+                        received >= static_cast<int>(sizeof(follow_up_message))) {
+                        auto& fup = *reinterpret_cast<const follow_up_message*>(buffer);
+                        if (accept_master(fup.header.source_port_identity)) {
+                            handle_follow_up(fup);
+                        }
+                    } else if (hdr->get_type() == message_type::delay_resp &&
+                               received >= static_cast<int>(sizeof(delay_resp_message))) {
+                        handle_delay_resp(*reinterpret_cast<const delay_resp_message*>(buffer));
+                    }
+                }
             }
         }
 
@@ -394,7 +432,38 @@ void ptp_clock::client_loop()
             send_delay_req();
             last_delay_req = now;
         }
+
+        // Detect master disappearance: if no Sync received for 5 seconds, go free-running
+        if (state_.load(std::memory_order_relaxed) == clock_state::locked) {
+            auto since_last_sync = std::chrono::duration_cast<std::chrono::seconds>(now - last_sync_received_).count();
+            if (since_last_sync >= 5) {
+                CASPAR_LOG(warning) << L"[ptp_clock] No Sync from master for 5s — transitioning to free-running";
+                state_.store(clock_state::free_running, std::memory_order_relaxed);
+                locked_master_ = {};
+                first_measurement_ = true;
+            }
+        }
     }
+}
+
+// Fix #20: Skip messages we sent ourselves
+bool ptp_clock::is_self_message(const ptp_header& hdr) const
+{
+    return std::memcmp(&hdr.source_port_identity, &identity_, sizeof(port_identity)) == 0;
+}
+
+// Fix #18: Accept only one master once locked; accept any when not locked
+bool ptp_clock::accept_master(const port_identity& source)
+{
+    if (state_.load(std::memory_order_relaxed) == clock_state::locked) {
+        if (std::memcmp(&source, &locked_master_, sizeof(port_identity)) != 0) {
+            return false; // Ignore Sync from a different master
+        }
+    } else {
+        // When not locked, track whichever master sends Sync
+        locked_master_ = source;
+    }
+    return true;
 }
 
 void ptp_clock::handle_sync(const sync_message& msg, int64_t recv_time_ns)
@@ -427,6 +496,11 @@ void ptp_clock::handle_delay_resp(const delay_resp_message& msg)
     uint16_t seq = net_to_host16(msg.header.sequence_id);
     if (seq != delay_req_sequence_) {
         return; // Not our request
+    }
+
+    // Fix #8: Verify the response is actually for us
+    if (std::memcmp(&msg.requesting_port_identity, &identity_, sizeof(port_identity)) != 0) {
+        return; // Response for a different node
     }
 
     // T3 = our Delay_Req send time

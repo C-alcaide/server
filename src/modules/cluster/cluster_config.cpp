@@ -11,6 +11,12 @@
 
 #include <common/log.h>
 
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <Windows.h>
+
+#include <algorithm>
 #include <chrono>
 #include <ctime>
 #include <iomanip>
@@ -22,11 +28,11 @@ namespace {
 
 std::string narrow(const std::wstring& ws)
 {
-    std::string s;
-    s.reserve(ws.size());
-    for (wchar_t c : ws) {
-        s.push_back(static_cast<char>(c & 0x7F));
-    }
+    if (ws.empty()) return {};
+    int len = WideCharToMultiByte(CP_UTF8, 0, ws.data(), static_cast<int>(ws.size()), nullptr, 0, nullptr, nullptr);
+    if (len <= 0) return {};
+    std::string s(static_cast<size_t>(len), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, ws.data(), static_cast<int>(ws.size()), s.data(), len, nullptr, nullptr);
     return s;
 }
 
@@ -42,7 +48,7 @@ int64_t parse_epoch_origin(const std::string& iso_datetime)
     std::istringstream ss(iso_datetime);
     ss >> std::get_time(&tm, "%Y-%m-%dT%H:%M:%S");
     if (ss.fail()) {
-    CASPAR_LOG(warning) << L"[cluster] Failed to parse epoch-origin: "
+        CASPAR_LOG(warning) << L"[cluster] Failed to parse epoch-origin: "
                             << std::wstring(iso_datetime.begin(), iso_datetime.end());
         return 0;
     }
@@ -136,6 +142,32 @@ cluster_config parse_cluster_config(const boost::property_tree::wptree& properti
 
     } catch (const std::exception& e) {
         CASPAR_LOG(error) << L"[cluster] Config parse error: " << e.what();
+    }
+
+    // Validate ranges
+    if (cfg.sync_margin < 0 || cfg.sync_margin > 100) {
+        CASPAR_LOG(warning) << L"[cluster] sync-margin " << cfg.sync_margin << L" out of range [0..100], clamping";
+        cfg.sync_margin = std::clamp(cfg.sync_margin, 0, 100);
+    }
+    if (cfg.sync_interval_ms < 1 || cfg.sync_interval_ms > 10000) {
+        CASPAR_LOG(warning) << L"[cluster] sync-interval-ms " << cfg.sync_interval_ms
+                            << L" out of range [1..10000], clamping";
+        cfg.sync_interval_ms = std::clamp(cfg.sync_interval_ms, 1, 10000);
+    }
+    if (cfg.content_sync_threshold < 1 || cfg.content_sync_threshold > 50) {
+        CASPAR_LOG(warning) << L"[cluster] content-sync-threshold " << cfg.content_sync_threshold
+                            << L" out of range [1..50], clamping";
+        cfg.content_sync_threshold = std::clamp(cfg.content_sync_threshold, 1, 50);
+    }
+    if (cfg.content_sync_max_layer < 1 || cfg.content_sync_max_layer > 10000) {
+        CASPAR_LOG(warning) << L"[cluster] content-sync-max-layer " << cfg.content_sync_max_layer
+                            << L" out of range [1..10000], clamping";
+        cfg.content_sync_max_layer = std::clamp(cfg.content_sync_max_layer, 1, 10000);
+    }
+    if (cfg.ptp_domain > 127) {
+        CASPAR_LOG(warning) << L"[cluster] ptp-domain " << static_cast<int>(cfg.ptp_domain)
+                            << L" out of range [0..127], clamping";
+        cfg.ptp_domain = 127;
     }
 
     return cfg;

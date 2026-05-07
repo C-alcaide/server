@@ -13,6 +13,13 @@
 
 #include <chrono>
 
+#ifdef _MSC_VER
+#include <intrin.h>
+#define SPIN_PAUSE() _mm_pause()
+#else
+#define SPIN_PAUSE() ((void)0)
+#endif
+
 namespace caspar { namespace cluster { namespace sync {
 
 command_scheduler::command_scheduler(std::shared_ptr<frame_clock> clock, command_executor executor)
@@ -77,7 +84,7 @@ void command_scheduler::dispatch_loop()
                 if (queue_.empty() || queue_.top().target_frame > now_frame) {
                     break;
                 }
-                cmd = std::move(const_cast<scheduled_command&>(queue_.top()));
+                cmd = queue_.top();
                 queue_.pop();
             }
 
@@ -99,16 +106,24 @@ void command_scheduler::dispatch_loop()
 
         // Sleep until close to next frame boundary
         // Use sub-millisecond sleep to avoid busy-wait but maintain precision
-        if (!queue_.empty()) {
+        int64_t ns_until = -1;
+        {
             std::lock_guard<std::mutex> lock(queue_mutex_);
-            int64_t next_frame = queue_.top().target_frame;
-            int64_t ns_until   = clock_->ns_until_frame(next_frame);
+            if (!queue_.empty()) {
+                int64_t next_frame = queue_.top().target_frame;
+                ns_until = clock_->ns_until_frame(next_frame);
+            }
+        }
+
+        if (ns_until >= 0) {
             if (ns_until > 2'000'000) { // More than 2ms away
                 std::this_thread::sleep_for(std::chrono::microseconds(500));
             } else if (ns_until > 100'000) { // More than 100µs away
                 std::this_thread::sleep_for(std::chrono::microseconds(50));
+            } else {
+                // Sub-100µs: spin with pause to reduce power and pipeline stalls
+                SPIN_PAUSE();
             }
-            // Otherwise spin (sub-frame precision)
         } else {
             // No pending commands, sleep longer
             std::this_thread::sleep_for(std::chrono::milliseconds(1));

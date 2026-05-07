@@ -27,21 +27,30 @@ namespace {
 // Narrow ASCII wstring to string (safe for AMCP commands and addresses)
 std::string narrow(const std::wstring& ws)
 {
-    std::string s;
-    s.reserve(ws.size());
-    for (wchar_t c : ws) {
-        s.push_back(static_cast<char>(c & 0x7F));
-    }
+    if (ws.empty()) return {};
+    int len = WideCharToMultiByte(CP_UTF8, 0, ws.data(), static_cast<int>(ws.size()), nullptr, 0, nullptr, nullptr);
+    if (len <= 0) return {};
+    std::string s(static_cast<size_t>(len), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, ws.data(), static_cast<int>(ws.size()), s.data(), len, nullptr, nullptr);
     return s;
 }
 
 std::wstring widen(const std::string& s)
 {
-    return std::wstring(s.begin(), s.end());
+    if (s.empty()) return {};
+    int len = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
+    if (len <= 0) return {};
+    std::wstring ws(static_cast<size_t>(len), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), ws.data(), len);
+    return ws;
 }
 
 // Wire protocol: "FRAME:target_frame COMMAND_TEXT\r\n"
 // Simple text protocol for easy debugging and interop
+// Protocol version handshake: master sends "CASPAR_CLUSTER/1\r\n" immediately after connect
+
+static constexpr const char* PROTOCOL_HANDSHAKE = "CASPAR_CLUSTER/1\r\n";
+static constexpr int         PROTOCOL_VERSION   = 1;
 
 std::string encode_relay_message(int64_t target_frame, const std::wstring& command)
 {
@@ -164,6 +173,9 @@ void command_relay::stop()
         return;
     }
 
+    // Wake the master_connection_loop if it's sleeping on the CV
+    stop_cv_.notify_all();
+
     // Close all member sockets
     {
         std::lock_guard<std::mutex> lock(members_mutex_);
@@ -211,8 +223,9 @@ void command_relay::master_connection_loop()
                 }
             }
         }
-        // Reconnect check every 2 seconds
-        std::this_thread::sleep_for(std::chrono::seconds(2));
+        // Wait up to 2s but wake immediately on stop()
+        std::unique_lock<std::mutex> lock(members_mutex_);
+        stop_cv_.wait_for(lock, std::chrono::seconds(2), [this] { return !running_.load(); });
     }
 }
 
@@ -250,6 +263,10 @@ bool command_relay::connect_to_member(member_info& member)
 
     member.socket = static_cast<uintptr_t>(sock);
     member.state  = member_state::connected;
+
+    // Send protocol version handshake
+    send(sock, PROTOCOL_HANDSHAKE, static_cast<int>(strlen(PROTOCOL_HANDSHAKE)), 0);
+
     CASPAR_LOG(info) << L"[cluster] Connected to member "
                      << std::wstring(member.host.begin(), member.host.end())
                      << L":" << member.port;
@@ -263,14 +280,21 @@ bool command_relay::send_to_member(member_info& member, const std::string& data)
     }
 
     SOCKET sock = static_cast<SOCKET>(member.socket);
-    int    sent = send(sock, data.c_str(), static_cast<int>(data.size()), 0);
-    if (sent == SOCKET_ERROR) {
-        CASPAR_LOG(warning) << L"[cluster] Lost connection to "
-                            << std::wstring(member.host.begin(), member.host.end());
-        closesocket(sock);
-        member.socket = static_cast<uintptr_t>(INVALID_SOCKET);
-        member.state  = member_state::disconnected;
-        return false;
+    int    total_sent = 0;
+    int    remaining  = static_cast<int>(data.size());
+
+    while (remaining > 0) {
+        int sent = send(sock, data.c_str() + total_sent, remaining, 0);
+        if (sent == SOCKET_ERROR) {
+            CASPAR_LOG(warning) << L"[cluster] Lost connection to "
+                                << std::wstring(member.host.begin(), member.host.end());
+            closesocket(sock);
+            member.socket = static_cast<uintptr_t>(INVALID_SOCKET);
+            member.state  = member_state::disconnected;
+            return false;
+        }
+        total_sent += sent;
+        remaining  -= sent;
     }
     return true;
 }
@@ -299,7 +323,11 @@ void command_relay::client_listener_loop()
         return;
     }
 
-    listen(listen_sock, 1);
+    if (listen(listen_sock, 1) == SOCKET_ERROR) {
+        CASPAR_LOG(error) << L"[cluster] Failed to listen on relay port " << client_port_;
+        closesocket(listen_sock);
+        return;
+    }
     listen_socket_ = static_cast<uintptr_t>(listen_sock);
 
     // Set accept timeout so we can check running_ flag
@@ -319,6 +347,10 @@ void command_relay::client_listener_loop()
         int nodelay = 1;
         setsockopt(client_sock, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&nodelay), sizeof(nodelay));
 
+        // Set receive timeout on client socket so receive thread doesn't block forever
+        DWORD recv_timeout = 2000;
+        setsockopt(client_sock, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&recv_timeout), sizeof(recv_timeout));
+
         master_socket_ = static_cast<uintptr_t>(client_sock);
         CASPAR_LOG(info) << L"[cluster] Master connected to client relay";
 
@@ -337,15 +369,28 @@ void command_relay::client_receive_loop(uintptr_t client_socket)
     SOCKET sock = static_cast<SOCKET>(client_socket);
     std::string buffer;
     char        recv_buf[4096];
+    constexpr size_t MAX_BUFFER_SIZE = 1024 * 1024; // 1 MB max
+    bool handshake_validated = false;
 
     while (running_) {
         int received = recv(sock, recv_buf, sizeof(recv_buf), 0);
         if (received <= 0) {
-            CASPAR_LOG(warning) << L"[cluster] Lost connection to master";
+            if (received == 0) {
+                CASPAR_LOG(info) << L"[cluster] Master disconnected gracefully";
+            } else if (running_) {
+                CASPAR_LOG(warning) << L"[cluster] Lost connection to master";
+            }
             break;
         }
 
         buffer.append(recv_buf, received);
+
+        // Protect against unbounded buffer growth (no newline in sight)
+        if (buffer.size() > MAX_BUFFER_SIZE) {
+            CASPAR_LOG(error) << L"[cluster] TCP receive buffer exceeded 1 MB without newline, dropping data";
+            buffer.clear();
+            continue;
+        }
 
         // Process complete lines
         size_t newline;
@@ -356,6 +401,25 @@ void command_relay::client_receive_loop(uintptr_t client_socket)
             // Trim \r
             if (!line.empty() && line.back() == '\r') {
                 line.pop_back();
+            }
+
+            // First line must be the protocol handshake
+            if (!handshake_validated) {
+                if (line.find("CASPAR_CLUSTER/") == 0) {
+                    int version = 0;
+                    try { version = std::stoi(line.substr(15)); } catch (...) {}
+                    if (version != PROTOCOL_VERSION) {
+                        CASPAR_LOG(error) << L"[cluster] Protocol version mismatch: master="
+                                          << version << L" local=" << PROTOCOL_VERSION;
+                        return; // Disconnect
+                    }
+                    handshake_validated = true;
+                    CASPAR_LOG(debug) << L"[cluster] Protocol handshake OK (v" << PROTOCOL_VERSION << L")";
+                } else {
+                    CASPAR_LOG(error) << L"[cluster] Missing protocol handshake from master, disconnecting";
+                    return;
+                }
+                continue;
             }
 
             parse_incoming_command(line);
