@@ -29,6 +29,8 @@
 #include <GL/glew.h>
 #include <GL/wglew.h>
 
+#include <algorithm>
+
 #include <mutex>
 
 namespace caspar { namespace vulkan_output {
@@ -319,9 +321,13 @@ void shared_texture_pool::blit_from_texture(GLuint source_texture_id, int width,
     // This must be called on the OGL device thread
     auto& s = slots_[write_index_];
 
+    // Clamp to pool dimensions to prevent out-of-bounds glCopyImageSubData
+    int clamped_w = (std::min)(width, static_cast<int>(width_));
+    int clamped_h = (std::min)(height, static_cast<int>(height_));
+
     glCopyImageSubData(source_texture_id, GL_TEXTURE_2D, 0, 0, 0, 0,
                        s.gl_texture, GL_TEXTURE_2D, 0, 0, 0, 0,
-                       width, height, 1);
+                       clamped_w, clamped_h, 1);
 }
 
 void shared_texture_pool::signal_gl()
