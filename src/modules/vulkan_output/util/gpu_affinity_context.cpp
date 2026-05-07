@@ -16,6 +16,7 @@
 #include <GL/wglew.h>
 
 #include <cstring>
+#include <mutex>
 
 namespace caspar { namespace vulkan_output {
 
@@ -33,20 +34,19 @@ static PFNWGLDELETEDCNVPROC          wglDeleteDCNV_          = nullptr;
 
 static bool load_affinity_extensions()
 {
-    static bool loaded = false;
+    static std::once_flag flag;
     static bool available = false;
-    if (loaded) return available;
-    loaded = true;
+    std::call_once(flag, [] {
+        wglEnumGpusNV_         = reinterpret_cast<PFNWGLENUMGPUSNVPROC>(wglGetProcAddress("wglEnumGpusNV"));
+        wglEnumGpuDevicesNV_   = reinterpret_cast<PFNWGLENUMGPUDEVICESNVPROC>(wglGetProcAddress("wglEnumGpuDevicesNV"));
+        wglCreateAffinityDCNV_ = reinterpret_cast<PFNWGLCREATEAFFINITYDCNVPROC>(wglGetProcAddress("wglCreateAffinityDCNV"));
+        wglDeleteDCNV_         = reinterpret_cast<PFNWGLDELETEDCNVPROC>(wglGetProcAddress("wglDeleteDCNV"));
 
-    wglEnumGpusNV_         = reinterpret_cast<PFNWGLENUMGPUSNVPROC>(wglGetProcAddress("wglEnumGpusNV"));
-    wglEnumGpuDevicesNV_   = reinterpret_cast<PFNWGLENUMGPUDEVICESNVPROC>(wglGetProcAddress("wglEnumGpuDevicesNV"));
-    wglCreateAffinityDCNV_ = reinterpret_cast<PFNWGLCREATEAFFINITYDCNVPROC>(wglGetProcAddress("wglCreateAffinityDCNV"));
-    wglDeleteDCNV_         = reinterpret_cast<PFNWGLDELETEDCNVPROC>(wglGetProcAddress("wglDeleteDCNV"));
-
-    available = (wglEnumGpusNV_ && wglEnumGpuDevicesNV_ && wglCreateAffinityDCNV_ && wglDeleteDCNV_);
-    if (!available) {
-        CASPAR_LOG(warning) << L"[gpu_affinity] WGL_NV_gpu_affinity not available — multi-GPU interop disabled";
-    }
+        available = (wglEnumGpusNV_ && wglEnumGpuDevicesNV_ && wglCreateAffinityDCNV_ && wglDeleteDCNV_);
+        if (!available) {
+            CASPAR_LOG(warning) << L"[gpu_affinity] WGL_NV_gpu_affinity not available — multi-GPU interop disabled";
+        }
+    });
     return available;
 }
 
