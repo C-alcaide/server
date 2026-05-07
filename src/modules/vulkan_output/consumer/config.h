@@ -110,6 +110,9 @@ struct configuration
     // EDID emulation: inject synthetic EDID on unconnected outputs (requires admin, pro GPU)
     bool             edid_emulation = false;
 
+    // EDID persistence: lock the current monitor's EDID so the display survives cable disconnect
+    bool             persist_edid = false;
+
     // Display name matching: if set, selects monitor by substring match on device name
     // instead of index. Useful for portable configs (VDD rehearsal → physical on-site).
     // Example: "BNQ" matches BenQ monitors, "Virtual" matches VDD monitors.

@@ -622,6 +622,11 @@ class vulkan_output_consumer : public core::frame_consumer
             }
         }
 
+        // EDID persistence: lock the monitor's EDID so the display survives cable disconnect
+        if (config_.persist_edid) {
+            nvapi_->persist_edid(config_.gpu_index, config_.output_index);
+        }
+
         // Quadro Sync configuration
         if (config_.gsync_enabled && nvapi_->gsync_device_count() > 0) {
             auto source = (config_.gsync_source == gsync_reference::external)

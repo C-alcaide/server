@@ -114,6 +114,13 @@ class nvapi_helpers
     // Remove a previously injected EDID, restoring the output to unconnected state.
     bool remove_edid(int gpu_index, uint32_t display_id);
 
+    // Persist the EDID of a currently connected monitor. After this, if the cable
+    // is disconnected, the GPU still reports the output as connected with the same
+    // EDID — Windows keeps the display in the desktop topology. Persists across
+    // reboots. Call remove_edid() to clear the override.
+    // Requires Administrator privileges and a professional GPU (Quadro/RTX A-series).
+    bool persist_edid(int gpu_index, int output_index);
+
   private:
     bool     available_    = false;
     int      gsync_count_  = 0;

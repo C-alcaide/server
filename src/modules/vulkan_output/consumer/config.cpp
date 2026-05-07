@@ -137,6 +137,9 @@ configuration parse_config(const boost::property_tree::wptree& ptree)
     // EDID emulation for headless outputs
     config.edid_emulation = ptree.get(L"edid-emulation", false);
 
+    // EDID persistence (lock connected monitor's EDID to survive cable disconnect)
+    config.persist_edid = ptree.get(L"persist-edid", false);
+
     // Display name matching (overrides index-based selection)
     config.display_name = ptree.get(L"display-name", L"");
 
