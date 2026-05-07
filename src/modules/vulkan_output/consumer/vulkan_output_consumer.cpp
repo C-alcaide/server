@@ -1191,6 +1191,14 @@ class vulkan_output_consumer : public core::frame_consumer
         if (size == 0)
             return;
 
+        // Validate buffer size matches expected frame dimensions to avoid GPU overread
+        const size_t expected_size = static_cast<size_t>(format_desc_.width) * format_desc_.height * 4;
+        if (size < expected_size) {
+            CASPAR_LOG(warning) << print() << L" CPU upload: pixel buffer (" << size
+                                << L" bytes) smaller than expected (" << expected_size << L"). Skipping frame.";
+            return;
+        }
+
         auto        dev       = device_->device();
         auto        phys_dev  = device_->physical_device();
 
