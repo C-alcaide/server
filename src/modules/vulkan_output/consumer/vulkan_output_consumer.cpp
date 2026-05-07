@@ -805,8 +805,11 @@ class vulkan_output_consumer : public core::frame_consumer
         vkCmdPipelineBarrier(swapchain_.cmd_buffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                              VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
 
-        // When color conversion is active, blit into intermediate image instead of swapchain
-        const bool color_convert_active = color_pipeline_ && color_pipeline_->is_active();
+        // When color conversion is active, blit into intermediate image instead of swapchain.
+        // Skip during identify overlay — it writes directly to the swapchain and the
+        // intermediate would contain uninitialized data if compute ran.
+        const bool identify_active = identify_frames_remaining_ > 0;
+        const bool color_convert_active = color_pipeline_ && color_pipeline_->is_active() && !identify_active;
         VkImage blit_dest_image = color_convert_active ? color_pipeline_->image()
                                                        : swapchain_.images[image_index];
 
