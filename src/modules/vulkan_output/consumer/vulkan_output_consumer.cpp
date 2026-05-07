@@ -1222,7 +1222,10 @@ class vulkan_output_consumer : public core::frame_consumer
         region.bufferImageHeight = 0;
         region.imageSubresource  = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
         region.imageOffset       = {0, 0, 0};
-        region.imageExtent       = {swapchain_.width, swapchain_.height, 1};
+        // Use actual frame dimensions — the pixel buffer is format_desc_ sized, not swapchain sized.
+        // Using swapchain dimensions would overread the buffer if swapchain > frame.
+        region.imageExtent       = {static_cast<uint32_t>(format_desc_.width),
+                                    static_cast<uint32_t>(format_desc_.height), 1};
 
         vkCmdCopyBufferToImage(swapchain_.cmd_buffer, staging_buffer_, dst_image,
                                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
