@@ -1333,7 +1333,12 @@ class vulkan_output_consumer : public core::frame_consumer
         wc.lpfnWndProc   = fse_wnd_proc;
         wc.hInstance     = GetModuleHandle(nullptr);
         wc.lpszClassName = L"CasparVulkanOutput";
-        RegisterClassExW(&wc);
+        if (!RegisterClassExW(&wc)) {
+            // ERROR_CLASS_ALREADY_EXISTS is expected on repeated init cycles
+            if (GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
+                CASPAR_LOG(warning) << print() << L" RegisterClassExW failed: " << GetLastError();
+            }
+        }
 
         // Enumerate monitors and select by output_index
         struct monitor_enum_data
