@@ -131,7 +131,8 @@ gpu_affinity_context::gpu_affinity_context(int gpu_index, int width, int height)
 gpu_affinity_context::~gpu_affinity_context()
 {
     if (running_) {
-        // Clean up GL resources on the context thread
+        // Poison-pill pattern: dispatch cleanup as the final task that also stops the thread.
+        // This guarantees the cleanup lambda fully executes before the thread exits.
         dispatch([this] {
             if (upload_texture_) {
                 glDeleteTextures(1, &upload_texture_);
@@ -152,10 +153,11 @@ gpu_affinity_context::~gpu_affinity_context()
                 wglDeleteDCNV_(affinity_dc_);
                 affinity_dc_ = nullptr;
             }
+
+            // Signal thread exit from within the task — guarantees cleanup ran first
+            running_ = false;
         });
 
-        running_ = false;
-        queue_cv_.notify_all();
         if (thread_.joinable())
             thread_.join();
     }
