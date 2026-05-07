@@ -51,6 +51,7 @@
 
 #include <chrono>
 #include <condition_variable>
+#include <future>
 #include <mutex>
 #include <queue>
 #include <thread>
@@ -691,14 +692,7 @@ class vulkan_output_consumer : public core::frame_consumer
             graph_->set_value("tick-time", tick);
             tick_timer_.restart();
 
-            // Pump window messages for FSE window (needed for WM_DISPLAYCHANGE etc.)
-            if (fse_hwnd_) {
-                MSG msg;
-                while (PeekMessageW(&msg, fse_hwnd_, 0, 0, PM_REMOVE)) {
-                    TranslateMessage(&msg);
-                    DispatchMessageW(&msg);
-                }
-            }
+
         }
     }
 
@@ -1355,71 +1349,105 @@ class vulkan_output_consumer : public core::frame_consumer
                 if ((wParam & 0xFFF0) == SC_CLOSE)
                     return 0;
                 break;
+            case WM_MOUSEACTIVATE:
+                return MA_NOACTIVATEANDEAT; // Don't steal focus on click
+            case WM_SETCURSOR:
+                SetCursor(nullptr); // Hide cursor on output windows
+                return TRUE;
         }
         return DefWindowProcW(hwnd, msg, wParam, lParam);
     }
 
     void create_fse_window()
     {
-        // Create a borderless window for fullscreen exclusive on consumer GPUs
-        WNDCLASSEXW wc{};
-        wc.cbSize        = sizeof(WNDCLASSEXW);
-        wc.style         = CS_HREDRAW | CS_VREDRAW;
-        wc.lpfnWndProc   = fse_wnd_proc;
-        wc.hInstance     = GetModuleHandle(nullptr);
-        wc.lpszClassName = L"CasparVulkanOutput";
-        if (!RegisterClassExW(&wc)) {
-            // ERROR_CLASS_ALREADY_EXISTS is expected on repeated init cycles
-            if (GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
-                CASPAR_LOG(warning) << print() << L" RegisterClassExW failed: " << GetLastError();
-            }
-        }
+        // Create the FSE window on a dedicated message thread so it always pumps messages.
+        // Windows routes messages to the thread that created the window, so if that thread
+        // doesn't pump, clicking the window causes a "Not Responding" hang.
+        std::promise<HWND> hwnd_promise;
+        auto hwnd_future = hwnd_promise.get_future();
 
-        // Enumerate monitors and select by output_index
-        struct monitor_enum_data
-        {
-            int target_index;
-            int current_index;
-            RECT rect;
-            bool found;
-        };
-        monitor_enum_data data{config_.output_index, 0, {}, false};
+        fse_msg_thread_ = std::thread([this, &hwnd_promise] {
+            SetThreadDescription(GetCurrentThread(), L"Vulkan FSE MsgPump");
 
-        EnumDisplayMonitors(
-            nullptr, nullptr,
-            [](HMONITOR, HDC, LPRECT rect, LPARAM lparam) -> BOOL {
-                auto* d = reinterpret_cast<monitor_enum_data*>(lparam);
-                d->current_index++;
-                if (d->current_index == d->target_index) {
-                    d->rect  = *rect;
-                    d->found = true;
-                    return FALSE; // Stop enumeration
+            WNDCLASSEXW wc{};
+            wc.cbSize        = sizeof(WNDCLASSEXW);
+            wc.style         = CS_HREDRAW | CS_VREDRAW;
+            wc.lpfnWndProc   = fse_wnd_proc;
+            wc.hInstance     = GetModuleHandle(nullptr);
+            wc.lpszClassName = L"CasparVulkanOutput";
+            if (!RegisterClassExW(&wc)) {
+                if (GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
+                    CASPAR_LOG(warning) << print() << L" RegisterClassExW failed: " << GetLastError();
                 }
-                return TRUE;
-            },
-            reinterpret_cast<LPARAM>(&data));
+            }
 
-        int x = 0, y = 0;
-        int w = format_desc_.width;
-        int h = format_desc_.height;
+            // Enumerate monitors and select by output_index
+            struct monitor_enum_data
+            {
+                int target_index;
+                int current_index;
+                RECT rect;
+                bool found;
+            };
+            monitor_enum_data data{config_.output_index, 0, {}, false};
 
-        if (data.found) {
-            x = data.rect.left;
-            y = data.rect.top;
-            w = data.rect.right - data.rect.left;
-            h = data.rect.bottom - data.rect.top;
-            CASPAR_LOG(info) << print() << L" FSE window on monitor " << config_.output_index << L" at ("
-                             << x << L"," << y << L") " << w << L"x" << h;
-        } else {
-            CASPAR_LOG(warning) << print() << L" Monitor " << config_.output_index
-                                << L" not found, using primary display.";
-        }
+            EnumDisplayMonitors(
+                nullptr, nullptr,
+                [](HMONITOR, HDC, LPRECT rect, LPARAM lparam) -> BOOL {
+                    auto* d = reinterpret_cast<monitor_enum_data*>(lparam);
+                    d->current_index++;
+                    if (d->current_index == d->target_index) {
+                        d->rect  = *rect;
+                        d->found = true;
+                        return FALSE;
+                    }
+                    return TRUE;
+                },
+                reinterpret_cast<LPARAM>(&data));
 
-        fse_hwnd_ = CreateWindowExW(WS_EX_TOPMOST, L"CasparVulkanOutput", L"CasparCG Vulkan Output",
-                                    WS_POPUP | WS_VISIBLE, x, y, w, h, nullptr, nullptr,
-                                    GetModuleHandle(nullptr), nullptr);
+            int x = 0, y = 0;
+            int w = format_desc_.width;
+            int h = format_desc_.height;
 
-        ShowWindow(fse_hwnd_, SW_SHOW);
+            if (data.found) {
+                x = data.rect.left;
+                y = data.rect.top;
+                w = data.rect.right - data.rect.left;
+                h = data.rect.bottom - data.rect.top;
+                CASPAR_LOG(info) << print() << L" FSE window on monitor " << config_.output_index << L" at ("
+                                 << x << L"," << y << L") " << w << L"x" << h;
+            } else {
+                CASPAR_LOG(warning) << print() << L" Monitor " << config_.output_index
+                                    << L" not found. Window will be created off-screen (no output until monitor is available).";
+                // Place window far off-screen so it doesn't cover the operator's display.
+                // Vulkan swapchain will still be created on this window; frames are rendered
+                // but not visible until the monitor appears in the desktop topology.
+                x = -32000;
+                y = -32000;
+            }
+
+            HWND hwnd = CreateWindowExW(WS_EX_TOPMOST | WS_EX_NOACTIVATE,
+                                        L"CasparVulkanOutput", L"CasparCG Vulkan Output",
+                                        WS_POPUP | WS_VISIBLE | WS_DISABLED, x, y, w, h,
+                                        nullptr, nullptr, GetModuleHandle(nullptr), nullptr);
+            ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            hwnd_promise.set_value(hwnd);
+
+            // Message pump — runs until WM_QUIT or fse_msg_running_ is false
+            MSG msg;
+            while (fse_msg_running_) {
+                if (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+                    if (msg.message == WM_QUIT)
+                        break;
+                    TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                } else {
+                    MsgWaitForMultipleObjects(0, nullptr, FALSE, 50, QS_ALLINPUT);
+                }
+            }
+        });
+
+        fse_hwnd_ = hwnd_future.get();
     }
 
     void destroy_resources()
@@ -1479,6 +1507,11 @@ class vulkan_output_consumer : public core::frame_consumer
         nvapi_.reset();
 
         if (fse_hwnd_) {
+            // Signal message thread to stop, then post WM_QUIT to unblock it
+            fse_msg_running_ = false;
+            PostMessageW(fse_hwnd_, WM_CLOSE, 0, 0);
+            if (fse_msg_thread_.joinable())
+                fse_msg_thread_.join();
             DestroyWindow(fse_hwnd_);
             fse_hwnd_ = nullptr;
             UnregisterClassW(L"CasparVulkanOutput", GetModuleHandle(nullptr));
@@ -1517,6 +1550,10 @@ class vulkan_output_consumer : public core::frame_consumer
     // Present thread
     std::thread                      present_thread_;
     std::atomic<bool>                running_{false};
+
+    // FSE window message thread
+    std::thread                      fse_msg_thread_;
+    std::atomic<bool>                fse_msg_running_{true};
 
     // Display hot-plug
     std::atomic<bool>                display_lost_{false};

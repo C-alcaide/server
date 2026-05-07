@@ -23,6 +23,7 @@
 
 #ifdef CASPAR_NVAPI_ENABLED
 
+#include <windows.h>
 #include <nvapi.h>
 
 #include <algorithm>

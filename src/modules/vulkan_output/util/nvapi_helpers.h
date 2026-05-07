@@ -106,6 +106,9 @@ class nvapi_helpers
     // Inject a synthetic EDID on an unconnected output.
     // Returns the NvAPI displayId used (needed for removal), or 0 on failure.
     // output_index is 1-based (same as config <device>).
+    // NOTE: This makes the GPU report the connector as "connected" but does NOT
+    // create a usable Windows desktop display. A physical dongle or IddCx virtual
+    // display driver is needed for EnumDisplayMonitors to see the output.
     uint32_t inject_edid(int gpu_index, int output_index, uint32_t width, uint32_t height, double refresh_hz);
 
     // Remove a previously injected EDID, restoring the output to unconnected state.
