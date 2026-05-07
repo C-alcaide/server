@@ -1383,6 +1383,7 @@ class vulkan_output_consumer : public core::frame_consumer
         if (fse_hwnd_) {
             DestroyWindow(fse_hwnd_);
             fse_hwnd_ = nullptr;
+            UnregisterClassW(L"CasparVulkanOutput", GetModuleHandle(nullptr));
         }
     }
 
