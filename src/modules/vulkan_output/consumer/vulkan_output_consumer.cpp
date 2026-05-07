@@ -1387,8 +1387,11 @@ class vulkan_output_consumer : public core::frame_consumer
         }
     }
 
+    // NOTE: config_ is read without mutex on the present thread for performance.
+    // config_mutex_ only protects modifications from state() reads on other threads.
+    // config_ MUST NOT be modified after the present thread starts (after initialize()).
     configuration                    config_;
-    mutable std::mutex               config_mutex_; // Protects config_ modifications from state() reads
+    mutable std::mutex               config_mutex_; // Protects state() reads from config_ writes
     core::video_format_desc          format_desc_;
     int                              port_index_ = 0;
     spl::shared_ptr<diagnostics::graph> graph_;
