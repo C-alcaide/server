@@ -283,6 +283,9 @@ void cuda_peer_transfer::read_source(GLuint texture_id, int width, int height)
 void cuda_peer_transfer::peer_copy()
 {
     // No GL context required — just device-to-device DMA
+    // TODO(perf): This is synchronous and blocks the present thread for the duration
+    // of the DMA transfer. Consider using cudaMemcpyPeerAsync + stream + event fence
+    // to overlap the transfer with other present work (double-buffer staging).
     cuda_check(
         cudaMemcpyPeer(dst_staging_, dst_device_, src_staging_, src_device_, total_bytes_),
         "cudaMemcpyPeer");
