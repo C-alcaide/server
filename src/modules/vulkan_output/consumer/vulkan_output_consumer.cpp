@@ -775,12 +775,28 @@ class vulkan_output_consumer : public core::frame_consumer
     void present_frame(const core::const_frame& frame)
     {
         if (display_lost_) {
-            // Attempt recovery every N frames
-            if (++hotplug_retry_counter_ % 50 == 0) {
-                recreate_swapchain();
+            switch (config_.on_disconnect) {
+                case disconnect_behavior::hold:
+                    // Hold last frame — don't retry, just return silently
+                    return;
+                case disconnect_behavior::black:
+                    // Attempt recovery every N frames (same as retry)
+                    // but don't log dropped-frame since black is intentional
+                    if (++hotplug_retry_counter_ % 50 == 0)
+                        recreate_swapchain();
+                    if (display_lost_)
+                        return;
+                    break;
+                case disconnect_behavior::retry:
+                default:
+                    // Attempt recovery every N frames
+                    if (++hotplug_retry_counter_ % 50 == 0) {
+                        recreate_swapchain();
+                    }
+                    if (display_lost_)
+                        return;
+                    break;
             }
-            if (display_lost_)
-                return;
         }
 
         auto dev = device_->device();
