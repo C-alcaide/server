@@ -688,13 +688,31 @@ class vulkan_output_consumer : public core::frame_consumer
         blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
 
         if (has_subregion()) {
-            int sw = config_.region_w > 0 ? config_.region_w : static_cast<int>(src_width) - config_.src_x;
-            int sh = config_.region_h > 0 ? config_.region_h : static_cast<int>(src_height) - config_.src_y;
+            const int32_t sw_max = static_cast<int32_t>(src_width);
+            const int32_t sh_max = static_cast<int32_t>(src_height);
+            const int32_t dw_max = static_cast<int32_t>(swapchain_.width);
+            const int32_t dh_max = static_cast<int32_t>(swapchain_.height);
 
-            blit.srcOffsets[0] = {config_.src_x, config_.src_y, 0};
-            blit.srcOffsets[1] = {config_.src_x + sw, config_.src_y + sh, 1};
-            blit.dstOffsets[0] = {config_.dest_x, config_.dest_y, 0};
-            blit.dstOffsets[1] = {config_.dest_x + sw, config_.dest_y + sh, 1};
+            // Clamp source offsets to source dimensions
+            int32_t sx = std::clamp(config_.src_x, 0, sw_max);
+            int32_t sy = std::clamp(config_.src_y, 0, sh_max);
+            int sw = config_.region_w > 0 ? config_.region_w : sw_max - sx;
+            int sh = config_.region_h > 0 ? config_.region_h : sh_max - sy;
+            // Clamp source region end to source bounds
+            sw = std::min(sw, sw_max - sx);
+            sh = std::min(sh, sh_max - sy);
+
+            // Clamp destination offsets to swapchain dimensions
+            int32_t dx = std::clamp(config_.dest_x, 0, dw_max);
+            int32_t dy = std::clamp(config_.dest_y, 0, dh_max);
+            // Clamp destination end to swapchain bounds
+            int dw = std::min(sw, dw_max - dx);
+            int dh = std::min(sh, dh_max - dy);
+
+            blit.srcOffsets[0] = {sx, sy, 0};
+            blit.srcOffsets[1] = {sx + sw, sy + sh, 1};
+            blit.dstOffsets[0] = {dx, dy, 0};
+            blit.dstOffsets[1] = {dx + dw, dy + dh, 1};
         } else {
             blit.srcOffsets[0] = {0, 0, 0};
             blit.srcOffsets[1] = {static_cast<int32_t>(src_width), static_cast<int32_t>(src_height), 1};
