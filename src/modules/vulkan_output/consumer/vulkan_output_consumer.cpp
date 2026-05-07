@@ -1027,7 +1027,17 @@ class vulkan_output_consumer : public core::frame_consumer
                                  VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &cs_barrier);
 
             // Blit intermediate → swapchain (swapchain is already in TRANSFER_DST from initial barrier)
-            auto final_region = compute_blit_region(color_pipeline_->width(), color_pipeline_->height());
+            // Use full-extent source — the subregion was already applied when blitting into
+            // the intermediate. Applying compute_blit_region() again would crop twice.
+            VkImageBlit final_region{};
+            final_region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            final_region.srcOffsets[0]  = {0, 0, 0};
+            final_region.srcOffsets[1]  = {static_cast<int32_t>(color_pipeline_->width()),
+                                           static_cast<int32_t>(color_pipeline_->height()), 1};
+            final_region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            final_region.dstOffsets[0]  = {0, 0, 0};
+            final_region.dstOffsets[1]  = {static_cast<int32_t>(swapchain_.width),
+                                           static_cast<int32_t>(swapchain_.height), 1};
             vkCmdBlitImage(swapchain_.cmd_buffer, color_pipeline_->image(),
                            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                            swapchain_.images[image_index], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
