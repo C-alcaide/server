@@ -104,6 +104,7 @@ class color_convert_pipeline
     bool                         active_ = false;
 
     VkPhysicalDevice physical_device_ = VK_NULL_HANDLE;
+    VkQueue          queue_           = VK_NULL_HANDLE;
 };
 
 /// Build 3×3 gamut conversion matrix (BT.709 → target) stored in 4×4 layout.

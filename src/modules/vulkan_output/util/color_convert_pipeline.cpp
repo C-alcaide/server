@@ -101,6 +101,7 @@ constexpr float mat_709_to_adobe_rgb[16] = {
 color_convert_pipeline::color_convert_pipeline(vulkan_device& device, uint32_t width, uint32_t height)
     : device_(device.device())
     , physical_device_(device.physical_device())
+    , queue_(device.present_queue())
     , width_(width)
     , height_(height)
 {
@@ -122,7 +123,12 @@ color_convert_pipeline::~color_convert_pipeline()
     if (device_ == VK_NULL_HANDLE)
         return;
 
-    vkDeviceWaitIdle(device_);
+    // Wait on the present queue where compute dispatches are submitted,
+    // rather than stalling all queues with vkDeviceWaitIdle.
+    if (queue_ != VK_NULL_HANDLE)
+        vkQueueWaitIdle(queue_);
+    else
+        vkDeviceWaitIdle(device_);
 
     if (descriptor_pool_ != VK_NULL_HANDLE)
         vkDestroyDescriptorPool(device_, descriptor_pool_, nullptr);
