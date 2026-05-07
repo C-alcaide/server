@@ -752,6 +752,22 @@ class vulkan_output_consumer : public core::frame_consumer
 
         create_swapchain();
         set_hdr_metadata();
+
+        // Recreate color pipeline if swapchain dimensions changed (hot-plug to different display)
+        if (color_pipeline_ && (color_pipeline_->width() != swapchain_.width ||
+                                color_pipeline_->height() != swapchain_.height)) {
+            try {
+                color_pipeline_ = std::make_unique<color_convert_pipeline>(
+                    *device_, swapchain_.width, swapchain_.height);
+                color_pipeline_->update_config(config_.gamut, config_.eotf,
+                                               static_cast<float>(config_.max_cll));
+                CASPAR_LOG(info) << print() << L" Color pipeline recreated for new dimensions.";
+            } catch (const std::exception& e) {
+                CASPAR_LOG(error) << print() << L" Failed to recreate color pipeline: " << e.what();
+                color_pipeline_.reset();
+            }
+        }
+
         display_lost_ = false;
         CASPAR_LOG(info) << print() << L" Swapchain recreated successfully.";
     }
