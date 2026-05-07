@@ -139,9 +139,11 @@ shared_texture_pool::~shared_texture_pool()
             }
         });
     } else {
-        // Affinity path: caller must ensure we're on the GL thread or context is still valid
+        // Affinity path: no GL context is current on this thread.
+        // Only destroy VK-side and Win32 handles. GL resources (texture, memory object,
+        // semaphore) will be freed when the affinity GL context is destroyed.
         for (int i = 0; i < BUFFER_COUNT; ++i) {
-            destroy_slot(slots_[i]);
+            destroy_slot_vk_only(slots_[i]);
         }
     }
 }
@@ -285,6 +287,14 @@ void shared_texture_pool::destroy_slot(slot& s)
         glDeleteTextures(1, &s.gl_texture);
     if (s.gl_memory_object)
         glDeleteMemoryObjectsEXT_(1, &s.gl_memory_object);
+
+    // VK + handle cleanup
+    destroy_slot_vk_only(s);
+}
+
+void shared_texture_pool::destroy_slot_vk_only(slot& s)
+{
+    auto dev = vk_device_.device();
 
     // VK cleanup
     if (s.vk_image_view != VK_NULL_HANDLE)

@@ -107,6 +107,7 @@ class shared_texture_pool
 
     void create_slot(slot& s);
     void destroy_slot(slot& s);
+    void destroy_slot_vk_only(slot& s); // VK + handle cleanup only (no GL context needed)
 
     std::shared_ptr<accelerator::ogl::device> ogl_device_;
     vulkan_device&                            vk_device_;
