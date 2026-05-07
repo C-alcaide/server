@@ -468,6 +468,22 @@ std::vector<display_info> vulkan_device::enumerate_displays()
         VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME,
     };
 
+    // Filter extensions to only those available
+    uint32_t avail_count = 0;
+    vkEnumerateInstanceExtensionProperties(nullptr, &avail_count, nullptr);
+    std::vector<VkExtensionProperties> avail_exts(avail_count);
+    vkEnumerateInstanceExtensionProperties(nullptr, &avail_count, avail_exts.data());
+
+    extensions.erase(
+        std::remove_if(extensions.begin(), extensions.end(),
+                       [&](const char* name) {
+                           return std::none_of(avail_exts.begin(), avail_exts.end(),
+                                               [&](const VkExtensionProperties& p) {
+                                                   return strcmp(p.extensionName, name) == 0;
+                                               });
+                       }),
+        extensions.end());
+
     VkInstanceCreateInfo create_info{};
     create_info.sType                   = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
     create_info.pApplicationInfo        = &app_info;
