@@ -172,19 +172,51 @@ edid_info nvapi_helpers::read_edid(int gpu_index, int display_output_id)
     if (!available_ || !impl_ || gpu_index >= static_cast<int>(impl_->gpu_count))
         return info;
 
+    // Map our 1-based output index to an NvAPI display ID.
+    // NvAPI_GPU_GetEDID requires a proper display ID from the enumeration API,
+    // not a sequential index.
+    NvU32 actual_display_id = 0;
+    {
+        NvU32 disp_id_count = 0;
+        auto  st = NvAPI_GPU_GetConnectedDisplayIds(impl_->gpus[gpu_index], nullptr, &disp_id_count, 0);
+        if (st != NVAPI_OK || disp_id_count == 0) {
+            CASPAR_LOG(debug) << L"[vulkan_output] No connected displays for GPU " << gpu_index;
+            return info;
+        }
+
+        std::vector<NV_GPU_DISPLAYIDS> display_ids(disp_id_count);
+        for (auto& d : display_ids)
+            d.version = NV_GPU_DISPLAYIDS_VER;
+
+        st = NvAPI_GPU_GetConnectedDisplayIds(impl_->gpus[gpu_index], display_ids.data(), &disp_id_count, 0);
+        if (st != NVAPI_OK) {
+            CASPAR_LOG(debug) << L"[vulkan_output] GetConnectedDisplayIds failed for GPU " << gpu_index;
+            return info;
+        }
+
+        int target_idx = display_output_id - 1; // Convert 1-based to 0-based
+        if (target_idx < 0 || target_idx >= static_cast<int>(disp_id_count)) {
+            CASPAR_LOG(debug) << L"[vulkan_output] Output index " << display_output_id
+                              << L" out of range (GPU has " << disp_id_count << L" connected displays)";
+            return info;
+        }
+
+        actual_display_id = display_ids[target_idx].displayId;
+    }
+
     // Read EDID using NvAPI_GPU_GetEDID
     NV_EDID edid{};
     edid.version = NV_EDID_VER;
     edid.offset  = 0;
 
     auto status = NvAPI_GPU_GetEDID(impl_->gpus[gpu_index],
-                                    static_cast<NvU32>(display_output_id),
+                                    actual_display_id,
                                     &edid);
     if (status != NVAPI_OK) {
         NvAPI_ShortString err;
         NvAPI_GetErrorMessage(status, err);
         CASPAR_LOG(debug) << L"[vulkan_output] GetEDID failed for gpu=" << gpu_index
-                          << L" output=" << display_output_id << L": " << to_wstring(err);
+                          << L" displayId=" << actual_display_id << L": " << to_wstring(err);
         return info;
     }
 
@@ -202,7 +234,7 @@ edid_info nvapi_helpers::read_edid(int gpu_index, int display_output_id)
         page.offset  = offset;
 
         status = NvAPI_GPU_GetEDID(impl_->gpus[gpu_index],
-                                   static_cast<NvU32>(display_output_id),
+                                   actual_display_id,
                                    &page);
         if (status != NVAPI_OK || page.edidId != edid_id)
             break;

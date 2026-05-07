@@ -373,8 +373,7 @@ void shared_texture_pool::signal_gl()
     auto& s = slots_[write_index_];
 
     // Signal the semaphore after the blit completes
-    constexpr GLenum GL_LAYOUT_GENERAL_EXT = 0x958D; // from GL_EXT_semaphore
-    GLenum dst_layout = GL_LAYOUT_GENERAL_EXT;
+    GLenum dst_layout = GL_LAYOUT_GENERAL_EXT; // 0x958D from GL_EXT_semaphore
     glSignalSemaphoreEXT_(s.gl_semaphore, 0, nullptr, 1, &s.gl_texture, &dst_layout);
 
     // Flush to ensure the signal is submitted to the GPU
