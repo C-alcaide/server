@@ -794,6 +794,8 @@ class vulkan_output_consumer : public core::frame_consumer
             result = vkAcquireNextImageKHR(
                 dev, swapchain_.swapchain, UINT64_MAX, swapchain_.image_available, VK_NULL_HANDLE, &image_index);
             if (result != VK_SUCCESS) {
+                // NOTE: Dropping a frame here after recreation is expected (by design).
+                // The swapchain was just recreated; one dropped frame is acceptable.
                 graph_->set_tag(diagnostics::tag_severity::WARNING, "dropped-frame");
                 return;
             }
