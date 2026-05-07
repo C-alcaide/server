@@ -132,9 +132,13 @@ cuda_peer_transfer::~cuda_peer_transfer()
         cudaGraphicsUnregisterResource(dst_resource_);
     }
 
-    // Delete destination GL texture
+    // Delete destination GL texture (requires GPU B's GL context to be current)
     if (dest_gl_texture_) {
-        glDeleteTextures(1, &dest_gl_texture_);
+        if (wglGetCurrentContext() != nullptr) {
+            glDeleteTextures(1, &dest_gl_texture_);
+        }
+        // If no GL context is current, the texture will be freed when the
+        // owning GL context is destroyed during shutdown.
     }
 
     // Free staging buffers
