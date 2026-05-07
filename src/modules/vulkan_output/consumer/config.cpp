@@ -134,6 +134,9 @@ configuration parse_config(const boost::property_tree::wptree& ptree)
     // EDID auto-detection
     config.edid_auto_hdr = ptree.get(L"edid-auto-hdr", false);
 
+    // EDID emulation for headless outputs
+    config.edid_emulation = ptree.get(L"edid-emulation", false);
+
     return config;
 }
 

@@ -101,6 +101,16 @@ class nvapi_helpers
     // Get number of detected GSync boards
     int gsync_device_count() const { return gsync_count_; }
 
+    // ─── EDID Emulation ──────────────────────────────────────────────────────
+
+    // Inject a synthetic EDID on an unconnected output.
+    // Returns the NvAPI displayId used (needed for removal), or 0 on failure.
+    // output_index is 1-based (same as config <device>).
+    uint32_t inject_edid(int gpu_index, int output_index, uint32_t width, uint32_t height, double refresh_hz);
+
+    // Remove a previously injected EDID, restoring the output to unconnected state.
+    bool remove_edid(int gpu_index, uint32_t display_id);
+
   private:
     bool     available_    = false;
     int      gsync_count_  = 0;

@@ -49,6 +49,7 @@
 
 #include <boost/algorithm/string.hpp>
 
+#include <chrono>
 #include <condition_variable>
 #include <mutex>
 #include <queue>
@@ -212,6 +213,22 @@ class vulkan_output_consumer : public core::frame_consumer
         }
 
         if (!found && device_->tier() == gpu_tier::consumer) {
+            // EDID emulation: inject synthetic EDID if the target output has no monitor
+            if (config_.edid_emulation) {
+                if (!nvapi_)
+                    nvapi_ = std::make_unique<nvapi_helpers>();
+                if (nvapi_->is_available()) {
+                    uint32_t edid_w = config_.region_w > 0 ? config_.region_w : format_desc_.width;
+                    uint32_t edid_h = config_.region_h > 0 ? config_.region_h : format_desc_.height;
+                    injected_edid_display_id_ = nvapi_->inject_edid(
+                        config_.gpu_index, config_.output_index,
+                        edid_w, edid_h, format_desc_.fps);
+                    if (injected_edid_display_id_ != 0) {
+                        // Give Windows time to enumerate the new display
+                        std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+                    }
+                }
+            }
             // Consumer fallback: create a borderless fullscreen window
             create_fse_window();
         } else if (!found) {
@@ -253,6 +270,9 @@ class vulkan_output_consumer : public core::frame_consumer
                         glGetUnsignedBytevEXT(0x9462 /*GL_DEVICE_LUID_EXT*/, ogl_luid);
                         ogl_luid_valid = true;
                     }
+                    // Drain any stale GL errors left by the unchecked extension call above.
+                    // If left, these propagate to the OGL device destructor and crash on shutdown.
+                    while (glGetError() != GL_NO_ERROR) {}
                 });
                 if (ogl_luid_valid && memcmp(ogl_luid, device_->device_luid(), 8) != 0) {
                     gpu_match = false;
@@ -578,7 +598,8 @@ class vulkan_output_consumer : public core::frame_consumer
 
     void setup_nvapi()
     {
-        nvapi_ = std::make_unique<nvapi_helpers>();
+        if (!nvapi_)
+            nvapi_ = std::make_unique<nvapi_helpers>();
         if (!nvapi_->is_available())
             return;
 
@@ -1449,6 +1470,12 @@ class vulkan_output_consumer : public core::frame_consumer
         interop_.reset();
         shared_pool_.reset();
         device_.reset();
+
+        // Remove injected EDID before releasing NvAPI
+        if (injected_edid_display_id_ != 0 && nvapi_) {
+            nvapi_->remove_edid(config_.gpu_index, injected_edid_display_id_);
+            injected_edid_display_id_ = 0;
+        }
         nvapi_.reset();
 
         if (fse_hwnd_) {
@@ -1511,6 +1538,9 @@ class vulkan_output_consumer : public core::frame_consumer
     VkBuffer                         staging_buffer_      = VK_NULL_HANDLE;
     VkDeviceMemory                   staging_memory_      = VK_NULL_HANDLE;
     size_t                           staging_buffer_size_ = 0;
+
+    // EDID emulation state
+    uint32_t                         injected_edid_display_id_ = 0;
 };
 
 } // anonymous namespace

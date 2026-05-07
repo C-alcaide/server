@@ -25,6 +25,10 @@
 
 #include <nvapi.h>
 
+#include <algorithm>
+#include <cstring>
+#include <vector>
+
 namespace caspar { namespace vulkan_output {
 
 namespace {
@@ -504,6 +508,257 @@ bool nvapi_helpers::disable_sync()
     return true;
 }
 
+// ─── EDID Emulation ─────────────────────────────────────────────────────────
+
+namespace {
+
+// Build a minimal 128-byte EDID block for the given resolution and refresh rate.
+// This is enough for Windows to enumerate the output as a connected display.
+void build_synthetic_edid(uint8_t* edid, uint32_t width, uint32_t height, double refresh_hz)
+{
+    memset(edid, 0, 128);
+
+    // Header
+    edid[0] = 0x00; edid[1] = 0xFF; edid[2] = 0xFF; edid[3] = 0xFF;
+    edid[4] = 0xFF; edid[5] = 0xFF; edid[6] = 0xFF; edid[7] = 0x00;
+
+    // Manufacturer ID: "CSP" (CasparCG) — encoded as 3 x 5-bit letters
+    // C=3, S=19, P=16 → (3<<10)|(19<<5)|16 = 0x0E70
+    edid[8] = 0x0E; edid[9] = 0x70;
+
+    // Product code
+    edid[10] = 0x01; edid[11] = 0x00;
+
+    // Serial number
+    edid[12] = 0x01; edid[13] = 0x00; edid[14] = 0x00; edid[15] = 0x00;
+
+    // Week/Year of manufacture (week 1, 2024)
+    edid[16] = 1; edid[17] = 34; // 2024 = 1990 + 34
+
+    // EDID version 1.4
+    edid[18] = 1; edid[19] = 4;
+
+    // Video input: digital, 8-bit color depth, DisplayPort
+    edid[20] = 0xA5; // Digital, 8-bit, DP
+
+    // Screen size (cm) — approximate from pixels at 96 DPI
+    edid[21] = static_cast<uint8_t>((std::min)(width * 254 / 960 / 10, 255u));  // horizontal cm
+    edid[22] = static_cast<uint8_t>((std::min)(height * 254 / 960 / 10, 255u)); // vertical cm
+
+    // Gamma (2.2 = value 120, stored as (gamma*100)-100)
+    edid[23] = 120;
+
+    // Feature support: RGB color, preferred timing in DTD1
+    edid[24] = 0x0A;
+
+    // Chromaticity (sRGB defaults)
+    edid[25] = 0xEE; edid[26] = 0x91; edid[27] = 0xA3; edid[28] = 0x54;
+    edid[29] = 0x4C; edid[30] = 0x99; edid[31] = 0x26; edid[32] = 0x0F;
+    edid[33] = 0x50; edid[34] = 0x54;
+
+    // Established timings (none)
+    edid[35] = 0; edid[36] = 0; edid[37] = 0;
+
+    // Standard timings (unused)
+    for (int i = 38; i < 54; i += 2) {
+        edid[i] = 0x01; edid[i + 1] = 0x01;
+    }
+
+    // ─── Detailed Timing Descriptor #1 (preferred mode) ─────────────────────
+    // Calculate timing parameters (CVT-like simplified)
+    uint32_t h_active  = width;
+    uint32_t v_active  = height;
+    uint32_t h_blank   = (width < 1920) ? 160 : 280;
+    uint32_t v_blank   = (height < 1080) ? 28 : 45;
+    uint32_t h_front   = (width < 1920) ? 48 : 88;
+    uint32_t h_sync    = (width < 1920) ? 32 : 44;
+    uint32_t v_front   = 4;
+    uint32_t v_sync    = 5;
+    uint32_t h_total   = h_active + h_blank;
+    uint32_t v_total   = v_active + v_blank;
+
+    // Pixel clock in 10 kHz units
+    double pixel_clock_mhz = (h_total * v_total * refresh_hz) / 1000000.0;
+    uint32_t pixel_clock = static_cast<uint32_t>(pixel_clock_mhz * 100.0 + 0.5); // in 10 kHz
+
+    edid[54] = pixel_clock & 0xFF;
+    edid[55] = (pixel_clock >> 8) & 0xFF;
+
+    // H active / H blanking
+    edid[56] = h_active & 0xFF;
+    edid[57] = h_blank & 0xFF;
+    edid[58] = static_cast<uint8_t>(((h_active >> 8) & 0x0F) << 4 | ((h_blank >> 8) & 0x0F));
+
+    // V active / V blanking
+    edid[59] = v_active & 0xFF;
+    edid[60] = v_blank & 0xFF;
+    edid[61] = static_cast<uint8_t>(((v_active >> 8) & 0x0F) << 4 | ((v_blank >> 8) & 0x0F));
+
+    // H front porch / H sync width
+    edid[62] = h_front & 0xFF;
+    edid[63] = h_sync & 0xFF;
+    edid[64] = static_cast<uint8_t>((v_front & 0x0F) << 4 | (v_sync & 0x0F));
+    edid[65] = static_cast<uint8_t>(((h_front >> 8) & 0x03) << 6 | ((h_sync >> 8) & 0x03) << 4 |
+                                    ((v_front >> 4) & 0x03) << 2 | ((v_sync >> 4) & 0x03));
+
+    // Image size (mm)
+    uint32_t h_mm = width * 254 / 960;
+    uint32_t v_mm = height * 254 / 960;
+    edid[66] = h_mm & 0xFF;
+    edid[67] = v_mm & 0xFF;
+    edid[68] = static_cast<uint8_t>(((h_mm >> 8) & 0x0F) << 4 | ((v_mm >> 8) & 0x0F));
+
+    // Borders
+    edid[69] = 0; edid[70] = 0;
+
+    // Features: non-interlaced, digital separate sync, H+ V+
+    edid[71] = 0x1E;
+
+    // ─── Descriptor #2: Monitor Name ────────────────────────────────────────
+    edid[72] = 0; edid[73] = 0; edid[74] = 0;
+    edid[75] = 0xFC; // Monitor name tag
+    edid[76] = 0;
+    const char* name = "CasparCG Out";
+    for (int i = 0; i < 13; ++i) {
+        edid[77 + i] = (i < static_cast<int>(strlen(name))) ? static_cast<uint8_t>(name[i]) : 0x0A;
+    }
+
+    // ─── Descriptor #3: Monitor Range Limits ────────────────────────────────
+    edid[90] = 0; edid[91] = 0; edid[92] = 0;
+    edid[93] = 0xFD; // Range limits tag
+    edid[94] = 0;
+    edid[95] = 23;   // Min V freq (Hz)
+    edid[96] = static_cast<uint8_t>((std::min)(static_cast<uint32_t>(refresh_hz + 1), 255u)); // Max V freq
+    edid[97] = 30;   // Min H freq (kHz)
+    edid[98] = static_cast<uint8_t>((std::min)(h_total * static_cast<uint32_t>(refresh_hz + 1) / 1000 + 1, 255u)); // Max H freq
+    edid[99] = static_cast<uint8_t>((std::min)(static_cast<uint32_t>(pixel_clock_mhz / 10) + 1, 255u)); // Max pixel clock / 10 MHz
+
+    // GTF not supported
+    edid[100] = 0x00;
+    // Padding
+    for (int i = 101; i < 108; ++i) edid[i] = 0x0A;
+
+    // ─── Descriptor #4: Dummy (unused) ──────────────────────────────────────
+    edid[108] = 0; edid[109] = 0; edid[110] = 0;
+    edid[111] = 0x10; // Dummy descriptor tag
+    edid[112] = 0;
+    for (int i = 113; i < 126; ++i) edid[i] = 0;
+
+    // Extension count: 0
+    edid[126] = 0;
+
+    // Checksum: byte 127 such that all 128 bytes sum to 0 mod 256
+    uint8_t sum = 0;
+    for (int i = 0; i < 127; ++i) sum += edid[i];
+    edid[127] = static_cast<uint8_t>(256 - sum);
+}
+
+} // namespace
+
+uint32_t nvapi_helpers::inject_edid(int gpu_index, int output_index, uint32_t width, uint32_t height, double refresh_hz)
+{
+    if (!available_ || !impl_ || gpu_index >= static_cast<int>(impl_->gpu_count))
+        return 0;
+
+    // Get ALL display IDs (including unconnected outputs)
+    NvU32 count = 0;
+    auto status = NvAPI_GPU_GetAllDisplayIds(impl_->gpus[gpu_index], nullptr, &count);
+    if (status != NVAPI_OK || count == 0) {
+        CASPAR_LOG(warning) << L"[vulkan_output] EDID emulation: GetAllDisplayIds failed or no outputs.";
+        return 0;
+    }
+
+    std::vector<NV_GPU_DISPLAYIDS> all_ids(count);
+    for (auto& d : all_ids) d.version = NV_GPU_DISPLAYIDS_VER;
+
+    status = NvAPI_GPU_GetAllDisplayIds(impl_->gpus[gpu_index], all_ids.data(), &count);
+    if (status != NVAPI_OK) {
+        CASPAR_LOG(warning) << L"[vulkan_output] EDID emulation: GetAllDisplayIds enumeration failed.";
+        return 0;
+    }
+
+    // Find the target output by sequential index (1-based).
+    // We count ALL physical connectors (connected or not).
+    int current = 0;
+    NvU32 target_display_id = 0;
+    for (NvU32 i = 0; i < count; ++i) {
+        // Skip MST topology entries (virtual sinks)
+        if (all_ids[i].isDynamic)
+            continue;
+
+        current++;
+        if (current == output_index) {
+            target_display_id = all_ids[i].displayId;
+
+            if (all_ids[i].isConnected) {
+                CASPAR_LOG(info) << L"[vulkan_output] EDID emulation: Output " << output_index
+                                 << L" already connected (displayId=" << target_display_id
+                                 << L"), skipping injection.";
+                return target_display_id; // Already connected, nothing to do
+            }
+            break;
+        }
+    }
+
+    if (target_display_id == 0) {
+        CASPAR_LOG(warning) << L"[vulkan_output] EDID emulation: Output " << output_index
+                            << L" not found (GPU has " << current << L" outputs).";
+        return 0;
+    }
+
+    // Build synthetic EDID
+    uint8_t edid_data[128];
+    build_synthetic_edid(edid_data, width, height, refresh_hz);
+
+    // Inject via NvAPI
+    NV_EDID nv_edid{};
+    nv_edid.version    = NV_EDID_VER;
+    nv_edid.sizeofEDID = 128;
+    memcpy(nv_edid.EDID_Data, edid_data, 128);
+
+    status = NvAPI_GPU_SetEDID(impl_->gpus[gpu_index], target_display_id, &nv_edid);
+    if (status != NVAPI_OK) {
+        NvAPI_ShortString err;
+        NvAPI_GetErrorMessage(status, err);
+        CASPAR_LOG(warning) << L"[vulkan_output] EDID emulation: SetEDID failed for output " << output_index
+                            << L" (displayId=" << target_display_id << L"): " << to_wstring(err)
+                            << L". Requires Administrator privileges and a professional GPU.";
+        return 0;
+    }
+
+    CASPAR_LOG(info) << L"[vulkan_output] EDID emulation: Injected " << width << L"x" << height
+                     << L"@" << static_cast<int>(refresh_hz) << L"Hz on output " << output_index
+                     << L" (displayId=" << target_display_id << L")";
+
+    return target_display_id;
+}
+
+bool nvapi_helpers::remove_edid(int gpu_index, uint32_t display_id)
+{
+    if (!available_ || !impl_ || display_id == 0)
+        return false;
+
+    if (gpu_index >= static_cast<int>(impl_->gpu_count))
+        return false;
+
+    // Setting sizeofEDID to 0 removes the injected EDID
+    NV_EDID nv_edid{};
+    nv_edid.version    = NV_EDID_VER;
+    nv_edid.sizeofEDID = 0;
+
+    auto status = NvAPI_GPU_SetEDID(impl_->gpus[gpu_index], display_id, &nv_edid);
+    if (status != NVAPI_OK) {
+        NvAPI_ShortString err;
+        NvAPI_GetErrorMessage(status, err);
+        CASPAR_LOG(warning) << L"[vulkan_output] EDID emulation: RemoveEDID failed for displayId="
+                            << display_id << L": " << to_wstring(err);
+        return false;
+    }
+
+    CASPAR_LOG(info) << L"[vulkan_output] EDID emulation: Removed EDID from displayId=" << display_id;
+    return true;
+}
+
 }} // namespace caspar::vulkan_output
 
 #else // !CASPAR_NVAPI_ENABLED
@@ -524,6 +779,10 @@ gsync_status nvapi_helpers::get_sync_status(int) { return {}; }
 bool nvapi_helpers::configure_sync(int, int, sync_source) { return false; }
 
 bool nvapi_helpers::disable_sync() { return false; }
+
+uint32_t nvapi_helpers::inject_edid(int, int, uint32_t, uint32_t, double) { return 0; }
+
+bool nvapi_helpers::remove_edid(int, uint32_t) { return false; }
 
 }} // namespace caspar::vulkan_output
 

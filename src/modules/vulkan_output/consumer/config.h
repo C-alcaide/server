@@ -106,6 +106,9 @@ struct configuration
     bool             gsync_master   = false; // This output is the master (others slave to it)
     gsync_reference  gsync_source   = gsync_reference::internal;
     bool             edid_auto_hdr  = false; // Auto-detect HDR from EDID
+
+    // EDID emulation: inject synthetic EDID on unconnected outputs (requires admin, pro GPU)
+    bool             edid_emulation = false;
 };
 
 configuration parse_config(const boost::property_tree::wptree& ptree);

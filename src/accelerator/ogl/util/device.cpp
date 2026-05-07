@@ -132,7 +132,9 @@ struct device::impl : public std::enable_shared_from_this<impl>
             for (auto& pool : pools)
                 pool.clear();
 
-        GL(glDeleteFramebuffers(1, &fbo_));
+        // Use raw call instead of GL() macro — destructors must not throw.
+        glDeleteFramebuffers(1, &fbo_);
+        while (glGetError() != GL_NO_ERROR) {}
     }
 
     template <typename Func>
