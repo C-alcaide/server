@@ -761,6 +761,14 @@ class vulkan_output_consumer : public core::frame_consumer
             dev, swapchain_.swapchain, UINT64_MAX, swapchain_.image_available, VK_NULL_HANDLE, &image_index);
 
         if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) {
+            // VK_SUBOPTIMAL means the acquire succeeded and signaled image_available.
+            // We must reset the semaphore before retrying acquire after recreation,
+            // otherwise the retry would double-signal an already-signaled semaphore (UB).
+            vkDestroySemaphore(dev, swapchain_.image_available, nullptr);
+            VkSemaphoreCreateInfo sem_info{};
+            sem_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+            vkCreateSemaphore(dev, &sem_info, nullptr, &swapchain_.image_available);
+
             recreate_swapchain();
             if (display_lost_)
                 return;
