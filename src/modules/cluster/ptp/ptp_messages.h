@@ -25,25 +25,34 @@ enum class message_type : uint8_t
 };
 
 // PTP port identity (clock identity + port number)
+#pragma pack(push, 1)
 struct port_identity
 {
     std::array<uint8_t, 8> clock_identity = {};
     uint16_t               port_number    = 1;
 };
+#pragma pack(pop)
 
 // IEEE 1588 timestamp: 48-bit seconds + 32-bit nanoseconds
+// Fields are stored in NETWORK byte order (big-endian) on the wire.
+#pragma pack(push, 1)
 struct ptp_timestamp
 {
-    uint16_t seconds_msb = 0;   // upper 16 bits of seconds
-    uint32_t seconds_lsb = 0;   // lower 32 bits of seconds
-    uint32_t nanoseconds = 0;
+    uint16_t seconds_msb = 0;   // upper 16 bits of seconds (network order)
+    uint32_t seconds_lsb = 0;   // lower 32 bits of seconds (network order)
+    uint32_t nanoseconds = 0;   // nanoseconds (network order)
 
+    // Convert from network byte order to host nanoseconds
     int64_t to_nanoseconds() const
     {
-        int64_t sec = (static_cast<int64_t>(seconds_msb) << 32) | seconds_lsb;
-        return sec * 1'000'000'000LL + nanoseconds;
+        uint16_t h_msb = ntohs_constexpr(seconds_msb);
+        uint32_t h_lsb = ntohl_constexpr(seconds_lsb);
+        uint32_t h_ns  = ntohl_constexpr(nanoseconds);
+        int64_t sec = (static_cast<int64_t>(h_msb) << 32) | h_lsb;
+        return sec * 1'000'000'000LL + h_ns;
     }
 
+    // Convert from host nanoseconds to network byte order
     static ptp_timestamp from_nanoseconds(int64_t ns)
     {
         ptp_timestamp ts;
@@ -53,12 +62,45 @@ struct ptp_timestamp
             sec -= 1;
             nsec += 1'000'000'000LL;
         }
-        ts.seconds_msb = static_cast<uint16_t>((sec >> 32) & 0xFFFF);
-        ts.seconds_lsb = static_cast<uint32_t>(sec & 0xFFFFFFFF);
-        ts.nanoseconds = static_cast<uint32_t>(nsec);
+        ts.seconds_msb = htons_constexpr(static_cast<uint16_t>((sec >> 32) & 0xFFFF));
+        ts.seconds_lsb = htonl_constexpr(static_cast<uint32_t>(sec & 0xFFFFFFFF));
+        ts.nanoseconds = htonl_constexpr(static_cast<uint32_t>(nsec));
         return ts;
     }
+
+  private:
+    // Portable byte swap helpers (constexpr-friendly)
+    static uint16_t ntohs_constexpr(uint16_t v)
+    {
+        const uint8_t* p = reinterpret_cast<const uint8_t*>(&v);
+        return static_cast<uint16_t>((p[0] << 8) | p[1]);
+    }
+    static uint32_t ntohl_constexpr(uint32_t v)
+    {
+        const uint8_t* p = reinterpret_cast<const uint8_t*>(&v);
+        return (static_cast<uint32_t>(p[0]) << 24) | (static_cast<uint32_t>(p[1]) << 16) |
+               (static_cast<uint32_t>(p[2]) << 8) | p[3];
+    }
+    static uint16_t htons_constexpr(uint16_t v)
+    {
+        uint16_t r;
+        uint8_t* p = reinterpret_cast<uint8_t*>(&r);
+        p[0] = static_cast<uint8_t>((v >> 8) & 0xFF);
+        p[1] = static_cast<uint8_t>(v & 0xFF);
+        return r;
+    }
+    static uint32_t htonl_constexpr(uint32_t v)
+    {
+        uint32_t r;
+        uint8_t* p = reinterpret_cast<uint8_t*>(&r);
+        p[0] = static_cast<uint8_t>((v >> 24) & 0xFF);
+        p[1] = static_cast<uint8_t>((v >> 16) & 0xFF);
+        p[2] = static_cast<uint8_t>((v >> 8) & 0xFF);
+        p[3] = static_cast<uint8_t>(v & 0xFF);
+        return r;
+    }
 };
+#pragma pack(pop)
 
 // Common PTP header (34 bytes)
 #pragma pack(push, 1)

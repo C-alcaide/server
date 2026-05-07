@@ -171,6 +171,15 @@ void ptp_clock::start()
     if (static_cast<SOCKET>(event_socket_) == INVALID_SOCKET ||
         static_cast<SOCKET>(general_socket_) == INVALID_SOCKET) {
         CASPAR_LOG(error) << L"[cluster] Failed to create PTP sockets";
+        if (static_cast<SOCKET>(event_socket_) != INVALID_SOCKET) {
+            closesocket(static_cast<SOCKET>(event_socket_));
+            event_socket_ = static_cast<uintptr_t>(INVALID_SOCKET);
+        }
+        if (static_cast<SOCKET>(general_socket_) != INVALID_SOCKET) {
+            closesocket(static_cast<SOCKET>(general_socket_));
+            general_socket_ = static_cast<uintptr_t>(INVALID_SOCKET);
+        }
+        WSACleanup();
         running_ = false;
         return;
     }

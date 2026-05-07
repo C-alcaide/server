@@ -218,6 +218,7 @@ void command_relay::master_connection_loop()
         {
             std::lock_guard<std::mutex> lock(members_mutex_);
             for (auto& member : members_) {
+                if (!running_) break;
                 if (member.state == member_state::disconnected || member.state == member_state::error) {
                     connect_to_member(member);
                 }
@@ -239,23 +240,52 @@ bool command_relay::connect_to_member(member_info& member)
         return false;
     }
 
-    // Set send timeout
-    DWORD timeout = 1000;
-    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&timeout), sizeof(timeout));
+    // Set non-blocking for connect with timeout
+    u_long non_blocking = 1;
+    ioctlsocket(sock, FIONBIO, &non_blocking);
 
     sockaddr_in addr = {};
     addr.sin_family  = AF_INET;
     addr.sin_port    = htons(member.port);
     inet_pton(AF_INET, member.host.c_str(), &addr.sin_addr);
 
-    if (connect(sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == SOCKET_ERROR) {
-        closesocket(sock);
-        member.state = member_state::error;
-        CASPAR_LOG(debug) << L"[cluster] Failed to connect to "
-                          << std::wstring(member.host.begin(), member.host.end())
-                          << L":" << member.port;
-        return false;
+    int result = connect(sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
+    if (result == SOCKET_ERROR) {
+        int err = WSAGetLastError();
+        if (err == WSAEWOULDBLOCK) {
+            // Wait for connection with 2-second timeout
+            fd_set write_set, except_set;
+            FD_ZERO(&write_set);
+            FD_ZERO(&except_set);
+            FD_SET(sock, &write_set);
+            FD_SET(sock, &except_set);
+            timeval tv = {2, 0}; // 2 seconds
+            int sel = select(0, nullptr, &write_set, &except_set, &tv);
+            if (sel <= 0 || FD_ISSET(sock, &except_set)) {
+                closesocket(sock);
+                member.state = member_state::error;
+                CASPAR_LOG(debug) << L"[cluster] Connect timeout to "
+                                  << std::wstring(member.host.begin(), member.host.end())
+                                  << L":" << member.port;
+                return false;
+            }
+        } else {
+            closesocket(sock);
+            member.state = member_state::error;
+            CASPAR_LOG(debug) << L"[cluster] Failed to connect to "
+                              << std::wstring(member.host.begin(), member.host.end())
+                              << L":" << member.port;
+            return false;
+        }
     }
+
+    // Restore blocking mode
+    u_long blocking = 0;
+    ioctlsocket(sock, FIONBIO, &blocking);
+
+    // Set send timeout
+    DWORD timeout = 1000;
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&timeout), sizeof(timeout));
 
     // Disable Nagle for low-latency command delivery
     int nodelay = 1;
