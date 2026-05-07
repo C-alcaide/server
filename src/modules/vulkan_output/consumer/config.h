@@ -109,6 +109,11 @@ struct configuration
 
     // EDID emulation: inject synthetic EDID on unconnected outputs (requires admin, pro GPU)
     bool             edid_emulation = false;
+
+    // Display name matching: if set, selects monitor by substring match on device name
+    // instead of index. Useful for portable configs (VDD rehearsal → physical on-site).
+    // Example: "BNQ" matches BenQ monitors, "Virtual" matches VDD monitors.
+    std::wstring     display_name;
 };
 
 configuration parse_config(const boost::property_tree::wptree& ptree);

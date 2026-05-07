@@ -1381,7 +1381,7 @@ class vulkan_output_consumer : public core::frame_consumer
                 }
             }
 
-            // Enumerate monitors and select by output_index
+            // Enumerate monitors and select by display-name or output_index
             struct monitor_enum_data
             {
                 int target_index;
@@ -1391,19 +1391,62 @@ class vulkan_output_consumer : public core::frame_consumer
             };
             monitor_enum_data data{config_.output_index, 0, {}, false};
 
-            EnumDisplayMonitors(
-                nullptr, nullptr,
-                [](HMONITOR, HDC, LPRECT rect, LPARAM lparam) -> BOOL {
-                    auto* d = reinterpret_cast<monitor_enum_data*>(lparam);
-                    d->current_index++;
-                    if (d->current_index == d->target_index) {
-                        d->rect  = *rect;
-                        d->found = true;
-                        return FALSE;
+            // If display-name is configured, try matching by device name first
+            if (!config_.display_name.empty()) {
+                DISPLAY_DEVICEW dd{};
+                dd.cb = sizeof(dd);
+                int match_count = 0;
+                for (DWORD i = 0; EnumDisplayDevicesW(nullptr, i, &dd, 0); ++i) {
+                    if (!(dd.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP)) {
+                        dd.cb = sizeof(dd);
+                        continue;
                     }
-                    return TRUE;
-                },
-                reinterpret_cast<LPARAM>(&data));
+                    // Get the monitor name for this adapter
+                    DISPLAY_DEVICEW mon{};
+                    mon.cb = sizeof(mon);
+                    if (EnumDisplayDevicesW(dd.DeviceName, 0, &mon, 0)) {
+                        std::wstring dev_str(mon.DeviceString);
+                        // Case-insensitive substring match
+                        if (boost::icontains(dev_str, config_.display_name)) {
+                            match_count++;
+                            if (match_count == config_.output_index || config_.output_index <= 1) {
+                                // Get this monitor's position
+                                DEVMODEW dm{};
+                                dm.dmSize = sizeof(dm);
+                                if (EnumDisplaySettingsW(dd.DeviceName, ENUM_CURRENT_SETTINGS, &dm)) {
+                                    data.rect.left   = dm.dmPosition.x;
+                                    data.rect.top    = dm.dmPosition.y;
+                                    data.rect.right  = dm.dmPosition.x + static_cast<LONG>(dm.dmPelsWidth);
+                                    data.rect.bottom = dm.dmPosition.y + static_cast<LONG>(dm.dmPelsHeight);
+                                    data.found = true;
+                                    CASPAR_LOG(info) << print() << L" Matched display-name \""
+                                                     << config_.display_name << L"\" → "
+                                                     << mon.DeviceString << L" (" << dd.DeviceName << L")";
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    dd.cb = sizeof(dd);
+                }
+            }
+
+            // Fallback: select by monitor index
+            if (!data.found) {
+                EnumDisplayMonitors(
+                    nullptr, nullptr,
+                    [](HMONITOR, HDC, LPRECT rect, LPARAM lparam) -> BOOL {
+                        auto* d = reinterpret_cast<monitor_enum_data*>(lparam);
+                        d->current_index++;
+                        if (d->current_index == d->target_index) {
+                            d->rect  = *rect;
+                            d->found = true;
+                            return FALSE;
+                        }
+                        return TRUE;
+                    },
+                    reinterpret_cast<LPARAM>(&data));
+            }
 
             int x = 0, y = 0;
             int w = format_desc_.width;
