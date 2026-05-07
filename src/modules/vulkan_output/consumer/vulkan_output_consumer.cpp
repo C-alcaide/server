@@ -1339,6 +1339,13 @@ class vulkan_output_consumer : public core::frame_consumer
                 vkDestroySurfaceKHR(device_->instance(), swapchain_.surface, nullptr);
         }
 
+        // Destroy resources that reference VkDevice handles BEFORE destroying the device.
+        // Order matters: color_pipeline_ and cuda_peer_ hold raw VkDevice/VkQueue handles.
+        color_pipeline_.reset();
+#ifdef CASPAR_CUDA_PEER_ENABLED
+        cuda_peer_.reset();
+#endif
+        affinity_ctx_.reset();
         interop_.reset();
         shared_pool_.reset();
         device_.reset();
