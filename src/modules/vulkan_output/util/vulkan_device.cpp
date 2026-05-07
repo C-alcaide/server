@@ -84,7 +84,7 @@ void vulkan_device::create_instance()
     app_info.engineVersion      = VK_MAKE_VERSION(2, 5, 0);
     app_info.apiVersion         = VK_API_VERSION_1_3;
 
-    std::vector<const char*> extensions = {
+    std::vector<const char*> desired_extensions = {
         VK_KHR_SURFACE_EXTENSION_NAME,
         VK_KHR_WIN32_SURFACE_EXTENSION_NAME,
         VK_KHR_DISPLAY_EXTENSION_NAME,
@@ -93,6 +93,28 @@ void vulkan_device::create_instance()
         VK_EXT_DISPLAY_SURFACE_COUNTER_EXTENSION_NAME,
         VK_EXT_DEBUG_UTILS_EXTENSION_NAME,
     };
+
+    // Enumerate available instance extensions and filter
+    uint32_t avail_count = 0;
+    vkEnumerateInstanceExtensionProperties(nullptr, &avail_count, nullptr);
+    std::vector<VkExtensionProperties> avail_exts(avail_count);
+    vkEnumerateInstanceExtensionProperties(nullptr, &avail_count, avail_exts.data());
+
+    std::vector<const char*> extensions;
+    for (auto* desired : desired_extensions) {
+        bool found = false;
+        for (const auto& avail : avail_exts) {
+            if (strcmp(avail.extensionName, desired) == 0) {
+                found = true;
+                break;
+            }
+        }
+        if (found) {
+            extensions.push_back(desired);
+        } else {
+            CASPAR_LOG(debug) << L"[vulkan] Instance extension not available: " << desired;
+        }
+    }
 
     std::vector<const char*> layers;
 #ifndef NDEBUG
@@ -175,6 +197,20 @@ void vulkan_device::select_physical_device(int gpu_index)
                      << L" (tier=" << (tier_ == gpu_tier::pro ? L"pro" : tier_ == gpu_tier::consumer ? L"consumer" : L"none")
                      << L", ext_mem=" << has_ext_mem
                      << L", present_barrier=" << has_present_barrier << L")";
+
+    gpu_index_ = gpu_index;
+
+    // Query device LUID for cross-API GPU matching
+    VkPhysicalDeviceIDProperties id_props{};
+    id_props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES;
+    VkPhysicalDeviceProperties2 props2{};
+    props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+    props2.pNext = &id_props;
+    vkGetPhysicalDeviceProperties2(physical_device_, &props2);
+    if (id_props.deviceLUIDValid) {
+        memcpy(device_luid_, id_props.deviceLUID, 8);
+        device_luid_valid_ = true;
+    }
 }
 
 void vulkan_device::create_logical_device()
@@ -203,9 +239,13 @@ void vulkan_device::create_logical_device()
     queue_info.queueCount       = 1;
     queue_info.pQueuePriorities = &queue_priority;
 
-    // Required device extensions
-    std::vector<const char*> device_extensions = {
+    // Core required extension (must have)
+    std::vector<const char*> required_extensions = {
         VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+    };
+
+    // Extensions we want but can survive without
+    std::vector<const char*> desired_device_exts = {
         VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME,
         VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME,
         VK_KHR_EXTERNAL_SEMAPHORE_EXTENSION_NAME,
@@ -214,7 +254,7 @@ void vulkan_device::create_logical_device()
     };
 
     if (tier_ == gpu_tier::consumer) {
-        device_extensions.push_back(VK_EXT_FULL_SCREEN_EXCLUSIVE_EXTENSION_NAME);
+        desired_device_exts.push_back(VK_EXT_FULL_SCREEN_EXCLUSIVE_EXTENSION_NAME);
     }
 
     // Check and add optional extensions if available
@@ -224,36 +264,48 @@ void vulkan_device::create_logical_device()
         std::vector<VkExtensionProperties> ext_props(ext_count);
         vkEnumerateDeviceExtensionProperties(physical_device_, nullptr, &ext_count, ext_props.data());
 
-        bool has_present_barrier = false;
-        bool has_display_control = false;
-        for (const auto& ext : ext_props) {
-            if (strcmp(ext.extensionName, VK_NV_PRESENT_BARRIER_EXTENSION_NAME) == 0)
-                has_present_barrier = true;
-            if (strcmp(ext.extensionName, VK_EXT_DISPLAY_CONTROL_EXTENSION_NAME) == 0)
-                has_display_control = true;
+        auto is_available = [&](const char* name) {
+            for (const auto& ext : ext_props) {
+                if (strcmp(ext.extensionName, name) == 0)
+                    return true;
+            }
+            return false;
+        };
+
+        // Start with required
+        std::vector<const char*> device_extensions = required_extensions;
+
+        // Add desired ones that are available
+        for (auto* desired : desired_device_exts) {
+            if (is_available(desired)) {
+                device_extensions.push_back(desired);
+            } else {
+                CASPAR_LOG(debug) << L"[vulkan] Device extension not available: " << desired;
+            }
         }
 
-        if (has_present_barrier)
+        // Add optional NV extensions
+        if (is_available(VK_NV_PRESENT_BARRIER_EXTENSION_NAME))
             device_extensions.push_back(VK_NV_PRESENT_BARRIER_EXTENSION_NAME);
-        if (has_display_control && tier_ == gpu_tier::pro)
+        if (is_available(VK_EXT_DISPLAY_CONTROL_EXTENSION_NAME) && tier_ == gpu_tier::pro)
             device_extensions.push_back(VK_EXT_DISPLAY_CONTROL_EXTENSION_NAME);
+
+        // Store enabled extensions for runtime queries
+        for (const auto* ext : device_extensions)
+            enabled_extensions_.emplace_back(ext);
+
+        VkPhysicalDeviceFeatures features{};
+
+        VkDeviceCreateInfo device_info{};
+        device_info.sType                   = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+        device_info.queueCreateInfoCount    = 1;
+        device_info.pQueueCreateInfos       = &queue_info;
+        device_info.enabledExtensionCount   = static_cast<uint32_t>(device_extensions.size());
+        device_info.ppEnabledExtensionNames = device_extensions.data();
+        device_info.pEnabledFeatures        = &features;
+
+        VK_CHECK(vkCreateDevice(physical_device_, &device_info, nullptr, &device_));
     }
-
-    // Store enabled extensions for runtime queries
-    for (const auto* ext : device_extensions)
-        enabled_extensions_.emplace_back(ext);
-
-    VkPhysicalDeviceFeatures features{};
-
-    VkDeviceCreateInfo device_info{};
-    device_info.sType                   = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
-    device_info.queueCreateInfoCount    = 1;
-    device_info.pQueueCreateInfos       = &queue_info;
-    device_info.enabledExtensionCount   = static_cast<uint32_t>(device_extensions.size());
-    device_info.ppEnabledExtensionNames = device_extensions.data();
-    device_info.pEnabledFeatures        = &features;
-
-    VK_CHECK(vkCreateDevice(physical_device_, &device_info, nullptr, &device_));
 
     vkGetDeviceQueue(device_, present_queue_family_, 0, &present_queue_);
 }
@@ -360,6 +412,44 @@ VkFence vulkan_device::create_vblank_fence(VkDisplayKHR display)
         return VK_NULL_HANDLE;
 
     return fence;
+}
+
+std::vector<display_info> vulkan_device::enumerate_displays_on_device() const
+{
+    std::vector<display_info> results;
+
+    if (tier_ != gpu_tier::pro)
+        return results;
+
+    VkPhysicalDeviceProperties props;
+    vkGetPhysicalDeviceProperties(physical_device_, &props);
+
+    auto get_display_props = reinterpret_cast<PFN_vkGetPhysicalDeviceDisplayPropertiesKHR>(
+        vkGetInstanceProcAddr(instance_, "vkGetPhysicalDeviceDisplayPropertiesKHR"));
+    if (!get_display_props)
+        return results;
+
+    uint32_t display_count = 0;
+    get_display_props(physical_device_, &display_count, nullptr);
+    std::vector<VkDisplayPropertiesKHR> displays(display_count);
+    get_display_props(physical_device_, &display_count, displays.data());
+
+    for (uint32_t di = 0; di < display_count; ++di) {
+        display_info info{};
+        info.gpu_index      = 0; // Caller should set this
+        info.output_index   = static_cast<int>(di + 1);
+        info.gpu_name       = std::wstring(props.deviceName, props.deviceName + strlen(props.deviceName));
+        info.display_name   = std::wstring(displays[di].displayName,
+                                           displays[di].displayName + strlen(displays[di].displayName));
+        info.width          = displays[di].physicalResolution.width;
+        info.height         = displays[di].physicalResolution.height;
+        info.refresh_rate   = 0;
+        info.tier           = tier_;
+        info.display_handle = displays[di].display;
+        results.push_back(info);
+    }
+
+    return results;
 }
 
 std::vector<display_info> vulkan_device::enumerate_displays()

@@ -65,6 +65,11 @@ class vulkan_device
     uint32_t         present_queue_family() const { return present_queue_family_; }
     VkQueue          present_queue() const { return present_queue_; }
     gpu_tier         tier() const { return tier_; }
+    int              gpu_index() const { return gpu_index_; }
+
+    // Device LUID for cross-API GPU matching (OGL ↔ VK)
+    const uint8_t*   device_luid() const { return device_luid_; }
+    bool             device_luid_valid() const { return device_luid_valid_; }
 
     // Surface + swapchain creation
     VkSurfaceKHR create_display_surface(const display_info& info, uint32_t target_refresh_mhz = 0);
@@ -78,8 +83,11 @@ class vulkan_device
     // Returns VK_NULL_HANDLE if display_control is not available.
     VkFence create_vblank_fence(VkDisplayKHR display);
 
-    // Enumerate all available outputs across all GPUs
+    // Enumerate all available outputs across all GPUs (creates temporary instance)
     static std::vector<display_info> enumerate_displays();
+
+    // Enumerate displays attached to THIS device's physical GPU (uses live instance — handles valid for device lifetime)
+    std::vector<display_info> enumerate_displays_on_device() const;
 
   private:
     void create_instance();
@@ -92,6 +100,9 @@ class vulkan_device
     uint32_t                 present_queue_family_ = 0;
     VkQueue                  present_queue_        = VK_NULL_HANDLE;
     gpu_tier                 tier_                 = gpu_tier::none;
+    int                      gpu_index_            = 0;
+    uint8_t                  device_luid_[8]       = {};
+    bool                     device_luid_valid_    = false;
     VkDebugUtilsMessengerEXT debug_messenger_      = VK_NULL_HANDLE;
     std::vector<std::string> enabled_extensions_;
 };

@@ -112,13 +112,39 @@ shared_texture_pool::shared_texture_pool(std::shared_ptr<accelerator::ogl::devic
                      << width_ << L"x" << height_ << L" (" << BUFFER_COUNT << L" slots)";
 }
 
+shared_texture_pool::shared_texture_pool(vulkan_device& vk_device,
+                                         uint32_t       width,
+                                         uint32_t       height,
+                                         bool           use_16bit)
+    : vk_device_(vk_device)
+    , width_(width)
+    , height_(height)
+    , use_16bit_(use_16bit)
+{
+    // Affinity constructor: caller guarantees we're on a valid GL context thread
+    load_gl_extensions();
+    for (int i = 0; i < BUFFER_COUNT; ++i) {
+        create_slot(slots_[i]);
+    }
+
+    CASPAR_LOG(info) << L"[vulkan_output] Shared texture pool created (affinity): "
+                     << width_ << L"x" << height_ << L" (" << BUFFER_COUNT << L" slots)";
+}
+
 shared_texture_pool::~shared_texture_pool()
 {
-    ogl_device_->dispatch_sync([this] {
+    if (ogl_device_) {
+        ogl_device_->dispatch_sync([this] {
+            for (int i = 0; i < BUFFER_COUNT; ++i) {
+                destroy_slot(slots_[i]);
+            }
+        });
+    } else {
+        // Affinity path: caller must ensure we're on the GL thread or context is still valid
         for (int i = 0; i < BUFFER_COUNT; ++i) {
             destroy_slot(slots_[i]);
         }
-    });
+    }
 }
 
 void shared_texture_pool::create_slot(slot& s)

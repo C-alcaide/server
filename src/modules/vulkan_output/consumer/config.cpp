@@ -43,6 +43,49 @@ configuration parse_config(const boost::property_tree::wptree& ptree)
     else
         config.transfer = hdr_transfer::sdr;
 
+    // Color gamut (output primaries)
+    auto gamut_str = ptree.get(L"gamut", L"");
+    if (gamut_str == L"bt2020" || gamut_str == L"2020")
+        config.gamut = output_gamut::bt2020;
+    else if (gamut_str == L"p3-d65" || gamut_str == L"p3" || gamut_str == L"display-p3")
+        config.gamut = output_gamut::p3_d65;
+    else if (gamut_str == L"p3-dci" || gamut_str == L"dci-p3")
+        config.gamut = output_gamut::p3_dci;
+    else if (gamut_str == L"adobe-rgb" || gamut_str == L"adobergb")
+        config.gamut = output_gamut::adobe_rgb;
+    else
+        config.gamut = output_gamut::bt709;
+
+    // Transfer function (EOTF) — if not explicitly set, infer from hdr_transfer
+    auto eotf_str = ptree.get(L"eotf", L"");
+    if (eotf_str == L"linear")
+        config.eotf = output_eotf::linear;
+    else if (eotf_str == L"pq" || eotf_str == L"st2084")
+        config.eotf = output_eotf::pq;
+    else if (eotf_str == L"hlg")
+        config.eotf = output_eotf::hlg;
+    else if (eotf_str == L"gamma24" || eotf_str == L"2.4")
+        config.eotf = output_eotf::gamma24;
+    else if (eotf_str == L"gamma26" || eotf_str == L"2.6")
+        config.eotf = output_eotf::gamma26;
+    else if (eotf_str == L"srgb")
+        config.eotf = output_eotf::srgb;
+    else {
+        // Infer from legacy transfer setting
+        if (config.transfer == hdr_transfer::pq)
+            config.eotf = output_eotf::pq;
+        else if (config.transfer == hdr_transfer::hlg)
+            config.eotf = output_eotf::hlg;
+        else
+            config.eotf = output_eotf::srgb;
+    }
+
+    // If gamut not explicitly set, infer from transfer mode
+    if (gamut_str.empty()) {
+        if (config.transfer == hdr_transfer::pq || config.transfer == hdr_transfer::hlg)
+            config.gamut = output_gamut::bt2020;
+    }
+
     auto hdr_meta = ptree.get_child_optional(L"hdr-metadata");
     if (hdr_meta) {
         config.max_cll  = hdr_meta->get(L"max-cll", 1000);

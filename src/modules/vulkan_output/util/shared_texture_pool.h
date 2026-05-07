@@ -48,11 +48,20 @@ class vulkan_device;
 class shared_texture_pool
 {
   public:
+    /// Standard constructor: manages GL calls via the provided ogl::device thread
     shared_texture_pool(std::shared_ptr<accelerator::ogl::device> ogl_device,
                         vulkan_device&                            vk_device,
                         uint32_t                                  width,
                         uint32_t                                  height,
                         bool                                      use_16bit = false);
+
+    /// Affinity constructor: caller is responsible for running on a valid GL context thread.
+    /// Use this when creating from gpu_affinity_context::dispatch_sync().
+    shared_texture_pool(vulkan_device& vk_device,
+                        uint32_t       width,
+                        uint32_t       height,
+                        bool           use_16bit = false);
+
     ~shared_texture_pool();
 
     shared_texture_pool(const shared_texture_pool&)            = delete;

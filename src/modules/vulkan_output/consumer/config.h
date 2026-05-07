@@ -34,6 +34,27 @@ enum class hdr_transfer
     hlg
 };
 
+// Output color gamut (primaries)
+enum class output_gamut
+{
+    bt709,     // ITU-R BT.709 / sRGB (default, no conversion needed)
+    bt2020,    // ITU-R BT.2020 / BT.2100
+    p3_d65,    // DCI-P3 with D65 white point (Display P3, Apple wide color)
+    p3_dci,    // DCI-P3 with DCI white point (cinema projection, gamma 2.6)
+    adobe_rgb, // Adobe RGB (1998)
+};
+
+// Output electro-optical transfer function
+enum class output_eotf
+{
+    srgb,      // sRGB ~2.2 curve (default, matches mixer working space)
+    linear,    // Linear light (1:1, no curve) — for compositing previews
+    pq,        // SMPTE ST 2084 (Perceptual Quantizer) — HDR10, BT.2100
+    hlg,       // ARIB STD-B67 (Hybrid Log-Gamma) — live broadcast HDR
+    gamma24,   // Pure gamma 2.4 (EBU broadcast reference)
+    gamma26,   // Pure gamma 2.6 (DCI cinema projection)
+};
+
 enum class disconnect_behavior
 {
     hold,  // Hold last frame (black if no frame yet)
@@ -55,6 +76,8 @@ struct configuration
     int          sync_group   = 0;     // 0 = no sync, >0 = present barrier group
     bool         borderless   = true;  // For fallback FSE mode
     hdr_transfer transfer     = hdr_transfer::sdr;
+    output_gamut gamut        = output_gamut::bt709;   // Output color gamut
+    output_eotf  eotf         = output_eotf::srgb;    // Output transfer function
     int          max_cll      = 1000;
     int          max_fall     = 400;
     bool         identify_on_start = false;

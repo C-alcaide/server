@@ -45,6 +45,16 @@ else()
     message(STATUS "NvAPI SDK not found - Quadro Sync and EDID features disabled")
 endif()
 
+# ─── Find CUDA Toolkit (optional, for GPU peer transfer) ────────────────────
+find_package(CUDAToolkit QUIET)
+if(CUDAToolkit_FOUND)
+    set(CUDA_PEER_FOUND TRUE)
+    message(STATUS "CUDA Toolkit found - GPU peer transfer enabled")
+else()
+    set(CUDA_PEER_FOUND FALSE)
+    message(STATUS "CUDA Toolkit not found - GPU peer transfer disabled (PBO fallback)")
+endif()
+
 # ─── Sources ─────────────────────────────────────────────────────────────────
 set(SOURCES
     consumer/vulkan_output_consumer.cpp
@@ -58,8 +68,16 @@ set(SOURCES
     util/vulkan_interop.h
     util/shared_texture_pool.cpp
     util/shared_texture_pool.h
+    util/gpu_affinity_context.cpp
+    util/gpu_affinity_context.h
+    util/cuda_peer_transfer.cpp
+    util/cuda_peer_transfer.h
     util/nvapi_helpers.cpp
     util/nvapi_helpers.h
+    util/color_convert_pipeline.cpp
+    util/color_convert_pipeline.h
+
+    shaders/color_convert_spv.h
 
     vulkan_output.cpp
     vulkan_output.h
@@ -81,10 +99,16 @@ if(NVAPI_FOUND)
     target_compile_definitions(vulkan_output PRIVATE CASPAR_NVAPI_ENABLED)
 endif()
 
+if(CUDA_PEER_FOUND)
+    target_include_directories(vulkan_output SYSTEM PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
+    target_compile_definitions(vulkan_output PRIVATE CASPAR_CUDA_PEER_ENABLED)
+endif()
+
 set_target_properties(vulkan_output PROPERTIES FOLDER modules)
 source_group(sources ./*)
 source_group(sources\\consumer consumer/*)
 source_group(sources\\util util/*)
+source_group(sources\\shaders shaders/*)
 
 # ─── Link libraries ─────────────────────────────────────────────────────────
 target_link_libraries(vulkan_output PRIVATE
@@ -95,4 +119,8 @@ target_link_libraries(vulkan_output PRIVATE
 
 if(NVAPI_FOUND)
     target_link_libraries(vulkan_output PRIVATE ${NVAPI_LIBRARY})
+endif()
+
+if(CUDA_PEER_FOUND)
+    target_link_libraries(vulkan_output PRIVATE CUDA::cudart_static)
 endif()

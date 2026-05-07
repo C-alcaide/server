@@ -1,0 +1,1141 @@
+# Vulkan Output Module
+
+Low-latency, direct-to-display GPU output consumer for CasparCG. Bypasses the desktop compositor entirely using the Vulkan graphics API, targeting professional broadcast scenarios where frame-accurate timing and deterministic latency are critical.
+
+## Table of Contents
+
+- [Architecture Overview](#architecture-overview)
+- [GPU Tier System](#gpu-tier-system)
+- [Frame Transfer Pipeline](#frame-transfer-pipeline)
+- [Multi-GPU Transfer](#multi-gpu-transfer)
+- [Color Space Conversion](#color-space-conversion)
+- [HDR Output](#hdr-output)
+- [Synchronization](#synchronization)
+- [Subregion Output](#subregion-output)
+- [Display Hot-Plug](#display-hot-plug)
+- [AMCP Commands](#amcp-commands)
+- [Configuration Reference](#configuration-reference)
+- [Configuration Examples](#configuration-examples)
+- [Build Requirements](#build-requirements)
+- [Diagnostics](#diagnostics)
+- [Troubleshooting](#troubleshooting)
+
+---
+
+## Architecture Overview
+
+The module is organized into seven layers:
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│ vulkan_output_consumer          (core::frame_consumer impl)  │
+│   ├── Frame buffering + present loop (dedicated thread)      │
+│   ├── Swapchain management + hot-plug recovery               │
+│   └── Identify overlay                                       │
+├──────────────────────────────────────────────────────────────┤
+│ color_convert_pipeline          (Vulkan compute shader)      │
+│   ├── BT.709 sRGB → target gamut + OETF conversion          │
+│   ├── RGBA16F intermediate image (zero-banding precision)    │
+│   └── Bypassed entirely when no conversion needed            │
+├──────────────────────────────────────────────────────────────┤
+│ vulkan_device                   (VkInstance + VkDevice RAII)  │
+│   ├── GPU enumeration + tier detection + LUID query          │
+│   ├── VK_KHR_display (Pro) / Win32 surface (Consumer)        │
+│   └── VBlank fence via VK_EXT_display_control                │
+├──────────────────────────────────────────────────────────────┤
+│ shared_texture_pool             (OGL ↔ VK zero-copy)         │
+│   ├── Double-buffered GL_EXT_memory_object textures          │
+│   ├── GL_EXT_semaphore / VK_KHR_external_semaphore sync      │
+│   └── 8-bit (SDR) or 16-bit (HDR) pixel format               │
+├──────────────────────────────────────────────────────────────┤
+│ gpu_affinity_context            (Cross-GPU OGL bridge)        │
+│   ├── WGL_NV_gpu_affinity context on target GPU              │
+│   ├── Dedicated thread with dispatch_sync() work queue       │
+│   └── PBO double-buffered upload (fallback path)             │
+├──────────────────────────────────────────────────────────────┤
+│ cuda_peer_transfer              (GPU→GPU DMA)                │
+│   ├── cudaMemcpyPeer: direct PCIe/NVLink DMA (no CPU copy)  │
+│   ├── CUDA↔GL interop on both GPUs                          │
+│   └── Graceful fallback to PBO path if CUDA unavailable      │
+├──────────────────────────────────────────────────────────────┤
+│ nvapi_helpers                   (NVIDIA NvAPI integration)    │
+│   ├── EDID readback (HDR capability, luminance, bit depth)   │
+│   ├── Quadro Sync II framelock configuration                 │
+│   └── GSync status monitoring                                │
+└──────────────────────────────────────────────────────────────┘
+```
+
+### Data Flow
+
+```
+CasparCG Mixer (OGL, GPU A)
+   │
+   ├─ Same-GPU zero-copy path (preferred):
+   │   OGL texture ──blit──▸ shared_texture_pool (GL_EXT_memory_object)
+   │                           │
+   │                    Win32 HANDLE export
+   │                           │
+   │                  VkImage (VK_KHR_external_memory_win32)
+   │                           │
+   │                    vkCmdBlitImage ──▸ swapchain image
+   │
+   ├─ Cross-GPU CUDA peer DMA path (fastest cross-GPU):
+   │   OGL texture ──cudaGraphicsGLRegisterImage──▸ CUDA array (GPU A)
+   │                                                 │
+   │                          cudaMemcpy2DFromArray ──▸ staging buffer (GPU A)
+   │                                                       │
+   │                                   cudaMemcpyPeer (PCIe/NVLink DMA)
+   │                                                       │
+   │                                              staging buffer (GPU B)
+   │                                                       │
+   │                          cudaMemcpy2DToArray ──▸ landing texture (GPU B)
+   │                                                       │
+   │                                     glCopyImageSubData ──▸ shared_texture_pool
+   │                                                              │
+   │                                                     VkImage ──▸ swapchain image
+   │
+   ├─ Cross-GPU PBO fallback path (no CUDA required):
+   │   frame.image_data() ──PBO upload──▸ texture (GPU B, affinity context)
+   │                                        │
+   │                          glCopyImageSubData ──▸ shared_texture_pool
+   │                                                       │
+   │                                              VkImage ──▸ swapchain image
+   │
+   ├─ CPU fallback path:
+   │   frame.image_data() ──memcpy──▸ staging buffer
+   │                                     │
+   │                              vkCmdCopyBufferToImage ──▸ swapchain image
+   │
+   └──▸ vkQueuePresentKHR ──▸ Display
+```
+
+**Same-GPU zero-copy** eliminates all CPU-side pixel copies. The OGL mixer output is blitted into a shared texture backed by exportable GPU memory (`GL_EXT_memory_object`), which is imported into Vulkan as a `VkImage` via a Win32 `HANDLE`. Synchronization between the OpenGL and Vulkan timelines uses paired `GL_EXT_semaphore` / `VkSemaphore` objects.
+
+**Cross-GPU CUDA peer DMA** uses the GPU's DMA copy engines to transfer pixels directly from GPU A to GPU B over PCIe or NVLink — no CPU involvement. The frame arrives at GPU B as a CUDA-written GL texture, which is then blitted into the shared interop pool for Vulkan presentation. This is the fastest cross-GPU path (~15 GB/s on PCIe 3.0 x16, up to 600 GB/s on NVLink).
+
+**Cross-GPU PBO fallback** is used when CUDA is unavailable. The mixer's CPU-side pixel buffer (which CasparCG already maintains for non-GPU consumers) is uploaded to GPU B via a double-buffered Pixel Buffer Object on the affinity context's GL thread.
+
+For HDR workflows, all shared textures are allocated as 16-bit (`RGBA16`) instead of 8-bit (`BGRA8`), preserving the full dynamic range from the mixer through to the display.
+
+The CPU fallback path (direct staging buffer upload to Vulkan) is used when no GL interop is possible, e.g. in multi-vendor GPU setups where neither CUDA nor WGL_NV_gpu_affinity is available.
+
+---
+
+## GPU Tier System
+
+The module detects the GPU capability tier at runtime and adapts its output strategy:
+
+| Tier | Detection | Output Method | Features |
+|------|-----------|---------------|----------|
+| **Pro** | `VK_KHR_display` extension available | Direct display mode — bypasses the OS compositor entirely. The GPU drives the display output at the hardware level. | VBlank fences, display mode selection, present barriers |
+| **Consumer** | No `VK_KHR_display` | Borderless fullscreen window with `VkSurfaceKHR` via Win32 | Basic frame delivery, no VBlank timing |
+
+**Pro tier** is available on NVIDIA Quadro, RTX A-series, and RTX Pro GPUs when the display is not managed by the Windows Desktop Window Manager (DWM). This typically requires the display to be configured as a "dedicated display" in the NVIDIA Control Panel, or to be connected via a Quadro Sync II board.
+
+**Consumer tier** creates a `WS_POPUP | WS_EX_TOPMOST` borderless window covering the target monitor and presents through the standard Vulkan WSI (Window System Integration) path. This still benefits from Vulkan's explicit swapchain control and VSync timing, but does not bypass the desktop compositor.
+
+The tier is logged at startup:
+
+```
+[vulkan_output] GPU 0 Output 1: NVIDIA RTX A4000 - DP-1 [Pro]
+[vulkan_output] GPU 0 Output 2: NVIDIA RTX A4000 - HDMI-1 [Consumer]
+```
+
+---
+
+## Frame Transfer Pipeline
+
+### Buffering
+
+The consumer maintains a thread-safe frame queue between the CasparCG mixer thread and the dedicated present thread:
+
+1. **Mixer thread** calls `send()` — pushes `const_frame` into the queue
+2. If the queue exceeds `buffer-depth`, the oldest frame is dropped (logged as `late-frame`)
+3. **Present thread** waits for `delay_frames + 1` frames to accumulate before starting presentation
+4. Present thread pops the oldest frame, records a Vulkan command buffer, and submits it
+
+### Presentation Delay
+
+The `<delay>` parameter introduces a fixed N-frame latency between when a frame enters the buffer and when it is presented. This compensates for downstream pipeline latency — video scalers, audio de-embedders, LED processors, or SDI-to-IP converters that introduce their own processing delay.
+
+For example, if an LED processor adds 2 frames of latency, setting `<delay>2</delay>` means the Vulkan output will hold frames 2 frames longer, allowing the combined system latency to align with other outputs (like DeckLink) that may have their own delay compensation.
+
+### Swapchain
+
+The swapchain is created with:
+
+- `VK_PRESENT_MODE_FIFO_KHR` — hardware VSync, guaranteed tear-free
+- Image count = `max(minImageCount + 1, buffer_depth)` — ensures enough images for smooth pipelining
+- Transfer destination usage — frames are blitted/copied into swapchain images
+
+Surface format selection priority:
+
+| Transfer Mode | Preferred Format | Color Space |
+|--------------|-----------------|-------------|
+| SDR | `VK_FORMAT_B8G8R8A8_UNORM` | `VK_COLOR_SPACE_SRGB_NONLINEAR_KHR` |
+| PQ (HDR10) | `VK_FORMAT_A2B10G10R10_UNORM_PACK32` | `VK_COLOR_SPACE_HDR10_ST2084_EXT` |
+| HLG | `VK_FORMAT_R16G16B16A16_SFLOAT` | (first available) |
+
+### Interlaced Content
+
+Field B is skipped — only field A is presented. This matches the behavior of the screen consumer.
+
+---
+
+## Multi-GPU Transfer
+
+When the CasparCG OGL mixer runs on a different GPU than the Vulkan output display, the module automatically detects the GPU mismatch (via LUID comparison) and activates the cross-GPU transfer pipeline.
+
+### Detection
+
+At startup, the module compares the LUID (Locally Unique Identifier) of:
+1. The **OGL device** GPU (where the mixer runs)
+2. The **Vulkan device** GPU (where the display is connected)
+
+If the LUIDs differ, the cross-GPU path is activated. The LUID is queried via `VkPhysicalDeviceIDProperties` on the Vulkan side and via `WGL_NV_gpu_affinity` LUID on the OpenGL side.
+
+### Transfer Hierarchy
+
+The module tries paths in order of performance:
+
+| Priority | Path | Bandwidth | CPU Load | Requirements |
+|----------|------|-----------|----------|--------------|
+| 1 | CUDA peer DMA | ~15 GB/s (PCIe 3.0 x16) | Zero | CUDA Toolkit, both NVIDIA GPUs |
+| 2 | PBO upload | ~6 GB/s | Moderate | WGL_NV_gpu_affinity |
+| 3 | CPU staging | ~3 GB/s | High | None (always available) |
+
+### CUDA Peer DMA (Preferred)
+
+When the CUDA Toolkit is available at build time (`CASPAR_CUDA_PEER_ENABLED`), the module:
+
+1. Queries `cudaGLGetDevices()` on each GPU's GL context to discover CUDA device indices
+2. Enables `cudaDeviceEnablePeerAccess()` for direct PCIe DMA (or NVLink if available)
+3. Allocates staging buffers on both GPUs
+
+Per-frame transfer:
+```
+Phase 1 (OGL thread, GPU A): cudaGraphicsMapResources → cudaMemcpy2DFromArray → staging_A
+Phase 2 (any thread):        cudaMemcpyPeer(staging_B, dev_B, staging_A, dev_A)
+Phase 3 (affinity thread, GPU B): cudaMemcpy2DToArray → landing_texture → shared_pool
+```
+
+Even without NVLink or direct P2P support, `cudaMemcpyPeer` still works — the driver routes through system RAM transparently, but uses the GPU's DMA engines rather than CPU memcpy, reducing CPU overhead.
+
+### PBO Upload Fallback
+
+When CUDA is not available (no toolkit at build time, or CUDA initialization fails at runtime):
+
+1. The mixer's CPU-side pixel buffer (`frame.image_data(0)`) is used
+2. A double-buffered PBO (Pixel Buffer Object) on the affinity context streams pixels to GPU B
+3. The uploaded texture is blitted into the shared interop pool
+
+This path still avoids blocking the OGL mixer thread. The double-buffered PBO overlaps the upload of frame N with the presentation of frame N-1.
+
+### WGL_NV_gpu_affinity
+
+The affinity context is created using the NVIDIA `WGL_NV_gpu_affinity` extension:
+
+1. `wglEnumGpusNV()` enumerates physical GPUs
+2. `wglCreateAffinityDCNV()` creates a device context bound to the target GPU
+3. A full OpenGL 4.5 context is created on this DC with its own dedicated thread
+4. The context's LUID is verified to match the Vulkan device
+
+This context provides the GL environment needed for both the CUDA interop (GPU B side) and the shared_texture_pool GL operations.
+
+### Log Output
+
+```
+[vulkan_output] GPU LUID mismatch — mixer on GPU 0, output on GPU 1. Activating cross-GPU transfer.
+[vulkan_output] Cross-GPU interop enabled via affinity bridge (GPU 1) (16-bit for HDR).
+[vulkan_output] CUDA peer DMA enabled (device 0 → device 1)
+[vulkan_output] Direct peer access enabled (NVLink/PCIe P2P)
+```
+
+If CUDA peer is unavailable:
+```
+[vulkan_output] CUDA peer transfer unavailable: cudaGLGetDevices failed — using PBO upload fallback.
+```
+
+---
+
+## HDR Output
+
+### Transfer Functions
+
+| Setting | Standard | Typical Use |
+|---------|----------|-------------|
+| `sdr` | BT.709 gamma | Standard broadcast, LED walls |
+| `pq` | SMPTE ST 2084 (Perceptual Quantizer) | HDR10, Dolby Vision base layer, HDR monitors |
+| `hlg` | ARIB STD-B67 (Hybrid Log-Gamma) | Live broadcast HDR, backward-compatible with SDR displays |
+
+### HDR Metadata
+
+When a non-SDR transfer is configured, the module sets SMPTE ST 2086 mastering display metadata via `VK_EXT_hdr_metadata`:
+
+- **Display primaries**: BT.2020 (R: 0.708/0.292, G: 0.170/0.797, B: 0.131/0.046)
+- **White point**: D65 (0.3127/0.3290)
+- **MaxCLL**: Maximum Content Light Level (nits) — configurable via `<max-cll>`
+- **MaxFALL**: Maximum Frame-Average Light Level (nits) — configurable via `<max-fall>`
+- **MinLuminance**: Fixed at 0.001 cd/m²
+
+### EDID Auto-Detection
+
+When `<edid-auto-hdr>true</edid-auto-hdr>` is set, the module reads the connected display's EDID via NvAPI at startup. If the display reports HDR capability (HDR Static Metadata Data Block in CTA-861 extension), the module:
+
+1. Automatically switches from SDR to PQ transfer
+2. Reads the display's reported maximum luminance and uses it as `MaxCLL`
+3. Re-applies HDR metadata with the display-specific values
+4. Logs the detected capabilities:
+
+```
+[vulkan_output] EDID auto-detected HDR (PQ) display: DELL UP2718Q MaxCLL=1000 cd/m²
+```
+
+This is useful in multi-display setups where some outputs are HDR-capable and others are not — the module adapts without manual configuration.
+
+---
+
+## Color Space Conversion
+
+The module includes a Vulkan compute shader that performs real-time color space conversion at the output stage. This transforms the mixer's working space (BT.709 sRGB) to any target gamut and transfer function — enabling wide-gamut and HDR output from standard BT.709 content.
+
+### Pipeline
+
+```
+Mixer output (BT.709 sRGB)
+    │
+    ▼ blit to RGBA16F intermediate
+    │
+    ▼ Compute shader:
+    │   1. Linearize (undo sRGB EOTF)
+    │   2. 3×3 gamut matrix (BT.709 → target primaries)
+    │   3. Apply output OETF (PQ, HLG, gamma, etc.)
+    │
+    ▼ blit to swapchain
+    │
+    ▼ vkQueuePresentKHR
+```
+
+When color conversion is not needed (gamut = BT.709, transfer = sRGB), the compute pass is completely bypassed — frames blit directly to the swapchain with zero overhead.
+
+### Output Gamuts
+
+| Config Value | Standard | Typical Use |
+|-------------|----------|-------------|
+| `bt709` | ITU-R BT.709 / sRGB | Default — no conversion, direct pass-through |
+| `bt2020` | ITU-R BT.2020 | HDR10, broadcast HDR, wide-gamut displays |
+| `p3-d65` | Display P3 (D65 white) | Apple displays, wide-gamut monitors, HDR grading |
+| `p3-dci` | DCI-P3 (DCI white) | Digital cinema projection (gamma 2.6) |
+| `adobe-rgb` | Adobe RGB (1998) | Photography, print proofing |
+
+Aliases: `p3` and `display-p3` → `p3-d65`; `dci-p3` → `p3-dci`; `2020` → `bt2020`; `adobergb` → `adobe-rgb`.
+
+### Transfer Functions (EOTF/OETF)
+
+| Config Value | Standard | Typical Use |
+|-------------|----------|-------------|
+| `srgb` | IEC 61966-2-1 (~gamma 2.2) | Default — matches mixer working space |
+| `linear` | 1:1 (no curve) | Compositing previews, light-linear workflows |
+| `pq` / `st2084` | SMPTE ST 2084 | HDR10, Dolby Vision base, broadcast HDR mastering |
+| `hlg` | ARIB STD-B67 | Live broadcast HDR, backward-compatible |
+| `gamma24` / `2.4` | Pure gamma 2.4 | EBU broadcast reference monitors |
+| `gamma26` / `2.6` | Pure gamma 2.6 | DCI cinema projection |
+
+### Automatic Inference
+
+When `<gamut>` or `<eotf>` are not explicitly set, the module infers them from the legacy `<transfer>` setting:
+
+| `<transfer>` | Inferred gamut | Inferred EOTF |
+|-------------|---------------|----------------|
+| `sdr` | bt709 | srgb |
+| `pq` | bt2020 | pq |
+| `hlg` | bt2020 | hlg |
+
+This means existing configs with `<transfer>pq</transfer>` automatically get BT.2020 gamut mapping without changes.
+
+### Configuration
+
+```xml
+<vulkan-output>
+    <gpu>0</gpu>
+    <device>1</device>
+    <gamut>bt2020</gamut>          <!-- Output color gamut -->
+    <eotf>pq</eotf>               <!-- Output transfer function -->
+    <hdr-metadata>
+        <max-cll>1000</max-cll>
+        <max-fall>400</max-fall>
+    </hdr-metadata>
+</vulkan-output>
+```
+
+### Performance
+
+The compute shader runs at approximately:
+- **1080p60**: < 0.1 ms per frame (negligible)
+- **2160p60**: ~0.3 ms per frame
+- **4320p60 (8K)**: ~1.2 ms per frame
+
+The intermediate image is RGBA16F (16-bit float), providing sufficient precision for all gamut conversions and transfer functions without banding artifacts.
+
+---
+
+## Synchronization
+
+### Vulkan Present Barriers (`VK_NV_present_barrier`)
+
+For multi-output setups where multiple Vulkan consumers must present at exactly the same time (e.g., a video wall driven by one GPU), the `<sync-group>` parameter enables Vulkan present barriers.
+
+All swapchains with the same non-zero `sync-group` value are frame-locked at the driver level. The NVIDIA driver holds all `vkQueuePresentKHR` calls until every swapchain in the group has submitted, then releases them simultaneously on the same VBlank.
+
+```xml
+<!-- GPU 0 drives two outputs, frame-locked together -->
+<channel>
+    <consumers>
+        <vulkan-output>
+            <gpu>0</gpu>
+            <device>1</device>
+            <sync-group>1</sync-group>
+        </vulkan-output>
+    </consumers>
+</channel>
+<channel>
+    <consumers>
+        <vulkan-output>
+            <gpu>0</gpu>
+            <device>2</device>
+            <sync-group>1</sync-group>
+        </vulkan-output>
+    </consumers>
+</channel>
+```
+
+Requires:
+- `VK_NV_present_barrier` device extension (NVIDIA driver 525+ with Quadro/RTX Pro GPU)
+- All outputs in the same sync group must be on the same GPU
+
+### Quadro Sync II (NvAPI GSync)
+
+For multi-GPU framelock — where separate physical GPUs must have their VSync signals locked together — the module integrates with NVIDIA Quadro Sync II boards via NvAPI.
+
+```xml
+<vulkan-output>
+    <gsync>
+        <enabled>true</enabled>
+        <master>true</master>
+        <reference>external</reference>
+    </gsync>
+</vulkan-output>
+```
+
+| Parameter | Description |
+|-----------|-------------|
+| `enabled` | Enable GSync framelock for this output |
+| `master` | Designate this output as the timing master. All other outputs in the sync group will slave to this output's VSync. Exactly one output should be master. |
+| `reference` | `internal` = use the GPU's own VSync as the timing reference. `external` = use the BNC house sync input on the Quadro Sync II card (genlock). |
+
+The module monitors sync status and exposes it via OSC:
+
+```
+vulkan-output/gsync/available  = true
+vulkan-output/gsync/synced     = true
+vulkan-output/gsync/house-sync = true
+vulkan-output/gsync/role       = master
+```
+
+### Synchronization Hierarchy
+
+For maximum timing accuracy, combine both mechanisms:
+
+```
+                 House Sync (BNC)
+                       │
+                 Quadro Sync II
+                       │
+              ┌────────┴────────┐
+              │                 │
+           GPU 0             GPU 1
+           (master)          (slave)
+              │                 │
+        ┌─────┴─────┐    ┌─────┴─────┐
+     Output 1    Output 2  Output 3  Output 4
+     sync-group=1          sync-group=2
+```
+
+- **Quadro Sync II** locks GPU 0 and GPU 1 VSync signals together (NvAPI)
+- **Present barriers** lock the per-GPU outputs together (`sync-group`)
+- **House sync** provides external genlock to the Quadro Sync II card
+
+---
+
+## Subregion Output
+
+The subregion feature allows a portion of the channel's frame to be mapped to a portion of the physical display. This enables multi-display tiling from a single wide channel.
+
+```xml
+<subregion>
+    <src-x>0</src-x>        <!-- X offset into the source channel frame -->
+    <src-y>0</src-y>        <!-- Y offset into the source channel frame -->
+    <dest-x>0</dest-x>      <!-- X offset on the physical output -->
+    <dest-y>0</dest-y>      <!-- Y offset on the physical output -->
+    <width>1920</width>     <!-- Region width (0 = full source width) -->
+    <height>1080</height>   <!-- Region height (0 = full source height) -->
+</subregion>
+```
+
+### Example: 3840×1080 Channel Across Two 1920×1080 Outputs
+
+```xml
+<!-- Left half -->
+<vulkan-output>
+    <gpu>0</gpu>
+    <device>1</device>
+    <subregion>
+        <src-x>0</src-x>
+        <src-y>0</src-y>
+        <width>1920</width>
+        <height>1080</height>
+    </subregion>
+    <sync-group>1</sync-group>
+</vulkan-output>
+
+<!-- Right half -->
+<vulkan-output>
+    <gpu>0</gpu>
+    <device>2</device>
+    <subregion>
+        <src-x>1920</src-x>
+        <src-y>0</src-y>
+        <width>1920</width>
+        <height>1080</height>
+    </subregion>
+    <sync-group>1</sync-group>
+</vulkan-output>
+```
+
+The blit operation uses `VK_FILTER_LINEAR` for scaling when the source region size differs from the output display resolution.
+
+---
+
+## Display Hot-Plug
+
+The consumer handles display disconnection and reconnection gracefully:
+
+| Event | Response |
+|-------|----------|
+| `VK_ERROR_SURFACE_LOST_KHR` | Marks display as lost, logs warning |
+| `VK_ERROR_OUT_OF_DATE_KHR` | Immediate swapchain recreation |
+| `VK_SUBOPTIMAL_KHR` | Swapchain recreation (resolution may have changed) |
+| Display lost + `on-disconnect=retry` | Retries surface validation every 50 frames (~1 second at 50fps) |
+| Display lost + `on-disconnect=hold` | Holds the last presented frame, stops attempting presents |
+| Display lost + `on-disconnect=black` | Clears output to black |
+| Display reconnected | Recreates swapchain, re-applies HDR metadata, resumes presentation |
+
+The `display-lost` state is exposed via OSC at `vulkan-output/display-lost`.
+
+---
+
+## AMCP Commands
+
+### INFO VULKAN_OUTPUT
+
+Enumerates all detected Vulkan display outputs across all GPUs.
+
+```
+>> INFO VULKAN_OUTPUT
+<< 201 INFO VULKAN_OUTPUT OK
+<< <vulkan-outputs>
+<<   <output>
+<<     <gpu-index>0</gpu-index>
+<<     <output-index>1</output-index>
+<<     <gpu-name>NVIDIA RTX A4000</gpu-name>
+<<     <display-name>DP-1</display-name>
+<<     <width>3840</width>
+<<     <height>2160</height>
+<<     <tier>pro</tier>
+<<   </output>
+<< </vulkan-outputs>
+```
+
+When NvAPI is available, the output also includes EDID information (manufacturer, model, HDR support, 10-bit support, maximum luminance).
+
+### ADD (AMCP)
+
+```
+ADD 1 VULKAN_OUTPUT [output_index] [gpu_index] [MODE video_mode] [DELAY frames]
+```
+
+Examples:
+```
+ADD 1 VULKAN_OUTPUT 1          -- Output 1 on GPU 0
+ADD 1 VULKAN_OUTPUT 2 1        -- Output 2 on GPU 1
+ADD 1 VULKAN_OUTPUT 1 0 DELAY 2  -- Output 1, 2-frame presentation delay
+```
+
+### CALL (Runtime)
+
+```
+CALL 1-500 IDENTIFY    -- Flash a color overlay for 3 seconds to identify the output
+```
+
+Each output displays a distinct color (Blue, Green, Red, Cyan, Magenta, Yellow) based on its output index for easy identification in multi-display setups.
+
+---
+
+## Configuration Reference
+
+All options for the `<vulkan-output>` consumer block in `casparcg.config`:
+
+| Element | Type | Default | Description |
+|---------|------|---------|-------------|
+| `<gpu>` | int | `0` | Physical GPU index (0-based) |
+| `<device>` | int | `1` | Display output index (1-based) |
+| `<buffer-depth>` | int | `3` | Pre-scheduled swapchain frame count |
+| `<delay>` | int | `0` | Presentation delay in frames |
+| `<video-mode>` | string | *(channel)* | Explicit output video mode |
+| `<identify-on-start>` | bool | `false` | Flash identification overlay on startup |
+| `<on-disconnect>` | enum | `retry` | `hold` \| `black` \| `retry` |
+| `<transfer>` | enum | `sdr` | `sdr` \| `pq` \| `hlg` |
+| `<gamut>` | enum | *(auto)* | `bt709` \| `bt2020` \| `p3-d65` \| `p3-dci` \| `adobe-rgb` |
+| `<eotf>` | enum | *(auto)* | `srgb` \| `linear` \| `pq` \| `hlg` \| `gamma24` \| `gamma26` |
+| `<edid-auto-hdr>` | bool | `false` | Auto-detect HDR from display EDID |
+| `<hdr-metadata>` | | | |
+| &nbsp;&nbsp;`<max-cll>` | int | `1000` | Maximum Content Light Level (nits) |
+| &nbsp;&nbsp;`<max-fall>` | int | `400` | Maximum Frame-Average Light Level (nits) |
+| &nbsp;&nbsp;`<transfer>` | enum | *(parent)* | Override transfer in metadata |
+| `<subregion>` | | | |
+| &nbsp;&nbsp;`<src-x>` | int | `0` | Source X offset |
+| &nbsp;&nbsp;`<src-y>` | int | `0` | Source Y offset |
+| &nbsp;&nbsp;`<dest-x>` | int | `0` | Destination X offset |
+| &nbsp;&nbsp;`<dest-y>` | int | `0` | Destination Y offset |
+| &nbsp;&nbsp;`<width>` | int | `0` | Region width (0 = full) |
+| &nbsp;&nbsp;`<height>` | int | `0` | Region height (0 = full) |
+| `<gsync>` | | | |
+| &nbsp;&nbsp;`<enabled>` | bool | `false` | Enable Quadro Sync framelock |
+| &nbsp;&nbsp;`<master>` | bool | `false` | This output is the sync master |
+| &nbsp;&nbsp;`<reference>` | enum | `internal` | `internal` \| `external` (house sync) |
+| `<sync-group>` | int | `0` | Present barrier group (0 = disabled) |
+
+---
+
+## Configuration Examples
+
+### Basic SDR Output
+
+Single output on the first GPU, first display connector:
+
+```xml
+<channel>
+    <video-mode>1080p5000</video-mode>
+    <consumers>
+        <vulkan-output>
+            <gpu>0</gpu>
+            <device>1</device>
+        </vulkan-output>
+    </consumers>
+</channel>
+```
+
+### HDR10 Output with PQ
+
+```xml
+<channel>
+    <video-mode>2160p5000</video-mode>
+    <color-depth>16</color-depth>
+    <color-space>bt2020</color-space>
+    <consumers>
+        <vulkan-output>
+            <gpu>0</gpu>
+            <device>1</device>
+            <transfer>pq</transfer>
+            <hdr-metadata>
+                <max-cll>1000</max-cll>
+                <max-fall>400</max-fall>
+            </hdr-metadata>
+        </vulkan-output>
+    </consumers>
+</channel>
+```
+
+### Auto-Detect HDR from Display
+
+Let the module read the display's EDID and decide:
+
+```xml
+<vulkan-output>
+    <gpu>0</gpu>
+    <device>1</device>
+    <edid-auto-hdr>true</edid-auto-hdr>
+</vulkan-output>
+```
+
+### Wide-Gamut Display P3 Output
+
+Convert BT.709 content to Display P3 for Apple-style wide-gamut monitors:
+
+```xml
+<vulkan-output>
+    <gpu>0</gpu>
+    <device>1</device>
+    <gamut>p3-d65</gamut>
+    <eotf>srgb</eotf>
+</vulkan-output>
+```
+
+### DCI Cinema Projection
+
+Output for DCI-P3 projectors using gamma 2.6:
+
+```xml
+<vulkan-output>
+    <gpu>0</gpu>
+    <device>1</device>
+    <gamut>p3-dci</gamut>
+    <eotf>gamma26</eotf>
+</vulkan-output>
+```
+
+### HDR10 with Explicit Gamut and Transfer
+
+Full control over color space conversion (equivalent to `<transfer>pq</transfer>` with automatic inference):
+
+```xml
+<vulkan-output>
+    <gpu>0</gpu>
+    <device>1</device>
+    <gamut>bt2020</gamut>
+    <eotf>pq</eotf>
+    <hdr-metadata>
+        <max-cll>1000</max-cll>
+        <max-fall>400</max-fall>
+    </hdr-metadata>
+</vulkan-output>
+```
+
+### EBU Broadcast Reference Monitor
+
+BT.709 primaries with gamma 2.4 (no gamut conversion, EOTF only):
+
+```xml
+<vulkan-output>
+    <gpu>0</gpu>
+    <device>1</device>
+    <eotf>gamma24</eotf>
+</vulkan-output>
+```
+
+### HLG Live Broadcast
+
+BT.2020 wide gamut with Hybrid Log-Gamma for backward-compatible HDR:
+
+```xml
+<vulkan-output>
+    <gpu>0</gpu>
+    <device>1</device>
+    <gamut>bt2020</gamut>
+    <eotf>hlg</eotf>
+</vulkan-output>
+```
+
+### 4-Output Video Wall (Single GPU)
+
+One wide channel split across four 1080p displays in a 2×2 grid:
+
+```xml
+<channel>
+    <video-mode>3840x2160p5000</video-mode>
+    <consumers>
+        <!-- Top-left -->
+        <vulkan-output>
+            <gpu>0</gpu>
+            <device>1</device>
+            <subregion>
+                <src-x>0</src-x>
+                <src-y>0</src-y>
+                <width>1920</width>
+                <height>1080</height>
+            </subregion>
+            <sync-group>1</sync-group>
+        </vulkan-output>
+        <!-- Top-right -->
+        <vulkan-output>
+            <gpu>0</gpu>
+            <device>2</device>
+            <subregion>
+                <src-x>1920</src-x>
+                <src-y>0</src-y>
+                <width>1920</width>
+                <height>1080</height>
+            </subregion>
+            <sync-group>1</sync-group>
+        </vulkan-output>
+        <!-- Bottom-left -->
+        <vulkan-output>
+            <gpu>0</gpu>
+            <device>3</device>
+            <subregion>
+                <src-x>0</src-x>
+                <src-y>1080</src-y>
+                <width>1920</width>
+                <height>1080</height>
+            </subregion>
+            <sync-group>1</sync-group>
+        </vulkan-output>
+        <!-- Bottom-right -->
+        <vulkan-output>
+            <gpu>0</gpu>
+            <device>4</device>
+            <subregion>
+                <src-x>1920</src-x>
+                <src-y>1080</src-y>
+                <width>1920</width>
+                <height>1080</height>
+            </subregion>
+            <sync-group>1</sync-group>
+        </vulkan-output>
+    </consumers>
+</channel>
+```
+
+### Multi-GPU with Quadro Sync II and House Sync
+
+Two GPUs, each driving two outputs, all genlocked to external reference:
+
+```xml
+<!-- GPU 0: Outputs 1-2 (master) -->
+<channel>
+    <video-mode>1080p5000</video-mode>
+    <consumers>
+        <vulkan-output>
+            <gpu>0</gpu>
+            <device>1</device>
+            <sync-group>1</sync-group>
+            <gsync>
+                <enabled>true</enabled>
+                <master>true</master>
+                <reference>external</reference>
+            </gsync>
+        </vulkan-output>
+    </consumers>
+</channel>
+<channel>
+    <video-mode>1080p5000</video-mode>
+    <consumers>
+        <vulkan-output>
+            <gpu>0</gpu>
+            <device>2</device>
+            <sync-group>1</sync-group>
+            <gsync>
+                <enabled>true</enabled>
+                <master>false</master>
+            </gsync>
+        </vulkan-output>
+    </consumers>
+</channel>
+
+<!-- GPU 1: Outputs 1-2 (slave) -->
+<channel>
+    <video-mode>1080p5000</video-mode>
+    <consumers>
+        <vulkan-output>
+            <gpu>1</gpu>
+            <device>1</device>
+            <sync-group>2</sync-group>
+            <gsync>
+                <enabled>true</enabled>
+                <master>false</master>
+            </gsync>
+        </vulkan-output>
+    </consumers>
+</channel>
+<channel>
+    <video-mode>1080p5000</video-mode>
+    <consumers>
+        <vulkan-output>
+            <gpu>1</gpu>
+            <device>2</device>
+            <sync-group>2</sync-group>
+            <gsync>
+                <enabled>true</enabled>
+                <master>false</master>
+            </gsync>
+        </vulkan-output>
+    </consumers>
+</channel>
+```
+
+### Multi-GPU without Quadro Sync (Automatic Cross-GPU)
+
+When outputs span multiple GPUs without Quadro Sync hardware, the module automatically detects the GPU mismatch and activates the cross-GPU transfer pipeline:
+
+```xml
+<!-- Mixer runs on GPU 0 (default), but outputs are on GPU 1 -->
+<channel>
+    <video-mode>1080p5000</video-mode>
+    <consumers>
+        <!-- This output is on a display connected to GPU 1 -->
+        <vulkan-output>
+            <gpu>1</gpu>
+            <device>1</device>
+        </vulkan-output>
+        <!-- Another output on GPU 1 -->
+        <vulkan-output>
+            <gpu>1</gpu>
+            <device>2</device>
+            <sync-group>1</sync-group>
+        </vulkan-output>
+    </consumers>
+</channel>
+```
+
+No special configuration is needed — the module:
+1. Detects the LUID mismatch between mixer GPU (0) and output GPU (1)
+2. Creates a `WGL_NV_gpu_affinity` context on GPU 1
+3. Attempts CUDA peer DMA (if CUDA Toolkit was available at build time)
+4. Falls back to PBO upload if CUDA is unavailable
+5. Uses `shared_texture_pool` on GPU 1 for Vulkan interop
+
+### Multi-GPU HDR Video Wall
+
+```xml
+<!-- 4K HDR content split across 4 outputs on GPU 1 (different from mixer GPU 0) -->
+<channel>
+    <video-mode>2160p5000</video-mode>
+    <color-depth>16</color-depth>
+    <color-space>bt2020</color-space>
+    <consumers>
+        <vulkan-output>
+            <gpu>1</gpu>
+            <device>1</device>
+            <transfer>pq</transfer>
+            <subregion>
+                <src-x>0</src-x>
+                <src-y>0</src-y>
+                <width>1920</width>
+                <height>1080</height>
+            </subregion>
+            <sync-group>1</sync-group>
+        </vulkan-output>
+        <vulkan-output>
+            <gpu>1</gpu>
+            <device>2</device>
+            <transfer>pq</transfer>
+            <subregion>
+                <src-x>1920</src-x>
+                <src-y>0</src-y>
+                <width>1920</width>
+                <height>1080</height>
+            </subregion>
+            <sync-group>1</sync-group>
+        </vulkan-output>
+    </consumers>
+</channel>
+```
+
+> **Performance note**: At 4K60 BGRA16 (16-bit HDR), the frame size is ~66 MB/frame → ~4 GB/s sustained. This comfortably fits within PCIe 3.0 x16 bandwidth (15.7 GB/s). For 8K or higher refresh rates, NVLink is recommended.
+
+### LED Wall with Presentation Delay
+
+Compensate for a 3-frame delay in the LED processor:
+
+```xml
+<vulkan-output>
+    <gpu>0</gpu>
+    <device>1</device>
+    <delay>3</delay>
+    <buffer-depth>5</buffer-depth>
+</vulkan-output>
+```
+
+> **Note**: Set `buffer-depth` to at least `delay + 2` to avoid frame drops during the initial fill.
+
+### Output Identification on Startup
+
+Useful for commissioning multi-display setups:
+
+```xml
+<vulkan-output>
+    <gpu>0</gpu>
+    <device>1</device>
+    <identify-on-start>true</identify-on-start>
+</vulkan-output>
+```
+
+Each output flashes a distinct color (blue, green, red, cyan, magenta, yellow) for 3 seconds based on its output index.
+
+---
+
+## Build Requirements
+
+| Dependency | Required | Purpose |
+|------------|----------|---------|
+| **Vulkan SDK** | Yes | Core Vulkan API, validation layers |
+| **NvAPI SDK** | Optional | EDID readback, Quadro Sync II framelock |
+| **CUDA Toolkit** | Optional | GPU-to-GPU peer DMA for cross-GPU transfer |
+| **GLEW** | Yes (via accelerator) | GL extension loading for zero-copy interop |
+
+### Vulkan SDK
+
+Set the `VULKAN_SDK` environment variable or install to the default `C:\VulkanSDK\` path. The build system auto-detects the latest version.
+
+### NvAPI SDK
+
+Set `NVAPI_SDK_PATH` CMake variable or place the SDK at `D:\Github\nvapi-main`. If not found, the module compiles without `CASPAR_NVAPI_ENABLED` — EDID auto-detection and Quadro Sync features are disabled, but all Vulkan output functionality remains available.
+
+### CUDA Toolkit
+
+When CUDA Toolkit is installed (detected via CMake's `find_package(CUDAToolkit)`), the module compiles with `CASPAR_CUDA_PEER_ENABLED` and links `cudart_static`. This enables the CUDA peer DMA path for cross-GPU transfer.
+
+If the CUDA Toolkit is not found at build time, the module compiles without CUDA support — multi-GPU still works via the PBO upload fallback path. No runtime error occurs.
+
+Tested with CUDA 12.x. The module uses only CUDA Runtime API (no kernels, no .cu files) so it compiles as standard C++.
+
+### Required Vulkan Extensions
+
+The module requires or uses the following Vulkan extensions:
+
+| Extension | Required | Tier | Purpose |
+|-----------|----------|------|---------|
+| `VK_KHR_swapchain` | Yes | Both | Swapchain presentation |
+| `VK_KHR_display` | No | Pro | Direct display mode (bypasses compositor) |
+| `VK_KHR_surface` | Yes | Both | Surface abstraction |
+| `VK_KHR_win32_surface` | No | Consumer | Win32 window surface |
+| `VK_KHR_external_memory_win32` | No | Both | Zero-copy OGL↔VK shared memory |
+| `VK_KHR_external_semaphore_win32` | No | Both | Zero-copy synchronization |
+| `VK_NV_present_barrier` | No | Pro | Multi-output frame-lock |
+| `VK_EXT_hdr_metadata` | No | Both | HDR static metadata |
+| `VK_EXT_display_control` | No | Pro | VBlank fence timing |
+
+---
+
+## Diagnostics
+
+The consumer publishes real-time diagnostics via the CasparCG graph system:
+
+| Graph Channel | Color | Description |
+|---------------|-------|-------------|
+| `frame-time` | Green | Time to record+submit+present one frame (normalized to frame period) |
+| `tick-time` | Blue | Time between successive present calls (should be ~1.0 at correct fps) |
+| `dropped-frame` | Red | Frame was dropped due to acquire/present failure |
+| `late-frame` | Purple | Frame buffer overflowed — mixer is producing faster than output is consuming |
+| `buffered-video` | Cyan | Current buffer fill level (0.0–1.0 relative to `buffer-depth`) |
+| `vblank-drift` | Orange | Time between present submission and actual VBlank signal (Pro tier only) |
+
+### OSC State
+
+The following state paths are published via OSC:
+
+```
+vulkan-output/gpu             = 0
+vulkan-output/output          = 1
+vulkan-output/tier            = "pro"
+vulkan-output/frames          = 123456
+vulkan-output/display-lost    = false
+vulkan-output/sync-group      = 1
+vulkan-output/present-barrier = true
+vulkan-output/delay           = 0
+vulkan-output/gsync/available = true
+vulkan-output/gsync/synced    = true
+vulkan-output/gsync/house-sync = true
+vulkan-output/gsync/role      = "master"
+```
+
+---
+
+## Troubleshooting
+
+### "Vulkan output not found: gpu=0 output=1"
+
+The specified GPU/output combination doesn't exist or isn't available for direct display.
+
+- Run `INFO VULKAN_OUTPUT` to see available outputs
+- For Pro tier: ensure the display is set to "dedicated" in NVIDIA Control Panel
+- Check that the Vulkan SDK is installed and the `vulkan-1.dll` runtime is on PATH
+
+### "Zero-copy unavailable, falling back to CPU"
+
+The OpenGL ↔ Vulkan interop extensions are not available.
+
+- Verify `GL_EXT_memory_object` and `GL_EXT_semaphore` are supported by the OGL driver
+- Multi-vendor GPU configurations (e.g., Intel iGPU + NVIDIA dGPU) may not support cross-API memory sharing
+- CPU fallback adds ~1–2ms per frame at 1080p, more at 4K
+
+### "GPU LUID mismatch — activating cross-GPU transfer"
+
+This is an informational message, not an error. The module detected that the target display is on a different GPU than the mixer and has activated the appropriate transfer pipeline.
+
+- If followed by "CUDA peer DMA enabled" → optimal path, no action needed
+- If followed by "CUDA peer transfer unavailable" → PBO fallback is used, which is still functional
+
+### "CUDA peer transfer unavailable"
+
+CUDA peer DMA could not be initialized. The module falls back to PBO upload.
+
+Common causes:
+- CUDA Toolkit was not found at build time (`CASPAR_CUDA_PEER_ENABLED` not defined)
+- `cudaGLGetDevices()` failed — the GL context wasn't created with a CUDA-capable driver
+- Mixed GPU vendor setup (e.g., NVIDIA + AMD) — CUDA only works with NVIDIA GPUs
+- The CUDA runtime failed to initialize (driver mismatch or out-of-memory)
+
+The PBO fallback is automatic and still provides smooth output.
+
+### "Affinity context LUID doesn't match Vulkan device"
+
+The `WGL_NV_gpu_affinity` context was created but its GPU doesn't match the Vulkan physical device.
+
+- This may indicate a driver bug or mismatch between GPU enumeration order
+- Verify GPU ordering: `INFO VULKAN_OUTPUT` shows the Vulkan enumeration, while NVIDIA Control Panel shows the WGL enumeration
+- As a workaround, swap the `<gpu>` index value
+
+### "GPU affinity context failed"
+
+`WGL_NV_gpu_affinity` is not available or the target GPU index is invalid.
+
+- Requires NVIDIA driver with `WGL_NV_gpu_affinity` support (Quadro/RTX/GeForce 400+)
+- Verify the GPU index exists: `INFO VULKAN_OUTPUT` lists available GPUs
+- The module falls back to CPU upload (SDR only) when affinity fails
+
+### "VK_NV_present_barrier not available"
+
+`sync-group` was configured but the extension isn't supported.
+
+- Requires NVIDIA driver 525 or newer
+- Only available on Quadro / RTX Pro GPUs
+- The outputs will still work, but without driver-level frame-lock
+
+### "Display disconnected (surface lost)"
+
+The display was physically disconnected or the desktop configuration changed.
+
+- With `<on-disconnect>retry</on-disconnect>` (default), the module will automatically recover when the display is reconnected
+- Monitor `vulkan-output/display-lost` via OSC for alerting
+- If the display was removed from the NVIDIA mosaic/surround configuration, a CasparCG restart may be required
+
+### High `frame-time` Values
+
+If `frame-time` consistently exceeds 0.5:
+
+- Increase `<buffer-depth>` to 4–5 to absorb timing jitter
+- Verify zero-copy path is active (check for "Zero-copy OGL→VK interop enabled" in the log)
+- Check for GPU thermal throttling (`nvidia-smi -q -d PERFORMANCE`)
+
+### Best Practices
+
+1. **Always use Pro tier for broadcast** — configure displays as "dedicated" in NVIDIA Control Panel to enable `VK_KHR_display` and bypass the compositor.
+
+2. **Set `buffer-depth` appropriately** — 3 is a good default. Increase to 4–5 for 4K or multi-output setups. For delay-compensated outputs, use `delay + 2` minimum.
+
+3. **Use `sync-group` for multi-output on a single GPU** — this is the most reliable way to frame-lock multiple outputs without additional hardware.
+
+4. **Use Quadro Sync II for multi-GPU framelock** — present barriers only work within a single GPU. Cross-GPU VSync synchronization requires Quadro Sync II hardware. However, cross-GPU *frame transfer* works automatically without any special hardware.
+
+5. **Enable `identify-on-start` during commissioning** — each output flashes a distinct color, making it easy to verify physical wiring.
+
+6. **Use `edid-auto-hdr` for mixed SDR/HDR setups** — the module will auto-detect which displays support HDR and configure accordingly.
+
+7. **Monitor diagnostics** — the `vblank-drift` graph (Pro tier) shows the actual timing accuracy. Values consistently above 0.1 indicate timing issues.
+
+8. **Install CUDA Toolkit for best cross-GPU performance** — even without NVLink, CUDA peer DMA is significantly faster than PBO upload because it uses the GPU's dedicated copy engines rather than CPU memcpy. The toolkit is only needed at build time.
+
+9. **Use NVLink for 4K+ cross-GPU HDR** — at 4K60 16-bit, frame sizes reach ~66 MB, requiring ~4 GB/s sustained. PCIe 3.0 x16 handles this (15.7 GB/s), but NVLink (~600 GB/s) provides massive headroom and lower latency.
+
+10. **Use `<gamut>` and `<eotf>` for precise color control** — the legacy `<transfer>` setting still works (infers bt2020 + pq/hlg automatically), but explicit `<gamut>` and `<eotf>` give full control. For standard BT.709 SDR output, leave both unset — the compute pass is completely bypassed with zero overhead.
