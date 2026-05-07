@@ -105,6 +105,15 @@ color_convert_pipeline::color_convert_pipeline(vulkan_device& device, uint32_t w
     , width_(width)
     , height_(height)
 {
+    // Validate push constant size against device limits
+    VkPhysicalDeviceProperties props;
+    vkGetPhysicalDeviceProperties(physical_device_, &props);
+    if (props.limits.maxPushConstantsSize < sizeof(color_convert_push_constants)) {
+        CASPAR_THROW_EXCEPTION(caspar_exception() << msg_info(
+            "Device maxPushConstantsSize (" + std::to_string(props.limits.maxPushConstantsSize) +
+            ") is less than required " + std::to_string(sizeof(color_convert_push_constants)) + " bytes"));
+    }
+
     // Default: identity matrix, sRGB EOTF, inactive
     std::memcpy(push_constants_.gamut_matrix, mat_identity, sizeof(mat_identity));
     push_constants_.eotf_mode     = 0;
