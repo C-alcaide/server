@@ -207,9 +207,19 @@ bool gpu_affinity_context::create_affinity_context(int gpu_index)
     wc.lpfnWndProc   = DefWindowProcW;
     wc.hInstance     = GetModuleHandle(nullptr);
     wc.lpszClassName = L"CasparGPUAffinityBootstrap";
-    RegisterClassExW(&wc);
+    if (!RegisterClassExW(&wc)) {
+        if (GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
+            CASPAR_LOG(error) << L"[gpu_affinity] RegisterClassExW failed: " << GetLastError();
+            return false;
+        }
+    }
 
     HWND temp_hwnd = CreateWindowExW(0, wc.lpszClassName, L"", 0, 0, 0, 1, 1, nullptr, nullptr, wc.hInstance, nullptr);
+    if (!temp_hwnd) {
+        CASPAR_LOG(error) << L"[gpu_affinity] CreateWindowExW failed: " << GetLastError();
+        UnregisterClassW(wc.lpszClassName, wc.hInstance);
+        return false;
+    }
     HDC  temp_dc   = GetDC(temp_hwnd);
 
     PIXELFORMATDESCRIPTOR pfd{};
@@ -231,6 +241,7 @@ bool gpu_affinity_context::create_affinity_context(int gpu_index)
         wglDeleteContext(temp_rc);
         ReleaseDC(temp_hwnd, temp_dc);
         DestroyWindow(temp_hwnd);
+        UnregisterClassW(wc.lpszClassName, wc.hInstance);
         return false;
     }
 
@@ -242,6 +253,7 @@ bool gpu_affinity_context::create_affinity_context(int gpu_index)
         wglDeleteContext(temp_rc);
         ReleaseDC(temp_hwnd, temp_dc);
         DestroyWindow(temp_hwnd);
+        UnregisterClassW(wc.lpszClassName, wc.hInstance);
         return false;
     }
 
@@ -262,6 +274,7 @@ bool gpu_affinity_context::create_affinity_context(int gpu_index)
         wglDeleteContext(temp_rc);
         ReleaseDC(temp_hwnd, temp_dc);
         DestroyWindow(temp_hwnd);
+        UnregisterClassW(wc.lpszClassName, wc.hInstance);
         return false;
     }
 
