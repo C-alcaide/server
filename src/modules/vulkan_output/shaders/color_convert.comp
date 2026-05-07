@@ -88,7 +88,9 @@ void main() {
     vec3 linear_rgb = srgb_to_linear(pixel.rgb);
 
     // Step 2: Gamut mapping (3×3 matrix multiply)
-    vec3 mapped = (pc.gamut_matrix * vec4(linear_rgb, 1.0)).rgb;
+    // C++ stores matrices row-major, but GLSL mat4 is column-major.
+    // Using vec4 * mat4 (row-vector × column-major) gives correct row-major semantics.
+    vec3 mapped = (vec4(linear_rgb, 1.0) * pc.gamut_matrix).rgb;
 
     // Step 3: Apply output OETF
     vec3 output_rgb;
