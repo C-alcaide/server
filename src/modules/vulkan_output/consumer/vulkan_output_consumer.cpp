@@ -342,11 +342,8 @@ class vulkan_output_consumer : public core::frame_consumer
             }
         }
 
-        // Start present thread
-        running_ = true;
-        present_thread_ = std::thread([this] { present_loop(); });
-
-        // Create color space conversion pipeline if needed
+        // Create color space conversion pipeline if needed (before present thread starts
+        // to avoid a data race — present_loop reads color_pipeline_ every frame)
         if (config_.gamut != output_gamut::bt709 || config_.eotf != output_eotf::srgb) {
             try {
                 color_pipeline_ = std::make_unique<color_convert_pipeline>(
@@ -360,6 +357,10 @@ class vulkan_output_consumer : public core::frame_consumer
                 color_pipeline_.reset();
             }
         }
+
+        // Start present thread
+        running_ = true;
+        present_thread_ = std::thread([this] { present_loop(); });
 
         // Show identify overlay if configured
         if (config_.identify_on_start) {
