@@ -1111,14 +1111,24 @@ class vulkan_output_consumer : public core::frame_consumer
                            1, &final_region, VK_FILTER_LINEAR);
         }
 
-        // Transition to present
-        barrier.oldLayout     = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        barrier.newLayout     = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-        barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        barrier.dstAccessMask = 0;
+        // Transition swapchain image to present layout
+        VkImageMemoryBarrier present_barrier{};
+        present_barrier.sType                           = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        present_barrier.oldLayout                       = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        present_barrier.newLayout                       = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        present_barrier.srcQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
+        present_barrier.dstQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
+        present_barrier.image                           = swapchain_.images[image_index];
+        present_barrier.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+        present_barrier.subresourceRange.baseMipLevel   = 0;
+        present_barrier.subresourceRange.levelCount     = 1;
+        present_barrier.subresourceRange.baseArrayLayer = 0;
+        present_barrier.subresourceRange.layerCount     = 1;
+        present_barrier.srcAccessMask                   = VK_ACCESS_TRANSFER_WRITE_BIT;
+        present_barrier.dstAccessMask                   = 0;
 
         vkCmdPipelineBarrier(swapchain_.cmd_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                             VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+                             VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0, nullptr, 1, &present_barrier);
 
         vkEndCommandBuffer(swapchain_.cmd_buffer);
 
