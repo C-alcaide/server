@@ -373,6 +373,9 @@ GLuint gpu_affinity_context::upload_frame(const uint8_t* pixels, int width, int 
     glBindBuffer(GL_PIXEL_UNPACK_BUFFER, pbo_[upload_pbo]);
     glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width_, height_, GL_BGRA, GL_UNSIGNED_BYTE, nullptr);
 
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+    glBindTexture(GL_TEXTURE_2D, 0);
+
     return upload_texture_;
 }
 
