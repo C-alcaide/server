@@ -117,6 +117,11 @@ struct configuration
     // instead of index. Useful for portable configs (VDD rehearsal → physical on-site).
     // Example: "BNQ" matches BenQ monitors, "Virtual" matches VDD monitors.
     std::wstring     display_name;
+
+    // Display blanker: launch a companion process that puts a black window behind
+    // CasparCG's output. If CasparCG crashes, the output stays black instead of
+    // showing the Windows desktop.
+    bool             display_blanker = false;
 };
 
 configuration parse_config(const boost::property_tree::wptree& ptree);

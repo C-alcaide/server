@@ -121,6 +121,39 @@ class nvapi_helpers
     // Requires Administrator privileges and a professional GPU (Quadro/RTX A-series).
     bool persist_edid(int gpu_index, int output_index);
 
+    // ─── Dedicated Display ───────────────────────────────────────────────────
+
+    // Information about a dedicated display managed by the NVIDIA driver.
+    // Dedicated displays are NOT part of the Windows desktop — they remain detached
+    // from DWM even when no application has acquired them (output stays black).
+    struct dedicated_display_info
+    {
+        uint32_t     display_id  = 0;
+        bool         is_acquired = false; // Already acquired by another process?
+        bool         is_mosaic   = false; // Part of a Mosaic grid?
+    };
+
+    // Enumerate all dedicated displays managed by the NVIDIA driver.
+    // Returns empty if the GPU/driver doesn't support dedicated displays.
+    std::vector<dedicated_display_info> get_dedicated_displays();
+
+    // Acquire exclusive access to a dedicated display. The display must already be
+    // configured as "dedicated" in NVIDIA Control Panel (or by the driver).
+    // Returns a DisplaySource handle on success, 0 on failure.
+    // Once acquired, the display stays detached from DWM even if the acquiring
+    // process crashes — this prevents the Windows desktop from appearing on the output.
+    uint64_t acquire_dedicated_display(uint32_t display_id);
+
+    // Release a previously acquired dedicated display. The display remains "dedicated"
+    // (detached from DWM) but is available for other processes to acquire.
+    bool release_dedicated_display(uint32_t display_id);
+
+    // Find and acquire the dedicated display matching the given output index.
+    // Convenience wrapper: enumerates dedicated displays, maps to the output index,
+    // and acquires if found. Returns the NvAPI displayId on success, 0 if the output
+    // is not a dedicated display or acquisition failed.
+    uint32_t acquire_dedicated_display_by_output(int gpu_index, int output_index);
+
   private:
     bool     available_    = false;
     int      gsync_count_  = 0;

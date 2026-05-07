@@ -43,6 +43,7 @@
 
 #include <core/consumer/channel_info.h>
 #include <core/consumer/frame_consumer.h>
+#include <core/diagnostics/osd_graph.h>
 #include <core/frame/frame.h>
 #include <core/video_channel.h>
 #include <core/video_format.h>
@@ -54,6 +55,7 @@
 #include <future>
 #include <mutex>
 #include <queue>
+#include <sstream>
 #include <thread>
 
 namespace caspar { namespace vulkan_output {
@@ -121,7 +123,14 @@ class vulkan_output_consumer : public core::frame_consumer
         // Buffer the frame
         {
             std::unique_lock<std::mutex> lock(buffer_mutex_);
-            if (buffer_.size() >= static_cast<size_t>(config_.buffer_depth)) {
+            if (adapter_mismatch_) {
+                // GDI fallback: block until buffer has space to provide backpressure
+                buffer_cv_.wait(lock, [this] {
+                    return buffer_.size() < static_cast<size_t>(config_.buffer_depth) || !running_;
+                });
+                if (!running_)
+                    return caspar::make_ready_future(true);
+            } else if (buffer_.size() >= static_cast<size_t>(config_.buffer_depth)) {
                 graph_->set_tag(diagnostics::tag_severity::WARNING, "late-frame");
                 buffer_.pop(); // Drop oldest
             }
@@ -231,6 +240,9 @@ class vulkan_output_consumer : public core::frame_consumer
                 }
             }
             // Consumer fallback: create a borderless fullscreen window
+            // Launch blanker BEFORE our window so it's behind us in z-order
+            if (config_.display_blanker)
+                launch_display_blanker();
             create_fse_window();
         } else if (!found) {
             CASPAR_THROW_EXCEPTION(caspar_exception()
@@ -239,7 +251,12 @@ class vulkan_output_consumer : public core::frame_consumer
         }
 
         // Create surface
-        if (device_->tier() == gpu_tier::pro && found) {
+        if (adapter_mismatch_) {
+            CASPAR_LOG(warning) << print()
+                                << L" Display is on a non-NVIDIA adapter (e.g. IddCx/VDD). "
+                                   L"Vulkan presentation disabled — using GDI fallback for output.";
+            device_dead_ = true; // Prevents Vulkan present path; GDI path handles rendering
+        } else if (device_->tier() == gpu_tier::pro && found) {
             // Convert fps to millihertz for display mode matching
             uint32_t refresh_mhz = static_cast<uint32_t>(format_desc_.fps * 1000.0 + 0.5);
             swapchain_.surface = device_->create_display_surface(target, refresh_mhz);
@@ -248,16 +265,18 @@ class vulkan_output_consumer : public core::frame_consumer
             swapchain_.surface = device_->create_win32_surface(fse_hwnd_);
         }
 
-        setup_present_barrier(); // Must be before create_swapchain so the barrier struct is chained
-        create_swapchain();
-        set_hdr_metadata();
-        create_sync_objects();
-        setup_vblank_timing();
-        setup_nvapi();
-        create_command_pool();
+        if (!adapter_mismatch_) {
+            setup_present_barrier(); // Must be before create_swapchain so the barrier struct is chained
+            create_swapchain();
+            set_hdr_metadata();
+            create_sync_objects();
+            setup_vblank_timing();
+            setup_nvapi();
+            create_command_pool();
+        }
 
         // Create shared texture pool for zero-copy if OGL device is available
-        if (ogl_device_) {
+        if (ogl_device_ && !adapter_mismatch_) {
             // Verify GPU match: OGL and VK must be on the same physical device for interop
             bool gpu_match = true;
             if (device_->device_luid_valid()) {
@@ -365,7 +384,7 @@ class vulkan_output_consumer : public core::frame_consumer
 
         // Create color space conversion pipeline if needed (before present thread starts
         // to avoid a data race — present_loop reads color_pipeline_ every frame)
-        if (config_.gamut != output_gamut::bt709 || config_.eotf != output_eotf::srgb) {
+        if (!adapter_mismatch_ && (config_.gamut != output_gamut::bt709 || config_.eotf != output_eotf::srgb)) {
             try {
                 color_pipeline_ = std::make_unique<color_convert_pipeline>(
                     *device_, format_desc_.width, format_desc_.height);
@@ -389,7 +408,8 @@ class vulkan_output_consumer : public core::frame_consumer
         }
 
         CASPAR_LOG(info) << print() << L" initialized. Tier: "
-                         << (device_->tier() == gpu_tier::pro ? L"Pro (direct display)" : L"Consumer (FSE)")
+                         << (adapter_mismatch_ ? L"GDI fallback (cross-adapter)" :
+                             device_->tier() == gpu_tier::pro ? L"Pro (direct display)" : L"Consumer (FSE)")
                          << (config_.delay_frames > 0 ? L" Delay: " + std::to_wstring(config_.delay_frames) + L" frames" : L"");
     }
 
@@ -670,6 +690,7 @@ class vulkan_output_consumer : public core::frame_consumer
                 graph_->set_value("buffered-video",
                                   static_cast<double>(buffer_.size()) / config_.buffer_depth);
             }
+            buffer_cv_.notify_one(); // Wake send() if it's blocking on full buffer
 
             caspar::timer frame_timer;
             present_frame(frame);
@@ -697,6 +718,19 @@ class vulkan_output_consumer : public core::frame_consumer
             graph_->set_value("tick-time", tick);
             tick_timer_.restart();
 
+            // FPS counter
+            ++fps_frame_count_;
+            auto now = std::chrono::steady_clock::now();
+            auto elapsed = std::chrono::duration_cast<std::chrono::duration<double>>(now - fps_update_time_).count();
+            if (elapsed >= 1.0) {
+                double fps = fps_frame_count_ / elapsed;
+                fps_frame_count_ = 0;
+                fps_update_time_ = now;
+                std::wstringstream stats;
+                stats.precision(2);
+                stats << std::fixed << print() << L" fps: " << fps;
+                graph_->set_text(stats.str());
+            }
 
         }
     }
@@ -755,7 +789,17 @@ class vulkan_output_consumer : public core::frame_consumer
 
     void recreate_swapchain()
     {
-        vkDeviceWaitIdle(device_->device());
+        if (device_dead_)
+            return;
+
+        auto wait_result = vkDeviceWaitIdle(device_->device());
+        if (wait_result == VK_ERROR_DEVICE_LOST) {
+            CASPAR_LOG(error) << print() << L" Device lost during swapchain recreation. Output permanently halted.";
+            display_lost_ = true;
+            device_dead_  = true;
+            core::diagnostics::osd::notify_gpu_driver_reset();
+            return;
+        }
 
         for (auto& iv : swapchain_.image_views)
             vkDestroyImageView(device_->device(), iv, nullptr);
@@ -804,6 +848,13 @@ class vulkan_output_consumer : public core::frame_consumer
 
     void present_frame(const core::const_frame& frame)
     {
+        if (device_dead_) {
+            if (adapter_mismatch_ && fse_hwnd_) {
+                present_frame_gdi(frame);
+            }
+            return;
+        }
+
         if (display_lost_) {
             switch (config_.on_disconnect) {
                 case disconnect_behavior::hold:
@@ -1191,6 +1242,8 @@ class vulkan_output_consumer : public core::frame_consumer
         if (submit_result == VK_ERROR_DEVICE_LOST) {
             CASPAR_LOG(error) << print() << L" GPU device lost (TDR) during submit. Output halted.";
             display_lost_ = true;
+            device_dead_  = true;
+            core::diagnostics::osd::notify_gpu_driver_reset();
             return;
         }
 
@@ -1212,10 +1265,58 @@ class vulkan_output_consumer : public core::frame_consumer
         } else if (present_result == VK_ERROR_DEVICE_LOST) {
             CASPAR_LOG(error) << print() << L" GPU device lost (TDR) during present. Output halted.";
             display_lost_ = true;
+            device_dead_  = true;
+            core::diagnostics::osd::notify_gpu_driver_reset();
             return;
         }
 
         ++frames_presented_;
+    }
+
+    void present_frame_gdi(const core::const_frame& frame)
+    {
+        // GDI fallback: blit BGRA8 pixels to the FSE window via StretchDIBits.
+        // Used when the target display is on a different adapter (e.g. VDD/IddCx)
+        // where Vulkan can't present directly.
+        const auto& img = frame.image_data(0);
+        const auto* pixels = img.data();
+        if (!pixels || img.size() == 0)
+            return;
+
+        auto src_w = static_cast<int>(frame.width());
+        auto src_h = static_cast<int>(frame.height());
+        if (src_w == 0 || src_h == 0)
+            return;
+
+        RECT client_rect;
+        GetClientRect(fse_hwnd_, &client_rect);
+        int dst_w = client_rect.right - client_rect.left;
+        int dst_h = client_rect.bottom - client_rect.top;
+        if (dst_w == 0 || dst_h == 0)
+            return;
+
+        BITMAPINFO bmi{};
+        bmi.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
+        bmi.bmiHeader.biWidth       = src_w;
+        bmi.bmiHeader.biHeight      = -src_h; // top-down
+        bmi.bmiHeader.biPlanes      = 1;
+        bmi.bmiHeader.biBitCount    = 32;
+        bmi.bmiHeader.biCompression = BI_RGB;
+
+        HDC hdc = GetDC(fse_hwnd_);
+        if (hdc) {
+            SetStretchBltMode(hdc, COLORONCOLOR);
+            StretchDIBits(hdc,
+                          0, 0, dst_w, dst_h,       // destination
+                          0, 0, src_w, src_h,       // source
+                          pixels, &bmi,
+                          DIB_RGB_COLORS, SRCCOPY);
+            ReleaseDC(fse_hwnd_, hdc);
+        }
+
+        // Pace at frame rate — GDI has no vsync
+        std::this_thread::sleep_for(std::chrono::microseconds(
+            static_cast<int64_t>(1000000.0 / format_desc_.fps)));
     }
 
     void upload_frame_cpu(const core::const_frame& frame, VkImage dst_image)
@@ -1363,6 +1464,71 @@ class vulkan_output_consumer : public core::frame_consumer
         return DefWindowProcW(hwnd, msg, wParam, lParam);
     }
 
+    void launch_display_blanker()
+    {
+        // Launch display_blanker.exe once per process. Multiple vulkan_output consumers
+        // may have display_blanker=true, but we only need one blanker process.
+        // The blanker is persistent — it survives CasparCG crashes/restarts and must
+        // be closed manually via its system tray icon. If already running (from a
+        // previous CasparCG session), the single-instance mutex causes it to exit
+        // immediately, which is fine.
+        static std::once_flag blanker_once;
+
+        std::call_once(blanker_once, [this] {
+            // Build command line: match the same display-name pattern this consumer uses,
+            // or fall back to --all (blanks all non-primary monitors).
+            std::wstring exe_path;
+            {
+                // Look for display_blanker.exe next to casparcg.exe
+                wchar_t module_path[MAX_PATH] = {};
+                GetModuleFileNameW(nullptr, module_path, MAX_PATH);
+                exe_path = module_path;
+                auto last_sep = exe_path.find_last_of(L"\\/");
+                if (last_sep != std::wstring::npos)
+                    exe_path = exe_path.substr(0, last_sep + 1);
+                exe_path += L"display_blanker.exe";
+            }
+
+            if (GetFileAttributesW(exe_path.c_str()) == INVALID_FILE_ATTRIBUTES) {
+                CASPAR_LOG(warning) << print()
+                    << L" display_blanker.exe not found next to casparcg.exe. Desktop blanking disabled.";
+                return;
+            }
+
+            std::wstring cmd = L"\"" + exe_path + L"\"";
+
+            if (!config_.display_name.empty()) {
+                cmd += L" --match \"" + config_.display_name + L"\"";
+            } else {
+                cmd += L" --all";
+            }
+
+            STARTUPINFOW si{};
+            si.cb = sizeof(si);
+
+            PROCESS_INFORMATION pi{};
+
+            // CreateProcessW needs a mutable buffer for the command line
+            std::vector<wchar_t> cmd_buf(cmd.begin(), cmd.end());
+            cmd_buf.push_back(L'\0');
+
+            if (CreateProcessW(nullptr, cmd_buf.data(), nullptr, nullptr, FALSE,
+                               0, nullptr, nullptr, &si, &pi)) {
+                CloseHandle(pi.hProcess);
+                CloseHandle(pi.hThread);
+                CASPAR_LOG(info) << print() << L" Display blanker launched (PID " << pi.dwProcessId << L")";
+                // Small delay to let blanker windows appear before our FSE window
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            } else {
+                auto err = GetLastError();
+                if (err != ERROR_ALREADY_EXISTS) {
+                    CASPAR_LOG(warning) << print()
+                        << L" Failed to launch display_blanker.exe (error " << err << L")";
+                }
+            }
+        });
+    }
+
     void create_fse_window()
     {
         // Create the FSE window on a dedicated message thread so it always pumps messages.
@@ -1393,10 +1559,32 @@ class vulkan_output_consumer : public core::frame_consumer
                 int current_index;
                 RECT rect;
                 bool found;
+                bool adapter_mismatch; // true if display is on a different GPU (e.g. VDD/IddCx)
             };
-            monitor_enum_data data{config_.output_index, 0, {}, false};
+            monitor_enum_data data{config_.output_index, 0, {}, false, false};
 
             // If display-name is configured, try matching by device name first
+            // Log all attached displays for diagnostics
+            {
+                DISPLAY_DEVICEW dd_log{};
+                dd_log.cb = sizeof(dd_log);
+                for (DWORD i = 0; EnumDisplayDevicesW(nullptr, i, &dd_log, 0); ++i) {
+                    if (dd_log.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP) {
+                        DISPLAY_DEVICEW mon_log{};
+                        mon_log.cb = sizeof(mon_log);
+                        std::wstring mon_str = L"(none)";
+                        if (EnumDisplayDevicesW(dd_log.DeviceName, 0, &mon_log, 0)) {
+                            mon_str = mon_log.DeviceString;
+                        }
+                        CASPAR_LOG(debug) << print() << L" Display[" << i << L"]: "
+                                          << dd_log.DeviceName << L" | " << dd_log.DeviceString
+                                          << L" | Monitor=" << mon_str
+                                          << L" | ID=" << mon_log.DeviceID;
+                    }
+                    dd_log.cb = sizeof(dd_log);
+                }
+            }
+
             if (!config_.display_name.empty()) {
                 DISPLAY_DEVICEW dd{};
                 dd.cb = sizeof(dd);
@@ -1411,8 +1599,10 @@ class vulkan_output_consumer : public core::frame_consumer
                     mon.cb = sizeof(mon);
                     if (EnumDisplayDevicesW(dd.DeviceName, 0, &mon, 0)) {
                         std::wstring dev_str(mon.DeviceString);
-                        // Case-insensitive substring match
-                        if (boost::icontains(dev_str, config_.display_name)) {
+                        std::wstring dev_id(mon.DeviceID);
+                        // Case-insensitive substring match on DeviceString or DeviceID
+                        if (boost::icontains(dev_str, config_.display_name) ||
+                            boost::icontains(dev_id, config_.display_name)) {
                             match_count++;
                             if (match_count == config_.output_index || config_.output_index <= 1) {
                                 // Get this monitor's position
@@ -1424,9 +1614,15 @@ class vulkan_output_consumer : public core::frame_consumer
                                     data.rect.right  = dm.dmPosition.x + static_cast<LONG>(dm.dmPelsWidth);
                                     data.rect.bottom = dm.dmPosition.y + static_cast<LONG>(dm.dmPelsHeight);
                                     data.found = true;
+                                    // Check if this display's adapter matches our Vulkan GPU
+                                    std::wstring adapter_str(dd.DeviceString);
+                                    if (!boost::icontains(adapter_str, L"NVIDIA")) {
+                                        data.adapter_mismatch = true;
+                                    }
                                     CASPAR_LOG(info) << print() << L" Matched display-name \""
                                                      << config_.display_name << L"\" → "
-                                                     << mon.DeviceString << L" (" << dd.DeviceName << L")";
+                                                     << mon.DeviceString << L" (" << dd.DeviceName << L")"
+                                                     << (data.adapter_mismatch ? L" [GDI fallback]" : L"");
                                 }
                                 break;
                             }
@@ -1479,6 +1675,7 @@ class vulkan_output_consumer : public core::frame_consumer
                                         WS_POPUP | WS_VISIBLE | WS_DISABLED, x, y, w, h,
                                         nullptr, nullptr, GetModuleHandle(nullptr), nullptr);
             ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            adapter_mismatch_ = data.adapter_mismatch;
             hwnd_promise.set_value(hwnd);
 
             // Message pump — runs until WM_QUIT or fse_msg_running_ is false
@@ -1492,6 +1689,11 @@ class vulkan_output_consumer : public core::frame_consumer
                 } else {
                     MsgWaitForMultipleObjects(0, nullptr, FALSE, 50, QS_ALLINPUT);
                 }
+            }
+
+            // Destroy window from the thread that created it (Win32 requirement)
+            if (hwnd) {
+                DestroyWindow(hwnd);
             }
         });
 
@@ -1555,12 +1757,13 @@ class vulkan_output_consumer : public core::frame_consumer
         nvapi_.reset();
 
         if (fse_hwnd_) {
-            // Signal message thread to stop, then post WM_QUIT to unblock it
+            // Signal message thread to stop, then post WM_NULL to wake MsgWait.
+            // The message thread owns the window and calls DestroyWindow before exiting
+            // (Win32 requires DestroyWindow from the creating thread).
             fse_msg_running_ = false;
-            PostMessageW(fse_hwnd_, WM_CLOSE, 0, 0);
+            PostMessageW(fse_hwnd_, WM_NULL, 0, 0);
             if (fse_msg_thread_.joinable())
                 fse_msg_thread_.join();
-            DestroyWindow(fse_hwnd_);
             fse_hwnd_ = nullptr;
             UnregisterClassW(L"CasparVulkanOutput", GetModuleHandle(nullptr));
         }
@@ -1605,6 +1808,8 @@ class vulkan_output_consumer : public core::frame_consumer
 
     // Display hot-plug
     std::atomic<bool>                display_lost_{false};
+    std::atomic<bool>                device_dead_{false}; // TDR — device permanently invalid
+    bool                             adapter_mismatch_{false}; // Display on different GPU — no Vulkan presentation
     uint64_t                         hotplug_retry_counter_ = 0;
     std::atomic<uint64_t>            frames_presented_{0};
 
@@ -1618,6 +1823,10 @@ class vulkan_output_consumer : public core::frame_consumer
     caspar::timer                    tick_timer_;
     bool                             vblank_supported_ = false;
     VkFence                          vblank_fence_     = VK_NULL_HANDLE;
+
+    // FPS counter
+    std::chrono::steady_clock::time_point fps_update_time_ = std::chrono::steady_clock::now();
+    int                              fps_frame_count_ = 0;
 
     // CPU staging
     VkBuffer                         staging_buffer_      = VK_NULL_HANDLE;

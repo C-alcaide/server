@@ -143,6 +143,9 @@ configuration parse_config(const boost::property_tree::wptree& ptree)
     // Display name matching (overrides index-based selection)
     config.display_name = ptree.get(L"display-name", L"");
 
+    // Display blanker companion process
+    config.display_blanker = ptree.get(L"display-blanker", false);
+
     return config;
 }
 

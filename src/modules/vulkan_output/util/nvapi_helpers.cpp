@@ -824,6 +824,149 @@ bool nvapi_helpers::persist_edid(int gpu_index, int output_index)
     return true;
 }
 
+// ─── Dedicated Display ──────────────────────────────────────────────────────
+
+std::vector<nvapi_helpers::dedicated_display_info> nvapi_helpers::get_dedicated_displays()
+{
+    std::vector<dedicated_display_info> result;
+    if (!available_ || !impl_)
+        return result;
+
+    NvU32 count = 0;
+    auto status = NvAPI_DISP_GetNvManagedDedicatedDisplays(&count, nullptr);
+    if (status != NVAPI_OK || count == 0) {
+        if (status != NVAPI_OK && status != NVAPI_NO_IMPLEMENTATION) {
+            NvAPI_ShortString err;
+            NvAPI_GetErrorMessage(status, err);
+            CASPAR_LOG(debug) << L"[vulkan_output] GetNvManagedDedicatedDisplays failed: " << to_wstring(err);
+        }
+        return result;
+    }
+
+    std::vector<NV_MANAGED_DEDICATED_DISPLAY_INFO> infos(count);
+    for (auto& d : infos)
+        d.version = NV_MANAGED_DEDICATED_DISPLAY_INFO_VER;
+
+    status = NvAPI_DISP_GetNvManagedDedicatedDisplays(&count, infos.data());
+    if (status != NVAPI_OK) {
+        NvAPI_ShortString err;
+        NvAPI_GetErrorMessage(status, err);
+        CASPAR_LOG(warning) << L"[vulkan_output] GetNvManagedDedicatedDisplays enumerate failed: " << to_wstring(err);
+        return result;
+    }
+
+    for (NvU32 i = 0; i < count; ++i) {
+        dedicated_display_info ddi;
+        ddi.display_id  = infos[i].displayId;
+        ddi.is_acquired = infos[i].isAcquired != 0;
+        ddi.is_mosaic   = infos[i].isMosaic != 0;
+        result.push_back(ddi);
+    }
+
+    CASPAR_LOG(info) << L"[vulkan_output] Found " << result.size() << L" dedicated display(s).";
+    for (const auto& d : result) {
+        CASPAR_LOG(info) << L"[vulkan_output]   displayId=" << d.display_id
+                         << (d.is_acquired ? L" [acquired by another process]" : L"")
+                         << (d.is_mosaic ? L" [mosaic]" : L"");
+    }
+
+    return result;
+}
+
+uint64_t nvapi_helpers::acquire_dedicated_display(uint32_t display_id)
+{
+    if (!available_ || !impl_)
+        return 0;
+
+    NvU64 source_handle = 0;
+    auto status = NvAPI_DISP_AcquireDedicatedDisplay(display_id, &source_handle);
+    if (status != NVAPI_OK) {
+        NvAPI_ShortString err;
+        NvAPI_GetErrorMessage(status, err);
+        CASPAR_LOG(warning) << L"[vulkan_output] AcquireDedicatedDisplay failed for displayId="
+                            << display_id << L": " << to_wstring(err);
+        return 0;
+    }
+
+    CASPAR_LOG(info) << L"[vulkan_output] Acquired dedicated display: displayId=" << display_id
+                     << L" sourceHandle=0x" << std::hex << source_handle << std::dec;
+    return source_handle;
+}
+
+bool nvapi_helpers::release_dedicated_display(uint32_t display_id)
+{
+    if (!available_ || !impl_)
+        return false;
+
+    auto status = NvAPI_DISP_ReleaseDedicatedDisplay(display_id);
+    if (status != NVAPI_OK) {
+        NvAPI_ShortString err;
+        NvAPI_GetErrorMessage(status, err);
+        CASPAR_LOG(warning) << L"[vulkan_output] ReleaseDedicatedDisplay failed for displayId="
+                            << display_id << L": " << to_wstring(err);
+        return false;
+    }
+
+    CASPAR_LOG(info) << L"[vulkan_output] Released dedicated display: displayId=" << display_id;
+    return true;
+}
+
+uint32_t nvapi_helpers::acquire_dedicated_display_by_output(int gpu_index, int output_index)
+{
+    if (!available_ || !impl_ || gpu_index >= static_cast<int>(impl_->gpu_count))
+        return 0;
+
+    // Get all display IDs for this GPU (connected outputs)
+    NvU32 disp_count = 0;
+    auto status = NvAPI_GPU_GetConnectedDisplayIds(impl_->gpus[gpu_index], nullptr, &disp_count, 0);
+    if (status != NVAPI_OK || disp_count == 0)
+        return 0;
+
+    std::vector<NV_GPU_DISPLAYIDS> display_ids(disp_count);
+    for (auto& d : display_ids)
+        d.version = NV_GPU_DISPLAYIDS_VER;
+
+    status = NvAPI_GPU_GetConnectedDisplayIds(impl_->gpus[gpu_index], display_ids.data(), &disp_count, 0);
+    if (status != NVAPI_OK)
+        return 0;
+
+    // Map 1-based output_index to NvAPI displayId
+    int target_idx = output_index - 1;
+    if (target_idx < 0 || target_idx >= static_cast<int>(disp_count))
+        return 0;
+
+    NvU32 target_display_id = display_ids[target_idx].displayId;
+
+    // Check if this display is in the dedicated display list
+    auto dedicated = get_dedicated_displays();
+    bool found = false;
+    for (const auto& d : dedicated) {
+        if (d.display_id == target_display_id) {
+            if (d.is_acquired) {
+                CASPAR_LOG(warning) << L"[vulkan_output] Dedicated display " << target_display_id
+                                    << L" already acquired by another process.";
+                return 0;
+            }
+            found = true;
+            break;
+        }
+    }
+
+    if (!found) {
+        CASPAR_LOG(info) << L"[vulkan_output] Output " << output_index << L" (displayId="
+                         << target_display_id << L") is not a dedicated display. "
+                         << L"Configure it as dedicated in NVIDIA Control Panel for crash-safe blanking.";
+        return 0;
+    }
+
+    // Acquire it
+    auto handle = acquire_dedicated_display(target_display_id);
+    if (handle == 0)
+        return 0;
+
+    return target_display_id;
+}
+
 }} // namespace caspar::vulkan_output
 
 #else // !CASPAR_NVAPI_ENABLED
@@ -850,6 +993,14 @@ uint32_t nvapi_helpers::inject_edid(int, int, uint32_t, uint32_t, double) { retu
 bool nvapi_helpers::remove_edid(int, uint32_t) { return false; }
 
 bool nvapi_helpers::persist_edid(int, int) { return false; }
+
+std::vector<nvapi_helpers::dedicated_display_info> nvapi_helpers::get_dedicated_displays() { return {}; }
+
+uint64_t nvapi_helpers::acquire_dedicated_display(uint32_t) { return 0; }
+
+bool nvapi_helpers::release_dedicated_display(uint32_t) { return false; }
+
+uint32_t nvapi_helpers::acquire_dedicated_display_by_output(int, int) { return 0; }
 
 }} // namespace caspar::vulkan_output
 

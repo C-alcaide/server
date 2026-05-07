@@ -1,0 +1,34 @@
+// Resource script for display_blanker.exe
+#include <windows.h>
+
+#define IDI_APP_ICON 101
+
+// Application icon (used for exe and tray)
+IDI_APP_ICON ICON "display_blanker.ico"
+
+// Version info
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION     1,0,0,0
+PRODUCTVERSION  1,0,0,0
+FILEFLAGSMASK   VS_FFI_FILEFLAGSMASK
+FILEFLAGS       0
+FILEOS          VOS_NT_WINDOWS32
+FILETYPE        VFT_APP
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName",      "CasparCG"
+            VALUE "FileDescription",  "CasparCG Display Blanker"
+            VALUE "FileVersion",      "1.0.0.0"
+            VALUE "ProductName",      "CasparCG Display Blanker"
+            VALUE "ProductVersion",   "1.0.0.0"
+            VALUE "LegalCopyright",   "Copyright (c) 2026 CasparCG Contributors"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 1200
+    END
+END

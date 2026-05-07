@@ -60,6 +60,8 @@ The module is organized into seven layers:
 ├──────────────────────────────────────────────────────────────┤
 │ nvapi_helpers                   (NVIDIA NvAPI integration)    │
 │   ├── EDID readback (HDR capability, luminance, bit depth)   │
+│   ├── EDID injection / persistence (headless outputs)        │
+│   ├── Dedicated display acquire / release (crash-safe blank) │
 │   ├── Quadro Sync II framelock configuration                 │
 │   └── GSync status monitoring                                │
 └──────────────────────────────────────────────────────────────┘
@@ -534,6 +536,108 @@ The `display-lost` state is exposed via OSC at `vulkan-output/display-lost`.
 
 ---
 
+## Display Blanker
+
+### Problem
+
+When CasparCG is not running — during restart, crash, or maintenance — the Windows desktop becomes visible on GPU output connectors. In broadcast environments, this is unacceptable: desktop icons, taskbars, and notification popups should never reach program output.
+
+### Solution: `display_blanker.exe`
+
+A standalone companion tool that keeps selected displays black independently of CasparCG. It ships alongside `casparcg.exe` and provides two complementary blanking mechanisms:
+
+| Mechanism | Tier | How it works | Survives crash of... |
+|-----------|------|-------------|---------------------|
+| **Black TOPMOST windows** | All GPUs | Creates `WS_EX_TOPMOST` black popup windows covering the output monitors. Sits between the desktop and any fullscreen application. | CasparCG (blanker stays running) |
+| **NvAPI dedicated display** | Pro (Quadro/RTX A) | Acquires displays via `NvAPI_DISP_AcquireDedicatedDisplay`. The NVIDIA driver detaches the display from DWM at the driver level — no desktop is composited to that output. | CasparCG AND the blanker (driver holds the state) |
+
+### Usage
+
+```
+display_blanker.exe                  Interactive — opens config window
+display_blanker.exe --autostart      Load saved config, minimize to tray
+display_blanker.exe --match MTT      Blank monitors matching "MTT" (VDD)
+display_blanker.exe --all            Blank all non-primary monitors
+```
+
+### Configuration GUI
+
+Double-click the tray icon or right-click → "Configure..." to open the settings window:
+
+- **Monitor list** with checkboxes — each entry shows: display name, adapter, resolution, and position
+- **★ Primary indicator** — the Windows main display is marked with a star and `[Windows main display]`
+- **Dedicated displays** section (Pro GPUs only) — lists displays configured as "dedicated" in NVIDIA Control Panel
+- **Enable blanking** toggle
+- **Start with Windows** checkbox (HKCU registry)
+- **15-second confirmation countdown** — after applying changes, a timer dialog appears on the primary monitor. If not confirmed (e.g., because you blanked the control monitor), changes automatically revert
+
+### Confirmation Safety
+
+Like Windows display settings, after applying any change the blanker shows:
+
+```
+┌──────────────────────────────────────────┐
+│      Confirm Display Settings            │
+├──────────────────────────────────────────┤
+│                                          │
+│  Do you want to keep these settings?     │
+│                                          │
+│  Reverting in 12 seconds...              │
+│                                          │
+│  [Keep Changes]        [Revert]          │
+└──────────────────────────────────────────┘
+```
+
+If you accidentally blank the monitor showing this dialog, you can't click "Keep Changes", so the countdown expires and everything reverts. This prevents lockouts.
+
+### Integration with CasparCG
+
+Add `<display-blanker>true</display-blanker>` to a vulkan-output consumer to auto-launch the blanker when CasparCG starts:
+
+```xml
+<vulkan-output>
+    <gpu>0</gpu>
+    <device>1</device>
+    <display-blanker>true</display-blanker>
+</vulkan-output>
+```
+
+The blanker is launched with `--match` using the `<display-name>` filter (if set), or `--all` otherwise. The blanker's single-instance mutex prevents duplicate launches — if it's already running, the second launch exits silently.
+
+### Dedicated Displays (NvAPI)
+
+For Pro-tier NVIDIA GPUs, the blanker can acquire displays via the NVIDIA dedicated display API. This provides the strongest guarantee:
+
+1. In **NVIDIA Control Panel**, configure target outputs as "Use NVIDIA GPU exclusively" (dedicated mode)
+2. In the blanker config window, check the dedicated displays you want to acquire
+3. The driver detaches those displays from DWM entirely — no Windows compositing occurs on those outputs
+
+**Key properties:**
+- The display stays black even if the blanker process exits (the driver holds the "dedicated" state)
+- Only an explicit release or reboot returns the display to the desktop
+- CasparCG's `VK_KHR_display` renders directly on the dedicated display — the blanker's acquisition doesn't interfere with Vulkan direct display mode
+- On clean exit, the blanker releases the acquisition; on crash, the driver keeps it acquired (output stays black)
+
+### INI File
+
+Settings are persisted to `display_blanker.ini` next to the executable:
+
+```ini
+[General]
+Enabled=1
+
+[Monitors]
+Count=2
+Output0=\\.\DISPLAY5
+Output1=\\.\DISPLAY6
+
+[DedicatedDisplays]
+Count=1
+DisplayId0=2147880067
+```
+
+---
+
 ## AMCP Commands
 
 ### INFO VULKAN_OUTPUT
@@ -598,6 +702,10 @@ All options for the `<vulkan-output>` consumer block in `casparcg.config`:
 | `<gamut>` | enum | *(auto)* | `bt709` \| `bt2020` \| `p3-d65` \| `p3-dci` \| `adobe-rgb` |
 | `<eotf>` | enum | *(auto)* | `srgb` \| `linear` \| `pq` \| `hlg` \| `gamma24` \| `gamma26` |
 | `<edid-auto-hdr>` | bool | `false` | Auto-detect HDR from display EDID |
+| `<edid-emulation>` | bool | `false` | Inject synthetic EDID on unconnected outputs (admin, Pro GPU) |
+| `<persist-edid>` | bool | `false` | Lock current EDID so display survives cable disconnect |
+| `<display-name>` | string | *(empty)* | Select monitor by substring match on device name |
+| `<display-blanker>` | bool | `false` | Auto-launch display_blanker.exe on startup |
 | `<hdr-metadata>` | | | |
 | &nbsp;&nbsp;`<max-cll>` | int | `1000` | Maximum Content Light Level (nits) |
 | &nbsp;&nbsp;`<max-fall>` | int | `400` | Maximum Frame-Average Light Level (nits) |
@@ -962,6 +1070,49 @@ Useful for commissioning multi-display setups:
 
 Each output flashes a distinct color (blue, green, red, cyan, magenta, yellow) for 3 seconds based on its output index.
 
+### Display Name Matching
+
+Select the output monitor by name instead of index — portable between machines:
+
+```xml
+<vulkan-output>
+    <gpu>0</gpu>
+    <device>1</device>
+    <display-name>BNQ</display-name>
+</vulkan-output>
+```
+
+The `<display-name>` value is matched as a case-insensitive substring against the Windows device name, adapter name, and monitor model. Useful for configs that should work across different machines (e.g., "MTT" matches Virtual Display Driver monitors, "BNQ" matches BenQ monitors).
+
+### Display Blanker (Crash-Safe Output)
+
+Keep outputs black when CasparCG is not rendering:
+
+```xml
+<vulkan-output>
+    <gpu>0</gpu>
+    <device>1</device>
+    <display-blanker>true</display-blanker>
+    <display-name>MTT</display-name>
+</vulkan-output>
+```
+
+This launches `display_blanker.exe` alongside CasparCG. The blanker creates black windows on matching monitors and (on Pro GPUs) can acquire dedicated display ownership for driver-level crash safety. See the [Display Blanker](#display-blanker) section for details.
+
+### EDID Emulation (Headless Outputs)
+
+Force a GPU output to report as connected even without a physical display:
+
+```xml
+<vulkan-output>
+    <gpu>0</gpu>
+    <device>2</device>
+    <edid-emulation>true</edid-emulation>
+</vulkan-output>
+```
+
+Injects a synthetic EDID matching the channel's video mode. Requires administrator privileges and a Pro-tier GPU. Useful for outputs that feed downstream video processing equipment (scalers, LED processors) that don't respond to EDID queries.
+
 ---
 
 ## Build Requirements
@@ -969,9 +1120,18 @@ Each output flashes a distinct color (blue, green, red, cyan, magenta, yellow) f
 | Dependency | Required | Purpose |
 |------------|----------|---------|
 | **Vulkan SDK** | Yes | Core Vulkan API, validation layers |
-| **NvAPI SDK** | Optional | EDID readback, Quadro Sync II framelock |
+| **NvAPI SDK** | Optional | EDID readback, Quadro Sync II framelock, dedicated display |
 | **CUDA Toolkit** | Optional | GPU-to-GPU peer DMA for cross-GPU transfer |
 | **GLEW** | Yes (via accelerator) | GL extension loading for zero-copy interop |
+
+### Built Artifacts
+
+| Artifact | Description |
+|----------|-------------|
+| `casparcg.exe` | Main server — includes vulkan_output module |
+| `display_blanker.exe` | Companion tool — display blanking (see [Display Blanker](#display-blanker)) |
+
+Both are placed in the `build/shell/` output directory.
 
 ### Vulkan SDK
 
@@ -1139,3 +1299,9 @@ If `frame-time` consistently exceeds 0.5:
 9. **Use NVLink for 4K+ cross-GPU HDR** — at 4K60 16-bit, frame sizes reach ~66 MB, requiring ~4 GB/s sustained. PCIe 3.0 x16 handles this (15.7 GB/s), but NVLink (~600 GB/s) provides massive headroom and lower latency.
 
 10. **Use `<gamut>` and `<eotf>` for precise color control** — the legacy `<transfer>` setting still works (infers bt2020 + pq/hlg automatically), but explicit `<gamut>` and `<eotf>` give full control. For standard BT.709 SDR output, leave both unset — the compute pass is completely bypassed with zero overhead.
+
+11. **Use `<display-blanker>` in production** — prevents desktop exposure during crashes or restarts. On Pro GPUs with dedicated display, the output stays black even if both CasparCG and the blanker crash.
+
+12. **Use `<display-name>` for portable configs** — instead of hard-coding `<device>` indices that change between machines, match by monitor manufacturer substring (e.g., `BNQ` for BenQ, `MTT` for VDD, `DEL` for Dell).
+
+13. **Run `display_blanker.exe --autostart` as a Windows service or startup item** — for fully unattended systems, this ensures blanking is active before CasparCG launches, eliminating the brief desktop flash during system boot.
