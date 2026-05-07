@@ -694,20 +694,20 @@ class vulkan_output_consumer : public core::frame_consumer
             const int32_t dh_max = static_cast<int32_t>(swapchain_.height);
 
             // Clamp source offsets to source dimensions
-            int32_t sx = std::clamp(config_.src_x, 0, sw_max);
-            int32_t sy = std::clamp(config_.src_y, 0, sh_max);
+            int32_t sx = (std::clamp)(config_.src_x, 0, sw_max);
+            int32_t sy = (std::clamp)(config_.src_y, 0, sh_max);
             int sw = config_.region_w > 0 ? config_.region_w : sw_max - sx;
             int sh = config_.region_h > 0 ? config_.region_h : sh_max - sy;
             // Clamp source region end to source bounds
-            sw = std::min(sw, sw_max - sx);
-            sh = std::min(sh, sh_max - sy);
+            sw = (std::min)(sw, sw_max - sx);
+            sh = (std::min)(sh, sh_max - sy);
 
             // Clamp destination offsets to swapchain dimensions
-            int32_t dx = std::clamp(config_.dest_x, 0, dw_max);
-            int32_t dy = std::clamp(config_.dest_y, 0, dh_max);
+            int32_t dx = (std::clamp)(config_.dest_x, 0, dw_max);
+            int32_t dy = (std::clamp)(config_.dest_y, 0, dh_max);
             // Clamp destination end to swapchain bounds
-            int dw = std::min(sw, dw_max - dx);
-            int dh = std::min(sh, dh_max - dy);
+            int dw = (std::min)(sw, dw_max - dx);
+            int dh = (std::min)(sh, dh_max - dy);
 
             blit.srcOffsets[0] = {sx, sy, 0};
             blit.srcOffsets[1] = {sx + sw, sy + sh, 1};
@@ -876,7 +876,7 @@ class vulkan_output_consumer : public core::frame_consumer
                 {0.8f, 0.0f, 0.8f, 1.0f}, // Magenta (output 5)
                 {0.8f, 0.8f, 0.0f, 1.0f}, // Yellow (output 6)
             };
-            int idx = std::max(0, config_.output_index - 1) % 6;
+            int idx = (std::max)(0, config_.output_index - 1) % 6;
             VkClearColorValue clear_color = {{colors[idx][0], colors[idx][1], colors[idx][2], colors[idx][3]}};
             VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
             vkCmdClearColorImage(swapchain_.cmd_buffer, swapchain_.images[image_index],
