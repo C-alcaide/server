@@ -836,6 +836,7 @@ class vulkan_output_consumer : public core::frame_consumer
 
         // Output identification overlay: clear to a unique color for 3 seconds
         bool used_shared_pool = false;
+        bool wrote_to_intermediate = false; // Tracks whether intermediate image received valid data
         if (identify_frames_remaining_ > 0) {
             --identify_frames_remaining_;
             // Each output gets a distinct color: cycle through R/G/B/C/M/Y based on output_index
@@ -893,9 +894,11 @@ class vulkan_output_consumer : public core::frame_consumer
                                1, &blit_region, VK_FILTER_LINEAR);
 
                 used_shared_pool = true;
+                wrote_to_intermediate = color_convert_active;
             } else {
-                // Texture isn't OGL — fall through to CPU
-                upload_frame_cpu(frame, blit_dest_image);
+                // Texture isn't OGL — CPU fallback (target swapchain directly;
+                // upload_frame_cpu writes BGRA8 which is incompatible with RGBA16F intermediate)
+                upload_frame_cpu(frame, swapchain_.images[image_index]);
             }
         } else if (shared_pool_ && affinity_ctx_) {
             // Cross-GPU path: transfer frame from GPU A → GPU B
@@ -945,7 +948,7 @@ class vulkan_output_consumer : public core::frame_consumer
                     });
                     transferred = true;
                 } else {
-                    upload_frame_cpu(frame, blit_dest_image);
+                    upload_frame_cpu(frame, swapchain_.images[image_index]);
                 }
             }
 
@@ -978,8 +981,9 @@ class vulkan_output_consumer : public core::frame_consumer
                                1, &blit_region, VK_FILTER_LINEAR);
 
                 used_shared_pool = true;
+                wrote_to_intermediate = color_convert_active;
             } else {
-                upload_frame_cpu(frame, blit_dest_image);
+                upload_frame_cpu(frame, swapchain_.images[image_index]);
             }
         } else if (interop_ && interop_->vk_image() != VK_NULL_HANDLE) {
             // Legacy interop path (manual handle import)
@@ -988,13 +992,16 @@ class vulkan_output_consumer : public core::frame_consumer
             vkCmdBlitImage(swapchain_.cmd_buffer, interop_->vk_image(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                            blit_dest_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit_region,
                            VK_FILTER_LINEAR);
+            wrote_to_intermediate = color_convert_active;
         } else {
             // CPU fallback: upload pixel data via staging buffer
-            upload_frame_cpu(frame, blit_dest_image);
+            // Always targets swapchain — BGRA8 pixels are incompatible with RGBA16F intermediate
+            upload_frame_cpu(frame, swapchain_.images[image_index]);
         }
 
         // ─── Color space conversion (compute shader) ───────────────────────────
-        if (color_convert_active) {
+        // Only run if the intermediate was actually written to by a GPU blit path.
+        if (color_convert_active && wrote_to_intermediate) {
             // Transition intermediate: TRANSFER_DST → GENERAL (for compute read/write)
             VkImageMemoryBarrier cs_barrier{};
             cs_barrier.sType                           = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
