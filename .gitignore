@@ -19,3 +19,36 @@ src/.idea
 /debian
 /obj-*
 build_custom/
+
+# Temp scripts, build logs, and tool artifacts
+*.ps1
+*.bak
+build_*.txt
+build_*.bat
+build_*.py
+fix*.py
+fix2*.py
+merge_script*.py
+restore_av.py
+run_build.py
+clean_cmake.py
+our_av.cpp
+their_av.cpp
+ff_check.txt
+ffmpeg_diff.txt
+vulkan_test_output.txt
+color_convert_spv.h
+enum_disp.cs
+enum_disp.exe
+test_nvapi_dd.*
+clear_edid.obj
+
+# CRU tool
+cru/
+cru.zip
+
+# Generated shader headers in source tree
+src/modules/vulkan_output/shaders/color_convert_spv.h
+
+# Backup files
+src/modules/ffmpeg/producer/av_producer.cpp.bak
