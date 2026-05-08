@@ -1,0 +1,150 @@
+﻿Type "q" to close application.
+Logging [debug] or higher severity to log/
+
+[2026-05-07 09:01:35.601] [info]    ############################################################################
+[2026-05-07 09:01:35.601] [info]    CasparCG Server is distributed by the Swedish Broadcasting Corporation (SVT)
+[2026-05-07 09:01:35.602] [info]    under the GNU General Public License GPLv3 or higher.
+[2026-05-07 09:01:35.602] [info]    Please see LICENSE.TXT for details.
+[2026-05-07 09:01:35.602] [info]    http://www.casparcg.com/
+[2026-05-07 09:01:35.602] [info]    ############################################################################
+[2026-05-07 09:01:35.602] [info]    Starting CasparCG Video and Graphics Playout Server 2.6.0 5fb46d481 Dev
+[2026-05-07 09:01:35.603] [info]    "D:\Github\CasparVP\build\shell\casparcg_vulkan_test.config":
+[2026-05-07 09:01:35.603] [info]    -----------------------------------------
+[2026-05-07 09:01:35.603] [info]    <?xml version="1.0" encoding="utf-8"?>
+[2026-05-07 09:01:35.603] [info]    <configuration>
+[2026-05-07 09:01:35.603] [info]       <paths>
+[2026-05-07 09:01:35.603] [info]          <media-path>D:\MEDIA</media-path>
+[2026-05-07 09:01:35.603] [info]          <data-path>data/</data-path>
+[2026-05-07 09:01:35.603] [info]          <template-path>template/</template-path>
+[2026-05-07 09:01:35.603] [info]          <log-path>log/</log-path>
+[2026-05-07 09:01:35.603] [info]       </paths>
+[2026-05-07 09:01:35.603] [info]       <log-level>debug</log-level>
+[2026-05-07 09:01:35.603] [info]       <controllers>
+[2026-05-07 09:01:35.603] [info]          <tcp>
+[2026-05-07 09:01:35.603] [info]             <port>5250</port>
+[2026-05-07 09:01:35.603] [info]             <protocol>AMCP</protocol>
+[2026-05-07 09:01:35.603] [info]          </tcp>
+[2026-05-07 09:01:35.603] [info]       </controllers>
+[2026-05-07 09:01:35.603] [info]       <channels>
+[2026-05-07 09:01:35.603] [info]          <channel>
+[2026-05-07 09:01:35.603] [info]             <video-mode>1080p2500</video-mode>
+[2026-05-07 09:01:35.603] [info]             <consumers>
+[2026-05-07 09:01:35.603] [info]                <vulkan-output>
+[2026-05-07 09:01:35.603] [info]                   <device>2</device>
+[2026-05-07 09:01:35.603] [info]                   <gpu>0</gpu>
+[2026-05-07 09:01:35.603] [info]                   <buffer-depth>3</buffer-depth>
+[2026-05-07 09:01:35.603] [info]                </vulkan-output>
+[2026-05-07 09:01:35.603] [info]                <vulkan-output>
+[2026-05-07 09:01:35.603] [info]                   <device>3</device>
+[2026-05-07 09:01:35.603] [info]                   <gpu>0</gpu>
+[2026-05-07 09:01:35.603] [info]                   <buffer-depth>3</buffer-depth>
+[2026-05-07 09:01:35.603] [info]                </vulkan-output>
+[2026-05-07 09:01:35.603] [info]                <vulkan-output>
+[2026-05-07 09:01:35.603] [info]                   <device>4</device>
+[2026-05-07 09:01:35.603] [info]                   <gpu>0</gpu>
+[2026-05-07 09:01:35.603] [info]                   <buffer-depth>3</buffer-depth>
+[2026-05-07 09:01:35.603] [info]                </vulkan-output>
+[2026-05-07 09:01:35.603] [info]             </consumers>
+[2026-05-07 09:01:35.603] [info]          </channel>
+[2026-05-07 09:01:35.603] [info]       </channels>
+[2026-05-07 09:01:35.603] [info]    </configuration>
+[2026-05-07 09:01:35.603] [info]    -----------------------------------------
+[2026-05-07 09:01:35.603] [info]    Initialized video modes.
+[2026-05-07 09:01:35.922] [info]    Initializing OpenGL Device (sfml).
+[2026-05-07 09:01:35.923] [info]    Initializing OpenGL Device.
+[2026-05-07 09:01:35.927] [info]    Initialized OpenGL 4.5.0 NVIDIA 576.57 NVIDIA Corporation
+[2026-05-07 09:01:36.054] [info]    Initialized OpenGL Accelerated GPU Image Mixer for channel 1
+[2026-05-07 09:01:36.054] [info]    video_channel[1|1080p2500] Successfully Initialized.
+[2026-05-07 09:01:36.054] [info]    Initialized channels.
+[2026-05-07 09:01:36.054] [info]    Initialized command repository.
+[2026-05-07 09:01:36.054] [info]    Initialized replay module.
+[2026-05-07 09:01:36.055] [info]    Initialized image module.
+[2026-05-07 09:01:36.055] [info]    Initialized ffmpeg module.
+[2026-05-07 09:01:36.055] [info]    Initialized oal module.
+[2026-05-07 09:01:36.181] [info]    Decklink devices found:
+[2026-05-07 09:01:36.181] [info]     - DeckLink 8K Pro [1] (2272735184)
+[2026-05-07 09:01:36.181] [info]     - DeckLink 8K Pro [2] (2272735185)
+[2026-05-07 09:01:36.181] [info]     - DeckLink 8K Pro [3] (2272735186)
+[2026-05-07 09:01:36.182] [info]     - DeckLink 8K Pro [4] (2272735187)
+[2026-05-07 09:01:36.182] [info]     - DeckLink 8K Pro [5] (1682513056)
+[2026-05-07 09:01:36.182] [info]     - DeckLink 8K Pro [6] (1682513057)
+[2026-05-07 09:01:36.182] [info]     - DeckLink 8K Pro [7] (1682513058)
+[2026-05-07 09:01:36.182] [info]     - DeckLink 8K Pro [8] (1682513059)
+[2026-05-07 09:01:36.182] [info]    Initialized decklink module.
+[2026-05-07 09:01:36.198] [info]    [cuda_prores] CUDA devices found:
+[2026-05-07 09:01:36.198] [info]      [0] NVIDIA RTX A4000 -- sm_86 -- 16375 MB
+[2026-05-07 09:01:36.198] [info]    [cuda_prores] Module initialised
+[2026-05-07 09:01:36.198] [info]    Initialized cuda_prores module.
+[2026-05-07 09:01:36.198] [info]    [cuda_notchlc] CUDA devices found:
+[2026-05-07 09:01:36.198] [info]      [0] NVIDIA RTX A4000 -- sm_86 -- 16375 MB
+[2026-05-07 09:01:36.198] [info]    [cuda_notchlc] Module initialised
+[2026-05-07 09:01:36.198] [info]    Initialized cuda_notchlc module.
+[2026-05-07 09:01:36.198] [info]    Initialized screen module.
+[2026-05-07 09:01:36.211] [info]    [vulkan_output] Available outputs:
+[2026-05-07 09:01:36.211] [info]      GPU 0 Output 1: NVIDIA RTX A4000 - Fullscreen Exclusive [Consumer]
+[2026-05-07 09:01:36.211] [info]    Initialized vulkan_output module.
+[2026-05-07 09:01:36.212] [info]    Initialized newtek module.
+[2026-05-07 09:01:36.212] [info]    Initialized artnet module.
+[2026-05-07 09:01:36.212] [info]    Initialized sacn module.
+[2026-05-07 09:01:36.212] [info]    [html] Using CEF cache path: D:\Github\CasparVP\build\shell/cef-cache
+[2026-05-07 09:01:36.299] [info]    Initialized html module.
+[2026-05-07 09:01:36.392] [info]    Initialized ltc module.
+[2026-05-07 09:01:36.393] [info]    Initialized system_audio module.
+[2026-05-07 09:01:36.393] [info]    Flash support is disabled
+[2026-05-07 09:01:36.393] [info]    Initialized flash module.
+[2026-05-07 09:01:36.394] [info]    Initialized bluefish module.
+[2026-05-07 09:01:36.394] [info]    Initialized spout module.
+[2026-05-07 09:01:36.394] [info]    [tracking] Initialising camera-tracking module
+[2026-05-07 09:01:36.394] [info]    Initialized tracking module.
+[2026-05-07 09:01:36.395] [info]    [keyframes] Initialising keyframe module
+[2026-05-07 09:01:36.395] [info]    Initialized keyframes module.
+[2026-05-07 09:01:36.395] [info]    [cluster] No <cluster> block in config, module idle
+[2026-05-07 09:01:36.395] [info]    Initialized cluster module.
+[2026-05-07 09:01:36.395] [info]    Initialized modules.
+[2026-05-07 09:01:36.398] [debug]   [vulkan] Instance extension not available: VK_KHR_display
+[2026-05-07 09:01:36.398] [debug]   [vulkan] Instance extension not available: VK_EXT_display_surface_counter
+[2026-05-07 09:01:36.402] [info]    [vulkan_output] Selected GPU 0: NVIDIA RTX A4000 (tier=consumer, ext_mem=true, present_barrier=true)
+[2026-05-07 09:01:37.534] [warning] vulkan_output[gpu:0|output:2] Monitor 2 not found, using primary display.
+[2026-05-07 09:01:37.753] [info]    vulkan_output[gpu:0|output:2] Swapchain created: 1920x1080 (3 images)
+[2026-05-07 09:01:37.755] [info]    [vulkan_output] No Quadro Sync devices found.
+[2026-05-07 09:01:37.755] [info]    [vulkan_output] NvAPI initialized: 1 GPU(s), 0 GSync device(s).
+[2026-05-07 09:01:37.788] [info]    vulkan_output[gpu:0|output:2] OGL context is on a different GPU than Vulkan output (gpu_index=0). Creating affinity bridge...
+[2026-05-07 09:01:37.910] [info]    [gpu_affinity] GPU 0: NVIDIA RTX A4000
+[2026-05-07 09:01:37.927] [info]    [gpu_affinity] Created OGL context on GPU 0 (1920x1080)
+[2026-05-07 09:01:37.927] [error]   vulkan_output[gpu:0|output:2] Affinity context LUID doesn't match Vulkan device ├ó?ÔÇØ driver issue?
+[2026-05-07 09:01:37.933] [info]    vulkan_output[gpu:0|output:2] initialized. Tier: Consumer (FSE)
+[2026-05-07 09:01:37.933] [info]    vulkan_output[gpu:0|output:2] Initialized.
+[2026-05-07 09:01:37.936] [debug]   [vulkan] Instance extension not available: VK_KHR_display
+[2026-05-07 09:01:37.936] [debug]   [vulkan] Instance extension not available: VK_EXT_display_surface_counter
+[2026-05-07 09:01:37.940] [info]    [vulkan_output] Selected GPU 0: NVIDIA RTX A4000 (tier=consumer, ext_mem=true, present_barrier=true)
+[2026-05-07 09:01:37.972] [warning] vulkan_output[gpu:0|output:3] Monitor 3 not found, using primary display.
+[2026-05-07 09:01:38.002] [info]    vulkan_output[gpu:0|output:3] Swapchain created: 1920x1080 (3 images)
+[2026-05-07 09:01:38.003] [info]    [vulkan_output] No Quadro Sync devices found.
+[2026-05-07 09:01:38.003] [info]    [vulkan_output] NvAPI initialized: 1 GPU(s), 0 GSync device(s).
+[2026-05-07 09:01:38.003] [info]    vulkan_output[gpu:0|output:3] OGL context is on a different GPU than Vulkan output (gpu_index=0). Creating affinity bridge...
+[2026-05-07 09:01:38.045] [info]    [gpu_affinity] GPU 0: NVIDIA RTX A4000
+[2026-05-07 09:01:38.067] [info]    [gpu_affinity] Created OGL context on GPU 0 (1920x1080)
+[2026-05-07 09:01:38.068] [error]   vulkan_output[gpu:0|output:3] Affinity context LUID doesn't match Vulkan device ├ó?ÔÇØ driver issue?
+[2026-05-07 09:01:38.099] [info]    vulkan_output[gpu:0|output:3] initialized. Tier: Consumer (FSE)
+[2026-05-07 09:01:38.099] [info]    vulkan_output[gpu:0|output:3] Initialized.
+[2026-05-07 09:01:38.101] [debug]   [vulkan] Instance extension not available: VK_KHR_display
+[2026-05-07 09:01:38.101] [debug]   [vulkan] Instance extension not available: VK_EXT_display_surface_counter
+[2026-05-07 09:01:38.104] [info]    [vulkan_output] Selected GPU 0: NVIDIA RTX A4000 (tier=consumer, ext_mem=true, present_barrier=true)
+[2026-05-07 09:01:38.158] [warning] vulkan_output[gpu:0|output:4] Monitor 4 not found, using primary display.
+[2026-05-07 09:01:38.197] [info]    vulkan_output[gpu:0|output:4] Swapchain created: 1920x1080 (3 images)
+[2026-05-07 09:01:38.197] [info]    [vulkan_output] No Quadro Sync devices found.
+[2026-05-07 09:01:38.197] [info]    [vulkan_output] NvAPI initialized: 1 GPU(s), 0 GSync device(s).
+[2026-05-07 09:01:38.198] [info]    vulkan_output[gpu:0|output:4] OGL context is on a different GPU than Vulkan output (gpu_index=0). Creating affinity bridge...
+[2026-05-07 09:01:38.245] [info]    [gpu_affinity] GPU 0: NVIDIA RTX A4000
+[2026-05-07 09:01:38.300] [info]    [gpu_affinity] Created OGL context on GPU 0 (1920x1080)
+[2026-05-07 09:01:38.300] [error]   vulkan_output[gpu:0|output:4] Affinity context LUID doesn't match Vulkan device ├ó?ÔÇØ driver issue?
+[2026-05-07 09:01:38.317] [info]    vulkan_output[gpu:0|output:4] initialized. Tier: Consumer (FSE)
+[2026-05-07 09:01:38.317] [info]    vulkan_output[gpu:0|output:4] Initialized.
+[2026-05-07 09:01:38.317] [info]    Initialized startup producers.
+[2026-05-07 09:01:38.317] [info]    Initialized controllers.
+[2026-05-07 09:01:38.317] [info]    Initialized osc.
+[2026-05-07 09:02:21.924] [info]    Received message from Console: q\r\n
+[2026-05-07 09:02:21.925] [info]    video_channel[1|1080p2500] Uninitializing.
+[2026-05-07 09:02:21.925] [info]    [asio] Shutting down global io_context.
+[2026-05-07 09:02:21.926] [info]    [asio] Global io_context uninitialized.
+[2026-05-07 09:02:21.926] [error]   OpenGL Error: 1280 Unknown error

@@ -39,6 +39,8 @@ struct tracked_producer
     int      stall_count     = 0;  // Consecutive frames where frame_number() didn't advance
     bool     paused          = false; // True if layer has no active producer or is stalled
     int64_t  requery_cooldown = 0; // Frames to wait before re-querying after content change
+    std::shared_ptr<core::frame_producer> cached_producer; // Cached to avoid per-tick foreground() heap allocs
+    int      query_skip_counter = 0; // Skip foreground() queries on most ticks
 };
 
 /// Per-channel drift metrics reported by the watchdog

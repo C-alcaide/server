@@ -174,10 +174,18 @@ void content_sync::scan_channel_layers(int channel_index, int max_layer)
 
     auto& channel = channels_[channel_index];
 
+    // Limit futures per scan pass to avoid heap allocation storms
+    static constexpr int max_probes_per_scan = 10;
+    int probes_this_scan = 0;
+
     for (int layer = 0; layer <= max_layer; ++layer) {
         auto key = make_key(channel_index, layer);
         if (tracked_.count(key)) {
             continue; // Already tracked
+        }
+
+        if (++probes_this_scan > max_probes_per_scan) {
+            break; // Resume remaining layers next scan cycle
         }
 
         // Probe this layer for an active producer
@@ -235,6 +243,23 @@ void content_sync::scan_channel_layers(int channel_index, int max_layer)
 
 void content_sync::check_producer(tracked_producer& tp)
 {
+    // Skip foreground() query on most ticks — producer pointer rarely changes
+    // Only re-query every 10 ticks (~20ms) to reduce heap allocations from std::future
+    if (++tp.query_skip_counter < 10) {
+        // Still use cached producer if available
+        if (!tp.cached_producer) {
+            return;
+        }
+        // Use cached frame_number for drift check
+        auto fn = tp.cached_producer->frame_number();
+        if (fn != tp.last_frame_number) {
+            tp.last_frame_number = fn;
+            tp.stall_count       = 0;
+        }
+        return;
+    }
+    tp.query_skip_counter = 0;
+
     // Get actual producer from the channel's stage
     if (tp.channel_index < 0 || tp.channel_index >= static_cast<int>(channels_.size())) {
         return;
@@ -245,11 +270,12 @@ void content_sync::check_producer(tracked_producer& tp)
 
     try {
         auto future = channel->stage()->foreground(tp.layer_index);
-        // Use wait_for to avoid blocking the watchdog indefinitely
-        if (future.wait_for(std::chrono::milliseconds(1)) != std::future_status::ready) {
+        // Use wait_for(0) to avoid blocking — just check if result is ready
+        if (future.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) {
             return; // Stage busy, skip this tick
         }
         producer = future.get();
+        tp.cached_producer = producer; // Cache to avoid future allocs on skip ticks
     } catch (...) {
         return; // Layer doesn't exist or stage error
     }
@@ -374,6 +400,13 @@ void content_sync::check_producer(tracked_producer& tp)
         return;
     }
 
+    // Cooldown after a correction: wait before issuing another seek
+    // This prevents seek storms when the decoder can't land precisely on the target frame
+    if (tp.requery_cooldown > 0) {
+        tp.requery_cooldown--;
+        return;
+    }
+
     // Issue seek correction
     try {
         std::vector<std::wstring> seek_params = {L"seek", std::to_wstring(expected)};
@@ -381,6 +414,10 @@ void content_sync::check_producer(tracked_producer& tp)
 
         tp.corrections++;
         total_corrections_.fetch_add(1, std::memory_order_relaxed);
+
+        // Re-anchor start_frame after correction to avoid immediate re-triggering
+        tp.start_frame = current_global - expected;
+        tp.requery_cooldown = 15; // Wait ~15 frames (0.3s at 50fps) before next correction
 
         CASPAR_LOG(warning) << L"[cluster] Drift correction: ch=" << tp.channel_index
                             << L" layer=" << tp.layer_index

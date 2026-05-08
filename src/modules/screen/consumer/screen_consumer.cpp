@@ -439,6 +439,7 @@ struct screen_consumer
         strategy_->do_tick(this);
 
         window_.display();
+        glFinish(); // Serialize GL work to prevent GPU command queue contention with Vulkan
 
         std::rotate(frames_.begin(), frames_.begin() + 1, frames_.end());
 

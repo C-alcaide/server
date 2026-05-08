@@ -68,11 +68,12 @@ class vulkan_device
     gpu_tier         tier() const { return tier_; }
     int              gpu_index() const { return gpu_index_; }
 
-    // Multi-queue API: each consumer acquires an exclusive queue index.
+    // Multi-queue API: each consumer acquires a queue index.
     // If more consumers than queues (unlikely: NVIDIA exposes 16), indices wrap
-    // and consumers sharing a queue must serialize submissions externally.
+    // and consumers sharing a queue serialize via the per-queue mutex.
     uint32_t         acquire_queue();
     VkQueue          queue(uint32_t idx) const { return queues_[idx % queue_count_]; }
+    std::mutex&      queue_mutex_for(uint32_t idx) { return queue_mutexes_[idx % queue_count_]; }
     uint32_t         queue_count() const { return queue_count_; }
 
     // Backward compat (used by frame_cache coordinator and single-consumer setups)
@@ -119,6 +120,7 @@ class vulkan_device
     bool                     device_luid_valid_    = false;
     VkDebugUtilsMessengerEXT debug_messenger_      = VK_NULL_HANDLE;
     std::vector<std::string> enabled_extensions_;
+    std::vector<std::mutex>  queue_mutexes_;      // One mutex per physical queue
     std::mutex               legacy_queue_mutex_; // For backward compat only
 };
 

@@ -1,0 +1,14 @@
+﻿**********************************************************************
+** Visual Studio 2026 Developer Command Prompt v18.5.1
+** Copyright (c) 2026 Microsoft Corporation
+**********************************************************************
+[vcvarsall.bat] Environment initialized for: 'x64'
+[1/9] Building CXX object modules\cluster\CMakeFiles\cluster.dir\sync\frame_clock.cpp.obj
+[2/9] Building CXX object modules\cluster\CMakeFiles\cluster.dir\relay\virtual_channel_map.cpp.obj
+[3/9] Building CXX object modules\cluster\CMakeFiles\cluster.dir\sync\command_scheduler.cpp.obj
+[4/9] Building CXX object modules\cluster\CMakeFiles\cluster.dir\ptp\ptp_clock.cpp.obj
+[5/9] Building CXX object modules\cluster\CMakeFiles\cluster.dir\relay\command_relay.cpp.obj
+[6/9] Building CXX object modules\cluster\CMakeFiles\cluster.dir\sync\content_sync.cpp.obj
+[7/9] Building CXX object modules\cluster\CMakeFiles\cluster.dir\cluster.cpp.obj
+[8/9] Linking CXX static library modules\cluster\cluster.lib
+[9/9] Linking CXX executable shell\casparcg.exe

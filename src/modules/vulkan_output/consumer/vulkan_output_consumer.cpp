@@ -423,9 +423,38 @@ class vulkan_output_consumer : public core::frame_consumer
             create_info.pNext                  = &barrier_info;
         }
 
+        // VK_EXT_full_screen_exclusive with APPLICATION_CONTROLLED mode is NOT used.
+        // On NVIDIA Windows drivers (tested 576.57, RTX A4000), if
+        // vkAcquireFullScreenExclusiveModeEXT fails (VK_ERROR_INITIALIZATION_FAILED),
+        // the swapchain silently stops presenting — frames are submitted and "complete"
+        // but nothing reaches the display. This is a driver bug / spec ambiguity.
+        // Without the FSE chain, the swapchain works correctly through DWM composition.
+        // DWM adds ~1 frame of latency but is reliable across all display configurations.
+        bool fse_requested = false;
+
         auto result = vkCreateSwapchainKHR(device_->device(), &create_info, nullptr, &swapchain_.swapchain);
         if (result != VK_SUCCESS)
             CASPAR_THROW_EXCEPTION(caspar_exception() << msg_info("Failed to create Vulkan swapchain"));
+
+        // Acquire full-screen exclusive mode after swapchain creation.
+        // This tells the driver to take exclusive control of the display output.
+        fse_acquired_ = false;
+        if (fse_requested) {
+            auto vkAcquireFSE = reinterpret_cast<PFN_vkAcquireFullScreenExclusiveModeEXT>(
+                vkGetDeviceProcAddr(device_->device(), "vkAcquireFullScreenExclusiveModeEXT"));
+            if (vkAcquireFSE) {
+                auto fse_result = vkAcquireFSE(device_->device(), swapchain_.swapchain);
+                if (fse_result == VK_SUCCESS) {
+                    fse_acquired_ = true;
+                    CASPAR_LOG(info) << print()
+                                     << L" Full-screen exclusive acquired — DWM bypassed (direct scanout).";
+                } else {
+                    CASPAR_LOG(warning) << print()
+                                        << L" Failed to acquire full-screen exclusive (result="
+                                        << fse_result << L"). DWM composition still active.";
+                }
+            }
+        }
 
         // Get swapchain images
         uint32_t sc_image_count = 0;
@@ -793,6 +822,39 @@ class vulkan_output_consumer : public core::frame_consumer
         return blit;
     }
 
+    void try_acquire_fse()
+    {
+        if (fse_acquired_ || !fse_hwnd_ || !swapchain_.swapchain)
+            return;
+        if (!device_->has_extension(VK_EXT_FULL_SCREEN_EXCLUSIVE_EXTENSION_NAME))
+            return;
+
+        auto vkAcquireFSE = reinterpret_cast<PFN_vkAcquireFullScreenExclusiveModeEXT>(
+            vkGetDeviceProcAddr(device_->device(), "vkAcquireFullScreenExclusiveModeEXT"));
+        if (!vkAcquireFSE)
+            return;
+
+        auto result = vkAcquireFSE(device_->device(), swapchain_.swapchain);
+        if (result == VK_SUCCESS) {
+            fse_acquired_ = true;
+            CASPAR_LOG(info) << print() << L" Full-screen exclusive re-acquired.";
+        }
+        // Silently ignore failure — will retry next frame
+    }
+
+    void release_fse(VkSwapchainKHR sc)
+    {
+        if (!fse_acquired_ || sc == VK_NULL_HANDLE)
+            return;
+
+        auto vkReleaseFSE = reinterpret_cast<PFN_vkReleaseFullScreenExclusiveModeEXT>(
+            vkGetDeviceProcAddr(device_->device(), "vkReleaseFullScreenExclusiveModeEXT"));
+        if (vkReleaseFSE) {
+            vkReleaseFSE(device_->device(), sc);
+        }
+        fse_acquired_ = false;
+    }
+
     void recreate_swapchain()
     {
         if (device_dead_)
@@ -815,6 +877,9 @@ class vulkan_output_consumer : public core::frame_consumer
 
         auto old = swapchain_.swapchain;
         swapchain_.swapchain = VK_NULL_HANDLE;
+
+        // Release FSE before destroying the old swapchain
+        release_fse(old);
 
         // Verify surface is still valid
         VkSurfaceCapabilitiesKHR caps;
@@ -939,6 +1004,10 @@ class vulkan_output_consumer : public core::frame_consumer
         } else if (result == VK_TIMEOUT || result == VK_NOT_READY) {
             graph_->set_tag(diagnostics::tag_severity::WARNING, "dropped-frame");
             return;
+        } else if (result == VK_ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT) {
+            // FSE was lost (alt-tab, focus change, etc.) — try to reacquire
+            fse_acquired_ = false;
+            try_acquire_fse();
         }
 
         // Record command buffer: copy frame data → swapchain image
@@ -1017,7 +1086,7 @@ class vulkan_output_consumer : public core::frame_consumer
             VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
             vkCmdClearColorImage(cmd, swapchain_.images[image_index],
                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear_color, 1, &range);
-        } else if (frame_cache_ && frame_cache_->pool()) {
+        } else if (frame_cache_ && frame_cache_->pool() && frame_generation_ > 0) {
             // Frame cache path: shared pool was populated in send() (same-GPU)
             // or cross-GPU transfer was done in send() via submit_frame().
             auto* pool = frame_cache_->pool();
@@ -1074,10 +1143,13 @@ class vulkan_output_consumer : public core::frame_consumer
                 });
             }
 
-            // Transition shared image for transfer src
+            // Transition shared image for transfer src.
+            // IMPORTANT: oldLayout must be GENERAL (not UNDEFINED) to preserve GL-written data.
+            // GL→VK interop images are always in GENERAL after glSignalSemaphoreEXT.
+            // Using UNDEFINED would allow the driver to discard the image contents.
             VkImageMemoryBarrier src_barrier{};
             src_barrier.sType                           = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-            src_barrier.oldLayout                       = VK_IMAGE_LAYOUT_UNDEFINED;
+            src_barrier.oldLayout                       = VK_IMAGE_LAYOUT_GENERAL;
             src_barrier.newLayout                       = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
             src_barrier.srcQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
             src_barrier.dstQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
@@ -1196,7 +1268,7 @@ class vulkan_output_consumer : public core::frame_consumer
 
         VkTimelineSemaphoreSubmitInfo timeline_submit{};
         timeline_submit.sType                     = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
-        timeline_submit.waitSemaphoreValueCount   = 2;
+        timeline_submit.waitSemaphoreValueCount   = wait_count; // Must match submit_info.waitSemaphoreCount
         timeline_submit.pWaitSemaphoreValues      = wait_values;
         timeline_submit.signalSemaphoreValueCount = 1;
         uint64_t signal_value                     = 0; // render_finished is binary
@@ -1227,7 +1299,10 @@ class vulkan_output_consumer : public core::frame_consumer
         VkResult submit_result;
         VkResult present_result;
 
-        // No queue mutex needed — each consumer has an exclusive queue.
+        // Lock per-queue mutex — if multiple consumers share a physical queue
+        // (wrapping), this serializes their vkQueueSubmit/vkQueuePresentKHR calls.
+        std::lock_guard<std::mutex> queue_lock(device_->queue_mutex_for(my_queue_idx_));
+
         submit_result = vkQueueSubmit(my_queue_, 1, &submit_info, frame_sync.in_flight);
         if (submit_result == VK_ERROR_DEVICE_LOST) {
             CASPAR_LOG(error) << print() << L" GPU device lost (TDR) during submit. Output halted.";
@@ -1252,6 +1327,9 @@ class vulkan_output_consumer : public core::frame_consumer
         } else if (present_result == VK_ERROR_SURFACE_LOST_KHR) {
             display_lost_ = true;
             CASPAR_LOG(warning) << print() << L" Display disconnected during present.";
+        } else if (present_result == VK_ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT) {
+            fse_acquired_ = false;
+            try_acquire_fse();
         } else if (present_result == VK_ERROR_DEVICE_LOST) {
             CASPAR_LOG(error) << print() << L" GPU device lost (TDR) during present. Output halted.";
             display_lost_ = true;
@@ -1454,6 +1532,23 @@ class vulkan_output_consumer : public core::frame_consumer
             case WM_SETCURSOR:
                 SetCursor(nullptr); // Hide cursor on output windows
                 return TRUE;
+            case WM_ERASEBKGND: {
+                // Paint solid black to ensure window is visually opaque
+                // even before the first Vulkan present.
+                RECT rc;
+                GetClientRect(hwnd, &rc);
+                FillRect(reinterpret_cast<HDC>(wParam), &rc,
+                         static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
+                return 1;
+            }
+            case WM_PAINT: {
+                PAINTSTRUCT ps;
+                HDC hdc = BeginPaint(hwnd, &ps);
+                FillRect(hdc, &ps.rcPaint,
+                         static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
+                EndPaint(hwnd, &ps);
+                return 0;
+            }
         }
         return DefWindowProcW(hwnd, msg, wParam, lParam);
     }
@@ -1539,6 +1634,7 @@ class vulkan_output_consumer : public core::frame_consumer
             wc.style         = CS_HREDRAW | CS_VREDRAW;
             wc.lpfnWndProc   = fse_wnd_proc;
             wc.hInstance     = GetModuleHandle(nullptr);
+            wc.hbrBackground = static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
             wc.lpszClassName = L"CasparVulkanOutput";
             if (!RegisterClassExW(&wc)) {
                 if (GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
@@ -1664,11 +1760,46 @@ class vulkan_output_consumer : public core::frame_consumer
                 y = -32000;
             }
 
-            HWND hwnd = CreateWindowExW(WS_EX_TOPMOST | WS_EX_NOACTIVATE,
+            HWND hwnd = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_APPWINDOW,
                                         L"CasparVulkanOutput", L"CasparCG Vulkan Output",
-                                        WS_POPUP | WS_VISIBLE | WS_DISABLED, x, y, w, h,
+                                        WS_POPUP | WS_VISIBLE, x, y, w, h,
                                         nullptr, nullptr, GetModuleHandle(nullptr), nullptr);
-            ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+
+            // Attach to the foreground thread's input queue so that
+            // SetForegroundWindow works reliably from a background thread.
+            DWORD fg_thread = 0;
+            {
+                HWND fg_wnd = GetForegroundWindow();
+                if (fg_wnd)
+                    fg_thread = GetWindowThreadProcessId(fg_wnd, nullptr);
+            }
+            DWORD our_thread = GetCurrentThreadId();
+            bool attached = false;
+            if (fg_thread && fg_thread != our_thread) {
+                attached = !!AttachThreadInput(our_thread, fg_thread, TRUE);
+            }
+
+            SetForegroundWindow(hwnd);
+            BringWindowToTop(hwnd);
+            SetWindowPos(hwnd, HWND_TOPMOST, x, y, w, h,
+                         SWP_SHOWWINDOW);
+            ShowWindow(hwnd, SW_SHOW);
+
+            if (attached) {
+                AttachThreadInput(our_thread, fg_thread, FALSE);
+            }
+
+            // Pump all pending messages so activation/focus messages are processed
+            // before the main thread tries to acquire FSE.  FSE requires the window
+            // to be the actual foreground window, not just queued for activation.
+            {
+                MSG init_msg;
+                while (PeekMessageW(&init_msg, nullptr, 0, 0, PM_REMOVE)) {
+                    TranslateMessage(&init_msg);
+                    DispatchMessageW(&init_msg);
+                }
+            }
+
             adapter_mismatch_ = data.adapter_mismatch;
             hwnd_promise.set_value(hwnd);
 
@@ -1729,6 +1860,9 @@ class vulkan_output_consumer : public core::frame_consumer
 
                 for (auto& iv : swapchain_.image_views)
                     vkDestroyImageView(dev, iv, nullptr);
+
+                // Release FSE before swapchain destruction
+                release_fse(swapchain_.swapchain);
 
                 if (swapchain_.swapchain != VK_NULL_HANDLE)
                     vkDestroySwapchainKHR(dev, swapchain_.swapchain, nullptr);
@@ -1830,6 +1964,7 @@ class vulkan_output_consumer : public core::frame_consumer
 
     // Present barrier
     bool                             present_barrier_enabled_ = false;
+    bool                             fse_acquired_ = false; // VK_EXT_full_screen_exclusive acquired
 
     // Output identification
     std::atomic<int>                 identify_frames_remaining_{0};

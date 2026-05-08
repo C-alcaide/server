@@ -13,6 +13,7 @@
 #include "../sync/command_scheduler.h"
 
 #include <atomic>
+#include <condition_variable>
 #include <functional>
 #include <map>
 #include <memory>
@@ -102,6 +103,7 @@ class command_relay
     mutable std::mutex              members_mutex_;
     std::vector<member_info>        members_;
     std::thread                     connection_thread_;
+    std::condition_variable         stop_cv_; // Wakes master_connection_loop on stop
 
     // Client: incoming connection from master
     std::string   client_bind_address_;

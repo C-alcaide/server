@@ -29,6 +29,7 @@ set(SOURCES
 casparcg_add_module_project(cluster
     SOURCES ${SOURCES}
     INIT_FUNCTION "cluster::init"
+    UNINIT_FUNCTION "cluster::uninit"
 )
 
 target_include_directories(cluster PRIVATE

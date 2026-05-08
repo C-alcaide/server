@@ -116,6 +116,7 @@ void vulkan_device::create_instance()
         VK_KHR_DISPLAY_EXTENSION_NAME,
         VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME,
         VK_KHR_EXTERNAL_MEMORY_CAPABILITIES_EXTENSION_NAME,
+        VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME, // Required for VK_EXT_full_screen_exclusive
         VK_EXT_DISPLAY_SURFACE_COUNTER_EXTENSION_NAME,
         VK_EXT_DEBUG_UTILS_EXTENSION_NAME,
     };
@@ -294,9 +295,10 @@ void vulkan_device::create_logical_device()
         VK_KHR_GLOBAL_PRIORITY_EXTENSION_NAME,
     };
 
-    if (tier_ == gpu_tier::consumer) {
-        desired_device_exts.push_back(VK_EXT_FULL_SCREEN_EXCLUSIVE_EXTENSION_NAME);
-    }
+    // FSE is useful on ALL tiers: on Windows, VK_KHR_display is not available,
+    // so even pro GPUs (A4000/A6000) use win32 surfaces. Application-controlled
+    // FSE bypasses DWM composition for direct scanout.
+    desired_device_exts.push_back(VK_EXT_FULL_SCREEN_EXCLUSIVE_EXTENSION_NAME);
 
     // Check and add optional extensions if available
     {
@@ -393,6 +395,8 @@ void vulkan_device::create_logical_device()
     queues_.resize(queue_count_);
     for (uint32_t i = 0; i < queue_count_; ++i)
         vkGetDeviceQueue(device_, present_queue_family_, i, &queues_[i]);
+
+    queue_mutexes_ = std::vector<std::mutex>(queue_count_);
 
     CASPAR_LOG(info) << L"[vulkan] Device created with " << queue_count_
                      << L" queues (family " << present_queue_family_ << L")";

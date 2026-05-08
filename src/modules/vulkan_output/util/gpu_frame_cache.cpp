@@ -228,16 +228,16 @@ uint64_t gpu_frame_cache::submit_frame(uint64_t generation, const std::function<
     std::unique_lock<std::mutex> lock(frame_mutex_);
 
     // If this generation is already transferred, return immediately
-    if (generation <= current_generation_)
-        return current_generation_;
+    if (generation <= current_generation_.load(std::memory_order_acquire))
+        return current_generation_.load(std::memory_order_relaxed);
 
     // If another consumer is currently transferring, wait for it
     if (transfer_in_progress_) {
         frame_cv_.wait(lock, [this, generation] {
-            return generation <= current_generation_ || !transfer_in_progress_;
+            return generation <= current_generation_.load(std::memory_order_relaxed) || !transfer_in_progress_;
         });
-        if (generation <= current_generation_)
-            return current_generation_;
+        if (generation <= current_generation_.load(std::memory_order_relaxed))
+            return current_generation_.load(std::memory_order_relaxed);
     }
 
     // This consumer wins — perform the transfer
@@ -250,7 +250,7 @@ uint64_t gpu_frame_cache::submit_frame(uint64_t generation, const std::function<
     do_coordinator_submit(generation);
 
     lock.lock();
-    current_generation_   = generation;
+    current_generation_.store(generation, std::memory_order_release);
     transfer_in_progress_ = false;
     timeline_value_.store(generation, std::memory_order_release);
     frame_cv_.notify_all();
@@ -286,7 +286,7 @@ void gpu_frame_cache::pump_loop()
         }
 
         // Skip if already processed (duplicate notification from multiple consumers)
-        if (work.generation <= current_generation_)
+        if (work.generation <= current_generation_.load(std::memory_order_acquire))
             continue;
 
         // Execute the transfer (blit + signal_gl + swap on the interop/affinity thread)
@@ -295,8 +295,8 @@ void gpu_frame_cache::pump_loop()
         // Coordinator submit: bridge binary semaphore → timeline
         do_coordinator_submit(work.generation);
 
-        // Update generation (thread-safe: pump is the sole writer for same-GPU path)
-        current_generation_ = work.generation;
+        // Update generation (thread-safe via atomic)
+        current_generation_.store(work.generation, std::memory_order_release);
         timeline_value_.store(work.generation, std::memory_order_release);
     }
 }
@@ -335,7 +335,12 @@ void gpu_frame_cache::do_coordinator_submit(uint64_t generation)
     submit_info.signalSemaphoreCount = 1;
     submit_info.pSignalSemaphores    = &timeline_sem_;
 
-    vkQueueSubmit(device_->queue(coord_queue_idx_), 1, &submit_info, VK_NULL_HANDLE);
+    std::lock_guard<std::mutex> lock(device_->queue_mutex_for(coord_queue_idx_));
+    VkResult result = vkQueueSubmit(device_->queue(coord_queue_idx_), 1, &submit_info, VK_NULL_HANDLE);
+    if (result != VK_SUCCESS) {
+        CASPAR_LOG(error) << L"[vulkan] Coordinator submit failed (result=" << result
+                          << L") — timeline semaphore may stall consumers.";
+    }
 }
 
 void gpu_frame_cache::frame_done()

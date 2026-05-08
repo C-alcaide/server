@@ -14,5 +14,6 @@
 namespace caspar { namespace cluster {
 
 void init(const core::module_dependencies& dependencies);
+void uninit();
 
 }} // namespace caspar::cluster

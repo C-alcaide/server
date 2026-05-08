@@ -47,8 +47,20 @@ class frame_clock
   private:
     std::shared_ptr<ptp::ptp_clock> clock_;
     int64_t                         epoch_origin_ns_;
-    std::atomic<int>                fps_num_;
-    std::atomic<int>                fps_den_;
+
+    // Pack fps_num (upper 32) and fps_den (lower 32) into a single atomic
+    // so they are always read/written as a consistent pair
+    std::atomic<uint64_t>           fps_packed_;
+
+    static uint64_t pack_fps(int num, int den)
+    {
+        return (static_cast<uint64_t>(static_cast<uint32_t>(num)) << 32) |
+               static_cast<uint64_t>(static_cast<uint32_t>(den));
+    }
+    static std::pair<int, int> unpack_fps(uint64_t packed)
+    {
+        return {static_cast<int>(packed >> 32), static_cast<int>(packed & 0xFFFFFFFF)};
+    }
 };
 
 }}} // namespace caspar::cluster::sync

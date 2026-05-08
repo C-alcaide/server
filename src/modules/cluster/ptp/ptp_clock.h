@@ -81,6 +81,8 @@ class ptp_clock
     void handle_follow_up(const follow_up_message& msg);
     void handle_delay_resp(const delay_resp_message& msg);
     void send_delay_req();
+    bool is_self_message(const ptp_header& hdr) const;
+    bool accept_master(const port_identity& source);
 
     int64_t local_time_ns() const;
     void    update_offset(int64_t measured_offset);
@@ -115,6 +117,10 @@ class ptp_clock
 
     // Identity
     port_identity identity_;
+    port_identity locked_master_{}; // Track the master we're locked to (#18)
+
+    // Master disappearance detection
+    std::chrono::steady_clock::time_point last_sync_received_{std::chrono::steady_clock::now()};
 
     // Threading
     std::atomic<bool> running_{false};

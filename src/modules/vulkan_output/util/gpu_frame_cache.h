@@ -157,7 +157,7 @@ class gpu_frame_cache
     // Frame generation tracking (first-caller-wins for blocking submit_frame)
     std::mutex              frame_mutex_;
     std::condition_variable frame_cv_;
-    uint64_t                current_generation_ = 0;
+    std::atomic<uint64_t>   current_generation_{0};
     bool                    transfer_in_progress_ = false;
 
     // Timeline semaphore: bridges binary GL→VK semaphore to multi-queue timeline.

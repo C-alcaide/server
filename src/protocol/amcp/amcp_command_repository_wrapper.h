@@ -78,6 +78,9 @@ class amcp_command_repository_wrapper
                                   amcp_command_impl_func command,
                                   int                    min_num_params);
 
+    /// Access the underlying command repository (for internal command execution)
+    std::shared_ptr<amcp_command_repository> repo() const { return repo_; }
+
   private:
     std::shared_ptr<amcp_command_repository> repo_;
     std::weak_ptr<command_context_factory>   context_factory_;

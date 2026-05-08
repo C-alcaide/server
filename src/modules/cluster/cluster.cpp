@@ -18,8 +18,12 @@
 
 #include <common/env.h>
 #include <common/log.h>
+#include <protocol/amcp/amcp_command_repository.h>
 #include <protocol/amcp/amcp_command_repository_wrapper.h>
 #include <protocol/amcp/amcp_shared.h>
+#include <protocol/amcp/AMCPCommand.h>
+#include <protocol/util/ClientInfo.h>
+#include <protocol/util/tokenize.h>
 
 #include <memory>
 #include <mutex>
@@ -45,6 +49,10 @@ struct cluster_state
     std::unique_ptr<relay::command_relay>       relay;
     bool                                        active          = false;
     bool                                        watchdog_armed  = false; // true once channels are captured
+
+    // For executing scheduled commands through the AMCP parser
+    std::weak_ptr<protocol::amcp::amcp_command_repository> command_repo;
+    std::shared_ptr<IO::ConsoleClientInfo>                 internal_client;
 };
 
 std::mutex    g_state_mutex;
@@ -57,14 +65,19 @@ void arm_watchdog(const spl::shared_ptr<std::vector<channel_context>>& channels)
 
 std::wstring cluster_status_command(protocol::amcp::command_context& ctx)
 {
+    // Deferred arm: channels are available now (first AMCP command after startup)
+    {
+        std::lock_guard<std::mutex> lock(g_state_mutex);
+        if (g_state.active && !g_state.watchdog_armed) {
+            arm_watchdog(ctx.channels);
+        }
+    }
+
     std::lock_guard<std::mutex> lock(g_state_mutex);
 
     if (!g_state.active) {
         return L"201 CLUSTER STATUS OK\r\nDISABLED\r\n";
     }
-
-    // Deferred arm: channels are available now
-    arm_watchdog(ctx.channels);
 
     std::wostringstream reply;
     reply << L"201 CLUSTER STATUS OK\r\n";
@@ -139,14 +152,14 @@ std::wstring cluster_status_command(protocol::amcp::command_context& ctx)
 
 std::wstring cluster_schedule_command(protocol::amcp::command_context& ctx)
 {
-    std::lock_guard<std::mutex> lock(g_state_mutex);
-
-    if (!g_state.active || !g_state.scheduler) {
-        return L"501 CLUSTER SCHEDULE FAILED\r\n";
+    // Deferred arm: channels are available now (outside state mutex for blocking ops)
+    {
+        std::lock_guard<std::mutex> lock(g_state_mutex);
+        if (!g_state.active || !g_state.scheduler) {
+            return L"501 CLUSTER SCHEDULE FAILED\r\n";
+        }
+        arm_watchdog(ctx.channels);
     }
-
-    // Deferred arm: channels are available now
-    arm_watchdog(ctx.channels);
 
     // Parameters: SCHEDULE <channel-layer> <command> AT <frame>
     // Or: SCHEDULE <channel-layer> <command>  (uses sync_margin)
@@ -259,17 +272,16 @@ void arm_watchdog(const spl::shared_ptr<std::vector<channel_context>>& channels)
 
 std::wstring cluster_track_command(protocol::amcp::command_context& ctx)
 {
-    std::lock_guard<std::mutex> lock(g_state_mutex);
-
-    if (!g_state.active) {
-        return L"501 CLUSTER TRACK FAILED\r\n";
-    }
-
-    // Arm watchdog on first use
-    arm_watchdog(ctx.channels);
-
-    if (!g_state.watchdog) {
-        return L"501 CLUSTER TRACK FAILED - NO WATCHDOG\r\n";
+    // Arm watchdog on first use (outside state mutex)
+    {
+        std::lock_guard<std::mutex> lock(g_state_mutex);
+        if (!g_state.active) {
+            return L"501 CLUSTER TRACK FAILED\r\n";
+        }
+        arm_watchdog(ctx.channels);
+        if (!g_state.watchdog) {
+            return L"501 CLUSTER TRACK FAILED - NO WATCHDOG\r\n";
+        }
     }
 
     if (ctx.parameters.empty()) {
@@ -296,7 +308,7 @@ std::wstring cluster_track_command(protocol::amcp::command_context& ctx)
         }
     }
 
-    // Whole-channel tracking
+    // Whole-channel tracking (watchdog has its own mutex)
     if (layer_index < 0) {
         g_state.watchdog->track_channel(channel_index);
         std::wostringstream reply;
@@ -325,7 +337,7 @@ std::wstring cluster_track_command(protocol::amcp::command_context& ctx)
         looping = true;
     }
 
-    // Auto-query producer for duration and loop state
+    // Auto-query producer for duration and loop state (NO mutex held — this can block)
     if (auto_query && channel_index < static_cast<int>(ctx.channels->size())) {
         try {
             auto& ch_ctx = ctx.channels->at(channel_index);
@@ -415,6 +427,12 @@ void start_cluster(const cluster_config& config,
 
     g_state.config = config;
 
+    // Store the underlying repo for scheduled command execution
+    if (command_repo) {
+        g_state.command_repo    = command_repo->repo();
+        g_state.internal_client = std::make_shared<IO::ConsoleClientInfo>();
+    }
+
     // 1. Create PTP clock
     auto ptp_mode = (config.mode == cluster_mode::master) ? ptp::clock_mode::master :
                     (config.mode == cluster_mode::external) ? ptp::clock_mode::external :
@@ -430,11 +448,37 @@ void start_cluster(const cluster_config& config,
         g_state.ptp, config.epoch_origin_ns, 50, 1);
 
     // 3. Create command scheduler with executor that parses AMCP
-    // The executor feeds commands back through the AMCP parser
-    sync::command_executor executor = [command_repo](const std::wstring& cmd) {
-        // For now, log execution. Full integration requires parser access.
-        CASPAR_LOG(debug) << L"[cluster] Execute@frame: " << cmd;
-        // TODO: Wire to amcp_command_repository::parse_and_execute()
+    // The executor feeds commands through the AMCP parser for full execution
+    sync::command_executor executor = [](const std::wstring& cmd) {
+        std::shared_ptr<protocol::amcp::amcp_command_repository> repo;
+        {
+            std::lock_guard<std::mutex> lock(g_state_mutex);
+            repo = g_state.command_repo.lock();
+        }
+        if (!repo) {
+            CASPAR_LOG(warning) << L"[cluster] Cannot execute command - repository expired: " << cmd;
+            return;
+        }
+
+        try {
+            std::list<std::wstring> tokens;
+            IO::tokenize(cmd, tokens);
+
+            auto command = repo->parse_command(
+                spl::shared_ptr<IO::client_connection<wchar_t>>(
+                    std::static_pointer_cast<IO::client_connection<wchar_t>>(g_state.internal_client)),
+                std::move(tokens), L"");
+            if (command) {
+                auto result = command->Execute(repo->channels()).get();
+                CASPAR_LOG(debug) << L"[cluster] Executed@frame: " << cmd.substr(0, 60)
+                                  << L" -> " << result.substr(0, 40);
+            } else {
+                CASPAR_LOG(warning) << L"[cluster] Failed to parse command: " << cmd;
+            }
+        } catch (const std::exception& e) {
+            CASPAR_LOG(error) << L"[cluster] Command execution error: " << e.what()
+                              << L" cmd=" << cmd.substr(0, 60);
+        }
     };
 
     g_state.scheduler = std::make_shared<sync::command_scheduler>(g_state.frame_clock, executor);
@@ -500,6 +544,40 @@ void init(const core::module_dependencies& dependencies)
     } else {
         CASPAR_LOG(info) << L"[cluster] No <cluster> block in config, module idle";
     }
+}
+
+void uninit()
+{
+    std::lock_guard<std::mutex> lock(g_state_mutex);
+    if (!g_state.active) {
+        return;
+    }
+
+    CASPAR_LOG(info) << L"[cluster] Shutting down cluster module...";
+
+    // Stop components in reverse dependency order
+    if (g_state.watchdog) {
+        g_state.watchdog->stop();
+        g_state.watchdog.reset();
+    }
+    if (g_state.scheduler) {
+        g_state.scheduler->stop();
+        g_state.scheduler.reset();
+    }
+    if (g_state.relay) {
+        g_state.relay->stop();
+        g_state.relay.reset();
+    }
+    if (g_state.ptp) {
+        g_state.ptp->stop();
+        g_state.ptp.reset();
+    }
+    g_state.frame_clock.reset();
+    g_state.channel_map.reset();
+    g_state.internal_client.reset();
+    g_state.active = false;
+
+    CASPAR_LOG(info) << L"[cluster] Shutdown complete.";
 }
 
 }} // namespace caspar::cluster
