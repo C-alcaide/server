@@ -20,7 +20,6 @@
 #include "vulkan_output_consumer.h"
 #include "config.h"
 #include "../util/vulkan_device.h"
-#include "../util/vulkan_interop.h"
 #include "../util/shared_texture_pool.h"
 #include "../util/interop_context.h"
 #include "../util/gpu_affinity_context.h"
@@ -49,10 +48,6 @@
 #include <core/video_format.h>
 
 #include <boost/algorithm/string.hpp>
-
-#include <d3d11.h>
-#include <dxgi1_2.h>
-#include <wrl/client.h>
 
 #include <chrono>
 #include <condition_variable>
@@ -326,7 +321,6 @@ class vulkan_output_consumer : public core::frame_consumer
             create_swapchain();
             set_hdr_metadata();
             create_sync_objects();
-            setup_vblank_timing();
             setup_nvapi();
             create_command_pool();
         }
@@ -735,19 +729,6 @@ class vulkan_output_consumer : public core::frame_consumer
         }
     }
 
-    void setup_vblank_timing()
-    {
-        if (display_handle_ == VK_NULL_HANDLE)
-            return;
-
-        // VK_EXT_display_control: register for VBlank events to measure drift
-        vblank_supported_ = device_->has_extension(VK_EXT_DISPLAY_CONTROL_EXTENSION_NAME);
-        if (vblank_supported_) {
-            CASPAR_LOG(info) << print() << L" VBlank timing via VK_EXT_display_control enabled.";
-            graph_->set_color("vblank-drift", diagnostics::color(0.9f, 0.5f, 0.1f));
-        }
-    }
-
     void setup_nvapi()
     {
         if (!nvapi_)
@@ -1043,7 +1024,7 @@ class vulkan_output_consumer : public core::frame_consumer
         // Acquire next swapchain image
         uint32_t image_index = 0;
         auto     result      = vkAcquireNextImageKHR(
-            dev, swapchain_.swapchain, UINT64_MAX, frame_sync.image_available, VK_NULL_HANDLE, &image_index);
+            dev, swapchain_.swapchain, 1'000'000'000ULL, frame_sync.image_available, VK_NULL_HANDLE, &image_index);
 
         if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) {
             // VK_SUBOPTIMAL means the acquire succeeded and signaled image_available.
@@ -1059,7 +1040,7 @@ class vulkan_output_consumer : public core::frame_consumer
                 return;
             // Retry acquire after recreation
             result = vkAcquireNextImageKHR(
-                dev, swapchain_.swapchain, UINT64_MAX, frame_sync.image_available, VK_NULL_HANDLE, &image_index);
+                dev, swapchain_.swapchain, 1'000'000'000ULL, frame_sync.image_available, VK_NULL_HANDLE, &image_index);
             if (result != VK_SUCCESS) {
                 // NOTE: Dropping a frame here after recreation is expected (by design).
                 // The swapchain was just recreated; one dropped frame is acceptable.
@@ -1069,6 +1050,9 @@ class vulkan_output_consumer : public core::frame_consumer
         } else if (result == VK_ERROR_SURFACE_LOST_KHR) {
             CASPAR_LOG(warning) << print() << L" Display disconnected (surface lost).";
             display_lost_ = true;
+            graph_->set_tag(diagnostics::tag_severity::WARNING, "dropped-frame");
+            return;
+        } else if (result == VK_TIMEOUT || result == VK_NOT_READY) {
             graph_->set_tag(diagnostics::tag_severity::WARNING, "dropped-frame");
             return;
         }
@@ -1266,14 +1250,6 @@ class vulkan_output_consumer : public core::frame_consumer
             } else {
                 upload_frame_cpu(frame, swapchain_.images[image_index], cmd);
             }
-        } else if (interop_ && interop_->vk_image() != VK_NULL_HANDLE) {
-            // Legacy interop path (manual handle import)
-            auto blit_region = compute_blit_region(format_desc_.width, format_desc_.height);
-
-            vkCmdBlitImage(cmd, interop_->vk_image(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                           blit_dest_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit_region,
-                           VK_FILTER_LINEAR);
-            wrote_to_intermediate = color_convert_active;
         } else {
             // CPU fallback: upload pixel data via staging buffer
             // Always targets swapchain — BGRA8 pixels are incompatible with RGBA16F intermediate
@@ -1413,128 +1389,6 @@ class vulkan_output_consumer : public core::frame_consumer
         swapchain_.advance_frame();
     }
 
-    void init_d3d11_fallback()
-    {
-        // Find the DXGI adapter that owns the target monitor.
-        // Creating the D3D11 device on this adapter avoids cross-adapter Present overhead.
-        HMONITOR target_mon = MonitorFromWindow(fse_hwnd_, MONITOR_DEFAULTTONEAREST);
-
-        Microsoft::WRL::ComPtr<IDXGIFactory2> dxgi_factory;
-        CreateDXGIFactory1(IID_PPV_ARGS(dxgi_factory.GetAddressOf()));
-        if (!dxgi_factory) {
-            CASPAR_LOG(info) << print() << L" CreateDXGIFactory1 failed. Using GDI fallback.";
-            return;
-        }
-
-        Microsoft::WRL::ComPtr<IDXGIAdapter1> target_adapter;
-        for (UINT i = 0; ; ++i) {
-            Microsoft::WRL::ComPtr<IDXGIAdapter1> adapter;
-            if (dxgi_factory->EnumAdapters1(i, &adapter) == DXGI_ERROR_NOT_FOUND)
-                break;
-            for (UINT j = 0; ; ++j) {
-                Microsoft::WRL::ComPtr<IDXGIOutput> output;
-                if (adapter->EnumOutputs(j, &output) == DXGI_ERROR_NOT_FOUND)
-                    break;
-                DXGI_OUTPUT_DESC odesc;
-                output->GetDesc(&odesc);
-                if (odesc.Monitor == target_mon) {
-                    target_adapter = adapter;
-                    break;
-                }
-            }
-            if (target_adapter)
-                break;
-        }
-
-        if (!target_adapter) {
-            // Target monitor not found in any DXGI adapter's outputs.
-            // This happens with IddCx/VDD — indirect display drivers don't expose DXGI outputs.
-            // D3D11 on the default adapter would cause cross-adapter Present stalls.
-            // Fall back to GDI which handles indirect displays natively.
-            CASPAR_LOG(info) << print()
-                             << L" Monitor not found in DXGI outputs (indirect display). Using GDI fallback.";
-            return;
-        }
-
-        D3D_FEATURE_LEVEL feature_level = D3D_FEATURE_LEVEL_11_0;
-        UINT flags = 0;
-#ifdef _DEBUG
-        flags |= D3D11_CREATE_DEVICE_DEBUG;
-#endif
-        DXGI_ADAPTER_DESC1 adesc;
-        target_adapter->GetDesc1(&adesc);
-        std::wstring adapter_name = adesc.Description;
-
-        HRESULT hr = D3D11CreateDevice(
-            target_adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, flags,
-            &feature_level, 1, D3D11_SDK_VERSION,
-            d3d_device_.ReleaseAndGetAddressOf(), nullptr,
-            d3d_context_.ReleaseAndGetAddressOf());
-        if (FAILED(hr)) {
-            CASPAR_LOG(info) << print() << L" D3D11 on adapter '" << adapter_name
-                             << L"' failed (hr=0x" << std::hex << hr << L"). Using GDI fallback.";
-            return;
-        }
-
-        // Get the factory from the device we actually created
-        Microsoft::WRL::ComPtr<IDXGIDevice> dxgi_device;
-        d3d_device_.As(&dxgi_device);
-        Microsoft::WRL::ComPtr<IDXGIAdapter> created_adapter;
-        dxgi_device->GetAdapter(created_adapter.GetAddressOf());
-        dxgi_factory.Reset();
-        created_adapter->GetParent(IID_PPV_ARGS(dxgi_factory.GetAddressOf()));
-
-        // Swap chain at source frame dimensions — DXGI_SCALING_STRETCH
-        // scales the buffer to the window size on Present.
-        DXGI_SWAP_CHAIN_DESC1 scd{};
-        scd.Width       = format_desc_.width;
-        scd.Height      = format_desc_.height;
-        scd.Format      = DXGI_FORMAT_B8G8R8A8_UNORM;
-        scd.SampleDesc  = {1, 0};
-        scd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-        scd.BufferCount = 2;
-        scd.SwapEffect  = DXGI_SWAP_EFFECT_FLIP_DISCARD;
-        scd.Scaling     = DXGI_SCALING_STRETCH;
-
-        hr = dxgi_factory->CreateSwapChainForHwnd(
-            d3d_device_.Get(), fse_hwnd_, &scd, nullptr, nullptr,
-            d3d_swapchain_.ReleaseAndGetAddressOf());
-        if (FAILED(hr)) {
-            CASPAR_LOG(info) << print() << L" DXGI swap chain creation failed (hr=0x"
-                             << std::hex << hr << L"). Using GDI fallback.";
-            d3d_device_.Reset();
-            d3d_context_.Reset();
-            return;
-        }
-
-        dxgi_factory->MakeWindowAssociation(fse_hwnd_, DXGI_MWA_NO_ALT_ENTER);
-
-        CASPAR_LOG(info) << print() << L" D3D11 fallback on adapter '" << adapter_name
-                         << L"' (" << format_desc_.width << L"x" << format_desc_.height
-                         << L" FLIP_DISCARD, STRETCH scaling).";
-    }
-
-    void present_frame_d3d11(const core::const_frame& frame)
-    {
-        const auto& img = frame.image_data(0);
-        const auto* pixels = img.data();
-        if (!pixels || img.size() == 0)
-            return;
-
-        auto src_w = static_cast<int>(frame.width());
-        auto src_h = static_cast<int>(frame.height());
-        if (src_w == 0 || src_h == 0)
-            return;
-
-        // Upload pixels directly to swap chain back buffer
-        Microsoft::WRL::ComPtr<ID3D11Texture2D> back_buffer;
-        d3d_swapchain_->GetBuffer(0, IID_PPV_ARGS(back_buffer.GetAddressOf()));
-        d3d_context_->UpdateSubresource(back_buffer.Get(), 0, nullptr,
-                                         pixels, static_cast<UINT>(src_w * 4), 0);
-
-        d3d_swapchain_->Present(1, 0); // vsync — adapter-local, no cross-adapter stall
-    }
-
     void present_frame_gdi(const core::const_frame& frame)
     {
         // GDI fallback for indirect displays (IddCx/VDD) that don't expose DXGI outputs.
@@ -1543,9 +1397,6 @@ class vulkan_output_consumer : public core::frame_consumer
         // while still providing visual feedback for rehearsal/preview.
         ++gdi_frame_counter_;
         if (gdi_frame_counter_ % 2 != 0) {
-            // Skip this frame — sleep to maintain pacing
-            std::this_thread::sleep_for(std::chrono::microseconds(
-                static_cast<int64_t>(1000000.0 / format_desc_.fps)));
             return;
         }
 
@@ -1584,10 +1435,6 @@ class vulkan_output_consumer : public core::frame_consumer
                           DIB_RGB_COLORS, SRCCOPY);
             ReleaseDC(fse_hwnd_, hdc);
         }
-
-        // Pace at frame rate — GDI has no vsync
-        std::this_thread::sleep_for(std::chrono::microseconds(
-            static_cast<int64_t>(1000000.0 / format_desc_.fps)));
     }
 
     void upload_frame_cpu(const core::const_frame& frame, VkImage dst_image, VkCommandBuffer cmd)
@@ -2005,11 +1852,6 @@ class vulkan_output_consumer : public core::frame_consumer
                     vkFreeMemory(dev, staging_memory_, nullptr);
                 }
 
-                if (vblank_fence_ != VK_NULL_HANDLE) {
-                    vkDestroyFence(dev, vblank_fence_, nullptr);
-                    vblank_fence_ = VK_NULL_HANDLE;
-                }
-
                 for (auto& iv : swapchain_.image_views)
                     vkDestroyImageView(dev, iv, nullptr);
 
@@ -2040,7 +1882,6 @@ class vulkan_output_consumer : public core::frame_consumer
 #endif
                 interop_ctx_.reset();
                 affinity_ctx_.reset();
-                interop_.reset();
                 shared_pool_.reset();
                 device_.reset();
             } else {
@@ -2053,7 +1894,6 @@ class vulkan_output_consumer : public core::frame_consumer
 #endif
                 interop_ctx_.release();
                 affinity_ctx_.release();
-                interop_.release();
                 shared_pool_.release();
                 device_.release();
             }
@@ -2065,11 +1905,6 @@ class vulkan_output_consumer : public core::frame_consumer
             injected_edid_display_id_ = 0;
         }
         nvapi_.reset();
-
-        // Release D3D11 fallback resources before destroying the window
-        d3d_swapchain_.Reset();
-        d3d_context_.Reset();
-        d3d_device_.Reset();
 
         if (fse_hwnd_) {
             // Signal message thread to stop, then post WM_NULL to wake MsgWait.
@@ -2096,7 +1931,6 @@ class vulkan_output_consumer : public core::frame_consumer
 
     std::shared_ptr<accelerator::ogl::device> ogl_device_;
     std::unique_ptr<vulkan_device>   device_;
-    std::unique_ptr<vulkan_interop>  interop_;
     std::unique_ptr<shared_texture_pool> shared_pool_;
     std::unique_ptr<interop_context> interop_ctx_;     // Dedicated GL context for blit (scalability)
     std::unique_ptr<gpu_affinity_context> affinity_ctx_; // For cross-GPU interop
@@ -2137,10 +1971,6 @@ class vulkan_output_consumer : public core::frame_consumer
 
     // Timing
     caspar::timer                    tick_timer_;
-    bool                             vblank_supported_ = false;
-    VkFence                          vblank_fence_     = VK_NULL_HANDLE;
-
-
 
     // FPS counter
     std::chrono::steady_clock::time_point fps_update_time_ = std::chrono::steady_clock::now();
@@ -2153,11 +1983,6 @@ class vulkan_output_consumer : public core::frame_consumer
 
     // EDID emulation state
     uint32_t                         injected_edid_display_id_ = 0;
-
-    // D3D11 fallback (replaces GDI StretchDIBits for cross-adapter outputs)
-    Microsoft::WRL::ComPtr<ID3D11Device>        d3d_device_;
-    Microsoft::WRL::ComPtr<ID3D11DeviceContext>  d3d_context_;
-    Microsoft::WRL::ComPtr<IDXGISwapChain1>      d3d_swapchain_;
 
     // GDI fallback frame throttle (reduces win32k.sys lock contention)
     uint64_t                         gdi_frame_counter_ = 0;

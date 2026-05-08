@@ -382,22 +382,22 @@ void shared_texture_pool::signal_gl()
 
 VkSemaphore shared_texture_pool::wait_semaphore_vk() const
 {
-    return slots_[read_index_].vk_semaphore;
+    return slots_[read_index_.load(std::memory_order_acquire)].vk_semaphore;
 }
 
 VkImage shared_texture_pool::current_vk_image() const
 {
-    return slots_[read_index_].vk_image;
+    return slots_[read_index_.load(std::memory_order_acquire)].vk_image;
 }
 
 VkImageView shared_texture_pool::current_vk_image_view() const
 {
-    return slots_[read_index_].vk_image_view;
+    return slots_[read_index_.load(std::memory_order_acquire)].vk_image_view;
 }
 
 void shared_texture_pool::swap()
 {
-    read_index_  = write_index_;
+    read_index_.store(write_index_, std::memory_order_release);
     write_index_ = (write_index_ + 1) % BUFFER_COUNT;
 }
 

@@ -24,6 +24,7 @@
 
 #include <GL/glew.h>
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 
@@ -118,7 +119,7 @@ class shared_texture_pool
     static constexpr int BUFFER_COUNT = 3;
     slot                 slots_[BUFFER_COUNT];
     int                  write_index_ = 0;
-    int                  read_index_  = 0;
+    std::atomic<int>     read_index_{0};
 
     // FBO pair for format-converting blit (used when use_16bit_ is true)
     GLuint               read_fbo_  = 0;
