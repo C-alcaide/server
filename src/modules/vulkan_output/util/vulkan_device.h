@@ -22,6 +22,7 @@
 #define VK_USE_PLATFORM_WIN32_KHR
 #include <vulkan/vulkan.h>
 
+#include <atomic>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -64,10 +65,19 @@ class vulkan_device
     VkPhysicalDevice physical_device() const { return physical_device_; }
     VkDevice         device() const { return device_; }
     uint32_t         present_queue_family() const { return present_queue_family_; }
-    VkQueue          present_queue() const { return present_queue_; }
-    std::mutex&      queue_mutex() { return queue_mutex_; }
     gpu_tier         tier() const { return tier_; }
     int              gpu_index() const { return gpu_index_; }
+
+    // Multi-queue API: each consumer acquires an exclusive queue index.
+    // If more consumers than queues (unlikely: NVIDIA exposes 16), indices wrap
+    // and consumers sharing a queue must serialize submissions externally.
+    uint32_t         acquire_queue();
+    VkQueue          queue(uint32_t idx) const { return queues_[idx % queue_count_]; }
+    uint32_t         queue_count() const { return queue_count_; }
+
+    // Backward compat (used by frame_cache coordinator and single-consumer setups)
+    VkQueue          present_queue() const { return queues_.empty() ? VK_NULL_HANDLE : queues_[0]; }
+    std::mutex&      queue_mutex() { return legacy_queue_mutex_; }
 
     // Device LUID for cross-API GPU matching (OGL ↔ VK)
     const uint8_t*   device_luid() const { return device_luid_; }
@@ -100,14 +110,16 @@ class vulkan_device
     VkPhysicalDevice         physical_device_      = VK_NULL_HANDLE;
     VkDevice                 device_               = VK_NULL_HANDLE;
     uint32_t                 present_queue_family_ = 0;
-    VkQueue                  present_queue_        = VK_NULL_HANDLE;
+    std::vector<VkQueue>     queues_;
+    uint32_t                 queue_count_          = 0;
+    std::atomic<uint32_t>    next_queue_index_{0};
     gpu_tier                 tier_                 = gpu_tier::none;
     int                      gpu_index_            = 0;
     uint8_t                  device_luid_[8]       = {};
     bool                     device_luid_valid_    = false;
     VkDebugUtilsMessengerEXT debug_messenger_      = VK_NULL_HANDLE;
     std::vector<std::string> enabled_extensions_;
-    std::mutex               queue_mutex_;
+    std::mutex               legacy_queue_mutex_; // For backward compat only
 };
 
 }} // namespace caspar::vulkan_output

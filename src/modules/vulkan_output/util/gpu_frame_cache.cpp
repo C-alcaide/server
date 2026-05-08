@@ -29,6 +29,7 @@
 
 #include <accelerator/ogl/util/device.h>
 
+#include <common/except.h>
 #include <common/log.h>
 
 #include <GL/glew.h>
@@ -87,6 +88,23 @@ gpu_frame_cache::gpu_frame_cache(
     : gpu_index_(gpu_index)
     , device_(std::move(device))
 {
+    // Acquire a dedicated queue for coordinator submits (binary → timeline bridge)
+    coord_queue_idx_ = device_->acquire_queue();
+
+    // Create timeline semaphore (Vulkan 1.2+ core feature)
+    VkSemaphoreTypeCreateInfo type_info{};
+    type_info.sType         = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
+    type_info.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+    type_info.initialValue  = 0;
+
+    VkSemaphoreCreateInfo sem_info{};
+    sem_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+    sem_info.pNext = &type_info;
+
+    if (vkCreateSemaphore(device_->device(), &sem_info, nullptr, &timeline_sem_) != VK_SUCCESS) {
+        CASPAR_THROW_EXCEPTION(caspar_exception() << msg_info("Failed to create timeline semaphore"));
+    }
+
     // Check GPU match: OGL mixer vs Vulkan output
     bool gpu_match = true;
     if (device_->device_luid_valid() && ogl_device) {
@@ -118,6 +136,10 @@ gpu_frame_cache::gpu_frame_cache(
     } else {
         init_cross_gpu(ogl_device, width, height, use_16bit);
     }
+
+    // Start pump thread (handles same-GPU transfers in the background)
+    pump_running_ = true;
+    pump_thread_ = std::thread([this] { pump_loop(); });
 }
 
 void gpu_frame_cache::init_same_gpu(
@@ -186,7 +208,20 @@ void gpu_frame_cache::init_cross_gpu(
                      << (use_16bit ? L" 16-bit" : L" 8-bit");
 }
 
-gpu_frame_cache::~gpu_frame_cache() = default;
+gpu_frame_cache::~gpu_frame_cache()
+{
+    // Stop pump thread
+    pump_running_ = false;
+    pump_cv_.notify_one();
+    if (pump_thread_.joinable())
+        pump_thread_.join();
+
+    // Wait for coordinator queue to drain
+    if (device_ && timeline_sem_ != VK_NULL_HANDLE) {
+        vkQueueWaitIdle(device_->queue(coord_queue_idx_));
+        vkDestroySemaphore(device_->device(), timeline_sem_, nullptr);
+    }
+}
 
 uint64_t gpu_frame_cache::submit_frame(uint64_t generation, const std::function<void()>& transfer_fn)
 {
@@ -207,27 +242,105 @@ uint64_t gpu_frame_cache::submit_frame(uint64_t generation, const std::function<
 
     // This consumer wins — perform the transfer
     transfer_in_progress_ = true;
-    semaphore_consumed_.store(false, std::memory_order_release); // Reset for new generation
     lock.unlock();
 
     transfer_fn();
 
+    // Coordinator submit: bridge binary GL→VK semaphore to timeline
+    do_coordinator_submit(generation);
+
     lock.lock();
     current_generation_   = generation;
     transfer_in_progress_ = false;
+    timeline_value_.store(generation, std::memory_order_release);
     frame_cv_.notify_all();
 
-    return current_generation_;
+    return generation;
+}
+
+uint64_t gpu_frame_cache::notify_frame(uint64_t generation, std::function<void()> transfer_fn)
+{
+    std::lock_guard<std::mutex> lock(pump_mutex_);
+    pump_queue_.push({generation, std::move(transfer_fn)});
+    pump_cv_.notify_one();
+    return generation;
+}
+
+void gpu_frame_cache::pump_loop()
+{
+    SetThreadDescription(GetCurrentThread(), L"VK Frame Pump");
+
+    while (pump_running_) {
+        pump_work work{};
+        {
+            std::unique_lock<std::mutex> lock(pump_mutex_);
+            pump_cv_.wait(lock, [this] { return !pump_queue_.empty() || !pump_running_; });
+            if (!pump_running_)
+                break;
+
+            // Drain queue and keep only the latest work (skip stale frames)
+            while (!pump_queue_.empty()) {
+                work = std::move(pump_queue_.front());
+                pump_queue_.pop();
+            }
+        }
+
+        // Skip if already processed (duplicate notification from multiple consumers)
+        if (work.generation <= current_generation_)
+            continue;
+
+        // Execute the transfer (blit + signal_gl + swap on the interop/affinity thread)
+        work.transfer_fn();
+
+        // Coordinator submit: bridge binary semaphore → timeline
+        do_coordinator_submit(work.generation);
+
+        // Update generation (thread-safe: pump is the sole writer for same-GPU path)
+        current_generation_ = work.generation;
+        timeline_value_.store(work.generation, std::memory_order_release);
+    }
+}
+
+void gpu_frame_cache::do_coordinator_submit(uint64_t generation)
+{
+    if (!pool_ || timeline_sem_ == VK_NULL_HANDLE)
+        return;
+
+    VkSemaphore wait_sem = pool_->wait_semaphore_vk();
+    if (wait_sem == VK_NULL_HANDLE)
+        return;
+
+    VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+
+    // Timeline semaphore submit info: values array must match semaphore arrays.
+    // Binary semaphore wait value is ignored (set to 0).
+    // Timeline semaphore signal value = frame generation.
+    uint64_t wait_value   = 0;          // Binary semaphore — value ignored
+    uint64_t signal_value = generation;  // Timeline signal = frame generation
+
+    VkTimelineSemaphoreSubmitInfo timeline_info{};
+    timeline_info.sType                     = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+    timeline_info.waitSemaphoreValueCount   = 1;
+    timeline_info.pWaitSemaphoreValues      = &wait_value;
+    timeline_info.signalSemaphoreValueCount = 1;
+    timeline_info.pSignalSemaphoreValues    = &signal_value;
+
+    VkSubmitInfo submit_info{};
+    submit_info.sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submit_info.pNext                = &timeline_info;
+    submit_info.waitSemaphoreCount   = 1;
+    submit_info.pWaitSemaphores      = &wait_sem;
+    submit_info.pWaitDstStageMask    = &wait_stage;
+    submit_info.commandBufferCount   = 0;
+    submit_info.signalSemaphoreCount = 1;
+    submit_info.pSignalSemaphores    = &timeline_sem_;
+
+    vkQueueSubmit(device_->queue(coord_queue_idx_), 1, &submit_info, VK_NULL_HANDLE);
 }
 
 void gpu_frame_cache::frame_done()
 {
     // Placeholder for future read-tracking if needed
-}
-
-bool gpu_frame_cache::try_consume_semaphore()
-{
-    return !semaphore_consumed_.exchange(true, std::memory_order_acq_rel);
 }
 
 void gpu_frame_cache::add_consumer()

@@ -149,19 +149,16 @@ class vulkan_output_consumer : public core::frame_consumer
             if (ogl_tex) {
                 auto* cache = frame_cache_.get();
                 ++frame_generation_;
-                cache->submit_frame(frame_generation_, [cache, ogl_tex, ogl_dev = ogl_device_] {
+                cache->notify_frame(frame_generation_, [cache, ogl_tex, ogl_dev = ogl_device_] {
                     auto* pool = cache->pool();
                     auto* ictx = cache->interop_ctx();
                     if (ictx) {
-                        // dispatch_sync: must block until blit+signal+swap complete
-                        // so other consumers see the updated pool state.
                         ictx->dispatch_sync([pool, ogl_tex] {
                             pool->blit_from_texture(ogl_tex->id(), ogl_tex->width(), ogl_tex->height());
                             pool->signal_gl();
                             pool->swap();
                         });
                     } else if (ogl_dev) {
-                        // No interop context — use OGL device thread
                         ogl_dev->dispatch_sync([pool, ogl_tex] {
                             pool->blit_from_texture(ogl_tex->id(), ogl_tex->width(), ogl_tex->height());
                             pool->signal_gl();
@@ -259,6 +256,11 @@ class vulkan_output_consumer : public core::frame_consumer
     void init_vulkan()
     {
         device_ = vk_device_manager::get(config_.gpu_index);
+
+        // Acquire a dedicated queue for this consumer's submit/present operations.
+        // Each consumer gets its own queue so submissions are fully parallel.
+        my_queue_idx_ = device_->acquire_queue();
+        my_queue_     = device_->queue(my_queue_idx_);
 
         // Find our target display using the main device's instance (not a temporary one)
         // to ensure the VkDisplayKHR handles are valid for our device's lifetime
@@ -796,11 +798,9 @@ class vulkan_output_consumer : public core::frame_consumer
         if (device_dead_)
             return;
 
-        VkResult wait_result;
-        {
-            std::lock_guard<std::mutex> qlock(device_->queue_mutex());
-            wait_result = vkDeviceWaitIdle(device_->device());
-        }
+        // Wait only for this consumer's queue to drain (not the entire device).
+        // Other consumers on the same VkDevice continue submitting unblocked.
+        VkResult wait_result = vkQueueWaitIdle(my_queue_);
         if (wait_result == VK_ERROR_DEVICE_LOST) {
             CASPAR_LOG(error) << print() << L" Device lost during swapchain recreation. Output permanently halted.";
             display_lost_ = true;
@@ -1184,14 +1184,27 @@ class vulkan_output_consumer : public core::frame_consumer
             return;
         }
 
-        // Submit — wait on shared pool semaphore too if zero-copy was used
+        // Submit — wait on timeline semaphore if zero-copy was used (replaces binary semaphore)
         VkSemaphore          wait_semaphores[2] = {frame_sync.image_available, VK_NULL_HANDLE};
         VkPipelineStageFlags wait_stages[2]     = {VK_PIPELINE_STAGE_TRANSFER_BIT,
                                                    VK_PIPELINE_STAGE_TRANSFER_BIT};
         uint32_t             wait_count         = 1;
 
+        // Timeline semaphore values array (must match wait_semaphores count).
+        // Binary semaphores use value 0 (ignored). Timeline uses the frame generation.
+        uint64_t             wait_values[2]     = {0, 0};
+
+        VkTimelineSemaphoreSubmitInfo timeline_submit{};
+        timeline_submit.sType                     = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+        timeline_submit.waitSemaphoreValueCount   = 2;
+        timeline_submit.pWaitSemaphoreValues      = wait_values;
+        timeline_submit.signalSemaphoreValueCount = 1;
+        uint64_t signal_value                     = 0; // render_finished is binary
+        timeline_submit.pSignalSemaphoreValues    = &signal_value;
+
         VkSubmitInfo submit_info{};
         submit_info.sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submit_info.pNext                = &timeline_submit;
         submit_info.waitSemaphoreCount   = wait_count;
         submit_info.pWaitSemaphores      = wait_semaphores;
         submit_info.pWaitDstStageMask    = wait_stages;
@@ -1200,43 +1213,39 @@ class vulkan_output_consumer : public core::frame_consumer
         submit_info.signalSemaphoreCount = 1;
         submit_info.pSignalSemaphores    = &frame_sync.render_finished;
 
+        // Add timeline semaphore wait if shared pool was used.
+        // The coordinator submit (in frame_cache) bridges the binary GL→VK semaphore
+        // to the timeline, so ALL consumers can independently wait on the same value.
+        if (used_shared_pool && frame_cache_ && frame_cache_->timeline_semaphore() != VK_NULL_HANDLE) {
+            wait_semaphores[1] = frame_cache_->timeline_semaphore();
+            wait_values[1]     = frame_generation_;  // Wait for our frame's transfer to complete
+            wait_count         = 2;
+            submit_info.waitSemaphoreCount        = wait_count;
+            timeline_submit.waitSemaphoreValueCount = wait_count;
+        }
+
         VkResult submit_result;
         VkResult present_result;
-        {
-            // Lock queue mutex — VkQueue is shared across consumers on the same VkDevice
-            std::lock_guard<std::mutex> qlock(device_->queue_mutex());
 
-            // Only the first consumer per frame waits on the GL→VK binary semaphore.
-            // Subsequent consumers benefit from in-order queue execution on the
-            // shared VkQueue — their commands execute after the first wait completes.
-            // This MUST be inside the queue lock so the semaphore consumer submits first.
-            if (used_shared_pool && frame_cache_ && frame_cache_->pool()) {
-                if (frame_cache_->try_consume_semaphore()) {
-                    wait_semaphores[1] = frame_cache_->pool()->wait_semaphore_vk();
-                    wait_count         = 2;
-                }
-            }
-            submit_info.waitSemaphoreCount = wait_count;
-
-            submit_result = vkQueueSubmit(device_->present_queue(), 1, &submit_info, frame_sync.in_flight);
-            if (submit_result == VK_ERROR_DEVICE_LOST) {
-                CASPAR_LOG(error) << print() << L" GPU device lost (TDR) during submit. Output halted.";
-                display_lost_ = true;
-                device_dead_  = true;
-                return;
-            }
-
-            // Present
-            VkPresentInfoKHR present_info{};
-            present_info.sType              = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
-            present_info.waitSemaphoreCount = 1;
-            present_info.pWaitSemaphores    = &frame_sync.render_finished;
-            present_info.swapchainCount     = 1;
-            present_info.pSwapchains        = &swapchain_.swapchain;
-            present_info.pImageIndices      = &image_index;
-
-            present_result = vkQueuePresentKHR(device_->present_queue(), &present_info);
+        // No queue mutex needed — each consumer has an exclusive queue.
+        submit_result = vkQueueSubmit(my_queue_, 1, &submit_info, frame_sync.in_flight);
+        if (submit_result == VK_ERROR_DEVICE_LOST) {
+            CASPAR_LOG(error) << print() << L" GPU device lost (TDR) during submit. Output halted.";
+            display_lost_ = true;
+            device_dead_  = true;
+            return;
         }
+
+        // Present
+        VkPresentInfoKHR present_info{};
+        present_info.sType              = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+        present_info.waitSemaphoreCount = 1;
+        present_info.pWaitSemaphores    = &frame_sync.render_finished;
+        present_info.swapchainCount     = 1;
+        present_info.pSwapchains        = &swapchain_.swapchain;
+        present_info.pImageIndices      = &image_index;
+
+        present_result = vkQueuePresentKHR(my_queue_, &present_info);
 
         if (present_result == VK_ERROR_OUT_OF_DATE_KHR || present_result == VK_SUBOPTIMAL_KHR) {
             recreate_swapchain();
@@ -1696,19 +1705,16 @@ class vulkan_output_consumer : public core::frame_consumer
             auto dev = device_->device();
 
             // Wait for GPU to finish with a hard timeout to prevent unkillable process.
-            // NVIDIA driver can hang indefinitely in vkDeviceWaitIdle/vkWaitForFences
-            // when display timing is disrupted (disconnected, TDR, or GL contention deadlock).
-            // If timeout fires, skip ALL Vulkan resource destruction — any vkDestroy* call
-            // can also hang on the same stuck GPU operation. Let the OS clean up on exit.
+            // NVIDIA driver can hang indefinitely in vkQueueWaitIdle when display timing
+            // is disrupted (disconnected, TDR, or GL contention deadlock).
+            // If timeout fires, skip ALL Vulkan resource destruction.
             bool gpu_stuck = device_dead_.load();
             if (!gpu_stuck) {
-                auto& qmutex = device_->queue_mutex();
-                auto idle_future = std::async(std::launch::async, [dev, &qmutex] {
-                    std::lock_guard<std::mutex> qlock(qmutex);
-                    return vkDeviceWaitIdle(dev);
+                auto idle_future = std::async(std::launch::async, [this] {
+                    return vkQueueWaitIdle(my_queue_);
                 });
                 if (idle_future.wait_for(std::chrono::seconds(2)) == std::future_status::timeout) {
-                    CASPAR_LOG(warning) << print() << L" vkDeviceWaitIdle timed out (2s) — skipping Vulkan cleanup.";
+                    CASPAR_LOG(warning) << print() << L" vkQueueWaitIdle timed out (2s) — skipping Vulkan cleanup.";
                     gpu_stuck = true;
                 } else {
                     idle_future.get(); // Collect result (ignore errors during shutdown)
@@ -1798,6 +1804,8 @@ class vulkan_output_consumer : public core::frame_consumer
     swapchain_resources              swapchain_{};
     HWND                             fse_hwnd_ = nullptr;
     VkDisplayKHR                     display_handle_ = VK_NULL_HANDLE;
+    uint32_t                         my_queue_idx_ = 0; // Exclusive queue for this consumer
+    VkQueue                          my_queue_ = VK_NULL_HANDLE;
 
     // Frame buffer
     std::queue<core::const_frame>    buffer_;

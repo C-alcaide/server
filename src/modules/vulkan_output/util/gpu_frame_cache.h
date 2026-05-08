@@ -26,6 +26,11 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <queue>
+#include <thread>
+
+#define VK_USE_PLATFORM_WIN32_KHR
+#include <vulkan/vulkan.h>
 
 namespace caspar { namespace accelerator { namespace ogl {
 class device;
@@ -95,17 +100,26 @@ class gpu_frame_cache
     // Submit a frame for transfer.  The first consumer to call this for a given
     // frame generation performs the actual OGL→VK blit (or cross-GPU transfer).
     // Subsequent callers for the same generation return immediately.
-    // Returns the generation number of the transferred frame.
+    // After transfer, issues a coordinator submit that bridges the GL→VK binary
+    // semaphore to the timeline semaphore.
+    // Returns the timeline value that will be signaled when the frame is ready.
     uint64_t submit_frame(uint64_t generation, const std::function<void()>& transfer_fn);
 
-    // Consume the GL→VK semaphore for the current frame.  Returns true for
-    // the first caller per generation (who must add the semaphore to their
-    // vkQueueSubmit wait list).  Subsequent callers return false — in-order
-    // queue execution on the shared VkQueue guarantees they see the completed
-    // blit without an explicit wait.
-    // MUST be called under device_->queue_mutex() to ensure the consumer that
-    // consumes the semaphore also submits first.
-    bool try_consume_semaphore();
+    // Non-blocking: posts transfer work to the pump thread.
+    // The pump executes the transfer in the background and signals the timeline
+    // semaphore.  Use for same-GPU transfers from send() where the present
+    // thread should not block on the blit.
+    // Returns the timeline value that will be signaled when complete.
+    uint64_t notify_frame(uint64_t generation, std::function<void()> transfer_fn);
+
+    // Timeline semaphore for multi-queue synchronization.
+    // Consumers add this to their vkQueueSubmit wait list (with the value returned
+    // by submit_frame/notify_frame) to ensure the shared pool data is visible.
+    VkSemaphore timeline_semaphore() const { return timeline_sem_; }
+
+    // Current signaled timeline value.  If a consumer's pending value <= this,
+    // the GPU-side wait will complete immediately (no stall).
+    uint64_t current_timeline_value() const { return timeline_value_.load(std::memory_order_acquire); }
 
     // Signal that one consumer has finished reading the current frame.
     void frame_done();
@@ -140,12 +154,33 @@ class gpu_frame_cache
 #endif
     bool                                     cross_gpu_ = false;
 
-    // Frame generation tracking
+    // Frame generation tracking (first-caller-wins for blocking submit_frame)
     std::mutex              frame_mutex_;
     std::condition_variable frame_cv_;
     uint64_t                current_generation_ = 0;
     bool                    transfer_in_progress_ = false;
-    std::atomic<bool>       semaphore_consumed_{false};
+
+    // Timeline semaphore: bridges binary GL→VK semaphore to multi-queue timeline.
+    // After each transfer, a coordinator submit waits on the binary semaphore
+    // and signals the timeline with the frame generation value.
+    VkSemaphore             timeline_sem_ = VK_NULL_HANDLE;
+    std::atomic<uint64_t>   timeline_value_{0};
+    uint32_t                coord_queue_idx_ = 0;
+
+    // Producer pump thread (same-GPU path: transfer runs in background)
+    struct pump_work
+    {
+        uint64_t                generation;
+        std::function<void()>   transfer_fn;
+    };
+    std::thread             pump_thread_;
+    std::mutex              pump_mutex_;
+    std::condition_variable pump_cv_;
+    std::queue<pump_work>   pump_queue_;
+    std::atomic<bool>       pump_running_{false};
+
+    void pump_loop();
+    void do_coordinator_submit(uint64_t generation);
 
     // Consumer tracking
     std::atomic<int>        consumer_count_{0};

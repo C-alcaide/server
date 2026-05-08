@@ -261,12 +261,16 @@ void vulkan_device::create_logical_device()
     if (present_queue_family_ == UINT32_MAX)
         CASPAR_THROW_EXCEPTION(caspar_exception() << msg_info("No graphics queue family found"));
 
-    float                   queue_priority = 1.0f;
+    // Request all available queues from the family (NVIDIA GPUs typically expose 16).
+    // Each consumer gets an exclusive queue for parallel submission.
+    queue_count_ = (std::min)(queue_families[present_queue_family_].queueCount, 16u);
+    std::vector<float> queue_priorities(queue_count_, 1.0f);
+
     VkDeviceQueueCreateInfo queue_info{};
     queue_info.sType            = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
     queue_info.queueFamilyIndex = present_queue_family_;
-    queue_info.queueCount       = 1;
-    queue_info.pQueuePriorities = &queue_priority;
+    queue_info.queueCount       = queue_count_;
+    queue_info.pQueuePriorities = queue_priorities.data();
 
     // Request high GPU scheduling priority so Vulkan present work preempts
     // other GPU clients (e.g. OpenGL screen consumer, DWM compositor).
@@ -341,8 +345,14 @@ void vulkan_device::create_logical_device()
 
         VkPhysicalDeviceFeatures features{};
 
+        // Enable timeline semaphores (core in Vulkan 1.2+, required for multi-queue coordination)
+        VkPhysicalDeviceVulkan12Features features12{};
+        features12.sType            = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+        features12.timelineSemaphore = VK_TRUE;
+
         VkDeviceCreateInfo device_info{};
         device_info.sType                   = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+        device_info.pNext                   = &features12;
         device_info.queueCreateInfoCount    = 1;
         device_info.pQueueCreateInfos       = &queue_info;
         device_info.enabledExtensionCount   = static_cast<uint32_t>(device_extensions.size());
@@ -380,7 +390,18 @@ void vulkan_device::create_logical_device()
         }
     }
 
-    vkGetDeviceQueue(device_, present_queue_family_, 0, &present_queue_);
+    queues_.resize(queue_count_);
+    for (uint32_t i = 0; i < queue_count_; ++i)
+        vkGetDeviceQueue(device_, present_queue_family_, i, &queues_[i]);
+
+    CASPAR_LOG(info) << L"[vulkan] Device created with " << queue_count_
+                     << L" queues (family " << present_queue_family_ << L")";
+}
+
+uint32_t vulkan_device::acquire_queue()
+{
+    uint32_t idx = next_queue_index_.fetch_add(1, std::memory_order_relaxed);
+    return idx % queue_count_;
 }
 
 VkSurfaceKHR vulkan_device::create_display_surface(const display_info& info, uint32_t target_refresh_mhz)
