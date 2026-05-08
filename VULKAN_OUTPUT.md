@@ -24,7 +24,7 @@ Low-latency, direct-to-display GPU output consumer for CasparCG. Bypasses the de
 
 ## Architecture Overview
 
-The module is organized into eight layers:
+The module is organized into ten layers:
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
@@ -34,6 +34,17 @@ The module is organized into eight layers:
 │   ├── Swapchain management + hot-plug recovery               │
 │   └── Identify overlay                                       │
 ├──────────────────────────────────────────────────────────────┤
+│ vk_device_manager               (Shared VkDevice registry)   │
+│   ├── Singleton: one VkDevice per physical GPU               │
+│   ├── Thread-safe weak_ptr registry with auto-cleanup        │
+│   └── Multiple consumers on the same GPU share one device    │
+├──────────────────────────────────────────────────────────────┤
+│ gpu_frame_cache                 (Per-GPU transfer cache)     │
+│   ├── One OGL→VK transfer per GPU per frame (deduplication) │
+│   ├── First-caller-wins coordination (mutex + condvar)       │
+│   ├── Binary semaphore tracking (one wait per frame)         │
+│   └── Owns interop_context, shared_texture_pool, affinity   │
+├──────────────────────────────────────────────────────────────┤
 │ color_convert_pipeline          (Vulkan compute shader)      │
 │   ├── BT.709 sRGB → target gamut + OETF conversion          │
 │   ├── RGBA16F intermediate image (zero-banding precision)    │
@@ -42,7 +53,8 @@ The module is organized into eight layers:
 │ vulkan_device                   (VkInstance + VkDevice RAII)  │
 │   ├── GPU enumeration + tier detection + LUID query          │
 │   ├── VK_KHR_display (Pro) / Win32 surface (Consumer)        │
-│   └── VBlank fence via VK_EXT_display_control                │
+│   ├── VBlank fence via VK_EXT_display_control                │
+│   └── queue_mutex for thread-safe queue submission           │
 ├──────────────────────────────────────────────────────────────┤
 │ interop_context                 (Dedicated GL blit thread)    │
 │   ├── Shared WGL context (shares textures with OGL device)   │
@@ -79,7 +91,10 @@ The module is organized into eight layers:
 CasparCG Mixer (OGL, GPU A)
    │
    ├─ Same-GPU zero-copy path (preferred):
-   │   send() ──dispatch_async──▸ interop_context (dedicated GL thread)
+   │   send() ──dispatch_sync──▸ gpu_frame_cache::submit_frame()
+   │                                │  (first caller wins — deduplicates per GPU)
+   │                                │
+   │              interop_context (dedicated GL thread)
    │                                │
    │              OGL texture ──blit──▸ shared_texture_pool (GL_EXT_memory_object)
    │                                     │  signal_gl() + swap()
@@ -90,6 +105,7 @@ CasparCG Mixer (OGL, GPU A)
    │              [present thread]  vkCmdBlitImage ──▸ swapchain image
    │
    ├─ Cross-GPU CUDA peer DMA path (fastest cross-GPU):
+   │   gpu_frame_cache::submit_frame() (first caller wins)
    │   OGL texture ──cudaGraphicsGLRegisterImage──▸ CUDA array (GPU A)
    │                                                 │
    │                          cudaMemcpy2DFromArray ──▸ staging buffer (GPU A)
@@ -105,6 +121,7 @@ CasparCG Mixer (OGL, GPU A)
    │                                                     VkImage ──▸ swapchain image
    │
    ├─ Cross-GPU PBO fallback path (no CUDA required):
+   │   gpu_frame_cache::submit_frame() (first caller wins)
    │   frame.image_data() ──PBO upload──▸ texture (GPU B, affinity context)
    │                                        │
    │                          glCopyImageSubData ──▸ shared_texture_pool
@@ -116,10 +133,20 @@ CasparCG Mixer (OGL, GPU A)
    │                                     │
    │                              vkCmdCopyBufferToImage ──▸ swapchain image
    │
-   └──▸ vkQueuePresentKHR ──▸ Display
+   └──▸ vkQueuePresentKHR (under queue_mutex) ──▸ Display
 ```
 
-**Same-GPU zero-copy** eliminates all CPU-side pixel copies. The OGL mixer output is blitted into a shared texture backed by exportable GPU memory (`GL_EXT_memory_object`), which is imported into Vulkan as a `VkImage` via a Win32 `HANDLE`. The blit runs on a dedicated `interop_context` GL thread via `dispatch_async()`, so the mixer's OGL device thread is never blocked — the mixer and blit run fully in parallel. Synchronization between the OpenGL and Vulkan timelines uses paired `GL_EXT_semaphore` / `VkSemaphore` objects.
+#### Shared VkDevice and Frame Cache
+
+When multiple consumers target the same GPU (e.g., a 4-output video wall on one GPU), the `vk_device_manager` singleton ensures they all share a single `VkDevice`. This is required for `VK_NV_present_barrier` (which frame-locks swapchains within a device) and avoids the overhead of redundant Vulkan device creation.
+
+The `gpu_frame_cache` deduplicates the OGL→VK frame transfer: the first consumer to call `submit_frame()` for a given frame generation performs the actual blit/transfer, while all other consumers on the same GPU block on a condition variable and receive the result. This means a 4-output setup does one GL blit per frame, not four.
+
+The GL→VK binary semaphore is also tracked per-frame: `try_consume_semaphore()` uses an atomic exchange so only the first consumer's `vkQueueSubmit` waits on the interop semaphore. Subsequent consumers skip the wait, avoiding a binary semaphore double-wait violation.
+
+All `vkQueueSubmit` and `vkQueuePresentKHR` calls are serialized through `vulkan_device::queue_mutex()`, satisfying Vulkan's external synchronization requirement on queue objects.
+
+**Same-GPU zero-copy** eliminates all CPU-side pixel copies. The OGL mixer output is blitted into a shared texture backed by exportable GPU memory (`GL_EXT_memory_object`), which is imported into Vulkan as a `VkImage` via a Win32 `HANDLE`. The blit runs on a dedicated `interop_context` GL thread via `dispatch_sync()`, so the transfer completes before `submit_frame()` returns. Synchronization between the OpenGL and Vulkan timelines uses paired `GL_EXT_semaphore` / `VkSemaphore` objects.
 
 **Cross-GPU CUDA peer DMA** uses the GPU's DMA copy engines to transfer pixels directly from GPU A to GPU B over PCIe or NVLink — no CPU involvement. The frame arrives at GPU B as a CUDA-written GL texture, which is then blitted into the shared interop pool for Vulkan presentation. This is the fastest cross-GPU path (~15 GB/s on PCIe 3.0 x16, up to 600 GB/s on NVLink).
 
@@ -416,8 +443,15 @@ This snaps every output to the same absolute time grid. For example, at 25fps th
 - **Independent threads** — each output has its own present thread, so one slow output can't block another
 - **Buffer queue absorbs jitter** — the depth-3 queue tolerates up to 3 frames of `send()` timing variation
 - **GPU semaphore sync** — `vkQueueSubmit` waits on the GL interop semaphore, ensuring the GPU won't start the Vulkan blit until the GL blit has finished (driver-level, no CPU involvement)
+- **Shared VkDevice** — multiple consumers on the same GPU share one `VkDevice` via `vk_device_manager`, which is a prerequisite for present barriers and eliminates redundant device creation
 
 With MAILBOX present mode, `vkQueuePresentKHR` returns immediately (no vsync blocking), so the grid-aligned sleep is the sole pacing mechanism. With FIFO mode (used when present barriers are enabled), `vkWaitForFences` provides hardware-locked pacing and the grid sleep is effectively a no-op.
+
+### Queue Thread Safety
+
+When multiple consumers share a `VkDevice` (via `vk_device_manager`), all Vulkan queue operations must be externally synchronized per the Vulkan specification. The `vulkan_device` exposes a `queue_mutex()` that consumers lock around `vkQueueSubmit` and `vkQueuePresentKHR` calls.
+
+Additionally, `vkDeviceWaitIdle` (used during swapchain recreation and shutdown) is also wrapped in the queue mutex to prevent concurrent queue submissions.
 
 ### Vulkan Present Barriers (`VK_NV_present_barrier`)
 
@@ -450,6 +484,7 @@ All swapchains with the same non-zero `sync-group` value are frame-locked at the
 Requires:
 - `VK_NV_present_barrier` device extension (NVIDIA driver 525+ with Quadro/RTX Pro GPU)
 - All outputs in the same sync group must be on the same GPU
+- All outputs in the same sync group must share the same `VkDevice` (handled automatically by `vk_device_manager`)
 
 ### Quadro Sync II (NvAPI GSync)
 

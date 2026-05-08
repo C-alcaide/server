@@ -101,7 +101,6 @@ constexpr float mat_709_to_adobe_rgb[16] = {
 color_convert_pipeline::color_convert_pipeline(vulkan_device& device, uint32_t width, uint32_t height)
     : device_(device.device())
     , physical_device_(device.physical_device())
-    , queue_(device.present_queue())
     , width_(width)
     , height_(height)
 {
@@ -132,12 +131,12 @@ color_convert_pipeline::~color_convert_pipeline()
     if (device_ == VK_NULL_HANDLE)
         return;
 
-    // Wait on the present queue where compute dispatches are submitted,
-    // rather than stalling all queues with vkDeviceWaitIdle.
-    if (queue_ != VK_NULL_HANDLE)
-        vkQueueWaitIdle(queue_);
-    else
-        vkDeviceWaitIdle(device_);
+    // NOTE: Caller must ensure no GPU work referencing this pipeline is in-flight
+    // before destruction. destroy_resources() calls vkDeviceWaitIdle (with queue_mutex)
+    // before resetting color_pipeline_. We must NOT call vkQueueWaitIdle here because
+    // the queue is shared across consumers via vk_device_manager, and we don't hold
+    // the queue_mutex — concurrent vkQueueSubmit from another consumer would be a
+    // Vulkan spec violation.
 
     if (descriptor_pool_ != VK_NULL_HANDLE)
         vkDestroyDescriptorPool(device_, descriptor_pool_, nullptr);

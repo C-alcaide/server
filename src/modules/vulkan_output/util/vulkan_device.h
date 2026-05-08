@@ -23,6 +23,7 @@
 #include <vulkan/vulkan.h>
 
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -64,6 +65,7 @@ class vulkan_device
     VkDevice         device() const { return device_; }
     uint32_t         present_queue_family() const { return present_queue_family_; }
     VkQueue          present_queue() const { return present_queue_; }
+    std::mutex&      queue_mutex() { return queue_mutex_; }
     gpu_tier         tier() const { return tier_; }
     int              gpu_index() const { return gpu_index_; }
 
@@ -105,6 +107,7 @@ class vulkan_device
     bool                     device_luid_valid_    = false;
     VkDebugUtilsMessengerEXT debug_messenger_      = VK_NULL_HANDLE;
     std::vector<std::string> enabled_extensions_;
+    std::mutex               queue_mutex_;
 };
 
 }} // namespace caspar::vulkan_output

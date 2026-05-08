@@ -64,6 +64,10 @@ set(SOURCES
 
     util/vulkan_device.cpp
     util/vulkan_device.h
+    util/vk_device_manager.cpp
+    util/vk_device_manager.h
+    util/gpu_frame_cache.cpp
+    util/gpu_frame_cache.h
     util/vulkan_interop.cpp
     util/vulkan_interop.h
     util/shared_texture_pool.cpp

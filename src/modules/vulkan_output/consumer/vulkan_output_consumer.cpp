@@ -20,6 +20,8 @@
 #include "vulkan_output_consumer.h"
 #include "config.h"
 #include "../util/vulkan_device.h"
+#include "../util/vk_device_manager.h"
+#include "../util/gpu_frame_cache.h"
 #include "../util/shared_texture_pool.h"
 #include "../util/interop_context.h"
 #include "../util/gpu_affinity_context.h"
@@ -138,35 +140,35 @@ class vulkan_output_consumer : public core::frame_consumer
         if (field == core::video_field::b)
             return caspar::make_ready_future(true);
 
-        // Zero-copy path: blit OGL texture into shared pool asynchronously.
-        // Uses the dedicated interop GL context if available (doesn't touch OGL device
-        // thread at all → mixer and blit run in parallel). Falls back to OGL device
-        // dispatch if shared context creation failed.
-        //
-        // dispatch_async is safe here because the grid-aligned present loop sleeps
-        // for one full frame period (16-40ms) before calling present_frame().
-        // The async blit completes in <0.1ms, so by the time the present thread
-        // reads the shared pool slot, the blit+signal+swap are long finished.
-        // GPU-side sync is handled by the VK semaphore wait in vkQueueSubmit.
-        // This reduces per-output consume time from ~3ms (dispatch_sync thread
-        // round-trip) to ~0.1ms, allowing 100+ outputs at 60fps.
-        if (shared_pool_ && !affinity_ctx_ && frame.texture()) {
+        // Zero-copy path: blit OGL texture into shared pool via frame cache.
+        // The frame cache ensures only one transfer per GPU per frame — the first
+        // consumer to call submit_frame() does the actual blit, others wait.
+        // For cross-GPU, the cache coordinates CUDA peer DMA or PBO upload.
+        if (frame_cache_ && !frame_cache_->is_cross_gpu() && frame.texture()) {
             auto ogl_tex = std::dynamic_pointer_cast<accelerator::ogl::texture>(frame.texture());
             if (ogl_tex) {
-                auto* pool = shared_pool_.get();
-                if (interop_ctx_) {
-                    interop_ctx_->dispatch_async([pool, ogl_tex] {
-                        pool->blit_from_texture(ogl_tex->id(), ogl_tex->width(), ogl_tex->height());
-                        pool->signal_gl();
-                        pool->swap();
-                    });
-                } else {
-                    ogl_device_->dispatch_async([pool, ogl_tex] {
-                        pool->blit_from_texture(ogl_tex->id(), ogl_tex->width(), ogl_tex->height());
-                        pool->signal_gl();
-                        pool->swap();
-                    });
-                }
+                auto* cache = frame_cache_.get();
+                ++frame_generation_;
+                cache->submit_frame(frame_generation_, [cache, ogl_tex, ogl_dev = ogl_device_] {
+                    auto* pool = cache->pool();
+                    auto* ictx = cache->interop_ctx();
+                    if (ictx) {
+                        // dispatch_sync: must block until blit+signal+swap complete
+                        // so other consumers see the updated pool state.
+                        ictx->dispatch_sync([pool, ogl_tex] {
+                            pool->blit_from_texture(ogl_tex->id(), ogl_tex->width(), ogl_tex->height());
+                            pool->signal_gl();
+                            pool->swap();
+                        });
+                    } else if (ogl_dev) {
+                        // No interop context — use OGL device thread
+                        ogl_dev->dispatch_sync([pool, ogl_tex] {
+                            pool->blit_from_texture(ogl_tex->id(), ogl_tex->width(), ogl_tex->height());
+                            pool->signal_gl();
+                            pool->swap();
+                        });
+                    }
+                });
             }
         }
 
@@ -256,7 +258,7 @@ class vulkan_output_consumer : public core::frame_consumer
   private:
     void init_vulkan()
     {
-        device_ = std::make_unique<vulkan_device>(config_.gpu_index, config_.output_index);
+        device_ = vk_device_manager::get(config_.gpu_index);
 
         // Find our target display using the main device's instance (not a temporary one)
         // to ensure the VkDisplayKHR handles are valid for our device's lifetime
@@ -325,142 +327,20 @@ class vulkan_output_consumer : public core::frame_consumer
             create_command_pool();
         }
 
-        // Create shared texture pool for zero-copy if OGL device is available
+        // Create per-GPU frame cache for zero-copy transfer (shared across consumers on same GPU)
         if (ogl_device_ && !adapter_mismatch_) {
-            // Verify GPU match: OGL and VK must be on the same physical device for interop
-            bool gpu_match = true;
-            if (device_->device_luid_valid()) {
-                uint8_t ogl_luid[8] = {};
-                bool    ogl_luid_valid = false;
-                ogl_device_->dispatch_sync([&] {
-                    // GL_EXT_memory_object exposes GL_DEVICE_LUID_EXT
-                    auto glGetUnsignedBytevEXT = reinterpret_cast<void(APIENTRY*)(GLenum, GLubyte*)>(
-                        wglGetProcAddress("glGetUnsignedBytevEXT"));
-                    if (glGetUnsignedBytevEXT) {
-                        glGetUnsignedBytevEXT(0x9462 /*GL_DEVICE_LUID_EXT*/, ogl_luid);
-                        ogl_luid_valid = true;
-                    }
-                    // Drain any stale GL errors left by the unchecked extension call above.
-                    // If left, these propagate to the OGL device destructor and crash on shutdown.
-                    while (glGetError() != GL_NO_ERROR) {}
-                });
-                // Only declare mismatch if we got a valid non-zero LUID from both sides
-                const uint8_t zero_luid[8] = {};
-                if (ogl_luid_valid) {
-                    auto format_luid = [](const uint8_t* luid) -> std::wstring {
-                        std::wstringstream ss;
-                        for (int i = 0; i < 8; ++i)
-                            ss << std::hex << std::setfill(L'0') << std::setw(2) << static_cast<unsigned>(luid[i]);
-                        return ss.str();
-                    };
-                    CASPAR_LOG(debug) << print() << L" OGL LUID: " << format_luid(ogl_luid)
-                                     << L"  VK LUID: " << format_luid(device_->device_luid());
-                }
-                if (ogl_luid_valid &&
-                    memcmp(ogl_luid, zero_luid, 8) != 0 &&
-                    memcmp(device_->device_luid(), zero_luid, 8) != 0 &&
-                    memcmp(ogl_luid, device_->device_luid(), 8) != 0) {
-                    gpu_match = false;
-                    CASPAR_LOG(info) << print()
-                        << L" OGL context is on a different GPU than Vulkan output (gpu_index="
-                        << device_->gpu_index() << L"). Creating affinity bridge...";
-                } else if (ogl_luid_valid && memcmp(ogl_luid, device_->device_luid(), 8) != 0) {
-                    // LUIDs differ but one is zero — extension not reliable, assume same GPU
-                    CASPAR_LOG(debug) << print()
-                        << L" LUID comparison unreliable (zero LUID detected), assuming same GPU.";
-                }
-            }
-
-            if (gpu_match) {
-                // Same GPU: direct zero-copy from mixer OGL texture → shared VK texture
-                try {
-                    bool use_16bit = (config_.transfer != hdr_transfer::sdr);
-                    shared_pool_ = std::make_unique<shared_texture_pool>(
-                        ogl_device_, *device_, format_desc_.width, format_desc_.height, use_16bit);
-                    CASPAR_LOG(info) << print() << L" Zero-copy OGL→VK interop enabled (same GPU)"
-                                     << (use_16bit ? L" (16-bit for HDR)." : L".");
-
-                    // Create a dedicated GL context (shares textures with OGL device)
-                    // for the interop blit. This avoids blocking the mixer's OGL thread.
-                    ogl_device_->dispatch_sync([this] {
-                        interop_ctx_ = std::make_unique<interop_context>();
-                        if (!interop_ctx_->valid()) {
-                            CASPAR_LOG(warning) << print()
-                                << L" Shared GL context unavailable, blit will use OGL device thread.";
-                            interop_ctx_.reset();
-                        } else {
-                            CASPAR_LOG(info) << print() << L" Dedicated interop GL context created.";
-                        }
-                    });
-                } catch (const std::exception& e) {
-                    CASPAR_LOG(warning) << print() << L" Zero-copy unavailable, falling back to CPU: " << e.what();
-                    shared_pool_.reset();
-                }
-            } else {
-                // Different GPU: create affinity OGL context on target GPU, then interop from there
-                try {
-                    affinity_ctx_ = std::make_unique<gpu_affinity_context>(
-                        device_->gpu_index(), format_desc_.width, format_desc_.height);
-
-                    // Verify the affinity context's LUID matches the Vulkan device
-                    if (affinity_ctx_->device_luid_valid() && device_->device_luid_valid()) {
-                        if (memcmp(affinity_ctx_->device_luid(), device_->device_luid(), 8) != 0) {
-                            CASPAR_LOG(error) << print()
-                                << L" Affinity context LUID doesn't match Vulkan device — driver issue?";
-                            affinity_ctx_.reset();
-                        }
-                    }
-
-                    if (affinity_ctx_) {
-                        // Create shared_texture_pool using the affinity context as the OGL side
-                        bool use_16bit = (config_.transfer != hdr_transfer::sdr);
-                        // shared_texture_pool needs an ogl::device-like interface for dispatch_sync.
-                        // We'll create it on the affinity context thread directly.
-                        affinity_ctx_->dispatch_sync([&] {
-                            shared_pool_ = std::make_unique<shared_texture_pool>(
-                                *device_, format_desc_.width, format_desc_.height, use_16bit);
-                        });
-
-#ifdef CASPAR_CUDA_PEER_ENABLED
-                        // Try CUDA peer DMA for direct GPU→GPU transfer (no CPU memcpy)
-                        try {
-                            int src_cuda_dev = -1;
-                            ogl_device_->dispatch_sync([&] {
-                                src_cuda_dev = cuda_peer_transfer::cuda_device_for_current_gl_context();
-                            });
-                            int dst_cuda_dev = -1;
-                            affinity_ctx_->dispatch_sync([&] {
-                                dst_cuda_dev = cuda_peer_transfer::cuda_device_for_current_gl_context();
-                            });
-
-                            if (src_cuda_dev >= 0 && dst_cuda_dev >= 0 && src_cuda_dev != dst_cuda_dev) {
-                                cuda_peer_ = std::make_unique<cuda_peer_transfer>(
-                                    src_cuda_dev, dst_cuda_dev,
-                                    format_desc_.width, format_desc_.height, use_16bit);
-                                CASPAR_LOG(info) << print()
-                                    << L" CUDA peer DMA enabled (device " << src_cuda_dev
-                                    << L" → device " << dst_cuda_dev << L")";
-                            }
-                        } catch (const std::exception& e) {
-                            CASPAR_LOG(warning) << print()
-                                << L" CUDA peer transfer unavailable: " << e.what()
-                                << L" — using PBO upload fallback.";
-                            cuda_peer_.reset();
-                        }
-#endif // CASPAR_CUDA_PEER_ENABLED
-
-                        CASPAR_LOG(info) << print()
-                            << L" Cross-GPU interop enabled via affinity bridge (GPU "
-                            << device_->gpu_index() << L")"
-                            << (use_16bit ? L" (16-bit for HDR)." : L".");
-                    }
-                } catch (const std::exception& e) {
-                    CASPAR_LOG(warning) << print()
-                        << L" GPU affinity context failed: " << e.what()
-                        << L" — falling back to CPU upload (SDR only).";
-                    affinity_ctx_.reset();
-                    shared_pool_.reset();
-                }
+            try {
+                bool use_16bit = (config_.transfer != hdr_transfer::sdr);
+                frame_cache_ = gpu_frame_cache::get(
+                    config_.gpu_index, device_, ogl_device_,
+                    format_desc_.width, format_desc_.height, use_16bit);
+                frame_cache_->add_consumer();
+                CASPAR_LOG(info) << print() << L" Frame cache acquired (consumers="
+                                 << frame_cache_->consumer_count() << L")";
+            } catch (const std::exception& e) {
+                CASPAR_LOG(warning) << print()
+                    << L" Frame cache unavailable, falling back to CPU: " << e.what();
+                frame_cache_.reset();
             }
         }
 
@@ -916,7 +796,11 @@ class vulkan_output_consumer : public core::frame_consumer
         if (device_dead_)
             return;
 
-        auto wait_result = vkDeviceWaitIdle(device_->device());
+        VkResult wait_result;
+        {
+            std::lock_guard<std::mutex> qlock(device_->queue_mutex());
+            wait_result = vkDeviceWaitIdle(device_->device());
+        }
         if (wait_result == VK_ERROR_DEVICE_LOST) {
             CASPAR_LOG(error) << print() << L" Device lost during swapchain recreation. Output permanently halted.";
             display_lost_ = true;
@@ -1133,10 +1017,62 @@ class vulkan_output_consumer : public core::frame_consumer
             VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
             vkCmdClearColorImage(cmd, swapchain_.images[image_index],
                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear_color, 1, &range);
-        } else if (shared_pool_ && !affinity_ctx_ && frame.texture()) {
-            // Zero-copy path (same GPU): the OGL blit was already done in send()
-            // where it sequences naturally after the mixer (minimal contention).
-            // Here we just reference the shared pool's current VK image.
+        } else if (frame_cache_ && frame_cache_->pool()) {
+            // Frame cache path: shared pool was populated in send() (same-GPU)
+            // or cross-GPU transfer was done in send() via submit_frame().
+            auto* pool = frame_cache_->pool();
+
+            // Cross-GPU: perform transfer now if not yet done for this frame.
+            // frame_generation_ is only incremented here for cross-GPU (not in send()),
+            // so the present thread is the sole writer — no data race.
+            if (frame_cache_->is_cross_gpu()) {
+                ++frame_generation_;
+                auto* cache = frame_cache_.get();
+                cache->submit_frame(frame_generation_, [&, cache] {
+                    bool transferred = false;
+#ifdef CASPAR_CUDA_PEER_ENABLED
+                    auto* cuda = cache->cuda_peer();
+                    if (cuda && frame.texture()) {
+                        auto ogl_tex = std::dynamic_pointer_cast<accelerator::ogl::texture>(frame.texture());
+                        if (ogl_tex) {
+                            try {
+                                ogl_device_->dispatch_sync([&] {
+                                    cuda->read_source(ogl_tex->id(), ogl_tex->width(), ogl_tex->height());
+                                });
+                                cuda->peer_copy();
+                                cache->affinity_ctx()->dispatch_sync([&] {
+                                    cuda->write_dest();
+                                    pool->blit_from_texture(
+                                        cuda->dest_texture(), format_desc_.width, format_desc_.height);
+                                    pool->signal_gl();
+                                });
+                                transferred = true;
+                            } catch (const std::exception& e) {
+                                CASPAR_LOG(warning) << print()
+                                    << L" CUDA peer failed, PBO fallback: " << e.what();
+                            }
+                        }
+                    }
+                    if (!transferred)
+#endif
+                    {
+                        const auto& img = frame.image_data(0);
+                        const auto* pixels = img.data();
+                        if (pixels && img.size() > 0 && cache->affinity_ctx()) {
+                            cache->affinity_ctx()->dispatch_sync([&] {
+                                GLuint tex_id = cache->affinity_ctx()->upload_frame(
+                                    pixels, format_desc_.width, format_desc_.height, format_desc_.width * 4);
+                                pool->blit_from_texture(tex_id, format_desc_.width, format_desc_.height);
+                                pool->signal_gl();
+                            });
+                            transferred = true;
+                        }
+                    }
+                    if (transferred) {
+                        pool->swap();
+                    }
+                });
+            }
 
             // Transition shared image for transfer src
             VkImageMemoryBarrier src_barrier{};
@@ -1145,7 +1081,7 @@ class vulkan_output_consumer : public core::frame_consumer
             src_barrier.newLayout                       = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
             src_barrier.srcQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
             src_barrier.dstQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
-            src_barrier.image                           = shared_pool_->current_vk_image();
+            src_barrier.image                           = pool->current_vk_image();
             src_barrier.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
             src_barrier.subresourceRange.baseMipLevel   = 0;
             src_barrier.subresourceRange.levelCount     = 1;
@@ -1157,99 +1093,14 @@ class vulkan_output_consumer : public core::frame_consumer
             vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                                  VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &src_barrier);
 
-            auto blit_region = compute_blit_region(shared_pool_->width(), shared_pool_->height());
-            vkCmdBlitImage(cmd, shared_pool_->current_vk_image(),
+            auto blit_region = compute_blit_region(pool->width(), pool->height());
+            vkCmdBlitImage(cmd, pool->current_vk_image(),
                            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                            blit_dest_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                            1, &blit_region, VK_FILTER_LINEAR);
 
             used_shared_pool = true;
             wrote_to_intermediate = color_convert_active;
-        } else if (shared_pool_ && affinity_ctx_) {
-            // Cross-GPU path: transfer frame from GPU A → GPU B
-            bool transferred = false;
-
-#ifdef CASPAR_CUDA_PEER_ENABLED
-            if (cuda_peer_ && frame.texture()) {
-                // CUDA peer DMA: direct GPU→GPU via PCIe DMA engine (no CPU copy)
-                auto ogl_tex = std::dynamic_pointer_cast<accelerator::ogl::texture>(frame.texture());
-                if (ogl_tex) {
-                    try {
-                        // Phase 1: Read mixer texture into GPU A staging (on OGL thread)
-                        ogl_device_->dispatch_sync([&] {
-                            cuda_peer_->read_source(ogl_tex->id(), ogl_tex->width(), ogl_tex->height());
-                        });
-
-                        // Phase 2: DMA from GPU A → GPU B (no GL context needed)
-                        cuda_peer_->peer_copy();
-
-                        // Phase 3: Write to landing texture + blit into shared pool (on affinity thread)
-                        affinity_ctx_->dispatch_sync([&] {
-                            cuda_peer_->write_dest();
-                            shared_pool_->blit_from_texture(
-                                cuda_peer_->dest_texture(), format_desc_.width, format_desc_.height);
-                            shared_pool_->signal_gl();
-                        });
-
-                        transferred = true;
-                    } catch (const std::exception& e) {
-                        CASPAR_LOG(warning) << print()
-                            << L" CUDA peer transfer failed, falling back to PBO: " << e.what();
-                    }
-                }
-            }
-#endif // CASPAR_CUDA_PEER_ENABLED
-
-            if (!transferred) {
-                // PBO fallback: CPU pixels → PBO upload → shared texture
-                const auto& img = frame.image_data(0);
-                const auto* pixels = img.data();
-                if (pixels && img.size() > 0) {
-                    affinity_ctx_->dispatch_sync([&] {
-                        GLuint tex_id = affinity_ctx_->upload_frame(
-                            pixels, format_desc_.width, format_desc_.height, format_desc_.width * 4);
-                        shared_pool_->blit_from_texture(tex_id, format_desc_.width, format_desc_.height);
-                        shared_pool_->signal_gl();
-                    });
-                    transferred = true;
-                } else {
-                    upload_frame_cpu(frame, swapchain_.images[image_index], cmd);
-                }
-            }
-
-            if (transferred) {
-                shared_pool_->swap();
-
-                // Transition shared image for transfer src
-                VkImageMemoryBarrier src_barrier{};
-                src_barrier.sType                           = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-                src_barrier.oldLayout                       = VK_IMAGE_LAYOUT_UNDEFINED;
-                src_barrier.newLayout                       = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-                src_barrier.srcQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
-                src_barrier.dstQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
-                src_barrier.image                           = shared_pool_->current_vk_image();
-                src_barrier.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
-                src_barrier.subresourceRange.baseMipLevel   = 0;
-                src_barrier.subresourceRange.levelCount     = 1;
-                src_barrier.subresourceRange.baseArrayLayer = 0;
-                src_barrier.subresourceRange.layerCount     = 1;
-                src_barrier.srcAccessMask                   = 0;
-                src_barrier.dstAccessMask                   = VK_ACCESS_TRANSFER_READ_BIT;
-
-                vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                                     VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &src_barrier);
-
-                auto blit_region = compute_blit_region(shared_pool_->width(), shared_pool_->height());
-                vkCmdBlitImage(cmd, shared_pool_->current_vk_image(),
-                               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                               blit_dest_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                               1, &blit_region, VK_FILTER_LINEAR);
-
-                used_shared_pool = true;
-                wrote_to_intermediate = color_convert_active;
-            } else {
-                upload_frame_cpu(frame, swapchain_.images[image_index], cmd);
-            }
         } else {
             // CPU fallback: upload pixel data via staging buffer
             // Always targets swapchain — BGRA8 pixels are incompatible with RGBA16F intermediate
@@ -1339,11 +1190,6 @@ class vulkan_output_consumer : public core::frame_consumer
                                                    VK_PIPELINE_STAGE_TRANSFER_BIT};
         uint32_t             wait_count         = 1;
 
-        if (used_shared_pool) {
-            wait_semaphores[1] = shared_pool_->wait_semaphore_vk();
-            wait_count         = 2;
-        }
-
         VkSubmitInfo submit_info{};
         submit_info.sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO;
         submit_info.waitSemaphoreCount   = wait_count;
@@ -1354,23 +1200,44 @@ class vulkan_output_consumer : public core::frame_consumer
         submit_info.signalSemaphoreCount = 1;
         submit_info.pSignalSemaphores    = &frame_sync.render_finished;
 
-        auto submit_result = vkQueueSubmit(device_->present_queue(), 1, &submit_info, frame_sync.in_flight);
-        if (submit_result == VK_ERROR_DEVICE_LOST) {
-            CASPAR_LOG(error) << print() << L" GPU device lost (TDR) during submit. Output halted.";
-            display_lost_ = true;
-            device_dead_  = true;
-            return;
-        }
-        // Present
-        VkPresentInfoKHR present_info{};
-        present_info.sType              = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
-        present_info.waitSemaphoreCount = 1;
-        present_info.pWaitSemaphores    = &frame_sync.render_finished;
-        present_info.swapchainCount     = 1;
-        present_info.pSwapchains        = &swapchain_.swapchain;
-        present_info.pImageIndices      = &image_index;
+        VkResult submit_result;
+        VkResult present_result;
+        {
+            // Lock queue mutex — VkQueue is shared across consumers on the same VkDevice
+            std::lock_guard<std::mutex> qlock(device_->queue_mutex());
 
-        auto present_result = vkQueuePresentKHR(device_->present_queue(), &present_info);
+            // Only the first consumer per frame waits on the GL→VK binary semaphore.
+            // Subsequent consumers benefit from in-order queue execution on the
+            // shared VkQueue — their commands execute after the first wait completes.
+            // This MUST be inside the queue lock so the semaphore consumer submits first.
+            if (used_shared_pool && frame_cache_ && frame_cache_->pool()) {
+                if (frame_cache_->try_consume_semaphore()) {
+                    wait_semaphores[1] = frame_cache_->pool()->wait_semaphore_vk();
+                    wait_count         = 2;
+                }
+            }
+            submit_info.waitSemaphoreCount = wait_count;
+
+            submit_result = vkQueueSubmit(device_->present_queue(), 1, &submit_info, frame_sync.in_flight);
+            if (submit_result == VK_ERROR_DEVICE_LOST) {
+                CASPAR_LOG(error) << print() << L" GPU device lost (TDR) during submit. Output halted.";
+                display_lost_ = true;
+                device_dead_  = true;
+                return;
+            }
+
+            // Present
+            VkPresentInfoKHR present_info{};
+            present_info.sType              = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+            present_info.waitSemaphoreCount = 1;
+            present_info.pWaitSemaphores    = &frame_sync.render_finished;
+            present_info.swapchainCount     = 1;
+            present_info.pSwapchains        = &swapchain_.swapchain;
+            present_info.pImageIndices      = &image_index;
+
+            present_result = vkQueuePresentKHR(device_->present_queue(), &present_info);
+        }
+
         if (present_result == VK_ERROR_OUT_OF_DATE_KHR || present_result == VK_SUBOPTIMAL_KHR) {
             recreate_swapchain();
         } else if (present_result == VK_ERROR_SURFACE_LOST_KHR) {
@@ -1835,7 +1702,9 @@ class vulkan_output_consumer : public core::frame_consumer
             // can also hang on the same stuck GPU operation. Let the OS clean up on exit.
             bool gpu_stuck = device_dead_.load();
             if (!gpu_stuck) {
-                auto idle_future = std::async(std::launch::async, [dev] {
+                auto& qmutex = device_->queue_mutex();
+                auto idle_future = std::async(std::launch::async, [dev, &qmutex] {
+                    std::lock_guard<std::mutex> qlock(qmutex);
                     return vkDeviceWaitIdle(dev);
                 });
                 if (idle_future.wait_for(std::chrono::seconds(2)) == std::future_status::timeout) {
@@ -1874,28 +1743,20 @@ class vulkan_output_consumer : public core::frame_consumer
             }
 
             // Destroy resources that reference VkDevice handles BEFORE destroying the device.
-            // Order matters: color_pipeline_ and cuda_peer_ hold raw VkDevice/VkQueue handles.
             if (!gpu_stuck) {
                 color_pipeline_.reset();
-#ifdef CASPAR_CUDA_PEER_ENABLED
-                cuda_peer_.reset();
-#endif
-                interop_ctx_.reset();
-                affinity_ctx_.reset();
-                shared_pool_.reset();
+                if (frame_cache_) {
+                    frame_cache_->remove_consumer();
+                    frame_cache_.reset();
+                }
                 device_.reset();
             } else {
-                // Release unique_ptrs without calling destructors that touch VkDevice.
+                // Release without calling destructors that touch VkDevice.
                 // The leaked async thread holds a VkDevice reference that prevents kernel cleanup,
                 // but the OS will reclaim all GPU resources when the process terminates.
                 color_pipeline_.release();
-#ifdef CASPAR_CUDA_PEER_ENABLED
-                cuda_peer_.release();
-#endif
-                interop_ctx_.release();
-                affinity_ctx_.release();
-                shared_pool_.release();
-                device_.release();
+                frame_cache_.reset(); // shared_ptr — safe to reset even if stuck
+                device_.reset();
             }
         }
 
@@ -1930,13 +1791,8 @@ class vulkan_output_consumer : public core::frame_consumer
     executor                         executor_;
 
     std::shared_ptr<accelerator::ogl::device> ogl_device_;
-    std::unique_ptr<vulkan_device>   device_;
-    std::unique_ptr<shared_texture_pool> shared_pool_;
-    std::unique_ptr<interop_context> interop_ctx_;     // Dedicated GL context for blit (scalability)
-    std::unique_ptr<gpu_affinity_context> affinity_ctx_; // For cross-GPU interop
-#ifdef CASPAR_CUDA_PEER_ENABLED
-    std::unique_ptr<cuda_peer_transfer> cuda_peer_;    // CUDA peer DMA (cross-GPU, no CPU copy)
-#endif
+    std::shared_ptr<vulkan_device>   device_;
+    std::shared_ptr<gpu_frame_cache> frame_cache_;
     std::unique_ptr<nvapi_helpers>   nvapi_;
     std::unique_ptr<color_convert_pipeline> color_pipeline_; // Color space conversion (compute)
     swapchain_resources              swapchain_{};
@@ -1962,6 +1818,7 @@ class vulkan_output_consumer : public core::frame_consumer
     bool                             adapter_mismatch_{false}; // Display on different GPU — no Vulkan presentation
     uint64_t                         hotplug_retry_counter_ = 0;
     std::atomic<uint64_t>            frames_presented_{0};
+    uint64_t                         frame_generation_{0};  // Monotonic counter for frame cache coordination
 
     // Present barrier
     bool                             present_barrier_enabled_ = false;
