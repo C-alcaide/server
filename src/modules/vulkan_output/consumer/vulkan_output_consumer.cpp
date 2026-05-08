@@ -374,7 +374,7 @@ class vulkan_output_consumer : public core::frame_consumer
         CASPAR_LOG(info) << print() << L" initialized. Tier: "
                          << (adapter_mismatch_ ? L"GDI fallback (cross-adapter)" :
                              (device_->tier() == gpu_tier::pro && found) ? L"Pro (direct display)" :
-                             device_->tier() == gpu_tier::pro ? L"Pro (FSE)" : L"Consumer (FSE)")
+                             device_->tier() == gpu_tier::pro ? L"Pro (fullscreen)" : L"Consumer (fullscreen)")
                          << (config_.delay_frames > 0 ? L" Delay: " + std::to_wstring(config_.delay_frames) + L" frames" : L"");
     }
 
@@ -1748,7 +1748,7 @@ class vulkan_output_consumer : public core::frame_consumer
                 y = data.rect.top;
                 w = data.rect.right - data.rect.left;
                 h = data.rect.bottom - data.rect.top;
-                CASPAR_LOG(info) << print() << L" FSE window on monitor " << config_.output_index << L" at ("
+                CASPAR_LOG(info) << print() << L" Fullscreen window on monitor " << config_.output_index << L" at ("
                                  << x << L"," << y << L") " << w << L"x" << h;
             } else {
                 CASPAR_LOG(warning) << print() << L" Monitor " << config_.output_index
