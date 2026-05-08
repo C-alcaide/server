@@ -4,15 +4,9 @@
 // the Windows desktop and CasparCG's output windows. If CasparCG crashes or
 // restarts, the blanker keeps the outputs black.
 //
-// For Pro-tier NVIDIA GPUs (Quadro/RTX A-series), can also acquire "dedicated
-// displays" via NvAPI. Dedicated displays are detached from the Windows desktop
-// at the driver level — the output stays black even if the blanker itself exits.
-// This provides crash-proof blanking without needing a running process.
-//
 // Features:
 //   - System tray icon with right-click menu
 //   - Configuration window to select which monitors to blank
-//   - NvAPI dedicated display acquisition (Pro GPUs, driver-level blanking)
 //   - Enable/Disable blanking toggle
 //   - "Start with Windows" option (adds to HKCU Run registry)
 //   - Settings saved to display_blanker.ini next to the exe
@@ -59,198 +53,10 @@ static const UINT IDC_CLOSE_BTN     = 3002;
 static const UINT IDC_AUTOSTART_CHK = 3003;
 static const UINT IDC_ENABLE_CHK    = 3004;
 static const UINT IDC_MONITOR_BASE  = 4000;
-static const UINT IDC_DEDICATED_LABEL = 5000;
-static const UINT IDC_DEDICATED_BASE  = 5001; // checkboxes for dedicated displays
 static const wchar_t* MUTEX_NAME    = L"CasparCG_DisplayBlanker_SingleInstance";
 static const wchar_t* REGISTRY_KEY  = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 static const wchar_t* REGISTRY_VAL  = L"CasparCG Display Blanker";
 
-// ─── NvAPI dynamic loader (no SDK dependency) ───────────────────────────
-//
-// We load nvapi64.dll at runtime and resolve the few functions we need via
-// NvAPI_QueryInterface. This avoids requiring the NvAPI SDK to build the
-// blanker tool, and gracefully degrades on non-NVIDIA systems.
-
-// NvAPI status codes we care about
-using NvAPI_Status = int;
-static const NvAPI_Status NVAPI_OK = 0;
-
-// Minimal struct matching NV_MANAGED_DEDICATED_DISPLAY_INFO_V1
-#pragma pack(push, 8)
-struct NvDedicatedDisplayInfo
-{
-    uint32_t version;
-    uint32_t displayId;
-    uint32_t isAcquired : 1;
-    uint32_t isMosaic   : 1;
-    uint32_t reserved   : 30;
-};
-#pragma pack(pop)
-
-// MAKE_NVAPI_VERSION macro equivalent: (sizeof(struct) | (ver << 16))
-static constexpr uint32_t NVDDI_VER1 =
-    static_cast<uint32_t>(sizeof(NvDedicatedDisplayInfo)) | (1u << 16);
-
-// NvAPI function IDs from nvapi_interface.h (stable across driver versions)
-static const uint32_t NVAPI_ID_INITIALIZE                    = 0x0150E828;
-static const uint32_t NVAPI_ID_UNLOAD                        = 0xD22BDD7E;
-static const uint32_t NVAPI_ID_GET_ERROR_MESSAGE             = 0x6C2D048C;
-static const uint32_t NVAPI_ID_GET_MANAGED_DEDICATED_DISPLAYS = 0xDBDF0CB2;
-static const uint32_t NVAPI_ID_ACQUIRE_DEDICATED_DISPLAY     = 0x47C917BA;
-static const uint32_t NVAPI_ID_RELEASE_DEDICATED_DISPLAY     = 0x1247825F;
-
-// Function pointer types
-using PFN_NvAPI_QueryInterface                   = void*(*)(uint32_t);
-using PFN_NvAPI_Initialize                       = NvAPI_Status(*)();
-using PFN_NvAPI_Unload                           = NvAPI_Status(*)();
-using PFN_NvAPI_GetErrorMessage                  = NvAPI_Status(*)(NvAPI_Status, char[64]);
-using PFN_NvAPI_DISP_GetNvManagedDedicatedDisplays = NvAPI_Status(*)(uint32_t*, NvDedicatedDisplayInfo*);
-using PFN_NvAPI_DISP_AcquireDedicatedDisplay     = NvAPI_Status(*)(uint32_t, uint64_t*);
-using PFN_NvAPI_DISP_ReleaseDedicatedDisplay     = NvAPI_Status(*)(uint32_t);
-
-// Resolved function pointers (null if NvAPI unavailable)
-static PFN_NvAPI_Initialize                          g_nvapi_init     = nullptr;
-static PFN_NvAPI_Unload                              g_nvapi_unload   = nullptr;
-static PFN_NvAPI_GetErrorMessage                     g_nvapi_err_msg  = nullptr;
-static PFN_NvAPI_DISP_GetNvManagedDedicatedDisplays  g_nvapi_get_dd   = nullptr;
-static PFN_NvAPI_DISP_AcquireDedicatedDisplay        g_nvapi_acquire  = nullptr;
-static PFN_NvAPI_DISP_ReleaseDedicatedDisplay        g_nvapi_release  = nullptr;
-static bool                                          g_nvapi_loaded   = false;
-
-static std::wstring nvapi_error_string(NvAPI_Status status)
-{
-    if (g_nvapi_err_msg) {
-        char buf[64] = {};
-        g_nvapi_err_msg(status, buf);
-        return std::wstring(buf, buf + strlen(buf));
-    }
-    return L"error " + std::to_wstring(status);
-}
-
-static bool load_nvapi()
-{
-    HMODULE lib = LoadLibraryW(L"nvapi64.dll");
-    if (!lib) return false;
-
-    auto query = reinterpret_cast<PFN_NvAPI_QueryInterface>(
-        GetProcAddress(lib, "nvapi_QueryInterface"));
-    if (!query) { FreeLibrary(lib); return false; }
-
-    g_nvapi_init    = reinterpret_cast<PFN_NvAPI_Initialize>(query(NVAPI_ID_INITIALIZE));
-    g_nvapi_unload  = reinterpret_cast<PFN_NvAPI_Unload>(query(NVAPI_ID_UNLOAD));
-    g_nvapi_err_msg = reinterpret_cast<PFN_NvAPI_GetErrorMessage>(query(NVAPI_ID_GET_ERROR_MESSAGE));
-    g_nvapi_get_dd  = reinterpret_cast<PFN_NvAPI_DISP_GetNvManagedDedicatedDisplays>(query(NVAPI_ID_GET_MANAGED_DEDICATED_DISPLAYS));
-    g_nvapi_acquire = reinterpret_cast<PFN_NvAPI_DISP_AcquireDedicatedDisplay>(query(NVAPI_ID_ACQUIRE_DEDICATED_DISPLAY));
-    g_nvapi_release = reinterpret_cast<PFN_NvAPI_DISP_ReleaseDedicatedDisplay>(query(NVAPI_ID_RELEASE_DEDICATED_DISPLAY));
-
-    if (!g_nvapi_init || !g_nvapi_get_dd || !g_nvapi_acquire || !g_nvapi_release)
-        return false;
-
-    auto status = g_nvapi_init();
-    if (status != NVAPI_OK)
-        return false;
-
-    g_nvapi_loaded = true;
-    return true;
-}
-
-// ─── Dedicated display tracking ─────────────────────────────────────────
-
-struct dedicated_display
-{
-    uint32_t display_id   = 0;
-    bool     is_acquired  = false;   // Acquired by another process?
-    bool     is_mosaic    = false;
-    bool     we_own       = false;   // We acquired it in this session
-    bool     checked      = false;   // User wants us to acquire it
-};
-
-static std::vector<dedicated_display> g_dedicated;
-
-static void enumerate_dedicated_displays()
-{
-    // Release any we currently own before re-enumerating
-    for (auto& d : g_dedicated) {
-        if (d.we_own && g_nvapi_release) {
-            g_nvapi_release(d.display_id);
-            d.we_own = false;
-        }
-    }
-
-    auto old_checked = std::move(g_dedicated);
-    g_dedicated.clear();
-
-    if (!g_nvapi_loaded || !g_nvapi_get_dd)
-        return;
-
-    uint32_t count = 0;
-    auto status = g_nvapi_get_dd(&count, nullptr);
-    if (status != NVAPI_OK || count == 0)
-        return;
-
-    std::vector<NvDedicatedDisplayInfo> infos(count);
-    for (auto& d : infos)
-        d.version = NVDDI_VER1;
-
-    status = g_nvapi_get_dd(&count, infos.data());
-    if (status != NVAPI_OK)
-        return;
-
-    for (uint32_t i = 0; i < count; ++i) {
-        dedicated_display dd;
-        dd.display_id  = infos[i].displayId;
-        dd.is_acquired = infos[i].isAcquired != 0;
-        dd.is_mosaic   = infos[i].isMosaic != 0;
-        dd.checked     = false;
-
-        // Preserve checked state from previous enumeration
-        for (const auto& o : old_checked) {
-            if (o.display_id == dd.display_id) {
-                dd.checked = o.checked;
-                break;
-            }
-        }
-
-        g_dedicated.push_back(dd);
-    }
-}
-
-static void acquire_dedicated_displays()
-{
-    if (!g_nvapi_loaded || !g_nvapi_acquire)
-        return;
-
-    for (auto& d : g_dedicated) {
-        if (d.checked && !d.we_own && !d.is_acquired) {
-            uint64_t handle = 0;
-            auto status = g_nvapi_acquire(d.display_id, &handle);
-            if (status == NVAPI_OK) {
-                d.we_own      = true;
-                d.is_acquired = true;
-            }
-        } else if (!d.checked && d.we_own) {
-            if (g_nvapi_release) {
-                g_nvapi_release(d.display_id);
-                d.we_own      = false;
-                d.is_acquired = false;
-            }
-        }
-    }
-}
-
-static void release_all_dedicated_displays()
-{
-    if (!g_nvapi_loaded || !g_nvapi_release)
-        return;
-
-    for (auto& d : g_dedicated) {
-        if (d.we_own) {
-            g_nvapi_release(d.display_id);
-            d.we_own      = false;
-            d.is_acquired = false;
-        }
-    }
-}
 
 // ─── Monitor info ───────────────────────────────────────────────────────
 
@@ -295,7 +101,6 @@ struct settings_snapshot
 {
     bool                         enabled;
     std::vector<bool>            monitor_checked;
-    std::vector<bool>            dedicated_checked;
 };
 
 static settings_snapshot take_snapshot()
@@ -304,8 +109,6 @@ static settings_snapshot take_snapshot()
     s.enabled = g_enabled;
     for (const auto& m : g_monitors)
         s.monitor_checked.push_back(m.checked);
-    for (const auto& d : g_dedicated)
-        s.dedicated_checked.push_back(d.checked);
     return s;
 }
 
@@ -314,8 +117,6 @@ static void restore_snapshot(const settings_snapshot& s)
     g_enabled = s.enabled;
     for (size_t i = 0; i < g_monitors.size() && i < s.monitor_checked.size(); ++i)
         g_monitors[i].checked = s.monitor_checked[i];
-    for (size_t i = 0; i < g_dedicated.size() && i < s.dedicated_checked.size(); ++i)
-        g_dedicated[i].checked = s.dedicated_checked[i];
 }
 
 // ─── Utility ────────────────────────────────────────────────────────────
@@ -355,19 +156,6 @@ static void save_settings()
     }
     WritePrivateProfileStringW(L"Monitors", L"Count",
                                std::to_wstring(idx).c_str(), g_ini_path.c_str());
-
-    // Save dedicated display selections
-    WritePrivateProfileSectionW(L"DedicatedDisplays", L"\0", g_ini_path.c_str());
-    idx = 0;
-    for (const auto& d : g_dedicated) {
-        if (d.checked) {
-            auto key = L"DisplayId" + std::to_wstring(idx++);
-            WritePrivateProfileStringW(L"DedicatedDisplays", key.c_str(),
-                                       std::to_wstring(d.display_id).c_str(), g_ini_path.c_str());
-        }
-    }
-    WritePrivateProfileStringW(L"DedicatedDisplays", L"Count",
-                               std::to_wstring(idx).c_str(), g_ini_path.c_str());
 }
 
 static void load_settings()
@@ -387,24 +175,6 @@ static void load_settings()
         m.checked = false;
         for (const auto& s : saved) {
             if (m.device_name == s) { m.checked = true; break; }
-        }
-    }
-
-    // Load dedicated display selections
-    int dd_count = GetPrivateProfileIntW(L"DedicatedDisplays", L"Count", 0, g_ini_path.c_str());
-    std::vector<uint32_t> saved_ids;
-    for (int i = 0; i < dd_count; ++i) {
-        wchar_t buf[64] = {};
-        auto key = L"DisplayId" + std::to_wstring(i);
-        GetPrivateProfileStringW(L"DedicatedDisplays", key.c_str(), L"0", buf, 64, g_ini_path.c_str());
-        uint32_t id = static_cast<uint32_t>(wcstoul(buf, nullptr, 10));
-        if (id != 0) saved_ids.push_back(id);
-    }
-
-    for (auto& d : g_dedicated) {
-        d.checked = false;
-        for (auto id : saved_ids) {
-            if (d.display_id == id) { d.checked = true; break; }
         }
     }
 }
@@ -545,13 +315,7 @@ static void update_tray_tooltip()
 {
     std::wstring tip = L"CasparCG Display Blanker";
     if (g_enabled) {
-        int dd_count = 0;
-        for (const auto& d : g_dedicated)
-            if (d.we_own) dd_count++;
-
         tip += L" \x2014 " + std::to_wstring(g_blanker_windows.size()) + L" blanked";
-        if (dd_count > 0)
-            tip += L", " + std::to_wstring(dd_count) + L" dedicated";
     } else {
         tip += L" \x2014 DISABLED";
     }
@@ -572,8 +336,6 @@ static LRESULT CALLBACK config_wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
     switch (msg) {
         case WM_CREATE: {
             enumerate_monitors();
-            if (g_nvapi_loaded)
-                enumerate_dedicated_displays();
             load_settings();
 
             HFONT font = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
@@ -625,47 +387,6 @@ static LRESULT CALLBACK config_wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                               P + 8, RH, static_cast<UINT>(IDC_MONITOR_BASE + i));
                 if (m.checked)
                     SendMessageW(chk, BM_SETCHECK, BST_CHECKED, 0);
-                y += RH + 2;
-            }
-
-            // ─── Dedicated displays section (NvAPI, Pro GPUs only) ──────────
-            if (!g_dedicated.empty()) {
-                y += 8;
-                CreateWindowExW(0, L"STATIC", nullptr, WS_CHILD | WS_VISIBLE | SS_ETCHEDHORZ,
-                    P, y, cw, 2, hwnd, nullptr, g_instance, nullptr);
-                y += 8;
-
-                mk(L"STATIC",
-                   L"Dedicated GPU outputs (driver-level blanking \x2014 survives crashes):",
-                   SS_LEFT, P, RH, IDC_DEDICATED_LABEL);
-                y += RH + 4;
-
-                for (size_t i = 0; i < g_dedicated.size(); ++i) {
-                    const auto& d = g_dedicated[i];
-
-                    std::wstring text = L"Display ID " + std::to_wstring(d.display_id);
-                    if (d.is_mosaic) text += L"  [Mosaic]";
-                    if (d.is_acquired && !d.we_own) text += L"  [in use by another app]";
-
-                    DWORD style = BS_AUTOCHECKBOX;
-                    HWND chk = mk(L"BUTTON", text.c_str(), style,
-                                  P + 8, RH, static_cast<UINT>(IDC_DEDICATED_BASE + i));
-                    if (d.checked || d.we_own)
-                        SendMessageW(chk, BM_SETCHECK, BST_CHECKED, 0);
-                    if (d.is_acquired && !d.we_own)
-                        EnableWindow(chk, FALSE); // Can't acquire — another process has it
-
-                    y += RH + 2;
-                }
-            } else if (g_nvapi_loaded) {
-                y += 8;
-                CreateWindowExW(0, L"STATIC", nullptr, WS_CHILD | WS_VISIBLE | SS_ETCHEDHORZ,
-                    P, y, cw, 2, hwnd, nullptr, g_instance, nullptr);
-                y += 8;
-
-                mk(L"STATIC",
-                   L"No dedicated displays found. Configure in NVIDIA Control Panel.",
-                   SS_LEFT, P, RH);
                 y += RH + 2;
             }
 
@@ -735,13 +456,6 @@ static LRESULT CALLBACK config_wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                             g_monitors[i].checked = (SendMessageW(chk, BM_GETCHECK, 0, 0) == BST_CHECKED);
                     }
 
-                    // Read dedicated display checkboxes
-                    for (size_t i = 0; i < g_dedicated.size(); ++i) {
-                        HWND chk = GetDlgItem(hwnd, static_cast<int>(IDC_DEDICATED_BASE + i));
-                        if (chk)
-                            g_dedicated[i].checked = (SendMessageW(chk, BM_GETCHECK, 0, 0) == BST_CHECKED);
-                    }
-
                     HWND en = GetDlgItem(hwnd, IDC_ENABLE_CHK);
                     if (en) g_enabled = (SendMessageW(en, BM_GETCHECK, 0, 0) == BST_CHECKED);
 
@@ -752,10 +466,8 @@ static LRESULT CALLBACK config_wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                     // Apply changes immediately (so user can see the effect)
                     if (g_enabled) {
                         create_blanker_windows();
-                        acquire_dedicated_displays();
                     } else {
                         destroy_blanker_windows();
-                        release_all_dedicated_displays();
                     }
                     update_tray_tooltip();
 
@@ -771,10 +483,8 @@ static LRESULT CALLBACK config_wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                         restore_snapshot(snapshot);
                         if (g_enabled) {
                             create_blanker_windows();
-                            acquire_dedicated_displays();
                         } else {
                             destroy_blanker_windows();
-                            release_all_dedicated_displays();
                         }
                         update_tray_tooltip();
                     }
@@ -1014,10 +724,8 @@ static LRESULT CALLBACK tray_wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
                     save_settings();
                     if (g_enabled) {
                         create_blanker_windows();
-                        acquire_dedicated_displays();
                     } else {
                         destroy_blanker_windows();
-                        release_all_dedicated_displays();
                     }
                     update_tray_tooltip();
                     break;
@@ -1149,11 +857,6 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR lpCmdLine, int)
     // Enumerate monitors
     enumerate_monitors();
 
-    // Try to load NvAPI for dedicated display support
-    load_nvapi();
-    if (g_nvapi_loaded)
-        enumerate_dedicated_displays();
-
     // Determine initial behavior
     bool show_config = false;
 
@@ -1179,10 +882,6 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR lpCmdLine, int)
     if (g_enabled)
         create_blanker_windows();
 
-    // Acquire dedicated displays
-    if (g_enabled)
-        acquire_dedicated_displays();
-
     update_tray_tooltip();
 
     // Show config on interactive launch
@@ -1200,13 +899,11 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR lpCmdLine, int)
 
     // Cleanup
     destroy_blanker_windows();
-    release_all_dedicated_displays();
     Shell_NotifyIconW(NIM_DELETE, &g_nid);
     if (g_tray_hwnd)   DestroyWindow(g_tray_hwnd);
     if (g_config_hwnd) DestroyWindow(g_config_hwnd);
     DeleteObject(g_black_brush);
     if (g_mutex) CloseHandle(g_mutex);
-    if (g_nvapi_unload) g_nvapi_unload();
 
     return 0;
 }
