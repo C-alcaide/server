@@ -68,6 +68,8 @@ set(SOURCES
     util/vulkan_interop.h
     util/shared_texture_pool.cpp
     util/shared_texture_pool.h
+    util/interop_context.cpp
+    util/interop_context.h
     util/gpu_affinity_context.cpp
     util/gpu_affinity_context.h
     util/cuda_peer_transfer.cpp
@@ -115,6 +117,8 @@ target_link_libraries(vulkan_output PRIVATE
     Vulkan::Vulkan
     accelerator
     GLEW::glew
+    d3d11
+    dxgi
 )
 
 if(NVAPI_FOUND)

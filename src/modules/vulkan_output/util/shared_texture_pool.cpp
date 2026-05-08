@@ -179,7 +179,7 @@ void shared_texture_pool::create_slot(slot& s)
     img_info.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     img_info.pNext         = &ext_mem_img;
     img_info.imageType     = VK_IMAGE_TYPE_2D;
-    img_info.format        = use_16bit_ ? VK_FORMAT_R16G16B16A16_UNORM : VK_FORMAT_B8G8R8A8_UNORM;
+    img_info.format        = use_16bit_ ? VK_FORMAT_R16G16B16A16_UNORM : VK_FORMAT_R8G8B8A8_UNORM;
     img_info.extent        = {width_, height_, 1};
     img_info.mipLevels     = 1;
     img_info.arrayLayers   = 1;
@@ -236,7 +236,7 @@ void shared_texture_pool::create_slot(slot& s)
     view_info.sType                           = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
     view_info.image                           = s.vk_image;
     view_info.viewType                        = VK_IMAGE_VIEW_TYPE_2D;
-    view_info.format                          = use_16bit_ ? VK_FORMAT_R16G16B16A16_UNORM : VK_FORMAT_B8G8R8A8_UNORM;
+    view_info.format                          = use_16bit_ ? VK_FORMAT_R16G16B16A16_UNORM : VK_FORMAT_R8G8B8A8_UNORM;
     view_info.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
     view_info.subresourceRange.baseMipLevel   = 0;
     view_info.subresourceRange.levelCount     = 1;

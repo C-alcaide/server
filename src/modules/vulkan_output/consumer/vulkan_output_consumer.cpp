@@ -22,6 +22,7 @@
 #include "../util/vulkan_device.h"
 #include "../util/vulkan_interop.h"
 #include "../util/shared_texture_pool.h"
+#include "../util/interop_context.h"
 #include "../util/gpu_affinity_context.h"
 #ifdef CASPAR_CUDA_PEER_ENABLED
 #include "../util/cuda_peer_transfer.h"
@@ -43,16 +44,20 @@
 
 #include <core/consumer/channel_info.h>
 #include <core/consumer/frame_consumer.h>
-#include <core/diagnostics/osd_graph.h>
 #include <core/frame/frame.h>
 #include <core/video_channel.h>
 #include <core/video_format.h>
 
 #include <boost/algorithm/string.hpp>
 
+#include <d3d11.h>
+#include <dxgi1_2.h>
+#include <wrl/client.h>
+
 #include <chrono>
 #include <condition_variable>
 #include <future>
+#include <iomanip>
 #include <mutex>
 #include <queue>
 #include <sstream>
@@ -64,19 +69,37 @@ namespace {
 
 // ─── Swapchain management ───────────────────────────────────────────────
 
+static constexpr int MAX_FRAMES_IN_FLIGHT = 3;
+
+struct frame_sync_objects
+{
+    VkSemaphore     image_available = VK_NULL_HANDLE;
+    VkSemaphore     render_finished = VK_NULL_HANDLE;
+    VkFence         in_flight       = VK_NULL_HANDLE;
+    VkCommandBuffer cmd_buffer      = VK_NULL_HANDLE;
+};
+
 struct swapchain_resources
 {
     VkSwapchainKHR           swapchain   = VK_NULL_HANDLE;
     VkSurfaceKHR             surface     = VK_NULL_HANDLE;
     std::vector<VkImage>     images;
     std::vector<VkImageView> image_views;
-    VkSemaphore              image_available = VK_NULL_HANDLE;
-    VkSemaphore              render_finished = VK_NULL_HANDLE;
-    VkFence                  in_flight       = VK_NULL_HANDLE;
     VkCommandPool            cmd_pool        = VK_NULL_HANDLE;
-    VkCommandBuffer          cmd_buffer      = VK_NULL_HANDLE;
     uint32_t                 width           = 0;
     uint32_t                 height          = 0;
+
+    // Per-frame-in-flight sync objects (double/triple buffered)
+    frame_sync_objects       frames[MAX_FRAMES_IN_FLIGHT];
+    int                      current_frame = 0;
+
+    // Convenience accessors for current frame's resources
+    VkSemaphore&     image_available_ref() { return frames[current_frame].image_available; }
+    VkSemaphore&     render_finished_ref() { return frames[current_frame].render_finished; }
+    VkFence&         in_flight_ref()       { return frames[current_frame].in_flight; }
+    VkCommandBuffer& cmd_buffer_ref()      { return frames[current_frame].cmd_buffer; }
+
+    void advance_frame() { current_frame = (current_frame + 1) % MAX_FRAMES_IN_FLIGHT; }
 };
 
 // ─── Consumer implementation ────────────────────────────────────────────
@@ -120,20 +143,55 @@ class vulkan_output_consumer : public core::frame_consumer
         if (field == core::video_field::b)
             return caspar::make_ready_future(true);
 
-        // Buffer the frame
-        {
-            std::unique_lock<std::mutex> lock(buffer_mutex_);
-            if (adapter_mismatch_) {
-                // GDI fallback: block until buffer has space to provide backpressure
-                buffer_cv_.wait(lock, [this] {
-                    return buffer_.size() < static_cast<size_t>(config_.buffer_depth) || !running_;
-                });
-                if (!running_)
-                    return caspar::make_ready_future(true);
-            } else if (buffer_.size() >= static_cast<size_t>(config_.buffer_depth)) {
-                graph_->set_tag(diagnostics::tag_severity::WARNING, "late-frame");
-                buffer_.pop(); // Drop oldest
+        // Zero-copy path: blit OGL texture into shared pool asynchronously.
+        // Uses the dedicated interop GL context if available (doesn't touch OGL device
+        // thread at all → mixer and blit run in parallel). Falls back to OGL device
+        // dispatch if shared context creation failed.
+        //
+        // dispatch_async is safe here because the grid-aligned present loop sleeps
+        // for one full frame period (16-40ms) before calling present_frame().
+        // The async blit completes in <0.1ms, so by the time the present thread
+        // reads the shared pool slot, the blit+signal+swap are long finished.
+        // GPU-side sync is handled by the VK semaphore wait in vkQueueSubmit.
+        // This reduces per-output consume time from ~3ms (dispatch_sync thread
+        // round-trip) to ~0.1ms, allowing 100+ outputs at 60fps.
+        if (shared_pool_ && !affinity_ctx_ && frame.texture()) {
+            auto ogl_tex = std::dynamic_pointer_cast<accelerator::ogl::texture>(frame.texture());
+            if (ogl_tex) {
+                auto* pool = shared_pool_.get();
+                if (interop_ctx_) {
+                    interop_ctx_->dispatch_async([pool, ogl_tex] {
+                        pool->blit_from_texture(ogl_tex->id(), ogl_tex->width(), ogl_tex->height());
+                        pool->signal_gl();
+                        pool->swap();
+                    });
+                } else {
+                    ogl_device_->dispatch_async([pool, ogl_tex] {
+                        pool->blit_from_texture(ogl_tex->id(), ogl_tex->width(), ogl_tex->height());
+                        pool->signal_gl();
+                        pool->swap();
+                    });
+                }
             }
+        }
+
+        // Block until the present thread has consumed a frame (backpressure).
+        // This makes the display vsync the sole reference clock for the channel,
+        // eliminating drift between a software timer and the hardware refresh rate.
+        // Timeout allows buffer_depth frames to complete even under GL contention.
+        {
+            auto timeout_ms = static_cast<int64_t>(config_.buffer_depth * 1000.0 / format_desc_.fps) + 50;
+            std::unique_lock<std::mutex> lock(buffer_mutex_);
+            if (!buffer_cv_.wait_for(lock, std::chrono::milliseconds(timeout_ms), [this] {
+                    return buffer_.size() < static_cast<size_t>(config_.buffer_depth) || !running_;
+                })) {
+                // Timed out — present thread stalled (display lost, TDR, etc.)
+                graph_->set_tag(diagnostics::tag_severity::WARNING, "late-frame");
+                if (!buffer_.empty())
+                    buffer_.pop();
+            }
+            if (!running_)
+                return caspar::make_ready_future(true);
             buffer_.push(std::move(frame));
         }
         buffer_cv_.notify_one();
@@ -222,7 +280,9 @@ class vulkan_output_consumer : public core::frame_consumer
             }
         }
 
-        if (!found && device_->tier() == gpu_tier::consumer) {
+        if (!found) {
+            // Pro GPU without VK_KHR_display (e.g. RTX A-series on Windows desktop mode),
+            // or consumer GPU: use FSE window path.
             // EDID emulation: inject synthetic EDID if the target output has no monitor
             if (config_.edid_emulation) {
                 if (!nvapi_)
@@ -244,17 +304,13 @@ class vulkan_output_consumer : public core::frame_consumer
             if (config_.display_blanker)
                 launch_display_blanker();
             create_fse_window();
-        } else if (!found) {
-            CASPAR_THROW_EXCEPTION(caspar_exception()
-                                   << msg_info("Vulkan output not found: gpu=" + std::to_string(config_.gpu_index) +
-                                               " output=" + std::to_string(config_.output_index)));
         }
 
         // Create surface
         if (adapter_mismatch_) {
             CASPAR_LOG(warning) << print()
                                 << L" Display is on a non-NVIDIA adapter (e.g. IddCx/VDD). "
-                                   L"Vulkan presentation disabled — using GDI fallback for output.";
+                                   L"Vulkan presentation disabled — using GDI fallback (half-rate blit).";
             device_dead_ = true; // Prevents Vulkan present path; GDI path handles rendering
         } else if (device_->tier() == gpu_tier::pro && found) {
             // Convert fps to millihertz for display mode matching
@@ -294,11 +350,30 @@ class vulkan_output_consumer : public core::frame_consumer
                     // If left, these propagate to the OGL device destructor and crash on shutdown.
                     while (glGetError() != GL_NO_ERROR) {}
                 });
-                if (ogl_luid_valid && memcmp(ogl_luid, device_->device_luid(), 8) != 0) {
+                // Only declare mismatch if we got a valid non-zero LUID from both sides
+                const uint8_t zero_luid[8] = {};
+                if (ogl_luid_valid) {
+                    auto format_luid = [](const uint8_t* luid) -> std::wstring {
+                        std::wstringstream ss;
+                        for (int i = 0; i < 8; ++i)
+                            ss << std::hex << std::setfill(L'0') << std::setw(2) << static_cast<unsigned>(luid[i]);
+                        return ss.str();
+                    };
+                    CASPAR_LOG(debug) << print() << L" OGL LUID: " << format_luid(ogl_luid)
+                                     << L"  VK LUID: " << format_luid(device_->device_luid());
+                }
+                if (ogl_luid_valid &&
+                    memcmp(ogl_luid, zero_luid, 8) != 0 &&
+                    memcmp(device_->device_luid(), zero_luid, 8) != 0 &&
+                    memcmp(ogl_luid, device_->device_luid(), 8) != 0) {
                     gpu_match = false;
                     CASPAR_LOG(info) << print()
                         << L" OGL context is on a different GPU than Vulkan output (gpu_index="
                         << device_->gpu_index() << L"). Creating affinity bridge...";
+                } else if (ogl_luid_valid && memcmp(ogl_luid, device_->device_luid(), 8) != 0) {
+                    // LUIDs differ but one is zero — extension not reliable, assume same GPU
+                    CASPAR_LOG(debug) << print()
+                        << L" LUID comparison unreliable (zero LUID detected), assuming same GPU.";
                 }
             }
 
@@ -310,6 +385,19 @@ class vulkan_output_consumer : public core::frame_consumer
                         ogl_device_, *device_, format_desc_.width, format_desc_.height, use_16bit);
                     CASPAR_LOG(info) << print() << L" Zero-copy OGL→VK interop enabled (same GPU)"
                                      << (use_16bit ? L" (16-bit for HDR)." : L".");
+
+                    // Create a dedicated GL context (shares textures with OGL device)
+                    // for the interop blit. This avoids blocking the mixer's OGL thread.
+                    ogl_device_->dispatch_sync([this] {
+                        interop_ctx_ = std::make_unique<interop_context>();
+                        if (!interop_ctx_->valid()) {
+                            CASPAR_LOG(warning) << print()
+                                << L" Shared GL context unavailable, blit will use OGL device thread.";
+                            interop_ctx_.reset();
+                        } else {
+                            CASPAR_LOG(info) << print() << L" Dedicated interop GL context created.";
+                        }
+                    });
                 } catch (const std::exception& e) {
                     CASPAR_LOG(warning) << print() << L" Zero-copy unavailable, falling back to CPU: " << e.what();
                     shared_pool_.reset();
@@ -409,7 +497,8 @@ class vulkan_output_consumer : public core::frame_consumer
 
         CASPAR_LOG(info) << print() << L" initialized. Tier: "
                          << (adapter_mismatch_ ? L"GDI fallback (cross-adapter)" :
-                             device_->tier() == gpu_tier::pro ? L"Pro (direct display)" : L"Consumer (FSE)")
+                             (device_->tier() == gpu_tier::pro && found) ? L"Pro (direct display)" :
+                             device_->tier() == gpu_tier::pro ? L"Pro (FSE)" : L"Consumer (FSE)")
                          << (config_.delay_frames > 0 ? L" Delay: " + std::to_wstring(config_.delay_frames) + L" frames" : L"");
     }
 
@@ -445,7 +534,7 @@ class vulkan_output_consumer : public core::frame_consumer
         create_info.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
         create_info.preTransform     = caps.currentTransform;
         create_info.compositeAlpha   = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
-        create_info.presentMode      = VK_PRESENT_MODE_FIFO_KHR; // VSync
+        create_info.presentMode      = pick_present_mode();
         create_info.clipped          = VK_TRUE;
         create_info.oldSwapchain     = VK_NULL_HANDLE;
 
@@ -523,17 +612,56 @@ class vulkan_output_consumer : public core::frame_consumer
         return formats[0];
     }
 
+    VkPresentModeKHR pick_present_mode()
+    {
+        // MAILBOX is ideal for externally-paced playout:
+        //  - The channel clock controls frame submission rate (25fps from send())
+        //  - MAILBOX lets the GPU process frames immediately (no vsync queue stall)
+        //  - Display still refreshes at vsync, picking the latest submitted frame
+        //  - Since we submit at exactly display rate, every frame IS displayed
+        //  - Eliminates fence wait spikes caused by FIFO backpressure + GPU contention
+        // Fall back to FIFO_RELAXED (late frames present immediately instead of
+        // waiting for next vsync) or FIFO (guaranteed available per spec).
+        uint32_t count = 0;
+        vkGetPhysicalDeviceSurfacePresentModesKHR(
+            device_->physical_device(), swapchain_.surface, &count, nullptr);
+        std::vector<VkPresentModeKHR> modes(count);
+        vkGetPhysicalDeviceSurfacePresentModesKHR(
+            device_->physical_device(), swapchain_.surface, &count, modes.data());
+
+        // If present barrier is enabled, FIFO is required for sync group correctness
+        if (present_barrier_enabled_)
+            return VK_PRESENT_MODE_FIFO_KHR;
+
+        for (auto m : modes) {
+            if (m == VK_PRESENT_MODE_MAILBOX_KHR) {
+                CASPAR_LOG(info) << print() << L" Using MAILBOX present mode (low-latency).";
+                return VK_PRESENT_MODE_MAILBOX_KHR;
+            }
+        }
+        for (auto m : modes) {
+            if (m == VK_PRESENT_MODE_FIFO_RELAXED_KHR) {
+                CASPAR_LOG(info) << print() << L" Using FIFO_RELAXED present mode.";
+                return VK_PRESENT_MODE_FIFO_RELAXED_KHR;
+            }
+        }
+        return VK_PRESENT_MODE_FIFO_KHR;
+    }
+
     void create_sync_objects()
     {
         VkSemaphoreCreateInfo sem_info{};
         sem_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-        vkCreateSemaphore(device_->device(), &sem_info, nullptr, &swapchain_.image_available);
-        vkCreateSemaphore(device_->device(), &sem_info, nullptr, &swapchain_.render_finished);
 
         VkFenceCreateInfo fence_info{};
         fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
         fence_info.flags = VK_FENCE_CREATE_SIGNALED_BIT;
-        vkCreateFence(device_->device(), &fence_info, nullptr, &swapchain_.in_flight);
+
+        for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+            vkCreateSemaphore(device_->device(), &sem_info, nullptr, &swapchain_.frames[i].image_available);
+            vkCreateSemaphore(device_->device(), &sem_info, nullptr, &swapchain_.frames[i].render_finished);
+            vkCreateFence(device_->device(), &fence_info, nullptr, &swapchain_.frames[i].in_flight);
+        }
     }
 
     void create_command_pool()
@@ -548,8 +676,11 @@ class vulkan_output_consumer : public core::frame_consumer
         alloc_info.sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
         alloc_info.commandPool        = swapchain_.cmd_pool;
         alloc_info.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-        alloc_info.commandBufferCount = 1;
-        vkAllocateCommandBuffers(device_->device(), &alloc_info, &swapchain_.cmd_buffer);
+        alloc_info.commandBufferCount = MAX_FRAMES_IN_FLIGHT;
+        VkCommandBuffer cmd_buffers[MAX_FRAMES_IN_FLIGHT];
+        vkAllocateCommandBuffers(device_->device(), &alloc_info, cmd_buffers);
+        for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i)
+            swapchain_.frames[i].cmd_buffer = cmd_buffers[i];
     }
 
     void set_hdr_metadata()
@@ -675,6 +806,21 @@ class vulkan_output_consumer : public core::frame_consumer
         // pipeline delay (scalers, audio de-embedders, LED processors).
         const auto min_fill = static_cast<size_t>(config_.delay_frames + 1);
 
+        // Frame pacer: With MAILBOX present mode, vkQueuePresentKHR returns
+        // immediately (no vsync blocking), so the present loop must self-pace
+        // to the target frame rate.
+        //
+        // Grid-aligned pacing: all outputs at the same frame rate converge to
+        // the same time grid regardless of when they were started. This ensures
+        // frame-accurate sync across multiple outputs on the same GPU — they
+        // all compute the same next-deadline independently and submit within
+        // the same vsync window.
+        //
+        // With FIFO mode (Quadro Sync / present_barrier), vkWaitForFences
+        // provides hardware-locked pacing and the sleep is a no-op.
+        const auto frame_interval_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::microseconds(static_cast<int64_t>(1'000'000.0 / format_desc_.fps)));
+
         while (running_) {
             core::const_frame frame;
             {
@@ -692,27 +838,22 @@ class vulkan_output_consumer : public core::frame_consumer
             }
             buffer_cv_.notify_one(); // Wake send() if it's blocking on full buffer
 
+            // Compute next grid-aligned deadline from steady_clock epoch.
+            // Every output at this fps computes the same deadline value,
+            // so they all wake and submit within microseconds of each other.
+            {
+                auto now_ns = std::chrono::steady_clock::now().time_since_epoch().count();
+                auto interval = frame_interval_ns.count();
+                auto next_tick_ns = ((now_ns / interval) + 1) * interval;
+                std::this_thread::sleep_until(
+                    std::chrono::steady_clock::time_point(
+                        std::chrono::steady_clock::duration(next_tick_ns)));
+            }
+
             caspar::timer frame_timer;
             present_frame(frame);
-            graph_->set_value("frame-time", frame_timer.elapsed() * format_desc_.fps * 0.5);
-
-            // Measure VBlank drift: time between present and actual VBlank signal
-            if (vblank_supported_ && display_handle_ != VK_NULL_HANDLE) {
-                if (vblank_fence_ == VK_NULL_HANDLE) {
-                    vblank_fence_ = device_->create_vblank_fence(display_handle_);
-                }
-                if (vblank_fence_ != VK_NULL_HANDLE) {
-                    caspar::timer vblank_timer;
-                    auto wait_result = vkWaitForFences(device_->device(), 1, &vblank_fence_, VK_TRUE, 50000000);
-                    if (wait_result == VK_SUCCESS) {
-                        auto drift = vblank_timer.elapsed() * format_desc_.fps;
-                        graph_->set_value("vblank-drift", drift * 0.5);
-                    }
-                    // Destroy and re-create — VK_EXT_display_control fences are single-shot
-                    vkDestroyFence(device_->device(), vblank_fence_, nullptr);
-                    vblank_fence_ = VK_NULL_HANDLE;
-                }
-            }
+            auto frame_elapsed = frame_timer.elapsed();
+            graph_->set_value("frame-time", frame_elapsed * format_desc_.fps * 0.5);
 
             auto tick = tick_timer_.elapsed() * format_desc_.fps * 0.5;
             graph_->set_value("tick-time", tick);
@@ -728,7 +869,9 @@ class vulkan_output_consumer : public core::frame_consumer
                 fps_update_time_ = now;
                 std::wstringstream stats;
                 stats.precision(2);
-                stats << std::fixed << print() << L" fps: " << fps;
+                stats << std::fixed << print()
+                      << L" " << format_desc_.width << L"x" << format_desc_.height
+                      << L" fps: " << fps;
                 graph_->set_text(stats.str());
             }
 
@@ -797,7 +940,6 @@ class vulkan_output_consumer : public core::frame_consumer
             CASPAR_LOG(error) << print() << L" Device lost during swapchain recreation. Output permanently halted.";
             display_lost_ = true;
             device_dead_  = true;
-            core::diagnostics::osd::notify_gpu_driver_reset();
             return;
         }
 
@@ -882,30 +1024,42 @@ class vulkan_output_consumer : public core::frame_consumer
 
         auto dev = device_->device();
 
-        // Wait for previous frame to finish
-        vkWaitForFences(dev, 1, &swapchain_.in_flight, VK_TRUE, UINT64_MAX);
-        vkResetFences(dev, 1, &swapchain_.in_flight);
+        // Get current frame's sync objects
+        auto& frame_sync = swapchain_.frames[swapchain_.current_frame];
+
+        // Wait for this frame slot's previous use to finish.
+        // Use a finite timeout (2× frame period) to detect GPU stalls without
+        // blocking indefinitely. With MAILBOX mode the fence is typically ready
+        // immediately; with FIFO it may take up to one vsync period.
+        const uint64_t fence_timeout_ns = static_cast<uint64_t>(2'000'000'000.0 / format_desc_.fps); // 2 frames in ns
+        auto fence_result = vkWaitForFences(dev, 1, &frame_sync.in_flight, VK_TRUE, fence_timeout_ns);
+        if (fence_result == VK_TIMEOUT) {
+            // GPU severely behind — skip this frame rather than stall further
+            graph_->set_tag(diagnostics::tag_severity::WARNING, "dropped-frame");
+            return;
+        }
+        vkResetFences(dev, 1, &frame_sync.in_flight);
 
         // Acquire next swapchain image
         uint32_t image_index = 0;
         auto     result      = vkAcquireNextImageKHR(
-            dev, swapchain_.swapchain, UINT64_MAX, swapchain_.image_available, VK_NULL_HANDLE, &image_index);
+            dev, swapchain_.swapchain, UINT64_MAX, frame_sync.image_available, VK_NULL_HANDLE, &image_index);
 
         if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) {
             // VK_SUBOPTIMAL means the acquire succeeded and signaled image_available.
             // We must reset the semaphore before retrying acquire after recreation,
             // otherwise the retry would double-signal an already-signaled semaphore (UB).
-            vkDestroySemaphore(dev, swapchain_.image_available, nullptr);
+            vkDestroySemaphore(dev, frame_sync.image_available, nullptr);
             VkSemaphoreCreateInfo sem_info{};
             sem_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-            vkCreateSemaphore(dev, &sem_info, nullptr, &swapchain_.image_available);
+            vkCreateSemaphore(dev, &sem_info, nullptr, &frame_sync.image_available);
 
             recreate_swapchain();
             if (display_lost_)
                 return;
             // Retry acquire after recreation
             result = vkAcquireNextImageKHR(
-                dev, swapchain_.swapchain, UINT64_MAX, swapchain_.image_available, VK_NULL_HANDLE, &image_index);
+                dev, swapchain_.swapchain, UINT64_MAX, frame_sync.image_available, VK_NULL_HANDLE, &image_index);
             if (result != VK_SUCCESS) {
                 // NOTE: Dropping a frame here after recreation is expected (by design).
                 // The swapchain was just recreated; one dropped frame is acceptable.
@@ -920,12 +1074,13 @@ class vulkan_output_consumer : public core::frame_consumer
         }
 
         // Record command buffer: copy frame data → swapchain image
-        vkResetCommandBuffer(swapchain_.cmd_buffer, 0);
+        auto cmd = frame_sync.cmd_buffer;
+        vkResetCommandBuffer(cmd, 0);
 
         VkCommandBufferBeginInfo begin_info{};
         begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
         begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        vkBeginCommandBuffer(swapchain_.cmd_buffer, &begin_info);
+        vkBeginCommandBuffer(cmd, &begin_info);
 
         // Transition swapchain image to transfer dst
         VkImageMemoryBarrier barrier{};
@@ -943,7 +1098,7 @@ class vulkan_output_consumer : public core::frame_consumer
         barrier.srcAccessMask                   = 0;
         barrier.dstAccessMask                   = VK_ACCESS_TRANSFER_WRITE_BIT;
 
-        vkCmdPipelineBarrier(swapchain_.cmd_buffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                              VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
 
         // When color conversion is active, blit into intermediate image instead of swapchain.
@@ -971,7 +1126,7 @@ class vulkan_output_consumer : public core::frame_consumer
             int_barrier.srcAccessMask                   = 0;
             int_barrier.dstAccessMask                   = VK_ACCESS_TRANSFER_WRITE_BIT;
 
-            vkCmdPipelineBarrier(swapchain_.cmd_buffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                                  VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &int_barrier);
         }
 
@@ -992,55 +1147,40 @@ class vulkan_output_consumer : public core::frame_consumer
             int idx = (std::max)(0, config_.output_index - 1) % 6;
             VkClearColorValue clear_color = {{colors[idx][0], colors[idx][1], colors[idx][2], colors[idx][3]}};
             VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-            vkCmdClearColorImage(swapchain_.cmd_buffer, swapchain_.images[image_index],
+            vkCmdClearColorImage(cmd, swapchain_.images[image_index],
                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear_color, 1, &range);
         } else if (shared_pool_ && !affinity_ctx_ && frame.texture()) {
-            // Zero-copy path (same GPU): blit OGL texture → shared texture → VK blit to swapchain
-            auto ogl_tex = std::dynamic_pointer_cast<accelerator::ogl::texture>(frame.texture());
-            if (ogl_tex) {
-                // Blit on OGL thread: copy from mixer output into shared exportable texture
-                ogl_device_->dispatch_sync([&] {
-                    shared_pool_->blit_from_texture(ogl_tex->id(), ogl_tex->width(), ogl_tex->height());
-                    shared_pool_->signal_gl();
-                });
+            // Zero-copy path (same GPU): the OGL blit was already done in send()
+            // where it sequences naturally after the mixer (minimal contention).
+            // Here we just reference the shared pool's current VK image.
 
-                // Advance indices so current_vk_image() returns the slot just written
-                shared_pool_->swap();
+            // Transition shared image for transfer src
+            VkImageMemoryBarrier src_barrier{};
+            src_barrier.sType                           = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            src_barrier.oldLayout                       = VK_IMAGE_LAYOUT_UNDEFINED;
+            src_barrier.newLayout                       = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            src_barrier.srcQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
+            src_barrier.dstQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
+            src_barrier.image                           = shared_pool_->current_vk_image();
+            src_barrier.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+            src_barrier.subresourceRange.baseMipLevel   = 0;
+            src_barrier.subresourceRange.levelCount     = 1;
+            src_barrier.subresourceRange.baseArrayLayer = 0;
+            src_barrier.subresourceRange.layerCount     = 1;
+            src_barrier.srcAccessMask                   = 0;
+            src_barrier.dstAccessMask                   = VK_ACCESS_TRANSFER_READ_BIT;
 
-                // Transition shared image for transfer src
-                VkImageMemoryBarrier src_barrier{};
-                src_barrier.sType                           = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-                src_barrier.oldLayout                       = VK_IMAGE_LAYOUT_UNDEFINED;
-                src_barrier.newLayout                       = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-                src_barrier.srcQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
-                src_barrier.dstQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
-                src_barrier.image                           = shared_pool_->current_vk_image();
-                src_barrier.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
-                src_barrier.subresourceRange.baseMipLevel   = 0;
-                src_barrier.subresourceRange.levelCount     = 1;
-                src_barrier.subresourceRange.baseArrayLayer = 0;
-                src_barrier.subresourceRange.layerCount     = 1;
-                src_barrier.srcAccessMask                   = 0;
-                src_barrier.dstAccessMask                   = VK_ACCESS_TRANSFER_READ_BIT;
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                                 VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &src_barrier);
 
-                vkCmdPipelineBarrier(swapchain_.cmd_buffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                                     VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &src_barrier);
+            auto blit_region = compute_blit_region(shared_pool_->width(), shared_pool_->height());
+            vkCmdBlitImage(cmd, shared_pool_->current_vk_image(),
+                           VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           blit_dest_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                           1, &blit_region, VK_FILTER_LINEAR);
 
-                // Blit shared VK image → swapchain image (subregion-aware)
-                auto blit_region = compute_blit_region(shared_pool_->width(), shared_pool_->height());
-
-                vkCmdBlitImage(swapchain_.cmd_buffer, shared_pool_->current_vk_image(),
-                               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                               blit_dest_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                               1, &blit_region, VK_FILTER_LINEAR);
-
-                used_shared_pool = true;
-                wrote_to_intermediate = color_convert_active;
-            } else {
-                // Texture isn't OGL — CPU fallback (target swapchain directly;
-                // upload_frame_cpu writes BGRA8 which is incompatible with RGBA16F intermediate)
-                upload_frame_cpu(frame, swapchain_.images[image_index]);
-            }
+            used_shared_pool = true;
+            wrote_to_intermediate = color_convert_active;
         } else if (shared_pool_ && affinity_ctx_) {
             // Cross-GPU path: transfer frame from GPU A → GPU B
             bool transferred = false;
@@ -1089,7 +1229,7 @@ class vulkan_output_consumer : public core::frame_consumer
                     });
                     transferred = true;
                 } else {
-                    upload_frame_cpu(frame, swapchain_.images[image_index]);
+                    upload_frame_cpu(frame, swapchain_.images[image_index], cmd);
                 }
             }
 
@@ -1112,11 +1252,11 @@ class vulkan_output_consumer : public core::frame_consumer
                 src_barrier.srcAccessMask                   = 0;
                 src_barrier.dstAccessMask                   = VK_ACCESS_TRANSFER_READ_BIT;
 
-                vkCmdPipelineBarrier(swapchain_.cmd_buffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                                      VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &src_barrier);
 
                 auto blit_region = compute_blit_region(shared_pool_->width(), shared_pool_->height());
-                vkCmdBlitImage(swapchain_.cmd_buffer, shared_pool_->current_vk_image(),
+                vkCmdBlitImage(cmd, shared_pool_->current_vk_image(),
                                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                                blit_dest_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                                1, &blit_region, VK_FILTER_LINEAR);
@@ -1124,20 +1264,20 @@ class vulkan_output_consumer : public core::frame_consumer
                 used_shared_pool = true;
                 wrote_to_intermediate = color_convert_active;
             } else {
-                upload_frame_cpu(frame, swapchain_.images[image_index]);
+                upload_frame_cpu(frame, swapchain_.images[image_index], cmd);
             }
         } else if (interop_ && interop_->vk_image() != VK_NULL_HANDLE) {
             // Legacy interop path (manual handle import)
             auto blit_region = compute_blit_region(format_desc_.width, format_desc_.height);
 
-            vkCmdBlitImage(swapchain_.cmd_buffer, interop_->vk_image(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            vkCmdBlitImage(cmd, interop_->vk_image(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                            blit_dest_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit_region,
                            VK_FILTER_LINEAR);
             wrote_to_intermediate = color_convert_active;
         } else {
             // CPU fallback: upload pixel data via staging buffer
             // Always targets swapchain — BGRA8 pixels are incompatible with RGBA16F intermediate
-            upload_frame_cpu(frame, swapchain_.images[image_index]);
+            upload_frame_cpu(frame, swapchain_.images[image_index], cmd);
         }
 
         // ─── Color space conversion (compute shader) ───────────────────────────
@@ -1159,11 +1299,11 @@ class vulkan_output_consumer : public core::frame_consumer
             cs_barrier.srcAccessMask                   = VK_ACCESS_TRANSFER_WRITE_BIT;
             cs_barrier.dstAccessMask                   = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
 
-            vkCmdPipelineBarrier(swapchain_.cmd_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
                                  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &cs_barrier);
 
             // Dispatch compute shader
-            color_pipeline_->dispatch(swapchain_.cmd_buffer, color_pipeline_->width(), color_pipeline_->height());
+            color_pipeline_->dispatch(cmd, color_pipeline_->width(), color_pipeline_->height());
 
             // Transition intermediate: GENERAL → TRANSFER_SRC (for final blit to swapchain)
             cs_barrier.oldLayout     = VK_IMAGE_LAYOUT_GENERAL;
@@ -1171,7 +1311,7 @@ class vulkan_output_consumer : public core::frame_consumer
             cs_barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
             cs_barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
 
-            vkCmdPipelineBarrier(swapchain_.cmd_buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                                  VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &cs_barrier);
 
             // Blit intermediate → swapchain (swapchain is already in TRANSFER_DST from initial barrier)
@@ -1186,7 +1326,7 @@ class vulkan_output_consumer : public core::frame_consumer
             final_region.dstOffsets[0]  = {0, 0, 0};
             final_region.dstOffsets[1]  = {static_cast<int32_t>(swapchain_.width),
                                            static_cast<int32_t>(swapchain_.height), 1};
-            vkCmdBlitImage(swapchain_.cmd_buffer, color_pipeline_->image(),
+            vkCmdBlitImage(cmd, color_pipeline_->image(),
                            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                            swapchain_.images[image_index], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                            1, &final_region, VK_FILTER_LINEAR);
@@ -1208,17 +1348,17 @@ class vulkan_output_consumer : public core::frame_consumer
         present_barrier.srcAccessMask                   = VK_ACCESS_TRANSFER_WRITE_BIT;
         present_barrier.dstAccessMask                   = 0;
 
-        vkCmdPipelineBarrier(swapchain_.cmd_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
                              VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0, nullptr, 1, &present_barrier);
 
-        if (vkEndCommandBuffer(swapchain_.cmd_buffer) != VK_SUCCESS) {
+        if (vkEndCommandBuffer(cmd) != VK_SUCCESS) {
             CASPAR_LOG(error) << print() << L" vkEndCommandBuffer failed — skipping frame.";
             graph_->set_tag(diagnostics::tag_severity::WARNING, "dropped-frame");
             return;
         }
 
         // Submit — wait on shared pool semaphore too if zero-copy was used
-        VkSemaphore          wait_semaphores[2] = {swapchain_.image_available, VK_NULL_HANDLE};
+        VkSemaphore          wait_semaphores[2] = {frame_sync.image_available, VK_NULL_HANDLE};
         VkPipelineStageFlags wait_stages[2]     = {VK_PIPELINE_STAGE_TRANSFER_BIT,
                                                    VK_PIPELINE_STAGE_TRANSFER_BIT};
         uint32_t             wait_count         = 1;
@@ -1234,24 +1374,22 @@ class vulkan_output_consumer : public core::frame_consumer
         submit_info.pWaitSemaphores      = wait_semaphores;
         submit_info.pWaitDstStageMask    = wait_stages;
         submit_info.commandBufferCount   = 1;
-        submit_info.pCommandBuffers      = &swapchain_.cmd_buffer;
+        submit_info.pCommandBuffers      = &frame_sync.cmd_buffer;
         submit_info.signalSemaphoreCount = 1;
-        submit_info.pSignalSemaphores    = &swapchain_.render_finished;
+        submit_info.pSignalSemaphores    = &frame_sync.render_finished;
 
-        auto submit_result = vkQueueSubmit(device_->present_queue(), 1, &submit_info, swapchain_.in_flight);
+        auto submit_result = vkQueueSubmit(device_->present_queue(), 1, &submit_info, frame_sync.in_flight);
         if (submit_result == VK_ERROR_DEVICE_LOST) {
             CASPAR_LOG(error) << print() << L" GPU device lost (TDR) during submit. Output halted.";
             display_lost_ = true;
             device_dead_  = true;
-            core::diagnostics::osd::notify_gpu_driver_reset();
             return;
         }
-
         // Present
         VkPresentInfoKHR present_info{};
         present_info.sType              = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
         present_info.waitSemaphoreCount = 1;
-        present_info.pWaitSemaphores    = &swapchain_.render_finished;
+        present_info.pWaitSemaphores    = &frame_sync.render_finished;
         present_info.swapchainCount     = 1;
         present_info.pSwapchains        = &swapchain_.swapchain;
         present_info.pImageIndices      = &image_index;
@@ -1266,18 +1404,151 @@ class vulkan_output_consumer : public core::frame_consumer
             CASPAR_LOG(error) << print() << L" GPU device lost (TDR) during present. Output halted.";
             display_lost_ = true;
             device_dead_  = true;
-            core::diagnostics::osd::notify_gpu_driver_reset();
             return;
         }
 
         ++frames_presented_;
+
+        // Advance to next frame-in-flight slot for the next iteration
+        swapchain_.advance_frame();
+    }
+
+    void init_d3d11_fallback()
+    {
+        // Find the DXGI adapter that owns the target monitor.
+        // Creating the D3D11 device on this adapter avoids cross-adapter Present overhead.
+        HMONITOR target_mon = MonitorFromWindow(fse_hwnd_, MONITOR_DEFAULTTONEAREST);
+
+        Microsoft::WRL::ComPtr<IDXGIFactory2> dxgi_factory;
+        CreateDXGIFactory1(IID_PPV_ARGS(dxgi_factory.GetAddressOf()));
+        if (!dxgi_factory) {
+            CASPAR_LOG(info) << print() << L" CreateDXGIFactory1 failed. Using GDI fallback.";
+            return;
+        }
+
+        Microsoft::WRL::ComPtr<IDXGIAdapter1> target_adapter;
+        for (UINT i = 0; ; ++i) {
+            Microsoft::WRL::ComPtr<IDXGIAdapter1> adapter;
+            if (dxgi_factory->EnumAdapters1(i, &adapter) == DXGI_ERROR_NOT_FOUND)
+                break;
+            for (UINT j = 0; ; ++j) {
+                Microsoft::WRL::ComPtr<IDXGIOutput> output;
+                if (adapter->EnumOutputs(j, &output) == DXGI_ERROR_NOT_FOUND)
+                    break;
+                DXGI_OUTPUT_DESC odesc;
+                output->GetDesc(&odesc);
+                if (odesc.Monitor == target_mon) {
+                    target_adapter = adapter;
+                    break;
+                }
+            }
+            if (target_adapter)
+                break;
+        }
+
+        if (!target_adapter) {
+            // Target monitor not found in any DXGI adapter's outputs.
+            // This happens with IddCx/VDD — indirect display drivers don't expose DXGI outputs.
+            // D3D11 on the default adapter would cause cross-adapter Present stalls.
+            // Fall back to GDI which handles indirect displays natively.
+            CASPAR_LOG(info) << print()
+                             << L" Monitor not found in DXGI outputs (indirect display). Using GDI fallback.";
+            return;
+        }
+
+        D3D_FEATURE_LEVEL feature_level = D3D_FEATURE_LEVEL_11_0;
+        UINT flags = 0;
+#ifdef _DEBUG
+        flags |= D3D11_CREATE_DEVICE_DEBUG;
+#endif
+        DXGI_ADAPTER_DESC1 adesc;
+        target_adapter->GetDesc1(&adesc);
+        std::wstring adapter_name = adesc.Description;
+
+        HRESULT hr = D3D11CreateDevice(
+            target_adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, flags,
+            &feature_level, 1, D3D11_SDK_VERSION,
+            d3d_device_.ReleaseAndGetAddressOf(), nullptr,
+            d3d_context_.ReleaseAndGetAddressOf());
+        if (FAILED(hr)) {
+            CASPAR_LOG(info) << print() << L" D3D11 on adapter '" << adapter_name
+                             << L"' failed (hr=0x" << std::hex << hr << L"). Using GDI fallback.";
+            return;
+        }
+
+        // Get the factory from the device we actually created
+        Microsoft::WRL::ComPtr<IDXGIDevice> dxgi_device;
+        d3d_device_.As(&dxgi_device);
+        Microsoft::WRL::ComPtr<IDXGIAdapter> created_adapter;
+        dxgi_device->GetAdapter(created_adapter.GetAddressOf());
+        dxgi_factory.Reset();
+        created_adapter->GetParent(IID_PPV_ARGS(dxgi_factory.GetAddressOf()));
+
+        // Swap chain at source frame dimensions — DXGI_SCALING_STRETCH
+        // scales the buffer to the window size on Present.
+        DXGI_SWAP_CHAIN_DESC1 scd{};
+        scd.Width       = format_desc_.width;
+        scd.Height      = format_desc_.height;
+        scd.Format      = DXGI_FORMAT_B8G8R8A8_UNORM;
+        scd.SampleDesc  = {1, 0};
+        scd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+        scd.BufferCount = 2;
+        scd.SwapEffect  = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+        scd.Scaling     = DXGI_SCALING_STRETCH;
+
+        hr = dxgi_factory->CreateSwapChainForHwnd(
+            d3d_device_.Get(), fse_hwnd_, &scd, nullptr, nullptr,
+            d3d_swapchain_.ReleaseAndGetAddressOf());
+        if (FAILED(hr)) {
+            CASPAR_LOG(info) << print() << L" DXGI swap chain creation failed (hr=0x"
+                             << std::hex << hr << L"). Using GDI fallback.";
+            d3d_device_.Reset();
+            d3d_context_.Reset();
+            return;
+        }
+
+        dxgi_factory->MakeWindowAssociation(fse_hwnd_, DXGI_MWA_NO_ALT_ENTER);
+
+        CASPAR_LOG(info) << print() << L" D3D11 fallback on adapter '" << adapter_name
+                         << L"' (" << format_desc_.width << L"x" << format_desc_.height
+                         << L" FLIP_DISCARD, STRETCH scaling).";
+    }
+
+    void present_frame_d3d11(const core::const_frame& frame)
+    {
+        const auto& img = frame.image_data(0);
+        const auto* pixels = img.data();
+        if (!pixels || img.size() == 0)
+            return;
+
+        auto src_w = static_cast<int>(frame.width());
+        auto src_h = static_cast<int>(frame.height());
+        if (src_w == 0 || src_h == 0)
+            return;
+
+        // Upload pixels directly to swap chain back buffer
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> back_buffer;
+        d3d_swapchain_->GetBuffer(0, IID_PPV_ARGS(back_buffer.GetAddressOf()));
+        d3d_context_->UpdateSubresource(back_buffer.Get(), 0, nullptr,
+                                         pixels, static_cast<UINT>(src_w * 4), 0);
+
+        d3d_swapchain_->Present(1, 0); // vsync — adapter-local, no cross-adapter stall
     }
 
     void present_frame_gdi(const core::const_frame& frame)
     {
-        // GDI fallback: blit BGRA8 pixels to the FSE window via StretchDIBits.
-        // Used when the target display is on a different adapter (e.g. VDD/IddCx)
-        // where Vulkan can't present directly.
+        // GDI fallback for indirect displays (IddCx/VDD) that don't expose DXGI outputs.
+        // StretchDIBits acquires a global win32k.sys kernel lock, so with multiple outputs
+        // the system becomes sluggish. Throttle to half frame rate to reduce lock contention
+        // while still providing visual feedback for rehearsal/preview.
+        ++gdi_frame_counter_;
+        if (gdi_frame_counter_ % 2 != 0) {
+            // Skip this frame — sleep to maintain pacing
+            std::this_thread::sleep_for(std::chrono::microseconds(
+                static_cast<int64_t>(1000000.0 / format_desc_.fps)));
+            return;
+        }
+
         const auto& img = frame.image_data(0);
         const auto* pixels = img.data();
         if (!pixels || img.size() == 0)
@@ -1319,7 +1590,7 @@ class vulkan_output_consumer : public core::frame_consumer
             static_cast<int64_t>(1000000.0 / format_desc_.fps)));
     }
 
-    void upload_frame_cpu(const core::const_frame& frame, VkImage dst_image)
+    void upload_frame_cpu(const core::const_frame& frame, VkImage dst_image, VkCommandBuffer cmd)
     {
         // CPU path: create/reuse staging buffer and copy pixel data
         // WARNING: This path assumes swapchain format matches BGRA8.
@@ -1338,7 +1609,7 @@ class vulkan_output_consumer : public core::frame_consumer
             // Black clear — invisible on LED walls, correct for CLEAR/empty frames
             VkClearColorValue clear_color = {{0.0f, 0.0f, 0.0f, 0.0f}};
             VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-            vkCmdClearColorImage(swapchain_.cmd_buffer, dst_image,
+            vkCmdClearColorImage(cmd, dst_image,
                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear_color, 1, &range);
             return;
         }
@@ -1440,7 +1711,7 @@ class vulkan_output_consumer : public core::frame_consumer
         region.imageExtent       = {static_cast<uint32_t>(format_desc_.width),
                                     static_cast<uint32_t>(format_desc_.height), 1};
 
-        vkCmdCopyBufferToImage(swapchain_.cmd_buffer, staging_buffer_, dst_image,
+        vkCmdCopyBufferToImage(cmd, staging_buffer_, dst_image,
                                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
     }
 
@@ -1709,45 +1980,84 @@ class vulkan_output_consumer : public core::frame_consumer
 
         if (device_) {
             auto dev = device_->device();
-            vkDeviceWaitIdle(dev);
 
-            if (staging_buffer_ != VK_NULL_HANDLE) {
-                vkDestroyBuffer(dev, staging_buffer_, nullptr);
-                vkFreeMemory(dev, staging_memory_, nullptr);
+            // Wait for GPU to finish with a hard timeout to prevent unkillable process.
+            // NVIDIA driver can hang indefinitely in vkDeviceWaitIdle/vkWaitForFences
+            // when display timing is disrupted (disconnected, TDR, or GL contention deadlock).
+            // If timeout fires, skip ALL Vulkan resource destruction — any vkDestroy* call
+            // can also hang on the same stuck GPU operation. Let the OS clean up on exit.
+            bool gpu_stuck = device_dead_.load();
+            if (!gpu_stuck) {
+                auto idle_future = std::async(std::launch::async, [dev] {
+                    return vkDeviceWaitIdle(dev);
+                });
+                if (idle_future.wait_for(std::chrono::seconds(2)) == std::future_status::timeout) {
+                    CASPAR_LOG(warning) << print() << L" vkDeviceWaitIdle timed out (2s) — skipping Vulkan cleanup.";
+                    gpu_stuck = true;
+                } else {
+                    idle_future.get(); // Collect result (ignore errors during shutdown)
+                }
             }
 
-            if (vblank_fence_ != VK_NULL_HANDLE) {
-                vkDestroyFence(dev, vblank_fence_, nullptr);
-                vblank_fence_ = VK_NULL_HANDLE;
+            if (!gpu_stuck) {
+                if (staging_buffer_ != VK_NULL_HANDLE) {
+                    vkDestroyBuffer(dev, staging_buffer_, nullptr);
+                    vkFreeMemory(dev, staging_memory_, nullptr);
+                }
+
+                if (vblank_fence_ != VK_NULL_HANDLE) {
+                    vkDestroyFence(dev, vblank_fence_, nullptr);
+                    vblank_fence_ = VK_NULL_HANDLE;
+                }
+
+                for (auto& iv : swapchain_.image_views)
+                    vkDestroyImageView(dev, iv, nullptr);
+
+                if (swapchain_.swapchain != VK_NULL_HANDLE)
+                    vkDestroySwapchainKHR(dev, swapchain_.swapchain, nullptr);
+                for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+                    if (swapchain_.frames[i].image_available != VK_NULL_HANDLE)
+                        vkDestroySemaphore(dev, swapchain_.frames[i].image_available, nullptr);
+                    if (swapchain_.frames[i].render_finished != VK_NULL_HANDLE)
+                        vkDestroySemaphore(dev, swapchain_.frames[i].render_finished, nullptr);
+                    if (swapchain_.frames[i].in_flight != VK_NULL_HANDLE)
+                        vkDestroyFence(dev, swapchain_.frames[i].in_flight, nullptr);
+                }
+                if (swapchain_.cmd_pool != VK_NULL_HANDLE)
+                    vkDestroyCommandPool(dev, swapchain_.cmd_pool, nullptr);
+                if (swapchain_.surface != VK_NULL_HANDLE)
+                    vkDestroySurfaceKHR(device_->instance(), swapchain_.surface, nullptr);
+            } else {
+                CASPAR_LOG(warning) << print() << L" GPU stuck — Vulkan resources leaked (OS will reclaim on exit).";
             }
 
-            for (auto& iv : swapchain_.image_views)
-                vkDestroyImageView(dev, iv, nullptr);
-
-            if (swapchain_.swapchain != VK_NULL_HANDLE)
-                vkDestroySwapchainKHR(dev, swapchain_.swapchain, nullptr);
-            if (swapchain_.image_available != VK_NULL_HANDLE)
-                vkDestroySemaphore(dev, swapchain_.image_available, nullptr);
-            if (swapchain_.render_finished != VK_NULL_HANDLE)
-                vkDestroySemaphore(dev, swapchain_.render_finished, nullptr);
-            if (swapchain_.in_flight != VK_NULL_HANDLE)
-                vkDestroyFence(dev, swapchain_.in_flight, nullptr);
-            if (swapchain_.cmd_pool != VK_NULL_HANDLE)
-                vkDestroyCommandPool(dev, swapchain_.cmd_pool, nullptr);
-            if (swapchain_.surface != VK_NULL_HANDLE)
-                vkDestroySurfaceKHR(device_->instance(), swapchain_.surface, nullptr);
-        }
-
-        // Destroy resources that reference VkDevice handles BEFORE destroying the device.
-        // Order matters: color_pipeline_ and cuda_peer_ hold raw VkDevice/VkQueue handles.
-        color_pipeline_.reset();
+            // Destroy resources that reference VkDevice handles BEFORE destroying the device.
+            // Order matters: color_pipeline_ and cuda_peer_ hold raw VkDevice/VkQueue handles.
+            if (!gpu_stuck) {
+                color_pipeline_.reset();
 #ifdef CASPAR_CUDA_PEER_ENABLED
-        cuda_peer_.reset();
+                cuda_peer_.reset();
 #endif
-        affinity_ctx_.reset();
-        interop_.reset();
-        shared_pool_.reset();
-        device_.reset();
+                interop_ctx_.reset();
+                affinity_ctx_.reset();
+                interop_.reset();
+                shared_pool_.reset();
+                device_.reset();
+            } else {
+                // Release unique_ptrs without calling destructors that touch VkDevice.
+                // The leaked async thread holds a VkDevice reference that prevents kernel cleanup,
+                // but the OS will reclaim all GPU resources when the process terminates.
+                color_pipeline_.release();
+#ifdef CASPAR_CUDA_PEER_ENABLED
+                cuda_peer_.release();
+#endif
+                interop_ctx_.release();
+                affinity_ctx_.release();
+                interop_.release();
+                shared_pool_.release();
+                device_.release();
+            }
+        }
 
         // Remove injected EDID before releasing NvAPI
         if (injected_edid_display_id_ != 0 && nvapi_) {
@@ -1755,6 +2065,11 @@ class vulkan_output_consumer : public core::frame_consumer
             injected_edid_display_id_ = 0;
         }
         nvapi_.reset();
+
+        // Release D3D11 fallback resources before destroying the window
+        d3d_swapchain_.Reset();
+        d3d_context_.Reset();
+        d3d_device_.Reset();
 
         if (fse_hwnd_) {
             // Signal message thread to stop, then post WM_NULL to wake MsgWait.
@@ -1783,6 +2098,7 @@ class vulkan_output_consumer : public core::frame_consumer
     std::unique_ptr<vulkan_device>   device_;
     std::unique_ptr<vulkan_interop>  interop_;
     std::unique_ptr<shared_texture_pool> shared_pool_;
+    std::unique_ptr<interop_context> interop_ctx_;     // Dedicated GL context for blit (scalability)
     std::unique_ptr<gpu_affinity_context> affinity_ctx_; // For cross-GPU interop
 #ifdef CASPAR_CUDA_PEER_ENABLED
     std::unique_ptr<cuda_peer_transfer> cuda_peer_;    // CUDA peer DMA (cross-GPU, no CPU copy)
@@ -1824,6 +2140,8 @@ class vulkan_output_consumer : public core::frame_consumer
     bool                             vblank_supported_ = false;
     VkFence                          vblank_fence_     = VK_NULL_HANDLE;
 
+
+
     // FPS counter
     std::chrono::steady_clock::time_point fps_update_time_ = std::chrono::steady_clock::now();
     int                              fps_frame_count_ = 0;
@@ -1835,6 +2153,14 @@ class vulkan_output_consumer : public core::frame_consumer
 
     // EDID emulation state
     uint32_t                         injected_edid_display_id_ = 0;
+
+    // D3D11 fallback (replaces GDI StretchDIBits for cross-adapter outputs)
+    Microsoft::WRL::ComPtr<ID3D11Device>        d3d_device_;
+    Microsoft::WRL::ComPtr<ID3D11DeviceContext>  d3d_context_;
+    Microsoft::WRL::ComPtr<IDXGISwapChain1>      d3d_swapchain_;
+
+    // GDI fallback frame throttle (reduces win32k.sys lock contention)
+    uint64_t                         gdi_frame_counter_ = 0;
 };
 
 } // anonymous namespace

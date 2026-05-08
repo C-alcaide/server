@@ -24,12 +24,13 @@ Low-latency, direct-to-display GPU output consumer for CasparCG. Bypasses the de
 
 ## Architecture Overview
 
-The module is organized into seven layers:
+The module is organized into eight layers:
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
 │ vulkan_output_consumer          (core::frame_consumer impl)  │
 │   ├── Frame buffering + present loop (dedicated thread)      │
+│   ├── Grid-aligned frame pacing (multi-output sync)          │
 │   ├── Swapchain management + hot-plug recovery               │
 │   └── Identify overlay                                       │
 ├──────────────────────────────────────────────────────────────┤
@@ -43,8 +44,13 @@ The module is organized into seven layers:
 │   ├── VK_KHR_display (Pro) / Win32 surface (Consumer)        │
 │   └── VBlank fence via VK_EXT_display_control                │
 ├──────────────────────────────────────────────────────────────┤
+│ interop_context                 (Dedicated GL blit thread)    │
+│   ├── Shared WGL context (shares textures with OGL device)   │
+│   ├── Own worker thread ("VK Interop GL")                    │
+│   └── dispatch_async() for non-blocking blit + signal        │
+├──────────────────────────────────────────────────────────────┤
 │ shared_texture_pool             (OGL ↔ VK zero-copy)         │
-│   ├── Double-buffered GL_EXT_memory_object textures          │
+│   ├── Triple-buffered GL_EXT_memory_object textures          │
 │   ├── GL_EXT_semaphore / VK_KHR_external_semaphore sync      │
 │   └── 8-bit (SDR) or 16-bit (HDR) pixel format               │
 ├──────────────────────────────────────────────────────────────┤
@@ -73,13 +79,15 @@ The module is organized into seven layers:
 CasparCG Mixer (OGL, GPU A)
    │
    ├─ Same-GPU zero-copy path (preferred):
-   │   OGL texture ──blit──▸ shared_texture_pool (GL_EXT_memory_object)
-   │                           │
-   │                    Win32 HANDLE export
-   │                           │
-   │                  VkImage (VK_KHR_external_memory_win32)
-   │                           │
-   │                    vkCmdBlitImage ──▸ swapchain image
+   │   send() ──dispatch_async──▸ interop_context (dedicated GL thread)
+   │                                │
+   │              OGL texture ──blit──▸ shared_texture_pool (GL_EXT_memory_object)
+   │                                     │  signal_gl() + swap()
+   │                              Win32 HANDLE export
+   │                                     │
+   │                            VkImage (VK_KHR_external_memory_win32)
+   │                                     │
+   │              [present thread]  vkCmdBlitImage ──▸ swapchain image
    │
    ├─ Cross-GPU CUDA peer DMA path (fastest cross-GPU):
    │   OGL texture ──cudaGraphicsGLRegisterImage──▸ CUDA array (GPU A)
@@ -111,7 +119,7 @@ CasparCG Mixer (OGL, GPU A)
    └──▸ vkQueuePresentKHR ──▸ Display
 ```
 
-**Same-GPU zero-copy** eliminates all CPU-side pixel copies. The OGL mixer output is blitted into a shared texture backed by exportable GPU memory (`GL_EXT_memory_object`), which is imported into Vulkan as a `VkImage` via a Win32 `HANDLE`. Synchronization between the OpenGL and Vulkan timelines uses paired `GL_EXT_semaphore` / `VkSemaphore` objects.
+**Same-GPU zero-copy** eliminates all CPU-side pixel copies. The OGL mixer output is blitted into a shared texture backed by exportable GPU memory (`GL_EXT_memory_object`), which is imported into Vulkan as a `VkImage` via a Win32 `HANDLE`. The blit runs on a dedicated `interop_context` GL thread via `dispatch_async()`, so the mixer's OGL device thread is never blocked — the mixer and blit run fully in parallel. Synchronization between the OpenGL and Vulkan timelines uses paired `GL_EXT_semaphore` / `VkSemaphore` objects.
 
 **Cross-GPU CUDA peer DMA** uses the GPU's DMA copy engines to transfer pixels directly from GPU A to GPU B over PCIe or NVLink — no CPU involvement. The frame arrives at GPU B as a CUDA-written GL texture, which is then blitted into the shared interop pool for Vulkan presentation. This is the fastest cross-GPU path (~15 GB/s on PCIe 3.0 x16, up to 600 GB/s on NVLink).
 
@@ -129,18 +137,24 @@ The module detects the GPU capability tier at runtime and adapts its output stra
 
 | Tier | Detection | Output Method | Features |
 |------|-----------|---------------|----------|
-| **Pro** | `VK_KHR_display` extension available | Direct display mode — bypasses the OS compositor entirely. The GPU drives the display output at the hardware level. | VBlank fences, display mode selection, present barriers |
-| **Consumer** | No `VK_KHR_display` | Borderless fullscreen window with `VkSurfaceKHR` via Win32 | Basic frame delivery, no VBlank timing |
+| **Pro** | `VK_KHR_display`, or `VK_NV_present_barrier`, or recognized professional GPU name | Direct display mode (if `VK_KHR_display` available) or fullscreen exclusive (FSE) window | VBlank fences, display mode selection, present barriers |
+| **Consumer** | None of the above | Borderless fullscreen window with `VkSurfaceKHR` via Win32 | Basic frame delivery, no VBlank timing |
 
-**Pro tier** is available on NVIDIA Quadro, RTX A-series, and RTX Pro GPUs when the display is not managed by the Windows Desktop Window Manager (DWM). This typically requires the display to be configured as a "dedicated display" in the NVIDIA Control Panel, or to be connected via a Quadro Sync II board.
+**Pro tier** is detected when any of the following is true:
+1. `VK_KHR_display` extension is available — the display is configured as "dedicated" in NVIDIA Control Panel
+2. `VK_NV_present_barrier` extension is available — indicates Quadro Sync hardware
+3. The GPU name matches a known professional model (Quadro, RTX A-series, Ada, Tesla)
+
+When `VK_KHR_display` is available, the module uses direct display mode (bypasses the OS compositor entirely). When the GPU is detected as Pro but `VK_KHR_display` is not available (e.g., display not set to dedicated mode), the module falls back to a fullscreen exclusive (FSE) window path while still reporting Pro tier.
 
 **Consumer tier** creates a `WS_POPUP | WS_EX_TOPMOST` borderless window covering the target monitor and presents through the standard Vulkan WSI (Window System Integration) path. This still benefits from Vulkan's explicit swapchain control and VSync timing, but does not bypass the desktop compositor.
 
-The tier is logged at startup:
+The tier label logged at startup indicates the path used:
 
 ```
-[vulkan_output] GPU 0 Output 1: NVIDIA RTX A4000 - DP-1 [Pro]
-[vulkan_output] GPU 0 Output 2: NVIDIA RTX A4000 - HDMI-1 [Consumer]
+[vulkan_output] ... initialized. Tier: Pro (direct display)   -- VK_KHR_display path
+[vulkan_output] ... initialized. Tier: Pro (FSE)              -- Pro GPU, fullscreen exclusive
+[vulkan_output] ... initialized. Tier: Consumer (FSE)         -- Consumer GPU, fullscreen exclusive
 ```
 
 ---
@@ -166,7 +180,7 @@ For example, if an LED processor adds 2 frames of latency, setting `<delay>2</de
 
 The swapchain is created with:
 
-- `VK_PRESENT_MODE_FIFO_KHR` — hardware VSync, guaranteed tear-free
+- `VK_PRESENT_MODE_MAILBOX_KHR` (preferred) — the GPU processes frames immediately without vsync queue blocking. The display still refreshes at vsync, picking the latest submitted frame. Since the present loop self-paces at exactly the target frame rate (via grid-aligned pacing), every frame is displayed. Falls back to `FIFO_RELAXED` or `FIFO` if MAILBOX is unavailable. When present barriers are enabled (`<sync-group>`), FIFO is forced for sync group correctness.
 - Image count = `max(minImageCount + 1, buffer_depth)` — ensures enough images for smooth pipelining
 - Transfer destination usage — frames are blitted/copied into swapchain images
 
@@ -382,6 +396,28 @@ The intermediate image is RGBA16F (16-bit float), providing sufficient precision
 ---
 
 ## Synchronization
+
+### Grid-Aligned Frame Pacing
+
+Each vulkan output's present thread independently computes the same absolute deadline from `steady_clock`'s epoch, so all outputs at the same frame rate wake and present at the same wall-clock instant — without any inter-output communication or coordinator.
+
+```
+interval  = 1s / fps                             (e.g. 40ms at 25fps, 16.67ms at 60fps)
+now_ns    = steady_clock::now()
+deadline  = ((now_ns / interval) + 1) * interval  (next grid tick)
+sleep_until(deadline)
+```
+
+This snaps every output to the same absolute time grid. For example, at 25fps the grid ticks are at 40ms, 80ms, 120ms, 160ms... from the `steady_clock` epoch. Every output running at the same fps independently computes the same next tick and sleeps to it.
+
+**Why they stay in sync:**
+- **Same fps → same grid** — all outputs at the same frame rate hit the same grid ticks
+- **No drift** — the grid is anchored to the `steady_clock` epoch, not relative to the previous frame
+- **Independent threads** — each output has its own present thread, so one slow output can't block another
+- **Buffer queue absorbs jitter** — the depth-3 queue tolerates up to 3 frames of `send()` timing variation
+- **GPU semaphore sync** — `vkQueueSubmit` waits on the GL interop semaphore, ensuring the GPU won't start the Vulkan blit until the GL blit has finished (driver-level, no CPU involvement)
+
+With MAILBOX present mode, `vkQueuePresentKHR` returns immediately (no vsync blocking), so the grid-aligned sleep is the sole pacing mechanism. With FIFO mode (used when present barriers are enabled), `vkWaitForFences` provides hardware-locked pacing and the grid sleep is effectively a no-op.
 
 ### Vulkan Present Barriers (`VK_NV_present_barrier`)
 

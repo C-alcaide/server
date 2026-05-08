@@ -24,6 +24,7 @@
 
 #include <algorithm>
 #include <stdexcept>
+#include <string>
 
 namespace caspar { namespace vulkan_output {
 
@@ -47,6 +48,31 @@ VKAPI_ATTR VkBool32 VKAPI_CALL debug_callback(VkDebugUtilsMessageSeverityFlagBit
         CASPAR_LOG(warning) << "[vulkan] " << data->pMessage;
     }
     return VK_FALSE;
+}
+
+// Detect professional GPU by device name pattern.
+// NVIDIA's professional GPUs: Quadro (legacy), RTX A-series (Ampere/Ada workstation),
+// RTX 4000/5000/6000 Ada (current workstation line).
+bool is_professional_gpu(const char* name)
+{
+    std::string n(name);
+    // Case-insensitive substring matching
+    std::string lower;
+    lower.resize(n.size());
+    std::transform(n.begin(), n.end(), lower.begin(), ::tolower);
+
+    if (lower.find("quadro") != std::string::npos)
+        return true;
+    // RTX A-series: "RTX A2000", "RTX A4000", "RTX A5000", "RTX A6000"
+    if (lower.find("rtx a") != std::string::npos)
+        return true;
+    // Ada workstation: "RTX 4000 Ada", "RTX 5000 Ada", "RTX 6000 Ada"
+    if (lower.find("ada") != std::string::npos)
+        return true;
+    // Tesla / data center
+    if (lower.find("tesla") != std::string::npos)
+        return true;
+    return false;
 }
 
 } // namespace
@@ -184,15 +210,18 @@ void vulkan_device::select_physical_device(int gpu_index)
             has_present_barrier = true;
     }
 
+    VkPhysicalDeviceProperties props;
+    vkGetPhysicalDeviceProperties(physical_device_, &props);
+
     if (has_display)
+        tier_ = gpu_tier::pro;
+    else if (has_present_barrier || is_professional_gpu(props.deviceName))
         tier_ = gpu_tier::pro;
     else if (has_fse)
         tier_ = gpu_tier::consumer;
     else
         tier_ = gpu_tier::none;
 
-    VkPhysicalDeviceProperties props;
-    vkGetPhysicalDeviceProperties(physical_device_, &props);
     CASPAR_LOG(info) << L"[vulkan_output] Selected GPU " << gpu_index << L": " << props.deviceName
                      << L" (tier=" << (tier_ == gpu_tier::pro ? L"pro" : tier_ == gpu_tier::consumer ? L"consumer" : L"none")
                      << L", ext_mem=" << has_ext_mem
@@ -239,6 +268,13 @@ void vulkan_device::create_logical_device()
     queue_info.queueCount       = 1;
     queue_info.pQueuePriorities = &queue_priority;
 
+    // Request high GPU scheduling priority so Vulkan present work preempts
+    // other GPU clients (e.g. OpenGL screen consumer, DWM compositor).
+    VkDeviceQueueGlobalPriorityCreateInfoKHR priority_info{};
+    priority_info.sType          = VK_STRUCTURE_TYPE_DEVICE_QUEUE_GLOBAL_PRIORITY_CREATE_INFO_KHR;
+    priority_info.globalPriority = VK_QUEUE_GLOBAL_PRIORITY_HIGH_KHR;
+    bool use_global_priority     = false;
+
     // Core required extension (must have)
     std::vector<const char*> required_extensions = {
         VK_KHR_SWAPCHAIN_EXTENSION_NAME,
@@ -251,6 +287,7 @@ void vulkan_device::create_logical_device()
         VK_KHR_EXTERNAL_SEMAPHORE_EXTENSION_NAME,
         VK_KHR_EXTERNAL_SEMAPHORE_WIN32_EXTENSION_NAME,
         VK_EXT_HDR_METADATA_EXTENSION_NAME,
+        VK_KHR_GLOBAL_PRIORITY_EXTENSION_NAME,
     };
 
     if (tier_ == gpu_tier::consumer) {
@@ -294,6 +331,14 @@ void vulkan_device::create_logical_device()
         for (const auto* ext : device_extensions)
             enabled_extensions_.emplace_back(ext);
 
+        // Chain global priority if the extension was enabled
+        if (std::find_if(device_extensions.begin(), device_extensions.end(), [](const char* e) {
+                return strcmp(e, VK_KHR_GLOBAL_PRIORITY_EXTENSION_NAME) == 0;
+            }) != device_extensions.end()) {
+            queue_info.pNext = &priority_info;
+            use_global_priority = true;
+        }
+
         VkPhysicalDeviceFeatures features{};
 
         VkDeviceCreateInfo device_info{};
@@ -304,7 +349,35 @@ void vulkan_device::create_logical_device()
         device_info.ppEnabledExtensionNames = device_extensions.data();
         device_info.pEnabledFeatures        = &features;
 
-        VK_CHECK(vkCreateDevice(physical_device_, &device_info, nullptr, &device_));
+        VkResult create_result = VK_ERROR_UNKNOWN;
+
+        // Try creating device with HIGH priority first, fall back to MEDIUM, then no priority
+        if (use_global_priority) {
+            priority_info.globalPriority = VK_QUEUE_GLOBAL_PRIORITY_HIGH_KHR;
+            create_result = vkCreateDevice(physical_device_, &device_info, nullptr, &device_);
+            if (create_result == VK_SUCCESS) {
+                CASPAR_LOG(info) << L"[vulkan] Queue created with HIGH global priority.";
+            } else {
+                CASPAR_LOG(debug) << L"[vulkan] HIGH priority rejected (code " << create_result
+                                  << L"), trying MEDIUM...";
+                priority_info.globalPriority = VK_QUEUE_GLOBAL_PRIORITY_MEDIUM_KHR;
+                create_result = vkCreateDevice(physical_device_, &device_info, nullptr, &device_);
+                if (create_result == VK_SUCCESS) {
+                    CASPAR_LOG(info) << L"[vulkan] Queue created with MEDIUM global priority.";
+                } else {
+                    CASPAR_LOG(debug) << L"[vulkan] MEDIUM priority rejected, creating without priority.";
+                    queue_info.pNext = nullptr;
+                    create_result = vkCreateDevice(physical_device_, &device_info, nullptr, &device_);
+                }
+            }
+        } else {
+            create_result = vkCreateDevice(physical_device_, &device_info, nullptr, &device_);
+        }
+
+        if (create_result != VK_SUCCESS) {
+            CASPAR_THROW_EXCEPTION(caspar_exception()
+                                   << msg_info("vkCreateDevice failed: " + std::to_string(create_result)));
+        }
     }
 
     vkGetDeviceQueue(device_, present_queue_family_, 0, &present_queue_);
@@ -511,14 +584,20 @@ std::vector<display_info> vulkan_device::enumerate_displays()
 
         bool has_display = false;
         bool has_fse     = false;
+        bool has_present_barrier = false;
         for (const auto& ext : ext_props) {
             if (strcmp(ext.extensionName, VK_KHR_DISPLAY_EXTENSION_NAME) == 0)
                 has_display = true;
             if (strcmp(ext.extensionName, VK_EXT_FULL_SCREEN_EXCLUSIVE_EXTENSION_NAME) == 0)
                 has_fse = true;
+            if (strcmp(ext.extensionName, VK_NV_PRESENT_BARRIER_EXTENSION_NAME) == 0)
+                has_present_barrier = true;
         }
 
-        gpu_tier tier = has_display ? gpu_tier::pro : has_fse ? gpu_tier::consumer : gpu_tier::none;
+        gpu_tier tier = has_display ? gpu_tier::pro
+                      : (has_present_barrier || is_professional_gpu(props.deviceName)) ? gpu_tier::pro
+                      : has_fse ? gpu_tier::consumer
+                      : gpu_tier::none;
 
         if (has_display) {
             // Enumerate physical displays via VK_KHR_display

@@ -115,7 +115,7 @@ class shared_texture_pool
     uint32_t                                  height_     = 0;
     bool                                      use_16bit_  = false;
 
-    static constexpr int BUFFER_COUNT = 2;
+    static constexpr int BUFFER_COUNT = 3;
     slot                 slots_[BUFFER_COUNT];
     int                  write_index_ = 0;
     int                  read_index_  = 0;
