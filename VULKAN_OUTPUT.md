@@ -80,6 +80,7 @@ The module is organized into ten layers:
 │   ├── EDID readback (HDR capability, luminance, bit depth)   │
 │   ├── EDID injection / persistence (headless outputs)        │
 │   ├── Dedicated display acquire / release (crash-safe blank) │
+│   ├── Hardware HDR (NvAPI UHDA: display engine PQ + BT.2020) │
 │   ├── Quadro Sync II framelock configuration                 │
 │   └── GSync status monitoring                                │
 └──────────────────────────────────────────────────────────────┘
@@ -164,7 +165,7 @@ The module detects the GPU capability tier at runtime and adapts its output stra
 
 | Tier | Detection | Output Method | Features |
 |------|-----------|---------------|----------|
-| **Pro** | `VK_KHR_display`, or `VK_NV_present_barrier`, or recognized professional GPU name | Direct display mode (if `VK_KHR_display` available) or fullscreen exclusive (FSE) window | VBlank fences, display mode selection, present barriers |
+| **Pro** | `VK_KHR_display`, or `VK_NV_present_barrier`, or recognized professional GPU name | Direct display mode (if `VK_KHR_display` available) or fullscreen window | VBlank fences, display mode selection, present barriers |
 | **Consumer** | None of the above | Borderless fullscreen window with `VkSurfaceKHR` via Win32 | Basic frame delivery, no VBlank timing |
 
 **Pro tier** is detected when any of the following is true:
@@ -172,16 +173,18 @@ The module detects the GPU capability tier at runtime and adapts its output stra
 2. `VK_NV_present_barrier` extension is available — indicates Quadro Sync hardware
 3. The GPU name matches a known professional model (Quadro, RTX A-series, Ada, Tesla)
 
-When `VK_KHR_display` is available, the module uses direct display mode (bypasses the OS compositor entirely). When the GPU is detected as Pro but `VK_KHR_display` is not available (e.g., display not set to dedicated mode), the module falls back to a fullscreen exclusive (FSE) window path while still reporting Pro tier.
+When `VK_KHR_display` is available, the module uses direct display mode (bypasses the OS compositor entirely). When the GPU is detected as Pro but `VK_KHR_display` is not available (e.g., display not set to dedicated mode), the module falls back to a fullscreen window path while still reporting Pro tier.
 
-**Consumer tier** creates a `WS_POPUP | WS_EX_TOPMOST` borderless window covering the target monitor and presents through the standard Vulkan WSI (Window System Integration) path. This still benefits from Vulkan's explicit swapchain control and VSync timing, but does not bypass the desktop compositor.
+The fullscreen window path uses `VK_EXT_full_screen_exclusive` with `VK_FULL_SCREEN_EXCLUSIVE_DEFAULT_EXT` mode, which hints to the driver that it may bypass DWM composition when the window covers the entire display. If the driver does not support FSE or swapchain creation fails with the FSE chain, the module silently retries without it.
+
+**Consumer tier** creates a `WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_APPWINDOW` borderless window covering the target monitor and presents through the standard Vulkan WSI (Window System Integration) path. This still benefits from Vulkan's explicit swapchain control and VSync timing.
 
 The tier label logged at startup indicates the path used:
 
 ```
 [vulkan_output] ... initialized. Tier: Pro (direct display)   -- VK_KHR_display path
-[vulkan_output] ... initialized. Tier: Pro (FSE)              -- Pro GPU, fullscreen exclusive
-[vulkan_output] ... initialized. Tier: Consumer (FSE)         -- Consumer GPU, fullscreen exclusive
+[vulkan_output] ... initialized. Tier: Pro (fullscreen)       -- Pro GPU, fullscreen window
+[vulkan_output] ... initialized. Tier: Consumer (fullscreen)  -- Consumer GPU, fullscreen window
 ```
 
 ---
@@ -336,6 +339,38 @@ When `<edid-auto-hdr>true</edid-auto-hdr>` is set, the module reads the connecte
 
 This is useful in multi-display setups where some outputs are HDR-capable and others are not — the module adapts without manual configuration.
 
+### Hardware HDR Acceleration (NvAPI Display Engine)
+
+On NVIDIA GPUs, when HDR output is configured (PQ or HLG), the module attempts to enable hardware-accelerated color conversion via `NvAPI_Disp_HdrColorControl`. This uses the GPU's **display engine** — dedicated scanout-stage hardware — to perform PQ EOTF encoding and BT.709→BT.2020 gamut mapping, entirely bypassing the compute shader pipeline.
+
+**How it works:**
+
+1. The module resolves the output index to an NvAPI display ID
+2. Queries `NvAPI_Disp_GetHdrCapabilities` to verify ST2084 PQ support
+3. Calls `NvAPI_Disp_HdrColorControl` with `NV_HDR_MODE_UHDA`
+4. The Vulkan swapchain receives linear scRGB FP16 values (RGB(1,1,1) = 80 nits)
+5. The display engine hardware converts to HDR10 (PQ + BT.2020 + 10-bit) at scanout
+
+**Benefits:**
+- Zero GPU shader cost — the conversion runs in dedicated display engine hardware
+- No additional frame latency — the transform happens at the scanout stage
+- The compute shader color pipeline is completely bypassed
+
+**Activation:**
+- Automatic when `<transfer>pq</transfer>` or `<transfer>hlg</transfer>` is set and the display supports ST2084
+- Also activates via `<edid-auto-hdr>` when the display reports HDR capability
+- Falls back silently to the compute shader path if the display or driver doesn't support hardware HDR
+- Does not affect Quadro Sync or present barrier synchronization (operates per-output, independent of framelock)
+
+**Log output when active:**
+```
+[vulkan_output] Display HDR caps: ST2084=1 EDR=1 maxLum=1000 minLum=50
+[vulkan_output] Hardware HDR enabled (NvAPI UHDA mode). Display engine performs PQ + BT.2020 conversion. MaxCLL=1000 MaxFALL=400
+[vulkan_output] Hardware HDR active — display engine handles PQ + BT.2020.
+```
+
+The mastering display metadata (ST2086) sent to the display uses BT.2020 primaries, D65 white point, and the configured MaxCLL/MaxFALL values. On shutdown, the module restores SDR mode automatically.
+
 ---
 
 ## Color Space Conversion
@@ -360,6 +395,8 @@ Mixer output (BT.709 sRGB)
 ```
 
 When color conversion is not needed (gamut = BT.709, transfer = sRGB), the compute pass is completely bypassed — frames blit directly to the swapchain with zero overhead.
+
+When [hardware HDR acceleration](#hardware-hdr-acceleration-nvapi-display-engine) is active, the compute shader is also bypassed entirely — the display engine performs the PQ encoding and gamut mapping in dedicated scanout hardware.
 
 ### Output Gamuts
 
@@ -1191,7 +1228,7 @@ Injects a synthetic EDID matching the channel's video mode. Requires administrat
 | Dependency | Required | Purpose |
 |------------|----------|---------|
 | **Vulkan SDK** | Yes | Core Vulkan API, validation layers |
-| **NvAPI SDK** | Optional | EDID readback, Quadro Sync II framelock, dedicated display |
+| **NvAPI SDK** | Optional | EDID readback, hardware HDR (display engine), Quadro Sync II, dedicated display |
 | **CUDA Toolkit** | Optional | GPU-to-GPU peer DMA for cross-GPU transfer |
 | **GLEW** | Yes (via accelerator) | GL extension loading for zero-copy interop |
 

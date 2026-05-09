@@ -154,6 +154,26 @@ class nvapi_helpers
     // is not a dedicated display or acquisition failed.
     uint32_t acquire_dedicated_display_by_output(int gpu_index, int output_index);
 
+    // ─── Hardware HDR (Display Engine) ───────────────────────────────────────
+
+    // Resolve a 1-based output index to an NvAPI displayId.
+    // Returns 0 if the display is not found.
+    uint32_t resolve_display_id(int gpu_index, int output_index);
+
+    // Enable HDR output via the display engine hardware.
+    // The GPU's display engine performs PQ EOTF encoding and BT.709→BT.2020 gamut
+    // mapping in hardware — zero GPU shader cost, no extra frame latency.
+    // Source must be scRGB FP16 (linear, sRGB primaries). The swapchain should use
+    // VK_FORMAT_R16G16B16A16_SFLOAT with linear values where RGB(1,1,1) = 80 nits.
+    // Returns true if the display engine accepted the HDR mode.
+    bool enable_hdr_output(uint32_t display_id, int max_cll, int max_fall);
+
+    // Disable hardware HDR output, returning the display to SDR mode.
+    bool disable_hdr_output(uint32_t display_id);
+
+    // Query whether the display supports hardware HDR (ST2084 PQ).
+    bool supports_hdr_output(uint32_t display_id);
+
   private:
     bool     available_    = false;
     int      gsync_count_  = 0;

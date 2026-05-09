@@ -321,11 +321,12 @@ class vulkan_output_consumer : public core::frame_consumer
         }
 
         if (!adapter_mismatch_) {
+            setup_nvapi();           // EDID auto-detect + hardware HDR probe (before swapchain for format selection)
             setup_present_barrier(); // Must be before create_swapchain so the barrier struct is chained
             create_swapchain();
-            set_hdr_metadata();
+            if (!hw_hdr_active_)
+                set_hdr_metadata();  // Only set Vulkan HDR metadata when NOT using hardware HDR
             create_sync_objects();
-            setup_nvapi();
             create_command_pool();
         }
 
@@ -347,8 +348,11 @@ class vulkan_output_consumer : public core::frame_consumer
         }
 
         // Create color space conversion pipeline if needed (before present thread starts
-        // to avoid a data race — present_loop reads color_pipeline_ every frame)
-        if (!adapter_mismatch_ && (config_.gamut != output_gamut::bt709 || config_.eotf != output_eotf::srgb)) {
+        // to avoid a data race — present_loop reads color_pipeline_ every frame).
+        // When hardware HDR is active (NvAPI UHDA mode), the display engine handles both
+        // PQ encoding and BT.709→BT.2020 gamut mapping — no compute shader needed.
+        if (!adapter_mismatch_ && !hw_hdr_active_ &&
+            (config_.gamut != output_gamut::bt709 || config_.eotf != output_eotf::srgb)) {
             try {
                 color_pipeline_ = std::make_unique<color_convert_pipeline>(
                     *device_, format_desc_.width, format_desc_.height);
@@ -493,6 +497,26 @@ class vulkan_output_consumer : public core::frame_consumer
         }
         std::vector<VkSurfaceFormatKHR> formats(count);
         vkGetPhysicalDeviceSurfaceFormatsKHR(device_->physical_device(), swapchain_.surface, &count, formats.data());
+
+        if (hw_hdr_active_) {
+            // Hardware HDR (NvAPI UHDA): source is linear scRGB FP16.
+            // Prefer RGBA16F with extended sRGB linear color space (VK_EXT_swapchain_colorspace).
+            // The display engine does PQ encoding + gamut mapping at scanout.
+            for (const auto& f : formats) {
+                if (f.format == VK_FORMAT_R16G16B16A16_SFLOAT &&
+                    f.colorSpace == VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT)
+                    return f;
+            }
+            // Fallback: any FP16 format (color space may be wrong but display engine overrides)
+            for (const auto& f : formats) {
+                if (f.format == VK_FORMAT_R16G16B16A16_SFLOAT)
+                    return f;
+            }
+            // Last resort: 10-bit (loses values >1.0, HDR highlights clamped to 80 nits)
+            CASPAR_LOG(warning) << print()
+                << L" No RGBA16F surface format available for hardware HDR. "
+                << L"HDR highlights above 80 nits will be clipped.";
+        }
 
         if (config_.transfer == hdr_transfer::pq || config_.transfer == hdr_transfer::hlg) {
             // Prefer 10-bit or 16-bit for HDR
@@ -660,8 +684,6 @@ class vulkan_output_consumer : public core::frame_consumer
                 CASPAR_LOG(info) << print() << L" EDID auto-detected HDR (PQ) display: "
                                  << edid.manufacturer << L" " << edid.model
                                  << L" MaxCLL=" << config_.max_cll << L" cd/m²";
-                // Re-apply HDR metadata now that we know the display capabilities
-                set_hdr_metadata();
             }
         }
 
@@ -685,6 +707,21 @@ class vulkan_output_consumer : public core::frame_consumer
                              << (status.synced ? L"LOCKED" : L"UNLOCKED")
                              << L" role=" << (status.role == sync_role::master ? L"master" : L"slave")
                              << (status.house_sync ? L" house_sync=" + std::to_wstring(status.house_sync_freq) + L"Hz" : L"");
+        }
+
+        // Hardware HDR: let the display engine perform PQ encoding + gamut mapping
+        // Source stays linear scRGB FP16 — no compute shader EOTF needed.
+        if (config_.transfer == hdr_transfer::pq || config_.transfer == hdr_transfer::hlg) {
+            nvapi_display_id_ = nvapi_->resolve_display_id(config_.gpu_index, config_.output_index);
+            if (nvapi_display_id_ != 0 && nvapi_->supports_hdr_output(nvapi_display_id_)) {
+                int cll  = config_.max_cll  > 0 ? config_.max_cll  : 1000;
+                int fall = config_.max_fall > 0 ? config_.max_fall : 400;
+                hw_hdr_active_ = nvapi_->enable_hdr_output(nvapi_display_id_, cll, fall);
+                if (hw_hdr_active_) {
+                    CASPAR_LOG(info) << print()
+                        << L" Hardware HDR active — display engine handles PQ + BT.2020.";
+                }
+            }
         }
     }
 
@@ -897,7 +934,8 @@ class vulkan_output_consumer : public core::frame_consumer
             vkDestroySwapchainKHR(device_->device(), old, nullptr);
 
         create_swapchain();
-        set_hdr_metadata();
+        if (!hw_hdr_active_)
+            set_hdr_metadata();
 
         // Recreate color pipeline if swapchain dimensions changed (hot-plug to different display)
         if (color_pipeline_ && (color_pipeline_->width() != swapchain_.width ||
@@ -968,7 +1006,10 @@ class vulkan_output_consumer : public core::frame_consumer
             graph_->set_tag(diagnostics::tag_severity::WARNING, "dropped-frame");
             return;
         }
-        vkResetFences(dev, 1, &frame_sync.in_flight);
+        // NOTE: Don't reset fence here. Reset just before vkQueueSubmit so that
+        // early returns (surface lost, acquire timeout, FSE lost) leave the fence
+        // signaled. Otherwise the next use of this frame slot would wait for a
+        // fence that never gets signaled, causing a spurious timeout + dropped frame.
 
         // Acquire next swapchain image
         uint32_t image_index = 0;
@@ -1005,9 +1046,12 @@ class vulkan_output_consumer : public core::frame_consumer
             graph_->set_tag(diagnostics::tag_severity::WARNING, "dropped-frame");
             return;
         } else if (result == VK_ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT) {
-            // FSE was lost (alt-tab, focus change, etc.) — try to reacquire
+            // FSE was lost (alt-tab, focus change, etc.) — image was NOT acquired.
+            // Try to reacquire FSE for next frame. Must drop this frame.
             fse_acquired_ = false;
             try_acquire_fse();
+            graph_->set_tag(diagnostics::tag_severity::WARNING, "dropped-frame");
+            return;
         }
 
         // Record command buffer: copy frame data → swapchain image
@@ -1302,6 +1346,13 @@ class vulkan_output_consumer : public core::frame_consumer
         // Lock per-queue mutex — if multiple consumers share a physical queue
         // (wrapping), this serializes their vkQueueSubmit/vkQueuePresentKHR calls.
         std::lock_guard<std::mutex> queue_lock(device_->queue_mutex_for(my_queue_idx_));
+
+        // Reset fence just before submit. This is deliberately late — earlier in
+        // present_frame() there are multiple early-return paths (surface lost,
+        // acquire timeout, FSE lost). If we reset the fence before those checks,
+        // an early return would leave the fence unsignaled and the next use of
+        // this frame slot would timeout waiting for it.
+        vkResetFences(dev, 1, &frame_sync.in_flight);
 
         submit_result = vkQueueSubmit(my_queue_, 1, &submit_info, frame_sync.in_flight);
         if (submit_result == VK_ERROR_DEVICE_LOST) {
@@ -1905,6 +1956,14 @@ class vulkan_output_consumer : public core::frame_consumer
             nvapi_->remove_edid(config_.gpu_index, injected_edid_display_id_);
             injected_edid_display_id_ = 0;
         }
+
+        // Disable hardware HDR before releasing NvAPI
+        if (hw_hdr_active_ && nvapi_display_id_ != 0 && nvapi_) {
+            nvapi_->disable_hdr_output(nvapi_display_id_);
+            hw_hdr_active_ = false;
+            nvapi_display_id_ = 0;
+        }
+
         nvapi_.reset();
 
         if (fse_hwnd_) {
@@ -1965,6 +2024,10 @@ class vulkan_output_consumer : public core::frame_consumer
     // Present barrier
     bool                             present_barrier_enabled_ = false;
     bool                             fse_acquired_ = false; // VK_EXT_full_screen_exclusive acquired
+
+    // Hardware HDR (NvAPI display engine)
+    uint32_t                         nvapi_display_id_ = 0;  // NvAPI display ID for this output
+    bool                             hw_hdr_active_ = false;  // Hardware EOTF active (skip compute shader EOTF)
 
     // Output identification
     std::atomic<int>                 identify_frames_remaining_{0};

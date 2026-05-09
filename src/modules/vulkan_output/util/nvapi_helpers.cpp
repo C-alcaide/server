@@ -967,6 +967,144 @@ uint32_t nvapi_helpers::acquire_dedicated_display_by_output(int gpu_index, int o
     return target_display_id;
 }
 
+// ─── Display ID Resolution ──────────────────────────────────────────────────
+
+uint32_t nvapi_helpers::resolve_display_id(int gpu_index, int output_index)
+{
+    if (!available_ || !impl_ || gpu_index >= static_cast<int>(impl_->gpu_count))
+        return 0;
+
+    NvU32 disp_id_count = 0;
+    auto st = NvAPI_GPU_GetConnectedDisplayIds(impl_->gpus[gpu_index], nullptr, &disp_id_count, 0);
+    if (st != NVAPI_OK || disp_id_count == 0)
+        return 0;
+
+    std::vector<NV_GPU_DISPLAYIDS> display_ids(disp_id_count);
+    for (auto& d : display_ids)
+        d.version = NV_GPU_DISPLAYIDS_VER;
+
+    st = NvAPI_GPU_GetConnectedDisplayIds(impl_->gpus[gpu_index], display_ids.data(), &disp_id_count, 0);
+    if (st != NVAPI_OK)
+        return 0;
+
+    int target_idx = output_index - 1;
+    if (target_idx < 0 || target_idx >= static_cast<int>(disp_id_count))
+        return 0;
+
+    return display_ids[target_idx].displayId;
+}
+
+// ─── Hardware HDR (Display Engine) ──────────────────────────────────────────
+
+bool nvapi_helpers::supports_hdr_output(uint32_t display_id)
+{
+    if (!available_ || display_id == 0)
+        return false;
+
+    NV_HDR_CAPABILITIES hdr_caps{};
+    hdr_caps.version = NV_HDR_CAPABILITIES_VER;
+    auto st = NvAPI_Disp_GetHdrCapabilities(display_id, &hdr_caps);
+    if (st != NVAPI_OK)
+        return false;
+
+    return hdr_caps.isST2084EotfSupported != 0;
+}
+
+bool nvapi_helpers::enable_hdr_output(uint32_t display_id, int max_cll, int max_fall)
+{
+    if (!available_ || display_id == 0)
+        return false;
+
+    // First check capabilities
+    NV_HDR_CAPABILITIES hdr_caps{};
+    hdr_caps.version = NV_HDR_CAPABILITIES_VER;
+    auto st = NvAPI_Disp_GetHdrCapabilities(display_id, &hdr_caps);
+    if (st != NVAPI_OK) {
+        NvAPI_ShortString err;
+        NvAPI_GetErrorMessage(st, err);
+        CASPAR_LOG(warning) << L"[vulkan_output] GetHdrCapabilities failed: " << to_wstring(err);
+        return false;
+    }
+
+    if (!hdr_caps.isST2084EotfSupported) {
+        CASPAR_LOG(warning) << L"[vulkan_output] Display does not support ST2084 (PQ) HDR.";
+        return false;
+    }
+
+    CASPAR_LOG(info) << L"[vulkan_output] Display HDR caps: ST2084="
+                     << hdr_caps.isST2084EotfSupported
+                     << L" EDR=" << hdr_caps.isEdrSupported
+                     << L" maxLum=" << hdr_caps.display_data.desired_content_max_luminance
+                     << L" minLum=" << hdr_caps.display_data.desired_content_min_luminance;
+
+    // Enable UHDA HDR mode (ST2084 PQ + BT.2020)
+    // Source: scRGB FP16 linear (sRGB primaries, RGB(1,1,1) = 80 nits)
+    // Output: HDR10 (PQ EOTF, BT.2020 primaries, 10-bit)
+    // The display engine hardware performs PQ encoding + gamut mapping.
+    NV_HDR_COLOR_DATA hdr_data{};
+    hdr_data.version                    = NV_HDR_COLOR_DATA_VER;
+    hdr_data.cmd                        = NV_HDR_CMD_SET;
+    hdr_data.hdrMode                    = NV_HDR_MODE_UHDA;
+    hdr_data.static_metadata_descriptor_id = NV_STATIC_METADATA_TYPE_1;
+
+    // Mastering display metadata (BT.2020 primaries, D65 white)
+    hdr_data.mastering_display_data.displayPrimary_x0 = 35400; // Red:   0.708
+    hdr_data.mastering_display_data.displayPrimary_y0 = 14600; // Red:   0.292
+    hdr_data.mastering_display_data.displayPrimary_x1 =  8500; // Green: 0.170
+    hdr_data.mastering_display_data.displayPrimary_y1 = 39850; // Green: 0.797
+    hdr_data.mastering_display_data.displayPrimary_x2 =  6550; // Blue:  0.131
+    hdr_data.mastering_display_data.displayPrimary_y2 =  2300; // Blue:  0.046
+    hdr_data.mastering_display_data.displayWhitePoint_x = 15635; // D65: 0.3127
+    hdr_data.mastering_display_data.displayWhitePoint_y = 16450; // D65: 0.3290
+    hdr_data.mastering_display_data.max_display_mastering_luminance =
+        static_cast<NvU16>((std::min)(max_cll, 65535));
+    hdr_data.mastering_display_data.min_display_mastering_luminance = 1; // 0.0001 cd/m²
+    hdr_data.mastering_display_data.max_content_light_level =
+        static_cast<NvU16>((std::min)(max_cll, 65535));
+    hdr_data.mastering_display_data.max_frame_average_light_level =
+        static_cast<NvU16>((std::min)(max_fall, 65535));
+
+    // Let driver choose optimal wire format
+    hdr_data.hdrColorFormat  = NV_COLOR_FORMAT_AUTO;
+    hdr_data.hdrDynamicRange = NV_DYNAMIC_RANGE_AUTO;
+    hdr_data.hdrBpc          = NV_BPC_10;
+
+    st = NvAPI_Disp_HdrColorControl(display_id, &hdr_data);
+    if (st != NVAPI_OK) {
+        NvAPI_ShortString err;
+        NvAPI_GetErrorMessage(st, err);
+        CASPAR_LOG(warning) << L"[vulkan_output] HdrColorControl SET failed: " << to_wstring(err);
+        return false;
+    }
+
+    CASPAR_LOG(info) << L"[vulkan_output] Hardware HDR enabled (NvAPI UHDA mode). "
+                     << L"Display engine performs PQ + BT.2020 conversion. "
+                     << L"MaxCLL=" << max_cll << L" MaxFALL=" << max_fall;
+    return true;
+}
+
+bool nvapi_helpers::disable_hdr_output(uint32_t display_id)
+{
+    if (!available_ || display_id == 0)
+        return false;
+
+    NV_HDR_COLOR_DATA hdr_data{};
+    hdr_data.version = NV_HDR_COLOR_DATA_VER;
+    hdr_data.cmd     = NV_HDR_CMD_SET;
+    hdr_data.hdrMode = NV_HDR_MODE_OFF;
+
+    auto st = NvAPI_Disp_HdrColorControl(display_id, &hdr_data);
+    if (st != NVAPI_OK) {
+        NvAPI_ShortString err;
+        NvAPI_GetErrorMessage(st, err);
+        CASPAR_LOG(warning) << L"[vulkan_output] HdrColorControl OFF failed: " << to_wstring(err);
+        return false;
+    }
+
+    CASPAR_LOG(info) << L"[vulkan_output] Hardware HDR disabled (SDR mode restored).";
+    return true;
+}
+
 }} // namespace caspar::vulkan_output
 
 #else // !CASPAR_NVAPI_ENABLED
@@ -1001,6 +1139,14 @@ uint64_t nvapi_helpers::acquire_dedicated_display(uint32_t) { return 0; }
 bool nvapi_helpers::release_dedicated_display(uint32_t) { return false; }
 
 uint32_t nvapi_helpers::acquire_dedicated_display_by_output(int, int) { return 0; }
+
+uint32_t nvapi_helpers::resolve_display_id(int, int) { return 0; }
+
+bool nvapi_helpers::supports_hdr_output(uint32_t) { return false; }
+
+bool nvapi_helpers::enable_hdr_output(uint32_t, int, int) { return false; }
+
+bool nvapi_helpers::disable_hdr_output(uint32_t) { return false; }
 
 }} // namespace caspar::vulkan_output
 
