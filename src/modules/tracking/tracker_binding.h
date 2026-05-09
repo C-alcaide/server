@@ -56,7 +56,7 @@ struct receiver_handle
 {
     tracking_protocol protocol  = tracking_protocol::freed;
     int               port      = 6301;
-    std::string       host; ///< Only used by VRPN
+    std::string       host; ///< VRPN: server URL; PSN: multicast group address
 };
 
 /// Optional per-lens zoom calibration entry.

@@ -80,7 +80,7 @@ static void load_config_receivers()
             const auto& rec = child.second;
 
             std::wstring proto_str = rec.get(L"protocol", L"FREED");
-            int          port      = rec.get(L"port",     6301);
+            int          port      = rec.get(L"port",     0);
             std::wstring host_w    = rec.get(L"host",     L"");
             std::string  host      = caspar::u8(host_w);
             tracking_protocol proto;
@@ -97,6 +97,10 @@ static void load_config_receivers()
             } catch (...) {
                 continue;
             }
+
+            // Apply per-protocol default port if not specified in config
+            if (port == 0)
+                port = (proto == tracking_protocol::psn) ? 56565 : 6301;
 
             try {
                 receiver_manager::instance().ensure_receiver(proto, port, host);

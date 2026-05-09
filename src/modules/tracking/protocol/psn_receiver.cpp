@@ -60,6 +60,7 @@ struct psn_receiver::impl
 
     ::psn::psn_decoder decoder_;
     uint8_t            last_frame_id_{0};
+    bool               has_received_frame_{false};
 
     explicit impl(uint16_t port, std::string multicast_addr)
         : port_(port)
@@ -124,9 +125,10 @@ struct psn_receiver::impl
 
         // Only emit data when a new frame has been committed
         const auto& data = decoder_.get_data();
-        if (data.header.frame_id == last_frame_id_)
+        if (has_received_frame_ && data.header.frame_id == last_frame_id_)
             return;
-        last_frame_id_ = data.header.frame_id;
+        last_frame_id_      = data.header.frame_id;
+        has_received_frame_ = true;
 
         for (const auto& [id, trk] : data.trackers) {
             camera_data d;
