@@ -145,13 +145,15 @@ Frames from a mixed input (e.g. a source that switches between SDR and HDR) will
 
 ### Automatic HDR enabling
 
-When a channel has `color-space bt2020` and `color-transfer pq` or `hlg`, the DeckLink consumer **automatically**:
+When a channel has **16-bit colour depth**, `color-space bt2020`, and `color-transfer pq` or `hlg`, the DeckLink consumer **automatically**:
 - Switches to HDR v210 10-bit output format
 - Sets `bmdFrameContainsHDRMetadata` on every output frame
 - Signals the correct EOTF via `bmdDeckLinkFrameMetadataHDRElectroOpticalTransferFunc`
 - Signals BT.2020 colour primaries and white point via the HDR static metadata extension
 
-No explicit `<hdr>true</hdr>` flag is needed — it is derived from the channel's color settings.
+All three conditions must be met — an 8-bit channel with BT.2020/PQ settings will **not** emit HDR metadata (insufficient bit depth), and a 16-bit channel with BT.709/SDR settings will output in SDR mode.
+
+No explicit `<hdr>true</hdr>` flag is needed — it is derived from the channel's depth and color settings.
 
 ### DeckLink consumer config in `casparcg.config`
 
@@ -191,6 +193,21 @@ No explicit `<hdr>true</hdr>` flag is needed — it is derived from the channel'
 | Green | (0.170, 0.797) |
 | Blue | (0.131, 0.046) |
 | White point | (0.3127, 0.3290) — D65 |
+
+### BT.601 support
+
+When the consumer's `color-space` is `bt601`, the output metadata correctly signals `bmdColorspaceRec601` and uses BT.601 chromaticity coordinates (SMPTE-C). This is primarily useful for SD formats.
+
+### AMCP colour overrides
+
+When adding a DeckLink consumer via AMCP, colour settings can be overridden with the `COLOR_SPACE` and `COLOR_TRANSFER` parameters:
+
+```
+ADD 1 DECKLINK 1 EMBEDDED_AUDIO COLOR_SPACE BT2020 COLOR_TRANSFER PQ
+ADD 1 DECKLINK 2 COLOR_TRANSFER HLG
+```
+
+If omitted, both values are inherited from the channel defaults.
 
 ---
 
@@ -730,3 +747,5 @@ Output for DCI projectors with gamma 2.6:
 - **CUDA ProRes producer** reads `color_matrix` and `transfer_func` from the ProRes bitstream header on every decoded frame. HDR ProRes files produced by Final Cut Pro, DaVinci Resolve, or a previous CUDA ProRes recording will therefore correctly signal PQ or HLG to the downstream mixer and consumers. Prior to this fix, all CUDA-decoded ProRes frames were reported as SDR regardless of container metadata.
 
 - **Vulkan output HDR** is configured per-consumer, independent of the channel's `<color-transfer>`. This allows a single channel to drive both an SDR DeckLink output and an HDR Vulkan output simultaneously. The Vulkan consumer supports wider gamut options (P3-D65, P3-DCI, Adobe RGB) beyond what DeckLink offers.
+
+- **DeckLink key_only + HDR** is not supported. The primary port rejects `key-only` when HDR is active. Secondary ports with `key-only` on an HDR channel will output the full-colour frame (with a logged warning) because v210 key extraction is not yet implemented.
