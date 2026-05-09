@@ -453,9 +453,9 @@ core::color_transfer get_color_transfer(IDeckLinkVideoInputFrame* video)
         auto     metadata = wrap_raw<com_ptr>(md, true);
         LONGLONG eotf;
         if (SUCCEEDED(md->GetInt(bmdDeckLinkFrameMetadataHDRElectroOpticalTransferFunc, &eotf))) {
-            if (eotf == 2) {
+            if (eotf == 2) {        // CEA 861.3: PQ (ST 2084)
                 return core::color_transfer::pq;
-            } else if (eotf == 1) {
+            } else if (eotf == 3) { // CEA 861.3: HLG (ARIB STD-B67)
                 return core::color_transfer::hlg;
             }
         }
@@ -767,7 +767,7 @@ class decklink_producer : public IDeckLinkInputCallback
     double out_sync_ = 0.0;
 
     bool freeze_on_lost_;
-    bool has_signal_;
+    bool has_signal_ = false;
     bool hdr_;
 
     int sync_group_ = 0;
@@ -786,6 +786,7 @@ class decklink_producer : public IDeckLinkInputCallback
     mutable std::mutex                                         buffer_mutex_;
 
     std::exception_ptr exception_;
+    std::mutex         exception_mutex_;
 
     com_ptr<IDeckLinkDisplayMode> mode_;
 
@@ -975,8 +976,9 @@ class decklink_producer : public IDeckLinkInputCallback
 
             graph_->set_text(print());
 
-            video_filter_ = Filter(vfilter_, AVMEDIA_TYPE_VIDEO, format_desc_, mode_, hdr_);
-            audio_filter_ = Filter(afilter_, AVMEDIA_TYPE_AUDIO, format_desc_, mode_, hdr_);
+            video_filter_  = Filter(vfilter_, AVMEDIA_TYPE_VIDEO, format_desc_, mode_, hdr_);
+            audio_filter_  = Filter(afilter_, AVMEDIA_TYPE_AUDIO, format_desc_, mode_, hdr_);
+            video_decoder_ = Decoder(hdr_, mode_);
 
             // Reset sync state so the sync-drift check doesn't immediately fire with stale timestamps,
             // and clear the buffer of any frames from the old format.
@@ -988,6 +990,7 @@ class decklink_producer : public IDeckLinkInputCallback
             }
             return S_OK;
         } catch (...) {
+            std::lock_guard<std::mutex> lock(exception_mutex_);
             exception_ = std::current_exception();
             return E_FAIL;
         }
@@ -1196,6 +1199,7 @@ class decklink_producer : public IDeckLinkInputCallback
                 boost::range::rotate(audio_cadence_, std::end(audio_cadence_) - 1);
             }
         } catch (...) {
+            std::lock_guard<std::mutex> lock(exception_mutex_);
             exception_ = std::current_exception();
             return E_FAIL;
         }
@@ -1222,8 +1226,11 @@ class decklink_producer : public IDeckLinkInputCallback
             graph_->set_text(stats.str());
         }
 
-        if (exception_ != nullptr) {
-            std::rethrow_exception(exception_);
+        {
+            std::lock_guard<std::mutex> lock(exception_mutex_);
+            if (exception_ != nullptr) {
+                std::rethrow_exception(exception_);
+            }
         }
 
         core::draw_frame frame;

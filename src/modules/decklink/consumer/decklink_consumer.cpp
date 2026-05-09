@@ -252,6 +252,7 @@ struct ChromaticityCoordinates
 
 const auto REC_709  = ChromaticityCoordinates{0.640, 0.330, 0.300, 0.600, 0.150, 0.060, 0.3127, 0.3290};
 const auto REC_2020 = ChromaticityCoordinates{0.708, 0.292, 0.170, 0.797, 0.131, 0.046, 0.3127, 0.3290};
+const auto REC_601  = ChromaticityCoordinates{0.630, 0.340, 0.310, 0.595, 0.155, 0.070, 0.3127, 0.3290};
 
 class decklink_frame
     : public IDeckLinkVideoFrame
@@ -330,13 +331,13 @@ class decklink_frame
 
     ULONG STDMETHODCALLTYPE Release() override
     {
-        if (--ref_count_ == 0) {
+        auto count = --ref_count_;
+        if (count == 0) {
             delete this;
-
             return 0;
         }
 
-        return ref_count_;
+        return count;
     }
 
     // IDecklinkVideoFrame
@@ -375,11 +376,13 @@ class decklink_frame
                 break;
 
             case bmdDeckLinkFrameMetadataColorspace:
-                *value = (color_space_ == core::color_space::bt2020) ? bmdColorspaceRec2020 : bmdColorspaceRec709;
+                *value = (color_space_ == core::color_space::bt2020) ? bmdColorspaceRec2020
+                       : (color_space_ == core::color_space::bt601)  ? bmdColorspaceRec601
+                       :                                                bmdColorspaceRec709;
                 break;
 
             default:
-                value  = nullptr;
+                *value = 0;
                 result = E_INVALIDARG;
         }
 
@@ -388,7 +391,9 @@ class decklink_frame
 
     HRESULT STDMETHODCALLTYPE GetFloat(BMDDeckLinkFrameMetadataID metadataID, double* value) override
     {
-        const auto color_space = (color_space_ == core::color_space::bt2020) ? &REC_2020 : &REC_709;
+        const auto color_space = (color_space_ == core::color_space::bt2020) ? &REC_2020
+                               : (color_space_ == core::color_space::bt601)  ? &REC_601
+                               :                                               &REC_709;
         HRESULT    result      = S_OK;
 
         switch (metadataID) {
@@ -441,7 +446,7 @@ class decklink_frame
                 break;
 
             default:
-                value  = nullptr;
+                *value = 0.0;
                 result = E_INVALIDARG;
         }
 
@@ -450,6 +455,8 @@ class decklink_frame
 
     HRESULT STDMETHODCALLTYPE GetFlag(BMDDeckLinkFrameMetadataID, BOOL* value) override
     {
+        if (!value)
+            return E_POINTER;
         // Not expecting GetFlag
         *value = false;
         return E_INVALIDARG;
@@ -457,6 +464,8 @@ class decklink_frame
 
     HRESULT STDMETHODCALLTYPE GetString(BMDDeckLinkFrameMetadataID, String* value) override
     {
+        if (!value)
+            return E_POINTER;
         // Not expecting GetString
         *value = nullptr;
         return E_INVALIDARG;
@@ -1158,6 +1167,10 @@ struct decklink_consumer final : public IDeckLinkVideoOutputCallback
 
     bool call(const std::vector<std::wstring>& params)
     {
+        if (!vanc_) {
+            CASPAR_LOG(warning) << print() << L" VANC not configured, ignoring call: " << (params.empty() ? L"N/A" : params[0]);
+            return false;
+        }
         try {
             bool result = vanc_->try_push_data(params);
             if (!result) {
@@ -1256,7 +1269,9 @@ spl::shared_ptr<core::frame_consumer> create_consumer(const std::vector<std::wst
 
     configuration config = parse_amcp_config(params, format_repository, channel_info);
 
-    config.hdr = (channel_info.depth != common::bit_depth::bit8);
+    config.hdr = (channel_info.depth != common::bit_depth::bit8) &&
+                 (config.color_space == core::color_space::bt2020 &&
+                  config.color_transfer != core::color_transfer::sdr);
 
     if (config.hdr && config.primary.key_only) {
         CASPAR_THROW_EXCEPTION(caspar_exception()
@@ -1274,7 +1289,9 @@ create_preconfigured_consumer(const boost::property_tree::wptree&               
 {
     configuration config = parse_xml_config(ptree, format_repository, channel_info);
 
-    config.hdr = (channel_info.depth != common::bit_depth::bit8);
+    config.hdr = (channel_info.depth != common::bit_depth::bit8) &&
+                 (config.color_space == core::color_space::bt2020 &&
+                  config.color_transfer != core::color_transfer::sdr);
 
     if (config.hdr && config.primary.key_only) {
         CASPAR_THROW_EXCEPTION(caspar_exception()

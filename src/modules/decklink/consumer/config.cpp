@@ -189,9 +189,8 @@ configuration parse_xml_config(const boost::property_tree::wptree&  ptree,
     if (!color_transfer_str.empty())
         config.color_transfer = get_color_transfer(color_transfer_str);
 
-    // Auto-enable HDR output flag when channel signals a non-SDR transfer on BT.2020
-    config.hdr = (config.color_space == core::color_space::bt2020 &&
-                  config.color_transfer != core::color_transfer::sdr);
+    // Note: config.hdr is set by the caller (create_consumer / create_preconfigured_consumer)
+    // based on both channel bit-depth and color settings.
 
     auto hdr_metadata = ptree.get_child_optional(L"hdr-metadata");
     if (hdr_metadata) {
@@ -241,8 +240,30 @@ configuration parse_amcp_config(const std::vector<std::wstring>&     params,
 
     config.color_space    = channel_info.default_color_space;
     config.color_transfer = channel_info.default_color_transfer;
-    config.hdr = (config.color_space == core::color_space::bt2020 &&
-                  config.color_transfer != core::color_transfer::sdr);
+
+    auto color_space_str = get_param(L"COLOR_SPACE", params);
+    if (!color_space_str.empty()) {
+        auto cs = boost::to_lower_copy(color_space_str);
+        if (cs == L"bt2020")
+            config.color_space = core::color_space::bt2020;
+        else if (cs == L"bt601")
+            config.color_space = core::color_space::bt601;
+        else if (cs == L"bt709")
+            config.color_space = core::color_space::bt709;
+    }
+
+    auto color_transfer_str = get_param(L"COLOR_TRANSFER", params);
+    if (!color_transfer_str.empty()) {
+        auto ct = boost::to_lower_copy(color_transfer_str);
+        if (ct == L"pq")
+            config.color_transfer = core::color_transfer::pq;
+        else if (ct == L"hlg")
+            config.color_transfer = core::color_transfer::hlg;
+        else if (ct == L"sdr")
+            config.color_transfer = core::color_transfer::sdr;
+    }
+
+    // Note: config.hdr is set by the caller based on both channel bit-depth and color settings.
 
     return config;
 }

@@ -386,7 +386,7 @@ class v210_strategy
         }
 
         if (config.key_only) {
-            // TODO: Add support for hdr frames
+            CASPAR_LOG(warning) << L"key_only is not supported for HDR v210 frames, outputting full-color frame";
         }
 
         return image_data;
