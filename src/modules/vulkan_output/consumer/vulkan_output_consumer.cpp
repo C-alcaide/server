@@ -423,38 +423,38 @@ class vulkan_output_consumer : public core::frame_consumer
             create_info.pNext                  = &barrier_info;
         }
 
-        // VK_EXT_full_screen_exclusive with APPLICATION_CONTROLLED mode is NOT used.
-        // On NVIDIA Windows drivers (tested 576.57, RTX A4000), if
-        // vkAcquireFullScreenExclusiveModeEXT fails (VK_ERROR_INITIALIZATION_FAILED),
-        // the swapchain silently stops presenting — frames are submitted and "complete"
-        // but nothing reaches the display. This is a driver bug / spec ambiguity.
-        // Without the FSE chain, the swapchain works correctly through DWM composition.
-        // DWM adds ~1 frame of latency but is reliable across all display configurations.
-        bool fse_requested = false;
+        // ─── Full-screen exclusive: DEFAULT mode ───────────────────────────
+        // VK_FULL_SCREEN_EXCLUSIVE_DEFAULT_EXT lets the driver decide when to
+        // grant exclusive display access. No explicit acquire/release needed.
+        // The driver grants exclusivity when the borderless window fully covers
+        // the display, and revokes it on focus loss — transparent to the app.
+        VkSurfaceFullScreenExclusiveInfoEXT fse_info{};
+        bool fse_chained = false;
+        if (fse_hwnd_ && device_->has_extension(VK_EXT_FULL_SCREEN_EXCLUSIVE_EXTENSION_NAME)) {
+            fse_info.sType               = VK_STRUCTURE_TYPE_SURFACE_FULL_SCREEN_EXCLUSIVE_INFO_EXT;
+            fse_info.pNext               = const_cast<void*>(create_info.pNext);
+            fse_info.fullScreenExclusive = VK_FULL_SCREEN_EXCLUSIVE_DEFAULT_EXT;
+            create_info.pNext            = &fse_info;
+            fse_chained = true;
+        }
 
         auto result = vkCreateSwapchainKHR(device_->device(), &create_info, nullptr, &swapchain_.swapchain);
-        if (result != VK_SUCCESS)
-            CASPAR_THROW_EXCEPTION(caspar_exception() << msg_info("Failed to create Vulkan swapchain"));
-
-        // Acquire full-screen exclusive mode after swapchain creation.
-        // This tells the driver to take exclusive control of the display output.
-        fse_acquired_ = false;
-        if (fse_requested) {
-            auto vkAcquireFSE = reinterpret_cast<PFN_vkAcquireFullScreenExclusiveModeEXT>(
-                vkGetDeviceProcAddr(device_->device(), "vkAcquireFullScreenExclusiveModeEXT"));
-            if (vkAcquireFSE) {
-                auto fse_result = vkAcquireFSE(device_->device(), swapchain_.swapchain);
-                if (fse_result == VK_SUCCESS) {
-                    fse_acquired_ = true;
-                    CASPAR_LOG(info) << print()
-                                     << L" Full-screen exclusive acquired — DWM bypassed (direct scanout).";
-                } else {
-                    CASPAR_LOG(warning) << print()
-                                        << L" Failed to acquire full-screen exclusive (result="
-                                        << fse_result << L"). DWM composition still active.";
-                }
+        if (result != VK_SUCCESS) {
+            if (fse_chained) {
+                // FSE chain caused failure — retry without it
+                CASPAR_LOG(warning) << print() << L" Swapchain creation failed with FSE chain (result="
+                                    << result << L"). Retrying without FSE.";
+                create_info.pNext = fse_info.pNext; // restore original pNext
+                result = vkCreateSwapchainKHR(device_->device(), &create_info, nullptr, &swapchain_.swapchain);
+                if (result != VK_SUCCESS)
+                    CASPAR_THROW_EXCEPTION(caspar_exception() << msg_info("Failed to create Vulkan swapchain"));
+                fse_chained = false;
+            } else {
+                CASPAR_THROW_EXCEPTION(caspar_exception() << msg_info("Failed to create Vulkan swapchain"));
             }
         }
+
+        fse_acquired_ = false; // No explicit acquire for DEFAULT mode
 
         // Get swapchain images
         uint32_t sc_image_count = 0;
