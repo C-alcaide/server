@@ -48,6 +48,7 @@ enum class tracking_protocol
     freed_plus, ///< FreeD+ / Stype extended-precision variant
     osc,        ///< OSC 1.0 UDP (schema: /camera/{id}/pan|tilt|roll|zoom|x|y|z)
     vrpn,       ///< VRPN pose tracker + analogue zoom channel
+    psn,        ///< PosiStageNet v2.0 UDP multicast (stage/performer tracking)
 };
 
 /// Identifies which receiver a binding was created on (needed for clean release).

@@ -62,6 +62,7 @@ Tracking data is injected directly into the stage transform pipeline on the rece
 | `FREED_PLUS` | 6301 | Stype FreeD+ extended format: identical to FreeD D1 for the first 26 bytes, then adds a 12-byte extension with 32-bit high-precision angles (1/8 388 608 degree per unit). Falls back to standard D1 automatically when a 29-byte packet arrives. |
 | `OSC` | 9000 | OSC 1.0 UDP. No external library required. Uses the address schema `/camera/{id}/pan`, `/tilt`, `/roll`, `/zoom`, `/focus`, `/x`, `/y`, `/z`. Angles in degrees; position in mm; zoom/focus in raw 0–65535 or normalised 0.0–1.0. |
 | `VRPN` | — | VRPN tracker client (`vrpn_Tracker_Remote`). Quaternion pose converted to yaw/pitch/roll. Analogue channel 0 used as zoom. Optional — requires `-DBUILD_TRACKING_VRPN=ON` at CMake configure time. |
+| `PSN` | 56565 | PosiStageNet v2.0 UDP multicast. Open protocol for live 3D stage position data (BlackTrax, MA Lighting grandMA, Disguise, etc.). Joins multicast group `236.10.10.10` by default. Carries position and orientation per tracker but no zoom/focus — those fields remain at 0. Position is converted from metres to mm; orientation from degrees to radians. |
 
 ---
 
@@ -145,9 +146,9 @@ TRACKING <ch>-<layer> BIND <protocol>
 
 | Parameter | Default | Description |
 | :--- | :--- | :--- |
-| `protocol` | — | `FREED`, `FREED_PLUS`, `OSC`, or `VRPN` (required) |
-| `PORT` | 6301 | UDP port to listen on (FreeD/FreeD+/OSC) |
-| `HOST` | — | VRPN server URL, e.g. `Tracker0@192.168.1.50` |
+| `protocol` | — | `FREED`, `FREED_PLUS`, `OSC`, `VRPN`, or `PSN` (required) |
+| `PORT` | 6301 (56565 for PSN) | UDP port to listen on (FreeD/FreeD+/OSC/PSN) |
+| `HOST` | — | VRPN server URL, e.g. `Tracker0@192.168.1.50`; or PSN multicast group, e.g. `236.10.10.10` |
 | `CAMERA` | 0 | Camera ID to accept. Use `-1` to accept all cameras on this port. |
 | `MODE` | `360` | `360` injects into the equirectangular projection; `2D` injects into fill/scale/rotation |
 
@@ -157,6 +158,8 @@ TRACKING 1-1 BIND FREED PORT 6301 CAMERA 1 MODE 360
 TRACKING 1-2 BIND FREED_PLUS PORT 6302 CAMERA 2 MODE 360
 TRACKING 1-5 BIND OSC PORT 9100 CAMERA 0 MODE 2D
 TRACKING 2-1 BIND VRPN HOST Tracker0@192.168.1.50 CAMERA 0 MODE 360
+TRACKING 1-1 BIND PSN PORT 56565 CAMERA 0 MODE 360
+TRACKING 1-1 BIND PSN HOST 236.10.10.10 CAMERA 3 MODE 360
 ```
 
 If a binding already exists on this channel/layer it is replaced and the old receiver's reference count is decremented.
@@ -422,6 +425,13 @@ Receivers can be pre-started when the server boots by adding a `<tracking>` bloc
       <protocol>VRPN</protocol>
       <host>Tracker0@192.168.1.50</host>
     </receiver>
+
+    <!-- Pre-start a PSN multicast receiver (BlackTrax, MA Lighting, etc.) -->
+    <receiver>
+      <protocol>PSN</protocol>
+      <port>56565</port>
+      <host>236.10.10.10</host>
+    </receiver>
   </tracking>
   ...
 </configuration>
@@ -529,6 +539,7 @@ src/modules/tracking/
     ├── freed_receiver.h/.cpp   FreeD D1 UDP
     ├── freed_plus_receiver.h/.cpp  Stype FreeD+ extended
     ├── osc_receiver.h/.cpp     OSC 1.0 UDP (no external lib)
+    ├── psn_receiver.h/.cpp     PosiStageNet v2.0 UDP multicast
     └── vrpn_receiver.h/.cpp    VRPN (optional)
 ```
 

@@ -55,7 +55,8 @@ static tracking_protocol parse_protocol(const std::wstring& s)
     if (boost::iequals(s, L"FREED_PLUS")) return tracking_protocol::freed_plus;
     if (boost::iequals(s, L"OSC"))        return tracking_protocol::osc;
     if (boost::iequals(s, L"VRPN"))       return tracking_protocol::vrpn;
-    throw std::runtime_error("Unknown tracking protocol — use FREED, FREED_PLUS, OSC or VRPN");
+    if (boost::iequals(s, L"PSN"))        return tracking_protocol::psn;
+    throw std::runtime_error("Unknown tracking protocol \u2014 use FREED, FREED_PLUS, OSC, VRPN or PSN");
 }
 
 static std::wstring protocol_name(tracking_protocol p)
@@ -65,6 +66,7 @@ static std::wstring protocol_name(tracking_protocol p)
     case tracking_protocol::freed_plus: return L"FREED_PLUS";
     case tracking_protocol::osc:        return L"OSC";
     case tracking_protocol::vrpn:       return L"VRPN";
+    case tracking_protocol::psn:        return L"PSN";
     default:                            return L"UNKNOWN";
     }
 }
@@ -99,9 +101,9 @@ static bool kwflag(const std::vector<std::wstring>& params, const std::wstring& 
 // TRACKING BIND — create / replace a binding on a channel/layer
 //
 // Syntax:
-//   TRACKING <ch>-<layer> BIND <FREED|FREED_PLUS|OSC|VRPN>
+//   TRACKING <ch>-<layer> BIND <FREED|FREED_PLUS|OSC|VRPN|PSN>
 //              [PORT <port>]
-//              [HOST <host>]     (VRPN only)
+//              [HOST <host>]     (VRPN: server URL; PSN: multicast group)
 //              [CAMERA <id>]     (default 0)
 //              [MODE <2D|360>]   (default 360)
 // ---------------------------------------------------------------------------
@@ -113,7 +115,7 @@ static std::wstring tracking_bind_command(command_context& ctx)
     try {
         tracking_protocol proto = parse_protocol(ctx.parameters.at(0));
 
-        int         port      = 6301;
+        int         port      = (proto == tracking_protocol::psn) ? 56565 : 6301;
         std::string host;
         int         camera_id = 0;
         tracking_mode mode    = tracking_mode::mode_360;

@@ -56,6 +56,12 @@ namespace caspar { namespace tracking {
 //       <protocol>VRPN</protocol>
 //       <host>Tracker0@192.168.1.50</host>
 //     </receiver>
+//     <!-- Pre-launch a PSN multicast receiver. -->
+//     <receiver>
+//       <protocol>PSN</protocol>
+//       <port>56565</port>
+//       <host>236.10.10.10</host>
+//     </receiver>
 //   </tracking>
 //
 // Channel/layer bindings are always established at runtime via AMCP:
@@ -83,6 +89,7 @@ static void load_config_receivers()
                 else if (boost::iequals(proto_str, L"FREED_PLUS")) proto = tracking_protocol::freed_plus;
                 else if (boost::iequals(proto_str, L"OSC"))        proto = tracking_protocol::osc;
                 else if (boost::iequals(proto_str, L"VRPN"))       proto = tracking_protocol::vrpn;
+                else if (boost::iequals(proto_str, L"PSN"))        proto = tracking_protocol::psn;
                 else {
                     CASPAR_LOG(warning) << L"[tracking] Unknown protocol in config: " << proto_str;
                     continue;

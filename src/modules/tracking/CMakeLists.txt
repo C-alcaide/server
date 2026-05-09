@@ -52,6 +52,8 @@ set(SOURCES
     protocol/freed_plus_receiver.h
     protocol/osc_receiver.cpp
     protocol/osc_receiver.h
+    protocol/psn_receiver.cpp
+    protocol/psn_receiver.h
     protocol/vrpn_receiver.cpp
     protocol/vrpn_receiver.h
 )
@@ -70,6 +72,11 @@ if (BUILD_TRACKING_VRPN)
     target_link_libraries(tracking PRIVATE vrpn)
     target_include_directories(tracking PRIVATE "${vrpn_SOURCE_DIR}")
 endif()
+
+# ---------------------------------------------------------------------------
+# PSN (PosiStageNet) — header-only, MIT licensed, vendored in vendor/psn/
+# ---------------------------------------------------------------------------
+target_include_directories(tracking PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/vendor/psn")
 
 # ---------------------------------------------------------------------------
 # IDE organisation

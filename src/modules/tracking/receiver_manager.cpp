@@ -22,6 +22,7 @@
 #include "protocol/freed_receiver.h"
 #include "protocol/freed_plus_receiver.h"
 #include "protocol/osc_receiver.h"
+#include "protocol/psn_receiver.h"
 #include "protocol/vrpn_receiver.h"
 
 #include <iostream>
@@ -56,6 +57,11 @@ void receiver_manager::ensure_receiver(tracking_protocol protocol, int port, con
             break;
         case tracking_protocol::vrpn:
             e.receiver = std::make_unique<vrpn_receiver>(host, 0 /*camera_id override via binding*/, 0);
+            break;
+        case tracking_protocol::psn:
+            e.receiver = std::make_unique<psn_receiver>(
+                static_cast<uint16_t>(port),
+                host.empty() ? "236.10.10.10" : host);
             break;
         default:
             throw std::runtime_error("Unknown tracking protocol");
