@@ -100,6 +100,18 @@ class stage_base
 
     virtual std::future<void> execute(std::function<void()> k) = 0;
 
+    // Keyframe management (type-erased: void* wraps module types)
+    virtual std::future<void>                  set_keyframe_data(int layer, std::shared_ptr<void> data)                      = 0;
+    virtual std::future<bool>                  arm_keyframes(int layer)                                                     = 0;
+    virtual std::future<void>                  disarm_keyframes(int layer)                                                  = 0;
+    virtual std::future<void>                  clear_keyframes(int layer)                                                   = 0;
+    virtual std::future<std::shared_ptr<void>> get_keyframe_data(int layer)                                                 = 0;
+    virtual std::future<bool>                  has_keyframe_data(int layer)                                                 = 0;
+    virtual std::future<bool>                  is_keyframes_armed(int layer)                                                = 0;
+    virtual std::future<bool>                  patch_keyframe(int layer, double time_secs, std::shared_ptr<void> patch_data) = 0;
+    virtual std::future<void>                  set_media_time_override(int layer, double time_secs)                         = 0;
+    virtual std::future<std::shared_ptr<void>> get_keyframe_status(int layer)                                               = 0;
+
     // Properties
     virtual std::future<std::shared_ptr<frame_producer>> foreground(int index) = 0;
     virtual std::future<std::shared_ptr<frame_producer>> background(int index) = 0;
@@ -154,6 +166,19 @@ class stage final : public stage_base
     std::future<std::shared_ptr<frame_producer>> background(int index) override;
 
     std::future<void>            execute(std::function<void()> k) override;
+
+    // Keyframe management
+    std::future<void>                  set_keyframe_data(int layer, std::shared_ptr<void> data) override;
+    std::future<bool>                  arm_keyframes(int layer) override;
+    std::future<void>                  disarm_keyframes(int layer) override;
+    std::future<void>                  clear_keyframes(int layer) override;
+    std::future<std::shared_ptr<void>> get_keyframe_data(int layer) override;
+    std::future<bool>                  has_keyframe_data(int layer) override;
+    std::future<bool>                  is_keyframes_armed(int layer) override;
+    std::future<bool>                  patch_keyframe(int layer, double time_secs, std::shared_ptr<void> patch_data) override;
+    std::future<void>                  set_media_time_override(int layer, double time_secs) override;
+    std::future<std::shared_ptr<void>> get_keyframe_status(int layer) override;
+
     std::unique_lock<std::mutex> get_lock() const;
 
     core::video_format_desc video_format_desc() const;
@@ -210,6 +235,19 @@ class stage_delayed final : public stage_base
     std::future<std::shared_ptr<frame_producer>> background(int index) override;
 
     std::future<void>            execute(std::function<void()> k) override;
+
+    // Keyframe management
+    std::future<void>                  set_keyframe_data(int layer, std::shared_ptr<void> data) override;
+    std::future<bool>                  arm_keyframes(int layer) override;
+    std::future<void>                  disarm_keyframes(int layer) override;
+    std::future<void>                  clear_keyframes(int layer) override;
+    std::future<std::shared_ptr<void>> get_keyframe_data(int layer) override;
+    std::future<bool>                  has_keyframe_data(int layer) override;
+    std::future<bool>                  is_keyframes_armed(int layer) override;
+    std::future<bool>                  patch_keyframe(int layer, double time_secs, std::shared_ptr<void> patch_data) override;
+    std::future<void>                  set_media_time_override(int layer, double time_secs) override;
+    std::future<std::shared_ptr<void>> get_keyframe_status(int layer) override;
+
     std::unique_lock<std::mutex> get_lock() const { return stage_->get_lock(); }
 
   private:

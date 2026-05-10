@@ -11,10 +11,10 @@ set(CMAKE_CUDA_ARCHITECTURES "52;61;80;86;89" CACHE STRING "CUDA architectures")
 # can be called across translation units (e.g. rice/entropy/DCT).
 set(CMAKE_CUDA_SEPARABLE_COMPILATION ON)
 
-# CUDA 12.9 formally supports VS 2017-2022.  VS 2026 (MSVC 19.50) triggers a
-# version check in host_config.h; the flag below suppresses it.  The CUDA
-# constructs used here (basic kernels, CUB, __clz) are well within what the
-# newer compiler handles correctly.
+# CUDA 12.9 formally supports VS 2017-2022.  VS 2026 stable (MSVC 14.50)
+# triggers a version check in host_config.h; the flag below suppresses it.
+# The CUDA constructs used here (basic kernels, CUB, __clz) are well within
+# what the newer compiler handles correctly.
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -allow-unsupported-compiler -Wno-deprecated-gpu-targets")
 
 # ─── Source lists ────────────────────────────────────────────────────────────

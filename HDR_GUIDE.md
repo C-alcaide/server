@@ -1,6 +1,8 @@
 # HDR & Wide-Gamut Guide for CasparVP
 
-This guide covers the HDR-related features added to CasparVP: channel color configuration, BT.2020 / PQ / HLG propagation through the pipeline, DeckLink HDR input/output, FFmpeg consumer color metadata, and High Frame Rate (HFR) support.
+This guide covers the HDR-related features added to CasparVP: channel color configuration, BT.2020 / PQ / HLG propagation through the pipeline, DeckLink HDR input/output, Vulkan direct-display HDR output, FFmpeg consumer color metadata, and High Frame Rate (HFR) support.
+
+For per-layer color grading and ACES color management (MIXER COLORSPACE, CDL, LUT3D, etc.), see [COLOR_GRADING.md](COLOR_GRADING.md). For Vulkan output architecture details, see [VULKAN_OUTPUT.md](VULKAN_OUTPUT.md).
 
 ---
 
@@ -10,13 +12,14 @@ This guide covers the HDR-related features added to CasparVP: channel color conf
 2. [Channel Configuration](#channel-configuration)
 3. [DeckLink Input (Capture)](#decklink-input-capture)
 4. [DeckLink Output (Playout)](#decklink-output-playout)
-5. [FFmpeg Consumer (File Recording)](#ffmpeg-consumer-file-recording)
-6. [CUDA ProRes Consumer (Recording)](#cuda-prores-consumer-recording)
-7. [CUDA ProRes Producer (Playback)](#cuda-prores-producer-playback)
-8. [High Frame Rate Formats](#high-frame-rate-formats)
-9. [Complete Config Examples](#complete-config-examples)
-10. [Quick Reference Table](#quick-reference-table)
-11. [Notes & Known Limitations](#notes--known-limitations)
+5. [Vulkan Output (Direct Display)](#vulkan-output-direct-display)
+6. [FFmpeg Consumer (File Recording)](#ffmpeg-consumer-file-recording)
+7. [CUDA ProRes Consumer (Recording)](#cuda-prores-consumer-recording)
+8. [CUDA ProRes Producer (Playback)](#cuda-prores-producer-playback)
+9. [High Frame Rate Formats](#high-frame-rate-formats)
+10. [Complete Config Examples](#complete-config-examples)
+11. [Quick Reference Table](#quick-reference-table)
+12. [Notes & Known Limitations](#notes--known-limitations)
 
 ---
 
@@ -35,19 +38,20 @@ This guide covers the HDR-related features added to CasparVP: channel color conf
 ┌────────────────────────────────────────────────────────────────┐
 │  OGL Mixer                                                     │
 │  - YCbCr↔BGRA conversion uses correct colour matrix           │
+│  - Per-layer color grading pipeline (see COLOR_GRADING.md)     │
 │  - Output BGRA frame carries channel color_space +             │
 │    color_transfer in pixel_format_desc                         │
 └───────────────────────┬────────────────────────────────────────┘
                         │
-          ┌─────────────┼──────────────┐
-          ▼             ▼              ▼
-┌──────────────────┐ ┌───────────────┐ ┌────────────────────┐
-│  DeckLink output │ │ FFmpeg consumer│ │ CUDA ProRes consumer│
-│  - HDR v210      │ │ enc->color_trc│ │ - MOV/MXF color    │
-│  - EOTF signaled │ │ enc->primaries│ │   metadata         │
-│  - primaries set │ │ enc->colorsp. │ │ - HDR mode auto-   │
-└──────────────────┘ └───────────────┘ │   derived from ch. │
-                                       └────────────────────┘
+          ┌─────────────┼──────────────┬───────────────┐
+          ▼             ▼              ▼               ▼
+┌──────────────────┐ ┌───────────────┐ ┌────────────┐ ┌──────────────────┐
+│  DeckLink output │ │ FFmpeg consumer│ │ CUDA ProRes│ │  Vulkan output   │
+│  - HDR v210      │ │ enc->color_trc│ │ - MOV/MXF  │ │  - Compute shader│
+│  - EOTF signaled │ │ enc->primaries│ │   color    │ │    gamut+OETF    │
+│  - primaries set │ │ enc->colorsp. │ │   metadata │ │  - Hardware HDR  │
+└──────────────────┘ └───────────────┘ │ - HDR auto │ │    (NvAPI UHDA)  │
+                                       └────────────┘ └──────────────────┘
 ```
 
 Color space and transfer function are declared **once on the channel** and flow automatically to every consumer. Individual consumers can optionally override them.
@@ -187,6 +191,106 @@ No explicit `<hdr>true</hdr>` flag is needed — it is derived from the channel'
 | Green | (0.170, 0.797) |
 | Blue | (0.131, 0.046) |
 | White point | (0.3127, 0.3290) — D65 |
+
+---
+
+## Vulkan Output (Direct Display)
+
+The Vulkan output consumer provides low-latency, direct-to-display HDR output. It performs its own gamut and transfer function conversion via a Vulkan compute shader — or bypasses it entirely using NVIDIA hardware HDR acceleration when available. For full architecture details, see [VULKAN_OUTPUT.md](VULKAN_OUTPUT.md).
+
+### HDR Configuration
+
+Unlike DeckLink (which inherits HDR settings from the channel), the Vulkan consumer has its own color conversion pipeline. Configuration is done per-consumer in `casparcg.config`:
+
+```xml
+<consumers>
+  <vulkan-output>
+    <gpu>0</gpu>
+    <device>1</device>
+    <transfer>pq</transfer>             <!-- sdr | pq | hlg -->
+    <gamut>bt2020</gamut>               <!-- bt709 | bt2020 | p3-d65 | p3-dci | adobe-rgb -->
+    <eotf>pq</eotf>                    <!-- srgb | linear | pq | hlg | gamma24 | gamma26 -->
+    <hdr-metadata>
+      <max-cll>1000</max-cll>          <!-- Maximum Content Light Level (nits) -->
+      <max-fall>400</max-fall>         <!-- Maximum Frame-Average Light Level (nits) -->
+    </hdr-metadata>
+  </vulkan-output>
+</consumers>
+```
+
+When `<gamut>` or `<eotf>` are not explicitly set, they are inferred from `<transfer>`:
+
+| `<transfer>` | Inferred gamut | Inferred EOTF |
+|:---|:---|:---|
+| `sdr` | bt709 | srgb |
+| `pq` | bt2020 | pq |
+| `hlg` | bt2020 | hlg |
+
+### EDID Auto-Detection
+
+The Vulkan consumer can read the connected display's EDID via NvAPI to auto-detect HDR capability:
+
+```xml
+<vulkan-output>
+    <gpu>0</gpu>
+    <device>1</device>
+    <edid-auto-hdr>true</edid-auto-hdr>
+</vulkan-output>
+```
+
+If the display reports an HDR Static Metadata Data Block (CTA-861), the module automatically switches to PQ transfer and reads the display's maximum luminance for MaxCLL.
+
+### Hardware HDR Acceleration (NVIDIA)
+
+On NVIDIA GPUs, when PQ or HLG output is configured, the module attempts to enable hardware-accelerated color conversion via `NvAPI_Disp_HdrColorControl` (UHDA mode). This uses the GPU's display engine — dedicated scanout-stage hardware — to perform PQ EOTF encoding and BT.709→BT.2020 gamut mapping at zero shader cost and zero additional latency. The compute shader pipeline is completely bypassed when this is active.
+
+Hardware HDR activates automatically when:
+- `<transfer>pq</transfer>` or `<transfer>hlg</transfer>` is set and the display supports ST2084
+- `<edid-auto-hdr>` detects an HDR-capable display
+
+Falls back silently to the compute shader path if the display or driver doesn't support it.
+
+### Color Conversion (Compute Shader)
+
+When hardware HDR is not available, a Vulkan compute shader converts the mixer's BT.709 sRGB output to the target gamut and transfer function via an RGBA16F intermediate (zero-banding precision):
+
+1. Linearize (undo sRGB EOTF)
+2. 3×3 gamut matrix (BT.709 → target primaries)
+3. Apply output OETF (PQ, HLG, gamma, etc.)
+
+When no conversion is needed (gamut = BT.709, transfer = sRGB), the compute pass is completely bypassed.
+
+### Supported Output Gamuts
+
+| Config Value | Standard | Typical Use |
+|:---|:---|:---|
+| `bt709` | ITU-R BT.709 / sRGB | Default — no conversion |
+| `bt2020` | ITU-R BT.2020 | HDR10, broadcast HDR |
+| `p3-d65` | Display P3 (D65 white) | Apple displays, wide-gamut monitors |
+| `p3-dci` | DCI-P3 (DCI white) | Digital cinema projection |
+| `adobe-rgb` | Adobe RGB (1998) | Photography, print proofing |
+
+### Supported Transfer Functions
+
+| Config Value | Standard | Typical Use |
+|:---|:---|:---|
+| `srgb` | IEC 61966-2-1 | Default — matches mixer working space |
+| `pq` / `st2084` | SMPTE ST 2084 | HDR10, Dolby Vision |
+| `hlg` | ARIB STD-B67 | Live broadcast HDR |
+| `gamma24` / `2.4` | Pure gamma 2.4 | EBU broadcast reference monitors |
+| `gamma26` / `2.6` | Pure gamma 2.6 | DCI cinema projection |
+| `linear` | 1:1 | Compositing previews |
+
+### DeckLink vs Vulkan — HDR Configuration Comparison
+
+| Aspect | DeckLink | Vulkan |
+|:---|:---|:---|
+| HDR mode source | Inherited from channel `<color-transfer>` | Set per-consumer via `<transfer>` |
+| Gamut conversion | None (passes through channel gamut) | Compute shader or hardware HDR |
+| Wide-gamut options | BT.709, BT.2020 | BT.709, BT.2020, P3-D65, P3-DCI, Adobe RGB |
+| HDR metadata | `<hdr-metadata>` in DeckLink block | `<hdr-metadata>` in vulkan-output block |
+| EDID auto-detect | No | Yes (`<edid-auto-hdr>`) |
+| Hardware acceleration | N/A | NvAPI UHDA display engine (NVIDIA) |
 
 ---
 
@@ -489,6 +593,91 @@ A BT.2020 PQ channel can output HLG on one specific DeckLink port while keeping 
 </channel>
 ```
 
+### Vulkan HDR10 direct-display output
+
+```xml
+<channel>
+  <video-mode>2160p5000</video-mode>
+  <color-depth>16</color-depth>
+  <consumers>
+    <vulkan-output>
+      <gpu>0</gpu>
+      <device>1</device>
+      <transfer>pq</transfer>
+      <hdr-metadata>
+        <max-cll>1000</max-cll>
+        <max-fall>400</max-fall>
+      </hdr-metadata>
+    </vulkan-output>
+  </consumers>
+</channel>
+```
+
+### Vulkan with EDID auto-detection
+
+Let the Vulkan consumer decide SDR or HDR based on the connected display:
+
+```xml
+<channel>
+  <video-mode>2160p5000</video-mode>
+  <color-depth>16</color-depth>
+  <consumers>
+    <vulkan-output>
+      <gpu>0</gpu>
+      <device>1</device>
+      <edid-auto-hdr>true</edid-auto-hdr>
+    </vulkan-output>
+  </consumers>
+</channel>
+```
+
+### Vulkan DCI-P3 cinema projection
+
+Output for DCI projectors with gamma 2.6:
+
+```xml
+<vulkan-output>
+    <gpu>0</gpu>
+    <device>1</device>
+    <gamut>p3-dci</gamut>
+    <eotf>gamma26</eotf>
+</vulkan-output>
+```
+
+### Mixed consumer setup — DeckLink SDI + Vulkan HDR + file recording
+
+```xml
+<channel>
+  <video-mode>2160p5000</video-mode>
+  <color-depth>16</color-depth>
+  <color-space>bt2020</color-space>
+  <color-transfer>pq</color-transfer>
+  <consumers>
+    <decklink>
+      <device>1</device>
+      <embedded-audio>true</embedded-audio>
+      <hdr-metadata>
+        <max-cll>1000</max-cll>
+        <max-fall>400</max-fall>
+      </hdr-metadata>
+    </decklink>
+    <vulkan-output>
+      <gpu>0</gpu>
+      <device>1</device>
+      <transfer>pq</transfer>
+      <hdr-metadata>
+        <max-cll>1000</max-cll>
+        <max-fall>400</max-fall>
+      </hdr-metadata>
+    </vulkan-output>
+    <ffmpeg>
+      <path>D:\Recordings\output.mov</path>
+      <args>-vcodec prores_ks -profile:v 4 -pix_fmt yuv422p10le</args>
+    </ffmpeg>
+  </consumers>
+</channel>
+```
+
 ---
 
 ## Quick Reference Table
@@ -530,12 +719,14 @@ A BT.2020 PQ channel can output HLG on one specific DeckLink port while keeping 
 
 - **Dynamic per-frame transfer function switching** is supported on the *input* side (DeckLink capture and file playback detect it per frame). On the *output* side the transfer function is set at channel-start time and is fixed for the session — runtime changes require a channel restart.
 
-- **No tone-mapping is performed** by the mixer. If you play SDR content on a BT.2020/PQ channel it will be treated as narrow-range WCG PQ. Use the FFmpeg producer filter options (e.g. `zscale`) for tone-mapping if needed.
+- **No tone-mapping is performed** by the channel-level HDR pipeline. If you play SDR content on a BT.2020/PQ channel it will be treated as narrow-range WCG PQ. For per-layer tone mapping, use `MIXER COLORSPACE` with a tone mapping operator (see [COLOR_GRADING.md](COLOR_GRADING.md)). The Vulkan output consumer can also perform gamut/OETF conversion at the output stage via its compute shader or hardware HDR path.
 
-- **HDR static metadata** (MaxCLL, MaxFALL, mastering display luminance) is set per-consumer via `<hdr-metadata>` in the DeckLink consumer config. The FFmpeg consumer currently writes only the EOTF/primaries/matrix into the encoder context; mastering display SEI is not set automatically — use `-x265-params` or Dolby Vision tooling for full HDR10 SEI.
+- **HDR static metadata** (MaxCLL, MaxFALL, mastering display luminance) is set per-consumer via `<hdr-metadata>` in the DeckLink or Vulkan consumer config. The FFmpeg consumer currently writes only the EOTF/primaries/matrix into the encoder context; mastering display SEI is not set automatically — use `-x265-params` or Dolby Vision tooling for full HDR10 SEI.
 
 - **HFR formats** (100/120 fps at 1080p and 2160p) require a DeckLink 8K Pro or equivalent hardware capable of those modes.
 
 - **CUDA ProRes consumer** (`CUDA_PRORES` / `CUDA_PRORES_BYPASS`) HDR mode is now derived from the channel's `<color-transfer>` when no explicit `HDR` AMCP parameter is given. Existing workflows that pass `HDR PQ` or `HDR HLG` explicitly are unaffected.
 
 - **CUDA ProRes producer** reads `color_matrix` and `transfer_func` from the ProRes bitstream header on every decoded frame. HDR ProRes files produced by Final Cut Pro, DaVinci Resolve, or a previous CUDA ProRes recording will therefore correctly signal PQ or HLG to the downstream mixer and consumers. Prior to this fix, all CUDA-decoded ProRes frames were reported as SDR regardless of container metadata.
+
+- **Vulkan output HDR** is configured per-consumer, independent of the channel's `<color-transfer>`. This allows a single channel to drive both an SDR DeckLink output and an HDR Vulkan output simultaneously. The Vulkan consumer supports wider gamut options (P3-D65, P3-DCI, Adobe RGB) beyond what DeckLink offers.

@@ -20,6 +20,9 @@ if (BUILD_CUDA_MODULES)
     message(STATUS "CUDA modules enabled (cuda_prores, cuda_notchlc)")
 endif()
 
+add_subdirectory(hap)
+message(STATUS "HAP module enabled")
+
 add_subdirectory(screen)
 add_subdirectory(vulkan_output)
 add_subdirectory(newtek)

@@ -1,0 +1,29 @@
+// Generated config.h for snappy 1.2.1 on Windows (MSVC x64).
+// All feature checks are 0 (MSVC doesn't have GCC builtins, mmap, etc.)
+
+#ifndef THIRD_PARTY_SNAPPY_OPENSOURCE_CMAKE_CONFIG_H_
+#define THIRD_PARTY_SNAPPY_OPENSOURCE_CMAKE_CONFIG_H_
+
+#define HAVE_ATTRIBUTE_ALWAYS_INLINE 0
+#define HAVE_BUILTIN_CTZ 0
+#define HAVE_BUILTIN_EXPECT 0
+#define HAVE_BUILTIN_PREFETCH 0
+#define HAVE_FUNC_MMAP 0
+#define HAVE_FUNC_SYSCONF 0
+#define HAVE_LIBLZO2 0
+#define HAVE_LIBZ 0
+#define HAVE_LIBLZ4 0
+#define HAVE_SYS_MMAN_H 0
+#define HAVE_SYS_RESOURCE_H 0
+#define HAVE_SYS_TIME_H 0
+#define HAVE_SYS_UIO_H 0
+#define HAVE_UNISTD_H 0
+#define HAVE_WINDOWS_H 1
+#define SNAPPY_HAVE_SSSE3 0
+#define SNAPPY_HAVE_X86_CRC32 0
+#define SNAPPY_HAVE_BMI2 0
+#define SNAPPY_HAVE_NEON 0
+#define SNAPPY_HAVE_NEON_CRC32 0
+#define SNAPPY_IS_BIG_ENDIAN 0
+
+#endif  // THIRD_PARTY_SNAPPY_OPENSOURCE_CMAKE_CONFIG_H_

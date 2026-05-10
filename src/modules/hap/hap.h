@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011 Sveriges Television AB <info@casparcg.com>
+ * Copyright (c) 2025 CasparCG Contributors
  *
  * This file is part of CasparCG (www.casparcg.com).
  *
@@ -16,32 +16,17 @@
  * You should have received a copy of the GNU General Public License
  * along with CasparCG. If not, see <http://www.gnu.org/licenses/>.
  *
- * Author: Robert Nagy, ronag89@gmail.com
+ * HAP is an open video codec designed for fast, GPU-accelerated playback
+ * using S3TC/DXT compressed textures. https://hap.video/
  */
 
+// hap.h
+// CasparCG module entry point for the HAP decoder producer.
 #pragma once
+#include <core/module_dependencies.h>
 
-#include <common/memory.h>
+namespace caspar { namespace hap {
 
-namespace caspar { namespace accelerator { namespace ogl {
+void init(const core::module_dependencies& dependencies);
 
-class shader;
-class device;
-
-enum class texture_id
-{
-    plane0 = 0,
-    plane1,
-    plane2,
-    plane3,
-    local_key,
-    layer_key,
-    background,
-    curve_lut_tex,
-    lut3d_tex,
-    hue_curve_tex
-};
-
-std::shared_ptr<shader> get_image_shader(const spl::shared_ptr<device>& ogl);
-
-}}} // namespace caspar::accelerator::ogl
+}} // namespace caspar::hap

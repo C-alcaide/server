@@ -26,9 +26,25 @@
 #include <core/mixer/image/blend_modes.h>
 
 #include <array>
+#include <memory>
 #include <optional>
+#include <string>
+#include <vector>
 
 namespace caspar { namespace core {
+
+// ---- 3D LUT data (parsed from .cube files) ---------------------------------
+struct lut3d_data final
+{
+    int                size = 0;  // LUT dimension (e.g., 33 for a 33x33x33 LUT)
+    std::vector<float> data;      // size*size*size*3 RGB float values
+};
+
+// ---- Hue curve data (Hue-vs-Hue, Hue-vs-Sat, etc.) ------------------------
+struct hue_curve_data final
+{
+    std::vector<float> data;  // 256 * 4 floats (R=HvH, G=HvS, B=HvL, A=SvS)
+};
 
 struct chroma
 {
@@ -59,7 +75,7 @@ struct levels final
     double max_output = 1.0;
 };
 
-enum class screen_curve_type { flat = 0, cylinder = 1, sphere = 2 };
+enum class screen_curve_type { flat = 0, cylinder = 1, sphere = 2, fisheye = 3 };
 
 struct projection final
 {
@@ -70,15 +86,29 @@ struct projection final
     double            fov          = 1.57079632679;
     double            offset_x     = 0.0;  // NDC lens-shift: +1 = pan right, -1 = pan left
     double            offset_y     = 0.0;  // NDC lens-shift: +1 = pan up,    -1 = pan down
+    // Off-axis frustum shift for multi-projector tiling
+    double            frustum_h    = 0.0;  // horizontal frustum offset in NDC (-1 to +1)
+    double            frustum_v    = 0.0;  // vertical frustum offset in NDC (-1 to +1)
+    // Lens distortion correction (Brown-Conrady radial model)
+    double            lens_k1      = 0.0;  // radial distortion coefficient
+    double            lens_k2      = 0.0;  // radial distortion coefficient
+    double            lens_k3      = 0.0;  // radial distortion coefficient
     // Curved screen compensation — independent of 360 mode
     bool              curve_enable = false;
     screen_curve_type curve_type   = screen_curve_type::flat;
     double            screen_arc   = 0.0;  // total arc in radians (horizontal for cylinder, radial for sphere)
+    // Soft-edge blending for multi-projector overlap
+    double            edge_blend_left   = 0.0;  // fraction of screen width (0..1)
+    double            edge_blend_right  = 0.0;
+    double            edge_blend_top    = 0.0;  // fraction of screen height (0..1)
+    double            edge_blend_bottom = 0.0;
+    double            edge_blend_gamma  = 2.2;  // blend-curve gamma (perceptual linearity)
 };
 
 // Transfer: 0=linear,1=srgb,2=rec709,3=pq(st2084),4=hlg,5=logc3(arri),6=slog3(sony)
 // Gamut:    0=bt709,1=bt2020,2=dcip3_d65,3=aces_ap0,4=aces_ap1(acescg),5=arri_wg3,6=sgamut3_cine
-// Tonemapping: 0=none,1=reinhard,2=aces_filmic,3=aces_rrt
+// Tonemapping: 0=none,1=reinhard,2=aces_filmic,3=aces_rrt_approx,
+//              4=aces_rrt_709,5=aces_rrt_p3,6=aces_rrt_2020_pq
 struct color_grade final
 {
     bool  enable          = false;
@@ -244,11 +274,59 @@ struct image_transform final
     double shadows    = 0.0;  // -1..+1
     double highlights = 0.0;  // -1..+1
 
+    // Linear saturation (scene-referred, applied in working space)
+    double linear_saturation = 1.0;  // 0=mono, 1=normal, >1=boosted
+
+    // ASC CDL (Slope/Offset/Power) — industry-standard primary color decision
+    std::array<double, 3> cdl_slope      = {1.0, 1.0, 1.0};
+    std::array<double, 3> cdl_offset     = {0.0, 0.0, 0.0};
+    std::array<double, 3> cdl_power      = {1.0, 1.0, 1.0};
+    double                cdl_saturation = 1.0;
+
+    // Split toning — tint shadows and highlights independently
+    std::array<double, 3> split_shadow_color    = {0.0, 0.0, 0.0};  // RGB offset for shadows
+    std::array<double, 3> split_highlight_color = {0.0, 0.0, 0.0};  // RGB offset for highlights
+    double                split_balance         = 0.5;               // 0..1 crossover point
+
+    // Gamut compression (ACES 1.3 Reference Gamut Compress)
+    bool   gamut_compress = false;
+    double gc_cyan    = 1.147;  // ACES default limit
+    double gc_magenta = 1.264;
+    double gc_yellow  = 1.312;
+
+    // 3D LUT (loaded from .cube files)
+    std::shared_ptr<const lut3d_data> lut3d;       // nullptr = disabled
+    float                             lut3d_strength = 1.0f;  // 0..1 mix factor
+
+    // Hue-vs-Hue / Hue-vs-Sat curves (4-channel 256-entry LUT)
+    std::shared_ptr<const hue_curve_data> hue_curves;  // nullptr = disabled
+
     // Per-channel RGB levels and tone curves
     core::rgb_levels  per_channel_levels;
     core::tone_curves curves;
     blur_config       blur;
     shape_config      shape;
+
+    // Sharpening (unsharp mask)
+    double sharpen_amount = 0.0;  // 0=off, 0.5=moderate, 1+=strong
+    double sharpen_radius = 1.0;  // kernel radius in pixels
+
+    // Film grain
+    double grain_intensity = 0.0;  // 0=off, 0.05=subtle, 0.2=heavy
+    double grain_size      = 1.0;  // scale factor for noise pattern
+
+    // Secondary qualifier (HSL key + grade)
+    bool   qualifier_enable = false;
+    double qual_target_hue  = 0.0;   // 0..1 (hue angle / 360)
+    double qual_hue_width   = 0.1;   // 0..0.5
+    double qual_min_sat     = 0.2;   // 0..1
+    double qual_max_sat     = 1.0;   // 0..1
+    double qual_min_lum     = 0.0;   // 0..1
+    double qual_max_lum     = 1.0;   // 0..1
+    double qual_softness    = 0.1;   // feather width
+    double qual_exposure    = 0.0;   // exposure offset for qualified region
+    double qual_sat_offset  = 0.0;   // saturation offset for qualified region
+    double qual_hue_offset  = 0.0;   // hue offset for qualified region (degrees)
 
     bool             is_key      = false;
     bool             invert      = false;

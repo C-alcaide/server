@@ -2,7 +2,7 @@
 
 This feature set introduces GPU-accelerated 360° projection, curved screen compensation, real-time playback speed control, and layer mirroring to CasparCG Server, designed for virtual production, live events, and advanced broadcast workflows.
 
-For color management and grading features, see [COLOR_GRADING.md](COLOR_GRADING.md). For blur, sharpening, and film grain, see [IMAGE_EFFECTS.md](IMAGE_EFFECTS.md). For keyframe debugging notes, see [KEYFRAMES_DEBUG.md](KEYFRAMES_DEBUG.md). For DMX lighting integration, see [DMX_LIGHTING.md](DMX_LIGHTING.md).
+For color management and grading features, see [COLOR_GRADING.md](COLOR_GRADING.md). For blur, sharpening, and film grain, see [IMAGE_EFFECTS.md](IMAGE_EFFECTS.md). For keyframe animation, see [KEYFRAMES.md](KEYFRAMES.md). For DMX lighting integration, see [DMX_LIGHTING.md](DMX_LIGHTING.md).
 
 ## Table of Contents
 
@@ -548,37 +548,46 @@ For full parameter tables, pipeline position details, and additional examples, s
 
 ## Keyframe Animation
 
-Timeline-based keyframe animation that interpolates any MIXER transform property over clip time. Upload a JSON timeline of keyframes (each with a time position, easing curve, and a full snapshot of mixer state), then arm the binding — the server automatically interpolates all fields every render frame as the clip plays.
+Timeline-based keyframe animation that interpolates any MIXER transform property over clip time. Upload a sparse JSON timeline of keyframes (each with a time position, easing curve, and only the fields you want to animate), then arm the binding — the server automatically interpolates all fields every render frame as the clip plays.
 
-Keyframeable properties include geometry (fill, crop, anchor, perspective corners), 360° projection (yaw, pitch, roll, FOV), opacity, color grading (contrast, brightness, saturation, lift/mid/gain, levels), white balance, blur, and more.
+Keyframeable properties include geometry (fill, crop, anchor, perspective corners), 360° projection (yaw, pitch, roll, FOV), opacity, color grading (contrast, brightness, saturation, lift/mid/gain, levels, CDL), white balance, blur, shapes, chroma key, and more — over 160 animatable fields in total.
 
 ### AMCP Commands
 
 ```bash
-# Upload a keyframe timeline (JSON blob)
-KEYFRAMES 1-10 SET ({"keyframes":[{"time":0,"state":{"proj_yaw":0}},{"time":5.0,"easing":"EASEINOUTCUBIC","state":{"proj_yaw":90}}]})
+# Upload a keyframe timeline (JSON blob, sparse — only animated fields)
+KEYFRAMES SET 1-10 ({"keyframes":[
+  {"time_secs":0.0, "easing":"LINEAR", "opacity":1.0, "proj_yaw":0.0},
+  {"time_secs":5.0, "easing":"EASEINOUTCUBIC", "opacity":0.5, "proj_yaw":90.0}
+]})
 
 # Arm — start injecting interpolated transforms each frame
-KEYFRAMES 1-10 ARM
+KEYFRAMES ARM 1-10
 
-# Manual tick (sends current time for paused-layer fallback)
-KEYFRAMES 1-10 TICK 2.9600
+# Scrub timeline while paused
+KEYFRAMES SEEK 1-10 2.5
+
+# Partial update of a single keyframe
+KEYFRAMES PATCH 1-10 5.0 ({"opacity":0.8})
+
+# Query armed state and keyframe count
+KEYFRAMES STATUS 1-10
 
 # Retrieve the stored timeline as JSON
-KEYFRAMES 1-10 GET
+KEYFRAMES GET 1-10
 
 # Stop interpolation (timeline preserved for re-arming)
-KEYFRAMES 1-10 DISARM
+KEYFRAMES DISARM 1-10
 
 # Remove timeline and disarm completely
-KEYFRAMES 1-10 CLEAR
+KEYFRAMES CLEAR 1-10
 ```
 
 ### Supported Easing Curves
 
-`LINEAR`, `EASEINQUAD`, `EASEOUTQUAD`, `EASEINOUTQUAD`, `EASEINCUBIC`, `EASEOUTCUBIC`, `EASEINOUTCUBIC`, and more — applied per-keyframe to control the interpolation shape between adjacent keyframes.
+`LINEAR`, `EASEIN`, `EASEOUT`, `EASE`, `EASEINQUAD`, `EASEOUTQUAD`, `EASEINOUTQUAD`, `EASEINCUBIC`, `EASEOUTCUBIC`, `EASEINOUTCUBIC`, `EASEINBACK`, `EASEOUTBOUNCE`, `EASEINELASTIC`, and more — applied per-keyframe to control the interpolation shape between adjacent keyframes.
 
-For debugging notes and known edge cases (e.g. paused-layer seek timing), see [KEYFRAMES_DEBUG.md](KEYFRAMES_DEBUG.md).
+For the complete field reference, interpolation modes, worked examples, and best practices, see [KEYFRAMES.md](KEYFRAMES.md).
 
 ---
 

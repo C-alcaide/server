@@ -12,23 +12,25 @@
 #pragma once
 
 #include "keyframe_data.h"
-
 #include <string>
 
 namespace caspar { namespace keyframes {
 
-/// Serialize a keyframe_timeline to a JSON string.
-/// Only non-default field values are emitted (sparse).
+/// Serialize a keyframe_timeline to a compact JSON string.
+/// Format:
+///  { "keyframes": [
+///      { "time_secs": 0.0, "easing": "LINEAR", "opacity": 1.0, ... },
+///      ...
+///  ]}
 std::string timeline_to_json(const keyframe_timeline& tl);
 
 /// Deserialize a keyframe_timeline from a JSON string.
-/// Accepts both sparse (new) and full (legacy) formats.
-/// Easing names are resolved to function pointers during parsing.
 /// Throws std::runtime_error on parse failure.
 keyframe_timeline json_to_timeline(const std::string& json);
 
-/// Parse a partial JSON object into sparse kf_values.
-/// Used by KEYFRAMES PATCH.  Unknown keys are silently ignored.
-kf_values parse_kf_values(const std::string& json);
+/// Apply a partial JSON object (only the fields present) on top of *base*.
+/// Fields not mentioned in the JSON retain their values from *base*.
+/// Throws std::runtime_error on parse failure.
+kf_state patch_state_from_json(const kf_state& base, const std::string& json);
 
 }} // namespace caspar::keyframes

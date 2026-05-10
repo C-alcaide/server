@@ -1,14 +1,14 @@
-# CasparCG VMX Module Usage Guide
+# CasparCG Replay Module Usage Guide
 
-This document outlines the usage, commands, and features of the VMX module for CasparCG Server. This module enables high-performance recording and playback of `.mav` files using the VMX codec, with robust support for "growing file" playback (Play-while-Recording) and background exporting.
+This document outlines the usage, commands, and features of the Replay module for CasparCG Server. This module enables high-performance recording and playback of `.mav` files using the Replay codec, with robust support for "growing file" playback (Play-while-Recording) and background exporting.
 
 ## 1. Recording (Consumer)
 
-To start recording a channel to a VMX file, use the `ADD` command with the `VMX` consumer type.
+To start recording a channel to a Replay file, use the `ADD` command with the `REPLAY` consumer type.
 
 ### Syntax
 ```bash
-ADD <channel> VMX <filename>[?<options>]
+ADD <channel> REPLAY <filename>[?<options>]
 ```
 *Note: The filename is relative to the `media/` folder defined in your configuration.*
 
@@ -49,12 +49,12 @@ The `OMT` (Open Media Transport) profiles offer updated tuning for modern workfl
 
 **Standard Recording (SQ Quality):**
 ```bash
-ADD 1 VMX "my_recording"
+ADD 1 REPLAY "my_recording"
 ```
 
 **High Quality Recording:**
 ```bash
-ADD 1 VMX "my_high_quality_recording" HQ
+ADD 1 REPLAY "my_high_quality_recording" HQ
 ```
 
 **Circular Buffer Recording (Time-Shift):**
@@ -72,12 +72,12 @@ This creates a folder `media/my_channel_buffer/` containing:
 
 **Stop Recording:**
 ```bash
-REMOVE 1 VMX "my_recording"
+REMOVE 1 REPLAY "my_recording"
 ```
 
 ## 2. Playback (Producer)
 
-To play a VMX file, use the standard `PLAY` command. The producer automatically detects if the file is segmented or growing and updates its duration dynamically.
+To play a Replay file, use the standard `PLAY` command. The producer automatically detects if the file is segmented or growing and updates its duration dynamically.
 
 ### Syntax
 ```bash
@@ -117,7 +117,7 @@ PLAY 1-1 "growing_file" SEEK LIVE
 
 ## 3. Timestamp Format
 
-The VMX module supports a high-precision timestamp format for all time-based commands (`SEEK`, `IN`, `OUT`, `EXPORT`).
+The Replay module supports a high-precision timestamp format for all time-based commands (`SEEK`, `IN`, `OUT`, `EXPORT`).
 
 **Format:** `yyyy-mm-dd-hh-mm-ss-ff`
 *   `yyyy`: Year
@@ -135,7 +135,7 @@ You can also use simple integer frame numbers (e.g., `0`, `100`, `5000`) instead
 
 ## 4. Commands
 
-The VMX producer supports standard AMCP commands via `CALL`.
+The Replay producer supports standard AMCP commands via `CALL`.
 
 ### SEEK
 Jumps to a specific frame or timestamp.
@@ -213,17 +213,17 @@ CALL 1-10 LOOP 0     # Disable
 ```
 
 ## 5. OSC Data
-The VMX producer outputs real-time data via OSC.
+The Replay producer outputs real-time data via OSC.
 
 **Addresses:**
 *   `/channel/1/stage/layer/1/file/time`: Current time in seconds.
 *   `/channel/1/stage/layer/1/file/frame`: Current frame number.
-*   `/channel/1/stage/layer/1/vmx/timestamp`: Current timestamp (microseconds).
-*   `/channel/1/stage/layer/1/vmx/timestamp_formatted`: Current timestamp as string (`yyyy-mm-dd-hh-mm-ss-ff`).
+*   `/channel/1/stage/layer/1/replay/timestamp`: Current timestamp (microseconds).
+*   `/channel/1/stage/layer/1/replay/timestamp_formatted`: Current timestamp as string (`yyyy-mm-dd-hh-mm-ss-ff`).
 
 ## 6. Diagnostics
 
-The VMX module registers detailed graphs in the CasparCG Diagnostics window.
+The Replay module registers detailed graphs in the CasparCG Diagnostics window.
 
 *   **Producer Graph**: Shows read bitrate, current FPS, and buffer health.
 *   **Consumer Graph**: Shows write buffer usage and encoding performance.

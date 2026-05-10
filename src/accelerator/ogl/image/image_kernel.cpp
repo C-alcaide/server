@@ -150,6 +150,10 @@ struct image_kernel::impl
     GLuint                  vao_;
     GLuint                  vbo_;
     GLuint                  curve_lut_tex_id_ = 0;
+    GLuint                  lut3d_tex_id_     = 0;
+    const core::lut3d_data* lut3d_data_ptr_   = nullptr;  // tracks which data is uploaded
+    GLuint                  hue_curve_tex_id_ = 0;
+    int                     frame_counter_    = 0;
 
     explicit impl(const spl::shared_ptr<device>& ogl)
         : ogl_(ogl)
@@ -168,6 +172,10 @@ struct image_kernel::impl
             GL(glDeleteBuffers(1, &vbo_));
             if (curve_lut_tex_id_)
                 GL(glDeleteTextures(1, &curve_lut_tex_id_));
+            if (lut3d_tex_id_)
+                GL(glDeleteTextures(1, &lut3d_tex_id_));
+            if (hue_curve_tex_id_)
+                GL(glDeleteTextures(1, &hue_curve_tex_id_));
         });
     }
 
@@ -313,6 +321,11 @@ struct image_kernel::impl
             shader_->set("view_fov",      static_cast<float>(transforms.image_transform.projection.fov));
             shader_->set("view_offset_x", static_cast<float>(transforms.image_transform.projection.offset_x));
             shader_->set("view_offset_y", static_cast<float>(transforms.image_transform.projection.offset_y));
+            shader_->set("frustum_h",     static_cast<float>(transforms.image_transform.projection.frustum_h));
+            shader_->set("frustum_v",     static_cast<float>(transforms.image_transform.projection.frustum_v));
+            shader_->set("lens_k1",       static_cast<float>(transforms.image_transform.projection.lens_k1));
+            shader_->set("lens_k2",       static_cast<float>(transforms.image_transform.projection.lens_k2));
+            shader_->set("lens_k3",       static_cast<float>(transforms.image_transform.projection.lens_k3));
             shader_->set("aspect_ratio",  static_cast<float>(params.aspect_ratio));
         } else {
             shader_->set("is_360", false);
@@ -322,6 +335,13 @@ struct image_kernel::impl
         shader_->set("is_curved",         transforms.image_transform.projection.curve_enable);
         shader_->set("screen_curve_type", static_cast<int>(transforms.image_transform.projection.curve_type));
         shader_->set("screen_arc",        static_cast<float>(transforms.image_transform.projection.screen_arc));
+
+        // Soft-edge blending
+        shader_->set("edge_blend_left",   static_cast<float>(transforms.image_transform.projection.edge_blend_left));
+        shader_->set("edge_blend_right",  static_cast<float>(transforms.image_transform.projection.edge_blend_right));
+        shader_->set("edge_blend_top",    static_cast<float>(transforms.image_transform.projection.edge_blend_top));
+        shader_->set("edge_blend_bottom", static_cast<float>(transforms.image_transform.projection.edge_blend_bottom));
+        shader_->set("edge_blend_gamma",  static_cast<float>(transforms.image_transform.projection.edge_blend_gamma));
 
         if (transforms.image_transform.blur.enable) {
             shader_->set("blur_enable", true);
@@ -349,8 +369,8 @@ struct image_kernel::impl
             {0.7951281f,  0.1643585f,  0.0405134f,  0.0234399f,  0.9415642f,  0.0349959f,  0.0036186f,  0.0613513f,  0.9350301f},
             // dcip3 d65 -> ACEScg
             {0.8224549f,  0.1774521f, -0.0000070f,  0.0332021f,  0.9618927f,  0.0049052f,  0.0170512f,  0.0723025f,  0.9106463f},
-            // aces_ap0 -> ACEScg (AP1)
-            {1.4514393f, -0.2362486f, -0.0153674f, -0.3194787f,  1.1765407f, -0.0083099f, -0.0153694f,  0.0183597f,  1.0023859f},
+            // aces_ap0 -> ACEScg (AP1)  [ACES CTL reference]
+            {1.4514393f, -0.2365107f, -0.2149286f, -0.0765538f,  1.1762297f, -0.0996759f,  0.0083161f, -0.0060324f,  0.9977163f},
             // aces_ap1 identity
             {1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f},
             // arri wide gamut 3 -> ACEScg
@@ -365,14 +385,14 @@ struct image_kernel::impl
             { 1.2746843f, -0.2692490f, -0.0054353f, -0.0293524f,  1.0763680f, -0.0470156f, -0.0160993f, -0.0606079f,  1.0767072f},
             // ACEScg -> dcip3 d65
             { 1.2239840f, -0.2239840f,  0.0000000f, -0.0421197f,  1.0421197f,  0.0000000f, -0.0196576f, -0.0787093f,  1.0983669f},
-            // ACEScg -> aces_ap0
-            { 0.6954522f,  0.1446577f,  0.1598901f,  0.0439823f,  0.8591788f,  0.0968389f, -0.0055023f,  0.0040678f,  1.0014345f},
+            // ACEScg -> aces_ap0  [inverse of AP0->AP1]
+            {0.6954522f,  0.1406787f,  0.1638691f,  0.0447946f,  0.8596711f,  0.0955343f, -0.0055259f,  0.0040252f,  1.0015007f},
             // ACEScg identity (ap1)
             { 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f},
-            // ACEScg -> arri wide gamut 3 (approximate inverse)
-            { 1.4514393f, -0.2362486f, -0.0153674f, -0.3194787f,  1.1765407f, -0.0083099f, -0.0153694f,  0.0183597f,  1.0023859f},
-            // ACEScg -> sgamut3.cine (approximate inverse)
-            { 1.4087253f, -0.3132873f, -0.0954380f, -0.0667453f,  1.1571781f, -0.0904328f, -0.0057800f, -0.0066708f,  1.0124508f}
+            // ACEScg -> arri wide gamut 3 (computed inverse)
+            { 1.4516608f, -0.2434265f, -0.2082343f, -0.0752455f,  1.1770530f, -0.1018075f,  0.0082817f, -0.0061186f,  0.9978370f},
+            // ACEScg -> sgamut3.cine (computed inverse)
+            { 1.4235761f, -0.3158537f, -0.1077233f, -0.0682645f,  1.1859178f, -0.1176531f,  0.0041827f, -0.0110575f,  1.0068749f}
         };
         const auto& cg = transforms.image_transform.color_grade;
         if (cg.enable) {
@@ -479,6 +499,156 @@ struct image_kernel::impl
             shader_->set("tb_highlights", static_cast<float>(transforms.image_transform.highlights));
         } else {
             shader_->set("tonebalance_enable", false);
+        }
+
+        // Linear saturation (scene-referred)
+        if (std::abs(transforms.image_transform.linear_saturation - 1.0) > epsilon) {
+            shader_->set("linear_sat_enable", true);
+            shader_->set("linear_sat_value",  static_cast<float>(transforms.image_transform.linear_saturation));
+        } else {
+            shader_->set("linear_sat_enable", false);
+        }
+
+        // ASC CDL (Slope/Offset/Power)
+        {
+            const auto& s = transforms.image_transform.cdl_slope;
+            const auto& o = transforms.image_transform.cdl_offset;
+            const auto& p = transforms.image_transform.cdl_power;
+            double      cs = transforms.image_transform.cdl_saturation;
+            bool cdl_active =
+                std::abs(s[0] - 1.0) > epsilon || std::abs(s[1] - 1.0) > epsilon || std::abs(s[2] - 1.0) > epsilon ||
+                std::abs(o[0]) > epsilon       || std::abs(o[1]) > epsilon       || std::abs(o[2]) > epsilon       ||
+                std::abs(p[0] - 1.0) > epsilon || std::abs(p[1] - 1.0) > epsilon || std::abs(p[2] - 1.0) > epsilon ||
+                std::abs(cs - 1.0) > epsilon;
+            if (cdl_active) {
+                shader_->set("cdl_enable", true);
+                // Swap R<->B for BGRA convention: user R=[0], shader .b=Red -> index [2]
+                shader_->set("cdl_slope",      s[2], s[1], s[0]);
+                shader_->set("cdl_offset",     o[2], o[1], o[0]);
+                shader_->set("cdl_power",      p[2], p[1], p[0]);
+                shader_->set("cdl_saturation", static_cast<float>(cs));
+            } else {
+                shader_->set("cdl_enable", false);
+            }
+        }
+
+        // Split toning
+        {
+            const auto& sc = transforms.image_transform.split_shadow_color;
+            const auto& hc = transforms.image_transform.split_highlight_color;
+            bool split_active =
+                std::abs(sc[0]) > epsilon || std::abs(sc[1]) > epsilon || std::abs(sc[2]) > epsilon ||
+                std::abs(hc[0]) > epsilon || std::abs(hc[1]) > epsilon || std::abs(hc[2]) > epsilon;
+            if (split_active) {
+                shader_->set("split_tone_enable", true);
+                // Swap R<->B for BGRA convention
+                shader_->set("split_shadow_color",    sc[2], sc[1], sc[0]);
+                shader_->set("split_highlight_color", hc[2], hc[1], hc[0]);
+                shader_->set("split_balance", static_cast<float>(transforms.image_transform.split_balance));
+            } else {
+                shader_->set("split_tone_enable", false);
+            }
+        }
+
+        // Gamut compression (ACES 1.3 Reference Gamut Compress)
+        if (transforms.image_transform.gamut_compress) {
+            shader_->set("gamut_compress_enable", true);
+            // BGRA order: .r=Blue(yellow), .g=Green(magenta), .b=Red(cyan)
+            shader_->set("gc_limit",
+                         static_cast<float>(transforms.image_transform.gc_yellow),
+                         static_cast<float>(transforms.image_transform.gc_magenta),
+                         static_cast<float>(transforms.image_transform.gc_cyan));
+        } else {
+            shader_->set("gamut_compress_enable", false);
+        }
+
+        // 3D LUT
+        {
+            const auto& lut = transforms.image_transform.lut3d;
+            if (lut && lut->size > 0 && !lut->data.empty()) {
+                // Re-upload if the data pointer changed (new LUT loaded)
+                if (lut.get() != lut3d_data_ptr_) {
+                    if (lut3d_tex_id_)
+                        GL(glDeleteTextures(1, &lut3d_tex_id_));
+                    GL(glCreateTextures(GL_TEXTURE_3D, 1, &lut3d_tex_id_));
+                    GL(glTextureStorage3D(lut3d_tex_id_, 1, GL_RGB32F, lut->size, lut->size, lut->size));
+                    GL(glTextureParameteri(lut3d_tex_id_, GL_TEXTURE_MIN_FILTER, GL_LINEAR));
+                    GL(glTextureParameteri(lut3d_tex_id_, GL_TEXTURE_MAG_FILTER, GL_LINEAR));
+                    GL(glTextureParameteri(lut3d_tex_id_, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE));
+                    GL(glTextureParameteri(lut3d_tex_id_, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE));
+                    GL(glTextureParameteri(lut3d_tex_id_, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE));
+                    GL(glTextureSubImage3D(lut3d_tex_id_, 0, 0, 0, 0,
+                                           lut->size, lut->size, lut->size,
+                                           GL_RGB, GL_FLOAT, lut->data.data()));
+                    lut3d_data_ptr_ = lut.get();
+                }
+                GL(glBindTextureUnit(static_cast<int>(texture_id::lut3d_tex), lut3d_tex_id_));
+                shader_->set("lut3d_enable", true);
+                shader_->set("lut3d_tex", static_cast<int>(texture_id::lut3d_tex));
+                shader_->set("lut3d_strength", transforms.image_transform.lut3d_strength);
+            } else {
+                shader_->set("lut3d_enable", false);
+                if (lut3d_tex_id_ && !lut) {
+                    lut3d_data_ptr_ = nullptr;
+                }
+            }
+        }
+
+        // Hue-vs-Hue / Hue-vs-Sat curves
+        {
+            const auto& hc = transforms.image_transform.hue_curves;
+            if (hc && !hc->data.empty()) {
+                if (!hue_curve_tex_id_) {
+                    GL(glCreateTextures(GL_TEXTURE_2D, 1, &hue_curve_tex_id_));
+                    GL(glTextureStorage2D(hue_curve_tex_id_, 1, GL_RGBA32F, 256, 1));
+                    GL(glTextureParameteri(hue_curve_tex_id_, GL_TEXTURE_MIN_FILTER, GL_LINEAR));
+                    GL(glTextureParameteri(hue_curve_tex_id_, GL_TEXTURE_MAG_FILTER, GL_LINEAR));
+                    GL(glTextureParameteri(hue_curve_tex_id_, GL_TEXTURE_WRAP_S, GL_REPEAT));
+                    GL(glTextureParameteri(hue_curve_tex_id_, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE));
+                }
+                GL(glTextureSubImage2D(hue_curve_tex_id_, 0, 0, 0, 256, 1, GL_RGBA, GL_FLOAT, hc->data.data()));
+                GL(glBindTextureUnit(static_cast<int>(texture_id::hue_curve_tex), hue_curve_tex_id_));
+                shader_->set("hue_curve_enable", true);
+                shader_->set("hue_curve_tex", static_cast<int>(texture_id::hue_curve_tex));
+            } else {
+                shader_->set("hue_curve_enable", false);
+            }
+        }
+
+        // Sharpening
+        if (std::abs(transforms.image_transform.sharpen_amount) > epsilon) {
+            shader_->set("sharpen_enable", true);
+            shader_->set("sharpen_amount", static_cast<float>(transforms.image_transform.sharpen_amount));
+            shader_->set("sharpen_radius", static_cast<float>(transforms.image_transform.sharpen_radius));
+        } else {
+            shader_->set("sharpen_enable", false);
+        }
+
+        // Film grain
+        if (std::abs(transforms.image_transform.grain_intensity) > epsilon) {
+            shader_->set("grain_enable",    true);
+            shader_->set("grain_intensity", static_cast<float>(transforms.image_transform.grain_intensity));
+            shader_->set("grain_size",      static_cast<float>(transforms.image_transform.grain_size));
+            shader_->set("grain_frame",     frame_counter_++);
+        } else {
+            shader_->set("grain_enable", false);
+        }
+
+        // Secondary qualifier
+        if (transforms.image_transform.qualifier_enable) {
+            shader_->set("qualifier_enable", true);
+            shader_->set("qual_target_hue",  static_cast<float>(transforms.image_transform.qual_target_hue));
+            shader_->set("qual_hue_width",   static_cast<float>(transforms.image_transform.qual_hue_width));
+            shader_->set("qual_min_sat",     static_cast<float>(transforms.image_transform.qual_min_sat));
+            shader_->set("qual_max_sat",     static_cast<float>(transforms.image_transform.qual_max_sat));
+            shader_->set("qual_min_lum",     static_cast<float>(transforms.image_transform.qual_min_lum));
+            shader_->set("qual_max_lum",     static_cast<float>(transforms.image_transform.qual_max_lum));
+            shader_->set("qual_softness",    static_cast<float>(transforms.image_transform.qual_softness));
+            shader_->set("qual_exposure",    static_cast<float>(transforms.image_transform.qual_exposure));
+            shader_->set("qual_sat_offset",  static_cast<float>(transforms.image_transform.qual_sat_offset));
+            shader_->set("qual_hue_offset",  static_cast<float>(transforms.image_transform.qual_hue_offset));
+        } else {
+            shader_->set("qualifier_enable", false);
         }
 
         // Per-channel RGB Levels

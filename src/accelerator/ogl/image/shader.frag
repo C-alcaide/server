@@ -54,11 +54,23 @@ uniform float view_fov;      // Vertical FOV in radians
 uniform float aspect_ratio;  // Screen aspect ratio (width/height)
 uniform float view_offset_x; // NDC lens-shift: +1 = pan right
 uniform float view_offset_y; // NDC lens-shift: +1 = pan up
+uniform float frustum_h;     // off-axis frustum shift horizontal
+uniform float frustum_v;     // off-axis frustum shift vertical
+uniform float lens_k1;       // radial distortion coefficient
+uniform float lens_k2;       // radial distortion coefficient
+uniform float lens_k3;       // radial distortion coefficient
 
 // Curved screen compensation
 uniform bool  is_curved;          // true when curve compensation is active
-uniform int   screen_curve_type;  // 0=flat, 1=cylinder (horizontal), 2=sphere (radial)
+uniform int   screen_curve_type;  // 0=flat, 1=cylinder (horizontal), 2=sphere (radial), 3=fisheye
 uniform float screen_arc;         // total arc angle in radians
+
+// Soft-edge blending (multi-projector overlap)
+uniform float edge_blend_left;    // blend width as fraction of screen (0 = off)
+uniform float edge_blend_right;
+uniform float edge_blend_top;
+uniform float edge_blend_bottom;
+uniform float edge_blend_gamma;   // blend curve gamma (default 2.2)
 
 // Color Grading (ACES workflow)
 uniform bool  color_grading;
@@ -88,6 +100,60 @@ uniform float hue_shift_degrees;  // -180..+180
 uniform bool  tonebalance_enable;
 uniform float tb_shadows;     // -1..+1
 uniform float tb_highlights;  // -1..+1
+
+// Linear saturation (scene-referred, in working space)
+uniform bool  linear_sat_enable;
+uniform float linear_sat_value;
+
+// ASC CDL (Slope/Offset/Power)
+uniform bool  cdl_enable;
+uniform vec3  cdl_slope;
+uniform vec3  cdl_offset;
+uniform vec3  cdl_power;
+uniform float cdl_saturation;
+
+// Split toning
+uniform bool  split_tone_enable;
+uniform vec3  split_shadow_color;
+uniform vec3  split_highlight_color;
+uniform float split_balance;
+
+// Gamut compression (ACES 1.3 Reference Gamut Compress)
+uniform bool  gamut_compress_enable;
+uniform vec3  gc_limit;  // .r=yellow(B), .g=magenta(G), .b=cyan(R) in BGRA order
+
+// 3D LUT
+uniform bool      lut3d_enable;
+uniform sampler3D lut3d_tex;
+uniform float     lut3d_strength;
+
+// Hue-vs-Hue / Hue-vs-Sat curves
+uniform bool      hue_curve_enable;
+uniform sampler2D hue_curve_tex;  // 256x1 RGBA32F: R=HvH, G=HvS, B=HvL, A=SvS
+
+// Sharpening (unsharp mask)
+uniform bool  sharpen_enable;
+uniform float sharpen_amount;
+uniform float sharpen_radius;
+
+// Film grain
+uniform bool  grain_enable;
+uniform float grain_intensity;
+uniform float grain_size;
+uniform int   grain_frame;  // animated per frame for temporal variation
+
+// Secondary qualifier (HSL key + grade)
+uniform bool  qualifier_enable;
+uniform float qual_target_hue;
+uniform float qual_hue_width;
+uniform float qual_min_sat;
+uniform float qual_max_sat;
+uniform float qual_min_lum;
+uniform float qual_max_lum;
+uniform float qual_softness;
+uniform float qual_exposure;
+uniform float qual_sat_offset;
+uniform float qual_hue_offset;
 
 // Per-channel RGB Levels (independent levels per R, G, B channel)
 uniform bool  rgb_levels_enable;
@@ -470,49 +536,201 @@ vec4 ChromaOnCustomColor(vec4 c)
 
 // ---- White Balance ----
 // temp: -1=cool (blue), +1=warm (orange); tint_val: -1=magenta, +1=green
+// Uses a diagonal gain matrix — no clamping, preserves HDR headroom.
 vec3 apply_white_balance(vec3 c, float temp, float tint_val)
 {
-    // NOTE: shader internal convention is color.r=Blue_displayed, color.b=Red_displayed
-    // (all formats go through a .bgra swizzle; fragColor=color.bgra restores at output)
-    // So warm = more Red = more color.b, less Blue = less color.r
-    c.b = clamp(c.b + temp     * 0.20, 0.0, 1.0);  // warm -> boost color.b (= Red displayed)
-    c.g = clamp(c.g + tint_val * 0.10, 0.0, 1.0);
-    c.r = clamp(c.r - temp     * 0.20, 0.0, 1.0);  // warm -> reduce color.r (= Blue displayed)
+    // Warm = boost Red, cut Blue.  Tint = boost Green, cut Magenta.
+    // Multiplicative gains derived from temperature/tint offsets.
+    // This matches the approach used in DaVinci Resolve and ACEScg pipelines.
+    float r_gain = 1.0 + temp     * 0.20;   // warm -> more red
+    float g_gain = 1.0 + tint_val * 0.10;   // tint -> more green
+    float b_gain = 1.0 - temp     * 0.20;   // warm -> less blue
+    c.r *= b_gain;  // .r = Blue in BGRA convention
+    c.g *= g_gain;
+    c.b *= r_gain;  // .b = Red in BGRA convention
     return c;
 }
 
 // ---- Lift / Midtone / Gain (3-way color corrector) ----
-// Mirrors DaVinci Resolve's Lift/Gamma/Gain primary wheels.
-// lift:    per-channel shadow offset  (-0.5..+0.5, default 0)
-// midtone: per-channel midtone power  (0.1..4.0,   default 1)
-// gain:    per-channel highlight mult (0..4.0,      default 1)
+// Matches DaVinci Resolve CDL-style primary wheels.
+// Formula: out = pow(max(c * gain + lift, 0.0), 1.0 / midtone)
+// No upper clamp — allows HDR pass-through.  Only clamp negatives for pow safety.
 vec3 apply_lmg(vec3 c, vec3 lift, vec3 midtone, vec3 gain)
 {
-    c = clamp(c * gain + lift, 0.0, 1.0);
+    c = max(c * gain + lift, vec3(0.0));
     c = pow(c, max(vec3(0.01), 1.0 / midtone));
     return c;
 }
 
 // ---- Hue Shift ----
+// Rotate hue in HSV space.  To avoid destroying HDR values (>1.0),
+// we extract the peak luminance, normalise, rotate, then re-scale.
 vec3 apply_hue_shift(vec3 c, float degrees)
 {
-    vec3 hsv = rgb2hsv(c);
-    hsv.x    = fract(hsv.x + degrees / 360.0);
-    return hsv2rgb(hsv);
+    float peak = max(max(c.r, c.g), max(c.b, 0.0001));
+    vec3 norm  = c / peak;
+    vec3 hsv   = rgb2hsv(clamp(norm, 0.0, 1.0));
+    hsv.x      = fract(hsv.x + degrees / 360.0);
+    return hsv2rgb(hsv) * peak;
 }
 
 // ---- Tonal Balance (Shadows / Highlights separation) ----
-// Mirrors DaVinci Resolve's Shadows and Highlights sliders.
-// shadows   > 0 lifts dark areas;    shadows   < 0 crushes them.
-// highlights > 0 lifts bright areas; highlights < 0 crushes them.
+// Soft luminance-based masks drive additive offsets.
+// No clamping — preserves HDR headroom for downstream tonemapping.
 vec3 apply_tone_balance(vec3 c, float shadows, float highlights)
 {
     float lum         = dot(c, vec3(0.2126, 0.7152, 0.0722));
     float shadow_mask = 1.0 - smoothstep(0.0, 0.6, lum);
     float hl_mask     = smoothstep(0.4, 1.0, lum);
-    c = clamp(c + vec3(shadows    * 0.5 * shadow_mask), 0.0, 1.0);
-    c = clamp(c + vec3(highlights * 0.5 * hl_mask),     0.0, 1.0);
+    c += vec3(shadows    * 0.5 * shadow_mask);
+    c += vec3(highlights * 0.5 * hl_mask);
     return c;
+}
+
+// ---- Linear Saturation (scene-referred) ----
+// Mix with luminance in scene-linear working space.  No clamping.
+vec3 apply_linear_saturation(vec3 c, float sat_val)
+{
+    float lum = dot(c, vec3(0.2126, 0.7152, 0.0722));
+    return mix(vec3(lum), c, sat_val);
+}
+
+// ---- ASC CDL (Slope/Offset/Power) ----
+// Industry-standard formula: out = pow(max(in * slope + offset, 0), power)
+// followed by a saturation adjustment.
+vec3 apply_cdl(vec3 c, vec3 slope, vec3 off, vec3 pwr, float sat_val)
+{
+    c = pow(max(c * slope + off, vec3(0.0)), pwr);
+    float lum = dot(c, vec3(0.2126, 0.7152, 0.0722));
+    c = mix(vec3(lum), c, sat_val);
+    return c;
+}
+
+// ---- Split Toning ----
+// Luminance-based tint: additive color offsets for shadows and highlights.
+vec3 apply_split_tone(vec3 c, vec3 shad_col, vec3 hi_col, float bal)
+{
+    float lum     = dot(c, vec3(0.2126, 0.7152, 0.0722));
+    float shad_mk = 1.0 - smoothstep(bal - 0.3, bal + 0.3, lum);
+    float hi_mk   = smoothstep(bal - 0.3, bal + 0.3, lum);
+    c += shad_col * shad_mk;
+    c += hi_col   * hi_mk;
+    return c;
+}
+
+// ---- Gamut Compression (ACES 1.3 Reference Gamut Compress) ----
+// Compresses out-of-gamut values toward the achromatic axis using a smooth
+// toe function.  Operates per-channel on the distance from achromatic.
+vec3 apply_gamut_compress(vec3 c, vec3 lim)
+{
+    float achromatic = max(max(c.r, c.g), max(c.b, 0.0));
+    if (achromatic <= 0.0) return c;
+    vec3 dist = (achromatic - c) / abs(achromatic);
+    float thr = 0.815;
+    for (int i = 0; i < 3; ++i) {
+        if (dist[i] > thr && lim[i] > 1.0001) {
+            float nd = (dist[i] - thr) / (lim[i] - thr);
+            float cd = nd / (1.0 + nd);
+            dist[i] = thr + cd * (lim[i] - thr);
+        }
+    }
+    return achromatic - dist * abs(achromatic);
+}
+
+// ---- 3D LUT ----
+// Trilinear lookup in a 3D texture.  Input clamped to 0..1 for LUT range.
+// Swizzles BGRA→RGB for lookup and back.
+vec3 apply_lut3d(vec3 c, float strength)
+{
+    vec3 rgb_in  = clamp(c.bgr, 0.0, 1.0);  // BGRA→RGB, clamp for LUT domain
+    vec3 rgb_out = texture(lut3d_tex, rgb_in).rgb;
+    return mix(c, rgb_out.bgr, strength);    // RGB→BGRA, mix with original
+}
+
+// ---- Hue-vs-Hue / Hue-vs-Sat Curves ----
+// 4-channel LUT indexed by hue: R=hue offset, G=sat multiplier, B=lum offset, A=sat-vs-sat
+vec3 apply_hue_curves(vec3 c)
+{
+    vec3  hsv  = rgb2hsv(clamp(c, 0.0, 1.0));
+    float hue  = hsv.x;  // 0..1
+    vec4  offsets = texture(hue_curve_tex, vec2(hue, 0.5));
+    // R channel: Hue-vs-Hue offset (signed, ±0.5 range mapped from ±180°)
+    hsv.x = fract(hsv.x + offsets.r);
+    // G channel: Hue-vs-Sat multiplier (1.0 = no change)
+    hsv.y *= offsets.g;
+    // A channel: Sat-vs-Sat multiplier (indexed by original saturation)
+    vec4 sat_offsets = texture(hue_curve_tex, vec2(hsv.y, 0.5));
+    hsv.y *= sat_offsets.a;
+    // B channel: Hue-vs-Lum offset (signed)
+    vec3 result = hsv2rgb(hsv);
+    result += offsets.b;
+    return result;
+}
+
+// ---- Sharpening (Laplacian unsharp mask) ----
+// Single-pass 3x3 Laplacian sharpening.  The radius parameter scales the
+// sample offset (1.0 = 1 texel).  Amount controls the enhancement strength.
+vec3 apply_sharpen(vec2 uv, vec3 center_col, float amount, float rad)
+{
+    vec2 ts = 1.0 / target_size * rad;
+    vec3 n  = get_rgba_color(uv + vec2( 0.0, -ts.y)).rgb;
+    vec3 s  = get_rgba_color(uv + vec2( 0.0,  ts.y)).rgb;
+    vec3 e  = get_rgba_color(uv + vec2( ts.x,  0.0)).rgb;
+    vec3 w  = get_rgba_color(uv + vec2(-ts.x,  0.0)).rgb;
+    vec3 blur_avg = (n + s + e + w) * 0.25;
+    return center_col + (center_col - blur_avg) * amount;
+}
+
+// ---- Film Grain (procedural) ----
+// Hash-based noise, animated per frame.  Grain response weighted by luminance
+// (more noise in midtones, less in deep shadows and clipped highlights).
+float grain_hash(vec2 p, int frame_seed)
+{
+    vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+    p3 += dot(p3, p3.yzx + float(frame_seed) * 0.00137);
+    return fract((p3.x + p3.y) * p3.z);
+}
+
+vec3 apply_film_grain(vec3 c, vec2 uv, float intensity, float size_val, int frame_seed)
+{
+    vec2 grain_uv = uv * target_size / max(size_val, 0.5);
+    float noise   = grain_hash(grain_uv, frame_seed) * 2.0 - 1.0;  // -1..+1
+    float lum     = dot(c, vec3(0.2126, 0.7152, 0.0722));
+    // Photographic response: more grain in midtones
+    float response = smoothstep(0.0, 0.15, lum) * (1.0 - smoothstep(0.8, 1.0, lum));
+    c += vec3(noise * intensity * response);
+    return c;
+}
+
+// ---- Secondary Qualifier (HSL key + grade) ----
+// Isolates a color range and applies exposure/saturation/hue corrections only
+// to the qualified pixels.  Uses soft masks for smooth transitions.
+vec3 apply_qualifier(vec3 c, float tgt_hue, float hue_w, float min_s, float max_s,
+                     float min_l, float max_l, float soft, float exp_off,
+                     float sat_off, float hue_off)
+{
+    vec3  hsv = rgb2hsv(clamp(c, 0.0, 1.0));
+    float hue_dist = AngleDiff(hsv.x, tgt_hue) * 2.0;
+    // Compute qualification mask
+    float hue_mask = 1.0 - smoothstep(hue_w - soft, hue_w + soft, hue_dist);
+    float sat_mask = smoothstep(min_s - soft, min_s + soft, hsv.y)
+                   * (1.0 - smoothstep(max_s - soft, max_s + soft, hsv.y));
+    float lum_mask = smoothstep(min_l - soft, min_l + soft, hsv.z)
+                   * (1.0 - smoothstep(max_l - soft, max_l + soft, hsv.z));
+    float mask = hue_mask * sat_mask * lum_mask;
+    if (mask < 0.001) return c;
+    // Apply corrections to a copy
+    vec3 graded = c;
+    // Exposure offset (additive in linear)
+    graded *= (1.0 + exp_off);
+    // Saturation offset
+    float glum = dot(graded, vec3(0.2126, 0.7152, 0.0722));
+    graded = mix(vec3(glum), graded, 1.0 + sat_off);
+    // Hue rotation
+    if (abs(hue_off) > 0.01) {
+        graded = apply_hue_shift(graded, hue_off);
+    }
+    return mix(c, graded, mask);
 }
 
 // ---- Per-channel RGB Levels ----
@@ -696,11 +914,126 @@ vec3 tonemap_aces_rrt(vec3 v) {
     vec3 b = v * (0.983729 * v + 0.432951) + 0.238081;
     return clamp(a / b, 0.0, 1.0);
 }
+
+// ---- ACES Reference Rendering Transform (RRT) + Output Display Transform (ODT) ----
+// Segmented spline fit from the ACES CTL reference implementation.
+// This is the c5 spline used in the RRT.
+float segmented_spline_c5_fwd(float x) {
+    const float coefsLow[6] = float[6](-4.0000000000, -4.0000000000, -3.1573765773, -0.4852499958, 1.8477324706, 1.8477324706);
+    const float coefsHigh[6] = float[6](-0.7185482425, 2.0810307172, 3.6681241237, 4.0000000000, 4.0000000000, 4.0000000000);
+    const float minPoint_x = 0.0001; const float minPoint_y = 0.0001;
+    const float midPoint_x = 0.18;   const float midPoint_y = 4.8;
+    const float maxPoint_x = 65504.0; const float maxPoint_y = 10000.0;
+    const int N_KNOTS_LOW = 4; const int N_KNOTS_HIGH = 4;
+
+    float xCheck = clamp(x, minPoint_x, maxPoint_x);
+    float logx = log10(xCheck);
+    float logy;
+
+    if (logx <= log10(midPoint_x)) {
+        float knot_coord = (logx - log10(minPoint_x)) / (log10(midPoint_x) - log10(minPoint_x)) * float(N_KNOTS_LOW);
+        int j = int(clamp(knot_coord, 0.0, float(N_KNOTS_LOW - 1)));
+        float t = clamp(knot_coord - float(j), 0.0, 1.0);
+        float cf0 = coefsLow[j]; float cf1 = coefsLow[j+1]; float cf2 = coefsLow[min(j+2, 5)];
+        float c0 = mix(cf0, cf1, 0.5); float c1 = cf1; float c2 = mix(cf1, cf2, 0.5);
+        logy = mix(mix(c0, c1, t), mix(c1, c2, t), t);
+    } else {
+        float knot_coord = (logx - log10(midPoint_x)) / (log10(maxPoint_x) - log10(midPoint_x)) * float(N_KNOTS_HIGH);
+        int j = int(clamp(knot_coord, 0.0, float(N_KNOTS_HIGH - 1)));
+        float t = clamp(knot_coord - float(j), 0.0, 1.0);
+        float cf0 = coefsHigh[j]; float cf1 = coefsHigh[j+1]; float cf2 = coefsHigh[min(j+2, 5)];
+        float c0 = mix(cf0, cf1, 0.5); float c1 = cf1; float c2 = mix(cf1, cf2, 0.5);
+        logy = mix(mix(c0, c1, t), mix(c1, c2, t), t);
+    }
+    return pow(10.0, logy);
+}
+
+// c9 spline used in the ODTs
+float segmented_spline_c9_fwd(float x, float minPt_y, float midPt_y, float maxPt_y) {
+    const float coefsLow[10] = float[10](-1.6989700043, -1.6989700043, -1.4779000000, -1.2291000000, -0.8648000000, -0.4480000000, 0.0051800000, 0.4511080334, 0.9113744414, 0.9113744414);
+    const float coefsHigh[10] = float[10](0.5154386965, 0.8470437783, 1.1358000000, 1.3802000000, 1.5197000000, 1.5985000000, 1.6467000000, 1.6746091357, 1.6878733390, 1.6878733390);
+    const int N_KNOTS_LOW = 8; const int N_KNOTS_HIGH = 8;
+    const float minPt_x = 0.18 * exp2(-6.5);
+    const float midPt_x = 0.18;
+    const float maxPt_x = 0.18 * exp2(6.5);
+
+    float xCheck = clamp(x, minPt_x, maxPt_x);
+    float logx = log10(xCheck);
+    float logy;
+
+    if (logx <= log10(midPt_x)) {
+        float knot_coord = (logx - log10(minPt_x)) / (log10(midPt_x) - log10(minPt_x)) * float(N_KNOTS_LOW);
+        int j = int(clamp(knot_coord, 0.0, float(N_KNOTS_LOW - 1)));
+        float t = clamp(knot_coord - float(j), 0.0, 1.0);
+        float cf0 = coefsLow[j]; float cf1 = coefsLow[j+1]; float cf2 = coefsLow[min(j+2, 9)];
+        float c0 = mix(cf0, cf1, 0.5); float c1 = cf1; float c2 = mix(cf1, cf2, 0.5);
+        logy = mix(mix(c0, c1, t), mix(c1, c2, t), t);
+    } else {
+        float knot_coord = (logx - log10(midPt_x)) / (log10(maxPt_x) - log10(midPt_x)) * float(N_KNOTS_HIGH);
+        int j = int(clamp(knot_coord, 0.0, float(N_KNOTS_HIGH - 1)));
+        float t = clamp(knot_coord - float(j), 0.0, 1.0);
+        float cf0 = coefsHigh[j]; float cf1 = coefsHigh[j+1]; float cf2 = coefsHigh[min(j+2, 9)];
+        float c0 = mix(cf0, cf1, 0.5); float c1 = cf1; float c2 = mix(cf1, cf2, 0.5);
+        logy = mix(mix(c0, c1, t), mix(c1, c2, t), t);
+    }
+    return pow(10.0, logy);
+}
+
+// ACES RRT: apply segmented spline c5 per channel (in ACES AP1 / ACEScg)
+vec3 aces_rrt(vec3 v) {
+    return vec3(segmented_spline_c5_fwd(v.r),
+                segmented_spline_c5_fwd(v.g),
+                segmented_spline_c5_fwd(v.b));
+}
+
+// ACES ODT for sRGB/Rec.709 100 nit display
+vec3 aces_odt_srgb(vec3 v) {
+    // RRT output is in OCES; apply c9 spline for Rec.709 48-nit cinema
+    // Simplified: use ODT params for 100 nit sRGB
+    v = vec3(segmented_spline_c9_fwd(v.r, 0.0001, 4.8, 48.0),
+             segmented_spline_c9_fwd(v.g, 0.0001, 4.8, 48.0),
+             segmented_spline_c9_fwd(v.b, 0.0001, 4.8, 48.0));
+    // Scale from cinema luminance to 0..1 display range
+    v /= 48.0;
+    return clamp(v, 0.0, 1.0);
+}
+
+// ACES RRT+ODT combined for Rec.709 SDR display (op=4)
+vec3 tonemap_aces_rrt_709(vec3 v) {
+    v = aces_rrt(v);
+    return aces_odt_srgb(v);
+}
+
+// ACES RRT+ODT for P3-D65 display (op=5)
+vec3 tonemap_aces_rrt_p3(vec3 v) {
+    v = aces_rrt(v);
+    // ODT for P3 48-nit
+    v = vec3(segmented_spline_c9_fwd(v.r, 0.0001, 4.8, 48.0),
+             segmented_spline_c9_fwd(v.g, 0.0001, 4.8, 48.0),
+             segmented_spline_c9_fwd(v.b, 0.0001, 4.8, 48.0));
+    v /= 48.0;
+    return clamp(v, 0.0, 1.0);
+}
+
+// ACES RRT+ODT for Rec.2020 1000-nit HDR PQ display (op=6)
+vec3 tonemap_aces_rrt_2020_pq(vec3 v) {
+    v = aces_rrt(v);
+    // ODT for 1000-nit HDR
+    v = vec3(segmented_spline_c9_fwd(v.r, 0.005, 4.8, 800.0),
+             segmented_spline_c9_fwd(v.g, 0.005, 4.8, 800.0),
+             segmented_spline_c9_fwd(v.b, 0.005, 4.8, 800.0));
+    v /= 1000.0;
+    return clamp(v, 0.0, 1.0);
+}
+
 vec3 apply_tone_mapping(vec3 rgb, int op) {
     switch (op) {
         case 1: return tonemap_reinhard(rgb);
         case 2: return tonemap_aces_filmic(rgb);
         case 3: return tonemap_aces_rrt(rgb);
+        case 4: return tonemap_aces_rrt_709(rgb);
+        case 5: return tonemap_aces_rrt_p3(rgb);
+        case 6: return tonemap_aces_rrt_2020_pq(rgb);
         default: return rgb;
     }
 }
@@ -712,35 +1045,51 @@ const float PI = 3.14159265359;
 // angular distortion the screen introduces, so that straight content lines
 // appear straight to a viewer sitting at the focus point of the arc.
 //   screen_curve_type 1 = horizontal cylinder  (arc applies left-right only)
-//   screen_curve_type 2 = full sphere/dome     (arc applies radially)
+//   screen_curve_type 2 = full sphere/dome     (warp applied to both axes)
 //   screen_arc = total arc in radians  (positive = convex away from viewer,
 //                                       negative = concave toward viewer)
+//
+// Convex mapping  (gnomonic):  content_x = tan(screen_x * half_arc) / tan(half_arc)
+// Concave mapping (inverse):   content_x = atan(screen_x * tan(half_arc)) / half_arc
 vec2 apply_curve_warp(vec2 uv) {
     if (abs(screen_arc) < 0.0001)
         return uv;
     vec2 ndc = uv * 2.0 - 1.0;
-    ndc.x *= aspect_ratio;  // bring into isotropic NDC space
-    float abs_half_arc = abs(screen_arc) * 0.5;
+    float half_arc = abs(screen_arc) * 0.5;
+    bool convex = (screen_arc >= 0.0);
     if (screen_curve_type == 1) {
-        // Cylinder: each screen column subtends an even angle across the arc.
-        // Convex (positive arc): compress edges inward.  Inverse rectilinear:
-        //   uv_src.x = tan(ang) / tan(arc/2)   (maps back to the content pixel)
-        // Concave (negative arc): expand edges outward — the inverse operation.
-        float ang_x  = ndc.x * abs_half_arc;
-        float warped = tan(ang_x) / tan(abs_half_arc);
-        ndc.x = (screen_arc >= 0.0) ? warped : (2.0 * ndc.x - warped);
+        // Cylinder: horizontal-only warp.  ndc.x in [-1..1] maps to
+        // [-half_arc..+half_arc] on the screen surface.  No aspect_ratio needed.
+        if (convex) {
+            ndc.x = tan(ndc.x * half_arc) / tan(half_arc);
+        } else {
+            ndc.x = atan(ndc.x * tan(half_arc)) / half_arc;
+        }
     } else if (screen_curve_type == 2) {
-        // Sphere/dome: each pixel is at a radial angle from the screen centre.
-        // Convex: compress; Concave: expand.
+        // Sphere/dome: warp both axes.  Vertical arc derived from aspect ratio.
+        float vert_half = half_arc / aspect_ratio;
+        if (convex) {
+            ndc.x = tan(ndc.x * half_arc)  / tan(half_arc);
+            ndc.y = tan(ndc.y * vert_half) / tan(vert_half);
+        } else {
+            ndc.x = atan(ndc.x * tan(half_arc))  / half_arc;
+            ndc.y = atan(ndc.y * tan(vert_half)) / vert_half;
+        }
+    } else if (screen_curve_type == 3) {
+        // Fisheye (equidistant): radial warp.  r maps linearly to angle.
         float r = length(ndc);
         if (r > 0.0001) {
-            float ang    = r * abs_half_arc;
-            float r_conv = tan(ang) / tan(abs_half_arc);
-            float r_warp = (screen_arc >= 0.0) ? r_conv : (2.0 * r - r_conv);
-            ndc          = (ndc / r) * r_warp;
+            if (convex) {
+                float angle = r * half_arc;
+                float warped_r = tan(angle) / tan(half_arc);
+                ndc *= warped_r / r;
+            } else {
+                float angle = atan(r * tan(half_arc));
+                float warped_r = angle / half_arc;
+                ndc *= warped_r / r;
+            }
         }
     }
-    ndc.x /= aspect_ratio;
     return ndc * 0.5 + 0.5;
 }
 
@@ -750,37 +1099,59 @@ vec2 get_equirect_uv(vec2 screen_uv) {
     // Lens-shift: slide the viewport across the sphere without changing orientation
     ndc -= vec2(view_offset_x, view_offset_y);
 
+    // 1b. Lens distortion correction (Brown-Conrady radial model)
+    // Applies inverse distortion so the output matches a physical camera lens.
+    if (lens_k1 != 0.0 || lens_k2 != 0.0 || lens_k3 != 0.0) {
+        float r2 = dot(ndc, ndc);
+        float r4 = r2 * r2;
+        float r6 = r4 * r2;
+        float radial = 1.0 + lens_k1 * r2 + lens_k2 * r4 + lens_k3 * r6;
+        ndc *= radial;
+    }
+
     // 2. Calculate View Vector
-    // Two independent parameters control the 360 projection:
-    //   screen_arc  — physical arc of the curved screen (degrees of sphere swept);
-    //                 changing this alters the curvature / angular density of pixels.
-    //   view_fov    — virtual camera zoom; scale = tan(fov/2), unit zoom at fov = 90°
-    //                 (scale = 1).  Smaller fov → zoomed in; larger fov → zoomed out.
-    // For cylinder/sphere modes the horizontal angle for pixel NDC x is:
-    //   angle_h = ndc.x * (screen_arc/2) * scale
-    // This gives screen_arc full control over geometry and scale full control over zoom.
-    float scale = tan(view_fov * 0.5);  // zoom factor; 1.0 at 90° FOV
+    // screen_arc  — physical arc of the curved screen in radians.
+    //               For curved screens, this fully determines the pixel-to-angle
+    //               mapping (matching Disguise / Assimilate behaviour).
+    // view_fov    — virtual camera FOV; only affects the flat-screen (rectilinear)
+    //               projection.  scale = tan(fov/2), unit zoom at fov = 90°.
+    float scale = tan(view_fov * 0.5);  // zoom factor for flat screen only
     vec3 dir;
     if (screen_curve_type == 1) {
-        // Horizontal cylinder: NDC x maps linearly to viewing angle on the cylinder.
-        // screen_arc sets the angular span at the screen edges; scale zooms content.
-        // Negative screen_arc flips the horizontal direction (concave vs convex).
-        float angle_h = ndc.x * screen_arc * 0.5 * scale;
-        dir = vec3(sin(angle_h), ndc.y * scale, -cos(angle_h));
+        // Horizontal cylinder: each screen pixel is at a fixed angular position
+        // determined by the physical screen arc.  No FOV scaling.
+        // Vertical extent derived from screen geometry (arc_length / aspect_ratio).
+        float half_arc   = screen_arc * 0.5;
+        float angle_h    = ndc.x * half_arc;
+        float vert_scale = half_arc / aspect_ratio;
+        dir = vec3(sin(angle_h), ndc.y * vert_scale, -cos(angle_h));
     } else if (screen_curve_type == 2) {
-        // Full sphere/dome: radial angle from screen centre determines look direction.
-        // screen_arc and scale combine as in the cylinder case, applied radially.
+        // Full sphere/dome: each pixel maps to (azimuth, elevation) on the sphere.
+        // Horizontal angular span = screen_arc; vertical = screen_arc / aspect_ratio.
+        float half_arc  = screen_arc * 0.5;
+        float vert_half = half_arc / aspect_ratio;
+        float ang_h = ndc.x * half_arc;
+        float ang_v = ndc.y * vert_half;
+        dir = vec3(sin(ang_h) * cos(ang_v), sin(ang_v), -cos(ang_h) * cos(ang_v));
+    } else if (screen_curve_type == 3) {
+        // Fisheye (equidistant): r maps linearly to angle from optical axis.
+        // screen_arc = total angular diameter of the fisheye field.
+        float half_arc = screen_arc * 0.5;
         float r = length(ndc);
-        if (r > 0.0001) {
-            float angle = r * screen_arc * 0.5 * scale;
-            vec2 d = ndc / r;
-            dir = vec3(d.x * sin(angle), d.y * sin(angle), -cos(angle));
-        } else {
+        if (r < 0.0001) {
             dir = vec3(0.0, 0.0, -1.0);
+        } else {
+            float theta = r * half_arc;    // angle from optical axis
+            float sin_t = sin(theta);
+            float cos_t = cos(theta);
+            dir = vec3(ndc.x / r * sin_t, ndc.y / r * sin_t, -cos_t);
         }
     } else {
         // Flat screen — standard rectilinear (gnomonic) projection.
-        dir = vec3(ndc.x * scale * aspect_ratio, ndc.y * scale, -1.0);
+        // Off-axis frustum shift: offset the NDC centre to render a sub-frustum
+        // (used for multi-projector tiling without changing the viewing direction).
+        vec2 shifted_ndc = ndc + vec2(frustum_h, frustum_v);
+        dir = vec3(shifted_ndc.x * scale * aspect_ratio, shifted_ndc.y * scale, -1.0);
     }
     dir = normalize(dir);
 
@@ -881,6 +1252,16 @@ vec4 get_rgba_color(vec2 uv)
         return vec4(0.0, 0.0, 0.0, 0.0);
 }
 
+// When blurring in equirectangular UV space (is_360), the horizontal axis
+// wraps continuously around the sphere.  fract() on the U coordinate lets
+// the blur kernel sample across the seam (anti-meridian) seamlessly instead
+// of clamping to the edge pixel.  Vertical stays clamped — poles don't wrap.
+vec4 sample_blur(vec2 s)
+{
+    if (is_360) s.x = fract(s.x);
+    return get_rgba_color(s);
+}
+
 vec4 get_blurred_color(vec2 uv)
 {
     if (!blur_enable || blur_radius < 0.5) return get_rgba_color(uv);
@@ -900,7 +1281,7 @@ vec4 get_blurred_color(vec2 uv)
             float theta = float(i) * 2.39996323; // Golden angle
             vec2 offset = vec2(cos(theta), sin(theta)) * radius * texelSize;
             float weight = exp(-(radius*radius) / (2.0 * sigma * sigma));
-            totalColor += get_rgba_color(uv + offset) * weight;
+            totalColor += sample_blur(uv + offset) * weight;
             totalWeight += weight;
         }
     }
@@ -912,7 +1293,7 @@ vec4 get_blurred_color(vec2 uv)
         for (int y = -steps; y <= steps; y++) {
             for (int x = -steps; x <= steps; x++) {
                 vec2 offset = vec2(float(x), float(y)) * stepSize * texelSize;
-                totalColor += get_rgba_color(uv + offset);
+                totalColor += sample_blur(uv + offset);
                 totalWeight += 1.0;
             }
         }
@@ -926,7 +1307,7 @@ vec4 get_blurred_color(vec2 uv)
         for (int i = 0; i < iSamples; i++) {
             float t = (float(i) / max(float(iSamples - 1), 1.0)) - 0.5; // -0.5 to 0.5
             vec2 offset = dir * (t * blur_radius * 2.0 * texelSize);
-            totalColor += get_rgba_color(uv + offset);
+            totalColor += sample_blur(uv + offset);
             totalWeight += 1.0;
         }
     }
@@ -939,7 +1320,7 @@ vec4 get_blurred_color(vec2 uv)
         int iSamples = int(clamp(blur_radius * 2.0, 16.0, 100.0));
         for (int i = 0; i < iSamples; i++) {
             float scale = 1.0 - strength * (float(i) / max(float(iSamples - 1), 1.0));
-            totalColor += get_rgba_color(center + toPixel * scale);
+            totalColor += sample_blur(center + toPixel * scale);
             totalWeight += 1.0;
         }
     }
@@ -962,7 +1343,7 @@ vec4 get_blurred_color(vec2 uv)
             float radius = sqrt(t) * blurAmount;
             float theta = float(i) * 2.39996323;
             vec2 offset = vec2(cos(theta), sin(theta)) * radius * texelSize;
-            totalColor += get_rgba_color(uv + offset);
+            totalColor += sample_blur(uv + offset);
             totalWeight += 1.0;
         }
     }
@@ -979,7 +1360,7 @@ vec4 get_blurred_color(vec2 uv)
             float theta = dither_theta + float(i) * 2.39996323; // Golden angle with dither
             vec2 offset = vec2(cos(theta), sin(theta)) * radius * texelSize;
 
-            vec4 col = get_rgba_color(uv + offset);
+            vec4 col = sample_blur(uv + offset);
 
             // Optical intensity mapping for distinct highlight bokeh
             float lum = dot(col.rgb, vec3(0.299, 0.587, 0.114));
@@ -1105,6 +1486,24 @@ void main()
         if (flip_v) uv_flipped.t = 1.0 - uv_flipped.t;
         col = get_blurred_color(uv_flipped);
     }
+
+    // Apply sharpening (operates on texture samples, before color grading)
+    if (sharpen_enable) {
+        vec2 sharp_uv = base_uv;
+        if (is_360) {
+            sharp_uv = get_equirect_uv(base_uv);
+            if (flip_h) sharp_uv.s = 1.0 - sharp_uv.s;
+            if (flip_v) sharp_uv.t = 1.0 - sharp_uv.t;
+        } else if (is_curved) {
+            sharp_uv = apply_curve_warp(base_uv);
+            if (flip_h) sharp_uv.s = 1.0 - sharp_uv.s;
+            if (flip_v) sharp_uv.t = 1.0 - sharp_uv.t;
+        } else {
+            if (flip_h) sharp_uv.s = 1.0 - sharp_uv.s;
+            if (flip_v) sharp_uv.t = 1.0 - sharp_uv.t;
+        }
+        col.rgb = apply_sharpen(sharp_uv, col.rgb, sharpen_amount, sharpen_radius);
+    }
     
     if (is_straight_alpha)
         col.rgb *= col.a;
@@ -1112,12 +1511,35 @@ void main()
     // Convert input -> working space (Linear ACEScg usually)
     if (color_grading) {
         // EOTF: encoded -> linear (unless input is already linear)
-        // We assume input_transfer applies to the RGB data directly.
-        // For ACES, we might want to linearize first.
         col.rgb = apply_eotf(col.rgb, input_transfer);
         
         // Gamut mapping: Input Gamut -> Working Gamut
-        col.rgb = input_to_working * col.rgb;
+        // Shader uses BGRA convention (.r=B, .b=R), swizzle to RGB for matrix
+        col.bgr = input_to_working * col.bgr;
+
+        // Gamut compression: compress out-of-gamut values toward achromatic axis
+        if (gamut_compress_enable) {
+            col.rgb = apply_gamut_compress(col.rgb, gc_limit);
+        }
+
+        // Exposure (linear gain in scene-linear working space)
+        // Applied here, at the start of the grading chain, matching DaVinci Resolve.
+        col.rgb *= exposure;
+    }
+
+    // ASC CDL (Slope/Offset/Power)
+    if (cdl_enable) {
+        col.rgb = apply_cdl(col.rgb, cdl_slope, cdl_offset, cdl_power, cdl_saturation);
+    }
+
+    // 3D LUT (creative look)
+    if (lut3d_enable) {
+        col.rgb = apply_lut3d(col.rgb, lut3d_strength);
+    }
+
+    // Linear Saturation (scene-referred)
+    if (linear_sat_enable) {
+        col.rgb = apply_linear_saturation(col.rgb, linear_sat_value);
     }
     // Apply White Balance
     if (white_balance) {
@@ -1129,9 +1551,26 @@ void main()
         col.rgb = apply_lmg(col.rgb, lmg_lift, lmg_midtone, lmg_gain);
     }
 
+    // Apply Split Toning
+    if (split_tone_enable) {
+        col.rgb = apply_split_tone(col.rgb, split_shadow_color, split_highlight_color, split_balance);
+    }
+
+    // Apply Secondary Qualifier
+    if (qualifier_enable) {
+        col.rgb = apply_qualifier(col.rgb, qual_target_hue, qual_hue_width,
+                                  qual_min_sat, qual_max_sat, qual_min_lum, qual_max_lum,
+                                  qual_softness, qual_exposure, qual_sat_offset, qual_hue_offset);
+    }
+
     // Apply Hue Shift
     if (hue_shift_enable) {
         col.rgb = apply_hue_shift(col.rgb, hue_shift_degrees);
+    }
+
+    // Apply Hue-vs-Hue / Hue-vs-Sat Curves
+    if (hue_curve_enable) {
+        col.rgb = apply_hue_curves(col.rgb);
     }
 
     // Apply Tonal Balance
@@ -1204,18 +1643,40 @@ void main()
 
     // Convert working space -> output space
     if (color_grading) {
-         // Tone Mapping (LDR compression)
+        // Tone Mapping (LDR compression)
         if (tone_mapping_op > 0) {
-            col.rgb *= exposure;
             col.rgb = apply_tone_mapping(col.rgb, tone_mapping_op);
         }
         
         // Gamut mapping: Working Gamut -> Output Gamut
-        col.rgb = working_to_output * col.rgb;
+        // Shader uses BGRA convention (.r=B, .b=R), swizzle to RGB for matrix
+        col.bgr = working_to_output * col.bgr;
         
         // OETF: linear -> encoded
         col.rgb = apply_oetf(col.rgb, output_transfer);
     }
-    
+
+    // Film grain (applied in display-referred space, after OETF)
+    if (grain_enable) {
+        vec2 grain_uv = TexCoord.st / TexCoord.q;
+        col.rgb = apply_film_grain(col.rgb, grain_uv, grain_intensity, grain_size, grain_frame);
+    }
+
+    // Soft-edge blending (multi-projector overlap feathering)
+    if (edge_blend_left > 0.0 || edge_blend_right > 0.0 ||
+        edge_blend_top > 0.0 || edge_blend_bottom > 0.0) {
+        vec2 uv_blend = TexCoord.st / TexCoord.q;
+        float blend_alpha = 1.0;
+        if (edge_blend_left > 0.0)
+            blend_alpha *= pow(clamp(uv_blend.x / edge_blend_left, 0.0, 1.0), edge_blend_gamma);
+        if (edge_blend_right > 0.0)
+            blend_alpha *= pow(clamp((1.0 - uv_blend.x) / edge_blend_right, 0.0, 1.0), edge_blend_gamma);
+        if (edge_blend_top > 0.0)
+            blend_alpha *= pow(clamp(uv_blend.y / edge_blend_top, 0.0, 1.0), edge_blend_gamma);
+        if (edge_blend_bottom > 0.0)
+            blend_alpha *= pow(clamp((1.0 - uv_blend.y) / edge_blend_bottom, 0.0, 1.0), edge_blend_gamma);
+        col *= blend_alpha;
+    }
+
 	fragColor = col.bgra;
 }

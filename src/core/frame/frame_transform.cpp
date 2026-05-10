@@ -125,6 +125,47 @@ image_transform image_transform::tween(double                 time,
     result.hue_shift   = do_tween(time, source.hue_shift,   dest.hue_shift,   duration, tween);
     result.shadows     = do_tween(time, source.shadows,     dest.shadows,     duration, tween);
     result.highlights  = do_tween(time, source.highlights,  dest.highlights,  duration, tween);
+    result.linear_saturation = do_tween(time, source.linear_saturation, dest.linear_saturation, duration, tween);
+    for (int i = 0; i < 3; ++i) {
+        result.cdl_slope[i]  = do_tween(time, source.cdl_slope[i],  dest.cdl_slope[i],  duration, tween);
+        result.cdl_offset[i] = do_tween(time, source.cdl_offset[i], dest.cdl_offset[i], duration, tween);
+        result.cdl_power[i]  = do_tween(time, source.cdl_power[i],  dest.cdl_power[i],  duration, tween);
+    }
+    result.cdl_saturation = do_tween(time, source.cdl_saturation, dest.cdl_saturation, duration, tween);
+    for (int i = 0; i < 3; ++i) {
+        result.split_shadow_color[i]    = do_tween(time, source.split_shadow_color[i],    dest.split_shadow_color[i],    duration, tween);
+        result.split_highlight_color[i] = do_tween(time, source.split_highlight_color[i], dest.split_highlight_color[i], duration, tween);
+    }
+    result.split_balance = do_tween(time, source.split_balance, dest.split_balance, duration, tween);
+    result.gamut_compress = dest.gamut_compress;
+    result.gc_cyan    = do_tween(time, source.gc_cyan,    dest.gc_cyan,    duration, tween);
+    result.gc_magenta = do_tween(time, source.gc_magenta, dest.gc_magenta, duration, tween);
+    result.gc_yellow  = do_tween(time, source.gc_yellow,  dest.gc_yellow,  duration, tween);
+    result.lut3d          = dest.lut3d;  // snap to destination (can't interpolate LUT data)
+    result.lut3d_strength = static_cast<float>(do_tween(time, static_cast<double>(source.lut3d_strength),
+                                                         static_cast<double>(dest.lut3d_strength), duration, tween));
+    result.hue_curves     = dest.hue_curves;  // snap to destination
+
+    // Sharpening
+    result.sharpen_amount = do_tween(time, source.sharpen_amount, dest.sharpen_amount, duration, tween);
+    result.sharpen_radius = do_tween(time, source.sharpen_radius, dest.sharpen_radius, duration, tween);
+
+    // Film grain
+    result.grain_intensity = do_tween(time, source.grain_intensity, dest.grain_intensity, duration, tween);
+    result.grain_size      = do_tween(time, source.grain_size,      dest.grain_size,      duration, tween);
+
+    // Secondary qualifier
+    result.qualifier_enable = dest.qualifier_enable;
+    result.qual_target_hue  = do_tween(time, source.qual_target_hue, dest.qual_target_hue, duration, tween);
+    result.qual_hue_width   = do_tween(time, source.qual_hue_width,  dest.qual_hue_width,  duration, tween);
+    result.qual_min_sat     = do_tween(time, source.qual_min_sat,    dest.qual_min_sat,    duration, tween);
+    result.qual_max_sat     = do_tween(time, source.qual_max_sat,    dest.qual_max_sat,    duration, tween);
+    result.qual_min_lum     = do_tween(time, source.qual_min_lum,    dest.qual_min_lum,    duration, tween);
+    result.qual_max_lum     = do_tween(time, source.qual_max_lum,    dest.qual_max_lum,    duration, tween);
+    result.qual_softness    = do_tween(time, source.qual_softness,   dest.qual_softness,   duration, tween);
+    result.qual_exposure    = do_tween(time, source.qual_exposure,   dest.qual_exposure,   duration, tween);
+    result.qual_sat_offset  = do_tween(time, source.qual_sat_offset, dest.qual_sat_offset, duration, tween);
+    result.qual_hue_offset  = do_tween(time, source.qual_hue_offset, dest.qual_hue_offset, duration, tween);
 
     // Per-channel RGB levels — tweened
     auto rl = [&](double s, double d) { return do_tween(time, s, d, duration, tween); };
@@ -244,6 +285,35 @@ bool operator==(const image_transform& lhs, const image_transform& rhs)
                boost::range::equal(lhs.gain,    rhs.gain,    eq) &&
                eq(lhs.hue_shift, rhs.hue_shift) &&
                eq(lhs.shadows, rhs.shadows) && eq(lhs.highlights, rhs.highlights) &&
+               eq(lhs.linear_saturation, rhs.linear_saturation) &&
+               boost::range::equal(lhs.cdl_slope,  rhs.cdl_slope,  eq) &&
+               boost::range::equal(lhs.cdl_offset, rhs.cdl_offset, eq) &&
+               boost::range::equal(lhs.cdl_power,  rhs.cdl_power,  eq) &&
+               eq(lhs.cdl_saturation, rhs.cdl_saturation) &&
+               boost::range::equal(lhs.split_shadow_color,    rhs.split_shadow_color,    eq) &&
+               boost::range::equal(lhs.split_highlight_color, rhs.split_highlight_color, eq) &&
+               eq(lhs.split_balance, rhs.split_balance) &&
+               lhs.gamut_compress == rhs.gamut_compress &&
+               eq(lhs.gc_cyan, rhs.gc_cyan) && eq(lhs.gc_magenta, rhs.gc_magenta) &&
+               eq(lhs.gc_yellow, rhs.gc_yellow) &&
+               lhs.lut3d.get() == rhs.lut3d.get() &&
+               eq(static_cast<double>(lhs.lut3d_strength), static_cast<double>(rhs.lut3d_strength)) &&
+               lhs.hue_curves.get() == rhs.hue_curves.get() &&
+               eq(lhs.sharpen_amount, rhs.sharpen_amount) &&
+               eq(lhs.sharpen_radius, rhs.sharpen_radius) &&
+               eq(lhs.grain_intensity, rhs.grain_intensity) &&
+               eq(lhs.grain_size, rhs.grain_size) &&
+               lhs.qualifier_enable == rhs.qualifier_enable &&
+               eq(lhs.qual_target_hue, rhs.qual_target_hue) &&
+               eq(lhs.qual_hue_width, rhs.qual_hue_width) &&
+               eq(lhs.qual_min_sat, rhs.qual_min_sat) &&
+               eq(lhs.qual_max_sat, rhs.qual_max_sat) &&
+               eq(lhs.qual_min_lum, rhs.qual_min_lum) &&
+               eq(lhs.qual_max_lum, rhs.qual_max_lum) &&
+               eq(lhs.qual_softness, rhs.qual_softness) &&
+               eq(lhs.qual_exposure, rhs.qual_exposure) &&
+               eq(lhs.qual_sat_offset, rhs.qual_sat_offset) &&
+               eq(lhs.qual_hue_offset, rhs.qual_hue_offset) &&
                lhs.per_channel_levels.enable        == rhs.per_channel_levels.enable &&
                eq(lhs.per_channel_levels.r.min_input,  rhs.per_channel_levels.r.min_input)  &&
                eq(lhs.per_channel_levels.r.max_input,  rhs.per_channel_levels.r.max_input)  &&

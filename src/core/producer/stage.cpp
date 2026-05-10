@@ -33,14 +33,16 @@
 
 #include <core/frame/frame_transform.h>
 #include <core/producer/route/route_producer.h>
-#include <modules/keyframes/keyframe_registry.h>
 #include <modules/keyframes/keyframe_data.h>
+#include <modules/keyframes/keyframe_fields.h>
 
+#include <boost/algorithm/string/predicate.hpp>
 #include <boost/range/adaptors.hpp>
 
 #include <functional>
 #include <future>
 #include <map>
+#include <set>
 #include <vector>
 
 namespace caspar { namespace core {
@@ -56,6 +58,13 @@ struct stage::impl : public std::enable_shared_from_this<impl>
 
     mutable std::mutex      format_desc_mutex_;
     core::video_format_desc format_desc_;
+
+    // ── Keyframe state (all accessed only on the stage executor — no mutex) ──
+    std::map<int, caspar::keyframes::keyframe_timeline> kf_timelines_;
+    std::set<int>                                       kf_armed_;
+    std::map<int, caspar::keyframes::kf_values>         kf_last_values_; // for change detection
+    std::map<int, double>                               kf_media_time_override_; // from CALL SEEK
+    std::map<int, uint32_t>                             kf_last_frame_number_;   // for override clearing
 
     executor   executor_{L"stage " + std::to_wstring(channel_index_)};
     std::mutex lock_;
@@ -136,26 +145,65 @@ struct stage::impl : public std::enable_shared_from_this<impl>
             try {
                 for (auto& t : tweens_)
                     t.second.tick(1);
+
+                  // ── Keyframe evaluation ────────────────────────────────────
+                  // Compute media time per layer and interpolate armed
+                  // timelines directly on the stage executor, BEFORE rendering.
                   {
-                      std::map<int, uint64_t> layer_frame_numbers;
-                      for (auto& layer_pair : layers_) {
-                          auto producer = layer_pair.second.foreground();
-                          if (producer.get() != nullptr)
-                              layer_frame_numbers[layer_pair.first] = producer->frame_number();
+                      double fps = 25.0;
+                      if (format_desc_.framerate.numerator() > 0 && format_desc_.framerate.denominator() > 0)
+                          fps = static_cast<double>(format_desc_.framerate.numerator()) /
+                                format_desc_.framerate.denominator();
+
+                      for (int armed_layer : kf_armed_) {
+                          auto tl_it = kf_timelines_.find(armed_layer);
+                          if (tl_it == kf_timelines_.end() || tl_it->second.empty())
+                              continue;
+
+                          auto layer_it = layers_.find(armed_layer);
+                          if (layer_it == layers_.end())
+                              continue;
+
+                          auto producer = layer_it->second.foreground();
+                          uint32_t fn = (producer.get() != nullptr) ? producer->frame_number() : 0;
+
+                          // Determine media time: use seek override if available
+                          double media_time;
+                          auto override_it = kf_media_time_override_.find(armed_layer);
+                          if (override_it != kf_media_time_override_.end()) {
+                              auto last_fn_it = kf_last_frame_number_.find(armed_layer);
+                              if (last_fn_it != kf_last_frame_number_.end() &&
+                                  fn != 0 && fn != last_fn_it->second) {
+                                  // Producer frame_number advanced — producer has caught up
+                                  kf_media_time_override_.erase(override_it);
+                                  media_time = static_cast<double>(fn) / fps;
+                              } else {
+                                  media_time = override_it->second;
+                              }
+                          } else {
+                              media_time = static_cast<double>(fn) / fps;
+                          }
+                          kf_last_frame_number_[armed_layer] = fn;
+
+                          // Interpolate
+                          auto values = tl_it->second.interpolate(media_time);
+                          if (values.empty())
+                              continue;
+
+                          // Skip if unchanged from last frame
+                          auto& last = kf_last_values_[armed_layer];
+                          if (values == last)
+                              continue;
+                          last = values;
+
+                          // Apply to tween
+                          auto src = tweens_[armed_layer].fetch();
+                          auto dst = src;
+                          caspar::keyframes::apply_kf_to_transform(values, dst.image_transform);
+                          tweens_[armed_layer] = tweened_transform(src, dst, 0, tweener(L"linear"));
                       }
-                      // Apply KF interpolated transforms directly to tweens_ HERE on the
-                      // stage executor thread, BEFORE rendering. This avoids the
-                      // executor::begin_invoke indirection that caused a 1-frame delay
-                      // and made the tween unavailable during the current render pass.
-                      caspar::keyframes::keyframe_registry::instance().auto_tick_all(
-                          channel_index_ - 1, layer_frame_numbers, format_desc_,
-                          [this](int layer, const caspar::keyframes::kf_state& s, unsigned int dur) {
-                          auto  src = tweens_[layer].fetch();
-                          auto  dst = src;
-                          caspar::keyframes::apply_state(s, dst.image_transform);
-                          tweens_[layer] = tweened_transform(src, dst, static_cast<int>(dur), tweener(L"linear"));
-                      });
                   }
+
                 // build a map of layers that are sourced from route producers
                 std::map<int, std::pair<int, int>> routed_layers;
                 for (auto& p : layers_) {
@@ -421,7 +469,33 @@ struct stage::impl : public std::enable_shared_from_this<impl>
 
     std::future<std::wstring> call(int index, const std::vector<std::wstring>& params)
     {
-        return flatten(executor_.begin_invoke([=] { return get_layer(index).foreground()->call(params).share(); }));
+        return flatten(executor_.begin_invoke([=] {
+            auto result = get_layer(index).foreground()->call(params).share();
+
+            // Detect seek commands for keyframe media time tracking.
+            // When a CALL SEEK happens while paused, frame_number() won't update,
+            // so we set an override that the KF render loop uses until the producer
+            // catches up.
+            if (params.size() >= 2 && boost::iequals(params[0], L"seek")) {
+                double fps = 25.0;
+                if (format_desc_.framerate.numerator() > 0 && format_desc_.framerate.denominator() > 0)
+                    fps = static_cast<double>(format_desc_.framerate.numerator()) /
+                          format_desc_.framerate.denominator();
+                try {
+                    int64_t seek_frame = boost::lexical_cast<int64_t>(params[1]);
+                    if (params.size() > 2)
+                        seek_frame += boost::lexical_cast<int64_t>(params[2]);
+                    kf_media_time_override_[index] = static_cast<double>(seek_frame) / fps;
+                } catch (...) {
+                    // Keyword seeks ("rel","in","out","end") — we can't know
+                    // the target frame before the async seek completes, so
+                    // don't set an override.  The render loop will pick up
+                    // the new frame_number naturally once the producer catches up.
+                }
+            }
+
+            return result;
+        }));
     }
     std::future<std::wstring> callbg(int index, const std::vector<std::wstring>& params)
     {
@@ -429,6 +503,104 @@ struct stage::impl : public std::enable_shared_from_this<impl>
     }
 
     std::unique_lock<std::mutex> get_lock() { return std::move(std::unique_lock<std::mutex>(lock_)); }
+
+    // ── Keyframe management (all on executor) ─────────────────────────────
+
+    std::future<void> kf_set(int layer, std::shared_ptr<void> data)
+    {
+        return executor_.begin_invoke([=] {
+            auto tl = std::static_pointer_cast<caspar::keyframes::keyframe_timeline>(data);
+            kf_timelines_[layer] = *tl;
+            kf_armed_.erase(layer);       // disarm on new SET (protocol rule)
+            kf_last_values_.erase(layer);
+            kf_media_time_override_.erase(layer);
+            kf_last_frame_number_.erase(layer);
+        });
+    }
+
+    std::future<bool> kf_arm(int layer)
+    {
+        return executor_.begin_invoke([=] {
+            if (kf_timelines_.count(layer)) {
+                kf_armed_.insert(layer);
+                return true;
+            }
+            return false;
+        });
+    }
+
+    std::future<void> kf_disarm(int layer)
+    {
+        return executor_.begin_invoke([=] {
+            kf_armed_.erase(layer);
+            kf_last_values_.erase(layer);
+        });
+    }
+
+    std::future<void> kf_clear(int layer)
+    {
+        return executor_.begin_invoke([=] {
+            kf_timelines_.erase(layer);
+            kf_armed_.erase(layer);
+            kf_last_values_.erase(layer);
+            kf_media_time_override_.erase(layer);
+            kf_last_frame_number_.erase(layer);
+        });
+    }
+
+    std::future<std::shared_ptr<void>> kf_get(int layer)
+    {
+        return executor_.begin_invoke([=]() -> std::shared_ptr<void> {
+            auto it = kf_timelines_.find(layer);
+            if (it == kf_timelines_.end())
+                return nullptr;
+            return std::make_shared<caspar::keyframes::keyframe_timeline>(it->second);
+        });
+    }
+
+    std::future<bool> kf_has(int layer)
+    {
+        return executor_.begin_invoke([=] { return kf_timelines_.count(layer) > 0; });
+    }
+
+    std::future<bool> kf_is_armed(int layer)
+    {
+        return executor_.begin_invoke([=] { return kf_armed_.count(layer) > 0; });
+    }
+
+    std::future<bool> kf_patch(int layer, double time_secs, std::shared_ptr<void> patch_data)
+    {
+        return executor_.begin_invoke([=] {
+            auto it = kf_timelines_.find(layer);
+            if (it == kf_timelines_.end())
+                return false;
+            auto vals = std::static_pointer_cast<caspar::keyframes::kf_values>(patch_data);
+            bool ok = it->second.patch_at_time(time_secs, *vals);
+            if (ok)
+                kf_last_values_.erase(layer); // force re-evaluation
+            return ok;
+        });
+    }
+
+    std::future<void> kf_set_media_time(int layer, double time_secs)
+    {
+        return executor_.begin_invoke([=] {
+            kf_media_time_override_[layer] = time_secs;
+            kf_last_values_.erase(layer); // force re-evaluation
+        });
+    }
+
+    std::future<std::shared_ptr<void>> kf_get_status(int layer)
+    {
+        return executor_.begin_invoke([=]() -> std::shared_ptr<void> {
+            auto s = std::make_shared<caspar::keyframes::kf_status>();
+            auto it = kf_timelines_.find(layer);
+            s->has_timeline   = (it != kf_timelines_.end());
+            s->armed          = kf_armed_.count(layer) > 0;
+            s->keyframe_count = s->has_timeline ? it->second.size() : 0;
+            return std::static_pointer_cast<void>(s);
+        });
+    }
 
     core::video_format_desc video_format_desc() const
     {
@@ -521,6 +693,18 @@ std::future<void>            stage::execute(std::function<void()> func)
     func();
     return make_ready_future();
 }
+
+// ── Keyframe management (stage wrappers) ─────────────────────────────────
+std::future<void>                  stage::set_keyframe_data(int layer, std::shared_ptr<void> data) { return impl_->kf_set(layer, std::move(data)); }
+std::future<bool>                  stage::arm_keyframes(int layer)     { return impl_->kf_arm(layer); }
+std::future<void>                  stage::disarm_keyframes(int layer)  { return impl_->kf_disarm(layer); }
+std::future<void>                  stage::clear_keyframes(int layer)   { return impl_->kf_clear(layer); }
+std::future<std::shared_ptr<void>> stage::get_keyframe_data(int layer) { return impl_->kf_get(layer); }
+std::future<bool>                  stage::has_keyframe_data(int layer) { return impl_->kf_has(layer); }
+std::future<bool>                  stage::is_keyframes_armed(int layer) { return impl_->kf_is_armed(layer); }
+std::future<bool>                  stage::patch_keyframe(int layer, double time_secs, std::shared_ptr<void> patch_data) { return impl_->kf_patch(layer, time_secs, std::move(patch_data)); }
+std::future<void>                  stage::set_media_time_override(int layer, double time_secs) { return impl_->kf_set_media_time(layer, time_secs); }
+std::future<std::shared_ptr<void>> stage::get_keyframe_status(int layer) { return impl_->kf_get_status(layer); }
 
 // STAGE DELAYED (For batching operations)
 stage_delayed::stage_delayed(std::shared_ptr<stage>& st, int index)
@@ -630,6 +814,48 @@ std::future<std::shared_ptr<frame_producer>> stage_delayed::background(int index
 std::future<void> stage_delayed::execute(std::function<void()> func)
 {
     return executor_.begin_invoke([=]() { return stage_->execute(func).get(); });
+}
+
+// ── Keyframe management (stage_delayed forwarding) ───────────────────────
+std::future<void> stage_delayed::set_keyframe_data(int layer, std::shared_ptr<void> data)
+{
+    return executor_.begin_invoke([=]() { return stage_->set_keyframe_data(layer, data).get(); });
+}
+std::future<bool> stage_delayed::arm_keyframes(int layer)
+{
+    return executor_.begin_invoke([=]() { return stage_->arm_keyframes(layer).get(); });
+}
+std::future<void> stage_delayed::disarm_keyframes(int layer)
+{
+    return executor_.begin_invoke([=]() { return stage_->disarm_keyframes(layer).get(); });
+}
+std::future<void> stage_delayed::clear_keyframes(int layer)
+{
+    return executor_.begin_invoke([=]() { return stage_->clear_keyframes(layer).get(); });
+}
+std::future<std::shared_ptr<void>> stage_delayed::get_keyframe_data(int layer)
+{
+    return executor_.begin_invoke([=]() -> std::shared_ptr<void> { return stage_->get_keyframe_data(layer).get(); });
+}
+std::future<bool> stage_delayed::has_keyframe_data(int layer)
+{
+    return executor_.begin_invoke([=]() { return stage_->has_keyframe_data(layer).get(); });
+}
+std::future<bool> stage_delayed::is_keyframes_armed(int layer)
+{
+    return executor_.begin_invoke([=]() { return stage_->is_keyframes_armed(layer).get(); });
+}
+std::future<bool> stage_delayed::patch_keyframe(int layer, double time_secs, std::shared_ptr<void> patch_data)
+{
+    return executor_.begin_invoke([=]() { return stage_->patch_keyframe(layer, time_secs, patch_data).get(); });
+}
+std::future<void> stage_delayed::set_media_time_override(int layer, double time_secs)
+{
+    return executor_.begin_invoke([=]() { return stage_->set_media_time_override(layer, time_secs).get(); });
+}
+std::future<std::shared_ptr<void>> stage_delayed::get_keyframe_status(int layer)
+{
+    return executor_.begin_invoke([=]() -> std::shared_ptr<void> { return stage_->get_keyframe_status(layer).get(); });
 }
 
 }} // namespace caspar::core

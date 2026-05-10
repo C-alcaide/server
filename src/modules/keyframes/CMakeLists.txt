@@ -8,8 +8,8 @@ set(SOURCES
     keyframe_data.cpp
     keyframe_data.h
 
-    keyframe_registry.cpp
-    keyframe_registry.h
+    keyframe_fields.cpp
+    keyframe_fields.h
 
     keyframe_json.cpp
     keyframe_json.h
