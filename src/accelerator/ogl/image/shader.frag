@@ -1,4 +1,4 @@
-#version 450
+﻿#version 450
 in vec4 TexCoord;
 in vec4 TexCoord2;
 out vec4 fragColor;
@@ -536,7 +536,7 @@ vec4 ChromaOnCustomColor(vec4 c)
 
 // ---- White Balance ----
 // temp: -1=cool (blue), +1=warm (orange); tint_val: -1=magenta, +1=green
-// Uses a diagonal gain matrix — no clamping, preserves HDR headroom.
+// Uses a diagonal gain matrix â€” no clamping, preserves HDR headroom.
 vec3 apply_white_balance(vec3 c, float temp, float tint_val)
 {
     // Warm = boost Red, cut Blue.  Tint = boost Green, cut Magenta.
@@ -554,7 +554,7 @@ vec3 apply_white_balance(vec3 c, float temp, float tint_val)
 // ---- Lift / Midtone / Gain (3-way color corrector) ----
 // Matches DaVinci Resolve CDL-style primary wheels.
 // Formula: out = pow(max(c * gain + lift, 0.0), 1.0 / midtone)
-// No upper clamp — allows HDR pass-through.  Only clamp negatives for pow safety.
+// No upper clamp â€” allows HDR pass-through.  Only clamp negatives for pow safety.
 vec3 apply_lmg(vec3 c, vec3 lift, vec3 midtone, vec3 gain)
 {
     c = max(c * gain + lift, vec3(0.0));
@@ -576,7 +576,7 @@ vec3 apply_hue_shift(vec3 c, float degrees)
 
 // ---- Tonal Balance (Shadows / Highlights separation) ----
 // Soft luminance-based masks drive additive offsets.
-// No clamping — preserves HDR headroom for downstream tonemapping.
+// No clamping â€” preserves HDR headroom for downstream tonemapping.
 vec3 apply_tone_balance(vec3 c, float shadows, float highlights)
 {
     float lum         = dot(c, vec3(0.2126, 0.7152, 0.0722));
@@ -639,12 +639,12 @@ vec3 apply_gamut_compress(vec3 c, vec3 lim)
 
 // ---- 3D LUT ----
 // Trilinear lookup in a 3D texture.  Input clamped to 0..1 for LUT range.
-// Swizzles BGRA→RGB for lookup and back.
+// Swizzles BGRAâ†’RGB for lookup and back.
 vec3 apply_lut3d(vec3 c, float strength)
 {
-    vec3 rgb_in  = clamp(c.bgr, 0.0, 1.0);  // BGRA→RGB, clamp for LUT domain
+    vec3 rgb_in  = clamp(c.bgr, 0.0, 1.0);  // BGRAâ†’RGB, clamp for LUT domain
     vec3 rgb_out = texture(lut3d_tex, rgb_in).rgb;
-    return mix(c, rgb_out.bgr, strength);    // RGB→BGRA, mix with original
+    return mix(c, rgb_out.bgr, strength);    // RGBâ†’BGRA, mix with original
 }
 
 // ---- Hue-vs-Hue / Hue-vs-Sat Curves ----
@@ -654,7 +654,7 @@ vec3 apply_hue_curves(vec3 c)
     vec3  hsv  = rgb2hsv(clamp(c, 0.0, 1.0));
     float hue  = hsv.x;  // 0..1
     vec4  offsets = texture(hue_curve_tex, vec2(hue, 0.5));
-    // R channel: Hue-vs-Hue offset (signed, ±0.5 range mapped from ±180°)
+    // R channel: Hue-vs-Hue offset (signed, Â±0.5 range mapped from Â±180Â°)
     hsv.x = fract(hsv.x + offsets.r);
     // G channel: Hue-vs-Sat multiplier (1.0 = no change)
     hsv.y *= offsets.g;
@@ -667,16 +667,28 @@ vec3 apply_hue_curves(vec3 c)
     return result;
 }
 
+// When sampling in equirectangular UV space (is_360), the horizontal axis
+// wraps continuously around the sphere.  fract() on the U coordinate lets
+// kernel taps sample across the seam (anti-meridian) seamlessly instead
+// of clamping to the edge pixel.  Vertical stays clamped â€” poles don't wrap.
+vec4 sample_wrap(vec2 s)
+{
+    if (is_360) s.x = fract(s.x);
+    return get_rgba_color(s);
+}
+
 // ---- Sharpening (Laplacian unsharp mask) ----
 // Single-pass 3x3 Laplacian sharpening.  The radius parameter scales the
 // sample offset (1.0 = 1 texel).  Amount controls the enhancement strength.
 vec3 apply_sharpen(vec2 uv, vec3 center_col, float amount, float rad)
 {
     vec2 ts = 1.0 / target_size * rad;
-    vec3 n  = get_rgba_color(uv + vec2( 0.0, -ts.y)).rgb;
-    vec3 s  = get_rgba_color(uv + vec2( 0.0,  ts.y)).rgb;
-    vec3 e  = get_rgba_color(uv + vec2( ts.x,  0.0)).rgb;
-    vec3 w  = get_rgba_color(uv + vec2(-ts.x,  0.0)).rgb;
+    // Use sample_wrap() so the horizontal U wraps via fract() in 360Â° mode,
+    // preventing a sharpening seam at the equirectangular anti-meridian.
+    vec3 n  = sample_wrap(uv + vec2( 0.0, -ts.y)).rgb;
+    vec3 s  = sample_wrap(uv + vec2( 0.0,  ts.y)).rgb;
+    vec3 e  = sample_wrap(uv + vec2( ts.x,  0.0)).rgb;
+    vec3 w  = sample_wrap(uv + vec2(-ts.x,  0.0)).rgb;
     vec3 blur_avg = (n + s + e + w) * 0.25;
     return center_col + (center_col - blur_avg) * amount;
 }
@@ -1110,11 +1122,11 @@ vec2 get_equirect_uv(vec2 screen_uv) {
     }
 
     // 2. Calculate View Vector
-    // screen_arc  — physical arc of the curved screen in radians.
+    // screen_arc  â€” physical arc of the curved screen in radians.
     //               For curved screens, this fully determines the pixel-to-angle
     //               mapping (matching Disguise / Assimilate behaviour).
-    // view_fov    — virtual camera FOV; only affects the flat-screen (rectilinear)
-    //               projection.  scale = tan(fov/2), unit zoom at fov = 90°.
+    // view_fov    â€” virtual camera FOV; only affects the flat-screen (rectilinear)
+    //               projection.  scale = tan(fov/2), unit zoom at fov = 90Â°.
     float scale = tan(view_fov * 0.5);  // zoom factor for flat screen only
     vec3 dir;
     if (screen_curve_type == 1) {
@@ -1147,7 +1159,7 @@ vec2 get_equirect_uv(vec2 screen_uv) {
             dir = vec3(ndc.x / r * sin_t, ndc.y / r * sin_t, -cos_t);
         }
     } else {
-        // Flat screen — standard rectilinear (gnomonic) projection.
+        // Flat screen â€” standard rectilinear (gnomonic) projection.
         // Off-axis frustum shift: offset the NDC centre to render a sub-frustum
         // (used for multi-projector tiling without changing the viewing direction).
         vec2 shifted_ndc = ndc + vec2(frustum_h, frustum_v);
@@ -1252,16 +1264,6 @@ vec4 get_rgba_color(vec2 uv)
         return vec4(0.0, 0.0, 0.0, 0.0);
 }
 
-// When blurring in equirectangular UV space (is_360), the horizontal axis
-// wraps continuously around the sphere.  fract() on the U coordinate lets
-// the blur kernel sample across the seam (anti-meridian) seamlessly instead
-// of clamping to the edge pixel.  Vertical stays clamped — poles don't wrap.
-vec4 sample_blur(vec2 s)
-{
-    if (is_360) s.x = fract(s.x);
-    return get_rgba_color(s);
-}
-
 vec4 get_blurred_color(vec2 uv)
 {
     if (!blur_enable || blur_radius < 0.5) return get_rgba_color(uv);
@@ -1281,7 +1283,7 @@ vec4 get_blurred_color(vec2 uv)
             float theta = float(i) * 2.39996323; // Golden angle
             vec2 offset = vec2(cos(theta), sin(theta)) * radius * texelSize;
             float weight = exp(-(radius*radius) / (2.0 * sigma * sigma));
-            totalColor += sample_blur(uv + offset) * weight;
+            totalColor += sample_wrap(uv + offset) * weight;
             totalWeight += weight;
         }
     }
@@ -1293,7 +1295,7 @@ vec4 get_blurred_color(vec2 uv)
         for (int y = -steps; y <= steps; y++) {
             for (int x = -steps; x <= steps; x++) {
                 vec2 offset = vec2(float(x), float(y)) * stepSize * texelSize;
-                totalColor += sample_blur(uv + offset);
+                totalColor += sample_wrap(uv + offset);
                 totalWeight += 1.0;
             }
         }
@@ -1307,7 +1309,7 @@ vec4 get_blurred_color(vec2 uv)
         for (int i = 0; i < iSamples; i++) {
             float t = (float(i) / max(float(iSamples - 1), 1.0)) - 0.5; // -0.5 to 0.5
             vec2 offset = dir * (t * blur_radius * 2.0 * texelSize);
-            totalColor += sample_blur(uv + offset);
+            totalColor += sample_wrap(uv + offset);
             totalWeight += 1.0;
         }
     }
@@ -1320,7 +1322,7 @@ vec4 get_blurred_color(vec2 uv)
         int iSamples = int(clamp(blur_radius * 2.0, 16.0, 100.0));
         for (int i = 0; i < iSamples; i++) {
             float scale = 1.0 - strength * (float(i) / max(float(iSamples - 1), 1.0));
-            totalColor += sample_blur(center + toPixel * scale);
+            totalColor += sample_wrap(center + toPixel * scale);
             totalWeight += 1.0;
         }
     }
@@ -1343,7 +1345,7 @@ vec4 get_blurred_color(vec2 uv)
             float radius = sqrt(t) * blurAmount;
             float theta = float(i) * 2.39996323;
             vec2 offset = vec2(cos(theta), sin(theta)) * radius * texelSize;
-            totalColor += sample_blur(uv + offset);
+            totalColor += sample_wrap(uv + offset);
             totalWeight += 1.0;
         }
     }
@@ -1360,7 +1362,7 @@ vec4 get_blurred_color(vec2 uv)
             float theta = dither_theta + float(i) * 2.39996323; // Golden angle with dither
             vec2 offset = vec2(cos(theta), sin(theta)) * radius * texelSize;
 
-            vec4 col = sample_blur(uv + offset);
+            vec4 col = sample_wrap(uv + offset);
 
             // Optical intensity mapping for distinct highlight bokeh
             float lum = dot(col.rgb, vec3(0.299, 0.587, 0.114));
@@ -1401,7 +1403,7 @@ float sdf_circle(vec2 p, float r)
     return length(p) - r;
 }
 
-// Iterative ellipse SDF approximation (Hálvgaard, 2020)
+// Iterative ellipse SDF approximation (HÃ¡lvgaard, 2020)
 float sdf_ellipse(vec2 p, vec2 ab)
 {
     p = abs(p);
@@ -1453,7 +1455,7 @@ float shape_gradient_t(vec2 uv)
         vec2 d = uv - shape_gradient_center;
         return (atan(d.y, d.x) / (2.0 * 3.14159265)) + 0.5;
     }
-    return 0.0; // solid — t unused
+    return 0.0; // solid â€” t unused
 }
 
 vec4 shape_compute_fill(vec2 uv)
@@ -1469,13 +1471,13 @@ void main()
     vec2 base_uv = TexCoord.st / TexCoord.q;
     vec4 col;
     if (is_360) {
-        // 360° equirectangular path — curve type used inside get_equirect_uv()
+        // 360Â° equirectangular path â€” curve type used inside get_equirect_uv()
         vec2 uv_rect = get_equirect_uv(base_uv);
         if (flip_h) uv_rect.s = 1.0 - uv_rect.s;
         if (flip_v) uv_rect.t = 1.0 - uv_rect.t;
         col = get_blurred_color(uv_rect);
     } else if (is_curved) {
-        // Flat content on curved screen — apply tangent UV warp
+        // Flat content on curved screen â€” apply tangent UV warp
         vec2 uv_warped = apply_curve_warp(base_uv);
         if (flip_h) uv_warped.s = 1.0 - uv_warped.s;
         if (flip_v) uv_warped.t = 1.0 - uv_warped.t;

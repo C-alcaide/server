@@ -1,0 +1,8 @@
+
+D:\Github\CasparVP>call "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat" 
+**********************************************************************
+** Visual Studio 2026 Developer Command Prompt v18.5.2
+** Copyright (c) 2026 Microsoft Corporation
+**********************************************************************
+[vcvarsall.bat] Environment initialized for: 'x64'
+ninja: no work to do.
