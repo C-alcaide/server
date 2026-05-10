@@ -5,6 +5,9 @@ set(SOURCES
 	consumer/artnet_consumer.cpp
 	consumer/artnet_consumer.h
 
+	producer/dmx_producer.cpp
+	producer/dmx_producer.h
+
 	util/fixture_calculation.cpp
 	util/fixture_calculation.h
 
@@ -19,6 +22,7 @@ casparcg_add_module_project(artnet
 
 set_target_properties(artnet PROPERTIES FOLDER modules)
 source_group(sources\\consumer consumer/*)
+source_group(sources\\producer producer/*)
 source_group(sources\\util util/*)
 source_group(sources ./*)
 

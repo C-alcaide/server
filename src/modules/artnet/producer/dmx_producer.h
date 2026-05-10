@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011 Sveriges Television AB <info@casparcg.com>
+ * Copyright (c) 2025 CasparCG Contributors
  *
  * This file is part of CasparCG (www.casparcg.com).
  *
@@ -15,28 +15,20 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with CasparCG. If not, see <http://www.gnu.org/licenses/>.
- *
- * Author: Eliyah Sundström eliyah@sundstroem.com
  */
 
-#include "artnet.h"
+#pragma once
 
-#define WIN32_LEAN_AND_MEAN
+#include <common/memory.h>
 
-#include "consumer/artnet_consumer.h"
-#include "producer/dmx_producer.h"
+#include <core/producer/frame_producer.h>
 
-#include <core/consumer/frame_consumer.h>
-
-#include <common/utf.h>
+#include <string>
+#include <vector>
 
 namespace caspar { namespace artnet {
 
-void init(const core::module_dependencies& dependencies)
-{
-    dependencies.consumer_registry->register_consumer_factory(L"ArtNet Consumer", create_consumer);
-    dependencies.consumer_registry->register_preconfigured_consumer_factory(L"artnet", create_preconfigured_consumer);
-    dependencies.producer_registry->register_producer_factory(L"DMX File Producer", create_dmx_producer);
-}
+spl::shared_ptr<core::frame_producer> create_dmx_producer(const core::frame_producer_dependencies& dependencies,
+                                                          const std::vector<std::wstring>&         params);
 
 }} // namespace caspar::artnet

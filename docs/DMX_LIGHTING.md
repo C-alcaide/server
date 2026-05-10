@@ -1,11 +1,19 @@
-# DMX Lighting — ArtNet & sACN Consumers
+# DMX Lighting — ArtNet & sACN
 
-CasparCG can drive DMX lighting fixtures directly from video output using the
-**ArtNet** and **sACN** consumers. Both analyse each rendered frame, sample the
-average colour of a configurable screen region per fixture, and transmit the
-resulting DMX values in real time. This enables pixel-accurate live lighting to
-match on-screen content — useful for virtual production LED walls, studio
-ambience, and stage wash lighting.
+CasparCG supports two modes of DMX output:
+
+1. **Pixel-sampling consumers** — analyse each rendered frame, sample the
+   average colour of a configurable screen region per fixture, and transmit
+   the resulting DMX values in real time. This enables pixel-accurate live
+   lighting to match on-screen content.
+
+2. **DMX File Producer** — plays back pre-recorded DMX show files (NDJSON
+   format) with frame-accurate synchronisation to video on the same channel.
+   Supports full transport controls (play, pause, seek, loop) and outputs
+   via Art-Net or sACN.
+
+Both modes are useful for virtual production LED walls, studio ambience,
+and stage wash lighting.
 
 ---
 
@@ -20,8 +28,9 @@ ambience, and stage wash lighting.
 7. [sACN Reference](#7-sacn-reference)
 8. [Protocol Comparison](#8-protocol-comparison)
 9. [Multiple Universes](#9-multiple-universes)
-10. [Worked Examples](#10-worked-examples)
-11. [Troubleshooting](#11-troubleshooting)
+10. [DMX File Producer](#10-dmx-file-producer)
+11. [Worked Examples](#11-worked-examples)
+12. [Troubleshooting](#12-troubleshooting)
 
 ---
 
@@ -446,7 +455,119 @@ frame-blocking between universes.
 
 ---
 
-## 10. Worked Examples
+## 10. DMX File Producer
+
+The DMX File Producer plays back pre-recorded DMX show files directly from a
+channel layer, with transport controls synchronised to the CasparCG timeline.
+This is useful for replaying lighting sequences recorded from a console,
+without requiring the original console to be connected.
+
+### File format (NDJSON)
+
+The producer reads `.ndjson` files — one JSON object per line. This format is
+compatible with the Dataton WATCHOUT ArtNet Recorder.
+
+```
+Line 1 (header):
+  {"copyright":"...","version":"v01","channels":[0,1,...,511]}
+
+Lines 2+ (frames):
+  {"dt":<microseconds>,"data":[<512 ints>]}
+  {"dt":<microseconds>,"data":[<512 ints>],"universe":<int>}
+```
+
+- **dt** — absolute timestamp in microseconds from the recording start
+- **data** — array of 512 DMX channel values (0–255)
+- **universe** — optional universe number (default 0); enables multi-universe
+  recordings in a single file
+
+Timestamps are framerate-independent. The producer maps the channel's frame
+clock to NDJSON timestamps using binary search, so the same file works at
+any channel framerate (25, 29.97, 50, 59.94 fps, etc.).
+
+### AMCP commands
+
+Place `.ndjson` files in the CasparCG media folder. The producer is loaded
+onto a layer like any other producer:
+
+```
+PLAY 1-50 show.ndjson
+PLAY 1-50 show.ndjson LOOP
+PAUSE 1-50
+RESUME 1-50
+CALL 1-50 SEEK 750            (seek to frame 750)
+CALL 1-50 SEEK rel 100         (seek forward 100 frames)
+CALL 1-50 SEEK in              (seek to start)
+STOP 1-50                      (stop + send blackout)
+```
+
+### Producer parameters
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `PROTOCOL` | string | `ARTNET` | Output protocol: `ARTNET`, `SACN`, `E131`, or `E1.31` |
+| `HOST` | string | `255.255.255.255` | Destination IP; for sACN, leave default for auto-multicast |
+| `PORT` | int | 6454 / 5568 | UDP port (auto-selected based on protocol) |
+| `UNIVERSE` | int | -1 (all) | Filter to a specific universe; -1 sends all universes in the file |
+| `PRIORITY` | int | 100 | sACN source priority (1–200) |
+
+### Examples
+
+```
+# Play via Art-Net broadcast
+PLAY 1-50 show.ndjson
+
+# Play via sACN multicast, universe 1, priority 120
+PLAY 1-50 show.ndjson PROTOCOL SACN UNIVERSE 1 PRIORITY 120
+
+# Play via sACN unicast to a specific LED processor
+PLAY 1-50 show.ndjson PROTOCOL SACN HOST 192.168.10.50
+
+# Play via Art-Net to a specific node, looping
+PLAY 1-50 show.ndjson HOST 192.168.1.100 LOOP
+
+# Sync DMX with video on the same channel
+PLAY 1-10 background_video
+PLAY 1-50 lighting_show.ndjson
+```
+
+### Synchronisation with video
+
+Because the DMX producer lives on a layer in the same channel as video
+producers, it shares the channel's frame clock. When the channel renders
+frame N, the DMX producer calculates:
+
+$$t_{\mu s} = \frac{N}{\text{fps}} \times 10^{6}$$
+
+and binary-searches the NDJSON frames to find the last frame with
+$dt \le t_{\mu s}$. Art-Net or sACN packets are only sent when the
+matched NDJSON frame changes, avoiding redundant network traffic.
+
+Pause, resume, and seek all work through the standard layer transport
+mechanism — the DMX producer tracks its own position and adjusts correctly
+after seek commands.
+
+### Blackout on stop
+
+When the producer is stopped or destroyed (e.g. `STOP 1-50` or
+`CLEAR 1-50`), it sends a single DMX frame with all 512 channels set to 0.
+This ensures fixtures go dark rather than holding the last received value.
+
+### Recording DMX files
+
+The companion **DMX Recorder** tool (`dmx_recorder.py` /
+`DMX Recorder.exe`) can record Art-Net and sACN traffic from any lighting
+console into NDJSON files compatible with this producer. It supports:
+
+- Simultaneous Art-Net + sACN capture
+- Multi-universe recording in a single file
+- Delta compression (skip unchanged frames)
+- Trim, merge, and playback preview
+- CLI and GUI modes
+
+---
+
+## 11. Worked Examples
 
 ### Example A — Ambient strip behind a news desk (ArtNet)
 
@@ -562,7 +683,7 @@ Fixtures mounted at a 45° angle on a diagonal set piece:
 
 ---
 
-## 11. Troubleshooting
+## 12. Troubleshooting
 
 ### No DMX output
 
