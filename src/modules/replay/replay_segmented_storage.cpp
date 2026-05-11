@@ -47,12 +47,28 @@
 #ifdef _WIN32
 #define POPEN _popen
 #define PCLOSE _pclose
+#define FSEEK64 _fseeki64
+#define FTELL64 _ftelli64
 #else
 #define POPEN popen
 #define PCLOSE pclose
+#define FSEEK64 fseeko
+#define FTELL64 ftello
 #endif
 
 namespace caspar { namespace replay {
+
+// Reject filenames containing shell metacharacters to prevent command injection via popen.
+static bool is_safe_filename(const std::string& path) {
+    for (char c : path) {
+        if (c == '\"' || c == '\'' || c == '`' || c == '$' || c == '!' ||
+            c == ';' || c == '|' || c == '&' || c == '<' || c == '>' ||
+            c == '(' || c == ')' || c == '{' || c == '}' || c == '\n' || c == '\r') {
+            return false;
+        }
+    }
+    return true;
+}
 
 // ----------------------------------------------------------------------------
 // ReplaySegmentedWriter
@@ -182,8 +198,7 @@ bool ReplaySegmentedWriter::WriteFrame(const void* data, size_t size, uint64_t t
     }
 
     // Get current offset in MAV file
-    // ftell returns long, _ftelli64 is safer for large files but segments are small (<2GB)
-    int64_t offset = _ftelli64(file_mav_);
+    int64_t offset = FTELL64(file_mav_);
     
     // Write Data
     if (fwrite(data, 1, size, file_mav_) != size) {
@@ -354,19 +369,29 @@ bool ReplaySegmentedReader::Open(const boost::filesystem::path& base_path)
             fclose(f);
             continue;
         }
+        
+        // Basic sanity check — reject obviously corrupt headers
+        if (header.width == 0 || header.width > 16384 ||
+            header.height == 0 || header.height > 16384 ||
+            header.fps <= 0.0 || header.fps > 1000.0) {
+            CASPAR_LOG(warning) << L"Replay: Skipping segment with invalid header (w=" 
+                                << header.width << L" h=" << header.height << L" fps=" << header.fps << L")";
+            fclose(f);
+            continue;
+        }
     
         width_ = header.width;
         height_ = header.height;
         fps_ = header.fps;
 
-        _fseeki64(f, 0, SEEK_END);
-        long size = ftell(f);
-        fseek(f, sizeof(header), SEEK_SET);
+        FSEEK64(f, 0, SEEK_END);
+        long long size = FTELL64(f);
+        FSEEK64(f, sizeof(header), SEEK_SET);
         
-        long entry_count = (size - sizeof(header)) / sizeof(replay_index_entry_v2);
+        long long entry_count = (size - (long long)sizeof(header)) / (long long)sizeof(replay_index_entry_v2);
         if (entry_count > 0) {
-            seg.indices.resize(entry_count);
-            fread(seg.indices.data(), sizeof(replay_index_entry_v2), entry_count, f);
+            seg.indices.resize((size_t)entry_count);
+            fread(seg.indices.data(), sizeof(replay_index_entry_v2), (size_t)entry_count, f);
 
             // Correct timestamps from entries
             seg.start_timestamp = seg.indices.front().timestamp;
@@ -454,8 +479,8 @@ bool ReplaySegmentedReader::GetFrame(size_t index, std::vector<uint8_t>& data, u
         next_offset = seg.indices[local_index + 1].file_offset;
     } else {
         // End of file
-        _fseeki64(cached_file_mav_, 0, SEEK_END);
-        next_offset = _ftelli64(cached_file_mav_);
+        FSEEK64(cached_file_mav_, 0, SEEK_END);
+        next_offset = FTELL64(cached_file_mav_);
     }
     
     if (next_offset <= entry.file_offset) return false;
@@ -468,7 +493,7 @@ bool ReplaySegmentedReader::GetFrame(size_t index, std::vector<uint8_t>& data, u
     // Ensure vector is exactly the size of the frame data
     if (data.size() != size) data.resize(size);
     
-    _fseeki64(cached_file_mav_, entry.file_offset, SEEK_SET);
+    FSEEK64(cached_file_mav_, entry.file_offset, SEEK_SET);
     if (fread(data.data(), 1, size, cached_file_mav_) != size) return false;
 
     return true;
@@ -500,6 +525,13 @@ size_t ReplaySegmentedReader::GetTotalFrames() const { return total_frames_; }
 
 void ReplaySegmentedReader::Refresh() 
 {
+    // Invalidate cached MAV handle — segments may have been deleted or changed
+    if (cached_file_mav_) {
+        fclose(cached_file_mav_);
+        cached_file_mav_ = nullptr;
+    }
+    cached_segment_index_ = -1;
+
     if (segments_.empty()) {
         Open(base_path_);
         return;
@@ -520,11 +552,11 @@ void ReplaySegmentedReader::Refresh()
         long long current_count = (long long)last_seg.indices.size();
         long long offset = sizeof(replay_segment_header) + (current_count * sizeof(replay_index_entry_v2));
         
-        _fseeki64(f, 0, SEEK_END);
-        long long file_size = _ftelli64(f);
+        FSEEK64(f, 0, SEEK_END);
+        long long file_size = FTELL64(f);
        
         if (file_size > offset) {
-            _fseeki64(f, offset, SEEK_SET);
+            FSEEK64(f, offset, SEEK_SET);
             long long new_entries_bytes = file_size - offset;
             long long new_count = new_entries_bytes / sizeof(replay_index_entry_v2);
             
@@ -593,9 +625,9 @@ void ReplaySegmentedReader::Refresh()
         replay_segment_header h;
         if (fread(&h, sizeof(h), 1, f2) != 1) { fclose(f2); break; }
         
-        _fseeki64(f2, 0, SEEK_END);
-        long long sz = _ftelli64(f2);
-        _fseeki64(f2, sizeof(h), SEEK_SET);
+        FSEEK64(f2, 0, SEEK_END);
+        long long sz = FTELL64(f2);
+        FSEEK64(f2, sizeof(h), SEEK_SET);
         
         long long count = (sz - sizeof(h)) / sizeof(replay_index_entry_v2);
         if (count > 0) {
@@ -652,6 +684,12 @@ bool VmxTranscoder::ExportJobs(const std::vector<ExportJob>& jobs, const boost::
     reader.Close(); 
     
     CASPAR_LOG(info) << L"[VMX] Exporting " << jobs.size() << " clips to " << output_path.wstring();
+    
+    // Validate output path to prevent command injection via popen
+    if (!is_safe_filename(output_path.string())) {
+        CASPAR_LOG(error) << L"[VMX] Export path contains unsafe characters: " << output_path.wstring();
+        return false;
+    }
     
     // Setup generic ffmpeg command based on first clip format
     // Redirect output to log file for debugging

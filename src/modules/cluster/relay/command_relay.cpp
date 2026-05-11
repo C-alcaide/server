@@ -215,13 +215,24 @@ std::vector<member_info> command_relay::get_members() const
 void command_relay::master_connection_loop()
 {
     while (running_) {
+        // Collect indices of members that need (re)connection
+        std::vector<size_t> to_connect;
         {
             std::lock_guard<std::mutex> lock(members_mutex_);
-            for (auto& member : members_) {
+            for (size_t i = 0; i < members_.size(); ++i) {
                 if (!running_) break;
-                if (member.state == member_state::disconnected || member.state == member_state::error) {
-                    connect_to_member(member);
+                if (members_[i].state == member_state::disconnected || members_[i].state == member_state::error) {
+                    to_connect.push_back(i);
                 }
+            }
+        }
+        // Connect one member at a time, releasing the lock between attempts
+        // so route_command/broadcast aren't blocked for the entire batch
+        for (auto idx : to_connect) {
+            if (!running_) break;
+            std::lock_guard<std::mutex> lock(members_mutex_);
+            if (members_[idx].state == member_state::disconnected || members_[idx].state == member_state::error) {
+                connect_to_member(members_[idx]);
             }
         }
         // Wait up to 2s but wake immediately on stop()

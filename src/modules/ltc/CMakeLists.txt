@@ -31,6 +31,7 @@ set(LIBLTC_SOURCES
 casparcg_add_module_project(ltc
     SOURCES 
         ltc_input.cpp
+        miniaudio_impl.c
         ${LIBLTC_SOURCES}
     INIT_FUNCTION "ltc::init"
 )

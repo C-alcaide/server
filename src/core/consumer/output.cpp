@@ -31,6 +31,7 @@
 #include <common/except.h>
 #include <common/memory.h>
 
+#include <atomic>
 #include <chrono>
 #include <map>
 #include <optional>
@@ -51,6 +52,8 @@ struct output::impl
     std::mutex                                     consumers_mutex_;
     std::map<int, spl::shared_ptr<frame_consumer>> consumers_;
 
+    std::atomic<uint64_t>      tick_count_{0};
+
     std::optional<time_point_t> time_;
 
   public:
@@ -65,7 +68,28 @@ struct output::impl
 
     void add(int index, spl::shared_ptr<frame_consumer> consumer)
     {
-        remove(index);
+        // Extract old consumer without destroying it under the lock.
+        std::shared_ptr<frame_consumer> old;
+        {
+            std::lock_guard<std::mutex> lock(consumers_mutex_);
+            auto it = consumers_.find(index);
+            if (it != consumers_.end()) {
+                old = static_cast<std::shared_ptr<frame_consumer>>(it->second);
+                consumers_.erase(it);
+            }
+        }
+
+        if (old) {
+            // Wait for the tick loop to finish its current iteration so it
+            // drops its shared_ptr copy of the old consumer.  At 25 fps a
+            // tick takes ~40 ms; we wait up to 200 ms (5 frames).
+            auto pre = tick_count_.load();
+            for (int i = 0; i < 200 && tick_count_.load() == pre; ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            // Destroy old consumer — joins its GL/render thread.
+            old.reset();
+        }
 
         consumer->initialize(format_desc_, channel_info_, index);
 
@@ -77,9 +101,19 @@ struct output::impl
 
     bool remove(int index)
     {
-        std::lock_guard<std::mutex> lock(consumers_mutex_);
-        auto                        count = consumers_.erase(index);
-        return count > 0;
+        std::shared_ptr<frame_consumer> old;
+        {
+            std::lock_guard<std::mutex> lock(consumers_mutex_);
+            auto it = consumers_.find(index);
+            if (it == consumers_.end())
+                return false;
+            old = static_cast<std::shared_ptr<frame_consumer>>(it->second);
+            consumers_.erase(it);
+        }
+        // Destroy outside the lock so the destructor (which may join
+        // threads) does not block the tick loop.
+        old.reset();
+        return true;
     }
 
     bool remove(const spl::shared_ptr<frame_consumer>& consumer) { return remove(consumer->index()); }
@@ -172,28 +206,41 @@ struct output::impl
                     ++it;
                 } catch (...) {
                     CASPAR_LOG_CURRENT_EXCEPTION();
-                    auto index = it->first;
-                    it         = consumers.erase(it);
+                    auto index  = it->first;
+                    auto failed = it->second.get();
+                    it          = consumers.erase(it);
 
+                    // Only erase from the authoritative map if the pointer still
+                    // matches — a concurrent add() may have already replaced it.
                     std::lock_guard<std::mutex> lock(consumers_mutex_);
-                    consumers_.erase(index);
+                    auto mit = consumers_.find(index);
+                    if (mit != consumers_.end() && mit->second.get() == failed)
+                        consumers_.erase(mit);
                 }
             }
 
             for (auto& p : futures) {
                 try {
                     if (!p.second.get()) {
+                        auto fit    = consumers.find(p.first);
+                        auto failed = fit != consumers.end() ? fit->second.get() : nullptr;
                         consumers.erase(p.first);
 
                         std::lock_guard<std::mutex> lock(consumers_mutex_);
-                        consumers_.erase(p.first);
+                        auto mit = consumers_.find(p.first);
+                        if (mit != consumers_.end() && mit->second.get() == failed)
+                            consumers_.erase(mit);
                     }
                 } catch (...) {
                     CASPAR_LOG_CURRENT_EXCEPTION();
+                    auto fit    = consumers.find(p.first);
+                    auto failed = fit != consumers.end() ? fit->second.get() : nullptr;
                     consumers.erase(p.first);
 
                     std::lock_guard<std::mutex> lock(consumers_mutex_);
-                    consumers_.erase(p.first);
+                    auto mit = consumers_.find(p.first);
+                    if (mit != consumers_.end() && mit->second.get() == failed)
+                        consumers_.erase(mit);
                 }
             }
         };
@@ -211,6 +258,8 @@ struct output::impl
             state["port"][p.first]["consumer"] = p.second->name();
         }
         state_ = std::move(state);
+
+        tick_count_.fetch_add(1, std::memory_order_release);
 
         const auto needs_sync = std::all_of(
             consumers.begin(), consumers.end(), [](auto& p) { return !p.second->has_synchronization_clock(); });

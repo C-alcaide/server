@@ -57,6 +57,9 @@ class mixer final
 
     common::bit_depth depth() const;
 
+    /// Access the underlying image_mixer for previz and other extensions.
+    spl::shared_ptr<image_mixer> get_image_mixer() const;
+
   private:
     struct impl;
     spl::shared_ptr<impl> impl_;

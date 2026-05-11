@@ -28,16 +28,45 @@
 
 #include <GL/glew.h>
 
+#include <atomic>
+#include <chrono>
+
 namespace caspar { namespace gl {
+
+// Rate-limit GL error logging to prevent log-file floods that can exhaust
+// disk space and destabilise the server.  Errors are still drained from the
+// GL error queue (mandatory) and the last error still throws, but only the
+// first few messages per second are actually written to the log.
+static constexpr int          GL_ERROR_LOG_LIMIT  = 10;   // max messages per window
+static constexpr std::int64_t GL_ERROR_WINDOW_NS  =
+    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::seconds(1)).count();
 
 void SMFL_GLCheckError(const std::string& /*unused*/, const char* func, const char* file, unsigned int line)
 {
     // Get the last error
     GLenum LastErrorCode = GL_NO_ERROR;
 
+    // Thread-local rate limiter — each GL thread gets its own counter.
+    thread_local int64_t tl_window_start = 0;
+    thread_local int     tl_error_count  = 0;
+    thread_local bool    tl_suppressed   = false;
+
     for (GLenum ErrorCode = glGetError(); ErrorCode != GL_NO_ERROR; ErrorCode = glGetError()) {
-        std::string str(reinterpret_cast<const char*>(glewGetErrorString(ErrorCode)));
-        CASPAR_LOG(error) << "OpenGL Error: " << ErrorCode << L" " << str;
+        auto now = std::chrono::steady_clock::now().time_since_epoch().count();
+        if (now - tl_window_start > GL_ERROR_WINDOW_NS) {
+            tl_window_start = now;
+            tl_error_count  = 0;
+            tl_suppressed   = false;
+        }
+        ++tl_error_count;
+        if (tl_error_count <= GL_ERROR_LOG_LIMIT) {
+            std::string str(reinterpret_cast<const char*>(glewGetErrorString(ErrorCode)));
+            CASPAR_LOG(error) << "OpenGL Error: " << ErrorCode << L" " << str;
+        } else if (!tl_suppressed) {
+            tl_suppressed = true;
+            CASPAR_LOG(error) << "GL error flood detected — suppressing further GL error "
+                                 "messages on this thread for up to 1 second.";
+        }
         LastErrorCode = ErrorCode;
     }
 

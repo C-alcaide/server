@@ -82,6 +82,9 @@ struct replay_consumer : public core::frame_consumer
     
     // Diagnostics
     spl::shared_ptr<diagnostics::graph> graph_;
+    
+    // Pre-allocated encode buffer to avoid per-frame allocation
+    std::vector<uint8_t>    encode_buffer_;
 
 public:
     replay_consumer(std::string path, VMX_PROFILE quality);

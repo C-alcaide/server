@@ -34,7 +34,6 @@
 
 #include "system_audio_producer.h"
 
-#define MINIAUDIO_IMPLEMENTATION
 #pragma warning(push)
 #pragma warning(disable : 4244)
 #include "miniaudio.h"
@@ -46,12 +45,16 @@
 #include <vector>
 #include <queue>
 #include <cstring>
-#include <algorithm> // For std::copy, std::min
+#include <algorithm>
 #include <string>
 
 namespace caspar { namespace system_audio {
 
 static const std::wstring PRODUCER_NAME = L"system_audio";
+
+// Maximum audio buffer: 5 seconds worth of interleaved samples.
+// Prevents unbounded growth if receive_impl is not called (e.g. channel paused).
+static constexpr size_t MAX_BUFFER_SECONDS = 5;
 
 spl::shared_ptr<core::frame_producer> create_producer(const core::frame_producer_dependencies& dependencies,
                                                       const std::vector<std::wstring>&         params)
@@ -82,14 +85,25 @@ class system_audio_producer::impl
     ma_device_config deviceConfig;
     
     std::string device_name_u8;
+    std::wstring device_display_name_;
     
     std::mutex audio_mutex;
     std::vector<int32_t> audio_buffer; // Interleaved S32 samples
+    size_t max_buffer_samples_ = 0;   // Computed cap for buffer size
     
     core::video_format_desc format_desc;
     spl::shared_ptr<core::frame_factory> frame_factory_;
     
     std::atomic<bool> running{false};
+    bool context_initialized_ = false;
+    bool device_initialized_  = false;
+    
+    // Stats for OSC state
+    std::atomic<int64_t> underrun_count_{0};
+    std::atomic<int64_t> buffer_fill_{0};
+    
+    core::monitor::state state_;
+    mutable std::mutex   state_mutex_;
 
     static void data_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount) {
         impl* self = (impl*)pDevice->pUserData;
@@ -97,12 +111,16 @@ class system_audio_producer::impl
 
         std::lock_guard<std::mutex> lock(self->audio_mutex);
         
-        // Input is S32, frameCount samples per channel
         const int32_t* input_samples = (const int32_t*)pInput;
         size_t sample_count = frameCount * self->format_desc.audio_channels;
         
-        // Append to buffer
         self->audio_buffer.insert(self->audio_buffer.end(), input_samples, input_samples + sample_count);
+        
+        // Cap buffer to prevent unbounded growth
+        if (self->max_buffer_samples_ > 0 && self->audio_buffer.size() > self->max_buffer_samples_) {
+            size_t excess = self->audio_buffer.size() - self->max_buffer_samples_;
+            self->audio_buffer.erase(self->audio_buffer.begin(), self->audio_buffer.begin() + excess);
+        }
     }
     
 public:
@@ -110,14 +128,18 @@ public:
         : frame_factory_(dependencies.frame_factory)
         , format_desc(dependencies.format_desc)
     {
+        max_buffer_samples_ = (size_t)format_desc.audio_sample_rate * format_desc.audio_channels * MAX_BUFFER_SECONDS;
+        
         if (!device_name.empty()) {
             device_name_u8 = caspar::u8(device_name);
+            device_display_name_ = device_name;
         }
 
         if (ma_context_init(NULL, 0, NULL, &context) != MA_SUCCESS) {
             CASPAR_LOG(error) << "system_audio: Failed to init miniaudio context";
             return;
         }
+        context_initialized_ = true;
 
         deviceConfig = ma_device_config_init(ma_device_type_capture);
         deviceConfig.capture.format   = ma_format_s32;
@@ -139,6 +161,7 @@ public:
                      std::string name(pCaptureInfos[i].name);
                      if (name == device_name_u8 || name.find(device_name_u8) != std::string::npos) {
                          deviceConfig.capture.pDeviceID = &pCaptureInfos[i].id;
+                         device_display_name_ = u16(name);
                          CASPAR_LOG(info) << "system_audio: Selected device: " << name;
                          found = true;
                          break;
@@ -146,37 +169,46 @@ public:
                  }
                  if (!found) {
                      CASPAR_LOG(warning) << "system_audio: Device not found: " << device_name_u8 << ". Using default.";
+                     device_display_name_ = L"Default";
                  }
              }
         } else {
              CASPAR_LOG(info) << "system_audio: Using default capture device";
+             device_display_name_ = L"Default";
         }
 
         if (ma_device_init(&context, &deviceConfig, &device) != MA_SUCCESS) {
             CASPAR_LOG(error) << "system_audio: Failed to init device";
-            ma_context_uninit(&context);
             return;
         }
+        device_initialized_ = true;
 
         if (ma_device_start(&device) != MA_SUCCESS) {
              CASPAR_LOG(error) << "system_audio: Failed to start device";
              ma_device_uninit(&device);
-             ma_context_uninit(&context);
+             device_initialized_ = false;
              return;
         }
         
         running = true;
+        
+        // Initial state
+        std::lock_guard<std::mutex> slock(state_mutex_);
+        state_["device"] = device_display_name_;
+        state_["running"] = std::to_wstring(running ? 1 : 0);
     }
     
     ~impl() {
-        if (running) {
+        running = false;
+        if (device_initialized_) {
             ma_device_uninit(&device);
         }
-        ma_context_uninit(&context);
+        if (context_initialized_) {
+            ma_context_uninit(&context);
+        }
     }
     
     core::draw_frame get_frame(int nb_samples) {
-        // Calculate expected samples per frame
         size_t samples_per_channel;
         if (nb_samples > 0) {
             samples_per_channel = nb_samples;
@@ -188,35 +220,51 @@ public:
         std::vector<int32_t> output_samples;
         output_samples.resize(total_samples_needed, 0); // Silence by default
         
+        bool underrun = false;
+        size_t current_fill = 0;
         {
             std::lock_guard<std::mutex> lock(audio_mutex);
+            current_fill = audio_buffer.size();
             if (audio_buffer.size() >= total_samples_needed) {
-                // We have exactly or more than needed
                 std::copy(audio_buffer.begin(), audio_buffer.begin() + total_samples_needed, output_samples.begin());
                 audio_buffer.erase(audio_buffer.begin(), audio_buffer.begin() + total_samples_needed);
             } else {
-                // Underrun handling
+                underrun = true;
                 if (!audio_buffer.empty()) {
-                    size_t available = audio_buffer.size();
-                    size_t to_copy = std::min(available, total_samples_needed);
+                    size_t to_copy = std::min(audio_buffer.size(), total_samples_needed);
                     std::copy(audio_buffer.begin(), audio_buffer.begin() + to_copy, output_samples.begin());
                     audio_buffer.clear();
-                    // Could log underrun occasionally
                 }
             }
         }
         
+        if (underrun) {
+            underrun_count_++;
+        }
+        buffer_fill_ = (int64_t)current_fill;
+        
+        // Update OSC state
+        {
+            std::lock_guard<std::mutex> slock(state_mutex_);
+            state_["buffer/fill"] = std::to_wstring(current_fill);
+            state_["buffer/underruns"] = std::to_wstring(underrun_count_.load());
+        }
+        
+        // Reuse cached black frame, just attach new audio
         core::pixel_format_desc pix_desc(core::pixel_format::bgra);
         pix_desc.planes.push_back(core::pixel_format_desc::plane(format_desc.width, format_desc.height, 4));
         auto frame = frame_factory_->create_frame(this, pix_desc);
         
-        // Populate audio data
-        // Using vector move constructor for caspar::array to handle memory safely
         if (!output_samples.empty()) {
             frame.audio_data() = caspar::array<int32_t>(std::move(output_samples));
         }
         
         return core::draw_frame(std::move(frame));
+    }
+    
+    core::monitor::state get_state() const {
+        std::lock_guard<std::mutex> slock(state_mutex_);
+        return state_;
     }
 };
 
@@ -236,6 +284,6 @@ core::draw_frame system_audio_producer::receive_impl(const core::video_field /*f
 
 std::wstring system_audio_producer::print() const { return L"system_audio[" + name() + L"]"; }
 std::wstring system_audio_producer::name() const { return PRODUCER_NAME; }
-core::monitor::state system_audio_producer::state() const { return core::monitor::state(); }
+core::monitor::state system_audio_producer::state() const { return impl_->get_state(); }
 
 }} // namespace caspar::system_audio

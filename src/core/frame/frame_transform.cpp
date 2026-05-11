@@ -167,6 +167,9 @@ image_transform image_transform::tween(double                 time,
     result.qual_sat_offset  = do_tween(time, source.qual_sat_offset, dest.qual_sat_offset, duration, tween);
     result.qual_hue_offset  = do_tween(time, source.qual_hue_offset, dest.qual_hue_offset, duration, tween);
 
+    // Mesh geometry override — snap to destination (can't interpolate mesh data)
+    result.geometry_override = dest.geometry_override;
+
     // Per-channel RGB levels — tweened
     auto rl = [&](double s, double d) { return do_tween(time, s, d, duration, tween); };
     result.per_channel_levels.enable         = dest.per_channel_levels.enable;
@@ -365,7 +368,9 @@ bool operator==(const image_transform& lhs, const image_transform& rhs)
                  boost::range::equal(lhs.shape.gradient_center, rhs.shape.gradient_center, eq) &&
                  eq(lhs.shape.stroke_width, rhs.shape.stroke_width) &&
                  boost::range::equal(lhs.shape.stroke_color,    rhs.shape.stroke_color,    eq) &&
-                 lhs.enable_geometry_modifiers == rhs.enable_geometry_modifiers;
+                 lhs.enable_geometry_modifiers == rhs.enable_geometry_modifiers &&
+                 lhs.geometry_override.has_value() == rhs.geometry_override.has_value() &&
+                 (!lhs.geometry_override.has_value() || &lhs.geometry_override->data() == &rhs.geometry_override->data());
 }
 
 bool operator!=(const image_transform& lhs, const image_transform& rhs) { return !(lhs == rhs); }

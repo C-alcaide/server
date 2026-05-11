@@ -65,6 +65,11 @@ casparcg_add_module_project(tracking
 )
 
 # ---------------------------------------------------------------------------
+# Accelerator linkage (for previz camera integration)
+# ---------------------------------------------------------------------------
+target_link_libraries(tracking PRIVATE accelerator)
+
+# ---------------------------------------------------------------------------
 # VRPN linkage
 # ---------------------------------------------------------------------------
 if (BUILD_TRACKING_VRPN)

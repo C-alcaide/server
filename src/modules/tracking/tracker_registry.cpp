@@ -171,6 +171,20 @@ void tracker_registry::inject_transform(const tracker_binding& binding, const ca
             },
             0,
             tweener(L"linear"));
+    } else if (binding.mode == tracking_mode::mode_previz) {
+        // Previz: drive the previz renderer's virtual camera.
+        // Angles are in radians from the tracker; convert to degrees for the previz API.
+        // Positions are in mm from the tracker; convert to metres for the previz API.
+        if (binding.previz_camera_fn) {
+            binding.previz_camera_fn(
+                static_cast<float>(data.x * binding.position_scale),
+                static_cast<float>(data.y * binding.position_scale),
+                static_cast<float>(data.z * binding.position_scale),
+                static_cast<float>(pan   * 180.0 / M_PI),   // rad → degrees
+                static_cast<float>(tilt  * 180.0 / M_PI),
+                static_cast<float>(roll  * 180.0 / M_PI),
+                static_cast<float>(fov   * 180.0 / M_PI));
+        }
     } else {
         // 2D mode: pan → fill_translation X, tilt → fill_translation Y (inverted so up = up),
         // roll → angle (radians), zoom → fill_scale (uniform).

@@ -1,6 +1,22 @@
 cmake_minimum_required (VERSION 3.28)
 project (core)
 
+include(FetchContent)
+
+# tinygltf — header-only glTF 2.0 / GLB loader
+FetchContent_Declare(tinygltf
+	GIT_REPOSITORY https://github.com/syoyo/tinygltf.git
+	GIT_TAG        v2.9.5
+)
+FetchContent_MakeAvailable(tinygltf)
+
+# tinyobjloader — header-only OBJ loader
+FetchContent_Declare(tinyobjloader
+	GIT_REPOSITORY https://github.com/tinyobjloader/tinyobjloader.git
+	GIT_TAG        v2.0.0rc13
+)
+FetchContent_MakeAvailable(tinyobjloader)
+
 set(SOURCES
 		consumer/frame_consumer.cpp
 		consumer/frame_consumer_registry.cpp
@@ -13,6 +29,7 @@ set(SOURCES
 		frame/frame.cpp
 		frame/frame_transform.cpp
 		frame/geometry.cpp
+		frame/mesh_loader.cpp
 
 		mixer/audio/audio_mixer.cpp
 		mixer/image/blend_modes.cpp
@@ -47,6 +64,7 @@ set(HEADERS
 		frame/frame_transform.h
 		frame/frame_visitor.h
 		frame/geometry.h
+		frame/mesh_loader.h
 		frame/pixel_format.h
 
 		mixer/audio/audio_mixer.h
@@ -82,6 +100,10 @@ casparcg_add_library(core SOURCES ${SOURCES} ${HEADERS})
 target_include_directories(core PRIVATE ..)
 target_precompile_headers(core PRIVATE StdAfx.h)
 target_link_libraries(core PRIVATE common GLEW::glew sfml-graphics)
+target_include_directories(core PRIVATE
+	${tinygltf_SOURCE_DIR}
+	${tinyobjloader_SOURCE_DIR}
+)
 
 source_group(sources ./*)
 source_group(sources\\consumer consumer/*)

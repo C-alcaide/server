@@ -770,7 +770,9 @@ struct image_kernel::impl
         GL(glVertexAttribPointer(vtx_loc, 2, GL_DOUBLE, GL_FALSE, stride, nullptr));
         GL(glVertexAttribPointer(tex_loc, 4, GL_DOUBLE, GL_FALSE, stride, (GLvoid*)(2 * sizeof(GLdouble))));
 
-        GL(glDrawArrays(GL_TRIANGLE_FAN, 0, static_cast<GLsizei>(coords.size())));
+        GLenum draw_mode = (params.geometry.type() == core::frame_geometry::geometry_type::mesh) ? GL_TRIANGLES
+                                                                                                 : GL_TRIANGLE_FAN;
+        GL(glDrawArrays(draw_mode, 0, static_cast<GLsizei>(coords.size())));
         GL(glTextureBarrier());
 
         GL(glDisableVertexAttribArray(vtx_loc));

@@ -104,9 +104,9 @@ struct mixer::impl
             return const_frame{};
         }
 
-        auto frame = std::move(buffer_.front().get());
+        auto f = std::move(buffer_.front());
         buffer_.pop();
-        return frame;
+        return std::move(f.get());
     }
 
     void set_master_volume(float volume) { audio_mixer_.set_master_volume(volume); }
@@ -131,4 +131,7 @@ mutable_frame mixer::create_frame(const void* tag, const pixel_format_desc& desc
 core::monitor::state mixer::state() const { return impl_->state_; }
 
 common::bit_depth mixer::depth() const { return impl_->image_mixer_->depth(); }
+
+spl::shared_ptr<image_mixer> mixer::get_image_mixer() const { return impl_->image_mixer_; }
+
 }} // namespace caspar::core

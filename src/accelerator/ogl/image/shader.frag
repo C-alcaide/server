@@ -667,6 +667,9 @@ vec3 apply_hue_curves(vec3 c)
     return result;
 }
 
+// Forward declaration — defined later, needed here for sample_wrap / sharpen.
+vec4 get_rgba_color(vec2 uv);
+
 // When sampling in equirectangular UV space (is_360), the horizontal axis
 // wraps continuously around the sphere.  fract() on the U coordinate lets
 // kernel taps sample across the seam (anti-meridian) seamlessly instead
@@ -926,6 +929,9 @@ vec3 tonemap_aces_rrt(vec3 v) {
     vec3 b = v * (0.983729 * v + 0.432951) + 0.238081;
     return clamp(a / b, 0.0, 1.0);
 }
+
+// log10 is not a GLSL built-in; define it via natural log.
+float log10(float x) { return log(x) * 0.4342944819032518; }
 
 // ---- ACES Reference Rendering Transform (RRT) + Output Display Transform (ODT) ----
 // Segmented spline fit from the ACES CTL reference implementation.

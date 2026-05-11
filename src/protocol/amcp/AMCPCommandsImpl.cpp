@@ -48,7 +48,12 @@
 #include <core/diagnostics/call_context.h>
 #include <core/diagnostics/osd_graph.h>
 #include <core/frame/frame_transform.h>
+#include <core/frame/mesh_loader.h>
 #include <core/mixer/mixer.h>
+
+#include <accelerator/ogl/image/image_mixer.h>
+#include <accelerator/ogl/image/previz_renderer.h>
+#include <accelerator/ogl/image/previz_scene.h>
 #include <core/producer/cg_proxy.h>
 #include <core/producer/color/color_producer.h>
 #include <core/producer/frame_producer.h>
@@ -64,6 +69,8 @@
 #include <fstream>
 #include <future>
 #include <memory>
+#include <mutex>
+#include <thread>
 
 #include <boost/algorithm/string.hpp>
 #include <boost/algorithm/string/regex.hpp>
@@ -1791,6 +1798,74 @@ std::future<std::wstring> mixer_projection_blend_command(command_context& ctx)
     return make_ready_future<std::wstring>(L"202 MIXER OK\r\n");
 }
 
+std::future<std::wstring> mixer_mesh_command(command_context& ctx)
+{
+    // Query mode: MIXER ch-layer MESH
+    if (ctx.parameters.empty()) {
+        auto transform2 = get_current_transform(ctx).share();
+        return std::async(std::launch::deferred, [transform2]() -> std::wstring {
+            auto& t = transform2.get().image_transform;
+            if (t.geometry_override.has_value()) {
+                auto tri_count = t.geometry_override->data().size() / 3;
+                return L"201 MIXER OK\r\nMESH " + std::to_wstring(tri_count) + L" triangles\r\n";
+            }
+            return L"201 MIXER OK\r\nNONE\r\n";
+        });
+    }
+
+    // Clear mode: MIXER ch-layer MESH NONE
+    if (boost::iequals(ctx.parameters.at(0), L"NONE")) {
+        transforms_applier transforms(ctx);
+        transforms.add(stage::transform_tuple_t(
+            ctx.layer_index(),
+            [](frame_transform transform) -> frame_transform {
+                transform.image_transform.geometry_override.reset();
+                return transform;
+            },
+            0,
+            L"linear"));
+        transforms.apply();
+
+        return make_ready_future<std::wstring>(L"202 MIXER OK\r\n");
+    }
+
+    // Set mode: MIXER ch-layer MESH <path.glb|gltf|obj>
+    auto mesh_path = ctx.parameters.at(0);
+
+    // Resolve path relative to media folder (prevent path traversal)
+    auto media_base = boost::filesystem::canonical(env::media_folder());
+    auto resolved   = media_base / mesh_path;
+
+    // Canonicalize and verify the path stays inside media folder
+    if (!boost::filesystem::exists(resolved)) {
+        return make_ready_future<std::wstring>(L"404 MIXER ERROR\r\n");
+    }
+    resolved = boost::filesystem::canonical(resolved);
+    if (resolved.wstring().find(media_base.wstring()) != 0) {
+        return make_ready_future<std::wstring>(L"403 MIXER FORBIDDEN\r\n");
+    }
+
+    try {
+        auto geometry = core::load_mesh(resolved.wstring());
+
+        transforms_applier transforms(ctx);
+        transforms.add(stage::transform_tuple_t(
+            ctx.layer_index(),
+            [geom = std::move(geometry)](frame_transform transform) mutable -> frame_transform {
+                transform.image_transform.geometry_override = std::move(geom);
+                return transform;
+            },
+            0,
+            L"linear"));
+        transforms.apply();
+
+        return make_ready_future<std::wstring>(L"202 MIXER OK\r\n");
+    } catch (const std::exception& e) {
+        CASPAR_LOG(error) << L"[MIXER MESH] " << e.what();
+        return make_ready_future<std::wstring>(L"502 MIXER FAILED\r\n");
+    }
+}
+
 std::future<std::wstring> mixer_flip_command(command_context& ctx)
 {
     if (ctx.parameters.empty()) {
@@ -3218,6 +3293,565 @@ std::wstring osc_unsubscribe_command(command_context& ctx)
     return L"202 OSC UNSUBSCRIBE OK\r\n";
 }
 
+// -------- Previz commands --------------------------------------------------
+
+static accelerator::ogl::image_mixer* get_ogl_mixer(command_context& ctx)
+{
+    auto img = ctx.channel.raw_channel->mixer().get_image_mixer();
+    return dynamic_cast<accelerator::ogl::image_mixer*>(img.get());
+}
+
+std::wstring previz_scene_command(command_context& ctx)
+{
+    auto* ogl_mix = get_ogl_mixer(ctx);
+    if (!ogl_mix)
+        return L"501 PREVIZ FAILED\r\n";
+
+    if (ctx.parameters.empty()) {
+        // Query
+        auto sc = ogl_mix->get_previz_renderer().scene();
+        if (sc.scene_path.empty())
+            return L"201 PREVIZ OK\r\nNONE\r\n";
+        return L"201 PREVIZ OK\r\n" + u16(sc.scene_path) + L"\r\n";
+    }
+
+    auto path_param = ctx.parameters.at(0);
+
+    // PREVIZ ch SCENE NONE — clear scene
+    if (boost::iequals(path_param, L"NONE")) {
+        ogl_mix->get_previz_renderer().load_scene("");
+        return L"202 PREVIZ OK\r\n";
+    }
+
+    // Resolve path relative to media folder (prevent path traversal)
+    auto media_base = boost::filesystem::canonical(env::media_folder());
+    auto resolved   = media_base / path_param;
+    if (!boost::filesystem::exists(resolved))
+        return L"404 PREVIZ ERROR\r\n";
+    resolved = boost::filesystem::canonical(resolved);
+    if (resolved.wstring().find(media_base.wstring()) != 0)
+        return L"403 PREVIZ FORBIDDEN\r\n";
+
+    try {
+        ogl_mix->get_previz_renderer().load_scene(u8(resolved.wstring()));
+        return L"202 PREVIZ OK\r\n";
+    } catch (const std::exception& e) {
+        CASPAR_LOG(error) << L"[PREVIZ SCENE] " << e.what();
+        return L"502 PREVIZ FAILED\r\n";
+    }
+}
+
+std::wstring previz_map_command(command_context& ctx)
+{
+    auto* ogl_mix = get_ogl_mixer(ctx);
+    if (!ogl_mix)
+        return L"501 PREVIZ FAILED\r\n";
+
+    if (ctx.parameters.size() < 2)
+        return L"400 PREVIZ ERROR\r\n";
+
+    auto mesh_name   = u8(ctx.parameters.at(0));
+    auto channel_str = ctx.parameters.at(1);
+
+    try {
+        int  target_ch   = std::stoi(u8(channel_str));
+        ogl_mix->get_previz_renderer().map_mesh(mesh_name, target_ch);
+        return L"202 PREVIZ OK\r\n";
+    } catch (const std::exception& e) {
+        CASPAR_LOG(error) << L"[PREVIZ MAP] " << e.what();
+        return L"502 PREVIZ FAILED\r\n";
+    }
+}
+
+std::wstring previz_unmap_command(command_context& ctx)
+{
+    auto* ogl_mix = get_ogl_mixer(ctx);
+    if (!ogl_mix)
+        return L"501 PREVIZ FAILED\r\n";
+
+    if (ctx.parameters.empty())
+        return L"400 PREVIZ ERROR\r\n";
+
+    try {
+        ogl_mix->get_previz_renderer().unmap_mesh(u8(ctx.parameters.at(0)));
+        return L"202 PREVIZ OK\r\n";
+    } catch (const std::exception& e) {
+        CASPAR_LOG(error) << L"[PREVIZ UNMAP] " << e.what();
+        return L"502 PREVIZ FAILED\r\n";
+    }
+}
+
+std::wstring previz_camera_command(command_context& ctx)
+{
+    auto* ogl_mix = get_ogl_mixer(ctx);
+    if (!ogl_mix)
+        return L"501 PREVIZ FAILED\r\n";
+
+    // Query
+    if (ctx.parameters.empty()) {
+        auto cam = ogl_mix->get_previz_renderer().scene().camera;
+        std::wostringstream os;
+        os << L"201 PREVIZ OK\r\n"
+           << cam.x << L" " << cam.y << L" " << cam.z << L" "
+           << cam.yaw << L" " << cam.pitch << L" " << cam.roll << L" "
+           << cam.fov << L"\r\n";
+        return os.str();
+    }
+
+    // RESET
+    if (boost::iequals(ctx.parameters.at(0), L"RESET")) {
+        ogl_mix->get_previz_renderer().reset_camera();
+        return L"202 PREVIZ OK\r\n";
+    }
+
+    // SET: PREVIZ ch CAMERA x y z yaw pitch roll fov
+    if (ctx.parameters.size() < 7)
+        return L"400 PREVIZ ERROR\r\n";
+
+    try {
+        float x     = std::stof(u8(ctx.parameters.at(0)));
+        float y     = std::stof(u8(ctx.parameters.at(1)));
+        float z     = std::stof(u8(ctx.parameters.at(2)));
+        float yaw   = std::stof(u8(ctx.parameters.at(3)));
+        float pitch = std::stof(u8(ctx.parameters.at(4)));
+        float roll  = std::stof(u8(ctx.parameters.at(5)));
+        float fov   = std::stof(u8(ctx.parameters.at(6)));
+
+        ogl_mix->get_previz_renderer().set_camera(x, y, z, yaw, pitch, roll, fov);
+        return L"202 PREVIZ OK\r\n";
+    } catch (const std::exception& e) {
+        CASPAR_LOG(error) << L"[PREVIZ CAMERA] " << e.what();
+        return L"502 PREVIZ FAILED\r\n";
+    }
+}
+
+std::wstring previz_info_command(command_context& ctx)
+{
+    auto* ogl_mix = get_ogl_mixer(ctx);
+    if (!ogl_mix)
+        return L"501 PREVIZ FAILED\r\n";
+
+    auto sc = ogl_mix->get_previz_renderer().scene();
+    std::wostringstream os;
+    os << L"201 PREVIZ OK\r\n";
+    os << L"active: "    << (sc.active ? L"true" : L"false") << L"\r\n";
+    os << L"scene: "     << (sc.scene_path.empty() ? L"NONE" : u16(sc.scene_path)) << L"\r\n";
+    os << L"meshes: "    << sc.meshes.size() << L"\r\n";
+    for (auto& m : sc.meshes) {
+        os << L"  " << u16(m.name);
+        auto it = sc.mesh_to_channel.find(m.name);
+        if (it != sc.mesh_to_channel.end())
+            os << L" -> channel " << it->second;
+        os << L"\r\n";
+    }
+    return os.str();
+}
+
+// ---------------------------------------------------------------------------
+// PREVIZ SHOW <mesh_name> [1|0]
+// ---------------------------------------------------------------------------
+std::wstring previz_show_command(command_context& ctx)
+{
+    auto* ogl_mix = get_ogl_mixer(ctx);
+    if (!ogl_mix)
+        return L"501 PREVIZ FAILED\r\n";
+    if (ctx.parameters.empty())
+        return L"400 PREVIZ ERROR missing mesh name\r\n";
+
+    std::string mesh_name = u8(ctx.parameters.at(0));
+    bool visible = ctx.parameters.size() >= 2 ? (ctx.parameters.at(1) != L"0") : true;
+    ogl_mix->get_previz_renderer().set_mesh_visible(mesh_name, visible);
+    return L"202 PREVIZ OK\r\n";
+}
+
+// ---------------------------------------------------------------------------
+// PREVIZ GRID [1|0]
+// ---------------------------------------------------------------------------
+std::wstring previz_grid_command(command_context& ctx)
+{
+    auto* ogl_mix = get_ogl_mixer(ctx);
+    if (!ogl_mix)
+        return L"501 PREVIZ FAILED\r\n";
+    bool on = ctx.parameters.empty() || ctx.parameters.at(0) != L"0";
+    ogl_mix->get_previz_renderer().set_grid(on);
+    return L"202 PREVIZ OK\r\n";
+}
+
+// ---------------------------------------------------------------------------
+// PREVIZ WIREFRAME [1|0]
+// ---------------------------------------------------------------------------
+std::wstring previz_wireframe_command(command_context& ctx)
+{
+    auto* ogl_mix = get_ogl_mixer(ctx);
+    if (!ogl_mix)
+        return L"501 PREVIZ FAILED\r\n";
+    bool on = ctx.parameters.empty() || ctx.parameters.at(0) != L"0";
+    ogl_mix->get_previz_renderer().set_wireframe(on);
+    return L"202 PREVIZ OK\r\n";
+}
+
+// ---------------------------------------------------------------------------
+// PREVIZ GIZMO [1|0]
+// ---------------------------------------------------------------------------
+std::wstring previz_gizmo_command(command_context& ctx)
+{
+    auto* ogl_mix = get_ogl_mixer(ctx);
+    if (!ogl_mix)
+        return L"501 PREVIZ FAILED\r\n";
+    bool on = ctx.parameters.empty() || ctx.parameters.at(0) != L"0";
+    ogl_mix->get_previz_renderer().set_gizmo(on);
+    return L"202 PREVIZ OK\r\n";
+}
+
+// ---------------------------------------------------------------------------
+// PREVIZ PRESET SAVE <name>
+// PREVIZ PRESET RECALL <name>
+// PREVIZ PRESET LIST
+// ---------------------------------------------------------------------------
+std::wstring previz_preset_command(command_context& ctx)
+{
+    auto* ogl_mix = get_ogl_mixer(ctx);
+    if (!ogl_mix)
+        return L"501 PREVIZ FAILED\r\n";
+    if (ctx.parameters.empty())
+        return L"400 PREVIZ ERROR missing subcommand\r\n";
+
+    auto sub = boost::to_upper_copy(ctx.parameters.at(0));
+    if (sub == L"SAVE") {
+        if (ctx.parameters.size() < 2)
+            return L"400 PREVIZ ERROR missing preset name\r\n";
+        ogl_mix->get_previz_renderer().save_camera_preset(u8(ctx.parameters.at(1)));
+        return L"202 PREVIZ OK\r\n";
+    } else if (sub == L"RECALL") {
+        if (ctx.parameters.size() < 2)
+            return L"400 PREVIZ ERROR missing preset name\r\n";
+        ogl_mix->get_previz_renderer().recall_camera_preset(u8(ctx.parameters.at(1)));
+        return L"202 PREVIZ OK\r\n";
+    } else if (sub == L"LIST") {
+        auto names = ogl_mix->get_previz_renderer().list_camera_presets();
+        std::wostringstream os;
+        os << L"201 PREVIZ OK\r\n";
+        for (auto& n : names)
+            os << u16(n) << L"\r\n";
+        return os.str();
+    }
+    return L"400 PREVIZ ERROR unknown preset subcommand\r\n";
+}
+
+// ---------------------------------------------------------------------------
+// PREVIZ SCREEN ADD <name> FLAT <width_m> <height_m>
+// PREVIZ SCREEN ADD <name> CURVED <width_m> <height_m> <radius_m> <arc_deg>
+// PREVIZ SCREEN <name> POSITION <x> <y> <z>
+// PREVIZ SCREEN <name> ROTATION <yaw> <pitch> <roll>
+// PREVIZ SCREEN <name> RESOLUTION <width_px> <height_px>
+// PREVIZ SCREEN <name> CHANNEL <ch_num>
+// PREVIZ SCREEN <name> REMOVE
+// PREVIZ SCREEN LIST
+// ---------------------------------------------------------------------------
+std::wstring previz_screen_command(command_context& ctx)
+{
+    auto* ogl_mix = get_ogl_mixer(ctx);
+    if (!ogl_mix)
+        return L"501 PREVIZ FAILED\r\n";
+    if (ctx.parameters.empty())
+        return L"400 PREVIZ ERROR missing subcommand\r\n";
+
+    try {
+        auto first = boost::to_upper_copy(ctx.parameters.at(0));
+
+        if (first == L"LIST") {
+            auto names = ogl_mix->get_previz_renderer().list_screens();
+            auto sc   = ogl_mix->get_previz_renderer().scene();
+            std::wostringstream os;
+            os << L"201 PREVIZ OK\r\n";
+            for (auto& n : names) {
+                auto it = sc.screens.find(n);
+                if (it != sc.screens.end()) {
+                    auto& s = it->second;
+                    os << u16(n) << L" " << s.width_m << L"x" << s.height_m << L"m";
+                    if (s.radius_m > 0)
+                        os << L" curved r=" << s.radius_m << L"m";
+                    if (s.channel >= 0)
+                        os << L" ch=" << s.channel;
+                    os << L"\r\n";
+                }
+            }
+            return os.str();
+        }
+
+        if (first == L"ADD") {
+            if (ctx.parameters.size() < 5)
+                return L"400 PREVIZ ERROR usage: SCREEN ADD <name> FLAT|CURVED <params...>\r\n";
+
+            std::string name = u8(ctx.parameters.at(1));
+            auto type        = boost::to_upper_copy(ctx.parameters.at(2));
+
+            if (type == L"FLAT") {
+                float w = std::stof(u8(ctx.parameters.at(3)));
+                float h = std::stof(u8(ctx.parameters.at(4)));
+                ogl_mix->get_previz_renderer().add_screen_flat(name, w, h);
+                return L"202 PREVIZ OK\r\n";
+            } else if (type == L"CURVED") {
+                if (ctx.parameters.size() < 7)
+                    return L"400 PREVIZ ERROR usage: SCREEN ADD <name> CURVED <w> <h> <radius> <arc_deg>\r\n";
+                float w   = std::stof(u8(ctx.parameters.at(3)));
+                float h   = std::stof(u8(ctx.parameters.at(4)));
+                float r   = std::stof(u8(ctx.parameters.at(5)));
+                float arc = std::stof(u8(ctx.parameters.at(6)));
+                ogl_mix->get_previz_renderer().add_screen_curved(name, w, h, r, arc);
+                return L"202 PREVIZ OK\r\n";
+            }
+            return L"400 PREVIZ ERROR unknown screen type (FLAT or CURVED)\r\n";
+        }
+
+        // Commands that take <name> as first parameter
+        if (ctx.parameters.size() < 2)
+            return L"400 PREVIZ ERROR usage: SCREEN <name> <subcommand> [params...]\r\n";
+
+        std::string name = u8(ctx.parameters.at(0));
+        auto sub         = boost::to_upper_copy(ctx.parameters.at(1));
+
+        if (sub == L"POSITION") {
+            if (ctx.parameters.size() < 5)
+                return L"400 PREVIZ ERROR usage: SCREEN <name> POSITION <x> <y> <z>\r\n";
+            float x = std::stof(u8(ctx.parameters.at(2)));
+            float y = std::stof(u8(ctx.parameters.at(3)));
+            float z = std::stof(u8(ctx.parameters.at(4)));
+            ogl_mix->get_previz_renderer().set_screen_position(name, x, y, z);
+            return L"202 PREVIZ OK\r\n";
+        } else if (sub == L"ROTATION") {
+            if (ctx.parameters.size() < 5)
+                return L"400 PREVIZ ERROR usage: SCREEN <name> ROTATION <yaw> <pitch> <roll>\r\n";
+            float yaw   = std::stof(u8(ctx.parameters.at(2)));
+            float pitch = std::stof(u8(ctx.parameters.at(3)));
+            float roll  = std::stof(u8(ctx.parameters.at(4)));
+            ogl_mix->get_previz_renderer().set_screen_rotation(name, yaw, pitch, roll);
+            return L"202 PREVIZ OK\r\n";
+        } else if (sub == L"RESOLUTION") {
+            if (ctx.parameters.size() < 4)
+                return L"400 PREVIZ ERROR usage: SCREEN <name> RESOLUTION <w> <h>\r\n";
+            int w = std::stoi(u8(ctx.parameters.at(2)));
+            int h = std::stoi(u8(ctx.parameters.at(3)));
+            ogl_mix->get_previz_renderer().set_screen_resolution(name, w, h);
+            return L"202 PREVIZ OK\r\n";
+        } else if (sub == L"CHANNEL") {
+            if (ctx.parameters.size() < 3)
+                return L"400 PREVIZ ERROR usage: SCREEN <name> CHANNEL <ch>\r\n";
+            int ch = std::stoi(u8(ctx.parameters.at(2)));
+            ogl_mix->get_previz_renderer().set_screen_channel(name, ch);
+            return L"202 PREVIZ OK\r\n";
+        } else if (sub == L"REMOVE") {
+            ogl_mix->get_previz_renderer().remove_screen(name);
+            return L"202 PREVIZ OK\r\n";
+        }
+
+        return L"400 PREVIZ ERROR unknown screen subcommand\r\n";
+    } catch (const std::exception& e) {
+        return L"502 PREVIZ FAILED " + u16(e.what()) + L"\r\n";
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PREVIZ AUTOPROJECTION [1|0] [SOURCE <ch>-<layer>]
+// Derive MIXER PROJECTION parameters from screen geometry + camera.
+//
+// Without SOURCE: applies projection to layer 0 of each mapped channel.
+// With SOURCE:    routes the source layer (PREMIX) to each non-source
+//                 channel on the same layer number, then applies projection.
+//                 Decode once, project many.
+// ---------------------------------------------------------------------------
+std::wstring previz_autoprojection_command(command_context& ctx)
+{
+    auto* ogl_mix = get_ogl_mixer(ctx);
+    if (!ogl_mix)
+        return L"501 PREVIZ FAILED\r\n";
+
+    bool on = ctx.parameters.empty() || ctx.parameters.at(0) != L"0";
+
+    if (on) {
+        // Parse optional SOURCE <ch>-<layer>
+        int  source_channel = 0;
+        int  source_layer   = 0;
+        bool has_source     = false;
+
+        for (size_t i = 0; i < ctx.parameters.size(); ++i) {
+            if (boost::iequals(ctx.parameters[i], L"SOURCE") && i + 1 < ctx.parameters.size()) {
+                auto& src = ctx.parameters[i + 1];
+                auto  dash = src.find(L'-');
+                if (dash != std::wstring::npos) {
+                    source_channel = std::stoi(src.substr(0, dash));
+                    source_layer   = std::stoi(src.substr(dash + 1));
+                    has_source     = true;
+                }
+                break;
+            }
+        }
+
+        // Capture weak_ptrs to all channel stages + video_channels
+        auto channels = ctx.channels;
+        std::map<int, std::weak_ptr<core::stage_base>> stages;
+        for (size_t i = 0; i < channels->size(); ++i)
+            stages[static_cast<int>(i + 1)] = (*channels)[i].stage;
+
+        accelerator::ogl::projection_apply_fn apply_fn;
+
+        if (has_source) {
+            // SOURCE mode: route premix, apply projection on source_layer
+            std::map<int, std::weak_ptr<core::video_channel>> video_channels;
+            for (size_t i = 0; i < channels->size(); ++i)
+                video_channels[static_cast<int>(i + 1)] = (*channels)[i].raw_channel;
+
+            // Shared set to track which channels already have routes loaded
+            auto routed_channels = std::make_shared<std::set<int>>();
+            auto routed_mutex    = std::make_shared<std::mutex>();
+
+            // Capture producer dependencies for route creation
+            auto producer_registry = ctx.static_context->producer_registry;
+            auto cg_registry       = ctx.static_context->cg_registry;
+            auto format_repository = ctx.static_context->format_repository;
+
+            apply_fn =
+                [stages, video_channels, source_channel, source_layer,
+                 routed_channels, routed_mutex,
+                 producer_registry, cg_registry, format_repository]
+                (int channel, double yaw, double pitch, double roll, double fov) {
+                    try {
+                        auto stage_it = stages.find(channel);
+                        if (stage_it == stages.end())
+                            return;
+                        auto stage = stage_it->second.lock();
+                        if (!stage)
+                            return;
+
+                        int target_layer = source_layer;
+
+                        // For non-source channels, ensure route://src-layer PREMIX is loaded
+                        if (channel != source_channel) {
+                            bool need_route = false;
+                            {
+                                std::lock_guard<std::mutex> lock(*routed_mutex);
+                                if (routed_channels->find(channel) == routed_channels->end()) {
+                                    routed_channels->insert(channel);
+                                    need_route = true;
+                                }
+                            }
+                            if (need_route) {
+                                // Route creation runs on a background thread to avoid
+                                // blocking the previz renderer (which could deadlock
+                                // with the stage executor).
+                                std::thread([video_channels, source_channel, source_layer, target_layer,
+                                             channel, stage, producer_registry, cg_registry, format_repository]() {
+                                    try {
+                                        auto src_it = video_channels.find(source_channel);
+                                        auto dst_it = video_channels.find(channel);
+                                        if (src_it == video_channels.end() || dst_it == video_channels.end())
+                                            return;
+                                        auto src_ch = src_it->second.lock();
+                                        auto dst_ch = dst_it->second.lock();
+                                        if (!src_ch || !dst_ch)
+                                            return;
+
+                                        std::vector<spl::shared_ptr<core::video_channel>> all_chs;
+                                        for (auto& [id, wch] : video_channels) {
+                                            auto ch = wch.lock();
+                                            if (ch)
+                                                all_chs.push_back(spl::make_shared_ptr(ch));
+                                        }
+
+                                        core::frame_producer_dependencies deps(
+                                            dst_ch->frame_factory(),
+                                            all_chs,
+                                            format_repository,
+                                            dst_ch->stage()->video_format_desc(),
+                                            producer_registry,
+                                            cg_registry);
+
+                                        std::vector<std::wstring> route_params = {
+                                            L"route://" + std::to_wstring(source_channel)
+                                                + L"-" + std::to_wstring(source_layer),
+                                            L"PREMIX"
+                                        };
+
+                                        auto producer = producer_registry->create_producer(deps, route_params);
+                                        stage->load(target_layer, producer, false, false).get();
+                                        stage->play(target_layer).get();
+
+                                        CASPAR_LOG(info) << L"[previz] Auto-routed route://"
+                                            << source_channel << L"-" << source_layer
+                                            << L" PREMIX to channel " << channel
+                                            << L" layer " << target_layer;
+                                    } catch (const std::exception& e) {
+                                        CASPAR_LOG(error) << L"[previz] Failed to create route for channel "
+                                            << channel << L": " << e.what();
+                                    } catch (...) {
+                                        CASPAR_LOG(error) << L"[previz] Route creation unknown error for channel "
+                                            << channel;
+                                    }
+                                }).detach();
+                            }
+                        }
+
+                        // Apply projection on the target layer (always, even before
+                        // the route finishes loading — the transform will be ready
+                        // when frames start arriving).
+                        stage->apply_transform(
+                            target_layer,
+                            [yaw, pitch, roll, fov](core::frame_transform t) -> core::frame_transform {
+                                t.image_transform.projection.enable = (fov > 0.0);
+                                t.image_transform.projection.yaw    = yaw;
+                                t.image_transform.projection.pitch  = pitch;
+                                t.image_transform.projection.roll   = roll;
+                                t.image_transform.projection.fov    = fov;
+                                return t;
+                            },
+                            0,
+                            tweener(L"linear"));
+                    } catch (const std::exception& e) {
+                        CASPAR_LOG(error) << L"[previz] Auto-projection callback error for channel "
+                            << channel << L": " << e.what();
+                    } catch (...) {
+                        CASPAR_LOG(error) << L"[previz] Auto-projection callback unknown error for channel "
+                            << channel;
+                    }
+                };
+
+            CASPAR_LOG(info) << L"[previz] Auto-projection SOURCE mode: route://"
+                << source_channel << L"-" << source_layer << L" PREMIX";
+        } else {
+            // Legacy mode: just apply projection to layer 0, no routing
+            apply_fn =
+                [stages](int channel, double yaw, double pitch, double roll, double fov) {
+                    auto it = stages.find(channel);
+                    if (it == stages.end())
+                        return;
+                    auto stage = it->second.lock();
+                    if (!stage)
+                        return;
+                    stage->apply_transform(
+                        0,
+                        [yaw, pitch, roll, fov](core::frame_transform t) -> core::frame_transform {
+                            t.image_transform.projection.enable = (fov > 0.0);
+                            t.image_transform.projection.yaw    = yaw;
+                            t.image_transform.projection.pitch  = pitch;
+                            t.image_transform.projection.roll   = roll;
+                            t.image_transform.projection.fov    = fov;
+                            return t;
+                        },
+                        0,
+                        tweener(L"linear"));
+                };
+        }
+
+        ogl_mix->get_previz_renderer().set_projection_callback(std::move(apply_fn));
+        ogl_mix->get_previz_renderer().set_auto_projection(true);
+    } else {
+        ogl_mix->get_previz_renderer().set_auto_projection(false);
+        ogl_mix->get_previz_renderer().set_projection_callback(nullptr);
+    }
+
+    return L"202 PREVIZ OK\r\n";
+}
+
 void register_commands(std::shared_ptr<amcp_command_repository_wrapper>& repo)
 {
     repo->register_channel_command(L"Basic Commands", L"LOADBG", loadbg_command, 1);
@@ -3276,6 +3910,7 @@ void register_commands(std::shared_ptr<amcp_command_repository_wrapper>& repo)
     repo->register_channel_command(L"Mixer Commands", L"MIXER PROJECTION_FRUSTUM",    mixer_projection_frustum_command,    0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER PROJECTION_DISTORTION", mixer_projection_distortion_command, 0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER PROJECTION_BLEND",      mixer_projection_blend_command,      0);
+    repo->register_channel_command(L"Mixer Commands", L"MIXER MESH",                  mixer_mesh_command,                  0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER FLIP",             mixer_flip_command,              0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER COLORSPACE",        mixer_colorspace_command,        0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER WHITEBALANCE", mixer_whitebalance_command, 0);
@@ -3301,6 +3936,19 @@ void register_commands(std::shared_ptr<amcp_command_repository_wrapper>& repo)
     repo->register_channel_command(L"Mixer Commands", L"MIXER COMMIT", mixer_commit_command, 0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER CLEAR", mixer_clear_command, 0);
     repo->register_command(L"Mixer Commands", L"CHANNEL_GRID", channel_grid_command, 0);
+
+    repo->register_channel_command(L"Previz Commands", L"PREVIZ SCENE",     previz_scene_command,     0);
+    repo->register_channel_command(L"Previz Commands", L"PREVIZ MAP",       previz_map_command,       2);
+    repo->register_channel_command(L"Previz Commands", L"PREVIZ UNMAP",     previz_unmap_command,     1);
+    repo->register_channel_command(L"Previz Commands", L"PREVIZ CAMERA",    previz_camera_command,    0);
+    repo->register_channel_command(L"Previz Commands", L"PREVIZ INFO",      previz_info_command,      0);
+    repo->register_channel_command(L"Previz Commands", L"PREVIZ SHOW",      previz_show_command,      1);
+    repo->register_channel_command(L"Previz Commands", L"PREVIZ GRID",      previz_grid_command,      0);
+    repo->register_channel_command(L"Previz Commands", L"PREVIZ WIREFRAME", previz_wireframe_command, 0);
+    repo->register_channel_command(L"Previz Commands", L"PREVIZ GIZMO",     previz_gizmo_command,     0);
+    repo->register_channel_command(L"Previz Commands", L"PREVIZ PRESET",    previz_preset_command,    1);
+    repo->register_channel_command(L"Previz Commands", L"PREVIZ SCREEN",    previz_screen_command,    1);
+    repo->register_channel_command(L"Previz Commands", L"PREVIZ AUTOPROJECTION", previz_autoprojection_command, 0);
 
     repo->register_command(L"Thumbnail Commands", L"THUMBNAIL LIST", thumbnail_list_command, 0);
     repo->register_command(L"Thumbnail Commands", L"THUMBNAIL RETRIEVE", thumbnail_retrieve_command, 1);

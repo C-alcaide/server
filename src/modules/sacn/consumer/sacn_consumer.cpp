@@ -124,15 +124,17 @@ struct sacn_consumer : public core::frame_consumer
                     long long                     elapsed_ms =
                         std::chrono::duration_cast<std::chrono::milliseconds>(elapsed_seconds).count();
 
-                    long long sleep_time = time - elapsed_ms * 1000;
+                    long long sleep_time = time - elapsed_ms;
                     if (sleep_time > 0)
                         std::this_thread::sleep_for(std::chrono::milliseconds(sleep_time));
 
                     last_send = now;
 
-                    frame_mutex_.lock();
-                    auto frame = last_frame_;
-                    frame_mutex_.unlock();
+                    core::const_frame frame;
+                    {
+                        std::lock_guard<std::mutex> lock(frame_mutex_);
+                        frame = last_frame_;
+                    }
 
                     if (!frame)
                         continue;
@@ -311,7 +313,9 @@ struct sacn_consumer : public core::frame_consumer
         buffer[off++] = 0x00;
 
         // --- Framing PDU: Sequence Number (1 byte, wraps 0-255) ---
-        buffer[off++] = sequence_number_++;
+        uint8_t seq = sequence_number_++;
+        if (seq == 0) seq = sequence_number_++; // skip 0 per E1.31
+        buffer[off++] = seq;
 
         // --- Framing PDU: Options (1 byte) = 0 ---
         buffer[off++] = 0x00;
@@ -354,7 +358,7 @@ struct sacn_consumer : public core::frame_consumer
         boost::system::error_code err;
         socket_.send_to(boost::asio::buffer(buffer, SACN_PACKET_SIZE), remote_endpoint_, 0, err);
         if (err)
-            CASPAR_THROW_EXCEPTION(io_error() << msg_info(err.message()));
+            CASPAR_LOG(warning) << L"[sacn_consumer] send error: " << err.message();
     }
 };
 

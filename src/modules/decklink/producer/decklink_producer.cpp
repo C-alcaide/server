@@ -99,6 +99,7 @@ class DeckLinkSyncManager
 
     std::map<int, std::shared_ptr<Group>> groups_;
     std::mutex                            manager_mutex_;
+    std::condition_variable               monitor_cv_;
     std::thread                           monitor_thread_;
     std::atomic<bool>                     monitoring_{false};
 
@@ -116,6 +117,7 @@ class DeckLinkSyncManager
     ~DeckLinkSyncManager()
     {
         monitoring_ = false;
+        monitor_cv_.notify_all();
         if (monitor_thread_.joinable())
             monitor_thread_.join();
     }
@@ -1433,8 +1435,9 @@ void DeckLinkSyncManager::register_producer(int group_id, int peers, decklink_pr
     if (group->producers.size() >= group->expected_peers && !monitoring_) {
         monitoring_     = true;
         monitor_thread_ = std::thread(&DeckLinkSyncManager::start_monitor_loop, this);
-        monitor_thread_.detach();
     }
+    // Wake monitor to check the new registration
+    monitor_cv_.notify_all();
 }
 
 void DeckLinkSyncManager::unregister_producer(int group_id, decklink_producer* producer)
@@ -1442,17 +1445,30 @@ void DeckLinkSyncManager::unregister_producer(int group_id, decklink_producer* p
     std::lock_guard<std::mutex> lock(manager_mutex_);
     auto                        it = groups_.find(group_id);
     if (it != groups_.end()) {
-        std::lock_guard<std::mutex> g_lock(it->second->mutex);
-        auto&                       vec = it->second->producers;
-        vec.erase(std::remove(vec.begin(), vec.end(), producer), vec.end());
+        bool should_erase = false;
+        {
+            std::lock_guard<std::mutex> g_lock(it->second->mutex);
+            auto&                       vec = it->second->producers;
+            vec.erase(std::remove(vec.begin(), vec.end(), producer), vec.end());
+            should_erase = vec.empty();
+        }
+        // Erase after releasing group lock
+        if (should_erase) {
+            groups_.erase(it);
+        }
     }
 }
 
 void DeckLinkSyncManager::start_monitor_loop()
 {
     while (monitoring_) {
-        // Simple polling loop
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        {
+            std::unique_lock<std::mutex> lock(manager_mutex_);
+            monitor_cv_.wait_for(lock, std::chrono::milliseconds(50), [this] { return !monitoring_.load(); });
+        }
+
+        if (!monitoring_)
+            break;
 
         std::lock_guard<std::mutex> lock(manager_mutex_);
         if (groups_.empty())
@@ -1467,29 +1483,23 @@ void DeckLinkSyncManager::start_monitor_loop()
             if (group->producers.size() < group->expected_peers)
                 continue;
 
-            bool          all_locked   = true;
-            bool          any_unlocked = false;
+            bool all_locked = true;
             for (auto* p : group->producers) {
                 if (!p->check_signal_locked()) {
-                    all_locked   = false;
-                    any_unlocked = true;
+                    all_locked = false;
                     break;
                 }
             }
 
             if (all_locked && !group->producers.empty()) {
-                // All signals present. Start capture on the leader (first device)
-                // The driver will start all other devices in the same capture group simultaneously.
                 CASPAR_LOG(info) << "Sync Group " << id << ": All signals locked. Starting synchronized capture.";
-                group->producers[0]->start_streams();
-                group->started = true;
-
-                // Mark the rest as started too (logically) so we don't try again
-                for (size_t i = 1; i < group->producers.size(); ++i) {
-                     // We don't call StartStreams on slaves in sync group
-                     // Logic for them is implicit
-                     CASPAR_LOG(info) << "Sync Group " << id << ": Peer " << i << " started implicitly.";
+                // Start ALL producers in the sync group so their SharedDeckLinkInput
+                // state (started_, start_ref_count_) is correct for format changes and cleanup.
+                for (size_t i = 0; i < group->producers.size(); ++i) {
+                    group->producers[i]->start_streams();
+                    CASPAR_LOG(info) << "Sync Group " << id << ": Peer " << i << " started.";
                 }
+                group->started = true;
             }
         }
     }

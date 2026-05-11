@@ -23,6 +23,7 @@
 
 #include <common/tweener.h>
 
+#include <core/frame/geometry.h>
 #include <core/mixer/image/blend_modes.h>
 
 #include <array>
@@ -327,6 +328,9 @@ struct image_transform final
     double qual_exposure    = 0.0;   // exposure offset for qualified region
     double qual_sat_offset  = 0.0;   // saturation offset for qualified region
     double qual_hue_offset  = 0.0;   // hue offset for qualified region (degrees)
+
+    // Mesh geometry override (MIXER MESH)
+    std::optional<frame_geometry> geometry_override;  // nullopt = use producer geometry
 
     bool             is_key      = false;
     bool             invert      = false;

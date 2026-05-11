@@ -32,7 +32,8 @@ class frame_geometry
   public:
     enum class geometry_type
     {
-        quad
+        quad,
+        mesh  // arbitrary triangle list (GL_TRIANGLES)
     };
 
     enum class scale_mode

@@ -21,13 +21,14 @@
 
 #include "camera_data.h"
 
+#include <functional>
 #include <memory>
 #include <string>
 #include <utility>
 #include <vector>
 
 #ifndef M_PI
-#define M_PI 3.141592653589793
+#define M_PI 3.14159265358979323846
 #endif
 
 namespace caspar { namespace core {
@@ -38,8 +39,9 @@ namespace caspar { namespace tracking {
 
 enum class tracking_mode
 {
-    mode_360, ///< 360° equirectangular — injects into projection.{yaw,pitch,roll,fov}
-    mode_2d,  ///< 2D layer — injects into fill_translation, angle, fill_scale
+    mode_360,   ///< 360° equirectangular — injects into projection.{yaw,pitch,roll,fov}
+    mode_2d,    ///< 2D layer — injects into fill_translation, angle, fill_scale
+    mode_previz,///< Previz — drives PREVIZ channel virtual camera
 };
 
 enum class tracking_protocol
@@ -111,6 +113,10 @@ struct tracker_binding
 
     /// Tracks which receiver this binding was registered on (for reference counting).
     receiver_handle receiver;
+
+    /// Previz mode callback: (x, y, z, yaw_deg, pitch_deg, roll_deg, fov_deg) → void.
+    /// Set by the AMCP layer when MODE PREVIZ is selected.
+    std::function<void(float, float, float, float, float, float, float)> previz_camera_fn;
 };
 
 }} // namespace caspar::tracking

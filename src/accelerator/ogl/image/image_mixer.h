@@ -35,6 +35,9 @@
 
 namespace caspar { namespace accelerator { namespace ogl {
 
+class previz_renderer;
+class channel_texture_store;
+
 class image_mixer final : public core::image_mixer
 {
   public:
@@ -65,6 +68,10 @@ class image_mixer final : public core::image_mixer
 
     // Expose the underlying OGL device for CUDA-GL interop producers.
     std::shared_ptr<class device> get_ogl_device() const;
+
+    // Previz 3D rendering
+    previz_renderer&  get_previz_renderer();
+    void              set_channel_texture_store(std::shared_ptr<channel_texture_store> store);
 
   private:
     struct impl;

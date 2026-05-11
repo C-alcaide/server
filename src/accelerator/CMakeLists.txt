@@ -5,6 +5,7 @@ set(SOURCES
 	ogl/image/image_kernel.cpp
 	ogl/image/image_mixer.cpp
 	ogl/image/image_shader.cpp
+	ogl/image/previz_renderer.cpp
 
 	ogl/util/buffer.cpp
 	ogl/util/context.cpp
@@ -20,6 +21,8 @@ set(HEADERS
 	ogl/image/image_kernel.h
 	ogl/image/image_mixer.h
 	ogl/image/image_shader.h
+	ogl/image/previz_renderer.h
+	ogl/image/previz_scene.h
 
 	ogl/util/buffer.h
 	ogl/util/context.h
@@ -31,6 +34,8 @@ set(HEADERS
 
 	ogl_image_vertex.h
 	ogl_image_fragment.h
+	ogl_previz_vertex.h
+	ogl_previz_fragment.h
 
 	accelerator.h
 	StdAfx.h
@@ -38,9 +43,12 @@ set(HEADERS
 
 bin2c("ogl/image/shader.vert" "ogl_image_vertex.h" "caspar::accelerator::ogl" "vertex_shader")
 bin2c("ogl/image/shader.frag" "ogl_image_fragment.h" "caspar::accelerator::ogl" "fragment_shader")
+bin2c("ogl/image/previz.vert" "ogl_previz_vertex.h" "caspar::accelerator::ogl" "previz_vertex_shader")
+bin2c("ogl/image/previz.frag" "ogl_previz_fragment.h" "caspar::accelerator::ogl" "previz_fragment_shader")
 
 casparcg_add_library(accelerator SOURCES ${SOURCES} ${HEADERS})
 target_include_directories(accelerator PRIVATE .. ${CMAKE_CURRENT_BINARY_DIR})
+target_include_directories(accelerator PRIVATE ${tinygltf_SOURCE_DIR} ${tinyobjloader_SOURCE_DIR})
 target_precompile_headers(accelerator PRIVATE StdAfx.h)
 target_link_libraries(accelerator PRIVATE common core GLEW::glew sfml-window)
 

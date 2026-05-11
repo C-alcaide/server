@@ -56,6 +56,7 @@ struct replay_producer : public core::frame_producer
     int                     channel_index_ = -1;
     
     std::unique_ptr<ReplaySegmentedReader> reader_;
+    std::mutex                  reader_mutex_; // Protects reader_ and fractional_frame_
 
     VMX_INSTANCE*           vmx_ = nullptr;
     int                     width_ = 0;
@@ -74,7 +75,7 @@ struct replay_producer : public core::frame_producer
     // Playback state
     std::atomic<int64_t>    frame_num_ = 0;
     std::atomic<double>     speed_ = 1.0;
-    double                  fractional_frame_ = 0.0;
+    double                  fractional_frame_ = 0.0; // Protected by reader_mutex_
     std::atomic<bool>       loop_ = false;
     std::atomic<int64_t>    duration_ = 0;
     std::atomic<int64_t>    in_point_ = 0;
@@ -83,6 +84,10 @@ struct replay_producer : public core::frame_producer
     // Decoding
     std::vector<uint8_t>    read_buffer_;
     core::draw_frame        current_frame_;
+    
+    // Export thread tracking
+    std::thread             export_thread_;
+    std::atomic<bool>       export_running_{false};
 
 public:
     replay_producer(std::string path, spl::shared_ptr<core::frame_factory> frame_factory);

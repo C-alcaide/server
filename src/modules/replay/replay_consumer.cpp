@@ -146,6 +146,11 @@ replay_consumer::replay_consumer(std::string path, VMX_PROFILE quality)
          std::stringstream ss;
          ss << "_" << std::put_time(&tm_now, "%Y%m%d_%H%M%S");
          
+         // Add milliseconds to avoid sub-second collisions
+         auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+             now.time_since_epoch()) % 1000;
+         ss << "_" << std::setfill('0') << std::setw(3) << ms.count();
+         
          std::string new_filename = check_p.stem().string() + ss.str() + check_p.extension().string();
          p = check_p.parent_path() / new_filename;
          
@@ -195,6 +200,14 @@ replay_consumer::replay_consumer(std::string path, VMX_PROFILE quality)
 
 replay_consumer::~replay_consumer()
 {
+    // Close writer first to flush pending data and finalize index
+    if (writer_) {
+        try {
+            writer_->Close();
+        } catch (...) {
+            CASPAR_LOG_CURRENT_EXCEPTION();
+        }
+    }
     if (vmx_) {
         VMX_Destroy(vmx_);
         vmx_ = nullptr;
@@ -270,12 +283,13 @@ std::future<bool> replay_consumer::send(core::video_field field, const core::con
         return make_ready_future(false);
     }
     
-    // Max buffer size needed as per docs is width*height*4?
-    // VMX typically compresses, so 4*w*h is definitely safe upper bound.
+    // Reuse pre-allocated encode buffer instead of allocating per-frame
     size_t max_size = (size_t)width_ * height_ * 4;
-    std::vector<uint8_t> buffer(max_size);
+    if (encode_buffer_.size() < max_size) {
+        encode_buffer_.resize(max_size);
+    }
     
-    int size = VMX_SaveTo(vmx_, buffer.data(), (int)max_size);
+    int size = VMX_SaveTo(vmx_, encode_buffer_.data(), (int)max_size);
     /* 
     Updated to match replay module format roughly
     Format per frame in .mav:
@@ -303,7 +317,7 @@ std::future<bool> replay_consumer::send(core::video_field field, const core::con
             ptr += audio_bytes;
         }
 
-        memcpy(ptr, buffer.data(), (size_t)size);
+        memcpy(ptr, encode_buffer_.data(), (size_t)size);
         
         // Timestamp (Microseconds since epoch)
         uint64_t timestamp = std::chrono::duration_cast<std::chrono::microseconds>(

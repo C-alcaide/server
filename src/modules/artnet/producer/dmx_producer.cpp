@@ -40,6 +40,7 @@
 #include <boost/property_tree/ptree.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <fstream>
 #include <iomanip>
@@ -81,10 +82,16 @@ static dmx_recording load_ndjson(const std::wstring& path)
 
     std::string line;
     int         line_no = 0;
+    static constexpr size_t MAX_FRAMES = 10000000; // 10M frame cap
 
     while (std::getline(file, line)) {
         if (line.empty())
             continue;
+
+        if (recording.frames.size() >= MAX_FRAMES) {
+            CASPAR_LOG(warning) << L"[dmx_producer] Frame limit (" << MAX_FRAMES << L") reached, truncating file.";
+            break;
+        }
 
         // Parse JSON using boost property_tree
         std::istringstream          iss(line);
@@ -296,8 +303,8 @@ struct dmx_file_producer : public core::frame_producer
     int      last_idx_        = -1; // last sent frame index (to avoid redundant sends)
     uint32_t total_frames_    = 0;  // total producer frames (based on channel fps)
     int64_t  position_us_     = 0;  // current playback position (microseconds)
-    int64_t  seek_offset_us_  = 0;  // offset applied by seek commands
-    uint32_t frame_at_seek_   = 0;  // frame_number() at last seek
+    std::atomic<int64_t>  seek_offset_us_{0};  // offset applied by seek commands
+    std::atomic<uint32_t> frame_at_seek_{0};   // frame_number() at last seek
 
     // Configuration
     int          universe_filter_ = -1; // -1 = send all universes
@@ -384,7 +391,8 @@ struct dmx_file_producer : public core::frame_producer
     core::draw_frame receive_impl(const core::video_field /*field*/, int /*nb_samples*/) override
     {
         // Calculate current time position using own tracking (survives seek)
-        uint32_t frames_since_seek = frame_number() - frame_at_seek_;
+        int64_t frames_since_seek = static_cast<int64_t>(frame_number()) - static_cast<int64_t>(frame_at_seek_);
+        if (frames_since_seek < 0) frames_since_seek = 0;
         double   channel_fps       = format_desc_.hz;
         int64_t  current_us        = seek_offset_us_
                                    + static_cast<int64_t>((static_cast<double>(frames_since_seek) / channel_fps) * 1000000.0);
@@ -467,9 +475,10 @@ struct dmx_file_producer : public core::frame_producer
 
             // Convert frame number to microseconds
             double channel_fps = format_desc_.hz;
-            seek_offset_us_ = static_cast<int64_t>((static_cast<double>(seek_frame) / channel_fps) * 1000000.0);
-            seek_offset_us_ = std::clamp(seek_offset_us_, int64_t(0), recording_.duration_us);
-            frame_at_seek_  = frame_number();
+            int64_t new_offset = static_cast<int64_t>((static_cast<double>(seek_frame) / channel_fps) * 1000000.0);
+            new_offset = std::clamp(new_offset, int64_t(0), recording_.duration_us);
+            seek_offset_us_.store(new_offset);
+            frame_at_seek_.store(frame_number());
             last_idx_       = -1; // force re-send at new position
 
             result = std::to_wstring(seek_frame);
@@ -478,7 +487,8 @@ struct dmx_file_producer : public core::frame_producer
                              << L" (" << std::fixed << std::setprecision(1)
                              << (seek_offset_us_ / 1000000.0) << L"s)";
         } else {
-            CASPAR_THROW_EXCEPTION(not_implemented());
+            // Unknown command — ignore gracefully
+            result = L"OK";
         }
 
         auto promise = std::promise<std::wstring>();
@@ -521,8 +531,10 @@ struct dmx_file_producer : public core::frame_producer
             socket_.send_to(boost::asio::buffer(buffer, 18 + send_len), remote_endpoint_, 0, err);
         } else {
             uint8_t buffer[638] = {};
+            uint8_t seq = sequence_++;
+            if (seq == 0) seq = sequence_++; // skip 0 per E1.31
             build_sacn_packet(buffer, universe, data, std::min(length, 512),
-                              sequence_++, sacn_cid_, sacn_priority_);
+                              seq, sacn_cid_, sacn_priority_);
             socket_.send_to(boost::asio::buffer(buffer, 638), remote_endpoint_, 0, err);
         }
 

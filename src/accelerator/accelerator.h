@@ -14,6 +14,12 @@
 
 namespace caspar { namespace accelerator {
 
+class accelerator_device;
+
+namespace ogl {
+class channel_texture_store;
+}
+
 class accelerator_device
 {
   public:
@@ -33,6 +39,9 @@ class accelerator
     std::unique_ptr<caspar::core::image_mixer> create_image_mixer(int channel_id, common::bit_depth depth);
 
     std::shared_ptr<accelerator_device> get_device() const;
+
+    /// Shared channel texture store — allows previz channels to sample other channels' output.
+    std::shared_ptr<ogl::channel_texture_store> get_channel_texture_store();
 
   private:
     struct impl;

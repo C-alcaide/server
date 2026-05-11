@@ -220,6 +220,10 @@ replay_producer::replay_producer(std::string path, spl::shared_ptr<core::frame_f
 
 replay_producer::~replay_producer()
 {
+    // Wait for any running export to finish
+    if (export_thread_.joinable()) {
+        export_thread_.join();
+    }
     if (vmx_) VMX_Destroy(vmx_);
     // reader_ cleans up automatically
 }
@@ -235,7 +239,8 @@ core::draw_frame replay_producer::receive_impl(core::video_field field, int nb_s
     bool close_to_live = (speed_ > 0 && dist < (fps_ * 2)); // Within 2 seconds
     
     // Always refresh if duration is 0 (first load) or close to live, but throttle when playing live
-    if (frames_since_update_ == 0 || duration_ == 0 || (close_to_live && ++refresh_skip_counter_ > 25)) {
+    if (duration_ == 0 || (close_to_live && ++refresh_skip_counter_ > 25)) {
+        std::lock_guard<std::mutex> rlock(reader_mutex_);
         reader_->Refresh();
         refresh_skip_counter_ = 0;
         
@@ -267,14 +272,17 @@ core::draw_frame replay_producer::receive_impl(core::video_field field, int nb_s
     // Issue #5: Mute audio if at end of file
     bool is_eof = false;
 
-    if (std::abs(spd - 1.0) < 0.001) {
-        next_f++;
-        fractional_frame_ = 0.0;
-    } else {
-        fractional_frame_ += spd;
-        int64_t frame_delta = (int64_t)fractional_frame_;
-        fractional_frame_ -= (double)frame_delta;
-        next_f += frame_delta;
+    {
+        std::lock_guard<std::mutex> rlock(reader_mutex_);
+        if (std::abs(spd - 1.0) < 0.001) {
+            next_f++;
+            fractional_frame_ = 0.0;
+        } else {
+            fractional_frame_ += spd;
+            int64_t frame_delta = (int64_t)fractional_frame_;
+            fractional_frame_ -= (double)frame_delta;
+            next_f += frame_delta;
+        }
     }
 
     if (next_f < 0) {
@@ -326,7 +334,10 @@ core::draw_frame replay_producer::receive_impl(core::video_field field, int nb_s
 
     if (reader_) {
         auto t1 = std::chrono::high_resolution_clock::now();
-        has_frame = reader_->GetFrame((size_t)frame_num_, read_buffer_, timestamp);
+        {
+            std::lock_guard<std::mutex> rlock(reader_mutex_);
+            has_frame = reader_->GetFrame((size_t)frame_num_, read_buffer_, timestamp);
+        }
         auto t2 = std::chrono::high_resolution_clock::now();
         
         {
@@ -460,6 +471,7 @@ std::future<std::wstring> replay_producer::call(const std::vector<std::wstring>&
             if (boost::iequals(params[1], L"LIVE")) {
                 // Force update duration from file
                 if (reader_) {
+                    std::lock_guard<std::mutex> rlock(reader_mutex_);
                     reader_->Refresh();
                     int64_t current_len = (int64_t)reader_->GetTotalFrames();
                     if (current_len > 0) duration_ = current_len;
@@ -476,6 +488,7 @@ std::future<std::wstring> replay_producer::call(const std::vector<std::wstring>&
                 if (arg.second) {
                      // Arg is timestamp -> find frame
                      if (reader_) {
+                         std::lock_guard<std::mutex> rlock(reader_mutex_);
                          size_t f = reader_->SeekTimestamp(arg.first);
                          frame_num_ = f;
                      }
@@ -484,7 +497,10 @@ std::future<std::wstring> replay_producer::call(const std::vector<std::wstring>&
                     frame_num_ = seek_frame;
                 }
             }
-            fractional_frame_ = 0.0;
+            {
+                std::lock_guard<std::mutex> rlock(reader_mutex_);
+                fractional_frame_ = 0.0;
+            }
         } catch(...) {}
         return caspar::make_ready_future(std::wstring(L"OK"));
     }
@@ -494,6 +510,7 @@ std::future<std::wstring> replay_producer::call(const std::vector<std::wstring>&
          
          auto arg = parse_replay_arg_extended(params[1], fps_);
          if (arg.second) {
+             std::lock_guard<std::mutex> rlock(reader_mutex_);
              if (reader_) in_point_ = (int64_t)reader_->SeekTimestamp(arg.first);
          } else {
              in_point_ = (int64_t)arg.first;
@@ -506,6 +523,7 @@ std::future<std::wstring> replay_producer::call(const std::vector<std::wstring>&
          
          auto arg = parse_replay_arg_extended(params[1], fps_);
          if (arg.second) {
+             std::lock_guard<std::mutex> rlock(reader_mutex_);
              if (reader_) out_point_ = (int64_t)reader_->SeekTimestamp(arg.first);
          } else {
              out_point_ = (int64_t)arg.first;
@@ -542,7 +560,19 @@ std::future<std::wstring> replay_producer::call(const std::vector<std::wstring>&
         // Capture params by value (copy)
         std::vector<std::wstring> args(params.begin() + 2, params.end());
         
-        std::thread([current_path_str, output_filename_w, args, fps]() {
+        // Reject if a previous export is still running
+        if (export_running_.load()) {
+            auto promise = std::promise<std::wstring>();
+            promise.set_value(L"400 EXPORT BUSY");
+            return promise.get_future();
+        }
+        // Join finished thread if any
+        if (export_thread_.joinable()) {
+            export_thread_.join();
+        }
+        export_running_.store(true);
+        
+        export_thread_ = std::thread([this, current_path_str, output_filename_w, args, fps]() {
             try {
                 CASPAR_LOG(info) << L"Export Thread Started for: " << output_filename_w;
                 // Parse args into jobs
@@ -672,7 +702,8 @@ std::future<std::wstring> replay_producer::call(const std::vector<std::wstring>&
             } catch(...) {
                 CASPAR_LOG(error) << L"Export Thread Unknown Exception";
             }
-        }).detach();
+            export_running_.store(false);
+        });
 
         return caspar::make_ready_future(std::wstring(L"Export Started"));
     }
@@ -694,6 +725,7 @@ void replay_producer::configure(const std::vector<std::wstring>& params)
             if (i + 1 < params.size()) {
                 auto arg = parse_replay_arg_extended(params[++i], fps_);
                 if (arg.second) {
+                    std::lock_guard<std::mutex> rlock(reader_mutex_);
                     if (reader_) in_point_ = (int64_t)reader_->SeekTimestamp(arg.first);
                 } else {
                     in_point_ = (int64_t)arg.first;
@@ -703,6 +735,7 @@ void replay_producer::configure(const std::vector<std::wstring>& params)
             if (i + 1 < params.size()) {
                 auto arg = parse_replay_arg_extended(params[++i], fps_);
                 if (arg.second) {
+                    std::lock_guard<std::mutex> rlock(reader_mutex_);
                     if (reader_) out_point_ = (int64_t)reader_->SeekTimestamp(arg.first);
                 } else {
                     out_point_ = (int64_t)arg.first;
@@ -712,6 +745,7 @@ void replay_producer::configure(const std::vector<std::wstring>& params)
             if (i + 1 < params.size()) {
                 std::wstring val = params[++i];
                 if (boost::iequals(val, L"LIVE")) {
+                    std::lock_guard<std::mutex> rlock(reader_mutex_);
                     if (reader_) {
                         reader_->Refresh();
                         int64_t len = (int64_t)reader_->GetTotalFrames();
@@ -724,6 +758,7 @@ void replay_producer::configure(const std::vector<std::wstring>& params)
                 } else {
                     auto arg = parse_replay_arg_extended(val, fps_);
                     if (arg.second) {
+                        std::lock_guard<std::mutex> rlock(reader_mutex_);
                         if (reader_) frame_num_ = (int64_t)reader_->SeekTimestamp(arg.first);
                     } else {
                         frame_num_ = (int64_t)arg.first;
@@ -740,6 +775,12 @@ void replay_producer::configure(const std::vector<std::wstring>& params)
                      len = (int64_t)arg.first;
                  }
                  out_point_ = in_point_ + len;
+             }
+        } else if (p == L"SPEED") {
+             if (i + 1 < params.size()) {
+                 try {
+                     speed_ = boost::lexical_cast<double>(params[++i]);
+                 } catch (...) {}
              }
         }
     }

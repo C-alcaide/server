@@ -21,6 +21,8 @@
 #include "image_mixer.h"
 
 #include "image_kernel.h"
+#include "previz_renderer.h"
+#include "previz_scene.h"
 
 #include "../util/buffer.h"
 #include "../util/device.h"
@@ -251,7 +253,10 @@ struct image_mixer::impl
     , public std::enable_shared_from_this<impl>
 {
     spl::shared_ptr<device>      ogl_;
+    int                          channel_id_;
     image_renderer               renderer_;
+    previz_renderer              previz_renderer_;
+    std::shared_ptr<channel_texture_store> channel_tex_store_;
     std::vector<draw_transforms> transform_stack_;
     std::vector<layer>           layers_; // layer/stream/items
     std::vector<layer*>          layer_stack_;
@@ -261,7 +266,9 @@ struct image_mixer::impl
   public:
     impl(const spl::shared_ptr<device>& ogl, const int channel_id, const size_t max_frame_size, common::bit_depth depth)
         : ogl_(ogl)
+        , channel_id_(channel_id)
         , renderer_(ogl, max_frame_size, depth)
+        , previz_renderer_(ogl)
         , transform_stack_(1)
     {
         CASPAR_LOG(info) << L"Initialized OpenGL Accelerated GPU Image Mixer for channel " << channel_id;
@@ -301,7 +308,9 @@ struct image_mixer::impl
         item item;
         item.pix_desc   = frame.pixel_format_desc();
         item.transforms = transform_stack_.back();
-        item.geometry   = frame.geometry();
+        item.geometry   = item.transforms.image_transform.geometry_override.has_value()
+                              ? *item.transforms.image_transform.geometry_override
+                              : frame.geometry();
 
         if (auto direct_core_tex = frame.texture()) {
             // Zero-copy path: producer pre-decoded directly into a GL texture
@@ -343,7 +352,73 @@ struct image_mixer::impl
     std::future<std::tuple<array<const std::uint8_t>, std::shared_ptr<core::texture>>>
     render(const core::video_format_desc& format_desc)
     {
-        return renderer_(std::move(layers_), format_desc);
+        // If previz is active, first do normal 2D compositing to post this
+        // channel's output to the texture store (so other screens — including
+        // screens mapped to *this* channel — can sample it), then render the
+        // 3D scene for the previz viewport.
+        if (previz_renderer_.active() && channel_tex_store_) {
+            auto  store  = channel_tex_store_;
+            auto  ch_id  = channel_id_;
+
+            // Normal compositing first — produces this channel's flat output.
+            // renderer_() internally dispatches GL work via ogl_, so we must
+            // resolve its future BEFORE entering another ogl_->dispatch_async
+            // to avoid deadlocking the single GL thread.
+            auto composited = renderer_(std::move(layers_), format_desc);
+
+            return std::async(
+                std::launch::deferred,
+                [this, composited = std::move(composited), store, ch_id, format_desc]() mutable
+                -> std::tuple<array<const std::uint8_t>, std::shared_ptr<core::texture>> {
+                    // Resolve composited result (runs the queued GL work)
+                    auto comp_tuple = composited.get();
+                    auto& comp_tex  = std::get<1>(comp_tuple);
+                    if (comp_tex) {
+                        auto* ogl_tex = dynamic_cast<ogl::texture*>(comp_tex.get());
+                        if (ogl_tex)
+                            store->update(ch_id, comp_tex,
+                                          static_cast<unsigned int>(ogl_tex->id()),
+                                          ogl_tex->width(), ogl_tex->height());
+                    }
+
+                    // Now dispatch the previz 3D render on the GL thread
+                    auto f = ogl_->dispatch_async(
+                        [this, store, format_desc]() mutable
+                        -> std::tuple<std::future<array<const std::uint8_t>>, std::shared_ptr<core::texture>> {
+                            auto target_texture =
+                                ogl_->create_texture(format_desc.width, format_desc.height, 4, renderer_.depth());
+                            previz_renderer_.render(target_texture, *store, format_desc.width, format_desc.height);
+                            return {ogl_->copy_async(target_texture), target_texture};
+                        });
+
+                    auto previz_tuple = std::move(f.get());
+                    return {std::move(std::get<0>(previz_tuple).get()), std::move(std::get<1>(previz_tuple))};
+                });
+        }
+
+        // Normal 2D compositing
+        auto result = renderer_(std::move(layers_), format_desc);
+
+        // Post output texture to the store for previz channels to sample
+        if (channel_tex_store_) {
+            auto ch_id = channel_id_;
+            auto store = channel_tex_store_;
+            return std::async(
+                std::launch::deferred,
+                [result = std::move(result), ch_id, store]() mutable
+                -> std::tuple<array<const std::uint8_t>, std::shared_ptr<core::texture>> {
+                    auto tuple = result.get();
+                    auto& tex = std::get<1>(tuple);
+                    if (tex) {
+                        auto* ogl_tex = dynamic_cast<ogl::texture*>(tex.get());
+                        if (ogl_tex)
+                            store->update(ch_id, tex, static_cast<unsigned int>(ogl_tex->id()), ogl_tex->width(), ogl_tex->height());
+                    }
+                    return tuple;
+                });
+        }
+
+        return result;
     }
 
     core::mutable_frame create_frame(const void* tag, const core::pixel_format_desc& desc) override
@@ -415,5 +490,12 @@ image_mixer::create_frame(const void* tag, const core::pixel_format_desc& desc, 
 common::bit_depth image_mixer::depth() const { return impl_->depth(); }
 
 std::shared_ptr<device> image_mixer::get_ogl_device() const { return impl_->ogl_; }
+
+previz_renderer& image_mixer::get_previz_renderer() { return impl_->previz_renderer_; }
+
+void image_mixer::set_channel_texture_store(std::shared_ptr<channel_texture_store> store)
+{
+    impl_->channel_tex_store_ = std::move(store);
+}
 
 }}} // namespace caspar::accelerator::ogl

@@ -47,6 +47,11 @@ struct frame_geometry::impl
         if (type == geometry_type::quad && data.size() != 4)
             CASPAR_THROW_EXCEPTION(invalid_argument() << msg_info("The number of coordinates needs to be 4"));
 
+        if (type == geometry_type::mesh && (data.size() < 3 || data.size() % 3 != 0))
+            CASPAR_THROW_EXCEPTION(invalid_argument()
+                                   << msg_info("Mesh geometry requires a triangle list (vertex count must be a "
+                                               "multiple of 3 and at least 3)"));
+
         data_ = std::move(data);
     }
 

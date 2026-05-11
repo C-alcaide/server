@@ -92,16 +92,17 @@ struct artnet_consumer : public core::frame_consumer
                     long long                     elapsed_ms =
                         std::chrono::duration_cast<std::chrono::milliseconds>(elapsed_seconds).count();
 
-                    long long sleep_time = time - elapsed_ms * 1000;
+                    long long sleep_time = time - elapsed_ms;
                     if (sleep_time > 0)
                         std::this_thread::sleep_for(std::chrono::milliseconds(sleep_time));
 
                     last_send = now;
 
-                    frame_mutex_.lock();
-                    auto frame = last_frame_;
-
-                    frame_mutex_.unlock();
+                    core::const_frame frame;
+                    {
+                        std::lock_guard<std::mutex> lock(frame_mutex_);
+                        frame = last_frame_;
+                    }
                     if (!frame)
                         continue; // No frame available
 
@@ -229,7 +230,7 @@ struct artnet_consumer : public core::frame_consumer
         boost::system::error_code err;
         socket.send_to(boost::asio::buffer(buffer), remote_endpoint, 0, err);
         if (err)
-            CASPAR_THROW_EXCEPTION(io_error() << msg_info(err.message()));
+            CASPAR_LOG(warning) << L"[artnet_consumer] send error: " << err.message();
     }
 };
 

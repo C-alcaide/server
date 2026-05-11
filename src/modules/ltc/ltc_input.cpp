@@ -51,88 +51,58 @@ class LTCInputImpl {
     ma_device device;
     ma_device_config deviceConfig;
     LTCDecoder* decoder = nullptr;
-    std::mutex timecode_mutex;
-    SMPTETimecode last_timecode = {0};
     
-    // We hold the latest valid frame for retrieval
+    // Atomic double-buffer for timecode to avoid mutex in audio callback
+    struct TimecodeSlot {
+        SMPTETimecode tc = {0};
+        std::chrono::steady_clock::time_point signal_time;
+        bool has_data = false;
+    };
+    std::atomic<int> active_slot_{0};       // Index of the slot being READ by consumers
+    TimecodeSlot slots_[2];                 // Double-buffer: audio writes to !active, then swaps
     std::atomic<bool> valid_signal{false};
     std::atomic<bool> running{false};
-
-    // System Time Fallback
-    std::chrono::time_point<std::chrono::steady_clock> last_signal_time;
+    
+    bool context_initialized_ = false;
+    bool device_initialized_  = false;
 
     // Device Management
-    ma_device_info* pCaptureInfos = nullptr;
-    ma_uint32 captureCount = 0;
-    ma_device_info* pPlaybackInfos = nullptr;
-    ma_uint32 playbackCount = 0;
     std::string current_device_name;
     std::mutex device_mutex;
 
     static void data_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount) {
-        // This runs on audio thread
         LTCInputImpl* self = (LTCInputImpl*)pDevice->pUserData;
-        if (self && self->decoder) {
-            // Write to decoder
-            // miniaudio f32 -> ltc expects float (if supported) or u8
-            // libltc decoder.c supports float
-            ltc_decoder_write_float(self->decoder, const_cast<float*>(static_cast<const float*>(pInput)), frameCount, 0); 
-            
-            // We use LTCFrameExt for the decoder read, then convert to SMPTETimecode
-            LTCFrameExt ltc_frame;
-            bool got_frame = false;
-            SMPTETimecode temp_tc = {0};
-            while(ltc_decoder_read(self->decoder, &ltc_frame)) {
-               ltc_frame_to_time(&temp_tc, &ltc_frame.ltc, 0);
-               got_frame = true;
-            }
+        if (!self || !self->decoder || !pInput) return;
 
-            if (got_frame) {
-                std::lock_guard<std::mutex> lock(self->timecode_mutex);
-                self->last_timecode = temp_tc;
-                self->valid_signal = true;
-                self->last_signal_time = std::chrono::steady_clock::now();
-            }
-        }
-    }
-
-public:
-    static LTCInputImpl& instance() {
-        static LTCInputImpl instance;
-        return instance;
-    }
-    
-    // Member initialization
-    LTCInputImpl() {
-        if (ma_context_init(NULL, 0, NULL, &context) != MA_SUCCESS) {
-             std::cerr << "Failed to init miniaudio context\n";
-        }
-    };
-    
-    ~LTCInputImpl() {
-        if (running) {
-             ma_device_uninit(&device);
-        }
-        ma_context_uninit(&context);
-    }
-
-    void start() {
-        std::lock_guard<std::mutex> lock(device_mutex);
-        if (running) return;
+        // Copy input to local buffer to avoid const_cast
+        const float* src = static_cast<const float*>(pInput);
+        std::vector<float> buf(src, src + frameCount);
+        ltc_decoder_write_float(self->decoder, buf.data(), frameCount, 0);
         
-        // Read configuration
-        try {
-            auto& pt = caspar::env::properties();
-            boost::optional<std::wstring> dev = pt.get_optional<std::wstring>(L"configuration.ltc.device");
-            if (dev && current_device_name.empty()) { // Use config if current is empty (first start)
-                 current_device_name = caspar::u8(*dev);
-            }
-        } catch (...) {
-            // Ignore if config not found or invalid
+        LTCFrameExt ltc_frame;
+        bool got_frame = false;
+        SMPTETimecode temp_tc = {0};
+        while(ltc_decoder_read(self->decoder, &ltc_frame)) {
+           ltc_frame_to_time(&temp_tc, &ltc_frame.ltc, 0);
+           got_frame = true;
         }
 
-        // Create decoder (48kHz sample rate, 25fps default - it auto-detects anyway usually)
-        if (!decoder) decoder = ltc_decoder_create(48000, 25);  
+        if (got_frame) {
+            // Write to the inactive slot, then swap atomically
+            int write_slot = 1 - self->active_slot_.load(std::memory_order_acquire);
+            self->slots_[write_slot].tc = temp_tc;
+            self->slots_[write_slot].signal_time = std::chrono::steady_clock::now();
+            self->slots_[write_slot].has_data = true;
+            self->active_slot_.store(write_slot, std::memory_order_release);
+            self->valid_signal = true;
+        }
+    }
+    
+    // Internal start logic — caller must hold device_mutex
+    bool start_unlocked() {
+        if (running) return true;
+        
+        if (!decoder) decoder = ltc_decoder_create(48000, 25);
         
         deviceConfig = ma_device_config_init(ma_device_type_capture);
         deviceConfig.capture.format = ma_format_f32;
@@ -144,56 +114,109 @@ public:
         // Find device ID if name is set
         ma_device_id* pDeviceID = NULL;
         if (!current_device_name.empty()) {
-             // Ensure devices are enumerated
-             if (!pCaptureInfos) {
-                 ma_context_get_devices(&context, &pPlaybackInfos, &playbackCount, &pCaptureInfos, &captureCount);
-             }
+             ma_device_info* pCaptureInfos = nullptr;
+             ma_uint32 captureCount = 0;
+             ma_device_info* pPlaybackInfos = nullptr;
+             ma_uint32 playbackCount = 0;
              
-             for (ma_uint32 i = 0; i < captureCount; ++i) {
-                 if (current_device_name == pCaptureInfos[i].name) {
-                     pDeviceID = &pCaptureInfos[i].id;
-                     break;
+             if (ma_context_get_devices(&context, &pPlaybackInfos, &playbackCount, &pCaptureInfos, &captureCount) == MA_SUCCESS) {
+                 for (ma_uint32 i = 0; i < captureCount; ++i) {
+                     if (current_device_name == pCaptureInfos[i].name) {
+                         pDeviceID = &pCaptureInfos[i].id;
+                         break;
+                     }
                  }
              }
-        }
-
-        // Initialize device
-        if (ma_device_init(&context, &deviceConfig, &device) != MA_SUCCESS) {
-            // Try with default if specific fails? Or just fail?
-            // Fallback to default if specific failed
-            if (pDeviceID != NULL) {
-                 std::cerr << "Failed to init specific device, trying default.\n";
-                 if (ma_device_init(&context, &deviceConfig, &device) != MA_SUCCESS) {
-                     std::cerr << "Failed to init miniaudio device for LTC\n";
-                     return;
-                 }
-            } else {
-                std::cerr << "Failed to init miniaudio device for LTC\n";
-                return;
-            }
         }
         
-        // If we used default (pDeviceID was NULL or failed), we should update current_device_name
-        if (pDeviceID == NULL) {
-             // Get device info to populate name? 
-             // miniaudio API for getting name of initialized device is ma_device_get_name?
-             // Actually we can just say "Default" if we don't know.
-             // Or better, re-enumerate and check isDefault.
+        // Assign found device ID to config
+        if (pDeviceID != NULL) {
+            deviceConfig.capture.pDeviceID = pDeviceID;
         }
+
+        if (ma_device_init(&context, &deviceConfig, &device) != MA_SUCCESS) {
+            if (pDeviceID != NULL) {
+                 // Fallback to default
+                 CASPAR_LOG(warning) << "LTC: Failed to init specific device, trying default.";
+                 deviceConfig.capture.pDeviceID = NULL;
+                 if (ma_device_init(&context, &deviceConfig, &device) != MA_SUCCESS) {
+                     CASPAR_LOG(error) << "LTC: Failed to init miniaudio device";
+                     return false;
+                 }
+            } else {
+                CASPAR_LOG(error) << "LTC: Failed to init miniaudio device";
+                return false;
+            }
+        }
+        device_initialized_ = true;
 
         if (ma_device_start(&device) == MA_SUCCESS) {
             running = true;
+            return true;
         }
+        // Start failed — clean up the initialized device
+        ma_device_uninit(&device);
+        device_initialized_ = false;
+        return false;
+    }
+
+public:
+    static LTCInputImpl& instance() {
+        static LTCInputImpl instance;
+        return instance;
+    }
+    
+    LTCInputImpl() {
+        if (ma_context_init(NULL, 0, NULL, &context) == MA_SUCCESS) {
+            context_initialized_ = true;
+        } else {
+            CASPAR_LOG(error) << "LTC: Failed to init miniaudio context";
+        }
+    }
+    
+    ~LTCInputImpl() {
+        running = false;
+        if (device_initialized_) {
+             ma_device_uninit(&device);
+        }
+        if (context_initialized_) {
+            ma_context_uninit(&context);
+        }
+        if (decoder) {
+            ltc_decoder_free(decoder);
+            decoder = nullptr;
+        }
+    }
+
+    void start() {
+        std::lock_guard<std::mutex> lock(device_mutex);
+        if (running) return;
+        
+        // Read configuration
+        try {
+            auto& pt = caspar::env::properties();
+            boost::optional<std::wstring> dev = pt.get_optional<std::wstring>(L"configuration.ltc.device");
+            if (dev && current_device_name.empty()) {
+                 current_device_name = caspar::u8(*dev);
+            }
+        } catch (...) {}
+
+        start_unlocked();
     }
 
     std::vector<std::string> get_capture_devices() {
         std::lock_guard<std::mutex> lock(device_mutex);
-        if (!pCaptureInfos) {
-            ma_context_get_devices(&context, &pPlaybackInfos, &playbackCount, &pCaptureInfos, &captureCount);
-        }
+        ma_device_info* pCaptureInfos = nullptr;
+        ma_uint32 captureCount = 0;
+        ma_device_info* pPlaybackInfos = nullptr;
+        ma_uint32 playbackCount = 0;
+        
+        // Always re-enumerate to pick up newly connected devices
         std::vector<std::string> devices;
-        for (ma_uint32 i = 0; i < captureCount; ++i) {
-            devices.push_back(pCaptureInfos[i].name);
+        if (ma_context_get_devices(&context, &pPlaybackInfos, &playbackCount, &pCaptureInfos, &captureCount) == MA_SUCCESS) {
+            for (ma_uint32 i = 0; i < captureCount; ++i) {
+                devices.push_back(pCaptureInfos[i].name);
+            }
         }
         return devices;
     }
@@ -204,83 +227,31 @@ public:
         if (running) {
              ma_device_stop(&device);
              ma_device_uninit(&device);
+             device_initialized_ = false;
              running = false;
         }
         
+        // Free old decoder and create fresh one
+        if (decoder) {
+            ltc_decoder_free(decoder);
+            decoder = nullptr;
+        }
+        
         current_device_name = name;
-        
-        // Restart (unlocking/locking happens in start, but we hold lock here so we need careful logic)
-        // Actually start() locks device_mutex. That would deadlock.
-        // I should refactor start() to not lock, or have internal method.
-        // Let's modify start() to NOT lock, and caller locks.
-        // Wait, start() is public via instance().start().
-        
-        // Let's release lock before calling member functions that lock, but that's unsafe.
-        // Better: Make internal methods or recursive mutex.
-        // For simplicity, let's just do the logic inline here.
-        
-        if (!decoder) decoder = ltc_decoder_create(48000, 25);
-        
-        deviceConfig = ma_device_config_init(ma_device_type_capture);
-        deviceConfig.capture.format = ma_format_f32;
-        deviceConfig.capture.channels = 1;
-        deviceConfig.sampleRate = 48000;
-        deviceConfig.dataCallback = data_callback;
-        deviceConfig.pUserData = this;
-        
-        ma_device_id* pDeviceID = NULL;
-        
-        // Ensure devices are enumerated
-        if (!pCaptureInfos) {
-             ma_context_get_devices(&context, &pPlaybackInfos, &playbackCount, &pCaptureInfos, &captureCount);
-        }
-         
-        bool found = false;
-        for (ma_uint32 i = 0; i < captureCount; ++i) {
-             if (name == pCaptureInfos[i].name) {
-                 pDeviceID = &pCaptureInfos[i].id;
-                 found = true;
-                 break;
-             }
-        }
-        
-        if (!found && !name.empty() && name != "Default") {
-            // Device name not found
-            // Fallback to default/empty?
-            // Keep running false?
-            return false; 
-        }
-
-        if (pDeviceID != NULL) {
-            deviceConfig.capture.pDeviceID = pDeviceID;
-        }
-
-        if (ma_device_init(&context, &deviceConfig, &device) != MA_SUCCESS) { // 3-arg form for miniaudio
-             std::cerr << "Failed to init device\n";
-             return false;
-        }
-
-        if (ma_device_start(&device) == MA_SUCCESS) {
-            running = true;
-        }
-        return true;
+        return start_unlocked();
     }
 
     std::string get_current_device_name() {
          return current_device_name.empty() ? "Default" : current_device_name;
     }
     
-    // ... [Rest of existing methods: get_current_timecode_string, etc.]
-    
     std::string get_current_timecode_string() {
-        std::lock_guard<std::mutex> lock(timecode_mutex);
-        
+        int slot = active_slot_.load(std::memory_order_acquire);
         bool use_fallback = !valid_signal;
         
         if (valid_signal) {
              auto now = std::chrono::steady_clock::now();
-             // 1 second timeout for signal loss
-             if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_signal_time).count() > 1000) {
+             if (std::chrono::duration_cast<std::chrono::milliseconds>(now - slots_[slot].signal_time).count() > 1000) {
                  use_fallback = true;
              }
         }
@@ -288,28 +259,30 @@ public:
         if (use_fallback) {
              time_t now = time(0);
              struct tm tstruct;
-             localtime_s(&tstruct, &now); 
+#ifdef _WIN32
+             localtime_s(&tstruct, &now);
+#else
+             localtime_r(&now, &tstruct);
+#endif
              char buffer[16];
-             sprintf(buffer, "%02d:%02d:%02d:00", tstruct.tm_hour, tstruct.tm_min, tstruct.tm_sec);
+             snprintf(buffer, sizeof(buffer), "%02d:%02d:%02d:00", tstruct.tm_hour, tstruct.tm_min, tstruct.tm_sec);
              return std::string(buffer);
         }
 
         char buffer[16];
-        sprintf(buffer, "%02d:%02d:%02d:%02d", 
-            last_timecode.hours, last_timecode.mins, 
-            last_timecode.secs, last_timecode.frame);
+        snprintf(buffer, sizeof(buffer), "%02d:%02d:%02d:%02d", 
+            slots_[slot].tc.hours, slots_[slot].tc.mins, 
+            slots_[slot].tc.secs, slots_[slot].tc.frame);
         return std::string(buffer);
     }
     
     uint32_t get_current_frame_number(int fps) {
-         // ... [Identical to before]
-         std::lock_guard<std::mutex> lock(timecode_mutex);
-         
+         int slot = active_slot_.load(std::memory_order_acquire);
          bool use_fallback = !valid_signal;
         
          if (valid_signal) {
              auto now = std::chrono::steady_clock::now();
-             if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_signal_time).count() > 1000) {
+             if (std::chrono::duration_cast<std::chrono::milliseconds>(now - slots_[slot].signal_time).count() > 1000) {
                  use_fallback = true;
              }
          }
@@ -317,20 +290,22 @@ public:
          if (use_fallback) {
              time_t now = time(0);
              struct tm tstruct;
-             localtime_s(&tstruct, &now); 
+#ifdef _WIN32
+             localtime_s(&tstruct, &now);
+#else
+             localtime_r(&now, &tstruct);
+#endif
              return (tstruct.tm_hour * 3600 + tstruct.tm_min * 60 + tstruct.tm_sec) * fps;
          }
 
-         return (last_timecode.hours * 3600 + last_timecode.mins * 60 + last_timecode.secs) * fps + last_timecode.frame;
+         return (slots_[slot].tc.hours * 3600 + slots_[slot].tc.mins * 60 + slots_[slot].tc.secs) * fps + slots_[slot].tc.frame;
     }
     
     bool is_valid() {
         if (!valid_signal) return false;
-        
-        // Signal lost check
-        std::lock_guard<std::mutex> lock(timecode_mutex);
+        int slot = active_slot_.load(std::memory_order_acquire);
         auto now = std::chrono::steady_clock::now();
-        if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_signal_time).count() > 1000) {
+        if (std::chrono::duration_cast<std::chrono::milliseconds>(now - slots_[slot].signal_time).count() > 1000) {
              return false;
         }
         return true;

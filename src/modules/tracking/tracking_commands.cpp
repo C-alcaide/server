@@ -28,6 +28,10 @@
 #include <protocol/amcp/amcp_command_context.h>
 #include <protocol/amcp/amcp_command_repository_wrapper.h>
 
+#include <core/mixer/mixer.h>
+#include <accelerator/ogl/image/image_mixer.h>
+#include <accelerator/ogl/image/previz_renderer.h>
+
 #include <boost/algorithm/string.hpp>
 
 #include <sstream>
@@ -73,7 +77,12 @@ static std::wstring protocol_name(tracking_protocol p)
 
 static std::wstring mode_name(tracking_mode m)
 {
-    return m == tracking_mode::mode_360 ? L"360" : L"2D";
+    switch (m) {
+    case tracking_mode::mode_360:    return L"360";
+    case tracking_mode::mode_2d:     return L"2D";
+    case tracking_mode::mode_previz: return L"PREVIZ";
+    default:                         return L"UNKNOWN";
+    }
 }
 
 // Parse optional named keyword parameters from the rest of the params list.
@@ -135,6 +144,8 @@ static std::wstring tracking_bind_command(command_context& ctx)
         std::wstring mode_str = kwparam(ctx.parameters, L"MODE", L"360");
         if (boost::iequals(mode_str, L"2D"))
             mode = tracking_mode::mode_2d;
+        else if (boost::iequals(mode_str, L"PREVIZ"))
+            mode = tracking_mode::mode_previz;
 
         // Grab stage from the current channel context
         auto stage_ptr = ctx.channel.stage;
@@ -164,6 +175,25 @@ static std::wstring tracking_bind_command(command_context& ctx)
         b.receiver.protocol = proto;
         b.receiver.port     = port;
         b.receiver.host     = host;
+
+        // For PREVIZ mode, set up the callback to drive the previz camera
+        if (mode == tracking_mode::mode_previz) {
+            auto raw_ch = ctx.channel.raw_channel;
+            if (raw_ch) {
+                auto img = raw_ch->mixer().get_image_mixer();
+                auto* ogl_mix = dynamic_cast<accelerator::ogl::image_mixer*>(img.get());
+                if (ogl_mix) {
+                    // Capture a weak reference to the stage so we can detect channel destruction.
+                    auto stage_weak = b.stage;
+                    auto& renderer  = ogl_mix->get_previz_renderer();
+                    b.previz_camera_fn = [&renderer, stage_weak](float x, float y, float z,
+                                                                  float yaw, float pitch, float roll, float fov) {
+                        if (stage_weak.lock())
+                            renderer.set_camera(x, y, z, yaw, pitch, roll, fov);
+                    };
+                }
+            }
+        }
 
         tracker_registry::instance().bind(ch, layer, std::move(b));
 
