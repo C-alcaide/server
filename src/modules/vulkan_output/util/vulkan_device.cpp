@@ -23,6 +23,7 @@
 #include <common/log.h>
 
 #include <algorithm>
+#include <cstring>
 #include <stdexcept>
 #include <string>
 
@@ -73,6 +74,57 @@ bool is_professional_gpu(const char* name)
     if (lower.find("tesla") != std::string::npos)
         return true;
     return false;
+}
+
+// Deduplicate VkPhysicalDevices by LUID.  Newer NVIDIA drivers expose the same
+// physical GPU as multiple VkPhysicalDevice handles (graphics vs compute/video).
+// We keep only the first occurrence of each unique LUID so that user-facing GPU
+// indices remain stable regardless of driver version.
+std::vector<VkPhysicalDevice> deduplicate_physical_devices(VkInstance instance,
+                                                           const std::vector<VkPhysicalDevice>& devices)
+{
+    struct luid_entry {
+        uint8_t          luid[8];
+        VkPhysicalDevice device;
+    };
+
+    std::vector<luid_entry> seen;
+    std::vector<VkPhysicalDevice> unique;
+
+    for (auto dev : devices) {
+        VkPhysicalDeviceIDProperties id_props{};
+        id_props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES;
+        VkPhysicalDeviceProperties2 props2{};
+        props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+        props2.pNext = &id_props;
+        vkGetPhysicalDeviceProperties2(dev, &props2);
+
+        if (id_props.deviceLUIDValid) {
+            bool duplicate = false;
+            for (const auto& s : seen) {
+                if (memcmp(s.luid, id_props.deviceLUID, 8) == 0) {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (duplicate)
+                continue;
+
+            luid_entry entry{};
+            memcpy(entry.luid, id_props.deviceLUID, 8);
+            entry.device = dev;
+            seen.push_back(entry);
+        }
+        unique.push_back(dev);
+    }
+
+    if (unique.size() < devices.size()) {
+        CASPAR_LOG(info) << L"[vulkan] Deduplicated " << devices.size()
+                         << L" physical devices to " << unique.size()
+                         << L" unique GPU(s) by LUID";
+    }
+
+    return unique;
 }
 
 } // namespace
@@ -182,11 +234,16 @@ void vulkan_device::select_physical_device(int gpu_index)
     if (count == 0)
         CASPAR_THROW_EXCEPTION(caspar_exception() << msg_info("No Vulkan-capable GPUs found"));
 
-    std::vector<VkPhysicalDevice> devices(count);
-    vkEnumeratePhysicalDevices(instance_, &count, devices.data());
+    std::vector<VkPhysicalDevice> all_devices(count);
+    vkEnumeratePhysicalDevices(instance_, &count, all_devices.data());
 
-    if (gpu_index < 0 || gpu_index >= static_cast<int>(count))
-        CASPAR_THROW_EXCEPTION(caspar_exception() << msg_info("Invalid GPU index: " + std::to_string(gpu_index)));
+    // Deduplicate: newer drivers may expose the same GPU as multiple
+    // VkPhysicalDevice handles (graphics vs compute/video).
+    auto devices = deduplicate_physical_devices(instance_, all_devices);
+
+    if (gpu_index < 0 || gpu_index >= static_cast<int>(devices.size()))
+        CASPAR_THROW_EXCEPTION(caspar_exception() << msg_info("Invalid GPU index: " + std::to_string(gpu_index)
+                                                              + " (only " + std::to_string(devices.size()) + " unique GPU(s) found)"));
 
     physical_device_ = devices[gpu_index];
 
@@ -228,6 +285,18 @@ void vulkan_device::select_physical_device(int gpu_index)
                      << L" (tier=" << (tier_ == gpu_tier::pro ? L"pro" : tier_ == gpu_tier::consumer ? L"consumer" : L"none")
                      << L", ext_mem=" << has_ext_mem
                      << L", present_barrier=" << has_present_barrier << L")";
+
+    // Warn if the driver's Vulkan API version is below 1.3 — older drivers have
+    // known multi-GPU stability issues (TDR during VkDevice creation, broken
+    // external memory interop) and lack extensions we rely on.
+    if (props.apiVersion < VK_API_VERSION_1_3) {
+        CASPAR_LOG(warning) << L"[vulkan_output] GPU " << gpu_index << L" (" << props.deviceName
+                            << L") reports Vulkan " << VK_VERSION_MAJOR(props.apiVersion) << L"."
+                            << VK_VERSION_MINOR(props.apiVersion)
+                            << L" — driver does not support Vulkan 1.3+. "
+                               L"Please update the NVIDIA driver (R550+ recommended). "
+                               L"Multi-GPU setups may TDR with older drivers.";
+    }
 
     gpu_index_ = gpu_index;
 
@@ -595,10 +664,13 @@ std::vector<display_info> vulkan_device::enumerate_displays()
 
     uint32_t gpu_count = 0;
     vkEnumeratePhysicalDevices(instance, &gpu_count, nullptr);
-    std::vector<VkPhysicalDevice> gpus(gpu_count);
-    vkEnumeratePhysicalDevices(instance, &gpu_count, gpus.data());
+    std::vector<VkPhysicalDevice> all_gpus(gpu_count);
+    vkEnumeratePhysicalDevices(instance, &gpu_count, all_gpus.data());
 
-    for (uint32_t gi = 0; gi < gpu_count; ++gi) {
+    // Deduplicate: newer drivers may expose the same GPU as multiple handles
+    auto gpus = deduplicate_physical_devices(instance, all_gpus);
+
+    for (uint32_t gi = 0; gi < static_cast<uint32_t>(gpus.size()); ++gi) {
         VkPhysicalDeviceProperties props;
         vkGetPhysicalDeviceProperties(gpus[gi], &props);
 

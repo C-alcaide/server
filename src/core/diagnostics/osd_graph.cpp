@@ -147,27 +147,59 @@ class context : public drawable
   private:
     context() {}
 
+    void safe_close_window()
+    {
+        try {
+            window_.reset();
+        } catch (...) {
+            CASPAR_LOG(warning) << L"[diag] Exception while closing diagnostics window.";
+            window_.release();
+        }
+    }
+
     void do_show(bool value)
     {
         if (value) {
             if (!window_) {
-                window_.reset(
-                    new sf::RenderWindow(sf::VideoMode(RENDERING_WIDTH, RENDERING_WIDTH), "CasparCG Diagnostics"));
-                window_->setPosition(sf::Vector2i(0, 0));
-                window_->setActive();
-                window_->setVerticalSyncEnabled(false);
-                window_->setVisible(false);
-                window_visible_  = false;
-                calculate_view_ = true;
-                glEnable(GL_BLEND);
-                glEnable(GL_LINE_SMOOTH);
-                glHint(GL_LINE_SMOOTH_HINT, GL_NICEST);
-                glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                try {
+                    window_.reset(
+                        new sf::RenderWindow(sf::VideoMode(RENDERING_WIDTH, RENDERING_WIDTH), "CasparCG Diagnostics"));
+                    window_->setPosition(sf::Vector2i(0, 0));
+                    if (!window_->setActive()) {
+                        CASPAR_LOG(warning) << L"[diag] Failed to activate OpenGL context for diagnostics window.";
+                        safe_close_window();
+                        return;
+                    }
+                    window_->setVerticalSyncEnabled(false);
+                    window_->setVisible(false);
+                    window_visible_  = false;
+                    calculate_view_ = true;
 
-                tick();
+                    // Clear any prior GL errors before checking our own calls
+                    while (glGetError() != GL_NO_ERROR) {}
+
+                    glEnable(GL_BLEND);
+                    glEnable(GL_LINE_SMOOTH);
+                    glHint(GL_LINE_SMOOTH_HINT, GL_NICEST);
+                    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+                    auto gl_err = glGetError();
+                    if (gl_err != GL_NO_ERROR) {
+                        CASPAR_LOG(warning) << L"[diag] OpenGL error " << gl_err
+                                            << L" during diagnostics window init — closing window.";
+                        safe_close_window();
+                        return;
+                    }
+
+                    tick();
+                } catch (...) {
+                    CASPAR_LOG(warning) << L"[diag] Failed to open diagnostics window.";
+                    safe_close_window();
+                }
             }
-        } else
-            window_.reset();
+        } else {
+            safe_close_window();
+        }
     }
 
     void tick()
@@ -175,11 +207,13 @@ class context : public drawable
         if (!window_)
             return;
 
+        try {
+
         sf::Event e;
         while (window_->pollEvent(e)) {
             switch (e.type) {
                 case sf::Event::Closed:
-                    window_.reset();
+                    safe_close_window();
                     return;
                 case sf::Event::Resized:
                     calculate_view_ = true;
@@ -236,7 +270,25 @@ class context : public drawable
         window_->draw(*this);
         window_->display();
 
+        // Check for GL errors after rendering — if the GPU context is lost
+        // (e.g. TDR on the same GPU), shut down the diagnostics window
+        // gracefully instead of spinning on a broken context.
+        auto gl_err = glGetError();
+        if (gl_err != GL_NO_ERROR) {
+            CASPAR_LOG(warning) << L"[diag] OpenGL error " << gl_err
+                                << L" during diagnostics render — closing window.";
+            safe_close_window();
+            return;
+        }
+
         display_time_.restart();
+
+        } catch (...) {
+            CASPAR_LOG(warning) << L"[diag] Exception in diagnostics tick — closing window.";
+            safe_close_window();
+            return;
+        }
+
         std::this_thread::sleep_for(std::chrono::milliseconds(40));
         if (executor_.is_running()) {
             executor_.begin_invoke([this] { tick(); });

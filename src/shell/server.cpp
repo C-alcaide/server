@@ -44,6 +44,8 @@
 
 #include <modules/image/consumer/image_consumer.h>
 
+#include <modules/vulkan_output/util/vk_device_manager.h>
+
 #include <protocol/amcp/AMCPCommandsImpl.h>
 #include <protocol/amcp/AMCPProtocolStrategy.h>
 #include <protocol/amcp/amcp_command_repository.h>
@@ -58,6 +60,7 @@
 #include <boost/format.hpp>
 #include <boost/property_tree/ptree.hpp>
 
+#include <set>
 #include <thread>
 #include <utility>
 
@@ -357,6 +360,27 @@ struct server::impl
         std::vector<spl::shared_ptr<core::video_channel>> channels_vec;
         for (auto& cc : *channels_) {
             channels_vec.emplace_back(cc.raw_channel);
+        }
+
+        // Pre-create all Vulkan VkDevices before any consumer starts its
+        // present thread.  Creating a VkDevice on one GPU while another
+        // GPU is already presenting can stall the driver long enough to
+        // trigger TDR (especially on older NVIDIA drivers).
+        {
+            std::set<int> gpu_indices;
+            for (const auto& ch : xml_channels) {
+                if (auto consumers = ch.get_child_optional(L"consumers")) {
+                    for (const auto& c : *consumers) {
+                        if (c.first == L"vulkan-output") {
+                            gpu_indices.insert(c.second.get(L"gpu", 0));
+                        }
+                    }
+                }
+            }
+            if (!gpu_indices.empty()) {
+                std::vector<int> indices(gpu_indices.begin(), gpu_indices.end());
+                vulkan_output::vk_device_manager::warm_up(indices);
+            }
         }
 
         for (auto& channel : *channels_) {

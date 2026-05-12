@@ -22,6 +22,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <vector>
 
 namespace caspar { namespace vulkan_output {
 
@@ -43,6 +44,12 @@ class vk_device_manager
     // yet, one is created.  When the last shared_ptr is released the device
     // is destroyed and removed from the registry.
     static std::shared_ptr<vulkan_device> get(int gpu_index);
+
+    // Pre-create VkDevices for a set of GPU indices.  Call this before any
+    // consumer starts its present loop to avoid creating a VkDevice on one
+    // GPU while another GPU is already presenting — which can trigger TDR
+    // on older NVIDIA drivers.
+    static void warm_up(const std::vector<int>& gpu_indices);
 
   private:
     static std::mutex                                    mutex_;
