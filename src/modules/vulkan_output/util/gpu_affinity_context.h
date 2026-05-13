@@ -77,6 +77,33 @@ class gpu_affinity_context
         return future.get();
     }
 
+    /// Run a function on the affinity context's GL thread asynchronously.
+    /// Returns a future that can be polled with wait_for() — essential for
+    /// abortable shutdown paths (caller can stop waiting if its `running_`
+    /// flag goes false while the affinity executor is wedged).
+    template <typename Func>
+    auto dispatch_async(Func&& func) -> std::future<decltype(func())>
+    {
+        using result_t = decltype(func());
+        auto promise = std::make_shared<std::promise<result_t>>();
+        auto future  = promise->get_future();
+
+        dispatch([f = std::forward<Func>(func), promise]() mutable {
+            try {
+                if constexpr (std::is_void_v<result_t>) {
+                    f();
+                    promise->set_value();
+                } else {
+                    promise->set_value(f());
+                }
+            } catch (...) {
+                promise->set_exception(std::current_exception());
+            }
+        });
+
+        return future;
+    }
+
     /// Upload CPU frame data to the internal texture. Returns the GL texture ID.
     /// Must be called via dispatch_sync (on the affinity thread).
     GLuint upload_frame(const uint8_t* pixels, int width, int height, int stride);

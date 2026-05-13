@@ -123,6 +123,7 @@ target_link_libraries(vulkan_output PRIVATE
     GLEW::glew
     d3d11
     dxgi
+    dwmapi
 )
 
 if(NVAPI_FOUND)

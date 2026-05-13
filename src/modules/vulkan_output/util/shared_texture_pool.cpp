@@ -100,6 +100,39 @@ shared_texture_pool::shared_texture_pool(std::shared_ptr<accelerator::ogl::devic
     , height_(height)
     , use_16bit_(use_16bit)
 {
+    // Detect Pascal GPUs (GP10x, Vulkan API 1.1 era, vendor NVIDIA).
+    // Pascal's GL driver has a tiling incompatibility with GL_EXT_memory_object:
+    // VK_IMAGE_TILING_OPTIMAL textures imported via glTextureStorageMem2DEXT
+    // produce visible pixel grid artifacts. LINEAR tiling avoids this.
+    VkPhysicalDeviceProperties vk_props;
+    vkGetPhysicalDeviceProperties(vk_device_.physical_device(), &vk_props);
+    if (vk_props.vendorID == 0x10DE) { // NVIDIA
+        uint32_t major = VK_API_VERSION_MAJOR(vk_props.apiVersion);
+        uint32_t minor = VK_API_VERSION_MINOR(vk_props.apiVersion);
+        // Pascal (GP10x) supports up to Vulkan 1.1. Turing+ supports 1.2+.
+        if (major == 1 && minor <= 1) {
+            use_linear_tiling_ = true;
+            CASPAR_LOG(info) << L"[vulkan_output] Pascal GPU detected ("
+                             << vk_props.deviceName
+                             << L") — forcing LINEAR tiling for GL_EXT_memory_object compatibility.";
+        }
+    }
+
+    if (use_linear_tiling_) {
+        // Verify LINEAR tiling support
+        VkFormat format = use_16bit_ ? VK_FORMAT_R16G16B16A16_UNORM : VK_FORMAT_R8G8B8A8_UNORM;
+        VkFormatProperties fmt_props;
+        vkGetPhysicalDeviceFormatProperties(vk_device_.physical_device(), format, &fmt_props);
+        const VkFormatFeatureFlags required = VK_FORMAT_FEATURE_TRANSFER_SRC_BIT |
+                                              VK_FORMAT_FEATURE_TRANSFER_DST_BIT |
+                                              VK_FORMAT_FEATURE_BLIT_SRC_BIT;
+        if ((fmt_props.linearTilingFeatures & required) != required) {
+            CASPAR_LOG(warning) << L"[vulkan_output] LINEAR tiling not fully supported —"
+                                << L" falling back to OPTIMAL (may cause artifacts).";
+            use_linear_tiling_ = false;
+        }
+    }
+
     // Create shared textures on the OGL thread
     ogl_device_->dispatch_sync([this] {
         load_gl_extensions();
@@ -108,15 +141,13 @@ shared_texture_pool::shared_texture_pool(std::shared_ptr<accelerator::ogl::devic
             create_slot(slots_[i]);
         }
 
-        // Create FBOs for format-converting blit (16-bit pool from 8-bit source)
-        if (use_16bit_) {
-            glGenFramebuffers(1, &read_fbo_);
-            glGenFramebuffers(1, &draw_fbo_);
-        }
+        glGenFramebuffers(1, &read_fbo_);
+        glGenFramebuffers(1, &draw_fbo_);
     });
 
     CASPAR_LOG(info) << L"[vulkan_output] Shared texture pool created: "
-                     << width_ << L"x" << height_ << L" (" << BUFFER_COUNT << L" slots)";
+                     << width_ << L"x" << height_ << L" (" << BUFFER_COUNT << L" slots"
+                     << (use_linear_tiling_ ? L", LINEAR tiling" : L"") << L")";
 }
 
 shared_texture_pool::shared_texture_pool(vulkan_device& vk_device,
@@ -127,21 +158,37 @@ shared_texture_pool::shared_texture_pool(vulkan_device& vk_device,
     , width_(width)
     , height_(height)
     , use_16bit_(use_16bit)
+    , use_linear_tiling_(true) // Cross-GPU (affinity) path always uses LINEAR tiling.
+                               // Pascal GPUs have GL_EXT_memory_object tiling incompatibilities,
+                               // and affinity GL contexts are even more restrictive.
 {
+    // Verify LINEAR tiling support for our format+usage
+    VkFormat format = use_16bit_ ? VK_FORMAT_R16G16B16A16_UNORM : VK_FORMAT_R8G8B8A8_UNORM;
+    VkFormatProperties fmt_props;
+    vkGetPhysicalDeviceFormatProperties(vk_device_.physical_device(), format, &fmt_props);
+    const VkFormatFeatureFlags required = VK_FORMAT_FEATURE_TRANSFER_SRC_BIT |
+                                          VK_FORMAT_FEATURE_TRANSFER_DST_BIT |
+                                          VK_FORMAT_FEATURE_BLIT_SRC_BIT;
+    if ((fmt_props.linearTilingFeatures & required) != required) {
+        CASPAR_LOG(warning) << L"[vulkan_output] LINEAR tiling not fully supported for "
+                            << (use_16bit_ ? L"RGBA16" : L"RGBA8")
+                            << L" — falling back to OPTIMAL (may cause artifacts on Pascal GPUs)";
+        use_linear_tiling_ = false;
+    }
+
     // Affinity constructor: caller guarantees we're on a valid GL context thread
     load_gl_extensions();
     for (int i = 0; i < BUFFER_COUNT; ++i) {
         create_slot(slots_[i]);
     }
 
-    // Create FBOs for format-converting blit (16-bit pool from 8-bit source)
-    if (use_16bit_) {
-        glGenFramebuffers(1, &read_fbo_);
-        glGenFramebuffers(1, &draw_fbo_);
-    }
+    // Create FBOs for blit — always, not just 16-bit (see above).
+    glGenFramebuffers(1, &read_fbo_);
+    glGenFramebuffers(1, &draw_fbo_);
 
     CASPAR_LOG(info) << L"[vulkan_output] Shared texture pool created (affinity): "
-                     << width_ << L"x" << height_ << L" (" << BUFFER_COUNT << L" slots)";
+                     << width_ << L"x" << height_ << L" (" << BUFFER_COUNT << L" slots"
+                     << (use_linear_tiling_ ? L", LINEAR tiling" : L", OPTIMAL tiling") << L")";
 }
 
 shared_texture_pool::~shared_texture_pool()
@@ -184,9 +231,20 @@ void shared_texture_pool::create_slot(slot& s)
     img_info.mipLevels     = 1;
     img_info.arrayLayers   = 1;
     img_info.samples       = VK_SAMPLE_COUNT_1_BIT;
-    img_info.tiling        = VK_IMAGE_TILING_OPTIMAL;
-    img_info.usage         = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
-                             VK_IMAGE_USAGE_SAMPLED_BIT;
+    img_info.tiling        = use_linear_tiling_ ? VK_IMAGE_TILING_LINEAR : VK_IMAGE_TILING_OPTIMAL;
+    img_info.usage         = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    // SAMPLED_BIT is needed for the color conversion compute shader (reads via imageView).
+    // LINEAR tiling may not support it on all GPUs — check before adding.
+    if (!use_linear_tiling_) {
+        img_info.usage |= VK_IMAGE_USAGE_SAMPLED_BIT;
+    } else {
+        VkFormat format = use_16bit_ ? VK_FORMAT_R16G16B16A16_UNORM : VK_FORMAT_R8G8B8A8_UNORM;
+        VkFormatProperties fmt_props;
+        vkGetPhysicalDeviceFormatProperties(vk_device_.physical_device(), format, &fmt_props);
+        if (fmt_props.linearTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) {
+            img_info.usage |= VK_IMAGE_USAGE_SAMPLED_BIT;
+        }
+    }
     img_info.sharingMode   = VK_SHARING_MODE_EXCLUSIVE;
     img_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
@@ -349,10 +407,31 @@ void shared_texture_pool::blit_from_texture(GLuint source_texture_id, int width,
     int clamped_w = (std::min)(width, static_cast<int>(width_));
     int clamped_h = (std::min)(height, static_cast<int>(height_));
 
-    if (use_16bit_ && read_fbo_) {
-        // Format-converting blit via FBO (spec-compliant across all vendors).
-        // glCopyImageSubData requires matching texel sizes; RGBA8→RGBA16 is not
-        // portable. glBlitFramebuffer handles the format conversion correctly.
+    if (use_linear_tiling_) {
+        // LINEAR tiling path: use glCopyImageSubData. On Pascal GPUs with
+        // VK-external-memory-backed textures, glBlitFramebuffer (FBO rendering)
+        // silently fails (black output). glCopyImageSubData bypasses the
+        // rendering pipeline and performs a direct memory copy, which is
+        // compatible with LINEAR tiling's contiguous memory layout.
+        while (glGetError() != GL_NO_ERROR) {} // drain stale errors
+        glCopyImageSubData(source_texture_id, GL_TEXTURE_2D, 0, 0, 0, 0,
+                           s.gl_texture, GL_TEXTURE_2D, 0, 0, 0, 0,
+                           clamped_w, clamped_h, 1);
+        GLenum err = glGetError();
+        if (err != GL_NO_ERROR) {
+            static bool warned = false;
+            if (!warned) {
+                CASPAR_LOG(warning) << L"[shared_texture_pool] glCopyImageSubData failed: GL error 0x"
+                                    << std::hex << err << std::dec
+                                    << L" src=" << source_texture_id << L" dst=" << s.gl_texture
+                                    << L" " << clamped_w << L"x" << clamped_h
+                                    << L" write_idx=" << write_index_;
+                warned = true;
+            }
+        }
+    } else {
+        // OPTIMAL tiling path: use glBlitFramebuffer. Goes through the rendering
+        // pipeline which correctly handles vendor-specific optimal tiling layouts.
         glBindFramebuffer(GL_READ_FRAMEBUFFER, read_fbo_);
         glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, source_texture_id, 0);
         glBindFramebuffer(GL_DRAW_FRAMEBUFFER, draw_fbo_);
@@ -360,12 +439,36 @@ void shared_texture_pool::blit_from_texture(GLuint source_texture_id, int width,
         glBlitFramebuffer(0, 0, clamped_w, clamped_h, 0, 0, clamped_w, clamped_h,
                           GL_COLOR_BUFFER_BIT, GL_NEAREST);
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    } else {
-        // Same-format copy (both RGBA8 or both RGBA16) — glCopyImageSubData is safe.
-        glCopyImageSubData(source_texture_id, GL_TEXTURE_2D, 0, 0, 0, 0,
-                           s.gl_texture, GL_TEXTURE_2D, 0, 0, 0, 0,
-                           clamped_w, clamped_h, 1);
     }
+}
+
+void shared_texture_pool::upload_from_pbo(GLuint pbo, int width, int height, GLenum pixel_format, GLenum pixel_type)
+{
+    auto& s = slots_[write_index_];
+
+    int clamped_w = (std::min)(width, static_cast<int>(width_));
+    int clamped_h = (std::min)(height, static_cast<int>(height_));
+
+    while (glGetError() != GL_NO_ERROR) {} // drain stale errors
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, pbo);
+    glBindTexture(GL_TEXTURE_2D, s.gl_texture);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, clamped_w, clamped_h,
+                    pixel_format, pixel_type, nullptr);
+    GLenum err = glGetError();
+    if (err != GL_NO_ERROR) {
+        static bool warned = false;
+        if (!warned) {
+            CASPAR_LOG(warning) << L"[shared_texture_pool] upload_from_pbo glTexSubImage2D failed: GL error 0x"
+                                << std::hex << err << std::dec
+                                << L" pbo=" << pbo << L" tex=" << s.gl_texture
+                                << L" " << clamped_w << L"x" << clamped_h
+                                << L" fmt=0x" << std::hex << pixel_format << std::dec
+                                << L" write_idx=" << write_index_;
+            warned = true;
+        }
+    }
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
 }
 
 void shared_texture_pool::signal_gl()
@@ -373,8 +476,20 @@ void shared_texture_pool::signal_gl()
     auto& s = slots_[write_index_];
 
     // Signal the semaphore after the blit completes
+    while (glGetError() != GL_NO_ERROR) {} // drain stale errors
     GLenum dst_layout = GL_LAYOUT_GENERAL_EXT; // 0x958D from GL_EXT_semaphore
     glSignalSemaphoreEXT_(s.gl_semaphore, 0, nullptr, 1, &s.gl_texture, &dst_layout);
+    GLenum err = glGetError();
+    if (err != GL_NO_ERROR) {
+        static bool warned = false;
+        if (!warned) {
+            CASPAR_LOG(warning) << L"[shared_texture_pool] glSignalSemaphoreEXT failed: GL error 0x"
+                                << std::hex << err << std::dec
+                                << L" sem=" << s.gl_semaphore << L" tex=" << s.gl_texture
+                                << L" write_idx=" << write_index_;
+            warned = true;
+        }
+    }
 
     // Flush to ensure the signal is submitted to the GPU
     glFlush();

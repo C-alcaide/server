@@ -71,6 +71,14 @@ class shared_texture_pool
     // Called on OGL thread: copies from source OGL texture into current write slot
     void blit_from_texture(GLuint source_texture_id, int width, int height);
 
+    // Called on OGL thread: uploads PBO data directly into current write slot.
+    // Bypasses FBO blit — works around Pascal GPU driver bugs with FBO rendering
+    // to VK-external-memory textures on affinity GL contexts.
+    void upload_from_pbo(GLuint pbo, int width, int height, GLenum pixel_format, GLenum pixel_type);
+
+    // Returns the GL texture ID of the current write slot.
+    GLuint current_write_gl_texture() const { return slots_[write_index_].gl_texture; }
+
     // Called on OGL thread: signals that the write is complete
     void signal_gl();
 
@@ -115,6 +123,7 @@ class shared_texture_pool
     uint32_t                                  width_      = 0;
     uint32_t                                  height_     = 0;
     bool                                      use_16bit_  = false;
+    bool                                      use_linear_tiling_ = false;
 
     static constexpr int BUFFER_COUNT = 3;
     slot                 slots_[BUFFER_COUNT];

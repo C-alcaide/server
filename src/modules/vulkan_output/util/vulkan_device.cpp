@@ -24,6 +24,9 @@
 
 #include <algorithm>
 #include <cstring>
+#include <cstdlib>
+#include <filesystem>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 
@@ -154,6 +157,70 @@ vulkan_device::~vulkan_device()
 
 void vulkan_device::create_instance()
 {
+    // ── Filter stale Vulkan ICDs ─────────────────────────────────────────
+    // After a driver upgrade, old driver entries may remain in the Windows
+    // DriverStore. The Vulkan loader discovers ALL ICD JSON files and
+    // dispatches vkCreateDevice through each ICD. A stale ICD (from the
+    // previous driver) can hang the GPU when it tries to talk to the
+    // current kernel-mode driver, causing TDR exactly 2 seconds later.
+    //
+    // Fix: find all NVIDIA ICD JSON files, keep only the newest, and set
+    // VK_DRIVER_FILES to force the loader to use only the current ICD.
+    {
+        static std::once_flag icd_filter_once;
+        std::call_once(icd_filter_once, [] {
+            namespace fs = std::filesystem;
+            try {
+                fs::path driver_store = L"C:\\Windows\\System32\\DriverStore\\FileRepository";
+                if (!fs::exists(driver_store))
+                    return;
+
+                // Collect all nv-vk64.json files with their parent directory timestamps
+                struct icd_entry { fs::path json_path; fs::file_time_type dir_time; };
+                std::vector<icd_entry> icd_files;
+
+                for (auto& dir : fs::directory_iterator(driver_store)) {
+                    if (!dir.is_directory())
+                        continue;
+                    auto name = dir.path().filename().wstring();
+                    if (name.find(L"nv_disp") == std::wstring::npos &&
+                        name.find(L"nv_lh") == std::wstring::npos)
+                        continue;
+                    auto json = dir.path() / L"nv-vk64.json";
+                    if (fs::exists(json)) {
+                        icd_files.push_back({json, dir.last_write_time()});
+                    }
+                }
+
+                if (icd_files.size() <= 1)
+                    return;  // Only one ICD — no filtering needed
+
+                // Sort by directory timestamp, newest first
+                std::sort(icd_files.begin(), icd_files.end(),
+                          [](const icd_entry& a, const icd_entry& b) {
+                              return a.dir_time > b.dir_time;
+                          });
+
+                // Use only the newest ICD
+                auto& newest = icd_files[0].json_path;
+                std::wstring env_val = newest.wstring();
+                _wputenv_s(L"VK_DRIVER_FILES", env_val.c_str());
+
+                CASPAR_LOG(info) << L"[vulkan] Filtered " << icd_files.size()
+                                 << L" NVIDIA ICD(s) — using newest: "
+                                 << newest.filename().wstring()
+                                 << L" from " << newest.parent_path().filename().wstring();
+
+                for (size_t i = 1; i < icd_files.size(); ++i) {
+                    CASPAR_LOG(warning) << L"[vulkan] Skipping stale ICD: "
+                                        << icd_files[i].json_path.parent_path().filename().wstring();
+                }
+            } catch (const std::exception& e) {
+                CASPAR_LOG(debug) << L"[vulkan] ICD filtering skipped: " << e.what();
+            }
+        });
+    }
+
     VkApplicationInfo app_info{};
     app_info.sType              = VK_STRUCTURE_TYPE_APPLICATION_INFO;
     app_info.pApplicationName   = "CasparCG";
@@ -407,10 +474,57 @@ void vulkan_device::create_logical_device()
         for (const auto* ext : device_extensions)
             enabled_extensions_.emplace_back(ext);
 
-        // Chain global priority if the extension was enabled
-        if (std::find_if(device_extensions.begin(), device_extensions.end(), [](const char* e) {
-                return strcmp(e, VK_KHR_GLOBAL_PRIORITY_EXTENSION_NAME) == 0;
-            }) != device_extensions.end()) {
+        // Query supported global priorities for our queue family so we never
+        // attempt an unsupported priority.  A failed vkCreateDevice with an
+        // unsupported priority can hang the ICD and trigger TDR.
+        bool has_global_priority_ext = std::find_if(device_extensions.begin(), device_extensions.end(),
+            [](const char* e) { return strcmp(e, VK_KHR_GLOBAL_PRIORITY_EXTENSION_NAME) == 0; })
+            != device_extensions.end();
+
+        VkQueueGlobalPriorityKHR best_priority = VK_QUEUE_GLOBAL_PRIORITY_MEDIUM_KHR;
+        if (has_global_priority_ext) {
+            // Query which priorities the driver actually supports
+            VkQueueFamilyGlobalPriorityPropertiesKHR prio_props{};
+            prio_props.sType = VK_STRUCTURE_TYPE_QUEUE_FAMILY_GLOBAL_PRIORITY_PROPERTIES_KHR;
+
+            VkQueueFamilyProperties2 qf2{};
+            qf2.sType = VK_STRUCTURE_TYPE_QUEUE_FAMILY_PROPERTIES_2;
+            qf2.pNext = &prio_props;
+
+            uint32_t qf2_count = 0;
+            vkGetPhysicalDeviceQueueFamilyProperties2(physical_device_, &qf2_count, nullptr);
+            std::vector<VkQueueFamilyGlobalPriorityPropertiesKHR> all_prio(qf2_count, prio_props);
+            std::vector<VkQueueFamilyProperties2> all_qf2(qf2_count, qf2);
+            for (uint32_t i = 0; i < qf2_count; ++i)
+                all_qf2[i].pNext = &all_prio[i];
+            vkGetPhysicalDeviceQueueFamilyProperties2(physical_device_, &qf2_count, all_qf2.data());
+
+            if (present_queue_family_ < qf2_count && all_prio[present_queue_family_].priorityCount > 0) {
+                auto& pq = all_prio[present_queue_family_];
+                bool has_high = false, has_medium = false;
+                for (uint32_t i = 0; i < pq.priorityCount; ++i) {
+                    if (pq.priorities[i] == VK_QUEUE_GLOBAL_PRIORITY_HIGH_KHR)   has_high = true;
+                    if (pq.priorities[i] == VK_QUEUE_GLOBAL_PRIORITY_MEDIUM_KHR) has_medium = true;
+                }
+                if (has_high)
+                    best_priority = VK_QUEUE_GLOBAL_PRIORITY_HIGH_KHR;
+                else if (has_medium)
+                    best_priority = VK_QUEUE_GLOBAL_PRIORITY_MEDIUM_KHR;
+                else
+                    has_global_priority_ext = false;  // no useful priority available
+
+                CASPAR_LOG(info) << L"[vulkan] Queue family " << present_queue_family_
+                                 << L" supports " << pq.priorityCount << L" priority level(s)."
+                                 << L" Using: " << (best_priority == VK_QUEUE_GLOBAL_PRIORITY_HIGH_KHR ? L"HIGH" : L"MEDIUM");
+            } else {
+                // Query returned no priority info — don't risk it
+                has_global_priority_ext = false;
+                CASPAR_LOG(debug) << L"[vulkan] Could not query global priority support; skipping.";
+            }
+        }
+
+        if (has_global_priority_ext) {
+            priority_info.globalPriority = best_priority;
             queue_info.pNext = &priority_info;
             use_global_priority = true;
         }
@@ -431,34 +545,25 @@ void vulkan_device::create_logical_device()
         device_info.ppEnabledExtensionNames = device_extensions.data();
         device_info.pEnabledFeatures        = &features;
 
-        VkResult create_result = VK_ERROR_UNKNOWN;
+        VkResult create_result = vkCreateDevice(physical_device_, &device_info, nullptr, &device_);
 
-        // Try creating device with HIGH priority first, fall back to MEDIUM, then no priority
-        if (use_global_priority) {
-            priority_info.globalPriority = VK_QUEUE_GLOBAL_PRIORITY_HIGH_KHR;
-            create_result = vkCreateDevice(physical_device_, &device_info, nullptr, &device_);
-            if (create_result == VK_SUCCESS) {
-                CASPAR_LOG(info) << L"[vulkan] Queue created with HIGH global priority.";
-            } else {
-                CASPAR_LOG(debug) << L"[vulkan] HIGH priority rejected (code " << create_result
-                                  << L"), trying MEDIUM...";
-                priority_info.globalPriority = VK_QUEUE_GLOBAL_PRIORITY_MEDIUM_KHR;
-                create_result = vkCreateDevice(physical_device_, &device_info, nullptr, &device_);
-                if (create_result == VK_SUCCESS) {
-                    CASPAR_LOG(info) << L"[vulkan] Queue created with MEDIUM global priority.";
-                } else {
-                    CASPAR_LOG(debug) << L"[vulkan] MEDIUM priority rejected, creating without priority.";
-                    queue_info.pNext = nullptr;
-                    create_result = vkCreateDevice(physical_device_, &device_info, nullptr, &device_);
-                }
-            }
-        } else {
+        // If the priority request was rejected, retry without it
+        if (create_result != VK_SUCCESS && use_global_priority) {
+            CASPAR_LOG(warning) << L"[vulkan] vkCreateDevice with global priority failed (code "
+                                << create_result << L"), retrying without priority.";
+            queue_info.pNext = nullptr;
             create_result = vkCreateDevice(physical_device_, &device_info, nullptr, &device_);
         }
 
         if (create_result != VK_SUCCESS) {
             CASPAR_THROW_EXCEPTION(caspar_exception()
                                    << msg_info("vkCreateDevice failed: " + std::to_string(create_result)));
+        }
+
+        if (use_global_priority) {
+            CASPAR_LOG(info) << L"[vulkan] Queue created with "
+                             << (best_priority == VK_QUEUE_GLOBAL_PRIORITY_HIGH_KHR ? L"HIGH" : L"MEDIUM")
+                             << L" global priority.";
         }
     }
 

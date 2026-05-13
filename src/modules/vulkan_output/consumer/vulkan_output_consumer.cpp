@@ -51,8 +51,12 @@
 
 #include <boost/algorithm/string.hpp>
 
+#include <dwmapi.h>
+
 #include <chrono>
 #include <condition_variable>
+#include <cstdio>
+#include <cstdlib>
 #include <future>
 #include <iomanip>
 #include <mutex>
@@ -99,6 +103,36 @@ struct swapchain_resources
     void advance_frame() { current_frame = (current_frame + 1) % MAX_FRAMES_IN_FLIGHT; }
 };
 
+// ─── TDR self-termination watchdog ──────────────────────────────────────
+// After a TDR (VK_ERROR_DEVICE_LOST), Vulkan calls may block indefinitely
+// inside the kernel-mode NVIDIA driver, preventing the process from exiting.
+// This creates a zombie process that holds file locks and can only be freed
+// by a reboot or driver reset (Win+Ctrl+Shift+B).
+//
+// Solution: When any consumer detects DEVICE_LOST, start a one-shot watchdog
+// thread that calls TerminateProcess() after a grace period.  The grace period
+// allows clean shutdown to complete if possible.  The watchdog thread never
+// touches GPU APIs so it cannot be blocked by the driver.
+namespace {
+std::once_flag tdr_watchdog_flag;
+
+void start_tdr_watchdog(int grace_seconds = 10)
+{
+    std::call_once(tdr_watchdog_flag, [grace_seconds] {
+        std::thread([grace_seconds] {
+            SetThreadDescription(GetCurrentThread(), L"TDR Watchdog");
+            CASPAR_LOG(error) << L"[vulkan_output] TDR detected — process will be forcefully terminated in "
+                              << grace_seconds << L" seconds if shutdown does not complete.";
+            std::this_thread::sleep_for(std::chrono::seconds(grace_seconds));
+            CASPAR_LOG(fatal) << L"[vulkan_output] TDR watchdog: clean shutdown did not complete in "
+                              << grace_seconds << L"s — calling TerminateProcess to prevent zombie.";
+            boost::log::core::get()->flush();
+            TerminateProcess(GetCurrentProcess(), 1);
+        }).detach();
+    });
+}
+} // namespace
+
 // ─── Consumer implementation ────────────────────────────────────────────
 
 class vulkan_output_consumer : public core::frame_consumer
@@ -123,6 +157,15 @@ class vulkan_output_consumer : public core::frame_consumer
         format_desc_ = format_desc;
         port_index_  = port_index;
 
+        // Clamp delay_frames to buffer_depth - 1 to prevent the present loop
+        // from stalling permanently (min_fill = delay_frames + 1 must be ≤ buffer_depth).
+        if (config_.delay_frames >= config_.buffer_depth) {
+            CASPAR_LOG(warning) << print() << L" delay (" << config_.delay_frames
+                                << L") >= buffer-depth (" << config_.buffer_depth
+                                << L"). Clamping delay to " << (config_.buffer_depth - 1);
+            config_.delay_frames = config_.buffer_depth - 1;
+        }
+
         graph_->set_text(print());
         graph_->set_color("frame-time", diagnostics::color(0.1f, 1.0f, 0.1f));
         graph_->set_color("dropped-frame", diagnostics::color(0.9f, 0.2f, 0.2f));
@@ -140,16 +183,26 @@ class vulkan_output_consumer : public core::frame_consumer
         if (field == core::video_field::b)
             return caspar::make_ready_future(true);
 
+        diag_sends_.fetch_add(1, std::memory_order_relaxed);
+
         // Zero-copy path: blit OGL texture into shared pool via frame cache.
         // The frame cache ensures only one transfer per GPU per frame — the first
         // consumer to call submit_frame() does the actual blit, others wait.
         // For cross-GPU, the cache coordinates CUDA peer DMA or PBO upload.
-        if (frame_cache_ && !frame_cache_->is_cross_gpu() && frame.texture()) {
+        // Skip frame cache operations until the startup gate opens — doing a
+        // coordinator vkQueueSubmit while a peer consumer is still creating
+        // swapchains on the same VkDevice can trigger TDR.
+        if (gate_open_ && frame_cache_ && !frame_cache_->is_cross_gpu() && frame.texture()) {
             auto ogl_tex = std::dynamic_pointer_cast<accelerator::ogl::texture>(frame.texture());
             if (ogl_tex) {
                 auto* cache = frame_cache_.get();
                 ++frame_generation_;
-                cache->notify_frame(frame_generation_, [cache, ogl_tex, ogl_dev = ogl_device_] {
+                // Synchronous transfer: blit + GL signal + coordinator submit all
+                // happen HERE, so the timeline semaphore is guaranteed signaled
+                // before the frame enters the buffer.  Eliminates the pump thread
+                // race where present_frame could wait on a timeline value the pump
+                // hadn't signaled yet.
+                cache->submit_frame(frame_generation_, [cache, ogl_tex, ogl_dev = ogl_device_.get()] {
                     auto* pool = cache->pool();
                     auto* ictx = cache->interop_ctx();
                     if (ictx) {
@@ -186,7 +239,7 @@ class vulkan_output_consumer : public core::frame_consumer
             }
             if (!running_)
                 return caspar::make_ready_future(true);
-            buffer_.push(std::move(frame));
+            buffer_.push({std::move(frame), frame_generation_.load(std::memory_order_relaxed)});
         }
         buffer_cv_.notify_one();
 
@@ -366,9 +419,40 @@ class vulkan_output_consumer : public core::frame_consumer
             }
         }
 
-        // Start present thread
+        // Signal that this consumer's heavy init (window + surface + swapchain)
+        // is complete.  The present thread will wait for all peers on this GPU
+        // before starting to submit frames — preventing TDR caused by one
+        // consumer presenting while another is still creating its swapchain.
+        vk_device_manager::consumer_ready(config_.gpu_index);
+
+        // Start present thread (it will gate on wait_all_ready before presenting)
         running_ = true;
         present_thread_ = std::thread([this] { present_loop(); });
+
+        // Diagnostic watchdog: every second, if no frame completed since the
+        // last check, log the last reached stage of present_frame() so we can
+        // see where the present thread is wedged without spamming the log
+        // when frames are flowing.
+        watchdog_thread_ = std::thread([this] {
+            SetThreadDescription(GetCurrentThread(), L"VK Present Watchdog");
+            int last_submits = 0;
+            while (running_) {
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+                if (!running_) break;
+                int submits = diag_submits_.load(std::memory_order_relaxed);
+                if (submits == last_submits) {
+                    CASPAR_LOG(warning) << print() << L" WATCHDOG: no frame submitted in 1s. "
+                                        << L"stage=" << diag_stage_.load(std::memory_order_relaxed)
+                                        << L" gate=" << (gate_open_ ? 1 : 0)
+                                        << L" running=" << running_.load()
+                                        << L" buf=" << diag_buf_size_last_
+                                        << L" pres=" << diag_presents_.load()
+                                        << L" submits=" << submits
+                                        << L" gen=" << frame_generation_;
+                }
+                last_submits = submits;
+            }
+        });
 
         // Show identify overlay if configured
         if (config_.identify_on_start) {
@@ -650,18 +734,17 @@ class vulkan_output_consumer : public core::frame_consumer
         if (config_.sync_group == 0)
             return;
 
-        // Enable present barrier on swapchain if extension is present
-        // VK_NV_present_barrier provides automatic frame-lock across all swapchains
-        // in the same barrier group — the driver synchronizes presents.
-        present_barrier_enabled_ = device_->has_extension("VK_NV_present_barrier");
-
-        if (present_barrier_enabled_) {
-            CASPAR_LOG(info) << print() << L" Present barrier enabled for sync group " << config_.sync_group
-                             << L". Presents will be frame-locked by driver.";
-        } else {
-            CASPAR_LOG(warning) << print() << L" VK_NV_present_barrier not available. "
-                                << L"Sync group " << config_.sync_group << L" will use best-effort timing.";
-        }
+        // Join the software sync barrier.  All consumers in the same sync group
+        // will synchronize their present calls via a cv-based barrier in
+        // vk_device_manager.  This provides best-effort frame-lock without
+        // requiring Quadro Sync hardware.
+        //
+        // NOTE: VK_NV_present_barrier is NOT used here because it only works
+        // across swapchains on the SAME VkDevice.  Cross-GPU setups (different
+        // physical GPUs = different VkDevices) cause the driver to deadlock
+        // waiting for a peer that never arrives → TDR.
+        sync_group_token_ = vk_device_manager::sync_group_join(config_.sync_group);
+        CASPAR_LOG(info) << print() << L" Joined software sync group " << config_.sync_group;
     }
 
     void setup_nvapi()
@@ -729,58 +812,97 @@ class vulkan_output_consumer : public core::frame_consumer
     {
         SetThreadDescription(GetCurrentThread(), L"Vulkan Present");
 
+        // ── Startup gate: wait until ALL consumers on this GPU have finished
+        // their heavy init (window + surface + swapchain creation) before
+        // submitting any frames.  This prevents TDR caused by GPU contention
+        // between a presenting consumer and a peer still creating resources.
+        vk_device_manager::wait_all_ready(config_.gpu_index);
+        gate_open_ = true;  // Allow send() to use frame cache now
+
         // Wait until buffer has enough frames to satisfy the configured delay
         // before starting to present. This introduces a fixed N-frame latency
         // to video output, allowing operators to compensate for downstream
         // pipeline delay (scalers, audio de-embedders, LED processors).
         const auto min_fill = static_cast<size_t>(config_.delay_frames + 1);
 
-        // Frame pacer: With MAILBOX present mode, vkQueuePresentKHR returns
-        // immediately (no vsync blocking), so the present loop must self-pace
-        // to the target frame rate.
-        //
-        // Grid-aligned pacing: all outputs at the same frame rate converge to
-        // the same time grid regardless of when they were started. This ensures
-        // frame-accurate sync across multiple outputs on the same GPU — they
-        // all compute the same next-deadline independently and submit within
-        // the same vsync window.
-        //
-        // With FIFO mode (Quadro Sync / present_barrier), vkWaitForFences
-        // provides hardware-locked pacing and the sleep is a no-op.
+        // Frame pacer interval: used by the phase-aligned pacer (MAILBOX mode)
+        // to sleep until the next frame tick. Not used in FIFO mode (present
+        // barrier) where hardware provides the timing.
         const auto frame_interval_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::microseconds(static_cast<int64_t>(1'000'000.0 / format_desc_.fps)));
 
         while (running_) {
             core::const_frame frame;
+            uint64_t frame_gen = 0; // timeline generation for THIS frame
             {
                 std::unique_lock<std::mutex> lock(buffer_mutex_);
                 buffer_cv_.wait_for(lock, std::chrono::milliseconds(50),
                                     [this, min_fill] { return buffer_.size() >= min_fill || !running_; });
-                if (!running_)
+                if (!running_) {
                     break;
-                if (buffer_.size() < min_fill)
+                }
+                if (buffer_.size() < min_fill) {
+                    // Heartbeat once per second so we can see the present loop is
+                    // alive even when no frames are flowing.
+                    auto hb_now = std::chrono::steady_clock::now();
+                    auto hb_elapsed = std::chrono::duration_cast<std::chrono::duration<double>>(
+                        hb_now - fps_update_time_).count();
+                    if (hb_elapsed >= 1.0) {
+                        fps_update_time_ = hb_now;
+                        CASPAR_LOG(info) << print() << L" idle gate=" << (gate_open_ ? 1 : 0)
+                                         << L" buf=" << buffer_.size()
+                                         << L"/" << min_fill
+                                         << L" sends=" << diag_sends_.exchange(0)
+                                         << L" pres=" << diag_presents_.exchange(0)
+                                         << L" submits=" << diag_submits_.exchange(0)
+                                         << L" gen=" << frame_generation_;
+                    }
                     continue;
-                frame = std::move(buffer_.front());
+                }
+                diag_buf_size_last_ = static_cast<int>(buffer_.size());
+                auto& entry = buffer_.front();
+                frame     = std::move(entry.first);
+                frame_gen = entry.second;
                 buffer_.pop();
                 graph_->set_value("buffered-video",
                                   static_cast<double>(buffer_.size()) / config_.buffer_depth);
             }
             buffer_cv_.notify_one(); // Wake send() if it's blocking on full buffer
 
-            // Compute next grid-aligned deadline from steady_clock epoch.
-            // Every output at this fps computes the same deadline value,
-            // so they all wake and submit within microseconds of each other.
-            {
+            // Frame pacer: With MAILBOX present mode, vkQueuePresentKHR returns
+            // immediately (no vsync blocking), so the present loop must self-pace
+            // to the target frame rate.
+            //
+            // Phase-aligned pacing: instead of aligning to the steady_clock epoch
+            // (which has a random phase vs vsync, causing periodic judder), we
+            // align to the first frame's present time.  All outputs on the same
+            // GPU start their present loops after wait_all_ready() at the same
+            // moment, so they share the same phase and submit within microseconds
+            // of each other — preserving multi-output sync.
+            //
+            // With FIFO mode (Quadro Sync / present_barrier), vkWaitForFences
+            // provides hardware-locked pacing and the sleep is skipped entirely.
+            if (!present_barrier_enabled_) {
+                if (pacer_epoch_ns_ == 0) {
+                    // First frame: record epoch as now. All outputs that passed
+                    // wait_all_ready() at the same time get the same epoch.
+                    pacer_epoch_ns_ = std::chrono::steady_clock::now().time_since_epoch().count();
+                }
                 auto now_ns = std::chrono::steady_clock::now().time_since_epoch().count();
                 auto interval = frame_interval_ns.count();
-                auto next_tick_ns = ((now_ns / interval) + 1) * interval;
+                // Compute next tick relative to our epoch (not system boot)
+                auto elapsed_since_epoch = now_ns - pacer_epoch_ns_;
+                auto ticks_elapsed = elapsed_since_epoch / interval;
+                auto next_tick_ns = pacer_epoch_ns_ + (ticks_elapsed + 1) * interval;
                 std::this_thread::sleep_until(
                     std::chrono::steady_clock::time_point(
                         std::chrono::steady_clock::duration(next_tick_ns)));
+                if (!running_)
+                    break; // Exit promptly during shutdown — don't present another frame
             }
 
             caspar::timer frame_timer;
-            present_frame(frame);
+            present_frame(frame, frame_gen);
             auto frame_elapsed = frame_timer.elapsed();
             graph_->set_value("frame-time", frame_elapsed * format_desc_.fps * 0.5);
 
@@ -799,9 +921,17 @@ class vulkan_output_consumer : public core::frame_consumer
                 std::wstringstream stats;
                 stats.precision(2);
                 stats << std::fixed << print()
-                      << L" " << format_desc_.width << L"x" << format_desc_.height
+                      << L" " << swapchain_.width << L"x" << swapchain_.height
                       << L" fps: " << fps;
                 graph_->set_text(stats.str());
+                // Diagnostic: also log to file once per second so we can tell
+                // from the log whether the present loop is actually running.
+                CASPAR_LOG(info) << print() << L" fps=" << fps
+                                 << L" buf=" << diag_buf_size_last_
+                                 << L" sends=" << diag_sends_.exchange(0)
+                                 << L" pres=" << diag_presents_.exchange(0)
+                                 << L" submits=" << diag_submits_.exchange(0)
+                                 << L" gen=" << frame_generation_;
             }
 
         }
@@ -850,10 +980,16 @@ class vulkan_output_consumer : public core::frame_consumer
             blit.dstOffsets[0] = {dx, dy, 0};
             blit.dstOffsets[1] = {dx + dw, dy + dh, 1};
         } else {
+            // No explicit subregion: 1:1 pixel mapping, cropped to the smaller
+            // of source and destination.  This matches DeckLink behavior where
+            // the output naturally takes only the first output_width pixels of
+            // each line — no scaling ever happens.
+            int32_t copy_w = (std::min)(static_cast<int32_t>(src_width),  static_cast<int32_t>(swapchain_.width));
+            int32_t copy_h = (std::min)(static_cast<int32_t>(src_height), static_cast<int32_t>(swapchain_.height));
             blit.srcOffsets[0] = {0, 0, 0};
-            blit.srcOffsets[1] = {static_cast<int32_t>(src_width), static_cast<int32_t>(src_height), 1};
+            blit.srcOffsets[1] = {copy_w, copy_h, 1};
             blit.dstOffsets[0] = {0, 0, 0};
-            blit.dstOffsets[1] = {static_cast<int32_t>(swapchain_.width), static_cast<int32_t>(swapchain_.height), 1};
+            blit.dstOffsets[1] = {copy_w, copy_h, 1};
         }
 
         return blit;
@@ -904,6 +1040,7 @@ class vulkan_output_consumer : public core::frame_consumer
             CASPAR_LOG(error) << print() << L" Device lost during swapchain recreation. Output permanently halted.";
             display_lost_ = true;
             device_dead_  = true;
+            start_tdr_watchdog();
             return;
         }
 
@@ -956,8 +1093,19 @@ class vulkan_output_consumer : public core::frame_consumer
         CASPAR_LOG(info) << print() << L" Swapchain recreated successfully.";
     }
 
-    void present_frame(const core::const_frame& frame)
+    void present_frame(const core::const_frame& frame, uint64_t frame_gen)
     {
+        diag_presents_.fetch_add(1, std::memory_order_relaxed);
+        diag_stage_.store(1, std::memory_order_relaxed); // entered
+
+        // Fast-path bail during shutdown.
+        // that may block far beyond their nominal timeouts when the GPU/driver
+        // is in a bad state (NVIDIA vkAcquireNextImageKHR / vkWaitForFences can
+        // ignore their timeout argument and hang forever). Skip the whole thing
+        // once running_ goes false so the present loop exits within one cv tick.
+        if (!running_)
+            return;
+
         if (device_dead_) {
             if (adapter_mismatch_ && fse_hwnd_) {
                 present_frame_gdi(frame);
@@ -1000,10 +1148,14 @@ class vulkan_output_consumer : public core::frame_consumer
         // blocking indefinitely. With MAILBOX mode the fence is typically ready
         // immediately; with FIFO it may take up to one vsync period.
         const uint64_t fence_timeout_ns = static_cast<uint64_t>(2'000'000'000.0 / format_desc_.fps); // 2 frames in ns
+        diag_stage_.store(2, std::memory_order_relaxed); // waitFences
         auto fence_result = vkWaitForFences(dev, 1, &frame_sync.in_flight, VK_TRUE, fence_timeout_ns);
         if (fence_result == VK_TIMEOUT) {
             // GPU severely behind — skip this frame rather than stall further
             graph_->set_tag(diagnostics::tag_severity::WARNING, "dropped-frame");
+            return;
+        }
+        if (!running_) {
             return;
         }
         // NOTE: Don't reset fence here. Reset just before vkQueueSubmit so that
@@ -1013,13 +1165,24 @@ class vulkan_output_consumer : public core::frame_consumer
 
         // Acquire next swapchain image
         uint32_t image_index = 0;
+        diag_stage_.store(3, std::memory_order_relaxed); // acquire
         auto     result      = vkAcquireNextImageKHR(
             dev, swapchain_.swapchain, 1'000'000'000ULL, frame_sync.image_available, VK_NULL_HANDLE, &image_index);
+        if (!running_) {
+            return;
+        }
 
         if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) {
             // VK_SUBOPTIMAL means the acquire succeeded and signaled image_available.
             // We must reset the semaphore before retrying acquire after recreation,
             // otherwise the retry would double-signal an already-signaled semaphore (UB).
+            // Wait for our queue to drain first — the signaled semaphore may still
+            // be referenced by a pending GPU operation. Destroying it while in-flight
+            // is a Vulkan spec violation that can crash the driver.
+            {
+                std::lock_guard<std::mutex> queue_lock(device_->queue_mutex_for(my_queue_idx_));
+                vkQueueWaitIdle(my_queue_);
+            }
             vkDestroySemaphore(dev, frame_sync.image_available, nullptr);
             VkSemaphoreCreateInfo sem_info{};
             sem_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
@@ -1109,6 +1272,16 @@ class vulkan_output_consumer : public core::frame_consumer
 
             vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                                  VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &int_barrier);
+
+            // Clear intermediate to black when subregion is active, so the compute
+            // shader doesn't process uninitialized texels outside the blit region
+            // (NaN/denorm floats → garbage after PQ/HLG EOTF).
+            if (has_subregion()) {
+                VkClearColorValue clear_color = {{0.0f, 0.0f, 0.0f, 0.0f}};
+                VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+                vkCmdClearColorImage(cmd, color_pipeline_->image(),
+                                     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear_color, 1, &range);
+            }
         }
 
         // Output identification overlay: clear to a unique color for 3 seconds
@@ -1130,96 +1303,75 @@ class vulkan_output_consumer : public core::frame_consumer
             VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
             vkCmdClearColorImage(cmd, swapchain_.images[image_index],
                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear_color, 1, &range);
-        } else if (frame_cache_ && frame_cache_->pool() && frame_generation_ > 0) {
+        } else if (frame_cache_ && frame_cache_->pool() &&
+                   (frame_generation_ > 0 || frame_cache_->is_cross_gpu())) {
             // Frame cache path: shared pool was populated in send() (same-GPU)
-            // or cross-GPU transfer was done in send() via submit_frame().
+            // or cross-GPU uses CPU staging (Pascal GL→VK interop is broken).
             auto* pool = frame_cache_->pool();
 
-            // Cross-GPU: perform transfer now if not yet done for this frame.
-            // frame_generation_ is only incremented here for cross-GPU (not in send()),
-            // so the present thread is the sole writer — no data race.
+            // Check if we have valid frame data to transfer.
+            bool has_frame_data = false;
             if (frame_cache_->is_cross_gpu()) {
-                ++frame_generation_;
-                auto* cache = frame_cache_.get();
-                cache->submit_frame(frame_generation_, [&, cache] {
-                    bool transferred = false;
-#ifdef CASPAR_CUDA_PEER_ENABLED
-                    auto* cuda = cache->cuda_peer();
-                    if (cuda && frame.texture()) {
-                        auto ogl_tex = std::dynamic_pointer_cast<accelerator::ogl::texture>(frame.texture());
-                        if (ogl_tex) {
-                            try {
-                                ogl_device_->dispatch_sync([&] {
-                                    cuda->read_source(ogl_tex->id(), ogl_tex->width(), ogl_tex->height());
-                                });
-                                cuda->peer_copy();
-                                cache->affinity_ctx()->dispatch_sync([&] {
-                                    cuda->write_dest();
-                                    pool->blit_from_texture(
-                                        cuda->dest_texture(), format_desc_.width, format_desc_.height);
-                                    pool->signal_gl();
-                                });
-                                transferred = true;
-                            } catch (const std::exception& e) {
-                                CASPAR_LOG(warning) << print()
-                                    << L" CUDA peer failed, PBO fallback: " << e.what();
-                            }
-                        }
-                    }
-                    if (!transferred)
-#endif
-                    {
-                        const auto& img = frame.image_data(0);
-                        const auto* pixels = img.data();
-                        if (pixels && img.size() > 0 && cache->affinity_ctx()) {
-                            cache->affinity_ctx()->dispatch_sync([&] {
-                                GLuint tex_id = cache->affinity_ctx()->upload_frame(
-                                    pixels, format_desc_.width, format_desc_.height, format_desc_.width * 4);
-                                pool->blit_from_texture(tex_id, format_desc_.width, format_desc_.height);
-                                pool->signal_gl();
-                            });
-                            transferred = true;
-                        }
-                    }
-                    if (transferred) {
-                        pool->swap();
-                    }
-                });
+                has_frame_data = frame.texture() || (frame.image_data(0).data() && frame.image_data(0).size() > 0);
+            } else {
+                has_frame_data = !!frame.texture();
             }
 
-            // Transition shared image for transfer src.
-            // IMPORTANT: oldLayout must be GENERAL (not UNDEFINED) to preserve GL-written data.
-            // GL→VK interop images are always in GENERAL after glSignalSemaphoreEXT.
-            // Using UNDEFINED would allow the driver to discard the image contents.
-            VkImageMemoryBarrier src_barrier{};
-            src_barrier.sType                           = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-            src_barrier.oldLayout                       = VK_IMAGE_LAYOUT_GENERAL;
-            src_barrier.newLayout                       = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-            src_barrier.srcQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
-            src_barrier.dstQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
-            src_barrier.image                           = pool->current_vk_image();
-            src_barrier.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
-            src_barrier.subresourceRange.baseMipLevel   = 0;
-            src_barrier.subresourceRange.levelCount     = 1;
-            src_barrier.subresourceRange.baseArrayLayer = 0;
-            src_barrier.subresourceRange.layerCount     = 1;
-            src_barrier.srcAccessMask                   = 0;
-            src_barrier.dstAccessMask                   = VK_ACCESS_TRANSFER_READ_BIT;
+            if (!has_frame_data) {
+                VkClearColorValue clear_color = {{0.0f, 0.0f, 0.0f, 1.0f}};
+                VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+                vkCmdClearColorImage(cmd, swapchain_.images[image_index],
+                                     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear_color, 1, &range);
+            } else if (frame_cache_->is_cross_gpu()) {
+                // Cross-GPU: use CPU staging buffer → vkCmdCopyBufferToImage.
+                // Pascal GPUs cannot write to VK-external-memory textures via GL
+                // (glCopyImageSubData → GL_OUT_OF_MEMORY, glTexSubImage2D → black).
+                // Pure Vulkan staging avoids GL interop entirely.
+                upload_frame_cpu(frame, blit_dest_image, cmd);
+                if (color_convert_active) {
+                    wrote_to_intermediate = true;
+                }
+            } else {
+                // Same-GPU: shared pool was populated in send() via submit_frame().
+                // Transition shared image for transfer src.
+                VkImageMemoryBarrier src_barrier{};
+                src_barrier.sType                           = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                src_barrier.oldLayout                       = VK_IMAGE_LAYOUT_GENERAL;
+                src_barrier.newLayout                       = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+                src_barrier.srcQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
+                src_barrier.dstQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
+                src_barrier.image                           = pool->current_vk_image();
+                src_barrier.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+                src_barrier.subresourceRange.baseMipLevel   = 0;
+                src_barrier.subresourceRange.levelCount     = 1;
+                src_barrier.subresourceRange.baseArrayLayer = 0;
+                src_barrier.subresourceRange.layerCount     = 1;
+                src_barrier.srcAccessMask                   = 0;
+                src_barrier.dstAccessMask                   = VK_ACCESS_TRANSFER_READ_BIT;
 
-            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                                 VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &src_barrier);
+                vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                                     VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &src_barrier);
 
-            auto blit_region = compute_blit_region(pool->width(), pool->height());
-            vkCmdBlitImage(cmd, pool->current_vk_image(),
-                           VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                           blit_dest_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                           1, &blit_region, VK_FILTER_LINEAR);
+                auto blit_region = compute_blit_region(pool->width(), pool->height());
+                vkCmdBlitImage(cmd, pool->current_vk_image(),
+                               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                               blit_dest_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                               1, &blit_region, VK_FILTER_LINEAR);
 
-            used_shared_pool = true;
-            wrote_to_intermediate = color_convert_active;
+                used_shared_pool = true;
+                wrote_to_intermediate = color_convert_active;
+            }
+        } else if (frame_cache_ && frame_cache_->pool()) {
+            // Pool exists but not yet populated (gen=0, no OGL texture received yet).
+            // Clear to black — the CPU upload path uses format_desc_ (channel resolution)
+            // which may exceed the swapchain image dimensions, causing an out-of-bounds
+            // GPU write and TDR.
+            VkClearColorValue clear_color = {{0.0f, 0.0f, 0.0f, 1.0f}};
+            VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+            vkCmdClearColorImage(cmd, swapchain_.images[image_index],
+                                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear_color, 1, &range);
         } else {
-            // CPU fallback: upload pixel data via staging buffer
-            // Always targets swapchain — BGRA8 pixels are incompatible with RGBA16F intermediate
+            // No frame cache or pool — CPU fallback: upload pixel data via staging buffer
             upload_frame_cpu(frame, swapchain_.images[image_index], cmd);
         }
 
@@ -1306,21 +1458,8 @@ class vulkan_output_consumer : public core::frame_consumer
                                                    VK_PIPELINE_STAGE_TRANSFER_BIT};
         uint32_t             wait_count         = 1;
 
-        // Timeline semaphore values array (must match wait_semaphores count).
-        // Binary semaphores use value 0 (ignored). Timeline uses the frame generation.
-        uint64_t             wait_values[2]     = {0, 0};
-
-        VkTimelineSemaphoreSubmitInfo timeline_submit{};
-        timeline_submit.sType                     = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
-        timeline_submit.waitSemaphoreValueCount   = wait_count; // Must match submit_info.waitSemaphoreCount
-        timeline_submit.pWaitSemaphoreValues      = wait_values;
-        timeline_submit.signalSemaphoreValueCount = 1;
-        uint64_t signal_value                     = 0; // render_finished is binary
-        timeline_submit.pSignalSemaphoreValues    = &signal_value;
-
         VkSubmitInfo submit_info{};
         submit_info.sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-        submit_info.pNext                = &timeline_submit;
         submit_info.waitSemaphoreCount   = wait_count;
         submit_info.pWaitSemaphores      = wait_semaphores;
         submit_info.pWaitDstStageMask    = wait_stages;
@@ -1329,36 +1468,63 @@ class vulkan_output_consumer : public core::frame_consumer
         submit_info.signalSemaphoreCount = 1;
         submit_info.pSignalSemaphores    = &frame_sync.render_finished;
 
-        // Add timeline semaphore wait if shared pool was used.
-        // The coordinator submit (in frame_cache) bridges the binary GL→VK semaphore
-        // to the timeline, so ALL consumers can independently wait on the same value.
+        // Only chain VkTimelineSemaphoreSubmitInfo when we actually have a
+        // timeline semaphore to wait on.  Some drivers mis-handle the pNext
+        // chain when all semaphores are binary.
+        VkTimelineSemaphoreSubmitInfo timeline_submit{};
+        uint64_t wait_values[2]  = {0, 0};
+        uint64_t signal_value    = 0;
+
         if (used_shared_pool && frame_cache_ && frame_cache_->timeline_semaphore() != VK_NULL_HANDLE) {
             wait_semaphores[1] = frame_cache_->timeline_semaphore();
-            wait_values[1]     = frame_generation_;  // Wait for our frame's transfer to complete
+            wait_values[1]     = frame_gen;  // Wait for THIS frame's transfer to complete
             wait_count         = 2;
-            submit_info.waitSemaphoreCount        = wait_count;
-            timeline_submit.waitSemaphoreValueCount = wait_count;
+
+            timeline_submit.sType                     = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+            timeline_submit.waitSemaphoreValueCount   = wait_count;
+            timeline_submit.pWaitSemaphoreValues      = wait_values;
+            timeline_submit.signalSemaphoreValueCount = 1;
+            timeline_submit.pSignalSemaphoreValues    = &signal_value;
+
+            submit_info.pNext              = &timeline_submit;
+            submit_info.waitSemaphoreCount = wait_count;
         }
 
         VkResult submit_result;
         VkResult present_result;
 
+        // Software sync barrier: wait for all consumers in the sync group
+        // to reach this point before submitting.  Aligns present calls to
+        // within ~1ms across GPUs without Quadro Sync hardware.
+        if (config_.sync_group > 0 && sync_group_token_) {
+            vk_device_manager::sync_group_wait(config_.sync_group);
+        }
+
         // Lock per-queue mutex — if multiple consumers share a physical queue
         // (wrapping), this serializes their vkQueueSubmit/vkQueuePresentKHR calls.
+        diag_stage_.store(5, std::memory_order_relaxed); // pre queue_lock
         std::lock_guard<std::mutex> queue_lock(device_->queue_mutex_for(my_queue_idx_));
-
         // Reset fence just before submit. This is deliberately late — earlier in
         // present_frame() there are multiple early-return paths (surface lost,
         // acquire timeout, FSE lost). If we reset the fence before those checks,
         // an early return would leave the fence unsignaled and the next use of
         // this frame slot would timeout waiting for it.
         vkResetFences(dev, 1, &frame_sync.in_flight);
-
+        diag_stage_.store(6, std::memory_order_relaxed); // submit
         submit_result = vkQueueSubmit(my_queue_, 1, &submit_info, frame_sync.in_flight);
+        if (submit_result == VK_SUCCESS)
+            diag_submits_.fetch_add(1, std::memory_order_relaxed);
+
         if (submit_result == VK_ERROR_DEVICE_LOST) {
-            CASPAR_LOG(error) << print() << L" GPU device lost (TDR) during submit. Output halted.";
+            CASPAR_LOG(error) << print() << L" GPU device lost (TDR) during submit."
+                              << L" queue=" << my_queue_idx_
+                              << L" waits=" << submit_info.waitSemaphoreCount
+                              << L" timeline=" << (submit_info.pNext ? L"yes" : L"no")
+                              << L" gen=" << frame_generation_
+                              << L" Output halted.";
             display_lost_ = true;
             device_dead_  = true;
+            start_tdr_watchdog();
             return;
         }
 
@@ -1370,7 +1536,7 @@ class vulkan_output_consumer : public core::frame_consumer
         present_info.swapchainCount     = 1;
         present_info.pSwapchains        = &swapchain_.swapchain;
         present_info.pImageIndices      = &image_index;
-
+        diag_stage_.store(7, std::memory_order_relaxed); // present
         present_result = vkQueuePresentKHR(my_queue_, &present_info);
 
         if (present_result == VK_ERROR_OUT_OF_DATE_KHR || present_result == VK_SUBOPTIMAL_KHR) {
@@ -1385,6 +1551,7 @@ class vulkan_output_consumer : public core::frame_consumer
             CASPAR_LOG(error) << print() << L" GPU device lost (TDR) during present. Output halted.";
             display_lost_ = true;
             device_dead_  = true;
+            start_tdr_watchdog();
             return;
         }
 
@@ -1551,17 +1718,55 @@ class vulkan_output_consumer : public core::frame_consumer
         memcpy(mapped, pixels, size);
         vkUnmapMemory(dev, staging_memory_);
 
+        // Clear the destination image first if the copy won't cover the entire
+        // surface, so borders don't contain undefined content.
+        {
+            VkClearColorValue clear_color = {{0.0f, 0.0f, 0.0f, 1.0f}};
+            VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+            vkCmdClearColorImage(cmd, dst_image,
+                                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear_color, 1, &range);
+        }
+
         // Copy buffer → image
+        // For cross-GPU with subregion, use bufferRowLength and bufferOffset
+        // to copy only the cropped region from the staging buffer.
         VkBufferImageCopy region{};
-        region.bufferOffset      = 0;
-        region.bufferRowLength   = 0;
         region.bufferImageHeight = 0;
         region.imageSubresource  = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-        region.imageOffset       = {0, 0, 0};
-        // Use actual frame dimensions — the pixel buffer is format_desc_ sized, not swapchain sized.
-        // Using swapchain dimensions would overread the buffer if swapchain > frame.
-        region.imageExtent       = {static_cast<uint32_t>(format_desc_.width),
-                                    static_cast<uint32_t>(format_desc_.height), 1};
+
+        if (has_subregion()) {
+            const int32_t fw = format_desc_.width;
+            const int32_t fh = format_desc_.height;
+            const int32_t dw = static_cast<int32_t>(swapchain_.width);
+            const int32_t dh = static_cast<int32_t>(swapchain_.height);
+
+            int32_t sx = (std::clamp)(config_.src_x, 0, fw);
+            int32_t sy = (std::clamp)(config_.src_y, 0, fh);
+            int32_t sw = config_.region_w > 0 ? config_.region_w : fw - sx;
+            int32_t sh = config_.region_h > 0 ? config_.region_h : fh - sy;
+            sw = (std::min)(sw, fw - sx);
+            sh = (std::min)(sh, fh - sy);
+            // Clamp to destination
+            int32_t dx = (std::clamp)(config_.dest_x, 0, dw);
+            int32_t dy = (std::clamp)(config_.dest_y, 0, dh);
+            sw = (std::min)(sw, dw - dx);
+            sh = (std::min)(sh, dh - dy);
+
+            if (sw <= 0 || sh <= 0) return;
+
+            region.bufferOffset    = (static_cast<VkDeviceSize>(sy) * fw + sx) * 4;
+            region.bufferRowLength = static_cast<uint32_t>(fw);
+            region.imageOffset     = {dx, dy, 0};
+            region.imageExtent     = {static_cast<uint32_t>(sw), static_cast<uint32_t>(sh), 1};
+        } else {
+            // No subregion: copy full frame (original behavior).
+            // Use actual frame dimensions — the pixel buffer is format_desc_ sized.
+            region.bufferOffset    = 0;
+            region.bufferRowLength = 0;
+            region.imageOffset     = {0, 0, 0};
+            region.imageExtent     = {static_cast<uint32_t>(format_desc_.width),
+                                      static_cast<uint32_t>(format_desc_.height), 1};
+        }
 
         vkCmdCopyBufferToImage(cmd, staging_buffer_, dst_image,
                                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
@@ -1575,7 +1780,9 @@ class vulkan_output_consumer : public core::frame_consumer
             case WM_CLOSE:
                 return 0; // Ignore — we manage window lifetime explicitly
             case WM_SYSCOMMAND:
-                if ((wParam & 0xFFF0) == SC_CLOSE)
+                if ((wParam & 0xFFF0) == SC_CLOSE ||
+                    (wParam & 0xFFF0) == SC_MINIMIZE ||
+                    (wParam & 0xFFF0) == SC_RESTORE)
                     return 0;
                 break;
             case WM_MOUSEACTIVATE:
@@ -1583,6 +1790,19 @@ class vulkan_output_consumer : public core::frame_consumer
             case WM_SETCURSOR:
                 SetCursor(nullptr); // Hide cursor on output windows
                 return TRUE;
+            case WM_WINDOWPOSCHANGING: {
+                // Prevent DWM or other windows from minimizing/resizing/moving
+                auto* pos = reinterpret_cast<WINDOWPOS*>(lParam);
+                pos->flags |= SWP_NOMOVE | SWP_NOSIZE;
+                // Block hide (Win+D, Aero Peek, Show Desktop)
+                if (pos->flags & SWP_HIDEWINDOW)
+                    pos->flags &= ~SWP_HIDEWINDOW;
+                return 0;
+            }
+            case WM_SIZE:
+                if (wParam == SIZE_MINIMIZED)
+                    return 0; // Block minimize
+                break;
             case WM_ERASEBKGND: {
                 // Paint solid black to ensure window is visually opaque
                 // even before the first Vulkan present.
@@ -1811,10 +2031,20 @@ class vulkan_output_consumer : public core::frame_consumer
                 y = -32000;
             }
 
-            HWND hwnd = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_APPWINDOW,
+            HWND hwnd = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
                                         L"CasparVulkanOutput", L"CasparCG Vulkan Output",
                                         WS_POPUP | WS_VISIBLE, x, y, w, h,
                                         nullptr, nullptr, GetModuleHandle(nullptr), nullptr);
+
+            // ── DWM protection: prevent Aero Peek / Show Desktop from hiding this window ──
+            {
+                BOOL exclude_peek = TRUE;
+                DwmSetWindowAttribute(hwnd, DWMWA_EXCLUDED_FROM_PEEK,
+                                      &exclude_peek, sizeof(exclude_peek));
+                BOOL disallow_peek = TRUE;
+                DwmSetWindowAttribute(hwnd, DWMWA_DISALLOW_PEEK,
+                                      &disallow_peek, sizeof(disallow_peek));
+            }
 
             // Attach to the foreground thread's input queue so that
             // SetForegroundWindow works reliably from a background thread.
@@ -1880,8 +2110,63 @@ class vulkan_output_consumer : public core::frame_consumer
     {
         running_ = false;
         buffer_cv_.notify_all();
-        if (present_thread_.joinable())
-            present_thread_.join();
+        // Wake any present thread blocked in frame_cache_->submit_frame() or
+        // the pump cv. Without this, a consumer parked waiting for a peer
+        // consumer's stalled transfer would never see running_ flip and the
+        // present_thread join would time out.
+        if (frame_cache_)
+            frame_cache_->request_shutdown();
+
+        // Join watchdog first — it only sleeps 1s so this is fast.
+        if (watchdog_thread_.joinable()) {
+            try { watchdog_thread_.join(); } catch (...) {}
+        }
+
+        // Join present thread with a hard timeout. The present thread can get stuck
+        // in cross-GPU dispatch_sync (ogl_device or affinity_ctx) if those executors
+        // are blocked during shutdown. Without a timeout, this makes the process
+        // unkillable (zombie).
+        //
+        // CRITICAL: We MUST NOT detach() a present thread that holds Vulkan/CUDA/GL
+        // resources (imported external memory, timeline semaphores, swapchain images,
+        // CUDA peer contexts). A detached zombie thread continues poking the NVIDIA
+        // kernel-mode driver with stale handles; after a few minutes the WDDM scheduler
+        // deadlocks and HANGS THE ENTIRE MACHINE (observed: Kernel-Power 41 critical,
+        // no minidump, hard reset required).
+        //
+        // The only safe action when the present thread refuses to exit is
+        // TerminateProcess(). std::_Exit / ExitProcess are NOT sufficient because
+        // they run DllMain(DLL_PROCESS_DETACH) on every loaded DLL — the NVIDIA
+        // driver DLL will wait for our zombie thread inside its DllMain and
+        // deadlock inside ExitProcess. TerminateProcess bypasses DllMain entirely.
+        if (present_thread_.joinable()) {
+            bool joined = false;
+            try {
+                auto join_future = std::async(std::launch::async, [this] {
+                    present_thread_.join();
+                });
+                // Poll the join every second so we can log when it actually exits
+                // and see if it just took longer than the previous 5s budget.
+                for (int sec = 1; sec <= 5; ++sec) {
+                    if (join_future.wait_for(std::chrono::seconds(1)) == std::future_status::ready) {
+                        joined = true;
+                        break;
+                    }
+                }
+                if (!joined) {
+                    CASPAR_LOG(fatal) << print() << L" Present thread join timed out (5s). "
+                                                    L"Calling TerminateProcess to prevent WDDM kernel deadlock "
+                                                    L"(detaching or ExitProcess can hang the OS via DllMain).";
+                    boost::log::core::get()->flush();
+                    ::TerminateProcess(::GetCurrentProcess(), 0);
+                }
+            } catch (...) {
+                CASPAR_LOG(fatal) << print() << L" Present thread join threw — calling TerminateProcess.";
+                boost::log::core::get()->flush();
+                ::TerminateProcess(::GetCurrentProcess(), 0);
+            }
+            (void)joined;
+        }
 
         if (device_) {
             auto dev = device_->device();
@@ -1889,15 +2174,20 @@ class vulkan_output_consumer : public core::frame_consumer
             // Wait for GPU to finish with a hard timeout to prevent unkillable process.
             // NVIDIA driver can hang indefinitely in vkQueueWaitIdle when display timing
             // is disrupted (disconnected, TDR, or GL contention deadlock).
-            // If timeout fires, skip ALL Vulkan resource destruction.
+            // If timeout fires, the GPU subsystem is wedged — any further VK/GL/CUDA
+            // calls from other consumers' destructors will hang the WDDM scheduler and
+            // can take down the entire OS. TerminateProcess to bypass DllMain.
             bool gpu_stuck = device_dead_.load();
             if (!gpu_stuck) {
                 auto idle_future = std::async(std::launch::async, [this] {
                     return vkQueueWaitIdle(my_queue_);
                 });
                 if (idle_future.wait_for(std::chrono::seconds(2)) == std::future_status::timeout) {
-                    CASPAR_LOG(warning) << print() << L" vkQueueWaitIdle timed out (2s) — skipping Vulkan cleanup.";
-                    gpu_stuck = true;
+                    CASPAR_LOG(fatal) << print() << L" vkQueueWaitIdle timed out (2s). "
+                                                    L"GPU subsystem wedged — calling TerminateProcess "
+                                                    L"to prevent WDDM kernel deadlock.";
+                    boost::log::core::get()->flush();
+                    ::TerminateProcess(::GetCurrentProcess(), 0);
                 } else {
                     idle_future.get(); // Collect result (ignore errors during shutdown)
                 }
@@ -1942,10 +2232,10 @@ class vulkan_output_consumer : public core::frame_consumer
                 }
                 device_.reset();
             } else {
-                // Release without calling destructors that touch VkDevice.
-                // The leaked async thread holds a VkDevice reference that prevents kernel cleanup,
-                // but the OS will reclaim all GPU resources when the process terminates.
-                color_pipeline_.release();
+                // GPU is stuck but vkDestroy* calls are safe on a lost device — they
+                // are no-ops or return immediately. Using reset() instead of release()
+                // ensures Vulkan objects are properly freed rather than leaked.
+                color_pipeline_.reset();
                 frame_cache_.reset(); // shared_ptr — safe to reset even if stuck
                 device_.reset();
             }
@@ -2000,14 +2290,15 @@ class vulkan_output_consumer : public core::frame_consumer
     uint32_t                         my_queue_idx_ = 0; // Exclusive queue for this consumer
     VkQueue                          my_queue_ = VK_NULL_HANDLE;
 
-    // Frame buffer
-    std::queue<core::const_frame>    buffer_;
+    // Frame buffer (frame + its associated timeline generation)
+    std::queue<std::pair<core::const_frame, uint64_t>> buffer_;
     std::mutex                       buffer_mutex_;
     std::condition_variable          buffer_cv_;
 
     // Present thread
     std::thread                      present_thread_;
     std::atomic<bool>                running_{false};
+    std::atomic<bool>                gate_open_{false}; // True once all peers on this GPU are ready
 
     // FSE window message thread
     std::thread                      fse_msg_thread_;
@@ -2018,11 +2309,12 @@ class vulkan_output_consumer : public core::frame_consumer
     std::atomic<bool>                device_dead_{false}; // TDR — device permanently invalid
     bool                             adapter_mismatch_{false}; // Display on different GPU — no Vulkan presentation
     uint64_t                         hotplug_retry_counter_ = 0;
-    std::atomic<uint64_t>            frames_presented_{0};
-    uint64_t                         frame_generation_{0};  // Monotonic counter for frame cache coordination
+    std::atomic<uint64_t>                frames_presented_{0};
+    std::atomic<uint64_t>                frame_generation_{0};  // Monotonic counter for frame cache coordination
 
     // Present barrier
     bool                             present_barrier_enabled_ = false;
+    std::shared_ptr<void>            sync_group_token_;  // Software present barrier membership
     bool                             fse_acquired_ = false; // VK_EXT_full_screen_exclusive acquired
 
     // Hardware HDR (NvAPI display engine)
@@ -2034,10 +2326,24 @@ class vulkan_output_consumer : public core::frame_consumer
 
     // Timing
     caspar::timer                    tick_timer_;
+    int64_t                          pacer_epoch_ns_ = 0; // First-frame epoch for phase-aligned pacing
 
     // FPS counter
     std::chrono::steady_clock::time_point fps_update_time_ = std::chrono::steady_clock::now();
     int                              fps_frame_count_ = 0;
+
+    // Diagnostic counters (atomic so send/present threads can both increment)
+    std::atomic<int> diag_sends_{0};      // calls to send()
+    std::atomic<int> diag_presents_{0};   // entries to present_frame
+    std::atomic<int> diag_submits_{0};    // successful vkQueueSubmits
+    int              diag_buf_size_last_ = 0; // last buffer size before pop
+    // Stage marker for watchdog: incremented at each milestone in present_frame.
+    // Values: 0=idle, 1=entered, 2=waitFences, 3=acquired, 4=cache_submit,
+    // 5=blit_recorded, 6=submitted, 7=presented
+    std::atomic<int> diag_stage_{0};
+    std::thread      watchdog_thread_;
+
+
 
     // CPU staging
     VkBuffer                         staging_buffer_      = VK_NULL_HANDLE;

@@ -30,6 +30,7 @@
 #include <windows.h>
 #include <shellapi.h>
 #include <commctrl.h>
+#include <dwmapi.h>
 
 #include <algorithm>
 #include <string>
@@ -38,6 +39,7 @@
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "advapi32.lib")
+#pragma comment(lib, "dwmapi.lib")
 
 // Icon resource ID (must match .rc file)
 #define IDI_APP_ICON 101
@@ -273,9 +275,26 @@ static LRESULT CALLBACK blanker_wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPA
             EndPaint(hwnd, &ps);
             return 0;
         }
-        case WM_CLOSE:        return 0;
+        case WM_CLOSE:         return 0;
         case WM_MOUSEACTIVATE: return MA_NOACTIVATEANDEAT;
-        case WM_SETCURSOR:    SetCursor(nullptr); return TRUE;
+        case WM_SETCURSOR:     SetCursor(nullptr); return TRUE;
+        case WM_SYSCOMMAND:
+            if ((wParam & 0xFFF0) == SC_MINIMIZE ||
+                (wParam & 0xFFF0) == SC_RESTORE ||
+                (wParam & 0xFFF0) == SC_CLOSE)
+                return 0;
+            break;
+        case WM_WINDOWPOSCHANGING: {
+            auto* pos = reinterpret_cast<WINDOWPOS*>(lParam);
+            pos->flags |= SWP_NOMOVE | SWP_NOSIZE;
+            if (pos->flags & SWP_HIDEWINDOW)
+                pos->flags &= ~SWP_HIDEWINDOW;
+            return 0;
+        }
+        case WM_SIZE:
+            if (wParam == SIZE_MINIMIZED)
+                return 0;
+            break;
     }
     return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
@@ -305,6 +324,13 @@ static void create_blanker_windows()
             m.rect.left, m.rect.top, w, h,
             nullptr, nullptr, g_instance, nullptr);
         if (hwnd) {
+            // DWM protection: keep blanker visible during Aero Peek / Show Desktop
+            BOOL exclude_peek = TRUE;
+            DwmSetWindowAttribute(hwnd, DWMWA_EXCLUDED_FROM_PEEK,
+                                  &exclude_peek, sizeof(exclude_peek));
+            BOOL disallow_peek = TRUE;
+            DwmSetWindowAttribute(hwnd, DWMWA_DISALLOW_PEEK,
+                                  &disallow_peek, sizeof(disallow_peek));
             ShowWindow(hwnd, SW_SHOWNOACTIVATE);
             g_blanker_windows.push_back(hwnd);
         }

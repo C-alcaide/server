@@ -127,18 +127,17 @@ cuda_peer_transfer::~cuda_peer_transfer()
         cudaSetDevice(src_device_);
         cudaGraphicsUnregisterResource(src_resource_);
     }
-    if (dst_resource_) {
+    if (dst_pbo_resource_) {
         cudaSetDevice(dst_device_);
-        cudaGraphicsUnregisterResource(dst_resource_);
+        cudaGraphicsUnregisterResource(dst_pbo_resource_);
     }
 
-    // Delete destination GL texture (requires GPU B's GL context to be current)
-    if (dest_gl_texture_) {
-        if (wglGetCurrentContext() != nullptr) {
+    // Delete destination GL resources (requires GPU B's GL context to be current)
+    if (wglGetCurrentContext() != nullptr) {
+        if (dest_pbo_)
+            glDeleteBuffers(1, &dest_pbo_);
+        if (dest_gl_texture_)
             glDeleteTextures(1, &dest_gl_texture_);
-        }
-        // If no GL context is current, the texture will be freed when the
-        // owning GL context is destroyed during shutdown.
     }
 
     // Free staging buffers
@@ -186,6 +185,9 @@ void cuda_peer_transfer::ensure_source_registered(GLuint texture_id)
                                     cudaGraphicsRegisterFlagsReadOnly),
         "cudaGraphicsGLRegisterImage (source)");
     src_texture_id_ = texture_id;
+
+    // Drain any stale GL errors left by CUDA-GL interop driver internals
+    while (glGetError() != GL_NO_ERROR) {}
 }
 
 void cuda_peer_transfer::unregister_source()
@@ -198,43 +200,45 @@ void cuda_peer_transfer::unregister_source()
     }
 }
 
-// ─── Destination registration ───────────────────────────────────────────────
+// ─── Destination helpers ────────────────────────────────────────────────────
 
-void cuda_peer_transfer::ensure_dest_registered()
+void cuda_peer_transfer::ensure_dest_texture()
 {
-    if (dst_resource_) {
-        return; // Already registered
-    }
+    if (dest_gl_texture_)
+        return;
 
-    // Create the landing texture on GPU B if not yet created
-    if (!dest_gl_texture_) {
-        glGenTextures(1, &dest_gl_texture_);
-        glBindTexture(GL_TEXTURE_2D, dest_gl_texture_);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glGenTextures(1, &dest_gl_texture_);
+    glBindTexture(GL_TEXTURE_2D, dest_gl_texture_);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 
-        GLenum internal_format = use_16bit_ ? GL_RGBA16 : GL_RGBA8;
-        GLenum pixel_format    = GL_BGRA;
-        GLenum pixel_type      = use_16bit_ ? GL_UNSIGNED_SHORT : GL_UNSIGNED_BYTE;
-        glTexImage2D(GL_TEXTURE_2D, 0, internal_format, width_, height_, 0,
-                     pixel_format, pixel_type, nullptr);
-        glBindTexture(GL_TEXTURE_2D, 0);
-    }
+    GLenum internal_format = use_16bit_ ? GL_RGBA16 : GL_RGBA8;
+    GLenum pixel_format    = GL_RGBA;  // matches CUDA byte order (not GL_BGRA)
+    GLenum pixel_type      = use_16bit_ ? GL_UNSIGNED_SHORT : GL_UNSIGNED_BYTE;
+    glTexImage2D(GL_TEXTURE_2D, 0, internal_format, width_, height_, 0,
+                 pixel_format, pixel_type, nullptr);
+    glBindTexture(GL_TEXTURE_2D, 0);
+}
+
+void cuda_peer_transfer::ensure_dest_pbo()
+{
+    if (dest_pbo_)
+        return;
+
+    glGenBuffers(1, &dest_pbo_);
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, dest_pbo_);
+    glBufferData(GL_PIXEL_UNPACK_BUFFER, static_cast<GLsizeiptr>(total_bytes_),
+                 nullptr, GL_STREAM_DRAW);
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
 
     cudaSetDevice(dst_device_);
     cuda_check(
-        cudaGraphicsGLRegisterImage(&dst_resource_, dest_gl_texture_, GL_TEXTURE_2D,
-                                    cudaGraphicsRegisterFlagsWriteDiscard),
-        "cudaGraphicsGLRegisterImage (dest)");
-}
+        cudaGraphicsGLRegisterBuffer(&dst_pbo_resource_, dest_pbo_,
+                                     cudaGraphicsRegisterFlagsWriteDiscard),
+        "cudaGraphicsGLRegisterBuffer (dest PBO)");
 
-void cuda_peer_transfer::unregister_dest()
-{
-    if (dst_resource_) {
-        cudaSetDevice(dst_device_);
-        cudaGraphicsUnregisterResource(dst_resource_);
-        dst_resource_ = nullptr;
-    }
+    CASPAR_LOG(info) << L"[cuda_peer_transfer] Dest PBO created and registered ("
+                     << (total_bytes_ / 1024 / 1024) << L" MB)";
 }
 
 // ─── Phase 1: Read source texture → GPU A staging ───────────────────────────
@@ -276,6 +280,13 @@ void cuda_peer_transfer::read_source(GLuint texture_id, int width, int height)
 
     // Wait for the copy to complete before peer_copy() reads src_staging
     cuda_check(cudaStreamSynchronize(src_stream_), "cudaStreamSynchronize (source)");
+
+    // CUDA-GL interop can leave stale GL error flags (GL_INVALID_OPERATION)
+    // from internal driver state changes during cudaGraphicsMapResources /
+    // cudaGraphicsUnmapResources.  Drain them so the next GL call (e.g.
+    // blit_from_texture on the same OGL executor thread) doesn't trip the
+    // GL error check and throw.
+    while (glGetError() != GL_NO_ERROR) {}
 }
 
 // ─── Phase 2: Peer DMA from GPU A staging → GPU B staging ──────────────────
@@ -295,41 +306,52 @@ void cuda_peer_transfer::peer_copy()
 
 void cuda_peer_transfer::write_dest()
 {
-    // Must be called on affinity thread (GPU B GL context current)
-    ensure_dest_registered();
+    // Must be called on affinity thread (GPU B GL context current).
+    //
+    // Pipeline: dst_staging_ (CUDA linear) → GL PBO (via CUDA) → GL texture.
+    // This avoids cudaMemcpy2DToArray into a CUDA-registered GL texture which
+    // has tiling/coherency issues on Pascal GPUs (P4000), producing visible
+    // horizontal lines.  The PBO path keeps everything on GPU B with no CPU
+    // round-trip.
+    ensure_dest_texture();
+    ensure_dest_pbo();
 
     cudaSetDevice(dst_device_);
 
-    // Map the destination GL texture for CUDA write
+    // Step 1: Map the GL PBO for CUDA write
     cuda_check(
-        cudaGraphicsMapResources(1, &dst_resource_, dst_stream_),
-        "cudaGraphicsMapResources (dest)");
+        cudaGraphicsMapResources(1, &dst_pbo_resource_, dst_stream_),
+        "cudaGraphicsMapResources (dest PBO)");
 
-    cudaArray_t dst_array = nullptr;
+    void*  pbo_ptr  = nullptr;
+    size_t pbo_size = 0;
     cuda_check(
-        cudaGraphicsSubResourceGetMappedArray(&dst_array, dst_resource_, 0, 0),
-        "cudaGraphicsSubResourceGetMappedArray (dest)");
+        cudaGraphicsResourceGetMappedPointer(&pbo_ptr, &pbo_size, dst_pbo_resource_),
+        "cudaGraphicsResourceGetMappedPointer (dest PBO)");
 
-    // Copy from linear staging → 2D array
+    // Step 2: Copy from staging → PBO (device-to-device on GPU B, very fast)
     cuda_check(
-        cudaMemcpy2DToArrayAsync(
-            dst_array,             // dst (cudaArray)
-            0, 0,                  // dst offset (x, y)
-            dst_staging_,          // src (linear)
-            row_bytes_,            // src pitch
-            row_bytes_,            // width in bytes
-            height_,               // height
-            cudaMemcpyDeviceToDevice,
-            dst_stream_),
-        "cudaMemcpy2DToArrayAsync");
+        cudaMemcpyAsync(pbo_ptr, dst_staging_, total_bytes_,
+                        cudaMemcpyDeviceToDevice, dst_stream_),
+        "cudaMemcpy dst_staging → PBO");
 
-    // Unmap — makes the texture available to GL again
+    // Step 3: Unmap PBO so GL can use it
     cuda_check(
-        cudaGraphicsUnmapResources(1, &dst_resource_, dst_stream_),
-        "cudaGraphicsUnmapResources (dest)");
+        cudaGraphicsUnmapResources(1, &dst_pbo_resource_, dst_stream_),
+        "cudaGraphicsUnmapResources (dest PBO)");
 
-    // Synchronize so GL sees the completed write
-    cuda_check(cudaStreamSynchronize(dst_stream_), "cudaStreamSynchronize (dest)");
+    // Wait for CUDA to finish writing the PBO
+    cuda_check(cudaStreamSynchronize(dst_stream_), "cudaStreamSynchronize (dest PBO)");
+
+    // Step 4: GL upload PBO → texture (on-GPU DMA, no CPU involvement)
+    GLenum pixel_format = GL_RGBA;  // CUDA staging has RGBA byte order
+    GLenum pixel_type   = use_16bit_ ? GL_UNSIGNED_SHORT : GL_UNSIGNED_BYTE;
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, dest_pbo_);
+    glBindTexture(GL_TEXTURE_2D, dest_gl_texture_);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width_, height_,
+                    pixel_format, pixel_type, nullptr);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
 }
 
 }} // namespace caspar::vulkan_output

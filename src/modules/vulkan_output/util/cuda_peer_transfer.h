@@ -75,6 +75,16 @@ class cuda_peer_transfer
     /// Valid after write_dest() completes. Use with blit_from_texture().
     GLuint dest_texture() const { return dest_gl_texture_; }
 
+    /// Returns the GL PBO ID on GPU B. Valid after write_dest() completes.
+    /// Use with upload_from_pbo() to bypass FBO blit.
+    GLuint dest_pbo() const { return dest_pbo_; }
+
+    /// Returns the GL pixel format for PBO upload (GL_RGBA).
+    GLenum pixel_format() const { return GL_RGBA; }
+
+    /// Returns the GL pixel type for PBO upload.
+    GLenum pixel_type() const { return use_16bit_ ? GL_UNSIGNED_SHORT : GL_UNSIGNED_BYTE; }
+
     /// Query whether CUDA peer access is available between the two devices.
     static bool is_peer_access_available(int src_device, int dst_device);
 
@@ -85,8 +95,8 @@ class cuda_peer_transfer
   private:
     void ensure_source_registered(GLuint texture_id);
     void unregister_source();
-    void ensure_dest_registered();
-    void unregister_dest();
+    void ensure_dest_texture();
+    void ensure_dest_pbo();
 
     int      src_device_;
     int      dst_device_;
@@ -109,9 +119,12 @@ class cuda_peer_transfer
     cudaGraphicsResource_t src_resource_   = nullptr;
     GLuint                 src_texture_id_ = 0; // currently registered texture
 
-    // Destination side (GPU B) — persistent landing texture
+    // Destination side (GPU B) — PBO-based pipeline
+    // Uses CUDA → GL PBO → GL texture to avoid cudaMemcpy2DToArray which has
+    // tiling/coherency issues on Pascal GPUs (P4000).
     GLuint                 dest_gl_texture_ = 0;
-    cudaGraphicsResource_t dst_resource_    = nullptr;
+    GLuint                 dest_pbo_        = 0;  // GL pixel buffer object on GPU B
+    cudaGraphicsResource_t dst_pbo_resource_ = nullptr; // CUDA registration of PBO
 
     bool peer_access_enabled_ = false;
 };

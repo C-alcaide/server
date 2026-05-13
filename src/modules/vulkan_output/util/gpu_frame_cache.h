@@ -124,6 +124,11 @@ class gpu_frame_cache
     // Signal that one consumer has finished reading the current frame.
     void frame_done();
 
+    // Request shutdown — wakes any threads blocked in submit_frame() so they
+    // can unwind promptly. Called by consumers' destroy_resources() before
+    // joining their present thread.
+    void request_shutdown();
+
     // Number of consumers sharing this cache
     int consumer_count() const { return consumer_count_.load(std::memory_order_relaxed); }
 
@@ -160,6 +165,12 @@ class gpu_frame_cache
     std::atomic<uint64_t>   current_generation_{0};
     bool                    transfer_in_progress_ = false;
 
+    // Shutdown flag — when set, submit_frame() exits the cv wait promptly
+    // so a present thread blocked on a peer consumer's stalled transfer can
+    // unwind during shutdown instead of holding kernel-mode GPU resources
+    // until TerminateProcess.
+    std::atomic<bool>       shutting_down_{false};
+
     // Timeline semaphore: bridges binary GL→VK semaphore to multi-queue timeline.
     // After each transfer, a coordinator submit waits on the binary semaphore
     // and signals the timeline with the frame generation value.
@@ -185,9 +196,11 @@ class gpu_frame_cache
     // Consumer tracking
     std::atomic<int>        consumer_count_{0};
 
-    // Registry
-    static std::mutex                                         registry_mutex_;
-    static std::map<int, std::weak_ptr<gpu_frame_cache>>      registry_;
+    // Registry — keyed by (gpu_index, width, height, use_16bit) so different
+    // channels and different bit depths get separate caches.
+    using cache_key = std::tuple<int, uint32_t, uint32_t, bool>;
+    static std::mutex                                              registry_mutex_;
+    static std::map<cache_key, std::weak_ptr<gpu_frame_cache>>     registry_;
 };
 
 }} // namespace caspar::vulkan_output

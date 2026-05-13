@@ -362,24 +362,31 @@ struct server::impl
             channels_vec.emplace_back(cc.raw_channel);
         }
 
-        // Pre-create all Vulkan VkDevices before any consumer starts its
-        // present thread.  Creating a VkDevice on one GPU while another
-        // GPU is already presenting can stall the driver long enough to
-        // trigger TDR (especially on older NVIDIA drivers).
+        // Count Vulkan consumers per GPU for the startup gate, and pre-create
+        // VkDevices if needed.
         {
             std::set<int> gpu_indices;
+            std::map<int, int> gpu_consumer_counts;  // gpu_index → number of consumers
             for (const auto& ch : xml_channels) {
                 if (auto consumers = ch.get_child_optional(L"consumers")) {
                     for (const auto& c : *consumers) {
                         if (c.first == L"vulkan-output") {
-                            gpu_indices.insert(c.second.get(L"gpu", 0));
+                            int gpu = c.second.get(L"gpu", 0);
+                            gpu_indices.insert(gpu);
+                            gpu_consumer_counts[gpu]++;
                         }
                     }
                 }
             }
             if (!gpu_indices.empty()) {
-                std::vector<int> indices(gpu_indices.begin(), gpu_indices.end());
-                vulkan_output::vk_device_manager::warm_up(indices);
+                vulkan_output::vk_device_manager::set_expected_consumers(gpu_consumer_counts);
+                // NOTE: warm-up (pre-creating VkDevices) is intentionally omitted.
+                // On driver 582.53+ the Vulkan loader dispatches vkCreateDevice
+                // through both ICD entries for each GPU (the driver exposes 4
+                // VkPhysicalDevices — 2 per GPU).  The failing ICD call hangs
+                // the GPU for ~2 seconds, triggering TDR.  The startup gate
+                // alone is sufficient: it defers all vkQueueSubmit calls until
+                // every consumer has finished init (including vkCreateDevice).
             }
         }
 

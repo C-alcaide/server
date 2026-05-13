@@ -52,12 +52,27 @@ interop_context::interop_context()
 
     hdc_ = GetDC(hwnd_);
 
-    // Match pixel format with parent
+    // Match pixel format with parent — use the same pixel format INDEX, not
+    // ChoosePixelFormat (which may return a different index for the new DC,
+    // causing shared context creation to fail or produce undefined behavior).
     int pf = GetPixelFormat(parent_dc);
     PIXELFORMATDESCRIPTOR pfd{};
     pfd.nSize = sizeof(pfd);
     DescribePixelFormat(parent_dc, pf, sizeof(pfd), &pfd);
-    SetPixelFormat(hdc_, ChoosePixelFormat(hdc_, &pfd), &pfd);
+    if (!SetPixelFormat(hdc_, pf, &pfd)) {
+        // Fallback: the exact format index may not be valid on this DC.
+        // Use ChoosePixelFormat to find the closest match.
+        int fallback_pf = ChoosePixelFormat(hdc_, &pfd);
+        if (!SetPixelFormat(hdc_, fallback_pf, &pfd)) {
+            CASPAR_LOG(error) << L"[interop_context] Failed to set pixel format.";
+            ReleaseDC(hwnd_, hdc_);
+            DestroyWindow(hwnd_);
+            UnregisterClassW(wc.lpszClassName, wc.hInstance);
+            hwnd_ = nullptr;
+            hdc_  = nullptr;
+            return;
+        }
+    }
 
     // Create a shared GL context via wglCreateContextAttribsARB (GL 4.5 core)
     auto wglCreateContextAttribsARB = reinterpret_cast<HGLRC(WINAPI*)(HDC, HGLRC, const int*)>(
