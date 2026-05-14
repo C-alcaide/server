@@ -93,13 +93,37 @@ cuda_peer_transfer::cuda_peer_transfer(int src_cuda_device, int dst_cuda_device,
         cudaError_t err = cudaDeviceEnablePeerAccess(dst_device_, 0);
         if (err == cudaSuccess || err == cudaErrorPeerAccessAlreadyEnabled) {
             peer_access_enabled_ = true;
-            CASPAR_LOG(info) << L"[cuda_peer_transfer] Direct peer access enabled (NVLink/PCIe P2P)";
         }
 
         cudaSetDevice(dst_device_);
         err = cudaDeviceEnablePeerAccess(src_device_, 0);
         if (err != cudaSuccess && err != cudaErrorPeerAccessAlreadyEnabled) {
             CASPAR_LOG(debug) << L"[cuda_peer_transfer] Reverse peer access not available";
+        }
+
+        // Query P2P link type and performance attributes
+        int nvlink_supported = 0;
+        cudaDeviceGetP2PAttribute(&nvlink_supported,
+                                  cudaDevP2PAttrNativeAtomicSupported,
+                                  src_device_, dst_device_);
+
+        int perf_rank = 0;
+        cudaDeviceGetP2PAttribute(&perf_rank,
+                                  cudaDevP2PAttrPerformanceRank,
+                                  src_device_, dst_device_);
+
+        // NVLink: native atomic support + high perf rank
+        // PCIe P2P: peer access enabled but no native atomics
+        if (nvlink_supported) {
+            CASPAR_LOG(info) << L"[cuda_peer_transfer] NVLink detected between device "
+                             << src_device_ << L" and device " << dst_device_
+                             << L" (perf_rank=" << perf_rank << L")";
+            CASPAR_LOG(info) << L"[cuda_peer_transfer] NVLink provides ~600 GB/s bidirectional bandwidth";
+        } else {
+            CASPAR_LOG(info) << L"[cuda_peer_transfer] PCIe P2P direct access between device "
+                             << src_device_ << L" and device " << dst_device_
+                             << L" (perf_rank=" << perf_rank
+                             << L", no NVLink — limited to PCIe bandwidth)";
         }
     } else {
         CASPAR_LOG(info) << L"[cuda_peer_transfer] No direct P2P — peer copy will stage through system RAM "
@@ -110,6 +134,11 @@ cuda_peer_transfer::cuda_peer_transfer(int src_cuda_device, int dst_cuda_device,
     cudaSetDevice(src_device_);
     cuda_check(cudaMalloc(&src_staging_, total_bytes_), "cudaMalloc src_staging");
     cuda_check(cudaStreamCreate(&src_stream_), "cudaStreamCreate src");
+    cuda_check(cudaStreamCreate(&peer_stream_), "cudaStreamCreate peer");
+    cuda_check(cudaEventCreateWithFlags(&src_ready_event_, cudaEventDisableTiming),
+               "cudaEventCreate src_ready");
+    cuda_check(cudaEventCreateWithFlags(&peer_event_, cudaEventDisableTiming),
+               "cudaEventCreate peer");
 
     // Allocate staging buffer on destination device
     cudaSetDevice(dst_device_);
@@ -150,7 +179,19 @@ cuda_peer_transfer::~cuda_peer_transfer()
         cudaFree(dst_staging_);
     }
 
-    // Destroy streams
+    // Destroy streams and events
+    if (src_ready_event_) {
+        cudaSetDevice(src_device_);
+        cudaEventDestroy(src_ready_event_);
+    }
+    if (peer_event_) {
+        cudaSetDevice(src_device_);
+        cudaEventDestroy(peer_event_);
+    }
+    if (peer_stream_) {
+        cudaSetDevice(src_device_);
+        cudaStreamDestroy(peer_stream_);
+    }
     if (src_stream_) {
         cudaSetDevice(src_device_);
         cudaStreamDestroy(src_stream_);
@@ -250,6 +291,12 @@ void cuda_peer_transfer::read_source(GLuint texture_id, int width, int height)
 
     cudaSetDevice(src_device_);
 
+    // GPU-side wait: ensure any in-flight peer DMA has finished reading
+    // src_staging_ before we overwrite it with the new frame.
+    cuda_check(
+        cudaStreamWaitEvent(src_stream_, peer_event_, 0),
+        "cudaStreamWaitEvent (read_source)");
+
     // Map the GL texture for CUDA read
     cuda_check(
         cudaGraphicsMapResources(1, &src_resource_, src_stream_),
@@ -278,8 +325,10 @@ void cuda_peer_transfer::read_source(GLuint texture_id, int width, int height)
         cudaGraphicsUnmapResources(1, &src_resource_, src_stream_),
         "cudaGraphicsUnmapResources (source)");
 
-    // Wait for the copy to complete before peer_copy() reads src_staging
-    cuda_check(cudaStreamSynchronize(src_stream_), "cudaStreamSynchronize (source)");
+    // Signal that src_staging_ is ready for peer_copy() to read.
+    cuda_check(
+        cudaEventRecord(src_ready_event_, src_stream_),
+        "cudaEventRecord (src_ready)");
 
     // CUDA-GL interop can leave stale GL error flags (GL_INVALID_OPERATION)
     // from internal driver state changes during cudaGraphicsMapResources /
@@ -293,13 +342,25 @@ void cuda_peer_transfer::read_source(GLuint texture_id, int width, int height)
 
 void cuda_peer_transfer::peer_copy()
 {
-    // No GL context required — just device-to-device DMA
-    // TODO(perf): This is synchronous and blocks the present thread for the duration
-    // of the DMA transfer. Consider using cudaMemcpyPeerAsync + stream + event fence
-    // to overlap the transfer with other present work (double-buffer staging).
+    // No GL context required — async device-to-device DMA.
+    // Runs on a dedicated stream so the calling thread returns immediately.
+    // read_source() GPU-waits on peer_event_ before overwriting src_staging_.
+    // write_dest()  GPU-waits on peer_event_ before reading dst_staging_.
+    cudaSetDevice(src_device_);
+
+    // GPU-wait for src_stream_ to finish writing src_staging_.
     cuda_check(
-        cudaMemcpyPeer(dst_staging_, dst_device_, src_staging_, src_device_, total_bytes_),
-        "cudaMemcpyPeer");
+        cudaStreamWaitEvent(peer_stream_, src_ready_event_, 0),
+        "cudaStreamWaitEvent (src_ready)");
+
+    cuda_check(
+        cudaMemcpyPeerAsync(dst_staging_, dst_device_,
+                            src_staging_, src_device_,
+                            total_bytes_, peer_stream_),
+        "cudaMemcpyPeerAsync");
+    cuda_check(
+        cudaEventRecord(peer_event_, peer_stream_),
+        "cudaEventRecord (peer_copy)");
 }
 
 // ─── Phase 3: Write GPU B staging → destination texture ─────────────────────
@@ -317,6 +378,17 @@ void cuda_peer_transfer::write_dest()
     ensure_dest_pbo();
 
     cudaSetDevice(dst_device_);
+
+    // GPU-side wait: ensure async peer DMA has finished writing
+    // dst_staging_ before we read it into the PBO.
+    // NOTE: peer_event_ was created on src_device_, but we wait on it from
+    // dst_stream_ (dst_device_).  Cross-device cudaStreamWaitEvent is supported
+    // on NVIDIA GPUs with modern drivers (CUDA 11+), but is not formally
+    // guaranteed by the CUDA programming guide for all configurations.
+    // Tested working on Ampere+Pascal with driver 550+.
+    cuda_check(
+        cudaStreamWaitEvent(dst_stream_, peer_event_, 0),
+        "cudaStreamWaitEvent (write_dest)");
 
     // Step 1: Map the GL PBO for CUDA write
     cuda_check(

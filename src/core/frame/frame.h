@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <future>
 #include <memory>
 #include <vector>
 
@@ -17,6 +18,25 @@ class texture
     virtual ~texture() {}
     virtual void bind(int index) = 0;
     virtual void unbind()        = 0;
+
+    /// Export a Win32 HANDLE for the texture's GPU memory (for VK→GL interop).
+    /// Returns nullptr if not supported. Caller must NOT close the handle.
+    virtual void*              export_win32_handle() const { return nullptr; }
+    /// Size of the GPU memory allocation backing the texture (bytes).
+    virtual unsigned long long export_alloc_size() const { return 0; }
+    /// Wait for any pending GPU rendering to complete before reading.
+    /// No-op for OGL textures; overridden by VK texture_wrapper.
+    virtual void               ensure_render_complete() const {}
+    /// Returns a Win32 HANDLE to a VkSemaphore signaled on render completion.
+    /// For GPU-side waiting (e.g. CUDA interop) instead of CPU fence wait.
+    virtual void*              render_semaphore_handle() const { return nullptr; }
+    /// Timeline semaphore value that will be signaled on render completion.
+    virtual uint64_t           render_semaphore_value() const { return 0; }
+    /// Width/height of the texture.
+    virtual int                tex_width() const { return 0; }
+    virtual int                tex_height() const { return 0; }
+    /// True if the texture uses 16-bit components.
+    virtual bool               tex_is_hbd() const { return false; }
 };
 
 class mutable_frame final
@@ -72,6 +92,14 @@ class const_frame final
                          array<const std::int32_t>              audio_data,
                          const struct pixel_format_desc&        desc,
                          std::shared_ptr<core::texture>         texture = nullptr);
+    /// Lazy-readback constructor: the image_data future is only evaluated when
+    /// image_data() is called.  GPU→CPU readback is deferred until a consumer
+    /// actually needs CPU pixels.
+    explicit const_frame(const void*                                           tag,
+                         std::shared_future<array<const std::uint8_t>>         lazy_image,
+                         array<const std::int32_t>                             audio_data,
+                         const struct pixel_format_desc&                       desc,
+                         std::shared_ptr<core::texture>                        texture);
     const_frame(const const_frame& other);
     const_frame(mutable_frame&& other);
 

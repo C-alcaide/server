@@ -27,6 +27,7 @@
 #include "../util/gpu_affinity_context.h"
 #ifdef CASPAR_CUDA_PEER_ENABLED
 #include "../util/cuda_peer_transfer.h"
+#include <cuda_runtime.h>
 #endif
 #include "../util/nvapi_helpers.h"
 #include "../util/color_convert_pipeline.h"
@@ -34,6 +35,9 @@
 #include <accelerator/ogl/image/image_mixer.h>
 #include <accelerator/ogl/util/device.h>
 #include <accelerator/ogl/util/texture.h>
+
+#include <accelerator/vulkan/util/texture_wrapper.h>
+#include <accelerator/vulkan/util/texture.h>
 
 #include <common/diagnostics/graph.h>
 #include <common/except.h>
@@ -145,6 +149,31 @@ class vulkan_output_consumer : public core::frame_consumer
     {
     }
 
+    // Sets Per-Monitor DPI awareness on the calling thread.
+    // Returns the previous DPI awareness context (to restore later) or nullptr.
+    // NOTE: We use thread-level DPI awareness only (not process-level) to avoid
+    // interfering with OpenGL contexts — the NVIDIA OGL driver (nvoglv64.dll)
+    // crashes with 0xc0000409 when process-level DPI awareness changes under it.
+    static DPI_AWARENESS_CONTEXT set_thread_dpi_awareness()
+    {
+        using SetThreadDpiAwarenessContextFn = DPI_AWARENESS_CONTEXT(WINAPI*)(DPI_AWARENESS_CONTEXT);
+        static auto fn = reinterpret_cast<SetThreadDpiAwarenessContextFn>(
+            GetProcAddress(GetModuleHandleW(L"user32.dll"), "SetThreadDpiAwarenessContext"));
+        if (fn)
+            return fn(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        return nullptr;
+    }
+
+    static void restore_thread_dpi_awareness(DPI_AWARENESS_CONTEXT prev)
+    {
+        if (!prev) return;
+        using SetThreadDpiAwarenessContextFn = DPI_AWARENESS_CONTEXT(WINAPI*)(DPI_AWARENESS_CONTEXT);
+        static auto fn = reinterpret_cast<SetThreadDpiAwarenessContextFn>(
+            GetProcAddress(GetModuleHandleW(L"user32.dll"), "SetThreadDpiAwarenessContext"));
+        if (fn)
+            fn(prev);
+    }
+
     ~vulkan_output_consumer() override
     {
         executor_.invoke([this] { destroy_resources(); });
@@ -185,6 +214,31 @@ class vulkan_output_consumer : public core::frame_consumer
 
         diag_sends_.fetch_add(1, std::memory_order_relaxed);
 
+        // ─── VK-native path (Vulkan mixer → Vulkan output, same GPU) ─────────
+        // When the mixer is Vulkan, frame.texture() is a texture_wrapper holding
+        // an exportable VkImage.  Skip the entire GL↔VK interop chain — no
+        // shared_texture_pool, no interop_context, no GL semaphores.
+        // The VkImage memory is imported on the output's VkDevice via Win32 HANDLE
+        // and blitted directly to the swapchain in present_frame().
+        bool vk_texture_path = false;
+        if (gate_open_ && frame.texture() && !adapter_mismatch_) {
+            auto vk_wrapper = std::dynamic_pointer_cast<accelerator::vulkan::texture_wrapper>(frame.texture());
+            if (vk_wrapper) {
+                vk_texture_path = true;
+                // No GPU transfer needed — the mixer's VkImage is on the same
+                // physical GPU and will be imported in present_frame().
+            } else if (!send_diag_logged_) {
+                CASPAR_LOG(warning) << print() << L" send(): frame.texture() is not a texture_wrapper"
+                                    << L" (typeid=" << typeid(*frame.texture()).name() << L")";
+                send_diag_logged_ = true;
+            }
+        } else if (send_diag_counter_++ % 300 == 0) {
+            CASPAR_LOG(trace) << print() << L" send(): VK path skipped"
+                             << L" gate=" << gate_open_
+                             << L" tex=" << (frame.texture() ? L"yes" : L"no")
+                             << L" mismatch=" << adapter_mismatch_;
+        }
+
         // Zero-copy path: blit OGL texture into shared pool via frame cache.
         // The frame cache ensures only one transfer per GPU per frame — the first
         // consumer to call submit_frame() does the actual blit, others wait.
@@ -192,7 +246,8 @@ class vulkan_output_consumer : public core::frame_consumer
         // Skip frame cache operations until the startup gate opens — doing a
         // coordinator vkQueueSubmit while a peer consumer is still creating
         // swapchains on the same VkDevice can trigger TDR.
-        if (gate_open_ && frame_cache_ && !frame_cache_->is_cross_gpu() && frame.texture()) {
+        // Skip when VK texture path is active — no GL interop needed.
+        if (!vk_texture_path && gate_open_ && frame_cache_ && !frame_cache_->is_cross_gpu() && frame.texture()) {
             auto ogl_tex = std::dynamic_pointer_cast<accelerator::ogl::texture>(frame.texture());
             if (ogl_tex) {
                 auto* cache = frame_cache_.get();
@@ -222,23 +277,23 @@ class vulkan_output_consumer : public core::frame_consumer
             }
         }
 
-        // Block until the present thread has consumed a frame (backpressure).
-        // This makes the display vsync the sole reference clock for the channel,
-        // eliminating drift between a software timer and the hardware refresh rate.
-        // Timeout allows buffer_depth frames to complete even under GL contention.
+        // Backpressure: When the buffer is full, drop the oldest frame rather
+        // than blocking the channel tick thread.  This ensures a slow consumer
+        // (e.g. cross-GPU with CUDA peer transfer) doesn't throttle the whole
+        // channel — the fastest consumer's vsync becomes the reference clock.
+        // The present thread will skip the dropped frame, producing a brief
+        // stutter on the slow output, which is preferable to halving the frame
+        // rate on ALL outputs.
         {
-            auto timeout_ms = static_cast<int64_t>(config_.buffer_depth * 1000.0 / format_desc_.fps) + 50;
             std::unique_lock<std::mutex> lock(buffer_mutex_);
-            if (!buffer_cv_.wait_for(lock, std::chrono::milliseconds(timeout_ms), [this] {
-                    return buffer_.size() < static_cast<size_t>(config_.buffer_depth) || !running_;
-                })) {
-                // Timed out — present thread stalled (display lost, TDR, etc.)
-                graph_->set_tag(diagnostics::tag_severity::WARNING, "late-frame");
-                if (!buffer_.empty())
-                    buffer_.pop();
-            }
             if (!running_)
                 return caspar::make_ready_future(true);
+            if (buffer_.size() >= static_cast<size_t>(config_.buffer_depth)) {
+                // Buffer full — drop oldest to make room
+                buffer_.pop();
+                graph_->set_tag(diagnostics::tag_severity::WARNING, "dropped-frame");
+                diag_drops_.fetch_add(1, std::memory_order_relaxed);
+            }
             buffer_.push({std::move(frame), frame_generation_.load(std::memory_order_relaxed)});
         }
         buffer_cv_.notify_one();
@@ -254,12 +309,14 @@ class vulkan_output_consumer : public core::frame_consumer
 
     std::wstring name() const override { return L"vulkan-output"; }
 
+    bool needs_cpu_frame_data() const override { return false; }
+
     int index() const override
     {
         return 500 + config_.gpu_index * 10 + config_.output_index;
     }
 
-    bool has_synchronization_clock() const override { return true; }
+    bool has_synchronization_clock() const override { return false; }
 
     std::future<bool> call(const std::vector<std::wstring>& params) override
     {
@@ -435,11 +492,11 @@ class vulkan_output_consumer : public core::frame_consumer
         // when frames are flowing.
         watchdog_thread_ = std::thread([this] {
             SetThreadDescription(GetCurrentThread(), L"VK Present Watchdog");
-            int last_submits = 0;
+            uint64_t last_submits = 0;
             while (running_) {
                 std::this_thread::sleep_for(std::chrono::seconds(1));
                 if (!running_) break;
-                int submits = diag_submits_.load(std::memory_order_relaxed);
+                uint64_t submits = watchdog_submits_.load(std::memory_order_relaxed);
                 if (submits == last_submits) {
                     CASPAR_LOG(warning) << print() << L" WATCHDOG: no frame submitted in 1s. "
                                         << L"stage=" << diag_stage_.load(std::memory_order_relaxed)
@@ -468,6 +525,11 @@ class vulkan_output_consumer : public core::frame_consumer
 
     void create_swapchain()
     {
+        // Ensure Per-Monitor DPI awareness on this thread so that
+        // vkGetPhysicalDeviceSurfaceCapabilitiesKHR returns physical pixel
+        // dimensions (e.g. 3840×2160) instead of DPI-scaled logical coordinates.
+        auto prev_dpi_ctx = set_thread_dpi_awareness();
+
         VkSurfaceCapabilitiesKHR caps;
         vkGetPhysicalDeviceSurfaceCapabilitiesKHR(device_->physical_device(), swapchain_.surface, &caps);
 
@@ -480,8 +542,14 @@ class vulkan_output_consumer : public core::frame_consumer
 
         uint32_t image_count = (std::max)(caps.minImageCount + 1,
                                            static_cast<uint32_t>(config_.buffer_depth));
-        if (caps.maxImageCount > 0)
+        if (caps.maxImageCount > 0) {
+            if (image_count > caps.maxImageCount) {
+                CASPAR_LOG(warning) << print() << L" Requested swapchain image count "
+                                    << image_count << L" exceeds maxImageCount "
+                                    << caps.maxImageCount << L". Clamping.";
+            }
             image_count = (std::min)(image_count, caps.maxImageCount);
+        }
 
         // Pick surface format (BGRA8 for SDR, A2B10G10R10 or RGBA16F for HDR)
         VkSurfaceFormatKHR surface_format = pick_surface_format();
@@ -569,6 +637,8 @@ class vulkan_output_consumer : public core::frame_consumer
 
         CASPAR_LOG(info) << print() << L" Swapchain created: " << swapchain_.width << L"x" << swapchain_.height
                          << L" (" << sc_image_count << L" images)";
+
+        restore_thread_dpi_awareness(prev_dpi_ctx);
     }
 
     VkSurfaceFormatKHR pick_surface_format()
@@ -811,6 +881,7 @@ class vulkan_output_consumer : public core::frame_consumer
     void present_loop()
     {
         SetThreadDescription(GetCurrentThread(), L"Vulkan Present");
+        set_thread_dpi_awareness(); // Ensure physical pixel coordinates for VK surface queries
 
         // ── Startup gate: wait until ALL consumers on this GPU have finished
         // their heavy init (window + surface + swapchain creation) before
@@ -926,12 +997,29 @@ class vulkan_output_consumer : public core::frame_consumer
                 graph_->set_text(stats.str());
                 // Diagnostic: also log to file once per second so we can tell
                 // from the log whether the present loop is actually running.
-                CASPAR_LOG(info) << print() << L" fps=" << fps
+                CASPAR_LOG(trace) << print() << L" fps=" << fps
                                  << L" buf=" << diag_buf_size_last_
-                                 << L" sends=" << diag_sends_.exchange(0)
-                                 << L" pres=" << diag_presents_.exchange(0)
-                                 << L" submits=" << diag_submits_.exchange(0)
+                                 << L" sends=" << diag_sends_.load()
+                                 << L" pres=" << diag_presents_.load()
+                                 << L" submits=" << diag_submits_.load()
                                  << L" gen=" << frame_generation_;
+            }
+
+            // Periodic 5s TIMING log (info level for test analysis)
+            ++diag_timing_frames_;
+            {
+                auto timing_elapsed = std::chrono::duration<double>(now - diag_timing_start_).count();
+                if (timing_elapsed >= 5.0 && diag_timing_frames_ > 0) {
+                    int drops = diag_drops_.exchange(0, std::memory_order_relaxed);
+                    CASPAR_LOG(info) << print() << L" TIMING: frames=" << diag_timing_frames_
+                                     << L" drops=" << drops;
+                    diag_timing_frames_ = 0;
+                    diag_timing_start_ = now;
+                    // Also reset 1s counters
+                    diag_sends_.store(0, std::memory_order_relaxed);
+                    diag_presents_.store(0, std::memory_order_relaxed);
+                    diag_submits_.store(0, std::memory_order_relaxed);
+                }
             }
 
         }
@@ -1143,6 +1231,32 @@ class vulkan_output_consumer : public core::frame_consumer
         // Get current frame's sync objects
         auto& frame_sync = swapchain_.frames[swapchain_.current_frame];
 
+#ifdef CASPAR_CUDA_PEER_ENABLED
+        // ── Early D2H kick: start async GPU→host transfer BEFORE fence wait ──
+        // Overlaps the ~4ms D2H with the ~2-3ms fence wait + swapchain acquire,
+        // reducing effective present_frame time by 2-3ms per frame.
+        // Only active after the first frame established cross-GPU CUDA mode.
+        bool early_d2h_kicked = false;
+        if (cuda_vk_peer_init_ && !cuda_vk_peer_failed_ && !cuda_d2h_active_) {
+            auto vk_wrapper = frame.texture()
+                ? std::dynamic_pointer_cast<accelerator::vulkan::texture_wrapper>(frame.texture())
+                : nullptr;
+            if (vk_wrapper) {
+                vk_wrapper->ensure_render_complete();
+                auto vk_tex = vk_wrapper->vk_texture();
+                HANDLE handle = vk_tex->export_win32_handle();
+                if (handle) {
+                    bool use_16bit = (vk_tex->depth() != common::bit_depth::bit8);
+                    auto alloc_sz  = static_cast<unsigned long long>(vk_tex->alloc_size());
+                    early_d2h_kicked = begin_cuda_d2h(handle,
+                        static_cast<uint32_t>(vk_tex->width()),
+                        static_cast<uint32_t>(vk_tex->height()),
+                        use_16bit, alloc_sz, vk_tex->device_luid());
+                }
+            }
+        }
+#endif
+
         // Wait for this frame slot's previous use to finish.
         // Use a finite timeout (2× frame period) to detect GPU stalls without
         // blocking indefinitely. With MAILBOX mode the fence is typically ready
@@ -1303,8 +1417,107 @@ class vulkan_output_consumer : public core::frame_consumer
             VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
             vkCmdClearColorImage(cmd, swapchain_.images[image_index],
                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear_color, 1, &range);
+        } else if (auto vk_wrapper = frame.texture()
+                       ? std::dynamic_pointer_cast<accelerator::vulkan::texture_wrapper>(frame.texture())
+                       : nullptr) {
+            // ─── VK-native zero-copy path ───────────────────────────────────────
+            // The mixer is Vulkan — import the render attachment's external memory
+            // on the output's VkDevice and blit directly to the swapchain.
+            if (present_path_counter_++ % 300 == 0) {
+                CASPAR_LOG(trace) << print() << L" present path: VK-native zero-copy";
+            }
+            // Wait for the mixer's GPU rendering to finish before importing.
+            // This fence wait runs on the present thread, NOT the channel tick,
+            // so the mixer can start the next frame in parallel.
+            vk_wrapper->ensure_render_complete();
+
+            auto vk_tex = vk_wrapper->vk_texture();
+            HANDLE handle = vk_tex->export_win32_handle();
+            if (handle) {
+                auto w = static_cast<uint32_t>(vk_tex->width());
+                auto h = static_cast<uint32_t>(vk_tex->height());
+                VkFormat fmt = (vk_tex->depth() == common::bit_depth::bit8)
+                                   ? VK_FORMAT_B8G8R8A8_UNORM
+                                   : VK_FORMAT_R16G16B16A16_UNORM;
+                auto* imported = import_vk_texture(handle, w, h, fmt);
+                if (imported) {
+                    // Memory barrier to make the mixer's writes visible on this
+                    // device.  We use GENERAL→TRANSFER_SRC_OPTIMAL instead of
+                    // UNDEFINED→TRANSFER_SRC_OPTIMAL because transitioning FROM
+                    // UNDEFINED is defined to discard image contents (Vulkan spec
+                    // §12.4).  The imported external memory already contains valid
+                    // rendered pixels (the mixer fence-waits before returning the
+                    // frame), so we must NOT discard them.
+                    //
+                    // GENERAL is safe as oldLayout here: the image was imported
+                    // from external memory and has never been used on this device,
+                    // so no actual layout metadata exists — the driver treats
+                    // GENERAL as "contents preserved, make memory available".
+                    VkImageMemoryBarrier src_barrier{};
+                    src_barrier.sType                           = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                    src_barrier.oldLayout                       = VK_IMAGE_LAYOUT_GENERAL;
+                    src_barrier.newLayout                       = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+                    src_barrier.srcQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
+                    src_barrier.dstQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
+                    src_barrier.image                           = imported->image;
+                    src_barrier.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+                    src_barrier.subresourceRange.baseMipLevel   = 0;
+                    src_barrier.subresourceRange.levelCount     = 1;
+                    src_barrier.subresourceRange.baseArrayLayer = 0;
+                    src_barrier.subresourceRange.layerCount     = 1;
+                    src_barrier.srcAccessMask                   = 0;
+                    src_barrier.dstAccessMask                   = VK_ACCESS_TRANSFER_READ_BIT;
+
+                    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &src_barrier);
+
+                    auto blit_region = compute_blit_region(w, h);
+                    vkCmdBlitImage(cmd, imported->image,
+                                   VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                   blit_dest_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                   1, &blit_region, VK_FILTER_LINEAR);
+
+                    wrote_to_intermediate = color_convert_active;
+                } else {
+                    // VK import failed — likely cross-GPU. Try CUDA peer DMA.
+#ifdef CASPAR_CUDA_PEER_ENABLED
+                    bool cuda_ok = false;
+                    if (!cuda_vk_peer_failed_) {
+                        if (early_d2h_kicked) {
+                            // D2H was kicked before fence wait — just complete.
+                            cuda_ok = complete_cuda_d2h(blit_dest_image, cmd);
+                        } else {
+                            // First frame or early kick wasn't possible — synchronous fallback.
+                            bool use_16bit = (vk_tex->depth() != common::bit_depth::bit8);
+                            auto alloc_sz  = static_cast<unsigned long long>(vk_tex->alloc_size());
+                            cuda_ok = cross_gpu_cuda_transfer(handle, w, h, use_16bit, alloc_sz,
+                                                              vk_tex->device_luid(), blit_dest_image, cmd);
+                        }
+                    }
+                    if (cuda_ok) {
+                        if (color_convert_active)
+                            wrote_to_intermediate = true;
+                    } else
+#endif
+                    {
+                        // CUDA unavailable or failed — CPU fallback
+                        upload_frame_cpu(frame, blit_dest_image, cmd);
+                        if (color_convert_active)
+                            wrote_to_intermediate = true;
+                    }
+                }
+            } else {
+                // Handle export failed — fall back to CPU staging
+                upload_frame_cpu(frame, blit_dest_image, cmd);
+                if (color_convert_active)
+                    wrote_to_intermediate = true;
+            }
         } else if (frame_cache_ && frame_cache_->pool() &&
                    (frame_generation_ > 0 || frame_cache_->is_cross_gpu())) {
+            if (present_path_counter_++ % 300 == 0) {
+                CASPAR_LOG(trace) << print() << L" present path: shared pool (gen="
+                                 << frame_generation_ << L" cross_gpu=" << frame_cache_->is_cross_gpu() << L")";
+            }
             // Frame cache path: shared pool was populated in send() (same-GPU)
             // or cross-GPU uses CPU staging (Pascal GL→VK interop is broken).
             auto* pool = frame_cache_->pool();
@@ -1362,6 +1575,9 @@ class vulkan_output_consumer : public core::frame_consumer
                 wrote_to_intermediate = color_convert_active;
             }
         } else if (frame_cache_ && frame_cache_->pool()) {
+            if (present_path_counter_++ % 300 == 0) {
+                CASPAR_LOG(trace) << print() << L" present path: black (pool exists, gen=0)";
+            }
             // Pool exists but not yet populated (gen=0, no OGL texture received yet).
             // Clear to black — the CPU upload path uses format_desc_ (channel resolution)
             // which may exceed the swapchain image dimensions, causing an out-of-bounds
@@ -1370,10 +1586,37 @@ class vulkan_output_consumer : public core::frame_consumer
             VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
             vkCmdClearColorImage(cmd, swapchain_.images[image_index],
                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear_color, 1, &range);
+        } else if (!frame.texture()) {
+            if (present_path_counter_++ % 300 == 0) {
+                CASPAR_LOG(trace) << print() << L" present path: black (null texture, no frame_cache)";
+            }
+            // No texture available (VK mixer empty frame, or no content loaded).
+            // Clear to black instead of upload_frame_cpu — the channel resolution
+            // (format_desc_) may exceed the swapchain image dimensions, and
+            // vkCmdCopyBufferToImage with an oversized region causes TDR.
+            VkClearColorValue clear_color = {{0.0f, 0.0f, 0.0f, 1.0f}};
+            VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+            vkCmdClearColorImage(cmd, swapchain_.images[image_index],
+                                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear_color, 1, &range);
         } else {
+            if (present_path_counter_++ % 300 == 0) {
+                CASPAR_LOG(trace) << print() << L" present path: CPU upload fallback"
+                                 << L" tex=" << (frame.texture() ? L"yes" : L"no")
+                                 << L" cache=" << (frame_cache_ ? L"yes" : L"no");
+            }
             // No frame cache or pool — CPU fallback: upload pixel data via staging buffer
             upload_frame_cpu(frame, swapchain_.images[image_index], cmd);
         }
+
+#ifdef CASPAR_CUDA_PEER_ENABLED
+        // Drain any early D2H that wasn't consumed (e.g., VK import succeeded
+        // or frame path didn't reach the cross-GPU branch).
+        if (cuda_d2h_active_) {
+            cudaSetDevice(cuda_vk_src_device_);
+            cudaStreamSynchronize(cuda_vk_src_stream_);
+            cuda_d2h_active_ = false;
+        }
+#endif
 
         // ─── Color space conversion (compute shader) ───────────────────────────
         // Only run if the intermediate was actually written to by a GPU blit path.
@@ -1512,8 +1755,10 @@ class vulkan_output_consumer : public core::frame_consumer
         vkResetFences(dev, 1, &frame_sync.in_flight);
         diag_stage_.store(6, std::memory_order_relaxed); // submit
         submit_result = vkQueueSubmit(my_queue_, 1, &submit_info, frame_sync.in_flight);
-        if (submit_result == VK_SUCCESS)
+        if (submit_result == VK_SUCCESS) {
             diag_submits_.fetch_add(1, std::memory_order_relaxed);
+            watchdog_submits_.fetch_add(1, std::memory_order_relaxed);
+        }
 
         if (submit_result == VK_ERROR_DEVICE_LOST) {
             CASPAR_LOG(error) << print() << L" GPU device lost (TDR) during submit."
@@ -1609,6 +1854,671 @@ class vulkan_output_consumer : public core::frame_consumer
         }
     }
 
+    // ─── VK-native import cache ─────────────────────────────────────────────
+    // When the mixer is Vulkan, we import the mixer's render attachment memory
+    // on the output's VkDevice via Win32 HANDLE.  The cache avoids re-importing
+    // the same memory every frame (render attachments are pooled).
+    struct vk_imported_image
+    {
+        VkImage        image        = VK_NULL_HANDLE;
+        VkDeviceMemory memory       = VK_NULL_HANDLE;
+        VkImageView    view         = VK_NULL_HANDLE;
+        uint32_t       width        = 0;
+        uint32_t       height       = 0;
+        HANDLE         src_handle   = nullptr; // Cache key — the mixer texture's exported handle (NOT owned)
+        HANDLE         owned_handle = nullptr; // Duplicated handle — owned by this cache entry, must be closed
+    };
+
+    // ─── VK-native import: import mixer's exportable VkImage memory ─────────
+    // Returns a pointer to a cached vk_imported_image, or nullptr on failure.
+    // The returned image is in VK_IMAGE_LAYOUT_UNDEFINED and needs a transition
+    // to TRANSFER_SRC before blitting.
+    vk_imported_image* import_vk_texture(HANDLE src_handle, uint32_t width, uint32_t height, VkFormat format)
+    {
+        // Check cache first — the mixer pools render attachments, so we'll see
+        // the same handle repeatedly.
+        for (auto& imp : vk_import_cache_) {
+            if (imp.src_handle == src_handle && imp.width == width && imp.height == height)
+                return &imp;
+        }
+
+        // Evict oldest entries if cache grows too large (prevents unbounded
+        // growth when attachment pool creates new textures on resolution change).
+        constexpr size_t MAX_IMPORT_CACHE = 8;
+        while (vk_import_cache_.size() >= MAX_IMPORT_CACHE) {
+            auto& old = vk_import_cache_.front();
+            auto  dev = device_->device();
+            if (old.view != VK_NULL_HANDLE)   vkDestroyImageView(dev, old.view, nullptr);
+            if (old.image != VK_NULL_HANDLE)  vkDestroyImage(dev, old.image, nullptr);
+            if (old.memory != VK_NULL_HANDLE) vkFreeMemory(dev, old.memory, nullptr);
+            if (old.owned_handle)             CloseHandle(old.owned_handle);
+            vk_import_cache_.erase(vk_import_cache_.begin());
+        }
+
+        auto dev = device_->device();
+
+        // Import the Win32 handle as VkDeviceMemory on the output's VkDevice.
+        // Duplicate the handle so the import cache owns its own copy.
+        HANDLE dup_handle = nullptr;
+        if (!DuplicateHandle(GetCurrentProcess(), src_handle, GetCurrentProcess(),
+                             &dup_handle, 0, FALSE, DUPLICATE_SAME_ACCESS)) {
+            if (!vk_import_fail_logged_) {
+                CASPAR_LOG(warning) << print() << L" Failed to duplicate Win32 handle for VK import (cross-GPU; will use CUDA peer or CPU fallback)";
+                vk_import_fail_logged_ = true;
+            }
+            return nullptr;
+        }
+
+        VkImportMemoryWin32HandleInfoKHR importInfo{};
+        importInfo.sType      = VK_STRUCTURE_TYPE_IMPORT_MEMORY_WIN32_HANDLE_INFO_KHR;
+        importInfo.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+        importInfo.handle     = dup_handle;
+
+        // Create a VkImage compatible with the imported memory
+        VkExternalMemoryImageCreateInfo extMemImageInfo{};
+        extMemImageInfo.sType       = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO;
+        extMemImageInfo.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+
+        VkImageCreateInfo imageInfo{};
+        imageInfo.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        imageInfo.pNext         = &extMemImageInfo;
+        imageInfo.imageType     = VK_IMAGE_TYPE_2D;
+        imageInfo.format        = format;
+        imageInfo.extent        = {width, height, 1};
+        imageInfo.mipLevels     = 1;
+        imageInfo.arrayLayers   = 1;
+        imageInfo.samples       = VK_SAMPLE_COUNT_1_BIT;
+        imageInfo.tiling        = VK_IMAGE_TILING_OPTIMAL;
+        imageInfo.usage         = VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+        imageInfo.sharingMode   = VK_SHARING_MODE_EXCLUSIVE;
+        imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+        VkImage image = VK_NULL_HANDLE;
+        if (vkCreateImage(dev, &imageInfo, nullptr, &image) != VK_SUCCESS) {
+            if (!vk_import_fail_logged_) {
+                CASPAR_LOG(warning) << print() << L" Failed to create VkImage for import (cross-GPU; will use CUDA peer or CPU fallback)";
+                vk_import_fail_logged_ = true;
+            }
+            CloseHandle(dup_handle);
+            return nullptr;
+        }
+
+        VkMemoryRequirements memReqs;
+        vkGetImageMemoryRequirements(dev, image, &memReqs);
+
+        VkPhysicalDeviceMemoryProperties memProps;
+        vkGetPhysicalDeviceMemoryProperties(device_->physical_device(), &memProps);
+
+        uint32_t memTypeIdx = UINT32_MAX;
+        for (uint32_t i = 0; i < memProps.memoryTypeCount; ++i) {
+            if ((memReqs.memoryTypeBits & (1u << i)) &&
+                (memProps.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
+                memTypeIdx = i;
+                break;
+            }
+        }
+        if (memTypeIdx == UINT32_MAX) {
+            if (!vk_import_fail_logged_) {
+                CASPAR_LOG(warning) << print() << L" No suitable memory type for VK import (cross-GPU; will use CUDA peer or CPU fallback)";
+                vk_import_fail_logged_ = true;
+            }
+            vkDestroyImage(dev, image, nullptr);
+            CloseHandle(dup_handle);
+            return nullptr;
+        }
+
+        VkMemoryAllocateInfo allocInfo{};
+        allocInfo.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        allocInfo.pNext           = &importInfo;
+        allocInfo.allocationSize  = memReqs.size;
+        allocInfo.memoryTypeIndex = memTypeIdx;
+
+        VkDeviceMemory importedMem = VK_NULL_HANDLE;
+        if (vkAllocateMemory(dev, &allocInfo, nullptr, &importedMem) != VK_SUCCESS) {
+            if (!vk_import_fail_logged_) {
+                CASPAR_LOG(warning) << print() << L" VK memory import failed (cross-GPU; will use CUDA peer or CPU fallback)";
+                vk_import_fail_logged_ = true;
+            }
+            vkDestroyImage(dev, image, nullptr);
+            CloseHandle(dup_handle);
+            return nullptr;
+        }
+
+        if (vkBindImageMemory(dev, image, importedMem, 0) != VK_SUCCESS) {
+            if (!vk_import_fail_logged_) {
+                CASPAR_LOG(warning) << print() << L" Failed to bind imported VK memory (cross-GPU; will use CUDA peer or CPU fallback)";
+                vk_import_fail_logged_ = true;
+            }
+            vkFreeMemory(dev, importedMem, nullptr);
+            vkDestroyImage(dev, image, nullptr);
+            CloseHandle(dup_handle);
+            return nullptr;
+        }
+
+        vk_import_cache_.push_back({image, importedMem, VK_NULL_HANDLE, width, height, src_handle, dup_handle});
+
+        if (!vk_mixer_logged_) {
+            CASPAR_LOG(info) << print() << L" VK mixer detected \u2014 using VK-native zero-copy path"
+                             << L" (bypassing GL\u2194VK interop)";
+            vk_mixer_logged_ = true;
+        }
+
+        return &vk_import_cache_.back();
+    }
+
+#ifdef CASPAR_CUDA_PEER_ENABLED
+
+    // Ensure a VK image exists on the consumer's GPU at the full mixer resolution.
+    // This is the blit source for the subregion crop into the swapchain.
+    void ensure_cuda_staging_image(uint32_t width, uint32_t height, bool use_16bit)
+    {
+        if (cuda_staging_image_ != VK_NULL_HANDLE &&
+            cuda_staging_w_ == width && cuda_staging_h_ == height)
+            return;
+
+        auto dev = device_->device();
+
+        // Tear down previous
+        if (cuda_staging_image_ != VK_NULL_HANDLE) {
+            vkDestroyImage(dev, cuda_staging_image_, nullptr);
+            vkFreeMemory(dev, cuda_staging_memory_, nullptr);
+            cuda_staging_image_  = VK_NULL_HANDLE;
+            cuda_staging_memory_ = VK_NULL_HANDLE;
+        }
+
+        VkFormat fmt = use_16bit ? VK_FORMAT_R16G16B16A16_UNORM : VK_FORMAT_B8G8R8A8_UNORM;
+
+        VkImageCreateInfo img_ci{};
+        img_ci.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        img_ci.imageType     = VK_IMAGE_TYPE_2D;
+        img_ci.format        = fmt;
+        img_ci.extent        = {width, height, 1};
+        img_ci.mipLevels     = 1;
+        img_ci.arrayLayers   = 1;
+        img_ci.samples       = VK_SAMPLE_COUNT_1_BIT;
+        img_ci.tiling        = VK_IMAGE_TILING_OPTIMAL;
+        img_ci.usage         = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        img_ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+        if (vkCreateImage(dev, &img_ci, nullptr, &cuda_staging_image_) != VK_SUCCESS) {
+            cuda_staging_image_ = VK_NULL_HANDLE;
+            return;
+        }
+
+        VkMemoryRequirements mem_reqs;
+        vkGetImageMemoryRequirements(dev, cuda_staging_image_, &mem_reqs);
+
+        VkPhysicalDeviceMemoryProperties mem_props;
+        vkGetPhysicalDeviceMemoryProperties(device_->physical_device(), &mem_props);
+
+        uint32_t type_index = UINT32_MAX;
+        for (uint32_t i = 0; i < mem_props.memoryTypeCount; ++i) {
+            if ((mem_reqs.memoryTypeBits & (1u << i)) &&
+                (mem_props.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
+                type_index = i;
+                break;
+            }
+        }
+
+        if (type_index == UINT32_MAX) {
+            vkDestroyImage(dev, cuda_staging_image_, nullptr);
+            cuda_staging_image_ = VK_NULL_HANDLE;
+            return;
+        }
+
+        VkMemoryAllocateInfo alloc_info{};
+        alloc_info.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        alloc_info.allocationSize  = mem_reqs.size;
+        alloc_info.memoryTypeIndex = type_index;
+
+        if (vkAllocateMemory(dev, &alloc_info, nullptr, &cuda_staging_memory_) != VK_SUCCESS) {
+            vkDestroyImage(dev, cuda_staging_image_, nullptr);
+            cuda_staging_image_ = VK_NULL_HANDLE;
+            return;
+        }
+
+        vkBindImageMemory(dev, cuda_staging_image_, cuda_staging_memory_, 0);
+        cuda_staging_w_ = width;
+        cuda_staging_h_ = height;
+    }
+
+    // ─── Cross-GPU VK→VK transfer via CUDA direct D2H ────────────────────────
+    // When the mixer's VK texture is on a different physical GPU from the
+    // consumer, import the VK texture into CUDA on the source GPU and DMA
+    // directly to the consumer's host-visible VK staging buffer.
+    //
+    // Key optimizations vs. the naive peer-copy path:
+    //  1. CUDA import cache — the mixer uses N render-attachment slots (triple
+    //     buffering), each with a different Win32 HANDLE. Without caching, every
+    //     frame triggers cudaImportExternalMemory + cudaDestroyExternalMemory
+    //     which costs ~150 ms round-trip. We cache up to kMaxCudaVkImports
+    //     entries so reimport only happens during the first N frames.
+    //  2. Direct D2H — instead of peer-copy (GPU 0 → host → GPU 1) then another
+    //     D2H (GPU 1 → host → VK buffer), we copy straight from the CUDA array
+    //     on GPU 0 to the host-visible VK staging buffer via cudaHostRegister.
+    //     This halves the PCIe traffic and eliminates the GPU 1 staging buffer.
+    //
+    // Returns true if the transfer succeeded, false to fall back to CPU.
+    // Phase 1: begin_cuda_d2h — starts async D2H, no sync. Can be called
+    // before fence wait to overlap D2H (~4ms) with VK sync (~2-3ms).
+    bool begin_cuda_d2h(HANDLE src_handle, uint32_t width, uint32_t height,
+                        bool use_16bit, unsigned long long vk_alloc_size,
+                        const uint8_t* src_luid)
+    {
+        try {
+            size_t pixel_size = use_16bit ? 8 : 4;
+
+            // ── Subregion optimization ──────────────────────────────────────
+            uint32_t sub_x = 0, sub_y = 0, sub_w = width, sub_h = height;
+            if (has_subregion()) {
+                sub_x = static_cast<uint32_t>((std::clamp)(config_.src_x, 0, static_cast<int>(width)));
+                sub_y = static_cast<uint32_t>((std::clamp)(config_.src_y, 0, static_cast<int>(height)));
+                sub_w = config_.region_w > 0
+                    ? static_cast<uint32_t>((std::min)(config_.region_w, static_cast<int>(width - sub_x)))
+                    : width - sub_x;
+                sub_h = config_.region_h > 0
+                    ? static_cast<uint32_t>((std::min)(config_.region_h, static_cast<int>(height - sub_y)))
+                    : height - sub_y;
+            }
+            sub_w = (std::min)(sub_w, swapchain_.width);
+            sub_h = (std::min)(sub_h, swapchain_.height);
+            if (sub_w == 0 || sub_h == 0) return false;
+
+            size_t sub_row_bytes   = sub_w * pixel_size;
+            size_t sub_total_bytes = static_cast<size_t>(sub_w) * sub_h * pixel_size;
+
+            // ── Lazy init: find the source CUDA device ──────────────────────
+            if (!cuda_vk_peer_init_) {
+                int cuda_dev_count = 0;
+                cudaGetDeviceCount(&cuda_dev_count);
+                if (cuda_dev_count < 1) {
+                    cuda_vk_peer_failed_ = true;
+                    return false;
+                }
+
+                cuda_vk_src_device_ = -1;
+                if (src_luid) {
+                    for (int i = 0; i < cuda_dev_count; ++i) {
+                        cudaDeviceProp prop;
+                        if (cudaGetDeviceProperties(&prop, i) != cudaSuccess) continue;
+                        if (memcmp(prop.luid, src_luid, 8) == 0) {
+                            cuda_vk_src_device_ = i;
+                            break;
+                        }
+                    }
+                }
+                if (cuda_vk_src_device_ < 0) {
+                    cuda_vk_src_device_ = 0; // fallback
+                }
+
+                cudaSetDevice(cuda_vk_src_device_);
+                cudaStreamCreate(&cuda_vk_src_stream_);
+
+                cuda_vk_peer_init_   = true;
+                cuda_vk_total_bytes_ = sub_total_bytes;
+                cuda_vk_row_bytes_   = sub_row_bytes;
+                cuda_vk_height_      = sub_h;
+
+                CASPAR_LOG(info) << print() << L" CUDA VK cross-GPU transfer initialized (direct D2H)"
+                                 << L" src_device=" << cuda_vk_src_device_
+                                 << L", subregion " << sub_w << L"x" << sub_h
+                                 << L" from " << sub_x << L"," << sub_y
+                                 << L", " << (sub_total_bytes / 1024 / 1024) << L" MB/frame";
+            }
+
+            if (cuda_vk_peer_failed_)
+                return false;
+
+            // ── Look up or import VK texture into CUDA (cached) ─────────────
+            cudaArray_t src_array = nullptr;
+            for (int i = 0; i < cuda_vk_import_count_; ++i) {
+                if (cuda_vk_imports_[i].handle == src_handle) {
+                    src_array = cuda_vk_imports_[i].array;
+                    break;
+                }
+            }
+
+            if (!src_array) {
+                // Not in cache — import this VK texture handle into CUDA
+                cudaSetDevice(cuda_vk_src_device_);
+
+                if (cuda_vk_import_count_ >= kMaxCudaVkImports) {
+                    // Cache full — evict oldest entry
+                    auto& oldest = cuda_vk_imports_[0];
+                    if (oldest.mipmap) cudaFreeMipmappedArray(oldest.mipmap);
+                    if (oldest.ext_mem) cudaDestroyExternalMemory(oldest.ext_mem);
+                    memmove(&cuda_vk_imports_[0], &cuda_vk_imports_[1],
+                            sizeof(cuda_vk_import_entry) * (kMaxCudaVkImports - 1));
+                    cuda_vk_imports_[kMaxCudaVkImports - 1] = {};
+                    --cuda_vk_import_count_;
+                }
+
+                auto& entry = cuda_vk_imports_[cuda_vk_import_count_];
+                entry.handle = src_handle;
+
+                cudaExternalMemoryHandleDesc extMemDesc{};
+                extMemDesc.type                = cudaExternalMemoryHandleTypeOpaqueWin32;
+                extMemDesc.handle.win32.handle = src_handle;
+                extMemDesc.size                = vk_alloc_size;
+                extMemDesc.flags               = 0;
+
+                if (cudaImportExternalMemory(&entry.ext_mem, &extMemDesc) != cudaSuccess) {
+                    CASPAR_LOG(warning) << print() << L" CUDA VK import failed for handle " << src_handle;
+                    entry = {};
+                    return false;
+                }
+
+                cudaExternalMemoryMipmappedArrayDesc mipmapDesc{};
+                mipmapDesc.offset     = 0;
+                int bits = use_16bit ? 16 : 8;
+                mipmapDesc.formatDesc = cudaCreateChannelDesc(bits, bits, bits, bits,
+                                                               cudaChannelFormatKindUnsigned);
+                mipmapDesc.extent.width  = width;
+                mipmapDesc.extent.height = height;
+                mipmapDesc.extent.depth  = 0;
+                mipmapDesc.numLevels     = 1;
+                mipmapDesc.flags         = cudaArrayDefault;
+
+                if (cudaExternalMemoryGetMappedMipmappedArray(&entry.mipmap, entry.ext_mem,
+                                                              &mipmapDesc) != cudaSuccess) {
+                    cudaDestroyExternalMemory(entry.ext_mem);
+                    entry = {};
+                    return false;
+                }
+
+                if (cudaGetMipmappedArrayLevel(&entry.array, entry.mipmap, 0) != cudaSuccess) {
+                    cudaFreeMipmappedArray(entry.mipmap);
+                    cudaDestroyExternalMemory(entry.ext_mem);
+                    entry = {};
+                    return false;
+                }
+
+                src_array = entry.array;
+                ++cuda_vk_import_count_;
+                CASPAR_LOG(info) << print() << L" CUDA VK import cached (slot "
+                                 << cuda_vk_import_count_ << L"/" << kMaxCudaVkImports
+                                 << L", handle=" << src_handle << L")";
+            }
+
+            // ── Ensure VK staging buffer exists ─────────────────────────────
+            auto dev      = device_->device();
+            auto phys_dev = device_->physical_device();
+
+            if (staging_buffer_ == VK_NULL_HANDLE || staging_buffer_size_ < sub_total_bytes) {
+                // Unregister old CUDA mapping before freeing
+                if (cuda_vk_host_registered_ && staging_mapped_) {
+                    cudaSetDevice(cuda_vk_src_device_);
+                    cudaHostUnregister(staging_mapped_);
+                    cuda_vk_host_registered_ = false;
+                }
+                if (staging_mapped_) {
+                    vkUnmapMemory(dev, staging_memory_);
+                    staging_mapped_ = nullptr;
+                }
+                if (staging_buffer_ != VK_NULL_HANDLE) {
+                    vkDestroyBuffer(dev, staging_buffer_, nullptr);
+                    vkFreeMemory(dev, staging_memory_, nullptr);
+                }
+
+                VkBufferCreateInfo buf_info{};
+                buf_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+                buf_info.size  = sub_total_bytes;
+                buf_info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+                if (vkCreateBuffer(dev, &buf_info, nullptr, &staging_buffer_) != VK_SUCCESS) {
+                    staging_buffer_ = VK_NULL_HANDLE;
+                    return false;
+                }
+
+                VkMemoryRequirements mem_reqs;
+                vkGetBufferMemoryRequirements(dev, staging_buffer_, &mem_reqs);
+
+                VkPhysicalDeviceMemoryProperties mem_props;
+                vkGetPhysicalDeviceMemoryProperties(phys_dev, &mem_props);
+
+                uint32_t type_index = UINT32_MAX;
+                for (uint32_t i = 0; i < mem_props.memoryTypeCount; ++i) {
+                    if ((mem_reqs.memoryTypeBits & (1u << i)) &&
+                        (mem_props.memoryTypes[i].propertyFlags &
+                         (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) ==
+                            (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
+                        type_index = i;
+                        break;
+                    }
+                }
+
+                if (type_index == UINT32_MAX) {
+                    vkDestroyBuffer(dev, staging_buffer_, nullptr);
+                    staging_buffer_ = VK_NULL_HANDLE;
+                    return false;
+                }
+
+                VkMemoryAllocateInfo alloc_info{};
+                alloc_info.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+                alloc_info.allocationSize  = mem_reqs.size;
+                alloc_info.memoryTypeIndex = type_index;
+                if (vkAllocateMemory(dev, &alloc_info, nullptr, &staging_memory_) != VK_SUCCESS) {
+                    vkDestroyBuffer(dev, staging_buffer_, nullptr);
+                    staging_buffer_ = VK_NULL_HANDLE;
+                    return false;
+                }
+                vkBindBufferMemory(dev, staging_buffer_, staging_memory_, 0);
+                staging_buffer_size_ = sub_total_bytes;
+
+                // Persistent map — HOST_COHERENT memory stays mapped for lifetime
+                if (vkMapMemory(dev, staging_memory_, 0, sub_total_bytes, 0, &staging_mapped_) != VK_SUCCESS) {
+                    staging_mapped_ = nullptr;
+                    return false;
+                }
+            }
+
+            // ── Register VK staging buffer with CUDA for direct GPU→host DMA ─
+            if (!cuda_vk_host_registered_ && staging_mapped_) {
+                cudaSetDevice(cuda_vk_src_device_);
+                if (cudaHostRegister(staging_mapped_, sub_total_bytes,
+                                     cudaHostRegisterDefault) == cudaSuccess) {
+                    cuda_vk_host_registered_ = true;
+                    CASPAR_LOG(info) << print() << L" CUDA host-registered VK staging buffer ("
+                                     << (sub_total_bytes / 1024 / 1024) << L" MB)";
+                } else {
+                    CASPAR_LOG(warning) << print()
+                        << L" cudaHostRegister failed — using pinned fallback";
+                }
+            }
+
+            // ── Direct D2H: CUDA array on GPU 0 → VK staging buffer (host) ──
+            // This is a single PCIe transfer — no peer copy, no GPU 1 staging.
+            void* dst_ptr = staging_mapped_;
+            bool using_pinned_fallback = false;
+
+            if (!cuda_vk_host_registered_) {
+                // Fallback: use a CUDA pinned host buffer + memcpy
+                if (!cuda_vk_pinned_host_) {
+                    cudaSetDevice(cuda_vk_src_device_);
+                    if (cudaMallocHost(&cuda_vk_pinned_host_, sub_total_bytes) != cudaSuccess) {
+                        return false;
+                    }
+                }
+                dst_ptr = cuda_vk_pinned_host_;
+                using_pinned_fallback = true;
+            }
+
+            cudaSetDevice(cuda_vk_src_device_);
+            if (cudaMemcpy2DFromArrayAsync(dst_ptr, sub_row_bytes,
+                                            src_array,
+                                            sub_x * pixel_size, sub_y,
+                                            sub_row_bytes, sub_h,
+                                            cudaMemcpyDeviceToHost,
+                                            cuda_vk_src_stream_) != cudaSuccess) {
+                return false;
+            }
+
+            // Store state for phase 2 (complete_cuda_d2h).
+            cuda_d2h_active_       = true;
+            cuda_d2h_using_pinned_ = using_pinned_fallback;
+            cuda_d2h_sub_w_        = sub_w;
+            cuda_d2h_sub_h_        = sub_h;
+            cuda_d2h_16bit_        = use_16bit;
+            return true;
+
+        } catch (const std::exception& e) {
+            CASPAR_LOG(warning) << print() << L" CUDA VK begin_cuda_d2h failed: " << e.what();
+            cuda_vk_peer_failed_ = true;
+            return false;
+        }
+    }
+
+    // Phase 2: complete_cuda_d2h — sync the async D2H and record VK commands
+    // to copy staging buffer → staging image → blit to destination.
+    bool complete_cuda_d2h(VkImage dst_image, VkCommandBuffer cmd)
+    {
+        if (!cuda_d2h_active_) return false;
+        cuda_d2h_active_ = false;
+
+        try {
+            cudaSetDevice(cuda_vk_src_device_);
+            cudaStreamSynchronize(cuda_vk_src_stream_);
+
+            if (cuda_d2h_using_pinned_) {
+                size_t pixel_size = cuda_d2h_16bit_ ? 8 : 4;
+                size_t total_bytes = static_cast<size_t>(cuda_d2h_sub_w_) * cuda_d2h_sub_h_ * pixel_size;
+                memcpy(staging_mapped_, cuda_vk_pinned_host_, total_bytes);
+            }
+
+            uint32_t sub_w = cuda_d2h_sub_w_;
+            uint32_t sub_h = cuda_d2h_sub_h_;
+            bool use_16bit = cuda_d2h_16bit_;
+
+            // ── VK staging buffer → staging image → blit to swapchain ───────
+            ensure_cuda_staging_image(sub_w, sub_h, use_16bit);
+            if (cuda_staging_image_ == VK_NULL_HANDLE)
+                return false;
+
+            // Transition staging image UNDEFINED → TRANSFER_DST
+            {
+                VkImageMemoryBarrier b{};
+                b.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                b.oldLayout           = VK_IMAGE_LAYOUT_UNDEFINED;
+                b.newLayout           = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+                b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                b.image               = cuda_staging_image_;
+                b.subresourceRange    = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+                b.srcAccessMask       = 0;
+                b.dstAccessMask       = VK_ACCESS_TRANSFER_WRITE_BIT;
+                vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                                     VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &b);
+            }
+
+            // Copy buffer → staging image
+            VkBufferImageCopy region{};
+            region.bufferOffset      = 0;
+            region.bufferRowLength   = 0;
+            region.bufferImageHeight = 0;
+            region.imageSubresource  = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            region.imageOffset       = {0, 0, 0};
+            region.imageExtent       = {sub_w, sub_h, 1};
+
+            vkCmdCopyBufferToImage(cmd, staging_buffer_, cuda_staging_image_,
+                                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+
+            // Transition staging image TRANSFER_DST → TRANSFER_SRC
+            {
+                VkImageMemoryBarrier b{};
+                b.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                b.oldLayout           = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+                b.newLayout           = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+                b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                b.image               = cuda_staging_image_;
+                b.subresourceRange    = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+                b.srcAccessMask       = VK_ACCESS_TRANSFER_WRITE_BIT;
+                b.dstAccessMask       = VK_ACCESS_TRANSFER_READ_BIT;
+                vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                     VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &b);
+            }
+
+            // Blit staging image → dst_image
+            VkImageBlit blit{};
+            blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            int32_t copy_w = static_cast<int32_t>((std::min)(sub_w, swapchain_.width));
+            int32_t copy_h = static_cast<int32_t>((std::min)(sub_h, swapchain_.height));
+            blit.srcOffsets[0] = {0, 0, 0};
+            blit.srcOffsets[1] = {copy_w, copy_h, 1};
+            blit.dstOffsets[0] = {0, 0, 0};
+            blit.dstOffsets[1] = {copy_w, copy_h, 1};
+            vkCmdBlitImage(cmd, cuda_staging_image_,
+                           VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           dst_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                           1, &blit, VK_FILTER_LINEAR);
+
+            return true;
+        } catch (const std::exception& e) {
+            CASPAR_LOG(warning) << print() << L" CUDA VK complete_cuda_d2h failed: " << e.what();
+            return false;
+        }
+    }
+
+    // Combined: begin + complete in one call (for first-frame fallback).
+    bool cross_gpu_cuda_transfer(HANDLE src_handle, uint32_t width, uint32_t height,
+                                 bool use_16bit, unsigned long long vk_alloc_size,
+                                 const uint8_t* src_luid, VkImage dst_image, VkCommandBuffer cmd)
+    {
+        if (!begin_cuda_d2h(src_handle, width, height, use_16bit, vk_alloc_size, src_luid))
+            return false;
+        return complete_cuda_d2h(dst_image, cmd);
+    }
+
+    void cleanup_cuda_vk_peer()
+    {
+        // Sync the stream BEFORE freeing any CUDA objects that may still be
+        // referenced by in-flight async work (e.g., cudaMemcpy2DFromArrayAsync
+        // kicked by begin_cuda_d2h).  If present_frame returned early due to
+        // shutdown, the async D2H was never synced by complete_cuda_d2h.
+        // Destroying mipmap arrays while the stream references them is a
+        // use-after-free on the GPU.
+        if (cuda_vk_src_stream_) {
+            cudaSetDevice(cuda_vk_src_device_);
+            cudaStreamSynchronize(cuda_vk_src_stream_);
+        }
+        cuda_d2h_active_ = false;
+
+        // Free cached CUDA imports
+        for (int i = 0; i < cuda_vk_import_count_; ++i) {
+            auto& e = cuda_vk_imports_[i];
+            if (e.mipmap) cudaFreeMipmappedArray(e.mipmap);
+            if (e.ext_mem) cudaDestroyExternalMemory(e.ext_mem);
+            e = {};
+        }
+        cuda_vk_import_count_ = 0;
+
+        // Unregister VK staging buffer from CUDA
+        if (cuda_vk_host_registered_ && staging_mapped_) {
+            cudaSetDevice(cuda_vk_src_device_);
+            cudaHostUnregister(staging_mapped_);
+            cuda_vk_host_registered_ = false;
+        }
+        // Free pinned fallback buffer
+        if (cuda_vk_pinned_host_) {
+            cudaSetDevice(cuda_vk_src_device_);
+            cudaFreeHost(cuda_vk_pinned_host_);
+            cuda_vk_pinned_host_ = nullptr;
+        }
+        if (cuda_vk_src_stream_) {
+            cudaSetDevice(cuda_vk_src_device_);
+            cudaStreamDestroy(cuda_vk_src_stream_);
+            cuda_vk_src_stream_ = nullptr;
+        }
+        if (cuda_staging_image_ != VK_NULL_HANDLE) {
+            auto dev = device_->device();
+            vkDestroyImage(dev, cuda_staging_image_, nullptr);
+            vkFreeMemory(dev, cuda_staging_memory_, nullptr);
+            cuda_staging_image_  = VK_NULL_HANDLE;
+            cuda_staging_memory_ = VK_NULL_HANDLE;
+        }
+    }
+#endif // CASPAR_CUDA_PEER_ENABLED
+
     void upload_frame_cpu(const core::const_frame& frame, VkImage dst_image, VkCommandBuffer cmd)
     {
         // CPU path: create/reuse staging buffer and copy pixel data
@@ -1655,6 +2565,10 @@ class vulkan_output_consumer : public core::frame_consumer
 
         // Create or reuse staging buffer
         if (staging_buffer_ == VK_NULL_HANDLE || staging_buffer_size_ < size) {
+            if (staging_mapped_) {
+                vkUnmapMemory(dev, staging_memory_);
+                staging_mapped_ = nullptr;
+            }
             if (staging_buffer_ != VK_NULL_HANDLE) {
                 vkDestroyBuffer(dev, staging_buffer_, nullptr);
                 vkFreeMemory(dev, staging_memory_, nullptr);
@@ -1761,11 +2675,16 @@ class vulkan_output_consumer : public core::frame_consumer
         } else {
             // No subregion: copy full frame (original behavior).
             // Use actual frame dimensions — the pixel buffer is format_desc_ sized.
+            // Clamp copy region to destination image bounds. The format_desc_
+            // describes the channel resolution (e.g. 7680x2160) which may far exceed
+            // the swapchain/destination dimensions (e.g. 2560x1440). An oversized
+            // vkCmdCopyBufferToImage region is a Vulkan spec violation that causes TDR.
+            uint32_t copy_w = (std::min)(static_cast<uint32_t>(format_desc_.width),  swapchain_.width);
+            uint32_t copy_h = (std::min)(static_cast<uint32_t>(format_desc_.height), swapchain_.height);
             region.bufferOffset    = 0;
-            region.bufferRowLength = 0;
+            region.bufferRowLength = static_cast<uint32_t>(format_desc_.width);
             region.imageOffset     = {0, 0, 0};
-            region.imageExtent     = {static_cast<uint32_t>(format_desc_.width),
-                                      static_cast<uint32_t>(format_desc_.height), 1};
+            region.imageExtent     = {copy_w, copy_h, 1};
         }
 
         vkCmdCopyBufferToImage(cmd, staging_buffer_, dst_image,
@@ -1792,13 +2711,27 @@ class vulkan_output_consumer : public core::frame_consumer
                 return TRUE;
             case WM_WINDOWPOSCHANGING: {
                 // Prevent DWM or other windows from minimizing/resizing/moving
+                // or changing the z-order of the output window.  When other windows
+                // open (e.g. screen consumer), Windows may try to insert them above
+                // our TOPMOST window.  Blocking SWP_NOZORDER changes and forcing
+                // our window to stay TOPMOST prevents the DWM compositor from
+                // showing desktop fragments through the Vulkan swapchain surface.
                 auto* pos = reinterpret_cast<WINDOWPOS*>(lParam);
-                pos->flags |= SWP_NOMOVE | SWP_NOSIZE;
+                pos->flags |= SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER;
+                pos->hwndInsertAfter = HWND_TOPMOST;
                 // Block hide (Win+D, Aero Peek, Show Desktop)
                 if (pos->flags & SWP_HIDEWINDOW)
                     pos->flags &= ~SWP_HIDEWINDOW;
                 return 0;
             }
+            case WM_ACTIVATE:
+                if (LOWORD(wParam) == WA_INACTIVE) {
+                    // Another window stole focus — re-assert TOPMOST so the output
+                    // stays on top without taking focus back.
+                    SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+                }
+                return 0;
             case WM_SIZE:
                 if (wParam == SIZE_MINIMIZED)
                     return 0; // Block minimize
@@ -1899,6 +2832,11 @@ class vulkan_output_consumer : public core::frame_consumer
 
         fse_msg_thread_ = std::thread([this, &hwnd_promise] {
             SetThreadDescription(GetCurrentThread(), L"Vulkan FSE MsgPump");
+
+            // Set Per-Monitor DPI awareness so EnumDisplayMonitors returns
+            // physical pixel coordinates (e.g. 3840x2160) instead of logical
+            // pixels scaled by the Windows DPI setting (e.g. 2560x1440 at 150%).
+            set_thread_dpi_awareness();
 
             WNDCLASSEXW wc{};
             wc.cbSize        = sizeof(WNDCLASSEXW);
@@ -2194,10 +3132,31 @@ class vulkan_output_consumer : public core::frame_consumer
             }
 
             if (!gpu_stuck) {
+                if (staging_mapped_) {
+                    vkUnmapMemory(dev, staging_memory_);
+                    staging_mapped_ = nullptr;
+                }
                 if (staging_buffer_ != VK_NULL_HANDLE) {
                     vkDestroyBuffer(dev, staging_buffer_, nullptr);
                     vkFreeMemory(dev, staging_memory_, nullptr);
                 }
+
+                // Clean up VK import cache
+                for (auto& imp : vk_import_cache_) {
+                    if (imp.view != VK_NULL_HANDLE)
+                        vkDestroyImageView(dev, imp.view, nullptr);
+                    if (imp.image != VK_NULL_HANDLE)
+                        vkDestroyImage(dev, imp.image, nullptr);
+                    if (imp.memory != VK_NULL_HANDLE)
+                        vkFreeMemory(dev, imp.memory, nullptr);
+                    if (imp.owned_handle)
+                        CloseHandle(imp.owned_handle);
+                }
+                vk_import_cache_.clear();
+
+#ifdef CASPAR_CUDA_PEER_ENABLED
+                cleanup_cuda_vk_peer();
+#endif
 
                 for (auto& iv : swapchain_.image_views)
                     vkDestroyImageView(dev, iv, nullptr);
@@ -2335,7 +3294,9 @@ class vulkan_output_consumer : public core::frame_consumer
     // Diagnostic counters (atomic so send/present threads can both increment)
     std::atomic<int> diag_sends_{0};      // calls to send()
     std::atomic<int> diag_presents_{0};   // entries to present_frame
-    std::atomic<int> diag_submits_{0};    // successful vkQueueSubmits
+    std::atomic<int> diag_submits_{0};    // successful vkQueueSubmits (reset by fps counter)
+    std::atomic<int> diag_drops_{0};      // dropped frames (buffer full in send())
+    std::atomic<uint64_t> watchdog_submits_{0}; // monotonic submit counter for watchdog (never reset)
     int              diag_buf_size_last_ = 0; // last buffer size before pop
     // Stage marker for watchdog: incremented at each milestone in present_frame.
     // Values: 0=idle, 1=entered, 2=waitFences, 3=acquired, 4=cache_submit,
@@ -2343,12 +3304,64 @@ class vulkan_output_consumer : public core::frame_consumer
     std::atomic<int> diag_stage_{0};
     std::thread      watchdog_thread_;
 
+    // Periodic 5s TIMING log
+    std::chrono::steady_clock::time_point diag_timing_start_ = std::chrono::steady_clock::now();
+    int diag_timing_frames_ = 0;
+
 
 
     // CPU staging
     VkBuffer                         staging_buffer_      = VK_NULL_HANDLE;
     VkDeviceMemory                   staging_memory_      = VK_NULL_HANDLE;
     size_t                           staging_buffer_size_ = 0;
+    void*                            staging_mapped_      = nullptr; // persistent map
+
+    // ─── VK-native import cache ─────────────────────────────────────────────
+    std::vector<vk_imported_image>   vk_import_cache_;
+    bool                             vk_mixer_logged_ = false; // Log once when VK mixer detected
+    bool                             vk_import_fail_logged_ = false; // Log VK import failure once (cross-GPU)
+    uint64_t                         present_path_counter_ = 0;    // Log present path every N frames
+    bool                             send_diag_logged_ = false;    // Log once the send() path decision
+    uint64_t                         send_diag_counter_ = 0;       // Periodic send() path logging
+
+#ifdef CASPAR_CUDA_PEER_ENABLED
+    // ─── Cross-GPU CUDA VK transfer state ───────────────────────────────────
+    bool                   cuda_vk_peer_init_   = false;
+    bool                   cuda_vk_peer_failed_ = false;
+    int                    cuda_vk_src_device_  = -1;
+    cudaStream_t           cuda_vk_src_stream_  = nullptr;
+    size_t                 cuda_vk_total_bytes_  = 0;
+    size_t                 cuda_vk_row_bytes_    = 0;
+    uint32_t               cuda_vk_height_       = 0;
+    bool                   cuda_vk_host_registered_ = false;
+    void*                  cuda_vk_pinned_host_     = nullptr;
+
+    // Early D2H kick state: async D2H is started before fence wait, completed after.
+    bool                   cuda_d2h_active_       = false;  // async D2H in flight
+    bool                   cuda_d2h_using_pinned_ = false;  // used pinned fallback
+    uint32_t               cuda_d2h_sub_w_        = 0;      // subregion width for VK blit
+    uint32_t               cuda_d2h_sub_h_        = 0;      // subregion height for VK blit
+    bool                   cuda_d2h_16bit_        = false;   // format for staging image
+
+    // Cache of CUDA-imported VK textures (avoids costly reimport per frame).
+    // The mixer uses triple buffering with pooled attachments, so after warmup
+    // we see a stable set of handles. Keep enough slots for the initial burst
+    // before the pool stabilizes (3 slots × ~2 attachments each = 6).
+    static constexpr int kMaxCudaVkImports = 8;
+    struct cuda_vk_import_entry {
+        HANDLE               handle  = nullptr;
+        cudaExternalMemory_t ext_mem = nullptr;
+        cudaMipmappedArray_t mipmap  = nullptr;
+        cudaArray_t          array   = nullptr;
+    };
+    cuda_vk_import_entry   cuda_vk_imports_[kMaxCudaVkImports] = {};
+    int                    cuda_vk_import_count_ = 0;
+
+    VkImage                cuda_staging_image_    = VK_NULL_HANDLE;
+    VkDeviceMemory         cuda_staging_memory_   = VK_NULL_HANDLE;
+    uint32_t               cuda_staging_w_        = 0;
+    uint32_t               cuda_staging_h_        = 0;
+#endif
 
     // EDID emulation state
     uint32_t                         injected_edid_display_id_ = 0;

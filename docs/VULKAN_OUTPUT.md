@@ -8,6 +8,8 @@ Low-latency, direct-to-display GPU output consumer for CasparCG. Bypasses the de
 - [GPU Tier System](#gpu-tier-system)
 - [Frame Transfer Pipeline](#frame-transfer-pipeline)
 - [Multi-GPU Transfer](#multi-gpu-transfer)
+- [GPU Topology Detection](#gpu-topology-detection)
+- [DeckLink CUDA-Vulkan Interop](#decklink-cuda-vulkan-interop)
 - [Color Space Conversion](#color-space-conversion)
 - [HDR Output](#hdr-output)
 - [Synchronization](#synchronization)
@@ -72,7 +74,8 @@ The module is organized into ten layers:
 │   └── PBO double-buffered upload (fallback path)             │
 ├──────────────────────────────────────────────────────────────┤
 │ cuda_peer_transfer              (GPU→GPU DMA)                │
-│   ├── cudaMemcpyPeer: direct PCIe/NVLink DMA (no CPU copy)  │
+│   ├── cudaMemcpyPeerAsync: async PCIe/NVLink DMA (no CPU copy)│
+│   ├── GPU-side event chain (zero CPU sync points)            │
 │   ├── CUDA↔GL interop on both GPUs                          │
 │   └── Graceful fallback to PBO path if CUDA unavailable      │
 ├──────────────────────────────────────────────────────────────┤
@@ -110,14 +113,18 @@ CasparCG Mixer (OGL, GPU A)
    │   OGL texture ──cudaGraphicsGLRegisterImage──▸ CUDA array (GPU A)
    │                                                 │
    │                          cudaMemcpy2DFromArray ──▸ staging buffer (GPU A)
+   │                                  cudaEventRecord(src_ready)
    │                                                       │
-   │                                   cudaMemcpyPeer (PCIe/NVLink DMA)
+   │                              cudaStreamWaitEvent(src_ready)  [GPU-side]
+   │                                   cudaMemcpyPeerAsync (PCIe/NVLink DMA)
+   │                                  cudaEventRecord(peer_event)
    │                                                       │
+   │                              cudaStreamWaitEvent(peer_event) [GPU-side]
    │                                              staging buffer (GPU B)
    │                                                       │
-   │                          cudaMemcpy2DToArray ──▸ landing texture (GPU B)
+   │                          cudaMemcpy ──▸ PBO (GPU B)
    │                                                       │
-   │                                     glCopyImageSubData ──▸ shared_texture_pool
+   │                                     glTexSubImage2D ──▸ shared_texture_pool
    │                                                              │
    │                                                     VkImage ──▸ swapchain image
    │
@@ -149,7 +156,7 @@ All `vkQueueSubmit` and `vkQueuePresentKHR` calls are serialized through `vulkan
 
 **Same-GPU zero-copy** eliminates all CPU-side pixel copies. The OGL mixer output is blitted into a shared texture backed by exportable GPU memory (`GL_EXT_memory_object`), which is imported into Vulkan as a `VkImage` via a Win32 `HANDLE`. The blit runs on a dedicated `interop_context` GL thread via `dispatch_sync()`, so the transfer completes before `submit_frame()` returns. Synchronization between the OpenGL and Vulkan timelines uses paired `GL_EXT_semaphore` / `VkSemaphore` objects.
 
-**Cross-GPU CUDA peer DMA** uses the GPU's DMA copy engines to transfer pixels directly from GPU A to GPU B over PCIe or NVLink — no CPU involvement. The frame arrives at GPU B as a CUDA-written GL texture, which is then blitted into the shared interop pool for Vulkan presentation. This is the fastest cross-GPU path (~15 GB/s on PCIe 3.0 x16, up to 600 GB/s on NVLink).
+**Cross-GPU CUDA peer DMA** uses the GPU's DMA copy engines to transfer pixels directly from GPU A to GPU B over PCIe or NVLink — no CPU involvement. The entire pipeline is fully async with GPU-side event synchronization: `src_ready_event_` signals when the source staging buffer is written, `peer_event_` signals when the peer DMA completes. No CPU sync points exist in the read→peer→write chain (except the final `cudaStreamSynchronize` in `write_dest()` before the GL texture upload). This is the fastest cross-GPU path (~15 GB/s on PCIe 3.0 x16, ~31 GB/s on PCIe 4.0, up to 600 GB/s on NVLink). When matching GPU architectures support P2P, the transfer is a single PCIe hop; otherwise the driver stages through system RAM transparently.
 
 **Cross-GPU PBO fallback** is used when CUDA is unavailable. The mixer's CPU-side pixel buffer (which CasparCG already maintains for non-GPU consumers) is uploaded to GPU B via a double-buffered Pixel Buffer Object on the affinity context's GL thread.
 
@@ -256,16 +263,23 @@ When the CUDA Toolkit is available at build time (`CASPAR_CUDA_PEER_ENABLED`), t
 
 1. Queries `cudaGLGetDevices()` on each GPU's GL context to discover CUDA device indices
 2. Enables `cudaDeviceEnablePeerAccess()` for direct PCIe DMA (or NVLink if available)
-3. Allocates staging buffers on both GPUs
+3. Queries `cudaDeviceGetP2PAttribute(cudaDevP2PAttrNativeAtomicSupported)` to detect NVLink vs PCIe P2P
+4. Allocates staging buffers on both GPUs
+5. Creates a dedicated `peer_stream_` with `src_ready_event_` and `peer_event_` for fully async GPU-side synchronization
 
-Per-frame transfer:
+Per-frame transfer (all async, zero CPU sync until final GL upload):
 ```
-Phase 1 (OGL thread, GPU A): cudaGraphicsMapResources → cudaMemcpy2DFromArray → staging_A
-Phase 2 (any thread):        cudaMemcpyPeer(staging_B, dev_B, staging_A, dev_A)
-Phase 3 (affinity thread, GPU B): cudaMemcpy2DToArray → landing_texture → shared_pool
+Phase 1 (OGL thread, GPU A): cudaStreamWaitEvent(peer_event)  [wait for previous DMA to finish reading src]
+                              cudaGraphicsMapResources → cudaMemcpy2DFromArray → staging_A
+                              cudaEventRecord(src_ready_event)  [signal staging_A is ready]
+Phase 2 (any thread):         cudaStreamWaitEvent(src_ready_event)  [GPU-side wait for Phase 1]
+                              cudaMemcpyPeerAsync(staging_B, dev_B, staging_A, dev_A, peer_stream)
+                              cudaEventRecord(peer_event)  [signal DMA complete]
+Phase 3 (affinity thread, GPU B): cudaStreamWaitEvent(peer_event)  [GPU-side wait for Phase 2]
+                                  cudaMemcpy → PBO → glTexSubImage2D → shared_pool
 ```
 
-Even without NVLink or direct P2P support, `cudaMemcpyPeer` still works — the driver routes through system RAM transparently, but uses the GPU's DMA engines rather than CPU memcpy, reducing CPU overhead.
+Even without NVLink or direct P2P support, `cudaMemcpyPeerAsync` still works — the driver routes through system RAM transparently, but uses the GPU's DMA engines rather than CPU memcpy, reducing CPU overhead.
 
 ### PBO Upload Fallback
 
@@ -294,12 +308,53 @@ This context provides the GL environment needed for both the CUDA interop (GPU B
 [vulkan_output] GPU LUID mismatch — mixer on GPU 0, output on GPU 1. Activating cross-GPU transfer.
 [vulkan_output] Cross-GPU interop enabled via affinity bridge (GPU 1) (16-bit for HDR).
 [vulkan_output] CUDA peer DMA enabled (device 0 → device 1)
-[vulkan_output] Direct peer access enabled (NVLink/PCIe P2P)
+[vulkan_output] NVLink detected between device 0 and device 1 (perf_rank=1)
+[vulkan_output] NVLink provides ~600 GB/s bidirectional bandwidth
+```
+
+Without NVLink but with P2P:
+```
+[vulkan_output] PCIe P2P direct access between device 0 and device 1 (perf_rank=0, no NVLink)
+```
+
+Without any P2P (different architectures):
+```
+[vulkan_output] No direct P2P — peer copy will stage through system RAM (still faster than CPU memcpy)
 ```
 
 If CUDA peer is unavailable:
 ```
 [vulkan_output] CUDA peer transfer unavailable: cudaGLGetDevices failed — using PBO upload fallback.
+```
+
+### GPU Topology Detection
+
+At module initialization, `vulkan_device::log_gpu_topology()` performs a one-time scan of the system's GPU interconnect topology:
+
+1. **Vulkan device group enumeration** — creates a temporary `VkInstance` and calls `vkEnumeratePhysicalDeviceGroups()` to detect NVLink/SLI bridges (multi-GPU device groups with `subsetAllocation = true`)
+2. **CUDA P2P attribute probing** — for every GPU pair, queries `cudaDeviceGetP2PAttribute()` to determine:
+   - Whether direct P2P access is possible (`cudaDevP2PAttrAccessSupported`)
+   - Performance rank (`cudaDevP2PAttrPerformanceRank`) — higher means faster (NVLink > PCIe)
+   - Native atomic support (`cudaDevP2PAttrNativeAtomicSupported`) — indicates NVLink
+
+Example startup output:
+```
+[vulkan_output] GPU topology: 4 device group(s)
+[vulkan_output]   Group 0: NVIDIA RTX A4000 (single GPU)
+[vulkan_output]   Group 1: NVIDIA RTX A4000 (single GPU)
+[vulkan_output]   Group 2: Quadro P4000 (single GPU)
+[vulkan_output]   Group 3: Quadro P4000 (single GPU)
+[vulkan_output]   No NVLink bridge detected. Cross-GPU transfers use CUDA peer DMA (PCIe).
+[vulkan_output] CUDA P2P topology (2 devices):
+[vulkan_output]   NVIDIA RTX A4000 <-> Quadro P4000: staged (system RAM) (perf_rank=0)
+```
+
+With NVLink:
+```
+[vulkan_output] GPU topology: 1 device group(s)
+[vulkan_output]   Group 0: NVIDIA RTX A6000 x2 (NVLink/SLI bridge, subsetAllocation)
+[vulkan_output] CUDA P2P topology (2 devices):
+[vulkan_output]   NVIDIA RTX A6000 <-> NVIDIA RTX A6000: direct P2P (perf_rank=1, NVLink)
 ```
 
 ---
@@ -370,6 +425,56 @@ On NVIDIA GPUs, when HDR output is configured (PQ or HLG), the module attempts t
 ```
 
 The mastering display metadata (ST2086) sent to the display uses BT.2020 primaries, D65 white point, and the configured MaxCLL/MaxFALL values. On shutdown, the module restores SDR mode automatically.
+
+---
+
+## DeckLink CUDA-Vulkan Interop
+
+When the Vulkan mixer is active (`<accelerator>vulkan</accelerator>`), the DeckLink consumer uses `cuda_vk_strategy` to receive rendered frames directly from the Vulkan pipeline via GPU-side synchronization — eliminating the CPU fence wait that previously dominated the DeckLink output path.
+
+### Architecture
+
+```
+Vulkan Mixer (image_kernel)
+    │
+    ├── render() produces VkImage + timeline semaphore
+    │     └── vkQueueSubmit signals VkSemaphore (timeline, value N)
+    │              └── exports Win32 HANDLE via VK_KHR_external_semaphore_win32
+    │
+    ├── core::texture interface propagates handle + value
+    │     └── frame.texture()->render_complete_semaphore_handle()
+    │     └── frame.texture()->render_complete_semaphore_value()
+    │
+    └── cuda_vk_strategy (DeckLink consumer)
+          ├── cudaImportExternalSemaphore (Win32 HANDLE → CUDA external semaphore)
+          ├── cudaWaitExternalSemaphoresAsync (GPU-side wait for VK render completion)
+          ├── CUDA BGRA→v210 conversion kernel
+          ├── cudaMemcpyAsync (device → host, double-buffered)
+          └── DeckLink ScheduleVideoFrame
+```
+
+### Key Design Points
+
+- **GPU-side semaphore wait**: `cudaWaitExternalSemaphoresAsync` enqueues a GPU-side wait on the CUDA stream — no CPU blocking. The CUDA kernel for v210 conversion starts immediately after the Vulkan render completes on the GPU timeline.
+- **Double-buffered output**: Two device buffers (`d_v210_[0]`, `d_v210_[1]`) and per-buffer `cudaEvent_t` allow pipelining: frame N's D2H transfer overlaps with frame N+1's GPU conversion.
+- **Semaphore handle caching**: A multi-slot cache (`MAX_CACHED_SEMS = 8`) maps Win32 HANDLEs to imported CUDA external semaphores, avoiding repeated `cudaImportExternalSemaphore` calls. The Vulkan mixer rotates through 3-4 `frame_data` slots, each with a unique semaphore handle.
+- **Graceful fallback**: If the frame's texture doesn't provide a semaphore handle (e.g., OGL mixer), the strategy falls back to CPU pixel readback.
+
+### Performance
+
+| Metric | Before (CPU fence) | After (GPU semaphore) |
+|--------|--------------------|-----------------------|
+| Fence/sync wait | 22ms (`glClientWaitSync`) | 0.06ms (`cudaWaitExternalSemaphoresAsync`) |
+| CPU thread blocked | Yes (22ms) | No |
+| Total frame time | ~30ms | ~28ms (GPU throughput limited) |
+
+The remaining 28ms is GPU execution time (VK render + CUDA v210 conversion), not CPU blocking. The CPU is free to service other consumers during this time.
+
+### Files
+
+- `src/modules/decklink/consumer/cuda_vk_strategy.cpp` — DeckLink CUDA-VK output strategy
+- `src/accelerator/vulkan/image/image_kernel.cpp` — timeline semaphore creation and signal
+- `src/core/frame/frame.h` — `core::texture` base class with virtual semaphore methods
 
 ---
 

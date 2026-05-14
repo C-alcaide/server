@@ -191,7 +191,7 @@ class gpu_frame_cache
     std::atomic<bool>       pump_running_{false};
 
     void pump_loop();
-    void do_coordinator_submit(uint64_t generation);
+    bool do_coordinator_submit(uint64_t generation);
 
     // Consumer tracking
     std::atomic<int>        consumer_count_{0};

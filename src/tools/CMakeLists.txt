@@ -25,3 +25,11 @@ function(bin2c source_file dest_file namespace obj_name)
         DEPENDS bin2c ${CMAKE_CURRENT_SOURCE_DIR}/${source_file}
     )
 endfunction()
+
+function(bin2c_file source_file dest_file namespace obj_name)
+    ADD_CUSTOM_COMMAND(
+        OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/${dest_file}
+        COMMAND bin2c ${namespace} ${obj_name} ${source_file} > ${CMAKE_CURRENT_BINARY_DIR}/${dest_file}
+        DEPENDS bin2c ${source_file}
+    )
+endfunction()

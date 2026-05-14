@@ -18,7 +18,7 @@ Port the upstream Vulkan image mixer (`src/accelerator/vulkan/`) into CasparVP a
 **Future work (not in this plan):**
 - `VK_KHR_video_encode` for hardware-accelerated FFmpeg/streaming encoding directly from VK textures
 - Vulkan-based screen consumer (replace SFML+OGL preview)
-- VK→D3D interop for Decklink consumer (zero-copy SDI output)
+- ~~VK→D3D interop for Decklink consumer (zero-copy SDI output)~~ → **Superseded**: VK→CUDA timeline semaphore interop implemented in `cuda_vk_strategy.cpp`. GPU-side `cudaWaitExternalSemaphoresAsync` eliminates CPU fence wait (22ms→0.06ms). See [DeckLink CUDA-Vulkan Interop](VULKAN_OUTPUT.md#decklink-cuda-vulkan-interop).
 - Spout consumer (inherently OGL, no VK equivalent in protocol)
 - NDI GPU-direct (NDI SDK doesn't support VK yet)
 
@@ -83,6 +83,8 @@ Currently throws `"d3d texture import not supported on vulkan accelerator"`.
 
 ### 2B. CUDA Zero-Copy Interop
 
+> **Status: Partially implemented** — The VK→CUDA semaphore pipeline is working for DeckLink output (`cuda_vk_strategy`). The VK mixer exports timeline semaphores via `VK_KHR_external_semaphore_win32`, and `core::texture` propagates semaphore handle/value through the frame pipeline. CUDA decoders writing directly to VK memory (the reverse direction) is not yet implemented.
+
 Currently the VK mixer only receives CPU pixel data (no GPU texture import from CUDA decoders).
 
 - Replace `cudaGraphicsGLRegisterImage` with `cudaImportExternalMemory()` + `VK_KHR_external_memory`
@@ -95,6 +97,8 @@ Currently the VK mixer only receives CPU pixel data (no GPU texture import from 
 - Both modules need `#ifdef ENABLE_VULKAN` dual paths (GL or VK depending on active mixer)
 
 ### 2C. render() Must Return GPU Texture
+
+> **Status: Partially implemented** — `vulkan::texture_wrapper` wraps `VkImage` and implements `core::texture` with `render_complete_semaphore_handle()` and `render_complete_semaphore_value()` virtual methods. The DeckLink consumer (`cuda_vk_strategy`) uses these to GPU-wait on VK render completion. The `frame_data::submit()` path in `image_kernel.cpp` creates exportable timeline semaphores and signals them in `vkQueueSubmit`.
 
 The upstream VK mixer's `render()` returns `{cpu_pixels, nullptr}` — no GPU texture.
 
@@ -182,7 +186,7 @@ Screen consumer uses OGL directly. With Vulkan mixer:
 
 ### 4C. Other Consumers (no changes needed)
 
-- **decklink_consumer**: Uses CPU pixels → unchanged
+- **decklink_consumer**: ~~Uses CPU pixels → unchanged~~ → **Updated**: When VK mixer active, `cuda_vk_strategy` uses VK→CUDA timeline semaphore interop for GPU-side sync. Double-buffered v210 output with per-buffer CUDA events. Falls back to CPU pixels with OGL mixer.
 - **ffmpeg_consumer**: Uses CPU pixels → unchanged
 - **cuda_prores consumer**: Uses CPU pixels → unchanged
 - **NDI**: Uses CPU pixels → unchanged

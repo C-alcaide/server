@@ -68,6 +68,10 @@ endif ()
 
 include_directories("${CMAKE_BINARY_DIR}/generated")
 
+IF(ENABLE_VULKAN)
+	add_definitions(-DENABLE_VULKAN)
+ENDIF()
+
 add_subdirectory(tools)
 add_subdirectory(accelerator)
 add_subdirectory(common)

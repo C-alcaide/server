@@ -28,6 +28,8 @@
 
 #include <cstdint>
 #include <functional>
+#include <future>
+#include <mutex>
 #include <vector>
 
 namespace caspar { namespace core {
@@ -90,13 +92,17 @@ frame_geometry&            mutable_frame::geometry() { return impl_->geometry_; 
 
 struct const_frame::impl
 {
-    std::vector<array<const std::uint8_t>> image_data_;
-    array<const std::int32_t>              audio_data_;
-    core::pixel_format_desc                desc_ = core::pixel_format_desc(pixel_format::invalid);
-    const void*                            tag_;
-    frame_geometry                         geometry_ = frame_geometry::get_default();
-    std::any                               opaque_;
-    std::shared_ptr<core::texture>         texture_;
+    mutable std::vector<array<const std::uint8_t>> image_data_;
+    array<const std::int32_t>                      audio_data_;
+    core::pixel_format_desc                        desc_ = core::pixel_format_desc(pixel_format::invalid);
+    const void*                                    tag_;
+    frame_geometry                                 geometry_ = frame_geometry::get_default();
+    std::any                                       opaque_;
+    std::shared_ptr<core::texture>                 texture_;
+
+    // Lazy readback support: if set, image_data_[0] is resolved on first access.
+    mutable std::shared_future<array<const std::uint8_t>> lazy_image_;
+    mutable std::once_flag                                lazy_resolved_;
 
     impl(const void*                            tag,
          std::vector<array<const std::uint8_t>> image_data,
@@ -112,6 +118,21 @@ struct const_frame::impl
         if (desc_.planes.size() != image_data_.size()) {
             CASPAR_THROW_EXCEPTION(invalid_argument());
         }
+    }
+
+    impl(const void*                                   tag,
+         std::shared_future<array<const std::uint8_t>> lazy_image,
+         array<const std::int32_t>                     audio_data,
+         const core::pixel_format_desc&                desc,
+         std::shared_ptr<core::texture>                texture)
+        : audio_data_(std::move(audio_data))
+        , desc_(desc)
+        , tag_(tag)
+        , texture_(texture)
+        , lazy_image_(std::move(lazy_image))
+    {
+        // Pre-fill image_data_ with a placeholder so planes.size() == image_data_.size()
+        image_data_.resize(desc_.planes.size());
     }
 
     impl(mutable_frame&& other)
@@ -131,7 +152,15 @@ struct const_frame::impl
         }
     }
 
-    const array<const std::uint8_t>& image_data(std::size_t index) const { return image_data_.at(index); }
+    const array<const std::uint8_t>& image_data(std::size_t index) const
+    {
+        if (lazy_image_.valid()) {
+            std::call_once(lazy_resolved_, [this] {
+                image_data_[0] = lazy_image_.get();
+            });
+        }
+        return image_data_.at(index);
+    }
 
     std::shared_ptr<core::texture> texture() { return texture_; }
 
@@ -149,6 +178,14 @@ const_frame::const_frame(const void*                            tag,
                          const core::pixel_format_desc&         desc,
                          std::shared_ptr<core::texture>         texture)
     : impl_(new impl(tag, std::move(image_data), std::move(audio_data), desc, texture))
+{
+}
+const_frame::const_frame(const void*                                   tag,
+                         std::shared_future<array<const std::uint8_t>> lazy_image,
+                         array<const std::int32_t>                     audio_data,
+                         const core::pixel_format_desc&                desc,
+                         std::shared_ptr<core::texture>                texture)
+    : impl_(new impl(tag, std::move(lazy_image), std::move(audio_data), desc, std::move(texture)))
 {
 }
 const_frame::const_frame(mutable_frame&& other)

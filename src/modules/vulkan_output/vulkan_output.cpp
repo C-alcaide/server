@@ -89,6 +89,9 @@ void init(const core::module_dependencies& dependencies)
                              << L" [" << (d.tier == gpu_tier::pro ? L"Pro" : L"Consumer") << L"]";
         }
     }
+
+    // Log GPU interconnect topology (NVLink, CUDA P2P)
+    vulkan_device::log_gpu_topology();
 }
 
 }} // namespace caspar::vulkan_output

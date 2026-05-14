@@ -10,6 +10,11 @@
 
 #include <tuple> // std::ignore
 
+#ifdef _MSC_VER
+#include <windows.h>
+#include <GL/gl.h>
+#endif
+
 #ifndef _MSC_VER
 #include <EGL/egl.h>
 #include <common/gl/gl_check.h>
@@ -23,6 +28,7 @@ struct device_context::impl
     virtual ~impl() {}
     virtual void bind()   = 0;
     virtual void unbind() = 0;
+    virtual void* native_handle() const { return nullptr; }
 };
 struct impl_sfml : public device_context::impl
 {
@@ -47,8 +53,27 @@ struct impl_sfml : public device_context::impl
 
     virtual ~impl_sfml() {}
 
-    virtual void bind() override { std::ignore = device_.setActive(true); }
+#ifdef _MSC_VER
+    void* cached_hglrc_ = nullptr;
+#endif
+
+    virtual void bind() override
+    {
+        std::ignore = device_.setActive(true);
+#ifdef _MSC_VER
+        if (!cached_hglrc_)
+            cached_hglrc_ = wglGetCurrentContext();
+#endif
+    }
     virtual void unbind() override { std::ignore = device_.setActive(false); }
+    virtual void* native_handle() const override
+    {
+#ifdef _MSC_VER
+        return cached_hglrc_;
+#else
+        return nullptr;
+#endif
+    }
 };
 
 #ifndef _MSC_VER
@@ -133,5 +158,6 @@ device_context::~device_context() {}
 
 void device_context::bind() { impl_->bind(); }
 void device_context::unbind() { impl_->unbind(); }
+void* device_context::native_handle() const { return impl_->native_handle(); }
 
 } // namespace caspar::accelerator::ogl

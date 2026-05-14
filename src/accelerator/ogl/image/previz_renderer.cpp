@@ -372,7 +372,7 @@ struct previz_renderer::impl
     {
         if (shader_)
             return;
-        shader_ = std::make_shared<shader>(std::string(previz_vertex_shader), std::string(previz_fragment_shader));
+        shader_ = std::make_shared<shader>(std::string(reinterpret_cast<const char*>(previz_vertex_shader)), std::string(reinterpret_cast<const char*>(previz_fragment_shader)));
     }
 
     void ensure_fbo(int w, int h)

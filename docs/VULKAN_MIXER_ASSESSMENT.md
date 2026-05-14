@@ -56,6 +56,8 @@ On Windows, this blocks any producer handing off D3D textures (Decklink capture,
 
 ### 2. No CUDA Zero-Copy Interop
 
+> **Status update (May 2026):** The VK→CUDA direction is now implemented for DeckLink output. `cuda_vk_strategy` uses `cudaWaitExternalSemaphoresAsync` to GPU-wait on the VK render timeline semaphore. The CUDA→VK direction (GPU decoders writing to VK textures) remains unimplemented.
+
 The OGL mixer uses `cudaGraphicsGLRegisterImage` for GPU-decoded frames (ProRes, NotchLC) to go directly to GL textures without CPU readback. No Vulkan equivalent is wired up.
 
 **Fix:** Use `cudaImportExternalMemory()` with `VK_KHR_external_memory`. Allocate Vulkan texture with export flag → CUDA imports the handle → decoder writes directly. Actually cleaner than the GL path. NVIDIA documents this workflow extensively.
@@ -64,7 +66,7 @@ The OGL mixer uses `cudaGraphicsGLRegisterImage` for GPU-decoded frames (ProRes,
 
 `screen_consumer.cpp` directly calls GL APIs. The host-path (CPU pixel data → PBO upload) still works, but the zero-copy `gpu_strategy` path (directly binding `frame.texture()`) breaks since there's no GL texture with Vulkan backend.
 
-**Impact:** Low — screen consumer is a preview tool. The host-path penalty is negligible for a preview window. Real output consumers (Decklink, NDI, streaming) receive frames via CPU anyway.
+**Impact:** Low — screen consumer is a preview tool. The host-path penalty is negligible for a preview window. Real output consumers (Decklink, NDI, streaming) receive frames via CPU anyway. DeckLink with VK mixer now uses GPU-side VK→CUDA semaphore interop (`cuda_vk_strategy`) instead of CPU pixels.
 
 **Possible fixes:**
 - VK→GL interop bridge via `VK_KHR_external_memory` (restores zero-copy)
@@ -111,6 +113,6 @@ Porting these to Vulkan GLSL would require translating ~1100 lines of shader cod
 
 **For upstream CasparCG master:** Functionally complete for image mixing. Main blockers are D3D import (Windows) and CUDA interop (GPU decode). On Linux headless without D3D/CUDA, usable today.
 
-**For CasparVP:** Requires porting all extended shader features, plus implementing the additional uniform/texture inputs those features need. Significant effort but no architectural barriers.
+**For CasparVP:** Requires porting all extended shader features, plus implementing the additional uniform/texture inputs those features need. Significant effort but no architectural barriers. VK→CUDA semaphore interop for DeckLink output is now implemented (`cuda_vk_strategy`), eliminating the CPU fence bottleneck (22ms→0.06ms). Cross-GPU async peer copy (`cudaMemcpyPeerAsync` with GPU-side event chain) and GPU topology detection at startup are also in place.
 
-**Both production blockers (D3D + CUDA) are fixable** with existing Vulkan APIs and well-documented patterns. They are additive work isolated to specific functions, not redesign.
+**Both production blockers (D3D + CUDA) are fixable** with existing Vulkan APIs and well-documented patterns. CUDA blocker #2 is partially resolved (VK→CUDA output path working; CUDA→VK input path remains). They are additive work isolated to specific functions, not redesign.

@@ -60,6 +60,7 @@ class frame_consumer
     virtual std::wstring print() const = 0;
     virtual std::wstring name() const  = 0;
     virtual bool         has_synchronization_clock() const { return false; }
+    virtual bool         needs_cpu_frame_data() const { return true; }
     virtual int          index() const = 0;
 };
 

@@ -57,6 +57,7 @@ class output final
     std::future<bool> call(int index, const std::vector<std::wstring>& params);
 
     size_t consumer_count() const;
+    bool   any_consumer_needs_cpu_data() const;
 
     core::monitor::state state() const;
 

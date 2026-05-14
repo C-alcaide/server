@@ -25,7 +25,6 @@
 #include "video_channel.h"
 
 #include <chrono>
-#include <iomanip>
 #include <sstream>
 
 #include "video_format.h"
@@ -119,7 +118,7 @@ struct video_channel::impl final
          std::unique_ptr<image_mixer>              image_mixer,
          std::function<void(core::monitor::state)> tick,
          color_transfer                            default_color_transfer = color_transfer::sdr)
-        : channel_info_(index, image_mixer->depth(), default_color_space, default_color_transfer)
+        : channel_info_(index, image_mixer->depth(), default_color_space, default_color_transfer, image_mixer->is_vulkan(), image_mixer->native_gl_context())
         , output_(graph_, format_desc, channel_info_)
         , image_mixer_(std::move(image_mixer))
         , mixer_(index, graph_, image_mixer_, default_color_space, default_color_transfer)
@@ -181,6 +180,11 @@ struct video_channel::impl final
 
                     // This is a little race prone, but at worst a new consumer will start with a frame of black
                     bool has_consumers = output_.consumer_count() > 0;
+
+                    // Tell the mixer whether any consumer needs CPU pixel data.
+                    // When false, the VK mixer can skip the GPU→CPU readback entirely.
+                    image_mixer_->set_cpu_readback_needed(
+                        has_consumers && output_.any_consumer_needs_cpu_data());
 
                     // Mix
                     caspar::timer mix_timer;

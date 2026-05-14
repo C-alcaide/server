@@ -28,6 +28,10 @@
 #include <filesystem>
 #include <mutex>
 #include <stdexcept>
+
+#ifdef CASPAR_CUDA_PEER_ENABLED
+#include <cuda_runtime.h>
+#endif
 #include <string>
 
 namespace caspar { namespace vulkan_output {
@@ -844,6 +848,146 @@ std::vector<display_info> vulkan_device::enumerate_displays()
 
     vkDestroyInstance(instance, nullptr);
     return results;
+}
+
+void vulkan_device::log_gpu_topology()
+{
+    // Guard against concurrent or repeated calls (e.g. multiple channels
+    // initializing simultaneously).  The topology doesn't change at runtime.
+    static std::once_flag topology_once;
+    std::call_once(topology_once, []() {
+        log_gpu_topology_impl();
+    });
+}
+
+void vulkan_device::log_gpu_topology_impl()
+{
+    // Create a temporary VkInstance to query device groups.
+    VkApplicationInfo app_info{};
+    app_info.sType            = VK_STRUCTURE_TYPE_APPLICATION_INFO;
+    app_info.pApplicationName = "CasparCG_Topology";
+    app_info.apiVersion       = VK_API_VERSION_1_3;
+
+    std::vector<const char*> extensions = {
+        VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME,
+    };
+
+    // Filter to available only
+    uint32_t avail_count = 0;
+    vkEnumerateInstanceExtensionProperties(nullptr, &avail_count, nullptr);
+    std::vector<VkExtensionProperties> avail_exts(avail_count);
+    vkEnumerateInstanceExtensionProperties(nullptr, &avail_count, avail_exts.data());
+    extensions.erase(
+        std::remove_if(extensions.begin(), extensions.end(),
+                       [&](const char* name) {
+                           return std::none_of(avail_exts.begin(), avail_exts.end(),
+                                               [&](const VkExtensionProperties& p) {
+                                                   return strcmp(p.extensionName, name) == 0;
+                                               });
+                       }),
+        extensions.end());
+
+    VkInstanceCreateInfo ci{};
+    ci.sType                   = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+    ci.pApplicationInfo        = &app_info;
+    ci.enabledExtensionCount   = static_cast<uint32_t>(extensions.size());
+    ci.ppEnabledExtensionNames = extensions.data();
+
+    VkInstance instance = VK_NULL_HANDLE;
+    if (vkCreateInstance(&ci, nullptr, &instance) != VK_SUCCESS) {
+        CASPAR_LOG(debug) << L"[vulkan_output] GPU topology: failed to create temp instance";
+        return;
+    }
+
+    // Enumerate device groups (Vulkan 1.1+ core)
+    auto pfn = reinterpret_cast<PFN_vkEnumeratePhysicalDeviceGroups>(
+        vkGetInstanceProcAddr(instance, "vkEnumeratePhysicalDeviceGroups"));
+
+    if (pfn) {
+        uint32_t group_count = 0;
+        pfn(instance, &group_count, nullptr);
+
+        if (group_count > 0) {
+            std::vector<VkPhysicalDeviceGroupProperties> groups(group_count);
+            for (auto& g : groups) {
+                g.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GROUP_PROPERTIES;
+                g.pNext = nullptr;
+            }
+            pfn(instance, &group_count, groups.data());
+
+            CASPAR_LOG(info) << L"[vulkan_output] GPU topology: " << group_count << L" device group(s)";
+
+            bool any_nvlink = false;
+            for (uint32_t gi = 0; gi < group_count; ++gi) {
+                const auto& g = groups[gi];
+                std::wstring gpu_names;
+                for (uint32_t di = 0; di < g.physicalDeviceCount; ++di) {
+                    VkPhysicalDeviceProperties dp;
+                    vkGetPhysicalDeviceProperties(g.physicalDevices[di], &dp);
+                    if (di > 0) gpu_names += L" + ";
+                    gpu_names += std::wstring(dp.deviceName, dp.deviceName + strlen(dp.deviceName));
+                }
+
+                if (g.physicalDeviceCount > 1) {
+                    any_nvlink = true;
+                    CASPAR_LOG(info) << L"[vulkan_output]   Group " << gi << L": " << gpu_names
+                                     << L" (" << g.physicalDeviceCount << L" GPUs, NVLink/SLI)"
+                                     << (g.subsetAllocation ? L" [subset alloc]" : L"");
+                    CASPAR_LOG(info) << L"[vulkan_output]   -> Single VkDevice can span both GPUs"
+                                     << L" for native peer memory (VK_KHR_device_group)";
+                } else {
+                    CASPAR_LOG(info) << L"[vulkan_output]   Group " << gi << L": " << gpu_names
+                                     << L" (single GPU)";
+                }
+            }
+
+            if (!any_nvlink && group_count > 1) {
+                CASPAR_LOG(info) << L"[vulkan_output]   No NVLink bridge detected."
+                                 << L" Cross-GPU transfers use CUDA peer DMA (PCIe).";
+            }
+        }
+    }
+
+    // Also log CUDA P2P topology if CUDA is available
+#ifdef CASPAR_CUDA_PEER_ENABLED
+    {
+        int cuda_dev_count = 0;
+        if (cudaGetDeviceCount(&cuda_dev_count) == cudaSuccess && cuda_dev_count > 1) {
+            CASPAR_LOG(info) << L"[vulkan_output] CUDA P2P topology (" << cuda_dev_count << L" devices):";
+            for (int src = 0; src < cuda_dev_count; ++src) {
+                cudaDeviceProp src_prop;
+                cudaGetDeviceProperties(&src_prop, src);
+                for (int dst = src + 1; dst < cuda_dev_count; ++dst) {
+                    cudaDeviceProp dst_prop;
+                    cudaGetDeviceProperties(&dst_prop, dst);
+
+                    int can_access = 0;
+                    cudaDeviceCanAccessPeer(&can_access, src, dst);
+
+                    int has_nvlink = 0;
+                    cudaDeviceGetP2PAttribute(&has_nvlink,
+                                              cudaDevP2PAttrNativeAtomicSupported,
+                                              src, dst);
+
+                    int perf_rank = 0;
+                    cudaDeviceGetP2PAttribute(&perf_rank,
+                                              cudaDevP2PAttrPerformanceRank,
+                                              src, dst);
+
+                    std::wstring link_type = has_nvlink ? L"NVLink" : can_access ? L"PCIe P2P" : L"staged (system RAM)";
+                    std::wstring src_name(src_prop.name, src_prop.name + strlen(src_prop.name));
+                    std::wstring dst_name(dst_prop.name, dst_prop.name + strlen(dst_prop.name));
+
+                    CASPAR_LOG(info) << L"[vulkan_output]   " << src_name << L" <-> " << dst_name
+                                     << L": " << link_type
+                                     << L" (perf_rank=" << perf_rank << L")";
+                }
+            }
+        }
+    }
+#endif
+
+    vkDestroyInstance(instance, nullptr);
 }
 
 }} // namespace caspar::vulkan_output

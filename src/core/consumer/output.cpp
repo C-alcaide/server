@@ -33,6 +33,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <iomanip>
 #include <map>
 #include <optional>
 #include <thread>
@@ -55,6 +56,12 @@ struct output::impl
     std::atomic<uint64_t>      tick_count_{0};
 
     std::optional<time_point_t> time_;
+
+    // Channel-level periodic timing diagnostic
+    std::chrono::steady_clock::time_point timing_start_{std::chrono::steady_clock::now()};
+    std::chrono::steady_clock::time_point timing_last_frame_{};
+    uint64_t timing_frames_ = 0;
+    uint64_t timing_late_   = 0;
 
   public:
     impl(const spl::shared_ptr<diagnostics::graph>& graph,
@@ -110,8 +117,16 @@ struct output::impl
             old = static_cast<std::shared_ptr<frame_consumer>>(it->second);
             consumers_.erase(it);
         }
-        // Destroy outside the lock so the destructor (which may join
-        // threads) does not block the tick loop.
+
+        // Wait for the tick loop to finish its current iteration so it
+        // drops its shared_ptr snapshot of the old consumer.  Without this,
+        // the old consumer may be destroyed later (when the tick snapshot
+        // goes out of scope) and race with a newly-added consumer at the
+        // same index.
+        auto pre = tick_count_.load();
+        for (int i = 0; i < 200 && tick_count_.load() == pre; ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
         old.reset();
         return true;
     }
@@ -140,10 +155,58 @@ struct output::impl
         return consumers_.size();
     }
 
+    bool any_consumer_needs_cpu_data()
+    {
+        std::lock_guard<std::mutex> lock(consumers_mutex_);
+        for (auto& p : consumers_) {
+            if (p.second->needs_cpu_frame_data()) {
+                static int log_count = 0;
+                if (log_count < 5) {
+                    CASPAR_LOG(info) << L"[output] Consumer forcing CPU readback: "
+                                    << p.second->name() << L" (index=" << p.first << L")"
+                                    << L" needs_cpu=" << p.second->needs_cpu_frame_data();
+                    log_count++;
+                }
+                return true;
+            }
+        }
+        static bool logged_skip = false;
+        if (!logged_skip && !consumers_.empty()) {
+            CASPAR_LOG(info) << L"[output] No consumer needs CPU readback (" << consumers_.size() << L" consumers)";
+            logged_skip = true;
+        }
+        return false;
+    }
+
     void operator()(const const_frame&             input_frame1,
                     const const_frame&             input_frame2,
                     const core::video_format_desc& format_desc)
     {
+        // Channel-level timing diagnostic
+        {
+            auto now = std::chrono::steady_clock::now();
+            timing_frames_++;
+            if (timing_last_frame_.time_since_epoch().count() > 0) {
+                double frame_ms = std::chrono::duration<double, std::milli>(now - timing_last_frame_).count();
+                double expected_ms = 1000.0 / format_desc_.hz;
+                if (frame_ms > expected_ms * 1.15)
+                    timing_late_++;
+            }
+            timing_last_frame_ = now;
+
+            auto elapsed = std::chrono::duration<double>(now - timing_start_).count();
+            if (elapsed >= 5.0 && timing_frames_ > 1) {
+                double avg_ms = elapsed * 1000.0 / timing_frames_;
+                CASPAR_LOG(info) << L"[channel " << channel_info_.index << L"] TIMING: avg="
+                                 << std::fixed << std::setprecision(1) << avg_ms
+                                 << L"ms late=" << timing_late_
+                                 << L" frames=" << timing_frames_;
+                timing_start_  = now;
+                timing_frames_ = 0;
+                timing_late_   = 0;
+            }
+        }
+
         auto time = std::move(time_);
 
         if (format_desc_ != format_desc) {
@@ -210,8 +273,6 @@ struct output::impl
                     auto failed = it->second.get();
                     it          = consumers.erase(it);
 
-                    // Only erase from the authoritative map if the pointer still
-                    // matches — a concurrent add() may have already replaced it.
                     std::lock_guard<std::mutex> lock(consumers_mutex_);
                     auto mit = consumers_.find(index);
                     if (mit != consumers_.end() && mit->second.get() == failed)
@@ -295,6 +356,7 @@ std::future<bool> output::call(int index, const std::vector<std::wstring>& param
     return impl_->call(index, params);
 }
 size_t output::consumer_count() const { return impl_->consumer_count(); }
+bool   output::any_consumer_needs_cpu_data() const { return impl_->any_consumer_needs_cpu_data(); }
 void   output::operator()(const const_frame& frame, const const_frame& frame2, const video_format_desc& format_desc)
 {
     return (*impl_)(frame, frame2, format_desc);

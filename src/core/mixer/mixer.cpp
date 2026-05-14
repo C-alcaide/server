@@ -66,6 +66,18 @@ struct mixer::impl
 
     const_frame operator()(std::vector<draw_frame> frames, const video_format_desc& format_desc, int nb_samples)
     {
+        // Evaluate the previous tick's deferred result BEFORE rendering the
+        // current tick.  This ensures the image_mixer's still-frame cache is
+        // up-to-date when render() checks it, preventing a 1-tick stale-cache
+        // race that caused frames to display out of order.
+        const_frame prev_result;
+        bool        have_prev = static_cast<int>(buffer_.size()) >= format_desc.field_count;
+        if (have_prev) {
+            auto f = std::move(buffer_.front());
+            buffer_.pop();
+            prev_result = std::move(f.get());
+        }
+
         image_mixer_->update_aspect_ratio(static_cast<double>(format_desc.square_width) /
                                           static_cast<double>(format_desc.square_height));
 
@@ -94,19 +106,15 @@ struct mixer::impl
              tag = this]() mutable {
                 auto desc = pixel_format_desc(pixel_format::bgra, default_color_space, default_color_transfer);
                 desc.planes.push_back(pixel_format_desc::plane(format_desc.width, format_desc.height, 4, depth));
-                std::vector<array<const uint8_t>> image_data;
-                auto                              tuple = std::move(result.get());
-                image_data.emplace_back(std::move(std::get<0>(tuple)));
-                return const_frame(tag, std::move(image_data), std::move(audio), desc, std::move(std::get<1>(tuple)));
+                auto tuple = std::move(result.get());
+                auto& tex_ptr = std::get<1>(tuple);
+                // Pass the shared_future<array<const uint8_t>> to const_frame for lazy readback.
+                // GPU→CPU copy is deferred until a consumer actually calls image_data().
+                auto frame = const_frame(tag, std::move(std::get<0>(tuple)), std::move(audio), desc, std::move(tex_ptr));
+                return frame;
             }));
 
-        if (buffer_.size() <= format_desc.field_count) {
-            return const_frame{};
-        }
-
-        auto f = std::move(buffer_.front());
-        buffer_.pop();
-        return std::move(f.get());
+        return have_prev ? prev_result : const_frame{};
     }
 
     void set_master_volume(float volume) { audio_mixer_.set_master_volume(volume); }

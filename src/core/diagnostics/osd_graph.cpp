@@ -48,10 +48,17 @@
 #include <mutex>
 #include <optional>
 #include <thread>
+#include <tuple>
 
 namespace fs = std::filesystem;
 
 namespace caspar { namespace core { namespace diagnostics { namespace osd {
+
+std::recursive_mutex& sfml_context_mutex()
+{
+    static std::recursive_mutex mtx;
+    return mtx;
+}
 
 #if SFML_VERSION_MAJOR >= 3
 
@@ -207,7 +214,19 @@ class context : public drawable
         if (!window_)
             return;
 
-        try {
+        // Hold the global SFML context mutex while the GL context is active.
+        // This prevents WGL races with other threads creating sf::Window
+        // instances (e.g. screen consumer).
+        {
+            std::lock_guard<std::recursive_mutex> lock(sfml_context_mutex());
+
+            if (!window_->setActive(true)) {
+                CASPAR_LOG(warning) << L"[diag] Failed to reactivate GL context — closing window.";
+                safe_close_window();
+                return;
+            }
+
+            try {
 
         sf::Event e;
         while (window_->pollEvent(e)) {
@@ -288,6 +307,12 @@ class context : public drawable
             safe_close_window();
             return;
         }
+
+        // Release the GL context before releasing the mutex and sleeping,
+        // so other threads can create WGL contexts safely.
+        std::ignore = window_->setActive(false);
+
+        } // release sfml_context_mutex
 
         std::this_thread::sleep_for(std::chrono::milliseconds(40));
         if (executor_.is_running()) {

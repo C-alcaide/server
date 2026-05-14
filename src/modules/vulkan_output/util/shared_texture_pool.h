@@ -36,7 +36,7 @@ namespace caspar { namespace vulkan_output {
 
 class vulkan_device;
 
-// Double-buffered shared texture pair for zero-copy OGL → VK transfer.
+// Triple-buffered shared texture pool for zero-copy OGL → VK transfer.
 // Manages GL_EXT_memory_object textures exported to Vulkan via Win32 handles,
 // plus GL_EXT_semaphore / VK_KHR_external_semaphore for synchronization.
 //

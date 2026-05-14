@@ -99,6 +99,17 @@ class vulkan_device
     // Enumerate all available outputs across all GPUs (creates temporary instance)
     static std::vector<display_info> enumerate_displays();
 
+    // Log GPU interconnect topology (NVLink device groups, CUDA P2P status).
+    // Creates a temporary VkInstance to query device groups. Safe to call at
+    // module init before any consumer is created.  Guarded by call_once —
+    // safe to call from multiple threads/channels.
+    static void log_gpu_topology();
+
+  private:
+    static void log_gpu_topology_impl();
+
+  public:
+
     // Enumerate displays attached to THIS device's physical GPU (uses live instance — handles valid for device lifetime)
     std::vector<display_info> enumerate_displays_on_device() const;
 

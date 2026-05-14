@@ -36,6 +36,14 @@
 #include <accelerator/ogl/util/device.h>
 #include <accelerator/ogl/util/texture.h>
 
+#ifdef ENABLE_VULKAN
+#include <accelerator/vulkan/image/image_mixer.h>
+#include <accelerator/vulkan/util/device.h>
+#include <accelerator/vulkan/util/texture.h>
+#include <accelerator/vulkan/util/texture_wrapper.h>
+#include "../../cuda_vk_texture.h"
+#endif
+
 #include <common/array.h>
 #include <common/bit_depth.h>
 #include <common/diagnostics/graph.h>
@@ -95,6 +103,7 @@ namespace caspar { namespace cuda_prores {
 // VRAM cost: 2 extra slots x ~638 MB (12K BGRA16) = ~1.3 GB — acceptable on 24GB GPUs.
 static constexpr int NUM_SLOTS  = 7;
 static constexpr int MAX_QUEUED = 4;
+// (NUM_VK_TEX / ring removed — per-slot cvt_[] used instead)
 
 struct prores_producer_impl final : public core::frame_producer
 {
@@ -105,6 +114,10 @@ struct prores_producer_impl final : public core::frame_producer
     int                                   color_matrix_override_ = -1;
     spl::shared_ptr<core::frame_factory>  frame_factory_;
     std::shared_ptr<accelerator::ogl::device> ogl_device_;
+    bool                                   use_vulkan_ = false;
+#ifdef ENABLE_VULKAN
+    std::shared_ptr<accelerator::vulkan::device> vk_device_;
+#endif
     core::video_format_desc               format_desc_;
     int                                   audio_channels_ = 0;
 
@@ -130,6 +143,10 @@ struct prores_producer_impl final : public core::frame_producer
     // Essential for 12K throughput where host-copy would saturate the PCIe bus.
     std::shared_ptr<accelerator::ogl::texture> gl_tex_[NUM_SLOTS];
     std::shared_ptr<CudaGLTexture>             cgt_   [NUM_SLOTS];
+#ifdef ENABLE_VULKAN
+    // Per-slot VK texture: one CudaVkTexture per decode slot (same as GL path).
+    std::shared_ptr<CudaVkTexture>             cvt_[NUM_SLOTS];
+#endif
 
     // Shared WGL context (Windows only): owned by read_thread_, shares object
     // names with CasparCG's main GL context so CUDA-GL interop works there.
@@ -190,11 +207,20 @@ struct prores_producer_impl final : public core::frame_producer
         , pingpong_(pingpong)
         , frame_factory_(deps.frame_factory)
     {
-        auto* ogl_mixer = dynamic_cast<accelerator::ogl::image_mixer*>(frame_factory_.get());
-        if (!ogl_mixer)
-            CASPAR_THROW_EXCEPTION(std::runtime_error("[prores_producer] frame_factory is not ogl::image_mixer"));
-
-        ogl_device_  = ogl_mixer->get_ogl_device();
+#ifdef ENABLE_VULKAN
+        auto* vk_mixer = dynamic_cast<accelerator::vulkan::image_mixer*>(frame_factory_.get());
+        if (vk_mixer) {
+            vk_device_   = vk_mixer->get_vk_device();
+            use_vulkan_  = true;
+            ogl_device_  = nullptr;
+        } else
+#endif
+        {
+            auto* ogl_mixer = dynamic_cast<accelerator::ogl::image_mixer*>(frame_factory_.get());
+            if (!ogl_mixer)
+                CASPAR_THROW_EXCEPTION(std::runtime_error("[prores_producer] frame_factory is not ogl::image_mixer or vulkan::image_mixer"));
+            ogl_device_  = ogl_mixer->get_ogl_device();
+        }
         format_desc_ = deps.format_desc;
 
         // Must be called before any CUDA resource alloc on this thread.
@@ -286,13 +312,21 @@ struct prores_producer_impl final : public core::frame_producer
             slots_init_[i] = true;
         }
 
-        // ~~ GL textures + shared WGL context (Windows zero-copy path) ~~~~~~~~~~~~~~~~~
-        // Create num_slots_ GL textures on the OGL thread, then capture its WGL handles
-        // and create a second HGLRC that shares object names with the main one.
-        // read_thread_ makes this shared context current so CUDA-GL interop
-        // (Register / Map / Unmap) runs entirely there, with no OGL-thread involvement
-        // at decode time.  This is the zero-copy path required for 12K ProRes HQ.
+        // ~~ GPU textures + zero-copy interop ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#ifdef ENABLE_VULKAN
+        if (use_vulkan_) {
+            // Vulkan path: one exportable VK texture per decode slot.
+            int fw = frame_info_.width, fh = frame_info_.height;
+            for (int i = 0; i < num_slots_; i++) {
+                auto vk_tex = vk_device_->create_exportable_texture(fw, fh, 4, common::bit_depth::bit16);
+                cvt_[i] = std::make_shared<CudaVkTexture>(vk_tex, static_cast<VkDevice>(vk_device_->getVkDevice()));
+            }
+            CASPAR_LOG(info) << L"[prores_producer] Using CUDA-Vulkan zero-copy interop"
+                             << L" (" << num_slots_ << L" per-slot textures)";
+        } else
+#endif
         {
+            // OGL path: GL textures + shared WGL context (Windows zero-copy path)
             int fw = frame_info_.width, fh = frame_info_.height;
             ogl_device_->dispatch_sync([this, fw, fh]() {
                 for (int i = 0; i < num_slots_; i++)
@@ -302,7 +336,6 @@ struct prores_producer_impl final : public core::frame_producer
                 HGLRC main_hglrc = wglGetCurrentContext();
                 hdc_             = wglGetCurrentDC();
                 if (main_hglrc && hdc_) {
-                    // Both contexts must be non-current for wglShareLists to succeed.
                     wglMakeCurrent(nullptr, nullptr);
                     shared_hglrc_ = wglCreateContext(hdc_);
                     if (shared_hglrc_) {
@@ -313,18 +346,25 @@ struct prores_producer_impl final : public core::frame_producer
                             shared_hglrc_ = nullptr;
                         }
                     }
-                    wglMakeCurrent(hdc_, main_hglrc);  // restore main OGL context
+                    wglMakeCurrent(hdc_, main_hglrc);
                 }
 #endif
             });
         }
 
         // ~~ Host-copy fallback buffers ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#ifdef WIN32
-        use_host_copy_ = (shared_hglrc_ == nullptr);
-#else
-        use_host_copy_ = true;
+#ifdef ENABLE_VULKAN
+        if (use_vulkan_) {
+            use_host_copy_ = false;  // VK interop doesn't need host copy
+        } else
 #endif
+        {
+#ifdef WIN32
+            use_host_copy_ = (shared_hglrc_ == nullptr);
+#else
+            use_host_copy_ = true;
+#endif
+        }
         if (use_host_copy_) {
             CASPAR_LOG(info) << L"[prores_producer] Using host-copy upload path";
             const size_t out_bytes = (size_t)frame_info_.width * frame_info_.height * 4 * sizeof(uint16_t);
@@ -400,6 +440,9 @@ struct prores_producer_impl final : public core::frame_producer
         // Make the shared GL context current here so CUDA-GL interop
         // (Register, Map, Unmap) runs on this thread with no involvement
         // from the single-threaded OGL dispatch thread.
+#ifdef ENABLE_VULKAN
+        if (!use_vulkan_)
+#endif
         if (!use_host_copy_ && shared_hglrc_) {
             if (!wglMakeCurrent(hdc_, shared_hglrc_)) {
                 CASPAR_LOG(error) << L"[prores_producer] wglMakeCurrent on read_thread_ failed"
@@ -428,10 +471,10 @@ struct prores_producer_impl final : public core::frame_producer
         int64_t video_frame_count = video_frame_start_;  // frames pushed to queue; used for OUT check
 
         // Async pipeline state (zero-copy path only).
-        // prev_slot: slot whose GPU work was submitted but not yet sync'd/pushed.
-        // -1 = nothing pending.  The frame for prev_slot is built and pushed in
-        // flush_async_slot(), called at the START of the next iteration so that
-        // the CPU work overlaps with the GPU decode of the current slot.
+        // Both GL and VK use a 2-stage pipeline via prev_slot:
+        //   flush the PREVIOUS slot each iteration (1 iteration overlap).
+        // VK ring textures decouple textures from decode slots (no aliasing),
+        // but we still flush prev_slot for minimal latency.
         int prev_slot = -1;
 
         // flush_async_slot: sync GPU work for slot ps, unmap the GL texture, and
@@ -439,15 +482,28 @@ struct prores_producer_impl final : public core::frame_producer
         // frame will be discarded (loop/pingpong reset, seek) to avoid allocating
         // a draw_frame that is immediately thrown away.
         auto flush_async_slot = [&](int ps, bool push_result) {
-            if (ps < 0 || use_host_copy_ || !cgt_[ps]) return;
+            if (ps < 0 || use_host_copy_) return;
+#ifdef ENABLE_VULKAN
+            if (use_vulkan_ && !cvt_[ps]) return;
+            if (!use_vulkan_ && !cgt_[ps]) return;
+#else
+            if (!cgt_[ps]) return;
+#endif
+
             cudaStreamSynchronize(slots_[ps].stream);
-            cgt_[ps]->unmap(slots_[ps].stream);
+
+            // GL path: unmap after sync. VK path: no unmap needed (persistent mapping).
+#ifdef ENABLE_VULKAN
+            if (!use_vulkan_)
+#endif
+            if (cgt_[ps]) cgt_[ps]->unmap(slots_[ps].stream);
 
             // Report actual GPU+submit time for this slot.
             graph_->set_value("decode-time",
                 slot_dec_timer_[ps].elapsed() * format_desc_.fps * 0.5);
 
-            if (!push_result) return;
+            if (!push_result)
+                return;
 
             const ProResFrameInfo& sfi = slot_fi_[ps];
             const auto pfd_cs = (sfi.color_matrix == 9)                         ? core::color_space::bt2020
@@ -457,7 +513,8 @@ struct prores_producer_impl final : public core::frame_producer
                               : (sfi.transfer_func == 14) ? core::color_transfer::hlg
                               : core::color_transfer::sdr;
 
-            core::pixel_format_desc pfd(core::pixel_format::rgba, pfd_cs, pfd_ct);
+            const auto pf = use_vulkan_ ? core::pixel_format::bgra : core::pixel_format::rgba;
+            core::pixel_format_desc pfd(pf, pfd_cs, pfd_ct);
             pfd.planes.push_back(core::pixel_format_desc::plane(
                 sfi.width, sfi.height, 4, common::bit_depth::bit16));
 
@@ -469,16 +526,35 @@ struct prores_producer_impl final : public core::frame_producer
             auto audio_store = std::make_shared<std::vector<int32_t>>(std::move(slot_audio_[ps]));
             array<const int32_t> audio_arr(audio_store->data(), audio_store->size(), std::move(audio_store));
 
+            std::shared_ptr<core::texture> gpu_tex;
+#ifdef ENABLE_VULKAN
+            if (use_vulkan_) {
+                gpu_tex = cvt_[ps]->core_texture();
+            } else
+#endif
+                gpu_tex = cgt_[ps]->gl_texture();
+
             core::draw_frame df(core::const_frame(
                 this, std::move(img_vec), std::move(audio_arr), pfd,
-                cgt_[ps]->gl_texture()));
+                gpu_tex));
 
             { std::lock_guard<std::mutex> lk(queue_mutex_); ready_queue_.push(std::move(df)); }
             queue_cv_.notify_one();
         };
 
+        // Helper: flush all pending work, then reset.
+        // Flush prev_slot (2-stage pipeline) for both GL and VK paths.
+        // Used for seek/loop/eof/stop edge cases where ALL pending work must drain.
+        auto flush_all_pending = [&](bool push_result) {
+            flush_async_slot(prev_slot, push_result);
+            prev_slot = -1;
+        };
+
         while (true) {
+            caspar::timer iter_timer;
+            double t_wait = 0, t_demux = 0, t_submit = 0, t_flush = 0;
             {
+                caspar::timer wait_timer;
                 std::unique_lock<std::mutex> lk(queue_mutex_);
                 queue_cv_.wait(lk, [this] {
                     // When eof_paused_, only wake for a seek or destructor  not for queue space.
@@ -492,8 +568,7 @@ struct prores_producer_impl final : public core::frame_producer
                 if (seek_target >= 0) {
                     // Flush any pending async slot: sync the GPU so the GL resource is
                     // released, but don't push the frame (stale frames will be discarded).
-                    flush_async_slot(prev_slot, false);
-                    prev_slot = -1;
+                    flush_all_pending(false);
                     while (!ready_queue_.empty()) ready_queue_.pop();  // flush stale frames
                     stop_flag_ = false;  // cancel any destructor-stop (safety)
                     eof_paused_ = false;  // resume from paused-at-EOF state
@@ -511,13 +586,15 @@ struct prores_producer_impl final : public core::frame_producer
                 }
 
                 if (stop_flag_) {
-                    flush_async_slot(prev_slot, false);
-                    prev_slot = -1;
+                    flush_all_pending(false);
                     break;
                 }
+                t_wait = wait_timer.elapsed();
             }
 
+            caspar::timer demux_timer;
             auto pkt = demuxer_->read_packet();
+            t_demux = demux_timer.elapsed();
 
             double current_speed = speed_.load();
 
@@ -525,8 +602,7 @@ struct prores_producer_impl final : public core::frame_producer
             if (pkt.is_eof) {
                 if (pingpong_.load()) {
                     // Sync/release pending async slot (discard — queue will be flushed).
-                    flush_async_slot(prev_slot, false);
-                    prev_slot = -1;
+                    flush_all_pending(false);
                     speed_.store(-current_speed);
                     // video_frame_count is one past the last decoded frame at EOF.
                     video_frame_count = std::max(0LL, video_frame_count - 1);
@@ -545,8 +621,7 @@ struct prores_producer_impl final : public core::frame_producer
                     continue;
                 } else if (loop_) {
                     // Sync/release pending async slot (discard — queue will be flushed).
-                    flush_async_slot(prev_slot, false);
-                    prev_slot = -1;
+                    flush_all_pending(false);
                     // Flush pre-buffered end-of-file frames so receive_impl cannot pop
                     // stale frames and increment frame_count_ away from in_frame_.
                     {
@@ -564,8 +639,7 @@ struct prores_producer_impl final : public core::frame_producer
                     fps_window_timer_.restart();
                 } else {
                     // Pause at EOF: push the pending async frame so it's the held still.
-                    flush_async_slot(prev_slot, true);
-                    prev_slot = -1;
+                    flush_all_pending(true);
                     eof_paused_ = true;  // keep thread alive; a seek will revive it
                     queue_cv_.notify_all();  // wake receive_impl so it doesn't block 40ms
                 }
@@ -610,43 +684,89 @@ struct prores_producer_impl final : public core::frame_producer
             // ~~ Decode ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
             cudaError_t   err;
 
-            if (!use_host_copy_ && cgt_[slot]) {
+            bool use_gpu_zerocopy = false;
+#ifdef ENABLE_VULKAN
+            use_gpu_zerocopy = use_vulkan_ && cvt_[slot];
+#endif
+            if (!use_gpu_zerocopy)
+                use_gpu_zerocopy = !use_host_copy_ && cgt_[slot];
+
+            if (use_gpu_zerocopy) {
                 // Zero-copy ASYNC path: submit GPU work to ctx->stream and return
-                // immediately.  The sync + unmap + push happen in the NEXT iteration
-                // via flush_async_slot(), overlapping GPU decode of slot N with the
-                // CPU work (demuxer read, audio, frame alloc) for slot N-1.
-                CudaGLTexture& cgt = *cgt_[slot];
+                // immediately.  The sync + push happen later via flush_async_slot().
+                //
+                // VK deep pipeline: flush this SLOT's previous cycle (num_slots_ iterations
+                // ago, ~70ms of GPU time) instead of the previous slot (1 iteration, ~10ms).
+                // This gives the GPU much more time to complete decode without blocking.
+                //
+                // GL 2-stage pipeline: flush the previous slot (1 iteration behind).
+                // GL textures must be unmapped promptly, so deep pipelining is not safe.
                 cudaArray_t arr;
-                try { arr = cgt.map(ctx.stream); }
-                catch (const std::exception& ex) {
-                    CASPAR_LOG(error) << L"[prores_producer] GL map failed: " << ex.what();
-                    continue;
+#ifdef ENABLE_VULKAN
+                if (use_vulkan_ && cvt_[slot]) {
+                    arr = cvt_[slot]->array();
+                } else
+#endif
+                {
+                    // GL path: map/unmap per frame
+                    CudaGLTexture& cgt = *cgt_[slot];
+                    try { arr = cgt.map(ctx.stream); }
+                    catch (const std::exception& ex) {
+                        CASPAR_LOG(error) << L"[prores_producer] GL map failed: " << ex.what();
+                        continue;
+                    }
                 }
                 const int cm = (color_matrix_override_ >= 0) ? color_matrix_override_ : (int)fi.color_matrix;
                 slot_dec_timer_[slot].restart();
+                { caspar::timer submit_timer;
                 err = prores_decode_frame_async(&ctx, pkt.data.data(), pkt.data.size(),
                                                cm, fi.frame_type != 0, arr);
+                t_submit = submit_timer.elapsed(); }
                 if (err != cudaSuccess) {
-                    // Partial submit: sync and unmap to release the resource.
                     cudaStreamSynchronize(ctx.stream);
-                    cgt.unmap(ctx.stream);
+#ifdef ENABLE_VULKAN
+                    if (!use_vulkan_)
+#endif
+                    if (cgt_[slot]) cgt_[slot]->unmap(ctx.stream);
                     CASPAR_LOG(warning) << L"[prores_producer] decode_async: " << cudaGetErrorString(err);
                     graph_->set_tag(diagnostics::tag_severity::WARNING, "dropped");
                     continue;
                 }
 
-                // While the GPU decodes slot, flush the PREVIOUS slot:
-                // sync its GPU work, unmap its GL texture, build its draw_frame, push.
-                // This overlaps CPU overhead with the GPU decode of the current slot.
-                flush_async_slot(prev_slot, true);
+                // Pipeline management after successful decode submit.
+                // 2-stage pipeline: flush the PREVIOUS slot now (both GL and VK).
+                {
+                    caspar::timer flush_timer;
+                    flush_async_slot(prev_slot, true);
+                    t_flush = flush_timer.elapsed();
+                    prev_slot = slot;
+                }
+
+                // Periodic decode-thread timing breakdown (every ~1s)
+                {
+                    static caspar::timer dec_log_timer;
+                    static int dec_log_count = 0;
+                    ++dec_log_count;
+                    if (dec_log_timer.elapsed() >= 1.0) {
+                        double t_total = iter_timer.elapsed();
+                        CASPAR_LOG(trace) << "[cuda_prores decode] iter=" << std::fixed << std::setprecision(1)
+                            << (t_total * 1000.0) << "ms  wait=" << (t_wait * 1000.0)
+                            << "ms  demux=" << (t_demux * 1000.0)
+                            << "ms  submit=" << (t_submit * 1000.0)
+                            << "ms  flush=" << (t_flush * 1000.0)
+                            << "ms  frames=" << dec_log_count
+                            << "  qsz=" << ready_queue_.size();
+                        dec_log_count = 0;
+                        dec_log_timer.restart();
+                    }
+                }
 
                 graph_->set_value("queue-fill",
                     static_cast<double>(ready_queue_.size() + 1) / (max_queued_ + 1));
 
-                // Save frame state for this slot; it will be pushed in the next iteration.
+                // Save frame state for this slot; it will be pushed when flushed.
                 slot_fi_   [slot] = fi;
                 slot_audio_[slot] = std::move(frame_audio);
-                prev_slot         = slot;
 
                 // Skip the synchronous frame-build below — frame will be built in flush.
                 slot = (slot + 1) % num_slots_;
@@ -711,7 +831,7 @@ struct prores_producer_impl final : public core::frame_producer
             check_bounds:
             if (current_speed >= 0.0 && out_frame_ >= 0 && video_frame_count >= out_frame_) {
                 if (pingpong_.load()) {
-                    flush_async_slot(prev_slot, false);  prev_slot = -1;
+                    flush_all_pending(false);
                     speed_.store(-current_speed);
                     video_frame_count = out_frame_ - 1;
                     {
@@ -725,7 +845,7 @@ struct prores_producer_impl final : public core::frame_producer
                     audio_frame_idx = 0;
                     seek_done_      = true;
                 } else if (loop_) {
-                    flush_async_slot(prev_slot, false);  prev_slot = -1;
+                    flush_all_pending(false);
                     {
                         std::lock_guard<std::mutex> qlk(queue_mutex_);
                         while (!ready_queue_.empty()) ready_queue_.pop();
@@ -740,13 +860,13 @@ struct prores_producer_impl final : public core::frame_producer
                     fps_display_      = 0.0;
                     fps_window_timer_.restart();
                 } else {
-                    flush_async_slot(prev_slot, true);  prev_slot = -1;
+                    flush_all_pending(true);
                     eof_paused_ = true;
                 }
                 queue_cv_.notify_all();
             } else if (current_speed < 0.0 && video_frame_count < in_frame_) {
                 if (pingpong_.load()) {
-                    flush_async_slot(prev_slot, false);  prev_slot = -1;
+                    flush_all_pending(false);
                     speed_.store(-current_speed);
                     video_frame_count = in_frame_;
                     {
@@ -760,7 +880,7 @@ struct prores_producer_impl final : public core::frame_producer
                     audio_frame_idx = 0;
                     seek_done_      = true;
                 } else if (loop_) {
-                    flush_async_slot(prev_slot, false);  prev_slot = -1;
+                    flush_all_pending(false);
                     int64_t target = (out_frame_ >= 0) ? out_frame_ - 1 : std::max(0LL, total_frames_ - 1);
                     {
                         std::lock_guard<std::mutex> qlk(queue_mutex_);
@@ -776,7 +896,7 @@ struct prores_producer_impl final : public core::frame_producer
                     fps_display_      = 0.0;
                     fps_window_timer_.restart();
                 } else {
-                    flush_async_slot(prev_slot, true);  prev_slot = -1;
+                    flush_all_pending(true);
                     eof_paused_ = true;
                 }
                 queue_cv_.notify_all();
@@ -784,8 +904,7 @@ struct prores_producer_impl final : public core::frame_producer
         }
 
         // Flush any frame that was submitted async but not yet pushed.
-        flush_async_slot(prev_slot, false);
-        prev_slot = -1;
+        flush_all_pending(false);
 
 #ifdef WIN32
         // Cleanup: unregister CUDA-GL resources while the shared context is current,
@@ -886,13 +1005,35 @@ struct prores_producer_impl final : public core::frame_producer
         if (field == core::video_field::b)
             return cached_frame_ ? cached_frame_ : core::draw_frame{};
 
+        // ── Speed / frame-advance check (BEFORE waiting on the queue) ──────
+        // When the file fps < channel fps (e.g. 25fps on a 60fps channel),
+        // most ticks don't need a new frame.  Computing frames_to_advance
+        // early avoids blocking the channel tick on a queue that may be empty.
+        double spd = speed_.load();
+        const double fps_ratio = (file_fps_ > 0.0 && format_desc_.fps > 0.0)
+                                     ? file_fps_ / format_desc_.fps
+                                     : 1.0;
+        speed_accum_ += std::abs(spd) * fps_ratio;
+        int frames_to_advance = static_cast<int>(speed_accum_);
+
+        const bool seek_just_done = seek_done_.exchange(false);
+        if (frames_to_advance == 0 && !seek_just_done) {
+            // No new frame needed this tick — return cached without blocking.
+            return cached_frame_ ? core::draw_frame::still(cached_frame_) : core::draw_frame{};
+        }
+        if (frames_to_advance == 0 && seek_just_done)
+            frames_to_advance = 1;
+
         // First field or progressive: fetch the next decoded frame.
         std::unique_lock<std::mutex> lk(queue_mutex_);
-        if (!eof_paused_) {
-            queue_cv_.wait_for(lk, std::chrono::milliseconds(40),
-                               [this] { return !ready_queue_.empty() || stop_flag_ || eof_paused_; });
-        }
         if (ready_queue_.empty()) {
+            lk.unlock();
+            // No frame consumed — don't deduct from speed_accum_.
+            // Cap to prevent unbounded growth during sustained decoder stalls
+            // (e.g. seek, loop boundary, or decoder slower than file fps).
+            // A cap of 2 keeps the "catch-up skip" short enough to avoid a
+            // visible burst when frames finally arrive.
+            speed_accum_ = (std::min)(speed_accum_, 2.0);
             // Update title with the (possibly just-reset) frame_count_ so the diag
             // window shows the correct counter immediately after a loop seek,
             // even while the queue is still refilling.
@@ -911,30 +1052,6 @@ struct prores_producer_impl final : public core::frame_producer
             return cached_frame_;
         }
 
-        double spd = speed_.load();
-        // Scale by file_fps/channel_fps so a 50fps file on a 25fps channel
-        // advances 2 file-frames per tick (real-time playback).
-        const double fps_ratio = (file_fps_ > 0.0 && format_desc_.fps > 0.0)
-                                     ? file_fps_ / format_desc_.fps
-                                     : 1.0;
-        speed_accum_ += std::abs(spd) * fps_ratio;
-        int frames_to_advance = static_cast<int>(speed_accum_);
-        speed_accum_ -= static_cast<double>(frames_to_advance);
-
-        // Always consume seek_done_ here so it doesn't linger into a future paused state.
-        // When paused (frames_to_advance==0) and a seek just completed, force-pop one frame
-        // to show the seeked-to position and update the diag title.
-        const bool seek_just_done = seek_done_.exchange(false);
-        if (frames_to_advance == 0) {
-            if (seek_just_done) {
-                frames_to_advance = 1;  // show first post-seek frame even while paused
-            } else {
-                lk.unlock();
-                // Mute the audio of duplicated frames to prevent ear-bleeding repetition
-                return cached_frame_ ? core::draw_frame::still(cached_frame_) : core::draw_frame{};
-            }
-        }
-
         // Count how many file frames are actually consumed from the queue.
         // frames_to_advance is what the speed requests; the queue may not always
         // have that many ready (decoder underflow).  Overcounting here causes the
@@ -951,6 +1068,17 @@ struct prores_producer_impl final : public core::frame_producer
         lk.unlock();
         queue_cv_.notify_all();
 
+        // Deduct the full frames_to_advance — NOT just actually_consumed.
+        // When the decoder can't keep up (slow decode or seek), fta may be
+        // larger than the queued frames.  Deducting only "consumed" would
+        // leave the accumulator permanently elevated, making fta >= 1 on
+        // EVERY tick (60 checks/sec instead of ~25), and the displayed fps
+        // would reflect the decoder throughput rather than the correct
+        // playback cadence.  By deducting the full fta we "forgive" the
+        // missing intermediate frames: the latest decoded frame is shown
+        // and playback continues at the correct timeline rate.
+        speed_accum_ -= static_cast<double>(frames_to_advance);
+
         auto fc = (frame_count_ += (spd >= 0.0) ? actually_consumed : -actually_consumed);
 
         // Live FPS: accumulate file frames consumed (not channel ticks) so the
@@ -962,6 +1090,10 @@ struct prores_producer_impl final : public core::frame_producer
             fps_display_   = fps_frame_acc_ / fps_elapsed;
             fps_frame_acc_ = 0;
             fps_window_timer_.restart();
+            CASPAR_LOG(trace) << "[cuda_prores] fps=" << std::fixed << std::setprecision(1)
+                             << fps_display_ << " accum=" << std::setprecision(3) << speed_accum_
+                             << " fta=" << frames_to_advance << " consumed=" << actually_consumed
+                             << " qsz=" << ready_queue_.size();
         }
 
         // Graph title: "clip.mov  125 / 700  |  5.0s / 28.0s  |  50.0fps"

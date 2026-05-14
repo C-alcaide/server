@@ -332,7 +332,12 @@ cudaError_t notchlc_decode_ctx_create(NotchLCDecodeCtx* ctx,
     }
 
     // ── Stream ────────────────────────────────────────────────────────────
-    CUDA_CHECK(cudaStreamCreate(&ctx->stream));
+    // Use highest-priority stream so decode preempts concurrent VK/GL rendering.
+    {
+        int lo = 0, hi = 0;
+        cudaDeviceGetStreamPriorityRange(&lo, &hi);
+        CUDA_CHECK(cudaStreamCreateWithPriority(&ctx->stream, cudaStreamNonBlocking, hi));
+    }
 
     // ── Upload gamma LUT (idempotent — same data every time) ──────────────
     CUDA_CHECK(caspar::cuda_notchlc::notchlc_upload_gamma_lut());

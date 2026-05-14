@@ -100,6 +100,9 @@ target_include_directories(vulkan_output PRIVATE
     ${Vulkan_INCLUDE_DIRS}
 )
 
+# Required because texture_wrapper.h → texture.h → vulkan.hpp
+target_compile_definitions(vulkan_output PRIVATE VULKAN_HPP_DISPATCH_LOADER_DYNAMIC=1)
+
 if(NVAPI_FOUND)
     target_include_directories(vulkan_output SYSTEM PRIVATE ${NVAPI_INCLUDE_DIR})
     target_compile_definitions(vulkan_output PRIVATE CASPAR_NVAPI_ENABLED)

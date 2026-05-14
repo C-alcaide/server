@@ -105,6 +105,15 @@ struct configuration
         yuv,
     };
 
+    enum class gpu_readback_mode_t
+    {
+        auto_select,  // cuda when CUDA available, else vulkan, else cpu
+        cuda,         // CUDA-VK interop (cuda_vk_strategy)
+        vulkan,       // Pure Vulkan compute (vk_readback_strategy)
+        vulkan_dma,   // VK DMA copy (no compute shader) + CPU v210 pack
+        cpu,          // CPU-only (AVX2 / memcpy)
+    };
+
     bool                 embedded_audio              = false;
     keyer_t              keyer                       = keyer_t::default_keyer;
     duplex_t             duplex                      = duplex_t::default_duplex;
@@ -114,6 +123,7 @@ struct configuration
     int                  base_buffer_depth           = 3;
     bool                 hdr                         = false;
     pixel_format_t       pixel_format                = pixel_format_t::rgba;
+    gpu_readback_mode_t  gpu_readback_mode            = gpu_readback_mode_t::auto_select;
 
     port_configuration              primary;
     std::vector<port_configuration> secondaries;

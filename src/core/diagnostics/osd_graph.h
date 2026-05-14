@@ -21,10 +21,17 @@
 
 #pragma once
 
+#include <mutex>
+
 namespace caspar { namespace core { namespace diagnostics { namespace osd {
 
 void register_sink();
 void show_graphs(bool value);
 void shutdown();
+
+// Global mutex to prevent SFML2 WGL context races between the DIAG window's
+// render thread and other threads creating sf::Window instances (e.g. screen
+// consumer).  Both sides must hold this mutex when interacting with WGL.
+std::recursive_mutex& sfml_context_mutex();
 
 }}}} // namespace caspar::core::diagnostics::osd

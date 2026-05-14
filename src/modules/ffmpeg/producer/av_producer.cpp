@@ -885,6 +885,11 @@ struct AVProducer::Impl
 
     int latency_ = 0;
 
+    // Periodic producer timing diagnostics
+    std::chrono::steady_clock::time_point diag_start_ = std::chrono::steady_clock::now();
+    int diag_frames_    = 0;
+    int diag_underflows_ = 0;
+
     std::chrono::steady_clock::time_point last_fps_update_;
     int                     frames_since_update_ = 0;
     double                  current_fps_ = 0.0;
@@ -1308,6 +1313,19 @@ struct AVProducer::Impl
             last_fps_update_ = now;
         }
 
+        // Periodic producer TIMING log every 5s
+        diag_frames_++;
+        {
+            auto diag_elapsed = std::chrono::duration<double>(now - diag_start_).count();
+            if (diag_elapsed >= 5.0 && diag_frames_ > 0) {
+                CASPAR_LOG(info) << print() << " TIMING: frames=" << diag_frames_
+                                 << " underflows=" << diag_underflows_;
+                diag_frames_ = 0;
+                diag_underflows_ = 0;
+                diag_start_ = now;
+            }
+        }
+
         CASPAR_SCOPE_EXIT { update_state(); };
 
         boost::lock_guard<boost::mutex> lock(buffer_mutex_);
@@ -1415,6 +1433,7 @@ struct AVProducer::Impl
             }
             graph_->set_tag(diagnostics::tag_severity::WARNING, "underflow");
             latency_ += 1;
+            diag_underflows_++;
             return core::draw_frame{};
         }
 
@@ -1424,6 +1443,7 @@ struct AVProducer::Impl
             if ((field == core::video_field::a && !is_field_1) || (field == core::video_field::b && is_field_1)) {
                 graph_->set_tag(diagnostics::tag_severity::WARNING, "underflow");
                 latency_ += 1;
+                diag_underflows_++;
                 return core::draw_frame{};
             }
         }

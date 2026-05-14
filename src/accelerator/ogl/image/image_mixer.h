@@ -51,7 +51,7 @@ class image_mixer final : public core::image_mixer
 
     image_mixer& operator=(const image_mixer&) = delete;
 
-    std::future<std::tuple<array<const std::uint8_t>, std::shared_ptr<core::texture>>>
+    std::future<std::tuple<std::shared_future<array<const std::uint8_t>>, std::shared_ptr<core::texture>>>
                         render(const core::video_format_desc& format_desc) override;
     core::mutable_frame create_frame(const void* tag, const core::pixel_format_desc& desc) override;
     core::mutable_frame
@@ -68,6 +68,8 @@ class image_mixer final : public core::image_mixer
 
     // Expose the underlying OGL device for CUDA-GL interop producers.
     std::shared_ptr<class device> get_ogl_device() const;
+
+    void* native_gl_context() const override;
 
     // Previz 3D rendering
     previz_renderer&  get_previz_renderer();

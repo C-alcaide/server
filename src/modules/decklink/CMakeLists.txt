@@ -1,5 +1,22 @@
 cmake_minimum_required (VERSION 3.28)
-project (decklink)
+
+# Enable CUDA when Vulkan accelerator is active — needed for the CUDA-VK
+# direct GPU decklink strategy (cuda_vk_strategy.cu).
+if(ENABLE_VULKAN)
+	find_package(CUDAToolkit QUIET)
+	if(CUDAToolkit_FOUND)
+		project(decklink LANGUAGES CXX CUDA)
+		set(CMAKE_CUDA_ARCHITECTURES "52;61;80;86;89" CACHE STRING "CUDA architectures (decklink)")
+		set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -allow-unsupported-compiler -Wno-deprecated-gpu-targets")
+		set(DECKLINK_CUDA_VK TRUE)
+	else()
+		project(decklink)
+		set(DECKLINK_CUDA_VK FALSE)
+	endif()
+else()
+	project(decklink)
+	set(DECKLINK_CUDA_VK FALSE)
+endif()
 
 set(SOURCES
 		consumer/decklink_consumer.cpp
@@ -58,6 +75,26 @@ else()
 	)
 endif ()
 
+# CUDA-VK direct GPU strategy sources
+if(DECKLINK_CUDA_VK)
+	list(APPEND SOURCES
+		consumer/cuda_vk_strategy.cpp
+		consumer/cuda_vk_strategy.h
+		consumer/cuda_vk_kernels.cu
+		consumer/cuda_vk_v210.cuh
+	)
+endif()
+
+# Pure-Vulkan readback strategy sources (no CUDA dependency)
+if(ENABLE_VULKAN)
+	list(APPEND SOURCES
+		consumer/vk_readback_strategy.cpp
+		consumer/vk_readback_strategy.h
+		consumer/vk_readback_v210_spv.h
+		consumer/vk_readback_bgra_spv.h
+	)
+endif()
+
 casparcg_add_module_project(decklink
 	SOURCES ${SOURCES}
 	INIT_FUNCTION "decklink::init"
@@ -67,6 +104,14 @@ target_include_directories(decklink PRIVATE
     ${FFMPEG_INCLUDE_PATH}
     )
 target_precompile_headers(decklink PRIVATE "StdAfx.h")
+
+# Exclude CUDA files from precompiled headers (nvcc is not compatible with them)
+if(DECKLINK_CUDA_VK)
+	set_source_files_properties(
+		consumer/cuda_vk_kernels.cu
+		PROPERTIES SKIP_PRECOMPILE_HEADERS ON
+	)
+endif()
 
 set_target_properties(decklink PROPERTIES FOLDER modules)
 source_group(sources ./*)
@@ -86,4 +131,27 @@ else()
 			dl
 	)
 endif ()
+
+# CUDA-VK direct GPU strategy dependencies
+if(DECKLINK_CUDA_VK)
+	target_compile_definitions(decklink PRIVATE DECKLINK_CUDA_VK_ENABLED)
+	target_include_directories(decklink SYSTEM PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
+	target_link_libraries(decklink PRIVATE CUDA::cudart_static)
+	set_property(TARGET decklink PROPERTY CUDA_SEPARABLE_COMPILATION OFF)
+	set_property(TARGET decklink PROPERTY CUDA_RESOLVE_DEVICE_SYMBOLS ON)
+	set_property(TARGET decklink PROPERTY CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}")
+	IF(ENABLE_VULKAN)
+		target_link_libraries(decklink PRIVATE Vulkan::Headers)
+	ENDIF()
+endif()
+
+# Pure-Vulkan readback strategy dependencies (Vulkan loader for API calls)
+if(ENABLE_VULKAN)
+	find_package(Vulkan REQUIRED)
+	target_link_libraries(decklink PRIVATE Vulkan::Vulkan)
+	set_source_files_properties(
+		consumer/vk_readback_strategy.cpp
+		PROPERTIES SKIP_PRECOMPILE_HEADERS ON
+	)
+endif()
 

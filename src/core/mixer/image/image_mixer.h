@@ -48,7 +48,7 @@ class image_mixer
 
     virtual void update_aspect_ratio(double aspect_ratio) = 0;
 
-    virtual std::future<std::tuple<array<const std::uint8_t>, std::shared_ptr<texture>>>
+    virtual std::future<std::tuple<std::shared_future<array<const std::uint8_t>>, std::shared_ptr<texture>>>
     render(const struct video_format_desc& format_desc) = 0;
 
     class mutable_frame create_frame(const void* tag, const struct pixel_format_desc& desc) override = 0;
@@ -57,6 +57,13 @@ class image_mixer
                                      common::bit_depth               depth) override                               = 0;
 
     virtual common::bit_depth depth() const = 0;
+
+    virtual bool is_vulkan() const { return false; }
+
+    /// Return the native GL context handle for context sharing (nullptr if not applicable).
+    virtual void* native_gl_context() const { return nullptr; }
+
+    virtual void set_cpu_readback_needed(bool needed) { (void)needed; }
 };
 
 }} // namespace caspar::core

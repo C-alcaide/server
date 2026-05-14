@@ -39,6 +39,7 @@
 #include <core/frame/frame.h>
 #include <core/frame/geometry.h>
 #include <core/video_format.h>
+#include <core/diagnostics/osd_graph.h>
 
 #include <boost/algorithm/string.hpp>
 #include <boost/lexical_cast.hpp>
@@ -46,6 +47,7 @@
 
 #include <tbb/concurrent_queue.h>
 
+#include <iomanip>
 #include <thread>
 #include <tuple> // std::ignore
 #include <utility>
@@ -67,12 +69,280 @@
 #include "consumer_screen_fragment.h"
 #include "consumer_screen_vertex.h"
 #include <accelerator/ogl/util/shader.h>
+#include <accelerator/ogl/util/texture.h>
+
+#if defined(_MSC_VER)
+#include <GL/wglew.h>
+#endif
+
+#ifdef _MSC_VER
+// ---------------------------------------------------------------------------
+// win32_gl_window — lightweight Win32 + WGL window that replaces sf::Window.
+//
+// SFML2's shared-context mechanism (wglShareLists on a static singleton)
+// permanently corrupts WGL state after a window is closed, making subsequent
+// sf::Window::create() calls crash.  This class creates standalone WGL
+// contexts with NO shared context, eliminating the race entirely.
+// ---------------------------------------------------------------------------
+namespace {
+
+struct win32_gl_window
+{
+    HWND   hwnd_   = nullptr;
+    HDC    hdc_    = nullptr;
+    HGLRC  hglrc_  = nullptr;
+    int    width_  = 0;
+    int    height_ = 0;
+    bool   resized_ = false;
+    bool   closed_  = false;
+
+    bool   shared_ = false;
+
+    // WGL extension function pointers (loaded during bootstrap)
+    PFNWGLCREATECONTEXTATTRIBSARBPROC wglCreateContextAttribsARB_ = nullptr;
+    PFNWGLSWAPINTERVALEXTPROC         wglSwapIntervalEXT_         = nullptr;
+
+    static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
+    {
+        auto* self = reinterpret_cast<win32_gl_window*>(GetWindowLongPtr(hWnd, GWLP_USERDATA));
+        switch (msg) {
+            case WM_SIZE:
+                if (self) {
+                    self->width_   = LOWORD(lParam);
+                    self->height_  = HIWORD(lParam);
+                    self->resized_ = true;
+                }
+                return 0;
+            case WM_CLOSE:
+                if (self) {
+                    self->closed_ = true;
+                }
+                return 0;  // Don't let DefWindowProc destroy the window
+            case WM_ERASEBKGND:
+                return 1;  // Prevent flicker
+            default:
+                return DefWindowProc(hWnd, msg, wParam, lParam);
+        }
+    }
+
+    static const wchar_t* window_class_name()
+    {
+        static bool registered = false;
+        static const wchar_t* name = L"CasparCG_ScreenConsumer";
+        if (!registered) {
+            WNDCLASSW wc  = {};
+            wc.style      = CS_OWNDC;
+            wc.lpfnWndProc  = WndProc;
+            wc.hInstance    = GetModuleHandle(nullptr);
+            wc.lpszClassName = name;
+            wc.hCursor      = LoadCursor(nullptr, IDC_ARROW);
+            RegisterClassW(&wc);
+            registered = true;
+        }
+        return name;
+    }
+
+    void create(int w, int h, const std::string& title,
+                bool borderless, bool fullscreen, bool resizable, bool closeable,
+                void* share_context = nullptr)
+    {
+        // --- Step 1: Create the real OS window ---
+        DWORD style   = WS_CLIPSIBLINGS | WS_CLIPCHILDREN;
+        DWORD exStyle = 0;
+
+        if (fullscreen || borderless) {
+            style |= WS_POPUP;
+        } else {
+            style |= WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU;
+            if (resizable)
+                style |= WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
+        }
+
+        // Adjust rect so the CLIENT area is exactly w x h
+        RECT rect = {0, 0, w, h};
+        AdjustWindowRectEx(&rect, style, FALSE, exStyle);
+
+        std::wstring wtitle(title.begin(), title.end());
+        hwnd_ = CreateWindowExW(
+            exStyle, window_class_name(), wtitle.c_str(), style,
+            CW_USEDEFAULT, CW_USEDEFAULT,
+            rect.right - rect.left, rect.bottom - rect.top,
+            nullptr, nullptr, GetModuleHandle(nullptr), nullptr);
+
+        if (!hwnd_)
+            throw std::runtime_error("CreateWindowEx failed");
+
+        // Store 'this' for WndProc dispatch
+        SetWindowLongPtr(hwnd_, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
+
+        hdc_ = GetDC(hwnd_);
+        if (!hdc_)
+            throw std::runtime_error("GetDC failed");
+
+        // --- Step 2: Set pixel format ---
+        PIXELFORMATDESCRIPTOR pfd = {};
+        pfd.nSize        = sizeof(pfd);
+        pfd.nVersion     = 1;
+        pfd.dwFlags      = PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER;
+        pfd.iPixelType   = PFD_TYPE_RGBA;
+        pfd.cColorBits   = 32;
+        pfd.cDepthBits   = 0;
+        pfd.cStencilBits = 0;
+        pfd.iLayerType   = PFD_MAIN_PLANE;
+
+        int pf = ChoosePixelFormat(hdc_, &pfd);
+        if (!pf || !SetPixelFormat(hdc_, pf, &pfd))
+            throw std::runtime_error("SetPixelFormat failed");
+
+        // --- Step 3: Bootstrap GL context ---
+        // Create a basic GL context to load WGL extensions
+        HGLRC temp_ctx = wglCreateContext(hdc_);
+        if (!temp_ctx)
+            throw std::runtime_error("wglCreateContext (bootstrap) failed");
+        wglMakeCurrent(hdc_, temp_ctx);
+
+        // Load WGL extension function pointers
+        wglCreateContextAttribsARB_ = reinterpret_cast<PFNWGLCREATECONTEXTATTRIBSARBPROC>(
+            wglGetProcAddress("wglCreateContextAttribsARB"));
+        wglSwapIntervalEXT_ = reinterpret_cast<PFNWGLSWAPINTERVALEXTPROC>(
+            wglGetProcAddress("wglSwapIntervalEXT"));
+
+        if (wglCreateContextAttribsARB_) {
+            // Create GL 4.5 Core profile context
+            int attribs[] = {
+                WGL_CONTEXT_MAJOR_VERSION_ARB, 4,
+                WGL_CONTEXT_MINOR_VERSION_ARB, 5,
+                WGL_CONTEXT_PROFILE_MASK_ARB,  WGL_CONTEXT_CORE_PROFILE_BIT_ARB,
+                0
+            };
+
+            // Try shared context first (enables zero-copy OGL mixer texture binding)
+            if (share_context) {
+                hglrc_ = wglCreateContextAttribsARB_(hdc_, reinterpret_cast<HGLRC>(share_context), attribs);
+                if (hglrc_) {
+                    shared_ = true;
+                    CASPAR_LOG(info) << "[screen_consumer] GL context shared with mixer — zero-copy OGL path enabled.";
+                } else {
+                    CASPAR_LOG(warning) << "[screen_consumer] Shared GL context creation failed (error="
+                                        << GetLastError() << "), falling back to standalone context.";
+                    // Re-establish bootstrap context — a failed wglCreateContextAttribsARB
+                    // can leave the WGL state dirty on some NVIDIA drivers.
+                    wglMakeCurrent(hdc_, temp_ctx);
+                }
+            }
+
+            if (!hglrc_)
+                hglrc_ = wglCreateContextAttribsARB_(hdc_, nullptr, attribs);
+
+            wglMakeCurrent(nullptr, nullptr);
+            wglDeleteContext(temp_ctx);
+
+            if (!hglrc_)
+                throw std::runtime_error("wglCreateContextAttribsARB failed");
+
+            wglMakeCurrent(hdc_, hglrc_);
+        } else {
+            // Fallback: use the basic context as-is
+            hglrc_ = temp_ctx;
+        }
+
+        width_  = w;
+        height_ = h;
+
+        ShowWindow(hwnd_, SW_SHOW);
+        UpdateWindow(hwnd_);
+    }
+
+    void close()
+    {
+        if (hglrc_) {
+            wglMakeCurrent(nullptr, nullptr);
+            wglDeleteContext(hglrc_);
+            hglrc_ = nullptr;
+        }
+        if (hdc_ && hwnd_) {
+            ReleaseDC(hwnd_, hdc_);
+            hdc_ = nullptr;
+        }
+        if (hwnd_) {
+            DestroyWindow(hwnd_);
+            hwnd_ = nullptr;
+        }
+    }
+
+    ~win32_gl_window() { close(); }
+
+    void setPosition(int x, int y)
+    {
+        if (hwnd_)
+            SetWindowPos(hwnd_, nullptr, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+
+    void setMouseCursorVisible(bool visible)
+    {
+        // ShowCursor is per-thread reference-counted; we just set the class cursor
+        if (hwnd_) {
+            SetClassLongPtr(hwnd_, GCLP_HCURSOR,
+                reinterpret_cast<LONG_PTR>(visible ? LoadCursor(nullptr, IDC_ARROW) : nullptr));
+        }
+    }
+
+    bool setActive(bool active)
+    {
+        if (active)
+            return wglMakeCurrent(hdc_, hglrc_) == TRUE;
+        else
+            return wglMakeCurrent(nullptr, nullptr) == TRUE;
+    }
+
+    HWND getSystemHandle() const { return hwnd_; }
+
+    void display()
+    {
+        if (hdc_)
+            SwapBuffers(hdc_);
+    }
+
+    void setVerticalSyncEnabled(bool enabled)
+    {
+        if (wglSwapIntervalEXT_)
+            wglSwapIntervalEXT_(enabled ? 1 : 0);
+    }
+
+    struct Size { unsigned int x, y; };
+    Size getSize() const
+    {
+        RECT r;
+        if (hwnd_ && GetClientRect(hwnd_, &r))
+            return {static_cast<unsigned int>(r.right), static_cast<unsigned int>(r.bottom)};
+        return {static_cast<unsigned int>(width_), static_cast<unsigned int>(height_)};
+    }
+
+    // Process pending window messages; returns true if any were processed.
+    // Sets resized_/closed_ flags for the caller to check.
+    bool pollEvents()
+    {
+        resized_ = false;
+        closed_  = false;
+        MSG msg;
+        bool had = false;
+        while (PeekMessage(&msg, hwnd_, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&msg);
+            DispatchMessage(&msg);
+            had = true;
+        }
+        return had;
+    }
+};
+
+} // anonymous namespace
+#endif // _MSC_VER
 
 namespace caspar { namespace screen {
 
 std::unique_ptr<accelerator::ogl::shader> get_shader()
 {
-    return std::make_unique<accelerator::ogl::shader>(std::string(vertex_shader), std::string(fragment_shader));
+    return std::make_unique<accelerator::ogl::shader>(std::string(reinterpret_cast<const char*>(vertex_shader)), std::string(reinterpret_cast<const char*>(fragment_shader)));
 }
 
 enum class stretch
@@ -158,9 +428,15 @@ struct screen_consumer
     int screen_x_      = 0;
     int screen_y_      = 0;
 
+    void* gl_share_context_ = nullptr;
+
     std::vector<core::frame_geometry::coord> draw_coords_;
 
+#ifdef _MSC_VER
+    win32_gl_window window_;
+#else
     sf::Window window_;
+#endif
 
     spl::shared_ptr<diagnostics::graph> graph_;
     caspar::timer                       tick_timer_;
@@ -169,6 +445,11 @@ struct screen_consumer
     std::chrono::steady_clock::time_point last_fps_update_;
     int                     frames_since_update_ = 0;
     double                  current_fps_ = 0.0;
+
+    // Periodic drop diagnostics
+    std::chrono::steady_clock::time_point diag_start_ = std::chrono::steady_clock::now();
+    int diag_sends_   = 0;
+    int diag_drops_   = 0;
 
     tbb::concurrent_bounded_queue<core::const_frame> frame_buffer_;
 
@@ -185,15 +466,19 @@ struct screen_consumer
     screen_consumer& operator=(const screen_consumer&) = delete;
 
   public:
-    screen_consumer(const configuration& config, const core::video_format_desc& format_desc, int channel_index)
+    screen_consumer(const configuration& config, const core::video_format_desc& format_desc, int channel_index,
+                    void* gl_share_context = nullptr, bool use_vulkan = false)
         : config_(config)
         , format_desc_(format_desc)
         , channel_index_(channel_index)
-        , strategy_(config.gpu_texture ? spl::make_shared<display_strategy, gpu_strategy>()
-                                       : spl::make_shared<display_strategy, host_strategy>())
+        , gl_share_context_(gl_share_context)
+        , strategy_((config.gpu_texture || use_vulkan) ? spl::make_shared<display_strategy, gpu_strategy>()
+                                                       : spl::make_shared<display_strategy, host_strategy>())
     {
         if (config_.gpu_texture) {
             CASPAR_LOG(info) << print() << " Using GPU texture for rendering.";
+        } else if (use_vulkan) {
+            CASPAR_LOG(info) << print() << " Auto-promoted to GPU mode (Vulkan mixer active).";
         } else {
             CASPAR_LOG(info) << print() << " Using frame copied to host for rendering.";
         }
@@ -258,44 +543,67 @@ struct screen_consumer
                 screen_height_ = config.screen_height;
                 screen_width_  = square_width_ * config.screen_height / square_height_;
             } else {
-                screen_width_  = square_width_;
-                screen_height_ = square_height_;
+                // Default to channel resolution, but clamp to the target display
+                // so the window doesn't span across multiple monitors (which can
+                // interfere with Vulkan output windows on adjacent displays).
+                screen_width_  = (std::min)(square_width_,  screen_width_);
+                screen_height_ = (std::min)(square_height_, screen_height_);
             }
         }
 
         thread_ = std::thread([this] {
             try {
-#if SFML_VERSION_MAJOR >= 3
-                sf::VideoMode mode{
-                    sf::Vector2u(config_.sbs_key ? screen_width_ * 2 : screen_width_, screen_height_),
-                    sf::VideoMode::getDesktopMode().bitsPerPixel
-                };
-                sf::ContextSettings settings{
-                    .depthBits         = 0,
-                    .stencilBits       = 0,
-                    .antiAliasingLevel = 0,
-                    .majorVersion      = 4,
-                    .minorVersion      = 5,
-                    .attributeFlags    = sf::ContextSettings::Attribute::Core
-                };
-                auto state = config_.windowed || config_.borderless ? sf::State::Windowed : sf::State::Fullscreen;
-                auto style = config_.borderless ? sf::Style::None : sf::Style::Default;
-                window_.create(mode, u8(print()), style, state, settings);
+#ifdef _MSC_VER
+                // Win32 + WGL: create window and GL 4.5 core context directly,
+                // bypassing SFML's shared-context mechanism which corrupts WGL
+                // state after repeated create/close cycles.
+                {
+                    int w = config_.sbs_key ? screen_width_ * 2 : screen_width_;
+                    int h = screen_height_;
+                    bool fullscreen = !config_.windowed && !config_.borderless;
+                    bool resizable  = config_.windowed && !config_.borderless;
+                    window_.create(w, h, u8(print()),
+                                   config_.borderless, fullscreen, resizable, config_.closeable,
+                                   gl_share_context_);
+                }
+
+                window_.setPosition(screen_x_, screen_y_);
+                window_.setMouseCursorVisible(config_.interactive);
+                std::ignore = window_.setActive(true);
 #else
-                const auto    window_style = config_.borderless ? sf::Style::None
-                                             : config_.windowed ? sf::Style::Resize | sf::Style::Close
-                                                                : sf::Style::Fullscreen;
-                sf::VideoMode desktop      = sf::VideoMode::getDesktopMode();
-                sf::VideoMode mode(
-                    config_.sbs_key ? screen_width_ * 2 : screen_width_, screen_height_, desktop.bitsPerPixel);
-                window_.create(mode,
-                               u8(print()),
-                               window_style,
-                               sf::ContextSettings(0, 0, 0, 4, 5, sf::ContextSettings::Attribute::Core));
+                // Non-Windows: use SFML as before
+#if SFML_VERSION_MAJOR >= 3
+                    sf::VideoMode mode{
+                        sf::Vector2u(config_.sbs_key ? screen_width_ * 2 : screen_width_, screen_height_),
+                        sf::VideoMode::getDesktopMode().bitsPerPixel
+                    };
+                    sf::ContextSettings settings{
+                        .depthBits         = 0,
+                        .stencilBits       = 0,
+                        .antiAliasingLevel = 0,
+                        .majorVersion      = 4,
+                        .minorVersion      = 5,
+                        .attributeFlags    = sf::ContextSettings::Attribute::Core
+                    };
+                    auto state = config_.windowed || config_.borderless ? sf::State::Windowed : sf::State::Fullscreen;
+                    auto style = config_.borderless ? sf::Style::None : sf::Style::Default;
+                    window_.create(mode, u8(print()), style, state, settings);
+#else
+                    const auto    window_style = config_.borderless ? sf::Style::None
+                                                 : config_.windowed ? sf::Style::Resize | sf::Style::Close
+                                                                    : sf::Style::Fullscreen;
+                    sf::VideoMode desktop      = sf::VideoMode::getDesktopMode();
+                    sf::VideoMode mode(
+                        config_.sbs_key ? screen_width_ * 2 : screen_width_, screen_height_, desktop.bitsPerPixel);
+                    window_.create(mode,
+                                   u8(print()),
+                                   window_style,
+                                   sf::ContextSettings(0, 0, 0, 4, 5, sf::ContextSettings::Attribute::Core));
 #endif
                 window_.setPosition(sf::Vector2i(screen_x_, screen_y_));
                 window_.setMouseCursorVisible(config_.interactive);
                 std::ignore = window_.setActive(true);
+#endif // _MSC_VER
 
                 if (config_.always_on_top) {
 #ifdef _MSC_VER
@@ -379,21 +687,39 @@ struct screen_consumer
                     tick();
                 }
             } catch (tbb::user_abort&) {
-                // Do nothing
             } catch (...) {
                 CASPAR_LOG_CURRENT_EXCEPTION();
                 is_running_ = false;
             }
 
-            for (auto frame : frames_) {
-                strategy_->cleanup_frame(frame);
+            // Cleanup must not throw — the GL context may be invalid.
+            try {
+                // Drain any stale GL errors so cleanup calls start clean.
+                while (glGetError() != GL_NO_ERROR) {}
+
+                for (auto frame : frames_) {
+                    strategy_->cleanup_frame(frame);
+                }
+
+                shader_.reset();
+                glDeleteVertexArrays(1, &vao_);
+                glDeleteBuffers(1, &vbo_);
+            } catch (...) {
+                CASPAR_LOG(warning) << print() << L" Exception during GL cleanup — ignoring.";
             }
 
-            shader_.reset();
-            GL(glDeleteVertexArrays(1, &vao_));
-            GL(glDeleteBuffers(1, &vbo_));
-
+#ifdef _MSC_VER
+            // Win32 path: direct close, no SFML shared context involvement.
             window_.close();
+#else
+            // Non-Windows: close under the SFML mutex to prevent context races.
+            {
+                std::lock_guard<std::recursive_mutex> lock(
+                    core::diagnostics::osd::sfml_context_mutex());
+                std::ignore = window_.setActive(false);
+                window_.close();
+            }
+#endif
         });
     }
 
@@ -407,7 +733,15 @@ struct screen_consumer
     bool poll()
     {
         int       count = 0;
-#if SFML_VERSION_MAJOR >= 3
+#ifdef _MSC_VER
+        if (window_.pollEvents()) {
+            count = 1;
+            if (window_.resized_) calculate_aspect();
+            if (window_.closed_ && config_.closeable) {
+                is_running_ = false;
+            }
+        }
+#elif SFML_VERSION_MAJOR >= 3
         while (const auto e = window_.pollEvent()) {
             count++;
             if (e->is<sf::Event::Resized>()) {
@@ -436,10 +770,15 @@ struct screen_consumer
 
     void tick()
     {
+        // Present the PREVIOUS frame first.  SwapBuffers may block waiting
+        // for DWM composition — doing it here lets that wait overlap with
+        // the mixer producing the next frame, instead of stalling the
+        // output pipeline after rendering.
+        window_.display();
+
         strategy_->do_tick(this);
 
-        window_.display();
-        glFinish(); // Serialize GL work to prevent GPU command queue contention with Vulkan
+        glFlush(); // Submit GL commands without blocking — SwapBuffers on next tick handles sync
 
         std::rotate(frames_.begin(), frames_.begin() + 1, frames_.end());
 
@@ -510,17 +849,29 @@ struct screen_consumer
             graph_->set_text(stats.str());
         }
 
-        const int MAX_TRIES = 3;
-        int       count     = 0;
-        while (count++ < MAX_TRIES && is_running_) {
-            if (frame_buffer_.try_push(frame))
-                break;
-
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        diag_sends_++;
+        if (!frame_buffer_.try_push(frame)) {
+            // Buffer full — drop the oldest frame and push the latest.
+            // Never block the output thread; screen is a preview consumer.
+            core::const_frame discard;
+            frame_buffer_.try_pop(discard);
+            if (!frame_buffer_.try_push(frame)) {
+                graph_->set_tag(diagnostics::tag_severity::WARNING, "dropped-frame");
+                diag_drops_++;
+            }
         }
 
-        if (count == MAX_TRIES) {
-             graph_->set_tag(diagnostics::tag_severity::WARNING, "dropped-frame");
+        // Periodic TIMING log every 5 seconds
+        {
+            auto diag_now = std::chrono::steady_clock::now();
+            auto diag_elapsed = std::chrono::duration<double>(diag_now - diag_start_).count();
+            if (diag_elapsed >= 5.0 && diag_sends_ > 0) {
+                CASPAR_LOG(info) << print() << L" TIMING: sends=" << diag_sends_
+                                 << L" drops=" << diag_drops_;
+                diag_start_ = diag_now;
+                diag_sends_ = 0;
+                diag_drops_ = 0;
+            }
         }
 
         return caspar::make_ready_future(is_running_.load());
@@ -659,7 +1010,8 @@ struct host_strategy : public display_strategy
 
     virtual void cleanup_frame(frame& frame) override
     {
-        GL(glUnmapNamedBuffer(frame.pbo));
+        glUnmapNamedBuffer(frame.pbo);
+        glGetError(); // drain any error from unmap
         glDeleteBuffers(1, &frame.pbo);
         glDeleteTextures(1, &frame.tex);
     }
@@ -696,7 +1048,14 @@ struct host_strategy : public display_strategy
             }
 
             auto size_multiplier = self->config_.high_bitdepth ? 2 : 1;
-            std::memcpy(frame.ptr, in_frame.image_data(0).begin(), self->format_desc_.size * size_multiplier);
+            auto& img = in_frame.image_data(0);
+            if (img.data() && static_cast<int>(img.size()) >= self->format_desc_.size * size_multiplier) {
+                std::memcpy(frame.ptr, img.begin(), self->format_desc_.size * size_multiplier);
+            } else {
+                // Frame has no CPU pixel data (e.g. VK mixer with readback skipped
+                // due to race during consumer add).  Zero-fill to avoid garbled output.
+                std::memset(frame.ptr, 0, self->format_desc_.size * size_multiplier);
+            }
 
             GL(glBindBuffer(GL_PIXEL_UNPACK_BUFFER, frame.pbo));
             GL(glTextureSubImage2D(frame.tex,
@@ -729,7 +1088,259 @@ struct host_strategy : public display_strategy
 
 struct gpu_strategy : public display_strategy
 {
-    virtual ~gpu_strategy() {}
+    virtual ~gpu_strategy()
+    {
+#ifdef ENABLE_VULKAN
+        cleanup_vk_interop();
+#endif
+    }
+
+    // Lazily-created fallback resources for non-GL textures (e.g. Vulkan mixer).
+    GLuint   fallback_pbo_ = 0;
+    GLuint   fallback_tex_ = 0;
+    char*    fallback_ptr_ = nullptr;
+    int      fallback_w_   = 0;
+    int      fallback_h_   = 0;
+    bool     fallback_hbd_ = false;
+
+#ifdef ENABLE_VULKAN
+    // VK→GL interop: import VK texture memory directly into GL (zero-copy).
+    GLuint   vk_gl_mem_obj_     = 0;
+    GLuint   vk_gl_tex_         = 0;
+    HANDLE   vk_cached_handle_  = nullptr;
+    int      vk_cached_w_       = 0;
+    int      vk_cached_h_       = 0;
+    bool     vk_cached_hbd_     = false;
+    bool     vk_interop_ok_     = true;   // optimistic; set false on failure
+    bool     vk_ext_loaded_     = false;
+
+    // Dynamic preview downscale: blit full-res VK texture → window-sized local GL texture.
+    // This decouples the rendered frame from VK shared memory, reducing GPU contention
+    // with production outputs (decklink, vulkan_output).
+    GLuint   preview_tex_       = 0;
+    GLuint   preview_read_fbo_  = 0;
+    GLuint   preview_draw_fbo_  = 0;
+    int      preview_w_         = 0;
+    int      preview_h_         = 0;
+    bool     preview_hbd_       = false;
+
+    PFNGLCREATEMEMORYOBJECTSEXTPROC     glCreateMemoryObjectsEXT_     = nullptr;
+    PFNGLDELETEMEMORYOBJECTSEXTPROC     glDeleteMemoryObjectsEXT_     = nullptr;
+    PFNGLIMPORTMEMORYWIN32HANDLEEXTPROC glImportMemoryWin32HandleEXT_ = nullptr;
+    PFNGLTEXTURESTORAGEMEM2DEXTPROC     glTextureStorageMem2DEXT_     = nullptr;
+
+    void load_vk_gl_extensions()
+    {
+        if (vk_ext_loaded_)
+            return;
+        vk_ext_loaded_ = true;
+
+        glCreateMemoryObjectsEXT_     = (PFNGLCREATEMEMORYOBJECTSEXTPROC)wglGetProcAddress("glCreateMemoryObjectsEXT");
+        glDeleteMemoryObjectsEXT_     = (PFNGLDELETEMEMORYOBJECTSEXTPROC)wglGetProcAddress("glDeleteMemoryObjectsEXT");
+        glImportMemoryWin32HandleEXT_ = (PFNGLIMPORTMEMORYWIN32HANDLEEXTPROC)wglGetProcAddress("glImportMemoryWin32HandleEXT");
+        glTextureStorageMem2DEXT_     = (PFNGLTEXTURESTORAGEMEM2DEXTPROC)wglGetProcAddress("glTextureStorageMem2DEXT");
+
+        if (!glCreateMemoryObjectsEXT_ || !glImportMemoryWin32HandleEXT_ || !glTextureStorageMem2DEXT_) {
+            vk_interop_ok_ = false;
+            CASPAR_LOG(info) << L"[screen] GL_EXT_memory_object_win32 not available — VK interop disabled, using PBO fallback";
+        }
+    }
+
+    void cleanup_vk_interop()
+    {
+        cleanup_vk_import();
+        cleanup_preview();
+    }
+
+    void cleanup_vk_import()
+    {
+        if (vk_gl_tex_) {
+            glDeleteTextures(1, &vk_gl_tex_);
+            vk_gl_tex_ = 0;
+        }
+        if (vk_gl_mem_obj_ && glDeleteMemoryObjectsEXT_) {
+            glDeleteMemoryObjectsEXT_(1, &vk_gl_mem_obj_);
+            vk_gl_mem_obj_ = 0;
+        }
+        vk_cached_handle_ = nullptr;
+    }
+
+    void cleanup_preview()
+    {
+        if (preview_draw_fbo_) {
+            glDeleteFramebuffers(1, &preview_draw_fbo_);
+            preview_draw_fbo_ = 0;
+        }
+        if (preview_read_fbo_) {
+            glDeleteFramebuffers(1, &preview_read_fbo_);
+            preview_read_fbo_ = 0;
+        }
+        if (preview_tex_) {
+            glDeleteTextures(1, &preview_tex_);
+            preview_tex_ = 0;
+        }
+        preview_w_ = 0;
+        preview_h_ = 0;
+    }
+
+    bool try_vk_interop(const core::const_frame& in_frame, screen_consumer* self)
+    {
+        load_vk_gl_extensions();
+        if (!vk_interop_ok_)
+            return false;
+
+        auto tex = in_frame.texture();
+        if (!tex)
+            return false;
+
+        // Ensure the VK renderpass has finished writing before GL reads.
+        // Without this the GPU may still be rendering → garbled output.
+        tex->ensure_render_complete();
+
+        HANDLE handle = static_cast<HANDLE>(tex->export_win32_handle());
+        if (!handle)
+            return false;
+
+        auto w     = tex->tex_width();
+        auto h     = tex->tex_height();
+        auto hbd   = tex->tex_is_hbd();
+        auto alloc = static_cast<GLuint64>(tex->export_alloc_size());
+
+        if (w <= 0 || h <= 0 || alloc == 0)
+            return false;
+
+        // Re-import only when the VK handle or dimensions change
+        if (handle != vk_cached_handle_ || w != vk_cached_w_ || h != vk_cached_h_ || hbd != vk_cached_hbd_) {
+            cleanup_vk_import();
+
+            // Import VK device memory into GL
+            glCreateMemoryObjectsEXT_(1, &vk_gl_mem_obj_);
+
+            // Duplicate the handle so GL owns an independent copy.
+            // The VK texture owns the original handle and may close it.
+            HANDLE dup_handle = nullptr;
+            if (!DuplicateHandle(GetCurrentProcess(), handle,
+                                 GetCurrentProcess(), &dup_handle,
+                                 0, FALSE, DUPLICATE_SAME_ACCESS)) {
+                CASPAR_LOG(warning) << L"[screen] DuplicateHandle failed for VK→GL interop — disabling";
+                vk_interop_ok_ = false;
+                return false;
+            }
+            glImportMemoryWin32HandleEXT_(vk_gl_mem_obj_, alloc,
+                                          GL_HANDLE_TYPE_OPAQUE_WIN32_EXT, dup_handle);
+
+            // Create GL texture backed by the imported memory
+            glCreateTextures(GL_TEXTURE_2D, 1, &vk_gl_tex_);
+            glTextureParameteri(vk_gl_tex_, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTextureParameteri(vk_gl_tex_, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTextureParameteri(vk_gl_tex_, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTextureParameteri(vk_gl_tex_, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            // The VK mixer stores pixels in BGRA channel order (the fragment
+            // shader reads subpassLoad().bgra).  The raw memory is imported as
+            // GL_RGBA so R and B are swapped.  Fix with texture swizzle.
+            glTextureParameteri(vk_gl_tex_, GL_TEXTURE_SWIZZLE_R, GL_BLUE);
+            glTextureParameteri(vk_gl_tex_, GL_TEXTURE_SWIZZLE_B, GL_RED);
+            glTextureStorageMem2DEXT_(vk_gl_tex_, 1, hbd ? GL_RGBA16 : GL_RGBA8,
+                                      w, h, vk_gl_mem_obj_, 0);
+
+            auto err = glGetError();
+            if (err != GL_NO_ERROR) {
+                CASPAR_LOG(warning) << L"[screen] GL error during VK interop import (0x"
+                                    << std::hex << err << L") — disabling interop";
+                cleanup_vk_interop();
+                vk_interop_ok_ = false;
+                return false;
+            }
+
+            vk_cached_handle_ = handle;
+            vk_cached_w_      = w;
+            vk_cached_h_      = h;
+            vk_cached_hbd_    = hbd;
+
+            static bool logged = false;
+            if (!logged) {
+                CASPAR_LOG(info) << L"[screen] VK→GL zero-copy interop active ("
+                                 << w << L"x" << h << (hbd ? L" 16-bit" : L" 8-bit") << L")";
+                logged = true;
+            }
+        }
+
+        // Bind the imported GL texture and draw
+        // Note: on NVIDIA, the driver provides implicit VK→GL synchronization
+        // for shared memory objects on the same physical device. VK commands are
+        // submitted before this frame reaches the consumer (via dispatch_async),
+        // so the driver serializes GL reads after VK writes.
+
+        // Dynamic preview downscale: if the VK texture is larger than the window,
+        // blit to a window-sized local GL texture.  This:
+        //   1. Minimizes the time the VK-shared texture is referenced by GL
+        //   2. Decouples SwapBuffers from VK synchronization
+        //   3. Reduces fragment shader texture read bandwidth
+        auto win_w = static_cast<int>(self->window_.getSize().x);
+        auto win_h = static_cast<int>(self->window_.getSize().y);
+
+        // Only downscale if the texture is significantly larger than the window
+        // (at least 1.5× in either dimension).  Otherwise render directly.
+        bool needs_downscale = (w > win_w * 3 / 2) || (h > win_h * 3 / 2);
+
+        if (needs_downscale && win_w > 0 && win_h > 0) {
+            // Ensure preview resources match current window size
+            if (preview_w_ != win_w || preview_h_ != win_h || preview_hbd_ != hbd) {
+                if (preview_draw_fbo_) glDeleteFramebuffers(1, &preview_draw_fbo_);
+                if (preview_read_fbo_) glDeleteFramebuffers(1, &preview_read_fbo_);
+                if (preview_tex_) glDeleteTextures(1, &preview_tex_);
+
+                // Create local GL texture at window size (not VK-backed)
+                glCreateTextures(GL_TEXTURE_2D, 1, &preview_tex_);
+                glTextureParameteri(preview_tex_, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                glTextureParameteri(preview_tex_, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                glTextureParameteri(preview_tex_, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                glTextureParameteri(preview_tex_, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                // Swizzle R↔B: the VK texture stores BGRA in RGBA layout.
+                // glBlitFramebuffer copies raw pixels (no swizzle applied), so
+                // the preview texture inherits the same channel order.
+                glTextureParameteri(preview_tex_, GL_TEXTURE_SWIZZLE_R, GL_BLUE);
+                glTextureParameteri(preview_tex_, GL_TEXTURE_SWIZZLE_B, GL_RED);
+                glTextureStorage2D(preview_tex_, 1, hbd ? GL_RGBA16 : GL_RGBA8, win_w, win_h);
+
+                // Create FBOs for the blit
+                glCreateFramebuffers(1, &preview_read_fbo_);
+                glNamedFramebufferTexture(preview_read_fbo_, GL_COLOR_ATTACHMENT0, vk_gl_tex_, 0);
+
+                glCreateFramebuffers(1, &preview_draw_fbo_);
+                glNamedFramebufferTexture(preview_draw_fbo_, GL_COLOR_ATTACHMENT0, preview_tex_, 0);
+
+                preview_w_   = win_w;
+                preview_h_   = win_h;
+                preview_hbd_ = hbd;
+
+                CASPAR_LOG(info) << L"[screen] Preview downscale active: " << w << L"x" << h
+                                 << L" → " << win_w << L"x" << win_h
+                                 << (hbd ? L" 16-bit" : L" 8-bit");
+            }
+
+            // Update the read FBO attachment if the VK texture was re-imported
+            // (handle changed → vk_gl_tex_ was recreated)
+            glNamedFramebufferTexture(preview_read_fbo_, GL_COLOR_ATTACHMENT0, vk_gl_tex_, 0);
+
+            // Blit: hardware-accelerated downscale from full-res VK texture → window-sized preview
+            glBlitNamedFramebuffer(preview_read_fbo_, preview_draw_fbo_,
+                                   0, 0, w, h,
+                                   0, 0, win_w, win_h,
+                                   GL_COLOR_BUFFER_BIT, GL_LINEAR);
+
+            // Bind the small local preview texture for rendering
+            GL(glActiveTexture(GL_TEXTURE0));
+            GL(glBindTexture(GL_TEXTURE_2D, preview_tex_));
+        } else {
+            // Texture is close to window size — render directly from VK-shared texture
+            GL(glActiveTexture(GL_TEXTURE0));
+            GL(glBindTexture(GL_TEXTURE_2D, vk_gl_tex_));
+        }
+        return true;
+    }
+#endif // ENABLE_VULKAN
+
     virtual frame init_frame(const configuration& config, const core::video_format_desc& format_desc) override
     {
         return frame();
@@ -741,6 +1352,19 @@ struct gpu_strategy : public display_strategy
             frame.fence = nullptr;
         }
         frame.texture.reset();
+        if (fallback_pbo_) {
+            glUnmapNamedBuffer(fallback_pbo_);
+            glDeleteBuffers(1, &fallback_pbo_);
+            fallback_pbo_ = 0;
+            fallback_ptr_ = nullptr;
+        }
+        if (fallback_tex_) {
+            glDeleteTextures(1, &fallback_tex_);
+            fallback_tex_ = 0;
+        }
+#ifdef ENABLE_VULKAN
+        cleanup_vk_interop();
+#endif
     }
 
     virtual void do_tick(screen_consumer* self) override
@@ -783,7 +1407,60 @@ struct gpu_strategy : public display_strategy
             GL(glClear(GL_COLOR_BUFFER_BIT));
 
             if (in_frame.texture()) {
-                in_frame.texture()->bind(0);
+                auto ogl_tex = std::dynamic_pointer_cast<accelerator::ogl::texture>(in_frame.texture());
+                if (ogl_tex && self->window_.shared_) {
+                    // OGL mixer with shared GL contexts: bind directly (zero-copy GPU path)
+                    ogl_tex->bind(0);
+#ifdef ENABLE_VULKAN
+                } else if (try_vk_interop(in_frame, self)) {
+                    // VK mixer: zero-copy via GL_EXT_memory_object_win32
+                    // (texture already bound by try_vk_interop)
+#endif
+                } else {
+                    // Non-OGL texture (Vulkan mixer) — upload CPU pixels via PBO
+                    auto w   = self->format_desc_.width;
+                    auto h   = self->format_desc_.height;
+                    auto hbd = self->config_.high_bitdepth;
+                    auto sz  = static_cast<GLsizeiptr>(self->format_desc_.size) * (hbd ? 2 : 1);
+
+                    if (!fallback_pbo_ || fallback_w_ != w || fallback_h_ != h || fallback_hbd_ != hbd) {
+                        if (fallback_pbo_) {
+                            glUnmapNamedBuffer(fallback_pbo_);
+                            glDeleteBuffers(1, &fallback_pbo_);
+                        }
+                        if (fallback_tex_)
+                            glDeleteTextures(1, &fallback_tex_);
+
+                        auto flags = GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT | GL_MAP_WRITE_BIT;
+                        GL(glCreateBuffers(1, &fallback_pbo_));
+                        GL(glNamedBufferStorage(fallback_pbo_, sz, nullptr, flags));
+                        fallback_ptr_ = reinterpret_cast<char*>(
+                            GL2(glMapNamedBufferRange(fallback_pbo_, 0, sz, flags)));
+
+                        GL(glCreateTextures(GL_TEXTURE_2D, 1, &fallback_tex_));
+                        GL(glTextureParameteri(fallback_tex_, GL_TEXTURE_MIN_FILTER, GL_LINEAR));
+                        GL(glTextureParameteri(fallback_tex_, GL_TEXTURE_MAG_FILTER, GL_LINEAR));
+                        GL(glTextureParameteri(fallback_tex_, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE));
+                        GL(glTextureParameteri(fallback_tex_, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE));
+                        GL(glTextureStorage2D(fallback_tex_, 1, hbd ? GL_RGBA16 : GL_RGBA8, w, h));
+
+                        fallback_w_   = w;
+                        fallback_h_   = h;
+                        fallback_hbd_ = hbd;
+                    }
+
+                    auto& img = in_frame.image_data(0);
+                    if (img.data() && static_cast<GLsizeiptr>(img.size()) >= sz)
+                        std::memcpy(fallback_ptr_, img.data(), sz);
+
+                    GL(glBindBuffer(GL_PIXEL_UNPACK_BUFFER, fallback_pbo_));
+                    GL(glTextureSubImage2D(fallback_tex_, 0, 0, 0, w, h,
+                                           GL_BGRA, hbd ? GL_UNSIGNED_SHORT : GL_UNSIGNED_BYTE, nullptr));
+                    GL(glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0));
+
+                    GL(glActiveTexture(GL_TEXTURE0));
+                    GL(glBindTexture(GL_TEXTURE_2D, fallback_tex_));
+                }
 
                 self->draw();
 
@@ -798,6 +1475,7 @@ struct screen_consumer_proxy : public core::frame_consumer
 {
     const configuration              config_;
     std::unique_ptr<screen_consumer> consumer_;
+    bool                             use_vulkan_ = false;
 
   public:
     explicit screen_consumer_proxy(configuration config)
@@ -812,7 +1490,9 @@ struct screen_consumer_proxy : public core::frame_consumer
                     int                            port_index) override
     {
         consumer_.reset();
-        consumer_ = std::make_unique<screen_consumer>(config_, format_desc, channel_info.index);
+        use_vulkan_ = channel_info.use_vulkan;
+        consumer_ = std::make_unique<screen_consumer>(config_, format_desc, channel_info.index,
+                                                      channel_info.gl_share_context, use_vulkan_);
     }
 
     std::future<bool> send(core::video_field field, core::const_frame frame) override
@@ -825,6 +1505,10 @@ struct screen_consumer_proxy : public core::frame_consumer
     std::wstring name() const override { return L"screen"; }
 
     bool has_synchronization_clock() const override { return false; }
+
+    // When Vulkan mixer is active, gpu_strategy is always used (auto-promoted)
+    // and VK→GL zero-copy interop bypasses CPU entirely.
+    bool needs_cpu_frame_data() const override { return !use_vulkan_; }
 
     int index() const override { return 600 + (config_.key_only ? 10 : 0) + config_.screen_index; }
 

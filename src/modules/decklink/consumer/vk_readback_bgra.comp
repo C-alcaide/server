@@ -1,0 +1,51 @@
+#version 450
+
+/*
+ * BGRA8 subregion extraction compute shader for DeckLink output.
+ *
+ * Reads the VK mixer's render attachment (RGBA UNORM texture) via texelFetch,
+ * swizzles RGBA → BGRA, and packs as uint32.
+ *
+ * Each invocation handles one pixel.  WorkgroupSize = (16, 16, 1).
+ * Dispatch: ((dst_w + 15) / 16,  (dst_h + 15) / 16,  1)
+ */
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(set = 0, binding = 0) uniform sampler2D src_tex;
+
+layout(set = 0, binding = 1) buffer BGRAOutput {
+    uint data[];
+} bgra_out;
+
+layout(push_constant) uniform PushConstants {
+    int src_x;   // subregion origin X in source texture
+    int src_y;   // subregion origin Y in source texture
+    int dst_w;   // DeckLink output width
+    int dst_h;   // DeckLink output height
+} pc;
+
+void main()
+{
+    int x = int(gl_GlobalInvocationID.x);
+    int y = int(gl_GlobalInvocationID.y);
+
+    if (x >= pc.dst_w || y >= pc.dst_h)
+        return;
+
+    int sx = pc.src_x + x;
+    int sy = pc.src_y + y;
+
+    vec4 pixel = texelFetch(src_tex, ivec2(sx, sy), 0);
+
+    // RGBA → BGRA swizzle, pack as uint32
+    uint B = uint(pixel.b * 255.0 + 0.5);
+    uint G = uint(pixel.g * 255.0 + 0.5);
+    uint R = uint(pixel.r * 255.0 + 0.5);
+    uint A = uint(pixel.a * 255.0 + 0.5);
+
+    uint packed = B | (G << 8u) | (R << 16u) | (A << 24u);
+
+    uint idx = uint(y) * uint(pc.dst_w) + uint(x);
+    bgra_out.data[idx] = packed;
+}

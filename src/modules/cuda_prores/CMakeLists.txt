@@ -137,6 +137,10 @@ target_link_libraries(cuda_prores PRIVATE
     GLEW::glew
 )
 
+IF(ENABLE_VULKAN)
+    target_link_libraries(cuda_prores PRIVATE Vulkan::Headers)
+ENDIF()
+
 if (MSVC)
     # Nothing extra on Windows — DeckLink interfaces come in via the DeckLink
     # module's interop/ headers (COM, oleaut32, etc via the SDK).

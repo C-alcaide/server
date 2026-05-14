@@ -342,13 +342,16 @@ uint64_t gpu_frame_cache::submit_frame(uint64_t generation, const std::function<
 
     transfer_fn();
 
-    // Coordinator submit: bridge binary GL→VK semaphore to timeline
-    do_coordinator_submit(generation);
+    // Coordinator submit: bridge binary GL→VK semaphore to timeline.
+    // Only update timeline_value_ on success — a failed submit means the
+    // VK timeline semaphore was never signaled.
+    bool coord_ok = do_coordinator_submit(generation);
 
     lock.lock();
     current_generation_.store(generation, std::memory_order_release);
     transfer_in_progress_ = false;
-    timeline_value_.store(generation, std::memory_order_release);
+    if (coord_ok)
+        timeline_value_.store(generation, std::memory_order_release);
     frame_cv_.notify_all();
 
     return generation;
@@ -401,23 +404,25 @@ void gpu_frame_cache::pump_loop()
         // Execute the transfer (blit + signal_gl + swap on the interop/affinity thread)
         work.transfer_fn();
 
-        // Coordinator submit: bridge binary semaphore → timeline
-        do_coordinator_submit(work.generation);
-
-        // Update generation (thread-safe via atomic)
-        current_generation_.store(work.generation, std::memory_order_release);
-        timeline_value_.store(work.generation, std::memory_order_release);
+        // Coordinator submit: bridge binary semaphore → timeline.
+        // Only update timeline_value_ on success — a failed submit means the
+        // VK timeline semaphore was never signaled, so advertising that value
+        // would cause consumers to hang forever in vkWaitSemaphores.
+        if (do_coordinator_submit(work.generation)) {
+            current_generation_.store(work.generation, std::memory_order_release);
+            timeline_value_.store(work.generation, std::memory_order_release);
+        }
     }
 }
 
-void gpu_frame_cache::do_coordinator_submit(uint64_t generation)
+bool gpu_frame_cache::do_coordinator_submit(uint64_t generation)
 {
     if (!pool_ || timeline_sem_ == VK_NULL_HANDLE)
-        return;
+        return false;
 
     VkSemaphore wait_sem = pool_->wait_semaphore_vk();
     if (wait_sem == VK_NULL_HANDLE)
-        return;
+        return false;
 
     VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
 
@@ -450,13 +455,16 @@ void gpu_frame_cache::do_coordinator_submit(uint64_t generation)
         CASPAR_LOG(error) << L"[vulkan] Coordinator submit: DEVICE_LOST (TDR) on GPU "
                           << gpu_index_ << L" queue=" << coord_queue_idx_
                           << L" gen=" << generation;
+        return false;
     } else if (result != VK_SUCCESS) {
         CASPAR_LOG(error) << L"[vulkan] Coordinator submit failed (result=" << result
                           << L") on GPU " << gpu_index_ << L" — timeline semaphore may stall consumers.";
+        return false;
     } else {
         CASPAR_LOG(debug) << L"[vulkan] Coordinator submit OK: GPU " << gpu_index_
                            << L" gen=" << generation << L" queue=" << coord_queue_idx_;
     }
+    return true;
 }
 
 void gpu_frame_cache::frame_done()

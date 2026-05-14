@@ -135,6 +135,9 @@ struct server::impl
         setup_video_modes(env::properties());
         CASPAR_LOG(info) << L"Initialized video modes.";
 
+        setup_accelerator(env::properties());
+        CASPAR_LOG(info) << L"Initialized accelerator.";
+
         auto xml_channels = setup_channels(env::properties());
         CASPAR_LOG(info) << L"Initialized channels.";
 
@@ -179,6 +182,30 @@ struct server::impl
 
         uninitialize_modules();
         core::diagnostics::osd::shutdown();
+    }
+
+    void setup_accelerator(const boost::property_tree::wptree& pt)
+    {
+        auto backend_str = pt.get(L"configuration.accelerator", L"opengl");
+        boost::algorithm::to_lower(backend_str);
+
+        accelerator::accelerator_backend backend = accelerator::accelerator_backend::opengl;
+
+        if (backend_str == L"opengl" || backend_str == L"ogl" || backend_str == L"auto") {
+            backend = accelerator::accelerator_backend::opengl;
+            CASPAR_LOG(info) << L"Using OpenGL accelerator backend.";
+        }
+#ifdef ENABLE_VULKAN
+        else if (backend_str == L"vulkan" || backend_str == L"vk") {
+            backend = accelerator::accelerator_backend::vulkan;
+            CASPAR_LOG(info) << L"Using Vulkan accelerator backend.";
+        }
+#endif
+        else {
+            CASPAR_LOG(warning) << L"Unknown accelerator backend: " << backend_str << L". Falling back to OpenGL.";
+        }
+
+        accelerator_.set_backend(backend);
     }
 
     void setup_video_modes(const boost::property_tree::wptree& pt)
@@ -448,7 +475,7 @@ struct server::impl
     {
         amcp_command_repo_ = std::make_shared<amcp::amcp_command_repository>(channels_);
 
-        auto ogl_device = accelerator_.get_device();
+        auto accelerator_device = accelerator_.get_device();
         auto ctx        = std::make_shared<amcp::amcp_command_static_context>(
             video_format_repository_,
             cg_registry_,
@@ -458,7 +485,7 @@ struct server::impl
             shutdown_server_now_,
             u8(caspar::env::properties().get(L"configuration.amcp.media-server.host", L"127.0.0.1")),
             u8(caspar::env::properties().get(L"configuration.amcp.media-server.port", L"8000")),
-            ogl_device,
+            accelerator_device,
             spl::make_shared_ptr(osc_client_));
 
         amcp_context_factory_ = std::make_shared<amcp::command_context_factory>(ctx);

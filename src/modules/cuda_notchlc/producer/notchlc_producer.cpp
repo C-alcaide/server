@@ -37,6 +37,12 @@
 #include <accelerator/ogl/util/device.h>
 #include <accelerator/ogl/util/texture.h>
 
+#ifdef ENABLE_VULKAN
+#include <accelerator/vulkan/image/image_mixer.h>
+#include <accelerator/vulkan/util/device.h>
+#include "../../cuda_vk_texture.h"
+#endif
+
 #include <common/array.h>
 #include <common/bit_depth.h>
 #include <common/diagnostics/graph.h>
@@ -135,6 +141,13 @@ struct notchlc_producer_impl final : public core::frame_producer
     std::shared_ptr<accelerator::ogl::texture> gl_tex_[NUM_SLOTS];
     std::shared_ptr<CudaGLTexture>             cgt_   [NUM_SLOTS];
 
+    bool                                         use_vulkan_ = false;
+#ifdef ENABLE_VULKAN
+    std::shared_ptr<accelerator::vulkan::device> vk_device_;
+    // Per-slot VK texture: one CudaVkTexture per decode slot (same as prores path).
+    std::shared_ptr<CudaVkTexture>               cvt_[NUM_SLOTS];
+#endif
+
 #ifdef WIN32
     HDC   hdc_          = nullptr;
     HGLRC shared_hglrc_ = nullptr;
@@ -211,11 +224,19 @@ struct notchlc_producer_impl final : public core::frame_producer
         , speed_(initial_speed), pingpong_(pingpong)
         , frame_factory_(deps.frame_factory)
     {
-        auto* ogl_mixer = dynamic_cast<accelerator::ogl::image_mixer*>(frame_factory_.get());
-        if (!ogl_mixer)
-            CASPAR_THROW_EXCEPTION(std::runtime_error("[notchlc_producer] frame_factory is not ogl::image_mixer"));
-
-        ogl_device_  = ogl_mixer->get_ogl_device();
+#ifdef ENABLE_VULKAN
+        auto* vk_mixer = dynamic_cast<accelerator::vulkan::image_mixer*>(frame_factory_.get());
+        if (vk_mixer) {
+            vk_device_   = vk_mixer->get_vk_device();
+            use_vulkan_  = true;
+        }
+#endif
+        if (!use_vulkan_) {
+            auto* ogl_mixer = dynamic_cast<accelerator::ogl::image_mixer*>(frame_factory_.get());
+            if (!ogl_mixer)
+                CASPAR_THROW_EXCEPTION(std::runtime_error("[notchlc_producer] frame_factory is not ogl::image_mixer or vulkan::image_mixer"));
+            ogl_device_ = ogl_mixer->get_ogl_device();
+        }
         format_desc_ = deps.format_desc;
 
         cudaSetDevice(cuda_device_);
@@ -292,7 +313,19 @@ struct notchlc_producer_impl final : public core::frame_producer
         // Pre-fill the slot pool with all created slot indices.
         for (int i = 0; i < num_slots_; i++) slot_pool_.push(i);
 
-        //  GL textures + shared WGL context (Windows zero-copy path) 
+        //  GPU textures + shared context (zero-copy path) 
+#ifdef ENABLE_VULKAN
+        if (use_vulkan_) {
+            int fw = frame_info_.width, fh = frame_info_.height;
+            for (int i = 0; i < num_slots_; i++) {
+                auto vk_tex = vk_device_->create_exportable_texture(fw, fh, 4, common::bit_depth::bit16);
+                cvt_[i] = std::make_shared<CudaVkTexture>(vk_tex, static_cast<VkDevice>(vk_device_->getVkDevice()));
+            }
+            use_host_copy_ = false;
+            CASPAR_LOG(info) << L"[notchlc_producer] Vulkan CUDA zero-copy active"
+                             << L" (" << num_slots_ << L" per-slot textures)";
+        } else
+#endif
         {
             int fw = frame_info_.width, fh = frame_info_.height;
             ogl_device_->dispatch_sync([this, fw, fh]() {
@@ -319,6 +352,10 @@ struct notchlc_producer_impl final : public core::frame_producer
             });
         }
 
+#ifdef ENABLE_VULKAN
+        if (!use_vulkan_)
+#endif
+        {
 #ifdef WIN32
         use_host_copy_ = (shared_hglrc_ == nullptr);
 #else
@@ -334,6 +371,7 @@ struct notchlc_producer_impl final : public core::frame_producer
                         std::string("[notchlc_producer] cudaMallocHost: ") + cudaGetErrorString(e)));
             }
         }
+        } // end !use_vulkan_ host-copy block
 
         // Reopen demuxer from beginning, then apply IN seek if requested.
         demuxer_     = std::make_unique<NotchLCDemuxer>(path_);
@@ -625,7 +663,7 @@ struct notchlc_producer_impl final : public core::frame_producer
         set_thread_name(L"notchlc-dec");
 
 #ifdef WIN32
-        if (!use_host_copy_ && shared_hglrc_) {
+        if (!use_vulkan_ && !use_host_copy_ && shared_hglrc_) {
             if (!wglMakeCurrent(hdc_, shared_hglrc_)) {
                 CASPAR_LOG(error) << L"[notchlc_producer] wglMakeCurrent on read_thread_ failed"
                                   << L" -- switching to host-copy fallback";
@@ -762,9 +800,17 @@ struct notchlc_producer_impl final : public core::frame_producer
             caspar::timer decode_timer;
             cudaError_t   err = cudaSuccess;
 
+            bool use_gpu_zerocopy = false;
+            cudaArray_t arr = nullptr;
+
+#ifdef ENABLE_VULKAN
+            if (use_vulkan_ && cvt_[gl_slot]) {
+                arr = cvt_[gl_slot]->array();
+                use_gpu_zerocopy = true;
+            } else
+#endif
             if (!use_host_copy_ && cgt_[gl_slot]) {
                 CudaGLTexture& cgt = *cgt_[gl_slot];
-                cudaArray_t arr;
                 try { arr = cgt.map(ctx.stream); }
                 catch (const std::exception& ex) {
                     CASPAR_LOG(error) << L"[notchlc_producer] GL map failed: " << ex.what();
@@ -773,8 +819,15 @@ struct notchlc_producer_impl final : public core::frame_producer
                     slot_pool_cv_.notify_one();
                     continue;
                 }
+                use_gpu_zerocopy = true;
+            }
+
+            if (use_gpu_zerocopy) {
                 err = notchlc_decode_gpu_phase(&ctx, item.hdr, item.actual_uncompressed, cm, arr);
-                cgt.unmap(ctx.stream);
+#ifdef ENABLE_VULKAN
+                if (!use_vulkan_ && cgt_[gl_slot])
+#endif
+                    cgt_[gl_slot]->unmap(ctx.stream);
             } else {
                 err = notchlc_decode_gpu_phase(&ctx, item.hdr, item.actual_uncompressed, cm, nullptr);
                 if (err == cudaSuccess) {
@@ -822,8 +875,15 @@ struct notchlc_producer_impl final : public core::frame_producer
 
             //  Build frame 
             core::draw_frame df;
-            if (!use_host_copy_ && cgt_[gl_slot]) {
-                core::pixel_format_desc pfd(core::pixel_format::rgba);
+            bool has_gpu_tex = false;
+#ifdef ENABLE_VULKAN
+            has_gpu_tex = use_vulkan_ && cvt_[gl_slot];
+#endif
+            if (!has_gpu_tex) has_gpu_tex = (!use_host_copy_ && cgt_[gl_slot]);
+
+            if (has_gpu_tex) {
+                const auto pf = use_vulkan_ ? core::pixel_format::bgra : core::pixel_format::rgba;
+                core::pixel_format_desc pfd(pf);
                 pfd.planes.push_back(core::pixel_format_desc::plane(
                     frame_info_.width, frame_info_.height, 4, common::bit_depth::bit16));
 
@@ -835,12 +895,20 @@ struct notchlc_producer_impl final : public core::frame_producer
                 auto audio_store = std::make_shared<std::vector<int32_t>>(std::move(frame_audio));
                 array<const int32_t> audio_arr(audio_store->data(), audio_store->size(), std::move(audio_store));
 
+                std::shared_ptr<core::texture> gpu_tex;
+#ifdef ENABLE_VULKAN
+                if (use_vulkan_) {
+                    gpu_tex = cvt_[gl_slot]->core_texture();
+                } else
+#endif
+                    gpu_tex = cgt_[gl_slot]->gl_texture();
+
                 df = core::draw_frame(core::const_frame(
                     this,
                     std::move(img_vec),
                     std::move(audio_arr),
                     pfd,
-                    cgt_[gl_slot]->gl_texture()));
+                    gpu_tex));
             } else {
                 core::pixel_format_desc pfd(core::pixel_format::bgra);
                 pfd.planes.push_back(core::pixel_format_desc::plane(
@@ -954,33 +1022,28 @@ struct notchlc_producer_impl final : public core::frame_producer
         if (field == core::video_field::b)
             return cached_frame_ ? cached_frame_ : core::draw_frame{};
 
-        std::unique_lock<std::mutex> lk(queue_mutex_);
-        if (!eof_paused_) {
-            queue_cv_.wait_for(lk, std::chrono::milliseconds(40),
-                               [this] { return !ready_queue_.empty() || stop_flag_ || eof_paused_; });
-        }
-        if (ready_queue_.empty()) return cached_frame_;
-
+        // ── Speed / frame-advance check (BEFORE touching the queue) ──────
         double spd = speed_.load();
-        // Scale by file_fps/channel_fps so a 50fps file on a 25fps channel
-        // advances 2 file-frames per tick (real-time playback).
         const double fps_ratio = (file_fps_ > 0.0 && format_desc_.fps > 0.0)
                                      ? file_fps_ / format_desc_.fps
                                      : 1.0;
         speed_accum_ += std::abs(spd) * fps_ratio;
         int frames_to_advance = static_cast<int>(speed_accum_);
-        speed_accum_ -= static_cast<double>(frames_to_advance);
 
-        if (frames_to_advance == 0) {
-            if (seek_done_.exchange(false, std::memory_order_relaxed) && !ready_queue_.empty()) {
-                cached_frame_ = std::move(ready_queue_.front());
-                ready_queue_.pop();
-                lk.unlock();
-                queue_cv_.notify_all();
-                return cached_frame_;
-            }
-            lk.unlock();
+        const bool seek_just_done = seek_done_.exchange(false, std::memory_order_relaxed);
+        if (frames_to_advance == 0 && !seek_just_done) {
             return cached_frame_ ? core::draw_frame::still(cached_frame_) : core::draw_frame{};
+        }
+        if (frames_to_advance == 0 && seek_just_done)
+            frames_to_advance = 1;
+
+        // Non-blocking queue check (no 40ms stall).
+        std::unique_lock<std::mutex> lk(queue_mutex_);
+        if (ready_queue_.empty()) {
+            lk.unlock();
+            // No frame consumed — don't deduct from speed_accum_.
+            speed_accum_ = (std::min)(speed_accum_, 2.0);
+            return cached_frame_;
         }
 
         // Count how many file frames are actually consumed from the queue.
@@ -997,6 +1060,10 @@ struct notchlc_producer_impl final : public core::frame_producer
         ready_queue_.pop();
         lk.unlock();
         queue_cv_.notify_all();
+
+        // Deduct the full frames_to_advance (not just actually_consumed)
+        // so the accumulator stays correct even when queue is partially drained.
+        speed_accum_ -= static_cast<double>(frames_to_advance);
 
         auto fc = (frame_count_ += (spd >= 0.0) ? actually_consumed : -actually_consumed);
 

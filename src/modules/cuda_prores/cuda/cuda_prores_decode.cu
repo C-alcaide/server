@@ -125,7 +125,15 @@ cudaError_t prores_decode_ctx_create(ProResDecodeCtx* ctx,
     if (is_444)
         CUDA_CHECK(cudaMallocHost((void**)&ctx->h_alpha, n_pix * sizeof(int16_t)));
 
-    CUDA_CHECK(cudaStreamCreate(&ctx->stream));
+    // Use highest-priority stream so decode preempts concurrent VK/GL rendering
+    // on the same GPU.  Without this, the VK mixer's composition work (sampling
+    // the huge source texture 60× per second) starves the decode stream, causing
+    // cudaStreamSynchronize to block ~75ms instead of ~40ms.
+    {
+        int lo = 0, hi = 0;
+        cudaDeviceGetStreamPriorityRange(&lo, &hi);   // lo = least, hi = greatest (numerically smallest)
+        CUDA_CHECK(cudaStreamCreateWithPriority(&ctx->stream, cudaStreamNonBlocking, hi));
+    }
 
     // Upload quant tables and scan order to __constant__ memory (first call
     // is a no-op if already done by the encoder init; subsequent calls just

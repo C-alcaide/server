@@ -83,3 +83,7 @@ target_link_libraries(cuda_notchlc PRIVATE
     GLEW::glew
 )
 
+IF(ENABLE_VULKAN)
+    target_link_libraries(cuda_notchlc PRIVATE Vulkan::Headers)
+ENDIF()
+

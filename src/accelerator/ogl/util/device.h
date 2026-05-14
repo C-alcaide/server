@@ -72,6 +72,9 @@ class device final
 
     std::wstring version() const;
 
+    /// Return the native GL context handle (HGLRC on Windows) for context sharing.
+    void* native_gl_context() const;
+
     boost::property_tree::wptree info() const;
     std::future<void>            gc();
 

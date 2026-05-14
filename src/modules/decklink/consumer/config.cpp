@@ -145,6 +145,20 @@ configuration parse_xml_config(const boost::property_tree::wptree&  ptree,
         }
     }
 
+    {
+        auto gpu_readback_mode = ptree.get(L"gpu-readback-mode", ptree.get(L"gpu-strategy", L"auto"));
+        if (gpu_readback_mode == L"cuda")
+            config.gpu_readback_mode = configuration::gpu_readback_mode_t::cuda;
+        else if (gpu_readback_mode == L"vulkan")
+            config.gpu_readback_mode = configuration::gpu_readback_mode_t::vulkan;
+        else if (gpu_readback_mode == L"vulkan-dma")
+            config.gpu_readback_mode = configuration::gpu_readback_mode_t::vulkan_dma;
+        else if (gpu_readback_mode == L"cpu")
+            config.gpu_readback_mode = configuration::gpu_readback_mode_t::cpu;
+        else
+            config.gpu_readback_mode = configuration::gpu_readback_mode_t::auto_select;
+    }
+
     config.primary = parse_output_config(ptree, format_repository);
     if (config.primary.device_index == -1)
         config.primary.device_index = 1;

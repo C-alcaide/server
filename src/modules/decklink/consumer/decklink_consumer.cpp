@@ -29,6 +29,14 @@
 #include "monitor.h"
 #include "vanc.h"
 
+#ifdef DECKLINK_CUDA_VK_ENABLED
+#include "cuda_vk_strategy.h"
+#endif
+
+#ifdef ENABLE_VULKAN
+#include "vk_readback_strategy.h"
+#endif
+
 #include "../util/util.h"
 
 #include <chrono>
@@ -220,14 +228,58 @@ core::video_format_desc get_decklink_format(const port_configuration&      confi
     return fallback_format_desc;
 }
 
-spl::shared_ptr<format_strategy> create_format_strategy(const configuration& config)
+spl::shared_ptr<format_strategy> create_format_strategy(const configuration& config, bool use_vulkan = false)
 {
-    if (config.hdr) {
-        return create_hdr_v210_strategy(config.color_space);
-    } else {
-        return config.pixel_format == configuration::pixel_format_t::yuv ? create_sdr_v210_strategy(config.color_space)
-                                                                         : create_sdr_bgra_strategy();
+    auto cpu_strategy = config.hdr
+        ? create_hdr_v210_strategy(config.color_space)
+        : (config.pixel_format == configuration::pixel_format_t::yuv
+               ? create_sdr_v210_strategy(config.color_space)
+               : create_sdr_bgra_strategy());
+
+    if (!use_vulkan)
+        return cpu_strategy;
+
+    bool is_hdr     = config.hdr;
+    bool use_bt2020 = config.color_space == core::color_space::bt2020;
+    auto strategy   = config.gpu_readback_mode;
+
+    // Auto-select: try CUDA first (proven), then VK readback
+    if (strategy == configuration::gpu_readback_mode_t::auto_select) {
+#ifdef DECKLINK_CUDA_VK_ENABLED
+        strategy = configuration::gpu_readback_mode_t::cuda;
+#elif defined(ENABLE_VULKAN)
+        strategy = configuration::gpu_readback_mode_t::vulkan;
+#else
+        return cpu_strategy;
+#endif
     }
+
+    if (strategy == configuration::gpu_readback_mode_t::cuda) {
+#ifdef DECKLINK_CUDA_VK_ENABLED
+        return try_create_cuda_vk_strategy(is_hdr, use_bt2020, std::move(cpu_strategy));
+#else
+        CASPAR_LOG(warning) << L"[decklink] CUDA gpu-readback-mode requested but CUDA not available, trying Vulkan";
+        strategy = configuration::gpu_readback_mode_t::vulkan;
+#endif
+    }
+
+    if (strategy == configuration::gpu_readback_mode_t::vulkan) {
+#ifdef ENABLE_VULKAN
+        return try_create_vk_readback_strategy(is_hdr, use_bt2020, std::move(cpu_strategy));
+#else
+        CASPAR_LOG(warning) << L"[decklink] Vulkan gpu-readback-mode requested but Vulkan not available, using CPU";
+#endif
+    }
+
+    if (strategy == configuration::gpu_readback_mode_t::vulkan_dma) {
+#ifdef ENABLE_VULKAN
+        return try_create_vk_readback_strategy(is_hdr, use_bt2020, std::move(cpu_strategy), /*dma_only=*/true);
+#else
+        CASPAR_LOG(warning) << L"[decklink] Vulkan-DMA gpu-readback-mode requested but Vulkan not available, using CPU";
+#endif
+    }
+
+    return cpu_strategy;
 }
 
 enum EOTF
@@ -509,10 +561,11 @@ struct decklink_secondary_port final : public IDeckLinkVideoOutputCallback
                             core::video_format_desc        channel_format_desc,
                             const core::video_format_desc& main_decklink_format_desc,
                             const std::wstring&            print,
-                            int                            device_sync_group)
+                            int                            device_sync_group,
+                            bool                           use_vulkan = false)
         : config_(config)
         , output_config_(std::move(output_config))
-        , format_strategy_(create_format_strategy(config))
+        , format_strategy_(create_format_strategy(config, use_vulkan))
         , device_sync_group_(device_sync_group)
         , channel_format_desc_(std::move(channel_format_desc))
         , decklink_format_desc_(get_decklink_format(output_config_, main_decklink_format_desc))
@@ -652,6 +705,7 @@ struct decklink_consumer final : public IDeckLinkVideoOutputCallback
 {
     const int                        channel_index_;
     const configuration              config_;
+    const bool                       use_vulkan_;
     spl::shared_ptr<format_strategy> format_strategy_;
 
     com_ptr<IDeckLink>                        decklink_      = get_device(config_.primary.device_index);
@@ -687,6 +741,14 @@ struct decklink_consumer final : public IDeckLinkVideoOutputCallback
     int                     frames_since_update_ = 0;
     double                  current_fps_ = 0.0;
 
+    // Periodic timing diagnostics (logged to file for test analysis)
+    std::chrono::steady_clock::time_point diag_last_log_;
+    double                  diag_tick_sum_   = 0.0;
+    int                     diag_tick_count_ = 0;
+    int                     diag_late_count_ = 0;
+    int                     diag_drop_count_ = 0;
+    int                     diag_flush_count_ = 0;
+
     reference_signal_detector           reference_signal_detector_{output_};
     // std::atomic<int64_t>                                  scheduled_frames_completed_{0};
     std::vector<std::unique_ptr<decklink_secondary_port>> secondary_port_contexts_;
@@ -701,10 +763,11 @@ struct decklink_consumer final : public IDeckLinkVideoOutputCallback
     std::shared_ptr<decklink_vanc> vanc_;
 
   public:
-    decklink_consumer(const configuration& config, core::video_format_desc channel_format_desc, int channel_index)
+    decklink_consumer(const configuration& config, core::video_format_desc channel_format_desc, int channel_index, bool use_vulkan = false)
         : channel_index_(channel_index)
         , config_(config)
-        , format_strategy_(create_format_strategy(config))
+        , use_vulkan_(use_vulkan)
+        , format_strategy_(create_format_strategy(config, use_vulkan))
         , channel_format_desc_(std::move(channel_format_desc))
         , decklink_format_desc_(get_decklink_format(config.primary, channel_format_desc_))
     {
@@ -751,7 +814,8 @@ struct decklink_consumer final : public IDeckLinkVideoOutputCallback
                                                                                          channel_format_desc_,
                                                                                          decklink_format_desc_,
                                                                                          print(),
-                                                                                         device_sync_group_));
+                                                                                         device_sync_group_,
+                                                                                         use_vulkan_));
         }
 
         if (config.vanc.enable) {
@@ -944,8 +1008,13 @@ struct decklink_consumer final : public IDeckLinkVideoOutputCallback
         }
         try {
             auto tick_time = tick_timer_.elapsed() * decklink_format_desc_.hz * 0.5;
+            auto tick_ms   = tick_timer_.elapsed() * 1000.0;
             graph_->set_value("tick-time", tick_time);
             tick_timer_.restart();
+
+            // Accumulate for periodic log
+            diag_tick_sum_ += tick_ms;
+            diag_tick_count_++;
 
             reference_signal_detector_.detect_change([this]() { return print(); });
 
@@ -967,12 +1036,35 @@ struct decklink_consumer final : public IDeckLinkVideoOutputCallback
 
             if (result == bmdOutputFrameDisplayedLate) {
                 graph_->set_tag(diagnostics::tag_severity::WARNING, "late-frame");
+                diag_late_count_++;
                 video_scheduled_ += decklink_format_desc_.duration;
                 audio_scheduled_ += dframe->nb_samples();
             } else if (result == bmdOutputFrameDropped) {
                 graph_->set_tag(diagnostics::tag_severity::WARNING, "dropped-frame");
+                diag_drop_count_++;
             } else if (result == bmdOutputFrameFlushed) {
                 graph_->set_tag(diagnostics::tag_severity::WARNING, "flushed-frame");
+                diag_flush_count_++;
+            }
+
+            // Log timing stats every 5 seconds
+            {
+                auto now = std::chrono::steady_clock::now();
+                if (diag_tick_count_ > 0 &&
+                    std::chrono::duration_cast<std::chrono::seconds>(now - diag_last_log_).count() >= 5) {
+                    double avg_ms = diag_tick_sum_ / diag_tick_count_;
+                    CASPAR_LOG(info) << print() << L" TIMING: avg=" << std::fixed << std::setprecision(1)
+                                     << avg_ms << L"ms late=" << diag_late_count_
+                                     << L" drops=" << diag_drop_count_
+                                     << L" flushed=" << diag_flush_count_
+                                     << L" frames=" << diag_tick_count_;
+                    diag_tick_sum_   = 0.0;
+                    diag_tick_count_ = 0;
+                    diag_late_count_ = 0;
+                    diag_drop_count_ = 0;
+                    diag_flush_count_ = 0;
+                    diag_last_log_   = now;
+                }
             }
 
             {
@@ -1205,6 +1297,7 @@ struct decklink_consumer_proxy : public core::frame_consumer
     std::unique_ptr<decklink_consumer> consumer_;
     core::video_format_desc            format_desc_;
     executor                           executor_;
+    bool                               use_vulkan_ = false;
 
   public:
     explicit decklink_consumer_proxy(const configuration& config)
@@ -1227,10 +1320,14 @@ struct decklink_consumer_proxy : public core::frame_consumer
                     const core::channel_info&      channel_info,
                     int                            port_index) override
     {
-        format_desc_ = format_desc;
+        format_desc_  = format_desc;
+        use_vulkan_   = channel_info.use_vulkan;
+        CASPAR_LOG(info) << L"[decklink_proxy] initialize: channel=" << channel_info.index
+                         << L" use_vulkan=" << (use_vulkan_ ? L"true" : L"false")
+                         << L" needs_cpu=" << (needs_cpu_frame_data() ? L"true" : L"false");
         executor_.invoke([=] {
             consumer_.reset();
-            consumer_ = std::make_unique<decklink_consumer>(config_, format_desc, channel_info.index);
+            consumer_ = std::make_unique<decklink_consumer>(config_, format_desc, channel_info.index, use_vulkan_);
         });
     }
 
@@ -1254,6 +1351,17 @@ struct decklink_consumer_proxy : public core::frame_consumer
     [[nodiscard]] int index() const override { return 300 + static_cast<int>(config_.primary.device_index); }
 
     [[nodiscard]] bool has_synchronization_clock() const override { return true; }
+
+    [[nodiscard]] bool needs_cpu_frame_data() const override
+    {
+        // When the CUDA-VK direct GPU strategy is active, the decklink consumer
+        // reads the VK texture directly via CUDA interop — no CPU readback needed.
+#ifdef DECKLINK_CUDA_VK_ENABLED
+        return !use_vulkan_;
+#else
+        return true;
+#endif
+    }
 
     [[nodiscard]] core::monitor::state state() const override { return get_state_for_config(config_, format_desc_); }
 };

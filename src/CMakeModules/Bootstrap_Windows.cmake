@@ -199,6 +199,26 @@ target_link_directories(OpenAL::OpenAL INTERFACE ${openal_SOURCE_DIR}/libs/Win64
 target_link_libraries(OpenAL::OpenAL INTERFACE OpenAL32)
 casparcg_add_runtime_dependency("${openal_SOURCE_DIR}/bin/Win64/OpenAL32.dll")
 
+# Vulkan
+set(ENABLE_VULKAN OFF CACHE BOOL "Enable Vulkan accelerator backend")
+IF(ENABLE_VULKAN)
+	find_package(Vulkan REQUIRED)
+
+	FetchContent_Declare(vk_bootstrap
+		GIT_REPOSITORY https://github.com/charles-lunarg/vk-bootstrap
+		GIT_TAG        v1.4.328
+	)
+	FetchContent_MakeAvailable(vk_bootstrap)
+
+	FetchContent_Declare(vma
+		GIT_REPOSITORY https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator
+		GIT_TAG        v3.3.0
+	)
+	set(VMA_STATIC_VULKAN_FUNCTIONS OFF)
+	set(VMA_DYNAMIC_VULKAN_FUNCTIONS ON)
+	FetchContent_MakeAvailable(vma)
+ENDIF()
+
 # flash template host
 casparcg_add_external_project(flashtemplatehost)
 ExternalProject_Add(flashtemplatehost
@@ -286,3 +306,4 @@ string(REPLACE "/EHsc" "" CMAKE_CXX_FLAGS ${CMAKE_CXX_FLAGS})
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /EHa /Zi /W4 /WX /MP /fp:fast /Zm192 /FIcommon/compiler/vs/disable_silly_warnings.h")
 set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG}	/D TBB_USE_ASSERT=1 /D TBB_USE_DEBUG /bigobj")
 set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE}	/Oi /arch:AVX2 /Ot /Gy /bigobj")
+set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "${CMAKE_CXX_FLAGS_RELWITHDEBINFO} /Oi /arch:AVX2 /Ot /Gy /bigobj")

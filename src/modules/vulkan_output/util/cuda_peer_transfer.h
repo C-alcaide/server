@@ -19,6 +19,7 @@
 struct cudaGraphicsResource;
 typedef struct cudaGraphicsResource* cudaGraphicsResource_t;
 typedef struct CUstream_st*          cudaStream_t;
+typedef struct CUevent_st*           cudaEvent_t;
 
 namespace caspar { namespace vulkan_output {
 
@@ -28,6 +29,11 @@ namespace caspar { namespace vulkan_output {
  * Transfers an OGL texture from GPU A (mixer) to a GL texture on GPU B (output)
  * using cudaMemcpyPeerAsync which leverages the GPU copy engines for direct
  * device-to-device DMA over PCIe/NVLink.
+ *
+ * IMPORTANT: This class is constructed with fixed width/height/bit-depth.
+ * If the mixer resolution changes at runtime, the caller must destroy and
+ * recreate this object.  Staging buffers, GL textures, PBOs, and CUDA
+ * registrations are all sized at construction time and cannot be resized.
  *
  * Usage from the consumer present path:
  *   // Phase 1: on OGL device thread (GPU A context current)
@@ -63,7 +69,8 @@ class cuda_peer_transfer
     /// If texture_id differs from previously registered, re-registers.
     void read_source(GLuint texture_id, int width, int height);
 
-    /// Phase 2: DMA from GPU A staging → GPU B staging via peer copy.
+    /// Phase 2: DMA from GPU A staging → GPU B staging via async peer copy.
+    /// Returns immediately — the DMA runs on a dedicated CUDA stream.
     /// Can be called from any thread (no GL context required).
     void peer_copy();
 
@@ -111,9 +118,12 @@ class cuda_peer_transfer
     void* src_staging_ = nullptr; // on src_device_
     void* dst_staging_ = nullptr; // on dst_device_
 
-    // CUDA streams (one per device)
-    cudaStream_t src_stream_ = nullptr;
-    cudaStream_t dst_stream_ = nullptr;
+    // CUDA streams
+    cudaStream_t src_stream_  = nullptr; // source device: GL texture → staging
+    cudaStream_t dst_stream_  = nullptr; // dest device: staging → PBO → GL texture
+    cudaStream_t peer_stream_ = nullptr; // source device: async peer DMA
+    cudaEvent_t  src_ready_event_ = nullptr; // signals src_staging_ write complete
+    cudaEvent_t  peer_event_      = nullptr; // signals peer DMA completion
 
     // Source side (GPU A)
     cudaGraphicsResource_t src_resource_   = nullptr;

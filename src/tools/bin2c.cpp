@@ -1,5 +1,6 @@
 #include <assert.h>
 #include <cerrno>
+#include <cstdint>
 #include <stdio.h>
 #include <string.h>
 
@@ -25,14 +26,12 @@ int main(int argc, char** argv)
         count++;
     }
 
-    printf("const char %s[] = {\n", argv[2]);
+    printf("const uint8_t %s[] = {\n", argv[2]);
     unsigned long n = 0;
     while (!feof(f)) {
         unsigned char c;
         if (fread(&c, 1, 1, f) == 0)
             break;
-        if ('\r' == c) // ignore carriage return
-            continue;
         printf("0x%.2X,", (int)c);
         ++n;
         if (n % 10 == 0)

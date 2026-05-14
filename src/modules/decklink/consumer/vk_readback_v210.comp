@@ -1,0 +1,128 @@
+#version 450
+
+/*
+ * V210 packing compute shader for DeckLink output.
+ *
+ * Reads the VK mixer's render attachment (RGBA UNORM texture) via texelFetch,
+ * converts to YCbCr 4:2:2, and packs into V210 format (10-bit per component,
+ * 6 pixels → 4 uint32 words per V210 group).
+ *
+ * Each invocation handles one V210 group.  WorkgroupSize = (64, 1, 1).
+ * Dispatch: ((groups_per_row + 63) / 64,  dst_h,  1)
+ *
+ * Supports both BT.709 (SDR) and BT.2020 (HDR) color matrices.
+ * The texture format (8-bit vs 16-bit) is transparent — texelFetch on UNORM
+ * returns normalized [0,1] floats regardless.
+ */
+
+layout(local_size_x = 64, local_size_y = 1) in;
+
+layout(set = 0, binding = 0) uniform sampler2D src_tex;
+
+layout(set = 0, binding = 1) buffer V210Output {
+    uint data[];
+} v210_out;
+
+layout(push_constant) uniform PushConstants {
+    int src_x;           // subregion origin X in source texture
+    int src_y;           // subregion origin Y in source texture
+    int dst_w;           // DeckLink output width
+    int dst_h;           // DeckLink output height
+    int groups_per_row;  // (dst_w + 5) / 6
+    int use_bt2020;      // 0 = BT.709, 1 = BT.2020
+} pc;
+
+// ─── BT.709 full-range → 10-bit limited-range YCbCr ────────────────────────
+
+void rgb_to_ycbcr_bt709(int R, int G, int B, out int Y, out int Cb, out int Cr)
+{
+    // Fixed-point (×2^20) BT.709 coefficients
+    // Y  = 64  + (0.2126*R + 0.7152*G + 0.0722*B) * 876/1023
+    // Cb = 512 + (-0.1146*R - 0.3854*G + 0.5*B) * 896/1023
+    // Cr = 512 + (0.5*R - 0.4542*G - 0.0458*B) * 896/1023
+    Y  = 64  + ((222951 * R + 750098 * G + 75663 * B) >> 20);
+    Cb = 512 + ((-100459 * R - 337802 * G + 438223 * B) >> 20);
+    Cr = 512 + ((438223 * R - 398337 * G - 39908 * B) >> 20);
+
+    Y  = clamp(Y,  64, 940);
+    Cb = clamp(Cb, 64, 960);
+    Cr = clamp(Cr, 64, 960);
+}
+
+// ─── BT.2020 full-range → 10-bit limited-range YCbCr ───────────────────────
+
+void rgb_to_ycbcr_bt2020(int R, int G, int B, out int Y, out int Cb, out int Cr)
+{
+    // BT.2020 coefficients: KR=0.2627, KG=0.6780, KB=0.0593
+    Y  = 64  + ((275375 * R + 710743 * G + 62594 * B) >> 20);
+    Cb = 512 + ((-146420 * R - 377856 * G + 524288 * B) >> 20);
+    Cr = 512 + ((524288 * R - 482393 * G - 41857 * B) >> 20);
+
+    Y  = clamp(Y,  64, 940);
+    Cb = clamp(Cb, 64, 960);
+    Cr = clamp(Cr, 64, 960);
+}
+
+// ─── Main ──────────────────────────────────────────────────────────────────
+
+void main()
+{
+    int group_x = int(gl_GlobalInvocationID.x);
+    int row     = int(gl_GlobalInvocationID.y);
+
+    if (row >= pc.dst_h || group_x >= pc.groups_per_row)
+        return;
+
+    int px_base = group_x * 6;
+
+    // Load 6 pixels, convert to 10-bit
+    int R[6], G[6], B[6];
+
+    for (int i = 0; i < 6; ++i) {
+        int sx = pc.src_x + px_base + i;
+        int sy = pc.src_y + row;
+
+        vec4 pixel;
+        if ((px_base + i) < pc.dst_w) {
+            pixel = texelFetch(src_tex, ivec2(sx, sy), 0);
+        } else {
+            pixel = vec4(0.0);
+        }
+
+        // UNORM → 10-bit [0..1023]
+        R[i] = int(pixel.r * 1023.0 + 0.5);
+        G[i] = int(pixel.g * 1023.0 + 0.5);
+        B[i] = int(pixel.b * 1023.0 + 0.5);
+    }
+
+    // Convert to YCbCr
+    int Y[6], Cb_raw[6], Cr_raw[6];
+
+    for (int i = 0; i < 6; ++i) {
+        if (pc.use_bt2020 != 0) {
+            rgb_to_ycbcr_bt2020(R[i], G[i], B[i], Y[i], Cb_raw[i], Cr_raw[i]);
+        } else {
+            rgb_to_ycbcr_bt709(R[i], G[i], B[i], Y[i], Cb_raw[i], Cr_raw[i]);
+        }
+    }
+
+    // 4:2:2 chroma subsampling: average pairs
+    int Cb0 = (Cb_raw[0] + Cb_raw[1] + 1) >> 1;
+    int Cr0 = (Cr_raw[0] + Cr_raw[1] + 1) >> 1;
+    int Cb1 = (Cb_raw[2] + Cb_raw[3] + 1) >> 1;
+    int Cr1 = (Cr_raw[2] + Cr_raw[3] + 1) >> 1;
+    int Cb2 = (Cb_raw[4] + Cb_raw[5] + 1) >> 1;
+    int Cr2 = (Cr_raw[4] + Cr_raw[5] + 1) >> 1;
+
+    // Pack V210 words
+    uint w0 = uint(Cb0)  | (uint(Y[0]) << 10) | (uint(Cr0) << 20);
+    uint w1 = uint(Y[1]) | (uint(Cb1)  << 10) | (uint(Y[2]) << 20);
+    uint w2 = uint(Cr1)  | (uint(Y[3]) << 10) | (uint(Cb2) << 20);
+    uint w3 = uint(Y[4]) | (uint(Cr2)  << 10) | (uint(Y[5]) << 20);
+
+    uint base = uint(row) * uint(pc.groups_per_row) * 4u + uint(group_x) * 4u;
+    v210_out.data[base + 0u] = w0;
+    v210_out.data[base + 1u] = w1;
+    v210_out.data[base + 2u] = w2;
+    v210_out.data[base + 3u] = w3;
+}
