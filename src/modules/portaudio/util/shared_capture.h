@@ -25,11 +25,14 @@
 
 #include <portaudio.h>
 
+#include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace caspar { namespace portaudio {

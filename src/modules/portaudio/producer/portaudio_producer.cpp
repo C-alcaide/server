@@ -334,6 +334,16 @@ class portaudio_producer_impl : public capture_listener
 
     core::draw_frame get_frame(int nb_samples)
     {
+        if (disconnected_) {
+            static bool logged = false;
+            if (!logged) {
+                logged = true;
+                CASPAR_LOG(warning) << L"[portaudio-producer] Device " << device_index_
+                                   << L" disconnected — returning silence.";
+            }
+            return core::draw_frame::empty();
+        }
+
         size_t samples_per_channel;
         if (nb_samples > 0) {
             samples_per_channel = static_cast<size_t>(nb_samples);

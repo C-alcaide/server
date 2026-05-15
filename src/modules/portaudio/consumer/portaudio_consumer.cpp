@@ -244,17 +244,6 @@ struct portaudio_consumer : public core::frame_consumer
         channel_index_ = channel_info.index;
         graph_->set_text(print());
 
-        // Calculate average samples per video frame for ring buffer sizing.
-        // Using average (not min) prevents drift on variable-cadence formats like NTSC 29.97.
-        int total_cadence = 0;
-        for (auto c : format_desc_.audio_cadence)
-            total_cadence += c;
-        int avg_samples = total_cadence / static_cast<int>(format_desc_.audio_cadence.size());
-
-        // Allocate ring buffer: enough for buffer_frames_ worth of audio + headroom
-        size_t ring_capacity = static_cast<size_t>(avg_samples) * output_channels_ * (buffer_frames_ + 2);
-        ring_buffer_ = std::make_unique<spsc_ring_buffer>(ring_capacity);
-
         // Find device
         auto& mgr = portaudio_device_manager::instance();
         if (!device_name_.empty()) {
@@ -293,6 +282,18 @@ struct portaudio_consumer : public core::frame_consumer
             if (!channel_map_.empty())
                 channel_map_.resize(output_channels_);
         }
+
+        // Calculate average samples per video frame for ring buffer sizing.
+        // Using average (not min) prevents drift on variable-cadence formats like NTSC 29.97.
+        // NOTE: Must be done AFTER channel_map_ adjusts output_channels_.
+        int total_cadence = 0;
+        for (auto c : format_desc_.audio_cadence)
+            total_cadence += c;
+        int avg_samples = total_cadence / static_cast<int>(format_desc_.audio_cadence.size());
+
+        // Allocate ring buffer: enough for buffer_frames_ worth of audio + headroom
+        size_t ring_capacity = static_cast<size_t>(avg_samples) * output_channels_ * (buffer_frames_ + 2);
+        ring_buffer_ = std::make_unique<spsc_ring_buffer>(ring_capacity);
 
         // Open stream — let hardware choose optimal callback buffer size
         PaStreamParameters output_params = {};
