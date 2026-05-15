@@ -209,17 +209,25 @@ public:
         }
     }
     
-    ~LTCInputImpl() {
-        {
-            std::lock_guard<std::mutex> lock(device_mutex);
-            stop_unlocked();
-        }
+    void shutdown() {
+        std::lock_guard<std::mutex> lock(device_mutex);
+        stop_unlocked();
         if (decoder_) {
             ltc_decoder_free(decoder_);
             decoder_ = nullptr;
         }
         if (pa_initialized_) {
             Pa_Terminate();
+            pa_initialized_ = false;
+        }
+    }
+
+    ~LTCInputImpl() {
+        // shutdown() should be called by ltc::uninit() before PortAudio terminates.
+        // Safety fallback: free decoder if shutdown() was not called.
+        if (decoder_) {
+            ltc_decoder_free(decoder_);
+            decoder_ = nullptr;
         }
     }
 
@@ -361,9 +369,14 @@ std::vector<std::string> LTCInput::get_capture_devices() { return LTCInputImpl::
 bool LTCInput::set_capture_device(const std::string& name) { return LTCInputImpl::instance().set_capture_device(name); }
 std::string LTCInput::get_current_device_name() { return LTCInputImpl::instance().get_current_device_name(); }
 bool LTCInput::is_using_system_clock() { return LTCInputImpl::instance().is_using_system_clock(); }
+void LTCInput::shutdown() { LTCInputImpl::instance().shutdown(); }
 
 void init(const core::module_dependencies&) {
     LTCInput::instance().start();
+}
+
+void uninit() {
+    LTCInput::instance().shutdown();
 }
 
 }}

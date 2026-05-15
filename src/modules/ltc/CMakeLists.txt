@@ -24,6 +24,7 @@ casparcg_add_module_project(ltc
         ltc_input.cpp
         ${LIBLTC_SOURCES}
     INIT_FUNCTION "ltc::init"
+    UNINIT_FUNCTION "ltc::uninit"
 )
 
 # Suppress warnings-as-errors for third-party C sources

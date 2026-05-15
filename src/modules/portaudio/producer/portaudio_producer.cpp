@@ -34,6 +34,8 @@
 
 #include <portaudio.h>
 
+#include "../util/spsc_ring_buffer.h"
+
 #include <algorithm>
 #include <atomic>
 #include <cstring>
@@ -56,9 +58,8 @@ class portaudio_producer_impl
     host_api_preference host_api_pref_ = host_api_preference::auto_select;
     int          input_channels_  = 2;
 
-    std::mutex           audio_mutex_;
-    std::vector<int32_t> audio_buffer_;
-    size_t               max_buffer_samples_ = 0;
+    std::unique_ptr<spsc_ring_buffer> capture_ring_;
+    std::atomic<int64_t>               overflow_count_{0};
 
     core::video_format_desc                format_desc_;
     spl::shared_ptr<core::frame_factory>   frame_factory_;
@@ -85,17 +86,10 @@ class portaudio_producer_impl
         const auto* input_samples = static_cast<const int32_t*>(input);
         size_t sample_count = frame_count * self->input_channels_;
 
-        std::lock_guard<std::mutex> lock(self->audio_mutex_);
-
-        self->audio_buffer_.insert(self->audio_buffer_.end(),
-                                   input_samples, input_samples + sample_count);
-
-        // Cap buffer to prevent unbounded growth
-        if (self->max_buffer_samples_ > 0 && self->audio_buffer_.size() > self->max_buffer_samples_) {
-            size_t excess = self->audio_buffer_.size() - self->max_buffer_samples_;
-            self->audio_buffer_.erase(self->audio_buffer_.begin(),
-                                      self->audio_buffer_.begin() + static_cast<ptrdiff_t>(excess));
-        }
+        // Lock-free write into SPSC ring buffer
+        size_t written = self->capture_ring_->write(input_samples, sample_count);
+        if (written < sample_count)
+            self->overflow_count_.fetch_add(1, std::memory_order_relaxed);
 
         return self->running_.load(std::memory_order_relaxed) ? paContinue : paComplete;
     }
@@ -111,8 +105,9 @@ class portaudio_producer_impl
         , format_desc_(dependencies.format_desc)
         , frame_factory_(dependencies.frame_factory)
     {
-        max_buffer_samples_ = static_cast<size_t>(format_desc_.audio_sample_rate) *
+        size_t ring_capacity = static_cast<size_t>(format_desc_.audio_sample_rate) *
                               input_channels_ * MAX_BUFFER_SECONDS;
+        capture_ring_ = std::make_unique<spsc_ring_buffer>(ring_capacity);
 
         auto& mgr = portaudio_device_manager::instance();
 
@@ -216,28 +211,10 @@ class portaudio_producer_impl
 
         std::vector<int32_t> output_samples(total_samples_needed, 0);
 
-        bool underrun = false;
-        size_t current_fill = 0;
-        {
-            std::lock_guard<std::mutex> lock(audio_mutex_);
-            current_fill = audio_buffer_.size();
-            if (audio_buffer_.size() >= total_samples_needed) {
-                std::copy(audio_buffer_.begin(),
-                          audio_buffer_.begin() + static_cast<ptrdiff_t>(total_samples_needed),
-                          output_samples.begin());
-                audio_buffer_.erase(audio_buffer_.begin(),
-                                    audio_buffer_.begin() + static_cast<ptrdiff_t>(total_samples_needed));
-            } else {
-                underrun = true;
-                if (!audio_buffer_.empty()) {
-                    size_t to_copy = std::min(audio_buffer_.size(), total_samples_needed);
-                    std::copy(audio_buffer_.begin(),
-                              audio_buffer_.begin() + static_cast<ptrdiff_t>(to_copy),
-                              output_samples.begin());
-                    audio_buffer_.clear();
-                }
-            }
-        }
+        // Lock-free read from SPSC ring buffer
+        size_t current_fill = capture_ring_->read_available();
+        size_t samples_read = capture_ring_->read(output_samples.data(), total_samples_needed);
+        bool underrun = (samples_read < total_samples_needed);
 
         if (underrun)
             underrun_count_++;
@@ -249,10 +226,14 @@ class portaudio_producer_impl
             state_["buffer/underruns"] = std::to_wstring(underrun_count_.load());
         }
 
-        // Create audio-only frame
+        // Create audio-only frame with minimal 1x1 pixel plane (audio producers don't need video data)
         core::pixel_format_desc pix_desc(core::pixel_format::bgra);
-        pix_desc.planes.push_back(core::pixel_format_desc::plane(format_desc_.width, format_desc_.height, 4));
+        pix_desc.planes.push_back(core::pixel_format_desc::plane(1, 1, 4));
         auto frame = frame_factory_->create_frame(this, pix_desc);
+
+        // Zero the single pixel for transparency
+        if (frame.image_data(0).size() >= 4)
+            std::memset(frame.image_data(0).data(), 0, 4);
 
         if (!output_samples.empty()) {
             frame.audio_data() = caspar::array<int32_t>(std::move(output_samples));

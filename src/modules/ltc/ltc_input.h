@@ -39,5 +39,6 @@ namespace caspar { namespace ltc {
         bool set_capture_device(const std::string& device_name); // Returns true if found and set
         std::string get_current_device_name();
         bool is_using_system_clock();
+        void shutdown();
     };
 }}

@@ -42,8 +42,12 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <cstring>
+#include <deque>
 #include <future>
 #include <memory>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -67,10 +71,23 @@ struct portaudio_consumer : public core::frame_consumer
     // PortAudio stream
     PaStream*            stream_         = nullptr;
     int                  device_index_   = -1;
-    int                  samples_per_frame_ = 0;  // audio samples per video frame (per channel)
 
-    // Ring buffer: bridges push (send) to pull (PA callback)
+    // Ring buffer: bridges push (write thread) to pull (PA callback)
     std::unique_ptr<spsc_ring_buffer> ring_buffer_;
+
+    // Drain notification: PA callback signals after consuming samples from ring buffer
+    std::mutex              drain_mutex_;
+    std::condition_variable drain_cv_;
+
+    // Write thread: takes pending writes from queue, writes to ring buffer (may block)
+    std::thread             write_thread_;
+    std::mutex              queue_mutex_;
+    std::condition_variable queue_cv_;
+    struct pending_write {
+        std::vector<int32_t> samples;
+        std::promise<bool>   promise;
+    };
+    std::deque<pending_write> write_queue_;
 
     // Sync control
     std::atomic<bool>    stop_{false};
@@ -101,6 +118,10 @@ struct portaudio_consumer : public core::frame_consumer
     ~portaudio_consumer() override
     {
         stop_ = true;
+        queue_cv_.notify_one();
+        drain_cv_.notify_all();
+        if (write_thread_.joinable())
+            write_thread_.join();
         if (stream_) {
             Pa_StopStream(stream_);
             Pa_CloseStream(stream_);
@@ -128,7 +149,68 @@ struct portaudio_consumer : public core::frame_consumer
             self->underrun_count_.fetch_add(1, std::memory_order_relaxed);
         }
 
+        // Signal write thread that buffer space is now available
+        self->drain_cv_.notify_one();
+
         return self->stop_.load(std::memory_order_relaxed) ? paComplete : paContinue;
+    }
+
+    // --- Write thread: drains queue into ring buffer, blocking on drain_cv_ ---
+    void write_thread_func()
+    {
+        while (!stop_) {
+            pending_write pw;
+            {
+                std::unique_lock<std::mutex> lock(queue_mutex_);
+                queue_cv_.wait(lock, [&] { return !write_queue_.empty() || stop_; });
+                if (stop_ && write_queue_.empty())
+                    break;
+                pw = std::move(write_queue_.front());
+                write_queue_.pop_front();
+            }
+
+            // Check device health (hot-unplug detection)
+            if (stream_ && !Pa_IsStreamActive(stream_) && !stop_) {
+                CASPAR_LOG(warning) << print() << L" Audio device disconnected or stream error.";
+                pw.promise.set_value(false);
+                continue;
+            }
+
+            // Write to ring buffer, blocking via condvar until space is available.
+            // This is the master clock mechanism: the ring buffer drains at the
+            // rate the hardware consumes samples (ASIO/WASAPI clock).
+            const int32_t* data = pw.samples.data();
+            size_t total = pw.samples.size();
+            size_t written = 0;
+
+            while (written < total && !stop_) {
+                size_t w = ring_buffer_->write(data + written, total - written);
+                written += w;
+                if (written < total) {
+                    std::unique_lock<std::mutex> lock(drain_mutex_);
+                    drain_cv_.wait_for(lock, std::chrono::milliseconds(5));
+                }
+            }
+
+            if (written < total && !stop_) {
+                overflow_count_.fetch_add(1, std::memory_order_relaxed);
+            }
+
+            // Update diagnostics
+            double fill_ratio = static_cast<double>(ring_buffer_->read_available()) /
+                               static_cast<double>(ring_buffer_->capacity());
+            graph_->set_value("buffer-fill", fill_ratio);
+            graph_->set_value("tick-time", perf_timer_.elapsed() * format_desc_.fps * 0.5);
+            perf_timer_.restart();
+
+            pw.promise.set_value(!stop_);
+        }
+
+        // Drain remaining promises on shutdown
+        std::lock_guard<std::mutex> lock(queue_mutex_);
+        for (auto& pw : write_queue_)
+            pw.promise.set_value(false);
+        write_queue_.clear();
     }
 
     // --- frame_consumer interface ---
@@ -141,13 +223,15 @@ struct portaudio_consumer : public core::frame_consumer
         channel_index_ = channel_info.index;
         graph_->set_text(print());
 
-        // Calculate samples per video frame
-        // Use minimum cadence value for consistent buffer sizing
-        samples_per_frame_ = *std::min_element(format_desc_.audio_cadence.begin(),
-                                               format_desc_.audio_cadence.end());
+        // Calculate average samples per video frame for ring buffer sizing.
+        // Using average (not min) prevents drift on variable-cadence formats like NTSC 29.97.
+        int total_cadence = 0;
+        for (auto c : format_desc_.audio_cadence)
+            total_cadence += c;
+        int avg_samples = total_cadence / static_cast<int>(format_desc_.audio_cadence.size());
 
-        // Allocate ring buffer: enough for buffer_frames_ worth of audio
-        size_t ring_capacity = static_cast<size_t>(samples_per_frame_) * output_channels_ * (buffer_frames_ + 2);
+        // Allocate ring buffer: enough for buffer_frames_ worth of audio + headroom
+        size_t ring_capacity = static_cast<size_t>(avg_samples) * output_channels_ * (buffer_frames_ + 2);
         ring_buffer_ = std::make_unique<spsc_ring_buffer>(ring_capacity);
 
         // Find device
@@ -183,7 +267,7 @@ struct portaudio_consumer : public core::frame_consumer
             output_channels_ = dev_info->maxOutputChannels;
         }
 
-        // Open stream
+        // Open stream — let hardware choose optimal callback buffer size
         PaStreamParameters output_params = {};
         output_params.device                    = device_index_;
         output_params.channelCount              = output_channels_;
@@ -195,7 +279,7 @@ struct portaudio_consumer : public core::frame_consumer
                                     nullptr,           // no input
                                     &output_params,
                                     format_desc_.audio_sample_rate,
-                                    samples_per_frame_, // frames per buffer = one video frame's worth
+                                    paFramesPerBufferUnspecified,
                                     paClipOff,
                                     stream_callback,
                                     this);
@@ -207,7 +291,7 @@ struct portaudio_consumer : public core::frame_consumer
 
         // Pre-fill ring buffer with silence (delay compensation + prevent initial underrun)
         int silence_frames = delay_frames_ + 1;
-        size_t silence_samples = static_cast<size_t>(samples_per_frame_) * output_channels_ * silence_frames;
+        size_t silence_samples = static_cast<size_t>(avg_samples) * output_channels_ * silence_frames;
         std::vector<int32_t> silence(silence_samples, 0);
         ring_buffer_->write(silence.data(), silence_samples);
 
@@ -219,6 +303,9 @@ struct portaudio_consumer : public core::frame_consumer
             CASPAR_THROW_EXCEPTION(invalid_operation()
                 << msg_info(std::string("Failed to start PortAudio stream: ") + Pa_GetErrorText(err)));
         }
+
+        // Start write thread
+        write_thread_ = std::thread(&portaudio_consumer::write_thread_func, this);
 
         started_ = true;
 
@@ -240,70 +327,42 @@ struct portaudio_consumer : public core::frame_consumer
         if (!started_)
             return make_ready_future(true);
 
-        // Audio-as-master-clock: return a deferred future that blocks until
-        // the ring buffer has space. This makes the ASIO hardware clock
-        // pace the channel tick.
-        return std::async(std::launch::deferred, [this, frame]() -> bool {
-            if (stop_)
-                return false;
+        if (stop_)
+            return make_ready_future(false);
 
-            const auto& audio = frame.audio_data();
-            if (!audio)
-                return true;
+        const auto& audio = frame.audio_data();
+        if (!audio)
+            return make_ready_future(true);
 
-            const int32_t* audio_ptr = audio.data();
-            size_t audio_size = audio.size();
+        const int32_t* audio_ptr = audio.data();
+        size_t audio_size = audio.size();
 
-            // Determine how many samples to write (interleaved, output_channels_ wide)
-            // CasparCG provides format_desc_.audio_channels channels interleaved as int32_t.
-            // We may need to select a subset or all channels.
-            int src_channels = format_desc_.audio_channels;
-            int src_samples_per_channel = static_cast<int>(audio_size) / src_channels;
-            size_t total_output_samples = static_cast<size_t>(src_samples_per_channel) * output_channels_;
+        // Determine how many samples to write (interleaved, output_channels_ wide)
+        int src_channels = format_desc_.audio_channels;
+        int src_samples_per_channel = static_cast<int>(audio_size) / src_channels;
+        size_t total_output_samples = static_cast<size_t>(src_samples_per_channel) * output_channels_;
 
-            // Prepare output buffer with channel mapping
-            // Simple mapping: take first output_channels_ from source, or zero-pad if source has fewer
-            std::vector<int32_t> output_buffer(total_output_samples);
-            for (int s = 0; s < src_samples_per_channel; ++s) {
-                for (int c = 0; c < output_channels_; ++c) {
-                    if (c < src_channels) {
-                        // CasparCG audio is 16.16 fixed-point in int32_t
-                        // PortAudio paInt32 expects full-scale 32-bit
-                        int32_t sample = audio_ptr[s * src_channels + c];
-                        output_buffer[s * output_channels_ + c] = sample;
-                    } else {
-                        output_buffer[s * output_channels_ + c] = 0;
-                    }
-                }
+        // Channel mapping: take first output_channels_ from source, zero-pad if source has fewer
+        std::vector<int32_t> output_buffer(total_output_samples);
+        for (int s = 0; s < src_samples_per_channel; ++s) {
+            for (int c = 0; c < output_channels_; ++c) {
+                output_buffer[s * output_channels_ + c] =
+                    (c < src_channels) ? audio_ptr[s * src_channels + c] : 0;
             }
+        }
 
-            // Block until ring buffer has space — this is the master clock mechanism.
-            // The ring buffer drains at the rate the ASIO/WASAPI hardware consumes samples.
-            size_t written = 0;
-            while (written < total_output_samples && !stop_) {
-                size_t w = ring_buffer_->write(output_buffer.data() + written,
-                                               total_output_samples - written);
-                written += w;
-
-                if (written < total_output_samples) {
-                    // Buffer full — wait for hardware to consume. Poll at 100µs.
-                    std::this_thread::sleep_for(std::chrono::microseconds(100));
-                }
-            }
-
-            if (written < total_output_samples) {
-                overflow_count_.fetch_add(1, std::memory_order_relaxed);
-            }
-
-            // Update diagnostics
-            double fill_ratio = static_cast<double>(ring_buffer_->read_available()) /
-                               static_cast<double>(ring_buffer_->capacity());
-            graph_->set_value("buffer-fill", fill_ratio);
-            graph_->set_value("tick-time", perf_timer_.elapsed() * format_desc_.fps * 0.5);
-            perf_timer_.restart();
-
-            return true;
-        });
+        // Post to write thread — returns future that completes when ring buffer write is done.
+        // The write thread blocks until the hardware drains enough space, providing the
+        // master clock mechanism. Because the work runs on a dedicated thread, this
+        // consumer's future can be awaited in parallel with other consumers (e.g. decklink).
+        std::promise<bool> promise;
+        auto future = promise.get_future();
+        {
+            std::lock_guard<std::mutex> lock(queue_mutex_);
+            write_queue_.push_back({std::move(output_buffer), std::move(promise)});
+        }
+        queue_cv_.notify_one();
+        return future;
     }
 
     std::wstring print() const override
@@ -338,21 +397,36 @@ spl::shared_ptr<core::frame_consumer> create_consumer(const std::vector<std::wst
         return core::frame_consumer::empty();
 
     std::string device_name;
-    if (params.size() > 1)
-        device_name = u8(params.at(1));
+    host_api_preference host_api = host_api_preference::auto_select;
+    int channels      = 2;
+    int buffer_frames  = 4;
+    int delay_frames   = 0;
 
-    int channels = 2;
-    if (params.size() > 2) {
-        try { channels = std::stoi(u8(params.at(2))); }
-        catch (...) {}
+    for (size_t i = 1; i < params.size(); ++i) {
+        if (boost::istarts_with(params[i], L"DEVICE=")) {
+            device_name = u8(params[i].substr(7));
+        } else if (boost::istarts_with(params[i], L"API=")) {
+            host_api = portaudio_device_manager::parse_host_api(u8(params[i].substr(4)));
+        } else if (boost::istarts_with(params[i], L"CHANNELS=")) {
+            try { channels = std::stoi(u8(params[i].substr(9))); }
+            catch (...) {}
+        } else if (boost::istarts_with(params[i], L"BUFFER=")) {
+            try { buffer_frames = std::stoi(u8(params[i].substr(7))); }
+            catch (...) {}
+        } else if (boost::istarts_with(params[i], L"DELAY=")) {
+            try { delay_frames = std::stoi(u8(params[i].substr(6))); }
+            catch (...) {}
+        } else if (i == 1 && !params[i].empty()) {
+            device_name = u8(params[i]);
+        }
     }
 
     return spl::make_shared<portaudio_consumer>(
         device_name,
-        host_api_preference::auto_select,
+        host_api,
         channels,
-        4,   // default buffer depth
-        0);  // default delay
+        buffer_frames,
+        delay_frames);
 }
 
 spl::shared_ptr<core::frame_consumer>
