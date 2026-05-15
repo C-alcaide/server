@@ -356,3 +356,73 @@ src/modules/replay/
             rife-v4.25-lite.param      # ncnn model definition
             rife-v4.25-lite.bin        # ncnn model weights (~7 MB)
 ```
+
+---
+
+## 12. Features Worth Taking from the MAV Edition Fork
+
+Two ideas from the NafetsM/CasparCG-Server-MAV-Edition fork are clean, useful,
+and straightforward to add to our replay module.
+
+### 12.1 Time-Based Seeking (AMCP Commands)
+
+Their `SEEK` command accepts **human-readable time offsets** in addition to raw
+frame numbers:
+
+```
+CALL 1-1 SEEK |3s          (seek 3 seconds from current position)
+CALL 1-1 SEEK |1500ms      (seek 1500 milliseconds from current position)
+CALL 1-1 SEEK |-2s         (seek backward 2 seconds)
+CALL 1-1 SEEK_ABS <utc_ms> (seek to an absolute UTC timestamp)
+```
+
+**Why it matters:** Broadcast operators think in seconds, not frames.  A camera
+operator pressing "go back 5 seconds" shouldn't need to mentally convert
+`5 × 50 = 250 frames`.  The `|` prefix (pipe) distinguishes time-based seeks
+from frame-number seeks, preserving backward compatibility.
+
+**Implementation:**
+- Parse the `|` prefix and `s`/`ms` suffix in the AMCP command handler
+- Convert to frame number: `frame = (time_ms / 1000.0) * fps`
+- Route through the existing `seek()` method
+- We already store FPS in `replay_file_header` and have timestamps in the
+  extended index — no file format changes needed
+
+### 12.2 Multi-Channel Sync via Absolute UTC Timestamps
+
+Their workflow for synchronizing multiple replay channels:
+
+```
+1. Query the live recording edge on one channel:
+   INFO 1-1    → returns file/live_edge_absolute_ms = 1715789400000
+
+2. Use that absolute timestamp to sync all channels:
+   CALL 1-1 SEEK_ABS 1715789400000
+   CALL 2-1 SEEK_ABS 1715789400000
+   CALL 3-1 SEEK_ABS 1715789400000
+```
+
+**Why it matters:** In multi-camera replay (e.g. sports), all angles must be
+frame-accurate to the same moment.  By using UTC timestamps recorded at
+ingest time, the operator can sync any combination of cameras regardless of
+when each recording started or what frame numbers they have.
+
+**Implementation:**
+- We already write timestamps to the extended index (`replay_extended_index.h`)
+- Add `SEEK_ABS` AMCP command that binary-searches the index for the closest
+  frame matching the given UTC timestamp
+- Expose `file/live_edge_absolute_ms` in producer state (OSC/diagnostics) so
+  automation clients can query it
+- The sync logic lives entirely in the AMCP client (or automation system) —
+  no server-side multi-channel coordination needed
+
+### 12.3 Estimated Effort
+
+Both features are **low complexity** — they are AMCP command parsing +
+timestamp arithmetic on top of infrastructure we already have.  They can be
+implemented independently of RIFE or any other feature in this plan.
+
+| Feature | Effort | Dependencies | Risk |
+|---|---|---|---|
+| Time-based SEEK | Small | None (existing index + fps) | None |
+| SEEK_ABS + live_edge | Small | Extended index timestamps | None |
