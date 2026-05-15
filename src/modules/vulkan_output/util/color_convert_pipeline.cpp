@@ -19,7 +19,7 @@
 
 #include "color_convert_pipeline.h"
 #include "vulkan_device.h"
-#include "../shaders/color_convert_spv.h"
+#include "color_convert_spv.h"
 
 #include <common/except.h>
 #include <common/log.h>
@@ -249,8 +249,8 @@ void color_convert_pipeline::create_pipeline()
     // Shader module from embedded SPIR-V
     VkShaderModuleCreateInfo module_info{};
     module_info.sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-    module_info.codeSize = color_convert_comp_spv_size;
-    module_info.pCode    = color_convert_comp_spv;
+    module_info.codeSize = sizeof(color_convert_comp) - 1;
+    module_info.pCode    = reinterpret_cast<const uint32_t*>(color_convert_comp);
 
     VK_CHECK(vkCreateShaderModule(device_, &module_info, nullptr, &shader_module_));
 

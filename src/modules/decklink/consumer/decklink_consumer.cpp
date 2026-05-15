@@ -241,6 +241,8 @@ spl::shared_ptr<format_strategy> create_format_strategy(const configuration& con
 
     bool is_hdr     = config.hdr;
     bool use_bt2020 = config.color_space == core::color_space::bt2020;
+    (void)is_hdr;
+    (void)use_bt2020;
     auto strategy   = config.gpu_readback_mode;
 
     // Auto-select: try CUDA first (proven), then VK readback

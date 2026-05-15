@@ -34,23 +34,19 @@
 #include <ctime>
 
 #include <common/env.h>
+#include <common/log.h>
 #include <common/utf.h>
 #include <boost/property_tree/ptree.hpp>
 
-#pragma warning(push)
-#pragma warning(disable : 4244)
-#include "miniaudio.h"
-#pragma warning(pop)
+#include <portaudio.h>
 
 namespace caspar { namespace ltc {
     
 static const wchar_t* LTC_CONFIG_ROOT = L"configuration.ltc";
 
 class LTCInputImpl {
-    ma_context context;
-    ma_device device;
-    ma_device_config deviceConfig;
-    LTCDecoder* decoder = nullptr;
+    PaStream*   stream_  = nullptr;
+    LTCDecoder* decoder_ = nullptr;
     
     // Atomic double-buffer for timecode to avoid mutex in audio callback
     struct TimecodeSlot {
@@ -63,26 +59,30 @@ class LTCInputImpl {
     std::atomic<bool> valid_signal{false};
     std::atomic<bool> running{false};
     
-    bool context_initialized_ = false;
-    bool device_initialized_  = false;
+    bool pa_initialized_ = false;
 
     // Device Management
     std::string current_device_name;
-    std::mutex device_mutex;
+    int         current_device_index_ = -1; // -1 = default
+    std::mutex  device_mutex;
 
-    static void data_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount) {
-        LTCInputImpl* self = (LTCInputImpl*)pDevice->pUserData;
-        if (!self || !self->decoder || !pInput) return;
+    static int stream_callback(const void*                     input,
+                               void*                           /*output*/,
+                               unsigned long                   frameCount,
+                               const PaStreamCallbackTimeInfo* /*timeInfo*/,
+                               PaStreamCallbackFlags           /*statusFlags*/,
+                               void*                           userData)
+    {
+        auto* self = static_cast<LTCInputImpl*>(userData);
+        if (!self || !self->decoder_ || !input) return paContinue;
 
-        // Copy input to local buffer to avoid const_cast
-        const float* src = static_cast<const float*>(pInput);
-        std::vector<float> buf(src, src + frameCount);
-        ltc_decoder_write_float(self->decoder, buf.data(), frameCount, 0);
+        const float* src = static_cast<const float*>(input);
+        ltc_decoder_write_float(self->decoder_, const_cast<float*>(src), static_cast<size_t>(frameCount), 0);
         
         LTCFrameExt ltc_frame;
         bool got_frame = false;
         SMPTETimecode temp_tc = {0};
-        while(ltc_decoder_read(self->decoder, &ltc_frame)) {
+        while(ltc_decoder_read(self->decoder_, &ltc_frame)) {
            ltc_frame_to_time(&temp_tc, &ltc_frame.ltc, 0);
            got_frame = true;
         }
@@ -96,68 +96,102 @@ class LTCInputImpl {
             self->active_slot_.store(write_slot, std::memory_order_release);
             self->valid_signal = true;
         }
+        return paContinue;
     }
     
+    // Find device index by name. Returns -1 if not found (use default).
+    int find_device_by_name(const std::string& name) {
+        if (name.empty()) return -1;
+        int count = Pa_GetDeviceCount();
+        for (int i = 0; i < count; ++i) {
+            const PaDeviceInfo* info = Pa_GetDeviceInfo(i);
+            if (info && info->maxInputChannels > 0 && name == info->name) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
     // Internal start logic — caller must hold device_mutex
     bool start_unlocked() {
         if (running) return true;
         
-        if (!decoder) decoder = ltc_decoder_create(48000, 25);
-        
-        deviceConfig = ma_device_config_init(ma_device_type_capture);
-        deviceConfig.capture.format = ma_format_f32;
-        deviceConfig.capture.channels = 1;
-        deviceConfig.sampleRate = 48000;
-        deviceConfig.dataCallback = data_callback;
-        deviceConfig.pUserData = this;
+        if (!decoder_) decoder_ = ltc_decoder_create(48000, 25);
 
-        // Find device ID if name is set
-        ma_device_id* pDeviceID = NULL;
-        if (!current_device_name.empty()) {
-             ma_device_info* pCaptureInfos = nullptr;
-             ma_uint32 captureCount = 0;
-             ma_device_info* pPlaybackInfos = nullptr;
-             ma_uint32 playbackCount = 0;
-             
-             if (ma_context_get_devices(&context, &pPlaybackInfos, &playbackCount, &pCaptureInfos, &captureCount) == MA_SUCCESS) {
-                 for (ma_uint32 i = 0; i < captureCount; ++i) {
-                     if (current_device_name == pCaptureInfos[i].name) {
-                         pDeviceID = &pCaptureInfos[i].id;
-                         break;
-                     }
-                 }
-             }
+        int device_idx = current_device_index_;
+        if (device_idx < 0) {
+            device_idx = Pa_GetDefaultInputDevice();
         }
-        
-        // Assign found device ID to config
-        if (pDeviceID != NULL) {
-            deviceConfig.capture.pDeviceID = pDeviceID;
+        if (device_idx == paNoDevice) {
+            CASPAR_LOG(error) << "LTC: No input device available";
+            return false;
         }
 
-        if (ma_device_init(&context, &deviceConfig, &device) != MA_SUCCESS) {
-            if (pDeviceID != NULL) {
-                 // Fallback to default
-                 CASPAR_LOG(warning) << "LTC: Failed to init specific device, trying default.";
-                 deviceConfig.capture.pDeviceID = NULL;
-                 if (ma_device_init(&context, &deviceConfig, &device) != MA_SUCCESS) {
-                     CASPAR_LOG(error) << "LTC: Failed to init miniaudio device";
-                     return false;
-                 }
+        const PaDeviceInfo* dev_info = Pa_GetDeviceInfo(device_idx);
+        if (!dev_info || dev_info->maxInputChannels < 1) {
+            CASPAR_LOG(error) << "LTC: Device " << device_idx << " has no input channels";
+            return false;
+        }
+
+        PaStreamParameters input_params{};
+        input_params.device                    = device_idx;
+        input_params.channelCount              = 1;
+        input_params.sampleFormat              = paFloat32;
+        input_params.suggestedLatency          = dev_info->defaultLowInputLatency;
+        input_params.hostApiSpecificStreamInfo = nullptr;
+
+        PaError err = Pa_OpenStream(&stream_,
+                                    &input_params,
+                                    nullptr,        // no output
+                                    48000,          // sample rate
+                                    paFramesPerBufferUnspecified,
+                                    paNoFlag,
+                                    stream_callback,
+                                    this);
+        if (err != paNoError) {
+            CASPAR_LOG(warning) << "LTC: Failed to open device " << device_idx 
+                                << " (" << Pa_GetErrorText(err) << "), trying default.";
+            if (device_idx != Pa_GetDefaultInputDevice()) {
+                device_idx = Pa_GetDefaultInputDevice();
+                if (device_idx == paNoDevice) {
+                    CASPAR_LOG(error) << "LTC: No default input device";
+                    return false;
+                }
+                dev_info = Pa_GetDeviceInfo(device_idx);
+                input_params.device           = device_idx;
+                input_params.suggestedLatency  = dev_info ? dev_info->defaultLowInputLatency : 0.0;
+                err = Pa_OpenStream(&stream_, &input_params, nullptr, 48000,
+                                    paFramesPerBufferUnspecified, paNoFlag, stream_callback, this);
+                if (err != paNoError) {
+                    CASPAR_LOG(error) << "LTC: Failed to open default device: " << Pa_GetErrorText(err);
+                    return false;
+                }
             } else {
-                CASPAR_LOG(error) << "LTC: Failed to init miniaudio device";
                 return false;
             }
         }
-        device_initialized_ = true;
 
-        if (ma_device_start(&device) == MA_SUCCESS) {
-            running = true;
-            return true;
+        err = Pa_StartStream(stream_);
+        if (err != paNoError) {
+            CASPAR_LOG(error) << "LTC: Failed to start stream: " << Pa_GetErrorText(err);
+            Pa_CloseStream(stream_);
+            stream_ = nullptr;
+            return false;
         }
-        // Start failed — clean up the initialized device
-        ma_device_uninit(&device);
-        device_initialized_ = false;
-        return false;
+
+        running = true;
+        CASPAR_LOG(info) << "LTC: Capturing from device " << device_idx 
+                         << " (" << (dev_info ? dev_info->name : "unknown") << ")";
+        return true;
+    }
+
+    void stop_unlocked() {
+        if (stream_) {
+            Pa_StopStream(stream_);
+            Pa_CloseStream(stream_);
+            stream_ = nullptr;
+        }
+        running = false;
     }
 
 public:
@@ -167,30 +201,32 @@ public:
     }
     
     LTCInputImpl() {
-        if (ma_context_init(NULL, 0, NULL, &context) == MA_SUCCESS) {
-            context_initialized_ = true;
+        PaError err = Pa_Initialize();
+        if (err == paNoError) {
+            pa_initialized_ = true;
         } else {
-            CASPAR_LOG(error) << "LTC: Failed to init miniaudio context";
+            CASPAR_LOG(error) << "LTC: Failed to init PortAudio: " << Pa_GetErrorText(err);
         }
     }
     
     ~LTCInputImpl() {
-        running = false;
-        if (device_initialized_) {
-             ma_device_uninit(&device);
+        {
+            std::lock_guard<std::mutex> lock(device_mutex);
+            stop_unlocked();
         }
-        if (context_initialized_) {
-            ma_context_uninit(&context);
+        if (decoder_) {
+            ltc_decoder_free(decoder_);
+            decoder_ = nullptr;
         }
-        if (decoder) {
-            ltc_decoder_free(decoder);
-            decoder = nullptr;
+        if (pa_initialized_) {
+            Pa_Terminate();
         }
     }
 
     void start() {
         std::lock_guard<std::mutex> lock(device_mutex);
         if (running) return;
+        if (!pa_initialized_) return;
         
         // Read configuration
         try {
@@ -198,6 +234,7 @@ public:
             boost::optional<std::wstring> dev = pt.get_optional<std::wstring>(L"configuration.ltc.device");
             if (dev && current_device_name.empty()) {
                  current_device_name = caspar::u8(*dev);
+                 current_device_index_ = find_device_by_name(current_device_name);
             }
         } catch (...) {}
 
@@ -206,16 +243,14 @@ public:
 
     std::vector<std::string> get_capture_devices() {
         std::lock_guard<std::mutex> lock(device_mutex);
-        ma_device_info* pCaptureInfos = nullptr;
-        ma_uint32 captureCount = 0;
-        ma_device_info* pPlaybackInfos = nullptr;
-        ma_uint32 playbackCount = 0;
-        
-        // Always re-enumerate to pick up newly connected devices
         std::vector<std::string> devices;
-        if (ma_context_get_devices(&context, &pPlaybackInfos, &playbackCount, &pCaptureInfos, &captureCount) == MA_SUCCESS) {
-            for (ma_uint32 i = 0; i < captureCount; ++i) {
-                devices.push_back(pCaptureInfos[i].name);
+        if (!pa_initialized_) return devices;
+        
+        int count = Pa_GetDeviceCount();
+        for (int i = 0; i < count; ++i) {
+            const PaDeviceInfo* info = Pa_GetDeviceInfo(i);
+            if (info && info->maxInputChannels > 0) {
+                devices.push_back(info->name);
             }
         }
         return devices;
@@ -224,20 +259,16 @@ public:
     bool set_capture_device(const std::string& name) {
         std::lock_guard<std::mutex> lock(device_mutex);
         
-        if (running) {
-             ma_device_stop(&device);
-             ma_device_uninit(&device);
-             device_initialized_ = false;
-             running = false;
-        }
+        stop_unlocked();
         
         // Free old decoder and create fresh one
-        if (decoder) {
-            ltc_decoder_free(decoder);
-            decoder = nullptr;
+        if (decoder_) {
+            ltc_decoder_free(decoder_);
+            decoder_ = nullptr;
         }
         
         current_device_name = name;
+        current_device_index_ = find_device_by_name(name);
         return start_unlocked();
     }
 
@@ -335,4 +366,4 @@ void init(const core::module_dependencies&) {
     LTCInput::instance().start();
 }
 
-}} 
+}}

@@ -68,9 +68,105 @@ endif ()
 
 include_directories("${CMAKE_BINARY_DIR}/generated")
 
+# ─── Auto-detect optional GPU features ───────────────────────────────────────
+
+# Vulkan: detection handled in Bootstrap_Windows.cmake (where deps are fetched)
 IF(ENABLE_VULKAN)
 	add_definitions(-DENABLE_VULKAN)
 ENDIF()
+
+# CUDA: auto-detect from CUDA Toolkit if not explicitly set
+# Workaround: MSBuild CUDA targets require CUDA_PATH_V<major>_<minor> env var.
+# If CUDA_PATH is set but the versioned var is missing (e.g. terminal started
+# before CUDA install), try to set it so check_language(CUDA) succeeds.
+if(DEFINED ENV{CUDA_PATH} AND EXISTS "$ENV{CUDA_PATH}/bin/nvcc.exe")
+    execute_process(
+        COMMAND "$ENV{CUDA_PATH}/bin/nvcc.exe" --version
+        OUTPUT_VARIABLE _nvcc_version_output ERROR_QUIET OUTPUT_STRIP_TRAILING_WHITESPACE)
+    if(_nvcc_version_output MATCHES "release ([0-9]+)\\.([0-9]+)")
+        set(_cuda_major "${CMAKE_MATCH_1}")
+        set(_cuda_minor "${CMAKE_MATCH_2}")
+        set(_cuda_path_var "CUDA_PATH_V${_cuda_major}_${_cuda_minor}")
+        if(NOT DEFINED ENV{${_cuda_path_var}})
+            set(ENV{${_cuda_path_var}} "$ENV{CUDA_PATH}")
+            message(STATUS "Set ${_cuda_path_var}=$ENV{CUDA_PATH} (workaround for MSBuild)")
+        endif()
+        unset(_cuda_major)
+        unset(_cuda_minor)
+        unset(_cuda_path_var)
+    endif()
+    unset(_nvcc_version_output)
+endif()
+
+if(NOT DEFINED BUILD_CUDA_MODULES)
+    include(CheckLanguage)
+    check_language(CUDA)
+    if(CMAKE_CUDA_COMPILER)
+        set(BUILD_CUDA_MODULES ON CACHE BOOL "Build NVIDIA GPU-accelerated modules (ProRes, NotchLC)")
+        message(STATUS "CUDA compiler found: ${CMAKE_CUDA_COMPILER} (auto-enabled)")
+    else()
+        set(BUILD_CUDA_MODULES OFF CACHE BOOL "Build NVIDIA GPU-accelerated modules (ProRes, NotchLC)")
+        message(STATUS "CUDA compiler not found -- CUDA modules disabled")
+    endif()
+elseif(BUILD_CUDA_MODULES)
+    include(CheckLanguage)
+    check_language(CUDA)
+    if(NOT CMAKE_CUDA_COMPILER)
+        message(WARNING "BUILD_CUDA_MODULES=ON but no CUDA compiler found -- disabling CUDA modules")
+        set(BUILD_CUDA_MODULES OFF CACHE BOOL "" FORCE)
+    endif()
+endif()
+
+# nvCOMP: needed only by cuda_notchlc (NotchLC GPU decompression)
+if(BUILD_CUDA_MODULES)
+    if(NOT DEFINED BUILD_CUDA_NOTCHLC)
+        # Auto-detect nvCOMP installation
+        if(DEFINED NVCOMP_ROOT)
+            set(_nvcomp_test "${NVCOMP_ROOT}")
+        elseif(DEFINED ENV{NVCOMP_ROOT})
+            set(_nvcomp_test "$ENV{NVCOMP_ROOT}")
+        elseif(EXISTS "C:/Program Files/NVIDIA nvCOMP/v5.2")
+            set(_nvcomp_test "C:/Program Files/NVIDIA nvCOMP/v5.2")
+        else()
+            set(_nvcomp_test "")
+        endif()
+
+        if(_nvcomp_test AND EXISTS "${_nvcomp_test}/include/nvcomp.h")
+            set(BUILD_CUDA_NOTCHLC ON CACHE BOOL "Build cuda_notchlc module (requires nvCOMP)")
+            message(STATUS "nvCOMP found: ${_nvcomp_test} -- cuda_notchlc enabled")
+        else()
+            set(BUILD_CUDA_NOTCHLC OFF CACHE BOOL "Build cuda_notchlc module (requires nvCOMP)")
+            message(STATUS "nvCOMP not found -- cuda_notchlc disabled (set NVCOMP_ROOT to enable)")
+        endif()
+        unset(_nvcomp_test)
+    endif()
+else()
+    set(BUILD_CUDA_NOTCHLC OFF CACHE BOOL "Build cuda_notchlc module (requires nvCOMP)")
+endif()
+
+# Fetch shared header-only libraries before subdirectories that use them
+include(FetchContent)
+
+# tinygltf — header-only glTF 2.0 / GLB loader (used by core + accelerator)
+set(TINYGLTF_BUILD_LOADER_EXAMPLE OFF CACHE BOOL "" FORCE)
+set(TINYGLTF_BUILD_GL_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(TINYGLTF_BUILD_VALIDATOR_EXAMPLE OFF CACHE BOOL "" FORCE)
+set(TINYGLTF_BUILD_BUILDER_EXAMPLE OFF CACHE BOOL "" FORCE)
+set(TINYGLTF_HEADER_ONLY ON CACHE BOOL "" FORCE)
+set(TINYGLTF_INSTALL OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(tinygltf
+	GIT_REPOSITORY https://github.com/syoyo/tinygltf.git
+	GIT_TAG        v2.9.5
+)
+FetchContent_MakeAvailable(tinygltf)
+
+# tinyobjloader — header-only OBJ loader (used by core + accelerator)
+set(TINYOBJLOADER_WITH_PYTHON OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(tinyobjloader
+	GIT_REPOSITORY https://github.com/tinyobjloader/tinyobjloader.git
+	GIT_TAG        v2.0.0rc13
+)
+FetchContent_MakeAvailable(tinyobjloader)
 
 add_subdirectory(tools)
 add_subdirectory(accelerator)

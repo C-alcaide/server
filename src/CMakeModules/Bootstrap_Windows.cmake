@@ -199,10 +199,24 @@ target_link_directories(OpenAL::OpenAL INTERFACE ${openal_SOURCE_DIR}/libs/Win64
 target_link_libraries(OpenAL::OpenAL INTERFACE OpenAL32)
 casparcg_add_runtime_dependency("${openal_SOURCE_DIR}/bin/Win64/OpenAL32.dll")
 
-# Vulkan
-set(ENABLE_VULKAN OFF CACHE BOOL "Enable Vulkan accelerator backend")
+# Vulkan: auto-detect from SDK if not explicitly set via -DENABLE_VULKAN=ON/OFF
+if(NOT DEFINED ENABLE_VULKAN)
+	find_package(Vulkan QUIET)
+	if(Vulkan_FOUND)
+		set(ENABLE_VULKAN ON CACHE BOOL "Enable Vulkan accelerator backend")
+		message(STATUS "Vulkan SDK found: ${Vulkan_INCLUDE_DIR} (auto-enabled)")
+	else()
+		set(ENABLE_VULKAN OFF CACHE BOOL "Enable Vulkan accelerator backend")
+		message(STATUS "Vulkan SDK not found -- Vulkan modules disabled")
+	endif()
+else()
+	if(ENABLE_VULKAN)
+		find_package(Vulkan REQUIRED)
+		message(STATUS "Vulkan SDK: ${Vulkan_INCLUDE_DIR} (explicitly enabled)")
+	endif()
+endif()
+
 IF(ENABLE_VULKAN)
-	find_package(Vulkan REQUIRED)
 
 	FetchContent_Declare(vk_bootstrap
 		GIT_REPOSITORY https://github.com/charles-lunarg/vk-bootstrap

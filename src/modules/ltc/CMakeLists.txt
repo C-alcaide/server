@@ -9,15 +9,6 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(libltc)
 
-if(NOT miniaudio_POPULATED)
-    FetchContent_Declare(
-        miniaudio
-        GIT_REPOSITORY https://github.com/mackron/miniaudio.git
-        GIT_TAG        master
-    )
-    FetchContent_MakeAvailable(miniaudio)
-endif()
-
 set(LIBLTC_ROOT "${libltc_SOURCE_DIR}")
 
 # Add libltc sources directly to avoid external build steps
@@ -31,12 +22,19 @@ set(LIBLTC_SOURCES
 casparcg_add_module_project(ltc
     SOURCES 
         ltc_input.cpp
-        miniaudio_impl.c
         ${LIBLTC_SOURCES}
     INIT_FUNCTION "ltc::init"
 )
 
+# Suppress warnings-as-errors for third-party C sources
+set_source_files_properties(
+    ${LIBLTC_SOURCES}
+    PROPERTIES COMPILE_OPTIONS "/W3;/WX-"
+)
+
 target_include_directories(ltc PRIVATE 
     ${LIBLTC_ROOT}/src
-    "${miniaudio_SOURCE_DIR}"
 )
+
+# PortAudio for audio capture (portaudio_static target from portaudio module)
+target_link_libraries(ltc PRIVATE portaudio_static)

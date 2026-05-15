@@ -26,6 +26,7 @@ if(WIN32)
     set(PA_USE_WASAPI ON CACHE BOOL "" FORCE)
     set(PA_USE_DS ON CACHE BOOL "" FORCE)
     set(PA_USE_WMME ON CACHE BOOL "" FORCE)
+    set(PA_USE_WDMKS OFF CACHE BOOL "" FORCE)  # Avoid GUID_NULL conflict with uuid.lib
 
     # ASIO SDK: set PA_USE_ASIO=ON and ASIOSDK_ROOT_DIR to the Steinberg ASIO SDK path
     # Users must download the ASIO SDK separately from Steinberg.
