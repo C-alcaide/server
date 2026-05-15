@@ -22,7 +22,8 @@ src/modules/portaudio/
 ├── producer/
 │   └── portaudio_producer.h/cpp    Audio capture producer
 ├── util/
-│   ├── portaudio_device.h/cpp      Device manager singleton
+│   ├── portaudio_device.h/cpp      Device manager singleton + shared capture registry
+│   ├── shared_capture.h            Shared capture stream (one PaStream per device)
 │   └── spsc_ring_buffer.h          Lock-free ring buffer
 └── CMakeLists.txt                  Build config + FetchContent
 ```
@@ -64,7 +65,9 @@ Channel tick                    Hardware callback
 
 ### Producer (Audio Capture)
 
-The producer captures audio from an input device and delivers it as audio-only frames to the CasparCG mixer.
+The producer captures audio from an input device and delivers it as audio-only frames to the CasparCG mixer. It supports two capture modes:
+
+**Direct mode** (default for WASAPI/DS): each producer opens its own `PaStream`.
 
 ```
 Hardware callback                  Channel tick
@@ -76,8 +79,30 @@ Hardware callback                  Channel tick
   SPSC Ring Buffer ◄── write    read ──► get_frame()
   (lock-free)                          │
                                        ▼
+                                  Channel extract
+                                  [FROM..FROM+COUNT)
+                                       │
+                                       ▼
+                                  Delay ring (opt)
+                                       │
+                                       ▼
                                   1×1 pixel frame
                                   + audio_data()
+```
+
+**Shared mode** (automatic for ASIO, opt-in via `SHARED`): multiple producers share one `PaStream` through `shared_portaudio_capture`.
+
+```
+Single PaStream (shared)              Per-producer
+    │                                     │
+    ▼                                     ▼
+  pa_callback()                      on_captured_audio()
+    │                                     │
+    ▼                                     ▼
+  Shared ring ──► pump thread ──► Listener ring buffer
+                  distributes         │
+                  to all listeners    ▼
+                                  get_frame() → channel extract → delay → frame
 ```
 
 **Key design decisions:**
@@ -87,6 +112,14 @@ Hardware callback                  Channel tick
 2. **Minimal video frame allocation.** Audio-only producers create a 1×1 transparent BGRA pixel instead of a full-resolution frame. On a 1080p channel this saves ~8 MB per frame of unnecessary allocation.
 
 3. **5-second ring buffer.** The capture buffer holds up to 5 seconds of audio, preventing unbounded memory growth if the CasparCG mixer stalls momentarily.
+
+4. **Channel extraction in `get_frame()`.** The PA stream always captures the full device channel width. Channel selection (`FROM`/`COUNT` or `MAP`) happens after reading from the ring buffer, in the mixer's thread — not in the audio callback.
+
+5. **Delay compensation via secondary ring buffer.** When `DELAY` is set, a second ring buffer pre-filled with silence sits between the capture ring and the output. This adds a precise, sample-accurate delay without modifying the capture path.
+
+6. **Shared capture for ASIO.** ASIO only allows one stream per device. The `shared_portaudio_capture` class (modelled on DeckLink's `SharedDeckLinkInput`) owns a single `PaStream` per device, with ref-counted lifecycle via `shared_ptr`. A pump thread reads from the shared ring buffer and distributes to all registered listeners. When the last producer releases its reference, the stream is stopped automatically.
+
+7. **Hot-plug detection.** Shared captures monitor `Pa_IsStreamActive()` and set a `disconnected_` flag when the device disappears, notifying all registered producers.
 
 ### SPSC Ring Buffer
 
@@ -100,7 +133,7 @@ Both consumer and producer use `spsc_ring_buffer`, a single-producer single-cons
 
 ### Device Manager
 
-`portaudio_device_manager` is a singleton that owns the PortAudio lifecycle (`Pa_Initialize` / `Pa_Terminate`) and provides device enumeration and matching.
+`portaudio_device_manager` is a singleton that owns the PortAudio lifecycle (`Pa_Initialize` / `Pa_Terminate`) and provides device enumeration, matching, and shared capture stream management.
 
 **Host API priority** (auto mode): ASIO → WASAPI → system default.
 
@@ -109,6 +142,8 @@ Both consumer and producer use `spsc_ring_buffer`, a single-producer single-cons
 2. Substring match (case-insensitive)
 
 If no match is found, the default device for the selected host API is used.
+
+**Shared capture registry:** The device manager maintains a `map<int, weak_ptr<shared_portaudio_capture>>` keyed by device index. `get_shared_capture()` returns an existing live stream or creates a new one. When the last `shared_ptr` expires the entry auto-cleans.
 
 ### LTC Integration
 
@@ -128,6 +163,7 @@ The LTC timecode module (`src/modules/ltc/`) uses PortAudio independently for it
       <channels>8</channels>
       <buffer-size>4</buffer-size>
       <delay>0</delay>
+      <channel-map>0,1,0,1,-1,-1,-1,-1</channel-map>
     </portaudio>
   </consumers>
 </channel>
@@ -137,14 +173,15 @@ The LTC timecode module (`src/modules/ltc/`) uses PortAudio independently for it
 |---|---|---|
 | `<device>` | *(empty = default device)* | Partial device name, case-insensitive substring match |
 | `<host-api>` | `auto` | `auto`, `asio`, `wasapi`, `directsound` (alias: `ds`) |
-| `<channels>` | `2` | Number of output channels (clamped to device maximum) |
+| `<channels>` | `2` | Number of output channels (clamped to device maximum). Overridden by `<channel-map>` size if present |
 | `<buffer-size>` | `4` | Ring buffer depth in video frames |
 | `<delay>` | `0` | Pipeline delay compensation in video frames (pre-fills silence) |
+| `<channel-map>` | *(empty = 1:1)* | Comma-separated routing: each value is the source channel index for that output (-1 = silence). Size determines output channel count |
 
 ### Consumer — AMCP
 
 ```
-ADD [channel] PORTAUDIO [device] [DEVICE=name] [API=api] [CHANNELS=n] [BUFFER=n] [DELAY=n]
+ADD [channel] PORTAUDIO [device] [DEVICE=name] [API=api] [CHANNELS=n] [BUFFER=n] [DELAY=n] [MAP=list]
 ```
 
 All parameters are optional. Examples:
@@ -158,13 +195,28 @@ ADD 1 PORTAUDIO DEVICE=Focusrite API=asio CHANNELS=8
 
 # Positional device name (first non-keyword arg)
 ADD 1 PORTAUDIO "Dante Virtual Soundcard" CHANNELS=16
+
+# Channel routing matrix: duplicate L/R to outputs 1-4, silence on 5-8
+ADD 1 PORTAUDIO DEVICE=RME CHANNELS=8 MAP=0,1,0,1,-1,-1,-1,-1
 ```
 
 ### Producer — AMCP
 
 ```
-PLAY [channel]-[layer] portaudio [device] [DEVICE=name] [API=api] [CHANNELS=n]
+PLAY [channel]-[layer] portaudio [device] [DEVICE=name] [API=api] [CHANNELS=n] [FROM=n] [COUNT=n] [MAP=list] [DELAY=ms] [DELAY_FRAMES=n] [SHARED]
 ```
+
+| Parameter | Default | Description |
+|---|---|---|
+| `DEVICE=` | *(default device)* | Partial device name match |
+| `API=` | `auto` | Host API: `auto`, `asio`, `wasapi`, `directsound`/`ds` |
+| `CHANNELS=` | *(all)* | Device stream channel count (how many channels to open) |
+| `FROM=` | `0` | First device channel to capture (0-indexed) |
+| `COUNT=` | *(all from FROM)* | Number of channels to extract from the device |
+| `MAP=` | *(none)* | Non-contiguous channel picks, e.g. `MAP=0,3,7`. Overrides FROM/COUNT |
+| `DELAY=` | `0` | Delay compensation in milliseconds |
+| `DELAY_FRAMES=` | `0` | Delay compensation in video frames (converted to ms internally) |
+| `SHARED` | *(off)* | Force shared capture mode. Auto-enabled for ASIO devices |
 
 Examples:
 
@@ -175,8 +227,17 @@ PLAY 1-10 portaudio
 # Specific device
 PLAY 1-10 portaudio DEVICE="Line In (Focusrite)" API=asio CHANNELS=2
 
-# Positional device name
-PLAY 1-10 portaudio "Microphone"
+# Dante 64-ch: capture channels 0-1 with 40ms delay
+PLAY 1-10 portaudio DEVICE=Dante FROM=0 COUNT=2 DELAY=40
+
+# Same device, channels 2-3 for camera 2
+PLAY 2-10 portaudio DEVICE=Dante FROM=2 COUNT=2 DELAY=40
+
+# Non-contiguous: pick channels 0, 5, 10 from a 16-ch device
+PLAY 3-10 portaudio DEVICE=Dante MAP=0,5,10
+
+# Shared mode explicit (auto for ASIO)
+PLAY 1-10 portaudio DEVICE=Dante API=wasapi SHARED FROM=0 COUNT=2
 ```
 
 ### Producer — XML (casparcg.config)
@@ -188,6 +249,9 @@ Producers use the AMCP command syntax inside a `<producer>` element:
   <video-mode>1080i5000</video-mode>
   <producers>
     <producer id="10">portaudio DEVICE=Focusrite API=asio CHANNELS=2</producer>
+    <producer id="11">portaudio DEVICE=Dante FROM=0 COUNT=2 DELAY=40</producer>
+    <producer id="12">portaudio DEVICE=Dante FROM=2 COUNT=2 DELAY=40</producer>
+    <producer id="13">portaudio DEVICE=Dante MAP=0,5,10</producer>
   </producers>
 </channel>
 ```
@@ -360,18 +424,111 @@ Configure the LTC capture device in casparcg.config:
 </ltc>
 ```
 
+### Scenario 8: ISO Recording with Dante Audio
+
+**Use case:** Record individual camera ISO files, each with SDI video from DeckLink and specific audio channels from a shared Dante device. For example, 3 cameras each getting their own stereo pair from a 64-channel Dante interface.
+
+The key challenge is that ASIO only allows one stream per device. The PortAudio producer's **shared capture** mode solves this — multiple producers register as listeners on a single stream, each extracting different channels.
+
+**Configuration:**
+
+```xml
+<channels>
+    <!-- Camera 1 ISO: DeckLink 1 video + Dante ch 0-1 audio -->
+    <channel>
+        <video-mode>1080i5000</video-mode>
+        <consumers>
+            <ffmpeg>recording/cam1_iso.mxf -codec:v prores_ks -codec:a pcm_s24le</ffmpeg>
+        </consumers>
+        <producers>
+            <producer id="0">DECKLINK DEVICE 1</producer>
+            <producer id="10">portaudio DEVICE=Dante API=asio FROM=0 COUNT=2 DELAY=40</producer>
+        </producers>
+    </channel>
+
+    <!-- Camera 2 ISO: DeckLink 2 video + Dante ch 2-3 audio -->
+    <channel>
+        <video-mode>1080i5000</video-mode>
+        <consumers>
+            <ffmpeg>recording/cam2_iso.mxf -codec:v prores_ks -codec:a pcm_s24le</ffmpeg>
+        </consumers>
+        <producers>
+            <producer id="0">DECKLINK DEVICE 2</producer>
+            <producer id="10">portaudio DEVICE=Dante API=asio FROM=2 COUNT=2 DELAY=40</producer>
+        </producers>
+    </channel>
+
+    <!-- Camera 3 ISO: DeckLink 3 video + Dante ch 4-5 audio -->
+    <channel>
+        <video-mode>1080i5000</video-mode>
+        <consumers>
+            <ffmpeg>recording/cam3_iso.mxf -codec:v prores_ks -codec:a pcm_s24le</ffmpeg>
+        </consumers>
+        <producers>
+            <producer id="0">DECKLINK DEVICE 3</producer>
+            <producer id="10">portaudio DEVICE=Dante API=asio FROM=4 COUNT=2 DELAY=40</producer>
+        </producers>
+    </channel>
+</channels>
+```
+
+**How it works:**
+- All three `portaudio` producers target the same Dante device with `API=asio`. Because ASIO is detected, shared capture mode activates automatically.
+- The first producer to initialise creates the shared `PaStream`. Producers 2 and 3 attach as listeners.
+- Each producer extracts its own stereo pair (`FROM=0 COUNT=2`, `FROM=2 COUNT=2`, `FROM=4 COUNT=2`) from the full device-width capture.
+- `DELAY=40` adds 40ms of audio delay to compensate for the SDI video pipeline latency (DeckLink capture → GPU → mixer), keeping audio and video in sync in the recorded files.
+- When a channel is stopped, its producer releases its shared_ptr; the shared stream stays open for the remaining producers.
+
 ## Channel Mapping
 
-The consumer maps channels by index: output channel N receives source channel N. If the source has fewer channels than the output, excess output channels are zero-filled (silence).
+### Consumer (Output)
 
-| Source | Output | Result |
-|---|---|---|
-| 2ch stereo | 2ch device | L→1, R→2 |
-| 2ch stereo | 8ch device | L→1, R→2, ch3-8 silence |
-| 8ch source | 2ch device | ch1→1, ch2→2, ch3-8 discarded |
-| 8ch source | 8ch device | 1:1 mapping |
+By default, the consumer maps channels 1:1: output channel N receives source channel N. If the source has fewer channels than the output, excess output channels are zero-filled (silence).
 
-For more complex routing (mono expansion, downmix, channel reordering), use FFmpeg audio filters at the source level or route through an external audio matrix before reaching CasparCG.
+With `MAP=` or `<channel-map>`, you can define arbitrary routing. Each entry specifies which source channel feeds that output position (-1 = silence).
+
+| Configuration | Output result |
+|---|---|
+| `CHANNELS=2` (no map) | L→1, R→2 |
+| `CHANNELS=8` (no map) | ch1→1, ch2→2, ..., ch3-8 silence if source is stereo |
+| `MAP=0,1,0,1` | L→1, R→2, L→3, R→4 (stereo duplicated) |
+| `MAP=1,0` | R→1, L→2 (swapped) |
+| `MAP=0,-1,-1,-1,1,-1,-1,-1` | L on out1, R on out5, rest silence |
+
+### Producer (Input)
+
+By default, the producer captures all device channels and delivers them to the CasparCG mixer.
+
+With `FROM=`/`COUNT=`, you select a contiguous range from the device. With `MAP=`, you pick arbitrary (possibly non-contiguous) device channels.
+
+| Configuration | Captured channels |
+|---|---|
+| *(no params)* | All device channels |
+| `FROM=0 COUNT=2` | Device ch 0, 1 |
+| `FROM=4 COUNT=2` | Device ch 4, 5 |
+| `MAP=0,3,7` | Device ch 0, 3, 7 (non-contiguous) |
+| `CHANNELS=16 FROM=8 COUNT=4` | Open 16-ch stream, extract ch 8-11 |
+
+### Shared Capture (ASIO / Explicit)
+
+When multiple producers target the same device (same device index), they can share a single `PaStream`. This is required for ASIO (exclusive access) and optional but beneficial for WASAPI/DS (reduces threads and ensures clock coherence).
+
+Shared mode is **automatic** for ASIO devices and can be forced with the `SHARED` keyword for other APIs.
+
+```bash
+# Three producers sharing one Dante ASIO device, each picking different channels
+PLAY 1-10 portaudio DEVICE=Dante API=asio FROM=0 COUNT=2 DELAY=40
+PLAY 2-10 portaudio DEVICE=Dante API=asio FROM=2 COUNT=2 DELAY=40
+PLAY 3-10 portaudio DEVICE=Dante API=asio FROM=4 COUNT=2 DELAY=40
+```
+
+The first producer creates the shared stream; subsequent producers attach as listeners. The stream closes automatically when the last producer is removed.
+
+### Delay Compensation
+
+The `DELAY=` (milliseconds) or `DELAY_FRAMES=` (video frames) parameter inserts a precise delay between audio capture and delivery to the mixer. This compensates for external pipeline latency (e.g. SDI video processing delay vs. direct Dante audio path).
+
+Internally, a secondary ring buffer pre-filled with silence sits between the capture buffer and `get_frame()`. Audio passes through this delay buffer FIFO-style, emerging exactly `DELAY` milliseconds later.
 
 ## Diagnostics
 

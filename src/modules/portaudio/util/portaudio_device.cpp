@@ -18,6 +18,7 @@
  */
 
 #include "portaudio_device.h"
+#include "shared_capture.h"
 
 #include <common/log.h>
 #include <common/utf.h>
@@ -349,6 +350,40 @@ host_api_preference portaudio_device_manager::parse_host_api(const std::string& 
     if (lower == "directsound") return host_api_preference::directsound;
     if (lower == "ds")          return host_api_preference::directsound;
     return host_api_preference::auto_select;
+}
+
+std::shared_ptr<shared_portaudio_capture>
+portaudio_device_manager::get_shared_capture(int device_index, int channels, int sample_rate)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    // Check if we already have a live shared capture for this device
+    auto it = shared_captures_.find(device_index);
+    if (it != shared_captures_.end()) {
+        auto existing = it->second.lock();
+        if (existing && existing->is_running()) {
+            // Validate channel/rate match
+            if (existing->channels() != channels || existing->sample_rate() != sample_rate) {
+                CASPAR_LOG(warning) << L"[portaudio] Shared capture for device " << device_index
+                                   << L" already open with channels=" << existing->channels()
+                                   << L" rate=" << existing->sample_rate()
+                                   << L". Requested channels=" << channels
+                                   << L" rate=" << sample_rate
+                                   << L". Using existing.";
+            }
+            return existing;
+        }
+    }
+
+    // Create new shared capture
+    auto capture = std::make_shared<shared_portaudio_capture>(device_index, channels, sample_rate);
+    if (!capture->start()) {
+        CASPAR_LOG(error) << L"[portaudio] Failed to create shared capture for device " << device_index;
+        return nullptr;
+    }
+
+    shared_captures_[device_index] = capture;
+    return capture;
 }
 
 }} // namespace caspar::portaudio

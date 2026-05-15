@@ -40,6 +40,7 @@
 
 #include <portaudio.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -48,10 +49,24 @@
 #include <future>
 #include <memory>
 #include <mutex>
+#include <sstream>
 #include <thread>
 #include <vector>
 
 namespace caspar { namespace portaudio {
+
+/// Parse a comma-separated list of integers (e.g. "0,1,0,1,-1,-1").
+static std::vector<int> parse_int_list(const std::string& str)
+{
+    std::vector<int> result;
+    std::istringstream ss(str);
+    std::string token;
+    while (std::getline(ss, token, ',')) {
+        try { result.push_back(std::stoi(token)); }
+        catch (...) {}
+    }
+    return result;
+}
 
 struct portaudio_consumer : public core::frame_consumer
 {
@@ -67,6 +82,10 @@ struct portaudio_consumer : public core::frame_consumer
     int                  output_channels_ = 2;
     int                  buffer_frames_   = 4;    // Ring buffer depth in video frames
     int                  delay_frames_    = 0;    // External pipeline delay compensation
+
+    // Channel routing matrix: channel_map_[output_ch] = source_ch (or -1 for silence)
+    // If empty, uses default 1:1 mapping with zero-pad.
+    std::vector<int>     channel_map_;
 
     // PortAudio stream
     PaStream*            stream_         = nullptr;
@@ -101,12 +120,14 @@ struct portaudio_consumer : public core::frame_consumer
                                 host_api_preference host_api,
                                 int          output_channels,
                                 int          buffer_frames,
-                                int          delay_frames)
+                                int          delay_frames,
+                                std::vector<int> channel_map)
         : device_name_(std::move(device_name))
         , host_api_pref_(host_api)
         , output_channels_(output_channels)
         , buffer_frames_(buffer_frames)
         , delay_frames_(delay_frames)
+        , channel_map_(std::move(channel_map))
     {
         graph_->set_color("tick-time", diagnostics::color(0.0f, 0.6f, 0.9f));
         graph_->set_color("buffer-fill", diagnostics::color(0.2f, 0.8f, 0.2f));
@@ -260,11 +281,17 @@ struct portaudio_consumer : public core::frame_consumer
         }
 
         // Clamp output channels to device capability
+        if (!channel_map_.empty()) {
+            // MAP= determines output channel count
+            output_channels_ = static_cast<int>(channel_map_.size());
+        }
         if (output_channels_ > dev_info->maxOutputChannels) {
             CASPAR_LOG(warning) << print() << L" Requested " << output_channels_
                                << L" channels, device supports " << dev_info->maxOutputChannels
                                << L". Clamping.";
             output_channels_ = dev_info->maxOutputChannels;
+            if (!channel_map_.empty())
+                channel_map_.resize(output_channels_);
         }
 
         // Open stream — let hardware choose optimal callback buffer size
@@ -315,7 +342,8 @@ struct portaudio_consumer : public core::frame_consumer
                         << L" channels=" << output_channels_
                         << L" rate=" << format_desc_.audio_sample_rate
                         << L" buffer_frames=" << buffer_frames_
-                        << L" delay=" << delay_frames_;
+                        << L" delay=" << delay_frames_
+                        << L" map=" << (channel_map_.empty() ? "default" : "custom");
     }
 
     std::future<bool> send(core::video_field field, core::const_frame frame) override
@@ -342,12 +370,14 @@ struct portaudio_consumer : public core::frame_consumer
         int src_samples_per_channel = static_cast<int>(audio_size) / src_channels;
         size_t total_output_samples = static_cast<size_t>(src_samples_per_channel) * output_channels_;
 
-        // Channel mapping: take first output_channels_ from source, zero-pad if source has fewer
+        // Channel mapping: use explicit map if configured, otherwise default 1:1 + zero-pad
         std::vector<int32_t> output_buffer(total_output_samples);
+        bool has_map = !channel_map_.empty() && static_cast<int>(channel_map_.size()) == output_channels_;
         for (int s = 0; s < src_samples_per_channel; ++s) {
             for (int c = 0; c < output_channels_; ++c) {
+                int src_ch = has_map ? channel_map_[c] : c;
                 output_buffer[s * output_channels_ + c] =
-                    (c < src_channels) ? audio_ptr[s * src_channels + c] : 0;
+                    (src_ch >= 0 && src_ch < src_channels) ? audio_ptr[s * src_channels + src_ch] : 0;
             }
         }
 
@@ -401,6 +431,7 @@ spl::shared_ptr<core::frame_consumer> create_consumer(const std::vector<std::wst
     int channels      = 2;
     int buffer_frames  = 4;
     int delay_frames   = 0;
+    std::vector<int> channel_map;
 
     for (size_t i = 1; i < params.size(); ++i) {
         if (boost::istarts_with(params[i], L"DEVICE=")) {
@@ -416,6 +447,8 @@ spl::shared_ptr<core::frame_consumer> create_consumer(const std::vector<std::wst
         } else if (boost::istarts_with(params[i], L"DELAY=")) {
             try { delay_frames = std::stoi(u8(params[i].substr(6))); }
             catch (...) {}
+        } else if (boost::istarts_with(params[i], L"MAP=")) {
+            channel_map = parse_int_list(u8(params[i].substr(4)));
         } else if (i == 1 && !params[i].empty()) {
             device_name = u8(params[i]);
         }
@@ -426,7 +459,8 @@ spl::shared_ptr<core::frame_consumer> create_consumer(const std::vector<std::wst
         host_api,
         channels,
         buffer_frames,
-        delay_frames);
+        delay_frames,
+        std::move(channel_map));
 }
 
 spl::shared_ptr<core::frame_consumer>
@@ -441,6 +475,12 @@ create_preconfigured_consumer(const boost::property_tree::wptree&               
     int buffer_frames   = element.get(L"buffer-size", 4);
     int delay_frames    = element.get(L"delay", 0);
 
+    // Parse channel-map: comma-separated ints, e.g. "0,1,0,1,-1,-1"
+    std::vector<int> channel_map;
+    auto map_str = u8(element.get(L"channel-map", L""));
+    if (!map_str.empty())
+        channel_map = parse_int_list(map_str);
+
     auto host_api = portaudio_device_manager::parse_host_api(host_api_str);
 
     return spl::make_shared<portaudio_consumer>(
@@ -448,7 +488,8 @@ create_preconfigured_consumer(const boost::property_tree::wptree&               
         host_api,
         output_channels,
         buffer_frames,
-        delay_frames);
+        delay_frames,
+        std::move(channel_map));
 }
 
 }} // namespace caspar::portaudio

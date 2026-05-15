@@ -54,6 +54,7 @@ set(SOURCES
 
     util/portaudio_device.cpp
     util/portaudio_device.h
+    util/shared_capture.h
     util/spsc_ring_buffer.h
 )
 

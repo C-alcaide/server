@@ -19,11 +19,15 @@
 
 #pragma once
 
+#include <map>
+#include <memory>
 #include <string>
 #include <vector>
 #include <mutex>
 
 namespace caspar { namespace portaudio {
+
+class shared_portaudio_capture;
 
 enum class host_api_preference
 {
@@ -81,6 +85,11 @@ class portaudio_device_manager
     /// Parse host API preference from string (e.g., "asio", "wasapi", "auto").
     static host_api_preference parse_host_api(const std::string& str);
 
+    /// Get or create a shared capture stream for the given device.
+    /// Multiple producers targeting the same device share a single PaStream.
+    /// The shared_ptr ref-counting manages the lifecycle automatically.
+    std::shared_ptr<shared_portaudio_capture> get_shared_capture(int device_index, int channels, int sample_rate);
+
   private:
     portaudio_device_manager() = default;
     ~portaudio_device_manager();
@@ -92,6 +101,9 @@ class portaudio_device_manager
 
     mutable std::mutex mutex_;
     bool               initialized_ = false;
+
+    // Shared capture streams: one per device_index, weak_ptr so they auto-expire
+    std::map<int, std::weak_ptr<shared_portaudio_capture>> shared_captures_;
 };
 
 }} // namespace caspar::portaudio
