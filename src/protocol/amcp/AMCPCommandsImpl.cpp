@@ -32,6 +32,7 @@
 #include "amcp_args.h"
 
 #include "../../modules/ltc/ltc_input.h"
+#include "../../modules/portaudio/util/portaudio_device.h"
 
 #include <common/env.h>
 
@@ -3147,6 +3148,51 @@ std::wstring info_ltc_command(command_context& ctx)
     return replyString.str();
 }
 
+std::wstring info_portaudio_command(command_context& ctx)
+{
+    boost::property_tree::wptree info;
+
+    auto& mgr = caspar::portaudio::portaudio_device_manager::instance();
+    if (!mgr.is_initialized()) {
+        info.add(L"portaudio.status", L"not initialized");
+    } else {
+        info.add(L"portaudio.status", L"initialized");
+
+        auto outputs = mgr.enumerate_output_devices();
+        for (const auto& dev : outputs) {
+            boost::property_tree::wptree device_node;
+            device_node.put(L"index", dev.index);
+            device_node.put(L"name", caspar::u16(dev.name));
+            device_node.put(L"host-api", caspar::u16(dev.host_api_name));
+            device_node.put(L"channels", dev.max_output_channels);
+            device_node.put(L"sample-rate", dev.default_sample_rate);
+            device_node.put(L"latency", dev.default_low_output_latency);
+            info.add_child(L"portaudio.output-devices.device", device_node);
+        }
+
+        auto inputs = mgr.enumerate_input_devices();
+        for (const auto& dev : inputs) {
+            boost::property_tree::wptree device_node;
+            device_node.put(L"index", dev.index);
+            device_node.put(L"name", caspar::u16(dev.name));
+            device_node.put(L"host-api", caspar::u16(dev.host_api_name));
+            device_node.put(L"channels", dev.max_input_channels);
+            device_node.put(L"sample-rate", dev.default_sample_rate);
+            device_node.put(L"latency", dev.default_low_input_latency);
+            info.add_child(L"portaudio.input-devices.device", device_node);
+        }
+    }
+
+    std::wstringstream replyString;
+    replyString << L"201 INFO PORTAUDIO OK\r\n";
+
+    pt::xml_writer_settings<std::wstring> w(' ', 3);
+    pt::xml_parser::write_xml(replyString, info, w);
+
+    replyString << L"\r\n";
+    return replyString.str();
+}
+
 std::wstring ltc_load_command(command_context& ctx)
 {
     if (ctx.parameters.size() < 1)
@@ -3969,6 +4015,7 @@ void register_commands(std::shared_ptr<amcp_command_repository_wrapper>& repo)
     repo->register_command(L"Query Commands", L"INFO CONFIG", info_config_command, 0);
     repo->register_command(L"Query Commands", L"INFO PATHS", info_paths_command, 0);
     repo->register_command(L"Query Commands", L"INFO LTC", info_ltc_command, 0);
+    repo->register_command(L"Query Commands", L"INFO PORTAUDIO", info_portaudio_command, 0);
     repo->register_command(L"LTC Commands", L"LTC LOAD", ltc_load_command, 1);
     repo->register_command(L"Query Commands", L"GL INFO", gl_info_command, 0);
     repo->register_command(L"Query Commands", L"GL GC", gl_gc_command, 0);

@@ -35,6 +35,8 @@ if (ENABLE_HTML)
 endif ()
 add_subdirectory(ltc)
 add_subdirectory(system_audio)
+add_subdirectory(portaudio)
+message(STATUS "PortAudio module enabled")
 
 if (MSVC)
     add_subdirectory(flash)
