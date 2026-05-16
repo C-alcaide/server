@@ -136,7 +136,11 @@ struct image_scroll_producer : public core::frame_producer
         if (end_time_)
             speed = -1.0;
 
-        auto av_frame = convert_image_frame(load_image(filename_), AV_PIX_FMT_BGRA);
+        // Scroll producer tile splitting operates on packed BGRA (4 bytes/pixel).
+        // High bit-depth images are downconverted here; a future improvement could
+        // add a 16-bit tile path for HDR scroll content.
+        auto av_frame = load_image(filename_);
+        av_frame      = convert_image_frame(av_frame, AV_PIX_FMT_BGRA);
 
         width_  = av_frame->width;
         height_ = av_frame->height;

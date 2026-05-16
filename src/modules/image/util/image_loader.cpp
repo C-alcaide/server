@@ -155,7 +155,10 @@ bool is_valid_file(const boost::filesystem::path& filename)
                                                       L".jpx",
                                                       L".j2k",
                                                       L".j2c",
-                                                      L".webp"};
+                                                      L".webp",
+                                                      L".exr",
+                                                      L".dpx",
+                                                      L".hdr"};
 
     auto ext = boost::to_lower_copy(boost::filesystem::path(filename).extension().wstring());
     if (extensions.find(ext) == extensions.end()) {

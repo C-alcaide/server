@@ -23,9 +23,11 @@
 #include "image_consumer.h"
 
 #include <common/array.h>
+#include <common/bit_depth.h>
 #include <common/env.h>
 #include <common/except.h>
 #include <common/future.h>
+#include <common/log.h>
 
 #include <core/consumer/channel_info.h>
 #include <core/frame/frame.h>
@@ -86,10 +88,6 @@ struct image_consumer : public core::frame_consumer
             try {
                 std::string filename2;
 
-                if (frame.pixel_format_desc().format != core::pixel_format::bgra)
-                    CASPAR_THROW_EXCEPTION(caspar_exception()
-                                           << msg_info("image_consumer received frame with wrong format"));
-
                 if (filename.empty())
                     filename2 =
                         u8(env::media_folder() +
@@ -105,41 +103,67 @@ struct image_consumer : public core::frame_consumer
                 if (!codec)
                     FF_RET(AVERROR(EINVAL), "avcodec_find_encoder");
 
-                // Detect bit depth from the frame's pixel format descriptor
-                const bool is_16bit = !frame.pixel_format_desc().planes.empty() &&
-                                      frame.pixel_format_desc().planes[0].depth == common::bit_depth::bit16;
-
                 auto ctx = std::shared_ptr<AVCodecContext>(avcodec_alloc_context3(codec),
                                                            [](AVCodecContext* ptr) { avcodec_free_context(&ptr); });
 
+                // Determine if this is a high bit-depth frame
+                const auto& pix_desc  = frame.pixel_format_desc();
+                bool        is_hi_dep = pix_desc.planes.size() > 0 &&
+                                 pix_desc.planes[0].depth != common::bit_depth::bit8;
+
+                // For 16-bit frames, output PNG16 (RGBA64BE); for 8-bit, standard RGBA
+                AVPixelFormat target_fmt = is_hi_dep ? AV_PIX_FMT_RGBA64BE : AV_PIX_FMT_RGBA;
+
                 ctx->width     = static_cast<int>(frame.width());
                 ctx->height    = static_cast<int>(frame.height());
-                ctx->pix_fmt   = is_16bit ? AV_PIX_FMT_RGBA64BE : AV_PIX_FMT_RGBA;
+                ctx->pix_fmt   = target_fmt;
                 ctx->time_base = {1, 1};
                 ctx->framerate = {0, 1};
 
                 FF(avcodec_open2(ctx.get(), codec, nullptr));
 
-                auto av_frame         = ffmpeg::alloc_frame();
-                av_frame->width       = static_cast<int>(frame.width());
-                av_frame->height      = static_cast<int>(frame.height());
-                av_frame->pts         = 0;
+                // Build source AVFrame from the frame's plane data
+                auto av_frame   = ffmpeg::alloc_frame();
+                av_frame->width  = static_cast<int>(frame.width());
+                av_frame->height = static_cast<int>(frame.height());
+                av_frame->pts    = 0;
 
-                if (is_16bit) {
-                    av_frame->format      = AV_PIX_FMT_BGRA64LE;
-                    av_frame->linesize[0] = static_cast<int>(frame.width()) * 8;
+                if (pix_desc.format == core::pixel_format::bgra) {
+                    // Mixer always outputs packed BGRA (1 plane, 4 components)
+                    if (is_hi_dep) {
+                        av_frame->format      = AV_PIX_FMT_BGRA64LE;
+                        av_frame->linesize[0] = static_cast<int>(frame.width()) * 8;
+                    } else {
+                        av_frame->format      = AV_PIX_FMT_BGRA;
+                        av_frame->linesize[0] = static_cast<int>(frame.width()) * 4;
+                    }
+                    av_frame->data[0] = const_cast<uint8_t*>(frame.image_data(0).data());
+                } else if (pix_desc.format == core::pixel_format::gbrp ||
+                           pix_desc.format == core::pixel_format::gbrap) {
+                    // Planar GBR(A) — unlikely from mixer but possible from direct frame path
+                    bool has_alpha = (pix_desc.planes.size() >= 4);
+                    int  bpc       = is_hi_dep ? 2 : 1; // bytes per component
+                    if (is_hi_dep) {
+                        av_frame->format = has_alpha ? AV_PIX_FMT_GBRAP16LE : AV_PIX_FMT_GBRP16LE;
+                    } else {
+                        av_frame->format = has_alpha ? AV_PIX_FMT_GBRAP : AV_PIX_FMT_GBRP;
+                    }
+                    for (size_t i = 0; i < pix_desc.planes.size() && i < 4; ++i) {
+                        av_frame->data[i]     = const_cast<uint8_t*>(frame.image_data(static_cast<int>(i)).data());
+                        av_frame->linesize[i] = pix_desc.planes[i].width * pix_desc.planes[i].stride * bpc;
+                    }
                 } else {
+                    // Fallback: assume packed BGRA-like format
                     av_frame->format      = AV_PIX_FMT_BGRA;
                     av_frame->linesize[0] = static_cast<int>(frame.width()) * 4;
+                    av_frame->data[0]     = const_cast<uint8_t*>(frame.image_data(0).data());
                 }
-                av_frame->data[0] = const_cast<uint8_t*>(frame.image_data(0).data());
 
-                // The png encoder requires RGB ordering, the mixer produces BGR.
-                auto av_frame2 = convert_image_frame(
-                    av_frame, is_16bit ? AV_PIX_FMT_RGBA64BE : AV_PIX_FMT_RGBA);
+                // Convert to target format for PNG encoding
+                auto av_frame2 = convert_image_frame(av_frame, target_fmt);
 
                 // Straighten alpha — PNG stores straight alpha, mixer produces premultiplied.
-                if (is_16bit) {
+                if (is_hi_dep) {
                     auto*       data   = reinterpret_cast<uint16_t*>(av_frame2->data[0]);
                     const int   stride = av_frame2->linesize[0] / 2; // in uint16_t units
                     const int   w      = av_frame2->width;
@@ -159,8 +183,8 @@ struct image_consumer : public core::frame_consumer
                         }
                     }
                 } else {
-                    image_view<bgra_pixel> original_view(av_frame2->data[0], av_frame2->width, av_frame2->height);
-                    unmultiply(original_view);
+                    image_view<bgra_pixel> view(av_frame2->data[0], av_frame2->width, av_frame2->height);
+                    unmultiply(view);
                 }
 
                 FF(avcodec_send_frame(ctx.get(), av_frame2.get()));

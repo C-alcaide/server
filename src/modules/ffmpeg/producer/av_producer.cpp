@@ -4,6 +4,7 @@
 #include "filter_param_tween.h"
 
 #include "../util/av_assert.h"
+#include "../util/av_color.h"
 #include "../util/av_util.h"
 
 #include <boost/exception/exception.hpp>
@@ -108,43 +109,6 @@ const AVCodec* get_decoder(AVCodecID codec_id)
 
 // TODO (fix) Handle ts discontinuities.
 // TODO (feat) Forward options.
-
-core::color_space get_color_space(const std::shared_ptr<AVFrame>& video)
-{
-    auto result = core::color_space::bt709;
-    if (video) {
-        switch (video->colorspace) {
-            case AVColorSpace::AVCOL_SPC_BT2020_NCL:
-                result = core::color_space::bt2020;
-                break;
-            case AVColorSpace::AVCOL_SPC_BT470BG:
-            case AVColorSpace::AVCOL_SPC_SMPTE170M:
-            case AVColorSpace::AVCOL_SPC_SMPTE240M:
-                result = core::color_space::bt601;
-                break;
-            default:
-                break;
-        }
-    }
-
-    return result;
-}
-
-core::color_transfer get_color_transfer(const std::shared_ptr<AVFrame>& video)
-{
-    if (video) {
-        switch (video->color_trc) {
-            case AVColorTransferCharacteristic::AVCOL_TRC_SMPTE2084:
-                return core::color_transfer::pq;
-            case AVColorTransferCharacteristic::AVCOL_TRC_ARIB_STD_B67:
-                return core::color_transfer::hlg;
-            default:
-                break;
-        }
-    }
-
-    return core::color_transfer::sdr;
-}
 
 class Decoder
 {

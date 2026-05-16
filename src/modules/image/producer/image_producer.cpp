@@ -53,11 +53,16 @@ struct image_producer : public core::frame_producer
         , length_(length)
     {
         auto av_frame = load_image(description_);
-        if (!is_frame_compatible_with_mixer(av_frame))
-            av_frame = convert_image_frame(av_frame, AV_PIX_FMT_BGRA);
+        av_frame      = ensure_mixer_compatible(av_frame);
 
-        auto frame =
-            ffmpeg::make_frame(this, *frame_factory, av_frame, nullptr, core::color_space::bt709, scale_mode, true);
+        auto frame = ffmpeg::make_frame(this,
+                                        *frame_factory,
+                                        av_frame,
+                                        nullptr,
+                                        ffmpeg::get_color_space(av_frame),
+                                        scale_mode,
+                                        true,
+                                        ffmpeg::get_color_transfer(av_frame));
         frame_ = core::draw_frame(std::move(frame));
 
         state_["file/path"] = description_;
@@ -74,11 +79,16 @@ struct image_producer : public core::frame_producer
         , length_(length)
     {
         auto av_frame = load_from_memory(std::move(image_data));
-        if (!is_frame_compatible_with_mixer(av_frame))
-            av_frame = convert_image_frame(av_frame, AV_PIX_FMT_BGRA);
+        av_frame      = ensure_mixer_compatible(av_frame);
 
-        auto frame =
-            ffmpeg::make_frame(this, *frame_factory, av_frame, nullptr, core::color_space::bt709, scale_mode, true);
+        auto frame = ffmpeg::make_frame(this,
+                                        *frame_factory,
+                                        av_frame,
+                                        nullptr,
+                                        ffmpeg::get_color_space(av_frame),
+                                        scale_mode,
+                                        true,
+                                        ffmpeg::get_color_transfer(av_frame));
         frame_ = core::draw_frame(std::move(frame));
 
         CASPAR_LOG(info) << print() << L" Initialized";

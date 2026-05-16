@@ -21,6 +21,7 @@
 
 #pragma once
 
+#include <ffmpeg/util/av_color.h>
 #include <ffmpeg/util/av_util.h>
 
 #include <memory>
@@ -30,5 +31,8 @@ namespace caspar::image {
 bool is_frame_compatible_with_mixer(const std::shared_ptr<AVFrame>& src);
 
 std::shared_ptr<AVFrame> convert_image_frame(const std::shared_ptr<AVFrame>& src, AVPixelFormat pixFmt);
+
+// Convert to a mixer-compatible format, preserving bit depth when possible.
+std::shared_ptr<AVFrame> ensure_mixer_compatible(const std::shared_ptr<AVFrame>& src);
 
 } // namespace caspar::image

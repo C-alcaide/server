@@ -31,6 +31,7 @@ extern "C" {
 #define __STDC_CONSTANT_MACROS
 #define __STDC_LIMIT_MACROS
 #include <libavformat/avformat.h>
+#include <libavutil/pixdesc.h>
 #include <libavutil/pixfmt.h>
 #include <libswscale/swscale.h>
 }
@@ -53,13 +54,19 @@ std::shared_ptr<AVFrame> convert_image_frame(const std::shared_ptr<AVFrame>& src
     if (src->format == pixFmt)
         return src;
 
+    // Use higher-quality flags when source is >8-bit to avoid precision loss
+    const auto* pix_desc = av_pix_fmt_desc_get(static_cast<AVPixelFormat>(src->format));
+    int         flags    = 0;
+    if (pix_desc && pix_desc->comp[0].depth > 8)
+        flags = SWS_ACCURATE_RND | SWS_FULL_CHR_H_INT;
+
     auto sws = std::shared_ptr<SwsContext>(sws_getContext(src->width,
                                                           src->height,
                                                           static_cast<AVPixelFormat>(src->format),
                                                           src->width,
                                                           src->height,
                                                           pixFmt,
-                                                          0,
+                                                          flags,
                                                           nullptr,
                                                           nullptr,
                                                           nullptr),
@@ -73,12 +80,33 @@ std::shared_ptr<AVFrame> convert_image_frame(const std::shared_ptr<AVFrame>& src
     dest->width               = src->width;
     dest->height              = src->height;
     dest->format              = pixFmt;
-    dest->colorspace          = AVCOL_SPC_BT709;
-    av_frame_get_buffer(dest.get(), 64);
+    dest->colorspace          = src->colorspace;
+    dest->color_trc           = src->color_trc;
+    dest->color_primaries     = src->color_primaries;
+
+    if (av_frame_get_buffer(dest.get(), 64) < 0) {
+        CASPAR_THROW_EXCEPTION(caspar_exception() << msg_info("Failed to allocate frame buffer"));
+    }
 
     sws_scale(sws.get(), src->data, src->linesize, 0, src->height, dest->data, dest->linesize);
 
     return dest;
+}
+
+std::shared_ptr<AVFrame> ensure_mixer_compatible(const std::shared_ptr<AVFrame>& src)
+{
+    if (is_frame_compatible_with_mixer(src))
+        return src;
+
+    // Check source bit depth to choose appropriate target format
+    const auto* pix_desc = av_pix_fmt_desc_get(static_cast<AVPixelFormat>(src->format));
+    if (pix_desc && pix_desc->comp[0].depth > 8) {
+        // High bit-depth source: convert to GBRAP16 (planar, full precision, mixer-native)
+        return convert_image_frame(src, AV_PIX_FMT_GBRAP16LE);
+    }
+
+    // 8-bit source: convert to BGRA (standard path)
+    return convert_image_frame(src, AV_PIX_FMT_BGRA);
 }
 
 } // namespace caspar::image
