@@ -71,6 +71,7 @@ struct device::impl : public std::enable_shared_from_this<impl>
     io_context                             io_context_;
     decltype(make_work_guard(io_context_)) work_;
     std::thread                            thread_;
+    std::thread::id                        thread_id_;
 
     impl()
         : context_(new device_context())
@@ -111,6 +112,7 @@ struct device::impl : public std::enable_shared_from_this<impl>
         context_->unbind();
 
         thread_ = std::thread([&] {
+            thread_id_ = std::this_thread::get_id();
             context_->bind();
             set_thread_name(L"OpenGL Device");
             io_context_.run();
@@ -167,6 +169,9 @@ struct device::impl : public std::enable_shared_from_this<impl>
     template <typename Func>
     auto dispatch_sync(Func&& func) -> decltype(func())
     {
+        // If already on the device thread, execute directly to avoid deadlock.
+        if (std::this_thread::get_id() == thread_id_)
+            return func();
         return dispatch_async(std::forward<Func>(func)).get();
     }
 

@@ -210,13 +210,19 @@ void tracker_registry::inject_transform(const tracker_binding& binding, const ca
 
 void tracker_registry::on_data(const camera_data& data)
 {
-    std::lock_guard<std::mutex> lk(mutex_);
-    latest_data_[data.camera_id] = data;
+    std::vector<tracker_binding> matched;
+    {
+        std::lock_guard<std::mutex> lk(mutex_);
+        latest_data_[data.camera_id] = data;
 
-    for (auto& [key, binding] : bindings_) {
-        if (binding.camera_id == -1 || binding.camera_id == data.camera_id)
-            inject_transform(binding, data);
+        for (auto& [key, binding] : bindings_) {
+            if (binding.camera_id == -1 || binding.camera_id == data.camera_id)
+                matched.push_back(binding);
+        }
     }
+
+    for (auto& binding : matched)
+        inject_transform(binding, data);
 }
 
 std::optional<camera_data> tracker_registry::get_latest_data(int camera_id) const

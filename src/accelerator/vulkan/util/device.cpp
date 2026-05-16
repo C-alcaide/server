@@ -148,6 +148,7 @@ struct device::impl : public std::enable_shared_from_this<impl>
     io_context                             io_context_;
     decltype(make_work_guard(io_context_)) work_;
     std::thread                            thread_;
+    std::thread::id                        thread_id_;
 
     impl()
         : work_(make_work_guard(io_context_))
@@ -279,6 +280,7 @@ struct device::impl : public std::enable_shared_from_this<impl>
         _pipelines[1] = std::make_shared<pipeline>(_device, vk::Format::eR16G16B16A16Unorm, _memoryProperties);
 
         thread_ = std::thread([&] {
+            thread_id_ = std::this_thread::get_id();
             set_thread_name(L"Vulkan Device");
             io_context_.run();
         });
@@ -350,6 +352,8 @@ struct device::impl : public std::enable_shared_from_this<impl>
     template <typename Func>
     auto dispatch_sync(Func&& func) -> decltype(func())
     {
+        if (std::this_thread::get_id() == thread_id_)
+            return func();
         return dispatch_async(std::forward<Func>(func)).get();
     }
 
@@ -411,6 +415,7 @@ struct device::impl : public std::enable_shared_from_this<impl>
 
     std::vector<vk::CommandBuffer> allocateCommandBuffers(uint32_t count)
     {
+        CASPAR_VERIFY(std::this_thread::get_id() == thread_id_);
         return _device.allocateCommandBuffers(
             vk::CommandBufferAllocateInfo(_command_pool, vk::CommandBufferLevel::ePrimary, count));
     }

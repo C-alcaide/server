@@ -179,6 +179,9 @@ color average_color(const core::const_frame& frame, rect& rectangle)
         }
     }
 
+    if (count == 0)
+        return color{0, 0, 0};
+
     color c{(std::uint8_t)(tr / count), (std::uint8_t)(tg / count), (std::uint8_t)(tb / count)};
 
     return c;

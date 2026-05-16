@@ -7,6 +7,8 @@ if(NOT DEFINED SPOUT_SDK_DIR)
         spout_sdk
         GIT_REPOSITORY https://github.com/leadedge/Spout2.git
         GIT_TAG        master
+        EXCLUDE_FROM_ALL    # Don't build Spout's own targets (Spout, Spout_static, etc.)
+                            # We compile the needed .cpp files directly in our own target.
     )
     FetchContent_MakeAvailable(spout_sdk)
     set(SPOUT_SDK_DIR "${spout_sdk_SOURCE_DIR}/SPOUTSDK")

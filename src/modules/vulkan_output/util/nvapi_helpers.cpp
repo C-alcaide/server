@@ -92,6 +92,9 @@ bool parse_edid_hdr_support(const uint8_t* edid, uint32_t edid_size, uint32_t& m
         uint8_t tag    = (ext[pos] >> 5) & 0x07;
         uint8_t length = ext[pos] & 0x1F;
 
+        if (pos + length + 1 > 128)
+            break; // data block overflows the extension block
+
         if (tag == 7 && length >= 2) { // Extended tag
             uint8_t ext_tag = ext[pos + 1];
             if (ext_tag == 6 && length >= 3) { // HDR Static Metadata

@@ -68,7 +68,12 @@ std::array<vk::VertexInputAttributeDescription, 2> get_attribute_descriptions(ui
     return attributeDescriptions;
 }
 
-const int DescriptorPoolSize = 64;
+// Descriptor set ring buffer size. With ~12 draw calls per frame and 3 frames in flight,
+// we consume ~36 sets before the GPU retires the oldest frame. 128 gives ~10 frames of
+// headroom without any per-set fence tracking. A future improvement could add per-slot
+// timeline semaphore stamps (vkGetSemaphoreCounterValue) to guarantee safety regardless
+// of pool size, but the overhead is unnecessary while 128 >> typical in-flight usage.
+const int DescriptorPoolSize = 128;
 const int BindlessTextureCount = 8;
 // UBO ring buffer: round sizeof(uniform_block) up to multiple of 256 for alignment
 const vk::DeviceSize UBO_SLOT_SIZE  = (sizeof(uniform_block) + 255) & ~vk::DeviceSize(255);

@@ -99,6 +99,7 @@ class portaudio_producer_impl : public capture_listener
 
     std::atomic<bool>    running_{false};
     std::atomic<bool>    disconnected_{false};
+    bool                 disconnect_logged_{false};
     std::atomic<int64_t> underrun_count_{0};
     std::atomic<int64_t> buffer_fill_{0};
 
@@ -335,9 +336,8 @@ class portaudio_producer_impl : public capture_listener
     core::draw_frame get_frame(int nb_samples)
     {
         if (disconnected_) {
-            static bool logged = false;
-            if (!logged) {
-                logged = true;
+            if (!disconnect_logged_) {
+                disconnect_logged_ = true;
                 CASPAR_LOG(warning) << L"[portaudio-producer] Device " << device_index_
                                    << L" disconnected — returning silence.";
             }

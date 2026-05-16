@@ -2185,7 +2185,16 @@ class vulkan_output_consumer : public core::frame_consumer
                     }
                 }
                 if (cuda_vk_src_device_ < 0) {
-                    cuda_vk_src_device_ = 0; // fallback
+                    if (src_luid) {
+                        // LUID was provided but no CUDA device matched — wrong GPU would be selected.
+                        // Fall back to non-CUDA path instead of silently using device 0.
+                        CASPAR_LOG(warning) << print() << L" CUDA LUID matching failed — no CUDA device matches "
+                                            << L"the Vulkan device LUID. Falling back to CPU staging path.";
+                        cuda_vk_peer_failed_ = true;
+                        cuda_vk_peer_init_   = true;
+                        return false;
+                    }
+                    cuda_vk_src_device_ = 0; // No LUID available (single-GPU likely) — use device 0
                 }
 
                 cudaSetDevice(cuda_vk_src_device_);
@@ -2660,14 +2669,17 @@ class vulkan_output_consumer : public core::frame_consumer
             staging_buffer_size_ = size;
         }
 
-        // Map and copy
-        void* mapped = nullptr;
-        if (vkMapMemory(dev, staging_memory_, 0, size, 0, &mapped) != VK_SUCCESS) {
-            CASPAR_LOG(error) << print() << L" Failed to map staging memory";
-            return;
+        // Map and copy — reuse persistent mapping if CUDA path already mapped it
+        void* mapped = staging_mapped_;
+        if (!mapped) {
+            if (vkMapMemory(dev, staging_memory_, 0, size, 0, &mapped) != VK_SUCCESS) {
+                CASPAR_LOG(error) << print() << L" Failed to map staging memory";
+                return;
+            }
         }
         memcpy(mapped, pixels, size);
-        vkUnmapMemory(dev, staging_memory_);
+        if (!staging_mapped_)
+            vkUnmapMemory(dev, staging_memory_);
 
         // Clear the destination image first if the copy won't cover the entire
         // surface, so borders don't contain undefined content.

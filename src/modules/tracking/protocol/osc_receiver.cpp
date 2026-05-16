@@ -53,11 +53,14 @@ namespace caspar { namespace tracking {
 
 static constexpr double DEG2RAD_OSC = 3.141592653589793 / 180.0;
 
-/// Returns the 4-byte-aligned offset after a null-terminated string
+/// Returns the 4-byte-aligned offset after a null-terminated string.
+/// Returns a value > len if no null terminator was found within bounds.
 static std::size_t osc_string_end(const uint8_t* data, std::size_t offset, std::size_t len)
 {
     while (offset < len && data[offset] != 0)
         ++offset;
+    if (offset >= len)
+        return len + 1; // no null found — signal out-of-bounds
     ++offset; // skip null
     // pad to 4-byte boundary
     return (offset + 3) & ~std::size_t{3};
@@ -99,9 +102,12 @@ static bool parse_osc_message(const uint8_t* data, std::size_t offset, std::size
         return false;
 
     // Address string
-    const char* addr_c = reinterpret_cast<const char*>(data + offset);
-    out_addr = addr_c;
     std::size_t tag_offset = osc_string_end(data, offset, len);
+    if (tag_offset > len)
+        return false;
+
+    const char* addr_c = reinterpret_cast<const char*>(data + offset);
+    out_addr = addr_c; // safe: osc_string_end verified null exists within bounds
 
     if (tag_offset >= len || data[tag_offset] != ',')
         return false;

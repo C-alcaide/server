@@ -6,6 +6,7 @@
 
 #ifdef ENABLE_VULKAN
 #include "vulkan/image/image_mixer.h"
+#include "vulkan/image/previz_texture_bridge.h"
 #include "vulkan/util/device.h"
 #endif
 
@@ -27,6 +28,10 @@ struct accelerator::impl
     std::shared_ptr<accelerator_device>          device_;
     std::shared_ptr<ogl::device>                 previz_ogl_device_;
     std::shared_ptr<ogl::channel_texture_store>  channel_tex_store_;
+#ifdef ENABLE_VULKAN
+    std::shared_ptr<vulkan::previz_texture_bridge> previz_bridge_;
+    std::once_flag                               bridge_init_flag_;
+#endif
     std::once_flag                               tex_store_init_flag_;
     std::once_flag                               previz_ogl_init_flag_;
     const core::video_format_repository          format_repository_;
@@ -58,6 +63,7 @@ struct accelerator::impl
                 depth);
             mixer->set_previz_ogl_device(get_previz_ogl_device());
             mixer->set_channel_texture_store(get_channel_texture_store());
+            mixer->set_previz_bridge(get_previz_bridge());
             return mixer;
         }
 #endif
@@ -107,6 +113,19 @@ struct accelerator::impl
         });
         return previz_ogl_device_;
     }
+
+#ifdef ENABLE_VULKAN
+    std::shared_ptr<vulkan::previz_texture_bridge> get_previz_bridge()
+    {
+        std::call_once(bridge_init_flag_, [this] {
+            auto vk_dev = std::dynamic_pointer_cast<vulkan::device>(get_device());
+            previz_bridge_ = std::make_shared<vulkan::previz_texture_bridge>(
+                spl::make_shared_ptr(vk_dev), get_previz_ogl_device());
+            CASPAR_LOG(info) << L"[accelerator] Created shared VK→GL previz texture bridge.";
+        });
+        return previz_bridge_;
+    }
+#endif
 };
 
 accelerator::accelerator(const core::video_format_repository format_repository)

@@ -363,7 +363,7 @@ struct image_mixer::impl
     std::shared_ptr<ogl::device>                 previz_ogl_device_;
     std::shared_ptr<ogl::channel_texture_store>  channel_tex_store_;
     std::unique_ptr<ogl::previz_renderer>        previz_renderer_;
-    std::unique_ptr<previz_texture_bridge>       previz_bridge_;
+    std::shared_ptr<previz_texture_bridge>       previz_bridge_;
     std::once_flag                               previz_init_flag_;
     int                                          channel_id_ = 0;
 
@@ -620,6 +620,11 @@ struct image_mixer::impl
         channel_tex_store_ = store;
     }
 
+    void set_previz_bridge(const std::shared_ptr<previz_texture_bridge>& bridge)
+    {
+        previz_bridge_ = bridge;
+    }
+
     ogl::previz_renderer* get_previz_renderer()
     {
         std::call_once(previz_init_flag_, [this] {
@@ -628,9 +633,6 @@ struct image_mixer::impl
             previz_renderer_ = std::make_unique<ogl::previz_renderer>(
                 spl::make_shared_ptr(previz_ogl_device_));
             CASPAR_LOG(info) << L"[vk_mixer] Created previz renderer for channel " << channel_id_;
-
-            // Create the VK→GL texture bridge
-            previz_bridge_ = std::make_unique<previz_texture_bridge>(vulkan_, previz_ogl_device_);
         });
         return previz_renderer_.get();
     }
@@ -643,7 +645,11 @@ image_mixer::image_mixer(const spl::shared_ptr<device>& vulkan,
     : impl_(std::make_unique<impl>(vulkan, channel_id, max_frame_size, depth))
 {
 }
-image_mixer::~image_mixer() {}
+image_mixer::~image_mixer()
+{
+    if (impl_->channel_tex_store_)
+        impl_->channel_tex_store_->remove(impl_->channel_id_);
+}
 void image_mixer::push(const core::frame_transform& transform) { impl_->push(transform); }
 void image_mixer::visit(const core::const_frame& frame) { impl_->visit(frame); }
 void image_mixer::pop() { impl_->pop(); }
@@ -677,6 +683,11 @@ void image_mixer::set_previz_ogl_device(const std::shared_ptr<ogl::device>& ogl_
 void image_mixer::set_channel_texture_store(const std::shared_ptr<ogl::channel_texture_store>& store)
 {
     impl_->set_channel_texture_store(store);
+}
+
+void image_mixer::set_previz_bridge(const std::shared_ptr<previz_texture_bridge>& bridge)
+{
+    impl_->set_previz_bridge(bridge);
 }
 
 ogl::previz_renderer* image_mixer::get_previz_renderer()

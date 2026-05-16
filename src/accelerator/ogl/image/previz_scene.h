@@ -138,6 +138,12 @@ class channel_texture_store
         return {};
     }
 
+    void remove(int channel_id)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        entries_.erase(channel_id);
+    }
+
   private:
     mutable std::mutex    mutex_;
     std::map<int, entry>  entries_;

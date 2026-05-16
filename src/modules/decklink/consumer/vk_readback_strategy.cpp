@@ -181,6 +181,18 @@ struct vk_readback_strategy::impl
         return std::shared_ptr<void>(mapped, [guard](void*) {});
     }
 
+    // Wait for all in-flight slot fences (targeted alternative to vkDeviceWaitIdle).
+    // Fences start signaled, so this is safe to call even before first submit.
+    void wait_all_slot_fences()
+    {
+        VkFence fences[NUM_BUFS];
+        int count = 0;
+        for (auto& s : slots_)
+            if (s.fence) fences[count++] = s.fence;
+        if (count > 0)
+            vkWaitForFences(device_, count, fences, VK_TRUE, 500'000'000); // 500ms timeout
+    }
+
     // Timing diagnostics
     int    frame_count_      = 0;
     double accum_import_ms_  = 0.0;
@@ -574,7 +586,7 @@ struct vk_readback_strategy::impl
             return;
 
         // Wait for all in-flight work before reallocating
-        vkDeviceWaitIdle(device_);
+        wait_all_slot_fences();
 
         for (auto& s : slots_) {
             if (s.dev_buf)   { vkDestroyBuffer(device_, s.dev_buf, nullptr); s.dev_buf = VK_NULL_HANDLE; }
@@ -680,7 +692,7 @@ struct vk_readback_strategy::impl
 
         // Evict oldest if full
         if (num_cached_tex_ >= MAX_TEX_CACHE) {
-            vkDeviceWaitIdle(device_);
+            wait_all_slot_fences();
             auto& old = tex_cache_[0];
             invalidate_sem_for_handle(old.handle);
             if (old.view)  vkDestroyImageView(device_, old.view, nullptr);
@@ -777,7 +789,7 @@ struct vk_readback_strategy::impl
                 return sem_cache_[i].sem;
 
         if (num_cached_sem_ >= MAX_SEM_CACHE) {
-            vkDeviceWaitIdle(device_);
+            wait_all_slot_fences();
             vkDestroySemaphore(device_, sem_cache_[0].sem, nullptr);
             for (int i = 1; i < num_cached_sem_; ++i)
                 sem_cache_[i-1] = sem_cache_[i];
@@ -829,7 +841,7 @@ struct vk_readback_strategy::impl
         if (!handle) return;
         for (int i = 0; i < num_cached_sem_; ++i) {
             if (sem_cache_[i].handle == handle) {
-                vkDeviceWaitIdle(device_);
+                wait_all_slot_fences();
                 vkDestroySemaphore(device_, sem_cache_[i].sem, nullptr);
                 for (int j = i + 1; j < num_cached_sem_; ++j)
                     sem_cache_[j-1] = sem_cache_[j];
@@ -902,7 +914,6 @@ struct vk_readback_strategy::impl
         step_timer = caspar::timer();
         if (warmup_count_ >= NUM_BUFS - 1)
             VK_CHECK(vkWaitForFences(device_, 1, &slot.fence, VK_TRUE, UINT64_MAX), "vkWaitForFences (dma)");
-        vkResetFences(device_, 1, &slot.fence);
         double sync_ms = step_timer.elapsed() * 1000.0;
 
         // Import timeline semaphore for GPU-side wait
@@ -983,7 +994,9 @@ struct vk_readback_strategy::impl
             submit.pWaitSemaphores    = &wait_sem;
             submit.pWaitDstStageMask  = &wait_stage;
         }
-
+        // Reset fence just before submit — if any prior VK call failed and threw,
+        // the fence remains signaled, preventing deadlock on the next wait.
+        vkResetFences(device_, 1, &slot.fence);
         VK_CHECK(vkQueueSubmit(compute_queue_, 1, &submit, slot.fence), "vkQueueSubmit (dma)");
         double submit_ms = step_timer.elapsed() * 1000.0;
 
@@ -1090,7 +1103,6 @@ struct vk_readback_strategy::impl
         step_timer = caspar::timer();
         if (warmup_count_ >= NUM_BUFS - 1)
             VK_CHECK(vkWaitForFences(device_, 1, &slot.fence, VK_TRUE, UINT64_MAX), "vkWaitForFences");
-        vkResetFences(device_, 1, &slot.fence);
         double sync_ms = step_timer.elapsed() * 1000.0;
 
         // Import timeline semaphore for GPU-side wait
@@ -1218,6 +1230,8 @@ struct vk_readback_strategy::impl
             submit.pWaitDstStageMask  = &wait_stage;
         }
 
+        // Reset fence just before submit to prevent deadlock if prior VK calls threw.
+        vkResetFences(device_, 1, &slot.fence);
         VK_CHECK(vkQueueSubmit(compute_queue_, 1, &submit, slot.fence), "vkQueueSubmit");
         double submit_ms = step_timer.elapsed() * 1000.0;
 

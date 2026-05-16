@@ -143,6 +143,13 @@ struct sacn_consumer : public core::frame_consumer
                     memset(dmx_data, 0, 512);
 
                     for (auto& cf : computed_fixtures_) {
+                        // Bounds check: ensure fixture address + channels fits in DMX universe
+                        int channels_needed = 1;
+                        if (cf.type == FixtureType::RGB) channels_needed = 3;
+                        else if (cf.type == FixtureType::RGBW) channels_needed = 4;
+                        if (cf.address < 0 || cf.address + channels_needed > 512)
+                            continue;
+
                         auto     color = average_color(frame, cf.rectangle);
                         uint8_t* ptr   = dmx_data + cf.address;
 

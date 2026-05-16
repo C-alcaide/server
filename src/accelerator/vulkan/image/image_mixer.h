@@ -42,6 +42,8 @@ class previz_renderer;
 
 namespace vulkan {
 
+class previz_texture_bridge;
+
 class image_mixer final : public core::image_mixer
 {
   public:
@@ -79,6 +81,7 @@ class image_mixer final : public core::image_mixer
     /// Previz support — called by accelerator after construction.
     void set_previz_ogl_device(const std::shared_ptr<ogl::device>& ogl_dev);
     void set_channel_texture_store(const std::shared_ptr<ogl::channel_texture_store>& store);
+    void set_previz_bridge(const std::shared_ptr<class previz_texture_bridge>& bridge);
     ogl::previz_renderer* get_previz_renderer();
 
     void set_target_color(core::color_space cs, core::color_transfer ct, bool auto_convert) override;
