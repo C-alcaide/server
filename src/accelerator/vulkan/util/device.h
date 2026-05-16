@@ -69,6 +69,8 @@ class device final
 
     std::future<std::shared_ptr<class texture>>
     copy_async(const array<const uint8_t>& source, int width, int height, int stride, common::bit_depth depth);
+    std::future<std::shared_ptr<class texture>>
+    copy_compressed_async(const array<const uint8_t>& source, int width, int height, vk::Format format);
     std::future<array<const uint8_t>> copy_async(const std::shared_ptr<class texture>& source);
     template <typename Func>
     auto dispatch_async(Func&& func)

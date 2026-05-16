@@ -29,11 +29,15 @@
 #include <core/monitor/monitor.h>
 
 #ifdef _WIN32
-#include "d3d11_gl_bridge.h"
-// d3d11.h must be included BEFORE extern "C" because hwcontext_d3d11va.h
-// transitively includes it, and d3d11.h has C++ operator overloads that
-// cannot compile inside extern "C" linkage.
 #include <d3d11.h>
+#include <dxgi1_2.h>
+#endif
+
+#ifdef _WIN32
+#include <GL/glew.h>
+#include <GL/wglew.h>
+#include <accelerator/ogl/util/device.h>
+#include <accelerator/ogl/util/texture.h>
 #endif
 
 #ifdef _MSC_VER
@@ -74,8 +78,283 @@ namespace caspar { namespace ffmpeg {
 const AVRational TIME_BASE_Q = {1, AV_TIME_BASE};
 
 // ── D3D11 → OpenGL GPU-direct bridge ────────────────────────────────────────
-// Implementation moved to d3d11_gl_bridge.cpp to avoid MSVC namespace issues
-// with accelerator header includes.
+// Avoids GPU→CPU→GPU roundtrip for D3D11VA decoded frames by using
+// WGL_NV_DX_interop2 + D3D11 Video Processor (NV12→BGRA on GPU).
+#ifdef _WIN32
+class d3d11_gl_bridge
+{
+    // D3D11 objects
+    ID3D11Device*                       d3d11_device_      = nullptr;
+    ID3D11DeviceContext*                d3d11_ctx_         = nullptr;
+    ID3D11VideoDevice*                  video_device_      = nullptr;
+    ID3D11VideoContext*                 video_ctx_         = nullptr;
+    ID3D11VideoProcessor*               video_processor_   = nullptr;
+    ID3D11VideoProcessorEnumerator*     vp_enum_           = nullptr;
+    ID3D11VideoProcessorOutputView*     vp_output_view_    = nullptr;
+    ID3D11Texture2D*                    bgra_texture_      = nullptr;
+
+    // WGL_NV_DX_interop2
+    PFNWGLDXOPENDEVICENVPROC            wglDXOpenDeviceNV_      = nullptr;
+    PFNWGLDXCLOSEDEVICENVPROC           wglDXCloseDeviceNV_     = nullptr;
+    PFNWGLDXREGISTEROBJECTNVPROC        wglDXRegisterObjectNV_  = nullptr;
+    PFNWGLDXUNREGISTEROBJECTNVPROC      wglDXUnregisterObjectNV_ = nullptr;
+    PFNWGLDXLOCKOBJECTSNVPROC           wglDXLockObjectsNV_     = nullptr;
+    PFNWGLDXUNLOCKOBJECTSNVPROC         wglDXUnlockObjectsNV_   = nullptr;
+
+    HANDLE interop_device_ = nullptr;
+    HANDLE interop_object_ = nullptr;
+    GLuint interop_gl_tex_ = 0;
+
+    // GL context for the decode thread
+    HWND   dummy_hwnd_  = nullptr;
+    HDC    dc_          = nullptr;
+    HGLRC  gl_ctx_      = nullptr;
+
+    int width_  = 0;
+    int height_ = 0;
+    bool active_ = false;
+
+  public:
+    bool init(AVBufferRef* hw_device_ctx, void* ogl_device_ptr)
+    {
+        if (!hw_device_ctx || !ogl_device_ptr)
+            return false;
+
+        auto* ogl_dev = static_cast<accelerator::ogl::device*>(ogl_device_ptr);
+
+        // Get the D3D11 device from FFmpeg's hw_device_ctx
+        auto* hwctx = reinterpret_cast<AVHWDeviceContext*>(hw_device_ctx->data);
+        if (!hwctx || hwctx->type != AV_HWDEVICE_TYPE_D3D11VA)
+            return false;
+        auto* d3d11_hwctx = static_cast<AVD3D11VADeviceContext*>(hwctx->hwctx);
+        d3d11_device_ = d3d11_hwctx->device;
+        d3d11_ctx_    = d3d11_hwctx->device_context;
+        if (!d3d11_device_ || !d3d11_ctx_)
+            return false;
+
+        // Load WGL_NV_DX_interop2 functions
+        wglDXOpenDeviceNV_       = (PFNWGLDXOPENDEVICENVPROC)wglGetProcAddress("wglDXOpenDeviceNV");
+        wglDXCloseDeviceNV_      = (PFNWGLDXCLOSEDEVICENVPROC)wglGetProcAddress("wglDXCloseDeviceNV");
+        wglDXRegisterObjectNV_   = (PFNWGLDXREGISTEROBJECTNVPROC)wglGetProcAddress("wglDXRegisterObjectNV");
+        wglDXUnregisterObjectNV_ = (PFNWGLDXUNREGISTEROBJECTNVPROC)wglGetProcAddress("wglDXUnregisterObjectNV");
+        wglDXLockObjectsNV_      = (PFNWGLDXLOCKOBJECTSNVPROC)wglGetProcAddress("wglDXLockObjectsNV");
+        wglDXUnlockObjectsNV_    = (PFNWGLDXUNLOCKOBJECTSNVPROC)wglGetProcAddress("wglDXUnlockObjectsNV");
+
+        if (!wglDXOpenDeviceNV_ || !wglDXCloseDeviceNV_ || !wglDXRegisterObjectNV_ ||
+            !wglDXUnregisterObjectNV_ || !wglDXLockObjectsNV_ || !wglDXUnlockObjectsNV_) {
+            CASPAR_LOG(info) << L"[av_producer] WGL_NV_DX_interop2 not available — using CPU path";
+            return false;
+        }
+
+        // Create shared GL context for the decode thread
+        void* mixer_hglrc = ogl_dev->native_gl_context();
+        if (!mixer_hglrc)
+            return false;
+
+        WNDCLASSA wc   = {};
+        wc.lpfnWndProc = DefWindowProcA;
+        wc.hInstance   = GetModuleHandle(nullptr);
+        wc.lpszClassName = "CasparCG_FFmpeg_D3D11GL";
+        RegisterClassA(&wc);
+
+        dummy_hwnd_ = CreateWindowA("CasparCG_FFmpeg_D3D11GL", "", 0, 0, 0, 1, 1, nullptr, nullptr, wc.hInstance, nullptr);
+        dc_ = GetDC(dummy_hwnd_);
+
+        PIXELFORMATDESCRIPTOR pfd = {};
+        pfd.nSize    = sizeof(pfd);
+        pfd.nVersion = 1;
+        pfd.dwFlags  = PFD_SUPPORT_OPENGL;
+        pfd.iPixelType = PFD_TYPE_RGBA;
+        pfd.cColorBits = 32;
+        int fmt = ChoosePixelFormat(dc_, &pfd);
+        SetPixelFormat(dc_, fmt, &pfd);
+
+        gl_ctx_ = wglCreateContext(dc_);
+        if (!gl_ctx_ || !wglShareLists((HGLRC)mixer_hglrc, gl_ctx_)) {
+            CASPAR_LOG(warning) << L"[av_producer] Failed to create shared GL context for D3D11-GL bridge";
+            cleanup();
+            return false;
+        }
+        wglMakeCurrent(dc_, gl_ctx_);
+
+        // Open DX interop device
+        interop_device_ = wglDXOpenDeviceNV_(d3d11_device_);
+        if (!interop_device_) {
+            CASPAR_LOG(warning) << L"[av_producer] wglDXOpenDeviceNV failed — using CPU path";
+            cleanup();
+            return false;
+        }
+
+        CASPAR_LOG(info) << L"[av_producer] D3D11→GL GPU-direct bridge initialized";
+        active_ = true;
+        return true;
+    }
+
+    bool setup_for_size(int width, int height)
+    {
+        if (width == width_ && height == height_ && bgra_texture_)
+            return true;
+
+        // Tear down old resources
+        teardown_interop();
+        teardown_video_processor();
+
+        width_  = width;
+        height_ = height;
+
+        // Create BGRA output texture
+        D3D11_TEXTURE2D_DESC desc = {};
+        desc.Width            = width;
+        desc.Height           = height;
+        desc.MipLevels        = 1;
+        desc.ArraySize        = 1;
+        desc.Format           = DXGI_FORMAT_B8G8R8A8_UNORM;
+        desc.SampleDesc.Count = 1;
+        desc.Usage            = D3D11_USAGE_DEFAULT;
+        desc.BindFlags        = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+        desc.MiscFlags        = 0; // no sharing needed — interop handles it
+
+        HRESULT hr = d3d11_device_->CreateTexture2D(&desc, nullptr, &bgra_texture_);
+        if (FAILED(hr))
+            return false;
+
+        // Create video processor for NV12→BGRA
+        HRESULT vhr;
+        vhr = d3d11_device_->QueryInterface(__uuidof(ID3D11VideoDevice), (void**)&video_device_);
+        if (FAILED(vhr))
+            return false;
+
+        d3d11_ctx_->QueryInterface(__uuidof(ID3D11VideoContext), (void**)&video_ctx_);
+
+        D3D11_VIDEO_PROCESSOR_CONTENT_DESC vp_desc = {};
+        vp_desc.InputFrameFormat            = D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE;
+        vp_desc.InputWidth                  = width;
+        vp_desc.InputHeight                 = height;
+        vp_desc.OutputWidth                 = width;
+        vp_desc.OutputHeight                = height;
+        vp_desc.Usage                       = D3D11_VIDEO_USAGE_PLAYBACK_NORMAL;
+
+        vhr = video_device_->CreateVideoProcessorEnumerator(&vp_desc, &vp_enum_);
+        if (FAILED(vhr))
+            return false;
+
+        vhr = video_device_->CreateVideoProcessor(vp_enum_, 0, &video_processor_);
+        if (FAILED(vhr))
+            return false;
+
+        // Create output view for the BGRA texture
+        D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC ov_desc = {};
+        ov_desc.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D;
+        vhr = video_device_->CreateVideoProcessorOutputView(bgra_texture_, vp_enum_, &ov_desc, &vp_output_view_);
+        if (FAILED(vhr))
+            return false;
+
+        // Register BGRA texture with GL via WGL_NV_DX_interop2
+        glGenTextures(1, &interop_gl_tex_);
+        interop_object_ = wglDXRegisterObjectNV_(
+            interop_device_, bgra_texture_, interop_gl_tex_, GL_TEXTURE_2D, WGL_ACCESS_READ_ONLY_NV);
+        if (!interop_object_) {
+            CASPAR_LOG(warning) << L"[av_producer] wglDXRegisterObjectNV failed";
+            return false;
+        }
+
+        return true;
+    }
+
+    std::shared_ptr<accelerator::ogl::texture>
+    convert(ID3D11Texture2D* nv12_tex, int array_index, accelerator::ogl::device& ogl_dev)
+    {
+        if (!active_ || !bgra_texture_)
+            return nullptr;
+
+        // Create input view for the NV12 texture array slice
+        D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC iv_desc = {};
+        iv_desc.FourCC               = 0;
+        iv_desc.ViewDimension        = D3D11_VPIV_DIMENSION_TEXTURE2D;
+        iv_desc.Texture2D.ArraySlice = array_index;
+        iv_desc.Texture2D.MipSlice   = 0;
+
+        ID3D11VideoProcessorInputView* input_view = nullptr;
+        HRESULT hr = video_device_->CreateVideoProcessorInputView(nv12_tex, vp_enum_, &iv_desc, &input_view);
+        if (FAILED(hr))
+            return nullptr;
+
+        // Run the video processor: NV12→BGRA
+        D3D11_VIDEO_PROCESSOR_STREAM stream = {};
+        stream.Enable      = TRUE;
+        stream.pInputSurface = input_view;
+
+        video_ctx_->VideoProcessorBlt(video_processor_, vp_output_view_, 0, 1, &stream);
+        input_view->Release();
+
+        // Lock the D3D11 texture for GL access
+        if (!wglDXLockObjectsNV_(interop_device_, 1, &interop_object_))
+            return nullptr;
+
+        // Create OGL texture and copy from the interop texture
+        auto ogl_tex = ogl_dev.dispatch_sync([&]() {
+            auto tex = std::make_shared<accelerator::ogl::texture>(width_, height_, 4);
+            tex->copy_from(static_cast<int>(interop_gl_tex_));
+            return tex;
+        });
+
+        wglDXUnlockObjectsNV_(interop_device_, 1, &interop_object_);
+        return ogl_tex;
+    }
+
+    bool is_active() const { return active_; }
+
+    void cleanup()
+    {
+        teardown_interop();
+        teardown_video_processor();
+
+        if (interop_device_) {
+            wglDXCloseDeviceNV_(interop_device_);
+            interop_device_ = nullptr;
+        }
+        if (gl_ctx_) {
+            wglMakeCurrent(nullptr, nullptr);
+            wglDeleteContext(gl_ctx_);
+            gl_ctx_ = nullptr;
+        }
+        if (dc_ && dummy_hwnd_) {
+            ReleaseDC(dummy_hwnd_, dc_);
+            dc_ = nullptr;
+        }
+        if (dummy_hwnd_) {
+            DestroyWindow(dummy_hwnd_);
+            dummy_hwnd_ = nullptr;
+        }
+        active_ = false;
+    }
+
+    ~d3d11_gl_bridge() { cleanup(); }
+
+  private:
+    void teardown_interop()
+    {
+        if (interop_object_) {
+            wglDXUnregisterObjectNV_(interop_device_, interop_object_);
+            interop_object_ = nullptr;
+        }
+        if (interop_gl_tex_) {
+            glDeleteTextures(1, &interop_gl_tex_);
+            interop_gl_tex_ = 0;
+        }
+    }
+
+    void teardown_video_processor()
+    {
+        if (vp_output_view_) { vp_output_view_->Release(); vp_output_view_ = nullptr; }
+        if (video_processor_) { video_processor_->Release(); video_processor_ = nullptr; }
+        if (vp_enum_) { vp_enum_->Release(); vp_enum_ = nullptr; }
+        if (video_ctx_) { video_ctx_->Release(); video_ctx_ = nullptr; }
+        if (video_device_) { video_device_->Release(); video_device_ = nullptr; }
+        if (bgra_texture_) { bgra_texture_->Release(); bgra_texture_ = nullptr; }
+    }
+};
+#endif // _WIN32
 
 struct Frame
 {
@@ -257,14 +536,6 @@ class Decoder
                                         output.pop();
                                 }
                                 output_cond.notify_all();
-#ifdef _WIN32
-                                {
-                                    boost::lock_guard<boost::mutex> hw_lock(hw_output_mutex);
-                                    while (!hw_output.empty())
-                                        hw_output.pop();
-                                }
-                                hw_output_cond.notify_all();
-#endif
                                 avcodec_flush_buffers(ctx.get());
                                 next_pts         = AV_NOPTS_VALUE;
                                 eof              = false;
@@ -868,7 +1139,7 @@ struct AVProducer::Impl
     std::unique_ptr<d3d11_gl_bridge> d3d11_bridge_;
     bool                             gpu_direct_video_ = false;
     int                              gpu_direct_decoder_idx_ = -1;
-    void*                            ogl_device_ = nullptr;
+    accelerator::ogl::device*        ogl_device_ = nullptr;
 #endif
 
     std::atomic<int64_t> start_{AV_NOPTS_VALUE};
@@ -1075,7 +1346,7 @@ struct AVProducer::Impl
         {
             void* gpu_dev = frame_factory_->gpu_device_handle();
             if (gpu_dev && vfilter_.empty()) {
-                ogl_device_ = gpu_dev;
+                ogl_device_ = static_cast<accelerator::ogl::device*>(gpu_dev);
 
                 // Find the video decoder with D3D11VA active
                 for (auto& [idx, dec] : decoders_) {
@@ -1321,66 +1592,50 @@ struct AVProducer::Impl
                     [&]() -> core::const_frame {
                         if (gpu_direct_video_ && frame.video && frame.video->format == AV_PIX_FMT_D3D11) {
                             // GPU-direct: convert D3D11 NV12 → BGRA OGL texture entirely on GPU
-                            auto ogl_tex = d3d11_bridge_->convert(frame.video.get(), ogl_device_);
-                            if (ogl_tex) {
-                                // Build BGRA pixel_format_desc
-                                auto desc = core::pixel_format_desc(core::pixel_format::bgra);
-                                desc.planes.push_back(core::pixel_format_desc::plane(
-                                    frame.video->width, frame.video->height, 4));
+                            auto* d3d11_tex = reinterpret_cast<ID3D11Texture2D*>(frame.video->data[0]);
+                            auto  array_idx = static_cast<int>(reinterpret_cast<intptr_t>(frame.video->data[1]));
 
-                                // Build audio data via make_frame (audio only)
-                                array<const std::int32_t> audio_data;
-                                if (frame.audio) {
-                                    const int channel_count = 16;
-                                    std::vector<std::int32_t> buf(frame.audio->nb_samples * channel_count, 0);
-                                    auto src_channels = frame.audio->ch_layout.nb_channels;
-                                    auto* src = reinterpret_cast<std::int32_t*>(frame.audio->data[0]);
-                                    for (int i = 0; i < frame.audio->nb_samples; ++i) {
-                                        for (int j = 0; j < std::min(channel_count, src_channels); ++j) {
-                                            buf[i * channel_count + j] = src[i * src_channels + j];
+                            if (d3d11_bridge_->setup_for_size(frame.video->width, frame.video->height)) {
+                                auto ogl_tex = d3d11_bridge_->convert(d3d11_tex, array_idx, *ogl_device_);
+                                if (ogl_tex) {
+                                    // Build BGRA pixel_format_desc
+                                    auto desc = core::pixel_format_desc(core::pixel_format::bgra);
+                                    desc.planes.push_back(core::pixel_format_desc::plane(
+                                        frame.video->width, frame.video->height, 4));
+
+                                    // Build audio data via make_frame (audio only)
+                                    array<const std::int32_t> audio_data;
+                                    if (frame.audio) {
+                                        const int channel_count = 16;
+                                        std::vector<std::int32_t> buf(frame.audio->nb_samples * channel_count, 0);
+                                        auto src_channels = frame.audio->ch_layout.nb_channels;
+                                        auto* src = reinterpret_cast<std::int32_t*>(frame.audio->data[0]);
+                                        for (int i = 0; i < frame.audio->nb_samples; ++i) {
+                                            for (int j = 0; j < std::min(channel_count, src_channels); ++j) {
+                                                buf[i * channel_count + j] = src[i * src_channels + j];
+                                            }
                                         }
+                                        audio_data = array<const std::int32_t>(buf);
                                     }
-                                    audio_data = array<const std::int32_t>(buf);
+
+                                    // Empty image data (consumers needing CPU data will get zeros)
+                                    std::vector<array<const std::uint8_t>> image_data;
+                                    image_data.push_back(array<const std::uint8_t>(
+                                        static_cast<std::size_t>(0)));
+
+                                    return core::const_frame(this, std::move(image_data),
+                                        std::move(audio_data), desc,
+                                        std::static_pointer_cast<core::texture>(ogl_tex));
                                 }
-
-                                // Empty image data (consumers needing CPU data will get zeros)
-                                std::vector<array<const std::uint8_t>> image_data;
-                                image_data.emplace_back();
-
-                                return core::const_frame(this, std::move(image_data),
-                                    std::move(audio_data), desc,
-                                    std::static_pointer_cast<core::texture>(ogl_tex));
                             }
-                            // Bridge failed — fall through to CPU path with transfer.
-                            // Convert NV12→BGRA since the filter graph is bypassed in GPU-direct mode.
+                            // Bridge failed — fall through to CPU path with transfer
                             auto sw_frame = alloc_frame();
                             sw_frame->format = AV_PIX_FMT_NV12;
                             sw_frame->width  = frame.video->width;
                             sw_frame->height = frame.video->height;
                             if (av_hwframe_transfer_data(sw_frame.get(), frame.video.get(), 0) == 0) {
                                 av_frame_copy_props(sw_frame.get(), frame.video.get());
-                                // NV12 is not supported by the mixer — convert to BGRA
-                                auto bgra_frame = alloc_frame();
-                                bgra_frame->format = AV_PIX_FMT_BGRA;
-                                bgra_frame->width  = sw_frame->width;
-                                bgra_frame->height = sw_frame->height;
-                                if (av_frame_get_buffer(bgra_frame.get(), 0) == 0) {
-                                    auto* sws = sws_getContext(
-                                        sw_frame->width, sw_frame->height, AV_PIX_FMT_NV12,
-                                        sw_frame->width, sw_frame->height, AV_PIX_FMT_BGRA,
-                                        SWS_BILINEAR, nullptr, nullptr, nullptr);
-                                    if (sws) {
-                                        sws_scale(sws, sw_frame->data, sw_frame->linesize, 0,
-                                                  sw_frame->height, bgra_frame->data, bgra_frame->linesize);
-                                        sws_freeContext(sws);
-                                        av_frame_copy_props(bgra_frame.get(), sw_frame.get());
-                                        frame.video = bgra_frame;
-                                    } else {
-                                        frame.video = sw_frame; // best-effort: will show as black
-                                    }
-                                } else {
-                                    frame.video = sw_frame;
-                                }
+                                frame.video = sw_frame;
                             }
                         }
                         return core::const_frame(

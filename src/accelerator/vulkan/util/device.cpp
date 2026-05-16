@@ -182,6 +182,9 @@ struct device::impl : public std::enable_shared_from_this<impl>
         // Find suitable physical device
         auto gpu_selector = vkb::PhysicalDeviceSelector(_vkb_instance);
 
+        vk::PhysicalDeviceFeatures features10;
+        features10.textureCompressionBC = true;
+
         vk::PhysicalDeviceVulkan12Features features12;
         features12.descriptorIndexing                        = true;
         features12.descriptorBindingPartiallyBound           = true;
@@ -198,6 +201,7 @@ struct device::impl : public std::enable_shared_from_this<impl>
         localReadFeatures.dynamicRenderingLocalRead = true;
 
         auto gpu_res = gpu_selector.set_minimum_version(1, 3)
+                           .set_required_features(features10)
                            .set_required_features_12(features12)
                            .set_required_features_13(features13)
                            .add_required_extension(VK_KHR_DYNAMIC_RENDERING_LOCAL_READ_EXTENSION_NAME)
@@ -642,6 +646,90 @@ struct device::impl : public std::enable_shared_from_this<impl>
         });
     }
 
+    std::future<std::shared_ptr<texture>>
+    copy_compressed_async(const array<const uint8_t>& source, int width, int height, vk::Format format)
+    {
+        return dispatch_async([this, source, width, height, format]() {
+            std::shared_ptr<buffer> buf;
+
+            auto tmp = source.storage<std::shared_ptr<buffer>>();
+            if (tmp) {
+                buf = *tmp;
+            } else {
+                buf = create_buffer(static_cast<int>(source.size()), true);
+                std::memcpy(buf->data(), source.data(), source.size());
+            }
+
+            // Create a VkImage with the compressed BC format
+            auto extent = vk::Extent3D{static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1};
+
+            vk::ImageCreateInfo imageInfo{};
+            imageInfo.imageType     = vk::ImageType::e2D;
+            imageInfo.format        = format;
+            imageInfo.extent        = extent;
+            imageInfo.mipLevels     = 1;
+            imageInfo.arrayLayers   = 1;
+            imageInfo.initialLayout = vk::ImageLayout::eUndefined;
+            imageInfo.samples       = vk::SampleCountFlagBits::e1;
+            imageInfo.tiling        = vk::ImageTiling::eOptimal;
+            imageInfo.usage         = vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled;
+            imageInfo.sharingMode   = vk::SharingMode::eExclusive;
+
+            auto image = _device.createImage(imageInfo);
+
+            auto memReq = _device.getImageMemoryRequirements(image);
+
+            vk::MemoryAllocateInfo allocInfo{};
+            allocInfo.allocationSize  = memReq.size;
+            allocInfo.memoryTypeIndex =
+                findDedicatedMemoryType(memReq.memoryTypeBits, vk::MemoryPropertyFlagBits::eDeviceLocal);
+
+            auto imageMemory = _device.allocateMemory(allocInfo);
+            _device.bindImageMemory(image, imageMemory, 0);
+
+            auto range = vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1);
+            vk::ImageViewCreateInfo viewInfo({}, image, vk::ImageViewType::e2D, format, vk::ComponentMapping(), range);
+            auto imageView = _device.createImageView(viewInfo);
+
+            auto tex = std::make_shared<texture>(width, height, 4, common::bit_depth::bit8,
+                                                 image, imageMemory, imageView, _device, memReq.size);
+
+            // Copy staging buffer → compressed image (extent is in texels, not blocks)
+            vk::BufferImageCopy region(0,
+                                       0,
+                                       0,
+                                       vk::ImageSubresourceLayers(vk::ImageAspectFlagBits::eColor, 0, 0, 1),
+                                       vk::Offset3D(0, 0, 0),
+                                       vk::Extent3D(width, height, 1));
+
+            submitSingleTimeCommands([&](vk::CommandBuffer cmd) {
+                transitionImageLayout(tex->id(),
+                                      vk::ImageLayout::eUndefined,
+                                      vk::AccessFlagBits2::eNone,
+                                      vk::PipelineStageFlagBits2::eTopOfPipe,
+
+                                      vk::ImageLayout::eTransferDstOptimal,
+                                      vk::AccessFlagBits2::eTransferWrite,
+                                      vk::PipelineStageFlagBits2::eTransfer,
+                                      cmd);
+
+                cmd.copyBufferToImage(buf->id(), tex->id(), vk::ImageLayout::eTransferDstOptimal, region);
+
+                transitionImageLayout(tex->id(),
+                                      vk::ImageLayout::eTransferDstOptimal,
+                                      vk::AccessFlagBits2::eTransferWrite,
+                                      vk::PipelineStageFlagBits2::eTransfer,
+
+                                      vk::ImageLayout::eShaderReadOnlyOptimal,
+                                      vk::AccessFlagBits2::eShaderRead,
+                                      vk::PipelineStageFlagBits2::eFragmentShader,
+                                      cmd);
+            });
+
+            return tex;
+        });
+    }
+
     std::future<array<const uint8_t>> copy_async(const std::shared_ptr<texture>& source)
     {
         auto f = dispatch_async([this, source]() -> std::pair<std::shared_ptr<buffer>, uint64_t> {
@@ -907,6 +995,11 @@ std::future<std::shared_ptr<texture>>
 device::copy_async(const array<const uint8_t>& source, int width, int height, int stride, common::bit_depth depth)
 {
     return impl_->copy_async(source, width, height, stride, depth);
+}
+std::future<std::shared_ptr<texture>>
+device::copy_compressed_async(const array<const uint8_t>& source, int width, int height, vk::Format format)
+{
+    return impl_->copy_compressed_async(source, width, height, format);
 }
 std::future<array<const uint8_t>> device::copy_async(const std::shared_ptr<texture>& source)
 {

@@ -346,6 +346,8 @@ vec4 get_rgba_color(vec2 uv){
     case 10:{float y=texture(textures[PLANE0],uv).g*precision_factor[0];float cb=texture(textures[PLANE1],uv).b*precision_factor[1];float cr=texture(textures[PLANE1],uv).r*precision_factor[1];return ycbcra_to_rgba(y,cb,cr,1.0);}
     case 11:{float g=texture(textures[PLANE0],uv).r*precision_factor[0];float b=texture(textures[PLANE1],uv).r*precision_factor[1];float r=texture(textures[PLANE2],uv).r*precision_factor[2];return vec4(r,g,b,1.0);}
     case 12:{float g=texture(textures[PLANE0],uv).r*precision_factor[0];float b=texture(textures[PLANE1],uv).r*precision_factor[1];float r=texture(textures[PLANE2],uv).r*precision_factor[2];float a=texture(textures[PLANE3],uv).r*precision_factor[3];return vec4(r,g,b,a);}
+    case 13:{vec4 c=texture(textures[PLANE0],uv);float scale=(c.b*(255.0/8.0))+1.0;float Co=(c.r-0.5)/scale;float Cg=(c.g-0.5)/scale;float Y=c.a;return vec4(clamp(Y+Co-Cg,0.0,1.0),clamp(Y+Cg,0.0,1.0),clamp(Y-Co-Cg,0.0,1.0),1.0);}
+    case 14:{vec4 c=texture(textures[PLANE0],uv);float scale=(c.b*(255.0/8.0))+1.0;float Co=(c.r-0.5)/scale;float Cg=(c.g-0.5)/scale;float Y=c.a;float a=texture(textures[PLANE1],uv).a;return vec4(clamp(Y+Co-Cg,0.0,1.0),clamp(Y+Cg,0.0,1.0),clamp(Y-Co-Cg,0.0,1.0),a);}
     } return vec4(0.0);
 }
 

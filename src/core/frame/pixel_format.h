@@ -42,6 +42,8 @@ enum class pixel_format
     uyvy,
     gbrp,  // planar
     gbrap, // planar
+    ycocg_dxt5,  // YCoCg-DXT5 (HAP Q) — BC3 hardware-decoded then shader YCoCg→RGB
+    ycocg_dxt5a, // YCoCg-DXT5 + separate alpha (HAP Q Alpha) — two BC3 planes
     count,
     invalid,
 };

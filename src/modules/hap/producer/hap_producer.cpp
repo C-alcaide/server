@@ -24,12 +24,20 @@
 #include "hap_producer.h"
 
 #include "hap_demuxer.h"
+#include "../cpu/hap_cpu_decode.h"
 #include "../gl/hap_gl_decode.h"
 #include "../util/hap_frame_parser.h"
 
 #include <accelerator/ogl/image/image_mixer.h>
 #include <accelerator/ogl/util/device.h>
 #include <accelerator/ogl/util/texture.h>
+
+#ifdef ENABLE_VULKAN
+#include <accelerator/vulkan/image/image_mixer.h>
+#include <accelerator/vulkan/util/device.h>
+#include <accelerator/vulkan/util/texture.h>
+#include <accelerator/vulkan/util/texture_wrapper.h>
+#endif
 
 #include <common/array.h>
 #include <common/bit_depth.h>
@@ -106,7 +114,12 @@ struct hap_producer_impl final : public core::frame_producer
     const std::wstring                        path_;
     std::atomic<bool>                            loop_{false};
     spl::shared_ptr<core::frame_factory>      frame_factory_;
-    std::shared_ptr<accelerator::ogl::device> ogl_device_;
+    std::shared_ptr<accelerator::ogl::device> ogl_device_; // nullptr when using CPU decode
+#ifdef ENABLE_VULKAN
+    std::shared_ptr<accelerator::vulkan::device> vk_device_; // non-null when VK mixer detected
+#endif
+    bool                                      use_cpu_decode_ = false;
+    bool                                      use_vk_upload_  = false;
     core::video_format_desc                   format_desc_;
     int                                       audio_channels_ = 0;
 
@@ -183,10 +196,25 @@ struct hap_producer_impl final : public core::frame_producer
         , frame_factory_(deps.frame_factory)
     {
         auto* ogl_mixer = dynamic_cast<accelerator::ogl::image_mixer*>(frame_factory_.get());
-        if (!ogl_mixer)
-            CASPAR_THROW_EXCEPTION(std::runtime_error("[hap_producer] frame_factory is not ogl::image_mixer"));
-
-        ogl_device_  = ogl_mixer->get_ogl_device();
+#ifdef ENABLE_VULKAN
+        auto* vk_mixer  = dynamic_cast<accelerator::vulkan::image_mixer*>(frame_factory_.get());
+#else
+        void* vk_mixer  = nullptr;
+#endif
+        if (ogl_mixer) {
+            ogl_device_     = ogl_mixer->get_ogl_device();
+            use_cpu_decode_ = false;
+        } else if (vk_mixer) {
+#ifdef ENABLE_VULKAN
+            vk_device_      = vk_mixer->get_vk_device();
+#endif
+            use_vk_upload_  = true;
+            use_cpu_decode_ = false;
+            CASPAR_LOG(info) << L"[hap_producer] Vulkan mixer detected, using direct BC texture upload.";
+        } else {
+            use_cpu_decode_ = true;
+            CASPAR_LOG(info) << L"[hap_producer] Non-OGL mixer detected, using CPU DXT decompression.";
+        }
         format_desc_ = deps.format_desc;
 
         demuxer_ = std::make_unique<HapDemuxer>(path_);
@@ -244,8 +272,8 @@ struct hap_producer_impl final : public core::frame_producer
                                 }
                             }();
 
-        // Create GL textures on the OGL thread
-        {
+        // Create GL textures on the OGL thread (skip for CPU decode and VK upload)
+        if (!use_cpu_decode_ && !use_vk_upload_) {
             int fw = frame_info_.width, fh = frame_info_.height;
             ogl_device_->dispatch_sync([this, fw, fh]() {
                 for (int i = 0; i < NUM_SLOTS; i++)
@@ -271,7 +299,7 @@ struct hap_producer_impl final : public core::frame_producer
         }
 
 #ifdef WIN32
-        if (!shared_hglrc_)
+        if (!use_cpu_decode_ && !use_vk_upload_ && !shared_hglrc_)
             CASPAR_THROW_EXCEPTION(std::runtime_error("[hap_producer] Cannot create shared GL context"));
 #endif
 
@@ -336,15 +364,17 @@ struct hap_producer_impl final : public core::frame_producer
         if (snappy_thread_d_.joinable()) snappy_thread_d_.join();
         if (gl_thread_.joinable())       gl_thread_.join();
 
-        // Clean up compressed textures on the OGL thread
-        ogl_device_->dispatch_sync([this]() {
-            for (int i = 0; i < NUM_SLOTS; i++) {
-                if (decode_slots_[i].compressed_tex)
-                    glDeleteTextures(1, &decode_slots_[i].compressed_tex);
-                if (decode_slots_[i].compressed_alpha)
-                    glDeleteTextures(1, &decode_slots_[i].compressed_alpha);
-            }
-        });
+        // Clean up compressed textures on the OGL thread (only if GL path was used)
+        if (ogl_device_) {
+            ogl_device_->dispatch_sync([this]() {
+                for (int i = 0; i < NUM_SLOTS; i++) {
+                    if (decode_slots_[i].compressed_tex)
+                        glDeleteTextures(1, &decode_slots_[i].compressed_tex);
+                    if (decode_slots_[i].compressed_alpha)
+                        glDeleteTextures(1, &decode_slots_[i].compressed_alpha);
+                }
+            });
+        }
     }
 
     // ── I/O thread: reads packets from disk ──
@@ -523,9 +553,10 @@ struct hap_producer_impl final : public core::frame_producer
     // ── GL thread: upload compressed data + render pass + build frame ──
     void gl_loop()
     {
-        set_thread_name(L"hap-gl");
+        set_thread_name(use_vk_upload_ ? L"hap-vk" : (use_cpu_decode_ ? L"hap-cpu" : L"hap-gl"));
         try {
 
+        if (!use_cpu_decode_ && !use_vk_upload_) {
 #ifdef WIN32
         if (shared_hglrc_) {
             if (!wglMakeCurrent(hdc_, shared_hglrc_)) {
@@ -559,6 +590,7 @@ struct hap_producer_impl final : public core::frame_producer
                                        primary_fmt, alpha_fmt);
             }
         }
+        } // end if (!use_cpu_decode_ && !use_vk_upload_)
 
         int                  gl_slot         = 0;
         std::vector<int32_t> audio_accum;
@@ -630,87 +662,312 @@ struct hap_producer_impl final : public core::frame_producer
                 if (stop_flag_) break;
             }
 
-            // GL decode: upload + render pass
+            // ═══ DECODE ═══
             caspar::timer decode_timer;
+            core::draw_frame df;
 
-            HapDecodeSlot& slot = decode_slots_[gl_slot];
+#ifdef ENABLE_VULKAN
+            if (use_vk_upload_) {
+                // ── Vulkan direct BC upload path ──
+                // HapQAlpha needs two textures which the current zero-copy path
+                // doesn't support, so fall through to CPU decode for that variant.
+                bool vk_handled = false;
 
-            // Validate decompressed data size before GL upload
-            {
-                size_t expected_tex = dxt_data_size(slot.width, slot.height, slot.compressed_format);
-                if (item.result.texture_data.size() != expected_tex) {
-                    CASPAR_LOG(warning) << L"[hap_producer] Texture data size mismatch: got "
-                                        << item.result.texture_data.size() << L", expected " << expected_tex;
-                    continue;
+                if (item.result.variant != HapVariant::HapQAlpha) {
+                    vk::Format vk_fmt;
+                    core::pixel_format pix_fmt;
+                    switch (item.result.variant) {
+                    case HapVariant::Hap:
+                        vk_fmt  = vk::Format::eBc1RgbaUnormBlock;
+                        pix_fmt = core::pixel_format::rgba;
+                        break;
+                    case HapVariant::HapAlpha:
+                        vk_fmt  = vk::Format::eBc3UnormBlock;
+                        pix_fmt = core::pixel_format::rgba;
+                        break;
+                    case HapVariant::HapQ:
+                        vk_fmt  = vk::Format::eBc3UnormBlock;
+                        pix_fmt = core::pixel_format::ycocg_dxt5;
+                        break;
+                    case HapVariant::HapR:
+                        vk_fmt  = vk::Format::eBc7UnormBlock;
+                        pix_fmt = core::pixel_format::rgba;
+                        break;
+                    default:
+                        vk_fmt  = vk::Format::eBc1RgbaUnormBlock;
+                        pix_fmt = core::pixel_format::rgba;
+                        break;
+                    }
+
+                    // Upload compressed texture data to Vulkan BC image
+                    auto tex_store = std::make_shared<std::vector<uint8_t>>(
+                        item.result.texture_data.begin(), item.result.texture_data.end());
+                    array<const uint8_t> tex_data(tex_store->data(), tex_store->size(), std::move(tex_store));
+
+                    auto tex_future = vk_device_->copy_compressed_async(
+                        tex_data, frame_info_.width, frame_info_.height, vk_fmt);
+                    auto vk_tex = tex_future.get();
+
+                    const double ms_decode = decode_timer.elapsed();
+                    graph_->set_value("decode-time", ms_decode * format_desc_.fps * 0.5);
+                    graph_->set_value("queue-fill",
+                        static_cast<double>(ready_queue_.size() + 1) / (MAX_QUEUED + 1));
+
+                    // Audio
+                    if (!item.audio_samples.empty())
+                        audio_accum.insert(audio_accum.end(),
+                                           item.audio_samples.begin(), item.audio_samples.end());
+                    const int cadence_len    = (int)format_desc_.audio_cadence.size();
+                    const int samples_per_ch = (cadence_len > 0)
+                        ? format_desc_.audio_cadence[audio_frame_idx % cadence_len]
+                        : 1920;
+                    ++audio_frame_idx;
+                    const int out_ch    = format_desc_.audio_channels;
+                    const int out_total = samples_per_ch * out_ch;
+                    std::vector<int32_t> frame_audio(out_total, 0);
+                    if (audio_channels_ > 0 && !audio_accum.empty()) {
+                        const int avail_samp = (int)audio_accum.size() / audio_channels_;
+                        const int take_samp  = std::min(avail_samp, samples_per_ch);
+                        const int copy_ch    = std::min(audio_channels_, out_ch);
+                        for (int s = 0; s < take_samp; s++)
+                            for (int c = 0; c < copy_ch; c++)
+                                frame_audio[s * out_ch + c] = audio_accum[s * audio_channels_ + c];
+                        audio_accum.erase(audio_accum.begin(),
+                                          audio_accum.begin() + take_samp * audio_channels_);
+                    }
+
+                    // Build frame with VK texture (zero-copy path via texture_wrapper)
+                    core::pixel_format_desc pfd(pix_fmt);
+                    pfd.planes.push_back(core::pixel_format_desc::plane(
+                        frame_info_.width, frame_info_.height, 4, common::bit_depth::bit8));
+
+                    auto empty_store = std::make_shared<std::vector<uint8_t>>(0);
+                    array<const uint8_t> dummy_img(empty_store->data(), 0, std::move(empty_store));
+                    std::vector<array<const uint8_t>> img_vec;
+                    img_vec.push_back(std::move(dummy_img));
+
+                    auto audio_store = std::make_shared<std::vector<int32_t>>(std::move(frame_audio));
+                    array<const int32_t> audio_arr(audio_store->data(), audio_store->size(), std::move(audio_store));
+
+                    auto wrapper = std::make_shared<accelerator::vulkan::texture_wrapper>(vk_tex);
+
+                    df = core::draw_frame(core::const_frame(
+                        this,
+                        std::move(img_vec),
+                        std::move(audio_arr),
+                        pfd,
+                        wrapper));
+                    vk_handled = true;
                 }
-                if (item.result.variant == HapVariant::HapQAlpha && slot.compressed_alpha) {
-                    size_t expected_alpha = dxt_data_size(slot.width, slot.height, slot.alpha_format);
-                    if (item.result.alpha_data.size() != expected_alpha) {
-                        CASPAR_LOG(warning) << L"[hap_producer] Alpha data size mismatch: got "
-                                            << item.result.alpha_data.size() << L", expected " << expected_alpha;
+
+                if (!vk_handled) {
+                    // Fall back to CPU decode for unsupported variants (HapQAlpha)
+                    std::vector<uint8_t> bgra_pixels;
+                    bool ok = cpu_decode_hap_to_bgra(
+                        item.result.variant,
+                        item.result.texture_data.data(),
+                        item.result.texture_data.size(),
+                        item.result.alpha_data.empty() ? nullptr : item.result.alpha_data.data(),
+                        item.result.alpha_data.size(),
+                        frame_info_.width, frame_info_.height,
+                        bgra_pixels);
+                    if (!ok) {
+                        CASPAR_LOG(warning) << L"[hap_producer] VK fallback CPU decode failed";
                         continue;
                     }
+
+                    const double ms_decode = decode_timer.elapsed();
+                    graph_->set_value("decode-time", ms_decode * format_desc_.fps * 0.5);
+                    graph_->set_value("queue-fill",
+                        static_cast<double>(ready_queue_.size() + 1) / (MAX_QUEUED + 1));
+
+                    if (!item.audio_samples.empty())
+                        audio_accum.insert(audio_accum.end(),
+                                           item.audio_samples.begin(), item.audio_samples.end());
+                    const int cadence_len    = (int)format_desc_.audio_cadence.size();
+                    const int samples_per_ch = (cadence_len > 0)
+                        ? format_desc_.audio_cadence[audio_frame_idx % cadence_len]
+                        : 1920;
+                    ++audio_frame_idx;
+                    const int out_ch    = format_desc_.audio_channels;
+                    const int out_total = samples_per_ch * out_ch;
+                    std::vector<int32_t> frame_audio(out_total, 0);
+                    if (audio_channels_ > 0 && !audio_accum.empty()) {
+                        const int avail_samp = (int)audio_accum.size() / audio_channels_;
+                        const int take_samp  = std::min(avail_samp, samples_per_ch);
+                        const int copy_ch    = std::min(audio_channels_, out_ch);
+                        for (int s = 0; s < take_samp; s++)
+                            for (int c = 0; c < copy_ch; c++)
+                                frame_audio[s * out_ch + c] = audio_accum[s * audio_channels_ + c];
+                        audio_accum.erase(audio_accum.begin(),
+                                          audio_accum.begin() + take_samp * audio_channels_);
+                    }
+
+                    core::pixel_format_desc pfd(core::pixel_format::bgra);
+                    pfd.planes.push_back(core::pixel_format_desc::plane(
+                        frame_info_.width, frame_info_.height, 4, common::bit_depth::bit8));
+
+                    auto pixel_store = std::make_shared<std::vector<uint8_t>>(std::move(bgra_pixels));
+                    array<const uint8_t> img_data(pixel_store->data(), pixel_store->size(), std::move(pixel_store));
+                    std::vector<array<const uint8_t>> img_vec;
+                    img_vec.push_back(std::move(img_data));
+
+                    auto audio_store = std::make_shared<std::vector<int32_t>>(std::move(frame_audio));
+                    array<const int32_t> audio_arr(audio_store->data(), audio_store->size(), std::move(audio_store));
+
+                    df = core::draw_frame(core::const_frame(
+                        this,
+                        std::move(img_vec),
+                        std::move(audio_arr),
+                        pfd));
                 }
+            } else
+#endif // ENABLE_VULKAN
+            if (use_cpu_decode_) {
+                // ── CPU decode path ──
+                std::vector<uint8_t> bgra_pixels;
+                bool ok = cpu_decode_hap_to_bgra(
+                    item.result.variant,
+                    item.result.texture_data.data(),
+                    item.result.texture_data.size(),
+                    item.result.alpha_data.empty() ? nullptr : item.result.alpha_data.data(),
+                    item.result.alpha_data.size(),
+                    frame_info_.width,
+                    frame_info_.height,
+                    bgra_pixels);
+
+                if (!ok) {
+                    CASPAR_LOG(warning) << L"[hap_producer] CPU decode failed for frame";
+                    continue;
+                }
+
+                const double ms_decode = decode_timer.elapsed();
+                graph_->set_value("decode-time", ms_decode * format_desc_.fps * 0.5);
+                graph_->set_value("queue-fill",
+                    static_cast<double>(ready_queue_.size() + 1) / (MAX_QUEUED + 1));
+
+                // Audio
+                if (!item.audio_samples.empty())
+                    audio_accum.insert(audio_accum.end(),
+                                       item.audio_samples.begin(), item.audio_samples.end());
+                const int cadence_len    = (int)format_desc_.audio_cadence.size();
+                const int samples_per_ch = (cadence_len > 0)
+                    ? format_desc_.audio_cadence[audio_frame_idx % cadence_len]
+                    : 1920;
+                ++audio_frame_idx;
+                const int out_ch    = format_desc_.audio_channels;
+                const int out_total = samples_per_ch * out_ch;
+                std::vector<int32_t> frame_audio(out_total, 0);
+                if (audio_channels_ > 0 && !audio_accum.empty()) {
+                    const int avail_samp = (int)audio_accum.size() / audio_channels_;
+                    const int take_samp  = std::min(avail_samp, samples_per_ch);
+                    const int copy_ch    = std::min(audio_channels_, out_ch);
+                    for (int s = 0; s < take_samp; s++)
+                        for (int c = 0; c < copy_ch; c++)
+                            frame_audio[s * out_ch + c] = audio_accum[s * audio_channels_ + c];
+                    audio_accum.erase(audio_accum.begin(),
+                                      audio_accum.begin() + take_samp * audio_channels_);
+                }
+
+                // Build frame with pixel data (standard path)
+                core::pixel_format_desc pfd(core::pixel_format::bgra);
+                pfd.planes.push_back(core::pixel_format_desc::plane(
+                    frame_info_.width, frame_info_.height, 4, common::bit_depth::bit8));
+
+                auto pixel_store = std::make_shared<std::vector<uint8_t>>(std::move(bgra_pixels));
+                array<const uint8_t> img_data(pixel_store->data(), pixel_store->size(), std::move(pixel_store));
+                std::vector<array<const uint8_t>> img_vec;
+                img_vec.push_back(std::move(img_data));
+
+                auto audio_store = std::make_shared<std::vector<int32_t>>(std::move(frame_audio));
+                array<const int32_t> audio_arr(audio_store->data(), audio_store->size(), std::move(audio_store));
+
+                df = core::draw_frame(core::const_frame(
+                    this,
+                    std::move(img_vec),
+                    std::move(audio_arr),
+                    pfd));
+            } else {
+                // ── GL decode path ──
+                HapDecodeSlot& slot = decode_slots_[gl_slot];
+
+                // Validate decompressed data size before GL upload
+                {
+                    size_t expected_tex = dxt_data_size(slot.width, slot.height, slot.compressed_format);
+                    if (item.result.texture_data.size() != expected_tex) {
+                        CASPAR_LOG(warning) << L"[hap_producer] Texture data size mismatch: got "
+                                            << item.result.texture_data.size() << L", expected " << expected_tex;
+                        continue;
+                    }
+                    if (item.result.variant == HapVariant::HapQAlpha && slot.compressed_alpha) {
+                        size_t expected_alpha = dxt_data_size(slot.width, slot.height, slot.alpha_format);
+                        if (item.result.alpha_data.size() != expected_alpha) {
+                            CASPAR_LOG(warning) << L"[hap_producer] Alpha data size mismatch: got "
+                                                << item.result.alpha_data.size() << L", expected " << expected_alpha;
+                            continue;
+                        }
+                    }
+                }
+
+                gl_decoder_->decode(slot, item.result.variant,
+                                    item.result.texture_data.data(),
+                                    item.result.texture_data.size(),
+                                    item.result.alpha_data.empty() ? nullptr : item.result.alpha_data.data(),
+                                    item.result.alpha_data.size());
+
+                const double ms_decode = decode_timer.elapsed();
+                graph_->set_value("decode-time", ms_decode * format_desc_.fps * 0.5);
+                graph_->set_value("queue-fill",
+                    static_cast<double>(ready_queue_.size() + 1) / (MAX_QUEUED + 1));
+
+                // Audio
+                if (!item.audio_samples.empty())
+                    audio_accum.insert(audio_accum.end(),
+                                       item.audio_samples.begin(), item.audio_samples.end());
+                const int cadence_len    = (int)format_desc_.audio_cadence.size();
+                const int samples_per_ch = (cadence_len > 0)
+                    ? format_desc_.audio_cadence[audio_frame_idx % cadence_len]
+                    : 1920;
+                ++audio_frame_idx;
+                const int out_ch    = format_desc_.audio_channels;
+                const int out_total = samples_per_ch * out_ch;
+                std::vector<int32_t> frame_audio(out_total, 0);
+                if (audio_channels_ > 0 && !audio_accum.empty()) {
+                    const int avail_samp = (int)audio_accum.size() / audio_channels_;
+                    const int take_samp  = std::min(avail_samp, samples_per_ch);
+                    const int copy_ch    = std::min(audio_channels_, out_ch);
+                    for (int s = 0; s < take_samp; s++)
+                        for (int c = 0; c < copy_ch; c++)
+                            frame_audio[s * out_ch + c] = audio_accum[s * audio_channels_ + c];
+                    audio_accum.erase(audio_accum.begin(),
+                                      audio_accum.begin() + take_samp * audio_channels_);
+                }
+
+                // Build frame with GL texture (zero-copy path)
+                core::pixel_format_desc pfd(core::pixel_format::rgba);
+                pfd.planes.push_back(core::pixel_format_desc::plane(
+                    frame_info_.width, frame_info_.height, 4, common::bit_depth::bit8));
+
+                auto empty_store = std::make_shared<std::vector<uint8_t>>(0);
+                array<const uint8_t> dummy_img(empty_store->data(), 0, std::move(empty_store));
+                std::vector<array<const uint8_t>> img_vec;
+                img_vec.push_back(std::move(dummy_img));
+
+                auto audio_store = std::make_shared<std::vector<int32_t>>(std::move(frame_audio));
+                array<const int32_t> audio_arr(audio_store->data(), audio_store->size(), std::move(audio_store));
+
+                df = core::draw_frame(core::const_frame(
+                    this,
+                    std::move(img_vec),
+                    std::move(audio_arr),
+                    pfd,
+                    slot.output_tex));
+
+                gl_slot = (gl_slot + 1) % NUM_SLOTS;
             }
-
-            gl_decoder_->decode(slot, item.result.variant,
-                                item.result.texture_data.data(),
-                                item.result.texture_data.size(),
-                                item.result.alpha_data.empty() ? nullptr : item.result.alpha_data.data(),
-                                item.result.alpha_data.size());
-
-            const double ms_decode = decode_timer.elapsed();
-            graph_->set_value("decode-time", ms_decode * format_desc_.fps * 0.5);
-            graph_->set_value("queue-fill",
-                static_cast<double>(ready_queue_.size() + 1) / (MAX_QUEUED + 1));
-
-            // Audio
-            if (!item.audio_samples.empty())
-                audio_accum.insert(audio_accum.end(),
-                                   item.audio_samples.begin(), item.audio_samples.end());
-            const int cadence_len    = (int)format_desc_.audio_cadence.size();
-            const int samples_per_ch = (cadence_len > 0)
-                ? format_desc_.audio_cadence[audio_frame_idx % cadence_len]
-                : 1920;
-            ++audio_frame_idx;
-            const int out_ch    = format_desc_.audio_channels;
-            const int out_total = samples_per_ch * out_ch;
-            std::vector<int32_t> frame_audio(out_total, 0);
-            if (audio_channels_ > 0 && !audio_accum.empty()) {
-                const int avail_samp = (int)audio_accum.size() / audio_channels_;
-                const int take_samp  = std::min(avail_samp, samples_per_ch);
-                const int copy_ch    = std::min(audio_channels_, out_ch);
-                for (int s = 0; s < take_samp; s++)
-                    for (int c = 0; c < copy_ch; c++)
-                        frame_audio[s * out_ch + c] = audio_accum[s * audio_channels_ + c];
-                audio_accum.erase(audio_accum.begin(),
-                                  audio_accum.begin() + take_samp * audio_channels_);
-            }
-
-            // Build frame with GL texture (zero-copy path)
-            core::pixel_format_desc pfd(core::pixel_format::rgba);
-            pfd.planes.push_back(core::pixel_format_desc::plane(
-                frame_info_.width, frame_info_.height, 4, common::bit_depth::bit8));
-
-            auto empty_store = std::make_shared<std::vector<uint8_t>>(0);
-            array<const uint8_t> dummy_img(empty_store->data(), 0, std::move(empty_store));
-            std::vector<array<const uint8_t>> img_vec;
-            img_vec.push_back(std::move(dummy_img));
-
-            auto audio_store = std::make_shared<std::vector<int32_t>>(std::move(frame_audio));
-            array<const int32_t> audio_arr(audio_store->data(), audio_store->size(), std::move(audio_store));
-
-            core::draw_frame df(core::const_frame(
-                this,
-                std::move(img_vec),
-                std::move(audio_arr),
-                pfd,
-                slot.output_tex));
 
             { std::lock_guard<std::mutex> lk(queue_mutex_); ready_queue_.push(std::move(df)); }
             queue_cv_.notify_one();
-
-            gl_slot = (gl_slot + 1) % NUM_SLOTS;
         }
 
         // Cleanup

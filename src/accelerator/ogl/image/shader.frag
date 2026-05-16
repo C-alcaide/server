@@ -1266,6 +1266,25 @@ vec4 get_rgba_color(vec2 uv)
             float a  = get_sample(plane[3], uv).r * precision_factor[3];
 			return vec4(r, g, b, a);
         }
+    case 13:    // ycocg_dxt5
+        {
+            vec4 c = get_sample(plane[0], uv);
+            float scale = (c.b * (255.0 / 8.0)) + 1.0;
+            float Co = (c.r - 0.5) / scale;
+            float Cg = (c.g - 0.5) / scale;
+            float Y  = c.a;
+            return vec4(clamp(Y + Co - Cg, 0.0, 1.0), clamp(Y + Cg, 0.0, 1.0), clamp(Y - Co - Cg, 0.0, 1.0), 1.0);
+        }
+    case 14:    // ycocg_dxt5a
+        {
+            vec4 c = get_sample(plane[0], uv);
+            float scale = (c.b * (255.0 / 8.0)) + 1.0;
+            float Co = (c.r - 0.5) / scale;
+            float Cg = (c.g - 0.5) / scale;
+            float Y  = c.a;
+            float a  = get_sample(plane[1], uv).a;
+            return vec4(clamp(Y + Co - Cg, 0.0, 1.0), clamp(Y + Cg, 0.0, 1.0), clamp(Y - Co - Cg, 0.0, 1.0), a);
+        }
     }
         return vec4(0.0, 0.0, 0.0, 0.0);
 }

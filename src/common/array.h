@@ -103,8 +103,8 @@ class array<const T> final
     {
         if (size_ > 0) {
             auto storage = std::shared_ptr<void>(std::malloc(size), std::free);
+            std::memset(storage.get(), 0, size);
             ptr_         = reinterpret_cast<T*>(storage.get());
-            std::memset(ptr_, 0, size_);
             storage_ = std::make_shared<std::any>(storage);
         }
     }
