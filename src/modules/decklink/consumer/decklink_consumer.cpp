@@ -1366,6 +1366,17 @@ struct decklink_consumer_proxy : public core::frame_consumer
     }
 
     [[nodiscard]] core::monitor::state state() const override { return get_state_for_config(config_, format_desc_); }
+
+    [[nodiscard]] core::av_pipeline_info av_pipeline() const override
+    {
+        core::av_pipeline_info info;
+        info.has_video          = true;
+        info.has_audio          = config_.embedded_audio;
+        info.audio_is_embedded  = config_.embedded_audio;
+        info.video_depth_frames = config_.buffer_depth();
+        info.audio_depth_frames = config_.embedded_audio ? config_.buffer_depth() : 0;
+        return info;
+    }
 };
 
 spl::shared_ptr<core::frame_consumer> create_consumer(const std::vector<std::wstring>&     params,

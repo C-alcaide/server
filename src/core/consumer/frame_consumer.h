@@ -39,6 +39,23 @@
 
 namespace caspar { namespace core {
 
+// Pipeline depth information for A/V sync advisor.
+// Each consumer overrides av_pipeline() to report its contribution
+// to the overall audio/video pipeline latency on a channel.
+struct av_pipeline_info
+{
+    bool   has_audio              = false; // Consumer outputs audio
+    bool   has_video              = false; // Consumer outputs video
+    bool   audio_is_embedded      = false; // Audio & video share physical path (e.g. SDI)
+    int    video_depth_frames     = 0;     // Video pipeline depth in whole frames
+    int    audio_depth_frames     = 0;     // Audio pipeline depth in whole frames (including delay)
+    double video_delay_ms         = 0.0;   // Sub-frame video delay (user-configured)
+    double audio_device_latency_ms = 0.0;  // Hardware-reported audio device latency
+    bool   video_delay_adjustable = false; // Consumer supports <delay>/<delay-ms> parameters
+    bool   audio_delay_adjustable = false; // Consumer supports audio <delay> parameter
+    int    audio_delay_frames     = 0;     // Current user-configured audio delay (delay_frames)
+};
+
 class frame_consumer
 {
     frame_consumer(const frame_consumer&);
@@ -62,6 +79,8 @@ class frame_consumer
     virtual bool         has_synchronization_clock() const { return false; }
     virtual bool         needs_cpu_frame_data() const { return true; }
     virtual int          index() const = 0;
+
+    virtual av_pipeline_info av_pipeline() const { return {}; }
 };
 
 }} // namespace caspar::core

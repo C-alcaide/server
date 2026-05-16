@@ -102,6 +102,7 @@ class destroy_consumer_proxy : public frame_consumer
     bool                 needs_cpu_frame_data() const override { return consumer_->needs_cpu_frame_data(); }
     int                  index() const override { return consumer_->index(); }
     core::monitor::state state() const override { return consumer_->state(); }
+    av_pipeline_info     av_pipeline() const override { return consumer_->av_pipeline(); }
 };
 
 class print_consumer_proxy : public frame_consumer
@@ -139,6 +140,7 @@ class print_consumer_proxy : public frame_consumer
     bool                 needs_cpu_frame_data() const override { return consumer_->needs_cpu_frame_data(); }
     int                  index() const override { return consumer_->index(); }
     core::monitor::state state() const override { return consumer_->state(); }
+    av_pipeline_info     av_pipeline() const override { return consumer_->av_pipeline(); }
 };
 
 frame_consumer_registry::frame_consumer_registry() {}

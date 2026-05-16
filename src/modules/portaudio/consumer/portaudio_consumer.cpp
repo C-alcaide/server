@@ -112,6 +112,9 @@ struct portaudio_consumer : public core::frame_consumer
     std::atomic<bool>    stop_{false};
     std::atomic<bool>    started_{false};
 
+    // Hardware-reported device output latency (set after Pa_OpenStream)
+    double device_latency_ms_ = 0.0;
+
     // Stats
     std::atomic<int64_t> underrun_count_{0};
     std::atomic<int64_t> overflow_count_{0};
@@ -317,6 +320,12 @@ struct portaudio_consumer : public core::frame_consumer
                 << msg_info(std::string("Failed to open PortAudio stream: ") + Pa_GetErrorText(err)));
         }
 
+        // Query actual device output latency
+        const PaStreamInfo* stream_info = Pa_GetStreamInfo(stream_);
+        if (stream_info) {
+            device_latency_ms_ = stream_info->outputLatency * 1000.0;
+        }
+
         // Pre-fill ring buffer with silence (delay compensation + prevent initial underrun)
         int silence_frames = delay_frames_ + 1;
         size_t silence_samples = static_cast<size_t>(avg_samples) * output_channels_ * silence_frames;
@@ -414,6 +423,17 @@ struct portaudio_consumer : public core::frame_consumer
         s["buffer/underruns"] = underrun_count_.load(std::memory_order_relaxed);
         s["buffer/overflows"] = overflow_count_.load(std::memory_order_relaxed);
         return s;
+    }
+
+    core::av_pipeline_info av_pipeline() const override
+    {
+        core::av_pipeline_info info;
+        info.has_audio               = true;
+        info.audio_depth_frames      = buffer_frames_ + delay_frames_ + 1;
+        info.audio_device_latency_ms = device_latency_ms_;
+        info.audio_delay_adjustable  = true;
+        info.audio_delay_frames      = delay_frames_;
+        return info;
     }
 };
 

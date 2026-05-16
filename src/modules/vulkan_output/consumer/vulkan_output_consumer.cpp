@@ -195,6 +195,18 @@ class vulkan_output_consumer : public core::frame_consumer
             config_.delay_frames = config_.buffer_depth - 1;
         }
 
+        // Clamp delay_ms to one frame period — larger values would cause the
+        // present loop to miss frames and should use delay_frames instead.
+        if (config_.delay_ms < 0.0)
+            config_.delay_ms = 0.0;
+        double max_delay_ms = 1000.0 / format_desc.fps;
+        if (config_.delay_ms > max_delay_ms) {
+            CASPAR_LOG(warning) << print() << L" delay-ms (" << config_.delay_ms
+                                << L") exceeds one frame period (" << max_delay_ms
+                                << L" ms). Clamping.";
+            config_.delay_ms = max_delay_ms;
+        }
+
         graph_->set_text(print());
         graph_->set_color("frame-time", diagnostics::color(0.1f, 1.0f, 0.1f));
         graph_->set_color("dropped-frame", diagnostics::color(0.9f, 0.2f, 0.2f));
@@ -318,6 +330,17 @@ class vulkan_output_consumer : public core::frame_consumer
 
     bool has_synchronization_clock() const override { return false; }
 
+    core::av_pipeline_info av_pipeline() const override
+    {
+        core::av_pipeline_info info;
+        std::lock_guard<std::mutex> lock(config_mutex_);
+        info.has_video               = true;
+        info.video_depth_frames      = config_.delay_frames + 1;
+        info.video_delay_ms          = config_.delay_ms;
+        info.video_delay_adjustable  = true;
+        return info;
+    }
+
     std::future<bool> call(const std::vector<std::wstring>& params) override
     {
         if (params.empty())
@@ -347,6 +370,7 @@ class vulkan_output_consumer : public core::frame_consumer
         s["vulkan-output/sync-group"]   = std::to_wstring(config_.sync_group);
         s["vulkan-output/present-barrier"] = std::wstring(present_barrier_enabled_ ? L"true" : L"false");
         s["vulkan-output/delay"]           = std::to_wstring(config_.delay_frames);
+        s["vulkan-output/delay-ms"]        = std::to_wstring(config_.delay_ms);
 
         // NvAPI Quadro Sync status
         if (nvapi_ && nvapi_->is_available() && config_.gsync_enabled) {
@@ -520,7 +544,10 @@ class vulkan_output_consumer : public core::frame_consumer
                          << (adapter_mismatch_ ? L"GDI fallback (cross-adapter)" :
                              (device_->tier() == gpu_tier::pro && found) ? L"Pro (direct display)" :
                              device_->tier() == gpu_tier::pro ? L"Pro (fullscreen)" : L"Consumer (fullscreen)")
-                         << (config_.delay_frames > 0 ? L" Delay: " + std::to_wstring(config_.delay_frames) + L" frames" : L"");
+                         << (config_.delay_frames > 0 || config_.delay_ms > 0.0
+                                 ? L" Delay: " + std::to_wstring(config_.delay_frames) + L" frames"
+                                   + (config_.delay_ms > 0.0 ? L" + " + std::to_wstring(config_.delay_ms) + L" ms" : L"")
+                                 : L"");
     }
 
     void create_swapchain()
@@ -896,6 +923,11 @@ class vulkan_output_consumer : public core::frame_consumer
         // pipeline delay (scalers, audio de-embedders, LED processors).
         const auto min_fill = static_cast<size_t>(config_.delay_frames + 1);
 
+        // Sub-frame delay: additional sleep before each present to fine-tune
+        // A/V sync beyond frame-granularity (e.g. matching PortAudio audio path).
+        const auto sub_frame_delay = std::chrono::microseconds(
+            static_cast<int64_t>(config_.delay_ms * 1000.0));
+
         // Frame pacer interval: used by the phase-aligned pacer (MAILBOX mode)
         // to sleep until the next frame tick. Not used in FIFO mode (present
         // barrier) where hardware provides the timing.
@@ -971,6 +1003,11 @@ class vulkan_output_consumer : public core::frame_consumer
                 if (!running_)
                     break; // Exit promptly during shutdown — don't present another frame
             }
+
+            // Sub-frame delay: hold the frame an additional N milliseconds
+            // beyond the frame-granularity delay to fine-tune A/V sync.
+            if (sub_frame_delay.count() > 0)
+                std::this_thread::sleep_for(sub_frame_delay);
 
             caspar::timer frame_timer;
             present_frame(frame, frame_gen);
@@ -3395,6 +3432,8 @@ spl::shared_ptr<core::frame_consumer> create_consumer(const std::vector<std::wst
             config.video_mode = params[++i];
         else if (boost::iequals(params[i], L"DELAY") && i + 1 < params.size())
             config.delay_frames = std::stoi(params[++i]);
+        else if (boost::iequals(params[i], L"DELAY_MS") && i + 1 < params.size())
+            config.delay_ms = std::stod(params[++i]);
     }
 
     // Extract OGL device from the channel for zero-copy interop
