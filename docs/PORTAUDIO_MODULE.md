@@ -479,6 +479,97 @@ The key challenge is that ASIO only allows one stream per device. The PortAudio 
 - `DELAY=40` adds 40ms of audio delay to compensate for the SDI video pipeline latency (DeckLink capture → GPU → mixer), keeping audio and video in sync in the recorded files.
 - When a channel is stopped, its producer releases its shared_ptr; the shared stream stays open for the remaining producers.
 
+### Scenario 9: Vulkan Output + PortAudio Audio
+
+**Use case:** Output video via the Vulkan output consumer (direct display or fullscreen exclusive) and route audio separately to a professional audio interface. Common for LED wall setups, preview monitors, and any workflow where video goes to a GPU output and audio to a dedicated DAC.
+
+```xml
+<channel>
+  <video-mode>1080p5000</video-mode>
+  <consumers>
+    <vulkan-output>
+      <gpu>0</gpu>
+      <device>1</device>
+      <buffer-depth>4</buffer-depth>
+      <delay>3</delay>
+      <delay-ms>5</delay-ms>
+    </vulkan-output>
+    <portaudio>
+      <device>Focusrite</device>
+      <host-api>asio</host-api>
+      <channels>2</channels>
+      <buffer-size>3</buffer-size>
+    </portaudio>
+  </consumers>
+</channel>
+```
+
+Or via AMCP:
+```bash
+ADD 1 VULKAN_OUTPUT 1 0 DELAY 3 DELAY_MS 5
+ADD 1 PORTAUDIO DEVICE=Focusrite API=asio CHANNELS=2 BUFFER=3
+```
+
+The Vulkan consumer takes output index and GPU index as positional parameters (`1 0`), with `DELAY`, `DELAY_MS`, and `MODE` as keyword-value pairs. The PortAudio consumer uses `KEY=VALUE` syntax.
+
+**How it works:**
+
+The PortAudio consumer is the **master clock** for the channel (`has_synchronization_clock() = true`). The Vulkan output consumer does **not** provide a clock (`has_synchronization_clock() = false`). This means:
+
+1. The audio hardware's crystal oscillator paces every channel tick via ring buffer backpressure.
+2. Both consumers receive the same frame at the same tick — no production-rate drift between them, ever.
+3. The Vulkan consumer pushes frames into a buffer queue; its present thread displays them at the next vsync. If the display's vsync rate drifts slightly against the audio clock (~50ppm), the buffer absorbs it transparently — at most one frame repeat or skip per minute, imperceptible to viewers.
+
+**The latency compensation problem:**
+
+Although both consumers receive frames simultaneously, their output pipelines have different depths:
+
+- **Audio path:** Frame audio → ring buffer (nearly full at steady state) → PA callback → DAC. Pipeline depth ≈ `(buffer-size + 1)` video frames.
+- **Video path:** Frame video → buffer queue → present thread → GPU → next vsync. Pipeline depth ≈ `(delay + 1)` video frames (where `delay` = Vulkan's `<delay>` parameter).
+
+Without compensation, audio **lags** video because the ring buffer holds more frames in its pipeline than the Vulkan present path. The Vulkan `<delay>` parameter corrects this by holding video frames in the buffer before presenting, matching the audio pipeline depth.
+
+**Delay formula:**
+
+```
+vulkan <delay> ≈ portaudio <buffer-size>
+vulkan <buffer-depth> ≥ vulkan <delay> + 1
+vulkan <delay-ms>     fine-tune residual offset (measure with lip-sync analyzer)
+```
+
+| PortAudio buffer-size | Vulkan delay | Vulkan buffer-depth | Expected accuracy |
+|---|---|---|---|
+| 2 | 2 | 3 | ±10ms, ~65ms total pipeline |
+| 3 | 3 | 4 | ±10ms, ~85ms total pipeline |
+| 4 (default) | 4 | 5 | ±10ms, ~105ms total pipeline |
+
+The `<delay-ms>` parameter adds a sub-frame hold (in milliseconds) on top of the frame-granularity `<delay>`. Use it to trim the last few ms of A/V offset that integer frames can't reach — for example, if a lip-sync analyzer shows audio arriving 5ms late, set `<delay-ms>5</delay-ms>` to hold video an extra 5ms. This is the same workflow used by disguise and Pixera for their per-output delay trim.
+
+**Expected lip-sync accuracy:**
+
+Once the delay is configured, the A/V offset is fixed (no drift over time) with residual jitter of **±10–15ms typical, ±20ms worst case**. This is determined by:
+
+- Vsync alignment jitter: ±0.5 frames (the channel tick is audio-locked, not vsync-locked, so frame submission rotates relative to the vsync edge)
+- PA callback granularity: ±half a hardware buffer period (~±2.7ms for 256-sample ASIO)
+
+This is well within the EBU R37 broadcast threshold (±40ms) and the ITU-R BT.1359 perceptibility threshold (±20ms). No drift accumulates over time because the audio clock is the single timing source for the entire channel.
+
+**Why no drift?**
+
+The PortAudio consumer's ring buffer backpressure paces every channel tick. The audio clock is the sole timing reference — there is no "video clock vs audio clock" conflict. The Vulkan display's vsync is a free-running consumer: it takes whatever frame is newest in the buffer at each refresh. Minor rate differences (display at 50.001 Hz vs audio at exactly 50 Hz) cause the buffer level to slowly oscillate by ±1 frame, absorbed silently. Audio plays without interruption.
+
+This is the "audio-scheduled video" architecture — the same approach validated in [CasparCG PR #1714](https://github.com/CasparCG/server/pull/1714) for OAL/screen consumers, extended to the Vulkan output path.
+
+**Tighter sync (optional):**
+
+If the display is genlocked to the same reference clock as the audio device (e.g. both locked to house sync via Quadro Sync II + word clock), vsync jitter drops to ±1–2ms, achieving near-SDI-level lip-sync accuracy.
+
+**Notes:**
+- The Vulkan consumer drops the oldest frame when its buffer is full rather than blocking the channel. This prevents a slow display from throttling audio.
+- For lowest audio latency, use ASIO. WASAPI adds ~10ms of extra driver buffer compared to ASIO.
+- The `delay` values above are starting points. Fine-tune with `<delay-ms>` and a lip-sync analyzer if ±10ms precision is needed. A simple field test: play a clapper/slate clip and compare the visual clap frame to the audio transient on a scope or by ear.
+- The same `<delay-ms>` parameter can also compensate for external downstream latency (scalers, LED processors, audio DSP chains), just as `delay` compensates in whole frames.
+
 ## Channel Mapping
 
 ### Consumer (Output)

@@ -102,9 +102,104 @@ enough for real-time 1080p50.
 - Less optimal than TensorRT but simpler build
 - ~8–12 ms / frame @ 1080p FP16
 
-**Recommendation:** Start with **Option B (ncnn/Vulkan)** for rapid prototyping
-and broad GPU compatibility, then add **Option A (TensorRT)** as an optional
-high-performance path once correctness is validated.
+**Recommendation:** Start with **Option A (TensorRT/CUDA)** for production.
+CUDA-GL interop is already proven in the codebase (`CudaGLTexture`,
+`CudaVkTexture`) and enables the zero-copy GPU path described in §5.
+ncnn/Vulkan can serve as a portable fallback but cannot easily participate in
+the zero-copy pipeline (see §4.1).
+
+---
+
+## 4.1 GPU Transfer Strategy — Avoiding the CPU↔GPU Roundtrip
+
+### The Problem
+
+VMX is a CPU-only codec.  RIFE runs on the GPU.  The OpenGL mixer composites
+on the GPU.  A naive integration creates a **wasteful double roundtrip**:
+
+```
+VMX decode (CPU)  →  upload to GPU (RIFE input)
+                          ↓
+                     RIFE inference (GPU)
+                          ↓
+                     download to CPU  ← WASTEFUL
+                          ↓
+                     build draw_frame (CPU buffer)
+                          ↓
+                     upload to GPU again  ← WASTEFUL  (OpenGL mixer)
+                          ↓
+                     composite + output
+```
+
+The GPU→CPU download (~0.5 ms) and second CPU→GPU upload (~1 ms) are
+unnecessary — the data is already on the GPU after RIFE finishes.
+
+### Existing Zero-Copy Infrastructure
+
+CasparCG already supports GPU-native frame passing:
+
+1. **`const_frame` accepts a GPU texture** — the constructor takes an optional
+   `std::shared_ptr<core::texture>` parameter
+2. **`image_mixer::visit()` has a zero-copy fast path** — when
+   `frame.texture()` returns a valid texture, the mixer binds it directly
+   instead of uploading from CPU:
+   ```cpp
+   if (auto direct_core_tex = frame.texture()) {
+       // Skip CPU→GPU upload, use pre-populated GPU texture directly
+   }
+   ```
+3. **`CudaGLTexture`** — registers an OpenGL texture with CUDA so a CUDA
+   kernel can read/write it without any host transfers.  Already used by
+   `cuda_prores` and `cuda_notchlc` producers.
+4. **`CudaVkTexture`** — same pattern for Vulkan textures via
+   `vkGetMemoryWin32HandleKHR` → `cudaImportExternalMemory`.
+
+### Transfer Strategy Options
+
+| Option | Data Flow | Transfers | Overhead | Backend |
+|---|---|---|---|---|
+| **A. CUDA-GL interop (recommended)** | VMX→CPU→OGL texture→CUDA map→RIFE→OGL texture out | 1× upload | ~1 ms | TensorRT / CUDA |
+| **B. Keep output on GPU only** | VMX→CPU→GPU (RIFE)→OGL texture out | 1× upload | ~1 ms | TensorRT / CUDA |
+| **C. Naive roundtrip** | VMX→CPU→GPU→RIFE→CPU→GPU (mixer) | 2× upload + 1× download | ~2.5 ms | Any |
+| **D. GPU-native decode** | NVENC decode→GPU→RIFE→GPU→mixer | 0 transfers | ~0 ms | Requires abandoning VMX |
+
+**Option A** is the recommended path:
+
+```
+VMX decode (CPU)
+    ↓
+Upload to OGL texture (one-time, via ogl_->copy_async())
+    ↓
+CUDA-GL map (cudaGraphicsGLRegisterImage — zero-copy)
+    ↓
+RIFE inference reads mapped input, writes to mapped OGL output texture
+    ↓
+Return const_frame carrying OGL texture
+    ↓
+Mixer sees frame.texture() → zero-copy compositing, no re-upload
+```
+
+The only unavoidable transfer is the initial VMX→GPU upload, since VMX is
+CPU-only.  Everything after that stays on the GPU.
+
+**Option D** would eliminate all transfers but requires replacing VMX with a
+GPU-decoded codec (NVDEC H.264/HEVC).  This sacrifices VMX's advantages
+(alpha channel, 10-bit, fused SIMD, field-aware slicing) and is not
+recommended unless VMX proves to be a bottleneck.
+
+### Impact on Backend Choice
+
+This analysis **strongly favors TensorRT/CUDA over ncnn/Vulkan** for the
+primary backend:
+
+- CUDA-GL interop is already proven in the codebase (`CudaGLTexture`)
+- ncnn/Vulkan would need Vulkan→OpenGL interop (or Vulkan→CUDA→OpenGL),
+  adding an extra translation layer
+- `rife-ncnn-vulkan` does not expose intermediate GPU buffers for external
+  interop
+
+ncnn remains useful as a **fallback for non-NVIDIA GPUs**, accepting the
+roundtrip penalty (Option C) on those platforms.
 
 ---
 
@@ -122,19 +217,33 @@ replay_producer::receive_impl()
         │
         ├─ When t == 0.0 → output real decoded frame (no interpolation)
         │
-        └─ When t != 0.0 → interpolate
+        └─ When t != 0.0 → interpolate (zero-copy GPU path)
             │
-            ├─ frame_A = VMX decode of floor frame
-            ├─ frame_B = VMX decode of ceil frame
+            ├─ frame_A = VMX decode of floor frame (CPU)
+            ├─ frame_B = VMX decode of ceil frame (CPU)
             │
-            ├─ Upload frame_A, frame_B to GPU (if not cached)
+            ├─ Upload frame_A, frame_B to OGL textures (if not cached)
+            │   via ogl_->copy_async() — async DMA through persistent PBOs
             │
-            ├─ rife_interpolator->interpolate(frame_A, frame_B, t)
-            │   → returns interpolated GPU buffer
+            ├─ CUDA-GL map input textures (cudaGraphicsGLRegisterImage)
             │
-            ├─ Download result to CPU (BGRA)
+            ├─ rife_interpolator->interpolate(mapped_A, mapped_B, t)
+            │   → RIFE writes result to CUDA-mapped OGL output texture
             │
-            └─ Build CasparCG draw_frame from result
+            └─ Build const_frame carrying OGL output texture
+                → mixer sees frame.texture() → zero-copy compositing
+                → no GPU→CPU download, no second upload
+```
+
+Fallback path (ncnn/Vulkan or when CUDA-GL interop unavailable):
+```
+        └─ When t != 0.0 → interpolate (roundtrip path)
+            │
+            ├─ frame_A, frame_B = VMX decode (CPU)
+            ├─ rife_interpolator->interpolate(src_a, src_b, dst, t)
+            │   → ncnn uploads internally, returns CPU buffer
+            └─ Build mutable_frame from CPU result
+                → mixer uploads to GPU normally via copy_async()
 ```
 
 ### Key Components
@@ -158,21 +267,35 @@ class rife_interpolator {
 public:
     virtual ~rife_interpolator() = default;
 
-    // Interpolate between two BGRA frames at position t ∈ (0, 1)
-    // Returns false on error. Result written to dst_bgra.
+    // CPU path: interpolate between two BGRA frames at position t ∈ (0, 1)
+    // Used by ncnn/Vulkan fallback. Result written to dst_bgra.
     virtual bool interpolate(
-        const uint8_t* src_a_bgra,   // frame N
-        const uint8_t* src_b_bgra,   // frame N+1
-        uint8_t*       dst_bgra,     // output interpolated frame
+        const uint8_t* src_a_bgra,   // frame N (CPU)
+        const uint8_t* src_b_bgra,   // frame N+1 (CPU)
+        uint8_t*       dst_bgra,     // output interpolated frame (CPU)
         int            width,
         int            height,
         float          t) = 0;       // 0.0 = frame A, 1.0 = frame B
+
+    // GPU zero-copy path: interpolate between two OGL textures.
+    // Writes result into dst_texture via CUDA-GL interop.
+    // Returns false if not supported (caller falls back to CPU path).
+    virtual bool interpolate_gpu(
+        std::shared_ptr<ogl::texture> src_a,   // frame N (OGL texture)
+        std::shared_ptr<ogl::texture> src_b,   // frame N+1 (OGL texture)
+        std::shared_ptr<ogl::texture> dst,      // output (OGL texture)
+        float                         t)
+    { return false; }  // Default: not supported, use CPU path
+
+    // Whether this backend supports the zero-copy GPU path
+    virtual bool supports_gpu_interop() const { return false; }
 
     // Estimated time per interpolation in milliseconds
     virtual double estimated_ms() const = 0;
 };
 
 // Factory — returns nullptr if no GPU available
+// Prefers CUDA/TensorRT backend (GPU interop) over ncnn (CPU path)
 std::unique_ptr<rife_interpolator> create_rife_interpolator(
     int width, int height, int gpu_id = 0);
 ```
@@ -205,15 +328,30 @@ Output frame 3:  interp(1, 2, 0.50)     (t=0.50)
 
 ### Timing Budget (1080p50, 20 ms per output frame)
 
+#### Zero-copy GPU path (TensorRT + CUDA-GL interop) — recommended
+
 | Step | Time | Notes |
 |---|---|---|
-| VMX decode frame A | ~2 ms | Cached from previous iteration |
+| VMX decode frame A | ~0 ms | Cached from previous iteration |
 | VMX decode frame B | ~2 ms | Read + decode |
-| GPU upload (2 frames) | ~1 ms | PCIe 3.0 x16, 2× 8 MB |
-| RIFE inference | ~5–8 ms | ncnn Vulkan or TensorRT FP16 |
-| GPU download (1 frame) | ~0.5 ms | 8 MB result |
-| CasparCG frame build | ~0.5 ms | Pixel format conversion |
-| **Total** | **~11–14 ms** | **Fits within 20 ms budget** |
+| GPU upload (1 new frame) | ~0.5 ms | PCIe 3.0 x16, 1× 8 MB (other cached) |
+| CUDA-GL map | ~0.01 ms | Near-zero (pointer exchange) |
+| RIFE inference | ~5–8 ms | TensorRT FP16 on Tensor cores |
+| Frame build | ~0.1 ms | Wrap OGL texture in const_frame |
+| **Total** | **~7.5–10.5 ms** | **Fits within 20 ms with margin** |
+
+#### Roundtrip CPU path (ncnn/Vulkan fallback)
+
+| Step | Time | Notes |
+|---|---|---|
+| VMX decode frame A | ~0 ms | Cached from previous iteration |
+| VMX decode frame B | ~2 ms | Read + decode |
+| GPU upload (2 frames) | ~1 ms | Internal to ncnn (PCIe 3.0 x16, 2× 8 MB) |
+| RIFE inference | ~8–15 ms | ncnn Vulkan compute shaders |
+| GPU download (1 frame) | ~0.5 ms | Internal to ncnn (8 MB result) |
+| CasparCG frame build | ~0.5 ms | CPU buffer → mutable_frame |
+| Mixer re-upload | ~0.5 ms | copy_async() to OGL texture |
+| **Total** | **~12.5–19.5 ms** | **Tight at 0.25× on slower GPUs** |
 
 ---
 
@@ -248,32 +386,35 @@ file/rife_ms       = 6.2        (last interpolation time in ms)
 
 ## 8. Implementation Phases
 
-### Phase 1 — ncnn/Vulkan Prototype (est. scope: medium)
+### Phase 1 — TensorRT/CUDA Zero-Copy (est. scope: medium)
 
-1. Add ncnn as FetchContent dependency (header-only Vulkan backend)
-2. Convert RIFE v4.25 PyTorch → ONNX → ncnn format
-3. Implement `rife_ncnn_impl.cpp`
+1. Add TensorRT as CMake dependency
+2. Convert RIFE v4.25 PyTorch → ONNX → TensorRT engine (auto-built on first run)
+3. Implement `rife_tensorrt_impl.cpp` with CUDA-GL interop
+   - Register OGL textures with CUDA via `CudaGLTexture` (existing pattern)
+   - RIFE reads from CUDA-mapped input textures, writes to mapped output texture
+   - Return `const_frame` with OGL texture → mixer zero-copy path
 4. Integrate into `replay_producer::receive_impl()` slow-motion path
 5. Add `INTERPOLATION` AMCP parameter
 6. Test at 1080p50 with 0.25× and 0.5× speeds
-7. Benchmark GPU memory and latency
+7. Benchmark GPU memory, latency, and verify zero-copy (no readback)
 
 ### Phase 2 — Production Hardening
 
-1. Frame caching: keep last 2 decoded VMX frames in a ring buffer
-   to avoid redundant decodes
+1. Frame caching: keep last 2 uploaded OGL textures in a ring buffer
+   to avoid redundant decodes and uploads
 2. Async GPU pipeline: upload frame B while interpolating A→B
 3. Graceful fallback: if RIFE inference exceeds frame budget,
    automatically switch to frame-repeat for that frame
-4. Model bundling: ship `.param` + `.bin` in release package
+4. Model bundling: ship TensorRT engine build scripts + ONNX model
 5. Config option: `<rife-model-path>` in casparcg.config
 
-### Phase 3 — TensorRT Backend (optional, high-performance)
+### Phase 3 — ncnn/Vulkan Fallback (portable, non-NVIDIA GPUs)
 
-1. Add TensorRT as optional CMake dependency
-2. Implement `rife_tensorrt_impl.cpp`
-3. Auto-build TensorRT engine on first use (cached)
-4. Runtime backend selection based on available libraries
+1. Add ncnn as FetchContent dependency (Vulkan backend)
+2. Convert RIFE v4.25 to ncnn format
+3. Implement `rife_ncnn_impl.cpp` (CPU roundtrip path)
+4. Runtime backend selection: TensorRT if available, else ncnn
 
 ### Phase 4 — Advanced Features
 
@@ -288,34 +429,51 @@ file/rife_ms       = 6.2        (last interpolation time in ms)
 
 | Dependency | Version | License | Size | Required |
 |---|---|---|---|---|
-| ncnn | ≥ 1.0.20240410 | BSD-3 | ~2 MB (lib) | Yes (Phase 1) |
-| Vulkan SDK | ≥ 1.3 | Apache 2.0 | Headers only (runtime loader) | Yes (Phase 1) |
-| RIFE v4.25 model | v4.25 | MIT | ~15 MB (.param + .bin) | Yes |
-| TensorRT | ≥ 10.x | NVIDIA EULA | ~500 MB (DLLs) | No (Phase 3) |
+| TensorRT | ≥ 10.x | NVIDIA EULA | ~500 MB (DLLs) | Yes (Phase 1) |
+| CUDA Toolkit | ≥ 12.x | NVIDIA EULA | Headers + runtime | Yes (Phase 1, CUDA-GL interop) |
+| RIFE v4.25 model | v4.25 | MIT | ~30 MB (.onnx) | Yes |
+| ncnn | ≥ 1.0.20240410 | BSD-3 | ~2 MB (lib) | No (Phase 3 fallback) |
+| Vulkan SDK | ≥ 1.3 | Apache 2.0 | Headers only (runtime loader) | No (Phase 3 fallback) |
 
 ### CMake Integration
 
 ```cmake
 option(ENABLE_RIFE "AI frame interpolation for slow-motion" OFF)
+option(ENABLE_RIFE_NCNN "ncnn/Vulkan fallback for non-NVIDIA GPUs" OFF)
 
 if(ENABLE_RIFE)
-    # ncnn via FetchContent
-    FetchContent_Declare(ncnn
-        GIT_REPOSITORY https://github.com/Tencent/ncnn.git
-        GIT_TAG        20240410
-    )
-    set(NCNN_VULKAN ON CACHE BOOL "" FORCE)
-    set(NCNN_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-    set(NCNN_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
-    set(NCNN_BUILD_BENCHMARK OFF CACHE BOOL "" FORCE)
-    FetchContent_MakeAvailable(ncnn)
+    # Primary backend: TensorRT + CUDA-GL interop (zero-copy)
+    find_package(CUDAToolkit REQUIRED)
+    find_package(TensorRT REQUIRED)
 
     target_compile_definitions(replay PRIVATE ENABLE_RIFE)
-    target_link_libraries(replay PRIVATE ncnn)
+    target_link_libraries(replay PRIVATE
+        CUDA::cudart
+        TensorRT::nvinfer
+    )
     target_sources(replay PRIVATE
         rife/rife_interpolator.cpp
-        rife/rife_ncnn_impl.cpp
+        rife/rife_tensorrt_impl.cpp
     )
+
+    if(ENABLE_RIFE_NCNN)
+        # Optional fallback: ncnn/Vulkan (CPU roundtrip path)
+        FetchContent_Declare(ncnn
+            GIT_REPOSITORY https://github.com/Tencent/ncnn.git
+            GIT_TAG        20240410
+        )
+        set(NCNN_VULKAN ON CACHE BOOL "" FORCE)
+        set(NCNN_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+        set(NCNN_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
+        set(NCNN_BUILD_BENCHMARK OFF CACHE BOOL "" FORCE)
+        FetchContent_MakeAvailable(ncnn)
+
+        target_compile_definitions(replay PRIVATE ENABLE_RIFE_NCNN)
+        target_link_libraries(replay PRIVATE ncnn)
+        target_sources(replay PRIVATE
+            rife/rife_ncnn_impl.cpp
+        )
+    endif()
 endif()
 ```
 
@@ -327,10 +485,11 @@ endif()
 |---|---|---|
 | RIFE exceeds 20 ms budget on RTX 3070 | Dropped frames | Auto-fallback to frame-repeat; use `--scale=0.5` (half-res flow) |
 | GPU memory pressure (RIFE + OpenGL rendering) | OOM crash | Monitor VRAM; RIFE needs ~300 MB; RTX 3070 has 8 GB |
-| Vulkan driver incompatibility | Crash on init | Graceful fallback to CPU-only (no interpolation) |
-| ncnn model accuracy differs from PyTorch | Visual artifacts | Validate with PSNR/SSIM against PyTorch reference |
+| CUDA-GL interop failure | Falls back to roundtrip | Detect at init; log warning; use CPU path |
+| TensorRT engine build fails | No RIFE available | Fall back to ncnn; ship pre-built engines for common GPUs |
 | Interlaced content | Field-level artifacts | Deinterlace before interpolation (already done by VMX progressive decode) |
 | Reverse playback + RIFE | Wrong motion direction | Swap frame A/B and use `t' = 1 - t` |
+| OGL texture format mismatch | CUDA interop error | Validate format at registration; use BGRA8 consistently |
 
 ---
 
@@ -348,13 +507,16 @@ src/modules/replay/
     replay_extended_index.h             # Unchanged
     replay.h / replay.cpp              # Updated: INTERPOLATION param parsing
     rife/
-        rife_interpolator.h             # Abstract interface
+        rife_interpolator.h             # Abstract interface (CPU + GPU paths)
         rife_interpolator.cpp           # Factory, model path resolution
-        rife_ncnn_impl.h               # ncnn backend header
-        rife_ncnn_impl.cpp             # ncnn Vulkan implementation
+        rife_tensorrt_impl.h            # TensorRT backend header
+        rife_tensorrt_impl.cpp          # TensorRT + CUDA-GL zero-copy impl
+        rife_ncnn_impl.h               # ncnn backend header (fallback)
+        rife_ncnn_impl.cpp             # ncnn Vulkan implementation (CPU roundtrip)
         models/
-            rife-v4.25-lite.param      # ncnn model definition
-            rife-v4.25-lite.bin        # ncnn model weights (~7 MB)
+            rife-v4.25.onnx            # ONNX model for TensorRT conversion
+            rife-v4.25-lite.param      # ncnn model definition (fallback)
+            rife-v4.25-lite.bin        # ncnn model weights (fallback, ~7 MB)
 ```
 
 ---
