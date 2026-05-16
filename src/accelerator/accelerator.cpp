@@ -25,8 +25,10 @@ namespace caspar { namespace accelerator {
 struct accelerator::impl
 {
     std::shared_ptr<accelerator_device>          device_;
+    std::shared_ptr<ogl::device>                 previz_ogl_device_;
     std::shared_ptr<ogl::channel_texture_store>  channel_tex_store_;
     std::once_flag                               tex_store_init_flag_;
+    std::once_flag                               previz_ogl_init_flag_;
     const core::video_format_repository          format_repository_;
     accelerator_backend                          backend_;
 
@@ -49,11 +51,14 @@ struct accelerator::impl
     {
 #ifdef ENABLE_VULKAN
         if (backend_ == accelerator_backend::vulkan) {
-            return std::make_unique<vulkan::image_mixer>(
+            auto mixer = std::make_unique<vulkan::image_mixer>(
                 spl::make_shared_ptr(std::dynamic_pointer_cast<vulkan::device>(get_device())),
                 channel_id,
                 format_repository_.get_max_video_format_size(),
                 depth);
+            mixer->set_previz_ogl_device(get_previz_ogl_device());
+            mixer->set_channel_texture_store(get_channel_texture_store());
+            return mixer;
         }
 #endif
         auto mixer = std::make_unique<ogl::image_mixer>(
@@ -93,6 +98,15 @@ struct accelerator::impl
         });
         return channel_tex_store_;
     }
+
+    std::shared_ptr<ogl::device> get_previz_ogl_device()
+    {
+        std::call_once(previz_ogl_init_flag_, [this] {
+            previz_ogl_device_ = std::make_shared<ogl::device>();
+            CASPAR_LOG(info) << L"[accelerator] Created dedicated OGL device for previz (VK backend).";
+        });
+        return previz_ogl_device_;
+    }
 };
 
 accelerator::accelerator(const core::video_format_repository format_repository)
@@ -117,6 +131,11 @@ std::shared_ptr<accelerator_device> accelerator::get_device() const
 std::shared_ptr<ogl::channel_texture_store> accelerator::get_channel_texture_store()
 {
     return impl_->get_channel_texture_store();
+}
+
+std::shared_ptr<ogl::device> accelerator::get_previz_ogl_device()
+{
+    return impl_->get_previz_ogl_device();
 }
 
 }} // namespace caspar::accelerator

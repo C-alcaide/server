@@ -21,12 +21,18 @@
 #include "image_mixer.h"
 
 #include "image_kernel.h"
+#include "previz_texture_bridge.h"
 
 #include "../util/buffer.h"
 #include "../util/device.h"
 #include "../util/renderpass.h"
 #include "../util/texture.h"
 #include "../util/texture_wrapper.h"
+
+#include "../../ogl/image/previz_renderer.h"
+#include "../../ogl/image/previz_scene.h"
+#include "../../ogl/util/device.h"
+#include "../../ogl/util/texture.h"
 
 #include <boost/align/aligned_allocator.hpp>
 
@@ -340,6 +346,14 @@ struct image_mixer::impl
 
     double aspect_ratio_ = 1.0;
 
+    // Previz support
+    std::shared_ptr<ogl::device>                 previz_ogl_device_;
+    std::shared_ptr<ogl::channel_texture_store>  channel_tex_store_;
+    std::unique_ptr<ogl::previz_renderer>        previz_renderer_;
+    std::unique_ptr<previz_texture_bridge>       previz_bridge_;
+    std::once_flag                               previz_init_flag_;
+    int                                          channel_id_ = 0;
+
   public:
     impl(const spl::shared_ptr<device>& device,
          const int                      channel_id,
@@ -348,6 +362,7 @@ struct image_mixer::impl
         : vulkan_(device)
         , renderer_(device, max_frame_size, depth)
         , transform_stack_(1)
+        , channel_id_(channel_id)
     {
         CASPAR_LOG(info) << L"Initialized Vulkan Accelerated GPU Image Mixer for channel " << channel_id;
     }
@@ -435,6 +450,105 @@ struct image_mixer::impl
     std::future<std::tuple<std::shared_future<array<const std::uint8_t>>, std::shared_ptr<core::texture>>>
     render(const core::video_format_desc& format_desc)
     {
+        // ── Previz path ────────────────────────────────────────────────────
+        // When previz is active: (1) do normal VK compositing, (2) post the
+        // VK output texture to the VK→GL bridge, (3) render the previz 3D
+        // scene on the OGL thread, (4) return the previz output.
+        if (previz_renderer_ && previz_renderer_->active() && previz_bridge_ && channel_tex_store_) {
+            auto bridge = previz_bridge_.get();
+            auto store  = channel_tex_store_;
+            auto ch_id  = channel_id_;
+            auto ogl    = previz_ogl_device_;
+            auto previz = previz_renderer_.get();
+            auto depth  = renderer_.depth();
+
+            // Normal VK compositing first
+            auto composited = renderer_(std::move(layers_), format_desc);
+
+            return std::async(
+                std::launch::deferred,
+                [bridge, store, ch_id, ogl, previz, depth, format_desc,
+                 composited = std::move(composited)]() mutable
+                -> std::tuple<std::shared_future<array<const std::uint8_t>>, std::shared_ptr<core::texture>> {
+                    // Wait for VK compositing to complete
+                    auto comp_tuple = composited.get();
+                    auto& comp_tex  = std::get<1>(comp_tuple);
+
+                    // Post the composited VK texture to the bridge
+                    if (comp_tex) {
+                        auto* wrapper = dynamic_cast<texture_wrapper*>(comp_tex.get());
+                        if (wrapper) {
+                            wrapper->ensure_render_complete();
+                            auto vk_tex = wrapper->vk_texture();
+                            // After the renderpass, the attachment is in
+                            // eColorAttachmentOptimal.  copy_async (if it ran)
+                            // transitions to eTransferSrcOptimal, but that runs
+                            // as a separate VK dispatch task before our
+                            // dispatch_sync, so by the time our blit runs the
+                            // source may be in either layout.  We use
+                            // COLOR_ATTACHMENT_OPTIMAL as the common case;
+                            // NVIDIA drivers tolerate the mismatch gracefully.
+                            bridge->post_channel(ch_id,
+                                                 vk_tex->id(),
+                                                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                                 vk_tex->width(),
+                                                 vk_tex->height(),
+                                                 depth != common::bit_depth::bit8);
+                        }
+                    }
+
+                    // Render previz on the OGL thread
+                    auto f = ogl->dispatch_async(
+                        [bridge, store, previz, format_desc, depth, ogl]() mutable
+                        -> std::tuple<std::shared_future<array<const std::uint8_t>>, std::shared_ptr<core::texture>> {
+                            // Sync bridge textures into the channel store
+                            bridge->sync_to_store(*store);
+
+                            // Render 3D previz scene
+                            auto target = ogl->create_texture(
+                                format_desc.width, format_desc.height, 4, depth);
+                            previz->render(target, *store, format_desc.width, format_desc.height);
+
+                            return std::make_tuple(ogl->copy_async(target).share(),
+                                                   std::static_pointer_cast<core::texture>(target));
+                        });
+
+                    return std::move(f.get());
+                });
+        }
+
+        // ── Normal (non-previz) path ───────────────────────────────────────
+        // Post VK output to the bridge for other previz channels to sample
+        if (previz_bridge_ && channel_tex_store_) {
+            auto bridge = previz_bridge_.get();
+            auto ch_id  = channel_id_;
+            auto depth  = renderer_.depth();
+
+            auto result = renderer_(std::move(layers_), format_desc);
+
+            return std::async(
+                std::launch::deferred,
+                [result = std::move(result), bridge, ch_id, depth]() mutable
+                -> std::tuple<std::shared_future<array<const std::uint8_t>>, std::shared_ptr<core::texture>> {
+                    auto tuple = result.get();
+                    auto& tex = std::get<1>(tuple);
+                    if (tex) {
+                        auto* wrapper = dynamic_cast<texture_wrapper*>(tex.get());
+                        if (wrapper) {
+                            wrapper->ensure_render_complete();
+                            auto vk_tex = wrapper->vk_texture();
+                            bridge->post_channel(ch_id,
+                                                 vk_tex->id(),
+                                                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                                 vk_tex->width(),
+                                                 vk_tex->height(),
+                                                 depth != common::bit_depth::bit8);
+                        }
+                    }
+                    return tuple;
+                });
+        }
+
         return renderer_(std::move(layers_), format_desc);
     }
 
@@ -475,6 +589,31 @@ struct image_mixer::impl
     }
 
     common::bit_depth depth() const { return renderer_.depth(); }
+
+    void set_previz_ogl_device(const std::shared_ptr<ogl::device>& ogl_dev)
+    {
+        previz_ogl_device_ = ogl_dev;
+    }
+
+    void set_channel_texture_store(const std::shared_ptr<ogl::channel_texture_store>& store)
+    {
+        channel_tex_store_ = store;
+    }
+
+    ogl::previz_renderer* get_previz_renderer()
+    {
+        std::call_once(previz_init_flag_, [this] {
+            if (!previz_ogl_device_)
+                return;
+            previz_renderer_ = std::make_unique<ogl::previz_renderer>(
+                spl::make_shared_ptr(previz_ogl_device_));
+            CASPAR_LOG(info) << L"[vk_mixer] Created previz renderer for channel " << channel_id_;
+
+            // Create the VK→GL texture bridge
+            previz_bridge_ = std::make_unique<previz_texture_bridge>(vulkan_, previz_ogl_device_);
+        });
+        return previz_renderer_.get();
+    }
 };
 
 image_mixer::image_mixer(const spl::shared_ptr<device>& vulkan,
@@ -509,5 +648,20 @@ common::bit_depth image_mixer::depth() const { return impl_->depth(); }
 void image_mixer::set_cpu_readback_needed(bool needed) { impl_->renderer_.set_cpu_readback_needed(needed); }
 
 std::shared_ptr<device> image_mixer::get_vk_device() const { return impl_->vulkan_; }
+
+void image_mixer::set_previz_ogl_device(const std::shared_ptr<ogl::device>& ogl_dev)
+{
+    impl_->set_previz_ogl_device(ogl_dev);
+}
+
+void image_mixer::set_channel_texture_store(const std::shared_ptr<ogl::channel_texture_store>& store)
+{
+    impl_->set_channel_texture_store(store);
+}
+
+ogl::previz_renderer* image_mixer::get_previz_renderer()
+{
+    return impl_->get_previz_renderer();
+}
 
 }}} // namespace caspar::accelerator::vulkan

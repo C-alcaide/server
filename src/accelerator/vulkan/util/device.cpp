@@ -812,7 +812,9 @@ std::vector<vk::CommandBuffer>     device::allocateCommandBuffers(uint32_t count
     return impl_->allocateCommandBuffers(count);
 }
 void       device::submit(const vk::SubmitInfo& submitInfo, vk::Fence fence) { impl_->submit(submitInfo, fence); }
-vk::Device device::getVkDevice() const { return impl_->_device; }
+vk::Device         device::getVkDevice() const { return impl_->_device; }
+vk::PhysicalDevice device::getVkPhysicalDevice() const { return impl_->_physical_device; }
+vk::CommandPool    device::getCommandPool() const { return impl_->_command_pool; }
 std::shared_ptr<pipeline> device::get_pipeline(common::bit_depth depth)
 {
     return impl_->_pipelines[depth == common::bit_depth::bit8 ? 0 : 1];

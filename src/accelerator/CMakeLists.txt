@@ -45,6 +45,7 @@ IF(ENABLE_VULKAN)
 	set(VULKAN_SOURCES
 		vulkan/image/image_mixer.cpp
 		vulkan/image/image_kernel.cpp
+		vulkan/image/previz_texture_bridge.cpp
 		vulkan/util/device.cpp
 		vulkan/util/buffer.cpp
 		vulkan/util/texture.cpp
@@ -56,6 +57,7 @@ IF(ENABLE_VULKAN)
 	set(VULKAN_HEADERS
 		vulkan/image/image_mixer.h
 		vulkan/image/image_kernel.h
+		vulkan/image/previz_texture_bridge.h
 		vulkan/util/device.h
 		vulkan/util/buffer.h
 		vulkan/util/texture.h

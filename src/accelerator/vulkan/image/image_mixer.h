@@ -32,7 +32,15 @@
 
 #include <future>
 
-namespace caspar { namespace accelerator { namespace vulkan {
+namespace caspar { namespace accelerator {
+
+namespace ogl {
+class device;
+class channel_texture_store;
+class previz_renderer;
+} // namespace ogl
+
+namespace vulkan {
 
 class image_mixer final : public core::image_mixer
 {
@@ -67,6 +75,11 @@ class image_mixer final : public core::image_mixer
     void set_cpu_readback_needed(bool needed) override;
 
     std::shared_ptr<class device> get_vk_device() const;
+
+    /// Previz support — called by accelerator after construction.
+    void set_previz_ogl_device(const std::shared_ptr<ogl::device>& ogl_dev);
+    void set_channel_texture_store(const std::shared_ptr<ogl::channel_texture_store>& store);
+    ogl::previz_renderer* get_previz_renderer();
 
   private:
     struct impl;

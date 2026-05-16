@@ -17,6 +17,7 @@ namespace caspar { namespace accelerator {
 class accelerator_device;
 
 namespace ogl {
+class device;
 class channel_texture_store;
 }
 
@@ -53,6 +54,9 @@ class accelerator
 
     /// Shared channel texture store — allows previz channels to sample other channels' output.
     std::shared_ptr<ogl::channel_texture_store> get_channel_texture_store();
+
+    /// Get (or lazily create) a dedicated OGL device for previz when VK is the mixer backend.
+    std::shared_ptr<ogl::device> get_previz_ogl_device();
 
   private:
     struct impl;
