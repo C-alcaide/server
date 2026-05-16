@@ -8,6 +8,8 @@ set(SOURCES
 	producer/av_input.h
 	producer/ffmpeg_producer.cpp
 	producer/ffmpeg_producer.h
+	producer/d3d11_gl_bridge.cpp
+	producer/d3d11_gl_bridge.h
 	consumer/ffmpeg_consumer.cpp
 	consumer/ffmpeg_consumer.h
 
@@ -40,8 +42,12 @@ source_group(sources\\producer ./producer/.*)
 source_group(sources\\util ./util/.*)
 
 if (MSVC)
-	# target_link_libraries(ffmpeg
-	# )
+	target_link_libraries(ffmpeg PRIVATE
+		# GLEW + accelerator for D3D11→GL GPU-direct producer path
+		GLEW::glew
+		accelerator
+		opengl32
+	)
 else()
 	target_link_libraries(ffmpeg PRIVATE
 			${FFMPEG_LIBRARIES}

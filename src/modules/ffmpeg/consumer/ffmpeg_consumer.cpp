@@ -79,6 +79,7 @@ extern "C" {
 #include <libavfilter/buffersrc.h>
 #include <libavformat/avformat.h>
 #include <libavutil/channel_layout.h>
+#include <libavutil/hwcontext.h>
 #include <libavutil/opt.h>
 #include <libavutil/pixfmt.h>
 #include <libavutil/samplefmt.h>
@@ -186,6 +187,29 @@ struct Stream
 
         if (!codec) {
             FF_RET(AVERROR(EINVAL), "avcodec_find_encoder");
+        }
+
+        // ── NVENC GPU-accelerated encoding path ───────────────────────────
+        // When an NVENC encoder is selected, automatically insert hwupload_cuda
+        // into the filter graph so format conversion (BGRA→NV12) happens on GPU
+        // via scale_cuda instead of CPU-side libswscale.
+        AVBufferRef* hw_device_ctx_ = nullptr;
+        bool         use_nvenc_hw_  = false;
+        if (codec->type == AVMEDIA_TYPE_VIDEO) {
+            std::string codec_name = codec->name ? codec->name : "";
+            if (codec_name.find("nvenc") != std::string::npos) {
+                if (av_hwdevice_ctx_create(&hw_device_ctx_, AV_HWDEVICE_TYPE_CUDA,
+                                           nullptr, nullptr, 0) == 0) {
+                    use_nvenc_hw_ = true;
+                    // If no user filter specified, use GPU-side format conversion
+                    if (filter_spec.empty() || filter_spec == "null") {
+                        filter_spec = "format=nv12,hwupload_cuda";
+                    }
+                    CASPAR_LOG(info) << L"[ffmpeg] NVENC GPU path: hwupload_cuda enabled";
+                } else {
+                    CASPAR_LOG(warning) << L"[ffmpeg] CUDA hw device creation failed — NVENC will use CPU upload";
+                }
+            }
         }
 
         AVFilterInOut* outputs = nullptr;
@@ -330,6 +354,15 @@ struct Stream
             FF(avfilter_link(cur->filter_ctx, cur->pad_idx, sink, 0));
         }
 
+        // Set CUDA device context on hwupload filters before graph config
+        if (use_nvenc_hw_ && hw_device_ctx_) {
+            for (unsigned i = 0; i < graph->nb_filters; i++) {
+                if (graph->filters[i]->filter->flags & AVFILTER_FLAG_HWDEVICE) {
+                    graph->filters[i]->hw_device_ctx = av_buffer_ref(hw_device_ctx_);
+                }
+            }
+        }
+
         FF(avfilter_graph_config(graph.get(), nullptr));
 
         st = avformat_new_stream(oc, nullptr);
@@ -399,6 +432,11 @@ struct Stream
             enc->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
         }
 
+        // Set CUDA hw_device_ctx on encoder so NVENC receives GPU frames
+        if (use_nvenc_hw_ && hw_device_ctx_) {
+            enc->hw_device_ctx = av_buffer_ref(hw_device_ctx_);
+        }
+
         auto dict = to_dict(std::move(stream_options));
         CASPAR_SCOPE_EXIT { av_dict_free(&dict); };
         FF(avcodec_open2(enc.get(), codec, &dict));
@@ -410,6 +448,11 @@ struct Stream
 
         if (codec->type == AVMEDIA_TYPE_AUDIO && !(codec->capabilities & AV_CODEC_CAP_VARIABLE_FRAME_SIZE)) {
             av_buffersink_set_frame_size(sink, enc->frame_size);
+        }
+
+        // Release the local hw_device_ctx ref (graph and enc hold their own refs)
+        if (hw_device_ctx_) {
+            av_buffer_unref(&hw_device_ctx_);
         }
     }
 

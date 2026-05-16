@@ -37,6 +37,10 @@ class frame_factory
     virtual class mutable_frame create_frame(const void* video_stream_tag, const struct pixel_format_desc& desc) = 0;
     virtual class mutable_frame
     create_frame(const void* video_stream_tag, const struct pixel_format_desc& desc, common::bit_depth depth) = 0;
+
+    /// Return an opaque handle to the underlying GPU device (e.g. ogl::device*).
+    /// Returns nullptr if the mixer has no GPU device or doesn't support direct import.
+    virtual void* gpu_device_handle() const { return nullptr; }
 };
 
 }} // namespace caspar::core

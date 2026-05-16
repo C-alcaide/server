@@ -26,10 +26,13 @@
 #include <common/executor.h>
 #include <common/diagnostics/graph.h>
 #include <common/timer.h>
+#include <common/log.h>
 #include <core/frame/frame.h>
 #include <core/frame/pixel_format.h>
 #include <core/consumer/frame_consumer.h>
+#include <core/consumer/channel_info.h>
 #include <core/video_format.h>
+#include <accelerator/ogl/util/texture.h>
 #include <memory>
 #include <atomic>
 #include <chrono>
@@ -46,6 +49,21 @@
 // For Context Creation
 #include <windows.h>
 #include <gl/GL.h>
+
+// WGL extension constants for shared-context creation
+#ifndef WGL_CONTEXT_MAJOR_VERSION_ARB
+#define WGL_CONTEXT_MAJOR_VERSION_ARB 0x2091
+#endif
+#ifndef WGL_CONTEXT_MINOR_VERSION_ARB
+#define WGL_CONTEXT_MINOR_VERSION_ARB 0x2092
+#endif
+#ifndef WGL_CONTEXT_PROFILE_MASK_ARB
+#define WGL_CONTEXT_PROFILE_MASK_ARB  0x9126
+#endif
+#ifndef WGL_CONTEXT_CORE_PROFILE_BIT_ARB
+#define WGL_CONTEXT_CORE_PROFILE_BIT_ARB 0x00000001
+#endif
+typedef HGLRC(WINAPI* PFNWGLCREATECONTEXTATTRIBSARBPROC)(HDC, HGLRC, const int*);
 
 // FFmpeg for pixel-format conversion and downscaling
 #pragma warning(push)
@@ -65,9 +83,10 @@ class gl_context
     HWND  hwnd_ = nullptr;
     HDC   hdc_  = nullptr;
     HGLRC hglrc_ = nullptr;
+    bool  shared_ = false;
 
   public:
-    gl_context()
+    gl_context(void* share_context = nullptr)
     {
         WNDCLASS wc      = {0};
         wc.lpfnWndProc   = DefWindowProc;
@@ -92,13 +111,49 @@ class gl_context
             int format = ChoosePixelFormat(hdc_, &pfd);
             SetPixelFormat(hdc_, format, &pfd);
 
-            hglrc_ = wglCreateContext(hdc_);
+            // Create a bootstrap context to load WGL extensions
+            HGLRC temp_ctx = wglCreateContext(hdc_);
+            if (!temp_ctx) return;
+            wglMakeCurrent(hdc_, temp_ctx);
+
+            auto wglCreateContextAttribsARB = reinterpret_cast<PFNWGLCREATECONTEXTATTRIBSARBPROC>(
+                wglGetProcAddress("wglCreateContextAttribsARB"));
+
+            if (wglCreateContextAttribsARB) {
+                int attribs[] = {
+                    WGL_CONTEXT_MAJOR_VERSION_ARB, 4,
+                    WGL_CONTEXT_MINOR_VERSION_ARB, 5,
+                    WGL_CONTEXT_PROFILE_MASK_ARB,  WGL_CONTEXT_CORE_PROFILE_BIT_ARB,
+                    0
+                };
+
+                // Try shared context with the OGL mixer (enables zero-copy texture path)
+                if (share_context) {
+                    hglrc_ = wglCreateContextAttribsARB(hdc_, reinterpret_cast<HGLRC>(share_context), attribs);
+                    if (hglrc_) {
+                        shared_ = true;
+                    } else {
+                        // Re-establish bootstrap context on failure
+                        wglMakeCurrent(hdc_, temp_ctx);
+                    }
+                }
+
+                if (!hglrc_)
+                    hglrc_ = wglCreateContextAttribsARB(hdc_, nullptr, attribs);
+
+                wglMakeCurrent(nullptr, nullptr);
+                wglDeleteContext(temp_ctx);
+            } else {
+                // Fallback: use basic context
+                hglrc_ = temp_ctx;
+            }
         }
     }
 
     ~gl_context()
     {
         if (hglrc_) {
+            wglMakeCurrent(nullptr, nullptr);
             wglDeleteContext(hglrc_);
         }
         if (hdc_) {
@@ -107,6 +162,7 @@ class gl_context
         if (hwnd_) {
             DestroyWindow(hwnd_);
         }
+        UnregisterClass(L"CasparCG_Spout_Consumer_Context", GetModuleHandle(NULL));
     }
 
     bool make_current()
@@ -116,6 +172,8 @@ class gl_context
         }
         return false;
     }
+
+    bool is_shared() const { return shared_; }
 };
 
 } // namespace
@@ -126,6 +184,10 @@ struct spout_consumer_impl : public core::frame_consumer
     std::unique_ptr<Spout>      sender_;
     std::unique_ptr<gl_context> context_;
     core::video_format_desc     format_desc_;
+
+    // GL context sharing for zero-copy GPU texture path
+    void* gl_share_context_ = nullptr;
+    std::atomic<bool> gpu_path_active_{false};
 
     // Optional downscale cap (0 = no cap = native resolution).
     // Set via AMCP: ADD x SPOUT "Name" MAX_WIDTH 1920 MAX_HEIGHT 1080
@@ -255,6 +317,9 @@ struct spout_consumer_impl : public core::frame_consumer
     {
         format_desc_ = format_desc;
 
+        // Capture the mixer's GL context handle for shared-context creation.
+        gl_share_context_ = channel_info.gl_share_context;
+
         // Compute output dimensions (native by default; capped if MAX_WIDTH/MAX_HEIGHT set).
         if (max_w_ > 0 || max_h_ > 0) {
             const int sw = format_desc.square_width;
@@ -319,8 +384,12 @@ struct spout_consumer_impl : public core::frame_consumer
             const int src_w = format_desc_.width;
             const int src_h = format_desc_.height;
 
-            if (!context_)
-                context_ = std::make_unique<gl_context>();
+            if (!context_) {
+                context_ = std::make_unique<gl_context>(gl_share_context_);
+                if (context_->is_shared()) {
+                    CASPAR_LOG(info) << L"[spout_consumer] GL context shared with mixer — GPU texture path available.";
+                }
+            }
             if (!context_->make_current()) {
                 busy_ = false;
                 return;
@@ -328,15 +397,32 @@ struct spout_consumer_impl : public core::frame_consumer
 
             if (!sender_) {
                 sender_ = std::make_unique<Spout>();
-                // Enable Spout frame counting so the frame-count semaphore is
-                // created and incremented on every SendImage call.  This allows
-                // the spout-bridge receiver to detect duplicate frames (via its
-                // hasNewFrame() semaphore peek) and skip redundant GPU readbacks.
-                // SetFrameCount(true) writes the registry key for future Spout
-                // instances and enables counting on this instance immediately.
                 sender_->SetFrameCount(true);
                 sender_->SetSenderName(sender_name_.c_str());
             }
+
+            // ── GPU texture path: zero-copy via SendTexture() ──
+            // Available when: shared GL context succeeded, no downscaling needed,
+            // and frame carries an OGL texture from the mixer.
+            if (context_->is_shared() && src_w == out_w_ && src_h == out_h_) {
+                if (auto core_tex = frame.texture()) {
+                    auto ogl_tex = std::dynamic_pointer_cast<accelerator::ogl::texture>(core_tex);
+                    if (ogl_tex) {
+                        gpu_path_active_ = true;
+                        sender_->SendTexture(static_cast<GLuint>(ogl_tex->id()),
+                                             GL_TEXTURE_2D,
+                                             static_cast<unsigned int>(ogl_tex->width()),
+                                             static_cast<unsigned int>(ogl_tex->height()),
+                                             false);  // bInvert=false: OGL mixer output is already top-down in texture
+                        graph_->set_value("frame-time", frame_timer_.elapsed() * 1000.0);
+                        busy_ = false;
+                        return;
+                    }
+                }
+            }
+
+            // ── CPU fallback path: swscale + SendImage() ──
+            gpu_path_active_ = false;
 
             // Rebuild swscale contexts when format or output dimensions change.
             if (src_fmt != src_av_fmt_ || !sws_ctxs_[0]) {
@@ -429,6 +515,8 @@ struct spout_consumer_impl : public core::frame_consumer
         // Range 10000–19999 avoids DeckLink(300+), Screen(600+), FFmpeg(100000+).
         return 10000 + static_cast<int>(std::hash<std::string>{}(sender_name_) % 10000);
     }
+
+    bool needs_cpu_frame_data() const override { return !gpu_path_active_; }
 
     caspar::core::monitor::state state() const override { return {}; }
 };

@@ -59,6 +59,14 @@
 
 #include <cuda_runtime.h>
 
+#ifdef WIN32
+#include <windows.h>
+#include <GL/glew.h>
+#endif
+#include <cuda_gl_interop.h>
+
+#include <accelerator/ogl/util/texture.h>
+
 #include "../cuda/cuda_prores_frame.h"
 #include "../cuda/cuda_prores_tables.cuh"
 #include "../muxer/mov_muxer.h"
@@ -102,6 +110,103 @@ static size_t v210_row_bytes(int w) {
 static size_t v210_frame_bytes(int w, int h) {
     return v210_row_bytes(w) * h;
 }
+
+// ---------------------------------------------------------------------------
+// GPU-direct texture cache: caches CUDA-GL registrations by GL texture ID.
+// The mixer reuses a small pool of textures, so we cache up to 8 slots.
+// ---------------------------------------------------------------------------
+class cuda_gl_read_cache
+{
+  public:
+    cuda_gl_read_cache() = default;
+
+    ~cuda_gl_read_cache()
+    {
+        for (int i = 0; i < num_cached_; ++i) {
+            if (slots_[i].mapped)
+                cudaGraphicsUnmapResources(1, &slots_[i].resource, nullptr);
+            if (slots_[i].resource)
+                cudaGraphicsUnregisterResource(slots_[i].resource);
+        }
+    }
+
+    // Returns a cudaArray_t for reading from the given GL texture.
+    // Registers the texture with CUDA on first encounter, then maps it.
+    // stream: CUDA stream that will read from the array.
+    cudaArray_t map_texture(int gl_id, cudaStream_t stream)
+    {
+        auto* slot = find_or_register(gl_id);
+        if (!slot) return nullptr;
+
+        if (!slot->mapped) {
+            auto err = cudaGraphicsMapResources(1, &slot->resource, stream);
+            if (err != cudaSuccess) return nullptr;
+            slot->mapped = true;
+        }
+
+        cudaArray_t array = nullptr;
+        auto err = cudaGraphicsSubResourceGetMappedArray(&array, slot->resource, 0, 0);
+        if (err != cudaSuccess) {
+            cudaGraphicsUnmapResources(1, &slot->resource, stream);
+            slot->mapped = false;
+            return nullptr;
+        }
+        return array;
+    }
+
+    // Unmaps the GL texture so GL can use it again.
+    void unmap_texture(int gl_id, cudaStream_t stream)
+    {
+        for (int i = 0; i < num_cached_; ++i) {
+            if (slots_[i].gl_id == gl_id && slots_[i].mapped) {
+                cudaGraphicsUnmapResources(1, &slots_[i].resource, stream);
+                slots_[i].mapped = false;
+                return;
+            }
+        }
+    }
+
+  private:
+    struct slot {
+        int                    gl_id    = 0;
+        cudaGraphicsResource_t resource = nullptr;
+        bool                   mapped   = false;
+    };
+    static constexpr int MAX_SLOTS = 8;
+    slot slots_[MAX_SLOTS];
+    int  num_cached_ = 0;
+
+    slot* find_or_register(int gl_id)
+    {
+        for (int i = 0; i < num_cached_; ++i) {
+            if (slots_[i].gl_id == gl_id)
+                return &slots_[i];
+        }
+        // Register new
+        if (num_cached_ >= MAX_SLOTS) {
+            // Evict oldest
+            if (slots_[0].mapped)
+                cudaGraphicsUnmapResources(1, &slots_[0].resource, nullptr);
+            cudaGraphicsUnregisterResource(slots_[0].resource);
+            for (int i = 1; i < num_cached_; ++i)
+                slots_[i - 1] = slots_[i];
+            num_cached_--;
+        }
+        auto& s = slots_[num_cached_];
+        s = {};
+        s.gl_id = gl_id;
+        auto err = cudaGraphicsGLRegisterImage(
+            &s.resource, static_cast<GLuint>(gl_id),
+            GL_TEXTURE_2D, cudaGraphicsRegisterFlagsReadOnly);
+        if (err != cudaSuccess) {
+            CASPAR_LOG(warning) << L"[cuda_prores] cudaGraphicsGLRegisterImage failed: "
+                                << cudaGetErrorString(err);
+            return nullptr;
+        }
+        num_cached_++;
+        return &s;
+    }
+};
 
 // ---------------------------------------------------------------------------
 // Config
@@ -266,11 +371,18 @@ public:
     // ── frame_consumer interface ──────────────────────────────────────────
 
     void initialize(const core::video_format_desc& format_desc,
-                    const core::channel_info& /*channel_info*/,
+                    const core::channel_info& channel_info,
                     int /*port_index*/) override
     {
         format_desc_ = format_desc;
         prores_tables_upload();
+
+#ifdef WIN32
+        // Capture GL share context for GPU-direct path (CUDA-GL interop)
+        if (!channel_info.use_vulkan && channel_info.gl_share_context) {
+            gl_share_context_ = channel_info.gl_share_context;
+        }
+#endif
 
         // Detect interlaced and field dominance from the channel format
         is_interlaced_ = (format_desc_.field_count == 2);
@@ -509,6 +621,8 @@ public:
                + std::to_wstring(cfg_.profile) + L"]";
     }
 
+    bool needs_cpu_frame_data() const override { return !gpu_direct_active_; }
+
 private:
     // ── Helpers ───────────────────────────────────────────────────────────
     static SmpteTimecode build_smpte_tc(int64_t fn, uint32_t fps)
@@ -542,6 +656,47 @@ private:
     void encode_loop()
     {
         bool first_frame = true;
+
+        // Set up shared GL context for GPU-direct CUDA-GL interop
+#ifdef WIN32
+        if (gl_share_context_ && !is_interlaced_) {
+            auto main_hglrc = static_cast<HGLRC>(gl_share_context_);
+            // Create a compatible DC using a PBUFFER-less offscreen window class
+            WNDCLASSW wc{};
+            wc.lpfnWndProc   = DefWindowProcW;
+            wc.hInstance     = GetModuleHandleW(nullptr);
+            wc.lpszClassName = L"CasparCG_ProRes_GL";
+            RegisterClassW(&wc);
+            HWND hwnd = CreateWindowW(L"CasparCG_ProRes_GL", L"", 0, 0, 0, 1, 1,
+                                      nullptr, nullptr, wc.hInstance, nullptr);
+            if (hwnd) {
+                gpu_dc_ = GetDC(hwnd);
+                PIXELFORMATDESCRIPTOR pfd{};
+                pfd.nSize    = sizeof(pfd);
+                pfd.nVersion = 1;
+                pfd.dwFlags  = PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL;
+                pfd.iPixelType = PFD_TYPE_RGBA;
+                pfd.cColorBits = 32;
+                int fmt = ChoosePixelFormat(gpu_dc_, &pfd);
+                if (fmt && SetPixelFormat(gpu_dc_, fmt, &pfd)) {
+                    gpu_hglrc_ = wglCreateContext(gpu_dc_);
+                    if (gpu_hglrc_) {
+                        if (wglShareLists(main_hglrc, gpu_hglrc_)) {
+                            wglMakeCurrent(gpu_dc_, gpu_hglrc_);
+                            gl_cache_ = std::make_unique<cuda_gl_read_cache>();
+                            gpu_direct_active_   = true;
+                            gpu_direct_gl_ready_ = true;
+                            CASPAR_LOG(info) << L"[cuda_prores] GPU-direct path active (CUDA-GL interop)";
+                        } else {
+                            wglDeleteContext(gpu_hglrc_);
+                            gpu_hglrc_ = nullptr;
+                            CASPAR_LOG(warning) << L"[cuda_prores] wglShareLists failed — CPU path";
+                        }
+                    }
+                }
+            }
+        }
+#endif
 
         while (running_ || !queue_empty()) {
             FrameJob job;
@@ -583,6 +738,52 @@ private:
         if (mxf_muxer_) { mxf_muxer_->close(); mxf_muxer_.reset(); }
 
         CASPAR_LOG(info) << L"[cuda_prores] Encode thread exited cleanly.";
+    }
+
+    // Attempt GPU-direct upload: read OGL texture via CUDA-GL interop into d_bgra_.
+    // Returns true if successful (d_bgra_ populated on device), false if fallback needed.
+    bool try_gpu_direct_upload(const core::const_frame& frame, cudaStream_t stream)
+    {
+#ifdef WIN32
+        if (!gpu_direct_gl_ready_ || !gl_cache_)
+            return false;
+
+        auto tex = frame.texture();
+        if (!tex)
+            return false;
+
+        auto* ogl_tex = dynamic_cast<accelerator::ogl::texture*>(tex.get());
+        if (!ogl_tex)
+            return false;
+
+        int gl_id = ogl_tex->id();
+        int w = ogl_tex->width();
+        int h = ogl_tex->height();
+        if (w != format_desc_.width || h != format_desc_.height)
+            return false;
+
+        cudaArray_t arr = gl_cache_->map_texture(gl_id, stream);
+        if (!arr)
+            return false;
+
+        // Copy from cudaArray (2D texture) to linear device buffer d_bgra_
+        auto err = cudaMemcpy2DFromArrayAsync(
+            d_bgra_, (size_t)w * 4,  // dst, dpitch
+            arr, 0, 0,               // src array, x offset, y offset
+            (size_t)w * 4, (size_t)h, // width in bytes, height
+            cudaMemcpyDeviceToDevice, stream);
+
+        gl_cache_->unmap_texture(gl_id, stream);
+
+        if (err != cudaSuccess) {
+            CASPAR_LOG(warning) << L"[cuda_prores] GPU-direct copy failed: "
+                                << cudaGetErrorString(err);
+            return false;
+        }
+        return true;
+#else
+        return false;
+#endif
     }
 
     bool encode_one(FrameJob &job, bool first_frame)
@@ -648,25 +849,29 @@ private:
                 encode_stream_, color_desc);
         } else if (frame_ctx_.is_4444) {
             // ── Progressive 4444 path ─────────────────────────────────────
-            const uint8_t *frame_pixels = job.frame.image_data(0).begin();
-            const size_t bgra_bytes = (size_t)fmt.width * fmt.height * 4;
-            std::memcpy(h_bgra_, frame_pixels, std::min(bgra_bytes, job.frame.image_data(0).size()));
-            err = cudaMemcpyAsync(d_bgra_, h_bgra_, bgra_bytes, cudaMemcpyHostToDevice, encode_stream_);
-            if (err != cudaSuccess) {
-                CASPAR_LOG(error) << L"[cuda_prores] cudaMemcpyAsync(bgra) failed: " << cudaGetErrorString(err);
-                return false;
+            if (!try_gpu_direct_upload(job.frame, encode_stream_)) {
+                const uint8_t *frame_pixels = job.frame.image_data(0).begin();
+                const size_t bgra_bytes = (size_t)fmt.width * fmt.height * 4;
+                std::memcpy(h_bgra_, frame_pixels, std::min(bgra_bytes, job.frame.image_data(0).size()));
+                err = cudaMemcpyAsync(d_bgra_, h_bgra_, bgra_bytes, cudaMemcpyHostToDevice, encode_stream_);
+                if (err != cudaSuccess) {
+                    CASPAR_LOG(error) << L"[cuda_prores] cudaMemcpyAsync(bgra) failed: " << cudaGetErrorString(err);
+                    return false;
+                }
             }
             err = prores_encode_frame_444(&frame_ctx_, d_bgra_, frame_ctx_.h_frame_buf,
                                           &encoded_size, encode_stream_, color_desc);
         } else {
             // ── Progressive 422 path ──────────────────────────────────────
-            const uint8_t *frame_pixels = job.frame.image_data(0).begin();
-            const size_t bgra_bytes = (size_t)fmt.width * fmt.height * 4;
-            std::memcpy(h_bgra_, frame_pixels, std::min(bgra_bytes, job.frame.image_data(0).size()));
-            err = cudaMemcpyAsync(d_bgra_, h_bgra_, bgra_bytes, cudaMemcpyHostToDevice, encode_stream_);
-            if (err != cudaSuccess) {
-                CASPAR_LOG(error) << L"[cuda_prores] cudaMemcpyAsync(bgra) failed: " << cudaGetErrorString(err);
-                return false;
+            if (!try_gpu_direct_upload(job.frame, encode_stream_)) {
+                const uint8_t *frame_pixels = job.frame.image_data(0).begin();
+                const size_t bgra_bytes = (size_t)fmt.width * fmt.height * 4;
+                std::memcpy(h_bgra_, frame_pixels, std::min(bgra_bytes, job.frame.image_data(0).size()));
+                err = cudaMemcpyAsync(d_bgra_, h_bgra_, bgra_bytes, cudaMemcpyHostToDevice, encode_stream_);
+                if (err != cudaSuccess) {
+                    CASPAR_LOG(error) << L"[cuda_prores] cudaMemcpyAsync(bgra) failed: " << cudaGetErrorString(err);
+                    return false;
+                }
             }
             err = prores_launch_bgra_to_v210(d_bgra_, d_v210_, fmt.width, fmt.height, encode_stream_);
             if (err != cudaSuccess) {
@@ -726,6 +931,19 @@ private:
         queue_cv_.notify_all();
         if (encode_thread_.joinable())
             encode_thread_.join();
+
+        // GPU-direct cleanup (must happen after encode_thread_ joins since
+        // the GL context was made current on that thread)
+        gl_cache_.reset();
+#ifdef WIN32
+        if (gpu_hglrc_) {
+            wglMakeCurrent(nullptr, nullptr);
+            wglDeleteContext(gpu_hglrc_);
+            gpu_hglrc_ = nullptr;
+        }
+#endif
+        gpu_direct_active_   = false;
+        gpu_direct_gl_ready_ = false;
 
         // GPU resource cleanup
         if (encode_stream_) {
@@ -789,6 +1007,18 @@ private:
     int16_t                 *d_field_a_y_   = nullptr;
     int16_t                 *d_field_a_cb_  = nullptr;
     int16_t                 *d_field_a_cr_  = nullptr;
+
+    // ── GPU-direct path (CUDA-GL interop) ─────────────────────────────────
+    // When active, reads the OGL mixer texture directly on GPU, avoiding
+    // the GPU→CPU→GPU roundtrip (PBO readback + cudaMemcpyAsync H→D).
+#ifdef WIN32
+    void*                    gl_share_context_ = nullptr; // mixer's HGLRC
+    HDC                      gpu_dc_           = nullptr;
+    HGLRC                    gpu_hglrc_        = nullptr; // shared WGL context for encode thread
+#endif
+    std::atomic<bool>         gpu_direct_active_{false};
+    bool                     gpu_direct_gl_ready_ = false; // GL context made current on encode thread
+    std::unique_ptr<cuda_gl_read_cache> gl_cache_;
 
     // ── Muxers (only one is active at a time) ─────────────────────────────
     std::unique_ptr<MovMuxer>  mov_muxer_;

@@ -51,5 +51,6 @@ target_link_libraries(spout PRIVATE
     glu32
     core
     common
+    accelerator
     ffmpeg
 )

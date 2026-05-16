@@ -44,6 +44,7 @@
 #include <GL/glew.h>
 
 #include <any>
+#include <atomic>
 #include <vector>
 
 namespace caspar { namespace accelerator { namespace ogl {
@@ -76,6 +77,14 @@ class image_renderer
     image_kernel            kernel_;
     const size_t            max_frame_size_;
     common::bit_depth       depth_;
+    std::atomic<bool>       cpu_readback_needed_{true};
+
+    // Still-frame cache: skip GPU composition when inputs are unchanged.
+    // NOTE: storing shared_ptr<texture> (not raw pointer) keeps old textures alive,
+    // preventing the texture pool from recycling addresses and causing false cache hits.
+    std::vector<std::pair<std::shared_ptr<texture>, core::image_transform>> prev_fingerprint_;
+    std::shared_ptr<core::texture>                             cached_texture_;
+    std::shared_future<array<const std::uint8_t>>              cached_cpu_;
 
   public:
     core::color_space    target_color_space    = core::color_space::bt709;
@@ -90,10 +99,17 @@ class image_renderer
     {
     }
 
+    void set_cpu_readback_needed(bool needed) { cpu_readback_needed_.store(needed, std::memory_order_relaxed); }
+
     std::future<std::tuple<std::shared_future<array<const std::uint8_t>>, std::shared_ptr<core::texture>>>
     operator()(std::vector<layer> layers, const core::video_format_desc& format_desc)
     {
         if (layers.empty()) { // Bypass GPU with empty frame.
+            // Release cached textures so VRAM from the last rendered frame is freed.
+            prev_fingerprint_.clear();
+            cached_texture_.reset();
+            cached_cpu_ = {};
+
             static const std::vector<uint8_t, boost::alignment::aligned_allocator<uint8_t, 32>> buffer(max_frame_size_,
                                                                                                        0);
             auto ready = make_ready_future<array<const std::uint8_t>>(
@@ -102,18 +118,53 @@ class image_renderer
                 {ready.share(), nullptr});
         }
 
+        // ── Still-frame cache ──────────────────────────────────────────────
+        // When input textures AND transforms are identical to the previous tick,
+        // skip GPU composition entirely and reuse the cached output.
+        {
+            std::vector<std::pair<std::shared_ptr<texture>, core::image_transform>> fingerprint;
+            for (auto& l : layers)
+                for (auto& itm : l.items) {
+                    std::shared_ptr<texture> tex_ptr;
+                    if (!itm.textures.empty() &&
+                        itm.textures[0].wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+                        tex_ptr = itm.textures[0].get();
+                    fingerprint.emplace_back(std::move(tex_ptr), itm.transforms.image_transform);
+                }
+
+            if (!fingerprint.empty() && fingerprint == prev_fingerprint_ && cached_texture_) {
+                layers.clear();
+                return make_ready_future<std::tuple<std::shared_future<array<const std::uint8_t>>,
+                                                    std::shared_ptr<core::texture>>>(
+                    {cached_cpu_, cached_texture_});
+            }
+            prev_fingerprint_ = std::move(fingerprint);
+        }
+
+        auto needs_cpu = cpu_readback_needed_.load(std::memory_order_relaxed);
+
         auto f = std::move(
             ogl_->dispatch_async([=, layers = std::move(layers)]() mutable
                                  -> std::tuple<std::shared_future<array<const std::uint8_t>>, std::shared_ptr<core::texture>> {
                 auto target_texture = ogl_->create_texture(format_desc.width, format_desc.height, 4, depth_);
                 draw(target_texture, std::move(layers), format_desc);
+
+                if (!needs_cpu) {
+                    auto empty = make_ready_future<array<const std::uint8_t>>(
+                        array<const std::uint8_t>(nullptr, 0, true));
+                    return {empty.share(), target_texture};
+                }
+
                 return {ogl_->copy_async(target_texture).share(), target_texture};
             }));
 
         return std::async(
             std::launch::deferred,
-            [f = std::move(f)]() mutable -> std::tuple<std::shared_future<array<const std::uint8_t>>, std::shared_ptr<core::texture>> {
+            [this, f = std::move(f)]() mutable -> std::tuple<std::shared_future<array<const std::uint8_t>>, std::shared_ptr<core::texture>> {
                 auto tuple = std::move(f.get());
+                // Update the still-frame cache with the freshly rendered result.
+                cached_cpu_     = std::get<0>(tuple);
+                cached_texture_ = std::get<1>(tuple);
                 return {std::move(std::get<0>(tuple)), std::move(std::get<1>(tuple))};
             });
     }
@@ -472,6 +523,8 @@ struct image_mixer::impl
     }
 
     common::bit_depth depth() const { return renderer_.depth(); }
+
+    void* gpu_device_handle() const override { return ogl_.get(); }
 };
 
 image_mixer::image_mixer(const spl::shared_ptr<device>& ogl,
@@ -506,6 +559,8 @@ common::bit_depth image_mixer::depth() const { return impl_->depth(); }
 std::shared_ptr<device> image_mixer::get_ogl_device() const { return impl_->ogl_; }
 
 void* image_mixer::native_gl_context() const { return impl_->ogl_->native_gl_context(); }
+
+void image_mixer::set_cpu_readback_needed(bool needed) { impl_->renderer_.set_cpu_readback_needed(needed); }
 
 previz_renderer& image_mixer::get_previz_renderer() { return impl_->previz_renderer_; }
 

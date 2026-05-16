@@ -71,6 +71,8 @@ class image_mixer final : public core::image_mixer
 
     void* native_gl_context() const override;
 
+    void set_cpu_readback_needed(bool needed) override;
+
     // Previz 3D rendering
     previz_renderer&  get_previz_renderer();
     void              set_channel_texture_store(std::shared_ptr<channel_texture_store> store);

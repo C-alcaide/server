@@ -29,6 +29,10 @@
 #include <core/monitor/monitor.h>
 
 #ifdef _WIN32
+#include "d3d11_gl_bridge.h"
+// d3d11.h must be included BEFORE extern "C" because hwcontext_d3d11va.h
+// transitively includes it, and d3d11.h has C++ operator overloads that
+// cannot compile inside extern "C" linkage.
 #include <d3d11.h>
 #endif
 
@@ -68,6 +72,10 @@ extern "C" {
 namespace caspar { namespace ffmpeg {
 
 const AVRational TIME_BASE_Q = {1, AV_TIME_BASE};
+
+// ── D3D11 → OpenGL GPU-direct bridge ────────────────────────────────────────
+// Implementation moved to d3d11_gl_bridge.cpp to avoid MSVC namespace issues
+// with accelerator header includes.
 
 struct Frame
 {
@@ -159,6 +167,14 @@ class Decoder
     // the SW pixel format to use for both the buffersrc args and frame transfer.
     AVPixelFormat sw_pix_fmt = AV_PIX_FMT_NONE;
 
+#ifdef _WIN32
+    // When true, D3D11 frames are kept as-is (no CPU transfer) and placed in hw_output.
+    std::atomic<bool>                         gpu_direct_mode_{false};
+    std::queue<std::shared_ptr<AVFrame>>      hw_output;
+    mutable boost::mutex                      hw_output_mutex;
+    boost::condition_variable                 hw_output_cond;
+#endif
+
     Decoder() = default;
 
     explicit Decoder(AVStream* stream)
@@ -241,6 +257,14 @@ class Decoder
                                         output.pop();
                                 }
                                 output_cond.notify_all();
+#ifdef _WIN32
+                                {
+                                    boost::lock_guard<boost::mutex> hw_lock(hw_output_mutex);
+                                    while (!hw_output.empty())
+                                        hw_output.pop();
+                                }
+                                hw_output_cond.notify_all();
+#endif
                                 avcodec_flush_buffers(ctx.get());
                                 next_pts         = AV_NOPTS_VALUE;
                                 eof              = false;
@@ -267,6 +291,21 @@ class Decoder
                     } else {
                         // Handle HW frame transfer
                         if (av_frame->format == AV_PIX_FMT_D3D11) {
+#ifdef _WIN32
+                            if (gpu_direct_mode_.load()) {
+                                // GPU-direct path: keep D3D11 frame, push to hw_output queue.
+                                // The Impl thread will use d3d11_gl_bridge to convert on GPU.
+                                av_frame->pts = av_frame->best_effort_timestamp;
+                                {
+                                    boost::unique_lock<boost::mutex> lock(hw_output_mutex);
+                                    hw_output_cond.wait(lock, [&]() { return hw_output.size() < output_capacity || flush_requested_.load(); });
+                                    if (!flush_requested_.load())
+                                        hw_output.push(std::move(av_frame));
+                                }
+                                hw_output_cond.notify_all();
+                                continue;
+                            }
+#endif
                             auto sw_frame = alloc_frame();
                             // Request the specific SW pixel format that was advertised to the filter's
                             // buffersrc (sw_pix_fmt, e.g. NV12). Width/height must also be set before
@@ -443,6 +482,24 @@ class Decoder
 
         return frame;
     }
+
+#ifdef _WIN32
+    std::shared_ptr<AVFrame> pop_hw()
+    {
+        std::shared_ptr<AVFrame> frame;
+        {
+            boost::lock_guard<boost::mutex> lock(hw_output_mutex);
+            if (!hw_output.empty()) {
+                frame = std::move(hw_output.front());
+                hw_output.pop();
+            }
+        }
+        if (frame) {
+            hw_output_cond.notify_all();
+        }
+        return frame;
+    }
+#endif
 };
 
 struct Filter
@@ -806,6 +863,14 @@ struct AVProducer::Impl
 
     std::map<int, std::vector<AVFilterContext*>> sources_;
 
+#ifdef _WIN32
+    // D3D11→GL GPU-direct video path (bypasses filter graph + CPU transfer)
+    std::unique_ptr<d3d11_gl_bridge> d3d11_bridge_;
+    bool                             gpu_direct_video_ = false;
+    int                              gpu_direct_decoder_idx_ = -1;
+    void*                            ogl_device_ = nullptr;
+#endif
+
     std::atomic<int64_t> start_{AV_NOPTS_VALUE};
     std::atomic<int64_t> duration_{AV_NOPTS_VALUE};
     std::atomic<int64_t> input_duration_{AV_NOPTS_VALUE};
@@ -1003,6 +1068,54 @@ struct AVProducer::Impl
 
         set_thread_name(L"[ffmpeg::av_producer]");
 
+#ifdef _WIN32
+        // ── Initialize D3D11→GL GPU-direct path ──────────────────────────
+        // Conditions: D3D11VA active, no user vfilter, progressive content,
+        // matching framerate, and WGL_NV_DX_interop2 available.
+        {
+            void* gpu_dev = frame_factory_->gpu_device_handle();
+            if (gpu_dev && vfilter_.empty()) {
+                ogl_device_ = gpu_dev;
+
+                // Find the video decoder with D3D11VA active
+                for (auto& [idx, dec] : decoders_) {
+                    if (dec.ctx && dec.ctx->codec_type == AVMEDIA_TYPE_VIDEO &&
+                        dec.ctx->hw_device_ctx && dec.sw_pix_fmt != AV_PIX_FMT_NONE) {
+
+                        // Check progressive (field_order or container flags)
+                        auto* st = input_->streams[idx];
+                        bool is_progressive = (st->codecpar->field_order == AV_FIELD_PROGRESSIVE ||
+                                               st->codecpar->field_order == AV_FIELD_UNKNOWN);
+
+                        // Check framerate match
+                        auto content_fr = av_guess_frame_rate(nullptr, st, nullptr);
+                        bool fps_match = (content_fr.num * format_desc_.framerate.denominator() ==
+                                          content_fr.den * format_desc_.framerate.numerator());
+
+                        // Check auto-deinterlace setting
+                        auto deint = u8(env::properties().get<std::wstring>(
+                            L"configuration.ffmpeg.producer.auto-deinterlace", L"interlaced"));
+                        bool deint_none = (deint == "none") || is_progressive;
+
+                        if (is_progressive && fps_match && deint_none) {
+                            d3d11_bridge_ = std::make_unique<d3d11_gl_bridge>();
+                            if (d3d11_bridge_->init(dec.ctx->hw_device_ctx, gpu_dev)) {
+                                gpu_direct_video_ = true;
+                                gpu_direct_decoder_idx_ = idx;
+                                dec.gpu_direct_mode_ = true;
+                                CASPAR_LOG(info) << print()
+                                    << L" D3D11→GL GPU-direct video enabled (bypasses filter graph)";
+                            } else {
+                                d3d11_bridge_.reset();
+                            }
+                        }
+                        break; // Only one video decoder
+                    }
+                }
+            }
+        }
+#endif
+
         boost::range::rotate(audio_cadence, std::end(audio_cadence) - 1);
 
         Frame frame;
@@ -1097,6 +1210,19 @@ struct AVProducer::Impl
 
                     std::vector<std::future<bool>> futures;
 
+#ifdef _WIN32
+                    if (gpu_direct_video_) {
+                        // GPU-direct: video comes from decoder hw_output, not filter graph
+                        if (!video_filter_.frame) {
+                            auto& dec = decoders_.at(gpu_direct_decoder_idx_);
+                            auto hw_frame = dec.pop_hw();
+                            if (hw_frame) {
+                                video_filter_.frame = std::move(hw_frame);
+                                progress = true;
+                            }
+                        }
+                    } else
+#endif
                     if (!video_filter_.frame) {
                         futures.push_back(video_executor_->begin_invoke([&]() { return video_filter_(); }));
                     }
@@ -1145,11 +1271,23 @@ struct AVProducer::Impl
                 if (video_filter_.frame) {
                     frame.video      = std::move(video_filter_.frame);
                     last_valid_video = frame.video;
-                    const auto tb    = av_buffersink_get_time_base(video_filter_.sink);
-                    const auto fr    = av_buffersink_get_frame_rate(video_filter_.sink);
-                    frame.start_time = start_time;
-                    frame.pts        = av_rescale_q(frame.video->pts, tb, TIME_BASE_Q) - start_time;
-                    frame.duration   = av_rescale_q(1, av_inv_q(fr), TIME_BASE_Q);
+#ifdef _WIN32
+                    if (gpu_direct_video_) {
+                        // GPU-direct: frame came from decoder, use stream time_base
+                        auto* st = input_->streams[gpu_direct_decoder_idx_];
+                        frame.start_time = start_time;
+                        frame.pts        = av_rescale_q(frame.video->pts, st->time_base, TIME_BASE_Q) - start_time;
+                        auto content_fr  = av_guess_frame_rate(nullptr, st, nullptr);
+                        frame.duration   = av_rescale_q(1, av_inv_q(content_fr), TIME_BASE_Q);
+                    } else
+#endif
+                    {
+                        const auto tb    = av_buffersink_get_time_base(video_filter_.sink);
+                        const auto fr    = av_buffersink_get_frame_rate(video_filter_.sink);
+                        frame.start_time = start_time;
+                        frame.pts        = av_rescale_q(frame.video->pts, tb, TIME_BASE_Q) - start_time;
+                        frame.duration   = av_rescale_q(1, av_inv_q(fr), TIME_BASE_Q);
+                    }
                 } else if (last_valid_video) {
                     frame.video = last_valid_video; // Keep the last video frame if we have an audio tail!
                 }
@@ -1179,7 +1317,81 @@ struct AVProducer::Impl
                 }
 
                 frame.frame = core::draw_frame(
-                    make_frame(this, *frame_factory_, frame.video, frame.audio, get_color_space(frame.video), scale_mode_, false, get_color_transfer(frame.video)));
+#ifdef _WIN32
+                    [&]() -> core::const_frame {
+                        if (gpu_direct_video_ && frame.video && frame.video->format == AV_PIX_FMT_D3D11) {
+                            // GPU-direct: convert D3D11 NV12 → BGRA OGL texture entirely on GPU
+                            auto ogl_tex = d3d11_bridge_->convert(frame.video.get(), ogl_device_);
+                            if (ogl_tex) {
+                                // Build BGRA pixel_format_desc
+                                auto desc = core::pixel_format_desc(core::pixel_format::bgra);
+                                desc.planes.push_back(core::pixel_format_desc::plane(
+                                    frame.video->width, frame.video->height, 4));
+
+                                // Build audio data via make_frame (audio only)
+                                array<const std::int32_t> audio_data;
+                                if (frame.audio) {
+                                    const int channel_count = 16;
+                                    std::vector<std::int32_t> buf(frame.audio->nb_samples * channel_count, 0);
+                                    auto src_channels = frame.audio->ch_layout.nb_channels;
+                                    auto* src = reinterpret_cast<std::int32_t*>(frame.audio->data[0]);
+                                    for (int i = 0; i < frame.audio->nb_samples; ++i) {
+                                        for (int j = 0; j < std::min(channel_count, src_channels); ++j) {
+                                            buf[i * channel_count + j] = src[i * src_channels + j];
+                                        }
+                                    }
+                                    audio_data = array<const std::int32_t>(buf);
+                                }
+
+                                // Empty image data (consumers needing CPU data will get zeros)
+                                std::vector<array<const std::uint8_t>> image_data;
+                                image_data.emplace_back();
+
+                                return core::const_frame(this, std::move(image_data),
+                                    std::move(audio_data), desc,
+                                    std::static_pointer_cast<core::texture>(ogl_tex));
+                            }
+                            // Bridge failed — fall through to CPU path with transfer.
+                            // Convert NV12→BGRA since the filter graph is bypassed in GPU-direct mode.
+                            auto sw_frame = alloc_frame();
+                            sw_frame->format = AV_PIX_FMT_NV12;
+                            sw_frame->width  = frame.video->width;
+                            sw_frame->height = frame.video->height;
+                            if (av_hwframe_transfer_data(sw_frame.get(), frame.video.get(), 0) == 0) {
+                                av_frame_copy_props(sw_frame.get(), frame.video.get());
+                                // NV12 is not supported by the mixer — convert to BGRA
+                                auto bgra_frame = alloc_frame();
+                                bgra_frame->format = AV_PIX_FMT_BGRA;
+                                bgra_frame->width  = sw_frame->width;
+                                bgra_frame->height = sw_frame->height;
+                                if (av_frame_get_buffer(bgra_frame.get(), 0) == 0) {
+                                    auto* sws = sws_getContext(
+                                        sw_frame->width, sw_frame->height, AV_PIX_FMT_NV12,
+                                        sw_frame->width, sw_frame->height, AV_PIX_FMT_BGRA,
+                                        SWS_BILINEAR, nullptr, nullptr, nullptr);
+                                    if (sws) {
+                                        sws_scale(sws, sw_frame->data, sw_frame->linesize, 0,
+                                                  sw_frame->height, bgra_frame->data, bgra_frame->linesize);
+                                        sws_freeContext(sws);
+                                        av_frame_copy_props(bgra_frame.get(), sw_frame.get());
+                                        frame.video = bgra_frame;
+                                    } else {
+                                        frame.video = sw_frame; // best-effort: will show as black
+                                    }
+                                } else {
+                                    frame.video = sw_frame;
+                                }
+                            }
+                        }
+                        return core::const_frame(
+                            make_frame(this, *frame_factory_, frame.video, frame.audio,
+                                get_color_space(frame.video), scale_mode_, false,
+                                get_color_transfer(frame.video)));
+                    }()
+#else
+                    make_frame(this, *frame_factory_, frame.video, frame.audio, get_color_space(frame.video), scale_mode_, false, get_color_transfer(frame.video))
+#endif
+                );
                 frame.frame_count = frame_count_++;
 
                 graph_->set_value("decode-time", decode_timer.elapsed() * format_desc_.fps * 0.5);
@@ -1851,9 +2063,15 @@ struct AVProducer::Impl
         audio_filter_ = Filter(afilter_, input_, decoders_, start_time, AVMEDIA_TYPE_AUDIO, format_desc_);
 
         sources_.clear();
-        for (auto& p : video_filter_.sources) {
-            sources_[p.first].push_back(p.second);
+#ifdef _WIN32
+        if (!gpu_direct_video_) {
+#endif
+            for (auto& p : video_filter_.sources) {
+                sources_[p.first].push_back(p.second);
+            }
+#ifdef _WIN32
         }
+#endif
         for (auto& p : audio_filter_.sources) {
             sources_[p.first].push_back(p.second);
         }
