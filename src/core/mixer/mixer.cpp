@@ -121,6 +121,16 @@ struct mixer::impl
     void set_master_volume(float volume) { audio_mixer_.set_master_volume(volume); }
 
     float get_master_volume() { return audio_mixer_.get_master_volume(); }
+
+    void flush()
+    {
+        // Drain any stale deferred frames left in the 1-frame delay buffer.
+        // This prevents the next consumer from receiving a frame that was
+        // rendered for a previous producer.
+        while (!buffer_.empty()) {
+            buffer_.pop();
+        }
+    }
 };
 
 mixer::mixer(int channel_index, spl::shared_ptr<diagnostics::graph> graph, spl::shared_ptr<image_mixer> image_mixer, core::color_space default_color_space, core::color_transfer default_color_transfer, bool auto_color_convert)
@@ -129,6 +139,7 @@ mixer::mixer(int channel_index, spl::shared_ptr<diagnostics::graph> graph, spl::
 }
 void        mixer::set_master_volume(float volume) { impl_->set_master_volume(volume); }
 float       mixer::get_master_volume() { return impl_->get_master_volume(); }
+void        mixer::flush() { impl_->flush(); }
 const_frame mixer::operator()(std::vector<draw_frame> frames, const video_format_desc& format_desc, int nb_samples)
 {
     return (*impl_)(std::move(frames), format_desc, nb_samples);

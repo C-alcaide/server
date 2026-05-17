@@ -74,6 +74,7 @@ struct video_channel::impl final
     std::shared_ptr<core::stage> stage_;
 
     uint64_t frame_counter_ = 0;
+    bool     had_consumers_ = false;
 
     std::chrono::steady_clock::time_point last_fps_update_ = std::chrono::steady_clock::now();
     int                                   frames_since_update_ = 0;
@@ -181,6 +182,15 @@ struct video_channel::impl final
 
                     // This is a little race prone, but at worst a new consumer will start with a frame of black
                     bool has_consumers = output_.consumer_count() > 0;
+
+                    // When consumers reappear after an idle period, flush the
+                    // mixer's 1-frame deferred buffer so the new consumer gets a
+                    // freshly rendered frame instead of a stale one left over
+                    // from the previous producer.
+                    if (has_consumers && !had_consumers_) {
+                        mixer_.flush();
+                    }
+                    had_consumers_ = has_consumers;
 
                     // Tell the mixer whether any consumer needs CPU pixel data.
                     // When false, the VK mixer can skip the GPU→CPU readback entirely.

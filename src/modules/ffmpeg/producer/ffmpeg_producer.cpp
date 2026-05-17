@@ -117,6 +117,11 @@ struct ffmpeg_producer : public core::frame_producer
 
     core::draw_frame last_frame(const core::video_field field) override { return producer_->prev_frame(field); }
 
+    // Use prev_frame (peek) instead of next_frame (consume) so that
+    // transition_producer::update_is_ready() → first_frame() does not
+    // trigger a double-consume in next_frame() when frame_flush_ is true.
+    core::draw_frame first_frame(const core::video_field field) override { return producer_->prev_frame(field); }
+
     core::draw_frame receive_impl(const core::video_field field, int nb_samples) override
     {
         return producer_->next_frame(field);

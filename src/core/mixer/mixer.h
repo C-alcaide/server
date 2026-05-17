@@ -52,6 +52,10 @@ class mixer final
     void  set_master_volume(float volume);
     float get_master_volume();
 
+    /// Discard any buffered deferred frames so the next consumer
+    /// receives a freshly rendered frame instead of a stale one.
+    void flush();
+
     mutable_frame create_frame(const void* tag, const pixel_format_desc& desc);
 
     core::monitor::state state() const;
