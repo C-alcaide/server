@@ -496,15 +496,19 @@ class Decoder
                 if (av_hwdevice_ctx_create(&hw_device_ctx, AV_HWDEVICE_TYPE_D3D11VA, nullptr, nullptr, 0) == 0) {
                     ctx->hw_device_ctx = hw_device_ctx;
                     ctx->get_format    = get_hw_format;
-                    // D3D11VA always transfers to NV12 (or P010 for 10-bit). We advertise NV12
-                    // so the filter's buffersrc is configured for a real CPU pixel format.
-                    sw_pix_fmt = AV_PIX_FMT_NV12;
                 }
             }
         } else if (ctx->codec_type == AVMEDIA_TYPE_AUDIO) {
         }
 
         FF(avcodec_open2(ctx.get(), codec, nullptr));
+
+        // After avcodec_open2, the codec resolves ctx->sw_pix_fmt to the real
+        // CPU format for HW-accelerated codecs (NV12 for 8-bit, P010 for 10-bit).
+        // Use that for both the filter buffersrc and frame transfer target.
+        if (ctx->hw_device_ctx && ctx->sw_pix_fmt != AV_PIX_FMT_NONE) {
+            sw_pix_fmt = ctx->sw_pix_fmt;
+        }
 
         // For video with frame threading the codec resolves threads=0 to
         // hardware_concurrency (e.g. 16). Raise the output queue to match so
@@ -562,6 +566,14 @@ class Decoder
                     } else {
                         // Handle HW frame transfer
                         if (av_frame->format == AV_PIX_FMT_D3D11) {
+                            // Resolve the actual SW pixel format from the HW frames context.
+                            // ctx->sw_pix_fmt may not be set until after get_format is called
+                            // during the first decode, so we update it here from the frame's
+                            // hw_frames_ctx which always has the correct sw_format.
+                            if (sw_pix_fmt == AV_PIX_FMT_NONE && av_frame->hw_frames_ctx) {
+                                auto* frames_ctx = reinterpret_cast<AVHWFramesContext*>(av_frame->hw_frames_ctx->data);
+                                sw_pix_fmt = frames_ctx->sw_format;
+                            }
 #ifdef _WIN32
                             if (gpu_direct_mode_.load()) {
                                 // GPU-direct path: keep D3D11 frame, push to hw_output queue.
@@ -954,7 +966,7 @@ struct Filter
                     // If the decoder uses HW acceleration, ctx->pix_fmt is a HW surface format
                     // (e.g. AV_PIX_FMT_D3D11). We must configure the buffersrc with the real
                     // CPU pixel format that the decoder will produce after the HW->SW transfer.
-                    // sw_pix_fmt is set to AV_PIX_FMT_NV12 when HW decoding is active.
+                    // sw_pix_fmt is the resolved CPU format (e.g. NV12 for 8-bit, P010 for 10-bit).
                     const auto src_fmt = (it->second.sw_pix_fmt != AV_PIX_FMT_NONE)
                                              ? it->second.sw_pix_fmt
                                              : st->pix_fmt;
@@ -1028,6 +1040,8 @@ struct Filter
                                               AV_PIX_FMT_YUVA422P,
                                               AV_PIX_FMT_YUVA420P,
                                               AV_PIX_FMT_UYVY422,
+                                              AV_PIX_FMT_NV12,
+                                              AV_PIX_FMT_P010LE,
                                               // bwdif needs planar rgb
                                               AV_PIX_FMT_GBRP,
                                               AV_PIX_FMT_GBRP10,
@@ -1647,6 +1661,7 @@ struct AVProducer::Impl
                     make_frame(this, *frame_factory_, frame.video, frame.audio, get_color_space(frame.video), scale_mode_, false, get_color_transfer(frame.video))
 #endif
                 );
+
                 frame.frame_count = frame_count_++;
 
                 graph_->set_value("decode-time", decode_timer.elapsed() * format_desc_.fps * 0.5);
@@ -1707,11 +1722,11 @@ struct AVProducer::Impl
     {
         CASPAR_SCOPE_EXIT { update_state(); };
 
+        boost::lock_guard<boost::mutex> lock(buffer_mutex_);
+
         // Don't start a new frame on the 2nd field
         if (field != core::video_field::b) {
             if (frame_flush_ || !frame_) {
-                boost::lock_guard<boost::mutex> lock(buffer_mutex_);
-
                 if (!buffer_.empty()) {
                     frame_          = buffer_[0].frame;
                     frame_time_     = buffer_[0].pts;

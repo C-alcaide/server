@@ -569,7 +569,7 @@ std::wstring print_command(command_context& ctx)
 
 std::wstring print_raw_command(command_context& ctx)
 {
-    // PRINT RAW 1-10 [filename]
+    // PRINT 1-10 RAW [filename]
     // Captures layer's raw producer frame (decoded output before mixer transforms)
     // and writes it to <media>/_raw/<filename>.png
 
@@ -585,12 +585,17 @@ std::wstring print_raw_command(command_context& ctx)
     // Get the foreground producer for this layer
     auto producer = ctx.channel.stage->foreground(layer_index).get();
     if (!producer || producer == core::frame_producer::empty()) {
+        CASPAR_LOG(warning) << L"PRINT RAW: no foreground producer on layer " << layer_index
+                            << L" (producer=" << (producer ? L"empty" : L"null") << L")";
         return L"404 PRINT RAW FAILED\r\n";
     }
+
+    CASPAR_LOG(debug) << L"PRINT RAW: producer=" << producer->name() << L" on layer " << layer_index;
 
     // Get the last produced frame (raw decode output, no transforms)
     auto raw_frame = producer->last_frame(core::video_field::progressive);
     if (!raw_frame) {
+        CASPAR_LOG(warning) << L"PRINT RAW: last_frame returned empty/blank frame from producer " << producer->name();
         return L"404 PRINT RAW FAILED\r\n";
     }
 
@@ -600,7 +605,7 @@ std::wstring print_raw_command(command_context& ctx)
         core::const_frame result;
         void push(const core::frame_transform&) override {}
         void visit(const core::const_frame& f) override {
-            if (!result) // Take the first valid frame
+            if (!result)
                 result = f;
         }
         void pop() override {}
@@ -610,6 +615,7 @@ std::wstring print_raw_command(command_context& ctx)
     raw_frame.accept(extractor);
 
     if (!extractor.result) {
+        CASPAR_LOG(warning) << L"PRINT RAW: frame_extractor found no const_frame in draw_frame from " << producer->name();
         return L"404 PRINT RAW FAILED\r\n";
     }
 

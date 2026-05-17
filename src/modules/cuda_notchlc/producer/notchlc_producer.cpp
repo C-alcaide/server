@@ -1101,11 +1101,19 @@ struct notchlc_producer_impl final : public core::frame_producer
 
     bool is_ready() override { return !ready_queue_.empty(); }
 
-    // We override last_frame() so that a post-seek frame is shown and the
-    // diag title updates immediately, without needing RESUME first.
+    // Called by the layer on every tick when the layer is paused
+    // (paused_=true in layer.cpp).  In that state, receive_impl() is NEVER
+    // called, so cached_frame_ is never populated through normal playback.
+    //
+    // We pop from ready_queue_ in two cases:
+    //  1. seek_done_ is true  – after an explicit SEEK while paused.
+    //  2. cached_frame_ is empty – initial LOAD/preview: the decode thread
+    //     has filled ready_queue_ but receive_impl() was never called because
+    //     the layer went straight to paused.  Without this, LOAD produces a
+    //     black frame since cached_frame_ starts empty.
     core::draw_frame last_frame(const core::video_field) override
     {
-        if (seek_done_.load(std::memory_order_relaxed)) {
+        if (seek_done_.load(std::memory_order_relaxed) || !cached_frame_) {
             std::unique_lock<std::mutex> lk(queue_mutex_);
             if (!ready_queue_.empty()) {
                 seek_done_.store(false, std::memory_order_relaxed);
@@ -1130,7 +1138,7 @@ struct notchlc_producer_impl final : public core::frame_producer
             // else: io_thread hasn't decoded the first post-seek frame yet.
             // Keep seek_done_=true and retry on the next tick (~40ms later).
         }
-        // Guard: draw_frame::still() dereferences impl_  crash if frame is empty.
+        // Guard: draw_frame::still() dereferences impl_ — crash if frame is empty.
         if (!cached_frame_) return core::draw_frame{};
         return core::draw_frame::still(cached_frame_);
     }

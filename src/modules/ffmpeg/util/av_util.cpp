@@ -69,14 +69,56 @@ core::mutable_frame make_frame(void*                            tag,
     tbb::parallel_invoke(
         [&]() {
             if (video) {
-                for (int n = 0; n < static_cast<int>(pix_desc.planes.size()); ++n) {
-                    auto frame_plan_index = data_map.empty() ? n : data_map.at(n);
-
-                    tbb::parallel_for(0, pix_desc.planes[n].height, [&](int y) {
-                        std::memcpy(frame.image_data(n).begin() + y * pix_desc.planes[n].linesize,
-                                    video->data[frame_plan_index] + y * video->linesize[frame_plan_index],
-                                    pix_desc.planes[n].linesize);
+                if (video->format == AV_PIX_FMT_NV12) {
+                    // NV12: plane 0 = Y (data[0]), plane 1+2 = deinterleaved UV (data[1])
+                    // Copy Y plane
+                    tbb::parallel_for(0, pix_desc.planes[0].height, [&](int y) {
+                        std::memcpy(frame.image_data(0).begin() + y * pix_desc.planes[0].linesize,
+                                    video->data[0] + y * video->linesize[0],
+                                    pix_desc.planes[0].linesize);
                     });
+                    // Deinterleave UV plane into separate U and V planes
+                    auto uv_height = pix_desc.planes[1].height;
+                    auto uv_width  = pix_desc.planes[1].linesize;
+                    tbb::parallel_for(0, uv_height, [&](int y) {
+                        auto* src = video->data[1] + y * video->linesize[1];
+                        auto* dst_u = frame.image_data(1).begin() + y * uv_width;
+                        auto* dst_v = frame.image_data(2).begin() + y * uv_width;
+                        for (int x = 0; x < uv_width; ++x) {
+                            dst_u[x] = src[x * 2];
+                            dst_v[x] = src[x * 2 + 1];
+                        }
+                    });
+                } else if (video->format == AV_PIX_FMT_P010LE || video->format == AV_PIX_FMT_P010BE) {
+                    // P010: like NV12 but 10-bit in 16-bit LE words.
+                    // Copy Y plane (2 bytes per sample)
+                    tbb::parallel_for(0, pix_desc.planes[0].height, [&](int y) {
+                        std::memcpy(frame.image_data(0).begin() + y * pix_desc.planes[0].linesize,
+                                    video->data[0] + y * video->linesize[0],
+                                    pix_desc.planes[0].linesize);
+                    });
+                    // Deinterleave UV plane (16-bit samples: U16 V16 U16 V16 ...)
+                    auto uv_height = pix_desc.planes[1].height;
+                    auto uv_width  = pix_desc.planes[1].width; // in pixels
+                    tbb::parallel_for(0, uv_height, [&](int y) {
+                        auto* src = reinterpret_cast<const uint16_t*>(video->data[1] + y * video->linesize[1]);
+                        auto* dst_u = reinterpret_cast<uint16_t*>(frame.image_data(1).begin() + y * pix_desc.planes[1].linesize);
+                        auto* dst_v = reinterpret_cast<uint16_t*>(frame.image_data(2).begin() + y * pix_desc.planes[2].linesize);
+                        for (int x = 0; x < uv_width; ++x) {
+                            dst_u[x] = src[x * 2];
+                            dst_v[x] = src[x * 2 + 1];
+                        }
+                    });
+                } else {
+                    for (int n = 0; n < static_cast<int>(pix_desc.planes.size()); ++n) {
+                        auto frame_plan_index = data_map.empty() ? n : data_map.at(n);
+
+                        tbb::parallel_for(0, pix_desc.planes[n].height, [&](int y) {
+                            std::memcpy(frame.image_data(n).begin() + y * pix_desc.planes[n].linesize,
+                                        video->data[frame_plan_index] + y * video->linesize[frame_plan_index],
+                                        pix_desc.planes[n].linesize);
+                        });
+                    }
                 }
             }
         },
@@ -154,6 +196,11 @@ std::tuple<core::pixel_format, common::bit_depth> get_pixel_format(AVPixelFormat
             return {core::pixel_format::ycbcra, common::bit_depth::bit8};
         case AV_PIX_FMT_UYVY422:
             return {core::pixel_format::uyvy, common::bit_depth::bit8};
+        case AV_PIX_FMT_NV12:
+            return {core::pixel_format::ycbcr, common::bit_depth::bit8};
+        case AV_PIX_FMT_P010LE:
+        case AV_PIX_FMT_P010BE:
+            return {core::pixel_format::ycbcr, common::bit_depth::bit10};
         case AV_PIX_FMT_GBRP:
             return {core::pixel_format::gbrp, common::bit_depth::bit8};
         case AV_PIX_FMT_GBRP10:
@@ -222,6 +269,23 @@ core::pixel_format_desc pixel_format_desc(AVPixelFormat     pix_fmt,
         }
         case core::pixel_format::ycbcr:
         case core::pixel_format::ycbcra: {
+            if (pix_fmt == AV_PIX_FMT_NV12) {
+                // NV12: Y plane (full res) + interleaved UV plane (half res).
+                // Describe as planar YUV420P (3 planes) — make_frame will deinterleave UV.
+                desc.planes.push_back(core::pixel_format_desc::plane(width, height, 1, depth));
+                desc.planes.push_back(core::pixel_format_desc::plane(width / 2, height / 2, 1, depth));
+                desc.planes.push_back(core::pixel_format_desc::plane(width / 2, height / 2, 1, depth));
+                return desc;
+            }
+            if (pix_fmt == AV_PIX_FMT_P010LE || pix_fmt == AV_PIX_FMT_P010BE) {
+                // P010: like NV12 but 10-bit per component in 16-bit words.
+                // Describe as planar YUV420P10 (3 planes) — make_frame will deinterleave UV.
+                desc.planes.push_back(core::pixel_format_desc::plane(width, height, 1, depth));
+                desc.planes.push_back(core::pixel_format_desc::plane(width / 2, height / 2, 1, depth));
+                desc.planes.push_back(core::pixel_format_desc::plane(width / 2, height / 2, 1, depth));
+                return desc;
+            }
+
             // Find chroma height
             size_t    sizes[4];
             ptrdiff_t linesizes1[4];

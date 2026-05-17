@@ -664,7 +664,14 @@ struct ffmpeg_consumer : public core::frame_consumer
                 std::optional<Stream> video_stream;
                 if (oc->oformat->video_codec != AV_CODEC_ID_NONE) {
                     if (oc->oformat->video_codec == AV_CODEC_ID_H264 && options.find("preset:v") == options.end()) {
-                        options["preset:v"] = "veryfast";
+                        // Only apply x264-style preset for software encoders, not NVENC
+                        auto codec_v = options.find("codec:v");
+                        if (codec_v == options.end()) codec_v = options.find("c:v");
+                        bool is_nvenc = (codec_v != options.end() &&
+                                         codec_v->second.find("nvenc") != std::string::npos);
+                        if (!is_nvenc) {
+                            options["preset:v"] = "veryfast";
+                        }
                     }
                     video_stream.emplace(oc, ":v", oc->oformat->video_codec, format_desc, realtime_, depth_, options, channel_info.default_color_space, channel_info.default_color_transfer);
 
