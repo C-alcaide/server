@@ -49,7 +49,9 @@
 #include <core/diagnostics/call_context.h>
 #include <core/diagnostics/osd_graph.h>
 #include <core/frame/frame_transform.h>
+#include <core/frame/frame_visitor.h>
 #include <core/frame/mesh_loader.h>
+#include <core/frame/write_frame.h>
 #include <core/mixer/mixer.h>
 
 #include <accelerator/ogl/image/image_mixer.h>
@@ -563,6 +565,64 @@ std::wstring print_command(command_context& ctx)
                                                                ctx.channel.raw_channel->get_consumer_channel_info()));
 
     return L"202 PRINT OK\r\n";
+}
+
+std::wstring print_raw_command(command_context& ctx)
+{
+    // PRINT RAW 1-10 [filename]
+    // Captures layer's raw producer frame (decoded output before mixer transforms)
+    // and writes it to <media>/_raw/<filename>.png
+
+    int layer_index = ctx.layer_index(1);
+
+    std::wstring filename;
+    if (!ctx.parameters.empty()) {
+        filename = ctx.parameters.at(0);
+    } else {
+        filename = L"raw_" + std::to_wstring(ctx.channel_index + 1) + L"-" + std::to_wstring(layer_index);
+    }
+
+    // Get the foreground producer for this layer
+    auto producer = ctx.channel.stage->foreground(layer_index).get();
+    if (!producer || producer == core::frame_producer::empty()) {
+        return L"404 PRINT RAW FAILED\r\n";
+    }
+
+    // Get the last produced frame (raw decode output, no transforms)
+    auto raw_frame = producer->last_frame(core::video_field::progressive);
+    if (!raw_frame) {
+        return L"404 PRINT RAW FAILED\r\n";
+    }
+
+    // Extract the const_frame from the draw_frame tree via visitor
+    struct frame_extractor final : public core::frame_visitor
+    {
+        core::const_frame result;
+        void push(const core::frame_transform&) override {}
+        void visit(const core::const_frame& f) override {
+            if (!result) // Take the first valid frame
+                result = f;
+        }
+        void pop() override {}
+    };
+
+    frame_extractor extractor;
+    raw_frame.accept(extractor);
+
+    if (!extractor.result) {
+        return L"404 PRINT RAW FAILED\r\n";
+    }
+
+    auto frame = extractor.result;
+
+    // Write to disk asynchronously
+    std::thread async([frame, filename] {
+        std::wstring output_path = env::media_folder() + L"_raw/" + filename + L".png";
+        core::write_frame_png(frame, output_path);
+    });
+    async.detach();
+
+    return L"202 PRINT RAW OK\r\n";
 }
 
 std::wstring log_level_command(command_context& ctx)
@@ -3936,6 +3996,7 @@ void register_commands(std::shared_ptr<amcp_command_repository_wrapper>& repo)
     repo->register_channel_command(L"Basic Commands", L"REMOVE", remove_command, 0);
     repo->register_channel_command(L"Basic Commands", L"APPLY", apply_command, 1);
     repo->register_channel_command(L"Basic Commands", L"PRINT", print_command, 0);
+    repo->register_channel_command(L"Basic Commands", L"PRINT RAW", print_raw_command, 0);
     repo->register_command(L"Basic Commands", L"CLEAR ALL", clear_all_command, 0);
     repo->register_command(L"Basic Commands", L"LOG LEVEL", log_level_command, 0);
     repo->register_channel_command(L"Basic Commands", L"SET", set_command, 2);

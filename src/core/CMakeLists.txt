@@ -23,6 +23,7 @@ set(SOURCES
 		frame/frame_transform.cpp
 		frame/geometry.cpp
 		frame/mesh_loader.cpp
+		frame/write_frame.cpp
 
 		mixer/audio/audio_mixer.cpp
 		mixer/image/blend_modes.cpp
@@ -59,6 +60,7 @@ set(HEADERS
 		frame/geometry.h
 		frame/mesh_loader.h
 		frame/pixel_format.h
+		frame/write_frame.h
 
 		mixer/audio/audio_mixer.h
 
