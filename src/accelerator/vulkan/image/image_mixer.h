@@ -81,6 +81,8 @@ class image_mixer final : public core::image_mixer
     void set_channel_texture_store(const std::shared_ptr<ogl::channel_texture_store>& store);
     ogl::previz_renderer* get_previz_renderer();
 
+    void set_target_color(core::color_space cs, core::color_transfer ct, bool auto_convert) override;
+
   private:
     struct impl;
     std::shared_ptr<impl> impl_;

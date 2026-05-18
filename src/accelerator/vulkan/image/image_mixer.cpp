@@ -49,6 +49,7 @@
 
 #include <any>
 #include <atomic>
+#include <functional>
 #include <vector>
 
 namespace caspar { namespace accelerator { namespace vulkan {
@@ -89,6 +90,10 @@ class image_renderer
     std::shared_future<array<const std::uint8_t>>              cached_result_cpu_;
 
   public:
+    core::color_space    target_color_space    = core::color_space::bt709;
+    core::color_transfer target_color_transfer = core::color_transfer::sdr;
+    bool                 auto_color_convert    = true;
+
     explicit image_renderer(const spl::shared_ptr<device>& vulkan, const size_t max_frame_size, common::bit_depth depth)
         : vulkan_(vulkan)
         , kernel_(vulkan_, depth)
@@ -126,14 +131,20 @@ class image_renderer
         {
             // Build a lightweight fingerprint: (texture_ptr, image_transform) per item.
             std::vector<std::pair<const void*, core::image_transform>> fingerprint;
-            for (auto& l : layers)
-                for (auto& itm : l.items) {
-                    const void* tex_ptr = nullptr;
-                    if (!itm.textures.empty() &&
-                        itm.textures[0].wait_for(std::chrono::seconds(0)) == std::future_status::ready)
-                        tex_ptr = itm.textures[0].get().get();
-                    fingerprint.emplace_back(tex_ptr, itm.transforms.image_transform);
+            std::function<void(const std::vector<layer>&)> collect_fingerprint;
+            collect_fingerprint = [&](const std::vector<layer>& ls) {
+                for (auto& l : ls) {
+                    collect_fingerprint(l.sublayers);
+                    for (auto& itm : l.items) {
+                        const void* tex_ptr = nullptr;
+                        if (!itm.textures.empty() &&
+                            itm.textures[0].wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+                            tex_ptr = itm.textures[0].get().get();
+                        fingerprint.emplace_back(tex_ptr, itm.transforms.image_transform);
+                    }
                 }
+            };
+            collect_fingerprint(layers);
 
             if (!fingerprint.empty() && fingerprint == prev_fingerprint_ && cached_result_wrapper_) {
                 layers.clear();   // release the layer data
@@ -266,7 +277,9 @@ class image_renderer
         draw_params draw_params;
         draw_params.target_width  = format_desc.square_width;
         draw_params.target_height = format_desc.square_height;
-        // TODO: Pass the target color_space
+        draw_params.target_color_space    = target_color_space;
+        draw_params.target_color_transfer = target_color_transfer;
+        draw_params.auto_color_convert    = auto_color_convert;
 
         draw_params.pix_desc   = std::move(item.pix_desc);
         draw_params.transforms = std::move(item.transforms);
@@ -368,6 +381,13 @@ struct image_mixer::impl
     }
 
     void update_aspect_ratio(double aspect_ratio) { aspect_ratio_ = aspect_ratio; }
+
+    void set_target_color(core::color_space cs, core::color_transfer ct, bool auto_convert)
+    {
+        renderer_.target_color_space    = cs;
+        renderer_.target_color_transfer = ct;
+        renderer_.auto_color_convert    = auto_convert;
+    }
 
     void push(const core::frame_transform& transform)
     {
@@ -662,6 +682,11 @@ void image_mixer::set_channel_texture_store(const std::shared_ptr<ogl::channel_t
 ogl::previz_renderer* image_mixer::get_previz_renderer()
 {
     return impl_->get_previz_renderer();
+}
+
+void image_mixer::set_target_color(core::color_space cs, core::color_transfer ct, bool auto_convert)
+{
+    impl_->set_target_color(cs, ct, auto_convert);
 }
 
 }}} // namespace caspar::accelerator::vulkan

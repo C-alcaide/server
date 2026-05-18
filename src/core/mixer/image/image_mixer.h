@@ -64,6 +64,13 @@ class image_mixer
     virtual void* native_gl_context() const { return nullptr; }
 
     virtual void set_cpu_readback_needed(bool needed) { (void)needed; }
+
+    virtual void set_target_color(color_space cs, color_transfer ct, bool auto_convert)
+    {
+        (void)cs;
+        (void)ct;
+        (void)auto_convert;
+    }
 };
 
 }} // namespace caspar::core

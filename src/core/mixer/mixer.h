@@ -44,7 +44,8 @@ class mixer final
                    spl::shared_ptr<caspar::diagnostics::graph> graph,
                    spl::shared_ptr<image_mixer>                image_mixer,
                    core::color_space                           default_color_space    = core::color_space::bt709,
-                   core::color_transfer                        default_color_transfer = core::color_transfer::sdr);
+                   core::color_transfer                        default_color_transfer = core::color_transfer::sdr,
+                   bool                                        auto_color_convert     = true);
 
     const_frame operator()(std::vector<draw_frame> frames, const video_format_desc& format_desc, int nb_samples);
 

@@ -405,6 +405,42 @@ struct image_kernel::impl
             shader_->set("exposure",          cg.exposure);
             shader_->set_matrix3("input_to_working",  k_to_working[ig]);
             shader_->set_matrix3("working_to_output", k_to_output[og]);
+        } else if (params.auto_color_convert &&
+                   (params.pix_desc.color_space != params.target_color_space ||
+                    params.pix_desc.color_transfer != params.target_color_transfer)) {
+            // Auto color conversion: source differs from channel output.
+            // Map core enums to shader indices.
+            auto gamut_index = [](core::color_space cs) -> int {
+                switch (cs) {
+                    case core::color_space::bt2020: return 1;
+                    default:                       return 0; // bt601/bt709 → shader index 0 (bt709)
+                }
+            };
+            auto transfer_index = [](core::color_transfer ct) -> int {
+                switch (ct) {
+                    case core::color_transfer::pq:  return 3;
+                    case core::color_transfer::hlg: return 4;
+                    default:                        return 2; // sdr → rec709
+                }
+            };
+            int ig = gamut_index(params.pix_desc.color_space);
+            int og = gamut_index(params.target_color_space);
+            // Skip if the mapped indices are identical (e.g. bt601 source on bt709 channel)
+            if (ig == og && params.pix_desc.color_transfer == params.target_color_transfer) {
+                shader_->set("color_grading", false);
+            } else {
+                int it = transfer_index(params.pix_desc.color_transfer);
+                int ot = transfer_index(params.target_color_transfer);
+                // Apply tonemapping when going from HDR to SDR
+                int tm = (it >= 3 && ot <= 2) ? 4 : 0; // 4 = ACES_RRT_709, 0 = NONE
+                shader_->set("color_grading",     true);
+                shader_->set("input_transfer",    it);
+                shader_->set("output_transfer",   ot);
+                shader_->set("tone_mapping_op",   tm);
+                shader_->set("exposure",          1.0f);
+                shader_->set_matrix3("input_to_working",  k_to_working[ig]);
+                shader_->set_matrix3("working_to_output", k_to_output[og]);
+            }
         } else {
             shader_->set("color_grading", false);
         }

@@ -322,6 +322,7 @@ struct server::impl
             auto default_color_transfer = color_transfer_str == L"pq"  ? core::color_transfer::pq
                                         : color_transfer_str == L"hlg" ? core::color_transfer::hlg
                                                                         : core::color_transfer::sdr;
+            auto auto_color_convert = xml_channel.second.get(L"auto-color-convert", true);
             auto channel =
                 spl::make_shared<video_channel>(channel_id,
                                                 format_desc,
@@ -335,7 +336,8 @@ struct server::impl
                                                         client->send(std::move(state));
                                                     }
                                                 },
-                                                default_color_transfer);
+                                                default_color_transfer,
+                                                auto_color_convert);
 
             const std::wstring lifecycle_key = L"lock" + std::to_wstring(channel_id);
             channels_->emplace_back(channel, channel->stage(), lifecycle_key);

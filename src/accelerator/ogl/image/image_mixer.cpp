@@ -78,6 +78,10 @@ class image_renderer
     common::bit_depth       depth_;
 
   public:
+    core::color_space    target_color_space    = core::color_space::bt709;
+    core::color_transfer target_color_transfer = core::color_transfer::sdr;
+    bool                 auto_color_convert    = true;
+
     explicit image_renderer(const spl::shared_ptr<device>& ogl, const size_t max_frame_size, common::bit_depth depth)
         : ogl_(ogl)
         , kernel_(ogl_)
@@ -179,7 +183,9 @@ class image_renderer
         draw_params draw_params;
         draw_params.target_width  = format_desc.square_width;
         draw_params.target_height = format_desc.square_height;
-        // TODO: Pass the target color_space
+        draw_params.target_color_space    = target_color_space;
+        draw_params.target_color_transfer = target_color_transfer;
+        draw_params.auto_color_convert    = auto_color_convert;
 
         draw_params.pix_desc   = std::move(item.pix_desc);
         draw_params.transforms = std::move(item.transforms);
@@ -277,6 +283,13 @@ struct image_mixer::impl
     }
 
     void update_aspect_ratio(double aspect_ratio) { aspect_ratio_ = aspect_ratio; }
+
+    void set_target_color(core::color_space cs, core::color_transfer ct, bool auto_convert)
+    {
+        renderer_.target_color_space    = cs;
+        renderer_.target_color_transfer = ct;
+        renderer_.auto_color_convert    = auto_convert;
+    }
 
     void push(const core::frame_transform& transform)
     {
@@ -499,6 +512,11 @@ previz_renderer& image_mixer::get_previz_renderer() { return impl_->previz_rende
 void image_mixer::set_channel_texture_store(std::shared_ptr<channel_texture_store> store)
 {
     impl_->channel_tex_store_ = std::move(store);
+}
+
+void image_mixer::set_target_color(core::color_space cs, core::color_transfer ct, bool auto_convert)
+{
+    impl_->set_target_color(cs, ct, auto_convert);
 }
 
 }}} // namespace caspar::accelerator::ogl

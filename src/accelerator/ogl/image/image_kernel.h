@@ -56,6 +56,9 @@ struct draw_params final
     double                                      aspect_ratio = 1.0;
     int                                         target_width;
     int                                         target_height;
+    core::color_space                           target_color_space    = core::color_space::bt709;
+    core::color_transfer                        target_color_transfer = core::color_transfer::sdr;
+    bool                                        auto_color_convert    = true;
 };
 
 class image_kernel final

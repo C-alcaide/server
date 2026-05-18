@@ -55,13 +55,14 @@ struct mixer::impl
     impl(const impl&)            = delete;
     impl& operator=(const impl&) = delete;
 
-    impl(int channel_index, spl::shared_ptr<diagnostics::graph> graph, spl::shared_ptr<image_mixer> image_mixer, core::color_space default_color_space, core::color_transfer default_color_transfer)
+    impl(int channel_index, spl::shared_ptr<diagnostics::graph> graph, spl::shared_ptr<image_mixer> image_mixer, core::color_space default_color_space, core::color_transfer default_color_transfer, bool auto_color_convert = true)
         : channel_index_(channel_index)
         , graph_(std::move(graph))
         , image_mixer_(std::move(image_mixer))
         , default_color_space_(default_color_space)
         , default_color_transfer_(default_color_transfer)
     {
+        image_mixer_->set_target_color(default_color_space_, default_color_transfer_, auto_color_convert);
     }
 
     const_frame operator()(std::vector<draw_frame> frames, const video_format_desc& format_desc, int nb_samples)
@@ -122,8 +123,8 @@ struct mixer::impl
     float get_master_volume() { return audio_mixer_.get_master_volume(); }
 };
 
-mixer::mixer(int channel_index, spl::shared_ptr<diagnostics::graph> graph, spl::shared_ptr<image_mixer> image_mixer, core::color_space default_color_space, core::color_transfer default_color_transfer)
-    : impl_(new impl(channel_index, std::move(graph), std::move(image_mixer), default_color_space, default_color_transfer))
+mixer::mixer(int channel_index, spl::shared_ptr<diagnostics::graph> graph, spl::shared_ptr<image_mixer> image_mixer, core::color_space default_color_space, core::color_transfer default_color_transfer, bool auto_color_convert)
+    : impl_(new impl(channel_index, std::move(graph), std::move(image_mixer), default_color_space, default_color_transfer, auto_color_convert))
 {
 }
 void        mixer::set_master_volume(float volume) { impl_->set_master_volume(volume); }
