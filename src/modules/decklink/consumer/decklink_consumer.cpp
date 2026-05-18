@@ -1055,11 +1055,11 @@ struct decklink_consumer final : public IDeckLinkVideoOutputCallback
                 if (diag_tick_count_ > 0 &&
                     std::chrono::duration_cast<std::chrono::seconds>(now - diag_last_log_).count() >= 5) {
                     double avg_ms = diag_tick_sum_ / diag_tick_count_;
-                    CASPAR_LOG(info) << print() << L" TIMING: avg=" << std::fixed << std::setprecision(1)
-                                     << avg_ms << L"ms late=" << diag_late_count_
-                                     << L" drops=" << diag_drop_count_
-                                     << L" flushed=" << diag_flush_count_
-                                     << L" frames=" << diag_tick_count_;
+                    CASPAR_LOG(trace) << print() << L" TIMING: avg=" << std::fixed << std::setprecision(1)
+                                      << avg_ms << L"ms late=" << diag_late_count_
+                                      << L" drops=" << diag_drop_count_
+                                      << L" flushed=" << diag_flush_count_
+                                      << L" frames=" << diag_tick_count_;
                     diag_tick_sum_   = 0.0;
                     diag_tick_count_ = 0;
                     diag_late_count_ = 0;

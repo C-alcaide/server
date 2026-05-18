@@ -866,8 +866,8 @@ struct screen_consumer
             auto diag_now = std::chrono::steady_clock::now();
             auto diag_elapsed = std::chrono::duration<double>(diag_now - diag_start_).count();
             if (diag_elapsed >= 5.0 && diag_sends_ > 0) {
-                CASPAR_LOG(info) << print() << L" TIMING: sends=" << diag_sends_
-                                 << L" drops=" << diag_drops_;
+                CASPAR_LOG(trace) << print() << L" TIMING: sends=" << diag_sends_
+                                  << L" drops=" << diag_drops_;
                 diag_start_ = diag_now;
                 diag_sends_ = 0;
                 diag_drops_ = 0;

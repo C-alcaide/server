@@ -408,10 +408,10 @@ struct output::impl
             auto elapsed = std::chrono::duration<double>(now - timing_start_).count();
             if (elapsed >= 5.0 && timing_frames_ > 1) {
                 double avg_ms = elapsed * 1000.0 / timing_frames_;
-                CASPAR_LOG(info) << L"[channel " << channel_info_.index << L"] TIMING: avg="
-                                 << std::fixed << std::setprecision(1) << avg_ms
-                                 << L"ms late=" << timing_late_
-                                 << L" frames=" << timing_frames_;
+                CASPAR_LOG(trace) << L"[channel " << channel_info_.index << L"] TIMING: avg="
+                                  << std::fixed << std::setprecision(1) << avg_ms
+                                  << L"ms late=" << timing_late_
+                                  << L" frames=" << timing_frames_;
                 timing_start_  = now;
                 timing_frames_ = 0;
                 timing_late_   = 0;

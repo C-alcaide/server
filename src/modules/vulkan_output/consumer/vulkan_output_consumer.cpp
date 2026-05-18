@@ -1042,14 +1042,14 @@ class vulkan_output_consumer : public core::frame_consumer
                                  << L" gen=" << frame_generation_;
             }
 
-            // Periodic 5s TIMING log (info level for test analysis)
+            // Periodic 5s TIMING log (trace level for test analysis)
             ++diag_timing_frames_;
             {
                 auto timing_elapsed = std::chrono::duration<double>(now - diag_timing_start_).count();
                 if (timing_elapsed >= 5.0 && diag_timing_frames_ > 0) {
                     int drops = diag_drops_.exchange(0, std::memory_order_relaxed);
-                    CASPAR_LOG(info) << print() << L" TIMING: frames=" << diag_timing_frames_
-                                     << L" drops=" << drops;
+                    CASPAR_LOG(trace) << print() << L" TIMING: frames=" << diag_timing_frames_
+                                      << L" drops=" << drops;
                     diag_timing_frames_ = 0;
                     diag_timing_start_ = now;
                     // Also reset 1s counters

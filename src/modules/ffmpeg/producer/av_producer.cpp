@@ -1318,8 +1318,8 @@ struct AVProducer::Impl
         {
             auto diag_elapsed = std::chrono::duration<double>(now - diag_start_).count();
             if (diag_elapsed >= 5.0 && diag_frames_ > 0) {
-                CASPAR_LOG(info) << print() << " TIMING: frames=" << diag_frames_
-                                 << " underflows=" << diag_underflows_;
+                CASPAR_LOG(trace) << print() << " TIMING: frames=" << diag_frames_
+                                  << " underflows=" << diag_underflows_;
                 diag_frames_ = 0;
                 diag_underflows_ = 0;
                 diag_start_ = now;
