@@ -1,21 +1,14 @@
 cmake_minimum_required (VERSION 3.28)
 project (core)
 
-include(FetchContent)
+# tinygltf and tinyobjloader are fetched in the top-level CMakeLists.txt
 
-# tinygltf — header-only glTF 2.0 / GLB loader
-FetchContent_Declare(tinygltf
-	GIT_REPOSITORY https://github.com/syoyo/tinygltf.git
-	GIT_TAG        v2.9.5
-)
-FetchContent_MakeAvailable(tinygltf)
-
-# tinyobjloader — header-only OBJ loader
-FetchContent_Declare(tinyobjloader
-	GIT_REPOSITORY https://github.com/tinyobjloader/tinyobjloader.git
-	GIT_TAG        v2.0.0rc13
-)
-FetchContent_MakeAvailable(tinyobjloader)
+# tinyobjloader compiles sources and inherits global /WX and /FI — fix for third-party code
+if(TARGET tinyobjloader)
+    target_compile_options(tinyobjloader PRIVATE /WX-)
+    # Global /FI requires the source root in include path to find disable_silly_warnings.h
+    target_include_directories(tinyobjloader PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/..")
+endif()
 
 set(SOURCES
 		consumer/frame_consumer.cpp

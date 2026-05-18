@@ -26,8 +26,8 @@ find_package(Vulkan REQUIRED)
 # ─── Find NvAPI SDK ──────────────────────────────────────────────────────────
 set(NVAPI_SDK_PATH "" CACHE PATH "Path to NvAPI SDK root")
 if(NOT NVAPI_SDK_PATH)
-    # Try common locations
-    foreach(_path "D:/Github/nvapi-main" "${CMAKE_SOURCE_DIR}/../nvapi-main" "$ENV{NVAPI_SDK}")
+    # Try common locations: sibling of source, sibling of repo root, env var
+    foreach(_path "${CMAKE_SOURCE_DIR}/../nvapi-main" "${CMAKE_SOURCE_DIR}/../../nvapi-main" "${CMAKE_SOURCE_DIR}/../../../nvapi-main" "$ENV{NVAPI_SDK}")
         if(EXISTS "${_path}/nvapi.h")
             set(NVAPI_SDK_PATH "${_path}")
             break()
@@ -83,11 +83,35 @@ set(SOURCES
     util/color_convert_pipeline.cpp
     util/color_convert_pipeline.h
 
-    shaders/color_convert_spv.h
-
     vulkan_output.cpp
     vulkan_output.h
 )
+
+# ─── Compile color_convert compute shader ────────────────────────────────────
+find_program(GLSLC glslc HINTS "$ENV{VULKAN_SDK}/Bin" "${Vulkan_INCLUDE_DIRS}/../Bin")
+if(GLSLC)
+    set(CC_SHADER_SRC "${CMAKE_CURRENT_SOURCE_DIR}/shaders/color_convert.comp")
+    set(CC_SHADER_SPV "${CMAKE_CURRENT_BINARY_DIR}/color_convert_comp.spv")
+    set(CC_SHADER_HDR "${CMAKE_CURRENT_BINARY_DIR}/color_convert_spv.h")
+
+    add_custom_command(
+        OUTPUT "${CC_SHADER_SPV}"
+        COMMAND "${GLSLC}" "${CC_SHADER_SRC}" -o "${CC_SHADER_SPV}"
+        DEPENDS "${CC_SHADER_SRC}"
+        COMMENT "Compiling color_convert.comp to SPIR-V"
+    )
+
+    add_custom_command(
+        OUTPUT "${CC_SHADER_HDR}"
+        COMMAND bin2c "caspar::vulkan_output" "color_convert_comp" "${CC_SHADER_SPV}" > "${CC_SHADER_HDR}"
+        DEPENDS bin2c "${CC_SHADER_SPV}"
+        COMMENT "Embedding color_convert SPIR-V as C++ header"
+    )
+
+    list(APPEND SOURCES "${CC_SHADER_HDR}")
+else()
+    message(WARNING "glslc not found - vulkan_output color conversion shader will not be compiled")
+endif()
 
 # ─── Module registration ─────────────────────────────────────────────────────
 casparcg_add_module_project(vulkan_output
@@ -98,6 +122,7 @@ casparcg_add_module_project(vulkan_output
 target_include_directories(vulkan_output PRIVATE
     ..
     ${Vulkan_INCLUDE_DIRS}
+    ${CMAKE_CURRENT_BINARY_DIR}
 )
 
 # Required because texture_wrapper.h → texture.h → vulkan.hpp

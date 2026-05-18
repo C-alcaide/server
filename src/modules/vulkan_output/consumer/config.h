@@ -96,10 +96,14 @@ struct configuration
     // Optional explicit video mode for the output
     std::wstring video_mode;
 
-    // Presentation delay (frames) — compensates for downstream pipeline latency
+    // Presentation delay — compensates for downstream pipeline latency
     // (e.g. scaler, audio de-embedder, LED processor). Video is held in the buffer
     // this many extra frames before being presented.
     int delay_frames = 0;
+
+    // Sub-frame presentation delay in milliseconds, added on top of delay_frames.
+    // For fine-tuning A/V sync (e.g. with a PortAudio audio consumer).
+    double delay_ms = 0.0;
 
     // Quadro Sync II (NvAPI)
     bool             gsync_enabled  = false; // Enable GSync framelock

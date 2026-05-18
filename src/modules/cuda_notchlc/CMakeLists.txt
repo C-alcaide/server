@@ -44,16 +44,35 @@ set_property(TARGET cuda_notchlc PROPERTY CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHI
 # ─── nvcomp ─────────────────────────────────────────────────────────────────
 # nvcomp v5.x ships separate cmake configs for CUDA 12 and CUDA 13.
 # Detect which CUDA toolkit is active and point to the matching cmake dir.
+#
+# Search order for nvCOMP root:
+#   1. NVCOMP_ROOT cmake variable or environment variable
+#   2. Default install path: C:/Program Files/NVIDIA nvCOMP/v5.2
+set(_NVCOMP_ROOT "")
+if(DEFINED NVCOMP_ROOT)
+    set(_NVCOMP_ROOT "${NVCOMP_ROOT}")
+elseif(DEFINED ENV{NVCOMP_ROOT})
+    set(_NVCOMP_ROOT "$ENV{NVCOMP_ROOT}")
+elseif(EXISTS "C:/Program Files/NVIDIA nvCOMP/v5.2")
+    set(_NVCOMP_ROOT "C:/Program Files/NVIDIA nvCOMP/v5.2")
+endif()
+
+if(NOT _NVCOMP_ROOT OR NOT EXISTS "${_NVCOMP_ROOT}")
+    message(FATAL_ERROR "\n*** nvCOMP 5.x not found. ***\n"
+                        "Set NVCOMP_ROOT to the nvCOMP install directory, e.g.:\n"
+                        "  cmake -DNVCOMP_ROOT=\"C:/Program Files/NVIDIA nvCOMP/v5.2\" ..\n"
+                        "Or set the NVCOMP_ROOT environment variable.\n")
+endif()
+
 if(CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL "13")
-    set(_NVCOMP_CMAKE_DIR "C:/Program Files/NVIDIA nvCOMP/v5.2/lib/13/cmake/nvcomp")
+    set(_NVCOMP_CMAKE_DIR "${_NVCOMP_ROOT}/lib/13/cmake/nvcomp")
 else()
-    set(_NVCOMP_CMAKE_DIR "C:/Program Files/NVIDIA nvCOMP/v5.2/lib/12/cmake/nvcomp")
+    set(_NVCOMP_CMAKE_DIR "${_NVCOMP_ROOT}/lib/12/cmake/nvcomp")
 endif()
 
 if(NOT EXISTS "${_NVCOMP_CMAKE_DIR}")
-    message(FATAL_ERROR "\n*** nvCOMP 5.2 not found at expected path: C:/Program Files/NVIDIA nvCOMP/v5.2 ***\n"
-                        "Please download nvCOMP 5.2 from NVIDIA's Developer Zone and extract/install it to this directory.\n"
-                        "(Alternatively, update the path in src/modules/cuda_notchlc/CMakeLists.txt)\n")
+    message(FATAL_ERROR "\n*** nvCOMP cmake config not found at: ${_NVCOMP_CMAKE_DIR} ***\n"
+                        "Ensure nvCOMP is installed and NVCOMP_ROOT points to the correct directory.\n")
 endif()
 
 find_package(nvcomp REQUIRED
@@ -67,7 +86,7 @@ find_package(CUDAToolkit REQUIRED)
 target_include_directories(cuda_notchlc PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CUDAToolkit_INCLUDE_DIRS}
-    "C:/Program Files/NVIDIA nvCOMP/v5.2/include"
+    "${_NVCOMP_ROOT}/include"
     ${FFMPEG_INCLUDE_PATH}
 )
 

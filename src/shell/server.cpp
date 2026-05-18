@@ -44,7 +44,9 @@
 
 #include <modules/image/consumer/image_consumer.h>
 
+#ifdef ENABLE_VULKAN
 #include <modules/vulkan_output/util/vk_device_manager.h>
+#endif
 
 #include <protocol/amcp/AMCPCommandsImpl.h>
 #include <protocol/amcp/AMCPProtocolStrategy.h>
@@ -391,6 +393,7 @@ struct server::impl
 
         // Count Vulkan consumers per GPU for the startup gate, and pre-create
         // VkDevices if needed.
+#ifdef ENABLE_VULKAN
         {
             std::set<int> gpu_indices;
             std::map<int, int> gpu_consumer_counts;  // gpu_index → number of consumers
@@ -416,6 +419,7 @@ struct server::impl
                 // every consumer has finished init (including vkCreateDevice).
             }
         }
+#endif
 
         for (auto& channel : *channels_) {
             core::diagnostics::scoped_call_context save;

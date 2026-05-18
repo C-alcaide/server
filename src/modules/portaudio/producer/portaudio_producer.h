@@ -15,25 +15,21 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with CasparCG. If not, see <http://www.gnu.org/licenses/>.
- *
- * This module uses miniaudio (https://miniaud.io), dual-licensed under
- * MIT and public domain (Unlicense), both compatible with GPL-3.
  */
 
-#include "system_audio.h"
+#pragma once
 
-#include <core/module_dependencies.h>
-#include <core/producer/frame_producer_registry.h>
+#include <common/memory.h>
 
-namespace caspar { namespace system_audio {
+#include <core/fwd.h>
+#include <core/producer/frame_producer.h>
 
-void init(const core::module_dependencies& dependencies)
-{
-    dependencies.producer_registry->register_producer_factory(L"system_audio", create_producer);
-}
+#include <string>
+#include <vector>
 
-void uninit()
-{
-}
+namespace caspar { namespace portaudio {
 
-}} // namespace caspar::system_audio
+spl::shared_ptr<core::frame_producer> create_producer(const core::frame_producer_dependencies& dependencies,
+                                                      const std::vector<std::wstring>&         params);
+
+}} // namespace caspar::portaudio

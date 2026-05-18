@@ -101,3 +101,56 @@ If all goes to plan, a folder called 'staging' has been created with everything 
 -DDIAG_FONT_PATH - Specify an alternate path/font to use for the DIAG window. On linux, this will often want to be set to an absolute path of a font
 
 -DCASPARCG_BINARY_NAME=casparcg-server - (Linux only) generate the executable with the specified name. This also reconfigures the install target to be a bit more friendly with system package managers.
+
+# CasparVPV Branch — Optional Dependencies
+
+The CasparVPV branch adds several optional GPU-accelerated and virtual-production modules.
+All optional dependencies are **auto-detected** at configure time — if they are not installed,
+the corresponding modules are simply disabled. No manual flags are needed for a basic build.
+
+## Vulkan SDK (optional)
+
+Enables the Vulkan accelerator backend and the `vulkan_output` consumer (low-latency GPU output).
+
+- **Install**: Download from https://vulkan.lunarg.com/ and run the installer.
+- **Version**: 1.3+ (tested with 1.4.350)
+- **Detection**: `find_package(Vulkan)` reads the `VULKAN_SDK` environment variable (set by the installer).
+- **Override**: `-DENABLE_VULKAN=OFF` to force-disable.
+
+## CUDA Toolkit (optional)
+
+Enables GPU-accelerated ProRes encoding/decoding (`cuda_prores`) and NotchLC decoding (`cuda_notchlc`).
+
+- **Install**: Download from https://developer.nvidia.com/cuda-downloads
+- **Version**: CUDA **12.8 or 12.9** recommended. Avoid 12.4–12.6 (nvcc template deduction bug). CUDA 13+ works but drops Maxwell/Pascal GPU support.
+- **Detection**: `check_language(CUDA)` — auto-detected from PATH.
+- **Override**: `-DBUILD_CUDA_MODULES=OFF` to force-disable all CUDA modules.
+
+## NVIDIA nvCOMP (optional, requires CUDA)
+
+Required only by the `cuda_notchlc` module (NotchLC GPU decompression). If CUDA is enabled but nvCOMP is not found, `cuda_prores` still builds normally.
+
+- **Install**: Download nvCOMP 5.x from https://developer.nvidia.com/nvcomp and extract/install it.
+- **Detection**: Searches `NVCOMP_ROOT` cmake variable, `NVCOMP_ROOT` environment variable, then the default path `C:/Program Files/NVIDIA nvCOMP/v5.2`.
+- **Override**: `-DBUILD_CUDA_NOTCHLC=OFF` to skip, or `-DNVCOMP_ROOT="C:/path/to/nvcomp"` to point to a custom location.
+
+## NVIDIA NvAPI SDK (optional, with Vulkan)
+
+Enables Quadro Sync II, EDID injection, and hardware HDR probing in the `vulkan_output` module. When absent, stubs are compiled and these features are simply unavailable at runtime.
+
+- **Install**: Download from https://developer.nvidia.com/nvapi and extract.
+- **Detection**: Searches `NVAPI_SDK_PATH` cmake variable, a sibling `nvapi-main/` directory, then the `NVAPI_SDK` environment variable.
+- **Override**: `-DNVAPI_SDK_PATH="C:/path/to/nvapi"` to point to a custom location.
+
+## Summary of CMake options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `ENABLE_VULKAN` | Auto (ON if SDK found) | Vulkan accelerator + vulkan_output module |
+| `BUILD_CUDA_MODULES` | Auto (ON if CUDA found) | cuda_prores and cuda_notchlc modules |
+| `BUILD_CUDA_NOTCHLC` | Auto (ON if nvCOMP found) | cuda_notchlc only (subset of CUDA modules) |
+| `BUILD_SPOUT` | Auto (ON on Windows) | Spout texture-sharing module |
+| `BUILD_REPLAY` | ON | Replay module (Windows only) |
+| `BUILD_TRACKING_VRPN` | OFF | Camera-tracking VRPN client support |
+| `NVCOMP_ROOT` | Auto-detected | Path to nvCOMP installation |
+| `NVAPI_SDK_PATH` | Auto-detected | Path to NvAPI SDK root |

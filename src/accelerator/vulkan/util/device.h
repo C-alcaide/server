@@ -57,6 +57,8 @@ class device final
     std::vector<vk::CommandBuffer>     allocateCommandBuffers(uint32_t count);
     void                               submit(const vk::SubmitInfo& submitInfo, vk::Fence fence);
     vk::Device                         getVkDevice() const;
+    vk::PhysicalDevice                 getVkPhysicalDevice() const;
+    vk::CommandPool                    getCommandPool() const;
 
     std::shared_ptr<class texture>
     create_attachment(int width, int height, common::bit_depth depth, uint32_t components_count);

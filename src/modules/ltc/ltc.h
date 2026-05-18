@@ -27,5 +27,6 @@
 namespace caspar { namespace ltc {
 
 void init(const core::module_dependencies& dependencies);
+void uninit();
 
 }} // namespace caspar::ltc

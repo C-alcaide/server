@@ -213,6 +213,8 @@ The `<delay>` parameter introduces a fixed N-frame latency between when a frame 
 
 For example, if an LED processor adds 2 frames of latency, setting `<delay>2</delay>` means the Vulkan output will hold frames 2 frames longer, allowing the combined system latency to align with other outputs (like DeckLink) that may have their own delay compensation.
 
+The `<delay-ms>` parameter adds a sub-frame delay in milliseconds on top of `<delay>`. This is useful for fine-tuning A/V sync when video and audio are routed through different consumers (e.g. Vulkan output + PortAudio). The value is clamped to `[0, one frame period]` — use whole-frame `<delay>` for coarser adjustments. See [PORTAUDIO_MODULE.md](PORTAUDIO_MODULE.md) Scenario 9 for a worked example.
+
 ### Swapchain
 
 The swapchain is created with:
@@ -878,7 +880,7 @@ When NvAPI is available, the output also includes EDID information (manufacturer
 ### ADD (AMCP)
 
 ```
-ADD 1 VULKAN_OUTPUT [output_index] [gpu_index] [MODE video_mode] [DELAY frames]
+ADD 1 VULKAN_OUTPUT [output_index] [gpu_index] [MODE video_mode] [DELAY frames] [DELAY_MS ms]
 ```
 
 Examples:
@@ -886,6 +888,7 @@ Examples:
 ADD 1 VULKAN_OUTPUT 1          -- Output 1 on GPU 0
 ADD 1 VULKAN_OUTPUT 2 1        -- Output 2 on GPU 1
 ADD 1 VULKAN_OUTPUT 1 0 DELAY 2  -- Output 1, 2-frame presentation delay
+ADD 1 VULKAN_OUTPUT 1 0 DELAY 3 DELAY_MS 5  -- 3 frames + 5ms sub-frame delay
 ```
 
 ### CALL (Runtime)
@@ -908,6 +911,7 @@ All options for the `<vulkan-output>` consumer block in `casparcg.config`:
 | `<device>` | int | `1` | Display output index (1-based) |
 | `<buffer-depth>` | int | `3` | Pre-scheduled swapchain frame count |
 | `<delay>` | int | `0` | Presentation delay in frames |
+| `<delay-ms>` | double | `0.0` | Sub-frame delay in milliseconds (added on top of `<delay>`) |
 | `<video-mode>` | string | *(channel)* | Explicit output video mode |
 | `<identify-on-start>` | bool | `false` | Flash identification overlay on startup |
 | `<on-disconnect>` | enum | `retry` | `hold` \| `black` \| `retry` |
@@ -1406,6 +1410,7 @@ vulkan-output/display-lost    = false
 vulkan-output/sync-group      = 1
 vulkan-output/present-barrier = true
 vulkan-output/delay           = 0
+vulkan-output/delay-ms        = 0.0
 vulkan-output/gsync/available = true
 vulkan-output/gsync/synced    = true
 vulkan-output/gsync/house-sync = true

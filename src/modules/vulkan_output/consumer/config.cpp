@@ -118,6 +118,7 @@ configuration parse_config(const boost::property_tree::wptree& ptree)
 
     // Presentation delay
     config.delay_frames = ptree.get(L"delay", 0);
+    config.delay_ms     = ptree.get(L"delay-ms", 0.0);
 
     // Quadro Sync II (NvAPI)
     auto gsync = ptree.get_child_optional(L"gsync");

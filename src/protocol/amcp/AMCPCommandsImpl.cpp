@@ -32,6 +32,7 @@
 #include "amcp_args.h"
 
 #include "../../modules/ltc/ltc_input.h"
+#include "../../modules/portaudio/util/portaudio_device.h"
 
 #include <common/env.h>
 
@@ -54,6 +55,9 @@
 #include <accelerator/ogl/image/image_mixer.h>
 #include <accelerator/ogl/image/previz_renderer.h>
 #include <accelerator/ogl/image/previz_scene.h>
+#ifdef ENABLE_VULKAN
+#include <accelerator/vulkan/image/image_mixer.h>
+#endif
 #include <core/producer/cg_proxy.h>
 #include <core/producer/color/color_producer.h>
 #include <core/producer/frame_producer.h>
@@ -3147,6 +3151,51 @@ std::wstring info_ltc_command(command_context& ctx)
     return replyString.str();
 }
 
+std::wstring info_portaudio_command(command_context& ctx)
+{
+    boost::property_tree::wptree info;
+
+    auto& mgr = caspar::portaudio::portaudio_device_manager::instance();
+    if (!mgr.is_initialized()) {
+        info.add(L"portaudio.status", L"not initialized");
+    } else {
+        info.add(L"portaudio.status", L"initialized");
+
+        auto outputs = mgr.enumerate_output_devices();
+        for (const auto& dev : outputs) {
+            boost::property_tree::wptree device_node;
+            device_node.put(L"index", dev.index);
+            device_node.put(L"name", caspar::u16(dev.name));
+            device_node.put(L"host-api", caspar::u16(dev.host_api_name));
+            device_node.put(L"channels", dev.max_output_channels);
+            device_node.put(L"sample-rate", dev.default_sample_rate);
+            device_node.put(L"latency", dev.default_low_output_latency);
+            info.add_child(L"portaudio.output-devices.device", device_node);
+        }
+
+        auto inputs = mgr.enumerate_input_devices();
+        for (const auto& dev : inputs) {
+            boost::property_tree::wptree device_node;
+            device_node.put(L"index", dev.index);
+            device_node.put(L"name", caspar::u16(dev.name));
+            device_node.put(L"host-api", caspar::u16(dev.host_api_name));
+            device_node.put(L"channels", dev.max_input_channels);
+            device_node.put(L"sample-rate", dev.default_sample_rate);
+            device_node.put(L"latency", dev.default_low_input_latency);
+            info.add_child(L"portaudio.input-devices.device", device_node);
+        }
+    }
+
+    std::wstringstream replyString;
+    replyString << L"201 INFO PORTAUDIO OK\r\n";
+
+    pt::xml_writer_settings<std::wstring> w(' ', 3);
+    pt::xml_parser::write_xml(replyString, info, w);
+
+    replyString << L"\r\n";
+    return replyString.str();
+}
+
 std::wstring ltc_load_command(command_context& ctx)
 {
     if (ctx.parameters.size() < 1)
@@ -3295,10 +3344,29 @@ std::wstring osc_unsubscribe_command(command_context& ctx)
 
 // -------- Previz commands --------------------------------------------------
 
-static accelerator::ogl::image_mixer* get_ogl_mixer(command_context& ctx)
+static accelerator::ogl::previz_renderer* get_previz_renderer(command_context& ctx)
 {
     auto img = ctx.channel.raw_channel->mixer().get_image_mixer();
-    return dynamic_cast<accelerator::ogl::image_mixer*>(img.get());
+
+    // Try OGL mixer first
+    auto* ogl_mix = dynamic_cast<accelerator::ogl::image_mixer*>(img.get());
+    if (ogl_mix)
+        return &ogl_mix->get_previz_renderer();
+
+#ifdef ENABLE_VULKAN
+    // Try VK mixer
+    auto* vk_mix = dynamic_cast<accelerator::vulkan::image_mixer*>(img.get());
+    if (vk_mix)
+        return vk_mix->get_previz_renderer();
+#endif
+
+    return nullptr;
+}
+
+// Backward-compat alias — existing command functions use this name
+static accelerator::ogl::previz_renderer* get_ogl_mixer(command_context& ctx)
+{
+    return get_previz_renderer(ctx);
 }
 
 std::wstring previz_scene_command(command_context& ctx)
@@ -3309,7 +3377,7 @@ std::wstring previz_scene_command(command_context& ctx)
 
     if (ctx.parameters.empty()) {
         // Query
-        auto sc = ogl_mix->get_previz_renderer().scene();
+        auto sc = ogl_mix->scene();
         if (sc.scene_path.empty())
             return L"201 PREVIZ OK\r\nNONE\r\n";
         return L"201 PREVIZ OK\r\n" + u16(sc.scene_path) + L"\r\n";
@@ -3319,7 +3387,7 @@ std::wstring previz_scene_command(command_context& ctx)
 
     // PREVIZ ch SCENE NONE — clear scene
     if (boost::iequals(path_param, L"NONE")) {
-        ogl_mix->get_previz_renderer().load_scene("");
+        ogl_mix->load_scene("");
         return L"202 PREVIZ OK\r\n";
     }
 
@@ -3333,7 +3401,7 @@ std::wstring previz_scene_command(command_context& ctx)
         return L"403 PREVIZ FORBIDDEN\r\n";
 
     try {
-        ogl_mix->get_previz_renderer().load_scene(u8(resolved.wstring()));
+        ogl_mix->load_scene(u8(resolved.wstring()));
         return L"202 PREVIZ OK\r\n";
     } catch (const std::exception& e) {
         CASPAR_LOG(error) << L"[PREVIZ SCENE] " << e.what();
@@ -3355,7 +3423,7 @@ std::wstring previz_map_command(command_context& ctx)
 
     try {
         int  target_ch   = std::stoi(u8(channel_str));
-        ogl_mix->get_previz_renderer().map_mesh(mesh_name, target_ch);
+        ogl_mix->map_mesh(mesh_name, target_ch);
         return L"202 PREVIZ OK\r\n";
     } catch (const std::exception& e) {
         CASPAR_LOG(error) << L"[PREVIZ MAP] " << e.what();
@@ -3373,7 +3441,7 @@ std::wstring previz_unmap_command(command_context& ctx)
         return L"400 PREVIZ ERROR\r\n";
 
     try {
-        ogl_mix->get_previz_renderer().unmap_mesh(u8(ctx.parameters.at(0)));
+        ogl_mix->unmap_mesh(u8(ctx.parameters.at(0)));
         return L"202 PREVIZ OK\r\n";
     } catch (const std::exception& e) {
         CASPAR_LOG(error) << L"[PREVIZ UNMAP] " << e.what();
@@ -3389,7 +3457,7 @@ std::wstring previz_camera_command(command_context& ctx)
 
     // Query
     if (ctx.parameters.empty()) {
-        auto cam = ogl_mix->get_previz_renderer().scene().camera;
+        auto cam = ogl_mix->scene().camera;
         std::wostringstream os;
         os << L"201 PREVIZ OK\r\n"
            << cam.x << L" " << cam.y << L" " << cam.z << L" "
@@ -3400,7 +3468,7 @@ std::wstring previz_camera_command(command_context& ctx)
 
     // RESET
     if (boost::iequals(ctx.parameters.at(0), L"RESET")) {
-        ogl_mix->get_previz_renderer().reset_camera();
+        ogl_mix->reset_camera();
         return L"202 PREVIZ OK\r\n";
     }
 
@@ -3417,7 +3485,7 @@ std::wstring previz_camera_command(command_context& ctx)
         float roll  = std::stof(u8(ctx.parameters.at(5)));
         float fov   = std::stof(u8(ctx.parameters.at(6)));
 
-        ogl_mix->get_previz_renderer().set_camera(x, y, z, yaw, pitch, roll, fov);
+        ogl_mix->set_camera(x, y, z, yaw, pitch, roll, fov);
         return L"202 PREVIZ OK\r\n";
     } catch (const std::exception& e) {
         CASPAR_LOG(error) << L"[PREVIZ CAMERA] " << e.what();
@@ -3431,7 +3499,7 @@ std::wstring previz_info_command(command_context& ctx)
     if (!ogl_mix)
         return L"501 PREVIZ FAILED\r\n";
 
-    auto sc = ogl_mix->get_previz_renderer().scene();
+    auto sc = ogl_mix->scene();
     std::wostringstream os;
     os << L"201 PREVIZ OK\r\n";
     os << L"active: "    << (sc.active ? L"true" : L"false") << L"\r\n";
@@ -3460,7 +3528,7 @@ std::wstring previz_show_command(command_context& ctx)
 
     std::string mesh_name = u8(ctx.parameters.at(0));
     bool visible = ctx.parameters.size() >= 2 ? (ctx.parameters.at(1) != L"0") : true;
-    ogl_mix->get_previz_renderer().set_mesh_visible(mesh_name, visible);
+    ogl_mix->set_mesh_visible(mesh_name, visible);
     return L"202 PREVIZ OK\r\n";
 }
 
@@ -3473,7 +3541,7 @@ std::wstring previz_grid_command(command_context& ctx)
     if (!ogl_mix)
         return L"501 PREVIZ FAILED\r\n";
     bool on = ctx.parameters.empty() || ctx.parameters.at(0) != L"0";
-    ogl_mix->get_previz_renderer().set_grid(on);
+    ogl_mix->set_grid(on);
     return L"202 PREVIZ OK\r\n";
 }
 
@@ -3486,7 +3554,7 @@ std::wstring previz_wireframe_command(command_context& ctx)
     if (!ogl_mix)
         return L"501 PREVIZ FAILED\r\n";
     bool on = ctx.parameters.empty() || ctx.parameters.at(0) != L"0";
-    ogl_mix->get_previz_renderer().set_wireframe(on);
+    ogl_mix->set_wireframe(on);
     return L"202 PREVIZ OK\r\n";
 }
 
@@ -3499,7 +3567,7 @@ std::wstring previz_gizmo_command(command_context& ctx)
     if (!ogl_mix)
         return L"501 PREVIZ FAILED\r\n";
     bool on = ctx.parameters.empty() || ctx.parameters.at(0) != L"0";
-    ogl_mix->get_previz_renderer().set_gizmo(on);
+    ogl_mix->set_gizmo(on);
     return L"202 PREVIZ OK\r\n";
 }
 
@@ -3520,15 +3588,15 @@ std::wstring previz_preset_command(command_context& ctx)
     if (sub == L"SAVE") {
         if (ctx.parameters.size() < 2)
             return L"400 PREVIZ ERROR missing preset name\r\n";
-        ogl_mix->get_previz_renderer().save_camera_preset(u8(ctx.parameters.at(1)));
+        ogl_mix->save_camera_preset(u8(ctx.parameters.at(1)));
         return L"202 PREVIZ OK\r\n";
     } else if (sub == L"RECALL") {
         if (ctx.parameters.size() < 2)
             return L"400 PREVIZ ERROR missing preset name\r\n";
-        ogl_mix->get_previz_renderer().recall_camera_preset(u8(ctx.parameters.at(1)));
+        ogl_mix->recall_camera_preset(u8(ctx.parameters.at(1)));
         return L"202 PREVIZ OK\r\n";
     } else if (sub == L"LIST") {
-        auto names = ogl_mix->get_previz_renderer().list_camera_presets();
+        auto names = ogl_mix->list_camera_presets();
         std::wostringstream os;
         os << L"201 PREVIZ OK\r\n";
         for (auto& n : names)
@@ -3560,8 +3628,8 @@ std::wstring previz_screen_command(command_context& ctx)
         auto first = boost::to_upper_copy(ctx.parameters.at(0));
 
         if (first == L"LIST") {
-            auto names = ogl_mix->get_previz_renderer().list_screens();
-            auto sc   = ogl_mix->get_previz_renderer().scene();
+            auto names = ogl_mix->list_screens();
+            auto sc   = ogl_mix->scene();
             std::wostringstream os;
             os << L"201 PREVIZ OK\r\n";
             for (auto& n : names) {
@@ -3589,7 +3657,7 @@ std::wstring previz_screen_command(command_context& ctx)
             if (type == L"FLAT") {
                 float w = std::stof(u8(ctx.parameters.at(3)));
                 float h = std::stof(u8(ctx.parameters.at(4)));
-                ogl_mix->get_previz_renderer().add_screen_flat(name, w, h);
+                ogl_mix->add_screen_flat(name, w, h);
                 return L"202 PREVIZ OK\r\n";
             } else if (type == L"CURVED") {
                 if (ctx.parameters.size() < 7)
@@ -3598,7 +3666,7 @@ std::wstring previz_screen_command(command_context& ctx)
                 float h   = std::stof(u8(ctx.parameters.at(4)));
                 float r   = std::stof(u8(ctx.parameters.at(5)));
                 float arc = std::stof(u8(ctx.parameters.at(6)));
-                ogl_mix->get_previz_renderer().add_screen_curved(name, w, h, r, arc);
+                ogl_mix->add_screen_curved(name, w, h, r, arc);
                 return L"202 PREVIZ OK\r\n";
             }
             return L"400 PREVIZ ERROR unknown screen type (FLAT or CURVED)\r\n";
@@ -3617,7 +3685,7 @@ std::wstring previz_screen_command(command_context& ctx)
             float x = std::stof(u8(ctx.parameters.at(2)));
             float y = std::stof(u8(ctx.parameters.at(3)));
             float z = std::stof(u8(ctx.parameters.at(4)));
-            ogl_mix->get_previz_renderer().set_screen_position(name, x, y, z);
+            ogl_mix->set_screen_position(name, x, y, z);
             return L"202 PREVIZ OK\r\n";
         } else if (sub == L"ROTATION") {
             if (ctx.parameters.size() < 5)
@@ -3625,23 +3693,23 @@ std::wstring previz_screen_command(command_context& ctx)
             float yaw   = std::stof(u8(ctx.parameters.at(2)));
             float pitch = std::stof(u8(ctx.parameters.at(3)));
             float roll  = std::stof(u8(ctx.parameters.at(4)));
-            ogl_mix->get_previz_renderer().set_screen_rotation(name, yaw, pitch, roll);
+            ogl_mix->set_screen_rotation(name, yaw, pitch, roll);
             return L"202 PREVIZ OK\r\n";
         } else if (sub == L"RESOLUTION") {
             if (ctx.parameters.size() < 4)
                 return L"400 PREVIZ ERROR usage: SCREEN <name> RESOLUTION <w> <h>\r\n";
             int w = std::stoi(u8(ctx.parameters.at(2)));
             int h = std::stoi(u8(ctx.parameters.at(3)));
-            ogl_mix->get_previz_renderer().set_screen_resolution(name, w, h);
+            ogl_mix->set_screen_resolution(name, w, h);
             return L"202 PREVIZ OK\r\n";
         } else if (sub == L"CHANNEL") {
             if (ctx.parameters.size() < 3)
                 return L"400 PREVIZ ERROR usage: SCREEN <name> CHANNEL <ch>\r\n";
             int ch = std::stoi(u8(ctx.parameters.at(2)));
-            ogl_mix->get_previz_renderer().set_screen_channel(name, ch);
+            ogl_mix->set_screen_channel(name, ch);
             return L"202 PREVIZ OK\r\n";
         } else if (sub == L"REMOVE") {
-            ogl_mix->get_previz_renderer().remove_screen(name);
+            ogl_mix->remove_screen(name);
             return L"202 PREVIZ OK\r\n";
         }
 
@@ -3842,11 +3910,11 @@ std::wstring previz_autoprojection_command(command_context& ctx)
                 };
         }
 
-        ogl_mix->get_previz_renderer().set_projection_callback(std::move(apply_fn));
-        ogl_mix->get_previz_renderer().set_auto_projection(true);
+        ogl_mix->set_projection_callback(std::move(apply_fn));
+        ogl_mix->set_auto_projection(true);
     } else {
-        ogl_mix->get_previz_renderer().set_auto_projection(false);
-        ogl_mix->get_previz_renderer().set_projection_callback(nullptr);
+        ogl_mix->set_auto_projection(false);
+        ogl_mix->set_projection_callback(nullptr);
     }
 
     return L"202 PREVIZ OK\r\n";
@@ -3969,6 +4037,7 @@ void register_commands(std::shared_ptr<amcp_command_repository_wrapper>& repo)
     repo->register_command(L"Query Commands", L"INFO CONFIG", info_config_command, 0);
     repo->register_command(L"Query Commands", L"INFO PATHS", info_paths_command, 0);
     repo->register_command(L"Query Commands", L"INFO LTC", info_ltc_command, 0);
+    repo->register_command(L"Query Commands", L"INFO PORTAUDIO", info_portaudio_command, 0);
     repo->register_command(L"LTC Commands", L"LTC LOAD", ltc_load_command, 1);
     repo->register_command(L"Query Commands", L"GL INFO", gl_info_command, 0);
     repo->register_command(L"Query Commands", L"GL GC", gl_gc_command, 0);

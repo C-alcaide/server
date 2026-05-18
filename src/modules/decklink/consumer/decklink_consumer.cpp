@@ -241,6 +241,8 @@ spl::shared_ptr<format_strategy> create_format_strategy(const configuration& con
 
     bool is_hdr     = config.hdr;
     bool use_bt2020 = config.color_space == core::color_space::bt2020;
+    (void)is_hdr;
+    (void)use_bt2020;
     auto strategy   = config.gpu_readback_mode;
 
     // Auto-select: try CUDA first (proven), then VK readback
@@ -1364,6 +1366,17 @@ struct decklink_consumer_proxy : public core::frame_consumer
     }
 
     [[nodiscard]] core::monitor::state state() const override { return get_state_for_config(config_, format_desc_); }
+
+    [[nodiscard]] core::av_pipeline_info av_pipeline() const override
+    {
+        core::av_pipeline_info info;
+        info.has_video          = true;
+        info.has_audio          = config_.embedded_audio;
+        info.audio_is_embedded  = config_.embedded_audio;
+        info.video_depth_frames = config_.buffer_depth();
+        info.audio_depth_frames = config_.embedded_audio ? config_.buffer_depth() : 0;
+        return info;
+    }
 };
 
 spl::shared_ptr<core::frame_consumer> create_consumer(const std::vector<std::wstring>&     params,
