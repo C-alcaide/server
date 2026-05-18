@@ -432,9 +432,15 @@ struct Stream
             enc->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
         }
 
-        // Set CUDA hw_device_ctx on encoder so NVENC receives GPU frames
+        // Set CUDA contexts on encoder so NVENC receives GPU frames
         if (use_nvenc_hw_ && hw_device_ctx_) {
             enc->hw_device_ctx = av_buffer_ref(hw_device_ctx_);
+            // When hwupload_cuda is in the filter graph, the buffersink outputs
+            // hardware frames. NVENC requires hw_frames_ctx to be set.
+            AVBufferRef* frames_ctx = av_buffersink_get_hw_frames_ctx(sink);
+            if (frames_ctx) {
+                enc->hw_frames_ctx = av_buffer_ref(frames_ctx);
+            }
         }
 
         auto dict = to_dict(std::move(stream_options));
@@ -630,7 +636,15 @@ struct ffmpeg_consumer : public core::frame_consumer
 
                     // TODO -y?
                     if (boost::filesystem::exists(full_path)) {
-                        boost::filesystem::remove(full_path);
+                        // Retry removal — on Windows the OS may briefly hold
+                        // the file handle after the previous consumer closed it.
+                        for (int attempt = 0; attempt < 10; ++attempt) {
+                            boost::system::error_code ec;
+                            boost::filesystem::remove(full_path, ec);
+                            if (!ec)
+                                break;
+                            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                        }
                     }
 
                     boost::filesystem::create_directories(full_path.parent_path());

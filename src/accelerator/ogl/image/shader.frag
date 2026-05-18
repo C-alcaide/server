@@ -80,6 +80,7 @@ uniform mat3  input_to_working;  // input gamut -> ACEScg (AP1)
 uniform mat3  working_to_output; // ACEScg (AP1) -> output gamut
 uniform int   tone_mapping_op;   // 0=none,1=reinhard,2=aces_filmic,3=aces_rrt
 uniform float exposure;          // linear exposure multiplier
+uniform float luminance_scale;   // BT.2408 luminance adaptation (e.g. 0.1 for SDR->HLG)
 
 // White balance
 uniform bool  white_balance;
@@ -865,12 +866,12 @@ vec4 ycbcra_to_rgba(float Y, float Cb, float Cr, float A)
 
 // ---- Color Grading: EOTFs (encoded -> linear) ----
 float eotf_srgb(float x)   { return x <= 0.04045  ? x / 12.92 : pow((x + 0.055) / 1.055, 2.4); }
-float eotf_rec709(float x) { return x < 0.081     ? x / 4.5   : pow((x + 0.099) / 1.099, 1.0 / 0.45); }
+float eotf_rec709(float x) { return pow(max(x, 0.0), 2.4); }  // BT.1886 display EOTF
 float eotf_pq(float x) {
     const float m1 = 0.1593017578125, m2 = 78.84375;
     const float c1 = 0.8359375, c2 = 18.8515625, c3 = 18.6875;
     float xp = pow(max(x, 0.0), 1.0 / m2);
-    return pow(max(xp - c1, 0.0) / (c2 - c3 * xp), 1.0 / m1) * (10000.0 / 100.0);
+    return pow(max(xp - c1, 0.0) / (c2 - c3 * xp), 1.0 / m1);
 }
 float eotf_hlg(float x) {
     const float a = 0.17883277, b = 0.28466892, c = 0.55991073;
@@ -898,11 +899,11 @@ vec3 apply_eotf(vec3 rgb, int t) {
 }
 // ---- Color Grading: OETFs (linear -> encoded) ----
 float oetf_srgb(float x)   { return x <= 0.0031308 ? x * 12.92 : 1.055 * pow(max(x, 0.0), 1.0 / 2.4) - 0.055; }
-float oetf_rec709(float x) { return x < 0.018      ? x * 4.5   : 1.099 * pow(max(x, 0.0), 0.45) - 0.099; }
+float oetf_rec709(float x) { return pow(max(x, 0.0), 1.0 / 2.4); }  // BT.1886 inverse
 float oetf_pq(float x) {
     const float m1 = 0.1593017578125, m2 = 78.84375;
     const float c1 = 0.8359375, c2 = 18.8515625, c3 = 18.6875;
-    float xn = pow(clamp(x * 100.0 / 10000.0, 0.0, 1.0), m1);
+    float xn = pow(clamp(x, 0.0, 1.0), m1);
     return pow((c1 + c2 * xn) / (1.0 + c3 * xn), m2);
 }
 float oetf_hlg(float x) {
@@ -1539,7 +1540,11 @@ void main()
     if (color_grading) {
         // EOTF: encoded -> linear (unless input is already linear)
         col.rgb = apply_eotf(col.rgb, input_transfer);
-        
+
+        // BT.2408 luminance adaptation (applied before gamut mapping)
+        // Scales linear light to match target luminance domain.
+        col.rgb *= luminance_scale;
+
         // Gamut mapping: Input Gamut -> Working Gamut
         // Shader uses BGRA convention (.r=B, .b=R), swizzle to RGB for matrix
         col.bgr = input_to_working * col.bgr;

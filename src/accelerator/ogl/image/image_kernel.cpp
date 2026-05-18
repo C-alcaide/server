@@ -405,6 +405,21 @@ struct image_kernel::impl
             shader_->set("exposure",          cg.exposure);
             shader_->set_matrix3("input_to_working",  k_to_working[ig]);
             shader_->set_matrix3("working_to_output", k_to_output[og]);
+
+            // BT.2408 luminance adaptation: scale linear light when crossing
+            // HDR/SDR domains.  Each transfer defines a "peak" in cd/m²:
+            //   SDR/sRGB/rec709 = 100, HLG = 1000, PQ = 10000
+            // Scale = source_peak / target_peak
+            auto get_peak = [](int transfer) -> float {
+                switch (transfer) {
+                    case 3: return 10000.0f; // PQ
+                    case 4: return 1000.0f;  // HLG
+                    default: return 100.0f;  // SDR, sRGB, rec709, linear
+                }
+            };
+            float src_peak = get_peak(cg.input_transfer);
+            float tgt_peak = get_peak(cg.output_transfer);
+            shader_->set("luminance_scale", src_peak / tgt_peak);
         } else if (params.auto_color_convert &&
                    (params.pix_desc.color_space != params.target_color_space ||
                     params.pix_desc.color_transfer != params.target_color_transfer)) {
@@ -440,6 +455,18 @@ struct image_kernel::impl
                 shader_->set("exposure",          1.0f);
                 shader_->set_matrix3("input_to_working",  k_to_working[ig]);
                 shader_->set_matrix3("working_to_output", k_to_output[og]);
+
+                // BT.2408 luminance adaptation for auto conversion path
+                auto get_peak = [](int transfer) -> float {
+                    switch (transfer) {
+                        case 3: return 10000.0f; // PQ
+                        case 4: return 1000.0f;  // HLG
+                        default: return 100.0f;  // SDR, sRGB, rec709, linear
+                    }
+                };
+                float src_peak = get_peak(it);
+                float tgt_peak = get_peak(ot);
+                shader_->set("luminance_scale", src_peak / tgt_peak);
             }
         } else {
             shader_->set("color_grading", false);
