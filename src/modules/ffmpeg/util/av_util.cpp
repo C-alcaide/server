@@ -90,14 +90,18 @@ core::mutable_frame make_frame(void*                            tag,
                         }
                     });
                 } else if (video->format == AV_PIX_FMT_P010LE || video->format == AV_PIX_FMT_P010BE) {
-                    // P010: like NV12 but 10-bit in 16-bit LE words.
-                    // Copy Y plane (2 bytes per sample)
+                    // P010: 10-bit in HIGH bits of 16-bit words.
+                    // Shift >>6 to normalise to low-10-bit layout (matching YUV420P10LE)
+                    // so the shader's precision_factor=64 works uniformly for all 10-bit.
+                    auto y_width = pix_desc.planes[0].width;
                     tbb::parallel_for(0, pix_desc.planes[0].height, [&](int y) {
-                        std::memcpy(frame.image_data(0).begin() + y * pix_desc.planes[0].linesize,
-                                    video->data[0] + y * video->linesize[0],
-                                    pix_desc.planes[0].linesize);
+                        auto* src = reinterpret_cast<const uint16_t*>(video->data[0] + y * video->linesize[0]);
+                        auto* dst = reinterpret_cast<uint16_t*>(frame.image_data(0).begin() + y * pix_desc.planes[0].linesize);
+                        for (int x = 0; x < y_width; ++x) {
+                            dst[x] = src[x] >> 6;
+                        }
                     });
-                    // Deinterleave UV plane (16-bit samples: U16 V16 U16 V16 ...)
+                    // Deinterleave UV plane + shift from high-10 to low-10 bits
                     auto uv_height = pix_desc.planes[1].height;
                     auto uv_width  = pix_desc.planes[1].width; // in pixels
                     tbb::parallel_for(0, uv_height, [&](int y) {
@@ -105,8 +109,8 @@ core::mutable_frame make_frame(void*                            tag,
                         auto* dst_u = reinterpret_cast<uint16_t*>(frame.image_data(1).begin() + y * pix_desc.planes[1].linesize);
                         auto* dst_v = reinterpret_cast<uint16_t*>(frame.image_data(2).begin() + y * pix_desc.planes[2].linesize);
                         for (int x = 0; x < uv_width; ++x) {
-                            dst_u[x] = src[x * 2];
-                            dst_v[x] = src[x * 2 + 1];
+                            dst_u[x] = src[x * 2] >> 6;
+                            dst_v[x] = src[x * 2 + 1] >> 6;
                         }
                     });
                 } else {
@@ -194,6 +198,17 @@ std::tuple<core::pixel_format, common::bit_depth> get_pixel_format(AVPixelFormat
             return {core::pixel_format::ycbcra, common::bit_depth::bit8};
         case AV_PIX_FMT_YUVA444P:
             return {core::pixel_format::ycbcra, common::bit_depth::bit8};
+        case AV_PIX_FMT_YUVA420P10:
+        case AV_PIX_FMT_YUVA422P10:
+        case AV_PIX_FMT_YUVA444P10:
+            return {core::pixel_format::ycbcra, common::bit_depth::bit10};
+        case AV_PIX_FMT_YUVA422P12:
+        case AV_PIX_FMT_YUVA444P12:
+            return {core::pixel_format::ycbcra, common::bit_depth::bit12};
+        case AV_PIX_FMT_RGBA64LE:
+            return {core::pixel_format::rgba, common::bit_depth::bit16};
+        case AV_PIX_FMT_BGRA64LE:
+            return {core::pixel_format::bgra, common::bit_depth::bit16};
         case AV_PIX_FMT_UYVY422:
             return {core::pixel_format::uyvy, common::bit_depth::bit8};
         case AV_PIX_FMT_NV12:

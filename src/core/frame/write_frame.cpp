@@ -118,10 +118,10 @@ bool write_frame_png(const const_frame& frame, const std::wstring& path)
                         auto* y_ptr  = reinterpret_cast<const uint16_t*>(y_plane.data()) + row * desc.planes[0].width + col;
                         auto* cb_ptr = reinterpret_cast<const uint16_t*>(cb_plane.data()) + (row / sub_y) * cb_w + (col / sub_x);
                         auto* cr_ptr = reinterpret_cast<const uint16_t*>(cr_plane.data()) + (row / sub_y) * cb_w + (col / sub_x);
-                        // P010: data in high 10 bits of 16-bit word
-                        y_val  = (*y_ptr >> 6) / 1023.0 * 255.0;
-                        cb_val = (*cb_ptr >> 6) / 1023.0 * 255.0;
-                        cr_val = (*cr_ptr >> 6) / 1023.0 * 255.0;
+                        // 10-bit data always in low 10 bits of uint16 (P010 normalised during deinterleave)
+                        y_val  = (*y_ptr) / 1023.0 * 255.0;
+                        cb_val = (*cb_ptr) / 1023.0 * 255.0;
+                        cr_val = (*cr_ptr) / 1023.0 * 255.0;
                     } else {
                         y_val  = y_plane.data()[row * desc.planes[0].width + col];
                         cb_val = cb_plane.data()[(row / sub_y) * cb_w + (col / sub_x)];

@@ -1217,9 +1217,9 @@ vec4 get_rgba_color(vec2 uv)
     case 2:		//rgba,
         return get_sample(plane[0], uv).rgba * precision_factor[0];
     case 3:		//argb,
-        return get_sample(plane[0], uv).gbar * precision_factor[0];
+        return get_sample(plane[0], uv).brga * precision_factor[0];
     case 4:		//abgr,
-        return get_sample(plane[0], uv).abgr * precision_factor[0];
+        return get_sample(plane[0], uv).grab * precision_factor[0];
     case 5:		//ycbcr,
         {
             float y  = get_sample(plane[0], uv).r * precision_factor[0];
@@ -1256,7 +1256,7 @@ vec4 get_rgba_color(vec2 uv)
             float g  = get_sample(plane[0], uv).r * precision_factor[0];
             float b = get_sample(plane[1], uv).r * precision_factor[1];
             float r = get_sample(plane[2], uv).r * precision_factor[2];
-			return vec4(r, g, b, 1.0);
+			return vec4(b, g, r, 1.0);
         }
     case 12:    // gbrap
         {
@@ -1264,7 +1264,7 @@ vec4 get_rgba_color(vec2 uv)
             float b = get_sample(plane[1], uv).r * precision_factor[1];
             float r = get_sample(plane[2], uv).r * precision_factor[2];
             float a  = get_sample(plane[3], uv).r * precision_factor[3];
-			return vec4(r, g, b, a);
+			return vec4(b, g, r, a);
         }
     case 13:    // ycocg_dxt5
         {
