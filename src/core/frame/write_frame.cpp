@@ -94,9 +94,14 @@ bool write_frame_png(const const_frame& frame, const std::wstring& path)
                     array<const uint8_t> img_arr(store->data(), store->size(), store);
                     std::vector<array<const uint8_t>> img_vec;
                     img_vec.push_back(std::move(img_arr));
-                    // GPU textures always store BGRA — build a matching descriptor
+                    // Use the frame's own pixel format — it encodes the correct
+                    // channel interpretation for whatever wrote the texture:
+                    //   OGL+CUDA: glGetTextureImage(GL_BGRA) applies R↔B swap on
+                    //             internal channels, producing RGBA in memory → frame says rgba.
+                    //   Vulkan:   raw cudaMemcpy gives BGRA in memory → frame says bgra.
                     auto tex_depth = tex->tex_is_hbd() ? common::bit_depth::bit16 : common::bit_depth::bit8;
-                    pixel_format_desc pfd(pixel_format::bgra);
+                    auto readback_fmt = frame.pixel_format_desc().format;
+                    pixel_format_desc pfd(readback_fmt);
                     pfd.planes.push_back(pixel_format_desc::plane(width, height, 4, tex_depth));
                     const_frame readback_frame(frame.stream_tag(), std::move(img_vec),
                                               frame.audio_data(), pfd, nullptr);
@@ -239,15 +244,29 @@ bool write_frame_png(const const_frame& frame, const std::wstring& path)
                 return false;
             }
 
-            // Write 16-bit PNG via lodepng
+            // Write 16-bit PNG via lodepng (force RGBA output for viewer compatibility)
             auto output_path = std::filesystem::path(path);
             std::filesystem::create_directories(output_path.parent_path());
             auto path_u8 = u8(path);
-            unsigned error = lodepng::encode(path_u8, rgba16,
+
+            lodepng::State state;
+            state.info_raw.colortype    = LCT_RGBA;
+            state.info_raw.bitdepth     = 16;
+            state.info_png.color.colortype = LCT_RGBA;
+            state.info_png.color.bitdepth  = 16;
+            state.encoder.auto_convert  = 0; // disable: always output RGBA16
+
+            std::vector<unsigned char> png;
+            unsigned error = lodepng::encode(png, rgba16,
                                             static_cast<unsigned>(width), static_cast<unsigned>(height),
-                                            LCT_RGBA, 16);
+                                            state);
             if (error) {
                 CASPAR_LOG(warning) << L"write_frame_png: lodepng error " << error << L" for " << path;
+                return false;
+            }
+            error = lodepng::save_file(png, path_u8);
+            if (error) {
+                CASPAR_LOG(warning) << L"write_frame_png: lodepng save error " << error << L" for " << path;
                 return false;
             }
 

@@ -99,7 +99,17 @@ class image_renderer
     {
     }
 
-    void set_cpu_readback_needed(bool needed) { cpu_readback_needed_.store(needed, std::memory_order_relaxed); }
+    void set_cpu_readback_needed(bool needed)
+    {
+        bool was = cpu_readback_needed_.exchange(needed, std::memory_order_relaxed);
+        // When transitioning from GPU-only to CPU-needed (e.g. IMAGE consumer
+        // added dynamically), invalidate the still-frame cache so the next
+        // render actually performs the GPU→CPU readback instead of returning
+        // the stale empty buffer from the previous cached result.
+        if (needed && !was) {
+            prev_fingerprint_.clear();
+        }
+    }
 
     std::future<std::tuple<std::shared_future<array<const std::uint8_t>>, std::shared_ptr<core::texture>>>
     operator()(std::vector<layer> layers, const core::video_format_desc& format_desc)

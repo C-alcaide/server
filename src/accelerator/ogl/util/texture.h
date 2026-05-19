@@ -66,6 +66,8 @@ class texture final : public core::texture
     /// Called automatically by ogl::device::create_texture().
     void set_device(std::weak_ptr<device> dev);
 
+    bool tex_is_hbd() const override { return depth() != common::bit_depth::bit8; }
+
     /// Read pixel data from the GPU texture (dispatches to GL thread).
     /// Zero-cost during normal playback — only called by write_frame_png.
     std::vector<std::uint8_t> read_pixels() const override;
