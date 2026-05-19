@@ -33,6 +33,7 @@
 #include <boost/algorithm/string.hpp>
 #include <boost/date_time/posix_time/posix_time.hpp>
 
+#include <algorithm>
 #include <fstream>
 #include <utility>
 #include <vector>
@@ -104,12 +105,16 @@ struct image_consumer : public core::frame_consumer
                 if (!codec)
                     FF_RET(AVERROR(EINVAL), "avcodec_find_encoder");
 
+                // Detect bit depth from the frame's pixel format descriptor
+                const bool is_16bit = !frame.pixel_format_desc().planes.empty() &&
+                                      frame.pixel_format_desc().planes[0].depth == common::bit_depth::bit16;
+
                 auto ctx = std::shared_ptr<AVCodecContext>(avcodec_alloc_context3(codec),
                                                            [](AVCodecContext* ptr) { avcodec_free_context(&ptr); });
 
                 ctx->width     = static_cast<int>(frame.width());
                 ctx->height    = static_cast<int>(frame.height());
-                ctx->pix_fmt   = AV_PIX_FMT_RGBA;
+                ctx->pix_fmt   = is_16bit ? AV_PIX_FMT_RGBA64BE : AV_PIX_FMT_RGBA;
                 ctx->time_base = {1, 1};
                 ctx->framerate = {0, 1};
 
@@ -118,16 +123,45 @@ struct image_consumer : public core::frame_consumer
                 auto av_frame         = ffmpeg::alloc_frame();
                 av_frame->width       = static_cast<int>(frame.width());
                 av_frame->height      = static_cast<int>(frame.height());
-                av_frame->format      = AV_PIX_FMT_BGRA;
                 av_frame->pts         = 0;
-                av_frame->linesize[0] = static_cast<int>(frame.width()) * 4;
-                av_frame->data[0]     = const_cast<uint8_t*>(frame.image_data(0).data());
 
-                // The png encoder requires RGB ordering, the mixer producers BGR.
-                auto av_frame2 = convert_image_frame(av_frame, AV_PIX_FMT_RGBA);
-                // Also straighten the alpha, as png is always straight, and the mixer produces premultiplied
-                image_view<bgra_pixel> original_view(av_frame2->data[0], av_frame2->width, av_frame2->height);
-                unmultiply(original_view);
+                if (is_16bit) {
+                    av_frame->format      = AV_PIX_FMT_BGRA64LE;
+                    av_frame->linesize[0] = static_cast<int>(frame.width()) * 8;
+                } else {
+                    av_frame->format      = AV_PIX_FMT_BGRA;
+                    av_frame->linesize[0] = static_cast<int>(frame.width()) * 4;
+                }
+                av_frame->data[0] = const_cast<uint8_t*>(frame.image_data(0).data());
+
+                // The png encoder requires RGB ordering, the mixer produces BGR.
+                auto av_frame2 = convert_image_frame(
+                    av_frame, is_16bit ? AV_PIX_FMT_RGBA64BE : AV_PIX_FMT_RGBA);
+
+                // Straighten alpha — PNG stores straight alpha, mixer produces premultiplied.
+                if (is_16bit) {
+                    auto*       data   = reinterpret_cast<uint16_t*>(av_frame2->data[0]);
+                    const int   stride = av_frame2->linesize[0] / 2; // in uint16_t units
+                    const int   w      = av_frame2->width;
+                    const int   h      = av_frame2->height;
+                    for (int y = 0; y < h; ++y) {
+                        uint16_t* row = data + y * stride;
+                        for (int x = 0; x < w; ++x) {
+                            uint16_t& r = row[x * 4 + 0];
+                            uint16_t& g = row[x * 4 + 1];
+                            uint16_t& b = row[x * 4 + 2];
+                            uint16_t  a = row[x * 4 + 3];
+                            if (a != 0 && a != 65535) {
+                                r = static_cast<uint16_t>(std::min(65535, static_cast<int>(r) * 65535 / a));
+                                g = static_cast<uint16_t>(std::min(65535, static_cast<int>(g) * 65535 / a));
+                                b = static_cast<uint16_t>(std::min(65535, static_cast<int>(b) * 65535 / a));
+                            }
+                        }
+                    }
+                } else {
+                    image_view<bgra_pixel> original_view(av_frame2->data[0], av_frame2->width, av_frame2->height);
+                    unmultiply(original_view);
+                }
 
                 FF(avcodec_send_frame(ctx.get(), av_frame2.get()));
                 FF(avcodec_send_frame(ctx.get(), nullptr));
@@ -174,9 +208,6 @@ spl::shared_ptr<core::frame_consumer> create_consumer(const std::vector<std::wst
 {
     if (params.empty() || !boost::iequals(params.at(0), L"IMAGE"))
         return core::frame_consumer::empty();
-
-    if (channel_info.depth != common::bit_depth::bit8)
-        CASPAR_THROW_EXCEPTION(caspar_exception() << msg_info("Image consumer only supports 8-bit color depth."));
 
     std::wstring filename;
 
