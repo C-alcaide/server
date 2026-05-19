@@ -749,7 +749,7 @@ struct hap_producer_impl final : public core::frame_producer
                     auto audio_store = std::make_shared<std::vector<int32_t>>(std::move(frame_audio));
                     array<const int32_t> audio_arr(audio_store->data(), audio_store->size(), std::move(audio_store));
 
-                    auto wrapper = std::make_shared<accelerator::vulkan::texture_wrapper>(vk_tex);
+                    auto wrapper = std::make_shared<accelerator::vulkan::VkReadableTextureWrapper>(vk_tex, vk_device_);
 
                     df = core::draw_frame(core::const_frame(
                         this,

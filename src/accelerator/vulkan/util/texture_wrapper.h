@@ -26,7 +26,9 @@
 #include <core/frame/frame.h>
 
 #include <atomic>
+#include <cstdint>
 #include <memory>
+#include <vector>
 
 namespace caspar { namespace accelerator { namespace vulkan {
 
@@ -38,7 +40,7 @@ namespace caspar { namespace accelerator { namespace vulkan {
  * texture units. Consumers that need GPU-native access should dynamic_cast
  * to texture_wrapper and call vk_texture() instead.
  */
-class texture_wrapper final : public core::texture
+class texture_wrapper : public core::texture
 {
   public:
     explicit texture_wrapper(std::shared_ptr<vulkan::texture> tex)
@@ -90,12 +92,37 @@ class texture_wrapper final : public core::texture
         }
     }
 
-  private:
+  protected:
     std::shared_ptr<vulkan::texture>      tex_;
     std::function<void()>                 wait_fn_;
     void*                                 sem_handle_ = nullptr;
     uint64_t                              sem_value_  = 0;
     mutable std::atomic_flag              wait_completed_ = ATOMIC_FLAG_INIT;
+};
+
+// Forward declaration
+class device;
+
+/**
+ * Extends texture_wrapper with on-demand GPU readback via the Vulkan device.
+ * Used by producers that write directly to VK textures without CUDA
+ * (e.g. hap_producer).  read_pixels() uses vulkan::device::copy_async()
+ * which is zero-cost during normal playback.
+ */
+class VkReadableTextureWrapper : public texture_wrapper
+{
+  public:
+    VkReadableTextureWrapper(std::shared_ptr<vulkan::texture> tex,
+                             std::shared_ptr<device>          vk_dev)
+        : texture_wrapper(std::move(tex))
+        , vk_device_(std::move(vk_dev))
+    {
+    }
+
+    std::vector<std::uint8_t> read_pixels() const override;
+
+  private:
+    std::shared_ptr<device> vk_device_;
 };
 
 }}} // namespace caspar::accelerator::vulkan

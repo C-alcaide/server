@@ -157,10 +157,8 @@ class CudaVkTexture
     bool is_free() const { return vk_tex_.use_count() == 1; }
 
     /// Return a core::texture wrapper for embedding in const_frame.
-    std::shared_ptr<core::texture> core_texture() const
-    {
-        return std::make_shared<accelerator::vulkan::texture_wrapper>(vk_tex_);
-    }
+    /// The returned wrapper supports on-demand GPU→CPU readback via read_pixels().
+    std::shared_ptr<core::texture> core_texture() const;
 
   private:
     static cudaChannelFormatDesc make_channel_desc(int stride, bool is_16bit)
@@ -185,6 +183,60 @@ class CudaVkTexture
     cudaMipmappedArray_t                          mipmap_;
     cudaArray_t                                   array_;
 };
+
+/// A texture_wrapper subclass that supports on-demand GPU→CPU pixel readback
+/// via cudaMemcpy2DFromArray from the persistent CUDA array.
+/// Zero cost during normal playback — read_pixels() is only called by consumers
+/// that explicitly need CPU data (e.g. PRINT RAW / write_frame_png).
+class CudaVkReadableWrapper final : public accelerator::vulkan::texture_wrapper
+{
+  public:
+    CudaVkReadableWrapper(std::shared_ptr<accelerator::vulkan::texture> vk_tex,
+                          cudaArray_t cuda_array, int width, int height, int stride, bool is_16bit)
+        : texture_wrapper(std::move(vk_tex))
+        , cuda_array_(cuda_array)
+        , width_(width)
+        , height_(height)
+        , stride_(stride)
+        , is_16bit_(is_16bit)
+    {
+    }
+
+    std::vector<std::uint8_t> read_pixels() const override
+    {
+        if (!cuda_array_ || width_ <= 0 || height_ <= 0)
+            return {};
+
+        const size_t bpp       = static_cast<size_t>(stride_) * (is_16bit_ ? 2 : 1);
+        const size_t row_bytes = static_cast<size_t>(width_) * bpp;
+        const size_t total     = row_bytes * static_cast<size_t>(height_);
+
+        std::vector<std::uint8_t> buf(total);
+        cudaError_t err = cudaMemcpy2DFromArray(
+            buf.data(), row_bytes, cuda_array_, 0, 0, row_bytes, height_, cudaMemcpyDeviceToHost);
+        if (err != cudaSuccess) {
+            CASPAR_LOG(warning) << L"[CudaVkReadableWrapper] cudaMemcpy2DFromArray failed: "
+                                << cudaGetErrorString(err);
+            return {};
+        }
+        return buf;
+    }
+
+  private:
+    cudaArray_t cuda_array_;
+    int         width_;
+    int         height_;
+    int         stride_;
+    bool        is_16bit_;
+};
+
+inline std::shared_ptr<core::texture> CudaVkTexture::core_texture() const
+{
+    return std::make_shared<CudaVkReadableWrapper>(
+        vk_tex_, array_,
+        vk_tex_->width(), vk_tex_->height(), vk_tex_->stride(),
+        vk_tex_->depth() == common::bit_depth::bit16);
+}
 
 } // namespace caspar
 

@@ -91,13 +91,20 @@ set(HEADERS
 		consumer/channel_info.h
 )
 
-casparcg_add_library(core SOURCES ${SOURCES} ${HEADERS})
+casparcg_add_library(core SOURCES ${SOURCES} ${HEADERS}
+	${tinygltf_SOURCE_DIR}/examples/common/lodepng.cpp
+)
+set_source_files_properties(${tinygltf_SOURCE_DIR}/examples/common/lodepng.cpp PROPERTIES
+	COMPILE_FLAGS "/w"
+	SKIP_PRECOMPILE_HEADERS ON
+)
 target_include_directories(core PRIVATE ..)
 target_precompile_headers(core PRIVATE StdAfx.h)
 target_link_libraries(core PRIVATE common GLEW::glew sfml-graphics)
 target_include_directories(core PRIVATE
 	${tinygltf_SOURCE_DIR}
 	${tinyobjloader_SOURCE_DIR}
+	${tinygltf_SOURCE_DIR}/examples/common
 )
 
 source_group(sources ./*)

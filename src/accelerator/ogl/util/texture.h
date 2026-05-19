@@ -23,9 +23,13 @@
 
 #include <common/bit_depth.h>
 #include <core/frame/frame.h>
+#include <cstdint>
 #include <memory>
+#include <vector>
 
 namespace caspar { namespace accelerator { namespace ogl {
+
+class device;
 
 class texture final : public core::texture
 {
@@ -57,6 +61,14 @@ class texture final : public core::texture
     void              set_depth(common::bit_depth depth);
     int               size() const;
     int               id() const;
+
+    /// Enable on-demand GPU readback for PRINT RAW.
+    /// Called automatically by ogl::device::create_texture().
+    void set_device(std::weak_ptr<device> dev);
+
+    /// Read pixel data from the GPU texture (dispatches to GL thread).
+    /// Zero-cost during normal playback — only called by write_frame_png.
+    std::vector<std::uint8_t> read_pixels() const override;
 
   private:
     struct impl;

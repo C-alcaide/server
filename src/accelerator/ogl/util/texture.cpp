@@ -21,6 +21,7 @@
 #include "texture.h"
 
 #include "buffer.h"
+#include "device.h"
 
 #include <common/bit_depth.h>
 #include <common/gl/gl_check.h>
@@ -42,6 +43,7 @@ struct texture::impl
     GLsizei           stride_ = 0;
     GLsizei           size_   = 0;
     common::bit_depth depth_;
+    std::weak_ptr<device> device_;
 
     impl(const impl&)            = delete;
     impl& operator=(const impl&) = delete;
@@ -152,5 +154,25 @@ common::bit_depth texture::depth() const { return impl_->depth_; }
 void              texture::set_depth(common::bit_depth depth) { impl_->depth_ = depth; }
 int               texture::size() const { return impl_->size_; }
 int               texture::id() const { return impl_->id_; }
+
+void texture::set_device(std::weak_ptr<device> dev) { impl_->device_ = std::move(dev); }
+
+std::vector<std::uint8_t> texture::read_pixels() const
+{
+    auto dev = impl_->device_.lock();
+    if (!dev)
+        return {};
+
+    const GLuint tex_id    = impl_->id_;
+    const int    s         = impl_->stride_;
+    const int    depth_idx = impl_->depth_ == common::bit_depth::bit8 ? 0 : 1;
+    const int    total     = impl_->size_;
+
+    std::vector<std::uint8_t> result(total);
+    dev->dispatch_sync([&] {
+        GL(glGetTextureImage(tex_id, 0, FORMAT[s], TYPE[depth_idx][s], total, result.data()));
+    });
+    return result;
+}
 
 }}} // namespace caspar::accelerator::ogl

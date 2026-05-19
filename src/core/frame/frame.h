@@ -37,6 +37,10 @@ class texture
     virtual int                tex_height() const { return 0; }
     /// True if the texture uses 16-bit components.
     virtual bool               tex_is_hbd() const { return false; }
+    /// On-demand GPU→CPU readback. Returns pixel data or empty if unsupported.
+    /// Only called by consumers that explicitly need CPU pixels (e.g. PRINT RAW).
+    /// Default: returns empty (no readback capability).
+    virtual std::vector<std::uint8_t> read_pixels() const { return {}; }
 };
 
 class mutable_frame final

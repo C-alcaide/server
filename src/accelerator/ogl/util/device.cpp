@@ -397,7 +397,9 @@ device::device()
 device::~device() {}
 std::shared_ptr<texture> device::create_texture(int width, int height, int stride, common::bit_depth depth)
 {
-    return impl_->create_texture(width, height, stride, depth, true);
+    auto tex = impl_->create_texture(width, height, stride, depth, true);
+    tex->set_device(shared_from_this());
+    return tex;
 }
 array<uint8_t> device::create_array(int size) { return impl_->create_array(size); }
 std::future<std::shared_ptr<texture>>

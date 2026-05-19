@@ -53,6 +53,7 @@ IF(ENABLE_VULKAN)
 		vulkan/util/renderpass.cpp
 		vulkan/util/matrix.cpp
 		vulkan/util/transforms.cpp
+		vulkan/util/texture_wrapper.cpp
 	)
 	set(VULKAN_HEADERS
 		vulkan/image/image_mixer.h
