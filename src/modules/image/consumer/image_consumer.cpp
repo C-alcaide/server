@@ -68,6 +68,7 @@ namespace caspar::image {
 struct image_consumer : public core::frame_consumer
 {
     const std::wstring filename_;
+    int                frames_waited_{0};
 
     explicit image_consumer(std::wstring filename)
         : filename_(std::move(filename))
@@ -82,6 +83,20 @@ struct image_consumer : public core::frame_consumer
 
     std::future<bool> send(core::video_field field, core::const_frame frame) override
     {
+        // The vulkan mixer's 1-frame pipeline delay means the first frame
+        // after this consumer is added may have empty CPU readback data
+        // (rendered before cpu_readback_needed was set).  Skip it and wait
+        // for the next tick which will have valid pixel data.
+        const auto& data = frame.image_data(0);
+        if (data.data() == nullptr || data.size() == 0) {
+            if (++frames_waited_ < 4) {
+                return make_ready_future(true);  // stay alive, wait for valid frame
+            }
+            // Give up after 4 empty frames to avoid hanging forever
+            CASPAR_LOG(warning) << L"[image_consumer] No valid CPU frame data after "
+                                << frames_waited_ << L" ticks — capturing empty frame.";
+        }
+
         auto filename = filename_;
 
         std::thread async([frame, filename] {
