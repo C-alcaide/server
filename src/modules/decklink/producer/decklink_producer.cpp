@@ -428,7 +428,7 @@ struct Decoder
     }
 };
 
-core::color_space get_color_space(IDeckLinkVideoInputFrame* video)
+core::color_space get_color_space(IDeckLinkVideoInputFrame* video, core::color_space fallback = core::color_space::bt709)
 {
     IDeckLinkVideoFrameMetadataExtensions* md = nullptr;
 
@@ -441,13 +441,15 @@ core::color_space get_color_space(IDeckLinkVideoInputFrame* video)
             } else if (color_space == bmdColorspaceRec601) {
                 return core::color_space::bt601;
             }
+            return core::color_space::bt709;
         }
     }
 
-    return core::color_space::bt709;
+    // Metadata not available (typical for SDI inputs) — use caller's fallback.
+    return fallback;
 }
 
-core::color_transfer get_color_transfer(IDeckLinkVideoInputFrame* video)
+core::color_transfer get_color_transfer(IDeckLinkVideoInputFrame* video, core::color_transfer fallback = core::color_transfer::sdr)
 {
     IDeckLinkVideoFrameMetadataExtensions* md = nullptr;
 
@@ -460,10 +462,12 @@ core::color_transfer get_color_transfer(IDeckLinkVideoInputFrame* video)
             } else if (eotf == 3) { // CEA 861.3: HLG (ARIB STD-B67)
                 return core::color_transfer::hlg;
             }
+            return core::color_transfer::sdr;
         }
     }
 
-    return core::color_transfer::sdr;
+    // Metadata not available (typical for SDI inputs) — use caller's fallback.
+    return fallback;
 }
 
 com_ptr<IDeckLinkDisplayMode> get_display_mode(const com_iface_ptr<IDeckLinkInput>& device,
@@ -1039,8 +1043,11 @@ class decklink_producer : public IDeckLinkInputCallback
 
             BMDTimeValue         in_video_pts   = 0LL;
             BMDTimeValue         in_audio_pts   = 0LL;
-            core::color_space    color_space    = core::color_space::bt709;
-            core::color_transfer color_transfer = core::color_transfer::sdr;
+            // When hdr_ is set (10BIT mode), default to BT.2020/HLG since SDI inputs
+            // don't carry color metadata via IDeckLinkVideoFrameMetadataExtensions
+            // (that API only works for HDMI). The metadata will override if available.
+            core::color_space    color_space    = hdr_ ? core::color_space::bt2020 : core::color_space::bt709;
+            core::color_transfer color_transfer = hdr_ ? core::color_transfer::hlg  : core::color_transfer::sdr;
 
             if (video) {
                 const auto flags = video->GetFlags();
@@ -1058,8 +1065,8 @@ class decklink_producer : public IDeckLinkInputCallback
                     return S_OK;
                 }
 
-                color_space    = get_color_space(video);
-                color_transfer = get_color_transfer(video);
+                color_space    = get_color_space(video, color_space);
+                color_transfer = get_color_transfer(video, color_transfer);
                 auto src    = video_decoder_.decode(video, mode_);
 
                 BMDTimeValue duration;
