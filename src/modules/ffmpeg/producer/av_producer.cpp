@@ -988,6 +988,21 @@ struct Filter
                     AVFilterContext* source = nullptr;
                     FF(avfilter_graph_create_filter(
                         &source, avfilter_get_by_name("buffer"), name.c_str(), args.c_str(), nullptr, graph.get()));
+
+                    // Set colorspace and color_range on the buffersrc so FFmpeg's filter
+                    // graph knows the incoming frame properties upfront.  Without this the
+                    // filter context starts as "csp: unknown range: unknown" and emits a
+                    // warning on the first frame that carries proper metadata.
+                    if (st->colorspace != AVCOL_SPC_UNSPECIFIED || st->color_range != AVCOL_RANGE_UNSPECIFIED) {
+                        AVBufferSrcParameters* par = av_buffersrc_parameters_alloc();
+                        if (par) {
+                            par->color_space = st->colorspace;
+                            par->color_range = st->color_range;
+                            av_buffersrc_parameters_set(source, par);
+                            av_free(par);
+                        }
+                    }
+
                     FF(avfilter_link(source, 0, cur->filter_ctx, cur->pad_idx));
                     sources.emplace(index, source);
                 } else if (st->codec_type == AVMEDIA_TYPE_AUDIO) {
@@ -1154,6 +1169,11 @@ struct AVProducer::Impl
     Filter                 audio_filter_;
 
     std::map<int, std::vector<AVFilterContext*>> sources_;
+
+    // Stream-level color metadata from the container/decoder, used as fallback
+    // when individual decoded frames have UNSPECIFIED colorspace/transfer.
+    AVColorSpace                     stream_color_space_ = AVCOL_SPC_UNSPECIFIED;
+    AVColorTransferCharacteristic    stream_color_trc_   = AVCOL_TRC_UNSPECIFIED;
 
 #ifdef _WIN32
     // D3D11→GL GPU-direct video path (bypasses filter graph + CPU transfer)
@@ -1324,6 +1344,10 @@ struct AVProducer::Impl
             for (auto n = 0UL; n < input_->nb_streams; ++n) {
                 auto st = input_->streams[n];
                 if (st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
+                    // Capture stream-level color metadata as fallback for frames
+                    // where the decoder leaves colorspace/transfer unspecified.
+                    stream_color_space_ = static_cast<AVColorSpace>(st->codecpar->color_space);
+                    stream_color_trc_   = static_cast<AVColorTransferCharacteristic>(st->codecpar->color_trc);
                     if (st->duration != AV_NOPTS_VALUE) {
                         v_dur = av_rescale_q(st->duration, st->time_base, {1, AV_TIME_BASE});
                     } else if (input_->duration != AV_NOPTS_VALUE) {
@@ -1467,7 +1491,7 @@ struct AVProducer::Impl
                             // We hit EOF while fast-forwarding to a seek target (the target was beyond the video).
                             // Render and push the very last dropped frame so we don't output a black screen.
                             last_dropped_frame.frame = core::draw_frame(
-                                make_frame(this, *frame_factory_, last_dropped_frame.video, last_dropped_frame.audio, get_color_space(last_dropped_frame.video), scale_mode_, false, get_color_transfer(last_dropped_frame.video)));
+                                make_frame(this, *frame_factory_, last_dropped_frame.video, last_dropped_frame.audio, get_color_space(last_dropped_frame.video, stream_color_space_), scale_mode_, false, get_color_transfer(last_dropped_frame.video, stream_color_trc_)));
                             last_dropped_frame.frame_count = frame_count_++;
 
                             boost::unique_lock<boost::mutex> buffer_lock(buffer_mutex_);
@@ -1661,11 +1685,11 @@ struct AVProducer::Impl
                         }
                         return core::const_frame(
                             make_frame(this, *frame_factory_, frame.video, frame.audio,
-                                get_color_space(frame.video), scale_mode_, false,
-                                get_color_transfer(frame.video)));
+                                get_color_space(frame.video, stream_color_space_), scale_mode_, false,
+                                get_color_transfer(frame.video, stream_color_trc_)));
                     }()
 #else
-                    make_frame(this, *frame_factory_, frame.video, frame.audio, get_color_space(frame.video), scale_mode_, false, get_color_transfer(frame.video))
+                    make_frame(this, *frame_factory_, frame.video, frame.audio, get_color_space(frame.video, stream_color_space_), scale_mode_, false, get_color_transfer(frame.video, stream_color_trc_))
 #endif
                 );
 
@@ -2269,6 +2293,19 @@ struct AVProducer::Impl
             auto frame = it->second.pop();
             if (!frame) {
                 continue;
+            }
+
+            // Update stream-level color metadata from the first decoded frame
+            // that carries valid properties.  Codecs like ProRes store color
+            // information in the bitstream frame header rather than the container,
+            // so codecpar fields are UNSPECIFIED while decoded frames have correct
+            // values.  Updating the fallback here ensures get_color_space() returns
+            // the right matrix even if the filter graph strips per-frame metadata.
+            if (frame->colorspace != AVCOL_SPC_UNSPECIFIED && stream_color_space_ == AVCOL_SPC_UNSPECIFIED) {
+                stream_color_space_ = static_cast<AVColorSpace>(frame->colorspace);
+            }
+            if (frame->color_trc != AVCOL_TRC_UNSPECIFIED && stream_color_trc_ == AVCOL_TRC_UNSPECIFIED) {
+                stream_color_trc_ = static_cast<AVColorTransferCharacteristic>(frame->color_trc);
             }
 
             for (auto& source : p.second) {

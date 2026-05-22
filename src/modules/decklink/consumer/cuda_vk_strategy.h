@@ -46,8 +46,10 @@ class cuda_vk_strategy final : public format_strategy
     /// @param is_hdr       True for HDR v210 output, false for SDR BGRA
     /// @param use_bt2020   True for BT.2020 color matrix, false for BT.709
     /// @param fallback     CPU strategy to use as fallback
+    /// @param needs_v210   True when pixel-format=yuv (always use V210 path)
     cuda_vk_strategy(bool is_hdr, bool use_bt2020,
-                     spl::shared_ptr<format_strategy> fallback);
+                     spl::shared_ptr<format_strategy> fallback,
+                     bool needs_v210 = false);
     ~cuda_vk_strategy() override;
 
     BMDPixelFormat        get_pixel_format() override;
@@ -69,6 +71,7 @@ class cuda_vk_strategy final : public format_strategy
 /// Returns nullptr if CUDA is not available.
 spl::shared_ptr<format_strategy> try_create_cuda_vk_strategy(
     bool is_hdr, bool use_bt2020,
-    spl::shared_ptr<format_strategy> fallback);
+    spl::shared_ptr<format_strategy> fallback,
+    bool needs_v210 = false);
 
 }} // namespace caspar::decklink

@@ -89,10 +89,12 @@ void main()
             pixel = vec4(0.0);
         }
 
-        // UNORM → 10-bit [0..1023]
-        R[i] = int(pixel.r * 1023.0 + 0.5);
+        // The mixer's fragment shader writes fragColor=col.bgra, so the
+        // render attachment stores BGRA in what is formally an RGBA format.
+        // texelFetch returns .r = Blue (position 0), .b = Red (position 2).
+        R[i] = int(pixel.b * 1023.0 + 0.5);
         G[i] = int(pixel.g * 1023.0 + 0.5);
-        B[i] = int(pixel.b * 1023.0 + 0.5);
+        B[i] = int(pixel.r * 1023.0 + 0.5);
     }
 
     // Convert to YCbCr

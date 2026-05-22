@@ -110,17 +110,19 @@ __global__ void k_vk_surface_to_v210(
             if (is_16bit) {
                 ushort4 pixel;
                 surf2Dread(&pixel, surf, sx * (int)sizeof(ushort4), sy);
-                // RGBA16Unorm [0..65535] → 10-bit [0..1023]
-                R[i] = pixel.x >> 6;
+                // The mixer's fragment shader writes fragColor=col.bgra, so the
+                // render attachment stores BGRA in what is formally RGBA format.
+                // surf2Dread returns pixel.x = Blue (position 0), pixel.z = Red (position 2).
+                R[i] = pixel.z >> 6;
                 G[i] = pixel.y >> 6;
-                B[i] = pixel.z >> 6;
+                B[i] = pixel.x >> 6;
             } else {
                 uchar4 pixel;
                 surf2Dread(&pixel, surf, sx * (int)sizeof(uchar4), sy);
-                // RGBA8 [0..255] → 10-bit [0..1023]
-                R[i] = pixel.x << 2;
+                // Same BGRA convention for 8-bit: pixel.x = Blue, pixel.z = Red.
+                R[i] = pixel.z << 2;
                 G[i] = pixel.y << 2;
-                B[i] = pixel.z << 2;
+                B[i] = pixel.x << 2;
             }
         } else {
             R[i] = 0; G[i] = 0; B[i] = 0;
@@ -186,11 +188,12 @@ __global__ void k_vk_surface_to_bgra8(
         pixel = make_uchar4(0, 0, 0, 255);
     }
 
-    // VK texture is RGBA, DeckLink expects BGRA
+    // Texture stores BGRA (mixer writes fragColor=col.bgra), DeckLink expects BGRA.
+    // pixel.x = B, pixel.y = G, pixel.z = R — already in correct order for bmdFormat8BitBGRA.
     uint8_t* out = d_bgra + ((size_t)y * dst_w + x) * 4;
-    out[0] = pixel.z; // B
+    out[0] = pixel.x; // B
     out[1] = pixel.y; // G
-    out[2] = pixel.x; // R
+    out[2] = pixel.z; // R
     out[3] = pixel.w; // A
 }
 

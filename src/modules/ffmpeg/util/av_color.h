@@ -35,35 +35,47 @@ extern "C" {
 
 namespace caspar { namespace ffmpeg {
 
-inline core::color_space get_color_space(const std::shared_ptr<AVFrame>& video)
+inline core::color_space get_color_space(const std::shared_ptr<AVFrame>& video,
+                                         AVColorSpace fallback = AVCOL_SPC_UNSPECIFIED)
 {
+    AVColorSpace cs = AVCOL_SPC_UNSPECIFIED;
     if (video) {
-        switch (video->colorspace) {
-            case AVCOL_SPC_BT2020_NCL:
-            case AVCOL_SPC_BT2020_CL:
-                return core::color_space::bt2020;
-            case AVCOL_SPC_BT470BG:
-            case AVCOL_SPC_SMPTE170M:
-            case AVCOL_SPC_SMPTE240M:
-                return core::color_space::bt601;
-            default:
-                break;
-        }
+        cs = static_cast<AVColorSpace>(video->colorspace);
+    }
+    if (cs == AVCOL_SPC_UNSPECIFIED) {
+        cs = fallback;
+    }
+    switch (cs) {
+        case AVCOL_SPC_BT2020_NCL:
+        case AVCOL_SPC_BT2020_CL:
+            return core::color_space::bt2020;
+        case AVCOL_SPC_BT470BG:
+        case AVCOL_SPC_SMPTE170M:
+        case AVCOL_SPC_SMPTE240M:
+            return core::color_space::bt601;
+        default:
+            break;
     }
     return core::color_space::bt709;
 }
 
-inline core::color_transfer get_color_transfer(const std::shared_ptr<AVFrame>& video)
+inline core::color_transfer get_color_transfer(const std::shared_ptr<AVFrame>& video,
+                                               AVColorTransferCharacteristic fallback = AVCOL_TRC_UNSPECIFIED)
 {
+    AVColorTransferCharacteristic trc = AVCOL_TRC_UNSPECIFIED;
     if (video) {
-        switch (video->color_trc) {
-            case AVCOL_TRC_SMPTE2084:
-                return core::color_transfer::pq;
-            case AVCOL_TRC_ARIB_STD_B67:
-                return core::color_transfer::hlg;
-            default:
-                break;
-        }
+        trc = static_cast<AVColorTransferCharacteristic>(video->color_trc);
+    }
+    if (trc == AVCOL_TRC_UNSPECIFIED) {
+        trc = fallback;
+    }
+    switch (trc) {
+        case AVCOL_TRC_SMPTE2084:
+            return core::color_transfer::pq;
+        case AVCOL_TRC_ARIB_STD_B67:
+            return core::color_transfer::hlg;
+        default:
+            break;
     }
     return core::color_transfer::sdr;
 }

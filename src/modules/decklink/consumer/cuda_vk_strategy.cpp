@@ -90,6 +90,7 @@ struct cuda_vk_strategy::impl
 {
     const bool use_bt2020_;
     const bool is_hdr_;
+    const bool needs_v210_;
 
     // CUDA resources
     int              cuda_device_ = 0;
@@ -185,9 +186,10 @@ struct cuda_vk_strategy::impl
     double   accum_launch_ms_  = 0.0;
     double   accum_total_ms_   = 0.0;
 
-    impl(bool is_hdr, bool use_bt2020, spl::shared_ptr<format_strategy> fallback)
+    impl(bool is_hdr, bool use_bt2020, spl::shared_ptr<format_strategy> fallback, bool needs_v210)
         : use_bt2020_(use_bt2020)
         , is_hdr_(is_hdr)
+        , needs_v210_(needs_v210)
         , fallback_(std::move(fallback))
     {
         // Use the same CUDA device as the primary GPU (device 0).
@@ -695,12 +697,14 @@ struct cuda_vk_strategy::impl
 // ===========================================================================
 
 cuda_vk_strategy::cuda_vk_strategy(bool is_hdr, bool use_bt2020,
-                                   spl::shared_ptr<format_strategy> fallback)
-    : impl_(std::make_unique<impl>(is_hdr, use_bt2020, std::move(fallback)))
+                                   spl::shared_ptr<format_strategy> fallback,
+                                   bool needs_v210)
+    : impl_(std::make_unique<impl>(is_hdr, use_bt2020, std::move(fallback), needs_v210))
 {
     CASPAR_LOG(info) << L"[cuda_vk_strategy] GPU-direct decklink: "
                      << (is_hdr ? L"HDR " : L"SDR ")
                      << (use_bt2020 ? L"BT.2020" : L"BT.709")
+                     << (needs_v210 ? L" V210" : L"")
                      << L" v210 packing on CUDA";
 }
 
@@ -708,12 +712,12 @@ cuda_vk_strategy::~cuda_vk_strategy() = default;
 
 BMDPixelFormat cuda_vk_strategy::get_pixel_format()
 {
-    return impl_->is_hdr_ ? bmdFormat10BitYUV : impl_->fallback_->get_pixel_format();
+    return (impl_->is_hdr_ || impl_->needs_v210_) ? bmdFormat10BitYUV : impl_->fallback_->get_pixel_format();
 }
 
 int cuda_vk_strategy::get_row_bytes(int width)
 {
-    if (impl_->is_hdr_) {
+    if (impl_->is_hdr_ || impl_->needs_v210_) {
         return ((width + 47) / 48) * 128;
     }
     return impl_->fallback_->get_row_bytes(width);
@@ -737,7 +741,7 @@ std::shared_ptr<void> cuda_vk_strategy::convert_frame_for_port(
     if (frame1 && field_dominance == bmdProgressiveFrame) {
         try {
             std::shared_ptr<void> result;
-            if (impl_->is_hdr_) {
+            if (impl_->is_hdr_ || impl_->needs_v210_) {
                 result = impl_->convert_v210(channel_format_desc, decklink_format_desc, config, frame1);
             } else {
                 result = impl_->convert_bgra(channel_format_desc, decklink_format_desc, config, frame1);
@@ -772,7 +776,8 @@ std::shared_ptr<void> cuda_vk_strategy::convert_frame_for_port(
 
 spl::shared_ptr<format_strategy> try_create_cuda_vk_strategy(
     bool is_hdr, bool use_bt2020,
-    spl::shared_ptr<format_strategy> fallback)
+    spl::shared_ptr<format_strategy> fallback,
+    bool needs_v210)
 {
     try {
         int device_count = 0;
@@ -782,7 +787,7 @@ spl::shared_ptr<format_strategy> try_create_cuda_vk_strategy(
         }
         return spl::make_shared_ptr(
             std::shared_ptr<format_strategy>(
-                std::make_shared<cuda_vk_strategy>(is_hdr, use_bt2020, std::move(fallback))));
+                std::make_shared<cuda_vk_strategy>(is_hdr, use_bt2020, std::move(fallback), needs_v210)));
     } catch (const std::exception& ex) {
         CASPAR_LOG(warning) << L"[cuda_vk_strategy] Init failed: " << ex.what() << L" — using CPU strategy";
         return fallback;

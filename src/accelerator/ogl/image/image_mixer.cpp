@@ -347,6 +347,8 @@ struct image_mixer::impl
 
     void set_target_color(core::color_space cs, core::color_transfer ct, bool auto_convert)
     {
+        CASPAR_LOG(trace) << L"[ogl_mixer] set_target_color cs=" << static_cast<int>(cs)
+                          << L" ct=" << static_cast<int>(ct) << L" auto=" << auto_convert;
         renderer_.target_color_space    = cs;
         renderer_.target_color_transfer = ct;
         renderer_.auto_color_convert    = auto_convert;

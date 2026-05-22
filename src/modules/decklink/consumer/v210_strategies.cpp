@@ -190,12 +190,12 @@ void pack_v210(const ARGBPixel<T>* src, const std::vector<int32_t>& color_matrix
         }
 
         if (x % 2 == 0) {
-            // Compute Cr
-            uint32_t v = 1025 << 19;
-            v += (int32_t)(color_matrix[6] * static_cast<int32_t>(r) + color_matrix[7] * static_cast<int32_t>(g) +
-                           color_matrix[8] * static_cast<int32_t>(b));
-            v >>= 20;
-            write_v210(v);
+            // Compute Cb (V210 word order: Cb, Y, Cr)
+            uint32_t u = 1025 << 19;
+            u += (int32_t)(color_matrix[3] * static_cast<int32_t>(r) + color_matrix[4] * static_cast<int32_t>(g) +
+                           color_matrix[5] * static_cast<int32_t>(b));
+            u >>= 20;
+            write_v210(u);
         }
 
         // Compute Y
@@ -206,12 +206,12 @@ void pack_v210(const ARGBPixel<T>* src, const std::vector<int32_t>& color_matrix
         write_v210(luma);
 
         if (x % 2 == 0) {
-            // Compute Cb
-            uint32_t u = 1025 << 19;
-            u += (int32_t)(color_matrix[3] * static_cast<int32_t>(r) + color_matrix[4] * static_cast<int32_t>(g) +
-                           color_matrix[5] * static_cast<int32_t>(b));
-            u >>= 20;
-            write_v210(u);
+            // Compute Cr (V210 word order: Cb, Y, Cr)
+            uint32_t v = 1025 << 19;
+            v += (int32_t)(color_matrix[6] * static_cast<int32_t>(r) + color_matrix[7] * static_cast<int32_t>(g) +
+                           color_matrix[8] * static_cast<int32_t>(b));
+            v >>= 20;
+            write_v210(v);
         }
     }
 }
@@ -220,24 +220,27 @@ class v210_strategy
     : public format_strategy
     , std::enable_shared_from_this<v210_strategy>
 {
-    std::vector<float> bt709{0.212639005871510,
+    // The mixer always outputs BGRA pixel format (fragment shader writes fragColor=col.bgra),
+    // so memory layout is [B, G, R, A].  The ARGBPixel struct reads them as .R=B, .G=G, .B=R.
+    // Matrix coefficients are reordered for BGR input: swap positions [0]↔[2], [3]↔[5], [6]↔[8].
+    std::vector<float> bt709{0.072192315360734,
                              0.715168678767756,
-                             0.072192315360734,
-                             -0.114592177555732,
+                             0.212639005871510,
+                             0.5,
                              -0.385407822444268,
-                             0.5,
-                             0.5,
+                             -0.114592177555732,
+                             -0.045844482962127,
                              -0.454155517037873,
-                             -0.045844482962127};
-    std::vector<float> bt2020{0.262700212011267,
+                             0.5};
+    std::vector<float> bt2020{0.059301716469862,
                               0.677998071518871,
-                              0.059301716469862,
-                              -0.139630430187157,
+                              0.262700212011267,
+                              0.5,
                               -0.360369569812843,
-                              0.5,
-                              0.5,
+                              -0.139630430187157,
+                              -0.040215470990186,
                               -0.459784529009814,
-                              -0.040215470990186};
+                              0.5};
 
     std::vector<int32_t> color_matrix;
     __m128i              black_batch;
@@ -271,10 +274,17 @@ class v210_strategy
                                                  const core::const_frame&       frame2,
                                                  BMDFieldDominance              field_dominance) override
     {
-        return bpc == 1 ? do_convert_frame_for_port<uint8_t>(
-                              channel_format_desc, decklink_format_desc, config, frame1, frame2, field_dominance)
-                        : do_convert_frame_for_port<uint16_t>(
-                              channel_format_desc, decklink_format_desc, config, frame1, frame2, field_dominance);
+        // Detect actual frame bit depth at runtime. The bpc member is set at construction
+        // based on config.hdr, but 16-bit channels with SDR or BT.709 transfer may still
+        // produce 16-bit frame data. Always check the frame's pixel format descriptor.
+        bool is_16bit = frame1 && !frame1.pixel_format_desc().planes.empty() &&
+                        frame1.pixel_format_desc().planes[0].depth != common::bit_depth::bit8;
+
+        return (is_16bit || bpc == 2)
+                   ? do_convert_frame_for_port<uint16_t>(
+                         channel_format_desc, decklink_format_desc, config, frame1, frame2, field_dominance)
+                   : do_convert_frame_for_port<uint8_t>(
+                         channel_format_desc, decklink_format_desc, config, frame1, frame2, field_dominance);
     }
 
   private:

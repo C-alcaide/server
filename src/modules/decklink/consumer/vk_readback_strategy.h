@@ -44,7 +44,8 @@ class vk_readback_strategy final : public format_strategy
   public:
     vk_readback_strategy(bool is_hdr, bool use_bt2020,
                          spl::shared_ptr<format_strategy> fallback,
-                         bool dma_only = false);
+                         bool dma_only = false,
+                         bool needs_v210 = false);
     ~vk_readback_strategy() override;
 
     BMDPixelFormat        get_pixel_format() override;
@@ -66,9 +67,11 @@ class vk_readback_strategy final : public format_strategy
 /// Returns the fallback if Vulkan is not available.
 /// If dma_only is true, uses vkCmdCopyImageToBuffer (DMA engine) instead of
 /// a compute shader, avoiding SM contention with CUDA workloads.
+/// If needs_v210 is true, always uses V210 compute shader (for YUV pixel format).
 spl::shared_ptr<format_strategy> try_create_vk_readback_strategy(
     bool is_hdr, bool use_bt2020,
     spl::shared_ptr<format_strategy> fallback,
-    bool dma_only = false);
+    bool dma_only = false,
+    bool needs_v210 = false);
 
 }} // namespace caspar::decklink

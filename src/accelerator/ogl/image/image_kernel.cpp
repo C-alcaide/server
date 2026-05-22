@@ -423,6 +423,16 @@ struct image_kernel::impl
         } else if (params.auto_color_convert &&
                    (params.pix_desc.color_space != params.target_color_space ||
                     params.pix_desc.color_transfer != params.target_color_transfer)) {
+            static int convert_count = 0;
+            convert_count++;
+            if (convert_count <= 3 || convert_count % 100 == 0) {
+                CASPAR_LOG(trace) << L"[ogl_kernel] auto_color_convert frame #" << convert_count
+                    << L" src_cs=" << static_cast<int>(params.pix_desc.color_space)
+                    << L" src_ct=" << static_cast<int>(params.pix_desc.color_transfer)
+                    << L" tgt_cs=" << static_cast<int>(params.target_color_space)
+                    << L" tgt_ct=" << static_cast<int>(params.target_color_transfer)
+                    << L" fmt=" << static_cast<int>(params.pix_desc.format);
+            }
             // Auto color conversion: source differs from channel output.
             // Map core enums to shader indices.
             auto gamut_index = [](core::color_space cs) -> int {
@@ -455,6 +465,16 @@ struct image_kernel::impl
                 shader_->set("exposure",          1.0f);
                 shader_->set_matrix3("input_to_working",  k_to_working[ig]);
                 shader_->set_matrix3("working_to_output", k_to_output[og]);
+                static bool logged_matrices = false;
+                if (!logged_matrices) {
+                    CASPAR_LOG(trace) << L"[ogl_kernel] GAMUT: ig=" << ig << L" og=" << og
+                        << L" it=" << it << L" ot=" << ot << L" tm=" << tm;
+                    CASPAR_LOG(trace) << L"[ogl_kernel] input_to_working[0..2]="
+                        << k_to_working[ig][0] << L"," << k_to_working[ig][1] << L"," << k_to_working[ig][2];
+                    CASPAR_LOG(trace) << L"[ogl_kernel] working_to_output[0..2]="
+                        << k_to_output[og][0] << L"," << k_to_output[og][1] << L"," << k_to_output[og][2];
+                    logged_matrices = true;
+                }
 
                 // BT.2408 luminance adaptation for auto conversion path
                 auto get_peak = [](int transfer) -> float {
@@ -469,6 +489,17 @@ struct image_kernel::impl
                 shader_->set("luminance_scale", src_peak / tgt_peak);
             }
         } else {
+            static int no_convert_count = 0;
+            no_convert_count++;
+            if (no_convert_count <= 5 || no_convert_count % 100 == 0) {
+                CASPAR_LOG(trace) << L"[ogl_kernel] NO_CONVERT frame #" << no_convert_count
+                    << L" auto=" << params.auto_color_convert
+                    << L" src_cs=" << static_cast<int>(params.pix_desc.color_space)
+                    << L" src_ct=" << static_cast<int>(params.pix_desc.color_transfer)
+                    << L" tgt_cs=" << static_cast<int>(params.target_color_space)
+                    << L" tgt_ct=" << static_cast<int>(params.target_color_transfer)
+                    << L" fmt=" << static_cast<int>(params.pix_desc.format);
+            }
             shader_->set("color_grading", false);
         }
 

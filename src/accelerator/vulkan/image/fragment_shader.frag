@@ -343,7 +343,7 @@ vec4 get_rgba_color(vec2 uv){
     case 7:{vec3 y3=texture(textures[PLANE0],uv).rrr*precision_factor[0];return vec4((y3-0.065)/0.859,1.0);}
     case 8: return vec4(texture(textures[PLANE0],uv).bgr*precision_factor[0],1.0);
     case 9: return vec4(texture(textures[PLANE0],uv).rgb*precision_factor[0],1.0);
-    case 10:{float y=texture(textures[PLANE0],uv).g*precision_factor[0];float cb=texture(textures[PLANE1],uv).b*precision_factor[1];float cr=texture(textures[PLANE1],uv).r*precision_factor[1];return ycbcra_to_rgba(y,cb,cr,1.0);}
+    case 10:{float y=texture(textures[PLANE0],uv).g*precision_factor[0];float cb=texture(textures[PLANE1],uv).r*precision_factor[1];float cr=texture(textures[PLANE1],uv).b*precision_factor[1];return ycbcra_to_rgba(y,cb,cr,1.0);}
     case 11:{float g=texture(textures[PLANE0],uv).r*precision_factor[0];float b=texture(textures[PLANE1],uv).r*precision_factor[1];float r=texture(textures[PLANE2],uv).r*precision_factor[2];return vec4(r,g,b,1.0);}
     case 12:{float g=texture(textures[PLANE0],uv).r*precision_factor[0];float b=texture(textures[PLANE1],uv).r*precision_factor[1];float r=texture(textures[PLANE2],uv).r*precision_factor[2];float a=texture(textures[PLANE3],uv).r*precision_factor[3];return vec4(r,g,b,a);}
     case 13:{vec4 c=texture(textures[PLANE0],uv);float scale=(c.b*(255.0/8.0))+1.0;float Co=(c.r-0.5)/scale;float Cg=(c.g-0.5)/scale;float Y=c.a;return vec4(clamp(Y+Co-Cg,0.0,1.0),clamp(Y+Cg,0.0,1.0),clamp(Y-Co-Cg,0.0,1.0),1.0);}
@@ -381,7 +381,7 @@ void main(){
     if(flag(F_SHARPEN)){vec2 su=buv;if(flag(F_360)){su=get_equirect_uv(buv);if(flag(F_FLIP_H))su.s=1.0-su.s;if(flag(F_FLIP_V))su.t=1.0-su.t;}else if(flag(F_CURVED)){su=apply_curve_warp(buv);if(flag(F_FLIP_H))su.s=1.0-su.s;if(flag(F_FLIP_V))su.t=1.0-su.t;}else{if(flag(F_FLIP_H))su.s=1.0-su.s;if(flag(F_FLIP_V))su.t=1.0-su.t;}col.rgb=apply_sharpen(su,col.rgb,sharpen_amount,sharpen_radius);}
     if(flag(F_STRAIGHT_ALPHA))col.rgb*=col.a;
 
-    if(flag(F_COLOR_GRADING)){col.rgb=apply_eotf(col.rgb,input_transfer);col.bgr=ubo_mat3(input_to_working_c0,input_to_working_c1,input_to_working_c2)*col.bgr;if(flag(F_GAMUT_COMPRESS))col.rgb=apply_gamut_compress(col.rgb,gc_limit_pad.xyz);col.rgb*=exposure;}
+    if(flag(F_COLOR_GRADING)){col.rgb=apply_eotf(col.rgb,input_transfer);col.rgb=ubo_mat3(input_to_working_c0,input_to_working_c1,input_to_working_c2)*col.rgb;if(flag(F_GAMUT_COMPRESS))col.rgb=apply_gamut_compress(col.rgb,gc_limit_pad.xyz);col.rgb*=exposure;}
     if(flag(F_CDL))col.rgb=apply_cdl(col.rgb,cdl_slope_sat.xyz,cdl_offset_pad.xyz,cdl_power_pad.xyz,cdl_slope_sat.w);
     if(flag(F_LUT3D))col.rgb=apply_lut3d(col.rgb,lut3d_strength);
     if(flag(F_LINEAR_SAT))col.rgb=apply_linear_sat(col.rgb,linear_sat_value);
@@ -410,7 +410,7 @@ void main(){
     col=blend_op(col);
     if(flag(F_CHROMA))col=ChromaKey(col.bgra,flag(F_CHROMA_MASK)).bgra;
 
-    if(flag(F_COLOR_GRADING)){if(tone_mapping_op>0)col.rgb=apply_tone_mapping(col.rgb,tone_mapping_op);col.bgr=ubo_mat3(working_to_output_c0,working_to_output_c1,working_to_output_c2)*col.bgr;col.rgb=apply_oetf(col.rgb,output_transfer);}
+    if(flag(F_COLOR_GRADING)){if(tone_mapping_op>0)col.rgb=apply_tone_mapping(col.rgb,tone_mapping_op);col.rgb=ubo_mat3(working_to_output_c0,working_to_output_c1,working_to_output_c2)*col.rgb;col.rgb=apply_oetf(col.rgb,output_transfer);}
     if(flag(F_GRAIN))col.rgb=apply_grain(col.rgb,TexCoord.st/TexCoord.q,grain_intensity,grain_size,grain_frame);
     if(flag(F_EDGE_BLEND)){vec2 ub=TexCoord.st/TexCoord.q;float ba=1.0;if(edge_blend_left>0.0)ba*=pow(clamp(ub.x/edge_blend_left,0.0,1.0),edge_blend_gamma);if(edge_blend_right>0.0)ba*=pow(clamp((1.0-ub.x)/edge_blend_right,0.0,1.0),edge_blend_gamma);if(edge_blend_top>0.0)ba*=pow(clamp(ub.y/edge_blend_top,0.0,1.0),edge_blend_gamma);if(edge_blend_bottom>0.0)ba*=pow(clamp((1.0-ub.y)/edge_blend_bottom,0.0,1.0),edge_blend_gamma);col*=ba;}
     fragColor=col.bgra;

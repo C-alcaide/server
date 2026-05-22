@@ -97,6 +97,7 @@ struct vk_readback_strategy::impl
     const bool is_hdr_;
     const bool use_bt2020_;
     const bool dma_only_;
+    const bool needs_v210_;
     spl::shared_ptr<format_strategy> fallback_;
 
     // Vulkan device (consumer-side, same physical GPU as mixer)
@@ -204,10 +205,11 @@ struct vk_readback_strategy::impl
 
     // ─── Construction / Destruction ────────────────────────────────────────
 
-    impl(bool is_hdr, bool use_bt2020, spl::shared_ptr<format_strategy> fallback, bool dma_only)
+    impl(bool is_hdr, bool use_bt2020, spl::shared_ptr<format_strategy> fallback, bool dma_only, bool needs_v210)
         : is_hdr_(is_hdr)
         , use_bt2020_(use_bt2020)
         , dma_only_(dma_only)
+        , needs_v210_(needs_v210)
         , fallback_(std::move(fallback))
     {
     }
@@ -453,19 +455,16 @@ struct vk_readback_strategy::impl
 
     void create_pipeline()
     {
-        // Select shader based on output format
+        // Select shader based on output format.
+        // V210 is needed for HDR, BT.2020, or when pixel-format=yuv (needs_v210).
         const uint32_t* spv_data;
         size_t          spv_size;
-        if (is_hdr_ || use_bt2020_) {
+        if (is_hdr_ || use_bt2020_ || needs_v210_) {
             // v210 path
             spv_data = vk_readback_v210_comp_spv;
             spv_size = vk_readback_v210_comp_spv_size;
         } else {
-            // SDR BGRA path if not HDR/v210, but we actually always use v210 for YUV
-            // and BGRA for SDR RGBA. The is_hdr_ flag determines which.
-            // For simplicity: if is_hdr_ → v210, else depends on pixel_format
-            // Since format_strategy selection already determined is_hdr_ correctly,
-            // is_hdr_=true means v210, is_hdr_=false means BGRA.
+            // SDR BGRA path — only when pixel-format=rgba (no V210 needed)
             spv_data = vk_readback_bgra_comp_spv;
             spv_size = vk_readback_bgra_comp_spv_size;
         }
@@ -499,7 +498,7 @@ struct vk_readback_strategy::impl
         VkPushConstantRange push{};
         push.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
         push.offset     = 0;
-        push.size       = is_hdr_ ? 24 : 16; // v210: 6 ints (24B), BGRA: 4 ints (16B)
+        push.size       = (is_hdr_ || use_bt2020_ || needs_v210_) ? 24 : 16; // v210: 6 ints (24B), BGRA: 4 ints (16B)
 
         VkPipelineLayoutCreateInfo pl_ci{};
         pl_ci.sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
@@ -575,7 +574,7 @@ struct vk_readback_strategy::impl
             // Raw RGBA pixels: 4 bytes/pixel (8-bit) or 8 bytes/pixel (16-bit)
             size_t bpp = (is_hdr_ || current_format_ == VK_FORMAT_R16G16B16A16_UNORM) ? 8 : 4;
             needed = (size_t)dst_w * dst_h * bpp;
-        } else if (is_hdr_) {
+        } else if (is_hdr_ || use_bt2020_ || needs_v210_) {
             size_t v210_row = (size_t)((dst_w + 47) / 48) * 128;
             needed = v210_row * dst_h;
         } else {
@@ -1170,7 +1169,7 @@ struct vk_readback_strategy::impl
                                 0, 1, &slot.desc_set, 0, nullptr);
 
         // Push constants and dispatch
-        if (is_hdr_) {
+        if (is_hdr_ || use_bt2020_ || needs_v210_) {
             int groups_per_row = (dst_w + 5) / 6;
             int push_data[6] = {src_x, src_y, dst_w, dst_h, groups_per_row, use_bt2020_ ? 1 : 0};
             vkCmdPushConstants(slot.cmd, pipe_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, 24, push_data);
@@ -1295,9 +1294,10 @@ struct vk_readback_strategy::impl
 
 vk_readback_strategy::vk_readback_strategy(bool is_hdr, bool use_bt2020,
                                            spl::shared_ptr<format_strategy> fallback,
-                                           bool dma_only)
+                                           bool dma_only,
+                                           bool needs_v210)
 #ifdef ENABLE_VULKAN
-    : impl_(std::make_unique<impl>(is_hdr, use_bt2020, std::move(fallback), dma_only))
+    : impl_(std::make_unique<impl>(is_hdr, use_bt2020, std::move(fallback), dma_only, needs_v210))
 #else
     : impl_(nullptr)
 #endif
@@ -1305,7 +1305,8 @@ vk_readback_strategy::vk_readback_strategy(bool is_hdr, bool use_bt2020,
     CASPAR_LOG(info) << L"[vk_readback] Pure-Vulkan GPU readback: "
                      << (dma_only ? L"DMA-only " : L"")
                      << (is_hdr ? L"HDR " : L"SDR ")
-                     << (use_bt2020 ? L"BT.2020" : L"BT.709");
+                     << (use_bt2020 ? L"BT.2020" : L"BT.709")
+                     << (needs_v210 ? L" V210" : L"");
 }
 
 vk_readback_strategy::~vk_readback_strategy() = default;
@@ -1314,7 +1315,7 @@ BMDPixelFormat vk_readback_strategy::get_pixel_format()
 {
 #ifdef ENABLE_VULKAN
     if (impl_)
-        return impl_->is_hdr_ ? bmdFormat10BitYUV : bmdFormat8BitBGRA;
+        return (impl_->is_hdr_ || impl_->use_bt2020_ || impl_->needs_v210_) ? bmdFormat10BitYUV : bmdFormat8BitBGRA;
 #endif
     return bmdFormat8BitBGRA;
 }
@@ -1323,7 +1324,7 @@ int vk_readback_strategy::get_row_bytes(int width)
 {
 #ifdef ENABLE_VULKAN
     if (impl_) {
-        if (impl_->is_hdr_)
+        if (impl_->is_hdr_ || impl_->use_bt2020_ || impl_->needs_v210_)
             return ((width + 47) / 48) * 128;
         else
             return width * 4;
@@ -1424,7 +1425,8 @@ std::shared_ptr<void> vk_readback_strategy::convert_frame_for_port(
 spl::shared_ptr<format_strategy> try_create_vk_readback_strategy(
     bool is_hdr, bool use_bt2020,
     spl::shared_ptr<format_strategy> fallback,
-    bool dma_only)
+    bool dma_only,
+    bool needs_v210)
 {
 #ifdef ENABLE_VULKAN
     try {
@@ -1438,7 +1440,7 @@ spl::shared_ptr<format_strategy> try_create_vk_readback_strategy(
         VkInstance test_inst;
         if (vkCreateInstance(&ci, nullptr, &test_inst) == VK_SUCCESS) {
             vkDestroyInstance(test_inst, nullptr);
-            return spl::make_shared<vk_readback_strategy>(is_hdr, use_bt2020, std::move(fallback), dma_only);
+            return spl::make_shared<vk_readback_strategy>(is_hdr, use_bt2020, std::move(fallback), dma_only, needs_v210);
         }
         CASPAR_LOG(warning) << L"[vk_readback] Vulkan not available, using CPU fallback";
     } catch (const std::exception& e) {

@@ -64,6 +64,9 @@ void apply_transform_colour_values(core::image_transform& self, const core::imag
     self.chroma.spill_suppress = std::max(other.chroma.spill_suppress, self.chroma.spill_suppress);
     self.chroma.spill_suppress_saturation =
         std::min(other.chroma.spill_suppress_saturation, self.chroma.spill_suppress_saturation);
+    if (other.color_grade.enable) {
+        self.color_grade = other.color_grade;
+    }
     self.is_key |= other.is_key;
     self.invert |= other.invert;
     self.is_mix |= other.is_mix;

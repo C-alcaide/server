@@ -241,6 +241,7 @@ spl::shared_ptr<format_strategy> create_format_strategy(const configuration& con
 
     bool is_hdr     = config.hdr;
     bool use_bt2020 = config.color_space == core::color_space::bt2020;
+    bool needs_v210 = (config.pixel_format == configuration::pixel_format_t::yuv);
     (void)is_hdr;
     (void)use_bt2020;
     auto strategy   = config.gpu_readback_mode;
@@ -258,7 +259,7 @@ spl::shared_ptr<format_strategy> create_format_strategy(const configuration& con
 
     if (strategy == configuration::gpu_readback_mode_t::cuda) {
 #ifdef DECKLINK_CUDA_VK_ENABLED
-        return try_create_cuda_vk_strategy(is_hdr, use_bt2020, std::move(cpu_strategy));
+        return try_create_cuda_vk_strategy(is_hdr, use_bt2020, std::move(cpu_strategy), needs_v210);
 #else
         CASPAR_LOG(warning) << L"[decklink] CUDA gpu-readback-mode requested but CUDA not available, trying Vulkan";
         strategy = configuration::gpu_readback_mode_t::vulkan;
@@ -267,7 +268,7 @@ spl::shared_ptr<format_strategy> create_format_strategy(const configuration& con
 
     if (strategy == configuration::gpu_readback_mode_t::vulkan) {
 #ifdef ENABLE_VULKAN
-        return try_create_vk_readback_strategy(is_hdr, use_bt2020, std::move(cpu_strategy));
+        return try_create_vk_readback_strategy(is_hdr, use_bt2020, std::move(cpu_strategy), /*dma_only=*/false, needs_v210);
 #else
         CASPAR_LOG(warning) << L"[decklink] Vulkan gpu-readback-mode requested but Vulkan not available, using CPU";
 #endif
@@ -275,7 +276,7 @@ spl::shared_ptr<format_strategy> create_format_strategy(const configuration& con
 
     if (strategy == configuration::gpu_readback_mode_t::vulkan_dma) {
 #ifdef ENABLE_VULKAN
-        return try_create_vk_readback_strategy(is_hdr, use_bt2020, std::move(cpu_strategy), /*dma_only=*/true);
+        return try_create_vk_readback_strategy(is_hdr, use_bt2020, std::move(cpu_strategy), /*dma_only=*/true, needs_v210);
 #else
         CASPAR_LOG(warning) << L"[decklink] Vulkan-DMA gpu-readback-mode requested but Vulkan not available, using CPU";
 #endif
@@ -1356,13 +1357,15 @@ struct decklink_consumer_proxy : public core::frame_consumer
 
     [[nodiscard]] bool needs_cpu_frame_data() const override
     {
-        // When the CUDA-VK direct GPU strategy is active, the decklink consumer
-        // reads the VK texture directly via CUDA interop — no CPU readback needed.
-#ifdef DECKLINK_CUDA_VK_ENABLED
-        return !use_vulkan_;
-#else
+        // When using Vulkan accelerator with a GPU readback strategy (CUDA/VK),
+        // do NOT request CPU readback — it triggers an image layout transition
+        // (eColorAttachmentOptimal → eTransferSrcOptimal) on the VK mixer's
+        // queue that races with the GPU strategy's texture import via CUDA
+        // external memory or VK external memory, causing black/corrupt output.
+        if (use_vulkan_ && config_.gpu_readback_mode != configuration::gpu_readback_mode_t::cpu)
+            return false;
+        // CPU mode or non-Vulkan accelerator needs pixel data in host memory.
         return true;
-#endif
     }
 
     [[nodiscard]] core::monitor::state state() const override { return get_state_for_config(config_, format_desc_); }
