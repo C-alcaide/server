@@ -90,6 +90,11 @@ struct ProResDemuxer::impl
     AVFrame*         audio_frame_       = nullptr;
     std::vector<int32_t> audio_buf_;   // decoded int32_t interleaved, since last video frame
 
+    // ── Container-level color metadata (fallback for unspecified frame headers) ──
+    uint8_t          container_color_primaries = 0;  // from st->codecpar (0 = not available)
+    uint8_t          container_transfer_func   = 0;
+    uint8_t          container_color_matrix     = 0;
+
     impl() = default;
 
     ~impl()
@@ -124,6 +129,12 @@ struct ProResDemuxer::impl
             }
             if (st->nb_frames > 0)
                 total_frames_cached = st->nb_frames;
+
+            // Save container-level color metadata (from colr atom / MXF descriptors)
+            // as fallback for ProRes frame headers that leave color fields unspecified.
+            container_color_primaries = static_cast<uint8_t>(st->codecpar->color_primaries);
+            container_transfer_func   = static_cast<uint8_t>(st->codecpar->color_trc);
+            container_color_matrix    = static_cast<uint8_t>(st->codecpar->color_space);
             break;
         }
 
@@ -369,6 +380,7 @@ bool ProResDemuxer::parse_frame_info(const uint8_t* data, int size,
     out.frame_type = (fhdr[12] >> 2) & 3;
 
     // Color metadata: bytes 14, 15, 16 (same offsets as FFmpeg)
+    // Values 0 and 2 mean "unspecified" per ITU-T H.273 / ISO 23091-2.
     out.color_primaries = fhdr[14];
     out.transfer_func   = fhdr[15];
     out.color_matrix    = fhdr[16];
@@ -414,5 +426,18 @@ bool ProResDemuxer::has_audio()         const { return impl_->audio_idx >= 0; }
 int  ProResDemuxer::audio_sample_rate() const { return impl_->audio_sample_rate_; }
 int  ProResDemuxer::audio_channels()    const { return impl_->audio_channels_; }
 int  ProResDemuxer::profile()           const { return impl_->profile; }
+
+void ProResDemuxer::apply_container_color_fallback(ProResFrameInfo& info) const
+{
+    // FFmpeg's prores_ks encoder often leaves color metadata unspecified in the
+    // ProRes frame header (bytes 14-16 = 0 or 2), storing the real metadata only
+    // in the container's colr atom.  Apply the container-level values as fallback.
+    if (info.color_primaries == 0 || info.color_primaries == 2)
+        info.color_primaries = impl_->container_color_primaries;
+    if (info.transfer_func == 0 || info.transfer_func == 2)
+        info.transfer_func = impl_->container_transfer_func;
+    if (info.color_matrix == 0 || info.color_matrix == 2)
+        info.color_matrix = impl_->container_color_matrix;
+}
 
 }} // namespace caspar::cuda_prores

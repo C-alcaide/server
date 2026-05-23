@@ -68,7 +68,7 @@
 // ---------------------------------------------------------------------------
 struct ProResColorDesc {
     uint8_t color_primaries;    // 1=Rec.709, 9=BT.2020
-    uint8_t transfer_function;  // 1=Rec.709, 14=HLG, 16=PQ
+    uint8_t transfer_function;  // 1=Rec.709, 18=HLG (ARIB STD-B67), 16=PQ (ST 2084)
     uint8_t color_matrix;       // 1=Rec.709, 9=BT.2020-NCL
 
     // HDR mastering display (ST 2086) — zero if SDR
@@ -84,8 +84,8 @@ struct ProResColorDesc {
 // Standard SDR Rec.709 preset
 static const ProResColorDesc COLOR_DESC_SDR_709 = { 1, 1, 1 };
 
-// HDR HLG BT.2020
-static const ProResColorDesc COLOR_DESC_HDR_HLG = { 9, 14, 9 };
+// HDR HLG BT.2020 (18 = ARIB STD-B67 per ITU-T H.273)
+static const ProResColorDesc COLOR_DESC_HDR_HLG = { 9, 18, 9 };
 
 // HDR PQ (HDR10)
 static const ProResColorDesc COLOR_DESC_HDR_PQ  = { 9, 16, 9 };

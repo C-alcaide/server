@@ -48,7 +48,7 @@ struct ProResFrameInfo
     int     height         = 0;
     int     frame_type     = 0;  // 0=progressive, 1=top-field-first, 2=bottom-field-first
     uint8_t color_primaries  = 1; // 1=Rec.709, 9=BT.2020
-    uint8_t transfer_func    = 1; // 1=Rec.709, 14=HLG, 16=PQ
+    uint8_t transfer_func    = 1; // 1=Rec.709, 18=HLG (ARIB STD-B67), 16=PQ (ST 2084)
     uint8_t color_matrix     = 1; // 1=Rec.709, 9=BT.2020-NCL
     int     profile          = 3; // ProResProfile index (3=HQ)
     int     mbs_per_slice    = 4; // read from picture header log2_slice_mb_width
@@ -108,6 +108,10 @@ class ProResDemuxer
     // ProRes profile index derived from the container codec tag:
     //   0=Proxy, 1=LT, 2=Standard, 3=HQ, 4=4444/4444XQ
     int profile() const;
+
+    // Apply container-level color metadata (from colr atom) as fallback
+    // when the ProRes frame header leaves color fields unspecified.
+    void apply_container_color_fallback(ProResFrameInfo& info) const;
 
     // True if the stream has been opened successfully.
     bool valid() const;

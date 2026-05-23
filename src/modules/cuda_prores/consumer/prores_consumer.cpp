@@ -352,7 +352,7 @@ public:
                 color_info = { 1, 1, 1, false };
                 break;
             case 1: // HLG BT.2020
-                color_info = { 9, 14, 9, false };
+                color_info = { 9, 18, 9, false };
                 break;
             case 2: { // PQ HDR10 — BT.2020 primaries, ST 2086
                 color_info.color_primaries   = 9;
@@ -595,7 +595,7 @@ private:
         const auto &fmt = format_desc_;
 
         static const ProResColorDesc k_sdr_709    = {1, 1, 1, {}, {}, 0, 0, 0, 0, 0, 0};
-        static const ProResColorDesc k_hlg_bt2020 = {9, 14, 9, {}, {}, 0, 0, 0, 0, 0, 0};
+        static const ProResColorDesc k_hlg_bt2020 = {9, 18, 9, {}, {}, 0, 0, 0, 0, 0, 0};
         const ProResColorDesc *color_desc = (cfg_.hdr_mode == 1) ? &k_hlg_bt2020 : &k_sdr_709;
 
         size_t encoded_size = 0;

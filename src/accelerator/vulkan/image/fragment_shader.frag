@@ -381,7 +381,7 @@ void main(){
     if(flag(F_SHARPEN)){vec2 su=buv;if(flag(F_360)){su=get_equirect_uv(buv);if(flag(F_FLIP_H))su.s=1.0-su.s;if(flag(F_FLIP_V))su.t=1.0-su.t;}else if(flag(F_CURVED)){su=apply_curve_warp(buv);if(flag(F_FLIP_H))su.s=1.0-su.s;if(flag(F_FLIP_V))su.t=1.0-su.t;}else{if(flag(F_FLIP_H))su.s=1.0-su.s;if(flag(F_FLIP_V))su.t=1.0-su.t;}col.rgb=apply_sharpen(su,col.rgb,sharpen_amount,sharpen_radius);}
     if(flag(F_STRAIGHT_ALPHA))col.rgb*=col.a;
 
-    if(flag(F_COLOR_GRADING)){col.rgb=apply_eotf(col.rgb,input_transfer);col.rgb=ubo_mat3(input_to_working_c0,input_to_working_c1,input_to_working_c2)*col.rgb;if(flag(F_GAMUT_COMPRESS))col.rgb=apply_gamut_compress(col.rgb,gc_limit_pad.xyz);col.rgb*=exposure;}
+    if(flag(F_COLOR_GRADING)){col.rgb=apply_eotf(col.rgb,input_transfer);if(input_transfer==3&&output_transfer==4)col.rgb/=10.0;col.rgb=ubo_mat3(input_to_working_c0,input_to_working_c1,input_to_working_c2)*col.rgb;if(flag(F_GAMUT_COMPRESS))col.rgb=apply_gamut_compress(col.rgb,gc_limit_pad.xyz);col.rgb*=exposure;}
     if(flag(F_CDL))col.rgb=apply_cdl(col.rgb,cdl_slope_sat.xyz,cdl_offset_pad.xyz,cdl_power_pad.xyz,cdl_slope_sat.w);
     if(flag(F_LUT3D))col.rgb=apply_lut3d(col.rgb,lut3d_strength);
     if(flag(F_LINEAR_SAT))col.rgb=apply_linear_sat(col.rgb,linear_sat_value);

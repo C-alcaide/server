@@ -237,6 +237,9 @@ struct prores_producer_impl final : public core::frame_producer
         if (!ProResDemuxer::parse_frame_info(pkt.data.data(), (int)pkt.data.size(), frame_info_))
             CASPAR_THROW_EXCEPTION(std::runtime_error("[prores_producer] Bad ProRes header"));
 
+        // Apply container-level color metadata when the frame header is unspecified.
+        demuxer_->apply_container_color_fallback(frame_info_);
+
         // Profile is determined from the container codec tag (ap4h, ap4x, apcn...),
         // not the icpf frame header — override the default from parse_frame_info.
         frame_info_.profile = demuxer_->profile();
@@ -510,7 +513,7 @@ struct prores_producer_impl final : public core::frame_producer
                               : (sfi.color_matrix == 5 || sfi.color_matrix == 6) ? core::color_space::bt601
                               : core::color_space::bt709;
             const auto pfd_ct = (sfi.transfer_func == 16) ? core::color_transfer::pq
-                              : (sfi.transfer_func == 14) ? core::color_transfer::hlg
+                              : (sfi.transfer_func == 18 || sfi.transfer_func == 14) ? core::color_transfer::hlg
                               : core::color_transfer::sdr;
 
             const auto pf = use_vulkan_ ? core::pixel_format::bgra : core::pixel_format::rgba;
@@ -649,6 +652,7 @@ struct prores_producer_impl final : public core::frame_producer
 
             ProResFrameInfo fi;
             if (!ProResDemuxer::parse_frame_info(pkt.data.data(), (int)pkt.data.size(), fi)) continue;
+            demuxer_->apply_container_color_fallback(fi);
 
             if (fi.frame_type != 0 && !warned_interlaced) {
                 warned_interlaced = true;
@@ -803,7 +807,7 @@ struct prores_producer_impl final : public core::frame_producer
                                   : (fi.color_matrix == 5 || fi.color_matrix == 6) ? core::color_space::bt601
                                   : core::color_space::bt709;
                 const auto pfd_ct = (fi.transfer_func == 16) ? core::color_transfer::pq
-                                  : (fi.transfer_func == 14) ? core::color_transfer::hlg
+                                  : (fi.transfer_func == 18 || fi.transfer_func == 14) ? core::color_transfer::hlg
                                   : core::color_transfer::sdr;
 
                 core::pixel_format_desc pfd(core::pixel_format::bgra, pfd_cs, pfd_ct);

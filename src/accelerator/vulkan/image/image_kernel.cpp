@@ -543,11 +543,13 @@ struct image_kernel::impl
                 {1.4235761f,-0.3158537f,-0.1077233f, -0.0682645f,1.1859178f,-0.1176531f, 0.0041827f,-0.0110575f,1.0068749f}
             };
 
-            // Helper: expand mat3 (9 floats col-major) to 3×vec4 (12 floats, std140)
+            // Helper: expand row-major mat3 (9 floats) to 3×vec4 columns (12 floats, std140).
+            // GLSL mat3(c0,c1,c2) treats arguments as COLUMNS.  The C++ tables store
+            // matrices in row-major order, so we must transpose when packing for the shader.
             auto set_mat3 = [](float dst[12], const float src[9]) {
-                dst[0]=src[0]; dst[1]=src[1]; dst[2]=src[2]; dst[3]=0;
-                dst[4]=src[3]; dst[5]=src[4]; dst[6]=src[5]; dst[7]=0;
-                dst[8]=src[6]; dst[9]=src[7]; dst[10]=src[8]; dst[11]=0;
+                dst[0]=src[0]; dst[1]=src[3]; dst[2]=src[6]; dst[3]=0;  // column 0
+                dst[4]=src[1]; dst[5]=src[4]; dst[6]=src[7]; dst[7]=0;  // column 1
+                dst[8]=src[2]; dst[9]=src[5]; dst[10]=src[8]; dst[11]=0; // column 2
             };
 
             const auto& cg = transforms.image_transform.color_grade;

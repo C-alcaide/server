@@ -48,7 +48,7 @@
 // ColorDesc mirrors ProResColorDesc for muxer-level metadata.
 struct MovColorInfo {
     uint8_t  color_primaries;     // 1=Rec.709, 9=BT.2020
-    uint8_t  transfer_function;   // 1=Rec.709, 14=HLG, 16=PQ
+    uint8_t  transfer_function;   // 1=Rec.709, 18=HLG (ARIB STD-B67), 16=PQ (ST 2084)
     uint8_t  color_matrix;        // 1=Rec.709, 9=BT.2020-NCL
     bool     has_hdr;             // true → write mdcv + clli atoms
     uint16_t mdcv_primaries_x[3];
