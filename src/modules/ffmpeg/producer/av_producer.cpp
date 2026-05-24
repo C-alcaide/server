@@ -1643,10 +1643,12 @@ struct AVProducer::Impl
                             if (d3d11_bridge_->setup_for_size(frame.video->width, frame.video->height)) {
                                 auto ogl_tex = d3d11_bridge_->convert(d3d11_tex, array_idx, *ogl_device_);
                                 if (ogl_tex) {
-                                    // Build BGRA pixel_format_desc
+                                    // Build BGRA pixel_format_desc with color metadata
                                     auto desc = core::pixel_format_desc(core::pixel_format::bgra);
                                     desc.planes.push_back(core::pixel_format_desc::plane(
                                         frame.video->width, frame.video->height, 4));
+                                    desc.color_space    = get_color_space(frame.video, stream_color_space_);
+                                    desc.color_transfer = get_color_transfer(frame.video, stream_color_trc_);
 
                                     // Build audio data via make_frame (audio only)
                                     array<const std::int32_t> audio_data;
