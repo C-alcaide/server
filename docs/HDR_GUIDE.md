@@ -129,6 +129,12 @@ Set `<auto-color-convert>false</auto-color-convert>` to disable automatic conver
 
 ### `<auto-tone-map>` (channel-level tone mapping)
 
+> **Requires `<auto-color-convert>true</auto-color-convert>`** (the default).
+> Channel-level tone mapping is part of the auto color conversion pipeline — it
+> operates in linear light between the EOTF decode and OETF encode steps. When
+> `auto-color-convert` is disabled, the entire conversion pipeline is skipped
+> and `<auto-tone-map>` has no effect.
+
 ```xml
 <channel>
   <video-mode>2160p5000</video-mode>
@@ -136,10 +142,13 @@ Set `<auto-color-convert>false</auto-color-convert>` to disable automatic conver
   <color-space>bt2020</color-space>
   <color-transfer>hlg</color-transfer>
 
+  <!-- auto-color-convert must be true (default) for tone mapping to work -->
+  <auto-color-convert>true</auto-color-convert>
+
   <!-- Tone mapping applied during auto color conversion -->
   <auto-tone-map>hlg_ootf</auto-tone-map>
 
-  <!-- Display peak luminance for HLG OOTF gamma calculation -->
+  <!-- Display peak luminance for HLG OOTF gamma calculation (default: 1000) -->
   <display-peak-luminance>1000</display-peak-luminance>
 
   <consumers>...</consumers>
@@ -187,7 +196,9 @@ The per-consumer tone-map is applied as a **display transform** after the mixer'
 - **Screen consumer**: OpenGL fragment shader applies EOTF decode → tone-map → OETF re-encode
 - **Vulkan output**: Compute shader inserts tone-map between gamut conversion and output OETF
 
-Per-consumer tone-mapping is independent of the channel-level `<auto-tone-map>` — they operate at different pipeline stages. The channel-level setting maps individual source layers to the channel's working space; the consumer-level setting transforms the final composited output for a specific display.
+Per-consumer tone-mapping is **independent** of both `<auto-color-convert>` and the channel-level `<auto-tone-map>`:
+- It does **not** require `<auto-color-convert>true</auto-color-convert>` — even if channel auto-conversion is off, a consumer can still apply its own display transform on the composited output.
+- It operates at a different pipeline stage: channel-level maps source layers → channel working space; consumer-level maps the final composited frame → display output.
 
 **AMCP (screen consumer)**:
 ```
