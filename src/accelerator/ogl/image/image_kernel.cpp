@@ -403,8 +403,31 @@ struct image_kernel::impl
             shader_->set("output_transfer",   cg.output_transfer);
             shader_->set("tone_mapping_op",   cg.tone_mapping);
             shader_->set("exposure",          cg.exposure);
-            shader_->set_matrix3("input_to_working",  k_to_working[ig]);
-            shader_->set_matrix3("working_to_output", k_to_output[og]);
+
+            // When no artistic tone mapping is applied and both gamuts are D65-based
+            // (BT.709=0, BT.2020=1), use direct ITU-R BT.2087 matrices to avoid
+            // chromatic adaptation artifacts from the ACEScg (D60) intermediate.
+            static const float k_direct_cg[2][2][9] = {
+                { // from bt709
+                    {1,0,0, 0,1,0, 0,0,1}, // → bt709 (identity)
+                    {0.6274039f,0.3292830f,0.0433131f, 0.0690972f,0.9195404f,0.0113623f, 0.0163914f,0.0880133f,0.8955953f}, // → bt2020
+                },
+                { // from bt2020
+                    {1.6604910f,-0.5876411f,-0.0728499f, -0.1245505f,1.1328999f,-0.0083494f, -0.0181508f,-0.1005789f,1.1187297f}, // → bt709
+                    {1,0,0, 0,1,0, 0,0,1}, // → bt2020 (identity)
+                },
+            };
+            static const float k_identity_cg[9] = {1,0,0, 0,1,0, 0,0,1};
+
+            if (cg.tone_mapping == 0 && ig <= 1 && og <= 1) {
+                // Direct D65↔D65 conversion — no ACEScg intermediate needed
+                shader_->set_matrix3("input_to_working",  k_direct_cg[ig][og]);
+                shader_->set_matrix3("working_to_output", k_identity_cg);
+            } else {
+                // Full ACES grading pipeline through ACEScg working space
+                shader_->set_matrix3("input_to_working",  k_to_working[ig]);
+                shader_->set_matrix3("working_to_output", k_to_output[og]);
+            }
 
             // BT.2408 luminance adaptation: scale linear light when crossing
             // HDR/SDR domains.  Each transfer defines a "peak" in cd/m²:

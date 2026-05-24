@@ -570,8 +570,31 @@ struct image_kernel::impl
                 uniforms.exposure = static_cast<float>(cg.exposure) * lum_scale;
                 int ig = std::min(std::max(cg.input_gamut,  0), 6);
                 int og = std::min(std::max(cg.output_gamut, 0), 6);
-                set_mat3(uniforms.input_to_working,  k_to_working[ig]);
-                set_mat3(uniforms.working_to_output, k_to_output[og]);
+
+                // When no artistic tone mapping is applied and both gamuts are D65-based
+                // (BT.709=0, BT.2020=1), use direct ITU-R BT.2087 matrices to avoid
+                // chromatic adaptation artifacts from the ACEScg (D60) intermediate.
+                static const float k_direct_cg[2][2][9] = {
+                    { // from bt709
+                        {1,0,0, 0,1,0, 0,0,1}, // → bt709 (identity)
+                        {0.6274039f,0.3292830f,0.0433131f, 0.0690972f,0.9195404f,0.0113623f, 0.0163914f,0.0880133f,0.8955953f}, // → bt2020
+                    },
+                    { // from bt2020
+                        {1.6604910f,-0.5876411f,-0.0728499f, -0.1245505f,1.1328999f,-0.0083494f, -0.0181508f,-0.1005789f,1.1187297f}, // → bt709
+                        {1,0,0, 0,1,0, 0,0,1}, // → bt2020 (identity)
+                    },
+                };
+                static const float k_identity_cg[9] = {1,0,0, 0,1,0, 0,0,1};
+
+                if (cg.tone_mapping == 0 && ig <= 1 && og <= 1) {
+                    // Direct D65↔D65 conversion — no ACEScg intermediate needed
+                    set_mat3(uniforms.input_to_working,  k_direct_cg[ig][og]);
+                    set_mat3(uniforms.working_to_output, k_identity_cg);
+                } else {
+                    // Full ACES grading pipeline through ACEScg working space
+                    set_mat3(uniforms.input_to_working,  k_to_working[ig]);
+                    set_mat3(uniforms.working_to_output, k_to_output[og]);
+                }
             } else if (params.auto_color_convert &&
                        (params.pix_desc.color_space != params.target_color_space ||
                         params.pix_desc.color_transfer != params.target_color_transfer)) {
