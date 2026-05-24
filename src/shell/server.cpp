@@ -324,7 +324,7 @@ struct server::impl
                                                                         : core::color_transfer::sdr;
             auto auto_color_convert = xml_channel.second.get(L"auto-color-convert", true);
 
-            // Parse auto-tone-map: none(0), reinhard(1), aces_filmic(2), aces_rrt(3)
+            // Parse auto-tone-map: none(0), reinhard(1), aces_filmic(2), aces_rrt(3), hlg_ootf(7)
             auto auto_tone_map_str = boost::to_lower_copy(xml_channel.second.get(L"auto-tone-map", L"none"));
             int  auto_tone_map     = 0;
             if (auto_tone_map_str == L"reinhard")
@@ -333,8 +333,12 @@ struct server::impl
                 auto_tone_map = 2;
             else if (auto_tone_map_str == L"aces_rrt")
                 auto_tone_map = 3;
+            else if (auto_tone_map_str == L"hlg_ootf")
+                auto_tone_map = 7;
             else if (auto_tone_map_str != L"none")
-                CASPAR_THROW_EXCEPTION(user_error() << msg_info(L"Invalid auto-tone-map, must be none, reinhard, aces_filmic or aces_rrt"));
+                CASPAR_THROW_EXCEPTION(user_error() << msg_info(L"Invalid auto-tone-map, must be none, reinhard, aces_filmic, aces_rrt or hlg_ootf"));
+
+            auto display_peak_luminance = xml_channel.second.get<float>(L"display-peak-luminance", 1000.0f);
 
             auto channel =
                 spl::make_shared<video_channel>(channel_id,
@@ -351,7 +355,8 @@ struct server::impl
                                                 },
                                                 default_color_transfer,
                                                 auto_color_convert,
-                                                auto_tone_map);
+                                                auto_tone_map,
+                                                display_peak_luminance);
 
             const std::wstring lifecycle_key = L"lock" + std::to_wstring(channel_id);
             channels_->emplace_back(channel, channel->stage(), lifecycle_key);

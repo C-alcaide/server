@@ -94,6 +94,7 @@ class image_renderer
     core::color_transfer target_color_transfer = core::color_transfer::sdr;
     bool                 auto_color_convert    = true;
     int                  auto_tone_map         = 0;
+    float                display_peak_luminance = 1000.0f;
 
     explicit image_renderer(const spl::shared_ptr<device>& vulkan, const size_t max_frame_size, common::bit_depth depth)
         : vulkan_(vulkan)
@@ -292,6 +293,7 @@ class image_renderer
         draw_params.target_color_transfer = target_color_transfer;
         draw_params.auto_color_convert    = auto_color_convert;
         draw_params.auto_tone_map         = auto_tone_map;
+        draw_params.display_peak_luminance = display_peak_luminance;
 
         draw_params.pix_desc   = std::move(item.pix_desc);
         draw_params.transforms = std::move(item.transforms);
@@ -394,12 +396,13 @@ struct image_mixer::impl
 
     void update_aspect_ratio(double aspect_ratio) { aspect_ratio_ = aspect_ratio; }
 
-    void set_target_color(core::color_space cs, core::color_transfer ct, bool auto_convert, int auto_tone_map)
+    void set_target_color(core::color_space cs, core::color_transfer ct, bool auto_convert, int auto_tone_map, float peak_luminance)
     {
         renderer_.target_color_space    = cs;
         renderer_.target_color_transfer = ct;
         renderer_.auto_color_convert    = auto_convert;
         renderer_.auto_tone_map         = auto_tone_map;
+        renderer_.display_peak_luminance = peak_luminance;
     }
 
     void push(const core::frame_transform& transform)
@@ -708,9 +711,9 @@ ogl::previz_renderer* image_mixer::get_previz_renderer()
     return impl_->get_previz_renderer();
 }
 
-void image_mixer::set_target_color(core::color_space cs, core::color_transfer ct, bool auto_convert, int auto_tone_map)
+void image_mixer::set_target_color(core::color_space cs, core::color_transfer ct, bool auto_convert, int auto_tone_map, float peak_luminance)
 {
-    impl_->set_target_color(cs, ct, auto_convert, auto_tone_map);
+    impl_->set_target_color(cs, ct, auto_convert, auto_tone_map, peak_luminance);
 }
 
 }}} // namespace caspar::accelerator::vulkan

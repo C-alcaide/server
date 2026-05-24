@@ -81,6 +81,7 @@ uniform mat3  working_to_output; // ACEScg (AP1) -> output gamut
 uniform int   tone_mapping_op;   // 0=none,1=reinhard,2=aces_filmic,3=aces_rrt
 uniform float exposure;          // linear exposure multiplier
 uniform float luminance_scale;   // BT.2408 luminance adaptation (e.g. 0.1 for SDR->HLG)
+uniform float display_peak_luminance; // display nominal peak luminance in nits (default 1000)
 
 // White balance
 uniform bool  white_balance;
@@ -931,6 +932,14 @@ vec3 tonemap_aces_rrt(vec3 v) {
     return clamp(a / b, 0.0, 1.0);
 }
 
+// HLG OOTF: BT.2100 system gamma for display rendering.
+// gamma = 1.2 * 1.111^log2(Lw/1000), where Lw = display peak luminance in nits.
+vec3 tonemap_hlg_ootf(vec3 v, float npl) {
+    float gamma = 1.2 * pow(1.111, log2(npl / 1000.0));
+    float Ys = dot(v, vec3(0.2627, 0.6780, 0.0593));
+    return v * pow(max(Ys, 1e-6), gamma - 1.0);
+}
+
 // log10 is not a GLSL built-in; define it via natural log.
 float log10(float x) { return log(x) * 0.4342944819032518; }
 
@@ -1053,6 +1062,7 @@ vec3 apply_tone_mapping(vec3 rgb, int op) {
         case 4: return tonemap_aces_rrt_709(rgb);
         case 5: return tonemap_aces_rrt_p3(rgb);
         case 6: return tonemap_aces_rrt_2020_pq(rgb);
+        case 7: return tonemap_hlg_ootf(rgb, display_peak_luminance);
         default: return rgb;
     }
 }

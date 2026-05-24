@@ -35,7 +35,7 @@ layout(scalar, binding = 2) uniform ParamsBlock {
     float edge_blend_gamma;
     int   input_transfer, output_transfer, tone_mapping_op;
     float exposure;
-    float _pad0;
+    float display_peak_luminance;
     vec4 input_to_working_c0, input_to_working_c1, input_to_working_c2;
     vec4 working_to_output_c0, working_to_output_c1, working_to_output_c2;
     float wb_temperature, wb_tint;
@@ -259,6 +259,7 @@ vec3 apply_oetf(vec3 r,int t){r=max(r,vec3(0.0));switch(t){case 1:return vec3(oe
 vec3 tonemap_reinhard(vec3 v){return v/(v+1.0);}
 vec3 tonemap_aces_filmic(vec3 x){return clamp((x*(2.51*x+0.03))/(x*(2.43*x+0.59)+0.14),0.0,1.0);}
 vec3 tonemap_aces_rrt(vec3 v){v*=0.6;vec3 a=v*(v+0.0245786)-0.000090537;vec3 b=v*(0.983729*v+0.432951)+0.238081;return clamp(a/b,0.0,1.0);}
+vec3 tonemap_hlg_ootf(vec3 v,float npl){float gamma=1.2*pow(1.111,log2(npl/1000.0));float Ys=dot(v,vec3(0.2627,0.6780,0.0593));return v*pow(max(Ys,1e-6),gamma-1.0);}
 float log10_f(float x){return log(x)*0.4342944819032518;}
 float spline_c5(float x){
     const float cL[6]=float[6](-4.0,-4.0,-3.1573765773,-0.4852499958,1.8477324706,1.8477324706);
@@ -279,7 +280,7 @@ float spline_c9(float x,float mnY,float mdY,float mxY){
 }
 vec3 aces_rrt_s(vec3 v){return vec3(spline_c5(v.r),spline_c5(v.g),spline_c5(v.b));}
 vec3 aces_odt_srgb(vec3 v){v=vec3(spline_c9(v.r,.0001,4.8,48.0),spline_c9(v.g,.0001,4.8,48.0),spline_c9(v.b,.0001,4.8,48.0));return clamp(v/48.0,0.0,1.0);}
-vec3 apply_tone_mapping(vec3 r,int op){switch(op){case 1:return tonemap_reinhard(r);case 2:return tonemap_aces_filmic(r);case 3:return tonemap_aces_rrt(r);case 4:return aces_odt_srgb(aces_rrt_s(r));case 5:{vec3 v=aces_rrt_s(r);v=vec3(spline_c9(v.r,.0001,4.8,48.0),spline_c9(v.g,.0001,4.8,48.0),spline_c9(v.b,.0001,4.8,48.0));return clamp(v/48.0,0.0,1.0);}case 6:{vec3 v=aces_rrt_s(r);v=vec3(spline_c9(v.r,.005,4.8,800.0),spline_c9(v.g,.005,4.8,800.0),spline_c9(v.b,.005,4.8,800.0));return clamp(v/1000.0,0.0,1.0);}default:return r;}}
+vec3 apply_tone_mapping(vec3 r,int op){switch(op){case 1:return tonemap_reinhard(r);case 2:return tonemap_aces_filmic(r);case 3:return tonemap_aces_rrt(r);case 4:return aces_odt_srgb(aces_rrt_s(r));case 5:{vec3 v=aces_rrt_s(r);v=vec3(spline_c9(v.r,.0001,4.8,48.0),spline_c9(v.g,.0001,4.8,48.0),spline_c9(v.b,.0001,4.8,48.0));return clamp(v/48.0,0.0,1.0);}case 6:{vec3 v=aces_rrt_s(r);v=vec3(spline_c9(v.r,.005,4.8,800.0),spline_c9(v.g,.005,4.8,800.0),spline_c9(v.b,.005,4.8,800.0));return clamp(v/1000.0,0.0,1.0);}case 7:return tonemap_hlg_ootf(r,display_peak_luminance);default:return r;}}
 
 // ── Effect helpers ──────────────────────────────────────────────────────
 vec3 apply_white_balance(vec3 c,float t,float ti){c.r*=1.0-t*0.20;c.g*=1.0+ti*0.10;c.b*=1.0+t*0.20;return c;}

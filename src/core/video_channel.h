@@ -79,7 +79,8 @@ class video_channel final
                            std::function<void(core::monitor::state)> on_tick,
                            color_transfer                            default_color_transfer = color_transfer::sdr,
                            bool                                      auto_color_convert     = true,
-                           int                                       auto_tone_map          = 0);
+                           int                                       auto_tone_map          = 0,
+                           float                                     display_peak_luminance = 1000.0f);
     ~video_channel();
 
     core::monitor::state state() const;

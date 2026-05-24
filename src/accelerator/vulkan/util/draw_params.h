@@ -54,6 +54,7 @@ struct draw_params final
     core::color_transfer                        target_color_transfer = core::color_transfer::sdr;
     bool                                        auto_color_convert    = true;
     int                                         auto_tone_map         = 0;
+    float                                       display_peak_luminance = 1000.0f;
 };
 
 }}} // namespace caspar::accelerator::vulkan

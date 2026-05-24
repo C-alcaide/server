@@ -402,6 +402,7 @@ struct image_kernel::impl
             shader_->set("input_transfer",    cg.input_transfer);
             shader_->set("output_transfer",   cg.output_transfer);
             shader_->set("tone_mapping_op",   cg.tone_mapping);
+            shader_->set("display_peak_luminance", params.display_peak_luminance);
             shader_->set("exposure",          cg.exposure);
 
             // When no artistic tone mapping is applied and both gamuts are D65-based
@@ -493,6 +494,7 @@ struct image_kernel::impl
                 shader_->set("input_transfer",    it);
                 shader_->set("output_transfer",   ot);
                 shader_->set("tone_mapping_op",   tm);
+                shader_->set("display_peak_luminance", params.display_peak_luminance);
                 shader_->set("exposure",          1.0f);
 
                 // Direct gamut matrices for auto conversion (ITU-R BT.2087).

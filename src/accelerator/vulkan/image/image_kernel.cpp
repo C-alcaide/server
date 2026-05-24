@@ -558,6 +558,7 @@ struct image_kernel::impl
                 uniforms.input_transfer  = cg.input_transfer;
                 uniforms.output_transfer = cg.output_transfer;
                 uniforms.tone_mapping_op = cg.tone_mapping;
+                uniforms.display_peak_luminance = params.display_peak_luminance;
                 // Combine user exposure with BT.2408 luminance adaptation.
                 // For PQ (absolute): simple ratio 100/10000.
                 // For HLG (scene-referred, OOTF γ=1.2): SDR white at 75% HLG
@@ -636,6 +637,7 @@ struct image_kernel::impl
                     uniforms.input_transfer  = it;
                     uniforms.output_transfer = ot;
                     uniforms.tone_mapping_op = tm;
+                    uniforms.display_peak_luminance = params.display_peak_luminance;
 
                     // BT.2408 luminance adaptation: scene-referred mapping
                     // for SDR↔HLG conversions (75% signal for ref white).

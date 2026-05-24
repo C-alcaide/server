@@ -71,7 +71,7 @@ struct alignas(16) uniform_block
     int32_t tone_mapping_op  = 0;           // 184
     float   exposure         = 1.0f;        // 188
     // mat3 in std140 = 3 × vec4 (each column padded to 16 bytes)
-    float   _pad0 = 0;                     // 192  alignment pad for mat3
+    float   display_peak_luminance = 1000.0f; // 192
     float   input_to_working[12]  = {      // 196  mat3 as 3×vec4 (std140)
         1,0,0,0,  0,1,0,0,  0,0,1,0
     };

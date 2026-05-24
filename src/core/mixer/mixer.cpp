@@ -55,14 +55,14 @@ struct mixer::impl
     impl(const impl&)            = delete;
     impl& operator=(const impl&) = delete;
 
-    impl(int channel_index, spl::shared_ptr<diagnostics::graph> graph, spl::shared_ptr<image_mixer> image_mixer, core::color_space default_color_space, core::color_transfer default_color_transfer, bool auto_color_convert = true, int auto_tone_map = 0)
+    impl(int channel_index, spl::shared_ptr<diagnostics::graph> graph, spl::shared_ptr<image_mixer> image_mixer, core::color_space default_color_space, core::color_transfer default_color_transfer, bool auto_color_convert = true, int auto_tone_map = 0, float display_peak_luminance = 1000.0f)
         : channel_index_(channel_index)
         , graph_(std::move(graph))
         , image_mixer_(std::move(image_mixer))
         , default_color_space_(default_color_space)
         , default_color_transfer_(default_color_transfer)
     {
-        image_mixer_->set_target_color(default_color_space_, default_color_transfer_, auto_color_convert, auto_tone_map);
+        image_mixer_->set_target_color(default_color_space_, default_color_transfer_, auto_color_convert, auto_tone_map, display_peak_luminance);
     }
 
     const_frame operator()(std::vector<draw_frame> frames, const video_format_desc& format_desc, int nb_samples)
@@ -133,8 +133,8 @@ struct mixer::impl
     }
 };
 
-mixer::mixer(int channel_index, spl::shared_ptr<diagnostics::graph> graph, spl::shared_ptr<image_mixer> image_mixer, core::color_space default_color_space, core::color_transfer default_color_transfer, bool auto_color_convert, int auto_tone_map)
-    : impl_(new impl(channel_index, std::move(graph), std::move(image_mixer), default_color_space, default_color_transfer, auto_color_convert, auto_tone_map))
+mixer::mixer(int channel_index, spl::shared_ptr<diagnostics::graph> graph, spl::shared_ptr<image_mixer> image_mixer, core::color_space default_color_space, core::color_transfer default_color_transfer, bool auto_color_convert, int auto_tone_map, float display_peak_luminance)
+    : impl_(new impl(channel_index, std::move(graph), std::move(image_mixer), default_color_space, default_color_transfer, auto_color_convert, auto_tone_map, display_peak_luminance))
 {
 }
 void        mixer::set_master_volume(float volume) { impl_->set_master_volume(volume); }
