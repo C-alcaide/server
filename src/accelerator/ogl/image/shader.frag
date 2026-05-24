@@ -1674,6 +1674,13 @@ void main()
         // Gamut mapping: Working Gamut -> Output Gamut
         // Shader uses BGRA convention (.r=B, .b=R), swizzle to RGB for matrix
         col.bgr = working_to_output * col.bgr;
+
+        // Clamp to [0,1] before OETF when no tone mapping is applied.
+        // This implements BT.2408 Method 0 hard-clip for HDR→SDR auto conversion
+        // and prevents out-of-range values from producing incorrect OETF output.
+        if (tone_mapping_op == 0) {
+            col.rgb = clamp(col.rgb, 0.0, 1.0);
+        }
         
         // OETF: linear -> encoded
         col.rgb = apply_oetf(col.rgb, output_transfer);

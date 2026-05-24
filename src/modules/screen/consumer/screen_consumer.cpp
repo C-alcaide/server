@@ -1380,6 +1380,14 @@ struct gpu_strategy : public display_strategy
                     glSemaphoreParameterui64vEXT_(vk_gl_semaphore_, GL_D3D12_FENCE_VALUE_EXT, &sem_value);
                     glWaitSemaphoreEXT_(vk_gl_semaphore_, 0, nullptr,
                                         1, &vk_gl_tex_, &src_layout);
+
+                    // Drain any GL error from the semaphore calls — some drivers
+                    // report GL_INVALID_VALUE when the timeline value hasn't been
+                    // signalled yet or on first use.  The GPU-side sync still works
+                    // (the wait is enqueued in the command stream regardless of the
+                    // client-side error flag).  Without this drain the stale error
+                    // propagates to the next GL() macro and kills the render thread.
+                    while (glGetError() != GL_NO_ERROR) {}
                 }
             }
         }

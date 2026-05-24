@@ -456,10 +456,12 @@ struct image_kernel::impl
             } else {
                 int it = transfer_index(params.pix_desc.color_transfer);
                 int ot = transfer_index(params.target_color_transfer);
-                // Apply tonemapping when going from HDR to SDR.
-                // Use Stephen Hill ACES approximation (op=3) — the full spline
-                // path (op=4) has a c9 input domain bug that clips everything.
-                int tm = (it >= 3 && ot <= 2) ? 3 : 0; // 3 = ACES_RRT (Hill), 0 = NONE
+                // BT.2408 Method 0: no artistic tone mapping for auto conversion.
+                // luminance_scale maps HDR linear light to SDR domain (1.0 = 100 nits),
+                // and values above 1.0 are naturally clipped by the framebuffer.
+                // Users who want highlight-preserving tone mapping should use the
+                // explicit color_grade path with a chosen operator.
+                int tm = 0;
                 shader_->set("color_grading",     true);
                 shader_->set("input_transfer",    it);
                 shader_->set("output_transfer",   ot);
