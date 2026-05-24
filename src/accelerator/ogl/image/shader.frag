@@ -1660,20 +1660,11 @@ void main()
         col.a     = col.a   * (1.0 - ca) + ca;
     }
 
-	col *= opacity;
-
-    if (has_local_key)
-        col.a *= texture(local_key, TexCoord2.st).r;
-
-    if (has_layer_key)
-        col.a *= texture(layer_key, TexCoord2.st).r;
-
-    col = blend(col);
-
-    if (chroma)
-        col = chroma_key(col);
-
-    // Convert working space -> output space
+    // Convert working space -> output space BEFORE blend so that both
+    // foreground and background are in the same display-referred encoding.
+    // This ensures correct compositing when layers have different color
+    // spaces/transfers (e.g. HDR PQ over SDR) and makes blend modes
+    // (Multiply, Screen, etc.) operate on 0-1 display values as designed.
     if (color_grading) {
         // Tone Mapping (LDR compression)
         if (tone_mapping_op > 0) {
@@ -1687,6 +1678,19 @@ void main()
         // OETF: linear -> encoded
         col.rgb = apply_oetf(col.rgb, output_transfer);
     }
+
+	col *= opacity;
+
+    if (has_local_key)
+        col.a *= texture(local_key, TexCoord2.st).r;
+
+    if (has_layer_key)
+        col.a *= texture(layer_key, TexCoord2.st).r;
+
+    col = blend(col);
+
+    if (chroma)
+        col = chroma_key(col);
 
     // Film grain (applied in display-referred space, after OETF)
     if (grain_enable) {
