@@ -430,19 +430,27 @@ struct image_kernel::impl
             }
 
             // BT.2408 luminance adaptation: scale linear light when crossing
-            // HDR/SDR domains.  Each transfer defines a "peak" in cd/m²:
-            //   SDR/sRGB/rec709 = 100, HLG = 1000, PQ = 10000
-            // Scale = source_peak / target_peak
-            auto get_peak = [](int transfer) -> float {
-                switch (transfer) {
-                    case 3: return 10000.0f; // PQ
-                    case 4: return 1000.0f;  // HLG
-                    default: return 100.0f;  // SDR, sRGB, rec709, linear
-                }
+            // HDR/SDR domains.
+            // For PQ (absolute): simple ratio 100/10000 or 10000/100.
+            // For HLG (scene-referred, OOTF γ=1.2): SDR white at 75% HLG
+            // signal per BT.2408 §3.2 → scene-linear factor 0.265.
+            auto get_luminance_scale = [](int src_t, int tgt_t) -> float {
+                constexpr float k_sdr_hlg = 0.265f;  // BT.2408: 75% HLG signal for SDR ref white
+                bool src_sdr = (src_t <= 2);  // 0=linear, 1=srgb, 2=rec709
+                bool tgt_sdr = (tgt_t <= 2);
+                bool src_hlg = (src_t == 4);
+                bool tgt_hlg = (tgt_t == 4);
+                bool src_pq  = (src_t == 3);
+                bool tgt_pq  = (tgt_t == 3);
+                if (src_sdr && tgt_hlg) return k_sdr_hlg;          // SDR → HLG
+                if (src_hlg && tgt_sdr) return 1.0f / k_sdr_hlg;   // HLG → SDR (3.774)
+                if (src_sdr && tgt_pq)  return 0.01f;              // SDR → PQ (100/10000)
+                if (src_pq  && tgt_sdr) return 100.0f;             // PQ → SDR
+                if (src_hlg && tgt_pq)  return 0.1f;               // HLG → PQ (1000/10000)
+                if (src_pq  && tgt_hlg) return 10.0f;              // PQ → HLG
+                return 1.0f;                                        // same domain
             };
-            float src_peak = get_peak(cg.input_transfer);
-            float tgt_peak = get_peak(cg.output_transfer);
-            shader_->set("luminance_scale", src_peak / tgt_peak);
+            shader_->set("luminance_scale", get_luminance_scale(cg.input_transfer, cg.output_transfer));
         } else if (params.auto_color_convert &&
                    (params.pix_desc.color_space != params.target_color_space ||
                     params.pix_desc.color_transfer != params.target_color_transfer)) {
@@ -521,16 +529,23 @@ struct image_kernel::impl
                 }
 
                 // BT.2408 luminance adaptation for auto conversion path
-                auto get_peak = [](int transfer) -> float {
-                    switch (transfer) {
-                        case 3: return 10000.0f; // PQ
-                        case 4: return 1000.0f;  // HLG
-                        default: return 100.0f;  // SDR, sRGB, rec709, linear
-                    }
+                auto get_luminance_scale = [](int src_t, int tgt_t) -> float {
+                    constexpr float k_sdr_hlg = 0.265f;  // BT.2408: 75% HLG signal
+                    bool src_sdr = (src_t <= 2);
+                    bool tgt_sdr = (tgt_t <= 2);
+                    bool src_hlg = (src_t == 4);
+                    bool tgt_hlg = (tgt_t == 4);
+                    bool src_pq  = (src_t == 3);
+                    bool tgt_pq  = (tgt_t == 3);
+                    if (src_sdr && tgt_hlg) return k_sdr_hlg;
+                    if (src_hlg && tgt_sdr) return 1.0f / k_sdr_hlg;
+                    if (src_sdr && tgt_pq)  return 0.01f;
+                    if (src_pq  && tgt_sdr) return 100.0f;
+                    if (src_hlg && tgt_pq)  return 0.1f;
+                    if (src_pq  && tgt_hlg) return 10.0f;
+                    return 1.0f;
                 };
-                float src_peak = get_peak(it);
-                float tgt_peak = get_peak(ot);
-                shader_->set("luminance_scale", src_peak / tgt_peak);
+                shader_->set("luminance_scale", get_luminance_scale(it, ot));
             }
         } else {
             static int no_convert_count = 0;

@@ -559,14 +559,26 @@ struct image_kernel::impl
                 uniforms.output_transfer = cg.output_transfer;
                 uniforms.tone_mapping_op = cg.tone_mapping;
                 // Combine user exposure with BT.2408 luminance adaptation.
-                auto get_peak = [](int transfer) -> float {
-                    switch (transfer) {
-                        case 3: return 10000.0f; // PQ
-                        case 4: return 1000.0f;  // HLG
-                        default: return 100.0f;  // SDR, sRGB, rec709, linear
-                    }
+                // For PQ (absolute): simple ratio 100/10000.
+                // For HLG (scene-referred, OOTF γ=1.2): SDR white at 75% HLG
+                // signal per BT.2408 §3.2 → scene-linear factor 0.265.
+                auto get_luminance_scale = [](int src_t, int tgt_t) -> float {
+                    constexpr float k_sdr_hlg = 0.265f;
+                    bool src_sdr = (src_t <= 2);
+                    bool tgt_sdr = (tgt_t <= 2);
+                    bool src_hlg = (src_t == 4);
+                    bool tgt_hlg = (tgt_t == 4);
+                    bool src_pq  = (src_t == 3);
+                    bool tgt_pq  = (tgt_t == 3);
+                    if (src_sdr && tgt_hlg) return k_sdr_hlg;
+                    if (src_hlg && tgt_sdr) return 1.0f / k_sdr_hlg;
+                    if (src_sdr && tgt_pq)  return 0.01f;
+                    if (src_pq  && tgt_sdr) return 100.0f;
+                    if (src_hlg && tgt_pq)  return 0.1f;
+                    if (src_pq  && tgt_hlg) return 10.0f;
+                    return 1.0f;
                 };
-                float lum_scale = get_peak(cg.input_transfer) / get_peak(cg.output_transfer);
+                float lum_scale = get_luminance_scale(cg.input_transfer, cg.output_transfer);
                 uniforms.exposure = static_cast<float>(cg.exposure) * lum_scale;
                 int ig = std::min(std::max(cg.input_gamut,  0), 6);
                 int og = std::min(std::max(cg.output_gamut, 0), 6);
@@ -625,21 +637,25 @@ struct image_kernel::impl
                     uniforms.output_transfer = ot;
                     uniforms.tone_mapping_op = tm;
 
-                    // BT.2408 luminance adaptation: scale linear light when
-                    // crossing HDR/SDR domains.  Each transfer defines a peak:
-                    //   SDR/sRGB/rec709 = 100, HLG = 1000, PQ = 10000
-                    // Scale = source_peak / target_peak
-                    // Applied via the 'exposure' uniform (same effect as OGL's luminance_scale).
-                    auto get_peak = [](int transfer) -> float {
-                        switch (transfer) {
-                            case 3: return 10000.0f; // PQ
-                            case 4: return 1000.0f;  // HLG
-                            default: return 100.0f;  // SDR, sRGB, rec709, linear
-                        }
+                    // BT.2408 luminance adaptation: scene-referred mapping
+                    // for SDR↔HLG conversions (75% signal for ref white).
+                    auto get_luminance_scale = [](int src_t, int tgt_t) -> float {
+                        constexpr float k_sdr_hlg = 0.265f;
+                        bool src_sdr = (src_t <= 2);
+                        bool tgt_sdr = (tgt_t <= 2);
+                        bool src_hlg = (src_t == 4);
+                        bool tgt_hlg = (tgt_t == 4);
+                        bool src_pq  = (src_t == 3);
+                        bool tgt_pq  = (tgt_t == 3);
+                        if (src_sdr && tgt_hlg) return k_sdr_hlg;
+                        if (src_hlg && tgt_sdr) return 1.0f / k_sdr_hlg;
+                        if (src_sdr && tgt_pq)  return 0.01f;
+                        if (src_pq  && tgt_sdr) return 100.0f;
+                        if (src_hlg && tgt_pq)  return 0.1f;
+                        if (src_pq  && tgt_hlg) return 10.0f;
+                        return 1.0f;
                     };
-                    float src_peak = get_peak(it);
-                    float tgt_peak = get_peak(ot);
-                    uniforms.exposure = src_peak / tgt_peak;
+                    uniforms.exposure = get_luminance_scale(it, ot);
 
                     // Direct gamut matrices for auto conversion (ITU-R BT.2087).
                     // Unlike the color grading path (which routes through ACEScg/AP1
