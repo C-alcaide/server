@@ -244,15 +244,15 @@ vec4 ycbcra_to_rgba(float Y,float Cb,float Cr,float A){
 
 // ── Color grading ───────────────────────────────────────────────────────
 float eotf_srgb(float x){return x<=0.04045?x/12.92:pow((x+0.055)/1.055,2.4);}
-float eotf_rec709(float x){return x<0.081?x/4.5:pow((x+0.099)/1.099,1.0/0.45);}
-float eotf_pq(float x){const float m1=0.1593017578125,m2=78.84375,c1=0.8359375,c2=18.8515625,c3=18.6875;float xp=pow(max(x,0.0),1.0/m2);return pow(max(xp-c1,0.0)/(c2-c3*xp),1.0/m1)*100.0;}
+float eotf_rec709(float x){return pow(max(x,0.0),2.4);}  // BT.1886 display EOTF
+float eotf_pq(float x){const float m1=0.1593017578125,m2=78.84375,c1=0.8359375,c2=18.8515625,c3=18.6875;float xp=pow(max(x,0.0),1.0/m2);return pow(max(xp-c1,0.0)/(c2-c3*xp),1.0/m1);}
 float eotf_hlg(float x){const float a=0.17883277,b=0.28466892,c=0.55991073;return x<=0.5?(x*x)/3.0:(exp((x-c)/a)+b)/12.0;}
 float eotf_logc3(float x){const float a=5.555556,b=0.052272,c=0.247190,d=0.385537,e=5.367655,f=0.092809;return x>e*0.010591+f?(pow(10.0,(x-d)/c)-b)/a:(x-f)/e;}
 float eotf_slog3(float x){const float cut=171.2102946929/1023.0;return x>=cut?pow(10.0,(x-0.410557184750733)/0.341132524981570)*0.18+0.01:(x-95.0/1023.0)*0.01/(cut-95.0/1023.0);}
 vec3 apply_eotf(vec3 r,int t){switch(t){case 1:return vec3(eotf_srgb(r.r),eotf_srgb(r.g),eotf_srgb(r.b));case 2:return vec3(eotf_rec709(r.r),eotf_rec709(r.g),eotf_rec709(r.b));case 3:return vec3(eotf_pq(r.r),eotf_pq(r.g),eotf_pq(r.b));case 4:return vec3(eotf_hlg(r.r),eotf_hlg(r.g),eotf_hlg(r.b));case 5:return vec3(eotf_logc3(r.r),eotf_logc3(r.g),eotf_logc3(r.b));case 6:return vec3(eotf_slog3(r.r),eotf_slog3(r.g),eotf_slog3(r.b));default:return r;}}
 float oetf_srgb(float x){return x<=0.0031308?x*12.92:1.055*pow(max(x,0.0),1.0/2.4)-0.055;}
-float oetf_rec709(float x){return x<0.018?x*4.5:1.099*pow(max(x,0.0),0.45)-0.099;}
-float oetf_pq(float x){const float m1=0.1593017578125,m2=78.84375,c1=0.8359375,c2=18.8515625,c3=18.6875;float xn=pow(clamp(x*100.0/10000.0,0.0,1.0),m1);return pow((c1+c2*xn)/(1.0+c3*xn),m2);}
+float oetf_rec709(float x){return pow(max(x,0.0),1.0/2.4);}  // BT.1886 inverse
+float oetf_pq(float x){const float m1=0.1593017578125,m2=78.84375,c1=0.8359375,c2=18.8515625,c3=18.6875;float xn=pow(clamp(x,0.0,1.0),m1);return pow((c1+c2*xn)/(1.0+c3*xn),m2);}
 float oetf_hlg(float x){const float a=0.17883277,b=0.28466892,c=0.55991073;x=max(x,0.0);return x<=1.0/12.0?sqrt(3.0*x):a*log(12.0*x-b)+c;}
 vec3 apply_oetf(vec3 r,int t){r=max(r,vec3(0.0));switch(t){case 1:return vec3(oetf_srgb(r.r),oetf_srgb(r.g),oetf_srgb(r.b));case 2:return vec3(oetf_rec709(r.r),oetf_rec709(r.g),oetf_rec709(r.b));case 3:return vec3(oetf_pq(r.r),oetf_pq(r.g),oetf_pq(r.b));case 4:return vec3(oetf_hlg(r.r),oetf_hlg(r.g),oetf_hlg(r.b));default:return r;}}
 
@@ -381,7 +381,7 @@ void main(){
     if(flag(F_SHARPEN)){vec2 su=buv;if(flag(F_360)){su=get_equirect_uv(buv);if(flag(F_FLIP_H))su.s=1.0-su.s;if(flag(F_FLIP_V))su.t=1.0-su.t;}else if(flag(F_CURVED)){su=apply_curve_warp(buv);if(flag(F_FLIP_H))su.s=1.0-su.s;if(flag(F_FLIP_V))su.t=1.0-su.t;}else{if(flag(F_FLIP_H))su.s=1.0-su.s;if(flag(F_FLIP_V))su.t=1.0-su.t;}col.rgb=apply_sharpen(su,col.rgb,sharpen_amount,sharpen_radius);}
     if(flag(F_STRAIGHT_ALPHA))col.rgb*=col.a;
 
-    if(flag(F_COLOR_GRADING)){col.rgb=apply_eotf(col.rgb,input_transfer);if(input_transfer==3&&output_transfer==4)col.rgb/=10.0;col.rgb=ubo_mat3(input_to_working_c0,input_to_working_c1,input_to_working_c2)*col.rgb;if(flag(F_GAMUT_COMPRESS))col.rgb=apply_gamut_compress(col.rgb,gc_limit_pad.xyz);col.rgb*=exposure;}
+    if(flag(F_COLOR_GRADING)){col.rgb=apply_eotf(col.rgb,input_transfer);col.rgb*=exposure;col.rgb=ubo_mat3(input_to_working_c0,input_to_working_c1,input_to_working_c2)*col.rgb;if(flag(F_GAMUT_COMPRESS))col.rgb=apply_gamut_compress(col.rgb,gc_limit_pad.xyz);}
     if(flag(F_CDL))col.rgb=apply_cdl(col.rgb,cdl_slope_sat.xyz,cdl_offset_pad.xyz,cdl_power_pad.xyz,cdl_slope_sat.w);
     if(flag(F_LUT3D))col.rgb=apply_lut3d(col.rgb,lut3d_strength);
     if(flag(F_LINEAR_SAT))col.rgb=apply_linear_sat(col.rgb,linear_sat_value);
@@ -410,7 +410,7 @@ void main(){
     col=blend_op(col);
     if(flag(F_CHROMA))col=ChromaKey(col.bgra,flag(F_CHROMA_MASK)).bgra;
 
-    if(flag(F_COLOR_GRADING)){if(tone_mapping_op>0)col.rgb=apply_tone_mapping(col.rgb,tone_mapping_op);col.rgb=ubo_mat3(working_to_output_c0,working_to_output_c1,working_to_output_c2)*col.rgb;col.rgb=apply_oetf(col.rgb,output_transfer);}
+    if(flag(F_COLOR_GRADING)){if(tone_mapping_op>0)col.rgb=apply_tone_mapping(col.rgb,tone_mapping_op);col.rgb=ubo_mat3(working_to_output_c0,working_to_output_c1,working_to_output_c2)*col.rgb;if(tone_mapping_op==0)col.rgb=clamp(col.rgb,0.0,1.0);col.rgb=apply_oetf(col.rgb,output_transfer);}
     if(flag(F_GRAIN))col.rgb=apply_grain(col.rgb,TexCoord.st/TexCoord.q,grain_intensity,grain_size,grain_frame);
     if(flag(F_EDGE_BLEND)){vec2 ub=TexCoord.st/TexCoord.q;float ba=1.0;if(edge_blend_left>0.0)ba*=pow(clamp(ub.x/edge_blend_left,0.0,1.0),edge_blend_gamma);if(edge_blend_right>0.0)ba*=pow(clamp((1.0-ub.x)/edge_blend_right,0.0,1.0),edge_blend_gamma);if(edge_blend_top>0.0)ba*=pow(clamp(ub.y/edge_blend_top,0.0,1.0),edge_blend_gamma);if(edge_blend_bottom>0.0)ba*=pow(clamp((1.0-ub.y)/edge_blend_bottom,0.0,1.0),edge_blend_gamma);col*=ba;}
     fragColor=col.bgra;

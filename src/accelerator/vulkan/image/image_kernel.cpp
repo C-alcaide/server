@@ -558,7 +558,16 @@ struct image_kernel::impl
                 uniforms.input_transfer  = cg.input_transfer;
                 uniforms.output_transfer = cg.output_transfer;
                 uniforms.tone_mapping_op = cg.tone_mapping;
-                uniforms.exposure        = static_cast<float>(cg.exposure);
+                // Combine user exposure with BT.2408 luminance adaptation.
+                auto get_peak = [](int transfer) -> float {
+                    switch (transfer) {
+                        case 3: return 10000.0f; // PQ
+                        case 4: return 1000.0f;  // HLG
+                        default: return 100.0f;  // SDR, sRGB, rec709, linear
+                    }
+                };
+                float lum_scale = get_peak(cg.input_transfer) / get_peak(cg.output_transfer);
+                uniforms.exposure = static_cast<float>(cg.exposure) * lum_scale;
                 int ig = std::min(std::max(cg.input_gamut,  0), 6);
                 int og = std::min(std::max(cg.output_gamut, 0), 6);
                 set_mat3(uniforms.input_to_working,  k_to_working[ig]);
@@ -593,19 +602,21 @@ struct image_kernel::impl
                     uniforms.output_transfer = ot;
                     uniforms.tone_mapping_op = tm;
 
-                    // Luminance scaling between transfer functions.
-                    // After EOTF, linear 1.0 represents:
-                    //   SDR (rec709):  100 nits (display reference white)
-                    //   PQ:            100 nits (shader eotf_pq has *100 factor)
-                    //   HLG:          1000 nits (scene peak)
-                    // OETF expects linear 1.0 to represent:
-                    //   PQ:            100 nits (shader oetf_pq has *100/10000 factor)
-                    //   HLG:          1000 nits (scene peak)
-                    // Note: PQ→HLG is handled by /10.0 in the shader.
-                    float exposure = 1.0f;
-                    if (it == 2 && ot == 4)      exposure = 0.1f;  // SDR→HLG: 100/1000 nits
-                    else if (it == 4 && ot == 3) exposure = 10.0f; // HLG→PQ: 1000→nits/100 unit
-                    uniforms.exposure = exposure;
+                    // BT.2408 luminance adaptation: scale linear light when
+                    // crossing HDR/SDR domains.  Each transfer defines a peak:
+                    //   SDR/sRGB/rec709 = 100, HLG = 1000, PQ = 10000
+                    // Scale = source_peak / target_peak
+                    // Applied via the 'exposure' uniform (same effect as OGL's luminance_scale).
+                    auto get_peak = [](int transfer) -> float {
+                        switch (transfer) {
+                            case 3: return 10000.0f; // PQ
+                            case 4: return 1000.0f;  // HLG
+                            default: return 100.0f;  // SDR, sRGB, rec709, linear
+                        }
+                    };
+                    float src_peak = get_peak(it);
+                    float tgt_peak = get_peak(ot);
+                    uniforms.exposure = src_peak / tgt_peak;
 
                     // Direct gamut matrices for auto conversion (ITU-R BT.2087).
                     // Unlike the color grading path (which routes through ACEScg/AP1
