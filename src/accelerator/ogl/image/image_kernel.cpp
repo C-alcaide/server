@@ -456,8 +456,10 @@ struct image_kernel::impl
             } else {
                 int it = transfer_index(params.pix_desc.color_transfer);
                 int ot = transfer_index(params.target_color_transfer);
-                // Apply tonemapping when going from HDR to SDR
-                int tm = (it >= 3 && ot <= 2) ? 4 : 0; // 4 = ACES_RRT_709, 0 = NONE
+                // Apply tonemapping when going from HDR to SDR.
+                // Use Stephen Hill ACES approximation (op=3) — the full spline
+                // path (op=4) has a c9 input domain bug that clips everything.
+                int tm = (it >= 3 && ot <= 2) ? 3 : 0; // 3 = ACES_RRT (Hill), 0 = NONE
                 shader_->set("color_grading",     true);
                 shader_->set("input_transfer",    it);
                 shader_->set("output_transfer",   ot);

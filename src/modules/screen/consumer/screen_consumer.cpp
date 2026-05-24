@@ -120,6 +120,38 @@ struct win32_gl_window
                 return 0;  // Don't let DefWindowProc destroy the window
             case WM_ERASEBKGND:
                 return 1;  // Prevent flicker
+            case WM_PRINTCLIENT:
+            {
+                // Handle PrintWindow capture by reading the GL front buffer
+                // and painting it to the provided DC.  This runs on the render
+                // thread (pollEvents dispatches here) so the GL context is current.
+                if (self && self->width_ > 0 && self->height_ > 0) {
+                    HDC target_dc = reinterpret_cast<HDC>(wParam);
+                    int w = self->width_;
+                    int h = self->height_;
+
+                    // Read the front buffer (what's currently displayed)
+                    std::vector<uint8_t> pixels(w * h * 4);
+                    glReadBuffer(GL_FRONT);
+                    glReadPixels(0, 0, w, h, GL_BGRA_EXT, GL_UNSIGNED_BYTE, pixels.data());
+
+                    // glReadPixels returns bottom-up; SetDIBitsToDevice with
+                    // negative height handles the flip automatically.
+                    BITMAPINFO bmi       = {};
+                    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+                    bmi.bmiHeader.biWidth    = w;
+                    bmi.bmiHeader.biHeight   = h;  // positive = bottom-up (matches GL)
+                    bmi.bmiHeader.biPlanes   = 1;
+                    bmi.bmiHeader.biBitCount = 32;
+                    bmi.bmiHeader.biCompression = BI_RGB;
+
+                    SetDIBitsToDevice(target_dc,
+                                      0, 0, w, h,
+                                      0, 0, 0, h,
+                                      pixels.data(), &bmi, DIB_RGB_COLORS);
+                }
+                return 0;
+            }
             default:
                 return DefWindowProc(hWnd, msg, wParam, lParam);
         }

@@ -63,6 +63,26 @@ bool is_hbd(const pixel_format_desc& desc)
     return !desc.planes.empty() && desc.planes[0].depth != common::bit_depth::bit8;
 }
 
+// YCbCr→RGB conversion coefficients per color space.
+// cr_to_r = 2*(1-Kr), cb_to_b = 2*(1-Kb)
+// cb_to_g = -Kb*(1-Kb)/Kg * 2, cr_to_g = -Kr*(1-Kr)/Kg * 2
+// where Kg = 1 - Kr - Kb
+struct ycbcr_coeffs {
+    double cr_to_r, cb_to_g, cr_to_g, cb_to_b;
+};
+
+inline ycbcr_coeffs get_ycbcr_coeffs(core::color_space cs)
+{
+    switch (cs) {
+    case core::color_space::bt2020: // Kr=0.2627, Kb=0.0593, Kg=0.6780
+        return {1.4746, -0.16455, -0.57135, 1.8814};
+    case core::color_space::bt601:  // Kr=0.299, Kb=0.114, Kg=0.587
+        return {1.4020, -0.34414, -0.71414, 1.7720};
+    default: // bt709: Kr=0.2126, Kb=0.0722, Kg=0.7152
+        return {1.5748, -0.18732, -0.46812, 1.8556};
+    }
+}
+
 } // anonymous namespace
 
 bool write_frame_png(const const_frame& frame, const std::wstring& path)
@@ -151,7 +171,7 @@ bool write_frame_png(const const_frame& frame, const std::wstring& path)
                 const int   sub_x = (cb_w < width) ? (width / cb_w) : 1;
                 const int   sub_y = (cb_h < height) ? (height / cb_h) : 1;
 
-                // BT.709 limited-range offsets/ranges scaled to bit depth
+                // Limited-range offsets/ranges scaled to bit depth
                 const int n = (depth == common::bit_depth::bit10) ? 10 :
                               (depth == common::bit_depth::bit12) ? 12 : 16;
                 const double scale  = static_cast<double>(1 << (n - 8));
@@ -159,6 +179,7 @@ bool write_frame_png(const const_frame& frame, const std::wstring& path)
                 const double y_rng  = 219.0 * scale;
                 const double c_off  = 128.0 * scale;
                 const double c_rng  = 224.0 * scale;
+                const auto   coeff  = get_ycbcr_coeffs(desc.color_space);
 
                 for (int row = 0; row < height; ++row) {
                     for (int col = 0; col < width; ++col) {
@@ -170,9 +191,9 @@ bool write_frame_png(const const_frame& frame, const std::wstring& path)
                         double cb_n = (*cb_ptr - c_off) / c_rng;
                         double cr_n = (*cr_ptr - c_off) / c_rng;
 
-                        double r = y_n + 1.5748 * cr_n;
-                        double g = y_n - 0.1873 * cb_n - 0.4681 * cr_n;
-                        double b = y_n + 1.8556 * cb_n;
+                        double r = y_n + coeff.cr_to_r * cr_n;
+                        double g = y_n + coeff.cb_to_g * cb_n + coeff.cr_to_g * cr_n;
+                        double b = y_n + coeff.cb_to_b * cb_n;
 
                         auto idx  = static_cast<size_t>(row) * width + col;
                         auto* dst = &rgba16[idx * 8];
@@ -215,6 +236,7 @@ bool write_frame_png(const const_frame& frame, const std::wstring& path)
                 const double y_rng  = 219.0 * scale;
                 const double c_off  = 128.0 * scale;
                 const double c_rng  = 224.0 * scale;
+                const auto   coeff  = get_ycbcr_coeffs(desc.color_space);
 
                 for (int row = 0; row < height; ++row) {
                     for (int col = 0; col < width; ++col) {
@@ -227,9 +249,9 @@ bool write_frame_png(const const_frame& frame, const std::wstring& path)
                         double cb_n = (*cb_ptr - c_off) / c_rng;
                         double cr_n = (*cr_ptr - c_off) / c_rng;
 
-                        double r = y_n + 1.5748 * cr_n;
-                        double g = y_n - 0.1873 * cb_n - 0.4681 * cr_n;
-                        double b = y_n + 1.8556 * cb_n;
+                        double r = y_n + coeff.cr_to_r * cr_n;
+                        double g = y_n + coeff.cb_to_g * cb_n + coeff.cr_to_g * cr_n;
+                        double b = y_n + coeff.cb_to_b * cb_n;
 
                         auto idx  = static_cast<size_t>(row) * width + col;
                         auto* dst = &rgba16[idx * 8];
@@ -314,6 +336,7 @@ bool write_frame_png(const const_frame& frame, const std::wstring& path)
             const int   cb_h  = desc.planes[1].height;
             const int   sub_x = (cb_w < width) ? (width / cb_w) : 1;
             const int   sub_y = (cb_h < height) ? (height / cb_h) : 1;
+            const auto  coeff = get_ycbcr_coeffs(desc.color_space);
 
             auto* dst = rgba.data();
             for (int row = 0; row < height; ++row) {
@@ -322,13 +345,13 @@ bool write_frame_png(const const_frame& frame, const std::wstring& path)
                     double cb_val = cb_plane.data()[(row / sub_y) * cb_w + (col / sub_x)];
                     double cr_val = cr_plane.data()[(row / sub_y) * cb_w + (col / sub_x)];
 
-                    // BT.709 YCbCr → RGB (limited range)
+                    // YCbCr → RGB (limited range)
                     double y_n  = (y_val - 16.0) / 219.0;
                     double cb_n = (cb_val - 128.0) / 224.0;
                     double cr_n = (cr_val - 128.0) / 224.0;
-                    int    r    = static_cast<int>((y_n + 1.5748 * cr_n) * 255.0 + 0.5);
-                    int    g    = static_cast<int>((y_n - 0.1873 * cb_n - 0.4681 * cr_n) * 255.0 + 0.5);
-                    int    b    = static_cast<int>((y_n + 1.8556 * cb_n) * 255.0 + 0.5);
+                    int    r    = static_cast<int>((y_n + coeff.cr_to_r * cr_n) * 255.0 + 0.5);
+                    int    g    = static_cast<int>((y_n + coeff.cb_to_g * cb_n + coeff.cr_to_g * cr_n) * 255.0 + 0.5);
+                    int    b    = static_cast<int>((y_n + coeff.cb_to_b * cb_n) * 255.0 + 0.5);
                     auto   idx  = static_cast<size_t>(row) * width + col;
                     dst[idx * 4 + 0] = static_cast<uint8_t>(std::clamp(r, 0, 255));
                     dst[idx * 4 + 1] = static_cast<uint8_t>(std::clamp(g, 0, 255));
@@ -345,6 +368,7 @@ bool write_frame_png(const const_frame& frame, const std::wstring& path)
             const int   cb_h  = desc.planes[1].height;
             const int   sub_x = (cb_w < width) ? (width / cb_w) : 1;
             const int   sub_y = (cb_h < height) ? (height / cb_h) : 1;
+            const auto  coeff = get_ycbcr_coeffs(desc.color_space);
 
             auto* dst = rgba.data();
             for (int row = 0; row < height; ++row) {
@@ -356,9 +380,9 @@ bool write_frame_png(const const_frame& frame, const std::wstring& path)
                     double y_n  = (y_val - 16.0) / 219.0;
                     double cb_n = (cb_val - 128.0) / 224.0;
                     double cr_n = (cr_val - 128.0) / 224.0;
-                    int    r    = static_cast<int>((y_n + 1.5748 * cr_n) * 255.0 + 0.5);
-                    int    g    = static_cast<int>((y_n - 0.1873 * cb_n - 0.4681 * cr_n) * 255.0 + 0.5);
-                    int    b    = static_cast<int>((y_n + 1.8556 * cb_n) * 255.0 + 0.5);
+                    int    r    = static_cast<int>((y_n + coeff.cr_to_r * cr_n) * 255.0 + 0.5);
+                    int    g    = static_cast<int>((y_n + coeff.cb_to_g * cb_n + coeff.cr_to_g * cr_n) * 255.0 + 0.5);
+                    int    b    = static_cast<int>((y_n + coeff.cb_to_b * cb_n) * 255.0 + 0.5);
                     auto   idx  = static_cast<size_t>(row) * width + col;
                     dst[idx * 4 + 0] = static_cast<uint8_t>(std::clamp(r, 0, 255));
                     dst[idx * 4 + 1] = static_cast<uint8_t>(std::clamp(g, 0, 255));
