@@ -16,7 +16,7 @@ For virtual production features (360° projection, curved screen compensation, p
 8. [Secondary Qualifier](#secondary-qualifier) — HSL keyer with per-key corrections
 9. [Sharpening](#sharpening) — Laplacian unsharp mask
 10. [Film Grain](#film-grain) — Procedural photographic grain emulation
-11. [Internal Pipeline](#internal-pipeline) — Full processing order
+11. [Internal Pipeline](#internal-pipeline) — Full processing order, two color management paths
 12. [Supported Standards](#supported-standards)
 13. [Limitations & Best Practices](#limitations--best-practices)
 14. [Common Workflows](#common-workflows)
@@ -167,7 +167,7 @@ Standard `.cube` format with `LUT_3D_SIZE` header and `R G B` triplets. The pars
 
 ## Linear Saturation
 
-Scene-linear saturation control using Rec.709 luminance weighting. Operates in the ACEScg working space before tone mapping, providing perceptually smooth results that avoid the clipping artifacts of display-referred saturation.
+Scene-linear saturation control using Rec.709 luminance weighting. Operates in the scene-linear working space before tone mapping, providing perceptually smooth results that avoid the clipping artifacts of display-referred saturation.
 
 ### AMCP Command
 
@@ -450,10 +450,10 @@ All color grading runs on the GPU in a single fragment shader pass. The processi
 | 1 | **Texture Fetch** | UV coordinates (projection, curve warp, flip) |
 | 2 | **Sharpening** | `MIXER SHARPEN` |
 | 3 | **Premultiply Alpha** | Automatic (if straight alpha source) |
-| 4 | **EOTF** (decode to linear) | `MIXER COLORSPACE` input_transfer |
-| 5 | **Input Gamut → ACEScg** | `MIXER COLORSPACE` input_gamut |
+| 4 | **EOTF** (decode to linear) | `MIXER COLORSPACE` or auto-color-convert |
+| 5 | **Input Gamut → Working Space** | `MIXER COLORSPACE` or auto-color-convert (see below) |
 | 6 | **Gamut Compression** | `MIXER GAMUTCOMPRESS` |
-| 7 | **Exposure** | `MIXER COLORSPACE` exposure |
+| 7 | **Exposure** | `MIXER COLORSPACE` exposure / auto luminance scaling |
 | 8 | **ASC CDL** | `MIXER CDL` |
 | 9 | **3D LUT** | `MIXER LUT3D` |
 | 10 | **Linear Saturation** | `MIXER LINEARSATURATION` |
@@ -473,12 +473,31 @@ All color grading runs on the GPU in a single fragment shader pass. The processi
 | 24 | **Keying** | `MIXER KEYER` |
 | 25 | **Blend Mode** | `MIXER BLEND` |
 | 26 | **Chroma Key** | `MIXER CHROMA` |
-| 27 | **Tone Mapping** | `MIXER COLORSPACE` tonemapping |
-| 28 | **ACEScg → Output Gamut** | `MIXER COLORSPACE` output_gamut |
-| 29 | **OETF** (encode for display) | `MIXER COLORSPACE` output_transfer |
+| 27 | **Tone Mapping** | `MIXER COLORSPACE` tonemapping / auto (ACES RRT for HDR→SDR) |
+| 28 | **Working Space → Output Gamut** | `MIXER COLORSPACE` or auto-color-convert (see below) |
+| 29 | **OETF** (encode for display) | `MIXER COLORSPACE` or auto-color-convert |
 | 30 | **Film Grain** | `MIXER GRAIN` |
 
-> **Design note:** Grading operations (steps 8–21) run in scene-linear ACEScg space, after the EOTF decode and gamut conversion but before tone mapping and output encoding. This ensures perceptually correct, display-independent results. Sharpening runs on raw texture samples (step 2) to avoid sharpening color grading artifacts. Film grain is applied last (step 30) in display-referred space so it has the correct photographic response.
+> **Design note:** Grading operations (steps 8–21) run in scene-linear space, after the EOTF decode and gamut conversion but before tone mapping and output encoding. This ensures perceptually correct, display-independent results. Sharpening runs on raw texture samples (step 2) to avoid sharpening color grading artifacts. Film grain is applied last (step 30) in display-referred space so it has the correct photographic response.
+
+### Two Color Management Paths
+
+The EOTF/gamut/OETF wrapper (steps 4–7 and 27–29) can be activated in two ways. They are **mutually exclusive** — if `MIXER COLORSPACE` is active, it takes priority:
+
+| | **MIXER COLORSPACE** (manual) | **auto-color-convert** (automatic) |
+| :--- | :--- | :--- |
+| **Activated by** | `MIXER COLORSPACE` command (sets `color_grade.enable`) | `<auto-color-convert>true</auto-color-convert>` in channel config (default) |
+| **Working space** | ACEScg (ACES AP1, D60 white point) | Target channel gamut (BT.709 or BT.2020, D65) |
+| **Gamut matrices** | Input → ACEScg → Output (via chromatic adaptation) | Direct standard matrices (ITU-R BT.2087, no intermediate) |
+| **Gamut accuracy** | Optimized for perceptual grading quality | Norm-correct to ITU standard (< 1 LSB deviation) |
+| **Tone mapping** | User-selected operator | Automatic ACES RRT for HDR→SDR; none otherwise |
+| **When to use** | Camera log workflows, creative grading, explicit control | Mixed SDR/HDR playout without manual setup |
+
+**Key points:**
+
+- **Grading tools work with both paths.** All color grading tools (CDL, LMG, white balance, hue shift, curves, levels, saturation, qualifier, etc.) have independent flags and operate between the EOTF and OETF regardless of which path activated the color conversion. When `auto-color-convert` provides the linearization, grading tools operate in the target channel's linear space.
+- **MIXER COLORSPACE overrides auto.** When you send a `MIXER COLORSPACE` command on a layer, that layer switches from the auto path to the manual ACEScg path. The auto path is skipped entirely for that layer.
+- **Auto handles luminance scaling.** The auto path automatically adjusts exposure for cross-transfer conversions: SDR→HLG (×0.1, mapping 100-nit reference white to HLG scene level), HLG→PQ (×10.0), and PQ→HLG (÷10.0 in shader).
 
 ---
 

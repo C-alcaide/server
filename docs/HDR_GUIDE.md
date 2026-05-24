@@ -1,6 +1,6 @@
 # HDR & Wide-Gamut Guide for CasparVP
 
-This guide covers the HDR-related features added to CasparVP: channel color configuration, BT.2020 / PQ / HLG propagation through the pipeline, DeckLink HDR input/output, Vulkan direct-display HDR output, FFmpeg consumer color metadata, and High Frame Rate (HFR) support.
+This guide covers the HDR-related features added to CasparVP: channel color configuration, automatic color conversion, BT.2020 / PQ / HLG propagation through the pipeline, DeckLink HDR input/output, Vulkan direct-display HDR output, FFmpeg consumer color metadata, and High Frame Rate (HFR) support.
 
 For per-layer color grading and ACES color management (MIXER COLORSPACE, CDL, LUT3D, etc.), see [COLOR_GRADING.md](COLOR_GRADING.md). For Vulkan output architecture details, see [VULKAN_OUTPUT.md](VULKAN_OUTPUT.md).
 
@@ -98,6 +98,34 @@ Color space and transfer function are declared **once on the channel** and flow 
 | `hlg` | ARIB STD-B67 (Hybrid Log-Gamma) | HDR broadcast (BBC, NHK) |
 
 > Setting `color-transfer` has no visual effect unless `color-space` is also `bt2020`. An SDR channel with `color-transfer pq` is technically inconsistent but will not error — the metadata will simply propagate.
+
+### `<auto-color-convert>` (automatic color conversion)
+
+```xml
+<channel>
+  <video-mode>2160p5000</video-mode>
+  <color-depth>16</color-depth>
+  <color-space>bt2020</color-space>
+  <color-transfer>pq</color-transfer>
+
+  <!-- Automatic color conversion: true (default) | false -->
+  <auto-color-convert>true</auto-color-convert>
+
+  <consumers>...</consumers>
+</channel>
+```
+
+When enabled (the default), the mixer automatically converts each layer's color space and transfer function to match the channel output — no `MIXER COLORSPACE` command is needed. For example, an SDR BT.709 clip played on a BT.2020 PQ channel will be automatically linearized, gamut-mapped, luminance-scaled, and re-encoded to PQ.
+
+| Feature | Detail |
+|---------|--------|
+| **Gamut conversion** | Uses standard ITU-R BT.2087 direct matrices between BT.709 and BT.2020 (both D65 white point). Norm-correct to < 1 LSB. |
+| **Luminance scaling** | SDR→HLG: ×0.1 (100→1000 nit reference). HLG→PQ: ×10.0. PQ→HLG: ÷10.0. All others: ×1.0 |
+| **Tone mapping** | Automatic ACES RRT for HDR→SDR (PQ/HLG source on SDR channel). No tone mapping for same-range conversions. |
+| **Grading tools** | All color grading commands (CDL, LMG, white balance, hue shift, curves, levels, saturation, qualifier, etc.) work normally — they operate in scene-linear space between the EOTF and OETF. |
+| **Override** | Sending `MIXER COLORSPACE` on a layer switches that layer to the manual ACEScg pipeline. Auto is skipped for that layer. |
+
+Set `<auto-color-convert>false</auto-color-convert>` to disable automatic conversion (e.g. when all sources already match the channel output, or when every layer uses explicit `MIXER COLORSPACE` commands).
 
 ### `<color-depth>` requirement for HDR
 

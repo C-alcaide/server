@@ -463,8 +463,25 @@ struct image_kernel::impl
                 shader_->set("output_transfer",   ot);
                 shader_->set("tone_mapping_op",   tm);
                 shader_->set("exposure",          1.0f);
-                shader_->set_matrix3("input_to_working",  k_to_working[ig]);
-                shader_->set_matrix3("working_to_output", k_to_output[og]);
+
+                // Direct gamut matrices for auto conversion (ITU-R BT.2087).
+                // Unlike the color grading path (which routes through ACEScg/AP1
+                // working space for perceptual benefits), auto conversion uses
+                // standard direct matrices — both BT.709 and BT.2020 share the
+                // D65 white point, so no chromatic adaptation is needed.
+                static const float k_direct[2][2][9] = {
+                    { // from bt709
+                        {1,0,0, 0,1,0, 0,0,1}, // → bt709 (identity)
+                        {0.6274039f,0.3292830f,0.0433131f, 0.0690972f,0.9195404f,0.0113623f, 0.0163914f,0.0880133f,0.8955953f}, // → bt2020
+                    },
+                    { // from bt2020
+                        {1.6604910f,-0.5876411f,-0.0728499f, -0.1245505f,1.1328999f,-0.0083494f, -0.0181508f,-0.1005789f,1.1187297f}, // → bt709
+                        {1,0,0, 0,1,0, 0,0,1}, // → bt2020 (identity)
+                    },
+                };
+                static const float k_identity[9] = {1,0,0, 0,1,0, 0,0,1};
+                shader_->set_matrix3("input_to_working",  k_direct[ig][og]);
+                shader_->set_matrix3("working_to_output", k_identity);
                 static bool logged_matrices = false;
                 if (!logged_matrices) {
                     CASPAR_LOG(trace) << L"[ogl_kernel] GAMUT: ig=" << ig << L" og=" << og

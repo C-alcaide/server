@@ -591,9 +591,39 @@ struct image_kernel::impl
                     uniforms.input_transfer  = it;
                     uniforms.output_transfer = ot;
                     uniforms.tone_mapping_op = tm;
-                    uniforms.exposure        = 1.0f;
-                    set_mat3(uniforms.input_to_working,  k_to_working[ig]);
-                    set_mat3(uniforms.working_to_output, k_to_output[og]);
+
+                    // Luminance scaling between transfer functions.
+                    // After EOTF, linear 1.0 represents:
+                    //   SDR (rec709):  100 nits (display reference white)
+                    //   PQ:            100 nits (shader eotf_pq has *100 factor)
+                    //   HLG:          1000 nits (scene peak)
+                    // OETF expects linear 1.0 to represent:
+                    //   PQ:            100 nits (shader oetf_pq has *100/10000 factor)
+                    //   HLG:          1000 nits (scene peak)
+                    // Note: PQ→HLG is handled by /10.0 in the shader.
+                    float exposure = 1.0f;
+                    if (it == 2 && ot == 4)      exposure = 0.1f;  // SDR→HLG: 100/1000 nits
+                    else if (it == 4 && ot == 3) exposure = 10.0f; // HLG→PQ: 1000→nits/100 unit
+                    uniforms.exposure = exposure;
+
+                    // Direct gamut matrices for auto conversion (ITU-R BT.2087).
+                    // Unlike the color grading path (which routes through ACEScg/AP1
+                    // working space for perceptual benefits), auto conversion uses
+                    // standard direct matrices — both BT.709 and BT.2020 share the
+                    // D65 white point, so no chromatic adaptation is needed.
+                    static const float k_direct[2][2][9] = {
+                        { // from bt709
+                            {1,0,0, 0,1,0, 0,0,1}, // → bt709 (identity)
+                            {0.6274039f,0.3292830f,0.0433131f, 0.0690972f,0.9195404f,0.0113623f, 0.0163914f,0.0880133f,0.8955953f}, // → bt2020
+                        },
+                        { // from bt2020
+                            {1.6604910f,-0.5876411f,-0.0728499f, -0.1245505f,1.1328999f,-0.0083494f, -0.0181508f,-0.1005789f,1.1187297f}, // → bt709
+                            {1,0,0, 0,1,0, 0,0,1}, // → bt2020 (identity)
+                        },
+                    };
+                    static const float k_identity[9] = {1,0,0, 0,1,0, 0,0,1};
+                    set_mat3(uniforms.input_to_working,  k_direct[ig][og]);
+                    set_mat3(uniforms.working_to_output, k_identity);
                 }
             }
         }
