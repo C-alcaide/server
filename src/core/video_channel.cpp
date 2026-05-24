@@ -119,11 +119,12 @@ struct video_channel::impl final
          std::unique_ptr<image_mixer>              image_mixer,
          std::function<void(core::monitor::state)> tick,
          color_transfer                            default_color_transfer = color_transfer::sdr,
-         bool                                      auto_color_convert     = true)
+         bool                                      auto_color_convert     = true,
+         int                                       auto_tone_map          = 0)
         : channel_info_(index, image_mixer->depth(), default_color_space, default_color_transfer, image_mixer->is_vulkan(), image_mixer->native_gl_context())
         , output_(graph_, format_desc, channel_info_)
         , image_mixer_(std::move(image_mixer))
-        , mixer_(index, graph_, image_mixer_, default_color_space, default_color_transfer, auto_color_convert)
+        , mixer_(index, graph_, image_mixer_, default_color_space, default_color_transfer, auto_color_convert, auto_tone_map)
         , stage_(std::make_shared<core::stage>(index, graph_, format_desc))
         , tick_(std::move(tick))
     {
@@ -300,8 +301,9 @@ video_channel::video_channel(int                                       index,
                              std::unique_ptr<image_mixer>              image_mixer,
                              std::function<void(core::monitor::state)> tick,
                              color_transfer                            default_color_transfer,
-                             bool                                      auto_color_convert)
-    : impl_(new impl(index, format_desc, default_color_space, std::move(image_mixer), std::move(tick), default_color_transfer, auto_color_convert))
+                             bool                                      auto_color_convert,
+                             int                                       auto_tone_map)
+    : impl_(new impl(index, format_desc, default_color_space, std::move(image_mixer), std::move(tick), default_color_transfer, auto_color_convert, auto_tone_map))
 {
 }
 video_channel::~video_channel() {}

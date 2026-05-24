@@ -77,7 +77,7 @@ class image_mixer final : public core::image_mixer
     previz_renderer&  get_previz_renderer();
     void              set_channel_texture_store(std::shared_ptr<channel_texture_store> store);
 
-    void set_target_color(core::color_space cs, core::color_transfer ct, bool auto_convert) override;
+    void set_target_color(core::color_space cs, core::color_transfer ct, bool auto_convert, int auto_tone_map) override;
 
   private:
     struct impl;

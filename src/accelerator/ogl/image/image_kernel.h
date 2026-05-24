@@ -59,6 +59,7 @@ struct draw_params final
     core::color_space                           target_color_space    = core::color_space::bt709;
     core::color_transfer                        target_color_transfer = core::color_transfer::sdr;
     bool                                        auto_color_convert    = true;
+    int                                         auto_tone_map         = 0;
 };
 
 class image_kernel final

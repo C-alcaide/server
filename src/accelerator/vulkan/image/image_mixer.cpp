@@ -93,6 +93,7 @@ class image_renderer
     core::color_space    target_color_space    = core::color_space::bt709;
     core::color_transfer target_color_transfer = core::color_transfer::sdr;
     bool                 auto_color_convert    = true;
+    int                  auto_tone_map         = 0;
 
     explicit image_renderer(const spl::shared_ptr<device>& vulkan, const size_t max_frame_size, common::bit_depth depth)
         : vulkan_(vulkan)
@@ -290,6 +291,7 @@ class image_renderer
         draw_params.target_color_space    = target_color_space;
         draw_params.target_color_transfer = target_color_transfer;
         draw_params.auto_color_convert    = auto_color_convert;
+        draw_params.auto_tone_map         = auto_tone_map;
 
         draw_params.pix_desc   = std::move(item.pix_desc);
         draw_params.transforms = std::move(item.transforms);
@@ -392,11 +394,12 @@ struct image_mixer::impl
 
     void update_aspect_ratio(double aspect_ratio) { aspect_ratio_ = aspect_ratio; }
 
-    void set_target_color(core::color_space cs, core::color_transfer ct, bool auto_convert)
+    void set_target_color(core::color_space cs, core::color_transfer ct, bool auto_convert, int auto_tone_map)
     {
         renderer_.target_color_space    = cs;
         renderer_.target_color_transfer = ct;
         renderer_.auto_color_convert    = auto_convert;
+        renderer_.auto_tone_map         = auto_tone_map;
     }
 
     void push(const core::frame_transform& transform)
@@ -705,9 +708,9 @@ ogl::previz_renderer* image_mixer::get_previz_renderer()
     return impl_->get_previz_renderer();
 }
 
-void image_mixer::set_target_color(core::color_space cs, core::color_transfer ct, bool auto_convert)
+void image_mixer::set_target_color(core::color_space cs, core::color_transfer ct, bool auto_convert, int auto_tone_map)
 {
-    impl_->set_target_color(cs, ct, auto_convert);
+    impl_->set_target_color(cs, ct, auto_convert, auto_tone_map);
 }
 
 }}} // namespace caspar::accelerator::vulkan

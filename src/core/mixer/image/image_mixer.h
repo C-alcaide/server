@@ -65,11 +65,12 @@ class image_mixer
 
     virtual void set_cpu_readback_needed(bool needed) { (void)needed; }
 
-    virtual void set_target_color(color_space cs, color_transfer ct, bool auto_convert)
+    virtual void set_target_color(color_space cs, color_transfer ct, bool auto_convert, int auto_tone_map = 0)
     {
         (void)cs;
         (void)ct;
         (void)auto_convert;
+        (void)auto_tone_map;
     }
 };
 

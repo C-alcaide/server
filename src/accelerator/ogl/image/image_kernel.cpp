@@ -487,12 +487,8 @@ struct image_kernel::impl
             } else {
                 int it = transfer_index(params.pix_desc.color_transfer);
                 int ot = transfer_index(params.target_color_transfer);
-                // BT.2408 Method 0: no artistic tone mapping for auto conversion.
-                // luminance_scale maps HDR linear light to SDR domain (1.0 = 100 nits),
-                // and values above 1.0 are naturally clipped by the framebuffer.
-                // Users who want highlight-preserving tone mapping should use the
-                // explicit color_grade path with a chosen operator.
-                int tm = 0;
+                // Use channel's configured auto tone-map operator (default: hard clamp).
+                int tm = params.auto_tone_map;
                 shader_->set("color_grading",     true);
                 shader_->set("input_transfer",    it);
                 shader_->set("output_transfer",   ot);

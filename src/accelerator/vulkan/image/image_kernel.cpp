@@ -630,8 +630,8 @@ struct image_kernel::impl
                 if (ig != og || params.pix_desc.color_transfer != params.target_color_transfer) {
                     int it = transfer_index(params.pix_desc.color_transfer);
                     int ot = transfer_index(params.target_color_transfer);
-                    // BT.2408 Method 0: no tone mapping for auto conversion.
-                    int tm = 0;
+                    // Use channel's configured auto tone-map operator (default: hard clamp).
+                    int tm = params.auto_tone_map;
                     uniforms.flags |= static_cast<uint32_t>(shader_flags::color_grading);
                     uniforms.input_transfer  = it;
                     uniforms.output_transfer = ot;
