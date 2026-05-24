@@ -121,11 +121,78 @@ When enabled (the default), the mixer automatically converts each layer's color 
 |---------|--------|
 | **Gamut conversion** | Uses standard ITU-R BT.2087 direct matrices between BT.709 and BT.2020 (both D65 white point). Norm-correct to < 1 LSB. |
 | **Luminance scaling** | SDR→HLG: ×0.1 (100→1000 nit reference). HLG→PQ: ×10.0. PQ→HLG: ÷10.0. All others: ×1.0 |
-| **Tone mapping** | Automatic ACES RRT for HDR→SDR (PQ/HLG source on SDR channel). No tone mapping for same-range conversions. |
+| **Tone mapping** | Configurable via `<auto-tone-map>`. Default is hard-clamp (broadcast standard). Options: reinhard, aces_filmic, aces_rrt, hlg_ootf. See below. |
 | **Grading tools** | All color grading commands (CDL, LMG, white balance, hue shift, curves, levels, saturation, qualifier, etc.) work normally — they operate in scene-linear space between the EOTF and OETF. |
 | **Override** | Sending `MIXER COLORSPACE` on a layer switches that layer to the manual ACEScg pipeline. Auto is skipped for that layer. |
 
 Set `<auto-color-convert>false</auto-color-convert>` to disable automatic conversion (e.g. when all sources already match the channel output, or when every layer uses explicit `MIXER COLORSPACE` commands).
+
+### `<auto-tone-map>` (channel-level tone mapping)
+
+```xml
+<channel>
+  <video-mode>2160p5000</video-mode>
+  <color-depth>16</color-depth>
+  <color-space>bt2020</color-space>
+  <color-transfer>hlg</color-transfer>
+
+  <!-- Tone mapping applied during auto color conversion -->
+  <auto-tone-map>hlg_ootf</auto-tone-map>
+
+  <!-- Display peak luminance for HLG OOTF gamma calculation -->
+  <display-peak-luminance>1000</display-peak-luminance>
+
+  <consumers>...</consumers>
+</channel>
+```
+
+When `auto-color-convert` is enabled and cross-domain conversion occurs (e.g. SDR source on an HLG channel), the specified tone-mapping operator is applied in linear light after luminance scaling and before the output OETF.
+
+| Value | Operator | Description |
+|:---|:---|:---|
+| `none` | Hard clamp (default) | Standard broadcast behavior — clips to [0,1] |
+| `reinhard` | Reinhard | Simple luminance-preserving curve: `v/(v+1)` |
+| `aces_filmic` | ACES Filmic | Narkowicz 2015 approximation — filmic S-curve |
+| `aces_rrt` | ACES RRT+ODT | Reference Rendering Transform + Output Device Transform |
+| `hlg_ootf` | BT.2100 HLG OOTF | Display-referred mapping — uses `<display-peak-luminance>` |
+
+The `<display-peak-luminance>` setting (in nits, default 1000) controls the gamma exponent in the HLG OOTF formula per BT.2100:
+
+```
+γ = 1.2 × 1.111^(log₂(Lw/1000))
+```
+
+where `Lw` is the display's nominal peak luminance. Lower values (e.g. 600 for a typical LED wall) produce a steeper gamma curve, compressing highlights more aggressively.
+
+### Per-consumer tone-map override
+
+Individual consumers can override the channel-level tone mapping with their own display-specific settings. This enables a single channel to drive multiple displays with different characteristics (e.g. a reference monitor at 1000 nits and an LED wall at 600 nits):
+
+```xml
+<consumers>
+  <screen>
+    <auto-tone-map>hlg_ootf</auto-tone-map>
+    <display-peak-luminance>600</display-peak-luminance>
+  </screen>
+  <vulkan-output>
+    <gpu>0</gpu>
+    <device>1</device>
+    <auto-tone-map>hlg_ootf</auto-tone-map>
+    <display-peak-luminance>1500</display-peak-luminance>
+  </vulkan-output>
+</consumers>
+```
+
+The per-consumer tone-map is applied as a **display transform** after the mixer's compositing stage:
+- **Screen consumer**: OpenGL fragment shader applies EOTF decode → tone-map → OETF re-encode
+- **Vulkan output**: Compute shader inserts tone-map between gamut conversion and output OETF
+
+Per-consumer tone-mapping is independent of the channel-level `<auto-tone-map>` — they operate at different pipeline stages. The channel-level setting maps individual source layers to the channel's working space; the consumer-level setting transforms the final composited output for a specific display.
+
+**AMCP (screen consumer)**:
+```
+ADD 1 SCREEN TONE_MAP hlg_ootf PEAK_LUMINANCE 600
+```
 
 ### `<color-depth>` requirement for HDR
 
@@ -301,9 +368,10 @@ When hardware HDR is not available, a Vulkan compute shader converts the mixer's
 
 1. Linearize (undo sRGB EOTF)
 2. 3×3 gamut matrix (BT.709 → target primaries)
-3. Apply output OETF (PQ, HLG, gamma, etc.)
+3. Tone mapping (if `<auto-tone-map>` is set on the consumer)
+4. Apply output OETF (PQ, HLG, gamma, etc.)
 
-When no conversion is needed (gamut = BT.709, transfer = sRGB), the compute pass is completely bypassed.
+When no conversion is needed (gamut = BT.709, transfer = sRGB, no tone-map), the compute pass is completely bypassed.
 
 ### Supported Output Gamuts
 
@@ -764,7 +832,7 @@ Output for DCI projectors with gamma 2.6:
 
 - **Dynamic per-frame transfer function switching** is supported on the *input* side (DeckLink capture and file playback detect it per frame). On the *output* side the transfer function is set at channel-start time and is fixed for the session — runtime changes require a channel restart.
 
-- **No tone-mapping is performed** by the channel-level HDR pipeline. If you play SDR content on a BT.2020/PQ channel it will be treated as narrow-range WCG PQ. For per-layer tone mapping, use `MIXER COLORSPACE` with a tone mapping operator (see [COLOR_GRADING.md](COLOR_GRADING.md)). The Vulkan output consumer can also perform gamut/OETF conversion at the output stage via its compute shader or hardware HDR path.
+- **Tone mapping** is available at two levels: (1) channel-level via `<auto-tone-map>`, applied during auto color conversion when source and channel transfer functions differ; and (2) per-consumer via `<auto-tone-map>` on screen or vulkan-output consumers, applied as a display transform on the final composited output. Without an explicit tone-map setting, the auto path hard-clips to [0,1] (broadcast standard). For per-layer creative tone mapping, use `MIXER COLORSPACE` with a tone mapping operator (see [COLOR_GRADING.md](COLOR_GRADING.md)).
 
 - **HDR static metadata** (MaxCLL, MaxFALL, mastering display luminance) is set per-consumer via `<hdr-metadata>` in the DeckLink or Vulkan consumer config. The FFmpeg consumer currently writes only the EOTF/primaries/matrix into the encoder context; mastering display SEI is not set automatically — use `-x265-params` or Dolby Vision tooling for full HDR10 SEI.
 
