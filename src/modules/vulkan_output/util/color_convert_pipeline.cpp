@@ -171,7 +171,7 @@ void color_convert_pipeline::dispatch(VkCommandBuffer cmd, uint32_t width, uint3
     vkCmdDispatch(cmd, gx, gy, 1);
 }
 
-void color_convert_pipeline::update_config(output_gamut gamut, output_eotf eotf, float max_luminance)
+void color_convert_pipeline::update_config(output_gamut gamut, output_eotf eotf, float max_luminance, int tone_map_op)
 {
     build_gamut_matrix(gamut, push_constants_.gamut_matrix);
 
@@ -186,15 +186,16 @@ void color_convert_pipeline::update_config(output_gamut gamut, output_eotf eotf,
     }
 
     push_constants_.max_luminance = max_luminance;
-    push_constants_.padding1      = 0.0f;
+    push_constants_.tone_map_op   = tone_map_op;
     push_constants_.padding2      = 0.0f;
 
     // Active if any conversion is needed
-    active_ = (gamut != output_gamut::bt709 || eotf != output_eotf::srgb);
+    active_ = (gamut != output_gamut::bt709 || eotf != output_eotf::srgb || tone_map_op != 0);
 
     CASPAR_LOG(debug) << "[color_convert_pipeline] Config updated: gamut="
                       << static_cast<int>(gamut) << " eotf=" << static_cast<int>(eotf)
-                      << " max_lum=" << max_luminance << " active=" << (active_ ? "yes" : "no");
+                      << " max_lum=" << max_luminance << " tone_map=" << tone_map_op
+                      << " active=" << (active_ ? "yes" : "no");
 }
 
 // ─── Private ───────────────────────────────────────────────────────────────

@@ -37,7 +37,7 @@ struct color_convert_push_constants
     float gamut_matrix[16]; // 4×4 (only 3×3 used, row-major)
     int   eotf_mode;       // 0=srgb, 1=linear, 2=pq, 3=hlg, 4=gamma24, 5=gamma26
     float max_luminance;   // PQ max nits
-    float padding1;
+    int   tone_map_op;     // 0=none, 1=reinhard, 2=aces_filmic, 3=aces_rrt, 7=hlg_ootf
     float padding2;
 };
 static_assert(sizeof(color_convert_push_constants) == 80, "Push constants must be 80 bytes");
@@ -64,8 +64,8 @@ class color_convert_pipeline
     /// The intermediate image must be in VK_IMAGE_LAYOUT_GENERAL before calling.
     void dispatch(VkCommandBuffer cmd, uint32_t width, uint32_t height);
 
-    /// Update the push constants (gamut matrix + EOTF mode) from config.
-    void update_config(output_gamut gamut, output_eotf eotf, float max_luminance);
+    /// Update the push constants (gamut matrix + EOTF mode + tone map) from config.
+    void update_config(output_gamut gamut, output_eotf eotf, float max_luminance, int tone_map_op = 0);
 
     /// Returns true if conversion is needed (gamut != bt709 or eotf != srgb)
     bool is_active() const { return active_; }

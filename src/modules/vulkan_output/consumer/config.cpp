@@ -147,6 +147,22 @@ configuration parse_config(const boost::property_tree::wptree& ptree)
     // Display blanker companion process
     config.display_blanker = ptree.get(L"display-blanker", false);
 
+    // Per-consumer tone mapping override
+    auto tone_map_str = ptree.get(L"auto-tone-map", L"");
+    if (!tone_map_str.empty()) {
+        if (tone_map_str == L"none")
+            config.tone_map_op = 0;
+        else if (tone_map_str == L"reinhard")
+            config.tone_map_op = 1;
+        else if (tone_map_str == L"aces_filmic")
+            config.tone_map_op = 2;
+        else if (tone_map_str == L"aces_rrt")
+            config.tone_map_op = 3;
+        else if (tone_map_str == L"hlg_ootf")
+            config.tone_map_op = 7;
+    }
+    config.display_peak_luminance = ptree.get(L"display-peak-luminance", config.display_peak_luminance);
+
     return config;
 }
 

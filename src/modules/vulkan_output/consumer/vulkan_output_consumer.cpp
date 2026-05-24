@@ -486,12 +486,16 @@ class vulkan_output_consumer : public core::frame_consumer
         // When hardware HDR is active (NvAPI UHDA mode), the display engine handles both
         // PQ encoding and BT.709→BT.2020 gamut mapping — no compute shader needed.
         if (!adapter_mismatch_ && !hw_hdr_active_ &&
-            (config_.gamut != output_gamut::bt709 || config_.eotf != output_eotf::srgb)) {
+            (config_.gamut != output_gamut::bt709 || config_.eotf != output_eotf::srgb || config_.tone_map_op != 0)) {
             try {
                 color_pipeline_ = std::make_unique<color_convert_pipeline>(
                     *device_, format_desc_.width, format_desc_.height);
+                // Use display_peak_luminance for tone-mapping, max_cll for PQ encoding
+                float lum = config_.tone_map_op != 0
+                    ? config_.display_peak_luminance
+                    : static_cast<float>(config_.max_cll);
                 color_pipeline_->update_config(config_.gamut, config_.eotf,
-                                               static_cast<float>(config_.max_cll));
+                                               lum, config_.tone_map_op);
                 CASPAR_LOG(info) << print() << L" Color space conversion enabled.";
             } catch (const std::exception& e) {
                 CASPAR_LOG(error) << print()
@@ -1205,8 +1209,11 @@ class vulkan_output_consumer : public core::frame_consumer
             try {
                 color_pipeline_ = std::make_unique<color_convert_pipeline>(
                     *device_, swapchain_.width, swapchain_.height);
+                float lum = config_.tone_map_op != 0
+                    ? config_.display_peak_luminance
+                    : static_cast<float>(config_.max_cll);
                 color_pipeline_->update_config(config_.gamut, config_.eotf,
-                                               static_cast<float>(config_.max_cll));
+                                               lum, config_.tone_map_op);
                 CASPAR_LOG(info) << print() << L" Color pipeline recreated for new dimensions.";
             } catch (const std::exception& e) {
                 CASPAR_LOG(error) << print() << L" Failed to recreate color pipeline: " << e.what();

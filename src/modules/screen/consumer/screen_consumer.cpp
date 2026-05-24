@@ -422,6 +422,9 @@ struct configuration
     bool            no_taskbar    = false;
     bool            closeable     = true;
     bool            no_activate   = false;
+    int             tone_map_op   = 0;    // 0=none(passthrough), 7=hlg_ootf
+    float           display_peak_luminance = 1000.0f;
+    int             channel_transfer = 0;  // set at init: 2=sdr/rec709, 3=pq, 4=hlg
 };
 
 struct frame
@@ -704,6 +707,9 @@ struct screen_consumer
                 }
 
                 shader_->set("colour_space", config_.colour_space);
+                shader_->set("tone_map_op", config_.tone_map_op);
+                shader_->set("display_peak_luminance", config_.display_peak_luminance);
+                shader_->set("channel_transfer", config_.channel_transfer);
                 if (config_.colour_space == configuration::colour_spaces::datavideo_full ||
                     config_.colour_space == configuration::colour_spaces::datavideo_limited) {
                     CASPAR_LOG(info) << print() << " Enabled colours conversion for DataVideo TC-100/TC-200 "
@@ -1594,7 +1600,7 @@ struct gpu_strategy : public display_strategy
 
 struct screen_consumer_proxy : public core::frame_consumer
 {
-    const configuration              config_;
+    configuration                    config_;
     std::unique_ptr<screen_consumer> consumer_;
     bool                             use_vulkan_ = false;
 
@@ -1612,6 +1618,12 @@ struct screen_consumer_proxy : public core::frame_consumer
     {
         consumer_.reset();
         use_vulkan_ = channel_info.use_vulkan;
+        // Set channel transfer so the screen shader knows what EOTF to apply
+        switch (channel_info.default_color_transfer) {
+            case core::color_transfer::pq:  config_.channel_transfer = 3; break;
+            case core::color_transfer::hlg: config_.channel_transfer = 4; break;
+            default:                        config_.channel_transfer = 2; break; // sdr/rec709
+        }
         consumer_ = std::make_unique<screen_consumer>(config_, format_desc, channel_info.index,
                                                       channel_info.gl_share_context, use_vulkan_);
     }
@@ -1703,6 +1715,21 @@ spl::shared_ptr<core::frame_consumer> create_consumer(const std::vector<std::wst
         config.screen_height = get_param(L"HEIGHT", params, 0);
     }
 
+    if (contains_param(L"TONE_MAP", params)) {
+        auto tm = get_param(L"TONE_MAP", params);
+        if (boost::iequals(tm, L"reinhard"))
+            config.tone_map_op = 1;
+        else if (boost::iequals(tm, L"aces_filmic"))
+            config.tone_map_op = 2;
+        else if (boost::iequals(tm, L"aces_rrt"))
+            config.tone_map_op = 3;
+        else if (boost::iequals(tm, L"hlg_ootf"))
+            config.tone_map_op = 7;
+    }
+    if (contains_param(L"PEAK_LUMINANCE", params)) {
+        config.display_peak_luminance = static_cast<float>(get_param(L"PEAK_LUMINANCE", params, 1000));
+    }
+
     if (config.sbs_key && config.key_only) {
         CASPAR_LOG(warning) << L" Key-only not supported with configuration of side-by-side fill and key. Ignored.";
         config.key_only = false;
@@ -1764,6 +1791,21 @@ create_preconfigured_consumer(const boost::property_tree::wptree&               
         CASPAR_LOG(warning) << L" Key only not supported for DataVideo TC100/TC200. Ignored.";
         config.key_only = false;
     }
+
+    auto tone_map_str = ptree.get(L"auto-tone-map", L"");
+    if (!tone_map_str.empty()) {
+        if (tone_map_str == L"none")
+            config.tone_map_op = 0;
+        else if (tone_map_str == L"reinhard")
+            config.tone_map_op = 1;
+        else if (tone_map_str == L"aces_filmic")
+            config.tone_map_op = 2;
+        else if (tone_map_str == L"aces_rrt")
+            config.tone_map_op = 3;
+        else if (tone_map_str == L"hlg_ootf")
+            config.tone_map_op = 7;
+    }
+    config.display_peak_luminance = ptree.get(L"display-peak-luminance", config.display_peak_luminance);
 
     auto stretch_str = ptree.get(L"stretch", L"fill");
     if (stretch_str == L"none") {

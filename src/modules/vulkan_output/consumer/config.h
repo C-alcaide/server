@@ -126,6 +126,10 @@ struct configuration
     // CasparCG's output. If CasparCG crashes, the output stays black instead of
     // showing the Windows desktop.
     bool             display_blanker = false;
+
+    // Per-consumer tone mapping override
+    int              tone_map_op = 0; // 0=none, 1=reinhard, 2=aces_filmic, 3=aces_rrt, 7=hlg_ootf
+    float            display_peak_luminance = 1000.0f;
 };
 
 configuration parse_config(const boost::property_tree::wptree& ptree);

@@ -17,7 +17,7 @@ layout(push_constant) uniform PushConstants {
     mat4  gamut_matrix;   // 3×3 embedded in 4×4 (row-major, col 3 and row 3 unused)
     int   eotf_mode;     // 0=srgb, 1=linear, 2=pq, 3=hlg, 4=gamma24, 5=gamma26
     float max_luminance; // For PQ: max nits (e.g. 1000.0)
-    float padding1;
+    int   tone_map_op;   // 0=none, 1=reinhard, 2=aces_filmic, 3=aces_rrt, 7=hlg_ootf
     float padding2;
 } pc;
 
@@ -80,6 +80,56 @@ vec3 linear_to_gamma(vec3 c, float gamma) {
     return pow(clamp(c, vec3(0.0), vec3(1.0)), vec3(1.0 / gamma));
 }
 
+// ─── Tone-map operators ────────────────────────────────────────────────────
+
+vec3 tonemap_reinhard(vec3 v) {
+    return v / (v + vec3(1.0));
+}
+
+vec3 tonemap_aces_filmic(vec3 v) {
+    // Narkowicz 2015 ACES filmic approximation
+    const float a = 2.51;
+    const float b = 0.03;
+    const float c = 2.43;
+    const float d = 0.59;
+    const float e = 0.14;
+    return clamp((v * (a * v + b)) / (v * (c * v + d) + e), 0.0, 1.0);
+}
+
+vec3 tonemap_aces_rrt(vec3 v) {
+    // RRT+ODT approximation
+    const mat3 input_mat = mat3(
+        0.59719, 0.07600, 0.02840,
+        0.35458, 0.90834, 0.13383,
+        0.04823, 0.01566, 0.83777);
+    const mat3 output_mat = mat3(
+         1.60475, -0.10208, -0.00327,
+        -0.53108,  1.10813, -0.07276,
+        -0.07367, -0.00605,  1.07602);
+    v = input_mat * v;
+    vec3 a = v * (v + 0.0245786) - 0.000090537;
+    vec3 b = v * (0.983729 * v + 0.4329510) + 0.238081;
+    v = a / b;
+    return clamp(output_mat * v, 0.0, 1.0);
+}
+
+vec3 tonemap_hlg_ootf(vec3 v, float npl) {
+    // BT.2100 HLG OOTF: scene-linear → display-linear
+    float gamma = 1.2 * pow(1.111, log2(npl / 1000.0));
+    float Ys = dot(v, vec3(0.2627, 0.6780, 0.0593));
+    return v * pow(max(Ys, 1e-6), gamma - 1.0);
+}
+
+vec3 apply_tone_map(vec3 v) {
+    switch (pc.tone_map_op) {
+        case 1:  return tonemap_reinhard(v);
+        case 2:  return tonemap_aces_filmic(v);
+        case 3:  return tonemap_aces_rrt(v);
+        case 7:  return tonemap_hlg_ootf(v, pc.max_luminance);
+        default: return v;
+    }
+}
+
 // ─── Main ──────────────────────────────────────────────────────────────────
 
 void main() {
@@ -98,6 +148,11 @@ void main() {
     // C++ stores matrices row-major, but GLSL mat4 is column-major.
     // Using vec4 * mat4 (row-vector × column-major) gives correct row-major semantics.
     vec3 mapped = max((vec4(linear_rgb, 1.0) * pc.gamut_matrix).rgb, vec3(0.0));
+
+    // Step 2.5: Tone mapping (if configured)
+    if (pc.tone_map_op != 0) {
+        mapped = apply_tone_map(mapped);
+    }
 
     // Step 3: Apply output OETF
     vec3 output_rgb;
