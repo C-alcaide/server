@@ -48,6 +48,7 @@
 #include <tbb/concurrent_queue.h>
 
 #include <iomanip>
+#include <mutex>
 #include <thread>
 #include <tuple> // std::ignore
 #include <utility>
@@ -159,9 +160,9 @@ struct win32_gl_window
 
     static const wchar_t* window_class_name()
     {
-        static bool registered = false;
+        static std::once_flag flag;
         static const wchar_t* name = L"CasparCG_ScreenConsumer";
-        if (!registered) {
+        std::call_once(flag, [&] {
             WNDCLASSW wc  = {};
             wc.style      = CS_OWNDC;
             wc.lpfnWndProc  = WndProc;
@@ -169,8 +170,7 @@ struct win32_gl_window
             wc.lpszClassName = name;
             wc.hCursor      = LoadCursor(nullptr, IDC_ARROW);
             RegisterClassW(&wc);
-            registered = true;
-        }
+        });
         return name;
     }
 

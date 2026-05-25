@@ -267,7 +267,7 @@ struct image_kernel::impl
         const auto color_space = is_hd ? params.pix_desc.color_space : core::color_space::bt601;
 
         const float color_matrices[3][9] = {
-            {1.0, 0.0, 1.402, 1.0, -0.344, -0.509, 1.0, 1.772, 0.0},                          // bt.601
+            {1.0, 0.0, 1.402, 1.0, -0.344, -0.71414, 1.0, 1.772, 0.0},                          // bt.601
             {1.0, 0.0, 1.5748, 1.0, -0.1873, -0.4681, 1.0, 1.8556, 0.0},                      // bt.709
             {1.0, 0.0, 1.4746, 1.0, -0.16455312684366, -0.57135312684366, 1.0, 1.8814, 0.0}}; // bt.2020
         const auto color_matrix = color_matrices[static_cast<int>(color_space)];

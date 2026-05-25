@@ -603,6 +603,10 @@ struct cuda_vk_strategy::impl
         void* handle = vk_tex->export_win32_handle();
         if (!handle) return nullptr;
 
+        // The BGRA8 kernel only supports 8-bit textures. For 16-bit textures,
+        // fall back to CPU path (the V210 path handles 16-bit natively).
+        if (vk_tex->depth() != common::bit_depth::bit8) return nullptr;
+
         int src_w = vk_tex->width();
         int src_h = vk_tex->height();
         int src_x = config.src_x;

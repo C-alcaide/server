@@ -83,6 +83,13 @@ uint32_t find_memory_type(VkPhysicalDevice phys, uint32_t filter, VkMemoryProper
     for (uint32_t i = 0; i < mem.memoryTypeCount; ++i)
         if ((filter & (1u << i)) && (mem.memoryTypes[i].propertyFlags & props) == props)
             return i;
+    // Fallback: if HOST_CACHED was requested but not available, try without it
+    if (props & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) {
+        VkMemoryPropertyFlags fallback = (props & ~VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
+        for (uint32_t i = 0; i < mem.memoryTypeCount; ++i)
+            if ((filter & (1u << i)) && (mem.memoryTypes[i].propertyFlags & fallback) == fallback)
+                return i;
+    }
     throw std::runtime_error("Failed to find suitable Vulkan memory type");
 }
 
@@ -719,14 +726,42 @@ struct vk_readback_strategy::impl
         alloc.pNext           = &import_info;
         alloc.allocationSize  = alloc_size;
 
-        // Find a device-local memory type
+        // Query valid memory types for this handle, then pick a device-local one
+        uint32_t valid_type_bits = ~0u;
+        auto vkGetMemoryWin32HandlePropertiesKHR_ =
+            (PFN_vkGetMemoryWin32HandlePropertiesKHR)vkGetDeviceProcAddr(device_, "vkGetMemoryWin32HandlePropertiesKHR");
+        if (vkGetMemoryWin32HandlePropertiesKHR_) {
+            VkMemoryWin32HandlePropertiesKHR handle_props{};
+            handle_props.sType = VK_STRUCTURE_TYPE_MEMORY_WIN32_HANDLE_PROPERTIES_KHR;
+            if (vkGetMemoryWin32HandlePropertiesKHR_(device_,
+                    VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT,
+                    win32_handle, &handle_props) == VK_SUCCESS) {
+                valid_type_bits = handle_props.memoryTypeBits;
+            }
+        }
+
         VkPhysicalDeviceMemoryProperties mem_props;
         vkGetPhysicalDeviceMemoryProperties(phys_device_, &mem_props);
+        bool found = false;
         for (uint32_t i = 0; i < mem_props.memoryTypeCount; ++i) {
-            if (mem_props.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) {
+            if ((valid_type_bits & (1u << i)) &&
+                (mem_props.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
                 alloc.memoryTypeIndex = i;
+                found = true;
                 break;
             }
+        }
+        if (!found) {
+            // Fallback: any valid memory type
+            for (uint32_t i = 0; i < mem_props.memoryTypeCount; ++i) {
+                if (valid_type_bits & (1u << i)) {
+                    alloc.memoryTypeIndex = i;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found)
+                throw std::runtime_error("No valid memory type for imported VK texture");
         }
 
         VK_CHECK(vkAllocateMemory(device_, &alloc, nullptr, &t.mem), "vkAllocateMemory (import)");
@@ -971,6 +1006,23 @@ struct vk_readback_strategy::impl
         vkCmdCopyImageToBuffer(slot.cmd, imported->image,
                                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                                slot.stage_buf, 1, &region);
+
+        // Transition image back to GENERAL and release to external queue
+        VkImageMemoryBarrier release_barrier{};
+        release_barrier.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        release_barrier.srcAccessMask       = VK_ACCESS_TRANSFER_READ_BIT;
+        release_barrier.dstAccessMask       = 0;
+        release_barrier.oldLayout           = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        release_barrier.newLayout           = VK_IMAGE_LAYOUT_GENERAL;
+        release_barrier.srcQueueFamilyIndex = compute_qf_;
+        release_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL;
+        release_barrier.image               = imported->image;
+        release_barrier.subresourceRange    = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+
+        vkCmdPipelineBarrier(slot.cmd,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+            0, 0, nullptr, 0, nullptr, 1, &release_barrier);
 
         VK_CHECK(vkEndCommandBuffer(slot.cmd), "vkEndCommandBuffer (dma)");
 

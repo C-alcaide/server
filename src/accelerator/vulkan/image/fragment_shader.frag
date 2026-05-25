@@ -104,7 +104,7 @@ bool flag(uint f) { return (flags & f) != 0u; }
 
 const float PI = 3.14159265359;
 const mat3 color_matrices[3] = mat3[3](
-    mat3(1.0,0.0,1.402, 1.0,-0.344,-0.509, 1.0,1.772,0.0),
+    mat3(1.0,0.0,1.402, 1.0,-0.344,-0.71414, 1.0,1.772,0.0),
     mat3(1.0,0.0,1.5748, 1.0,-0.1873,-0.4681, 1.0,1.8556,0.0),
     mat3(1.0,0.0,1.4746, 1.0,-0.16455312684366,-0.57135312684366, 1.0,1.8814,0.0)
 );
@@ -291,7 +291,7 @@ vec3 apply_linear_sat(vec3 c,float s){float l=dot(c,vec3(0.2126,0.7152,0.0722));
 vec3 apply_cdl(vec3 c,vec3 sl,vec3 of,vec3 pw,float s){c=pow(max(c*sl+of,vec3(0.0)),pw);float l=dot(c,vec3(0.2126,0.7152,0.0722));return mix(vec3(l),c,s);}
 vec3 apply_split_tone(vec3 c,vec3 sc,vec3 hc,float b){float l=dot(c,vec3(0.2126,0.7152,0.0722));c+=sc*(1.0-smoothstep(b-0.3,b+0.3,l));c+=hc*smoothstep(b-0.3,b+0.3,l);return c;}
 vec3 apply_gamut_compress(vec3 c,vec3 lim){float a=max(max(c.r,c.g),max(c.b,0.0));if(a<=0.0)return c;vec3 d=(a-c)/abs(a);float thr=0.815;for(int i=0;i<3;++i)if(d[i]>thr&&lim[i]>1.0001){float nd=(d[i]-thr)/(lim[i]-thr);d[i]=thr+nd/(1.0+nd)*(lim[i]-thr);}return a-d*abs(a);}
-vec3 apply_lut3d(vec3 c,float st){return mix(c,texture(lut3d_tex,clamp(c.bgr,0.0,1.0)).bgr,st);}
+vec3 apply_lut3d(vec3 c,float st){return mix(c,texture(lut3d_tex,clamp(c,0.0,1.0)).rgb,st);}
 vec3 apply_hue_curves(vec3 c){vec3 h=rgb2hsv(clamp(c,0.0,1.0));vec4 o=texture(hue_curve_tex,vec2(h.x,0.5));h.x=fract(h.x+o.r);h.y*=o.g;vec4 so=texture(hue_curve_tex,vec2(h.y,0.5));h.y*=so.a;return hsv2rgb(h)+o.b;}
 vec3 apply_qualifier(vec3 c,float th,float hw,float ms,float xs,float ml,float xl,float sf,float eo,float so,float ho){
     vec3 h=rgb2hsv(clamp(c,0.0,1.0));float hd=AngleDiff(h.x,th)*2.0;
@@ -341,7 +341,7 @@ vec4 get_rgba_color(vec2 uv){
     case 4: return texture(textures[PLANE0],uv).abgr*precision_factor[0];
     case 5:{float y=texture(textures[PLANE0],uv).r*precision_factor[0];float cb=texture(textures[PLANE1],uv).r*precision_factor[1];float cr=texture(textures[PLANE2],uv).r*precision_factor[2];return ycbcra_to_rgba(y,cb,cr,1.0);}
     case 6:{float y=texture(textures[PLANE0],uv).r*precision_factor[0];float cb=texture(textures[PLANE1],uv).r*precision_factor[1];float cr=texture(textures[PLANE2],uv).r*precision_factor[2];float a=texture(textures[PLANE3],uv).r*precision_factor[3];return ycbcra_to_rgba(y,cb,cr,a);}
-    case 7:{vec3 y3=texture(textures[PLANE0],uv).rrr*precision_factor[0];return vec4((y3-0.065)/0.859,1.0);}
+    case 7:{vec3 y3=texture(textures[PLANE0],uv).rrr*precision_factor[0];return vec4((y3-0.0627451)/0.858824,1.0);}
     case 8: return vec4(texture(textures[PLANE0],uv).bgr*precision_factor[0],1.0);
     case 9: return vec4(texture(textures[PLANE0],uv).rgb*precision_factor[0],1.0);
     case 10:{float y=texture(textures[PLANE0],uv).g*precision_factor[0];float cb=texture(textures[PLANE1],uv).r*precision_factor[1];float cr=texture(textures[PLANE1],uv).b*precision_factor[1];return ycbcra_to_rgba(y,cb,cr,1.0);}
@@ -409,7 +409,7 @@ void main(){
     if(flag(F_LOCAL_KEY))col.a*=texture(textures[LOCAL_KEY],TexCoord2.st).r;
     if(flag(F_LAYER_KEY))col.a*=texture(textures[LAYER_KEY],TexCoord2.st).r;
     col=blend_op(col);
-    if(flag(F_CHROMA))col=ChromaKey(col.bgra,flag(F_CHROMA_MASK)).bgra;
+    if(flag(F_CHROMA))col=ChromaKey(col,flag(F_CHROMA_MASK));
 
     if(flag(F_COLOR_GRADING)){if(tone_mapping_op>0)col.rgb=apply_tone_mapping(col.rgb,tone_mapping_op);col.rgb=ubo_mat3(working_to_output_c0,working_to_output_c1,working_to_output_c2)*col.rgb;if(tone_mapping_op==0)col.rgb=clamp(col.rgb,0.0,1.0);col.rgb=apply_oetf(col.rgb,output_transfer);}
     if(flag(F_GRAIN))col.rgb=apply_grain(col.rgb,TexCoord.st/TexCoord.q,grain_intensity,grain_size,grain_frame);

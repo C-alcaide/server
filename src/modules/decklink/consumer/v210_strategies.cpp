@@ -440,7 +440,8 @@ class v210_strategy
 
         tbb::parallel_for(0, NUM_THREADS, [&](int thread_index) {
             auto start_y = firstLine + thread_index * rows_per_thread;
-            auto end_y   = (thread_index + 1) * rows_per_thread;
+            auto end_y   = (thread_index == NUM_THREADS - 1) ? decklink_format_desc.height
+                                                             : (thread_index + 1) * rows_per_thread;
 
             for (uint64_t y = start_y; y < end_y; y += decklink_format_desc.field_count) {
                 auto     dest_row  = reinterpret_cast<uint8_t*>(image_data.get()) + y * dest_line_bytes;

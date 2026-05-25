@@ -700,16 +700,15 @@ struct image_kernel::impl
                 std::abs(gain[0]-1.0) > epsilon || std::abs(gain[1]-1.0) > epsilon || std::abs(gain[2]-1.0) > epsilon;
             if (lmg_active) {
                 uniforms.flags |= static_cast<uint32_t>(shader_flags::lmg_enable);
-                // R↔B swap for BGRA convention
-                uniforms.lmg_lift[0] = static_cast<float>(lift[2]);
+                uniforms.lmg_lift[0] = static_cast<float>(lift[0]);
                 uniforms.lmg_lift[1] = static_cast<float>(lift[1]);
-                uniforms.lmg_lift[2] = static_cast<float>(lift[0]);
-                uniforms.lmg_midtone[0] = static_cast<float>(midtone[2]);
+                uniforms.lmg_lift[2] = static_cast<float>(lift[2]);
+                uniforms.lmg_midtone[0] = static_cast<float>(midtone[0]);
                 uniforms.lmg_midtone[1] = static_cast<float>(midtone[1]);
-                uniforms.lmg_midtone[2] = static_cast<float>(midtone[0]);
-                uniforms.lmg_gain[0] = static_cast<float>(gain[2]);
+                uniforms.lmg_midtone[2] = static_cast<float>(midtone[2]);
+                uniforms.lmg_gain[0] = static_cast<float>(gain[0]);
                 uniforms.lmg_gain[1] = static_cast<float>(gain[1]);
-                uniforms.lmg_gain[2] = static_cast<float>(gain[0]);
+                uniforms.lmg_gain[2] = static_cast<float>(gain[2]);
             }
         }
 
@@ -746,17 +745,16 @@ struct image_kernel::impl
                 std::abs(cs-1.0) > epsilon;
             if (cdl_active) {
                 uniforms.flags |= static_cast<uint32_t>(shader_flags::cdl_enable);
-                // R↔B swap for BGRA convention
-                uniforms.cdl_slope[0] = static_cast<float>(s[2]);
+                uniforms.cdl_slope[0] = static_cast<float>(s[0]);
                 uniforms.cdl_slope[1] = static_cast<float>(s[1]);
-                uniforms.cdl_slope[2] = static_cast<float>(s[0]);
+                uniforms.cdl_slope[2] = static_cast<float>(s[2]);
                 uniforms.cdl_saturation = static_cast<float>(cs);
-                uniforms.cdl_offset[0] = static_cast<float>(o[2]);
+                uniforms.cdl_offset[0] = static_cast<float>(o[0]);
                 uniforms.cdl_offset[1] = static_cast<float>(o[1]);
-                uniforms.cdl_offset[2] = static_cast<float>(o[0]);
-                uniforms.cdl_power[0] = static_cast<float>(p[2]);
+                uniforms.cdl_offset[2] = static_cast<float>(o[2]);
+                uniforms.cdl_power[0] = static_cast<float>(p[0]);
                 uniforms.cdl_power[1] = static_cast<float>(p[1]);
-                uniforms.cdl_power[2] = static_cast<float>(p[0]);
+                uniforms.cdl_power[2] = static_cast<float>(p[2]);
             }
         }
 
@@ -769,24 +767,23 @@ struct image_kernel::impl
                 std::abs(hc[0]) > epsilon || std::abs(hc[1]) > epsilon || std::abs(hc[2]) > epsilon;
             if (split_active) {
                 uniforms.flags |= static_cast<uint32_t>(shader_flags::split_tone_enable);
-                // R↔B swap for BGRA convention
-                uniforms.split_shadow_color[0] = static_cast<float>(sc[2]);
+                uniforms.split_shadow_color[0] = static_cast<float>(sc[0]);
                 uniforms.split_shadow_color[1] = static_cast<float>(sc[1]);
-                uniforms.split_shadow_color[2] = static_cast<float>(sc[0]);
+                uniforms.split_shadow_color[2] = static_cast<float>(sc[2]);
                 uniforms.split_balance = static_cast<float>(transforms.image_transform.split_balance);
-                uniforms.split_highlight_color[0] = static_cast<float>(hc[2]);
+                uniforms.split_highlight_color[0] = static_cast<float>(hc[0]);
                 uniforms.split_highlight_color[1] = static_cast<float>(hc[1]);
-                uniforms.split_highlight_color[2] = static_cast<float>(hc[0]);
+                uniforms.split_highlight_color[2] = static_cast<float>(hc[2]);
             }
         }
 
         // ── Gamut Compression ─────────────────────────────────────────
         if (transforms.image_transform.gamut_compress) {
             uniforms.flags |= static_cast<uint32_t>(shader_flags::gamut_compress);
-            // BGRA order: .r=Blue(yellow), .g=Green(magenta), .b=Red(cyan)
-            uniforms.gc_limit[0] = static_cast<float>(transforms.image_transform.gc_yellow);
+            // RGBA order: .r=Red(cyan limit), .g=Green(magenta limit), .b=Blue(yellow limit)
+            uniforms.gc_limit[0] = static_cast<float>(transforms.image_transform.gc_cyan);
             uniforms.gc_limit[1] = static_cast<float>(transforms.image_transform.gc_magenta);
-            uniforms.gc_limit[2] = static_cast<float>(transforms.image_transform.gc_cyan);
+            uniforms.gc_limit[2] = static_cast<float>(transforms.image_transform.gc_yellow);
         }
 
         // ── 3D LUT ───────────────────────────────────────────────────
@@ -843,22 +840,21 @@ struct image_kernel::impl
             const auto& rl = transforms.image_transform.per_channel_levels;
             if (rl.enable) {
                 uniforms.flags |= static_cast<uint32_t>(shader_flags::rgb_levels_enable);
-                // R↔B swap for BGRA convention: [0]=Blue_displayed, [2]=Red_displayed
-                uniforms.rgb_levels_min_input[0]  = static_cast<float>(rl.b.min_input);
+                uniforms.rgb_levels_min_input[0]  = static_cast<float>(rl.r.min_input);
                 uniforms.rgb_levels_min_input[1]  = static_cast<float>(rl.g.min_input);
-                uniforms.rgb_levels_min_input[2]  = static_cast<float>(rl.r.min_input);
-                uniforms.rgb_levels_max_input[0]  = static_cast<float>(rl.b.max_input);
+                uniforms.rgb_levels_min_input[2]  = static_cast<float>(rl.b.min_input);
+                uniforms.rgb_levels_max_input[0]  = static_cast<float>(rl.r.max_input);
                 uniforms.rgb_levels_max_input[1]  = static_cast<float>(rl.g.max_input);
-                uniforms.rgb_levels_max_input[2]  = static_cast<float>(rl.r.max_input);
-                uniforms.rgb_levels_gamma[0]      = static_cast<float>(rl.b.gamma);
+                uniforms.rgb_levels_max_input[2]  = static_cast<float>(rl.b.max_input);
+                uniforms.rgb_levels_gamma[0]      = static_cast<float>(rl.r.gamma);
                 uniforms.rgb_levels_gamma[1]      = static_cast<float>(rl.g.gamma);
-                uniforms.rgb_levels_gamma[2]      = static_cast<float>(rl.r.gamma);
-                uniforms.rgb_levels_min_output[0] = static_cast<float>(rl.b.min_output);
+                uniforms.rgb_levels_gamma[2]      = static_cast<float>(rl.b.gamma);
+                uniforms.rgb_levels_min_output[0] = static_cast<float>(rl.r.min_output);
                 uniforms.rgb_levels_min_output[1] = static_cast<float>(rl.g.min_output);
-                uniforms.rgb_levels_min_output[2] = static_cast<float>(rl.r.min_output);
-                uniforms.rgb_levels_max_output[0] = static_cast<float>(rl.b.max_output);
+                uniforms.rgb_levels_min_output[2] = static_cast<float>(rl.b.min_output);
+                uniforms.rgb_levels_max_output[0] = static_cast<float>(rl.r.max_output);
                 uniforms.rgb_levels_max_output[1] = static_cast<float>(rl.g.max_output);
-                uniforms.rgb_levels_max_output[2] = static_cast<float>(rl.r.max_output);
+                uniforms.rgb_levels_max_output[2] = static_cast<float>(rl.b.max_output);
             }
         }
 
