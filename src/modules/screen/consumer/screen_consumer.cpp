@@ -724,7 +724,9 @@ struct screen_consumer
                 while (is_running_) {
                     tick();
                 }
+                CASPAR_LOG(info) << print() << L" Render loop exited (is_running_ = false).";
             } catch (tbb::user_abort&) {
+                CASPAR_LOG(warning) << print() << L" Render loop aborted (tbb::user_abort).";
             } catch (...) {
                 CASPAR_LOG_CURRENT_EXCEPTION();
                 is_running_ = false;
@@ -776,6 +778,7 @@ struct screen_consumer
             count = 1;
             if (window_.resized_) calculate_aspect();
             if (window_.closed_ && config_.closeable) {
+                CASPAR_LOG(warning) << print() << L" Window closed by user (WM_CLOSE received).";
                 is_running_ = false;
             }
         }
@@ -786,6 +789,7 @@ struct screen_consumer
                 calculate_aspect();
             } else if (e->is<sf::Event::Closed>()) {
                 if (config_.closeable) {
+                    CASPAR_LOG(warning) << print() << L" Window closed by user (WM_CLOSE received).";
                     is_running_ = false;
                 }
             }
@@ -798,6 +802,7 @@ struct screen_consumer
                 calculate_aspect();
             } else if (e.type == sf::Event::Closed) {
                 if (config_.closeable) {
+                    CASPAR_LOG(warning) << print() << L" Window closed by user (WM_CLOSE received).";
                     is_running_ = false;
                 }
             }

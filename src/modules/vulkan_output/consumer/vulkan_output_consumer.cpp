@@ -1316,6 +1316,23 @@ class vulkan_output_consumer : public core::frame_consumer
         if (!running_) {
             return;
         }
+
+        // ─── Debug capture: extract readback data from previous frame ───────
+        // The readback buffer was filled by vkCmdCopyImageToBuffer in the previous
+        // command buffer submission. Now that the fence is signaled, the data is ready.
+        // We store the raw RGBA16F data — the test runner converts to 16-bit PNG.
+        if (debug_readback_pending_ && debug_readback_mapped_) {
+            debug_readback_pending_ = false;
+            uint32_t w = debug_readback_width_;
+            uint32_t h = debug_readback_height_;
+            size_t byte_count = static_cast<size_t>(w) * h * 8; // 4 × fp16 = 8 bytes/pixel
+            std::lock_guard<std::mutex> lock(debug_frame_mutex_);
+            debug_frame_data_.resize(byte_count);
+            std::memcpy(debug_frame_data_.data(), debug_readback_mapped_, byte_count);
+            debug_frame_w_      = static_cast<int>(w);
+            debug_frame_h_      = static_cast<int>(h);
+            debug_frame_format_ = 1; // RGBA16F
+        }
         // NOTE: Don't reset fence here. Reset just before vkQueueSubmit so that
         // early returns (surface lost, acquire timeout, FSE lost) leave the fence
         // signaled. Otherwise the next use of this frame slot would wait for a
@@ -1712,6 +1729,26 @@ class vulkan_output_consumer : public core::frame_consumer
                            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                            swapchain_.images[image_index], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                            1, &final_region, VK_FILTER_LINEAR);
+
+            // ─── Debug readback: copy post-conversion RGBA16F to host-visible buffer ───
+            if (debug_capture_enabled_.load(std::memory_order_relaxed)) {
+                ensure_debug_readback_buffer(color_pipeline_->width(), color_pipeline_->height());
+                if (debug_readback_buffer_ != VK_NULL_HANDLE) {
+                    VkBufferImageCopy copy_region{};
+                    copy_region.bufferOffset      = 0;
+                    copy_region.bufferRowLength   = 0; // tightly packed
+                    copy_region.bufferImageHeight = 0;
+                    copy_region.imageSubresource  = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+                    copy_region.imageOffset       = {0, 0, 0};
+                    copy_region.imageExtent       = {color_pipeline_->width(), color_pipeline_->height(), 1};
+                    vkCmdCopyImageToBuffer(cmd, color_pipeline_->image(),
+                                           VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                           debug_readback_buffer_, 1, &copy_region);
+                    debug_readback_width_   = color_pipeline_->width();
+                    debug_readback_height_  = color_pipeline_->height();
+                    debug_readback_pending_ = true;
+                }
+            }
         }
 
         // Transition swapchain image to present layout
@@ -1846,8 +1883,104 @@ class vulkan_output_consumer : public core::frame_consumer
 
         ++frames_presented_;
 
+        // Debug capture: for non-color-pipeline path, store frame pixels directly.
+        // (When color pipeline is active, readback is recorded in the command buffer above.)
+        if (debug_capture_enabled_.load(std::memory_order_relaxed) && !debug_readback_pending_) {
+            if (!color_pipeline_ || !color_pipeline_->is_active()) {
+                const auto& img = frame.image_data(0);
+                if (img.data() && img.size() > 0) {
+                    std::lock_guard<std::mutex> lock(debug_frame_mutex_);
+                    debug_frame_data_.assign(img.data(), img.data() + img.size());
+                    debug_frame_w_ = static_cast<int>(frame.width());
+                    debug_frame_h_ = static_cast<int>(frame.height());
+                    debug_frame_format_ = 0; // BGRA8
+                }
+            }
+        }
+
         // Advance to next frame-in-flight slot for the next iteration
         swapchain_.advance_frame();
+    }
+
+    // ─── Debug readback buffer management ────────────────────────────────────
+    void ensure_debug_readback_buffer(uint32_t w, uint32_t h)
+    {
+        size_t required = static_cast<size_t>(w) * h * 8; // RGBA16F = 8 bytes/pixel
+        if (debug_readback_buffer_ != VK_NULL_HANDLE && debug_readback_size_ >= required) {
+            return; // Already allocated and large enough
+        }
+
+        VkDevice dev = device_->device();
+
+        // Destroy old buffer if resizing
+        if (debug_readback_buffer_ != VK_NULL_HANDLE) {
+            vkDestroyBuffer(dev, debug_readback_buffer_, nullptr);
+            vkFreeMemory(dev, debug_readback_memory_, nullptr);
+            debug_readback_buffer_ = VK_NULL_HANDLE;
+            debug_readback_memory_ = VK_NULL_HANDLE;
+            debug_readback_mapped_ = nullptr;
+        }
+
+        VkBufferCreateInfo buf_info{};
+        buf_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        buf_info.size  = required;
+        buf_info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        buf_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+        if (vkCreateBuffer(dev, &buf_info, nullptr, &debug_readback_buffer_) != VK_SUCCESS) {
+            debug_readback_buffer_ = VK_NULL_HANDLE;
+            return;
+        }
+
+        VkMemoryRequirements mem_reqs;
+        vkGetBufferMemoryRequirements(dev, debug_readback_buffer_, &mem_reqs);
+
+        // Find host-visible, host-coherent memory type
+        VkPhysicalDeviceMemoryProperties mem_props;
+        vkGetPhysicalDeviceMemoryProperties(device_->physical_device(), &mem_props);
+        uint32_t mem_type_idx = UINT32_MAX;
+        VkMemoryPropertyFlags desired = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        for (uint32_t i = 0; i < mem_props.memoryTypeCount; ++i) {
+            if ((mem_reqs.memoryTypeBits & (1u << i)) &&
+                (mem_props.memoryTypes[i].propertyFlags & desired) == desired) {
+                mem_type_idx = i;
+                break;
+            }
+        }
+        if (mem_type_idx == UINT32_MAX) {
+            vkDestroyBuffer(dev, debug_readback_buffer_, nullptr);
+            debug_readback_buffer_ = VK_NULL_HANDLE;
+            return;
+        }
+
+        VkMemoryAllocateInfo alloc_info{};
+        alloc_info.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        alloc_info.allocationSize  = mem_reqs.size;
+        alloc_info.memoryTypeIndex = mem_type_idx;
+
+        if (vkAllocateMemory(dev, &alloc_info, nullptr, &debug_readback_memory_) != VK_SUCCESS) {
+            vkDestroyBuffer(dev, debug_readback_buffer_, nullptr);
+            debug_readback_buffer_ = VK_NULL_HANDLE;
+            return;
+        }
+
+        vkBindBufferMemory(dev, debug_readback_buffer_, debug_readback_memory_, 0);
+        vkMapMemory(dev, debug_readback_memory_, 0, required, 0, &debug_readback_mapped_);
+        debug_readback_size_ = required;
+    }
+
+    void destroy_debug_readback_buffer()
+    {
+        if (debug_readback_buffer_ != VK_NULL_HANDLE) {
+            VkDevice dev = device_->device();
+            vkUnmapMemory(dev, debug_readback_memory_);
+            vkDestroyBuffer(dev, debug_readback_buffer_, nullptr);
+            vkFreeMemory(dev, debug_readback_memory_, nullptr);
+            debug_readback_buffer_ = VK_NULL_HANDLE;
+            debug_readback_memory_ = VK_NULL_HANDLE;
+            debug_readback_mapped_ = nullptr;
+            debug_readback_size_   = 0;
+        }
     }
 
     void present_frame_gdi(const core::const_frame& frame)
@@ -1895,6 +2028,15 @@ class vulkan_output_consumer : public core::frame_consumer
                           pixels, &bmi,
                           DIB_RGB_COLORS, SRCCOPY);
             ReleaseDC(fse_hwnd_, hdc);
+        }
+
+        // Debug capture: GDI path has no color pipeline, store frame pixels directly.
+        if (debug_capture_enabled_.load(std::memory_order_relaxed)) {
+            std::lock_guard<std::mutex> lock(debug_frame_mutex_);
+            debug_frame_data_.assign(img.data(), img.data() + img.size());
+            debug_frame_w_ = src_w;
+            debug_frame_h_ = src_h;
+            debug_frame_format_ = 0; // BGRA8
         }
     }
 
@@ -2809,6 +2951,59 @@ class vulkan_output_consumer : public core::frame_consumer
                 EndPaint(hwnd, &ps);
                 return 0;
             }
+            case WM_COPYDATA: {
+                // ─── Debug capture: write raw frame data to file ───
+                // Used by automated test runners. Sends WM_COPYDATA with the output
+                // file path. Server writes raw pixel data (RGBA16F or BGRA8) with a
+                // 16-byte header. Returns 1 on success, 0 if no data available yet.
+                auto* self = reinterpret_cast<vulkan_output_consumer*>(
+                    GetWindowLongPtr(hwnd, GWLP_USERDATA));
+                if (!self)
+                    return 0;
+
+                auto* cds = reinterpret_cast<const COPYDATASTRUCT*>(lParam);
+                if (!cds || cds->dwData != 0x43565031) // "CVP1" magic
+                    return DefWindowProcW(hwnd, msg, wParam, lParam);
+
+                // Enable capture on first request
+                self->debug_capture_enabled_.store(true, std::memory_order_release);
+
+                // Extract file path from COPYDATASTRUCT (UTF-16)
+                if (!cds->lpData || cds->cbData < 4)
+                    return 0;
+                std::wstring path(static_cast<const wchar_t*>(cds->lpData),
+                                  cds->cbData / sizeof(wchar_t));
+                // Remove null terminator if present
+                while (!path.empty() && path.back() == L'\0')
+                    path.pop_back();
+                if (path.empty())
+                    return 0;
+
+                // Write the frame data to file under lock
+                std::lock_guard<std::mutex> lock(self->debug_frame_mutex_);
+                if (self->debug_frame_data_.empty() || self->debug_frame_w_ == 0)
+                    return 0;
+
+                HANDLE hFile = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr,
+                                           CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+                if (hFile == INVALID_HANDLE_VALUE)
+                    return 0;
+
+                // Header: 4-byte magic + uint32 width + uint32 height + uint32 format
+                // Format: 0 = BGRA8 (4 bytes/px), 1 = RGBA16F (8 bytes/px)
+                struct { char magic[4]; uint32_t w, h, fmt; } header = {
+                    {'C','V','P','1'},
+                    static_cast<uint32_t>(self->debug_frame_w_),
+                    static_cast<uint32_t>(self->debug_frame_h_),
+                    self->debug_frame_format_
+                };
+                DWORD written = 0;
+                WriteFile(hFile, &header, sizeof(header), &written, nullptr);
+                WriteFile(hFile, self->debug_frame_data_.data(),
+                          static_cast<DWORD>(self->debug_frame_data_.size()), &written, nullptr);
+                CloseHandle(hFile);
+                return 1;
+            }
         }
         return DefWindowProcW(hwnd, msg, wParam, lParam);
     }
@@ -3030,6 +3225,9 @@ class vulkan_output_consumer : public core::frame_consumer
                                         WS_POPUP | WS_VISIBLE, x, y, w, h,
                                         nullptr, nullptr, GetModuleHandle(nullptr), nullptr);
 
+            // Store instance pointer for WM_COPYDATA debug capture
+            SetWindowLongPtr(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
+
             // ── DWM protection: prevent Aero Peek / Show Desktop from hiding this window ──
             {
                 BOOL exclude_peek = TRUE;
@@ -3196,6 +3394,8 @@ class vulkan_output_consumer : public core::frame_consumer
                     vkDestroyBuffer(dev, staging_buffer_, nullptr);
                     vkFreeMemory(dev, staging_memory_, nullptr);
                 }
+
+                destroy_debug_readback_buffer();
 
                 // Clean up VK import cache
                 for (auto& imp : vk_import_cache_) {
@@ -3365,6 +3565,26 @@ class vulkan_output_consumer : public core::frame_consumer
     int diag_timing_frames_ = 0;
 
 
+
+    // ─── Debug capture (WM_COPYDATA) — GPU readback for post-conversion frames ───
+    // DEBUGGING TOOL: Zero-cost when disabled (one relaxed atomic load per frame).
+    // Enabled on first WM_COPYDATA received. When active, records an additional
+    // vkCmdCopyImageToBuffer after color conversion to read back the final output.
+    // The readback has 1-frame latency (frame N's data is available at frame N+1's fence).
+    // Data is written to file on WM_COPYDATA request (binary: header + raw pixels).
+    std::atomic<bool>                debug_capture_enabled_{false};
+    std::mutex                       debug_frame_mutex_;
+    std::vector<uint8_t>             debug_frame_data_;       // Raw pixels (RGBA16F or BGRA8)
+    int                              debug_frame_w_{0};
+    int                              debug_frame_h_{0};
+    uint32_t                         debug_frame_format_{0};  // 0=BGRA8, 1=RGBA16F
+    VkBuffer                         debug_readback_buffer_   = VK_NULL_HANDLE;
+    VkDeviceMemory                   debug_readback_memory_   = VK_NULL_HANDLE;
+    void*                            debug_readback_mapped_   = nullptr;
+    size_t                           debug_readback_size_     = 0;
+    uint32_t                         debug_readback_width_    = 0;
+    uint32_t                         debug_readback_height_   = 0;
+    bool                             debug_readback_pending_  = false; // True if a readback was recorded last frame
 
     // CPU staging
     VkBuffer                         staging_buffer_      = VK_NULL_HANDLE;
