@@ -151,6 +151,11 @@ void main() {
 
     vec4 pixel = imageLoad(work_image, pos);
 
+    // The VK mixer's fragment shader outputs col.bgra (BGRA swizzle) into an
+    // R16G16B16A16 render attachment, so physical channel layout is B,G,R,A.
+    // Swap R and B to get correct RGB before color processing.
+    pixel.rgb = pixel.bgr;
+
     // Step 1: Linearize (undo sRGB EOTF from mixer output)
     vec3 linear_rgb = srgb_to_linear(pixel.rgb);
 
