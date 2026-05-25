@@ -174,21 +174,26 @@ struct image_consumer : public core::frame_consumer
                     av_frame->data[0]     = const_cast<uint8_t*>(frame.image_data(0).data());
                 }
 
-                // Convert to target format for PNG encoding
-                auto av_frame2 = convert_image_frame(av_frame, target_fmt);
-
                 // Straighten alpha — PNG stores straight alpha, mixer produces premultiplied.
-                if (is_hi_dep) {
-                    auto*       data   = reinterpret_cast<uint16_t*>(av_frame2->data[0]);
-                    const int   stride = av_frame2->linesize[0] / 2; // in uint16_t units
-                    const int   w      = av_frame2->width;
-                    const int   h      = av_frame2->height;
+                // Must be done BEFORE converting to RGBA64BE because the un-premultiply
+                // operates via native uint16_t* which requires little-endian data on x64.
+                if (is_hi_dep && pix_desc.format == core::pixel_format::bgra) {
+                    // Work on the native-endian BGRA64LE source data directly.
+                    // We need a writable copy since frame data is const.
+                    auto  src_size = av_frame->linesize[0] * av_frame->height;
+                    auto  buf      = std::vector<uint8_t>(frame.image_data(0).begin(),
+                                                         frame.image_data(0).begin() + src_size);
+                    auto* data     = reinterpret_cast<uint16_t*>(buf.data());
+                    const int stride16 = av_frame->linesize[0] / 2; // in uint16_t units
+                    const int w        = av_frame->width;
+                    const int h        = av_frame->height;
                     for (int y = 0; y < h; ++y) {
-                        uint16_t* row = data + y * stride;
+                        uint16_t* row = data + y * stride16;
                         for (int x = 0; x < w; ++x) {
-                            uint16_t& r = row[x * 4 + 0];
+                            // BGRA component order: B=0, G=1, R=2, A=3
+                            uint16_t& b = row[x * 4 + 0];
                             uint16_t& g = row[x * 4 + 1];
-                            uint16_t& b = row[x * 4 + 2];
+                            uint16_t& r = row[x * 4 + 2];
                             uint16_t  a = row[x * 4 + 3];
                             if (a != 0 && a != 65535) {
                                 r = static_cast<uint16_t>(std::min(65535, static_cast<int>(r) * 65535 / a));
@@ -197,6 +202,38 @@ struct image_consumer : public core::frame_consumer
                             }
                         }
                     }
+                    av_frame->data[0] = buf.data();
+
+                    // Convert the un-premultiplied BGRA64LE to RGBA64BE for PNG encoding
+                    auto av_frame2 = convert_image_frame(av_frame, target_fmt);
+
+                    FF(avcodec_send_frame(ctx.get(), av_frame2.get()));
+                    FF(avcodec_send_frame(ctx.get(), nullptr));
+
+                    auto pkt =
+                        std::shared_ptr<AVPacket>(av_packet_alloc(), [](AVPacket* ptr) { av_packet_free(&ptr); });
+                    int ret = 0;
+                    while (ret >= 0) {
+                        ret = avcodec_receive_packet(ctx.get(), pkt.get());
+                        if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
+                            break;
+                        FF_RET(ret, "avcodec_receive_packet");
+
+                        file_stream.write(reinterpret_cast<const char*>(pkt->data), pkt->size);
+                        av_packet_unref(pkt.get());
+                    }
+
+                    CASPAR_LOG(info) << L"[image_consumer] Written " << u16(filename2);
+                    return;
+                }
+
+                // Convert to target format for PNG encoding
+                auto av_frame2 = convert_image_frame(av_frame, target_fmt);
+
+                // Straighten alpha for 8-bit path
+                if (is_hi_dep) {
+                    // Non-BGRA 16-bit path (e.g. GBR planar): un-premultiply not needed
+                    // as those formats don't come from the premultiplied mixer output.
                 } else {
                     image_view<bgra_pixel> view(av_frame2->data[0], av_frame2->width, av_frame2->height);
                     unmultiply(view);
