@@ -69,9 +69,19 @@ vec3 eotf_pq(vec3 v)
 vec3 tonemap_hlg_ootf(vec3 v, float npl)
 {
     // BT.2100 HLG OOTF: scene-linear → display-linear
+    // Soft-knee highlight rolloff for sub-1000-nit displays.
     float gamma = 1.2f * pow(1.111f, log2(npl / 1000.0f));
     float Ys = dot(v, vec3(0.2627f, 0.6780f, 0.0593f));
-    return v * pow(max(Ys, 1e-6f), gamma - 1.0f);
+    vec3 result = v * pow(max(Ys, 1e-6f), gamma - 1.0f);
+    if (npl < 1000.0f) {
+        float Yd = dot(result, vec3(0.2627f, 0.6780f, 0.0593f));
+        float knee = 0.85f;
+        if (Yd > knee) {
+            float compressed = knee + (1.0f - knee) * tanh((Yd - knee) / (1.0f - knee));
+            result *= compressed / max(Yd, 1e-6f);
+        }
+    }
+    return result;
 }
 
 vec3 tonemap_reinhard(vec3 v)

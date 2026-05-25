@@ -934,10 +934,20 @@ vec3 tonemap_aces_rrt(vec3 v) {
 
 // HLG OOTF: BT.2100 system gamma for display rendering.
 // gamma = 1.2 * 1.111^log2(Lw/1000), where Lw = display peak luminance in nits.
+// Includes soft-knee highlight rolloff for sub-1000-nit displays to avoid hard clipping.
 vec3 tonemap_hlg_ootf(vec3 v, float npl) {
     float gamma = 1.2 * pow(1.111, log2(npl / 1000.0));
     float Ys = dot(v, vec3(0.2627, 0.6780, 0.0593));
-    return v * pow(max(Ys, 1e-6), gamma - 1.0);
+    vec3 result = v * pow(max(Ys, 1e-6), gamma - 1.0);
+    if (npl < 1000.0) {
+        float Yd = dot(result, vec3(0.2627, 0.6780, 0.0593));
+        float knee = 0.85;
+        if (Yd > knee) {
+            float compressed = knee + (1.0 - knee) * tanh((Yd - knee) / (1.0 - knee));
+            result *= compressed / max(Yd, 1e-6);
+        }
+    }
+    return result;
 }
 
 // log10 is not a GLSL built-in; define it via natural log.
