@@ -144,12 +144,22 @@ struct image_consumer : public core::frame_consumer
                 av_frame->pts    = 0;
 
                 if (pix_desc.format == core::pixel_format::bgra) {
-                    // Mixer always outputs packed BGRA (1 plane, 4 components)
+                    // 8-bit mixer outputs packed BGRA (1 plane, 4 components)
                     if (is_hi_dep) {
                         av_frame->format      = AV_PIX_FMT_BGRA64LE;
                         av_frame->linesize[0] = static_cast<int>(frame.width()) * 8;
                     } else {
                         av_frame->format      = AV_PIX_FMT_BGRA;
+                        av_frame->linesize[0] = static_cast<int>(frame.width()) * 4;
+                    }
+                    av_frame->data[0] = const_cast<uint8_t*>(frame.image_data(0).data());
+                } else if (pix_desc.format == core::pixel_format::rgba) {
+                    // 16-bit mixer outputs packed RGBA directly (no .bgra swizzle)
+                    if (is_hi_dep) {
+                        av_frame->format      = AV_PIX_FMT_RGBA64LE;
+                        av_frame->linesize[0] = static_cast<int>(frame.width()) * 8;
+                    } else {
+                        av_frame->format      = AV_PIX_FMT_RGBA;
                         av_frame->linesize[0] = static_cast<int>(frame.width()) * 4;
                     }
                     av_frame->data[0] = const_cast<uint8_t*>(frame.image_data(0).data());
@@ -177,8 +187,9 @@ struct image_consumer : public core::frame_consumer
                 // Straighten alpha — PNG stores straight alpha, mixer produces premultiplied.
                 // Must be done BEFORE converting to RGBA64BE because the un-premultiply
                 // operates via native uint16_t* which requires little-endian data on x64.
-                if (is_hi_dep && pix_desc.format == core::pixel_format::bgra) {
-                    // Work on the native-endian BGRA64LE source data directly.
+                if (is_hi_dep && (pix_desc.format == core::pixel_format::bgra ||
+                                  pix_desc.format == core::pixel_format::rgba)) {
+                    // Work on the native-endian source data directly.
                     // We need a writable copy since frame data is const.
                     auto  src_size = av_frame->linesize[0] * av_frame->height;
                     auto  buf      = std::vector<uint8_t>(frame.image_data(0).begin(),
@@ -190,21 +201,21 @@ struct image_consumer : public core::frame_consumer
                     for (int y = 0; y < h; ++y) {
                         uint16_t* row = data + y * stride16;
                         for (int x = 0; x < w; ++x) {
-                            // BGRA component order: B=0, G=1, R=2, A=3
-                            uint16_t& b = row[x * 4 + 0];
-                            uint16_t& g = row[x * 4 + 1];
-                            uint16_t& r = row[x * 4 + 2];
-                            uint16_t  a = row[x * 4 + 3];
+                            // RGBA: R=0, G=1, B=2, A=3; BGRA: B=0, G=1, R=2, A=3
+                            uint16_t& c0 = row[x * 4 + 0];
+                            uint16_t& c1 = row[x * 4 + 1];
+                            uint16_t& c2 = row[x * 4 + 2];
+                            uint16_t  a  = row[x * 4 + 3];
                             if (a != 0 && a != 65535) {
-                                r = static_cast<uint16_t>(std::min(65535, static_cast<int>(r) * 65535 / a));
-                                g = static_cast<uint16_t>(std::min(65535, static_cast<int>(g) * 65535 / a));
-                                b = static_cast<uint16_t>(std::min(65535, static_cast<int>(b) * 65535 / a));
+                                c0 = static_cast<uint16_t>(std::min(65535, static_cast<int>(c0) * 65535 / a));
+                                c1 = static_cast<uint16_t>(std::min(65535, static_cast<int>(c1) * 65535 / a));
+                                c2 = static_cast<uint16_t>(std::min(65535, static_cast<int>(c2) * 65535 / a));
                             }
                         }
                     }
                     av_frame->data[0] = buf.data();
 
-                    // Convert the un-premultiplied BGRA64LE to RGBA64BE for PNG encoding
+                    // Convert the un-premultiplied source to RGBA64BE for PNG encoding
                     auto av_frame2 = convert_image_frame(av_frame, target_fmt);
 
                     FF(avcodec_send_frame(ctx.get(), av_frame2.get()));

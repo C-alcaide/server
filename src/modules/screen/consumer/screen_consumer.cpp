@@ -1320,11 +1320,13 @@ struct gpu_strategy : public display_strategy
             glTextureParameteri(vk_gl_tex_, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
             glTextureParameteri(vk_gl_tex_, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
             glTextureParameteri(vk_gl_tex_, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-            // The VK mixer stores pixels in BGRA channel order (the fragment
-            // shader reads subpassLoad().bgra).  The raw memory is imported as
-            // GL_RGBA so R and B are swapped.  Fix with texture swizzle.
-            glTextureParameteri(vk_gl_tex_, GL_TEXTURE_SWIZZLE_R, GL_BLUE);
-            glTextureParameteri(vk_gl_tex_, GL_TEXTURE_SWIZZLE_B, GL_RED);
+            // 8-bit: the VK shader writes BGRA into R8G8B8A8_UNORM, so the
+            // raw memory has B in channel 0 and R in channel 2.  Swizzle to fix.
+            // 16-bit: the shader writes RGBA directly — no swizzle needed.
+            if (!hbd) {
+                glTextureParameteri(vk_gl_tex_, GL_TEXTURE_SWIZZLE_R, GL_BLUE);
+                glTextureParameteri(vk_gl_tex_, GL_TEXTURE_SWIZZLE_B, GL_RED);
+            }
             glTextureStorageMem2DEXT_(vk_gl_tex_, 1, hbd ? GL_RGBA16 : GL_RGBA8,
                                       w, h, vk_gl_mem_obj_, 0);
 
@@ -1433,11 +1435,14 @@ struct gpu_strategy : public display_strategy
                 glTextureParameteri(preview_tex_, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
                 glTextureParameteri(preview_tex_, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
                 glTextureParameteri(preview_tex_, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-                // Swizzle R↔B: the VK texture stores BGRA in RGBA layout.
+                // 8-bit VK texture stores BGRA in RGBA layout — swizzle R↔B.
+                // 16-bit stores RGBA directly — no swizzle needed.
                 // glBlitFramebuffer copies raw pixels (no swizzle applied), so
                 // the preview texture inherits the same channel order.
-                glTextureParameteri(preview_tex_, GL_TEXTURE_SWIZZLE_R, GL_BLUE);
-                glTextureParameteri(preview_tex_, GL_TEXTURE_SWIZZLE_B, GL_RED);
+                if (!hbd) {
+                    glTextureParameteri(preview_tex_, GL_TEXTURE_SWIZZLE_R, GL_BLUE);
+                    glTextureParameteri(preview_tex_, GL_TEXTURE_SWIZZLE_B, GL_RED);
+                }
                 glTextureStorage2D(preview_tex_, 1, hbd ? GL_RGBA16 : GL_RGBA8, win_w, win_h);
 
                 // Create FBOs for the blit

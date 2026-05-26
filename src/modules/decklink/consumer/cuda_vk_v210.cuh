@@ -110,12 +110,11 @@ __global__ void k_vk_surface_to_v210(
             if (is_16bit) {
                 ushort4 pixel;
                 surf2Dread(&pixel, surf, sx * (int)sizeof(ushort4), sy);
-                // The mixer's fragment shader writes fragColor=col.bgra, so the
-                // render attachment stores BGRA in what is formally RGBA format.
-                // surf2Dread returns pixel.x = Blue (position 0), pixel.z = Red (position 2).
-                R[i] = pixel.z >> 6;
+                // 16-bit: shader writes RGBA directly (no .bgra swizzle).
+                // pixel.x = Red, pixel.y = Green, pixel.z = Blue.
+                R[i] = pixel.x >> 6;
                 G[i] = pixel.y >> 6;
-                B[i] = pixel.x >> 6;
+                B[i] = pixel.z >> 6;
             } else {
                 uchar4 pixel;
                 surf2Dread(&pixel, surf, sx * (int)sizeof(uchar4), sy);
