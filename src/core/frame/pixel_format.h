@@ -53,6 +53,9 @@ enum class color_space
     bt601,
     bt709,
     bt2020,
+    p3_d65,    // DCI-P3 with D65 white point (Display P3)
+    p3_dci,    // DCI-P3 with DCI white point (cinema)
+    adobe_rgb, // Adobe RGB (1998)
 };
 
 enum class color_transfer
@@ -60,6 +63,9 @@ enum class color_transfer
     sdr,
     pq,
     hlg,
+    linear,    // Linear light (no curve)
+    gamma24,   // Pure gamma 2.4 (EBU broadcast reference)
+    gamma26,   // Pure gamma 2.6 (DCI cinema projection)
 };
 
 struct pixel_format_desc final

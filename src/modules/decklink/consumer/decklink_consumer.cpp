@@ -1325,6 +1325,17 @@ struct decklink_consumer_proxy : public core::frame_consumer
     {
         format_desc_  = format_desc;
         use_vulkan_   = channel_info.use_vulkan;
+
+        // Warn if channel is set to a color space that DeckLink SDI cannot signal
+        if (channel_info.default_color_space != core::color_space::bt709 &&
+            channel_info.default_color_space != core::color_space::bt2020 &&
+            channel_info.default_color_space != core::color_space::bt601) {
+            CASPAR_LOG(warning) << L"[decklink_consumer] Channel " << channel_info.index
+                << L" is configured with a color space not supported by SDI (P3/Adobe RGB)."
+                << L" DeckLink output will carry the pixel values but SDI metadata will signal BT.2020."
+                << L" Consider setting channel color-space to bt2020 for correct SDI signaling.";
+        }
+
         CASPAR_LOG(info) << L"[decklink_proxy] initialize: channel=" << channel_info.index
                          << L" use_vulkan=" << (use_vulkan_ ? L"true" : L"false")
                          << L" needs_cpu=" << (needs_cpu_frame_data() ? L"true" : L"false");

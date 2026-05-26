@@ -249,12 +249,16 @@ float eotf_pq(float x){const float m1=0.1593017578125,m2=78.84375,c1=0.8359375,c
 float eotf_hlg(float x){const float a=0.17883277,b=0.28466892,c=0.55991073;return x<=0.5?(x*x)/3.0:(exp((x-c)/a)+b)/12.0;}
 float eotf_logc3(float x){const float a=5.555556,b=0.052272,c=0.247190,d=0.385537,e=5.367655,f=0.092809;return x>e*0.010591+f?(pow(10.0,(x-d)/c)-b)/a:(x-f)/e;}
 float eotf_slog3(float x){const float cut=171.2102946929/1023.0;return x>=cut?pow(10.0,(x-0.410557184750733)/0.341132524981570)*0.18+0.01:(x-95.0/1023.0)*0.01/(cut-95.0/1023.0);}
-vec3 apply_eotf(vec3 r,int t){switch(t){case 1:return vec3(eotf_srgb(r.r),eotf_srgb(r.g),eotf_srgb(r.b));case 2:return vec3(eotf_rec709(r.r),eotf_rec709(r.g),eotf_rec709(r.b));case 3:return vec3(eotf_pq(r.r),eotf_pq(r.g),eotf_pq(r.b));case 4:return vec3(eotf_hlg(r.r),eotf_hlg(r.g),eotf_hlg(r.b));case 5:return vec3(eotf_logc3(r.r),eotf_logc3(r.g),eotf_logc3(r.b));case 6:return vec3(eotf_slog3(r.r),eotf_slog3(r.g),eotf_slog3(r.b));default:return r;}}
+float eotf_gamma24(float x){return pow(max(x,0.0),2.4);}  // Pure gamma 2.4 inverse
+float eotf_gamma26(float x){return pow(max(x,0.0),2.6);}  // Pure gamma 2.6 inverse
+vec3 apply_eotf(vec3 r,int t){switch(t){case 1:return vec3(eotf_srgb(r.r),eotf_srgb(r.g),eotf_srgb(r.b));case 2:return vec3(eotf_rec709(r.r),eotf_rec709(r.g),eotf_rec709(r.b));case 3:return vec3(eotf_pq(r.r),eotf_pq(r.g),eotf_pq(r.b));case 4:return vec3(eotf_hlg(r.r),eotf_hlg(r.g),eotf_hlg(r.b));case 5:return vec3(eotf_logc3(r.r),eotf_logc3(r.g),eotf_logc3(r.b));case 6:return vec3(eotf_slog3(r.r),eotf_slog3(r.g),eotf_slog3(r.b));case 7:return r;case 8:return vec3(eotf_gamma24(r.r),eotf_gamma24(r.g),eotf_gamma24(r.b));case 9:return vec3(eotf_gamma26(r.r),eotf_gamma26(r.g),eotf_gamma26(r.b));default:return r;}}
 float oetf_srgb(float x){return x<=0.0031308?x*12.92:1.055*pow(max(x,0.0),1.0/2.4)-0.055;}
 float oetf_rec709(float x){return pow(max(x,0.0),1.0/2.4);}  // BT.1886 inverse
 float oetf_pq(float x){const float m1=0.1593017578125,m2=78.84375,c1=0.8359375,c2=18.8515625,c3=18.6875;float xn=pow(clamp(x,0.0,1.0),m1);return pow((c1+c2*xn)/(1.0+c3*xn),m2);}
 float oetf_hlg(float x){const float a=0.17883277,b=0.28466892,c=0.55991073;x=max(x,0.0);return x<=1.0/12.0?sqrt(3.0*x):a*log(12.0*x-b)+c;}
-vec3 apply_oetf(vec3 r,int t){r=max(r,vec3(0.0));switch(t){case 1:return vec3(oetf_srgb(r.r),oetf_srgb(r.g),oetf_srgb(r.b));case 2:return vec3(oetf_rec709(r.r),oetf_rec709(r.g),oetf_rec709(r.b));case 3:return vec3(oetf_pq(r.r),oetf_pq(r.g),oetf_pq(r.b));case 4:return vec3(oetf_hlg(r.r),oetf_hlg(r.g),oetf_hlg(r.b));default:return r;}}
+float oetf_gamma24(float x){return pow(max(x,0.0),1.0/2.4);}  // Pure gamma 2.4 (EBU)
+float oetf_gamma26(float x){return pow(max(x,0.0),1.0/2.6);}  // Pure gamma 2.6 (DCI)
+vec3 apply_oetf(vec3 r,int t){r=max(r,vec3(0.0));switch(t){case 1:return vec3(oetf_srgb(r.r),oetf_srgb(r.g),oetf_srgb(r.b));case 2:return vec3(oetf_rec709(r.r),oetf_rec709(r.g),oetf_rec709(r.b));case 3:return vec3(oetf_pq(r.r),oetf_pq(r.g),oetf_pq(r.b));case 4:return vec3(oetf_hlg(r.r),oetf_hlg(r.g),oetf_hlg(r.b));case 5:return r;case 6:return vec3(oetf_gamma24(r.r),oetf_gamma24(r.g),oetf_gamma24(r.b));case 7:return vec3(oetf_gamma26(r.r),oetf_gamma26(r.g),oetf_gamma26(r.b));default:return r;}}
 
 vec3 tonemap_reinhard(vec3 v){return v/(v+1.0);}
 vec3 tonemap_aces_filmic(vec3 x){return clamp((x*(2.51*x+0.03))/(x*(2.43*x+0.59)+0.14),0.0,1.0);}

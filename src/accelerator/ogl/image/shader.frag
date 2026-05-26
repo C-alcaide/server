@@ -887,6 +887,8 @@ float eotf_slog3(float x) {
     return x >= cut ? pow(10.0, (x - 0.410557184750733) / 0.341132524981570) * 0.18 + 0.01
                     : (x - 95.0 / 1023.0) * 0.01 / (cut - 95.0 / 1023.0);
 }
+float eotf_gamma24(float x) { return pow(max(x, 0.0), 2.4); }  // Pure gamma 2.4 inverse
+float eotf_gamma26(float x) { return pow(max(x, 0.0), 2.6); }  // Pure gamma 2.6 inverse
 vec3 apply_eotf(vec3 rgb, int t) {
     switch (t) {
         case 1: return vec3(eotf_srgb(rgb.r),  eotf_srgb(rgb.g),  eotf_srgb(rgb.b));
@@ -895,6 +897,9 @@ vec3 apply_eotf(vec3 rgb, int t) {
         case 4: return vec3(eotf_hlg(rgb.r),   eotf_hlg(rgb.g),   eotf_hlg(rgb.b));
         case 5: return vec3(eotf_logc3(rgb.r), eotf_logc3(rgb.g), eotf_logc3(rgb.b));
         case 6: return vec3(eotf_slog3(rgb.r), eotf_slog3(rgb.g), eotf_slog3(rgb.b));
+        case 7: return rgb;  // linear (no EOTF needed)
+        case 8: return vec3(eotf_gamma24(rgb.r), eotf_gamma24(rgb.g), eotf_gamma24(rgb.b));
+        case 9: return vec3(eotf_gamma26(rgb.r), eotf_gamma26(rgb.g), eotf_gamma26(rgb.b));
         default: return rgb;
     }
 }
@@ -912,6 +917,8 @@ float oetf_hlg(float x) {
     x = max(x, 0.0);
     return x <= 1.0 / 12.0 ? sqrt(3.0 * x) : a * log(12.0 * x - b) + c;
 }
+float oetf_gamma24(float x) { return pow(max(x, 0.0), 1.0 / 2.4); }  // Pure gamma 2.4 (EBU)
+float oetf_gamma26(float x) { return pow(max(x, 0.0), 1.0 / 2.6); }  // Pure gamma 2.6 (DCI)
 vec3 apply_oetf(vec3 rgb, int t) {
     rgb = max(rgb, vec3(0.0));
     switch (t) {
@@ -919,6 +926,9 @@ vec3 apply_oetf(vec3 rgb, int t) {
         case 2: return vec3(oetf_rec709(rgb.r), oetf_rec709(rgb.g), oetf_rec709(rgb.b));
         case 3: return vec3(oetf_pq(rgb.r),    oetf_pq(rgb.g),    oetf_pq(rgb.b));
         case 4: return vec3(oetf_hlg(rgb.r),   oetf_hlg(rgb.g),   oetf_hlg(rgb.b));
+        case 5: return rgb;  // linear (no OETF)
+        case 6: return vec3(oetf_gamma24(rgb.r), oetf_gamma24(rgb.g), oetf_gamma24(rgb.b));
+        case 7: return vec3(oetf_gamma26(rgb.r), oetf_gamma26(rgb.g), oetf_gamma26(rgb.b));
         default: return rgb;
     }
 }

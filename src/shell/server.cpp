@@ -304,12 +304,14 @@ struct server::impl
                                        << msg_info(L"Invalid color-depth: " + std::to_wstring(color_depth)));
 
             auto color_space_str = boost::to_lower_copy(xml_channel.second.get(L"color-space", L"bt709"));
-            if (color_space_str != L"bt709" && color_space_str != L"bt2020")
-                CASPAR_THROW_EXCEPTION(user_error() << msg_info(L"Invalid color-space, must be bt709 or bt2020"));
+            if (color_space_str != L"bt709" && color_space_str != L"bt2020" &&
+                color_space_str != L"p3-d65" && color_space_str != L"p3-dci" && color_space_str != L"adobe-rgb")
+                CASPAR_THROW_EXCEPTION(user_error() << msg_info(L"Invalid color-space, must be bt709, bt2020, p3-d65, p3-dci or adobe-rgb"));
 
             auto color_transfer_str = boost::to_lower_copy(xml_channel.second.get(L"color-transfer", L"sdr"));
-            if (color_transfer_str != L"sdr" && color_transfer_str != L"pq" && color_transfer_str != L"hlg")
-                CASPAR_THROW_EXCEPTION(user_error() << msg_info(L"Invalid color-transfer, must be sdr, pq or hlg"));
+            if (color_transfer_str != L"sdr" && color_transfer_str != L"pq" && color_transfer_str != L"hlg" &&
+                color_transfer_str != L"linear" && color_transfer_str != L"gamma24" && color_transfer_str != L"gamma26")
+                CASPAR_THROW_EXCEPTION(user_error() << msg_info(L"Invalid color-transfer, must be sdr, pq, hlg, linear, gamma24 or gamma26"));
 
             if (format_desc.format == video_format::invalid)
                 CASPAR_THROW_EXCEPTION(user_error() << msg_info(L"Invalid video-mode: " + format_desc_str));
@@ -318,10 +320,17 @@ struct server::impl
             auto channel_id  = static_cast<int>(channels_->size() + 1);
             auto depth       = color_depth == 16 ? common::bit_depth::bit16 : common::bit_depth::bit8;
             auto default_color_space =
-                color_space_str == L"bt2020" ? core::color_space::bt2020 : core::color_space::bt709;
-            auto default_color_transfer = color_transfer_str == L"pq"  ? core::color_transfer::pq
-                                        : color_transfer_str == L"hlg" ? core::color_transfer::hlg
-                                                                        : core::color_transfer::sdr;
+                color_space_str == L"bt2020"    ? core::color_space::bt2020
+              : color_space_str == L"p3-d65"   ? core::color_space::p3_d65
+              : color_space_str == L"p3-dci"   ? core::color_space::p3_dci
+              : color_space_str == L"adobe-rgb" ? core::color_space::adobe_rgb
+                                               : core::color_space::bt709;
+            auto default_color_transfer = color_transfer_str == L"pq"      ? core::color_transfer::pq
+                                        : color_transfer_str == L"hlg"     ? core::color_transfer::hlg
+                                        : color_transfer_str == L"linear"  ? core::color_transfer::linear
+                                        : color_transfer_str == L"gamma24" ? core::color_transfer::gamma24
+                                        : color_transfer_str == L"gamma26" ? core::color_transfer::gamma26
+                                                                           : core::color_transfer::sdr;
             auto auto_color_convert = xml_channel.second.get(L"auto-color-convert", true);
 
             // Parse auto-tone-map: none(0), reinhard(1), aces_filmic(2), aces_rrt(3), hlg_ootf(7)

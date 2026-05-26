@@ -185,6 +185,7 @@ class vulkan_output_consumer : public core::frame_consumer
     {
         format_desc_ = format_desc;
         port_index_  = port_index;
+        mixer_auto_color_convert_ = channel_info.auto_color_convert;
 
         // Clamp delay_frames to buffer_depth - 1 to prevent the present loop
         // from stalling permanently (min_fill = delay_frames + 1 must be ≤ buffer_depth).
@@ -481,12 +482,17 @@ class vulkan_output_consumer : public core::frame_consumer
             }
         }
 
-        // Create color space conversion pipeline if needed (before present thread starts
-        // to avoid a data race — present_loop reads color_pipeline_ every frame).
-        // When hardware HDR is active (NvAPI UHDA mode), the display engine handles both
-        // PQ encoding and BT.709→BT.2020 gamut mapping — no compute shader needed.
-        if (!adapter_mismatch_ && !hw_hdr_active_ &&
-            (config_.gamut != output_gamut::bt709 || config_.eotf != output_eotf::srgb || config_.tone_map_op != 0)) {
+        // Color space conversion pipeline: DISABLED.
+        // The mixer (via auto_color_convert or manual MIXER COLOR commands) already
+        // converts to the channel's target color space (gamut + transfer + tone mapping).
+        // The vulkan output consumer receives already-converted frames. Running
+        // color_convert.comp on top would double-convert.
+        // Hardware HDR (NvAPI UHDA) is also handled upstream when active.
+        //
+        // The color_convert_pipeline remains in the codebase for potential future use
+        // cases where a display-specific post-process is needed that differs from the
+        // mixer's conversion (e.g. display-specific LUT or soft-knee rolloff).
+        if (false && !adapter_mismatch_ && !hw_hdr_active_ && config_.tone_map_op != 0) {
             try {
                 color_pipeline_ = std::make_unique<color_convert_pipeline>(
                     *device_, format_desc_.width, format_desc_.height);
@@ -3491,6 +3497,7 @@ class vulkan_output_consumer : public core::frame_consumer
     mutable std::mutex               config_mutex_; // Protects state() reads from config_ writes
     core::video_format_desc          format_desc_;
     int                              port_index_ = 0;
+    bool                             mixer_auto_color_convert_ = true;
     spl::shared_ptr<diagnostics::graph> graph_;
     executor                         executor_;
 

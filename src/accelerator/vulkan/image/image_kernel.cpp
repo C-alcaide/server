@@ -612,25 +612,44 @@ struct image_kernel::impl
                        (params.pix_desc.color_space != params.target_color_space ||
                         params.pix_desc.color_transfer != params.target_color_transfer)) {
                 // Auto color conversion: source differs from channel output.
+                // Gamut indices for the k_direct matrix (0=bt709, 1=bt2020, 2=p3_d65, 3=p3_dci, 4=adobe_rgb)
                 auto gamut_index = [](core::color_space cs) -> int {
                     switch (cs) {
-                        case core::color_space::bt2020: return 1;
-                        default:                       return 0; // bt601/bt709 → shader index 0 (bt709)
+                        case core::color_space::bt2020:    return 1;
+                        case core::color_space::p3_d65:   return 2;
+                        case core::color_space::p3_dci:   return 3;
+                        case core::color_space::adobe_rgb:return 4;
+                        default:                          return 0; // bt601/bt709 → index 0
                     }
                 };
-                auto transfer_index = [](core::color_transfer ct) -> int {
+                // EOTF indices (apply_eotf): 1=srgb,2=rec709,3=pq,4=hlg,5=logc3,6=slog3,7=linear,8=gamma24,9=gamma26
+                auto eotf_index = [](core::color_transfer ct) -> int {
                     switch (ct) {
-                        case core::color_transfer::pq:  return 3;
-                        case core::color_transfer::hlg: return 4;
-                        default:                        return 2; // sdr → rec709
+                        case core::color_transfer::pq:      return 3;
+                        case core::color_transfer::hlg:     return 4;
+                        case core::color_transfer::linear:  return 7;
+                        case core::color_transfer::gamma24: return 8;
+                        case core::color_transfer::gamma26: return 9;
+                        default:                            return 2; // sdr → rec709 (BT.1886)
+                    }
+                };
+                // OETF indices (apply_oetf): 1=srgb,2=rec709,3=pq,4=hlg,5=linear,6=gamma24,7=gamma26
+                auto oetf_index = [](core::color_transfer ct) -> int {
+                    switch (ct) {
+                        case core::color_transfer::pq:      return 3;
+                        case core::color_transfer::hlg:     return 4;
+                        case core::color_transfer::linear:  return 5;
+                        case core::color_transfer::gamma24: return 6;
+                        case core::color_transfer::gamma26: return 7;
+                        default:                            return 2; // sdr → rec709 (BT.1886)
                     }
                 };
                 int ig = gamut_index(params.pix_desc.color_space);
                 int og = gamut_index(params.target_color_space);
                 // Skip if the mapped indices are identical (e.g. bt601 source on bt709 channel)
                 if (ig != og || params.pix_desc.color_transfer != params.target_color_transfer) {
-                    int it = transfer_index(params.pix_desc.color_transfer);
-                    int ot = transfer_index(params.target_color_transfer);
+                    int it = eotf_index(params.pix_desc.color_transfer);
+                    int ot = oetf_index(params.target_color_transfer);
                     // Use channel's configured auto tone-map operator (default: hard clamp).
                     int tm = params.auto_tone_map;
                     uniforms.flags |= static_cast<uint32_t>(shader_flags::color_grading);
@@ -641,10 +660,12 @@ struct image_kernel::impl
 
                     // BT.2408 luminance adaptation: scene-referred mapping
                     // for SDR↔HLG conversions (75% signal for ref white).
+                    // Note: src_t uses EOTF indices, tgt_t uses OETF indices.
+                    // Linear/gamma24/gamma26 are treated as SDR-level for luminance.
                     auto get_luminance_scale = [](int src_t, int tgt_t) -> float {
                         constexpr float k_sdr_hlg = 0.265f;
-                        bool src_sdr = (src_t <= 2);
-                        bool tgt_sdr = (tgt_t <= 2);
+                        bool src_sdr = (src_t <= 2 || src_t >= 7); // rec709/srgb or linear/gamma24/gamma26
+                        bool tgt_sdr = (tgt_t <= 2 || tgt_t >= 5); // rec709/srgb or linear/gamma24/gamma26
                         bool src_hlg = (src_t == 4);
                         bool tgt_hlg = (tgt_t == 4);
                         bool src_pq  = (src_t == 3);
@@ -659,19 +680,46 @@ struct image_kernel::impl
                     };
                     uniforms.exposure = get_luminance_scale(it, ot);
 
-                    // Direct gamut matrices for auto conversion (ITU-R BT.2087).
-                    // Unlike the color grading path (which routes through ACEScg/AP1
-                    // working space for perceptual benefits), auto conversion uses
-                    // standard direct matrices — both BT.709 and BT.2020 share the
-                    // D65 white point, so no chromatic adaptation is needed.
-                    static const float k_direct[2][2][9] = {
+                    // Direct gamut matrices for auto conversion.
+                    // 5 gamuts: 0=bt709, 1=bt2020, 2=p3_d65, 3=p3_dci, 4=adobe_rgb
+                    // All D65-based pairs use ITU-R BT.2087 style direct matrices.
+                    // P3-DCI (D50-ish white) uses Bradford-adapted matrices.
+                    // Row-major 3×3 stored as 9 floats.
+                    static const float k_direct[5][5][9] = {
                         { // from bt709
-                            {1,0,0, 0,1,0, 0,0,1}, // → bt709 (identity)
+                            {1,0,0, 0,1,0, 0,0,1}, // → bt709
                             {0.6274039f,0.3292830f,0.0433131f, 0.0690972f,0.9195404f,0.0113623f, 0.0163914f,0.0880133f,0.8955953f}, // → bt2020
+                            {0.8224620f,0.1775380f,0.0000000f, 0.0331942f,0.9668058f,0.0000000f, 0.0170826f,0.0723974f,0.9105200f}, // → p3_d65
+                            {0.8685170f,0.1283810f,0.0031015f, 0.0344530f,0.9618840f,0.0036629f, 0.0167662f,0.0710578f,0.9121760f}, // → p3_dci
+                            {0.7151583f,0.2848417f,0.0000000f, 0.0000000f,1.0000000f,0.0000000f, 0.0000000f,0.0411539f,0.9588461f}, // → adobe_rgb
                         },
                         { // from bt2020
                             {1.6604910f,-0.5876411f,-0.0728499f, -0.1245505f,1.1328999f,-0.0083494f, -0.0181508f,-0.1005789f,1.1187297f}, // → bt709
-                            {1,0,0, 0,1,0, 0,0,1}, // → bt2020 (identity)
+                            {1,0,0, 0,1,0, 0,0,1}, // → bt2020
+                            {1.3434780f,-0.2820610f,-0.0614170f, -0.0652590f,1.0757410f,-0.0104820f, -0.0028170f,-0.0195750f,1.0223920f}, // → p3_d65
+                            {1.3807920f,-0.3315990f,-0.0491930f, -0.0586050f,1.0680060f,-0.0094010f, -0.0029440f,-0.0196200f,1.0225640f}, // → p3_dci
+                            {1.1512080f,-0.1512080f,0.0000000f, -0.1136290f,1.1136290f,0.0000000f, -0.0175840f,-0.0563370f,1.0739210f}, // → adobe_rgb
+                        },
+                        { // from p3_d65
+                            {1.2249401f,-0.2249401f,0.0000000f, -0.0420489f,1.0420489f,0.0000000f, -0.0196376f,-0.0786498f,1.0982874f}, // → bt709
+                            {0.7538780f,0.1986920f,0.0474300f, 0.0457440f,0.9413590f,0.0128970f, 0.0011430f,0.0156030f,0.9832540f}, // → bt2020
+                            {1,0,0, 0,1,0, 0,0,1}, // → p3_d65
+                            {1.0342270f,-0.0318520f,0.0000000f, 0.0012440f,0.9987560f,0.0000000f, -0.0002610f,0.0000000f,1.0028360f}, // → p3_dci (approx, Bradford)
+                            {0.8681240f,0.1318760f,0.0000000f, -0.0339850f,1.0339850f,0.0000000f, -0.0178610f,0.0279920f,0.9898690f}, // → adobe_rgb
+                        },
+                        { // from p3_dci
+                            {1.1827920f,-0.1831980f,0.0004060f, -0.0418540f,1.0418540f,0.0000000f, -0.0183830f,-0.0778470f,1.0962300f}, // → bt709
+                            {0.7325850f,0.2146490f,0.0527660f, 0.0441100f,0.9427470f,0.0131430f, 0.0013630f,0.0156860f,0.9829510f}, // → bt2020
+                            {0.9668230f,0.0307660f,0.0024110f, -0.0012100f,1.0012100f,0.0000000f, 0.0002530f,0.0000000f,0.9997470f}, // → p3_d65 (approx, Bradford)
+                            {1,0,0, 0,1,0, 0,0,1}, // → p3_dci
+                            {0.8399020f,0.1599740f,0.0001240f, -0.0340460f,1.0340460f,0.0000000f, -0.0176370f,0.0280000f,0.9896370f}, // → adobe_rgb
+                        },
+                        { // from adobe_rgb
+                            {1.3982450f,-0.3982450f,0.0000000f, 0.0000000f,1.0000000f,0.0000000f, 0.0000000f,-0.0429180f,1.0429180f}, // → bt709
+                            {0.8737660f,0.2049790f,0.0000000f, 0.0968570f,0.9031430f,0.0000000f, 0.0180060f,0.0824960f,0.8994980f}, // → bt2020 (via inv(adobe)×bt2020)
+                            {1.1519280f,-0.1519280f,0.0000000f, 0.0391260f,0.9608740f,0.0000000f, 0.0205670f,0.0523530f,0.9270800f}, // → p3_d65
+                            {1.1907120f,-0.1877990f,0.0000000f, 0.0405500f,0.9594500f,0.0000000f, 0.0197940f,0.0511990f,0.9290070f}, // → p3_dci (approx, Bradford)
+                            {1,0,0, 0,1,0, 0,0,1}, // → adobe_rgb
                         },
                     };
                     static const float k_identity[9] = {1,0,0, 0,1,0, 0,0,1};
