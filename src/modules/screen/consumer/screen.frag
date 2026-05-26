@@ -10,9 +10,12 @@
 #define RANGE_LIMITED   ((235.0f - 16.0f) / 256.0f)
 
 // Channel transfer function identifiers
-#define TRANSFER_SDR   2
-#define TRANSFER_PQ    3
-#define TRANSFER_HLG   4
+#define TRANSFER_SDR     2
+#define TRANSFER_PQ      3
+#define TRANSFER_HLG     4
+#define TRANSFER_LINEAR  5
+#define TRANSFER_GAMMA24 6
+#define TRANSFER_GAMMA26 7
 
 uniform sampler2D background;
 
@@ -63,6 +66,9 @@ vec3 eotf_pq(vec3 v)
     vec3 p = pow(max(v, vec3(0.0f)), vec3(1.0f / m2));
     return pow(max(p - c1, vec3(0.0f)) / (c2 - c3 * p), vec3(1.0f / m1));
 }
+
+vec3 eotf_gamma24(vec3 v) { return pow(max(v, vec3(0.0f)), vec3(2.4f)); }
+vec3 eotf_gamma26(vec3 v) { return pow(max(v, vec3(0.0f)), vec3(2.6f)); }
 
 // --- Tone-map operators ---
 
@@ -135,6 +141,12 @@ vec3 apply_display_tone_map(vec3 color)
         linear_color = eotf_hlg(color);
     else if (channel_transfer == TRANSFER_PQ)
         linear_color = eotf_pq(color);
+    else if (channel_transfer == TRANSFER_LINEAR)
+        linear_color = color;
+    else if (channel_transfer == TRANSFER_GAMMA24)
+        linear_color = eotf_gamma24(color);
+    else if (channel_transfer == TRANSFER_GAMMA26)
+        linear_color = eotf_gamma26(color);
     else
         linear_color = eotf_rec709(color);
 

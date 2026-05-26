@@ -489,9 +489,25 @@ class vulkan_output_consumer : public core::frame_consumer
         // color_convert.comp on top would double-convert.
         // Hardware HDR (NvAPI UHDA) is also handled upstream when active.
         //
-        // The color_convert_pipeline remains in the codebase for potential future use
-        // cases where a display-specific post-process is needed that differs from the
-        // mixer's conversion (e.g. display-specific LUT or soft-knee rolloff).
+        // Currently config_.gamut and config_.eotf have NO effect — the channel's
+        // color-space and color-transfer determine all pixel values in the framebuffer.
+        //
+        // FUTURE RE-ENABLEMENT PLAN:
+        // To properly support per-consumer gamut adaptation (e.g. channel=bt2020 but
+        // vulkan-output display is P3), this pipeline should be re-enabled with the
+        // following architecture:
+        //   1. Channel color-space remains the mixer's working space (determines what
+        //      sources get converted TO during compositing).
+        //   2. This compute shader converts FROM the channel gamut TO config_.gamut/eotf
+        //      (the display's native gamut + transfer).
+        //   3. The shader input gamut comes from channel_info (passed at initialize()),
+        //      not from config — so it always matches what the mixer actually output.
+        //   4. Enable only when config_.gamut != channel gamut OR config_.eotf != channel
+        //      transfer (skip the no-op identity conversion).
+        //   5. tone_map_op applies here as a display-specific artistic transform AFTER
+        //      the gamut conversion (e.g. soft-knee HLG OOTF for this display's peak nits).
+        //   6. When hw_hdr_active_ (NvAPI UHDA), the display engine already handles
+        //      gamut mapping at scanout — skip this pipeline entirely.
         if (false && !adapter_mismatch_ && !hw_hdr_active_ && config_.tone_map_op != 0) {
             try {
                 color_pipeline_ = std::make_unique<color_convert_pipeline>(

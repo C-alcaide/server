@@ -374,22 +374,41 @@ std::shared_ptr<AVFrame> make_av_video_frame(const core::const_frame& frame, con
     }
 
     if (format != core::pixel_format::invalid) {
+        // Map color_transfer to AVColorTransferCharacteristic
+        AVColorTransferCharacteristic trc = AVCOL_TRC_BT709;
+        switch (pix_desc.color_transfer) {
+            case core::color_transfer::pq:      trc = AVCOL_TRC_SMPTE2084; break;
+            case core::color_transfer::hlg:     trc = AVCOL_TRC_ARIB_STD_B67; break;
+            case core::color_transfer::linear:  trc = AVCOL_TRC_LINEAR; break;
+            case core::color_transfer::gamma24: trc = AVCOL_TRC_GAMMA22; break; // 2.2 closest standard to 2.4
+            case core::color_transfer::gamma26: trc = AVCOL_TRC_GAMMA28; break; // 2.8 closest standard to 2.6
+            default:                            trc = AVCOL_TRC_BT709; break;
+        }
+
         switch (pix_desc.color_space) {
             case core::color_space::bt2020:
                 av_frame->color_primaries = AVCOL_PRI_BT2020;
-                av_frame->color_trc       = (pix_desc.color_transfer == core::color_transfer::pq)
-                                                ? AVCOL_TRC_SMPTE2084
-                                            : (pix_desc.color_transfer == core::color_transfer::hlg)
-                                                ? AVCOL_TRC_ARIB_STD_B67
-                                                : AVCOL_TRC_BT709;
+                av_frame->color_trc       = trc;
                 break;
             case core::color_space::bt601:
                 av_frame->color_primaries = AVCOL_PRI_BT470BG;
                 av_frame->color_trc       = AVCOL_TRC_SMPTE170M;
                 break;
+            case core::color_space::p3_d65:
+                av_frame->color_primaries = AVCOL_PRI_SMPTE432;
+                av_frame->color_trc       = trc;
+                break;
+            case core::color_space::p3_dci:
+                av_frame->color_primaries = AVCOL_PRI_SMPTE431;
+                av_frame->color_trc       = trc;
+                break;
+            case core::color_space::adobe_rgb:
+                av_frame->color_primaries = AVCOL_PRI_BT709; // No exact match; Adobe RGB primaries ≈ BT.709
+                av_frame->color_trc       = trc;
+                break;
             default: // bt709
                 av_frame->color_primaries = AVCOL_PRI_BT709;
-                av_frame->color_trc       = AVCOL_TRC_BT709;
+                av_frame->color_trc       = trc;
                 break;
         }
     }

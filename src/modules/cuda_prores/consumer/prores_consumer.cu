@@ -217,6 +217,7 @@ struct prores_config {
     int          profile        = 3;     // 3=HQ, 4=4444
     bool         has_alpha      = true;  // encode alpha plane for 4444
     int          hdr_mode       = -1;    // -1=inherit from channel, 0=SDR_709, 1=HLG_BT2020, 2=PQ_HDR10
+    int          color_primaries_override = -1; // -1=auto from hdr_mode, else ISO 23001-8 value
     uint16_t     hdr_max_cll    = 1000;  // MaxCLL  nits (PQ only)
     uint16_t     hdr_max_fall   = 400;   // MaxFALL nits (PQ only)
     bool         use_mxf        = false; // false=MOV
@@ -476,6 +477,9 @@ public:
                 break;
             }
         }
+        // Override color_primaries for P3 gamuts (ISO 23001-8: 11=P3-DCI, 12=P3-D65)
+        if (cfg_.color_primaries_override > 0)
+            color_info.color_primaries = cfg_.color_primaries_override;
 
         // Derive output file path
         const std::wstring filename =
@@ -1113,6 +1117,13 @@ create_consumer(const std::vector<std::wstring>& params,
             default:                        cfg.hdr_mode = 0; break;
         }
     }
+    if (cfg.color_primaries_override < 0) {
+        switch (channel_info.default_color_space) {
+            case core::color_space::p3_d65:   cfg.color_primaries_override = 12; break; // SMPTE RP 431-2
+            case core::color_space::p3_dci:   cfg.color_primaries_override = 11; break; // SMPTE EG 432-1
+            default: break;
+        }
+    }
     return spl::make_shared<prores_consumer_impl>(std::move(cfg), 1);
 }
 
@@ -1128,6 +1139,13 @@ create_preconfigured_consumer(const boost::property_tree::wptree& element,
             case core::color_transfer::pq:  cfg.hdr_mode = 2; break;
             case core::color_transfer::hlg: cfg.hdr_mode = 1; break;
             default:                        cfg.hdr_mode = 0; break;
+        }
+    }
+    if (cfg.color_primaries_override < 0) {
+        switch (channel_info.default_color_space) {
+            case core::color_space::p3_d65:   cfg.color_primaries_override = 12; break;
+            case core::color_space::p3_dci:   cfg.color_primaries_override = 11; break;
+            default: break;
         }
     }
     return spl::make_shared<prores_consumer_impl>(std::move(cfg), 1);

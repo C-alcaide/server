@@ -80,7 +80,7 @@ core::color_space get_color_space(const std::wstring& str)
     else if (color_space_str == L"bt601")
         return core::color_space::bt601;
 
-    CASPAR_THROW_EXCEPTION(user_error() << msg_info(L"Invalid decklink color-space, must be bt601, bt709 or bt2020"));
+    CASPAR_THROW_EXCEPTION(user_error() << msg_info(L"Invalid decklink color-space: must be bt601, bt709, or bt2020 (SDI cannot signal P3 or Adobe RGB)"));
 }
 
 core::color_transfer get_color_transfer(const std::wstring& str)
@@ -93,7 +93,7 @@ core::color_transfer get_color_transfer(const std::wstring& str)
     else if (s == L"sdr")
         return core::color_transfer::sdr;
 
-    CASPAR_THROW_EXCEPTION(user_error() << msg_info(L"Invalid color-transfer, must be sdr, pq or hlg"));
+    CASPAR_THROW_EXCEPTION(user_error() << msg_info(L"Invalid decklink color-transfer: must be sdr, pq, or hlg (SDI cannot signal linear/gamma24/gamma26)"));
 }
 
 configuration parse_xml_config(const boost::property_tree::wptree&  ptree,
@@ -264,6 +264,7 @@ configuration parse_amcp_config(const std::vector<std::wstring>&     params,
             config.color_space = core::color_space::bt601;
         else if (cs == L"bt709")
             config.color_space = core::color_space::bt709;
+        // P3/Adobe ignored — SDI cannot signal them; channel default is used instead
     }
 
     auto color_transfer_str = get_param(L"COLOR_TRANSFER", params);
@@ -275,6 +276,7 @@ configuration parse_amcp_config(const std::vector<std::wstring>&     params,
             config.color_transfer = core::color_transfer::hlg;
         else if (ct == L"sdr")
             config.color_transfer = core::color_transfer::sdr;
+        // linear/gamma24/gamma26 ignored — SDI cannot signal them
     }
 
     // Note: config.hdr is set by the caller based on both channel bit-depth and color settings.

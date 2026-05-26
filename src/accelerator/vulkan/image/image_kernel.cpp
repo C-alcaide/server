@@ -391,7 +391,10 @@ struct image_kernel::impl
 
         const auto is_hd           = params.pix_desc.planes.at(0).height > 700;
         const auto color_space     = is_hd ? params.pix_desc.color_space : core::color_space::bt601;
-        uniforms.color_space_index = static_cast<uint32_t>(color_space);
+        // YCbCr decode: only indices 0-2 (bt601/bt709/bt2020) are valid in the shader arrays.
+        // Wide-gamut spaces (P3, Adobe RGB) use BT.709 coefficients as fallback,
+        // because if the source had BT.2020 matrix, av_color.h would have returned bt2020 directly.
+        uniforms.color_space_index = static_cast<uint32_t>(color_space) > 2u ? 1u : static_cast<uint32_t>(color_space);
 
         if (params.pix_desc.is_straight_alpha) {
             uniforms.flags |= static_cast<uint32_t>(shader_flags::is_straight_alpha);

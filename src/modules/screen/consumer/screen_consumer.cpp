@@ -1625,9 +1625,12 @@ struct screen_consumer_proxy : public core::frame_consumer
         use_vulkan_ = channel_info.use_vulkan;
         // Set channel transfer so the screen shader knows what EOTF to apply
         switch (channel_info.default_color_transfer) {
-            case core::color_transfer::pq:  config_.channel_transfer = 3; break;
-            case core::color_transfer::hlg: config_.channel_transfer = 4; break;
-            default:                        config_.channel_transfer = 2; break; // sdr/rec709
+            case core::color_transfer::pq:      config_.channel_transfer = 3; break;
+            case core::color_transfer::hlg:     config_.channel_transfer = 4; break;
+            case core::color_transfer::linear:  config_.channel_transfer = 5; break;
+            case core::color_transfer::gamma24: config_.channel_transfer = 6; break;
+            case core::color_transfer::gamma26: config_.channel_transfer = 7; break;
+            default:                            config_.channel_transfer = 2; break; // sdr/rec709
         }
         consumer_ = std::make_unique<screen_consumer>(config_, format_desc, channel_info.index,
                                                       channel_info.gl_share_context, use_vulkan_);

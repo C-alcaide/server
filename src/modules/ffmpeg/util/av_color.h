@@ -56,6 +56,16 @@ inline core::color_space get_color_space(const std::shared_ptr<AVFrame>& video,
         default:
             break;
     }
+
+    // Check color_primaries for wide-gamut detection (matrix coefficients don't distinguish P3/Adobe)
+    if (video) {
+        switch (static_cast<AVColorPrimaries>(video->color_primaries)) {
+            case AVCOL_PRI_SMPTE432: return core::color_space::p3_d65;
+            case AVCOL_PRI_SMPTE431: return core::color_space::p3_dci;
+            default: break;
+        }
+    }
+
     return core::color_space::bt709;
 }
 
@@ -74,6 +84,13 @@ inline core::color_transfer get_color_transfer(const std::shared_ptr<AVFrame>& v
             return core::color_transfer::pq;
         case AVCOL_TRC_ARIB_STD_B67:
             return core::color_transfer::hlg;
+        case AVCOL_TRC_LINEAR:
+            return core::color_transfer::linear;
+        case AVCOL_TRC_GAMMA22:
+        case AVCOL_TRC_IEC61966_2_1: // sRGB ~2.2, closest to gamma24
+            return core::color_transfer::gamma24;
+        case AVCOL_TRC_GAMMA28:
+            return core::color_transfer::gamma26;
         default:
             break;
     }

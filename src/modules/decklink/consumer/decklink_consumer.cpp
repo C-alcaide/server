@@ -230,8 +230,10 @@ core::video_format_desc get_decklink_format(const port_configuration&      confi
 
 spl::shared_ptr<format_strategy> create_format_strategy(const configuration& config, bool use_vulkan = false)
 {
+    // HDR mode always signals BT.2020 on SDI, so v210 must use BT.2020 matrix.
+    // SDR mode: use the configured color_space (bt709 or bt601; P3/Adobe falls back to bt709).
     auto cpu_strategy = config.hdr
-        ? create_hdr_v210_strategy(config.color_space)
+        ? create_hdr_v210_strategy(core::color_space::bt2020)
         : (config.pixel_format == configuration::pixel_format_t::yuv
                ? create_sdr_v210_strategy(config.color_space)
                : create_sdr_bgra_strategy());
@@ -1405,7 +1407,9 @@ spl::shared_ptr<core::frame_consumer> create_consumer(const std::vector<std::wst
     configuration config = parse_amcp_config(params, format_repository, channel_info);
 
     config.hdr = (channel_info.depth != common::bit_depth::bit8) &&
-                 (config.color_space == core::color_space::bt2020 &&
+                 ((config.color_space == core::color_space::bt2020 ||
+                   config.color_space == core::color_space::p3_d65 ||
+                   config.color_space == core::color_space::p3_dci) &&
                   config.color_transfer != core::color_transfer::sdr);
 
     if (config.hdr && config.primary.key_only) {
@@ -1425,7 +1429,9 @@ create_preconfigured_consumer(const boost::property_tree::wptree&               
     configuration config = parse_xml_config(ptree, format_repository, channel_info);
 
     config.hdr = (channel_info.depth != common::bit_depth::bit8) &&
-                 (config.color_space == core::color_space::bt2020 &&
+                 ((config.color_space == core::color_space::bt2020 ||
+                   config.color_space == core::color_space::p3_d65 ||
+                   config.color_space == core::color_space::p3_dci) &&
                   config.color_transfer != core::color_transfer::sdr);
 
     if (config.hdr && config.primary.key_only) {

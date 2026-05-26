@@ -266,16 +266,21 @@ struct image_kernel::impl
         const auto is_hd       = params.pix_desc.planes.at(0).height > 700;
         const auto color_space = is_hd ? params.pix_desc.color_space : core::color_space::bt601;
 
+        // YCbCr decode matrices — only bt601/bt709/bt2020 exist for YCbCr.
+        // Wide-gamut spaces (P3, Adobe RGB) use BT.709 coefficients as fallback,
+        // because if the source had BT.2020 matrix, av_color.h would have returned bt2020 directly.
+        const int cs_idx = static_cast<int>(color_space) > 2 ? 1 : static_cast<int>(color_space);
+
         const float color_matrices[3][9] = {
             {1.0, 0.0, 1.402, 1.0, -0.344, -0.71414, 1.0, 1.772, 0.0},                          // bt.601
             {1.0, 0.0, 1.5748, 1.0, -0.1873, -0.4681, 1.0, 1.8556, 0.0},                      // bt.709
             {1.0, 0.0, 1.4746, 1.0, -0.16455312684366, -0.57135312684366, 1.0, 1.8814, 0.0}}; // bt.2020
-        const auto color_matrix = color_matrices[static_cast<int>(color_space)];
+        const auto color_matrix = color_matrices[cs_idx];
 
         const float luma_coefficients[3][3] = {{0.299, 0.587, 0.114},     // bt.601
                                                {0.2126, 0.7152, 0.0722},  // bt.709
                                                {0.2627, 0.6780, 0.0593}}; // bt.2020
-        const auto  luma_coeff              = luma_coefficients[static_cast<int>(color_space)];
+        const auto  luma_coeff              = luma_coefficients[cs_idx];
 
         // Setup shader
         shader_->use();
