@@ -93,7 +93,8 @@ struct mixer::impl
 
         state_["audio"] = audio_mixer_.state();
 
-        auto depth = image_mixer_->depth();
+        auto depth     = image_mixer_->depth();
+        auto is_vulkan = image_mixer_->is_vulkan();
 
         buffer_.push(std::async(
             std::launch::deferred,
@@ -101,13 +102,15 @@ struct mixer::impl
              audio  = std::move(audio),
              graph  = graph_,
              depth,
+             is_vulkan,
              format_desc,
              default_color_space    = default_color_space_,
              default_color_transfer = default_color_transfer_,
              tag = this]() mutable {
-                // 8-bit VK mixer outputs BGRA (shader .bgra swizzle into R8G8B8A8);
-                // 16-bit outputs RGBA directly (no B16G16R16A16 format exists).
-                auto pf = (depth == common::bit_depth::bit8) ? pixel_format::bgra : pixel_format::rgba;
+                // VK mixer: 8-bit outputs BGRA (shader .bgra swizzle into R8G8B8A8),
+                //           16-bit outputs RGBA directly (no B16G16R16A16 format exists).
+                // OGL mixer: always BGRA (GL_BGRA readback format swaps R/B from internal RGBA).
+                auto pf = (is_vulkan && depth != common::bit_depth::bit8) ? pixel_format::rgba : pixel_format::bgra;
                 auto desc = pixel_format_desc(pf, default_color_space, default_color_transfer);
                 desc.planes.push_back(pixel_format_desc::plane(format_desc.width, format_desc.height, 4, depth));
                 auto tuple = std::move(result.get());
