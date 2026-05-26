@@ -408,6 +408,13 @@ struct image_kernel::impl
         }
         uniforms.pixel_format = static_cast<uint32_t>(params.pix_desc.format);
 
+        // 8-bit render targets use BGRA output swizzle in the shader to match
+        // VK_FORMAT_B8G8R8A8_UNORM import expectation.  16-bit renders RGBA
+        // directly since VK_FORMAT_B16G16R16A16_UNORM does not exist in Vulkan.
+        if (depth_ == common::bit_depth::bit8) {
+            uniforms.flags2 |= static_cast<uint32_t>(shader_flags2::output_bgra);
+        }
+
         uniforms.opacity =
             transforms.image_transform.is_key ? 1.0f : static_cast<float>(transforms.image_transform.opacity);
 

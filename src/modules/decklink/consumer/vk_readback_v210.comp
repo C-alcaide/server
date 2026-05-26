@@ -30,6 +30,7 @@ layout(push_constant) uniform PushConstants {
     int dst_h;           // DeckLink output height
     int groups_per_row;  // (dst_w + 5) / 6
     int use_bt2020;      // 0 = BT.709, 1 = BT.2020
+    int is_16bit;        // 0 = 8-bit (BGRA swizzled), 1 = 16-bit (RGBA direct)
 } pc;
 
 // ─── BT.709 full-range → 10-bit limited-range YCbCr ────────────────────────
@@ -89,12 +90,19 @@ void main()
             pixel = vec4(0.0);
         }
 
-        // The mixer's fragment shader writes fragColor=col.bgra, so the
+        // For 8-bit: the mixer's fragment shader writes fragColor=col.bgra, so the
         // render attachment stores BGRA in what is formally an RGBA format.
         // texelFetch returns .r = Blue (position 0), .b = Red (position 2).
-        R[i] = int(pixel.b * 1023.0 + 0.5);
-        G[i] = int(pixel.g * 1023.0 + 0.5);
-        B[i] = int(pixel.r * 1023.0 + 0.5);
+        // For 16-bit: the shader writes RGBA directly, so .r = Red, .b = Blue.
+        if (pc.is_16bit != 0) {
+            R[i] = int(pixel.r * 1023.0 + 0.5);
+            G[i] = int(pixel.g * 1023.0 + 0.5);
+            B[i] = int(pixel.b * 1023.0 + 0.5);
+        } else {
+            R[i] = int(pixel.b * 1023.0 + 0.5);
+            G[i] = int(pixel.g * 1023.0 + 0.5);
+            B[i] = int(pixel.r * 1023.0 + 0.5);
+        }
     }
 
     // Convert to YCbCr

@@ -31,6 +31,7 @@
 #include "format_strategy.h"
 
 #include <common/memshfl.h>
+#include <core/frame/pixel_format.h>
 
 #include <tbb/parallel_for.h>
 #include <tbb/scalable_allocator.h>
@@ -242,13 +243,35 @@ class v210_strategy
                               -0.459784529009814,
                               0.5};
 
+    // Standard RGB order matrices for 16-bit RGBA frames (no BGR swap).
+    std::vector<float> bt709_rgba{0.212639005871510,
+                                  0.715168678767756,
+                                  0.072192315360734,
+                                  -0.114592177555732,
+                                  -0.385407822444268,
+                                  0.5,
+                                  0.5,
+                                  -0.454155517037873,
+                                  -0.045844482962127};
+    std::vector<float> bt2020_rgba{0.262700212011267,
+                                   0.677998071518871,
+                                   0.059301716469862,
+                                   -0.139630430187157,
+                                   -0.360369569812843,
+                                   0.5,
+                                   0.5,
+                                   -0.459784529009814,
+                                   -0.040215470990186};
+
     std::vector<int32_t> color_matrix;
+    std::vector<int32_t> color_matrix_rgba;
     __m128i              black_batch;
     uint8_t              bpc;
 
   public:
     explicit v210_strategy(core::color_space color_space, uint8_t bpc)
         : color_matrix(create_int_matrix(color_space == core::color_space::bt2020 ? bt2020 : bt709))
+        , color_matrix_rgba(create_int_matrix(color_space == core::color_space::bt2020 ? bt2020_rgba : bt709_rgba))
         , bpc(bpc)
     {
         // setup black batch (6 pixels of black, encoded as v210)
@@ -374,6 +397,12 @@ class v210_strategy
                                                     const core::const_frame&       frame2,
                                                     BMDFieldDominance              field_dominance)
     {
+        // 16-bit frames are RGBA (no BGR swap), use standard-order matrix.
+        bool use_rgba = frame1 && !frame1.pixel_format_desc().planes.empty() &&
+                        frame1.pixel_format_desc().format == core::pixel_format::rgba;
+        if (use_rgba)
+            std::swap(color_matrix, color_matrix_rgba);
+
         std::shared_ptr<void> image_data = allocate_frame_data(decklink_format_desc);
 
         if (field_dominance != bmdProgressiveFrame) {
@@ -398,6 +427,9 @@ class v210_strategy
         if (config.key_only) {
             CASPAR_LOG(warning) << L"key_only is not supported for HDR v210 frames, outputting full-color frame";
         }
+
+        if (use_rgba)
+            std::swap(color_matrix, color_matrix_rgba);
 
         return image_data;
     }

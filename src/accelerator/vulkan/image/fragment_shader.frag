@@ -102,6 +102,10 @@ const uint F_STRAIGHT_ALPHA=1u<<0, F_LOCAL_KEY=1u<<1, F_LAYER_KEY=1u<<2,
            F_EDGE_BLEND=1u<<31;
 bool flag(uint f) { return (flags & f) != 0u; }
 
+// Extended flags (flags2)
+const uint F2_OUTPUT_BGRA=1u<<0;
+bool flag2(uint f) { return (flags2 & f) != 0u; }
+
 const float PI = 3.14159265359;
 const mat3 color_matrices[3] = mat3[3](
     mat3(1.0,0.0,1.402, 1.0,-0.344,-0.71414, 1.0,1.772,0.0),
@@ -222,7 +226,7 @@ vec3 get_blend_color(vec3 b, vec3 fg) {
     } return fg;
 }
 vec4 blend_op(vec4 fore) {
-    vec4 back = subpassLoad(background).bgra;
+    vec4 back = flag2(F2_OUTPUT_BGRA) ? subpassLoad(background).bgra : subpassLoad(background);
     if(blend_mode!=0) fore.rgb = get_blend_color(back.rgb/(back.a+1e-7), fore.rgb/(fore.a+1e-7))*fore.a;
     switch(keyer){ case 1: return fore+back; default: return fore+(1.0-fore.a)*back; }
 }
@@ -418,5 +422,5 @@ void main(){
     if(flag(F_COLOR_GRADING)){if(tone_mapping_op>0)col.rgb=apply_tone_mapping(col.rgb,tone_mapping_op);col.rgb=ubo_mat3(working_to_output_c0,working_to_output_c1,working_to_output_c2)*col.rgb;if(tone_mapping_op==0)col.rgb=clamp(col.rgb,0.0,1.0);col.rgb=apply_oetf(col.rgb,output_transfer);}
     if(flag(F_GRAIN))col.rgb=apply_grain(col.rgb,TexCoord.st/TexCoord.q,grain_intensity,grain_size,grain_frame);
     if(flag(F_EDGE_BLEND)){vec2 ub=TexCoord.st/TexCoord.q;float ba=1.0;if(edge_blend_left>0.0)ba*=pow(clamp(ub.x/edge_blend_left,0.0,1.0),edge_blend_gamma);if(edge_blend_right>0.0)ba*=pow(clamp((1.0-ub.x)/edge_blend_right,0.0,1.0),edge_blend_gamma);if(edge_blend_top>0.0)ba*=pow(clamp(ub.y/edge_blend_top,0.0,1.0),edge_blend_gamma);if(edge_blend_bottom>0.0)ba*=pow(clamp((1.0-ub.y)/edge_blend_bottom,0.0,1.0),edge_blend_gamma);col*=ba;}
-    fragColor=col.bgra;
+    fragColor=flag2(F2_OUTPUT_BGRA)?col.bgra:col;
 }

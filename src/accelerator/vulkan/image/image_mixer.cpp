@@ -349,7 +349,10 @@ class image_renderer
         draw_params draw_params;
         draw_params.target_width    = format_desc.square_width;
         draw_params.target_height   = format_desc.square_height;
-        draw_params.pix_desc.format = core::pixel_format::bgra;
+        // 8-bit attachments store BGRA (shader .bgra swizzle); 16-bit store RGBA directly.
+        draw_params.pix_desc.format = (source_texture->depth() == common::bit_depth::bit8)
+                                          ? core::pixel_format::bgra
+                                          : core::pixel_format::rgba;
         draw_params.pix_desc.planes = {core::pixel_format_desc::plane(
             source_texture->width(), source_texture->height(), 4, source_texture->depth())};
         draw_params.textures        = {spl::make_shared_ptr(source_texture)};

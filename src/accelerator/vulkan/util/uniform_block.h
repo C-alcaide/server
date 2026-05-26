@@ -224,4 +224,11 @@ enum class shader_flags : uint32_t
 
 inline shader_flags operator|(shader_flags a, shader_flags b) { return static_cast<shader_flags>(static_cast<uint32_t>(a) | static_cast<uint32_t>(b)); }
 
+// Bit flags for `flags2` field (extended beyond 32 bits of `flags`)
+enum class shader_flags2 : uint32_t
+{
+    none         = 0,
+    output_bgra  = 1u << 0,  // Apply .bgra swizzle on fragment output (8-bit path)
+};
+
 }}} // namespace caspar::accelerator::vulkan

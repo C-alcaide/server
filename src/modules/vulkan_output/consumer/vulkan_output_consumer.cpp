@@ -50,6 +50,7 @@
 #include <core/consumer/channel_info.h>
 #include <core/consumer/frame_consumer.h>
 #include <core/frame/frame.h>
+#include <core/frame/pixel_format.h>
 #include <core/video_channel.h>
 #include <core/video_format.h>
 
@@ -1917,7 +1918,13 @@ class vulkan_output_consumer : public core::frame_consumer
                     debug_frame_h_ = static_cast<int>(frame.height());
                     const auto& planes = frame.pixel_format_desc().planes;
                     bool is_16bit = !planes.empty() && planes[0].depth != common::bit_depth::bit8;
-                    debug_frame_format_ = is_16bit ? 2 : 0; // 2=BGRA16, 0=BGRA8
+                    // VK mixer 8-bit outputs BGRA (.bgra swizzle); 16-bit outputs RGBA directly.
+                    // Check pixel_format_desc to determine actual layout.
+                    bool is_bgra = (frame.pixel_format_desc().format == core::pixel_format::bgra);
+                    if (is_16bit)
+                        debug_frame_format_ = is_bgra ? 2 : 3; // 2=BGRA16, 3=RGBA16
+                    else
+                        debug_frame_format_ = 0; // BGRA8
                 }
             }
         }
@@ -2062,7 +2069,11 @@ class vulkan_output_consumer : public core::frame_consumer
             debug_frame_h_ = src_h;
             const auto& planes = frame.pixel_format_desc().planes;
             bool is_16bit = !planes.empty() && planes[0].depth != common::bit_depth::bit8;
-            debug_frame_format_ = is_16bit ? 2 : 0; // 2=BGRA16, 0=BGRA8
+            bool is_bgra = (frame.pixel_format_desc().format == core::pixel_format::bgra);
+            if (is_16bit)
+                debug_frame_format_ = is_bgra ? 2 : 3; // 2=BGRA16, 3=RGBA16
+            else
+                debug_frame_format_ = 0; // BGRA8
         }
     }
 
@@ -3016,7 +3027,7 @@ class vulkan_output_consumer : public core::frame_consumer
                     return 0;
 
                 // Header: 4-byte magic + uint32 width + uint32 height + uint32 format
-                // Format: 0 = BGRA8 (4 bytes/px), 1 = RGBA16F (8 bytes/px), 2 = BGRA16 (8 bytes/px)
+                // Format: 0 = BGRA8 (4 bytes/px), 1 = RGBA16F (8 bytes/px), 2 = BGRA16 (8 bytes/px), 3 = RGBA16 (8 bytes/px)
                 struct { char magic[4]; uint32_t w, h, fmt; } header = {
                     {'C','V','P','1'},
                     static_cast<uint32_t>(self->debug_frame_w_),
@@ -3604,7 +3615,7 @@ class vulkan_output_consumer : public core::frame_consumer
     std::vector<uint8_t>             debug_frame_data_;       // Raw pixels (RGBA16F, BGRA8, or BGRA16)
     int                              debug_frame_w_{0};
     int                              debug_frame_h_{0};
-    uint32_t                         debug_frame_format_{0};  // 0=BGRA8, 1=RGBA16F, 2=BGRA16
+    uint32_t                         debug_frame_format_{0};  // 0=BGRA8, 1=RGBA16F, 2=BGRA16, 3=RGBA16
     VkBuffer                         debug_readback_buffer_   = VK_NULL_HANDLE;
     VkDeviceMemory                   debug_readback_memory_   = VK_NULL_HANDLE;
     void*                            debug_readback_mapped_   = nullptr;

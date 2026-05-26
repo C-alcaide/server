@@ -105,7 +105,10 @@ struct mixer::impl
              default_color_space    = default_color_space_,
              default_color_transfer = default_color_transfer_,
              tag = this]() mutable {
-                auto desc = pixel_format_desc(pixel_format::bgra, default_color_space, default_color_transfer);
+                // 8-bit VK mixer outputs BGRA (shader .bgra swizzle into R8G8B8A8);
+                // 16-bit outputs RGBA directly (no B16G16R16A16 format exists).
+                auto pf = (depth == common::bit_depth::bit8) ? pixel_format::bgra : pixel_format::rgba;
+                auto desc = pixel_format_desc(pf, default_color_space, default_color_transfer);
                 desc.planes.push_back(pixel_format_desc::plane(format_desc.width, format_desc.height, 4, depth));
                 auto tuple = std::move(result.get());
                 auto& tex_ptr = std::get<1>(tuple);

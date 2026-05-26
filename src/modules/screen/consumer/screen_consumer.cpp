@@ -38,6 +38,7 @@
 #include <core/consumer/frame_consumer.h>
 #include <core/frame/frame.h>
 #include <core/frame/geometry.h>
+#include <core/frame/pixel_format.h>
 #include <core/video_format.h>
 #include <core/diagnostics/osd_graph.h>
 
@@ -1101,13 +1102,17 @@ struct host_strategy : public display_strategy
             }
 
             GL(glBindBuffer(GL_PIXEL_UNPACK_BUFFER, frame.pbo));
+            // 8-bit mixer outputs BGRA; 16-bit outputs RGBA directly.
+            auto gl_fmt = (self->config_.high_bitdepth &&
+                           in_frame.pixel_format_desc().format == core::pixel_format::rgba)
+                              ? GL_RGBA : GL_BGRA;
             GL(glTextureSubImage2D(frame.tex,
                                    0,
                                    0,
                                    0,
                                    self->format_desc_.width,
                                    self->format_desc_.height,
-                                   GL_BGRA,
+                                   gl_fmt,
                                    self->config_.high_bitdepth ? GL_UNSIGNED_SHORT : GL_UNSIGNED_BYTE,
                                    nullptr));
             GL(glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0));
@@ -1586,8 +1591,11 @@ struct gpu_strategy : public display_strategy
                         std::memcpy(fallback_ptr_, img.data(), sz);
 
                     GL(glBindBuffer(GL_PIXEL_UNPACK_BUFFER, fallback_pbo_));
+                    // 8-bit mixer outputs BGRA; 16-bit outputs RGBA directly.
+                    auto gl_fmt = (hbd && in_frame.pixel_format_desc().format == core::pixel_format::rgba)
+                                      ? GL_RGBA : GL_BGRA;
                     GL(glTextureSubImage2D(fallback_tex_, 0, 0, 0, w, h,
-                                           GL_BGRA, hbd ? GL_UNSIGNED_SHORT : GL_UNSIGNED_BYTE, nullptr));
+                                           gl_fmt, hbd ? GL_UNSIGNED_SHORT : GL_UNSIGNED_BYTE, nullptr));
                     GL(glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0));
 
                     GL(glActiveTexture(GL_TEXTURE0));

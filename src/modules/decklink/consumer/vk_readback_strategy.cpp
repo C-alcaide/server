@@ -505,7 +505,7 @@ struct vk_readback_strategy::impl
         VkPushConstantRange push{};
         push.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
         push.offset     = 0;
-        push.size       = (is_hdr_ || use_bt2020_ || needs_v210_) ? 24 : 16; // v210: 6 ints (24B), BGRA: 4 ints (16B)
+        push.size       = (is_hdr_ || use_bt2020_ || needs_v210_) ? 28 : 16; // v210: 7 ints (28B), BGRA: 4 ints (16B)
 
         VkPipelineLayoutCreateInfo pl_ci{};
         pl_ci.sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
@@ -1223,8 +1223,8 @@ struct vk_readback_strategy::impl
         // Push constants and dispatch
         if (is_hdr_ || use_bt2020_ || needs_v210_) {
             int groups_per_row = (dst_w + 5) / 6;
-            int push_data[6] = {src_x, src_y, dst_w, dst_h, groups_per_row, use_bt2020_ ? 1 : 0};
-            vkCmdPushConstants(slot.cmd, pipe_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, 24, push_data);
+            int push_data[7] = {src_x, src_y, dst_w, dst_h, groups_per_row, use_bt2020_ ? 1 : 0, is_16bit ? 1 : 0};
+            vkCmdPushConstants(slot.cmd, pipe_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, 28, push_data);
 
             uint32_t gx = (uint32_t)((groups_per_row + 63) / 64);
             uint32_t gy = (uint32_t)dst_h;
