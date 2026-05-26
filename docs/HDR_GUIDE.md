@@ -31,16 +31,18 @@ For per-layer color grading and ACES color management (MIXER COLORSPACE, CDL, LU
 │  DeckLink capture  → bmdDeckLinkFrameMetadata* per frame       │
 │  FFmpeg producer   → AVFrame color_trc / colorspace per frame  │
 │  CUDA ProRes prod. → ProRes bitstream color_matrix/transfer_func│
-│  All map to: color_space (bt601/709/2020) + color_transfer (sdr/pq/hlg)│
+│  All map to: color_space (bt601/709/2020/p3_d65/p3_dci/adobe_rgb)    │
+│            + color_transfer (sdr/pq/hlg/linear/gamma24/gamma26)      │
 └───────────────────────┬────────────────────────────────────────┘
                         │  pixel_format_desc { color_space, color_transfer }
                         ▼
 ┌────────────────────────────────────────────────────────────────┐
-│  OGL Mixer                                                     │
+│  OGL/Vulkan Mixer                                                  │
 │  - YCbCr↔BGRA conversion uses correct colour matrix           │
+│  - Auto color convert: EOTF → linear → gamut matrix → OETF    │
 │  - Per-layer color grading pipeline (see COLOR_GRADING.md)     │
-│  - Output BGRA frame carries channel color_space +             │
-│    color_transfer in pixel_format_desc                         │
+│  - Output BGRA frame in channel's target color_space +         │
+│    color_transfer (already converted)                          │
 └───────────────────────┬────────────────────────────────────────┘
                         │
           ┌─────────────┼──────────────┬───────────────┐
@@ -68,10 +70,10 @@ Color space and transfer function are declared **once on the channel** and flow 
   <video-mode>2160p5000</video-mode>
   <color-depth>16</color-depth>
 
-  <!-- Wide-gamut colour primaries: bt709 (default) | bt2020 -->
+  <!-- Wide-gamut colour primaries: bt709 | bt2020 | p3-d65 | p3-dci | adobe-rgb -->
   <color-space>bt2020</color-space>
 
-  <!-- Transfer function:  sdr (default) | pq | hlg -->
+  <!-- Transfer function: sdr | pq | hlg | linear | gamma24 | gamma26 -->
   <color-transfer>pq</color-transfer>
 
   <consumers>
@@ -86,18 +88,26 @@ Color space and transfer function are declared **once on the channel** and flow 
 |-------|---------|-------------|
 | `bt709` | ITU-R BT.709 primaries (default) | HD SDR; standard broadcast |
 | `bt2020` | ITU-R BT.2020 primaries | UHD HDR; wide-gamut |
+| `p3-d65` | Display P3 (D65 white point) | Apple displays, wide-gamut monitors, HDR grading |
+| `p3-dci` | DCI-P3 (DCI white point) | Digital cinema projection |
+| `adobe-rgb` | Adobe RGB (1998) | Photography, print proofing |
 
-> `bt601` is supported in the DeckLink input pipeline (auto-detected) but is not a valid channel config value—channels always output BT.709 or BT.2020.
+> `bt601` is supported in the DeckLink input pipeline (auto-detected) but is not a valid channel config value.
+>
+> **DeckLink compatibility**: SDI can only signal BT.709 or BT.2020. If a channel is set to `p3-d65`, `p3-dci`, or `adobe-rgb` and a DeckLink consumer is attached, a warning is logged. The pixel values are still output correctly but SDI metadata will signal BT.2020. For correct SDI signaling, use `bt709` or `bt2020`.
 
 ### `<color-transfer>` values
 
 | Value | Standard | Typical use |
 |-------|----------|-------------|
-| `sdr` | BT.709 gamma (default) | All SDR workflows |
+| `sdr` | BT.709 / BT.1886 gamma (default) | All SDR workflows |
 | `pq` | SMPTE ST 2084 (Perceptual Quantizer) | HDR10, cinema mastering |
 | `hlg` | ARIB STD-B67 (Hybrid Log-Gamma) | HDR broadcast (BBC, NHK) |
+| `linear` | Linear light (no curve) | Compositing previews, light-linear workflows |
+| `gamma24` | Pure gamma 2.4 | EBU broadcast reference monitors |
+| `gamma26` | Pure gamma 2.6 | DCI cinema projection |
 
-> Setting `color-transfer` has no visual effect unless `color-space` is also `bt2020`. An SDR channel with `color-transfer pq` is technically inconsistent but will not error — the metadata will simply propagate.
+> `linear`, `gamma24`, and `gamma26` are primarily useful for direct-display output (Vulkan) or compositing workflows. For SDI output via DeckLink, `sdr`, `pq`, or `hlg` are the standard choices.
 
 ### `<auto-color-convert>` (automatic color conversion)
 
@@ -119,8 +129,8 @@ When enabled (the default), the mixer automatically converts each layer's color 
 
 | Feature | Detail |
 |---------|--------|
-| **Gamut conversion** | Uses standard ITU-R BT.2087 direct matrices between BT.709 and BT.2020 (both D65 white point). Norm-correct to < 1 LSB. |
-| **Luminance scaling** | SDR→HLG: ×0.1 (100→1000 nit reference). HLG→PQ: ×10.0. PQ→HLG: ÷10.0. All others: ×1.0 |
+| **Gamut conversion** | Direct 3×3 matrices between all 5 channel gamuts (BT.709, BT.2020, P3-D65, P3-DCI, Adobe RGB). D65-based pairs use ITU-R BT.2087 matrices; DCI uses Bradford-adapted matrices. Norm-correct to < 1 LSB. |
+| **Luminance scaling** | SDR→HLG: ×0.265 (BT.2408 75% signal). HLG→PQ: ×0.1. PQ→SDR: ×100.0. Linear/gamma24/gamma26 treated as SDR-level for luminance adaptation. |
 | **Tone mapping** | Configurable via `<auto-tone-map>`. Default is hard-clamp (broadcast standard). Options: reinhard, aces_filmic, aces_rrt, hlg_ootf. See below. |
 | **Grading tools** | All color grading commands (CDL, LMG, white balance, hue shift, curves, levels, saturation, qualifier, etc.) work normally — they operate in scene-linear space between the EOTF and OETF. |
 | **Override** | Sending `MIXER COLORSPACE` on a layer switches that layer to the manual ACEScg pipeline. Auto is skipped for that layer. |
@@ -373,16 +383,19 @@ Hardware HDR activates automatically when:
 
 Falls back silently to the compute shader path if the display or driver doesn't support it.
 
-### Color Conversion (Compute Shader)
+### Color Conversion Architecture
 
-When hardware HDR is not available, a Vulkan compute shader converts the mixer's BT.709 sRGB output to the target gamut and transfer function via an RGBA16F intermediate (zero-banding precision):
+Color space conversion is performed by the **mixer's fragment shader** during compositing — not by the Vulkan output consumer. The mixer applies:
 
-1. Linearize (undo sRGB EOTF)
-2. 3×3 gamut matrix (BT.709 → target primaries)
-3. Tone mapping (if `<auto-tone-map>` is set on the consumer)
-4. Apply output OETF (PQ, HLG, gamma, etc.)
+1. EOTF linearization (source transfer → linear light)
+2. 3×3 gamut matrix (source → channel target primaries)
+3. Luminance adaptation (BT.2408 for SDR↔HDR transitions)
+4. Tone mapping (if `<auto-tone-map>` is set)
+5. OETF encoding (linear → channel target transfer)
 
-When no conversion is needed (gamut = BT.709, transfer = sRGB, no tone-map), the compute pass is completely bypassed.
+Frames arrive at the Vulkan consumer already in the channel's target gamut and transfer. The Vulkan compute shader (`color_convert_pipeline`) is currently **disabled** — it was the legacy conversion path before the mixer gained full color management. It may be re-enabled for per-consumer display transforms in the future.
+
+When hardware HDR acceleration (NvAPI UHDA) is active, the display engine performs additional PQ/HLG encoding at the scanout stage.
 
 ### Supported Output Gamuts
 
@@ -410,8 +423,8 @@ When no conversion is needed (gamut = BT.709, transfer = sRGB, no tone-map), the
 | Aspect | DeckLink | Vulkan |
 |:---|:---|:---|
 | HDR mode source | Inherited from channel `<color-transfer>` | Set per-consumer via `<transfer>` |
-| Gamut conversion | None (passes through channel gamut) | Compute shader or hardware HDR |
-| Wide-gamut options | BT.709, BT.2020 | BT.709, BT.2020, P3-D65, P3-DCI, Adobe RGB |
+| Gamut conversion | None (outputs channel gamut directly) | Compute shader or hardware HDR |
+| Channel gamut options | BT.709, BT.2020 (P3/Adobe: warning logged) | All 5 gamuts fully supported |
 | HDR metadata | `<hdr-metadata>` in DeckLink block | `<hdr-metadata>` in vulkan-output block |
 | EDID auto-detect | No | Yes (`<edid-auto-hdr>`) |
 | Hardware acceleration | N/A | NvAPI UHDA display engine (NVIDIA) |
@@ -811,7 +824,12 @@ Output for DCI projectors with gamma 2.6:
 | Standard HD/UHD SDR | `bt709` (default) | `sdr` (default) | `8` |
 | UHD HDR10 (PQ) | `bt2020` | `pq` | `16` |
 | UHD HLG broadcast | `bt2020` | `hlg` | `16` |
-| Wide-gamut SDR (future) | `bt2020` | `sdr` | `16` |
+| Wide-gamut SDR | `bt2020` | `sdr` | `16` |
+| Display P3 HDR grading | `p3-d65` | `pq` | `16` |
+| DCI cinema projection | `p3-dci` | `gamma26` | `16` |
+| EBU reference monitor | `bt709` | `gamma24` | `16` |
+| Linear compositing preview | `bt709` | `linear` | `16` |
+| Adobe RGB proofing | `adobe-rgb` | `sdr` | `16` |
 
 ### CUDA ProRes — HDR mode resolution
 
@@ -853,6 +871,8 @@ Output for DCI projectors with gamma 2.6:
 
 - **CUDA ProRes producer** reads `color_matrix` and `transfer_func` from the ProRes bitstream header on every decoded frame. HDR ProRes files produced by Final Cut Pro, DaVinci Resolve, or a previous CUDA ProRes recording will therefore correctly signal PQ or HLG to the downstream mixer and consumers. Prior to this fix, all CUDA-decoded ProRes frames were reported as SDR regardless of container metadata.
 
-- **Vulkan output HDR** is configured per-consumer, independent of the channel's `<color-transfer>`. This allows a single channel to drive both an SDR DeckLink output and an HDR Vulkan output simultaneously. The Vulkan consumer supports wider gamut options (P3-D65, P3-DCI, Adobe RGB) beyond what DeckLink offers.
+- **Vulkan output color conversion** is now performed by the mixer's fragment shader, not the Vulkan consumer's compute shader. The `color_convert_pipeline` is disabled. The Vulkan consumer outputs whatever the mixer produces — the channel's `<gamut>` and `<eotf>` settings in the vulkan-output config are used for HDR display signaling (NvAPI metadata) but not for pixel conversion.
+
+- **DeckLink with wide-gamut channels**: SDI can only signal BT.709 or BT.2020 color primaries. If a channel is set to `p3-d65`, `p3-dci`, or `adobe-rgb`, the DeckLink consumer logs a warning. The pixel values are output correctly but SDI receivers will interpret them as BT.2020. For correct end-to-end SDI workflows, set the channel to `bt709` or `bt2020`.
 
 - **DeckLink key_only + HDR** is not supported. The primary port rejects `key-only` when HDR is active. Secondary ports with `key-only` on an HDR channel will output the full-colour frame (with a logged warning) because v210 key extraction is not yet implemented.

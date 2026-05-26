@@ -48,9 +48,9 @@ The module is organized into ten layers:
 │   └── Owns interop_context, shared_texture_pool, affinity   │
 ├──────────────────────────────────────────────────────────────┤
 │ color_convert_pipeline          (Vulkan compute shader)      │
-│   ├── BT.709 sRGB → target gamut + OETF conversion          │
-│   ├── RGBA16F intermediate image (zero-banding precision)    │
-│   └── Bypassed entirely when no conversion needed            │
+│   ├── DISABLED: mixer now performs all color conversion      │
+│   ├── Retained for future per-consumer display transforms    │
+│   └── Bypassed entirely (no GPU cost)                        │
 ├──────────────────────────────────────────────────────────────┤
 │ vulkan_device                   (VkInstance + VkDevice RAII)  │
 │   ├── GPU enumeration + tier detection + LUID query          │
@@ -482,28 +482,28 @@ The remaining 28ms is GPU execution time (VK render + CUDA v210 conversion), not
 
 ## Color Space Conversion
 
-The module includes a Vulkan compute shader that performs real-time color space conversion at the output stage. This transforms the mixer's working space (BT.709 sRGB) to any target gamut and transfer function — enabling wide-gamut and HDR output from standard BT.709 content.
+Color space conversion is now handled by the **mixer** (fragment shader) rather than by the Vulkan output's compute shader. The mixer performs EOTF linearization, gamut matrix multiplication, and OETF encoding during compositing — so frames arrive at the Vulkan output already in the channel's target color space and transfer function.
 
-### Pipeline
+The `color_convert_pipeline` compute shader is retained in the codebase but is currently **disabled** (bypassed with zero GPU cost). It may be re-enabled in the future for per-consumer display transforms that differ from the channel output.
+
+### Architecture (current)
 
 ```
-Mixer output (BT.709 sRGB)
+Source (BT.709 sRGB, BT.2020 PQ, etc.)
     │
-    ▼ blit to RGBA16F intermediate
+    ▼ Mixer fragment shader:
+    │   1. Apply EOTF (linearize source)
+    │   2. 3×3 gamut matrix (source → channel target)
+    │   3. Apply OETF (encode to channel transfer)
     │
-    ▼ Compute shader:
-    │   1. Linearize (undo sRGB EOTF)
-    │   2. 3×3 gamut matrix (BT.709 → target primaries)
-    │   3. Apply output OETF (PQ, HLG, gamma, etc.)
+    ▼ Composited frame in channel target gamut/transfer
     │
-    ▼ blit to swapchain
+    ▼ blit to swapchain (Vulkan output)
     │
     ▼ vkQueuePresentKHR
 ```
 
-When color conversion is not needed (gamut = BT.709, transfer = sRGB), the compute pass is completely bypassed — frames blit directly to the swapchain with zero overhead.
-
-When [hardware HDR acceleration](#hardware-hdr-acceleration-nvapi-display-engine) is active, the compute shader is also bypassed entirely — the display engine performs the PQ encoding and gamut mapping in dedicated scanout hardware.
+When hardware HDR acceleration (NvAPI UHDA) is active, the display engine may perform additional PQ encoding at the scanout stage.
 
 ### Output Gamuts
 
