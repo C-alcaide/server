@@ -182,6 +182,10 @@ list(APPEND CMAKE_PREFIX_PATH ${sfml_SOURCE_DIR}/lib/cmake/SFML)
 # set(SFML_STATIC_LIBRARIES TRUE)
 find_package(SFML 2 COMPONENTS graphics system window REQUIRED)
 
+foreach(_sfml_target sfml-graphics sfml-system sfml-window)
+    set_target_properties(${_sfml_target} PROPERTIES MAP_IMPORTED_CONFIG_RELWITHDEBINFO Release)
+endforeach()
+
 casparcg_add_runtime_dependency_from_target(sfml-graphics)
 casparcg_add_runtime_dependency_from_target(sfml-system)
 casparcg_add_runtime_dependency_from_target(sfml-window)
