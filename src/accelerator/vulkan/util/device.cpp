@@ -25,6 +25,7 @@
 #include "buffer.h"
 #include "pipeline.h"
 #include "texture.h"
+#include "vulkan_queue.h"
 
 #include <common/array.h>
 #include <common/assert.h>
@@ -56,6 +57,7 @@ VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
 #include <array>
 #include <deque>
 #include <future>
+#include <memory>
 #include <thread>
 
 namespace caspar { namespace accelerator { namespace vulkan {
@@ -127,7 +129,7 @@ struct device::impl : public std::enable_shared_from_this<impl>
     vk::PhysicalDeviceMemoryProperties _memoryProperties;
     vk::PhysicalDevice                 _physical_device;
     vk::Device                         _device;
-    vk::Queue                          _queue;
+    std::unique_ptr<vulkan_queue>      _queue;
     vk::CommandPool                    _command_pool;
     VmaAllocator                       _allocator;
 
@@ -232,12 +234,13 @@ struct device::impl : public std::enable_shared_from_this<impl>
         auto vkb_device = device_res.value();
         _device         = vk::Device(vkb_device.device);
         VULKAN_HPP_DEFAULT_DISPATCHER.init(_device);
-        _queue            = vk::Queue(vkb_device.get_queue(vkb::QueueType::graphics).value());
-        auto queue_family = vkb_device.get_queue_index(vkb::QueueType::graphics).value();
+        auto graphics_queue  = vk::Queue(vkb_device.get_queue(vkb::QueueType::graphics).value());
+        auto graphics_family = vkb_device.get_queue_index(vkb::QueueType::graphics).value();
+        _queue               = std::make_unique<vulkan_queue>(graphics_queue, graphics_family);
 
         vk::CommandPoolCreateInfo pool_info;
         pool_info.flags            = vk::CommandPoolCreateFlagBits::eResetCommandBuffer;
-        pool_info.queueFamilyIndex = queue_family;
+        pool_info.queueFamilyIndex = _queue->family_index();
 
         _command_pool = _device.createCommandPool(pool_info);
 
@@ -391,7 +394,7 @@ struct device::impl : public std::enable_shared_from_this<impl>
         submitInfo.setCommandBuffers(cmd_buffer);
         submitInfo.setSignalSemaphores(_semaphore);
         submitInfo.pNext = &timelineInfo;
-        _queue.submit(submitInfo);
+        _queue->submit(submitInfo);
 
         _transfer_cmd_buffers.push_back({cmd_buffer, signal_value});
 
@@ -403,7 +406,7 @@ struct device::impl : public std::enable_shared_from_this<impl>
         return _device.allocateCommandBuffers(
             vk::CommandBufferAllocateInfo(_command_pool, vk::CommandBufferLevel::ePrimary, count));
     }
-    void submit(const vk::SubmitInfo& submitInfo, vk::Fence fence) { _queue.submit(submitInfo, fence); }
+    void submit(const vk::SubmitInfo& submitInfo, vk::Fence fence) { _queue->submit(submitInfo, fence); }
 
     std::shared_ptr<texture>
     create_attachment(int width, int height, common::bit_depth depth, uint32_t components_count)
