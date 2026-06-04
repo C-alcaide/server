@@ -531,13 +531,28 @@ The EOTF/gamut/OETF wrapper (steps 4–7 and 27–29) can be activated in two wa
 
 ## Limitations & Best Practices
 
-### 16-bit Integer Precision
+### Single-Pass Precision (No Inter-Stage Quantization)
 
-CasparCG uses normalized integer textures (0–65535 mapped to 0.0–1.0) internally. It does **not** use floating-point textures (EXR/half-float).
+All 30 color grading operations execute within **a single GPU fragment shader invocation**, using native 32-bit floating-point arithmetic throughout. Intermediate values between operations (EOTF decode → gamut map → CDL → LUT → tone map → OETF encode, etc.) remain in GPU float registers and are **never written to an intermediate framebuffer** between steps.
+
+This eliminates the precision loss inherent in multi-pass architectures where each effect renders to a separate texture — every round-trip to an 8-bit FBO quantizes the signal to 256 levels, causing cumulative banding and color shifts when stacking multiple grading operations. With the single-pass design, quantization occurs only once: at the final fragment output into the 16-bit render attachment.
+
+| | **Single-pass (current)** | **Multi-pass (legacy approach)** |
+| :--- | :--- | :--- |
+| **Intermediate precision** | 32-bit float (23-bit mantissa, ~7 decimal digits) | 8-bit integer (256 levels) per pass |
+| **Quantization events** | 1× (final output) | N× (once per shader pass) |
+| **Cumulative error** | None | ~0.4% per pass, compounds with stacking |
+| **Banding risk** | Negligible | Visible after 3+ stacked operations |
+
+### 16-bit Integer Storage
+
+CasparCG uses normalized integer textures (0–65535 mapped to 0.0–1.0) for framebuffer storage. It does **not** use floating-point textures (EXR/half-float) for render targets.
 
 - **Impact**: Inputs strictly clip at 1.0 (paper white). Super-white and negative values in the source are lost.
 - **Workaround**: Do **not** use Linear EXR or scRGB sources where data exceeds 1.0.
 - **Recommended**: Use **Log-encoded** (LogC3, S-Log3) or **PQ/HLG** sources. These formats compress highlight data to fit within the 0.0–1.0 signal range, allowing the tone mapper to work effectively.
+
+> **Note:** The 16-bit integer limit applies only to the final stored output. All grading math runs at full 32-bit float precision inside the shader — there is no loss of information between grading operations regardless of the storage format.
 
 ### Alpha Channel
 
