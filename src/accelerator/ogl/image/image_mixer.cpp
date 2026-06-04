@@ -98,9 +98,9 @@ class image_renderer
                 {array<const std::uint8_t>(buffer.data(), format_desc.size, true), nullptr});
         }
 
-        auto f = std::move(
-            ogl_->dispatch_async([this, format_desc, layers = std::move(layers)]() mutable
-                                 -> std::tuple<std::future<array<const std::uint8_t>>, std::shared_ptr<core::texture>> {
+        auto f = std::move(ogl_->dispatch_async(
+            [this, format_desc, layers = std::move(layers)]() mutable
+                -> std::tuple<std::future<array<const std::uint8_t>>, std::shared_ptr<core::texture>> {
                 auto target_texture = ogl_->create_texture(format_desc.width, format_desc.height, 4, depth_);
                 draw(target_texture, std::move(layers), format_desc);
                 return {ogl_->copy_async(target_texture), target_texture};
@@ -331,8 +331,9 @@ struct image_mixer::impl
     }
 
     std::future<std::tuple<array<const std::uint8_t>, std::shared_ptr<core::texture>>>
-    render(const core::video_format_desc& format_desc)
+    render(const core::video_format_desc& format_desc, bool /*need_host_frame*/)
     {
+        // OpenGL has no GPU-direct consumer: the result is always read back to host.
         return renderer_(std::move(layers_), format_desc);
     }
 
@@ -428,9 +429,9 @@ void image_mixer::visit(const core::const_frame& frame) { impl_->visit(frame); }
 void image_mixer::pop() { impl_->pop(); }
 void image_mixer::update_aspect_ratio(double aspect_ratio) { impl_->update_aspect_ratio(aspect_ratio); }
 std::future<std::tuple<array<const std::uint8_t>, std::shared_ptr<core::texture>>>
-image_mixer::render(const core::video_format_desc& format_desc)
+image_mixer::render(const core::video_format_desc& format_desc, bool need_host_frame)
 {
-    return impl_->render(format_desc);
+    return impl_->render(format_desc, need_host_frame);
 }
 core::mutable_frame image_mixer::create_frame(const void* tag, const core::pixel_format_desc& desc)
 {

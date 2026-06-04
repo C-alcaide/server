@@ -60,7 +60,14 @@ class frame_consumer
     virtual std::wstring print() const = 0;
     virtual std::wstring name() const  = 0;
     virtual bool         has_synchronization_clock() const { return false; }
-    virtual int          index() const = 0;
+
+    // Whether this consumer needs the channel's final frame copied back to host
+    // memory. Consumers that sample the GPU texture directly (e.g. the Vulkan
+    // screen consumer) return false; when no attached consumer needs a host copy
+    // the mixer can skip the GPU->host readback entirely.
+    virtual bool needs_host_frame() const { return true; }
+
+    virtual int index() const = 0;
 };
 
 }} // namespace caspar::core

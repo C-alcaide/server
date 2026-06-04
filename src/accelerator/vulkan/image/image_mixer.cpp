@@ -89,7 +89,7 @@ class image_renderer
     }
 
     std::future<std::tuple<array<const std::uint8_t>, std::shared_ptr<core::texture>>>
-    operator()(std::vector<layer> layers, const core::video_format_desc& format_desc)
+    operator()(std::vector<layer> layers, const core::video_format_desc& format_desc, bool need_host_frame)
     {
         if (layers.empty()) { // Bypass GPU with empty frame.
             static const std::vector<uint8_t, boost::alignment::aligned_allocator<uint8_t, 32>> buffer(max_frame_size_,
@@ -105,6 +105,13 @@ class image_renderer
         draw(target, std::move(layers), format_desc, pass);
 
         pass->commit();
+
+        // No consumer wants the bytes on the host: skip the GPU->host readback and
+        // return an empty host array. (The GPU texture slot stays nullptr until D2.)
+        if (!need_host_frame) {
+            return make_ready_future<std::tuple<array<const std::uint8_t>, std::shared_ptr<core::texture>>>(
+                {array<const std::uint8_t>(), nullptr});
+        }
 
         auto readback = vulkan_->transfer().copy_async(target);
 
@@ -337,9 +344,9 @@ struct image_mixer::impl
     }
 
     std::future<std::tuple<array<const std::uint8_t>, std::shared_ptr<core::texture>>>
-    render(const core::video_format_desc& format_desc)
+    render(const core::video_format_desc& format_desc, bool need_host_frame)
     {
-        return renderer_(std::move(layers_), format_desc);
+        return renderer_(std::move(layers_), format_desc, need_host_frame);
     }
 
     core::mutable_frame create_frame(const void* tag, const core::pixel_format_desc& desc) override
@@ -405,9 +412,9 @@ void image_mixer::visit(const core::const_frame& frame) { impl_->visit(frame); }
 void image_mixer::pop() { impl_->pop(); }
 void image_mixer::update_aspect_ratio(double aspect_ratio) { impl_->update_aspect_ratio(aspect_ratio); }
 std::future<std::tuple<array<const std::uint8_t>, std::shared_ptr<core::texture>>>
-image_mixer::render(const core::video_format_desc& format_desc)
+image_mixer::render(const core::video_format_desc& format_desc, bool need_host_frame)
 {
-    return impl_->render(format_desc);
+    return impl_->render(format_desc, need_host_frame);
 }
 core::mutable_frame image_mixer::create_frame(const void* tag, const core::pixel_format_desc& desc)
 {
