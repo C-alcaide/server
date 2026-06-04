@@ -132,7 +132,6 @@ struct device::impl : public std::enable_shared_from_this<impl>
     vk::PhysicalDevice                 _physical_device;
     vk::Device                         _device;
     std::unique_ptr<vulkan_queue>      _queue;
-    vk::CommandPool                    _command_pool;
     VmaAllocator                       _allocator;
 
     std::array<std::shared_ptr<pipeline>, 2> _pipelines;
@@ -233,12 +232,6 @@ struct device::impl : public std::enable_shared_from_this<impl>
         auto graphics_family = vkb_device.get_queue_index(vkb::QueueType::graphics).value();
         _queue               = std::make_unique<vulkan_queue>(graphics_queue, graphics_family);
 
-        vk::CommandPoolCreateInfo pool_info;
-        pool_info.flags            = vk::CommandPoolCreateFlagBits::eResetCommandBuffer;
-        pool_info.queueFamilyIndex = _queue->family_index();
-
-        _command_pool = _device.createCommandPool(pool_info);
-
         cmd_ctx_ = std::make_unique<command_context>(_device, *_queue);
 
         VmaVulkanFunctions vulkanFunctions    = {};
@@ -285,7 +278,6 @@ struct device::impl : public std::enable_shared_from_this<impl>
 
         cmd_ctx_.reset();
 
-        _device.destroyCommandPool(_command_pool);
         vmaDestroyAllocator(_allocator);
         for (auto& pipeline : _pipelines) {
             pipeline.reset();
@@ -346,13 +338,6 @@ struct device::impl : public std::enable_shared_from_this<impl>
         }
         throw std::runtime_error("Failed to find suitable memory type");
     }
-
-    std::vector<vk::CommandBuffer> allocateCommandBuffers(uint32_t count)
-    {
-        return _device.allocateCommandBuffers(
-            vk::CommandBufferAllocateInfo(_command_pool, vk::CommandBufferLevel::ePrimary, count));
-    }
-    void submit(const vk::SubmitInfo& submitInfo, vk::Fence fence) { _queue->submit(submitInfo, fence); }
 
     std::shared_ptr<texture>
     create_attachment(int width, int height, common::bit_depth depth, uint32_t components_count)
@@ -729,13 +714,9 @@ device::device(const std::vector<vulkan_requirements_fn>& requirements)
 device::~device() {}
 
 vk::PhysicalDeviceMemoryProperties device::getMemoryProperties() { return impl_->_memoryProperties; }
-std::vector<vk::CommandBuffer>     device::allocateCommandBuffers(uint32_t count)
-{
-    return impl_->allocateCommandBuffers(count);
-}
-void       device::submit(const vk::SubmitInfo& submitInfo, vk::Fence fence) { impl_->submit(submitInfo, fence); }
-vk::Device device::getVkDevice() const { return impl_->_device; }
-std::shared_ptr<pipeline> device::get_pipeline(common::bit_depth depth)
+vk::Device                         device::getVkDevice() const { return impl_->_device; }
+vulkan_queue&                      device::queue() { return *impl_->_queue; }
+std::shared_ptr<pipeline>          device::get_pipeline(common::bit_depth depth)
 {
     return impl_->_pipelines[depth == common::bit_depth::bit8 ? 0 : 1];
 }

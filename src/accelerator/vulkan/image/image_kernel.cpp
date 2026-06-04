@@ -21,6 +21,7 @@
 
 #include "image_kernel.h"
 
+#include "../util/command_context.h"
 #include "../util/device.h"
 #include "../util/pipeline.h"
 #include "../util/renderpass.h"
@@ -92,8 +93,11 @@ struct image_kernel::impl
         vk::DeviceMemory memory = nullptr;
         size_t           size   = 0;
 
-        vk::CommandBuffer cmd_buffer = nullptr;
-        vk::Fence         fence      = nullptr;
+        // Set by the last submit that used this slot; create_renderpass waits on
+        // it before reusing the slot (keeps its vertex buffer alive until the GPU
+        // is done). Replaces the per-frame VkFence — same completion info, off the
+        // command_context timeline.
+        completion_token token;
 
         explicit frame_data(image_kernel::impl* parent)
             : parent(parent)
@@ -106,13 +110,9 @@ struct image_kernel::impl
         }
         virtual draw_data create_draw_data(const draw_params& params) { return parent->draw(params); }
         virtual std::shared_ptr<class pipeline> get_pipeline() { return parent->vulkan_->get_pipeline(parent->depth_); }
-        virtual vk::CommandBuffer               get_command_buffer() { return cmd_buffer; }
-        virtual void                            submit()
+        virtual void                            record_and_submit(const std::function<void(vk::CommandBuffer)>& record)
         {
-            fence = parent->vulkan_->getVkDevice().createFence({});
-            vk::SubmitInfo submitInfo{};
-            submitInfo.setCommandBuffers(cmd_buffer);
-            parent->vulkan_->submit(submitInfo, fence);
+            token = parent->cmd_ctx_.record_and_submit(record);
         }
         virtual std::shared_ptr<class texture>
         create_attachment(uint32_t width, uint32_t height, uint32_t components_count)
@@ -121,50 +121,47 @@ struct image_kernel::impl
         }
     };
 
-    frame_data frames_[frame_buffer_size];
-    uint32_t   current_frame_index_ = 0;
+    // Private to this kernel's (channel's) thread: command buffers are recorded
+    // lock-free here; only the queue submit serializes (vulkan_queue's mutex).
+    command_context cmd_ctx_;
+    frame_data      frames_[frame_buffer_size];
+    uint32_t        current_frame_index_ = 0;
 
     explicit impl(const spl::shared_ptr<device>& vulkan, common::bit_depth depth)
         : vulkan_(vulkan)
         , depth_(depth)
+        , cmd_ctx_(vulkan->getVkDevice(), vulkan->queue())
         , frames_{frame_data{this}, frame_data{this}, frame_data{this}}
     {
-        auto cmd_buffers = vulkan_->allocateCommandBuffers(frame_buffer_size);
-        for (uint32_t i = 0; i < frame_buffer_size; ++i) {
-            frames_[i].cmd_buffer = cmd_buffers[i];
-        }
     }
 
     ~impl()
     {
         auto vk_device = vulkan_->getVkDevice();
 
+        // command_context's dtor requires the device idle (it does not waitIdle);
+        // the in-flight slots may still reference these vertex buffers.
+        vk_device.waitIdle();
+
         for (auto& frame : frames_) {
             if (frame.buffer) {
                 vk_device.unmapMemory(frame.memory);
                 vk_device.destroyBuffer(frame.buffer);
                 vk_device.freeMemory(frame.memory);
-                if (frame.fence) {
-                    vk_device.destroyFence(frame.fence);
-                }
             }
         }
     }
 
     spl::shared_ptr<renderpass> create_renderpass(uint32_t width, uint32_t height)
     {
-        auto  device = vulkan_->getVkDevice();
-        auto& ctx    = frames_[(++current_frame_index_) % frame_buffer_size];
-        if (ctx.fence) {
-            auto result = device.waitForFences(ctx.fence, true, 1000000000); // wait up to one second
-            if (result == vk::Result::eTimeout) {
-                CASPAR_LOG(warning) << L"[Vulkan image_kernel] Timeout waiting for fence";
-            }
-            device.destroyFence(ctx.fence);
-            ctx.fence = nullptr;
+        auto& ctx = frames_[(++current_frame_index_) % frame_buffer_size];
+
+        // Wait until the previous use of this slot has completed on the GPU before
+        // reusing its vertex buffer (bounds in-flight frames to frame_buffer_size).
+        if (ctx.token && !cmd_ctx_.wait(ctx.token)) {
+            CASPAR_LOG(warning) << L"[Vulkan image_kernel] Timeout waiting for frame completion";
         }
 
-        ctx.cmd_buffer.reset({});
         return spl::make_shared<renderpass>(&ctx, width, height);
     }
 

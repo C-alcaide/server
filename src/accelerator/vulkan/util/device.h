@@ -36,6 +36,7 @@ namespace caspar { namespace accelerator { namespace vulkan {
 struct draw_params;
 
 class image_kernel;
+class vulkan_queue;
 
 class device final
     : public std::enable_shared_from_this<device>
@@ -54,9 +55,8 @@ class device final
     upload_vertex_buffer(const std::vector<core::frame_geometry::coord>& coords);
 
     vk::PhysicalDeviceMemoryProperties getMemoryProperties();
-    std::vector<vk::CommandBuffer>     allocateCommandBuffers(uint32_t count);
-    void                               submit(const vk::SubmitInfo& submitInfo, vk::Fence fence);
     vk::Device                         getVkDevice() const;
+    vulkan_queue&                      queue();
 
     std::shared_ptr<class texture>
     create_attachment(int width, int height, common::bit_depth depth, uint32_t components_count);
