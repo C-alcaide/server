@@ -22,6 +22,7 @@
 #include "image_kernel.h"
 
 #include "../util/command_context.h"
+#include "../util/descriptor_pool.h"
 #include "../util/device.h"
 #include "../util/pipeline.h"
 #include "../util/renderpass.h"
@@ -100,8 +101,16 @@ struct image_kernel::impl
         // command_context timeline.
         completion_token token;
 
+        // Per-slot descriptor sets, recycled on the same completion as the vertex
+        // buffer: create_renderpass waits the token before this slot is reused, so
+        // allocate() can safely reset the pool.
+        descriptor_pool desc_pool_;
+
         explicit frame_data(image_kernel::impl* parent)
             : parent(parent)
+            , desc_pool_(parent->vulkan_->getVkDevice(),
+                         parent->pipeline_->descriptor_set_layout(),
+                         parent->pipeline_->descriptor_pool_sizes())
         {
         }
 
@@ -111,7 +120,11 @@ struct image_kernel::impl
         }
         virtual draw_data create_draw_data(const draw_params& params) { return parent->draw(params); }
         virtual std::shared_ptr<class pipeline> get_pipeline() { return parent->pipeline_; }
-        virtual void                            record_and_submit(const std::function<void(vk::CommandBuffer)>& record)
+        virtual std::vector<vk::DescriptorSet>  allocate_descriptor_sets(uint32_t count)
+        {
+            return desc_pool_.allocate(count);
+        }
+        virtual void record_and_submit(const std::function<void(vk::CommandBuffer)>& record)
         {
             token = parent->cmd_ctx_.record_and_submit(record);
         }

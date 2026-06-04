@@ -103,6 +103,9 @@ void renderpass::commit()
 {
     auto vertex_buffer = upload_vertex_buffers();
 
+    // One descriptor set per layer (= per draw), sized to this exact frame.
+    auto descriptor_sets = _ctx->allocate_descriptor_sets(static_cast<uint32_t>(layers_.size()));
+
     _ctx->record_and_submit([&](vk::CommandBuffer cmd_buffer) {
         vk::ClearValue clearColor{vk::ClearColorValue(std::array<float, 4>{0.0f, 0.0f, 0.0f, 0.0f})};
 
@@ -132,6 +135,7 @@ void renderpass::commit()
             // create a renderpass for each layer
             bool                     default_cleared = false;
             std::shared_ptr<texture> previous_attachment;
+            size_t                   draw_index = 0;
             for (auto& layer : layers_) {
                 if (layer.attachment != previous_attachment) {
                     // We need to start a new render pass
@@ -199,6 +203,7 @@ void renderpass::commit()
                 }
 
                 _pipeline->draw(cmd_buffer,
+                                descriptor_sets[draw_index++],
                                 vertex_buffer,
                                 static_cast<uint32_t>(layer.coords.size()),
                                 layer.vertex_buffer_offset,
