@@ -81,8 +81,9 @@ static const uint32_t frame_buffer_size = 3;
 
 struct image_kernel::impl
 {
-    spl::shared_ptr<device> vulkan_;
-    common::bit_depth       depth_;
+    spl::shared_ptr<device>   vulkan_;
+    common::bit_depth         depth_;
+    std::shared_ptr<pipeline> pipeline_;
 
     struct frame_data : public frame_context
     {
@@ -109,7 +110,7 @@ struct image_kernel::impl
             return parent->upload_vertex_buffer(*this, (void*)src.data(), src.size() * sizeof(float));
         }
         virtual draw_data create_draw_data(const draw_params& params) { return parent->draw(params); }
-        virtual std::shared_ptr<class pipeline> get_pipeline() { return parent->vulkan_->get_pipeline(parent->depth_); }
+        virtual std::shared_ptr<class pipeline> get_pipeline() { return parent->pipeline_; }
         virtual void                            record_and_submit(const std::function<void(vk::CommandBuffer)>& record)
         {
             token = parent->cmd_ctx_.record_and_submit(record);
@@ -130,6 +131,9 @@ struct image_kernel::impl
     explicit impl(const spl::shared_ptr<device>& vulkan, common::bit_depth depth)
         : vulkan_(vulkan)
         , depth_(depth)
+        , pipeline_(std::make_shared<pipeline>(vulkan->getVkDevice(),
+                                               depth == common::bit_depth::bit8 ? vk::Format::eR8G8B8A8Unorm
+                                                                                : vk::Format::eR16G16B16A16Unorm))
         , cmd_ctx_(vulkan->getVkDevice(), vulkan->queue())
         , frames_{frame_data{this}, frame_data{this}, frame_data{this}}
     {

@@ -49,10 +49,6 @@ class device final
 
     device& operator=(const device&) = delete;
 
-    std::shared_ptr<class pipeline> get_pipeline(common::bit_depth depth);
-    std::pair<vk::Buffer, vk::DeviceMemory>
-    upload_vertex_buffer(const std::vector<core::frame_geometry::coord>& coords);
-
     vk::PhysicalDeviceMemoryProperties getMemoryProperties();
     vk::Device                         getVkDevice() const;
     vulkan_queue&                      queue();

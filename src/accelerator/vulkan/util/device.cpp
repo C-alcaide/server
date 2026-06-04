@@ -25,7 +25,6 @@
 #include "buffer.h"
 #include "command_context.h"
 #include "completion_token.h"
-#include "pipeline.h"
 #include "texture.h"
 #include "vulkan_queue.h"
 
@@ -127,8 +126,6 @@ struct device::impl : public std::enable_shared_from_this<impl>
     vk::Device                         _device;
     std::unique_ptr<vulkan_queue>      _queue;
     VmaAllocator                       _allocator;
-
-    std::array<std::shared_ptr<pipeline>, 2> _pipelines;
 
     std::unique_ptr<command_context> cmd_ctx_;
 
@@ -238,9 +235,6 @@ struct device::impl : public std::enable_shared_from_this<impl>
         vmaCreateAllocator(&allocatorCreateInfo, &_allocator);
 
         _memoryProperties = _physical_device.getMemoryProperties();
-
-        _pipelines[0] = std::make_shared<pipeline>(_device, vk::Format::eR8G8B8A8Unorm);
-        _pipelines[1] = std::make_shared<pipeline>(_device, vk::Format::eR16G16B16A16Unorm);
     }
 
     ~impl()
@@ -260,9 +254,6 @@ struct device::impl : public std::enable_shared_from_this<impl>
         cmd_ctx_.reset();
 
         vmaDestroyAllocator(_allocator);
-        for (auto& pipeline : _pipelines) {
-            pipeline.reset();
-        }
 
         _device.destroy();
         vkb::destroy_instance(_vkb_instance);
@@ -656,10 +647,6 @@ device::~device() {}
 vk::PhysicalDeviceMemoryProperties device::getMemoryProperties() { return impl_->_memoryProperties; }
 vk::Device                         device::getVkDevice() const { return impl_->_device; }
 vulkan_queue&                      device::queue() { return *impl_->_queue; }
-std::shared_ptr<pipeline>          device::get_pipeline(common::bit_depth depth)
-{
-    return impl_->_pipelines[depth == common::bit_depth::bit8 ? 0 : 1];
-}
 
 std::shared_ptr<texture>
 device::create_attachment(int width, int height, common::bit_depth depth, uint32_t components_count)
