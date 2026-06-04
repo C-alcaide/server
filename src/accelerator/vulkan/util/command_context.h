@@ -25,6 +25,7 @@
 
 #include <deque>
 #include <functional>
+#include <memory>
 #include <mutex>
 
 #include <vulkan/vulkan.hpp>
@@ -50,7 +51,7 @@ class vulkan_queue;
 class command_context final
 {
   public:
-    command_context(vk::Device device, vulkan_queue& queue);
+    command_context(vk::Device device, std::shared_ptr<vulkan_queue> queue);
     ~command_context();
 
     command_context(const command_context&)            = delete;
@@ -75,7 +76,7 @@ class command_context final
     vk::CommandBuffer acquire_command_buffer();
 
     vk::Device                          device_;
-    vulkan_queue&                       queue_;
+    std::shared_ptr<vulkan_queue>       queue_;
     vk::CommandPool                     pool_;
     vk::Semaphore                       timeline_;
     uint64_t                            value_ = 0;

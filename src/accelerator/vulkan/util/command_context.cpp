@@ -25,13 +25,13 @@
 
 namespace caspar { namespace accelerator { namespace vulkan {
 
-command_context::command_context(vk::Device device, vulkan_queue& queue)
+command_context::command_context(vk::Device device, std::shared_ptr<vulkan_queue> queue)
     : device_(device)
-    , queue_(queue)
+    , queue_(std::move(queue))
 {
     vk::CommandPoolCreateInfo pool_info;
     pool_info.flags            = vk::CommandPoolCreateFlagBits::eResetCommandBuffer;
-    pool_info.queueFamilyIndex = queue_.family_index();
+    pool_info.queueFamilyIndex = queue_->family_index();
     pool_                      = device_.createCommandPool(pool_info);
 
     vk::SemaphoreTypeCreateInfo timeline_info{};
@@ -89,7 +89,7 @@ completion_token command_context::record_and_submit(const std::function<void(vk:
     submit_info.setCommandBuffers(cmd);
     submit_info.setSignalSemaphores(timeline_);
     submit_info.pNext = &timeline_submit;
-    queue_.submit(submit_info);
+    queue_->submit(submit_info);
 
     inflight_.push_back({cmd, signal_value});
 

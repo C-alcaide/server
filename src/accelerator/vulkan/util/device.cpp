@@ -95,7 +95,7 @@ struct device::impl : public std::enable_shared_from_this<impl>
     vk::PhysicalDeviceMemoryProperties _memoryProperties;
     vk::PhysicalDevice                 _physical_device;
     vk::Device                         _device;
-    std::unique_ptr<vulkan_queue>      _queue;
+    std::shared_ptr<vulkan_queue>      _queue;
     VmaAllocator                       _allocator;
 
     std::unique_ptr<class transfer> transfer_;
@@ -187,7 +187,7 @@ struct device::impl : public std::enable_shared_from_this<impl>
         VULKAN_HPP_DEFAULT_DISPATCHER.init(_device);
         auto graphics_queue  = vk::Queue(vkb_device.get_queue(vkb::QueueType::graphics).value());
         auto graphics_family = vkb_device.get_queue_index(vkb::QueueType::graphics).value();
-        _queue               = std::make_unique<vulkan_queue>(graphics_queue, graphics_family);
+        _queue               = std::make_shared<vulkan_queue>(graphics_queue, graphics_family);
 
         VmaVulkanFunctions vulkanFunctions    = {};
         vulkanFunctions.vkGetInstanceProcAddr = _vkb_instance.fp_vkGetInstanceProcAddr;
@@ -446,7 +446,7 @@ device::~device() {}
 
 vk::PhysicalDeviceMemoryProperties device::getMemoryProperties() { return impl_->_memoryProperties; }
 vk::Device                         device::getVkDevice() const { return impl_->_device; }
-vulkan_queue&                      device::queue() { return *impl_->_queue; }
+std::shared_ptr<vulkan_queue>      device::queue() { return impl_->_queue; }
 class transfer&                    device::transfer() { return *impl_->transfer_; }
 
 std::shared_ptr<texture> device::create_texture(int width, int height, int stride, common::bit_depth depth)

@@ -52,7 +52,7 @@ class device final
 
     vk::PhysicalDeviceMemoryProperties getMemoryProperties();
     vk::Device                         getVkDevice() const;
-    vulkan_queue&                      queue();
+    std::shared_ptr<vulkan_queue>      queue();
     class transfer&                    transfer();
 
     std::shared_ptr<class texture> create_texture(int width, int height, int stride, common::bit_depth depth);
