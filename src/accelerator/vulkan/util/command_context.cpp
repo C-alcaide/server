@@ -72,6 +72,8 @@ vk::CommandBuffer command_context::acquire_command_buffer()
 
 completion_token command_context::record_and_submit(const std::function<void(vk::CommandBuffer)>& record)
 {
+    std::lock_guard<std::mutex> lock(mutex_);
+
     auto cmd = acquire_command_buffer();
 
     cmd.begin(vk::CommandBufferBeginInfo{vk::CommandBufferUsageFlagBits::eOneTimeSubmit});

@@ -25,6 +25,7 @@
 
 #include <deque>
 #include <functional>
+#include <mutex>
 
 #include <vulkan/vulkan.hpp>
 
@@ -39,8 +40,13 @@ class vulkan_queue;
 // drives both buffer reclamation (reuse a buffer once the GPU passed its value)
 // and the readback wait().
 //
-// Single-threaded for now: not internally synchronized. The owner must ensure
-// the device is idle before destruction (the dtor does not waitIdle).
+// Internally synchronized for the record path: one context is shared by every
+// channel's transfer ops, so record_and_submit holds a mutex guarding the pool,
+// the inflight ring and the timeline value. wait() is deliberately left
+// lock-free — it only reads the semaphore via a self-contained completion_token,
+// touching no mutable state, so a host readback can block without serializing
+// other submitters. The owner must ensure the device is idle before destruction
+// (the dtor does not waitIdle).
 class command_context final
 {
   public:
@@ -74,6 +80,7 @@ class command_context final
     vk::Semaphore                       timeline_;
     uint64_t                            value_ = 0;
     std::deque<inflight_command_buffer> inflight_;
+    std::mutex                          mutex_;
 };
 
 }}} // namespace caspar::accelerator::vulkan

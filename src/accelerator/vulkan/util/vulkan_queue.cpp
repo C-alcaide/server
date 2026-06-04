@@ -31,6 +31,7 @@ vulkan_queue::vulkan_queue(vk::Queue queue, uint32_t family_index)
 
 void vulkan_queue::submit(const vk::ArrayProxy<const vk::SubmitInfo>& submits, vk::Fence fence)
 {
+    std::lock_guard<std::mutex> lock(mutex_);
     queue_.submit(submits, fence);
 }
 
