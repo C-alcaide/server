@@ -49,6 +49,7 @@ IF(ENABLE_VULKAN)
 		vulkan/image/image_mixer.cpp
 
 		vulkan/util/buffer.cpp
+		vulkan/util/command_context.cpp
 		vulkan/util/device.cpp
 		vulkan/util/vulkan_queue.cpp
 		vulkan/util/pipeline.cpp
@@ -63,6 +64,8 @@ IF(ENABLE_VULKAN)
 		vulkan/image/image_mixer.h
 
 		vulkan/util/buffer.h
+		vulkan/util/command_context.h
+		vulkan/util/completion_token.h
 		vulkan/util/device.h
 		vulkan/util/vulkan_queue.h
 		vulkan/util/draw_params.h
