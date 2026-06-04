@@ -40,6 +40,8 @@
 
 #include <array>
 #include <cmath>
+#include <algorithm>
+#include <vector>
 
 namespace caspar::accelerator::vulkan {
 
@@ -80,13 +82,104 @@ bool is_outside_screen(const std::vector<core::frame_geometry::coord>& coords)
 
 static const double epsilon = 0.001;
 
+// ── Tone Curve LUT builder (Fritsch-Carlson monotone cubic hermite) ─────────
+static std::array<float, 256> build_curve_lut(const core::curve_channel& cc)
+{
+    std::array<float, 256> lut;
+    if (cc.count < 2) {
+        for (int i = 0; i < 256; ++i) lut[i] = i / 255.0f;
+        return lut;
+    }
+    std::vector<std::pair<double, double>> pts;
+    pts.reserve(cc.count);
+    for (int i = 0; i < cc.count; ++i)
+        pts.push_back({cc.points[i].x, cc.points[i].y});
+    std::sort(pts.begin(), pts.end());
+
+    int n = static_cast<int>(pts.size());
+    std::vector<double> dx(n - 1), dy(n - 1), delta(n - 1), m(n);
+    for (int i = 0; i < n - 1; ++i) {
+        dx[i]    = pts[i + 1].first  - pts[i].first;
+        dy[i]    = pts[i + 1].second - pts[i].second;
+        delta[i] = (dx[i] > 1e-10) ? dy[i] / dx[i] : 0.0;
+    }
+    m[0]     = delta[0];
+    m[n - 1] = delta[n - 2];
+    for (int i = 1; i < n - 1; ++i)
+        m[i] = (delta[i - 1] + delta[i]) * 0.5;
+    for (int i = 0; i < n - 1; ++i) {
+        if (std::abs(delta[i]) < 1e-10) { m[i] = m[i + 1] = 0.0; continue; }
+        double a = m[i]     / delta[i];
+        double b = m[i + 1] / delta[i];
+        double h = std::sqrt(a * a + b * b);
+        if (h > 3.0) { m[i] *= 3.0 / h; m[i + 1] *= 3.0 / h; }
+    }
+    for (int k = 0; k < 256; ++k) {
+        double t = k / 255.0;
+        if (t <= pts.front().first) { lut[k] = static_cast<float>(std::max(0.0, std::min(1.0, pts.front().second))); continue; }
+        if (t >= pts.back().first)  { lut[k] = static_cast<float>(std::max(0.0, std::min(1.0, pts.back().second)));  continue; }
+        int seg = 0;
+        for (int i = 0; i < n - 2; ++i)
+            if (t >= pts[i].first && t < pts[i + 1].first) { seg = i; break; }
+        double h_   = dx[seg];
+        double t_   = (h_ > 1e-10) ? (t - pts[seg].first) / h_ : 0.0;
+        double t2   = t_ * t_;
+        double t3   = t2 * t_;
+        double h00  = 2*t3 - 3*t2 + 1;
+        double h10  = t3  - 2*t2 + t_;
+        double h01  = -2*t3 + 3*t2;
+        double h11  = t3  - t2;
+        double val  = h00 * pts[seg].second  + h10 * h_ * m[seg]
+                    + h01 * pts[seg+1].second + h11 * h_ * m[seg+1];
+        lut[k] = static_cast<float>(std::max(0.0, std::min(1.0, val)));
+    }
+    return lut;
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
 static const uint32_t frame_buffer_size = 3;
+
+// ── Vulkan LUT texture helper ────────────────────────────────────────────────
+// Manages a small GPU-only image + staging buffer for uploading LUT data.
+struct vk_lut_texture
+{
+    vk::Device       evendevice    = nullptr;
+    vk::Image        image     = nullptr;
+    vk::ImageView    view      = nullptr;
+    vk::DeviceMemory memory    = nullptr;
+    vk::Buffer       staging   = nullptr;
+    vk::DeviceMemory staging_mem = nullptr;
+    void*            mapped    = nullptr;
+    vk::DeviceSize   data_size = 0;
+
+    void destroy()
+    {
+        if (!device) return;
+        if (view)        device.destroyImageView(view);
+        if (image)       device.destroyImage(image);
+        if (memory)      device.freeMemory(memory);
+        if (staging)     device.destroyBuffer(staging);
+        if (staging_mem) { device.unmapMemory(staging_mem); device.freeMemory(staging_mem); }
+        *this = {};
+    }
+};
 
 struct image_kernel::impl
 {
     spl::shared_ptr<device> vulkan_;
     common::bit_depth       depth_;
     int32_t                 frame_counter_ = 0;
+
+    // ── Persistent LUT textures ──────────────────────────────────────────
+    vk_lut_texture          lut3d_tex_{};
+    const core::lut3d_data* lut3d_data_ptr_ = nullptr;  // tracks which data is uploaded
+
+    vk_lut_texture          hue_curve_tex_{};
+
+    vk_lut_texture          curve_lut_tex_{};
+
+    lut_views               current_lut_views_{};
+    // ─────────────────────────────────────────────────────────────────────
 
     struct frame_data : public frame_context
     {
@@ -113,6 +206,8 @@ struct image_kernel::impl
             return parent->upload_vertex_buffer(*this, (void*)src.data(), src.size() * sizeof(float));
         }
         virtual draw_data create_draw_data(const draw_params& params) { return parent->draw(params); }
+        virtual lut_views get_lut_views() const override { return parent->current_lut_views_; }
+        virtual void upload_pending_luts(vk::CommandBuffer cmd) override { parent->do_upload_pending_luts(cmd); }
         virtual std::shared_ptr<class pipeline> get_pipeline() { return parent->vulkan_->get_pipeline(parent->depth_); }
         virtual vk::CommandBuffer               get_command_buffer() { return cmd_buffer; }
         virtual void                            submit()
@@ -233,6 +328,10 @@ struct image_kernel::impl
     {
         auto vk_device = vulkan_->getVkDevice();
 
+        lut3d_tex_.destroy();
+        hue_curve_tex_.destroy();
+        curve_lut_tex_.destroy();
+
         for (auto& frame : frames_) {
             if (frame.buffer) {
                 vk_device.unmapMemory(frame.memory);
@@ -315,6 +414,261 @@ struct image_kernel::impl
 
         return vb.buffer;
     }
+
+    // ── LUT texture management ───────────────────────────────────────────
+    // Creates a VkImage + VkImageView + staging buffer for a LUT texture.
+    // 3D LUT: imageType=3D, width=height=depth=size, format=R32G32B32Sfloat
+    // 2D LUT: imageType=2D, width=256, height=1, format=R32G32B32A32Sfloat
+
+    void create_lut_image_3d(vk_lut_texture& tex, uint32_t size)
+    {
+        auto vk_device = vulkan_->getVkDevice();
+        tex.destroy();
+        tex.device = vk_device;
+
+        // Use RGBA32F (universally supported for sampling) — RGB data will be padded with alpha=1.0
+        vk::DeviceSize byte_size = size * size * size * 4 * sizeof(float);
+        tex.data_size = byte_size;
+
+        // Image
+        vk::ImageCreateInfo img_info{};
+        img_info.imageType     = vk::ImageType::e3D;
+        img_info.format        = vk::Format::eR32G32B32A32Sfloat;
+        img_info.extent        = vk::Extent3D(size, size, size);
+        img_info.mipLevels     = 1;
+        img_info.arrayLayers   = 1;
+        img_info.samples       = vk::SampleCountFlagBits::e1;
+        img_info.tiling        = vk::ImageTiling::eOptimal;
+        img_info.usage         = vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eTransferDst;
+        img_info.sharingMode   = vk::SharingMode::eExclusive;
+        img_info.initialLayout = vk::ImageLayout::eUndefined;
+        tex.image = vk_device.createImage(img_info);
+
+        auto mem_req = vk_device.getImageMemoryRequirements(tex.image);
+        vk::MemoryAllocateInfo alloc{};
+        alloc.allocationSize  = mem_req.size;
+        alloc.memoryTypeIndex = findDedicatedMemoryType(mem_req.memoryTypeBits,
+                                                        vk::MemoryPropertyFlagBits::eDeviceLocal);
+        tex.memory = vk_device.allocateMemory(alloc);
+        vk_device.bindImageMemory(tex.image, tex.memory, 0);
+
+        // View
+        vk::ImageViewCreateInfo view_info{};
+        view_info.image    = tex.image;
+        view_info.viewType = vk::ImageViewType::e3D;
+        view_info.format   = vk::Format::eR32G32B32A32Sfloat;
+        view_info.subresourceRange = vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1);
+        tex.view = vk_device.createImageView(view_info);
+
+        // Staging buffer
+        vk::BufferCreateInfo buf_info{};
+        buf_info.size  = byte_size;
+        buf_info.usage = vk::BufferUsageFlagBits::eTransferSrc;
+        tex.staging    = vk_device.createBuffer(buf_info);
+
+        auto buf_req = vk_device.getBufferMemoryRequirements(tex.staging);
+        vk::MemoryAllocateInfo buf_alloc{};
+        buf_alloc.allocationSize  = buf_req.size;
+        buf_alloc.memoryTypeIndex = findDedicatedMemoryType(buf_req.memoryTypeBits,
+                                                             vk::MemoryPropertyFlagBits::eHostVisible |
+                                                             vk::MemoryPropertyFlagBits::eHostCoherent);
+        tex.staging_mem = vk_device.allocateMemory(buf_alloc);
+        vk_device.bindBufferMemory(tex.staging, tex.staging_mem, 0);
+        tex.mapped = vk_device.mapMemory(tex.staging_mem, 0, byte_size);
+    }
+
+    void create_lut_image_2d(vk_lut_texture& tex, uint32_t width, vk::Format format, vk::DeviceSize byte_size)
+    {
+        auto vk_device = vulkan_->getVkDevice();
+        tex.destroy();
+        tex.device = vk_device;
+        tex.data_size = byte_size;
+
+        // Image
+        vk::ImageCreateInfo img_info{};
+        img_info.imageType     = vk::ImageType::e2D;
+        img_info.format        = format;
+        img_info.extent        = vk::Extent3D(width, 1, 1);
+        img_info.mipLevels     = 1;
+        img_info.arrayLayers   = 1;
+        img_info.samples       = vk::SampleCountFlagBits::e1;
+        img_info.tiling        = vk::ImageTiling::eOptimal;
+        img_info.usage         = vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eTransferDst;
+        img_info.sharingMode   = vk::SharingMode::eExclusive;
+        img_info.initialLayout = vk::ImageLayout::eUndefined;
+        tex.image = vk_device.createImage(img_info);
+
+        auto mem_req = vk_device.getImageMemoryRequirements(tex.image);
+        vk::MemoryAllocateInfo alloc{};
+        alloc.allocationSize  = mem_req.size;
+        alloc.memoryTypeIndex = findDedicatedMemoryType(mem_req.memoryTypeBits,
+                                                        vk::MemoryPropertyFlagBits::eDeviceLocal);
+        tex.memory = vk_device.allocateMemory(alloc);
+        vk_device.bindImageMemory(tex.image, tex.memory, 0);
+
+        // View
+        vk::ImageViewCreateInfo view_info{};
+        view_info.image    = tex.image;
+        view_info.viewType = vk::ImageViewType::e2D;
+        view_info.format   = format;
+        view_info.subresourceRange = vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1);
+        tex.view = vk_device.createImageView(view_info);
+
+        // Staging buffer
+        vk::BufferCreateInfo buf_info{};
+        buf_info.size  = byte_size;
+        buf_info.usage = vk::BufferUsageFlagBits::eTransferSrc;
+        tex.staging    = vk_device.createBuffer(buf_info);
+
+        auto buf_req = vk_device.getBufferMemoryRequirements(tex.staging);
+        vk::MemoryAllocateInfo buf_alloc{};
+        buf_alloc.allocationSize  = buf_req.size;
+        buf_alloc.memoryTypeIndex = findDedicatedMemoryType(buf_req.memoryTypeBits,
+                                                             vk::MemoryPropertyFlagBits::eHostVisible |
+                                                             vk::MemoryPropertyFlagBits::eHostCoherent);
+        tex.staging_mem = vk_device.allocateMemory(buf_alloc);
+        vk_device.bindBufferMemory(tex.staging, tex.staging_mem, 0);
+        tex.mapped = vk_device.mapMemory(tex.staging_mem, 0, byte_size);
+    }
+
+    void upload_lut_data(vk_lut_texture& tex, const void* data, vk::CommandBuffer cmd,
+                         uint32_t width, uint32_t height, uint32_t depth_z)
+    {
+        if (data)
+            memcpy(tex.mapped, data, tex.data_size);
+
+        // Transition: undefined → transfer dst
+        vk::ImageMemoryBarrier2 barrier{};
+        barrier.oldLayout     = vk::ImageLayout::eUndefined;
+        barrier.newLayout     = vk::ImageLayout::eTransferDstOptimal;
+        barrier.image         = tex.image;
+        barrier.subresourceRange = vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1);
+        barrier.srcStageMask  = vk::PipelineStageFlagBits2::eTopOfPipe;
+        barrier.dstStageMask  = vk::PipelineStageFlagBits2::eTransfer;
+        barrier.dstAccessMask = vk::AccessFlagBits2::eTransferWrite;
+
+        vk::DependencyInfo dep{};
+        dep.setImageMemoryBarriers(barrier);
+        cmd.pipelineBarrier2(dep);
+
+        // Copy staging → image
+        vk::BufferImageCopy region{};
+        region.imageSubresource = vk::ImageSubresourceLayers(vk::ImageAspectFlagBits::eColor, 0, 0, 1);
+        region.imageExtent      = vk::Extent3D{width, height, depth_z};
+        cmd.copyBufferToImage(tex.staging, tex.image, vk::ImageLayout::eTransferDstOptimal, region);
+
+        // Transition: transfer dst → shader read
+        barrier.oldLayout     = vk::ImageLayout::eTransferDstOptimal;
+        barrier.newLayout     = vk::ImageLayout::eShaderReadOnlyOptimal;
+        barrier.srcStageMask  = vk::PipelineStageFlagBits2::eTransfer;
+        barrier.srcAccessMask = vk::AccessFlagBits2::eTransferWrite;
+        barrier.dstStageMask  = vk::PipelineStageFlagBits2::eFragmentShader;
+        barrier.dstAccessMask = vk::AccessFlagBits2::eShaderSampledRead;
+        cmd.pipelineBarrier2(dep);
+    }
+
+    // Pending upload state — set during draw(), executed during commit()
+    bool lut3d_upload_pending_     = false;
+    uint32_t lut3d_pending_size_   = 0;
+    bool hue_curve_upload_pending_ = false;
+    bool curve_lut_upload_pending_ = false;
+    std::vector<float> curve_lut_pending_data_;
+
+    /// Prepare LUT textures from draw_params transforms.
+    /// Called during draw() — writes staging buffers and sets pending flags.
+    void prepare_lut_textures(const draw_params& params)
+    {
+        const auto& transforms = params.transforms;
+
+        // ── 3D LUT ───────────────────────────────────────────────────────
+        const auto& lut = transforms.image_transform.lut3d;
+        if (lut && lut->size > 0 && !lut->data.empty()) {
+            if (lut.get() != lut3d_data_ptr_) {
+                uint32_t sz = static_cast<uint32_t>(lut->size);
+                vk::DeviceSize expected = sz * sz * sz * 4 * sizeof(float);
+                if (!lut3d_tex_.image || lut3d_tex_.data_size != expected) {
+                    create_lut_image_3d(lut3d_tex_, sz);
+                }
+                // Pad RGB → RGBA (source is size³×3 floats, staging is size³×4 floats)
+                auto* dst = static_cast<float*>(lut3d_tex_.mapped);
+                const float* src = lut->data.data();
+                uint32_t count = sz * sz * sz;
+                for (uint32_t i = 0; i < count; ++i) {
+                    dst[i * 4 + 0] = src[i * 3 + 0];
+                    dst[i * 4 + 1] = src[i * 3 + 1];
+                    dst[i * 4 + 2] = src[i * 3 + 2];
+                    dst[i * 4 + 3] = 1.0f;
+                }
+                lut3d_data_ptr_ = lut.get();
+                lut3d_upload_pending_ = true;
+                lut3d_pending_size_ = sz;
+            }
+            current_lut_views_.lut3d = lut3d_tex_.view;
+        } else {
+            current_lut_views_.lut3d = nullptr;
+            if (!lut) lut3d_data_ptr_ = nullptr;
+        }
+
+        // ── Hue Curves ───────────────────────────────────────────────────
+        const auto& hc = transforms.image_transform.hue_curves;
+        if (hc && !hc->data.empty()) {
+            vk::DeviceSize byte_size = 256 * 4 * sizeof(float);
+            if (!hue_curve_tex_.image) {
+                create_lut_image_2d(hue_curve_tex_, 256, vk::Format::eR32G32B32A32Sfloat, byte_size);
+            }
+            memcpy(hue_curve_tex_.mapped, hc->data.data(), byte_size);
+            hue_curve_upload_pending_ = true;
+            current_lut_views_.hue_curve = hue_curve_tex_.view;
+        } else {
+            current_lut_views_.hue_curve = nullptr;
+        }
+
+        // ── Tone Curves ──────────────────────────────────────────────────
+        const auto& cv = transforms.image_transform.curves;
+        if (cv.enable) {
+            auto lut_r = build_curve_lut(cv.red);
+            auto lut_g = build_curve_lut(cv.green);
+            auto lut_b = build_curve_lut(cv.blue);
+            auto lut_m = build_curve_lut(cv.master);
+
+            curve_lut_pending_data_.resize(256 * 4);
+            for (int i = 0; i < 256; ++i) {
+                curve_lut_pending_data_[i * 4 + 0] = lut_b[i];
+                curve_lut_pending_data_[i * 4 + 1] = lut_g[i];
+                curve_lut_pending_data_[i * 4 + 2] = lut_r[i];
+                curve_lut_pending_data_[i * 4 + 3] = lut_m[i];
+            }
+
+            vk::DeviceSize byte_size = 256 * 4 * sizeof(float);
+            if (!curve_lut_tex_.image) {
+                create_lut_image_2d(curve_lut_tex_, 256, vk::Format::eR32G32B32A32Sfloat, byte_size);
+            }
+            memcpy(curve_lut_tex_.mapped, curve_lut_pending_data_.data(), byte_size);
+            curve_lut_upload_pending_ = true;
+            current_lut_views_.curve_lut = curve_lut_tex_.view;
+        } else {
+            current_lut_views_.curve_lut = nullptr;
+        }
+    }
+
+    /// Record GPU upload commands for any LUTs that were prepared.
+    /// Called at the start of commit() before any rendering.
+    void do_upload_pending_luts(vk::CommandBuffer cmd)
+    {
+        if (lut3d_upload_pending_) {
+            upload_lut_data(lut3d_tex_, nullptr, cmd, lut3d_pending_size_, lut3d_pending_size_, lut3d_pending_size_);
+            lut3d_upload_pending_ = false;
+        }
+        if (hue_curve_upload_pending_) {
+            upload_lut_data(hue_curve_tex_, nullptr, cmd, 256, 1, 1);
+            hue_curve_upload_pending_ = false;
+        }
+        if (curve_lut_upload_pending_) {
+            upload_lut_data(curve_lut_tex_, nullptr, cmd, 256, 1, 1);
+            curve_lut_upload_pending_ = false;
+        }
+    }
+    // ─────────────────────────────────────────────────────────────────────
 
     std::pair<std::vector<core::frame_geometry::coord>, uniform_block> draw(const draw_params& params)
     {
@@ -850,7 +1204,6 @@ struct image_kernel::impl
             if (lut && lut->size > 0 && !lut->data.empty()) {
                 uniforms.flags |= static_cast<uint32_t>(shader_flags::lut3d_enable);
                 uniforms.lut3d_strength = static_cast<float>(transforms.image_transform.lut3d_strength);
-                // Note: actual 3D texture view set in renderpass/draw_params (Phase 3C)
             }
         }
 
@@ -859,7 +1212,6 @@ struct image_kernel::impl
             const auto& hc = transforms.image_transform.hue_curves;
             if (hc && !hc->data.empty()) {
                 uniforms.flags |= static_cast<uint32_t>(shader_flags::hue_curve_enable);
-                // Note: actual texture view set in renderpass/draw_params (Phase 3C)
             }
         }
 
@@ -921,7 +1273,6 @@ struct image_kernel::impl
             const auto& cv = transforms.image_transform.curves;
             if (cv.enable) {
                 uniforms.flags |= static_cast<uint32_t>(shader_flags::curves_enable);
-                // Note: actual curve LUT texture set in renderpass/draw_params (Phase 3C)
             }
         }
 
@@ -959,6 +1310,9 @@ struct image_kernel::impl
                 }
             }
         }
+
+        // Prepare LUT texture data in staging buffers (uploaded at commit time)
+        prepare_lut_textures(params);
 
         return {std::move(coords), uniforms};
     }

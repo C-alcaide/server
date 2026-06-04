@@ -34,10 +34,21 @@
 namespace caspar { namespace accelerator { namespace vulkan {
 
 using draw_data = std::pair<std::vector<core::frame_geometry::coord>, uniform_block>;
+
+/// Optional LUT image views returned by the kernel alongside draw_data.
+/// These fill descriptor bindings 3 (3D LUT), 4 (hue curve), 5 (curve LUT).
+struct lut_views
+{
+    vk::ImageView lut3d      = nullptr;
+    vk::ImageView hue_curve  = nullptr;
+    vk::ImageView curve_lut  = nullptr;
+};
 struct frame_context
 {
     virtual vk::Buffer                      upload_vertex_data(const std::vector<float>& data) = 0;
     virtual draw_data                       create_draw_data(const draw_params& params)        = 0;
+    virtual lut_views                       get_lut_views() const                              { return {}; }
+    virtual void                            upload_pending_luts(vk::CommandBuffer cmd)          {}
     virtual std::shared_ptr<class pipeline> get_pipeline()                                     = 0;
     virtual vk::CommandBuffer               get_command_buffer()                               = 0;
     virtual void                            submit()                                           = 0;

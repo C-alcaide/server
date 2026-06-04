@@ -91,6 +91,12 @@ void renderpass::draw(const draw_params& params)
         textures[6] = params.layer_key->view();
     }
 
+    // Fill LUT texture slots from the kernel's cached views
+    auto luts = _ctx->get_lut_views();
+    textures[7] = luts.lut3d;
+    textures[8] = luts.hue_curve;
+    textures[9] = luts.curve_lut;
+
     layers_.push_back({
         attachment,
         params.local_key,
@@ -107,6 +113,10 @@ void renderpass::commit()
 
     auto cmd_buffer = _ctx->get_command_buffer();
     cmd_buffer.begin(vk::CommandBufferBeginInfo(vk::CommandBufferUsageFlagBits::eOneTimeSubmit));
+
+    // Upload any LUT textures that were updated during draw() calls.
+    // Must happen before rendering starts (images need to reach ShaderReadOnlyOptimal).
+    _ctx->upload_pending_luts(cmd_buffer);
 
     vk::ClearValue clearColor{vk::ClearColorValue(std::array<float, 4>{0.0f, 0.0f, 0.0f, 0.0f})};
 
