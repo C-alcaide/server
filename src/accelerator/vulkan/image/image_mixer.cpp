@@ -97,24 +97,21 @@ class image_renderer
                 {array<const std::uint8_t>(buffer.data(), format_desc.size, true), nullptr});
         }
 
-        auto f = std::move(vulkan_->dispatch_async(
-            [this, format_desc, layers = std::move(layers)]() mutable
-            -> std::tuple<std::future<array<const std::uint8_t>>, std::shared_ptr<core::texture>> {
-                auto pass   = kernel_.create_renderpass(format_desc.square_width, format_desc.square_height);
-                auto target = pass->default_attachment();
-                draw(target, std::move(layers), format_desc, pass);
+        // Record + submit synchronously on the caller's (mixer) thread; the only
+        // CPU wait is the readback future's .get() downstream (it consumes bytes).
+        auto pass   = kernel_.create_renderpass(format_desc.square_width, format_desc.square_height);
+        auto target = pass->default_attachment();
+        draw(target, std::move(layers), format_desc, pass);
 
-                pass->commit();
+        pass->commit();
 
-                return {vulkan_->copy_async(target), nullptr};
-            }));
+        auto readback = vulkan_->copy_async(target);
 
-        return std::async(
-            std::launch::deferred,
-            [f = std::move(f)]() mutable -> std::tuple<array<const std::uint8_t>, std::shared_ptr<core::texture>> {
-                auto tuple = std::move(f.get());
-                return {std::move(std::get<0>(tuple).get()), std::move(std::get<1>(tuple))};
-            });
+        return std::async(std::launch::deferred,
+                          [readback = std::move(readback)]() mutable
+                              -> std::tuple<array<const std::uint8_t>, std::shared_ptr<core::texture>> {
+                              return {std::move(readback.get()), nullptr};
+                          });
     }
 
     common::bit_depth depth() const { return depth_; }
@@ -419,7 +416,6 @@ image_mixer::create_frame(const void* tag, const core::pixel_format_desc& desc, 
 {
     return impl_->create_frame(tag, desc, depth);
 }
-
 
 #ifdef WIN32
 core::const_frame image_mixer::import_d3d_texture(const void*                                tag,

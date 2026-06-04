@@ -33,7 +33,7 @@
 #include <common/assert.h>
 #include <common/env.h>
 #include <common/except.h>
-#include <common/os/thread.h>
+#include <common/future.h>
 
 #include <VkBootstrap.h>
 #include <vulkan/vulkan.hpp>
@@ -48,9 +48,6 @@ VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
 #include <vk_mem_alloc.h>
 #pragma warning(pop)
 
-#include <boost/asio/deadline_timer.hpp>
-#include <boost/asio/dispatch.hpp>
-#include <boost/asio/spawn.hpp>
 #include <boost/property_tree/ptree.hpp>
 
 #include <tbb/concurrent_queue.h>
@@ -60,11 +57,8 @@ VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
 #include <deque>
 #include <future>
 #include <memory>
-#include <thread>
 
 namespace caspar { namespace accelerator { namespace vulkan {
-
-using namespace boost::asio;
 
 inline VKAPI_ATTR VkBool32 VKAPI_CALL default_debug_callback(VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
                                                              VkDebugUtilsMessageTypeFlagsEXT        messageType,
@@ -138,12 +132,7 @@ struct device::impl : public std::enable_shared_from_this<impl>
 
     std::unique_ptr<command_context> cmd_ctx_;
 
-    io_context                             io_context_;
-    decltype(make_work_guard(io_context_)) work_;
-    std::thread                            thread_;
-
     explicit impl(const std::vector<vulkan_requirements_fn>& requirements)
-        : work_(make_work_guard(io_context_))
     {
         CASPAR_LOG(info) << L"Initializing Vulkan Device.";
 
@@ -252,18 +241,10 @@ struct device::impl : public std::enable_shared_from_this<impl>
 
         _pipelines[0] = std::make_shared<pipeline>(_device, vk::Format::eR8G8B8A8Unorm);
         _pipelines[1] = std::make_shared<pipeline>(_device, vk::Format::eR16G16B16A16Unorm);
-
-        thread_ = std::thread([&] {
-            set_thread_name(L"Vulkan Device");
-            io_context_.run();
-        });
     }
 
     ~impl()
     {
-        work_.reset();
-        thread_.join();
-
         _device.waitIdle();
 
         for (auto& pool : host_pools_)
@@ -285,45 +266,6 @@ struct device::impl : public std::enable_shared_from_this<impl>
 
         _device.destroy();
         vkb::destroy_instance(_vkb_instance);
-    }
-
-    template <typename Func>
-    auto spawn_async(Func&& func)
-    {
-        using result_type = decltype(func(std::declval<yield_context>()));
-        using task_type   = std::packaged_task<result_type(yield_context)>;
-
-        auto task   = task_type(std::forward<Func>(func));
-        auto future = task.get_future();
-        boost::asio::spawn(io_context_,
-                           std::move(task)
-#if BOOST_VERSION >= 108000
-                               ,
-                           [](std::exception_ptr e) {
-                               if (e)
-                                   std::rethrow_exception(e);
-                           }
-#endif
-        );
-        return future;
-    }
-
-    template <typename Func>
-    auto dispatch_async(Func&& func)
-    {
-        using result_type = decltype(func());
-        using task_type   = std::packaged_task<result_type()>;
-
-        auto task   = task_type(std::forward<Func>(func));
-        auto future = task.get_future();
-        boost::asio::dispatch(io_context_, std::move(task));
-        return future;
-    }
-
-    template <typename Func>
-    auto dispatch_sync(Func&& func) -> decltype(func())
-    {
-        return dispatch_async(std::forward<Func>(func)).get();
     }
 
     std::wstring version() { return version_; }
@@ -495,95 +437,93 @@ struct device::impl : public std::enable_shared_from_this<impl>
         return array<uint8_t>(ptr, buf->size(), std::move(buf));
     }
 
+    // Upload (host→device). Records + submits synchronously on the caller's
+    // thread (serialized through cmd_ctx_'s record mutex and the queue mutex), and
+    // returns a ready future: no host readback, so no CPU wait — GPU consumers of
+    // the texture are ordered by the memory barriers, not by the CPU.
     std::future<std::shared_ptr<texture>>
     copy_async(const array<const uint8_t>& source, int width, int height, int stride, common::bit_depth depth)
     {
-        return dispatch_async([this, source, width, height, stride, depth]() {
-            std::shared_ptr<buffer> buf;
+        std::shared_ptr<buffer> buf;
 
-            auto tmp = source.storage<std::shared_ptr<buffer>>();
-            if (tmp) {
-                buf = *tmp;
-            } else {
-                buf = create_buffer(static_cast<int>(source.size()), true);
-                std::memcpy(buf->data(), source.data(), source.size());
-            }
+        auto tmp = source.storage<std::shared_ptr<buffer>>();
+        if (tmp) {
+            buf = *tmp;
+        } else {
+            buf = create_buffer(static_cast<int>(source.size()), true);
+            std::memcpy(buf->data(), source.data(), source.size());
+        }
 
-            auto tex = create_texture(width, height, stride, depth, false);
+        auto tex = create_texture(width, height, stride, depth, false);
 
-            vk::BufferImageCopy region(0,
-                                       0,
-                                       0,
-                                       vk::ImageSubresourceLayers(vk::ImageAspectFlagBits::eColor, 0, 0, 1),
-                                       vk::Offset3D(0, 0, 0),
-                                       vk::Extent3D(width, height, 1));
+        vk::BufferImageCopy region(0,
+                                   0,
+                                   0,
+                                   vk::ImageSubresourceLayers(vk::ImageAspectFlagBits::eColor, 0, 0, 1),
+                                   vk::Offset3D(0, 0, 0),
+                                   vk::Extent3D(width, height, 1));
 
-            cmd_ctx_->record_and_submit([&](vk::CommandBuffer cmd) {
-                transitionImageLayout(tex->id(),
-                                      vk::ImageLayout::eUndefined,
-                                      vk::AccessFlagBits2::eNone,
-                                      vk::PipelineStageFlagBits2::eTopOfPipe,
+        cmd_ctx_->record_and_submit([&](vk::CommandBuffer cmd) {
+            transitionImageLayout(tex->id(),
+                                  vk::ImageLayout::eUndefined,
+                                  vk::AccessFlagBits2::eNone,
+                                  vk::PipelineStageFlagBits2::eTopOfPipe,
 
-                                      vk::ImageLayout::eTransferDstOptimal,
-                                      vk::AccessFlagBits2::eTransferWrite,
-                                      vk::PipelineStageFlagBits2::eTransfer,
-                                      cmd);
+                                  vk::ImageLayout::eTransferDstOptimal,
+                                  vk::AccessFlagBits2::eTransferWrite,
+                                  vk::PipelineStageFlagBits2::eTransfer,
+                                  cmd);
 
-                cmd.copyBufferToImage(buf->id(), tex->id(), vk::ImageLayout::eTransferDstOptimal, region);
+            cmd.copyBufferToImage(buf->id(), tex->id(), vk::ImageLayout::eTransferDstOptimal, region);
 
-                transitionImageLayout(tex->id(),
-                                      vk::ImageLayout::eTransferDstOptimal,
-                                      vk::AccessFlagBits2::eTransferWrite,
-                                      vk::PipelineStageFlagBits2::eTransfer,
+            transitionImageLayout(tex->id(),
+                                  vk::ImageLayout::eTransferDstOptimal,
+                                  vk::AccessFlagBits2::eTransferWrite,
+                                  vk::PipelineStageFlagBits2::eTransfer,
 
-                                      vk::ImageLayout::eShaderReadOnlyOptimal,
-                                      vk::AccessFlagBits2::eShaderRead,
-                                      vk::PipelineStageFlagBits2::eFragmentShader,
-                                      cmd);
-            });
-
-            // No need to wait here, GPU-GPU deps (the usage of this texture on the device) are enforced by the memory
-            // barriers
-            return tex;
+                                  vk::ImageLayout::eShaderReadOnlyOptimal,
+                                  vk::AccessFlagBits2::eShaderRead,
+                                  vk::PipelineStageFlagBits2::eFragmentShader,
+                                  cmd);
         });
+
+        return make_ready_future(std::move(tex));
     }
 
+    // Readback (device→host). Records + submits synchronously on the caller's
+    // thread; the returned deferred future blocks at .get() on cmd_ctx_->wait —
+    // the one legitimate CPU wait, because the caller is consuming bytes.
     std::future<array<const uint8_t>> copy_async(const std::shared_ptr<texture>& source)
     {
-        auto f = dispatch_async([this, source]() -> std::pair<std::shared_ptr<buffer>, completion_token> {
-            auto buf = create_buffer(source->size(), false);
+        auto buf = create_buffer(source->size(), false);
 
-            vk::CopyImageToBufferInfo2 copyInfo{};
-            copyInfo.dstBuffer      = buf->id();
-            copyInfo.srcImage       = source->id();
-            copyInfo.srcImageLayout = vk::ImageLayout::eTransferSrcOptimal;
+        vk::CopyImageToBufferInfo2 copyInfo{};
+        copyInfo.dstBuffer      = buf->id();
+        copyInfo.srcImage       = source->id();
+        copyInfo.srcImageLayout = vk::ImageLayout::eTransferSrcOptimal;
 
-            vk::BufferImageCopy2 region{};
-            region.bufferOffset     = 0;
-            region.imageSubresource = vk::ImageSubresourceLayers(vk::ImageAspectFlagBits::eColor, 0, 0, 1);
-            region.imageOffset      = vk::Offset3D{0, 0, 0};
-            region.imageExtent =
-                vk::Extent3D{static_cast<uint32_t>(source->width()), static_cast<uint32_t>(source->height()), 1};
-            copyInfo.setRegions(region);
+        vk::BufferImageCopy2 region{};
+        region.bufferOffset     = 0;
+        region.imageSubresource = vk::ImageSubresourceLayers(vk::ImageAspectFlagBits::eColor, 0, 0, 1);
+        region.imageOffset      = vk::Offset3D{0, 0, 0};
+        region.imageExtent =
+            vk::Extent3D{static_cast<uint32_t>(source->width()), static_cast<uint32_t>(source->height()), 1};
+        copyInfo.setRegions(region);
 
-            auto token = cmd_ctx_->record_and_submit([&](vk::CommandBuffer cmd) {
-                transitionImageLayout(source->id(),
-                                      vk::ImageLayout::eRenderingLocalRead,
-                                      vk::AccessFlagBits2::eColorAttachmentWrite,
-                                      vk::PipelineStageFlagBits2::eColorAttachmentOutput,
+        auto token = cmd_ctx_->record_and_submit([&](vk::CommandBuffer cmd) {
+            transitionImageLayout(source->id(),
+                                  vk::ImageLayout::eRenderingLocalRead,
+                                  vk::AccessFlagBits2::eColorAttachmentWrite,
+                                  vk::PipelineStageFlagBits2::eColorAttachmentOutput,
 
-                                      vk::ImageLayout::eTransferSrcOptimal,
-                                      vk::AccessFlagBits2::eHostRead,
-                                      vk::PipelineStageFlagBits2::eHost,
-                                      cmd);
-                cmd.copyImageToBuffer2(copyInfo);
-            });
-
-            return {buf, token};
+                                  vk::ImageLayout::eTransferSrcOptimal,
+                                  vk::AccessFlagBits2::eHostRead,
+                                  vk::PipelineStageFlagBits2::eHost,
+                                  cmd);
+            cmd.copyImageToBuffer2(copyInfo);
         });
 
-        return std::async(std::launch::deferred, [this, f = std::move(f)]() mutable {
-            auto [buf, token] = f.get();
+        return std::async(std::launch::deferred, [this, buf = std::move(buf), token]() mutable {
             if (!cmd_ctx_->wait(token)) {
                 CASPAR_LOG(warning) << L"[Vulkan] Timeout waiting for readback semaphore";
             }
@@ -682,28 +622,28 @@ struct device::impl : public std::enable_shared_from_this<impl>
 
     std::future<void> gc()
     {
-        return spawn_async([this](yield_context yield) {
-            CASPAR_LOG(info) << " vulkan: Running GC.";
+        CASPAR_LOG(info) << " vulkan: Running GC.";
 
-            try {
-                for (auto& depth_pools : device_pools_) {
-                    for (auto& pools : depth_pools) {
-                        for (auto& pool : pools)
-                            pool.second.clear();
-                    }
-                }
-                for (auto& pools : host_pools_) {
+        try {
+            for (auto& depth_pools : device_pools_) {
+                for (auto& pools : depth_pools) {
                     for (auto& pool : pools)
                         pool.second.clear();
                 }
-                for (auto& pools : attachment_pools_) {
-                    for (auto& pool : pools)
-                        pool.second.clear();
-                }
-            } catch (...) {
-                CASPAR_LOG_CURRENT_EXCEPTION();
             }
-        });
+            for (auto& pools : host_pools_) {
+                for (auto& pool : pools)
+                    pool.second.clear();
+            }
+            for (auto& pools : attachment_pools_) {
+                for (auto& pool : pools)
+                    pool.second.clear();
+            }
+        } catch (...) {
+            CASPAR_LOG_CURRENT_EXCEPTION();
+        }
+
+        return make_ready_future();
     }
 };
 
@@ -741,7 +681,6 @@ std::future<array<const uint8_t>> device::copy_async(const std::shared_ptr<textu
 {
     return impl_->copy_async(source);
 }
-void device::dispatch(std::function<void()> func) { boost::asio::dispatch(impl_->io_context_, std::move(func)); }
 std::wstring                 device::version() const { return impl_->version(); }
 boost::property_tree::wptree device::info() const { return impl_->info(); }
 std::future<void>            device::gc() { return impl_->gc(); }

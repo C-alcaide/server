@@ -26,7 +26,6 @@
 #include <common/bit_depth.h>
 #include <core/frame/geometry.h>
 
-#include <functional>
 #include <future>
 
 #include <vulkan/vulkan.hpp>
@@ -66,23 +65,6 @@ class device final
     std::future<std::shared_ptr<class texture>>
     copy_async(const array<const uint8_t>& source, int width, int height, int stride, common::bit_depth depth);
     std::future<array<const uint8_t>> copy_async(const std::shared_ptr<class texture>& source);
-    template <typename Func>
-    auto dispatch_async(Func&& func)
-    {
-        using result_type = decltype(func());
-        using task_type   = std::packaged_task<result_type()>;
-
-        auto task   = std::make_shared<task_type>(std::forward<Func>(func));
-        auto future = task->get_future();
-        dispatch([=] { (*task)(); });
-        return future;
-    }
-
-    template <typename Func>
-    auto dispatch_sync(Func&& func)
-    {
-        return dispatch_async(std::forward<Func>(func)).get();
-    }
 
     std::wstring version() const;
 
@@ -90,7 +72,6 @@ class device final
     std::future<void>            gc();
 
   private:
-    void dispatch(std::function<void()> func);
     struct impl;
     std::shared_ptr<impl> impl_;
 };
