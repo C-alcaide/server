@@ -22,11 +22,9 @@
 #include "device.h"
 
 #include "../image/image_kernel.h"
-#include "barrier.h"
 #include "buffer.h"
-#include "command_context.h"
-#include "completion_token.h"
 #include "texture.h"
+#include "transfer.h"
 #include "vulkan_queue.h"
 
 #include <common/array.h>
@@ -100,7 +98,7 @@ struct device::impl : public std::enable_shared_from_this<impl>
     std::unique_ptr<vulkan_queue>      _queue;
     VmaAllocator                       _allocator;
 
-    std::unique_ptr<command_context> transfer_ctx_;
+    std::unique_ptr<class transfer> transfer_;
 
     explicit impl(const std::vector<vulkan_requirements_fn>& requirements)
     {
@@ -191,8 +189,6 @@ struct device::impl : public std::enable_shared_from_this<impl>
         auto graphics_family = vkb_device.get_queue_index(vkb::QueueType::graphics).value();
         _queue               = std::make_unique<vulkan_queue>(graphics_queue, graphics_family);
 
-        transfer_ctx_ = std::make_unique<command_context>(_device, *_queue);
-
         VmaVulkanFunctions vulkanFunctions    = {};
         vulkanFunctions.vkGetInstanceProcAddr = _vkb_instance.fp_vkGetInstanceProcAddr;
         vulkanFunctions.vkGetDeviceProcAddr   = vkb_device.fp_vkGetDeviceProcAddr;
@@ -221,7 +217,7 @@ struct device::impl : public std::enable_shared_from_this<impl>
             for (auto& pool : pools)
                 pool.clear();
 
-        transfer_ctx_.reset();
+        transfer_.reset();
 
         vmaDestroyAllocator(_allocator);
 
@@ -328,103 +324,6 @@ struct device::impl : public std::enable_shared_from_this<impl>
         auto buf = create_buffer(size, true);
         auto ptr = reinterpret_cast<uint8_t*>(buf->data());
         return array<uint8_t>(ptr, buf->size(), std::move(buf));
-    }
-
-    // Upload (host→device). Records + submits synchronously on the caller's
-    // thread (serialized through transfer_ctx_'s record mutex and the queue mutex), and
-    // returns a ready future: no host readback, so no CPU wait — GPU consumers of
-    // the texture are ordered by the memory barriers, not by the CPU.
-    std::future<std::shared_ptr<texture>>
-    copy_async(const array<const uint8_t>& source, int width, int height, int stride, common::bit_depth depth)
-    {
-        std::shared_ptr<buffer> buf;
-
-        auto tmp = source.storage<std::shared_ptr<buffer>>();
-        if (tmp) {
-            buf = *tmp;
-        } else {
-            buf = create_buffer(static_cast<int>(source.size()), true);
-            std::memcpy(buf->data(), source.data(), source.size());
-        }
-
-        auto tex = create_texture(width, height, stride, depth, false);
-
-        vk::BufferImageCopy region(0,
-                                   0,
-                                   0,
-                                   vk::ImageSubresourceLayers(vk::ImageAspectFlagBits::eColor, 0, 0, 1),
-                                   vk::Offset3D(0, 0, 0),
-                                   vk::Extent3D(width, height, 1));
-
-        transfer_ctx_->record_and_submit([&](vk::CommandBuffer cmd) {
-            transitionImageLayout(tex->id(),
-                                  vk::ImageLayout::eUndefined,
-                                  vk::AccessFlagBits2::eNone,
-                                  vk::PipelineStageFlagBits2::eTopOfPipe,
-
-                                  vk::ImageLayout::eTransferDstOptimal,
-                                  vk::AccessFlagBits2::eTransferWrite,
-                                  vk::PipelineStageFlagBits2::eTransfer,
-                                  cmd);
-
-            cmd.copyBufferToImage(buf->id(), tex->id(), vk::ImageLayout::eTransferDstOptimal, region);
-
-            transitionImageLayout(tex->id(),
-                                  vk::ImageLayout::eTransferDstOptimal,
-                                  vk::AccessFlagBits2::eTransferWrite,
-                                  vk::PipelineStageFlagBits2::eTransfer,
-
-                                  vk::ImageLayout::eShaderReadOnlyOptimal,
-                                  vk::AccessFlagBits2::eShaderRead,
-                                  vk::PipelineStageFlagBits2::eFragmentShader,
-                                  cmd);
-        });
-
-        return make_ready_future(std::move(tex));
-    }
-
-    // Readback (device→host). Records + submits synchronously on the caller's
-    // thread; the returned deferred future blocks at .get() on transfer_ctx_->wait —
-    // the one legitimate CPU wait, because the caller is consuming bytes.
-    std::future<array<const uint8_t>> copy_async(const std::shared_ptr<texture>& source)
-    {
-        auto buf = create_buffer(source->size(), false);
-
-        vk::CopyImageToBufferInfo2 copyInfo{};
-        copyInfo.dstBuffer      = buf->id();
-        copyInfo.srcImage       = source->id();
-        copyInfo.srcImageLayout = vk::ImageLayout::eTransferSrcOptimal;
-
-        vk::BufferImageCopy2 region{};
-        region.bufferOffset     = 0;
-        region.imageSubresource = vk::ImageSubresourceLayers(vk::ImageAspectFlagBits::eColor, 0, 0, 1);
-        region.imageOffset      = vk::Offset3D{0, 0, 0};
-        region.imageExtent =
-            vk::Extent3D{static_cast<uint32_t>(source->width()), static_cast<uint32_t>(source->height()), 1};
-        copyInfo.setRegions(region);
-
-        auto token = transfer_ctx_->record_and_submit([&](vk::CommandBuffer cmd) {
-            transitionImageLayout(source->id(),
-                                  vk::ImageLayout::eRenderingLocalRead,
-                                  vk::AccessFlagBits2::eColorAttachmentWrite,
-                                  vk::PipelineStageFlagBits2::eColorAttachmentOutput,
-
-                                  vk::ImageLayout::eTransferSrcOptimal,
-                                  vk::AccessFlagBits2::eHostRead,
-                                  vk::PipelineStageFlagBits2::eHost,
-                                  cmd);
-            cmd.copyImageToBuffer2(copyInfo);
-        });
-
-        return std::async(std::launch::deferred, [this, buf = std::move(buf), token]() mutable {
-            if (!transfer_ctx_->wait(token)) {
-                CASPAR_LOG(warning) << L"[Vulkan] Timeout waiting for readback semaphore";
-            }
-
-            auto ptr  = reinterpret_cast<uint8_t*>(buf->data());
-            auto size = buf->size();
-            return array<const uint8_t>(ptr, size, std::move(buf));
-        });
     }
 
     boost::property_tree::wptree info() const
@@ -539,27 +438,23 @@ struct device::impl : public std::enable_shared_from_this<impl>
 device::device(const std::vector<vulkan_requirements_fn>& requirements)
     : impl_(new impl(requirements))
 {
+    // Created after impl_ is set so the transfer service can build its
+    // command_context off this fully-constructed device's queue.
+    impl_->transfer_ = std::make_unique<class transfer>(*this);
 }
 device::~device() {}
 
 vk::PhysicalDeviceMemoryProperties device::getMemoryProperties() { return impl_->_memoryProperties; }
 vk::Device                         device::getVkDevice() const { return impl_->_device; }
 vulkan_queue&                      device::queue() { return *impl_->_queue; }
+class transfer&                    device::transfer() { return *impl_->transfer_; }
 
 std::shared_ptr<texture> device::create_texture(int width, int height, int stride, common::bit_depth depth)
 {
     return impl_->create_texture(width, height, stride, depth, true);
 }
-array<uint8_t> device::create_array(int size) { return impl_->create_array(size); }
-std::future<std::shared_ptr<texture>>
-device::copy_async(const array<const uint8_t>& source, int width, int height, int stride, common::bit_depth depth)
-{
-    return impl_->copy_async(source, width, height, stride, depth);
-}
-std::future<array<const uint8_t>> device::copy_async(const std::shared_ptr<texture>& source)
-{
-    return impl_->copy_async(source);
-}
+std::shared_ptr<buffer>      device::create_buffer(int size, bool write) { return impl_->create_buffer(size, write); }
+array<uint8_t>               device::create_array(int size) { return impl_->create_array(size); }
 std::wstring                 device::version() const { return impl_->version(); }
 boost::property_tree::wptree device::info() const { return impl_->info(); }
 std::future<void>            device::gc() { return impl_->gc(); }

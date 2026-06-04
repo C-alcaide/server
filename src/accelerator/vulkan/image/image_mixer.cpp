@@ -26,6 +26,7 @@
 #include "../util/device.h"
 #include "../util/renderpass.h"
 #include "../util/texture.h"
+#include "../util/transfer.h"
 
 #ifdef WIN32
 #include "../../d3d/d3d_texture2d.h"
@@ -105,7 +106,7 @@ class image_renderer
 
         pass->commit();
 
-        auto readback = vulkan_->copy_async(target);
+        auto readback = vulkan_->transfer().copy_async(target);
 
         return std::async(std::launch::deferred,
                           [readback = std::move(readback)]() mutable
@@ -318,11 +319,11 @@ struct image_mixer::impl
             item.textures = *textures_ptr;
         } else {
             for (int n = 0; n < static_cast<int>(item.pix_desc.planes.size()); ++n) {
-                item.textures.emplace_back(vulkan_->copy_async(frame.image_data(n),
-                                                               item.pix_desc.planes[n].width,
-                                                               item.pix_desc.planes[n].height,
-                                                               item.pix_desc.planes[n].stride,
-                                                               item.pix_desc.planes[n].depth));
+                item.textures.emplace_back(vulkan_->transfer().copy_async(frame.image_data(n),
+                                                                          item.pix_desc.planes[n].width,
+                                                                          item.pix_desc.planes[n].height,
+                                                                          item.pix_desc.planes[n].stride,
+                                                                          item.pix_desc.planes[n].depth));
             }
         }
 
@@ -367,11 +368,12 @@ struct image_mixer::impl
                                        }
                                        std::vector<future_texture> textures;
                                        for (int n = 0; n < static_cast<int>(desc.planes.size()); ++n) {
-                                           textures.emplace_back(self->vulkan_->copy_async(image_data[n],
-                                                                                           desc.planes[n].width,
-                                                                                           desc.planes[n].height,
-                                                                                           desc.planes[n].stride,
-                                                                                           desc.planes[n].depth));
+                                           textures.emplace_back(
+                                               self->vulkan_->transfer().copy_async(image_data[n],
+                                                                                    desc.planes[n].width,
+                                                                                    desc.planes[n].height,
+                                                                                    desc.planes[n].stride,
+                                                                                    desc.planes[n].depth));
                                        }
                                        return std::make_shared<decltype(textures)>(std::move(textures));
                                    });

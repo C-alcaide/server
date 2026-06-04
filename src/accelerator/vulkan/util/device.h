@@ -36,6 +36,7 @@ struct draw_params;
 
 class image_kernel;
 class vulkan_queue;
+class transfer;
 
 class device final
     : public std::enable_shared_from_this<device>
@@ -52,13 +53,11 @@ class device final
     vk::PhysicalDeviceMemoryProperties getMemoryProperties();
     vk::Device                         getVkDevice() const;
     vulkan_queue&                      queue();
+    class transfer&                    transfer();
 
     std::shared_ptr<class texture> create_texture(int width, int height, int stride, common::bit_depth depth);
+    std::shared_ptr<class buffer>  create_buffer(int size, bool write);
     array<uint8_t>                 create_array(int size);
-
-    std::future<std::shared_ptr<class texture>>
-    copy_async(const array<const uint8_t>& source, int width, int height, int stride, common::bit_depth depth);
-    std::future<array<const uint8_t>> copy_async(const std::shared_ptr<class texture>& source);
 
     std::wstring version() const;
 
