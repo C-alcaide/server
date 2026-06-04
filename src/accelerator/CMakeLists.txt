@@ -64,6 +64,7 @@ IF(ENABLE_VULKAN)
 		vulkan/image/image_kernel.h
 		vulkan/image/image_mixer.h
 
+		vulkan/util/barrier.h
 		vulkan/util/buffer.h
 		vulkan/util/command_context.h
 		vulkan/util/completion_token.h

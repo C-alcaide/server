@@ -53,8 +53,6 @@ class device final
     vk::Device                         getVkDevice() const;
     vulkan_queue&                      queue();
 
-    std::shared_ptr<class texture>
-    create_attachment(int width, int height, common::bit_depth depth, uint32_t components_count);
     std::shared_ptr<class texture> create_texture(int width, int height, int stride, common::bit_depth depth);
     array<uint8_t>                 create_array(int size);
 

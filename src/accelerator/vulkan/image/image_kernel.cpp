@@ -21,6 +21,7 @@
 
 #include "image_kernel.h"
 
+#include "../util/barrier.h"
 #include "../util/command_context.h"
 #include "../util/descriptor_pool.h"
 #include "../util/device.h"
@@ -36,8 +37,12 @@
 #include <boost/algorithm/cxx11/all_of.hpp>
 #include <boost/range/adaptor/transformed.hpp>
 
+#include <tbb/concurrent_queue.h>
+#include <tbb/concurrent_unordered_map.h>
+
 #include <array>
 #include <cmath>
+#include <memory>
 
 namespace caspar::accelerator::vulkan {
 
@@ -86,6 +91,12 @@ struct image_kernel::impl
     common::bit_depth         depth_;
     std::shared_ptr<pipeline> pipeline_;
 
+    // Output/intermediate render targets, recycled per (width,height). Kept in a
+    // shared_ptr so a recycled texture's deleter can outlive this kernel without a
+    // dangling pool (concurrent_unordered_map keeps element references stable).
+    using attachment_queue_t = tbb::concurrent_bounded_queue<std::shared_ptr<texture>>;
+    std::shared_ptr<tbb::concurrent_unordered_map<size_t, attachment_queue_t>> attachment_pools_;
+
     struct frame_data : public frame_context
     {
         image_kernel::impl* parent = nullptr;
@@ -131,7 +142,7 @@ struct image_kernel::impl
         virtual std::shared_ptr<class texture>
         create_attachment(uint32_t width, uint32_t height, uint32_t components_count)
         {
-            return parent->vulkan_->create_attachment(width, height, parent->depth_, components_count);
+            return parent->create_attachment(width, height, components_count);
         }
     };
 
@@ -147,6 +158,7 @@ struct image_kernel::impl
         , pipeline_(std::make_shared<pipeline>(vulkan->getVkDevice(),
                                                depth == common::bit_depth::bit8 ? vk::Format::eR8G8B8A8Unorm
                                                                                 : vk::Format::eR16G16B16A16Unorm))
+        , attachment_pools_(std::make_shared<tbb::concurrent_unordered_map<size_t, attachment_queue_t>>())
         , cmd_ctx_(vulkan->getVkDevice(), vulkan->queue())
         , frames_{frame_data{this}, frame_data{this}, frame_data{this}}
     {
@@ -229,6 +241,72 @@ struct image_kernel::impl
         memcpy(vb.data, data, size);
 
         return vb.buffer;
+    }
+
+    std::shared_ptr<texture> create_attachment(uint32_t width, uint32_t height, uint32_t components_count)
+    {
+        CASPAR_VERIFY(width > 0 && height > 0);
+
+        auto format = depth_ == common::bit_depth::bit8 ? vk::Format::eR8G8B8A8Unorm : vk::Format::eR16G16B16A16Unorm;
+        auto vk_device = vulkan_->getVkDevice();
+
+        auto pool   = &(*attachment_pools_)[(width << 16 & 0xFFFF0000) | (height & 0x0000FFFF)];
+        auto extent = vk::Extent3D{width, height, 1};
+
+        std::shared_ptr<texture> tex;
+        if (!pool->try_pop(tex)) {
+            vk::ImageCreateInfo imageInfo{};
+            imageInfo.imageType     = vk::ImageType::e2D;
+            imageInfo.format        = format;
+            imageInfo.extent        = extent;
+            imageInfo.mipLevels     = 1;
+            imageInfo.arrayLayers   = 1;
+            imageInfo.initialLayout = vk::ImageLayout::eUndefined;
+            imageInfo.samples       = vk::SampleCountFlagBits::e1;
+            imageInfo.tiling        = vk::ImageTiling::eOptimal;
+            imageInfo.usage         = vk::ImageUsageFlagBits::eTransferSrc | vk::ImageUsageFlagBits::eInputAttachment |
+                              vk::ImageUsageFlagBits::eColorAttachment | vk::ImageUsageFlagBits::eTransferDst |
+                              vk::ImageUsageFlagBits::eSampled;
+            imageInfo.sharingMode = vk::SharingMode::eExclusive;
+            auto image            = vk_device.createImage(imageInfo);
+
+            auto memReq = vk_device.getImageMemoryRequirements(image);
+
+            vk::MemoryAllocateInfo allocInfo{};
+            allocInfo.allocationSize = memReq.size;
+            allocInfo.memoryTypeIndex =
+                findDedicatedMemoryType(memReq.memoryTypeBits, vk::MemoryPropertyFlagBits::eDeviceLocal);
+
+            auto imageMemory = vk_device.allocateMemory(allocInfo);
+            vk_device.bindImageMemory(image, imageMemory, 0);
+            auto range = vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1);
+
+            vk::ImageViewCreateInfo createInfo(
+                {}, image, vk::ImageViewType::e2D, format, vk::ComponentMapping(), range);
+
+            auto imageView = vk_device.createImageView(createInfo);
+
+            tex = std::make_shared<texture>(
+                width, height, components_count, depth_, image, imageMemory, imageView, vk_device);
+        }
+
+        cmd_ctx_.record_and_submit([&](vk::CommandBuffer cmd) {
+            transitionImageLayout(
+                tex->id(),
+                vk::ImageLayout::eUndefined,
+                vk::AccessFlagBits2::eNone,
+                vk::PipelineStageFlagBits2::eTopOfPipe,
+                vk::ImageLayout::eRenderingLocalRead,
+                vk::AccessFlagBits2::eColorAttachmentWrite | vk::AccessFlagBits2::eInputAttachmentRead,
+                vk::PipelineStageFlagBits2::eColorAttachmentOutput | vk::PipelineStageFlagBits2::eFragmentShader,
+                cmd);
+        });
+
+        tex->set_depth(depth_);
+
+        auto ptr = tex.get();
+        return std::shared_ptr<texture>(
+            ptr, [tex = std::move(tex), pool, pools = attachment_pools_](texture*) mutable { pool->push(tex); });
     }
 
     std::pair<std::vector<core::frame_geometry::coord>, uniform_block> draw(const draw_params& params)
