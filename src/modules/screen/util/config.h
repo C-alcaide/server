@@ -75,8 +75,7 @@ struct configuration
 };
 
 // Parse a configuration from AMCP command params. Does not set gpu_texture.
-configuration parse_consumer_params(const std::vector<std::wstring>& params,
-                                    const core::channel_info&        channel_info);
+configuration parse_consumer_params(const std::vector<std::wstring>& params, const core::channel_info& channel_info);
 
 // Parse a configuration from an XML property tree. Does not set gpu_texture.
 configuration parse_preconfigured_consumer(const boost::property_tree::wptree& ptree,

@@ -65,15 +65,13 @@
 
 namespace caspar { namespace screen { namespace vulkan {
 
-namespace avk = caspar::accelerator::vulkan;
-
 struct screen_consumer_vk
 {
-    const configuration               config_;
-    core::video_format_desc           format_desc_;
-    int                               channel_index_;
-    std::shared_ptr<avk::device>       device_;
-    std::shared_ptr<avk::vulkan_queue> queue_;
+    const configuration                                config_;
+    core::video_format_desc                            format_desc_;
+    int                                                channel_index_;
+    std::shared_ptr<accelerator::vulkan::device>       device_;
+    std::shared_ptr<accelerator::vulkan::vulkan_queue> queue_;
 
     // A plain command pool for render_pipeline's per-slot buffers. The consumer
     // never goes through a command_context here: its only submit is the WSI
@@ -96,7 +94,7 @@ struct screen_consumer_vk
 
     // Per frame-in-flight slot, the texture the slot's draw samples. Held until
     // the slot's fence retires so the pool cannot recycle it while in use.
-    std::vector<std::shared_ptr<avk::texture>> in_flight_textures_;
+    std::vector<std::shared_ptr<accelerator::vulkan::texture>> in_flight_textures_;
 
     spl::shared_ptr<diagnostics::graph> graph_;
     caspar::timer                       tick_timer_;
@@ -105,16 +103,17 @@ struct screen_consumer_vk
 
     std::atomic<bool> is_running_{true};
     std::atomic<bool> needs_resize_{false};
+    std::atomic<bool> first_frame_presented_{false};
     std::thread       thread_;
 
     screen_consumer_vk(const screen_consumer_vk&)            = delete;
     screen_consumer_vk& operator=(const screen_consumer_vk&) = delete;
 
   public:
-    screen_consumer_vk(const configuration&                config,
-                       const core::video_format_desc&      format_desc,
-                       int                                 channel_index,
-                       const std::shared_ptr<avk::device>& device)
+    screen_consumer_vk(const configuration&                                config,
+                       const core::video_format_desc&                      format_desc,
+                       int                                                 channel_index,
+                       const std::shared_ptr<accelerator::vulkan::device>& device)
         : config_(config)
         , format_desc_(format_desc)
         , channel_index_(channel_index)
@@ -350,8 +349,8 @@ struct screen_consumer_vk
 
             // The slot's fence (just waited) guarantees the previous draw in this
             // slot has retired, so its texture can be released and ours retained.
-            uint32_t frame_slot              = swapchain_->frame_slot();
-            in_flight_textures_[frame_slot]  = src;
+            uint32_t frame_slot             = swapchain_->frame_slot();
+            in_flight_textures_[frame_slot] = src;
 
             render_pipeline_->render(*src,
                                      image_index,
@@ -366,6 +365,12 @@ struct screen_consumer_vk
 
             swapchain_->next_frame();
         }
+
+#ifdef __APPLE__
+        if (!first_frame_presented_.exchange(true)) {
+            window_->nudge_for_first_frame();
+        }
+#endif
 
         graph_->set_value("tick-time", tick_timer_.elapsed() * format_desc_.fps * 0.5);
         tick_timer_.restart();
@@ -431,12 +436,12 @@ struct screen_consumer_vk
 
 struct screen_consumer_proxy_vk : public core::frame_consumer
 {
-    const configuration                 config_;
-    std::shared_ptr<avk::device>        device_;
-    std::unique_ptr<screen_consumer_vk> consumer_;
+    const configuration                          config_;
+    std::shared_ptr<accelerator::vulkan::device> device_;
+    std::unique_ptr<screen_consumer_vk>          consumer_;
 
   public:
-    screen_consumer_proxy_vk(configuration config, std::shared_ptr<avk::device> device)
+    screen_consumer_proxy_vk(configuration config, std::shared_ptr<accelerator::vulkan::device> device)
         : config_(std::move(config))
         , device_(std::move(device))
     {

@@ -59,6 +59,14 @@
 #include <clocale>
 #include <csignal>
 
+#ifdef __APPLE__
+// Defined in macos_main_loop.mm - pumps Cocoa events and the main run loop so
+// GCD main-queue blocks (used by the Vulkan screen consumer for GLFW/Cocoa
+// calls) are processed on the main thread.
+extern "C" void macos_init_app();
+extern "C" void macos_process_events(double timeout_seconds);
+#endif
+
 namespace caspar {
 
 void setup_global_locale()
@@ -162,7 +170,23 @@ auto run(const std::wstring& config_file_name, std::atomic<bool>& should_wait_fo
     boost::asio::signal_set signals(io, SIGINT, SIGTERM);
     signals.async_wait([&](auto, auto) { io.stop(); });
 
+#ifdef __APPLE__
+    // On macOS the main thread must own Cocoa/GCD event processing so the screen
+    // consumer can create and drive its window. Run ASIO on a background thread
+    // and pump the main run loop here until shutdown.
+    macos_init_app();
+    auto        work_guard = boost::asio::make_work_guard(io);
+    std::thread asio_thread([&io] { io.run(); });
+
+    while (!io.stopped()) {
+        macos_process_events(0.01); // 10ms timeout
+    }
+
+    work_guard.reset();
+    asio_thread.join();
+#else
     io.run();
+#endif
 
     caspar_server.reset();
 

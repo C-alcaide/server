@@ -27,6 +27,7 @@ if (MSVC)
 elseif(APPLE)
 	list(APPEND SOURCES
 			macos_specific.cpp
+			macos_main_loop.mm
 	)
 else ()
 	list(APPEND SOURCES
@@ -93,6 +94,7 @@ elseif(APPLE)
 		OpenAL::OpenAL
 		dl
 		pthread
+		"-framework Cocoa"
 	)
 
 	# RPATH needed at runtime for frameworks in the app bundle
