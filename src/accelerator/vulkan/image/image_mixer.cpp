@@ -95,7 +95,7 @@ class image_renderer
             static const std::vector<uint8_t, boost::alignment::aligned_allocator<uint8_t, 32>> buffer(max_frame_size_,
                                                                                                        0);
             return make_ready_future<std::tuple<array<const std::uint8_t>, std::shared_ptr<core::texture>>>(
-                {array<const std::uint8_t>(buffer.data(), format_desc.size, true), nullptr});
+                {array<const std::uint8_t>(buffer.data(), format_desc.size, true), kernel_.empty_texture()});
         }
 
         // Record + submit synchronously on the caller's (mixer) thread; the only
@@ -106,19 +106,20 @@ class image_renderer
 
         pass->commit();
 
-        // No consumer wants the bytes on the host: skip the GPU->host readback and
-        // return an empty host array. (The GPU texture slot stays nullptr until D2.)
+        // The composited attachment is returned in the texture slot for GPU-direct
+        // consumers; holding it on the const_frame defers its recycle to the pool.
+        // No consumer wants the bytes on the host: skip the GPU->host readback.
         if (!need_host_frame) {
             return make_ready_future<std::tuple<array<const std::uint8_t>, std::shared_ptr<core::texture>>>(
-                {array<const std::uint8_t>(), nullptr});
+                {array<const std::uint8_t>(), target});
         }
 
         auto readback = vulkan_->transfer().copy_async(target);
 
         return std::async(std::launch::deferred,
-                          [readback = std::move(readback)]() mutable
-                              -> std::tuple<array<const std::uint8_t>, std::shared_ptr<core::texture>> {
-                              return {std::move(readback.get()), nullptr};
+                          [readback = std::move(readback),
+                           target]() mutable -> std::tuple<array<const std::uint8_t>, std::shared_ptr<core::texture>> {
+                              return {std::move(readback.get()), target};
                           });
     }
 
