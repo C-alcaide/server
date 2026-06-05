@@ -29,7 +29,6 @@
 
 #include <accelerator/vulkan/util/device.h>
 #include <accelerator/vulkan/util/texture.h>
-#include <accelerator/vulkan/util/transfer.h>
 #include <accelerator/vulkan/util/vulkan_queue.h>
 
 #include <common/array.h>
@@ -320,17 +319,17 @@ struct screen_consumer_vk
         if (!is_running_)
             return;
 
-        // Host-upload (GPU->CPU->GPU, like the GL consumer): re-upload the
-        // composited host bytes to a sampled texture through the shared device
-        // transfer service. It records + submits on the one shared queue and
-        // leaves the texture shader-read; on that single queue, submission order
-        // plus the upload's shader-read barrier order it ahead of our present
-        // submit below, so no token or semaphore is needed (distance 0). Done
-        // outside the queue lock because transfer takes the queue's lock itself.
-        auto depth = config_.high_bitdepth ? common::bit_depth::bit16 : common::bit_depth::bit8;
-        auto src   = device_->transfer()
-                       .copy_async(in_frame.image_data(0), format_desc_.width, format_desc_.height, 4, depth)
-                       .get();
+        // GPU-direct: the channel's composited texture rides on the const_frame.
+        // The vulkan image_mixer always provides one (the empty 1x1 texture for
+        // empty frames) in eShaderReadOnlyOptimal, so a missing/foreign texture is
+        // unexpected — skip it. On the single shared queue the mixer's finalize
+        // barrier + submission order make the texture visible to our sample with no
+        // token or semaphore (distance 0).
+        auto src = std::dynamic_pointer_cast<accelerator::vulkan::texture>(in_frame.texture());
+        if (!src) {
+            CASPAR_LOG(warning) << print() << L" Frame has no Vulkan texture; skipping.";
+            return;
+        }
 
         auto params = calculate_render_params();
 
@@ -465,6 +464,10 @@ struct screen_consumer_proxy_vk : public core::frame_consumer
     std::wstring name() const override { return L"screen"; }
 
     bool has_synchronization_clock() const override { return false; }
+
+    // GPU-direct: we sample the composited texture off the const_frame, so the
+    // channel can skip the GPU->host readback when we are the only consumer.
+    bool needs_host_frame() const override { return false; }
 
     int index() const override { return 600 + (config_.key_only ? 10 : 0) + config_.screen_index; }
 
