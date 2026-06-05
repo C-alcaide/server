@@ -52,6 +52,8 @@ class device final
 
     vk::PhysicalDeviceMemoryProperties getMemoryProperties();
     vk::Device                         getVkDevice() const;
+    vk::Instance                       instance() const;
+    vk::PhysicalDevice                 physical_device() const;
     std::shared_ptr<vulkan_queue>      queue();
     class transfer&                    transfer();
 

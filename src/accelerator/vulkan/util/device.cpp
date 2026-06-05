@@ -446,6 +446,8 @@ device::~device() {}
 
 vk::PhysicalDeviceMemoryProperties device::getMemoryProperties() { return impl_->_memoryProperties; }
 vk::Device                         device::getVkDevice() const { return impl_->_device; }
+vk::Instance                       device::instance() const { return vk::Instance(impl_->_vkb_instance.instance); }
+vk::PhysicalDevice                 device::physical_device() const { return impl_->_physical_device; }
 std::shared_ptr<vulkan_queue>      device::queue() { return impl_->_queue; }
 class transfer&                    device::transfer() { return *impl_->transfer_; }
 

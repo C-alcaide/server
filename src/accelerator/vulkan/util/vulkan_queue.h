@@ -49,6 +49,15 @@ class vulkan_queue final
 
     uint32_t family_index() const { return family_index_; }
 
+    // The raw queue handle, for submitters that need vkQueueSubmit2 (binary +
+    // timeline semaphore mix) or vkQueuePresentKHR, which submit() does not wrap.
+    // Such callers must hold scoped_lock() to honour the queue's external sync.
+    vk::Queue vk_queue() const { return queue_; }
+
+    // Hold this while submitting through vk_queue() directly, so those submits
+    // serialize against the ones going through submit().
+    std::unique_lock<std::mutex> scoped_lock() { return std::unique_lock<std::mutex>(mutex_); }
+
   private:
     vk::Queue  queue_;
     uint32_t   family_index_;
