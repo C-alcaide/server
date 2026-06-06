@@ -23,8 +23,8 @@
 #include "image_loader.h"
 #include "image_algorithms.h"
 
-#include <common/except.h>
 #include "common/scope_exit.h"
+#include <common/except.h>
 
 #include <ffmpeg/util/av_assert.h>
 

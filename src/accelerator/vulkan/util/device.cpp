@@ -23,6 +23,7 @@
 
 #include "../image/image_kernel.h"
 #include "buffer.h"
+#include "queue_manager.h"
 #include "texture.h"
 #include "transfer.h"
 #include "vulkan_queue.h"
@@ -95,8 +96,11 @@ struct device::impl : public std::enable_shared_from_this<impl>
     vk::PhysicalDeviceMemoryProperties _memoryProperties;
     vk::PhysicalDevice                 _physical_device;
     vk::Device                         _device;
-    std::shared_ptr<vulkan_queue>      _queue;
-    VmaAllocator                       _allocator;
+    // Owns the queues: primary() is the render/transfer path, acquire() hands out
+    // a distinct family to clients that want one (capped at MAX_QUEUES).
+    static constexpr size_t        MAX_QUEUES = 2;
+    std::unique_ptr<queue_manager> queue_manager_;
+    VmaAllocator                   _allocator;
 
     std::unique_ptr<class transfer> transfer_;
 
@@ -193,9 +197,22 @@ struct device::impl : public std::enable_shared_from_this<impl>
                 fn(_vkb_physical_device);
         }
 
-        // Create the logical device
+        // Create the logical device. The queue_manager scans the families and
+        // picks which to take one queue from each; we feed that into the custom
+        // queue setup (queue count is frozen at vkCreateDevice), then hand it the
+        // VkDevice so it can pull the handles. The graphics family is the primary
+        // queue every existing path uses; the rest go to acquire_queue() clients
+        // (e.g. the screen consumer), which arrive later.
         auto device_builder = vkb::DeviceBuilder(_vkb_physical_device);
         _physical_device    = vk::PhysicalDevice(_vkb_physical_device.physical_device);
+
+        queue_manager_ = std::make_unique<queue_manager>(_physical_device, MAX_QUEUES);
+
+        static const float                       queue_priority = 1.0f;
+        std::vector<vkb::CustomQueueDescription> queue_descriptions;
+        for (auto family : queue_manager_->families())
+            queue_descriptions.emplace_back(family, std::vector<float>{queue_priority});
+        device_builder.custom_queue_setup(queue_descriptions);
 
         auto device_res = device_builder.build();
         if (!device_res) {
@@ -205,9 +222,8 @@ struct device::impl : public std::enable_shared_from_this<impl>
         auto vkb_device = device_res.value();
         _device         = vk::Device(vkb_device.device);
         VULKAN_HPP_DEFAULT_DISPATCHER.init(_device);
-        auto graphics_queue  = vk::Queue(vkb_device.get_queue(vkb::QueueType::graphics).value());
-        auto graphics_family = vkb_device.get_queue_index(vkb::QueueType::graphics).value();
-        _queue               = std::make_shared<vulkan_queue>(graphics_queue, graphics_family);
+
+        queue_manager_->create_queues(_device);
 
         VmaVulkanFunctions vulkanFunctions    = {};
         vulkanFunctions.vkGetInstanceProcAddr = _vkb_instance.fp_vkGetInstanceProcAddr;
@@ -468,7 +484,8 @@ vk::PhysicalDeviceMemoryProperties device::getMemoryProperties() { return impl_-
 vk::Device                         device::getVkDevice() const { return impl_->_device; }
 vk::Instance                       device::instance() const { return vk::Instance(impl_->_vkb_instance.instance); }
 vk::PhysicalDevice                 device::physical_device() const { return impl_->_physical_device; }
-std::shared_ptr<vulkan_queue>      device::queue() { return impl_->_queue; }
+std::shared_ptr<vulkan_queue>      device::queue() { return impl_->queue_manager_->primary(); }
+std::shared_ptr<vulkan_queue>      device::acquire_queue() { return impl_->queue_manager_->acquire(); }
 class transfer&                    device::transfer() { return *impl_->transfer_; }
 
 std::shared_ptr<texture> device::create_texture(int width, int height, int stride, common::bit_depth depth)

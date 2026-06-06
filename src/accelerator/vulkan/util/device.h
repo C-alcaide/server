@@ -55,7 +55,12 @@ class device final
     vk::Instance                       instance() const;
     vk::PhysicalDevice                 physical_device() const;
     std::shared_ptr<vulkan_queue>      queue();
-    class transfer&                    transfer();
+    // Hand out a queue on a family distinct from the primary graphics queue, so a
+    // client (e.g. the screen consumer) can run on its own family. Round-robins +
+    // shares across the secondary families; collapses to queue() on single-family
+    // hardware. No reclamation — sharing makes exhaustion impossible.
+    std::shared_ptr<vulkan_queue> acquire_queue();
+    class transfer&               transfer();
 
     std::shared_ptr<class texture> create_texture(int width, int height, int stride, common::bit_depth depth);
     std::shared_ptr<class buffer>  create_buffer(int size, bool write);

@@ -36,10 +36,7 @@ namespace caspar { namespace decklink {
 using String = BSTR;
 using UINT32 = unsigned int;
 
-static std::wstring to_string(String bstr_string)
-{
-    return static_cast<const wchar_t*>(bstr_t(bstr_string, false));
-}
+static std::wstring to_string(String bstr_string) { return static_cast<const wchar_t*>(bstr_t(bstr_string, false)); }
 
 static void com_initialize() { ::CoInitialize(nullptr); }
 

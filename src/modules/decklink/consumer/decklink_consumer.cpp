@@ -150,7 +150,7 @@ void set_duplex(const com_iface_ptr<IDeckLinkAttributes_v10_11>&    attributes,
 }
 
 void set_keyer(const com_iface_ptr<IDeckLinkProfileAttributes>& attributes,
-               const com_iface_ptr<IDeckLinkOutput>&             output,
+               const com_iface_ptr<IDeckLinkOutput>&            output,
                const com_iface_ptr<IDeckLinkKeyer>&             decklink_keyer,
                configuration::keyer_t                           keyer,
                BMDDisplayMode                                   display_mode,
@@ -168,7 +168,8 @@ void set_keyer(const com_iface_ptr<IDeckLinkProfileAttributes>& attributes,
                                                    &actualMode,
                                                    &supported)) &&
             !supported) {
-            CASPAR_LOG(warning) << print << L" Keying is not supported by this device for the current video mode. Disabling keyer.";
+            CASPAR_LOG(warning)
+                << print << L" Keying is not supported by this device for the current video mode. Disabling keyer.";
             decklink_keyer->Disable();
             return;
         }
@@ -512,7 +513,13 @@ struct decklink_secondary_port final : public IDeckLinkVideoOutputCallback
         }
 
         set_latency(configuration_, config.latency, print);
-        set_keyer(attributes_, output_, keyer_, config.keyer, mode_->GetDisplayMode(), format_strategy_->get_pixel_format(), print);
+        set_keyer(attributes_,
+                  output_,
+                  keyer_,
+                  config.keyer,
+                  mode_->GetDisplayMode(),
+                  format_strategy_->get_pixel_format(),
+                  print);
 
         if (device_sync_group_ > 0 &&
             FAILED(configuration_->SetInt(bmdDeckLinkConfigPlaybackGroup, device_sync_group_))) {
@@ -749,7 +756,13 @@ struct decklink_consumer final : public IDeckLinkVideoOutputCallback
         }
 
         set_latency(configuration_, config.latency, print());
-        set_keyer(attributes_, output_, keyer_, config.keyer, mode_->GetDisplayMode(), format_strategy_->get_pixel_format(), print());
+        set_keyer(attributes_,
+                  output_,
+                  keyer_,
+                  config.keyer,
+                  mode_->GetDisplayMode(),
+                  format_strategy_->get_pixel_format(),
+                  print());
 
         if (config.hdr) {
             BOOL flag = FALSE;
