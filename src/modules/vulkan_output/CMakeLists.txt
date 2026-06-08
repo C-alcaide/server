@@ -6,7 +6,7 @@ project(vulkan_output)
 if(DEFINED ENV{VULKAN_SDK})
     set(VULKAN_SDK_PATH "$ENV{VULKAN_SDK}")
     string(STRIP "${VULKAN_SDK_PATH}" VULKAN_SDK_PATH)
-else()
+elseif(WIN32)
     # Default Windows install location
     file(GLOB VULKAN_SDK_CANDIDATES "C:/VulkanSDK/*")
     list(SORT VULKAN_SDK_CANDIDATES ORDER DESCENDING)
@@ -15,15 +15,19 @@ else()
     endif()
 endif()
 
-if(VULKAN_SDK_PATH)
+if(VULKAN_SDK_PATH AND WIN32)
     set(Vulkan_INCLUDE_DIR "${VULKAN_SDK_PATH}/Include")
     set(Vulkan_LIBRARY "${VULKAN_SDK_PATH}/Lib/vulkan-1.lib")
+    message(STATUS "Vulkan SDK: ${VULKAN_SDK_PATH}")
+elseif(VULKAN_SDK_PATH)
+    set(Vulkan_INCLUDE_DIR "${VULKAN_SDK_PATH}/include")
     message(STATUS "Vulkan SDK: ${VULKAN_SDK_PATH}")
 endif()
 
 find_package(Vulkan REQUIRED)
 
-# ─── Find NvAPI SDK ──────────────────────────────────────────────────────────
+# ─── Find NvAPI SDK (Windows only) ───────────────────────────────────────────
+if(WIN32)
 set(NVAPI_SDK_PATH "" CACHE PATH "Path to NvAPI SDK root")
 if(NOT NVAPI_SDK_PATH)
     # Try common locations: sibling of source, sibling of repo root, env var
@@ -43,6 +47,9 @@ if(NVAPI_SDK_PATH AND EXISTS "${NVAPI_SDK_PATH}/nvapi.h")
 else()
     set(NVAPI_FOUND FALSE)
     message(STATUS "NvAPI SDK not found - Quadro Sync and EDID features disabled")
+endif()
+else()
+    set(NVAPI_FOUND FALSE)
 endif()
 
 # ─── Find CUDA Toolkit (optional, for GPU peer transfer) ────────────────────
@@ -72,6 +79,7 @@ set(SOURCES
     util/vulkan_interop.h
     util/shared_texture_pool.cpp
     util/shared_texture_pool.h
+    util/platform_handles.h
     util/interop_context.cpp
     util/interop_context.h
     util/gpu_affinity_context.cpp
@@ -149,10 +157,19 @@ target_link_libraries(vulkan_output PRIVATE
     Vulkan::Vulkan
     accelerator
     GLEW::glew
-    d3d11
-    dxgi
-    dwmapi
 )
+
+if(WIN32)
+    target_link_libraries(vulkan_output PRIVATE
+        d3d11
+        dxgi
+        dwmapi
+    )
+else()
+    target_link_libraries(vulkan_output PRIVATE
+        EGL
+    )
+endif()
 
 if(NVAPI_FOUND)
     target_link_libraries(vulkan_output PRIVATE ${NVAPI_LIBRARY})

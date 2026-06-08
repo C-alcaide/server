@@ -40,6 +40,10 @@ namespace caspar { namespace vulkan_output {
 //
 // Must be created while the OGL device context is current (i.e., inside a
 // dispatch_sync on the OGL device). The shared context inherits all texture names.
+//
+// Platform implementations:
+//   Windows: WGL shared context via wglCreateContextAttribsARB / wglShareLists
+//   Linux:   EGL shared context via eglCreateContext with shared EGLContext
 class interop_context
 {
   public:
@@ -62,9 +66,16 @@ class interop_context
   private:
     void thread_func();
 
+    // Platform-specific context handles
+#ifdef _WIN32
     HWND  hwnd_  = nullptr;
     HDC   hdc_   = nullptr;
     HGLRC hglrc_ = nullptr;
+#else
+    void* egl_display_ = nullptr; // EGLDisplay
+    void* egl_context_ = nullptr; // EGLContext
+    void* egl_surface_ = nullptr; // EGLSurface (EGL_NO_SURFACE for surfaceless)
+#endif
     bool  valid_ = false;
 
     std::thread             thread_;

@@ -21,6 +21,8 @@
 
 #include <common/log.h>
 
+#ifdef _WIN32
+
 #include <GL/wglew.h>
 
 namespace caspar { namespace vulkan_output {
@@ -194,3 +196,149 @@ void interop_context::thread_func()
 }
 
 }} // namespace caspar::vulkan_output
+
+#else // Linux
+
+#include <EGL/egl.h>
+#include <EGL/eglext.h>
+#include <pthread.h>
+
+namespace caspar { namespace vulkan_output {
+
+interop_context::interop_context()
+{
+    // On Linux, the OGL device uses EGL. We need to get the current EGL display
+    // and context to create a shared child context.
+    auto parent_display = eglGetCurrentDisplay();
+    auto parent_context = eglGetCurrentContext();
+
+    if (parent_display == EGL_NO_DISPLAY || parent_context == EGL_NO_CONTEXT) {
+        CASPAR_LOG(error) << L"[interop_context] No current EGL context — must be called from OGL device thread.";
+        return;
+    }
+
+    egl_display_ = parent_display;
+
+    // Get the config of the parent context
+    EGLint config_id = 0;
+    eglQueryContext(parent_display, parent_context, EGL_CONFIG_ID, &config_id);
+
+    EGLConfig config = nullptr;
+    EGLint num_configs = 0;
+    EGLint config_attribs[] = {EGL_CONFIG_ID, config_id, EGL_NONE};
+    eglChooseConfig(parent_display, config_attribs, &config, 1, &num_configs);
+
+    if (num_configs == 0) {
+        CASPAR_LOG(error) << L"[interop_context] Failed to retrieve parent EGL config.";
+        return;
+    }
+
+    // Create shared EGL context (GL 4.5 core)
+    EGLint ctx_attribs[] = {
+        EGL_CONTEXT_MAJOR_VERSION, 4,
+        EGL_CONTEXT_MINOR_VERSION, 5,
+        EGL_CONTEXT_OPENGL_PROFILE_MASK, EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT,
+        EGL_NONE
+    };
+
+    egl_context_ = eglCreateContext(parent_display, config, parent_context, ctx_attribs);
+    if (!egl_context_ || egl_context_ == EGL_NO_CONTEXT) {
+        CASPAR_LOG(error) << L"[interop_context] Failed to create shared EGL context.";
+        egl_context_ = nullptr;
+        return;
+    }
+
+    egl_surface_ = nullptr; // surfaceless rendering
+
+    valid_ = true;
+
+    // Start the worker thread
+    thread_ = std::thread([this] { thread_func(); });
+}
+
+interop_context::~interop_context()
+{
+    if (thread_.joinable()) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            stop_ = true;
+        }
+        cv_.notify_one();
+        thread_.join();
+    }
+
+    if (egl_context_) {
+        eglDestroyContext(static_cast<EGLDisplay>(egl_display_),
+                          static_cast<EGLContext>(egl_context_));
+    }
+}
+
+void interop_context::dispatch_async(std::function<void()> task)
+{
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        tasks_.push(std::move(task));
+    }
+    cv_.notify_one();
+}
+
+void interop_context::dispatch_sync(std::function<void()> task)
+{
+    bool done = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        tasks_.push([&] {
+            task();
+            {
+                std::lock_guard<std::mutex> lk(mutex_);
+                done = true;
+            }
+            done_cv_.notify_one();
+        });
+    }
+    cv_.notify_one();
+
+    std::unique_lock<std::mutex> lock(mutex_);
+    done_cv_.wait(lock, [&] { return done; });
+}
+
+void interop_context::thread_func()
+{
+    pthread_setname_np(pthread_self(), "VK Interop GL");
+
+    // EGL API binding is per-thread state — must bind OpenGL API on this thread
+    eglBindAPI(EGL_OPENGL_API);
+
+    // Make shared context current (surfaceless — EGL_NO_SURFACE)
+    if (!eglMakeCurrent(static_cast<EGLDisplay>(egl_display_),
+                        EGL_NO_SURFACE, EGL_NO_SURFACE,
+                        static_cast<EGLContext>(egl_context_))) {
+        CASPAR_LOG(error) << L"[interop_context] Failed to make shared EGL context current.";
+        valid_ = false;
+        return;
+    }
+
+    // Init GLEW on this context
+    glewExperimental = GL_TRUE;
+    glewInit();
+
+    while (true) {
+        std::function<void()> task;
+        {
+            std::unique_lock<std::mutex> lock(mutex_);
+            cv_.wait(lock, [this] { return !tasks_.empty() || stop_; });
+            if (stop_ && tasks_.empty())
+                break;
+            task = std::move(tasks_.front());
+            tasks_.pop();
+        }
+        task();
+    }
+
+    eglMakeCurrent(static_cast<EGLDisplay>(egl_display_),
+                   EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+}
+
+}} // namespace caspar::vulkan_output
+
+#endif // _WIN32

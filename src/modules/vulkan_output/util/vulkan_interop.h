@@ -19,8 +19,7 @@
 
 #pragma once
 
-#define VK_USE_PLATFORM_WIN32_KHR
-#include <vulkan/vulkan.h>
+#include "platform_handles.h"
 
 #include <cstdint>
 
@@ -29,7 +28,7 @@ namespace caspar { namespace vulkan_output {
 class vulkan_device;
 
 // Manages an OpenGL → Vulkan shared memory object for zero-copy frame transfer.
-// Uses GL_EXT_memory_object + VK_KHR_external_memory_win32.
+// Uses GL_EXT_memory_object + VK_KHR_external_memory_{win32,fd}.
 class vulkan_interop
 {
   public:
@@ -44,10 +43,10 @@ class vulkan_interop
     VkImage       vk_image() const { return image_; }
     VkImageView   vk_image_view() const { return image_view_; }
     VkDeviceMemory vk_memory() const { return memory_; }
-    HANDLE        shared_handle() const { return shared_handle_; }
+    platform::native_handle_t shared_handle() const { return shared_handle_; }
 
-    // Create the Vulkan side from a Win32 HANDLE exported by OpenGL
-    void import_from_handle(HANDLE handle);
+    // Create the Vulkan side from a platform handle exported by OpenGL
+    void import_from_handle(platform::native_handle_t handle);
 
   private:
     vulkan_device& device_;
@@ -58,7 +57,7 @@ class vulkan_interop
     VkImage        image_      = VK_NULL_HANDLE;
     VkImageView    image_view_ = VK_NULL_HANDLE;
     VkDeviceMemory memory_     = VK_NULL_HANDLE;
-    HANDLE         shared_handle_ = nullptr;
+    platform::native_handle_t shared_handle_ = platform::kInvalidHandle;
 };
 
 }} // namespace caspar::vulkan_output

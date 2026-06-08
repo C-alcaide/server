@@ -2,6 +2,8 @@
 
 Low-latency, direct-to-display GPU output consumer for CasparCG. Bypasses the desktop compositor entirely using the Vulkan graphics API, targeting professional broadcast scenarios where frame-accurate timing and deterministic latency are critical.
 
+**Supported platforms**: Windows (via `VK_EXT_full_screen_exclusive` + Win32 surfaces) and Linux (via `VK_KHR_display` direct scanout).
+
 ## Table of Contents
 
 - [Architecture Overview](#architecture-overview)
@@ -19,6 +21,7 @@ Low-latency, direct-to-display GPU output consumer for CasparCG. Bypasses the de
 - [Configuration Reference](#configuration-reference)
 - [Configuration Examples](#configuration-examples)
 - [Build Requirements](#build-requirements)
+- [Linux Testing](#linux-testing)
 - [Diagnostics](#diagnostics)
 - [Troubleshooting](#troubleshooting)
 
@@ -42,7 +45,7 @@ The module is organized into ten layers:
 │   └── Multiple consumers on the same GPU share one device    │
 ├──────────────────────────────────────────────────────────────┤
 │ gpu_frame_cache                 (Per-GPU transfer cache)     │
-│   ├── One OGL→VK transfer per GPU per frame (deduplication) │
+│   ├── One transfer per GPU per frame (deduplication)         │
 │   ├── First-caller-wins coordination (mutex + condvar)       │
 │   ├── Binary semaphore tracking (one wait per frame)         │
 │   └── Owns interop_context, shared_texture_pool, affinity   │
@@ -54,12 +57,12 @@ The module is organized into ten layers:
 ├──────────────────────────────────────────────────────────────┤
 │ vulkan_device                   (VkInstance + VkDevice RAII)  │
 │   ├── GPU enumeration + tier detection + LUID query          │
-│   ├── VK_KHR_display (Pro) / Win32 surface (Consumer)        │
+│   ├── VK_KHR_display (Linux) / FSE+Win32 surface (Windows)   │
 │   ├── VBlank fence via VK_EXT_display_control                │
 │   └── queue_mutex for thread-safe queue submission           │
 ├──────────────────────────────────────────────────────────────┤
 │ interop_context                 (Dedicated GL blit thread)    │
-│   ├── Shared WGL context (shares textures with OGL device)   │
+│   ├── Shared GL context (WGL on Windows, EGL on Linux)       │
 │   ├── Own worker thread ("VK Interop GL")                    │
 │   └── dispatch_async() for non-blocking blit + signal        │
 ├──────────────────────────────────────────────────────────────┤
@@ -69,7 +72,7 @@ The module is organized into ten layers:
 │   └── 8-bit (SDR) or 16-bit (HDR) pixel format               │
 ├──────────────────────────────────────────────────────────────┤
 │ gpu_affinity_context            (Cross-GPU OGL bridge)        │
-│   ├── WGL_NV_gpu_affinity context on target GPU              │
+│   ├── WGL_NV_gpu_affinity (Win) / EGL device enum (Linux)    │
 │   ├── Dedicated thread with dispatch_sync() work queue       │
 │   └── PBO double-buffered upload (fallback path)             │
 ├──────────────────────────────────────────────────────────────┤
@@ -89,7 +92,9 @@ The module is organized into ten layers:
 └──────────────────────────────────────────────────────────────┘
 ```
 
-### Data Flow
+### Data Flow (OGL Mixer)
+
+When the **OGL mixer** is active, frames are transferred from OpenGL to Vulkan via interop:
 
 ```
 CasparCG Mixer (OGL, GPU A)
@@ -102,9 +107,9 @@ CasparCG Mixer (OGL, GPU A)
    │                                │
    │              OGL texture ──blit──▸ shared_texture_pool (GL_EXT_memory_object)
    │                                     │  signal_gl() + swap()
-   │                              Win32 HANDLE export
+   │                              Platform handle export (Win32 HANDLE / fd)
    │                                     │
-   │                            VkImage (VK_KHR_external_memory_win32)
+   │                            VkImage (VK_KHR_external_memory)
    │                                     │
    │              [present thread]  vkCmdBlitImage ──▸ swapchain image
    │
@@ -144,25 +149,76 @@ CasparCG Mixer (OGL, GPU A)
    └──▸ vkQueuePresentKHR (under queue_mutex) ──▸ Display
 ```
 
+### Data Flow (Vulkan Mixer)
+
+When the **Vulkan mixer** is active, the transfer is simpler — no GL interop is needed. The consumer detects the Vulkan mixer via `dynamic_pointer_cast<texture_wrapper>` on the frame's texture:
+
+```
+CasparCG Mixer (Vulkan, GPU A)
+   │
+   ├─ Same-GPU path (preferred):
+   │   render() produces VkImage + exported platform handle (Win32 HANDLE / fd)
+   │         │
+   │   [present thread]  ensure_render_complete() (fence wait)
+   │                     import_vk_texture(HANDLE) → VkImage on output device
+   │                     vkCmdBlitImage (imported image → swapchain image)
+   │
+   ├─ Cross-GPU CUDA path (import fails → LUID mismatch detected):
+   │   begin_cuda_d2h(HANDLE, src_luid):
+   │     CUDA matches src_luid to a CUDA device index
+   │     cudaImportExternalMemory(HANDLE) → CUDA buffer (GPU A)
+   │     cudaMemcpyAsync (device → host staging buffer)
+   │   complete_cuda_d2h():
+   │     host staging → vkCmdCopyBufferToImage → swapchain image
+   │
+   ├─ CPU fallback path:
+   │   frame.image_data() ──memcpy──▸ staging buffer
+   │                     vkCmdCopyBufferToImage ──▸ swapchain image
+   │
+   └──▸ vkQueuePresentKHR (under queue_mutex) ──▸ Display
+```
+
+The `interop_context`, `shared_texture_pool`, and `gpu_affinity_context` layers are bypassed entirely when the Vulkan mixer is active — they exist only for the OGL→VK bridge.
+
 #### Shared VkDevice and Frame Cache
 
 When multiple consumers target the same GPU (e.g., a 4-output video wall on one GPU), the `vk_device_manager` singleton ensures they all share a single `VkDevice`. This is required for `VK_NV_present_barrier` (which frame-locks swapchains within a device) and avoids the overhead of redundant Vulkan device creation.
 
-The `gpu_frame_cache` deduplicates the OGL→VK frame transfer: the first consumer to call `submit_frame()` for a given frame generation performs the actual blit/transfer, while all other consumers on the same GPU block on a condition variable and receive the result. This means a 4-output setup does one GL blit per frame, not four.
+The `gpu_frame_cache` deduplicates the mixer→output frame transfer: the first consumer to call `submit_frame()` for a given frame generation performs the actual blit/transfer, while all other consumers on the same GPU block on a condition variable and receive the result. This means a 4-output setup does one transfer per frame, not four.
 
-The GL→VK binary semaphore is also tracked per-frame: `try_consume_semaphore()` uses an atomic exchange so only the first consumer's `vkQueueSubmit` waits on the interop semaphore. Subsequent consumers skip the wait, avoiding a binary semaphore double-wait violation.
+The GL→VK binary semaphore (OGL mixer path) is also tracked per-frame: `try_consume_semaphore()` uses an atomic exchange so only the first consumer's `vkQueueSubmit` waits on the interop semaphore. Subsequent consumers skip the wait, avoiding a binary semaphore double-wait violation. The `gpu_frame_cache` then bridges this to a timeline semaphore that all consumers wait on in their `vkQueueSubmit`. The Vulkan mixer path bypasses this entirely — synchronization is handled by `ensure_render_complete()` (fence wait) before the imported image is used.
 
 All `vkQueueSubmit` and `vkQueuePresentKHR` calls are serialized through `vulkan_device::queue_mutex()`, satisfying Vulkan's external synchronization requirement on queue objects.
 
-**Same-GPU zero-copy** eliminates all CPU-side pixel copies. The OGL mixer output is blitted into a shared texture backed by exportable GPU memory (`GL_EXT_memory_object`), which is imported into Vulkan as a `VkImage` via a Win32 `HANDLE`. The blit runs on a dedicated `interop_context` GL thread via `dispatch_sync()`, so the transfer completes before `submit_frame()` returns. Synchronization between the OpenGL and Vulkan timelines uses paired `GL_EXT_semaphore` / `VkSemaphore` objects.
+**Same-GPU zero-copy (OGL mixer)** eliminates all CPU-side pixel copies. The OGL mixer output is blitted into a shared texture backed by exportable GPU memory (`GL_EXT_memory_object`), which is imported into Vulkan as a `VkImage` via a platform handle (Win32 HANDLE on Windows, POSIX fd on Linux). The blit runs on a dedicated `interop_context` GL thread via `dispatch_sync()`, so the transfer completes before `submit_frame()` returns. Synchronization between the OpenGL and Vulkan timelines uses paired `GL_EXT_semaphore` / `VkSemaphore` objects.
 
-**Cross-GPU CUDA peer DMA** uses the GPU's DMA copy engines to transfer pixels directly from GPU A to GPU B over PCIe or NVLink — no CPU involvement. The entire pipeline is fully async with GPU-side event synchronization: `src_ready_event_` signals when the source staging buffer is written, `peer_event_` signals when the peer DMA completes. No CPU sync points exist in the read→peer→write chain (except the final `cudaStreamSynchronize` in `write_dest()` before the GL texture upload). This is the fastest cross-GPU path (~15 GB/s on PCIe 3.0 x16, ~31 GB/s on PCIe 4.0, up to 600 GB/s on NVLink). When matching GPU architectures support P2P, the transfer is a single PCIe hop; otherwise the driver stages through system RAM transparently.
+**Same-GPU zero-copy (Vulkan mixer)** is even simpler: the mixer produces a `VkImage` backed by exportable memory (`VK_KHR_external_memory`). The output consumer calls `ensure_render_complete()` (a GPU fence wait ensuring the render pass is finished), then imports the platform handle as a `VkImage` on the output's device. Since both sides are on the same GPU, the import shares the same physical memory — no copy occurs. The consumer then performs a direct `vkCmdBlitImage` from the imported image into the swapchain image. Imported images are cached (up to 8 slots) to avoid repeated `vkCreateImage` + `vkBindImageMemory` calls as the mixer rotates through its render target pool.
 
-**Cross-GPU PBO fallback** is used when CUDA is unavailable. The mixer's CPU-side pixel buffer (which CasparCG already maintains for non-GPU consumers) is uploaded to GPU B via a double-buffered Pixel Buffer Object on the affinity context's GL thread.
+**Cross-GPU CUDA peer DMA (OGL mixer)** uses the GPU's DMA copy engines to transfer pixels directly from GPU A to GPU B over PCIe or NVLink — no CPU involvement. The entire pipeline is fully async with GPU-side event synchronization: `src_ready_event_` signals when the source staging buffer is written, `peer_event_` signals when the peer DMA completes. No CPU sync points exist in the read→peer→write chain (except the final `cudaStreamSynchronize` in `write_dest()` before the GL texture upload). This is the fastest cross-GPU path (~15 GB/s on PCIe 3.0 x16, ~31 GB/s on PCIe 4.0, up to 600 GB/s on NVLink). When matching GPU architectures support P2P, the transfer is a single PCIe hop; otherwise the driver stages through system RAM transparently.
+
+**Cross-GPU CUDA D2H (Vulkan mixer)** is activated when `import_vk_texture()` fails (indicating the source VkImage is on a different GPU). The consumer imports the mixer's platform handle into CUDA on the source GPU (matched by LUID via `cudaGetDeviceProperties`), performs an async device-to-host copy to a staging buffer, then uploads the staging data to a Vulkan image on the output GPU via `vkCmdCopyBufferToImage`. This path involves a host-memory hop but still uses the GPU's DMA copy engine for the D2H transfer.
+
+**Cross-GPU PBO fallback (OGL mixer)** is used when CUDA is unavailable. The mixer's CPU-side pixel buffer (which CasparCG already maintains for non-GPU consumers) is uploaded to GPU B via a double-buffered Pixel Buffer Object on the affinity context's GL thread.
 
 For HDR workflows, all shared textures are allocated as 16-bit (`RGBA16`) instead of 8-bit (`BGRA8`), preserving the full dynamic range from the mixer through to the display.
 
-The CPU fallback path (direct staging buffer upload to Vulkan) is used when no GL interop is possible, e.g. in multi-vendor GPU setups where neither CUDA nor WGL_NV_gpu_affinity is available.
+The CPU fallback path (direct staging buffer upload to Vulkan) is used when no GL interop is possible, e.g. in multi-vendor GPU setups where neither CUDA nor GPU affinity is available.
+
+### Platform Summary
+
+| Aspect | Windows | Linux |
+|--------|---------|-------|
+| **Display surface** | `VK_EXT_full_screen_exclusive` + Win32 window | `VK_KHR_display` (direct scanout) |
+| **GL context** | WGL (shared context via `wglShareLists`) | EGL (surfaceless shared context) |
+| **External memory** | `GL_EXT_memory_object_win32` / Win32 HANDLE | `GL_EXT_memory_object_fd` / POSIX fd |
+| **External semaphore** | `GL_EXT_semaphore_win32` / Win32 HANDLE | `GL_EXT_semaphore_fd` / POSIX fd |
+| **GPU affinity** | `WGL_NV_gpu_affinity` | `EGL_EXT_device_enumeration` |
+| **CUDA peer transfer** | Same API (cudaMemcpyPeerAsync) | Same API (cudaMemcpyPeerAsync) |
+| **NvAPI (Sync/EDID/HDR)** | Full support | Not available (stubs compiled) |
+| **HDR output** | NvAPI UHDA hardware + `VK_EXT_hdr_metadata` | `VK_EXT_hdr_metadata` only |
+| **Display blanker** | `display_blanker.exe` companion | Not needed (exclusive display) |
+| **Thread naming** | `SetThreadDescription` | `pthread_setname_np` |
+| **Process kill (TDR)** | `TerminateProcess` | `kill(SIGKILL)` |
 
 ---
 
@@ -173,7 +229,7 @@ The module detects the GPU capability tier at runtime and adapts its output stra
 | Tier | Detection | Output Method | Features |
 |------|-----------|---------------|----------|
 | **Pro** | `VK_KHR_display`, or `VK_NV_present_barrier`, or recognized professional GPU name | Direct display mode (if `VK_KHR_display` available) or fullscreen window | VBlank fences, display mode selection, present barriers |
-| **Consumer** | None of the above | Borderless fullscreen window with `VkSurfaceKHR` via Win32 | Basic frame delivery, no VBlank timing |
+| **Consumer** | None of the above | Borderless fullscreen window with `VkSurfaceKHR` via Win32 (Windows only) | Basic frame delivery, no VBlank timing |
 
 **Pro tier** is detected when any of the following is true:
 1. `VK_KHR_display` extension is available and enumerates displays (see caveat below)
@@ -194,9 +250,30 @@ The NVIDIA Windows driver *does* report `VK_KHR_display` as a supported extensio
 
 **Bottom line**: On Windows, the "Pro (direct display)" code path will never be reached. All output goes through `VK_EXT_full_screen_exclusive` + Win32 surfaces.
 
-#### Linux (not currently implemented)
+#### Linux
 
-On **Linux**, `VK_KHR_display` works as intended: when no compositor (X11/Wayland) manages a display, it appears through `vkGetPhysicalDeviceDisplayPropertiesKHR` and can be acquired for direct scanout via DRM/KMS. This is the natural platform for direct display in headless broadcast servers. However, the current module is **Windows-only** (uses Win32 APIs, WGL, NvAPI, `WGL_NV_gpu_affinity`), so this path is not available.
+On **Linux**, `VK_KHR_display` works as intended: when no compositor (X11/Wayland) manages a display, it appears through `vkGetPhysicalDeviceDisplayPropertiesKHR` and can be acquired for direct scanout via DRM/KMS. This is the **primary output path on Linux** — simpler than Windows because there is no compositor to fight.
+
+**Linux platform stack**:
+- **Surface creation**: `VK_KHR_display` direct mode (no windows, no compositor)
+- **GL interop**: EGL shared contexts via `EGL_KHR_surfaceless_context`
+- **External memory**: `GL_EXT_memory_object_fd` / `VK_KHR_external_memory_fd` (POSIX file descriptors)
+- **External semaphores**: `GL_EXT_semaphore_fd` / `VK_KHR_external_semaphore_fd`
+- **GPU affinity**: `EGL_EXT_device_enumeration` + `EGL_EXT_platform_device` (select GPU by DRM render node)
+- **CUDA peer transfer**: Works identically (same CUDA Runtime API)
+- **NvAPI**: Not available — Quadro Sync and EDID injection disabled. HDR via `VK_EXT_hdr_metadata` directly.
+- **Display blanker**: Not needed — `VK_KHR_display` owns the display exclusively
+
+**Requirements for Linux VK_KHR_display**:
+- NVIDIA proprietary driver ≥ 535 (or Mesa for AMD, though untested)
+- The target display must NOT be managed by X11/Wayland (either run headless, or use `xrandr --output DP-X --off` to release it)
+- User must have access to `/dev/dri/card*` (typically via `video` group)
+
+**Advantages over Windows**:
+- True direct scanout — zero compositor overhead
+- No FSE workarounds or DWM fighting
+- No display blanker needed
+- Simpler code path (no Win32 window creation, no FSE state machine)
 
 #### Actual output path used (Windows)
 
@@ -206,12 +283,20 @@ The fullscreen window path uses `VK_EXT_full_screen_exclusive` with `VK_FULL_SCR
 
 **Consumer tier** creates a `WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_APPWINDOW` borderless window covering the target monitor and presents through the standard Vulkan WSI (Window System Integration) path. This still benefits from Vulkan's explicit swapchain control and VSync timing.
 
+#### Actual output path used (Linux)
+
+All Linux deployments use the **"Pro (direct display)"** path:
+
+The module enumerates displays via `vkGetPhysicalDeviceDisplayPropertiesKHR`, selects the target by output index, and creates a `VkSurfaceKHR` directly from the `VkDisplayKHR` handle. No windows or window system is involved. The display is exclusively owned by the Vulkan instance for the duration of output.
+
+This provides true hardware-level scanout with zero compositor overhead, deterministic timing, and full control over display modes (resolution, refresh rate, HDR metadata).
+
 The tier label logged at startup indicates the path used:
 
 ```
-[vulkan_output] ... initialized. Tier: Pro (direct display)   -- VK_KHR_display path (never reached on Windows)
+[vulkan_output] ... initialized. Tier: Pro (direct display)   -- VK_KHR_display path (Linux, or Windows with display released)
 [vulkan_output] ... initialized. Tier: Pro (fullscreen)       -- Pro GPU, fullscreen window (normal Windows path)
-[vulkan_output] ... initialized. Tier: Consumer (fullscreen)  -- Consumer GPU, fullscreen window
+[vulkan_output] ... initialized. Tier: Consumer (fullscreen)  -- Consumer GPU, fullscreen window (Windows only)
 ```
 
 ---
@@ -259,15 +344,15 @@ Field B is skipped — only field A is presented. This matches the behavior of t
 
 ## Multi-GPU Transfer
 
-When the CasparCG OGL mixer runs on a different GPU than the Vulkan output display, the module automatically detects the GPU mismatch (via LUID comparison) and activates the cross-GPU transfer pipeline.
+When the CasparCG mixer runs on a different GPU than the Vulkan output display, the module automatically detects the GPU mismatch (via LUID comparison) and activates the cross-GPU transfer pipeline.
 
 ### Detection
 
 At startup, the module compares the LUID (Locally Unique Identifier) of:
-1. The **OGL device** GPU (where the mixer runs)
-2. The **Vulkan device** GPU (where the display is connected)
+1. The **mixer device** GPU (where the OGL or Vulkan mixer runs)
+2. The **Vulkan output device** GPU (where the display is connected)
 
-If the LUIDs differ, the cross-GPU path is activated. The LUID is queried via `VkPhysicalDeviceIDProperties` on the Vulkan side and via `WGL_NV_gpu_affinity` LUID on the OpenGL side.
+If the LUIDs differ, the cross-GPU path is activated. The LUID is queried via `VkPhysicalDeviceIDProperties` on the Vulkan side and via GPU affinity context LUID (WGL on Windows, EGL device on Linux) or `VkPhysicalDeviceIDProperties` on the mixer side (depending on whether the OGL or Vulkan mixer is active).
 
 ### Transfer Hierarchy
 
@@ -276,7 +361,7 @@ The module tries paths in order of performance:
 | Priority | Path | Bandwidth | CPU Load | Requirements |
 |----------|------|-----------|----------|--------------|
 | 1 | CUDA peer DMA | ~15 GB/s (PCIe 3.0 x16) | Zero | CUDA Toolkit, both NVIDIA GPUs |
-| 2 | PBO upload | ~6 GB/s | Moderate | WGL_NV_gpu_affinity |
+| 2 | PBO upload | ~6 GB/s | Moderate | GPU affinity (WGL or EGL) |
 | 3 | CPU staging | ~3 GB/s | High | None (always available) |
 
 ### CUDA Peer DMA (Preferred)
@@ -311,16 +396,25 @@ When CUDA is not available (no toolkit at build time, or CUDA initialization fai
 2. A double-buffered PBO (Pixel Buffer Object) on the affinity context streams pixels to GPU B
 3. The uploaded texture is blitted into the shared interop pool
 
-This path still avoids blocking the OGL mixer thread. The double-buffered PBO overlaps the upload of frame N with the presentation of frame N-1.
+This path still avoids blocking the mixer thread. The double-buffered PBO overlaps the upload of frame N with the presentation of frame N-1.
 
-### WGL_NV_gpu_affinity
+### GPU Affinity Context
 
-The affinity context is created using the NVIDIA `WGL_NV_gpu_affinity` extension:
+The affinity context creates an OpenGL context pinned to a specific GPU for cross-GPU scenarios:
+
+**Windows** — uses NVIDIA `WGL_NV_gpu_affinity` extension:
 
 1. `wglEnumGpusNV()` enumerates physical GPUs
 2. `wglCreateAffinityDCNV()` creates a device context bound to the target GPU
 3. A full OpenGL 4.5 context is created on this DC with its own dedicated thread
 4. The context's LUID is verified to match the Vulkan device
+
+**Linux** — uses `EGL_EXT_device_enumeration` + `EGL_EXT_platform_device`:
+
+1. `eglQueryDevicesEXT()` enumerates EGL devices (maps to DRM render nodes)
+2. `eglGetPlatformDisplayEXT(EGL_PLATFORM_DEVICE_EXT, device)` creates a display for the target GPU
+3. A surfaceless OpenGL 4.5 core context is created via `eglCreateContext()`
+4. The DRM device path (e.g., `/dev/dri/renderD129`) identifies which GPU is used
 
 This context provides the GL environment needed for both the CUDA interop (GPU B side) and the shared_texture_pool GL operations.
 
@@ -461,14 +555,14 @@ Vulkan Mixer (image_kernel)
     │
     ├── render() produces VkImage + timeline semaphore
     │     └── vkQueueSubmit signals VkSemaphore (timeline, value N)
-    │              └── exports Win32 HANDLE via VK_KHR_external_semaphore_win32
+    │              └── exports platform handle via VK_KHR_external_semaphore_{win32,fd}
     │
     ├── core::texture interface propagates handle + value
-    │     └── frame.texture()->render_complete_semaphore_handle()
-    │     └── frame.texture()->render_complete_semaphore_value()
+    │     └── frame.texture()->render_semaphore_handle()
+    │     └── frame.texture()->render_semaphore_value()
     │
     └── cuda_vk_strategy (DeckLink consumer)
-          ├── cudaImportExternalSemaphore (Win32 HANDLE → CUDA external semaphore)
+          ├── cudaImportExternalSemaphore (platform handle → CUDA external semaphore)
           ├── cudaWaitExternalSemaphoresAsync (GPU-side wait for VK render completion)
           ├── CUDA BGRA→v210 conversion kernel
           ├── cudaMemcpyAsync (device → host, double-buffered)
@@ -479,7 +573,7 @@ Vulkan Mixer (image_kernel)
 
 - **GPU-side semaphore wait**: `cudaWaitExternalSemaphoresAsync` enqueues a GPU-side wait on the CUDA stream — no CPU blocking. The CUDA kernel for v210 conversion starts immediately after the Vulkan render completes on the GPU timeline.
 - **Double-buffered output**: Two device buffers (`d_v210_[0]`, `d_v210_[1]`) and per-buffer `cudaEvent_t` allow pipelining: frame N's D2H transfer overlaps with frame N+1's GPU conversion.
-- **Semaphore handle caching**: A multi-slot cache (`MAX_CACHED_SEMS = 8`) maps Win32 HANDLEs to imported CUDA external semaphores, avoiding repeated `cudaImportExternalSemaphore` calls. The Vulkan mixer rotates through 3-4 `frame_data` slots, each with a unique semaphore handle.
+- **Semaphore handle caching**: A multi-slot cache (`MAX_CACHED_SEMS = 8`) maps platform handles to imported CUDA external semaphores, avoiding repeated `cudaImportExternalSemaphore` calls. The Vulkan mixer rotates through 3-4 `frame_data` slots, each with a unique semaphore handle.
 - **Graceful fallback**: If the frame's texture doesn't provide a semaphore handle (e.g., OGL mixer), the strategy falls back to CPU pixel readback.
 
 ### Performance
@@ -772,6 +866,8 @@ The `display-lost` state is exposed via OSC at `vulkan-output/display-lost`.
 ---
 
 ## Display Blanker
+
+> **Windows only.** On Linux, `VK_KHR_display` acquires the display exclusively — no desktop or compositor content is ever visible on the output. A blanker is not needed.
 
 ### Problem
 
@@ -1354,29 +1450,35 @@ Injects a synthetic EDID matching the channel's video mode. Requires administrat
 
 ## Build Requirements
 
-| Dependency | Required | Purpose |
-|------------|----------|---------|
-| **Vulkan SDK** | Yes | Core Vulkan API, validation layers |
-| **NvAPI SDK** | Optional | EDID readback, hardware HDR (display engine), Quadro Sync II, dedicated display |
-| **CUDA Toolkit** | Optional | GPU-to-GPU peer DMA for cross-GPU transfer |
-| **GLEW** | Yes (via accelerator) | GL extension loading for zero-copy interop |
+| Dependency | Required | Platform | Purpose |
+|------------|----------|----------|---------|
+| **Vulkan SDK** | Yes | Both | Core Vulkan API, validation layers |
+| **NvAPI SDK** | Optional | Windows only | EDID readback, hardware HDR (display engine), Quadro Sync II, dedicated display |
+| **CUDA Toolkit** | Optional | Both | GPU-to-GPU peer DMA for cross-GPU transfer |
+| **GLEW** | Yes (via accelerator) | Both | GL extension loading for zero-copy interop |
+| **EGL** (libEGL-dev) | Yes | Linux only | GL context creation, device enumeration |
+| **DRM** (libdrm-dev) | Optional | Linux only | Display identification in logs |
 
 ### Built Artifacts
 
-| Artifact | Description |
-|----------|-------------|
-| `casparcg.exe` | Main server — includes vulkan_output module |
-| `display_blanker.exe` | Companion tool — display blanking (see [Display Blanker](#display-blanker)) |
+| Artifact | Platform | Description |
+|----------|----------|-------------|
+| `casparcg` / `casparcg.exe` | Both | Main server — includes vulkan_output module |
+| `display_blanker.exe` | Windows only | Companion tool — display blanking (see [Display Blanker](#display-blanker)) |
 
 Both are placed in the `build/shell/` output directory.
 
 ### Vulkan SDK
 
-Set the `VULKAN_SDK` environment variable or install to the default `C:\VulkanSDK\` path. The build system auto-detects the latest version.
+**Windows**: Set the `VULKAN_SDK` environment variable or install to the default `C:\VulkanSDK\` path. The build system auto-detects the latest version.
 
-### NvAPI SDK
+**Linux**: Install the LunarG Vulkan SDK packages (`vulkan-sdk`, `libvulkan-dev`). Standard distro packages also work (e.g., `apt install libvulkan-dev vulkan-validationlayers-dev`).
+
+### NvAPI SDK (Windows only)
 
 Set `NVAPI_SDK_PATH` CMake variable or place the SDK at `D:\Github\nvapi-main`. If not found, the module compiles without `CASPAR_NVAPI_ENABLED` — EDID auto-detection and Quadro Sync features are disabled, but all Vulkan output functionality remains available.
+
+On Linux, NvAPI is not available. The module compiles with stub implementations — all NvAPI-dependent features gracefully report "not available."
 
 ### CUDA Toolkit
 
@@ -1384,23 +1486,58 @@ When CUDA Toolkit is installed (detected via CMake's `find_package(CUDAToolkit)`
 
 If the CUDA Toolkit is not found at build time, the module compiles without CUDA support — multi-GPU still works via the PBO upload fallback path. No runtime error occurs.
 
-Tested with CUDA 12.x. The module uses only CUDA Runtime API (no kernels, no .cu files) so it compiles as standard C++.
+Tested with CUDA 12.x. The module uses only CUDA Runtime API (no kernels, no .cu files) so it compiles as standard C++. Works identically on Windows and Linux.
+
+### Linux Docker Build
+
+A Dockerfile for Linux CI validation is provided:
+
+```bash
+# Compile-only validation (no GPU required):
+docker build --target build-casparcg -f tools/linux/Dockerfile.vulkan-output .
+
+# Full image with runtime dependencies:
+docker build -f tools/linux/Dockerfile.vulkan-output -t casparcg-vulkan .
+```
 
 ### Required Vulkan Extensions
 
 The module requires or uses the following Vulkan extensions:
 
-| Extension | Required | Tier | Purpose |
-|-----------|----------|------|---------|
+| Extension | Required | Platform | Purpose |
+|-----------|----------|----------|---------|
 | `VK_KHR_swapchain` | Yes | Both | Swapchain presentation |
-| `VK_KHR_display` | No | Pro | Direct display mode (bypasses compositor) |
+| `VK_KHR_display` | No | Linux (primary) | Direct display mode (bypasses compositor) |
 | `VK_KHR_surface` | Yes | Both | Surface abstraction |
-| `VK_KHR_win32_surface` | No | Consumer | Win32 window surface |
-| `VK_KHR_external_memory_win32` | No | Both | Zero-copy OGL↔VK shared memory |
-| `VK_KHR_external_semaphore_win32` | No | Both | Zero-copy synchronization |
-| `VK_NV_present_barrier` | No | Pro | Multi-output frame-lock |
+| `VK_KHR_win32_surface` | No | Windows | Win32 window surface |
+| `VK_KHR_external_memory_win32` | No | Windows | Zero-copy OGL↔VK shared memory |
+| `VK_KHR_external_memory_fd` | No | Linux | Zero-copy OGL↔VK shared memory |
+| `VK_KHR_external_semaphore_win32` | No | Windows | Zero-copy synchronization |
+| `VK_KHR_external_semaphore_fd` | No | Linux | Zero-copy synchronization |
+| `VK_NV_present_barrier` | No | Both | Multi-output frame-lock |
 | `VK_EXT_hdr_metadata` | No | Both | HDR static metadata |
-| `VK_EXT_display_control` | No | Pro | VBlank fence timing |
+| `VK_EXT_display_control` | No | Both | VBlank fence timing |
+| `VK_EXT_full_screen_exclusive` | No | Windows | FSE hint for DWM bypass |
+
+---
+
+## Linux Testing
+
+For detailed Linux testing procedures, see [`src/modules/vulkan_output/LINUX_TESTING.md`](../src/modules/vulkan_output/LINUX_TESTING.md).
+
+**Quick start on Linux:**
+
+1. Ensure NVIDIA driver ≥ 535 is installed
+2. Release the target display from the compositor: `xrandr --output DP-X --off`
+3. Verify displays are visible to Vulkan: `vulkaninfo | grep displayProperties`
+4. Start CasparCG: `./casparcg --log-level debug`
+5. Add output: `ADD 1 vulkan_output 1`
+
+**Key differences from Windows deployment:**
+- No FSE window or blanker needed — `VK_KHR_display` provides exclusive access
+- First-time setup requires releasing the display from X11/Wayland
+- HDR uses `VK_EXT_hdr_metadata` directly (no NvAPI hardware path)
+- Quadro Sync II framelock is not available
 
 ---
 

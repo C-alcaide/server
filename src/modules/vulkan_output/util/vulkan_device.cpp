@@ -18,6 +18,7 @@
  */
 
 #include "vulkan_device.h"
+#include "platform_handles.h"
 
 #include <common/except.h>
 #include <common/log.h>
@@ -161,6 +162,7 @@ vulkan_device::~vulkan_device()
 
 void vulkan_device::create_instance()
 {
+#ifdef _WIN32
     // ── Filter stale Vulkan ICDs ─────────────────────────────────────────
     // After a driver upgrade, old driver entries may remain in the Windows
     // DriverStore. The Vulkan loader discovers ALL ICD JSON files and
@@ -224,6 +226,7 @@ void vulkan_device::create_instance()
             }
         });
     }
+#endif // _WIN32
 
     VkApplicationInfo app_info{};
     app_info.sType              = VK_STRUCTURE_TYPE_APPLICATION_INFO;
@@ -235,7 +238,9 @@ void vulkan_device::create_instance()
 
     std::vector<const char*> desired_extensions = {
         VK_KHR_SURFACE_EXTENSION_NAME,
+#ifdef _WIN32
         VK_KHR_WIN32_SURFACE_EXTENSION_NAME,
+#endif
         VK_KHR_DISPLAY_EXTENSION_NAME,
         VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME,
         VK_KHR_EXTERNAL_MEMORY_CAPABILITIES_EXTENSION_NAME,
@@ -332,9 +337,11 @@ void vulkan_device::select_physical_device(int gpu_index)
     for (const auto& ext : ext_props) {
         if (strcmp(ext.extensionName, VK_KHR_DISPLAY_EXTENSION_NAME) == 0)
             has_display = true;
+#ifdef _WIN32
         if (strcmp(ext.extensionName, VK_EXT_FULL_SCREEN_EXCLUSIVE_EXTENSION_NAME) == 0)
             has_fse = true;
-        if (strcmp(ext.extensionName, VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME) == 0)
+#endif
+        if (strcmp(ext.extensionName, platform::kVkExternalMemoryExtName) == 0)
             has_ext_mem = true;
         if (strcmp(ext.extensionName, VK_NV_PRESENT_BARRIER_EXTENSION_NAME) == 0)
             has_present_barrier = true;
@@ -429,9 +436,9 @@ void vulkan_device::create_logical_device()
     // Extensions we want but can survive without
     std::vector<const char*> desired_device_exts = {
         VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME,
-        VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME,
+        platform::kVkExternalMemoryExtName,
         VK_KHR_EXTERNAL_SEMAPHORE_EXTENSION_NAME,
-        VK_KHR_EXTERNAL_SEMAPHORE_WIN32_EXTENSION_NAME,
+        platform::kVkExternalSemExtName,
         VK_EXT_HDR_METADATA_EXTENSION_NAME,
         VK_KHR_GLOBAL_PRIORITY_EXTENSION_NAME,
     };
@@ -440,7 +447,9 @@ void vulkan_device::create_logical_device()
     // (DWM never releases displays, so vkGetPhysicalDeviceDisplayPropertiesKHR
     // returns zero displays regardless of GPU). Application-controlled FSE
     // bypasses DWM composition for direct scanout on all tiers.
+#ifdef _WIN32
     desired_device_exts.push_back(VK_EXT_FULL_SCREEN_EXCLUSIVE_EXTENSION_NAME);
+#endif
 
     // Check and add optional extensions if available
     {
@@ -648,6 +657,7 @@ VkSurfaceKHR vulkan_device::create_display_surface(const display_info& info, uin
     return surface;
 }
 
+#ifdef _WIN32
 VkSurfaceKHR vulkan_device::create_win32_surface(HWND hwnd)
 {
     VkWin32SurfaceCreateInfoKHR surface_info{};
@@ -660,6 +670,7 @@ VkSurfaceKHR vulkan_device::create_win32_surface(HWND hwnd)
 
     return surface;
 }
+#endif // _WIN32
 
 bool vulkan_device::has_extension(const char* name) const
 {
@@ -796,8 +807,10 @@ std::vector<display_info> vulkan_device::enumerate_displays()
         for (const auto& ext : ext_props) {
             if (strcmp(ext.extensionName, VK_KHR_DISPLAY_EXTENSION_NAME) == 0)
                 has_display = true;
+#ifdef _WIN32
             if (strcmp(ext.extensionName, VK_EXT_FULL_SCREEN_EXCLUSIVE_EXTENSION_NAME) == 0)
                 has_fse = true;
+#endif
             if (strcmp(ext.extensionName, VK_NV_PRESENT_BARRIER_EXTENSION_NAME) == 0)
                 has_present_barrier = true;
         }

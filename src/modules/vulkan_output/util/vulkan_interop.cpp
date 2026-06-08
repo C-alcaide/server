@@ -19,9 +19,14 @@
 
 #include "vulkan_interop.h"
 #include "vulkan_device.h"
+#include "platform_handles.h"
 
 #include <common/except.h>
 #include <common/log.h>
+
+#ifndef _WIN32
+#include <unistd.h>
+#endif
 
 namespace caspar { namespace vulkan_output {
 
@@ -55,18 +60,25 @@ vulkan_interop::~vulkan_interop()
         vkDestroyImage(dev, image_, nullptr);
     if (memory_ != VK_NULL_HANDLE)
         vkFreeMemory(dev, memory_, nullptr);
+#ifdef _WIN32
     if (shared_handle_)
         CloseHandle(shared_handle_);
+#else
+    if (shared_handle_ != platform::kInvalidHandle) {
+        close(shared_handle_);
+        shared_handle_ = platform::kInvalidHandle;
+    }
+#endif
 }
 
-void vulkan_interop::import_from_handle(HANDLE handle)
+void vulkan_interop::import_from_handle(platform::native_handle_t handle)
 {
     shared_handle_ = handle;
 
     // Create VkImage with external memory
     VkExternalMemoryImageCreateInfo ext_mem_info{};
     ext_mem_info.sType       = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO;
-    ext_mem_info.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+    ext_mem_info.handleTypes = platform::kExternalMemoryHandleType;
 
     VkImageCreateInfo image_info{};
     image_info.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -88,11 +100,18 @@ void vulkan_interop::import_from_handle(HANDLE handle)
     VkMemoryRequirements mem_reqs;
     vkGetImageMemoryRequirements(device_.device(), image_, &mem_reqs);
 
-    // Import the Win32 handle as device memory
+    // Import the platform handle as device memory
+#ifdef _WIN32
     VkImportMemoryWin32HandleInfoKHR import_info{};
     import_info.sType      = VK_STRUCTURE_TYPE_IMPORT_MEMORY_WIN32_HANDLE_INFO_KHR;
-    import_info.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+    import_info.handleType = platform::kExternalMemoryHandleType;
     import_info.handle     = handle;
+#else
+    VkImportMemoryFdInfoKHR import_info{};
+    import_info.sType      = VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR;
+    import_info.handleType = platform::kExternalMemoryHandleType;
+    import_info.fd         = handle;
+#endif
 
     // Find a suitable memory type
     VkPhysicalDeviceMemoryProperties mem_props;

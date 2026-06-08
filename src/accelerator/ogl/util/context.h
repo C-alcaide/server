@@ -17,8 +17,11 @@ class device_context final
     void bind();
     void unbind();
 
-    /// Return the platform-native GL context handle (HGLRC on Windows, nullptr elsewhere).
+    /// Return the platform-native GL context handle (HGLRC on Windows, EGLContext on Linux).
     void* native_handle() const;
+
+    /// Return the EGL display handle (Linux only, nullptr on Windows).
+    void* native_egl_display() const;
 
     struct impl;
 

@@ -9,10 +9,13 @@
 
 #pragma once
 
+#ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <Windows.h>
+#endif
+
 #include <GL/glew.h>
 
 #include <atomic>
@@ -28,7 +31,11 @@
 namespace caspar { namespace vulkan_output {
 
 /**
- * Creates an OpenGL context bound to a specific GPU via WGL_NV_gpu_affinity.
+ * Creates an OpenGL context bound to a specific GPU.
+ *
+ * Windows: Uses WGL_NV_gpu_affinity to create a DC pinned to a specific GPU.
+ * Linux:   Uses EGL_EXT_device_enumeration + EGL_EXT_platform_device to create
+ *          an EGLDisplay/context bound to a specific DRM render node.
  *
  * This enables zero-copy OGL→VK interop on multi-GPU systems where the main
  * CasparCG OGL mixer runs on GPU 0 but outputs are connected to GPU 1+.
@@ -46,7 +53,7 @@ class gpu_affinity_context
 {
   public:
     /// Creates an affinity OGL context on the specified GPU.
-    /// Throws if WGL_NV_gpu_affinity is unavailable or gpu_index is invalid.
+    /// Throws if GPU affinity is unavailable or gpu_index is invalid.
     explicit gpu_affinity_context(int gpu_index, int width, int height);
     ~gpu_affinity_context();
 
@@ -141,9 +148,15 @@ class gpu_affinity_context
     uint8_t device_luid_[8]    = {};
     bool    device_luid_valid_ = false;
 
+#ifdef _WIN32
     // Win32 handles
     HDC   affinity_dc_  = nullptr;
     HGLRC affinity_rc_  = nullptr;
+#else
+    // EGL handles (Linux)
+    void* egl_display_  = nullptr; // EGLDisplay
+    void* egl_context_  = nullptr; // EGLContext
+#endif
 
     // Thread management
     std::thread              thread_;

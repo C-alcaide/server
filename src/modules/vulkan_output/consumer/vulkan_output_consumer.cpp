@@ -56,7 +56,13 @@
 
 #include <boost/algorithm/string.hpp>
 
+#ifdef _WIN32
 #include <dwmapi.h>
+#else
+#include <pthread.h>
+#include <signal.h>
+#include <unistd.h>
+#endif
 
 #include <chrono>
 #include <condition_variable>
@@ -72,6 +78,20 @@
 namespace caspar { namespace vulkan_output {
 
 namespace {
+
+// ─── Cross-platform thread naming ───────────────────────────────────────
+inline void set_thread_name([[maybe_unused]] const wchar_t* name)
+{
+#ifdef _WIN32
+    SetThreadDescription(GetCurrentThread(), name);
+#else
+    // pthread_setname_np is limited to 16 chars including null terminator
+    char narrow[16];
+    wcstombs(narrow, name, sizeof(narrow) - 1);
+    narrow[15] = '\0';
+    pthread_setname_np(pthread_self(), narrow);
+#endif
+}
 
 // ─── Swapchain management ───────────────────────────────────────────────
 
@@ -125,14 +145,18 @@ void start_tdr_watchdog(int grace_seconds = 10)
 {
     std::call_once(tdr_watchdog_flag, [grace_seconds] {
         std::thread([grace_seconds] {
-            SetThreadDescription(GetCurrentThread(), L"TDR Watchdog");
+            set_thread_name(L"TDR Watchdog");
             CASPAR_LOG(error) << L"[vulkan_output] TDR detected — process will be forcefully terminated in "
                               << grace_seconds << L" seconds if shutdown does not complete.";
             std::this_thread::sleep_for(std::chrono::seconds(grace_seconds));
             CASPAR_LOG(fatal) << L"[vulkan_output] TDR watchdog: clean shutdown did not complete in "
-                              << grace_seconds << L"s — calling TerminateProcess to prevent zombie.";
+                              << grace_seconds << L"s — forcefully terminating process.";
             boost::log::core::get()->flush();
+#ifdef _WIN32
             TerminateProcess(GetCurrentProcess(), 1);
+#else
+            kill(getpid(), SIGKILL);
+#endif
         }).detach();
     });
 }
@@ -155,6 +179,7 @@ class vulkan_output_consumer : public core::frame_consumer
     // NOTE: We use thread-level DPI awareness only (not process-level) to avoid
     // interfering with OpenGL contexts — the NVIDIA OGL driver (nvoglv64.dll)
     // crashes with 0xc0000409 when process-level DPI awareness changes under it.
+#ifdef _WIN32
     static DPI_AWARENESS_CONTEXT set_thread_dpi_awareness()
     {
         using SetThreadDpiAwarenessContextFn = DPI_AWARENESS_CONTEXT(WINAPI*)(DPI_AWARENESS_CONTEXT);
@@ -174,6 +199,10 @@ class vulkan_output_consumer : public core::frame_consumer
         if (fn)
             fn(prev);
     }
+#else
+    static void* set_thread_dpi_awareness() { return nullptr; }
+    static void restore_thread_dpi_awareness(void*) {}
+#endif
 
     ~vulkan_output_consumer() override
     {
@@ -416,6 +445,7 @@ class vulkan_output_consumer : public core::frame_consumer
         }
 
         if (!found) {
+#ifdef _WIN32
             // Pro GPU without VK_KHR_display (e.g. RTX A-series on Windows desktop mode),
             // or consumer GPU: use FSE window path.
             // EDID emulation: inject synthetic EDID if the target output has no monitor
@@ -439,9 +469,19 @@ class vulkan_output_consumer : public core::frame_consumer
             if (config_.display_blanker)
                 launch_display_blanker();
             create_fse_window();
+#else
+            // On Linux, VK_KHR_display is the only output path.
+            // If no displays were found, the GPU has no connected monitors.
+            CASPAR_THROW_EXCEPTION(caspar_exception()
+                                   << msg_info("No VK_KHR_display outputs found on GPU "
+                                               + std::to_string(config_.gpu_index)
+                                               + " output " + std::to_string(config_.output_index)
+                                               + ". Ensure a display is connected and not managed by X11/Wayland."));
+#endif
         }
 
         // Create surface
+#ifdef _WIN32
         if (adapter_mismatch_) {
             CASPAR_LOG(warning) << print()
                                 << L" Display is on a non-NVIDIA adapter (e.g. IddCx/VDD). "
@@ -455,6 +495,14 @@ class vulkan_output_consumer : public core::frame_consumer
         } else if (fse_hwnd_) {
             swapchain_.surface = device_->create_win32_surface(fse_hwnd_);
         }
+#else
+        // Linux: always use VK_KHR_display (the only path)
+        {
+            uint32_t refresh_mhz = static_cast<uint32_t>(format_desc_.fps * 1000.0 + 0.5);
+            swapchain_.surface = device_->create_display_surface(target, refresh_mhz);
+            display_handle_ = target.display_handle;
+        }
+#endif
 
         if (!adapter_mismatch_) {
             setup_nvapi();           // EDID auto-detect + hardware HDR probe (before swapchain for format selection)
@@ -542,7 +590,7 @@ class vulkan_output_consumer : public core::frame_consumer
         // see where the present thread is wedged without spamming the log
         // when frames are flowing.
         watchdog_thread_ = std::thread([this] {
-            SetThreadDescription(GetCurrentThread(), L"VK Present Watchdog");
+            set_thread_name(L"VK Present Watchdog");
             uint64_t last_submits = 0;
             while (running_) {
                 std::this_thread::sleep_for(std::chrono::seconds(1));
@@ -640,6 +688,7 @@ class vulkan_output_consumer : public core::frame_consumer
         // the display, and revokes it on focus loss — transparent to the app.
         VkSurfaceFullScreenExclusiveInfoEXT fse_info{};
         bool fse_chained = false;
+#ifdef _WIN32
         if (fse_hwnd_ && device_->has_extension(VK_EXT_FULL_SCREEN_EXCLUSIVE_EXTENSION_NAME)) {
             fse_info.sType               = VK_STRUCTURE_TYPE_SURFACE_FULL_SCREEN_EXCLUSIVE_INFO_EXT;
             fse_info.pNext               = const_cast<void*>(create_info.pNext);
@@ -647,6 +696,7 @@ class vulkan_output_consumer : public core::frame_consumer
             create_info.pNext            = &fse_info;
             fse_chained = true;
         }
+#endif
 
         auto result = vkCreateSwapchainKHR(device_->device(), &create_info, nullptr, &swapchain_.swapchain);
         if (result != VK_SUCCESS) {
@@ -934,7 +984,7 @@ class vulkan_output_consumer : public core::frame_consumer
 
     void present_loop()
     {
-        SetThreadDescription(GetCurrentThread(), L"Vulkan Present");
+        set_thread_name(L"Vulkan Present");
         set_thread_dpi_awareness(); // Ensure physical pixel coordinates for VK surface queries
 
         // ── Startup gate: wait until ALL consumers on this GPU have finished
@@ -1149,6 +1199,7 @@ class vulkan_output_consumer : public core::frame_consumer
 
     void try_acquire_fse()
     {
+#ifdef _WIN32
         if (fse_acquired_ || !fse_hwnd_ || !swapchain_.swapchain)
             return;
         if (!device_->has_extension(VK_EXT_FULL_SCREEN_EXCLUSIVE_EXTENSION_NAME))
@@ -1165,10 +1216,12 @@ class vulkan_output_consumer : public core::frame_consumer
             CASPAR_LOG(info) << print() << L" Full-screen exclusive re-acquired.";
         }
         // Silently ignore failure — will retry next frame
+#endif
     }
 
     void release_fse(VkSwapchainKHR sc)
     {
+#ifdef _WIN32
         if (!fse_acquired_ || sc == VK_NULL_HANDLE)
             return;
 
@@ -1178,6 +1231,7 @@ class vulkan_output_consumer : public core::frame_consumer
             vkReleaseFSE(device_->device(), sc);
         }
         fse_acquired_ = false;
+#endif
     }
 
     void recreate_swapchain()
@@ -1262,9 +1316,11 @@ class vulkan_output_consumer : public core::frame_consumer
             return;
 
         if (device_dead_) {
+#ifdef _WIN32
             if (adapter_mismatch_ && fse_hwnd_) {
                 present_frame_gdi(frame);
             }
+#endif
             return;
         }
 
@@ -2014,6 +2070,7 @@ class vulkan_output_consumer : public core::frame_consumer
         }
     }
 
+#ifdef _WIN32
     void present_frame_gdi(const core::const_frame& frame)
     {
         // GDI fallback for indirect displays (IddCx/VDD) that don't expose DXGI outputs.
@@ -2076,6 +2133,7 @@ class vulkan_output_consumer : public core::frame_consumer
                 debug_frame_format_ = 0; // BGRA8
         }
     }
+#endif // _WIN32
 
     // ─── VK-native import cache ─────────────────────────────────────────────
     // When the mixer is Vulkan, we import the mixer's render attachment memory
@@ -2926,6 +2984,7 @@ class vulkan_output_consumer : public core::frame_consumer
                                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
     }
 
+#ifdef _WIN32
     // Custom window procedure that ignores WM_CLOSE/WM_SYSCOMMAND SC_CLOSE
     // to prevent DefWindowProcW from destroying our FSE window unexpectedly (use-after-free)
     static LRESULT CALLBACK fse_wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
@@ -3334,6 +3393,7 @@ class vulkan_output_consumer : public core::frame_consumer
 
         fse_hwnd_ = hwnd_future.get();
     }
+#endif // _WIN32
 
     void destroy_resources()
     {
@@ -3508,6 +3568,7 @@ class vulkan_output_consumer : public core::frame_consumer
 
         nvapi_.reset();
 
+#ifdef _WIN32
         if (fse_hwnd_) {
             // Signal message thread to stop, then post WM_NULL to wake MsgWait.
             // The message thread owns the window and calls DestroyWindow before exiting
@@ -3519,6 +3580,7 @@ class vulkan_output_consumer : public core::frame_consumer
             fse_hwnd_ = nullptr;
             UnregisterClassW(L"CasparVulkanOutput", GetModuleHandle(nullptr));
         }
+#endif
     }
 
     // NOTE: config_ is read without mutex on the present thread for performance.
@@ -3538,7 +3600,9 @@ class vulkan_output_consumer : public core::frame_consumer
     std::unique_ptr<nvapi_helpers>   nvapi_;
     std::unique_ptr<color_convert_pipeline> color_pipeline_; // Color space conversion (compute)
     swapchain_resources              swapchain_{};
+#ifdef _WIN32
     HWND                             fse_hwnd_ = nullptr;
+#endif
     VkDisplayKHR                     display_handle_ = VK_NULL_HANDLE;
     uint32_t                         my_queue_idx_ = 0; // Exclusive queue for this consumer
     VkQueue                          my_queue_ = VK_NULL_HANDLE;
@@ -3553,14 +3617,16 @@ class vulkan_output_consumer : public core::frame_consumer
     std::atomic<bool>                running_{false};
     std::atomic<bool>                gate_open_{false}; // True once all peers on this GPU are ready
 
+#ifdef _WIN32
     // FSE window message thread
     std::thread                      fse_msg_thread_;
     std::atomic<bool>                fse_msg_running_{true};
+#endif
 
     // Display hot-plug
     std::atomic<bool>                display_lost_{false};
     std::atomic<bool>                device_dead_{false}; // TDR — device permanently invalid
-    bool                             adapter_mismatch_{false}; // Display on different GPU — no Vulkan presentation
+    bool                             adapter_mismatch_{false}; // Display on different GPU — no Vulkan presentation (Windows only)
     uint64_t                         hotplug_retry_counter_ = 0;
     std::atomic<uint64_t>                frames_presented_{0};
     std::atomic<uint64_t>                frame_generation_{0};  // Monotonic counter for frame cache coordination
@@ -3568,7 +3634,7 @@ class vulkan_output_consumer : public core::frame_consumer
     // Present barrier
     bool                             present_barrier_enabled_ = false;
     std::shared_ptr<void>            sync_group_token_;  // Software present barrier membership
-    bool                             fse_acquired_ = false; // VK_EXT_full_screen_exclusive acquired
+    bool                             fse_acquired_ = false; // VK_EXT_full_screen_exclusive acquired (Windows only)
 
     // Hardware HDR (NvAPI display engine)
     uint32_t                         nvapi_display_id_ = 0;  // NvAPI display ID for this output

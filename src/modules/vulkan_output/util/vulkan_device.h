@@ -19,8 +19,7 @@
 
 #pragma once
 
-#define VK_USE_PLATFORM_WIN32_KHR
-#include <vulkan/vulkan.h>
+#include "platform_handles.h"
 
 #include <atomic>
 #include <memory>
@@ -86,7 +85,9 @@ class vulkan_device
 
     // Surface + swapchain creation
     VkSurfaceKHR create_display_surface(const display_info& info, uint32_t target_refresh_mhz = 0);
+#ifdef _WIN32
     VkSurfaceKHR create_win32_surface(HWND hwnd);
+#endif
 
     // Check if a device extension is enabled
     bool has_extension(const char* name) const;

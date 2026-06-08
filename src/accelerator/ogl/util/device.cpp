@@ -414,6 +414,7 @@ std::future<array<const uint8_t>> device::copy_async(const std::shared_ptr<textu
 void device::dispatch(std::function<void()> func) { boost::asio::dispatch(impl_->io_context_, std::move(func)); }
 std::wstring                 device::version() const { return impl_->version(); }
 void*                        device::native_gl_context() const { return impl_->context_->native_handle(); }
+void*                        device::native_egl_display() const { return impl_->context_->native_egl_display(); }
 boost::property_tree::wptree device::info() const { return impl_->info(); }
 std::future<void>            device::gc() { return impl_->gc(); }
 }}} // namespace caspar::accelerator::ogl

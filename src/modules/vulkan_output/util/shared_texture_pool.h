@@ -19,10 +19,7 @@
 
 #pragma once
 
-#define VK_USE_PLATFORM_WIN32_KHR
-#include <vulkan/vulkan.h>
-
-#include <GL/glew.h>
+#include "platform_handles.h"
 
 #include <atomic>
 #include <cstdint>
@@ -110,8 +107,8 @@ class shared_texture_pool
         VkSemaphore    vk_semaphore  = VK_NULL_HANDLE;
 
         // Shared handles
-        HANDLE memory_handle    = nullptr;
-        HANDLE semaphore_handle = nullptr;
+        platform::native_handle_t memory_handle    = platform::kInvalidHandle;
+        platform::native_handle_t semaphore_handle = platform::kInvalidHandle;
     };
 
     void create_slot(slot& s);

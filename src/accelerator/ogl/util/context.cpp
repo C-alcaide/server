@@ -29,6 +29,7 @@ struct device_context::impl
     virtual void bind()   = 0;
     virtual void unbind() = 0;
     virtual void* native_handle() const { return nullptr; }
+    virtual void* native_egl_display() const { return nullptr; }
 };
 struct impl_sfml : public device_context::impl
 {
@@ -138,6 +139,8 @@ struct impl_egl : public device_context::impl
 
     virtual void bind() override { eglMakeCurrent(eglDisplay_, EGL_NO_SURFACE, EGL_NO_SURFACE, eglContext_); }
     virtual void unbind() override { eglMakeCurrent(eglDisplay_, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT); }
+    virtual void* native_handle() const override { return eglContext_; }
+    virtual void* native_egl_display() const override { return eglDisplay_; }
 };
 #endif
 
@@ -159,5 +162,6 @@ device_context::~device_context() {}
 void device_context::bind() { impl_->bind(); }
 void device_context::unbind() { impl_->unbind(); }
 void* device_context::native_handle() const { return impl_->native_handle(); }
+void* device_context::native_egl_display() const { return impl_->native_egl_display(); }
 
 } // namespace caspar::accelerator::ogl

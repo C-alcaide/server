@@ -33,6 +33,14 @@
 #include <common/log.h>
 
 #include <GL/glew.h>
+#ifdef _WIN32
+#include <GL/wglew.h>
+#else
+#include <EGL/egl.h>
+#include <pthread.h>
+#include <signal.h>
+#include <unistd.h>
+#endif
 
 #include <cstdio>
 #include <cstdlib>
@@ -117,8 +125,13 @@ gpu_frame_cache::gpu_frame_cache(
         bool    ogl_luid_valid = false;
         std::string ogl_renderer;
         ogl_device->dispatch_sync([&] {
+#ifdef _WIN32
             auto glGetUnsignedBytevEXT = reinterpret_cast<void(APIENTRY*)(GLenum, GLubyte*)>(
                 wglGetProcAddress("glGetUnsignedBytevEXT"));
+#else
+            auto glGetUnsignedBytevEXT = reinterpret_cast<void(*)(GLenum, GLubyte*)>(
+                eglGetProcAddress("glGetUnsignedBytevEXT"));
+#endif
             if (glGetUnsignedBytevEXT) {
                 glGetUnsignedBytevEXT(0x9462 /*GL_DEVICE_LUID_EXT*/, ogl_luid);
                 ogl_luid_valid = true;
@@ -295,9 +308,13 @@ gpu_frame_cache::~gpu_frame_cache()
             });
             if (idle_future.wait_for(std::chrono::seconds(2)) == std::future_status::timeout) {
                 CASPAR_LOG(fatal) << L"[vulkan] Frame cache coordinator vkQueueWaitIdle timed out (2s). "
-                                  << L"GPU subsystem wedged — calling TerminateProcess to prevent WDDM kernel deadlock.";
+                                  << L"GPU subsystem wedged — forcefully terminating process.";
                 boost::log::core::get()->flush();
+#ifdef _WIN32
                 ::TerminateProcess(::GetCurrentProcess(), 0);
+#else
+                kill(getpid(), SIGKILL);
+#endif
             } else {
                 idle_future.get(); // Collect result (may throw on device lost — caught below)
                 vkDestroySemaphore(device_->device(), timeline_sem_, nullptr);
@@ -380,7 +397,11 @@ uint64_t gpu_frame_cache::notify_frame(uint64_t generation, std::function<void()
 
 void gpu_frame_cache::pump_loop()
 {
+#ifdef _WIN32
     SetThreadDescription(GetCurrentThread(), L"VK Frame Pump");
+#else
+    pthread_setname_np(pthread_self(), "VK Frame Pump");
+#endif
 
     while (pump_running_) {
         pump_work work{};

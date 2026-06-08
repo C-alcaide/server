@@ -29,7 +29,7 @@
 #include <queue>
 #include <thread>
 
-#define VK_USE_PLATFORM_WIN32_KHR
+#include "platform_handles.h"
 #include <vulkan/vulkan.h>
 
 namespace caspar { namespace accelerator { namespace ogl {

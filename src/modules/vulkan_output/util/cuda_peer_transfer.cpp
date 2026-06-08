@@ -15,6 +15,11 @@
 #include <common/except.h>
 
 #include <GL/glew.h>
+#ifdef _WIN32
+#include <GL/wglew.h>
+#else
+#include <EGL/egl.h>
+#endif
 #include <cuda_runtime.h>
 #include <cuda_gl_interop.h>
 
@@ -162,7 +167,12 @@ cuda_peer_transfer::~cuda_peer_transfer()
     }
 
     // Delete destination GL resources (requires GPU B's GL context to be current)
-    if (wglGetCurrentContext() != nullptr) {
+#ifdef _WIN32
+    bool has_gl_context = (wglGetCurrentContext() != nullptr);
+#else
+    bool has_gl_context = (eglGetCurrentContext() != EGL_NO_CONTEXT);
+#endif
+    if (has_gl_context) {
         if (dest_pbo_)
             glDeleteBuffers(1, &dest_pbo_);
         if (dest_gl_texture_)

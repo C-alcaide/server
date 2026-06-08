@@ -19,6 +19,7 @@
 
 #include "shared_texture_pool.h"
 #include "vulkan_device.h"
+#include "platform_handles.h"
 
 #include <accelerator/ogl/util/device.h>
 
@@ -27,7 +28,12 @@
 #include <common/log.h>
 
 #include <GL/glew.h>
+#ifdef _WIN32
 #include <GL/wglew.h>
+#else
+#include <EGL/egl.h>
+#include <unistd.h> // close()
+#endif
 
 #include <algorithm>
 
@@ -46,35 +52,58 @@ namespace {
         }                                                                                                              \
     } while (0)
 
-// GL_EXT_memory_object / GL_EXT_memory_object_win32 function pointers
+// GL_EXT_memory_object / GL_EXT_memory_object_{win32,fd} function pointers
 PFNGLCREATEMEMORYOBJECTSEXTPROC        glCreateMemoryObjectsEXT_       = nullptr;
 PFNGLDELETEMEMORYOBJECTSEXTPROC        glDeleteMemoryObjectsEXT_       = nullptr;
-PFNGLIMPORTMEMORYWIN32HANDLEEXTPROC    glImportMemoryWin32HandleEXT_   = nullptr;
 PFNGLTEXTURESTORAGEMEM2DEXTPROC        glTextureStorageMem2DEXT_       = nullptr;
+#ifdef _WIN32
+PFNGLIMPORTMEMORYWIN32HANDLEEXTPROC    glImportMemoryWin32HandleEXT_   = nullptr;
+#else
+PFNGLIMPORTMEMORYFDEXTPROC             glImportMemoryFdEXT_            = nullptr;
+#endif
 
-// GL_EXT_semaphore / GL_EXT_semaphore_win32 function pointers
+// GL_EXT_semaphore / GL_EXT_semaphore_{win32,fd} function pointers
 PFNGLGENSEMAPHORESEXTPROC              glGenSemaphoresEXT_             = nullptr;
 PFNGLDELETESEMAPHORESEXTPROC           glDeleteSemaphoresEXT_          = nullptr;
-PFNGLIMPORTSEMAPHOREWIN32HANDLEEXTPROC glImportSemaphoreWin32HandleEXT_ = nullptr;
 PFNGLSIGNALSEMAPHOREEXTPROC            glSignalSemaphoreEXT_           = nullptr;
 PFNGLWAITSEMAPHOREEXTPROC              glWaitSemaphoreEXT_             = nullptr;
+#ifdef _WIN32
+PFNGLIMPORTSEMAPHOREWIN32HANDLEEXTPROC glImportSemaphoreWin32HandleEXT_ = nullptr;
+#else
+PFNGLIMPORTSEMAPHOREFDEXTPROC          glImportSemaphoreFdEXT_         = nullptr;
+#endif
 
 std::once_flag gl_ext_flag;
 
 void load_gl_extensions()
 {
     std::call_once(gl_ext_flag, [] {
-        glCreateMemoryObjectsEXT_      = (PFNGLCREATEMEMORYOBJECTSEXTPROC)wglGetProcAddress("glCreateMemoryObjectsEXT");
-        glDeleteMemoryObjectsEXT_      = (PFNGLDELETEMEMORYOBJECTSEXTPROC)wglGetProcAddress("glDeleteMemoryObjectsEXT");
-        glImportMemoryWin32HandleEXT_  = (PFNGLIMPORTMEMORYWIN32HANDLEEXTPROC)wglGetProcAddress("glImportMemoryWin32HandleEXT");
-        glTextureStorageMem2DEXT_      = (PFNGLTEXTURESTORAGEMEM2DEXTPROC)wglGetProcAddress("glTextureStorageMem2DEXT");
+#ifdef _WIN32
+        auto get_proc = [](const char* name) { return (void*)wglGetProcAddress(name); };
+#else
+        auto get_proc = [](const char* name) { return (void*)eglGetProcAddress(name); };
+#endif
 
-        glGenSemaphoresEXT_             = (PFNGLGENSEMAPHORESEXTPROC)wglGetProcAddress("glGenSemaphoresEXT");
-        glDeleteSemaphoresEXT_          = (PFNGLDELETESEMAPHORESEXTPROC)wglGetProcAddress("glDeleteSemaphoresEXT");
-        glImportSemaphoreWin32HandleEXT_ = (PFNGLIMPORTSEMAPHOREWIN32HANDLEEXTPROC)wglGetProcAddress("glImportSemaphoreWin32HandleEXT");
-        glSignalSemaphoreEXT_           = (PFNGLSIGNALSEMAPHOREEXTPROC)wglGetProcAddress("glSignalSemaphoreEXT");
-        glWaitSemaphoreEXT_             = (PFNGLWAITSEMAPHOREEXTPROC)wglGetProcAddress("glWaitSemaphoreEXT");
+        glCreateMemoryObjectsEXT_      = (PFNGLCREATEMEMORYOBJECTSEXTPROC)get_proc("glCreateMemoryObjectsEXT");
+        glDeleteMemoryObjectsEXT_      = (PFNGLDELETEMEMORYOBJECTSEXTPROC)get_proc("glDeleteMemoryObjectsEXT");
+        glTextureStorageMem2DEXT_      = (PFNGLTEXTURESTORAGEMEM2DEXTPROC)get_proc("glTextureStorageMem2DEXT");
+#ifdef _WIN32
+        glImportMemoryWin32HandleEXT_  = (PFNGLIMPORTMEMORYWIN32HANDLEEXTPROC)get_proc("glImportMemoryWin32HandleEXT");
+#else
+        glImportMemoryFdEXT_           = (PFNGLIMPORTMEMORYFDEXTPROC)get_proc("glImportMemoryFdEXT");
+#endif
 
+        glGenSemaphoresEXT_             = (PFNGLGENSEMAPHORESEXTPROC)get_proc("glGenSemaphoresEXT");
+        glDeleteSemaphoresEXT_          = (PFNGLDELETESEMAPHORESEXTPROC)get_proc("glDeleteSemaphoresEXT");
+        glSignalSemaphoreEXT_           = (PFNGLSIGNALSEMAPHOREEXTPROC)get_proc("glSignalSemaphoreEXT");
+        glWaitSemaphoreEXT_             = (PFNGLWAITSEMAPHOREEXTPROC)get_proc("glWaitSemaphoreEXT");
+#ifdef _WIN32
+        glImportSemaphoreWin32HandleEXT_ = (PFNGLIMPORTSEMAPHOREWIN32HANDLEEXTPROC)get_proc("glImportSemaphoreWin32HandleEXT");
+#else
+        glImportSemaphoreFdEXT_         = (PFNGLIMPORTSEMAPHOREFDEXTPROC)get_proc("glImportSemaphoreFdEXT");
+#endif
+
+#ifdef _WIN32
         if (!glCreateMemoryObjectsEXT_ || !glImportMemoryWin32HandleEXT_ || !glTextureStorageMem2DEXT_) {
             CASPAR_THROW_EXCEPTION(caspar_exception()
                                    << msg_info("GL_EXT_memory_object_win32 not available on this GPU/driver"));
@@ -84,6 +113,17 @@ void load_gl_extensions()
             CASPAR_THROW_EXCEPTION(caspar_exception()
                                    << msg_info("GL_EXT_semaphore_win32 not available on this GPU/driver"));
         }
+#else
+        if (!glCreateMemoryObjectsEXT_ || !glImportMemoryFdEXT_ || !glTextureStorageMem2DEXT_) {
+            CASPAR_THROW_EXCEPTION(caspar_exception()
+                                   << msg_info("GL_EXT_memory_object_fd not available on this GPU/driver"));
+        }
+
+        if (!glGenSemaphoresEXT_ || !glImportSemaphoreFdEXT_ || !glSignalSemaphoreEXT_) {
+            CASPAR_THROW_EXCEPTION(caspar_exception()
+                                   << msg_info("GL_EXT_semaphore_fd not available on this GPU/driver"));
+        }
+#endif
     });
 }
 
@@ -220,7 +260,7 @@ void shared_texture_pool::create_slot(slot& s)
     // Create VkImage
     VkExternalMemoryImageCreateInfo ext_mem_img{};
     ext_mem_img.sType       = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO;
-    ext_mem_img.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+    ext_mem_img.handleTypes = platform::kExternalMemoryHandleType;
 
     VkImageCreateInfo img_info{};
     img_info.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -256,7 +296,7 @@ void shared_texture_pool::create_slot(slot& s)
 
     VkExportMemoryAllocateInfo export_info{};
     export_info.sType       = VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO;
-    export_info.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+    export_info.handleTypes = platform::kExternalMemoryHandleType;
 
     VkPhysicalDeviceMemoryProperties mem_props;
     vkGetPhysicalDeviceMemoryProperties(vk_device_.physical_device(), &mem_props);
@@ -280,14 +320,25 @@ void shared_texture_pool::create_slot(slot& s)
     VK_CHECK(vkBindImageMemory(dev, s.vk_image, s.vk_memory, 0));
 
     // Export memory handle
+#ifdef _WIN32
     VkMemoryGetWin32HandleInfoKHR get_handle_info{};
     get_handle_info.sType      = VK_STRUCTURE_TYPE_MEMORY_GET_WIN32_HANDLE_INFO_KHR;
     get_handle_info.memory     = s.vk_memory;
-    get_handle_info.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+    get_handle_info.handleType = platform::kExternalMemoryHandleType;
 
     auto vkGetMemoryWin32HandleKHR_ = reinterpret_cast<PFN_vkGetMemoryWin32HandleKHR>(
         vkGetDeviceProcAddr(dev, "vkGetMemoryWin32HandleKHR"));
     VK_CHECK(vkGetMemoryWin32HandleKHR_(dev, &get_handle_info, &s.memory_handle));
+#else
+    VkMemoryGetFdInfoKHR get_handle_info{};
+    get_handle_info.sType      = VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR;
+    get_handle_info.memory     = s.vk_memory;
+    get_handle_info.handleType = platform::kExternalMemoryHandleType;
+
+    auto vkGetMemoryFdKHR_ = reinterpret_cast<PFN_vkGetMemoryFdKHR>(
+        vkGetDeviceProcAddr(dev, "vkGetMemoryFdKHR"));
+    VK_CHECK(vkGetMemoryFdKHR_(dev, &get_handle_info, &s.memory_handle));
+#endif
 
     // Create VkImageView
     VkImageViewCreateInfo view_info{};
@@ -307,7 +358,7 @@ void shared_texture_pool::create_slot(slot& s)
 
     VkExportSemaphoreCreateInfo export_sem_info{};
     export_sem_info.sType       = VK_STRUCTURE_TYPE_EXPORT_SEMAPHORE_CREATE_INFO;
-    export_sem_info.handleTypes = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+    export_sem_info.handleTypes = platform::kExternalSemaphoreHandleType;
 
     VkSemaphoreCreateInfo sem_info{};
     sem_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
@@ -316,23 +367,43 @@ void shared_texture_pool::create_slot(slot& s)
     VK_CHECK(vkCreateSemaphore(dev, &sem_info, nullptr, &s.vk_semaphore));
 
     // Export semaphore handle
+#ifdef _WIN32
     VkSemaphoreGetWin32HandleInfoKHR get_sem_handle{};
     get_sem_handle.sType      = VK_STRUCTURE_TYPE_SEMAPHORE_GET_WIN32_HANDLE_INFO_KHR;
     get_sem_handle.semaphore  = s.vk_semaphore;
-    get_sem_handle.handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+    get_sem_handle.handleType = platform::kExternalSemaphoreHandleType;
 
     auto vkGetSemaphoreWin32HandleKHR_ = reinterpret_cast<PFN_vkGetSemaphoreWin32HandleKHR>(
         vkGetDeviceProcAddr(dev, "vkGetSemaphoreWin32HandleKHR"));
     VK_CHECK(vkGetSemaphoreWin32HandleKHR_(dev, &get_sem_handle, &s.semaphore_handle));
+#else
+    VkSemaphoreGetFdInfoKHR get_sem_handle{};
+    get_sem_handle.sType      = VK_STRUCTURE_TYPE_SEMAPHORE_GET_FD_INFO_KHR;
+    get_sem_handle.semaphore  = s.vk_semaphore;
+    get_sem_handle.handleType = platform::kExternalSemaphoreHandleType;
+
+    auto vkGetSemaphoreFdKHR_ = reinterpret_cast<PFN_vkGetSemaphoreFdKHR>(
+        vkGetDeviceProcAddr(dev, "vkGetSemaphoreFdKHR"));
+    VK_CHECK(vkGetSemaphoreFdKHR_(dev, &get_sem_handle, &s.semaphore_handle));
+#endif
 
     // ─── GL side: import memory + create texture ─────────────────────────────
 
     // Import VK memory into GL
     glCreateMemoryObjectsEXT_(1, &s.gl_memory_object);
+#ifdef _WIN32
     glImportMemoryWin32HandleEXT_(s.gl_memory_object,
                                   mem_reqs.size,
-                                  GL_HANDLE_TYPE_OPAQUE_WIN32_EXT,
+                                  platform::kGlHandleType,
                                   s.memory_handle);
+#else
+    glImportMemoryFdEXT_(s.gl_memory_object,
+                         mem_reqs.size,
+                         platform::kGlHandleType,
+                         s.memory_handle);
+    // fd is consumed by import on Linux — mark as invalid to prevent double-close
+    s.memory_handle = platform::kInvalidHandle;
+#endif
 
     // Create GL texture backed by imported memory
     glCreateTextures(GL_TEXTURE_2D, 1, &s.gl_texture);
@@ -345,9 +416,17 @@ void shared_texture_pool::create_slot(slot& s)
 
     // Import VK semaphore into GL
     glGenSemaphoresEXT_(1, &s.gl_semaphore);
+#ifdef _WIN32
     glImportSemaphoreWin32HandleEXT_(s.gl_semaphore,
-                                     GL_HANDLE_TYPE_OPAQUE_WIN32_EXT,
+                                     platform::kGlHandleType,
                                      s.semaphore_handle);
+#else
+    glImportSemaphoreFdEXT_(s.gl_semaphore,
+                            platform::kGlHandleType,
+                            s.semaphore_handle);
+    // fd is consumed by import on Linux — mark as invalid to prevent double-close
+    s.semaphore_handle = platform::kInvalidHandle;
+#endif
 }
 
 void shared_texture_pool::destroy_slot(slot& s)
@@ -387,6 +466,7 @@ void shared_texture_pool::destroy_slot_vk_only(slot& s)
     }
 
     // Handle cleanup
+#ifdef _WIN32
     if (s.memory_handle) {
         CloseHandle(s.memory_handle);
         s.memory_handle = nullptr;
@@ -395,6 +475,16 @@ void shared_texture_pool::destroy_slot_vk_only(slot& s)
         CloseHandle(s.semaphore_handle);
         s.semaphore_handle = nullptr;
     }
+#else
+    if (s.memory_handle != platform::kInvalidHandle) {
+        close(s.memory_handle);
+        s.memory_handle = platform::kInvalidHandle;
+    }
+    if (s.semaphore_handle != platform::kInvalidHandle) {
+        close(s.semaphore_handle);
+        s.semaphore_handle = platform::kInvalidHandle;
+    }
+#endif
 }
 
 void shared_texture_pool::blit_from_texture(GLuint source_texture_id, int width, int height)

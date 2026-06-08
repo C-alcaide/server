@@ -1,0 +1,98 @@
+# Dockerfile for building CasparCG with vulkan_output module on Linux.
+# This validates the Linux cross-platform port compiles correctly.
+#
+# Usage:
+#   docker build -f tools/linux/Dockerfile.vulkan-output -t casparcg-vulkan-build .
+#   docker run --rm casparcg-vulkan-build
+#
+# For CI (compile-only validation without GPU hardware):
+#   docker build --target build-casparcg -f tools/linux/Dockerfile.vulkan-output .
+
+FROM docker.io/buildpack-deps:noble AS build-casparcg
+
+# Install base build dependencies
+ADD tools/linux/install-dependencies /
+RUN apt-get update && /install-dependencies
+
+# Install Vulkan SDK (lunarg PPA)
+RUN apt-get install -y --no-install-recommends wget gnupg ca-certificates && \
+    wget -qO - https://packages.lunarg.com/lunarg-signing-key-pub.asc | apt-key add - && \
+    echo "deb https://packages.lunarg.com/vulkan/1.4.341 noble main" > /etc/apt/sources.list.d/lunarg-vulkan.list && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+        vulkan-sdk \
+        libvulkan-dev \
+        vulkan-validationlayers-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install additional EGL/DRM dev packages for VK_KHR_display + EGL device
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libdrm-dev \
+    libgbm-dev \
+    libegl1-mesa-dev \
+    libgles2-mesa-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Optional: CUDA toolkit for GPU peer transfer (comment out if not needed)
+# This adds ~3GB to the image. For compile-only validation it can be skipped
+# by passing --build-arg INSTALL_CUDA=0
+ARG INSTALL_CUDA=1
+RUN if [ "$INSTALL_CUDA" = "1" ]; then \
+        apt-get update && apt-get install -y --no-install-recommends \
+            nvidia-cuda-toolkit \
+        && rm -rf /var/lib/apt/lists/*; \
+    fi
+
+RUN mkdir /source && mkdir /build && mkdir /install
+COPY ./src /source
+
+WORKDIR /build
+
+ARG CC=clang
+ARG CXX=clang++
+ARG GIT_HASH
+
+# Configure with vulkan_output enabled
+RUN cmake -GNinja /source \
+    -DUSE_STATIC_BOOST=ON \
+    -DUSE_SYSTEM_CEF=OFF \
+    -DCMAKE_BUILD_TYPE=Release
+
+# Build — this validates all Linux platform code compiles
+RUN cmake --build . 2>&1 | tee /build/build.log
+
+# Verify vulkan_output module was built
+RUN test -f /build/modules/vulkan_output/libvulkan_output.a || \
+    (echo "ERROR: vulkan_output module was not built!" && exit 1)
+
+RUN cmake --install . --prefix staging
+
+RUN ln -s /build/staging /staging && \
+    /source/shell/copy_deps.sh /build/shell/casparcg /staging/lib
+
+# Runtime image
+FROM docker.io/ubuntu:noble
+COPY --from=build-casparcg /staging /opt/casparcg
+
+RUN set -ex; \
+    apt-get update; \
+    DEBIAN_FRONTEND="noninteractive" apt-get install -y --no-install-recommends \
+        tzdata \
+        libc++1 \
+        libnss3 \
+        fontconfig \
+        libglvnd0 \
+        libgl1 \
+        libglx0 \
+        libegl1 \
+        libgles2 \
+        libvulkan1 \
+        libdrm2 \
+        mesa-vulkan-drivers \
+    ; \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /opt/casparcg
+RUN chmod 755 run.sh
+ADD tools/linux/run_docker.sh ./
+CMD ["./run_docker.sh"]
