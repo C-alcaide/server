@@ -40,10 +40,17 @@
 #include <common/timer.h>
 
 #ifdef ENABLE_VULKAN
-#define VK_USE_PLATFORM_WIN32_KHR
+#ifdef _WIN32
+#include <windows.h>
 #include <vulkan/vulkan.h>
+#include <vulkan/vulkan_win32.h>
+#else
+#include <vulkan/vulkan.h>
+#include <unistd.h>
+#endif
 
 #include <accelerator/vulkan/util/texture_wrapper.h>
+#include <accelerator/vulkan/util/platform_config.h>
 #include <common/array.h>
 #include <common/bit_depth.h>
 #include <core/frame/frame.h>
@@ -51,10 +58,6 @@
 
 #include "vk_readback_v210_spv.h"
 #include "vk_readback_bgra_spv.h"
-#endif
-
-#ifdef WIN32
-#include <windows.h>
 #endif
 
 #include <atomic>
@@ -418,11 +421,12 @@ struct vk_readback_strategy::impl
         queue_ci.queueCount       = 1;
         queue_ci.pQueuePriorities = &priority;
 
+        using namespace caspar::accelerator::vulkan;
         const char* dev_exts[] = {
             VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME,
-            VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME,
+            platform::kExtMemExtName,
             VK_KHR_EXTERNAL_SEMAPHORE_EXTENSION_NAME,
-            VK_KHR_EXTERNAL_SEMAPHORE_WIN32_EXTENSION_NAME,
+            platform::kExtSemExtName,
             VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME,
         };
 
@@ -715,11 +719,24 @@ struct vk_readback_strategy::impl
         VkFormat format = is_16bit ? VK_FORMAT_R16G16B16A16_UNORM : VK_FORMAT_R8G8B8A8_UNORM;
         current_format_ = format;
 
+        using namespace caspar::accelerator::vulkan;
+
         // Import external memory
+#ifdef _WIN32
         VkImportMemoryWin32HandleInfoKHR import_info{};
         import_info.sType      = VK_STRUCTURE_TYPE_IMPORT_MEMORY_WIN32_HANDLE_INFO_KHR;
-        import_info.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+        import_info.handleType = platform::kExternalMemoryHandleType;
         import_info.handle     = win32_handle;
+#else
+        int dup_fd = dup(static_cast<int>(reinterpret_cast<intptr_t>(win32_handle)));
+        if (dup_fd < 0)
+            throw std::runtime_error("[vk_readback] Failed to dup fd for VK import");
+
+        VkImportMemoryFdInfoKHR import_info{};
+        import_info.sType      = VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR;
+        import_info.handleType = platform::kExternalMemoryHandleType;
+        import_info.fd         = dup_fd;
+#endif
 
         VkMemoryAllocateInfo alloc{};
         alloc.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
@@ -728,17 +745,31 @@ struct vk_readback_strategy::impl
 
         // Query valid memory types for this handle, then pick a device-local one
         uint32_t valid_type_bits = ~0u;
+#ifdef _WIN32
         auto vkGetMemoryWin32HandlePropertiesKHR_ =
             (PFN_vkGetMemoryWin32HandlePropertiesKHR)vkGetDeviceProcAddr(device_, "vkGetMemoryWin32HandlePropertiesKHR");
         if (vkGetMemoryWin32HandlePropertiesKHR_) {
             VkMemoryWin32HandlePropertiesKHR handle_props{};
             handle_props.sType = VK_STRUCTURE_TYPE_MEMORY_WIN32_HANDLE_PROPERTIES_KHR;
             if (vkGetMemoryWin32HandlePropertiesKHR_(device_,
-                    VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT,
+                    platform::kExternalMemoryHandleType,
                     win32_handle, &handle_props) == VK_SUCCESS) {
                 valid_type_bits = handle_props.memoryTypeBits;
             }
         }
+#else
+        auto vkGetMemoryFdPropertiesKHR_ =
+            (PFN_vkGetMemoryFdPropertiesKHR)vkGetDeviceProcAddr(device_, "vkGetMemoryFdPropertiesKHR");
+        if (vkGetMemoryFdPropertiesKHR_) {
+            VkMemoryFdPropertiesKHR handle_props{};
+            handle_props.sType = VK_STRUCTURE_TYPE_MEMORY_FD_PROPERTIES_KHR;
+            if (vkGetMemoryFdPropertiesKHR_(device_,
+                    platform::kExternalMemoryHandleType,
+                    dup_fd, &handle_props) == VK_SUCCESS) {
+                valid_type_bits = handle_props.memoryTypeBits;
+            }
+        }
+#endif
 
         VkPhysicalDeviceMemoryProperties mem_props;
         vkGetPhysicalDeviceMemoryProperties(phys_device_, &mem_props);
@@ -764,12 +795,28 @@ struct vk_readback_strategy::impl
                 throw std::runtime_error("No valid memory type for imported VK texture");
         }
 
-        VK_CHECK(vkAllocateMemory(device_, &alloc, nullptr, &t.mem), "vkAllocateMemory (import)");
+        {
+            VkResult alloc_res = vkAllocateMemory(device_, &alloc, nullptr, &t.mem);
+            if (alloc_res != VK_SUCCESS) {
+#ifndef _WIN32
+                // On Linux, vkAllocateMemory failure does NOT consume the fd
+                if (dup_fd >= 0) ::close(dup_fd);
+#endif
+                throw std::runtime_error("[vk_readback] vkAllocateMemory (import) failed: " +
+                                         std::to_string(alloc_res));
+            }
+        }
+
+#ifndef _WIN32
+        // On Linux, successful vkAllocateMemory with VkImportMemoryFdInfoKHR
+        // consumes the fd — mark as invalid to prevent double-close.
+        dup_fd = -1;
+#endif
 
         // Create VkImage for the imported memory
         VkExternalMemoryImageCreateInfo ext_img{};
         ext_img.sType       = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO;
-        ext_img.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+        ext_img.handleTypes = platform::kExternalMemoryHandleType;
 
         VkImageCreateInfo img_ci{};
         img_ci.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -842,6 +889,7 @@ struct vk_readback_strategy::impl
         VkSemaphore sem;
         VK_CHECK(vkCreateSemaphore(device_, &sem_ci, nullptr, &sem), "vkCreateSemaphore");
 
+#ifdef _WIN32
         VkImportSemaphoreWin32HandleInfoKHR import_info{};
         import_info.sType      = VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_WIN32_HANDLE_INFO_KHR;
         import_info.semaphore  = sem;
@@ -861,6 +909,36 @@ struct vk_readback_strategy::impl
             throw std::runtime_error("[vk_readback] vkImportSemaphoreWin32HandleKHR failed: " +
                                      std::to_string(res));
         }
+#else
+        VkImportSemaphoreFdInfoKHR import_info{};
+        import_info.sType      = VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_FD_INFO_KHR;
+        import_info.semaphore  = sem;
+        import_info.handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
+        // vkImportSemaphoreFdKHR consumes the fd on success — dup first
+        import_info.fd         = dup(static_cast<int>(reinterpret_cast<intptr_t>(win32_handle)));
+        if (import_info.fd < 0) {
+            vkDestroySemaphore(device_, sem, nullptr);
+            throw std::runtime_error("[vk_readback] Failed to dup semaphore fd");
+        }
+
+        auto vkImportSemaphoreFdKHR_ =
+            (PFN_vkImportSemaphoreFdKHR)vkGetDeviceProcAddr(device_, "vkImportSemaphoreFdKHR");
+        if (!vkImportSemaphoreFdKHR_) {
+            ::close(import_info.fd);
+            vkDestroySemaphore(device_, sem, nullptr);
+            throw std::runtime_error("[vk_readback] vkImportSemaphoreFdKHR not available");
+        }
+
+        auto res = vkImportSemaphoreFdKHR_(device_, &import_info);
+        if (res != VK_SUCCESS) {
+            // On failure, fd is NOT consumed — close it
+            ::close(import_info.fd);
+            vkDestroySemaphore(device_, sem, nullptr);
+            throw std::runtime_error("[vk_readback] vkImportSemaphoreFdKHR failed: " +
+                                     std::to_string(res));
+        }
+        // On success, fd is consumed by the driver — do not close
+#endif
 
         sem_cache_[num_cached_sem_] = {win32_handle, sem};
         num_cached_sem_++;

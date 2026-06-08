@@ -47,8 +47,10 @@
 
 #include <cuda_runtime.h>
 
-#ifdef WIN32
+#ifdef _WIN32
 #include <windows.h>
+#else
+#include <unistd.h>
 #endif
 
 #include <atomic>
@@ -264,11 +266,22 @@ struct cuda_vk_strategy::impl
 
         // Import the VK texture's device memory into CUDA
         cudaExternalMemoryHandleDesc extMemDesc{};
+#ifdef _WIN32
         extMemDesc.type                = cudaExternalMemoryHandleTypeOpaqueWin32;
         extMemDesc.handle.win32.handle = win32_handle;
+#else
+        extMemDesc.type       = cudaExternalMemoryHandleTypeOpaqueFd;
+        extMemDesc.handle.fd  = dup(static_cast<int>(reinterpret_cast<intptr_t>(win32_handle)));
+#endif
         extMemDesc.size                = alloc_size;
         extMemDesc.flags               = 0;
-        cuda_check(cudaImportExternalMemory(&slot.ext_mem, &extMemDesc), "cudaImportExternalMemory");
+        auto mem_err = cudaImportExternalMemory(&slot.ext_mem, &extMemDesc);
+#ifndef _WIN32
+        // On Linux, cudaImportExternalMemory does NOT consume the fd on failure
+        if (mem_err != cudaSuccess && extMemDesc.handle.fd >= 0)
+            ::close(extMemDesc.handle.fd);
+#endif
+        cuda_check(mem_err, "cudaImportExternalMemory");
 
         // Map as mipmapped array
         cudaExternalMemoryMipmappedArrayDesc mipmapDesc{};
@@ -392,12 +405,21 @@ struct cuda_vk_strategy::impl
         if (!cuda_sem) {
             // Import new semaphore
             cudaExternalSemaphoreHandleDesc desc{};
+#ifdef _WIN32
             desc.type                = cudaExternalSemaphoreHandleTypeTimelineSemaphoreWin32;
             desc.handle.win32.handle = sem_handle;
+#else
+            desc.type       = cudaExternalSemaphoreHandleTypeTimelineSemaphoreFd;
+            desc.handle.fd  = dup(static_cast<int>(reinterpret_cast<intptr_t>(sem_handle)));
+#endif
             desc.flags               = 0;
             cudaExternalSemaphore_t new_sem = nullptr;
             auto err = cudaImportExternalSemaphore(&new_sem, &desc);
             if (err != cudaSuccess) {
+#ifndef _WIN32
+                // On Linux, cudaImportExternalSemaphore does NOT consume fd on failure
+                if (desc.handle.fd >= 0) ::close(desc.handle.fd);
+#endif
                 CASPAR_LOG(warning) << L"[cuda_vk_strategy] Failed to import VK semaphore: "
                                     << cudaGetErrorString(err) << L" — falling back to CPU wait";
                 gpu_wait_available_ = false;
