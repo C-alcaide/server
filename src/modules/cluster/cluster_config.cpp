@@ -10,11 +10,7 @@
 #include "cluster_config.h"
 
 #include <common/log.h>
-
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <Windows.h>
+#include <common/utf.h>
 
 #include <algorithm>
 #include <chrono>
@@ -28,12 +24,7 @@ namespace {
 
 std::string narrow(const std::wstring& ws)
 {
-    if (ws.empty()) return {};
-    int len = WideCharToMultiByte(CP_UTF8, 0, ws.data(), static_cast<int>(ws.size()), nullptr, 0, nullptr, nullptr);
-    if (len <= 0) return {};
-    std::string s(static_cast<size_t>(len), '\0');
-    WideCharToMultiByte(CP_UTF8, 0, ws.data(), static_cast<int>(ws.size()), s.data(), len, nullptr, nullptr);
-    return s;
+    return u8(ws);
 }
 
 } // anonymous namespace

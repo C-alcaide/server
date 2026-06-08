@@ -5,7 +5,7 @@ include(FetchContent)
 FetchContent_Declare(
     libltc
     GIT_REPOSITORY https://github.com/x42/libltc.git
-    GIT_TAG        master
+    GIT_TAG        bf84b01097a1789c0296cc5fcfc3bf4608407930  # v1.3.2
 )
 FetchContent_MakeAvailable(libltc)
 
@@ -30,7 +30,8 @@ casparcg_add_module_project(ltc
 # Suppress warnings-as-errors for third-party C sources
 set_source_files_properties(
     ${LIBLTC_SOURCES}
-    PROPERTIES COMPILE_OPTIONS "/W3;/WX-"
+    PROPERTIES COMPILE_OPTIONS
+        "$<$<C_COMPILER_ID:MSVC>:/W3;/WX->$<$<NOT:$<C_COMPILER_ID:MSVC>>:-w>"
 )
 
 target_include_directories(ltc PRIVATE 

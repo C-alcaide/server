@@ -512,7 +512,7 @@ This is useful in multi-display setups where some outputs are HDR-capable and ot
 
 ### Hardware HDR Acceleration (NvAPI Display Engine)
 
-On NVIDIA GPUs, when HDR output is configured (PQ or HLG), the module attempts to enable hardware-accelerated color conversion via `NvAPI_Disp_HdrColorControl`. This uses the GPU's **display engine** — dedicated scanout-stage hardware — to perform PQ EOTF encoding and BT.709→BT.2020 gamut mapping, entirely bypassing the compute shader pipeline.
+On NVIDIA GPUs, when HDR output is configured (PQ or HLG), the module attempts to enable hardware-accelerated HDR signaling via `NvAPI_Disp_HdrColorControl`. This uses the GPU's **display engine** — dedicated scanout-stage hardware — to perform PQ EOTF encoding and BT.2020 gamut mapping at scanout, allowing the mixer to output in a linear or scRGB working space.
 
 **How it works:**
 
@@ -525,12 +525,11 @@ On NVIDIA GPUs, when HDR output is configured (PQ or HLG), the module attempts t
 **Benefits:**
 - Zero GPU shader cost — the conversion runs in dedicated display engine hardware
 - No additional frame latency — the transform happens at the scanout stage
-- The compute shader color pipeline is completely bypassed
 
 **Activation:**
 - Automatic when `<transfer>pq</transfer>` or `<transfer>hlg</transfer>` is set and the display supports ST2084
 - Also activates via `<edid-auto-hdr>` when the display reports HDR capability
-- Falls back silently to the compute shader path if the display or driver doesn't support hardware HDR
+- Falls back gracefully if the display or driver doesn't support hardware HDR
 - Does not affect Quadro Sync or present barrier synchronization (operates per-output, independent of framelock)
 
 **Log output when active:**
@@ -596,9 +595,11 @@ The remaining 28ms is GPU execution time (VK render + CUDA v210 conversion), not
 
 ## Color Space Conversion
 
-Color space conversion is now handled by the **mixer** (fragment shader) rather than by the Vulkan output's compute shader. The mixer performs EOTF linearization, gamut matrix multiplication, and OETF encoding during compositing — so frames arrive at the Vulkan output already in the channel's target color space and transfer function.
+Color space conversion is handled by the **mixer** (fragment shader), **not** by the Vulkan output consumer. The mixer performs EOTF linearization, gamut matrix multiplication, and OETF encoding during compositing — so frames arrive at the Vulkan output already in the channel's target color space and transfer function.
 
-The `color_convert_pipeline` compute shader is retained in the codebase but is currently **disabled** (bypassed with zero GPU cost). It may be re-enabled in the future for per-consumer display transforms that differ from the channel output.
+> **Important**: The `<gamut>` and `<eotf>` settings in the `<vulkan-output>` config block are currently **non-functional** (parsed but ignored). All color conversion is controlled by the **channel-level** `<color-space>` and `<color-transfer>` settings, which define the mixer's output color space. The `<transfer>` setting (sdr/pq/hlg) remains functional — it controls hardware HDR signaling, VK_EXT_hdr_metadata, NvAPI UHDA, and 16-bit frame cache selection.
+
+The `color_convert_pipeline` compute shader is retained in the codebase but is currently **disabled** (bypassed with zero GPU cost). It may be re-enabled in the future for per-consumer display adaptation when the output display differs from the channel's working color space.
 
 ### Architecture (current)
 
@@ -619,7 +620,9 @@ Source (BT.709 sRGB, BT.2020 PQ, etc.)
 
 When hardware HDR acceleration (NvAPI UHDA) is active, the display engine may perform additional PQ encoding at the scanout stage.
 
-### Output Gamuts
+### Output Gamuts (reserved — currently no-op)
+
+These values are parsed but have **no effect** on pixel output. They are reserved for future per-consumer display adaptation. Color gamut is currently controlled by the channel's `<color-space>` setting.
 
 | Config Value | Standard | Typical Use |
 |-------------|----------|-------------|
@@ -631,7 +634,9 @@ When hardware HDR acceleration (NvAPI UHDA) is active, the display engine may pe
 
 Aliases: `p3` and `display-p3` → `p3-d65`; `dci-p3` → `p3-dci`; `2020` → `bt2020`; `adobergb` → `adobe-rgb`.
 
-### Transfer Functions (EOTF/OETF)
+### Transfer Functions / EOTF (reserved — currently no-op)
+
+These values are parsed but have **no effect** on pixel output. They are reserved for future per-consumer display adaptation. Transfer function is currently controlled by the channel's `<color-transfer>` setting.
 
 | Config Value | Standard | Typical Use |
 |-------------|----------|-------------|
@@ -642,9 +647,9 @@ Aliases: `p3` and `display-p3` → `p3-d65`; `dci-p3` → `p3-dci`; `2020` → `
 | `gamma24` / `2.4` | Pure gamma 2.4 | EBU broadcast reference monitors |
 | `gamma26` / `2.6` | Pure gamma 2.6 | DCI cinema projection |
 
-### Automatic Inference
+### Automatic Inference (reserved — currently no-op)
 
-When `<gamut>` or `<eotf>` are not explicitly set, the module infers them from the legacy `<transfer>` setting:
+When `<gamut>` or `<eotf>` are not explicitly set, the module infers defaults from the `<transfer>` setting. These inferred values are stored but currently have no effect on pixel output:
 
 | `<transfer>` | Inferred gamut | Inferred EOTF |
 |-------------|---------------|----------------|
@@ -652,26 +657,37 @@ When `<gamut>` or `<eotf>` are not explicitly set, the module infers them from t
 | `pq` | bt2020 | pq |
 | `hlg` | bt2020 | hlg |
 
-This means existing configs with `<transfer>pq</transfer>` automatically get BT.2020 gamut mapping without changes.
+Note: `<transfer>` itself IS functional — it controls hardware HDR signaling and metadata (see [HDR Output](#hdr-output)). Only the gamut/eotf values derived from it are currently unused.
 
 ### Configuration
 
+To get HDR10 (BT.2020 + PQ) output, configure at the **channel level**:
+
 ```xml
-<vulkan-output>
-    <gpu>0</gpu>
-    <device>1</device>
-    <gamut>bt2020</gamut>          <!-- Output color gamut -->
-    <eotf>pq</eotf>               <!-- Output transfer function -->
-    <hdr-metadata>
-        <max-cll>1000</max-cll>
-        <max-fall>400</max-fall>
-    </hdr-metadata>
-</vulkan-output>
+<channel>
+    <video-mode>2160p5000</video-mode>
+    <color-space>bt2020</color-space>
+    <color-transfer>pq</color-transfer>
+    <color-depth>16</color-depth>
+    <consumers>
+        <vulkan-output>
+            <gpu>0</gpu>
+            <device>1</device>
+            <transfer>pq</transfer>         <!-- Enables HW HDR signaling -->
+            <hdr-metadata>
+                <max-cll>1000</max-cll>
+                <max-fall>400</max-fall>
+            </hdr-metadata>
+        </vulkan-output>
+    </consumers>
+</channel>
 ```
 
-### Performance
+The channel's `<color-space>` and `<color-transfer>` determine the mixer's output pixel values. The consumer's `<transfer>` enables hardware HDR metadata signaling to the display.
 
-The compute shader runs at approximately:
+### Performance (reserved pipeline — currently disabled)
+
+When the per-consumer color conversion compute shader is re-enabled in the future, expected performance:
 - **1080p60**: < 0.1 ms per frame (negligible)
 - **2160p60**: ~0.3 ms per frame
 - **4320p60 (8K)**: ~1.2 ms per frame
@@ -1031,9 +1047,9 @@ All options for the `<vulkan-output>` consumer block in `casparcg.config`:
 | `<video-mode>` | string | *(channel)* | Explicit output video mode |
 | `<identify-on-start>` | bool | `false` | Flash identification overlay on startup |
 | `<on-disconnect>` | enum | `retry` | `hold` \| `black` \| `retry` |
-| `<transfer>` | enum | `sdr` | `sdr` \| `pq` \| `hlg` |
-| `<gamut>` | enum | *(auto)* | `bt709` \| `bt2020` \| `p3-d65` \| `p3-dci` \| `adobe-rgb` |
-| `<eotf>` | enum | *(auto)* | `srgb` \| `linear` \| `pq` \| `hlg` \| `gamma24` \| `gamma26` |
+| `<transfer>` | enum | `sdr` | `sdr` \| `pq` \| `hlg` — controls HW HDR signaling, metadata, and 16-bit frame cache |
+| `<gamut>` | enum | *(auto)* | **Reserved (currently no-op)**. Parsed but unused — color conversion is handled by the mixer at channel level |
+| `<eotf>` | enum | *(auto)* | **Reserved (currently no-op)**. Parsed but unused — see `<gamut>` above |
 | `<edid-auto-hdr>` | bool | `false` | Auto-detect HDR from display EDID |
 | `<edid-emulation>` | bool | `false` | Inject synthetic EDID on unconnected outputs (admin, Pro GPU) |
 | `<persist-edid>` | bool | `false` | Lock current EDID so display survives cable disconnect |
@@ -1083,6 +1099,7 @@ Single output on the first GPU, first display connector:
     <video-mode>2160p5000</video-mode>
     <color-depth>16</color-depth>
     <color-space>bt2020</color-space>
+    <color-transfer>pq</color-transfer>
     <consumers>
         <vulkan-output>
             <gpu>0</gpu>
@@ -1111,15 +1128,21 @@ Let the module read the display's EDID and decide:
 
 ### Wide-Gamut Display P3 Output
 
-Convert BT.709 content to Display P3 for Apple-style wide-gamut monitors:
+To output Display P3 content, configure the **channel** color space. The consumer's `<gamut>` setting has no effect:
 
 ```xml
-<vulkan-output>
-    <gpu>0</gpu>
-    <device>1</device>
-    <gamut>p3-d65</gamut>
-    <eotf>srgb</eotf>
-</vulkan-output>
+<channel>
+    <video-mode>2160p5000</video-mode>
+    <color-space>p3-d65</color-space>
+    <color-transfer>srgb</color-transfer>
+    <color-depth>16</color-depth>
+    <consumers>
+        <vulkan-output>
+            <gpu>0</gpu>
+            <device>1</device>
+        </vulkan-output>
+    </consumers>
+</channel>
 ```
 
 ### DCI Cinema Projection
@@ -1127,41 +1150,60 @@ Convert BT.709 content to Display P3 for Apple-style wide-gamut monitors:
 Output for DCI-P3 projectors using gamma 2.6:
 
 ```xml
-<vulkan-output>
-    <gpu>0</gpu>
-    <device>1</device>
-    <gamut>p3-dci</gamut>
-    <eotf>gamma26</eotf>
-</vulkan-output>
+<channel>
+    <video-mode>2048x1080p2400</video-mode>
+    <color-space>p3-dci</color-space>
+    <color-transfer>gamma26</color-transfer>
+    <color-depth>16</color-depth>
+    <consumers>
+        <vulkan-output>
+            <gpu>0</gpu>
+            <device>1</device>
+        </vulkan-output>
+    </consumers>
+</channel>
 ```
 
 ### HDR10 with Explicit Gamut and Transfer
 
-Full control over color space conversion (equivalent to `<transfer>pq</transfer>` with automatic inference):
+Full HDR10 pipeline with BT.2020 gamut and PQ transfer — configured at channel level, with hardware HDR signaling on the consumer:
 
 ```xml
-<vulkan-output>
-    <gpu>0</gpu>
-    <device>1</device>
-    <gamut>bt2020</gamut>
-    <eotf>pq</eotf>
-    <hdr-metadata>
-        <max-cll>1000</max-cll>
-        <max-fall>400</max-fall>
-    </hdr-metadata>
-</vulkan-output>
+<channel>
+    <video-mode>2160p5000</video-mode>
+    <color-space>bt2020</color-space>
+    <color-transfer>pq</color-transfer>
+    <color-depth>16</color-depth>
+    <consumers>
+        <vulkan-output>
+            <gpu>0</gpu>
+            <device>1</device>
+            <transfer>pq</transfer>
+            <hdr-metadata>
+                <max-cll>1000</max-cll>
+                <max-fall>400</max-fall>
+            </hdr-metadata>
+        </vulkan-output>
+    </consumers>
+</channel>
 ```
 
 ### EBU Broadcast Reference Monitor
 
-BT.709 primaries with gamma 2.4 (no gamut conversion, EOTF only):
+BT.709 primaries with gamma 2.4 for EBU tech 3320 compliance:
 
 ```xml
-<vulkan-output>
-    <gpu>0</gpu>
-    <device>1</device>
-    <eotf>gamma24</eotf>
-</vulkan-output>
+<channel>
+    <video-mode>1080p5000</video-mode>
+    <color-space>bt709</color-space>
+    <color-transfer>gamma24</color-transfer>
+    <consumers>
+        <vulkan-output>
+            <gpu>0</gpu>
+            <device>1</device>
+        </vulkan-output>
+    </consumers>
+</channel>
 ```
 
 ### HLG Live Broadcast
@@ -1169,12 +1211,23 @@ BT.709 primaries with gamma 2.4 (no gamut conversion, EOTF only):
 BT.2020 wide gamut with Hybrid Log-Gamma for backward-compatible HDR:
 
 ```xml
-<vulkan-output>
-    <gpu>0</gpu>
-    <device>1</device>
-    <gamut>bt2020</gamut>
-    <eotf>hlg</eotf>
-</vulkan-output>
+<channel>
+    <video-mode>2160p5000</video-mode>
+    <color-space>bt2020</color-space>
+    <color-transfer>hlg</color-transfer>
+    <color-depth>16</color-depth>
+    <consumers>
+        <vulkan-output>
+            <gpu>0</gpu>
+            <device>1</device>
+            <transfer>hlg</transfer>
+            <hdr-metadata>
+                <max-cll>1000</max-cll>
+                <max-fall>400</max-fall>
+            </hdr-metadata>
+        </vulkan-output>
+    </consumers>
+</channel>
 ```
 
 ### 4-Output Video Wall (Single GPU)

@@ -10,12 +10,24 @@
 #include "command_relay.h"
 
 #include <common/log.h>
+#include <common/utf.h>
 
+#ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <WinSock2.h>
 #include <WS2tcpip.h>
+#else
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#include <cerrno>
+#endif
 
 #include <chrono>
 #include <sstream>
@@ -24,25 +36,32 @@ namespace caspar { namespace cluster { namespace relay {
 
 namespace {
 
+// ─── Platform socket abstraction ────────────────────────────────────────────
+#ifdef _WIN32
+using socket_t = SOCKET;
+constexpr socket_t kInvalidSocket = INVALID_SOCKET;
+constexpr int      kSocketError   = SOCKET_ERROR;
+inline int         close_socket(socket_t s) { return closesocket(s); }
+inline int         last_error() { return WSAGetLastError(); }
+constexpr int      kWouldBlock = WSAEWOULDBLOCK;
+#else
+using socket_t = int;
+constexpr socket_t kInvalidSocket = -1;
+constexpr int      kSocketError   = -1;
+inline int         close_socket(socket_t s) { return ::close(s); }
+inline int         last_error() { return errno; }
+constexpr int      kWouldBlock = EINPROGRESS;
+#endif
+
 // Narrow ASCII wstring to string (safe for AMCP commands and addresses)
 std::string narrow(const std::wstring& ws)
 {
-    if (ws.empty()) return {};
-    int len = WideCharToMultiByte(CP_UTF8, 0, ws.data(), static_cast<int>(ws.size()), nullptr, 0, nullptr, nullptr);
-    if (len <= 0) return {};
-    std::string s(static_cast<size_t>(len), '\0');
-    WideCharToMultiByte(CP_UTF8, 0, ws.data(), static_cast<int>(ws.size()), s.data(), len, nullptr, nullptr);
-    return s;
+    return u8(ws);
 }
 
 std::wstring widen(const std::string& s)
 {
-    if (s.empty()) return {};
-    int len = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
-    if (len <= 0) return {};
-    std::wstring ws(static_cast<size_t>(len), L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), ws.data(), len);
-    return ws;
+    return u16(s);
 }
 
 // Wire protocol: "FRAME:target_frame COMMAND_TEXT\r\n"
@@ -180,21 +199,21 @@ void command_relay::stop()
     {
         std::lock_guard<std::mutex> lock(members_mutex_);
         for (auto& m : members_) {
-            if (static_cast<SOCKET>(m.socket) != INVALID_SOCKET) {
-                closesocket(static_cast<SOCKET>(m.socket));
-                m.socket = static_cast<uintptr_t>(INVALID_SOCKET);
+            if (static_cast<socket_t>(m.socket) != kInvalidSocket) {
+                close_socket(static_cast<socket_t>(m.socket));
+                m.socket = static_cast<uintptr_t>(kInvalidSocket);
             }
         }
     }
 
     // Close listen/master sockets
-    if (static_cast<SOCKET>(listen_socket_) != INVALID_SOCKET) {
-        closesocket(static_cast<SOCKET>(listen_socket_));
-        listen_socket_ = static_cast<uintptr_t>(INVALID_SOCKET);
+    if (static_cast<socket_t>(listen_socket_) != kInvalidSocket) {
+        close_socket(static_cast<socket_t>(listen_socket_));
+        listen_socket_ = static_cast<uintptr_t>(kInvalidSocket);
     }
-    if (static_cast<SOCKET>(master_socket_) != INVALID_SOCKET) {
-        closesocket(static_cast<SOCKET>(master_socket_));
-        master_socket_ = static_cast<uintptr_t>(INVALID_SOCKET);
+    if (static_cast<socket_t>(master_socket_) != kInvalidSocket) {
+        close_socket(static_cast<socket_t>(master_socket_));
+        master_socket_ = static_cast<uintptr_t>(kInvalidSocket);
     }
 
     if (connection_thread_.joinable()) connection_thread_.join();
@@ -245,15 +264,20 @@ bool command_relay::connect_to_member(member_info& member)
 {
     member.state = member_state::connecting;
 
-    SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (sock == INVALID_SOCKET) {
+    socket_t sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (sock == kInvalidSocket) {
         member.state = member_state::error;
         return false;
     }
 
     // Set non-blocking for connect with timeout
+#ifdef _WIN32
     u_long non_blocking = 1;
     ioctlsocket(sock, FIONBIO, &non_blocking);
+#else
+    int flags = fcntl(sock, F_GETFL, 0);
+    fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+#endif
 
     sockaddr_in addr = {};
     addr.sin_family  = AF_INET;
@@ -261,9 +285,9 @@ bool command_relay::connect_to_member(member_info& member)
     inet_pton(AF_INET, member.host.c_str(), &addr.sin_addr);
 
     int result = connect(sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
-    if (result == SOCKET_ERROR) {
-        int err = WSAGetLastError();
-        if (err == WSAEWOULDBLOCK) {
+    if (result == kSocketError) {
+        int err = last_error();
+        if (err == kWouldBlock) {
             // Wait for connection with 2-second timeout
             fd_set write_set, except_set;
             FD_ZERO(&write_set);
@@ -271,9 +295,9 @@ bool command_relay::connect_to_member(member_info& member)
             FD_SET(sock, &write_set);
             FD_SET(sock, &except_set);
             timeval tv = {2, 0}; // 2 seconds
-            int sel = select(0, nullptr, &write_set, &except_set, &tv);
+            int sel = select(static_cast<int>(sock) + 1, nullptr, &write_set, &except_set, &tv);
             if (sel <= 0 || FD_ISSET(sock, &except_set)) {
-                closesocket(sock);
+                close_socket(sock);
                 member.state = member_state::error;
                 CASPAR_LOG(debug) << L"[cluster] Connect timeout to "
                                   << std::wstring(member.host.begin(), member.host.end())
@@ -281,7 +305,7 @@ bool command_relay::connect_to_member(member_info& member)
                 return false;
             }
         } else {
-            closesocket(sock);
+            close_socket(sock);
             member.state = member_state::error;
             CASPAR_LOG(debug) << L"[cluster] Failed to connect to "
                               << std::wstring(member.host.begin(), member.host.end())
@@ -291,12 +315,22 @@ bool command_relay::connect_to_member(member_info& member)
     }
 
     // Restore blocking mode
+#ifdef _WIN32
     u_long blocking = 0;
     ioctlsocket(sock, FIONBIO, &blocking);
+#else
+    int flags2 = fcntl(sock, F_GETFL, 0);
+    fcntl(sock, F_SETFL, flags2 & ~O_NONBLOCK);
+#endif
 
     // Set send timeout
+#ifdef _WIN32
     DWORD timeout = 1000;
     setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&timeout), sizeof(timeout));
+#else
+    struct timeval snd_tv = {1, 0}; // 1 second
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &snd_tv, sizeof(snd_tv));
+#endif
 
     // Disable Nagle for low-latency command delivery
     int nodelay = 1;
@@ -306,7 +340,7 @@ bool command_relay::connect_to_member(member_info& member)
     member.state  = member_state::connected;
 
     // Send protocol version handshake
-    send(sock, PROTOCOL_HANDSHAKE, static_cast<int>(strlen(PROTOCOL_HANDSHAKE)), 0);
+    ::send(sock, PROTOCOL_HANDSHAKE, static_cast<int>(strlen(PROTOCOL_HANDSHAKE)), 0);
 
     CASPAR_LOG(info) << L"[cluster] Connected to member "
                      << std::wstring(member.host.begin(), member.host.end())
@@ -320,17 +354,17 @@ bool command_relay::send_to_member(member_info& member, const std::string& data)
         return false;
     }
 
-    SOCKET sock = static_cast<SOCKET>(member.socket);
-    int    total_sent = 0;
-    int    remaining  = static_cast<int>(data.size());
+    socket_t sock = static_cast<socket_t>(member.socket);
+    int      total_sent = 0;
+    int      remaining  = static_cast<int>(data.size());
 
     while (remaining > 0) {
-        int sent = send(sock, data.c_str() + total_sent, remaining, 0);
-        if (sent == SOCKET_ERROR) {
+        int sent = ::send(sock, data.c_str() + total_sent, remaining, 0);
+        if (sent == kSocketError) {
             CASPAR_LOG(warning) << L"[cluster] Lost connection to "
                                 << std::wstring(member.host.begin(), member.host.end());
-            closesocket(sock);
-            member.socket = static_cast<uintptr_t>(INVALID_SOCKET);
+            close_socket(sock);
+            member.socket = static_cast<uintptr_t>(kInvalidSocket);
             member.state  = member_state::disconnected;
             return false;
         }
@@ -344,8 +378,8 @@ bool command_relay::send_to_member(member_info& member, const std::string& data)
 
 void command_relay::client_listener_loop()
 {
-    SOCKET listen_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (listen_sock == INVALID_SOCKET) {
+    socket_t listen_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (listen_sock == kInvalidSocket) {
         CASPAR_LOG(error) << L"[cluster] Failed to create listener socket";
         return;
     }
@@ -358,29 +392,34 @@ void command_relay::client_listener_loop()
     addr.sin_port    = htons(client_port_);
     inet_pton(AF_INET, client_bind_address_.c_str(), &addr.sin_addr);
 
-    if (bind(listen_sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == SOCKET_ERROR) {
+    if (bind(listen_sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == kSocketError) {
         CASPAR_LOG(error) << L"[cluster] Failed to bind relay listener on port " << client_port_;
-        closesocket(listen_sock);
+        close_socket(listen_sock);
         return;
     }
 
-    if (listen(listen_sock, 1) == SOCKET_ERROR) {
+    if (listen(listen_sock, 1) == kSocketError) {
         CASPAR_LOG(error) << L"[cluster] Failed to listen on relay port " << client_port_;
-        closesocket(listen_sock);
+        close_socket(listen_sock);
         return;
     }
     listen_socket_ = static_cast<uintptr_t>(listen_sock);
 
     // Set accept timeout so we can check running_ flag
+#ifdef _WIN32
     DWORD timeout = 1000;
     setsockopt(listen_sock, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeout), sizeof(timeout));
+#else
+    struct timeval tv = {1, 0}; // 1 second
+    setsockopt(listen_sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+#endif
 
     while (running_) {
         sockaddr_in client_addr = {};
-        int         client_len  = sizeof(client_addr);
-        SOCKET      client_sock = accept(listen_sock, reinterpret_cast<sockaddr*>(&client_addr), &client_len);
+        socklen_t   client_len  = sizeof(client_addr);
+        socket_t    client_sock = accept(listen_sock, reinterpret_cast<sockaddr*>(&client_addr), &client_len);
 
-        if (client_sock == INVALID_SOCKET) {
+        if (client_sock == kInvalidSocket) {
             continue; // Timeout or error, retry
         }
 
@@ -389,8 +428,13 @@ void command_relay::client_listener_loop()
         setsockopt(client_sock, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&nodelay), sizeof(nodelay));
 
         // Set receive timeout on client socket so receive thread doesn't block forever
+#ifdef _WIN32
         DWORD recv_timeout = 2000;
         setsockopt(client_sock, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&recv_timeout), sizeof(recv_timeout));
+#else
+        struct timeval recv_tv = {2, 0}; // 2 seconds
+        setsockopt(client_sock, SOL_SOCKET, SO_RCVTIMEO, &recv_tv, sizeof(recv_tv));
+#endif
 
         master_socket_ = static_cast<uintptr_t>(client_sock);
         CASPAR_LOG(info) << L"[cluster] Master connected to client relay";
@@ -407,14 +451,14 @@ void command_relay::client_listener_loop()
 
 void command_relay::client_receive_loop(uintptr_t client_socket)
 {
-    SOCKET sock = static_cast<SOCKET>(client_socket);
+    socket_t sock = static_cast<socket_t>(client_socket);
     std::string buffer;
     char        recv_buf[4096];
     constexpr size_t MAX_BUFFER_SIZE = 1024 * 1024; // 1 MB max
     bool handshake_validated = false;
 
     while (running_) {
-        int received = recv(sock, recv_buf, sizeof(recv_buf), 0);
+        int received = ::recv(sock, recv_buf, sizeof(recv_buf), 0);
         if (received <= 0) {
             if (received == 0) {
                 CASPAR_LOG(info) << L"[cluster] Master disconnected gracefully";

@@ -4,6 +4,12 @@
 > associated readback strategies as implemented on the `CasparVPV` branch.
 > All path references are relative to the CasparVP repository root.
 
+> **Platform support**: The Vulkan mixer runs on both **Windows** and
+> **Linux**. Cross-device interop uses platform-specific external memory
+> extensions: Win32 opaque handles on Windows, POSIX file descriptors on
+> Linux. Platform constants are centralized in
+> `src/accelerator/vulkan/util/platform_config.h`.
+
 ---
 
 ## 1. Architecture Overview
@@ -28,7 +34,9 @@ split into three logical stages:
 2. **Composition** — The `vulkan::image_mixer` composites all layers into a
    single render target (`VK_FORMAT_R16G16B16A16_UNORM` at 16-bit depth,
    `VK_FORMAT_R8G8B8A8_UNORM` at 8-bit). The output is an exportable
-   `VkImage` backed by `VK_KHR_external_memory_win32`.
+   `VkImage` backed by platform-specific external memory
+   (`VK_KHR_external_memory_win32` on Windows, `VK_KHR_external_memory_fd`
+   on Linux).
 
 3. **Readback / Output** — Downstream consumers convert the composited
    texture to their wire format. DeckLink consumers use one of five
@@ -63,14 +71,16 @@ The device is created via **VkBootstrap** (`vkb::InstanceBuilder`,
 | `dynamicRendering` | VK 1.3 |
 | `synchronization2` | VK 1.3 |
 | `dynamicRenderingLocalRead` | `VK_KHR_dynamic_rendering_local_read` |
-| External memory export | `VK_KHR_external_memory_win32` |
-| External semaphore export | `VK_KHR_external_semaphore_win32` |
+| External memory export | `VK_KHR_external_memory_win32` (Windows) / `VK_KHR_external_memory_fd` (Linux) |
+| External semaphore export | `VK_KHR_external_semaphore_win32` (Windows) / `VK_KHR_external_semaphore_fd` (Linux) |
 
 ### 2.3 Memory Management
 
 - **VMA** (`VmaAllocator`) is used for staging buffers.
-- **Manual allocation** with `VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT`
-  is used for attachment textures (required for cross-device export).
+- **Manual allocation** with platform-specific external memory handle type
+  (`VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT` on Windows,
+  `VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT` on Linux) is used for
+  attachment textures (required for cross-device export).
 - **Pool recycling**: Attachment, device-texture, and host-buffer pools use
   `tbb::concurrent_bounded_queue` keyed by `(width << 16 | height)` to
   recycle allocations without per-frame alloc/free.
@@ -162,13 +172,15 @@ Attachments (`create_attachment()`) are VkImages with all of:
 - `TRANSFER_DST` — for clears
 - `SAMPLED` — for use as a texture source
 
-Attachments use **export memory** (`VK_KHR_external_memory_win32`) so they
-can be imported by consumer-side VkDevices or CUDA.
+Attachments use **export memory** (`VK_KHR_external_memory_win32` on
+Windows, `VK_KHR_external_memory_fd` on Linux) so they can be imported by
+consumer-side VkDevices or CUDA.
 
 A per-frame-slot attachment pool (`frame_data::attachment_pool_`, max 4)
 recycles allocations. This keeps the underlying `VkDeviceMemory` and its
-Win32 HANDLE stable across frames, which is critical because
-`cudaImportExternalMemory()` costs 10–150 ms and must be avoided per-frame.
+platform handle (Win32 HANDLE / POSIX fd) stable across frames, which is
+critical because `cudaImportExternalMemory()` costs 10–150 ms and must be
+avoided per-frame.
 
 ### 4.3 Triple Buffering
 
@@ -189,15 +201,19 @@ prepares a third.
 Each `frame_data` slot creates an **exportable timeline VkSemaphore**:
 
 ```cpp
+// Windows:
 VkExternalSemaphoreHandleTypeFlagBits::eOpaqueWin32
+// Linux:
+VkExternalSemaphoreHandleTypeFlagBits::eOpaqueFd
 VkSemaphoreType::eTimeline
 ```
 
 On each `submit()`, the timeline value increments and is signaled when the
-GPU finishes the command buffer. The Win32 HANDLE is cached after the first
-`vkGetSemaphoreWin32HandleKHR` call and exposed via:
+GPU finishes the command buffer. The platform handle is cached after the
+first export call (`vkGetSemaphoreWin32HandleKHR` on Windows,
+`vkGetSemaphoreFdKHR` on Linux) and exposed via:
 
-- `renderpass::render_semaphore_handle()` → HANDLE
+- `renderpass::render_semaphore_handle()` → platform handle
 - `renderpass::render_semaphore_value()` → uint64
 
 ### 5.2 texture_wrapper
@@ -210,16 +226,16 @@ The composited attachment is wrapped in `texture_wrapper` (implements
 | Method | Purpose |
 |---|---|
 | `vk_texture()` | Native VK texture for GPU-native consumers |
-| `export_win32_handle()` | Win32 HANDLE to the VkDeviceMemory |
+| `export_handle()` | Platform handle to VkDeviceMemory (Win32 HANDLE / fd) |
 | `export_alloc_size()` | Allocation size for CUDA import |
-| `render_semaphore_handle()` | Timeline semaphore HANDLE |
+| `render_semaphore_handle()` | Timeline semaphore platform handle |
 | `render_semaphore_value()` | Timeline value to wait for |
 | `ensure_render_complete()` | Fence wait (thread-safe, one-shot) |
 
 Consumers choose their access path:
 - **vulkan_output**: calls `vk_texture()` — zero-copy, no readback
-- **CUDA readback**: imports the Win32 HANDLE + semaphore via `cudaImportExternalMemory` / `cudaImportExternalSemaphore`, waits GPU-side
-- **VK readback**: imports via `VK_KHR_external_memory_win32` on a consumer-side VkDevice
+- **CUDA readback**: imports the platform handle + semaphore via `cudaImportExternalMemory` / `cudaImportExternalSemaphore`, waits GPU-side
+- **VK readback**: imports via `VK_KHR_external_memory_win32` / `VK_KHR_external_memory_fd` on a consumer-side VkDevice
 - **CPU readback**: calls `ensure_render_complete()` then `image_data()`
 
 ### 5.3 Fence Wait Ordering
@@ -454,7 +470,8 @@ Each GPU strategy wraps a CPU fallback strategy for partial operations
 **Files**: `cuda_vk_strategy.h/cpp`, `cuda_vk_kernels.cu`, `cuda_vk_v210.cuh`
 
 1. Imports the mixer's VK texture via `cudaImportExternalMemory()` using the
-   Win32 HANDLE → maps to `cudaMipmappedArray` → creates `cudaSurfaceObject`.
+   platform handle (Win32 HANDLE on Windows, POSIX fd on Linux) → maps to
+   `cudaMipmappedArray` → creates `cudaSurfaceObject`.
 2. Imports the timeline semaphore via `cudaImportExternalSemaphore()`.
 3. Waits GPU-side (`cudaWaitExternalSemaphoresAsync`) for render completion.
 4. CUDA kernels (`v210_pack_kernel`, `bgra_copy_kernel`) run on compute SMs:
@@ -463,7 +480,12 @@ Each GPU strategy wraps a CPU fallback strategy for partial operations
    - Write directly to pinned host memory (`cudaMallocHost`)
 5. Triple-buffered: 3 host buffers + stream events for async D2H.
 6. **Import caching**: Up to 8 texture/semaphore imports cached; only
-   re-imported when the Win32 HANDLE changes.
+   re-imported when the platform handle changes.
+
+> **Linux fd ownership**: On Linux, `cudaImportExternalMemory` and
+> `cudaImportExternalSemaphore` consume the fd on success. The implementation
+> uses `dup()` before import so the original cached fd remains valid. On
+> failure, the dup'd fd is closed explicitly to prevent leaks.
 
 **Advantage**: Entire pipeline runs on GPU — no CPU involvement.
 **Disadvantage**: Compute kernels run on SMs — contends with CUDA ProRes/NotchLC decode.
@@ -475,8 +497,9 @@ Each GPU strategy wraps a CPU fallback strategy for partial operations
 1. Creates a **consumer-side VkDevice** on the same physical GPU (matched
    by LUID), with a **compute-only queue family** (avoids graphics queue
    contention).
-2. Imports the mixer's VK texture via `VK_KHR_external_memory_win32` →
-   creates a `VkImageView` on the consumer device.
+2. Imports the mixer's VK texture via `VK_KHR_external_memory_win32`
+   (Windows) or `VK_KHR_external_memory_fd` (Linux) → creates a
+   `VkImageView` on the consumer device.
 3. Compute shader (`vk_readback_v210.comp`) packs RGBA → v210 entirely on
    GPU:
    - Reads 6 RGBA pixels per workgroup invocation
@@ -631,11 +654,12 @@ Skips GPU→CPU transfer when only GPU-native consumers are attached.
 
 ### 14.3 Attachment Pool Recycling (§4.2)
 
-Stable Win32 HANDLEs avoid expensive CUDA re-imports per frame.
+Stable platform handles (Win32 HANDLEs / POSIX fds) avoid expensive CUDA
+re-imports per frame.
 
 ### 14.4 Import Caching (CUDA strategy)
 
-Up to 8 texture + 8 semaphore CUDA imports cached, keyed by Win32 HANDLE.
+Up to 8 texture + 8 semaphore CUDA imports cached, keyed by platform handle.
 
 ### 14.5 Subregion Extraction on GPU
 
@@ -712,8 +736,9 @@ The XML parser also accepts `<gpu-strategy>` as a legacy alias for
 | `src/accelerator/vulkan/util/device.h/cpp` | VkDevice, VMA, memory pools, async dispatch |
 | `src/accelerator/vulkan/util/pipeline.h/cpp` | Graphics pipeline, descriptor layout, UBO ring |
 | `src/accelerator/vulkan/util/renderpass.h/cpp` | Dynamic rendering, layer batching, command recording |
-| `src/accelerator/vulkan/util/texture.h/cpp` | VkImage wrapper, Win32 handle export, LUID |
+| `src/accelerator/vulkan/util/texture.h/cpp` | VkImage wrapper, platform handle export, LUID |
 | `src/accelerator/vulkan/util/texture_wrapper.h` | Core::texture adapter for cross-device export |
+| `src/accelerator/vulkan/util/platform_config.h` | Platform-agnostic constants (handle types, extensions, close_handle) |
 | `src/accelerator/vulkan/util/buffer.h/cpp` | VMA staging buffer |
 | `src/accelerator/vulkan/util/matrix.h/cpp` | 4×4 vertex matrix computation |
 | `src/accelerator/vulkan/util/transforms.h/cpp` | Transform composition, polygon clipping |

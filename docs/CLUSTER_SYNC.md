@@ -2,6 +2,8 @@
 
 Multi-machine synchronized playout for CasparCG using IEEE 1588 PTP clock synchronization, global frame numbering, frame-accurate command scheduling, TCP command relay with virtual channel mapping, and a content sync watchdog for automatic drift detection and correction.
 
+> **Platform support**: The cluster module runs on both **Windows** and **Linux**. Networking uses WinSock2 on Windows and POSIX BSD sockets on Linux (compile-time platform split). No additional dependencies beyond the OS socket API.
+
 ## Table of Contents
 
 - [Architecture Overview](#architecture-overview)
@@ -890,7 +892,7 @@ The command scheduler is logging "late by N frames" warnings.
 - Increase `<sync-margin>` (try 5 or 7)
 - Check network latency between master and clients
 - Check for CPU contention on the client (the scheduler thread needs consistent scheduling)
-- Verify `TCP_NODELAY` is effective: some Windows TCP stacks batch small writes
+- Verify `TCP_NODELAY` is effective: some TCP stacks batch small writes (Windows MME, Linux with Nagle)
 
 ### Member: disconnected
 

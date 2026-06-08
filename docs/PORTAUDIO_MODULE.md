@@ -2,7 +2,7 @@
 
 ## Overview
 
-The PortAudio module provides professional audio I/O for CasparCG Server via the PortAudio library (v19.7.0, statically linked). It supports ASIO, WASAPI, and DirectSound host APIs on Windows, enabling multi-channel output to professional audio interfaces and low-latency capture from any input device.
+The PortAudio module provides professional audio I/O for CasparCG Server via the PortAudio library (v19.7.0, statically linked). It supports ASIO, WASAPI, and DirectSound host APIs on Windows, and ALSA/JACK on Linux, enabling multi-channel output to professional audio interfaces and low-latency capture from any input device.
 
 The module provides three components:
 

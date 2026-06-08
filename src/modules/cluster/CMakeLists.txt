@@ -45,5 +45,5 @@ source_group(sources\\relay relay/*)
 # ─── Link libraries ─────────────────────────────────────────────────────────
 target_link_libraries(cluster PRIVATE
     protocol
-    ws2_32
+    $<$<PLATFORM_ID:Windows>:ws2_32>
 )

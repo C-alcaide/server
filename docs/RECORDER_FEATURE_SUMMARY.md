@@ -73,11 +73,13 @@ PLAY 1-10 system_audio "CABLE Output"
 
 A global module that decodes SMPTE Linear Timecode (LTC) from an audio input in real time. The decoded timecode is available server-wide for timestamping, scheduling, OSC output, or integration with external automation systems.
 
+> **Platform support**: The LTC module runs on both **Windows** and **Linux**. Audio capture uses PortAudio (WASAPI/DirectSound on Windows, ALSA/JACK on Linux). The libltc decoder library is platform-independent.
+
 ### Technical Architecture
 
 ```
 ┌──────────────────┐     callback      ┌────────────────────┐     decode      ┌─────────────────┐
-│  Audio Device     │ ──────────────▶  │  miniaudio capture  │ ────────────▶  │  libltc decoder  │
+│  Audio Device     │ ──────────────▶  │  PortAudio capture  │ ────────────▶  │  libltc decoder  │
 │  (Line In, etc.)  │   f32 mono       │  48 kHz, 1 channel  │               │  LTCFrameExt     │
 └──────────────────┘                   └────────────────────┘               └────────┬────────┘
                                                                                      │
@@ -91,9 +93,9 @@ A global module that decodes SMPTE Linear Timecode (LTC) from an audio input in 
                                                                             └─────────────────┘
 ```
 
-*   **Audio engine:** [miniaudio](https://miniaud.io) captures audio at 48 kHz, mono, float32 format.
-*   **Decoder:** [libltc](https://github.com/x42/libltc) (LGPL-2.1+). The `data_callback()` feeds raw float samples into `ltc_decoder_write_float()`. Decoded frames are read via `ltc_decoder_read()` in the same callback, keeping latency minimal.
-*   **Global singleton:** `LTCInput::instance()` provides thread-safe access to the latest timecode from anywhere in the server.
+*   **Audio engine:** [PortAudio](http://www.portaudio.com/) v19.7 captures audio at 48 kHz, mono, float32 format. On Windows it uses WASAPI/DirectSound; on Linux it uses ALSA or JACK.
+*   **Decoder:** [libltc](https://github.com/x42/libltc) v1.3.2 (LGPL-2.1+). The `stream_callback()` feeds raw float samples into `ltc_decoder_write_float()`. Decoded frames are read via `ltc_decoder_read()` in the same callback, keeping latency minimal.
+*   **Global singleton:** `LTCInput::instance()` provides thread-safe access to the latest timecode from anywhere in the server. Internally uses atomic double-buffering for lock-free delivery from the audio callback thread.
 *   **Signal validity:**
     *   A `valid_signal` flag is set whenever a timecode frame is successfully decoded.
     *   If no valid frame arrives within **1 second**, the module considers the signal lost.

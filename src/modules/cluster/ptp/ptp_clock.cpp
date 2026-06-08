@@ -11,11 +11,20 @@
 
 #include <common/log.h>
 
+#ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <WinSock2.h>
 #include <WS2tcpip.h>
+#else
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#include <cerrno>
+#endif
 
 #include <algorithm>
 #include <cstring>
@@ -24,6 +33,21 @@
 namespace caspar { namespace cluster { namespace ptp {
 
 namespace {
+
+// ─── Platform socket abstraction ────────────────────────────────────────────
+#ifdef _WIN32
+using socket_t = SOCKET;
+constexpr socket_t kInvalidSocket = INVALID_SOCKET;
+constexpr int      kSocketError   = SOCKET_ERROR;
+inline int         close_socket(socket_t s) { return closesocket(s); }
+inline int         last_error() { return WSAGetLastError(); }
+#else
+using socket_t = int;
+constexpr socket_t kInvalidSocket = -1;
+constexpr int      kSocketError   = -1;
+inline int         close_socket(socket_t s) { return ::close(s); }
+inline int         last_error() { return errno; }
+#endif
 
 constexpr uint16_t PTP_EVENT_PORT   = 319;
 constexpr uint16_t PTP_GENERAL_PORT = 320;
@@ -54,11 +78,11 @@ port_identity generate_identity()
     return id;
 }
 
-SOCKET create_udp_socket(const std::string& bind_addr, uint16_t port, const std::string& multicast_group)
+socket_t create_udp_socket(const std::string& bind_addr, uint16_t port, const std::string& multicast_group)
 {
-    SOCKET sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (sock == INVALID_SOCKET) {
-        return INVALID_SOCKET;
+    socket_t sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (sock == kInvalidSocket) {
+        return kInvalidSocket;
     }
 
     // Allow address reuse
@@ -70,9 +94,9 @@ SOCKET create_udp_socket(const std::string& bind_addr, uint16_t port, const std:
     addr.sin_family      = AF_INET;
     addr.sin_port        = htons(port);
     inet_pton(AF_INET, bind_addr.c_str(), &addr.sin_addr);
-    if (bind(sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == SOCKET_ERROR) {
-        closesocket(sock);
-        return INVALID_SOCKET;
+    if (bind(sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == kSocketError) {
+        close_socket(sock);
+        return kInvalidSocket;
     }
 
     // Join multicast group
@@ -80,7 +104,7 @@ SOCKET create_udp_socket(const std::string& bind_addr, uint16_t port, const std:
     inet_pton(AF_INET, multicast_group.c_str(), &mreq.imr_multiaddr);
     inet_pton(AF_INET, bind_addr.c_str(), &mreq.imr_interface);
     if (setsockopt(sock, IPPROTO_IP, IP_ADD_MEMBERSHIP, reinterpret_cast<const char*>(&mreq), sizeof(mreq)) ==
-        SOCKET_ERROR) {
+        kSocketError) {
         CASPAR_LOG(warning) << L"[cluster] Failed to join PTP multicast group";
     }
 
@@ -93,14 +117,19 @@ SOCKET create_udp_socket(const std::string& bind_addr, uint16_t port, const std:
     int ttl = 1;
     setsockopt(sock, IPPROTO_IP, IP_MULTICAST_TTL, reinterpret_cast<const char*>(&ttl), sizeof(ttl));
 
-    // Non-blocking with timeout
-    DWORD timeout = 50; // 50ms recv timeout
+    // Set receive timeout (50ms)
+#ifdef _WIN32
+    DWORD timeout = 50;
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeout), sizeof(timeout));
+#else
+    struct timeval tv = {0, 50000}; // 50ms
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+#endif
 
     return sock;
 }
 
-void send_to_multicast(SOCKET sock, const std::string& group, uint16_t port, const void* data, int len)
+void send_to_multicast(socket_t sock, const std::string& group, uint16_t port, const void* data, int len)
 {
     sockaddr_in dest = {};
     dest.sin_family  = AF_INET;
@@ -156,6 +185,7 @@ void ptp_clock::start()
         return; // Already running
     }
 
+#ifdef _WIN32
     // Initialize Winsock
     WSADATA wsa;
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
@@ -163,23 +193,26 @@ void ptp_clock::start()
         running_ = false;
         return;
     }
+#endif
 
     // Create sockets
     event_socket_   = static_cast<uintptr_t>(create_udp_socket(bind_address_, PTP_EVENT_PORT, multicast_group_));
     general_socket_ = static_cast<uintptr_t>(create_udp_socket(bind_address_, PTP_GENERAL_PORT, multicast_group_));
 
-    if (static_cast<SOCKET>(event_socket_) == INVALID_SOCKET ||
-        static_cast<SOCKET>(general_socket_) == INVALID_SOCKET) {
+    if (static_cast<socket_t>(event_socket_) == kInvalidSocket ||
+        static_cast<socket_t>(general_socket_) == kInvalidSocket) {
         CASPAR_LOG(error) << L"[cluster] Failed to create PTP sockets";
-        if (static_cast<SOCKET>(event_socket_) != INVALID_SOCKET) {
-            closesocket(static_cast<SOCKET>(event_socket_));
-            event_socket_ = static_cast<uintptr_t>(INVALID_SOCKET);
+        if (static_cast<socket_t>(event_socket_) != kInvalidSocket) {
+            close_socket(static_cast<socket_t>(event_socket_));
+            event_socket_ = static_cast<uintptr_t>(kInvalidSocket);
         }
-        if (static_cast<SOCKET>(general_socket_) != INVALID_SOCKET) {
-            closesocket(static_cast<SOCKET>(general_socket_));
-            general_socket_ = static_cast<uintptr_t>(INVALID_SOCKET);
+        if (static_cast<socket_t>(general_socket_) != kInvalidSocket) {
+            close_socket(static_cast<socket_t>(general_socket_));
+            general_socket_ = static_cast<uintptr_t>(kInvalidSocket);
         }
+#ifdef _WIN32
         WSACleanup();
+#endif
         running_ = false;
         return;
     }
@@ -206,16 +239,18 @@ void ptp_clock::stop()
         worker_thread_.join();
     }
 
-    if (static_cast<SOCKET>(event_socket_) != INVALID_SOCKET) {
-        closesocket(static_cast<SOCKET>(event_socket_));
-        event_socket_ = static_cast<uintptr_t>(INVALID_SOCKET);
+    if (static_cast<socket_t>(event_socket_) != kInvalidSocket) {
+        close_socket(static_cast<socket_t>(event_socket_));
+        event_socket_ = static_cast<uintptr_t>(kInvalidSocket);
     }
-    if (static_cast<SOCKET>(general_socket_) != INVALID_SOCKET) {
-        closesocket(static_cast<SOCKET>(general_socket_));
-        general_socket_ = static_cast<uintptr_t>(INVALID_SOCKET);
+    if (static_cast<socket_t>(general_socket_) != kInvalidSocket) {
+        close_socket(static_cast<socket_t>(general_socket_));
+        general_socket_ = static_cast<uintptr_t>(kInvalidSocket);
     }
 
+#ifdef _WIN32
     WSACleanup();
+#endif
 
     CASPAR_LOG(info) << L"[cluster] PTP clock stopped";
 }
@@ -252,8 +287,12 @@ void ptp_clock::master_loop()
     auto last_sync     = std::chrono::steady_clock::now();
     auto last_announce = last_sync;
 
+#ifdef _WIN32
     WSAPOLLFD pfd = {};
-    pfd.fd     = static_cast<SOCKET>(event_socket_);
+#else
+    struct pollfd pfd = {};
+#endif
+    pfd.fd     = static_cast<socket_t>(event_socket_);
     pfd.events = POLLIN;
 
     while (running_) {
@@ -272,15 +311,19 @@ void ptp_clock::master_loop()
         }
 
         // Poll for Delay_Req from clients (non-blocking with short timeout)
-        int poll_result = WSAPoll(&pfd, 1, 10); // 10ms timeout — responsive to stop
+#ifdef _WIN32
+        int poll_result = WSAPoll(&pfd, 1, 10);
+#else
+        int poll_result = poll(&pfd, 1, 10);
+#endif
         if (poll_result <= 0) {
             continue;
         }
 
         char buffer[256];
         sockaddr_in sender_addr = {};
-        int sender_len = sizeof(sender_addr);
-        int received = recvfrom(static_cast<SOCKET>(event_socket_), buffer, sizeof(buffer), 0,
+        socklen_t sender_len = sizeof(sender_addr);
+        int received = recvfrom(static_cast<socket_t>(event_socket_), buffer, sizeof(buffer), 0,
                                 reinterpret_cast<sockaddr*>(&sender_addr), &sender_len);
 
         if (received >= static_cast<int>(sizeof(ptp_header))) {
@@ -301,7 +344,7 @@ void ptp_clock::master_loop()
                 resp.receive_timestamp     = recv_time;
                 resp.requesting_port_identity = hdr->source_port_identity;
 
-                send_to_multicast(static_cast<SOCKET>(general_socket_), multicast_group_,
+                send_to_multicast(static_cast<socket_t>(general_socket_), multicast_group_,
                                   PTP_GENERAL_PORT, &resp, sizeof(resp));
             }
         }
@@ -327,7 +370,7 @@ void ptp_clock::send_sync()
     auto t1 = ptp_timestamp::from_nanoseconds(system_clock_ns());
     sync.origin_timestamp = t1;
 
-    send_to_multicast(static_cast<SOCKET>(event_socket_), multicast_group_,
+    send_to_multicast(static_cast<socket_t>(event_socket_), multicast_group_,
                       PTP_EVENT_PORT, &sync, sizeof(sync));
 
     // Send Follow_Up with precise timestamp (general port)
@@ -344,7 +387,7 @@ void ptp_clock::send_sync()
     fup.header.log_message_interval = -3;
     fup.precise_origin_timestamp = precise_t1;
 
-    send_to_multicast(static_cast<SOCKET>(general_socket_), multicast_group_,
+    send_to_multicast(static_cast<socket_t>(general_socket_), multicast_group_,
                       PTP_GENERAL_PORT, &fup, sizeof(fup));
 }
 
@@ -367,7 +410,7 @@ void ptp_clock::send_announce()
     ann.steps_removed         = 0;
     ann.time_source           = 0xA0; // Internal oscillator
 
-    send_to_multicast(static_cast<SOCKET>(general_socket_), multicast_group_,
+    send_to_multicast(static_cast<socket_t>(general_socket_), multicast_group_,
                       PTP_GENERAL_PORT, &ann, sizeof(ann));
 }
 
@@ -377,17 +420,25 @@ void ptp_clock::client_loop()
 {
     auto last_delay_req = std::chrono::steady_clock::now();
 
+#ifdef _WIN32
     WSAPOLLFD fds[2];
-    fds[0].fd     = static_cast<SOCKET>(event_socket_);
+#else
+    struct pollfd fds[2];
+#endif
+    fds[0].fd     = static_cast<socket_t>(event_socket_);
     fds[0].events = POLLIN;
-    fds[1].fd     = static_cast<SOCKET>(general_socket_);
+    fds[1].fd     = static_cast<socket_t>(general_socket_);
     fds[1].events = POLLIN;
 
     while (running_) {
         // Poll both sockets with 100ms timeout
+#ifdef _WIN32
         int poll_result = WSAPoll(fds, 2, 100);
+#else
+        int poll_result = poll(fds, 2, 100);
+#endif
         if (poll_result < 0) {
-            CASPAR_LOG(warning) << L"[ptp_clock] WSAPoll failed: " << WSAGetLastError();
+            CASPAR_LOG(warning) << L"[ptp_clock] poll failed: " << last_error();
             continue;
         }
 
@@ -542,7 +593,7 @@ void ptp_clock::send_delay_req()
     delay_req_send_time_ns_ = system_clock_ns();
     req.origin_timestamp = ptp_timestamp::from_nanoseconds(delay_req_send_time_ns_);
 
-    send_to_multicast(static_cast<SOCKET>(event_socket_), multicast_group_,
+    send_to_multicast(static_cast<socket_t>(event_socket_), multicast_group_,
                       PTP_EVENT_PORT, &req, sizeof(req));
 }
 
