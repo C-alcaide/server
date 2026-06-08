@@ -136,6 +136,12 @@ void vulkan_interop::import_from_handle(platform::native_handle_t handle)
     alloc_info.memoryTypeIndex = memory_type_index;
 
     VK_CHECK(vkAllocateMemory(device_.device(), &alloc_info, nullptr, &memory_));
+
+#ifndef _WIN32
+    // vkAllocateMemory with VkImportMemoryFdInfoKHR consumes the fd on success —
+    // mark as invalid to prevent double-close in destructor.
+    shared_handle_ = platform::kInvalidHandle;
+#endif
     VK_CHECK(vkBindImageMemory(device_.device(), image_, memory_, 0));
 
     // Create image view
