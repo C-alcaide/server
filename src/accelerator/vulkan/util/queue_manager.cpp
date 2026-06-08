@@ -26,62 +26,178 @@
 #include <common/except.h>
 #include <common/log.h>
 
-#include <algorithm>
+#include <map>
 
 namespace caspar { namespace accelerator { namespace vulkan {
 
-queue_manager::queue_manager(vk::PhysicalDevice physical_device, size_t max_queues)
+namespace {
+
+// The capability bits we score families on. A family supporting fewer of these
+// is more specialized (a dedicated transfer/video family), which is exactly what
+// we want to offload onto when one exists.
+constexpr vk::QueueFlags capability_bits()
+{
+    return vk::QueueFlagBits::eGraphics | vk::QueueFlagBits::eCompute | vk::QueueFlagBits::eTransfer |
+           vk::QueueFlagBits::eVideoEncodeKHR | vk::QueueFlagBits::eVideoDecodeKHR;
+}
+
+int count_capabilities(vk::QueueFlags flags)
+{
+    int n = 0;
+    for (auto bit : {vk::QueueFlagBits::eGraphics,
+                     vk::QueueFlagBits::eCompute,
+                     vk::QueueFlagBits::eTransfer,
+                     vk::QueueFlagBits::eVideoEncodeKHR,
+                     vk::QueueFlagBits::eVideoDecodeKHR}) {
+        if (flags & bit)
+            ++n;
+    }
+    return n;
+}
+
+// The most specialized family supporting `required`, preferring one distinct
+// from the graphics family so the work actually runs off the render queue.
+// UINT32_MAX if no family supports the capability.
+uint32_t best_family(const std::vector<vk::QueueFamilyProperties>& family_props,
+                     vk::QueueFlagBits                             required,
+                     uint32_t                                      graphics_family)
+{
+    uint32_t best      = UINT32_MAX;
+    int      best_caps = 0;
+    for (uint32_t i = 0; i < family_props.size(); ++i) {
+        auto flags = family_props[i].queueFlags;
+        if (!(flags & required))
+            continue;
+        int caps = count_capabilities(flags & capability_bits());
+        // Prefer fewer capabilities (more dedicated); on a tie, prefer a family
+        // other than the graphics one.
+        bool better = best == UINT32_MAX || caps < best_caps ||
+                      (caps == best_caps && best == graphics_family && i != graphics_family);
+        if (better) {
+            best      = i;
+            best_caps = caps;
+        }
+    }
+    return best;
+}
+
+} // namespace
+
+const char* to_string(queue_type type)
+{
+    switch (type) {
+        case queue_type::graphics:
+            return "graphics";
+        case queue_type::transfer:
+            return "transfer";
+        case queue_type::compute:
+            return "compute";
+        case queue_type::video_encode:
+            return "video_encode";
+        case queue_type::video_decode:
+            return "video_decode";
+    }
+    return "unknown";
+}
+
+queue_manager::queue_manager(vk::PhysicalDevice physical_device)
 {
     auto family_props = physical_device.getQueueFamilyProperties();
 
-    uint32_t graphics_family = UINT32_MAX;
-    for (uint32_t i = 0; i < family_props.size(); ++i) {
-        if (family_props[i].queueFlags & vk::QueueFlagBits::eGraphics) {
-            graphics_family = i;
-            break;
-        }
-    }
+    uint32_t graphics_family = best_family(family_props, vk::QueueFlagBits::eGraphics, UINT32_MAX);
     if (graphics_family == UINT32_MAX) {
         CASPAR_THROW_EXCEPTION(caspar_exception() << msg_info("No graphics-capable Vulkan queue family found"));
     }
 
-    // Graphics family first (the primary queue), then the rest, capped.
-    families_.push_back(graphics_family);
-    for (uint32_t i = 0; i < family_props.size() && families_.size() < max_queues; ++i) {
-        if (i != graphics_family)
-            families_.push_back(i);
+    // Resolve each queue_type to a family. Transfer and compute fall back to the
+    // graphics family (which always supports transfer and, in practice, compute);
+    // video falls back to nothing — that hardware simply can't do it.
+    type_family_[static_cast<size_t>(queue_type::graphics)] = graphics_family;
+    type_family_[static_cast<size_t>(queue_type::transfer)] =
+        best_family(family_props, vk::QueueFlagBits::eTransfer, graphics_family);
+    type_family_[static_cast<size_t>(queue_type::compute)] =
+        best_family(family_props, vk::QueueFlagBits::eCompute, graphics_family);
+    type_family_[static_cast<size_t>(queue_type::video_encode)] =
+        best_family(family_props, vk::QueueFlagBits::eVideoEncodeKHR, graphics_family);
+    type_family_[static_cast<size_t>(queue_type::video_decode)] =
+        best_family(family_props, vk::QueueFlagBits::eVideoDecodeKHR, graphics_family);
+
+    if (type_family_[static_cast<size_t>(queue_type::transfer)] == UINT32_MAX)
+        type_family_[static_cast<size_t>(queue_type::transfer)] = graphics_family;
+    if (type_family_[static_cast<size_t>(queue_type::compute)] == UINT32_MAX)
+        type_family_[static_cast<size_t>(queue_type::compute)] = graphics_family;
+
+    // Lay out the queues: one per resolved type where the family has spare
+    // capacity, sharing within a family once its queueCount is used up. Graphics
+    // is laid out first so the primary queue is queues_[0].
+    std::map<uint32_t, uint32_t> used_per_family; // family -> queues already taken
+    auto                         lay_out = [&](queue_type type) {
+        auto t = static_cast<size_t>(type);
+        auto f = type_family_[t];
+        if (f == UINT32_MAX) {
+            type_queue_[t] = SIZE_MAX;
+            return;
+        }
+        uint32_t taken = used_per_family[f];
+        if (taken < family_props[f].queueCount) {
+            // Room for a dedicated queue on this family.
+            used_per_family[f] = taken + 1;
+            type_queue_[t]     = queue_specs_.size();
+            queue_specs_.emplace_back(f, taken);
+        } else {
+            // Family exhausted — share its first queue.
+            for (size_t q = 0; q < queue_specs_.size(); ++q) {
+                if (queue_specs_[q].first == f) {
+                    type_queue_[t] = q;
+                    break;
+                }
+            }
+        }
+    };
+    lay_out(queue_type::graphics);
+    lay_out(queue_type::transfer);
+    lay_out(queue_type::compute);
+    lay_out(queue_type::video_encode);
+    lay_out(queue_type::video_decode);
+
+    // Collapse the per-queue specs into (family, count) for the device builder.
+    for (const auto& spec : queue_specs_) {
+        if (!queue_setup_.empty() && queue_setup_.back().first == spec.first)
+            ++queue_setup_.back().second;
+        else
+            queue_setup_.emplace_back(spec.first, 1u);
     }
 
-    CASPAR_LOG(info) << "Vulkan: " << family_props.size() << " queue families available, creating " << families_.size()
-                     << " queues.";
+    CASPAR_LOG(info) << "Vulkan: " << family_props.size() << " queue families available, creating "
+                     << queue_specs_.size() << " queues.";
     for (uint32_t i = 0; i < family_props.size(); ++i) {
-        bool created = std::find(families_.begin(), families_.end(), i) != families_.end();
         CASPAR_LOG(info) << "  queue family " << i << ": queueCount=" << family_props[i].queueCount
-                         << " flags=" << vk::to_string(family_props[i].queueFlags).c_str()
-                         << (created ? " [queue created]" : "");
+                         << " flags=" << vk::to_string(family_props[i].queueFlags).c_str();
+    }
+    for (size_t t = 0; t < type_count; ++t) {
+        auto type = static_cast<queue_type>(t);
+        if (type_family_[t] == UINT32_MAX)
+            CASPAR_LOG(info) << "  " << to_string(type) << " queue: unavailable";
+        else
+            CASPAR_LOG(info) << "  " << to_string(type) << " queue: family " << type_family_[t];
     }
 }
 
 void queue_manager::create_queues(vk::Device device)
 {
-    for (auto family : families_) {
-        queues_.push_back(std::make_shared<vulkan_queue>(device.getQueue(family, 0), family));
+    for (const auto& spec : queue_specs_) {
+        queues_.push_back(std::make_shared<vulkan_queue>(device.getQueue(spec.first, spec.second), spec.first));
     }
 }
 
-std::shared_ptr<vulkan_queue> queue_manager::primary() const { return queues_.at(0); }
+std::shared_ptr<vulkan_queue> queue_manager::primary() const { return acquire(queue_type::graphics); }
 
-std::shared_ptr<vulkan_queue> queue_manager::acquire()
+std::shared_ptr<vulkan_queue> queue_manager::acquire(queue_type type) const
 {
-    // Round-robin over the secondary families (everything past queues_[0]),
-    // sharing if there are more clients than secondaries. Single-family hardware
-    // has none, so this returns the primary and the client aliases the render
-    // queue (the distance-0, single-queue path).
-    if (queues_.size() <= 1)
-        return queues_.at(0);
-
-    auto n = queues_.size() - 1;
-    return queues_[1 + (cursor_++ % n)];
+    auto q = type_queue_[static_cast<size_t>(type)];
+    if (q == SIZE_MAX)
+        return nullptr;
+    return queues_.at(q);
 }
 
 }}} // namespace caspar::accelerator::vulkan
