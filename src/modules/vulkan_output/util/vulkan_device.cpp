@@ -436,9 +436,10 @@ void vulkan_device::create_logical_device()
         VK_KHR_GLOBAL_PRIORITY_EXTENSION_NAME,
     };
 
-    // FSE is useful on ALL tiers: on Windows, VK_KHR_display is not available,
-    // so even pro GPUs (A4000/A6000) use win32 surfaces. Application-controlled
-    // FSE bypasses DWM composition for direct scanout.
+    // FSE is useful on ALL tiers: on Windows, VK_KHR_display requires the display
+    // to be configured as "dedicated GPU display" in NVIDIA Control Panel, which most
+    // deployments don't use. Application-controlled FSE bypasses DWM composition
+    // for direct scanout without removing the display from the desktop.
     desired_device_exts.push_back(VK_EXT_FULL_SCREEN_EXCLUSIVE_EXTENSION_NAME);
 
     // Check and add optional extensions if available

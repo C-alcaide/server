@@ -143,7 +143,7 @@ static const uint32_t frame_buffer_size = 3;
 // Manages a small GPU-only image + staging buffer for uploading LUT data.
 struct vk_lut_texture
 {
-    vk::Device       evendevice    = nullptr;
+    vk::Device       device    = nullptr;
     vk::Image        image     = nullptr;
     vk::ImageView    view      = nullptr;
     vk::DeviceMemory memory    = nullptr;

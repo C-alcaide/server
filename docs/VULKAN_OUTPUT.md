@@ -180,7 +180,21 @@ The module detects the GPU capability tier at runtime and adapts its output stra
 2. `VK_NV_present_barrier` extension is available — indicates Quadro Sync hardware
 3. The GPU name matches a known professional model (Quadro, RTX A-series, Ada, Tesla)
 
-When `VK_KHR_display` is available, the module uses direct display mode (bypasses the OS compositor entirely). When the GPU is detected as Pro but `VK_KHR_display` is not available (e.g., display not set to dedicated mode), the module falls back to a fullscreen window path while still reporting Pro tier.
+When `VK_KHR_display` is available **and** the target display is enumerated through it, the module uses direct display mode (bypasses the OS compositor entirely). When the GPU is detected as Pro but `VK_KHR_display` is not available or the display is not enumerated (e.g., display not set to dedicated mode), the module falls back to a fullscreen window path while still reporting Pro tier.
+
+#### VK_KHR_display on Windows vs Linux
+
+On **Windows**, `VK_KHR_display` is only available on NVIDIA professional GPUs (Quadro, RTX A-series, Ada workstation) when a display is explicitly released from the Windows desktop and configured as a "dedicated GPU display" via:
+
+> NVIDIA Control Panel → Workstation → View system topology → Right-click display → "Use for dedicated GPU display"
+
+This removes the display from the Windows GDI/DWM desktop entirely. The NVIDIA driver then exposes it through `vkGetPhysicalDeviceDisplayPropertiesKHR`. In practice, **most Windows deployments will use the "Pro (fullscreen)" path** with `VK_EXT_full_screen_exclusive` rather than direct display, because removing a display from the desktop is disruptive to manage and prevents any desktop interaction on that output.
+
+On **Linux**, `VK_KHR_display` is more broadly available: any GPU with DRM/KMS support can enumerate displays when no window system (X11/Wayland) is managing them. This makes the direct display path the natural choice for headless broadcast servers running Linux. However, the current module is **Windows-only** (uses Win32 APIs, WGL, NvAPI, `WGL_NV_gpu_affinity`), so the Linux path is not currently implemented.
+
+#### Practical recommendation (Windows)
+
+For most broadcast installations, the **"Pro (fullscreen)"** path (Win32 surface + `VK_EXT_full_screen_exclusive`) is the recommended configuration. It provides compositor bypass on NVIDIA professional drivers while keeping the display accessible for management and diagnostics. Reserve dedicated display mode for scenarios requiring absolute timing guarantees (e.g., genlock with `VK_EXT_display_control` VBlank fences).
 
 The fullscreen window path uses `VK_EXT_full_screen_exclusive` with `VK_FULL_SCREEN_EXCLUSIVE_DEFAULT_EXT` mode, which hints to the driver that it may bypass DWM composition when the window covers the entire display. If the driver does not support FSE or swapchain creation fails with the FSE chain, the module silently retries without it.
 
