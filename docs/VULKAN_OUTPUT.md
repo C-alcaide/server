@@ -176,35 +176,41 @@ The module detects the GPU capability tier at runtime and adapts its output stra
 | **Consumer** | None of the above | Borderless fullscreen window with `VkSurfaceKHR` via Win32 | Basic frame delivery, no VBlank timing |
 
 **Pro tier** is detected when any of the following is true:
-1. `VK_KHR_display` extension is available — the display is configured as "dedicated" in NVIDIA Control Panel
+1. `VK_KHR_display` extension is available and enumerates displays (see caveat below)
 2. `VK_NV_present_barrier` extension is available — indicates Quadro Sync hardware
 3. The GPU name matches a known professional model (Quadro, RTX A-series, Ada, Tesla)
 
-When `VK_KHR_display` is available **and** the target display is enumerated through it, the module uses direct display mode (bypasses the OS compositor entirely). When the GPU is detected as Pro but `VK_KHR_display` is not available or the display is not enumerated (e.g., display not set to dedicated mode), the module falls back to a fullscreen window path while still reporting Pro tier.
+When `VK_KHR_display` is available **and** the target display is enumerated through it, the module uses direct display mode (bypasses the OS compositor entirely). When the GPU is detected as Pro but no display is enumerated through `VK_KHR_display`, the module falls back to a fullscreen window path while still reporting Pro tier.
 
-#### VK_KHR_display on Windows vs Linux
+#### VK_KHR_display on Windows — effectively non-functional
 
-On **Windows**, `VK_KHR_display` is only available on NVIDIA professional GPUs (Quadro, RTX A-series, Ada workstation) when a display is explicitly released from the Windows desktop and configured as a "dedicated GPU display" via:
+On **Windows**, `VK_KHR_display` is **not usable in practice**. The Windows Display Manager (DWM) retains exclusive ownership of all connected displays at all times. There is no supported mechanism to release a display from Windows to make it available through `vkGetPhysicalDeviceDisplayPropertiesKHR`:
 
-> NVIDIA Control Panel → Workstation → View system topology → Right-click display → "Use for dedicated GPU display"
+- **"Don't use for desktop"** (Windows Display Settings): Makes the display inactive, but Windows still holds the underlying display resource. The display becomes unavailable to *both* the desktop and applications — including Vulkan's display enumeration.
+- **NVIDIA "dedicated GPU display"** (referenced in older documentation): This option does **not exist** in current NVIDIA Windows drivers, including professional Quadro and RTX A-series cards. It may have been available in legacy drivers (pre-R535) or only on specific enterprise Linux configurations.
+- **`VK_NV_acquire_winrt_display`**: NVIDIA's Windows-specific extension for acquiring displays from WinRT. In practice, it does not provide a working path to release a display from DWM either.
 
-This removes the display from the Windows GDI/DWM desktop entirely. The NVIDIA driver then exposes it through `vkGetPhysicalDeviceDisplayPropertiesKHR`. In practice, **most Windows deployments will use the "Pro (fullscreen)" path** with `VK_EXT_full_screen_exclusive` rather than direct display, because removing a display from the desktop is disruptive to manage and prevents any desktop interaction on that output.
+The NVIDIA Windows driver *does* report `VK_KHR_display` as a supported extension, but `vkGetPhysicalDeviceDisplayPropertiesKHR` returns **zero displays** because none can be released from Windows. The code handles this gracefully — when no displays are enumerated, it falls through to the fullscreen window path.
 
-On **Linux**, `VK_KHR_display` is more broadly available: any GPU with DRM/KMS support can enumerate displays when no window system (X11/Wayland) is managing them. This makes the direct display path the natural choice for headless broadcast servers running Linux. However, the current module is **Windows-only** (uses Win32 APIs, WGL, NvAPI, `WGL_NV_gpu_affinity`), so the Linux path is not currently implemented.
+**Bottom line**: On Windows, the "Pro (direct display)" code path will never be reached. All output goes through `VK_EXT_full_screen_exclusive` + Win32 surfaces.
 
-#### Practical recommendation (Windows)
+#### Linux (not currently implemented)
 
-For most broadcast installations, the **"Pro (fullscreen)"** path (Win32 surface + `VK_EXT_full_screen_exclusive`) is the recommended configuration. It provides compositor bypass on NVIDIA professional drivers while keeping the display accessible for management and diagnostics. Reserve dedicated display mode for scenarios requiring absolute timing guarantees (e.g., genlock with `VK_EXT_display_control` VBlank fences).
+On **Linux**, `VK_KHR_display` works as intended: when no compositor (X11/Wayland) manages a display, it appears through `vkGetPhysicalDeviceDisplayPropertiesKHR` and can be acquired for direct scanout via DRM/KMS. This is the natural platform for direct display in headless broadcast servers. However, the current module is **Windows-only** (uses Win32 APIs, WGL, NvAPI, `WGL_NV_gpu_affinity`), so this path is not available.
 
-The fullscreen window path uses `VK_EXT_full_screen_exclusive` with `VK_FULL_SCREEN_EXCLUSIVE_DEFAULT_EXT` mode, which hints to the driver that it may bypass DWM composition when the window covers the entire display. If the driver does not support FSE or swapchain creation fails with the FSE chain, the module silently retries without it.
+#### Actual output path used (Windows)
+
+All Windows deployments use the **"Pro (fullscreen)"** or **"Consumer (fullscreen)"** path:
+
+The fullscreen window path uses `VK_EXT_full_screen_exclusive` with `VK_FULL_SCREEN_EXCLUSIVE_DEFAULT_EXT` mode, which hints to the driver that it may bypass DWM composition when the window covers the entire display. On NVIDIA professional drivers (Quadro, RTX A-series), this achieves near-direct-scanout performance without needing to release the display from Windows. If the driver does not support FSE or swapchain creation fails with the FSE chain, the module silently retries without it.
 
 **Consumer tier** creates a `WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_APPWINDOW` borderless window covering the target monitor and presents through the standard Vulkan WSI (Window System Integration) path. This still benefits from Vulkan's explicit swapchain control and VSync timing.
 
 The tier label logged at startup indicates the path used:
 
 ```
-[vulkan_output] ... initialized. Tier: Pro (direct display)   -- VK_KHR_display path
-[vulkan_output] ... initialized. Tier: Pro (fullscreen)       -- Pro GPU, fullscreen window
+[vulkan_output] ... initialized. Tier: Pro (direct display)   -- VK_KHR_display path (never reached on Windows)
+[vulkan_output] ... initialized. Tier: Pro (fullscreen)       -- Pro GPU, fullscreen window (normal Windows path)
 [vulkan_output] ... initialized. Tier: Consumer (fullscreen)  -- Consumer GPU, fullscreen window
 ```
 
