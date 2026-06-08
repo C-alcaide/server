@@ -24,6 +24,7 @@
 #include "../image/image_kernel.h"
 #include "buffer.h"
 #include "pipeline.h"
+#include "platform_config.h"
 #include "texture.h"
 
 #include <common/array.h>
@@ -40,10 +41,14 @@ VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
 #define VMA_STATIC_VULKAN_FUNCTIONS 0
 #define VMA_DYNAMIC_VULKAN_FUNCTIONS 1
 #define VMA_IMPLEMENTATION
+#ifdef _MSC_VER
 #pragma warning(push)
 #pragma warning(disable : 4189)
+#endif
 #include <vk_mem_alloc.h>
+#ifdef _MSC_VER
 #pragma warning(pop)
+#endif
 
 #include <boost/asio/deadline_timer.hpp>
 #include <boost/asio/dispatch.hpp>
@@ -206,8 +211,8 @@ struct device::impl : public std::enable_shared_from_this<impl>
                            .set_required_features_13(features13)
                            .add_required_extension(VK_KHR_DYNAMIC_RENDERING_LOCAL_READ_EXTENSION_NAME)
                            .add_required_extension_features(localReadFeatures)
-                           .add_required_extension("VK_KHR_external_memory_win32")
-                           .add_required_extension("VK_KHR_external_semaphore_win32")
+                           .add_required_extension(platform::kExtMemExtName)
+                           .add_required_extension(platform::kExtSemExtName)
                            .prefer_gpu_device_type(vkb::PreferredDeviceType::discrete)
                            .select();
         if (!gpu_res) {
@@ -442,7 +447,7 @@ struct device::impl : public std::enable_shared_from_this<impl>
             // Chain external memory info so the attachment can be exported to
             // other VkDevices on the same physical GPU (VK→VK zero-copy output).
             vk::ExternalMemoryImageCreateInfo extMemImageInfo{};
-            extMemImageInfo.handleTypes = vk::ExternalMemoryHandleTypeFlagBits::eOpaqueWin32;
+            extMemImageInfo.handleTypes = static_cast<vk::ExternalMemoryHandleTypeFlagBits>(platform::kExternalMemoryHandleType);
 
             vk::ImageCreateInfo imageInfo{};
             imageInfo.pNext         = &extMemImageInfo;
@@ -463,7 +468,7 @@ struct device::impl : public std::enable_shared_from_this<impl>
             auto memReq = _device.getImageMemoryRequirements(image);
 
             vk::ExportMemoryAllocateInfo exportMemInfo{};
-            exportMemInfo.handleTypes = vk::ExternalMemoryHandleTypeFlagBits::eOpaqueWin32;
+            exportMemInfo.handleTypes = static_cast<vk::ExternalMemoryHandleTypeFlagBits>(platform::kExternalMemoryHandleType);
 
             vk::MemoryAllocateInfo allocInfo{};
             allocInfo.pNext           = &exportMemInfo;
@@ -949,7 +954,7 @@ device::create_exportable_texture(int width, int height, int stride, common::bit
 
         // External memory export info chained into image create
         vk::ExternalMemoryImageCreateInfo extMemImageInfo{};
-        extMemImageInfo.handleTypes = vk::ExternalMemoryHandleTypeFlagBits::eOpaqueWin32;
+        extMemImageInfo.handleTypes = static_cast<vk::ExternalMemoryHandleTypeFlagBits>(platform::kExternalMemoryHandleType);
 
         vk::ImageCreateInfo imageInfo{};
         imageInfo.pNext         = &extMemImageInfo;
@@ -970,7 +975,7 @@ device::create_exportable_texture(int width, int height, int stride, common::bit
 
         // Export memory allocate info
         vk::ExportMemoryAllocateInfo exportMemInfo{};
-        exportMemInfo.handleTypes = vk::ExternalMemoryHandleTypeFlagBits::eOpaqueWin32;
+        exportMemInfo.handleTypes = static_cast<vk::ExternalMemoryHandleTypeFlagBits>(platform::kExternalMemoryHandleType);
 
         vk::MemoryAllocateInfo allocInfo{};
         allocInfo.pNext           = &exportMemInfo;

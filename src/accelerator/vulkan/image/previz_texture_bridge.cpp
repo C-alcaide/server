@@ -29,7 +29,11 @@
 #include <vulkan/vulkan.hpp>
 
 #include <GL/glew.h>
+#ifdef _WIN32
 #include <GL/wglew.h>
+#else
+#include <EGL/egl.h>
+#endif
 
 #include <algorithm>
 #include <cstring>
@@ -50,8 +54,14 @@ namespace {
 // GL_EXT_memory_object function pointers
 PFNGLCREATEMEMORYOBJECTSEXTPROC        glCreateMemoryObjectsEXT_       = nullptr;
 PFNGLDELETEMEMORYOBJECTSEXTPROC        glDeleteMemoryObjectsEXT_       = nullptr;
-PFNGLIMPORTMEMORYWIN32HANDLEEXTPROC    glImportMemoryWin32HandleEXT_   = nullptr;
 PFNGLTEXTURESTORAGEMEM2DEXTPROC        glTextureStorageMem2DEXT_       = nullptr;
+
+#ifdef _WIN32
+PFNGLIMPORTMEMORYWIN32HANDLEEXTPROC    glImportMemoryWin32HandleEXT_   = nullptr;
+#else
+using PFNGLIMPORTMEMORYFDEXTPROC = void (*)(GLuint, GLuint64, GLenum, GLint);
+PFNGLIMPORTMEMORYFDEXTPROC             glImportMemoryFdEXT_            = nullptr;
+#endif
 
 std::once_flag gl_ext_flag;
 bool           gl_ext_loaded = false;
@@ -59,6 +69,7 @@ bool           gl_ext_loaded = false;
 void try_load_gl_extensions()
 {
     std::call_once(gl_ext_flag, [] {
+#ifdef _WIN32
         glCreateMemoryObjectsEXT_      = (PFNGLCREATEMEMORYOBJECTSEXTPROC)wglGetProcAddress("glCreateMemoryObjectsEXT");
         glDeleteMemoryObjectsEXT_      = (PFNGLDELETEMEMORYOBJECTSEXTPROC)wglGetProcAddress("glDeleteMemoryObjectsEXT");
         glImportMemoryWin32HandleEXT_  = (PFNGLIMPORTMEMORYWIN32HANDLEEXTPROC)wglGetProcAddress("glImportMemoryWin32HandleEXT");
@@ -66,6 +77,15 @@ void try_load_gl_extensions()
 
         gl_ext_loaded = glCreateMemoryObjectsEXT_ && glImportMemoryWin32HandleEXT_ &&
                         glTextureStorageMem2DEXT_;
+#else
+        glCreateMemoryObjectsEXT_      = (PFNGLCREATEMEMORYOBJECTSEXTPROC)eglGetProcAddress("glCreateMemoryObjectsEXT");
+        glDeleteMemoryObjectsEXT_      = (PFNGLDELETEMEMORYOBJECTSEXTPROC)eglGetProcAddress("glDeleteMemoryObjectsEXT");
+        glImportMemoryFdEXT_           = (PFNGLIMPORTMEMORYFDEXTPROC)eglGetProcAddress("glImportMemoryFdEXT");
+        glTextureStorageMem2DEXT_      = (PFNGLTEXTURESTORAGEMEM2DEXTPROC)eglGetProcAddress("glTextureStorageMem2DEXT");
+
+        gl_ext_loaded = glCreateMemoryObjectsEXT_ && glImportMemoryFdEXT_ &&
+                        glTextureStorageMem2DEXT_;
+#endif
 
         if (!gl_ext_loaded) {
             CASPAR_LOG(warning) << L"[previz_bridge] GL_EXT_memory_object not available — "
@@ -87,7 +107,7 @@ struct previz_texture_bridge::channel_slot
     // VK side
     VkImage        vk_image      = VK_NULL_HANDLE;
     VkDeviceMemory vk_memory     = VK_NULL_HANDLE;
-    HANDLE         memory_handle    = nullptr;
+    platform::native_handle_t memory_handle = platform::kInvalidHandle;
     VkDeviceSize   memory_size      = 0;
 
     // GL side (interop)
@@ -112,8 +132,13 @@ previz_texture_bridge::previz_texture_bridge(const spl::shared_ptr<device>&     
     auto vk_dev = static_cast<VkDevice>(vk_device_->getVkDevice());
 
     // Load VK extension function pointers
-    vkGetMemoryWin32HandleKHR_ = reinterpret_cast<PFN_vkGetMemoryWin32HandleKHR>(
+#ifdef _WIN32
+    vkGetMemoryHandleKHR_ = reinterpret_cast<PFN_vkGetMemoryWin32HandleKHR>(
         vkGetDeviceProcAddr(vk_dev, "vkGetMemoryWin32HandleKHR"));
+#else
+    vkGetMemoryHandleKHR_ = reinterpret_cast<PFN_vkGetMemoryFdKHR>(
+        vkGetDeviceProcAddr(vk_dev, "vkGetMemoryFdKHR"));
+#endif
 
     // Detect Pascal GPU for LINEAR tiling workaround
     vk_device_->dispatch_sync([this] {
@@ -164,8 +189,7 @@ previz_texture_bridge::~previz_texture_bridge()
                 vkDestroyImage(vk_dev, s.vk_image, nullptr);
             if (s.vk_memory != VK_NULL_HANDLE)
                 vkFreeMemory(vk_dev, s.vk_memory, nullptr);
-            if (s.memory_handle)
-                CloseHandle(s.memory_handle);
+            platform::close_handle(s.memory_handle);
         }
     });
 }
@@ -187,7 +211,7 @@ void previz_texture_bridge::create_slot(channel_slot& s, int width, int height, 
 
     VkExternalMemoryImageCreateInfo ext_mem_img{};
     ext_mem_img.sType       = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO;
-    ext_mem_img.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+    ext_mem_img.handleTypes = platform::kExternalMemoryHandleType;
 
     VkImageCreateInfo img_info{};
     img_info.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -213,7 +237,7 @@ void previz_texture_bridge::create_slot(channel_slot& s, int width, int height, 
 
     VkExportMemoryAllocateInfo export_info{};
     export_info.sType       = VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO;
-    export_info.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+    export_info.handleTypes = platform::kExternalMemoryHandleType;
 
     VkPhysicalDeviceMemoryProperties mem_props;
     vkGetPhysicalDeviceMemoryProperties(vk_phys, &mem_props);
@@ -239,23 +263,45 @@ void previz_texture_bridge::create_slot(channel_slot& s, int width, int height, 
     VK_CHECK(vkBindImageMemory(vk_dev, s.vk_image, s.vk_memory, 0));
 
     // Export memory handle
+#ifdef _WIN32
     VkMemoryGetWin32HandleInfoKHR get_handle{};
     get_handle.sType      = VK_STRUCTURE_TYPE_MEMORY_GET_WIN32_HANDLE_INFO_KHR;
     get_handle.memory     = s.vk_memory;
-    get_handle.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+    get_handle.handleType = platform::kExternalMemoryHandleType;
 
-    if (!vkGetMemoryWin32HandleKHR_)
+    if (!vkGetMemoryHandleKHR_)
         CASPAR_THROW_EXCEPTION(caspar_exception() << msg_info("vkGetMemoryWin32HandleKHR not loaded"));
-    VK_CHECK(vkGetMemoryWin32HandleKHR_(vk_dev, &get_handle, &s.memory_handle));
+    VK_CHECK(vkGetMemoryHandleKHR_(vk_dev, &get_handle, &s.memory_handle));
+#else
+    VkMemoryGetFdInfoKHR get_handle{};
+    get_handle.sType      = VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR;
+    get_handle.memory     = s.vk_memory;
+    get_handle.handleType = platform::kExternalMemoryHandleType;
+
+    if (!vkGetMemoryHandleKHR_)
+        CASPAR_THROW_EXCEPTION(caspar_exception() << msg_info("vkGetMemoryFdKHR not loaded"));
+    VK_CHECK(vkGetMemoryHandleKHR_(vk_dev, &get_handle, &s.memory_handle));
+#endif
 
     // ── GL: Import memory + create texture ───────────────────────────────
 
     if (interop_available_) {
         glCreateMemoryObjectsEXT_(1, &s.gl_memory_object);
+#ifdef _WIN32
         glImportMemoryWin32HandleEXT_(s.gl_memory_object,
                                       mem_reqs.size,
-                                      GL_HANDLE_TYPE_OPAQUE_WIN32_EXT,
+                                      platform::kGlHandleType,
                                       s.memory_handle);
+#else
+        // glImportMemoryFdEXT consumes the fd — duplicate it first since we
+        // want to keep memory_handle valid for the slot's lifetime.
+        int import_fd = dup(s.memory_handle);
+        glImportMemoryFdEXT_(s.gl_memory_object,
+                             mem_reqs.size,
+                             platform::kGlHandleType,
+                             import_fd);
+        // fd is consumed by GL, no need to close import_fd
+#endif
 
         glCreateTextures(GL_TEXTURE_2D, 1, &s.gl_texture);
         glTextureParameteri(s.gl_texture, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
@@ -296,13 +342,12 @@ void previz_texture_bridge::destroy_slot(channel_slot& s)
     auto vk_image  = s.vk_image;
     auto vk_memory = s.vk_memory;
     auto mem_handle = s.memory_handle;
-    vk_device_->dispatch_sync([vk_dev, vk_image, vk_memory, mem_handle] {
+    vk_device_->dispatch_sync([vk_dev, vk_image, vk_memory, mem_handle]() mutable {
         if (vk_image != VK_NULL_HANDLE)
             vkDestroyImage(vk_dev, vk_image, nullptr);
         if (vk_memory != VK_NULL_HANDLE)
             vkFreeMemory(vk_dev, vk_memory, nullptr);
-        if (mem_handle)
-            CloseHandle(mem_handle);
+        platform::close_handle(mem_handle);
     });
 
     s = {};

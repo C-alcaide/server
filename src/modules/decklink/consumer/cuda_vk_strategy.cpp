@@ -462,7 +462,7 @@ struct cuda_vk_strategy::impl
         if (!vk_tex) return nullptr;
 
         // Get Win32 handle for CUDA import
-        void* handle = vk_tex->export_win32_handle();
+        void* handle = vk_tex->export_native_handle();
         if (!handle) return nullptr;
 
         bool is_16bit = vk_tex->depth() != common::bit_depth::bit8;
@@ -600,7 +600,7 @@ struct cuda_vk_strategy::impl
         auto vk_tex = wrapper->vk_texture();
         if (!vk_tex) return nullptr;
 
-        void* handle = vk_tex->export_win32_handle();
+        void* handle = vk_tex->export_native_handle();
         if (!handle) return nullptr;
 
         // The BGRA8 kernel only supports 8-bit textures. For 16-bit textures,

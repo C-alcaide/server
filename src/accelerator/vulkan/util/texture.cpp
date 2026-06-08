@@ -21,6 +21,7 @@
 
 #include "texture.h"
 #include "buffer.h"
+#include "platform_config.h"
 
 #include <common/bit_depth.h>
 #include <common/log.h>
@@ -46,7 +47,7 @@ struct texture::impl
     common::bit_depth depth_;
     uint8_t           device_luid_[8] = {};
     bool              has_luid_ = false;
-    mutable HANDLE    win32_handle_ = nullptr; // Cached external memory handle
+    mutable platform::native_handle_t native_handle_ = platform::kInvalidHandle;
 
     impl(const impl&)            = delete;
     impl& operator=(const impl&) = delete;
@@ -76,10 +77,7 @@ struct texture::impl
 
     ~impl()
     {
-        if (win32_handle_) {
-            CloseHandle(win32_handle_);
-            win32_handle_ = nullptr;
-        }
+        platform::close_handle(native_handle_);
         device_.destroyImageView(imageView_);
         device_.freeMemory(memory_);
         device_.destroyImage(image_);
@@ -134,32 +132,56 @@ void texture::set_device_luid(const uint8_t* luid)
     }
 }
 
-HANDLE texture::export_win32_handle() const
+platform::native_handle_t texture::export_native_handle() const
 {
-    if (impl_->win32_handle_)
-        return impl_->win32_handle_;
+    if (impl_->native_handle_ != platform::kInvalidHandle)
+        return impl_->native_handle_;
 
+#ifdef _WIN32
     auto pfn = reinterpret_cast<PFN_vkGetMemoryWin32HandleKHR>(
         impl_->device_.getProcAddr("vkGetMemoryWin32HandleKHR"));
     if (!pfn) {
         CASPAR_LOG(debug) << L"[vulkan] vkGetMemoryWin32HandleKHR not available";
-        return nullptr;
+        return platform::kInvalidHandle;
     }
 
     VkMemoryGetWin32HandleInfoKHR handleInfo{};
     handleInfo.sType      = VK_STRUCTURE_TYPE_MEMORY_GET_WIN32_HANDLE_INFO_KHR;
     handleInfo.memory     = impl_->memory_;
-    handleInfo.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+    handleInfo.handleType = platform::kExternalMemoryHandleType;
 
     HANDLE handle = nullptr;
     VkResult result = pfn(static_cast<VkDevice>(impl_->device_), &handleInfo, &handle);
     if (result != VK_SUCCESS || !handle) {
-        CASPAR_LOG(debug) << L"[vulkan] Failed to export Win32 handle (result=" << result << L")";
-        return nullptr;
+        CASPAR_LOG(debug) << L"[vulkan] Failed to export memory handle (result=" << result << L")";
+        return platform::kInvalidHandle;
     }
 
-    impl_->win32_handle_ = handle;
-    return handle;
+    impl_->native_handle_ = handle;
+#else
+    auto pfn = reinterpret_cast<PFN_vkGetMemoryFdKHR>(
+        impl_->device_.getProcAddr("vkGetMemoryFdKHR"));
+    if (!pfn) {
+        CASPAR_LOG(debug) << L"[vulkan] vkGetMemoryFdKHR not available";
+        return platform::kInvalidHandle;
+    }
+
+    VkMemoryGetFdInfoKHR fdInfo{};
+    fdInfo.sType      = VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR;
+    fdInfo.memory     = impl_->memory_;
+    fdInfo.handleType = platform::kExternalMemoryHandleType;
+
+    int fd = -1;
+    VkResult result = pfn(static_cast<VkDevice>(impl_->device_), &fdInfo, &fd);
+    if (result != VK_SUCCESS || fd < 0) {
+        CASPAR_LOG(debug) << L"[vulkan] Failed to export memory fd (result=" << result << L")";
+        return platform::kInvalidHandle;
+    }
+
+    impl_->native_handle_ = fd;
+#endif
+
+    return impl_->native_handle_;
 }
 
 }}} // namespace caspar::accelerator::vulkan

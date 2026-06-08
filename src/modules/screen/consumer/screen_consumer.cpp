@@ -1282,7 +1282,7 @@ struct gpu_strategy : public display_strategy
         // Without this the GPU may still be rendering → garbled output.
         tex->ensure_render_complete();
 
-        HANDLE handle = static_cast<HANDLE>(tex->export_win32_handle());
+        HANDLE handle = static_cast<HANDLE>(tex->export_native_handle());
         if (!handle)
             return false;
 

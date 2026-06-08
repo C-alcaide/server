@@ -22,13 +22,11 @@
 #pragma once
 
 #include <common/bit_depth.h>
+#include "platform_config.h"
+
 #include <core/frame/frame.h>
 #include <memory>
 #include <vulkan/vulkan.hpp>
-
-#ifdef _WIN32
-#include <windows.h>
-#endif
 
 namespace caspar { namespace accelerator { namespace vulkan {
 
@@ -63,12 +61,13 @@ class texture final
     VkDeviceMemory    memory() const;
     vk::DeviceSize    alloc_size() const;
 
-    /// Export the texture's device memory as a Win32 HANDLE via
-    /// VK_KHR_external_memory_win32.  The handle is cached — subsequent calls
-    /// return the same HANDLE.  The caller must NOT close the returned handle;
-    /// it is owned by the texture and closed on destruction.
-    /// Returns nullptr if the memory was not allocated with export capability.
-    HANDLE            export_win32_handle() const;
+    /// Export the texture's device memory as a platform-native handle via
+    /// VK_KHR_external_memory_win32 (Windows) or VK_KHR_external_memory_fd (Linux).
+    /// The handle is cached — subsequent calls return the same handle.
+    /// The caller must NOT close the returned handle; it is owned by the texture
+    /// and closed on destruction.
+    /// Returns kInvalidHandle if the memory was not allocated with export capability.
+    platform::native_handle_t export_native_handle() const;
 
     /// Returns the LUID of the VkDevice that created this texture (8 bytes).
     /// Returns nullptr if LUID was not set at creation time.

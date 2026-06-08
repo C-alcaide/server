@@ -19,9 +19,10 @@
 
 #pragma once
 
-// Platform-agnostic handle type definitions for Vulkan/GL external memory interop.
-// Windows: opaque Win32 HANDLEs
-// Linux:   POSIX file descriptors (fd)
+// Platform-agnostic handle type definitions for the Vulkan mixer's
+// external memory/semaphore interop (VK→VK cross-device, VK→GL previz).
+// Windows: opaque Win32 HANDLEs via VK_KHR_external_memory_win32
+// Linux:   POSIX file descriptors via VK_KHR_external_memory_fd
 
 #ifdef _WIN32
 #include <windows.h>
@@ -32,9 +33,7 @@
 #include <unistd.h>
 #endif
 
-#include <GL/glew.h>
-
-namespace caspar { namespace vulkan_output { namespace platform {
+namespace caspar { namespace accelerator { namespace vulkan { namespace platform {
 
 // ─── Vulkan external memory handle type ─────────────────────────────────────
 #ifdef _WIN32
@@ -42,29 +41,25 @@ inline constexpr VkExternalMemoryHandleTypeFlagBits kExternalMemoryHandleType =
     VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
 inline constexpr VkExternalSemaphoreHandleTypeFlagBits kExternalSemaphoreHandleType =
     VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_WIN32_BIT;
-inline constexpr const char* kVkExternalMemoryExtName  = VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME;
-inline constexpr const char* kVkExternalSemExtName     = VK_KHR_EXTERNAL_SEMAPHORE_WIN32_EXTENSION_NAME;
+inline constexpr const char* kExtMemExtName = VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME;
+inline constexpr const char* kExtSemExtName = VK_KHR_EXTERNAL_SEMAPHORE_WIN32_EXTENSION_NAME;
 #else
 inline constexpr VkExternalMemoryHandleTypeFlagBits kExternalMemoryHandleType =
     VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
 inline constexpr VkExternalSemaphoreHandleTypeFlagBits kExternalSemaphoreHandleType =
     VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
-inline constexpr const char* kVkExternalMemoryExtName  = VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME;
-inline constexpr const char* kVkExternalSemExtName     = VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME;
+inline constexpr const char* kExtMemExtName = VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME;
+inline constexpr const char* kExtSemExtName = VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME;
 #endif
 
 // ─── GL import handle type ──────────────────────────────────────────────────
 #ifdef _WIN32
-inline constexpr GLenum kGlHandleType = GL_HANDLE_TYPE_OPAQUE_WIN32_EXT;
-inline constexpr const char* kGlMemoryObjectExtName = "GL_EXT_memory_object_win32";
-inline constexpr const char* kGlSemaphoreExtName    = "GL_EXT_semaphore_win32";
+inline constexpr unsigned int kGlHandleType = 0x9462; // GL_HANDLE_TYPE_OPAQUE_WIN32_EXT
 #else
-inline constexpr GLenum kGlHandleType = GL_HANDLE_TYPE_OPAQUE_FD_EXT;
-inline constexpr const char* kGlMemoryObjectExtName = "GL_EXT_memory_object_fd";
-inline constexpr const char* kGlSemaphoreExtName    = "GL_EXT_semaphore_fd";
+inline constexpr unsigned int kGlHandleType = 0x9464; // GL_HANDLE_TYPE_OPAQUE_FD_EXT
 #endif
 
-// ─── Platform handle type ───────────────────────────────────────────────────
+// ─── Platform native handle type ────────────────────────────────────────────
 #ifdef _WIN32
 using native_handle_t = HANDLE;
 inline constexpr native_handle_t kInvalidHandle = nullptr;
@@ -86,4 +81,4 @@ inline void close_handle(native_handle_t& h)
     h = kInvalidHandle;
 }
 
-}}} // namespace caspar::vulkan_output::platform
+}}}} // namespace caspar::accelerator::vulkan::platform

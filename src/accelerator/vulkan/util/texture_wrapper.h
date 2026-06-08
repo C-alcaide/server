@@ -60,7 +60,15 @@ class texture_wrapper : public core::texture
     void bind(int /*index*/) override {} // No-op for Vulkan
     void unbind() override {}            // No-op for Vulkan
 
-    void*              export_win32_handle() const override { return tex_->export_win32_handle(); }
+    void*              export_native_handle() const override
+    {
+#ifdef _WIN32
+        return tex_->export_native_handle();
+#else
+        auto fd = tex_->export_native_handle();
+        return fd == platform::kInvalidHandle ? nullptr : reinterpret_cast<void*>(static_cast<intptr_t>(fd));
+#endif
+    }
     unsigned long long export_alloc_size() const override   { return static_cast<unsigned long long>(tex_->alloc_size()); }
     int                tex_width() const override           { return tex_->width(); }
     int                tex_height() const override          { return tex_->height(); }

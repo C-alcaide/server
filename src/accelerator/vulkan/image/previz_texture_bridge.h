@@ -19,13 +19,11 @@
 
 #pragma once
 
+#include "../util/platform_config.h"
+
 #include <common/memory.h>
 
 #include <GL/glew.h>
-
-#define VK_USE_PLATFORM_WIN32_KHR
-#include <vulkan/vulkan.h>
-#include <vulkan/vulkan_win32.h>
 
 #include <map>
 #include <memory>
@@ -47,7 +45,7 @@ class device;
 /// After the Vulkan mixer composites a channel, the output texture is posted
 /// to this bridge.  The bridge creates a shared VkImage with exportable
 /// memory, blits the composited result into it, and imports the memory into
-/// the previz OpenGL context via GL_EXT_memory_object_win32.  Synchronization
+/// the previz OpenGL context via GL_EXT_memory_object.  Synchronization
 /// is fence-based: post_channel() waits for the VK blit to complete before
 /// returning, so GL can safely sample the shared texture immediately.
 ///
@@ -114,7 +112,11 @@ class previz_texture_bridge
     std::map<int, channel_slot>        slots_; // channel_id → slot
 
     // VK function pointers (loaded once)
-    PFN_vkGetMemoryWin32HandleKHR      vkGetMemoryWin32HandleKHR_    = nullptr;
+#ifdef _WIN32
+    PFN_vkGetMemoryWin32HandleKHR      vkGetMemoryHandleKHR_ = nullptr;
+#else
+    PFN_vkGetMemoryFdKHR               vkGetMemoryHandleKHR_ = nullptr;
+#endif
 };
 
 }}} // namespace caspar::accelerator::vulkan

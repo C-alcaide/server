@@ -916,7 +916,7 @@ struct vk_readback_strategy::impl
         auto vk_tex = wrapper->vk_texture();
         if (!vk_tex) return {};
 
-        void* mem_handle = vk_tex->export_win32_handle();
+        void* mem_handle = vk_tex->export_native_handle();
         if (!mem_handle) return {};
 
         const uint8_t* luid = vk_tex->device_luid();
@@ -1120,7 +1120,7 @@ struct vk_readback_strategy::impl
         auto vk_tex = wrapper->vk_texture();
         if (!vk_tex) return nullptr;
 
-        void* mem_handle = vk_tex->export_win32_handle();
+        void* mem_handle = vk_tex->export_native_handle();
         if (!mem_handle) return nullptr;
 
         const uint8_t* luid = vk_tex->device_luid();

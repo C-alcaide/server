@@ -19,15 +19,16 @@ class texture
     virtual void bind(int index) = 0;
     virtual void unbind()        = 0;
 
-    /// Export a Win32 HANDLE for the texture's GPU memory (for VK→GL interop).
+    /// Export a platform-native handle for the texture's GPU memory.
+    /// Windows: Win32 HANDLE, Linux: file descriptor cast to void*.
     /// Returns nullptr if not supported. Caller must NOT close the handle.
-    virtual void*              export_win32_handle() const { return nullptr; }
+    virtual void*              export_native_handle() const { return nullptr; }
     /// Size of the GPU memory allocation backing the texture (bytes).
     virtual unsigned long long export_alloc_size() const { return 0; }
     /// Wait for any pending GPU rendering to complete before reading.
     /// No-op for OGL textures; overridden by VK texture_wrapper.
     virtual void               ensure_render_complete() const {}
-    /// Returns a Win32 HANDLE to a VkSemaphore signaled on render completion.
+    /// Returns a platform-native handle to a VkSemaphore signaled on render completion.
     /// For GPU-side waiting (e.g. CUDA interop) instead of CPU fence wait.
     virtual void*              render_semaphore_handle() const { return nullptr; }
     /// Timeline semaphore value that will be signaled on render completion.

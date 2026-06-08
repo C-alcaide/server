@@ -1367,8 +1367,8 @@ class vulkan_output_consumer : public core::frame_consumer
             if (vk_wrapper) {
                 vk_wrapper->ensure_render_complete();
                 auto vk_tex = vk_wrapper->vk_texture();
-                HANDLE handle = vk_tex->export_win32_handle();
-                if (handle) {
+                auto handle = static_cast<platform::native_handle_t>(vk_tex->export_native_handle());
+                if (handle != platform::kInvalidHandle) {
                     bool use_16bit = (vk_tex->depth() != common::bit_depth::bit8);
                     auto alloc_sz  = static_cast<unsigned long long>(vk_tex->alloc_size());
                     early_d2h_kicked = begin_cuda_d2h(handle,
@@ -1572,8 +1572,8 @@ class vulkan_output_consumer : public core::frame_consumer
             vk_wrapper->ensure_render_complete();
 
             auto vk_tex = vk_wrapper->vk_texture();
-            HANDLE handle = vk_tex->export_win32_handle();
-            if (handle) {
+            auto handle = static_cast<platform::native_handle_t>(vk_tex->export_native_handle());
+            if (handle != platform::kInvalidHandle) {
                 auto w = static_cast<uint32_t>(vk_tex->width());
                 auto h = static_cast<uint32_t>(vk_tex->height());
                 VkFormat fmt = (vk_tex->depth() == common::bit_depth::bit8)
@@ -2146,15 +2146,15 @@ class vulkan_output_consumer : public core::frame_consumer
         VkImageView    view         = VK_NULL_HANDLE;
         uint32_t       width        = 0;
         uint32_t       height       = 0;
-        HANDLE         src_handle   = nullptr; // Cache key — the mixer texture's exported handle (NOT owned)
-        HANDLE         owned_handle = nullptr; // Duplicated handle — owned by this cache entry, must be closed
+        platform::native_handle_t src_handle   = platform::kInvalidHandle; // Cache key — the mixer texture's exported handle (NOT owned)
+        platform::native_handle_t owned_handle = platform::kInvalidHandle; // Duplicated handle — owned by this cache entry, must be closed
     };
 
     // ─── VK-native import: import mixer's exportable VkImage memory ─────────
     // Returns a pointer to a cached vk_imported_image, or nullptr on failure.
     // The returned image is in VK_IMAGE_LAYOUT_UNDEFINED and needs a transition
     // to TRANSFER_SRC before blitting.
-    vk_imported_image* import_vk_texture(HANDLE src_handle, uint32_t width, uint32_t height, VkFormat format)
+    vk_imported_image* import_vk_texture(platform::native_handle_t src_handle, uint32_t width, uint32_t height, VkFormat format)
     {
         // Check cache first — the mixer pools render attachments, so we'll see
         // the same handle repeatedly.
@@ -2172,19 +2172,20 @@ class vulkan_output_consumer : public core::frame_consumer
             if (old.view != VK_NULL_HANDLE)   vkDestroyImageView(dev, old.view, nullptr);
             if (old.image != VK_NULL_HANDLE)  vkDestroyImage(dev, old.image, nullptr);
             if (old.memory != VK_NULL_HANDLE) vkFreeMemory(dev, old.memory, nullptr);
-            if (old.owned_handle)             CloseHandle(old.owned_handle);
+            platform::close_handle(old.owned_handle);
             vk_import_cache_.erase(vk_import_cache_.begin());
         }
 
         auto dev = device_->device();
 
-        // Import the Win32 handle as VkDeviceMemory on the output's VkDevice.
+        // Import the handle as VkDeviceMemory on the output's VkDevice.
         // Duplicate the handle so the import cache owns its own copy.
+#ifdef _WIN32
         HANDLE dup_handle = nullptr;
         if (!DuplicateHandle(GetCurrentProcess(), src_handle, GetCurrentProcess(),
                              &dup_handle, 0, FALSE, DUPLICATE_SAME_ACCESS)) {
             if (!vk_import_fail_logged_) {
-                CASPAR_LOG(warning) << print() << L" Failed to duplicate Win32 handle for VK import (cross-GPU; will use CUDA peer or CPU fallback)";
+                CASPAR_LOG(warning) << print() << L" Failed to duplicate handle for VK import (cross-GPU; will use CUDA peer or CPU fallback)";
                 vk_import_fail_logged_ = true;
             }
             return nullptr;
@@ -2192,13 +2193,28 @@ class vulkan_output_consumer : public core::frame_consumer
 
         VkImportMemoryWin32HandleInfoKHR importInfo{};
         importInfo.sType      = VK_STRUCTURE_TYPE_IMPORT_MEMORY_WIN32_HANDLE_INFO_KHR;
-        importInfo.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+        importInfo.handleType = platform::kExternalMemoryHandleType;
         importInfo.handle     = dup_handle;
+#else
+        int dup_handle = dup(src_handle);
+        if (dup_handle < 0) {
+            if (!vk_import_fail_logged_) {
+                CASPAR_LOG(warning) << print() << L" Failed to dup fd for VK import (cross-GPU; will use CUDA peer or CPU fallback)";
+                vk_import_fail_logged_ = true;
+            }
+            return nullptr;
+        }
+
+        VkImportMemoryFdInfoKHR importInfo{};
+        importInfo.sType      = VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR;
+        importInfo.handleType = platform::kExternalMemoryHandleType;
+        importInfo.fd         = dup_handle;
+#endif
 
         // Create a VkImage compatible with the imported memory
         VkExternalMemoryImageCreateInfo extMemImageInfo{};
         extMemImageInfo.sType       = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO;
-        extMemImageInfo.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+        extMemImageInfo.handleTypes = platform::kExternalMemoryHandleType;
 
         VkImageCreateInfo imageInfo{};
         imageInfo.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -2220,7 +2236,7 @@ class vulkan_output_consumer : public core::frame_consumer
                 CASPAR_LOG(warning) << print() << L" Failed to create VkImage for import (cross-GPU; will use CUDA peer or CPU fallback)";
                 vk_import_fail_logged_ = true;
             }
-            CloseHandle(dup_handle);
+            platform::close_handle(dup_handle);
             return nullptr;
         }
 
@@ -2244,7 +2260,7 @@ class vulkan_output_consumer : public core::frame_consumer
                 vk_import_fail_logged_ = true;
             }
             vkDestroyImage(dev, image, nullptr);
-            CloseHandle(dup_handle);
+            platform::close_handle(dup_handle);
             return nullptr;
         }
 
@@ -2261,9 +2277,16 @@ class vulkan_output_consumer : public core::frame_consumer
                 vk_import_fail_logged_ = true;
             }
             vkDestroyImage(dev, image, nullptr);
-            CloseHandle(dup_handle);
+            // On Linux, vkAllocateMemory failure does NOT consume the fd
+            platform::close_handle(dup_handle);
             return nullptr;
         }
+
+#ifndef _WIN32
+        // On Linux, successful vkAllocateMemory with VkImportMemoryFdInfoKHR
+        // consumes the fd — mark as invalid to prevent double-close.
+        dup_handle = platform::kInvalidHandle;
+#endif
 
         if (vkBindImageMemory(dev, image, importedMem, 0) != VK_SUCCESS) {
             if (!vk_import_fail_logged_) {
@@ -2272,7 +2295,7 @@ class vulkan_output_consumer : public core::frame_consumer
             }
             vkFreeMemory(dev, importedMem, nullptr);
             vkDestroyImage(dev, image, nullptr);
-            CloseHandle(dup_handle);
+            platform::close_handle(dup_handle);
             return nullptr;
         }
 
@@ -3502,8 +3525,7 @@ class vulkan_output_consumer : public core::frame_consumer
                         vkDestroyImage(dev, imp.image, nullptr);
                     if (imp.memory != VK_NULL_HANDLE)
                         vkFreeMemory(dev, imp.memory, nullptr);
-                    if (imp.owned_handle)
-                        CloseHandle(imp.owned_handle);
+                    platform::close_handle(imp.owned_handle);
                 }
                 vk_import_cache_.clear();
 

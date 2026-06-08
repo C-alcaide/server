@@ -23,12 +23,13 @@
 
 #include "../util/device.h"
 #include "../util/pipeline.h"
+#include "../util/platform_config.h"
 #include "../util/renderpass.h"
 #include "../util/texture.h"
 
 #include <common/assert.h>
 
-#ifdef WIN32
+#ifdef _WIN32
 #include <vulkan/vulkan_win32.h>
 #endif
 
@@ -193,7 +194,7 @@ struct image_kernel::impl
         vk::CommandBuffer cmd_buffer = nullptr;
         vk::Fence         fence      = nullptr;
         vk::Semaphore     render_sem = nullptr;   // exportable timeline semaphore for GPU-side wait
-        void*             render_sem_handle = nullptr; // cached Win32 HANDLE
+        platform::native_handle_t render_sem_handle = platform::kInvalidHandle; // cached handle
         uint64_t          render_sem_value  = 0;       // current timeline value
 
         explicit frame_data(image_kernel::impl* parent)
@@ -218,9 +219,8 @@ struct image_kernel::impl
 
             // Create an exportable timeline semaphore for GPU-side wait by CUDA consumers.
             if (!render_sem) {
-#ifdef WIN32
                 vk::ExportSemaphoreCreateInfo exportInfo{};
-                exportInfo.handleTypes = vk::ExternalSemaphoreHandleTypeFlagBits::eOpaqueWin32;
+                exportInfo.handleTypes = static_cast<vk::ExternalSemaphoreHandleTypeFlagBits>(platform::kExternalSemaphoreHandleType);
                 vk::SemaphoreTypeCreateInfo typeInfo{};
                 typeInfo.semaphoreType = vk::SemaphoreType::eTimeline;
                 typeInfo.initialValue  = 0;
@@ -228,7 +228,6 @@ struct image_kernel::impl
                 vk::SemaphoreCreateInfo semInfo{};
                 semInfo.pNext = &typeInfo;
                 render_sem = vk_device.createSemaphore(semInfo);
-#endif
             }
 
             render_sem_value++;
@@ -249,9 +248,9 @@ struct image_kernel::impl
 
         void*                           render_complete_semaphore_handle() override
         {
-#ifdef WIN32
-            if (render_sem && !render_sem_handle) {
+            if (render_sem && render_sem_handle == platform::kInvalidHandle) {
                 auto vk_device = parent->vulkan_->getVkDevice();
+#ifdef _WIN32
                 auto pfn = reinterpret_cast<PFN_vkGetSemaphoreWin32HandleKHR>(
                     vk_device.getProcAddr("vkGetSemaphoreWin32HandleKHR"));
                 if (!pfn) return nullptr;
@@ -265,10 +264,28 @@ struct image_kernel::impl
                 VkResult result = pfn(static_cast<VkDevice>(vk_device), &handleInfo, &handle);
                 if (result == VK_SUCCESS && handle)
                     render_sem_handle = handle;
+#else
+                auto pfn = reinterpret_cast<PFN_vkGetSemaphoreFdKHR>(
+                    vk_device.getProcAddr("vkGetSemaphoreFdKHR"));
+                if (!pfn) return nullptr;
+
+                VkSemaphoreGetFdInfoKHR fdInfo{};
+                fdInfo.sType     = VK_STRUCTURE_TYPE_SEMAPHORE_GET_FD_INFO_KHR;
+                fdInfo.semaphore = static_cast<VkSemaphore>(render_sem);
+                fdInfo.handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
+
+                int fd = -1;
+                VkResult result = pfn(static_cast<VkDevice>(vk_device), &fdInfo, &fd);
+                if (result == VK_SUCCESS && fd >= 0)
+                    render_sem_handle = fd;
+#endif
             }
+#ifdef _WIN32
             return render_sem_handle;
 #else
-            return nullptr;
+            return render_sem_handle == platform::kInvalidHandle
+                ? nullptr
+                : reinterpret_cast<void*>(static_cast<intptr_t>(render_sem_handle));
 #endif
         }
 
@@ -340,8 +357,8 @@ struct image_kernel::impl
                 if (frame.fence) {
                     vk_device.destroyFence(frame.fence);
                 }
-                if (frame.render_sem_handle) {
-                    CloseHandle(frame.render_sem_handle);
+                if (frame.render_sem_handle != platform::kInvalidHandle) {
+                    platform::close_handle(frame.render_sem_handle);
                 }
                 if (frame.render_sem) {
                     vk_device.destroySemaphore(frame.render_sem);
