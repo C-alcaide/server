@@ -1,69 +1,76 @@
 # CasparCG Server — Input & Capture Feature Reference
 
-This document covers the input and capture modules added to CasparCG Server: System Audio capture, LTC timecode input, DeckLink input sharing, and DeckLink synchronized capture.
+This document covers the input and capture modules added to CasparCG Server: PortAudio capture, LTC timecode input, DeckLink input sharing, and DeckLink synchronized capture.
 
 ---
 
-## 1. System Audio Producer (`system_audio`)
+## 1. Audio Capture Producer (`portaudio`)
 
 ### Overview
 
-The System Audio producer captures audio from any OS-visible recording device — Line-in jacks, USB audio interfaces, Dante Virtual Soundcard, VB-Cable virtual devices, etc. — and routes it into a CasparCG layer. This enables mixing external audio sources alongside video playback without requiring a DeckLink card.
+The PortAudio producer captures audio from any OS-visible recording device — Line-in jacks, USB audio interfaces, ASIO devices, Dante Virtual Soundcard, VB-Cable virtual devices, etc. — and routes it into a CasparCG layer. This enables mixing external audio sources alongside video playback without requiring a DeckLink card.
 
 ### Technical Architecture
 
 ```
 ┌──────────────────┐     callback      ┌────────────────────┐    receive_impl    ┌──────────────┐
-│  Audio Hardware   │ ──────────────▶  │  miniaudio capture  │ ──────────────▶   │  CasparCG    │
-│  (WASAPI/ALSA)   │   S32 samples    │  data_callback()    │   per-frame pull  │  Pipeline    │
+│  Audio Hardware   │ ──────────────▶  │  PortAudio capture  │ ──────────────▶   │  CasparCG    │
+│ (WASAPI/ASIO/ALSA)│   S32 samples    │  stream_callback()  │   per-frame pull  │  Pipeline    │
 └──────────────────┘                   │  ┌──────────────┐   │                   └──────────────┘
-                                       │  │  Ring Buffer  │   │
-                                       │  │ (mutex-locked)│   │
+                                       │  │  SPSC Ring   │   │
+                                       │  │  (lock-free) │   │
                                        │  └──────────────┘   │
                                        └────────────────────┘
 ```
 
-*   **Audio engine:** [miniaudio](https://miniaud.io) (MIT / Unlicense) in capture-only mode. Uses WASAPI on Windows, ALSA/PulseAudio on Linux.
-*   **Sample format:** 32-bit signed integer (S32), matching CasparCG's native audio format. No sample-rate conversion is performed — miniaudio is configured to match the channel's `audio_sample_rate` directly.
-*   **Channel count:** Matches the CasparCG channel's `audio_channels` setting (typically 2).
+*   **Audio engine:** [PortAudio](http://www.portaudio.com/) v19.7.0, statically linked. Uses WASAPI/DirectSound/ASIO on Windows, ALSA/JACK on Linux.
+*   **Sample format:** 32-bit signed integer (S32), matching CasparCG's native audio format. No sample-rate conversion is performed — PortAudio is configured to match the channel's `audio_sample_rate` directly.
+*   **Channel count:** Configurable via `CHANNELS` parameter. Supports channel selection (`FROM`, `MAP`) and multi-channel capture (e.g., 8-channel Dante).
 *   **Push → Pull bridge:**
-    *   **Push side:** miniaudio's high-priority audio thread fires `data_callback()` whenever the hardware delivers a buffer. Samples are appended to a `std::vector<int32_t>` under a mutex lock.
-    *   **Pull side:** On each `receive_impl()` call (once per video frame), the producer calculates the required sample count for the frame duration and drains that many samples from the buffer.
+    *   **Push side:** PortAudio's high-priority audio callback (`stream_callback()`) fires whenever the hardware delivers a buffer. Samples are written to a lock-free SPSC ring buffer.
+    *   **Pull side:** On each `receive_impl()` call (once per video frame), the producer reads the required sample count from the ring buffer.
+*   **Shared capture (ASIO):** ASIO only allows one stream per device. Multiple producers targeting the same device automatically share a single `PaStream` via `shared_portaudio_capture`.
+*   **Delay compensation:** Optional `DELAY` parameter inserts a fixed-latency delay ring buffer (in milliseconds) for lip-sync alignment with video.
 *   **Underrun handling:** If the ring buffer contains fewer samples than needed (clock drift, CPU load, late device start), the producer copies what is available and pads the remainder with silence. No pipeline stalls or frame drops occur.
-*   **Video frame:** The producer emits a transparent BGRA frame (black/silent fill) — only the audio payload is meaningful. Layer it beneath or above video producers using standard CasparCG mixer commands.
-*   **Device selection:** Device names are matched by substring against the OS capture device list. If no match is found, the default OS recording device is used (with a log warning).
+*   **Video frame:** The producer emits a 1×1 transparent BGRA pixel — only the audio payload is meaningful. Layer it beneath or above video producers using standard CasparCG mixer commands.
+*   **Device selection:** Device names are matched by substring. Host API preference can be set via `API` parameter (ASIO, WASAPI, DS, ALSA, JACK).
 
 ### Usage
 
 ```
-PLAY <channel>-<layer> system_audio [<device_name>]
-PLAY <channel>-<layer> system_audio DEVICE="<device_name>"
+PLAY <channel>-<layer> portaudio [<device_name>]
+PLAY <channel>-<layer> portaudio DEVICE="<device_name>" [CHANNELS <n>] [FROM <ch>] [MAP <ch,ch,...>] [DELAY <ms>] [API <api>] [SHARED]
 ```
 
 ### Examples
 
 ```
 # Use the default OS recording device
-PLAY 1-10 system_audio
+PLAY 1-10 portaudio
 
 # Substring match on device name
-PLAY 1-10 system_audio "Focusrite"
+PLAY 1-10 portaudio "Focusrite"
 
 # Explicit DEVICE parameter (useful when names contain spaces)
-PLAY 1-10 system_audio DEVICE="Focusrite USB Audio"
+PLAY 1-10 portaudio DEVICE="Focusrite USB Audio"
 
-# Dante Virtual Soundcard
-PLAY 1-10 system_audio "Dante"
+# ASIO device with 8 channels, extract channels 2-3
+PLAY 1-10 portaudio DEVICE="Dante" API=ASIO CHANNELS 8 FROM 2
 
-# VB-Cable virtual input
-PLAY 1-10 system_audio "CABLE Output"
+# Non-contiguous channel map (grab channels 0, 3, 7 from an 8-ch device)
+PLAY 1-10 portaudio DEVICE="RME" CHANNELS 8 MAP="0,3,7"
+
+# 50ms delay compensation for lip-sync
+PLAY 1-10 portaudio DEVICE="Line In" DELAY 50
 ```
 
 ### Best Practices
 
-*   Run `system_audio` on its own dedicated layer so it can be independently stopped, started, or volume-adjusted via `MIXER VOLUME`.
+*   Run `portaudio` on its own dedicated layer so it can be independently stopped, started, or volume-adjusted via `MIXER VOLUME`.
 *   If you experience periodic underruns, ensure the audio device's sample rate matches the channel configuration (default 48 kHz).
-*   For multi-channel audio capture (e.g., 8-channel Dante), set the channel's `audio-channels` in `casparcg.config` to match.
+*   For multi-channel audio capture (e.g., 8-channel Dante), use `CHANNELS` and `FROM`/`MAP` to select the desired subset.
+*   For ASIO devices, multiple producers sharing the same device automatically use shared capture — no manual configuration needed.
+*   See `docs/PORTAUDIO_MODULE.md` for full technical documentation.
 
 ---
 

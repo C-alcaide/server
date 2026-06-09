@@ -20,10 +20,10 @@ CasparVP integra capacidades de **grabación ISO** y **replay instantáneo** den
 | **Exportación de highlights** | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
 | **Grabación HDR (PQ/HLG)** | ✅ | ✅ | ❌ | ❌ | ✅ | ⚠️ solo Ki Pro Ultra 12G |
 | **Grabación multi-canal** | ✅ multi-ch (límite = HW) | ✅ hasta 6 ch HD | ✅ multi-ch | ✅ multi-ch (UI: 9, límite = HW) | ⚠️ hasta 4 ch (Extreme 8K) | ⚠️ hasta 4 ch (Ki Pro GO) |
-| **Codecs profesionales (ProRes, DNx)** | ✅ vía FFmpeg | ⚠️ propietario (ProRes/DNx requiere X-File, coste extra) | ✅ | ✅ DNx, ProRes, XDCAM | ✅ | ✅ |
+| **Codecs profesionales (ProRes, DNx)** | ✅ GPU ProRes (CUDA) + FFmpeg | ⚠️ propietario (ProRes/DNx requiere X-File, coste extra) | ✅ | ✅ DNx, ProRes, XDCAM | ✅ | ✅ |
 | **Proxy simultáneo (hi-res + proxy)** | ❌ | ✅ | ✅ | ❌ | ❌ | ⚠️ solo Ki Pro Ultra 12G |
 | **Timecode LTC embebido** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| **Enc. por hardware (NVENC/QSV)** | ❌ | ❌ | ⚠️ | ✅ | N/A | N/A |
+| **Enc. por hardware (NVENC/QSV/CUDA)** | ✅ CUDA ProRes | ❌ | ⚠️ | ✅ | N/A | N/A |
 | **Captura sincronizada multi-tarjeta** | ✅ sync HW (DeckLink) | ✅ | ⚠️ | ✅ sync HW (DeckLink) | N/A (appliance) | N/A (appliance) |
 | **Streaming de red (entrada)** | ✅ NDI, SRT, RTMP, RTP, UDP | ✅ ST 2110 | ✅ NDI, SRT, RTMP | ❌ | ❌ | ❌ |
 | **Streaming de red (salida)** | ✅ NDI, SRT, RTMP, UDP/TS | ✅ ST 2110 | ✅ SRT, RTMP, UDP | ❌ | ❌ | ❌ |
