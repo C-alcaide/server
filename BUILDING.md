@@ -120,19 +120,29 @@ Enables the Vulkan accelerator backend and the `vulkan_output` consumer (low-lat
 ## CUDA Toolkit (optional)
 
 Enables GPU-accelerated ProRes encoding/decoding (`cuda_prores`) and NotchLC decoding (`cuda_notchlc`).
+Both modules are fully supported on **Windows and Linux**.
 
 - **Install**: Download from https://developer.nvidia.com/cuda-downloads
 - **Version**: CUDA **12.8 or 12.9** recommended. Avoid 12.4–12.6 (nvcc template deduction bug). CUDA 13+ works but drops Maxwell/Pascal GPU support.
 - **Detection**: `check_language(CUDA)` — auto-detected from PATH.
 - **Override**: `-DBUILD_CUDA_MODULES=OFF` to force-disable all CUDA modules.
 
+### Additional Linux dependencies for CUDA modules
+
+The `cuda_prores` module requires:
+- **liburing-dev** — io_uring async I/O for the high-throughput file writer (`sudo apt install liburing-dev`)
+- **libEGL-dev** — EGL for CUDA-GL interop in the consumer (`sudo apt install libegl-dev`)
+- **DeckLink SDK** — the DeckLink Linux headers are included in the repository (`src/modules/decklink/linux_interop/`)
+
 ## NVIDIA nvCOMP (optional, requires CUDA)
 
 Required only by the `cuda_notchlc` module (NotchLC GPU decompression). If CUDA is enabled but nvCOMP is not found, `cuda_prores` still builds normally.
 
 - **Install**: Download nvCOMP 5.x from https://developer.nvidia.com/nvcomp and extract/install it.
-- **Detection**: Searches `NVCOMP_ROOT` cmake variable, `NVCOMP_ROOT` environment variable, then the default path `C:/Program Files/NVIDIA nvCOMP/v5.2`.
-- **Override**: `-DBUILD_CUDA_NOTCHLC=OFF` to skip, or `-DNVCOMP_ROOT="C:/path/to/nvcomp"` to point to a custom location.
+- **Detection**: Searches `NVCOMP_ROOT` cmake variable, `NVCOMP_ROOT` environment variable, then platform-specific default paths:
+  - Windows: `C:/Program Files/NVIDIA nvCOMP/v5.2`
+  - Linux: `/usr/local/lib/cmake/nvcomp` or `/opt/nvidia/nvcomp`
+- **Override**: `-DBUILD_CUDA_NOTCHLC=OFF` to skip, or `-DNVCOMP_ROOT="/path/to/nvcomp"` to point to a custom location.
 
 ## NVIDIA NvAPI SDK (optional, with Vulkan)
 

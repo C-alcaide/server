@@ -35,9 +35,10 @@ The bypass encoder accepts raw **V210** (10-bit packed 4:2:2 YCbCr) frames direc
 | GPU | NVIDIA RTX A5000 (sm_86, 24 GB VRAM) |
 | Pixel format in | V210 — 10-bit 4:2:2 YCbCr, packed as 4 words per 6 pixels |
 | Codec out | Apple ProRes 422 HQ — `icpf` bitstream inside QuickTime `.mov` or MXF |
-| Build | NVCC (CUDA 12.x) + MSVC via CMake/Ninja, Windows only |
+| Build | NVCC (CUDA 12.x) + MSVC/GCC via CMake/Ninja; Windows and Linux |
 | Libraries | CUDA Runtime, CUB (NVIDIA's device-side primitives, part of CUDA) |
 | Container | Custom minimal QuickTime `.mov` muxer + optional MXF muxer |
+| I/O backend | Windows: IOCP (`FILE_FLAG_OVERLAPPED`); Linux: `io_uring` (`O_DIRECT`) |
 
 ---
 
@@ -363,9 +364,10 @@ Output: `D:\Github\CasparCG-cuda\out\build\x64-RelWithDebInfo\shell\casparcg.exe
 | GPU | NVIDIA RTX A5000 (sm_86, 24 GB VRAM) |
 | Pixel format in | V210 — 10-bit 4:2:2 YCbCr, packed as 4 words per 6 pixels |
 | Codec out | Apple ProRes 422 HQ — `icpf` bitstream inside QuickTime `.mov` |
-| Build | NVCC (CUDA 12.x) + MSVC via CMake/Ninja, Windows only |
+| Build | NVCC (CUDA 12.x) + MSVC/GCC via CMake/Ninja; Windows and Linux |
 | Libraries | CUDA Runtime, CUB (NVIDIA's device-side primitives, part of CUDA) |
 | Container | Custom minimal QuickTime `.mov` muxer (no FFmpeg dependency at runtime) |
+| I/O backend | Windows: IOCP (`FILE_FLAG_OVERLAPPED`); Linux: `io_uring` (`O_DIRECT`) |
 
 ---
 

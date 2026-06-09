@@ -349,3 +349,34 @@ The title bar shows: `cuda_prores[1|3] | 750 fr (30.0s)` — consumer slot, prof
 - `4` (default) is the right choice for 1080 on most modern GPUs
 - Use `8` only on high-core-count server GPUs (e.g. A100, H100) for 4K
 - `1` or `2` may be needed for compatibility with certain NLEs that don't support multi-slice ProRes
+
+---
+
+## Linux Platform Notes
+
+The `cuda_prores` and `cuda_notchlc` modules are fully supported on Linux. Key differences from Windows:
+
+| Feature | Windows | Linux |
+|---------|---------|-------|
+| **File I/O** | IOCP + `FILE_FLAG_NO_BUFFERING` | `io_uring` + `O_DIRECT` |
+| **Consumer GPU-direct** | WGL shared context (CUDA-GL interop) | EGL surfaceless shared context (CUDA-GL interop) |
+| **Producer GPU zero-copy** | WGL `wglShareLists` | Host-copy fallback (PBO upload) |
+| **Producer Vulkan zero-copy** | Supported | Supported |
+| **DeckLink SDK** | COM (`CoCreateInstance`) | Direct API (`CreateDeckLinkIteratorInstance`) |
+| **GL headers** | `GL/glew.h` | `GL/gl.h` + `EGL/egl.h` |
+
+### Build dependencies (Linux)
+
+```bash
+sudo apt install liburing-dev libegl-dev
+```
+
+The DeckLink Linux interop headers are included in the source tree (`src/modules/decklink/linux_interop/`). nvCOMP 5.x must be installed separately for NotchLC support.
+
+### Consumer GPU-direct path
+
+On Linux, the `CUDA_PRORES` consumer creates a shared EGL context (surfaceless, via `EGL_KHR_surfaceless_context`) on the encode thread. This enables zero-copy GPU-direct reads of the mixer's output texture — the same performance benefit as the WGL path on Windows. If EGL context creation fails, it falls back to the CPU frame data path automatically.
+
+### Producer fallback
+
+On Linux without Vulkan, the ProRes and NotchLC producers use the host-copy path: decoded frames are written to `cudaMallocHost` pinned buffers, then uploaded via PBO. When the Vulkan mixer is active, producers use the zero-copy `CudaVkTexture` interop path on both platforms.
