@@ -41,24 +41,23 @@
 //  All allocated buffers are freed in the destructor.
 #pragma once
 
+#ifdef WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
 #include <comutil.h>    // pulls in COM/RPC headers that define 'interface' keyword
+#include "interop/DeckLinkAPI.h"
+#else
+#include "linux_interop/LinuxCOM.h"
+#include "linux_interop/DeckLinkAPI.h"
+#endif
 
 #include <cuda_runtime.h>
 #include <mutex>
 #include <vector>
 #include <cstdint>
 #include <cassert>
-
-// DeckLink SDK COM interface (path resolved via ../decklink include added by CMakeLists.txt)
-#if defined(_MSC_VER)
-#include "interop/DeckLinkAPI.h"
-#else
-#include "linux_interop/DeckLinkAPI.h"
-#endif
 
 class CudaPinnedAllocator final : public IDeckLinkMemoryAllocator {
 public:

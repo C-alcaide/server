@@ -70,6 +70,7 @@ class image_mixer final : public core::image_mixer
     std::shared_ptr<class device> get_ogl_device() const;
 
     void* native_gl_context() const override;
+    void* native_egl_display() const override;
 
     void set_cpu_readback_needed(bool needed) override;
 

@@ -39,16 +39,15 @@
 //
 #pragma once
 
+#ifdef WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
 #include <comutil.h>    // pulls in COM/RPC headers that define 'interface' keyword
-
-#if defined(_MSC_VER)
-// Resolved via the ../decklink include path added by CMakeLists.txt
 #include "interop/DeckLinkAPI.h"
 #else
+#include "linux_interop/LinuxCOM.h"
 #include "linux_interop/DeckLinkAPI.h"
 #endif
 

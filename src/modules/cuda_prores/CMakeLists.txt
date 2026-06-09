@@ -45,7 +45,8 @@ set(CPU_SOURCES
     muxer/mxf_muxer.cpp
 
     # Storage
-    storage/async_file_writer.cpp
+    $<$<PLATFORM_ID:Windows>:storage/async_file_writer.cpp>
+    $<$<PLATFORM_ID:Linux>:storage/async_file_writer_linux.cpp>
 
     # Input (DeckLink capture + allocator)
     input/cuda_pinned_allocator.cpp
@@ -124,6 +125,11 @@ target_include_directories(cuda_prores PRIVATE
     ../decklink
 )
 
+# On Linux, also include the DeckLink Linux interop headers
+if(NOT WIN32)
+    target_include_directories(cuda_prores PRIVATE ../decklink/linux_interop)
+endif()
+
 # ─── Link libraries ──────────────────────────────────────────────────────────
 target_link_libraries(cuda_prores PRIVATE
     # CUDA runtime (static preferred for redistribution)
@@ -146,6 +152,9 @@ if (MSVC)
     # module's interop/ headers (COM, oleaut32, etc via the SDK).
     # No explicit DeckLink .lib: COM late-binding via CoCreateInstance.
 else()
-    target_link_libraries(cuda_prores PRIVATE dl)
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(LIBURING REQUIRED liburing)
+    target_include_directories(cuda_prores PRIVATE ${LIBURING_INCLUDE_DIRS})
+    target_link_libraries(cuda_prores PRIVATE ${LIBURING_LIBRARIES} dl EGL)
 endif()
 

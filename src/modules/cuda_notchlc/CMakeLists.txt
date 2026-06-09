@@ -47,27 +47,44 @@ set_property(TARGET cuda_notchlc PROPERTY CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHI
 #
 # Search order for nvCOMP root:
 #   1. NVCOMP_ROOT cmake variable or environment variable
-#   2. Default install path: C:/Program Files/NVIDIA nvCOMP/v5.2
+#   2. Default install path (platform-dependent)
 set(_NVCOMP_ROOT "")
 if(DEFINED NVCOMP_ROOT)
     set(_NVCOMP_ROOT "${NVCOMP_ROOT}")
 elseif(DEFINED ENV{NVCOMP_ROOT})
     set(_NVCOMP_ROOT "$ENV{NVCOMP_ROOT}")
-elseif(EXISTS "C:/Program Files/NVIDIA nvCOMP/v5.2")
+elseif(WIN32 AND EXISTS "C:/Program Files/NVIDIA nvCOMP/v5.2")
     set(_NVCOMP_ROOT "C:/Program Files/NVIDIA nvCOMP/v5.2")
+elseif(EXISTS "/usr/local/lib/cmake/nvcomp")
+    set(_NVCOMP_ROOT "/usr/local")
+elseif(EXISTS "/opt/nvidia/nvcomp")
+    set(_NVCOMP_ROOT "/opt/nvidia/nvcomp")
 endif()
 
 if(NOT _NVCOMP_ROOT OR NOT EXISTS "${_NVCOMP_ROOT}")
     message(FATAL_ERROR "\n*** nvCOMP 5.x not found. ***\n"
                         "Set NVCOMP_ROOT to the nvCOMP install directory, e.g.:\n"
-                        "  cmake -DNVCOMP_ROOT=\"C:/Program Files/NVIDIA nvCOMP/v5.2\" ..\n"
+                        "  cmake -DNVCOMP_ROOT=\"C:/Program Files/NVIDIA nvCOMP/v5.2\" ..  (Windows)\n"
+                        "  cmake -DNVCOMP_ROOT=/usr/local ..                              (Linux)\n"
                         "Or set the NVCOMP_ROOT environment variable.\n")
 endif()
 
-if(CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL "13")
-    set(_NVCOMP_CMAKE_DIR "${_NVCOMP_ROOT}/lib/13/cmake/nvcomp")
+if(WIN32)
+    # Windows nvCOMP ships separate cmake configs for CUDA 12 and CUDA 13
+    if(CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL "13")
+        set(_NVCOMP_CMAKE_DIR "${_NVCOMP_ROOT}/lib/13/cmake/nvcomp")
+    else()
+        set(_NVCOMP_CMAKE_DIR "${_NVCOMP_ROOT}/lib/12/cmake/nvcomp")
+    endif()
 else()
-    set(_NVCOMP_CMAKE_DIR "${_NVCOMP_ROOT}/lib/12/cmake/nvcomp")
+    # Linux: cmake configs at lib/cmake/nvcomp or lib/12/cmake/nvcomp
+    if(EXISTS "${_NVCOMP_ROOT}/lib/cmake/nvcomp")
+        set(_NVCOMP_CMAKE_DIR "${_NVCOMP_ROOT}/lib/cmake/nvcomp")
+    elseif(CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL "13")
+        set(_NVCOMP_CMAKE_DIR "${_NVCOMP_ROOT}/lib/13/cmake/nvcomp")
+    else()
+        set(_NVCOMP_CMAKE_DIR "${_NVCOMP_ROOT}/lib/12/cmake/nvcomp")
+    endif()
 endif()
 
 if(NOT EXISTS "${_NVCOMP_CMAKE_DIR}")

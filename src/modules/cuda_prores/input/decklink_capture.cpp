@@ -29,12 +29,14 @@
 // Build prerequisites on Windows:
 //   - DeckLink SDK installed, interop/ headers available
 //   - CUDA Toolkit 12.x
-//   - COM initialized by the caller (CoInitialize / CoInitializeEx)
+//   - COM initialized by the caller (CoInitialize / CoInitializeEx) [Windows only]
+#ifdef WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
 #include <comdef.h>
+#endif
 
 #include "decklink_capture.h"
 

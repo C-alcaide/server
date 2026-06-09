@@ -31,13 +31,16 @@
 //                         in sync with write_video); omit to disable tmcd track
 //   5. close()        — back-patch mdat size, write moov tree (incl. tmcd if set)
 //
-// Atom writer is self-contained with no external dependencies beyond Win32 and CRT.
+// Atom writer is self-contained with no external dependencies beyond OS I/O and CRT.
 #pragma once
 
+#ifdef WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#endif
+
 #include <stdint.h>
 #include <string>
 #include <vector>
@@ -102,8 +105,13 @@ public:
     ~MovMuxer();
 
 private:
+#ifdef WIN32
     HANDLE       file_       = INVALID_HANDLE_VALUE;
     HANDLE       iocp_       = nullptr;
+    OVERLAPPED   ov_         = {};
+#else
+    int          fd_         = -1;
+#endif
     uint32_t     sector_size_ = 4096;
     std::wstring path_;         // stored in open() for use in close()
 
@@ -119,9 +127,8 @@ private:
     std::vector<SampleEntry> video_samples_;
     std::vector<SampleEntry> audio_samples_;
 
-    // OVERLAPPED write tracking (single outstanding write per call)
-    OVERLAPPED ov_ = {};
-    std::vector<uint8_t> write_buf_; // sector-aligned staging buffer for write
+    // Sector-aligned staging buffer for write
+    std::vector<uint8_t> write_buf_;
 
     // Timecode track (optional QuickTime 'tmcd' track).
     // Populated by write_timecode(); absent if never called.

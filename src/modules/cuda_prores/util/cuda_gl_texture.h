@@ -45,6 +45,8 @@
 // which pulls in <GL/gl.h> on Windows). Include it explicitly here.
 #ifdef WIN32
 #include <GL/glew.h>
+#else
+#include <GL/gl.h>
 #endif
 #include <cuda_gl_interop.h>
 #include <cuda_runtime.h>

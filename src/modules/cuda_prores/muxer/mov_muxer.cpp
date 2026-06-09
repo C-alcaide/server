@@ -22,14 +22,23 @@
 
 // mov_muxer.cpp
 // QuickTime .mov muxer implementation for ProRes + PCM audio.
-// File writes use FILE_FLAG_NO_BUFFERING | FILE_FLAG_OVERLAPPED (unbuffered async I/O)
-// with sector-aligned staging buffers for maximum NVMe throughput.
+// File writes use direct I/O with sector-aligned staging buffers for maximum
+// NVMe throughput.
+//   Windows: FILE_FLAG_NO_BUFFERING | FILE_FLAG_OVERLAPPED + IOCP
+//   Linux:   O_DIRECT + synchronous pwrite()
 #include "mov_muxer.h"
 
 #include <cassert>
 #include <cstring>
 #include <cstdio>
 #include <algorithm>
+
+#ifndef WIN32
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <common/utf.h>
+#endif
 
 // ─── Atom helpers ────────────────────────────────────────────────────────────
 
@@ -72,7 +81,7 @@ void MovMuxer::end_atom(std::vector<uint8_t> &b, size_t start) {
 // ─── File I/O ────────────────────────────────────────────────────────────────
 
 // Write `size` bytes from `data` at current write_pos_, sector-aligned.
-// Blocks until write completes (IOCP wait), then advances write_pos_.
+// Blocks until write completes, then advances write_pos_.
 bool MovMuxer::write_aligned(const uint8_t *data, size_t size) {
     if (!size) return true;
 
@@ -83,6 +92,7 @@ bool MovMuxer::write_aligned(const uint8_t *data, size_t size) {
     memset(write_buf_.data(), 0, aligned);
     memcpy(write_buf_.data(), data, size);
 
+#ifdef WIN32
     OVERLAPPED ov = {};
     ov.Offset     = (DWORD)( write_pos_        & 0xFFFFFFFF);
     ov.OffsetHigh = (DWORD)((write_pos_ >> 32) & 0xFFFFFFFF);
@@ -95,6 +105,10 @@ bool MovMuxer::write_aligned(const uint8_t *data, size_t size) {
     OVERLAPPED *pov = nullptr;
     if (!GetQueuedCompletionStatus(iocp_, &bytes_transferred, &key, &pov, INFINITE))
         return false;
+#else
+    ssize_t written = pwrite(fd_, write_buf_.data(), aligned, static_cast<off_t>(write_pos_));
+    if (written < 0 || static_cast<size_t>(written) != aligned) return false;
+#endif
 
     write_pos_ += aligned;
     return true;
@@ -113,6 +127,7 @@ bool MovMuxer::open(const std::wstring &path,
 
     path_ = path; // store for close()
 
+#ifdef WIN32
     file_ = CreateFileW(
         path.c_str(),
         GENERIC_WRITE,
@@ -124,6 +139,11 @@ bool MovMuxer::open(const std::wstring &path,
 
     iocp_ = CreateIoCompletionPort(file_, nullptr, 0, 1);
     if (!iocp_) { CloseHandle(file_); return false; }
+#else
+    std::string utf8_path = caspar::u8(path);
+    fd_ = ::open(utf8_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_DIRECT, 0644);
+    if (fd_ < 0) return false;
+#endif
 
     // Write ftyp atom followed by a 'free' padding atom that fills the rest of
     // the sector.  Without padding, the zero bytes after ftyp look like a
@@ -691,7 +711,11 @@ void MovMuxer::write_tmcd_trak(std::vector<uint8_t> &buf) {
 }
 
 bool MovMuxer::close() {
+#ifdef WIN32
     if (file_ == INVALID_HANDLE_VALUE) return false;
+#else
+    if (fd_ < 0) return false;
+#endif
 
     // Back-patch mdat extended size field.
     // mdat header is at offset: 0 (ftyp, sector-aligned so ftyp occupies >= 1 sector)
@@ -743,6 +767,7 @@ bool MovMuxer::close() {
     // moov is small (few MB at most) — write with regular buffered I/O
     // by closing the unbuffered handle and re-opening with buffered.
     // Close unbuffered handle; re-open with buffered I/O for moov + back-patch
+#ifdef WIN32
     CloseHandle(iocp_); iocp_ = nullptr;
     CloseHandle(file_); file_ = INVALID_HANDLE_VALUE;
 
@@ -776,11 +801,37 @@ bool MovMuxer::close() {
     WriteFile(bf, moov.data(), (DWORD)moov.size(), &written, nullptr);
 
     CloseHandle(bf);
+#else
+    ::close(fd_); fd_ = -1;
+
+    // Re-open with buffered I/O for back-patching mdat size + appending moov
+    std::string utf8_path = caspar::u8(path_);
+    int bf = ::open(utf8_path.c_str(), O_RDWR, 0644);
+    if (bf < 0) return false;
+
+    // Back-patch mdat extended-size field
+    uint64_t mdat_hdr_at = mdat_hdr_offset + 8;
+    uint64_t mdat_total  = mdat_total_size;
+    uint8_t sz_buf[8];
+    for (int i = 7; i >= 0; i--) { sz_buf[i] = mdat_total & 0xFF; mdat_total >>= 8; }
+    pwrite(bf, sz_buf, 8, static_cast<off_t>(mdat_hdr_at));
+
+    // Append moov at end of file
+    lseek(bf, 0, SEEK_END);
+    ssize_t wr = ::write(bf, moov.data(), moov.size());
+    (void)wr;
+
+    ::close(bf);
+#endif
     path_.clear();
     return true;
 }
 
 MovMuxer::~MovMuxer() {
+#ifdef WIN32
     if (iocp_) { CloseHandle(iocp_); iocp_ = nullptr; }
     if (file_ != INVALID_HANDLE_VALUE) { CloseHandle(file_); file_ = INVALID_HANDLE_VALUE; }
+#else
+    if (fd_ >= 0) { ::close(fd_); fd_ = -1; }
+#endif
 }

@@ -63,6 +63,9 @@ class image_mixer
     /// Return the native GL context handle for context sharing (nullptr if not applicable).
     virtual void* native_gl_context() const { return nullptr; }
 
+    /// Return the native EGL display for context ops (nullptr on non-EGL platforms).
+    virtual void* native_egl_display() const { return nullptr; }
+
     virtual void set_cpu_readback_needed(bool needed) { (void)needed; }
 
     virtual void set_target_color(color_space cs, color_transfer ct, bool auto_convert, int auto_tone_map = 0, float peak_luminance = 1000.0f)

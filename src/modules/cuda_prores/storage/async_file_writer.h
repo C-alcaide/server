@@ -20,14 +20,15 @@
  */
 
 // async_file_writer.h
-// High-throughput unbuffered async file writer using IOCP and a pre-allocated
+// High-throughput unbuffered async file writer using a pre-allocated
 // sector-aligned write buffer ring.
 //
 // Design goals
 // ─────────────────────────────────────────────────────────────────────────────
-//  • FILE_FLAG_NO_BUFFERING | FILE_FLAG_OVERLAPPED | FILE_FLAG_WRITE_THROUGH
-//    bypasses the OS page cache for direct NVMe/RAID throughput.
-//  • K=8 sector-aligned pinned write buffers — each WriteFile call is backed by
+//  • Direct I/O bypassing the OS page cache for maximum NVMe/RAID throughput.
+//     – Windows: FILE_FLAG_NO_BUFFERING | FILE_FLAG_OVERLAPPED | FILE_FLAG_WRITE_THROUGH
+//     – Linux:   O_DIRECT | O_WRONLY + io_uring for async submission
+//  • K=8 sector-aligned pinned write buffers — each write call is backed by
 //    one buffer slot.  When all K slots are in-flight, write() blocks until one
 //    completes (backpressure rather than unbounded queue growth).
 //  • Caller must ensure each write() size fits in one slot (i.e. ≤ slot_bytes).
@@ -38,10 +39,14 @@
 // Thread safety: single-writer thread only.
 #pragma once
 
+#ifdef WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#else
+#include <liburing.h>
+#endif
 
 #include <cstdint>
 #include <cstddef>
@@ -62,7 +67,8 @@ public:
     ~AsyncFileWriter();
 
     // Open output file.  sector_size should be the physical sector size of the
-    // target volume (query with GetDiskFreeSpace or IOCTL_STORAGE_QUERY_PROPERTY).
+    // target volume (query with GetDiskFreeSpace or IOCTL_STORAGE_QUERY_PROPERTY
+    // on Windows; use statfs or ioctl(BLKSSZGET) on Linux).
     bool open(const wchar_t *path,
               size_t slot_bytes  = kDefaultSlotBytes,
               size_t sector_size = kDefaultSectorSize);
@@ -86,18 +92,27 @@ public:
 
 private:
     struct Slot {
-        uint8_t  *buf       = nullptr; // VirtualAlloc'd, sector-aligned
-        OVERLAPPED ov       = {};
+        uint8_t  *buf       = nullptr; // sector-aligned allocation
         bool       in_flight = false;
         size_t     size      = 0;      // bytes for the current write (≤ slot_bytes)
+#ifdef WIN32
+        OVERLAPPED ov       = {};
+#endif
     };
 
     bool wait_for_slot(int idx);    // wait for in-flight write on slot idx to complete
     bool drain_all();               // wait for ALL in-flight slots
     int  acquire_free_slot();       // returns slot index, blocks if needed
 
+#ifdef WIN32
     HANDLE   file_      = INVALID_HANDLE_VALUE;
     HANDLE   iocp_      = nullptr;
+#else
+    int              fd_   = -1;
+    struct io_uring  ring_ = {};
+    bool             ring_initialized_ = false;
+#endif
+
     size_t   slot_bytes_   = 0;
     size_t   sector_size_  = 0;
     uint64_t write_offset_ = 0;

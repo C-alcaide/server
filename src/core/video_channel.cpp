@@ -122,7 +122,7 @@ struct video_channel::impl final
          bool                                      auto_color_convert     = true,
          int                                       auto_tone_map          = 0,
          float                                     display_peak_luminance = 1000.0f)
-        : channel_info_(index, image_mixer->depth(), default_color_space, default_color_transfer, image_mixer->is_vulkan(), image_mixer->native_gl_context(), auto_color_convert)
+        : channel_info_(index, image_mixer->depth(), default_color_space, default_color_transfer, image_mixer->is_vulkan(), image_mixer->native_gl_context(), auto_color_convert, image_mixer->native_egl_display())
         , output_(graph_, format_desc, channel_info_)
         , image_mixer_(std::move(image_mixer))
         , mixer_(index, graph_, image_mixer_, default_color_space, default_color_transfer, auto_color_convert, auto_tone_map, display_peak_luminance)

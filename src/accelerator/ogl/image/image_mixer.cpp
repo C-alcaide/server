@@ -579,6 +579,8 @@ std::shared_ptr<device> image_mixer::get_ogl_device() const { return impl_->ogl_
 
 void* image_mixer::native_gl_context() const { return impl_->ogl_->native_gl_context(); }
 
+void* image_mixer::native_egl_display() const { return impl_->ogl_->native_egl_display(); }
+
 void image_mixer::set_cpu_readback_needed(bool needed) { impl_->renderer_.set_cpu_readback_needed(needed); }
 
 previz_renderer& image_mixer::get_previz_renderer() { return impl_->previz_renderer_; }

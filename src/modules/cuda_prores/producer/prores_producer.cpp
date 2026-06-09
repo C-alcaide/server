@@ -74,6 +74,8 @@
 // Do NOT include wglew.h here -- it redefines HGPUNV which conflicts with
 // cuda_gl_interop.h (already included transitively via cuda_gl_texture.h).
 #include <GL/glew.h>
+#else
+#include <GL/gl.h>
 #endif
 
 #include <algorithm>

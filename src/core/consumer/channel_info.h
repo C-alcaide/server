@@ -30,7 +30,8 @@ struct channel_info
 {
     channel_info(int channel_index, common::bit_depth depth, color_space color_space,
                  color_transfer color_transfer = color_transfer::sdr, bool use_vulkan = false,
-                 void* gl_share_context = nullptr, bool auto_color_convert = true)
+                 void* gl_share_context = nullptr, bool auto_color_convert = true,
+                 void* egl_display = nullptr)
         : index(channel_index)
         , depth(depth)
         , default_color_space(color_space)
@@ -38,6 +39,7 @@ struct channel_info
         , use_vulkan(use_vulkan)
         , gl_share_context(gl_share_context)
         , auto_color_convert(auto_color_convert)
+        , egl_display(egl_display)
     {
     }
 
@@ -48,6 +50,7 @@ struct channel_info
     bool              use_vulkan             = false;
     void*             gl_share_context       = nullptr;
     bool              auto_color_convert     = true;
+    void*             egl_display            = nullptr;
 };
 
 } // namespace caspar::core

@@ -62,6 +62,9 @@
 #ifdef WIN32
 #include <windows.h>
 #include <GL/glew.h>
+#else
+#include <GL/gl.h>
+#include <EGL/egl.h>
 #endif
 #include <cuda_gl_interop.h>
 
@@ -383,6 +386,12 @@ public:
         if (!channel_info.use_vulkan && channel_info.gl_share_context) {
             gl_share_context_ = channel_info.gl_share_context;
         }
+#else
+        // Linux EGL: capture EGL context + display for GPU-direct path
+        if (!channel_info.use_vulkan && channel_info.gl_share_context) {
+            gl_share_context_ = channel_info.gl_share_context;
+            egl_display_      = channel_info.egl_display;
+        }
 #endif
 
         // Detect interlaced and field dominance from the channel format
@@ -700,6 +709,41 @@ private:
                 }
             }
         }
+#else
+        // Linux EGL: create a shared context on the encode thread for CUDA-GL interop
+        if (gl_share_context_ && egl_display_ && !is_interlaced_) {
+            auto shared_ctx = static_cast<EGLContext>(gl_share_context_);
+            auto display    = static_cast<EGLDisplay>(egl_display_);
+
+            // Query the config used by the shared context
+            EGLint config_id = 0;
+            eglQueryContext(display, shared_ctx, EGL_CONFIG_ID, &config_id);
+            EGLConfig config = nullptr;
+            EGLint num_configs = 0;
+            EGLint config_attribs[] = { EGL_CONFIG_ID, config_id, EGL_NONE };
+            eglChooseConfig(display, config_attribs, &config, 1, &num_configs);
+
+            if (config && num_configs > 0) {
+                // Create encoder's own context sharing GL objects with the mixer
+                EGLint ctx_attribs[] = { EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE };
+                egl_context_ = eglCreateContext(display, config, shared_ctx, ctx_attribs);
+                if (egl_context_ != EGL_NO_CONTEXT) {
+                    // Surfaceless make-current (EGL 1.5 / EGL_KHR_surfaceless_context)
+                    if (eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, egl_context_)) {
+                        gl_cache_ = std::make_unique<cuda_gl_read_cache>();
+                        gpu_direct_active_   = true;
+                        gpu_direct_gl_ready_ = true;
+                        CASPAR_LOG(info) << L"[cuda_prores] GPU-direct path active (CUDA-EGL interop)";
+                    } else {
+                        eglDestroyContext(display, egl_context_);
+                        egl_context_ = EGL_NO_CONTEXT;
+                        CASPAR_LOG(warning) << L"[cuda_prores] eglMakeCurrent failed — CPU path";
+                    }
+                } else {
+                    CASPAR_LOG(warning) << L"[cuda_prores] eglCreateContext failed — CPU path";
+                }
+            }
+        }
 #endif
 
         while (running_ || !queue_empty()) {
@@ -945,6 +989,13 @@ private:
             wglDeleteContext(gpu_hglrc_);
             gpu_hglrc_ = nullptr;
         }
+#else
+        if (egl_context_ != EGL_NO_CONTEXT && egl_display_) {
+            auto display = static_cast<EGLDisplay>(egl_display_);
+            eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+            eglDestroyContext(display, egl_context_);
+            egl_context_ = EGL_NO_CONTEXT;
+        }
 #endif
         gpu_direct_active_   = false;
         gpu_direct_gl_ready_ = false;
@@ -1019,6 +1070,10 @@ private:
     void*                    gl_share_context_ = nullptr; // mixer's HGLRC
     HDC                      gpu_dc_           = nullptr;
     HGLRC                    gpu_hglrc_        = nullptr; // shared WGL context for encode thread
+#else
+    void*                    gl_share_context_ = nullptr; // mixer's EGLContext
+    void*                    egl_display_      = nullptr; // EGLDisplay for context ops
+    EGLContext               egl_context_      = EGL_NO_CONTEXT; // encode thread's shared context
 #endif
     std::atomic<bool>         gpu_direct_active_{false};
     bool                     gpu_direct_gl_ready_ = false; // GL context made current on encode thread
