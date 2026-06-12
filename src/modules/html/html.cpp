@@ -37,13 +37,13 @@
 #include <boost/property_tree/ptree.hpp>
 #include <boost/range/algorithm/remove_if.hpp>
 
+#include <atomic>
 #include <memory>
 #include <utility>
 
 #ifdef __APPLE__
 #include <boost/dll/runtime_symbol_info.hpp>
-#include <pthread.h>
-#include <sched.h>
+#include <dispatch/dispatch.h>
 #endif
 
 #pragma warning(push)
@@ -59,6 +59,13 @@
 namespace caspar::html {
 
 std::unique_ptr<executor> g_cef_executor;
+#ifdef __APPLE__
+// On macOS CEF runs on the main application thread and is pumped cooperatively
+// by the shell's main loop (see caspar_html_tick). This tracks whether
+// CefInitialize has succeeded so the tick/shutdown hooks are safe no-ops
+// before init and after shutdown.
+std::atomic<bool> g_cef_running{false};
+#endif
 
 void caspar_log(const CefRefPtr<CefBrowser>&        browser,
                 boost::log::trivial::severity_level level,
@@ -109,6 +116,7 @@ class remove_handler : public CefV8Handler
 
 class renderer_application
     : public CefApp
+    , public CefBrowserProcessHandler
     , CefRenderProcessHandler
 {
     std::vector<CefRefPtr<CefV8Context>> contexts_;
@@ -123,6 +131,22 @@ class renderer_application
     }
 
     CefRefPtr<CefRenderProcessHandler> GetRenderProcessHandler() override { return this; }
+
+#ifdef __APPLE__
+    CefRefPtr<CefBrowserProcessHandler> GetBrowserProcessHandler() override { return this; }
+
+    void OnScheduleMessagePumpWork(int64_t delay_ms) override
+    {
+        // external_message_pump: schedule a single CefDoMessageLoopWork() on the
+        // main thread after |delay_ms|. The shell's run loop services the main
+        // GCD queue, so the work runs on the CEF UI (main) thread.
+        dispatch_after_f(
+            dispatch_time(DISPATCH_TIME_NOW, delay_ms * 1000000LL), dispatch_get_main_queue(), nullptr, [](void*) {
+                if (g_cef_running)
+                    CefDoMessageLoopWork();
+            });
+    }
+#endif
 
     void
     OnContextCreated(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame, CefRefPtr<CefV8Context> context) override
@@ -251,16 +275,10 @@ void init(const core::module_dependencies& dependencies)
     dependencies.producer_registry->register_producer_factory(L"HTML Producer", html::create_producer);
 
     CefMainArgs main_args;
-    g_cef_executor = std::make_unique<executor>(L"cef");
-    bool result    = g_cef_executor->invoke([&] {
+
+    auto initialize_cef = [&]() -> bool {
 #ifdef WIN32
         SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
-#elif defined(__APPLE__)
-        // macOS: Set thread to high priority using pthread
-        pthread_t          thread = pthread_self();
-        struct sched_param param;
-        param.sched_priority = sched_get_priority_max(SCHED_FIFO);
-        pthread_setschedparam(thread, SCHED_FIFO, &param);
 #endif
         const auto gpu = is_gpu_shared_texture_enabled();
 
@@ -271,6 +289,12 @@ void init(const core::module_dependencies& dependencies)
         settings.windowless_rendering_enabled = true;
 
 #ifdef __APPLE__
+        // macOS: CEF's default UI message pump calls [NSApplication run], which
+        // collides with the shell's own main-thread event pump. external_message_pump
+        // switches CEF to a pump driven by CefDoMessageLoopWork() (see caspar_html_tick)
+        // and OnScheduleMessagePumpWork(), so it never calls [NSApp run] itself.
+        settings.external_message_pump = true;
+
         // macOS: Configure paths for both app bundle and flat deployment
         // Get executable path and derive framework/resource locations
         auto exe_path = boost::dll::program_location();
@@ -338,14 +362,30 @@ void init(const core::module_dependencies& dependencies)
 
         return CefInitialize(
             main_args, settings, CefRefPtr<CefApp>(new renderer_application(gpu.first, gpu.second)), nullptr);
-    });
+    };
+
+#ifdef __APPLE__
+    // macOS: CEF must be initialized and pumped on the main application thread.
+    // init() runs on the main thread during server construction, so initialize
+    // here and let the shell's main loop drive CefDoMessageLoopWork() via
+    // caspar_html_tick(). Do not spin a dedicated CEF thread or run the loop.
+    bool result = initialize_cef();
+    if (result)
+        g_cef_running = true;
+#else
+    g_cef_executor = std::make_unique<executor>(L"cef");
+    bool result    = g_cef_executor->invoke(initialize_cef);
+#endif
 
     if (!result) {
         CASPAR_LOG(error) << "[html] Failed to initialize CEF";
         return;
     }
 
+#ifndef __APPLE__
     g_cef_executor->begin_invoke([&] { CefRunMessageLoop(); });
+#endif
+
     dependencies.cg_registry->register_cg_producer(
         L"html",
         {L".html"},
@@ -356,14 +396,32 @@ void init(const core::module_dependencies& dependencies)
         false);
 }
 
+#ifdef __APPLE__
+extern "C" void caspar_html_tick()
+{
+    // Pump CEF's browser-process message loop on the main thread. No-op until
+    // CefInitialize has succeeded and after CefShutdown.
+    if (g_cef_running)
+        CefDoMessageLoopWork();
+}
+#endif
+
 void uninit()
 {
+#ifdef __APPLE__
+    if (!g_cef_running)
+        return;
+    g_cef_running = false;
+    CefShutdown();
+    return;
+#else
     if (!g_cef_executor)
         return;
 
     invoke([] { CefQuitMessageLoop(); });
     g_cef_executor->begin_invoke([&] { CefShutdown(); });
     g_cef_executor.reset();
+#endif
 }
 
 class cef_task : public CefTask

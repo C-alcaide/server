@@ -30,7 +30,51 @@
 #import <Cocoa/Cocoa.h>
 #import <dispatch/dispatch.h>
 
+#ifdef ENABLE_HTML
+// CEF requires the host NSApplication to conform to CefAppProtocol when its
+// browser-process message loop is pumped on the main thread.
+#include "include/cef_application_mac.h"
+#endif
+
+// NSApplication subclass that tracks |isHandlingSendEvent|, which CEF requires
+// on macOS (CefAppProtocol). Without it CEF aborts when initialized on the main
+// thread. The methods are harmless when the HTML/CEF module is not built.
+#ifdef ENABLE_HTML
+@interface CasparApplication : NSApplication <CefAppProtocol>
+#else
+@interface CasparApplication : NSApplication
+#endif
+{
+  @private
+    BOOL handlingSendEvent_;
+}
+@end
+
+@implementation CasparApplication
+- (BOOL)isHandlingSendEvent
+{
+    return handlingSendEvent_;
+}
+- (void)setHandlingSendEvent:(BOOL)handlingSendEvent
+{
+    handlingSendEvent_ = handlingSendEvent;
+}
+- (void)sendEvent:(NSEvent*)event
+{
+#ifdef ENABLE_HTML
+    CefScopedSendingEvent sendingEventScoper;
+#endif
+    [super sendEvent:event];
+}
+@end
+
 static NSApplication* sharedApp = nil;
+
+// Defined in the html (CEF) module; weak so the shell still links when the HTML
+// module is disabled (then null and skipped). On macOS CEF runs on the main
+// thread, so it is pumped here as part of main-thread event processing - this
+// keeps the CEF-specific workaround out of the shared shell main loop.
+extern "C" void caspar_html_tick(void) __attribute__((weak));
 
 extern "C" {
 
@@ -38,7 +82,9 @@ void macos_init_app()
 {
     @autoreleasepool {
         if (sharedApp == nil) {
-            sharedApp = [NSApplication sharedApplication];
+            // Instantiate our CefAppProtocol-conforming NSApplication as the
+            // shared instance before anything else touches +sharedApplication.
+            sharedApp = [CasparApplication sharedApplication];
             [sharedApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
         }
     }
@@ -67,6 +113,10 @@ void macos_process_events(double timeout_seconds)
 
         // Run the run loop briefly to ensure GCD main-queue blocks are processed.
         [[NSRunLoop mainRunLoop] runMode:NSDefaultRunLoopMode beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.001]];
+
+        // Pump CEF on the main thread (no-op when the HTML module is absent).
+        if (caspar_html_tick)
+            caspar_html_tick();
     }
 }
 
