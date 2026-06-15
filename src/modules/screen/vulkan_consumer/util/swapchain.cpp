@@ -24,12 +24,10 @@
 
 #include <common/log.h>
 
-#define GLFW_INCLUDE_VULKAN
-#include <GLFW/glfw3.h>
-
 #include <vulkan/vulkan.hpp>
 
 #include <algorithm>
+#include <functional>
 #include <limits>
 #include <vector>
 
@@ -39,13 +37,14 @@ static constexpr int MAX_FRAMES_IN_FLIGHT = 2;
 
 struct swapchain::impl
 {
-    vk::Instance       instance_;
-    vk::PhysicalDevice physical_device_;
-    vk::Device         device_;
-    vk::Queue          queue_;
-    uint32_t           queue_family_index_;
-    GLFWwindow*        window_ = nullptr;
-    bool               vsync_  = false;
+    vk::Instance                    instance_;
+    vk::PhysicalDevice              physical_device_;
+    vk::Device                      device_;
+    vk::Queue                       queue_;
+    uint32_t                        queue_family_index_;
+    std::function<void(int&, int&)> get_framebuffer_size_;
+    std::function<void()>           wait_for_events_;
+    bool                            vsync_ = false;
 
     vk::SurfaceKHR   surface_;
     vk::SwapchainKHR swapchain_;
@@ -61,27 +60,25 @@ struct swapchain::impl
     std::vector<vk::Fence>     in_flight_fences_;
     size_t                     current_frame_ = 0;
 
-    impl(vk::Instance       instance,
-         vk::PhysicalDevice physical_device,
-         vk::Device         device,
-         vk::Queue          queue,
-         uint32_t           queue_family_index,
-         GLFWwindow*        window,
-         bool               vsync,
-         vk::SurfaceKHR     pre_created_surface)
+    impl(vk::Instance                    instance,
+         vk::PhysicalDevice              physical_device,
+         vk::Device                      device,
+         vk::Queue                       queue,
+         uint32_t                        queue_family_index,
+         vk::SurfaceKHR                  surface,
+         bool                            vsync,
+         std::function<void(int&, int&)> get_framebuffer_size,
+         std::function<void()>           wait_for_events)
         : instance_(instance)
         , physical_device_(physical_device)
         , device_(device)
         , queue_(queue)
         , queue_family_index_(queue_family_index)
-        , window_(window)
+        , get_framebuffer_size_(std::move(get_framebuffer_size))
+        , wait_for_events_(std::move(wait_for_events))
         , vsync_(vsync)
     {
-        if (pre_created_surface) {
-            set_surface(pre_created_surface);
-        } else {
-            create_surface();
-        }
+        set_surface(surface);
 
         create_swapchain();
         create_image_views();
@@ -104,25 +101,9 @@ struct swapchain::impl
         CASPAR_LOG(info) << L"[vk::swapchain] Vulkan swapchain destroyed";
     }
 
-    void create_surface()
-    {
-        VkSurfaceKHR raw_surface = VK_NULL_HANDLE;
-        VkResult     result      = glfwCreateWindowSurface(instance_, window_, nullptr, &raw_surface);
-        if (result != VK_SUCCESS) {
-            CASPAR_THROW_EXCEPTION(vk_exception() << msg_info("Failed to create Vulkan window surface"));
-        }
-        surface_ = vk::SurfaceKHR(raw_surface);
-
-        // Verify the queue family supports presentation
-        if (!physical_device_.getSurfaceSupportKHR(queue_family_index_, surface_)) {
-            CASPAR_THROW_EXCEPTION(vk_exception() << msg_info("Queue family does not support presentation to surface"));
-        }
-    }
     void set_surface(vk::SurfaceKHR surface)
     {
         surface_ = surface;
-
-        // Verify the queue family supports presentation
         if (!physical_device_.getSurfaceSupportKHR(queue_family_index_, surface_)) {
             CASPAR_THROW_EXCEPTION(vk_exception() << msg_info("Queue family does not support presentation to surface"));
         }
@@ -177,15 +158,12 @@ struct swapchain::impl
             return capabilities.currentExtent;
         }
 
-        int width, height;
-        glfwGetFramebufferSize(window_, &width, &height);
+        int width = 0, height = 0;
+        get_framebuffer_size_(width, height);
 
         vk::Extent2D extent = {static_cast<uint32_t>(width), static_cast<uint32_t>(height)};
-
-        extent.width = std::clamp(extent.width, capabilities.minImageExtent.width, capabilities.maxImageExtent.width);
-        extent.height =
-            std::clamp(extent.height, capabilities.minImageExtent.height, capabilities.maxImageExtent.height);
-
+        extent.width  = std::clamp(extent.width,  capabilities.minImageExtent.width,  capabilities.maxImageExtent.width);
+        extent.height = std::clamp(extent.height, capabilities.minImageExtent.height, capabilities.maxImageExtent.height);
         return extent;
     }
 
@@ -303,12 +281,12 @@ struct swapchain::impl
 
     void recreate()
     {
-        // Wait for window to be non-zero size
         int width = 0, height = 0;
-        glfwGetFramebufferSize(window_, &width, &height);
+        get_framebuffer_size_(width, height);
         while (width == 0 || height == 0) {
-            glfwGetFramebufferSize(window_, &width, &height);
-            glfwWaitEvents();
+            if (wait_for_events_)
+                wait_for_events_();
+            get_framebuffer_size_(width, height);
         }
 
         device_.waitIdle();
@@ -359,16 +337,24 @@ struct swapchain::impl
     void next_frame() { current_frame_ = (current_frame_ + 1) % MAX_FRAMES_IN_FLIGHT; }
 };
 
-swapchain::swapchain(vk::Instance       instance,
-                     vk::PhysicalDevice physical_device,
-                     vk::Device         device,
-                     vk::Queue          queue,
-                     uint32_t           queue_family_index,
-                     GLFWwindow*        window,
-                     bool               vsync,
-                     vk::SurfaceKHR     pre_created_surface)
-    : impl_(std::make_unique<
-            impl>(instance, physical_device, device, queue, queue_family_index, window, vsync, pre_created_surface))
+swapchain::swapchain(vk::Instance                    instance,
+                     vk::PhysicalDevice              physical_device,
+                     vk::Device                      device,
+                     vk::Queue                       queue,
+                     uint32_t                        queue_family_index,
+                     vk::SurfaceKHR                  surface,
+                     bool                            vsync,
+                     std::function<void(int&, int&)> get_framebuffer_size,
+                     std::function<void()>           wait_for_events)
+    : impl_(std::make_unique<impl>(instance,
+                                   physical_device,
+                                   device,
+                                   queue,
+                                   queue_family_index,
+                                   surface,
+                                   vsync,
+                                   std::move(get_framebuffer_size),
+                                   std::move(wait_for_events)))
 {
 }
 

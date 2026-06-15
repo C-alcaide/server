@@ -241,13 +241,17 @@ struct screen_consumer_vk
         pool_info.queueFamilyIndex = queue_->family_index();
         command_pool_              = vkdevice.createCommandPool(pool_info);
 
-        // macOS needs to control how the surface is created, so it is created from
-        // the window; this returns VK_NULL_HANDLE on other platforms and the
-        // swapchain falls back to creating the surface itself.
         auto surface = window_->create_surface(instance);
 
-        swapchain_ = std::make_unique<swapchain>(
-            instance, physical, vkdevice, queue, queue_->family_index(), window_->handle(), config_.vsync, surface);
+        swapchain_ = std::make_unique<swapchain>(instance,
+                                                 physical,
+                                                 vkdevice,
+                                                 queue,
+                                                 queue_->family_index(),
+                                                 surface,
+                                                 config_.vsync,
+                                                 [this](int& w, int& h) { window_->framebuffer_size(w, h); },
+                                                 [this]() { window_->wait_for_events(); });
 
         render_pipeline_ = std::make_unique<render_pipeline>(vkdevice, physical, command_pool_, queue, *swapchain_);
 

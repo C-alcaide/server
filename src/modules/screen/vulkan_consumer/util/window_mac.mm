@@ -219,6 +219,13 @@ struct screen_window::impl
         h = bh;
     }
 
+    void wait_for_events()
+    {
+        run_on_main_with_timeout(0.1, ^{
+            glfwWaitEvents();
+        });
+    }
+
     void nudge_for_first_frame()
     {
         GLFWwindow* win = window_;
@@ -238,12 +245,12 @@ screen_window::screen_window(const window_config& config)
 {
 }
 screen_window::~screen_window() {}
-GLFWwindow* screen_window::handle() const { return impl_->window_; }
-int         screen_window::width() const { return impl_->width_; }
-int         screen_window::height() const { return impl_->height_; }
+int screen_window::width() const { return impl_->width_; }
+int screen_window::height() const { return impl_->height_; }
 vk::SurfaceKHR       screen_window::create_surface(vk::Instance vk_instance) { return impl_->create_surface(vk_instance); }
 bool        screen_window::poll() { return impl_->poll(); }
 void        screen_window::framebuffer_size(int& w, int& h) { impl_->framebuffer_size(w, h); }
+void        screen_window::wait_for_events() { impl_->wait_for_events(); }
 void        screen_window::nudge_for_first_frame() { impl_->nudge_for_first_frame(); }
 
 }}} // namespace caspar::screen::vulkan

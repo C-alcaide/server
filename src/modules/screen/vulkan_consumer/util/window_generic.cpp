@@ -22,6 +22,8 @@
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 
+#include <vulkan/vulkan.hpp>
+
 #include <common/except.h>
 #include <common/log.h>
 
@@ -109,6 +111,11 @@ struct screen_window::impl
         if (window_)
             glfwGetFramebufferSize(window_, &w, &h);
     }
+
+    void wait_for_events()
+    {
+        glfwWaitEvents();
+    }
 };
 
 screen_window::screen_window(const window_config& config)
@@ -116,11 +123,18 @@ screen_window::screen_window(const window_config& config)
 {
 }
 screen_window::~screen_window() {}
-GLFWwindow*    screen_window::handle() const { return impl_->window_; }
 int            screen_window::width() const { return impl_->width_; }
 int            screen_window::height() const { return impl_->height_; }
 bool           screen_window::poll() { return impl_->poll(); }
 void           screen_window::framebuffer_size(int& w, int& h) { impl_->framebuffer_size(w, h); }
-vk::SurfaceKHR screen_window::create_surface(vk::Instance /*vk_instance*/) { return VK_NULL_HANDLE; }
+void           screen_window::wait_for_events() { impl_->wait_for_events(); }
+vk::SurfaceKHR screen_window::create_surface(vk::Instance vk_instance)
+{
+    VkSurfaceKHR raw = VK_NULL_HANDLE;
+    VkResult result = glfwCreateWindowSurface(static_cast<VkInstance>(vk_instance), impl_->window_, nullptr, &raw);
+    if (result != VK_SUCCESS)
+        CASPAR_THROW_EXCEPTION(caspar_exception() << msg_info("Failed to create Vulkan window surface"));
+    return vk::SurfaceKHR(raw);
+}
 
 }}} // namespace caspar::screen::vulkan

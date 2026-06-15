@@ -24,8 +24,6 @@
 
 #include <vulkan/vulkan.hpp>
 
-struct GLFWwindow;
-
 namespace caspar { namespace screen { namespace vulkan {
 
 struct window_config
@@ -42,7 +40,7 @@ struct window_config
     int         screen_index  = 0;
 };
 
-// Owns a GLFW window. On macOS all GLFW/Cocoa calls are marshalled to the main
+// Platform window. On macOS all windowing calls are marshalled to the main
 // thread internally (via Grand Central Dispatch); on other platforms they run
 // directly on the calling (consumer render) thread.
 class screen_window
@@ -54,14 +52,17 @@ class screen_window
     screen_window(const screen_window&)            = delete;
     screen_window& operator=(const screen_window&) = delete;
 
-    GLFWwindow* handle() const;
-    int         width() const;
-    int         height() const;
+    int width() const;
+    int height() const;
 
     // Pump window events. Returns true if the window requested close.
     bool poll();
 
     void framebuffer_size(int& width, int& height);
+
+    // Block until at least one window event arrives (used during swapchain recreation
+    // to wait for a minimized window to be restored without busy-spinning).
+    void wait_for_events();
 
     vk::SurfaceKHR create_surface(vk::Instance vk_instance);
 #ifdef __APPLE__

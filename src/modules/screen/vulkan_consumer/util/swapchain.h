@@ -24,11 +24,9 @@
 #include <vulkan/vulkan.hpp>
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <vector>
-
-// Forward declare GLFW types
-struct GLFWwindow;
 
 namespace caspar { namespace screen { namespace vulkan {
 
@@ -39,7 +37,7 @@ class texture;
  * Phase 9: Screen consumer support.
  *
  * Provides:
- * - Vulkan surface creation from GLFW window
+ * - Vulkan swapchain tied to a platform surface
  * - Swapchain creation and management
  * - Image acquisition and presentation
  * - VSync control
@@ -49,25 +47,26 @@ class swapchain final
 {
   public:
     /**
-     * Create a swapchain for the given GLFW window.
+     * Create a swapchain for the given Vulkan surface.
      *
      * @param instance Vulkan instance
      * @param physical_device Physical device
      * @param device Logical device
      * @param queue Presentation queue
      * @param queue_family_index Queue family index for presentation
-     * @param window GLFW window pointer
+     * @param surface Pre-created Vulkan surface (owned by caller, destroyed with instance)
      * @param vsync Enable vertical sync
-     * @param pre_created_surface Optional pre-created VkSurfaceKHR (for macOS Metal layer control)
+     * @param get_framebuffer_size Callback returning the current drawable size in pixels
      */
-    swapchain(vk::Instance       instance,
-              vk::PhysicalDevice physical_device,
-              vk::Device         device,
-              vk::Queue          queue,
-              uint32_t           queue_family_index,
-              GLFWwindow*        window,
-              bool               vsync,
-              vk::SurfaceKHR     pre_created_surface = nullptr);
+    swapchain(vk::Instance                    instance,
+              vk::PhysicalDevice              physical_device,
+              vk::Device                      device,
+              vk::Queue                       queue,
+              uint32_t                        queue_family_index,
+              vk::SurfaceKHR                  surface,
+              bool                            vsync,
+              std::function<void(int&, int&)> get_framebuffer_size,
+              std::function<void()>           wait_for_events = {});
     ~swapchain();
 
     swapchain(const swapchain&)            = delete;
