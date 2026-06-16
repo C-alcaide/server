@@ -443,10 +443,12 @@ void vulkan_device::create_logical_device()
         VK_KHR_GLOBAL_PRIORITY_EXTENSION_NAME,
     };
 
-    // FSE is useful on ALL tiers: on Windows, VK_KHR_display is non-functional
-    // (DWM never releases displays, so vkGetPhysicalDeviceDisplayPropertiesKHR
-    // returns zero displays regardless of GPU). Application-controlled FSE
-    // bypasses DWM composition for direct scanout on all tiers.
+    // FSE is useful on ALL tiers: on Windows, VK_KHR_display requires
+    // configureDriver.exe --option 6 to export the extension AND the display
+    // must be removed from the Windows desktop (Win11 Settings → Display →
+    // Advanced → "Remove display from desktop"). Without both steps,
+    // vkGetPhysicalDeviceDisplayPropertiesKHR returns zero displays.
+    // FSE provides a fallback output path that works without driver configuration.
 #ifdef _WIN32
     desired_device_exts.push_back(VK_EXT_FULL_SCREEN_EXCLUSIVE_EXTENSION_NAME);
 #endif

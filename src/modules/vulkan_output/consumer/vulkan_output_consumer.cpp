@@ -58,6 +58,7 @@
 
 #ifdef _WIN32
 #include <dwmapi.h>
+#include <shellapi.h>
 #else
 #include <pthread.h>
 #include <signal.h>
@@ -68,6 +69,7 @@
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <future>
 #include <iomanip>
 #include <mutex>
@@ -442,12 +444,75 @@ class vulkan_output_consumer : public core::frame_consumer
                     break;
                 }
             }
+
+#ifdef _WIN32
+            // If VK_KHR_display returned zero displays, the target display may still
+            // be part of the Windows desktop. Try detaching it programmatically.
+            // This is the Windows 11 equivalent of Settings → Display → Advanced →
+            // "Remove display from desktop".
+            if (!found && displays.empty()) {
+                // First, ensure the NVIDIA driver exports VK_KHR_display (configureDriver --set 6).
+                bool driver_configured = ensure_vk_khr_display_exported();
+
+                // Re-enumerate after potential driver config change
+                displays = device_->enumerate_displays_on_device();
+                for (const auto& d : displays) {
+                    if (d.output_index == config_.output_index) {
+                        target = d;
+                        target.gpu_index = config_.gpu_index;
+                        found = true;
+                        break;
+                    }
+                }
+
+                // Still no displays? Try detaching from desktop — but ONLY if configureDriver
+                // succeeded (or VK_KHR_display was already working). If the driver doesn't
+                // export VK_KHR_display, detaching is pointless and disrupts the desktop.
+                if (!found && displays.empty() && driver_configured) {
+                    CASPAR_LOG(info) << print()
+                        << L" Pro GPU but VK_KHR_display reports no displays. "
+                           L"Attempting to detach output " << config_.output_index
+                        << L" from Windows desktop...";
+
+                    if (detach_display_from_desktop(config_.gpu_index, config_.output_index)) {
+                        // Re-enumerate after detach — the display should now appear
+                        displays = device_->enumerate_displays_on_device();
+                        for (const auto& d : displays) {
+                            if (d.output_index == config_.output_index) {
+                                target = d;
+                                target.gpu_index = config_.gpu_index;
+                                found = true;
+                                break;
+                            }
+                        }
+                        if (!found) {
+                            CASPAR_LOG(warning) << print()
+                                << L" Display detached from desktop but VK_KHR_display still reports "
+                                   L"no displays. A system restart may be required after running "
+                                   L"'configureDriver.exe --set 6'.";
+                            // Reattach since we couldn't use it
+                            reattach_display_to_desktop();
+                        }
+                    }
+                } else if (!found && displays.empty() && !driver_configured) {
+                    CASPAR_LOG(info) << print()
+                        << L" VK_KHR_display not available (configureDriver not run or UAC declined). "
+                           L"Skipping display detach. Falling back to fullscreen exclusive window.";
+                }
+            }
+#endif
         }
 
         if (!found) {
 #ifdef _WIN32
             // Pro GPU without VK_KHR_display (e.g. RTX A-series on Windows desktop mode),
             // or consumer GPU: use FSE window path.
+
+            // Ensure the target display is attached to the desktop — it may have been
+            // detached by a previous run that crashed, or by a manual detach.
+            // FSE needs the display in the Windows desktop topology.
+            ensure_display_attached_for_fse(config_.gpu_index, config_.output_index);
+
             // EDID emulation: inject synthetic EDID if the target output has no monitor
             if (config_.edid_emulation) {
                 if (!nvapi_)
@@ -3127,6 +3192,343 @@ class vulkan_output_consumer : public core::frame_consumer
         return DefWindowProcW(hwnd, msg, wParam, lParam);
     }
 
+    // ─── configureDriver auto-invoke ────────────────────────────────────────────
+    // On Windows, VK_KHR_display is not exported by the NVIDIA driver by default.
+    // The NVIDIA "Configure Driver Utility" (configureDriver.exe) option 6 enables
+    // it.  This function detects Pro GPUs that report zero VK_KHR_display outputs
+    // and auto-runs the utility (if found next to casparcg.exe) to enable the
+    // extension.  Requires admin privileges — if not elevated, logs a hint.
+    // Only called when a vulkan_output consumer is actually initializing on a Pro GPU.
+    //
+    // Reference: https://github.com/nvpro-samples/gl_render_vk_ddisplay
+    // Download:  https://www.nvidia.com/en-us/drivers/driver-utility/
+    //
+    // Returns true if VK_KHR_display is believed to be functional (either already
+    // working or configureDriver succeeded — though a restart may still be needed).
+    // Returns false if configureDriver was not found, UAC was declined, or it failed.
+    static bool ensure_vk_khr_display_exported()
+    {
+        static bool result = false;
+        static std::once_flag once;
+        std::call_once(once, [] {
+            // Quick check: if VK_KHR_display already reports displays, nothing to do.
+            auto displays = vulkan_device::enumerate_displays();
+            for (const auto& d : displays) {
+                if (d.tier == gpu_tier::pro && d.display_handle != VK_NULL_HANDLE) {
+                    result = true;
+                    return; // Already working
+                }
+            }
+
+            // Find configureDriver.exe next to the server executable
+            std::filesystem::path exe_dir;
+            {
+                wchar_t module_path[MAX_PATH] = {};
+                GetModuleFileNameW(nullptr, module_path, MAX_PATH);
+                exe_dir = std::filesystem::path(module_path).parent_path();
+            }
+
+            auto configure_driver_path = exe_dir / L"configureDriver.exe";
+            if (!std::filesystem::exists(configure_driver_path)) {
+                CASPAR_LOG(warning)
+                    << L"[vulkan_output] Pro GPU detected but VK_KHR_display reports no displays. "
+                       L"The NVIDIA driver may not export VK_KHR_display on Windows by default. "
+                       L"Place 'configureDriver.exe' next to casparcg.exe and restart, or run manually: "
+                       L"configureDriver.exe --set 6  (requires admin). "
+                       L"Download: https://www.nvidia.com/en-us/drivers/driver-utility/";
+                return;
+            }
+
+            CASPAR_LOG(info) << L"[vulkan_output] Pro GPU detected but VK_KHR_display shows no displays. "
+                                L"Running configureDriver.exe --set 6 to export VK_KHR_display...";
+
+            // Use ShellExecuteEx with "runas" to request elevation via UAC.
+            // configureDriver.exe modifies driver registry keys and needs admin.
+            auto file_str = configure_driver_path.wstring();
+            auto dir_str  = exe_dir.wstring();
+
+            SHELLEXECUTEINFOW sei{};
+            sei.cbSize       = sizeof(sei);
+            sei.fMask        = SEE_MASK_NOCLOSEPROCESS;
+            sei.lpVerb       = L"runas";
+            sei.lpFile       = file_str.c_str();
+            sei.lpParameters = L"--set 6";
+            sei.lpDirectory  = dir_str.c_str();
+            sei.nShow        = SW_HIDE;
+
+            if (!ShellExecuteExW(&sei)) {
+                auto err = GetLastError();
+                if (err == ERROR_CANCELLED) {
+                    CASPAR_LOG(warning)
+                        << L"[vulkan_output] UAC elevation was declined for configureDriver.exe. "
+                           L"VK_KHR_display will not be available. Run manually as admin: "
+                           L"configureDriver.exe --set 6";
+                } else {
+                    CASPAR_LOG(warning)
+                        << L"[vulkan_output] Failed to launch configureDriver.exe (error " << err << L"). "
+                           L"Run manually: configureDriver.exe --set 6";
+                }
+                return;
+            }
+
+            WaitForSingleObject(sei.hProcess, 10000);
+
+            DWORD exit_code = 0;
+            GetExitCodeProcess(sei.hProcess, &exit_code);
+            CloseHandle(sei.hProcess);
+
+            if (exit_code == 0) {
+                CASPAR_LOG(info) << L"[vulkan_output] configureDriver.exe completed successfully. "
+                                    L"VK_KHR_display should now be exported. "
+                                    L"NOTE: A system restart may be required for the change to take effect.";
+                result = true;
+            } else if (exit_code == STILL_ACTIVE) {
+                CASPAR_LOG(warning) << L"[vulkan_output] configureDriver.exe did not complete within timeout.";
+            } else {
+                CASPAR_LOG(warning) << L"[vulkan_output] configureDriver.exe exited with code " << exit_code
+                                    << L". VK_KHR_display may not be enabled. Check admin privileges.";
+            }
+        });
+        return result;
+    }
+
+    // ─── Display Detach/Reattach (Win32 CCD API) ────────────────────────────────
+    // Programmatically removes a display from the Windows desktop topology.
+    // This is equivalent to Settings → Display → Advanced → "Remove display from desktop".
+    // Required for VK_KHR_display on Windows: the display must not be owned by DWM.
+    //
+    // Uses ChangeDisplaySettingsExW to detach the display from the desktop.
+    // On Windows 11 Enterprise/Pro for Workstations, this allows VK_KHR_display
+    // to enumerate and acquire the display for exclusive Vulkan scanout.
+
+    bool detach_display_from_desktop(int gpu_index, int output_index)
+    {
+        // Resolve the target display's GDI device name (e.g. \\.\DISPLAY3)
+        // by matching the output_index to connected displays on the target GPU.
+        // Use the Vulkan device name to identify the correct adapter.
+        VkPhysicalDeviceProperties dev_props{};
+        vkGetPhysicalDeviceProperties(device_->physical_device(), &dev_props);
+        std::wstring vk_gpu_name;
+        {
+            int len = MultiByteToWideChar(CP_UTF8, 0, dev_props.deviceName, -1, nullptr, 0);
+            vk_gpu_name.resize(len - 1);
+            MultiByteToWideChar(CP_UTF8, 0, dev_props.deviceName, -1, vk_gpu_name.data(), len);
+        }
+
+        DISPLAY_DEVICEW dd{};
+        dd.cb = sizeof(dd);
+        int gpu_display_idx = 0;
+        std::wstring target_device_name;
+
+        for (DWORD i = 0; EnumDisplayDevicesW(nullptr, i, &dd, 0); ++i) {
+            if (dd.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP) {
+                std::wstring adapter_str(dd.DeviceString);
+                if (boost::icontains(adapter_str, vk_gpu_name)) {
+                    gpu_display_idx++;
+                    if (gpu_display_idx == output_index) {
+                        target_device_name = dd.DeviceName;
+                        break;
+                    }
+                }
+            }
+            dd.cb = sizeof(dd);
+        }
+
+        if (target_device_name.empty()) {
+            CASPAR_LOG(debug) << print()
+                << L" detach_display: Could not find display on target GPU at output_index=" << output_index;
+            return false;
+        }
+
+        CASPAR_LOG(info) << print() << L" Detaching display " << target_device_name
+                         << L" from Windows desktop for VK_KHR_display...";
+
+        // Use ChangeDisplaySettingsExW to detach the display.
+        // Setting dmPelsWidth=0, dmPelsHeight=0 with DM_POSITION detaches.
+        DEVMODEW dm{};
+        dm.dmSize = sizeof(dm);
+        dm.dmFields = DM_POSITION | DM_PELSWIDTH | DM_PELSHEIGHT;
+        dm.dmPelsWidth = 0;
+        dm.dmPelsHeight = 0;
+        dm.dmPosition.x = 0;
+        dm.dmPosition.y = 0;
+
+        LONG result = ChangeDisplaySettingsExW(
+            target_device_name.c_str(), &dm, nullptr,
+            CDS_UPDATEREGISTRY | CDS_NORESET, nullptr);
+
+        if (result != DISP_CHANGE_SUCCESSFUL) {
+            CASPAR_LOG(warning) << print()
+                << L" ChangeDisplaySettingsExW failed to detach " << target_device_name
+                << L" (error " << result << L"). "
+                << L"The process may need administrator privileges, or the display cannot be detached.";
+            return false;
+        }
+
+        // Apply the change (CDS_NORESET deferred it, now commit)
+        result = ChangeDisplaySettingsExW(nullptr, nullptr, nullptr, 0, nullptr);
+        if (result != DISP_CHANGE_SUCCESSFUL) {
+            CASPAR_LOG(warning) << print()
+                << L" ChangeDisplaySettingsExW commit failed (error " << result << L").";
+            return false;
+        }
+
+        CASPAR_LOG(info) << print() << L" Successfully detached " << target_device_name
+                         << L" from Windows desktop. Display is now available for VK_KHR_display.";
+        detached_device_name_ = target_device_name;
+        display_detached_by_us_ = true;
+
+        // Give the system time to process the topology change
+        std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+        return true;
+    }
+
+    void reattach_display_to_desktop()
+    {
+        if (!display_detached_by_us_ || detached_device_name_.empty())
+            return;
+
+        // Reattach by reverting to registry settings (which still has the display config)
+        // Passing nullptr for DEVMODE with the device name restores default settings.
+        LONG result = ChangeDisplaySettingsExW(
+            detached_device_name_.c_str(), nullptr, nullptr,
+            CDS_UPDATEREGISTRY | CDS_NORESET, nullptr);
+
+        // Commit the change
+        ChangeDisplaySettingsExW(nullptr, nullptr, nullptr, 0, nullptr);
+
+        if (result == DISP_CHANGE_SUCCESSFUL) {
+            CASPAR_LOG(info) << print() << L" Reattached " << detached_device_name_
+                             << L" to Windows desktop.";
+        } else {
+            CASPAR_LOG(warning) << print()
+                << L" Failed to reattach " << detached_device_name_
+                << L" to desktop (error " << result << L"). "
+                << L"Manually re-enable in Settings → Display.";
+        }
+
+        display_detached_by_us_ = false;
+        detached_device_name_.clear();
+    }
+
+    void ensure_display_attached_for_fse(int gpu_index, int output_index)
+    {
+        // Check if the target display is currently detached from the desktop.
+        // If so, reattach it — FSE requires the display to be part of the desktop topology.
+        VkPhysicalDeviceProperties dev_props{};
+        vkGetPhysicalDeviceProperties(device_->physical_device(), &dev_props);
+        std::wstring vk_gpu_name;
+        {
+            int len = MultiByteToWideChar(CP_UTF8, 0, dev_props.deviceName, -1, nullptr, 0);
+            vk_gpu_name.resize(len - 1);
+            MultiByteToWideChar(CP_UTF8, 0, dev_props.deviceName, -1, vk_gpu_name.data(), len);
+        }
+
+        // First check if the display IS attached — if so, nothing to do.
+        DISPLAY_DEVICEW dd{};
+        dd.cb = sizeof(dd);
+        int gpu_display_idx = 0;
+        LONG rightmost_edge = 0; // Track rightmost edge for positioning reattached display
+        for (DWORD i = 0; EnumDisplayDevicesW(nullptr, i, &dd, 0); ++i) {
+            if (dd.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP) {
+                std::wstring adapter_str(dd.DeviceString);
+                if (boost::icontains(adapter_str, vk_gpu_name)) {
+                    gpu_display_idx++;
+                    if (gpu_display_idx == output_index)
+                        return; // Already attached, nothing to do.
+                }
+                // Track rightmost edge of all attached displays
+                DEVMODEW dm_check{};
+                dm_check.dmSize = sizeof(dm_check);
+                if (EnumDisplaySettingsW(dd.DeviceName, ENUM_CURRENT_SETTINGS, &dm_check)) {
+                    LONG edge = dm_check.dmPosition.x + static_cast<LONG>(dm_check.dmPelsWidth);
+                    if (edge > rightmost_edge)
+                        rightmost_edge = edge;
+                }
+            }
+            dd.cb = sizeof(dd);
+        }
+
+        // Display is not attached. Find it among all displays (including detached ones).
+        dd.cb = sizeof(dd);
+        gpu_display_idx = 0;
+        std::wstring target_device_name;
+        for (DWORD i = 0; EnumDisplayDevicesW(nullptr, i, &dd, 0); ++i) {
+            // Check adapter string regardless of ATTACHED_TO_DESKTOP flag
+            std::wstring adapter_str(dd.DeviceString);
+            if (boost::icontains(adapter_str, vk_gpu_name)) {
+                gpu_display_idx++;
+                if (gpu_display_idx == output_index) {
+                    target_device_name = dd.DeviceName;
+                    break;
+                }
+            }
+            dd.cb = sizeof(dd);
+        }
+
+        if (target_device_name.empty()) {
+            CASPAR_LOG(debug) << print()
+                << L" ensure_display_attached_for_fse: Could not find detached display on GPU for output_index="
+                << output_index;
+            return;
+        }
+
+        CASPAR_LOG(info) << print() << L" Display " << target_device_name
+                         << L" is detached from desktop. Reattaching for FSE fallback...";
+
+        // Try ChangeDisplaySettingsExW first — set explicit position to avoid overlap
+        DEVMODEW dm{};
+        dm.dmSize = sizeof(dm);
+        if (!EnumDisplaySettingsW(target_device_name.c_str(), ENUM_REGISTRY_SETTINGS, &dm)) {
+            dm.dmPelsWidth  = 1920;
+            dm.dmPelsHeight = 1080;
+            dm.dmBitsPerPel = 32;
+            dm.dmDisplayFrequency = 60;
+        }
+        dm.dmPosition.x = rightmost_edge;
+        dm.dmPosition.y = 0;
+        dm.dmFields = DM_POSITION | DM_PELSWIDTH | DM_PELSHEIGHT | DM_BITSPERPEL | DM_DISPLAYFREQUENCY;
+
+        LONG result = ChangeDisplaySettingsExW(
+            target_device_name.c_str(), &dm, nullptr,
+            CDS_UPDATEREGISTRY | CDS_NORESET, nullptr);
+
+        LONG commit_result = ChangeDisplaySettingsExW(nullptr, nullptr, nullptr, 0, nullptr);
+
+        if (result == DISP_CHANGE_SUCCESSFUL && commit_result == DISP_CHANGE_SUCCESSFUL) {
+            CASPAR_LOG(info) << print() << L" Reattached " << target_device_name
+                             << L" at (" << dm.dmPosition.x << L"," << dm.dmPosition.y << L") "
+                             << dm.dmPelsWidth << L"x" << dm.dmPelsHeight << L" for FSE.";
+            reattached_device_name_ = target_device_name;
+            std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+        } else {
+            // ChangeDisplaySettingsExW failed (e.g. topology in "only show on X" mode).
+            // Use displayswitch.exe /extend as a robust fallback — it forces all connected
+            // displays into extended desktop mode regardless of current topology state.
+            CASPAR_LOG(info) << print()
+                << L" ChangeDisplaySettingsExW failed (step1=" << result << L" commit=" << commit_result
+                << L"). Using displayswitch /extend to restore multi-monitor topology...";
+
+            STARTUPINFOW si{};
+            si.cb = sizeof(si);
+            PROCESS_INFORMATION pi{};
+            wchar_t cmd[] = L"displayswitch.exe /extend";
+            if (CreateProcessW(nullptr, cmd, nullptr, nullptr, FALSE,
+                               CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+                WaitForSingleObject(pi.hProcess, 10000);
+                CloseHandle(pi.hProcess);
+                CloseHandle(pi.hThread);
+                // displayswitch needs time to apply the topology change
+                std::this_thread::sleep_for(std::chrono::milliseconds(3000));
+                CASPAR_LOG(info) << print() << L" displayswitch /extend completed.";
+            } else {
+                CASPAR_LOG(warning) << print()
+                    << L" Failed to run displayswitch.exe. "
+                    << L"Manually re-enable the display in Settings → Display.";
+            }
+        }
+    }
+
     void launch_display_blanker()
     {
         // Launch display_blanker.exe once per process. Multiple vulkan_output consumers
@@ -3301,21 +3703,74 @@ class vulkan_output_consumer : public core::frame_consumer
                 }
             }
 
-            // Fallback: select by monitor index
+            // Fallback: select by GPU name + output index
+            // Match the Vulkan device name against Windows display adapter DeviceString,
+            // then pick the Nth attached display on that adapter.
+            if (!data.found && !reattached_device_name_.empty()) {
+                // We just reattached this specific device — use it directly.
+                // After reattach, topology may have shifted so GPU name matching is unreliable.
+                DEVMODEW dm{};
+                dm.dmSize = sizeof(dm);
+                if (EnumDisplaySettingsW(reattached_device_name_.c_str(), ENUM_CURRENT_SETTINGS, &dm)) {
+                    data.rect.left   = dm.dmPosition.x;
+                    data.rect.top    = dm.dmPosition.y;
+                    data.rect.right  = dm.dmPosition.x + static_cast<LONG>(dm.dmPelsWidth);
+                    data.rect.bottom = dm.dmPosition.y + static_cast<LONG>(dm.dmPelsHeight);
+                    data.found = true;
+                    CASPAR_LOG(info) << print() << L" Using reattached display " << reattached_device_name_
+                                     << L" at (" << dm.dmPosition.x << L"," << dm.dmPosition.y << L") "
+                                     << dm.dmPelsWidth << L"x" << dm.dmPelsHeight;
+                } else {
+                    CASPAR_LOG(warning) << print() << L" Reattached display " << reattached_device_name_
+                                        << L" has no current settings (not yet enumerated by Windows?).";
+                }
+                reattached_device_name_.clear();
+            }
             if (!data.found) {
-                EnumDisplayMonitors(
-                    nullptr, nullptr,
-                    [](HMONITOR, HDC, LPRECT rect, LPARAM lparam) -> BOOL {
-                        auto* d = reinterpret_cast<monitor_enum_data*>(lparam);
-                        d->current_index++;
-                        if (d->current_index == d->target_index) {
-                            d->rect  = *rect;
-                            d->found = true;
-                            return FALSE;
+                VkPhysicalDeviceProperties dev_props{};
+                vkGetPhysicalDeviceProperties(device_->physical_device(), &dev_props);
+                std::wstring vk_gpu_name;
+                {
+                    int len = MultiByteToWideChar(CP_UTF8, 0, dev_props.deviceName, -1, nullptr, 0);
+                    vk_gpu_name.resize(len - 1);
+                    MultiByteToWideChar(CP_UTF8, 0, dev_props.deviceName, -1, vk_gpu_name.data(), len);
+                }
+
+                DISPLAY_DEVICEW dd{};
+                dd.cb = sizeof(dd);
+                int output_count_on_gpu = 0;
+                for (DWORD i = 0; EnumDisplayDevicesW(nullptr, i, &dd, 0); ++i) {
+                    if (!(dd.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP)) {
+                        dd.cb = sizeof(dd);
+                        continue;
+                    }
+                    std::wstring adapter_str(dd.DeviceString);
+                    // Match: adapter name contains the Vulkan GPU name (e.g. "Quadro P4000")
+                    if (boost::icontains(adapter_str, vk_gpu_name)) {
+                        output_count_on_gpu++;
+                        if (output_count_on_gpu == config_.output_index) {
+                            DEVMODEW dm{};
+                            dm.dmSize = sizeof(dm);
+                            if (EnumDisplaySettingsW(dd.DeviceName, ENUM_CURRENT_SETTINGS, &dm)) {
+                                data.rect.left   = dm.dmPosition.x;
+                                data.rect.top    = dm.dmPosition.y;
+                                data.rect.right  = dm.dmPosition.x + static_cast<LONG>(dm.dmPelsWidth);
+                                data.rect.bottom = dm.dmPosition.y + static_cast<LONG>(dm.dmPelsHeight);
+                                data.found = true;
+                                CASPAR_LOG(info) << print() << L" Matched adapter \"" << adapter_str
+                                                 << L"\" output " << config_.output_index
+                                                 << L" (" << dd.DeviceName << L")";
+                            }
+                            break;
                         }
-                        return TRUE;
-                    },
-                    reinterpret_cast<LPARAM>(&data));
+                    }
+                    dd.cb = sizeof(dd);
+                }
+
+                // No last-resort fallback: if the configured display is not found
+                // on this GPU, we refuse to land on an arbitrary monitor.
+                // The window will be created off-screen (invisible) rather than
+                // accidentally covering the operator's primary display.
             }
 
             int x = 0, y = 0;
@@ -3330,11 +3785,14 @@ class vulkan_output_consumer : public core::frame_consumer
                 CASPAR_LOG(info) << print() << L" Fullscreen window on monitor " << config_.output_index << L" at ("
                                  << x << L"," << y << L") " << w << L"x" << h;
             } else {
-                CASPAR_LOG(warning) << print() << L" Monitor " << config_.output_index
-                                    << L" not found. Window will be created off-screen (no output until monitor is available).";
+                CASPAR_LOG(error) << print() << L" Configured display (gpu=" << config_.gpu_index
+                                  << L" device=" << config_.output_index
+                                  << L") not found in desktop topology. Output will NOT be visible."
+                                  << L" Check that the display is connected and attached to the desktop.";
                 // Place window far off-screen so it doesn't cover the operator's display.
                 // Vulkan swapchain will still be created on this window; frames are rendered
-                // but not visible until the monitor appears in the desktop topology.
+                // but not visible. The consumer stays alive so CasparCG doesn't crash —
+                // reconnect the display and restart the channel to recover.
                 x = -32000;
                 y = -32000;
             }
@@ -3602,6 +4060,9 @@ class vulkan_output_consumer : public core::frame_consumer
             fse_hwnd_ = nullptr;
             UnregisterClassW(L"CasparVulkanOutput", GetModuleHandle(nullptr));
         }
+
+        // Reattach display to Windows desktop if we detached it for VK_KHR_display
+        reattach_display_to_desktop();
 #endif
     }
 
@@ -3628,6 +4089,11 @@ class vulkan_output_consumer : public core::frame_consumer
     VkDisplayKHR                     display_handle_ = VK_NULL_HANDLE;
     uint32_t                         my_queue_idx_ = 0; // Exclusive queue for this consumer
     VkQueue                          my_queue_ = VK_NULL_HANDLE;
+
+    // Display detached from desktop for VK_KHR_display (Windows 11+)
+    bool                             display_detached_by_us_{false}; // True if we removed the display from desktop
+    std::wstring                     detached_device_name_;          // GDI device name (e.g. \\\\.\\DISPLAY5)
+    std::wstring                     reattached_device_name_;        // Set if we reattached a display for FSE
 
     // Frame buffer (frame + its associated timeline generation)
     std::queue<std::pair<core::const_frame, uint64_t>> buffer_;

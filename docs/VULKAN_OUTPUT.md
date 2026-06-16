@@ -2,10 +2,11 @@
 
 Low-latency, direct-to-display GPU output consumer for CasparCG. Bypasses the desktop compositor entirely using the Vulkan graphics API, targeting professional broadcast scenarios where frame-accurate timing and deterministic latency are critical.
 
-**Supported platforms**: Windows (via `VK_EXT_full_screen_exclusive` + Win32 surfaces) and Linux (via `VK_KHR_display` direct scanout).
+**Supported platforms**: Windows (via `VK_EXT_full_screen_exclusive` + Win32 surfaces; or `VK_KHR_display` on Windows 11 with Specialized Monitors) and Linux (via `VK_KHR_display` direct scanout).
 
 ## Table of Contents
 
+- [System Requirements](#system-requirements)
 - [Architecture Overview](#architecture-overview)
 - [GPU Tier System](#gpu-tier-system)
 - [Frame Transfer Pipeline](#frame-transfer-pipeline)
@@ -24,6 +25,54 @@ Low-latency, direct-to-display GPU output consumer for CasparCG. Bypasses the de
 - [Linux Testing](#linux-testing)
 - [Diagnostics](#diagnostics)
 - [Troubleshooting](#troubleshooting)
+
+---
+
+## System Requirements
+
+### Windows (Fullscreen Exclusive — default path)
+
+| Requirement | Details |
+|---|---|
+| **OS** | Windows 10 or later (any edition) |
+| **GPU** | NVIDIA Quadro/RTX A-series/RTX Pro (Pro tier) or GeForce RTX (Consumer tier) |
+| **Driver** | NVIDIA R535+ (Vulkan 1.3+). R550+ recommended for multi-GPU stability |
+| **Display** | Must be attached to the Windows desktop (extended mode) |
+| **Admin** | Not required for FSE path |
+
+### Windows (VK_KHR_display direct scanout — optional)
+
+| Requirement | Details |
+|---|---|
+| **OS** | **Windows 11** (build 22000+) — Enterprise, Pro for Workstations, or IoT Enterprise |
+| **GPU** | NVIDIA Quadro/RTX A-series/RTX Pro (Pro tier only) |
+| **Driver** | NVIDIA R535+ with `configureDriver.exe` v2.8+ |
+| **One-time setup** | Run `configureDriver.exe --set 6` as administrator, then restart |
+| **Display** | Must be removed from Windows desktop (Settings → Display → Advanced → "Remove display from desktop") |
+| **Admin** | Required for initial configureDriver setup (UAC elevation) |
+
+> **Note**: Windows 10 does NOT support VK_KHR_display regardless of GPU or driver version. The "Specialized Monitors" / "Remove display from desktop" feature is Windows 11 only.
+
+### Linux (VK_KHR_display direct scanout — default path)
+
+| Requirement | Details |
+|---|---|
+| **OS** | Any Linux distribution with Vulkan support |
+| **GPU** | NVIDIA with proprietary driver ≥ 535 (or Mesa for AMD — untested) |
+| **Display** | Must NOT be managed by X11/Wayland compositor (`xrandr --output DP-X --off`) |
+| **Permissions** | Access to `/dev/dri/card*` (typically via `video` group) |
+| **Admin** | Not required (no configureDriver equivalent needed) |
+
+### Automation Features (Windows)
+
+The module includes automatic recovery for common display configuration issues:
+
+| Feature | Behavior |
+|---|---|
+| **configureDriver auto-invoke** | On Win11 with Pro GPU, automatically runs `configureDriver.exe --set 6` with UAC if VK_KHR_display reports no displays. Skipped on Win10. |
+| **Display detach** | After configureDriver succeeds, automatically detaches the target display from the Windows desktop for VK_KHR_display acquisition |
+| **Display reattach for FSE** | If VK_KHR_display fails and FSE fallback is needed, detects if the target display was left detached (from crash/previous run) and reattaches via `displayswitch /extend` |
+| **GPU-aware display targeting** | FSE window placement matches the Vulkan GPU name against Windows display adapter names to target the correct monitor |
 
 ---
 
@@ -238,17 +287,39 @@ The module detects the GPU capability tier at runtime and adapts its output stra
 
 When `VK_KHR_display` is available **and** the target display is enumerated through it, the module uses direct display mode (bypasses the OS compositor entirely). When the GPU is detected as Pro but no display is enumerated through `VK_KHR_display`, the module falls back to a fullscreen window path while still reporting Pro tier.
 
-#### VK_KHR_display on Windows — effectively non-functional
+#### VK_KHR_display on Windows
 
-On **Windows**, `VK_KHR_display` is **not usable in practice**. The Windows Display Manager (DWM) retains exclusive ownership of all connected displays at all times. There is no supported mechanism to release a display from Windows to make it available through `vkGetPhysicalDeviceDisplayPropertiesKHR`:
+On **Windows 11** (Enterprise, Pro for Workstations, or IoT Enterprise editions), `VK_KHR_display` direct scanout is supported through the **Specialized Monitors** / **"Remove display from desktop"** feature. This requires:
 
-- **"Don't use for desktop"** (Windows Display Settings): Makes the display inactive, but Windows still holds the underlying display resource. The display becomes unavailable to *both* the desktop and applications — including Vulkan's display enumeration.
-- **NVIDIA "dedicated GPU display"** (referenced in older documentation): This option does **not exist** in current NVIDIA Windows drivers, including professional Quadro and RTX A-series cards. It may have been available in legacy drivers (pre-R535) or only on specific enterprise Linux configurations.
-- **`VK_NV_acquire_winrt_display`**: NVIDIA's Windows-specific extension for acquiring displays from WinRT. In practice, it does not provide a working path to release a display from DWM either.
+1. **Windows 11** (build 22000+) — Windows 10 does NOT support this feature regardless of edition
+2. **NVIDIA professional GPU** (Quadro, RTX A-series, RTX Pro) with driver ≥ 535
+3. **`configureDriver.exe --set 6`** run as administrator — enables the `ExposeVK_KHR_display` driver registry key
+4. **System restart** after running configureDriver — the driver only loads the setting at boot
+5. **Display removed from Windows desktop** — either manually via Settings → Display → Advanced → "Remove display from desktop", or programmatically via `ChangeDisplaySettingsExW`
 
-The NVIDIA Windows driver *does* report `VK_KHR_display` as a supported extension, but `vkGetPhysicalDeviceDisplayPropertiesKHR` returns **zero displays** because none can be released from Windows. The code handles this gracefully — when no displays are enumerated, it falls through to the fullscreen window path.
+The module automates steps 3–5:
+- On first run with a Pro GPU that reports no VK_KHR_display outputs, it launches `configureDriver.exe --set 6` with UAC elevation
+- If configureDriver succeeds and VK_KHR_display still reports no displays, it attempts to detach the target display from the Windows desktop
+- If detach succeeds but enumeration still fails, it warns that a restart is needed and reattaches the display
+- If configureDriver fails or is unavailable, or if the OS is Windows 10, the module falls back to FSE immediately
 
-**Bottom line**: On Windows, the "Pro (direct display)" code path will never be reached. All output goes through `VK_EXT_full_screen_exclusive` + Win32 surfaces.
+**On Windows 10**: VK_KHR_display is **not available**. The "Specialized Monitors" / "Remove display from desktop" feature does not exist in Windows 10. All output goes through `VK_EXT_full_screen_exclusive` + Win32 surfaces. The `configureDriver --set 6` command may succeed silently but has no effect.
+
+**Bottom line**: On Windows 10, all output uses the FSE fullscreen window path. On Windows 11 with the correct edition and setup, VK_KHR_display direct scanout is possible but requires one-time admin setup + restart.
+
+#### FSE Fullscreen Window (Windows — primary path)
+
+The fullscreen exclusive window path is the default and most reliable output method on Windows. It:
+
+- Automatically identifies the target display by matching the Vulkan GPU name against Windows display adapter names (`EnumDisplayDevicesW`)
+- If the target display was left detached from a previous run (crash recovery), automatically reattaches it using `displayswitch /extend`
+- Creates a borderless `WS_EX_TOPMOST` window positioned on the target display
+- Uses `VK_EXT_full_screen_exclusive` with `MAILBOX` present mode for low-latency output
+
+The display-targeting logic uses this priority:
+1. `<display-name>` config option — match by monitor device string or device ID (substring, case-insensitive)
+2. GPU name matching — find displays attached to the configured GPU adapter, pick the Nth output
+3. `EnumDisplayMonitors` by index — last resort fallback
 
 #### Linux
 
@@ -277,9 +348,16 @@ On **Linux**, `VK_KHR_display` works as intended: when no compositor (X11/Waylan
 
 #### Actual output path used (Windows)
 
-All Windows deployments use the **"Pro (fullscreen)"** or **"Consumer (fullscreen)"** path:
+On **Windows 10** or Windows 11 without Specialized Monitors support, all deployments use the **"Pro (fullscreen)"** or **"Consumer (fullscreen)"** path.
 
-The fullscreen window path uses `VK_EXT_full_screen_exclusive` with `VK_FULL_SCREEN_EXCLUSIVE_DEFAULT_EXT` mode, which hints to the driver that it may bypass DWM composition when the window covers the entire display. On NVIDIA professional drivers (Quadro, RTX A-series), this achieves near-direct-scanout performance without needing to release the display from Windows. If the driver does not support FSE or swapchain creation fails with the FSE chain, the module silently retries without it.
+On **Windows 11** with Specialized Monitors enabled and `configureDriver --set 6` applied + restarted, Pro GPUs can use the **"Pro (direct display)"** path — identical to Linux.
+
+The fullscreen window path uses `VK_EXT_full_screen_exclusive` with `MAILBOX` present mode for low-latency presentation. On NVIDIA professional drivers (Quadro, RTX A-series), this achieves near-direct-scanout performance. The module:
+
+1. Detects if the target display was left detached (from a previous crash or VK_KHR_display attempt)
+2. Reattaches it automatically via `displayswitch /extend` if needed
+3. Creates a GPU-targeted borderless fullscreen window on the correct display
+4. If `VK_EXT_full_screen_exclusive` is supported, requests exclusive access for lowest latency
 
 **Consumer tier** creates a `WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_APPWINDOW` borderless window covering the target monitor and presents through the standard Vulkan WSI (Window System Integration) path. This still benefits from Vulkan's explicit swapchain control and VSync timing.
 
@@ -982,6 +1060,104 @@ Output1=\\.\DISPLAY6
 Count=1
 DisplayId0=2147880067
 ```
+
+---
+
+## VK_KHR_display on Windows (Direct Display)
+
+> **Windows 11 only.** On Linux, `VK_KHR_display` is always available with the proprietary NVIDIA driver — no special configuration is needed.
+
+### Background
+
+On Windows, the NVIDIA driver does **not** export `VK_KHR_display` by default. The Desktop Window Manager (DWM) owns all display outputs, so `vkGetPhysicalDeviceDisplayPropertiesKHR` returns zero displays unless the driver is explicitly configured to expose them.
+
+Two steps are required for true Direct Display output:
+
+1. **Export the extension** — Run `configureDriver.exe --option 6` (admin, one-time)
+2. **Remove displays from the desktop** — Detach the target monitors from the Windows desktop
+
+Both steps are **handled automatically** by CasparCG VP when a `<vulkan-output>` consumer is configured on a Pro GPU. On shutdown, detached displays are automatically returned to the Windows desktop.
+
+Once both steps are done, the vulkan_output consumer uses `VK_KHR_display` for exclusive scanout — no DWM compositing, no FSE window, minimal latency.
+
+### Supported GPUs
+
+`configureDriver.exe` supports NVIDIA professional GPUs:
+
+- **Ada generation**: RTX 6000, RTX 5880, RTX 5000, RTX 4500, RTX 4000, RTX 4000 SFF
+- **Ampere**: RTX A6000, RTX A5500, RTX A5000, RTX A4500, RTX A4000H, RTX A4000
+- **Turing**: Quadro RTX 8000, RTX 6000, RTX 5000, RTX 4000
+- **Volta/Pascal**: Quadro GV100, GP100, P6000, P5000, **P4000**
+- **Maxwell**: Quadro M6000 24GB, M6000, M5000, **M4000**
+
+### Auto-Configuration (Option B)
+
+CasparCG VP automatically handles both prerequisites when a `<vulkan-output>` consumer initializes on a Pro GPU:
+
+**Step 1: Extension Export (module init)**
+
+If `configureDriver.exe` is found next to `casparcg.exe` and Pro GPUs report no `VK_KHR_display` displays, it is invoked automatically:
+
+```
+[info] [vulkan_output] Pro GPU detected but VK_KHR_display shows no displays.
+       Running configureDriver.exe --option 6 to export VK_KHR_display...
+[info] [vulkan_output] configureDriver.exe completed successfully.
+       NOTE: A system restart may be required for the change to take effect.
+```
+
+**Step 2: Display Detach (per-consumer)**
+
+When a vulkan_output consumer finds its target display still attached to the Windows desktop, it uses the Win32 CCD API (`SetDisplayConfig`) to programmatically remove it:
+
+```
+[info] [vulkan_output] Pro GPU but VK_KHR_display reports no displays.
+       Attempting to detach output 1 from Windows desktop...
+[info] [vulkan_output] Successfully detached \\.\DISPLAY3 from Windows desktop.
+       Display is now available for VK_KHR_display.
+```
+
+On shutdown, any display detached by CasparCG is **automatically reattached** to the Windows desktop:
+
+```
+[info] [vulkan_output] Reattached \\.\DISPLAY3 to Windows desktop.
+```
+
+**Requirements:**
+- Place `configureDriver.exe` in the same directory as `casparcg.exe`
+- CasparCG must run with **administrator** privileges (the driver setting is a protected registry key)
+- A **system restart** may be needed after the first run of `configureDriver.exe` for the driver to pick up the new setting
+- Windows 11 Enterprise, Pro for Workstations, or IoT Enterprise (required for the "Remove display from desktop" API)
+
+If CasparCG is not running as admin, a log hint is emitted:
+
+```
+[warning] [vulkan_output] configureDriver.exe requires administrator privileges.
+          Run CasparCG as admin, or execute manually: configureDriver.exe --option 6
+```
+
+### Manual Setup
+
+If auto-configuration is not desired or CasparCG cannot run as admin:
+
+1. Download `configureDriver.exe` from https://www.nvidia.com/en-us/drivers/driver-utility/
+2. Open an elevated Command Prompt
+3. Run: `configureDriver.exe --option 6`
+4. Restart the system
+5. (Optional) In Windows Settings, manually remove target output displays from the desktop — CasparCG will do this automatically if it has permissions, but manual removal persists across reboots
+
+### Fallback Behavior
+
+If `VK_KHR_display` is not available (extension not exported, display not removed from desktop, or non-Pro GPU), the vulkan_output consumer falls back to:
+
+1. **Fullscreen Exclusive (FSE) window** — Borderless TOPMOST window with `VK_EXT_full_screen_exclusive` for DWM bypass
+2. **Display blanker** — Optional companion process for desktop hiding
+
+The FSE path works on all GPUs without any driver configuration.
+
+### Reference
+
+- NVIDIA sample: https://github.com/nvpro-samples/gl_render_vk_ddisplay
+- Microsoft docs: https://learn.microsoft.com/en-us/windows-hardware/drivers/display/specialized-monitors
 
 ---
 
