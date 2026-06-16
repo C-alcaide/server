@@ -10,6 +10,10 @@ add_subdirectory(artnet)
 
 add_subdirectory(screen)
 
+if (ENABLE_VULKAN)
+	add_subdirectory(gpu_test)
+endif ()
+
 if (ENABLE_HTML)
 	add_subdirectory(html)
 endif ()
