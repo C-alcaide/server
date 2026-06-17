@@ -2,8 +2,9 @@
 
 ## Goal
 
-Route each channel's image mixer to the same GPU as its vulkan-output consumer,
-eliminating cross-GPU PCIe copies (~1–2 ms per 4K frame) in multi-GPU setups.
+Route each channel's image mixer to the same GPU as its vulkan-output consumer
+when that relationship is unambiguous, eliminating cross-GPU PCIe copies
+(~1–2 ms per 4K frame) in multi-GPU setups.
 
 ---
 
@@ -42,6 +43,19 @@ accelerator::get_device(gpu_index)  ──►  map<int, vulkan::device>
 
 ## Implementation Phases
 
+> **Status (implemented):**
+> - ✅ Vulkan mixer `device` accepts `gpu_index` with LUID-deduplicated selection
+>   (`src/accelerator/vulkan/util/device.{h,cpp}`).
+> - ✅ `accelerator` manages a `map<int, accelerator_device>` keyed by GPU index;
+>   `create_image_mixer`/`get_device` take a `gpu_index`
+>   (`src/accelerator/accelerator.{h,cpp}`). Previz bridge stays on GPU 0 and is
+>   only wired for GPU-0 mixers.
+> - ✅ `server.cpp` resolves channel GPU: explicit `<gpu>` → first `<vulkan-output>`
+>   consumer `<gpu>` → default 0, then passes it to `create_image_mixer`.
+> - ✅ `<gpu>` documented in `src/shell/casparcg.config`.
+> - ⏳ OGL GPU affinity (Phase 4) deferred — OGL backend ignores `gpu_index`.
+> - ⏳ Frame cache simplification / warnings (Phase 6) optional/pending.
+
 ### Phase 1: Config — Add `<gpu>` to Channel Level
 
 **File**: `src/shell/casparcg.config` (schema) + parsing in `src/shell/server.cpp`
@@ -61,12 +75,14 @@ accelerator::get_device(gpu_index)  ──►  map<int, vulkan::device>
 
 **Behavior**:
 - If `<gpu>` is present at channel level → use that GPU for the mixer
-- If absent → auto-infer from the first `<vulkan-output>` consumer's `<gpu>` value
+- If absent → inherit the GPU from the channel's `<vulkan-output>` consumer when
+  there is a clear match
 - If no vulkan-output consumer → default to GPU 0 (existing behavior)
 
 **Changes**:
 1. In `setup_channels()`, parse `<gpu>` from each `<channel>` ptree node
 2. If not specified, do a lookahead scan of `<consumers><vulkan-output><gpu>` children
+   and use that GPU when the channel has a matching vulkan-output consumer
 3. Pass the resolved `gpu_index` to `accelerator_.create_image_mixer()`
 
 ---
@@ -132,28 +148,11 @@ constructor and calls `select_physical_device(gpu_index)`.
 
 ### Phase 4: OGL Mixer Device — GPU Affinity (Windows)
 
-**Files**: `src/accelerator/ogl/util/context.cpp`, `src/accelerator/ogl/util/device.h`
+**Status**: Deferred for now.
 
-On Windows, WGL provides `wglEnumGpusNV()` / `WGL_NV_gpu_affinity` to create
-GL contexts bound to a specific GPU. SFML's `sf::Context` doesn't support this,
-so we need:
-
-```cpp
-// New constructor:
-device_context(int gpu_index);
-
-// Windows implementation using WGL_NV_gpu_affinity:
-HGPUNV gpus[8];
-wglEnumGpusNV(gpu_index, &gpus[gpu_index]);
-HDC affinity_dc = wglCreateAffinityDCNV(&gpus[gpu_index], ...);
-HGLRC ctx = wglCreateContextAttribsARB(affinity_dc, ...);
-```
-
-On Linux, EGL provides `EGL_EXT_device_enumeration` for the same purpose.
-
-**Note**: If WGL_NV_gpu_affinity is not available (non-NVIDIA), fall back to
-default context (existing behavior). Log a warning that GPU affinity is not
-supported.
+Skip OGL GPU affinity work until the Vulkan path is complete and validated.
+The mixer affinity effort focuses on Vulkan-backed channels first, because that
+is the path that directly affects vulkan-output latency.
 
 ---
 
@@ -224,7 +223,6 @@ for each <channel> in config:
 |------|-----------|
 | Multiple VkDevices increase VRAM usage (duplicate pipelines, texture pools) | Pools are lazy-allocated; pipeline shaders are small (~50KB each) |
 | Thread contention with multiple device threads | Each device has its own IO thread — no contention |
-| OGL GPU affinity not available on all drivers | Fallback to default GPU with warning; cross-GPU path still works |
 | Config validation: gpu index out of range | Log error + fall back to GPU 0 at startup |
 | Existing single-GPU deployments regressed | No change in behavior when all channels use GPU 0 (same device returned) |
 | previz cross-device texture sharing | previz stays on GPU 0; small copy acceptable for monitoring |
@@ -238,13 +236,11 @@ for each <channel> in config:
 | 1 | Config parsing + gpu_index pass-through | Small | None |
 | 2 | Accelerator multi-device map | Medium | Phase 1 |
 | 3 | Vulkan mixer device gpu_index selection | Medium | Phase 2 |
-| 4 | OGL mixer device GPU affinity (Windows) | Medium | Phase 2 |
+| 4 | OGL affinity deferred | N/A | N/A |
 | 5 | Previz cross-device handling | Small | Phase 3 |
 | 6 | Frame cache simplification + warnings | Small | Phase 3 |
 
-Phases 3 and 4 are independent (Vulkan backend vs OGL backend) and can be done
-in parallel. Phase 4 is only needed if the OGL backend is still used; if the
-project is Vulkan-only going forward, it can be deferred.
+Phases 3 and 5 are independent. OGL affinity is explicitly out of scope for now.
 
 ---
 
@@ -257,6 +253,6 @@ project is Vulkan-only going forward, it can be deferred.
 3. **Multi-GPU mismatch (intentional)**: `<channel><gpu>0` + `<vulkan-output><gpu>1` →
    verify cross-GPU fallback still works, warning logged
 4. **Auto-inference**: No `<gpu>` at channel level, `<vulkan-output><gpu>1` →
-   verify mixer auto-selects GPU 1
+  verify mixer auto-selects GPU 1 for that channel
 5. **Performance**: Measure frame latency (send→present) with and without affinity
    on a dual-GPU system — expect ~1-2ms improvement

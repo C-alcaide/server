@@ -213,7 +213,7 @@ void vulkan_device::create_instance()
                 _wputenv_s(L"VK_DRIVER_FILES", env_val.c_str());
 
                 CASPAR_LOG(info) << L"[vulkan] Filtered " << icd_files.size()
-                                 << L" NVIDIA ICD(s) — using newest: "
+                                 << L" NVIDIA ICD(s) - using newest: "
                                  << newest.filename().wstring()
                                  << L" from " << newest.parent_path().filename().wstring();
 
@@ -371,7 +371,7 @@ void vulkan_device::select_physical_device(int gpu_index)
         CASPAR_LOG(warning) << L"[vulkan_output] GPU " << gpu_index << L" (" << props.deviceName
                             << L") reports Vulkan " << VK_VERSION_MAJOR(props.apiVersion) << L"."
                             << VK_VERSION_MINOR(props.apiVersion)
-                            << L" — driver does not support Vulkan 1.3+. "
+                            << L" - driver does not support Vulkan 1.3+. "
                                L"Please update the NVIDIA driver (R550+ recommended). "
                                L"Multi-GPU setups may TDR with older drivers.";
     }
@@ -444,7 +444,7 @@ void vulkan_device::create_logical_device()
     };
 
     // FSE is useful on ALL tiers: on Windows, VK_KHR_display requires
-    // configureDriver.exe --option 6 to export the extension AND the display
+    // configureDriver.exe --set 6 to export the extension AND the display
     // must be removed from the Windows desktop (Win11 Settings → Display →
     // Advanced → "Remove display from desktop"). Without both steps,
     // vkGetPhysicalDeviceDisplayPropertiesKHR returns zero displays.

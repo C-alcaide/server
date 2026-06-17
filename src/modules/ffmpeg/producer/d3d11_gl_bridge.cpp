@@ -99,7 +99,7 @@ struct d3d11_gl_bridge::impl
         // Open DX interop device
         interop_device_ = wglDXOpenDeviceNV(d3d11_device_);
         if (!interop_device_) {
-            CASPAR_LOG(warning) << L"[av_producer] wglDXOpenDeviceNV failed — using CPU path";
+            CASPAR_LOG(warning) << L"[av_producer] wglDXOpenDeviceNV failed - using CPU path";
             cleanup();
             return false;
         }

@@ -42,7 +42,9 @@ class device final
     , public accelerator_device
 {
   public:
-    device();
+    // gpu_index selects which physical GPU the mixer runs on (0-based, deduplicated
+    // by LUID to match the indexing used by the vulkan_output consumer).
+    explicit device(int gpu_index = 0);
     ~device();
 
     device(const device&) = delete;

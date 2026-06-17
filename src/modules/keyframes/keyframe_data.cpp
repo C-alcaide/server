@@ -178,7 +178,7 @@ easing_fn_t resolve_easing(const std::string& name)
         std::lock_guard<std::mutex> lk(warned_mutex);
         if (warned.insert(upper).second)
             CASPAR_LOG(warning) << L"[keyframes] Unknown easing \"" << std::wstring(upper.begin(), upper.end())
-                                << L"\" — using LINEAR";
+                                << L"\" - using LINEAR";
     }
     return ease_linear;
 }

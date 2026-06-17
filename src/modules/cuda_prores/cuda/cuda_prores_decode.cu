@@ -106,7 +106,7 @@ cudaError_t prores_decode_ctx_create(ProResDecodeCtx* ctx,
     CUDA_CHECK(cudaMalloc((void**)&ctx->d_slice_starts, (size_t)num_slices * sizeof(uint32_t)));
     CUDA_CHECK(cudaMalloc((void**)&ctx->d_slice_sizes,  (size_t)num_slices * sizeof(uint16_t)));
     CUDA_CHECK(cudaMalloc((void**)&ctx->d_dec_coeffs,   coeff_bytes));
-    CUDA_CHECK(cudaMalloc((void**)&ctx->d_q_scales,     (size_t)num_slices * sizeof(uint8_t)));
+    CUDA_CHECK(cudaMalloc((void**)&ctx->d_q_scales,     (size_t)num_slices * sizeof(uint16_t)));
     CUDA_CHECK(cudaMalloc((void**)&ctx->d_y,            n_pix    * sizeof(int16_t)));
     CUDA_CHECK(cudaMalloc((void**)&ctx->d_cb,           n_chroma * sizeof(int16_t)));
     CUDA_CHECK(cudaMalloc((void**)&ctx->d_cr,           n_chroma * sizeof(int16_t)));
@@ -308,10 +308,15 @@ static void decode_alpha_to_host(
     int             mbs_per_slice,
     int             slices_per_row,
     int             frame_width,
+    int             frame_height,
     int             alpha_bits,
     int16_t*        h_alpha)
 {
-    const int mb_width = frame_width / 16;
+    // Round up to whole macroblocks (matches the demuxer's mb_width/mb_height),
+    // so the partial right/bottom edge macroblocks are covered.  Writes are then
+    // clamped to the real frame dimensions below to avoid overrunning h_alpha,
+    // which is allocated as frame_width * frame_height (not padded).
+    const int mb_width = (frame_width + 15) / 16;
     // ProRes 4444 alpha: same RLE/delta pixel encoding as FFmpeg unpack_alpha.
     // Each slice covers 16 pixel rows × (mb_count * 16) pixel columns.
     // Max pixels per slice: 8 MBs × 16 × 16 = 2048.
@@ -340,11 +345,23 @@ static void decode_alpha_to_host(
 
         int s_col           = s % slices_per_row;
         int s_row           = s / slices_per_row;
-        int mb_x            = s_col * mbs_per_slice;
-        int mb_count_actual = mb_width - mb_x < mbs_per_slice
-                              ? mb_width - mb_x : mbs_per_slice;
+        // Power-of-two slice decomposition (match FFmpeg / the entropy + IDCT
+        // paths): walk the row to find this slice's MB offset and count.
+        int mb_x = 0, mb_count_actual = mbs_per_slice;
+        {
+            int cur = mbs_per_slice;
+            for (int k = 0; k < s_col; ++k) {
+                while (mb_width - mb_x < cur) cur >>= 1;
+                mb_x += cur;
+            }
+            while (mb_width - mb_x < cur) cur >>= 1;
+            mb_count_actual = cur;
+        }
+        if (mb_x >= mb_width) continue;                 // slice fully outside image
+        if (mb_count_actual <= 0) continue;
         int pixel_x         = mb_x * 16;
         int pixel_y         = s_row * 16;
+        if (pixel_x >= frame_width || pixel_y >= frame_height) continue;
         int num_pixels      = mb_count_actual * 16 * 16;  // 4*64*mb_count
 
         // Fill with fully opaque in case alpha plane is absent
@@ -352,17 +369,30 @@ static void decode_alpha_to_host(
         for (int i = 0; i < num_pixels; ++i) temp[i] = opaque;
 
         if (alpha_size > 0) {
-            const uint8_t* alpha_data = sl + hdr_bytes + y_size + cb_size + cr_size;
-            unpack_alpha_cpu(alpha_data, alpha_size, temp, num_pixels, alpha_bits);
+            // Guard against a corrupt slice header pointing the alpha payload
+            // past the end of the slice (and therefore the frame buffer).
+            int alpha_off = hdr_bytes + y_size + cb_size + cr_size;
+            if (alpha_off >= 0 && alpha_off + alpha_size <= total) {
+                const uint8_t* alpha_data = sl + alpha_off;
+                unpack_alpha_cpu(alpha_data, alpha_size, temp, num_pixels, alpha_bits);
+            }
         }
 
         // Layout from FFmpeg decode_slice_alpha:
         //   16 rows, each row = mb_count_actual * 16 pixels wide.
+        // Clamp the copied width/height to the real frame so partial edge
+        // macroblocks do not write past the end of h_alpha.
         int row_width = mb_count_actual * 16;
-        for (int row = 0; row < 16; ++row) {
+        int copy_w    = row_width;
+        if (pixel_x + copy_w > frame_width)
+            copy_w = frame_width - pixel_x;
+        int copy_rows = 16;
+        if (pixel_y + copy_rows > frame_height)
+            copy_rows = frame_height - pixel_y;
+        for (int row = 0; row < copy_rows; ++row) {
             const int16_t* src = temp + row * row_width;
             int16_t*       dst = h_alpha + (pixel_y + row) * frame_width + pixel_x;
-            memcpy(dst, src, (size_t)row_width * sizeof(int16_t));
+            memcpy(dst, src, (size_t)copy_w * sizeof(int16_t));
         }
     }
 }
@@ -410,7 +440,7 @@ cudaError_t prores_decode_frame(
         ctx->d_q_scales,
         ctx->mbs_per_slice,
         ctx->num_slices,
-        ctx->width / 16,           // mb_width
+        (ctx->width + 15) / 16,    // mb_width (ceil; covers partial right edge)
         ctx->slices_per_row,       // for partial-slice computation
         is_interlaced,
         ctx->is_444,
@@ -428,6 +458,7 @@ cudaError_t prores_decode_frame(
         ctx->width, ctx->height,
         ctx->slices_per_row,
         ctx->mbs_per_slice,
+        (ctx->width + 15) / 16,
         ctx->coeff_stride,
         0,            // comp_coeff_offset for Y
         ctx->profile,
@@ -445,6 +476,7 @@ cudaError_t prores_decode_frame(
         chroma_w, ctx->height,
         ctx->slices_per_row,
         ctx->mbs_per_slice,
+        (ctx->width + 15) / 16,
         ctx->coeff_stride,
         y_n * 64,     // comp_coeff_offset for Cb
         ctx->profile,
@@ -462,6 +494,7 @@ cudaError_t prores_decode_frame(
         chroma_w, ctx->height,
         ctx->slices_per_row,
         ctx->mbs_per_slice,
+        (ctx->width + 15) / 16,
         ctx->coeff_stride,
         (y_n + cb_n) * 64,   // comp_coeff_offset for Cr
         ctx->profile,
@@ -482,6 +515,7 @@ cudaError_t prores_decode_frame(
                 ctx->mbs_per_slice,
                 ctx->slices_per_row,
                 ctx->width,
+                ctx->height,
                 ctx->alpha_bits,
                 ctx->h_alpha);
         } else {
@@ -591,7 +625,7 @@ cudaError_t prores_decode_frame_async(
         ctx->d_q_scales,
         ctx->mbs_per_slice,
         ctx->num_slices,
-        ctx->width / 16,
+        (ctx->width + 15) / 16,
         ctx->slices_per_row,
         is_interlaced,
         ctx->is_444,
@@ -604,19 +638,19 @@ cudaError_t prores_decode_frame_async(
     CUDA_CHECK(launch_idct_dequant(
         ctx->d_dec_coeffs, ctx->d_q_scales, ctx->d_y,
         ctx->width, ctx->height, ctx->slices_per_row,
-        ctx->mbs_per_slice, ctx->coeff_stride, 0,
+        ctx->mbs_per_slice, (ctx->width + 15) / 16, ctx->coeff_stride, 0,
         ctx->profile, false, is_interlaced, 4, false, s));
 
     CUDA_CHECK(launch_idct_dequant(
         ctx->d_dec_coeffs, ctx->d_q_scales, ctx->d_cb,
         chroma_w, ctx->height, ctx->slices_per_row,
-        ctx->mbs_per_slice, ctx->coeff_stride, y_n * 64,
+        ctx->mbs_per_slice, (ctx->width + 15) / 16, ctx->coeff_stride, y_n * 64,
         ctx->profile, true, is_interlaced, ctx->is_444 ? 4 : 2, ctx->is_444, s));
 
     CUDA_CHECK(launch_idct_dequant(
         ctx->d_dec_coeffs, ctx->d_q_scales, ctx->d_cr,
         chroma_w, ctx->height, ctx->slices_per_row,
-        ctx->mbs_per_slice, ctx->coeff_stride, (y_n + cb_n) * 64,
+        ctx->mbs_per_slice, (ctx->width + 15) / 16, ctx->coeff_stride, (y_n + cb_n) * 64,
         ctx->profile, true, is_interlaced, ctx->is_444 ? 4 : 2, ctx->is_444, s));
 
     // Alpha (ProRes 4444 only) -- CPU-decoded RLE/delta, not IDCT.
@@ -625,7 +659,7 @@ cudaError_t prores_decode_frame_async(
             decode_alpha_to_host(h_icpf_data, ctx->h_slice_starts,
                                  ctx->h_slice_sizes, ctx->num_slices,
                                  ctx->mbs_per_slice, ctx->slices_per_row,
-                                 ctx->width, ctx->alpha_bits, ctx->h_alpha);
+                                 ctx->width, ctx->height, ctx->alpha_bits, ctx->h_alpha);
         } else {
             const int n = ctx->width * ctx->height;
             for (int i = 0; i < n; ++i) ctx->h_alpha[i] = 1023;
@@ -693,25 +727,25 @@ cudaError_t prores_decode_frame_to_host(
         ctx->d_bitstream, ctx->d_slice_starts, ctx->d_slice_sizes,
         ctx->d_dec_coeffs, ctx->d_q_scales,
         ctx->mbs_per_slice, ctx->num_slices,
-        ctx->width / 16, ctx->slices_per_row,
+        (ctx->width + 15) / 16, ctx->slices_per_row,
         is_interlaced, ctx->is_444, s));
 
     CUDA_CHECK(launch_idct_dequant(
         ctx->d_dec_coeffs, ctx->d_q_scales, ctx->d_y,
         ctx->width, ctx->height, ctx->slices_per_row,
-        ctx->mbs_per_slice, ctx->coeff_stride, 0,
+        ctx->mbs_per_slice, (ctx->width + 15) / 16, ctx->coeff_stride, 0,
         ctx->profile, false, is_interlaced, 4, false, s));
 
     CUDA_CHECK(launch_idct_dequant(
         ctx->d_dec_coeffs, ctx->d_q_scales, ctx->d_cb,
         chroma_w, ctx->height, ctx->slices_per_row,
-        ctx->mbs_per_slice, ctx->coeff_stride, y_n * 64,
+        ctx->mbs_per_slice, (ctx->width + 15) / 16, ctx->coeff_stride, y_n * 64,
         ctx->profile, true, is_interlaced, ctx->is_444 ? 4 : 2, ctx->is_444, s));
 
     CUDA_CHECK(launch_idct_dequant(
         ctx->d_dec_coeffs, ctx->d_q_scales, ctx->d_cr,
         chroma_w, ctx->height, ctx->slices_per_row,
-        ctx->mbs_per_slice, ctx->coeff_stride, (y_n + cb_n) * 64,
+        ctx->mbs_per_slice, (ctx->width + 15) / 16, ctx->coeff_stride, (y_n + cb_n) * 64,
         ctx->profile, true, is_interlaced, ctx->is_444 ? 4 : 2, ctx->is_444, s));
 
     // Alpha (ProRes 4444 only) -- CPU-decoded RLE/delta, not IDCT.
@@ -720,7 +754,7 @@ cudaError_t prores_decode_frame_to_host(
             decode_alpha_to_host(h_icpf_data, ctx->h_slice_starts,
                                  ctx->h_slice_sizes, ctx->num_slices,
                                  ctx->mbs_per_slice, ctx->slices_per_row,
-                                 ctx->width, ctx->alpha_bits, ctx->h_alpha);
+                                 ctx->width, ctx->height, ctx->alpha_bits, ctx->h_alpha);
         } else {
             const int n = ctx->width * ctx->height;
             for (int i = 0; i < n; ++i) ctx->h_alpha[i] = 1023;

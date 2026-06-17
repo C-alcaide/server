@@ -131,7 +131,7 @@ void vk_device_manager::consumer_ready(int gpu_index)
     if (it == gate_.end())
         return;
     it->second.ready++;
-    CASPAR_LOG(info) << L"[vulkan] Startup gate: GPU " << gpu_index << L" — "
+    CASPAR_LOG(info) << L"[vulkan] Startup gate: GPU " << gpu_index << L" - "
                      << it->second.ready << L"/" << it->second.expected << L" consumers ready";
     if (it->second.ready >= it->second.expected)
         gate_cv_.notify_all();

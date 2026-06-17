@@ -67,6 +67,116 @@ void apply_transform_colour_values(core::image_transform& self, const core::imag
     if (other.color_grade.enable) {
         self.color_grade = other.color_grade;
     }
+
+    // ---- Extended color grading (combined so a default `other` is a no-op) ----
+    // White balance
+    self.temperature += other.temperature;
+    self.tint        += other.tint;
+
+    // Lift / Midtone / Gain
+    for (int i = 0; i < 3; ++i) {
+        self.lift[i]    += other.lift[i];     // additive,        default 0
+        self.midtone[i] *= other.midtone[i];  // multiplicative,  default 1
+        self.gain[i]    *= other.gain[i];     // multiplicative,  default 1
+    }
+
+    // Hue shift
+    self.hue_shift += other.hue_shift;
+
+    // Tonal balance
+    self.shadows    += other.shadows;
+    self.highlights += other.highlights;
+
+    // Linear saturation
+    self.linear_saturation *= other.linear_saturation;
+
+    // ASC CDL
+    for (int i = 0; i < 3; ++i) {
+        self.cdl_slope[i]  *= other.cdl_slope[i];   // multiplicative, default 1
+        self.cdl_offset[i] += other.cdl_offset[i];  // additive,       default 0
+        self.cdl_power[i]  *= other.cdl_power[i];    // multiplicative, default 1
+    }
+    self.cdl_saturation *= other.cdl_saturation;
+
+    // Split toning
+    for (int i = 0; i < 3; ++i) {
+        self.split_shadow_color[i]    += other.split_shadow_color[i];
+        self.split_highlight_color[i] += other.split_highlight_color[i];
+    }
+    if (other.split_balance != 0.5)
+        self.split_balance = other.split_balance;
+
+    // Gamut compression
+    if (other.gamut_compress) {
+        self.gamut_compress = true;
+        self.gc_cyan        = other.gc_cyan;
+        self.gc_magenta     = other.gc_magenta;
+        self.gc_yellow      = other.gc_yellow;
+    }
+
+    // 3D LUT
+    if (other.lut3d) {
+        self.lut3d          = other.lut3d;
+        self.lut3d_strength = other.lut3d_strength;
+    }
+
+    // Hue curves
+    if (other.hue_curves) {
+        self.hue_curves = other.hue_curves;
+    }
+
+    // Sharpening
+    self.sharpen_amount += other.sharpen_amount;
+    if (other.sharpen_radius != 1.0)
+        self.sharpen_radius = other.sharpen_radius;
+
+    // Film grain
+    self.grain_intensity += other.grain_intensity;
+    if (other.grain_size != 1.0)
+        self.grain_size = other.grain_size;
+
+    // Secondary qualifier
+    if (other.qualifier_enable) {
+        self.qualifier_enable = true;
+        self.qual_target_hue  = other.qual_target_hue;
+        self.qual_hue_width   = other.qual_hue_width;
+        self.qual_min_sat     = other.qual_min_sat;
+        self.qual_max_sat     = other.qual_max_sat;
+        self.qual_min_lum     = other.qual_min_lum;
+        self.qual_max_lum     = other.qual_max_lum;
+        self.qual_softness    = other.qual_softness;
+        self.qual_exposure    = other.qual_exposure;
+        self.qual_sat_offset  = other.qual_sat_offset;
+        self.qual_hue_offset  = other.qual_hue_offset;
+    }
+
+    // Per-channel RGB levels
+    if (other.per_channel_levels.enable)
+        self.per_channel_levels = other.per_channel_levels;
+
+    // Tone curves
+    if (other.curves.enable)
+        self.curves = other.curves;
+
+    // Blur
+    if (other.blur.enable)
+        self.blur = other.blur;
+
+    // Shape
+    if (other.shape.enable)
+        self.shape = other.shape;
+
+    // Flip
+    self.flip_h ^= other.flip_h;
+    self.flip_v ^= other.flip_v;
+
+    // 360 / curved projection / edge blending
+    if (other.projection.enable || other.projection.curve_enable ||
+        other.projection.edge_blend_left > 0.0 || other.projection.edge_blend_right > 0.0 ||
+        other.projection.edge_blend_top > 0.0 || other.projection.edge_blend_bottom > 0.0) {
+        self.projection = other.projection;
+    }
+
     self.is_key |= other.is_key;
     self.invert |= other.invert;
     self.is_mix |= other.is_mix;

@@ -256,7 +256,7 @@ public:
                          << L" qscale=" << cfg_.q_scale
                          << L" slices=" << cfg_.slices_per_row
                          << L" " << (cfg_.use_mxf ? L"MXF" : L"MOV")
-                         << L" → " << cfg_.output_path;
+                         << L" -> " << cfg_.output_path;
     }
 
     ~prores_consumer_impl() override
@@ -428,7 +428,7 @@ public:
         // Start encode thread
         encode_thread_ = std::thread(&prores_consumer_impl::encode_loop, this);
 
-        CASPAR_LOG(info) << L"[cuda_prores] Recording → " << full_path;
+        CASPAR_LOG(info) << L"[cuda_prores] Recording -> " << full_path;
     }
 
     std::future<bool> send(const core::video_field field, core::const_frame frame) override
@@ -536,7 +536,7 @@ private:
             frame_queue_.front().done.set_value(false);
             frame_queue_.pop();
             graph_->set_tag(diagnostics::tag_severity::WARNING, "dropped-frame");
-            CASPAR_LOG(warning) << L"[cuda_prores] Queue overflow — dropped oldest frame";
+            CASPAR_LOG(warning) << L"[cuda_prores] Queue overflow - dropped oldest frame";
         }
         graph_->set_value("queue-depth", static_cast<double>(frame_queue_.size()) / kMaxQueueDepth);
         frame_queue_.push(std::move(job));
@@ -609,7 +609,7 @@ private:
             std::memcpy(h_bgra_a_, px_a, std::min(bgra_sz, job.frame.image_data(0).size()));
             err = cudaMemcpyAsync(d_bgra_a_, h_bgra_a_, bgra_sz, cudaMemcpyHostToDevice, encode_stream_);
             if (err != cudaSuccess) {
-                CASPAR_LOG(error) << L"[cuda_prores] H→D field_a failed: " << cudaGetErrorString(err);
+                CASPAR_LOG(error) << L"[cuda_prores] H->D field_a failed: " << cudaGetErrorString(err);
                 return false;
             }
 
@@ -618,7 +618,7 @@ private:
             std::memcpy(h_bgra_, px_b, std::min(bgra_sz, job.frame_b.image_data(0).size()));
             err = cudaMemcpyAsync(d_bgra_, h_bgra_, bgra_sz, cudaMemcpyHostToDevice, encode_stream_);
             if (err != cudaSuccess) {
-                CASPAR_LOG(error) << L"[cuda_prores] H→D field_b failed: " << cudaGetErrorString(err);
+                CASPAR_LOG(error) << L"[cuda_prores] H->D field_b failed: " << cudaGetErrorString(err);
                 return false;
             }
 
@@ -632,7 +632,7 @@ private:
             err = launch_bgra8_to_field422p10(d_bgra_a_, d_field_a_y_, d_field_a_cb_, d_field_a_cr_,
                                               fmt.width, fmt.height, parity_a, encode_stream_);
             if (err != cudaSuccess) {
-                CASPAR_LOG(error) << L"[cuda_prores] BGRA→field_a failed: " << cudaGetErrorString(err);
+                CASPAR_LOG(error) << L"[cuda_prores] BGRA->field_a failed: " << cudaGetErrorString(err);
                 return false;
             }
 
@@ -640,7 +640,7 @@ private:
             err = launch_bgra8_to_field422p10(d_bgra_, frame_ctx_.d_y, frame_ctx_.d_cb, frame_ctx_.d_cr,
                                               fmt.width, fmt.height, parity_b, encode_stream_);
             if (err != cudaSuccess) {
-                CASPAR_LOG(error) << L"[cuda_prores] BGRA→field_b failed: " << cudaGetErrorString(err);
+                CASPAR_LOG(error) << L"[cuda_prores] BGRA->field_b failed: " << cudaGetErrorString(err);
                 return false;
             }
 
@@ -832,7 +832,7 @@ static prores_config parse_params(const std::vector<std::wstring>& params)
         bool had_ctrl = false;
         for (wchar_t c : cfg.output_path) { if (c < L' ') had_ctrl = true; else clean += c; }
         if (had_ctrl) {
-            CASPAR_LOG(warning) << L"[cuda_prores] PATH contained control characters — "
+            CASPAR_LOG(warning) << L"[cuda_prores] PATH contained control characters - "
                                    L"AMCP processes \\r, \\n etc. as C escape sequences. "
                                    L"Use forward slashes in paths: D:/recordings";
             cfg.output_path = std::move(clean);

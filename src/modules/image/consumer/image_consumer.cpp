@@ -94,7 +94,7 @@ struct image_consumer : public core::frame_consumer
             }
             // Give up after 4 empty frames to avoid hanging forever
             CASPAR_LOG(warning) << L"[image_consumer] No valid CPU frame data after "
-                                << frames_waited_ << L" ticks — capturing empty frame.";
+                                << frames_waited_ << L" ticks - capturing empty frame.";
         }
 
         auto filename = filename_;

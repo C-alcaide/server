@@ -58,7 +58,7 @@ static bool load_affinity_extensions()
 
         available = (wglEnumGpusNV_ && wglEnumGpuDevicesNV_ && wglCreateAffinityDCNV_ && wglDeleteDCNV_);
         if (!available) {
-            CASPAR_LOG(warning) << L"[gpu_affinity] WGL_NV_gpu_affinity not available — multi-GPU interop disabled";
+            CASPAR_LOG(warning) << L"[gpu_affinity] WGL_NV_gpu_affinity not available - multi-GPU interop disabled";
         }
     });
     return available;
@@ -273,7 +273,7 @@ static bool load_egl_device_extensions()
         available = (eglQueryDevicesEXT_ && eglGetPlatformDisplayEXT_);
         if (!available) {
             CASPAR_LOG(warning) << L"[gpu_affinity] EGL device enumeration extensions not available "
-                                   L"— multi-GPU interop disabled";
+                                   L"- multi-GPU interop disabled";
         }
     });
     return available;

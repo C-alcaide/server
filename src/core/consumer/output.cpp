@@ -238,7 +238,7 @@ struct output::impl
                                  << L", delay-ms=" << std::setprecision(1) << vid->pipeline.video_delay_ms << L")";
 
                 if (std::abs(offset) <= 5.0) {
-                    CASPAR_LOG(info) << L"      OK — offset " << std::setprecision(1) << offset
+                    CASPAR_LOG(info) << L"      OK - offset " << std::setprecision(1) << offset
                                      << L" ms (within +/-5 ms)";
                 } else {
                     CASPAR_LOG(warning) << L"      Video " << (offset > 0 ? L"leads" : L"lags")

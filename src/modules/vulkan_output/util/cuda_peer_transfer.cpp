@@ -86,7 +86,7 @@ cuda_peer_transfer::cuda_peer_transfer(int src_cuda_device, int dst_cuda_device,
     , total_bytes_(static_cast<size_t>(width) * height * (use_16bit ? 8 : 4))
 {
     CASPAR_LOG(info) << L"[cuda_peer_transfer] Initializing peer transfer: device "
-                     << src_device_ << L" → device " << dst_device_
+                     << src_device_ << L" -> device " << dst_device_
                      << L" (" << width_ << L"x" << height_
                      << (use_16bit_ ? L" 16-bit" : L" 8-bit") << L")";
 
@@ -128,10 +128,10 @@ cuda_peer_transfer::cuda_peer_transfer(int src_cuda_device, int dst_cuda_device,
             CASPAR_LOG(info) << L"[cuda_peer_transfer] PCIe P2P direct access between device "
                              << src_device_ << L" and device " << dst_device_
                              << L" (perf_rank=" << perf_rank
-                             << L", no NVLink — limited to PCIe bandwidth)";
+                             << L", no NVLink - limited to PCIe bandwidth)";
         }
     } else {
-        CASPAR_LOG(info) << L"[cuda_peer_transfer] No direct P2P — peer copy will stage through system RAM "
+        CASPAR_LOG(info) << L"[cuda_peer_transfer] No direct P2P - peer copy will stage through system RAM "
                          << L"(still faster than CPU memcpy)";
     }
 
@@ -415,7 +415,7 @@ void cuda_peer_transfer::write_dest()
     cuda_check(
         cudaMemcpyAsync(pbo_ptr, dst_staging_, total_bytes_,
                         cudaMemcpyDeviceToDevice, dst_stream_),
-        "cudaMemcpy dst_staging → PBO");
+        "cudaMemcpy dst_staging -> PBO");
 
     // Step 3: Unmap PBO so GL can use it
     cuda_check(

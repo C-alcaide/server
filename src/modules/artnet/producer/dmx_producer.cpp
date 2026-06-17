@@ -373,7 +373,7 @@ struct dmx_file_producer : public core::frame_producer
         CASPAR_LOG(info) << print() << L" Loaded " << recording_.frames.size()
                          << L" DMX frames, duration " << std::fixed << std::setprecision(1) << duration_s
                          << L"s, " << total_frames_ << L" channel frames @ " << channel_fps
-                         << L" Hz, output: " << proto_name << L" → " << u16(host_str) << L":" << port_;
+                         << L" Hz, output: " << proto_name << L" -> " << u16(host_str) << L":" << port_;
     }
 
     ~dmx_file_producer()

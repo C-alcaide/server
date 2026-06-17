@@ -225,12 +225,13 @@ __device__ __forceinline__ void idct_col(int32_t* col)
 // ---------------------------------------------------------------------------
 __global__ void k_prores_idct_dequant(
     const int16_t* __restrict__ d_dec_coeffs,    // entropy decode output
-    const uint8_t* __restrict__ d_q_scales,      // per-slice q_scale
+    const uint16_t* __restrict__ d_q_scales,      // per-slice q_scale
     int16_t*       __restrict__ d_out_plane,     // output planar (Y, Cb, or Cr)
     int plane_width,                              // luma: width,  chroma: width/2
     int plane_height,                             // height
     int slices_per_row,                           // luma: (width/16)/mbs
     int mbs_per_slice,                            // mbs per slice
+    int mb_width,                                 // frame width in MBs (ceil(width/16))
     int coeff_stride,                             // (y_n+cb_n+cr_n+a_n)*64 per slice
     int comp_coeff_offset,                        // offset in coeff_stride for this component
     int comp_blocks_per_mb,  // 4 = full-width plane (Y, 4444 Cb/Cr/Alpha); 2 = 422 half-width
@@ -257,8 +258,21 @@ __global__ void k_prores_idct_dequant(
 
     if (comp_blocks_per_mb == 4) {
         mb_col_in_plane = blk_x >> 1;
-        slice_col        = mb_col_in_plane / mbs_per_slice;
-        mb_col_in_slice  = mb_col_in_plane % mbs_per_slice;
+        // Power-of-two slice decomposition (see entropy decoder): walk the row
+        // to find which slice this MB column belongs to and its offset within
+        // that slice.  A simple mb_col / mbs_per_slice is WRONG when mb_width
+        // is not a multiple of mbs_per_slice.
+        {
+            int mb_x = 0, cur = mbs_per_slice, sc = 0;
+            while (true) {
+                while (mb_width - mb_x < cur) cur >>= 1;
+                if (mb_col_in_plane < mb_x + cur) break;
+                mb_x += cur;
+                ++sc;
+            }
+            slice_col       = sc;
+            mb_col_in_slice = mb_col_in_plane - mb_x;
+        }
         mb_row           = blk_y >> 1;
         int brow_mb      = blk_y & 1;
         int bcol_mb      = blk_x & 1;
@@ -269,8 +283,17 @@ __global__ void k_prores_idct_dequant(
     } else {
         // 422 chroma: 2 blocks per MB (1 col × 2 rows of 8px each)
         mb_col_in_plane = blk_x;
-        slice_col       = blk_x / mbs_per_slice;
-        mb_col_in_slice = blk_x % mbs_per_slice;
+        {
+            int mb_x = 0, cur = mbs_per_slice, sc = 0;
+            while (true) {
+                while (mb_width - mb_x < cur) cur >>= 1;
+                if (mb_col_in_plane < mb_x + cur) break;
+                mb_x += cur;
+                ++sc;
+            }
+            slice_col       = sc;
+            mb_col_in_slice = mb_col_in_plane - mb_x;
+        }
         mb_row          = blk_y >> 1;
         int brow_mb     = blk_y & 1;
         block_in_slice  = mb_col_in_slice * 2 + brow_mb;
@@ -348,12 +371,13 @@ __global__ void k_prores_idct_dequant(
 // Launcher helper — call once for each component plane.
 inline cudaError_t launch_idct_dequant(
     const int16_t*  d_dec_coeffs,
-    const uint8_t*  d_q_scales,
+    const uint16_t* d_q_scales,
     int16_t*        d_out_plane,
     int             plane_width,
     int             plane_height,
     int             slices_per_row,
     int             mbs_per_slice,
+    int             mb_width,
     int             coeff_stride,
     int             comp_coeff_offset,
     int             profile,
@@ -364,11 +388,12 @@ inline cudaError_t launch_idct_dequant(
     cudaStream_t    stream)
 {
     dim3 threads(64);
-    dim3 blocks(plane_width / 8, (plane_height + 7) / 8);
+    dim3 blocks((plane_width + 7) / 8, (plane_height + 7) / 8);
     k_prores_idct_dequant<<<blocks, threads, 0, stream>>>(
         d_dec_coeffs, d_q_scales, d_out_plane,
         plane_width, plane_height,
         slices_per_row, mbs_per_slice,
+        mb_width,
         coeff_stride, comp_coeff_offset,
         comp_blocks_per_mb, is_chroma_col_major,
         profile, is_chroma, is_interlaced);

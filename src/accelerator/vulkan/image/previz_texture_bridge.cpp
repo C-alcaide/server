@@ -88,7 +88,7 @@ void try_load_gl_extensions()
 #endif
 
         if (!gl_ext_loaded) {
-            CASPAR_LOG(warning) << L"[previz_bridge] GL_EXT_memory_object not available — "
+            CASPAR_LOG(warning) << L"[previz_bridge] GL_EXT_memory_object not available - "
                                    L"falling back to CPU readback for previz channel textures.";
         }
     });
@@ -150,7 +150,7 @@ previz_texture_bridge::previz_texture_bridge(const spl::shared_ptr<device>&     
             uint32_t minor = VK_API_VERSION_MINOR(vk_props.apiVersion);
             if (major == 1 && minor <= 1) {
                 use_linear_tiling_ = true;
-                CASPAR_LOG(info) << L"[previz_bridge] Pascal GPU detected — using LINEAR tiling.";
+                CASPAR_LOG(info) << L"[previz_bridge] Pascal GPU detected - using LINEAR tiling.";
             }
         }
     });
@@ -514,7 +514,7 @@ void previz_texture_bridge::post_channel(int    channel_id,
         // for this channel until GPU interop is available.
         static bool warned = false;
         if (!warned) {
-            CASPAR_LOG(warning) << L"[previz_bridge] CPU fallback path not implemented — "
+            CASPAR_LOG(warning) << L"[previz_bridge] CPU fallback path not implemented - "
                                    L"previz channel textures will be black.";
             warned = true;
         }

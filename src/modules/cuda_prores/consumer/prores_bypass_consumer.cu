@@ -241,7 +241,7 @@ public:
                          << L" qscale=" << cfg_.q_scale
                          << L" slices=" << cfg_.slices_per_row
                          << L" " << (cfg_.use_mxf ? L"MXF" : L"MOV")
-                         << L" → " << cfg_.output_path;
+                         << L" -> " << cfg_.output_path;
     }
 
     ~prores_bypass_consumer_impl() override
@@ -446,7 +446,7 @@ private:
         }
         if (w % 16 != 0) {
             CASPAR_LOG(error) << L"[cuda_prores_bypass] Capture width " << w
-                              << L" is not a multiple of 16 — cannot encode ProRes";
+                              << L" is not a multiple of 16 - cannot encode ProRes";
             return;
         }
 
@@ -565,7 +565,7 @@ private:
                 if (encode_errors == 1 || (encode_errors - encode_errors_log) >= 100) {
                     CASPAR_LOG(error) << L"[cuda_prores_bypass] Encode failed (frame "
                                       << job.frame_number << L", total errors: " << encode_errors
-                                      << L") — check width/format compatibility. "
+                                      << L") - check width/format compatibility. "
                                       << L"Channel: " << format_desc_.width << L"x" << format_desc_.height
                                       << L" " << format_desc_.name;
                     encode_errors_log = encode_errors;
@@ -789,7 +789,7 @@ static bypass_config parse_bypass_params(const std::vector<std::wstring>& params
         bool had_ctrl = false;
         for (wchar_t c : cfg.output_path) { if (c < L' ') had_ctrl = true; else clean += c; }
         if (had_ctrl) {
-            CASPAR_LOG(warning) << L"[cuda_prores_bypass] PATH contained control characters — "
+            CASPAR_LOG(warning) << L"[cuda_prores_bypass] PATH contained control characters - "
                                    L"AMCP processes \\r, \\n etc. as C escape sequences. "
                                    L"Use forward slashes in paths: D:/recordings";
             cfg.output_path = std::move(clean);

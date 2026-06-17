@@ -293,7 +293,7 @@ bool write_frame_png(const const_frame& frame, const std::wstring& path)
             }
 
             CASPAR_LOG(info) << L"write_frame_png: saved " << width << L"x" << height
-                             << L" 16-bit → " << path;
+                             << L" 16-bit -> " << path;
             return true;
         }
 
@@ -421,7 +421,7 @@ bool write_frame_png(const const_frame& frame, const std::wstring& path)
             return false;
         }
 
-        CASPAR_LOG(info) << L"write_frame_png: saved " << width << L"x" << height << L" → " << path;
+        CASPAR_LOG(info) << L"write_frame_png: saved " << width << L"x" << height << L" -> " << path;
         return true;
 
     } catch (const std::exception& e) {

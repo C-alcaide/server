@@ -47,7 +47,7 @@ struct ProResDecodeCtx {
     uint32_t* d_slice_starts;    // [num_slices] byte offset from d_bitstream start
     uint16_t* d_slice_sizes;     // [num_slices] slice byte sizes
     int16_t*  d_dec_coeffs;      // [num_slices × coeff_stride] entropy decode output
-    uint8_t*  d_q_scales;        // [num_slices] q_scale per slice
+    uint16_t* d_q_scales;        // [num_slices] q_scale per slice (FFmpeg-remapped, may exceed 255)
     int16_t*  d_y;               // [height × width]  planar luma
     int16_t*  d_cb;              // [height × width/2] planar Cb  (422), [height × width] (4444)
     int16_t*  d_cr;              // as d_cb

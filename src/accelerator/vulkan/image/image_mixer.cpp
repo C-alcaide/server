@@ -194,7 +194,7 @@ class image_renderer
                 if (!cpu_readback_needed_.load(std::memory_order_relaxed)) {
                     static bool logged_skip = false;
                     if (!logged_skip) {
-                        CASPAR_LOG(info) << L"[vk_mixer] CPU readback SKIPPED — all consumers use GPU-native paths";
+                        CASPAR_LOG(info) << L"[vk_mixer] CPU readback SKIPPED - all consumers use GPU-native paths";
                         logged_skip = true;
                     }
                     auto empty = make_ready_future<array<const std::uint8_t>>(

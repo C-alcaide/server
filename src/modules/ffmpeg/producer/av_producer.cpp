@@ -142,7 +142,7 @@ class d3d11_gl_bridge
 
         if (!wglDXOpenDeviceNV_ || !wglDXCloseDeviceNV_ || !wglDXRegisterObjectNV_ ||
             !wglDXUnregisterObjectNV_ || !wglDXLockObjectsNV_ || !wglDXUnlockObjectsNV_) {
-            CASPAR_LOG(info) << L"[av_producer] WGL_NV_DX_interop2 not available — using CPU path";
+            CASPAR_LOG(info) << L"[av_producer] WGL_NV_DX_interop2 not available - using CPU path";
             return false;
         }
 
@@ -180,12 +180,12 @@ class d3d11_gl_bridge
         // Open DX interop device
         interop_device_ = wglDXOpenDeviceNV_(d3d11_device_);
         if (!interop_device_) {
-            CASPAR_LOG(warning) << L"[av_producer] wglDXOpenDeviceNV failed — using CPU path";
+            CASPAR_LOG(warning) << L"[av_producer] wglDXOpenDeviceNV failed - using CPU path";
             cleanup();
             return false;
         }
 
-        CASPAR_LOG(info) << L"[av_producer] D3D11→GL GPU-direct bridge initialized";
+        CASPAR_LOG(info) << L"[av_producer] D3D11->GL GPU-direct bridge initialized";
         active_ = true;
         return true;
     }
@@ -1420,7 +1420,7 @@ struct AVProducer::Impl
                                 gpu_direct_decoder_idx_ = idx;
                                 dec.gpu_direct_mode_ = true;
                                 CASPAR_LOG(info) << print()
-                                    << L" D3D11→GL GPU-direct video enabled (bypasses filter graph)";
+                                    << L" D3D11->GL GPU-direct video enabled (bypasses filter graph)";
                             } else {
                                 d3d11_bridge_.reset();
                             }

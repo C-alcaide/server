@@ -225,7 +225,9 @@ __device__ void decode_ac_plane(BitReader* br, int16_t* blocks, int n_blocks,
 // Output:
 //   d_dec_coeffs  : [num_slices][(y_n + cb_n + cr_n + a_n) * 64] int16_t
 //                   scan-ordered quantised coefficients (DC in [*][0])
-//   d_q_scales    : [num_slices] uint8_t  q_scale read from slice header
+//   d_q_scales    : [num_slices] uint16_t q_scale read from slice header
+//                   (already remapped per FFmpeg: qscale>128 -> (qscale-96)<<2,
+//                    so the stored value can exceed 255 -> needs 16 bits)
 //
 // Slice header:
 //   422:  6 bytes: [0]=hdr_size_bits(48) [1]=q_scale [2..3]=Y_size [4..5]=Cb_size
@@ -246,7 +248,7 @@ __global__ void k_prores_entropy_decode(
     const uint32_t* __restrict__ d_slice_starts,   // byte offset per slice     
     const uint16_t* __restrict__ d_slice_sizes,    // byte size per slice       
     int16_t*        __restrict__ d_dec_coeffs,      // output
-    uint8_t*        __restrict__ d_q_scales,        // output: q_scale per slice
+    uint16_t*       __restrict__ d_q_scales,        // output: q_scale per slice
     int mbs_per_slice,
     int num_slices,
     int mb_width,
@@ -257,10 +259,22 @@ __global__ void k_prores_entropy_decode(
     const int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= num_slices) return;
 
-    // Compute the actual number of MBs in this slice (last slice in each row
-    // may have fewer MBs than mbs_per_slice if mb_width is not a multiple).
+    // Compute the actual number of MBs in this slice.  ProRes splits a row
+    // whose mb_width is not a multiple of mbs_per_slice into POWER-OF-TWO
+    // slices (FFmpeg: slice_mb_count starts at mbs_per_slice and is halved
+    // until it fits the remaining MBs).  A simple remainder model is WRONG
+    // for non-aligned widths (e.g. 163 MBs, slice 8 -> 8*20, 2, 1).
     const int s_col = s % slices_per_row;
-    const int mbs_actual = min(mbs_per_slice, mb_width - s_col * mbs_per_slice);
+    int mbs_actual;
+    {
+        int mb_x = 0, cur = mbs_per_slice;
+        for (int k = 0; k < s_col; ++k) {
+            while (mb_width - mb_x < cur) cur >>= 1;
+            mb_x += cur;
+        }
+        while (mb_width - mb_x < cur) cur >>= 1;
+        mbs_actual = cur;
+    }
 
     // Fixed stride uses mbs_per_slice (the maximum) so all slices have the
     // same coeff_stride in d_dec_coeffs.  Only the DECODE CALLS use mbs_actual.
@@ -289,7 +303,14 @@ __global__ void k_prores_entropy_decode(
     if (hdr_bytes < 6 || hdr_bytes > total)
         return;
 
-    uint8_t q_scale    = slice[1];
+    // q_scale: clip to [1,224] then remap high values exactly as FFmpeg
+    // proresdec.c does:  qscale = qscale > 128 ? (qscale - 96) << 2 : qscale;
+    // Without this remap, slices encoded with qscale > 128 are dequantised
+    // ~4x too weakly, collapsing AC detail to a flat grey block.
+    int     q_scale    = slice[1];
+    q_scale            = q_scale < 1 ? 1 : (q_scale > 224 ? 224 : q_scale);
+    if (q_scale > 128)
+        q_scale = (q_scale - 96) << 2;
     int     y_size     = ((int)slice[2] << 8) | slice[3];
     int     cb_size    = ((int)slice[4] << 8) | slice[5];
     int     cr_size;
@@ -306,7 +327,7 @@ __global__ void k_prores_entropy_decode(
     if (hdr_bytes + y_size + cb_size + cr_size + alpha_size > total)
         return;
 
-    d_q_scales[s] = q_scale;
+    d_q_scales[s] = (uint16_t)q_scale;
 
     // ── Coefficient buffer for this slice (fixed stride = mbs_per_slice) ──
     const ptrdiff_t stride = (ptrdiff_t)(y_n_max + cb_n_max + cb_n_max + alpha_n_max) * 64;
@@ -366,7 +387,7 @@ inline cudaError_t launch_entropy_decode(
     const uint32_t* d_slice_starts,
     const uint16_t* d_slice_sizes,
     int16_t*        d_dec_coeffs,
-    uint8_t*        d_q_scales,
+    uint16_t*       d_q_scales,
     int             mbs_per_slice,
     int             num_slices,
     int             mb_width,

@@ -81,7 +81,7 @@ inline int select_cuda_gl_device()
                                          cudaGLDeviceListAll);
     if (err != cudaSuccess || cuda_dev_count == 0) {
         CASPAR_LOG(warning) << L"[cuda_gl_texture] cudaGLGetDevices failed ("
-                            << cudaGetErrorString(err) << L") — using device 0";
+                            << cudaGetErrorString(err) << L") - using device 0";
         return 0;
     }
     CASPAR_LOG(info) << L"[cuda_gl_texture] GL-interoperable CUDA device: "

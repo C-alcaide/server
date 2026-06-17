@@ -109,6 +109,69 @@ void apply_transform_colour_values(core::image_transform& self, const core::imag
     self.shadows    += other.shadows;
     self.highlights += other.highlights;
 
+    // Linear saturation: multiplicative (default 1)
+    self.linear_saturation *= other.linear_saturation;
+
+    // ASC CDL
+    for (int i = 0; i < 3; ++i) {
+        self.cdl_slope[i]  *= other.cdl_slope[i];
+        self.cdl_offset[i] += other.cdl_offset[i];
+        self.cdl_power[i]  *= other.cdl_power[i];
+    }
+    self.cdl_saturation *= other.cdl_saturation;
+
+    // Split toning
+    for (int i = 0; i < 3; ++i) {
+        self.split_shadow_color[i]    += other.split_shadow_color[i];
+        self.split_highlight_color[i] += other.split_highlight_color[i];
+    }
+    if (other.split_balance != 0.5)
+        self.split_balance = other.split_balance;
+
+    // Gamut compression
+    if (other.gamut_compress) {
+        self.gamut_compress = true;
+        self.gc_cyan        = other.gc_cyan;
+        self.gc_magenta     = other.gc_magenta;
+        self.gc_yellow      = other.gc_yellow;
+    }
+
+    // 3D LUT
+    if (other.lut3d) {
+        self.lut3d          = other.lut3d;
+        self.lut3d_strength = other.lut3d_strength;
+    }
+
+    // Hue curves
+    if (other.hue_curves) {
+        self.hue_curves = other.hue_curves;
+    }
+
+    // Sharpening
+    self.sharpen_amount += other.sharpen_amount;
+    if (other.sharpen_radius != 1.0)
+        self.sharpen_radius = other.sharpen_radius;
+
+    // Film grain
+    self.grain_intensity += other.grain_intensity;
+    if (other.grain_size != 1.0)
+        self.grain_size = other.grain_size;
+
+    // Secondary qualifier
+    if (other.qualifier_enable) {
+        self.qualifier_enable = true;
+        self.qual_target_hue  = other.qual_target_hue;
+        self.qual_hue_width   = other.qual_hue_width;
+        self.qual_min_sat     = other.qual_min_sat;
+        self.qual_max_sat     = other.qual_max_sat;
+        self.qual_min_lum     = other.qual_min_lum;
+        self.qual_max_lum     = other.qual_max_lum;
+        self.qual_softness    = other.qual_softness;
+        self.qual_exposure    = other.qual_exposure;
+        self.qual_sat_offset  = other.qual_sat_offset;
+        self.qual_hue_offset  = other.qual_hue_offset;
+    }
+
     // Per-channel RGB levels: intersect input range, multiply gamma, intersect output range (per-channel)
     if (other.per_channel_levels.enable) {
         self.per_channel_levels.enable = true;

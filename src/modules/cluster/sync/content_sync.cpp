@@ -422,7 +422,7 @@ void content_sync::check_producer(tracked_producer& tp)
         CASPAR_LOG(warning) << L"[cluster] Drift correction: ch=" << tp.channel_index
                             << L" layer=" << tp.layer_index
                             << L" drift=" << drift << L" frames"
-                            << L" → seek to " << expected;
+                            << L" -> seek to " << expected;
     } catch (const std::exception& e) {
         CASPAR_LOG(error) << L"[cluster] Seek correction failed: " << e.what();
     }

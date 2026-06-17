@@ -207,7 +207,7 @@ struct Stream
                     }
                     CASPAR_LOG(info) << L"[ffmpeg] NVENC GPU path: hwupload_cuda enabled";
                 } else {
-                    CASPAR_LOG(warning) << L"[ffmpeg] CUDA hw device creation failed — NVENC will use CPU upload";
+                    CASPAR_LOG(warning) << L"[ffmpeg] CUDA hw device creation failed - NVENC will use CPU upload";
                 }
             }
         }

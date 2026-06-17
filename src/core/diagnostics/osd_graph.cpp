@@ -193,7 +193,7 @@ class context : public drawable
                     auto gl_err = glGetError();
                     if (gl_err != GL_NO_ERROR) {
                         CASPAR_LOG(warning) << L"[diag] OpenGL error " << gl_err
-                                            << L" during diagnostics window init — closing window.";
+                                            << L" during diagnostics window init - closing window.";
                         safe_close_window();
                         return;
                     }
@@ -221,7 +221,7 @@ class context : public drawable
             std::lock_guard<std::recursive_mutex> lock(sfml_context_mutex());
 
             if (!window_->setActive(true)) {
-                CASPAR_LOG(warning) << L"[diag] Failed to reactivate GL context — closing window.";
+                CASPAR_LOG(warning) << L"[diag] Failed to reactivate GL context - closing window.";
                 safe_close_window();
                 return;
             }
@@ -295,7 +295,7 @@ class context : public drawable
         auto gl_err = glGetError();
         if (gl_err != GL_NO_ERROR) {
             CASPAR_LOG(warning) << L"[diag] OpenGL error " << gl_err
-                                << L" during diagnostics render — closing window.";
+                                << L" during diagnostics render - closing window.";
             safe_close_window();
             return;
         }
@@ -303,7 +303,7 @@ class context : public drawable
         display_time_.restart();
 
         } catch (...) {
-            CASPAR_LOG(warning) << L"[diag] Exception in diagnostics tick — closing window.";
+            CASPAR_LOG(warning) << L"[diag] Exception in diagnostics tick - closing window.";
             safe_close_window();
             return;
         }

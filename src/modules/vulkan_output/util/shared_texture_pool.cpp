@@ -154,7 +154,7 @@ shared_texture_pool::shared_texture_pool(std::shared_ptr<accelerator::ogl::devic
             use_linear_tiling_ = true;
             CASPAR_LOG(info) << L"[vulkan_output] Pascal GPU detected ("
                              << vk_props.deviceName
-                             << L") — forcing LINEAR tiling for GL_EXT_memory_object compatibility.";
+                             << L") - forcing LINEAR tiling for GL_EXT_memory_object compatibility.";
         }
     }
 
@@ -167,7 +167,7 @@ shared_texture_pool::shared_texture_pool(std::shared_ptr<accelerator::ogl::devic
                                               VK_FORMAT_FEATURE_TRANSFER_DST_BIT |
                                               VK_FORMAT_FEATURE_BLIT_SRC_BIT;
         if ((fmt_props.linearTilingFeatures & required) != required) {
-            CASPAR_LOG(warning) << L"[vulkan_output] LINEAR tiling not fully supported —"
+            CASPAR_LOG(warning) << L"[vulkan_output] LINEAR tiling not fully supported -"
                                 << L" falling back to OPTIMAL (may cause artifacts).";
             use_linear_tiling_ = false;
         }
@@ -212,7 +212,7 @@ shared_texture_pool::shared_texture_pool(vulkan_device& vk_device,
     if ((fmt_props.linearTilingFeatures & required) != required) {
         CASPAR_LOG(warning) << L"[vulkan_output] LINEAR tiling not fully supported for "
                             << (use_16bit_ ? L"RGBA16" : L"RGBA8")
-                            << L" — falling back to OPTIMAL (may cause artifacts on Pascal GPUs)";
+                            << L" - falling back to OPTIMAL (may cause artifacts on Pascal GPUs)";
         use_linear_tiling_ = false;
     }
 

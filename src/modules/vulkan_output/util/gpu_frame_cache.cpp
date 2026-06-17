@@ -192,7 +192,7 @@ gpu_frame_cache::gpu_frame_cache(
             // No identification available — assume cross-GPU to be safe
             gpu_match = false;
             CASPAR_LOG(warning) << L"[vulkan] Frame cache GPU " << gpu_index
-                                << L": Cannot identify OGL GPU — assuming cross-GPU.";
+                                << L": Cannot identify OGL GPU - assuming cross-GPU.";
         }
     }
 
@@ -214,7 +214,7 @@ void gpu_frame_cache::init_same_gpu(
     uint32_t width, uint32_t height, bool use_16bit)
 {
     pool_ = std::make_unique<shared_texture_pool>(ogl_device, *device_, width, height, use_16bit);
-    CASPAR_LOG(info) << L"[vulkan] Frame cache: zero-copy OGL→VK (same GPU " << gpu_index_ << L")"
+    CASPAR_LOG(info) << L"[vulkan] Frame cache: zero-copy OGL->VK (same GPU " << gpu_index_ << L")"
                      << (use_16bit ? L" 16-bit" : L" 8-bit");
 
     // Dedicated GL context for blit (avoids blocking mixer thread)
@@ -266,7 +266,7 @@ void gpu_frame_cache::init_cross_gpu(
             cuda_peer_ = std::make_unique<cuda_peer_transfer>(
                 src_cuda_dev, dst_cuda_dev, width, height, use_16bit);
             CASPAR_LOG(info) << L"[vulkan] Frame cache: CUDA peer DMA (device "
-                             << src_cuda_dev << L" → " << dst_cuda_dev << L")";
+                             << src_cuda_dev << L" -> " << dst_cuda_dev << L")";
         }
     } catch (const std::exception& e) {
         CASPAR_LOG(warning) << L"[vulkan] Frame cache: CUDA peer unavailable: " << e.what();
@@ -308,7 +308,7 @@ gpu_frame_cache::~gpu_frame_cache()
             });
             if (idle_future.wait_for(std::chrono::seconds(2)) == std::future_status::timeout) {
                 CASPAR_LOG(fatal) << L"[vulkan] Frame cache coordinator vkQueueWaitIdle timed out (2s). "
-                                  << L"GPU subsystem wedged — forcefully terminating process.";
+                                  << L"GPU subsystem wedged - forcefully terminating process.";
                 boost::log::core::get()->flush();
 #ifdef _WIN32
                 ::TerminateProcess(::GetCurrentProcess(), 0);
@@ -320,7 +320,7 @@ gpu_frame_cache::~gpu_frame_cache()
                 vkDestroySemaphore(device_->device(), timeline_sem_, nullptr);
             }
         } catch (...) {
-            CASPAR_LOG(warning) << L"[vulkan] Frame cache coordinator cleanup threw — ignoring.";
+            CASPAR_LOG(warning) << L"[vulkan] Frame cache coordinator cleanup threw - ignoring.";
             // Don't destroy timeline_sem_ — device may be lost.
         }
     }
@@ -479,7 +479,7 @@ bool gpu_frame_cache::do_coordinator_submit(uint64_t generation)
         return false;
     } else if (result != VK_SUCCESS) {
         CASPAR_LOG(error) << L"[vulkan] Coordinator submit failed (result=" << result
-                          << L") on GPU " << gpu_index_ << L" — timeline semaphore may stall consumers.";
+                          << L") on GPU " << gpu_index_ << L" - timeline semaphore may stall consumers.";
         return false;
     } else {
         CASPAR_LOG(debug) << L"[vulkan] Coordinator submit OK: GPU " << gpu_index_

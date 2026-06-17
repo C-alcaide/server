@@ -148,11 +148,11 @@ void start_tdr_watchdog(int grace_seconds = 10)
     std::call_once(tdr_watchdog_flag, [grace_seconds] {
         std::thread([grace_seconds] {
             set_thread_name(L"TDR Watchdog");
-            CASPAR_LOG(error) << L"[vulkan_output] TDR detected — process will be forcefully terminated in "
+            CASPAR_LOG(error) << L"[vulkan_output] TDR detected - process will be forcefully terminated in "
                               << grace_seconds << L" seconds if shutdown does not complete.";
             std::this_thread::sleep_for(std::chrono::seconds(grace_seconds));
             CASPAR_LOG(fatal) << L"[vulkan_output] TDR watchdog: clean shutdown did not complete in "
-                              << grace_seconds << L"s — forcefully terminating process.";
+                              << grace_seconds << L"s - forcefully terminating process.";
             boost::log::core::get()->flush();
 #ifdef _WIN32
             TerminateProcess(GetCurrentProcess(), 1);
@@ -550,7 +550,7 @@ class vulkan_output_consumer : public core::frame_consumer
         if (adapter_mismatch_) {
             CASPAR_LOG(warning) << print()
                                 << L" Display is on a non-NVIDIA adapter (e.g. IddCx/VDD). "
-                                   L"Vulkan presentation disabled — using GDI fallback (half-rate blit).";
+                                   L"Vulkan presentation disabled - using GDI fallback (half-rate blit).";
             device_dead_ = true; // Prevents Vulkan present path; GDI path handles rendering
         } else if (device_->tier() == gpu_tier::pro && found) {
             // Convert fps to millihertz for display mode matching
@@ -1041,7 +1041,7 @@ class vulkan_output_consumer : public core::frame_consumer
                 hw_hdr_active_ = nvapi_->enable_hdr_output(nvapi_display_id_, cll, fall);
                 if (hw_hdr_active_) {
                     CASPAR_LOG(info) << print()
-                        << L" Hardware HDR active — display engine handles PQ + BT.2020.";
+                        << L" Hardware HDR active - display engine handles PQ + BT.2020.";
                 }
             }
         }
@@ -1915,7 +1915,7 @@ class vulkan_output_consumer : public core::frame_consumer
                              VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0, nullptr, 1, &present_barrier);
 
         if (vkEndCommandBuffer(cmd) != VK_SUCCESS) {
-            CASPAR_LOG(error) << print() << L" vkEndCommandBuffer failed — skipping frame.";
+            CASPAR_LOG(error) << print() << L" vkEndCommandBuffer failed - skipping frame.";
             graph_->set_tag(diagnostics::tag_severity::WARNING, "dropped-frame");
             return;
         }
@@ -2520,7 +2520,7 @@ class vulkan_output_consumer : public core::frame_consumer
                     if (src_luid) {
                         // LUID was provided but no CUDA device matched — wrong GPU would be selected.
                         // Fall back to non-CUDA path instead of silently using device 0.
-                        CASPAR_LOG(warning) << print() << L" CUDA LUID matching failed — no CUDA device matches "
+                        CASPAR_LOG(warning) << print() << L" CUDA LUID matching failed - no CUDA device matches "
                                             << L"the Vulkan device LUID. Falling back to CPU staging path.";
                         cuda_vk_peer_failed_ = true;
                         cuda_vk_peer_init_   = true;
@@ -2699,7 +2699,7 @@ class vulkan_output_consumer : public core::frame_consumer
                                      << (sub_total_bytes / 1024 / 1024) << L" MB)";
                 } else {
                     CASPAR_LOG(warning) << print()
-                        << L" cudaHostRegister failed — using pinned fallback";
+                        << L" cudaHostRegister failed - using pinned fallback";
                 }
             }
 
@@ -2909,7 +2909,7 @@ class vulkan_output_consumer : public core::frame_consumer
             static bool warned = false;
             if (!warned) {
                 CASPAR_LOG(warning) << print()
-                    << L" CPU upload path used with HDR swapchain format — non-black frames will be incorrect."
+                    << L" CPU upload path used with HDR swapchain format - non-black frames will be incorrect."
                     << L" Use GPU interop (shared_pool) for correct HDR output.";
                 warned = true;
             }
@@ -3404,7 +3404,7 @@ class vulkan_output_consumer : public core::frame_consumer
             CASPAR_LOG(warning) << print()
                 << L" Failed to reattach " << detached_device_name_
                 << L" to desktop (error " << result << L"). "
-                << L"Manually re-enable in Settings → Display.";
+                << L"Manually re-enable in Settings -> Display.";
         }
 
         display_detached_by_us_ = false;
@@ -3524,7 +3524,7 @@ class vulkan_output_consumer : public core::frame_consumer
             } else {
                 CASPAR_LOG(warning) << print()
                     << L" Failed to run displayswitch.exe. "
-                    << L"Manually re-enable the display in Settings → Display.";
+                    << L"Manually re-enable the display in Settings -> Display.";
             }
         }
     }
@@ -3691,7 +3691,7 @@ class vulkan_output_consumer : public core::frame_consumer
                                         data.adapter_mismatch = true;
                                     }
                                     CASPAR_LOG(info) << print() << L" Matched display-name \""
-                                                     << config_.display_name << L"\" → "
+                                                     << config_.display_name << L"\" -> "
                                                      << mon.DeviceString << L" (" << dd.DeviceName << L")"
                                                      << (data.adapter_mismatch ? L" [GDI fallback]" : L"");
                                 }
@@ -3931,7 +3931,7 @@ class vulkan_output_consumer : public core::frame_consumer
                     ::TerminateProcess(::GetCurrentProcess(), 0);
                 }
             } catch (...) {
-                CASPAR_LOG(fatal) << print() << L" Present thread join threw — calling TerminateProcess.";
+                CASPAR_LOG(fatal) << print() << L" Present thread join threw - calling TerminateProcess.";
                 boost::log::core::get()->flush();
                 ::TerminateProcess(::GetCurrentProcess(), 0);
             }
@@ -3954,7 +3954,7 @@ class vulkan_output_consumer : public core::frame_consumer
                 });
                 if (idle_future.wait_for(std::chrono::seconds(2)) == std::future_status::timeout) {
                     CASPAR_LOG(fatal) << print() << L" vkQueueWaitIdle timed out (2s). "
-                                                    L"GPU subsystem wedged — calling TerminateProcess "
+                                                    L"GPU subsystem wedged - calling TerminateProcess "
                                                     L"to prevent WDDM kernel deadlock.";
                     boost::log::core::get()->flush();
                     ::TerminateProcess(::GetCurrentProcess(), 0);
@@ -4012,7 +4012,7 @@ class vulkan_output_consumer : public core::frame_consumer
                 if (swapchain_.surface != VK_NULL_HANDLE)
                     vkDestroySurfaceKHR(device_->instance(), swapchain_.surface, nullptr);
             } else {
-                CASPAR_LOG(warning) << print() << L" GPU stuck — Vulkan resources leaked (OS will reclaim on exit).";
+                CASPAR_LOG(warning) << print() << L" GPU stuck - Vulkan resources leaked (OS will reclaim on exit).";
             }
 
             // Destroy resources that reference VkDevice handles BEFORE destroying the device.

@@ -339,7 +339,7 @@ class portaudio_producer_impl : public capture_listener
             if (!disconnect_logged_) {
                 disconnect_logged_ = true;
                 CASPAR_LOG(warning) << L"[portaudio-producer] Device " << device_index_
-                                   << L" disconnected — returning silence.";
+                                   << L" disconnected - returning silence.";
             }
             return core::draw_frame::empty();
         }

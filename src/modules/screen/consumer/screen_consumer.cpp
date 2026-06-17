@@ -254,7 +254,7 @@ struct win32_gl_window
                 hglrc_ = wglCreateContextAttribsARB_(hdc_, reinterpret_cast<HGLRC>(share_context), attribs);
                 if (hglrc_) {
                     shared_ = true;
-                    CASPAR_LOG(info) << "[screen_consumer] GL context shared with mixer — zero-copy OGL path enabled.";
+                    CASPAR_LOG(info) << "[screen_consumer] GL context shared with mixer - zero-copy OGL path enabled.";
                 } else {
                     CASPAR_LOG(warning) << "[screen_consumer] Shared GL context creation failed (error="
                                         << GetLastError() << "), falling back to standalone context.";
@@ -746,7 +746,7 @@ struct screen_consumer
                 glDeleteVertexArrays(1, &vao_);
                 glDeleteBuffers(1, &vbo_);
             } catch (...) {
-                CASPAR_LOG(warning) << print() << L" Exception during GL cleanup — ignoring.";
+                CASPAR_LOG(warning) << print() << L" Exception during GL cleanup - ignoring.";
             }
 
 #ifdef _MSC_VER
@@ -1210,14 +1210,14 @@ struct gpu_strategy : public display_strategy
 
         if (!glCreateMemoryObjectsEXT_ || !glImportMemoryWin32HandleEXT_ || !glTextureStorageMem2DEXT_) {
             vk_interop_ok_ = false;
-            CASPAR_LOG(info) << L"[screen] GL_EXT_memory_object_win32 not available — VK interop disabled, using PBO fallback";
+            CASPAR_LOG(info) << L"[screen] GL_EXT_memory_object_win32 not available - VK interop disabled, using PBO fallback";
         }
 
         if (glGenSemaphoresEXT_ && glImportSemaphoreWin32HandleEXT_ && glWaitSemaphoreEXT_ &&
             glDeleteSemaphoresEXT_ && glSemaphoreParameterui64vEXT_) {
             vk_sem_ok_ = true;
         } else {
-            CASPAR_LOG(info) << L"[screen] GL_EXT_semaphore_win32 not available — using implicit sync (may fail with VK readback modes)";
+            CASPAR_LOG(info) << L"[screen] GL_EXT_semaphore_win32 not available - using implicit sync (may fail with VK readback modes)";
         }
     }
 
@@ -1307,7 +1307,7 @@ struct gpu_strategy : public display_strategy
             if (!DuplicateHandle(GetCurrentProcess(), handle,
                                  GetCurrentProcess(), &dup_handle,
                                  0, FALSE, DUPLICATE_SAME_ACCESS)) {
-                CASPAR_LOG(warning) << L"[screen] DuplicateHandle failed for VK→GL interop — disabling";
+                CASPAR_LOG(warning) << L"[screen] DuplicateHandle failed for VK->GL interop - disabling";
                 vk_interop_ok_ = false;
                 return false;
             }
@@ -1333,7 +1333,7 @@ struct gpu_strategy : public display_strategy
             auto err = glGetError();
             if (err != GL_NO_ERROR) {
                 CASPAR_LOG(warning) << L"[screen] GL error during VK interop import (0x"
-                                    << std::hex << err << L") — disabling interop";
+                                    << std::hex << err << L") - disabling interop";
                 cleanup_vk_interop();
                 vk_interop_ok_ = false;
                 return false;
@@ -1346,7 +1346,7 @@ struct gpu_strategy : public display_strategy
 
             static bool logged = false;
             if (!logged) {
-                CASPAR_LOG(info) << L"[screen] VK→GL zero-copy interop active ("
+                CASPAR_LOG(info) << L"[screen] VK->GL zero-copy interop active ("
                                  << w << L"x" << h << (hbd ? L" 16-bit" : L" 8-bit") << L")";
                 logged = true;
             }
@@ -1380,14 +1380,14 @@ struct gpu_strategy : public display_strategy
 
                         static bool sem_logged = false;
                         if (!sem_logged) {
-                            CASPAR_LOG(info) << L"[screen] Explicit VK→GL semaphore sync active";
+                            CASPAR_LOG(info) << L"[screen] Explicit VK->GL semaphore sync active";
                             sem_logged = true;
                         }
                     } else {
                         glDeleteSemaphoresEXT_(1, &vk_gl_semaphore_);
                         vk_gl_semaphore_ = 0;
                         vk_sem_ok_ = false;
-                        CASPAR_LOG(warning) << L"[screen] DuplicateHandle for VK semaphore failed — falling back to implicit sync";
+                        CASPAR_LOG(warning) << L"[screen] DuplicateHandle for VK semaphore failed - falling back to implicit sync";
                     }
                 }
 
@@ -1457,7 +1457,7 @@ struct gpu_strategy : public display_strategy
                 preview_hbd_ = hbd;
 
                 CASPAR_LOG(info) << L"[screen] Preview downscale active: " << w << L"x" << h
-                                 << L" → " << win_w << L"x" << win_h
+                                 << L" -> " << win_w << L"x" << win_h
                                  << (hbd ? L" 16-bit" : L" 8-bit");
             }
 

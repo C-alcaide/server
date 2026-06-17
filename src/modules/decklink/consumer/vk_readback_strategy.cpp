@@ -1248,7 +1248,7 @@ struct vk_readback_strategy::impl
         } else {
             if (frame_count_ < 3)
                 CASPAR_LOG(warning) << L"[vk_readback] No timeline semaphore on frame (sem_handle="
-                                    << sem_handle << L" sem_value=" << sem_value << L") — using CPU fence wait";
+                                    << sem_handle << L" sem_value=" << sem_value << L") - using CPU fence wait";
             wrapper->ensure_render_complete(); // No semaphore available
         }
 
@@ -1542,7 +1542,7 @@ std::shared_ptr<void> vk_readback_strategy::convert_frame_for_port(
             }
         } catch (const std::exception& e) {
             CASPAR_LOG(warning) << L"[vk_readback] GPU conversion failed: " << e.what()
-                                << L" — falling back to CPU";
+                                << L" - falling back to CPU";
         }
         // Fallback
         return impl_->fallback_->convert_frame_for_port(

@@ -421,7 +421,7 @@ struct cuda_vk_strategy::impl
                 if (desc.handle.fd >= 0) ::close(desc.handle.fd);
 #endif
                 CASPAR_LOG(warning) << L"[cuda_vk_strategy] Failed to import VK semaphore: "
-                                    << cudaGetErrorString(err) << L" — falling back to CPU wait";
+                                    << cudaGetErrorString(err) << L" - falling back to CPU wait";
                 gpu_wait_available_ = false;
                 gpu_wait_fail_count_ = 0;
                 return false;
@@ -775,7 +775,7 @@ std::shared_ptr<void> cuda_vk_strategy::convert_frame_for_port(
             if (result) return result;
             static bool logged_null = false;
             if (!logged_null) {
-                CASPAR_LOG(debug) << L"[cuda_vk_strategy] GPU path returned null (no VK texture) — using CPU fallback";
+                CASPAR_LOG(debug) << L"[cuda_vk_strategy] GPU path returned null (no VK texture) - using CPU fallback";
                 logged_null = true;
             }
         } catch (const std::exception& ex) {
@@ -808,14 +808,14 @@ spl::shared_ptr<format_strategy> try_create_cuda_vk_strategy(
     try {
         int device_count = 0;
         if (cudaGetDeviceCount(&device_count) != cudaSuccess || device_count == 0) {
-            CASPAR_LOG(info) << L"[cuda_vk_strategy] No CUDA devices — using CPU strategy";
+            CASPAR_LOG(info) << L"[cuda_vk_strategy] No CUDA devices - using CPU strategy";
             return fallback;
         }
         return spl::make_shared_ptr(
             std::shared_ptr<format_strategy>(
                 std::make_shared<cuda_vk_strategy>(is_hdr, use_bt2020, std::move(fallback), needs_v210)));
     } catch (const std::exception& ex) {
-        CASPAR_LOG(warning) << L"[cuda_vk_strategy] Init failed: " << ex.what() << L" — using CPU strategy";
+        CASPAR_LOG(warning) << L"[cuda_vk_strategy] Init failed: " << ex.what() << L" - using CPU strategy";
         return fallback;
     }
 }

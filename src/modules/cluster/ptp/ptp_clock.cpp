@@ -497,7 +497,7 @@ void ptp_clock::client_loop()
         if (state_.load(std::memory_order_relaxed) == clock_state::locked) {
             auto since_last_sync = std::chrono::duration_cast<std::chrono::seconds>(now - last_sync_received_).count();
             if (since_last_sync >= 5) {
-                CASPAR_LOG(warning) << L"[ptp_clock] No Sync from master for 5s — transitioning to free-running";
+                CASPAR_LOG(warning) << L"[ptp_clock] No Sync from master for 5s - transitioning to free-running";
                 state_.store(clock_state::free_running, std::memory_order_relaxed);
                 locked_master_ = {};
                 first_measurement_ = true;

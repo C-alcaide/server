@@ -349,11 +349,30 @@ struct server::impl
 
             auto display_peak_luminance = xml_channel.second.get<float>(L"display-peak-luminance", 1000.0f);
 
+            // Resolve which physical GPU this channel's mixer should run on.
+            // Priority: explicit <gpu> at channel level, else inherit from the
+            // channel's first <vulkan-output> consumer's <gpu>, else default 0.
+            // Keeping the mixer on the same GPU as the vulkan-output consumer
+            // avoids cross-GPU PCIe copies on the hot output path.
+            int gpu_index = xml_channel.second.get(L"gpu", -1);
+            if (gpu_index < 0) {
+                gpu_index = 0;
+                if (auto consumers = xml_channel.second.get_child_optional(L"consumers")) {
+                    for (auto& consumer : *consumers) {
+                        if (consumer.first == L"vulkan-output") {
+                            gpu_index = consumer.second.get(L"gpu", 0);
+                            break;
+                        }
+                    }
+                }
+            }
+            CASPAR_LOG(info) << L"[server] Channel " << channel_id << L" mixer assigned to GPU " << gpu_index << L".";
+
             auto channel =
                 spl::make_shared<video_channel>(channel_id,
                                                 format_desc,
                                                 default_color_space,
-                                                accelerator_.create_image_mixer(channel_id, depth),
+                                                accelerator_.create_image_mixer(channel_id, depth, gpu_index),
                                                 [channel_id, weak_client](core::monitor::state channel_state) {
                                                     monitor::state state;
                                                     state[""]["channel"][channel_id] = channel_state;

@@ -194,10 +194,10 @@ struct ProResDemuxer::impl
                 // on a truly unreadable file.
                 char errbuf[64];
                 av_strerror(ret, errbuf, sizeof(errbuf));
-                CASPAR_LOG(debug) << L"[prores_demuxer] av_read_frame transient error: " << errbuf << L" — retrying";
+                CASPAR_LOG(debug) << L"[prores_demuxer] av_read_frame transient error: " << errbuf << L" - retrying";
                 av_packet_unref(pkt);
                 if (++consecutive_errors > 32) {
-                    CASPAR_LOG(warning) << L"[prores_demuxer] Too many consecutive read errors — signalling EOF";
+                    CASPAR_LOG(warning) << L"[prores_demuxer] Too many consecutive read errors - signalling EOF";
                     av_packet_free(&pkt);
                     ProResPacket out;
                     out.is_eof = true;
@@ -229,7 +229,7 @@ struct ProResDemuxer::impl
     ProResPacket seek_and_loop()
     {
         if (!looped)
-            CASPAR_LOG(debug) << L"[prores_demuxer] EOF reached — looping";
+            CASPAR_LOG(debug) << L"[prores_demuxer] EOF reached - looping";
         looped = true;
 
         audio_buf_.clear();  // discard audio accumulated before the loop point
@@ -402,6 +402,10 @@ bool ProResDemuxer::parse_frame_info(const uint8_t* data, int size,
     int log2_smb_h = phdr[7] & 0xF;
     if (log2_smb_h != 0)
         return false;  // only horizontal slicing supported
+    if (log2_smb_w > 3)
+        return false;  // ProRes allows slice widths of 1/2/4/8 MBs only;
+                       // a larger value would overflow the 2048-pixel slice
+                       // buffers in the decoder.
 
     int mbs_per_slice = 1 << log2_smb_w;  // power of 2
     int mb_width      = (out.width  + 15) / 16;
@@ -409,7 +413,19 @@ bool ProResDemuxer::parse_frame_info(const uint8_t* data, int size,
     if (out.frame_type != 0)
         mb_height = (out.height + 31) / 32;  // interlaced: field height
 
-    int slices_per_row = (mb_width + mbs_per_slice - 1) / mbs_per_slice;
+    // ProRes does NOT use a simple ceil(mb_width / mbs_per_slice) slice layout.
+    // When mb_width is not a multiple of mbs_per_slice, the remainder columns
+    // are split into POWER-OF-TWO slices (FFmpeg: slice_mb_count starts at
+    // slice_mb_width and is halved until it fits the remaining MBs).  The slice
+    // count per row is therefore:
+    //   (mb_width >> log2) + popcount(mb_width & (mbs_per_slice - 1))
+    // e.g. mb_width=163, slice=8 -> 20 + popcount(3) = 22 slices/row, with the
+    // last two slices covering 2 and 1 MBs.  Using ceil(163/8)=21 here corrupts
+    // every slice offset and produces grey output with stray decoded blocks.
+    int remainder      = mb_width & (mbs_per_slice - 1);
+    int popcount       = 0;
+    for (int b = remainder; b; b &= (b - 1)) ++popcount;
+    int slices_per_row = (mb_width >> log2_smb_w) + popcount;
     int num_slices     = slices_per_row * mb_height;
 
     out.mbs_per_slice  = mbs_per_slice;

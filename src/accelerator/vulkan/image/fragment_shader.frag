@@ -291,7 +291,9 @@ vec3 aces_odt_srgb(vec3 v){v=vec3(spline_c9(v.r,.0001,4.8,48.0),spline_c9(v.g,.0
 vec3 apply_tone_mapping(vec3 r,int op){switch(op){case 1:return tonemap_reinhard(r);case 2:return tonemap_aces_filmic(r);case 3:return tonemap_aces_rrt(r);case 4:return aces_odt_srgb(aces_rrt_s(r));case 5:{vec3 v=aces_rrt_s(r);v=vec3(spline_c9(v.r,.0001,4.8,48.0),spline_c9(v.g,.0001,4.8,48.0),spline_c9(v.b,.0001,4.8,48.0));return clamp(v/48.0,0.0,1.0);}case 6:{vec3 v=aces_rrt_s(r);v=vec3(spline_c9(v.r,.005,4.8,800.0),spline_c9(v.g,.005,4.8,800.0),spline_c9(v.b,.005,4.8,800.0));return clamp(v/1000.0,0.0,1.0);}case 7:return tonemap_hlg_ootf(r,display_peak_luminance);default:return r;}}
 
 // ── Effect helpers ──────────────────────────────────────────────────────
-vec3 apply_white_balance(vec3 c,float t,float ti){c.r*=1.0-t*0.20;c.g*=1.0+ti*0.10;c.b*=1.0+t*0.20;return c;}
+// White balance in RGB working space: warm (+t) boosts red, cuts blue; tint (+ti) boosts green.
+// (Matches the OGL shader, which expresses the same gains in its BGRA convention.)
+vec3 apply_white_balance(vec3 c,float t,float ti){c.r*=1.0+t*0.20;c.g*=1.0+ti*0.10;c.b*=1.0-t*0.20;return c;}
 vec3 apply_lmg(vec3 c,vec3 l,vec3 m,vec3 g){return pow(max(c*g+l,vec3(0.0)),max(vec3(0.01),1.0/m));}
 vec3 apply_hue_shift(vec3 c,float deg){float pk=max(max(c.r,c.g),max(c.b,0.0001));vec3 h=rgb2hsv(clamp(c/pk,0.0,1.0));h.x=fract(h.x+deg/360.0);return hsv2rgb(h)*pk;}
 vec3 apply_tone_balance(vec3 c,float s,float h){float l=dot(c,vec3(0.2126,0.7152,0.0722));c+=vec3(s*0.5*(1.0-smoothstep(0.0,0.6,l)));c+=vec3(h*0.5*smoothstep(0.4,1.0,l));return c;}

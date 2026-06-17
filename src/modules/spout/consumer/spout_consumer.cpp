@@ -387,7 +387,7 @@ struct spout_consumer_impl : public core::frame_consumer
             if (!context_) {
                 context_ = std::make_unique<gl_context>(gl_share_context_);
                 if (context_->is_shared()) {
-                    CASPAR_LOG(info) << L"[spout_consumer] GL context shared with mixer — GPU texture path available.";
+                    CASPAR_LOG(info) << L"[spout_consumer] GL context shared with mixer - GPU texture path available.";
                 }
             }
             if (!context_->make_current()) {

@@ -168,7 +168,7 @@ struct freed_receiver::impl
         std::copy_n(recv_buf_.begin(), FREED_PACKET_LEN, pkt.begin());
 
         if (!verify_checksum(pkt)) {
-            std::cerr << "[tracking/freed] bad checksum — packet dropped\n";
+            std::cerr << "[tracking/freed] bad checksum - packet dropped\n";
             return;
         }
 

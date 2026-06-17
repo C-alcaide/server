@@ -34,7 +34,7 @@ interop_context::interop_context()
     HDC   parent_dc = wglGetCurrentDC();
 
     if (!parent_rc || !parent_dc) {
-        CASPAR_LOG(error) << L"[interop_context] No current GL context — must be called from OGL device thread.";
+        CASPAR_LOG(error) << L"[interop_context] No current GL context - must be called from OGL device thread.";
         return;
     }
 
@@ -213,7 +213,7 @@ interop_context::interop_context()
     auto parent_context = eglGetCurrentContext();
 
     if (parent_display == EGL_NO_DISPLAY || parent_context == EGL_NO_CONTEXT) {
-        CASPAR_LOG(error) << L"[interop_context] No current EGL context — must be called from OGL device thread.";
+        CASPAR_LOG(error) << L"[interop_context] No current EGL context - must be called from OGL device thread.";
         return;
     }
 

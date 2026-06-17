@@ -64,7 +64,7 @@ void SMFL_GLCheckError(const std::string& /*unused*/, const char* func, const ch
             CASPAR_LOG(error) << "OpenGL Error: " << ErrorCode << L" " << str;
         } else if (!tl_suppressed) {
             tl_suppressed = true;
-            CASPAR_LOG(error) << "GL error flood detected — suppressing further GL error "
+            CASPAR_LOG(error) << "GL error flood detected - suppressing further GL error "
                                  "messages on this thread for up to 1 second.";
         }
         LastErrorCode = ErrorCode;

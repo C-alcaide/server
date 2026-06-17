@@ -823,7 +823,7 @@ bool nvapi_helpers::persist_edid(int gpu_index, int output_index)
     CASPAR_LOG(info) << L"[vulkan_output] persist_edid: Locked EDID for output " << output_index
                      << L" (" << info.manufacturer << L" " << info.model
                      << L" " << info.max_width << L"x" << info.max_height << L")"
-                     << L" — display will remain active even if cable is disconnected.";
+                     << L" - display will remain active even if cable is disconnected.";
     return true;
 }
 

@@ -127,7 +127,7 @@ DecklinkCapture::DecklinkCapture(int            device_index,
     // Register before EnableVideoInput so the first Allocate arrives in time
     if (FAILED(input_->SetVideoInputFrameMemoryAllocator(allocator_.get()))) {
         // Not fatal — fall back to driver-managed host buffers; GPUDirect DMA disabled
-        fprintf(stderr, "[DecklinkCapture] SetVideoInputFrameMemoryAllocator failed — "
+        fprintf(stderr, "[DecklinkCapture] SetVideoInputFrameMemoryAllocator failed - "
                         "GPUDirect disabled, using pageable host buffers\n");
     }
 }

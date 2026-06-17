@@ -269,12 +269,29 @@ bool operator==(const image_transform& lhs, const image_transform& rhs)
                eq(lhs.chroma.spill_suppress, rhs.chroma.spill_suppress) &&
                eq(lhs.chroma.spill_suppress_saturation, rhs.chroma.spill_suppress_saturation) && lhs.crop == rhs.crop &&
                lhs.perspective == rhs.perspective &&
+               eq(lhs.levels.min_input,  rhs.levels.min_input)  &&
+               eq(lhs.levels.max_input,  rhs.levels.max_input)  &&
+               eq(lhs.levels.gamma,      rhs.levels.gamma)      &&
+               eq(lhs.levels.min_output, rhs.levels.min_output) &&
+               eq(lhs.levels.max_output, rhs.levels.max_output) &&
                lhs.projection.enable == rhs.projection.enable && eq(lhs.projection.yaw, rhs.projection.yaw) &&
                eq(lhs.projection.pitch, rhs.projection.pitch) && eq(lhs.projection.roll, rhs.projection.roll) &&
                eq(lhs.projection.fov, rhs.projection.fov) &&
+               eq(lhs.projection.offset_x, rhs.projection.offset_x) &&
+               eq(lhs.projection.offset_y, rhs.projection.offset_y) &&
+               eq(lhs.projection.frustum_h, rhs.projection.frustum_h) &&
+               eq(lhs.projection.frustum_v, rhs.projection.frustum_v) &&
+               eq(lhs.projection.lens_k1, rhs.projection.lens_k1) &&
+               eq(lhs.projection.lens_k2, rhs.projection.lens_k2) &&
+               eq(lhs.projection.lens_k3, rhs.projection.lens_k3) &&
                lhs.projection.curve_enable == rhs.projection.curve_enable &&
                lhs.projection.curve_type   == rhs.projection.curve_type   &&
                eq(lhs.projection.screen_arc, rhs.projection.screen_arc)   &&
+               eq(lhs.projection.edge_blend_left,   rhs.projection.edge_blend_left)   &&
+               eq(lhs.projection.edge_blend_right,  rhs.projection.edge_blend_right)  &&
+               eq(lhs.projection.edge_blend_top,    rhs.projection.edge_blend_top)    &&
+               eq(lhs.projection.edge_blend_bottom, rhs.projection.edge_blend_bottom) &&
+               eq(lhs.projection.edge_blend_gamma,  rhs.projection.edge_blend_gamma)  &&
                lhs.color_grade.enable == rhs.color_grade.enable &&
                lhs.color_grade.input_transfer == rhs.color_grade.input_transfer &&
                lhs.color_grade.input_gamut == rhs.color_grade.input_gamut &&

@@ -175,7 +175,7 @@ struct freed_plus_receiver::impl
         for (size_t i = 0; i < FREED_PLUS_PACKET_LEN; ++i)
             xor_val ^= recv_buf_[i];
         if (xor_val != 0) {
-            std::cerr << "[tracking/freed+] bad XOR checksum — packet dropped\n";
+            std::cerr << "[tracking/freed+] bad XOR checksum - packet dropped\n";
             return;
         }
 
