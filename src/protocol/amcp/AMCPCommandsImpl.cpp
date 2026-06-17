@@ -3445,8 +3445,8 @@ std::wstring previz_scene_command(command_context& ctx)
         // Query
         auto sc = ogl_mix->scene();
         if (sc.scene_path.empty())
-            return L"201 PREVIZ OK\r\nNONE\r\n";
-        return L"201 PREVIZ OK\r\n" + u16(sc.scene_path) + L"\r\n";
+            return L"201 PREVIZ OK\r\nNONE\r\n\r\n";
+        return L"201 PREVIZ OK\r\n" + u16(sc.scene_path) + L"\r\n\r\n";
     }
 
     auto path_param = ctx.parameters.at(0);
@@ -3528,7 +3528,7 @@ std::wstring previz_camera_command(command_context& ctx)
         os << L"201 PREVIZ OK\r\n"
            << cam.x << L" " << cam.y << L" " << cam.z << L" "
            << cam.yaw << L" " << cam.pitch << L" " << cam.roll << L" "
-           << cam.fov << L"\r\n";
+           << cam.fov << L"\r\n\r\n";
         return os.str();
     }
 
@@ -3578,6 +3578,7 @@ std::wstring previz_info_command(command_context& ctx)
             os << L" -> channel " << it->second;
         os << L"\r\n";
     }
+    os << L"\r\n";   // blank line terminates the multi-line response
     return os.str();
 }
 
@@ -3667,6 +3668,7 @@ std::wstring previz_preset_command(command_context& ctx)
         os << L"201 PREVIZ OK\r\n";
         for (auto& n : names)
             os << u16(n) << L"\r\n";
+        os << L"\r\n";   // blank line terminates the multi-line response
         return os.str();
     }
     return L"400 PREVIZ ERROR unknown preset subcommand\r\n";
@@ -3710,6 +3712,7 @@ std::wstring previz_screen_command(command_context& ctx)
                     os << L"\r\n";
                 }
             }
+            os << L"\r\n";   // blank line terminates the multi-line response
             return os.str();
         }
 
