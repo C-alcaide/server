@@ -42,7 +42,12 @@
 #include <boost/logic/tribool.hpp>
 #include <common/filesystem.h>
 
+#include <atomic>
 #include <chrono>
+#include <cstddef>
+#include <memory>
+#include <string>
+#include <vector>
 
 extern "C" {
 #define __STDC_CONSTANT_MACROS
@@ -55,14 +60,30 @@ namespace caspar { namespace ffmpeg {
 using namespace std::chrono_literals;
 
 namespace {
-// Single shared worker that performs the slow ffmpeg teardown off the realtime thread
-// WITHOUT spawning an unbounded number of concurrent threads. Serializing producer
-// destruction means a mass CLEAR/REMOVE no longer races many ffmpeg/tbbmalloc frees
-// against each other.
+// Small fixed-size pool of workers that perform the slow ffmpeg teardown off the realtime
+// thread WITHOUT spawning an unbounded number of concurrent threads.
+//
+// Rationale: a single teardown thread would fully serialize destruction, so one producer
+// whose teardown blocks (e.g. a network input whose abort() is slow to unblock the decoder)
+// would stall the teardown of every other producer behind it and leak their memory. A small
+// bounded pool keeps the heap-corruption protection (only a handful of concurrent frees
+// instead of N) while avoiding that head-of-line blocking. Producers are dispatched
+// round-robin across the pool.
 caspar::executor& ffmpeg_producer_destroyer()
 {
-    static caspar::executor destroyer(L"ffmpeg_producer_destroyer");
-    return destroyer;
+    static constexpr std::size_t        pool_size = 3;
+    static std::vector<std::unique_ptr<caspar::executor>> pool = [] {
+        std::vector<std::unique_ptr<caspar::executor>> workers;
+        workers.reserve(pool_size);
+        for (std::size_t i = 0; i < pool_size; ++i) {
+            workers.push_back(
+                std::make_unique<caspar::executor>(L"ffmpeg_producer_destroyer_" + std::to_wstring(i)));
+        }
+        return workers;
+    }();
+
+    static std::atomic<std::size_t> next{0};
+    return *pool[next.fetch_add(1, std::memory_order_relaxed) % pool_size];
 }
 } // namespace
 
