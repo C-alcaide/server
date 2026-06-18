@@ -26,6 +26,7 @@
 #include "av_producer.h"
 
 #include <common/env.h>
+#include <common/executor.h>
 #include <common/os/filesystem.h>
 #include <common/param.h>
 
@@ -52,6 +53,18 @@ extern "C" {
 namespace caspar { namespace ffmpeg {
 
 using namespace std::chrono_literals;
+
+namespace {
+// Single shared worker that performs the slow ffmpeg teardown off the realtime thread
+// WITHOUT spawning an unbounded number of concurrent threads. Serializing producer
+// destruction means a mass CLEAR/REMOVE no longer races many ffmpeg/tbbmalloc frees
+// against each other.
+caspar::executor& ffmpeg_producer_destroyer()
+{
+    static caspar::executor destroyer(L"ffmpeg_producer_destroyer");
+    return destroyer;
+}
+} // namespace
 
 struct ffmpeg_producer : public core::frame_producer
 {
@@ -94,13 +107,13 @@ struct ffmpeg_producer : public core::frame_producer
 
     ~ffmpeg_producer()
     {
-        std::thread([producer = std::move(producer_)]() mutable {
+        ffmpeg_producer_destroyer().begin_invoke([producer = std::move(producer_)]() mutable {
             try {
                 producer.reset();
             } catch (...) {
                 CASPAR_LOG_CURRENT_EXCEPTION();
             }
-        }).detach();
+        });
     }
 
     // frame_producer

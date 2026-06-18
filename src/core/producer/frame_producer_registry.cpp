@@ -86,7 +86,12 @@ class destroy_producer_proxy : public frame_producer
         if (!destroyer)
             return;
 
-        CASPAR_VERIFY(destroyer->size() < 8);
+        // Throwing from a destructor (as CASPAR_VERIFY would) while many layers are being
+        // cleared at once is unsafe and can itself abort the process. Apply backpressure via
+        // logging instead of asserting.
+        if (destroyer->size() >= 8) {
+            CASPAR_LOG(warning) << L"Producer destroyer backlog: " << destroyer->size();
+        }
 
         auto producer = new spl::shared_ptr<frame_producer>(std::move(producer_));
 
