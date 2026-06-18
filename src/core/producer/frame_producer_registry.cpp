@@ -86,11 +86,26 @@ class destroy_producer_proxy : public frame_producer
         if (!destroyer)
             return;
 
-        // Throwing from a destructor (as CASPAR_VERIFY would) while many layers are being
-        // cleared at once is unsafe and can itself abort the process. Apply backpressure via
-        // logging instead of asserting.
-        if (destroyer->size() >= 8) {
-            CASPAR_LOG(warning) << L"Producer destroyer backlog: " << destroyer->size();
+        // Backpressure for the asynchronous destroyer queue.
+        //
+        // The queue used to be guarded by CASPAR_VERIFY(size < 8), but throwing from a
+        // destructor while many layers are being cleared at once is unsafe and can itself
+        // abort the process. Simply dropping the guard would let the backlog (and the memory
+        // of every not-yet-destroyed producer) grow without bound if destruction cannot keep
+        // up. Instead, once the backlog passes a threshold, destroy this producer
+        // synchronously on the current thread. That bounds the queue and provides real
+        // backpressure without ever throwing.
+        constexpr std::size_t destroyer_backlog_limit = 8;
+
+        if (destroyer->size() >= destroyer_backlog_limit) {
+            CASPAR_LOG(warning) << L"Producer destroyer backlog (" << destroyer->size()
+                                << L") reached limit; destroying synchronously to apply backpressure.";
+            try {
+                producer_.reset();
+            } catch (...) {
+                CASPAR_LOG_CURRENT_EXCEPTION();
+            }
+            return;
         }
 
         auto producer = new spl::shared_ptr<frame_producer>(std::move(producer_));
