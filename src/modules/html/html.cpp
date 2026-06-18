@@ -332,8 +332,20 @@ void init(const core::module_dependencies& dependencies)
         CefString(&settings.resources_dir_path).FromString(resources_path.string());
         CefString(&settings.locales_dir_path).FromString(resources_path.string());
 
-        // Set the subprocess path to the main executable (handles renderer, GPU processes)
-        CefString(&settings.browser_subprocess_path).FromString(exe_path.string());
+        // Subprocess path: in an app bundle, CEF must spawn the dedicated helper
+        // apps - macOS won't relaunch the main bundle executable as a child
+        // process cleanly, which leaves the renderer/GPU process dead (no frames,
+        // no logs). CEF derives the (GPU)/(Renderer)/... variants from the base
+        // "<App> Helper". In a flat layout there are no helpers, so the main
+        // executable doubles as the subprocess (see intercept_command_line).
+        if (is_app_bundle) {
+            auto app_name   = bundle_path.stem().string();
+            auto helper_exe = frameworks_path / (app_name + " Helper.app") / "Contents" / "MacOS" / (app_name + " Helper");
+            CefString(&settings.browser_subprocess_path).FromString(helper_exe.string());
+            CASPAR_LOG(info) << "[html]   Subprocess (helper): " << helper_exe.string();
+        } else {
+            CefString(&settings.browser_subprocess_path).FromString(exe_path.string());
+        }
 
         // Set main_bundle_path appropriately for app bundle or flat structure
         if (is_app_bundle) {
@@ -346,7 +358,6 @@ void init(const core::module_dependencies& dependencies)
         CASPAR_LOG(info) << "[html]   App bundle: " << (is_app_bundle ? "yes" : "no");
         CASPAR_LOG(info) << "[html]   Framework: " << framework_path.string();
         CASPAR_LOG(info) << "[html]   Resources: " << resources_path.string();
-        CASPAR_LOG(info) << "[html]   Subprocess: " << exe_path.string();
         CASPAR_LOG(info) << "[html]   Bundle path: " << bundle_path.string();
 #endif
 
