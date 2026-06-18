@@ -543,9 +543,13 @@ struct image_mixer::impl
                             // Sync bridge textures into the channel store
                             bridge->sync_to_store(*store);
 
-                            // Render 3D previz scene
+                            // Render 3D previz scene.  The previz renderer
+                            // binds its own FBO and does a full glClear, so the
+                            // texture's glClearTexImage init is redundant — and
+                            // for some depth/format combinations it raises a
+                            // transient GL_INVALID_VALUE.  Skip it (clear=false).
                             auto target = ogl->create_texture(
-                                format_desc.width, format_desc.height, 4, depth);
+                                format_desc.width, format_desc.height, 4, depth, false);
                             previz->render(target, *store, format_desc.width, format_desc.height);
 
                             return std::make_tuple(ogl->copy_async(target).share(),

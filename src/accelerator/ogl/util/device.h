@@ -46,7 +46,7 @@ class device final
 
     device& operator=(const device&) = delete;
 
-    std::shared_ptr<class texture> create_texture(int width, int height, int stride, common::bit_depth depth);
+    std::shared_ptr<class texture> create_texture(int width, int height, int stride, common::bit_depth depth, bool clear = true);
     array<uint8_t>                 create_array(int size);
 
     std::future<std::shared_ptr<class texture>>

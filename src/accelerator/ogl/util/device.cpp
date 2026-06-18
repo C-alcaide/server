@@ -395,9 +395,9 @@ device::device()
 {
 }
 device::~device() {}
-std::shared_ptr<texture> device::create_texture(int width, int height, int stride, common::bit_depth depth)
+std::shared_ptr<texture> device::create_texture(int width, int height, int stride, common::bit_depth depth, bool clear)
 {
-    auto tex = impl_->create_texture(width, height, stride, depth, true);
+    auto tex = impl_->create_texture(width, height, stride, depth, clear);
     tex->set_device(shared_from_this());
     return tex;
 }
