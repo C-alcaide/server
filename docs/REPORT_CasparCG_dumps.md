@@ -9,6 +9,8 @@
 
 > These are **DumpType 1** minidumps: faulting-thread stacks, registers, and the loaded-module list — **no heap pages**. They show *where* each crash tripped and *which* code path led there, but not the corrupted block's contents. Full heap forensics requires a DumpType=2 dump on the next crash (see README).
 
+> **Update 2026-06-20:** follow-up reproduction testing has refined the thread-count interpretation below. The 548–603 thread figure is now understood to be **largely config-confounded** (it scales with CPU cores × concurrent producers × resolution) and is **not, by itself, evidence of a leak** — controlled testing showed threads, memory, and handles all reclaim cleanly under sustained churn. The decisive evidence remains the **identical heap-corruption signature and identical culprit frame** across the two crashes. See the dated **Addendum (§7)** for the full follow-up analysis and what it means for the proposed fixes.
+
 ---
 
 ## 1. Executive summary
@@ -20,7 +22,7 @@ The four CasparCG dumps fall into two groups that tell one coherent story:
 
 Two pieces of **new quantitative evidence** emerge from the stacks that the WER metadata alone could not show:
 
-- **Thread explosion: 548–603 live threads** in the process at crash time (a 6-channel server should run a few dozen), nearly all parked in `ntdll` waits. This is hard evidence of **thread accumulation** from per-loop decoder-thread creation and detached teardown threads.
+- **Thread explosion: 548–603 live threads** in the process at crash time (a 6-channel server should run a few dozen), nearly all parked in `ntdll` waits. This is hard evidence of **thread accumulation** from per-loop decoder-thread creation and detached teardown threads. *(See §7 Addendum 2026-06-20: subsequent testing shows thread count is largely config-driven and not by itself proof of a leak; this figure is retained as context, but is no longer presented as the primary evidence.)*
 - In dump 22168, the corrupting thread shows **`tbbmalloc.dll` and `avutil-57.dll` frames** beneath the CasparCG frames — a **cross-module free through `tbbmalloc_proxy` in the ffmpeg path**, directly supporting the mixed-allocator corruption theory.
 
 **Conclusion:** the dumps confirm and strengthen the root-cause attribution — a reproducible CasparCG ffmpeg-teardown/free path corrupts the shared heap; the access violations are secondary heap-walk failures; and the thread count quantifies the churn/accumulation the proposed fixes target.
@@ -101,3 +103,37 @@ These four points are mutually consistent and align with the original investigat
 - DumpType 1: no heap pages → the corrupted block itself cannot be inspected; the culprit is identified by faulting-stack code path, not by the damaged allocation.
 - No CasparCG PDBs → `casparcg.exe+0x28a044` / `+0x250ffe` are RVAs; the destructor/unwind interpretation is structural (disassembly shape), not a resolved symbol.
 - Stack frames beyond the faulting frame are recovered by a heuristic qword scan of stack memory (clamped to the containing segment), not a true unwind; candidate return addresses are validated by resolving into loaded modules.
+
+---
+
+## 7. Addendum — follow-up reproduction testing (2026-06-20)
+
+After this report was first published, a controlled reproduction effort was run against the **exact unfixed 2.4.3.0 binary** from the bundled `bin\` directory, driven over AMCP with a topology matched to the production SERVIDOR1 show (5 program channels in sync, channel 6 = channel 1 routed to an HD output, screen consumers on channels 1–2, a distinct clip per channel). Process threads, RSS, OS handles, and GDI/USER object counts were sampled every 30 s throughout.
+
+### 7.1 What the testing showed
+
+- **No resource leak under sustained churn.** Across ~3,800 mid-show `MIX` producer replacements (≈760 full 5-channel transitions) over ~28 minutes, every metric oscillated within a **bounded band and returned to its baseline**:
+  - **Handles**: trough flat at **2,916–2,931** — i.e. *zero* net drift after ~1,900 producer teardowns. A per-producer handle leak would have shown ~1,900 handles of growth; none was observed.
+  - **Threads**: baseline **~379**, spiking to **~487** only during the overlap of a MIX transition, then settling back. No upward creep.
+  - **RSS**: bounded **~3.2–3.9 GB**; **GDI** flat at 32; **USER** flat at ~4,820.
+- **Coordinated end-of-broadcast teardown** (REMOVE all screens + CLEAR all channels, repeated) likewise produced a clean sawtooth (threads collapsing to ~106, then rebuilding) with **no crash**.
+- **Passive looping** had already been confirmed not to reproduce the crash; this testing extends that negative result to **active teardown and mid-show churn** as well.
+
+### 7.2 Refined interpretation
+
+1. **The crash is not a slow leak / resource exhaustion.** Both teardown churn and mid-show churn reclaim fully. The earlier "thread accumulation" reading is **superseded**: thread count is largely a function of CPU-core count × concurrent producers × resolution, and is *config-confounded* rather than a leak indicator.
+2. **The crash is consistent with a rare race / bad-free** — a one-shot heap corruption that occurs only on a specific teardown interleaving. This matches both the dump evidence (a single, reproducible cross-module free at `casparcg.exe+0x28a044` with `tbbmalloc` + `avutil-57` frames) and the operational reality that **most show days do not crash**.
+3. **The corruption mechanism (cross-module free under the mixed `tbbmalloc_proxy` allocator) is unchanged and remains the core finding.** What changed is the *driver*: not gradual accumulation, but a low-probability race in the teardown free path.
+4. **A trigger outside pure AMCP churn is plausible.** The synthetic tool deliberately never touches the **DeckLink** consumers (to protect SDI hardware), so it cannot exercise a reference-signal-loss or device-reconfiguration teardown. An external event (e.g. genlock/reference loss or a network drop forcing an internal consumer reconfigure) reaching the same buggy free path is a credible explanation for the rare production crashes and is the next avenue to test against a production log captured around a real crash time.
+
+### 7.3 What this means for the proposed fixes (PRs #1755 / #1756)
+
+The fixes remain worthwhile, but their **justification is reframed from "leak plug" to "race-window / frequency reduction"**:
+
+| Fix | Original framing | Reframed in light of 2026-06-20 testing |
+|-----|------------------|------------------------------------------|
+| **Bounded producer-destroyer teardown** | Stops "thread explosion" / exhaustion | Thread-exhaustion rationale is **weakened** (no leak observed). Still valuable as a **concurrency limiter**: fewer simultaneous cross-module frees ⇒ smaller window for the race. |
+| **ffmpeg decoder reuse across loop wraps** | Cuts per-loop decoder create/destroy churn | **Strengthened indirectly.** It removes the most frequent execution of the exact teardown free path implicated in the corruption, lowering crash probability — though it reduces *frequency*, it does not by itself *close* the race. |
+| **Screen-consumer / GPU-free teardown hardening** | Addresses the 67% end-of-broadcast fingerprint | Could not be tripped synthetically; if the real trigger is a DeckLink reconfiguration, additional hardening of the **consumer-reconfiguration** path may be needed beyond what the current PRs cover. |
+
+**Honest limitations of the validation:** because **neither** the unfixed nor the fixed build crashes under synthetic load, a bench A/B ("unfixed crashes, fixed does not") was **not** achievable. The fixes should therefore be treated as **low-risk hardening that reduces the concurrency and frequency of the implicated teardown free path**, with **validation deferred to production soak** (crash-rate reduction across show days), not a reproduced bench failure. None of the fixes are contradicted by this testing; the thread-count argument in §1/§2 should simply not be relied upon as primary evidence.
