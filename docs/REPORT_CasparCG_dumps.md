@@ -9,7 +9,7 @@
 
 > These are **DumpType 1** minidumps: faulting-thread stacks, registers, and the loaded-module list — **no heap pages**. They show *where* each crash tripped and *which* code path led there, but not the corrupted block's contents. Full heap forensics requires a DumpType=2 dump on the next crash (see README).
 
-> **Update 2026-06-20:** follow-up reproduction testing has refined the thread-count interpretation below. The 548–603 thread figure is now understood to be **largely config-confounded** (it scales with CPU cores × concurrent producers × resolution) and is **not, by itself, evidence of a leak** — controlled testing showed threads, memory, and handles all reclaim cleanly under sustained churn. The decisive evidence remains the **identical heap-corruption signature and identical culprit frame** across the two crashes. See the dated **Addendum (§7)** for the full follow-up analysis and what it means for the proposed fixes.
+> **Update 2026-06-20:** follow-up reproduction testing has refined the thread-count interpretation below. The 548–603 thread figure is now understood to be **largely config-confounded** (it scales with CPU cores × concurrent producers × resolution) and is **not, by itself, evidence of a leak** — controlled testing with **local-file** churn showed threads, memory, and handles all reclaim cleanly. **However, a later test that injected network faults into an HLS source produced the first positive leak signal of the investigation: a monotonic accumulation of OS *thread handles* (~1,000/min) under HLS reconnect churn — see Addendum §8.** This corroborates upstream issue [#1549](https://github.com/CasparCG/server/issues/1549) ("more frequent with HLS"). The decisive heap-corruption evidence remains the **identical fault signature and identical culprit frame** across the two crashes. See the dated **Addendum (§7, §8)** for the full follow-up analysis and what it means for the proposed fixes.
 
 ---
 
@@ -92,9 +92,10 @@ These four points are mutually consistent and align with the original investigat
 
 ## 5. Recommendations
 
-- **Reduce teardown/thread churn** — bound the producer-destroyer thread pool and reuse ffmpeg decoders across loop wraps instead of destroying/recreating decoder threads and filter graphs every iteration. (This is what the proposed fixes target; the 548–603 thread count is the metric to watch — a healthy build should hold a flat, low thread count over long looping playback.)
+- **Reduce teardown/thread churn** — bound the producer-destroyer thread pool and reuse ffmpeg decoders across loop wraps instead of destroying/recreating decoder threads and filter graphs every iteration. (This is what the proposed fixes target. The decoder-reuse fix is directly relevant to the **HLS thread-handle leak** in §8, which rides on the per-loop/per-reconnect decoder rebuild.)
+- **Investigate the HLS reconnect thread-handle leak (§8).** Under HLS network faults the process accumulates handles to **already-exited threads** (live threads stay ~380 while thread handles climb past 13,000). Audit the reconnect/decoder-rebuild path for a thread created per reconnect whose handle is never `join()`ed/`detach()`ed/closed; verify avcodec multi-thread decoder teardown on the abnormal/reconnect path.
 - **Capture a full dump next time.** Set `DumpType=2` for `casparcg.exe` (regkey in the README) so the corrupted heap block can be walked and the exact freed object identified.
-- **Validation signal after fixes:** flat process RSS and a stable, low thread count over an extended loop-playback soak; absence of `0xC0000374` recurrence.
+- **Validation signal after fixes:** flat process RSS, a stable thread *handle* count under HLS reconnect soak, and absence of `0xC0000374` recurrence.
 
 ---
 
@@ -137,3 +138,46 @@ The fixes remain worthwhile, but their **justification is reframed from "leak pl
 | **Screen-consumer / GPU-free teardown hardening** | Addresses the 67% end-of-broadcast fingerprint | Could not be tripped synthetically; if the real trigger is a DeckLink reconfiguration, additional hardening of the **consumer-reconfiguration** path may be needed beyond what the current PRs cover. |
 
 **Honest limitations of the validation:** because **neither** the unfixed nor the fixed build crashes under synthetic load, a bench A/B ("unfixed crashes, fixed does not") was **not** achievable. The fixes should therefore be treated as **low-risk hardening that reduces the concurrency and frequency of the implicated teardown free path**, with **validation deferred to production soak** (crash-rate reduction across show days), not a reproduced bench failure. None of the fixes are contradicted by this testing; the thread-count argument in §1/§2 should simply not be relied upon as primary evidence.
+
+---
+
+## 8. Addendum — HLS reconnect thread-handle leak (2026-06-20)
+
+The §7 testing used **local files** and found clean reclaim. A follow-up test added the one production-relevant variable the local-file test was missing — **a network source that fails** — and produced the **first positive leak signal of the entire investigation.**
+
+### 8.1 Why HLS, and how it was tested
+
+Upstream issue [#1549](https://github.com/CasparCG/server/issues/1549) reports the **same** `0xC0000374` heap-corruption signature (no error logs, present from 2.3.x → master, graphics-independent, both SDI and HLS) and explicitly notes it is **"more frequent with HLS."** No real flaky HLS source was available, so a **fault-injecting HLS server** was built (`flaky_hls_server.py`): it serves a normal VOD playlist but, per `.ts` segment request, randomly (a) sends a partial body then resets the socket (truncated read), (b) returns 503/404, or (c) stalls then closes (read timeout). CasparCG was pointed at it and driven with the same churn harness.
+
+Under faults the server log showed exactly the expected reconnect storm: *"Stream ends prematurely"*, *"keepalive request failed … Error number -10053 … retrying with new connection"*, *"Error when loading first segment"*, and constant `.ts` re-opens on fresh `hls@`/`http@` contexts — i.e. **repeated demuxer/decoder teardown and rebuild driven by the network faults.**
+
+### 8.2 The measurement
+
+Handle sampling of the **same unfixed 2.4.3.0 binary** (PID 443292):
+
+| Condition | Handle trough behaviour |
+|-----------|-------------------------|
+| Local-file churn (§7) | **Flat** 2,916–2,931 (zero net drift over ~1,900 teardowns) |
+| **HLS fault churn** | **Monotonic climb** 2,987 → 8,615 in ~6 min (**≈1,000 handles/min**), continuing past **13,000** |
+
+The leaked handles were typed without Sysinternals by reading the live handle table (`NtQuerySystemInformation(SystemExtendedHandleInformation)`) and mapping `ObjectTypeIndex` via in-process probe objects. Result:
+
+- **The runaway type is `Thread` (object-type index 8).** At 418 min uptime the process held **~7,000 → 13,000 Thread handles while only ~380 threads were actually alive** — i.e. thousands of handles to **already-exited threads that were never closed.** Event (~1,300) and Semaphore (~590) were mildly elevated; everything else was flat.
+
+This is a true handle leak (handles to dead threads), **distinct** from the live-thread "explosion" discussed in §1/§7, and it appears **only** under the HLS reconnect path.
+
+### 8.3 Where it comes from (code attribution)
+
+The leak rides on the **decoder/demuxer teardown-and-rebuild rate**, which the HLS faults drive far higher than normal playback:
+
+- In the **running 2.4.3-stable** build, every loop-wrap/seek and every reconnect-induced EOF runs `av_producer::seek_internal()` → **`decoders_.clear()` + full recreate** (`src/modules/ffmpeg/producer/av_producer.cpp`). Each `Decoder` (a) spawns a `boost::thread` worker and (b) opens an avcodec context with `threads=0` (**auto = N CPU cores**), spawning N frame-thread workers. Per rebuild that is ~(1 + N) threads created and destroyed; the HLS fault stream multiplies the rebuild rate, so any per-teardown thread-handle that is not released accumulates quickly.
+- The producer teardown itself runs on a **detached** `std::thread` in `~ffmpeg_producer` (`ffmpeg_producer.cpp`); `detach()` releases that handle, so it is part of the churn but not itself the leak.
+- **Next step to name the exact line:** audit the reconnect/abnormal-EOF teardown path for a thread whose handle is not `join()`ed/`detach()`ed/closed (candidate sites: the avcodec multi-thread decoder teardown on the error/reconnect path, the `Decoder` worker join, and the `Input` read thread join). Setting `configuration.ffmpeg.producer.threads = 1` and re-measuring would confirm whether the leaked handles are the avcodec frame-thread pool (rate should drop ~N-fold).
+
+### 8.4 What this means for the fixes
+
+- The **ffmpeg decoder-reuse fix (PR #1756, "Fix 4b")** flushes decoders **in place** across a loop-wrap/seek instead of `decoders_.clear()` + recreate. Because the HLS leak rides on the per-loop/per-reconnect rebuild, this fix is expected to **substantially reduce the thread-handle accumulation rate**, not merely the heap-race frequency — a more direct benefit than §7.3 credited it with.
+- This finding gives the fixes a **concrete, measurable validation signal** that §7 lacked: under an HLS reconnect soak, the **unfixed build leaks Thread handles (~1,000/min) and the fixed build should hold them flat** — a bench A/B that *is* achievable, unlike the heap crash itself.
+- It also independently corroborates **#1549's "more frequent with HLS"** observation with a mechanism: HLS reconnects hammer the exact teardown/rebuild path implicated in the corruption.
+
+**Limitation:** the thread-handle leak is established; whether it is the *same* defect that ultimately trips the `0xC0000374` heap corruption, or a parallel symptom of the same over-exercised teardown path, is not yet proven. The exit-on-first-death harness remains armed to capture a full-heap dump if the HLS soak trips the crash.
