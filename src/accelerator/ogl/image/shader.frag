@@ -157,6 +157,10 @@ uniform float     lut3d_strength;
 uniform bool      hue_curve_enable;
 uniform sampler2D hue_curve_tex;  // 256x1 RGBA32F: R=HvH, G=HvS, B=HvL, A=SvS
 
+// Per-pixel projection blend mask (multiplied into the final colour in output space)
+uniform bool      blend_mask_enable;
+uniform sampler2D blend_mask_tex;  // RGB intensity map, sampled at output screen UV
+
 // Sharpening (unsharp mask)
 uniform bool  sharpen_enable;
 uniform float sharpen_amount;
@@ -1804,6 +1808,12 @@ void main()
         if (edge_blend_bottom > 0.0)
             blend_alpha *= pow(clamp((1.0 - uv_blend.y) / edge_blend_bottom, 0.0, 1.0), edge_blend_gamma);
         col *= blend_alpha;
+    }
+
+    // Per-pixel projection blend mask (arbitrary soft-edge overlap multiply)
+    if (blend_mask_enable) {
+        vec2 uv_mask = TexCoord.st / TexCoord.q;
+        col.rgb *= texture(blend_mask_tex, uv_mask).rgb;
     }
 
 	fragColor = col.bgra;

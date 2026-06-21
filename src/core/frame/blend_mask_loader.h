@@ -15,34 +15,30 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with CasparCG. If not, see <http://www.gnu.org/licenses/>.
- *
- * Author: Robert Nagy, ronag89@gmail.com
  */
 
 #pragma once
 
-#include <common/memory.h>
+#include "frame_transform.h"
 
-namespace caspar { namespace accelerator { namespace ogl {
+#include <memory>
+#include <string>
 
-class shader;
-class device;
+namespace caspar { namespace core {
 
-enum class texture_id
-{
-    plane0 = 0,
-    plane1,
-    plane2,
-    plane3,
-    local_key,
-    layer_key,
-    background,
-    curve_lut_tex,
-    lut3d_tex,
-    hue_curve_tex,
-    blend_mask_tex
-};
+/**
+ * Load a per-pixel projection blend mask from a PNG file.
+ *
+ * The image is decoded to RGB float values in the 0..1 range and stored in a
+ * blend_mask_data buffer.  The mask is sampled in the layer's output screen
+ * space and multiplied into the final colour, enabling arbitrary soft-edge
+ * overlap masks for multi-projector blending.
+ *
+ * @param filename  Path to a .png file.
+ * @return shared blend_mask_data on success.
+ * @throws file_not_found     if the file does not exist.
+ * @throws file_read_error    if the PNG could not be decoded.
+ */
+std::shared_ptr<blend_mask_data> load_blend_mask(const std::wstring& filename);
 
-std::shared_ptr<shader> get_image_shader(const spl::shared_ptr<device>& ogl);
-
-}}} // namespace caspar::accelerator::ogl
+}} // namespace caspar::core

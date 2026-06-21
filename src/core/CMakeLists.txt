@@ -19,6 +19,7 @@ set(SOURCES
 		diagnostics/osd_graph.cpp
 
 		frame/draw_frame.cpp
+		frame/blend_mask_loader.cpp
 		frame/frame.cpp
 		frame/frame_transform.cpp
 		frame/geometry.cpp
@@ -58,6 +59,7 @@ set(HEADERS
 		frame/frame_transform.h
 		frame/frame_visitor.h
 		frame/geometry.h
+		frame/blend_mask_loader.h
 		frame/mesh_loader.h
 		frame/pixel_format.h
 		frame/write_frame.h

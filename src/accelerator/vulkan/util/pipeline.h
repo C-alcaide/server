@@ -39,7 +39,7 @@ class pipeline final
                       uint32_t                             coords_count,
                       uint32_t                             vertex_buffer_offset,
                       const uniform_block&                 params,
-                      const std::array<vk::ImageView, 10>& textures);
+                      const std::array<vk::ImageView, 11>& textures);
     vk::Pipeline id() const;
 
   private:

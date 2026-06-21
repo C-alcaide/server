@@ -179,6 +179,9 @@ struct image_kernel::impl
 
     vk_lut_texture          curve_lut_tex_{};
 
+    vk_lut_texture               blend_mask_tex_{};
+    const core::blend_mask_data* blend_mask_data_ptr_ = nullptr;  // tracks which data is uploaded
+
     lut_views               current_lut_views_{};
     // ─────────────────────────────────────────────────────────────────────
 
@@ -348,6 +351,7 @@ struct image_kernel::impl
         lut3d_tex_.destroy();
         hue_curve_tex_.destroy();
         curve_lut_tex_.destroy();
+        blend_mask_tex_.destroy();
 
         for (auto& frame : frames_) {
             if (frame.buffer) {
@@ -548,6 +552,60 @@ struct image_kernel::impl
         tex.mapped = vk_device.mapMemory(tex.staging_mem, 0, byte_size);
     }
 
+    // Like create_lut_image_2d but with an explicit height (used for the
+    // arbitrary-resolution projection blend mask).
+    void create_image_2d_wh(vk_lut_texture& tex, uint32_t width, uint32_t height, vk::Format format,
+                            vk::DeviceSize byte_size)
+    {
+        auto vk_device = vulkan_->getVkDevice();
+        tex.destroy();
+        tex.device = vk_device;
+        tex.data_size = byte_size;
+
+        vk::ImageCreateInfo img_info{};
+        img_info.imageType     = vk::ImageType::e2D;
+        img_info.format        = format;
+        img_info.extent        = vk::Extent3D(width, height, 1);
+        img_info.mipLevels     = 1;
+        img_info.arrayLayers   = 1;
+        img_info.samples       = vk::SampleCountFlagBits::e1;
+        img_info.tiling        = vk::ImageTiling::eOptimal;
+        img_info.usage         = vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eTransferDst;
+        img_info.sharingMode   = vk::SharingMode::eExclusive;
+        img_info.initialLayout = vk::ImageLayout::eUndefined;
+        tex.image = vk_device.createImage(img_info);
+
+        auto mem_req = vk_device.getImageMemoryRequirements(tex.image);
+        vk::MemoryAllocateInfo alloc{};
+        alloc.allocationSize  = mem_req.size;
+        alloc.memoryTypeIndex = findDedicatedMemoryType(mem_req.memoryTypeBits,
+                                                        vk::MemoryPropertyFlagBits::eDeviceLocal);
+        tex.memory = vk_device.allocateMemory(alloc);
+        vk_device.bindImageMemory(tex.image, tex.memory, 0);
+
+        vk::ImageViewCreateInfo view_info{};
+        view_info.image    = tex.image;
+        view_info.viewType = vk::ImageViewType::e2D;
+        view_info.format   = format;
+        view_info.subresourceRange = vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1);
+        tex.view = vk_device.createImageView(view_info);
+
+        vk::BufferCreateInfo buf_info{};
+        buf_info.size  = byte_size;
+        buf_info.usage = vk::BufferUsageFlagBits::eTransferSrc;
+        tex.staging    = vk_device.createBuffer(buf_info);
+
+        auto buf_req = vk_device.getBufferMemoryRequirements(tex.staging);
+        vk::MemoryAllocateInfo buf_alloc{};
+        buf_alloc.allocationSize  = buf_req.size;
+        buf_alloc.memoryTypeIndex = findDedicatedMemoryType(buf_req.memoryTypeBits,
+                                                             vk::MemoryPropertyFlagBits::eHostVisible |
+                                                             vk::MemoryPropertyFlagBits::eHostCoherent);
+        tex.staging_mem = vk_device.allocateMemory(buf_alloc);
+        vk_device.bindBufferMemory(tex.staging, tex.staging_mem, 0);
+        tex.mapped = vk_device.mapMemory(tex.staging_mem, 0, byte_size);
+    }
+
     void upload_lut_data(vk_lut_texture& tex, const void* data, vk::CommandBuffer cmd,
                          uint32_t width, uint32_t height, uint32_t depth_z)
     {
@@ -590,6 +648,9 @@ struct image_kernel::impl
     bool hue_curve_upload_pending_ = false;
     bool curve_lut_upload_pending_ = false;
     std::vector<float> curve_lut_pending_data_;
+    bool     blend_mask_upload_pending_ = false;
+    uint32_t blend_mask_pending_w_      = 0;
+    uint32_t blend_mask_pending_h_      = 0;
 
     /// Prepare LUT textures from draw_params transforms.
     /// Called during draw() — writes staging buffers and sets pending flags.
@@ -666,6 +727,37 @@ struct image_kernel::impl
         } else {
             current_lut_views_.curve_lut = nullptr;
         }
+
+        // ── Blend Mask ───────────────────────────────────────────────────
+        const auto& mask = transforms.image_transform.blend_mask;
+        if (mask && mask->width > 0 && mask->height > 0 && !mask->data.empty()) {
+            if (mask.get() != blend_mask_data_ptr_) {
+                uint32_t w = static_cast<uint32_t>(mask->width);
+                uint32_t h = static_cast<uint32_t>(mask->height);
+                vk::DeviceSize byte_size = static_cast<vk::DeviceSize>(w) * h * 4 * sizeof(float);
+                if (!blend_mask_tex_.image || blend_mask_tex_.data_size != byte_size) {
+                    create_image_2d_wh(blend_mask_tex_, w, h, vk::Format::eR32G32B32A32Sfloat, byte_size);
+                }
+                // Pad RGB → RGBA (source is w*h*3 floats, staging is w*h*4 floats)
+                auto*        dst   = static_cast<float*>(blend_mask_tex_.mapped);
+                const float* src   = mask->data.data();
+                uint32_t     count = w * h;
+                for (uint32_t i = 0; i < count; ++i) {
+                    dst[i * 4 + 0] = src[i * 3 + 0];
+                    dst[i * 4 + 1] = src[i * 3 + 1];
+                    dst[i * 4 + 2] = src[i * 3 + 2];
+                    dst[i * 4 + 3] = 1.0f;
+                }
+                blend_mask_data_ptr_       = mask.get();
+                blend_mask_upload_pending_ = true;
+                blend_mask_pending_w_      = w;
+                blend_mask_pending_h_      = h;
+            }
+            current_lut_views_.blend_mask = blend_mask_tex_.view;
+        } else {
+            current_lut_views_.blend_mask = nullptr;
+            if (!mask) blend_mask_data_ptr_ = nullptr;
+        }
     }
 
     /// Record GPU upload commands for any LUTs that were prepared.
@@ -683,6 +775,10 @@ struct image_kernel::impl
         if (curve_lut_upload_pending_) {
             upload_lut_data(curve_lut_tex_, nullptr, cmd, 256, 1, 1);
             curve_lut_upload_pending_ = false;
+        }
+        if (blend_mask_upload_pending_) {
+            upload_lut_data(blend_mask_tex_, nullptr, cmd, blend_mask_pending_w_, blend_mask_pending_h_, 1);
+            blend_mask_upload_pending_ = false;
         }
     }
     // ─────────────────────────────────────────────────────────────────────
@@ -893,6 +989,14 @@ struct image_kernel::impl
                 uniforms.edge_blend_top    = ebt;
                 uniforms.edge_blend_bottom = ebb;
                 uniforms.edge_blend_gamma  = std::clamp(static_cast<float>(transforms.image_transform.projection.edge_blend_gamma), 0.5f, 4.0f);
+            }
+        }
+
+        // ── Projection blend mask ─────────────────────────────────────
+        {
+            const auto& mask = transforms.image_transform.blend_mask;
+            if (mask && mask->width > 0 && mask->height > 0 && !mask->data.empty()) {
+                uniforms.flags2 |= static_cast<uint32_t>(shader_flags2::blend_mask);
             }
         }
 

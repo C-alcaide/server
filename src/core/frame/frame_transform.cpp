@@ -182,6 +182,9 @@ image_transform image_transform::tween(double                 time,
                                                          static_cast<double>(dest.lut3d_strength), duration, tween));
     result.hue_curves     = dest.hue_curves;  // snap to destination
 
+    // Per-pixel projection blend mask — snap to destination (can't interpolate image data)
+    result.blend_mask     = dest.blend_mask;
+
     // Sharpening
     result.sharpen_amount = do_tween(time, source.sharpen_amount, dest.sharpen_amount, duration, tween);
     result.sharpen_radius = do_tween(time, source.sharpen_radius, dest.sharpen_radius, duration, tween);
@@ -357,6 +360,7 @@ bool operator==(const image_transform& lhs, const image_transform& rhs)
                lhs.lut3d.get() == rhs.lut3d.get() &&
                eq(static_cast<double>(lhs.lut3d_strength), static_cast<double>(rhs.lut3d_strength)) &&
                lhs.hue_curves.get() == rhs.hue_curves.get() &&
+               lhs.blend_mask.get() == rhs.blend_mask.get() &&
                eq(lhs.sharpen_amount, rhs.sharpen_amount) &&
                eq(lhs.sharpen_radius, rhs.sharpen_radius) &&
                eq(lhs.grain_intensity, rhs.grain_intensity) &&

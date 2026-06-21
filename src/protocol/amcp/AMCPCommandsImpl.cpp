@@ -51,6 +51,7 @@
 #include <core/frame/frame_transform.h>
 #include <core/frame/frame_visitor.h>
 #include <core/frame/mesh_loader.h>
+#include <core/frame/blend_mask_loader.h>
 #include <core/frame/write_frame.h>
 #include <core/mixer/mixer.h>
 
@@ -2032,6 +2033,73 @@ std::future<std::wstring> mixer_mesh_command(command_context& ctx)
         return make_ready_future<std::wstring>(L"202 MIXER OK\r\n");
     } catch (const std::exception& e) {
         CASPAR_LOG(error) << L"[MIXER MESH] " << e.what();
+        return make_ready_future<std::wstring>(L"502 MIXER FAILED\r\n");
+    }
+}
+
+std::future<std::wstring> mixer_projection_blend_mask_command(command_context& ctx)
+{
+    // Query mode: MIXER ch-layer PROJECTION_BLEND_MASK
+    if (ctx.parameters.empty()) {
+        auto transform2 = get_current_transform(ctx).share();
+        return std::async(std::launch::deferred, [transform2]() -> std::wstring {
+            auto& mask = transform2.get().image_transform.blend_mask;
+            if (mask && mask->width > 0 && mask->height > 0) {
+                return L"201 MIXER OK\r\nMASK " + std::to_wstring(mask->width) + L"x" +
+                       std::to_wstring(mask->height) + L"\r\n";
+            }
+            return L"201 MIXER OK\r\nNONE\r\n";
+        });
+    }
+
+    // Clear mode: MIXER ch-layer PROJECTION_BLEND_MASK NONE
+    if (boost::iequals(ctx.parameters.at(0), L"NONE")) {
+        transforms_applier transforms(ctx);
+        transforms.add(stage::transform_tuple_t(
+            ctx.layer_index(),
+            [](frame_transform transform) -> frame_transform {
+                transform.image_transform.blend_mask.reset();
+                return transform;
+            },
+            0,
+            L"linear"));
+        transforms.apply();
+
+        return make_ready_future<std::wstring>(L"202 MIXER OK\r\n");
+    }
+
+    // Set mode: MIXER ch-layer PROJECTION_BLEND_MASK <path.png>
+    auto mask_path = ctx.parameters.at(0);
+
+    // Resolve path relative to media folder (prevent path traversal)
+    auto media_base = boost::filesystem::canonical(env::media_folder());
+    auto resolved   = media_base / mask_path;
+
+    if (!boost::filesystem::exists(resolved)) {
+        return make_ready_future<std::wstring>(L"404 MIXER ERROR\r\n");
+    }
+    resolved = boost::filesystem::canonical(resolved);
+    if (resolved.wstring().find(media_base.wstring()) != 0) {
+        return make_ready_future<std::wstring>(L"403 MIXER FORBIDDEN\r\n");
+    }
+
+    try {
+        auto mask = core::load_blend_mask(resolved.wstring());
+
+        transforms_applier transforms(ctx);
+        transforms.add(stage::transform_tuple_t(
+            ctx.layer_index(),
+            [mask = std::move(mask)](frame_transform transform) mutable -> frame_transform {
+                transform.image_transform.blend_mask = std::move(mask);
+                return transform;
+            },
+            0,
+            L"linear"));
+        transforms.apply();
+
+        return make_ready_future<std::wstring>(L"202 MIXER OK\r\n");
+    } catch (const std::exception& e) {
+        CASPAR_LOG(error) << L"[MIXER PROJECTION_BLEND_MASK] " << e.what();
         return make_ready_future<std::wstring>(L"502 MIXER FAILED\r\n");
     }
 }
@@ -4393,6 +4461,7 @@ void register_commands(std::shared_ptr<amcp_command_repository_wrapper>& repo)
     repo->register_channel_command(L"Mixer Commands", L"MIXER PROJECTION_FRUSTUM",    mixer_projection_frustum_command,    0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER PROJECTION_DISTORTION", mixer_projection_distortion_command, 0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER PROJECTION_BLEND",      mixer_projection_blend_command,      0);
+    repo->register_channel_command(L"Mixer Commands", L"MIXER PROJECTION_BLEND_MASK", mixer_projection_blend_mask_command, 0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER MESH",                  mixer_mesh_command,                  0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER FLIP",             mixer_flip_command,              0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER COLORSPACE",        mixer_colorspace_command,        0);

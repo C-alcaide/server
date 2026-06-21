@@ -153,6 +153,8 @@ struct image_kernel::impl
     GLuint                  lut3d_tex_id_     = 0;
     const core::lut3d_data* lut3d_data_ptr_   = nullptr;  // tracks which data is uploaded
     GLuint                  hue_curve_tex_id_ = 0;
+    GLuint                       blend_mask_tex_id_   = 0;
+    const core::blend_mask_data* blend_mask_data_ptr_ = nullptr;  // tracks which data is uploaded
     int                     frame_counter_    = 0;
 
     explicit impl(const spl::shared_ptr<device>& ogl)
@@ -176,6 +178,8 @@ struct image_kernel::impl
                 GL(glDeleteTextures(1, &lut3d_tex_id_));
             if (hue_curve_tex_id_)
                 GL(glDeleteTextures(1, &hue_curve_tex_id_));
+            if (blend_mask_tex_id_)
+                GL(glDeleteTextures(1, &blend_mask_tex_id_));
         });
     }
 
@@ -838,6 +842,35 @@ struct image_kernel::impl
                 shader_->set("hue_curve_tex", static_cast<int>(texture_id::hue_curve_tex));
             } else {
                 shader_->set("hue_curve_enable", false);
+            }
+        }
+
+        // Per-pixel projection blend mask
+        {
+            const auto& mask = transforms.image_transform.blend_mask;
+            if (mask && mask->width > 0 && mask->height > 0 && !mask->data.empty()) {
+                // Re-upload if the data pointer changed (new mask loaded)
+                if (mask.get() != blend_mask_data_ptr_) {
+                    if (blend_mask_tex_id_)
+                        GL(glDeleteTextures(1, &blend_mask_tex_id_));
+                    GL(glCreateTextures(GL_TEXTURE_2D, 1, &blend_mask_tex_id_));
+                    GL(glTextureStorage2D(blend_mask_tex_id_, 1, GL_RGB32F, mask->width, mask->height));
+                    GL(glTextureParameteri(blend_mask_tex_id_, GL_TEXTURE_MIN_FILTER, GL_LINEAR));
+                    GL(glTextureParameteri(blend_mask_tex_id_, GL_TEXTURE_MAG_FILTER, GL_LINEAR));
+                    GL(glTextureParameteri(blend_mask_tex_id_, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE));
+                    GL(glTextureParameteri(blend_mask_tex_id_, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE));
+                    GL(glTextureSubImage2D(blend_mask_tex_id_, 0, 0, 0,
+                                           mask->width, mask->height, GL_RGB, GL_FLOAT, mask->data.data()));
+                    blend_mask_data_ptr_ = mask.get();
+                }
+                GL(glBindTextureUnit(static_cast<int>(texture_id::blend_mask_tex), blend_mask_tex_id_));
+                shader_->set("blend_mask_enable", true);
+                shader_->set("blend_mask_tex", static_cast<int>(texture_id::blend_mask_tex));
+            } else {
+                shader_->set("blend_mask_enable", false);
+                if (blend_mask_tex_id_ && !mask) {
+                    blend_mask_data_ptr_ = nullptr;
+                }
             }
         }
 

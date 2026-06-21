@@ -47,6 +47,18 @@ struct hue_curve_data final
     std::vector<float> data;  // 256 * 4 floats (R=HvH, G=HvS, B=HvL, A=SvS)
 };
 
+// ---- Per-pixel projection blend mask (loaded from a PNG) -------------------
+// A grayscale or RGB intensity map sampled in output screen space and
+// multiplied into the final colour.  Enables arbitrary soft-edge overlap
+// masks for multi-projector blending (curved / irregular seams) that the
+// rectangular edge_blend bands cannot express.
+struct blend_mask_data final
+{
+    int                width  = 0;
+    int                height = 0;
+    std::vector<float> data;  // width*height*3 RGB float values (0..1)
+};
+
 struct chroma
 {
     enum class legacy_type
@@ -340,6 +352,9 @@ struct image_transform final
 
     // Hue-vs-Hue / Hue-vs-Sat curves (4-channel 256-entry LUT)
     std::shared_ptr<const hue_curve_data> hue_curves;  // nullptr = disabled
+
+    // Per-pixel projection blend mask (loaded from a PNG, sampled in output space)
+    std::shared_ptr<const blend_mask_data> blend_mask;  // nullptr = disabled
 
     // Per-channel RGB levels and tone curves
     core::rgb_levels  per_channel_levels;

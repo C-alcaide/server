@@ -77,9 +77,9 @@ void renderpass::draw(const draw_params& params)
         return;
     }
 
-    std::array<vk::ImageView, 10> textures = {attachment->view(),
+    std::array<vk::ImageView, 11> textures = {attachment->view(),
                                               nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
-                                              nullptr, nullptr, nullptr};
+                                              nullptr, nullptr, nullptr, nullptr};
 
     for (int n = 0; n < params.textures.size(); ++n) {
         textures[1+n] = params.textures[n]->view();
@@ -96,6 +96,7 @@ void renderpass::draw(const draw_params& params)
     textures[7] = luts.lut3d;
     textures[8] = luts.hue_curve;
     textures[9] = luts.curve_lut;
+    textures[10] = luts.blend_mask;
 
     layers_.push_back({
         attachment,

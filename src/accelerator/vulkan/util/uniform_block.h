@@ -254,6 +254,7 @@ enum class shader_flags2 : uint32_t
     none         = 0,
     output_bgra  = 1u << 0,  // Apply .bgra swizzle on fragment output (8-bit path)
     icvfx_enable = 1u << 1,  // Inner/outer frustum (in-camera VFX) blend active
+    blend_mask   = 1u << 2,  // Per-pixel projection blend mask multiply active
 };
 
 }}} // namespace caspar::accelerator::vulkan

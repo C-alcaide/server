@@ -148,18 +148,27 @@ struct pipeline::impl
         curveLutLayoutBinding.descriptorCount = 1;
         curveLutLayoutBinding.stageFlags      = vk::ShaderStageFlagBits::eFragment;
 
+        // Binding 6: blend mask sampler2D
+        vk::DescriptorSetLayoutBinding blendMaskLayoutBinding{};
+        blendMaskLayoutBinding.binding         = 6;
+        blendMaskLayoutBinding.descriptorType  = vk::DescriptorType::eCombinedImageSampler;
+        blendMaskLayoutBinding.descriptorCount = 1;
+        blendMaskLayoutBinding.stageFlags      = vk::ShaderStageFlagBits::eFragment;
+
         vk::DescriptorSetLayoutCreateInfo layoutInfo{};
         std::array bindings{texturesLayoutBinding, backgroundLayoutBinding, uboLayoutBinding,
-                            lut3dLayoutBinding, hueCurveLayoutBinding, curveLutLayoutBinding};
+                            lut3dLayoutBinding, hueCurveLayoutBinding, curveLutLayoutBinding,
+                            blendMaskLayoutBinding};
         layoutInfo.setBindings(bindings);
 
-        std::array<vk::DescriptorBindingFlags, 6> bindingFlags{
+        std::array<vk::DescriptorBindingFlags, 7> bindingFlags{
             vk::DescriptorBindingFlagBits::ePartiallyBound, // 0: textures
             vk::DescriptorBindingFlags{},                   // 1: background
             vk::DescriptorBindingFlags{},                   // 2: UBO
             vk::DescriptorBindingFlagBits::ePartiallyBound, // 3: lut3d
             vk::DescriptorBindingFlagBits::ePartiallyBound, // 4: hue curve
-            vk::DescriptorBindingFlagBits::ePartiallyBound  // 5: curve lut
+            vk::DescriptorBindingFlagBits::ePartiallyBound, // 5: curve lut
+            vk::DescriptorBindingFlagBits::ePartiallyBound  // 6: blend mask
         };
         vk::DescriptorSetLayoutBindingFlagsCreateInfo bindingFlagsInfo;
         bindingFlagsInfo.setBindingFlags(bindingFlags);
@@ -169,7 +178,7 @@ struct pipeline::impl
 
         // Create descriptor pool
         vk::DescriptorPoolSize samplerPoolSize(vk::DescriptorType::eCombinedImageSampler,
-                                               (BindlessTextureCount + 3) * DescriptorPoolSize);
+                                               (BindlessTextureCount + 4) * DescriptorPoolSize);
         vk::DescriptorPoolSize inputAttachmentPoolSize(vk::DescriptorType::eInputAttachment,
                                                        1 * DescriptorPoolSize);
         vk::DescriptorPoolSize uboPoolSize(vk::DescriptorType::eUniformBuffer,
@@ -361,11 +370,11 @@ struct pipeline::impl
     }
 
     vk::DescriptorSet acquire_descriptor_set(const uniform_block& params,
-                                              const std::array<vk::ImageView, 10>& textures)
+                                              const std::array<vk::ImageView, 11>& textures)
     {
         // C++ textures array layout:
         //   [0] = background attachment, [1..4] = planes, [5] = local_key, [6] = layer_key
-        //   [7] = lut3d, [8] = hue_curve, [9] = curve_lut
+        //   [7] = lut3d, [8] = hue_curve, [9] = curve_lut, [10] = blend_mask
 
         // Shader bindless textures[N] layout:
         //   [0..3] = planes, [4] = local_key, [5] = layer_key
@@ -473,6 +482,22 @@ struct pipeline::impl
             writes.push_back(curveLutWrite);
         }
 
+        // Binding 6: blend mask (if present)
+        vk::DescriptorImageInfo blendMaskInfo{};
+        if (textures[10]) {
+            blendMaskInfo.sampler     = textureSampler_;
+            blendMaskInfo.imageView   = textures[10];
+            blendMaskInfo.imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal;
+
+            vk::WriteDescriptorSet blendMaskWrite{};
+            blendMaskWrite.dstSet          = descriptorSet;
+            blendMaskWrite.dstBinding      = 6;
+            blendMaskWrite.dstArrayElement = 0;
+            blendMaskWrite.descriptorType  = vk::DescriptorType::eCombinedImageSampler;
+            blendMaskWrite.setImageInfo(blendMaskInfo);
+            writes.push_back(blendMaskWrite);
+        }
+
         device_.updateDescriptorSets(writes, nullptr);
 
         return descriptorSet;
@@ -483,7 +508,7 @@ struct pipeline::impl
               uint32_t                             coords_count,
               uint32_t                             vertex_buffer_offset,
               const uniform_block&                 params,
-              const std::array<vk::ImageView, 10>& textures)
+              const std::array<vk::ImageView, 11>& textures)
     {
         auto descriptorSet = acquire_descriptor_set(params, textures);
         commandBuffer.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline_);
@@ -525,7 +550,7 @@ void pipeline::draw(vk::CommandBuffer                    commandBuffer,
                     uint32_t                             coords_count,
                     uint32_t                             vertex_buffer_offset,
                     const uniform_block&                 params,
-                    const std::array<vk::ImageView, 10>& textures)
+                    const std::array<vk::ImageView, 11>& textures)
 {
     impl_->draw(commandBuffer, vertexBuffer, coords_count, vertex_buffer_offset, params, textures);
 }

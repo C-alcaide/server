@@ -36,12 +36,14 @@ namespace caspar { namespace accelerator { namespace vulkan {
 using draw_data = std::pair<std::vector<core::frame_geometry::coord>, uniform_block>;
 
 /// Optional LUT image views returned by the kernel alongside draw_data.
-/// These fill descriptor bindings 3 (3D LUT), 4 (hue curve), 5 (curve LUT).
+/// These fill descriptor bindings 3 (3D LUT), 4 (hue curve), 5 (curve LUT),
+/// 6 (blend mask).
 struct lut_views
 {
     vk::ImageView lut3d      = nullptr;
     vk::ImageView hue_curve  = nullptr;
     vk::ImageView curve_lut  = nullptr;
+    vk::ImageView blend_mask = nullptr;
 };
 struct frame_context
 {
@@ -78,7 +80,7 @@ class renderpass
         std::shared_ptr<class texture>           attachment;
         std::shared_ptr<class texture>           local_key_attachment;
         std::shared_ptr<class texture>           layer_key_attachment;
-        std::array<vk::ImageView, 10>            textures;
+        std::array<vk::ImageView, 11>            textures;
         std::vector<core::frame_geometry::coord> coords;
         uniform_block                            uniforms;
         uint32_t                                 vertex_buffer_offset = 0;
