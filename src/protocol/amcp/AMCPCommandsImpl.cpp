@@ -68,6 +68,7 @@
 #include <core/producer/transition/sting_producer.h>
 #include <core/producer/transition/transition_producer.h>
 #include <core/video_format.h>
+#include <core/video_channel.h>
 
 #include <protocol/osc/client.h>
 
@@ -2577,6 +2578,70 @@ std::future<std::wstring> mixer_lut3d_command(command_context& ctx)
     return make_ready_future<std::wstring>(L"202 MIXER OK\r\n");
 }
 
+// CALIBRATION <channel> LUT <file.cube> [strength]   load a channel-master LED calibration LUT
+// CALIBRATION <channel> CLEAR                         remove the calibration LUT
+// CALIBRATION <channel> BYPASS <0|1>                  temporarily bypass without unloading
+// CALIBRATION <channel> [INFO]                        query current state
+//
+// Unlike MIXER LUT3D (which is per-layer), CALIBRATION applies a single
+// display-to-display 3D LUT to the final composited channel output, so every
+// consumer (SDI/NDI/screen/file) receives the corrected pixels. It is intended
+// for whole LED-wall colour calibration (e.g. LUTs solved by OpenVPCal).
+std::future<std::wstring> calibration_command(command_context& ctx)
+{
+    auto image_mixer = ctx.channel.raw_channel->mixer().get_image_mixer();
+
+    // Query: CALIBRATION <ch>  or  CALIBRATION <ch> INFO
+    if (ctx.parameters.empty() || boost::iequals(ctx.parameters.at(0), L"INFO")) {
+        auto              st = image_mixer->get_calibration_state();
+        std::wstringstream result;
+        result << L"201 CALIBRATION OK\r\n";
+        result << (st.enabled ? L"ENABLED" : L"NONE");
+        if (st.enabled) {
+            result << L" SIZE " << st.size << L" STRENGTH " << st.strength << L" BYPASS "
+                   << (st.bypass ? 1 : 0);
+            if (!st.path.empty())
+                result << L" PATH " << st.path;
+        }
+        result << L"\r\n";
+        return make_ready_future<std::wstring>(result.str());
+    }
+
+    if (boost::iequals(ctx.parameters.at(0), L"CLEAR")) {
+        image_mixer->set_calibration_lut(nullptr, 1.0f, L"");
+        return make_ready_future<std::wstring>(L"202 CALIBRATION OK\r\n");
+    }
+
+    if (boost::iequals(ctx.parameters.at(0), L"BYPASS")) {
+        bool bypass = ctx.parameters.size() > 1 &&
+                      (ctx.parameters.at(1) == L"1" || boost::iequals(ctx.parameters.at(1), L"TRUE"));
+        image_mixer->set_calibration_bypass(bypass);
+        return make_ready_future<std::wstring>(L"202 CALIBRATION OK\r\n");
+    }
+
+    if (boost::iequals(ctx.parameters.at(0), L"LUT")) {
+        if (ctx.parameters.size() < 2)
+            return make_ready_future<std::wstring>(L"403 CALIBRATION ERROR\r\n");
+
+        // Resolve path: try as-is first, then relative to media folder
+        std::wstring path = ctx.parameters.at(1);
+        if (!std::ifstream(path).is_open()) {
+            auto media = caspar::env::media_folder();
+            path       = media + L"/" + path;
+        }
+
+        auto lut = parse_cube_file(path);
+        if (!lut)
+            return make_ready_future<std::wstring>(L"404 CALIBRATION LOAD FAILED\r\n");
+
+        float strength = ctx.parameters.size() > 2 ? std::stof(ctx.parameters[2]) : 1.0f;
+        image_mixer->set_calibration_lut(lut, strength, path);
+        return make_ready_future<std::wstring>(L"202 CALIBRATION OK\r\n");
+    }
+
+    return make_ready_future<std::wstring>(L"403 CALIBRATION ERROR\r\n");
+}
+
 // MIXER HUECURVE <HUE_HUE|HUE_SAT|HUE_LUM|SAT_SAT> <h1> <offset1> <h2> <offset2> ...
 // MIXER HUECURVE RESET
 // MIXER HUECURVE — query
@@ -4354,6 +4419,8 @@ void register_commands(std::shared_ptr<amcp_command_repository_wrapper>& repo)
     repo->register_channel_command(L"Mixer Commands", L"MIXER COMMIT", mixer_commit_command, 0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER CLEAR", mixer_clear_command, 0);
     repo->register_command(L"Mixer Commands", L"CHANNEL_GRID", channel_grid_command, 0);
+
+    repo->register_channel_command(L"Calibration Commands", L"CALIBRATION", calibration_command, 0);
 
     repo->register_channel_command(L"Previz Commands", L"PREVIZ SCENE",     previz_scene_command,     0);
     repo->register_channel_command(L"Previz Commands", L"PREVIZ MAP",       previz_map_command,       2);

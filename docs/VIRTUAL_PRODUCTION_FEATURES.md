@@ -2,7 +2,7 @@
 
 This feature set introduces GPU-accelerated 360° projection, curved screen compensation, real-time playback speed control, and layer mirroring to CasparCG Server, designed for virtual production, live events, and advanced broadcast workflows.
 
-For color management and grading features, see [COLOR_GRADING.md](COLOR_GRADING.md). For blur, sharpening, and film grain, see [IMAGE_EFFECTS.md](IMAGE_EFFECTS.md). For keyframe animation, see [KEYFRAMES.md](KEYFRAMES.md). For DMX lighting integration, see [DMX_LIGHTING.md](DMX_LIGHTING.md).
+For color management and grading features, see [COLOR_GRADING.md](COLOR_GRADING.md). For blur, sharpening, and film grain, see [IMAGE_EFFECTS.md](IMAGE_EFFECTS.md). For keyframe animation, see [KEYFRAMES.md](KEYFRAMES.md). For DMX lighting integration, see [DMX_LIGHTING.md](DMX_LIGHTING.md). For LED-wall color calibration, see [LED_CALIBRATION.md](LED_CALIBRATION.md).
 
 ## Table of Contents
 

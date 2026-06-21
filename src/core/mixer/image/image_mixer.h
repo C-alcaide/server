@@ -28,8 +28,22 @@
 
 #include <cstdint>
 #include <future>
+#include <memory>
+#include <string>
 
 namespace caspar { namespace core {
+
+struct lut3d_data; // fwd (defined in core/frame/frame_transform.h)
+
+/// Snapshot of the channel-master calibration LUT state, reported by INFO.
+struct calibration_lut_state
+{
+    bool         enabled  = false;   // a calibration LUT is loaded
+    bool         bypass   = false;   // temporarily bypassed (e.g. while shooting patches)
+    int          size     = 0;       // LUT cube dimension (e.g. 33)
+    float        strength = 1.0f;    // 0..1 blend factor
+    std::wstring path;               // source .cube path (for diagnostics)
+};
 
 class image_mixer
     : public frame_visitor
@@ -76,6 +90,22 @@ class image_mixer
         (void)auto_tone_map;
         (void)peak_luminance;
     }
+
+    /// Channel-master LED-wall calibration LUT. Applied to the final composited
+    /// frame (channel→output, post-grade) so every consumer receives the
+    /// corrected output. Pass nullptr to clear.
+    virtual void set_calibration_lut(std::shared_ptr<const lut3d_data> lut, float strength, const std::wstring& path)
+    {
+        (void)lut;
+        (void)strength;
+        (void)path;
+    }
+
+    /// Temporarily bypass the calibration LUT without unloading it (e.g. while
+    /// shooting calibration patches).
+    virtual void set_calibration_bypass(bool bypass) { (void)bypass; }
+
+    virtual calibration_lut_state get_calibration_state() const { return {}; }
 };
 
 }} // namespace caspar::core

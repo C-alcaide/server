@@ -93,6 +93,30 @@ class image_renderer
     int                  auto_tone_map         = 0;
     float                display_peak_luminance = 1000.0f;
 
+    // Channel-master LED-wall calibration LUT, applied as a final full-screen
+    // pass over the composited frame (output-agnostic — every consumer sees it).
+    std::shared_ptr<const core::lut3d_data> calibration_lut_;
+    float                                   calibration_strength_ = 1.0f;
+    bool                                    calibration_bypass_   = false;
+
+    void set_calibration_lut(std::shared_ptr<const core::lut3d_data> lut, float strength)
+    {
+        calibration_lut_      = std::move(lut);
+        calibration_strength_ = strength;
+        // Invalidate the still-frame cache so the new LUT takes effect immediately.
+        prev_fingerprint_.clear();
+        cached_texture_.reset();
+        cached_cpu_ = {};
+    }
+
+    void set_calibration_bypass(bool bypass)
+    {
+        calibration_bypass_ = bypass;
+        prev_fingerprint_.clear();
+        cached_texture_.reset();
+        cached_cpu_ = {};
+    }
+
     explicit image_renderer(const spl::shared_ptr<device>& ogl, const size_t max_frame_size, common::bit_depth depth)
         : ogl_(ogl)
         , kernel_(ogl_)
@@ -155,11 +179,24 @@ class image_renderer
 
         auto needs_cpu = cpu_readback_needed_.load(std::memory_order_relaxed);
 
+        // Snapshot the calibration LUT state for this tick (stable across the
+        // async render).
+        auto cal_lut      = calibration_lut_;
+        auto cal_strength = calibration_strength_;
+        auto cal_bypass   = calibration_bypass_;
+
         auto f = std::move(
             ogl_->dispatch_async([=, layers = std::move(layers)]() mutable
                                  -> std::tuple<std::shared_future<array<const std::uint8_t>>, std::shared_ptr<core::texture>> {
                 auto target_texture = ogl_->create_texture(format_desc.width, format_desc.height, 4, depth_);
                 draw(target_texture, std::move(layers), format_desc);
+
+                // Channel-master LED-wall calibration LUT (final full-screen pass).
+                if (cal_lut && !cal_bypass && cal_lut->size > 0) {
+                    auto cal_texture = ogl_->create_texture(format_desc.width, format_desc.height, 4, depth_);
+                    apply_calibration_lut(target_texture, cal_texture, format_desc, cal_lut, cal_strength);
+                    target_texture = cal_texture;
+                }
 
                 if (!needs_cpu) {
                     auto empty = make_ready_future<array<const std::uint8_t>>(
@@ -319,6 +356,41 @@ class image_renderer
 
         kernel_.draw(std::move(draw_params));
     }
+
+    // Channel-master calibration LUT: full-screen pass that copies the composited
+    // frame through a 3D LUT into a fresh texture. The source is tagged with the
+    // channel's output colour space so the kernel performs NO colour conversion —
+    // only the calibration LUT runs (display-to-display correction).
+    void apply_calibration_lut(std::shared_ptr<texture>&                      source_texture,
+                               std::shared_ptr<texture>&                      target_texture,
+                               const core::video_format_desc&                 format_desc,
+                               const std::shared_ptr<const core::lut3d_data>& lut,
+                               float                                          strength)
+    {
+        if (!source_texture || !lut)
+            return;
+
+        draw_params draw_params;
+        draw_params.target_width    = format_desc.square_width;
+        draw_params.target_height   = format_desc.square_height;
+        draw_params.pix_desc.format = core::pixel_format::bgra;
+        draw_params.pix_desc.planes = {core::pixel_format_desc::plane(
+            source_texture->width(), source_texture->height(), 4, source_texture->depth())};
+        draw_params.pix_desc.color_space    = target_color_space;
+        draw_params.pix_desc.color_transfer = target_color_transfer;
+        draw_params.target_color_space      = target_color_space;
+        draw_params.target_color_transfer   = target_color_transfer;
+        draw_params.auto_color_convert      = false;
+        draw_params.auto_tone_map           = 0;
+        draw_params.textures                = {spl::make_shared_ptr(source_texture)};
+        draw_params.blend_mode              = core::blend_mode::normal;
+        draw_params.background              = target_texture;
+        draw_params.geometry               = core::frame_geometry::get_default();
+        draw_params.transforms.image_transform.lut3d          = lut;
+        draw_params.transforms.image_transform.lut3d_strength = strength;
+
+        kernel_.draw(std::move(draw_params));
+    }
 };
 
 struct image_mixer::impl
@@ -359,6 +431,34 @@ struct image_mixer::impl
         renderer_.auto_color_convert    = auto_convert;
         renderer_.auto_tone_map         = auto_tone_map;
         renderer_.display_peak_luminance = peak_luminance;
+    }
+
+    std::wstring calibration_path_;
+
+    void set_calibration_lut(std::shared_ptr<const core::lut3d_data> lut, float strength, const std::wstring& path)
+    {
+        CASPAR_LOG(info) << L"[ogl_mixer] set_calibration_lut size="
+                         << (lut ? lut->size : 0) << L" strength=" << strength
+                         << L" path=" << path;
+        renderer_.set_calibration_lut(std::move(lut), strength);
+        calibration_path_ = path;
+    }
+
+    void set_calibration_bypass(bool bypass)
+    {
+        CASPAR_LOG(info) << L"[ogl_mixer] set_calibration_bypass " << bypass;
+        renderer_.set_calibration_bypass(bypass);
+    }
+
+    core::calibration_lut_state get_calibration_state() const
+    {
+        core::calibration_lut_state s;
+        s.enabled  = static_cast<bool>(renderer_.calibration_lut_) && renderer_.calibration_lut_->size > 0;
+        s.bypass   = renderer_.calibration_bypass_;
+        s.size     = renderer_.calibration_lut_ ? renderer_.calibration_lut_->size : 0;
+        s.strength = renderer_.calibration_strength_;
+        s.path     = calibration_path_;
+        return s;
     }
 
     void push(const core::frame_transform& transform)
@@ -594,5 +694,14 @@ void image_mixer::set_target_color(core::color_space cs, core::color_transfer ct
 {
     impl_->set_target_color(cs, ct, auto_convert, auto_tone_map, peak_luminance);
 }
+
+void image_mixer::set_calibration_lut(std::shared_ptr<const core::lut3d_data> lut, float strength, const std::wstring& path)
+{
+    impl_->set_calibration_lut(std::move(lut), strength, path);
+}
+
+void image_mixer::set_calibration_bypass(bool bypass) { impl_->set_calibration_bypass(bypass); }
+
+core::calibration_lut_state image_mixer::get_calibration_state() const { return impl_->get_calibration_state(); }
 
 }}} // namespace caspar::accelerator::ogl
