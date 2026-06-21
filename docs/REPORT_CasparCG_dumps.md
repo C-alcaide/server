@@ -11,6 +11,10 @@
 
 > **Update 2026-06-20:** follow-up reproduction testing has refined the thread-count interpretation below. The 548–603 thread figure is now understood to be **largely config-confounded** (it scales with CPU cores × concurrent producers × resolution) and is **not, by itself, evidence of a leak** — controlled testing with **local-file** churn showed threads, memory, and handles all reclaim cleanly. **However, a later test that injected network faults into an HLS source produced the first positive leak signal of the investigation: a monotonic accumulation of OS *thread handles* (~1,000/min) under HLS reconnect churn — see Addendum §8.** This corroborates upstream issue [#1549](https://github.com/CasparCG/server/issues/1549) ("more frequent with HLS"). The decisive heap-corruption evidence remains the **identical fault signature and identical culprit frame** across the two crashes. See the dated **Addendum (§7, §8)** for the full follow-up analysis and what it means for the proposed fixes.
 
+> **RESOLVED 2026-06-21 — handle leak root-caused and fixed (see Addendum §9).** The thread-handle leak of §8 is **not** an ffmpeg teardown bug. It is CasparCG's own **`boost::stacktrace`** (MSVC **dbgeng/windbg** backend): every thrown exception captures a stack trace, and every `CASPAR_LOG_CURRENT_EXCEPTION` symbolizes it via dbgeng, which **attaches to the process and leaks a handle to every thread** on each call. The leak is **source-agnostic** — it scales with the *logged-exception rate*, not with HLS specifically; HLS was merely the easiest way to generate a fast exception storm on the bench. Any reconnect-prone network protocol (RTMP/RTSP/SRT/UDP/NDI/…) or even local-file error path drives the same leak, just at a lower rate. The §8.3 "decoder-rebuild" attribution and the `threads=1` lead were **measurement artifacts** (dbgeng was duplicating handles to the decode threads). Fix = stop capturing/symbolizing per-exception stacks (two files: `src/common/except.h`, `src/common/log.h`); validated **flat** under an 8-min faulty-HLS soak with full multi-threaded decode. Crash dumps are unaffected.
+>
+> **⚠️ This does NOT explain the 2026-06-17 production crashes.** Those occurred on a **local-file, stream-free** server — exactly the §7 condition where the leak was measured at **zero net drift**. The production crashes are `0xC0000374` **heap corruption** (a cross-module bad free, §1–§4), a **different mechanism** from a handle leak, and they remain **open and unproven**. The §8/§9 leak and the production crashes are most likely **two separate problems**; do not treat this fix as a fix for the local-file crashes.
+
 ---
 
 ## 1. Executive summary
@@ -181,3 +185,45 @@ The leak rides on the **decoder/demuxer teardown-and-rebuild rate**, which the H
 - It also independently corroborates **#1549's "more frequent with HLS"** observation with a mechanism: HLS reconnects hammer the exact teardown/rebuild path implicated in the corruption.
 
 **Limitation:** the thread-handle leak is established; whether it is the *same* defect that ultimately trips the `0xC0000374` heap corruption, or a parallel symptom of the same over-exercised teardown path, is not yet proven. The exit-on-first-death harness remains armed to capture a full-heap dump if the HLS soak trips the crash.
+
+---
+
+## 9. Addendum — HLS thread-handle leak root-caused and fixed (2026-06-21)
+
+The §8 leak was tracked to its source. It is **not** in the ffmpeg producer at all — it is in CasparCG's exception/logging machinery.
+
+### 9.1 Root cause: `boost::stacktrace` over the dbgeng backend
+
+- `CASPAR_THROW_EXCEPTION` (`src/common/except.h`) attaches a `boost::stacktrace::stacktrace()` to **every** thrown exception (cheap — captures return addresses only).
+- `CASPAR_LOG_CURRENT_EXCEPTION` (`src/common/log.h`) then **symbolizes** that trace via boost's default MSVC backend, **dbgeng/dbghelp** (`windbg`). Each symbolization call **attaches the debug engine to the process and opens a handle to every thread** in it — and those per-thread handles are **never released**.
+- The HLS fault stream is a high-rate exception generator: each truncated read / 503 / timeout → an ffmpeg error → `CASPAR_THROW_EXCEPTION` → logged → one dbgeng walk → one leaked handle **per live thread**. With ~380 live threads and a steady throw rate this produces exactly the **~1,000 handles/min** of §8.2.
+
+### 9.2 How the §8.3 attribution was corrected
+
+The earlier "decoder-rebuild / `threads=1`" lead was a **confound**: the leaked handles were dbgeng *duplicating* a handle to every thread, so reducing the avcodec frame-thread count (`threads=1`) only reduced the *number of threads dbgeng cloned a handle to* — it never touched the real leak. Distinct-TID accounting (separating duplicate-handle inflation from genuine dead-thread leaks) showed the leaked handles pointed at **live** threads across **all** modules evenly — the signature of a debugger walking the whole process, not an ffmpeg teardown. Confirming experiments:
+
+- `dbgeng.dll` + `dbghelp.dll` were loaded; **`CLEAR`-all-channels stopped handle growth dead** (no throws ⇒ no symbolization).
+- A `BOOST_STACKTRACE_USE_NOOP` rebuild **unloaded dbgeng** and held handles **flat** under identical faulty churn.
+
+### 9.3 The fix (validated)
+
+Two-file surgical change on branch `CasparVPV` (FFmpeg path left fully multi-threaded — no perf compromise):
+
+- **`src/common/except.h`** — stop attaching a stacktrace on throw (removed `stacktrace_info` capture from `CASPAR_THROW_EXCEPTION`).
+- **`src/common/log.h`** — `CASPAR_LOG_CURRENT_EXCEPTION` logs exception type + message + file:line only; no per-exception dbgeng symbolization. The `get_stack_trace()` helper is kept for *manual* diagnostic use.
+
+**Validation:** 8-minute faulty-HLS soak (5-channel churn, full multi-threaded decode + filter) → OS handles **flat** (~3,000, oscillating, no upward trend), **0** zombie threads. Compare §8.2's 2,987 → 8,615 climb on the unfixed binary under the same load. The crash-dump path (`main.cpp` `safe_dump_to/from_dump`) is **separate and untouched** — it captures addresses signal-safely and symbolizes once at next startup, so it does not leak and full backtraces are preserved.
+
+### 9.4 Scope of the fix (source-agnostic)
+
+The leak is in the **exception-logging path**, not in any specific producer, so the fix is **not HLS-specific**. The leak rate is `~(live thread count) × (logged-exception rate)`; HLS reconnect storms merely maximize the second term. The same leak is driven by **any** exception-generating source — RTMP/RTMPS, RTSP, HTTP progressive, UDP/RTP, SRT, MPEG-TS, NDI, and even local-file error paths (decode errors, missing/corrupt media) — only at a lower throw rate, hence slower accumulation. A clean local-file show throws few exceptions, which is why §7's local-file soak stayed flat.
+
+### 9.5 Relationship to the `0xC0000374` production crashes — **likely a separate problem**
+
+This fix resolves the **§8 thread-handle leak**, but it should **not** be assumed to fix the 2026-06-17 production crashes:
+
+- **Different environment.** Production ran **local files with no streams** — the §7 condition under which the handle leak measured **zero net drift**. A stream-free box does not generate the exception storm the leak depends on, so the leak was almost certainly *not* a significant factor there.
+- **Different mechanism.** The crashes are `0xC0000374` **heap corruption** (a cross-module bad free under the mixed `tbbmalloc_proxy` allocator, §1–§4). Handle exhaustion presents as failures to create threads/events/handles, **not** as a corrupted heap block. These are distinct failure modes.
+- **Status: open.** The heap-corruption root cause remains **unproven**; the `DumpType=2` full-heap capture (README) is still the way to close it.
+
+**Weak, unproven bridge:** *if* the production server threw exceptions at a low background rate (e.g. DeckLink reference-loss / device reconfiguration, or occasional local-media decode errors), each logged throw would still leak ~(live-thread-count) handles, accumulating slowly over a long show day. That path is **speculative**, would manifest as handle exhaustion rather than `0xC0000374`, and was **not** reproduced in §7. It is plausible — not established — that reduced per-exception overhead also slightly narrows the teardown race window. Treat the §1–§4 heap corruption as **still open**.
