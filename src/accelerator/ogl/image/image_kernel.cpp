@@ -326,11 +326,14 @@ struct image_kernel::impl
             shader_->set("view_fov",      static_cast<float>(transforms.image_transform.projection.fov));
             shader_->set("view_offset_x", static_cast<float>(transforms.image_transform.projection.offset_x));
             shader_->set("view_offset_y", static_cast<float>(transforms.image_transform.projection.offset_y));
-            shader_->set("frustum_h",     static_cast<float>(transforms.image_transform.projection.frustum_h));
-            shader_->set("frustum_v",     static_cast<float>(transforms.image_transform.projection.frustum_v));
+            shader_->set("frustum_h",     std::clamp(static_cast<float>(transforms.image_transform.projection.frustum_h), -1.0f, 1.0f));
+            shader_->set("frustum_v",     std::clamp(static_cast<float>(transforms.image_transform.projection.frustum_v), -1.0f, 1.0f));
             shader_->set("lens_k1",       static_cast<float>(transforms.image_transform.projection.lens_k1));
             shader_->set("lens_k2",       static_cast<float>(transforms.image_transform.projection.lens_k2));
             shader_->set("lens_k3",       static_cast<float>(transforms.image_transform.projection.lens_k3));
+            shader_->set("lens_p1",       static_cast<float>(transforms.image_transform.projection.lens_p1));
+            shader_->set("lens_p2",       static_cast<float>(transforms.image_transform.projection.lens_p2));
+            shader_->set("source_lens",   static_cast<int>(transforms.image_transform.projection.source_lens));
             shader_->set("aspect_ratio",  static_cast<float>(params.aspect_ratio));
         } else {
             shader_->set("is_360", false);
@@ -339,14 +342,38 @@ struct image_kernel::impl
         // Curved screen compensation — dispatched independently of 360 mode
         shader_->set("is_curved",         transforms.image_transform.projection.curve_enable);
         shader_->set("screen_curve_type", static_cast<int>(transforms.image_transform.projection.curve_type));
-        shader_->set("screen_arc",        static_cast<float>(transforms.image_transform.projection.screen_arc));
+        shader_->set("screen_arc",        std::clamp(static_cast<float>(transforms.image_transform.projection.screen_arc), -6.2831853f, 6.2831853f));
+        shader_->set("screen_arc_v",      std::clamp(static_cast<float>(transforms.image_transform.projection.screen_arc_v), -6.2831853f, 6.2831853f));
+        shader_->set("eye_distance",      std::max(static_cast<float>(transforms.image_transform.projection.eye_distance), 0.05f));
 
         // Soft-edge blending
-        shader_->set("edge_blend_left",   static_cast<float>(transforms.image_transform.projection.edge_blend_left));
-        shader_->set("edge_blend_right",  static_cast<float>(transforms.image_transform.projection.edge_blend_right));
-        shader_->set("edge_blend_top",    static_cast<float>(transforms.image_transform.projection.edge_blend_top));
-        shader_->set("edge_blend_bottom", static_cast<float>(transforms.image_transform.projection.edge_blend_bottom));
-        shader_->set("edge_blend_gamma",  static_cast<float>(transforms.image_transform.projection.edge_blend_gamma));
+        shader_->set("edge_blend_left",   std::clamp(static_cast<float>(transforms.image_transform.projection.edge_blend_left),   0.0f, 1.0f));
+        shader_->set("edge_blend_right",  std::clamp(static_cast<float>(transforms.image_transform.projection.edge_blend_right),  0.0f, 1.0f));
+        shader_->set("edge_blend_top",    std::clamp(static_cast<float>(transforms.image_transform.projection.edge_blend_top),    0.0f, 1.0f));
+        shader_->set("edge_blend_bottom", std::clamp(static_cast<float>(transforms.image_transform.projection.edge_blend_bottom), 0.0f, 1.0f));
+        shader_->set("edge_blend_gamma",  std::clamp(static_cast<float>(transforms.image_transform.projection.edge_blend_gamma),  0.5f, 4.0f));
+
+        // ICVFX inner/outer frustum
+        const auto& proj = transforms.image_transform.projection;
+        shader_->set("icvfx_enable",    proj.icvfx_enable);
+        if (proj.icvfx_enable) {
+            shader_->set("inner_yaw",       static_cast<float>(proj.inner_yaw));
+            shader_->set("inner_pitch",     static_cast<float>(proj.inner_pitch));
+            shader_->set("inner_roll",      static_cast<float>(proj.inner_roll));
+            shader_->set("inner_fov",       static_cast<float>(proj.inner_fov));
+            shader_->set("inner_offset_x",  static_cast<float>(proj.inner_offset_x));
+            shader_->set("inner_offset_y",  static_cast<float>(proj.inner_offset_y));
+            shader_->set("icvfx_q0x",       static_cast<float>(proj.icvfx_q0x));
+            shader_->set("icvfx_q0y",       static_cast<float>(proj.icvfx_q0y));
+            shader_->set("icvfx_q1x",       static_cast<float>(proj.icvfx_q1x));
+            shader_->set("icvfx_q1y",       static_cast<float>(proj.icvfx_q1y));
+            shader_->set("icvfx_q2x",       static_cast<float>(proj.icvfx_q2x));
+            shader_->set("icvfx_q2y",       static_cast<float>(proj.icvfx_q2y));
+            shader_->set("icvfx_q3x",       static_cast<float>(proj.icvfx_q3x));
+            shader_->set("icvfx_q3y",       static_cast<float>(proj.icvfx_q3y));
+            shader_->set("icvfx_feather",   std::max(static_cast<float>(proj.icvfx_feather), 1e-4f));
+            shader_->set("icvfx_outer_dim", std::clamp(static_cast<float>(proj.icvfx_outer_dim), 0.0f, 1.0f));
+        }
 
         if (transforms.image_transform.blur.enable) {
             shader_->set("blur_enable", true);

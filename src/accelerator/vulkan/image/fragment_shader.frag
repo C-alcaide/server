@@ -81,7 +81,27 @@ layout(scalar, binding = 2) uniform ParamsBlock {
     float shape_stroke_width;
     vec4  shape_stroke_color;
     uint  flags2;
-    float _padEnd[3];
+    float eye_distance;
+    int   source_lens;
+    float screen_arc_v;
+    float inner_yaw;
+    float inner_pitch;
+    float inner_roll;
+    float inner_fov;
+    float inner_offset_x;
+    float inner_offset_y;
+    float icvfx_q0x;
+    float icvfx_q0y;
+    float icvfx_q1x;
+    float icvfx_q1y;
+    float icvfx_q2x;
+    float icvfx_q2y;
+    float icvfx_q3x;
+    float icvfx_q3y;
+    float icvfx_feather;
+    float icvfx_outer_dim;
+    float lens_p1;
+    float lens_p2;
 };
 layout(binding = 3) uniform sampler3D lut3d_tex;
 layout(binding = 4) uniform sampler2D hue_curve_tex;
@@ -104,6 +124,7 @@ bool flag(uint f) { return (flags & f) != 0u; }
 
 // Extended flags (flags2)
 const uint F2_OUTPUT_BGRA=1u<<0;
+const uint F2_ICVFX=1u<<1;
 bool flag2(uint f) { return (flags2 & f) != 0u; }
 
 const float PI = 3.14159265359;
@@ -317,25 +338,40 @@ float grain_hash(vec2 p,int fs){vec3 p3=fract(vec3(p.xyx)*0.1031);p3+=dot(p3,p3.
 vec3 apply_grain(vec3 c,vec2 uv,float in_v,float sz,int fs){vec2 gu=uv*target_size/max(sz,0.5);float n=grain_hash(gu,fs)*2.0-1.0;float l=dot(c,vec3(0.2126,0.7152,0.0722));float r=smoothstep(0.0,0.15,l)*(1.0-smoothstep(0.8,1.0,l));return c+vec3(n*in_v*r);}
 
 // ── 360° / Curved ───────────────────────────────────────────────────────
-vec2 apply_curve_warp(vec2 uv){if(abs(screen_arc)<0.0001)return uv;vec2 ndc=uv*2.0-1.0;float ha=abs(screen_arc)*0.5;bool cv=screen_arc>=0.0;
-    if(screen_curve_type==1){ndc.x=cv?tan(ndc.x*ha)/tan(ha):atan(ndc.x*tan(ha))/ha;}
-    else if(screen_curve_type==2){float vh=ha/aspect_ratio;if(cv){ndc.x=tan(ndc.x*ha)/tan(ha);ndc.y=tan(ndc.y*vh)/tan(vh);}else{ndc.x=atan(ndc.x*tan(ha))/ha;ndc.y=atan(ndc.y*tan(vh))/vh;}}
-    else if(screen_curve_type==3){float r=length(ndc);if(r>0.0001){float wr=cv?tan(r*ha)/tan(ha):atan(r*tan(ha))/ha;ndc*=wr/r;}}
+// Physical viewing-angle warp for a curved DESTINATION screen.  k = eye_distance
+// (Dv/R); k=1 reduces to the classic tan(s*half_arc)/tan(half_arc) mapping.
+float curve_warp_axis(float s,float ha,float k){
+    float thm=clamp(atan(sin(ha),k-(1.0-cos(ha))),-1.55334,1.55334);
+    float th =clamp(atan(sin(s*ha),k-(1.0-cos(s*ha))),-1.55334,1.55334);
+    return tan(th)/tan(thm);}
+vec2 apply_curve_warp(vec2 uv){float ha=abs(screen_arc)*0.5;if(ha<0.0001)return uv;float k=max(eye_distance,0.05);float hav=abs(screen_arc_v)*0.5;vec2 ndc=uv*2.0-1.0;
+    if(screen_curve_type==1){ndc.x=curve_warp_axis(ndc.x,ha,k);}
+    else if(screen_curve_type==2){if(hav>0.0001){ndc.x=curve_warp_axis(ndc.x,ha,k);ndc.y=curve_warp_axis(ndc.y,hav,k);}else{float r=length(ndc);if(r>0.0001)ndc*=curve_warp_axis(r,ha,k)/r;}}
+    else if(screen_curve_type==3){float r=length(ndc);if(r>0.0001){float thm=min(ha,1.55334);ndc*=(tan(r*ha)/tan(thm))/r;}}
     return ndc*0.5+0.5;}
-vec2 get_equirect_uv(vec2 suv){
-    vec2 ndc=suv*2.0-1.0-vec2(view_offset_x,view_offset_y);
+vec2 get_equirect_uv_ex(vec2 suv,float p_yaw,float p_pitch,float p_roll,float p_fov,float p_offx,float p_offy){
+    vec2 ndc=suv*2.0-1.0-vec2(p_offx,p_offy);
     if(lens_k1!=0.0||lens_k2!=0.0||lens_k3!=0.0){float r2=dot(ndc,ndc);ndc*=1.0+lens_k1*r2+lens_k2*r2*r2+lens_k3*r2*r2*r2;}
-    float sc=tan(view_fov*0.5);vec3 dir;
-    if(screen_curve_type==1){float ha=screen_arc*0.5;dir=vec3(sin(ndc.x*ha),ndc.y*ha/aspect_ratio,-cos(ndc.x*ha));}
-    else if(screen_curve_type==2){float ha=screen_arc*0.5,vh=ha/aspect_ratio;float ah=ndc.x*ha,av=ndc.y*vh;dir=vec3(sin(ah)*cos(av),sin(av),-cos(ah)*cos(av));}
-    else if(screen_curve_type==3){float ha=screen_arc*0.5;float r=length(ndc);if(r<0.0001)dir=vec3(0,0,-1);else{float th=r*ha;dir=vec3(ndc.x/r*sin(th),ndc.y/r*sin(th),-cos(th));}}
+    if(lens_p1!=0.0||lens_p2!=0.0){float x=ndc.x,y=ndc.y,r2=x*x+y*y;ndc.x+=2.0*lens_p1*x*y+lens_p2*(r2+2.0*x*x);ndc.y+=lens_p1*(r2+2.0*y*y)+2.0*lens_p2*x*y;}
+    float sc=tan(p_fov*0.5);float hf=p_fov*0.5;vec3 dir;
+    if(source_lens==1){dir=vec3(sin(ndc.x*hf),ndc.y*hf/aspect_ratio,-cos(ndc.x*hf));}
+    else if(source_lens==2){float vh=hf/aspect_ratio;float ah=ndc.x*hf,av=ndc.y*vh;dir=vec3(sin(ah)*cos(av),sin(av),-cos(ah)*cos(av));}
+    else if(source_lens==3){float r=length(ndc);if(r<0.0001)dir=vec3(0,0,-1);else{float th=r*hf;dir=vec3(ndc.x/r*sin(th),ndc.y/r*sin(th),-cos(th));}}
     else{vec2 sh=ndc+vec2(frustum_h,frustum_v);dir=vec3(sh.x*sc*aspect_ratio,sh.y*sc,-1.0);}
     dir=normalize(dir);
-    float cr=cos(view_roll),sr=sin(view_roll);mat3 rz=mat3(cr,-sr,0,sr,cr,0,0,0,1);
-    float cp=cos(view_pitch),sp=sin(view_pitch);mat3 rx=mat3(1,0,0,0,cp,-sp,0,sp,cp);
-    float cy=cos(view_yaw),sy=sin(view_yaw);mat3 ry=mat3(cy,0,sy,0,1,0,-sy,0,cy);
+    float cr=cos(p_roll),sr=sin(p_roll);mat3 rz=mat3(cr,-sr,0,sr,cr,0,0,0,1);
+    float cp=cos(p_pitch),sp=sin(p_pitch);mat3 rx=mat3(1,0,0,0,cp,-sp,0,sp,cp);
+    float cy=cos(p_yaw),sy=sin(p_yaw);mat3 ry=mat3(cy,0,sy,0,1,0,-sy,0,cy);
     dir=ry*rx*rz*dir;
     return vec2(0.5+atan(dir.x,-dir.z)/(2.0*PI), 0.5+asin(dir.y)/PI);}
+vec2 get_equirect_uv(vec2 suv){return get_equirect_uv_ex(suv,view_yaw,view_pitch,view_roll,view_fov,view_offset_x,view_offset_y);}
+float icvfx_mask(vec2 suv){vec2 p=suv*2.0-1.0;vec2 c0=vec2(icvfx_q0x,icvfx_q0y),c1=vec2(icvfx_q1x,icvfx_q1y),c2=vec2(icvfx_q2x,icvfx_q2y),c3=vec2(icvfx_q3x,icvfx_q3y);
+    float area=(c0.x*c1.y-c1.x*c0.y)+(c1.x*c2.y-c2.x*c1.y)+(c2.x*c3.y-c3.x*c2.y)+(c3.x*c0.y-c0.x*c3.y);float w=(area>=0.0)?1.0:-1.0;float md=1e9;vec2 a,b,e,nm;
+    a=c0;b=c1;e=b-a;nm=vec2(-e.y,e.x);md=min(md,dot(p-a,nm)*w/max(length(nm),1e-6));
+    a=c1;b=c2;e=b-a;nm=vec2(-e.y,e.x);md=min(md,dot(p-a,nm)*w/max(length(nm),1e-6));
+    a=c2;b=c3;e=b-a;nm=vec2(-e.y,e.x);md=min(md,dot(p-a,nm)*w/max(length(nm),1e-6));
+    a=c3;b=c0;e=b-a;nm=vec2(-e.y,e.x);md=min(md,dot(p-a,nm)*w/max(length(nm),1e-6));
+    return clamp(md/max(icvfx_feather,1e-4),0.0,1.0);}
 
 // ── Pixel format ────────────────────────────────────────────────────────
 vec4 get_rgba_color(vec2 uv);
@@ -385,11 +421,18 @@ vec4 shape_fill(vec2 uv){if(shape_fill_type==0)return shape_color1;float t;if(sh
 // ── Main ────────────────────────────────────────────────────────────────
 void main(){
     vec2 buv=TexCoord.st/TexCoord.q;vec4 col;
-    if(flag(F_360)){vec2 uv=get_equirect_uv(buv);if(flag(F_FLIP_H))uv.s=1.0-uv.s;if(flag(F_FLIP_V))uv.t=1.0-uv.t;col=get_blurred_color(uv);}
-    else if(flag(F_CURVED)){vec2 uv=apply_curve_warp(buv);if(flag(F_FLIP_H))uv.s=1.0-uv.s;if(flag(F_FLIP_V))uv.t=1.0-uv.t;col=get_blurred_color(uv);}
-    else{vec2 uv=buv;if(flag(F_FLIP_H))uv.s=1.0-uv.s;if(flag(F_FLIP_V))uv.t=1.0-uv.t;col=get_blurred_color(uv);}
+    // Destination curve compensation composes with the source projection:
+    // warp the screen UV first, then sample the flat or 360 source.
+    vec2 vuv=flag(F_CURVED)?apply_curve_warp(buv):buv;
+    vec2 uv=flag(F_360)?get_equirect_uv(vuv):vuv;
+    if(flag(F_FLIP_H))uv.s=1.0-uv.s;if(flag(F_FLIP_V))uv.t=1.0-uv.t;
+    col=get_blurred_color(uv);
 
-    if(flag(F_SHARPEN)){vec2 su=buv;if(flag(F_360)){su=get_equirect_uv(buv);if(flag(F_FLIP_H))su.s=1.0-su.s;if(flag(F_FLIP_V))su.t=1.0-su.t;}else if(flag(F_CURVED)){su=apply_curve_warp(buv);if(flag(F_FLIP_H))su.s=1.0-su.s;if(flag(F_FLIP_V))su.t=1.0-su.t;}else{if(flag(F_FLIP_H))su.s=1.0-su.s;if(flag(F_FLIP_V))su.t=1.0-su.t;}col.rgb=apply_sharpen(su,col.rgb,sharpen_amount,sharpen_radius);}
+    // ICVFX inner/outer frustum: blend parallax-correct inner sample over the
+    // dimmed outer sample inside the feathered camera-frustum quad mask.
+    if(flag2(F2_ICVFX)){float m=icvfx_mask(buv);col.rgb*=icvfx_outer_dim;if(m>0.0){vec2 iuv=flag(F_360)?get_equirect_uv_ex(vuv,inner_yaw,inner_pitch,inner_roll,inner_fov,inner_offset_x,inner_offset_y):vuv;if(flag(F_FLIP_H))iuv.s=1.0-iuv.s;if(flag(F_FLIP_V))iuv.t=1.0-iuv.t;vec4 icol=get_blurred_color(iuv);col=mix(col,icol,m);}}
+
+    if(flag(F_SHARPEN)){col.rgb=apply_sharpen(uv,col.rgb,sharpen_amount,sharpen_radius);}
     if(flag(F_STRAIGHT_ALPHA))col.rgb*=col.a;
 
     if(flag(F_COLOR_GRADING)){col.rgb=apply_eotf(col.rgb,input_transfer);col.rgb*=exposure;col.rgb=ubo_mat3(input_to_working_c0,input_to_working_c1,input_to_working_c2)*col.rgb;if(flag(F_GAMUT_COMPRESS))col.rgb=apply_gamut_compress(col.rgb,gc_limit_pad.xyz);}

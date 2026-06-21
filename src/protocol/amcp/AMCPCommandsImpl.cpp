@@ -1732,28 +1732,121 @@ std::future<std::wstring> mixer_projection_curve_command(command_context& ctx)
             else if (proj.curve_type == core::screen_curve_type::fisheye)
                 type_str = L"FISHEYE";
             return L"201 MIXER OK\r\n" + type_str + L" " +
-                   std::to_wstring(proj.screen_arc * RAD2DEG) + L"\r\n";
+                   std::to_wstring(proj.screen_arc * RAD2DEG) + L" " +
+                   std::to_wstring(proj.screen_arc_v * RAD2DEG) + L" " +
+                   std::to_wstring(proj.eye_distance) + L"\r\n";
         });
     }
 
     using core::screen_curve_type;
     transforms_applier transforms(ctx);
-    int          duration = ctx.parameters.size() > 2 ? std::stoi(ctx.parameters[2]) : 0;
-    std::wstring tween    = ctx.parameters.size() > 3 ? ctx.parameters[3] : L"linear";
     const auto&  type_arg = ctx.parameters.at(0);
     screen_curve_type curve_type = screen_curve_type::flat;
     if      (boost::iequals(type_arg, L"CYLINDER")) curve_type = screen_curve_type::cylinder;
     else if (boost::iequals(type_arg, L"SPHERE"))   curve_type = screen_curve_type::sphere;
     else if (boost::iequals(type_arg, L"FISHEYE"))  curve_type = screen_curve_type::fisheye;
-    double screen_arc   = std::stod(ctx.parameters.at(1)) * DEG2RAD;
-    bool   curve_enable = (curve_type != screen_curve_type::flat && screen_arc != 0.0);
+    double screen_arc    = std::stod(ctx.parameters.at(1)) * DEG2RAD;
+    // Optional: type arc [arc_v] [eye_distance] [duration] [tween]
+    double       screen_arc_v = ctx.parameters.size() > 2 ? std::stod(ctx.parameters[2]) * DEG2RAD : 0.0;
+    double       eye_distance = ctx.parameters.size() > 3 ? std::stod(ctx.parameters[3]) : 1.0;
+    int          duration     = ctx.parameters.size() > 4 ? std::stoi(ctx.parameters[4]) : 0;
+    std::wstring tween        = ctx.parameters.size() > 5 ? ctx.parameters[5] : L"linear";
+    bool         curve_enable = (curve_type != screen_curve_type::flat && screen_arc != 0.0);
 
     transforms.add(stage::transform_tuple_t(
         ctx.layer_index(),
         [=](frame_transform transform) -> frame_transform {
             transform.image_transform.projection.curve_type   = curve_type;
             transform.image_transform.projection.screen_arc   = screen_arc;
+            transform.image_transform.projection.screen_arc_v = screen_arc_v;
+            transform.image_transform.projection.eye_distance = eye_distance;
             transform.image_transform.projection.curve_enable = curve_enable;
+            transform.image_transform.projection.curve_auto   = false; // explicit set locks against auto-projection
+            return transform;
+        },
+        duration,
+        tween));
+    transforms.apply();
+
+    return make_ready_future<std::wstring>(L"202 MIXER OK\r\n");
+}
+
+std::future<std::wstring> mixer_projection_lens_command(command_context& ctx)
+{
+    if (ctx.parameters.empty()) {
+        auto transform2 = get_current_transform(ctx).share();
+        return std::async(std::launch::deferred, [transform2]() -> std::wstring {
+            auto& proj = transform2.get().image_transform.projection;
+            std::wstring lens_str = L"RECTILINEAR";
+            if (proj.source_lens == core::screen_curve_type::cylinder)
+                lens_str = L"CYLINDER";
+            else if (proj.source_lens == core::screen_curve_type::sphere)
+                lens_str = L"SPHERE";
+            else if (proj.source_lens == core::screen_curve_type::fisheye)
+                lens_str = L"FISHEYE";
+            return L"201 MIXER OK\r\n" + lens_str + L"\r\n";
+        });
+    }
+
+    using core::screen_curve_type;
+    transforms_applier transforms(ctx);
+    const auto&  lens_arg  = ctx.parameters.at(0);
+    screen_curve_type lens = screen_curve_type::flat;  // flat = rectilinear
+    if      (boost::iequals(lens_arg, L"CYLINDER")) lens = screen_curve_type::cylinder;
+    else if (boost::iequals(lens_arg, L"SPHERE"))   lens = screen_curve_type::sphere;
+    else if (boost::iequals(lens_arg, L"FISHEYE"))  lens = screen_curve_type::fisheye;
+
+    transforms.add(stage::transform_tuple_t(
+        ctx.layer_index(),
+        [=](frame_transform transform) -> frame_transform {
+            transform.image_transform.projection.source_lens = lens;
+            return transform;
+        },
+        0,
+        L"linear"));
+    transforms.apply();
+
+    return make_ready_future<std::wstring>(L"202 MIXER OK\r\n");
+}
+
+std::future<std::wstring> mixer_projection_icvfx_command(command_context& ctx)
+{
+    if (ctx.parameters.empty()) {
+        auto transform2 = get_current_transform(ctx).share();
+        return std::async(std::launch::deferred, [transform2]() -> std::wstring {
+            auto proj = transform2.get().image_transform.projection;
+            return L"201 MIXER OK\r\n" +
+                   std::wstring(proj.icvfx_enable ? L"1" : L"0") + L" " +
+                   std::to_wstring(proj.inner_fov) + L" " +
+                   std::to_wstring(proj.icvfx_feather) + L" " +
+                   std::to_wstring(proj.icvfx_outer_dim) + L"\r\n";
+        });
+    }
+
+    // MIXER <ch>-<l> PROJECTION_ICVFX <enable> [inner_fov_rad] [feather] [outer_dim] [dur] [tween]
+    transforms_applier transforms(ctx);
+    bool         enable    = (ctx.parameters.at(0) == L"1" ||
+                              boost::iequals(ctx.parameters.at(0), L"true"));
+    bool         has_fov   = ctx.parameters.size() > 1;
+    double       inner_fov = has_fov ? std::stod(ctx.parameters[1]) : 0.0;
+    bool         has_feat  = ctx.parameters.size() > 2;
+    double       feather   = has_feat ? std::stod(ctx.parameters[2]) : 0.0;
+    bool         has_dim   = ctx.parameters.size() > 3;
+    double       outer_dim = has_dim ? std::stod(ctx.parameters[3]) : 1.0;
+    int          duration  = ctx.parameters.size() > 4 ? std::stoi(ctx.parameters[4]) : 0;
+    std::wstring tween     = ctx.parameters.size() > 5 ? ctx.parameters[5] : L"linear";
+
+    transforms.add(stage::transform_tuple_t(
+        ctx.layer_index(),
+        [=](frame_transform transform) -> frame_transform {
+            auto& p = transform.image_transform.projection;
+            p.icvfx_enable = enable;
+            if (has_fov && inner_fov > 0.0)
+                p.inner_fov = inner_fov;
+            if (has_feat)
+                p.icvfx_feather = feather;
+            if (has_dim)
+                p.icvfx_outer_dim = outer_dim;
             return transform;
         },
         duration,
@@ -1801,16 +1894,20 @@ std::future<std::wstring> mixer_projection_distortion_command(command_context& c
         return std::async(std::launch::deferred, [transform2]() -> std::wstring {
             auto proj = transform2.get().image_transform.projection;
             return L"201 MIXER OK\r\n" + std::to_wstring(proj.lens_k1) + L" " +
-                   std::to_wstring(proj.lens_k2) + L" " + std::to_wstring(proj.lens_k3) + L"\r\n";
+                   std::to_wstring(proj.lens_k2) + L" " + std::to_wstring(proj.lens_k3) + L" " +
+                   std::to_wstring(proj.lens_p1) + L" " + std::to_wstring(proj.lens_p2) + L"\r\n";
         });
     }
 
     transforms_applier transforms(ctx);
-    int          duration = ctx.parameters.size() > 3 ? std::stoi(ctx.parameters[3]) : 0;
-    std::wstring tween    = ctx.parameters.size() > 4 ? ctx.parameters[4] : L"linear";
+    // Canonical form: k1 k2 k3 [p1 p2] [duration] [tween]
     double       k1       = std::stod(ctx.parameters.at(0));
     double       k2       = std::stod(ctx.parameters.at(1));
     double       k3       = std::stod(ctx.parameters.at(2));
+    double       p1       = ctx.parameters.size() > 3 ? std::stod(ctx.parameters[3]) : 0.0;
+    double       p2       = ctx.parameters.size() > 4 ? std::stod(ctx.parameters[4]) : 0.0;
+    int          duration = ctx.parameters.size() > 5 ? std::stoi(ctx.parameters[5]) : 0;
+    std::wstring tween    = ctx.parameters.size() > 6 ? ctx.parameters[6] : L"linear";
 
     transforms.add(stage::transform_tuple_t(
         ctx.layer_index(),
@@ -1818,6 +1915,8 @@ std::future<std::wstring> mixer_projection_distortion_command(command_context& c
             transform.image_transform.projection.lens_k1 = k1;
             transform.image_transform.projection.lens_k2 = k2;
             transform.image_transform.projection.lens_k3 = k3;
+            transform.image_transform.projection.lens_p1 = p1;
+            transform.image_transform.projection.lens_p2 = p2;
             return transform;
         },
         duration,
@@ -3457,6 +3556,32 @@ std::wstring previz_scene_command(command_context& ctx)
         return L"202 PREVIZ OK\r\n";
     }
 
+    // PREVIZ ch SCENE SAVE <path> / LOAD <path> — JSON stage-layout persistence
+    if (boost::iequals(path_param, L"SAVE") || boost::iequals(path_param, L"LOAD")) {
+        if (ctx.parameters.size() < 2)
+            return L"400 PREVIZ ERROR usage: SCENE SAVE|LOAD <path>\r\n";
+        bool is_save     = boost::iequals(path_param, L"SAVE");
+        auto media_base  = boost::filesystem::canonical(env::media_folder());
+        auto resolved    = boost::filesystem::path(media_base) / ctx.parameters.at(1);
+        // Guard against path traversal outside the media folder.
+        auto check       = resolved.lexically_normal();
+        if (check.wstring().find(media_base.wstring()) != 0)
+            return L"403 PREVIZ FORBIDDEN\r\n";
+        try {
+            if (is_save) {
+                ogl_mix->save_layout(u8(resolved.wstring()));
+            } else {
+                if (!boost::filesystem::exists(resolved))
+                    return L"404 PREVIZ ERROR\r\n";
+                ogl_mix->load_layout(u8(resolved.wstring()));
+            }
+            return L"202 PREVIZ OK\r\n";
+        } catch (const std::exception& e) {
+            CASPAR_LOG(error) << L"[PREVIZ SCENE " << path_param << L"] " << e.what();
+            return L"502 PREVIZ FAILED\r\n";
+        }
+    }
+
     // Resolve path relative to media folder (prevent path traversal)
     auto media_base = boost::filesystem::canonical(env::media_folder());
     auto resolved   = media_base / path_param;
@@ -3538,6 +3663,13 @@ std::wstring previz_camera_command(command_context& ctx)
         return L"202 PREVIZ OK\r\n";
     }
 
+    // OVERRIDE 1|0 — freeze/unfreeze tracker control of the production camera
+    if (boost::iequals(ctx.parameters.at(0), L"OVERRIDE")) {
+        bool lock = (ctx.parameters.size() < 2) || ctx.parameters.at(1) != L"0";
+        ogl_mix->set_camera_locked(lock);
+        return L"202 PREVIZ OK\r\n";
+    }
+
     // SET: PREVIZ ch CAMERA x y z yaw pitch roll fov
     if (ctx.parameters.size() < 7)
         return L"400 PREVIZ ERROR\r\n";
@@ -3555,6 +3687,53 @@ std::wstring previz_camera_command(command_context& ctx)
         return L"202 PREVIZ OK\r\n";
     } catch (const std::exception& e) {
         CASPAR_LOG(error) << L"[PREVIZ CAMERA] " << e.what();
+        return L"502 PREVIZ FAILED\r\n";
+    }
+}
+
+std::wstring previz_view_command(command_context& ctx)
+{
+    auto* ogl_mix = get_ogl_mixer(ctx);
+    if (!ogl_mix)
+        return L"501 PREVIZ FAILED\r\n";
+
+    // Query
+    if (ctx.parameters.empty()) {
+        auto cam = ogl_mix->scene().view_camera;
+        bool ov  = ogl_mix->scene().has_view_override;
+        std::wostringstream os;
+        os << L"201 PREVIZ OK\r\n"
+           << (ov ? 1 : 0) << L" "
+           << cam.x << L" " << cam.y << L" " << cam.z << L" "
+           << cam.yaw << L" " << cam.pitch << L" " << cam.roll << L" "
+           << cam.fov << L"\r\n\r\n";
+        return os.str();
+    }
+
+    // CLEAR / RESET: drop the viewport override (render follows production camera)
+    if (boost::iequals(ctx.parameters.at(0), L"CLEAR") ||
+        boost::iequals(ctx.parameters.at(0), L"RESET")) {
+        ogl_mix->clear_view_camera();
+        return L"202 PREVIZ OK\r\n";
+    }
+
+    // SET: PREVIZ ch VIEW x y z yaw pitch roll fov
+    if (ctx.parameters.size() < 7)
+        return L"400 PREVIZ ERROR\r\n";
+
+    try {
+        float x     = std::stof(u8(ctx.parameters.at(0)));
+        float y     = std::stof(u8(ctx.parameters.at(1)));
+        float z     = std::stof(u8(ctx.parameters.at(2)));
+        float yaw   = std::stof(u8(ctx.parameters.at(3)));
+        float pitch = std::stof(u8(ctx.parameters.at(4)));
+        float roll  = std::stof(u8(ctx.parameters.at(5)));
+        float fov   = std::stof(u8(ctx.parameters.at(6)));
+
+        ogl_mix->set_view_camera(x, y, z, yaw, pitch, roll, fov);
+        return L"202 PREVIZ OK\r\n";
+    } catch (const std::exception& e) {
+        CASPAR_LOG(error) << L"[PREVIZ VIEW] " << e.what();
         return L"502 PREVIZ FAILED\r\n";
     }
 }
@@ -3780,6 +3959,35 @@ std::wstring previz_screen_command(command_context& ctx)
         } else if (sub == L"REMOVE") {
             ogl_mix->remove_screen(name);
             return L"202 PREVIZ OK\r\n";
+        } else if (sub == L"EYEMODE") {
+            // SCREEN <name> EYEMODE CAMERA | FIXED [x y z]
+            if (ctx.parameters.size() < 3)
+                return L"400 PREVIZ ERROR usage: SCREEN <name> EYEMODE CAMERA|FIXED [x y z]\r\n";
+            auto mode_arg = boost::to_upper_copy(ctx.parameters.at(2));
+            int  mode     = (mode_arg == L"FIXED") ? 1 : 0;
+            float x = 0.0f, y = 1.5f, z = 3.0f;
+            if (mode == 1 && ctx.parameters.size() >= 6) {
+                x = std::stof(u8(ctx.parameters.at(3)));
+                y = std::stof(u8(ctx.parameters.at(4)));
+                z = std::stof(u8(ctx.parameters.at(5)));
+            }
+            ogl_mix->set_screen_eye_mode(name, mode, x, y, z);
+            return L"202 PREVIZ OK\r\n";
+        } else if (sub == L"ARCV") {
+            // SCREEN <name> ARCV <arc_v_deg>   (0 = single-curved cylinder)
+            if (ctx.parameters.size() < 3)
+                return L"400 PREVIZ ERROR usage: SCREEN <name> ARCV <arc_v_deg>\r\n";
+            float arc_v = std::stof(u8(ctx.parameters.at(2)));
+            ogl_mix->set_screen_arc_v(name, arc_v);
+            return L"202 PREVIZ OK\r\n";
+        } else if (sub == L"ICVFX") {
+            // SCREEN <name> ICVFX 1|0   (enable inner/outer frustum in-camera VFX)
+            if (ctx.parameters.size() < 3)
+                return L"400 PREVIZ ERROR usage: SCREEN <name> ICVFX 1|0\r\n";
+            bool enable = (ctx.parameters.at(2) == L"1" ||
+                           boost::iequals(ctx.parameters.at(2), L"true"));
+            ogl_mix->set_screen_icvfx(name, enable);
+            return L"202 PREVIZ OK\r\n";
         }
 
         return L"400 PREVIZ ERROR unknown screen subcommand\r\n";
@@ -3851,7 +4059,12 @@ std::wstring previz_autoprojection_command(command_context& ctx)
                 [stages, video_channels, source_channel, source_layer,
                  routed_channels, routed_mutex,
                  producer_registry, cg_registry, format_repository]
-                (int channel, double yaw, double pitch, double roll, double fov) {
+                (int channel, const accelerator::ogl::screen_projection& proj) {
+                    static const double DEG2RAD = 3.141592653589793 / 180.0;
+                    const double yaw   = static_cast<double>(proj.yaw_deg)   * DEG2RAD;
+                    const double pitch = static_cast<double>(proj.pitch_deg) * DEG2RAD;
+                    const double roll  = static_cast<double>(proj.roll_deg)  * DEG2RAD;
+                    const double fov   = static_cast<double>(proj.fov_deg)   * DEG2RAD;
                     try {
                         auto stage_it = stages.find(channel);
                         if (stage_it == stages.end())
@@ -3933,12 +4146,44 @@ std::wstring previz_autoprojection_command(command_context& ctx)
                         // when frames start arriving).
                         stage->apply_transform(
                             target_layer,
-                            [yaw, pitch, roll, fov](core::frame_transform t) -> core::frame_transform {
+                            [yaw, pitch, roll, fov, proj](core::frame_transform t) -> core::frame_transform {
                                 t.image_transform.projection.enable = (fov > 0.0);
                                 t.image_transform.projection.yaw    = yaw;
                                 t.image_transform.projection.pitch  = pitch;
                                 t.image_transform.projection.roll   = roll;
                                 t.image_transform.projection.fov    = fov;
+                                // Auto-projection owns the curve only while the
+                                // layer has not been manually overridden.  An
+                                // explicit MIXER PROJECTION_CURVE clears curve_auto
+                                // and freezes the operator's values.
+                                if (t.image_transform.projection.curve_auto ||
+                                    !t.image_transform.projection.curve_enable) {
+                                    static const double D2R = 3.141592653589793 / 180.0;
+                                    auto& p = t.image_transform.projection;
+                                    p.curve_type   = static_cast<core::screen_curve_type>(proj.curve_type);
+                                    p.screen_arc   = static_cast<double>(proj.screen_arc_deg)   * D2R;
+                                    p.screen_arc_v = static_cast<double>(proj.screen_arc_v_deg) * D2R;
+                                    p.eye_distance = static_cast<double>(proj.eye_distance);
+                                    p.curve_enable = (proj.curve_type != 0 && proj.screen_arc_deg != 0.0f);
+                                    p.curve_auto   = true;
+                                }
+                                // ICVFX inner/outer frustum (auto path)
+                                {
+                                    static const double I2R = 3.141592653589793 / 180.0;
+                                    auto& p = t.image_transform.projection;
+                                    p.icvfx_enable = proj.icvfx_enable;
+                                    if (proj.icvfx_enable) {
+                                        p.inner_yaw          = static_cast<double>(proj.inner_yaw_deg)   * I2R;
+                                        p.inner_pitch        = static_cast<double>(proj.inner_pitch_deg) * I2R;
+                                        p.inner_roll         = static_cast<double>(proj.inner_roll_deg)  * I2R;
+                                        p.inner_fov          = static_cast<double>(proj.inner_fov_deg)   * I2R;
+                                        p.inner_eye_distance = static_cast<double>(proj.inner_eye_distance);
+                                        p.icvfx_q0x = proj.icvfx_q[0]; p.icvfx_q0y = proj.icvfx_q[1];
+                                        p.icvfx_q1x = proj.icvfx_q[2]; p.icvfx_q1y = proj.icvfx_q[3];
+                                        p.icvfx_q2x = proj.icvfx_q[4]; p.icvfx_q2y = proj.icvfx_q[5];
+                                        p.icvfx_q3x = proj.icvfx_q[6]; p.icvfx_q3y = proj.icvfx_q[7];
+                                    }
+                                }
                                 return t;
                             },
                             0,
@@ -3957,7 +4202,12 @@ std::wstring previz_autoprojection_command(command_context& ctx)
         } else {
             // Legacy mode: just apply projection to layer 0, no routing
             apply_fn =
-                [stages](int channel, double yaw, double pitch, double roll, double fov) {
+                [stages](int channel, const accelerator::ogl::screen_projection& proj) {
+                    static const double DEG2RAD = 3.141592653589793 / 180.0;
+                    const double yaw   = static_cast<double>(proj.yaw_deg)   * DEG2RAD;
+                    const double pitch = static_cast<double>(proj.pitch_deg) * DEG2RAD;
+                    const double roll  = static_cast<double>(proj.roll_deg)  * DEG2RAD;
+                    const double fov   = static_cast<double>(proj.fov_deg)   * DEG2RAD;
                     auto it = stages.find(channel);
                     if (it == stages.end())
                         return;
@@ -3966,12 +4216,40 @@ std::wstring previz_autoprojection_command(command_context& ctx)
                         return;
                     stage->apply_transform(
                         0,
-                        [yaw, pitch, roll, fov](core::frame_transform t) -> core::frame_transform {
+                        [yaw, pitch, roll, fov, proj](core::frame_transform t) -> core::frame_transform {
                             t.image_transform.projection.enable = (fov > 0.0);
                             t.image_transform.projection.yaw    = yaw;
                             t.image_transform.projection.pitch  = pitch;
                             t.image_transform.projection.roll   = roll;
                             t.image_transform.projection.fov    = fov;
+                            if (t.image_transform.projection.curve_auto ||
+                                !t.image_transform.projection.curve_enable) {
+                                static const double D2R = 3.141592653589793 / 180.0;
+                                auto& p = t.image_transform.projection;
+                                p.curve_type   = static_cast<core::screen_curve_type>(proj.curve_type);
+                                p.screen_arc   = static_cast<double>(proj.screen_arc_deg)   * D2R;
+                                p.screen_arc_v = static_cast<double>(proj.screen_arc_v_deg) * D2R;
+                                p.eye_distance = static_cast<double>(proj.eye_distance);
+                                p.curve_enable = (proj.curve_type != 0 && proj.screen_arc_deg != 0.0f);
+                                p.curve_auto   = true;
+                            }
+                            // ICVFX inner/outer frustum (auto path)
+                            {
+                                static const double I2R = 3.141592653589793 / 180.0;
+                                auto& p = t.image_transform.projection;
+                                p.icvfx_enable = proj.icvfx_enable;
+                                if (proj.icvfx_enable) {
+                                    p.inner_yaw          = static_cast<double>(proj.inner_yaw_deg)   * I2R;
+                                    p.inner_pitch        = static_cast<double>(proj.inner_pitch_deg) * I2R;
+                                    p.inner_roll         = static_cast<double>(proj.inner_roll_deg)  * I2R;
+                                    p.inner_fov          = static_cast<double>(proj.inner_fov_deg)   * I2R;
+                                    p.inner_eye_distance = static_cast<double>(proj.inner_eye_distance);
+                                    p.icvfx_q0x = proj.icvfx_q[0]; p.icvfx_q0y = proj.icvfx_q[1];
+                                    p.icvfx_q1x = proj.icvfx_q[2]; p.icvfx_q1y = proj.icvfx_q[3];
+                                    p.icvfx_q2x = proj.icvfx_q[4]; p.icvfx_q2y = proj.icvfx_q[5];
+                                    p.icvfx_q3x = proj.icvfx_q[6]; p.icvfx_q3y = proj.icvfx_q[7];
+                                }
+                            }
                             return t;
                         },
                         0,
@@ -4044,7 +4322,9 @@ void register_commands(std::shared_ptr<amcp_command_repository_wrapper>& repo)
     repo->register_channel_command(L"Mixer Commands", L"MIXER PERSPECTIVE", mixer_perspective_command, 0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER PROJECTION",        mixer_projection_command,        0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER PROJECTION_OFFSET", mixer_projection_offset_command, 0);
-    repo->register_channel_command(L"Mixer Commands", L"MIXER PROJECTION_CURVE",  mixer_projection_curve_command,  2);
+    repo->register_channel_command(L"Mixer Commands", L"MIXER PROJECTION_CURVE",  mixer_projection_curve_command,  0);
+    repo->register_channel_command(L"Mixer Commands", L"MIXER PROJECTION_LENS",   mixer_projection_lens_command,   0);
+    repo->register_channel_command(L"Mixer Commands", L"MIXER PROJECTION_ICVFX",  mixer_projection_icvfx_command,  0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER PROJECTION_FRUSTUM",    mixer_projection_frustum_command,    0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER PROJECTION_DISTORTION", mixer_projection_distortion_command, 0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER PROJECTION_BLEND",      mixer_projection_blend_command,      0);
@@ -4079,6 +4359,7 @@ void register_commands(std::shared_ptr<amcp_command_repository_wrapper>& repo)
     repo->register_channel_command(L"Previz Commands", L"PREVIZ MAP",       previz_map_command,       2);
     repo->register_channel_command(L"Previz Commands", L"PREVIZ UNMAP",     previz_unmap_command,     1);
     repo->register_channel_command(L"Previz Commands", L"PREVIZ CAMERA",    previz_camera_command,    0);
+    repo->register_channel_command(L"Previz Commands", L"PREVIZ VIEW",      previz_view_command,      0);
     repo->register_channel_command(L"Previz Commands", L"PREVIZ INFO",      previz_info_command,      0);
     repo->register_channel_command(L"Previz Commands", L"PREVIZ SHOW",      previz_show_command,      1);
     repo->register_channel_command(L"Previz Commands", L"PREVIZ GRID",      previz_grid_command,      0);

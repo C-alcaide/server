@@ -79,11 +79,20 @@ struct screen_meta
     float height_m = 1.0f;
     float radius_m = 0.0f;   // 0 = flat
     float arc_deg  = 0.0f;
+    float arc_v_deg = 0.0f;  // vertical arc (0 = single-curved cylinder)
     float pos_x = 0.0f, pos_y = 0.0f, pos_z = 0.0f;
     float rot_yaw = 0.0f, rot_pitch = 0.0f, rot_roll = 0.0f;
     int   res_w = 0;          // 0 = not set (use channel default)
     int   res_h = 0;
     int   channel = -1;       // mapped channel (-1 = unmapped)
+    // Eye-point model for curve compensation & FOV:
+    //   eye_mode 0 = CAMERA → eye follows the production virtual camera (in-camera VFX)
+    //   eye_mode 1 = FIXED  → eye sits at a fixed audience design position (design_eye)
+    int   eye_mode = 0;
+    float design_eye_x = 0.0f, design_eye_y = 1.5f, design_eye_z = 3.0f;
+    // ICVFX inner/outer frustum: when true, auto-projection computes a
+    // camera-eye inner frustum + feathered camera-frustum mask for this screen.
+    bool  icvfx_enable = false;
 };
 
 // ---- Previz scene (all meshes + camera + mappings) ------------------------
@@ -92,6 +101,16 @@ struct previz_scene
 {
     std::vector<previz_mesh>         meshes;
     previz_camera                    camera;
+    // Independent viewport/navigation camera.  When has_view_override is true the
+    // render() POV uses view_camera, while compute_frustum() ALWAYS uses the
+    // production 'camera' above.  This decouples operator viewport orbiting (Live
+    // Link / nav) from the virtual production camera that drives projection.
+    previz_camera                    view_camera;
+    bool                             has_view_override = false;
+    // Operator OVERRIDE/freeze: when true the bound tracker stops driving the
+    // production camera, letting the operator hand-fly it (PREVIZ CAMERA SET still
+    // works).  Cleared to hand control back to the tracker.
+    bool                             camera_locked = false;
     std::map<std::string, int>       mesh_to_channel; // mesh name → channel index
     bool                             show_grid      = true;
     bool                             show_wireframe = false;

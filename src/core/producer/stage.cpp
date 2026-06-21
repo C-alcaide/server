@@ -289,6 +289,45 @@ struct stage::impl : public std::enable_shared_from_this<impl>
                 monitor::state state;
                 for (auto& p : layers_) {
                     state["layer"][p.first] = p.second.state();
+
+                    // Publish the full projection/curve state per layer so OSC
+                    // subscribers (and virtual-production tooling) can mirror the
+                    // server's projection model in real time.
+                    auto tw = tweens_.find(p.first);
+                    if (tw != tweens_.end()) {
+                        const auto pr = tw->second.fetch().image_transform.projection;
+                        auto       ps = state["layer"][p.first]["projection"];
+                        ps["enable"]       = pr.enable;
+                        ps["yaw"]          = pr.yaw;
+                        ps["pitch"]        = pr.pitch;
+                        ps["roll"]         = pr.roll;
+                        ps["fov"]          = pr.fov;
+                        ps["offset_x"]     = pr.offset_x;
+                        ps["offset_y"]     = pr.offset_y;
+                        ps["frustum_h"]    = pr.frustum_h;
+                        ps["frustum_v"]    = pr.frustum_v;
+                        ps["lens_k1"]      = pr.lens_k1;
+                        ps["lens_k2"]      = pr.lens_k2;
+                        ps["lens_k3"]      = pr.lens_k3;
+                        ps["lens_p1"]      = pr.lens_p1;
+                        ps["lens_p2"]      = pr.lens_p2;
+                        ps["source_lens"]  = static_cast<int>(pr.source_lens);
+                        ps["curve_enable"] = pr.curve_enable;
+                        ps["curve_auto"]   = pr.curve_auto;
+                        ps["curve_type"]   = static_cast<int>(pr.curve_type);
+                        ps["screen_arc"]   = pr.screen_arc;
+                        ps["screen_arc_v"] = pr.screen_arc_v;
+                        ps["eye_distance"] = pr.eye_distance;
+                        ps["edge_blend"]   = {pr.edge_blend_left,
+                                              pr.edge_blend_right,
+                                              pr.edge_blend_top,
+                                              pr.edge_blend_bottom,
+                                              pr.edge_blend_gamma};
+                        ps["icvfx_enable"]    = pr.icvfx_enable;
+                        ps["inner_fov"]       = pr.inner_fov;
+                        ps["icvfx_feather"]   = pr.icvfx_feather;
+                        ps["icvfx_outer_dim"] = pr.icvfx_outer_dim;
+                    }
                 }
                 state_ = std::move(state);
             } catch (...) {

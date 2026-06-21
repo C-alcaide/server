@@ -565,6 +565,14 @@ CH4 → Previz output             ←  The previz renderer itself
 3. Position the virtual camera at the tracked camera's physical location
 4. Enable auto-projection — tracked camera movements now drive content mapping
 
+> **Tracking lens & timing realism in previz.** When a binding runs in `MODE PREVIZ`, the virtual camera is driven by the same processed pose as a live layer, so the tracking realism features apply here too:
+> - `TRACKING DELAY` time-aligns the virtual camera with a delayed video feed (the interpolated pose drives the previz camera).
+> - `TRACKING NODAL` shifts the virtual camera's position onto the lens entrance pupil for correct parallax.
+> - `TRACKING LENS` feeds the profile's field of view (and nodal offset) into the previz camera FOV as the lens zooms.
+> - `OPENTRACKIO` can drive the previz camera just like FreeD — `TRACKING 1-4 BIND OPENTRACKIO PORT 55555 HOST 239.135.1.100 MODE PREVIZ`.
+>
+> Distortion (`k1`–`k3`, `p1`/`p2`) and focus-driven depth of field (`TRACKING DOF`) are **not** applied to the previz camera — they affect the 2D/360 layer output only.
+
 ---
 
 ## Best Practices

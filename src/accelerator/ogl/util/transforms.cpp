@@ -73,14 +73,62 @@ void apply_transform_colour_values(core::image_transform& self, const core::imag
     self.blend_mode = std::max(self.blend_mode, other.blend_mode);
     self.layer_depth += other.layer_depth;
     if (other.projection.enable) {
-        self.projection = other.projection;
+        // 360 virtual-camera view params (does not touch destination compensation)
+        self.projection.enable      = true;
+        self.projection.yaw         = other.projection.yaw;
+        self.projection.pitch       = other.projection.pitch;
+        self.projection.roll        = other.projection.roll;
+        self.projection.fov         = other.projection.fov;
+        self.projection.offset_x    = other.projection.offset_x;
+        self.projection.offset_y    = other.projection.offset_y;
+        self.projection.frustum_h   = other.projection.frustum_h;
+        self.projection.frustum_v   = other.projection.frustum_v;
+        self.projection.lens_k1     = other.projection.lens_k1;
+        self.projection.lens_k2     = other.projection.lens_k2;
+        self.projection.lens_k3     = other.projection.lens_k3;
+        self.projection.lens_p1     = other.projection.lens_p1;
+        self.projection.lens_p2     = other.projection.lens_p2;
+        self.projection.source_lens = other.projection.source_lens;
     }
     // Curved screen compensation merges independently of 360 mode
     if (other.projection.curve_enable) {
-        self.projection.curve_type = other.projection.curve_type;
-        self.projection.screen_arc = other.projection.screen_arc;
+        self.projection.curve_type   = other.projection.curve_type;
+        self.projection.screen_arc   = other.projection.screen_arc;
+        self.projection.screen_arc_v = other.projection.screen_arc_v;
+        self.projection.eye_distance = other.projection.eye_distance;
+        self.projection.curve_auto   = other.projection.curve_auto;
     }
     self.projection.curve_enable |= other.projection.curve_enable;
+    // Edge blending merges independently as well
+    if (other.projection.edge_blend_left > 0.0 || other.projection.edge_blend_right > 0.0 ||
+        other.projection.edge_blend_top > 0.0 || other.projection.edge_blend_bottom > 0.0) {
+        self.projection.edge_blend_left   = other.projection.edge_blend_left;
+        self.projection.edge_blend_right  = other.projection.edge_blend_right;
+        self.projection.edge_blend_top    = other.projection.edge_blend_top;
+        self.projection.edge_blend_bottom = other.projection.edge_blend_bottom;
+        self.projection.edge_blend_gamma  = other.projection.edge_blend_gamma;
+    }
+    // ICVFX inner/outer frustum merges independently of 360/curve modes
+    if (other.projection.icvfx_enable) {
+        self.projection.icvfx_enable       = true;
+        self.projection.inner_yaw          = other.projection.inner_yaw;
+        self.projection.inner_pitch        = other.projection.inner_pitch;
+        self.projection.inner_roll         = other.projection.inner_roll;
+        self.projection.inner_fov          = other.projection.inner_fov;
+        self.projection.inner_eye_distance = other.projection.inner_eye_distance;
+        self.projection.inner_offset_x     = other.projection.inner_offset_x;
+        self.projection.inner_offset_y     = other.projection.inner_offset_y;
+        self.projection.icvfx_q0x          = other.projection.icvfx_q0x;
+        self.projection.icvfx_q0y          = other.projection.icvfx_q0y;
+        self.projection.icvfx_q1x          = other.projection.icvfx_q1x;
+        self.projection.icvfx_q1y          = other.projection.icvfx_q1y;
+        self.projection.icvfx_q2x          = other.projection.icvfx_q2x;
+        self.projection.icvfx_q2y          = other.projection.icvfx_q2y;
+        self.projection.icvfx_q3x          = other.projection.icvfx_q3x;
+        self.projection.icvfx_q3y          = other.projection.icvfx_q3y;
+        self.projection.icvfx_feather      = other.projection.icvfx_feather;
+        self.projection.icvfx_outer_dim    = other.projection.icvfx_outer_dim;
+    }
     if (other.color_grade.enable) {
         self.color_grade = other.color_grade;
     }

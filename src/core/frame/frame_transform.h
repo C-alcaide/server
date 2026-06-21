@@ -90,20 +90,59 @@ struct projection final
     // Off-axis frustum shift for multi-projector tiling
     double            frustum_h    = 0.0;  // horizontal frustum offset in NDC (-1 to +1)
     double            frustum_v    = 0.0;  // vertical frustum offset in NDC (-1 to +1)
-    // Lens distortion correction (Brown-Conrady radial model)
+    // Lens distortion correction (Brown-Conrady model, OpenLensIO-compatible)
     double            lens_k1      = 0.0;  // radial distortion coefficient
     double            lens_k2      = 0.0;  // radial distortion coefficient
     double            lens_k3      = 0.0;  // radial distortion coefficient
-    // Curved screen compensation — independent of 360 mode
+    double            lens_p1      = 0.0;  // tangential (decentering) coefficient
+    double            lens_p2      = 0.0;  // tangential (decentering) coefficient
+    // Virtual-camera lens model used when sampling a 360 source (independent of
+    // destination screen compensation below).  flat = rectilinear/gnomonic.
+    screen_curve_type source_lens  = screen_curve_type::flat;
+    // Curved screen compensation — destination screen shape, independent of 360 mode
     bool              curve_enable = false;
     screen_curve_type curve_type   = screen_curve_type::flat;
-    double            screen_arc   = 0.0;  // total arc in radians (horizontal for cylinder, radial for sphere)
+    double            screen_arc   = 0.0;  // total horizontal arc in radians (cylinder + sphere)
+    double            screen_arc_v = 0.0;  // total vertical arc in radians (0 = cylinder; >0 = sphere/dome)
+    // Viewer eye distance as a multiple of the screen radius (k = Dv / R).
+    // k = 1 places the viewer at the centre of curvature (legacy behaviour);
+    // larger k models a viewer further back than the radius.
+    double            eye_distance = 1.0;
+    // When true, this layer's curve compensation is owned by auto-projection and
+    // may be overwritten on each recompute.  An explicit MIXER PROJECTION_CURVE
+    // sets this false so manual values are protected from auto-projection.
+    bool              curve_auto   = false;
     // Soft-edge blending for multi-projector overlap
     double            edge_blend_left   = 0.0;  // fraction of screen width (0..1)
     double            edge_blend_right  = 0.0;
     double            edge_blend_top    = 0.0;  // fraction of screen height (0..1)
     double            edge_blend_bottom = 0.0;
     double            edge_blend_gamma  = 2.2;  // blend-curve gamma (perceptual linearity)
+    // ---- ICVFX inner/outer frustum (in-camera VFX) -------------------------
+    // When enabled, the region the tracked camera sees (the inner frustum) is
+    // rendered with parallax-correct perspective (eye = camera), while the rest
+    // of the screen keeps the outer projection above (eye = design-eye), dimmed
+    // by icvfx_outer_dim.  The two are blended by a feathered camera-frustum
+    // quad mask expressed in this layer's output NDC.
+    bool              icvfx_enable      = false;
+    double            inner_yaw         = 0.0;
+    double            inner_pitch       = 0.0;
+    double            inner_roll        = 0.0;
+    double            inner_fov         = 1.57079632679;
+    double            inner_eye_distance = 1.0;
+    double            inner_offset_x    = 0.0;
+    double            inner_offset_y    = 0.0;
+    // Camera-frustum mask quad corners in output NDC (-1..+1), order: 0=UL,1=UR,2=LR,3=LL
+    double            icvfx_q0x         = -1.0;
+    double            icvfx_q0y         =  1.0;
+    double            icvfx_q1x         =  1.0;
+    double            icvfx_q1y         =  1.0;
+    double            icvfx_q2x         =  1.0;
+    double            icvfx_q2y         = -1.0;
+    double            icvfx_q3x         = -1.0;
+    double            icvfx_q3y         = -1.0;
+    double            icvfx_feather     = 0.05; // edge feather in NDC units
+    double            icvfx_outer_dim   = 1.0;  // outer-region brightness multiplier (0..1)
 };
 
 // Transfer: 0=linear,1=srgb,2=rec709,3=pq(st2084),4=hlg,5=logc3(arri),6=slog3(sony)

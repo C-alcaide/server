@@ -28,6 +28,8 @@
 #include <common/utf.h>
 
 #include <boost/filesystem.hpp>
+#include <boost/property_tree/ptree.hpp>
+#include <boost/property_tree/json_parser.hpp>
 
 #define TINYGLTF_NO_INCLUDE_STB_IMAGE
 #define TINYGLTF_NO_INCLUDE_STB_IMAGE_WRITE
@@ -493,13 +495,19 @@ struct previz_renderer::impl
 
         shader_->use();
 
+        // Choose the viewport POV: the navigation/view camera when an override is
+        // active, otherwise the production virtual camera.  This NEVER affects
+        // compute_frustum(), which always uses scene_.camera.
+        const previz_camera& view_cam =
+            scene_.has_view_override ? scene_.view_camera : scene_.camera;
+
         // Build view matrix (camera)
-        auto view = mat4::rotate_z(-scene_.camera.roll) * mat4::rotate_x(-scene_.camera.pitch) *
-                    mat4::rotate_y(-scene_.camera.yaw) *
-                    mat4::translate(-scene_.camera.x, -scene_.camera.y, -scene_.camera.z);
+        auto view = mat4::rotate_z(-view_cam.roll) * mat4::rotate_x(-view_cam.pitch) *
+                    mat4::rotate_y(-view_cam.yaw) *
+                    mat4::translate(-view_cam.x, -view_cam.y, -view_cam.z);
 
         float aspect = static_cast<float>(w) / static_cast<float>(h);
-        auto  proj   = mat4::perspective(scene_.camera.fov, aspect, scene_.camera.near_clip, scene_.camera.far_clip);
+        auto  proj   = mat4::perspective(view_cam.fov, aspect, view_cam.near_clip, view_cam.far_clip);
 
         // Flip Y so the FBO output matches CasparCG's top-down texture convention.
         // OpenGL FBOs render bottom-up; the downstream copy_async / screen consumer
@@ -737,6 +745,175 @@ void previz_renderer::reset_camera()
     update_projections();
 }
 
+void previz_renderer::set_view_camera(float x, float y, float z, float yaw, float pitch, float roll, float fov)
+{
+    std::lock_guard<std::mutex> lock(impl_->scene_mutex_);
+    impl_->scene_.view_camera       = {x, y, z, yaw, pitch, roll, fov, 0.1f, 100.0f};
+    impl_->scene_.has_view_override = true;
+    // No update_projections(): the view camera never drives projection.
+}
+
+void previz_renderer::clear_view_camera()
+{
+    std::lock_guard<std::mutex> lock(impl_->scene_mutex_);
+    impl_->scene_.has_view_override = false;
+}
+
+void previz_renderer::set_camera_locked(bool locked)
+{
+    std::lock_guard<std::mutex> lock(impl_->scene_mutex_);
+    impl_->scene_.camera_locked = locked;
+}
+
+bool previz_renderer::is_camera_locked() const
+{
+    std::lock_guard<std::mutex> lock(impl_->scene_mutex_);
+    return impl_->scene_.camera_locked;
+}
+
+void previz_renderer::save_layout(const std::string& path) const
+{
+    namespace pt = boost::property_tree;
+    pt::ptree root;
+
+    {
+        std::lock_guard<std::mutex> lock(impl_->scene_mutex_);
+        const auto& sc = impl_->scene_;
+
+        auto write_cam = [](const previz_camera& c) {
+            pt::ptree n;
+            n.put("x", c.x);     n.put("y", c.y);     n.put("z", c.z);
+            n.put("yaw", c.yaw); n.put("pitch", c.pitch); n.put("roll", c.roll);
+            n.put("fov", c.fov);
+            return n;
+        };
+
+        root.put("version", 1);
+        root.put_child("camera", write_cam(sc.camera));
+        root.put_child("view_camera", write_cam(sc.view_camera));
+        root.put("has_view_override", sc.has_view_override);
+        root.put("camera_locked", sc.camera_locked);
+        root.put("auto_projection", sc.auto_projection);
+        if (!sc.scene_path.empty())
+            root.put("model_path", sc.scene_path);
+
+        pt::ptree screens;
+        for (const auto& [name, m] : sc.screens) {
+            pt::ptree s;
+            s.put("name", m.name);
+            s.put("width_m", m.width_m);
+            s.put("height_m", m.height_m);
+            s.put("radius_m", m.radius_m);
+            s.put("arc_deg", m.arc_deg);
+            s.put("arc_v_deg", m.arc_v_deg);
+            s.put("pos_x", m.pos_x); s.put("pos_y", m.pos_y); s.put("pos_z", m.pos_z);
+            s.put("rot_yaw", m.rot_yaw); s.put("rot_pitch", m.rot_pitch); s.put("rot_roll", m.rot_roll);
+            s.put("res_w", m.res_w); s.put("res_h", m.res_h);
+            s.put("channel", m.channel);
+            s.put("eye_mode", m.eye_mode);
+            s.put("design_eye_x", m.design_eye_x);
+            s.put("design_eye_y", m.design_eye_y);
+            s.put("design_eye_z", m.design_eye_z);
+            s.put("icvfx_enable", m.icvfx_enable);
+            screens.push_back(std::make_pair("", s));
+        }
+        root.put_child("screens", screens);
+    }
+
+    pt::write_json(path, root);
+    CASPAR_LOG(info) << L"[previz] Saved stage layout to " << u16(path);
+}
+
+void previz_renderer::load_layout(const std::string& path)
+{
+    namespace pt = boost::property_tree;
+    pt::ptree root;
+    pt::read_json(path, root);
+
+    auto read_cam = [](const pt::ptree& n) {
+        previz_camera c;
+        c.x   = n.get("x", 0.0f);   c.y = n.get("y", 1.5f);   c.z = n.get("z", 5.0f);
+        c.yaw = n.get("yaw", 0.0f); c.pitch = n.get("pitch", 0.0f); c.roll = n.get("roll", 0.0f);
+        c.fov = n.get("fov", 60.0f);
+        return c;
+    };
+
+    // Optionally (re)load the venue model first (outside the scene lock).
+    auto model_path = root.get<std::string>("model_path", "");
+    if (!model_path.empty() && boost::filesystem::exists(model_path)) {
+        try { load_scene(model_path); } catch (...) {}
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(impl_->scene_mutex_);
+        auto& sc = impl_->scene_;
+
+        if (auto cam = root.get_child_optional("camera"))
+            sc.camera = read_cam(*cam);
+        if (auto vc = root.get_child_optional("view_camera"))
+            sc.view_camera = read_cam(*vc);
+        sc.has_view_override = root.get("has_view_override", false);
+        sc.camera_locked     = root.get("camera_locked", false);
+        sc.auto_projection   = root.get("auto_projection", sc.auto_projection);
+
+        sc.screens.clear();
+        if (auto screens = root.get_child_optional("screens")) {
+            for (const auto& [_, s] : *screens) {
+                screen_meta m;
+                m.name      = s.get("name", std::string());
+                if (m.name.empty())
+                    continue;
+                m.width_m   = s.get("width_m", 1.0f);
+                m.height_m  = s.get("height_m", 1.0f);
+                m.radius_m  = s.get("radius_m", 0.0f);
+                m.arc_deg   = s.get("arc_deg", 0.0f);
+                m.arc_v_deg = s.get("arc_v_deg", 0.0f);
+                m.pos_x     = s.get("pos_x", 0.0f);
+                m.pos_y     = s.get("pos_y", 0.0f);
+                m.pos_z     = s.get("pos_z", 0.0f);
+                m.rot_yaw   = s.get("rot_yaw", 0.0f);
+                m.rot_pitch = s.get("rot_pitch", 0.0f);
+                m.rot_roll  = s.get("rot_roll", 0.0f);
+                m.res_w     = s.get("res_w", 0);
+                m.res_h     = s.get("res_h", 0);
+                m.channel   = s.get("channel", -1);
+                m.eye_mode  = s.get("eye_mode", 0);
+                m.design_eye_x = s.get("design_eye_x", 0.0f);
+                m.design_eye_y = s.get("design_eye_y", 1.5f);
+                m.design_eye_z = s.get("design_eye_z", 3.0f);
+                m.icvfx_enable = s.get("icvfx_enable", false);
+                sc.screens[m.name] = m;
+            }
+        }
+    }
+
+    // Rebuild meshes + channel mappings for every restored screen.
+    {
+        std::map<std::string, screen_meta> restored;
+        {
+            std::lock_guard<std::mutex> lock(impl_->scene_mutex_);
+            restored = impl_->scene_.screens;
+        }
+        for (const auto& [name, m] : restored) {
+            if (m.radius_m > 1e-4f && m.arc_deg > 1e-4f)
+                add_screen_curved(name, m.width_m, m.height_m, m.radius_m, m.arc_deg);
+            else
+                add_screen_flat(name, m.width_m, m.height_m);
+            set_screen_position(name, m.pos_x, m.pos_y, m.pos_z);
+            set_screen_rotation(name, m.rot_yaw, m.rot_pitch, m.rot_roll);
+            if (m.res_w > 0 && m.res_h > 0)
+                set_screen_resolution(name, m.res_w, m.res_h);
+            set_screen_arc_v(name, m.arc_v_deg);
+            set_screen_eye_mode(name, m.eye_mode, m.design_eye_x, m.design_eye_y, m.design_eye_z);
+            set_screen_icvfx(name, m.icvfx_enable);
+            if (m.channel >= 0)
+                set_screen_channel(name, m.channel);
+        }
+    }
+    update_projections();
+    CASPAR_LOG(info) << L"[previz] Loaded stage layout from " << u16(path);
+}
+
 void previz_renderer::set_mesh_visible(const std::string& mesh_name, bool visible)
 {
     std::lock_guard<std::mutex> lock(impl_->scene_mutex_);
@@ -951,20 +1128,29 @@ screen_projection compute_frustum(const previz_camera& cam, const screen_meta& m
     float cy = meta.pos_y + rot.m[5] * hh;
     float cz = meta.pos_z + rot.m[6] * hh;
 
-    float dx = cx - cam.x;
-    float dy = cy - cam.y;
-    float dz = cz - cam.z;
+    // Eye point: follow the production camera (in-camera VFX) or sit at a fixed
+    // audience design position, per the screen's eye_mode.
+    float eye_x = cam.x, eye_y = cam.y, eye_z = cam.z;
+    if (meta.eye_mode == 1) {
+        eye_x = meta.design_eye_x;
+        eye_y = meta.design_eye_y;
+        eye_z = meta.design_eye_z;
+    }
+
+    float dx = cx - eye_x;
+    float dy = cy - eye_y;
+    float dz = cz - eye_z;
     float dist = std::sqrt(dx * dx + dy * dy + dz * dz);
 
     if (dist < 1e-6f)
-        return {}; // camera at screen center — degenerate
+        return {}; // eye at screen center — degenerate
 
-    // Perpendicular distance from camera to screen plane
+    // Perpendicular distance from eye to screen plane
     float perp_dist = std::abs(dx * snx + dy * sny + dz * snz);
     if (perp_dist < 1e-6f)
-        perp_dist = dist; // camera in screen plane — use total distance
+        perp_dist = dist; // eye in screen plane — use total distance
 
-    // Vertical FOV: angular extent of screen height from camera
+    // Vertical FOV: angular extent of screen height from the eye
     float fov_v = 2.0f * std::atan2(meta.height_m * 0.5f, perp_dist) * 180.0f / static_cast<float>(M_PI);
     fov_v       = std::max(1.0f, std::min(170.0f, fov_v)); // clamp to sane range
 
@@ -1007,8 +1193,105 @@ screen_projection compute_frustum(const previz_camera& cam, const screen_meta& m
                 proj_roll = -proj_roll;
         }
     }
+    // ── Curved-screen compensation geometry ───────────────────────
+    // Derive the physical curve parameters the warp shader needs directly
+    // from the screen geometry the previz already knows about.
+    //   curve_type : cylinder when single-curved, sphere when doubly-curved,
+    //                flat when the panel has no radius/arc.
+    //   eye_distance (k) = viewer distance / screen radius (Dv/R).  For a flat
+    //                panel (radius_m <= 0) there is no curvature, so k is left
+    //                at the neutral value and the type forced flat to avoid a
+    //                divide-by-zero.
+    int   curve_type   = 0;
+    float arc_h        = 0.0f;
+    float arc_v        = 0.0f;
+    float eye_distance = 1.0f;
+    if (meta.radius_m > 1e-4f && meta.arc_deg > 1e-4f) {
+        arc_h = meta.arc_deg;
+        arc_v = (meta.arc_v_deg > 1e-4f) ? meta.arc_v_deg : 0.0f;
+        curve_type   = (arc_v > 0.0f) ? 2 /*sphere*/ : 1 /*cylinder*/;
+        eye_distance = std::max(0.05f, std::min(100.0f, perp_dist / meta.radius_m));
+    }
 
-    return {proj_yaw, proj_pitch, proj_roll, fov_v};
+    screen_projection result{proj_yaw, proj_pitch, proj_roll, fov_v, curve_type, arc_h, arc_v, eye_distance};
+
+    // ── ICVFX inner/outer frustum ──────────────────────────────────
+    // Outer projection (above) stays as the design-eye / LED-volume slice.  The
+    // inner frustum re-samples the source from the tracked camera's viewpoint and
+    // a feathered quad mask marks where the camera looks on the screen.
+    if (meta.icvfx_enable) {
+        result.icvfx_enable = true;
+
+        // Screen right axis = rotation column 0; up & normal already in scope.
+        float rgt_x = rot.m[0], rgt_y = rot.m[1], rgt_z = rot.m[2];
+
+        // Inner view direction = from screen centre toward the camera; this
+        // off-axis "normal" shifts the 360 sampling to give the on-camera parallax.
+        float inx = cam.x - cx, iny = cam.y - cy, inz = cam.z - cz;
+        float in_horiz    = std::sqrt(inx * inx + inz * inz);
+        float inner_yaw   = std::atan2(inx, inz) * 180.0f / static_cast<float>(M_PI);
+        float inner_pitch = std::atan2(-iny, in_horiz) * 180.0f / static_cast<float>(M_PI);
+
+        // Inner FOV from the camera's perpendicular distance to the screen.
+        float icdx = cx - cam.x, icdy = cy - cam.y, icdz = cz - cam.z;
+        float icdist = std::sqrt(icdx * icdx + icdy * icdy + icdz * icdz);
+        float iperp  = std::abs(icdx * snx + icdy * sny + icdz * snz);
+        if (iperp < 1e-6f)
+            iperp = (icdist > 1e-6f) ? icdist : 1.0f;
+        float inner_fov = 2.0f * std::atan2(meta.height_m * 0.5f, iperp) * 180.0f / static_cast<float>(M_PI);
+        inner_fov       = std::max(1.0f, std::min(170.0f, inner_fov));
+
+        result.inner_yaw_deg   = inner_yaw;
+        result.inner_pitch_deg = inner_pitch;
+        result.inner_roll_deg  = proj_roll;  // screen orientation defines "up"
+        result.inner_fov_deg   = inner_fov;
+        float inner_k = 1.0f;
+        if (curve_type != 0 && meta.radius_m > 1e-4f)
+            inner_k = std::max(0.05f, std::min(100.0f, iperp / meta.radius_m));
+        result.inner_eye_distance = inner_k;
+
+        // ── Camera-frustum mask quad (content NDC) ─────────────────
+        // Camera world basis: forward = R*(0,0,-1) = -col2, right = col0, up = col1.
+        auto  cam_rot = mat4::rotate_y(cam.yaw) * mat4::rotate_x(cam.pitch) * mat4::rotate_z(cam.roll);
+        float crx = cam_rot.m[0],  cry = cam_rot.m[1],  crz = cam_rot.m[2];   // right
+        float cux = cam_rot.m[4],  cuy = cam_rot.m[5],  cuz = cam_rot.m[6];   // up
+        float cfx = -cam_rot.m[8], cfy = -cam_rot.m[9], cfz = -cam_rot.m[10]; // forward
+
+        // Frustum half-extents (vertical FOV from camera; aspect = screen aspect).
+        float cam_aspect = (meta.height_m > 1e-6f) ? (meta.width_m / meta.height_m) : 1.77778f;
+        float half_v     = std::tan(cam.fov * 0.5f * static_cast<float>(M_PI) / 180.0f);
+        float half_h     = half_v * cam_aspect;
+
+        // Intersect the 4 corner rays with the screen plane (point = centre,
+        // normal = (snx,sny,snz)) and convert to content NDC.
+        const float sgn_x[4] = {-1.0f, 1.0f, 1.0f, -1.0f}; // UL, UR, LR, LL
+        const float sgn_y[4] = { 1.0f, 1.0f, -1.0f, -1.0f};
+        bool        mask_valid = true;
+        for (int i = 0; i < 4 && mask_valid; ++i) {
+            float dxr = cfx + sgn_x[i] * half_h * crx + sgn_y[i] * half_v * cux;
+            float dyr = cfy + sgn_x[i] * half_h * cry + sgn_y[i] * half_v * cuy;
+            float dzr = cfz + sgn_x[i] * half_h * crz + sgn_y[i] * half_v * cuz;
+            float denom = dxr * snx + dyr * sny + dzr * snz;
+            if (std::abs(denom) < 1e-6f) { mask_valid = false; break; }
+            float t = ((cx - cam.x) * snx + (cy - cam.y) * sny + (cz - cam.z) * snz) / denom;
+            if (t <= 0.0f) { mask_valid = false; break; } // screen behind camera
+            float px = cam.x + t * dxr, py = cam.y + t * dyr, pz = cam.z + t * dzr;
+            float lx = (px - meta.pos_x) * rgt_x + (py - meta.pos_y) * rgt_y + (pz - meta.pos_z) * rgt_z;
+            float ly = (px - meta.pos_x) * sux   + (py - meta.pos_y) * suy   + (pz - meta.pos_z) * suz;
+            result.icvfx_q[i * 2 + 0] = (meta.width_m  > 1e-6f) ? (2.0f * lx / meta.width_m)        : 0.0f;
+            result.icvfx_q[i * 2 + 1] = (meta.height_m > 1e-6f) ? (1.0f - 2.0f * ly / meta.height_m) : 0.0f;
+        }
+        if (!mask_valid) {
+            // Camera not looking at the screen — collapse to a zero-area quad so
+            // the shader renders pure outer with no inner region.
+            for (int i = 0; i < 8; ++i)
+                result.icvfx_q[i] = 0.0f;
+        }
+        result.icvfx_feather   = 0.05f;
+        result.icvfx_outer_dim = 1.0f;
+    }
+
+    return result;
 }
 
 } // anonymous namespace
@@ -1153,6 +1436,46 @@ void previz_renderer::set_screen_resolution(const std::string& name, int width_p
     it->second.res_h = height_px;
 }
 
+void previz_renderer::set_screen_eye_mode(const std::string& name, int eye_mode, float x, float y, float z)
+{
+    {
+        std::lock_guard<std::mutex> lock(impl_->scene_mutex_);
+        auto it = impl_->scene_.screens.find(name);
+        if (it == impl_->scene_.screens.end()) return;
+        it->second.eye_mode = (eye_mode == 1) ? 1 : 0;
+        if (it->second.eye_mode == 1) {
+            it->second.design_eye_x = x;
+            it->second.design_eye_y = y;
+            it->second.design_eye_z = z;
+        }
+    }
+    update_projections();
+}
+
+void previz_renderer::set_screen_arc_v(const std::string& name, float arc_v_deg)
+{
+    {
+        std::lock_guard<std::mutex> lock(impl_->scene_mutex_);
+        auto it = impl_->scene_.screens.find(name);
+        if (it == impl_->scene_.screens.end()) return;
+        it->second.arc_v_deg = arc_v_deg;
+    }
+    update_projections();
+}
+
+void previz_renderer::set_screen_icvfx(const std::string& name, bool enable)
+{
+    {
+        std::lock_guard<std::mutex> lock(impl_->scene_mutex_);
+        auto it = impl_->scene_.screens.find(name);
+        if (it == impl_->scene_.screens.end()) return;
+        it->second.icvfx_enable = enable;
+    }
+    update_projections();
+    CASPAR_LOG(info) << L"[previz] Screen " << u8(name) << L" ICVFX "
+                     << (enable ? L"enabled" : L"disabled");
+}
+
 void previz_renderer::set_screen_channel(const std::string& name, int channel)
 {
     {
@@ -1251,12 +1574,10 @@ void previz_renderer::set_projection_callback(projection_apply_fn fn)
 
 void previz_renderer::update_projections()
 {
-    static const double DEG2RAD = 3.141592653589793 / 180.0;
-
     struct proj_update
     {
-        int    channel;
-        double yaw, pitch, roll, fov;
+        int               channel;
+        screen_projection proj;
     };
     std::vector<proj_update> updates;
     projection_apply_fn      fn;
@@ -1269,17 +1590,12 @@ void previz_renderer::update_projections()
         for (const auto& [name, meta] : impl_->scene_.screens) {
             if (meta.channel < 1)
                 continue;
-            auto p = compute_frustum(impl_->scene_.camera, meta);
-            updates.push_back({meta.channel,
-                               static_cast<double>(p.yaw_deg) * DEG2RAD,
-                               static_cast<double>(p.pitch_deg) * DEG2RAD,
-                               static_cast<double>(p.roll_deg) * DEG2RAD,
-                               static_cast<double>(p.fov_deg) * DEG2RAD});
+            updates.push_back({meta.channel, compute_frustum(impl_->scene_.camera, meta)});
         }
     }
     // Lock released — safe to call external callbacks (stage transforms)
     for (const auto& u : updates)
-        fn(u.channel, u.yaw, u.pitch, u.roll, u.fov);
+        fn(u.channel, u.proj);
 }
 
 screen_projection previz_renderer::compute_screen_projection(const std::string& screen_name) const

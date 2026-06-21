@@ -179,8 +179,32 @@ struct alignas(16) uniform_block
 
     // ── Extended flags2 (for features beyond 32 bits of 'flags') ────────
     uint32_t flags2 = 0;                    // 736
-    float    _padEnd[3] = {0, 0, 0};        // 740  pad to multiple of 16
-    // Total: 752 bytes
+    float    eye_distance = 1.0f;           // 740  viewer distance / screen radius (k)
+    int32_t  source_lens  = 0;              // 744  0=rectilinear,1=cyl,2=sph,3=fisheye
+    float    screen_arc_v = 0;              // 748  vertical screen arc (rad); 0=cylinder,>0=sphere/dome
+
+    // ── ICVFX inner/outer frustum (in-camera VFX) ───────────────────────
+    float    inner_yaw      = 0;            // 752
+    float    inner_pitch    = 0;            // 756
+    float    inner_roll     = 0;            // 760
+    float    inner_fov      = 1.5707963f;   // 764
+    float    inner_offset_x = 0;            // 768
+    float    inner_offset_y = 0;            // 772
+    float    icvfx_q0x      = -1.0f;        // 776  camera-frustum mask quad (output NDC)
+    float    icvfx_q0y      =  1.0f;        // 780  UL
+    float    icvfx_q1x      =  1.0f;        // 784  UR
+    float    icvfx_q1y      =  1.0f;        // 788
+    float    icvfx_q2x      =  1.0f;        // 792  LR
+    float    icvfx_q2y      = -1.0f;        // 796
+    float    icvfx_q3x      = -1.0f;        // 800  LL
+    float    icvfx_q3y      = -1.0f;        // 804
+    float    icvfx_feather  = 0.05f;        // 808  mask edge feather (NDC units)
+    float    icvfx_outer_dim = 1.0f;        // 812  outer-region brightness multiplier (0..1)
+    // ── Lens tangential distortion (Brown-Conrady, OpenLensIO) ──────────
+    // Appended at the end to preserve all existing offsets above.
+    float    lens_p1        = 0;            // 816  tangential (decentering) coefficient
+    float    lens_p2        = 0;            // 820  tangential (decentering) coefficient
+    // Total: 824 bytes
 };
 
 // Bit flags for `flags` field
@@ -229,6 +253,7 @@ enum class shader_flags2 : uint32_t
 {
     none         = 0,
     output_bgra  = 1u << 0,  // Apply .bgra swizzle on fragment output (8-bit path)
+    icvfx_enable = 1u << 1,  // Inner/outer frustum (in-camera VFX) blend active
 };
 
 }}} // namespace caspar::accelerator::vulkan

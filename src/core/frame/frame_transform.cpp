@@ -110,9 +110,45 @@ image_transform image_transform::tween(double                 time,
     result.projection.fov          = do_tween(time, source.projection.fov,      dest.projection.fov,      duration, tween);
     result.projection.offset_x     = do_tween(time, source.projection.offset_x, dest.projection.offset_x, duration, tween);
     result.projection.offset_y     = do_tween(time, source.projection.offset_y, dest.projection.offset_y, duration, tween);
+    result.projection.frustum_h    = do_tween(time, source.projection.frustum_h, dest.projection.frustum_h, duration, tween);
+    result.projection.frustum_v    = do_tween(time, source.projection.frustum_v, dest.projection.frustum_v, duration, tween);
+    result.projection.lens_k1      = do_tween(time, source.projection.lens_k1,   dest.projection.lens_k1,   duration, tween);
+    result.projection.lens_k2      = do_tween(time, source.projection.lens_k2,   dest.projection.lens_k2,   duration, tween);
+    result.projection.lens_k3      = do_tween(time, source.projection.lens_k3,   dest.projection.lens_k3,   duration, tween);
+    result.projection.lens_p1      = do_tween(time, source.projection.lens_p1,   dest.projection.lens_p1,   duration, tween);
+    result.projection.lens_p2      = do_tween(time, source.projection.lens_p2,   dest.projection.lens_p2,   duration, tween);
+    result.projection.source_lens  = dest.projection.source_lens;
     result.projection.curve_enable = dest.projection.curve_enable;
     result.projection.curve_type   = dest.projection.curve_type;
+    result.projection.curve_auto   = dest.projection.curve_auto;
     result.projection.screen_arc   = do_tween(time, source.projection.screen_arc, dest.projection.screen_arc, duration, tween);
+    result.projection.screen_arc_v = do_tween(time, source.projection.screen_arc_v, dest.projection.screen_arc_v, duration, tween);
+    result.projection.eye_distance = do_tween(time, source.projection.eye_distance, dest.projection.eye_distance, duration, tween);
+    result.projection.edge_blend_left   = do_tween(time, source.projection.edge_blend_left,   dest.projection.edge_blend_left,   duration, tween);
+    result.projection.edge_blend_right  = do_tween(time, source.projection.edge_blend_right,  dest.projection.edge_blend_right,  duration, tween);
+    result.projection.edge_blend_top    = do_tween(time, source.projection.edge_blend_top,    dest.projection.edge_blend_top,    duration, tween);
+    result.projection.edge_blend_bottom = do_tween(time, source.projection.edge_blend_bottom, dest.projection.edge_blend_bottom, duration, tween);
+    result.projection.edge_blend_gamma  = do_tween(time, source.projection.edge_blend_gamma,  dest.projection.edge_blend_gamma,  duration, tween);
+    // ICVFX inner/outer frustum
+    result.projection.icvfx_enable       = dest.projection.icvfx_enable;
+    result.projection.inner_yaw          = do_tween(time, source.projection.inner_yaw,          dest.projection.inner_yaw,          duration, tween);
+    result.projection.inner_pitch        = do_tween(time, source.projection.inner_pitch,        dest.projection.inner_pitch,        duration, tween);
+    result.projection.inner_roll         = do_tween(time, source.projection.inner_roll,         dest.projection.inner_roll,         duration, tween);
+    result.projection.inner_fov          = do_tween(time, source.projection.inner_fov,          dest.projection.inner_fov,          duration, tween);
+    result.projection.inner_eye_distance = do_tween(time, source.projection.inner_eye_distance, dest.projection.inner_eye_distance, duration, tween);
+    result.projection.inner_offset_x     = do_tween(time, source.projection.inner_offset_x,     dest.projection.inner_offset_x,     duration, tween);
+    result.projection.inner_offset_y     = do_tween(time, source.projection.inner_offset_y,     dest.projection.inner_offset_y,     duration, tween);
+    // Mask quad corners snap to destination (geometry recomputed per-frame by previz)
+    result.projection.icvfx_q0x          = dest.projection.icvfx_q0x;
+    result.projection.icvfx_q0y          = dest.projection.icvfx_q0y;
+    result.projection.icvfx_q1x          = dest.projection.icvfx_q1x;
+    result.projection.icvfx_q1y          = dest.projection.icvfx_q1y;
+    result.projection.icvfx_q2x          = dest.projection.icvfx_q2x;
+    result.projection.icvfx_q2y          = dest.projection.icvfx_q2y;
+    result.projection.icvfx_q3x          = dest.projection.icvfx_q3x;
+    result.projection.icvfx_q3y          = dest.projection.icvfx_q3y;
+    result.projection.icvfx_feather      = do_tween(time, source.projection.icvfx_feather,    dest.projection.icvfx_feather,    duration, tween);
+    result.projection.icvfx_outer_dim    = do_tween(time, source.projection.icvfx_outer_dim,  dest.projection.icvfx_outer_dim,  duration, tween);
     result.color_grade             = dest.color_grade;
     result.color_grade.exposure = static_cast<float>(do_tween(time, static_cast<double>(source.color_grade.exposure), static_cast<double>(dest.color_grade.exposure), duration, tween));
     result.temperature    = do_tween(time, source.temperature, dest.temperature, duration, tween);
@@ -284,6 +320,8 @@ bool operator==(const image_transform& lhs, const image_transform& rhs)
                eq(lhs.projection.lens_k1, rhs.projection.lens_k1) &&
                eq(lhs.projection.lens_k2, rhs.projection.lens_k2) &&
                eq(lhs.projection.lens_k3, rhs.projection.lens_k3) &&
+               eq(lhs.projection.lens_p1, rhs.projection.lens_p1) &&
+               eq(lhs.projection.lens_p2, rhs.projection.lens_p2) &&
                lhs.projection.curve_enable == rhs.projection.curve_enable &&
                lhs.projection.curve_type   == rhs.projection.curve_type   &&
                eq(lhs.projection.screen_arc, rhs.projection.screen_arc)   &&

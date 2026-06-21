@@ -862,33 +862,60 @@ struct image_kernel::impl
             uniforms.view_fov       = static_cast<float>(transforms.image_transform.projection.fov);
             uniforms.view_offset_x  = static_cast<float>(transforms.image_transform.projection.offset_x);
             uniforms.view_offset_y  = static_cast<float>(transforms.image_transform.projection.offset_y);
-            uniforms.frustum_h      = static_cast<float>(transforms.image_transform.projection.frustum_h);
-            uniforms.frustum_v      = static_cast<float>(transforms.image_transform.projection.frustum_v);
+            uniforms.frustum_h      = std::clamp(static_cast<float>(transforms.image_transform.projection.frustum_h), -1.0f, 1.0f);
+            uniforms.frustum_v      = std::clamp(static_cast<float>(transforms.image_transform.projection.frustum_v), -1.0f, 1.0f);
             uniforms.lens_k1        = static_cast<float>(transforms.image_transform.projection.lens_k1);
             uniforms.lens_k2        = static_cast<float>(transforms.image_transform.projection.lens_k2);
             uniforms.lens_k3        = static_cast<float>(transforms.image_transform.projection.lens_k3);
+            uniforms.lens_p1        = static_cast<float>(transforms.image_transform.projection.lens_p1);
+            uniforms.lens_p2        = static_cast<float>(transforms.image_transform.projection.lens_p2);
+            uniforms.source_lens    = static_cast<int32_t>(transforms.image_transform.projection.source_lens);
         }
 
         // ── Curved Screen ─────────────────────────────────────────────
         if (transforms.image_transform.projection.curve_enable)
             uniforms.flags |= static_cast<uint32_t>(shader_flags::is_curved);
         uniforms.screen_curve_type = static_cast<int32_t>(transforms.image_transform.projection.curve_type);
-        uniforms.screen_arc        = static_cast<float>(transforms.image_transform.projection.screen_arc);
+        uniforms.screen_arc        = std::clamp(static_cast<float>(transforms.image_transform.projection.screen_arc), -6.2831853f, 6.2831853f);
+        uniforms.screen_arc_v      = std::clamp(static_cast<float>(transforms.image_transform.projection.screen_arc_v), -6.2831853f, 6.2831853f);
+        uniforms.eye_distance      = std::max(static_cast<float>(transforms.image_transform.projection.eye_distance), 0.05f);
 
         // ── Edge Blending ─────────────────────────────────────────────
         {
-            float ebl = static_cast<float>(transforms.image_transform.projection.edge_blend_left);
-            float ebr = static_cast<float>(transforms.image_transform.projection.edge_blend_right);
-            float ebt = static_cast<float>(transforms.image_transform.projection.edge_blend_top);
-            float ebb = static_cast<float>(transforms.image_transform.projection.edge_blend_bottom);
+            float ebl = std::clamp(static_cast<float>(transforms.image_transform.projection.edge_blend_left),   0.0f, 1.0f);
+            float ebr = std::clamp(static_cast<float>(transforms.image_transform.projection.edge_blend_right),  0.0f, 1.0f);
+            float ebt = std::clamp(static_cast<float>(transforms.image_transform.projection.edge_blend_top),    0.0f, 1.0f);
+            float ebb = std::clamp(static_cast<float>(transforms.image_transform.projection.edge_blend_bottom), 0.0f, 1.0f);
             if (ebl > epsilon || ebr > epsilon || ebt > epsilon || ebb > epsilon) {
                 uniforms.flags |= static_cast<uint32_t>(shader_flags::edge_blend);
                 uniforms.edge_blend_left   = ebl;
                 uniforms.edge_blend_right  = ebr;
                 uniforms.edge_blend_top    = ebt;
                 uniforms.edge_blend_bottom = ebb;
-                uniforms.edge_blend_gamma  = static_cast<float>(transforms.image_transform.projection.edge_blend_gamma);
+                uniforms.edge_blend_gamma  = std::clamp(static_cast<float>(transforms.image_transform.projection.edge_blend_gamma), 0.5f, 4.0f);
             }
+        }
+
+        // ── ICVFX inner/outer frustum ─────────────────────────────────
+        if (transforms.image_transform.projection.icvfx_enable) {
+            const auto& proj = transforms.image_transform.projection;
+            uniforms.flags2 |= static_cast<uint32_t>(shader_flags2::icvfx_enable);
+            uniforms.inner_yaw       = static_cast<float>(proj.inner_yaw);
+            uniforms.inner_pitch     = static_cast<float>(proj.inner_pitch);
+            uniforms.inner_roll      = static_cast<float>(proj.inner_roll);
+            uniforms.inner_fov       = static_cast<float>(proj.inner_fov);
+            uniforms.inner_offset_x  = static_cast<float>(proj.inner_offset_x);
+            uniforms.inner_offset_y  = static_cast<float>(proj.inner_offset_y);
+            uniforms.icvfx_q0x       = static_cast<float>(proj.icvfx_q0x);
+            uniforms.icvfx_q0y       = static_cast<float>(proj.icvfx_q0y);
+            uniforms.icvfx_q1x       = static_cast<float>(proj.icvfx_q1x);
+            uniforms.icvfx_q1y       = static_cast<float>(proj.icvfx_q1y);
+            uniforms.icvfx_q2x       = static_cast<float>(proj.icvfx_q2x);
+            uniforms.icvfx_q2y       = static_cast<float>(proj.icvfx_q2y);
+            uniforms.icvfx_q3x       = static_cast<float>(proj.icvfx_q3x);
+            uniforms.icvfx_q3y       = static_cast<float>(proj.icvfx_q3y);
+            uniforms.icvfx_feather   = std::max(static_cast<float>(proj.icvfx_feather), 1e-4f);
+            uniforms.icvfx_outer_dim = std::clamp(static_cast<float>(proj.icvfx_outer_dim), 0.0f, 1.0f);
         }
 
         // ── Blur ──────────────────────────────────────────────────────

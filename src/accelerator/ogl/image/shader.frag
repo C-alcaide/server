@@ -59,11 +59,16 @@ uniform float frustum_v;     // off-axis frustum shift vertical
 uniform float lens_k1;       // radial distortion coefficient
 uniform float lens_k2;       // radial distortion coefficient
 uniform float lens_k3;       // radial distortion coefficient
+uniform float lens_p1;       // tangential (decentering) coefficient
+uniform float lens_p2;       // tangential (decentering) coefficient
 
 // Curved screen compensation
 uniform bool  is_curved;          // true when curve compensation is active
 uniform int   screen_curve_type;  // 0=flat, 1=cylinder (horizontal), 2=sphere (radial), 3=fisheye
-uniform float screen_arc;         // total arc angle in radians
+uniform float screen_arc;         // total horizontal arc angle in radians
+uniform float screen_arc_v;       // total vertical arc in radians (0 = cylinder; >0 = sphere/dome)
+uniform float eye_distance;       // viewer distance / screen radius (k = Dv/R); 1 = centre of curvature
+uniform int   source_lens;        // virtual-camera lens model for 360 source: 0=rectilinear,1=cyl,2=sph,3=fisheye
 
 // Soft-edge blending (multi-projector overlap)
 uniform float edge_blend_left;    // blend width as fraction of screen (0 = off)
@@ -71,6 +76,25 @@ uniform float edge_blend_right;
 uniform float edge_blend_top;
 uniform float edge_blend_bottom;
 uniform float edge_blend_gamma;   // blend curve gamma (default 2.2)
+
+// ICVFX inner/outer frustum (in-camera VFX)
+uniform bool  icvfx_enable;       // true when inner-frustum blend is active
+uniform float inner_yaw;          // inner (camera-eye) view yaw   in radians
+uniform float inner_pitch;        // inner view pitch in radians
+uniform float inner_roll;         // inner view roll  in radians
+uniform float inner_fov;          // inner vertical FOV in radians
+uniform float inner_offset_x;     // inner NDC lens-shift X
+uniform float inner_offset_y;     // inner NDC lens-shift Y
+uniform float icvfx_q0x;          // camera-frustum mask quad corner UL (output NDC)
+uniform float icvfx_q0y;
+uniform float icvfx_q1x;          // UR
+uniform float icvfx_q1y;
+uniform float icvfx_q2x;          // LR
+uniform float icvfx_q2y;
+uniform float icvfx_q3x;          // LL
+uniform float icvfx_q3y;
+uniform float icvfx_feather;      // mask edge feather in NDC units
+uniform float icvfx_outer_dim;    // outer-region brightness multiplier (0..1)
 
 // Color Grading (ACES workflow)
 uniform bool  color_grading;
@@ -1090,65 +1114,72 @@ vec3 apply_tone_mapping(vec3 rgb, int op) {
 const float PI = 3.14159265359;
 
 // ---- Curved screen UV warp for flat (non-360) content ----
-// Compensates for a curved destination screen by applying the inverse of the
-// angular distortion the screen introduces, so that straight content lines
-// appear straight to a viewer sitting at the focus point of the arc.
-//   screen_curve_type 1 = horizontal cylinder  (arc applies left-right only)
-//   screen_curve_type 2 = full sphere/dome     (warp applied to both axes)
-//   screen_arc = total arc in radians  (positive = convex away from viewer,
-//                                       negative = concave toward viewer)
+// Pre-warps rectilinear content so straight lines appear straight to a viewer
+// looking at a physically curved DESTINATION screen.
+//   screen_curve_type 1 = horizontal cylinder (warp X only)
+//   screen_curve_type 2 = sphere / dome       (radial warp, symmetric)
+//   screen_curve_type 3 = equidistant fisheye (radial, geometry-defined)
+//   screen_arc   = total arc subtended by the screen surface (radians)
+//   eye_distance = viewer distance / screen radius (k = Dv/R); 1 = centre of curvature
 //
-// Convex mapping  (gnomonic):  content_x = tan(screen_x * half_arc) / tan(half_arc)
-// Concave mapping (inverse):   content_x = atan(screen_x * tan(half_arc)) / half_arc
+// Cylinder/sphere use the physical viewing-angle relationship
+//   theta(alpha) = atan2(sin alpha, k - (1 - cos alpha))
+// where alpha is the screen-surface angle and theta the angle as seen by the
+// viewer.  The rectilinear content coordinate is tan(theta)/tan(theta_edge).
+// k = 1 (viewer at the centre of curvature) reduces this to the classic
+// tan(s*half_arc)/tan(half_arc) mapping.  Edge angles are clamped below 90 deg
+// so the warp stays finite for arcs up to and beyond 180 deg.
+float curve_warp_axis(float s, float half_arc, float k) {
+    float thm = atan(sin(half_arc), k - (1.0 - cos(half_arc)));
+    thm = clamp(thm, -1.55334, 1.55334);            // guard edge angle < ~89 deg
+    float a  = s * half_arc;
+    float th = atan(sin(a), k - (1.0 - cos(a)));
+    th = clamp(th, -1.55334, 1.55334);
+    return tan(th) / tan(thm);
+}
+
 vec2 apply_curve_warp(vec2 uv) {
-    if (abs(screen_arc) < 0.0001)
-        return uv;
-    vec2 ndc = uv * 2.0 - 1.0;
     float half_arc = abs(screen_arc) * 0.5;
-    bool convex = (screen_arc >= 0.0);
+    if (half_arc < 0.0001)
+        return uv;
+    float k = max(eye_distance, 0.05);
+    float half_arc_v = abs(screen_arc_v) * 0.5;
+    vec2 ndc = uv * 2.0 - 1.0;
     if (screen_curve_type == 1) {
-        // Cylinder: horizontal-only warp.  ndc.x in [-1..1] maps to
-        // [-half_arc..+half_arc] on the screen surface.  No aspect_ratio needed.
-        if (convex) {
-            ndc.x = tan(ndc.x * half_arc) / tan(half_arc);
-        } else {
-            ndc.x = atan(ndc.x * tan(half_arc)) / half_arc;
-        }
+        // Cylinder: horizontal-only physical warp.
+        ndc.x = curve_warp_axis(ndc.x, half_arc, k);
     } else if (screen_curve_type == 2) {
-        // Sphere/dome: warp both axes.  Vertical arc derived from aspect ratio.
-        float vert_half = half_arc / aspect_ratio;
-        if (convex) {
-            ndc.x = tan(ndc.x * half_arc)  / tan(half_arc);
-            ndc.y = tan(ndc.y * vert_half) / tan(vert_half);
+        if (half_arc_v > 0.0001) {
+            // Doubly-curved screen: independent horizontal and vertical arcs
+            // (toroidal). Each axis warped separately by its own physical arc.
+            ndc.x = curve_warp_axis(ndc.x, half_arc,   k);
+            ndc.y = curve_warp_axis(ndc.y, half_arc_v, k);
         } else {
-            ndc.x = atan(ndc.x * tan(half_arc))  / half_arc;
-            ndc.y = atan(ndc.y * tan(vert_half)) / vert_half;
+            // Symmetric sphere/dome: radially-symmetric warp (no aspect coupling).
+            float r = length(ndc);
+            if (r > 0.0001)
+                ndc *= curve_warp_axis(r, half_arc, k) / r;
         }
     } else if (screen_curve_type == 3) {
-        // Fisheye (equidistant): radial warp.  r maps linearly to angle.
+        // Equidistant fisheye screen: radius maps linearly to angle.
         float r = length(ndc);
         if (r > 0.0001) {
-            if (convex) {
-                float angle = r * half_arc;
-                float warped_r = tan(angle) / tan(half_arc);
-                ndc *= warped_r / r;
-            } else {
-                float angle = atan(r * tan(half_arc));
-                float warped_r = angle / half_arc;
-                ndc *= warped_r / r;
-            }
+            float thm = min(half_arc, 1.55334);
+            float warped_r = tan(r * half_arc) / tan(thm);
+            ndc *= warped_r / r;
         }
     }
     return ndc * 0.5 + 0.5;
 }
 
-vec2 get_equirect_uv(vec2 screen_uv) {
+vec2 get_equirect_uv_ex(vec2 screen_uv,
+                        float p_yaw, float p_pitch, float p_roll,
+                        float p_fov, float p_off_x, float p_off_y) {
     // 1. Convert Screen UV (0..1) to Normalized Device Coordinates (-1..1)
     vec2 ndc = screen_uv * 2.0 - 1.0;
     // Lens-shift: slide the viewport across the sphere without changing orientation
-    ndc -= vec2(view_offset_x, view_offset_y);
-
-    // 1b. Lens distortion correction (Brown-Conrady radial model)
+    ndc -= vec2(p_off_x, p_off_y);
+    // 1b. Lens distortion correction (Brown-Conrady model, OpenLensIO-compatible)
     // Applies inverse distortion so the output matches a physical camera lens.
     if (lens_k1 != 0.0 || lens_k2 != 0.0 || lens_k3 != 0.0) {
         float r2 = dot(ndc, ndc);
@@ -1157,46 +1188,48 @@ vec2 get_equirect_uv(vec2 screen_uv) {
         float radial = 1.0 + lens_k1 * r2 + lens_k2 * r4 + lens_k3 * r6;
         ndc *= radial;
     }
+    // 1c. Tangential (decentering) distortion — Brown-Conrady p1/p2 terms.
+    if (lens_p1 != 0.0 || lens_p2 != 0.0) {
+        float x  = ndc.x;
+        float y  = ndc.y;
+        float r2 = x * x + y * y;
+        ndc.x += 2.0 * lens_p1 * x * y + lens_p2 * (r2 + 2.0 * x * x);
+        ndc.y += lens_p1 * (r2 + 2.0 * y * y) + 2.0 * lens_p2 * x * y;
+    }
 
     // 2. Calculate View Vector
-    // screen_arc  â€” physical arc of the curved screen in radians.
-    //               For curved screens, this fully determines the pixel-to-angle
-    //               mapping (matching Disguise / Assimilate behaviour).
-    // view_fov    â€” virtual camera FOV; only affects the flat-screen (rectilinear)
-    //               projection.  scale = tan(fov/2), unit zoom at fov = 90Â°.
-    float scale = tan(view_fov * 0.5);  // zoom factor for flat screen only
+    // source_lens — virtual-camera lens model used to sample the 360 source.
+    //   0 = rectilinear (flat/gnomonic), 1 = cylinder, 2 = sphere, 3 = fisheye.
+    // p_fov       — virtual camera field of view (radians); drives the angular
+    //               span for every lens model.  The image aspect ratio derives
+    //               the vertical span from the horizontal one.
+    float scale     = tan(p_fov * 0.5);  // rectilinear zoom factor
+    float half_fov  = p_fov * 0.5;       // angular half-span for curved lenses
     vec3 dir;
-    if (screen_curve_type == 1) {
-        // Horizontal cylinder: each screen pixel is at a fixed angular position
-        // determined by the physical screen arc.  No FOV scaling.
-        // Vertical extent derived from screen geometry (arc_length / aspect_ratio).
-        float half_arc   = screen_arc * 0.5;
-        float angle_h    = ndc.x * half_arc;
-        float vert_scale = half_arc / aspect_ratio;
+    if (source_lens == 1) {
+        // Cylindrical lens: horizontal pixels map to azimuth, vertical stays linear.
+        float angle_h    = ndc.x * half_fov;
+        float vert_scale = half_fov / aspect_ratio;
         dir = vec3(sin(angle_h), ndc.y * vert_scale, -cos(angle_h));
-    } else if (screen_curve_type == 2) {
-        // Full sphere/dome: each pixel maps to (azimuth, elevation) on the sphere.
-        // Horizontal angular span = screen_arc; vertical = screen_arc / aspect_ratio.
-        float half_arc  = screen_arc * 0.5;
-        float vert_half = half_arc / aspect_ratio;
-        float ang_h = ndc.x * half_arc;
+    } else if (source_lens == 2) {
+        // Spherical lens: pixels map to (azimuth, elevation) on the sphere.
+        float vert_half = half_fov / aspect_ratio;
+        float ang_h = ndc.x * half_fov;
         float ang_v = ndc.y * vert_half;
         dir = vec3(sin(ang_h) * cos(ang_v), sin(ang_v), -cos(ang_h) * cos(ang_v));
-    } else if (screen_curve_type == 3) {
-        // Fisheye (equidistant): r maps linearly to angle from optical axis.
-        // screen_arc = total angular diameter of the fisheye field.
-        float half_arc = screen_arc * 0.5;
+    } else if (source_lens == 3) {
+        // Equidistant fisheye lens: r maps linearly to angle from optical axis.
         float r = length(ndc);
         if (r < 0.0001) {
             dir = vec3(0.0, 0.0, -1.0);
         } else {
-            float theta = r * half_arc;    // angle from optical axis
+            float theta = r * half_fov;    // angle from optical axis
             float sin_t = sin(theta);
             float cos_t = cos(theta);
             dir = vec3(ndc.x / r * sin_t, ndc.y / r * sin_t, -cos_t);
         }
     } else {
-        // Flat screen â€” standard rectilinear (gnomonic) projection.
+        // Rectilinear (flat/gnomonic) lens.
         // Off-axis frustum shift: offset the NDC centre to render a sub-frustum
         // (used for multi-projector tiling without changing the viewing direction).
         vec2 shifted_ndc = ndc + vec2(frustum_h, frustum_v);
@@ -1206,15 +1239,15 @@ vec2 get_equirect_uv(vec2 screen_uv) {
 
     // 3. Rotation Matrices
     // Roll (Z)
-    float cr = cos(view_roll); float sr = sin(view_roll);
+    float cr = cos(p_roll); float sr = sin(p_roll);
     mat3 rot_z = mat3(cr, -sr, 0.0, sr, cr, 0.0, 0.0, 0.0, 1.0);
     
     // Pitch (X)
-    float cp = cos(view_pitch); float sp = sin(view_pitch);
+    float cp = cos(p_pitch); float sp = sin(p_pitch);
     mat3 rot_x = mat3(1.0, 0.0, 0.0, 0.0, cp, -sp, 0.0, sp, cp);
     
     // Yaw (Y)
-    float cy = cos(view_yaw); float sy = sin(view_yaw);
+    float cy = cos(p_yaw); float sy = sin(p_yaw);
     mat3 rot_y = mat3(cy, 0.0, sy, 0.0, 1.0, 0.0, -sy, 0.0, cy);
 
     // Apply rotations: Yaw * Pitch * Roll * dir
@@ -1231,6 +1264,34 @@ vec2 get_equirect_uv(vec2 screen_uv) {
     
     return uv;
 }
+
+vec2 get_equirect_uv(vec2 screen_uv) {
+    return get_equirect_uv_ex(screen_uv, view_yaw, view_pitch, view_roll,
+                              view_fov, view_offset_x, view_offset_y);
+}
+
+// ICVFX camera-frustum mask: returns 1 inside the projected camera quad,
+// 0 outside, feathered across icvfx_feather (output-NDC units).  Winding
+// independent so the quad orientation does not need normalising upstream.
+float icvfx_mask(vec2 screen_uv) {
+    vec2 p = screen_uv * 2.0 - 1.0;
+    vec2 c0 = vec2(icvfx_q0x, icvfx_q0y);
+    vec2 c1 = vec2(icvfx_q1x, icvfx_q1y);
+    vec2 c2 = vec2(icvfx_q2x, icvfx_q2y);
+    vec2 c3 = vec2(icvfx_q3x, icvfx_q3y);
+    float area = (c0.x*c1.y - c1.x*c0.y) + (c1.x*c2.y - c2.x*c1.y)
+               + (c2.x*c3.y - c3.x*c2.y) + (c3.x*c0.y - c0.x*c3.y);
+    float wind = (area >= 0.0) ? 1.0 : -1.0;
+    float md = 1e9;
+    vec2 a, b, e, nrm;
+    a = c0; b = c1; e = b - a; nrm = vec2(-e.y, e.x); md = min(md, dot(p - a, nrm) * wind / max(length(nrm), 1e-6));
+    a = c1; b = c2; e = b - a; nrm = vec2(-e.y, e.x); md = min(md, dot(p - a, nrm) * wind / max(length(nrm), 1e-6));
+    a = c2; b = c3; e = b - a; nrm = vec2(-e.y, e.x); md = min(md, dot(p - a, nrm) * wind / max(length(nrm), 1e-6));
+    a = c3; b = c0; e = b - a; nrm = vec2(-e.y, e.x); md = min(md, dot(p - a, nrm) * wind / max(length(nrm), 1e-6));
+    float f = max(icvfx_feather, 1e-4);
+    return clamp(md / f, 0.0, 1.0);
+}
+
 
 vec4 get_sample(sampler2D sampler, vec2 coords)
 {
@@ -1526,40 +1587,34 @@ void main()
 {
     vec2 base_uv = TexCoord.st / TexCoord.q;
     vec4 col;
-    if (is_360) {
-        // 360Â° equirectangular path â€” curve type used inside get_equirect_uv()
-        vec2 uv_rect = get_equirect_uv(base_uv);
-        if (flip_h) uv_rect.s = 1.0 - uv_rect.s;
-        if (flip_v) uv_rect.t = 1.0 - uv_rect.t;
-        col = get_blurred_color(uv_rect);
-    } else if (is_curved) {
-        // Flat content on curved screen â€” apply tangent UV warp
-        vec2 uv_warped = apply_curve_warp(base_uv);
-        if (flip_h) uv_warped.s = 1.0 - uv_warped.s;
-        if (flip_v) uv_warped.t = 1.0 - uv_warped.t;
-        col = get_blurred_color(uv_warped);
-    } else {
-        vec2 uv_flipped = base_uv;
-        if (flip_h) uv_flipped.s = 1.0 - uv_flipped.s;
-        if (flip_v) uv_flipped.t = 1.0 - uv_flipped.t;
-        col = get_blurred_color(uv_flipped);
+    // Destination curve compensation is orthogonal to the source projection:
+    // warp the screen UV first, then sample either the flat or 360 source.
+    vec2 view_uv = is_curved ? apply_curve_warp(base_uv) : base_uv;
+    vec2 uv = is_360 ? get_equirect_uv(view_uv) : view_uv;
+    if (flip_h) uv.s = 1.0 - uv.s;
+    if (flip_v) uv.t = 1.0 - uv.t;
+    col = get_blurred_color(uv);
+
+    // ICVFX inner/outer frustum: blend a parallax-correct inner sample over the
+    // dimmed outer sample inside the feathered camera-frustum quad mask.
+    if (icvfx_enable) {
+        float m = icvfx_mask(base_uv);
+        col.rgb *= icvfx_outer_dim;
+        if (m > 0.0) {
+            vec2 iuv = is_360
+                ? get_equirect_uv_ex(view_uv, inner_yaw, inner_pitch, inner_roll,
+                                     inner_fov, inner_offset_x, inner_offset_y)
+                : view_uv;
+            if (flip_h) iuv.s = 1.0 - iuv.s;
+            if (flip_v) iuv.t = 1.0 - iuv.t;
+            vec4 icol = get_blurred_color(iuv);
+            col = mix(col, icol, m);
+        }
     }
 
     // Apply sharpening (operates on texture samples, before color grading)
     if (sharpen_enable) {
-        vec2 sharp_uv = base_uv;
-        if (is_360) {
-            sharp_uv = get_equirect_uv(base_uv);
-            if (flip_h) sharp_uv.s = 1.0 - sharp_uv.s;
-            if (flip_v) sharp_uv.t = 1.0 - sharp_uv.t;
-        } else if (is_curved) {
-            sharp_uv = apply_curve_warp(base_uv);
-            if (flip_h) sharp_uv.s = 1.0 - sharp_uv.s;
-            if (flip_v) sharp_uv.t = 1.0 - sharp_uv.t;
-        } else {
-            if (flip_h) sharp_uv.s = 1.0 - sharp_uv.s;
-            if (flip_v) sharp_uv.t = 1.0 - sharp_uv.t;
-        }
+        vec2 sharp_uv = uv;
         col.rgb = apply_sharpen(sharp_uv, col.rgb, sharpen_amount, sharpen_radius);
     }
     
