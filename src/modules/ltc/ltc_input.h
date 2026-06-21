@@ -24,6 +24,8 @@
 #include <string>
 #include <vector>
 #include <mutex>
+#include <chrono>
+#include <cstdint>
 
 namespace caspar { namespace ltc {
     class LTCInput {
@@ -33,6 +35,16 @@ namespace caspar { namespace ltc {
         std::string get_current_timecode_string();
         uint32_t get_current_frame_number(int fps);
         bool is_valid();
+
+        // Genlock anchor: maps the most-recently decoded house timecode to the
+        // steady_clock instant it was captured, so consumers can align their own
+        // steady_clock-stamped data to the house frame grid.
+        // Returns false if there is no currently-valid LTC signal.
+        //   out_frame = absolute frame number of that timecode at `fps`
+        //   out_time  = steady_clock instant the timecode was decoded
+        bool get_timecode_anchor(int fps,
+                                 uint32_t&                              out_frame,
+                                 std::chrono::steady_clock::time_point& out_time);
         
         // Device management
         std::vector<std::string> get_capture_devices();

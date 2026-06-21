@@ -22,6 +22,7 @@
 #include "camera_data.h"
 #include "tracker_binding.h"
 
+#include <deque>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -51,6 +52,15 @@ class tracker_registry
     void update_scale(int channel, int layer, double pan_scale, double tilt_scale, double zoom_full_range);
     void update_zoom_default_fov(int channel, int layer, double fov_rad);
     void update_position_scale(int channel, int layer, double scale);
+    void update_delay(int channel, int layer, double delay_ms);
+    void update_genlock(int channel, int layer, bool enable, double frames);
+    void update_nodal(int channel, int layer, double forward_m, double right_m, double up_m);
+    void update_dof(int channel, int layer, bool enable, double near_raw, double far_raw, double max_radius);
+    void update_lens(int channel, int layer, std::shared_ptr<lens_profile> lens);
+    void update_target_camera(int channel, int layer, bool enable,
+                              double x, double y, double z,
+                              double yaw_rad, double pitch_rad, double roll_rad, double fov_rad);
+    void update_target_map(int channel, int layer, double gain, double ref_dist_m, double aspect);
 
     // ----- Called by protocol receivers when a packet arrives -----------------
 
@@ -70,6 +80,10 @@ class tracker_registry
     mutable std::mutex                               mutex_;
     std::map<std::pair<int, int>, tracker_binding>   bindings_;
     std::map<int, camera_data>                       latest_data_;
+
+    /// Per-camera_id time-ordered history of recent samples, used to reconstruct
+    /// a delayed pose for latency compensation (see tracker_binding::delay_ms).
+    std::map<int, std::deque<camera_data>>           sample_history_;
 
     void inject_transform(const tracker_binding& binding, const camera_data& data);
 };

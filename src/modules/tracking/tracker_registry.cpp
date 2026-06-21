@@ -19,6 +19,10 @@
 
 #include "tracker_registry.h"
 
+#include "lens_profile.h"
+
+#include "../ltc/ltc_input.h"
+
 #include <core/frame/frame_transform.h>
 #include <core/producer/stage.h>
 #include <common/tweener.h>
@@ -28,6 +32,12 @@
 #include <stdexcept>
 
 namespace caspar { namespace tracking {
+
+namespace {
+// History retention bounds for the latency-compensation buffer.
+constexpr int HISTORY_WINDOW_MS   = 2000; ///< Drop samples older than this (relative to newest).
+constexpr int HISTORY_MAX_SAMPLES = 512;  ///< Hard cap on buffered samples per camera.
+} // namespace
 
 tracker_registry& tracker_registry::instance()
 {
@@ -110,6 +120,87 @@ void tracker_registry::update_position_scale(int channel, int layer, double scal
     it->second.position_scale = scale;
 }
 
+void tracker_registry::update_delay(int channel, int layer, double delay_ms)
+{
+    std::lock_guard<std::mutex> lk(mutex_);
+    auto it = bindings_.find({channel, layer});
+    if (it == bindings_.end())
+        throw std::runtime_error("No binding at channel/layer");
+    it->second.delay_ms = delay_ms;
+}
+
+void tracker_registry::update_genlock(int channel, int layer, bool enable, double frames)
+{
+    std::lock_guard<std::mutex> lk(mutex_);
+    auto it = bindings_.find({channel, layer});
+    if (it == bindings_.end())
+        throw std::runtime_error("No binding at channel/layer");
+    it->second.genlock_enable = enable;
+    it->second.genlock_frames = frames;
+}
+
+void tracker_registry::update_nodal(int channel, int layer, double forward_m, double right_m, double up_m)
+{
+    std::lock_guard<std::mutex> lk(mutex_);
+    auto it = bindings_.find({channel, layer});
+    if (it == bindings_.end())
+        throw std::runtime_error("No binding at channel/layer");
+    it->second.nodal_forward_m = forward_m;
+    it->second.nodal_right_m   = right_m;
+    it->second.nodal_up_m      = up_m;
+}
+
+void tracker_registry::update_dof(int channel, int layer, bool enable, double near_raw, double far_raw, double max_radius)
+{
+    std::lock_guard<std::mutex> lk(mutex_);
+    auto it = bindings_.find({channel, layer});
+    if (it == bindings_.end())
+        throw std::runtime_error("No binding at channel/layer");
+    it->second.dof_enable         = enable;
+    it->second.dof_focus_near_raw = near_raw;
+    it->second.dof_focus_far_raw  = far_raw;
+    it->second.dof_max_radius     = max_radius;
+}
+
+void tracker_registry::update_lens(int channel, int layer, std::shared_ptr<lens_profile> lens)
+{
+    std::lock_guard<std::mutex> lk(mutex_);
+    auto it = bindings_.find({channel, layer});
+    if (it == bindings_.end())
+        throw std::runtime_error("No binding at channel/layer");
+    it->second.lens = std::move(lens);
+}
+
+void tracker_registry::update_target_camera(int channel, int layer, bool enable,
+                                            double x, double y, double z,
+                                            double yaw_rad, double pitch_rad, double roll_rad, double fov_rad)
+{
+    std::lock_guard<std::mutex> lk(mutex_);
+    auto it = bindings_.find({channel, layer});
+    if (it == bindings_.end())
+        throw std::runtime_error("No binding at channel/layer");
+    it->second.target_enable    = enable;
+    it->second.target_cam_x     = x;
+    it->second.target_cam_y     = y;
+    it->second.target_cam_z     = z;
+    it->second.target_cam_yaw   = yaw_rad;
+    it->second.target_cam_pitch = pitch_rad;
+    it->second.target_cam_roll  = roll_rad;
+    it->second.target_cam_fov   = fov_rad;
+}
+
+void tracker_registry::update_target_map(int channel, int layer, double gain, double ref_dist_m, double aspect)
+{
+    std::lock_guard<std::mutex> lk(mutex_);
+    auto it = bindings_.find({channel, layer});
+    if (it == bindings_.end())
+        throw std::runtime_error("No binding at channel/layer");
+    it->second.target_gain       = gain;
+    it->second.target_ref_dist_m = ref_dist_m;
+    if (aspect > 0.0)
+        it->second.target_aspect = aspect;
+}
+
 // ---- Data injection --------------------------------------------------------
 
 /// Compute effective FOV in radians from a raw zoom value and the binding params.
@@ -139,6 +230,59 @@ static double compute_fov(const tracker_binding& b, uint16_t zoom_raw)
     return 2.0 * std::atan(std::tan(b.zoom_default_fov * 0.5) * b.zoom_full_range / z);
 }
 
+/// Shortest-path angular interpolation (handles wrap-around at ±π).
+static double lerp_angle(double a, double b, double t)
+{
+    double diff = b - a;
+    while (diff > M_PI)
+        diff -= 2.0 * M_PI;
+    while (diff < -M_PI)
+        diff += 2.0 * M_PI;
+    return a + diff * t;
+}
+
+/// Reconstruct a camera pose at target_time by interpolating between buffered
+/// samples. `history` must be ordered oldest→newest by timestamp.
+/// Clamps to the oldest/newest sample when target_time falls outside the buffer.
+static camera_data interpolate_history(const std::deque<camera_data>&        history,
+                                       std::chrono::steady_clock::time_point target_time)
+{
+    if (history.empty())
+        return camera_data{};
+    if (history.size() == 1 || target_time <= history.front().timestamp)
+        return history.front();
+    if (target_time >= history.back().timestamp)
+        return history.back();
+
+    // First sample with timestamp >= target_time.
+    auto hi = std::lower_bound(history.begin(),
+                               history.end(),
+                               target_time,
+                               [](const camera_data& s, std::chrono::steady_clock::time_point t) {
+                                   return s.timestamp < t;
+                               });
+    auto lo = std::prev(hi);
+
+    const double span = std::chrono::duration<double>(hi->timestamp - lo->timestamp).count();
+    const double t    = (span > 0.0)
+                         ? std::chrono::duration<double>(target_time - lo->timestamp).count() / span
+                         : 0.0;
+
+    camera_data out;
+    out.camera_id = lo->camera_id;
+    out.pan       = lerp_angle(lo->pan, hi->pan, t);
+    out.tilt      = lerp_angle(lo->tilt, hi->tilt, t);
+    out.roll      = lerp_angle(lo->roll, hi->roll, t);
+    out.x         = lo->x + (hi->x - lo->x) * t;
+    out.y         = lo->y + (hi->y - lo->y) * t;
+    out.z         = lo->z + (hi->z - lo->z) * t;
+    out.zoom      = static_cast<uint16_t>(std::lround(lo->zoom + (static_cast<double>(hi->zoom) - lo->zoom) * t));
+    out.focus     = static_cast<uint16_t>(std::lround(lo->focus + (static_cast<double>(hi->focus) - lo->focus) * t));
+    out.iris      = static_cast<uint16_t>(std::lround(lo->iris + (static_cast<double>(hi->iris) - lo->iris) * t));
+    out.timestamp = target_time;
+    return out;
+}
+
 void tracker_registry::inject_transform(const tracker_binding& binding, const camera_data& data)
 {
     auto stage = binding.stage.lock();
@@ -149,9 +293,51 @@ void tracker_registry::inject_transform(const tracker_binding& binding, const ca
     const double pan       = data.pan * binding.pan_scale + binding.pan_offset;
     const double tilt      = data.tilt * binding.tilt_scale + binding.tilt_offset;
     const double roll      = data.roll + binding.roll_offset;
-    const double fov       = compute_fov(binding, data.zoom);
-    const double offset_x  = data.x * binding.position_scale;
-    const double offset_y  = data.y * binding.position_scale;
+
+    // Dynamic lens profile: sample distortion / FOV / nodal forward by (zoom, focus).
+    lens_sample lens{};
+    const bool  has_lens = static_cast<bool>(binding.lens);
+    if (has_lens)
+        lens = binding.lens->sample(static_cast<double>(data.zoom), static_cast<double>(data.focus));
+
+    const double fov = (has_lens && lens.fov_rad > 0.0) ? lens.fov_rad : compute_fov(binding, data.zoom);
+
+    // Entrance-pupil (nodal) offset: shift the tracked position by the lens-local
+    // nodal vector expressed in world space, so an off-axis pupil produces correct
+    // parallax as the camera rotates. Offsets are in metres; positions in mm.
+    // The lens profile's forward offset augments any manual NODAL forward setting.
+    const double nodal_fwd_m = binding.nodal_forward_m + (has_lens ? lens.nodal_forward_m : 0.0);
+    double pos_x = data.x;
+    double pos_y = data.y;
+    double pos_z = data.z;
+    if (nodal_fwd_m != 0.0 || binding.nodal_right_m != 0.0 || binding.nodal_up_m != 0.0) {
+        const double cp = std::cos(pan),  sp = std::sin(pan);
+        const double ct = std::cos(tilt), st = std::sin(tilt);
+        // Camera-frame basis (right-handed: at rest forward=+Z, right=+X, up=+Y).
+        const double fwd[3]   = {sp * ct, st, cp * ct};
+        const double right[3] = {cp, 0.0, -sp};
+        const double up[3]    = {-sp * st, ct, -cp * st};
+        const double nf       = nodal_fwd_m * 1000.0; // m → mm
+        const double nr       = binding.nodal_right_m * 1000.0;
+        const double nu       = binding.nodal_up_m * 1000.0;
+        pos_x += nf * fwd[0] + nr * right[0] + nu * up[0];
+        pos_y += nf * fwd[1] + nr * right[1] + nu * up[1];
+        pos_z += nf * fwd[2] + nr * right[2] + nu * up[2];
+    }
+
+    const double offset_x  = pos_x * binding.position_scale;
+    const double offset_y  = pos_y * binding.position_scale;
+
+    // Faked depth-of-field: map the decoded focus value to a lens-bokeh blur radius.
+    const bool   dof_on     = binding.dof_enable;
+    double       dof_radius = 0.0;
+    if (dof_on) {
+        const double span = binding.dof_focus_far_raw - binding.dof_focus_near_raw;
+        const double t    = (span != 0.0)
+                             ? (static_cast<double>(data.focus) - binding.dof_focus_near_raw) / span
+                             : 0.0;
+        dof_radius = binding.dof_max_radius * std::clamp(t, 0.0, 1.0);
+    }
 
     if (binding.mode == tracking_mode::mode_360) {
         // 360° equirectangular: set yaw / pitch / roll / fov on the projection struct.
@@ -159,7 +345,7 @@ void tracker_registry::inject_transform(const tracker_binding& binding, const ca
         // camera parallax correction inside the sphere.
         stage->apply_transform(
             layer,
-            [pan, tilt, roll, fov, offset_x, offset_y](core::frame_transform t) -> core::frame_transform {
+            [pan, tilt, roll, fov, offset_x, offset_y, dof_on, dof_radius, has_lens, lens](core::frame_transform t) -> core::frame_transform {
                 t.image_transform.projection.enable   = (fov > 0.0);
                 t.image_transform.projection.yaw      = pan;
                 t.image_transform.projection.pitch    = tilt;
@@ -167,6 +353,19 @@ void tracker_registry::inject_transform(const tracker_binding& binding, const ca
                 t.image_transform.projection.fov      = fov;
                 t.image_transform.projection.offset_x = offset_x;
                 t.image_transform.projection.offset_y = offset_y;
+                if (has_lens) {
+                    // Lens profile drives the Brown-Conrady distortion coefficients.
+                    t.image_transform.projection.lens_k1 = lens.k1;
+                    t.image_transform.projection.lens_k2 = lens.k2;
+                    t.image_transform.projection.lens_k3 = lens.k3;
+                    t.image_transform.projection.lens_p1 = lens.p1;
+                    t.image_transform.projection.lens_p2 = lens.p2;
+                }
+                if (dof_on) {
+                    t.image_transform.blur.enable = dof_radius > 0.0;
+                    t.image_transform.blur.radius = dof_radius;
+                    t.image_transform.blur.type   = core::blur_type::lens;
+                }
                 return t;
             },
             0,
@@ -177,13 +376,73 @@ void tracker_registry::inject_transform(const tracker_binding& binding, const ca
         // Positions are in mm from the tracker; convert to metres for the previz API.
         if (binding.previz_camera_fn) {
             binding.previz_camera_fn(
-                static_cast<float>(data.x * binding.position_scale),
-                static_cast<float>(data.y * binding.position_scale),
-                static_cast<float>(data.z * binding.position_scale),
+                static_cast<float>(pos_x * binding.position_scale),
+                static_cast<float>(pos_y * binding.position_scale),
+                static_cast<float>(pos_z * binding.position_scale),
                 static_cast<float>(pan   * 180.0 / M_PI),   // rad → degrees
                 static_cast<float>(tilt  * 180.0 / M_PI),
                 static_cast<float>(roll  * 180.0 / M_PI),
                 static_cast<float>(fov   * 180.0 / M_PI));
+        }
+    } else if (binding.mode == tracking_mode::mode_target) {
+        // Track-target: project the tracked SUBJECT world position through a static
+        // virtual camera to drive this layer's screen position (AR follow). The
+        // subject position is data.x/y/z scaled mm→m by position_scale; orientation
+        // and zoom from the tracker are intentionally ignored here.
+        // target_enable == false (no camera configured) writes no transform.
+        if (binding.target_enable) {
+            // Subject world position (metres).
+            const double sx = data.x * binding.position_scale;
+            const double sy = data.y * binding.position_scale;
+            const double sz = data.z * binding.position_scale;
+            // Vector from camera to subject (world).
+            const double dx = sx - binding.target_cam_x;
+            const double dy = sy - binding.target_cam_y;
+            const double dz = sz - binding.target_cam_z;
+            // World→view: apply inverse camera rotation Rz(-roll)·Rx(-pitch)·Ry(-yaw).
+            const double cy = std::cos(-binding.target_cam_yaw),   sy_ = std::sin(-binding.target_cam_yaw);
+            const double cp = std::cos(-binding.target_cam_pitch), sp_ = std::sin(-binding.target_cam_pitch);
+            const double cr = std::cos(-binding.target_cam_roll),  sr_ = std::sin(-binding.target_cam_roll);
+            // v1 = Ry(-yaw)·d
+            const double v1x =  cy * dx + sy_ * dz;
+            const double v1y =  dy;
+            const double v1z = -sy_ * dx + cy * dz;
+            // v2 = Rx(-pitch)·v1
+            const double v2x =  v1x;
+            const double v2y =  cp * v1y - sp_ * v1z;
+            const double v2z =  sp_ * v1y + cp * v1z;
+            // v3 = Rz(-roll)·v2
+            const double vx =  cr * v2x - sr_ * v2y;
+            const double vy =  sr_ * v2x + cr * v2y;
+            const double vz =  v2z;
+
+            constexpr double kNear = 1e-3;
+            const bool visible = vz > kNear;
+            double fill_x = 0.0, fill_y = 0.0, t_scale = 1.0;
+            if (visible) {
+                const double f      = 1.0 / std::tan(binding.target_cam_fov * 0.5);
+                const double ndc_x  = (vx / vz) * f / binding.target_aspect;
+                const double ndc_y  = (vy / vz) * f;
+                fill_x =  ndc_x * binding.target_gain;
+                fill_y = -ndc_y * binding.target_gain; // screen Y is down
+                t_scale = (binding.target_ref_dist_m > 0.0) ? (binding.target_ref_dist_m / vz) : 1.0;
+            }
+            stage->apply_transform(
+                layer,
+                [visible, fill_x, fill_y, t_scale](core::frame_transform t) -> core::frame_transform {
+                    t.image_transform.enable_geometry_modifiers = true;
+                    // Behind the camera → hide via opacity rather than smearing across frame.
+                    t.image_transform.opacity = visible ? 1.0 : 0.0;
+                    if (visible) {
+                        t.image_transform.fill_translation[0] = fill_x;
+                        t.image_transform.fill_translation[1] = fill_y;
+                        t.image_transform.fill_scale[0]       = t_scale;
+                        t.image_transform.fill_scale[1]       = t_scale;
+                    }
+                    return t;
+                },
+                0,
+                tweener(L"linear"));
         }
     } else {
         // 2D mode: pan → fill_translation X, tilt → fill_translation Y (inverted so up = up),
@@ -194,13 +453,18 @@ void tracker_registry::inject_transform(const tracker_binding& binding, const ca
         const double scale = (fov > 0.0) ? (binding.zoom_default_fov / fov) : 1.0;
         stage->apply_transform(
             layer,
-            [pan, tilt, roll, scale, offset_x, offset_y](core::frame_transform t) -> core::frame_transform {
+            [pan, tilt, roll, scale, offset_x, offset_y, dof_on, dof_radius](core::frame_transform t) -> core::frame_transform {
                 t.image_transform.enable_geometry_modifiers = true;
                 t.image_transform.fill_translation[0]       = pan + offset_x;
                 t.image_transform.fill_translation[1]       = -tilt - offset_y;
                 t.image_transform.angle                     = roll;
                 t.image_transform.fill_scale[0]             = scale;
                 t.image_transform.fill_scale[1]             = scale;
+                if (dof_on) {
+                    t.image_transform.blur.enable = dof_radius > 0.0;
+                    t.image_transform.blur.radius = dof_radius;
+                    t.image_transform.blur.type   = core::blur_type::lens;
+                }
                 return t;
             },
             0,
@@ -211,18 +475,63 @@ void tracker_registry::inject_transform(const tracker_binding& binding, const ca
 void tracker_registry::on_data(const camera_data& data)
 {
     std::vector<tracker_binding> matched;
+    std::deque<camera_data>      history_snapshot;
+    bool                         any_delay = false;
     {
         std::lock_guard<std::mutex> lk(mutex_);
         latest_data_[data.camera_id] = data;
 
+        // Append to per-camera history and trim to the retention window/cap.
+        auto& hist = sample_history_[data.camera_id];
+        hist.push_back(data);
+        const auto cutoff = data.timestamp - std::chrono::milliseconds(HISTORY_WINDOW_MS);
+        while (hist.size() > 1 && hist.front().timestamp < cutoff)
+            hist.pop_front();
+        while (hist.size() > HISTORY_MAX_SAMPLES)
+            hist.pop_front();
+
         for (auto& [key, binding] : bindings_) {
-            if (binding.camera_id == -1 || binding.camera_id == data.camera_id)
+            if (binding.camera_id == -1 || binding.camera_id == data.camera_id) {
                 matched.push_back(binding);
+                if (binding.delay_ms > 0.0 || binding.genlock_enable)
+                    any_delay = true;
+            }
         }
+
+        if (any_delay)
+            history_snapshot = hist; // copy for lock-free interpolation below
     }
 
-    for (auto& binding : matched)
-        inject_transform(binding, data);
+    for (auto& binding : matched) {
+        if (binding.genlock_enable && binding.channel_fps > 0.0) {
+            // Frame-native genlock: hold the pose back by N channel frames, and
+            // snap the sampled time to the house frame grid when LTC is valid so
+            // pose updates align to video frame boundaries.
+            const double fps = binding.channel_fps;
+            auto to_dur = [](double seconds) {
+                return std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                    std::chrono::duration<double>(seconds));
+            };
+            auto target = data.timestamp - to_dur(binding.genlock_frames / fps);
+
+            uint32_t                              ltc_frame = 0;
+            std::chrono::steady_clock::time_point ltc_time;
+            if (ltc::LTCInput::instance().get_timecode_anchor(
+                    static_cast<int>(std::lround(fps)), ltc_frame, ltc_time)) {
+                const double rel    = std::chrono::duration<double>(target - ltc_time).count();
+                const double k      = std::round(static_cast<double>(ltc_frame) + rel * fps);
+                target = ltc_time + to_dur((k - static_cast<double>(ltc_frame)) / fps);
+            }
+            inject_transform(binding, interpolate_history(history_snapshot, target));
+        } else if (binding.delay_ms > 0.0) {
+            const auto target =
+                data.timestamp - std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                                     std::chrono::duration<double, std::milli>(binding.delay_ms));
+            inject_transform(binding, interpolate_history(history_snapshot, target));
+        } else {
+            inject_transform(binding, data);
+        }
+    }
 }
 
 std::optional<camera_data> tracker_registry::get_latest_data(int camera_id) const

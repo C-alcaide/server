@@ -43,6 +43,7 @@ struct camera_data
     // Optics (raw 16-bit, vendor-calibrated)
     uint16_t zoom  = 0; ///< 0 = max telephoto, 65535 = widest (de-facto convention)
     uint16_t focus = 0;
+    uint16_t iris  = 0; ///< Aperture/iris (0 = closed, 65535 = open). OSC/VRPN only; FreeD leaves 0.
 
     std::chrono::steady_clock::time_point timestamp = std::chrono::steady_clock::now();
 };

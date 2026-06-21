@@ -124,11 +124,17 @@ struct vrpn_receiver::impl
         auto* self = static_cast<impl*>(userdata);
         if (a.num_channel < 1)
             return;
-        double raw = a.channel[0]; // typically 0.0-1.0
-        if (raw < 0.0) raw = 0.0;
-        if (raw > 1.0) raw = 1.0;
+        auto to_raw = [](double v) {
+            if (v < 0.0) v = 0.0;
+            if (v > 1.0) v = 1.0;
+            return static_cast<uint16_t>(v * 65535.0);
+        };
         std::lock_guard<std::mutex> lk(self->data_mutex_);
-        self->partial_.zoom = static_cast<uint16_t>(raw * 65535.0);
+        self->partial_.zoom = to_raw(a.channel[0]); // channel 0: zoom
+        if (a.num_channel > 1)
+            self->partial_.focus = to_raw(a.channel[1]); // channel 1: focus
+        if (a.num_channel > 2)
+            self->partial_.iris = to_raw(a.channel[2]); // channel 2: iris
     }
 #endif
 

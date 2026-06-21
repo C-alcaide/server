@@ -37,11 +37,15 @@ class stage_base;
 
 namespace caspar { namespace tracking {
 
+class lens_profile;
+
 enum class tracking_mode
 {
     mode_360,   ///< 360° equirectangular — injects into projection.{yaw,pitch,roll,fov}
     mode_2d,    ///< 2D layer — injects into fill_translation, angle, fill_scale
     mode_previz,///< Previz — drives PREVIZ channel virtual camera
+    mode_target,///< Track-target — projects a tracked SUBJECT world position through a
+                ///< static virtual camera to drive the layer's screen position (AR follow).
 };
 
 enum class tracking_protocol
@@ -51,6 +55,7 @@ enum class tracking_protocol
     osc,        ///< OSC 1.0 UDP (schema: /camera/{id}/pan|tilt|roll|zoom|x|y|z)
     vrpn,       ///< VRPN pose tracker + analogue zoom channel
     psn,        ///< PosiStageNet v2.0 UDP multicast (stage/performer tracking)
+    opentrackio,///< SMPTE RIS OSVP OpenTrackIO (JSON over UDP multicast)
 };
 
 /// Identifies which receiver a binding was created on (needed for clean release).
@@ -110,6 +115,68 @@ struct tracker_binding
     //
     // Default 0.001 NDC/mm means 1 metre of camera travel ≈ 1.0 NDC of offset.
     double position_scale = 0.001;
+
+    // ------- Entrance-pupil (nodal) offset -------------------------
+    // Lens-local offset (metres) of the optical entrance pupil from the tracked
+    // origin. Expressed in the camera frame: forward (+along view), right, up.
+    // Produces correct parallax as the camera rotates about an off-axis pupil.
+    // All 0 = disabled (no position shift).
+    double nodal_forward_m = 0.0;
+    double nodal_right_m   = 0.0;
+    double nodal_up_m      = 0.0;
+
+    // ------- Tracking latency compensation -------------------------
+    // Delays the applied camera pose by this many milliseconds, interpolating
+    // between buffered samples. Used to time-align tracking data with delayed
+    // video (e.g. genlock/processing latency on the camera feed).
+    // 0 = disabled (raw newest sample injected immediately, no buffering).
+    double delay_ms = 0.0;
+
+    // ------- Genlock / LTC frame-anchored latency compensation -----
+    // Frame-native alternative to delay_ms: holds the pose back by genlock_frames
+    // frames of the channel's frame rate, and — when a valid house LTC signal is
+    // present — snaps the sampled time to the house frame grid so pose updates
+    // align to video frame boundaries (true genlock behaviour).
+    // Takes precedence over delay_ms when genlock_enable is true.
+    bool   genlock_enable = false;
+    double genlock_frames = 0.0;  ///< number of channel frames to delay the pose by
+    double channel_fps    = 0.0;  ///< channel frame rate captured at bind (0 = unknown)
+
+    // ------- Depth-of-field (faked rack-focus) ---------------------
+    // Maps the decoded lens focus value to a blur radius (lens-bokeh type).
+    // NON-PHYSICAL: there is no depth buffer for 2D/360 layers; this is an
+    // operator-calibrated creative defocus driven by the focus channel.
+    //   radius = max_radius * clamp((focus - near_raw) / (far_raw - near_raw), 0, 1)
+    // dof_enable = false leaves the layer's blur untouched (manual MIXER BLUR wins).
+    bool   dof_enable         = false;
+    double dof_focus_near_raw = 0.0;     ///< focus raw value mapped to 0 blur (sharp)
+    double dof_focus_far_raw  = 65535.0; ///< focus raw value mapped to max blur
+    double dof_max_radius     = 0.0;     ///< blur radius at the far cal point
+
+    // ------- Dynamic lens distortion profile -----------------------
+    // Optional lens-calibration grid. When set, the binding samples it by
+    // (zoom, focus) each packet to drive projection FOV + distortion k1..k3 /
+    // p1/p2 + entrance-pupil forward offset. Null = disabled.
+    std::shared_ptr<lens_profile> lens;
+
+    // ------- Track-target virtual camera (mode_target) -------------
+    // A static virtual camera used to project a tracked SUBJECT world position
+    // (data.x/y/z, scaled mm→m by position_scale) into screen space so a graphic
+    // FOLLOWS the subject. Only used when mode == mode_target.
+    //   Camera position in metres; orientation in radians; fov is vertical (rad).
+    //   The view convention matches previz_renderer: Rz(-roll)·Rx(-pitch)·Ry(-yaw)·T(-C).
+    // target_enable = false (or an all-zero camera) makes mode_target a no-op.
+    bool   target_enable   = false;  ///< mode_target writes no transform until a camera is set
+    double target_cam_x    = 0.0;    ///< camera position X (metres)
+    double target_cam_y    = 0.0;    ///< camera position Y (metres)
+    double target_cam_z    = 0.0;    ///< camera position Z (metres)
+    double target_cam_yaw  = 0.0;    ///< camera yaw   (radians)
+    double target_cam_pitch= 0.0;    ///< camera pitch (radians)
+    double target_cam_roll = 0.0;    ///< camera roll  (radians)
+    double target_cam_fov  = M_PI / 2.0; ///< camera vertical FOV (radians, 90° default)
+    double target_aspect   = 16.0 / 9.0; ///< frame aspect ratio (W/H) for horizontal NDC
+    double target_gain     = 0.5;    ///< NDC[-1,1] → fill_translation (0.5: NDC edge → frame edge)
+    double target_ref_dist_m = 0.0;  ///< 0 = no distance scaling; else fill_scale = ref/dist
 
     /// Tracks which receiver this binding was registered on (for reference counting).
     receiver_handle receiver;

@@ -20,19 +20,27 @@
 #include "tracking_commands.h"
 
 #include "camera_data.h"
+#include "lens_profile.h"
 #include "receiver_manager.h"
 #include "tracker_binding.h"
 #include "tracker_registry.h"
 
+#include "../ltc/ltc_input.h"
+
+#include <common/env.h>
 #include <common/utf.h>
 #include <protocol/amcp/amcp_command_context.h>
 #include <protocol/amcp/amcp_command_repository_wrapper.h>
 
 #include <core/mixer/mixer.h>
+#include <core/producer/stage.h>
+#include <core/video_channel.h>
+#include <core/video_format.h>
 #include <accelerator/ogl/image/image_mixer.h>
 #include <accelerator/ogl/image/previz_renderer.h>
 
 #include <boost/algorithm/string.hpp>
+#include <boost/filesystem.hpp>
 
 #include <sstream>
 #include <stdexcept>
@@ -60,7 +68,8 @@ static tracking_protocol parse_protocol(const std::wstring& s)
     if (boost::iequals(s, L"OSC"))        return tracking_protocol::osc;
     if (boost::iequals(s, L"VRPN"))       return tracking_protocol::vrpn;
     if (boost::iequals(s, L"PSN"))        return tracking_protocol::psn;
-    throw std::runtime_error("Unknown tracking protocol \u2014 use FREED, FREED_PLUS, OSC, VRPN or PSN");
+    if (boost::iequals(s, L"OPENTRACKIO")) return tracking_protocol::opentrackio;
+    throw std::runtime_error("Unknown tracking protocol \u2014 use FREED, FREED_PLUS, OSC, VRPN, PSN or OPENTRACKIO");
 }
 
 static std::wstring protocol_name(tracking_protocol p)
@@ -71,6 +80,7 @@ static std::wstring protocol_name(tracking_protocol p)
     case tracking_protocol::osc:        return L"OSC";
     case tracking_protocol::vrpn:       return L"VRPN";
     case tracking_protocol::psn:        return L"PSN";
+    case tracking_protocol::opentrackio: return L"OPENTRACKIO";
     default:                            return L"UNKNOWN";
     }
 }
@@ -81,6 +91,7 @@ static std::wstring mode_name(tracking_mode m)
     case tracking_mode::mode_360:    return L"360";
     case tracking_mode::mode_2d:     return L"2D";
     case tracking_mode::mode_previz: return L"PREVIZ";
+    case tracking_mode::mode_target: return L"TARGET";
     default:                         return L"UNKNOWN";
     }
 }
@@ -110,12 +121,13 @@ static bool kwflag(const std::vector<std::wstring>& params, const std::wstring& 
 // TRACKING BIND — create / replace a binding on a channel/layer
 //
 // Syntax:
-//   TRACKING <ch>-<layer> BIND <FREED|FREED_PLUS|OSC|VRPN|PSN>
+//   TRACKING <ch>-<layer> BIND <FREED|FREED_PLUS|OSC|VRPN|PSN|OPENTRACKIO>
 //              [PORT <port>]
-//              [HOST <host>]     (VRPN: server URL; PSN: multicast group)
+//              [HOST <host>]     (VRPN: server URL; PSN/OPENTRACKIO: multicast group)
 //              [CAMERA <id>]     (default 0)
-//              [MODE <2D|360>]   (default 360)
-// ---------------------------------------------------------------------------
+//              [MODE <2D|360|PREVIZ|TARGET>]   (default 360)
+//                  TARGET: project a tracked SUBJECT position through a static
+//                  virtual camera (TARGET_CAMERA/TARGET_MAP) so a graphic follows it.
 static std::wstring tracking_bind_command(command_context& ctx)
 {
     if (ctx.parameters.empty())
@@ -124,7 +136,9 @@ static std::wstring tracking_bind_command(command_context& ctx)
     try {
         tracking_protocol proto = parse_protocol(ctx.parameters.at(0));
 
-        int         port      = (proto == tracking_protocol::psn) ? 56565 : 6301;
+        int         port      = (proto == tracking_protocol::psn)         ? 56565
+                                : (proto == tracking_protocol::opentrackio) ? 55555
+                                                                            : 6301;
         std::string host;
         int         camera_id = 0;
         tracking_mode mode    = tracking_mode::mode_360;
@@ -146,6 +160,8 @@ static std::wstring tracking_bind_command(command_context& ctx)
             mode = tracking_mode::mode_2d;
         else if (boost::iequals(mode_str, L"PREVIZ"))
             mode = tracking_mode::mode_previz;
+        else if (boost::iequals(mode_str, L"TARGET"))
+            mode = tracking_mode::mode_target;
 
         // Grab stage from the current channel context
         auto stage_ptr = ctx.channel.stage;
@@ -176,6 +192,10 @@ static std::wstring tracking_bind_command(command_context& ctx)
         b.receiver.port     = port;
         b.receiver.host     = host;
 
+        // Capture the channel frame rate for frame-native genlock latency comp.
+        if (auto raw_ch = ctx.channel.raw_channel)
+            b.channel_fps = raw_ch->stage()->video_format_desc().fps;
+
         // For PREVIZ mode, set up the callback to drive the previz camera
         if (mode == tracking_mode::mode_previz) {
             auto raw_ch = ctx.channel.raw_channel;
@@ -188,7 +208,8 @@ static std::wstring tracking_bind_command(command_context& ctx)
                     auto& renderer  = ogl_mix->get_previz_renderer();
                     b.previz_camera_fn = [&renderer, stage_weak](float x, float y, float z,
                                                                   float yaw, float pitch, float roll, float fov) {
-                        if (stage_weak.lock())
+                        // Skip while the operator has frozen the camera (OVERRIDE).
+                        if (stage_weak.lock() && !renderer.is_camera_locked())
                             renderer.set_camera(x, y, z, yaw, pitch, roll, fov);
                     };
                 }
@@ -294,6 +315,21 @@ static std::wstring tracking_info_command(command_context& ctx)
     ss << L"ZOOM_FULL_RANGE " << binding->zoom_full_range                             << L"\r\n";
     ss << L"ZOOM_DEFAULT_FOV " << (binding->zoom_default_fov * RAD2DEG_CMD)           << L"\r\n";
     ss << L"POSITION_SCALE "  << binding->position_scale                              << L"\r\n";
+    ss << L"DELAY "           << binding->delay_ms                                    << L"\r\n";
+    ss << L"GENLOCK "         << (binding->genlock_enable ? 1 : 0) << L" " << binding->genlock_frames << L"\r\n";
+    ss << L"NODAL "           << binding->nodal_forward_m << L" " << binding->nodal_right_m
+                              << L" " << binding->nodal_up_m                            << L"\r\n";
+    ss << L"DOF "             << (binding->dof_enable ? 1 : 0) << L" " << binding->dof_focus_near_raw
+                              << L" " << binding->dof_focus_far_raw << L" " << binding->dof_max_radius << L"\r\n";
+    ss << L"LENS "            << (binding->lens ? caspar::u16(binding->lens->name()) : std::wstring(L"NONE")) << L"\r\n";
+    ss << L"TARGET_CAMERA "    << (binding->target_enable ? 1 : 0) << L" "
+                              << binding->target_cam_x << L" " << binding->target_cam_y << L" " << binding->target_cam_z
+                              << L" " << (binding->target_cam_yaw   * RAD2DEG_CMD)
+                              << L" " << (binding->target_cam_pitch * RAD2DEG_CMD)
+                              << L" " << (binding->target_cam_roll  * RAD2DEG_CMD)
+                              << L" " << (binding->target_cam_fov   * RAD2DEG_CMD)                  << L"\r\n";
+    ss << L"TARGET_MAP "       << binding->target_gain << L" " << binding->target_ref_dist_m
+                              << L" " << binding->target_aspect                                     << L"\r\n";
 
     if (latest) {
         ss << L"LAST_PAN "   << (latest->pan  * RAD2DEG_CMD) << L"\r\n";
@@ -307,6 +343,10 @@ static std::wstring tracking_info_command(command_context& ctx)
     } else {
         ss << L"LAST_DATA NONE\r\n";
     }
+
+    // House timecode diagnostics (shared LTC input).
+    ss << L"LTC_VALID " << (caspar::ltc::LTCInput::instance().is_valid() ? 1 : 0) << L"\r\n";
+    ss << L"LTC_TC "    << caspar::u16(caspar::ltc::LTCInput::instance().get_current_timecode_string()) << L"\r\n";
 
     return ss.str();
 }
@@ -424,6 +464,334 @@ static std::wstring tracking_position_scale_command(command_context& ctx)
 }
 
 // ---------------------------------------------------------------------------
+// TRACKING DELAY — latency compensation for the tracking pose
+//
+// Delays the applied camera pose by the given number of milliseconds,
+// interpolating between buffered samples. Use this to time-align tracking data
+// with a delayed video feed (genlock/processing latency).
+//   0 = disabled (newest sample injected immediately — no buffering).
+//
+// Live — no rebind needed. With no argument, queries the current value.
+//
+// Syntax: TRACKING <ch>-<layer> DELAY [milliseconds]
+// ---------------------------------------------------------------------------
+static std::wstring tracking_delay_command(command_context& ctx)
+{
+    if (ctx.parameters.empty()) {
+        auto binding = tracker_registry::instance().get_binding(ctx.channel_index, ctx.layer_index());
+        if (!binding)
+            return L"404 TRACKING ERROR No binding on this channel/layer\r\n";
+        std::wostringstream ss;
+        ss << L"201 TRACKING OK\r\n" << L"DELAY " << binding->delay_ms << L"\r\n";
+        return ss.str();
+    }
+
+    try {
+        double delay_ms = std::stod(ctx.parameters.at(0));
+        if (delay_ms < 0.0)
+            return L"400 TRACKING ERROR DELAY must be >= 0 milliseconds\r\n";
+
+        tracker_registry::instance().update_delay(
+            ctx.channel_index, ctx.layer_index(), delay_ms);
+        return L"202 TRACKING OK\r\n";
+    } catch (const std::exception& e) {
+        return L"400 TRACKING ERROR " + caspar::u16(e.what()) + L"\r\n";
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TRACKING GENLOCK — frame-native, LTC-anchored latency compensation
+//
+// A broadcast-native alternative to DELAY: holds the tracking pose back by a
+// number of frames of the channel's frame rate. When a valid house LTC signal
+// is present (shared LTC input), the sampled time is snapped to the house frame
+// grid so pose updates align to video frame boundaries (true genlock). When no
+// LTC is present it behaves as a frame-native delay (frames / channel_fps).
+//
+// Takes precedence over DELAY when enabled. Live — no rebind needed.
+// With no argument, queries. `OFF` (or 0 frames with no ON) disables.
+//
+// Syntax: TRACKING <ch>-<layer> GENLOCK <frames> [ON|OFF]
+//         TRACKING <ch>-<layer> GENLOCK OFF
+// ---------------------------------------------------------------------------
+static std::wstring tracking_genlock_command(command_context& ctx)
+{
+    if (ctx.parameters.empty()) {
+        auto binding = tracker_registry::instance().get_binding(ctx.channel_index, ctx.layer_index());
+        if (!binding)
+            return L"404 TRACKING ERROR No binding on this channel/layer\r\n";
+        std::wostringstream ss;
+        ss << L"201 TRACKING OK\r\n"
+           << L"GENLOCK " << (binding->genlock_enable ? 1 : 0) << L" " << binding->genlock_frames << L"\r\n";
+        return ss.str();
+    }
+
+    try {
+        auto first = ctx.parameters.at(0);
+
+        // GENLOCK OFF — disable, keep the frame count.
+        if (boost::iequals(first, L"OFF")) {
+            auto binding = tracker_registry::instance().get_binding(ctx.channel_index, ctx.layer_index());
+            double frames = binding ? binding->genlock_frames : 0.0;
+            tracker_registry::instance().update_genlock(
+                ctx.channel_index, ctx.layer_index(), false, frames);
+            return L"202 TRACKING OK\r\n";
+        }
+
+        double frames = std::stod(first);
+        if (frames < 0.0)
+            return L"400 TRACKING ERROR GENLOCK frames must be >= 0\r\n";
+
+        bool enable = true;
+        if (ctx.parameters.size() > 1) {
+            if (boost::iequals(ctx.parameters.at(1), L"OFF"))
+                enable = false;
+            else if (boost::iequals(ctx.parameters.at(1), L"ON"))
+                enable = true;
+        }
+
+        tracker_registry::instance().update_genlock(
+            ctx.channel_index, ctx.layer_index(), enable, frames);
+        return L"202 TRACKING OK\r\n";
+    } catch (const std::exception& e) {
+        return L"400 TRACKING ERROR " + caspar::u16(e.what()) + L"\r\n";
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TRACKING NODAL — entrance-pupil (nodal) offset for parallax correction
+//
+// Sets the lens-local offset (metres) of the optical entrance pupil from the
+// tracked origin, in the camera frame: forward (along view), right, up.
+// Produces correct parallax as the camera rotates about an off-axis pupil.
+// All 0 = disabled. Live — no rebind needed. With no argument, queries.
+//
+// Syntax: TRACKING <ch>-<layer> NODAL [forward_m right_m up_m]
+// ---------------------------------------------------------------------------
+static std::wstring tracking_nodal_command(command_context& ctx)
+{
+    if (ctx.parameters.empty()) {
+        auto binding = tracker_registry::instance().get_binding(ctx.channel_index, ctx.layer_index());
+        if (!binding)
+            return L"404 TRACKING ERROR No binding on this channel/layer\r\n";
+        std::wostringstream ss;
+        ss << L"201 TRACKING OK\r\n"
+           << L"NODAL " << binding->nodal_forward_m << L" " << binding->nodal_right_m << L" "
+           << binding->nodal_up_m << L"\r\n";
+        return ss.str();
+    }
+
+    if (ctx.parameters.size() < 3)
+        return L"400 TRACKING ERROR Expected: NODAL <forward_m> <right_m> <up_m>\r\n";
+
+    try {
+        double forward_m = std::stod(ctx.parameters.at(0));
+        double right_m   = std::stod(ctx.parameters.at(1));
+        double up_m      = std::stod(ctx.parameters.at(2));
+        tracker_registry::instance().update_nodal(
+            ctx.channel_index, ctx.layer_index(), forward_m, right_m, up_m);
+        return L"202 TRACKING OK\r\n";
+    } catch (const std::exception& e) {
+        return L"400 TRACKING ERROR " + caspar::u16(e.what()) + L"\r\n";
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TRACKING DOF — faked depth-of-field driven by the lens focus channel
+//
+// NON-PHYSICAL: 2D/360 layers have no depth buffer. This maps the decoded focus
+// value to a lens-bokeh blur radius for an operator-calibrated rack-focus look:
+//   radius = max_radius * clamp((focus - near_raw)/(far_raw - near_raw), 0, 1)
+// When enabled, tracking drives the layer blur each packet (overrides MIXER BLUR).
+// Disable to leave the layer blur untouched. With no argument, queries.
+//
+// Syntax: TRACKING <ch>-<layer> DOF <enable 0|1> [near_raw far_raw max_radius]
+// ---------------------------------------------------------------------------
+static std::wstring tracking_dof_command(command_context& ctx)
+{
+    if (ctx.parameters.empty()) {
+        auto binding = tracker_registry::instance().get_binding(ctx.channel_index, ctx.layer_index());
+        if (!binding)
+            return L"404 TRACKING ERROR No binding on this channel/layer\r\n";
+        std::wostringstream ss;
+        ss << L"201 TRACKING OK\r\n"
+           << L"DOF " << (binding->dof_enable ? 1 : 0) << L" " << binding->dof_focus_near_raw << L" "
+           << binding->dof_focus_far_raw << L" " << binding->dof_max_radius << L"\r\n";
+        return ss.str();
+    }
+
+    try {
+        bool enable = std::stoi(ctx.parameters.at(0)) != 0;
+        // Preserve existing calibration unless explicitly provided.
+        auto binding = tracker_registry::instance().get_binding(ctx.channel_index, ctx.layer_index());
+        if (!binding)
+            return L"404 TRACKING ERROR No binding on this channel/layer\r\n";
+        double near_raw   = ctx.parameters.size() > 1 ? std::stod(ctx.parameters[1]) : binding->dof_focus_near_raw;
+        double far_raw    = ctx.parameters.size() > 2 ? std::stod(ctx.parameters[2]) : binding->dof_focus_far_raw;
+        double max_radius = ctx.parameters.size() > 3 ? std::stod(ctx.parameters[3]) : binding->dof_max_radius;
+        if (max_radius < 0.0)
+            return L"400 TRACKING ERROR DOF max_radius must be >= 0\r\n";
+
+        tracker_registry::instance().update_dof(
+            ctx.channel_index, ctx.layer_index(), enable, near_raw, far_raw, max_radius);
+        return L"202 TRACKING OK\r\n";
+    } catch (const std::exception& e) {
+        return L"400 TRACKING ERROR " + caspar::u16(e.what()) + L"\r\n";
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TRACKING LENS — load/clear a dynamic lens-calibration profile
+//
+// When loaded, the binding samples the profile by (zoom, focus) each packet to
+// drive the projection FOV + Brown-Conrady distortion (k1..k3, p1/p2) +
+// entrance-pupil forward offset. Distortion is applied in 360 mode.
+// The path is resolved relative to the media folder (path-traversal guarded).
+// With no argument, queries the active profile name.
+//
+// Syntax: TRACKING <ch>-<layer> LENS LOAD <path>
+//         TRACKING <ch>-<layer> LENS CLEAR
+// ---------------------------------------------------------------------------
+static std::wstring tracking_lens_command(command_context& ctx)
+{
+    if (ctx.parameters.empty()) {
+        auto binding = tracker_registry::instance().get_binding(ctx.channel_index, ctx.layer_index());
+        if (!binding)
+            return L"404 TRACKING ERROR No binding on this channel/layer\r\n";
+        std::wostringstream ss;
+        ss << L"201 TRACKING OK\r\n";
+        if (binding->lens)
+            ss << L"LENS " << caspar::u16(binding->lens->name()) << L"\r\n";
+        else
+            ss << L"LENS NONE\r\n";
+        return ss.str();
+    }
+
+    auto sub = ctx.parameters.at(0);
+
+    if (boost::iequals(sub, L"CLEAR") || boost::iequals(sub, L"NONE")) {
+        try {
+            tracker_registry::instance().update_lens(ctx.channel_index, ctx.layer_index(), nullptr);
+            return L"202 TRACKING OK\r\n";
+        } catch (const std::exception& e) {
+            return L"400 TRACKING ERROR " + caspar::u16(e.what()) + L"\r\n";
+        }
+    }
+
+    if (boost::iequals(sub, L"LOAD")) {
+        if (ctx.parameters.size() < 2)
+            return L"400 TRACKING ERROR Expected: LENS LOAD <path>\r\n";
+        try {
+            auto media_base = boost::filesystem::canonical(env::media_folder());
+            auto resolved   = boost::filesystem::path(media_base) / ctx.parameters.at(1);
+            // Guard against path traversal outside the media folder.
+            auto check = resolved.lexically_normal();
+            if (check.wstring().find(media_base.wstring()) != 0)
+                return L"403 TRACKING FORBIDDEN\r\n";
+            if (!boost::filesystem::exists(resolved))
+                return L"404 TRACKING ERROR Lens file not found\r\n";
+
+            auto profile = lens_profile::load(caspar::u8(resolved.wstring()));
+            tracker_registry::instance().update_lens(ctx.channel_index, ctx.layer_index(), profile);
+            return L"202 TRACKING OK\r\n";
+        } catch (const std::exception& e) {
+            return L"400 TRACKING ERROR " + caspar::u16(e.what()) + L"\r\n";
+        }
+    }
+
+    return L"400 TRACKING ERROR Expected: LENS LOAD <path> | LENS CLEAR\r\n";
+}
+
+// ---------------------------------------------------------------------------
+// TRACKING TARGET_CAMERA — static virtual camera for mode TARGET
+//
+// Defines the virtual camera through which a tracked SUBJECT world position is
+// projected to screen space (mode TARGET only). Position in metres, orientation
+// in degrees, fov is the vertical field of view in degrees. Setting a camera
+// enables target projection; with no argument, queries. Live — no rebind needed.
+//
+// Syntax: TRACKING <ch>-<layer> TARGET_CAMERA <x> <y> <z> <yaw> <pitch> <roll> <fov>
+// ---------------------------------------------------------------------------
+static std::wstring tracking_target_camera_command(command_context& ctx)
+{
+    if (ctx.parameters.empty()) {
+        auto binding = tracker_registry::instance().get_binding(ctx.channel_index, ctx.layer_index());
+        if (!binding)
+            return L"404 TRACKING ERROR No binding on this channel/layer\r\n";
+        std::wostringstream ss;
+        ss << L"201 TRACKING OK\r\n"
+           << L"TARGET_CAMERA " << (binding->target_enable ? 1 : 0) << L" "
+           << binding->target_cam_x << L" " << binding->target_cam_y << L" " << binding->target_cam_z
+           << L" " << (binding->target_cam_yaw   * RAD2DEG_CMD)
+           << L" " << (binding->target_cam_pitch * RAD2DEG_CMD)
+           << L" " << (binding->target_cam_roll  * RAD2DEG_CMD)
+           << L" " << (binding->target_cam_fov   * RAD2DEG_CMD) << L"\r\n";
+        return ss.str();
+    }
+
+    if (ctx.parameters.size() < 7)
+        return L"400 TRACKING ERROR Expected: TARGET_CAMERA <x> <y> <z> <yaw> <pitch> <roll> <fov>\r\n";
+
+    try {
+        double x     = std::stod(ctx.parameters.at(0));
+        double y     = std::stod(ctx.parameters.at(1));
+        double z     = std::stod(ctx.parameters.at(2));
+        double yaw   = std::stod(ctx.parameters.at(3)) * DEG2RAD_CMD;
+        double pitch = std::stod(ctx.parameters.at(4)) * DEG2RAD_CMD;
+        double roll  = std::stod(ctx.parameters.at(5)) * DEG2RAD_CMD;
+        double fov   = std::stod(ctx.parameters.at(6)) * DEG2RAD_CMD;
+        if (fov <= 0.0)
+            return L"400 TRACKING ERROR TARGET_CAMERA fov must be > 0\r\n";
+        tracker_registry::instance().update_target_camera(
+            ctx.channel_index, ctx.layer_index(), true, x, y, z, yaw, pitch, roll, fov);
+        return L"202 TRACKING OK\r\n";
+    } catch (const std::exception& e) {
+        return L"400 TRACKING ERROR " + caspar::u16(e.what()) + L"\r\n";
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TRACKING TARGET_MAP — screen mapping for mode TARGET
+//
+// gain        : maps projected NDC[-1,1] to fill_translation (0.5 = NDC edge → frame edge).
+// ref_dist_m  : optional. 0 = no distance scaling; otherwise fill_scale = ref_dist / view_z,
+//               so the graphic shrinks as the subject moves away.
+// aspect      : optional frame aspect ratio (W/H); <= 0 leaves the current value.
+// With no argument, queries. Live — no rebind needed.
+//
+// Syntax: TRACKING <ch>-<layer> TARGET_MAP <gain> [ref_dist_m] [aspect]
+// ---------------------------------------------------------------------------
+static std::wstring tracking_target_map_command(command_context& ctx)
+{
+    if (ctx.parameters.empty()) {
+        auto binding = tracker_registry::instance().get_binding(ctx.channel_index, ctx.layer_index());
+        if (!binding)
+            return L"404 TRACKING ERROR No binding on this channel/layer\r\n";
+        std::wostringstream ss;
+        ss << L"201 TRACKING OK\r\n"
+           << L"TARGET_MAP " << binding->target_gain << L" " << binding->target_ref_dist_m
+           << L" " << binding->target_aspect << L"\r\n";
+        return ss.str();
+    }
+
+    try {
+        auto binding = tracker_registry::instance().get_binding(ctx.channel_index, ctx.layer_index());
+        if (!binding)
+            return L"404 TRACKING ERROR No binding on this channel/layer\r\n";
+        double gain      = std::stod(ctx.parameters.at(0));
+        double ref_dist  = ctx.parameters.size() > 1 ? std::stod(ctx.parameters[1]) : binding->target_ref_dist_m;
+        double aspect    = ctx.parameters.size() > 2 ? std::stod(ctx.parameters[2]) : binding->target_aspect;
+        if (ref_dist < 0.0)
+            return L"400 TRACKING ERROR TARGET_MAP ref_dist_m must be >= 0\r\n";
+        tracker_registry::instance().update_target_map(
+            ctx.channel_index, ctx.layer_index(), gain, ref_dist, aspect);
+        return L"202 TRACKING OK\r\n";
+    } catch (const std::exception& e) {
+        return L"400 TRACKING ERROR " + caspar::u16(e.what()) + L"\r\n";
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Registration
 // ---------------------------------------------------------------------------
 
@@ -438,6 +806,13 @@ void register_amcp_commands(
     repo->register_channel_command(L"Tracking Commands", L"TRACKING ZERO",        tracking_zero_command,        0);
     repo->register_channel_command(L"Tracking Commands", L"TRACKING DEFAULT_FOV", tracking_default_fov_command, 1);
     repo->register_channel_command(L"Tracking Commands", L"TRACKING POSITION_SCALE", tracking_position_scale_command, 1);
+    repo->register_channel_command(L"Tracking Commands", L"TRACKING DELAY",          tracking_delay_command,          0);
+    repo->register_channel_command(L"Tracking Commands", L"TRACKING GENLOCK",        tracking_genlock_command,        0);
+    repo->register_channel_command(L"Tracking Commands", L"TRACKING NODAL",          tracking_nodal_command,          0);
+    repo->register_channel_command(L"Tracking Commands", L"TRACKING DOF",            tracking_dof_command,            0);
+    repo->register_channel_command(L"Tracking Commands", L"TRACKING LENS",           tracking_lens_command,           0);
+    repo->register_channel_command(L"Tracking Commands", L"TRACKING TARGET_CAMERA",   tracking_target_camera_command,  0);
+    repo->register_channel_command(L"Tracking Commands", L"TRACKING TARGET_MAP",      tracking_target_map_command,     0);
     repo->register_channel_command(L"Tracking Commands", L"TRACKING INFO",        tracking_info_command,        0);
 
     // Global command (no channel required)

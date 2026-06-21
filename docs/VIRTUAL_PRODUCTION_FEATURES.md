@@ -9,14 +9,15 @@ For color management and grading features, see [COLOR_GRADING.md](COLOR_GRADING.
 1. [360° Equirectangular Projection](#-equirectangular-projection)
 2. [360° Projection Offset](#-projection-offset)
 3. [Curved Screen Compensation](#curved-screen-compensation)
-4. [Playback Speed Control](#playback-speed-control)
-5. [Ping-Pong Loop](#ping-pong-loop)
-6. [Flip (Mirror)](#flip-mirror)
-7. [Camera Tracking](#camera-tracking)
-8. [Shape Overlay](#shape-overlay)
-9. [Image Effects](#image-effects)
-10. [Keyframe Animation](#keyframe-animation)
-11. [DMX Lighting](#dmx-lighting)
+4. [Lens Distortion Correction](#lens-distortion-correction)
+5. [Playback Speed Control](#playback-speed-control)
+6. [Ping-Pong Loop](#ping-pong-loop)
+7. [Flip (Mirror)](#flip-mirror)
+8. [Camera Tracking](#camera-tracking)
+9. [Shape Overlay](#shape-overlay)
+10. [Image Effects](#image-effects)
+11. [Keyframe Animation](#keyframe-animation)
+12. [DMX Lighting](#dmx-lighting)
 
 ## 360° Equirectangular Projection
 
@@ -120,17 +121,18 @@ The compensation is **fully independent of 360° mode**: it works on standard fl
 ### AMCP Command
 
 ```bash
-MIXER [channel]-[layer] PROJECTION_CURVE [type] [arc] [duration] [tween]
-MIXER [channel]-[layer] PROJECTION_CURVE          // Query current type and arc
-MIXER [channel]-[layer] PROJECTION_CURVE FLAT 0   // Disable compensation
+MIXER [channel]-[layer] PROJECTION_CURVE [type] [arc] [eye_distance] [duration] [tween]
+MIXER [channel]-[layer] PROJECTION_CURVE              // Query: type arc eye_distance
+MIXER [channel]-[layer] PROJECTION_CURVE FLAT 0       // Disable compensation
 ```
 
 ### Parameters
 
 | Parameter | Description | Range / Unit |
 | :--- | :--- | :--- |
-| **type** | Shape of the physical screen | `FLAT`, `CYLINDER`, `SPHERE` |
-| **arc** | Total angular span of the screen surface as seen from the viewer's focus point | 0.0 to 360.0 degrees |
+| **type** | Shape of the physical screen | `FLAT`, `CYLINDER`, `SPHERE`, `FISHEYE` |
+| **arc** | Total angular span of the screen surface as seen from the centre of curvature | 0.0 to 360.0 degrees |
+| **eye_distance** | Viewer eye distance expressed as a multiple of the screen radius *R* (`k = Dᵥ / R`) | ≥ 0.05, default `1.0` |
 | **duration** | Tween duration in frames | Integer |
 | **tween** | Tween curve type | `linear`, `ease`, `ease-in`, `ease-out`, etc. |
 
@@ -141,26 +143,28 @@ MIXER [channel]-[layer] PROJECTION_CURVE FLAT 0   // Disable compensation
 | `FLAT` | Standard flat screen — no compensation | — |
 | `CYLINDER` | Screen curves left-to-right only (LED wall arc, curved cyclorama, panoramic cinema) | Horizontal only — vertical axis is unaffected |
 | `SPHERE` | Screen curves in all directions (dome, planetarium, CAVE) | Radial — both axes warped symmetrically |
+| `FISHEYE` | Equidistant (angle-linear) projection surface | Radial — equidistant mapping |
 
-### How the Arc Parameter Works
+### The Physical Model
 
-The **arc** is the total angle subtended by the physical screen surface at the viewer's design eye-point:
+The warp is derived from an explicit eye-point geometry rather than a naïve tangent map. The screen is an arc of radius *R* whose **centre of curvature is the origin**. The viewer's eye sits on the central axis at distance *Dᵥ* in front of that centre. The single dimensionless parameter
 
-- A flat 16:9 screen at normal viewing distance subtends roughly **30–40°** — use `FLAT` (no warp needed).
-- A typical LED wall wrapping around a studio set subtends **120–160°** horizontally — use `CYLINDER 140`.
-- A full panoramic dome subtends **180°** — use `SPHERE 180`.
+$$k = \text{eye\_distance} = \frac{D_v}{R}$$
 
-Measuring the arc: stand at the intended viewer position (or camera position for virtual production), sweep an angle gauge from the leftmost to rightmost visible edge of the screen. That reading is your arc value.
+controls the geometry. A screen sample at normalised position `s ∈ [-1, 1]` lies at physical angle `α = s · φ`, where `φ = arc / 2` (the half-arc). The angle that point subtends **at the viewer's eye** is
 
-> **Tip:** Start with a test card containing a white grid and incrementally increase the arc value until the straight vertical lines at the screen edges appear visually straight to the seated viewer.
+$$\theta(\alpha) = \operatorname{atan2}\!\big(\sin\alpha,\; k - (1 - \cos\alpha)\big)$$
 
-### Warp Formula
+and the corresponding rectilinear source coordinate is
 
-For flat content on a **cylindrical** screen, the horizontal UV coordinate is re-mapped via the tangent inverse:
+$$u_{\text{src}} = \frac{\tan\theta(\alpha)}{\tan\theta(\varphi)}$$
 
-$$u_{\text{src}} = \frac{\tan\!\left(u_{\text{NDC}} \cdot \frac{\text{arc}}{2}\right)}{\tan\!\left(\frac{\text{arc}}{2}\right)}$$
+**Regression guard:** at `k = 1` (eye on the curvature circle) the geometry collapses to `θ = α`, and the formula reduces *exactly* to the legacy tangent map `tan(s·φ) / tan(φ)`. So `eye_distance 1` reproduces the previous behaviour. Increasing `k` moves the viewer back (flatter perceived warp); decreasing `k` brings the eye closer (stronger warp). The edge angle is clamped below 89° so arcs ≥ 180° no longer produce a `tan → ∞` NaN.
 
-This expands the pixels towards the screen edges so they align with the even angular spacing of the physical curved surface. For **360° content** the same arc drives the sinusoidal ray direction directly, so the look-direction samples are spread evenly across the arc rather than using the tangent-based rectilinear formula.
+- **`SPHERE`** applies the same `θ(α)` mapping **radially** on the NDC radius `r = length(ndc)` — no aspect-ratio coupling, so both axes warp symmetrically.
+- **`FISHEYE`** uses a true equidistant (angle-linear) mapping `tan(r·φ) / tan(min(φ, 89°))` instead of a tangent/gnomonic curve.
+
+The `arc` sign is ignored (its absolute value is used); the model is always the concave (viewer-inside) case.
 
 ### Usage Examples
 
@@ -177,22 +181,23 @@ MIXER 1-10 PROJECTION 0 0 0 90
 MIXER 1-10 PROJECTION_CURVE CYLINDER 140
 ```
 
-**3. Dome / planetarium — full spherical screen**
+**3. Dome / planetarium — spherical screen with viewer set back**
+Viewer twice the screen radius away from the centre of curvature (`k = 2`).
 ```bash
-MIXER 1-10 PROJECTION_CURVE SPHERE 180
+MIXER 1-10 PROJECTION_CURVE SPHERE 160 2.0
 ```
 
 **4. Animated arc — live calibration during rehearsal**
-Smoothly sweep the arc value from 0° to 160° over 4 seconds (100 frames at 25 fps) to find the sweet spot without stopping playback.
+Smoothly sweep the arc value from 0° to 160° over 4 seconds (100 frames at 25 fps) to find the sweet spot without stopping playback. `eye_distance` is held at the default `1.0`.
 ```bash
-MIXER 1-10 PROJECTION_CURVE CYLINDER 160 100 LINEAR
+MIXER 1-10 PROJECTION_CURVE CYLINDER 160 1.0 100 LINEAR
 ```
 
 **5. Query current state**
 ```bash
 MIXER 1-10 PROJECTION_CURVE
 ```
-Response: `201 MIXER OK\r\nCYLINDER 140.0\r\n`
+Response: `201 MIXER OK\r\nCYLINDER 140.0 1.0\r\n`
 
 **6. Disable compensation**
 ```bash
@@ -212,6 +217,30 @@ MIXER 1-10 PROJECTION_CURVE FLAT 0
 
 Sending `PROJECTION 0 0 0 0` (disabling 360° mode) leaves any active curve compensation running — flat content will still be correctly warped for the curved screen.
 
+### Source Lens — `PROJECTION_LENS` (360° content)
+
+`PROJECTION_CURVE` describes the **physical destination screen**. A separate concept, the **source lens**, describes how the *incoming 360° source* is mapped onto the virtual camera before the destination warp is applied. Historically these two were overloaded onto the same `type` value; they are now fully separated so a `SPHERE` source can be shown on a `CYLINDER` screen, etc.
+
+```bash
+MIXER [channel]-[layer] PROJECTION_LENS [model]
+MIXER [channel]-[layer] PROJECTION_LENS            // Query current lens model
+```
+
+| Model | Virtual-camera mapping of the 360° source |
+| :--- | :--- |
+| `RECTILINEAR` / `FLAT` | Pin-hole / gnomonic (default) — straight lines stay straight |
+| `CYLINDER` | Cylindrical (panoramic) source unwrap |
+| `SPHERE` | Spherical (equirectangular) source unwrap |
+| `FISHEYE` | Equidistant fisheye source unwrap |
+
+The lens mapping is driven by the virtual-camera **field of view** set via `PROJECTION` (the `fov` argument), *not* by the screen `arc`. The lens model snaps instantly (it is not tweened) but is fully keyframeable via `proj_source_lens`. Use `PROJECTION_LENS` only for 360° / equirectangular layers; it has no effect on flat content.
+
+```bash
+MIXER 1-10 PROJECTION 0 0 0 110          // 110° virtual FOV
+MIXER 1-10 PROJECTION_LENS RECTILINEAR   // rectilinear de-warp of the 360° source
+MIXER 1-10 PROJECTION_CURVE CYLINDER 140 // then compensate the curved LED wall
+```
+
 ### Best Practices
 
 - **Always measure the arc at the camera or primary viewer position**, not at the screen centre. The arc changes if the camera moves; for moving camera rigs, automate the arc via tween or OSC.
@@ -219,6 +248,96 @@ Sending `PROJECTION 0 0 0 0` (disabling 360° mode) leaves any active curve comp
 - **For virtual production** with a tracking camera, combine `PROJECTION_CURVE` with `PROJECTION` yaw/pitch to account for both screen shape and camera look-direction simultaneously.
 - **`CYLINDER` only compensates the horizontal axis.** Tall screens that also curve vertically require `SPHERE`, or you can stack two MIXER layers with separate compensations if the horizontal and vertical arcs differ.
 - The arc can be **tweened** (`EASEINOUTQUAD`, `LINEAR`, etc.) — useful for dynamic architectural mapping where the screen profile changes during the show.
+
+---
+
+## Lens Distortion Correction
+
+Real camera lenses never image the world perfectly. Straight lines bow outward (*barrel*) or pinch inward (*pincushion*), and de-centred optical elements skew the image diagonally (*tangential* distortion). `PROJECTION_DISTORTION` applies the industry-standard **Brown–Conrady** lens model on the GPU so that a 360° / projected layer can either:
+
+- **Match a real lens** — reproduce the exact distortion of a physical taking-lens so a CG/virtual layer sits seamlessly on top of a live plate, or
+- **Cancel a real lens** — pre-warp the source with the inverse of a measured profile so the projected image comes out geometrically straight.
+
+This is the same distortion model used by OpenCV, Blender, Nuke, and the SMPTE OpenLensIO virtual-production standard. The five coefficients map 1:1 onto those tools, so a calibration captured elsewhere can be pasted straight in.
+
+### AMCP Command
+
+```bash
+MIXER [channel]-[layer] PROJECTION_DISTORTION [k1] [k2] [k3] [p1] [p2] [duration] [tween]
+MIXER [channel]-[layer] PROJECTION_DISTORTION                  // Query: k1 k2 k3 p1 p2
+MIXER [channel]-[layer] PROJECTION_DISTORTION 0 0 0 0 0        // Disable (all zero = identity)
+```
+
+`p1`, `p2`, `duration`, and `tween` are optional. Supplying only `k1 k2 k3` leaves the tangential terms at zero (pure radial distortion) — fully backward compatible with the previous three-argument form.
+
+### Parameters
+
+| Parameter | Description | Typical Range |
+| :--- | :--- | :--- |
+| **k1** | 1st-order radial coefficient. The dominant barrel/pincushion term. Negative = barrel (wide-angle), positive = pincushion (telephoto). | `-0.5` … `+0.5` |
+| **k2** | 2nd-order radial coefficient. Fine-tunes the curve toward the frame edge. | `-0.2` … `+0.2` |
+| **k3** | 3rd-order radial coefficient. Corrects the extreme corners on fisheye / very wide glass. | `-0.1` … `+0.1` |
+| **p1** | 1st tangential (decentering) coefficient. Corrects vertical-axis skew from a lens element that is not perfectly centred. | `-0.01` … `+0.01` |
+| **p2** | 2nd tangential (decentering) coefficient. Corrects horizontal-axis skew. | `-0.01` … `+0.01` |
+| **duration** | Tween duration in frames | Integer |
+| **tween** | Tween curve type | `linear`, `ease`, `easeinoutquad`, … |
+
+> **Magnitudes are small.** Tangential coefficients are usually one to two orders of magnitude smaller than the radial ones. For most lenses `p1`/`p2` stay below `±0.005`; values larger than that produce an obvious diagonal shear.
+
+### The Brown–Conrady Model
+
+Each output pixel is expressed as a normalised coordinate `(x, y)` measured from the optical centre, with squared radius `r² = x² + y²`. The distorted sample position is:
+
+$$x_d = x\,(1 + k_1 r^2 + k_2 r^4 + k_3 r^6) + \big[\,2 p_1 x y + p_2 (r^2 + 2x^2)\,\big]$$
+
+$$y_d = y\,(1 + k_1 r^2 + k_2 r^4 + k_3 r^6) + \big[\,p_1 (r^2 + 2y^2) + 2 p_2 x y\,\big]$$
+
+- The first bracket is the **radial** polynomial (`k1`/`k2`/`k3`) — symmetric about the centre, it produces barrel/pincushion bowing.
+- The second bracket is the **tangential** term (`p1`/`p2`) — it tilts the distortion off-axis to model a lens whose elements are slightly decentered.
+
+**Regression guard:** with all five coefficients `0` the equations reduce to `x_d = x, y_d = y` — the layer is byte-for-byte identical to a layer with no distortion command. The tangential branch is skipped entirely when `p1 == 0 && p2 == 0`.
+
+### Keyframe & OSC Integration
+
+All five coefficients are independently keyframeable through the keyframe-animation system as `proj_lens_k1`, `proj_lens_k2`, `proj_lens_k3`, `proj_lens_p1`, and `proj_lens_p2`, and the current values are published on the OSC tree under each layer's stage node (`…/lens_k1`, `…/lens_p1`, etc.). This means a distortion profile can be ramped on a timeline — e.g. to match a real zoom lens whose distortion changes through its range — or driven live from the [camera-tracking lens-calibration system](CAMERA_TRACKING.md#tracking-lens).
+
+### Usage Examples
+
+**1. Correct moderate barrel distortion from a wide lens**
+A 14 mm cine lens bows verticals outward; a small negative `k1` straightens them.
+```bash
+MIXER 1-10 PROJECTION_DISTORTION -0.18 0.02 0 0 0
+```
+
+**2. Full five-coefficient calibration pasted from OpenCV**
+A lens calibrated externally yields `k1=-0.232, k2=0.061, k3=-0.009, p1=0.0007, p2=-0.0012`.
+```bash
+MIXER 1-10 PROJECTION_DISTORTION -0.232 0.061 -0.009 0.0007 -0.0012
+```
+
+**3. Animated distortion to match a zoom move**
+Ease the distortion from the wide-end profile to the tele-end profile over 50 frames as a virtual lens zooms in.
+```bash
+MIXER 1-10 PROJECTION_DISTORTION -0.18 0.02 0 0 0
+MIXER 1-10 PROJECTION_DISTORTION 0.04 -0.01 0 0 0 50 EASEINOUTQUAD
+```
+
+**4. Query the current coefficients**
+```bash
+MIXER 1-10 PROJECTION_DISTORTION
+```
+Response: `201 MIXER OK\r\n-0.232000 0.061000 -0.009000 0.000700 -0.001200\r\n`
+
+**5. Disable distortion**
+```bash
+MIXER 1-10 PROJECTION_DISTORTION 0 0 0 0 0
+```
+
+### Best Practices
+
+- **Calibrate, don't eyeball.** Capture a checkerboard or dot grid with the real lens and run OpenCV `calibrateCamera` (or a tool like Nuke's LensDistortion / PFTrack). Paste the resulting `k1 k2 k3 p1 p2` directly — the sign and scale conventions match.
+- **Dial radial first, tangential last.** Get the verticals/horizontals straight with `k1` (then `k2`, `k3`), and only reach for `p1`/`p2` if the image is still skewed diagonally after the radial terms are correct.
+- **For seamless virtual production**, drive the coefficients from a lens file via `TRACKING LENS` so distortion tracks zoom and focus automatically rather than being set as a static value.
 
 ---
 
@@ -443,7 +562,16 @@ MIXER 1-10 FLIP
 
 ## Camera Tracking
 
-Real-time camera tracking integration maps physical camera movement (pan, tilt, roll, zoom) directly to layer transforms — either driving the 360° projection system or 2D fill/scale/rotation — with sub-frame latency. Supports FreeD, FreeD+ (Stype), OSC, VRPN, and PosiStageNet protocols.
+Real-time camera tracking integration maps physical camera movement (pan, tilt, roll, zoom) directly to layer transforms — either driving the 360° projection system or 2D fill/scale/rotation — with sub-frame latency. Supports FreeD, FreeD+ (Stype), OSC, VRPN, PosiStageNet, and SMPTE **OpenTrackIO** protocols.
+
+Beyond raw pose, the tracking system now models the **lens and timing realism** needed for high-end virtual production:
+
+- **Latency compensation** (`TRACKING DELAY`) — time-align tracking data with a delayed video feed by interpolating buffered samples.
+- **Genlock / LTC sync** (`TRACKING GENLOCK`) — frame-native latency compensation that, when a house LTC signal is present on the shared LTC input, snaps the sampled pose to the video frame grid so tracking updates align to frame boundaries.
+- **Nodal / entrance-pupil offset** (`TRACKING NODAL`) — correct parallax for a lens whose optical centre is offset from the tracked origin.
+- **Dynamic lens calibration** (`TRACKING LENS`) — load a per-lens profile that drives FOV, Brown–Conrady distortion, and nodal offset from the live zoom/focus encoders.
+- **Focus-driven depth of field** (`TRACKING DOF`) — map the lens focus channel to an operator-calibrated rack-focus blur.
+- **Track-target follow** (`MODE TARGET` + `TRACKING TARGET_CAMERA` / `TARGET_MAP`) — project a tracked **subject** position through a static virtual camera so a graphic (nameplate, arrow, highlight ring) follows the subject on screen, e.g. driven from an OpenFollow PSN stream.
 
 ```bash
 # Bind a FreeD tracker to drive 360° projection
@@ -455,9 +583,20 @@ TRACKING 1-1 ZERO
 # 2D counter-tracking for a fixed lower-third graphic
 TRACKING 1-10 BIND FREED PORT 6301 CAMERA 1 MODE 2D
 TRACKING 1-10 SCALE -0.15 -0.10 65535
+
+# One OpenTrackIO stream carries pose + lens + timing together
+TRACKING 1-1 BIND OPENTRACKIO PORT 55555 HOST 239.135.1.100 MODE 360
+
+# AR track-target: a nameplate follows a performer (OpenFollow PSN)
+TRACKING 1-1 BIND PSN HOST 236.10.10.10 PORT 56565 MODE TARGET
+TRACKING 1-1 TARGET_CAMERA 0 1.6 0 0 0 0 50
+TRACKING 1-1 TARGET_MAP 0.5 3.0 1.7778
+
+# Genlock the tracking pose to house LTC, 3 frames behind the program feed
+TRACKING 1-1 GENLOCK 3 ON
 ```
 
-For full protocol details, zoom calibration, axis scaling, configuration file setup, and worked examples, see [CAMERA_TRACKING.md](CAMERA_TRACKING.md).
+For full protocol details, zoom calibration, axis scaling, latency/nodal/lens/DOF realism, the lens-calibration file format, configuration file setup, and worked examples, see [CAMERA_TRACKING.md](CAMERA_TRACKING.md).
 
 ---
 

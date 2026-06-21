@@ -21,6 +21,7 @@
 
 #include "protocol/freed_receiver.h"
 #include "protocol/freed_plus_receiver.h"
+#include "protocol/opentrackio_receiver.h"
 #include "protocol/osc_receiver.h"
 #include "protocol/psn_receiver.h"
 #include "protocol/vrpn_receiver.h"
@@ -62,6 +63,11 @@ void receiver_manager::ensure_receiver(tracking_protocol protocol, int port, con
             e.receiver = std::make_unique<psn_receiver>(
                 static_cast<uint16_t>(port),
                 host.empty() ? "236.10.10.10" : host);
+            break;
+        case tracking_protocol::opentrackio:
+            e.receiver = std::make_unique<opentrackio_receiver>(
+                static_cast<uint16_t>(port),
+                host.empty() ? "239.135.1.100" : host);
             break;
         default:
             throw std::runtime_error("Unknown tracking protocol");

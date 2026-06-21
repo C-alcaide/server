@@ -349,6 +349,21 @@ public:
         }
         return true;
     }
+
+    bool get_timecode_anchor(int fps,
+                             uint32_t&                              out_frame,
+                             std::chrono::steady_clock::time_point& out_time) {
+        if (!valid_signal) return false;
+        int slot = active_slot_.load(std::memory_order_acquire);
+        auto now = std::chrono::steady_clock::now();
+        if (std::chrono::duration_cast<std::chrono::milliseconds>(now - slots_[slot].signal_time).count() > 1000)
+            return false;
+        const int  rate = fps > 0 ? fps : 25;
+        const auto& tc  = slots_[slot].tc;
+        out_frame = static_cast<uint32_t>((tc.hours * 3600 + tc.mins * 60 + tc.secs) * rate + tc.frame);
+        out_time  = slots_[slot].signal_time;
+        return true;
+    }
     
     bool is_using_system_clock() {
         return !is_valid();
@@ -363,6 +378,9 @@ void LTCInput::start() { LTCInputImpl::instance().start(); }
 std::string LTCInput::get_current_timecode_string() { return LTCInputImpl::instance().get_current_timecode_string(); }
 uint32_t LTCInput::get_current_frame_number(int fps) { return LTCInputImpl::instance().get_current_frame_number(fps); }
 bool LTCInput::is_valid() { return LTCInputImpl::instance().is_valid(); }
+bool LTCInput::get_timecode_anchor(int fps, uint32_t& out_frame, std::chrono::steady_clock::time_point& out_time) {
+    return LTCInputImpl::instance().get_timecode_anchor(fps, out_frame, out_time);
+}
 
 // New methods bindings
 std::vector<std::string> LTCInput::get_capture_devices() { return LTCInputImpl::instance().get_capture_devices(); }

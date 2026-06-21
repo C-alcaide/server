@@ -90,6 +90,7 @@ static void load_config_receivers()
                 else if (boost::iequals(proto_str, L"OSC"))        proto = tracking_protocol::osc;
                 else if (boost::iequals(proto_str, L"VRPN"))       proto = tracking_protocol::vrpn;
                 else if (boost::iequals(proto_str, L"PSN"))        proto = tracking_protocol::psn;
+                else if (boost::iequals(proto_str, L"OPENTRACKIO")) proto = tracking_protocol::opentrackio;
                 else {
                     CASPAR_LOG(warning) << L"[tracking] Unknown protocol in config: " << proto_str;
                     continue;
@@ -100,7 +101,9 @@ static void load_config_receivers()
 
             // Apply per-protocol default port if not specified in config
             if (port == 0)
-                port = (proto == tracking_protocol::psn) ? 56565 : 6301;
+                port = (proto == tracking_protocol::psn)         ? 56565
+                     : (proto == tracking_protocol::opentrackio) ? 55555
+                                                                 : 6301;
 
             try {
                 receiver_manager::instance().ensure_receiver(proto, port, host);

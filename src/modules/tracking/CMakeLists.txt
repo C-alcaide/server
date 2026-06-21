@@ -36,6 +36,9 @@ set(SOURCES
     camera_data.h
     tracker_binding.h
 
+    lens_profile.cpp
+    lens_profile.h
+
     tracker_registry.cpp
     tracker_registry.h
 
@@ -52,6 +55,8 @@ set(SOURCES
     protocol/freed_plus_receiver.h
     protocol/osc_receiver.cpp
     protocol/osc_receiver.h
+    protocol/opentrackio_receiver.cpp
+    protocol/opentrackio_receiver.h
     protocol/psn_receiver.cpp
     protocol/psn_receiver.h
     protocol/vrpn_receiver.cpp

@@ -274,6 +274,10 @@ struct osc_receiver::impl
             double focus = (val <= 1.0 && val >= 0.0) ? val * 65535.0 : val;
             d.focus = static_cast<uint16_t>(std::clamp(focus, 0.0, 65535.0));
         }
+        else if (field == "iris") {
+            double iris = (val <= 1.0 && val >= 0.0) ? val * 65535.0 : val;
+            d.iris = static_cast<uint16_t>(std::clamp(iris, 0.0, 65535.0));
+        }
     }
 };
 
