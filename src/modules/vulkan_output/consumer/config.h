@@ -48,6 +48,12 @@ enum class output_eotf
     gamma24,
 };
 
+enum class gsync_reference
+{
+    vsync,
+    external, // House sync
+};
+
 struct configuration
 {
     int          gpu_index    = 0;     // Physical GPU index (reserved for multi-GPU PR)
@@ -67,6 +73,17 @@ struct configuration
     // Display name matching: if set, selects monitor by substring match on device name
     // instead of index. Example: "BNQ" matches BenQ monitors.
     std::wstring display_name;
+
+    // NvAPI automation (requires CASPAR_NVAPI_ENABLED + professional GPU)
+    bool edid_emulation    = false;  // Inject synthetic EDID on disconnected outputs
+    bool edid_auto_hdr     = false;  // Read EDID to auto-detect HDR capabilities
+    bool persist_edid      = false;  // Lock EDID so display survives cable disconnect
+    bool hardware_hdr      = false;  // Use display engine PQ+BT.2020 (zero GPU cost)
+    int  max_cll           = 1000;   // Peak content luminance (cd/m²)
+    int  max_fall          = 400;    // Max frame-average luminance (cd/m²)
+    bool gsync_enabled     = false;  // Enable Quadro Sync framelock
+    bool gsync_master      = false;  // Configure this output as sync master
+    gsync_reference gsync_source = gsync_reference::vsync;
 };
 
 configuration parse_config(const boost::property_tree::wptree& ptree);

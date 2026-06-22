@@ -21,6 +21,7 @@
 #include "config.h"
 #include "../util/color_convert_pipeline.h"
 #include "../util/display_enum.h"
+#include "../util/nvapi_helpers.h"
 #include "../util/output_window.h"
 #include "../util/presentation.h"
 
@@ -708,6 +709,26 @@ class vulkan_output_consumer_impl
   private:
     void run()
     {
+        // ─── NvAPI pre-surface automation ───────────────────────────────────
+        // EDID emulation: inject synthetic EDID on disconnected outputs so
+        // Windows enumerates them (must happen BEFORE display enumeration).
+        if (config_.edid_emulation) {
+            if (!nvapi_)
+                nvapi_ = std::make_unique<nvapi_helpers>();
+            if (nvapi_->is_available()) {
+                uint32_t edid_w = config_.region_w > 0 ? config_.region_w : format_desc_.width;
+                uint32_t edid_h = config_.region_h > 0 ? config_.region_h : format_desc_.height;
+                injected_edid_display_id_ = nvapi_->inject_edid(
+                    config_.gpu_index, config_.output_index, edid_w, edid_h, format_desc_.fps);
+                if (injected_edid_display_id_ != 0) {
+                    // Give Windows time to enumerate the new display
+                    std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+                    CASPAR_LOG(info) << print() << L" EDID emulation active for output "
+                                     << config_.output_index;
+                }
+            }
+        }
+
         // Find target display
         auto displays = enumerate_displays();
         auto* target  = find_display(displays, config_.output_index, config_.display_name);
@@ -764,38 +785,141 @@ class vulkan_output_consumer_impl
 
         // Set HDR metadata if we got an HDR surface format
         if (hdr_format.format != vk::Format::eUndefined) {
-            float max_nits = (config_.transfer == hdr_transfer::hlg) ? 1000.0f : 1000.0f;
+            float max_nits = static_cast<float>(config_.max_cll);
             set_hdr_metadata(vk_device, swapchain_->swapchain(), config_.gamut, max_nits);
         }
+
+        // ─── NvAPI post-swapchain automation ────────────────────────────────
+        setup_nvapi();
 
         // Initialize color conversion pipeline (always created, conditionally dispatched)
         color_pipeline_ = std::make_unique<color_convert_pipeline>(
             vk_device, physical, swapchain_->width(), swapchain_->height());
 
         // Determine tone map op from transfer/EOTF combination
+        // If hardware HDR is active, the display engine handles PQ+BT.2020 —
+        // the color pipeline should pass linear data through (identity).
         int tone_map = 0;
-        if (config_.eotf == output_eotf::hlg)
-            tone_map = 7; // hlg_ootf
-        else if (config_.gamut == output_gamut::bt2020 && config_.eotf == output_eotf::pq)
-            tone_map = 3; // aces_rrt for HDR10
+        output_gamut effective_gamut = config_.gamut;
+        output_eotf  effective_eotf = config_.eotf;
+        float        effective_nits = static_cast<float>(config_.max_cll);
 
-        color_pipeline_->update_config(config_.gamut, config_.eotf, 1000.0f, tone_map);
+        if (hw_hdr_active_) {
+            // Hardware HDR: display engine performs PQ encoding + gamut mapping.
+            // Source stays linear sRGB primaries — skip compute shader conversion.
+            effective_gamut = output_gamut::bt709;
+            effective_eotf  = output_eotf::linear;
+            tone_map        = 0;
+        } else {
+            if (config_.eotf == output_eotf::hlg)
+                tone_map = 7; // hlg_ootf
+            else if (config_.gamut == output_gamut::bt2020 && config_.eotf == output_eotf::pq)
+                tone_map = 3; // aces_rrt for HDR10
+        }
+
+        color_pipeline_->update_config(effective_gamut, effective_eotf, effective_nits, tone_map);
 
         if (color_pipeline_->is_active()) {
             CASPAR_LOG(info) << print() << L" Color pipeline active: gamut="
-                             << static_cast<int>(config_.gamut)
-                             << L" eotf=" << static_cast<int>(config_.eotf);
+                             << static_cast<int>(effective_gamut)
+                             << L" eotf=" << static_cast<int>(effective_eotf);
         }
 
         while (is_running_) {
             tick(queue_obj);
         }
 
-        // Cleanup
+        // ─── Cleanup ────────────────────────────────────────────────────────
+        shutdown_nvapi();
         color_pipeline_.reset();
         swapchain_.reset();
         vk_instance.destroySurfaceKHR(surface);
         window_.reset();
+    }
+
+    // ─── NvAPI automation helpers ──────────────────────────────────────────
+    void setup_nvapi()
+    {
+        // Only proceed if NvAPI features are configured
+        if (!config_.edid_auto_hdr && !config_.persist_edid &&
+            !config_.gsync_enabled && !config_.hardware_hdr)
+            return;
+
+        if (!nvapi_)
+            nvapi_ = std::make_unique<nvapi_helpers>();
+        if (!nvapi_->is_available())
+            return;
+
+        // EDID auto-detection: read connected monitor's EDID to discover HDR capabilities
+        if (config_.edid_auto_hdr) {
+            auto edid = nvapi_->read_edid(config_.gpu_index, config_.output_index);
+            if (edid.supports_hdr && config_.transfer == hdr_transfer::sdr) {
+                config_.transfer = hdr_transfer::pq;
+                config_.gamut    = output_gamut::bt2020;
+                config_.eotf     = output_eotf::pq;
+                if (edid.max_luminance > 0)
+                    config_.max_cll = static_cast<int>(edid.max_luminance);
+                CASPAR_LOG(info) << print() << L" EDID auto-detected HDR (PQ) display: "
+                                 << edid.manufacturer << L" " << edid.model
+                                 << L" MaxCLL=" << config_.max_cll << L" cd/m²";
+            }
+        }
+
+        // EDID persistence: lock the monitor's EDID so the display survives cable disconnect
+        if (config_.persist_edid) {
+            nvapi_->persist_edid(config_.gpu_index, config_.output_index);
+        }
+
+        // Quadro Sync configuration
+        if (config_.gsync_enabled && nvapi_->gsync_device_count() > 0) {
+            auto source = (config_.gsync_source == gsync_reference::external)
+                              ? sync_source::house_sync
+                              : sync_source::vsync;
+
+            if (config_.gsync_master) {
+                nvapi_->configure_sync(config_.gpu_index, config_.output_index, source);
+            }
+
+            auto status = nvapi_->get_sync_status(config_.gpu_index);
+            CASPAR_LOG(info) << print() << L" Quadro Sync: "
+                             << (status.synced ? L"LOCKED" : L"UNLOCKED")
+                             << L" role=" << (status.role == sync_role::master ? L"master" : L"slave")
+                             << (status.house_sync
+                                     ? L" house_sync=" + std::to_wstring(status.house_sync_freq) + L"Hz"
+                                     : L"");
+        }
+
+        // Hardware HDR: let the display engine perform PQ encoding + gamut mapping.
+        // Source stays linear scRGB FP16 — no compute shader EOTF needed.
+        if (config_.hardware_hdr &&
+            (config_.transfer == hdr_transfer::pq || config_.transfer == hdr_transfer::hlg)) {
+            nvapi_display_id_ = nvapi_->resolve_display_id(config_.gpu_index, config_.output_index);
+            if (nvapi_display_id_ != 0 && nvapi_->supports_hdr_output(nvapi_display_id_)) {
+                hw_hdr_active_ = nvapi_->enable_hdr_output(nvapi_display_id_, config_.max_cll, config_.max_fall);
+                if (hw_hdr_active_) {
+                    CASPAR_LOG(info) << print()
+                                     << L" Hardware HDR active — display engine handles PQ + BT.2020.";
+                }
+            }
+        }
+    }
+
+    void shutdown_nvapi()
+    {
+        // Remove injected EDID
+        if (injected_edid_display_id_ != 0 && nvapi_) {
+            nvapi_->remove_edid(config_.gpu_index, injected_edid_display_id_);
+            injected_edid_display_id_ = 0;
+        }
+
+        // Disable hardware HDR
+        if (hw_hdr_active_ && nvapi_display_id_ != 0 && nvapi_) {
+            nvapi_->disable_hdr_output(nvapi_display_id_);
+            hw_hdr_active_    = false;
+            nvapi_display_id_ = 0;
+        }
+
+        nvapi_.reset();
     }
 
     void tick(const std::shared_ptr<accelerator::vulkan::vulkan_queue>& queue_obj)
@@ -852,6 +976,12 @@ class vulkan_output_consumer_impl
     std::unique_ptr<output_window>          window_;
     std::unique_ptr<present_swapchain>      swapchain_;
     std::unique_ptr<color_convert_pipeline> color_pipeline_;
+
+    // NvAPI automation state
+    std::unique_ptr<nvapi_helpers> nvapi_;
+    uint32_t                      nvapi_display_id_          = 0;
+    bool                          hw_hdr_active_             = false;
+    uint32_t                      injected_edid_display_id_  = 0;
 
     spl::shared_ptr<diagnostics::graph>            graph_ = spl::make_shared<diagnostics::graph>();
     caspar::timer                                  tick_timer_;

@@ -89,6 +89,20 @@ configuration parse_config(const boost::property_tree::wptree& ptree)
         config.region_h = subregion->get(L"height", 0);
     }
 
+    // NvAPI automation
+    config.edid_emulation = ptree.get(L"edid-emulation", false);
+    config.edid_auto_hdr  = ptree.get(L"edid-auto-hdr", false);
+    config.persist_edid   = ptree.get(L"persist-edid", false);
+    config.hardware_hdr   = ptree.get(L"hardware-hdr", false);
+    config.max_cll        = ptree.get(L"max-cll", 1000);
+    config.max_fall       = ptree.get(L"max-fall", 400);
+    config.gsync_enabled  = ptree.get(L"gsync", false);
+    config.gsync_master   = ptree.get(L"gsync-master", false);
+
+    auto gsync_src_str = ptree.get(L"gsync-source", L"vsync");
+    if (gsync_src_str == L"external" || gsync_src_str == L"house")
+        config.gsync_source = gsync_reference::external;
+
     return config;
 }
 
