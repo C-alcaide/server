@@ -192,6 +192,23 @@ struct device::impl : public std::enable_shared_from_this<impl>
             CASPAR_THROW_EXCEPTION(caspar_exception() << msg_info("No suitable Vulkan GPUs found"));
         }
 
+        // Log GPU topology (all suitable devices)
+        CASPAR_LOG(info) << L"[vulkan] GPU topology: " << candidates.size() << L" suitable device(s):";
+        for (size_t i = 0; i < candidates.size(); ++i) {
+            auto type_str = [](VkPhysicalDeviceType t) {
+                switch (t) {
+                    case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU:   return "discrete";
+                    case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU: return "integrated";
+                    case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU:    return "virtual";
+                    case VK_PHYSICAL_DEVICE_TYPE_CPU:            return "cpu";
+                    default:                                     return "other";
+                }
+            };
+            CASPAR_LOG(info) << L"[vulkan]   [" << i << L"] "
+                             << candidates[i].properties.deviceName
+                             << " (" << type_str(candidates[i].properties.deviceType) << ")";
+        }
+
         // Select by gpu_index if specified, otherwise use first (preferred discrete)
         if (gpu_index >= 0 && gpu_index < static_cast<int>(candidates.size())) {
             _vkb_physical_device = candidates[gpu_index];
