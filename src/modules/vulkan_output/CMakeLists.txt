@@ -36,6 +36,8 @@ set(SOURCES
 	util/color_convert_pipeline.h
 	util/display_enum.cpp
 	util/display_enum.h
+	util/nvapi_helpers.cpp
+	util/nvapi_helpers.h
 	util/output_window.cpp
 	util/output_window.h
 	util/presentation.cpp
@@ -61,4 +63,19 @@ target_compile_definitions(vulkan_output PUBLIC VULKAN_HPP_DISPATCH_LOADER_DYNAM
 
 if (MSVC)
 	target_link_libraries(vulkan_output PRIVATE dxgi.lib)
+endif ()
+
+# Optional NvAPI support (Quadro Sync, EDID emulation, hardware HDR)
+if (MSVC)
+	find_path(NVAPI_INCLUDE_DIR nvapi.h HINTS "${CMAKE_SOURCE_DIR}/../nvapi" "${CMAKE_SOURCE_DIR}/external/nvapi")
+	find_library(NVAPI_LIBRARY NAMES nvapi64 HINTS "${CMAKE_SOURCE_DIR}/../nvapi/amd64" "${CMAKE_SOURCE_DIR}/external/nvapi/amd64")
+
+	if (NVAPI_INCLUDE_DIR AND NVAPI_LIBRARY)
+		message(STATUS "NvAPI found: ${NVAPI_INCLUDE_DIR}")
+		target_include_directories(vulkan_output PRIVATE ${NVAPI_INCLUDE_DIR})
+		target_link_libraries(vulkan_output PRIVATE ${NVAPI_LIBRARY})
+		target_compile_definitions(vulkan_output PRIVATE CASPAR_NVAPI_ENABLED=1)
+	else ()
+		message(STATUS "NvAPI not found — building without Quadro Sync / EDID emulation / hardware HDR.")
+	endif ()
 endif ()
