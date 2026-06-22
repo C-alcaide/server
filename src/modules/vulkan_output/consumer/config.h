@@ -66,6 +66,8 @@ struct configuration
     int          gpu_index    = 0;     // Physical GPU index (reserved for multi-GPU PR)
     int          output_index = 1;     // Display output index (1-based)
     int          buffer_depth = 3;     // Swapchain image count / pre-scheduled frames
+    int          delay_frames = 0;     // Extra frames to hold before presenting (A/V sync)
+    double       delay_ms     = 0.0;   // Sub-frame delay in ms (clamped to one frame period)
     bool         borderless   = true;  // Borderless fullscreen (always true for now)
     hdr_transfer transfer     = hdr_transfer::sdr;
     output_gamut gamut        = output_gamut::bt709;

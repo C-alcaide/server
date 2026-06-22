@@ -737,13 +737,23 @@ class vulkan_output_consumer_impl
         format_desc_   = format_desc;
         channel_index_ = channel_index;
 
+        // Clamp delay_frames to valid range
+        config_.delay_frames = std::max(0, std::min(config_.delay_frames, config_.buffer_depth - 1));
+
+        // Clamp delay_ms to one frame period
+        double frame_period_ms = 1000.0 / format_desc_.fps;
+        if (config_.delay_ms > frame_period_ms)
+            config_.delay_ms = frame_period_ms;
+        if (config_.delay_ms < 0.0)
+            config_.delay_ms = 0.0;
+
         graph_->set_color("tick-time", diagnostics::color(0.0f, 0.6f, 0.9f));
         graph_->set_color("frame-time", diagnostics::color(0.1f, 1.0f, 0.1f));
         graph_->set_color("dropped-frame", diagnostics::color(0.3f, 0.6f, 0.3f));
         graph_->set_text(print());
         diagnostics::register_graph(graph_);
 
-        frame_buffer_.set_capacity(1);
+        frame_buffer_.set_capacity(config_.buffer_depth);
 
         thread_ = std::thread([this] {
             try {
@@ -760,6 +770,10 @@ class vulkan_output_consumer_impl
     std::future<bool> send(core::video_field /*field*/, const core::const_frame& frame)
     {
         if (!frame_buffer_.try_push(frame)) {
+            // Drop oldest frame (backpressure) and push new one
+            core::const_frame discard;
+            frame_buffer_.try_pop(discard);
+            frame_buffer_.try_push(frame);
             graph_->set_tag(diagnostics::tag_severity::WARNING, "dropped-frame");
         }
         return make_ready_future(is_running_.load());
@@ -1026,14 +1040,31 @@ class vulkan_output_consumer_impl
         if (device_dead_)
             return;
 
+        // ─── Min-fill gating (presentation delay) ───────────────────────────
+        // Wait until buffer has enough frames before presenting the oldest one.
+        // This introduces intentional latency for A/V sync compensation.
+        const int min_fill = config_.delay_frames + 1;
+
         core::const_frame frame;
 
-        while (!frame_buffer_.try_pop(frame) && is_running_) {
+        // Wait for buffer to reach min_fill threshold
+        while (is_running_) {
+            if (static_cast<int>(frame_buffer_.size()) >= min_fill) {
+                if (frame_buffer_.try_pop(frame))
+                    break;
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
 
         if (!frame || !is_running_)
             return;
+
+        // Sub-frame delay: fine-grained A/V sync adjustment
+        if (config_.delay_ms > 0.0) {
+            auto sub_frame_delay = std::chrono::microseconds(
+                static_cast<int64_t>(config_.delay_ms * 1000.0));
+            std::this_thread::sleep_for(sub_frame_delay);
+        }
 
         // Get the Vulkan texture from the composited frame
         auto src = std::dynamic_pointer_cast<accelerator::vulkan::texture>(frame.texture());
