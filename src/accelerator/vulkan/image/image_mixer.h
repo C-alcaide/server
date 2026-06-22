@@ -84,7 +84,7 @@ class image_mixer final : public core::image_mixer
     void set_previz_bridge(const std::shared_ptr<class previz_texture_bridge>& bridge);
     ogl::previz_renderer* get_previz_renderer();
 
-    void set_target_color(core::color_space cs, core::color_transfer ct, bool auto_convert, int auto_tone_map, float peak_luminance) override;
+    void set_target_color(core::color_space cs, core::color_transfer ct, bool auto_convert, int auto_tone_map, float peak_luminance, float sdr_reference_white, bool auto_gamut_compress) override;
 
     void set_calibration_lut(std::shared_ptr<const core::lut3d_data> lut, float strength, const std::wstring& path) override;
     void set_calibration_bypass(bool bypass) override;

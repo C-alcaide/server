@@ -68,6 +68,14 @@ enum class color_transfer
     gamma26,   // Pure gamma 2.6 (DCI cinema projection)
 };
 
+enum class chroma_location
+{
+    unspecified,
+    left,       // MPEG-2/4, H.264 default for 4:2:0/4:2:2
+    center,     // MPEG-1, JPEG
+    topleft,    // Co-sited with top-left luma sample
+};
+
 struct pixel_format_desc final
 {
     struct plane
@@ -106,8 +114,9 @@ struct pixel_format_desc final
     pixel_format          format            = pixel_format::invalid;
     bool                  is_straight_alpha = false;
     std::vector<plane>    planes;
-    core::color_space     color_space    = core::color_space::bt709;
-    core::color_transfer  color_transfer = core::color_transfer::sdr;
+    core::color_space     color_space      = core::color_space::bt709;
+    core::color_transfer  color_transfer   = core::color_transfer::sdr;
+    core::chroma_location chroma_location  = core::chroma_location::unspecified;
 };
 
 }} // namespace caspar::core

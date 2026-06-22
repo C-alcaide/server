@@ -121,11 +121,13 @@ struct video_channel::impl final
          color_transfer                            default_color_transfer = color_transfer::sdr,
          bool                                      auto_color_convert     = true,
          int                                       auto_tone_map          = 0,
-         float                                     display_peak_luminance = 1000.0f)
+         float                                     display_peak_luminance = 1000.0f,
+         float                                     sdr_reference_white    = 100.0f,
+         bool                                      auto_gamut_compress    = false)
         : channel_info_(index, image_mixer->depth(), default_color_space, default_color_transfer, image_mixer->is_vulkan(), image_mixer->native_gl_context(), auto_color_convert, image_mixer->native_egl_display())
         , output_(graph_, format_desc, channel_info_)
         , image_mixer_(std::move(image_mixer))
-        , mixer_(index, graph_, image_mixer_, default_color_space, default_color_transfer, auto_color_convert, auto_tone_map, display_peak_luminance)
+        , mixer_(index, graph_, image_mixer_, default_color_space, default_color_transfer, auto_color_convert, auto_tone_map, display_peak_luminance, sdr_reference_white, auto_gamut_compress)
         , stage_(std::make_shared<core::stage>(index, graph_, format_desc))
         , tick_(std::move(tick))
     {
@@ -304,8 +306,10 @@ video_channel::video_channel(int                                       index,
                              color_transfer                            default_color_transfer,
                              bool                                      auto_color_convert,
                              int                                       auto_tone_map,
-                             float                                     display_peak_luminance)
-    : impl_(new impl(index, format_desc, default_color_space, std::move(image_mixer), std::move(tick), default_color_transfer, auto_color_convert, auto_tone_map, display_peak_luminance))
+                             float                                     display_peak_luminance,
+                             float                                     sdr_reference_white,
+                             bool                                      auto_gamut_compress)
+    : impl_(new impl(index, format_desc, default_color_space, std::move(image_mixer), std::move(tick), default_color_transfer, auto_color_convert, auto_tone_map, display_peak_luminance, sdr_reference_white, auto_gamut_compress))
 {
 }
 video_channel::~video_channel() {}

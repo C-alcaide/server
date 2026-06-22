@@ -61,6 +61,16 @@ core::mutable_frame make_frame(void*                            tag,
     pix_desc.is_straight_alpha = is_straight_alpha;
     pix_desc.color_transfer    = color_transfer;
 
+    // Propagate chroma sample location for subsampled YUV content
+    if (video && video->chroma_location != AVCHROMA_LOC_UNSPECIFIED) {
+        switch (video->chroma_location) {
+            case AVCHROMA_LOC_LEFT:       pix_desc.chroma_location = core::chroma_location::left;    break;
+            case AVCHROMA_LOC_CENTER:     pix_desc.chroma_location = core::chroma_location::center;  break;
+            case AVCHROMA_LOC_TOPLEFT:    pix_desc.chroma_location = core::chroma_location::topleft; break;
+            default:                      pix_desc.chroma_location = core::chroma_location::left;    break;
+        }
+    }
+
     auto frame = frame_factory.create_frame(tag, pix_desc);
     if (scale_mode != core::frame_geometry::scale_mode::stretch) {
         frame.geometry() = core::frame_geometry::get_default(scale_mode);

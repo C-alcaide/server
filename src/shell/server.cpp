@@ -349,6 +349,19 @@ struct server::impl
 
             auto display_peak_luminance = xml_channel.second.get<float>(L"display-peak-luminance", 1000.0f);
 
+            // BT.2408 Amd.4: configurable SDR reference white level for PQ mapping.
+            // 100 = traditional SDR white (100 cd/m²). 203 = PQ media white per BT.2408 Amd.4.
+            // Affects SDR→PQ scale factor: scale = sdr_ref_white / 10000.
+            auto sdr_reference_white = xml_channel.second.get<float>(L"sdr-reference-white-nits", 100.0f);
+            if (sdr_reference_white <= 0.0f || sdr_reference_white > 1000.0f)
+                CASPAR_THROW_EXCEPTION(user_error() << msg_info(L"sdr-reference-white-nits must be between 1 and 1000"));
+
+            // Auto gamut compression: soft-compress out-of-gamut values in auto_color_convert path.
+            // When converting wide→narrow gamut (e.g. BT.2020→BT.709), saturated colors can
+            // produce negative RGB values. Default (false) = hard-clip (broadcast standard).
+            // true = ACES-style soft compression (prevents visible clipping on saturated content).
+            auto auto_gamut_compress = xml_channel.second.get(L"auto-gamut-compress", false);
+
             // Resolve which physical GPU this channel's mixer should run on.
             // Priority: explicit <gpu> at channel level, else inherit from the
             // channel's first <vulkan-output> consumer's <gpu>, else default 0.
@@ -384,7 +397,9 @@ struct server::impl
                                                 default_color_transfer,
                                                 auto_color_convert,
                                                 auto_tone_map,
-                                                display_peak_luminance);
+                                                display_peak_luminance,
+                                                sdr_reference_white,
+                                                auto_gamut_compress);
 
             const std::wstring lifecycle_key = L"lock" + std::to_wstring(channel_id);
             channels_->emplace_back(channel, channel->stage(), lifecycle_key);

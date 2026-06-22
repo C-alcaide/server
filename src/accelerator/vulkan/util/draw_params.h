@@ -55,6 +55,8 @@ struct draw_params final
     bool                                        auto_color_convert    = true;
     int                                         auto_tone_map         = 0;
     float                                       display_peak_luminance = 1000.0f;
+    float                                       sdr_reference_white    = 100.0f;
+    bool                                        auto_gamut_compress    = false;
 };
 
 }}} // namespace caspar::accelerator::vulkan

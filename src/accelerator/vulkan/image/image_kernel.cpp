@@ -1181,8 +1181,11 @@ struct image_kernel::impl
                     // for SDR↔HLG conversions (75% signal for ref white).
                     // Note: src_t uses EOTF indices, tgt_t uses OETF indices.
                     // Linear/gamma24/gamma26 are treated as SDR-level for luminance.
-                    auto get_luminance_scale = [](int src_t, int tgt_t) -> float {
+                    auto get_luminance_scale = [&](int src_t, int tgt_t) -> float {
+                        // SDR→PQ uses configurable sdr_reference_white per BT.2408 Amd.4.
                         constexpr float k_sdr_hlg = 0.265f;
+                        float sdr_pq_scale = params.sdr_reference_white / 10000.0f;
+                        float pq_sdr_scale = 10000.0f / params.sdr_reference_white;
                         bool src_sdr = (src_t <= 2 || src_t >= 7); // rec709/srgb or linear/gamma24/gamma26
                         bool tgt_sdr = (tgt_t <= 2 || tgt_t >= 5); // rec709/srgb or linear/gamma24/gamma26
                         bool src_hlg = (src_t == 4);
@@ -1191,8 +1194,8 @@ struct image_kernel::impl
                         bool tgt_pq  = (tgt_t == 3);
                         if (src_sdr && tgt_hlg) return k_sdr_hlg;
                         if (src_hlg && tgt_sdr) return 1.0f / k_sdr_hlg;
-                        if (src_sdr && tgt_pq)  return 0.01f;
-                        if (src_pq  && tgt_sdr) return 100.0f;
+                        if (src_sdr && tgt_pq)  return sdr_pq_scale;
+                        if (src_pq  && tgt_sdr) return pq_sdr_scale;
                         if (src_hlg && tgt_pq)  return 0.1f;
                         if (src_pq  && tgt_hlg) return 10.0f;
                         return 1.0f;
@@ -1244,6 +1247,17 @@ struct image_kernel::impl
                     static const float k_identity[9] = {1,0,0, 0,1,0, 0,0,1};
                     set_mat3(uniforms.input_to_working,  k_direct[ig][og]);
                     set_mat3(uniforms.working_to_output, k_identity);
+
+                    // Auto gamut compression: enable ACES-style soft compress for
+                    // wide→narrow gamut conversions to prevent hard-clipping of
+                    // out-of-gamut colors (e.g. BT.2020→BT.709).
+                    if (params.auto_gamut_compress && ig != og) {
+                        uniforms.flags |= static_cast<uint32_t>(shader_flags::gamut_compress);
+                        // Default ACES 1.3 gamut compress limits (cyan, magenta, yellow)
+                        uniforms.gc_limit[0] = 1.147f;
+                        uniforms.gc_limit[1] = 1.264f;
+                        uniforms.gc_limit[2] = 1.312f;
+                    }
                 }
             }
         }

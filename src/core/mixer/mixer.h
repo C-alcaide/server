@@ -47,7 +47,9 @@ class mixer final
                    core::color_transfer                        default_color_transfer = core::color_transfer::sdr,
                    bool                                        auto_color_convert     = true,
                    int                                         auto_tone_map          = 0,
-                   float                                       display_peak_luminance = 1000.0f);
+                   float                                       display_peak_luminance = 1000.0f,
+                   float                                       sdr_reference_white    = 100.0f,
+                   bool                                        auto_gamut_compress    = false);
 
     const_frame operator()(std::vector<draw_frame> frames, const video_format_desc& format_desc, int nb_samples);
 

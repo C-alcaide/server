@@ -861,6 +861,70 @@ Output for DCI projectors with gamma 2.6:
 
 ---
 
+## Standards Compliance & References
+
+CasparVP's color pipeline is designed to comply with the following ITU-R, SMPTE, EBU, and ARIB standards. This section documents which specifications govern each part of the auto-color-convert path and related configuration options.
+
+### Core Color Standards
+
+| Standard | Scope | CasparVP Usage |
+|----------|-------|----------------|
+| **ITU-R BT.709-6** | HD color primaries, matrix coefficients, and transfer curve | Default channel gamut; YCbCr→RGB matrix for SDR content |
+| **ITU-R BT.2020-2** | UHD/4K color primaries (wide gamut) | BT.2020 gamut option; non-constant-luminance YCbCr coefficients |
+| **ITU-R BT.601-7** | SD color primaries and matrix coefficients | Legacy SD input support |
+| **ITU-R BT.1886** | Display EOTF for SDR content (gamma 2.4 power law) | SDR EOTF in the auto-conversion path (linearisation step) |
+
+### HDR Transfer Functions
+
+| Standard | Scope | CasparVP Usage |
+|----------|-------|----------------|
+| **SMPTE ST 2084** (PQ) | Perceptual Quantizer EOTF/OETF | PQ transfer function; exact constants used in shader |
+| **ARIB STD-B67** (HLG) | Hybrid Log-Gamma OETF | HLG transfer function; a/b/c constants per spec |
+| **ITU-R BT.2100-2** | System requirements for HDR-TV (PQ and HLG) | Overall HDR system compliance; scene-referred vs display-referred paths |
+
+### Color Conversion & Gamut Mapping
+
+| Standard | Scope | CasparVP Usage |
+|----------|-------|----------------|
+| **ITU-R BT.2087-0** | Colour conversion from one set of chromaticity coordinates to another | Direct gamut-conversion matrices (Case #1); all D65-based gamut pairs computed from chromaticity primaries per BT.2087 method |
+| **SMPTE RP 177** | Derivation of basic 3×3 matrix from chromaticity coordinates | Reference method for BT.709/BT.2020/P3 RGB↔XYZ matrices |
+| **SMPTE ST 428-1** | DCI-P3 with DCI white point (x=0.314, y=0.351) | P3-DCI gamut support; Bradford CAT used for D50-ish→D65 adaptation |
+
+### Luminance Mapping & Tone Mapping
+
+| Standard | Scope | CasparVP Usage |
+|----------|-------|----------------|
+| **ITU-R BT.2408** | HDR operational practices — SDR/HLG/PQ luminance alignment | `luminance_scale` factors in auto-conversion: SDR→HLG uses 0.265 (75% signal), SDR→PQ uses `sdr_reference_white / 10000` |
+| **ITU-R BT.2390-9** | HDR-to-SDR and SDR-to-HDR tone mapping — EETF (Electrical-Electrical Transfer Function) | Governs the `auto-tone-map` feature. BT.2390 defines a reference EETF that maps PQ signals above a display's peak luminance into the displayable range using a Hermite spline. CasparVP's `<auto-tone-map>` levels 1–3 implement progressively stronger knee compression based on the channel's `<display-peak-luminance>`. Level 0 (default) is hard-clip to [0,1] per broadcast convention |
+| **SMPTE ST 2086** | Mastering display colour volume metadata (MaxCLL, MaxFALL) | Static HDR metadata on DeckLink and Vulkan consumers |
+
+### Broadcast Operational Practices
+
+| Standard | Scope | CasparVP Usage |
+|----------|-------|----------------|
+| **EBU R 137** | Guidelines for the production and distribution of HDR/WCG content | Informs `<sdr-reference-white-nits>`: EBU R 137 defines 203 cd/m² as the HDR reference white for SDR content mapped into a PQ container (per ITU-R BT.2408 Amendment 4). CasparVP defaults to 100 cd/m² (standard SDR reference) but allows 203 for EBU-compliant HDR workflows |
+| **EBU Tech 3373** | Colorimetry testing — test patterns and verification | Reference for CasparCG-TestRunner validation methodology |
+
+### SDR Reference White Level
+
+The `<sdr-reference-white-nits>` channel setting (default: 100) controls where SDR content maps in the PQ/HLG luminance range during auto conversion:
+
+- **100 nits** (default): Traditional SDR reference white. SDR→PQ maps to `100/10000 = 0.01` in PQ linear light. Appropriate when SDR content represents standard broadcast levels.
+- **203 nits** (EBU R 137 / BT.2408 Amd.4): HDR reference white for SDR-originated content in an HDR container. SDR→PQ maps to `203/10000 = 0.0203`. Use when mixing SDR graphics into an HDR programme per EBU recommended practice.
+
+### Gamut Compression
+
+The `<auto-gamut-compress>` channel setting (default: false) enables ACES-style soft gamut compression during auto conversion when source and target gamuts differ:
+
+- When **disabled** (default): Out-of-gamut colours are hard-clipped to [0,1] after matrix conversion. This preserves bit-exact in-gamut colours and is the broadcast standard.
+- When **enabled**: Applies a smooth compression curve (ACES 1.3 gamut compress algorithm with limits 1.147/1.264/1.312 for cyan/magenta/yellow) that maps out-of-gamut colours toward the gamut boundary. This avoids visible clipping artefacts on saturated BT.2020 content played through a BT.709 channel but slightly shifts near-boundary in-gamut colours.
+
+### Chroma Sample Location
+
+CasparVP now captures and propagates `AVChromaLocation` metadata from the FFmpeg decoder through the pixel format descriptor. This metadata is available for future shader-level chroma resampling corrections on subsampled YUV content (4:2:0/4:2:2).
+
+---
+
 ## Notes & Known Limitations
 
 - **OGL mixer YCbCr conversion** uses the channel's `color-space` for the correct coefficients (BT.601/709/2020). The mixer output is always BGRA — consumer conversion to YCbCr for encoding uses the same color metadata.

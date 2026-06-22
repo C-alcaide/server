@@ -615,8 +615,12 @@ struct image_kernel::impl
                 // BT.2408 luminance adaptation for auto conversion path
                 // Note: src_t uses EOTF indices, tgt_t uses OETF indices.
                 // Linear/gamma24/gamma26 are treated as SDR-level for luminance.
-                auto get_luminance_scale = [](int src_t, int tgt_t) -> float {
+                auto get_luminance_scale = [&](int src_t, int tgt_t) -> float {
+                    // BT.2408: SDR→HLG uses 0.265 (75% HLG signal for ref white).
+                    // SDR→PQ uses sdr_reference_white / 10000 (configurable per BT.2408 Amd.4).
                     constexpr float k_sdr_hlg = 0.265f;  // BT.2408: 75% HLG signal
+                    float sdr_pq_scale = params.sdr_reference_white / 10000.0f;
+                    float pq_sdr_scale = 10000.0f / params.sdr_reference_white;
                     bool src_sdr = (src_t <= 2 || src_t >= 7); // rec709/srgb or linear/gamma24/gamma26
                     bool tgt_sdr = (tgt_t <= 2 || tgt_t >= 5); // rec709/srgb or linear/gamma24/gamma26
                     bool src_hlg = (src_t == 4);
@@ -625,13 +629,24 @@ struct image_kernel::impl
                     bool tgt_pq  = (tgt_t == 3);
                     if (src_sdr && tgt_hlg) return k_sdr_hlg;
                     if (src_hlg && tgt_sdr) return 1.0f / k_sdr_hlg;
-                    if (src_sdr && tgt_pq)  return 0.01f;
-                    if (src_pq  && tgt_sdr) return 100.0f;
+                    if (src_sdr && tgt_pq)  return sdr_pq_scale;
+                    if (src_pq  && tgt_sdr) return pq_sdr_scale;
                     if (src_hlg && tgt_pq)  return 0.1f;
                     if (src_pq  && tgt_hlg) return 10.0f;
                     return 1.0f;
                 };
                 shader_->set("luminance_scale", get_luminance_scale(it, ot));
+
+                // Auto gamut compression: enable ACES-style soft compress for
+                // wide→narrow gamut conversions to prevent hard-clipping of
+                // out-of-gamut colors (e.g. BT.2020→BT.709).
+                if (params.auto_gamut_compress && ig != og) {
+                    shader_->set("gamut_compress_enable", true);
+                    // Default ACES 1.3 gamut compress limits (cyan, magenta, yellow)
+                    shader_->set("gc_limit", 1.147f, 1.264f, 1.312f);
+                } else {
+                    shader_->set("gamut_compress_enable", false);
+                }
             }
         } else {
             static int no_convert_count = 0;

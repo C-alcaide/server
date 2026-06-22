@@ -1174,6 +1174,7 @@ struct AVProducer::Impl
     // when individual decoded frames have UNSPECIFIED colorspace/transfer.
     AVColorSpace                     stream_color_space_ = AVCOL_SPC_UNSPECIFIED;
     AVColorTransferCharacteristic    stream_color_trc_   = AVCOL_TRC_UNSPECIFIED;
+    AVChromaLocation                 stream_chroma_loc_  = AVCHROMA_LOC_UNSPECIFIED;
 
 #ifdef _WIN32
     // D3D11→GL GPU-direct video path (bypasses filter graph + CPU transfer)
@@ -1348,6 +1349,7 @@ struct AVProducer::Impl
                     // where the decoder leaves colorspace/transfer unspecified.
                     stream_color_space_ = static_cast<AVColorSpace>(st->codecpar->color_space);
                     stream_color_trc_   = static_cast<AVColorTransferCharacteristic>(st->codecpar->color_trc);
+                    stream_chroma_loc_  = static_cast<AVChromaLocation>(st->codecpar->chroma_location);
                     if (st->duration != AV_NOPTS_VALUE) {
                         v_dur = av_rescale_q(st->duration, st->time_base, {1, AV_TIME_BASE});
                     } else if (input_->duration != AV_NOPTS_VALUE) {
@@ -2308,6 +2310,9 @@ struct AVProducer::Impl
             }
             if (frame->color_trc != AVCOL_TRC_UNSPECIFIED && stream_color_trc_ == AVCOL_TRC_UNSPECIFIED) {
                 stream_color_trc_ = static_cast<AVColorTransferCharacteristic>(frame->color_trc);
+            }
+            if (frame->chroma_location != AVCHROMA_LOC_UNSPECIFIED && stream_chroma_loc_ == AVCHROMA_LOC_UNSPECIFIED) {
+                stream_chroma_loc_ = static_cast<AVChromaLocation>(frame->chroma_location);
             }
 
             for (auto& source : p.second) {

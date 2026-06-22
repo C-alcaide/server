@@ -80,7 +80,9 @@ class video_channel final
                            color_transfer                            default_color_transfer = color_transfer::sdr,
                            bool                                      auto_color_convert     = true,
                            int                                       auto_tone_map          = 0,
-                           float                                     display_peak_luminance = 1000.0f);
+                           float                                     display_peak_luminance = 1000.0f,
+                           float                                     sdr_reference_white    = 100.0f,
+                           bool                                      auto_gamut_compress    = false);
     ~video_channel();
 
     core::monitor::state state() const;
