@@ -150,6 +150,12 @@ image_transform image_transform::tween(double                 time,
     result.projection.icvfx_feather      = do_tween(time, source.projection.icvfx_feather,    dest.projection.icvfx_feather,    duration, tween);
     result.projection.icvfx_outer_dim    = do_tween(time, source.projection.icvfx_outer_dim,  dest.projection.icvfx_outer_dim,  duration, tween);
     result.projection.icvfx_inner_dim    = do_tween(time, source.projection.icvfx_inner_dim,  dest.projection.icvfx_inner_dim,  duration, tween);
+    result.projection.icvfx_inner_gain_r = do_tween(time, source.projection.icvfx_inner_gain_r, dest.projection.icvfx_inner_gain_r, duration, tween);
+    result.projection.icvfx_inner_gain_g = do_tween(time, source.projection.icvfx_inner_gain_g, dest.projection.icvfx_inner_gain_g, duration, tween);
+    result.projection.icvfx_inner_gain_b = do_tween(time, source.projection.icvfx_inner_gain_b, dest.projection.icvfx_inner_gain_b, duration, tween);
+    result.projection.icvfx_outer_gain_r = do_tween(time, source.projection.icvfx_outer_gain_r, dest.projection.icvfx_outer_gain_r, duration, tween);
+    result.projection.icvfx_outer_gain_g = do_tween(time, source.projection.icvfx_outer_gain_g, dest.projection.icvfx_outer_gain_g, duration, tween);
+    result.projection.icvfx_outer_gain_b = do_tween(time, source.projection.icvfx_outer_gain_b, dest.projection.icvfx_outer_gain_b, duration, tween);
     result.color_grade             = dest.color_grade;
     result.color_grade.exposure = static_cast<float>(do_tween(time, static_cast<double>(source.color_grade.exposure), static_cast<double>(dest.color_grade.exposure), duration, tween));
     result.temperature    = do_tween(time, source.temperature, dest.temperature, duration, tween);

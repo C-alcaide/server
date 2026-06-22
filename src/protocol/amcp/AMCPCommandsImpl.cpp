@@ -1863,6 +1863,52 @@ std::future<std::wstring> mixer_projection_icvfx_command(command_context& ctx)
     return make_ready_future<std::wstring>(L"202 MIXER OK\r\n");
 }
 
+std::future<std::wstring> mixer_projection_icvfx_color_command(command_context& ctx)
+{
+    if (ctx.parameters.empty()) {
+        auto transform2 = get_current_transform(ctx).share();
+        return std::async(std::launch::deferred, [transform2]() -> std::wstring {
+            auto proj = transform2.get().image_transform.projection;
+            return L"201 MIXER OK\r\n" +
+                   std::to_wstring(proj.icvfx_inner_gain_r) + L" " +
+                   std::to_wstring(proj.icvfx_inner_gain_g) + L" " +
+                   std::to_wstring(proj.icvfx_inner_gain_b) + L" " +
+                   std::to_wstring(proj.icvfx_outer_gain_r) + L" " +
+                   std::to_wstring(proj.icvfx_outer_gain_g) + L" " +
+                   std::to_wstring(proj.icvfx_outer_gain_b) + L"\r\n";
+        });
+    }
+
+    // MIXER <ch>-<l> PROJECTION_ICVFX_COLOR <ir> <ig> <ib> <or> <og> <ob> [dur] [tween]
+    transforms_applier transforms(ctx);
+    double       ir       = std::stod(ctx.parameters.at(0));
+    double       ig       = std::stod(ctx.parameters.at(1));
+    double       ib       = std::stod(ctx.parameters.at(2));
+    double       orr      = std::stod(ctx.parameters.at(3));
+    double       og       = std::stod(ctx.parameters.at(4));
+    double       ob       = std::stod(ctx.parameters.at(5));
+    int          duration = ctx.parameters.size() > 6 ? std::stoi(ctx.parameters[6]) : 0;
+    std::wstring tween    = ctx.parameters.size() > 7 ? ctx.parameters[7] : L"linear";
+
+    transforms.add(stage::transform_tuple_t(
+        ctx.layer_index(),
+        [=](frame_transform transform) -> frame_transform {
+            auto& p = transform.image_transform.projection;
+            p.icvfx_inner_gain_r = ir;
+            p.icvfx_inner_gain_g = ig;
+            p.icvfx_inner_gain_b = ib;
+            p.icvfx_outer_gain_r = orr;
+            p.icvfx_outer_gain_g = og;
+            p.icvfx_outer_gain_b = ob;
+            return transform;
+        },
+        duration,
+        tween));
+    transforms.apply();
+
+    return make_ready_future<std::wstring>(L"202 MIXER OK\r\n");
+}
+
 std::future<std::wstring> mixer_projection_frustum_command(command_context& ctx)
 {
     if (ctx.parameters.empty()) {
@@ -4463,6 +4509,7 @@ void register_commands(std::shared_ptr<amcp_command_repository_wrapper>& repo)
     repo->register_channel_command(L"Mixer Commands", L"MIXER PROJECTION_CURVE",  mixer_projection_curve_command,  0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER PROJECTION_LENS",   mixer_projection_lens_command,   0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER PROJECTION_ICVFX",  mixer_projection_icvfx_command,  0);
+    repo->register_channel_command(L"Mixer Commands", L"MIXER PROJECTION_ICVFX_COLOR", mixer_projection_icvfx_color_command, 0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER PROJECTION_FRUSTUM",    mixer_projection_frustum_command,    0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER PROJECTION_DISTORTION", mixer_projection_distortion_command, 0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER PROJECTION_BLEND",      mixer_projection_blend_command,      0);

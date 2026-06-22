@@ -127,6 +127,12 @@ static const std::vector<kf_field>& build_field_table()
         KF_D("proj_icvfx_feather",    projection.icvfx_feather,   0.05),
         KF_D("proj_icvfx_outer_dim",  projection.icvfx_outer_dim, 1.0),
         KF_D("proj_icvfx_inner_dim",  projection.icvfx_inner_dim, 1.0),
+        KF_D("proj_icvfx_inner_gain_r", projection.icvfx_inner_gain_r, 1.0),
+        KF_D("proj_icvfx_inner_gain_g", projection.icvfx_inner_gain_g, 1.0),
+        KF_D("proj_icvfx_inner_gain_b", projection.icvfx_inner_gain_b, 1.0),
+        KF_D("proj_icvfx_outer_gain_r", projection.icvfx_outer_gain_r, 1.0),
+        KF_D("proj_icvfx_outer_gain_g", projection.icvfx_outer_gain_g, 1.0),
+        KF_D("proj_icvfx_outer_gain_b", projection.icvfx_outer_gain_b, 1.0),
 
         // ── White balance ───────────────────────────────────────────
         KF_D("temperature", temperature, 0.0),

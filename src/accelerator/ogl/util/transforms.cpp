@@ -129,6 +129,12 @@ void apply_transform_colour_values(core::image_transform& self, const core::imag
         self.projection.icvfx_feather      = other.projection.icvfx_feather;
         self.projection.icvfx_outer_dim    = other.projection.icvfx_outer_dim;
         self.projection.icvfx_inner_dim    = other.projection.icvfx_inner_dim;
+        self.projection.icvfx_inner_gain_r = other.projection.icvfx_inner_gain_r;
+        self.projection.icvfx_inner_gain_g = other.projection.icvfx_inner_gain_g;
+        self.projection.icvfx_inner_gain_b = other.projection.icvfx_inner_gain_b;
+        self.projection.icvfx_outer_gain_r = other.projection.icvfx_outer_gain_r;
+        self.projection.icvfx_outer_gain_g = other.projection.icvfx_outer_gain_g;
+        self.projection.icvfx_outer_gain_b = other.projection.icvfx_outer_gain_b;
     }
     if (other.color_grade.enable) {
         self.color_grade = other.color_grade;

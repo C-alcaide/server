@@ -205,7 +205,13 @@ struct alignas(16) uniform_block
     float    lens_p1        = 0;            // 816  tangential (decentering) coefficient
     float    lens_p2        = 0;            // 820  tangential (decentering) coefficient
     float    icvfx_inner_dim = 1.0f;        // 824  inner-region brightness multiplier (0..1)
-    // Total: 828 bytes
+    float    icvfx_inner_gain_r = 1.0f;     // 828  inner-region RGB gain (white-balance / tint)
+    float    icvfx_inner_gain_g = 1.0f;     // 832
+    float    icvfx_inner_gain_b = 1.0f;     // 836
+    float    icvfx_outer_gain_r = 1.0f;     // 840  outer-region RGB gain (white-balance / tint)
+    float    icvfx_outer_gain_g = 1.0f;     // 844
+    float    icvfx_outer_gain_b = 1.0f;     // 848
+    // Total: 852 bytes
 };
 
 // Bit flags for `flags` field

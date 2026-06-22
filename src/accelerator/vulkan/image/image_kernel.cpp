@@ -1021,6 +1021,12 @@ struct image_kernel::impl
             uniforms.icvfx_feather   = std::max(static_cast<float>(proj.icvfx_feather), 1e-4f);
             uniforms.icvfx_outer_dim = std::clamp(static_cast<float>(proj.icvfx_outer_dim), 0.0f, 1.0f);
             uniforms.icvfx_inner_dim = std::clamp(static_cast<float>(proj.icvfx_inner_dim), 0.0f, 1.0f);
+            uniforms.icvfx_inner_gain_r = std::max(static_cast<float>(proj.icvfx_inner_gain_r), 0.0f);
+            uniforms.icvfx_inner_gain_g = std::max(static_cast<float>(proj.icvfx_inner_gain_g), 0.0f);
+            uniforms.icvfx_inner_gain_b = std::max(static_cast<float>(proj.icvfx_inner_gain_b), 0.0f);
+            uniforms.icvfx_outer_gain_r = std::max(static_cast<float>(proj.icvfx_outer_gain_r), 0.0f);
+            uniforms.icvfx_outer_gain_g = std::max(static_cast<float>(proj.icvfx_outer_gain_g), 0.0f);
+            uniforms.icvfx_outer_gain_b = std::max(static_cast<float>(proj.icvfx_outer_gain_b), 0.0f);
         }
 
         // ── Blur ──────────────────────────────────────────────────────

@@ -103,6 +103,12 @@ layout(scalar, binding = 2) uniform ParamsBlock {
     float lens_p1;
     float lens_p2;
     float icvfx_inner_dim;
+    float icvfx_inner_gain_r;
+    float icvfx_inner_gain_g;
+    float icvfx_inner_gain_b;
+    float icvfx_outer_gain_r;
+    float icvfx_outer_gain_g;
+    float icvfx_outer_gain_b;
 };
 layout(binding = 3) uniform sampler3D lut3d_tex;
 layout(binding = 4) uniform sampler2D hue_curve_tex;
@@ -433,7 +439,7 @@ void main(){
 
     // ICVFX inner/outer frustum: blend parallax-correct inner sample over the
     // dimmed outer sample inside the feathered camera-frustum quad mask.
-    if(flag2(F2_ICVFX)){float m=icvfx_mask(buv);col.rgb*=icvfx_outer_dim;if(m>0.0){vec2 iuv=flag(F_360)?get_equirect_uv_ex(vuv,inner_yaw,inner_pitch,inner_roll,inner_fov,inner_offset_x,inner_offset_y):vuv;if(flag(F_FLIP_H))iuv.s=1.0-iuv.s;if(flag(F_FLIP_V))iuv.t=1.0-iuv.t;vec4 icol=get_blurred_color(iuv);icol.rgb*=icvfx_inner_dim;col=mix(col,icol,m);}}
+    if(flag2(F2_ICVFX)){float m=icvfx_mask(buv);col.rgb*=icvfx_outer_dim*vec3(icvfx_outer_gain_r,icvfx_outer_gain_g,icvfx_outer_gain_b);if(m>0.0){vec2 iuv=flag(F_360)?get_equirect_uv_ex(vuv,inner_yaw,inner_pitch,inner_roll,inner_fov,inner_offset_x,inner_offset_y):vuv;if(flag(F_FLIP_H))iuv.s=1.0-iuv.s;if(flag(F_FLIP_V))iuv.t=1.0-iuv.t;vec4 icol=get_blurred_color(iuv);icol.rgb*=icvfx_inner_dim*vec3(icvfx_inner_gain_r,icvfx_inner_gain_g,icvfx_inner_gain_b);col=mix(col,icol,m);}}
 
     if(flag(F_SHARPEN)){col.rgb=apply_sharpen(uv,col.rgb,sharpen_amount,sharpen_radius);}
     if(flag(F_STRAIGHT_ALPHA))col.rgb*=col.a;

@@ -96,6 +96,8 @@ uniform float icvfx_q3y;
 uniform float icvfx_feather;      // mask edge feather in NDC units
 uniform float icvfx_outer_dim;    // outer-region brightness multiplier (0..1)
 uniform float icvfx_inner_dim;    // inner-region brightness multiplier (0..1)
+uniform vec3  icvfx_inner_gain;   // inner-region RGB gain (white-balance / tint)
+uniform vec3  icvfx_outer_gain;   // outer-region RGB gain (white-balance / tint)
 
 // Color Grading (ACES workflow)
 uniform bool  color_grading;
@@ -1604,7 +1606,7 @@ void main()
     // dimmed outer sample inside the feathered camera-frustum quad mask.
     if (icvfx_enable) {
         float m = icvfx_mask(base_uv);
-        col.rgb *= icvfx_outer_dim;
+        col.rgb *= icvfx_outer_dim * icvfx_outer_gain;
         if (m > 0.0) {
             vec2 iuv = is_360
                 ? get_equirect_uv_ex(view_uv, inner_yaw, inner_pitch, inner_roll,
@@ -1613,7 +1615,7 @@ void main()
             if (flip_h) iuv.s = 1.0 - iuv.s;
             if (flip_v) iuv.t = 1.0 - iuv.t;
             vec4 icol = get_blurred_color(iuv);
-            icol.rgb *= icvfx_inner_dim;
+            icol.rgb *= icvfx_inner_dim * icvfx_inner_gain;
             col = mix(col, icol, m);
         }
     }
