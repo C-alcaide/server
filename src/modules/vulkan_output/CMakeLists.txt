@@ -36,6 +36,8 @@ set(SOURCES
 	util/color_convert_pipeline.h
 	util/display_enum.cpp
 	util/display_enum.h
+	util/frame_transfer.cpp
+	util/frame_transfer.h
 	util/nvapi_helpers.cpp
 	util/nvapi_helpers.h
 	util/output_device.cpp
