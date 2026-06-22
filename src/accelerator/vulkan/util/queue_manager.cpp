@@ -161,11 +161,14 @@ queue_manager::queue_manager(vk::PhysicalDevice physical_device)
     lay_out(queue_type::video_decode);
 
     // Collapse the per-queue specs into (family, count) for the device builder.
+    // Must aggregate by family to avoid duplicate VkDeviceQueueCreateInfo entries
+    // (Vulkan spec violation if the same family appears twice).
+    std::map<uint32_t, uint32_t> family_counts;
     for (const auto& spec : queue_specs_) {
-        if (!queue_setup_.empty() && queue_setup_.back().first == spec.first)
-            ++queue_setup_.back().second;
-        else
-            queue_setup_.emplace_back(spec.first, 1u);
+        family_counts[spec.first]++;
+    }
+    for (const auto& [fam, cnt] : family_counts) {
+        queue_setup_.emplace_back(fam, cnt);
     }
 
     CASPAR_LOG(info) << "Vulkan: " << family_props.size() << " queue families available, creating "

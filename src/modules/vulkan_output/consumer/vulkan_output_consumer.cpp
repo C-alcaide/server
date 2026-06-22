@@ -797,6 +797,7 @@ class vulkan_output_consumer_impl
     uint64_t get_frames_presented() const { return frames_presented_; }
     uint64_t get_frames_dropped() const { return frames_dropped_; }
     bool     get_display_lost() const { return display_lost_.load(); }
+    bool     get_adapter_mismatch() const { return adapter_mismatch_.load(); }
     int      get_sync_group() const { return config_.sync_group; }
 
   private:
@@ -886,8 +887,18 @@ class vulkan_output_consumer_impl
 
         // Separate device mode: create isolated VkDevice for TDR isolation +
         // multi-queue (each consumer gets its own queue from a 16-queue pool).
+        // NOTE: Multi-GPU requires separate-device=true so the consumer creates
+        // its own VkDevice on the correct GPU. Without it, the consumer uses the
+        // shared accelerator device which may be on a different GPU.
         std::unique_ptr<output_device> out_device;
         std::mutex*                    queue_mtx = nullptr;
+
+        if (!config_.separate_device && config_.gpu_index > 0) {
+            CASPAR_LOG(warning) << print()
+                << L" gpu=" << config_.gpu_index << L" requires <separate-device>true</separate-device> "
+                   L"for correct multi-GPU operation. Enabling automatically.";
+            config_.separate_device = true;
+        }
 
         if (config_.separate_device) {
             out_device = std::make_unique<output_device>(config_.gpu_index);
@@ -1401,8 +1412,8 @@ class vulkan_output_consumer_impl
     std::shared_ptr<present_barrier::token> barrier_token_;
 
     // GDI fallback (Windows only: cross-adapter displays that Vulkan can't present to)
-    bool     adapter_mismatch_{false};
-    uint64_t gdi_frame_counter_ = 0;
+    std::atomic<bool> adapter_mismatch_{false};
+    uint64_t          gdi_frame_counter_ = 0;
 
     spl::shared_ptr<diagnostics::graph>            graph_ = spl::make_shared<diagnostics::graph>();
     caspar::timer                                  tick_timer_;
@@ -1448,7 +1459,10 @@ class vulkan_output_consumer_proxy : public core::frame_consumer
 
     bool has_synchronization_clock() const override { return false; }
 
-    bool needs_host_frame() const override { return false; }
+    bool needs_host_frame() const override
+    {
+        return impl_ && impl_->get_adapter_mismatch();
+    }
 
     int index() const override { return 700 + config_.output_index; }
 

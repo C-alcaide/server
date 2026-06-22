@@ -150,7 +150,21 @@ struct swapchain::impl
         return formats[0];
     }
 
-    vk::PresentModeKHR choose_present_mode() { return vk::PresentModeKHR::eFifo; }
+    vk::PresentModeKHR choose_present_mode()
+    {
+        if (vsync_)
+            return vk::PresentModeKHR::eFifo;
+
+        auto modes = physical_device_.getSurfacePresentModesKHR(surface_);
+        for (auto m : modes)
+            if (m == vk::PresentModeKHR::eImmediate)
+                return m;
+        for (auto m : modes)
+            if (m == vk::PresentModeKHR::eMailbox)
+                return m;
+
+        return vk::PresentModeKHR::eFifo; // fallback if neither available
+    }
 
     vk::Extent2D choose_extent(const vk::SurfaceCapabilitiesKHR& capabilities)
     {
@@ -291,9 +305,20 @@ struct swapchain::impl
 
         device_.waitIdle();
 
+        // Destroy old render-finished semaphores (sized per old swapchain image count)
+        for (auto s : render_finished_semaphores_)
+            device_.destroySemaphore(s);
+        render_finished_semaphores_.clear();
+
         cleanup_swapchain();
         create_swapchain();
         create_image_views();
+
+        // Recreate render-finished semaphores for new image count
+        vk::SemaphoreCreateInfo si{};
+        render_finished_semaphores_.resize(swapchain_images_.size());
+        for (size_t i = 0; i < swapchain_images_.size(); ++i)
+            render_finished_semaphores_[i] = device_.createSemaphore(si);
 
         CASPAR_LOG(info) << L"[vk::swapchain] Swapchain recreated (" << swapchain_extent_.width << L"x"
                          << swapchain_extent_.height << L")";

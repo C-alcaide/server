@@ -149,8 +149,13 @@ void init(const core::module_dependencies& dependencies)
             if (params.size() > 1 && try_get_color(params.at(1), color))
                 color_str = boost::to_upper_copy(params.at(1));
 
-            return spl::make_shared<gpu_test_producer>(
-                deps.frame_factory, deps.format_desc.width, deps.format_desc.height, color, color_str);
+            try {
+                return spl::make_shared<gpu_test_producer>(
+                    deps.frame_factory, deps.format_desc.width, deps.format_desc.height, color, color_str);
+            } catch (const std::exception& e) {
+                CASPAR_LOG(warning) << L"GPU test producer failed: " << e.what();
+                return core::frame_producer::empty();
+            }
         });
 }
 

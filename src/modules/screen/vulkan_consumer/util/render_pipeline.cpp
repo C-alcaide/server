@@ -477,8 +477,45 @@ struct render_pipeline::impl
         cmdBuffer.pushConstants<screen_push_constants>(
             pipeline_layout_, vk::ShaderStageFlagBits::eVertex | vk::ShaderStageFlagBits::eFragment, 0, params);
 
-        // Draw fullscreen quad (6 vertices, no vertex buffer)
-        cmdBuffer.draw(6, 1, 0, 0);
+        if (params.sbs_key) {
+            // Side-by-side key: draw fill on left half, key on right half
+            vk::Viewport left_vp = viewport;
+            left_vp.width = viewport.width * 0.5f;
+            cmdBuffer.setViewport(0, left_vp);
+
+            vk::Rect2D left_sc = scissor;
+            left_sc.extent.width = width / 2;
+            cmdBuffer.setScissor(0, left_sc);
+
+            // Left half: fill (key_only = 0)
+            screen_push_constants fill_params = params;
+            fill_params.key_only = 0;
+            fill_params.sbs_key  = 0;
+            cmdBuffer.pushConstants<screen_push_constants>(
+                pipeline_layout_, vk::ShaderStageFlagBits::eVertex | vk::ShaderStageFlagBits::eFragment, 0, fill_params);
+            cmdBuffer.draw(6, 1, 0, 0);
+
+            // Right half: key (key_only = 1)
+            vk::Viewport right_vp = viewport;
+            right_vp.x     = viewport.width * 0.5f;
+            right_vp.width = viewport.width * 0.5f;
+            cmdBuffer.setViewport(0, right_vp);
+
+            vk::Rect2D right_sc = scissor;
+            right_sc.offset.x    = static_cast<int32_t>(width / 2);
+            right_sc.extent.width = width - width / 2;
+            cmdBuffer.setScissor(0, right_sc);
+
+            screen_push_constants key_params = params;
+            key_params.key_only = 1;
+            key_params.sbs_key  = 0;
+            cmdBuffer.pushConstants<screen_push_constants>(
+                pipeline_layout_, vk::ShaderStageFlagBits::eVertex | vk::ShaderStageFlagBits::eFragment, 0, key_params);
+            cmdBuffer.draw(6, 1, 0, 0);
+        } else {
+            // Single draw
+            cmdBuffer.draw(6, 1, 0, 0);
+        }
 
         cmdBuffer.endRenderPass();
 

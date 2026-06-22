@@ -165,8 +165,8 @@ struct screen_consumer_vk
 #endif
 
         if (config.windowed) {
-            screen_x_ = config.screen_x;
-            screen_y_ = config.screen_y;
+            screen_x_ += config.screen_x;
+            screen_y_ += config.screen_y;
 
             if (config.screen_width > 0 && config.screen_height > 0) {
                 screen_width_  = config.screen_width;
@@ -417,6 +417,7 @@ struct screen_consumer_vk
         params.key_only      = config_.key_only ? 1 : 0;
         params.colour_space  = static_cast<int32_t>(config_.colour_space);
         params.window_width  = screen_width_;
+        params.sbs_key       = config_.sbs_key ? 1 : 0;
 
         return params;
     }

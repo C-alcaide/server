@@ -47,7 +47,7 @@ struct screen_push_constants
     int32_t key_only;      // Show alpha channel only
     int32_t colour_space;  // 0=RGB, 1=datavideo_full, 2=datavideo_limited
     int32_t window_width;  // Window width for DataVideo conversion
-    int32_t _pad;          // Padding
+    int32_t sbs_key;       // Side-by-side key mode (fill left, key right)
 };
 
 /**
