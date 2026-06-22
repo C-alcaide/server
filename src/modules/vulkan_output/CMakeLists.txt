@@ -38,6 +38,8 @@ set(SOURCES
 	util/display_enum.h
 	util/nvapi_helpers.cpp
 	util/nvapi_helpers.h
+	util/output_device.cpp
+	util/output_device.h
 	util/output_window.cpp
 	util/output_window.h
 	util/presentation.cpp
