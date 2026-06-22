@@ -126,9 +126,9 @@ struct device::impl : public std::enable_shared_from_this<impl>
                                     .require_api_version(VK_API_VERSION_1_3);
 #endif
 
-        // Enable the surface-creation instance extensions when the loader reports
-        // them available, so consumers (e.g. the screen consumer) can present to a
-        // window. Enabling the available extensions here is purely additive.
+        // Enable presentation-related instance extensions when the loader reports
+        // them available, so consumers (e.g. the screen consumer, vulkan_output) can
+        // present to a window or direct-to-display. Purely additive.
         if (auto sys_info = vkb::SystemInfo::get_system_info()) {
             const char* surface_extensions[] = {
                 "VK_KHR_surface",
@@ -137,6 +137,9 @@ struct device::impl : public std::enable_shared_from_this<impl>
                 "VK_KHR_xlib_surface",
                 "VK_KHR_xcb_surface",
                 "VK_KHR_wayland_surface",
+                "VK_KHR_display",
+                "VK_KHR_get_display_properties2",
+                "VK_EXT_direct_mode_display",
             };
             for (const auto* ext : surface_extensions) {
                 if (sys_info->is_extension_available(ext)) {

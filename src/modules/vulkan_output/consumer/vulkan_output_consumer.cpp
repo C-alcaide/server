@@ -21,6 +21,7 @@
 #include "config.h"
 #include "../util/display_enum.h"
 #include "../util/output_window.h"
+#include "../util/presentation.h"
 
 #include <accelerator/vulkan/util/device.h>
 #include <accelerator/vulkan/util/texture.h>
@@ -44,6 +45,10 @@
 #include <tbb/concurrent_queue.h>
 
 #include <vulkan/vulkan.hpp>
+
+#ifdef _WIN32
+#include <vulkan/vulkan_win32.h>
+#endif
 
 #include <atomic>
 #include <limits>
@@ -70,19 +75,23 @@ struct frame_sync
 class present_swapchain
 {
   public:
-    present_swapchain(vk::Instance       instance,
-                      vk::PhysicalDevice physical,
-                      vk::Device         device,
-                      vk::Queue          queue,
-                      uint32_t           queue_family,
-                      vk::SurfaceKHR     surface,
-                      int                desired_images)
+    present_swapchain(vk::Instance        instance,
+                      vk::PhysicalDevice  physical,
+                      vk::Device          device,
+                      vk::Queue           queue,
+                      uint32_t            queue_family,
+                      vk::SurfaceKHR      surface,
+                      int                 desired_images,
+                      presentation_tier   tier,
+                      vk::PresentModeKHR  present_mode)
         : instance_(instance)
         , physical_(physical)
         , device_(device)
         , queue_(queue)
         , queue_family_(queue_family)
         , surface_(surface)
+        , tier_(tier)
+        , present_mode_(present_mode)
     {
         create_swapchain(desired_images);
         create_sync_objects();
@@ -283,10 +292,32 @@ class present_swapchain
         ci.imageSharingMode = vk::SharingMode::eExclusive;
         ci.preTransform     = caps.currentTransform;
         ci.compositeAlpha   = vk::CompositeAlphaFlagBitsKHR::eOpaque;
-        ci.presentMode      = vk::PresentModeKHR::eFifo; // VSync always on for pro output
+        ci.presentMode      = present_mode_;
         ci.clipped          = VK_TRUE;
 
+#ifdef _WIN32
+        // Chain FSE info if using full-screen exclusive tier
+        VkSurfaceFullScreenExclusiveInfoEXT fse_info{};
+        bool fse_chained = false;
+        if (tier_ == presentation_tier::full_screen_exclusive) {
+            fse_info.sType               = VK_STRUCTURE_TYPE_SURFACE_FULL_SCREEN_EXCLUSIVE_INFO_EXT;
+            fse_info.pNext               = nullptr;
+            fse_info.fullScreenExclusive = VK_FULL_SCREEN_EXCLUSIVE_DEFAULT_EXT;
+            ci.pNext                     = &fse_info;
+            fse_chained = true;
+        }
+#endif
+
         swapchain_ = device_.createSwapchainKHR(ci);
+
+#ifdef _WIN32
+        if (!swapchain_ && fse_chained) {
+            // FSE chain failed — retry without it
+            CASPAR_LOG(warning) << L"[vulkan_output] Swapchain creation with FSE failed. Retrying without.";
+            ci.pNext = nullptr;
+            swapchain_ = device_.createSwapchainKHR(ci);
+        }
+#endif
         images_    = device_.getSwapchainImagesKHR(swapchain_);
 
         for (const auto& img : images_) {
@@ -334,6 +365,8 @@ class present_swapchain
     vk::Queue                  queue_;
     uint32_t                   queue_family_;
     vk::SurfaceKHR             surface_;
+    presentation_tier          tier_;
+    vk::PresentModeKHR         present_mode_;
     vk::SwapchainKHR           swapchain_;
     vk::Format                 format_;
     vk::Extent2D               extent_;
@@ -419,16 +452,32 @@ class vulkan_output_consumer_impl
             return;
         }
 
-        // Create window and Vulkan presentation resources
-        window_ = std::make_unique<output_window>(*target);
-
         auto vk_instance = device_->instance();
         auto physical    = device_->physical_device();
         auto vk_device   = device_->getVkDevice();
         auto queue_obj   = device_->queue();
         auto vk_queue    = queue_obj->vk_queue();
 
-        auto surface = window_->create_surface(vk_instance);
+        // Determine presentation tier and create surface
+        uint32_t target_refresh_mhz = static_cast<uint32_t>(format_desc_.fps * 1000.0 + 0.5);
+        auto tier_result = create_tiered_surface(vk_instance, physical, vk_device, *target, target_refresh_mhz);
+
+        vk::SurfaceKHR surface;
+        presentation_tier active_tier = tier_result.tier;
+
+        if (tier_result.surface) {
+            // Direct display path (VK_KHR_display) — surface already created, no window needed
+            surface = tier_result.surface;
+            CASPAR_LOG(info) << print() << L" Using " << tier_name(active_tier) << L" (no window).";
+        } else {
+            // FSE or borderless — need a window for the surface
+            window_ = std::make_unique<output_window>(*target);
+            surface = window_->create_surface(vk_instance);
+            CASPAR_LOG(info) << print() << L" Using " << tier_name(active_tier) << L" with window.";
+        }
+
+        // Select present mode
+        auto present_mode = pick_present_mode(physical, surface);
 
         swapchain_ = std::make_unique<present_swapchain>(vk_instance,
                                                          physical,
@@ -436,10 +485,13 @@ class vulkan_output_consumer_impl
                                                          vk_queue,
                                                          queue_obj->family_index(),
                                                          surface,
-                                                         config_.buffer_depth);
+                                                         config_.buffer_depth,
+                                                         active_tier,
+                                                         present_mode);
 
         CASPAR_LOG(info) << print() << L" Started. Swapchain " << swapchain_->width() << L"x"
-                         << swapchain_->height() << L" on " << target->display_name;
+                         << swapchain_->height() << L" | " << tier_name(active_tier)
+                         << L" | " << target->display_name;
 
         while (is_running_) {
             tick(queue_obj);
@@ -447,7 +499,6 @@ class vulkan_output_consumer_impl
 
         // Cleanup
         swapchain_.reset();
-        // Surface is owned by the instance; destroy before window closes
         vk_instance.destroySurfaceKHR(surface);
         window_.reset();
     }

@@ -11,6 +11,8 @@ set(SOURCES
 	util/display_enum.h
 	util/output_window.cpp
 	util/output_window.h
+	util/presentation.cpp
+	util/presentation.h
 
 	vulkan_output.cpp
 	vulkan_output.h

@@ -119,7 +119,9 @@ void register_vulkan_requirements(vkb::PhysicalDevice& pd)
     pd.enable_extension_if_present(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
 #ifdef _WIN32
     pd.enable_extension_if_present("VK_EXT_full_screen_exclusive");
+    pd.enable_extension_if_present("VK_KHR_win32_surface");
 #endif
+    pd.enable_extension_if_present("VK_KHR_display_swapchain");
 }
 #endif
 
