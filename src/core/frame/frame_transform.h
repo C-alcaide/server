@@ -155,6 +155,7 @@ struct projection final
     double            icvfx_q3y         = -1.0;
     double            icvfx_feather     = 0.05; // edge feather in NDC units
     double            icvfx_outer_dim   = 1.0;  // outer-region brightness multiplier (0..1)
+    double            icvfx_inner_dim   = 1.0;  // inner-region brightness multiplier (0..1)
 };
 
 // Transfer: 0=linear,1=srgb,2=rec709,3=pq(st2084),4=hlg,5=logc3(arri),6=slog3(sony)

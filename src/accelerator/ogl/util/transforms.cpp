@@ -128,6 +128,7 @@ void apply_transform_colour_values(core::image_transform& self, const core::imag
         self.projection.icvfx_q3y          = other.projection.icvfx_q3y;
         self.projection.icvfx_feather      = other.projection.icvfx_feather;
         self.projection.icvfx_outer_dim    = other.projection.icvfx_outer_dim;
+        self.projection.icvfx_inner_dim    = other.projection.icvfx_inner_dim;
     }
     if (other.color_grade.enable) {
         self.color_grade = other.color_grade;

@@ -204,7 +204,8 @@ struct alignas(16) uniform_block
     // Appended at the end to preserve all existing offsets above.
     float    lens_p1        = 0;            // 816  tangential (decentering) coefficient
     float    lens_p2        = 0;            // 820  tangential (decentering) coefficient
-    // Total: 824 bytes
+    float    icvfx_inner_dim = 1.0f;        // 824  inner-region brightness multiplier (0..1)
+    // Total: 828 bytes
 };
 
 // Bit flags for `flags` field

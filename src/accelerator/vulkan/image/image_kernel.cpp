@@ -1020,6 +1020,7 @@ struct image_kernel::impl
             uniforms.icvfx_q3y       = static_cast<float>(proj.icvfx_q3y);
             uniforms.icvfx_feather   = std::max(static_cast<float>(proj.icvfx_feather), 1e-4f);
             uniforms.icvfx_outer_dim = std::clamp(static_cast<float>(proj.icvfx_outer_dim), 0.0f, 1.0f);
+            uniforms.icvfx_inner_dim = std::clamp(static_cast<float>(proj.icvfx_inner_dim), 0.0f, 1.0f);
         }
 
         // ── Blur ──────────────────────────────────────────────────────

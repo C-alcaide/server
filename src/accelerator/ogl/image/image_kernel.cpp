@@ -377,6 +377,7 @@ struct image_kernel::impl
             shader_->set("icvfx_q3y",       static_cast<float>(proj.icvfx_q3y));
             shader_->set("icvfx_feather",   std::max(static_cast<float>(proj.icvfx_feather), 1e-4f));
             shader_->set("icvfx_outer_dim", std::clamp(static_cast<float>(proj.icvfx_outer_dim), 0.0f, 1.0f));
+            shader_->set("icvfx_inner_dim", std::clamp(static_cast<float>(proj.icvfx_inner_dim), 0.0f, 1.0f));
         }
 
         if (transforms.image_transform.blur.enable) {

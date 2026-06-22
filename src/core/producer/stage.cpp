@@ -327,6 +327,7 @@ struct stage::impl : public std::enable_shared_from_this<impl>
                         ps["inner_fov"]       = pr.inner_fov;
                         ps["icvfx_feather"]   = pr.icvfx_feather;
                         ps["icvfx_outer_dim"] = pr.icvfx_outer_dim;
+                        ps["icvfx_inner_dim"] = pr.icvfx_inner_dim;
                     }
                 }
                 state_ = std::move(state);

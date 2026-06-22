@@ -95,6 +95,7 @@ uniform float icvfx_q3x;          // LL
 uniform float icvfx_q3y;
 uniform float icvfx_feather;      // mask edge feather in NDC units
 uniform float icvfx_outer_dim;    // outer-region brightness multiplier (0..1)
+uniform float icvfx_inner_dim;    // inner-region brightness multiplier (0..1)
 
 // Color Grading (ACES workflow)
 uniform bool  color_grading;
@@ -1612,6 +1613,7 @@ void main()
             if (flip_h) iuv.s = 1.0 - iuv.s;
             if (flip_v) iuv.t = 1.0 - iuv.t;
             vec4 icol = get_blurred_color(iuv);
+            icol.rgb *= icvfx_inner_dim;
             col = mix(col, icol, m);
         }
     }

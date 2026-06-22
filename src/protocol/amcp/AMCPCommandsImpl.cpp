@@ -1821,11 +1821,12 @@ std::future<std::wstring> mixer_projection_icvfx_command(command_context& ctx)
                    std::wstring(proj.icvfx_enable ? L"1" : L"0") + L" " +
                    std::to_wstring(proj.inner_fov) + L" " +
                    std::to_wstring(proj.icvfx_feather) + L" " +
-                   std::to_wstring(proj.icvfx_outer_dim) + L"\r\n";
+                   std::to_wstring(proj.icvfx_outer_dim) + L" " +
+                   std::to_wstring(proj.icvfx_inner_dim) + L"\r\n";
         });
     }
 
-    // MIXER <ch>-<l> PROJECTION_ICVFX <enable> [inner_fov_rad] [feather] [outer_dim] [dur] [tween]
+    // MIXER <ch>-<l> PROJECTION_ICVFX <enable> [inner_fov_rad] [feather] [outer_dim] [inner_dim] [dur] [tween]
     transforms_applier transforms(ctx);
     bool         enable    = (ctx.parameters.at(0) == L"1" ||
                               boost::iequals(ctx.parameters.at(0), L"true"));
@@ -1835,8 +1836,10 @@ std::future<std::wstring> mixer_projection_icvfx_command(command_context& ctx)
     double       feather   = has_feat ? std::stod(ctx.parameters[2]) : 0.0;
     bool         has_dim   = ctx.parameters.size() > 3;
     double       outer_dim = has_dim ? std::stod(ctx.parameters[3]) : 1.0;
-    int          duration  = ctx.parameters.size() > 4 ? std::stoi(ctx.parameters[4]) : 0;
-    std::wstring tween     = ctx.parameters.size() > 5 ? ctx.parameters[5] : L"linear";
+    bool         has_inner = ctx.parameters.size() > 4;
+    double       inner_dim = has_inner ? std::stod(ctx.parameters[4]) : 1.0;
+    int          duration  = ctx.parameters.size() > 5 ? std::stoi(ctx.parameters[5]) : 0;
+    std::wstring tween     = ctx.parameters.size() > 6 ? ctx.parameters[6] : L"linear";
 
     transforms.add(stage::transform_tuple_t(
         ctx.layer_index(),
@@ -1849,6 +1852,8 @@ std::future<std::wstring> mixer_projection_icvfx_command(command_context& ctx)
                 p.icvfx_feather = feather;
             if (has_dim)
                 p.icvfx_outer_dim = outer_dim;
+            if (has_inner)
+                p.icvfx_inner_dim = inner_dim;
             return transform;
         },
         duration,
