@@ -193,13 +193,22 @@ struct output_window::impl
                 }
             }
 
+            // Destroy window on the thread that created it (Win32 requirement)
+            if (hwnd_) {
+                DestroyWindow(hwnd_);
+                hwnd_ = nullptr;
+            }
+
             if (set_dpi && prev_ctx)
                 set_dpi(prev_ctx);
         });
 
-        // Wait for window creation
-        while (!ready)
+        // Wait for window creation (timeout after 5 seconds)
+        int wait_ms = 0;
+        while (!ready && wait_ms < 5000) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            ++wait_ms;
+        }
 
         if (!hwnd_)
             CASPAR_THROW_EXCEPTION(caspar_exception() << msg_info("Failed to create output window"));
@@ -216,10 +225,6 @@ struct output_window::impl
         }
         if (msg_thread_.joinable())
             msg_thread_.join();
-        if (hwnd_) {
-            DestroyWindow(hwnd_);
-            hwnd_ = nullptr;
-        }
     }
 
     vk::SurfaceKHR create_surface(vk::Instance instance)

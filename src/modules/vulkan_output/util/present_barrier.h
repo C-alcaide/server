@@ -96,8 +96,17 @@ class present_barrier
         auto it = groups_.find(group_id);
         if (it != groups_.end()) {
             it->second.member_count--;
-            if (it->second.member_count <= 0)
+            if (it->second.member_count <= 0) {
+                // Last member gone — wake any lingering waiters, then erase
+                it->second.generation++;
+                cv_.notify_all();
                 groups_.erase(it);
+            } else if (it->second.arrived >= it->second.member_count) {
+                // Remaining members are all arrived — release them
+                it->second.arrived = 0;
+                it->second.generation++;
+                cv_.notify_all();
+            }
         }
     }
 

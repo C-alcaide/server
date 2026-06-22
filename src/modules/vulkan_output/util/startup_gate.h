@@ -50,7 +50,8 @@ class startup_gate
     {
         std::unique_lock<std::mutex> lock(mtx_);
         return cv_.wait_for(lock, timeout, [this] {
-            return ready_.load() >= expected_.load() || expected_.load() == 0;
+            int exp = expected_.load();
+            return exp > 0 && ready_.load() >= exp;
         });
     }
 

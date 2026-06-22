@@ -25,6 +25,7 @@
 #endif
 
 #include <common/log.h>
+#include <common/except.h>
 
 #include <cstring>
 
@@ -61,6 +62,22 @@ bool same_physical_device(vk::PhysicalDevice a, vk::PhysicalDevice b)
 
     // Fallback: compare device UUIDs
     return std::memcmp(id_a.deviceUUID, id_b.deviceUUID, VK_UUID_SIZE) == 0;
+}
+
+uint32_t bytes_per_pixel(vk::Format fmt)
+{
+    switch (fmt) {
+        case vk::Format::eR16G16B16A16Sfloat:
+        case vk::Format::eR16G16B16A16Unorm:
+            return 8;
+        case vk::Format::eA2B10G10R10UnormPack32:
+        case vk::Format::eB8G8R8A8Unorm:
+        case vk::Format::eR8G8B8A8Unorm:
+        case vk::Format::eB8G8R8A8Srgb:
+        case vk::Format::eR8G8B8A8Srgb:
+        default:
+            return 4;
+    }
 }
 
 // ─── Construction / Destruction ─────────────────────────────────────────────
@@ -167,7 +184,7 @@ vk::Image frame_transfer::transfer(vk::Image         src_image,
     }
 
     // Host staging path: copy src → host buffer → dst buffer → dst image
-    vk::DeviceSize image_size = static_cast<vk::DeviceSize>(width_) * height_ * 4; // BGRA8
+    vk::DeviceSize image_size = static_cast<vk::DeviceSize>(width_) * height_ * bytes_per_pixel(format_);
 
     // Phase 1: Copy source image → source staging buffer (on src device)
     src_cmd.reset();
@@ -337,14 +354,15 @@ uint32_t find_memory_type(vk::PhysicalDevice physical, uint32_t type_bits, vk::M
         if ((type_bits & (1u << i)) && (mem_props.memoryTypes[i].propertyFlags & props) == props)
             return i;
     }
-    return 0;
+    CASPAR_THROW_EXCEPTION(caspar_exception()
+                           << msg_info("No suitable memory type found for host-staging transfer"));
 }
 
 } // namespace
 
 void frame_transfer::create_host_staging_path()
 {
-    vk::DeviceSize image_size = static_cast<vk::DeviceSize>(width_) * height_ * 4; // BGRA8
+    vk::DeviceSize image_size = static_cast<vk::DeviceSize>(width_) * height_ * bytes_per_pixel(format_);
 
     // Source staging buffer (host-visible, on src device)
     {

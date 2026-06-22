@@ -926,11 +926,14 @@ class vulkan_output_consumer_impl
         // Select HDR surface format if configured
         auto hdr_format = pick_hdr_surface_format(physical, surface, config_.transfer);
 
+        uint32_t queue_family_idx = queue_obj ? queue_obj->family_index()
+                                              : out_device->queue_family();
+
         swapchain_ = std::make_unique<present_swapchain>(vk_instance,
                                                          physical,
                                                          vk_device,
                                                          vk_queue,
-                                                         queue_obj->family_index(),
+                                                         queue_family_idx,
                                                          surface,
                                                          config_.buffer_depth,
                                                          active_tier,
@@ -953,7 +956,8 @@ class vulkan_output_consumer_impl
                 event_info.displayEvent = VK_DISPLAY_EVENT_TYPE_FIRST_PIXEL_OUT_EXT;
                 VkFence fence = VK_NULL_HANDLE;
                 if (fn(vk_device, tier_result.display, &event_info, nullptr, &fence) == VK_SUCCESS) {
-                    vblank_fence_ = vk::Fence(fence);
+                    vblank_fence_  = vk::Fence(fence);
+                    vblank_device_ = vk_device;
                     CASPAR_LOG(info) << print() << L" VBlank fence active (VK_EXT_display_control).";
                 }
             }
@@ -1231,10 +1235,9 @@ class vulkan_output_consumer_impl
             // VBlank fence: wait for first-pixel-out before submitting next frame.
             // This provides hard VSync for KHR_display tier (pro GPUs only).
             if (vblank_fence_) {
-                auto vk_dev = device_->getVkDevice();
-                auto vb_wait = vk_dev.waitForFences(vblank_fence_, VK_TRUE, std::numeric_limits<uint64_t>::max());
+                auto vb_wait = vblank_device_.waitForFences(vblank_fence_, VK_TRUE, std::numeric_limits<uint64_t>::max());
                 (void)vb_wait;
-                vk_dev.resetFences(vblank_fence_);
+                vblank_device_.resetFences(vblank_fence_);
             }
 
             swapchain_->wait_fence();
@@ -1384,7 +1387,8 @@ class vulkan_output_consumer_impl
     uint64_t          hotplug_retry_counter_ = 0;
 
     // VBlank fence (KHR_display tier only — null otherwise)
-    vk::Fence vblank_fence_;
+    vk::Fence  vblank_fence_;
+    vk::Device vblank_device_; // The VkDevice that owns the fence (may be separate from accelerator)
 
     // Phase-aligned pacing (MAILBOX mode)
     int64_t pacer_epoch_ns_     = 0;  // Timestamp of first frame (0 = not set)
