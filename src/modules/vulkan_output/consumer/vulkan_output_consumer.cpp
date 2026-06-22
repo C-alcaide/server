@@ -778,6 +778,7 @@ class vulkan_output_consumer_impl
             core::const_frame discard;
             frame_buffer_.try_pop(discard);
             frame_buffer_.try_push(frame);
+            frames_dropped_++;
             graph_->set_tag(diagnostics::tag_severity::WARNING, "dropped-frame");
         }
         return make_ready_future(is_running_.load());
@@ -790,6 +791,10 @@ class vulkan_output_consumer_impl
     }
 
     bool is_running() const { return is_running_.load(); }
+    uint64_t get_frames_presented() const { return frames_presented_; }
+    uint64_t get_frames_dropped() const { return frames_dropped_; }
+    bool     get_display_lost() const { return display_lost_.load(); }
+    int      get_sync_group() const { return config_.sync_group; }
 
   private:
     void run()
@@ -1287,6 +1292,7 @@ class vulkan_output_consumer_impl
     int64_t pacer_epoch_ns_     = 0;  // Timestamp of first frame (0 = not set)
     int64_t frame_interval_ns_  = 0;  // Frame period in nanoseconds
     uint64_t frames_presented_  = 0;  // Total frames presented (used for pacing)
+    uint64_t frames_dropped_    = 0;  // Total frames dropped in send()
     bool     use_pacer_         = false; // True if MAILBOX present mode active
 
     // Software present barrier (sync group frame-lock)

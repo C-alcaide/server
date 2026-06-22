@@ -103,6 +103,23 @@ configuration parse_config(const boost::property_tree::wptree& ptree)
     if (gsync_src_str == L"external" || gsync_src_str == L"house")
         config.gsync_source = gsync_reference::external;
 
+    // Presentation timing
+    config.delay_frames = ptree.get(L"delay-frames", 0);
+    config.delay_ms     = ptree.get(L"delay-ms", 0.0);
+    config.sync_group   = ptree.get(L"sync-group", 0);
+
+    // Separate device mode (TDR isolation + multi-queue)
+    config.separate_device = ptree.get(L"separate-device", false);
+
+    // Display disconnect behavior
+    auto disc_str = ptree.get(L"on-disconnect", L"retry");
+    if (disc_str == L"hold")
+        config.on_disconnect = disconnect_behavior::hold;
+    else if (disc_str == L"black")
+        config.on_disconnect = disconnect_behavior::black;
+    else
+        config.on_disconnect = disconnect_behavior::retry;
+
     return config;
 }
 
