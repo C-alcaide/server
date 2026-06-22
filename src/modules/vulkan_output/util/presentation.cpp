@@ -181,7 +181,7 @@ static surface_result try_khr_display_surface(vk::Instance        instance,
 
     CASPAR_LOG(info) << L"[vulkan_output] Direct display surface created: " << sel_width << L"x" << sel_height;
 
-    return {vk::SurfaceKHR(surface), presentation_tier::khr_display, sel_width, sel_height};
+    return {vk::SurfaceKHR(surface), presentation_tier::khr_display, vk::DisplayKHR(target_display), sel_width, sel_height};
 }
 
 // ─── Win32 Surface with optional FSE ────────────────────────────────────────

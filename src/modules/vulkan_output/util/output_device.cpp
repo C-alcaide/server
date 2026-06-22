@@ -152,6 +152,28 @@ bool output_device::has_extension(const char* name) const
     return false;
 }
 
+VkFence output_device::create_vblank_fence(VkDisplayKHR display)
+{
+    if (!has_extension(VK_EXT_DISPLAY_CONTROL_EXTENSION_NAME) || display == VK_NULL_HANDLE)
+        return VK_NULL_HANDLE;
+
+    auto vkRegisterDisplayEventEXT_ = reinterpret_cast<PFN_vkRegisterDisplayEventEXT>(
+        vkGetDeviceProcAddr(device_, "vkRegisterDisplayEventEXT"));
+    if (!vkRegisterDisplayEventEXT_)
+        return VK_NULL_HANDLE;
+
+    VkDisplayEventInfoEXT event_info{};
+    event_info.sType        = VK_STRUCTURE_TYPE_DISPLAY_EVENT_INFO_EXT;
+    event_info.displayEvent = VK_DISPLAY_EVENT_TYPE_FIRST_PIXEL_OUT_EXT;
+
+    VkFence fence = VK_NULL_HANDLE;
+    VkResult result = vkRegisterDisplayEventEXT_(device_, display, &event_info, nullptr, &fence);
+    if (result != VK_SUCCESS)
+        return VK_NULL_HANDLE;
+
+    return fence;
+}
+
 // ─── Private: Instance Creation ─────────────────────────────────────────────
 
 void output_device::create_instance_()

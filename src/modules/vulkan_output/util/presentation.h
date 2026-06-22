@@ -49,6 +49,7 @@ struct surface_result
 {
     vk::SurfaceKHR    surface = {};
     presentation_tier tier    = presentation_tier::borderless;
+    vk::DisplayKHR    display = {};  // Only valid for khr_display tier
     uint32_t          width   = 0;
     uint32_t          height  = 0;
 };

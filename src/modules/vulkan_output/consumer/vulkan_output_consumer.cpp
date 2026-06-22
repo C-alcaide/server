@@ -864,6 +864,24 @@ class vulkan_output_consumer_impl
                          << swapchain_->height() << L" | " << tier_name(active_tier)
                          << L" | " << target->display_name;
 
+        // ─── VBlank fence (KHR_display tier only) ───────────────────────────
+        // Hard VSync using VK_EXT_display_control — fence signals on first-pixel-out.
+        // Only available on professional GPUs with direct display mode.
+        if (active_tier == presentation_tier::khr_display && tier_result.display) {
+            auto fn = reinterpret_cast<PFN_vkRegisterDisplayEventEXT>(
+                vkGetDeviceProcAddr(vk_device, "vkRegisterDisplayEventEXT"));
+            if (fn) {
+                VkDisplayEventInfoEXT event_info{};
+                event_info.sType        = VK_STRUCTURE_TYPE_DISPLAY_EVENT_INFO_EXT;
+                event_info.displayEvent = VK_DISPLAY_EVENT_TYPE_FIRST_PIXEL_OUT_EXT;
+                VkFence fence = VK_NULL_HANDLE;
+                if (fn(vk_device, tier_result.display, &event_info, nullptr, &fence) == VK_SUCCESS) {
+                    vblank_fence_ = vk::Fence(fence);
+                    CASPAR_LOG(info) << print() << L" VBlank fence active (VK_EXT_display_control).";
+                }
+            }
+        }
+
         // Set HDR metadata if we got an HDR surface format
         if (hdr_format.format != vk::Format::eUndefined) {
             float max_nits = static_cast<float>(config_.max_cll);
@@ -918,6 +936,10 @@ class vulkan_output_consumer_impl
 
         // ─── Cleanup ────────────────────────────────────────────────────────
         shutdown_nvapi();
+        if (vblank_fence_) {
+            vk_device.destroyFence(vblank_fence_);
+            vblank_fence_ = nullptr;
+        }
         color_pipeline_.reset();
         swapchain_.reset();
         vk_instance.destroySurfaceKHR(surface);
@@ -1088,6 +1110,15 @@ class vulkan_output_consumer_impl
         try {
             auto lock = queue_obj->scoped_lock();
 
+            // VBlank fence: wait for first-pixel-out before submitting next frame.
+            // This provides hard VSync for KHR_display tier (pro GPUs only).
+            if (vblank_fence_) {
+                auto vk_dev = device_->getVkDevice();
+                auto vb_wait = vk_dev.waitForFences(vblank_fence_, VK_TRUE, std::numeric_limits<uint64_t>::max());
+                (void)vb_wait;
+                vk_dev.resetFences(vblank_fence_);
+            }
+
             swapchain_->wait_fence();
 
             vk::Result acquire_result{};
@@ -1178,6 +1209,9 @@ class vulkan_output_consumer_impl
     std::atomic<bool> display_lost_{false};
     std::atomic<bool> device_dead_{false};
     uint64_t          hotplug_retry_counter_ = 0;
+
+    // VBlank fence (KHR_display tier only — null otherwise)
+    vk::Fence vblank_fence_;
 
     spl::shared_ptr<diagnostics::graph>            graph_ = spl::make_shared<diagnostics::graph>();
     caspar::timer                                  tick_timer_;

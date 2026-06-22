@@ -91,6 +91,10 @@ class output_device
     // Check if device extension is enabled.
     bool has_extension(const char* name) const;
 
+    // Create a VBlank fence for hard VSync synchronization (KHR_display only).
+    // Returns VK_NULL_HANDLE if VK_EXT_display_control is not available.
+    VkFence create_vblank_fence(VkDisplayKHR display);
+
     // Device LUID (for cross-API GPU matching). Returns nullptr if unavailable.
     const uint8_t* luid() const { return luid_valid_ ? luid_ : nullptr; }
 
