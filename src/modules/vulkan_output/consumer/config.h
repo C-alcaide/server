@@ -69,6 +69,7 @@ struct configuration
     int          delay_frames = 0;     // Extra frames to hold before presenting (A/V sync)
     double       delay_ms     = 0.0;   // Sub-frame delay in ms (clamped to one frame period)
     int          sync_group   = 0;     // Present barrier group (0=disabled, >0=frame-lock with peers)
+    bool         separate_device = false; // Use isolated VkDevice for TDR isolation + multi-queue
     bool         borderless   = true;  // Borderless fullscreen (always true for now)
     hdr_transfer transfer     = hdr_transfer::sdr;
     output_gamut gamut        = output_gamut::bt709;

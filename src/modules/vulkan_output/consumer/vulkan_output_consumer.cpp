@@ -22,6 +22,7 @@
 #include "../util/color_convert_pipeline.h"
 #include "../util/display_enum.h"
 #include "../util/nvapi_helpers.h"
+#include "../util/output_device.h"
 #include "../util/output_window.h"
 #include "../util/present_barrier.h"
 #include "../util/presentation.h"
@@ -827,6 +828,24 @@ class vulkan_output_consumer_impl
         auto queue_obj   = device_->queue();
         auto vk_queue    = queue_obj->vk_queue();
 
+        // Separate device mode: create isolated VkDevice for TDR isolation +
+        // multi-queue (each consumer gets its own queue from a 16-queue pool).
+        std::unique_ptr<output_device> out_device;
+        std::mutex*                    queue_mtx = nullptr;
+
+        if (config_.separate_device) {
+            out_device = std::make_unique<output_device>(config_.gpu_index);
+            vk_instance = vk::Instance(out_device->instance());
+            physical    = vk::PhysicalDevice(out_device->physical_device());
+            vk_device   = vk::Device(out_device->device());
+            auto q_idx  = out_device->acquire_queue_index();
+            vk_queue    = vk::Queue(out_device->queue_at(q_idx));
+            queue_mtx   = &out_device->queue_mutex(q_idx);
+            queue_obj   = nullptr; // Not using accelerator queue in separate-device mode
+            CASPAR_LOG(info) << print() << L" Using separate VkDevice (queue " << q_idx
+                             << L"/" << out_device->queue_count() << L").";
+        }
+
         // Determine presentation tier and create surface
         uint32_t target_refresh_mhz = static_cast<uint32_t>(format_desc_.fps * 1000.0 + 0.5);
         auto tier_result = create_tiered_surface(vk_instance, physical, vk_device, *target, target_refresh_mhz);
@@ -945,7 +964,7 @@ class vulkan_output_consumer_impl
         startup_gate::instance().wait_all_ready();
 
         while (is_running_ && !device_dead_) {
-            tick(queue_obj);
+            tick(queue_obj, queue_mtx);
         }
 
         // ─── Cleanup ────────────────────────────────────────────────────────
@@ -958,6 +977,7 @@ class vulkan_output_consumer_impl
         swapchain_.reset();
         vk_instance.destroySurfaceKHR(surface);
         window_.reset();
+        out_device.reset();
     }
 
     // ─── NvAPI automation helpers ──────────────────────────────────────────
@@ -1045,7 +1065,8 @@ class vulkan_output_consumer_impl
         nvapi_.reset();
     }
 
-    void tick(const std::shared_ptr<accelerator::vulkan::vulkan_queue>& queue_obj)
+    void tick(const std::shared_ptr<accelerator::vulkan::vulkan_queue>& queue_obj,
+              std::mutex* separate_queue_mtx)
     {
         // ─── Display disconnect state machine ───────────────────────────────
         if (display_lost_) {
@@ -1145,7 +1166,11 @@ class vulkan_output_consumer_impl
         vk::Result present_result = vk::Result::eSuccess;
 
         try {
-            auto lock = queue_obj->scoped_lock();
+            // Acquire queue lock: either the shared accelerator queue's scoped_lock
+            // or the per-queue mutex from the separate output_device.
+            std::unique_lock<std::mutex> lock =
+                queue_obj ? queue_obj->scoped_lock()
+                          : std::unique_lock<std::mutex>(*separate_queue_mtx);
 
             // VBlank fence: wait for first-pixel-out before submitting next frame.
             // This provides hard VSync for KHR_display tier (pro GPUs only).
