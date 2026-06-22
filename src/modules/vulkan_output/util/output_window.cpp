@@ -183,4 +183,8 @@ bool output_window::should_close() const
 #endif
 }
 
+#ifdef _WIN32
+void* output_window::native_handle() const { return impl_->hwnd_; }
+#endif
+
 }} // namespace caspar::vulkan_output

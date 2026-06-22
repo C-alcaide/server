@@ -843,6 +843,47 @@ class vulkan_output_consumer_impl
         auto queue_obj   = device_->queue();
         auto vk_queue    = queue_obj->vk_queue();
 
+#ifdef _WIN32
+        // Cross-adapter detection: if the display's DXGI adapter doesn't match the
+        // Vulkan device name, Vulkan cannot present to it (e.g., IddCx/VDD, USB adapter).
+        {
+            const char* dev_name_raw = physical.getProperties().deviceName;
+            std::wstring vk_dev_name(dev_name_raw, dev_name_raw + strlen(dev_name_raw));
+            if (!target->gpu_name.empty() &&
+                target->gpu_name.find(vk_dev_name) == std::wstring::npos &&
+                vk_dev_name.find(target->gpu_name) == std::wstring::npos) {
+                adapter_mismatch_ = true;
+                CASPAR_LOG(warning) << print()
+                    << L" Display is on adapter \"" << target->gpu_name
+                    << L"\" but Vulkan device is \"" << vk_dev_name
+                    << L"\". Using GDI fallback (half-rate blit).";
+            }
+        }
+#endif
+
+#ifdef _WIN32
+        // GDI fallback: create window but skip all Vulkan surface/swapchain setup.
+        if (adapter_mismatch_) {
+            window_ = std::make_unique<output_window>(*target);
+            CASPAR_LOG(info) << print() << L" GDI fallback active — no Vulkan presentation.";
+
+            startup_gate::instance().signal_ready();
+            startup_gate::instance().wait_all_ready();
+
+            while (is_running_) {
+                core::const_frame frame;
+                if (!frame_buffer_.try_pop(frame)) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(4));
+                    continue;
+                }
+                present_frame_gdi(frame);
+                frames_presented_++;
+            }
+            window_.reset();
+            return;
+        }
+#endif
+
         // Separate device mode: create isolated VkDevice for TDR isolation +
         // multi-queue (each consumer gets its own queue from a 16-queue pool).
         std::unique_ptr<output_device> out_device;
@@ -1268,6 +1309,60 @@ class vulkan_output_consumer_impl
         frames_presented_++;
     }
 
+#ifdef _WIN32
+    void present_frame_gdi(const core::const_frame& frame)
+    {
+        // GDI fallback for displays on non-NVIDIA adapters (IddCx/VDD).
+        // StretchDIBits acquires a global win32k.sys kernel lock, so with multiple
+        // outputs the system becomes sluggish. Throttle to half frame rate.
+        ++gdi_frame_counter_;
+        if (gdi_frame_counter_ % 2 != 0)
+            return;
+
+        if (!window_)
+            return;
+
+        const auto& img = frame.image_data(0);
+        if (img.size() == 0)
+            return;
+
+        auto src_w = static_cast<int>(frame.width());
+        auto src_h = static_cast<int>(frame.height());
+        if (src_w == 0 || src_h == 0)
+            return;
+
+        HWND hwnd = static_cast<HWND>(window_->native_handle());
+        if (!hwnd)
+            return;
+
+        RECT client_rect;
+        GetClientRect(hwnd, &client_rect);
+        int dst_w = client_rect.right - client_rect.left;
+        int dst_h = client_rect.bottom - client_rect.top;
+        if (dst_w == 0 || dst_h == 0)
+            return;
+
+        BITMAPINFO bmi{};
+        bmi.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
+        bmi.bmiHeader.biWidth       = src_w;
+        bmi.bmiHeader.biHeight      = -src_h; // top-down
+        bmi.bmiHeader.biPlanes      = 1;
+        bmi.bmiHeader.biBitCount    = 32;
+        bmi.bmiHeader.biCompression = BI_RGB;
+
+        HDC hdc = GetDC(hwnd);
+        if (hdc) {
+            SetStretchBltMode(hdc, COLORONCOLOR);
+            StretchDIBits(hdc,
+                          0, 0, dst_w, dst_h,
+                          0, 0, src_w, src_h,
+                          img.data(), &bmi,
+                          DIB_RGB_COLORS, SRCCOPY);
+            ReleaseDC(hwnd, hdc);
+        }
+    }
+#endif
+
     configuration                                config_;
     std::shared_ptr<accelerator::vulkan::device> device_;
     core::video_format_desc                      format_desc_;
@@ -1300,6 +1395,10 @@ class vulkan_output_consumer_impl
 
     // Software present barrier (sync group frame-lock)
     std::shared_ptr<present_barrier::token> barrier_token_;
+
+    // GDI fallback (Windows only: cross-adapter displays that Vulkan can't present to)
+    bool     adapter_mismatch_{false};
+    uint64_t gdi_frame_counter_ = 0;
 
     spl::shared_ptr<diagnostics::graph>            graph_ = spl::make_shared<diagnostics::graph>();
     caspar::timer                                  tick_timer_;

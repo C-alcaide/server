@@ -49,6 +49,11 @@ class output_window
     // Returns true if the window received a close/destroy event.
     bool should_close() const;
 
+#ifdef _WIN32
+    // Returns the native window handle (for GDI fallback).
+    void* native_handle() const;
+#endif
+
   private:
     struct impl;
     std::unique_ptr<impl> impl_;
