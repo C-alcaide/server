@@ -1,5 +1,11 @@
 # CasparCG 360° Client — Operations Guide
 
+> **Note:** This guide documents the companion **CasparCG 360° client** (the
+> [casparcg-360-client](https://github.com/C-alcaide/casparcg-360-client)
+> control application), which drives this CasparVP server over AMCP. It lives
+> here so all CasparVP documentation stays in one place; the server-side feature
+> references are the other docs in this folder.
+
 A practical, task-oriented manual for the CasparCG 360° / Virtual Production
 control client. It covers day-to-day playout as well as the advanced xR
 toolset: the global **3D Stage / previz**, **camera tracking**, **projection
