@@ -67,7 +67,7 @@ casparcg_add_module_project(vulkan_output
 target_include_directories(vulkan_output PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 add_dependencies(vulkan_output vulkan_output_shaders)
 target_link_libraries(vulkan_output PRIVATE accelerator)
-target_link_libraries(vulkan_output PRIVATE Vulkan::Headers vk-bootstrap::vk-bootstrap)
+target_link_libraries(vulkan_output PRIVATE Vulkan::Vulkan vk-bootstrap::vk-bootstrap)
 target_compile_definitions(vulkan_output PUBLIC VULKAN_HPP_DISPATCH_LOADER_DYNAMIC=1)
 
 if (MSVC)

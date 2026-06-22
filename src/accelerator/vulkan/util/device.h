@@ -45,7 +45,7 @@ class device final
     , public accelerator_device
 {
   public:
-    explicit device(const std::vector<vulkan_requirements_fn>& requirements = {});
+    explicit device(const std::vector<vulkan_requirements_fn>& requirements = {}, int gpu_index = -1);
     ~device();
 
     device(const device&) = delete;

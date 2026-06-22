@@ -56,7 +56,7 @@ class accelerator
     void add_vulkan_requirements(vulkan_requirements_fn fn);
 #endif
 
-    std::unique_ptr<caspar::core::image_mixer> create_image_mixer(int channel_id, common::bit_depth depth);
+    std::unique_ptr<caspar::core::image_mixer> create_image_mixer(int channel_id, common::bit_depth depth, int gpu_index = -1);
 
     std::shared_ptr<accelerator_device> get_device() const;
 

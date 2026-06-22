@@ -321,11 +321,26 @@ struct server::impl
             auto depth       = color_depth == 16 ? common::bit_depth::bit16 : common::bit_depth::bit8;
             auto default_color_space =
                 color_space_str == L"bt2020" ? core::color_space::bt2020 : core::color_space::bt709;
+
+            // Determine GPU affinity: explicit <gpu> on channel, or from first vulkan-output consumer
+            int gpu_index = xml_channel.second.get(L"gpu", -1);
+            if (gpu_index < 0) {
+                auto consumers_node = xml_channel.second.get_child_optional(L"consumers");
+                if (consumers_node) {
+                    for (auto& consumer_entry : *consumers_node) {
+                        if (consumer_entry.first == L"vulkan-output") {
+                            gpu_index = consumer_entry.second.get(L"gpu", -1);
+                            break;
+                        }
+                    }
+                }
+            }
+
             auto channel =
                 spl::make_shared<video_channel>(channel_id,
                                                 format_desc,
                                                 default_color_space,
-                                                accelerator_.create_image_mixer(channel_id, depth),
+                                                accelerator_.create_image_mixer(channel_id, depth, gpu_index),
                                                 [channel_id, weak_client](core::monitor::state channel_state) {
                                                     monitor::state state;
                                                     state[""]["channel"][channel_id] = channel_state;
