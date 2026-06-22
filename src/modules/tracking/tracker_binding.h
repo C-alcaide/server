@@ -125,6 +125,20 @@ struct tracker_binding
     double nodal_right_m   = 0.0;
     double nodal_up_m      = 0.0;
 
+    // ------- Rigid tracker→world alignment (xR survey) -------------
+    // Maps the tracker's own coordinate frame to the previz/LED-wall world
+    // frame, solved from a survey of known points (client-side Umeyama):
+    //     world_metres = align_scale · R · tracker_millimetres + align_t
+    // R is row-major (tracker→world); align_t is in metres; align_scale folds
+    // the millimetre→metre unit change into the fit. Orientation is aligned by
+    // composing R with the tracker rotation (see tracker_registry::inject_transform).
+    // Only applied in mode_previz. align_enable = false leaves the legacy
+    // per-axis offset / position_scale path untouched.
+    bool   align_enable = false;
+    double align_r[9]   = {1, 0, 0, 0, 1, 0, 0, 0, 1}; ///< row-major rotation, tracker→world
+    double align_t[3]   = {0, 0, 0};                    ///< translation, metres
+    double align_scale  = 1.0;                          ///< metres per millimetre
+
     // ------- Tracking latency compensation -------------------------
     // Delays the applied camera pose by this many milliseconds, interpolating
     // between buffered samples. Used to time-align tracking data with delayed

@@ -37,6 +37,55 @@ namespace {
 // History retention bounds for the latency-compensation buffer.
 constexpr int HISTORY_WINDOW_MS   = 2000; ///< Drop samples older than this (relative to newest).
 constexpr int HISTORY_MAX_SAMPLES = 512;  ///< Hard cap on buffered samples per camera.
+
+// --- Rigid tracker→world alignment helpers (mirror client tracker_align.py) ---
+// Camera→world rotation convention matches previz_renderer:
+//   R_cam = Ry(yaw)·Rx(pitch)·Rz(roll)   (view = Rz(-roll)·Rx(-pitch)·Ry(-yaw)·T(-C)).
+
+/// Build R = Ry(yaw)·Rx(pitch)·Rz(roll) into a row-major 3×3 (radians).
+inline void rot_ypr(double yaw, double pitch, double roll, double out[9])
+{
+    const double cy = std::cos(yaw),   sy = std::sin(yaw);
+    const double cp = std::cos(pitch), sp = std::sin(pitch);
+    const double cr = std::cos(roll),  sr = std::sin(roll);
+    // Ry(yaw):  [ cy 0 sy ; 0 1 0 ; -sy 0 cy ]
+    // Rx(pitch):[ 1 0 0 ; 0 cp -sp ; 0 sp cp ]
+    // Rz(roll): [ cr -sr 0 ; sr cr 0 ; 0 0 1 ]
+    // M = Rx·Rz:
+    const double m00 = cr,        m01 = -sr,       m02 = 0.0;
+    const double m10 = cp * sr,   m11 = cp * cr,   m12 = -sp;
+    const double m20 = sp * sr,   m21 = sp * cr,   m22 = cp;
+    // R = Ry·M:
+    out[0] = cy * m00 + sy * m20; out[1] = cy * m01 + sy * m21; out[2] = cy * m02 + sy * m22;
+    out[3] = m10;                 out[4] = m11;                 out[5] = m12;
+    out[6] = -sy * m00 + cy * m20; out[7] = -sy * m01 + cy * m21; out[8] = -sy * m02 + cy * m22;
+}
+
+/// Row-major 3×3 product: out = a·b.
+inline void mat3_mul(const double a[9], const double b[9], double out[9])
+{
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c)
+            out[r * 3 + c] = a[r * 3 + 0] * b[0 * 3 + c]
+                           + a[r * 3 + 1] * b[1 * 3 + c]
+                           + a[r * 3 + 2] * b[2 * 3 + c];
+}
+
+/// Decompose R = Ry(yaw)·Rx(pitch)·Rz(roll) (row-major) → yaw/pitch/roll radians.
+inline void euler_yxz(const double R[9], double& yaw, double& pitch, double& roll)
+{
+    double sp = -R[5]; // -R[1][2]
+    sp = std::clamp(sp, -1.0, 1.0);
+    pitch = std::asin(sp);
+    const double cp = std::cos(pitch);
+    if (std::abs(cp) > 1e-6) {
+        yaw  = std::atan2(R[2], R[8]);  // atan2(R[0][2], R[2][2])
+        roll = std::atan2(R[3], R[4]);  // atan2(R[1][0], R[1][1])
+    } else {
+        roll = 0.0;
+        yaw  = std::atan2(-R[6], R[0]); // atan2(-R[2][0], R[0][0])
+    }
+}
 } // namespace
 
 tracker_registry& tracker_registry::instance()
@@ -148,6 +197,23 @@ void tracker_registry::update_nodal(int channel, int layer, double forward_m, do
     it->second.nodal_forward_m = forward_m;
     it->second.nodal_right_m   = right_m;
     it->second.nodal_up_m      = up_m;
+}
+
+void tracker_registry::update_world_align(
+    int channel, int layer, bool enable, const double r[9], const double t[3], double scale)
+{
+    std::lock_guard<std::mutex> lk(mutex_);
+    auto it = bindings_.find({channel, layer});
+    if (it == bindings_.end())
+        throw std::runtime_error("No binding at channel/layer");
+    it->second.align_enable = enable;
+    if (enable) {
+        for (int i = 0; i < 9; ++i)
+            it->second.align_r[i] = r[i];
+        for (int i = 0; i < 3; ++i)
+            it->second.align_t[i] = t[i];
+        it->second.align_scale = scale;
+    }
 }
 
 void tracker_registry::update_dof(int channel, int layer, bool enable, double near_raw, double far_raw, double max_radius)
@@ -375,13 +441,39 @@ void tracker_registry::inject_transform(const tracker_binding& binding, const ca
         // Angles are in radians from the tracker; convert to degrees for the previz API.
         // Positions are in mm from the tracker; convert to metres for the previz API.
         if (binding.previz_camera_fn) {
+            double cam_x_m, cam_y_m, cam_z_m;
+            double cam_yaw = pan, cam_pitch = tilt, cam_roll = roll;
+
+            if (binding.align_enable) {
+                // Rigid tracker→world alignment (survey). Position uses the raw
+                // tracker millimetres directly (align_scale folds mm→m):
+                //   world_m = align_scale · R_align · (pos_x,pos_y,pos_z) + align_t
+                const double* R = binding.align_r;
+                const double  s = binding.align_scale;
+                cam_x_m = s * (R[0] * pos_x + R[1] * pos_y + R[2] * pos_z) + binding.align_t[0];
+                cam_y_m = s * (R[3] * pos_x + R[4] * pos_y + R[5] * pos_z) + binding.align_t[1];
+                cam_z_m = s * (R[6] * pos_x + R[7] * pos_y + R[8] * pos_z) + binding.align_t[2];
+
+                // Orientation: camera→world = R_align · R_track, decomposed back
+                // into the previz yaw/pitch/roll convention.
+                double R_track[9];
+                rot_ypr(pan, tilt, roll, R_track);
+                double R_world[9];
+                mat3_mul(R, R_track, R_world);
+                euler_yxz(R_world, cam_yaw, cam_pitch, cam_roll);
+            } else {
+                cam_x_m = pos_x * binding.position_scale;
+                cam_y_m = pos_y * binding.position_scale;
+                cam_z_m = pos_z * binding.position_scale;
+            }
+
             binding.previz_camera_fn(
-                static_cast<float>(pos_x * binding.position_scale),
-                static_cast<float>(pos_y * binding.position_scale),
-                static_cast<float>(pos_z * binding.position_scale),
-                static_cast<float>(pan   * 180.0 / M_PI),   // rad → degrees
-                static_cast<float>(tilt  * 180.0 / M_PI),
-                static_cast<float>(roll  * 180.0 / M_PI),
+                static_cast<float>(cam_x_m),
+                static_cast<float>(cam_y_m),
+                static_cast<float>(cam_z_m),
+                static_cast<float>(cam_yaw   * 180.0 / M_PI),   // rad → degrees
+                static_cast<float>(cam_pitch * 180.0 / M_PI),
+                static_cast<float>(cam_roll  * 180.0 / M_PI),
                 static_cast<float>(fov   * 180.0 / M_PI));
         }
     } else if (binding.mode == tracking_mode::mode_target) {

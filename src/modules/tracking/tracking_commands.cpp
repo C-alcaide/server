@@ -319,6 +319,11 @@ static std::wstring tracking_info_command(command_context& ctx)
     ss << L"GENLOCK "         << (binding->genlock_enable ? 1 : 0) << L" " << binding->genlock_frames << L"\r\n";
     ss << L"NODAL "           << binding->nodal_forward_m << L" " << binding->nodal_right_m
                               << L" " << binding->nodal_up_m                            << L"\r\n";
+    ss << L"WORLDALIGN "      << (binding->align_enable ? 1 : 0);
+    for (int i = 0; i < 9; ++i)
+        ss << L" " << binding->align_r[i];
+    ss << L" " << binding->align_t[0] << L" " << binding->align_t[1] << L" " << binding->align_t[2]
+       << L" " << binding->align_scale                                                  << L"\r\n";
     ss << L"DOF "             << (binding->dof_enable ? 1 : 0) << L" " << binding->dof_focus_near_raw
                               << L" " << binding->dof_focus_far_raw << L" " << binding->dof_max_radius << L"\r\n";
     ss << L"LENS "            << (binding->lens ? caspar::u16(binding->lens->name()) : std::wstring(L"NONE")) << L"\r\n";
@@ -597,6 +602,65 @@ static std::wstring tracking_nodal_command(command_context& ctx)
 }
 
 // ---------------------------------------------------------------------------
+// TRACKING WORLDALIGN — rigid tracker→world alignment (xR survey)
+//
+// Maps the tracker's coordinate frame onto the previz/LED-wall world frame so a
+// tracked camera drives the previz virtual camera (mode_previz) in the correct
+// place and orientation for in-camera VFX. Solved client-side from a survey of
+// known points (Umeyama):  world_m = scale · R · tracker_mm + t
+//
+// Only affects mode_previz bindings. With no argument, queries.
+//
+// Syntax:
+//   TRACKING <ch>-<layer> WORLDALIGN SET r00 r01 r02 r10 r11 r12 r20 r21 r22 tx ty tz scale
+//   TRACKING <ch>-<layer> WORLDALIGN CLEAR
+// ---------------------------------------------------------------------------
+static std::wstring tracking_worldalign_command(command_context& ctx)
+{
+    if (ctx.parameters.empty()) {
+        auto binding = tracker_registry::instance().get_binding(ctx.channel_index, ctx.layer_index());
+        if (!binding)
+            return L"404 TRACKING ERROR No binding on this channel/layer\r\n";
+        std::wostringstream ss;
+        ss << L"201 TRACKING OK\r\n" << L"WORLDALIGN " << (binding->align_enable ? 1 : 0);
+        for (int i = 0; i < 9; ++i)
+            ss << L" " << binding->align_r[i];
+        ss << L" " << binding->align_t[0] << L" " << binding->align_t[1] << L" " << binding->align_t[2]
+           << L" " << binding->align_scale << L"\r\n";
+        return ss.str();
+    }
+
+    try {
+        const std::wstring& sub = ctx.parameters.at(0);
+        if (boost::iequals(sub, L"CLEAR")) {
+            double r[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+            double t[3] = {0, 0, 0};
+            tracker_registry::instance().update_world_align(
+                ctx.channel_index, ctx.layer_index(), false, r, t, 1.0);
+            return L"202 TRACKING OK\r\n";
+        }
+        if (boost::iequals(sub, L"SET")) {
+            // SET + 9 (R) + 3 (t) + 1 (scale) = 14 parameters.
+            if (ctx.parameters.size() < 14)
+                return L"400 TRACKING ERROR Expected: WORLDALIGN SET <9 R> <3 t> <scale>\r\n";
+            double r[9];
+            double t[3];
+            for (int i = 0; i < 9; ++i)
+                r[i] = std::stod(ctx.parameters.at(1 + i));
+            for (int i = 0; i < 3; ++i)
+                t[i] = std::stod(ctx.parameters.at(10 + i));
+            double scale = std::stod(ctx.parameters.at(13));
+            tracker_registry::instance().update_world_align(
+                ctx.channel_index, ctx.layer_index(), true, r, t, scale);
+            return L"202 TRACKING OK\r\n";
+        }
+        return L"400 TRACKING ERROR Expected: WORLDALIGN SET|CLEAR\r\n";
+    } catch (const std::exception& e) {
+        return L"400 TRACKING ERROR " + caspar::u16(e.what()) + L"\r\n";
+    }
+}
+
+// ---------------------------------------------------------------------------
 // TRACKING DOF — faked depth-of-field driven by the lens focus channel
 //
 // NON-PHYSICAL: 2D/360 layers have no depth buffer. This maps the decoded focus
@@ -809,6 +873,7 @@ void register_amcp_commands(
     repo->register_channel_command(L"Tracking Commands", L"TRACKING DELAY",          tracking_delay_command,          0);
     repo->register_channel_command(L"Tracking Commands", L"TRACKING GENLOCK",        tracking_genlock_command,        0);
     repo->register_channel_command(L"Tracking Commands", L"TRACKING NODAL",          tracking_nodal_command,          0);
+    repo->register_channel_command(L"Tracking Commands", L"TRACKING WORLDALIGN",     tracking_worldalign_command,     0);
     repo->register_channel_command(L"Tracking Commands", L"TRACKING DOF",            tracking_dof_command,            0);
     repo->register_channel_command(L"Tracking Commands", L"TRACKING LENS",           tracking_lens_command,           0);
     repo->register_channel_command(L"Tracking Commands", L"TRACKING TARGET_CAMERA",   tracking_target_camera_command,  0);

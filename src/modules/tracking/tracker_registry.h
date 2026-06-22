@@ -55,6 +55,7 @@ class tracker_registry
     void update_delay(int channel, int layer, double delay_ms);
     void update_genlock(int channel, int layer, bool enable, double frames);
     void update_nodal(int channel, int layer, double forward_m, double right_m, double up_m);
+    void update_world_align(int channel, int layer, bool enable, const double r[9], const double t[3], double scale);
     void update_dof(int channel, int layer, bool enable, double near_raw, double far_raw, double max_radius);
     void update_lens(int channel, int layer, std::shared_ptr<lens_profile> lens);
     void update_target_camera(int channel, int layer, bool enable,
