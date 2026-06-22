@@ -60,10 +60,26 @@ set(HEADERS
 		utf.h
 )
 
+if (ENABLE_VULKAN)
+	list(APPEND SOURCES
+			vulkan/gpu_luid.cpp
+			vulkan/icd_filter.cpp
+	)
+	list(APPEND HEADERS
+			vulkan/gpu_luid.h
+			vulkan/icd_filter.h
+			vulkan/platform_handles.h
+	)
+endif ()
+
 casparcg_add_library(common SOURCES ${SOURCES} ${HEADERS})
 target_include_directories(common PRIVATE ..)
 target_precompile_headers(common PRIVATE stdafx.h)
 target_link_libraries(common PRIVATE GLEW::glew)
+
+if (ENABLE_VULKAN)
+	target_link_libraries(common PRIVATE Vulkan::Headers)
+endif ()
 
 source_group(sources ./*)
 source_group(sources\\gl gl/*)
@@ -71,3 +87,6 @@ source_group(sources\\diagnostics diagnostics/*)
 source_group(sources\\compiler\\vs compiler/vs/*)
 source_group(sources\\os\\windows os/windows/*)
 source_group(sources\\os os/*)
+if (ENABLE_VULKAN)
+	source_group(sources\\vulkan vulkan/*)
+endif ()

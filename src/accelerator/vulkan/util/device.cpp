@@ -32,6 +32,8 @@
 #include <common/env.h>
 #include <common/except.h>
 #include <common/os/thread.h>
+#include <common/vulkan/gpu_luid.h>
+#include <common/vulkan/icd_filter.h>
 
 #include <VkBootstrap.h>
 #include <vulkan/vulkan.hpp>
@@ -162,6 +164,8 @@ struct device::impl : public std::enable_shared_from_this<impl>
     {
         CASPAR_LOG(info) << L"Initializing Vulkan Device (gpu_index=" << gpu_index << L").";
 
+        vulkan_common::filter_stale_nvidia_icds();
+
         auto instance_builder = vkb::InstanceBuilder()
 #ifdef _DEBUG
                                     .enable_validation_layers(true)
@@ -224,20 +228,6 @@ struct device::impl : public std::enable_shared_from_this<impl>
                                                                 : gpu_devices_res.error().message())));
         }
 
-        // Helper: read a device's LUID (returns valid=false if unavailable).
-        auto read_luid = [](VkPhysicalDevice pd, std::array<uint8_t, 8>& out) -> bool {
-            VkPhysicalDeviceIDProperties id_props{};
-            id_props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES;
-            VkPhysicalDeviceProperties2 props2{};
-            props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
-            props2.pNext = &id_props;
-            vkGetPhysicalDeviceProperties2(pd, &props2);
-            if (!id_props.deviceLUIDValid)
-                return false;
-            std::memcpy(out.data(), id_props.deviceLUID, 8);
-            return true;
-        };
-
         // Resolve gpu_index against the SAME index space the vulkan_output consumer
         // uses: a raw vkEnumeratePhysicalDevices list deduplicated by LUID (first
         // occurrence wins). vk-bootstrap's select_devices() feature-filters and may
@@ -254,14 +244,14 @@ struct device::impl : public std::enable_shared_from_this<impl>
             if (raw_count > 0)
                 vkEnumeratePhysicalDevices(_vkb_instance.instance, &raw_count, raw_devices.data());
 
+            auto unique_devices = vulkan_common::deduplicate_by_luid(raw_devices);
+
+            // Extract unique LUIDs in order to map gpu_index -> target LUID
             std::vector<std::array<uint8_t, 8>> unique_luids;
-            for (auto pd : raw_devices) {
+            for (auto pd : unique_devices) {
                 std::array<uint8_t, 8> luid{};
-                if (!read_luid(pd, luid))
-                    continue; // skip devices without a LUID (cannot be matched cross-API)
-                if (std::find(unique_luids.begin(), unique_luids.end(), luid) != unique_luids.end())
-                    continue;
-                unique_luids.push_back(luid);
+                if (vulkan_common::query_device_luid(pd, luid))
+                    unique_luids.push_back(luid);
             }
 
             if (gpu_index >= 0 && gpu_index < static_cast<int>(unique_luids.size())) {
@@ -282,7 +272,7 @@ struct device::impl : public std::enable_shared_from_this<impl>
         if (have_target_luid) {
             for (size_t i = 0; i < all_gpus.size(); ++i) {
                 std::array<uint8_t, 8> luid{};
-                if (read_luid(all_gpus[i].physical_device, luid) && luid == target_luid) {
+                if (vulkan_common::query_device_luid(all_gpus[i].physical_device, luid) && luid == target_luid) {
                     selected_index = static_cast<int>(i);
                     matched        = true;
                     break;
@@ -349,16 +339,10 @@ struct device::impl : public std::enable_shared_from_this<impl>
 
         // Query device LUID for cross-GPU identification
         {
-            VkPhysicalDeviceIDProperties idProps{};
-            idProps.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES;
-            VkPhysicalDeviceProperties2 props2{};
-            props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
-            props2.pNext = &idProps;
-            vkGetPhysicalDeviceProperties2(_physical_device, &props2);
-            if (idProps.deviceLUIDValid) {
-                std::memcpy(_device_luid, idProps.deviceLUID, 8);
-                _device_luid_valid = true;
-            }
+            std::array<uint8_t, 8> luid{};
+            _device_luid_valid = vulkan_common::query_device_luid(_physical_device, luid);
+            if (_device_luid_valid)
+                std::memcpy(_device_luid, luid.data(), 8);
         }
 
         _pipelines[0] = std::make_shared<pipeline>(_device, vk::Format::eR8G8B8A8Unorm, _memoryProperties);

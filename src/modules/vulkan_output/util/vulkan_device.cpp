@@ -22,11 +22,12 @@
 
 #include <common/except.h>
 #include <common/log.h>
+#include <common/vulkan/gpu_luid.h>
+#include <common/vulkan/icd_filter.h>
 
 #include <algorithm>
 #include <cstring>
 #include <cstdlib>
-#include <filesystem>
 #include <mutex>
 #include <stdexcept>
 
@@ -84,57 +85,6 @@ bool is_professional_gpu(const char* name)
     return false;
 }
 
-// Deduplicate VkPhysicalDevices by LUID.  Newer NVIDIA drivers expose the same
-// physical GPU as multiple VkPhysicalDevice handles (graphics vs compute/video).
-// We keep only the first occurrence of each unique LUID so that user-facing GPU
-// indices remain stable regardless of driver version.
-std::vector<VkPhysicalDevice> deduplicate_physical_devices(VkInstance instance,
-                                                           const std::vector<VkPhysicalDevice>& devices)
-{
-    struct luid_entry {
-        uint8_t          luid[8];
-        VkPhysicalDevice device;
-    };
-
-    std::vector<luid_entry> seen;
-    std::vector<VkPhysicalDevice> unique;
-
-    for (auto dev : devices) {
-        VkPhysicalDeviceIDProperties id_props{};
-        id_props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES;
-        VkPhysicalDeviceProperties2 props2{};
-        props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
-        props2.pNext = &id_props;
-        vkGetPhysicalDeviceProperties2(dev, &props2);
-
-        if (id_props.deviceLUIDValid) {
-            bool duplicate = false;
-            for (const auto& s : seen) {
-                if (memcmp(s.luid, id_props.deviceLUID, 8) == 0) {
-                    duplicate = true;
-                    break;
-                }
-            }
-            if (duplicate)
-                continue;
-
-            luid_entry entry{};
-            memcpy(entry.luid, id_props.deviceLUID, 8);
-            entry.device = dev;
-            seen.push_back(entry);
-        }
-        unique.push_back(dev);
-    }
-
-    if (unique.size() < devices.size()) {
-        CASPAR_LOG(info) << L"[vulkan] Deduplicated " << devices.size()
-                         << L" physical devices to " << unique.size()
-                         << L" unique GPU(s) by LUID";
-    }
-
-    return unique;
-}
-
 } // namespace
 
 vulkan_device::vulkan_device(int gpu_index, int output_index)
@@ -162,71 +112,7 @@ vulkan_device::~vulkan_device()
 
 void vulkan_device::create_instance()
 {
-#ifdef _WIN32
-    // ── Filter stale Vulkan ICDs ─────────────────────────────────────────
-    // After a driver upgrade, old driver entries may remain in the Windows
-    // DriverStore. The Vulkan loader discovers ALL ICD JSON files and
-    // dispatches vkCreateDevice through each ICD. A stale ICD (from the
-    // previous driver) can hang the GPU when it tries to talk to the
-    // current kernel-mode driver, causing TDR exactly 2 seconds later.
-    //
-    // Fix: find all NVIDIA ICD JSON files, keep only the newest, and set
-    // VK_DRIVER_FILES to force the loader to use only the current ICD.
-    {
-        static std::once_flag icd_filter_once;
-        std::call_once(icd_filter_once, [] {
-            namespace fs = std::filesystem;
-            try {
-                fs::path driver_store = L"C:\\Windows\\System32\\DriverStore\\FileRepository";
-                if (!fs::exists(driver_store))
-                    return;
-
-                // Collect all nv-vk64.json files with their parent directory timestamps
-                struct icd_entry { fs::path json_path; fs::file_time_type dir_time; };
-                std::vector<icd_entry> icd_files;
-
-                for (auto& dir : fs::directory_iterator(driver_store)) {
-                    if (!dir.is_directory())
-                        continue;
-                    auto name = dir.path().filename().wstring();
-                    if (name.find(L"nv_disp") == std::wstring::npos &&
-                        name.find(L"nv_lh") == std::wstring::npos)
-                        continue;
-                    auto json = dir.path() / L"nv-vk64.json";
-                    if (fs::exists(json)) {
-                        icd_files.push_back({json, dir.last_write_time()});
-                    }
-                }
-
-                if (icd_files.size() <= 1)
-                    return;  // Only one ICD — no filtering needed
-
-                // Sort by directory timestamp, newest first
-                std::sort(icd_files.begin(), icd_files.end(),
-                          [](const icd_entry& a, const icd_entry& b) {
-                              return a.dir_time > b.dir_time;
-                          });
-
-                // Use only the newest ICD
-                auto& newest = icd_files[0].json_path;
-                std::wstring env_val = newest.wstring();
-                _wputenv_s(L"VK_DRIVER_FILES", env_val.c_str());
-
-                CASPAR_LOG(info) << L"[vulkan] Filtered " << icd_files.size()
-                                 << L" NVIDIA ICD(s) - using newest: "
-                                 << newest.filename().wstring()
-                                 << L" from " << newest.parent_path().filename().wstring();
-
-                for (size_t i = 1; i < icd_files.size(); ++i) {
-                    CASPAR_LOG(warning) << L"[vulkan] Skipping stale ICD: "
-                                        << icd_files[i].json_path.parent_path().filename().wstring();
-                }
-            } catch (const std::exception& e) {
-                CASPAR_LOG(debug) << L"[vulkan] ICD filtering skipped: " << e.what();
-            }
-        });
-    }
-#endif // _WIN32
+    vulkan_common::filter_stale_nvidia_icds();
 
     VkApplicationInfo app_info{};
     app_info.sType              = VK_STRUCTURE_TYPE_APPLICATION_INFO;
@@ -315,7 +201,7 @@ void vulkan_device::select_physical_device(int gpu_index)
 
     // Deduplicate: newer drivers may expose the same GPU as multiple
     // VkPhysicalDevice handles (graphics vs compute/video).
-    auto devices = deduplicate_physical_devices(instance_, all_devices);
+    auto devices = vulkan_common::deduplicate_by_luid(all_devices);
 
     if (gpu_index < 0 || gpu_index >= static_cast<int>(devices.size()))
         CASPAR_THROW_EXCEPTION(caspar_exception() << msg_info("Invalid GPU index: " + std::to_string(gpu_index)
@@ -379,15 +265,11 @@ void vulkan_device::select_physical_device(int gpu_index)
     gpu_index_ = gpu_index;
 
     // Query device LUID for cross-API GPU matching
-    VkPhysicalDeviceIDProperties id_props{};
-    id_props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES;
-    VkPhysicalDeviceProperties2 props2{};
-    props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
-    props2.pNext = &id_props;
-    vkGetPhysicalDeviceProperties2(physical_device_, &props2);
-    if (id_props.deviceLUIDValid) {
-        memcpy(device_luid_, id_props.deviceLUID, 8);
-        device_luid_valid_ = true;
+    {
+        std::array<uint8_t, 8> luid{};
+        device_luid_valid_ = vulkan_common::query_device_luid(physical_device_, luid);
+        if (device_luid_valid_)
+            memcpy(device_luid_, luid.data(), 8);
     }
 }
 
@@ -747,6 +629,8 @@ std::vector<display_info> vulkan_device::enumerate_displays()
 {
     std::vector<display_info> results;
 
+    vulkan_common::filter_stale_nvidia_icds();
+
     // Create a temporary instance for enumeration
     VkApplicationInfo app_info{};
     app_info.sType            = VK_STRUCTURE_TYPE_APPLICATION_INFO;
@@ -791,7 +675,7 @@ std::vector<display_info> vulkan_device::enumerate_displays()
     vkEnumeratePhysicalDevices(instance, &gpu_count, all_gpus.data());
 
     // Deduplicate: newer drivers may expose the same GPU as multiple handles
-    auto gpus = deduplicate_physical_devices(instance, all_gpus);
+    auto gpus = vulkan_common::deduplicate_by_luid(all_gpus);
 
     for (uint32_t gi = 0; gi < static_cast<uint32_t>(gpus.size()); ++gi) {
         VkPhysicalDeviceProperties props;
@@ -878,6 +762,8 @@ void vulkan_device::log_gpu_topology()
 
 void vulkan_device::log_gpu_topology_impl()
 {
+    vulkan_common::filter_stale_nvidia_icds();
+
     // Create a temporary VkInstance to query device groups.
     VkApplicationInfo app_info{};
     app_info.sType            = VK_STRUCTURE_TYPE_APPLICATION_INFO;
