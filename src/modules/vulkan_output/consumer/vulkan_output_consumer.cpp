@@ -19,6 +19,7 @@
 
 #include "vulkan_output_consumer.h"
 #include "config.h"
+#include "../util/color_convert_pipeline.h"
 #include "../util/display_enum.h"
 #include "../util/output_window.h"
 #include "../util/presentation.h"
@@ -223,6 +224,163 @@ class present_swapchain
                             nullptr,
                             nullptr,
                             barrier_to_present);
+
+        cmd.end();
+
+        // Submit
+        vk::PipelineStageFlags wait_stage = vk::PipelineStageFlagBits::eTransfer;
+        vk::SubmitInfo         submit{};
+        submit.waitSemaphoreCount   = 1;
+        submit.pWaitSemaphores      = &sync.image_available;
+        submit.pWaitDstStageMask    = &wait_stage;
+        submit.commandBufferCount   = 1;
+        submit.pCommandBuffers      = &sync.cmd_buffer;
+        submit.signalSemaphoreCount = 1;
+        submit.pSignalSemaphores    = &sync.render_finished;
+        queue_.submit(submit, sync.in_flight);
+
+        // Present
+        vk::PresentInfoKHR present{};
+        present.waitSemaphoreCount = 1;
+        present.pWaitSemaphores    = &sync.render_finished;
+        present.swapchainCount     = 1;
+        present.pSwapchains        = &swapchain_;
+        present.pImageIndices      = &image_index;
+        auto present_result = queue_.presentKHR(present);
+        (void)present_result;
+
+        current_frame_idx_ = (current_frame_idx_ + 1) % MAX_FRAMES_IN_FLIGHT;
+    }
+
+    // Record and submit: blit src → intermediate, dispatch color compute, blit intermediate → swapchain.
+    void blit_via_compute_and_present(VkImage                  src_image,
+                                      uint32_t                 src_width,
+                                      uint32_t                 src_height,
+                                      color_convert_pipeline&  pipeline,
+                                      uint32_t                 image_index)
+    {
+        auto& sync = current_frame();
+        auto  cmd  = sync.cmd_buffer;
+
+        cmd.reset();
+        cmd.begin(vk::CommandBufferBeginInfo{vk::CommandBufferUsageFlagBits::eOneTimeSubmit});
+
+        // Transition intermediate: undefined → transfer dst
+        vk::ImageMemoryBarrier bar_int_to_dst{};
+        bar_int_to_dst.srcAccessMask    = {};
+        bar_int_to_dst.dstAccessMask    = vk::AccessFlagBits::eTransferWrite;
+        bar_int_to_dst.oldLayout        = vk::ImageLayout::eUndefined;
+        bar_int_to_dst.newLayout        = vk::ImageLayout::eTransferDstOptimal;
+        bar_int_to_dst.image            = pipeline.image();
+        bar_int_to_dst.subresourceRange = vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
+        cmd.pipelineBarrier(vk::PipelineStageFlagBits::eTopOfPipe,
+                            vk::PipelineStageFlagBits::eTransfer,
+                            {}, nullptr, nullptr, bar_int_to_dst);
+
+        // Transition source: shader read → transfer src
+        vk::ImageMemoryBarrier bar_src_to_xfer{};
+        bar_src_to_xfer.srcAccessMask    = vk::AccessFlagBits::eShaderRead;
+        bar_src_to_xfer.dstAccessMask    = vk::AccessFlagBits::eTransferRead;
+        bar_src_to_xfer.oldLayout        = vk::ImageLayout::eShaderReadOnlyOptimal;
+        bar_src_to_xfer.newLayout        = vk::ImageLayout::eTransferSrcOptimal;
+        bar_src_to_xfer.image            = src_image;
+        bar_src_to_xfer.subresourceRange = vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
+        cmd.pipelineBarrier(vk::PipelineStageFlagBits::eFragmentShader,
+                            vk::PipelineStageFlagBits::eTransfer,
+                            {}, nullptr, nullptr, bar_src_to_xfer);
+
+        // Blit source → intermediate (scaled to intermediate size)
+        vk::ImageBlit region_to_int{};
+        region_to_int.srcSubresource = vk::ImageSubresourceLayers{vk::ImageAspectFlagBits::eColor, 0, 0, 1};
+        region_to_int.srcOffsets[0]  = vk::Offset3D{0, 0, 0};
+        region_to_int.srcOffsets[1]  = vk::Offset3D{static_cast<int32_t>(src_width), static_cast<int32_t>(src_height), 1};
+        region_to_int.dstSubresource = vk::ImageSubresourceLayers{vk::ImageAspectFlagBits::eColor, 0, 0, 1};
+        region_to_int.dstOffsets[0]  = vk::Offset3D{0, 0, 0};
+        region_to_int.dstOffsets[1]  = vk::Offset3D{static_cast<int32_t>(pipeline.width()), static_cast<int32_t>(pipeline.height()), 1};
+        cmd.blitImage(src_image,
+                      vk::ImageLayout::eTransferSrcOptimal,
+                      pipeline.image(),
+                      vk::ImageLayout::eTransferDstOptimal,
+                      region_to_int,
+                      vk::Filter::eLinear);
+
+        // Transition source back: transfer src → shader read
+        vk::ImageMemoryBarrier bar_src_back{};
+        bar_src_back.srcAccessMask    = vk::AccessFlagBits::eTransferRead;
+        bar_src_back.dstAccessMask    = vk::AccessFlagBits::eShaderRead;
+        bar_src_back.oldLayout        = vk::ImageLayout::eTransferSrcOptimal;
+        bar_src_back.newLayout        = vk::ImageLayout::eShaderReadOnlyOptimal;
+        bar_src_back.image            = src_image;
+        bar_src_back.subresourceRange = vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
+        cmd.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
+                            vk::PipelineStageFlagBits::eFragmentShader,
+                            {}, nullptr, nullptr, bar_src_back);
+
+        // Transition intermediate: transfer dst → general (for compute)
+        vk::ImageMemoryBarrier bar_int_to_general{};
+        bar_int_to_general.srcAccessMask    = vk::AccessFlagBits::eTransferWrite;
+        bar_int_to_general.dstAccessMask    = vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite;
+        bar_int_to_general.oldLayout        = vk::ImageLayout::eTransferDstOptimal;
+        bar_int_to_general.newLayout        = vk::ImageLayout::eGeneral;
+        bar_int_to_general.image            = pipeline.image();
+        bar_int_to_general.subresourceRange = vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
+        cmd.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
+                            vk::PipelineStageFlagBits::eComputeShader,
+                            {}, nullptr, nullptr, bar_int_to_general);
+
+        // Dispatch color conversion compute shader
+        pipeline.dispatch(cmd, pipeline.width(), pipeline.height());
+
+        // Transition intermediate: general → transfer src
+        vk::ImageMemoryBarrier bar_int_to_src{};
+        bar_int_to_src.srcAccessMask    = vk::AccessFlagBits::eShaderWrite;
+        bar_int_to_src.dstAccessMask    = vk::AccessFlagBits::eTransferRead;
+        bar_int_to_src.oldLayout        = vk::ImageLayout::eGeneral;
+        bar_int_to_src.newLayout        = vk::ImageLayout::eTransferSrcOptimal;
+        bar_int_to_src.image            = pipeline.image();
+        bar_int_to_src.subresourceRange = vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
+        cmd.pipelineBarrier(vk::PipelineStageFlagBits::eComputeShader,
+                            vk::PipelineStageFlagBits::eTransfer,
+                            {}, nullptr, nullptr, bar_int_to_src);
+
+        // Transition swapchain image: undefined → transfer dst
+        vk::ImageMemoryBarrier bar_swap_to_dst{};
+        bar_swap_to_dst.srcAccessMask    = {};
+        bar_swap_to_dst.dstAccessMask    = vk::AccessFlagBits::eTransferWrite;
+        bar_swap_to_dst.oldLayout        = vk::ImageLayout::eUndefined;
+        bar_swap_to_dst.newLayout        = vk::ImageLayout::eTransferDstOptimal;
+        bar_swap_to_dst.image            = images_[image_index];
+        bar_swap_to_dst.subresourceRange = vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
+        cmd.pipelineBarrier(vk::PipelineStageFlagBits::eTopOfPipe,
+                            vk::PipelineStageFlagBits::eTransfer,
+                            {}, nullptr, nullptr, bar_swap_to_dst);
+
+        // Blit intermediate → swapchain
+        vk::ImageBlit region_to_swap{};
+        region_to_swap.srcSubresource = vk::ImageSubresourceLayers{vk::ImageAspectFlagBits::eColor, 0, 0, 1};
+        region_to_swap.srcOffsets[0]  = vk::Offset3D{0, 0, 0};
+        region_to_swap.srcOffsets[1]  = vk::Offset3D{static_cast<int32_t>(pipeline.width()), static_cast<int32_t>(pipeline.height()), 1};
+        region_to_swap.dstSubresource = vk::ImageSubresourceLayers{vk::ImageAspectFlagBits::eColor, 0, 0, 1};
+        region_to_swap.dstOffsets[0]  = vk::Offset3D{0, 0, 0};
+        region_to_swap.dstOffsets[1]  = vk::Offset3D{static_cast<int32_t>(extent_.width), static_cast<int32_t>(extent_.height), 1};
+        cmd.blitImage(pipeline.image(),
+                      vk::ImageLayout::eTransferSrcOptimal,
+                      images_[image_index],
+                      vk::ImageLayout::eTransferDstOptimal,
+                      region_to_swap,
+                      vk::Filter::eLinear);
+
+        // Transition swapchain image: transfer dst → present
+        vk::ImageMemoryBarrier bar_swap_to_present{};
+        bar_swap_to_present.srcAccessMask    = vk::AccessFlagBits::eTransferWrite;
+        bar_swap_to_present.dstAccessMask    = {};
+        bar_swap_to_present.oldLayout        = vk::ImageLayout::eTransferDstOptimal;
+        bar_swap_to_present.newLayout        = vk::ImageLayout::ePresentSrcKHR;
+        bar_swap_to_present.image            = images_[image_index];
+        bar_swap_to_present.subresourceRange = vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
+        cmd.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
+                            vk::PipelineStageFlagBits::eBottomOfPipe,
+                            {}, nullptr, nullptr, bar_swap_to_present);
 
         cmd.end();
 
@@ -493,11 +651,31 @@ class vulkan_output_consumer_impl
                          << swapchain_->height() << L" | " << tier_name(active_tier)
                          << L" | " << target->display_name;
 
+        // Initialize color conversion pipeline (always created, conditionally dispatched)
+        color_pipeline_ = std::make_unique<color_convert_pipeline>(
+            vk_device, physical, swapchain_->width(), swapchain_->height());
+
+        // Determine tone map op from transfer/EOTF combination
+        int tone_map = 0;
+        if (config_.eotf == output_eotf::hlg)
+            tone_map = 7; // hlg_ootf
+        else if (config_.gamut == output_gamut::bt2020 && config_.eotf == output_eotf::pq)
+            tone_map = 3; // aces_rrt for HDR10
+
+        color_pipeline_->update_config(config_.gamut, config_.eotf, 1000.0f, tone_map);
+
+        if (color_pipeline_->is_active()) {
+            CASPAR_LOG(info) << print() << L" Color pipeline active: gamut="
+                             << static_cast<int>(config_.gamut)
+                             << L" eotf=" << static_cast<int>(config_.eotf);
+        }
+
         while (is_running_) {
             tick(queue_obj);
         }
 
         // Cleanup
+        color_pipeline_.reset();
         swapchain_.reset();
         vk_instance.destroySurfaceKHR(surface);
         window_.reset();
@@ -530,13 +708,18 @@ class vulkan_output_consumer_impl
 
             uint32_t image_index = swapchain_->acquire_next_image();
             if (image_index == std::numeric_limits<uint32_t>::max()) {
-                // Swapchain out of date — shouldn't happen in borderless FSE
                 CASPAR_LOG(warning) << print() << L" Swapchain out of date.";
                 return;
             }
 
-            swapchain_->blit_and_present(
-                src->id(), static_cast<uint32_t>(src->width()), static_cast<uint32_t>(src->height()), image_index);
+            if (color_pipeline_ && color_pipeline_->is_active()) {
+                swapchain_->blit_via_compute_and_present(
+                    src->id(), static_cast<uint32_t>(src->width()), static_cast<uint32_t>(src->height()),
+                    *color_pipeline_, image_index);
+            } else {
+                swapchain_->blit_and_present(
+                    src->id(), static_cast<uint32_t>(src->width()), static_cast<uint32_t>(src->height()), image_index);
+            }
         }
 
         graph_->set_value("frame-time", frame_timer.elapsed() * format_desc_.fps * 0.5);
@@ -549,8 +732,9 @@ class vulkan_output_consumer_impl
     core::video_format_desc                      format_desc_;
     int                                          channel_index_ = 0;
 
-    std::unique_ptr<output_window>      window_;
-    std::unique_ptr<present_swapchain>  swapchain_;
+    std::unique_ptr<output_window>          window_;
+    std::unique_ptr<present_swapchain>      swapchain_;
+    std::unique_ptr<color_convert_pipeline> color_pipeline_;
 
     spl::shared_ptr<diagnostics::graph>            graph_ = spl::make_shared<diagnostics::graph>();
     caspar::timer                                  tick_timer_;

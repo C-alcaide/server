@@ -1,12 +1,39 @@
 cmake_minimum_required (VERSION 3.28)
 project (vulkan_output)
 
+# Compile GLSL shaders to SPIR-V
+find_program(glslc_executable NAMES glslc HINTS Vulkan::glslc)
+set(SHADER_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/shaders)
+set(SHADER_BINARY_DIR ${CMAKE_CURRENT_SOURCE_DIR}/shaders)
+
+file(GLOB SHADERS ${SHADER_SOURCE_DIR}/color_convert.comp)
+
+foreach(source IN LISTS SHADERS)
+	get_filename_component(FILENAME ${source} NAME)
+	add_custom_command(
+		COMMAND
+			${glslc_executable}
+			-o ${SHADER_BINARY_DIR}/${FILENAME}.spv
+			${source}
+		OUTPUT ${SHADER_BINARY_DIR}/${FILENAME}.spv
+		DEPENDS ${source} ${SHADER_BINARY_DIR}
+		COMMENT "Compiling ${FILENAME}"
+	)
+	list(APPEND SPV_SHADERS ${SHADER_BINARY_DIR}/${FILENAME}.spv)
+endforeach()
+
+add_custom_target(vulkan_output_shaders ALL DEPENDS ${SPV_SHADERS})
+
+bin2c("shaders/color_convert.comp.spv" "color_convert_comp.h" "caspar::vulkan_output" "color_convert_comp_spv")
+
 set(SOURCES
 	consumer/config.cpp
 	consumer/config.h
 	consumer/vulkan_output_consumer.cpp
 	consumer/vulkan_output_consumer.h
 
+	util/color_convert_pipeline.cpp
+	util/color_convert_pipeline.h
 	util/display_enum.cpp
 	util/display_enum.h
 	util/output_window.cpp
@@ -16,6 +43,8 @@ set(SOURCES
 
 	vulkan_output.cpp
 	vulkan_output.h
+
+	color_convert_comp.h
 )
 
 casparcg_add_module_project(vulkan_output
@@ -24,6 +53,8 @@ casparcg_add_module_project(vulkan_output
 	VULKAN_REQUIREMENTS_FUNCTION "vulkan_output::register_vulkan_requirements"
 )
 
+target_include_directories(vulkan_output PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+add_dependencies(vulkan_output vulkan_output_shaders)
 target_link_libraries(vulkan_output PRIVATE accelerator)
 target_link_libraries(vulkan_output PRIVATE Vulkan::Headers vk-bootstrap::vk-bootstrap)
 target_compile_definitions(vulkan_output PUBLIC VULKAN_HPP_DISPATCH_LOADER_DYNAMIC=1)
