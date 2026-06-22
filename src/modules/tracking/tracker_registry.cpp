@@ -160,6 +160,18 @@ void tracker_registry::update_zoom_default_fov(int channel, int layer, double fo
     it->second.zoom_default_fov = fov_rad;
 }
 
+void tracker_registry::update_zoom_lut(int channel, int layer, std::vector<zoom_entry> lut)
+{
+    std::lock_guard<std::mutex> lk(mutex_);
+    auto it = bindings_.find({channel, layer});
+    if (it == bindings_.end())
+        throw std::runtime_error("No binding at channel/layer");
+    // Keep the table sorted ascending by raw_value so compute_fov() can bracket.
+    std::sort(lut.begin(), lut.end(),
+              [](const zoom_entry& a, const zoom_entry& b) { return a.raw_value < b.raw_value; });
+    it->second.zoom_lookup = std::move(lut);
+}
+
 void tracker_registry::update_position_scale(int channel, int layer, double scale)
 {
     std::lock_guard<std::mutex> lk(mutex_);

@@ -314,6 +314,10 @@ static std::wstring tracking_info_command(command_context& ctx)
     ss << L"ROLL_OFFSET "  << (binding->roll_offset * RAD2DEG_CMD)                    << L"\r\n";
     ss << L"ZOOM_FULL_RANGE " << binding->zoom_full_range                             << L"\r\n";
     ss << L"ZOOM_DEFAULT_FOV " << (binding->zoom_default_fov * RAD2DEG_CMD)           << L"\r\n";
+    ss << L"ZOOM_LUT "        << binding->zoom_lookup.size();
+    for (const auto& ze : binding->zoom_lookup)
+        ss << L" " << ze.raw_value << L" " << (ze.fov_rad * RAD2DEG_CMD);
+    ss << L"\r\n";
     ss << L"POSITION_SCALE "  << binding->position_scale                              << L"\r\n";
     ss << L"DELAY "           << binding->delay_ms                                    << L"\r\n";
     ss << L"GENLOCK "         << (binding->genlock_enable ? 1 : 0) << L" " << binding->genlock_frames << L"\r\n";
@@ -441,7 +445,72 @@ static std::wstring tracking_default_fov_command(command_context& ctx)
 }
 
 // ---------------------------------------------------------------------------
-// TRACKING POSITION_SCALE — set the NDC-per-mm scale for X/Y camera position
+// TRACKING ZOOM_LUT — per-lens zoom→FOV calibration lookup table
+//
+// Replaces the analytic zoom formula with operator-measured samples. When set,
+// compute_fov() linearly interpolates the FOV between the bracketing raw zoom
+// values; outside the table the nearest endpoint is held. Use for lenses whose
+// zoom→FOV curve is non-ideal. CLEAR reverts to the DEFAULT_FOV/SCALE formula.
+//
+// FOV values are in degrees (converted to radians internally). At least two
+// (raw, fov) pairs are required. Live — no rebind needed. With no argument,
+// queries the current table.
+//
+// Syntax:
+//   TRACKING <ch>-<layer> ZOOM_LUT SET raw0 fov0 raw1 fov1 [raw2 fov2 ...]
+//   TRACKING <ch>-<layer> ZOOM_LUT CLEAR
+// ---------------------------------------------------------------------------
+static std::wstring tracking_zoom_lut_command(command_context& ctx)
+{
+    if (ctx.parameters.empty()) {
+        auto binding = tracker_registry::instance().get_binding(ctx.channel_index, ctx.layer_index());
+        if (!binding)
+            return L"404 TRACKING ERROR No binding on this channel/layer\r\n";
+        std::wostringstream ss;
+        ss << L"201 TRACKING OK\r\n" << L"ZOOM_LUT " << binding->zoom_lookup.size();
+        for (const auto& e : binding->zoom_lookup)
+            ss << L" " << e.raw_value << L" " << (e.fov_rad * RAD2DEG_CMD);
+        ss << L"\r\n";
+        return ss.str();
+    }
+
+    try {
+        const std::wstring& sub = ctx.parameters.at(0);
+        if (boost::iequals(sub, L"CLEAR")) {
+            tracker_registry::instance().update_zoom_lut(
+                ctx.channel_index, ctx.layer_index(), {});
+            return L"202 TRACKING OK\r\n";
+        }
+        if (boost::iequals(sub, L"SET")) {
+            // SET + N*(raw, fov) pairs. Need at least two pairs (4 numeric params).
+            const size_t n_nums = ctx.parameters.size() - 1;
+            if (n_nums < 4 || (n_nums % 2) != 0)
+                return L"400 TRACKING ERROR Expected: ZOOM_LUT SET raw0 fov0 raw1 fov1 [..]\r\n";
+            std::vector<zoom_entry> lut;
+            lut.reserve(n_nums / 2);
+            for (size_t i = 1; i + 1 < ctx.parameters.size(); i += 2) {
+                double raw = std::stod(ctx.parameters.at(i));
+                double fov = std::stod(ctx.parameters.at(i + 1));
+                if (raw < 0.0 || raw > 65535.0)
+                    return L"400 TRACKING ERROR ZOOM_LUT raw must be 0..65535\r\n";
+                if (fov <= 0.0 || fov >= 180.0)
+                    return L"400 TRACKING ERROR ZOOM_LUT fov must be between 0 and 180 degrees\r\n";
+                zoom_entry e;
+                e.raw_value = static_cast<uint16_t>(raw + 0.5);
+                e.fov_rad   = fov * DEG2RAD_CMD;
+                lut.push_back(e);
+            }
+            tracker_registry::instance().update_zoom_lut(
+                ctx.channel_index, ctx.layer_index(), std::move(lut));
+            return L"202 TRACKING OK\r\n";
+        }
+        return L"400 TRACKING ERROR Expected: ZOOM_LUT SET|CLEAR\r\n";
+    } catch (const std::exception& e) {
+        return L"400 TRACKING ERROR " + caspar::u16(e.what()) + L"\r\n";
+    }
+}
+
+
 //
 // Controls how physical camera translation (in millimetres, from the tracking
 // protocol) is mapped to CasparCG NDC units:
@@ -869,6 +938,7 @@ void register_amcp_commands(
     repo->register_channel_command(L"Tracking Commands", L"TRACKING SCALE",       tracking_scale_command,       3);
     repo->register_channel_command(L"Tracking Commands", L"TRACKING ZERO",        tracking_zero_command,        0);
     repo->register_channel_command(L"Tracking Commands", L"TRACKING DEFAULT_FOV", tracking_default_fov_command, 1);
+    repo->register_channel_command(L"Tracking Commands", L"TRACKING ZOOM_LUT",      tracking_zoom_lut_command,       0);
     repo->register_channel_command(L"Tracking Commands", L"TRACKING POSITION_SCALE", tracking_position_scale_command, 1);
     repo->register_channel_command(L"Tracking Commands", L"TRACKING DELAY",          tracking_delay_command,          0);
     repo->register_channel_command(L"Tracking Commands", L"TRACKING GENLOCK",        tracking_genlock_command,        0);
