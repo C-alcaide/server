@@ -23,6 +23,7 @@
 #include "../util/display_enum.h"
 #include "../util/nvapi_helpers.h"
 #include "../util/output_window.h"
+#include "../util/present_barrier.h"
 #include "../util/presentation.h"
 #include "../util/startup_gate.h"
 
@@ -54,6 +55,7 @@
 #endif
 
 #include <atomic>
+#include <chrono>
 #include <limits>
 #include <mutex>
 #include <thread>
@@ -888,6 +890,18 @@ class vulkan_output_consumer_impl
             set_hdr_metadata(vk_device, swapchain_->swapchain(), config_.gamut, max_nits);
         }
 
+        // ─── Phase-aligned pacing (MAILBOX mode) ────────────────────────────
+        // In MAILBOX mode, the swapchain doesn't block — we pace ourselves to
+        // avoid burning CPU/GPU. FIFO mode provides natural pacing via fence wait.
+        use_pacer_ = (present_mode == vk::PresentModeKHR::eMailbox);
+        frame_interval_ns_ = static_cast<int64_t>(1000000000.0 / format_desc_.fps);
+
+        // ─── Software present barrier (sync groups) ─────────────────────────
+        if (config_.sync_group > 0) {
+            barrier_token_ = present_barrier::instance().join(config_.sync_group);
+            CASPAR_LOG(info) << print() << L" Joined present barrier sync_group=" << config_.sync_group;
+        }
+
         // ─── NvAPI post-swapchain automation ────────────────────────────────
         setup_nvapi();
 
@@ -1088,6 +1102,29 @@ class vulkan_output_consumer_impl
             std::this_thread::sleep_for(sub_frame_delay);
         }
 
+        // ─── Phase-aligned pacing (MAILBOX mode) ────────────────────────────
+        // Sleep until our target presentation time to maintain constant phase
+        // across all outputs. Without this, MAILBOX mode burns CPU/GPU and
+        // outputs drift in phase relative to each other.
+        if (use_pacer_) {
+            auto now_ns = std::chrono::steady_clock::now().time_since_epoch().count();
+            if (pacer_epoch_ns_ == 0)
+                pacer_epoch_ns_ = now_ns; // First frame sets epoch
+
+            int64_t target_ns = pacer_epoch_ns_ + static_cast<int64_t>(frames_presented_ + 1) * frame_interval_ns_;
+            int64_t sleep_ns  = target_ns - now_ns;
+            if (sleep_ns > 0 && sleep_ns < frame_interval_ns_ * 2) {
+                std::this_thread::sleep_for(std::chrono::nanoseconds(sleep_ns));
+            }
+        }
+
+        // ─── Software present barrier (sync group frame-lock) ───────────────
+        // All consumers in the same sync_group wait here until all have a frame
+        // ready, then release together for synchronized presentation.
+        if (barrier_token_) {
+            present_barrier::instance().wait(config_.sync_group);
+        }
+
         // Get the Vulkan texture from the composited frame
         auto src = std::dynamic_pointer_cast<accelerator::vulkan::texture>(frame.texture());
         if (!src) {
@@ -1188,6 +1225,7 @@ class vulkan_output_consumer_impl
         graph_->set_value("frame-time", frame_timer.elapsed() * format_desc_.fps * 0.5);
         graph_->set_value("tick-time", tick_timer_.elapsed() * format_desc_.fps * 0.5);
         tick_timer_.restart();
+        frames_presented_++;
     }
 
     configuration                                config_;
@@ -1212,6 +1250,15 @@ class vulkan_output_consumer_impl
 
     // VBlank fence (KHR_display tier only — null otherwise)
     vk::Fence vblank_fence_;
+
+    // Phase-aligned pacing (MAILBOX mode)
+    int64_t pacer_epoch_ns_     = 0;  // Timestamp of first frame (0 = not set)
+    int64_t frame_interval_ns_  = 0;  // Frame period in nanoseconds
+    uint64_t frames_presented_  = 0;  // Total frames presented (used for pacing)
+    bool     use_pacer_         = false; // True if MAILBOX present mode active
+
+    // Software present barrier (sync group frame-lock)
+    std::shared_ptr<present_barrier::token> barrier_token_;
 
     spl::shared_ptr<diagnostics::graph>            graph_ = spl::make_shared<diagnostics::graph>();
     caspar::timer                                  tick_timer_;

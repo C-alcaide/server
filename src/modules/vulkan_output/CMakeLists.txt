@@ -44,6 +44,7 @@ set(SOURCES
 	util/output_device.h
 	util/output_window.cpp
 	util/output_window.h
+	util/present_barrier.h
 	util/presentation.cpp
 	util/presentation.h
 	util/startup_gate.h
