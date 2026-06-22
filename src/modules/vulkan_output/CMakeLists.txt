@@ -92,3 +92,17 @@ if (MSVC)
 		message(STATUS "NvAPI not found — building without Quadro Sync / EDID emulation / hardware HDR.")
 	endif ()
 endif ()
+
+# Optional CUDA support (P2P peer copy for NVLink cross-GPU transfer)
+find_package(CUDAToolkit QUIET)
+if (CUDAToolkit_FOUND)
+	message(STATUS "CUDA Toolkit found (${CUDAToolkit_VERSION}) — enabling CUDA P2P transfer.")
+	target_link_libraries(vulkan_output PRIVATE CUDA::cuda_driver CUDA::cudart_static)
+	target_compile_definitions(vulkan_output PRIVATE CASPAR_CUDA_P2P_ENABLED=1)
+	target_sources(vulkan_output PRIVATE
+		util/cuda_peer_transfer.cpp
+		util/cuda_peer_transfer.h
+	)
+else ()
+	message(STATUS "CUDA Toolkit not found — building without NVLink P2P transfer (host staging fallback).")
+endif ()

@@ -32,7 +32,8 @@ namespace caspar { namespace vulkan_output {
 enum class transfer_mode
 {
     same_device,      // Source and dest on same VkDevice — zero-copy, use image directly
-    external_memory,  // Cross-GPU via VK_KHR_external_memory (NVLink-accelerated when available)
+    cuda_peer,        // Cross-GPU via CUDA P2P DMA (NVLink when available, fastest)
+    external_memory,  // Cross-GPU via VK_KHR_external_memory (driver-managed DMA)
     host_staging,     // Cross-GPU fallback: download to host, upload to dest device
 };
 
@@ -42,6 +43,8 @@ enum class transfer_mode
 // this is a no-op passthrough — the source VkImage is used directly.
 //
 // When devices differ, this class manages the transfer:
+// - CUDA peer: fastest path — direct GPU-to-GPU DMA via dedicated copy engine.
+//   Uses NVLink when available (900+ GB/s) or PCIe P2P.
 // - External memory: exports the source image's memory as an OS handle,
 //   imports it on the output device. The GPU driver routes the DMA over
 //   NVLink when the GPUs are NVLink-connected, otherwise over PCIe.
@@ -95,6 +98,7 @@ class frame_transfer
     void probe_transfer_mode();
     void create_external_memory_path();
     void create_host_staging_path();
+    void try_create_cuda_peer_path();
 
     vk::Device         src_device_;
     vk::PhysicalDevice src_physical_;
@@ -105,6 +109,9 @@ class frame_transfer
     uint32_t           height_;
     vk::Format         format_;
     transfer_mode      mode_ = transfer_mode::same_device;
+
+    // CUDA P2P path (owned pointer to avoid exposing CUDA headers)
+    std::unique_ptr<class cuda_peer_transfer_wrapper> cuda_peer_;
 
     // External memory path
     vk::Image                   dst_image_      = nullptr;

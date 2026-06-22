@@ -20,12 +20,24 @@
 #include "frame_transfer.h"
 
 #include "platform_handles.h"
+#ifdef CASPAR_CUDA_P2P_ENABLED
+#include "cuda_peer_transfer.h"
+#endif
 
 #include <common/log.h>
 
 #include <cstring>
 
 namespace caspar { namespace vulkan_output {
+
+// Wrapper to avoid exposing cuda_peer_transfer in the header
+class cuda_peer_transfer_wrapper
+{
+  public:
+#ifdef CASPAR_CUDA_P2P_ENABLED
+    std::unique_ptr<cuda_peer_transfer> impl;
+#endif
+};
 
 // ─── LUID comparison ────────────────────────────────────────────────────────
 
@@ -78,7 +90,13 @@ frame_transfer::frame_transfer(vk::Device         src_device,
 
     probe_transfer_mode();
 
-    if (mode_ == transfer_mode::external_memory) {
+    if (mode_ == transfer_mode::cuda_peer) {
+        // Already initialized in probe_transfer_mode → try_create_cuda_peer_path
+        CASPAR_LOG(info) << L"[frame_transfer] Cross-GPU via CUDA P2P"
+                         << (cuda_peer_ && cuda_peer_->impl && cuda_peer_->impl->is_nvlink()
+                                 ? L" (NVLink — direct DMA)."
+                                 : L" (PCIe DMA).");
+    } else if (mode_ == transfer_mode::external_memory) {
         create_external_memory_path();
         CASPAR_LOG(info) << L"[frame_transfer] Cross-GPU via external memory (NVLink-accelerated if connected).";
     } else {
@@ -91,6 +109,11 @@ frame_transfer::~frame_transfer()
 {
     if (mode_ == transfer_mode::same_device)
         return;
+
+    if (mode_ == transfer_mode::cuda_peer) {
+        cuda_peer_.reset(); // cuda_peer_transfer handles its own cleanup
+        return;
+    }
 
     if (src_fence_)
         src_device_.destroyFence(src_fence_);
@@ -129,6 +152,12 @@ vk::Image frame_transfer::transfer(vk::Image         src_image,
 {
     if (mode_ == transfer_mode::same_device)
         return src_image;
+
+#ifdef CASPAR_CUDA_P2P_ENABLED
+    if (mode_ == transfer_mode::cuda_peer && cuda_peer_ && cuda_peer_->impl) {
+        return cuda_peer_->impl->transfer(src_image, src_cmd, src_queue, dst_cmd, dst_queue);
+    }
+#endif
 
     if (mode_ == transfer_mode::external_memory) {
         // The imported image shares memory with the source — just return it.
@@ -218,6 +247,17 @@ vk::Image frame_transfer::transfer(vk::Image         src_image,
 
 void frame_transfer::probe_transfer_mode()
 {
+    // Priority: cuda_peer > external_memory > host_staging
+
+#ifdef CASPAR_CUDA_P2P_ENABLED
+    // Try CUDA P2P first (fastest: uses dedicated GPU copy engine, NVLink when available)
+    if (cuda_peer_transfer::is_available(src_physical_, dst_physical_)) {
+        try_create_cuda_peer_path();
+        if (mode_ == transfer_mode::cuda_peer)
+            return;
+    }
+#endif
+
     // Check if dst device supports importing external memory from src device
     auto dst_ext_props = dst_physical_.enumerateDeviceExtensionProperties();
 
@@ -239,6 +279,25 @@ void frame_transfer::probe_transfer_mode()
         mode_ = transfer_mode::external_memory;
     else
         mode_ = transfer_mode::host_staging;
+}
+
+// ─── Private: CUDA P2P path ─────────────────────────────────────────────────
+
+void frame_transfer::try_create_cuda_peer_path()
+{
+#ifdef CASPAR_CUDA_P2P_ENABLED
+    try {
+        cuda_peer_ = std::make_unique<cuda_peer_transfer_wrapper>();
+        cuda_peer_->impl = std::make_unique<cuda_peer_transfer>(
+            src_device_, src_physical_, dst_device_, dst_physical_, width_, height_, format_);
+        mode_ = transfer_mode::cuda_peer;
+        dst_image_ = cuda_peer_->impl->dst_image();
+    } catch (const std::exception& e) {
+        CASPAR_LOG(warning) << L"[frame_transfer] CUDA P2P init failed: " << e.what()
+                            << L" — will try other paths.";
+        cuda_peer_.reset();
+    }
+#endif
 }
 
 // ─── Private: External memory path ──────────────────────────────────────────

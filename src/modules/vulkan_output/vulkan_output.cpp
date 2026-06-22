@@ -121,7 +121,11 @@ void register_vulkan_requirements(vkb::PhysicalDevice& pd)
 #ifdef _WIN32
     pd.enable_extension_if_present("VK_EXT_full_screen_exclusive");
     pd.enable_extension_if_present("VK_KHR_win32_surface");
+    pd.enable_extension_if_present("VK_KHR_external_memory_win32");
+#else
+    pd.enable_extension_if_present("VK_KHR_external_memory_fd");
 #endif
+    pd.enable_extension_if_present("VK_KHR_external_memory");
     pd.enable_extension_if_present("VK_KHR_display_swapchain");
 }
 #endif
