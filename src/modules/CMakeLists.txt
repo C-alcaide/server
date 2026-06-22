@@ -12,6 +12,7 @@ add_subdirectory(screen)
 
 if (ENABLE_VULKAN)
 	add_subdirectory(gpu_test)
+	add_subdirectory(vulkan_output)
 endif ()
 
 if (ENABLE_HTML)
