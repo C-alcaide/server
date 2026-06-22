@@ -20,6 +20,7 @@
 #include "vulkan_output_consumer.h"
 #include "config.h"
 #include "../util/color_convert_pipeline.h"
+#include "../util/display_control.h"
 #include "../util/display_enum.h"
 #include "../util/nvapi_helpers.h"
 #include "../util/output_device.h"
@@ -812,6 +813,12 @@ class vulkan_output_consumer_impl
                 }
             }
         }
+
+        // ─── Ensure KHR_display outputs are exported (Pro GPUs) ─────────────
+        // On professional GPUs (Quadro/RTX A-series), KHR_display outputs may
+        // not be visible until the driver is reconfigured. This auto-detects
+        // and spawns configureDriver.exe if needed.
+        ensure_vk_khr_display_exported();
 
         // Find target display
         auto displays = enumerate_displays();

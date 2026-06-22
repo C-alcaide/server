@@ -34,6 +34,8 @@ set(SOURCES
 
 	util/color_convert_pipeline.cpp
 	util/color_convert_pipeline.h
+	util/display_control.cpp
+	util/display_control.h
 	util/display_enum.cpp
 	util/display_enum.h
 	util/frame_transfer.cpp
