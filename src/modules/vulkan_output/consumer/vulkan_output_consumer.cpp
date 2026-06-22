@@ -54,6 +54,9 @@
 
 #ifdef _WIN32
 #include <vulkan/vulkan_win32.h>
+#else
+#include <csignal>
+#include <unistd.h>
 #endif
 
 #include <atomic>
@@ -1349,9 +1352,13 @@ class vulkan_output_consumer_proxy : public core::frame_consumer
     core::monitor::state state() const override
     {
         core::monitor::state s;
-        s["vulkan-output/index"]   = config_.output_index;
-        s["vulkan-output/gpu"]     = config_.gpu_index;
-        s["vulkan-output/running"] = impl_ ? impl_->is_running() : false;
+        s["vulkan-output/output"]         = config_.output_index;
+        s["vulkan-output/gpu"]            = config_.gpu_index;
+        s["vulkan-output/running"]        = impl_ ? impl_->is_running() : false;
+        s["vulkan-output/frames"]         = impl_ ? static_cast<int64_t>(impl_->get_frames_presented()) : 0LL;
+        s["vulkan-output/dropped"]        = impl_ ? static_cast<int64_t>(impl_->get_frames_dropped()) : 0LL;
+        s["vulkan-output/display-lost"]   = impl_ ? impl_->get_display_lost() : false;
+        s["vulkan-output/sync-group"]     = config_.sync_group;
         return s;
     }
 

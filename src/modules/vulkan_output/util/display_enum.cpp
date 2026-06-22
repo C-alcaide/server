@@ -21,7 +21,10 @@
 
 #include <common/log.h>
 
+#include <vulkan/vulkan.h>
+
 #include <algorithm>
+#include <cstring>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -76,19 +79,92 @@ std::vector<display_info> enumerate_displays()
     return results;
 }
 
-#else
+#else // Linux: enumerate via VK_KHR_display
 
 std::vector<display_info> enumerate_displays()
 {
-    // Linux/macOS: minimal fallback using primary display
-    display_info primary;
-    primary.gpu_index    = 0;
-    primary.output_index = 1;
-    primary.gpu_name     = L"GPU 0";
-    primary.display_name = L"Primary";
-    primary.width        = 1920;
-    primary.height       = 1080;
-    return {primary};
+    std::vector<display_info> results;
+
+    // Create temporary VkInstance with KHR_display to enumerate
+    VkApplicationInfo app_info{};
+    app_info.sType      = VK_STRUCTURE_TYPE_APPLICATION_INFO;
+    app_info.apiVersion = VK_API_VERSION_1_1;
+
+    const char* extensions[] = {VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_DISPLAY_EXTENSION_NAME};
+
+    VkInstanceCreateInfo ci{};
+    ci.sType                   = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+    ci.pApplicationInfo        = &app_info;
+    ci.enabledExtensionCount   = 2;
+    ci.ppEnabledExtensionNames = extensions;
+
+    VkInstance instance = VK_NULL_HANDLE;
+    if (vkCreateInstance(&ci, nullptr, &instance) != VK_SUCCESS) {
+        CASPAR_LOG(warning) << L"[vulkan_output] Failed to create VkInstance for display enumeration.";
+        return results;
+    }
+
+    auto vkEnumPhysDevs = reinterpret_cast<PFN_vkEnumeratePhysicalDevices>(
+        vkGetInstanceProcAddr(instance, "vkEnumeratePhysicalDevices"));
+    auto vkGetDispProps = reinterpret_cast<PFN_vkGetPhysicalDeviceDisplayPropertiesKHR>(
+        vkGetInstanceProcAddr(instance, "vkGetPhysicalDeviceDisplayPropertiesKHR"));
+    auto vkGetPhysDevProps = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties>(
+        vkGetInstanceProcAddr(instance, "vkGetPhysicalDeviceProperties"));
+
+    if (!vkEnumPhysDevs || !vkGetDispProps || !vkGetPhysDevProps) {
+        vkDestroyInstance(instance, nullptr);
+        CASPAR_LOG(warning) << L"[vulkan_output] VK_KHR_display functions not available.";
+        return results;
+    }
+
+    uint32_t dev_count = 0;
+    vkEnumPhysDevs(instance, &dev_count, nullptr);
+    std::vector<VkPhysicalDevice> devices(dev_count);
+    vkEnumPhysDevs(instance, &dev_count, devices.data());
+
+    for (uint32_t gpu_idx = 0; gpu_idx < dev_count; ++gpu_idx) {
+        VkPhysicalDeviceProperties props{};
+        vkGetPhysDevProps(devices[gpu_idx], &props);
+
+        std::wstring gpu_name(props.deviceName, props.deviceName + strlen(props.deviceName));
+
+        uint32_t display_count = 0;
+        vkGetDispProps(devices[gpu_idx], &display_count, nullptr);
+        if (display_count == 0)
+            continue;
+
+        std::vector<VkDisplayPropertiesKHR> display_props(display_count);
+        vkGetDispProps(devices[gpu_idx], &display_count, display_props.data());
+
+        for (uint32_t d = 0; d < display_count; ++d) {
+            const auto& dp = display_props[d];
+
+            display_info info;
+            info.gpu_index    = static_cast<int>(gpu_idx);
+            info.output_index = static_cast<int>(results.size()) + 1;
+            info.gpu_name     = gpu_name;
+            info.width        = dp.physicalResolution.width;
+            info.height       = dp.physicalResolution.height;
+            info.pos_x        = 0;
+            info.pos_y        = 0;
+
+            if (dp.displayName)
+                info.display_name = std::wstring(dp.displayName, dp.displayName + strlen(dp.displayName));
+            else
+                info.display_name = L"Display " + std::to_wstring(d + 1);
+
+            results.push_back(std::move(info));
+        }
+    }
+
+    vkDestroyInstance(instance, nullptr);
+
+    if (results.empty()) {
+        CASPAR_LOG(warning) << L"[vulkan_output] No VK_KHR_display outputs found. "
+                               L"Ensure displays are not managed by X11/Wayland compositor.";
+    }
+
+    return results;
 }
 
 #endif

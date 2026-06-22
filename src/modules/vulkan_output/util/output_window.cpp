@@ -122,26 +122,38 @@ struct output_window::impl
     }
 };
 
-#else
+#else // Linux: VK_KHR_display — no platform window needed
 
-// Linux/macOS stub — to be implemented with XCB/Wayland or MoltenVK
 struct output_window::impl
 {
-    int width_  = 0;
-    int height_ = 0;
+    int              width_  = 0;
+    int              height_ = 0;
+    VkDisplayKHR     display_ = VK_NULL_HANDLE;
 
     impl(const display_info& display)
         : width_(display.width)
         , height_(display.height)
+        , display_(display.vk_display)
     {
-        CASPAR_LOG(warning) << L"[vulkan_output] Platform window not implemented; output will not display.";
+        if (display_ == VK_NULL_HANDLE) {
+            CASPAR_THROW_EXCEPTION(caspar_exception()
+                << msg_info("No VK_KHR_display handle for output. "
+                            "Ensure display is not managed by X11/Wayland compositor."));
+        }
+
+        CASPAR_LOG(info) << L"[vulkan_output] Linux VK_KHR_display output: "
+                         << display.display_name << L" " << width_ << L"x" << height_;
     }
 
     ~impl() = default;
 
-    vk::SurfaceKHR create_surface(vk::Instance /*instance*/)
+    vk::SurfaceKHR create_surface(vk::Instance instance)
     {
-        CASPAR_THROW_EXCEPTION(caspar_exception() << msg_info("Vulkan output window not implemented on this platform"));
+        // Surface creation for VK_KHR_display is handled by output_device::create_display_surface().
+        // This method should not be called on Linux — the consumer uses the display surface path directly.
+        CASPAR_THROW_EXCEPTION(caspar_exception()
+            << msg_info("output_window::create_surface() should not be called on Linux. "
+                        "Use output_device::create_display_surface() directly."));
     }
 };
 

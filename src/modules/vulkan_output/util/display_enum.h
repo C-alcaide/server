@@ -19,6 +19,8 @@
 
 #pragma once
 
+#include <vulkan/vulkan.h>
+
 #include <string>
 #include <vector>
 
@@ -34,6 +36,9 @@ struct display_info
     int          height = 0;
     int          pos_x  = 0;
     int          pos_y  = 0;
+
+    // VK_KHR_display handle (Linux: always set; Windows: set for Pro tier only)
+    VkDisplayKHR vk_display = VK_NULL_HANDLE;
 };
 
 // Enumerate all active displays. Each entry contains the display geometry

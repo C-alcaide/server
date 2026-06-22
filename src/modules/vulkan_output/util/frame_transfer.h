@@ -19,15 +19,9 @@
 
 #pragma once
 
-#include <vulkan/vulkan.hpp>
+#include "platform_handles.h"
 
-#ifdef _WIN32
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
-#include <vulkan/vulkan_win32.h>
-#endif
+#include <vulkan/vulkan.hpp>
 
 #include <cstdint>
 #include <memory>
@@ -113,11 +107,9 @@ class frame_transfer
     transfer_mode      mode_ = transfer_mode::same_device;
 
     // External memory path
-    vk::Image          dst_image_      = nullptr;
-    vk::DeviceMemory   dst_memory_     = nullptr;
-#ifdef _WIN32
-    HANDLE             shared_handle_  = nullptr;
-#endif
+    vk::Image                   dst_image_      = nullptr;
+    vk::DeviceMemory            dst_memory_     = nullptr;
+    platform::native_handle_t   shared_handle_  = platform::kInvalidHandle;
 
     // Host staging path
     vk::Buffer       src_staging_buffer_ = nullptr;

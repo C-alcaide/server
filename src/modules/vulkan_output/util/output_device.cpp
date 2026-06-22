@@ -19,6 +19,8 @@
 
 #include "output_device.h"
 
+#include "platform_handles.h"
+
 #include <common/except.h>
 #include <common/log.h>
 
@@ -343,9 +345,9 @@ void output_device::create_device_()
 
     std::vector<const char*> optional = {
         VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME,
+        platform::kExtMemExtName,
+        platform::kExtSemExtName,
 #ifdef _WIN32
-        VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME,
-        VK_KHR_EXTERNAL_SEMAPHORE_WIN32_EXTENSION_NAME,
         VK_EXT_FULL_SCREEN_EXCLUSIVE_EXTENSION_NAME,
 #endif
         VK_KHR_EXTERNAL_SEMAPHORE_EXTENSION_NAME,

@@ -19,6 +19,8 @@
 
 #include "frame_transfer.h"
 
+#include "platform_handles.h"
+
 #include <common/log.h>
 
 #include <cstring>
@@ -100,10 +102,7 @@ frame_transfer::~frame_transfer()
             dst_device_.destroyImage(dst_image_);
         if (dst_memory_)
             dst_device_.freeMemory(dst_memory_);
-#ifdef _WIN32
-        if (shared_handle_)
-            CloseHandle(shared_handle_);
-#endif
+        platform::close_handle(shared_handle_);
     } else {
         if (src_staging_buffer_)
             src_device_.destroyBuffer(src_staging_buffer_);
@@ -224,26 +223,16 @@ void frame_transfer::probe_transfer_mode()
 
     bool has_external_memory = false;
     for (const auto& ext : dst_ext_props) {
-#ifdef _WIN32
-        if (std::string(ext.extensionName.data()) == VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME)
+        if (std::string(ext.extensionName.data()) == platform::kExtMemExtName)
             has_external_memory = true;
-#else
-        if (std::string(ext.extensionName.data()) == "VK_KHR_external_memory_fd")
-            has_external_memory = true;
-#endif
     }
 
     // Also need the src device to support exporting
     auto src_ext_props = src_physical_.enumerateDeviceExtensionProperties();
     bool src_can_export = false;
     for (const auto& ext : src_ext_props) {
-#ifdef _WIN32
-        if (std::string(ext.extensionName.data()) == VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME)
+        if (std::string(ext.extensionName.data()) == platform::kExtMemExtName)
             src_can_export = true;
-#else
-        if (std::string(ext.extensionName.data()) == "VK_KHR_external_memory_fd")
-            src_can_export = true;
-#endif
     }
 
     if (has_external_memory && src_can_export)

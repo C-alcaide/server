@@ -46,6 +46,7 @@ set(SOURCES
 	util/output_device.h
 	util/output_window.cpp
 	util/output_window.h
+	util/platform_handles.h
 	util/present_barrier.h
 	util/presentation.cpp
 	util/presentation.h
@@ -71,6 +72,10 @@ target_compile_definitions(vulkan_output PUBLIC VULKAN_HPP_DISPATCH_LOADER_DYNAM
 
 if (MSVC)
 	target_link_libraries(vulkan_output PRIVATE dxgi.lib)
+else ()
+	# Linux: link Vulkan loader for vkGetInstanceProcAddr etc.
+	find_package(Vulkan REQUIRED)
+	target_link_libraries(vulkan_output PRIVATE Vulkan::Vulkan)
 endif ()
 
 # Optional NvAPI support (Quadro Sync, EDID emulation, hardware HDR)
