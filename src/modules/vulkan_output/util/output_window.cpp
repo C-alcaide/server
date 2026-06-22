@@ -25,9 +25,12 @@
 #ifdef _WIN32
 #include <vulkan/vulkan_win32.h>
 #include <windows.h>
+#include <dwmapi.h>
+#pragma comment(lib, "dwmapi.lib")
 #endif
 
 #include <atomic>
+#include <thread>
 
 namespace caspar { namespace vulkan_output {
 
@@ -37,10 +40,63 @@ static const wchar_t* const kWindowClassName = L"CasparCG_VulkanOutput";
 
 static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
 {
-    if (msg == WM_CLOSE)
-        return 0; // Prevent user closing the output window
-    if (msg == WM_ERASEBKGND)
-        return 1; // Prevent flicker
+    switch (msg) {
+        case WM_CLOSE:
+            return 0; // Block close
+
+        case WM_SYSCOMMAND:
+            // Block minimize, restore, close via system menu
+            switch (wparam & 0xFFF0) {
+                case SC_CLOSE:
+                case SC_MINIMIZE:
+                case SC_RESTORE:
+                    return 0;
+            }
+            break;
+
+        case WM_MOUSEACTIVATE:
+            return MA_NOACTIVATEANDEAT; // Don't steal focus on click
+
+        case WM_SETCURSOR:
+            SetCursor(nullptr); // Hide cursor (per-message, reliable)
+            return TRUE;
+
+        case WM_WINDOWPOSCHANGING: {
+            // Prevent move, resize, z-order change, hide
+            auto* pos = reinterpret_cast<WINDOWPOS*>(lparam);
+            pos->flags |= SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER;
+            pos->flags &= ~SWP_HIDEWINDOW;
+            pos->hwndInsertAfter = HWND_TOPMOST;
+            return 0;
+        }
+
+        case WM_ACTIVATE:
+            // Re-assert TOPMOST when focus returns
+            SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            break;
+
+        case WM_SIZE:
+            if (wparam == SIZE_MINIMIZED)
+                return 0; // Block minimize
+            break;
+
+        case WM_ERASEBKGND: {
+            HDC hdc = reinterpret_cast<HDC>(wparam);
+            RECT rc;
+            GetClientRect(hwnd, &rc);
+            FillRect(hdc, &rc, static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
+            return 1;
+        }
+
+        case WM_PAINT: {
+            PAINTSTRUCT ps;
+            HDC hdc = BeginPaint(hwnd, &ps);
+            FillRect(hdc, &ps.rcPaint, static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
+            EndPaint(hwnd, &ps);
+            return 0;
+        }
+    }
     return DefWindowProcW(hwnd, msg, wparam, lparam);
 }
 
@@ -50,10 +106,10 @@ static void register_window_class()
     std::call_once(flag, [] {
         WNDCLASSEXW wc{};
         wc.cbSize        = sizeof(wc);
-        wc.style         = CS_OWNDC;
+        wc.style         = CS_HREDRAW | CS_VREDRAW;
         wc.lpfnWndProc   = wnd_proc;
         wc.hInstance     = GetModuleHandleW(nullptr);
-        wc.hCursor       = LoadCursorW(nullptr, IDC_ARROW);
+        wc.hCursor       = nullptr; // No cursor
         wc.hbrBackground = static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
         wc.lpszClassName = kWindowClassName;
         RegisterClassExW(&wc);
@@ -62,44 +118,104 @@ static void register_window_class()
 
 struct output_window::impl
 {
-    HWND             hwnd_   = nullptr;
-    int              width_  = 0;
-    int              height_ = 0;
+    HWND              hwnd_   = nullptr;
+    int               width_  = 0;
+    int               height_ = 0;
     std::atomic<bool> closed_{false};
+    std::thread       msg_thread_;
 
     impl(const display_info& display)
+        : width_(display.width)
+        , height_(display.height)
     {
         register_window_class();
 
-        width_  = display.width;
-        height_ = display.height;
+        // Create window on a dedicated message pump thread for responsiveness.
+        std::atomic<bool> ready{false};
+        msg_thread_ = std::thread([this, &display, &ready] {
+            // Per-monitor DPI awareness (thread-level, loaded dynamically)
+            using SetDpiCtxFn = DPI_AWARENESS_CONTEXT(WINAPI*)(DPI_AWARENESS_CONTEXT);
+            auto set_dpi = reinterpret_cast<SetDpiCtxFn>(
+                GetProcAddress(GetModuleHandleW(L"user32.dll"), "SetThreadDpiAwarenessContext"));
+            DPI_AWARENESS_CONTEXT prev_ctx = nullptr;
+            if (set_dpi)
+                prev_ctx = set_dpi(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
-        // WS_POPUP = no title bar, no border. Position exactly on target display.
-        hwnd_ = CreateWindowExW(WS_EX_APPWINDOW | WS_EX_TOPMOST,
-                                kWindowClassName,
-                                L"CasparCG Vulkan Output",
-                                WS_POPUP | WS_VISIBLE,
-                                display.pos_x,
-                                display.pos_y,
-                                width_,
-                                height_,
-                                nullptr,
-                                nullptr,
-                                GetModuleHandleW(nullptr),
-                                nullptr);
+            // WS_EX_TOOLWINDOW = hidden from taskbar and Alt+Tab
+            hwnd_ = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+                                    kWindowClassName,
+                                    L"CasparCG Vulkan Output",
+                                    WS_POPUP | WS_VISIBLE,
+                                    display.pos_x,
+                                    display.pos_y,
+                                    width_,
+                                    height_,
+                                    nullptr,
+                                    nullptr,
+                                    GetModuleHandleW(nullptr),
+                                    nullptr);
+
+            if (!hwnd_) {
+                ready = true;
+                return;
+            }
+
+            // DWM protection: prevent Aero Peek / Show Desktop from hiding output
+            BOOL exclude = TRUE;
+            DwmSetWindowAttribute(hwnd_, DWMWA_EXCLUDED_FROM_PEEK, &exclude, sizeof(exclude));
+            DwmSetWindowAttribute(hwnd_, DWMWA_DISALLOW_PEEK, &exclude, sizeof(exclude));
+
+            // Bring to foreground (attach to foreground thread for permission)
+            DWORD fg_thread = GetWindowThreadProcessId(GetForegroundWindow(), nullptr);
+            DWORD our_thread = GetCurrentThreadId();
+            if (fg_thread != our_thread)
+                AttachThreadInput(our_thread, fg_thread, TRUE);
+            SetForegroundWindow(hwnd_);
+            BringWindowToTop(hwnd_);
+            if (fg_thread != our_thread)
+                AttachThreadInput(our_thread, fg_thread, FALSE);
+
+            ready = true;
+
+            // Message pump — keeps window responsive
+            MSG msg;
+            while (!closed_) {
+                DWORD result = MsgWaitForMultipleObjects(0, nullptr, FALSE, 100, QS_ALLINPUT);
+                if (result == WAIT_OBJECT_0) {
+                    while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+                        if (msg.message == WM_QUIT) {
+                            closed_ = true;
+                            break;
+                        }
+                        TranslateMessage(&msg);
+                        DispatchMessageW(&msg);
+                    }
+                }
+            }
+
+            if (set_dpi && prev_ctx)
+                set_dpi(prev_ctx);
+        });
+
+        // Wait for window creation
+        while (!ready)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
 
         if (!hwnd_)
             CASPAR_THROW_EXCEPTION(caspar_exception() << msg_info("Failed to create output window"));
 
-        // Hide cursor on the output window
-        ShowCursor(FALSE);
-
-        CASPAR_LOG(info) << L"[vulkan_output] Created window on " << display.display_name << L" at ("
+        CASPAR_LOG(info) << L"[vulkan_output] Created FSE window on " << display.display_name << L" at ("
                          << display.pos_x << L"," << display.pos_y << L") " << width_ << L"x" << height_;
     }
 
     ~impl()
     {
+        closed_ = true;
+        if (hwnd_) {
+            PostMessage(hwnd_, WM_QUIT, 0, 0);
+        }
+        if (msg_thread_.joinable())
+            msg_thread_.join();
         if (hwnd_) {
             DestroyWindow(hwnd_);
             hwnd_ = nullptr;
