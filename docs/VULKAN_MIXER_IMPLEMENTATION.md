@@ -14,6 +14,12 @@
 
 ## 1. Architecture Overview
 
+```mermaid
+flowchart LR
+    ING["Ingest (GPU 0)<br/>FFmpeg / CUDA decode · cuda_vk_texture"] --> COMP["Composition (GPU 0)<br/>VK mixer · dynamic rendering local read · descriptor indexing"]
+    COMP --> OUT["Readback / consumer (GPU 0 or 1)<br/>external memory + timeline semaphore export"]
+```
+
 The Vulkan mixer replaces the OpenGL image mixer as an alternative GPU
 compositing backend. It is selected at channel startup via the
 `<accelerator>vulkan</accelerator>` configuration element. The system is

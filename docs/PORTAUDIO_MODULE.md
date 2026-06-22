@@ -30,6 +30,18 @@ src/modules/portaudio/
 
 ## Architecture
 
+```mermaid
+flowchart LR
+    subgraph OUT["Consumer (output)"]
+      TICK["Channel tick → send()"] --> RB1["SPSC ring buffer"]
+      RB1 --> PACB["PA callback"] --> DAC["DAC (master clock)"]
+    end
+    subgraph IN["Producer (input)"]
+      ADC["Hardware callback<br/>stream_callback()"] --> RB2["SPSC ring buffer"]
+      RB2 --> RX["receive_impl()<br/>(+ optional delay ring)"] --> FRM["1×1 pixel + audio frame"]
+    end
+```
+
 ### Consumer (Audio Output)
 
 The consumer bridges CasparCG's push model (one audio buffer per video frame) with PortAudio's pull model (hardware callback requests samples at its own rate).

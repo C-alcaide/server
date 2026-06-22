@@ -639,6 +639,201 @@ def edge_blend():
     _save(fig, "edge_blend.png")
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 11. Blur types (GPU image effects)
+# ─────────────────────────────────────────────────────────────────────────────
+def blur_types():
+    fig, ax = _new((11, 6))
+    _text(ax, 50, 96, "Blur types (GPU image effects)", color=TITLE, size=13,
+          ha="center", weight="bold")
+
+    cells = [
+        (8, 50, "gaussian", "soft radial falloff"),
+        (38, 50, "box", "uniform block average"),
+        (68, 50, "directional", "smear along an angle"),
+        (8, 8, "zoom", "radial from a centre"),
+        (38, 8, "tilt-shift", "sharp band, soft above/below"),
+        (68, 8, "lens (bokeh)", "hexagonal highlight discs"),
+    ]
+    cw, ch = 26, 34
+    for x, y, name, sub in cells:
+        _panel(ax, x, y, cw, ch, fc="#13233b", ec=BORDER_SUBTLE)
+        cx, cy = x + cw / 2, y + ch / 2 + 3
+        if name == "gaussian":
+            for r, a in [(9, 0.10), (7, 0.16), (5, 0.24), (3, 0.36), (1.4, 0.6)]:
+                ax.add_patch(Circle((cx, cy), r, facecolor=ACCENT_HOVER, alpha=a,
+                                    edgecolor="none", zorder=4))
+        elif name == "box":
+            for i in range(4):
+                for j in range(4):
+                    ax.add_patch(Rectangle((cx - 8 + i * 4, cy - 8 + j * 4), 3.6, 3.6,
+                                           facecolor=ACCENT_HOVER, alpha=0.18 + 0.04 * ((i + j) % 3),
+                                           edgecolor="none", zorder=4))
+        elif name == "directional":
+            for k in range(-3, 4):
+                off = k * 1.8
+                ax.plot([cx - 9, cx + 9], [cy + off, cy + off], color=ACCENT_HOVER,
+                        alpha=0.5 - abs(k) * 0.05, lw=2.2, zorder=4, solid_capstyle="round")
+            ax.add_patch(FancyArrowPatch((cx - 9, cy - 11), (cx + 9, cy - 11), arrowstyle="-|>",
+                                        mutation_scale=10, color=MUTED, lw=1.2, zorder=5))
+        elif name == "zoom":
+            for ang in range(0, 360, 30):
+                a = np.deg2rad(ang)
+                ax.plot([cx + 2 * np.cos(a), cx + 10 * np.cos(a)],
+                        [cy + 2 * np.sin(a), cy + 10 * np.sin(a)], color=ACCENT_HOVER,
+                        alpha=0.55, lw=2.0, zorder=4, solid_capstyle="round")
+            ax.add_patch(Circle((cx, cy), 1.6, facecolor=TITLE, edgecolor="none", zorder=5))
+        elif name == "tilt-shift":
+            ax.add_patch(Rectangle((cx - 10, cy - 9), 20, 18, facecolor=ACCENT_HOVER,
+                                   alpha=0.10, edgecolor="none", zorder=3))
+            ax.add_patch(Rectangle((cx - 10, cy - 2), 20, 4, facecolor=TITLE, alpha=0.5,
+                                   edgecolor="none", zorder=5))
+            for off in (6, 8, -6, -8):
+                ax.plot([cx - 10, cx + 10], [cy + off, cy + off], color=ACCENT_HOVER,
+                        alpha=0.4, lw=1.6, zorder=4)
+        elif name.startswith("lens"):
+            hexes = [(cx - 4, cy + 3, 4.2), (cx + 5, cy + 5, 3.2), (cx + 2, cy - 4, 5.0)]
+            for hx, hy, hr in hexes:
+                ang = np.deg2rad(np.arange(0, 360, 60) + 15)
+                pts = np.column_stack([hx + hr * np.cos(ang), hy + hr * np.sin(ang)])
+                ax.add_patch(Polygon(pts, closed=True, facecolor=ACCENT_HOVER, alpha=0.32,
+                                     edgecolor="#cfe0ff", lw=1.0, zorder=4))
+        _text(ax, cx, y + 6.5, name, color="#cfe0ff", size=10, ha="center", weight="bold")
+        _text(ax, cx, y + 3.4, sub, color=MUTED, size=7.8, ha="center", style="italic")
+
+    _text(ax, 50, 2.5, "All run in the fragment shader before colour grading; radius sets the "
+          "sample spread.", color=MUTED, size=8.5, ha="center", style="italic")
+    _save(fig, "blur_types.png")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 12. MIXER SHAPE — SDF shapes and gradient fills
+# ─────────────────────────────────────────────────────────────────────────────
+def _grad_image(kind, n=200):
+    yy, xx = np.mgrid[0:n, 0:n] / (n - 1.0)
+    if kind == "linear":
+        return xx
+    if kind == "radial":
+        return np.clip(np.hypot(xx - 0.5, yy - 0.5) / 0.5, 0, 1)
+    if kind == "conic":
+        return (np.arctan2(yy - 0.5, xx - 0.5) + np.pi) / (2 * np.pi)
+    return np.ones((n, n))
+
+
+def _shape_patch(shp, bx, by, bw, bh, *, fc, ec, lw=1.6, z=5):
+    if shp == "RECT":
+        return Rectangle((bx, by), bw, bh, facecolor=fc, edgecolor=ec, lw=lw, zorder=z)
+    if shp == "ROUNDED_RECT":
+        return FancyBboxPatch((bx + 2, by + 2), bw - 4, bh - 4,
+                              boxstyle="round,pad=2,rounding_size=4",
+                              facecolor=fc, edgecolor=ec, lw=lw, zorder=z)
+    if shp == "CIRCLE":
+        return Circle((bx + bw / 2, by + bh / 2), bw / 2, facecolor=fc, edgecolor=ec, lw=lw, zorder=z)
+    if shp == "ELLIPSE":
+        from matplotlib.patches import Ellipse
+        return Ellipse((bx + bw / 2, by + bh / 2), bw, bh, facecolor=fc, edgecolor=ec, lw=lw, zorder=z)
+    return Rectangle((bx, by), bw, bh, facecolor=fc, edgecolor=ec, lw=lw, zorder=z)
+
+
+def shape_overlay():
+    fig, ax = _new_eq((11, 5))  # 110 x 50 units
+    _text(ax, 55, 47, "MIXER SHAPE — SDF shapes & gradient fills", color=TITLE,
+          size=13, ha="center", weight="bold")
+
+    cmap = mcolors.LinearSegmentedColormap.from_list("vp", ["#13233b", ACCENT_HOVER, "#cfe0ff"])
+    items = [
+        ("RECT", "SOLID"),
+        ("ROUNDED_RECT", "LINEAR"),
+        ("CIRCLE", "RADIAL"),
+        ("ELLIPSE", "CONIC"),
+    ]
+    x0 = 6
+    for shp, fill in items:
+        cx, cy = x0 + 9, 26
+        bw, bh = 18, 18
+        if shp == "ELLIPSE":
+            bh = 12
+        bx, by = cx - bw / 2, cy - bh / 2
+        if fill == "SOLID":
+            ax.add_patch(_shape_patch(shp, bx, by, bw, bh, fc=ACCENT_HOVER, ec="#cfe0ff"))
+        else:
+            gk = {"LINEAR": "linear", "RADIAL": "radial", "CONIC": "conic"}[fill]
+            im = ax.imshow(_grad_image(gk), extent=[bx, bx + bw, by, by + bh], origin="lower",
+                           cmap=cmap, zorder=4, aspect="auto")
+            clip = _shape_patch(shp, bx, by, bw, bh, fc="none", ec="#cfe0ff")
+            ax.add_patch(clip)
+            im.set_clip_path(clip)
+        _text(ax, cx, by - 3.5, shp, color="#cfe0ff", size=9, ha="center", weight="bold")
+        _text(ax, cx, by - 6.5, "FILL " + fill, color=MUTED, size=8, ha="center", style="italic")
+        x0 += 26
+
+    _text(ax, 55, 6, "Anti-aliased signed-distance shapes; per-stop RGBA gradients interpolate "
+          "all four channels.", color=MUTED, size=8.5, ha="center", style="italic")
+    _save(fig, "shape_overlay.png")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 13. 360° equirectangular projection onto a virtual sphere
+# ─────────────────────────────────────────────────────────────────────────────
+def equirect_projection():
+    fig, ax = _new((11, 5.2))
+    _text(ax, 50, 96, "360° equirectangular projection", color=TITLE, size=13,
+          ha="center", weight="bold")
+
+    # Equirect source map
+    mx, my, mw, mh = 4, 30, 34, 46
+    ax.add_patch(Rectangle((mx, my), mw, mh, facecolor="#13233b", edgecolor=LED, lw=1.4, zorder=3))
+    for i in range(1, 6):
+        ax.plot([mx + i * mw / 6] * 2, [my, my + mh], color="#1d3a5f", lw=0.7, zorder=4)
+    for j in range(1, 4):
+        ax.plot([mx, mx + mw], [my + j * mh / 4] * 2, color="#1d3a5f", lw=0.7, zorder=4)
+    ax.add_patch(Rectangle((mx + mw * 0.42, my + mh * 0.42), mw * 0.26, mh * 0.30,
+                           facecolor=ACCENT, alpha=0.30, edgecolor=ACCENT_HOVER, lw=1.6, zorder=5))
+    _text(ax, mx + mw / 2, my + mh + 3, "equirectangular source", color="#bcd4ef", size=9,
+          ha="center", weight="bold")
+    _text(ax, mx + mw / 2, my - 3, "longitude (yaw) × latitude (pitch)", color=MUTED, size=7.6,
+          ha="center")
+
+    ax.add_patch(FancyArrowPatch((40, 53), (48, 53), arrowstyle="-|>", mutation_scale=14,
+                                color=MUTED, lw=1.6, zorder=6))
+
+    # Sphere + camera frustum
+    cx, cy, R = 64, 53, 18
+    ax.add_patch(Circle((cx, cy), R, facecolor="#13233b", edgecolor=LED, lw=1.6, zorder=3))
+    for lat in (-40, 0, 40):
+        a = np.deg2rad(lat)
+        ax.plot([cx - R * np.cos(a), cx + R * np.cos(a)], [cy + R * np.sin(a)] * 2,
+                color="#1d3a5f", lw=0.7, zorder=4)
+    for lon in (-50, 0, 50):
+        a = np.deg2rad(lon)
+        yy = np.linspace(-R, R, 30)
+        ax.plot(cx + np.sin(a) * np.sqrt(np.clip(R ** 2 - yy ** 2, 0, None)), cy + yy,
+                color="#1d3a5f", lw=0.7, zorder=4)
+    ax.add_patch(Circle((cx, cy), 1.6, facecolor=SUCCESS, edgecolor="white", lw=0.8, zorder=6))
+    fa = np.deg2rad(28)
+    ax.add_patch(Polygon([(cx, cy),
+                          (cx + R * np.cos(fa), cy + R * np.sin(fa)),
+                          (cx + R * np.cos(-fa), cy + R * np.sin(-fa))],
+                         closed=True, facecolor=ACCENT, alpha=0.28, edgecolor=ACCENT_HOVER,
+                         lw=1.4, zorder=5))
+    _text(ax, cx, cy - R - 3, "virtual sphere", color="#bcd4ef", size=9, ha="center", weight="bold")
+    _text(ax, cx + 9, cy + 7, "FOV", color="#cfe0ff", size=8, ha="center")
+
+    ax.add_patch(FancyArrowPatch((84, 53), (90, 53), arrowstyle="-|>", mutation_scale=14,
+                                color=MUTED, lw=1.6, zorder=6))
+
+    # Rendered view
+    vx, vy, vw, vh = 90, 42, 8, 22
+    ax.add_patch(Rectangle((vx, vy), vw, vh, facecolor=ACCENT, alpha=0.22, edgecolor=ACCENT_HOVER,
+                           lw=1.6, zorder=5))
+    _text(ax, 88, 38, "output view\n(yaw·pitch·roll·FOV)", color=MUTED, size=7.4, ha="center")
+
+    _text(ax, 50, 12, "The 2D layer is sampled onto a sphere; the camera's yaw / pitch / roll and "
+          "FOV pick the visible window. Offset slides the sphere without rotating it.",
+          color=MUTED, size=8.2, ha="center", style="italic")
+    _save(fig, "equirect_projection.png")
+
+
 def main():
     channel_workspace()
     stage_layout()
@@ -650,6 +845,9 @@ def main():
     corner_pin()
     tracking_coords()
     edge_blend()
+    blur_types()
+    shape_overlay()
+    equirect_projection()
     print("done")
 
 

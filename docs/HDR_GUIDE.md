@@ -25,6 +25,14 @@ For per-layer color grading and ACES color management (MIXER COLORSPACE, CDL, LU
 
 ## Overview of the Pipeline
 
+```mermaid
+flowchart TB
+    SRC["Source<br/>DeckLink capture · FFmpeg · ProRes (+metadata)"] --> DESC["pixel_format_desc<br/>color_space · color_transfer"]
+    DESC --> MIX["Mixer (OGL / Vulkan)<br/>EOTF → linear → gamut matrix → auto tone-map → OETF"]
+    MIX --> GRD["Per-layer grading<br/>COLORSPACE · CDL · ..."]
+    GRD --> OUT["Consumers<br/>DeckLink v210 · FFmpeg trc · Vulkan UHDA · CUDA ProRes"]
+```
+
 ```
 ┌────────────────────────────────────────────────────────────────┐
 │  Source                                                        │

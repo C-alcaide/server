@@ -52,6 +52,17 @@ The key insight: **no CPU thread blocks waiting for GPU work**. The Vulkan rende
 
 ## VK→CUDA Timeline Semaphore Pipeline
 
+```mermaid
+flowchart TB
+    MIX["Vulkan mixer<br/>image_kernel::frame_data::submit"] --> SEM["Timeline semaphore<br/>VK_KHR_external_semaphore_win32 (Win32 HANDLE)"]
+    SEM --> TEX["core::texture<br/>render_complete_semaphore"]
+    TEX --> CONS["Consumer (cuda_vk_strategy)<br/>vulkan_output / DeckLink"]
+    CONS --> WAIT["cudaWaitExternalSemaphoresAsync"]
+    WAIT --> CVT["CUDA v210 convert"]
+    CVT --> CPY["cudaMemcpyAsync D2H<br/>(double-buffered)"]
+    CPY --> OUT["ScheduleVideoFrame / display"]
+```
+
 ### Step 1: Vulkan Creates and Signals
 
 In `image_kernel.cpp`, each `frame_data::submit()`:

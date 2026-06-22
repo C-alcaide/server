@@ -26,6 +26,15 @@ The `tracking` module enables real-time camera tracking data to drive CasparCG l
 
 ## Overview
 
+```mermaid
+flowchart LR
+    CAM["Physical camera<br/>(jib / crane / PTZ)"] --> RX["Protocol receiver<br/>FREED · OSC · VRPN · PSN · OpenTrackIO"]
+    RX --> REG["tracker_registry<br/>(camera_data)"]
+    REG --> XF["Stage transform<br/>world align · zoom to FOV"]
+    XF --> MIX["Mixer<br/>(PROJECTION inject)"]
+    MIX --> OUT["Channel output"]
+```
+
 This module receives tracking data from physical camera rigs (head trackers, optical trackers, inertial systems) and maps each packet to a specific CasparCG channel/layer. Depending on the configured mode the data drives either:
 
 - **360° mode** — the `MIXER PROJECTION` system: yaw/pitch/roll and FOV are updated each time a packet arrives, letting viewers pan inside an equirectangular video as the physical camera moves.

@@ -44,6 +44,18 @@ CasparCG VP's previz system provides:
 
 ## Architecture
 
+```mermaid
+flowchart TB
+    CLI["360 client<br/>scene tree · properties · viewport"] -->|scene_changed| AMCP["AMCP PREVIZ (TCP 5250)"]
+    AMCP --> REN["previz_renderer (OpenGL 4.5)"]
+    REN --> SCN["Scene setup (glTF / OBJ)"]
+    SCN --> BIND["Channel texture binding (zero-copy)"]
+    BIND --> CAMU["Camera update"]
+    CAMU --> PASS["Render pass<br/>emissive LED screens · diffuse geometry"]
+    PASS --> OUT["Output<br/>DeckLink · Vulkan · Spout · NDI"]
+    CAMU -.auto-projection.-> MIXP["MIXER PROJECTION"]
+```
+
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                     CasparCG 360 Client                        │

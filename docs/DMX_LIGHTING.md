@@ -36,6 +36,14 @@ and stage wash lighting.
 
 ## 1. Protocol Overview
 
+```mermaid
+flowchart LR
+    FR["Rendered frame"] --> SMP["Pixel-sampling consumer<br/>(sample region per fixture)"]
+    SMP --> DMX["DMX values<br/>RGB / RGBW / DIMMER"]
+    DMX --> NET["Art-Net UDP 6454<br/>or sACN UDP 5568 (239.255.x.x)"]
+    NET --> FIX["Lighting desk / fixtures"]
+```
+
 ### ArtNet
 
 ArtNet is a DMX-over-UDP protocol by Artistic Licence. It uses a fixed UDP

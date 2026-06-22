@@ -34,6 +34,8 @@ MIXER <channel>-<layer> BLUR <radius> [type] [angle] [center_x] [center_y] [tilt
 
 ## Supported Blur Types
 
+![Blur types — gaussian, box, directional, zoom, tilt-shift, lens](images/blur_types.png)
+
 ### `gaussian` (Default)
 Applies a standard, organic soft Gaussian falloff blur matching physical camera diffusion across a general radius vector. This is perfect for background obscuring and standard out-of-focus simulation.
 **Example (Blur layer 10 by 15 pixels softly):**

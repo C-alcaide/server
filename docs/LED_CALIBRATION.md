@@ -13,6 +13,16 @@ The LUT itself is typically solved by [OpenVPCal](https://github.com/Netflix-Sku
 (camera-based, Apache-2.0) and exported as a `.cube` 3D LUT. CasparVP only
 *applies* the LUT; it does not perform the colorimetric solve.
 
+```mermaid
+flowchart LR
+    COMP["Final composited<br/>channel output"] --> LUT["CALIBRATION LUT<br/>display-to-display .cube (33³)"]
+    LUT --> BL["strength blend (0–1)"]
+    BL --> D["DeckLink SDI"]
+    BL --> V["vulkan_output HDMI/DP"]
+    BL --> N["NDI"]
+    BL --> F["File"]
+```
+
 ## How it differs from `MIXER ... LUT3D`
 
 | | `MIXER <ch>-<layer> LUT3D` | `CALIBRATION <ch> LUT` |

@@ -14,6 +14,15 @@ This module provides three components sharing the same GPU ProRes encode/decode 
 
 ## Part 1 — GPU Encoder (Bypass Consumer)
 
+```mermaid
+flowchart TB
+    IN["DeckLink SDI input"] --> RING["Device VRAM ring"]
+    RING --> ENC["Encode thread (CUDA)<br/>k_v210_unpack → k_dct_quantise → interleave → entropy (CUB prefix sum)"]
+    ENC --> HDR["Host: frame header (icpf box)"]
+    HDR --> MUX["MovMuxer / MxfMuxer<br/>(async unbuffered write)"]
+    MUX --> FILE[".mov / .mxf"]
+```
+
 ### Overview
 
 The bypass encoder accepts raw **V210** (10-bit packed 4:2:2 YCbCr) frames directly from a Blackmagic DeckLink SDI input, runs the entire encode pipeline on the GPU, and writes conformant `.mov` or `.mxf` files to disk — bypassing the CasparCG GPU mixer entirely.

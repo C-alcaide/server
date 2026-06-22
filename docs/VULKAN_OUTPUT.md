@@ -78,6 +78,19 @@ The module includes automatic recovery for common display configuration issues:
 
 ## Architecture Overview
 
+```mermaid
+flowchart TB
+    A["1 · vulkan_output_consumer<br/>present loop · swapchain · hot-plug"] --> B["2 · vk_device_manager<br/>shared VkDevice per GPU"]
+    B --> C["3 · gpu_frame_cache (dedup transfer)"]
+    C --> D["4 · color_convert_pipeline (mixer does convert)"]
+    D --> E["5 · vulkan_device<br/>VK_KHR_display / FSE · VBlank fence"]
+    E --> F["6 · interop_context<br/>GL blit thread · GL_EXT_memory_object"]
+    F --> G["7 · shared_texture_pool<br/>triple-buffered GL↔VK zero-copy"]
+    G --> H["8 · gpu_affinity_context<br/>cross-GPU GL bridge (WGL_NV_gpu_affinity)"]
+    H --> I["9 · cuda_peer_transfer<br/>GPU→GPU async DMA"]
+    I --> J["10 · nvapi_helpers<br/>EDID · HDR · Quadro Sync II · G-Sync"]
+```
+
 The module is organized into ten layers:
 
 ```

@@ -16,6 +16,15 @@ All three share the same GPU encode/decode kernel pipeline (NVIDIA CUDA).  Consu
 
 ## CUDA_PRORES Producer (Playback)
 
+```mermaid
+flowchart LR
+    PLAY["PLAY command"] --> DEC["CUDA GPU decode<br/>(ProRes bitstream)"]
+    DEC --> INT["CUDA–GL interop<br/>(zero-copy)"]
+    INT --> COMP["Compositor layer"]
+    COMP --> OUT["Output"]
+    AUD["libavcodec audio"] -.channel cadence.-> COMP
+```
+
 The ProRes producer uses CUDA to GPU-decode ProRes frames and feeds them into the CasparCG compositor via the zero-copy CUDA-GL interop path (Windows) or a host-copy fallback (Linux / when `wglShareLists` fails).  Audio is decoded by libavcodec from the same container and delivered at the channel's native cadence.
 
 ### PLAY Command Syntax

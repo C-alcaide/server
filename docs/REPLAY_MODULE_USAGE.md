@@ -16,6 +16,15 @@ The Replay module provides high-performance recording and instant playback of vi
 
 ## 1. Technical Architecture
 
+```mermaid
+flowchart TB
+    CH["Channel"] -->|record| VMX["VMX intra-frame codec<br/>+ 32-bit PCM audio"]
+    VMX --> SEG["Segmented .mav / .idx<br/>(circular buffer)"]
+    SEG -->|play| RD["libvmx decode (BGRA)"]
+    RD --> COMP["Compositor layer"] --> OUT["Output"]
+    SEG -->|export| EXP["libvmx decode + FFmpeg<br/>libx264 yuv420p"] --> MP4[".mp4"]
+```
+
 ### Codec — libvmx
 
 The module uses [libvmx](https://github.com/openmediatransport/libvmx) (MIT license), a GPU-friendly intra-frame video codec. Every frame is independently compressed (no inter-frame dependencies), which enables:

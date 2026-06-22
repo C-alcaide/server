@@ -25,6 +25,15 @@ For virtual production features (360° projection, curved screen compensation, p
 
 ## ACES Color Management
 
+```mermaid
+flowchart LR
+    SRC["Source clip / live"] --> CS["COLORSPACE<br/>EOTF decode → gamut → tone-map → OETF"]
+    CS --> CDL["ASC CDL<br/>Slope · Offset · Power"]
+    CDL --> LUT["LUT3D (.cube)"]
+    LUT --> SEC["Saturation · Split-tone<br/>Hue curves · Qualifier"]
+    SEC --> OUT["Layer output"]
+```
+
 The color management pipeline converts between color spaces, applies HDR tone mapping, and handles camera log curves — all per-layer.
 
 ### AMCP Command

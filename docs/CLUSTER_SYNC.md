@@ -24,6 +24,15 @@ Multi-machine synchronized playout for CasparCG using IEEE 1588 PTP clock synchr
 
 ## Architecture Overview
 
+```mermaid
+flowchart TB
+    PTP["PTP multicast<br/>224.0.1.129 : 319/320"] --> MASTER["MASTER<br/>PTP master · frame clock · scheduler · relay · watchdog"]
+    MASTER -->|scheduled AMCP over TCP| A["Client A"]
+    MASTER -->|scheduled AMCP over TCP| B["Client B"]
+    PTP -.shared clock.-> A
+    PTP -.shared clock.-> B
+```
+
 The cluster module enables multiple CasparCG instances to play content in frame-accurate synchronization. One instance acts as the **master** (timing authority and command router), while the others act as **clients** (timing followers and command receivers).
 
 ```

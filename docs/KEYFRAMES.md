@@ -194,6 +194,8 @@ Each field has a **kind** that controls how it is interpolated:
 The `easing` field on each keyframe controls the curve **from** that keyframe **to**
 the next.  Names are case-insensitive.
 
+![Keyframe interpolation and easing curves](images/easing_curves.png)
+
 | Category | In | Out | InOut |
 |----------|----|-----|-------|
 | Linear | `LINEAR` | — | — |
