@@ -54,6 +54,13 @@ enum class gsync_reference
     external, // House sync
 };
 
+enum class disconnect_behavior
+{
+    hold,  // Hold last frame (silent)
+    black, // Output black
+    retry, // Periodically attempt swapchain recreation
+};
+
 struct configuration
 {
     int          gpu_index    = 0;     // Physical GPU index (reserved for multi-GPU PR)
@@ -84,6 +91,9 @@ struct configuration
     bool gsync_enabled     = false;  // Enable Quadro Sync framelock
     bool gsync_master      = false;  // Configure this output as sync master
     gsync_reference gsync_source = gsync_reference::vsync;
+
+    // Display disconnect recovery behavior
+    disconnect_behavior on_disconnect = disconnect_behavior::retry;
 };
 
 configuration parse_config(const boost::property_tree::wptree& ptree);

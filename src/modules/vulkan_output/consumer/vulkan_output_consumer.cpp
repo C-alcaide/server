@@ -24,6 +24,7 @@
 #include "../util/nvapi_helpers.h"
 #include "../util/output_window.h"
 #include "../util/presentation.h"
+#include "../util/startup_gate.h"
 
 #include <accelerator/vulkan/util/device.h>
 #include <accelerator/vulkan/util/texture.h>
@@ -54,11 +55,33 @@
 
 #include <atomic>
 #include <limits>
+#include <mutex>
 #include <thread>
 
 namespace caspar { namespace vulkan_output {
 
 namespace {
+
+// ─── TDR Watchdog ───────────────────────────────────────────────────────────
+// After a GPU reset (TDR), Vulkan calls may block indefinitely, creating zombie
+// processes. This detached thread ensures forced termination after a grace period.
+static std::once_flag tdr_watchdog_flag;
+
+void start_tdr_watchdog(int grace_seconds = 10)
+{
+    std::call_once(tdr_watchdog_flag, [grace_seconds] {
+        std::thread([grace_seconds] {
+            CASPAR_LOG(error) << L"[vulkan_output] TDR detected (VK_ERROR_DEVICE_LOST). "
+                                 L"Terminating in " << grace_seconds << L"s if shutdown does not complete.";
+            std::this_thread::sleep_for(std::chrono::seconds(grace_seconds));
+#ifdef _WIN32
+            TerminateProcess(GetCurrentProcess(), 1);
+#else
+            kill(getpid(), SIGKILL);
+#endif
+        }).detach();
+    });
+}
 
 static constexpr int MAX_FRAMES_IN_FLIGHT = 3;
 
@@ -124,11 +147,13 @@ class present_swapchain
     vk::SwapchainKHR swapchain() const { return swapchain_; }
 
     // Returns UINT32_MAX if swapchain needs recreation (shouldn't happen for FSE)
-    uint32_t acquire_next_image()
+    // Sets out_result to the acquire result for error detection.
+    uint32_t acquire_next_image(vk::Result& out_result)
     {
         auto result = device_.acquireNextImageKHR(
             swapchain_, std::numeric_limits<uint64_t>::max(), current_frame().image_available, nullptr);
 
+        out_result = result.result;
         if (result.result == vk::Result::eErrorOutOfDateKHR || result.result == vk::Result::eSuboptimalKHR)
             return std::numeric_limits<uint32_t>::max();
 
@@ -144,7 +169,8 @@ class present_swapchain
 
     // Record and submit a blit from src_image to the swapchain image at image_index.
     // src_x/src_y define the top-left crop offset; src_width/src_height the crop size.
-    void blit_and_present(VkImage  src_image,
+    // Returns the vk::Result from vkQueuePresentKHR.
+    vk::Result blit_and_present(VkImage  src_image,
                           uint32_t src_x,
                           uint32_t src_y,
                           uint32_t src_width,
@@ -254,13 +280,14 @@ class present_swapchain
         present.pSwapchains        = &swapchain_;
         present.pImageIndices      = &image_index;
         auto present_result = queue_.presentKHR(present);
-        (void)present_result;
 
         current_frame_idx_ = (current_frame_idx_ + 1) % MAX_FRAMES_IN_FLIGHT;
+        return present_result;
     }
 
     // Record and submit: blit src → intermediate, dispatch color compute, blit intermediate → swapchain.
-    void blit_via_compute_and_present(VkImage                  src_image,
+    // Returns the vk::Result from vkQueuePresentKHR.
+    vk::Result blit_via_compute_and_present(VkImage                  src_image,
                                       uint32_t                 src_x,
                                       uint32_t                 src_y,
                                       uint32_t                 src_width,
@@ -413,9 +440,44 @@ class present_swapchain
         present.pSwapchains        = &swapchain_;
         present.pImageIndices      = &image_index;
         auto present_result = queue_.presentKHR(present);
-        (void)present_result;
 
         current_frame_idx_ = (current_frame_idx_ + 1) % MAX_FRAMES_IN_FLIGHT;
+        return present_result;
+    }
+
+    // Recreate the swapchain (e.g., after display reconnect or OUT_OF_DATE).
+    // Returns false if surface is no longer valid (display disconnected).
+    bool recreate(int desired_images)
+    {
+        // Wait for all GPU work to finish
+        auto wait_result = device_.waitForFences(
+            {frames_[0].in_flight, frames_[1].in_flight, frames_[2].in_flight},
+            VK_TRUE, std::numeric_limits<uint64_t>::max());
+        if (static_cast<VkResult>(wait_result) == VK_ERROR_DEVICE_LOST)
+            return false;
+
+        // Verify surface is still valid
+        try {
+            auto caps = physical_.getSurfaceCapabilitiesKHR(surface_);
+            (void)caps;
+        } catch (const vk::SurfaceLostKHRError&) {
+            return false;
+        } catch (const vk::SystemError&) {
+            return false;
+        }
+
+        // Destroy old swapchain resources
+        for (auto& iv : image_views_)
+            device_.destroyImageView(iv);
+        image_views_.clear();
+        images_.clear();
+        device_.destroySwapchainKHR(swapchain_);
+        swapchain_ = nullptr;
+
+        // Recreate
+        create_swapchain(desired_images);
+        current_frame_idx_ = 0;
+        return true;
     }
 
   private:
@@ -830,7 +892,13 @@ class vulkan_output_consumer_impl
                              << L" eotf=" << static_cast<int>(effective_eotf);
         }
 
-        while (is_running_) {
+        // ─── Startup gate ───────────────────────────────────────────────────
+        // Signal that this consumer has finished heavy initialization.
+        // Then wait for all other consumers before entering the present loop.
+        startup_gate::instance().signal_ready();
+        startup_gate::instance().wait_all_ready();
+
+        while (is_running_ && !device_dead_) {
             tick(queue_obj);
         }
 
@@ -929,6 +997,35 @@ class vulkan_output_consumer_impl
 
     void tick(const std::shared_ptr<accelerator::vulkan::vulkan_queue>& queue_obj)
     {
+        // ─── Display disconnect state machine ───────────────────────────────
+        if (display_lost_) {
+            switch (config_.on_disconnect) {
+                case disconnect_behavior::hold:
+                    // Silently hold last frame — sleep to avoid busy spin
+                    std::this_thread::sleep_for(std::chrono::milliseconds(16));
+                    return;
+                case disconnect_behavior::black:
+                case disconnect_behavior::retry:
+                default:
+                    if (++hotplug_retry_counter_ % 50 == 0) {
+                        // Attempt swapchain recreation every ~50 ticks
+                        if (swapchain_->recreate(config_.buffer_depth)) {
+                            display_lost_ = false;
+                            hotplug_retry_counter_ = 0;
+                            CASPAR_LOG(info) << print() << L" Display reconnected — swapchain recreated.";
+                        }
+                    }
+                    if (display_lost_) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(16));
+                        return;
+                    }
+                    break;
+            }
+        }
+
+        if (device_dead_)
+            return;
+
         core::const_frame frame;
 
         while (!frame_buffer_.try_pop(frame) && is_running_) {
@@ -955,25 +1052,75 @@ class vulkan_output_consumer_impl
         uint32_t crop_h = config_.region_h > 0 ? static_cast<uint32_t>(config_.region_h)
                                                : static_cast<uint32_t>(src->height());
 
-        {
+        vk::Result present_result = vk::Result::eSuccess;
+
+        try {
             auto lock = queue_obj->scoped_lock();
 
             swapchain_->wait_fence();
 
-            uint32_t image_index = swapchain_->acquire_next_image();
+            vk::Result acquire_result{};
+            uint32_t image_index = swapchain_->acquire_next_image(acquire_result);
+
+            if (acquire_result == vk::Result::eErrorSurfaceLostKHR) {
+                display_lost_ = true;
+                CASPAR_LOG(warning) << print() << L" Surface lost — display disconnected.";
+                return;
+            }
+
             if (image_index == std::numeric_limits<uint32_t>::max()) {
-                CASPAR_LOG(warning) << print() << L" Swapchain out of date.";
+                // OUT_OF_DATE or SUBOPTIMAL — recreate swapchain
+                if (!swapchain_->recreate(config_.buffer_depth)) {
+                    display_lost_ = true;
+                    CASPAR_LOG(warning) << print() << L" Swapchain recreation failed — display lost.";
+                }
                 return;
             }
 
             if (color_pipeline_ && color_pipeline_->is_active()) {
-                swapchain_->blit_via_compute_and_present(
+                present_result = swapchain_->blit_via_compute_and_present(
                     src->id(), crop_x, crop_y, crop_w, crop_h,
                     *color_pipeline_, image_index);
             } else {
-                swapchain_->blit_and_present(
+                present_result = swapchain_->blit_and_present(
                     src->id(), crop_x, crop_y, crop_w, crop_h, image_index);
             }
+        } catch (const vk::DeviceLostError&) {
+            device_dead_ = true;
+            start_tdr_watchdog();
+            is_running_ = false;
+            return;
+        } catch (const vk::SystemError& e) {
+            if (static_cast<VkResult>(e.code().value()) == VK_ERROR_DEVICE_LOST) {
+                device_dead_ = true;
+                start_tdr_watchdog();
+                is_running_ = false;
+                return;
+            }
+            throw;
+        }
+
+        // Handle present result
+        switch (present_result) {
+            case vk::Result::eSuccess:
+            case vk::Result::eSuboptimalKHR:
+                break;
+            case vk::Result::eErrorOutOfDateKHR:
+                if (!swapchain_->recreate(config_.buffer_depth))
+                    display_lost_ = true;
+                break;
+            case vk::Result::eErrorSurfaceLostKHR:
+                display_lost_ = true;
+                CASPAR_LOG(warning) << print() << L" Surface lost during present.";
+                break;
+            case vk::Result::eErrorDeviceLost:
+                device_dead_ = true;
+                start_tdr_watchdog();
+                is_running_ = false;
+                return;
+            default:
+                // Includes eErrorFullScreenExclusiveModeLostEXT if available
+                break;
         }
 
         graph_->set_value("frame-time", frame_timer.elapsed() * format_desc_.fps * 0.5);
@@ -995,6 +1142,11 @@ class vulkan_output_consumer_impl
     uint32_t                      nvapi_display_id_          = 0;
     bool                          hw_hdr_active_             = false;
     uint32_t                      injected_edid_display_id_  = 0;
+
+    // Display disconnect / TDR recovery state
+    std::atomic<bool> display_lost_{false};
+    std::atomic<bool> device_dead_{false};
+    uint64_t          hotplug_retry_counter_ = 0;
 
     spl::shared_ptr<diagnostics::graph>            graph_ = spl::make_shared<diagnostics::graph>();
     caspar::timer                                  tick_timer_;

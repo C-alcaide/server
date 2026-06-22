@@ -46,6 +46,7 @@ set(SOURCES
 	util/output_window.h
 	util/presentation.cpp
 	util/presentation.h
+	util/startup_gate.h
 
 	vulkan_output.cpp
 	vulkan_output.h
