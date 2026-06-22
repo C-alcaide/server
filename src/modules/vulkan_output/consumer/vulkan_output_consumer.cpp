@@ -143,7 +143,10 @@ class present_swapchain
     }
 
     // Record and submit a blit from src_image to the swapchain image at image_index.
+    // src_x/src_y define the top-left crop offset; src_width/src_height the crop size.
     void blit_and_present(VkImage  src_image,
+                          uint32_t src_x,
+                          uint32_t src_y,
                           uint32_t src_width,
                           uint32_t src_height,
                           uint32_t image_index)
@@ -187,8 +190,8 @@ class present_swapchain
         // Blit (handles scaling if source != swapchain size)
         vk::ImageBlit region{};
         region.srcSubresource = vk::ImageSubresourceLayers{vk::ImageAspectFlagBits::eColor, 0, 0, 1};
-        region.srcOffsets[0]  = vk::Offset3D{0, 0, 0};
-        region.srcOffsets[1]  = vk::Offset3D{static_cast<int32_t>(src_width), static_cast<int32_t>(src_height), 1};
+        region.srcOffsets[0]  = vk::Offset3D{static_cast<int32_t>(src_x), static_cast<int32_t>(src_y), 0};
+        region.srcOffsets[1]  = vk::Offset3D{static_cast<int32_t>(src_x + src_width), static_cast<int32_t>(src_y + src_height), 1};
         region.dstSubresource = vk::ImageSubresourceLayers{vk::ImageAspectFlagBits::eColor, 0, 0, 1};
         region.dstOffsets[0]  = vk::Offset3D{0, 0, 0};
         region.dstOffsets[1]  = vk::Offset3D{static_cast<int32_t>(extent_.width), static_cast<int32_t>(extent_.height), 1};
@@ -258,6 +261,8 @@ class present_swapchain
 
     // Record and submit: blit src → intermediate, dispatch color compute, blit intermediate → swapchain.
     void blit_via_compute_and_present(VkImage                  src_image,
+                                      uint32_t                 src_x,
+                                      uint32_t                 src_y,
                                       uint32_t                 src_width,
                                       uint32_t                 src_height,
                                       color_convert_pipeline&  pipeline,
@@ -296,8 +301,8 @@ class present_swapchain
         // Blit source → intermediate (scaled to intermediate size)
         vk::ImageBlit region_to_int{};
         region_to_int.srcSubresource = vk::ImageSubresourceLayers{vk::ImageAspectFlagBits::eColor, 0, 0, 1};
-        region_to_int.srcOffsets[0]  = vk::Offset3D{0, 0, 0};
-        region_to_int.srcOffsets[1]  = vk::Offset3D{static_cast<int32_t>(src_width), static_cast<int32_t>(src_height), 1};
+        region_to_int.srcOffsets[0]  = vk::Offset3D{static_cast<int32_t>(src_x), static_cast<int32_t>(src_y), 0};
+        region_to_int.srcOffsets[1]  = vk::Offset3D{static_cast<int32_t>(src_x + src_width), static_cast<int32_t>(src_y + src_height), 1};
         region_to_int.dstSubresource = vk::ImageSubresourceLayers{vk::ImageAspectFlagBits::eColor, 0, 0, 1};
         region_to_int.dstOffsets[0]  = vk::Offset3D{0, 0, 0};
         region_to_int.dstOffsets[1]  = vk::Offset3D{static_cast<int32_t>(pipeline.width()), static_cast<int32_t>(pipeline.height()), 1};
@@ -942,6 +947,14 @@ class vulkan_output_consumer_impl
 
         caspar::timer frame_timer;
 
+        // Compute source region (subregion crop or full frame)
+        uint32_t crop_x = static_cast<uint32_t>(config_.src_x);
+        uint32_t crop_y = static_cast<uint32_t>(config_.src_y);
+        uint32_t crop_w = config_.region_w > 0 ? static_cast<uint32_t>(config_.region_w)
+                                               : static_cast<uint32_t>(src->width());
+        uint32_t crop_h = config_.region_h > 0 ? static_cast<uint32_t>(config_.region_h)
+                                               : static_cast<uint32_t>(src->height());
+
         {
             auto lock = queue_obj->scoped_lock();
 
@@ -955,11 +968,11 @@ class vulkan_output_consumer_impl
 
             if (color_pipeline_ && color_pipeline_->is_active()) {
                 swapchain_->blit_via_compute_and_present(
-                    src->id(), static_cast<uint32_t>(src->width()), static_cast<uint32_t>(src->height()),
+                    src->id(), crop_x, crop_y, crop_w, crop_h,
                     *color_pipeline_, image_index);
             } else {
                 swapchain_->blit_and_present(
-                    src->id(), static_cast<uint32_t>(src->width()), static_cast<uint32_t>(src->height()), image_index);
+                    src->id(), crop_x, crop_y, crop_w, crop_h, image_index);
             }
         }
 
