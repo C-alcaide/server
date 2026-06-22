@@ -84,7 +84,8 @@ class present_swapchain
                       vk::SurfaceKHR      surface,
                       int                 desired_images,
                       presentation_tier   tier,
-                      vk::PresentModeKHR  present_mode)
+                      vk::PresentModeKHR  present_mode,
+                      vk::SurfaceFormatKHR preferred_format = {})
         : instance_(instance)
         , physical_(physical)
         , device_(device)
@@ -93,6 +94,7 @@ class present_swapchain
         , surface_(surface)
         , tier_(tier)
         , present_mode_(present_mode)
+        , preferred_format_(preferred_format)
     {
         create_swapchain(desired_images);
         create_sync_objects();
@@ -118,6 +120,7 @@ class present_swapchain
 
     uint32_t width() const { return extent_.width; }
     uint32_t height() const { return extent_.height; }
+    vk::SwapchainKHR swapchain() const { return swapchain_; }
 
     // Returns UINT32_MAX if swapchain needs recreation (shouldn't happen for FSE)
     uint32_t acquire_next_image()
@@ -417,16 +420,29 @@ class present_swapchain
         auto caps = physical_.getSurfaceCapabilitiesKHR(surface_);
         auto formats = physical_.getSurfaceFormatsKHR(surface_);
 
-        // Prefer BGRA8 SRGB
-        vk::SurfaceFormatKHR chosen = formats[0];
-        for (const auto& f : formats) {
-            if (f.format == vk::Format::eB8G8R8A8Srgb && f.colorSpace == vk::ColorSpaceKHR::eSrgbNonlinear) {
-                chosen = f;
-                break;
+        // Use preferred format if it was explicitly set and is available
+        vk::SurfaceFormatKHR chosen{};
+        if (preferred_format_.format != vk::Format::eUndefined) {
+            for (const auto& f : formats) {
+                if (f.format == preferred_format_.format && f.colorSpace == preferred_format_.colorSpace) {
+                    chosen = f;
+                    break;
+                }
             }
         }
-        if (chosen.format == vk::Format::eUndefined)
-            chosen.format = vk::Format::eB8G8R8A8Unorm;
+
+        // Fallback: prefer BGRA8 SRGB
+        if (chosen.format == vk::Format::eUndefined) {
+            chosen = formats[0];
+            for (const auto& f : formats) {
+                if (f.format == vk::Format::eB8G8R8A8Srgb && f.colorSpace == vk::ColorSpaceKHR::eSrgbNonlinear) {
+                    chosen = f;
+                    break;
+                }
+            }
+            if (chosen.format == vk::Format::eUndefined)
+                chosen.format = vk::Format::eB8G8R8A8Unorm;
+        }
 
         format_ = chosen.format;
         extent_ = caps.currentExtent;
@@ -525,6 +541,7 @@ class present_swapchain
     vk::SurfaceKHR             surface_;
     presentation_tier          tier_;
     vk::PresentModeKHR         present_mode_;
+    vk::SurfaceFormatKHR       preferred_format_;
     vk::SwapchainKHR           swapchain_;
     vk::Format                 format_;
     vk::Extent2D               extent_;
@@ -534,6 +551,96 @@ class present_swapchain
     frame_sync                 frames_[MAX_FRAMES_IN_FLIGHT];
     int                        current_frame_idx_ = 0;
 };
+
+// ----------------------------------------------------------------------------
+// HDR surface format selection + metadata
+// ----------------------------------------------------------------------------
+
+// Pick a surface format appropriate for the configured transfer/EOTF:
+//   HDR (PQ/HLG): prefer RGBA16F + extended sRGB linear (scRGB),
+//                  fall back to A2B10G10R10 + HDR10 ST2084
+//   SDR:          returns default (empty) — swapchain picks BGRA8 SRGB
+vk::SurfaceFormatKHR pick_hdr_surface_format(vk::PhysicalDevice physical,
+                                             vk::SurfaceKHR     surface,
+                                             hdr_transfer        transfer)
+{
+    if (transfer == hdr_transfer::sdr)
+        return {}; // Use default SDR format
+
+    auto formats = physical.getSurfaceFormatsKHR(surface);
+
+    // Priority 1: RGBA16F + extended sRGB linear (scRGB — Windows HDR compositing)
+    for (const auto& f : formats) {
+        if (f.format == vk::Format::eR16G16B16A16Sfloat &&
+            f.colorSpace == vk::ColorSpaceKHR::eExtendedSrgbLinearEXT) {
+            return f;
+        }
+    }
+
+    // Priority 2: A2B10G10R10 + HDR10 ST2084
+    for (const auto& f : formats) {
+        if (f.format == vk::Format::eA2B10G10R10UnormPack32 &&
+            f.colorSpace == vk::ColorSpaceKHR::eHdr10St2084EXT) {
+            return f;
+        }
+    }
+
+    // Priority 3: RGBA16F with any HDR color space
+    for (const auto& f : formats) {
+        if (f.format == vk::Format::eR16G16B16A16Sfloat &&
+            f.colorSpace != vk::ColorSpaceKHR::eSrgbNonlinear) {
+            return f;
+        }
+    }
+
+    CASPAR_LOG(warning) << L"[vulkan_output] No HDR-capable surface format found; falling back to SDR.";
+    return {};
+}
+
+// Set HDR metadata (VK_EXT_hdr_metadata) on the swapchain.
+// Only call after swapchain creation and only if HDR format was selected.
+void set_hdr_metadata(vk::Device device, vk::SwapchainKHR swapchain, output_gamut gamut, float max_luminance)
+{
+    // Try to get the function pointer
+    auto fn = reinterpret_cast<PFN_vkSetHdrMetadataEXT>(
+        VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceProcAddr(device, "vkSetHdrMetadataEXT"));
+    if (!fn) {
+        CASPAR_LOG(debug) << L"[vulkan_output] vkSetHdrMetadataEXT not available.";
+        return;
+    }
+
+    VkHdrMetadataEXT metadata{};
+    metadata.sType = VK_STRUCTURE_TYPE_HDR_METADATA_EXT;
+
+    if (gamut == output_gamut::bt2020) {
+        // BT.2020 primaries
+        metadata.displayPrimaryRed   = {0.708f, 0.292f};
+        metadata.displayPrimaryGreen = {0.170f, 0.797f};
+        metadata.displayPrimaryBlue  = {0.131f, 0.046f};
+    } else if (gamut == output_gamut::p3_d65) {
+        // DCI-P3 (D65)
+        metadata.displayPrimaryRed   = {0.680f, 0.320f};
+        metadata.displayPrimaryGreen = {0.265f, 0.690f};
+        metadata.displayPrimaryBlue  = {0.150f, 0.060f};
+    } else {
+        // BT.709
+        metadata.displayPrimaryRed   = {0.640f, 0.330f};
+        metadata.displayPrimaryGreen = {0.300f, 0.600f};
+        metadata.displayPrimaryBlue  = {0.150f, 0.060f};
+    }
+
+    metadata.whitePoint         = {0.3127f, 0.3290f}; // D65
+    metadata.maxLuminance       = max_luminance;
+    metadata.minLuminance       = 0.001f;
+    metadata.maxContentLightLevel      = max_luminance;
+    metadata.maxFrameAverageLightLevel = max_luminance * 0.5f;
+
+    VkSwapchainKHR sc = swapchain;
+    fn(device, 1, &sc, &metadata);
+
+    CASPAR_LOG(info) << L"[vulkan_output] HDR metadata set: max_luminance=" << max_luminance
+                     << L" gamut=" << static_cast<int>(gamut);
+}
 
 // ----------------------------------------------------------------------------
 // Consumer implementation
@@ -637,6 +744,9 @@ class vulkan_output_consumer_impl
         // Select present mode
         auto present_mode = pick_present_mode(physical, surface);
 
+        // Select HDR surface format if configured
+        auto hdr_format = pick_hdr_surface_format(physical, surface, config_.transfer);
+
         swapchain_ = std::make_unique<present_swapchain>(vk_instance,
                                                          physical,
                                                          vk_device,
@@ -645,11 +755,18 @@ class vulkan_output_consumer_impl
                                                          surface,
                                                          config_.buffer_depth,
                                                          active_tier,
-                                                         present_mode);
+                                                         present_mode,
+                                                         hdr_format);
 
         CASPAR_LOG(info) << print() << L" Started. Swapchain " << swapchain_->width() << L"x"
                          << swapchain_->height() << L" | " << tier_name(active_tier)
                          << L" | " << target->display_name;
+
+        // Set HDR metadata if we got an HDR surface format
+        if (hdr_format.format != vk::Format::eUndefined) {
+            float max_nits = (config_.transfer == hdr_transfer::hlg) ? 1000.0f : 1000.0f;
+            set_hdr_metadata(vk_device, swapchain_->swapchain(), config_.gamut, max_nits);
+        }
 
         // Initialize color conversion pipeline (always created, conditionally dispatched)
         color_pipeline_ = std::make_unique<color_convert_pipeline>(

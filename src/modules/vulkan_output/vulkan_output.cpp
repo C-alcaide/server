@@ -117,6 +117,7 @@ void init(const core::module_dependencies& dependencies)
 void register_vulkan_requirements(vkb::PhysicalDevice& pd)
 {
     pd.enable_extension_if_present(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+    pd.enable_extension_if_present("VK_EXT_hdr_metadata");
 #ifdef _WIN32
     pd.enable_extension_if_present("VK_EXT_full_screen_exclusive");
     pd.enable_extension_if_present("VK_KHR_win32_surface");
