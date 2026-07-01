@@ -73,6 +73,9 @@ void apply_transform_colour_values(core::image_transform& self, const core::imag
     if (other.blur.enable) {
         self.blur = other.blur;
     }
+    self.sharpen_amount += other.sharpen_amount;
+    if (other.sharpen_radius != 1.0)
+        self.sharpen_radius = other.sharpen_radius;
 }
 
 bool is_default_perspective(const core::corners& perspective)

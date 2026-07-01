@@ -1206,6 +1206,37 @@ std::future<std::wstring> mixer_blur_command(command_context& ctx)
     return make_ready_future<std::wstring>(L"202 MIXER OK\r\n");
 }
 
+// MIXER SHARPEN amount [radius] [duration tween]
+std::future<std::wstring> mixer_sharpen_command(command_context& ctx)
+{
+    if (ctx.parameters.empty()) {
+        auto transform2 = get_current_transform(ctx).share();
+        return std::async(std::launch::deferred, [transform2]() -> std::wstring {
+            auto t = transform2.get().image_transform;
+            return L"201 MIXER OK\r\n" + std::to_wstring(t.sharpen_amount) + L" " +
+                   std::to_wstring(t.sharpen_radius) + L"\r\n";
+        });
+    }
+
+    transforms_applier transforms(ctx);
+    double       amount   = std::stod(ctx.parameters.at(0));
+    double       radius   = ctx.parameters.size() > 1 ? std::stod(ctx.parameters[1]) : 1.0;
+    int          duration = ctx.parameters.size() > 2 ? std::stoi(ctx.parameters[2]) : 0;
+    std::wstring tween    = ctx.parameters.size() > 3 ? ctx.parameters[3] : L"linear";
+
+    transforms.add(stage::transform_tuple_t(
+        ctx.layer_index(),
+        [=](frame_transform transform) -> frame_transform {
+            transform.image_transform.sharpen_amount = amount;
+            transform.image_transform.sharpen_radius = radius;
+            return transform;
+        },
+        duration,
+        tween));
+    transforms.apply();
+    return make_ready_future<std::wstring>(L"202 MIXER OK\r\n");
+}
+
 std::future<std::wstring> mixer_fill_command(command_context& ctx)
 {
     if (ctx.parameters.empty()) {
@@ -1857,6 +1888,7 @@ void register_commands(std::shared_ptr<amcp_command_repository_wrapper>& repo)
     repo->register_channel_command(L"Mixer Commands", L"MIXER CONTRAST", mixer_contrast_command, 0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER LEVELS", mixer_levels_command, 0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER BLUR", mixer_blur_command, 0);
+    repo->register_channel_command(L"Mixer Commands", L"MIXER SHARPEN", mixer_sharpen_command, 0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER FILL", mixer_fill_command, 0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER CLIP", mixer_clip_command, 0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER ANCHOR", mixer_anchor_command, 0);
