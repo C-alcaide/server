@@ -76,6 +76,9 @@ void apply_transform_colour_values(core::image_transform& self, const core::imag
     self.sharpen_amount += other.sharpen_amount;
     if (other.sharpen_radius != 1.0)
         self.sharpen_radius = other.sharpen_radius;
+    self.grain_intensity += other.grain_intensity;
+    if (other.grain_size != 1.0)
+        self.grain_size = other.grain_size;
 }
 
 bool is_default_perspective(const core::corners& perspective)

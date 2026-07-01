@@ -120,6 +120,8 @@ struct image_transform final
     core::blur_config     blur;
     double                sharpen_amount = 0.0;
     double                sharpen_radius = 1.0;
+    double                grain_intensity = 0.0;
+    double                grain_size      = 1.0;
 
     bool             is_key      = false;
     bool             invert      = false;
