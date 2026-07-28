@@ -236,6 +236,12 @@ class ofx_producer : public core::frame_producer
                 return nullptr;
             }
         }
+        static bool vk_pool_warned = false;
+        if (!vk_pool_warned) {
+            vk_pool_warned = true;
+            CASPAR_LOG(warning) << L"[ofx] CUDA-VK zero-copy texture pool exhausted (all in flight); "
+                                << L"falling back to CPU for some frames.";
+        }
         return nullptr; // all pooled textures still in flight -> skip zero-copy this frame
     }
 #endif
@@ -756,6 +762,11 @@ class ofx_producer : public core::frame_producer
                 {
                     std::lock_guard<std::mutex> lock(effect_mutex_);
                     auto& keys = anim_[name];
+                    if (keys.size() >= 1000) {
+                        std::promise<std::wstring> pr;
+                        pr.set_value(L"402 CALL ERROR (too many keyframes; max 1000 per parameter)\r\n");
+                        return pr.get_future();
+                    }
                     keys.push_back(kf);
                     std::sort(keys.begin(), keys.end(), [](const keyframe& a, const keyframe& b) {
                         return a.frame < b.frame;

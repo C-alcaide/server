@@ -31,7 +31,9 @@
 #include <atomic>
 #include <chrono>
 #include <cstdarg>
+#include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <mutex>
 #include <thread>
@@ -216,16 +218,32 @@ class caspar_ofx_host : public OFX::Host::ImageEffect::Host
     }
 
     // --- Message suite (OFX::Host::Host) ---
-    OfxStatus vmessage(const char* /*type*/, const char* /*id*/, const char* /*format*/, va_list /*args*/) override
+    OfxStatus vmessage(const char* type, const char* /*id*/, const char* format, va_list args) override
     {
+        char buf[1024];
+        if (format)
+            std::vsnprintf(buf, sizeof(buf), format, args);
+        else
+            buf[0] = '\0';
+        const bool err = type && (std::strstr(type, "Error") || std::strstr(type, "Fatal"));
+        if (err)
+            CASPAR_LOG(warning) << L"[ofx] plug-in message: " << u16(buf);
+        else
+            CASPAR_LOG(info) << L"[ofx] plug-in message: " << u16(buf);
         return kOfxStatOK;
     }
 
     OfxStatus setPersistentMessage(const char* /*type*/,
                                    const char* /*id*/,
-                                   const char* /*format*/,
-                                   va_list /*args*/) override
+                                   const char* format,
+                                   va_list     args) override
     {
+        char buf[1024];
+        if (format)
+            std::vsnprintf(buf, sizeof(buf), format, args);
+        else
+            buf[0] = '\0';
+        CASPAR_LOG(warning) << L"[ofx] plug-in persistent message: " << u16(buf);
         return kOfxStatOK;
     }
 
@@ -358,12 +376,17 @@ struct effect::impl
 
     ~impl()
     {
-        if (instance) {
-            if (render_open) {
-                OfxPointD rs{1.0, 1.0};
-                instance->endRenderAction(0, 0, 1, false, rs, true, false);
+        // A misbehaving plug-in must never let an exception (incl. SEH under /EHa) escape a
+        // destructor, which would call std::terminate.
+        try {
+            if (instance) {
+                if (render_open) {
+                    OfxPointD rs{1.0, 1.0};
+                    instance->endRenderAction(0, 0, 1, false, rs, true, false);
+                }
+                delete instance;
             }
-            delete instance;
+        } catch (...) {
         }
     }
 };

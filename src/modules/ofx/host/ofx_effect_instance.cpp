@@ -22,8 +22,13 @@
 #include "ofx_param_instance.h"
 
 #include <common/log.h>
+#include <common/utf.h>
 
 #include <GL/glew.h>
+
+#include <cstdarg>
+#include <cstdio>
+#include <cstring>
 
 namespace caspar { namespace ofx {
 
@@ -254,9 +259,28 @@ const std::string& ofx_effect_instance::getDefaultOutputFielding() const
     return v;
 }
 
-OfxStatus ofx_effect_instance::vmessage(const char*, const char*, const char*, va_list) { return kOfxStatOK; }
-OfxStatus ofx_effect_instance::setPersistentMessage(const char*, const char*, const char*, va_list)
+OfxStatus ofx_effect_instance::vmessage(const char* type, const char* /*id*/, const char* format, va_list args)
 {
+    char buf[1024];
+    if (format)
+        std::vsnprintf(buf, sizeof(buf), format, args);
+    else
+        buf[0] = '\0';
+    const bool err = type && (std::strstr(type, "Error") || std::strstr(type, "Fatal"));
+    if (err)
+        CASPAR_LOG(warning) << L"[ofx] plug-in message: " << u16(buf);
+    else
+        CASPAR_LOG(info) << L"[ofx] plug-in message: " << u16(buf);
+    return kOfxStatOK;
+}
+OfxStatus ofx_effect_instance::setPersistentMessage(const char* /*type*/, const char* /*id*/, const char* format, va_list args)
+{
+    char buf[1024];
+    if (format)
+        std::vsnprintf(buf, sizeof(buf), format, args);
+    else
+        buf[0] = '\0';
+    CASPAR_LOG(warning) << L"[ofx] plug-in persistent message: " << u16(buf);
     return kOfxStatOK;
 }
 OfxStatus ofx_effect_instance::clearPersistentMessage() { return kOfxStatOK; }
