@@ -41,6 +41,7 @@
 #include <cstring>
 #include <future>
 #include <memory>
+#include <mutex>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -102,6 +103,10 @@ class remotewall_producer : public core::frame_producer
     const int                            codec_;
 
     RecvWallHandle*           rw_ = nullptr;
+    RecvWallConfig            cfg_{};
+    int                       device_ = 0;
+    std::mutex                rw_mtx_;    // guards rw_ + pool during a live reconfigure (SET)
+    bool                      zero_copy_ok_ = false;
     std::vector<std::uint8_t> staging_;
     RecvWallFrameInfo         info_{};
     unsigned long long        ver_        = 0;
@@ -121,47 +126,68 @@ class remotewall_producer : public core::frame_producer
 #endif
 
   public:
-    remotewall_producer(const core::frame_producer_dependencies& deps, int port, int tiles, int codec)
+    remotewall_producer(const core::frame_producer_dependencies& deps, const RecvWallConfig& cfg, int device)
         : frame_factory_(deps.frame_factory)
         , format_desc_(deps.format_desc)
         , fallback_w_(deps.format_desc.width)
         , fallback_h_(deps.format_desc.height)
-        , port_(port)
-        , tiles_(tiles)
-        , codec_(codec)
+        , port_(cfg.listenPort)
+        , tiles_(cfg.expectedTiles)
+        , codec_(cfg.codec)
     {
+        cfg_    = cfg;
+        device_ = device;
 #ifdef ENABLE_VULKAN
         if (auto* vk_mixer = dynamic_cast<accelerator::vulkan::image_mixer*>(frame_factory_.get())) {
             vk_device_  = vk_mixer->get_vk_device();
             use_vulkan_ = vk_device_ != nullptr;
         }
 #endif
-        RecvWallConfig cfg{};
-        cfg.listenPort    = static_cast<unsigned short>(port_);
-        cfg.expectedTiles = tiles_; // 0 = auto from the first SyncMeta
-        cfg.codec         = codec_; // 0 = HEVC, 1 = H.264
-        cfg.fullRange     = 1;      // full-swing RGB
-        cfg.pixelOrder    = 0;      // 0 = BGRA (matches the bgra frame tag)
-        cfg.useGpuConvert = 1;      // CUDA NV12->BGRA composite (lib falls back to CPU on failure)
-        rw_               = RecvWallInit(&cfg);
-        CASPAR_LOG(info) << L"[remotewall] receiver " << (rw_ ? L"started" : L"FAILED") << L" on UDP port "
-                         << port_ << L" (tiles=" << tiles_ << L", codec=" << codec_ << L", path="
+        init_receiver();
+    }
+
+    ~remotewall_producer() { teardown_receiver(); }
+
+    // (Re)bind the receiver from cfg_. Zero-copy engages only on the Vulkan mixer without a sync
+    // group (sync groups use the receiver's host-side reorder buffer, so the composite is not
+    // published GPU-direct). Safe to call again after teardown_receiver() for a live reconfigure.
+    void init_receiver()
+    {
 #ifdef ENABLE_VULKAN
-                         << (use_vulkan_ ? L"vulkan-zerocopy" : L"cpu-readback")
+        if (use_vulkan_)
+            cudaSetDevice(device_);
+        zero_copy_ok_ = use_vulkan_ && cfg_.syncGroup[0] == 0;
+#endif
+        rw_         = RecvWallInit(&cfg_);
+        ver_        = 0;
+        have_frame_ = false;
+        wall_w_ = wall_h_ = 0;
+        staging_.clear();
+        CASPAR_LOG(info) << L"[remotewall] receiver " << (rw_ ? L"started" : L"FAILED") << L" on UDP port "
+                         << static_cast<int>(cfg_.listenPort) << L" (tiles=" << cfg_.expectedTiles
+                         << L", codec=" << cfg_.codec << L", path="
+#ifdef ENABLE_VULKAN
+                         << (zero_copy_ok_ ? L"vulkan-zerocopy" : L"cpu-readback")
 #else
                          << L"cpu-readback"
 #endif
-                         << L").";
+                         << L", syncgroup='" << u16(cfg_.syncGroup) << L"').";
     }
 
-    ~remotewall_producer()
+    void teardown_receiver()
     {
+        if (!rw_)
+            return;
 #ifdef ENABLE_VULKAN
-        if (rw_ && use_vulkan_)
+        if (use_vulkan_)
             RecvWallUnbindCudaArray(rw_);
+        bound_.reset();
+        pool_.clear();
+        pool_w_ = pool_h_ = 0;
+        last_df_ = core::draw_frame::empty();
 #endif
-        if (rw_)
-            RecvWallShutdown(rw_);
+        RecvWallShutdown(rw_);
+        rw_ = nullptr;
     }
 
     core::draw_frame make_marker_frame()
@@ -180,10 +206,11 @@ class remotewall_producer : public core::frame_producer
         return core::draw_frame(std::move(frame));
     }
 
-    core::draw_frame receive_impl(const core::video_field field, int nb_samples) override
+    core::draw_frame receive_impl(const core::video_field /*field*/, int /*nb_samples*/) override
     {
+        std::lock_guard<std::mutex> lk(rw_mtx_);
 #ifdef ENABLE_VULKAN
-        if (use_vulkan_ && rw_)
+        if (zero_copy_ok_ && rw_)
             return receive_vulkan();
 #endif
         return receive_cpu();
@@ -328,7 +355,7 @@ class remotewall_producer : public core::frame_producer
             RecvWallGetStats(rw_, &st);
 
         core::monitor::state s;
-        s["remotewall/port"]           = port_;
+        s["remotewall/port"]           = static_cast<int>(cfg_.listenPort);
         s["remotewall/wall"]           = std::vector<int>{w, h};
         s["remotewall/grid"]           = std::vector<int>{static_cast<int>(info_.gridCols),
                                                           static_cast<int>(info_.gridRows)};
@@ -372,7 +399,7 @@ class remotewall_producer : public core::frame_producer
                     std::snprintf(tc, sizeof tc, "%02u:%02u:%02u%c%02u", info_.tcHours, info_.tcMinutes,
                                   info_.tcSeconds, info_.tcDrop ? ';' : ':', info_.tcFrames);
                 std::ostringstream os;
-                os << "port " << port_ << " wall " << wall_w_ << "x" << wall_h_ << " grid "
+                os << "port " << static_cast<int>(cfg_.listenPort) << " wall " << wall_w_ << "x" << wall_h_ << " grid "
                    << info_.gridCols << "x" << info_.gridRows << " fps "
                    << (info_.fpsDen ? static_cast<double>(info_.fpsNum) / info_.fpsDen : 0.0) << " tc " << tc
                    << " colorspace " << info_.colorSpace << " frame " << info_.globalFrameIndex << " fec "
@@ -389,6 +416,31 @@ class remotewall_producer : public core::frame_producer
                     os << " " << cam[i];
                 os << "\r\n";
                 result = u16(os.str());
+            } else if (boost::iequals(sub, L"SET") && params.size() >= 4) {
+                // Live reconfigure: rebind the receiver with the new value. Guarded so it does not
+                // race receive_impl. Keys: port | syncgroup | bindip.
+                const std::wstring key = params.at(2);
+                const std::wstring val = params.at(3);
+                std::lock_guard<std::mutex> lk(rw_mtx_);
+                bool ok = true;
+                if (boost::iequals(key, L"port")) {
+                    try {
+                        cfg_.listenPort = static_cast<unsigned short>(std::stoi(val));
+                    } catch (...) {
+                        ok = false;
+                    }
+                } else if (boost::iequals(key, L"syncgroup")) {
+                    std::snprintf(cfg_.syncGroup, sizeof cfg_.syncGroup, "%s", u8(val).c_str());
+                } else if (boost::iequals(key, L"bindip")) {
+                    std::snprintf(cfg_.bindIp, sizeof cfg_.bindIp, "%s", u8(val).c_str());
+                } else {
+                    ok = false;
+                }
+                if (ok) {
+                    teardown_receiver();
+                    init_receiver();
+                }
+                result = ok ? L"" : L"402 CALL ERROR (unknown REMOTEWALL SET key)\r\n";
             }
         }
         std::promise<std::wstring> pr;
@@ -397,7 +449,7 @@ class remotewall_producer : public core::frame_producer
     }
 
     core::monitor::state state() const override { return state_; }
-    std::wstring         print() const override { return L"remotewall[" + std::to_wstring(port_) + L"]"; }
+    std::wstring         print() const override { return L"remotewall[" + std::to_wstring(cfg_.listenPort) + L"]"; }
     std::wstring         name() const override { return L"remotewall"; }
     bool                 is_ready() override { return true; }
 };
@@ -410,9 +462,12 @@ spl::shared_ptr<core::frame_producer> create_producer(const core::frame_producer
     if (params.empty() || !boost::iequals(params.at(0), L"REMOTEWALL"))
         return core::frame_producer::empty();
 
-    int port  = config().listen_port;
-    int tiles = 0; // auto-detect from the first SyncMeta
-    int codec = 0; // 0 = HEVC, 1 = H.264
+    int          port    = config().listen_port;
+    int          tiles   = 0; // auto-detect from the first SyncMeta
+    int          codec   = 0; // 0 = HEVC, 1 = H.264
+    int          device  = config().cuda_device;
+    std::wstring bind_ip;
+    std::wstring sync_group;
     for (std::size_t i = 1; i < params.size(); ++i) {
         if (boost::iequals(params[i], L"PORT") && i + 1 < params.size()) {
             try {
@@ -426,10 +481,29 @@ spl::shared_ptr<core::frame_producer> create_producer(const core::frame_producer
             }
         } else if (boost::iequals(params[i], L"CODEC") && i + 1 < params.size()) {
             codec = boost::iequals(params[++i], L"h264") ? 1 : 0;
+        } else if (boost::iequals(params[i], L"DEVICE") && i + 1 < params.size()) {
+            try {
+                device = std::stoi(params[++i]);
+            } catch (...) {
+            }
+        } else if (boost::iequals(params[i], L"BINDIP") && i + 1 < params.size()) {
+            bind_ip = params[++i];
+        } else if (boost::iequals(params[i], L"SYNCGROUP") && i + 1 < params.size()) {
+            sync_group = params[++i];
         }
     }
 
-    return spl::make_shared<remotewall_producer>(dependencies, port, tiles, codec);
+    RecvWallConfig cfg{};
+    cfg.listenPort    = static_cast<unsigned short>(port);
+    cfg.expectedTiles = tiles;
+    cfg.codec         = codec;
+    cfg.fullRange     = 1; // full-swing RGB
+    cfg.pixelOrder    = 0; // 0 = BGRA (matches the bgra frame tag)
+    cfg.useGpuConvert = 1; // CUDA NV12->BGRA composite (lib falls back to CPU on failure)
+    std::snprintf(cfg.bindIp, sizeof cfg.bindIp, "%s", u8(bind_ip).c_str());
+    std::snprintf(cfg.syncGroup, sizeof cfg.syncGroup, "%s", u8(sync_group).c_str());
+
+    return spl::make_shared<remotewall_producer>(dependencies, cfg, device);
 }
 
 void register_remotewall_producer(const core::module_dependencies& dependencies)
