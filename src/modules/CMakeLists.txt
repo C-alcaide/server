@@ -22,6 +22,8 @@ if (BUILD_CUDA_MODULES)
         add_subdirectory(cuda_notchlc)
         message(STATUS "CUDA module enabled: cuda_notchlc")
     endif()
+    add_subdirectory(remotewall)
+    message(STATUS "CUDA module enabled: remotewall")
 endif()
 
 add_subdirectory(hap)
