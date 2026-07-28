@@ -387,9 +387,6 @@ class ofx_producer : public core::frame_producer
     {
         // Generator context: no source clip; render straight into a fresh frame.
         if (context_ == effect_context::generator) {
-            core::pixel_format_desc pfd(core::pixel_format::bgra);
-            pfd.planes.push_back(core::pixel_format_desc::plane(width_, height_, 4));
-
             bool rendered = false;
             {
                 std::lock_guard<std::mutex> lock(effect_mutex_);
@@ -402,9 +399,33 @@ class ofx_producer : public core::frame_producer
             if (!rendered)
                 return core::draw_frame::empty();
 
-            auto out = frame_factory_->create_frame(this, pfd);
-            rgba_bottom_up_to_bgra_top_down(
-                dst_rgba_.data(), width_ * 4, out.image_data(0).data(), pfd.planes[0].linesize, width_, height_);
+            // The plug-in may negotiate an 8-bit, 16-bit or float32 working depth (a generator
+            // that advertises float, e.g. a live-source plug-in, gets float here). Convert its
+            // bottom-up output to a top-down BGRA frame with the matching depth converter — using
+            // the 8-bit converter on a float buffer would misread it as transparent/garbage.
+            const bool              wide = (working_bytes_ == 2);
+            core::pixel_format_desc pfd(core::pixel_format::bgra);
+            pfd.planes.push_back(core::pixel_format_desc::plane(
+                width_, height_, 4, wide ? common::bit_depth::bit16 : common::bit_depth::bit8));
+            pfd.is_straight_alpha = !effect_->output_premultiplied();
+
+            auto      out         = frame_factory_->create_frame(this, pfd);
+            const int dst_stride  = out.pixel_format_desc().planes[0].linesize;
+            const int work_stride = width_ * 4 * working_bytes_;
+            if (working_bytes_ == 4)
+                rgbaf_bottom_up_to_bgra(reinterpret_cast<const float*>(dst_rgba_.data()),
+                                        work_stride,
+                                        out.image_data(0).data(),
+                                        dst_stride,
+                                        1,
+                                        width_,
+                                        height_);
+            else if (working_bytes_ == 2)
+                rgba16_bottom_up_to_bgra16_top_down(
+                    dst_rgba_.data(), work_stride, out.image_data(0).data(), dst_stride, width_, height_);
+            else
+                rgba_bottom_up_to_bgra_top_down(
+                    dst_rgba_.data(), work_stride, out.image_data(0).data(), dst_stride, width_, height_);
             return core::draw_frame(std::move(out));
         }
 
