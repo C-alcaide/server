@@ -111,3 +111,28 @@ The receiver + cloudXR wire/SEI headers are vendored under `src/modules/remotewa
 - **Multi‑GPU:** decode auto‑matches the Vulkan mixer's GPU by UUID; override with `DEVICE`.
 - **Codecs:** HEVC, H.264, AV1 (AV1 metadata rides an ITU‑T T.35 metadata OBU).
 - 8‑bit and 10/12‑bit HDR supported; OpenGL zero‑copy is the remaining follow‑up.
+
+## Feeding a DeckLink output
+
+Prefer the **Vulkan mixer** for a DeckLink workflow — it is more efficient here, not less, even though
+DeckLink ultimately hands host memory to the SDK. The final SDI frame must reach system RAM once, and
+that single readback is unavoidable for either mixer; the difference is everything *before* it:
+
+- **Vulkan mixer:** the wall stays on the GPU (our zero‑copy path), the VK mixer composites, and the
+  DeckLink consumer imports the mixer's VK texture and **packs v210/BGRA in a GPU compute shader**,
+  reading back only the packed buffer once. With the Vulkan accelerator the core skips the full‑frame
+  host readback entirely (`needs_cpu_frame_data() == false`). See
+  [vk_readback_strategy.cpp](src/modules/decklink/consumer/vk_readback_strategy.cpp) /
+  [cuda_vk_strategy.cpp](src/modules/decklink/consumer/cuda_vk_strategy.cpp).
+- **OpenGL mixer:** adds a GPU→CPU→GPU round trip on wall ingest *and* a full‑frame CPU readback with
+  CPU‑side v210 packing at the consumer.
+
+Caveats:
+
+- Leave the DeckLink consumer's `gpu-readback-mode` at `auto` (or `cuda`/`vulkan`). Setting it to `cpu`
+  forces the host path and discards the benefit.
+- On a multi‑GPU host, keep the **decode GPU, the Vulkan mixer, and the DeckLink adapter on the same
+  card**. The consumer matches the adapter's GPU by LUID and remotewall matches the mixer's GPU by UUID,
+  so aligning them avoids a cross‑GPU copy. Pin decode with `DEVICE` if auto‑match picks the wrong one.
+- HDR: the 16‑bit zero‑copy wall → VK mixer → v210 compute packer keeps 10‑bit precision on‑GPU end‑to‑end.
+
