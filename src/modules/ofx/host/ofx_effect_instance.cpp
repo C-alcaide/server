@@ -72,9 +72,21 @@ OfxStatus ofx_effect_instance::renderAction(OfxTime            time,
             if (!cuda_)
                 cuda_ = std::make_unique<cuda_backend>();
 
-            ctx_.source_dev = ctx_.source_rgba ? cuda_->upload_source(ctx_.source_rgba, ctx_.width, ctx_.height) : nullptr;
-            ctx_.output_dev = cuda_->ensure_output(ctx_.width, ctx_.height);
-            ctx_.cuda       = true;
+            // On-device convert path: upload the raw source once and swizzle/flip/premultiply on the
+            // device (no CPU passes). Otherwise fall back to the legacy host-RGBA upload.
+            if (ctx_.raw_source) {
+                ctx_.source_dev = cuda_->convert_source(ctx_.raw_source,
+                                                        ctx_.raw_src_stride,
+                                                        ctx_.raw_is_bgra,
+                                                        ctx_.raw_straight,
+                                                        ctx_.width,
+                                                        ctx_.height);
+            } else {
+                ctx_.source_dev = ctx_.source_rgba ? cuda_->upload_source(ctx_.source_rgba, ctx_.width, ctx_.height) : nullptr;
+            }
+            ctx_.output_dev         = cuda_->ensure_output(ctx_.width, ctx_.height);
+            ctx_.output_dev_topdown = nullptr;
+            ctx_.cuda               = true;
 
             static const OFX::Host::Property::PropSpec in_spec[] = {
                 {kOfxPropTime, OFX::Host::Property::eDouble, 1, true, "0"},
@@ -85,6 +97,7 @@ OfxStatus ofx_effect_instance::renderAction(OfxTime            time,
                 {kOfxImageEffectPropInteractiveRenderStatus, OFX::Host::Property::eInt, 1, true, "0"},
                 {kOfxImageEffectPropRenderQualityDraft, OFX::Host::Property::eInt, 1, true, "0"},
                 {kOfxImageEffectPropCudaEnabled, OFX::Host::Property::eInt, 1, true, "1"},
+                {kOfxImageEffectPropCudaStream, OFX::Host::Property::ePointer, 1, true, ""},
                 OFX::Host::Property::propSpecEnd};
 
             OFX::Host::Property::Set inArgs(in_spec);
@@ -96,10 +109,18 @@ OfxStatus ofx_effect_instance::renderAction(OfxTime            time,
             inArgs.setIntProperty(kOfxImageEffectPropInteractiveRenderStatus, interactiveRender);
             inArgs.setIntProperty(kOfxImageEffectPropRenderQualityDraft, draftRender);
             inArgs.setIntProperty(kOfxImageEffectPropCudaEnabled, 1);
+            inArgs.setPointerProperty(kOfxImageEffectPropCudaStream, cuda_ ? cuda_->stream() : nullptr);
 
             const OfxStatus st = mainEntry(kOfxImageEffectActionRender, getHandle(), &inArgs, nullptr);
 
             if (st == kOfxStatOK || st == kOfxStatReplyDefault) {
+                // On-device convert path: mirror the plug-in's bottom-up output back to top-down so
+                // the producer can do a single contiguous copy into the VK array. Sync the backend
+                // stream so the result is ready for the caller's copy.
+                if (ctx_.raw_source) {
+                    ctx_.output_dev_topdown = cuda_->mirror_output(ctx_.output_dev, ctx_.width, ctx_.height);
+                    cuda_->sync();
+                }
                 if (ctx_.output_rgba)
                     cuda_->readback_output(ctx_.output_rgba, ctx_.width, ctx_.height);
                 static bool logged_ok = false;

@@ -181,7 +181,10 @@ class caspar_ofx_host : public OFX::Host::ImageEffect::Host
 #endif
 #ifdef CASPAR_OFX_CUDA
         p.setStringProperty(kOfxImageEffectPropCudaRenderSupported, ofx_cuda_enabled() ? "true" : "false");
-        p.setStringProperty(kOfxImageEffectPropCudaStreamSupported, "false");
+        // The host owns a CUDA stream and passes it via kOfxImageEffectPropCudaStream at render time.
+        // Plug-ins that ignore it and use the legacy default stream still order correctly (the default
+        // stream serialises with our blocking stream).
+        p.setStringProperty(kOfxImageEffectPropCudaStreamSupported, ofx_cuda_enabled() ? "true" : "false");
 #endif
     }
 
@@ -543,14 +546,27 @@ bool effect::cuda_capable() const
     return valid() && impl_->eff->cuda_requested();
 }
 
-void* effect::render_cuda(const std::uint8_t* src_rgba, int width, int height, double time, field_kind field)
+void* effect::render_cuda(const std::uint8_t* raw_source,
+                          int                 src_stride,
+                          bool                is_bgra,
+                          bool                straight_alpha,
+                          int                 width,
+                          int                 height,
+                          double              time,
+                          field_kind          field)
 {
-    if (!valid() || src_rgba == nullptr)
+    if (!valid() || raw_source == nullptr)
         return nullptr;
 
     auto& c             = impl_->eff->ctx();
-    c.source_rgba       = src_rgba;
-    c.output_rgba       = nullptr; // skip host readback — caller consumes ctx.output_dev directly
+    // On-device convert path: hand the raw top-down source to the host; it uploads it once and does
+    // the swizzle/flip/premultiply on the device (NPP), then mirrors the output back to top-down.
+    c.raw_source        = raw_source;
+    c.raw_src_stride    = src_stride;
+    c.raw_is_bgra       = is_bgra;
+    c.raw_straight      = straight_alpha;
+    c.source_rgba       = nullptr;
+    c.output_rgba       = nullptr; // skip host readback — caller consumes the returned device ptr directly
     c.width             = width;
     c.height            = height;
     c.working_bytes     = 1;
@@ -578,10 +594,13 @@ void* effect::render_cuda(const std::uint8_t* src_rgba, int width, int height, d
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
         if (ms > kRenderBudgetMs)
             record_strike(impl_->plugin_id, L"cuda render over time budget");
+        c.raw_source = nullptr; // consumed; do not leak into a later render
         if (st != kOfxStatOK && st != kOfxStatReplyDefault)
             return nullptr;
-        return impl_->eff->ctx().output_dev; // the device buffer the plug-in rendered into
+        // Top-down RGBA device buffer (already un-flipped by the host), ready for one contiguous copy.
+        return impl_->eff->ctx().output_dev_topdown;
     } catch (...) {
+        c.raw_source = nullptr;
         CASPAR_LOG(warning) << L"[ofx] CUDA render action threw; dropping frame.";
         record_strike(impl_->plugin_id, L"cuda render crashed");
         return nullptr;

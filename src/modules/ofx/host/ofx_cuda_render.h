@@ -47,6 +47,25 @@ class cuda_backend
     /// Copy the output device buffer back into an 8-bit RGBA host buffer.
     void readback_output(std::uint8_t* rgba, int width, int height);
 
+    /// On-device source convert (no CPU passes): upload the RAW top-down source (BGRA or RGBA) once,
+    /// then swap channels (BGRA->RGBA), mirror vertically (top-down -> OFX bottom-up), and
+    /// premultiply straight alpha — all on the backend stream via NPP. Returns the bottom-up RGBA
+    /// device buffer the plug-in reads. Throws on failure.
+    void* convert_source(const std::uint8_t* raw,
+                         int                 src_stride,
+                         bool                is_bgra,
+                         bool                straight_alpha,
+                         int                 width,
+                         int                 height);
+
+    /// On-device output convert: mirror the plug-in's bottom-up RGBA output vertically back to
+    /// top-down, on the backend stream via NPP. Returns a top-down RGBA device buffer ready for a
+    /// single contiguous cudaMemcpy2DToArray. Throws on failure.
+    void* mirror_output(void* out_dev, int width, int height);
+
+    /// Block until all work enqueued on the backend stream has completed.
+    void sync();
+
     /// Opaque CUDA stream handle for kOfxImageEffectPropCudaStream (may be null = default stream).
     void* stream() const;
 

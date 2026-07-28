@@ -109,11 +109,20 @@ class effect
     /// host enabled it). Lets the producer decide whether the CUDA zero-copy path is viable.
     bool cuda_capable() const;
 
-    /// CUDA render into the plug-in's device output buffer, returning that CUDA device pointer (or
-    /// nullptr on failure). src_rgba is bottom-up 8-bit RGBA (width*height*4); it is uploaded to a
-    /// device buffer, the plug-in renders in CUDA mode, and NO host readback is performed — the
-    /// caller copies the returned device buffer straight into a GPU texture (device-to-device).
-    void* render_cuda(const std::uint8_t* src_rgba, int width, int height, double time, field_kind field = field_kind::both);
+    /// CUDA render into the plug-in's device output buffer, returning a top-down 8-bit RGBA CUDA
+    /// device pointer (or nullptr on failure). raw_source is the RAW top-down source (BGRA or RGBA,
+    /// stride = src_stride); the host uploads it once and does the channel swap / vertical flip /
+    /// premultiply on the device (NPP), runs the plug-in in CUDA mode, then mirrors the output back
+    /// to top-down. NO host readback is performed — the caller copies the returned device buffer
+    /// straight into a GPU texture with one contiguous device-to-device copy.
+    void* render_cuda(const std::uint8_t* raw_source,
+                      int                 src_stride,
+                      bool                is_bgra,
+                      bool                straight_alpha,
+                      int                 width,
+                      int                 height,
+                      double              time,
+                      field_kind          field = field_kind::both);
 
     /// Ask the plug-in whether the given frame is an identity (no-op) — lets the host skip the
     /// render and pass the source through unchanged. Returns false if not identity / on error.

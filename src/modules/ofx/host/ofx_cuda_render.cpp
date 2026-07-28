@@ -20,22 +20,49 @@
 #include "ofx_cuda_render.h"
 
 #include <stdexcept>
+#include <string>
 
 #ifdef CASPAR_OFX_CUDA
 #include <cuda_runtime.h>
+#include <nppi_data_exchange_and_initialization.h>
+#include <nppi_geometry_transforms.h>
+#include <nppi_arithmetic_and_logical_operations.h>
+#include <npp.h>
 #endif
 
 namespace caspar { namespace ofx {
 
 #ifdef CASPAR_OFX_CUDA
 
+namespace {
+void cuda_verify(cudaError_t e, const char* what)
+{
+    if (e != cudaSuccess)
+        throw std::runtime_error(std::string("[ofx] ") + what + ": " + cudaGetErrorString(e));
+}
+void npp_verify(NppStatus s, const char* what)
+{
+    if (s != NPP_SUCCESS)
+        throw std::runtime_error(std::string("[ofx] ") + what + " (NPP status " + std::to_string(static_cast<int>(s)) + ")");
+}
+} // namespace
+
 struct cuda_backend::impl
 {
-    void*        src     = nullptr;
-    void*        out     = nullptr;
+    void*        src     = nullptr; // legacy upload_source buffer (bottom-up RGBA)
+    void*        out     = nullptr; // plug-in output buffer (device)
+    void*        raw     = nullptr; // convert_source: uploaded raw source (top-down)
+    void*        swap    = nullptr; // convert_source: channel-swapped intermediate
+    void*        conv    = nullptr; // convert_source: final bottom-up RGBA source
+    void*        flip    = nullptr; // mirror_output: top-down RGBA ready for the VK array
     std::size_t  src_sz  = 0;
     std::size_t  out_sz  = 0;
+    std::size_t  raw_sz  = 0;
+    std::size_t  swap_sz = 0;
+    std::size_t  conv_sz = 0;
+    std::size_t  flip_sz = 0;
     cudaStream_t stream_ = nullptr;
+    NppStreamContext npp_ctx_{};
 
     impl()
     {
@@ -43,14 +70,20 @@ struct cuda_backend::impl
         if (cudaGetDeviceCount(&n) != cudaSuccess || n == 0)
             throw std::runtime_error("[ofx] no CUDA device available");
         cudaSetDevice(0);
+        cuda_verify(cudaStreamCreate(&stream_), "cudaStreamCreate");
+        // Fill the NPP stream context for the current device, then point it at our stream so all
+        // NPP calls below run on it (instead of the legacy global default stream).
+        npp_verify(nppGetStreamContext(&npp_ctx_), "nppGetStreamContext");
+        npp_ctx_.hStream = stream_;
     }
 
     ~impl()
     {
-        if (src)
-            cudaFree(src);
-        if (out)
-            cudaFree(out);
+        for (void* p : {src, out, raw, swap, conv, flip})
+            if (p)
+                cudaFree(p);
+        if (stream_)
+            cudaStreamDestroy(stream_);
     }
 
     void ensure(void*& buf, std::size_t& cur, std::size_t need)
@@ -95,6 +128,86 @@ void cuda_backend::readback_output(std::uint8_t* rgba, int width, int height)
         throw std::runtime_error("[ofx] cudaMemcpy D2H failed");
 }
 
+void* cuda_backend::convert_source(const std::uint8_t* raw,
+                                   int                 src_stride,
+                                   bool                is_bgra,
+                                   bool                straight_alpha,
+                                   int                 width,
+                                   int                 height)
+{
+    const int         step = width * 4;                            // tightly-packed device row bytes
+    const std::size_t sz   = static_cast<std::size_t>(step) * height;
+    const NppiSize    roi{width, height};
+
+    impl_->ensure(impl_->raw, impl_->raw_sz, sz);
+    impl_->ensure(impl_->conv, impl_->conv_sz, sz);
+
+    // 1) Upload the raw top-down source, tightening any input row padding to `step`.
+    cuda_verify(cudaMemcpy2DAsync(impl_->raw,
+                                  step,
+                                  raw,
+                                  src_stride,
+                                  step,
+                                  height,
+                                  cudaMemcpyHostToDevice,
+                                  impl_->stream_),
+                "cudaMemcpy2DAsync source H2D");
+
+    // 2) Channel swap BGRA->RGBA when needed (dst[i] = src[order[i]]).
+    const std::uint8_t* pre = static_cast<const std::uint8_t*>(impl_->raw);
+    if (is_bgra) {
+        impl_->ensure(impl_->swap, impl_->swap_sz, sz);
+        const int order[4] = {2, 1, 0, 3};
+        npp_verify(nppiSwapChannels_8u_C4R_Ctx(static_cast<const Npp8u*>(impl_->raw),
+                                               step,
+                                               static_cast<Npp8u*>(impl_->swap),
+                                               step,
+                                               roi,
+                                               order,
+                                               impl_->npp_ctx_),
+                   "nppiSwapChannels BGRA->RGBA");
+        pre = static_cast<const std::uint8_t*>(impl_->swap);
+    }
+
+    // 3) Vertical mirror (top-down -> OFX bottom-up) into the final source buffer.
+    npp_verify(nppiMirror_8u_C4R_Ctx(reinterpret_cast<const Npp8u*>(pre),
+                                     step,
+                                     static_cast<Npp8u*>(impl_->conv),
+                                     step,
+                                     roi,
+                                     NPP_HORIZONTAL_AXIS,
+                                     impl_->npp_ctx_),
+               "nppiMirror source vertical");
+
+    // 4) Premultiply straight alpha in place.
+    if (straight_alpha)
+        npp_verify(nppiAlphaPremul_8u_AC4IR_Ctx(
+                       static_cast<Npp8u*>(impl_->conv), step, roi, impl_->npp_ctx_),
+                   "nppiAlphaPremul source");
+
+    return impl_->conv;
+}
+
+void* cuda_backend::mirror_output(void* out_dev, int width, int height)
+{
+    const int         step = width * 4;
+    const std::size_t sz   = static_cast<std::size_t>(step) * height;
+    const NppiSize    roi{width, height};
+
+    impl_->ensure(impl_->flip, impl_->flip_sz, sz);
+    npp_verify(nppiMirror_8u_C4R_Ctx(static_cast<const Npp8u*>(out_dev),
+                                     step,
+                                     static_cast<Npp8u*>(impl_->flip),
+                                     step,
+                                     roi,
+                                     NPP_HORIZONTAL_AXIS,
+                                     impl_->npp_ctx_),
+               "nppiMirror output vertical");
+    return impl_->flip;
+}
+
+void cuda_backend::sync() { cuda_verify(cudaStreamSynchronize(impl_->stream_), "cudaStreamSynchronize"); }
+
 void* cuda_backend::stream() const { return impl_->stream_; }
 
 #else // CASPAR_OFX_CUDA not defined — CUDA was not built; backend is unavailable.
@@ -107,8 +220,12 @@ cuda_backend::~cuda_backend()                                            = defau
 void* cuda_backend::upload_source(const std::uint8_t*, int, int) { return nullptr; }
 void* cuda_backend::ensure_output(int, int) { return nullptr; }
 void  cuda_backend::readback_output(std::uint8_t*, int, int) {}
+void* cuda_backend::convert_source(const std::uint8_t*, int, bool, bool, int, int) { return nullptr; }
+void* cuda_backend::mirror_output(void*, int, int) { return nullptr; }
+void  cuda_backend::sync() {}
 void* cuda_backend::stream() const { return nullptr; }
 
 #endif
 
 }} // namespace caspar::ofx
+

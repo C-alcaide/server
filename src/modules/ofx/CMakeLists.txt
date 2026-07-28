@@ -41,6 +41,8 @@ if (TARGET openfx_host)
 	if (CUDAToolkit_FOUND)
 		target_compile_definitions(ofx PRIVATE CASPAR_OFX_CUDA)
 		target_link_libraries(ofx PRIVATE CUDA::cudart_static)
+		# NPP for on-device source/output convert (channel swap, vertical mirror, alpha premultiply).
+		target_link_libraries(ofx PRIVATE CUDA::nppc CUDA::nppidei CUDA::nppig CUDA::nppial)
 		message(STATUS "ofx: CUDA render backend enabled")
 		# CUDA<->Vulkan zero-copy interop (VkImage exported to CUDA) for the Vulkan mixer.
 		if (ENABLE_VULKAN)

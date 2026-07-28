@@ -462,38 +462,30 @@ class ofx_producer : public core::frame_producer
             // renders into a CUDA device buffer which is copied device-to-device into an exportable
             // VK texture the mixer consumes directly — no CPU readback.
             if (vk_device_ && bytes == 1 && working_bytes_ == 1 && effect_->cuda_capable()) {
-                const int work_stride = w * 4;
-                if (src_rgba)
-                    rgba_top_down_to_rgba_bottom_up(cf.image_data(0).data(), pfd.planes[0].linesize, src_rgba_.data(), work_stride, w, h);
-                else
-                    bgra_top_down_to_rgba_bottom_up(cf.image_data(0).data(), pfd.planes[0].linesize, src_rgba_.data(), work_stride, w, h);
-                if (pfd.is_straight_alpha)
-                    premultiply_rgba8(src_rgba_.data(), work_stride, w, h);
-
+                // No CPU conversion pass: hand the raw source to render_cuda, which uploads it once
+                // and does the swizzle/flip/premultiply on the device (NPP) and mirrors the plug-in
+                // output back to top-down. The returned buffer is top-down RGBA, ready for a single
+                // contiguous copy into the exportable VK texture.
                 apply_animation(t);
-                void* out_dev = effect_->render_cuda(src_rgba_.data(), w, h, t, to_field_kind(field));
+                void* out_dev = effect_->render_cuda(cf.image_data(0).data(),
+                                                     pfd.planes[0].linesize,
+                                                     !src_rgba,
+                                                     pfd.is_straight_alpha,
+                                                     w,
+                                                     h,
+                                                     t,
+                                                     to_field_kind(field));
                 if (out_dev) {
                     auto cvt = acquire_vk_cuda_texture(w, h);
                     if (cvt) {
-                        // The plug-in renders in OFX convention (bottom-up RGBA), matching the GL
-                        // backend so effects behave identically on both mixers. The Vulkan mixer
-                        // samples the exportable texture top-down, so copy the device buffer row-
-                        // reversed (row h-1-y -> array row y) to un-flip it. Channels stay RGBA and
-                        // the frame is tagged rgba below, so no channel swap is needed here.
-                        cudaError_t  e    = cudaSuccess;
-                        const size_t row  = static_cast<size_t>(w) * 4;
-                        const auto*  base = static_cast<const std::uint8_t*>(out_dev);
-                        for (int y = 0; y < h && e == cudaSuccess; ++y) {
-                            e = cudaMemcpy2DToArrayAsync(cvt->array(),
-                                                         0,
-                                                         static_cast<size_t>(y),
-                                                         base + static_cast<size_t>(h - 1 - y) * row,
-                                                         row,
-                                                         row,
-                                                         1,
-                                                         cudaMemcpyDeviceToDevice,
-                                                         nullptr);
-                        }
+                        cudaError_t e = cudaMemcpy2DToArray(cvt->array(),
+                                                            0,
+                                                            0,
+                                                            out_dev,
+                                                            static_cast<size_t>(w) * 4,
+                                                            static_cast<size_t>(w) * 4,
+                                                            static_cast<size_t>(h),
+                                                            cudaMemcpyDeviceToDevice);
                         if (e == cudaSuccess)
                             e = cudaDeviceSynchronize();
                         if (e == cudaSuccess) {

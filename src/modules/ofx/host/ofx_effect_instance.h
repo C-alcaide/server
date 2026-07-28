@@ -50,6 +50,14 @@ struct render_context
     void*               source_dev  = nullptr; ///< CUDA device ptr for the source clip (CUDA mode)
     void*               source_to_dev = nullptr; ///< CUDA device ptr for the SourceTo clip (transition, CUDA mode)
     void*               output_dev  = nullptr; ///< CUDA device ptr for the output clip (CUDA mode)
+    // On-device convert path (CUDA zero-copy): when raw_source is set the host uploads it once and
+    // does the swizzle/flip/premultiply on the device via NPP (no CPU passes), then mirrors the
+    // plug-in output back to top-down. output_dev_topdown is what the producer copies to the VK array.
+    const std::uint8_t* raw_source     = nullptr; ///< raw top-down source (BGRA or RGBA); null = legacy host-RGBA path
+    int                 raw_src_stride = 0;       ///< row bytes of raw_source
+    bool                raw_is_bgra    = false;   ///< raw_source channel order is BGRA (else RGBA)
+    bool                raw_straight   = false;   ///< raw_source has straight (un-premultiplied) alpha
+    void*               output_dev_topdown = nullptr; ///< top-down RGBA output, ready for cudaMemcpy2DToArray
     bool                external_gl = false;   ///< GL textures are owned externally (zero-copy on the mixer device); skip the offscreen context + readback
 };
 
