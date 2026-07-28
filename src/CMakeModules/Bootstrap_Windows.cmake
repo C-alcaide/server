@@ -316,6 +316,21 @@ if (ENABLE_OFX)
 			LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/ofx-plugins/CoreGLTest.ofx.bundle/Contents/Win64"
 		)
 
+		# Core-profile GL source-sampling passthrough test plug-in (validates the zero-copy source
+		# path) — raw C API + GLEW for the GL 3.3 entry points.
+		add_library(CoreGLPassthrough_ofx MODULE "${CMAKE_SOURCE_DIR}/modules/ofx/test/coregl_passthrough_test.cpp")
+		target_include_directories(CoreGLPassthrough_ofx PRIVATE ${openfx_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR})
+		target_compile_options(CoreGLPassthrough_ofx PRIVATE /W0 /WX- /EHsc /UUNICODE /U_UNICODE)
+		target_compile_definitions(CoreGLPassthrough_ofx PRIVATE _CRT_SECURE_NO_WARNINGS)
+		target_link_libraries(CoreGLPassthrough_ofx PRIVATE opengl32 GLEW::glew)
+		set_target_properties(CoreGLPassthrough_ofx PROPERTIES
+			PREFIX ""
+			SUFFIX ".ofx"
+			OUTPUT_NAME "CoreGLPassthrough"
+			FOLDER external
+			LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/ofx-plugins/CoreGLPassthrough.ofx.bundle/Contents/Win64"
+		)
+
 		# CPU transition test plug-in (blends SourceFrom/SourceTo by the Transition param) — raw C API.
 		add_library(TransitionTest_ofx MODULE "${CMAKE_SOURCE_DIR}/modules/ofx/test/transition_mix_test.cpp")
 		target_include_directories(TransitionTest_ofx PRIVATE ${openfx_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR})

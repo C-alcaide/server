@@ -515,19 +515,18 @@ class ofx_producer : public core::frame_producer
             // the self-contained compatibility path.
             if (ogl_device_ && bytes == 1 && working_bytes_ == 1 && effect_->opengl_capable() &&
                 effect_->zerocopy_gl_supported()) {
-                const int work_stride = w * 4;
-                if (src_rgba)
-                    rgba_top_down_to_rgba_bottom_up(
-                        cf.image_data(0).data(), pfd.planes[0].linesize, src_rgba_.data(), work_stride, w, h);
-                else
-                    bgra_top_down_to_rgba_bottom_up(
-                        cf.image_data(0).data(), pfd.planes[0].linesize, src_rgba_.data(), work_stride, w, h);
-                if (pfd.is_straight_alpha)
-                    premultiply_rgba8(src_rgba_.data(), work_stride, w, h);
-
+                // No CPU conversion pass: hand the raw source to the zero-copy path, which uploads it
+                // once and does the swizzle/flip/premultiply on the GPU.
                 apply_animation(t);
-                auto out_tex = effect_->render_gl_zerocopy(
-                    *ogl_device_, src_rgba_.data(), w, h, t, to_field_kind(field));
+                auto out_tex = effect_->render_gl_zerocopy(*ogl_device_,
+                                                           cf.image_data(0).data(),
+                                                           pfd.planes[0].linesize,
+                                                           !src_rgba,
+                                                           pfd.is_straight_alpha,
+                                                           w,
+                                                           h,
+                                                           t,
+                                                           to_field_kind(field));
                 if (out_tex) {
                     // The OFX plug-in renders standard RGBA-ordered pixels into the texture. The OGL
                     // mixer's shader works in a BGRA convention (its "rgba" case samples straight and

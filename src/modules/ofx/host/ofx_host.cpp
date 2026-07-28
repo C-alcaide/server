@@ -374,6 +374,12 @@ struct effect::impl
     std::string                       plugin_id;             ///< for health/blocklist accounting
     bool                              gl_zerocopy_unsupported = false; ///< plug-in needs a compatibility GL profile
 
+    // Zero-copy GL source-convert (swizzle/flip/premultiply on the GPU). Created lazily on the
+    // mixer's GL thread and owned by that context (freed on context teardown).
+    unsigned int zc_convert_prog_ = 0;
+    unsigned int zc_convert_vao_  = 0;
+    unsigned int zc_upload_tex_   = 0;
+
     ~impl()
     {
         // A misbehaving plug-in must never let an exception (incl. SEH under /EHa) escape a
@@ -582,14 +588,33 @@ void* effect::render_cuda(const std::uint8_t* src_rgba, int width, int height, d
     }
 }
 
+namespace {
+GLuint ofx_compile_shader(GLenum type, const char* src)
+{
+    GLuint s = glCreateShader(type);
+    glShaderSource(s, 1, &src, nullptr);
+    glCompileShader(s);
+    GLint ok = GL_FALSE;
+    glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
+    if (!ok) {
+        glDeleteShader(s);
+        return 0;
+    }
+    return s;
+}
+} // namespace
+
 std::shared_ptr<core::texture> effect::render_gl_zerocopy(accelerator::ogl::device& device,
-                                                          const std::uint8_t*       src_rgba,
+                                                          const std::uint8_t*       src,
+                                                          int                       src_stride,
+                                                          bool                      src_is_bgra,
+                                                          bool                      straight_alpha,
                                                           int                       width,
                                                           int                       height,
                                                           double                    time,
                                                           field_kind                field)
 {
-    if (!valid() || src_rgba == nullptr || width <= 0 || height <= 0)
+    if (!valid() || src == nullptr || width <= 0 || height <= 0)
         return nullptr;
 
     const char* field_str = kOfxImageFieldBoth;
@@ -615,13 +640,84 @@ std::shared_ptr<core::texture> effect::render_gl_zerocopy(accelerator::ogl::devi
             auto source_tex = device.create_texture(width, height, 4, common::bit_depth::bit8, false);
             auto render_tex = device.create_texture(width, height, 4, common::bit_depth::bit8, true);
 
-            // Upload the source. The producer supplies rows in the orientation that makes the
-            // plug-in's output land in the mixer's top-down convention (no GPU flip needed).
+            // Compile the source-convert program once (swizzle is free via the GL_BGRA upload; this
+            // pass does the vertical flip + premultiply that the CPU path used to do).
+            if (impl_->zc_convert_prog_ == 0) {
+                static const char* kVs =
+                    "#version 330 core\nout vec2 vUV;\nvoid main(){ vec2 p=vec2(float((gl_VertexID<<1)&2),"
+                    "float(gl_VertexID&2)); vUV=p; gl_Position=vec4(p*2.0-1.0,0.0,1.0); }\n";
+                static const char* kFs =
+                    "#version 330 core\nin vec2 vUV;\nout vec4 o;\nuniform sampler2D uSrc;\nuniform bool "
+                    "uStraight;\nvoid main(){ vec4 c=texture(uSrc, vec2(vUV.x, 1.0-vUV.y)); if(uStraight) "
+                    "c.rgb*=c.a; o=c; }\n";
+                GLuint vs = ofx_compile_shader(GL_VERTEX_SHADER, kVs);
+                GLuint fs = ofx_compile_shader(GL_FRAGMENT_SHADER, kFs);
+                if (vs && fs) {
+                    GLuint prog = glCreateProgram();
+                    glAttachShader(prog, vs);
+                    glAttachShader(prog, fs);
+                    glLinkProgram(prog);
+                    GLint ok = GL_FALSE;
+                    glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+                    if (ok) {
+                        impl_->zc_convert_prog_ = prog;
+                        glGenVertexArrays(1, &impl_->zc_convert_vao_);
+                    } else {
+                        glDeleteProgram(prog);
+                    }
+                }
+                if (vs)
+                    glDeleteShader(vs);
+                if (fs)
+                    glDeleteShader(fs);
+            }
+            if (impl_->zc_convert_prog_ == 0)
+                return nullptr; // convert program unavailable -> fall back to CPU path
+
+            // Upload the RAW source (top-down); GL_BGRA gives a free channel swap on upload.
+            if (impl_->zc_upload_tex_ == 0) {
+                glGenTextures(1, &impl_->zc_upload_tex_);
+                glBindTexture(GL_TEXTURE_2D, impl_->zc_upload_tex_);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            } else {
+                glBindTexture(GL_TEXTURE_2D, impl_->zc_upload_tex_);
+            }
             glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-            glBindTexture(GL_TEXTURE_2D, source_tex->id());
-            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, src_rgba);
-            glBindTexture(GL_TEXTURE_2D, 0);
+            glPixelStorei(GL_UNPACK_ROW_LENGTH, src_stride / 4);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0,
+                         src_is_bgra ? GL_BGRA : GL_RGBA, GL_UNSIGNED_BYTE, src);
+            glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
             glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+            glBindTexture(GL_TEXTURE_2D, 0);
+
+            // GPU convert pass: sample the upload texture flipped + premultiplied into source_tex.
+            {
+                GLint prev_fbo = 0, prev_vp[4] = {0, 0, 0, 0};
+                glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prev_fbo);
+                glGetIntegerv(GL_VIEWPORT, prev_vp);
+                GLuint cfbo = 0;
+                glGenFramebuffers(1, &cfbo);
+                glBindFramebuffer(GL_FRAMEBUFFER, cfbo);
+                glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, source_tex->id(), 0);
+                glViewport(0, 0, width, height);
+                glDisable(GL_BLEND);
+                glUseProgram(impl_->zc_convert_prog_);
+                glBindVertexArray(impl_->zc_convert_vao_);
+                glActiveTexture(GL_TEXTURE0);
+                glBindTexture(GL_TEXTURE_2D, impl_->zc_upload_tex_);
+                glUniform1i(glGetUniformLocation(impl_->zc_convert_prog_, "uSrc"), 0);
+                glUniform1i(glGetUniformLocation(impl_->zc_convert_prog_, "uStraight"), straight_alpha ? 1 : 0);
+                glDrawArrays(GL_TRIANGLES, 0, 3);
+                glBindVertexArray(0);
+                glUseProgram(0);
+                glBindTexture(GL_TEXTURE_2D, 0);
+                glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(prev_fbo));
+                glViewport(prev_vp[0], prev_vp[1], prev_vp[2], prev_vp[3]);
+                glDeleteFramebuffers(1, &cfbo);
+            }
 
             auto& c         = impl_->eff->ctx();
             c.external_gl   = true;

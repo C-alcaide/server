@@ -82,11 +82,15 @@ class effect
 
     /// Zero-copy OpenGL render. Runs the plug-in's OpenGL render on the mixer's GL device thread
     /// against device-owned textures and returns the result as a mixer texture — NO CPU readback
-    /// and NO re-upload of the output. src_rgba is bottom-up 8-bit RGBA (width*height*4), the same
-    /// orientation as the CPU/self-contained GL path; the output is Y-flipped on the GPU back to the
-    /// mixer's top-down convention. Returns nullptr on failure (caller should fall back to render()).
+    /// and NO re-upload of the output. The raw source (top-down, `src_is_bgra` selects BGRA vs RGBA)
+    /// is uploaded once and swizzled/flipped/premultiplied into the source texture **on the GPU** —
+    /// no CPU conversion pass. The output is Y-flipped on the GPU back to the mixer's top-down
+    /// convention. Returns nullptr on failure (caller should fall back to render()).
     std::shared_ptr<core::texture> render_gl_zerocopy(accelerator::ogl::device& device,
-                                                      const std::uint8_t*       src_rgba,
+                                                      const std::uint8_t*       src,
+                                                      int                       src_stride,
+                                                      bool                      src_is_bgra,
+                                                      bool                      straight_alpha,
                                                       int                       width,
                                                       int                       height,
                                                       double                    time,
