@@ -84,8 +84,10 @@ class effect
     /// against device-owned textures and returns the result as a mixer texture — NO CPU readback
     /// and NO re-upload of the output. The raw source (top-down, `src_is_bgra` selects BGRA vs RGBA)
     /// is uploaded once and swizzled/flipped/premultiplied into the source texture **on the GPU** —
-    /// no CPU conversion pass. The output is Y-flipped on the GPU back to the mixer's top-down
-    /// convention. Returns nullptr on failure (caller should fall back to render()).
+    /// no CPU conversion pass. Alternatively, when `src_tex_id` is non-zero the source is a GPU-native
+    /// mixer texture sampled directly (texture-backed zero-copy — no readback, no upload; `src_flip`
+    /// states its orientation and `src` may be null). The output is Y-flipped on the GPU back to the
+    /// mixer's top-down convention. Returns nullptr on failure (caller should fall back to render()).
     std::shared_ptr<core::texture> render_gl_zerocopy(accelerator::ogl::device& device,
                                                       const std::uint8_t*       src,
                                                       int                       src_stride,
@@ -94,7 +96,9 @@ class effect
                                                       int                       width,
                                                       int                       height,
                                                       double                    time,
-                                                      field_kind                field = field_kind::both);
+                                                      field_kind                field       = field_kind::both,
+                                                      unsigned int              src_tex_id  = 0,
+                                                      bool                      src_flip    = true);
 
     /// True if this effect negotiated an OpenGL-capable render (plug-in advertises GL support and
     /// the host enabled it). Lets the producer decide whether the zero-copy GL path is viable.

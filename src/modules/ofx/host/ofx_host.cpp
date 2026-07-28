@@ -631,9 +631,14 @@ std::shared_ptr<core::texture> effect::render_gl_zerocopy(accelerator::ogl::devi
                                                           int                       width,
                                                           int                       height,
                                                           double                    time,
-                                                          field_kind                field)
+                                                          field_kind                field,
+                                                          unsigned int              src_tex_id,
+                                                          bool                      src_flip)
 {
-    if (!valid() || src == nullptr || width <= 0 || height <= 0)
+    // Two source modes: a CPU pointer (`src`) uploaded into an internal texture, or a GPU-native
+    // source texture (`src_tex_id`) sampled directly (texture-backed zero-copy — no readback, no
+    // upload). Exactly one must be provided.
+    if (!valid() || width <= 0 || height <= 0 || (src == nullptr && src_tex_id == 0))
         return nullptr;
 
     const char* field_str = kOfxImageFieldBoth;
@@ -667,8 +672,8 @@ std::shared_ptr<core::texture> effect::render_gl_zerocopy(accelerator::ogl::devi
                     "float(gl_VertexID&2)); vUV=p; gl_Position=vec4(p*2.0-1.0,0.0,1.0); }\n";
                 static const char* kFs =
                     "#version 330 core\nin vec2 vUV;\nout vec4 o;\nuniform sampler2D uSrc;\nuniform bool "
-                    "uStraight;\nvoid main(){ vec4 c=texture(uSrc, vec2(vUV.x, 1.0-vUV.y)); if(uStraight) "
-                    "c.rgb*=c.a; o=c; }\n";
+                    "uStraight;\nuniform bool uFlip;\nvoid main(){ vec2 uv=vec2(vUV.x, uFlip?1.0-vUV.y:vUV.y); "
+                    "vec4 c=texture(uSrc, uv); if(uStraight) c.rgb*=c.a; o=c; }\n";
                 GLuint vs = ofx_compile_shader(GL_VERTEX_SHADER, kVs);
                 GLuint fs = ofx_compile_shader(GL_FRAGMENT_SHADER, kFs);
                 if (vs && fs) {
@@ -693,27 +698,36 @@ std::shared_ptr<core::texture> effect::render_gl_zerocopy(accelerator::ogl::devi
             if (impl_->zc_convert_prog_ == 0)
                 return nullptr; // convert program unavailable -> fall back to CPU path
 
-            // Upload the RAW source (top-down); GL_BGRA gives a free channel swap on upload.
-            if (impl_->zc_upload_tex_ == 0) {
-                glGenTextures(1, &impl_->zc_upload_tex_);
-                glBindTexture(GL_TEXTURE_2D, impl_->zc_upload_tex_);
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            // Upload the RAW source (top-down); GL_BGRA gives a free channel swap on upload. Skipped
+            // entirely when a GPU-native source texture is provided (texture-backed zero-copy).
+            bool uploaded_flip = true; // CPU source is top-down -> flip to OFX bottom-up
+            if (src_tex_id == 0) {
+                if (impl_->zc_upload_tex_ == 0) {
+                    glGenTextures(1, &impl_->zc_upload_tex_);
+                    glBindTexture(GL_TEXTURE_2D, impl_->zc_upload_tex_);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                } else {
+                    glBindTexture(GL_TEXTURE_2D, impl_->zc_upload_tex_);
+                }
+                glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+                glPixelStorei(GL_UNPACK_ROW_LENGTH, src_stride / 4);
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0,
+                             src_is_bgra ? GL_BGRA : GL_RGBA, GL_UNSIGNED_BYTE, src);
+                glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+                glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+                glBindTexture(GL_TEXTURE_2D, 0);
             } else {
-                glBindTexture(GL_TEXTURE_2D, impl_->zc_upload_tex_);
+                uploaded_flip = src_flip; // GPU-native source: caller states its orientation
             }
-            glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-            glPixelStorei(GL_UNPACK_ROW_LENGTH, src_stride / 4);
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0,
-                         src_is_bgra ? GL_BGRA : GL_RGBA, GL_UNSIGNED_BYTE, src);
-            glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
-            glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
-            glBindTexture(GL_TEXTURE_2D, 0);
 
-            // GPU convert pass: sample the upload texture flipped + premultiplied into source_tex.
+            // GPU convert pass: sample the source (upload texture or the provided GPU texture)
+            // flipped + premultiplied into source_tex.
             {
+                const GLuint src_sample_tex =
+                    src_tex_id != 0 ? static_cast<GLuint>(src_tex_id) : impl_->zc_upload_tex_;
                 GLint prev_fbo = 0, prev_vp[4] = {0, 0, 0, 0};
                 glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prev_fbo);
                 glGetIntegerv(GL_VIEWPORT, prev_vp);
@@ -726,9 +740,10 @@ std::shared_ptr<core::texture> effect::render_gl_zerocopy(accelerator::ogl::devi
                 glUseProgram(impl_->zc_convert_prog_);
                 glBindVertexArray(impl_->zc_convert_vao_);
                 glActiveTexture(GL_TEXTURE0);
-                glBindTexture(GL_TEXTURE_2D, impl_->zc_upload_tex_);
+                glBindTexture(GL_TEXTURE_2D, src_sample_tex);
                 glUniform1i(glGetUniformLocation(impl_->zc_convert_prog_, "uSrc"), 0);
                 glUniform1i(glGetUniformLocation(impl_->zc_convert_prog_, "uStraight"), straight_alpha ? 1 : 0);
+                glUniform1i(glGetUniformLocation(impl_->zc_convert_prog_, "uFlip"), uploaded_flip ? 1 : 0);
                 glDrawArrays(GL_TRIANGLES, 0, 3);
                 glBindVertexArray(0);
                 glUseProgram(0);

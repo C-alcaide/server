@@ -526,18 +526,50 @@ class ofx_producer : public core::frame_producer
             // the self-contained compatibility path.
             if (ogl_device_ && bytes == 1 && working_bytes_ == 1 && effect_->opengl_capable() &&
                 effect_->zerocopy_gl_supported()) {
-                // No CPU conversion pass: hand the raw source to the zero-copy path, which uploads it
-                // once and does the swizzle/flip/premultiply on the GPU.
                 apply_animation(t);
-                auto out_tex = effect_->render_gl_zerocopy(*ogl_device_,
-                                                           cf.image_data(0).data(),
-                                                           pfd.planes[0].linesize,
-                                                           !src_rgba,
-                                                           pfd.is_straight_alpha,
-                                                           w,
-                                                           h,
-                                                           t,
-                                                           to_field_kind(field));
+
+                // Texture-backed zero-copy: if the source frame is already a GPU-native OGL texture
+                // on this mixer, sample it directly through the convert pass — no CPU readback of the
+                // upstream frame and no re-upload. Otherwise upload the raw CPU source once.
+                unsigned int src_tex = 0;
+                if (auto st = cf.texture()) {
+                    if (auto ogl_tex = std::dynamic_pointer_cast<accelerator::ogl::texture>(st))
+                        src_tex = static_cast<unsigned int>(ogl_tex->id());
+                }
+
+                std::shared_ptr<core::texture> out_tex;
+                if (src_tex != 0) {
+                    static bool logged_tex = false;
+                    if (!logged_tex) { logged_tex = true;
+                        CASPAR_LOG(info) << L"[ofx] OpenGL zero-copy producer path active "
+                                            L"(texture-backed source, no readback)."; }
+                    // Mixer textures are bottom-up RGBA and premultiplied; no channel swap and no
+                    // premultiply. The convert pass still flips (uFlip) so that, combined with the
+                    // output Y-flip blit, orientation matches the source (same as the CPU path).
+                    out_tex = effect_->render_gl_zerocopy(*ogl_device_,
+                                                          nullptr,
+                                                          0,
+                                                          false,
+                                                          false,
+                                                          w,
+                                                          h,
+                                                          t,
+                                                          to_field_kind(field),
+                                                          src_tex,
+                                                          /*src_flip=*/true);
+                } else {
+                    // No CPU conversion pass: hand the raw source to the zero-copy path, which uploads
+                    // it once and does the swizzle/flip/premultiply on the GPU.
+                    out_tex = effect_->render_gl_zerocopy(*ogl_device_,
+                                                          cf.image_data(0).data(),
+                                                          pfd.planes[0].linesize,
+                                                          !src_rgba,
+                                                          pfd.is_straight_alpha,
+                                                          w,
+                                                          h,
+                                                          t,
+                                                          to_field_kind(field));
+                }
                 if (out_tex) {
                     // The OFX plug-in renders standard RGBA-ordered pixels into the texture. The OGL
                     // mixer's shader works in a BGRA convention (its "rgba" case samples straight and
