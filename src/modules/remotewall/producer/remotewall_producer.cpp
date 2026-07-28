@@ -30,13 +30,20 @@
 #include <common/array.h>
 #include <common/bit_depth.h>
 #include <common/log.h>
+#include <common/utf.h>
 
 #include <boost/algorithm/string.hpp>
 
+#include <cctype>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
+#include <future>
 #include <memory>
+#include <sstream>
+#include <string>
+#include <utility>
 #include <vector>
 
 #include "RecvWall.h" // vendored receiver C API
@@ -59,6 +66,27 @@ module_config& config()
 }
 
 namespace {
+
+// Map the stream's free-text colour tag (e.g. "BT709", "BT2020/PQ", "BT2020/HLG") to CasparCG's
+// colour-space / transfer enums so the mixer applies the right colour handling / tone-map.
+std::pair<core::color_space, core::color_transfer> parse_colorspace(const char* cs)
+{
+    std::string s = cs ? cs : "";
+    for (auto& ch : s)
+        ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+
+    core::color_space    space = core::color_space::bt709;
+    core::color_transfer trc   = core::color_transfer::sdr;
+    if (s.find("2020") != std::string::npos)
+        space = core::color_space::bt2020;
+    else if (s.find("601") != std::string::npos)
+        space = core::color_space::bt601;
+    if (s.find("PQ") != std::string::npos || s.find("2084") != std::string::npos)
+        trc = core::color_transfer::pq;
+    else if (s.find("HLG") != std::string::npos)
+        trc = core::color_transfer::hlg;
+    return {space, trc};
+}
 
 // Native cloudXR tile-wall producer. On the Vulkan mixer it publishes the receiver's device
 // composite straight into an exportable VK texture (zero-copy, no readback); elsewhere it falls
@@ -187,7 +215,9 @@ class remotewall_producer : public core::frame_producer
         if (!have_frame_ || wall_w_ <= 0 || wall_h_ <= 0)
             return make_marker_frame();
 
-        core::pixel_format_desc pfd(core::pixel_format::bgra);
+        update_state(wall_w_, wall_h_);
+        const auto cst = parse_colorspace(info_.colorSpace);
+        core::pixel_format_desc pfd(core::pixel_format::bgra, cst.first, cst.second);
         pfd.planes.push_back(core::pixel_format_desc::plane(wall_w_, wall_h_, 4));
 
         auto      frame      = frame_factory_->create_frame(this, pfd);
@@ -234,7 +264,8 @@ class remotewall_producer : public core::frame_producer
 
     core::draw_frame make_texture_frame(const std::shared_ptr<CudaVkTexture>& cvt, int w, int h)
     {
-        core::pixel_format_desc pfd(core::pixel_format::bgra);
+        const auto cst = parse_colorspace(info_.colorSpace);
+        core::pixel_format_desc pfd(core::pixel_format::bgra, cst.first, cst.second);
         pfd.is_straight_alpha = false; // composite alpha is forced opaque
         pfd.planes.push_back(core::pixel_format_desc::plane(w, h, 4, common::bit_depth::bit8));
 
@@ -255,6 +286,8 @@ class remotewall_producer : public core::frame_producer
         if (!RecvWallGetGeometry(rw_, &gw, &gh, nullptr, nullptr, nullptr, nullptr) || gw == 0 || gh == 0)
             return last_df_ ? last_df_ : make_marker_frame();
 
+        wall_w_ = static_cast<int>(gw);
+        wall_h_ = static_cast<int>(gh);
         ensure_pool(static_cast<int>(gw), static_cast<int>(gh));
 
         if (!bound_) {
@@ -271,6 +304,7 @@ class remotewall_producer : public core::frame_producer
             // the next wall does not overwrite the frame the mixer is about to read.
             auto present = bound_;
             have_frame_  = true;
+            update_state(static_cast<int>(gw), static_cast<int>(gh));
 
             auto next = pick_free(present);
             if (next) {
@@ -284,6 +318,83 @@ class remotewall_producer : public core::frame_producer
         return last_df_ ? last_df_ : make_marker_frame();
     }
 #endif
+
+    // Publish per-frame metadata (geometry, timecode, colour, FEC/drops, and the full source camera)
+    // as monitor state -> emitted over OSC, and available to CALL ... REMOTEWALL INFO/CAMERA.
+    void update_state(int w, int h)
+    {
+        RecvWallStats st{};
+        if (rw_)
+            RecvWallGetStats(rw_, &st);
+
+        core::monitor::state s;
+        s["remotewall/port"]           = port_;
+        s["remotewall/wall"]           = std::vector<int>{w, h};
+        s["remotewall/grid"]           = std::vector<int>{static_cast<int>(info_.gridCols),
+                                                          static_cast<int>(info_.gridRows)};
+        s["remotewall/fps"]            = info_.fpsDen ? static_cast<double>(info_.fpsNum) / info_.fpsDen : 0.0;
+        s["remotewall/colorspace"]     = std::string(info_.colorSpace);
+        s["remotewall/frame"]          = static_cast<double>(info_.globalFrameIndex);
+        if (info_.tcValid) {
+            char tc[24];
+            std::snprintf(tc, sizeof tc, "%02u:%02u:%02u%c%02u", info_.tcHours, info_.tcMinutes,
+                          info_.tcSeconds, info_.tcDrop ? ';' : ':', info_.tcFrames);
+            s["remotewall/timecode"] = std::string(tc);
+        }
+        s["remotewall/fec-recovered"]  = static_cast<double>(st.fecRecovered);
+        s["remotewall/drops"]          = static_cast<double>(st.auQueueDrops);
+        s["remotewall/frames-decoded"] = static_cast<double>(st.framesDecoded);
+
+        // Full source camera (CameraMeta: camToWorld/worldToCam/proj 4x4, intrinsics, fov, frustum).
+        const float* cam = info_.cam;
+        s["remotewall/camera/camtoworld"] = std::vector<double>(cam, cam + 16);
+        s["remotewall/camera/worldtocam"] = std::vector<double>(cam + 16, cam + 32);
+        s["remotewall/camera/proj"]       = std::vector<double>(cam + 32, cam + 48);
+        s["remotewall/camera/intrinsics"] = std::vector<double>{cam[48], cam[49], cam[50], cam[51]};
+        s["remotewall/camera/fov"]        = std::vector<double>{cam[52], cam[53]};
+        s["remotewall/camera/frustum"] =
+            std::vector<double>{cam[56], cam[57], cam[58], cam[59], cam[60], cam[61]};
+        state_ = s;
+    }
+
+    // AMCP: CALL <ch-layer> REMOTEWALL INFO | CAMERA
+    std::future<std::wstring> call(const std::vector<std::wstring>& params) override
+    {
+        std::wstring result;
+        if (!params.empty() && boost::iequals(params.at(0), L"REMOTEWALL")) {
+            const std::wstring sub = params.size() > 1 ? params.at(1) : L"";
+            if (boost::iequals(sub, L"INFO")) {
+                RecvWallStats st{};
+                if (rw_)
+                    RecvWallGetStats(rw_, &st);
+                char tc[24] = "--:--:--:--";
+                if (info_.tcValid)
+                    std::snprintf(tc, sizeof tc, "%02u:%02u:%02u%c%02u", info_.tcHours, info_.tcMinutes,
+                                  info_.tcSeconds, info_.tcDrop ? ';' : ':', info_.tcFrames);
+                std::ostringstream os;
+                os << "port " << port_ << " wall " << wall_w_ << "x" << wall_h_ << " grid "
+                   << info_.gridCols << "x" << info_.gridRows << " fps "
+                   << (info_.fpsDen ? static_cast<double>(info_.fpsNum) / info_.fpsDen : 0.0) << " tc " << tc
+                   << " colorspace " << info_.colorSpace << " frame " << info_.globalFrameIndex << " fec "
+                   << st.fecRecovered << " drops " << st.auQueueDrops << "\r\n";
+                result = u16(os.str());
+            } else if (boost::iequals(sub, L"CAMERA")) {
+                const float*       cam = info_.cam;
+                std::ostringstream os;
+                os << "intrinsics fx " << cam[48] << " fy " << cam[49] << " cx " << cam[50] << " cy " << cam[51]
+                   << " fov " << cam[52] << " " << cam[53] << " frustum " << cam[56] << " " << cam[57] << " "
+                   << cam[58] << " " << cam[59] << " " << cam[60] << " " << cam[61] << "\r\n";
+                os << "proj";
+                for (int i = 32; i < 48; ++i)
+                    os << " " << cam[i];
+                os << "\r\n";
+                result = u16(os.str());
+            }
+        }
+        std::promise<std::wstring> pr;
+        pr.set_value(result);
+        return pr.get_future();
+    }
 
     core::monitor::state state() const override { return state_; }
     std::wstring         print() const override { return L"remotewall[" + std::to_wstring(port_) + L"]"; }
