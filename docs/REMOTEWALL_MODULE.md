@@ -131,8 +131,11 @@ Caveats:
 
 - Leave the DeckLink consumer's `gpu-readback-mode` at `auto` (or `cuda`/`vulkan`). Setting it to `cpu`
   forces the host path and discards the benefit.
-- On a multi‑GPU host, keep the **decode GPU, the Vulkan mixer, and the DeckLink adapter on the same
-  card**. The consumer matches the adapter's GPU by LUID and remotewall matches the mixer's GPU by UUID,
-  so aligning them avoids a cross‑GPU copy. Pin decode with `DEVICE` if auto‑match picks the wrong one.
+- On a multi‑GPU host, keep all three **GPU stages on one GPU**: the decode GPU, the Vulkan mixer, and
+  the DeckLink consumer's readback/pack step. remotewall matches decode to the mixer GPU by UUID and the
+  readback strategy matches its compute GPU to the mixer GPU by LUID, so they already converge on the
+  mixer's card — just make sure decode lands there too (pin with `DEVICE` if auto‑match picks wrong).
+  The DeckLink board itself is a PCIe I/O card fed from host RAM (no GPUDirect here), so it has no GPU
+  affinity — only the GPU stages must share a card to avoid cross‑GPU copies.
 - HDR: the 16‑bit zero‑copy wall → VK mixer → v210 compute packer keeps 10‑bit precision on‑GPU end‑to‑end.
 
