@@ -251,6 +251,13 @@ struct RecvWallHandle
 	CUgraphicsResource texRes = nullptr;
 	std::atomic<bool> texBound{false};
 
+	// GPU-direct output: a CUDA array (e.g. a Vulkan/GL texture mapped to CUDA)
+	// the GPU path publishes into directly. Persistent (no map/unmap); the caller
+	// owns the array's lifetime and rebinds a fresh one per frame if double-buffering.
+	std::mutex zc_mtx;
+	CUarray zc_arr = nullptr;
+	std::atomic<bool> zc_bound{false};
+
 	std::atomic<uint64_t> ausDone{0}, decOut{0}, complete{0}, qDrops{0}, gpuErrors{0};
 	std::mutex srcMtx; char srcAddr[48] = {0};   // last datagram's source ip:port
 	uint8_t yLut[256], cLut[256];
@@ -442,7 +449,32 @@ void RecvWallHandle::decodeWorkerGpu(uint16_t tile, TileQ* tq)
 				if (fresh) {
 					cuCtxSynchronize();   // wait for all tile kernels before reading back
 					bool wentDirect = false;
-					if (texBound.load() && !syncOn) {
+					// Zero-copy publish into a bound CUDA array (Vulkan/GL texture mapped
+					// to CUDA): device composite -> array, entirely on the GPU. The array
+					// is persistent (no map/unmap); clients use RecvWallPeekInfo.
+					if (zc_bound.load() && !syncOn) {
+						std::lock_guard<std::mutex> zc_lock(zc_mtx); // NB: 'ck' is a NvCodecUtils macro
+						if (zc_arr) {
+							cuMemsetD2D8(myBuf + 3, 4, 0xFF, 1, (size_t)wallW * wallH); // opaque alpha
+							CUDA_MEMCPY2D cp{};
+							cp.srcMemoryType = CU_MEMORYTYPE_DEVICE;
+							cp.srcDevice     = myBuf;
+							cp.srcPitch      = (size_t)wallW * 4;
+							cp.dstMemoryType = CU_MEMORYTYPE_ARRAY;
+							cp.dstArray      = zc_arr;
+							cp.WidthInBytes  = (size_t)wallW * 4;
+							cp.Height        = (size_t)wallH;
+							if (cuMemcpy2D(&cp) == CUDA_SUCCESS) wentDirect = true;
+						}
+						if (wentDirect) {
+							std::lock_guard<std::mutex> lk(latestMtx);
+							fillInfo(latestInfo, doneMeta, doneSend, wallW, wallH);
+							version.fetch_add(1);
+							complete.fetch_add(1);
+							latestCv.notify_all();
+						}
+					}
+					if (!wentDirect && texBound.load() && !syncOn) {
 						// Zero-copy publish: CUDA composite -> registered D3D11
 						// texture, entirely on the GPU. Version/info only; no
 						// CPU pixels (clients use RecvWallPeekInfo).
@@ -819,6 +851,24 @@ void RecvWallUnbindD3D11Texture(RecvWallHandle* h)
 	cuCtxSetCurrent(h->ctx);
 	std::lock_guard<std::mutex> lk(h->texMtx);
 	if (h->texRes) { cuGraphicsUnregisterResource(h->texRes); h->texRes = nullptr; }
+}
+
+int RecvWallBindCudaArray(RecvWallHandle* h, void* cudaArray)
+{
+	if (!h || !cudaArray) return 0;
+	if (!h->cfg.useGpuConvert || h->syncOn) return 0;   // needs the device composite
+	std::lock_guard<std::mutex> lk(h->zc_mtx);
+	h->zc_arr = reinterpret_cast<CUarray>(cudaArray);  // cudaArray_t and CUarray alias the same object
+	h->zc_bound.store(true);
+	return 1;
+}
+
+void RecvWallUnbindCudaArray(RecvWallHandle* h)
+{
+	if (!h) return;
+	h->zc_bound.store(false);
+	std::lock_guard<std::mutex> lk(h->zc_mtx);
+	h->zc_arr = nullptr;
 }
 
 int RecvWallPeekInfo(RecvWallHandle* h, unsigned long long* ioVersion, RecvWallFrameInfo* outInfo)

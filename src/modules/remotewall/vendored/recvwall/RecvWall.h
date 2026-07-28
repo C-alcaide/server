@@ -101,6 +101,18 @@ int RecvWallBindD3D11Texture(RecvWallHandle* h, void* d3d11Texture2D);
 /* Detach the texture: publishes go back to the CPU path (GetLatest works again). */
 void RecvWallUnbindD3D11Texture(RecvWallHandle* h);
 
+/* ---- GPU-direct output (zero-copy to a CUDA array) -----------------------
+   Bind a CUDA array (cudaArray_t / CUarray, size == wall size, RGBA8/BGRA8 to
+   match pixelOrder) that the GPU-convert path publishes the composite INTO
+   directly (device->array, no CPU round-trip). Intended for a Vulkan/GL texture
+   already mapped to CUDA (e.g. an exportable VkImage imported via external
+   memory). Requires useGpuConvert=1 and no syncGroup. Returns 1 on success.
+   RecvWallPeekInfo advances the version when a new wall has been written. */
+int RecvWallBindCudaArray(RecvWallHandle* h, void* cudaArray);
+
+/* Detach the CUDA array: publishes go back to the CPU path (GetLatest works). */
+void RecvWallUnbindCudaArray(RecvWallHandle* h);
+
 /* Like RecvWallGetLatest but WITHOUT pixels: advances *ioVersion and fills
    outInfo when a newer wall was published. The polling companion of the
    GPU-direct mode. Returns 1 = newer, 0 = no change. */

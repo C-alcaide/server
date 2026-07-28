@@ -27,6 +27,8 @@
 #include <core/producer/frame_producer.h>
 #include <core/video_format.h>
 
+#include <common/array.h>
+#include <common/bit_depth.h>
 #include <common/log.h>
 
 #include <boost/algorithm/string.hpp>
@@ -34,9 +36,19 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <memory>
 #include <vector>
 
 #include "RecvWall.h" // vendored receiver C API
+
+#ifdef ENABLE_VULKAN
+#include <accelerator/vulkan/image/image_mixer.h>
+#include <accelerator/vulkan/util/device.h>
+
+#include <cuda_runtime.h>
+
+#include "cuda_vk_texture.h" // src/modules/cuda_vk_texture.h (via the .. include dir)
+#endif
 
 namespace caspar { namespace remotewall {
 
@@ -48,9 +60,9 @@ module_config& config()
 
 namespace {
 
-// Phase 1 producer: binds the cloudXR receiver (UDP/RTP+FEC -> per-tile NVDEC -> composite) and
-// serves the latest wall frame. CPU-readback path (RecvWallGetLatest copies the composite to host);
-// the CUDA<->VK/GL zero-copy hand-off replaces this in Phase 2. Renders a marker frame until signal.
+// Native cloudXR tile-wall producer. On the Vulkan mixer it publishes the receiver's device
+// composite straight into an exportable VK texture (zero-copy, no readback); elsewhere it falls
+// back to a CPU readback. Renders a marker frame until the wall is receiving.
 class remotewall_producer : public core::frame_producer
 {
     spl::shared_ptr<core::frame_factory> frame_factory_;
@@ -70,6 +82,16 @@ class remotewall_producer : public core::frame_producer
     bool                      have_frame_ = false;
     core::monitor::state      state_;
 
+#ifdef ENABLE_VULKAN
+    std::shared_ptr<accelerator::vulkan::device>   vk_device_;
+    bool                                           use_vulkan_ = false;
+    std::vector<std::shared_ptr<CudaVkTexture>>    pool_;
+    std::shared_ptr<CudaVkTexture>                 bound_;    // current GPU write target
+    int                                            pool_w_ = 0;
+    int                                            pool_h_ = 0;
+    core::draw_frame                               last_df_ = core::draw_frame::empty();
+#endif
+
   public:
     remotewall_producer(const core::frame_producer_dependencies& deps, int port, int tiles, int codec)
         : frame_factory_(deps.frame_factory)
@@ -80,6 +102,12 @@ class remotewall_producer : public core::frame_producer
         , tiles_(tiles)
         , codec_(codec)
     {
+#ifdef ENABLE_VULKAN
+        if (auto* vk_mixer = dynamic_cast<accelerator::vulkan::image_mixer*>(frame_factory_.get())) {
+            vk_device_  = vk_mixer->get_vk_device();
+            use_vulkan_ = vk_device_ != nullptr;
+        }
+#endif
         RecvWallConfig cfg{};
         cfg.listenPort    = static_cast<unsigned short>(port_);
         cfg.expectedTiles = tiles_; // 0 = auto from the first SyncMeta
@@ -89,11 +117,21 @@ class remotewall_producer : public core::frame_producer
         cfg.useGpuConvert = 1;      // CUDA NV12->BGRA composite (lib falls back to CPU on failure)
         rw_               = RecvWallInit(&cfg);
         CASPAR_LOG(info) << L"[remotewall] receiver " << (rw_ ? L"started" : L"FAILED") << L" on UDP port "
-                         << port_ << L" (tiles=" << tiles_ << L", codec=" << codec_ << L").";
+                         << port_ << L" (tiles=" << tiles_ << L", codec=" << codec_ << L", path="
+#ifdef ENABLE_VULKAN
+                         << (use_vulkan_ ? L"vulkan-zerocopy" : L"cpu-readback")
+#else
+                         << L"cpu-readback"
+#endif
+                         << L").";
     }
 
     ~remotewall_producer()
     {
+#ifdef ENABLE_VULKAN
+        if (rw_ && use_vulkan_)
+            RecvWallUnbindCudaArray(rw_);
+#endif
         if (rw_)
             RecvWallShutdown(rw_);
     }
@@ -114,7 +152,17 @@ class remotewall_producer : public core::frame_producer
         return core::draw_frame(std::move(frame));
     }
 
-    core::draw_frame receive_impl(const core::video_field /*field*/, int /*nb_samples*/) override
+    core::draw_frame receive_impl(const core::video_field field, int nb_samples) override
+    {
+#ifdef ENABLE_VULKAN
+        if (use_vulkan_ && rw_)
+            return receive_vulkan();
+#endif
+        return receive_cpu();
+    }
+
+    // CPU-readback path: copy the top-down BGRA composite into a wall-sized frame.
+    core::draw_frame receive_cpu()
     {
         if (rw_) {
             unsigned gw = 0, gh = 0;
@@ -139,7 +187,6 @@ class remotewall_producer : public core::frame_producer
         if (!have_frame_ || wall_w_ <= 0 || wall_h_ <= 0)
             return make_marker_frame();
 
-        // Copy the top-down BGRA composite into a wall-sized frame (Phase 1 CPU readback).
         core::pixel_format_desc pfd(core::pixel_format::bgra);
         pfd.planes.push_back(core::pixel_format_desc::plane(wall_w_, wall_h_, 4));
 
@@ -153,6 +200,90 @@ class remotewall_producer : public core::frame_producer
                         static_cast<std::size_t>(src_stride));
         return core::draw_frame(std::move(frame));
     }
+
+#ifdef ENABLE_VULKAN
+    // Zero-copy path: the receiver writes the composite straight into a bound exportable VK
+    // texture (device->array). We double-buffer across a small pool so the mixer reads a stable
+    // texture while the next wall is written into a fresh one.
+    void ensure_pool(int w, int h)
+    {
+        if (pool_w_ == w && pool_h_ == h && !pool_.empty())
+            return;
+        RecvWallUnbindCudaArray(rw_);
+        bound_.reset();
+        pool_.clear();
+        last_df_ = core::draw_frame::empty();
+        cudaSetDevice(config().cuda_device);
+        constexpr int kSlots = 4;
+        for (int i = 0; i < kSlots; ++i) {
+            auto vk_tex = vk_device_->create_exportable_texture(w, h, 4, common::bit_depth::bit8);
+            pool_.push_back(
+                std::make_shared<CudaVkTexture>(vk_tex, static_cast<VkDevice>(vk_device_->getVkDevice())));
+        }
+        pool_w_ = w;
+        pool_h_ = h;
+    }
+
+    std::shared_ptr<CudaVkTexture> pick_free(const std::shared_ptr<CudaVkTexture>& except)
+    {
+        for (auto& t : pool_)
+            if (t != except && t->is_free())
+                return t;
+        return nullptr;
+    }
+
+    core::draw_frame make_texture_frame(const std::shared_ptr<CudaVkTexture>& cvt, int w, int h)
+    {
+        core::pixel_format_desc pfd(core::pixel_format::bgra);
+        pfd.is_straight_alpha = false; // composite alpha is forced opaque
+        pfd.planes.push_back(core::pixel_format_desc::plane(w, h, 4, common::bit_depth::bit8));
+
+        auto                                   store = std::make_shared<std::vector<std::uint8_t>>(0);
+        array<const std::uint8_t>              dummy(store->data(), 0, std::move(store));
+        std::vector<array<const std::uint8_t>> img_vec;
+        img_vec.push_back(std::move(dummy));
+
+        auto                      astore = std::make_shared<std::vector<std::int32_t>>(0);
+        array<const std::int32_t> audio(astore->data(), 0, std::move(astore));
+
+        return core::draw_frame(core::const_frame(this, std::move(img_vec), std::move(audio), pfd, cvt->core_texture()));
+    }
+
+    core::draw_frame receive_vulkan()
+    {
+        unsigned gw = 0, gh = 0;
+        if (!RecvWallGetGeometry(rw_, &gw, &gh, nullptr, nullptr, nullptr, nullptr) || gw == 0 || gh == 0)
+            return last_df_ ? last_df_ : make_marker_frame();
+
+        ensure_pool(static_cast<int>(gw), static_cast<int>(gh));
+
+        if (!bound_) {
+            bound_ = pick_free(nullptr);
+            if (bound_)
+                RecvWallBindCudaArray(rw_, bound_->array());
+        }
+        if (!bound_)
+            return last_df_ ? last_df_ : make_marker_frame();
+
+        RecvWallWaitNewFrame(rw_, ver_, 8);
+        if (RecvWallPeekInfo(rw_, &ver_, &info_) == 1) {
+            // A new wall was written into `bound_`. Present it, then rebind a fresh free slot so
+            // the next wall does not overwrite the frame the mixer is about to read.
+            auto present = bound_;
+            have_frame_  = true;
+
+            auto next = pick_free(present);
+            if (next) {
+                bound_ = next;
+                RecvWallBindCudaArray(rw_, bound_->array());
+            } // else: pool exhausted this tick; keep bound_ = present (drop-oldest live edge)
+
+            last_df_ = make_texture_frame(present, static_cast<int>(gw), static_cast<int>(gh));
+        }
+
+        return last_df_ ? last_df_ : make_marker_frame();
+    }
+#endif
 
     core::monitor::state state() const override { return state_; }
     std::wstring         print() const override { return L"remotewall[" + std::to_wstring(port_) + L"]"; }

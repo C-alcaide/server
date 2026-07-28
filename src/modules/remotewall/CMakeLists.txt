@@ -38,6 +38,7 @@ find_package(CUDAToolkit REQUIRED)
 
 target_include_directories(remotewall PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/..                       # src/modules (cuda_vk_texture.h)
     ${CMAKE_CURRENT_SOURCE_DIR}/vendored/recvwall
     ${CMAKE_CURRENT_SOURCE_DIR}/vendored/cloudxr        # net/ + sync/
     "${_NVC}/NvCodec"                                    # "NvDecoder/NvDecoder.h"
