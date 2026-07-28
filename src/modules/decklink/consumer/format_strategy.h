@@ -24,15 +24,31 @@
 #include "../StdAfx.h"
 
 #include "config.h"
+#include "gpu_output_buffer_pool.h"
 
 #include "../decklink_api.h"
 
 #include <core/frame/frame.h>
 #include <core/video_format.h>
 
+#include <common/memshfl.h>
+
 #include <memory>
 
 namespace caspar { namespace decklink {
+
+// Lazily-sized page-locked allocation for a CPU strategy's output frame. Pinning
+// the buffer the DeckLink driver DMAs to the card avoids a per-frame driver
+// pin/unpin (Tier 1). Falls back to aligned host memory if page-locking fails.
+inline std::shared_ptr<void>
+acquire_pinned_output(std::shared_ptr<gpu_output_buffer_pool>& pool, std::size_t bytes, std::size_t alignment = 64)
+{
+    if (!pool)
+        pool = std::make_shared<gpu_output_buffer_pool>(bytes, 4, gpu_output_buffer_pool::pin_kind::host_locked);
+    if (auto p = pool->acquire(bytes))
+        return p;
+    return create_aligned_buffer(bytes, alignment);
+}
 
 class format_strategy
 {

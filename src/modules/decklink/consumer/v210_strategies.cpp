@@ -268,6 +268,8 @@ class v210_strategy
     __m128i              black_batch;
     uint8_t              bpc;
 
+    std::shared_ptr<gpu_output_buffer_pool> pool_;
+
   public:
     explicit v210_strategy(core::color_space color_space, uint8_t bpc)
         : color_matrix(create_int_matrix(color_space == core::color_space::bt2020 ? bt2020 : bt709))
@@ -288,7 +290,7 @@ class v210_strategy
     std::shared_ptr<void> allocate_frame_data(const core::video_format_desc& format_desc) override
     {
         auto size = get_row_bytes(format_desc.width) * format_desc.height;
-        return create_aligned_buffer(size, 128);
+        return acquire_pinned_output(pool_, size, 128);
     }
     std::shared_ptr<void> convert_frame_for_port(const core::video_format_desc& channel_format_desc,
                                                  const core::video_format_desc& decklink_format_desc,

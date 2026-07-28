@@ -31,19 +31,12 @@
 
 namespace caspar { namespace decklink {
 
-std::shared_ptr<void> convert_to_key_only(const std::shared_ptr<void>& image_data, std::size_t byte_count)
-{
-    auto key_data = create_aligned_buffer(byte_count);
-
-    aligned_memshfl(key_data.get(), image_data.get(), byte_count, 0x0F0F0F0F, 0x0B0B0B0B, 0x07070707, 0x03030303);
-
-    return key_data;
-}
-
 class sdr_bgra_strategy
     : public format_strategy
     , std::enable_shared_from_this<sdr_bgra_strategy>
 {
+    std::shared_ptr<gpu_output_buffer_pool> pool_;
+
   public:
     sdr_bgra_strategy() = default;
 
@@ -52,7 +45,7 @@ class sdr_bgra_strategy
 
     std::shared_ptr<void> allocate_frame_data(const core::video_format_desc& format_desc) override
     {
-        return create_aligned_buffer(format_desc.size, 64);
+        return acquire_pinned_output(pool_, format_desc.size, 64);
     }
 
     std::shared_ptr<void> convert_frame_for_port(const core::video_format_desc& channel_format_desc,
@@ -84,7 +77,15 @@ class sdr_bgra_strategy
         }
 
         if (config.key_only) {
-            image_data = convert_to_key_only(image_data, decklink_format_desc.size);
+            auto key_data = acquire_pinned_output(pool_, decklink_format_desc.size, 64);
+            aligned_memshfl(key_data.get(),
+                            image_data.get(),
+                            decklink_format_desc.size,
+                            0x0F0F0F0F,
+                            0x0B0B0B0B,
+                            0x07070707,
+                            0x03030303);
+            image_data = key_data;
         }
 
         return image_data;

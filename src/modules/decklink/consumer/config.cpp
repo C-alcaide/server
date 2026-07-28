@@ -159,6 +159,17 @@ configuration parse_xml_config(const boost::property_tree::wptree&  ptree,
             config.gpu_readback_mode = configuration::gpu_readback_mode_t::auto_select;
     }
 
+    {
+        // Final GPU->card transfer of the packed frame (orthogonal to the pack strategy).
+        auto gpu_transfer = ptree.get(L"gpu-transfer", L"auto");
+        if (gpu_transfer == L"dvp")
+            config.gpu_transfer = configuration::gpu_transfer_t::dvp;
+        else if (gpu_transfer == L"copy")
+            config.gpu_transfer = configuration::gpu_transfer_t::copy;
+        else
+            config.gpu_transfer = configuration::gpu_transfer_t::auto_select;
+    }
+
     config.primary = parse_output_config(ptree, format_repository);
     if (config.primary.device_index == -1)
         config.primary.device_index = 1;

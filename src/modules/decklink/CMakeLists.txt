@@ -24,6 +24,8 @@ set(SOURCES
 		consumer/v210_strategies.cpp
 		consumer/sdr_bgra_strategy.cpp
 		consumer/format_strategy.h
+		consumer/gpu_output_buffer_pool.cpp
+		consumer/gpu_output_buffer_pool.h
 		consumer/config.cpp
 		consumer/config.h
 		consumer/monitor.cpp

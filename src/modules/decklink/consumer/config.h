@@ -114,6 +114,19 @@ struct configuration
         cpu,          // CPU-only (AVX2 / memcpy)
     };
 
+    // Final GPU->card transfer of the packed output frame. Orthogonal to
+    // gpu_readback_mode (which selects HOW the frame is packed):
+    //   copy = pack on GPU, one pinned copy to host, driver DMAs it (Tier 1);
+    //   dvp  = NVIDIA GPUDirect for Video hardware-synced transfer (Tier 2,
+    //          Quadro only); falls back to copy when DVP is unavailable;
+    //   auto = dvp when available (Quadro + runtime present), else copy.
+    enum class gpu_transfer_t
+    {
+        auto_select,
+        copy,
+        dvp,
+    };
+
     bool                 embedded_audio              = false;
     keyer_t              keyer                       = keyer_t::default_keyer;
     duplex_t             duplex                      = duplex_t::default_duplex;
@@ -124,6 +137,7 @@ struct configuration
     bool                 hdr                         = false;
     pixel_format_t       pixel_format                = pixel_format_t::rgba;
     gpu_readback_mode_t  gpu_readback_mode            = gpu_readback_mode_t::auto_select;
+    gpu_transfer_t       gpu_transfer                 = gpu_transfer_t::auto_select;
 
     port_configuration              primary;
     std::vector<port_configuration> secondaries;
