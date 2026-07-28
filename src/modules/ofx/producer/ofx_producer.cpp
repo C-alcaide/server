@@ -475,13 +475,32 @@ class ofx_producer : public core::frame_producer
                 if (out_dev) {
                     auto cvt = acquire_vk_cuda_texture(w, h);
                     if (cvt) {
-                        cudaError_t e = cudaMemcpy2DToArray(cvt->array(), 0, 0, out_dev,
-                                                            static_cast<size_t>(w) * 4, static_cast<size_t>(w) * 4,
-                                                            static_cast<size_t>(h), cudaMemcpyDeviceToDevice);
+                        // The plug-in renders in OFX convention (bottom-up RGBA), matching the GL
+                        // backend so effects behave identically on both mixers. The Vulkan mixer
+                        // samples the exportable texture top-down, so copy the device buffer row-
+                        // reversed (row h-1-y -> array row y) to un-flip it. Channels stay RGBA and
+                        // the frame is tagged rgba below, so no channel swap is needed here.
+                        cudaError_t  e    = cudaSuccess;
+                        const size_t row  = static_cast<size_t>(w) * 4;
+                        const auto*  base = static_cast<const std::uint8_t*>(out_dev);
+                        for (int y = 0; y < h && e == cudaSuccess; ++y) {
+                            e = cudaMemcpy2DToArrayAsync(cvt->array(),
+                                                         0,
+                                                         static_cast<size_t>(y),
+                                                         base + static_cast<size_t>(h - 1 - y) * row,
+                                                         row,
+                                                         row,
+                                                         1,
+                                                         cudaMemcpyDeviceToDevice,
+                                                         nullptr);
+                        }
                         if (e == cudaSuccess)
                             e = cudaDeviceSynchronize();
                         if (e == cudaSuccess) {
-                            core::pixel_format_desc tex_pfd(core::pixel_format::bgra, pfd.color_space, pfd.color_transfer);
+                            // Plug-in output is RGBA (byte0=R); tag the frame rgba so the mixer
+                            // shader samples channels directly (.rgba). Tagging bgra here would
+                            // swap R<->B. The exportable VK image is R8G8B8A8Unorm to match.
+                            core::pixel_format_desc tex_pfd(core::pixel_format::rgba, pfd.color_space, pfd.color_transfer);
                             tex_pfd.is_straight_alpha = !effect_->output_premultiplied();
                             tex_pfd.planes.push_back(core::pixel_format_desc::plane(w, h, 4, common::bit_depth::bit8));
 
