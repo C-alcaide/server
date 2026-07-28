@@ -85,8 +85,10 @@ Legacy **fixed-function** GL plug-ins are auto-detected (they raise `GL_INVALID_
 downcast frame_factory → vulkan::image_mixer → get_vk_device()
    → create/acquire an exportable VK texture, imported into CUDA (CudaVkTexture)
    → effect.render_cuda(): upload source → device; plugin renders into a device buffer (NO readback)
-   → cudaMemcpy2DToArray device-to-device into the VK texture
-   → texture-backed const_frame  →  mixer consumes the VkImage directly (NO CPU roundtrip)
+   → copy device-to-device into the VK texture, row-reversed to convert the plug-in's
+     bottom-up (OFX-convention) output to the mixer's top-down orientation
+   → texture-backed const_frame (pixel_format::rgba — plug-in output is RGBA, the Vulkan
+     shader samples .rgba directly)  →  mixer consumes the VkImage directly (NO CPU roundtrip)
 ```
 
 ### 3.4 Generator
@@ -185,6 +187,7 @@ Every item below was built and validated at runtime; the CPU golden test (`gain 
 | Legacy fixed-function GL auto-fallback (compat + readback) | ✅ | `OpenGLSamplePlugin` renders correctly on OGL mixer |
 | CUDA render path (host-copy) | ✅ | `CudaFill`: alpha=64 proves device write + readback |
 | **CUDA↔Vulkan zero-copy** (Vulkan mixer) | ✅ | `CudaFill`: alpha=64 via device-to-device, no readback |
+| CUDA zero-copy orientation + channel order | ✅ | `CudaPassthrough`: 4-quadrant source reproduced exactly (H/V splits decomposed) |
 | Generator context | ✅ | runtime |
 | General context | ✅ | General-only `CoreGLTest` instantiates + renders |
 | Transition context | ✅ | `TransitionMix`: red→blue `(161,0,94)` linear blend |
@@ -201,10 +204,6 @@ Every item below was built and validated at runtime; the CPU golden test (`gain 
 
 ## 10. Known limitations & next steps
 
-- **CUDA zero-copy — non-uniform correctness unverified.** `CudaFill` writes a *uniform* value, so it
-  cannot validate orientation (source is uploaded bottom-up with **no Y-flip** on the CUDA path) or colour
-  channel order (the output texture is labelled `bgra`). A **CUDA kernel** test plug-in (nvcc) with a
-  spatial/channel-dependent transform is needed to confirm and, if required, add a Y-flip and channel fix.
 - **Multi-GPU CUDA↔Vulkan.** The CUDA path does not call `cudaSetDevice` to match the Vulkan mixer's GPU;
   on a multi-GPU host where the CUDA default device differs from the VK device the interop may fail
   (it currently falls back to passing the source through).
@@ -216,6 +215,9 @@ Every item below was built and validated at runtime; the CPU golden test (`gain 
 - **Parameter breadth.** Custom, parametric, and 3D parameter types are not yet implemented.
 - **16-bit / float on the GPU zero-copy paths.** Zero-copy GL/CUDA currently engage for 8-bit only;
   higher depths use the CPU path.
+- **CUDA output flip is per-row (correctness-first).** The bottom-up→top-down convert is done with one
+  `cudaMemcpy2DToArrayAsync` per row. This is correct but launch-heavy; a single mirror kernel/NPP call
+  would be cheaper.
 
 ---
 
@@ -226,6 +228,7 @@ Every item below was built and validated at runtime; the CPU golden test (`gain 
 | `caspar.test:CoreGLOrientation` (`CoreGLTest`) | core-profile GL, known top/bottom pattern; multithread probe | `build/ofx_gl_orient_test.ps1` |
 | `caspar.test:TransitionMix` (`TransitionTest`) | CPU transition blend | `build/ofx_transition_test.ps1` |
 | `caspar.test:CudaFill` (`CudaTest`) | CUDA device-buffer fill | inline CUDA test |
+| `caspar.test:CudaPassthrough` | CUDA source-sampling identity — validates zero-copy source orientation + channel order | `build/ofx_cuda_passthrough_test.ps1`, `build/ofx_cuda_decompose_test.ps1` |
 | `uk.co.thefoundry.BasicGainPlugin` | CPU gain (golden reference) | `build/ofx_golden_test.ps1` |
 | `com.genarts:OpenGLSamplePlugin` | legacy fixed-function GL | `build/ofx_gl_test.ps1` |
 
