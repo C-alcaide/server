@@ -42,7 +42,7 @@ All paths are under `src/modules/ofx/` unless noted.
 | `host/ofx_clip_instance.{h,cpp}` | `ofx_clip_instance` / `ofx_image` / `ofx_texture`. Maps clip names (`Source`, `SourceFrom`, `SourceTo`, `Output`) to the current frame's buffers/textures/device pointers. |
 | `host/ofx_param_instance.{h,cpp}` | Concrete parameter instances (int, double, bool, choice, rgb(a), 2D, pushbutton, **string**, group, page). |
 | `host/ofx_gl_render.{h,cpp}` | Self-contained offscreen OpenGL backend (SFML **compatibility** context + GLEW). Fallback for legacy GL plug-ins and the Vulkan mixer. |
-| `host/ofx_cuda_render.{h,cpp}` | CUDA host-copy backend (cudaMalloc/cudaMemcpy). Runtime API only, no nvcc. |
+| `host/ofx_cuda_render.{h,cpp}` | CUDA render backend (runtime API + NPP, no nvcc). On-device source convert (channel swap / vertical mirror / alpha premultiply) and output mirror on a dedicated CUDA stream. |
 | `host/ofx_includes.h` | Order-sensitive, warning-wrapped OFX + HostSupport includes. |
 | `bridge/ofx_image_bridge.{h,cpp}` | Pixel bridging: BGRA↔RGBA, 8/16-bit, float, vertical flip, premultiply. |
 | `producer/ofx_producer.{h,cpp}` | `ofx_producer : core::frame_producer` + `create_producer`. Wraps source(s), bridges pixels, drives the render backends, exposes the AMCP `CALL OFX …` control protocol. |
@@ -72,7 +72,10 @@ source producer → const_frame (BGRA/RGBA, 8/16-bit)
 ```
 downcast frame_factory → ogl::image_mixer → get_ogl_device()
    → device.dispatch_sync on the GL thread:
-        upload source → GL texture; bind output texture to an FBO; set viewport;
+        source: if the frame is already a GPU-native OGL texture, sample it DIRECTLY (no readback,
+                no upload); otherwise upload the raw source once;
+        a GPU convert pass swizzles/flips/premultiplies the source into the plug-in's source texture;
+        bind output texture to an FBO; set viewport;
         plugin renders (core-profile GL) into the output texture;
         GPU Y-flip (glBlitNamedFramebuffer, DSA) → final texture
    → texture-backed const_frame (pixel_format::bgra)  →  mixer consumes directly (NO readback)
@@ -84,12 +87,17 @@ Legacy **fixed-function** GL plug-ins are auto-detected (they raise `GL_INVALID_
 ```
 downcast frame_factory → vulkan::image_mixer → get_vk_device()
    → create/acquire an exportable VK texture, imported into CUDA (CudaVkTexture)
-   → effect.render_cuda(): upload source → device; plugin renders into a device buffer (NO readback)
-   → copy device-to-device into the VK texture, row-reversed to convert the plug-in's
-     bottom-up (OFX-convention) output to the mixer's top-down orientation
+   → effect.render_cuda(): upload the RAW source once, then on a dedicated CUDA stream (NPP)
+        swap channels (BGRA→RGBA, skipped for RGBA sources) + vertical mirror (top-down → OFX
+        bottom-up) + premultiply (skipped when already premultiplied);
+        plugin renders into a device buffer (NO readback);
+        mirror the output back to top-down
+   → ONE contiguous cudaMemcpy2DToArray into the VK texture
    → texture-backed const_frame (pixel_format::rgba — plug-in output is RGBA, the Vulkan
      shader samples .rgba directly)  →  mixer consumes the VkImage directly (NO CPU roundtrip)
 ```
+The host owns the CUDA stream and advertises it via `kOfxImageEffectPropCudaStream`; plug-ins that use
+the legacy default stream still order correctly (it serialises with the host's blocking stream).
 
 ### 3.4 Generator
 No source; the plug-in renders into a fresh output frame (CPU or GL).
@@ -183,9 +191,10 @@ Every item below was built and validated at runtime; the CPU golden test (`gain 
 | CPU filter (audio, time, isIdentity, premult, 8/16/float) | ✅ | golden-pixel test |
 | RGBA **and** BGRA sources (8-bit) | ✅ | orientation/transition tests |
 | OpenGL zero-copy (core-profile plug-ins, OGL mixer) | ✅ | `CoreGLTest`: green-top/red-bottom, no readback |
+| OpenGL texture-backed source (skip readback+upload) | ✅ | `CoreGLPassthrough` over `[ISF] isftest` reproduces it; logs texture-backed path |
 | Orientation + channel order (GPU) | ✅ | matches CPU reference exactly |
 | Legacy fixed-function GL auto-fallback (compat + readback) | ✅ | `OpenGLSamplePlugin` renders correctly on OGL mixer |
-| CUDA render path (host-copy) | ✅ | `CudaFill`: alpha=64 proves device write + readback |
+| CUDA on-device convert (NPP swap/mirror/premult, single stream) | ✅ | `CudaPassthrough` exact; no CPU passes |
 | **CUDA↔Vulkan zero-copy** (Vulkan mixer) | ✅ | `CudaFill`: alpha=64 via device-to-device, no readback |
 | CUDA zero-copy orientation + channel order | ✅ | `CudaPassthrough`: 4-quadrant source reproduced exactly (H/V splits decomposed) |
 | Generator context | ✅ | runtime |
@@ -215,9 +224,13 @@ Every item below was built and validated at runtime; the CPU golden test (`gain 
 - **Parameter breadth.** Custom, parametric, and 3D parameter types are not yet implemented.
 - **16-bit / float on the GPU zero-copy paths.** Zero-copy GL/CUDA currently engage for 8-bit only;
   higher depths use the CPU path.
-- **CUDA output flip is per-row (correctness-first).** The bottom-up→top-down convert is done with one
-  `cudaMemcpy2DToArrayAsync` per row. This is correct but launch-heavy; a single mirror kernel/NPP call
-  would be cheaper.
+- **Texture-backed source on the Vulkan mixer (E2).** A GPU-native *VK* source texture is currently read
+  back to CPU before the CUDA convert. Importing it directly into CUDA (external memory) would close the
+  last readback, but requires the upstream producer's texture to be exportable and per-handle import
+  caching — deferred as future work. (The OGL mixer already samples texture-backed sources directly.)
+- **CUDA↔VK completion is a stream sync, not a semaphore (G).** The host syncs its CUDA stream before the
+  mixer composites. A CUDA↔VK timeline semaphore (`cudaImportExternalSemaphore`) would remove the stall;
+  deferred as high-effort/optional future work.
 
 ---
 
@@ -226,6 +239,7 @@ Every item below was built and validated at runtime; the CPU golden test (`gain 
 | Plug-in (id) | Purpose | Harness |
 |---|---|---|
 | `caspar.test:CoreGLOrientation` (`CoreGLTest`) | core-profile GL, known top/bottom pattern; multithread probe | `build/ofx_gl_orient_test.ps1` |
+| `caspar.test:CoreGLPassthrough` | core-GL source-sampling identity — validates GL zero-copy source + texture-backed source | `build/ofx_passthrough_test.ps1`, `build/ofx_texsrc_test.ps1` |
 | `caspar.test:TransitionMix` (`TransitionTest`) | CPU transition blend | `build/ofx_transition_test.ps1` |
 | `caspar.test:CudaFill` (`CudaTest`) | CUDA device-buffer fill | inline CUDA test |
 | `caspar.test:CudaPassthrough` | CUDA source-sampling identity — validates zero-copy source orientation + channel order | `build/ofx_cuda_passthrough_test.ps1`, `build/ofx_cuda_decompose_test.ps1` |
