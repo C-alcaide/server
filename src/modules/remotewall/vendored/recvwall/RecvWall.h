@@ -76,6 +76,11 @@ int RecvWallGetGeometry(RecvWallHandle* h, unsigned int* wallW, unsigned int* wa
                         unsigned short* gridCols, unsigned short* gridRows,
                         unsigned int* fpsNum, unsigned int* fpsDen);
 
+/* Composite bytes/pixel of the published wall: 4 = RGBA8/BGRA8 (8-bit), 8 =
+   RGBA16/BGRA16 (10/12-bit HDR, from a P016 NVDEC surface). Defaults to 4 until
+   the first frame is decoded; clients size their target texture accordingly. */
+int RecvWallGetPixelBytes(RecvWallHandle* h);
+
 /* Non-blocking. If the newest composite's version differs from *ioVersion, copy
    it (8 bpc, 4 ch, top-down, dstPitch bytes/row) into dst and update *ioVersion.
    Returns 1 = new frame copied, 0 = no new frame, -1 = no geometry yet or

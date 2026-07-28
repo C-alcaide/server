@@ -217,4 +217,46 @@ inline void scanAnnexB(const uint8_t* data, size_t len, bool hevc, Cb cb) {
     }
 }
 
+// --- AV1 metadata-OBU scanner ------------------------------------------------
+// AV1 has no Annex-B SEI; NVENC carries the SyncMeta in an OBU_METADATA of type
+// ITU-T T.35 (same UUID + serialized payload). We walk the OBU stream and, for
+// each metadata OBU, search the payload for our UUID (tolerant of the T.35
+// country-code / provider framing that precedes it).
+inline uint64_t readLeb128(const uint8_t* p, size_t len, size_t& i) {
+    uint64_t v = 0;
+    for (int s = 0; s < 8 && i < len; ++s) {
+        uint8_t b = p[i++];
+        v |= (uint64_t)(b & 0x7F) << (s * 7);
+        if (!(b & 0x80)) break;
+    }
+    return v;
+}
+template <class Cb>
+inline void scanAv1Obu(const uint8_t* data, size_t len, Cb cb) {
+    size_t i = 0;
+    while (i < len) {
+        uint8_t h        = data[i++];
+        int     type     = (h >> 3) & 0x0F;   // obu_type
+        bool    ext      = (h >> 2) & 0x01;   // obu_extension_flag
+        bool    hasSize  = (h >> 1) & 0x01;   // obu_has_size_field
+        if (ext) { if (i >= len) break; ++i; } // skip extension header
+        size_t payloadLen;
+        if (hasSize) {
+            uint64_t sz = readLeb128(data, len, i);
+            if (i + sz > len) sz = len - i;
+            payloadLen = (size_t)sz;
+        } else {
+            payloadLen = len - i;
+        }
+        const uint8_t* payload = data + i;
+        if (type == 5) { // OBU_METADATA
+            for (size_t k = 0; k + 16 <= payloadLen; ++k) {
+                SyncMeta m;
+                if (parseUserData(payload + k, payloadLen - k, m)) { cb(m); break; }
+            }
+        }
+        i += payloadLen;
+    }
+}
+
 } // namespace sync

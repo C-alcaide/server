@@ -28,8 +28,8 @@ PLAY 1-10 REMOTEWALL [PORT <n>] [TILES <n>] [CODEC hevc|h264]
 |---|---|---|
 | `PORT` | 9000 (or config) | UDP port the receiver binds |
 | `TILES` | 0 (auto) | Expected tile count; 0 = detect from the first `SyncMeta` |
-| `CODEC` | hevc | `hevc` or `h264` |
-| `DEVICE` | 0 (or config) | CUDA device index for decode/convert |
+| `CODEC` | hevc | `hevc`, `h264`, or `av1` |
+| `DEVICE` | auto | CUDA device index for decode/convert. Default: **auto‑match** the Vulkan mixer's GPU by UUID (multi‑GPU hosts); pass an index to pin it |
 | `BINDIP` | all | Local interface to bind (multi‑homed hosts) |
 | `SYNCGROUP` | (none) | Cross‑zone frame‑lock group. **Note:** enabling a sync group uses the receiver's host‑side reorder buffer, so playback is CPU‑readback (not zero‑copy). |
 
@@ -37,6 +37,7 @@ Examples:
 ```
 PLAY 1-10 REMOTEWALL PORT 9000
 PLAY 1-10 REMOTEWALL PORT 9002 CODEC h264 BINDIP 10.0.0.5
+PLAY 1-10 REMOTEWALL PORT 9000 CODEC av1
 PLAY 1-10 REMOTEWALL PORT 9000 SYNCGROUP wall
 ```
 
@@ -56,6 +57,7 @@ The same metadata is published continuously as **monitor state** (and therefore 
 `remotewall/…` keys of the layer's producer, including:
 
 - `remotewall/wall`, `/grid`, `/fps`, `/colorspace`, `/frame`, `/timecode`, `/fec-recovered`, `/drops`
+- `remotewall/bit-depth` (8 or 16), `/device` (CUDA index in use)
 - `remotewall/camera/camtoworld`, `/worldtocam`, `/proj` (4×4 matrices), `/intrinsics` (fx,fy,cx,cy),
   `/fov`, `/frustum` (l,r,b,t,near,far)
 
@@ -66,8 +68,13 @@ SEI; real Unreal senders populate them.)
 ## Colour / HDR
 
 The stream's `colorSpace` tag (`BT709`, `BT2020/PQ`, `BT2020/HLG`, …) is mapped to the frame's
-colour‑space / transfer so the mixer applies the correct colour handling and tone‑mapping. The current
-pipeline decodes 8‑bit 4:2:0; 10‑bit (P016 → RGBA16 / true HDR) is planned.
+colour‑space / transfer so the mixer applies the correct colour handling and tone‑mapping.
+
+**Bit depth is auto‑detected** from the NVDEC surface: 8‑bit 4:2:0 decodes to RGBA8, while a 10/12‑bit
+(P016) surface decodes to a **16‑bit RGBA** composite and the producer allocates a `R16G16B16A16`
+exportable texture (true HDR, zero‑copy on the Vulkan mixer). For 10‑bit the YUV→RGB matrix follows
+the colour tag (BT.2020 for HDR walls). `CALL … REMOTEWALL INFO` and `remotewall/bit-depth` report the
+active depth. (10‑bit is validated against an HDR sender; the demo test pattern is 8‑bit.)
 
 ## Configuration (`casparcg.config`)
 
@@ -95,9 +102,12 @@ The receiver + cloudXR wire/SEI headers are vendored under `src/modules/remotewa
 
 ## Mixer support & limitations
 
-- **Vulkan mixer:** zero‑copy (CUDA→VK exportable texture, no readback). *Primary path.*
-- **OpenGL mixer:** CPU‑readback fallback (correct, not yet zero‑copy).
+- **Vulkan mixer:** zero‑copy (CUDA→VK exportable texture, no readback), 8‑bit or 16‑bit. *Primary path.*
+- **OpenGL mixer:** CPU‑readback fallback (correct, not zero‑copy). Zero‑copy on GL is deferred: it needs
+  a CUDA‑registerable GL texture exposed by `ogl::device` plus an external‑texture input path in the GL
+  `image_mixer` and cross‑thread GL/CUDA context sharing with the async writer — the CPU fallback is
+  already correct, so this is intentionally out of scope for now.
 - **Sync groups:** CPU‑readback (host‑side reorder buffer).
-- **Multi‑GPU:** the CUDA device defaults to 0 / config; matching it to the Vulkan mixer's GPU on a
-  multi‑GPU host is future work.
-- 8‑bit today; 10‑bit/HDR, AV1, and OpenGL zero‑copy are planned follow‑ups.
+- **Multi‑GPU:** decode auto‑matches the Vulkan mixer's GPU by UUID; override with `DEVICE`.
+- **Codecs:** HEVC, H.264, AV1 (AV1 metadata rides an ITU‑T T.35 metadata OBU).
+- 8‑bit and 10/12‑bit HDR supported; OpenGL zero‑copy is the remaining follow‑up.

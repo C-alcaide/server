@@ -122,11 +122,15 @@ class remotewall_producer : public core::frame_producer
     std::shared_ptr<CudaVkTexture>                 bound_;    // current GPU write target
     int                                            pool_w_ = 0;
     int                                            pool_h_ = 0;
+    int                                            pool_bytes_ = 4; // 4 = RGBA8, 8 = RGBA16 (HDR)
     core::draw_frame                               last_df_ = core::draw_frame::empty();
 #endif
 
   public:
-    remotewall_producer(const core::frame_producer_dependencies& deps, const RecvWallConfig& cfg, int device)
+    remotewall_producer(const core::frame_producer_dependencies& deps,
+                        const RecvWallConfig&                    cfg,
+                        int                                      device,
+                        bool                                     device_auto)
         : frame_factory_(deps.frame_factory)
         , format_desc_(deps.format_desc)
         , fallback_w_(deps.format_desc.width)
@@ -142,11 +146,45 @@ class remotewall_producer : public core::frame_producer
             vk_device_  = vk_mixer->get_vk_device();
             use_vulkan_ = vk_device_ != nullptr;
         }
+        // Multi-GPU: unless the user pinned DEVICE, decode on the same physical GPU the Vulkan
+        // mixer runs on (match by device UUID) so the CUDA composite and the VK texture live on
+        // one GPU (no cross-device copy for the zero-copy path).
+        if (use_vulkan_ && device_auto) {
+            const int matched = cuda_device_for_vk();
+            if (matched >= 0)
+                device_ = matched;
+        }
 #endif
         init_receiver();
     }
 
     ~remotewall_producer() { teardown_receiver(); }
+
+#ifdef ENABLE_VULKAN
+    // Find the CUDA device index whose UUID matches the Vulkan mixer's physical GPU (-1 if none).
+    int cuda_device_for_vk()
+    {
+        if (!vk_device_)
+            return -1;
+        vk::PhysicalDevice             phys = vk_device_->getVkPhysicalDevice();
+        vk::PhysicalDeviceIDProperties idp{};
+        vk::PhysicalDeviceProperties2  p2{};
+        p2.pNext = &idp;
+        phys.getProperties2(&p2);
+
+        int count = 0;
+        if (cudaGetDeviceCount(&count) != cudaSuccess)
+            return -1;
+        for (int i = 0; i < count; ++i) {
+            cudaDeviceProp prop{};
+            if (cudaGetDeviceProperties(&prop, i) != cudaSuccess)
+                continue;
+            if (std::memcmp(prop.uuid.bytes, idp.deviceUUID.data(), 16) == 0)
+                return i;
+        }
+        return -1;
+    }
+#endif
 
     // (Re)bind the receiver from cfg_. Zero-copy engages only on the Vulkan mixer without a sync
     // group (sync groups use the receiver's host-side reorder buffer, so the composite is not
@@ -165,7 +203,7 @@ class remotewall_producer : public core::frame_producer
         staging_.clear();
         CASPAR_LOG(info) << L"[remotewall] receiver " << (rw_ ? L"started" : L"FAILED") << L" on UDP port "
                          << static_cast<int>(cfg_.listenPort) << L" (tiles=" << cfg_.expectedTiles
-                         << L", codec=" << cfg_.codec << L", path="
+                         << L", codec=" << cfg_.codec << L", device=" << device_ << L", path="
 #ifdef ENABLE_VULKAN
                          << (zero_copy_ok_ ? L"vulkan-zerocopy" : L"cpu-readback")
 #else
@@ -219,16 +257,18 @@ class remotewall_producer : public core::frame_producer
     // CPU-readback path: copy the top-down BGRA composite into a wall-sized frame.
     core::draw_frame receive_cpu()
     {
+        int bytes = 4;
         if (rw_) {
             unsigned gw = 0, gh = 0;
             if (RecvWallGetGeometry(rw_, &gw, &gh, nullptr, nullptr, nullptr, nullptr) && gw > 0 && gh > 0) {
-                const std::size_t need = static_cast<std::size_t>(gw) * gh * 4;
+                bytes                  = RecvWallGetPixelBytes(rw_);
+                const std::size_t need = static_cast<std::size_t>(gw) * gh * bytes;
                 if (staging_.size() != need)
                     staging_.assign(need, 0);
                 RecvWallWaitNewFrame(rw_, ver_, 8);
                 if (RecvWallGetLatest(rw_,
                                       staging_.data(),
-                                      static_cast<int>(gw) * 4,
+                                      static_cast<int>(gw) * bytes,
                                       static_cast<int>(staging_.size()),
                                       &ver_,
                                       &info_) == 1) {
@@ -243,13 +283,14 @@ class remotewall_producer : public core::frame_producer
             return make_marker_frame();
 
         update_state(wall_w_, wall_h_);
-        const auto cst = parse_colorspace(info_.colorSpace);
+        const auto              cst   = parse_colorspace(info_.colorSpace);
+        const common::bit_depth depth = bytes == 8 ? common::bit_depth::bit16 : common::bit_depth::bit8;
         core::pixel_format_desc pfd(core::pixel_format::bgra, cst.first, cst.second);
-        pfd.planes.push_back(core::pixel_format_desc::plane(wall_w_, wall_h_, 4));
+        pfd.planes.push_back(core::pixel_format_desc::plane(wall_w_, wall_h_, 4, depth));
 
         auto      frame      = frame_factory_->create_frame(this, pfd);
         const int dst_stride = frame.pixel_format_desc().planes[0].linesize;
-        const int src_stride = wall_w_ * 4;
+        const int src_stride = wall_w_ * bytes;
         auto*     dst        = frame.image_data(0).data();
         for (int y = 0; y < wall_h_; ++y)
             std::memcpy(dst + static_cast<std::size_t>(y) * dst_stride,
@@ -264,21 +305,24 @@ class remotewall_producer : public core::frame_producer
     // texture while the next wall is written into a fresh one.
     void ensure_pool(int w, int h)
     {
-        if (pool_w_ == w && pool_h_ == h && !pool_.empty())
+        const int bytes = rw_ ? RecvWallGetPixelBytes(rw_) : 4;
+        if (pool_w_ == w && pool_h_ == h && pool_bytes_ == bytes && !pool_.empty())
             return;
         RecvWallUnbindCudaArray(rw_);
         bound_.reset();
         pool_.clear();
         last_df_ = core::draw_frame::empty();
-        cudaSetDevice(config().cuda_device);
-        constexpr int kSlots = 4;
+        cudaSetDevice(device_);
+        const common::bit_depth depth  = bytes == 8 ? common::bit_depth::bit16 : common::bit_depth::bit8;
+        constexpr int           kSlots = 4;
         for (int i = 0; i < kSlots; ++i) {
-            auto vk_tex = vk_device_->create_exportable_texture(w, h, 4, common::bit_depth::bit8);
+            auto vk_tex = vk_device_->create_exportable_texture(w, h, 4, depth);
             pool_.push_back(
                 std::make_shared<CudaVkTexture>(vk_tex, static_cast<VkDevice>(vk_device_->getVkDevice())));
         }
-        pool_w_ = w;
-        pool_h_ = h;
+        pool_w_     = w;
+        pool_h_     = h;
+        pool_bytes_ = bytes;
     }
 
     std::shared_ptr<CudaVkTexture> pick_free(const std::shared_ptr<CudaVkTexture>& except)
@@ -291,10 +335,11 @@ class remotewall_producer : public core::frame_producer
 
     core::draw_frame make_texture_frame(const std::shared_ptr<CudaVkTexture>& cvt, int w, int h)
     {
-        const auto cst = parse_colorspace(info_.colorSpace);
+        const auto              cst   = parse_colorspace(info_.colorSpace);
+        const common::bit_depth depth = pool_bytes_ == 8 ? common::bit_depth::bit16 : common::bit_depth::bit8;
         core::pixel_format_desc pfd(core::pixel_format::bgra, cst.first, cst.second);
         pfd.is_straight_alpha = false; // composite alpha is forced opaque
-        pfd.planes.push_back(core::pixel_format_desc::plane(w, h, 4, common::bit_depth::bit8));
+        pfd.planes.push_back(core::pixel_format_desc::plane(w, h, 4, depth));
 
         auto                                   store = std::make_shared<std::vector<std::uint8_t>>(0);
         array<const std::uint8_t>              dummy(store->data(), 0, std::move(store));
@@ -371,6 +416,8 @@ class remotewall_producer : public core::frame_producer
         s["remotewall/fec-recovered"]  = static_cast<double>(st.fecRecovered);
         s["remotewall/drops"]          = static_cast<double>(st.auQueueDrops);
         s["remotewall/frames-decoded"] = static_cast<double>(st.framesDecoded);
+        s["remotewall/bit-depth"]      = rw_ ? RecvWallGetPixelBytes(rw_) * 2 : 8; // bits/channel (8 or 16)
+        s["remotewall/device"]         = device_;
 
         // Full source camera (CameraMeta: camToWorld/worldToCam/proj 4x4, intrinsics, fov, frustum).
         const float* cam = info_.cam;
@@ -402,8 +449,9 @@ class remotewall_producer : public core::frame_producer
                 os << "port " << static_cast<int>(cfg_.listenPort) << " wall " << wall_w_ << "x" << wall_h_ << " grid "
                    << info_.gridCols << "x" << info_.gridRows << " fps "
                    << (info_.fpsDen ? static_cast<double>(info_.fpsNum) / info_.fpsDen : 0.0) << " tc " << tc
-                   << " colorspace " << info_.colorSpace << " frame " << info_.globalFrameIndex << " fec "
-                   << st.fecRecovered << " drops " << st.auQueueDrops << "\r\n";
+                   << " colorspace " << info_.colorSpace << " depth " << (rw_ ? RecvWallGetPixelBytes(rw_) * 2 : 8)
+                   << " device " << device_ << " frame " << info_.globalFrameIndex << " fec " << st.fecRecovered
+                   << " drops " << st.auQueueDrops << "\r\n";
                 result = u16(os.str());
             } else if (boost::iequals(sub, L"CAMERA")) {
                 const float*       cam = info_.cam;
@@ -462,10 +510,11 @@ spl::shared_ptr<core::frame_producer> create_producer(const core::frame_producer
     if (params.empty() || !boost::iequals(params.at(0), L"REMOTEWALL"))
         return core::frame_producer::empty();
 
-    int          port    = config().listen_port;
-    int          tiles   = 0; // auto-detect from the first SyncMeta
-    int          codec   = 0; // 0 = HEVC, 1 = H.264
-    int          device  = config().cuda_device;
+    int          port        = config().listen_port;
+    int          tiles       = 0; // auto-detect from the first SyncMeta
+    int          codec       = 0; // 0 = HEVC, 1 = H.264, 2 = AV1
+    int          device      = config().cuda_device;
+    bool         device_auto = true; // match the Vulkan mixer's GPU unless DEVICE is given
     std::wstring bind_ip;
     std::wstring sync_group;
     for (std::size_t i = 1; i < params.size(); ++i) {
@@ -480,10 +529,12 @@ spl::shared_ptr<core::frame_producer> create_producer(const core::frame_producer
             } catch (...) {
             }
         } else if (boost::iequals(params[i], L"CODEC") && i + 1 < params.size()) {
-            codec = boost::iequals(params[++i], L"h264") ? 1 : 0;
+            const std::wstring c = params[++i];
+            codec                = boost::iequals(c, L"h264") ? 1 : boost::iequals(c, L"av1") ? 2 : 0;
         } else if (boost::iequals(params[i], L"DEVICE") && i + 1 < params.size()) {
             try {
-                device = std::stoi(params[++i]);
+                device      = std::stoi(params[++i]);
+                device_auto = false;
             } catch (...) {
             }
         } else if (boost::iequals(params[i], L"BINDIP") && i + 1 < params.size()) {
@@ -503,7 +554,7 @@ spl::shared_ptr<core::frame_producer> create_producer(const core::frame_producer
     std::snprintf(cfg.bindIp, sizeof cfg.bindIp, "%s", u8(bind_ip).c_str());
     std::snprintf(cfg.syncGroup, sizeof cfg.syncGroup, "%s", u8(sync_group).c_str());
 
-    return spl::make_shared<remotewall_producer>(dependencies, cfg, device);
+    return spl::make_shared<remotewall_producer>(dependencies, cfg, device, device_auto);
 }
 
 void register_remotewall_producer(const core::module_dependencies& dependencies)

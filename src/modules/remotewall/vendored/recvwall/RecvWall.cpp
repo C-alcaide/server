@@ -31,6 +31,7 @@
 #include <mutex>
 #include <thread>
 #include <vector>
+#include <string>
 #pragma comment(lib, "ws2_32.lib")
 
 // NvDecoder.cpp expects this global (each cloudXR tool defines its own copy).
@@ -39,6 +40,40 @@ simplelogger::Logger* logger = simplelogger::LoggerFactory::CreateConsoleLogger(
 // Instantiated in ColorSpace.cu (compiled with nvcc, linked into the lib).
 template <class COLOR32> void Nv12ToColor32(uint8_t* dpNv12, int nNv12Pitch, uint8_t* dpBgra,
     int nBgraPitch, int nWidth, int nHeight, int iMatrix, bool video_full_range);
+// 10/12-bit P016 -> 16-bit 4ch (RGBA64/BGRA64), also instantiated in ColorSpace.cu.
+template <class COLOR64> void P016ToColor64(uint8_t* dpP016, int nP016Pitch, uint8_t* dpBgra,
+    int nBgraPitch, int nWidth, int nHeight, int iMatrix, bool video_full_range);
+
+// cfg.codec: 0 = HEVC (default), 1 = H.264, 2 = AV1.
+static cudaVideoCodec pickCudaCodec(int c)
+{
+	return c == 1 ? cudaVideoCodec_H264 : c == 2 ? cudaVideoCodec_AV1 : cudaVideoCodec_HEVC;
+}
+// Extract every embedded SyncMeta from one access unit, picking the codec-specific
+// carriage (Annex-B SEI for H.264/HEVC, metadata OBU for AV1).
+template <class Cb>
+static void scanMeta(int codec, const uint8_t* d, size_t n, Cb cb)
+{
+	if (codec == 2)
+		sync::scanAv1Obu(d, n, cb);
+	else
+		sync::scanAnnexB(d, n, codec == 0, cb);
+}
+// Map the NVDEC surface bit depth to the composite's bytes/pixel: 8-bit -> RGBA8
+// (4 B/px), 10/12-bit -> RGBA16 (8 B/px).
+static int compBppFor(int bitDepth) { return bitDepth > 8 ? 8 : 4; }
+
+// Pick the YUV->RGB matrix for the P016 (HDR) convert from the SEI colour tag.
+// HDR walls are BT.2020; SDR-tagged 10-bit falls back to BT.709.
+static int matrixFor(const char* cs)
+{
+	std::string s = cs ? cs : "";
+	for (auto& ch : s) ch = (char)std::toupper((unsigned char)ch);
+	if (s.find("2020") != std::string::npos) return ColorSpaceStandard_BT2020;
+	if (s.find("601") != std::string::npos) return ColorSpaceStandard_BT601;
+	return ColorSpaceStandard_BT709;
+}
+
 
 namespace {
 
@@ -239,6 +274,7 @@ struct RecvWallHandle
 	std::map<uint64_t, GFrame> gframes;
 	std::vector<CUdeviceptr> bufPool;
 	size_t compBytes = 0;
+	std::atomic<int> outBpp{4};   // composite bytes/pixel: 4 = RGBA8, 8 = RGBA16 (HDR)
 
 	// Latest-wins published wall (8 bpc, 4 ch, top-down, pitch = wallW*4).
 	std::mutex latestMtx; std::condition_variable latestCv;
@@ -321,8 +357,7 @@ struct RecvWallHandle
 void RecvWallHandle::decodeWorkerCpu(uint16_t tile, TileQ* tq)
 {
 	cuCtxSetCurrent(ctx);
-	const bool hevc = (cfg.codec == 0);
-	NvDecoder dec(ctx, false, hevc ? cudaVideoCodec_HEVC : cudaVideoCodec_H264, true);
+	NvDecoder dec(ctx, false, pickCudaCodec(cfg.codec), true);
 	std::vector<sync::SyncMeta> metas;
 	for (;;) {
 		AuJob job;
@@ -331,7 +366,7 @@ void RecvWallHandle::decodeWorkerCpu(uint16_t tile, TileQ* tq)
 		  if (!running.load() && tq->q.empty()) break;
 		  job = std::move(tq->q.front()); tq->q.pop_front(); }
 		metas.clear();
-		sync::scanAnnexB(job.au.data(), job.au.size(), hevc, [&](const sync::SyncMeta& m) { metas.push_back(m); });
+		scanMeta(cfg.codec, job.au.data(), job.au.size(), [&](const sync::SyncMeta& m) { metas.push_back(m); });
 		int n = dec.Decode(job.au.data(), (int)job.au.size());
 		decOut.fetch_add((uint64_t)n);
 		for (int i = 0; i < n; ++i) {
@@ -382,8 +417,7 @@ void RecvWallHandle::decodeWorkerCpu(uint16_t tile, TileQ* tq)
 void RecvWallHandle::decodeWorkerGpu(uint16_t tile, TileQ* tq)
 {
 	cuCtxSetCurrent(ctx);
-	const bool hevc = (cfg.codec == 0);
-	NvDecoder dec(ctx, true, hevc ? cudaVideoCodec_HEVC : cudaVideoCodec_H264, true); // device frames
+	NvDecoder dec(ctx, true, pickCudaCodec(cfg.codec), true); // device frames
 	std::vector<sync::SyncMeta> metas;
 	for (;;) {
 		AuJob job;
@@ -392,7 +426,7 @@ void RecvWallHandle::decodeWorkerGpu(uint16_t tile, TileQ* tq)
 		  if (!running.load() && tq->q.empty()) break;
 		  job = std::move(tq->q.front()); tq->q.pop_front(); }
 		metas.clear();
-		sync::scanAnnexB(job.au.data(), job.au.size(), hevc, [&](const sync::SyncMeta& m) { metas.push_back(m); });
+		scanMeta(cfg.codec, job.au.data(), job.au.size(), [&](const sync::SyncMeta& m) { metas.push_back(m); });
 		int n = dec.Decode(job.au.data(), (int)job.au.size());
 		decOut.fetch_add((uint64_t)n);
 		for (int i = 0; i < n; ++i) {
@@ -400,9 +434,12 @@ void RecvWallHandle::decodeWorkerGpu(uint16_t tile, TileQ* tq)
 			if (!fr || metas.empty()) continue;
 			const sync::SyncMeta& m = metas.back();
 			bool fresh = false; CUdeviceptr myBuf = 0; sync::SyncMeta doneMeta; uint64_t doneSend = 0;
+			const bool p016 = dec.GetBitDepth() > 8;   // 10/12-bit HDR surface (P016)
+			const int  bpp  = p016 ? 8 : 4;            // composite bytes/pixel (RGBA16 / RGBA8)
 			{ std::lock_guard<std::mutex> lk(pendingMtx);
 			  configureLocked(m);
-			  if (compBytes == 0) compBytes = (size_t)wallW * wallH * 4;
+			  outBpp.store(bpp);
+			  if (compBytes == 0) compBytes = (size_t)wallW * wallH * bpp;
 			  { long long lc = lastComplete.load();   // sender restart (see CPU worker)
 			    if (lc > 300 && (long long)job.frame + 300 < lc) {
 			        for (auto& kv : gframes) if (kv.second.dComp) bufPool.push_back(kv.second.dComp);
@@ -419,13 +456,24 @@ void RecvWallHandle::decodeWorkerGpu(uint16_t tile, TileQ* tq)
 			  const int tc = m.tileId % cols, tr = m.tileId / cols;
 			  const int roiW = tileW < dec.GetWidth() ? tileW : dec.GetWidth();
 			  const int roiH = tileH < dec.GetHeight() ? tileH : dec.GetHeight();
-			  const CUdeviceptr dst = gf.dComp + (CUdeviceptr)(((size_t)(tr * tileH) * wallW + (size_t)(tc * tileW)) * 4);
-			  if (cfg.pixelOrder == 1)
-			      Nv12ToColor32<RGBA32>(fr, dec.GetDeviceFramePitch(), (uint8_t*)dst, wallW * 4,
+			  const CUdeviceptr dst = gf.dComp + (CUdeviceptr)(((size_t)(tr * tileH) * wallW + (size_t)(tc * tileW)) * bpp);
+			  if (p016) {
+			      // 10/12-bit: NVDEC gives P016; convert to 16-bit RGBA. Pick the YUV->RGB
+			      // matrix from the SEI colour tag (HDR walls are BT.2020).
+			      const int mat = matrixFor(m.colorSpace);
+			      if (cfg.pixelOrder == 1)
+			          P016ToColor64<RGBA64>(fr, dec.GetDeviceFramePitch(), (uint8_t*)dst, wallW * bpp,
+			                                roiW, roiH, mat, cfg.fullRange != 0);
+			      else
+			          P016ToColor64<BGRA64>(fr, dec.GetDeviceFramePitch(), (uint8_t*)dst, wallW * bpp,
+			                                roiW, roiH, mat, cfg.fullRange != 0);
+			  } else if (cfg.pixelOrder == 1) {
+			      Nv12ToColor32<RGBA32>(fr, dec.GetDeviceFramePitch(), (uint8_t*)dst, wallW * bpp,
 			                            roiW, roiH, ColorSpaceStandard_BT601, cfg.fullRange != 0);
-			  else
-			      Nv12ToColor32<BGRA32>(fr, dec.GetDeviceFramePitch(), (uint8_t*)dst, wallW * 4,
+			  } else {
+			      Nv12ToColor32<BGRA32>(fr, dec.GetDeviceFramePitch(), (uint8_t*)dst, wallW * bpp,
 			                            roiW, roiH, ColorSpaceStandard_BT601, cfg.fullRange != 0);
+			  }
 			  // Inside CUDA-heavy host processes (e.g. Resolve) the kernel launch can
 			  // fail where standalone processes work; surface it so the client can
 			  // fall back to the CPU convert instead of compositing black.
@@ -455,14 +503,17 @@ void RecvWallHandle::decodeWorkerGpu(uint16_t tile, TileQ* tq)
 					if (zc_bound.load() && !syncOn) {
 						std::lock_guard<std::mutex> zc_lock(zc_mtx); // NB: 'ck' is a NvCodecUtils macro
 						if (zc_arr) {
-							cuMemsetD2D8(myBuf + 3, 4, 0xFF, 1, (size_t)wallW * wallH); // opaque alpha
+							if (bpp == 8)
+								cuMemsetD2D16(myBuf + 6, 8, 0xFFFF, 1, (size_t)wallW * wallH); // 16-bit opaque alpha
+							else
+								cuMemsetD2D8(myBuf + 3, 4, 0xFF, 1, (size_t)wallW * wallH);   // 8-bit opaque alpha
 							CUDA_MEMCPY2D cp{};
 							cp.srcMemoryType = CU_MEMORYTYPE_DEVICE;
 							cp.srcDevice     = myBuf;
-							cp.srcPitch      = (size_t)wallW * 4;
+							cp.srcPitch      = (size_t)wallW * bpp;
 							cp.dstMemoryType = CU_MEMORYTYPE_ARRAY;
 							cp.dstArray      = zc_arr;
-							cp.WidthInBytes  = (size_t)wallW * 4;
+							cp.WidthInBytes  = (size_t)wallW * bpp;
 							cp.Height        = (size_t)wallH;
 							if (cuMemcpy2D(&cp) == CUDA_SUCCESS) wentDirect = true;
 						}
@@ -474,10 +525,11 @@ void RecvWallHandle::decodeWorkerGpu(uint16_t tile, TileQ* tq)
 							latestCv.notify_all();
 						}
 					}
-					if (!wentDirect && texBound.load() && !syncOn) {
+					if (!wentDirect && texBound.load() && !syncOn && bpp == 4) {
 						// Zero-copy publish: CUDA composite -> registered D3D11
 						// texture, entirely on the GPU. Version/info only; no
-						// CPU pixels (clients use RecvWallPeekInfo).
+						// CPU pixels (clients use RecvWallPeekInfo). 8-bit only
+						// (the bound texture is R8G8B8A8; HDR falls to readback).
 						// The SDK convert kernel leaves alpha 0 (the CPU path
 						// fixes it host-side): strided GPU memset -> opaque.
 						cuMemsetD2D8(myBuf + 3, 4, 0xFF, 1, (size_t)wallW * wallH);
@@ -510,8 +562,14 @@ void RecvWallHandle::decodeWorkerGpu(uint16_t tile, TileQ* tq)
 					if (!wentDirect) {
 						std::vector<uint8_t> wall(compBytes);
 						cuMemcpyDtoH(wall.data(), myBuf, compBytes);
-						if (syncOn) enqueueSynced(std::move(wall), doneMeta, doneSend, /*fixAlpha=*/true);
-						else publish(wall, doneMeta, doneSend, /*fixAlpha=*/true);
+						// The convert kernel leaves alpha 0; force opaque host-side
+						// (depth-aware: 8-bit alpha every 4th byte, 16-bit every 8th).
+						if (bpp == 8)
+							for (size_t a = 6; a + 2 <= wall.size(); a += 8) { wall[a] = 0xFF; wall[a + 1] = 0xFF; }
+						else
+							for (size_t a = 3; a < wall.size(); a += 4) wall[a] = 0xFF;
+						if (syncOn) enqueueSynced(std::move(wall), doneMeta, doneSend, /*fixAlpha=*/false);
+						else publish(wall, doneMeta, doneSend, /*fixAlpha=*/false);
 					}
 				}
 				std::lock_guard<std::mutex> lk(pendingMtx);
@@ -788,6 +846,8 @@ int RecvWallGetGeometry(RecvWallHandle* h, unsigned int* wallW, unsigned int* wa
 	return 1;
 }
 
+int RecvWallGetPixelBytes(RecvWallHandle* h) { return h ? h->outBpp.load() : 4; }
+
 int RecvWallGetLatest(RecvWallHandle* h, unsigned char* dst, int dstPitch,
                       int dstCapBytes, unsigned long long* ioVersion,
                       RecvWallFrameInfo* outInfo)
@@ -797,7 +857,7 @@ int RecvWallGetLatest(RecvWallHandle* h, unsigned char* dst, int dstPitch,
 	if (v == *ioVersion) return 0;
 	std::lock_guard<std::mutex> lk(h->latestMtx);
 	if (h->latestPx.empty()) return 0;
-	const int srcPitch = h->wallW * 4;
+	const int srcPitch = h->wallW * h->outBpp.load();
 	if (dstPitch < srcPitch || (long long)dstCapBytes < (long long)dstPitch * h->wallH) return -1;
 	for (int y = 0; y < h->wallH; ++y)
 		std::memcpy(dst + (size_t)y * dstPitch, h->latestPx.data() + (size_t)y * srcPitch, srcPitch);
