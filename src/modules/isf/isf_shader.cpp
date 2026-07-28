@@ -41,17 +41,32 @@ namespace caspar { namespace isf {
 namespace {
 
 /// Extract the ISF JSON header (the first {...} block, which lives inside a leading /* */ comment).
+/// Brace counting is string-aware so that braces inside JSON string values do not unbalance it.
 std::string extract_json(const std::string& source)
 {
     const auto open = source.find('{');
     if (open == std::string::npos)
         return {};
-    int         depth = 0;
-    std::size_t i     = open;
+    int         depth   = 0;
+    bool        in_str  = false;
+    bool        escaped = false;
+    std::size_t i       = open;
     for (; i < source.size(); ++i) {
-        if (source[i] == '{')
+        const char c = source[i];
+        if (in_str) {
+            if (escaped)
+                escaped = false;
+            else if (c == '\\')
+                escaped = true;
+            else if (c == '"')
+                in_str = false;
+            continue;
+        }
+        if (c == '"')
+            in_str = true;
+        else if (c == '{')
             ++depth;
-        else if (source[i] == '}') {
+        else if (c == '}') {
             --depth;
             if (depth == 0) {
                 ++i;
@@ -324,6 +339,21 @@ struct shader::impl
     bool   compiled_ = false;
     bool   failed_   = false;
 
+    // Cached uniform locations (populated once after link; avoids per-frame glGetUniformLocation
+    // and string building in the render hot path).
+    struct sampler_loc
+    {
+        GLint tex  = -1;
+        GLint size = -1;
+        GLint rect = -1;
+        GLint flip = -1;
+        GLint bgra = -1;
+    };
+    GLint u_rendersize_ = -1, u_time_ = -1, u_timedelta_ = -1, u_frameindex_ = -1, u_passindex_ = -1,
+          u_date_ = -1;
+    std::vector<sampler_loc> sampler_locs_; ///< parallel to sampler_names_
+    std::vector<GLint>       input_locs_;   ///< parallel to inputs_ (-1 for image inputs)
+
     std::map<std::string, GLuint> upload_tex_;   ///< per-image-input CPU upload textures
     std::map<std::string, GLuint> imported_tex_; ///< imported name -> GL tex
     std::map<std::string, std::pair<int, int>> imported_size_;
@@ -563,7 +593,30 @@ struct shader::impl
             return false;
         }
         glGenVertexArrays(1, &vao_);
+        cache_locations();
         return true;
+    }
+
+    void cache_locations()
+    {
+        u_rendersize_ = glGetUniformLocation(program_, "RENDERSIZE");
+        u_time_       = glGetUniformLocation(program_, "TIME");
+        u_timedelta_  = glGetUniformLocation(program_, "TIMEDELTA");
+        u_frameindex_ = glGetUniformLocation(program_, "FRAMEINDEX");
+        u_passindex_  = glGetUniformLocation(program_, "PASSINDEX");
+        u_date_       = glGetUniformLocation(program_, "DATE");
+        sampler_locs_.resize(sampler_names_.size());
+        for (std::size_t i = 0; i < sampler_names_.size(); ++i) {
+            const auto& n     = sampler_names_[i];
+            sampler_locs_[i].tex  = glGetUniformLocation(program_, n.c_str());
+            sampler_locs_[i].size = glGetUniformLocation(program_, ("_" + n + "_imgSize").c_str());
+            sampler_locs_[i].rect = glGetUniformLocation(program_, ("_" + n + "_imgRect").c_str());
+            sampler_locs_[i].flip = glGetUniformLocation(program_, ("_" + n + "_flip").c_str());
+            sampler_locs_[i].bgra = glGetUniformLocation(program_, ("_" + n + "_bgra").c_str());
+        }
+        input_locs_.resize(inputs_.size());
+        for (std::size_t i = 0; i < inputs_.size(); ++i)
+            input_locs_[i] = inputs_[i].is_image ? -1 : glGetUniformLocation(program_, inputs_[i].name.c_str());
     }
 
     // -- texture helpers -------------------------------------------------------------------------
@@ -623,6 +676,23 @@ struct shader::impl
             b.h          = h;
             b.is_float   = is_float;
             b.front      = 0;
+
+            // Persistent buffers are read (as the previous frame) before they are first written,
+            // so they must start cleared rather than with undefined texture contents.
+            if (persistent) {
+                GLint prev_fbo = 0;
+                glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prev_fbo);
+                GLuint cfbo = 0;
+                glGenFramebuffers(1, &cfbo);
+                glBindFramebuffer(GL_FRAMEBUFFER, cfbo);
+                for (int i = 0; i < n; ++i) {
+                    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, b.tex[i], 0);
+                    glClearColor(0.f, 0.f, 0.f, 0.f);
+                    glClear(GL_COLOR_BUFFER_BIT);
+                }
+                glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(prev_fbo));
+                glDeleteFramebuffers(1, &cfbo);
+            }
         }
         b.persistent = persistent;
         return b;
@@ -681,11 +751,11 @@ struct shader::impl
 
     void set_scalar_uniforms(int width, int height, double time, double time_delta, int frame_index, int pass_index)
     {
-        glUniform2f(glGetUniformLocation(program_, "RENDERSIZE"), static_cast<float>(width), static_cast<float>(height));
-        glUniform1f(glGetUniformLocation(program_, "TIME"), static_cast<float>(time));
-        glUniform1f(glGetUniformLocation(program_, "TIMEDELTA"), static_cast<float>(time_delta));
-        glUniform1i(glGetUniformLocation(program_, "FRAMEINDEX"), frame_index);
-        glUniform1i(glGetUniformLocation(program_, "PASSINDEX"), pass_index);
+        glUniform2f(u_rendersize_, static_cast<float>(width), static_cast<float>(height));
+        glUniform1f(u_time_, static_cast<float>(time));
+        glUniform1f(u_timedelta_, static_cast<float>(time_delta));
+        glUniform1i(u_frameindex_, frame_index);
+        glUniform1i(u_passindex_, pass_index);
 
         std::time_t now = std::time(nullptr);
         std::tm     lt{};
@@ -694,17 +764,16 @@ struct shader::impl
 #else
         localtime_r(&now, &lt);
 #endif
-        glUniform4f(glGetUniformLocation(program_, "DATE"),
+        glUniform4f(u_date_,
                     static_cast<float>(lt.tm_year + 1900),
                     static_cast<float>(lt.tm_mon + 1),
                     static_cast<float>(lt.tm_mday),
                     static_cast<float>(lt.tm_hour * 3600 + lt.tm_min * 60 + lt.tm_sec));
 
-        for (const auto& in : inputs_) {
-            if (in.is_image)
-                continue;
-            const GLint loc = glGetUniformLocation(program_, in.name.c_str());
-            if (loc < 0)
+        for (std::size_t k = 0; k < inputs_.size(); ++k) {
+            const auto& in  = inputs_[k];
+            const GLint loc = input_locs_[k];
+            if (in.is_image || loc < 0)
                 continue;
             const auto& v = values_.at(in.name);
             auto        g = [&](std::size_t i) { return i < v.size() ? static_cast<float>(v[i]) : 0.0f; };
@@ -722,7 +791,9 @@ struct shader::impl
     void bind_samplers(const std::map<std::string, bound_image>& images)
     {
         int unit = 0;
-        for (const auto& n : sampler_names_) {
+        for (std::size_t i = 0; i < sampler_names_.size(); ++i) {
+            const auto& n  = sampler_names_[i];
+            const auto& sl = sampler_locs_[i];
             bound_image bi;
             if (auto it = images.find(n); it != images.end())
                 bi = it->second;
@@ -738,13 +809,12 @@ struct shader::impl
             }
             glActiveTexture(GL_TEXTURE0 + unit);
             glBindTexture(GL_TEXTURE_2D, bi.tex);
-            glUniform1i(glGetUniformLocation(program_, n.c_str()), unit);
-            glUniform2f(glGetUniformLocation(program_, ("_" + n + "_imgSize").c_str()),
-                        static_cast<float>(bi.w > 0 ? bi.w : 1),
-                        static_cast<float>(bi.h > 0 ? bi.h : 1));
-            glUniform4f(glGetUniformLocation(program_, ("_" + n + "_imgRect").c_str()), 0.f, 0.f, 1.f, 1.f);
-            glUniform1i(glGetUniformLocation(program_, ("_" + n + "_flip").c_str()), bi.flip ? 1 : 0);
-            glUniform1i(glGetUniformLocation(program_, ("_" + n + "_bgra").c_str()), bi.bgra ? 1 : 0);
+            glUniform1i(sl.tex, unit);
+            glUniform2f(sl.size, static_cast<float>(bi.w > 0 ? bi.w : 1), static_cast<float>(bi.h > 0 ? bi.h : 1));
+            if (sl.rect >= 0)
+                glUniform4f(sl.rect, 0.f, 0.f, 1.f, 1.f);
+            glUniform1i(sl.flip, bi.flip ? 1 : 0);
+            glUniform1i(sl.bgra, bi.bgra ? 1 : 0);
             ++unit;
         }
         glActiveTexture(GL_TEXTURE0);
@@ -814,6 +884,12 @@ struct shader::impl
 
             glBindFramebuffer(GL_FRAMEBUFFER, fbo);
             glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, write_tex, 0);
+            if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+                CASPAR_LOG(warning) << L"[isf] framebuffer incomplete (unsupported buffer format?); "
+                                    << L"disabling shader.";
+                failed_ = true;
+                break;
+            }
             glViewport(0, 0, pw, ph);
             glClearColor(0.f, 0.f, 0.f, 0.f);
             glClear(GL_COLOR_BUFFER_BIT);
@@ -838,6 +914,8 @@ struct shader::impl
                 kv.second.front = 1 - kv.second.front;
             kv.second.written = false;
         }
+        if (failed_)
+            return 0;
         return last_tex;
     }
 
