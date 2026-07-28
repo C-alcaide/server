@@ -35,6 +35,25 @@ namespace caspar { namespace decklink {
 
 namespace {
 
+#ifdef _WIN32
+// VirtualLock can only pin pages that fit in the process working set, whose
+// default maximum is tiny (~1.5 MB). Grow the min/max working set to cover the
+// buffers we are about to lock (accumulated across pools), else VirtualLock fails.
+void raise_working_set(std::size_t extra_bytes)
+{
+    static std::mutex m;
+    std::lock_guard<std::mutex> lk(m);
+    HANDLE h     = ::GetCurrentProcess();
+    SIZE_T mn = 0, mx = 0;
+    if (!::GetProcessWorkingSetSize(h, &mn, &mx))
+        return;
+    const SIZE_T margin  = static_cast<SIZE_T>(32) << 20; // 32 MB headroom
+    SIZE_T       want_mn = mn + extra_bytes + margin;
+    SIZE_T       want_mx = mx > want_mn ? mx : want_mn + (static_cast<SIZE_T>(64) << 20);
+    ::SetProcessWorkingSetSize(h, want_mn, want_mx);
+}
+#endif
+
 // Allocate a page-locked buffer of `bytes`. Sets `locked` to whether page-locking
 // actually succeeded (allocation still returns a usable buffer if locking fails,
 // e.g. the process working-set quota is exhausted — the frame just isn't pinned).
@@ -56,6 +75,7 @@ void* alloc_pinned(std::size_t bytes, gpu_output_buffer_pool::pin_kind kind, boo
     void* p = ::VirtualAlloc(nullptr, bytes, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (!p)
         return nullptr;
+    raise_working_set(bytes);
     locked = ::VirtualLock(p, bytes) != 0;
     return p;
 #else
@@ -125,6 +145,11 @@ gpu_output_buffer_pool::gpu_output_buffer_pool(std::size_t buffer_bytes, int ini
     if (!state_->all_pinned)
         CASPAR_LOG(warning) << L"[decklink] gpu_output_buffer_pool: some output buffers could not be page-locked "
                                L"(working-set quota?); output still functional, just not pinned.";
+    else
+        CASPAR_LOG(info) << L"[decklink] gpu_output_buffer_pool: " << static_cast<int>(state_->pooled.size())
+                         << L" x " << static_cast<double>(buffer_bytes) / (1024.0 * 1024.0)
+                         << L" MB page-locked output buffers ("
+                         << (kind == pin_kind::cuda_pinned ? L"cuda-pinned" : L"host-locked") << L").";
 }
 
 gpu_output_buffer_pool::~gpu_output_buffer_pool() = default;
