@@ -148,3 +148,112 @@ ELSEIF (CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     message(STATUS "ADDING: -DTBB_USE_GLIBCXX_VERSION=${TBB_USE_GLIBCXX_VERSION}")
     add_definitions(-DTBB_USE_GLIBCXX_VERSION=${TBB_USE_GLIBCXX_VERSION})
 ENDIF ()
+
+# OpenFX (host) — Linux mirror of the Windows OFX bootstrap block. Builds the BSD-3 HostSupport
+# C++ library as an internal static lib (openfx_host) plus libexpat (its XML dependency), so the
+# ofx module can load OFX plug-ins. Compiler flags are Linux/GCC-Clang appropriate.
+include(FetchContent)
+option(ENABLE_OFX "Enable the OpenFX host module" ON)
+if (ENABLE_OFX)
+	# --- expat (XML, required by HostSupport) ---
+	set(EXPAT_BUILD_TOOLS    OFF CACHE BOOL "" FORCE)
+	set(EXPAT_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+	set(EXPAT_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
+	set(EXPAT_BUILD_DOCS     OFF CACHE BOOL "" FORCE)
+	set(EXPAT_SHARED_LIBS    OFF CACHE BOOL "" FORCE)
+	set(EXPAT_BUILD_PKGCONFIG OFF CACHE BOOL "" FORCE)
+	FetchContent_Declare(expat
+		GIT_REPOSITORY https://github.com/libexpat/libexpat.git
+		GIT_TAG        R_2_6_4
+		GIT_SHALLOW    TRUE
+		SOURCE_SUBDIR  expat
+	)
+	FetchContent_MakeAvailable(expat)
+
+	FetchContent_Declare(openfx
+		GIT_REPOSITORY https://github.com/AcademySoftwareFoundation/openfx.git
+		GIT_TAG        OFX_Release_1.5.1
+		GIT_SHALLOW    TRUE
+		SOURCE_SUBDIR  include
+	)
+	FetchContent_MakeAvailable(openfx)
+
+	set(OPENFX_HOSTSUPPORT_SOURCES
+		${openfx_SOURCE_DIR}/HostSupport/src/ofxhBinary.cpp
+		${openfx_SOURCE_DIR}/HostSupport/src/ofxhClip.cpp
+		${openfx_SOURCE_DIR}/HostSupport/src/ofxhHost.cpp
+		${openfx_SOURCE_DIR}/HostSupport/src/ofxhImageEffect.cpp
+		${openfx_SOURCE_DIR}/HostSupport/src/ofxhImageEffectAPI.cpp
+		${openfx_SOURCE_DIR}/HostSupport/src/ofxhInteract.cpp
+		${openfx_SOURCE_DIR}/HostSupport/src/ofxhMemory.cpp
+		${openfx_SOURCE_DIR}/HostSupport/src/ofxhParam.cpp
+		${openfx_SOURCE_DIR}/HostSupport/src/ofxhPluginAPICache.cpp
+		${openfx_SOURCE_DIR}/HostSupport/src/ofxhPluginCache.cpp
+		${openfx_SOURCE_DIR}/HostSupport/src/ofxhPropertySuite.cpp
+		${openfx_SOURCE_DIR}/HostSupport/src/ofxhUtilities.cpp
+	)
+
+	add_library(openfx_host STATIC ${OPENFX_HOSTSUPPORT_SOURCES})
+	target_include_directories(openfx_host PUBLIC
+		${openfx_SOURCE_DIR}/include
+		${openfx_SOURCE_DIR}/HostSupport/include
+	)
+	target_include_directories(openfx_host PRIVATE ${CMAKE_SOURCE_DIR})
+	target_link_libraries(openfx_host PUBLIC expat ${CMAKE_DL_LIBS})
+	# Third-party BSD code: silence warnings and neutralise the global -Werror for this target.
+	target_compile_options(openfx_host PRIVATE -w)
+	# Match the definitions used on the ofx module so the class vtables align across the two libs.
+	target_compile_definitions(openfx_host PUBLIC OFX_SUPPORTS_OPENGLRENDER)
+	target_compile_definitions(openfx_host PUBLIC OFX_SUPPORTS_MULTITHREAD)
+	set_target_properties(openfx_host PROPERTIES FOLDER external)
+
+	# Optional OFX sample plug-ins for end-to-end host testing (bundled .ofx modules).
+	option(BUILD_OFX_SAMPLE_PLUGINS "Build OpenFX sample plug-ins (Invert, Basic) for testing" OFF)
+	if (BUILD_OFX_SAMPLE_PLUGINS)
+		file(GLOB OFX_SUPPORT_SOURCES ${openfx_SOURCE_DIR}/Support/Library/*.cpp)
+		add_library(ofxsupport STATIC ${OFX_SUPPORT_SOURCES})
+		target_include_directories(ofxsupport PUBLIC
+			${openfx_SOURCE_DIR}/include
+			${openfx_SOURCE_DIR}/Support/include
+		)
+		target_include_directories(ofxsupport PRIVATE ${CMAKE_SOURCE_DIR})
+		target_compile_options(ofxsupport PRIVATE -w)
+		set_target_properties(ofxsupport PROPERTIES FOLDER external)
+
+		function(casparcg_add_ofx_sample_plugin NAME SOURCE)
+			add_library(${NAME} MODULE ${SOURCE})
+			target_link_libraries(${NAME} PRIVATE ofxsupport)
+			target_include_directories(${NAME} PRIVATE ${CMAKE_SOURCE_DIR})
+			target_compile_options(${NAME} PRIVATE -w)
+			set_target_properties(${NAME} PROPERTIES
+				PREFIX ""
+				SUFFIX ".ofx"
+				FOLDER external
+				LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/ofx-plugins/${NAME}.ofx.bundle/Contents/Linux-x86-64"
+			)
+		endfunction()
+
+		casparcg_add_ofx_sample_plugin(Invert "${openfx_SOURCE_DIR}/Examples/Invert/invert.cpp")
+		casparcg_add_ofx_sample_plugin(Basic  "${openfx_SOURCE_DIR}/Examples/Basic/basic.cpp")
+
+		# GL example + core-GL test plug-in (raw C API, link GL directly, no ofxsupport).
+		find_package(OpenGL REQUIRED)
+		add_library(OpenGLExample_ofx MODULE "${openfx_SOURCE_DIR}/Examples/OpenGL/opengl.cpp")
+		target_include_directories(OpenGLExample_ofx PRIVATE ${openfx_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR})
+		target_compile_options(OpenGLExample_ofx PRIVATE -w)
+		target_link_libraries(OpenGLExample_ofx PRIVATE OpenGL::GL)
+		set_target_properties(OpenGLExample_ofx PROPERTIES
+			PREFIX "" SUFFIX ".ofx" OUTPUT_NAME "OpenGL" FOLDER external
+			LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/ofx-plugins/OpenGL.ofx.bundle/Contents/Linux-x86-64"
+		)
+
+		add_library(CoreGLTest_ofx MODULE "${CMAKE_SOURCE_DIR}/modules/ofx/test/coregl_orientation_test.cpp")
+		target_include_directories(CoreGLTest_ofx PRIVATE ${openfx_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR})
+		target_compile_options(CoreGLTest_ofx PRIVATE -w)
+		target_link_libraries(CoreGLTest_ofx PRIVATE OpenGL::GL)
+		set_target_properties(CoreGLTest_ofx PROPERTIES
+			PREFIX "" SUFFIX ".ofx" OUTPUT_NAME "CoreGLTest" FOLDER external
+			LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/ofx-plugins/CoreGLTest.ofx.bundle/Contents/Linux-x86-64"
+		)
+	endif ()
+endif ()

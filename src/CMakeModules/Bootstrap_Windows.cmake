@@ -184,6 +184,171 @@ ExternalProject_Get_Property(zlib BINARY_DIR)
 set(ZLIB_INCLUDE_PATH "${SOURCE_DIR};${BINARY_DIR}")
 link_directories(${BINARY_DIR})
 
+# OpenFX (host) — used by the ofx module to load OFX plug-ins.
+# We vendor the OpenFX C API headers + the BSD-3 HostSupport C++ library and build
+# HostSupport as an internal static lib (openfx_host). HostSupport uses expat for its
+# persistent plug-in cache, so we also fetch libexpat and build it statically.
+option(ENABLE_OFX "Enable the OpenFX host module" ON)
+if (ENABLE_OFX)
+	# --- expat (XML, required by HostSupport) ---
+	set(EXPAT_BUILD_TOOLS    OFF CACHE BOOL "" FORCE)
+	set(EXPAT_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+	set(EXPAT_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
+	set(EXPAT_BUILD_DOCS     OFF CACHE BOOL "" FORCE)
+	set(EXPAT_SHARED_LIBS    OFF CACHE BOOL "" FORCE)
+	set(EXPAT_BUILD_PKGCONFIG OFF CACHE BOOL "" FORCE)
+	FetchContent_Declare(expat
+		GIT_REPOSITORY https://github.com/libexpat/libexpat.git
+		GIT_TAG        R_2_6_4
+		GIT_SHALLOW    TRUE
+		SOURCE_SUBDIR  expat
+	)
+	FetchContent_MakeAvailable(expat)
+
+	# --- OpenFX source (headers + HostSupport). SOURCE_SUBDIR points at a dir with no
+	#     CMakeLists.txt so MakeAvailable only populates the source (no add_subdirectory). ---
+	FetchContent_Declare(openfx
+		GIT_REPOSITORY https://github.com/AcademySoftwareFoundation/openfx.git
+		GIT_TAG        OFX_Release_1.5.1
+		GIT_SHALLOW    TRUE
+		SOURCE_SUBDIR  include
+	)
+	FetchContent_MakeAvailable(openfx)
+
+	set(OPENFX_HOSTSUPPORT_SOURCES
+		${openfx_SOURCE_DIR}/HostSupport/src/ofxhBinary.cpp
+		${openfx_SOURCE_DIR}/HostSupport/src/ofxhClip.cpp
+		${openfx_SOURCE_DIR}/HostSupport/src/ofxhHost.cpp
+		${openfx_SOURCE_DIR}/HostSupport/src/ofxhImageEffect.cpp
+		${openfx_SOURCE_DIR}/HostSupport/src/ofxhImageEffectAPI.cpp
+		${openfx_SOURCE_DIR}/HostSupport/src/ofxhInteract.cpp
+		${openfx_SOURCE_DIR}/HostSupport/src/ofxhMemory.cpp
+		${openfx_SOURCE_DIR}/HostSupport/src/ofxhParam.cpp
+		${openfx_SOURCE_DIR}/HostSupport/src/ofxhPluginAPICache.cpp
+		${openfx_SOURCE_DIR}/HostSupport/src/ofxhPluginCache.cpp
+		${openfx_SOURCE_DIR}/HostSupport/src/ofxhPropertySuite.cpp
+		${openfx_SOURCE_DIR}/HostSupport/src/ofxhUtilities.cpp
+	)
+
+	add_library(openfx_host STATIC ${OPENFX_HOSTSUPPORT_SOURCES})
+	target_include_directories(openfx_host PUBLIC
+		${openfx_SOURCE_DIR}/include
+		${openfx_SOURCE_DIR}/HostSupport/include
+	)
+	# The global CMAKE_CXX_FLAGS force-includes common/compiler/vs/disable_silly_warnings.h
+	# (a relative path); add the source root so it resolves for this out-of-tree target.
+	target_include_directories(openfx_host PRIVATE ${CMAKE_SOURCE_DIR})
+	target_link_libraries(openfx_host PUBLIC expat)
+	# HostSupport is third-party BSD code and does not compile clean under /W4 /WX.
+	# It also assumes an ANSI (non-UNICODE) build for TCHAR Win32 APIs, so undefine the
+	# global UNICODE/_UNICODE for this target only.
+	target_compile_options(openfx_host PRIVATE /W0 /WX- /EHsc /UUNICODE /U_UNICODE)
+	target_compile_definitions(openfx_host PRIVATE _CRT_SECURE_NO_WARNINGS)
+	# Enable the OFX OpenGL render suite in HostSupport. Must match the definition on the
+	# ofx module (aligns the class vtables across the two static libs).
+	target_compile_definitions(openfx_host PUBLIC OFX_SUPPORTS_OPENGLRENDER)
+	# Host provides a real (parallel) OfxMultiThreadSuite: HostSupport forwards the suite to the
+	# host's multiThread*/mutex* virtuals, which caspar_ofx_host implements.
+	target_compile_definitions(openfx_host PUBLIC OFX_SUPPORTS_MULTITHREAD)
+	set_target_properties(openfx_host expat PROPERTIES FOLDER external)
+
+	# Optional: build a couple of OpenFX sample plug-ins (from the fetched OpenFX repo) into
+	# .ofx bundles under ${CMAKE_BINARY_DIR}/ofx-plugins for end-to-end testing of the host.
+	option(BUILD_OFX_SAMPLE_PLUGINS "Build OpenFX sample plug-ins (Invert, Basic) for testing" OFF)
+	if (BUILD_OFX_SAMPLE_PLUGINS)
+		# OFX C++ plug-in Support library.
+		file(GLOB OFX_SUPPORT_SOURCES ${openfx_SOURCE_DIR}/Support/Library/*.cpp)
+		add_library(ofxsupport STATIC ${OFX_SUPPORT_SOURCES})
+		target_include_directories(ofxsupport PUBLIC
+			${openfx_SOURCE_DIR}/include
+			${openfx_SOURCE_DIR}/Support/include
+		)
+		target_include_directories(ofxsupport PRIVATE ${CMAKE_SOURCE_DIR})
+		target_compile_options(ofxsupport PRIVATE /W0 /WX- /EHsc /UUNICODE /U_UNICODE)
+		target_compile_definitions(ofxsupport PRIVATE _CRT_SECURE_NO_WARNINGS)
+		set_target_properties(ofxsupport PROPERTIES FOLDER external)
+
+		# Helper to build one example .ofx bundle: <name>.ofx.bundle/Contents/Win64/<name>.ofx
+		function(casparcg_add_ofx_sample_plugin NAME SOURCE)
+			add_library(${NAME} MODULE ${SOURCE})
+			target_link_libraries(${NAME} PRIVATE ofxsupport)
+			target_include_directories(${NAME} PRIVATE ${CMAKE_SOURCE_DIR})
+			target_compile_options(${NAME} PRIVATE /W0 /WX- /EHsc /UUNICODE /U_UNICODE)
+			target_compile_definitions(${NAME} PRIVATE _CRT_SECURE_NO_WARNINGS)
+			set_target_properties(${NAME} PROPERTIES
+				PREFIX ""
+				SUFFIX ".ofx"
+				FOLDER external
+				LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/ofx-plugins/${NAME}.ofx.bundle/Contents/Win64"
+			)
+		endfunction()
+
+		casparcg_add_ofx_sample_plugin(Invert "${openfx_SOURCE_DIR}/Examples/Invert/invert.cpp")
+		casparcg_add_ofx_sample_plugin(Basic  "${openfx_SOURCE_DIR}/Examples/Basic/basic.cpp")
+
+		# The OpenGL example uses the raw C API (defines its own OFX entry points) and calls GL
+		# directly, so it must NOT link ofxsupport (duplicate symbols) and needs opengl32.
+		add_library(OpenGLExample_ofx MODULE "${openfx_SOURCE_DIR}/Examples/OpenGL/opengl.cpp")
+		target_include_directories(OpenGLExample_ofx PRIVATE ${openfx_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR})
+		target_compile_options(OpenGLExample_ofx PRIVATE /W0 /WX- /EHsc /UUNICODE /U_UNICODE)
+		target_compile_definitions(OpenGLExample_ofx PRIVATE _CRT_SECURE_NO_WARNINGS)
+		target_link_libraries(OpenGLExample_ofx PRIVATE opengl32)
+		set_target_properties(OpenGLExample_ofx PROPERTIES
+			PREFIX ""
+			SUFFIX ".ofx"
+			OUTPUT_NAME "OpenGL"
+			FOLDER external
+			LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/ofx-plugins/OpenGL.ofx.bundle/Contents/Win64"
+		)
+
+		# Core-profile GL test plug-in (glScissor/glClear only) — renders a deterministic
+		# top/bottom colour pattern to verify the zero-copy OpenGL render path + orientation.
+		add_library(CoreGLTest_ofx MODULE "${CMAKE_SOURCE_DIR}/modules/ofx/test/coregl_orientation_test.cpp")
+		target_include_directories(CoreGLTest_ofx PRIVATE ${openfx_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR})
+		target_compile_options(CoreGLTest_ofx PRIVATE /W0 /WX- /EHsc /UUNICODE /U_UNICODE)
+		target_compile_definitions(CoreGLTest_ofx PRIVATE _CRT_SECURE_NO_WARNINGS)
+		target_link_libraries(CoreGLTest_ofx PRIVATE opengl32)
+		set_target_properties(CoreGLTest_ofx PROPERTIES
+			PREFIX ""
+			SUFFIX ".ofx"
+			OUTPUT_NAME "CoreGLTest"
+			FOLDER external
+			LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/ofx-plugins/CoreGLTest.ofx.bundle/Contents/Win64"
+		)
+
+		# CPU transition test plug-in (blends SourceFrom/SourceTo by the Transition param) — raw C API.
+		add_library(TransitionTest_ofx MODULE "${CMAKE_SOURCE_DIR}/modules/ofx/test/transition_mix_test.cpp")
+		target_include_directories(TransitionTest_ofx PRIVATE ${openfx_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR})
+		target_compile_options(TransitionTest_ofx PRIVATE /W0 /WX- /EHsc /UUNICODE /U_UNICODE)
+		target_compile_definitions(TransitionTest_ofx PRIVATE _CRT_SECURE_NO_WARNINGS)
+		set_target_properties(TransitionTest_ofx PROPERTIES
+			PREFIX ""
+			SUFFIX ".ofx"
+			OUTPUT_NAME "TransitionTest"
+			FOLDER external
+			LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/ofx-plugins/TransitionTest.ofx.bundle/Contents/Win64"
+		)
+
+		# CUDA test plug-in (cudaMemset the output device buffer) — validates the host CUDA render
+		# path. Runtime host API only (cudaMemset), so no nvcc; just links cudart.
+		find_package(CUDAToolkit QUIET)
+		if (CUDAToolkit_FOUND)
+			add_library(CudaTest_ofx MODULE "${CMAKE_SOURCE_DIR}/modules/ofx/test/cuda_fill_test.cpp")
+			target_include_directories(CudaTest_ofx PRIVATE ${openfx_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR})
+			target_compile_options(CudaTest_ofx PRIVATE /W0 /WX- /EHsc /UUNICODE /U_UNICODE)
+			target_compile_definitions(CudaTest_ofx PRIVATE _CRT_SECURE_NO_WARNINGS)
+			target_link_libraries(CudaTest_ofx PRIVATE CUDA::cudart_static)
+			set_target_properties(CudaTest_ofx PROPERTIES
+				PREFIX ""
+				SUFFIX ".ofx"
+				OUTPUT_NAME "CudaTest"
+				FOLDER external
+				LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/ofx-plugins/CudaTest.ofx.bundle/Contents/Win64"
+			)
+		endif ()
+	endif ()
+endif ()
+
 # OpenAL
 FetchContent_Declare(openal
 	URL ${CASPARCG_DOWNLOAD_MIRROR}/openal/openal-soft-1.19.1-bin.zip
