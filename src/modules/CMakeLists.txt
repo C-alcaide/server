@@ -13,6 +13,7 @@ add_subdirectory(ffmpeg)
 add_subdirectory(oal)
 add_subdirectory(decklink)
 add_subdirectory(ofx)
+add_subdirectory(isf)
 
 if (BUILD_CUDA_MODULES)
     add_subdirectory(cuda_prores)
