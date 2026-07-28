@@ -25,6 +25,7 @@
 #include "util/util.h"
 
 #include "consumer/decklink_consumer.h"
+#include "consumer/dvp_support.h"
 #include "producer/decklink_producer.h"
 
 #include <core/consumer/frame_consumer.h>
@@ -86,6 +87,8 @@ void init(const core::module_dependencies& dependencies)
         for (const auto& device : devices) {
             CASPAR_LOG(info) << L" - " << device;
         }
+        // Probe + log NVIDIA DVP (GPUDirect for Video) availability for Tier-2 GPU-direct output.
+        dvp_available();
     }
 }
 

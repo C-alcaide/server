@@ -26,6 +26,8 @@ set(SOURCES
 		consumer/format_strategy.h
 		consumer/gpu_output_buffer_pool.cpp
 		consumer/gpu_output_buffer_pool.h
+		consumer/dvp_support.cpp
+		consumer/dvp_support.h
 		consumer/config.cpp
 		consumer/config.h
 		consumer/monitor.cpp
@@ -145,6 +147,23 @@ if(DECKLINK_CUDA_VK)
 	IF(ENABLE_VULKAN)
 		target_link_libraries(decklink PRIVATE Vulkan::Headers)
 	ENDIF()
+
+	# NVIDIA GPUDirect for Video (DVP) — Tier-2 hardware-synced GPU->card transfer.
+	# Referenced from the DeckLink SDK's bundled NVIDIA_GPUDirect (own NVIDIA EULA),
+	# not vendored. Uses the DLL import lib (dvp.lib + dvp.dll): the static lib is
+	# built against the static CRT (/MT) and conflicts with CasparCG's dynamic CRT.
+	set(DECKLINK_GPUDIRECT_SDK "d:/Github/Blackmagic DeckLink SDK 15.3/Win/Samples/NVIDIA_GPUDirect"
+		CACHE PATH "NVIDIA GPUDirect for Video (DVP) root inside the DeckLink SDK")
+	if(MSVC AND EXISTS "${DECKLINK_GPUDIRECT_SDK}/lib/x64/dvp.lib")
+		message(STATUS "decklink: NVIDIA DVP (GPUDirect for Video) enabled from ${DECKLINK_GPUDIRECT_SDK}")
+		target_compile_definitions(decklink PRIVATE DECKLINK_CUDA_DVP_ENABLED)
+		target_include_directories(decklink SYSTEM PRIVATE "${DECKLINK_GPUDIRECT_SDK}/include")
+		target_link_libraries(decklink PRIVATE
+			"${DECKLINK_GPUDIRECT_SDK}/lib/x64/dvp.lib"
+			CUDA::cuda_driver)
+		# NOTE: dvp.dll from ${DECKLINK_GPUDIRECT_SDK}/bin/x64 must be staged next to
+		# casparcg.exe (done by the packaging step / copied manually for dev runs).
+	endif()
 endif()
 
 # Pure-Vulkan readback strategy dependencies (Vulkan loader for API calls)
