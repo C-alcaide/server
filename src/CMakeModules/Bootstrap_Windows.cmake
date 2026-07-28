@@ -360,6 +360,21 @@ if (ENABLE_OFX)
 				FOLDER external
 				LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/ofx-plugins/CudaTest.ofx.bundle/Contents/Win64"
 			)
+
+			# CUDA source-sampling passthrough test plug-in (validates the CUDA source path /
+			# orientation): copies source device buffer -> output device buffer. Runtime API only.
+			add_library(CudaPassthrough_ofx MODULE "${CMAKE_SOURCE_DIR}/modules/ofx/test/cuda_passthrough_test.cpp")
+			target_include_directories(CudaPassthrough_ofx PRIVATE ${openfx_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR})
+			target_compile_options(CudaPassthrough_ofx PRIVATE /W0 /WX- /EHsc /UUNICODE /U_UNICODE)
+			target_compile_definitions(CudaPassthrough_ofx PRIVATE _CRT_SECURE_NO_WARNINGS)
+			target_link_libraries(CudaPassthrough_ofx PRIVATE CUDA::cudart_static)
+			set_target_properties(CudaPassthrough_ofx PROPERTIES
+				PREFIX ""
+				SUFFIX ".ofx"
+				OUTPUT_NAME "CudaPassthrough"
+				FOLDER external
+				LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/ofx-plugins/CudaPassthrough.ofx.bundle/Contents/Win64"
+			)
 		endif ()
 	endif ()
 endif ()
