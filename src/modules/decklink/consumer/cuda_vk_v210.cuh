@@ -35,17 +35,16 @@ __device__ __forceinline__
 void bgra16_to_ycbcr10_bt709(int R10, int G10, int B10,
                               int& Y, int& Cb, int& Cr)
 {
-    // Fixed-point (×2^20) BT.709 coefficients for 10-bit input
-    // Y  = 64  + (0.2126*R + 0.7152*G + 0.0722*B) * 876/1023
-    // Cb = 512 + (-0.1146*R - 0.3854*G + 0.5*B) * 896/1023
-    // Cr = 512 + (0.5*R - 0.4542*G - 0.0458*B) * 896/1023
-    Y  = 64  + ((222951 * R10 + 750098 * G10 + 75663 * B10) >> 20);
-    Cb = 512 + ((-100459 * R10 - 337802 * G10 + 438223 * B10) >> 20);
-    Cr = 512 + ((438223 * R10 - 398337 * G10 - 39908 * B10) >> 20);
+    // Legal/limited-range BT.709, identical fixed-point coefficients to the CPU
+    // packer (v210_strategies.cpp create_int_matrix): luma x 876/1023, chroma
+    // x 896/1023. Input R10/G10/B10 are 10-bit (0..1023).
+    Y  = ((64 << 20)   + 190929 * R10 + 642151 * G10 +  64822 * B10) >> 20;
+    Cb = ((1025 << 19) - 105242 * R10 - 353959 * G10 + 459200 * B10) >> 20;
+    Cr = ((1025 << 19) + 459200 * R10 - 417097 * G10 -  42104 * B10) >> 20;
 
-    Y  = max(64, min(Y, 940));
-    Cb = max(64, min(Cb, 960));
-    Cr = max(64, min(Cr, 960));
+    Y  = max(0, min(Y, 1023));
+    Cb = max(0, min(Cb, 1023));
+    Cr = max(0, min(Cr, 1023));
 }
 
 // ---------------------------------------------------------------------------
@@ -55,14 +54,15 @@ __device__ __forceinline__
 void bgra16_to_ycbcr10_bt2020(int R10, int G10, int B10,
                                int& Y, int& Cb, int& Cr)
 {
-    // BT.2020 coefficients: KR=0.2627, KG=0.6780, KB=0.0593
-    Y  = 64  + ((275375 * R10 + 710743 * G10 + 62594 * B10) >> 20);
-    Cb = 512 + ((-146420 * R10 - 377856 * G10 + 524288 * B10) >> 20);
-    Cr = 512 + ((524288 * R10 - 482393 * G10 - 41857 * B10) >> 20);
+    // Legal/limited-range BT.2020 (KR=0.2627, KG=0.6780, KB=0.0593), matching
+    // the CPU packer's scaling.
+    Y  = ((64 << 20)   + 235879 * R10 + 608775 * G10 +  53247 * B10) >> 20;
+    Cb = ((1025 << 19) - 128237 * R10 - 330964 * G10 + 459200 * B10) >> 20;
+    Cr = ((1025 << 19) + 459200 * R10 - 422267 * G10 -  36934 * B10) >> 20;
 
-    Y  = max(64, min(Y, 940));
-    Cb = max(64, min(Cb, 960));
-    Cr = max(64, min(Cr, 960));
+    Y  = max(0, min(Y, 1023));
+    Cb = max(0, min(Cb, 1023));
+    Cr = max(0, min(Cr, 1023));
 }
 
 // ---------------------------------------------------------------------------
@@ -140,13 +140,13 @@ __global__ void k_vk_surface_to_v210(
             bgra16_to_ycbcr10_bt709(R[i], G[i], B[i], Y[i], Cb_raw[i], Cr_raw[i]);
     }
 
-    // 4:2:2 chroma subsampling: average pairs
-    int Cb0 = (Cb_raw[0] + Cb_raw[1] + 1) >> 1;
-    int Cr0 = (Cr_raw[0] + Cr_raw[1] + 1) >> 1;
-    int Cb1 = (Cb_raw[2] + Cb_raw[3] + 1) >> 1;
-    int Cr1 = (Cr_raw[2] + Cr_raw[3] + 1) >> 1;
-    int Cb2 = (Cb_raw[4] + Cb_raw[5] + 1) >> 1;
-    int Cr2 = (Cr_raw[4] + Cr_raw[5] + 1) >> 1;
+    // 4:2:2 chroma subsampling: co-sited nearest (even pixel), matching the CPU packer.
+    int Cb0 = Cb_raw[0];
+    int Cr0 = Cr_raw[0];
+    int Cb1 = Cb_raw[2];
+    int Cr1 = Cr_raw[2];
+    int Cb2 = Cb_raw[4];
+    int Cr2 = Cr_raw[4];
 
     // Pack V210 words
     uint32_t w0 = (uint32_t)Cb0        | ((uint32_t)Y[0] << 10) | ((uint32_t)Cr0 << 20);
