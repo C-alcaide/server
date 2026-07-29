@@ -69,7 +69,37 @@ struct stage::impl : public std::enable_shared_from_this<impl>
     executor   executor_{L"stage " + std::to_wstring(channel_index_)};
     std::mutex lock_;
 
+    // ── Per-layer failure tracking (stage executor only — no mutex) ──
+    // Consecutive receive() failures per layer. Used to rate-limit logging and
+    // to give up on a layer that fails every tick instead of paying for it
+    // forever.
+    static constexpr int max_consecutive_layer_failures = 25;
+    std::map<int, int>   layer_failures_;
+
   private:
+    /// Records a failure for `index` and logs it (first failure, then every
+    /// 25th) so a permanently-broken producer cannot flood the log.
+    /// Returns true when the layer has failed too many times in a row and
+    /// should be dropped.
+    bool note_layer_failure(int index)
+    {
+        auto count = ++layer_failures_[index];
+
+        if (count == 1 || count % max_consecutive_layer_failures == 0) {
+            CASPAR_LOG_CURRENT_EXCEPTION();
+            CASPAR_LOG(error) << L"stage[" << channel_index_ << L"] layer " << index << L" failed to produce a frame ("
+                              << count << L" consecutive). Other layers are unaffected.";
+        }
+
+        if (count >= max_consecutive_layer_failures) {
+            CASPAR_LOG(error) << L"stage[" << channel_index_ << L"] removing layer " << index << L" after " << count
+                              << L" consecutive failures.";
+            return true;
+        }
+
+        return false;
+    }
+
     void orderSourceLayers(std::vector<std::pair<int, bool>>&        layerVec,
                            const std::map<int, std::pair<int, int>>& routed_layers,
                            int                                       l,
@@ -241,32 +271,63 @@ struct stage::impl : public std::enable_shared_from_this<impl>
                     auto has_background_route =
                         std::find(fetch_background.begin(), fetch_background.end(), p->first) != fetch_background.end();
 
+                    // ── Per-layer fault isolation ──────────────────────────
+                    // A throwing producer must not take the rest of the
+                    // channel down with it. Previously a single exception here
+                    // propagated to the outer handler, which cleared EVERY
+                    // layer on the channel — a broadcast-hostile failure mode.
+                    // Now the offending layer alone degrades (to black, or to
+                    // its last good frame via layer::receive) and is dropped
+                    // entirely after too many consecutive failures.
                     layer_frame res = {};
-                    if (l.second) {
-                        res.foreground1_raw = layer.receive(field1, result.nb_samples);
-                        res.foreground1     = draw_frame::push(res.foreground1_raw, tween.fetch());
-                        res.foreground1.transform().image_transform.enable_geometry_modifiers = true;
-                    }
-
-                    res.has_background = layer.has_background();
-                    if (has_background_route)
-                        res.background1 = layer.receive_background(field1, result.nb_samples);
-
-                    if (is_interlaced) {
-                        res.is_interlaced = true;
+                    try {
                         if (l.second) {
-                            res.foreground2_raw = layer.receive(video_field::b, result.nb_samples);
-                            res.foreground2     = draw_frame::push(res.foreground2_raw, tween.fetch());
-                            res.foreground2.transform().image_transform.enable_geometry_modifiers = true;
+                            res.foreground1_raw = layer.receive(field1, result.nb_samples);
+                            res.foreground1     = draw_frame::push(res.foreground1_raw, tween.fetch());
+                            res.foreground1.transform().image_transform.enable_geometry_modifiers = true;
                         }
+
+                        res.has_background = layer.has_background();
                         if (has_background_route)
-                            res.background2 = layer.receive_background(video_field::b, result.nb_samples);
+                            res.background1 = layer.receive_background(field1, result.nb_samples);
+
+                        if (is_interlaced) {
+                            res.is_interlaced = true;
+                            if (l.second) {
+                                res.foreground2_raw = layer.receive(video_field::b, result.nb_samples);
+                                res.foreground2     = draw_frame::push(res.foreground2_raw, tween.fetch());
+                                res.foreground2.transform().image_transform.enable_geometry_modifiers = true;
+                            }
+                            if (has_background_route)
+                                res.background2 = layer.receive_background(video_field::b, result.nb_samples);
+                        }
+
+                        layer_failures_.erase(p->first);
+                    } catch (...) {
+                        res = layer_frame{};
+                        if (is_interlaced)
+                            res.is_interlaced = true;
+
+                        if (note_layer_failure(p->first)) {
+                            // Too many consecutive failures — drop just this
+                            // layer so it stops costing a frame every tick.
+                            layers_.erase(p->first);
+                            layer_failures_.erase(l.first);
+                            continue;
+                        }
                     }
 
                     frames[p->first] = res;
 
                     // push received foreground frame to any configured route producer
-                    routesCb(p->first, res);
+                    try {
+                        routesCb(p->first, res);
+                    } catch (...) {
+                        if (note_layer_failure(p->first)) {
+                            layers_.erase(p->first);
+                            layer_failures_.erase(l.first);
+                        }
+                    }
                 }
 
                 for (auto& p : frames) {
@@ -338,7 +399,10 @@ struct stage::impl : public std::enable_shared_from_this<impl>
                 }
                 state_ = std::move(state);
             } catch (...) {
-                layers_.clear();
+                // Per-layer faults are handled inside the loop above; anything
+                // reaching here is a stage-wide fault (tween/keyframe/route
+                // bookkeeping). Do NOT clear layers_ — losing every layer on
+                // the channel is far worse than dropping one frame.
                 CASPAR_LOG_CURRENT_EXCEPTION();
             }
 
