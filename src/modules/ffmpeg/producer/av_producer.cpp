@@ -845,6 +845,13 @@ class Decoder
     std::atomic<AVColorSpace> frame_colorspace{AVCOL_SPC_UNSPECIFIED};
     std::atomic<AVColorRange> frame_color_range{AVCOL_RANGE_UNSPECIFIED};
 
+    // Set if any decoded frame was actually flagged interlaced. The deinterlacer
+    // is omitted for streams whose container declares them progressive (see the
+    // filter spec), and containers do occasionally lie; this is the safety net,
+    // consulted on every filter rebuild so a mis-declared file gets its
+    // deinterlacer back rather than playing combed forever.
+    std::atomic<bool> saw_interlaced_frame_{false};
+
 #ifdef _WIN32
     // When true, D3D11 frames are kept as-is (no CPU transfer) and placed in hw_output.
     std::atomic<bool>                         gpu_direct_mode_{false};
@@ -1047,6 +1054,16 @@ class Decoder
                             frame_color_range.store(static_cast<AVColorRange>(av_frame->color_range),
                                                     std::memory_order_relaxed);
                         }
+
+                        // Recorded, not judged: whether it matters depends on what the
+                        // container claimed, which the filter graph decides and logs.
+#if LIBAVCODEC_VERSION_MAJOR < 61
+                        const bool frame_interlaced = av_frame->interlaced_frame != 0;
+#else
+                        const bool frame_interlaced = (av_frame->flags & AV_FRAME_FLAG_INTERLACED) != 0;
+#endif
+                        if (frame_interlaced)
+                            saw_interlaced_frame_.store(true, std::memory_order_relaxed);
 
                         if (av_frame->format != AV_PIX_FMT_D3D11 && gpu_direct_mode_.load())
                             saw_software_frame_.store(true, std::memory_order_relaxed);
@@ -1337,7 +1354,45 @@ struct Filter
             auto deint = u8(
                 env::properties().get<std::wstring>(L"configuration.ffmpeg.producer.auto-deinterlace", L"interlaced"));
 
-            if (deint != "none") {
+            // ── Skip the deinterlacer on declared-progressive streams ──────
+            // With deint=interlaced (the default) bwdif is a pass-through on
+            // progressive frames -- but it is still in the graph, so its format
+            // constraints apply to everything. It has no semi-planar support, so a
+            // hardware-decoded NV12 frame gets de-interleaved to yuv420p by
+            // libswscale on every frame, for a filter that then does nothing.
+            //
+            // Measured on 12 layers of hardware-decoded 1080p25 H.264, three runs:
+            // 3.85 -> 3.14, 3.84 -> 3.17 and 3.89 -> 3.17 CPU cores, about 18%.
+            // NV12 also then reaches the mixer as two planes instead of three,
+            // which is what the native semi-planar upload path was built for.
+            //
+            // Only for streams the container explicitly declares progressive --
+            // "unknown" keeps the deinterlacer -- and only for deint=interlaced,
+            // since deint=all means the caller wants every frame deinterlaced.
+            // If any decoder has since seen a frame actually flagged interlaced,
+            // the container lied and the deinterlacer goes back in.
+            bool declared_progressive = false;
+            bool observed_interlaced  = false;
+            if (deint == "interlaced") {
+                for (auto n = 0U; n < input->nb_streams; ++n) {
+                    const auto* st = input->streams[n];
+                    if (st->codecpar->codec_type != AVMEDIA_TYPE_VIDEO)
+                        continue;
+                    declared_progressive = st->codecpar->field_order == AV_FIELD_PROGRESSIVE;
+                    const auto it        = streams.find(st->index);
+                    if (it != streams.end())
+                        observed_interlaced = it->second.saw_interlaced_frame_.load(std::memory_order_relaxed);
+                    break;
+                }
+                if (declared_progressive && observed_interlaced) {
+                    CASPAR_LOG(warning) << L"[ffmpeg] stream declares itself progressive but has delivered interlaced "
+                                           L"frames; keeping the deinterlacer";
+                }
+            }
+
+            const bool skip_deint = declared_progressive && !observed_interlaced;
+
+            if (deint != "none" && !skip_deint) {
                 filter_spec += (boost::format(",bwdif=mode=send_field:parity=auto:deint=%s") % deint).str();
             }
 
@@ -1602,12 +1657,41 @@ struct Filter
 #pragma warning(push)
 #pragma warning(disable : 4245)
 #endif
-            const AVPixelFormat pix_fmts[] = {AV_PIX_FMT_RGB24,
-                                              AV_PIX_FMT_BGR24,
-                                              AV_PIX_FMT_BGRA,
-                                              AV_PIX_FMT_ARGB,
+            const AVPixelFormat pix_fmts[] = {AV_PIX_FMT_BGRA,
                                               AV_PIX_FMT_RGBA,
-                                              AV_PIX_FMT_ABGR,
+                                              // RGB24 and BGR24 are deliberately not offered. Vulkan
+                                              // implementations are not required to support
+                                              // 3-component 8-bit formats as sampled images, and this
+                                              // one does not: the VK mixer throws as soon as a frame
+                                              // of rgb24 reaches it, which an FFV1 RGB clip made it
+                                              // do the moment a CPU consumer was attached. OpenGL
+                                              // renders them correctly, so this is a parity floor
+                                              // rather than a bug -- supporting them would mean
+                                              // expanding to 4 components during upload.
+                                              //
+                                              // ARGB and ABGR are also not offered. The
+                                              // mixer's shaders have cases for them
+                                              // (pixel_format 3 and 4) but the swizzles are wrong:
+                                              // a QuickTime RLE clip, whose decoder emits argb,
+                                              // renders at 6.4 dB against a reference where every
+                                              // other format scores 38 dB or better. Nothing
+                                              // noticed because the filter graph always converted
+                                              // packed alpha formats to planar before the mixer saw
+                                              // them, so the path was never exercised. Excluding
+                                              // them here keeps negotiation on a format known to
+                                              // render correctly; fixing the shaders is a separate
+                                              // job needing a parity test on both backends.
+                                              // mixer's shaders have cases for them
+                                              // (pixel_format 3 and 4) but the swizzles are wrong:
+                                              // a QuickTime RLE clip, whose decoder emits argb,
+                                              // renders at 6.4 dB against a reference where every
+                                              // other format scores 38 dB or better. Nothing
+                                              // noticed because the filter graph always converted
+                                              // packed alpha formats to planar before the mixer saw
+                                              // them, so the path was never exercised. Excluding
+                                              // them here keeps negotiation on a format known to
+                                              // render correctly; fixing the shaders is a separate
+                                              // job needing a parity test on both backends.
                                               AV_PIX_FMT_YUV444P,
                                               AV_PIX_FMT_YUV444P10,
                                               AV_PIX_FMT_YUV444P12,

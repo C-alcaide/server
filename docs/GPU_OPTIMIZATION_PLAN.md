@@ -956,6 +956,97 @@ place no conversion in these graphs depended on it. It matters for graphs where
 one *does* occur — user-supplied filters, scaling — which is exactly where a
 silently-wrong colour declaration would have been hardest to track down.
 
+---
+
+## Skipping the deinterlacer on declared-progressive streams — 2026-07-30
+
+`bwdif` is appended to every video filter graph. With the default
+`deint=interlaced` it only acts on frames flagged interlaced, so on progressive
+content it does nothing — but it is still *in* the graph, so its format
+constraints apply. It has no semi-planar support, so a hardware-decoded NV12
+frame gets de-interleaved to `yuv420p` by libswscale on every frame, for a filter
+that then passes it straight through.
+
+It is now omitted when the container **explicitly** declares the stream
+progressive (`field_order == AV_FIELD_PROGRESSIVE`) — `unknown` keeps it — and
+only under `deint=interlaced`, since `deint=all` means the caller wants
+everything deinterlaced. Containers do lie, so the `Decoder` records whether any
+frame was actually flagged interlaced, and every filter rebuild consults it: a
+mis-declared file gets its deinterlacer back and logs why.
+
+**Measured: ~18 % CPU.** Twelve layers of hardware-decoded 1080p25 H.264, three
+consecutive runs, bwdif present versus absent: 3.85 → 3.14, 3.84 → 3.17 and
+3.89 → 3.17 cores.
+
+> Measure this as a within-run A/B only. Absolute CPU for the identical
+> configuration varied between 2.4 and 3.9 cores across sessions on this machine,
+> so cross-run comparisons say nothing. And do not baseline against
+> `auto-deinterlace=all`: that makes bwdif genuinely deinterlace every frame
+> rather than pass through, which flatters the change to ~47 %. The honest
+> comparison is against the *default* `interlaced` mode.
+
+What now reaches the mixer, and what it exposed:
+
+| source | before | after |
+|---|---|---|
+| H.264 4:2:0 8-bit (hw) | `yuv420p`, 3 planes | **`nv12`, 2 planes** |
+| ProRes 4444 | `yuva444p16le` (promoted) | **`yuva444p12le`** |
+| FFV1 planar RGB | `gbrp` | `gbrp` (see below) |
+| QuickTime RLE RGBA | `gbrap` | **`rgba`** |
+
+NV12 arriving as two planes is what the native semi-planar upload path was built
+for; until now the filter graph had been undoing it for every software-transferred
+hardware-decoded frame.
+
+### Two latent mixer bugs this exposed
+
+Both were invisible because the filter graph had always converted packed formats
+to planar before the mixer saw them. Both are avoided by not offering the format,
+and both are worth fixing properly at some point.
+
+- **Packed ARGB/ABGR render wrong.** A QuickTime RLE clip, whose decoder emits
+  `argb`, rendered at **6.4 dB** against a reference where every other format
+  scores 38 dB or better. The shader swizzles (`pixel_format` 3 and 4,
+  `.brga`/`.grab`) do not match either plausible upload convention. `rgba` is
+  correct — the same clip scores `inf` once negotiation picks it.
+- **The Vulkan mixer cannot take `rgb24` at all.** It throws the moment such a
+  frame reaches it, which an FFV1 RGB clip did as soon as a CPU consumer was
+  attached. This is a legitimate hardware limitation rather than a defect:
+  Vulkan implementations are not required to support 3-component 8-bit formats
+  as sampled images, and this one does not. OpenGL renders them correctly, so
+  supporting them on Vulkan means expanding to 4 components during upload.
+
+`AV_PIX_FMT_{RGB24,BGR24,ARGB,ABGR}` are therefore no longer offered to the
+filter graph.
+
+### Verification
+
+Nine source types, both backends, channel output against a reference decode of
+the same frame (static source, `SEEK` to a fixed frame):
+
+| clip | arrives as | OpenGL | Vulkan |
+|---|---|---|---|
+| H.264 4:2:0 8-bit | `nv12` | 38.73 | 38.38 |
+| H.264 4:2:0 10-bit | `yuv420p10le` | 39.62 | 39.19 |
+| H.264 4:4:4 8-bit | `yuv444p` | 70.81 | 70.81 |
+| ProRes 422 HQ | `yuv422p10le` | 39.79 | 39.72 |
+| ProRes 4444 | `yuva444p12le` | 46.42 | 46.42 |
+| DNxHR HQ | `yuv422p` | 40.01 | 39.92 |
+| FFV1 RGB | `gbrp` | inf | inf |
+| QuickTime RLE | `rgba` | inf | inf |
+| v210 | `yuv422p10le` | 29.79 | 29.78 |
+
+Deinterlacing unaffected: interlaced clips still score 39.02 dB (8-bit) and
+39.12 dB (10-bit) against combed baselines of 29.33 and 28.94.
+
+**v210's 29.79 dB is pre-existing, not a regression** — it measures identically
+with the deinterlacer forced back in, and it arrives in the same format
+(`yuv422p10le`) as ProRes 422, which scores 39.79. Same mixer path, same arrival
+format, 10 dB apart, so the difference is in the source or the reference decode
+rather than in anything changed here. Worth a look on its own.
+
+Harness: `CasparCG-TestRunner/vkdispatch/quality_matrix.py` and `cpu_probe.py`.
+
 Harness: `CasparCG-TestRunner/vkdispatch/upload_matrix.py` and `deint_check.py`.
 
 ---
