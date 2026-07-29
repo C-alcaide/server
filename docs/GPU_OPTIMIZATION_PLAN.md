@@ -4,7 +4,9 @@
 > strategy across all custom modules. Covers pitfalls, production risks, and
 > quality concerns that may not surface immediately during testing.
 
-**Status**: Phases 1–5 implemented (items 1–5 & 7 from audit). All 6 audit fixes applied. Builds clean.
+**Status**: Phases 1–7 implemented. Phase 5 (GPU-direct decode) was found never to have
+executed and has been rewritten — it is now byte-exact against the CPU path. Phases 6–7
+(native semi-planar upload; GPU planes carried separately on `const_frame`) are new.
 
 ## Background
 
@@ -194,7 +196,9 @@ mixer-level readback when the FFmpeg consumer is the only one attached.
 
 ## Phase 5: FFmpeg Producer D3D11VA → GL Direct
 
-> ### ⚠ Status correction (2026-07-29): this path has never actually run
+> ### ⚠ Status (2026-07-29): rewritten and now byte-exact — see "Phase 5 completed" below
+>
+> ### The original design never actually ran
 >
 > Three separate reasons, found by instrumenting the decision rather than reading
 > the code:
@@ -271,6 +275,49 @@ the format → `pixel_format::invalid` → black frame.
 - Fallback uses sws_scale for CPU conversion
 
 ---
+
+---
+
+## Phase 5 completed: GPU-direct decode by NV12 plane import
+
+The VideoProcessor is gone. The decoded NV12 surface is handed to the mixer as
+its **two planes**, and the mixer's shader performs the colour conversion — the
+same shader, with the same matrix, range and chroma siting, that a
+software-decoded frame goes through.
+
+**Verified byte-exact.** With `gpu-direct-decode` on and off, the same clip and
+frame produce PNG captures with identical sha256. That is a property the
+VideoProcessor could not have: its matrix and range are driver-defined.
+
+`const_frame` gained the ability to carry GPU planes separately (see phase 7
+below), which is what makes this expressible at all — previously a producer with
+GPU-side frames had to convert to a single interleaved texture first, i.e. in the
+one place that cannot see the channel's colour management.
+
+### Four defects, none of them visible before the path was instrumented
+
+| Defect | Effect |
+|---|---|
+| `wglGetProcAddress` called with no current GL context | every WGL_NV_DX_interop2 pointer was null; the bridge reported "not available" |
+| The bridge created its own GL context and `wglShareLists`'d against the mixer's | fails, because the mixer's context is current on the GL device thread. It now dispatches onto that thread and borrows the mixer's context, as the rest of the codebase does |
+| Eligibility required `ctx->sw_pix_fmt` at producer start | a D3D11VA decoder only resolves it in its first `get_format` callback, so it was always `NONE`. The decision is now made on the first hardware frame |
+| The extraction shader sampled with normalised coordinates | decoded surfaces are padded to the codec's macroblock grid (H.264 stores 1080 as **1088**), so the sample spanned the padding and rescaled the picture — a ~4 row vertical shift at 1080p. It now indexes texels with `Load()` |
+
+That last one is the useful lesson for any future interop work: **a decoded
+surface is not the size of the picture.** It was caught only because the parity
+test compares against the CPU path; it would have been invisible to a "does it
+look right?" check.
+
+Other requirements worth remembering: the hardware frame pool must be allocated
+with `D3D11_BIND_SHADER_RESOURCE` (FFmpeg's default binds decode-only, so no
+shader resource view can be created over it), plane views need the D3D11.3
+`CreateShaderResourceView1` with `PlaneSlice`, and FFmpeg's D3D11 device lock
+must be held around the extraction because the decoder shares that immediate
+context.
+
+**Still opt-in** via `configuration.ffmpeg.producer.gpu-direct-decode`. It is now
+colour-exact rather than driver-defined, but it has been exercised on one GPU and
+one codec pair only.
 
 ## Phase 6: Native semi-planar upload (NV12 / P010)
 
