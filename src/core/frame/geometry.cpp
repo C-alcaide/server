@@ -69,6 +69,20 @@ frame_geometry::geometry_type             frame_geometry::type() const { return 
 frame_geometry::scale_mode                frame_geometry::mode() const { return impl_->mode_; }
 const std::vector<frame_geometry::coord>& frame_geometry::data() const { return impl_->data_; }
 
+bool frame_geometry::operator==(const frame_geometry& other) const
+{
+    // Shared impl means the same geometry — the common case for meshes, which
+    // are built once and carried by shared_ptr, so a large vertex list is not
+    // compared element-wise every tick.
+    if (impl_.get() == other.impl_.get())
+        return true;
+
+    return impl_->type_ == other.impl_->type_ && impl_->mode_ == other.impl_->mode_ &&
+           impl_->data_ == other.impl_->data_;
+}
+
+bool frame_geometry::operator!=(const frame_geometry& other) const { return !(*this == other); }
+
 const frame_geometry frame_geometry::get_default(scale_mode mode)
 {
     std::vector<frame_geometry::coord> data{

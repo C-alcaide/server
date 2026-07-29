@@ -71,6 +71,68 @@ struct layer
     }
 };
 
+// ── Still-frame cache fingerprint ──────────────────────────────────────────
+// Everything the composition result depends on must appear here. A missing
+// field means a change to it does not invalidate the cache, and the channel
+// keeps sending a stale frame — the worst failure this cache can produce.
+//
+// Holding shared_ptr<texture> (rather than a raw pointer) also keeps the old
+// textures alive, so the texture pool cannot recycle an address and make two
+// different textures compare equal (ABA).
+struct item_fingerprint
+{
+    std::vector<std::shared_ptr<texture>> textures; // all planes, not just plane 0
+    core::image_transform                 transform;
+    core::frame_geometry                  geometry   = core::frame_geometry::get_default();
+    core::pixel_format_desc               pix_desc   = core::pixel_format_desc(core::pixel_format::invalid);
+    core::blend_mode                      blend_mode = core::blend_mode::normal;
+    int                                   layer_path = 0; // position in the layer/sublayer tree
+
+    bool operator==(const item_fingerprint& other) const
+    {
+        return textures == other.textures && transform == other.transform && geometry == other.geometry &&
+               pix_desc == other.pix_desc && blend_mode == other.blend_mode && layer_path == other.layer_path;
+    }
+    bool operator!=(const item_fingerprint& other) const { return !(*this == other); }
+};
+
+struct render_fingerprint
+{
+    std::vector<item_fingerprint> items;
+
+    // True only when every texture future was already resolved. An unresolved
+    // future reads as nullptr, so two different frames could otherwise compare
+    // equal while still uploading; an incomplete fingerprint never matches.
+    bool complete = false;
+
+    // Channel-wide state the kernel binds. Changing any of these changes the
+    // output for identical inputs.
+    int                  target_width           = 0;
+    int                  target_height          = 0;
+    core::color_space    target_color_space     = core::color_space::bt709;
+    core::color_transfer target_color_transfer  = core::color_transfer::sdr;
+    bool                 auto_color_convert     = true;
+    int                  auto_tone_map          = 0;
+    float                display_peak_luminance = 0.0f;
+    float                sdr_reference_white    = 0.0f;
+    bool                 auto_gamut_compress    = false;
+    const void*          calibration_lut        = nullptr;
+    float                calibration_strength   = 0.0f;
+    bool                 calibration_bypass     = false;
+
+    bool matches(const render_fingerprint& other) const
+    {
+        return complete && other.complete && items == other.items && target_width == other.target_width &&
+               target_height == other.target_height && target_color_space == other.target_color_space &&
+               target_color_transfer == other.target_color_transfer &&
+               auto_color_convert == other.auto_color_convert && auto_tone_map == other.auto_tone_map &&
+               display_peak_luminance == other.display_peak_luminance &&
+               sdr_reference_white == other.sdr_reference_white && auto_gamut_compress == other.auto_gamut_compress &&
+               calibration_lut == other.calibration_lut && calibration_strength == other.calibration_strength &&
+               calibration_bypass == other.calibration_bypass;
+    }
+};
+
 class image_renderer
 {
     spl::shared_ptr<device> ogl_;
@@ -80,11 +142,9 @@ class image_renderer
     std::atomic<bool>       cpu_readback_needed_{true};
 
     // Still-frame cache: skip GPU composition when inputs are unchanged.
-    // NOTE: storing shared_ptr<texture> (not raw pointer) keeps old textures alive,
-    // preventing the texture pool from recycling addresses and causing false cache hits.
-    std::vector<std::pair<std::shared_ptr<texture>, core::image_transform>> prev_fingerprint_;
-    std::shared_ptr<core::texture>                             cached_texture_;
-    std::shared_future<array<const std::uint8_t>>              cached_cpu_;
+    render_fingerprint                            prev_fingerprint_;
+    std::shared_ptr<core::texture>                cached_texture_;
+    std::shared_future<array<const std::uint8_t>> cached_cpu_;
 
   public:
     core::color_space    target_color_space    = core::color_space::bt709;
@@ -106,7 +166,7 @@ class image_renderer
         calibration_lut_      = std::move(lut);
         calibration_strength_ = strength;
         // Invalidate the still-frame cache so the new LUT takes effect immediately.
-        prev_fingerprint_.clear();
+        prev_fingerprint_ = {};
         cached_texture_.reset();
         cached_cpu_ = {};
     }
@@ -114,7 +174,7 @@ class image_renderer
     void set_calibration_bypass(bool bypass)
     {
         calibration_bypass_ = bypass;
-        prev_fingerprint_.clear();
+        prev_fingerprint_ = {};
         cached_texture_.reset();
         cached_cpu_ = {};
     }
@@ -135,7 +195,7 @@ class image_renderer
         // render actually performs the GPU→CPU readback instead of returning
         // the stale empty buffer from the previous cached result.
         if (needed && !was) {
-            prev_fingerprint_.clear();
+            prev_fingerprint_ = {};
         }
     }
 
@@ -144,7 +204,7 @@ class image_renderer
     {
         if (layers.empty()) { // Bypass GPU with empty frame.
             // Release cached textures so VRAM from the last rendered frame is freed.
-            prev_fingerprint_.clear();
+            prev_fingerprint_ = {};
             cached_texture_.reset();
             cached_cpu_ = {};
 
@@ -157,20 +217,12 @@ class image_renderer
         }
 
         // ── Still-frame cache ──────────────────────────────────────────────
-        // When input textures AND transforms are identical to the previous tick,
-        // skip GPU composition entirely and reuse the cached output.
+        // When every input to composition is identical to the previous tick,
+        // skip the GPU work entirely and reuse the cached output.
         {
-            std::vector<std::pair<std::shared_ptr<texture>, core::image_transform>> fingerprint;
-            for (auto& l : layers)
-                for (auto& itm : l.items) {
-                    std::shared_ptr<texture> tex_ptr;
-                    if (!itm.textures.empty() &&
-                        itm.textures[0].wait_for(std::chrono::seconds(0)) == std::future_status::ready)
-                        tex_ptr = itm.textures[0].get();
-                    fingerprint.emplace_back(std::move(tex_ptr), itm.transforms.image_transform);
-                }
+            auto fingerprint = build_fingerprint(layers, format_desc);
 
-            if (!fingerprint.empty() && fingerprint == prev_fingerprint_ && cached_texture_) {
+            if (!fingerprint.items.empty() && fingerprint.matches(prev_fingerprint_) && cached_texture_) {
                 layers.clear();
                 return make_ready_future<std::tuple<std::shared_future<array<const std::uint8_t>>,
                                                     std::shared_ptr<core::texture>>>(
@@ -223,6 +275,60 @@ class image_renderer
     common::bit_depth depth() const { return depth_; }
 
   private:
+    /// Collects the full description of what composition would draw, including
+    /// sublayers (which the previous fingerprint ignored entirely, so a change
+    /// inside a sublayer left a stale frame on air).
+    render_fingerprint build_fingerprint(const std::vector<layer>&      layers,
+                                        const core::video_format_desc& format_desc) const
+    {
+        render_fingerprint fp;
+        fp.complete               = true;
+        fp.target_width           = format_desc.square_width;
+        fp.target_height          = format_desc.square_height;
+        fp.target_color_space     = target_color_space;
+        fp.target_color_transfer  = target_color_transfer;
+        fp.auto_color_convert     = auto_color_convert;
+        fp.auto_tone_map          = auto_tone_map;
+        fp.display_peak_luminance = display_peak_luminance;
+        fp.sdr_reference_white    = sdr_reference_white;
+        fp.auto_gamut_compress    = auto_gamut_compress;
+        fp.calibration_lut        = calibration_lut_.get();
+        fp.calibration_strength   = calibration_strength_;
+        fp.calibration_bypass     = calibration_bypass_;
+
+        int path = 0;
+        std::function<void(const std::vector<layer>&)> collect = [&](const std::vector<layer>& ls) {
+            for (auto& l : ls) {
+                ++path;
+                collect(l.sublayers);
+                for (auto& itm : l.items) {
+                    item_fingerprint ifp;
+                    ifp.transform  = itm.transforms.image_transform;
+                    ifp.geometry   = itm.geometry;
+                    ifp.pix_desc   = itm.pix_desc;
+                    ifp.blend_mode = l.blend_mode;
+                    ifp.layer_path = path;
+
+                    for (auto& tex : itm.textures) {
+                        if (tex.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
+                            // Still uploading: an unresolved future would read as
+                            // nullptr and could match a different frame.
+                            fp.complete = false;
+                            ifp.textures.clear();
+                            break;
+                        }
+                        ifp.textures.push_back(tex.get());
+                    }
+
+                    fp.items.push_back(std::move(ifp));
+                }
+            }
+        };
+        collect(layers);
+
+        return fp;
+    }
+
     void draw(std::shared_ptr<texture>&      target_texture,
               std::vector<layer>             layers,
               const core::video_format_desc& format_desc)

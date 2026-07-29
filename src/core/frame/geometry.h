@@ -67,6 +67,13 @@ class frame_geometry
     scale_mode                mode() const;
     const std::vector<coord>& data() const;
 
+    /// Value equality (type, scale mode and vertex data), with a fast path when
+    /// both sides share the same impl. Used by the mixers' still-frame cache:
+    /// geometry changes must invalidate it, or the channel outputs a stale
+    /// frame while, say, a mesh or scale mode changes underneath.
+    bool operator==(const frame_geometry& other) const;
+    bool operator!=(const frame_geometry& other) const;
+
     static const frame_geometry get_default(scale_mode = scale_mode::stretch);
     static const frame_geometry get_default_vflip(scale_mode = scale_mode::stretch);
 

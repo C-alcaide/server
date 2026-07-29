@@ -119,4 +119,27 @@ struct pixel_format_desc final
     core::chroma_location chroma_location  = core::chroma_location::unspecified;
 };
 
+inline bool operator==(const pixel_format_desc::plane& lhs, const pixel_format_desc::plane& rhs)
+{
+    return lhs.linesize == rhs.linesize && lhs.width == rhs.width && lhs.height == rhs.height &&
+           lhs.size == rhs.size && lhs.stride == rhs.stride && lhs.depth == rhs.depth;
+}
+
+inline bool operator!=(const pixel_format_desc::plane& lhs, const pixel_format_desc::plane& rhs)
+{
+    return !(lhs == rhs);
+}
+
+/// Every field is compared. Used by the mixers' still-frame cache: a field left
+/// out here is a field whose change would not invalidate the cache, which shows
+/// up on air as a frozen frame.
+inline bool operator==(const pixel_format_desc& lhs, const pixel_format_desc& rhs)
+{
+    return lhs.format == rhs.format && lhs.is_straight_alpha == rhs.is_straight_alpha &&
+           lhs.color_space == rhs.color_space && lhs.color_transfer == rhs.color_transfer &&
+           lhs.chroma_location == rhs.chroma_location && lhs.planes == rhs.planes;
+}
+
+inline bool operator!=(const pixel_format_desc& lhs, const pixel_format_desc& rhs) { return !(lhs == rhs); }
+
 }} // namespace caspar::core

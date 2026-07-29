@@ -354,19 +354,38 @@ BT.601, BT.709, BT.2020, DCI-P3, ACES AP0, ACES AP1, Display P3.
 
 **File**: `src/accelerator/vulkan/image/image_mixer.cpp`
 
-When inputs are unchanged between ticks (a "still" frame — same texture
-pointers and identical `image_transform` per item), the mixer short-circuits
-GPU composition entirely and returns the cached `texture_wrapper` +
-CPU-pixel future from the previous tick.
+When every input to composition is unchanged between ticks (a "still" frame),
+the mixer short-circuits GPU composition entirely and returns the cached
+`texture_wrapper` + CPU-pixel future from the previous tick. This reduces mixer
+GPU load to ~0 during still scenes, freeing GPU cycles for CUDA decode.
 
-This is implemented via a lightweight fingerprint:
-```cpp
-vector<pair<const void* /*texture_ptr*/, image_transform>> fingerprint;
-```
+The fingerprint (`render_fingerprint` / `item_fingerprint`) must describe
+*everything* the result depends on, because a field left out is a change that
+does not invalidate the cache — which reaches air as a frozen frame. It covers,
+per item: all plane textures (as `shared_ptr`), the combined `image_transform`,
+`frame_geometry`, `pixel_format_desc`, the owning layer's blend mode, and the
+item's position in the layer/sublayer tree; plus, per render: target dimensions,
+target colour space/transfer, `auto_color_convert`, tone-mapping parameters and
+the calibration LUT identity/strength/bypass.
 
-If `fingerprint == prev_fingerprint_`, the cached result is returned
-without touching the GPU. This reduces mixer GPU load from 60 fps to
-~0 fps during still scenes, freeing GPU cycles for CUDA decode.
+Two properties are load-bearing:
+
+- **Textures are held by `shared_ptr`, never by raw pointer.** The attachment and
+  device-texture pools recycle allocations, so a raw pointer can be reused by a
+  different texture and make two different frames compare equal (ABA). Holding
+  the `shared_ptr` both keeps the address unique and keeps the texture alive.
+- **An unresolved upload future makes the fingerprint incomplete**, and an
+  incomplete fingerprint never matches. Reading a pending future as `nullptr`
+  would otherwise let two different frames compare equal mid-upload.
+
+> **History:** this fingerprint originally compared
+> `pair<const void*, image_transform>` for `textures[0]` only. The raw pointer
+> was an ABA hazard (fixed in the OGL mixer at the time, but not here), and
+> geometry, blend mode, pixel format, the non-plane-0 textures and all
+> channel-wide colour state were not compared at all. `image_transform`'s own
+> equality also skipped several `projection` fields including the whole ICVFX
+> block, so a tracked camera moving the inner frustum over a static plate froze
+> the wall.
 
 ---
 

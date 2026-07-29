@@ -90,17 +90,37 @@ provides happens-before; relaxed atomic ordering is sufficient.
 - Compare with previous tick's fingerprint before dispatching to GL thread
 - On match: return `{cached_cpu_, cached_texture_}` immediately
 
-**Fingerprinting approach:**
+**Fingerprinting approach** (rewritten — see "Fingerprint completeness" below):
 - Store `shared_ptr<texture>` (not raw pointers) to prevent pool-recycled addresses from
   causing false cache hits (ABA problem — **Audit Fix #1**)
-- `image_transform` has `operator==` — directly comparable
+- Compare **all** plane textures, the combined `image_transform`, `frame_geometry`,
+  `pixel_format_desc`, the owning layer's blend mode and the item's position in the
+  layer/sublayer tree, plus channel-wide state (target dimensions, colour space/transfer,
+  `auto_color_convert`, tone-map parameters, calibration LUT identity/strength/bypass)
+- An unresolved upload future marks the fingerprint **incomplete**; incomplete never matches
 - Clear cache when `layers` is empty (same as VK mixer)
 
 **Production risks:**
-- **False positive (stale frame displayed):** Prevented by using `shared_ptr<texture>` which
-  keeps old textures alive and prevents address reuse from the texture pool.
+- **False positive (stale frame displayed):** the real risk of this optimisation. Addressed
+  by comparing every input (see below) and by never matching an incomplete fingerprint.
 - **Memory leak from cached textures:** Cache holds `shared_ptr<texture>`. Cleared when
   `layers` is empty (STOP/CLEAR/REMOVE scenarios).
+
+### Fingerprint completeness (correction to the original design)
+
+The first implementation compared only `textures[0]` and `image_transform`, per top-level
+layer. That left four ways to freeze a frame on air, all since fixed:
+
+| Gap | Effect |
+|---|---|
+| OGL did not walk `sublayers` at all | any change inside a sublayer was invisible to the cache |
+| `geometry`, `pix_desc` and the layer's `blend_mode` were not compared | a mesh/scale-mode/blend change did not invalidate |
+| only plane 0 was compared | a YUV item whose chroma planes changed but whose Y texture was reused did not invalidate |
+| channel-wide colour state was not compared | `set_target_color` / tone-map changes did not invalidate (the calibration LUT was already handled by explicit invalidation) |
+| `image_transform::operator==` itself skipped `projection` fields | notably the entire ICVFX block, so a tracked camera moving the inner frustum over a static plate froze the wall |
+
+An unresolved texture future used to read as `nullptr`, so two different frames could also
+compare equal while still uploading.
 
 ---
 
