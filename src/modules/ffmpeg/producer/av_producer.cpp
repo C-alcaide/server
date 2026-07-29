@@ -1337,8 +1337,19 @@ struct AVProducer::Impl
 
     ~Impl()
     {
+        // Quiesce explicitly and in a defined order rather than relying on
+        // implicit member-destruction order. The filter graphs, decoders and
+        // sources reference each other, and the run loop plus both filter
+        // executors touch all of them; freeing them in declaration order while
+        // any of that is still live is how ffmpeg allocations end up being freed
+        // twice or read after free. See
+        // docs/CasparCG_HRC_Crash_Report_2026-06-17.md §9.1 fix 3.
+
+        // 1. Stop feeding the pipeline.
         input_.abort();
 
+        // 2. Join the run loop, so nothing else touches decoders_/filters while
+        //    they are being torn down.
         try {
             if (thread_.joinable()) {
                 thread_.interrupt();
@@ -1348,8 +1359,27 @@ struct AVProducer::Impl
             // Do nothing...
         }
 
-        video_executor_.reset();
-        audio_executor_.reset();
+        // 3. Stop the filter executors before freeing the graphs they reference.
+        try {
+            video_executor_.reset();
+            audio_executor_.reset();
+        } catch (...) {
+            CASPAR_LOG_CURRENT_EXCEPTION();
+        }
+
+        // 4. Now fully quiesced: destroy the pipeline in dependency order.
+        //    sources_ holds AVFilterContext* borrowed from the filter graphs, so
+        //    it must go before the graphs; the graphs reference decoder contexts,
+        //    so they go before the decoders (whose destructors join their
+        //    worker threads).
+        try {
+            sources_.clear();
+            video_filter_ = Filter{};
+            audio_filter_ = Filter{};
+            decoders_.clear();
+        } catch (...) {
+            CASPAR_LOG_CURRENT_EXCEPTION();
+        }
 
         CASPAR_LOG(debug) << print() << " Joined";
     }
