@@ -54,6 +54,9 @@ uniform int u_dst_h;
 uniform int u_groups_per_row;
 uniform int u_use_bt2020;
 uniform int u_is_16bit;
+uniform int u_first_line;   // first output row this pass writes (0, or 1 for field 2)
+uniform int u_line_step;    // 1 = progressive, 2 = interlaced field
+uniform int u_key_only;     // 1 = output the alpha (as a grey key)
 
 void rgb_to_ycbcr_bt709(int R, int G, int B, out int Y, out int Cb, out int Cr) {
     Y  = 64  + ((222951 * R + 750098 * G + 75663 * B) >> 20);
@@ -69,7 +72,7 @@ void rgb_to_ycbcr_bt2020(int R, int G, int B, out int Y, out int Cb, out int Cr)
 }
 void main() {
     int group_x = int(gl_GlobalInvocationID.x);
-    int row     = int(gl_GlobalInvocationID.y);
+    int row     = u_first_line + int(gl_GlobalInvocationID.y) * u_line_step;
     if (row >= u_dst_h || group_x >= u_groups_per_row) return;
     int px_base = group_x * 6;
     int R[6], G[6], B[6];
@@ -77,7 +80,9 @@ void main() {
         vec4 pixel = vec4(0.0);
         if ((px_base + i) < u_dst_w)
             pixel = texelFetch(src_tex, ivec2(u_src_x + px_base + i, u_src_y + row), 0);
-        if (u_is_16bit != 0) {
+        if (u_key_only != 0) {
+            int a = int(pixel.a * 1023.0 + 0.5); R[i] = a; G[i] = a; B[i] = a;
+        } else if (u_is_16bit != 0) {
             R[i] = int(pixel.r * 1023.0 + 0.5); G[i] = int(pixel.g * 1023.0 + 0.5); B[i] = int(pixel.b * 1023.0 + 0.5);
         } else {
             R[i] = int(pixel.b * 1023.0 + 0.5); G[i] = int(pixel.g * 1023.0 + 0.5); B[i] = int(pixel.r * 1023.0 + 0.5);
@@ -111,16 +116,22 @@ uniform int u_src_x;
 uniform int u_src_y;
 uniform int u_dst_w;
 uniform int u_dst_h;
+uniform int u_first_line;
+uniform int u_line_step;
+uniform int u_key_only;
 void main() {
-    int x = int(gl_GlobalInvocationID.x);
-    int y = int(gl_GlobalInvocationID.y);
-    if (x >= u_dst_w || y >= u_dst_h) return;
-    vec4 pixel = texelFetch(src_tex, ivec2(u_src_x + x, u_src_y + y), 0);
-    uint B = uint(pixel.b * 255.0 + 0.5);
-    uint G = uint(pixel.g * 255.0 + 0.5);
-    uint R = uint(pixel.r * 255.0 + 0.5);
-    uint A = uint(pixel.a * 255.0 + 0.5);
-    bgra_out.data[uint(y) * uint(u_dst_w) + uint(x)] = B | (G << 8u) | (R << 16u) | (A << 24u);
+    int x   = int(gl_GlobalInvocationID.x);
+    int row = u_first_line + int(gl_GlobalInvocationID.y) * u_line_step;
+    if (x >= u_dst_w || row >= u_dst_h) return;
+    vec4 pixel = texelFetch(src_tex, ivec2(u_src_x + x, u_src_y + row), 0);
+    uint B, G, R, A;
+    if (u_key_only != 0) {
+        uint a = uint(pixel.a * 255.0 + 0.5); B = a; G = a; R = a; A = a;
+    } else {
+        B = uint(pixel.b * 255.0 + 0.5); G = uint(pixel.g * 255.0 + 0.5);
+        R = uint(pixel.r * 255.0 + 0.5); A = uint(pixel.a * 255.0 + 0.5);
+    }
+    bgra_out.data[uint(row) * uint(u_dst_w) + uint(x)] = B | (G << 8u) | (R << 16u) | (A << 24u);
 }
 )GLSL";
 
@@ -194,6 +205,16 @@ void cpu_ref_v210_row(const std::uint8_t* rgba, int dst_w, int groups_per_row, b
     }
 }
 
+// Independent C++ reference of the bgra shader (RGBA texel -> BGRA8 uint32).
+void cpu_ref_bgra_row(const std::uint8_t* rgba, int dst_w, std::uint32_t* out)
+{
+    for (int x = 0; x < dst_w; ++x) {
+        const std::uint8_t* p = rgba + x * 4; // p[0]=R,p[1]=G,p[2]=B,p[3]=A
+        out[x] = std::uint32_t(p[2]) | (std::uint32_t(p[1]) << 8) | (std::uint32_t(p[0]) << 16) |
+                 (std::uint32_t(p[3]) << 24);
+    }
+}
+
 } // namespace
 
 struct ogl_gl_strategy::impl
@@ -240,8 +261,23 @@ struct ogl_gl_strategy::impl
         return needs_v210_ ? ((width + 47) / 48) * 128 : width * 4;
     }
 
-    // Runs on the GL thread: (re)build program + SSBO, dispatch the pack, read back.
-    bool pack_on_gl(int tex_id, int src_x, int src_y, int dst_w, int dst_h, bool is_16bit, void* out, std::size_t out_sz)
+    struct field_pass
+    {
+        int tex_id;
+        int first_line; // first output row this field writes (0 or 1)
+        int line_step;  // 1 progressive, 2 interlaced
+    };
+
+    // Runs on the GL thread: (re)build program + SSBO, dispatch each field pass, read back.
+    bool pack_on_gl(const std::vector<field_pass>& passes,
+                    int                            src_x,
+                    int                            src_y,
+                    int                            dst_w,
+                    int                            dst_h,
+                    bool                           is_16bit,
+                    bool                           key_only,
+                    void*                          out,
+                    std::size_t                    out_sz)
     {
         if (!prog_) {
             prog_ = compile_compute(needs_v210_ ? k_v210_cs : k_bgra_cs);
@@ -261,23 +297,31 @@ struct ogl_gl_strategy::impl
 
         glUseProgram(prog_);
         glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(tex_id));
         glUniform1i(glGetUniformLocation(prog_, "src_tex"), 0);
         glUniform1i(glGetUniformLocation(prog_, "u_src_x"), src_x);
         glUniform1i(glGetUniformLocation(prog_, "u_src_y"), src_y);
         glUniform1i(glGetUniformLocation(prog_, "u_dst_w"), dst_w);
         glUniform1i(glGetUniformLocation(prog_, "u_dst_h"), dst_h);
-
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, ssbo_);
-
+        glUniform1i(glGetUniformLocation(prog_, "u_key_only"), key_only ? 1 : 0);
+        const int groups_per_row = needs_v210_ ? row_bytes(dst_w) / 16 : 0;
         if (needs_v210_) {
-            const int groups_per_row = row_bytes(dst_w) / 16;
             glUniform1i(glGetUniformLocation(prog_, "u_groups_per_row"), groups_per_row);
             glUniform1i(glGetUniformLocation(prog_, "u_use_bt2020"), use_bt2020_ ? 1 : 0);
             glUniform1i(glGetUniformLocation(prog_, "u_is_16bit"), is_16bit ? 1 : 0);
-            glDispatchCompute((groups_per_row + 63) / 64, dst_h, 1);
-        } else {
-            glDispatchCompute((dst_w + 15) / 16, (dst_h + 15) / 16, 1);
+        }
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, ssbo_);
+
+        for (const auto& p : passes) {
+            glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(p.tex_id));
+            glUniform1i(glGetUniformLocation(prog_, "u_first_line"), p.first_line);
+            glUniform1i(glGetUniformLocation(prog_, "u_line_step"), p.line_step);
+            const int rows = (dst_h - p.first_line + p.line_step - 1) / p.line_step;
+            if (rows <= 0)
+                continue;
+            if (needs_v210_)
+                glDispatchCompute((groups_per_row + 63) / 64, rows, 1);
+            else
+                glDispatchCompute((dst_w + 15) / 16, (rows + 15) / 16, 1);
         }
 
         glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT | GL_SHADER_STORAGE_BARRIER_BIT);
@@ -285,16 +329,16 @@ struct ogl_gl_strategy::impl
 
         // One-shot correctness gate: compare the GPU pack of row 0 against an
         // independent C++ reference of the same math on the actual texels. Fires
-        // on the first non-black frame so it validates real colour, not black.
-        if (needs_v210_ && !is_16bit && !parity_done_) {
+        // on the first non-black progressive frame (single pass, not key-only).
+        if (needs_v210_ && !is_16bit && !key_only && passes.size() == 1 && !parity_done_) {
             const auto*         g   = static_cast<const std::uint32_t*>(out);
             const std::uint32_t bw0 = 512u | (64u << 10) | (512u << 20); // black v210 word 0
             const std::uint32_t bw1 = 64u | (512u << 10) | (64u << 20);  // black v210 word 1
             const bool          non_black = out_sz >= 8 && (g[0] != bw0 || g[1] != bw1);
             if (non_black) {
                 parity_done_     = true;
-                const int groups = row_bytes(dst_w) / 16;
-                glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(tex_id));
+                const int groups = groups_per_row;
+                glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(passes[0].tex_id));
                 GLint tw = 0, th = 0;
                 glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &tw);
                 glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &th);
@@ -322,12 +366,47 @@ struct ogl_gl_strategy::impl
                 }
             }
         }
+
+        // BGRA-path parity self-test (first non-black progressive frame).
+        if (!needs_v210_ && !key_only && passes.size() == 1 && !parity_done_) {
+            const auto* g         = static_cast<const std::uint32_t*>(out);
+            const bool  non_black = out_sz >= 8 && g[0] != 0u && g[0] != 0xFF000000u;
+            if (non_black) {
+                parity_done_ = true;
+                glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(passes[0].tex_id));
+                GLint tw = 0, th = 0;
+                glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &tw);
+                glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &th);
+                if (tw > 0 && th > 0 && src_y < th) {
+                    std::vector<std::uint8_t> full(static_cast<std::size_t>(tw) * th * 4);
+                    glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, full.data());
+                    const std::uint8_t*        src_row = full.data() + (static_cast<std::size_t>(src_y) * tw + src_x) * 4;
+                    std::vector<std::uint32_t> ref(static_cast<std::size_t>(dst_w));
+                    cpu_ref_bgra_row(src_row, dst_w, ref.data());
+                    int mism = 0, first = -1;
+                    for (int i = 0; i < dst_w; ++i)
+                        if (ref[i] != g[i]) {
+                            ++mism;
+                            if (first < 0)
+                                first = i;
+                        }
+                    if (mism == 0)
+                        CASPAR_LOG(info) << L"[ogl_gl_strategy] bgra parity self-test PASS (" << dst_w
+                                         << L" px @ row " << src_y << L").";
+                    else
+                        CASPAR_LOG(warning) << L"[ogl_gl_strategy] bgra parity self-test: " << mism << L"/" << dst_w
+                                            << L" px differ (first@" << first << L").";
+                }
+            }
+        }
         return true;
     }
 
     std::shared_ptr<void> convert(const core::video_format_desc& decklink_format_desc,
                                   const port_configuration&      config,
-                                  const core::const_frame&       frame1)
+                                  const core::const_frame&       frame1,
+                                  const core::const_frame&       frame2,
+                                  BMDFieldDominance              field_dominance)
     {
         const int         dst_w  = decklink_format_desc.width;
         const int         dst_h  = decklink_format_desc.height;
@@ -335,13 +414,13 @@ struct ogl_gl_strategy::impl
 
         auto out = acquire_pinned_output(pool_, out_sz, 128);
 
-        auto tex = frame1.texture();
-        auto* gl_tex = dynamic_cast<accelerator::ogl::texture*>(tex.get());
-        if (broken_ || !gl_tex) {
+        auto  tex1    = frame1.texture();
+        auto* gl_tex1 = dynamic_cast<accelerator::ogl::texture*>(tex1.get());
+        if (broken_ || !gl_tex1) {
             std::memset(out.get(), 0, out_sz); // no OGL texture / broken shader -> black
             return out;
         }
-        auto dev = gl_tex->get_device();
+        auto dev = gl_tex1->get_device();
         if (!dev) {
             std::memset(out.get(), 0, out_sz);
             return out;
@@ -350,12 +429,29 @@ struct ogl_gl_strategy::impl
 
         const bool is_16bit = !frame1.pixel_format_desc().planes.empty() &&
                               frame1.pixel_format_desc().planes[0].depth != common::bit_depth::bit8;
-        const int  tex_id   = gl_tex->id();
+        const bool key_only = config.key_only;
         const int  src_x    = config.src_x;
         const int  src_y    = config.src_y;
 
-        void*       dst = out.get();
-        const bool  ok  = dev->dispatch_sync([&] { return pack_on_gl(tex_id, src_x, src_y, dst_w, dst_h, is_16bit, dst, out_sz); });
+        // Build the field passes. Progressive: one full pass. Interlaced: weave the
+        // two fields (frame1/frame2) into alternate output rows, matching the CPU
+        // strategy's field-dominance line assignment.
+        std::vector<field_pass> passes;
+        accelerator::ogl::texture* gl_tex2 = nullptr;
+        if (field_dominance != bmdProgressiveFrame && frame2)
+            gl_tex2 = dynamic_cast<accelerator::ogl::texture*>(frame2.texture().get());
+        if (gl_tex2) {
+            const int fl1 = (field_dominance == bmdUpperFieldFirst) ? 0 : 1;
+            const int fl2 = (field_dominance != bmdUpperFieldFirst) ? 0 : 1;
+            passes.push_back({gl_tex1->id(), fl1, 2});
+            passes.push_back({gl_tex2->id(), fl2, 2});
+        } else {
+            passes.push_back({gl_tex1->id(), 0, 1});
+        }
+
+        void*      dst = out.get();
+        const bool ok  = dev->dispatch_sync(
+            [&] { return pack_on_gl(passes, src_x, src_y, dst_w, dst_h, is_16bit, key_only, dst, out_sz); });
         if (!ok)
             std::memset(out.get(), 0, out_sz);
         return out;
@@ -396,7 +492,7 @@ std::shared_ptr<void> ogl_gl_strategy::convert_frame_for_port(const core::video_
                                                               const core::const_frame&       frame2,
                                                               BMDFieldDominance              field_dominance)
 {
-    return impl_->convert(decklink_format_desc, config, frame1);
+    return impl_->convert(decklink_format_desc, config, frame1, frame2, field_dominance);
 }
 
 spl::shared_ptr<format_strategy> try_create_ogl_gl_strategy(bool                             is_hdr,

@@ -296,16 +296,22 @@ spl::shared_ptr<format_strategy> create_format_strategy(const configuration& con
     return cpu_strategy;
 }
 
-// The OpenGL GPU pack (GL compute v210/BGRA) is used only when explicitly enabled
-// (<gpu-pack>gpu</>) and the output is progressive with no key-only ports (v1).
+// The OpenGL GPU pack (GL compute v210/BGRA) is used when explicitly enabled
+// (<gpu-pack>gpu</>). Progressive + interlaced (field weave) and key-only ports
+// are supported; ports with a destination offset / partial region are not (v210
+// group alignment) and stay on the CPU.
 bool ogl_gpu_pack_eligible(const configuration& config, bool use_vulkan, int field_count)
 {
-    if (use_vulkan || config.gpu_pack != configuration::gpu_pack_t::gpu || field_count != 1)
+    (void)field_count;
+    if (use_vulkan || config.gpu_pack != configuration::gpu_pack_t::gpu)
         return false;
-    if (config.primary.key_only)
+    auto ok_geometry = [](const port_configuration& p) {
+        return p.dest_x == 0 && p.dest_y == 0 && p.region_w == 0 && p.region_h == 0;
+    };
+    if (!ok_geometry(config.primary))
         return false;
     for (const auto& s : config.secondaries)
-        if (s.key_only)
+        if (!ok_geometry(s))
             return false;
     return true;
 }
