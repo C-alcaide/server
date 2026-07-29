@@ -884,22 +884,52 @@ so the change can never do worse than the previous behaviour.
 - **No filter errors** on any of the eleven clips tested, on both backends, and
   the arrival table is identical for OpenGL and Vulkan.
 
-### Costs and what is still open
+### Costs
 
-- **Upload bytes rise for the affected content**, because it is no longer being
-  thrown away: 10-bit 4:2:0 goes 2.97 → 5.93 MB/frame and 4:4:4 2.97 → 5.93 MB.
-  Against the capacity table above that lowers the layer ceiling for those
-  sources. This is correctness bought with bandwidth, and it is the right trade —
-  but it is a real change to a deployment's headroom and should be planned for.
-- **ProRes 4444 still converts YUV→RGB** (`yuva444p12le` → `gbrap16le`). Both are
-  in the lossless set so no picture is lost, but it costs a full-frame swscale.
-  Getting the native format needs `yuva444p16` in the offered list, which bwdif
-  would accept; `yuva444p12` alone is not enough because bwdif does not support
-  12-bit YUVA and promotes to 16-bit.
-- **`sw_pix_fmt` remains stale after a hardware-decode fallback.** It is no longer
-  load-bearing for format negotiation, but it still configures the buffersrc, so
-  the graph is built claiming `NV12` and then reconfigures when real frames
-  arrive. Worth fixing on its own.
+**Upload bytes rise for the affected content**, because it is no longer being
+thrown away: 10-bit 4:2:0 goes 2.97 → 5.93 MB/frame and 4:4:4 2.97 → 5.93 MB.
+Against the capacity table above that lowers the layer ceiling for those sources.
+This is correctness bought with bandwidth, and it is the right trade — but it is
+a real change to a deployment's headroom and should be planned for.
+
+### Two follow-ups, both fixed 2026-07-30
+
+**ProRes 4444 no longer converts YUV→RGB.** It was arriving as `gbrap16le`, which
+loses no picture but costs a full-frame swscale. The cause was that the offered
+list stopped at `yuva444p12`: bwdif has no 12-bit YUVA support and promotes it to
+16-bit, so the only formats both bwdif and the sink accepted were RGB. Added
+`AV_PIX_FMT_YUVA{420,422,444}P16` to the offered list, and the corresponding
+`ycbcra`/`bit16` entries to `av_util.cpp`'s mapping — without those the format
+would have mapped to `pixel_format::invalid`. ProRes 4444 now arrives as
+`yuva444p16le`, 4 planes, same 15.82 MB/frame, with the conversion gone.
+
+Verified against a reference decode at **46.4 dB**, per-channel r 45.1 / g 53.4 /
+b 44.8. Green being much better than red and blue is chroma rounding, not a
+matrix error — a wrong matrix would show a large systematic bias rather than an
+RMS error of ~1.4 levels out of 255. The mixer now does this YUV→RGB conversion
+instead of swscale, so this was the thing worth checking.
+
+**`sw_pix_fmt` is corrected once a software frame reveals the truth.** It is
+probed from the hardware frames context when the decoder is opened, before anyone
+knows whether hardware decoding will be used; when it declines, the decoder emits
+its native format while `sw_pix_fmt` still says `NV12`. The buffersrc was
+therefore configured with `NV12` for a 10-bit stream — FFmpeg only warns
+("Changing video frame properties on the fly…") and copes, but it is a false
+declaration, and it repeated on every filter rebuild. An ordinary frame is
+authoritative about its own layout, so it is now taken from there. Mismatch
+warnings per clip drop from 3 to 1; the remaining one is the first graph build,
+before any frame exists, and is unavoidable without deferring graph construction.
+
+### Still open
+
+**The buffersrc's colour metadata has the same shape of problem.** For codecs
+that carry colour information in the bitstream rather than the container — ProRes
+among them — `codecpar` reports unspecified, so the buffersrc is configured
+`csp: unknown range: unknown` and the first real frame triggers the same
+"Changing video frame properties" warning. The producer already learns
+`stream_color_space_` from decoded frames; feeding that back into the buffersrc
+parameters would close it. Benign today, and the code comments already
+acknowledge it, but it is the last of this family.
 
 Harness: `CasparCG-TestRunner/vkdispatch/upload_matrix.py` and `deint_check.py`.
 

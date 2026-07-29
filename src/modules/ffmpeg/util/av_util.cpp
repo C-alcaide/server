@@ -200,6 +200,14 @@ std::tuple<core::pixel_format, common::bit_depth> get_pixel_format(AVPixelFormat
         case AV_PIX_FMT_YUVA422P12:
         case AV_PIX_FMT_YUVA444P12:
             return {core::pixel_format::ycbcra, common::bit_depth::bit12};
+        // Needed so the producer can offer these to its filter graph. bwdif has
+        // no 12-bit YUVA support and promotes 12-bit YUVA to 16-bit, so without
+        // a 16-bit entry here the only formats a ProRes 4444 clip could
+        // negotiate were RGB, forcing a YUV->RGB pass on the host.
+        case AV_PIX_FMT_YUVA420P16:
+        case AV_PIX_FMT_YUVA422P16:
+        case AV_PIX_FMT_YUVA444P16:
+            return {core::pixel_format::ycbcra, common::bit_depth::bit16};
         case AV_PIX_FMT_RGBA64LE:
             return {core::pixel_format::rgba, common::bit_depth::bit16};
         case AV_PIX_FMT_BGRA64LE:

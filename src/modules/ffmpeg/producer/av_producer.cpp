@@ -1024,6 +1024,26 @@ class Decoder
                         if (av_frame->format != AV_PIX_FMT_D3D11 && gpu_direct_mode_.load())
                             saw_software_frame_.store(true, std::memory_order_relaxed);
 
+                        // sw_pix_fmt is probed from the hardware frames context when the
+                        // decoder is opened, before anyone knows whether hardware decoding
+                        // will actually be used. When it declines -- H.264 High 10 and
+                        // 4:4:4 both do -- the decoder emits its native software format
+                        // while sw_pix_fmt still says NV12, and the buffersrc is then
+                        // configured with NV12 for a 10-bit stream. FFmpeg only warns
+                        // about that ("Changing video frame properties on the fly...")
+                        // and copes, but it is a false declaration and it repeated on
+                        // every filter rebuild. An ordinary frame is authoritative about
+                        // its own layout, so take it.
+                        if (av_frame->format != AV_PIX_FMT_D3D11 && av_frame->format != AV_PIX_FMT_NONE &&
+                            sw_pix_fmt != static_cast<AVPixelFormat>(av_frame->format)) {
+                            const auto* was = av_get_pix_fmt_name(sw_pix_fmt);
+                            const auto* now = av_get_pix_fmt_name(static_cast<AVPixelFormat>(av_frame->format));
+                            CASPAR_LOG(info) << L"[ffmpeg] decoder software format is " << (now ? u16(now) : L"?")
+                                             << L", not the " << (was ? u16(was) : L"unset")
+                                             << L" advertised by the hardware frames context; correcting";
+                            sw_pix_fmt = static_cast<AVPixelFormat>(av_frame->format);
+                        }
+
                         // Handle HW frame transfer
                         if (av_frame->format == AV_PIX_FMT_D3D11) {
                             // Resolve the actual SW pixel format from the HW frames context.
@@ -1563,6 +1583,14 @@ struct Filter
                                               AV_PIX_FMT_YUVA420P10,
                                               AV_PIX_FMT_YUVA444P12,
                                               AV_PIX_FMT_YUVA422P12,
+                                              // bwdif does not support 12-bit YUVA and promotes it to
+                                              // 16-bit. Without these entries the only formats a
+                                              // ProRes 4444 clip could negotiate were RGB, which cost
+                                              // a full-frame YUV->RGB conversion on the host for no
+                                              // gain -- same byte count, same picture.
+                                              AV_PIX_FMT_YUVA420P16,
+                                              AV_PIX_FMT_YUVA422P16,
+                                              AV_PIX_FMT_YUVA444P16,
                                               AV_PIX_FMT_RGBA64LE,
                                               AV_PIX_FMT_BGRA64LE,
                                               AV_PIX_FMT_UYVY422,
