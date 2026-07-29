@@ -89,6 +89,7 @@ struct configuration
     {
         low_latency,
         normal_latency,
+        sync_display, // experimental: DisplayVideoFrameSync (no scheduled preroll), minimal latency
         default_latency = normal_latency
     };
 
@@ -163,7 +164,8 @@ struct configuration
 
     [[nodiscard]] int buffer_depth() const
     {
-        return base_buffer_depth + (latency == latency_t::low_latency ? 0 : 1) +
+        const bool low = latency == latency_t::low_latency || latency == latency_t::sync_display;
+        return base_buffer_depth + (low ? 0 : 1) +
                (embedded_audio ? 1 : 0); // TODO: Do we need this?
     }
 

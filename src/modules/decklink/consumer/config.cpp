@@ -114,6 +114,8 @@ configuration parse_xml_config(const boost::property_tree::wptree&  ptree,
         config.latency = configuration::latency_t::low_latency;
     } else if (latency == L"normal") {
         config.latency = configuration::latency_t::normal_latency;
+    } else if (latency == L"sync") {
+        config.latency = configuration::latency_t::sync_display;
     }
 
     auto wait_for_reference = ptree.get(L"wait-for-reference", L"auto");

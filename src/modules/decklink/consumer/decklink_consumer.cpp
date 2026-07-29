@@ -80,6 +80,11 @@ void set_latency(const com_iface_ptr<Configuration>& config,
     if (latency == configuration::latency_t::low_latency) {
         config->SetFlag(bmdDeckLinkConfigLowLatencyVideoOutput, true);
         CASPAR_LOG(info) << print << L" Enabled low-latency mode.";
+    } else if (latency == configuration::latency_t::sync_display) {
+        // Synchronous display pairs with the low-latency flag: per Blackmagic, it
+        // guarantees the frame is output as soon as the previous one completes.
+        config->SetFlag(bmdDeckLinkConfigLowLatencyVideoOutput, true);
+        CASPAR_LOG(info) << print << L" Enabled low-latency mode (sync-display).";
     } else if (latency == configuration::latency_t::normal_latency) {
         config->SetFlag(bmdDeckLinkConfigLowLatencyVideoOutput, false);
         CASPAR_LOG(info) << print << L" Disabled low-latency mode.";
@@ -801,6 +806,12 @@ struct decklink_consumer final : public IDeckLinkVideoOutputCallback
     std::atomic<bool>              abort_request_{false};
     std::shared_ptr<decklink_vanc> vanc_;
 
+    // Experimental synchronous-display path (DisplayVideoFrameSync). When enabled,
+    // a worker thread pops frames and blocks on DisplayVideoFrameSync instead of
+    // using scheduled playback + preroll, for minimal (~0-1 frame) output latency.
+    bool        use_sync_display_ = false;
+    std::thread sync_thread_;
+
   public:
     decklink_consumer(const configuration& config, core::video_format_desc channel_format_desc, int channel_index, bool use_vulkan = false)
         : channel_index_(channel_index)
@@ -890,35 +901,57 @@ struct decklink_consumer final : public IDeckLinkVideoOutputCallback
                 CASPAR_LOG(warning) << print() << L" Device does not support colorspace metadata.";
         }
 
+        // Decide whether the experimental synchronous-display path can be used.
+        // It is a single-device, video-only path: fall back to scheduled playback
+        // when embedded audio or secondary ports are configured.
+        if (config.latency == configuration::latency_t::sync_display) {
+            if (config.embedded_audio) {
+                CASPAR_LOG(warning) << print()
+                                    << L" sync-display latency does not support embedded audio; using scheduled "
+                                       L"playback.";
+            } else if (!config.secondaries.empty()) {
+                CASPAR_LOG(warning) << print()
+                                    << L" sync-display latency does not support secondary ports; using scheduled "
+                                       L"playback.";
+            } else {
+                use_sync_display_ = true;
+            }
+        }
+
         if (config.embedded_audio) {
             output_->BeginAudioPreroll();
         }
 
-        for (int n = 0; n < buffer_size_; ++n) {
-            auto nb_samples = decklink_format_desc_.audio_cadence[n % decklink_format_desc_.audio_cadence.size()] *
-                              decklink_format_desc_.field_count;
+        if (use_sync_display_) {
+            // No preroll / no StartScheduledPlayback: the worker thread drives output.
+            start_sync_display();
+        } else {
+            for (int n = 0; n < buffer_size_; ++n) {
+                auto nb_samples = decklink_format_desc_.audio_cadence[n % decklink_format_desc_.audio_cadence.size()] *
+                                  decklink_format_desc_.field_count;
+                if (config.embedded_audio) {
+                    schedule_next_audio(std::vector<int32_t>(nb_samples * decklink_format_desc_.audio_channels),
+                                        nb_samples);
+                }
+
+                std::shared_ptr<void> image_data = format_strategy_->allocate_frame_data(decklink_format_desc_);
+
+                schedule_next_video(image_data, nb_samples, video_scheduled_);
+                for (auto& context : secondary_port_contexts_) {
+                    context->schedule_next_video(image_data, 0, video_scheduled_);
+                }
+
+                video_scheduled_ += decklink_format_desc_.duration;
+            }
+
             if (config.embedded_audio) {
-                schedule_next_audio(std::vector<int32_t>(nb_samples * decklink_format_desc_.audio_channels),
-                                    nb_samples);
+                output_->EndAudioPreroll();
             }
 
-            std::shared_ptr<void> image_data = format_strategy_->allocate_frame_data(decklink_format_desc_);
+            wait_for_reference_lock();
 
-            schedule_next_video(image_data, nb_samples, video_scheduled_);
-            for (auto& context : secondary_port_contexts_) {
-                context->schedule_next_video(image_data, 0, video_scheduled_);
-            }
-
-            video_scheduled_ += decklink_format_desc_.duration;
+            start_playback();
         }
-
-        if (config.embedded_audio) {
-            output_->EndAudioPreroll();
-        }
-
-        wait_for_reference_lock();
-
-        start_playback();
     }
 
     ~decklink_consumer()
@@ -926,8 +959,14 @@ struct decklink_consumer final : public IDeckLinkVideoOutputCallback
         abort_request_ = true;
         buffer_cond_.notify_all();
 
+        if (sync_thread_.joinable()) {
+            sync_thread_.join();
+        }
+
         if (output_ != nullptr) {
-            output_->StopScheduledPlayback(0, nullptr, 0);
+            if (!use_sync_display_) {
+                output_->StopScheduledPlayback(0, nullptr, 0);
+            }
             if (config_.embedded_audio) {
                 output_->DisableAudioOutput();
             }
@@ -1025,6 +1064,84 @@ struct decklink_consumer final : public IDeckLinkVideoOutputCallback
 
         for (auto& context : secondary_port_contexts_) {
             context->start_playback([this]() { return print(); });
+        }
+    }
+
+    // Experimental: drive output via DisplayVideoFrameSync from a worker thread.
+    // Each call blocks until the previously displayed frame completes, so the loop
+    // paces itself to the genlock/output clock with no scheduled preroll queue.
+    void start_sync_display()
+    {
+        CASPAR_LOG(info) << print() << L" Started synchronous-display output (experimental).";
+        sync_thread_ = std::thread([this] { sync_display_loop(); });
+    }
+
+    void sync_display_loop()
+    {
+        set_thread_realtime_priority();
+        set_thread_name(L"decklink_consumer[" + std::to_wstring(config_.primary.device_index) + L"]-DisplaySync");
+
+        const bool   isInterlaced = mode_->GetFieldDominance() != bmdProgressiveFrame;
+        const double frame_period =
+            static_cast<double>(decklink_format_desc_.duration) / decklink_format_desc_.time_scale;
+        prec_timer frame_timer;
+        tick_timer_.restart();
+        diag_last_log_ = std::chrono::steady_clock::now();
+
+        try {
+            while (!abort_request_) {
+                // Rate-limit to the frame period. When the card is genlocked,
+                // DisplayVideoFrameSync already blocks for ~one frame and this
+                // returns immediately; without a reference it free-runs, so this
+                // provides the timing backpressure that paces the channel.
+                frame_timer.tick(frame_period);
+
+                core::const_frame frame1 = pop();
+                if (abort_request_)
+                    break;
+                core::const_frame frame2;
+                if (isInterlaced) {
+                    frame2 = pop();
+                    if (abort_request_)
+                        break;
+                }
+
+                std::shared_ptr<void> image_data =
+                    format_strategy_->convert_frame_for_port(channel_format_desc_,
+                                                             decklink_format_desc_,
+                                                             config_.primary,
+                                                             frame1,
+                                                             frame2,
+                                                             mode_->GetFieldDominance());
+
+                auto fill_frame = build_fill_frame(std::move(image_data), 0);
+
+                // Blocks until the previously displayed frame has finished output.
+                HRESULT hr = output_->DisplayVideoFrameSync(get_raw(fill_frame));
+                if (FAILED(hr)) {
+                    CASPAR_LOG(error) << print() << L" DisplayVideoFrameSync failed (0x" << std::hex << hr << std::dec
+                                      << L").";
+                }
+
+                auto tick_ms = tick_timer_.elapsed() * 1000.0;
+                tick_timer_.restart();
+                graph_->set_value("tick-time", tick_ms / (1000.0 / decklink_format_desc_.hz) * 0.5);
+                diag_tick_sum_ += tick_ms;
+                diag_tick_count_++;
+
+                auto now = std::chrono::steady_clock::now();
+                if (diag_tick_count_ > 0 &&
+                    std::chrono::duration_cast<std::chrono::seconds>(now - diag_last_log_).count() >= 5) {
+                    CASPAR_LOG(trace) << print() << L" SYNC TIMING: avg=" << std::fixed << std::setprecision(1)
+                                      << (diag_tick_sum_ / diag_tick_count_) << L"ms frames=" << diag_tick_count_;
+                    diag_tick_sum_   = 0.0;
+                    diag_tick_count_ = 0;
+                    diag_last_log_   = now;
+                }
+            }
+        } catch (...) {
+            std::lock_guard<std::mutex> lock(exception_mutex_);
+            exception_ = std::current_exception();
         }
     }
 
@@ -1222,7 +1339,7 @@ struct decklink_consumer final : public IDeckLinkVideoOutputCallback
         audio_scheduled_ += nb_samples; // TODO - what if there are too many/few samples in this frame?
     }
 
-    void schedule_next_video(std::shared_ptr<void> image_data, int nb_samples, BMDTimeValue display_time)
+    com_ptr<IDeckLinkVideoFrame> build_fill_frame(std::shared_ptr<void> image_data, int nb_samples)
     {
         auto fmt        = format_strategy_->get_pixel_format();
         auto row_bytes  = format_strategy_->get_row_bytes(decklink_format_desc_.width);
@@ -1256,6 +1373,12 @@ struct decklink_consumer final : public IDeckLinkVideoOutputCallback
                 }
             }
         }
+        return fill_frame;
+    }
+
+    void schedule_next_video(std::shared_ptr<void> image_data, int nb_samples, BMDTimeValue display_time)
+    {
+        auto fill_frame = build_fill_frame(std::move(image_data), nb_samples);
         if (FAILED(output_->ScheduleVideoFrame(
                 get_raw(fill_frame), display_time, decklink_format_desc_.duration, decklink_format_desc_.time_scale))) {
             CASPAR_LOG(error) << print() << L" Failed to schedule primary video.";
