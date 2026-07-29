@@ -1409,6 +1409,8 @@ struct Filter
 
         FF(avfilter_graph_parse2(graph.get(), filter_spec.c_str(), &inputs, &outputs));
 
+        auto filter_src_fmt = AV_PIX_FMT_NONE;
+
         // inputs
         {
             for (auto cur = inputs; cur; cur = cur->next) {
@@ -1459,6 +1461,18 @@ struct Filter
                                                L"decoder nor the stream reports a pixel format yet (decoder "
                                             << u16(st->codec ? st->codec->name : "?") << L").";
                     }
+
+                    // Remembered for the buffersink's format list below. Note this
+                    // is the *stream's* declared format, not src_fmt: src_fmt comes
+                    // from sw_pix_fmt, which is probed from the hardware frames
+                    // context at open and stays at NV12 even when the decoder then
+                    // declines hardware decoding and emits its native software
+                    // format. Restricting against NV12 permits an 8-bit 4:2:0
+                    // result, which is exactly the loss being prevented. codecpar
+                    // describes what the content is and is not affected by how it
+                    // gets decoded.
+                    const auto declared = static_cast<AVPixelFormat>(input->streams[index]->codecpar->format);
+                    filter_src_fmt      = declared != AV_PIX_FMT_NONE ? declared : src_fmt;
 
                     auto args = (boost::format("video_size=%dx%d:pix_fmt=%d:time_base=%d/%d") % st->width % st->height %
                                  src_fmt % st->pkt_timebase.num % st->pkt_timebase.den)
@@ -1562,7 +1576,63 @@ struct Filter
                                               AV_PIX_FMT_GBRAP,
                                               AV_PIX_FMT_GBRAP16,
                                               AV_PIX_FMT_NONE};
-            FF(av_opt_set_int_list(sink, "pix_fmts", pix_fmts, -1, AV_OPT_SEARCH_CHILDREN));
+
+            // ── Do not offer the sink a format that would lose picture ────
+            // Offering this whole list let negotiation choose freely, and what it
+            // chose was driven by the *filters'* format preferences rather than by
+            // the source. `bwdif` is inserted into every video graph (it only acts
+            // on frames flagged interlaced, but its format constraints apply to
+            // all of them) and lists yuv420p first, so measured at the mixer:
+            //
+            //   H.264 High 10   yuv420p10le -> yuv420p   truncated to 8-bit
+            //   H.264 High 4:4:4  yuv444p   -> yuv420p   chroma subsampled
+            //   ProRes 4444    yuva444p12le -> gbrap16le YUV->RGB on the CPU
+            //
+            // The first two are silent quality losses on every such clip; they are
+            // also why GPU-direct decode measured *better* than the software path
+            // for 10-bit content, which had been recorded as an oddity of the
+            // GPU path rather than a defect in this one.
+            //
+            // So restrict the offer to formats that cannot lose anything relative
+            // to what the decoder produces: at least its bit depth, at least its
+            // chroma resolution, and alpha if it has alpha. Negotiation is then
+            // free to pick any of them and cannot pick a lossy one. Deinterlacing
+            // is untouched -- bwdif stays in the graph for all content.
+            std::vector<AVPixelFormat> allowed;
+            const auto*                src_desc =
+                filter_src_fmt != AV_PIX_FMT_NONE ? av_pix_fmt_desc_get(filter_src_fmt) : nullptr;
+            if (src_desc != nullptr) {
+                const int  src_depth  = src_desc->comp[0].depth;
+                const bool src_alpha  = (src_desc->flags & AV_PIX_FMT_FLAG_ALPHA) != 0;
+                for (auto p = pix_fmts; *p != AV_PIX_FMT_NONE; ++p) {
+                    const auto* d = av_pix_fmt_desc_get(*p);
+                    if (d == nullptr)
+                        continue;
+                    if (d->comp[0].depth < src_depth)
+                        continue;
+                    // Smaller log2_chroma means denser chroma. Never coarsen.
+                    if (d->log2_chroma_w > src_desc->log2_chroma_w ||
+                        d->log2_chroma_h > src_desc->log2_chroma_h)
+                        continue;
+                    if (src_alpha && (d->flags & AV_PIX_FMT_FLAG_ALPHA) == 0)
+                        continue;
+                    allowed.push_back(*p);
+                }
+            }
+
+            // An empty or unusable restriction must never be worse than the old
+            // behaviour, so fall back to the full list and say why.
+            if (allowed.empty()) {
+                CASPAR_LOG(info) << L"[ffmpeg] filter output unrestricted: source format "
+                                 << (src_desc != nullptr ? u16(src_desc->name) : L"unresolved at graph build")
+                                 << L" -- conversion is permitted and may lose precision";
+                FF(av_opt_set_int_list(sink, "pix_fmts", pix_fmts, -1, AV_OPT_SEARCH_CHILDREN));
+            } else {
+                CASPAR_LOG(info) << L"[ffmpeg] filter output restricted to " << allowed.size()
+                                 << L" lossless format(s) for source " << u16(src_desc->name);
+                allowed.push_back(AV_PIX_FMT_NONE);
+                FF(av_opt_set_int_list(sink, "pix_fmts", allowed.data(), AV_PIX_FMT_NONE, AV_OPT_SEARCH_CHILDREN));
+            }
 #ifdef _MSC_VER
 #pragma warning(pop)
 #endif

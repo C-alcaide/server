@@ -801,6 +801,110 @@ Harness: `CasparCG-TestRunner/vkdispatch/tick_probe.py`.
 
 ---
 
+## The producer was silently degrading 10-bit and 4:4:4 — fixed 2026-07-30
+
+Following the upload-bandwidth finding above, the next question was which source
+types reach the mixer in a more expensive representation than they need. Measured
+by playing one clip per source type and reading the arrival diagnostic
+(`decoded frames arrive as X -> mixer pixel_format N`), the answer turned out to
+be a correctness problem rather than a bandwidth one.
+
+| source | arrived as (before) | arrives as (now) |
+|---|---|---|
+| H.264 4:2:0 8-bit | `yuv420p` | `yuv420p` |
+| **H.264 High 10** (`yuv420p10le`) | **`yuv420p`** — truncated to 8-bit | **`yuv420p10le`** |
+| **H.264 High 4:4:4** (`yuv444p`) | **`yuv420p`** — chroma subsampled | **`yuv444p`** |
+| ProRes 422 HQ | `yuv422p10le` | `yuv422p10le` |
+| ProRes 4444 + alpha | `gbrap16le` | `gbrap16le` |
+| DNxHR HQ | `yuv422p` | `yuv422p` |
+| FFV1 planar RGB | `gbrp` | `gbrp` |
+| QuickTime RLE RGBA | `gbrap` | `gbrap` |
+| v210 | `yuv422p10le` | `yuv422p10le` |
+
+**Every 10-bit clip was being truncated to 8 bits, and every 4:4:4 clip
+subsampled to 4:2:0, before the mixer ever saw them.** Measured on the source
+alone, that conversion costs 43.0 dB for 10-bit content and 40.3 dB for 4:4:4 —
+applied to every frame, silently.
+
+### Cause
+
+`bwdif` is appended to *every* video filter graph unless
+`configuration.ffmpeg.producer.auto-deinterlace` is `none`. With the default
+`deint=interlaced` it only acts on frames flagged interlaced, so on progressive
+content it is a pass-through — but it is still *in* the graph, and its format
+constraints therefore govern negotiation for all content. It lists `yuv420p`
+first among its supported formats, and the buffersink was handed a fixed list of
+36 formats and left to choose, so the choice was driven by the filter's
+preference rather than by the source.
+
+Removing bwdif confirms it: with `auto-deinterlace=none` the same clips arrive as
+`yuv420p10le`, `yuv444p`, `nv12` and `yuva444p12le` respectively.
+
+This is also the explanation for something previously recorded as an oddity of
+the GPU path. `CasparCG-TestRunner/gpudirect/README.md` notes that 10-bit HEVC
+measured ~46 dB *different* between GPU-direct and software decode, and concluded
+"the GPU-direct output is the more accurate of the two … it is the filter graph's
+format negotiation to fix, not the GPU-direct path". That was right, and this is
+that fix.
+
+### Fix
+
+The buffersink is no longer offered formats that could lose picture. The offer is
+filtered against what the stream declares, keeping only formats with at least the
+source's bit depth, at least its chroma resolution, and alpha if the source has
+alpha. Negotiation is then free to choose among them and cannot choose a lossy
+one. **bwdif stays in the graph for all content — deinterlacing is unchanged.**
+
+The restriction is derived from `codecpar->format`, deliberately *not* from
+`sw_pix_fmt`. `sw_pix_fmt` is probed from the hardware frames context at open and
+stays at `NV12` even when the decoder subsequently declines hardware decoding and
+falls back to software — which is exactly what happens for High 10 and 4:4:4.
+Restricting against `NV12` permits an 8-bit 4:2:0 result, i.e. precisely the loss
+being prevented. The first version of this fix did that and changed nothing;
+the log line reporting `restricted … for source nv12` on a `yuv420p10le` clip is
+what gave it away. `codecpar` describes the content and is unaffected by how it
+is decoded.
+
+If no lossless candidate exists the full list is restored and the reason logged,
+so the change can never do worse than the previous behaviour.
+
+### Verification
+
+- **Deinterlacing still works, measured rather than assumed.** Interlaced clips
+  built from a *moving* source (a static source weaves into an identical frame
+  and cannot show combing — the same trap as the gpudirect harness). Row-adjacency
+  PSNR of the raw combed frame vs the channel output: 29.33 → **39.02 dB**
+  (8-bit) and 28.94 → **39.12 dB** (10-bit). Combing is removed, and interlaced
+  10-bit now keeps its precision as well.
+- **The mixer renders the newly-arriving formats correctly.** Channel output vs a
+  reference decode of the same frame: `yuv444p` **70.8 dB** (essentially exact —
+  4:4:4 needs no chroma reconstruction), `yuv420p10le` 39.6 dB and `yuv420p`
+  38.7 dB (both limited by chroma upsampling differing between GPU sampling and
+  swscale, as expected).
+- **No filter errors** on any of the eleven clips tested, on both backends, and
+  the arrival table is identical for OpenGL and Vulkan.
+
+### Costs and what is still open
+
+- **Upload bytes rise for the affected content**, because it is no longer being
+  thrown away: 10-bit 4:2:0 goes 2.97 → 5.93 MB/frame and 4:4:4 2.97 → 5.93 MB.
+  Against the capacity table above that lowers the layer ceiling for those
+  sources. This is correctness bought with bandwidth, and it is the right trade —
+  but it is a real change to a deployment's headroom and should be planned for.
+- **ProRes 4444 still converts YUV→RGB** (`yuva444p12le` → `gbrap16le`). Both are
+  in the lossless set so no picture is lost, but it costs a full-frame swscale.
+  Getting the native format needs `yuva444p16` in the offered list, which bwdif
+  would accept; `yuva444p12` alone is not enough because bwdif does not support
+  12-bit YUVA and promotes to 16-bit.
+- **`sw_pix_fmt` remains stale after a hardware-decode fallback.** It is no longer
+  load-bearing for format negotiation, but it still configures the buffersrc, so
+  the graph is built claiming `NV12` and then reconfigures when real frames
+  arrive. Worth fixing on its own.
+
+Harness: `CasparCG-TestRunner/vkdispatch/upload_matrix.py` and `deint_check.py`.
+
+---
+
 ## NDI Advanced SDK Assessment
 
 ### Availability
