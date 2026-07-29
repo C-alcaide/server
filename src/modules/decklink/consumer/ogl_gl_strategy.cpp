@@ -29,8 +29,11 @@
 
 #include <GL/glew.h>
 
+#include <algorithm>
+#include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace caspar { namespace decklink {
 
@@ -150,6 +153,47 @@ GLuint compile_compute(const char* src)
     return prog;
 }
 
+// Independent C++ reference of the v210 shader math (BT.709/2020, 8-bit BGRA
+// source), used by the one-shot parity self-test. Packs one row of the source
+// (RGBA8 texels, mixer stores BGRA) into v210 exactly as k_v210_cs does.
+void cpu_ref_v210_row(const std::uint8_t* rgba, int dst_w, int groups_per_row, bool bt2020, std::uint32_t* out)
+{
+    auto to10 = [](std::uint8_t v) { return int(double(v) / 255.0 * 1023.0 + 0.5); };
+    for (int g = 0; g < groups_per_row; ++g) {
+        int Y[6], Cb[6], Cr[6];
+        for (int i = 0; i < 6; ++i) {
+            int px = g * 6 + i;
+            int R = 0, G = 0, B = 0;
+            if (px < dst_w) {
+                const std::uint8_t* p = rgba + px * 4; // p[0]=R,p[1]=G,p[2]=B texel channels
+                R = to10(p[2]);                        // shader: R = pixel.b
+                G = to10(p[1]);
+                B = to10(p[0]);                        // shader: B = pixel.r
+            }
+            if (bt2020) {
+                Y[i]  = 64 + ((275375 * R + 710743 * G + 62594 * B) >> 20);
+                Cb[i] = 512 + ((-146420 * R - 377856 * G + 524288 * B) >> 20);
+                Cr[i] = 512 + ((524288 * R - 482393 * G - 41857 * B) >> 20);
+            } else {
+                Y[i]  = 64 + ((222951 * R + 750098 * G + 75663 * B) >> 20);
+                Cb[i] = 512 + ((-100459 * R - 337802 * G + 438223 * B) >> 20);
+                Cr[i] = 512 + ((438223 * R - 398337 * G - 39908 * B) >> 20);
+            }
+            Y[i]  = std::min(940, std::max(64, Y[i]));
+            Cb[i] = std::min(960, std::max(64, Cb[i]));
+            Cr[i] = std::min(960, std::max(64, Cr[i]));
+        }
+        int  Cb0 = (Cb[0] + Cb[1] + 1) >> 1, Cr0 = (Cr[0] + Cr[1] + 1) >> 1;
+        int  Cb1 = (Cb[2] + Cb[3] + 1) >> 1, Cr1 = (Cr[2] + Cr[3] + 1) >> 1;
+        int  Cb2 = (Cb[4] + Cb[5] + 1) >> 1, Cr2 = (Cr[4] + Cr[5] + 1) >> 1;
+        std::uint32_t* w = out + g * 4;
+        w[0] = std::uint32_t(Cb0) | (std::uint32_t(Y[0]) << 10) | (std::uint32_t(Cr0) << 20);
+        w[1] = std::uint32_t(Y[1]) | (std::uint32_t(Cb1) << 10) | (std::uint32_t(Y[2]) << 20);
+        w[2] = std::uint32_t(Cr1) | (std::uint32_t(Y[3]) << 10) | (std::uint32_t(Cb2) << 20);
+        w[3] = std::uint32_t(Y[4]) | (std::uint32_t(Cr2) << 10) | (std::uint32_t(Y[5]) << 20);
+    }
+}
+
 } // namespace
 
 struct ogl_gl_strategy::impl
@@ -167,6 +211,7 @@ struct ogl_gl_strategy::impl
     GLuint                                  ssbo_    = 0;
     std::size_t                             ssbo_sz_ = 0;
     bool                                    broken_  = false; // shader failed to build
+    bool                                    parity_done_ = false; // one-shot self-test
 
     impl(bool is_hdr, bool use_bt2020, spl::shared_ptr<format_strategy> fallback, bool needs_v210)
         : is_hdr_(is_hdr)
@@ -237,6 +282,46 @@ struct ogl_gl_strategy::impl
 
         glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT | GL_SHADER_STORAGE_BARRIER_BIT);
         glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, out_sz, out);
+
+        // One-shot correctness gate: compare the GPU pack of row 0 against an
+        // independent C++ reference of the same math on the actual texels. Fires
+        // on the first non-black frame so it validates real colour, not black.
+        if (needs_v210_ && !is_16bit && !parity_done_) {
+            const auto*         g   = static_cast<const std::uint32_t*>(out);
+            const std::uint32_t bw0 = 512u | (64u << 10) | (512u << 20); // black v210 word 0
+            const std::uint32_t bw1 = 64u | (512u << 10) | (64u << 20);  // black v210 word 1
+            const bool          non_black = out_sz >= 8 && (g[0] != bw0 || g[1] != bw1);
+            if (non_black) {
+                parity_done_     = true;
+                const int groups = row_bytes(dst_w) / 16;
+                glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(tex_id));
+                GLint tw = 0, th = 0;
+                glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &tw);
+                glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &th);
+                if (tw > 0 && th > 0 && src_y < th) {
+                    std::vector<std::uint8_t> full(static_cast<std::size_t>(tw) * th * 4);
+                    glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, full.data());
+                    const std::uint8_t*        src_row = full.data() + (static_cast<std::size_t>(src_y) * tw + src_x) * 4;
+                    std::vector<std::uint32_t> ref(static_cast<std::size_t>(groups) * 4);
+                    cpu_ref_v210_row(src_row, dst_w, groups, use_bt2020_, ref.data());
+                    int mism = 0, first = -1;
+                    for (std::size_t i = 0; i < ref.size(); ++i)
+                        if (ref[i] != g[i]) {
+                            ++mism;
+                            if (first < 0)
+                                first = static_cast<int>(i);
+                        }
+                    if (mism == 0)
+                        CASPAR_LOG(info) << L"[ogl_gl_strategy] v210 parity self-test PASS (" << groups
+                                         << L" groups @ row " << src_y << L").";
+                    else
+                        CASPAR_LOG(warning)
+                            << L"[ogl_gl_strategy] v210 parity self-test: " << mism << L"/" << ref.size()
+                            << L" words differ (first@" << first << L" gpu=" << g[first] << L" ref=" << ref[first]
+                            << L").";
+                }
+            }
+        }
         return true;
     }
 
