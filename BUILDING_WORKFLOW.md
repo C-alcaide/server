@@ -24,29 +24,43 @@ Quick reference for AI agents and developers building CasparVP on this machine.
 
 **Every cmake invocation must run inside a single `cmd.exe` session that starts with `vcvars64.bat`.**
 
-```
-cmd /c ""C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat"" && cmake --build d:\Github\CasparVP\build --target <targets>
+```bat
+call "C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxiliary\Build\vcvars64.bat" -vcvars_ver=14.50
+cmake --build d:\Github\CasparVP\build --target <targets>
 ```
 
-> ### ⚠ Pin the toolset to 14.50 (required since the VS 14.51 update, 2026-07)
+Use **BuildTools**, and **always** pass `-vcvars_ver=14.50`. Both halves matter —
+see below.
+
+> ### ⚠ Pin the toolset to 14.50, and source it from BuildTools
 >
 > **The whole tree must build on MSVC 14.50.** `nvcc` 12.9 cannot use 14.51:
 > `cudafe++` dies with an access violation while parsing its STL, so CUDA
 > constrains the entire project. `CMakeCache.txt` therefore pins `cl.exe`
-> **14.50.35717** (BuildTools).
+> **14.50.35717** — and specifically the **BuildTools** copy.
 >
 > A VS update added toolset **14.51.36231**, and plain `vcvars64.bat` selects the
-> newest one — pairing the 14.50 compiler with the 14.51 STL. Always pass
-> `-vcvars_ver=14.50`:
+> newest one, pairing the 14.50 compiler with the 14.51 STL.
 >
-> ```bat
-> call "C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxiliary\Build\vcvars64.bat" -vcvars_ver=14.50
-> cmake --build d:\Github\CasparVP\build --target <targets>
-> ```
+> **14.50 exists only in BuildTools on this machine.** The Community install has
+> 14.51 alone, so `Community\...\vcvars64.bat -vcvars_ver=14.50` fails outright
+> with `Toolset directory for version '14.50' was not found`. Worse is the
+> version that *doesn't* fail: sourcing Community's vcvars **without** the pin
+> succeeds and builds, because `CMakeCache.txt` names the BuildTools 14.50
+> `cl.exe` by absolute path — so you get the 14.50 compiler with 14.51 headers on
+> `INCLUDE` and no warning about it. Whether it compiles then depends on which
+> translation units you happen to touch. (This is exactly how it went once: an
+> edit confined to `ffmpeg_consumer.cpp` built and ran fine in that mismatched
+> environment, and only a clean rebuild in the correct one proved the binary.)
+>
+> If in doubt which environment produced a binary, rebuild with
+> `--clean-first` in the pinned one. 383 targets, and it is the only way to be
+> certain.
 >
 > | Symptom | Cause |
 > |---|---|
-> | `include\variant(292): error C2988` / `C3855` in `accelerator/vulkan/util/device.cpp` | 14.50 `cl.exe` parsing the 14.51 STL — you forgot `-vcvars_ver=14.50` |
+> | `include\variant(292): error C2988` / `C3855` in `accelerator/vulkan/util/device.cpp` | 14.50 `cl.exe` parsing the 14.51 STL — you forgot `-vcvars_ver=14.50`, or sourced Community's vcvars |
+> | `[ERROR:vcvars.bat] Toolset directory for version '14.50' was not found.` | you used the **Community** vcvars. 14.50 is only in BuildTools |
 > | `C1083: cannot open include file 'atlbase.h'` in `decklink`/`flash`, or `LNK1104: atls.lib` | the **ATL component for 14.50 is not installed**. Install it via the VS installer (Individual components → "MSVC v14.50 … ATL"). `decklink` and `flash` need ATL. |
 > | `casparcg.exe` links but dies at load: `0xC0000005`, faulting module `unknown`, offset 0, no log output at all | 14.51 ATL headers compiled against the 14.50 STL, and 14.51's `atls.lib` linked in |
 >

@@ -8,8 +8,6 @@ set(SOURCES
 	producer/av_input.h
 	producer/ffmpeg_producer.cpp
 	producer/ffmpeg_producer.h
-	producer/d3d11_gl_bridge.cpp
-	producer/d3d11_gl_bridge.h
 	consumer/ffmpeg_consumer.cpp
 	consumer/ffmpeg_consumer.h
 

@@ -30,7 +30,7 @@ on unnecessary GPU→CPU→GPU roundtrips.
 | DeckLink (CUDA-VK) | `false` | VK texture → CUDA surface → v210 pack on GPU |
 | **Spout** *(Phase 2)* | `!gpu_path_active_` | Shared GL context + `glCopyImageSubData` → `SendTexture` |
 | **ProRes encoder** *(Phase 3)* | `!gpu_direct_active_` | Shared GL context + CUDA GL register → GPU-direct encode |
-| **FFmpeg consumer** *(Phase 4)* | Conditional | GPU texture accepted from mixer |
+| **FFmpeg consumer** *(Phase 4)* | `true` (never overridden) | Still takes the readback. NVENC now receives RGB with no host conversion; the readback removal is outstanding — see Phase 4 |
 
 ### Consumers that still use CPU readback
 | Consumer | Issue | Impact |
@@ -183,12 +183,78 @@ bool needs_cpu_frame_data() const override { return !gpu_direct_active_; }
 
 **Files:** `src/modules/ffmpeg/consumer/ffmpeg_consumer.cpp`
 
+> ### ⚠ Status (2026-07-29): the description below was aspirational, not a record
+>
+> The consumer does **not** accept GPU textures. It never overrode
+> `needs_cpu_frame_data()`, so it has always taken the full mixer readback — the
+> log says so plainly at every `ADD`: `output[1] CPU readback required by
+> consumer ffmpeg`. Read the paragraph below as the goal it was, not as
+> implemented behaviour.
+>
+> What *was* implemented was a filter insertion, `format=nv12,hwupload_cuda`,
+> commented as doing the conversion "on GPU via scale_cuda". Both halves of that
+> claim were wrong:
+>
+> - `format=nv12` is **host libswscale**. No part of it ran on the GPU.
+> - `scale_cuda` was never in the graph, and could not have done this job
+>   anyway: it rejects RGB input outright at graph-config time
+>   (`Unsupported input format: yuva420p`), so the filter named in the
+>   justification is incapable of the conversion it was credited with.
+>
+> The conversion was also unnecessary. `h264_nvenc` lists `bgra` among its
+> accepted input formats and converts to YCbCr inside the encoder, on the GPU.
+> Measured at 1080p over 300 frames (`h264_nvenc -preset p4`):
+>
+> | path | CPU (utime) | PSNR vs source | file |
+> |---|---|---|---|
+> | `format=nv12,hwupload_cuda` (was) | 5.55 s | 48.88 dB | 138 KiB |
+> | `format=nv12` alone | — | 48.88 dB (identical) | — |
+> | RGB straight to NVENC (now) | **4.30 s** | **50.59 dB** | 131 KiB |
+>
+> So the forced conversion cost ~4.2 ms of CPU per frame — a fifth of a core at
+> 50 fps — *and* lost 1.7 dB, because it subsampled chroma on the host that the
+> encoder would otherwise have subsampled itself. `hwupload_cuda` contributed
+> nothing measurable: it is PSNR-identical to `format=nv12` alone and slightly
+> slower.
+>
+> Fixed by inserting nothing. The buffersink already negotiates against
+> `codec->pix_fmts`, and with no filter forced it settles on `bgra` for an 8-bit
+> channel and `rgba` for a 16-bit one. Verified on both mixer backends — the
+> recordings are byte-identical in size across OGL and VK, and the encoder now
+> logs its negotiated input format at open time:
+> `[ffmpeg] h264_nvenc input format bgra (no host conversion)`.
+>
+> Two defects found alongside it, both fixed in the same commit:
+>
+> - **NVENC recording was broken via the documented option spelling.** The
+>   x264-preset guard tested `codec:v` and `c:v` only, but the encoder is also
+>   selected from `vcodec`. `ADD 1 FILE out.mp4 -vcodec h264_nvenc` therefore got
+>   `preset:v=veryfast` applied, which NVENC rejects (`Undefined constant ... in
+>   'veryfast'`), failing the recording outright.
+> - **A CUDA device context leaked per recording.** `hw_device_ctx_` was a raw
+>   local; the graph and encoder each took a reference and the original was never
+>   released.
+>
+> **Still outstanding — the readback itself.** The remaining cost is the
+> GPU→CPU readback of the composited frame, which this does not touch. Removing
+> it needs mixer texture → CUDA external memory → a BGRA→NV12 kernel →
+> `AV_PIX_FMT_CUDA`, with `needs_cpu_frame_data()` false while that path is live.
+> `src/modules/cuda_prores/consumer/prores_consumer.cu` is a working template for
+> the OGL half (`frame.texture()` → `cudaGraphicsGLRegisterImage` → kernel, with
+> `needs_cpu_frame_data() { return !gpu_direct_active_; }`) and
+> `cuda_vk_texture.h` for the VK half. Note that prores acquires its GL context
+> with a private `wglShareLists` context — do not copy that part; dispatch onto
+> the mixer's GL thread as Phase 5 ended up doing, for the reasons recorded in
+> `GPU_AFFINITY_PLAN.md`.
+
 The FFmpeg file-output consumer accepts GPU textures from the mixer, reading
 them back to CPU only when needed for software encoding. This avoids the
 mixer-level readback when the FFmpeg consumer is the only one attached.
 
 **Production risks:**
 - **Software encoder breakage:** Must NOT activate GPU-only mode for `libx264`/`libx265`.
+  (Verified for the format change above: `libx264` still negotiates `yuv444p` through
+  libswscale, unchanged.)
 - **User filter incompatibility:** If user passes custom filters, the filter graph may need
   CPU frames. Fallback logic handles this gracefully.
 
