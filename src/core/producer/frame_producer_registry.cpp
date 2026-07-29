@@ -86,7 +86,17 @@ class destroy_producer_proxy : public frame_producer
         if (!destroyer)
             return;
 
-        CASPAR_VERIFY(destroyer->size() < 8);
+        // Never throw from here. This runs inside a destructor, and the case it
+        // fires in -- a large simultaneous CLEAR/REMOVE filling the queue -- is
+        // exactly when throwing is least survivable (CASPAR_VERIFY during stack
+        // unwinding terminates the process). Report the backlog instead; the
+        // queue is unbounded by design (set_capacity above) so there is nothing
+        // to protect against here beyond visibility.
+        // See docs/CasparCG_HRC_Crash_Report_2026-06-17.md §9.1 fix 2.
+        const auto backlog = destroyer->size();
+        if (backlog >= 8) {
+            CASPAR_LOG(warning) << L"Producer destroyer backlog: " << backlog << L" producers awaiting destruction.";
+        }
 
         auto producer = new spl::shared_ptr<frame_producer>(std::move(producer_));
 
