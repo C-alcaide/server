@@ -30,6 +30,8 @@
 #include <GL/glew.h>
 
 #include <algorithm>
+#include <array>
+#include <cmath>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -49,8 +51,11 @@ namespace caspar { namespace decklink {
 namespace {
 
 // GL 4.3 compute shader: pack a subregion of an RGBA texture into V210
-// (10-bit 4:2:2). Ported from vk_readback_v210.comp (descriptor sets/push
-// constants -> binding=N + uniforms). One invocation packs one 6-pixel group.
+// (10-bit 4:2:2). Mirrors the CPU v210 packer (v210_strategies.cpp) exactly:
+// the legal-range RGB->YCbCr matrix is computed on the host and uploaded in
+// u_mat[9], the 8-bit input is scaled <<2 (as R8<<2), chroma is co-sited nearest
+// (even pixel, no averaging), and the luma/chroma offsets match. One invocation
+// packs one 6-pixel group.
 const char* const k_v210_cs = R"GLSL(
 #version 430
 layout(local_size_x = 64, local_size_y = 1) in;
@@ -61,24 +66,14 @@ uniform int u_src_y;
 uniform int u_dst_w;
 uniform int u_dst_h;
 uniform int u_groups_per_row;
-uniform int u_use_bt2020;
 uniform int u_is_16bit;
 uniform int u_first_line;   // first output row this pass writes (0, or 1 for field 2)
 uniform int u_line_step;    // 1 = progressive, 2 = interlaced field
 uniform int u_key_only;     // 1 = output the alpha (as a grey key)
+uniform int u_mat[9];       // legal-range fixed-point RGB->YCbCr (host-computed, matches CPU)
 
-void rgb_to_ycbcr_bt709(int R, int G, int B, out int Y, out int Cb, out int Cr) {
-    Y  = 64  + ((222951 * R + 750098 * G + 75663 * B) >> 20);
-    Cb = 512 + ((-100459 * R - 337802 * G + 438223 * B) >> 20);
-    Cr = 512 + ((438223 * R - 398337 * G - 39908 * B) >> 20);
-    Y = clamp(Y, 64, 940); Cb = clamp(Cb, 64, 960); Cr = clamp(Cr, 64, 960);
-}
-void rgb_to_ycbcr_bt2020(int R, int G, int B, out int Y, out int Cb, out int Cr) {
-    Y  = 64  + ((275375 * R + 710743 * G + 62594 * B) >> 20);
-    Cb = 512 + ((-146420 * R - 377856 * G + 524288 * B) >> 20);
-    Cr = 512 + ((524288 * R - 482393 * G - 41857 * B) >> 20);
-    Y = clamp(Y, 64, 940); Cb = clamp(Cb, 64, 960); Cr = clamp(Cr, 64, 960);
-}
+int clamp10(int v) { return clamp(v, 0, 1023); }
+
 void main() {
     int group_x = int(gl_GlobalInvocationID.x);
     int row     = u_first_line + int(gl_GlobalInvocationID.y) * u_line_step;
@@ -86,25 +81,29 @@ void main() {
     int px_base = group_x * 6;
     int R[6], G[6], B[6];
     for (int i = 0; i < 6; ++i) {
-        vec4 pixel = vec4(0.0);
+        vec4 p = vec4(0.0);
         if ((px_base + i) < u_dst_w)
-            pixel = texelFetch(src_tex, ivec2(u_src_x + px_base + i, u_src_y + row), 0);
+            p = texelFetch(src_tex, ivec2(u_src_x + px_base + i, u_src_y + row), 0);
         if (u_key_only != 0) {
-            int a = int(pixel.a * 1023.0 + 0.5); R[i] = a; G[i] = a; B[i] = a;
+            int a = (u_is_16bit != 0) ? int(p.a * 1023.0 + 0.5) : (int(p.a * 255.0 + 0.5) << 2);
+            R[i] = a; G[i] = a; B[i] = a;
         } else if (u_is_16bit != 0) {
-            R[i] = int(pixel.r * 1023.0 + 0.5); G[i] = int(pixel.g * 1023.0 + 0.5); B[i] = int(pixel.b * 1023.0 + 0.5);
+            R[i] = int(p.r * 1023.0 + 0.5); G[i] = int(p.g * 1023.0 + 0.5); B[i] = int(p.b * 1023.0 + 0.5);
         } else {
-            R[i] = int(pixel.b * 1023.0 + 0.5); G[i] = int(pixel.g * 1023.0 + 0.5); B[i] = int(pixel.r * 1023.0 + 0.5);
+            // 8-bit mixer texture is BGRA in memory: un-swizzle to real RGB, then 8->10 bit (<<2) like the CPU packer.
+            R[i] = int(p.b * 255.0 + 0.5) << 2; G[i] = int(p.g * 255.0 + 0.5) << 2; B[i] = int(p.r * 255.0 + 0.5) << 2;
         }
     }
-    int Y[6], Cb[6], Cr[6];
-    for (int i = 0; i < 6; ++i) {
-        if (u_use_bt2020 != 0) rgb_to_ycbcr_bt2020(R[i], G[i], B[i], Y[i], Cb[i], Cr[i]);
-        else                   rgb_to_ycbcr_bt709(R[i], G[i], B[i], Y[i], Cb[i], Cr[i]);
-    }
-    int Cb0 = (Cb[0] + Cb[1] + 1) >> 1; int Cr0 = (Cr[0] + Cr[1] + 1) >> 1;
-    int Cb1 = (Cb[2] + Cb[3] + 1) >> 1; int Cr1 = (Cr[2] + Cr[3] + 1) >> 1;
-    int Cb2 = (Cb[4] + Cb[5] + 1) >> 1; int Cr2 = (Cr[4] + Cr[5] + 1) >> 1;
+    int Y[6];
+    for (int i = 0; i < 6; ++i)
+        Y[i] = clamp10(((64 << 20) + u_mat[0]*R[i] + u_mat[1]*G[i] + u_mat[2]*B[i]) >> 20);
+    // Co-sited nearest chroma from the even pixel of each pair (matches CPU).
+    int Cb0 = clamp10(((1025 << 19) + u_mat[3]*R[0] + u_mat[4]*G[0] + u_mat[5]*B[0]) >> 20);
+    int Cr0 = clamp10(((1025 << 19) + u_mat[6]*R[0] + u_mat[7]*G[0] + u_mat[8]*B[0]) >> 20);
+    int Cb1 = clamp10(((1025 << 19) + u_mat[3]*R[2] + u_mat[4]*G[2] + u_mat[5]*B[2]) >> 20);
+    int Cr1 = clamp10(((1025 << 19) + u_mat[6]*R[2] + u_mat[7]*G[2] + u_mat[8]*B[2]) >> 20);
+    int Cb2 = clamp10(((1025 << 19) + u_mat[3]*R[4] + u_mat[4]*G[4] + u_mat[5]*B[4]) >> 20);
+    int Cr2 = clamp10(((1025 << 19) + u_mat[6]*R[4] + u_mat[7]*G[4] + u_mat[8]*B[4]) >> 20);
     uint w0 = uint(Cb0)  | (uint(Y[0]) << 10) | (uint(Cr0) << 20);
     uint w1 = uint(Y[1]) | (uint(Cb1)  << 10) | (uint(Y[2]) << 20);
     uint w2 = uint(Cr1)  | (uint(Y[3]) << 10) | (uint(Cb2) << 20);
@@ -173,39 +172,69 @@ GLuint compile_compute(const char* src)
     return prog;
 }
 
-// Independent C++ reference of the v210 shader math (BT.709/2020, 8-bit BGRA
-// source), used by the one-shot parity self-test. Packs one row of the source
-// (RGBA8 texels, mixer stores BGRA) into v210 exactly as k_v210_cs does.
-void cpu_ref_v210_row(const std::uint8_t* rgba, int dst_w, int groups_per_row, bool bt2020, std::uint32_t* out)
+// Legal-range RGB->YCbCr fixed-point matrix, computed exactly like the CPU
+// packer's create_int_matrix (v210_strategies.cpp): luma x 876*1024/1023, chroma
+// x 896*1024/1023, then x1024. Uploaded to the shader as u_mat so the GPU and CPU
+// use identical coefficients (single source of truth for colour parity).
+std::array<std::int32_t, 9> legal_range_v210_matrix(bool bt2020)
 {
-    auto to10 = [](std::uint8_t v) { return int(double(v) / 255.0 * 1023.0 + 0.5); };
+    static const double bt709[9] = {0.212639005871510,
+                                    0.715168678767756,
+                                    0.072192315360734,
+                                    -0.114592177555732,
+                                    -0.385407822444268,
+                                    0.5,
+                                    0.5,
+                                    -0.454155517037873,
+                                    -0.045844482962127};
+    static const double bt2020c[9] = {0.262700212011267,
+                                      0.677998071518871,
+                                      0.059301716469862,
+                                      -0.139630430187157,
+                                      -0.360369569812843,
+                                      0.5,
+                                      0.5,
+                                      -0.459784529009814,
+                                      -0.040215470990186};
+    const double* c                = bt2020 ? bt2020c : bt709;
+    const double  luma_range       = 876.0 * 1024.0 / 1023.0;
+    const double  chroma_range     = 896.0 * 1024.0 / 1023.0;
+    std::array<std::int32_t, 9> m{};
+    for (int i = 0; i < 9; ++i)
+        m[i] = static_cast<std::int32_t>(std::lround(c[i] * (i < 3 ? luma_range : chroma_range) * 1024.0));
+    return m;
+}
+
+// Independent C++ reference of the v210 shader math, used by the one-shot parity
+// self-test. It mirrors the CPU packer (v210_strategies.cpp) exactly: legal-range
+// matrix `m`, 8-bit input scaled <<2, co-sited nearest chroma (even pixel). The
+// source row is RGBA8 texels of the mixer's BGRA texture, i.e. p[0]=B,p[1]=G,p[2]=R.
+void cpu_ref_v210_row(const std::uint8_t*                rgba,
+                      int                                dst_w,
+                      int                                groups_per_row,
+                      const std::array<std::int32_t, 9>& m,
+                      std::uint32_t*                     out)
+{
+    auto clamp10 = [](int v) { return v < 0 ? 0 : (v > 1023 ? 1023 : v); };
     for (int g = 0; g < groups_per_row; ++g) {
-        int Y[6], Cb[6], Cr[6];
+        int R[6], G[6], B[6];
         for (int i = 0; i < 6; ++i) {
             int px = g * 6 + i;
-            int R = 0, G = 0, B = 0;
             if (px < dst_w) {
-                const std::uint8_t* p = rgba + px * 4; // p[0]=R,p[1]=G,p[2]=B texel channels
-                R = to10(p[2]);                        // shader: R = pixel.b
-                G = to10(p[1]);
-                B = to10(p[0]);                        // shader: B = pixel.r
-            }
-            if (bt2020) {
-                Y[i]  = 64 + ((275375 * R + 710743 * G + 62594 * B) >> 20);
-                Cb[i] = 512 + ((-146420 * R - 377856 * G + 524288 * B) >> 20);
-                Cr[i] = 512 + ((524288 * R - 482393 * G - 41857 * B) >> 20);
+                const std::uint8_t* p = rgba + px * 4; // mixer memory BGRA: p[0]=B, p[1]=G, p[2]=R
+                R[i] = int(p[2]) << 2;
+                G[i] = int(p[1]) << 2;
+                B[i] = int(p[0]) << 2;
             } else {
-                Y[i]  = 64 + ((222951 * R + 750098 * G + 75663 * B) >> 20);
-                Cb[i] = 512 + ((-100459 * R - 337802 * G + 438223 * B) >> 20);
-                Cr[i] = 512 + ((438223 * R - 398337 * G - 39908 * B) >> 20);
+                R[i] = G[i] = B[i] = 0;
             }
-            Y[i]  = std::min(940, std::max(64, Y[i]));
-            Cb[i] = std::min(960, std::max(64, Cb[i]));
-            Cr[i] = std::min(960, std::max(64, Cr[i]));
         }
-        int  Cb0 = (Cb[0] + Cb[1] + 1) >> 1, Cr0 = (Cr[0] + Cr[1] + 1) >> 1;
-        int  Cb1 = (Cb[2] + Cb[3] + 1) >> 1, Cr1 = (Cr[2] + Cr[3] + 1) >> 1;
-        int  Cb2 = (Cb[4] + Cb[5] + 1) >> 1, Cr2 = (Cr[4] + Cr[5] + 1) >> 1;
+        int Y[6];
+        for (int i = 0; i < 6; ++i)
+            Y[i] = clamp10(((64 << 20) + m[0] * R[i] + m[1] * G[i] + m[2] * B[i]) >> 20);
+        auto cb = [&](int i) { return clamp10(((1025 << 19) + m[3] * R[i] + m[4] * G[i] + m[5] * B[i]) >> 20); };
+        auto cr = [&](int i) { return clamp10(((1025 << 19) + m[6] * R[i] + m[7] * G[i] + m[8] * B[i]) >> 20); };
+        int Cb0 = cb(0), Cr0 = cr(0), Cb1 = cb(2), Cr1 = cr(2), Cb2 = cb(4), Cr2 = cr(4);
         std::uint32_t* w = out + g * 4;
         w[0] = std::uint32_t(Cb0) | (std::uint32_t(Y[0]) << 10) | (std::uint32_t(Cr0) << 20);
         w[1] = std::uint32_t(Y[1]) | (std::uint32_t(Cb1) << 10) | (std::uint32_t(Y[2]) << 20);
@@ -312,6 +341,7 @@ struct ogl_gl_strategy::impl
     std::size_t                             ssbo_sz_ = 0;
     bool                                    broken_  = false; // shader failed to build
     bool                                    parity_done_ = false; // one-shot self-test
+    std::array<std::int32_t, 9>             v210_mat_;    // legal-range matrix (matches CPU)
 
     impl(bool is_hdr, bool use_bt2020, spl::shared_ptr<format_strategy> fallback, bool needs_v210, bool use_dvp)
         : is_hdr_(is_hdr)
@@ -319,6 +349,7 @@ struct ogl_gl_strategy::impl
         , needs_v210_(needs_v210)
         , use_dvp_(use_dvp)
         , fallback_(std::move(fallback))
+        , v210_mat_(legal_range_v210_matrix(use_bt2020))
     {
     }
 
@@ -571,8 +602,8 @@ struct ogl_gl_strategy::impl
         const int groups_per_row = needs_v210_ ? row_bytes(dst_w) / 16 : 0;
         if (needs_v210_) {
             glUniform1i(glGetUniformLocation(prog_, "u_groups_per_row"), groups_per_row);
-            glUniform1i(glGetUniformLocation(prog_, "u_use_bt2020"), use_bt2020_ ? 1 : 0);
             glUniform1i(glGetUniformLocation(prog_, "u_is_16bit"), is_16bit ? 1 : 0);
+            glUniform1iv(glGetUniformLocation(prog_, "u_mat"), 9, v210_mat_.data());
         }
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, ssbo_);
 
@@ -627,7 +658,7 @@ struct ogl_gl_strategy::impl
                     glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, full.data());
                     const std::uint8_t*        src_row = full.data() + (static_cast<std::size_t>(src_y) * tw + src_x) * 4;
                     std::vector<std::uint32_t> ref(static_cast<std::size_t>(groups) * 4);
-                    cpu_ref_v210_row(src_row, dst_w, groups, use_bt2020_, ref.data());
+                    cpu_ref_v210_row(src_row, dst_w, groups, v210_mat_, ref.data());
                     // Compare only fully in-bounds groups: past (tw - src_x) the GPU
                     // reads out-of-texture texels (0) while the CPU ref runs off the
                     // row, so cropped ports would otherwise false-mismatch at the edge.
