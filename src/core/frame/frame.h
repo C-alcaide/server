@@ -102,6 +102,29 @@ class mutable_frame final
     std::unique_ptr<impl> impl_;
 };
 
+/// Whether a frame can give you host (CPU) pixels, and at what cost.
+///
+/// Before this existed, all three cases below looked identical at the call site:
+/// image_data() returned an empty array both when readback had been deliberately
+/// skipped (no consumer asked for CPU pixels) and when it simply had not
+/// happened yet. Code that treated "empty" as "black" therefore silently
+/// produced black frames, and code that treated it as "has pixels" read a null
+/// pointer. Ask host_image_state() when you need to know.
+enum class host_image_availability
+{
+    /// No host pixels and none obtainable: a GPU-only frame whose readback was
+    /// skipped. image_data() returns an empty array. Use texture() instead, or
+    /// declare needs_cpu_frame_data() so the mixer produces pixels for you.
+    unavailable,
+
+    /// A readback is in flight. image_data() will block until it lands and then
+    /// yield real pixels. Never call this on the channel thread.
+    deferred,
+
+    /// Host pixels are present now; image_data() is a cheap accessor.
+    available,
+};
+
 class const_frame final
 {
   public:
@@ -129,6 +152,16 @@ class const_frame final
     const struct pixel_format_desc& pixel_format_desc() const;
 
     const array<const std::uint8_t>& image_data(std::size_t index) const;
+
+    /// Can this frame give you host pixels, and at what cost? Resolving a
+    /// readback that has already completed is free, so this is cheap to call —
+    /// but it does not block on one that is still in flight (that reports
+    /// `deferred`).
+    host_image_availability host_image_state() const;
+
+    /// Shorthand for host_image_state() != unavailable, i.e. "image_data() will
+    /// eventually yield real pixels".
+    bool has_host_image() const;
 
     const array<const std::int32_t>& audio_data() const;
 

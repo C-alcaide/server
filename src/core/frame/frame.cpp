@@ -26,6 +26,7 @@
 #include <common/array.h>
 #include <common/except.h>
 
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <future>
@@ -162,6 +163,31 @@ struct const_frame::impl
         return image_data_.at(index);
     }
 
+    host_image_availability host_image_state() const
+    {
+        if (lazy_image_.valid()) {
+            // Not landed yet: honest answer is "deferred". Do not block here —
+            // callers use this precisely to avoid blocking the channel thread.
+            if (lazy_image_.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
+                return host_image_availability::deferred;
+
+            // Ready: resolving is free, and it is the only way to distinguish a
+            // real readback from one the mixer deliberately skipped (which is
+            // published as a ready future holding an empty array).
+            std::call_once(lazy_resolved_, [this] { image_data_[0] = lazy_image_.get(); });
+        }
+
+        if (image_data_.empty())
+            return host_image_availability::unavailable;
+
+        for (auto& plane : image_data_) {
+            if (plane.size() == 0 || plane.data() == nullptr)
+                return host_image_availability::unavailable;
+        }
+
+        return host_image_availability::available;
+    }
+
     std::shared_ptr<core::texture> texture() { return texture_; }
 
     std::size_t width() const { return desc_.planes.at(0).width; }
@@ -208,6 +234,11 @@ bool                     const_frame::operator<(const const_frame& other) const 
 bool                     const_frame::operator>(const const_frame& other) const { return impl_ > other.impl_; }
 const pixel_format_desc& const_frame::pixel_format_desc() const { return impl_->desc_; }
 const array<const std::uint8_t>& const_frame::image_data(std::size_t index) const { return impl_->image_data(index); }
+host_image_availability          const_frame::host_image_state() const
+{
+    return impl_ ? impl_->host_image_state() : host_image_availability::unavailable;
+}
+bool const_frame::has_host_image() const { return host_image_state() != host_image_availability::unavailable; }
 const array<const std::int32_t>& const_frame::audio_data() const { return impl_->audio_data_; }
 std::shared_ptr<core::texture>   const_frame::texture() const { return impl_->texture(); }
 std::size_t                      const_frame::width() const { return impl_->width(); }
@@ -220,9 +251,23 @@ const_frame                      const_frame::with_tag(const void* new_tag) cons
         return const_frame();
     }
 
-    std::vector<array<const std::uint8_t>> image_data_copy = impl_->image_data_;
-    auto                                   new_frame =
-        const_frame(new_tag, std::move(image_data_copy), impl_->audio_data_, impl_->desc_, impl_->texture_);
+    // Preserve the pending readback. This used to copy image_data_ and build a
+    // non-lazy frame, which for an unresolved frame copies a vector of *empty*
+    // arrays and throws the future away — so the retagged frame reported no host
+    // pixels for ever. Every route goes through here (route_producer retags to
+    // keep stream identities distinct), so a routed mixer output silently lost
+    // its ability to produce CPU pixels, and any downstream consumer needing
+    // them got nothing.
+    const_frame new_frame;
+    if (impl_->lazy_image_.valid()) {
+        new_frame = const_frame(new_tag, impl_->lazy_image_, impl_->audio_data_, impl_->desc_, impl_->texture_);
+        // Carry over an already-resolved result so the copy does not wait again.
+        new_frame.impl_->image_data_ = impl_->image_data_;
+    } else {
+        std::vector<array<const std::uint8_t>> image_data_copy = impl_->image_data_;
+        new_frame =
+            const_frame(new_tag, std::move(image_data_copy), impl_->audio_data_, impl_->desc_, impl_->texture_);
+    }
 
     new_frame.impl_->geometry_ = impl_->geometry_;
     if (impl_->opaque_.has_value()) {
