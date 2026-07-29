@@ -39,6 +39,7 @@
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/range/adaptors.hpp>
 
+#include <algorithm>
 #include <functional>
 #include <future>
 #include <map>
@@ -75,6 +76,13 @@ struct stage::impl : public std::enable_shared_from_this<impl>
     // forever.
     static constexpr int max_consecutive_layer_failures = 25;
     std::map<int, int>   layer_failures_;
+
+    // ── OSC projection publication state (stage executor only) ──
+    // Last value published per layer, and the set of layers that have ever had
+    // a non-default projection. Used to publish only on change (plus a periodic
+    // refresh) instead of rebuilding ~33 monitor::state keys per layer per tick.
+    std::map<int, core::projection> osc_projection_last_;
+    std::set<int>                  osc_projection_ever_;
 
   private:
     /// Records a failure for `index` and logs it (first failure, then every
@@ -347,6 +355,12 @@ struct stage::impl : public std::enable_shared_from_this<impl>
                     routesCb(-1, chan_lf);
                 }
 
+                // Periodic full republication so an OSC subscriber that connects
+                // mid-show converges even on values that are not changing.
+                const auto refresh_ticks =
+                    static_cast<uint64_t>(std::max(1, static_cast<int>(result.format_desc.hz)));
+                const bool osc_refresh_due = (frame_number % refresh_ticks) == 0;
+
                 monitor::state state;
                 for (auto& p : layers_) {
                     state["layer"][p.first] = p.second.state();
@@ -354,10 +368,38 @@ struct stage::impl : public std::enable_shared_from_this<impl>
                     // Publish the full projection/curve state per layer so OSC
                     // subscribers (and virtual-production tooling) can mirror the
                     // server's projection model in real time.
+                    //
+                    // This block used to run unconditionally for every layer every
+                    // tick: ~33 keys, each one a lexical_cast plus a string
+                    // concatenation plus an insert into a flat_map (a sorted
+                    // vector, so O(n) per insert). On a 16-layer channel that is
+                    // hundreds of allocations and a quadratic insert pattern per
+                    // frame, almost always to republish values that did not
+                    // change. Now it is published when it changes, on the periodic
+                    // refresh, and never at all for layers that have never had a
+                    // non-default projection. The OSC client sends whole snapshots
+                    // with no diffing, and OSC receivers hold the last value they
+                    // were sent, so omitting unchanged keys is transparent to them.
                     auto tw = tweens_.find(p.first);
                     if (tw != tweens_.end()) {
                         const auto pr = tw->second.fetch().image_transform.projection;
-                        auto       ps = state["layer"][p.first]["projection"];
+
+                        static const core::projection projection_defaults{};
+
+                        if (osc_projection_ever_.find(p.first) == osc_projection_ever_.end()) {
+                            if (pr == projection_defaults)
+                                continue; // never configured — nothing a subscriber can miss
+                            osc_projection_ever_.insert(p.first);
+                        }
+
+                        auto last    = osc_projection_last_.find(p.first);
+                        bool changed = last == osc_projection_last_.end() || last->second != pr;
+                        if (!changed && !osc_refresh_due)
+                            continue;
+
+                        osc_projection_last_[p.first] = pr;
+
+                        auto ps = state["layer"][p.first]["projection"];
                         ps["enable"]       = pr.enable;
                         ps["yaw"]          = pr.yaw;
                         ps["pitch"]        = pr.pitch;
