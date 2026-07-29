@@ -56,8 +56,27 @@ struct accelerator::impl
         backend_ = backend;
     }
 
-    std::unique_ptr<core::image_mixer> create_image_mixer(int channel_id, common::bit_depth depth, int gpu_index)
+    std::unique_ptr<core::image_mixer>
+    create_image_mixer(int channel_id, common::bit_depth depth, int gpu_index, bool gpu_index_explicit)
     {
+        // GPU affinity is only implemented for the Vulkan backend
+        // (GPU_AFFINITY_PLAN.md phase 4 is unimplemented). Silently falling
+        // back to GPU 0 makes an OGL channel run on the wrong GPU and pay a
+        // cross-GPU copy for every frame it outputs — the exact cost affinity
+        // exists to remove — with nothing but a warning to show for it. Refuse
+        // the configuration instead.
+        if (backend_ != accelerator_backend::vulkan && gpu_index != 0) {
+            CASPAR_THROW_EXCEPTION(
+                user_error() << msg_info(
+                    L"Channel " + std::to_wstring(channel_id) + L" requests GPU " + std::to_wstring(gpu_index) +
+                    L", but the OpenGL accelerator does not implement GPU affinity and would silently run the mixer "
+                    L"on GPU 0 (adding a cross-GPU copy per frame). " +
+                    (gpu_index_explicit
+                         ? L"Either remove <gpu> from the channel or set <accelerator>vulkan</accelerator>."
+                         : L"The GPU was inherited from this channel's <vulkan-output> consumer. Either set "
+                           L"<gpu>0</gpu> explicitly on the channel or set <accelerator>vulkan</accelerator>.")));
+        }
+
 #ifdef ENABLE_VULKAN
         if (backend_ == accelerator_backend::vulkan) {
             auto mixer = std::make_unique<vulkan::image_mixer>(
@@ -95,8 +114,10 @@ struct accelerator::impl
         }
 
 #ifndef ENABLE_VULKAN
-        // OGL backend: GPU affinity is not yet implemented — all channels share a
-        // single default OGL device regardless of gpu_index.
+        // OGL backend: GPU affinity is not implemented — all channels share a
+        // single default OGL device regardless of gpu_index. Channel mixers are
+        // rejected outright in create_image_mixer(); this remains as a guard for
+        // any other caller.
         if (gpu_index != 0) {
             CASPAR_LOG(warning) << L"[accelerator] OGL backend ignores gpu_index " << gpu_index
                                 << L" (GPU affinity not implemented); using default GPU.";
@@ -170,9 +191,9 @@ accelerator::~accelerator() {}
 void accelerator::set_backend(accelerator_backend backend) { impl_->set_backend(backend); }
 
 std::unique_ptr<core::image_mixer>
-accelerator::create_image_mixer(const int channel_id, common::bit_depth depth, int gpu_index)
+accelerator::create_image_mixer(const int channel_id, common::bit_depth depth, int gpu_index, bool gpu_index_explicit)
 {
-    return impl_->create_image_mixer(channel_id, depth, gpu_index);
+    return impl_->create_image_mixer(channel_id, depth, gpu_index, gpu_index_explicit);
 }
 
 std::shared_ptr<accelerator_device> accelerator::get_device() const

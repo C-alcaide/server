@@ -148,11 +148,25 @@ constructor and calls `select_physical_device(gpu_index)`.
 
 ### Phase 4: OGL Mixer Device — GPU Affinity (Windows)
 
-**Status**: Deferred for now.
+**Status**: Not implemented. **No longer silently ignored.**
 
-Skip OGL GPU affinity work until the Vulkan path is complete and validated.
-The mixer affinity effort focuses on Vulkan-backed channels first, because that
-is the path that directly affects vulkan-output latency.
+OGL affinity itself is still unimplemented. What changed is the failure mode: the
+accelerator previously logged a warning and forced GPU 0, so an OGL channel
+configured for GPU 1 quietly ran on the wrong GPU and paid a cross-GPU copy for
+every frame it output — precisely the cost this document exists to remove, with
+only a log line to show for it.
+
+`accelerator::create_image_mixer()` now throws `user_error` when a non-zero
+`gpu_index` reaches a non-Vulkan backend, naming whether the index came from an
+explicit channel-level `<gpu>` or was inherited from a `<vulkan-output>`
+consumer, and telling the operator how to resolve it. A misconfiguration cannot
+ship silently any more.
+
+Implementing real OGL affinity (per-adapter contexts, e.g. `WGL_NV_gpu_affinity`)
+remains open. It is gated on auditing every `wglShareLists` caller first — Spout,
+cuda_prores and `ogl_gl_strategy`'s process-level `dvp_gl_ctx` all assume a single
+shared mixer context, and list sharing across affinity contexts on different GPUs
+is not valid.
 
 ---
 

@@ -367,7 +367,8 @@ struct server::impl
             // channel's first <vulkan-output> consumer's <gpu>, else default 0.
             // Keeping the mixer on the same GPU as the vulkan-output consumer
             // avoids cross-GPU PCIe copies on the hot output path.
-            int gpu_index = xml_channel.second.get(L"gpu", -1);
+            int  gpu_index          = xml_channel.second.get(L"gpu", -1);
+            bool gpu_index_explicit = gpu_index >= 0;
             if (gpu_index < 0) {
                 gpu_index = 0;
                 if (auto consumers = xml_channel.second.get_child_optional(L"consumers")) {
@@ -385,7 +386,8 @@ struct server::impl
                 spl::make_shared<video_channel>(channel_id,
                                                 format_desc,
                                                 default_color_space,
-                                                accelerator_.create_image_mixer(channel_id, depth, gpu_index),
+                                                accelerator_.create_image_mixer(
+                                                    channel_id, depth, gpu_index, gpu_index_explicit),
                                                 [channel_id, weak_client](core::monitor::state channel_state) {
                                                     monitor::state state;
                                                     state[""]["channel"][channel_id] = channel_state;

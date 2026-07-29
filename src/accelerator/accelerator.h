@@ -48,8 +48,16 @@ class accelerator
 
     void set_backend(accelerator_backend backend);
 
+    /// Create a channel's image mixer on `gpu_index`.
+    ///
+    /// The OpenGL backend does not implement GPU affinity, so a non-zero
+    /// `gpu_index` cannot be honoured there. Rather than silently running on
+    /// GPU 0 — which quietly costs a PCIe copy per frame on the output path —
+    /// this throws `user_error`. `gpu_index_explicit` only affects the wording
+    /// of that error: true when the user wrote `<gpu>` on the channel, false
+    /// when it was inherited from a `<vulkan-output>` consumer.
     std::unique_ptr<caspar::core::image_mixer>
-    create_image_mixer(int channel_id, common::bit_depth depth, int gpu_index = 0);
+    create_image_mixer(int channel_id, common::bit_depth depth, int gpu_index = 0, bool gpu_index_explicit = false);
 
     std::shared_ptr<accelerator_device> get_device() const;
 
