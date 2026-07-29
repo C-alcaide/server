@@ -38,23 +38,42 @@ cmd /c ""C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Buil
 > | Symptom | Cause |
 > |---|---|
 > | `include\variant(292): error C2988` / `C3855` while compiling `accelerator/vulkan/util/device.cpp` | 14.50 `cl.exe` parsing the 14.51 STL |
-> | `LINK : fatal error LNK1104: cannot open 'atls.lib'` linking `casparcg.exe` | the 14.50 toolset ships no `atlmfc`; `decklink` and `flash` use ATL |
+> | `fatal error C1083: cannot open include file 'atlbase.h'` in `decklink`/`flash` | the 14.50 toolset ships no `atlmfc` at all |
+> | `LINK : fatal error LNK1104: cannot open 'atls.lib'` linking `casparcg.exe` | same — no ATL import libs either |
 >
-> Until CMake is reconfigured, pin the toolset to 14.50 and add 14.51's ATL
-> import libs for the link step only:
+> Until CMake is reconfigured: pin compiler **and** STL to 14.50, then add
+> 14.51's ATL headers and libs on top. This combination builds the whole tree.
 >
 > ```bat
+> set VS_ATL=C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Tools\MSVC\14.51.36231\atlmfc
 > call "C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxiliary\Build\vcvars64.bat" -vcvars_ver=14.50
-> set LIB=%LIB%;C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Tools\MSVC\14.51.36231\atlmfc\lib\x64
+> set INCLUDE=%INCLUDE%;%VS_ATL%\include
+> set LIB=%LIB%;%VS_ATL%\lib\x64
 > cmake --build d:\Github\CasparVP\build --target <targets>
 > ```
 >
-> **Durable fix:** reconfigure CMake onto 14.51, which has both the STL and ATL
-> in one place. That forces a full rebuild, so it is a deliberate action rather
-> than something to do mid-task.
+> **Durable fix:** reconfigure CMake onto 14.51, which has the STL and ATL in one
+> place. That forces a full rebuild, so it is a deliberate action rather than
+> something to do mid-task.
 >
 > Note: `run_build.py`, referenced below, is **not present** in the tree. Use the
 > `cmd`/`.bat` route.
+
+> ### ⚠ Precompiled headers do not track the headers they include
+>
+> Each target's PCH wraps its `StdAfx.h`, which pulls in `core/frame/*.h`,
+> `common/*.h` and more — but ninja does **not** treat those as inputs to the PCH.
+> Editing one of them leaves every module's PCH stale, and because the PCH is
+> authoritative (`/Yu` plus include guards baked in), the edit is silently
+> invisible. The usual symptom is nonsense like "no operator found" for an
+> operator you just added, or worse, no symptom at all.
+>
+> After editing any header that appears in a `StdAfx.h`, force the PCHs to
+> rebuild. Deleting the `.pch` alone is not enough — ninja only tracks the `.obj`:
+>
+> ```powershell
+> Get-ChildItem d:\Github\CasparVP\build -Recurse -Include cmake_pch.cxx.pch,cmake_pch.cxx.obj | Remove-Item -Force
+> ```
 
 ### Why this is the only correct method
 
