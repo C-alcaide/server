@@ -57,6 +57,7 @@ extern "C" {
 #include <libavutil/channel_layout.h>
 #include <libavutil/error.h>
 #include <libavutil/opt.h>
+#include <libavutil/pixdesc.h>
 #include <libavutil/pixfmt.h>
 #include <libavutil/samplefmt.h>
 #include <libavutil/hwcontext.h>
@@ -121,6 +122,13 @@ class d3d11_gl_bridge
     ID3D11VertexShader*       plane_vs_       = nullptr;
     ID3D11PixelShader*        plane_ps_       = nullptr;
     ID3D11SamplerState*       plane_sampler_  = nullptr;
+    // Per-surface-format view/target choice. NV12 planes are 8-bit (R8 / R8G8);
+    // P010 and P016 are 16-bit (R16 / R16G16) with the significant bits
+    // high-aligned, which the mixer handles by declaring the planes bit16.
+    DXGI_FORMAT               expected_format_ = DXGI_FORMAT_NV12;
+    DXGI_FORMAT               y_view_format_   = DXGI_FORMAT_R8_UNORM;
+    DXGI_FORMAT               uv_view_format_  = DXGI_FORMAT_R8G8_UNORM;
+    common::bit_depth         plane_depth_     = common::bit_depth::bit8;
     HANDLE                    y_interop_obj_  = nullptr;
     HANDLE                    uv_interop_obj_ = nullptr;
     GLuint                    y_gl_tex_       = 0;
@@ -319,14 +327,36 @@ class d3d11_gl_bridge
     /// Builds the plane-extraction resources for a given frame size. Returns
     /// false if anything is unavailable, in which case the caller falls back to
     /// the CPU transfer path -- this is opt-in and must never take a channel down.
-    bool setup_planes(int width, int height)
+    bool setup_planes(int width, int height, DXGI_FORMAT src_format)
     {
-        if (plane_path_ok_ && width == width_ && height == height_)
+        if (plane_path_ok_ && width == width_ && height == height_ && src_format == expected_format_)
             return true;
 
         teardown_planes();
         width_  = width;
         height_ = height;
+
+        // Only the semi-planar YCbCr layouts hardware decoders produce are
+        // supported; anything else must take the CPU path rather than be
+        // reinterpreted.
+        expected_format_ = src_format;
+        switch (src_format) {
+            case DXGI_FORMAT_NV12:
+                y_view_format_  = DXGI_FORMAT_R8_UNORM;
+                uv_view_format_ = DXGI_FORMAT_R8G8_UNORM;
+                plane_depth_    = common::bit_depth::bit8;
+                break;
+            case DXGI_FORMAT_P010:
+            case DXGI_FORMAT_P016:
+                y_view_format_  = DXGI_FORMAT_R16_UNORM;
+                uv_view_format_ = DXGI_FORMAT_R16G16_UNORM;
+                plane_depth_    = common::bit_depth::bit16;
+                break;
+            default:
+                CASPAR_LOG(info) << L"[av_producer] GPU-direct: unsupported decoded surface format "
+                                 << static_cast<int>(src_format) << L"; using the CPU path";
+                return false;
+        }
 
         // Full-screen triangle from SV_VertexID; no vertex or index buffers.
         static const char* kVS =
@@ -408,8 +438,8 @@ class d3d11_gl_bridge
             return SUCCEEDED(d3d11_device_->CreateRenderTargetView(*tex, nullptr, rtv));
         };
 
-        if (!make_plane(width, height, DXGI_FORMAT_R8_UNORM, &y_texture_, &y_rtv_) ||
-            !make_plane(width / 2, height / 2, DXGI_FORMAT_R8G8_UNORM, &uv_texture_, &uv_rtv_))
+        if (!make_plane(width, height, y_view_format_, &y_texture_, &y_rtv_) ||
+            !make_plane(width / 2, height / 2, uv_view_format_, &uv_texture_, &uv_rtv_))
             return false;
 
         // GL object creation and interop registration belong on the mixer's GL
@@ -439,14 +469,29 @@ class d3d11_gl_bridge
     std::pair<std::shared_ptr<void>, std::shared_ptr<void>>
     convert_planes(ID3D11Texture2D* nv12, int array_idx, accelerator::ogl::device& ogl_dev)
     {
-        if (!plane_path_ok_ || !nv12)
+        if (!plane_path_ok_ || !nv12) {
+            CASPAR_LOG(warning) << L"[av_producer] extract: planes not set up";
             return {};
+        }
+
+        // What did the decoder actually give us? The plane views must match the
+        // surface's real format, and an 8-bit view over a 10-bit surface is
+        // rejected outright.
+        D3D11_TEXTURE2D_DESC src_desc = {};
+        nv12->GetDesc(&src_desc);
+        if (src_desc.Format != expected_format_) {
+            CASPAR_LOG(warning) << L"[av_producer] extract: surface format " << static_cast<int>(src_desc.Format)
+                                << L" is not the expected " << static_cast<int>(expected_format_);
+            return {};
+        }
 
         // Plane SRVs require the D3D11.3 view descriptors (PlaneSlice). The
         // decoded surface is an array; index the slice this frame lives in.
         ID3D11Device3* dev3 = nullptr;
-        if (FAILED(d3d11_device_->QueryInterface(__uuidof(ID3D11Device3), reinterpret_cast<void**>(&dev3))) || !dev3)
+        if (FAILED(d3d11_device_->QueryInterface(__uuidof(ID3D11Device3), reinterpret_cast<void**>(&dev3))) || !dev3) {
+            CASPAR_LOG(warning) << L"[av_producer] extract: ID3D11Device3 unavailable (no plane views)";
             return {};
+        }
 
         auto make_srv = [&](DXGI_FORMAT fmt, UINT plane, ID3D11ShaderResourceView1** srv) -> bool {
             D3D11_SHADER_RESOURCE_VIEW_DESC1 sd = {};
@@ -462,7 +507,9 @@ class d3d11_gl_bridge
 
         ID3D11ShaderResourceView1* y_srv  = nullptr;
         ID3D11ShaderResourceView1* uv_srv = nullptr;
-        if (!make_srv(DXGI_FORMAT_R8_UNORM, 0, &y_srv) || !make_srv(DXGI_FORMAT_R8G8_UNORM, 1, &uv_srv)) {
+        if (!make_srv(y_view_format_, 0, &y_srv) || !make_srv(uv_view_format_, 1, &uv_srv)) {
+            CASPAR_LOG(warning) << L"[av_producer] extract: could not create NV12 plane views (surface not bound "
+                                   L"for shader access?)";
             if (y_srv)
                 y_srv->Release();
             if (uv_srv)
@@ -513,11 +560,13 @@ class d3d11_gl_bridge
 
         ogl_dev.dispatch_sync([&] {
             HANDLE objs[2] = {y_interop_obj_, uv_interop_obj_};
-            if (!wglDXLockObjectsNV_(interop_device_, 2, objs))
+            if (!wglDXLockObjectsNV_(interop_device_, 2, objs)) {
+                CASPAR_LOG(warning) << L"[av_producer] extract: wglDXLockObjectsNV failed";
                 return;
+            }
 
-            y_out  = ogl_dev.create_texture(width_, height_, 1, common::bit_depth::bit8, false);
-            uv_out = ogl_dev.create_texture(width_ / 2, height_ / 2, 2, common::bit_depth::bit8, false);
+            y_out  = ogl_dev.create_texture(width_, height_, 1, plane_depth_, false);
+            uv_out = ogl_dev.create_texture(width_ / 2, height_ / 2, 2, plane_depth_, false);
             if (y_out && uv_out) {
                 glCopyImageSubData(y_gl_tex_, GL_TEXTURE_2D, 0, 0, 0, 0, y_out->id(), GL_TEXTURE_2D, 0, 0, 0, 0,
                                    width_, height_, 1);
@@ -563,6 +612,9 @@ class d3d11_gl_bridge
     }
 
     bool is_active() const { return active_; }
+
+    /// Depth of the extracted planes: bit8 for NV12, bit16 for P010/P016.
+    common::bit_depth plane_depth() const { return plane_depth_; }
 
     void cleanup()
     {
@@ -651,6 +703,16 @@ const AVCodec* get_decoder(AVCodecID codec_id)
 // TODO (fix) Handle ts discontinuities.
 // TODO (feat) Forward options.
 
+namespace {
+/// Whether the GPU-direct decode path is enabled in configuration. Read once.
+bool gpu_direct_decode_requested()
+{
+    static const bool value =
+        env::properties().get(L"configuration.ffmpeg.producer.gpu-direct-decode", false);
+    return value;
+}
+} // namespace
+
 class Decoder
 {
     static enum AVPixelFormat get_hw_format(AVCodecContext* ctx, const enum AVPixelFormat* pix_fmts)
@@ -661,16 +723,17 @@ class Decoder
             if (*p != AV_PIX_FMT_D3D11)
                 continue;
 
-            // Allocate the hardware frame pool ourselves so the decoded surfaces
-            // can also be read by a shader. FFmpeg's default pool binds them for
-            // decode only (D3D11_BIND_DECODER), which is enough to copy out of
-            // but not to create a shader resource view over -- and reading the
-            // NV12 planes through a view is what lets the *mixer* do the colour
-            // conversion instead of the D3D11 VideoProcessor.
-            //
-            // Failing here is not fatal: the GPU-direct path then declines and
-            // the ordinary transfer-to-CPU path runs.
-            if (!ctx->hw_frames_ctx && ctx->hw_device_ctx) {
+            // Allocate the frame pool here, where ffmpeg is ready for it, adding
+            // shader-resource binding so the GPU-direct path can create plane
+            // views over the decoded surfaces. FFmpeg's default pool binds them
+            // for decode only. Failing is not fatal -- GPU-direct then declines
+            // and the CPU transfer path runs.
+            // Only when GPU-direct was actually requested. Adding
+            // SHADER_RESOURCE unconditionally changes the pool for everyone, and
+            // for P010 surfaces it made av_hwframe_transfer_data fail outright
+            // ("Error transferring the data to system memory: Invalid argument")
+            // -- i.e. it broke the ordinary CPU path for 10-bit HEVC.
+            if (gpu_direct_decode_requested() && !ctx->hw_frames_ctx && ctx->hw_device_ctx) {
                 AVBufferRef* frames_ref = nullptr;
                 if (avcodec_get_hw_frames_parameters(ctx, ctx->hw_device_ctx, AV_PIX_FMT_D3D11, &frames_ref) >= 0 &&
                     frames_ref) {
@@ -678,15 +741,50 @@ class Decoder
                     auto* d3d11  = static_cast<AVD3D11VAFramesContext*>(frames->hwctx);
                     d3d11->BindFlags |= D3D11_BIND_SHADER_RESOURCE;
 
+                    // The pool is sized for the decoder alone, but the GPU-direct
+                    // path also holds surfaces while they queue for extraction.
+                    // Without headroom the decoder hits "Static surface pool size
+                    // exceeded" and stops producing frames -- a black channel.
+                    if (frames->initial_pool_size > 0)
+                        frames->initial_pool_size += 16;
+
                     if (av_hwframe_ctx_init(frames_ref) >= 0) {
                         ctx->hw_frames_ctx = frames_ref;
                     } else {
+                        CASPAR_LOG(info)
+                            << L"[av_producer] could not allocate a shader-readable decode pool; GPU-direct "
+                               L"will decline";
                         av_buffer_unref(&frames_ref);
                     }
                 }
             }
 
             return *p;
+        }
+
+        // D3D11VA cannot decode this stream -- H.264 High 10 and, on many GPUs,
+        // VP9 are common cases. Returning AV_PIX_FMT_NONE here tells the decoder
+        // that *no* offered format is acceptable, so it fails outright
+        // ("decode_slice_header error") and the channel goes black with nothing
+        // but an ffmpeg-level error to explain it.
+        //
+        // Accept the decoder's preferred software format instead: the stream then
+        // decodes on the CPU, which is exactly what would have happened without
+        // hardware acceleration configured.
+        // Pick the first *software* format. The list can also contain other
+        // hardware formats (vulkan, vaapi) which would be rejected with
+        // "does not match the type of the provided device context", leaving us
+        // no better off than returning NONE.
+        for (p = pix_fmts; *p != AV_PIX_FMT_NONE; p++) {
+            const auto* fmt_desc = av_pix_fmt_desc_get(*p);
+            if (fmt_desc && !(fmt_desc->flags & AV_PIX_FMT_FLAG_HWACCEL)) {
+                static std::once_flag once;
+                std::call_once(once, [&] {
+                    CASPAR_LOG(info) << L"[ffmpeg] hardware decoding unavailable for this stream; falling back to "
+                                        L"software decoding.";
+                });
+                return *p;
+            }
         }
 
         av_log(ctx, AV_LOG_ERROR, "Failed to get HW surface format.\n");
@@ -737,6 +835,10 @@ class Decoder
 #ifdef _WIN32
     // When true, D3D11 frames are kept as-is (no CPU transfer) and placed in hw_output.
     std::atomic<bool>                         gpu_direct_mode_{false};
+    // Set when the decoder emits an ordinary frame while it was asked to produce
+    // hardware surfaces -- i.e. hardware decoding declined after the fact. The
+    // producer watches this so it stops waiting for surfaces that never come.
+    std::atomic<bool>                         saw_software_frame_{false};
     std::queue<std::shared_ptr<AVFrame>>      hw_output;
     mutable boost::mutex                      hw_output_mutex;
     boost::condition_variable                 hw_output_cond;
@@ -791,11 +893,43 @@ class Decoder
 
         FF(avcodec_open2(ctx.get(), codec, nullptr));
 
-        // After avcodec_open2, the codec resolves ctx->sw_pix_fmt to the real
-        // CPU format for HW-accelerated codecs (NV12 for 8-bit, P010 for 10-bit).
-        // Use that for both the filter buffersrc and frame transfer target.
-        if (ctx->hw_device_ctx && ctx->sw_pix_fmt != AV_PIX_FMT_NONE) {
-            sw_pix_fmt = ctx->sw_pix_fmt;
+        // Resolve the format hardware-decoded frames will actually have, BEFORE
+        // any decoding starts.
+        //
+        // ctx->sw_pix_fmt is only filled in during the decoder's first
+        // get_format callback, i.e. once frames are already flowing -- so
+        // reading it here always yielded AV_PIX_FMT_NONE and sw_pix_fmt stayed
+        // unset. The filter graph is built from this value, so it was configured
+        // for the *bitstream's* format (yuv420p) while the decoder went on to
+        // emit NV12. For a passthrough graph ffmpeg only warns ("Changing video
+        // frame properties on the fly"), but as soon as a real filter is in the
+        // graph -- yadif, which auto-deinterlace inserts for every interlaced
+        // clip -- it receives data in a layout it was configured against and the
+        // process dies with an access violation. Interlaced H.264 with the
+        // default settings crashed the server outright.
+        //
+        // avcodec_get_hw_frames_parameters() answers the same question up front,
+        // so ask it now. The frames context it produces is also the one the
+        // decoder will use, which lets us add SHADER_RESOURCE binding for the
+        // GPU-direct path in the same place.
+        if (ctx->hw_device_ctx) {
+            // Only *read* the format here; do not take ownership of the pool.
+            // Allocating it this early yielded a context that av_hwframe_ctx_init
+            // would not accept with the extra bind flag, and ffmpeg then silently
+            // built its own default pool -- leaving the surfaces unbindable for
+            // shader access. The pool with SHADER_RESOURCE is created in
+            // get_format instead, which is where it works.
+            AVBufferRef* probe = nullptr;
+            if (avcodec_get_hw_frames_parameters(ctx.get(), ctx->hw_device_ctx, AV_PIX_FMT_D3D11, &probe) >= 0 &&
+                probe) {
+                sw_pix_fmt = reinterpret_cast<AVHWFramesContext*>(probe->data)->sw_format;
+                av_buffer_unref(&probe);
+            }
+
+            // Fall back to whatever the codec has resolved, if anything.
+            if (sw_pix_fmt == AV_PIX_FMT_NONE && ctx->sw_pix_fmt != AV_PIX_FMT_NONE) {
+                sw_pix_fmt = ctx->sw_pix_fmt;
+            }
         }
 
         // For video with frame threading the codec resolves threads=0 to
@@ -862,6 +996,9 @@ class Decoder
                                 output.push(std::move(av_frame));
                         }
                     } else {
+                        if (av_frame->format != AV_PIX_FMT_D3D11 && gpu_direct_mode_.load())
+                            saw_software_frame_.store(true, std::memory_order_relaxed);
+
                         // Handle HW frame transfer
                         if (av_frame->format == AV_PIX_FMT_D3D11) {
                             // Resolve the actual SW pixel format from the HW frames context.
@@ -891,7 +1028,18 @@ class Decoder
                             // Request the specific SW pixel format that was advertised to the filter's
                             // buffersrc (sw_pix_fmt, e.g. NV12). Width/height must also be set before
                             // the call so FFmpeg can allocate the destination CPU buffer correctly.
-                            sw_frame->format = sw_pix_fmt;
+                            // Ask for the surface's OWN layout, taken from the frame's
+                            // hw_frames_ctx. Leaving it unset lets
+                            // av_hwframe_transfer_data pick, and it picks an 8-bit
+                            // target for a 10-bit (P010) surface -- silently
+                            // discarding the extra bits. Forcing a separately probed
+                            // value is not safe either; the frame's own context is
+                            // the authority.
+                            sw_frame->format = AV_PIX_FMT_NONE;
+                            if (av_frame->hw_frames_ctx) {
+                                auto* fctx = reinterpret_cast<AVHWFramesContext*>(av_frame->hw_frames_ctx->data);
+                                sw_frame->format = fctx->sw_format;
+                            }
                             sw_frame->width  = av_frame->width;
                             sw_frame->height = av_frame->height;
                             int transfer_ret = av_hwframe_transfer_data(sw_frame.get(), av_frame.get(), 0);
@@ -1939,6 +2087,27 @@ struct AVProducer::Impl
 
 #ifdef _WIN32
                     if (gpu_direct_video_) {
+                        // Hardware decoding can decline after the fact: H.264 High 10
+                        // and VP9 fall back to software here. The decoder then emits
+                        // ordinary frames while this path waits for surfaces that
+                        // never arrive, and the channel stalls on "Waiting for video
+                        // frame...". Stand down as soon as that is observed. This has
+                        // to happen here, where the waiting is: a check further
+                        // downstream is never reached by a stalled producer.
+                        {
+                            auto it = decoders_.find(gpu_direct_decoder_idx_);
+                            if (it != decoders_.end() &&
+                                it->second.saw_software_frame_.load(std::memory_order_relaxed)) {
+                                gpu_direct_video_          = false;
+                                it->second.gpu_direct_mode_ = false;
+                                CASPAR_LOG(info) << print()
+                                                 << L" D3D11 GPU-direct video stood down: this stream decodes in "
+                                                    L"software.";
+                            }
+                        }
+                    }
+
+                    if (gpu_direct_video_) {
                         // GPU-direct: video comes from decoder hw_output, not filter graph
                         if (!video_filter_.frame) {
                             auto& dec = decoders_.at(gpu_direct_decoder_idx_);
@@ -2046,6 +2215,24 @@ struct AVProducer::Impl
                 frame.frame = core::draw_frame(
 #ifdef _WIN32
                     [&]() -> core::const_frame {
+                        // Hardware decoding can decline after the fact -- H.264 High
+                        // 10 and VP9 fall back to software on this hardware. The
+                        // decoder then emits ordinary frames while the producer is
+                        // still set up to wait for hardware surfaces, and the
+                        // channel stalls on "Waiting for video frame...". Stand the
+                        // GPU-direct path down the moment a software frame appears.
+                        if (gpu_direct_video_ && frame.video && frame.video->format != AV_PIX_FMT_D3D11) {
+                            gpu_direct_video_ = false;
+                            if (gpu_direct_decoder_idx_ >= 0) {
+                                auto it = decoders_.find(gpu_direct_decoder_idx_);
+                                if (it != decoders_.end())
+                                    it->second.gpu_direct_mode_ = false;
+                            }
+                            CASPAR_LOG(info) << print()
+                                             << L" D3D11 GPU-direct video stood down: this stream decodes in "
+                                                L"software.";
+                        }
+
                         if (gpu_direct_video_ && frame.video && frame.video->format == AV_PIX_FMT_D3D11) {
                             auto* d3d11_tex = reinterpret_cast<ID3D11Texture2D*>(frame.video->data[0]);
                             auto  array_idx = static_cast<int>(reinterpret_cast<intptr_t>(frame.video->data[1]));
@@ -2053,8 +2240,13 @@ struct AVProducer::Impl
                             // The bridge is built on the first hardware frame, not
                             // at producer start: only now are the surface format
                             // and dimensions actually known.
-                            if (!gpu_direct_failed_ && d3d11_bridge_ &&
-                                d3d11_bridge_->setup_planes(frame.video->width, frame.video->height)) {
+                            D3D11_TEXTURE2D_DESC hw_desc = {};
+                            if (d3d11_tex)
+                                d3d11_tex->GetDesc(&hw_desc);
+
+                            if (!gpu_direct_failed_ && d3d11_bridge_ && d3d11_tex &&
+                                d3d11_bridge_->setup_planes(frame.video->width, frame.video->height,
+                                                            hw_desc.Format)) {
 
                                 auto planes = d3d11_bridge_->convert_planes(d3d11_tex, array_idx, *ogl_device_);
                                 if (planes.first && planes.second) {
@@ -2070,11 +2262,16 @@ struct AVProducer::Impl
                                     // Semi-planar exactly as the decoder produced
                                     // it. The mixer's shader converts, so this
                                     // matches the software path by construction.
+                                    // bit16 for P010/P016: their significant bits are
+                                    // high-aligned in each word, so the mixer's
+                                    // precision factor must be 1.0 -- exactly what
+                                    // bit16 selects. See pixel_format::nv12.
+                                    const auto plane_depth = d3d11_bridge_->plane_depth();
                                     auto desc = core::pixel_format_desc(core::pixel_format::nv12);
                                     desc.planes.push_back(core::pixel_format_desc::plane(
-                                        frame.video->width, frame.video->height, 1));
+                                        frame.video->width, frame.video->height, 1, plane_depth));
                                     desc.planes.push_back(core::pixel_format_desc::plane(
-                                        frame.video->width / 2, frame.video->height / 2, 2));
+                                        frame.video->width / 2, frame.video->height / 2, 2, plane_depth));
                                     desc.color_space    = get_color_space(frame.video, stream_color_space_);
                                     desc.color_transfer = get_color_transfer(frame.video, stream_color_trc_);
                                     if (frame.video->chroma_location != AVCHROMA_LOC_UNSPECIFIED) {
