@@ -322,14 +322,19 @@ struct server::impl
             auto default_color_space =
                 color_space_str == L"bt2020" ? core::color_space::bt2020 : core::color_space::bt709;
 
-            // Determine GPU affinity: explicit <gpu> on channel, or from first vulkan-output consumer
-            int gpu_index = xml_channel.second.get(L"gpu", -1);
+            // Determine GPU affinity: explicit <gpu> on channel, or from first vulkan-output consumer.
+            // gpu_index_explicit only affects error-message wording in accelerator::create_image_mixer:
+            // true when the user wrote <gpu> on the channel, false when it was inherited below from a
+            // <vulkan-output> consumer.
+            int  gpu_index          = xml_channel.second.get(L"gpu", -1);
+            bool gpu_index_explicit = gpu_index >= 0;
             if (gpu_index < 0) {
+                gpu_index = 0;
                 auto consumers_node = xml_channel.second.get_child_optional(L"consumers");
                 if (consumers_node) {
                     for (auto& consumer_entry : *consumers_node) {
                         if (consumer_entry.first == L"vulkan-output") {
-                            gpu_index = consumer_entry.second.get(L"gpu", -1);
+                            gpu_index = consumer_entry.second.get(L"gpu", 0);
                             break;
                         }
                     }
@@ -340,7 +345,8 @@ struct server::impl
                 spl::make_shared<video_channel>(channel_id,
                                                 format_desc,
                                                 default_color_space,
-                                                accelerator_.create_image_mixer(channel_id, depth, gpu_index),
+                                                accelerator_.create_image_mixer(
+                                                    channel_id, depth, gpu_index, gpu_index_explicit),
                                                 [channel_id, weak_client](core::monitor::state channel_state) {
                                                     monitor::state state;
                                                     state[""]["channel"][channel_id] = channel_state;
