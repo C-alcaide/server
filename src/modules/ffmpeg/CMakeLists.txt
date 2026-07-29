@@ -47,6 +47,8 @@ if (MSVC)
 		GLEW::glew
 		accelerator
 		opengl32
+		# D3DCompile, for the NV12 plane-extraction shaders in that path
+		d3dcompiler
 	)
 else()
 	target_link_libraries(ffmpeg PRIVATE

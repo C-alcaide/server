@@ -30,6 +30,9 @@
 
 #ifdef _WIN32
 #include <d3d11.h>
+#include <d3d11_3.h>
+#include <d3dcompiler.h>
+#include <cstring>
 #include <dxgi1_2.h>
 #endif
 
@@ -105,10 +108,34 @@ class d3d11_gl_bridge
     HANDLE interop_object_ = nullptr;
     GLuint interop_gl_tex_ = 0;
 
-    // GL context for the decode thread
-    HWND   dummy_hwnd_  = nullptr;
-    HDC    dc_          = nullptr;
-    HGLRC  gl_ctx_      = nullptr;
+    // ── Colour-exact plane path ──────────────────────────────────────────────
+    // Instead of letting the VideoProcessor convert NV12->BGRA with a
+    // driver-defined matrix and range, extract the two NV12 planes as-is and let
+    // the mixer's shader convert them. A tiny pixel shader does the extraction:
+    // it only moves texels between formats (R8 / R8G8), so it cannot alter
+    // colour.
+    ID3D11Texture2D*          y_texture_      = nullptr;   // R8_UNORM,   w x h
+    ID3D11Texture2D*          uv_texture_     = nullptr;   // R8G8_UNORM, w/2 x h/2
+    ID3D11RenderTargetView*   y_rtv_          = nullptr;
+    ID3D11RenderTargetView*   uv_rtv_         = nullptr;
+    ID3D11VertexShader*       plane_vs_       = nullptr;
+    ID3D11PixelShader*        plane_ps_       = nullptr;
+    ID3D11SamplerState*       plane_sampler_  = nullptr;
+    HANDLE                    y_interop_obj_  = nullptr;
+    HANDLE                    uv_interop_obj_ = nullptr;
+    GLuint                    y_gl_tex_       = 0;
+    GLuint                    uv_gl_tex_      = 0;
+    bool                      plane_path_ok_  = false;
+
+    // The mixer's GL device. All GL and interop work is dispatched onto its
+    // thread, where its context is current: a private context is not an option
+    // because wglShareLists fails against a context that is current on another
+    // thread, which is exactly what the mixer's is.
+    accelerator::ogl::device* ogl_dev_ = nullptr;
+
+    // FFmpeg's D3D11 device lock. ID3D11DeviceContext is not free-threaded and
+    // the decoder is using the same one, so every D3D11 call here must hold it.
+    AVD3D11VADeviceContext* d3d11_hwctx_ = nullptr;
 
     int width_  = 0;
     int height_ = 0;
@@ -117,73 +144,55 @@ class d3d11_gl_bridge
   public:
     bool init(AVBufferRef* hw_device_ctx, void* ogl_device_ptr)
     {
-        if (!hw_device_ctx || !ogl_device_ptr)
+        if (!hw_device_ctx || !ogl_device_ptr) {
+            CASPAR_LOG(warning) << L"[av_producer] bridge init: no hw_device_ctx or no GL device";
             return false;
+        }
 
-        auto* ogl_dev = static_cast<accelerator::ogl::device*>(ogl_device_ptr);
+        ogl_dev_ = static_cast<accelerator::ogl::device*>(ogl_device_ptr);
 
         // Get the D3D11 device from FFmpeg's hw_device_ctx
         auto* hwctx = reinterpret_cast<AVHWDeviceContext*>(hw_device_ctx->data);
-        if (!hwctx || hwctx->type != AV_HWDEVICE_TYPE_D3D11VA)
+        if (!hwctx || hwctx->type != AV_HWDEVICE_TYPE_D3D11VA) {
+            CASPAR_LOG(warning) << L"[av_producer] bridge init: hw device is not D3D11VA";
             return false;
-        auto* d3d11_hwctx = static_cast<AVD3D11VADeviceContext*>(hwctx->hwctx);
-        d3d11_device_ = d3d11_hwctx->device;
-        d3d11_ctx_    = d3d11_hwctx->device_context;
-        if (!d3d11_device_ || !d3d11_ctx_)
-            return false;
-
-        // Load WGL_NV_DX_interop2 functions
-        wglDXOpenDeviceNV_       = (PFNWGLDXOPENDEVICENVPROC)wglGetProcAddress("wglDXOpenDeviceNV");
-        wglDXCloseDeviceNV_      = (PFNWGLDXCLOSEDEVICENVPROC)wglGetProcAddress("wglDXCloseDeviceNV");
-        wglDXRegisterObjectNV_   = (PFNWGLDXREGISTEROBJECTNVPROC)wglGetProcAddress("wglDXRegisterObjectNV");
-        wglDXUnregisterObjectNV_ = (PFNWGLDXUNREGISTEROBJECTNVPROC)wglGetProcAddress("wglDXUnregisterObjectNV");
-        wglDXLockObjectsNV_      = (PFNWGLDXLOCKOBJECTSNVPROC)wglGetProcAddress("wglDXLockObjectsNV");
-        wglDXUnlockObjectsNV_    = (PFNWGLDXUNLOCKOBJECTSNVPROC)wglGetProcAddress("wglDXUnlockObjectsNV");
-
-        if (!wglDXOpenDeviceNV_ || !wglDXCloseDeviceNV_ || !wglDXRegisterObjectNV_ ||
-            !wglDXUnregisterObjectNV_ || !wglDXLockObjectsNV_ || !wglDXUnlockObjectsNV_) {
-            CASPAR_LOG(info) << L"[av_producer] WGL_NV_DX_interop2 not available - using CPU path";
+        }
+        d3d11_hwctx_  = static_cast<AVD3D11VADeviceContext*>(hwctx->hwctx);
+        d3d11_device_ = d3d11_hwctx_->device;
+        d3d11_ctx_    = d3d11_hwctx_->device_context;
+        if (!d3d11_device_ || !d3d11_ctx_) {
+            CASPAR_LOG(warning) << L"[av_producer] bridge init: null D3D11 device/context";
             return false;
         }
 
-        // Create shared GL context for the decode thread
-        void* mixer_hglrc = ogl_dev->native_gl_context();
-        if (!mixer_hglrc)
+        // Load the interop entry points and open the interop device on the
+        // mixer's GL thread. wglGetProcAddress resolves nothing without a
+        // current context, and the interop device must belong to the context
+        // that will later lock the shared objects.
+        bool ok = ogl_dev_->dispatch_sync([&]() -> bool {
+            wglDXOpenDeviceNV_       = (PFNWGLDXOPENDEVICENVPROC)wglGetProcAddress("wglDXOpenDeviceNV");
+            wglDXCloseDeviceNV_      = (PFNWGLDXCLOSEDEVICENVPROC)wglGetProcAddress("wglDXCloseDeviceNV");
+            wglDXRegisterObjectNV_   = (PFNWGLDXREGISTEROBJECTNVPROC)wglGetProcAddress("wglDXRegisterObjectNV");
+            wglDXUnregisterObjectNV_ = (PFNWGLDXUNREGISTEROBJECTNVPROC)wglGetProcAddress("wglDXUnregisterObjectNV");
+            wglDXLockObjectsNV_      = (PFNWGLDXLOCKOBJECTSNVPROC)wglGetProcAddress("wglDXLockObjectsNV");
+            wglDXUnlockObjectsNV_    = (PFNWGLDXUNLOCKOBJECTSNVPROC)wglGetProcAddress("wglDXUnlockObjectsNV");
+
+            if (!wglDXOpenDeviceNV_ || !wglDXCloseDeviceNV_ || !wglDXRegisterObjectNV_ ||
+                !wglDXUnregisterObjectNV_ || !wglDXLockObjectsNV_ || !wglDXUnlockObjectsNV_) {
+                CASPAR_LOG(info) << L"[av_producer] WGL_NV_DX_interop2 not available - using CPU path";
+                return false;
+            }
+
+            interop_device_ = wglDXOpenDeviceNV_(d3d11_device_);
+            if (!interop_device_) {
+                CASPAR_LOG(warning) << L"[av_producer] wglDXOpenDeviceNV failed - using CPU path";
+                return false;
+            }
+            return true;
+        });
+
+        if (!ok)
             return false;
-
-        WNDCLASSA wc   = {};
-        wc.lpfnWndProc = DefWindowProcA;
-        wc.hInstance   = GetModuleHandle(nullptr);
-        wc.lpszClassName = "CasparCG_FFmpeg_D3D11GL";
-        RegisterClassA(&wc);
-
-        dummy_hwnd_ = CreateWindowA("CasparCG_FFmpeg_D3D11GL", "", 0, 0, 0, 1, 1, nullptr, nullptr, wc.hInstance, nullptr);
-        dc_ = GetDC(dummy_hwnd_);
-
-        PIXELFORMATDESCRIPTOR pfd = {};
-        pfd.nSize    = sizeof(pfd);
-        pfd.nVersion = 1;
-        pfd.dwFlags  = PFD_SUPPORT_OPENGL;
-        pfd.iPixelType = PFD_TYPE_RGBA;
-        pfd.cColorBits = 32;
-        int fmt = ChoosePixelFormat(dc_, &pfd);
-        SetPixelFormat(dc_, fmt, &pfd);
-
-        gl_ctx_ = wglCreateContext(dc_);
-        if (!gl_ctx_ || !wglShareLists((HGLRC)mixer_hglrc, gl_ctx_)) {
-            CASPAR_LOG(warning) << L"[av_producer] Failed to create shared GL context for D3D11-GL bridge";
-            cleanup();
-            return false;
-        }
-        wglMakeCurrent(dc_, gl_ctx_);
-
-        // Open DX interop device
-        interop_device_ = wglDXOpenDeviceNV_(d3d11_device_);
-        if (!interop_device_) {
-            CASPAR_LOG(warning) << L"[av_producer] wglDXOpenDeviceNV failed - using CPU path";
-            cleanup();
-            return false;
-        }
 
         CASPAR_LOG(info) << L"[av_producer] D3D11->GL GPU-direct bridge initialized";
         active_ = true;
@@ -307,31 +316,271 @@ class d3d11_gl_bridge
         return ogl_tex;
     }
 
+    /// Builds the plane-extraction resources for a given frame size. Returns
+    /// false if anything is unavailable, in which case the caller falls back to
+    /// the CPU transfer path -- this is opt-in and must never take a channel down.
+    bool setup_planes(int width, int height)
+    {
+        if (plane_path_ok_ && width == width_ && height == height_)
+            return true;
+
+        teardown_planes();
+        width_  = width;
+        height_ = height;
+
+        // Full-screen triangle from SV_VertexID; no vertex or index buffers.
+        static const char* kVS =
+            "struct VSOut { float4 pos : SV_Position; float2 uv : TEXCOORD0; };\n"
+            "VSOut main(uint vid : SV_VertexID)\n"
+            "{\n"
+            "    VSOut o;\n"
+            "    float2 t = float2((vid << 1) & 2, vid & 2);\n"
+            "    o.uv  = t;\n"
+            "    o.pos = float4(t * float2(2, -2) + float2(-1, 1), 0, 1);\n"
+            "    return o;\n"
+            "}\n";
+
+        // Pass-through. Whatever the plane SRV yields is written unchanged: the
+        // SRV format decides which components are meaningful (R8 for Y, R8G8 for
+        // CbCr). No arithmetic happens here, by design -- the colour conversion
+        // belongs to the mixer's shader, which is the entire point of this path.
+        //
+        // Load(), not Sample(): the decoded surface is padded up to the codec's
+        // macroblock grid (H.264 stores 1080 as 1088), so normalised coordinates
+        // span the padding too and silently rescale the picture -- a ~4 row
+        // vertical shift at 1080p. Indexing texels directly copies the cropped
+        // top-left region exactly, and needs no sampler at all.
+        static const char* kPS =
+            "Texture2D src : register(t0);\n"
+            "struct VSOut { float4 pos : SV_Position; float2 uv : TEXCOORD0; };\n"
+            "float4 main(VSOut i) : SV_Target { return src.Load(int3(i.pos.xy, 0)); }\n";
+
+        auto compile = [](const char* src, const char* target, ID3DBlob** out) -> bool {
+            ID3DBlob* err = nullptr;
+            auto      hr  = D3DCompile(src, std::strlen(src), nullptr, nullptr, nullptr, "main", target,
+                                       D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, out, &err);
+            if (err)
+                err->Release();
+            return SUCCEEDED(hr);
+        };
+
+        ID3DBlob* vs_blob = nullptr;
+        ID3DBlob* ps_blob = nullptr;
+        if (!compile(kVS, "vs_5_0", &vs_blob) || !compile(kPS, "ps_5_0", &ps_blob)) {
+            if (vs_blob)
+                vs_blob->Release();
+            if (ps_blob)
+                ps_blob->Release();
+            return false;
+        }
+
+        bool ok = SUCCEEDED(d3d11_device_->CreateVertexShader(
+                      vs_blob->GetBufferPointer(), vs_blob->GetBufferSize(), nullptr, &plane_vs_)) &&
+                  SUCCEEDED(d3d11_device_->CreatePixelShader(
+                      ps_blob->GetBufferPointer(), ps_blob->GetBufferSize(), nullptr, &plane_ps_));
+        vs_blob->Release();
+        ps_blob->Release();
+        if (!ok)
+            return false;
+
+        D3D11_SAMPLER_DESC sd = {};
+        // Point sampling: this pass copies texels, it must not resample them.
+        sd.Filter   = D3D11_FILTER_MIN_MAG_MIP_POINT;
+        sd.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
+        sd.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
+        sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+        if (FAILED(d3d11_device_->CreateSamplerState(&sd, &plane_sampler_)))
+            return false;
+
+        auto make_plane = [&](int w, int h, DXGI_FORMAT fmt, ID3D11Texture2D** tex,
+                              ID3D11RenderTargetView** rtv) -> bool {
+            D3D11_TEXTURE2D_DESC td = {};
+            td.Width                = w;
+            td.Height               = h;
+            td.MipLevels            = 1;
+            td.ArraySize            = 1;
+            td.Format               = fmt;
+            td.SampleDesc.Count     = 1;
+            td.Usage                = D3D11_USAGE_DEFAULT;
+            td.BindFlags            = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+            if (FAILED(d3d11_device_->CreateTexture2D(&td, nullptr, tex)))
+                return false;
+            return SUCCEEDED(d3d11_device_->CreateRenderTargetView(*tex, nullptr, rtv));
+        };
+
+        if (!make_plane(width, height, DXGI_FORMAT_R8_UNORM, &y_texture_, &y_rtv_) ||
+            !make_plane(width / 2, height / 2, DXGI_FORMAT_R8G8_UNORM, &uv_texture_, &uv_rtv_))
+            return false;
+
+        // GL object creation and interop registration belong on the mixer's GL
+        // thread, where the context these names live in is current.
+        bool registered = ogl_dev_->dispatch_sync([&]() -> bool {
+            glGenTextures(1, &y_gl_tex_);
+            glGenTextures(1, &uv_gl_tex_);
+            y_interop_obj_ = wglDXRegisterObjectNV_(interop_device_, y_texture_, y_gl_tex_, GL_TEXTURE_2D,
+                                                    WGL_ACCESS_READ_ONLY_NV);
+            uv_interop_obj_ = wglDXRegisterObjectNV_(interop_device_, uv_texture_, uv_gl_tex_, GL_TEXTURE_2D,
+                                                     WGL_ACCESS_READ_ONLY_NV);
+            return y_interop_obj_ != nullptr && uv_interop_obj_ != nullptr;
+        });
+
+        if (!registered) {
+            CASPAR_LOG(warning) << L"[av_producer] bridge: could not register NV12 planes for GL interop";
+            return false;
+        }
+
+        plane_path_ok_ = true;
+        return true;
+    }
+
+    /// Extracts the decoded NV12 surface into two GL textures (Y, and CbCr
+    /// interleaved at half resolution), leaving colour conversion to the mixer.
+    /// Returns a pair of nulls on any failure.
+    std::pair<std::shared_ptr<void>, std::shared_ptr<void>>
+    convert_planes(ID3D11Texture2D* nv12, int array_idx, accelerator::ogl::device& ogl_dev)
+    {
+        if (!plane_path_ok_ || !nv12)
+            return {};
+
+        // Plane SRVs require the D3D11.3 view descriptors (PlaneSlice). The
+        // decoded surface is an array; index the slice this frame lives in.
+        ID3D11Device3* dev3 = nullptr;
+        if (FAILED(d3d11_device_->QueryInterface(__uuidof(ID3D11Device3), reinterpret_cast<void**>(&dev3))) || !dev3)
+            return {};
+
+        auto make_srv = [&](DXGI_FORMAT fmt, UINT plane, ID3D11ShaderResourceView1** srv) -> bool {
+            D3D11_SHADER_RESOURCE_VIEW_DESC1 sd = {};
+            sd.Format                           = fmt;
+            sd.ViewDimension                    = D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
+            sd.Texture2DArray.MostDetailedMip   = 0;
+            sd.Texture2DArray.MipLevels         = 1;
+            sd.Texture2DArray.FirstArraySlice   = static_cast<UINT>(array_idx);
+            sd.Texture2DArray.ArraySize         = 1;
+            sd.Texture2DArray.PlaneSlice        = plane;
+            return SUCCEEDED(dev3->CreateShaderResourceView1(nv12, &sd, srv));
+        };
+
+        ID3D11ShaderResourceView1* y_srv  = nullptr;
+        ID3D11ShaderResourceView1* uv_srv = nullptr;
+        if (!make_srv(DXGI_FORMAT_R8_UNORM, 0, &y_srv) || !make_srv(DXGI_FORMAT_R8G8_UNORM, 1, &uv_srv)) {
+            if (y_srv)
+                y_srv->Release();
+            if (uv_srv)
+                uv_srv->Release();
+            dev3->Release();
+            return {};
+        }
+
+        auto draw_plane = [&](ID3D11RenderTargetView* rtv, ID3D11ShaderResourceView1* srv, int w, int h) {
+            D3D11_VIEWPORT vp = {};
+            vp.Width          = static_cast<float>(w);
+            vp.Height         = static_cast<float>(h);
+            vp.MaxDepth       = 1.0f;
+
+            ID3D11ShaderResourceView* srv0 = srv;
+            d3d11_ctx_->OMSetRenderTargets(1, &rtv, nullptr);
+            d3d11_ctx_->RSSetViewports(1, &vp);
+            d3d11_ctx_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            d3d11_ctx_->IASetInputLayout(nullptr);
+            d3d11_ctx_->VSSetShader(plane_vs_, nullptr, 0);
+            d3d11_ctx_->PSSetShader(plane_ps_, nullptr, 0);
+            d3d11_ctx_->PSSetShaderResources(0, 1, &srv0);
+            d3d11_ctx_->Draw(3, 0);
+
+            ID3D11ShaderResourceView* none = nullptr;
+            d3d11_ctx_->PSSetShaderResources(0, 1, &none);
+        };
+
+        // The decoder shares this immediate context, and it is not free-threaded.
+        if (d3d11_hwctx_ && d3d11_hwctx_->lock)
+            d3d11_hwctx_->lock(d3d11_hwctx_->lock_ctx);
+
+        draw_plane(y_rtv_, y_srv, width_, height_);
+        draw_plane(uv_rtv_, uv_srv, width_ / 2, height_ / 2);
+        d3d11_ctx_->Flush();
+
+        if (d3d11_hwctx_ && d3d11_hwctx_->unlock)
+            d3d11_hwctx_->unlock(d3d11_hwctx_->lock_ctx);
+
+        y_srv->Release();
+        uv_srv->Release();
+        dev3->Release();
+
+        // Hand both planes to GL and copy into pooled textures, so the D3D11
+        // surfaces are free for the next frame immediately.
+        std::shared_ptr<accelerator::ogl::texture> y_out;
+        std::shared_ptr<accelerator::ogl::texture> uv_out;
+
+        ogl_dev.dispatch_sync([&] {
+            HANDLE objs[2] = {y_interop_obj_, uv_interop_obj_};
+            if (!wglDXLockObjectsNV_(interop_device_, 2, objs))
+                return;
+
+            y_out  = ogl_dev.create_texture(width_, height_, 1, common::bit_depth::bit8, false);
+            uv_out = ogl_dev.create_texture(width_ / 2, height_ / 2, 2, common::bit_depth::bit8, false);
+            if (y_out && uv_out) {
+                glCopyImageSubData(y_gl_tex_, GL_TEXTURE_2D, 0, 0, 0, 0, y_out->id(), GL_TEXTURE_2D, 0, 0, 0, 0,
+                                   width_, height_, 1);
+                glCopyImageSubData(uv_gl_tex_, GL_TEXTURE_2D, 0, 0, 0, 0, uv_out->id(), GL_TEXTURE_2D, 0, 0, 0, 0,
+                                   width_ / 2, height_ / 2, 1);
+            }
+
+            wglDXUnlockObjectsNV_(interop_device_, 2, objs);
+        });
+
+        if (!y_out || !uv_out)
+            return {};
+
+        return {std::static_pointer_cast<void>(y_out), std::static_pointer_cast<void>(uv_out)};
+    }
+
+    void teardown_planes()
+    {
+        if (y_interop_obj_) {
+            wglDXUnregisterObjectNV_(interop_device_, y_interop_obj_);
+            y_interop_obj_ = nullptr;
+        }
+        if (uv_interop_obj_) {
+            wglDXUnregisterObjectNV_(interop_device_, uv_interop_obj_);
+            uv_interop_obj_ = nullptr;
+        }
+        if (y_gl_tex_) {
+            glDeleteTextures(1, &y_gl_tex_);
+            y_gl_tex_ = 0;
+        }
+        if (uv_gl_tex_) {
+            glDeleteTextures(1, &uv_gl_tex_);
+            uv_gl_tex_ = 0;
+        }
+        if (y_rtv_) { y_rtv_->Release(); y_rtv_ = nullptr; }
+        if (uv_rtv_) { uv_rtv_->Release(); uv_rtv_ = nullptr; }
+        if (y_texture_) { y_texture_->Release(); y_texture_ = nullptr; }
+        if (uv_texture_) { uv_texture_->Release(); uv_texture_ = nullptr; }
+        if (plane_vs_) { plane_vs_->Release(); plane_vs_ = nullptr; }
+        if (plane_ps_) { plane_ps_->Release(); plane_ps_ = nullptr; }
+        if (plane_sampler_) { plane_sampler_->Release(); plane_sampler_ = nullptr; }
+        plane_path_ok_ = false;
+    }
+
     bool is_active() const { return active_; }
 
     void cleanup()
     {
+        teardown_planes();
         teardown_interop();
         teardown_video_processor();
 
-        if (interop_device_) {
-            wglDXCloseDeviceNV_(interop_device_);
-            interop_device_ = nullptr;
+        // The interop device belongs to the mixer's GL context, so close it on
+        // that thread. There is no private context or dummy window to tear down
+        // any more -- the bridge borrows the mixer's.
+        if (interop_device_ && ogl_dev_) {
+            ogl_dev_->dispatch_sync([&] {
+                wglDXCloseDeviceNV_(interop_device_);
+                interop_device_ = nullptr;
+            });
         }
-        if (gl_ctx_) {
-            wglMakeCurrent(nullptr, nullptr);
-            wglDeleteContext(gl_ctx_);
-            gl_ctx_ = nullptr;
-        }
-        if (dc_ && dummy_hwnd_) {
-            ReleaseDC(dummy_hwnd_, dc_);
-            dc_ = nullptr;
-        }
-        if (dummy_hwnd_) {
-            DestroyWindow(dummy_hwnd_);
-            dummy_hwnd_ = nullptr;
-        }
-        active_ = false;
+        interop_device_ = nullptr;
+        active_         = false;
     }
 
     ~d3d11_gl_bridge() { cleanup(); }
@@ -409,8 +658,35 @@ class Decoder
         const enum AVPixelFormat* p;
 
         for (p = pix_fmts; *p != -1; p++) {
-            if (*p == AV_PIX_FMT_D3D11)
-                return *p;
+            if (*p != AV_PIX_FMT_D3D11)
+                continue;
+
+            // Allocate the hardware frame pool ourselves so the decoded surfaces
+            // can also be read by a shader. FFmpeg's default pool binds them for
+            // decode only (D3D11_BIND_DECODER), which is enough to copy out of
+            // but not to create a shader resource view over -- and reading the
+            // NV12 planes through a view is what lets the *mixer* do the colour
+            // conversion instead of the D3D11 VideoProcessor.
+            //
+            // Failing here is not fatal: the GPU-direct path then declines and
+            // the ordinary transfer-to-CPU path runs.
+            if (!ctx->hw_frames_ctx && ctx->hw_device_ctx) {
+                AVBufferRef* frames_ref = nullptr;
+                if (avcodec_get_hw_frames_parameters(ctx, ctx->hw_device_ctx, AV_PIX_FMT_D3D11, &frames_ref) >= 0 &&
+                    frames_ref) {
+                    auto* frames = reinterpret_cast<AVHWFramesContext*>(frames_ref->data);
+                    auto* d3d11  = static_cast<AVD3D11VAFramesContext*>(frames->hwctx);
+                    d3d11->BindFlags |= D3D11_BIND_SHADER_RESOURCE;
+
+                    if (av_hwframe_ctx_init(frames_ref) >= 0) {
+                        ctx->hw_frames_ctx = frames_ref;
+                    } else {
+                        av_buffer_unref(&frames_ref);
+                    }
+                }
+            }
+
+            return *p;
         }
 
         av_log(ctx, AV_LOG_ERROR, "Failed to get HW surface format.\n");
@@ -1210,7 +1486,13 @@ struct AVProducer::Impl
 #ifdef _WIN32
     // D3D11→GL GPU-direct video path (bypasses filter graph + CPU transfer)
     std::unique_ptr<d3d11_gl_bridge> d3d11_bridge_;
+    // Cheap preconditions passed; the bridge is created lazily when the first
+    // hardware surface arrives (see get_hw_format: sw_pix_fmt is not resolved
+    // until then).
+    bool                             gpu_direct_requested_ = false;
     bool                             gpu_direct_video_ = false;
+    bool                             gpu_direct_failed_ = false;
+    bool                             gpu_direct_logged_ = false;
     int                              gpu_direct_decoder_idx_ = -1;
     accelerator::ogl::device*        ogl_device_ = nullptr;
 #endif
@@ -1495,10 +1777,12 @@ struct AVProducer::Impl
                         declined(L"decoder is not using D3D11VA (codec not hardware-accelerated here)");
                         break;
                     }
-                    if (dec.sw_pix_fmt == AV_PIX_FMT_NONE) {
-                        declined(L"decoder did not resolve a hardware surface format");
-                        break;
-                    }
+
+                    // NOTE: dec.sw_pix_fmt is deliberately NOT checked here. A
+                    // D3D11VA decoder only resolves ctx->sw_pix_fmt in its first
+                    // get_format callback, i.e. once decoding has started, so at
+                    // this point it is always AV_PIX_FMT_NONE. Requiring it here
+                    // is why this path never actually ran.
 
                     // Check progressive (field_order or container flags)
                     auto* st = input_->streams[idx];
@@ -1522,18 +1806,32 @@ struct AVProducer::Impl
                     } else if (!deint_none) {
                         declined(L"auto-deinterlace is active");
                     } else {
+                        // Everything knowable up front passes. Let the decoder
+                        // emit hardware surfaces; the bridge is created when the
+                        // first one arrives, which is the earliest moment the
+                        // surface format and dimensions are actually known. If
+                        // that fails we fall back to the transfer path and say so.
+                        // init() only needs the D3D11 device and the GL context,
+                        // both known now. The size-dependent resources are built
+                        // on the first hardware frame, which is also the first
+                        // moment the surface format is resolved.
                         d3d11_bridge_ = std::make_unique<d3d11_gl_bridge>();
-                        if (d3d11_bridge_->init(dec.ctx->hw_device_ctx, gpu_dev)) {
-                            gpu_direct_video_ = true;
-                            gpu_direct_decoder_idx_ = idx;
-                            dec.gpu_direct_mode_ = true;
-                            CASPAR_LOG(info) << print()
-                                << L" D3D11->GL GPU-direct video enabled (bypasses filter graph). "
-                                   L"NOTE: NV12->BGRA is done by the D3D11 VideoProcessor, whose matrix and "
-                                   L"range are driver-defined, so colour may differ from the software path.";
-                        } else {
+                        if (!d3d11_bridge_->init(dec.ctx->hw_device_ctx, gpu_dev)) {
                             d3d11_bridge_.reset();
                             declined(L"WGL_NV_DX_interop2 bridge failed to initialise");
+                        } else {
+                            gpu_direct_requested_ = true;
+                            // The decoder must start emitting hardware surfaces
+                            // now, otherwise the first one never arrives and there
+                            // is nothing to decide on. If plane extraction then
+                            // fails, the producer falls back to CPU transfer.
+                            gpu_direct_video_       = true;
+                            gpu_direct_decoder_idx_ = idx;
+                            dec.gpu_direct_mode_    = true;
+                            CASPAR_LOG(info)
+                                << print()
+                                << L" D3D11 GPU-direct video eligible; plane extraction starts on the first "
+                                   L"hardware frame.";
                         }
                     }
                     break; // Only one video decoder
@@ -1749,27 +2047,59 @@ struct AVProducer::Impl
 #ifdef _WIN32
                     [&]() -> core::const_frame {
                         if (gpu_direct_video_ && frame.video && frame.video->format == AV_PIX_FMT_D3D11) {
-                            // GPU-direct: convert D3D11 NV12 → BGRA OGL texture entirely on GPU
                             auto* d3d11_tex = reinterpret_cast<ID3D11Texture2D*>(frame.video->data[0]);
                             auto  array_idx = static_cast<int>(reinterpret_cast<intptr_t>(frame.video->data[1]));
 
-                            if (d3d11_bridge_->setup_for_size(frame.video->width, frame.video->height)) {
-                                auto ogl_tex = d3d11_bridge_->convert(d3d11_tex, array_idx, *ogl_device_);
-                                if (ogl_tex) {
-                                    // Build BGRA pixel_format_desc with color metadata
-                                    auto desc = core::pixel_format_desc(core::pixel_format::bgra);
+                            // The bridge is built on the first hardware frame, not
+                            // at producer start: only now are the surface format
+                            // and dimensions actually known.
+                            if (!gpu_direct_failed_ && d3d11_bridge_ &&
+                                d3d11_bridge_->setup_planes(frame.video->width, frame.video->height)) {
+
+                                auto planes = d3d11_bridge_->convert_planes(d3d11_tex, array_idx, *ogl_device_);
+                                if (planes.first && planes.second) {
+                                    if (!gpu_direct_logged_) {
+                                        gpu_direct_logged_ = true;
+                                        CASPAR_LOG(info)
+                                            << print()
+                                            << L" D3D11 GPU-direct video active: NV12 planes handed to the mixer, "
+                                               L"which performs the colour conversion (no CPU frame, no "
+                                               L"VideoProcessor).";
+                                    }
+
+                                    // Semi-planar exactly as the decoder produced
+                                    // it. The mixer's shader converts, so this
+                                    // matches the software path by construction.
+                                    auto desc = core::pixel_format_desc(core::pixel_format::nv12);
                                     desc.planes.push_back(core::pixel_format_desc::plane(
-                                        frame.video->width, frame.video->height, 4));
+                                        frame.video->width, frame.video->height, 1));
+                                    desc.planes.push_back(core::pixel_format_desc::plane(
+                                        frame.video->width / 2, frame.video->height / 2, 2));
                                     desc.color_space    = get_color_space(frame.video, stream_color_space_);
                                     desc.color_transfer = get_color_transfer(frame.video, stream_color_trc_);
+                                    if (frame.video->chroma_location != AVCHROMA_LOC_UNSPECIFIED) {
+                                        switch (frame.video->chroma_location) {
+                                            case AVCHROMA_LOC_LEFT:
+                                                desc.chroma_location = core::chroma_location::left;
+                                                break;
+                                            case AVCHROMA_LOC_CENTER:
+                                                desc.chroma_location = core::chroma_location::center;
+                                                break;
+                                            case AVCHROMA_LOC_TOPLEFT:
+                                                desc.chroma_location = core::chroma_location::topleft;
+                                                break;
+                                            default:
+                                                desc.chroma_location = core::chroma_location::left;
+                                                break;
+                                        }
+                                    }
 
-                                    // Build audio data via make_frame (audio only)
                                     array<const std::int32_t> audio_data;
                                     if (frame.audio) {
-                                        const int channel_count = 16;
+                                        const int                 channel_count = 16;
                                         std::vector<std::int32_t> buf(frame.audio->nb_samples * channel_count, 0);
-                                        auto src_channels = frame.audio->ch_layout.nb_channels;
-                                        auto* src = reinterpret_cast<std::int32_t*>(frame.audio->data[0]);
+                                        auto  src_channels = frame.audio->ch_layout.nb_channels;
+                                        auto* src          = reinterpret_cast<std::int32_t*>(frame.audio->data[0]);
                                         for (int i = 0; i < frame.audio->nb_samples; ++i) {
                                             for (int j = 0; j < std::min(channel_count, src_channels); ++j) {
                                                 buf[i * channel_count + j] = src[i * src_channels + j];
@@ -1778,16 +2108,41 @@ struct AVProducer::Impl
                                         audio_data = array<const std::int32_t>(buf);
                                     }
 
-                                    // Empty image data (consumers needing CPU data will get zeros)
+                                    // No host pixels: consumers that need them ask
+                                    // the channel, which reads back the composited
+                                    // frame. host_image_state() reports this
+                                    // honestly as `unavailable`.
                                     std::vector<array<const std::uint8_t>> image_data;
-                                    image_data.push_back(array<const std::uint8_t>(
-                                        static_cast<std::size_t>(0)));
+                                    image_data.emplace_back(static_cast<std::size_t>(0));
+                                    image_data.emplace_back(static_cast<std::size_t>(0));
 
-                                    return core::const_frame(this, std::move(image_data),
-                                        std::move(audio_data), desc,
-                                        std::static_pointer_cast<core::texture>(ogl_tex));
+                                    std::vector<std::shared_ptr<core::texture>> textures;
+                                    textures.push_back(std::static_pointer_cast<core::texture>(
+                                        std::static_pointer_cast<accelerator::ogl::texture>(planes.first)));
+                                    textures.push_back(std::static_pointer_cast<core::texture>(
+                                        std::static_pointer_cast<accelerator::ogl::texture>(planes.second)));
+
+                                    return core::const_frame(this, std::move(image_data), std::move(audio_data), desc,
+                                                             std::move(textures));
                                 }
+
+                                // Extraction failed. Stop trying: it will not
+                                // start working, and retrying every frame would
+                                // cost a D3D11 pass per frame for nothing.
+                                if (!gpu_direct_failed_) {
+                                    gpu_direct_failed_ = true;
+                                    CASPAR_LOG(warning)
+                                        << print()
+                                        << L" D3D11 GPU-direct plane extraction failed; falling back to the CPU "
+                                           L"transfer path for this producer.";
+                                }
+                            } else if (!gpu_direct_failed_) {
+                                gpu_direct_failed_ = true;
+                                CASPAR_LOG(warning) << print()
+                                                    << L" D3D11 GPU-direct setup failed; falling back to the CPU "
+                                                       L"transfer path for this producer.";
                             }
+
                             // Bridge failed — fall through to CPU path with transfer
                             auto sw_frame = alloc_frame();
                             sw_frame->format = AV_PIX_FMT_NV12;
