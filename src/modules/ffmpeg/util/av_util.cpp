@@ -1,4 +1,8 @@
 #include "av_util.h"
+
+#include <mutex>
+#include <set>
+#include <utility>
 #include "av_assert.h"
 
 #include <common/bit_depth.h>
@@ -68,6 +72,27 @@ core::mutable_frame make_frame(void*                            tag,
             case AVCHROMA_LOC_CENTER:     pix_desc.chroma_location = core::chroma_location::center;  break;
             case AVCHROMA_LOC_TOPLEFT:    pix_desc.chroma_location = core::chroma_location::topleft; break;
             default:                      pix_desc.chroma_location = core::chroma_location::left;    break;
+        }
+    }
+
+    // One-shot per (source format -> mixer format) pair. Answers "what layout is
+    // this clip actually arriving in?", which decides whether the semi-planar
+    // upload path is in play at all -- previously only inferable by reading code.
+    if (video) {
+        static std::mutex                          s_seen_mutex;
+        static std::set<std::pair<int, int>>       s_seen;
+        auto key = std::make_pair(static_cast<int>(video->format), static_cast<int>(pix_desc.format));
+        bool first;
+        {
+            std::lock_guard<std::mutex> lock(s_seen_mutex);
+            first = s_seen.insert(key).second;
+        }
+        if (first) {
+            const char* name = av_get_pix_fmt_name(static_cast<AVPixelFormat>(video->format));
+            CASPAR_LOG(info) << L"[ffmpeg] decoded frames arrive as " << (name ? u16(name) : L"?")
+                             << L" -> mixer pixel_format " << static_cast<int>(pix_desc.format) << L" ("
+                             << static_cast<int>(pix_desc.planes.size()) << L" plane(s), "
+                             << (pix_desc.planes.empty() ? 0 : pix_desc.planes[0].stride) << L" stride)";
         }
     }
 

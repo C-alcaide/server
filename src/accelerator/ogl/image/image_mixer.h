@@ -69,6 +69,13 @@ class image_mixer final : public core::image_mixer
     // Expose the underlying OGL device for CUDA-GL interop producers.
     std::shared_ptr<class device> get_ogl_device() const;
 
+    /// Producers use this to discover the mixer's GL device (for WGL/CUDA
+    /// interop). impl overrode it but this class did not forward it, so it
+    /// always returned the base's nullptr and every interop path that asks for
+    /// it silently declined -- including the whole D3D11->GL GPU-direct decode
+    /// path, which therefore never ran.
+    void* gpu_device_handle() const override;
+
     void* native_gl_context() const override;
     void* native_egl_display() const override;
 

@@ -1452,45 +1452,95 @@ struct AVProducer::Impl
         // Conditions: D3D11VA active, no user vfilter, progressive content,
         // matching framerate, and WGL_NV_DX_interop2 available.
         {
+            // Every branch below reports why the path was or was not taken. It
+            // used to fail silently, so there was no way to tell "GPU-direct is
+            // running" from "GPU-direct quietly declined" -- which matters,
+            // because this path converts NV12 with the D3D11 VideoProcessor and
+            // therefore does NOT use the mixer's colour management (see
+            // docs/GPU_OPTIMIZATION_PLAN.md). Knowing whether it is live is a
+            // prerequisite for trusting the picture.
+            const auto declined = [&](const std::wstring& why) {
+                CASPAR_LOG(info) << print() << L" D3D11->GL GPU-direct video not used: " << why << L".";
+            };
+
+            // Opt-in. NV12->BGRA is done by the D3D11 VideoProcessor, whose
+            // matrix and range are driver-defined, so this path does NOT go
+            // through the mixer's colour management and can differ from the
+            // software path. It stays off until it is made colour-exact (by
+            // importing the NV12 planes and letting the shader convert, which
+            // core::pixel_format::nv12 now supports).
+            const bool gpu_direct_enabled =
+                env::properties().get(L"configuration.ffmpeg.producer.gpu-direct-decode", false);
+
             void* gpu_dev = frame_factory_->gpu_device_handle();
-            if (gpu_dev && vfilter_.empty()) {
+            if (!gpu_direct_enabled) {
+                declined(L"disabled (set configuration.ffmpeg.producer.gpu-direct-decode to true to enable; "
+                         L"note its colour conversion is driver-defined)");
+            } else if (!gpu_dev) {
+                declined(L"mixer exposes no OpenGL device (Vulkan backend, or GPU affinity moved it)");
+            } else if (!vfilter_.empty()) {
+                declined(L"a video filter is set (" + u16(vfilter_) + L"), which requires CPU frames");
+            } else {
                 ogl_device_ = static_cast<accelerator::ogl::device*>(gpu_dev);
 
                 // Find the video decoder with D3D11VA active
+                bool found_video = false;
                 for (auto& [idx, dec] : decoders_) {
-                    if (dec.ctx && dec.ctx->codec_type == AVMEDIA_TYPE_VIDEO &&
-                        dec.ctx->hw_device_ctx && dec.sw_pix_fmt != AV_PIX_FMT_NONE) {
+                    if (!dec.ctx || dec.ctx->codec_type != AVMEDIA_TYPE_VIDEO)
+                        continue;
 
-                        // Check progressive (field_order or container flags)
-                        auto* st = input_->streams[idx];
-                        bool is_progressive = (st->codecpar->field_order == AV_FIELD_PROGRESSIVE ||
-                                               st->codecpar->field_order == AV_FIELD_UNKNOWN);
+                    found_video = true;
 
-                        // Check framerate match
-                        auto content_fr = av_guess_frame_rate(nullptr, st, nullptr);
-                        bool fps_match = (content_fr.num * format_desc_.framerate.denominator() ==
-                                          content_fr.den * format_desc_.framerate.numerator());
-
-                        // Check auto-deinterlace setting
-                        auto deint = u8(env::properties().get<std::wstring>(
-                            L"configuration.ffmpeg.producer.auto-deinterlace", L"interlaced"));
-                        bool deint_none = (deint == "none") || is_progressive;
-
-                        if (is_progressive && fps_match && deint_none) {
-                            d3d11_bridge_ = std::make_unique<d3d11_gl_bridge>();
-                            if (d3d11_bridge_->init(dec.ctx->hw_device_ctx, gpu_dev)) {
-                                gpu_direct_video_ = true;
-                                gpu_direct_decoder_idx_ = idx;
-                                dec.gpu_direct_mode_ = true;
-                                CASPAR_LOG(info) << print()
-                                    << L" D3D11->GL GPU-direct video enabled (bypasses filter graph)";
-                            } else {
-                                d3d11_bridge_.reset();
-                            }
-                        }
-                        break; // Only one video decoder
+                    if (!dec.ctx->hw_device_ctx) {
+                        declined(L"decoder is not using D3D11VA (codec not hardware-accelerated here)");
+                        break;
                     }
+                    if (dec.sw_pix_fmt == AV_PIX_FMT_NONE) {
+                        declined(L"decoder did not resolve a hardware surface format");
+                        break;
+                    }
+
+                    // Check progressive (field_order or container flags)
+                    auto* st = input_->streams[idx];
+                    bool is_progressive = (st->codecpar->field_order == AV_FIELD_PROGRESSIVE ||
+                                           st->codecpar->field_order == AV_FIELD_UNKNOWN);
+
+                    // Check framerate match
+                    auto content_fr = av_guess_frame_rate(nullptr, st, nullptr);
+                    bool fps_match = (content_fr.num * format_desc_.framerate.denominator() ==
+                                      content_fr.den * format_desc_.framerate.numerator());
+
+                    // Check auto-deinterlace setting
+                    auto deint = u8(env::properties().get<std::wstring>(
+                        L"configuration.ffmpeg.producer.auto-deinterlace", L"interlaced"));
+                    bool deint_none = (deint == "none") || is_progressive;
+
+                    if (!is_progressive) {
+                        declined(L"content is interlaced");
+                    } else if (!fps_match) {
+                        declined(L"content framerate does not match the channel");
+                    } else if (!deint_none) {
+                        declined(L"auto-deinterlace is active");
+                    } else {
+                        d3d11_bridge_ = std::make_unique<d3d11_gl_bridge>();
+                        if (d3d11_bridge_->init(dec.ctx->hw_device_ctx, gpu_dev)) {
+                            gpu_direct_video_ = true;
+                            gpu_direct_decoder_idx_ = idx;
+                            dec.gpu_direct_mode_ = true;
+                            CASPAR_LOG(info) << print()
+                                << L" D3D11->GL GPU-direct video enabled (bypasses filter graph). "
+                                   L"NOTE: NV12->BGRA is done by the D3D11 VideoProcessor, whose matrix and "
+                                   L"range are driver-defined, so colour may differ from the software path.";
+                        } else {
+                            d3d11_bridge_.reset();
+                            declined(L"WGL_NV_DX_interop2 bridge failed to initialise");
+                        }
+                    }
+                    break; // Only one video decoder
                 }
+
+                if (!found_video)
+                    declined(L"no video decoder was created");
             }
         }
 #endif

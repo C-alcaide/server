@@ -877,6 +877,7 @@ image_mixer::create_frame(const void* tag, const core::pixel_format_desc& desc, 
 common::bit_depth image_mixer::depth() const { return impl_->depth(); }
 
 std::shared_ptr<device> image_mixer::get_ogl_device() const { return impl_->ogl_; }
+void* image_mixer::gpu_device_handle() const { return impl_->gpu_device_handle(); }
 
 void* image_mixer::native_gl_context() const { return impl_->ogl_->native_gl_context(); }
 
