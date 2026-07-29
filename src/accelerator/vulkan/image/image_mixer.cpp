@@ -675,28 +675,33 @@ struct image_mixer::impl
     {
         const auto host_state = frame.host_image_state();
 
-        if (auto core_tex = frame.texture()) {
-            auto wrapper = std::dynamic_pointer_cast<texture_wrapper>(core_tex);
+        if (!frame.textures().empty()) {
+            // Every plane must belong to this device; a partially-usable set is
+            // not usable at all, so check them all before binding any.
+            bool all_mine = true;
+            for (auto& core_tex : frame.textures()) {
+                auto native = std::dynamic_pointer_cast<texture_wrapper>(core_tex);
+                if (!native || core_tex->owner_device() == nullptr ||
+                    core_tex->owner_device() != static_cast<const void*>(vulkan_->getVkDevice())) {
+                    all_mine = false;
+                    break;
+                }
+            }
 
-            // Provenance, not just type: a wrapper from another vulkan::device
-            // carries a VkImage this device must not touch. With per-channel GPU
-            // affinity a route across GPUs delivers exactly that.
-            const bool mine = wrapper && core_tex->owner_device() != nullptr &&
-                              core_tex->owner_device() == static_cast<const void*>(vulkan_->getVkDevice());
-
-            if (mine) {
-                item.textures.emplace_back(
-                    make_ready_future(std::shared_ptr<texture>(wrapper->vk_texture())).share());
+            if (all_mine) {
+                for (auto& core_tex : frame.textures()) {
+                    auto native = std::static_pointer_cast<texture_wrapper>(core_tex);
+                    item.textures.emplace_back(make_ready_future(std::shared_ptr<texture>(native->vk_texture())).share());
+                }
                 return true;
             }
 
-            // (2) would import the foreign allocation via VK_KHR_external_memory.
-            // Not implemented; until it is, fall through to the host path so the
+            // (2) would import the foreign allocation via external memory. Not
+            // implemented; until it is, fall through to the host path so the
             // frame still draws, and say so once because it costs a readback.
             if (!foreign_texture_logged_.exchange(true)) {
-                CASPAR_LOG(warning) << L"[vk::image_mixer] frame.texture() is not usable on this device ("
-                                    << (wrapper ? L"different VkDevice -- cross-GPU route?" : L"different backend")
-                                    << L"); falling back to a host upload.";
+                CASPAR_LOG(warning) << L"[vk::image_mixer]" L" frame GPU planes are not usable on this device "
+                                       L"(different VkDevice -- cross-GPU route? -- or backend); falling back to a host upload.";
             }
         }
 

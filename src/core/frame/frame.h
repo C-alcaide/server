@@ -142,6 +142,16 @@ class const_frame final
                          array<const std::int32_t>                             audio_data,
                          const struct pixel_format_desc&                       desc,
                          std::shared_ptr<core::texture>                        texture);
+    /// Multi-plane GPU frame: the producer decoded straight into GPU memory and
+    /// the planes are still separate (Y + interleaved CbCr for a hardware NV12
+    /// decode, say). The mixer binds them as the planes of `desc`, so the shader
+    /// does the colour conversion -- which is the whole point, since a
+    /// producer-side conversion cannot use the channel's colour management.
+    explicit const_frame(const void*                                tag,
+                         std::vector<array<const std::uint8_t>>     image_data,
+                         array<const std::int32_t>                  audio_data,
+                         const struct pixel_format_desc&            desc,
+                         std::vector<std::shared_ptr<core::texture>> textures);
     const_frame(const const_frame& other);
     const_frame(mutable_frame&& other);
 
@@ -165,7 +175,13 @@ class const_frame final
 
     const array<const std::int32_t>& audio_data() const;
 
+    /// The frame's first GPU plane, or nullptr. Kept for the many callers that
+    /// only ever deal with single-plane (already converted) GPU frames.
     std::shared_ptr<core::texture> texture() const;
+
+    /// All GPU planes, in `pixel_format_desc` plane order. Empty when the frame
+    /// has no GPU-side representation.
+    const std::vector<std::shared_ptr<core::texture>>& textures() const;
 
     std::size_t width() const;
 

@@ -635,16 +635,24 @@ struct image_mixer::impl
     {
         const auto host_state = frame.host_image_state();
 
-        if (auto core_tex = frame.texture()) {
-            auto native = std::dynamic_pointer_cast<texture>(core_tex);
+        if (!frame.textures().empty()) {
+            // Every plane must belong to this device; a partially-usable set is
+            // not usable at all, so check them all before binding any.
+            bool all_mine = true;
+            for (auto& core_tex : frame.textures()) {
+                auto native = std::dynamic_pointer_cast<texture>(core_tex);
+                if (!native || core_tex->owner_device() == nullptr ||
+                    core_tex->owner_device() != static_cast<const void*>(ogl_.get())) {
+                    all_mine = false;
+                    break;
+                }
+            }
 
-            // Provenance, not just type: a wrapper from another device carries
-            // memory this device must not touch. See core::texture::owner_device.
-            const bool mine = native && core_tex->owner_device() != nullptr &&
-                              core_tex->owner_device() == static_cast<const void*>(ogl_.get());
-
-            if (mine) {
-                item.textures.emplace_back(make_ready_future(std::shared_ptr<texture>(native)).share());
+            if (all_mine) {
+                for (auto& core_tex : frame.textures()) {
+                    auto native = std::static_pointer_cast<texture>(core_tex);
+                    item.textures.emplace_back(make_ready_future(std::shared_ptr<texture>(native)).share());
+                }
                 return true;
             }
 
@@ -652,9 +660,8 @@ struct image_mixer::impl
             // implemented; until it is, fall through to the host path so the
             // frame still draws, and say so once because it costs a readback.
             if (!foreign_texture_logged_.exchange(true)) {
-                CASPAR_LOG(warning) << L"[image_mixer]" L" frame.texture() is not usable on this device ("
-                                    << (native ? L"different device -- cross-GPU route?" : L"different backend")
-                                    << L"); falling back to a host upload.";
+                CASPAR_LOG(warning) << L"[image_mixer]" L" frame GPU planes are not usable on this device "
+                                       L"(different ogl::device or backend); falling back to a host upload.";
             }
         }
 

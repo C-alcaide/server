@@ -99,7 +99,9 @@ struct const_frame::impl
     const void*                                    tag_;
     frame_geometry                                 geometry_ = frame_geometry::get_default();
     std::any                                       opaque_;
-    std::shared_ptr<core::texture>                 texture_;
+    // GPU planes in pixel_format_desc order. Single-texture frames hold exactly
+    // one; a hardware NV12 decode holds two (Y and interleaved CbCr).
+    std::vector<std::shared_ptr<core::texture>>    textures_;
 
     // Lazy readback support: if set, image_data_[0] is resolved on first access.
     mutable std::shared_future<array<const std::uint8_t>> lazy_image_;
@@ -114,7 +116,25 @@ struct const_frame::impl
         , audio_data_(std::move(audio_data))
         , desc_(desc)
         , tag_(tag)
-        , texture_(texture)
+    {
+        if (texture)
+            textures_.push_back(std::move(texture));
+
+        if (desc_.planes.size() != image_data_.size()) {
+            CASPAR_THROW_EXCEPTION(invalid_argument());
+        }
+    }
+
+    impl(const void*                                tag,
+         std::vector<array<const std::uint8_t>>     image_data,
+         array<const std::int32_t>                  audio_data,
+         const core::pixel_format_desc&             desc,
+         std::vector<std::shared_ptr<core::texture>> textures)
+        : image_data_(std::move(image_data))
+        , audio_data_(std::move(audio_data))
+        , desc_(desc)
+        , tag_(tag)
+        , textures_(std::move(textures))
     {
         if (desc_.planes.size() != image_data_.size()) {
             CASPAR_THROW_EXCEPTION(invalid_argument());
@@ -129,9 +149,11 @@ struct const_frame::impl
         : audio_data_(std::move(audio_data))
         , desc_(desc)
         , tag_(tag)
-        , texture_(texture)
         , lazy_image_(std::move(lazy_image))
     {
+        if (texture)
+            textures_.push_back(std::move(texture));
+
         // Pre-fill image_data_ with a placeholder so planes.size() == image_data_.size()
         image_data_.resize(desc_.planes.size());
     }
@@ -142,7 +164,6 @@ struct const_frame::impl
         , audio_data_(std::move(other.impl_->audio_data_))
         , desc_(std::move(other.impl_->desc_))
         , tag_(other.stream_tag())
-        , texture_(nullptr)
         , geometry_(std::move(other.impl_->geometry_))
     {
         if (desc_.planes.size() != image_data_.size() && !other.impl_->commit_) {
@@ -188,7 +209,7 @@ struct const_frame::impl
         return host_image_availability::available;
     }
 
-    std::shared_ptr<core::texture> texture() { return texture_; }
+    std::shared_ptr<core::texture> texture() { return textures_.empty() ? nullptr : textures_.front(); }
 
     std::size_t width() const { return desc_.planes.at(0).width; }
 
@@ -212,6 +233,14 @@ const_frame::const_frame(const void*                                   tag,
                          const core::pixel_format_desc&                desc,
                          std::shared_ptr<core::texture>                texture)
     : impl_(new impl(tag, std::move(lazy_image), std::move(audio_data), desc, std::move(texture)))
+{
+}
+const_frame::const_frame(const void*                                tag,
+                         std::vector<array<const std::uint8_t>>     image_data,
+                         array<const std::int32_t>                  audio_data,
+                         const core::pixel_format_desc&             desc,
+                         std::vector<std::shared_ptr<core::texture>> textures)
+    : impl_(new impl(tag, std::move(image_data), std::move(audio_data), desc, std::move(textures)))
 {
 }
 const_frame::const_frame(mutable_frame&& other)
@@ -241,6 +270,11 @@ host_image_availability          const_frame::host_image_state() const
 bool const_frame::has_host_image() const { return host_image_state() != host_image_availability::unavailable; }
 const array<const std::int32_t>& const_frame::audio_data() const { return impl_->audio_data_; }
 std::shared_ptr<core::texture>   const_frame::texture() const { return impl_->texture(); }
+const std::vector<std::shared_ptr<core::texture>>& const_frame::textures() const
+{
+    static const std::vector<std::shared_ptr<core::texture>> none;
+    return impl_ ? impl_->textures_ : none;
+}
 std::size_t                      const_frame::width() const { return impl_->width(); }
 std::size_t                      const_frame::height() const { return impl_->height(); }
 std::size_t                      const_frame::size() const { return impl_->size(); }
@@ -260,13 +294,13 @@ const_frame                      const_frame::with_tag(const void* new_tag) cons
     // them got nothing.
     const_frame new_frame;
     if (impl_->lazy_image_.valid()) {
-        new_frame = const_frame(new_tag, impl_->lazy_image_, impl_->audio_data_, impl_->desc_, impl_->texture_);
+        new_frame = const_frame(new_tag, impl_->lazy_image_, impl_->audio_data_, impl_->desc_, impl_->texture());
         // Carry over an already-resolved result so the copy does not wait again.
         new_frame.impl_->image_data_ = impl_->image_data_;
     } else {
         std::vector<array<const std::uint8_t>> image_data_copy = impl_->image_data_;
         new_frame =
-            const_frame(new_tag, std::move(image_data_copy), impl_->audio_data_, impl_->desc_, impl_->texture_);
+            const_frame(new_tag, std::move(image_data_copy), impl_->audio_data_, impl_->desc_, impl_->textures_);
     }
 
     new_frame.impl_->geometry_ = impl_->geometry_;
