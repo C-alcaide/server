@@ -238,6 +238,60 @@ the format → `pixel_format::invalid` → black frame.
 - D3D11 Video Processor handles NV12→BGRA on GPU (zero CPU involvement)
 - Fallback uses sws_scale for CPU conversion
 
+---
+
+## Phase 6: Native semi-planar upload (NV12 / P010)
+
+**Files**: `src/core/frame/pixel_format.h`, `src/modules/ffmpeg/util/av_util.cpp`,
+`src/accelerator/{ogl/image/shader.frag,vulkan/image/fragment_shader.frag}`,
+`src/core/frame/write_frame.cpp`
+
+**Before:** a hardware-decoded frame arrives semi-planar (Y plane + interleaved
+Cb/Cr plane) and was *described* as three planar planes, so `make_frame`
+deinterleaved the chroma — and for P010 shifted every sample `>>6` — two bytes at
+a time on TBB workers, into persistently-mapped `GL_MAP_COHERENT_BIT` memory.
+That is uncached write-combining memory on discrete GPUs, where narrow scattered
+writes from several threads defeat the write-combine buffers. One full-frame CPU
+pass per decoded frame, purely to reshape data the GPU can sample directly.
+
+**After:** `core::pixel_format::nv12` describes the decoder's own layout — plane 0
+Y, plane 1 Cb/Cr at half resolution with stride 2 — which both backends already
+support as RG8/RG16 textures. Both shaders read `.r` and `.rg`. `make_frame` is a
+straight per-plane row copy for every format.
+
+> **Enum ordering is load-bearing:** the mixer shaders `switch` on
+> `pixel_format`'s *numeric* value. New formats must be **appended** before
+> `count`; inserting one silently reinterprets every format after it.
+
+**P010 needs no arithmetic.** Its 10 bits are high-aligned in each 16-bit word, so
+`raw/65535` is already the correct normalised value. Declaring the planes `bit16`
+(not `bit10`) selects `precision_factor = 1.0` and the normalisation is exact.
+`bit10` would apply the ×64 scale meant for low-aligned planar 10-bit.
+
+### Parity method (reusable for any pixel-path change)
+
+The A/B that validated this is worth repeating for future work, because it is the
+only way to distinguish "different" from "wrong":
+
+1. **Use a *static* source.** The first attempt used `testsrc2`, which is
+   animated; the captures were of different frames and every comparison was
+   meaningless noise (~24 dB against everything). `smptehdbars` is static.
+2. **A/B the same backend against the previous implementation**, by stashing just
+   the changed file and rebuilding that one module. This is the measurement that
+   actually answers "did I change the picture?".
+3. **Attribute any cross-backend difference with a matched control** — the same
+   content and subsampling through a code path the change did not touch.
+
+Results for this phase:
+
+| Comparison | Result |
+|---|---|
+| NV12 (H.264 8-bit), old vs new implementation | **byte-exact identical** |
+| P010 (HEVC 10-bit), old vs new | 0.49% of samples differ by exactly 1 LSB at 8-bit output, PSNR 71.2 dB — the new path is *more* accurate, since the old `>>6` discarded the low 6 bits. A scale error is excluded: the delta is 1 LSB regardless of sample value |
+| 16-bit channel, P010 | full 0..65535 range, correct scale, both backends |
+| OGL vs VK on the new path | 49.58 dB, max 17.51% |
+| **Control**: OGL vs VK on the *unchanged* planar 4:2:0 path | 49.56 dB, max 16.94% — i.e. the cross-backend difference is pre-existing chroma sampling at hard edges, not introduced here |
+
 ### Filter Graph Constraint
 - **Critical:** `bwdif` (deinterlace) and `fps` filters require CPU frames
 - GPU-direct path only viable for progressive, native-framerate sources
