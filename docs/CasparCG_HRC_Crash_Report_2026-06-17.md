@@ -228,6 +228,34 @@ The relevant CasparCG code was diffed against the 2.5.0 tag. The conclusion is t
 
 ---
 
+## 8.3 State of these fixes in CasparVP (updated 2026-07-29)
+
+The analysis below targets upstream `v2.4.3-stable`. This fork has since been
+audited against it and the structural fixes applied:
+
+| §9.1 fix | State in `CasparVPV` |
+|---|---|
+| **1** — unbounded detached teardown thread per producer | **Fixed.** `~ffmpeg_producer` now hands teardown to a bounded pool of four `executor`s, so a mass `CLEAR`/`REMOVE` can no longer run N concurrent ffmpeg teardowns against the shared heap. Queue depth is logged if it backs up. |
+| **2** — `CASPAR_VERIFY(destroyer->size() < 8)` throwing from a destructor | **Fixed.** Logs the backlog instead. The queue is deliberately unbounded, so the assert protected nothing and terminated the process during unwinding. |
+| **3** — implicit member-destruction order in `~Impl` | **Fixed.** Explicit ordered quiesce: input abort → join run thread → stop filter executors → `sources_` → filter graphs → decoders, each stage exception-guarded. |
+| **4a** — `Decoder` worker reading its own `thread` member | **Fixed.** The loop tests an explicit `std::atomic<bool> abort_`, which is also part of both queue wait predicates so teardown no longer depends on an interruption point firing. |
+| **4b** — per-loop `decoders_.clear()` + full pipeline rebuild | **Already diverged before this audit.** `seek_internal()` in this fork calls `Decoder::flush()` per decoder, keeping decoder threads and codec contexts alive across a loop wrap. The expensive half of 4b — thread create/join and codec-context churn on every loop — does not happen here. |
+
+**What remains of 4b, and why it is not being changed blindly:** a loop wrap
+still calls `reset()`, which rebuilds both `Filter` graphs
+(`avfilter_graph_alloc`/`free`). That is far cheaper than the decoder churn, and
+it is not gratuitous: the graph bakes in `start_time` (the `fps` filter uses it
+to map pts), so reusing a graph across a seek would change pts mapping at the
+loop point. Reusing it is only safe when the graph has no start-time-dependent
+filter. Until a soak test shows filter-graph churn is actually material on this
+fork, the risk to loop-point A/V timing outweighs the gain.
+
+**Still open, independent of the above:** the mixed-allocator vector in §8.2
+(`tbbmalloc_proxy` overriding global `malloc`/`free` while DeckLink, NVIDIA,
+CEF and FreeImage allocate and free across DLL boundaries). Worth a one-off
+experiment — build without the proxy, soak — now that the producer-lifecycle
+defects are closed.
+
 ## 9. Where a code fix would be needed (CasparCG)
 
 Three structural locations in the CasparCG source (`CasparCG/server`), in priority order:
