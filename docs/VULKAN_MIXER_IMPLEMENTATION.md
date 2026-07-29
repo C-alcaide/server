@@ -105,6 +105,69 @@ All GPU work is serialized onto a single `boost::asio::io_context` thread
 `dispatch_sync()` to enqueue work. This avoids external synchronization
 around the VkDevice.
 
+#### 2.5.1 Is one thread per GPU a scaling wall? — measured 2026-07-29
+
+The claim above ("avoids external synchronization") is a design convenience,
+not a Vulkan requirement, and it was reasonable to suspect that funnelling
+every channel's uploads, composition, LUT passes and readback through one
+thread would become a bottleneck on a multi-channel server. That suspicion was
+argued from the code and never measured. It is now instrumented — the device
+publishes `vk.dispatch.*` and `vk.dispatch_by_kind.*` in `info()`, which
+`GL INFO` returns (its error message says OpenGL only; the code path is
+generic and works for both backends).
+
+Measured on the RTX A4000, `bars.mov` looping on layer 10 of every channel,
+one NDI consumer per channel so composition *and* readback actually run
+(with no consumer at all the channel skips both, and only the upload path is
+exercised — an easy way to measure nothing):
+
+| | 4 × 1080p50 | 8 × 1080p50 |
+|---|---|---|
+| dispatch items | 19.5 k | 37.4 k |
+| wall-clock busy | 22.0 % | 77.7 % |
+| **actual thread CPU** | **5.4 %** | **9.7 %** |
+| queue wait, mean | 0.66 ms | 7.5 ms |
+| composition (`other`) | 19.6 % wall | 72.3 % wall |
+| uploads | 3.0 % wall | 4.5 % wall |
+| readback | 0.7 % wall | 0.9 % wall |
+
+**Conclusion: the thread is not the bottleneck, and adding threads to it would
+not help.** At eight 1080p50 channels it consumes under 10 % of one core while
+*appearing* 78 % busy. The gap between the two is time an item spent in
+progress but not executing — the thread descheduled on an oversubscribed
+machine (eight NDI encoders compressing 1080p50 alongside eight channel
+threads), or blocked inside `vkQueueSubmit` when the GPU is behind. Neither is
+relieved by per-thread command pools.
+
+This is why both numbers are published. A wall-clock figure alone would have
+made the thread look nearly saturated at eight channels and sent the next round
+of work in exactly the wrong direction.
+
+Two further findings from the same run:
+
+- **All the alarming peaks are startup transients.** Composition shows a
+  ~40–75 ms `exec_peak`, but across a second 16-second window with 5 500 more
+  composition items, 12 000 more uploads and 2 700 more readbacks, no peak
+  grew. They are one-off pipeline creation and first-allocation costs, not
+  steady-state stalls. Any peak reported by this instrumentation should be
+  re-checked against a second sample before it is believed.
+- **Command-buffer recycling is healthy.** `submitSingleTimeCommands` reclaims
+  at most one finished buffer per call and only if the *oldest* has completed,
+  which looks like it could never recover from a burst. Measured, it is fine:
+  99.8–99.9 % reuse, with the in-flight deque settling at 23 buffers (4 ch) and
+  40 (8 ch). Published as `vk.cmd_buffers.*`. A hypothesis worth having and
+  worth discarding.
+
+**Consequence for the transfer-queue and parallel-recording work.** Transfers
+are 4–5 % of this thread's wall-clock time and composition is the rest, so
+moving staging and readback to a transfer queue cannot buy much *CPU* time, and
+per-thread command recording targets a thread with 90 % of a core spare. Both
+are deferred. The one case still open is GPU-side DMA parallelism — whether the
+copy engines sitting idle actually costs throughput — and this instrumentation
+cannot answer that, because it measures the CPU side only. Deciding it needs GPU
+timestamps (`vkCmdWriteTimestamp2` around the copy and composition passes). Do
+that measurement before writing any queue-ownership barriers.
+
 ---
 
 ## 3. Graphics Pipeline

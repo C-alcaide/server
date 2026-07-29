@@ -159,6 +159,193 @@ struct device::impl : public std::enable_shared_from_this<impl>
     std::thread                            thread_;
     std::thread::id                        thread_id_;
 
+    // ── Dispatch-thread instrumentation ──────────────────────────────────
+    // Every upload, composition pass, LUT pass and readback for every channel
+    // on this GPU is funnelled onto one io_context on one thread.
+    // VULKAN_MIXER_IMPLEMENTATION.md defends that as avoiding external
+    // synchronisation, and the plan to add a transfer queue and per-thread
+    // command recording assumes the thread is a scaling wall. Both positions
+    // were argued from the code, never measured, so measure them:
+    //
+    //   wait   -- how long work sits enqueued before the thread picks it up.
+    //             Near zero means there is no contention to relieve.
+    //   exec   -- how long it then takes.
+    //   busy   -- share of wall-clock the thread spends executing. Approaching
+    //             100% is the only thing that makes parallel recording urgent.
+    //   depth  -- peak simultaneous outstanding work.
+    //
+    // Published under vk.dispatch.* in info(), which "GL INFO" returns for both
+    // backends (its message says OpenGL only; the path is generic).
+    // Split by kind, because the aggregate cannot tell a saturated thread from an
+    // idle one held up by one long item -- and those want opposite fixes.
+    enum class dispatch_kind
+    {
+        other = 0, // composition, LUT passes, allocation, gc
+        upload,    // host -> device staging copies
+        readback,  // device -> host, including the wait for it to complete
+        count_
+    };
+    static const wchar_t* kind_name(dispatch_kind k)
+    {
+        switch (k) {
+            case dispatch_kind::upload:
+                return L"upload";
+            case dispatch_kind::readback:
+                return L"readback";
+            default:
+                return L"other";
+        }
+    }
+
+    struct dispatch_stats
+    {
+        std::atomic<int64_t>  depth{0};
+        std::atomic<int64_t>  depth_peak{0};
+        std::atomic<uint64_t> count{0};
+        std::atomic<uint64_t> wait_us{0};
+        std::atomic<uint64_t> wait_us_peak{0};
+        std::atomic<uint64_t> exec_us{0};
+        std::atomic<uint64_t> exec_us_peak{0};
+    };
+    mutable dispatch_stats stats_;
+    mutable std::array<dispatch_stats, static_cast<size_t>(dispatch_kind::count_)> kind_stats_;
+    std::chrono::steady_clock::time_point stats_since_{std::chrono::steady_clock::now()};
+
+    // Command-buffer recycling health. submitSingleTimeCommands reclaims at most
+    // one finished buffer per call, and only if the *oldest* has completed, so the
+    // in-flight deque can never shrink faster than it grows. Track both the depth
+    // and how often we had to allocate a fresh buffer instead of reusing one --
+    // a rising allocation rate is what a failing recycler looks like from outside.
+    // Written only from the dispatch thread; read from info() on another, hence
+    // atomic.
+    std::atomic<int64_t>  cmd_buffers_inflight_{0};
+    std::atomic<uint64_t> cmd_buffers_allocated_{0};
+    std::atomic<uint64_t> cmd_buffers_reused_{0};
+
+    void* thread_native_handle_ = nullptr;
+
+    /// CPU time actually consumed by the dispatch thread, in microseconds, or 0
+    /// if unavailable. Distinguishes "this thread is the bottleneck" from "this
+    /// machine is oversubscribed and the thread cannot get scheduled".
+    uint64_t dispatch_thread_cpu_us() const
+    {
+#ifdef _WIN32
+        FILETIME creation{}, exit{}, kernel{}, user{};
+        if (thread_native_handle_ &&
+            GetThreadTimes(reinterpret_cast<HANDLE>(thread_native_handle_), &creation, &exit, &kernel, &user)) {
+            const auto to_us = [](const FILETIME& ft) {
+                return ((static_cast<uint64_t>(ft.dwHighDateTime) << 32) | ft.dwLowDateTime) / 10ULL;
+            };
+            return to_us(kernel) + to_us(user);
+        }
+#endif
+        return 0;
+    }
+
+    template <typename T>
+    static void atomic_max(std::atomic<T>& target, T value)
+    {
+        auto prev = target.load(std::memory_order_relaxed);
+        while (prev < value && !target.compare_exchange_weak(prev, value, std::memory_order_relaxed))
+            ;
+    }
+
+    /// Wraps a dispatch handler so its queue wait and execution time are
+    /// recorded. Returns a move-only handler, which is what asio wants anyway.
+    template <typename Handler>
+    auto instrument(Handler&& handler, dispatch_kind kind = dispatch_kind::other)
+    {
+        auto&      kstats   = kind_stats_[static_cast<size_t>(kind)];
+        const auto enqueued = std::chrono::steady_clock::now();
+        atomic_max<int64_t>(stats_.depth_peak, stats_.depth.fetch_add(1, std::memory_order_relaxed) + 1);
+        atomic_max<int64_t>(kstats.depth_peak, kstats.depth.fetch_add(1, std::memory_order_relaxed) + 1);
+
+        return [this, &kstats, enqueued, handler = std::forward<Handler>(handler)]() mutable {
+            const auto started = std::chrono::steady_clock::now();
+            // Decrement and record even if the handler throws: a leaked depth
+            // count would make the queue look permanently backed up.
+            struct finish_guard
+            {
+                dispatch_stats*                       all;
+                dispatch_stats*                       kind;
+                std::chrono::steady_clock::time_point started;
+                ~finish_guard()
+                {
+                    const auto exec_us = static_cast<uint64_t>(
+                        std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() -
+                                                                             started)
+                            .count());
+                    for (auto* s : {all, kind}) {
+                        s->exec_us.fetch_add(exec_us, std::memory_order_relaxed);
+                        atomic_max<uint64_t>(s->exec_us_peak, exec_us);
+                        s->depth.fetch_sub(1, std::memory_order_relaxed);
+                    }
+                }
+            } guard{&stats_, &kstats, started};
+
+            const auto wait_us = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(started - enqueued).count());
+            for (auto* s : {&stats_, &kstats}) {
+                s->wait_us.fetch_add(wait_us, std::memory_order_relaxed);
+                atomic_max<uint64_t>(s->wait_us_peak, wait_us);
+                s->count.fetch_add(1, std::memory_order_relaxed);
+            }
+
+            handler();
+        };
+    }
+
+    void publish_dispatch_stats(boost::property_tree::wptree& info) const
+    {
+        const auto window_us = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - stats_since_)
+                .count());
+
+        const auto publish = [&](const std::wstring& prefix, const dispatch_stats& s) {
+            const auto count   = s.count.load(std::memory_order_relaxed);
+            const auto exec_us = s.exec_us.load(std::memory_order_relaxed);
+            const auto wait_us = s.wait_us.load(std::memory_order_relaxed);
+
+            info.add(prefix + L".count", count);
+            info.add(prefix + L".depth", s.depth.load(std::memory_order_relaxed));
+            info.add(prefix + L".depth_peak", s.depth_peak.load(std::memory_order_relaxed));
+            info.add(prefix + L".wait_avg_us", count ? wait_us / count : 0);
+            info.add(prefix + L".wait_peak_us", s.wait_us_peak.load(std::memory_order_relaxed));
+            info.add(prefix + L".exec_avg_us", count ? exec_us / count : 0);
+            info.add(prefix + L".exec_peak_us", s.exec_us_peak.load(std::memory_order_relaxed));
+            // A double, not integer percent: an idle thread is the expected answer
+            // on a lightly loaded server, and "0" cannot tell 0.4% from 0.004%.
+            info.add(prefix + L".busy_percent",
+                     window_us ? (static_cast<double>(exec_us) * 100.0) / static_cast<double>(window_us) : 0.0);
+            info.add(prefix + L".exec_total_ms", exec_us / 1000);
+        };
+
+        publish(L"vk.dispatch", stats_);
+        info.add(L"vk.dispatch.window_ms", window_us / 1000);
+
+        // busy_percent above is wall-clock: it counts time an item was in
+        // progress, including time the thread was preempted. cpu_percent is the
+        // thread's own CPU consumption. When the two diverge, the thread is
+        // waiting or descheduled rather than working, and giving it more threads
+        // to record on would not help.
+        const auto cpu_us = dispatch_thread_cpu_us();
+        info.add(L"vk.dispatch.cpu_total_ms", cpu_us / 1000);
+        info.add(L"vk.dispatch.cpu_percent",
+                 window_us ? (static_cast<double>(cpu_us) * 100.0) / static_cast<double>(window_us) : 0.0);
+
+        const auto allocated = cmd_buffers_allocated_.load(std::memory_order_relaxed);
+        const auto reused    = cmd_buffers_reused_.load(std::memory_order_relaxed);
+        info.add(L"vk.cmd_buffers.inflight", cmd_buffers_inflight_.load(std::memory_order_relaxed));
+        info.add(L"vk.cmd_buffers.allocated", allocated);
+        info.add(L"vk.cmd_buffers.reused", reused);
+        info.add(L"vk.cmd_buffers.reuse_percent",
+                 (allocated + reused) ? (static_cast<double>(reused) * 100.0) / static_cast<double>(allocated + reused)
+                                      : 0.0);
+
+        for (size_t i = 0; i < kind_stats_.size(); ++i)
+            publish(std::wstring(L"vk.dispatch_by_kind.") + kind_name(static_cast<dispatch_kind>(i)), kind_stats_[i]);
+    }
+
     explicit impl(int gpu_index)
         : work_(make_work_guard(io_context_))
     {
@@ -353,6 +540,11 @@ struct device::impl : public std::enable_shared_from_this<impl>
             set_thread_name(L"Vulkan Device");
             io_context_.run();
         });
+        // Kept so busy_percent can be reported as real CPU time, not wall time.
+        // On a server whose consumers are compressing video, the dispatch thread
+        // spends part of every item descheduled, and a wall-clock measurement
+        // charges that to Vulkan.
+        thread_native_handle_ = reinterpret_cast<void*>(thread_.native_handle());
     }
 
     ~impl()
@@ -407,14 +599,14 @@ struct device::impl : public std::enable_shared_from_this<impl>
     }
 
     template <typename Func>
-    auto dispatch_async(Func&& func)
+    auto dispatch_async(Func&& func, dispatch_kind kind = dispatch_kind::other)
     {
         using result_type = decltype(func());
         using task_type   = std::packaged_task<result_type()>;
 
         auto task   = task_type(std::forward<Func>(func));
         auto future = task.get_future();
-        boost::asio::dispatch(io_context_, std::move(task));
+        boost::asio::dispatch(io_context_, instrument(std::move(task), kind));
         return future;
     }
 
@@ -450,6 +642,7 @@ struct device::impl : public std::enable_shared_from_this<impl>
                 cmd_buffer = _transfer_cmd_buffers.front().cmd;
                 cmd_buffer.reset();
                 _transfer_cmd_buffers.pop_front();
+                cmd_buffers_reused_.fetch_add(1, std::memory_order_relaxed);
             }
         }
 
@@ -461,6 +654,7 @@ struct device::impl : public std::enable_shared_from_this<impl>
             allocInfo.commandBufferCount = 1;
 
             cmd_buffer = _device.allocateCommandBuffers(allocInfo)[0];
+            cmd_buffers_allocated_.fetch_add(1, std::memory_order_relaxed);
         }
 
         cmd_buffer.begin(vk::CommandBufferBeginInfo{vk::CommandBufferUsageFlagBits::eOneTimeSubmit});
@@ -478,6 +672,7 @@ struct device::impl : public std::enable_shared_from_this<impl>
         _queue.submit(submitInfo);
 
         _transfer_cmd_buffers.push_back({cmd_buffer, signal_value});
+        cmd_buffers_inflight_.store(static_cast<int64_t>(_transfer_cmd_buffers.size()), std::memory_order_relaxed);
 
         return signal_value;
     }
@@ -661,7 +856,8 @@ struct device::impl : public std::enable_shared_from_this<impl>
     std::future<std::shared_ptr<texture>>
     copy_async(const array<const uint8_t>& source, int width, int height, int stride, common::bit_depth depth)
     {
-        return dispatch_async([this, source, width, height, stride, depth]() {
+        return dispatch_async(
+            [this, source, width, height, stride, depth]() {
             std::shared_ptr<buffer> buf;
 
             // The array may already carry the staging buffer it was written into
@@ -714,13 +910,15 @@ struct device::impl : public std::enable_shared_from_this<impl>
             // No need to wait here, GPU-GPU deps (the usage of this texture on the device) are enforced by the memory
             // barriers
             return tex;
-        });
+            },
+            dispatch_kind::upload);
     }
 
     std::future<std::shared_ptr<texture>>
     copy_compressed_async(const array<const uint8_t>& source, int width, int height, vk::Format format)
     {
-        return dispatch_async([this, source, width, height, format]() {
+        return dispatch_async(
+            [this, source, width, height, format]() {
             std::shared_ptr<buffer> buf;
 
             auto tmp = source.storage<std::shared_ptr<buffer>>();
@@ -798,12 +996,14 @@ struct device::impl : public std::enable_shared_from_this<impl>
             });
 
             return tex;
-        });
+            },
+            dispatch_kind::upload);
     }
 
     std::future<array<const uint8_t>> copy_async(const std::shared_ptr<texture>& source)
     {
-        auto f = dispatch_async([this, source]() -> std::pair<std::shared_ptr<buffer>, uint64_t> {
+        auto f = dispatch_async(
+            [this, source]() -> std::pair<std::shared_ptr<buffer>, uint64_t> {
             auto buf = create_buffer(source->size(), false);
 
             vk::CopyImageToBufferInfo2 copyInfo{};
@@ -833,7 +1033,8 @@ struct device::impl : public std::enable_shared_from_this<impl>
             });
 
             return {buf, signal_value};
-        });
+            },
+            dispatch_kind::readback);
 
         return std::async(std::launch::deferred, [this, f = std::move(f)]() mutable {
             auto [buf, signal_value] = f.get();
@@ -933,6 +1134,8 @@ struct device::impl : public std::enable_shared_from_this<impl>
         info.add(L"gl.summary.pooled_host_buffers.total_read_size", total_read_size);
         info.add(L"gl.summary.pooled_host_buffers.total_write_size", total_write_size);
         info.add_child(L"gl.summary.all_host_buffers", buffer::info());
+
+        publish_dispatch_stats(info);
 
         return info;
     }
@@ -1076,7 +1279,10 @@ std::future<array<const uint8_t>> device::copy_async(const std::shared_ptr<textu
 {
     return impl_->copy_async(source);
 }
-void device::dispatch(std::function<void()> func) { boost::asio::dispatch(impl_->io_context_, std::move(func)); }
+void device::dispatch(std::function<void()> func)
+{
+    boost::asio::dispatch(impl_->io_context_, impl_->instrument(std::move(func)));
+}
 std::wstring                 device::version() const { return impl_->version(); }
 boost::property_tree::wptree device::info() const { return impl_->info(); }
 std::future<void>            device::gc() { return impl_->gc(); }
