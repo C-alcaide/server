@@ -46,7 +46,9 @@
 #include <tbb/concurrent_queue.h>
 #include <tbb/concurrent_unordered_map.h>
 
+#include <algorithm>
 #include <array>
+#include <chrono>
 #include <future>
 #include <thread>
 
@@ -72,6 +74,14 @@ struct device::impl : public std::enable_shared_from_this<impl>
     decltype(make_work_guard(io_context_)) work_;
     std::thread                            thread_;
     std::thread::id                        thread_id_;
+
+    // ── GPU→CPU readback wait prediction ──
+    // Rolling estimate of how long a readback takes, so copy_async can sleep for
+    // about that long instead of polling on a fixed cadence. Published through
+    // info() as gl.summary.readback_predicted_us.
+    static constexpr int64_t fine_poll_us          = 250;
+    static constexpr int64_t max_predicted_wait_us = 100'000;
+    std::atomic<int64_t>     readback_us_{0};
 
     impl()
         : context_(new device_context())
@@ -267,11 +277,30 @@ struct device::impl : public std::enable_shared_from_this<impl>
 
             GL(glFlush());
 
+            // Wait for the readback by yielding to the io_context between checks,
+            // never by blocking: this runs on the single GL thread, so blocking it
+            // would stall every other channel's uploads and composition too.
+            //
+            // The wait used to be a flat 2 ms poll, which cost up to 2 ms of
+            // latency per frame per channel and woke the thread on a fixed cadence
+            // regardless of how long the copy actually takes. Readback duration is
+            // very stable for a given resolution, so predict it: sleep for roughly
+            // the last measured duration, then poll finely. Warm, this lands within
+            // a few hundred microseconds of completion after a single wakeup.
+            const auto start = std::chrono::steady_clock::now();
+
+            auto predicted_us = readback_us_.load(std::memory_order_relaxed);
+            // Undershoot the prediction so the fine poll converges from below
+            // rather than overshooting into added latency.
+            auto first_wait_us = predicted_us > fine_poll_us ? predicted_us - fine_poll_us : 0;
+
             deadline_timer timer(io_context_);
-            for (auto n = 0; true; ++n) {
-                // TODO (perf) Smarter non-polling solution?
-                timer.expires_from_now(boost::posix_time::milliseconds(2));
-                timer.async_wait(yield);
+            for (auto n = 0;; ++n) {
+                const auto wait_us = n == 0 ? first_wait_us : fine_poll_us;
+                if (wait_us > 0) {
+                    timer.expires_from_now(boost::posix_time::microseconds(wait_us));
+                    timer.async_wait(yield);
+                }
 
                 auto wait = glClientWaitSync(fence, 0, 1);
                 if (wait == GL_ALREADY_SIGNALED || wait == GL_CONDITION_SATISFIED) {
@@ -280,6 +309,25 @@ struct device::impl : public std::enable_shared_from_this<impl>
             }
 
             glDeleteSync(fence);
+
+            const auto elapsed_us = static_cast<int64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start)
+                    .count());
+
+            // Asymmetric moving average. Sleeping for a prediction that is too
+            // LONG turns directly into output latency, so track downwards fast
+            // (weight 1/2) and upwards slowly (weight 1/8): an abrupt drop in
+            // GPU load converges in two or three frames, while a one-off
+            // scheduling spike barely moves the estimate.
+            int64_t next;
+            if (predicted_us == 0) {
+                next = elapsed_us;
+            } else if (elapsed_us < predicted_us) {
+                next = (predicted_us + elapsed_us) / 2;
+            } else {
+                next = (predicted_us * 7 + elapsed_us) / 8;
+            }
+            readback_us_.store(std::clamp<int64_t>(next, 0, max_predicted_wait_us), std::memory_order_relaxed);
 
             auto ptr  = reinterpret_cast<uint8_t*>(buf->data());
             auto size = buf->size();
@@ -369,6 +417,7 @@ struct device::impl : public std::enable_shared_from_this<impl>
         info.add(L"gl.summary.pooled_host_buffers.total_read_size", total_read_size);
         info.add(L"gl.summary.pooled_host_buffers.total_write_size", total_write_size);
         info.add_child(L"gl.summary.all_host_buffers", buffer::info());
+        info.add(L"gl.summary.readback_predicted_us", readback_us_.load(std::memory_order_relaxed));
 
         return info;
     }
