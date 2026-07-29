@@ -144,6 +144,10 @@ bool write_frame_png(const const_frame& frame, const std::wstring& path)
 
             if (desc.format == pixel_format::bgra || desc.format == pixel_format::rgba ||
                 desc.format == pixel_format::argb || desc.format == pixel_format::abgr) {
+                if (plane0.size() < num_pixels * 8) {
+                    CASPAR_LOG(warning) << L"write_frame_png: HBD plane too small for dimensions";
+                    return false;
+                }
                 const auto* src16 = reinterpret_cast<const uint16_t*>(plane0.data());
                 for (size_t i = 0; i < num_pixels; ++i) {
                     uint16_t r, g, b, a;
@@ -302,6 +306,10 @@ bool write_frame_png(const const_frame& frame, const std::wstring& path)
 
         if (desc.format == pixel_format::bgra || desc.format == pixel_format::rgba ||
             desc.format == pixel_format::argb || desc.format == pixel_format::abgr) {
+            if (plane0.size() < num_pixels * 4) {
+                CASPAR_LOG(warning) << L"write_frame_png: plane too small for dimensions";
+                return false;
+            }
             const auto* src = plane0.data();
             auto*       dst = rgba.data();
             if (desc.format == pixel_format::bgra) {
