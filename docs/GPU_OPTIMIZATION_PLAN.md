@@ -629,6 +629,74 @@ independently provides value.
 
 ---
 
+## Is sequential layer receive a bottleneck? — measured 2026-07-29
+
+`stage::receive` pulls layers one at a time on the stage executor. The standing
+proposal was a `prefetching_producer` decorator with a bounded queue plus
+parallel fan-out across layers, on the premise that one producer blocking in
+`receive()` costs the channel its frame for every consumer.
+
+Worth separating two cases first, because only one of them is a hazard:
+
+- A producer returning an **empty** frame is already harmless.
+  [layer.cpp](../src/core/producer/layer.cpp) substitutes `last_frame()`.
+- A producer that **waits** — stalled read, CEF paint, a lock held by a decoder —
+  delays every later layer in the loop.
+
+The stage now measures the second case and publishes it under `receive` in
+channel state (`INFO <ch>`): `tick_avg_us`, `tick_peak_us`, `budget_percent`,
+`peak_budget_percent`, `layers`, and `slowest_layer` / `slowest_producer` /
+`slowest_avg_us` / `slowest_peak_us` so a blocking producer can be named rather
+than suspected. Recomputed once a second, re-emitted every tick (see the note in
+the code about why both).
+
+Measured at 1080p50 — 20 ms budget — with an NDI consumer attached so
+composition and readback actually run, `bars.mov` looping on every layer:
+
+| layers | receive avg | of budget | receive peak | of budget | **actual tick** | late frames |
+|---|---|---|---|---|---|---|
+| 0 (idle) | 0 | 0 % | 0 | 0 % | 20.00 ms | 1 / 687 |
+| 1 | 90 µs | 0.45 % | 149 µs | 0.74 % | 20.00 ms | 4 / 1347 |
+| 6 (mixed file+colour) | 225 µs | 1.1 % | 446 µs | 2.2 % | 20.00 ms | 89 / 2848 |
+| 8 | 846 µs | 4.2 % | 6.9 ms | 34.6 % | 20.00 ms | 67 / 2113 |
+| 16 | 932 µs | 4.7 % | 6.6 ms | 33.2 % | **30.61 ms** | 457 / 4205 |
+| 24 | 1394 µs | 7.0 % | 6.8 ms | 34.2 % | **45.72 ms** | 845 / 5030 |
+
+**Conclusion: the premise does not hold in this tree, and the decorator is not
+justified.** The decisive rows are the last two. At 24 concurrent file producers
+the channel has collapsed to 45.7 ms per tick against a 20 ms nominal — less
+than half rate, 845 late frames — and `stage::receive` accounts for **1.4 ms of
+those 45.7, about 3 %**. The other 97 % is composition, readback, the consumer,
+and decode threads competing for CPU. Parallelising layer receive would address
+3 % of the problem, at the price of a frame of added latency per decorated
+producer and of the deliberate sources-before-routes ordering
+(`orderSourceLayers`) and the single-threaded keyframe invariant
+(`KEYFRAMES.md`). Sequential receive costs between 0.5 % and 7 % of the frame
+across every load tested.
+
+**What would reverse this.** `receive/budget_percent` large while
+`timing/consume_load` (see `PORTAUDIO_MODULE.md`) is small — time genuinely going
+into pulling layers rather than into the consumer. Not observed at any load
+here. The figures are published precisely so this stays falsifiable in a real
+deployment rather than being re-argued from the code.
+
+Two cautions for anyone repeating the measurement:
+
+- **Attach a consumer.** With no consumer the channel skips composition *and*
+  readback, and `output.cpp` publishes no timing block at all — so the load is
+  unrepresentative and "did we miss frames?" is unanswerable. Measured without
+  one, 16 layers showed a receive peak of *108 %* of the frame budget; with a
+  consumer attached the same scenario shows 33 %. The uncomfortable-looking
+  number came from the less realistic configuration.
+- **Peaks are worst at the edge of capacity, not past it.** 8 layers peaks
+  higher than 24 relative to how much trouble the channel is in, because a
+  producer that has fallen behind returns empty immediately (cheap), while one
+  just barely keeping up is the one that waits.
+
+Harness: `CasparCG-TestRunner/vkdispatch/` sibling, `recv_probe.py`.
+
+---
+
 ## NDI Advanced SDK Assessment
 
 ### Availability

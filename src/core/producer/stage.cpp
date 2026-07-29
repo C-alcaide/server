@@ -40,8 +40,10 @@
 #include <boost/range/adaptors.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <functional>
 #include <future>
+#include <iterator>
 #include <map>
 #include <set>
 #include <vector>
@@ -83,6 +85,53 @@ struct stage::impl : public std::enable_shared_from_this<impl>
     // refresh) instead of rebuilding ~33 monitor::state keys per layer per tick.
     std::map<int, core::projection> osc_projection_last_;
     std::set<int>                  osc_projection_ever_;
+
+    // ── Per-layer receive timing (stage executor only) ──────────────────────
+    // Layers are pulled sequentially below, so a producer that *blocks* inside
+    // receive() delays every later layer and the channel's whole tick. Note that
+    // a producer returning an *empty* frame is already harmless: layer::receive
+    // substitutes last_frame(). The hazard is specifically a producer that
+    // waits -- a stalled network read, a CEF paint, a lock held by a decoder.
+    //
+    // Whether any producer in this tree actually does that is an empirical
+    // question, and it decides whether a prefetch decorator plus parallel layer
+    // fan-out is worth its costs (a frame of added latency per decorated
+    // producer, and giving up the deliberate sources-before-routes ordering).
+    // So measure it before building it.
+    //
+    // Published under "receive" on the refresh tick only. Publishing per-tick
+    // timings every tick would defeat the change-driven projection publication
+    // directly above, which exists precisely to keep this state cheap.
+    struct receive_timing
+    {
+        uint64_t count    = 0;
+        uint64_t total_us = 0;
+        uint64_t peak_us  = 0;
+    };
+    std::map<int, receive_timing> receive_timings_;
+    uint64_t                      receive_tick_us_      = 0; // current tick, all layers
+    uint64_t                      receive_tick_peak_us_ = 0; // worst tick in the window
+    uint64_t                      receive_window_us_    = 0; // summed across ticks
+    uint64_t                      receive_window_ticks_ = 0;
+
+    // Last computed figures. `state_` is rebuilt from scratch every tick, so the
+    // values have to be re-emitted every tick even though they are only
+    // recomputed once a second -- otherwise they are visible in one tick out of
+    // 25 and any reader sees them only by luck.
+    struct receive_published
+    {
+        bool         valid = false;
+        uint64_t     tick_avg_us  = 0;
+        uint64_t     tick_peak_us = 0;
+        double       budget_percent      = 0.0;
+        double       peak_budget_percent = 0.0;
+        int32_t      layers              = 0;
+        int          slowest_layer       = -1;
+        uint64_t     slowest_avg_us      = 0;
+        uint64_t     slowest_peak_us     = 0;
+        std::wstring slowest_producer;
+    };
+    receive_published receive_published_;
 
   private:
     /// Records a failure for `index` and logs it (first failure, then every
@@ -268,6 +317,8 @@ struct stage::impl : public std::enable_shared_from_this<impl>
                 // This will risk some stutter for freshly created producers, but it lets us tick at 25hz and avoids
                 // amcp changes starting on the second field
 
+                receive_tick_us_ = 0;
+
                 for (auto& l : layerVec) {
                     auto p = layers_.find(l.first);
                     if (p == layers_.end())
@@ -287,6 +338,8 @@ struct stage::impl : public std::enable_shared_from_this<impl>
                     // Now the offending layer alone degrades (to black, or to
                     // its last good frame via layer::receive) and is dropped
                     // entirely after too many consecutive failures.
+                    const auto recv_start = std::chrono::steady_clock::now();
+
                     layer_frame res = {};
                     try {
                         if (l.second) {
@@ -321,8 +374,21 @@ struct stage::impl : public std::enable_shared_from_this<impl>
                             // layer so it stops costing a frame every tick.
                             layers_.erase(p->first);
                             layer_failures_.erase(l.first);
+                            receive_timings_.erase(p->first);
                             continue;
                         }
+                    }
+
+                    {
+                        const auto recv_us = static_cast<uint64_t>(
+                            std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() -
+                                                                                 recv_start)
+                                .count());
+                        auto& t = receive_timings_[p->first];
+                        t.count++;
+                        t.total_us += recv_us;
+                        t.peak_us = std::max(t.peak_us, recv_us);
+                        receive_tick_us_ += recv_us;
                     }
 
                     frames[p->first] = res;
@@ -361,7 +427,80 @@ struct stage::impl : public std::enable_shared_from_this<impl>
                     static_cast<uint64_t>(std::max(1, static_cast<int>(result.format_desc.hz)));
                 const bool osc_refresh_due = (frame_number % refresh_ticks) == 0;
 
+                receive_window_us_ += receive_tick_us_;
+                receive_window_ticks_++;
+                receive_tick_peak_us_ = std::max(receive_tick_peak_us_, receive_tick_us_);
+
                 monitor::state state;
+
+                // Receive timing, on the refresh tick only. The whole-tick figure
+                // against the frame budget is the number that matters: if pulling
+                // every layer costs a few percent of a frame, sequential receive is
+                // not hurting anyone and a prefetch decorator would only add
+                // latency.
+                if (osc_refresh_due && receive_window_ticks_ > 0) {
+                    // Drop timings for layers that no longer exist. CLEAR removes
+                    // from layers_ but said nothing about this map, so stale entries
+                    // survived and were counted -- reporting eight layers on a
+                    // three-layer channel, and potentially naming a departed
+                    // producer as the slowest.
+                    for (auto it = receive_timings_.begin(); it != receive_timings_.end();)
+                        it = layers_.find(it->first) == layers_.end() ? receive_timings_.erase(it) : std::next(it);
+
+                    const double period_us = result.format_desc.hz > 0.0 ? 1000000.0 / result.format_desc.hz : 0.0;
+                    const auto   avg_us    = receive_window_us_ / receive_window_ticks_;
+
+                    auto& pub          = receive_published_;
+                    pub.valid          = true;
+                    pub.tick_avg_us    = avg_us;
+                    pub.tick_peak_us   = receive_tick_peak_us_;
+                    pub.budget_percent = period_us > 0.0 ? (static_cast<double>(avg_us) * 100.0) / period_us : 0.0;
+                    pub.peak_budget_percent =
+                        period_us > 0.0 ? (static_cast<double>(receive_tick_peak_us_) * 100.0) / period_us : 0.0;
+                    pub.layers = static_cast<int32_t>(receive_timings_.size());
+
+                    // Name the worst layer, so a blocking producer can be found
+                    // rather than merely suspected.
+                    pub.slowest_layer   = -1;
+                    pub.slowest_peak_us = 0;
+                    pub.slowest_avg_us  = 0;
+                    pub.slowest_producer.clear();
+                    for (const auto& [index, t] : receive_timings_) {
+                        if (t.peak_us > pub.slowest_peak_us) {
+                            pub.slowest_peak_us = t.peak_us;
+                            pub.slowest_layer   = index;
+                            pub.slowest_avg_us  = t.count ? t.total_us / t.count : 0;
+                        }
+                    }
+                    if (pub.slowest_layer >= 0) {
+                        const auto it = layers_.find(pub.slowest_layer);
+                        if (it != layers_.end())
+                            pub.slowest_producer = it->second.foreground()->name();
+                    }
+
+                    receive_window_us_    = 0;
+                    receive_window_ticks_ = 0;
+                    receive_tick_peak_us_ = 0;
+                    for (auto& [index, t] : receive_timings_)
+                        t = receive_timing{};
+                }
+
+                if (receive_published_.valid) {
+                    const auto& pub                      = receive_published_;
+                    state["receive"]["tick_avg_us"]       = static_cast<int64_t>(pub.tick_avg_us);
+                    state["receive"]["tick_peak_us"]      = static_cast<int64_t>(pub.tick_peak_us);
+                    state["receive"]["budget_percent"]    = pub.budget_percent;
+                    state["receive"]["peak_budget_percent"] = pub.peak_budget_percent;
+                    state["receive"]["layers"]            = pub.layers;
+                    if (pub.slowest_layer >= 0) {
+                        state["receive"]["slowest_layer"]   = pub.slowest_layer;
+                        state["receive"]["slowest_avg_us"]  = static_cast<int64_t>(pub.slowest_avg_us);
+                        state["receive"]["slowest_peak_us"] = static_cast<int64_t>(pub.slowest_peak_us);
+                        if (!pub.slowest_producer.empty())
+                            state["receive"]["slowest_producer"] = pub.slowest_producer;
+                    }
+                }
+
                 for (auto& p : layers_) {
                     state["layer"][p.first] = p.second.state();
 
