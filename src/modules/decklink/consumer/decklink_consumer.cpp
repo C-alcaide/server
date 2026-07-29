@@ -786,6 +786,7 @@ struct decklink_consumer final : public IDeckLinkVideoOutputCallback
     int                     diag_late_count_ = 0;
     int                     diag_drop_count_ = 0;
     int                     diag_flush_count_ = 0;
+    unsigned int            diag_last_buffered_ = 0;
 
     reference_signal_detector           reference_signal_detector_{output_};
     // std::atomic<int64_t>                                  scheduled_frames_completed_{0};
@@ -1098,6 +1099,7 @@ struct decklink_consumer final : public IDeckLinkVideoOutputCallback
                                       << avg_ms << L"ms late=" << diag_late_count_
                                       << L" drops=" << diag_drop_count_
                                       << L" flushed=" << diag_flush_count_
+                                      << L" buffered=" << diag_last_buffered_ << L"/" << config_.buffer_depth()
                                       << L" frames=" << diag_tick_count_;
                     diag_tick_sum_   = 0.0;
                     diag_tick_count_ = 0;
@@ -1111,6 +1113,7 @@ struct decklink_consumer final : public IDeckLinkVideoOutputCallback
             {
                 UINT32 buffered;
                 output_->GetBufferedVideoFrameCount(&buffered);
+                diag_last_buffered_ = buffered;
                 graph_->set_value("buffered-video", static_cast<double>(buffered) / config_.buffer_depth());
 
                 if (config_.embedded_audio) {
