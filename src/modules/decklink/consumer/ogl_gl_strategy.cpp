@@ -560,19 +560,25 @@ struct ogl_gl_strategy::impl
                     const std::uint8_t*        src_row = full.data() + (static_cast<std::size_t>(src_y) * tw + src_x) * 4;
                     std::vector<std::uint32_t> ref(static_cast<std::size_t>(groups) * 4);
                     cpu_ref_v210_row(src_row, dst_w, groups, use_bt2020_, ref.data());
+                    // Compare only fully in-bounds groups: past (tw - src_x) the GPU
+                    // reads out-of-texture texels (0) while the CPU ref runs off the
+                    // row, so cropped ports would otherwise false-mismatch at the edge.
+                    const int limit_px     = std::max(0, std::min(dst_w, tw - src_x));
+                    const int valid_groups = std::min(groups, limit_px / 6);
+                    const std::size_t cmp  = static_cast<std::size_t>(valid_groups) * 4;
                     int mism = 0, first = -1;
-                    for (std::size_t i = 0; i < ref.size(); ++i)
+                    for (std::size_t i = 0; i < cmp; ++i)
                         if (ref[i] != g[i]) {
                             ++mism;
                             if (first < 0)
                                 first = static_cast<int>(i);
                         }
                     if (mism == 0)
-                        CASPAR_LOG(info) << L"[ogl_gl_strategy] v210 parity self-test PASS (" << groups
+                        CASPAR_LOG(info) << L"[ogl_gl_strategy] v210 parity self-test PASS (" << valid_groups
                                          << L" groups @ row " << src_y << L").";
                     else
                         CASPAR_LOG(warning)
-                            << L"[ogl_gl_strategy] v210 parity self-test: " << mism << L"/" << ref.size()
+                            << L"[ogl_gl_strategy] v210 parity self-test: " << mism << L"/" << cmp
                             << L" words differ (first@" << first << L" gpu=" << g[first] << L" ref=" << ref[first]
                             << L").";
                 }
@@ -595,18 +601,20 @@ struct ogl_gl_strategy::impl
                     const std::uint8_t*        src_row = full.data() + (static_cast<std::size_t>(src_y) * tw + src_x) * 4;
                     std::vector<std::uint32_t> ref(static_cast<std::size_t>(dst_w));
                     cpu_ref_bgra_row(src_row, dst_w, ref.data());
+                    // Compare only in-bounds pixels (see v210 note above).
+                    const int limit_px = std::max(0, std::min(dst_w, tw - src_x));
                     int mism = 0, first = -1;
-                    for (int i = 0; i < dst_w; ++i)
+                    for (int i = 0; i < limit_px; ++i)
                         if (ref[i] != g[i]) {
                             ++mism;
                             if (first < 0)
                                 first = i;
                         }
                     if (mism == 0)
-                        CASPAR_LOG(info) << L"[ogl_gl_strategy] bgra parity self-test PASS (" << dst_w
+                        CASPAR_LOG(info) << L"[ogl_gl_strategy] bgra parity self-test PASS (" << limit_px
                                          << L" px @ row " << src_y << L").";
                     else
-                        CASPAR_LOG(warning) << L"[ogl_gl_strategy] bgra parity self-test: " << mism << L"/" << dst_w
+                        CASPAR_LOG(warning) << L"[ogl_gl_strategy] bgra parity self-test: " << mism << L"/" << limit_px
                                             << L" px differ (first@" << first << L").";
                 }
             }
