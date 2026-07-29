@@ -291,9 +291,14 @@ class d3d11_gl_bridge
         if (!wglDXLockObjectsNV_(interop_device_, 1, &interop_object_))
             return nullptr;
 
-        // Create OGL texture and copy from the interop texture
+        // Create OGL texture and copy from the interop texture.
+        // Must go through device::create_texture: it draws from the texture pool
+        // (avoiding VRAM churn) and stamps the owning device onto the texture,
+        // which the mixer checks before binding it. A directly constructed
+        // texture has no owner and the mixer would reject it, silently falling
+        // back to a host upload and undoing this whole GPU-direct path.
         auto ogl_tex = ogl_dev.dispatch_sync([&]() {
-            auto tex = std::make_shared<accelerator::ogl::texture>(width_, height_, 4);
+            auto tex = ogl_dev.create_texture(width_, height_, 4, common::bit_depth::bit8, false);
             tex->copy_from(static_cast<int>(interop_gl_tex_));
             return tex;
         });

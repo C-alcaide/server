@@ -549,6 +549,11 @@ struct image_mixer::impl
     std::vector<layer>           layers_; // layer/stream/items
     std::vector<layer*>          layer_stack_;
 
+    // One-shot warnings: these paths cost a readback (or drop an item) every
+    // frame, so they must be visible, but not once per frame.
+    std::atomic<bool> host_fallback_logged_{false};
+    std::atomic<bool> empty_host_plane_logged_{false};
+
     double aspect_ratio_ = 1.0;
 
     // Previz support
@@ -634,6 +639,29 @@ struct image_mixer::impl
         }
     }
 
+    /// Uploads the frame's host planes. Refuses to upload an empty plane: with
+    /// lazy readback, image_data() legitimately returns an empty array when no
+    /// consumer asked for CPU pixels, and uploading that would sample garbage.
+    void upload_host_planes(item& item, const core::const_frame& frame)
+    {
+        for (int n = 0; n < static_cast<int>(item.pix_desc.planes.size()); ++n) {
+            const auto& plane_data = frame.image_data(n);
+            if (plane_data.size() == 0 || plane_data.data() == nullptr) {
+                if (!empty_host_plane_logged_.exchange(true)) {
+                    CASPAR_LOG(warning) << L"[vk::image_mixer] host upload requested but plane " << n
+                                        << L" is empty (readback was skipped); dropping this item.";
+                }
+                item.textures.clear();
+                return;
+            }
+            item.textures.emplace_back(vulkan_->copy_async(plane_data,
+                                                           item.pix_desc.planes[n].width,
+                                                           item.pix_desc.planes[n].height,
+                                                           item.pix_desc.planes[n].stride,
+                                                           item.pix_desc.planes[n].depth));
+        }
+    }
+
     void visit(const core::const_frame& frame)
     {
         if (frame.pixel_format_desc().format == core::pixel_format::invalid)
@@ -649,20 +677,30 @@ struct image_mixer::impl
 
         if (auto direct_core_tex = frame.texture()) {
             // Zero-copy path: producer pre-decoded directly into a VK texture
-            // (CUDA decoder via CudaVkTexture).
+            // (CUDA decoder via CudaVkTexture), or another channel's mixer
+            // output arriving through a route.
             auto vk_wrapper = std::dynamic_pointer_cast<texture_wrapper>(direct_core_tex);
-            if (vk_wrapper) {
+
+            // A texture_wrapper from a *different* vulkan::device carries a
+            // VkImage that this device must not touch. The dynamic_cast alone
+            // cannot tell the two apart, so check the owning device: with
+            // per-channel GPU affinity, a route between channels pinned to
+            // different GPUs delivers exactly that.
+            const bool same_device =
+                vk_wrapper && direct_core_tex->owner_device() != nullptr &&
+                direct_core_tex->owner_device() == static_cast<const void*>(vulkan_->getVkDevice());
+
+            if (same_device) {
                 item.textures.emplace_back(
                     make_ready_future(std::shared_ptr<texture>(vk_wrapper->vk_texture())).share());
             } else {
-                CASPAR_LOG(warning) << L"[vk::image_mixer] frame.texture() is not a vulkan::texture_wrapper -- falling back to CPU upload";
-                for (int n = 0; n < static_cast<int>(item.pix_desc.planes.size()); ++n) {
-                    item.textures.emplace_back(vulkan_->copy_async(frame.image_data(n),
-                                                                   item.pix_desc.planes[n].width,
-                                                                   item.pix_desc.planes[n].height,
-                                                                   item.pix_desc.planes[n].stride,
-                                                                   item.pix_desc.planes[n].depth));
+                if (!host_fallback_logged_.exchange(true)) {
+                    CASPAR_LOG(warning)
+                        << L"[vk::image_mixer] frame.texture() is not usable on this device ("
+                        << (vk_wrapper ? L"different VkDevice — cross-GPU route?" : L"not a vulkan::texture_wrapper")
+                        << L"); falling back to host upload. This costs a readback per frame.";
                 }
+                upload_host_planes(item, frame);
             }
         } else {
             auto textures_ptr = frame.opaque().has_value()
@@ -672,13 +710,7 @@ struct image_mixer::impl
             if (textures_ptr) {
                 item.textures = *textures_ptr;
             } else {
-                for (int n = 0; n < static_cast<int>(item.pix_desc.planes.size()); ++n) {
-                    item.textures.emplace_back(vulkan_->copy_async(frame.image_data(n),
-                                                                   item.pix_desc.planes[n].width,
-                                                                   item.pix_desc.planes[n].height,
-                                                                   item.pix_desc.planes[n].stride,
-                                                                   item.pix_desc.planes[n].depth));
-                }
+                upload_host_planes(item, frame);
             }
         }
 

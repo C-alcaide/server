@@ -19,6 +19,20 @@ class texture
     virtual void bind(int index) = 0;
     virtual void unbind()        = 0;
 
+    /// Opaque identity of the GPU device that owns this texture's memory
+    /// (the VkDevice for Vulkan, the ogl::device for OpenGL).
+    ///
+    /// A mixer may only bind a texture natively when this matches its own
+    /// device. Using a VkImage that belongs to a different VkDevice — which
+    /// happens as soon as two channels are pinned to different GPUs and one
+    /// routes into the other — is undefined behaviour, and the wrapper types
+    /// alone cannot distinguish the two cases. Consumers that import via
+    /// external memory should use export_native_handle() instead and do not
+    /// need to match.
+    ///
+    /// Returns nullptr when unknown, which callers must treat as "not mine".
+    virtual const void*        owner_device() const { return nullptr; }
+
     /// Export a platform-native handle for the texture's GPU memory.
     /// Windows: Win32 HANDLE, Linux: file descriptor cast to void*.
     /// Returns nullptr if not supported. Caller must NOT close the handle.

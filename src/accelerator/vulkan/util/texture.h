@@ -61,6 +61,11 @@ class texture final
     VkDeviceMemory    memory() const;
     vk::DeviceSize    alloc_size() const;
 
+    /// The VkDevice that owns this image. Two vulkan::device instances (one per
+    /// GPU) produce images that must not be bound on each other's device, and
+    /// this is the only reliable way to tell them apart.
+    vk::Device        vk_device() const;
+
     /// Export the texture's device memory as a platform-native handle via
     /// VK_KHR_external_memory_win32 (Windows) or VK_KHR_external_memory_fd (Linux).
     /// The handle is cached — subsequent calls return the same handle.

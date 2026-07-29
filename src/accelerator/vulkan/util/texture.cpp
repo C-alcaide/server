@@ -118,6 +118,7 @@ int               texture::size() const { return impl_->size_; }
 VkImage           texture::id() const { return impl_->image_; }
 VkDeviceMemory    texture::memory() const { return impl_->memory_; }
 vk::DeviceSize    texture::alloc_size() const { return impl_->alloc_size_; }
+vk::Device        texture::vk_device() const { return impl_->device_; }
 
 const uint8_t* texture::device_luid() const
 {

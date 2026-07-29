@@ -71,6 +71,10 @@ class texture final : public core::texture
     /// thread where this texture and its context are valid.
     std::shared_ptr<device> get_device() const;
 
+    /// Identity of the owning ogl::device, so a mixer can tell whether this
+    /// texture belongs to its own GL context before binding it.
+    const void* owner_device() const override;
+
     bool tex_is_hbd() const override { return depth() != common::bit_depth::bit8; }
 
     /// Read pixel data from the GPU texture (dispatches to GL thread).

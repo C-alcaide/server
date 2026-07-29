@@ -516,6 +516,10 @@ struct image_mixer::impl
     std::vector<layer>           layers_; // layer/stream/items
     std::vector<layer*>          layer_stack_;
 
+    // One-shot warning: this path costs a readback (or drops an item) every
+    // frame, so it must be visible, but not once per frame.
+    std::atomic<bool> host_fallback_logged_{false};
+
     double aspect_ratio_ = 1.0;
 
   public:
@@ -595,6 +599,27 @@ struct image_mixer::impl
         }
     }
 
+    /// Uploads the frame's host planes. Returns false when they are not
+    /// available: with lazy readback, image_data() legitimately returns an empty
+    /// array when no consumer asked for CPU pixels, and uploading that would
+    /// sample garbage.
+    bool upload_host_planes(item& item, const core::const_frame& frame)
+    {
+        for (int n = 0; n < static_cast<int>(item.pix_desc.planes.size()); ++n) {
+            const auto& plane_data = frame.image_data(n);
+            if (plane_data.size() == 0 || plane_data.data() == nullptr) {
+                item.textures.clear();
+                return false;
+            }
+            item.textures.emplace_back(ogl_->copy_async(plane_data,
+                                                        item.pix_desc.planes[n].width,
+                                                        item.pix_desc.planes[n].height,
+                                                        item.pix_desc.planes[n].stride,
+                                                        item.pix_desc.planes[n].depth));
+        }
+        return true;
+    }
+
     void visit(const core::const_frame& frame)
     {
         if (frame.pixel_format_desc().format == core::pixel_format::invalid)
@@ -612,13 +637,29 @@ struct image_mixer::impl
 
         if (auto direct_core_tex = frame.texture()) {
             // Zero-copy path: producer pre-decoded directly into a GL texture
-            // (CUDA decoder via CudaGLTexture + shared WGL context).
+            // (CUDA decoder via CudaGLTexture + shared WGL context), or another
+            // channel's mixer output arriving through a route.
             // opaque_ is empty for these frames so the any_cast below must be skipped.
             auto ogl_tex = std::dynamic_pointer_cast<texture>(direct_core_tex);
-            if (ogl_tex) {
+
+            // A GL texture from a different ogl::device belongs to another GL
+            // context and must not be bound here. Today there is one OGL device
+            // plus a dedicated previz device, so this guards against a previz or
+            // cross-device texture reaching a channel mixer.
+            const bool same_device = ogl_tex && direct_core_tex->owner_device() != nullptr &&
+                                     direct_core_tex->owner_device() == static_cast<const void*>(ogl_.get());
+
+            if (same_device) {
                 item.textures.emplace_back(make_ready_future(std::shared_ptr<texture>(std::move(ogl_tex))).share());
-            } else {
-                CASPAR_LOG(warning) << L"[image_mixer] frame.texture() is not an ogl::texture -- skipping frame";
+            } else if (upload_host_planes(item, frame)) {
+                if (!host_fallback_logged_.exchange(true)) {
+                    CASPAR_LOG(warning) << L"[image_mixer] frame.texture() is not usable on this device ("
+                                        << (ogl_tex ? L"different ogl::device" : L"not an ogl::texture")
+                                        << L"); falling back to host upload.";
+                }
+            } else if (!host_fallback_logged_.exchange(true)) {
+                CASPAR_LOG(warning) << L"[image_mixer] frame.texture() is not usable on this device and no host "
+                                       L"pixels are available -- dropping this item.";
             }
         } else {
             // Normal path: opaque_ holds the pre-uploaded future_texture vector set by the commit callback.
@@ -628,13 +669,7 @@ struct image_mixer::impl
             if (textures_ptr) {
                 item.textures = *textures_ptr;
             } else {
-                for (int n = 0; n < static_cast<int>(item.pix_desc.planes.size()); ++n) {
-                    item.textures.emplace_back(ogl_->copy_async(frame.image_data(n),
-                                                                item.pix_desc.planes[n].width,
-                                                                item.pix_desc.planes[n].height,
-                                                                item.pix_desc.planes[n].stride,
-                                                                item.pix_desc.planes[n].depth));
-                }
+                upload_host_planes(item, frame);
             }
         }
 

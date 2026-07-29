@@ -60,6 +60,14 @@ class texture_wrapper : public core::texture
     void bind(int /*index*/) override {} // No-op for Vulkan
     void unbind() override {}            // No-op for Vulkan
 
+    /// Identity of the owning VkDevice, so a mixer can tell whether this image
+    /// is safe to bind natively or has to go through an external-memory import
+    /// (or the host path).
+    const void* owner_device() const override
+    {
+        return static_cast<const void*>(static_cast<VkDevice>(tex_->vk_device()));
+    }
+
     void*              export_native_handle() const override
     {
 #ifdef _WIN32
