@@ -41,6 +41,7 @@ struct buffer::impl
     GLsizei    size_   = 0;
     void*      data_   = nullptr;
     bool       write_  = false;
+    const void* owner_ = nullptr;
     GLenum     target_ = 0;
     GLbitfield flags_  = 0;
 
@@ -92,6 +93,8 @@ buffer& buffer::operator=(buffer&& other)
 }
 void* buffer::data() { return impl_->data_; }
 bool  buffer::write() const { return impl_->write_; }
+const void* buffer::owner_device() const { return impl_->owner_; }
+void        buffer::set_owner_device(const void* owner) { impl_->owner_ = owner; }
 int   buffer::size() const { return impl_->size_; }
 void  buffer::bind() { return impl_->bind(); }
 void  buffer::unbind() { return impl_->unbind(); }

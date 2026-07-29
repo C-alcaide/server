@@ -104,6 +104,7 @@ buffer& buffer::operator=(buffer&& other)
 }
 void*    buffer::data() { return impl_->allocInfo.pMappedData; }
 bool     buffer::write() const { return impl_->write_; }
+VmaAllocator buffer::allocator() const { return impl_->allocator_; }
 int      buffer::size() const { return static_cast<int>(impl_->allocInfo.size); }
 VkBuffer buffer::id() const { return impl_->buf; }
 

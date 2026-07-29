@@ -47,6 +47,12 @@ class buffer final
     int   size() const;
     bool  write() const;
 
+    /// Identity of the ogl::device (and hence GL context) that created this
+    /// buffer. A GL buffer name is only valid in its own context, so device
+    /// ::copy_async must not reuse a foreign one; see the comment there.
+    const void* owner_device() const;
+    void        set_owner_device(const void* owner);
+
   private:
     struct impl;
     std::unique_ptr<impl> impl_;

@@ -46,6 +46,11 @@ class buffer final
     int      size() const;
     bool     write() const;
 
+    /// The VMA allocator that owns this buffer -- one per vulkan::device, so it
+    /// identifies the owning device. A VkBuffer may only be referenced in commands
+    /// submitted to the device that created it; see device::copy_async.
+    VmaAllocator allocator() const;
+
   private:
     struct impl;
     std::unique_ptr<impl> impl_;

@@ -664,8 +664,14 @@ struct device::impl : public std::enable_shared_from_this<impl>
         return dispatch_async([this, source, width, height, stride, depth]() {
             std::shared_ptr<buffer> buf;
 
+            // The array may already carry the staging buffer it was written into
+            // (frame_factory hands out mapped VK memory), which lets us skip a
+            // memcpy. Only when that buffer belongs to *this* device, though: a
+            // VkBuffer referenced in a submit to another device is undefined
+            // behaviour, and in practice takes the GPU down with ErrorDeviceLost.
+            // A routed frame reaches a mixer on a different GPU exactly like this.
             auto tmp = source.storage<std::shared_ptr<buffer>>();
-            if (tmp) {
+            if (tmp && *tmp && (*tmp)->allocator() == _allocator) {
                 buf = *tmp;
             } else {
                 buf = create_buffer(static_cast<int>(source.size()), true);

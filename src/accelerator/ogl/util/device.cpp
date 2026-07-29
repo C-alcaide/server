@@ -215,6 +215,8 @@ struct device::impl : public std::enable_shared_from_this<impl>
             dispatch_sync([&] { buf = std::make_shared<buffer>(size, write); });
         }
 
+        buf->set_owner_device(this);
+
         auto ptr = buf.get();
         return std::shared_ptr<buffer>(ptr, [buf = std::move(buf), self = shared_from_this()](buffer*) mutable {
             auto pool = &self->host_pools_[static_cast<int>(buf->write() ? 1 : 0)][buf->size()];
@@ -235,8 +237,12 @@ struct device::impl : public std::enable_shared_from_this<impl>
         return dispatch_async([=] {
             std::shared_ptr<buffer> buf;
 
+            // The array may already carry the PBO it was written into, which lets
+            // us skip a memcpy -- but only if that PBO was created by *this*
+            // device. A GL buffer name is meaningless in another context, and a
+            // routed frame can reach a mixer holding a different ogl::device.
             auto tmp = source.storage<std::shared_ptr<buffer>>();
-            if (tmp) {
+            if (tmp && *tmp && (*tmp)->owner_device() == static_cast<const void*>(this)) {
                 buf = *tmp;
             } else {
                 buf = create_buffer(static_cast<int>(source.size()), true);
