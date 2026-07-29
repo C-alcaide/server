@@ -697,6 +697,110 @@ Harness: `CasparCG-TestRunner/vkdispatch/` sibling, `recv_probe.py`.
 
 ---
 
+## What actually limits layer count — measured 2026-07-29
+
+Having established that `stage::receive` is 3 % of the tick on a channel running
+at half rate, the obvious next question is what the other 97 % is. The channel
+tick already timed itself — `produce-time`, `mix-time`, `consume-time`,
+`osc-time`, `frame-time` — but only into the diagnostics graph, which is a
+picture. Those same measurements are now published under `tick` in channel
+state, with `unaccounted` for whatever the four phases do not explain.
+
+Decomposed at 1080p50 (20 ms budget), NDI consumer attached, N layers each
+playing `bars.mov`:
+
+| layers | produce | **mix** | consume | osc | total | actual tick |
+|---|---|---|---|---|---|---|
+| 0 | 0.02 | 0.02 | 19.88 | 0.02 | 19.92 | 20.00 ms |
+| 1 | 0.16 | 0.08 | 19.62 | 0.04 | 19.86 | 20.00 ms |
+| 4 | 0.46 | 0.50 | 18.84 | 0.00 | 19.80 | 20.00 ms |
+| 8 | 0.88 | 1.76 | 16.74 | 0.08 | 19.38 | 19.89 ms |
+| 16 | 1.54 | **27.90** | 0.28 | 0.12 | 29.72 | 31.60 ms |
+| 24 | 2.44 | **39.42** | 0.10 | 0.26 | 41.96 | 38.54 ms |
+
+Two things are visible here. First, **the back-pressure clock working**: as `mix`
+grows from 0.02 to 1.76 ms, `consume` shrinks from 19.88 to 16.74 to absorb it,
+and the tick stays at 20.00 ms. That is the design in `PORTAUDIO_MODULE.md`
+behaving as advertised, and it is now directly observable rather than argued.
+Second, at 16 layers the slack is gone (`consume` → 0.28 ms) and `mix` alone
+exceeds the frame period, so the channel goes late.
+
+### It is upload bandwidth, and it depends on the source pixel format
+
+`mix` includes waiting for the frame's staged uploads, so a bandwidth limit shows
+up there rather than as a separate phase. Re-running the identical test with only
+the *source clip* changed:
+
+| layers | `mix`, `bars.mov` (gbrap16le, 15 MB/frame) | `mix`, `bars8.mp4` (yuv420p, 3 MB/frame) | tick | late |
+|---|---|---|---|---|
+| 8 | 4.92 ms | 0.52 ms | 20.00 ms | 2 |
+| 16 | 27.90 ms | **0.30 ms** | 20.00 ms | **4** |
+| 24 | 39.42 ms | **0.48 ms** | 20.01 ms | **7** |
+
+**Twenty-four layers of 8-bit 1080p50 run at exactly nominal rate with 0.48 ms
+of mix time.** The composition path was never the constraint. The collapse was
+host→GPU upload bandwidth, and `bars.mov` is a lossless RGBA source that decodes
+to `gbrap16le` — four 16-bit planes, 15 MB per frame per layer. At 24 layers that
+is 360 MB per frame.
+
+Measured plateau: **9.1 GB/s** (24 × 15 MB / 38.54 ms), against 15.8 GB/s
+theoretical for the A4000's PCIe 3.0 x16 link and roughly 12 GB/s achievable in
+practice. The channel is running the bus at about three quarters of its usable
+throughput, which is the ceiling being hit.
+
+### Capacity rule
+
+At ~9.1 GB/s of usable upload, a frame period of `T` ms affords roughly
+`9.1 × T / 1000` GB of uploads. Dividing by bytes per frame per layer:
+
+| source | bytes/frame at 1080p | layers at 1080p50 (20 ms) | at 1080p25 (40 ms) |
+|---|---|---|---|
+| 8-bit 4:2:0 (NV12 / yuv420p) | 3.0 MB | ~60 | ~120 |
+| 8-bit RGBA | 8.3 MB | ~22 | ~44 |
+| 16-bit RGBA + alpha (`gbrap16le`) | 15.0 MB | ~12 | ~24 |
+
+The 16-bit row predicts a ceiling of ~12 layers, and the finer sweep put the
+crossover at 10–11. Close enough to use for planning, and it explains the shape
+of the earlier numbers: beyond the crossover `mix` costs ~1.7–1.9 ms per added
+1080p50 layer, which is 15 MB at ~9 GB/s.
+
+**Consequences.**
+
+- **Phase 6 (native NV12/P010 upload) attacked exactly this constraint**, which
+  was not the reason it was originally proposed. Uploading two semi-planar planes
+  instead of a converted RGBA frame cuts upload bytes for hardware-decoded YUV
+  content, and upload bytes are what sets the layer ceiling.
+- **The readback is a much smaller term.** A 1080p RGBA readback for a CPU
+  consumer is 8.3 MB per frame — 415 MB/s at 50 Hz, under 5 % of the budget. So
+  the remaining Phase 4 work (removing the FFmpeg consumer's readback) is worth
+  doing for the CPU cost, not for bandwidth.
+- **Do not benchmark with lossless RGBA content** unless that is what the
+  deployment plays. `bars.mov` costs five times what ordinary 8-bit material
+  does, and the difference is the whole result.
+
+### Corrections this measurement forced
+
+Recorded because each was a conclusion that looked well-supported and was wrong:
+
+- **"The channel collapses at 16+ layers."** It collapses at 16+ layers *of
+  16-bit RGBA*. With 8-bit 4:2:0 it was still at nominal rate at 24 layers, which
+  was as far as the test went — the real ceiling is higher and was never reached.
+- **"`mix` scaling 1.76 → 27.90 ms for a 2× layer increase is a cliff."** An
+  artefact of sampling 8 then 16 with nothing between, plus run-to-run variance
+  (the same 8-layer configuration measured 1.76 ms and 4.92 ms in two runs). The
+  finer sweep shows a roughly linear ~1.8 ms per layer.
+- **"~1.8 ms to composite one 1080p layer means the composition path is 10–20×
+  slower than the hardware."** It is not compositing time at all; it is 15 MB of
+  upload at bus speed. The arithmetic was right and the attribution was wrong.
+- **The first version of this instrumentation reported 19.9 ms of `produce` on an
+  idle channel.** `caspar::timer::elapsed()` measures from construction, and the
+  accumulation had been moved to the end of the tick, so every phase read as
+  nearly the whole tick. Each duration is now captured where its phase ends.
+
+Harness: `CasparCG-TestRunner/vkdispatch/tick_probe.py`.
+
+---
+
 ## NDI Advanced SDK Assessment
 
 ### Availability

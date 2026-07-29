@@ -80,6 +80,48 @@ struct video_channel::impl final
     int                                   frames_since_update_ = 0;
     double                                current_fps_ = 0.0;
 
+    // ── Tick decomposition ────────────────────────────────────────────────
+    // The tick below already times produce / mix / consume / osc, but only into
+    // the diagnostics graph, which is a picture. So when a channel misses its
+    // rate there was no way to ask *which phase* took the time without attaching
+    // a debugger — and the honest answer to "why is this channel at half rate"
+    // was a guess. These are the same measurements, published under "tick" in
+    // channel state so they can be read over AMCP and asserted on.
+    //
+    // Accumulated every tick, summarised once a second, and re-emitted every
+    // tick (state_ is rebuilt from scratch, so a value written only on the
+    // summary tick would be visible in one tick out of 25).
+    struct phase_stats
+    {
+        double sum_ms  = 0.0;
+        double peak_ms = 0.0;
+
+        void add(double ms)
+        {
+            sum_ms += ms;
+            peak_ms = std::max(peak_ms, ms);
+        }
+        void reset() { *this = phase_stats{}; }
+    };
+    struct tick_phases
+    {
+        phase_stats produce, mix, consume, osc, total;
+        uint64_t    ticks = 0;
+
+        void reset()
+        {
+            produce.reset();
+            mix.reset();
+            consume.reset();
+            osc.reset();
+            total.reset();
+            ticks = 0;
+        }
+    };
+    tick_phases tick_window_;
+    tick_phases tick_published_;
+    bool        tick_published_valid_ = false;
+
     std::function<void(core::monitor::state)> tick_;
 
     std::map<route_id, std::weak_ptr<core::route>> routes_;
@@ -182,7 +224,8 @@ struct video_channel::impl final
                     // Produce
                     caspar::timer produce_timer;
                     auto          stage_frames = (*stage_)(frame_counter_, background_routes, routesCb);
-                    graph_->set_value("produce-time", produce_timer.elapsed() * format_desc.hz * 0.5);
+                    const auto produce_elapsed = produce_timer.elapsed();
+                    graph_->set_value("produce-time", produce_elapsed * format_desc.hz * 0.5);
 
                     // This is a little race prone, but at worst a new consumer will start with a frame of black
                     bool has_consumers = output_.consumer_count() > 0;
@@ -210,7 +253,8 @@ struct video_channel::impl final
                         has_consumers && stage_frames.format_desc.field_count == 2
                             ? mixer_(stage_frames.frames2, stage_frames.format_desc, stage_frames.nb_samples)
                             : const_frame{};
-                    graph_->set_value("mix-time", mix_timer.elapsed() * format_desc.hz * 0.5);
+                    const auto mix_elapsed = mix_timer.elapsed();
+                    graph_->set_value("mix-time", mix_elapsed * format_desc.hz * 0.5);
 
                     // Consume
                     caspar::timer consume_timer;
@@ -218,12 +262,68 @@ struct video_channel::impl final
                     auto consume_elapsed = consume_timer.elapsed();
                     graph_->set_value("consume-time", consume_elapsed * stage_frames.format_desc.hz * 0.5);
 
-                    graph_->set_value("frame-time", frame_timer.elapsed() * stage_frames.format_desc.hz * 0.5);
+                    const auto frame_elapsed = frame_timer.elapsed();
+                    graph_->set_value("frame-time", frame_elapsed * stage_frames.format_desc.hz * 0.5);
+
+                    // Accumulate the phase timings taken above. osc is folded in
+                    // one tick late, because it is only known after this state has
+                    // been built and handed to tick_().
+                    {
+                        auto& w = tick_window_;
+                        w.ticks++;
+                        // Each of these was captured where its phase ended.
+                        // Reading .elapsed() here instead would measure from that
+                        // timer's construction to now -- so "produce" would include
+                        // mix and consume and come out equal to the whole tick,
+                        // which is exactly what the first version of this reported
+                        // (19.9 ms of "produce" on an empty channel).
+                        w.produce.add(produce_elapsed * 1000.0);
+                        w.mix.add(mix_elapsed * 1000.0);
+                        w.consume.add(consume_elapsed * 1000.0);
+                        w.total.add(frame_elapsed * 1000.0);
+
+                        const auto summary_ticks =
+                            static_cast<uint64_t>(std::max(1, static_cast<int>(stage_frames.format_desc.hz)));
+                        if (w.ticks >= summary_ticks) {
+                            tick_published_       = w;
+                            tick_published_valid_ = true;
+                            w.reset();
+                        }
+                    }
 
                     monitor::state state = {};
                     state["stage"]       = stage_->state();
                     state["mixer"]       = mixer_.state();
                     state["output"]      = output_.state();
+
+                    if (tick_published_valid_ && tick_published_.ticks > 0) {
+                        const auto&  p         = tick_published_;
+                        const auto   n         = static_cast<double>(p.ticks);
+                        const double period_ms = stage_frames.format_desc.hz > 0.0
+                                                     ? 1000.0 / stage_frames.format_desc.hz
+                                                     : 0.0;
+
+                        const auto emit = [&](const char* name, const phase_stats& s) {
+                            state["tick"][name]["avg_ms"]  = s.sum_ms / n;
+                            state["tick"][name]["peak_ms"] = s.peak_ms;
+                            state["tick"][name]["percent"] =
+                                period_ms > 0.0 ? (s.sum_ms / n) * 100.0 / period_ms : 0.0;
+                        };
+                        emit("produce", p.produce);
+                        emit("mix", p.mix);
+                        emit("consume", p.consume);
+                        emit("osc", p.osc);
+                        emit("total", p.total);
+
+                        // What produce+mix+consume+osc does not account for: waiting
+                        // on the tick's own pacing, plus anything else in the loop.
+                        // A large unaccounted share means the channel is idle-waiting
+                        // (healthy) or blocked somewhere not timed here (not).
+                        const double accounted =
+                            (p.produce.sum_ms + p.mix.sum_ms + p.consume.sum_ms + p.osc.sum_ms) / n;
+                        state["tick"]["unaccounted"]["avg_ms"] = std::max(0.0, p.total.sum_ms / n - accounted);
+                        state["tick"]["nominal_ms"]            = period_ms;
+                    }
                     state["framerate"]   = {stage_frames.format_desc.framerate.numerator() *
                                                 stage_frames.format_desc.field_count,
                                             stage_frames.format_desc.framerate.denominator()};
@@ -232,7 +332,11 @@ struct video_channel::impl final
 
                     caspar::timer osc_timer;
                     tick_(state_);
-                    graph_->set_value("osc-time", osc_timer.elapsed() * stage_frames.format_desc.hz * 0.5);
+                    const auto osc_elapsed = osc_timer.elapsed();
+                    graph_->set_value("osc-time", osc_elapsed * stage_frames.format_desc.hz * 0.5);
+                    // Folded into the window a tick late, by construction: it is not
+                    // known until after the state above was published.
+                    tick_window_.osc.add(osc_elapsed * 1000.0);
                 } catch (...) {
                     CASPAR_LOG_CURRENT_EXCEPTION();
                 }
