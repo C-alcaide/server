@@ -920,16 +920,41 @@ authoritative about its own layout, so it is now taken from there. Mismatch
 warnings per clip drop from 3 to 1; the remaining one is the first graph build,
 before any frame exists, and is unavoidable without deferring graph construction.
 
-### Still open
+**The buffersrc's colour metadata had the same shape of problem, also fixed.**
+For codecs that carry colour in the bitstream rather than the container — ProRes
+among them — `codecpar` reports unspecified, so the buffersrc was configured
+`csp: unknown range: unknown` and every real frame then disagreed with it. The
+`Decoder` now records the colour space and range reported by decoded frames, and
+the buffersrc uses those wherever the container said nothing. (Learned on the
+`Decoder` rather than reusing the existing `stream_color_space_`, which the run
+thread only updates when it *pops* frames — by then the graph has already been
+built. The decode thread sees them first.)
 
-**The buffersrc's colour metadata has the same shape of problem.** For codecs
-that carry colour information in the bitstream rather than the container — ProRes
-among them — `codecpar` reports unspecified, so the buffersrc is configured
-`csp: unknown range: unknown` and the first real frame triggers the same
-"Changing video frame properties" warning. The producer already learns
-`stream_color_space_` from decoded frames; feeding that back into the buffersrc
-parameters would close it. Benign today, and the code comments already
-acknowledge it, but it is the last of this family.
+### Result
+
+`Changing video frame properties on the fly` warnings, per clip, across the
+nine-source matrix on both backends:
+
+| | before | after |
+|---|---|---|
+| ProRes 4444 | 3 | 1 |
+| ProRes 422 | 3 | 1 |
+| H.264 High 10 | 3 | 1 |
+| H.264 High 4:4:4 | 3 | 1 |
+| everything else | 0 | 0 |
+
+The remaining one is the very first graph build, before any frame has been
+decoded and while nothing better is knowable. Removing it would mean deferring
+graph construction until the first frame arrives — a restructuring of producer
+startup that is not worth it for a warning that is accurate at the moment it is
+emitted.
+
+Pixel output is unchanged by the colour fix (ProRes 4444 46.42 dB, H.264 4:4:4
+70.81 dB against reference decodes, both identical to before it). That is the
+expected result: the declaration was wrong, but with the format restriction in
+place no conversion in these graphs depended on it. It matters for graphs where
+one *does* occur — user-supplied filters, scaling — which is exactly where a
+silently-wrong colour declaration would have been hardest to track down.
 
 Harness: `CasparCG-TestRunner/vkdispatch/upload_matrix.py` and `deint_check.py`.
 

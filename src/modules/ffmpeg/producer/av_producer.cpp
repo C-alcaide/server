@@ -832,6 +832,19 @@ class Decoder
     // the SW pixel format to use for both the buffersrc args and frame transfer.
     AVPixelFormat sw_pix_fmt = AV_PIX_FMT_NONE;
 
+    // Colour properties as reported by decoded frames, for codecs that carry them
+    // in the bitstream rather than the container. ProRes is the common case: its
+    // codecpar says UNSPECIFIED, so the buffersrc gets configured "csp: unknown
+    // range: unknown" and the first real frame trips FFmpeg's "Changing video
+    // frame properties on the fly" warning -- the same shape of problem as
+    // sw_pix_fmt being probed before the decoder had run. Learned here so a
+    // filter rebuild can declare them up front instead.
+    //
+    // Written by the decode thread below, read by the run thread when it builds
+    // the filter graph. Atomic because those are genuinely different threads.
+    std::atomic<AVColorSpace> frame_colorspace{AVCOL_SPC_UNSPECIFIED};
+    std::atomic<AVColorRange> frame_color_range{AVCOL_RANGE_UNSPECIFIED};
+
 #ifdef _WIN32
     // When true, D3D11 frames are kept as-is (no CPU transfer) and placed in hw_output.
     std::atomic<bool>                         gpu_direct_mode_{false};
@@ -1021,6 +1034,20 @@ class Decoder
                                 output.push(std::move(av_frame));
                         }
                     } else {
+                        // Learn the colour properties the container did not state.
+                        // Done for every decoded frame regardless of hardware or
+                        // software path, since a hardware surface carries them too.
+                        if (av_frame->colorspace != AVCOL_SPC_UNSPECIFIED &&
+                            frame_colorspace.load(std::memory_order_relaxed) == AVCOL_SPC_UNSPECIFIED) {
+                            frame_colorspace.store(static_cast<AVColorSpace>(av_frame->colorspace),
+                                                   std::memory_order_relaxed);
+                        }
+                        if (av_frame->color_range != AVCOL_RANGE_UNSPECIFIED &&
+                            frame_color_range.load(std::memory_order_relaxed) == AVCOL_RANGE_UNSPECIFIED) {
+                            frame_color_range.store(static_cast<AVColorRange>(av_frame->color_range),
+                                                    std::memory_order_relaxed);
+                        }
+
                         if (av_frame->format != AV_PIX_FMT_D3D11 && gpu_direct_mode_.load())
                             saw_software_frame_.store(true, std::memory_order_relaxed);
 
@@ -1517,11 +1544,27 @@ struct Filter
                     // graph knows the incoming frame properties upfront.  Without this the
                     // filter context starts as "csp: unknown range: unknown" and emits a
                     // warning on the first frame that carries proper metadata.
-                    if (st->colorspace != AVCOL_SPC_UNSPECIFIED || st->color_range != AVCOL_RANGE_UNSPECIFIED) {
+                    // Where the container says nothing, use what decoded frames
+                    // reported. ProRes and friends carry colour in the bitstream, so
+                    // codecpar is UNSPECIFIED and the buffersrc would start as
+                    // "csp: unknown range: unknown" -- and then every real frame
+                    // disagrees with it, which is what FFmpeg's "Changing video frame
+                    // properties on the fly" warning was reporting. The decoder has
+                    // seen frames by the time the graph is rebuilt, so by then this is
+                    // known; on the very first build it is not, and the buffersrc is
+                    // configured exactly as before.
+                    auto src_csp = st->colorspace;
+                    auto src_rng = st->color_range;
+                    if (src_csp == AVCOL_SPC_UNSPECIFIED)
+                        src_csp = it->second.frame_colorspace.load(std::memory_order_relaxed);
+                    if (src_rng == AVCOL_RANGE_UNSPECIFIED)
+                        src_rng = it->second.frame_color_range.load(std::memory_order_relaxed);
+
+                    if (src_csp != AVCOL_SPC_UNSPECIFIED || src_rng != AVCOL_RANGE_UNSPECIFIED) {
                         AVBufferSrcParameters* par = av_buffersrc_parameters_alloc();
                         if (par) {
-                            par->color_space = st->colorspace;
-                            par->color_range = st->color_range;
+                            par->color_space = src_csp;
+                            par->color_range = src_rng;
                             av_buffersrc_parameters_set(source, par);
                             av_free(par);
                         }
