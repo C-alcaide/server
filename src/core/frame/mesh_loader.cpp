@@ -107,6 +107,35 @@ int get_stride(const tinygltf::Model& model, const tinygltf::Accessor& accessor,
                              : (component_size * tinygltf::GetNumComponentsInType(accessor.type));
 }
 
+// Validate an accessor index against a malformed/hostile glTF; throws on error.
+const tinygltf::Accessor& get_accessor(const tinygltf::Model& model, int idx, const std::string& path)
+{
+    if (idx < 0 || idx >= static_cast<int>(model.accessors.size()))
+        CASPAR_THROW_EXCEPTION(invalid_argument() << msg_info("glTF references an invalid accessor: " + path));
+    return model.accessors[idx];
+}
+
+// Ensure the accessor's whole data range lies inside its buffer (bufferView/buffer
+// indices and byte extents), so later raw pointer reads cannot run out of bounds.
+void validate_accessor(const tinygltf::Model&     model,
+                       const tinygltf::Accessor& acc,
+                       std::size_t               elem_size,
+                       const std::string&        path)
+{
+    if (acc.bufferView < 0 || acc.bufferView >= static_cast<int>(model.bufferViews.size()))
+        CASPAR_THROW_EXCEPTION(invalid_argument() << msg_info("glTF accessor has an invalid bufferView: " + path));
+    const auto& bv = model.bufferViews[acc.bufferView];
+    if (bv.buffer < 0 || bv.buffer >= static_cast<int>(model.buffers.size()))
+        CASPAR_THROW_EXCEPTION(invalid_argument() << msg_info("glTF bufferView has an invalid buffer: " + path));
+    if (acc.count == 0)
+        return;
+    const std::size_t stride = bv.byteStride > 0 ? static_cast<std::size_t>(bv.byteStride) : elem_size;
+    const std::size_t begin  = static_cast<std::size_t>(bv.byteOffset) + acc.byteOffset;
+    const std::size_t span   = stride * (acc.count - 1) + elem_size;
+    if (begin + span > model.buffers[bv.buffer].data.size())
+        CASPAR_THROW_EXCEPTION(invalid_argument() << msg_info("glTF accessor data is out of bounds: " + path));
+}
+
 mesh_data load_gltf(const std::string& path)
 {
     tinygltf::Model    model;
@@ -139,15 +168,18 @@ mesh_data load_gltf(const std::string& path)
     if (pos_it == prim.attributes.end())
         CASPAR_THROW_EXCEPTION(invalid_argument() << msg_info("glTF primitive has no POSITION attribute: " + path));
 
-    const auto& pos_acc = model.accessors[pos_it->second];
+    const auto& pos_acc = get_accessor(model, pos_it->second, path);
     if (pos_acc.componentType != TINYGLTF_COMPONENT_TYPE_FLOAT)
         CASPAR_THROW_EXCEPTION(invalid_argument() << msg_info("glTF POSITION must be float: " + path));
+    validate_accessor(model, pos_acc, sizeof(float) * tinygltf::GetNumComponentsInType(pos_acc.type), path);
 
     // Get TEXCOORD_0 accessor (optional)
     const tinygltf::Accessor* uv_acc = nullptr;
     auto                      uv_it  = prim.attributes.find("TEXCOORD_0");
-    if (uv_it != prim.attributes.end())
-        uv_acc = &model.accessors[uv_it->second];
+    if (uv_it != prim.attributes.end()) {
+        uv_acc = &get_accessor(model, uv_it->second, path);
+        validate_accessor(model, *uv_acc, sizeof(float) * tinygltf::GetNumComponentsInType(uv_acc->type), path);
+    }
 
     // Read position data
     const auto* pos_data   = get_buffer_ptr<uint8_t>(model, pos_acc);
@@ -179,7 +211,11 @@ mesh_data load_gltf(const std::string& path)
 
     if (prim.indices >= 0) {
         // Indexed geometry
-        const auto& idx_acc = model.accessors[prim.indices];
+        const auto&       idx_acc  = get_accessor(model, prim.indices, path);
+        const std::size_t idx_elem = idx_acc.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_INT    ? 4
+                                     : idx_acc.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT ? 2
+                                                                                                       : 1;
+        validate_accessor(model, idx_acc, idx_elem, path);
         const auto& idx_bv  = model.bufferViews[idx_acc.bufferView];
         const auto* idx_raw = &model.buffers[idx_bv.buffer].data[idx_bv.byteOffset + idx_acc.byteOffset];
 

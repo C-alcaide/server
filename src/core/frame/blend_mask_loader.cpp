@@ -51,10 +51,19 @@ std::shared_ptr<blend_mask_data> load_blend_mask(const std::wstring& filename)
     if (width == 0 || height == 0)
         CASPAR_THROW_EXCEPTION(file_read_error() << msg_info("Blend mask PNG has zero size: " + path_str));
 
+    constexpr unsigned k_max_dim = 16384; // guard against absurd / hostile PNG dimensions (OOM)
+    if (width > k_max_dim || height > k_max_dim)
+        CASPAR_THROW_EXCEPTION(file_read_error()
+                               << msg_info("Blend mask PNG exceeds the 16384-pixel per-side limit: " + path_str));
+
+    const size_t need = static_cast<size_t>(width) * height * 3;
+    if (rgb.size() < need)
+        CASPAR_THROW_EXCEPTION(file_read_error() << msg_info("Blend mask PNG decode produced too few bytes: " + path_str));
+
     auto result    = std::make_shared<blend_mask_data>();
     result->width  = static_cast<int>(width);
     result->height = static_cast<int>(height);
-    result->data.resize(static_cast<size_t>(width) * height * 3);
+    result->data.resize(need);
 
     constexpr float inv255 = 1.0f / 255.0f;
     for (size_t i = 0; i < result->data.size(); ++i) {
