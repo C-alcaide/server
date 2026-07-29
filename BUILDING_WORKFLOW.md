@@ -28,33 +28,32 @@ Quick reference for AI agents and developers building CasparVP on this machine.
 cmd /c ""C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat"" && cmake --build d:\Github\CasparVP\build --target <targets>
 ```
 
-> ### ⚠ Toolset pinning required after the VS 14.51 update (2026-07)
+> ### ⚠ Pin the toolset to 14.50 (required since the VS 14.51 update, 2026-07)
 >
-> `CMakeCache.txt` pins `cl.exe` **14.50.35717** from the **BuildTools** install
-> (`C:\Program Files (x86)\...\18\BuildTools\...`). A VS update added toolset
-> **14.51.36231**, and plain `vcvars64.bat` now selects 14.51's headers. That
-> combination breaks in two places:
+> **The whole tree must build on MSVC 14.50.** `nvcc` 12.9 cannot use 14.51:
+> `cudafe++` dies with an access violation while parsing its STL, so CUDA
+> constrains the entire project. `CMakeCache.txt` therefore pins `cl.exe`
+> **14.50.35717** (BuildTools).
 >
-> | Symptom | Cause |
-> |---|---|
-> | `include\variant(292): error C2988` / `C3855` while compiling `accelerator/vulkan/util/device.cpp` | 14.50 `cl.exe` parsing the 14.51 STL |
-> | `fatal error C1083: cannot open include file 'atlbase.h'` in `decklink`/`flash` | the 14.50 toolset ships no `atlmfc` at all |
-> | `LINK : fatal error LNK1104: cannot open 'atls.lib'` linking `casparcg.exe` | same — no ATL import libs either |
->
-> Until CMake is reconfigured: pin compiler **and** STL to 14.50, then add
-> 14.51's ATL headers and libs on top. This combination builds the whole tree.
+> A VS update added toolset **14.51.36231**, and plain `vcvars64.bat` selects the
+> newest one — pairing the 14.50 compiler with the 14.51 STL. Always pass
+> `-vcvars_ver=14.50`:
 >
 > ```bat
-> set VS_ATL=C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Tools\MSVC\14.51.36231\atlmfc
 > call "C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxiliary\Build\vcvars64.bat" -vcvars_ver=14.50
-> set INCLUDE=%INCLUDE%;%VS_ATL%\include
-> set LIB=%LIB%;%VS_ATL%\lib\x64
 > cmake --build d:\Github\CasparVP\build --target <targets>
 > ```
 >
-> **Durable fix:** reconfigure CMake onto 14.51, which has the STL and ATL in one
-> place. That forces a full rebuild, so it is a deliberate action rather than
-> something to do mid-task.
+> | Symptom | Cause |
+> |---|---|
+> | `include\variant(292): error C2988` / `C3855` in `accelerator/vulkan/util/device.cpp` | 14.50 `cl.exe` parsing the 14.51 STL — you forgot `-vcvars_ver=14.50` |
+> | `C1083: cannot open include file 'atlbase.h'` in `decklink`/`flash`, or `LNK1104: atls.lib` | the **ATL component for 14.50 is not installed**. Install it via the VS installer (Individual components → "MSVC v14.50 … ATL"). `decklink` and `flash` need ATL. |
+> | `casparcg.exe` links but dies at load: `0xC0000005`, faulting module `unknown`, offset 0, no log output at all | 14.51 ATL headers compiled against the 14.50 STL, and 14.51's `atls.lib` linked in |
+>
+> **Do not** work around a missing 14.50 ATL by adding 14.51's `atlmfc` to
+> `INCLUDE`/`LIB`. It links successfully and then crashes before `main`, which is
+> far harder to diagnose than the missing-header error it replaces. Install the
+> matching ATL component instead.
 >
 > Note: `run_build.py`, referenced below, is **not present** in the tree. Use the
 > `cmd`/`.bat` route.
