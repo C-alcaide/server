@@ -114,6 +114,7 @@ class remotewall_producer : public core::frame_producer
     int                       wall_h_     = 0;
     bool                      have_frame_ = false;
     core::monitor::state      state_;
+    mutable std::mutex        state_mtx_; // guards state_ (written on mixer thread, read on monitor thread)
 
 #ifdef ENABLE_VULKAN
     std::shared_ptr<accelerator::vulkan::device>   vk_device_;
@@ -196,6 +197,7 @@ class remotewall_producer : public core::frame_producer
             cudaSetDevice(device_);
         zero_copy_ok_ = use_vulkan_ && cfg_.syncGroup[0] == 0;
 #endif
+        cfg_.cudaDevice = device_; // decode on the resolved (mixer-matched) GPU
         rw_         = RecvWallInit(&cfg_);
         ver_        = 0;
         have_frame_ = false;
@@ -428,6 +430,7 @@ class remotewall_producer : public core::frame_producer
         s["remotewall/camera/fov"]        = std::vector<double>{cam[52], cam[53]};
         s["remotewall/camera/frustum"] =
             std::vector<double>{cam[56], cam[57], cam[58], cam[59], cam[60], cam[61]};
+        std::lock_guard<std::mutex> lk(state_mtx_);
         state_ = s;
     }
 
@@ -496,7 +499,11 @@ class remotewall_producer : public core::frame_producer
         return pr.get_future();
     }
 
-    core::monitor::state state() const override { return state_; }
+    core::monitor::state state() const override
+    {
+        std::lock_guard<std::mutex> lk(state_mtx_);
+        return state_;
+    }
     std::wstring         print() const override { return L"remotewall[" + std::to_wstring(cfg_.listenPort) + L"]"; }
     std::wstring         name() const override { return L"remotewall"; }
     bool                 is_ready() override { return true; }

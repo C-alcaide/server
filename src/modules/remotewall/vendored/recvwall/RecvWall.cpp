@@ -77,18 +77,24 @@ static int matrixFor(const char* cs)
 
 namespace {
 
-// Full-range BT.601 NV12 -> 8-bit 4ch at (ox,oy) in a top-down wall buffer.
-// roiW/roiH clamp the converted region to the tile cell (the decoder surface
-// can be larger than the tile). yL/cL are range LUTs (identity when full-range).
+// NV12 -> 8-bit 4ch at (ox,oy) in a top-down wall buffer. roiW/roiH clamp the
+// converted region to the tile cell (the decoder surface can be larger than the
+// tile). yL/cL are range LUTs (identity when full-range). matrix selects the
+// YCbCr->RGB coefficients (BT.601/709/2020) from the stream's colour tag.
 static void nv12ToWall(const uint8_t* nv12, int srcW, int srcH, int roiW, int roiH,
                        uint8_t* dst, int dstStride, int ox, int oy, int dstW, int dstH,
-                       const uint8_t* yL, const uint8_t* cL, bool rgba)
+                       const uint8_t* yL, const uint8_t* cL, bool rgba, int matrix)
 {
 	const uint8_t* Y = nv12;
 	const uint8_t* UV = nv12 + (size_t)srcW * srcH;
 	if (roiW > srcW) roiW = srcW;
 	if (roiH > srcH) roiH = srcH;
 	const int bIdx = rgba ? 2 : 0, rIdx = rgba ? 0 : 2;
+	// Full-range YCbCr->RGB, <<16 fixed point: {r<-v, g<-u, g<-v, b<-u}.
+	int cvr, cug, cvg, cub;
+	if (matrix == ColorSpaceStandard_BT2020)      { cvr = 96636;  cug = 10784; cvg = 37443; cub = 123304; }
+	else if (matrix == ColorSpaceStandard_BT709)  { cvr = 103211; cug = 12276; cvg = 30678; cub = 121610; }
+	else                                          { cvr = 91881;  cug = 22554; cvg = 46802; cub = 116130; } // BT.601
 	for (int y = 0; y < roiH; ++y) {
 		int dy = oy + y; if (dy < 0 || dy >= dstH) continue;
 		const uint8_t* yr = Y + (size_t)y * srcW;
@@ -99,9 +105,9 @@ static void nv12ToWall(const uint8_t* nv12, int srcW, int srcH, int roiW, int ro
 			int yy = yL[yr[x]];
 			int uv = (x & ~1);
 			int u = cL[uvr[uv]] - 128, v = cL[uvr[uv + 1]] - 128;
-			int r = yy + ((91881 * v) >> 16);
-			int g = yy - ((22554 * u + 46802 * v) >> 16);
-			int b = yy + ((116130 * u) >> 16);
+			int r = yy + ((cvr * v) >> 16);
+			int g = yy - ((cug * u + cvg * v) >> 16);
+			int b = yy + ((cub * u) >> 16);
 			drow[bIdx] = (uint8_t)(b < 0 ? 0 : b > 255 ? 255 : b);
 			drow[1]    = (uint8_t)(g < 0 ? 0 : g > 255 ? 255 : g);
 			drow[rIdx] = (uint8_t)(r < 0 ? 0 : r > 255 ? 255 : r);
@@ -251,6 +257,7 @@ struct RecvWallHandle
 	std::atomic<bool> running{true};
 	std::thread rx;
 	rtpfec::Reassembler* reasm = nullptr;
+	std::mutex reasmMtx;                   // guards reasm swap (sender restart) vs stats read
 	rtpfec::Reassembler::Callback auCb;   // kept so rx can rebuild reasm on sender restart
 	uint32_t rxHwm = 0;                   // transport frame high-water mark (rx thread only)
 
@@ -405,7 +412,8 @@ void RecvWallHandle::decodeWorkerCpu(uint16_t tile, TileQ* tq)
 				for (auto& tk : done) {
 					int tid = tk.first, tc = tid % cols, tr = tid / cols;
 					nv12ToWall(tk.second.data(), decW, decH, tileW, tileH, wall.data(), wallW * 4,
-					           tc * tileW, tr * tileH, wallW, wallH, yLut, cLut, cfg.pixelOrder == 1);
+					           tc * tileW, tr * tileH, wallW, wallH, yLut, cLut, cfg.pixelOrder == 1,
+					           matrixFor(doneMeta.colorSpace));
 				}
 				if (syncOn) enqueueSynced(std::move(wall), doneMeta, doneSend, false);
 				else publish(wall, doneMeta, doneSend);
@@ -469,10 +477,10 @@ void RecvWallHandle::decodeWorkerGpu(uint16_t tile, TileQ* tq)
 			                                roiW, roiH, mat, cfg.fullRange != 0);
 			  } else if (cfg.pixelOrder == 1) {
 			      Nv12ToColor32<RGBA32>(fr, dec.GetDeviceFramePitch(), (uint8_t*)dst, wallW * bpp,
-			                            roiW, roiH, ColorSpaceStandard_BT601, cfg.fullRange != 0);
+			                            roiW, roiH, matrixFor(m.colorSpace), cfg.fullRange != 0);
 			  } else {
 			      Nv12ToColor32<BGRA32>(fr, dec.GetDeviceFramePitch(), (uint8_t*)dst, wallW * bpp,
-			                            roiW, roiH, ColorSpaceStandard_BT601, cfg.fullRange != 0);
+			                            roiW, roiH, matrixFor(m.colorSpace), cfg.fullRange != 0);
 			  }
 			  // Inside CUDA-heavy host processes (e.g. Resolve) the kernel launch can
 			  // fail where standalone processes work; surface it so the client can
@@ -721,7 +729,9 @@ RecvWallHandle* RecvWallInit(const RecvWallConfig* cfg)
 	}
 
 	if (cuInit(0) != CUDA_SUCCESS) { delete h; return nullptr; }
-	if (cuDeviceGet(&h->cuDev, 0) != CUDA_SUCCESS) { delete h; return nullptr; }
+	int cudaDev = h->cfg.cudaDevice;
+	{ int nDev = 0; if (cuDeviceGetCount(&nDev) != CUDA_SUCCESS || cudaDev < 0 || cudaDev >= nDev) cudaDev = 0; }
+	if (cuDeviceGet(&h->cuDev, cudaDev) != CUDA_SUCCESS) { delete h; return nullptr; }
 	if (cuDevicePrimaryCtxRetain(&h->ctx, h->cuDev) != CUDA_SUCCESS) { delete h; return nullptr; }
 
 	WSADATA W;
@@ -816,6 +826,7 @@ RecvWallHandle* RecvWallInit(const RecvWallConfig* cfg)
 					rtpfec::PktHdr ph; std::memcpy(&ph, buf.data(), sizeof(ph));
 					if (ph.magic == rtpfec::kMagic) {
 						if (h->rxHwm > 300 && ph.frameIndex + 300 < h->rxHwm) {
+							std::lock_guard<std::mutex> lk(h->reasmMtx);
 							delete h->reasm;
 							h->reasm = new rtpfec::Reassembler(h->auCb);
 							h->rxHwm = 0;
@@ -877,6 +888,7 @@ int RecvWallWaitNewFrame(RecvWallHandle* h, unsigned long long curVersion, int t
 void RecvWallGetStats(RecvWallHandle* h, RecvWallStats* out)
 {
 	if (!h || !out) return;
+	std::lock_guard<std::mutex> lk(h->reasmMtx);
 	const rtpfec::Reassembler::Stats& rs = h->reasm->stats();
 	out->pktData = rs.dataRecv; out->pktFec = rs.fecRecv; out->fecRecovered = rs.recovered;
 	out->ausDone = h->ausDone.load(); out->framesDecoded = h->decOut.load();
@@ -992,7 +1004,7 @@ void RecvWallShutdown(RecvWallHandle* h)
 	  if (h->texRes) { cuGraphicsUnregisterResource(h->texRes); h->texRes = nullptr; } }
 	for (auto d : h->bufPool) cuMemFree(d);
 	for (auto& kv : h->gframes) if (kv.second.dComp) cuMemFree(kv.second.dComp);
-	delete h->reasm;
+	{ std::lock_guard<std::mutex> lk(h->reasmMtx); delete h->reasm; h->reasm = nullptr; }
 	if (h->syncOn) h->board.close();             // release my slot under the mutex
 	cuDevicePrimaryCtxRelease(h->cuDev);
 	delete h;

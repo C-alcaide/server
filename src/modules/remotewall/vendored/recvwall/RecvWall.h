@@ -28,6 +28,10 @@ typedef struct RecvWallConfig
 	int rcvbufKB;                 /* SO_RCVBUF in KB; 0 => 65536 (64 MB) */
 	int maxAuQueue;               /* per-tile AU queue bound, drop-oldest; 0 => 16 */
 	char bindIp[64];              /* local interface to bind ("" => 0.0.0.0 = all) */
+	int cudaDevice;               /* CUDA device ordinal to decode/composite on; 0 =
+	                                 first GPU (default). Set to the host mixer's GPU
+	                                 so the zero-copy composite and the imported
+	                                 texture live on ONE device (multi-GPU boxes). */
 
 	/* ---- Cross-instance presentation sync (multi-zone walls) ---------------
 	   Instances (any mix of OFX plugin instances - possibly in separate host
