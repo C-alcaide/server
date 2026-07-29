@@ -44,6 +44,15 @@ enum class pixel_format
     gbrap, // planar
     ycocg_dxt5,  // YCoCg-DXT5 (HAP Q) — BC3 hardware-decoded then shader YCoCg→RGB
     ycocg_dxt5a, // YCoCg-DXT5 + separate alpha (HAP Q Alpha) — two BC3 planes
+    // Semi-planar YCbCr as hardware decoders produce it: plane 0 = Y (1 component),
+    // plane 1 = Cb/Cr interleaved at half resolution (2 components). Covers NV12
+    // (8-bit) and P010/P016 (16-bit) — the only difference is the plane depth, and
+    // for P010 the 10 significant bits already sit in the high bits of each 16-bit
+    // word, so no rescaling is needed.
+    //
+    // New values must be APPENDED: the mixer shaders switch on this enum's numeric
+    // value, so inserting one silently reinterprets every format after it.
+    nv12,
     count,
     invalid,
 };

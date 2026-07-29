@@ -166,16 +166,24 @@ bool write_frame_png(const const_frame& frame, const std::wstring& path)
                     write_be16(dst + 4, scale_to_16(b, depth));
                     write_be16(dst + 6, scale_to_16(a, depth));
                 }
-            } else if (desc.format == pixel_format::ycbcr && desc.planes.size() >= 3) {
+            } else if ((desc.format == pixel_format::ycbcr && desc.planes.size() >= 3) ||
+                       (desc.format == pixel_format::nv12 && desc.planes.size() >= 2)) {
+                // nv12 keeps Cb and Cr interleaved in plane 1, so both chroma
+                // reads come from the same plane two components apart.
+                const bool  semi_planar = desc.format == pixel_format::nv12;
                 const auto& y_plane  = frame.image_data(0);
                 const auto& cb_plane = frame.image_data(1);
-                const auto& cr_plane = frame.image_data(2);
+                const auto& cr_plane = frame.image_data(semi_planar ? 1 : 2);
+                const int   c_step   = semi_planar ? 2 : 1;
+                const int   cr_off   = semi_planar ? 1 : 0;
                 const int   cb_w  = desc.planes[1].width;
                 const int   cb_h  = desc.planes[1].height;
                 const int   sub_x = (cb_w < width) ? (width / cb_w) : 1;
                 const int   sub_y = (cb_h < height) ? (height / cb_h) : 1;
 
-                // Limited-range offsets/ranges scaled to bit depth
+                // Limited-range offsets/ranges scaled to bit depth.
+                // P010 arrives high-aligned in 16-bit words and is declared bit16,
+                // so the 16-bit scaling below is already the right one for it.
                 const int n = (depth == common::bit_depth::bit10) ? 10 :
                               (depth == common::bit_depth::bit12) ? 12 : 16;
                 const double scale  = static_cast<double>(1 << (n - 8));
@@ -187,9 +195,10 @@ bool write_frame_png(const const_frame& frame, const std::wstring& path)
 
                 for (int row = 0; row < height; ++row) {
                     for (int col = 0; col < width; ++col) {
+                        const int c_idx = ((row / sub_y) * cb_w + (col / sub_x)) * c_step;
                         auto* y_ptr  = reinterpret_cast<const uint16_t*>(y_plane.data()) + row * desc.planes[0].width + col;
-                        auto* cb_ptr = reinterpret_cast<const uint16_t*>(cb_plane.data()) + (row / sub_y) * cb_w + (col / sub_x);
-                        auto* cr_ptr = reinterpret_cast<const uint16_t*>(cr_plane.data()) + (row / sub_y) * cb_w + (col / sub_x);
+                        auto* cb_ptr = reinterpret_cast<const uint16_t*>(cb_plane.data()) + c_idx;
+                        auto* cr_ptr = reinterpret_cast<const uint16_t*>(cr_plane.data()) + c_idx + cr_off;
 
                         double y_n  = (*y_ptr - y_off) / y_rng;
                         double cb_n = (*cb_ptr - c_off) / c_rng;
@@ -336,10 +345,16 @@ bool write_frame_png(const const_frame& frame, const std::wstring& path)
                     dst[i * 4 + 3] = src[i * 4 + 0];
                 }
             }
-        } else if (desc.format == pixel_format::ycbcr && desc.planes.size() >= 3) {
+        } else if ((desc.format == pixel_format::ycbcr && desc.planes.size() >= 3) ||
+                   (desc.format == pixel_format::nv12 && desc.planes.size() >= 2)) {
+            // nv12 keeps Cb and Cr interleaved in plane 1, so both chroma reads
+            // come from the same plane two components apart.
+            const bool  semi_planar = desc.format == pixel_format::nv12;
             const auto& y_plane  = frame.image_data(0);
             const auto& cb_plane = frame.image_data(1);
-            const auto& cr_plane = frame.image_data(2);
+            const auto& cr_plane = frame.image_data(semi_planar ? 1 : 2);
+            const int   c_step   = semi_planar ? 2 : 1;
+            const int   cr_off   = semi_planar ? 1 : 0;
             const int   cb_w  = desc.planes[1].width;
             const int   cb_h  = desc.planes[1].height;
             const int   sub_x = (cb_w < width) ? (width / cb_w) : 1;
@@ -349,9 +364,10 @@ bool write_frame_png(const const_frame& frame, const std::wstring& path)
             auto* dst = rgba.data();
             for (int row = 0; row < height; ++row) {
                 for (int col = 0; col < width; ++col) {
+                    const int c_idx = ((row / sub_y) * cb_w + (col / sub_x)) * c_step;
                     double y_val  = y_plane.data()[row * desc.planes[0].width + col];
-                    double cb_val = cb_plane.data()[(row / sub_y) * cb_w + (col / sub_x)];
-                    double cr_val = cr_plane.data()[(row / sub_y) * cb_w + (col / sub_x)];
+                    double cb_val = cb_plane.data()[c_idx];
+                    double cr_val = cr_plane.data()[c_idx + cr_off];
 
                     // YCbCr → RGB (limited range)
                     double y_n  = (y_val - 16.0) / 219.0;

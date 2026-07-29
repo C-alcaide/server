@@ -1384,6 +1384,19 @@ vec4 get_rgba_color(vec2 uv)
             float a  = get_sample(plane[1], uv).a;
             return vec4(clamp(Y + Co - Cg, 0.0, 1.0), clamp(Y + Cg, 0.0, 1.0), clamp(Y - Co - Cg, 0.0, 1.0), a);
         }
+    case 15:    // nv12 -- semi-planar YCbCr (NV12 8-bit, P010/P016 16-bit)
+        {
+            // plane[0] = Y (1 component), plane[1] = Cb,Cr interleaved at half
+            // resolution (2 components). Sampling .rg from a single RG texture is
+            // what lets the decoder's native layout go straight to the GPU.
+            //
+            // P010 needs no rescaling here: its 10 bits sit in the high bits of
+            // each 16-bit word, so the plane is declared bit16 and its
+            // precision_factor is 1.0.
+            float y    = get_sample(plane[0], uv).r * precision_factor[0];
+            vec2  cbcr = get_sample(plane[1], uv).rg * precision_factor[1];
+            return ycbcra_to_rgba(y, cbcr.x, cbcr.y, 1.0);
+        }
     }
         return vec4(0.0, 0.0, 0.0, 0.0);
 }
