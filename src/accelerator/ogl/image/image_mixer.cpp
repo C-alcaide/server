@@ -51,6 +51,20 @@ namespace caspar { namespace accelerator { namespace ogl {
 
 using future_texture = std::shared_future<std::shared_ptr<texture>>;
 
+/// Upload futures the frame factory started for a mutable_frame, carried on
+/// const_frame::opaque().
+///
+/// `owner_device` is essential, not decorative: the payload is produced by
+/// whichever channel's mixer created the frame, and a routed frame is visited by
+/// a *different* channel's mixer -- which may hold another ogl::device (and so
+/// another GL context). It used to be a bare vector, so the receiving mixer
+/// trusted it blindly.
+struct staged_textures
+{
+    const void*                 owner_device = nullptr;
+    std::vector<future_texture> textures;
+};
+
 struct item
 {
     core::pixel_format_desc     pix_desc = core::pixel_format_desc(core::pixel_format::invalid);
@@ -516,9 +530,10 @@ struct image_mixer::impl
     std::vector<layer>           layers_; // layer/stream/items
     std::vector<layer*>          layer_stack_;
 
-    // One-shot warning: this path costs a readback (or drops an item) every
-    // frame, so it must be visible, but not once per frame.
-    std::atomic<bool> host_fallback_logged_{false};
+    // One-shot warnings: these paths cost a readback, or drop an item, on every
+    // frame -- so they must be visible, but not once per frame.
+    std::atomic<bool> foreign_texture_logged_{false};
+    std::atomic<bool> no_source_logged_{false};
 
     double aspect_ratio_ = 1.0;
 
@@ -599,24 +614,94 @@ struct image_mixer::impl
         }
     }
 
-    /// Uploads the frame's host planes. Returns false when they are not
-    /// available: with lazy readback, image_data() legitimately returns an empty
-    /// array when no consumer asked for CPU pixels, and uploading that would
-    /// sample garbage.
-    bool upload_host_planes(item& item, const core::const_frame& frame)
+    /// Resolves the source textures for `item`, in one fixed order shared by both
+    /// mixer backends:
+    ///
+    ///   1. a GPU texture owned by *this* device      -> zero copy
+    ///   2. a GPU texture owned by another device     -> import not implemented;
+    ///                                                   falls through to host
+    ///   3. pre-staged upload futures on opaque()     -> upload already started
+    ///   4. host planes                               -> upload now
+    ///   5. nothing usable                            -> drop the item
+    ///
+    /// Returns false when nothing usable was found, in which case the item must
+    /// be dropped rather than pushed with an empty texture list.
+    ///
+    /// This replaced three divergent branches per backend, each with its own
+    /// (and differently worded) fallback behaviour. Keeping the decision order in
+    /// one place per backend is what makes "why did this frame not draw?"
+    /// answerable.
+    bool resolve_item_textures(item& item, const core::const_frame& frame)
     {
+        const auto host_state = frame.host_image_state();
+
+        if (auto core_tex = frame.texture()) {
+            auto native = std::dynamic_pointer_cast<texture>(core_tex);
+
+            // Provenance, not just type: a wrapper from another device carries
+            // memory this device must not touch. See core::texture::owner_device.
+            const bool mine = native && core_tex->owner_device() != nullptr &&
+                              core_tex->owner_device() == static_cast<const void*>(ogl_.get());
+
+            if (mine) {
+                item.textures.emplace_back(make_ready_future(std::shared_ptr<texture>(native)).share());
+                return true;
+            }
+
+            // (2) would import the foreign allocation via external memory. Not
+            // implemented; until it is, fall through to the host path so the
+            // frame still draws, and say so once because it costs a readback.
+            if (!foreign_texture_logged_.exchange(true)) {
+                CASPAR_LOG(warning) << L"[image_mixer]" L" frame.texture() is not usable on this device ("
+                                    << (native ? L"different device -- cross-GPU route?" : L"different backend")
+                                    << L"); falling back to a host upload.";
+            }
+        }
+
+        // (3) The frame factory already started uploads for this frame.
+        if (frame.opaque().has_value()) {
+            // any_cast to a pointer type yields nullptr on a type mismatch rather
+            // than throwing, which is what we want when the payload came from the
+            // other backend.
+            if (auto staged = std::any_cast<std::shared_ptr<staged_textures>>(&frame.opaque())) {
+                if (*staged && (*staged)->owner_device == static_cast<const void*>(ogl_.get())) {
+                    item.textures = (*staged)->textures;
+                    return true;
+                }
+                if (!foreign_texture_logged_.exchange(true)) {
+                    CASPAR_LOG(warning) << L"[image_mixer] pre-staged upload belongs to another device; "
+                                           L"falling back to a host upload.";
+                }
+            }
+        }
+
+        // (4) Host planes. `unavailable` means there are none and none coming --
+        // typically a GPU-only frame whose readback was skipped -- so uploading
+        // would sample a null pointer.
+        if (host_state == core::host_image_availability::unavailable) {
+            if (!no_source_logged_.exchange(true)) {
+                CASPAR_LOG(warning) << L"[image_mixer]" L" item has no usable GPU texture and no host pixels "
+                                       L"(readback was skipped); dropping it.";
+            }
+            return false;
+        }
+
         for (int n = 0; n < static_cast<int>(item.pix_desc.planes.size()); ++n) {
-            const auto& plane_data = frame.image_data(n);
-            if (plane_data.size() == 0 || plane_data.data() == nullptr) {
+            const auto& plane = frame.image_data(n);
+            if (plane.size() == 0 || plane.data() == nullptr) {
+                if (!no_source_logged_.exchange(true)) {
+                    CASPAR_LOG(warning) << L"[image_mixer]" L" host plane " << n << L" is empty; dropping this item.";
+                }
                 item.textures.clear();
                 return false;
             }
-            item.textures.emplace_back(ogl_->copy_async(plane_data,
-                                                        item.pix_desc.planes[n].width,
-                                                        item.pix_desc.planes[n].height,
-                                                        item.pix_desc.planes[n].stride,
-                                                        item.pix_desc.planes[n].depth));
+            item.textures.emplace_back(ogl_->copy_async(plane,
+                                                         item.pix_desc.planes[n].width,
+                                                         item.pix_desc.planes[n].height,
+                                                         item.pix_desc.planes[n].stride,
+                                                         item.pix_desc.planes[n].depth));
         }
+
         return true;
     }
 
@@ -635,43 +720,8 @@ struct image_mixer::impl
                               ? *item.transforms.image_transform.geometry_override
                               : frame.geometry();
 
-        if (auto direct_core_tex = frame.texture()) {
-            // Zero-copy path: producer pre-decoded directly into a GL texture
-            // (CUDA decoder via CudaGLTexture + shared WGL context), or another
-            // channel's mixer output arriving through a route.
-            // opaque_ is empty for these frames so the any_cast below must be skipped.
-            auto ogl_tex = std::dynamic_pointer_cast<texture>(direct_core_tex);
-
-            // A GL texture from a different ogl::device belongs to another GL
-            // context and must not be bound here. Today there is one OGL device
-            // plus a dedicated previz device, so this guards against a previz or
-            // cross-device texture reaching a channel mixer.
-            const bool same_device = ogl_tex && direct_core_tex->owner_device() != nullptr &&
-                                     direct_core_tex->owner_device() == static_cast<const void*>(ogl_.get());
-
-            if (same_device) {
-                item.textures.emplace_back(make_ready_future(std::shared_ptr<texture>(std::move(ogl_tex))).share());
-            } else if (upload_host_planes(item, frame)) {
-                if (!host_fallback_logged_.exchange(true)) {
-                    CASPAR_LOG(warning) << L"[image_mixer] frame.texture() is not usable on this device ("
-                                        << (ogl_tex ? L"different ogl::device" : L"not an ogl::texture")
-                                        << L"); falling back to host upload.";
-                }
-            } else if (!host_fallback_logged_.exchange(true)) {
-                CASPAR_LOG(warning) << L"[image_mixer] frame.texture() is not usable on this device and no host "
-                                       L"pixels are available -- dropping this item.";
-            }
-        } else {
-            // Normal path: opaque_ holds the pre-uploaded future_texture vector set by the commit callback.
-            auto textures_ptr = frame.opaque().has_value()
-                ? std::any_cast<std::shared_ptr<std::vector<future_texture>>>(frame.opaque())
-                : nullptr;
-            if (textures_ptr) {
-                item.textures = *textures_ptr;
-            } else {
-                upload_host_planes(item, frame);
-            }
-        }
+        if (!resolve_item_textures(item, frame))
+            return;
 
         layer_stack_.back()->items.push_back(item);
     }
@@ -785,7 +835,10 @@ struct image_mixer::impl
                                                                                         desc.planes[n].stride,
                                                                                         desc.planes[n].depth));
                                        }
-                                       return std::make_shared<decltype(textures)>(std::move(textures));
+                                       auto staged          = std::make_shared<staged_textures>();
+                                       staged->owner_device = static_cast<const void*>(self->ogl_.get());
+                                       staged->textures     = std::move(textures);
+                                       return staged;
                                    });
     }
 

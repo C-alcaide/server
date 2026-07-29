@@ -56,6 +56,21 @@ namespace caspar { namespace accelerator { namespace vulkan {
 
 using future_texture = std::shared_future<std::shared_ptr<texture>>;
 
+/// Upload futures the frame factory started for a mutable_frame, carried on
+/// const_frame::opaque().
+///
+/// `owner_device` is essential, not decorative: the payload is produced by
+/// whichever channel's mixer created the frame, and a routed frame is visited by
+/// a *different* channel's mixer. With per-channel GPU affinity that mixer can be
+/// on another VkDevice, and binding these VkImages there is undefined behaviour.
+/// It used to be a bare vector, so the receiving mixer trusted it blindly and a
+/// cross-GPU route rendered nothing.
+struct staged_textures
+{
+    const void*                 owner_device = nullptr;
+    std::vector<future_texture> textures;
+};
+
 struct item
 {
     core::pixel_format_desc     pix_desc = core::pixel_format_desc(core::pixel_format::invalid);
@@ -549,10 +564,10 @@ struct image_mixer::impl
     std::vector<layer>           layers_; // layer/stream/items
     std::vector<layer*>          layer_stack_;
 
-    // One-shot warnings: these paths cost a readback (or drop an item) every
-    // frame, so they must be visible, but not once per frame.
-    std::atomic<bool> host_fallback_logged_{false};
-    std::atomic<bool> empty_host_plane_logged_{false};
+    // One-shot warnings: these paths cost a readback, or drop an item, on every
+    // frame -- so they must be visible, but not once per frame.
+    std::atomic<bool> foreign_texture_logged_{false};
+    std::atomic<bool> no_source_logged_{false};
 
     double aspect_ratio_ = 1.0;
 
@@ -639,27 +654,97 @@ struct image_mixer::impl
         }
     }
 
-    /// Uploads the frame's host planes. Refuses to upload an empty plane: with
-    /// lazy readback, image_data() legitimately returns an empty array when no
-    /// consumer asked for CPU pixels, and uploading that would sample garbage.
-    void upload_host_planes(item& item, const core::const_frame& frame)
+    /// Resolves the source textures for `item`, in one fixed order shared by both
+    /// mixer backends:
+    ///
+    ///   1. a GPU texture owned by *this* device      -> zero copy
+    ///   2. a GPU texture owned by another device     -> import not implemented;
+    ///                                                   falls through to host
+    ///   3. pre-staged upload futures on opaque()     -> upload already started
+    ///   4. host planes                               -> upload now
+    ///   5. nothing usable                            -> drop the item
+    ///
+    /// Returns false when nothing usable was found, in which case the item must
+    /// be dropped rather than pushed with an empty texture list.
+    ///
+    /// This replaced three divergent branches per backend, each with its own
+    /// (and differently worded) fallback behaviour. Keeping the decision order in
+    /// one place per backend is what makes "why did this frame not draw?"
+    /// answerable.
+    bool resolve_item_textures(item& item, const core::const_frame& frame)
     {
+        const auto host_state = frame.host_image_state();
+
+        if (auto core_tex = frame.texture()) {
+            auto wrapper = std::dynamic_pointer_cast<texture_wrapper>(core_tex);
+
+            // Provenance, not just type: a wrapper from another vulkan::device
+            // carries a VkImage this device must not touch. With per-channel GPU
+            // affinity a route across GPUs delivers exactly that.
+            const bool mine = wrapper && core_tex->owner_device() != nullptr &&
+                              core_tex->owner_device() == static_cast<const void*>(vulkan_->getVkDevice());
+
+            if (mine) {
+                item.textures.emplace_back(
+                    make_ready_future(std::shared_ptr<texture>(wrapper->vk_texture())).share());
+                return true;
+            }
+
+            // (2) would import the foreign allocation via VK_KHR_external_memory.
+            // Not implemented; until it is, fall through to the host path so the
+            // frame still draws, and say so once because it costs a readback.
+            if (!foreign_texture_logged_.exchange(true)) {
+                CASPAR_LOG(warning) << L"[vk::image_mixer] frame.texture() is not usable on this device ("
+                                    << (wrapper ? L"different VkDevice -- cross-GPU route?" : L"different backend")
+                                    << L"); falling back to a host upload.";
+            }
+        }
+
+        // (3) The frame factory already started uploads for this frame.
+        if (frame.opaque().has_value()) {
+            // any_cast to a pointer type yields nullptr on a type mismatch rather
+            // than throwing, which is what we want when the payload came from the
+            // other backend.
+            if (auto staged = std::any_cast<std::shared_ptr<staged_textures>>(&frame.opaque())) {
+                if (*staged && (*staged)->owner_device == static_cast<const void*>(vulkan_->getVkDevice())) {
+                    item.textures = (*staged)->textures;
+                    return true;
+                }
+                if (!foreign_texture_logged_.exchange(true)) {
+                    CASPAR_LOG(warning) << L"[vk::image_mixer] pre-staged upload belongs to another device "
+                                           L"(cross-GPU route?); falling back to a host upload.";
+                }
+            }
+        }
+
+        // (4) Host planes. `unavailable` means there are none and none coming --
+        // typically a GPU-only frame whose readback was skipped -- so uploading
+        // would sample a null pointer.
+        if (host_state == core::host_image_availability::unavailable) {
+            if (!no_source_logged_.exchange(true)) {
+                CASPAR_LOG(warning) << L"[vk::image_mixer] item has no usable GPU texture and no host pixels "
+                                       L"(readback was skipped); dropping it.";
+            }
+            return false;
+        }
+
         for (int n = 0; n < static_cast<int>(item.pix_desc.planes.size()); ++n) {
-            const auto& plane_data = frame.image_data(n);
-            if (plane_data.size() == 0 || plane_data.data() == nullptr) {
-                if (!empty_host_plane_logged_.exchange(true)) {
-                    CASPAR_LOG(warning) << L"[vk::image_mixer] host upload requested but plane " << n
-                                        << L" is empty (readback was skipped); dropping this item.";
+            const auto& plane = frame.image_data(n);
+            if (plane.size() == 0 || plane.data() == nullptr) {
+                if (!no_source_logged_.exchange(true)) {
+                    CASPAR_LOG(warning) << L"[vk::image_mixer] host plane " << n << L" is empty; dropping this item.";
                 }
                 item.textures.clear();
-                return;
+                return false;
             }
-            item.textures.emplace_back(vulkan_->copy_async(plane_data,
+            item.textures.emplace_back(vulkan_->copy_async(plane,
                                                            item.pix_desc.planes[n].width,
                                                            item.pix_desc.planes[n].height,
                                                            item.pix_desc.planes[n].stride,
                                                            item.pix_desc.planes[n].depth));
         }
+
+        return true;
     }
 
     void visit(const core::const_frame& frame)
@@ -675,44 +760,8 @@ struct image_mixer::impl
         item.transforms = transform_stack_.back();
         item.geometry   = frame.geometry();
 
-        if (auto direct_core_tex = frame.texture()) {
-            // Zero-copy path: producer pre-decoded directly into a VK texture
-            // (CUDA decoder via CudaVkTexture), or another channel's mixer
-            // output arriving through a route.
-            auto vk_wrapper = std::dynamic_pointer_cast<texture_wrapper>(direct_core_tex);
-
-            // A texture_wrapper from a *different* vulkan::device carries a
-            // VkImage that this device must not touch. The dynamic_cast alone
-            // cannot tell the two apart, so check the owning device: with
-            // per-channel GPU affinity, a route between channels pinned to
-            // different GPUs delivers exactly that.
-            const bool same_device =
-                vk_wrapper && direct_core_tex->owner_device() != nullptr &&
-                direct_core_tex->owner_device() == static_cast<const void*>(vulkan_->getVkDevice());
-
-            if (same_device) {
-                item.textures.emplace_back(
-                    make_ready_future(std::shared_ptr<texture>(vk_wrapper->vk_texture())).share());
-            } else {
-                if (!host_fallback_logged_.exchange(true)) {
-                    CASPAR_LOG(warning)
-                        << L"[vk::image_mixer] frame.texture() is not usable on this device ("
-                        << (vk_wrapper ? L"different VkDevice — cross-GPU route?" : L"not a vulkan::texture_wrapper")
-                        << L"); falling back to host upload. This costs a readback per frame.";
-                }
-                upload_host_planes(item, frame);
-            }
-        } else {
-            auto textures_ptr = frame.opaque().has_value()
-                ? std::any_cast<std::shared_ptr<std::vector<future_texture>>>(frame.opaque())
-                : nullptr;
-
-            if (textures_ptr) {
-                item.textures = *textures_ptr;
-            } else {
-                upload_host_planes(item, frame);
-            }
-        }
+        if (!resolve_item_textures(item, frame))
+            return;
 
         layer_stack_.back()->items.push_back(item);
     }
@@ -864,7 +913,10 @@ struct image_mixer::impl
                                                                                            desc.planes[n].stride,
                                                                                            desc.planes[n].depth));
                                        }
-                                       return std::make_shared<decltype(textures)>(std::move(textures));
+                                       auto staged          = std::make_shared<staged_textures>();
+                                       staged->owner_device = static_cast<const void*>(self->vulkan_->getVkDevice());
+                                       staged->textures     = std::move(textures);
+                                       return staged;
                                    });
     }
 
