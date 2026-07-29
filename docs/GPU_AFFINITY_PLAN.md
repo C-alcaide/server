@@ -162,11 +162,35 @@ explicit channel-level `<gpu>` or was inherited from a `<vulkan-output>`
 consumer, and telling the operator how to resolve it. A misconfiguration cannot
 ship silently any more.
 
-Implementing real OGL affinity (per-adapter contexts, e.g. `WGL_NV_gpu_affinity`)
-remains open. It is gated on auditing every `wglShareLists` caller first — Spout,
-cuda_prores and `ogl_gl_strategy`'s process-level `dvp_gl_ctx` all assume a single
-shared mixer context, and list sharing across affinity contexts on different GPUs
-is not valid.
+#### Audit result (2026-07-29): real OGL affinity is deliberately not implemented
+
+The audit that phase 4 was gated on has been done. Six places share GL lists with
+the mixer's context — `cuda_prores` (producer *and* consumer), `cuda_notchlc`,
+`hap`, the ffmpeg `d3d11_gl_bridge`, and `vulkan_output`'s `interop_context` — plus
+`spout` and `screen` reach for `native_gl_context()`. Per-GPU mixer contexts would
+require each of those to share with *its own channel's* context, and two of the
+findings are worse than a simple plumbing change:
+
+- **`ogl_gl_strategy`'s `dvp_gl_ctx` is a process-wide singleton** holding a
+  refcount and the cached DVP alignment constants, documented "GL thread only
+  (context current)". With two OGL devices, `dvpInitGLContext` /
+  `dvpCloseGLContext` would run against different contexts through one refcount —
+  the first channel's teardown can close the context out from under the second —
+  and the cached alignment constants would be shared between GPUs that need not
+  agree on them.
+- **The screen consumer has already abandoned WGL list sharing**: its
+  `win32_gl_window` exists because "SFML2's shared-context mechanism
+  (`wglShareLists` on a static singleton) permanently corrupts WGL state after a
+  window is closed". That is a measure of how fragile this area is in practice.
+
+Set against that: the only beneficiary is a multi-GPU deployment that has chosen
+the **OpenGL** backend, while Vulkan already has working affinity and is the
+documented path for multi-GPU. Outcome (2) above — refusing the configuration
+loudly instead of misconfiguring silently — is implemented and removes the actual
+hazard.
+
+So this stays unimplemented on purpose. If it is ever needed, the first task is
+making `dvp_gl_ctx` per-device, not creating the affinity contexts.
 
 ---
 
