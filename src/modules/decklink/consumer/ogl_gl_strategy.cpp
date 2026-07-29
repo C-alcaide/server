@@ -226,6 +226,75 @@ void cpu_ref_bgra_row(const std::uint8_t* rgba, int dst_w, std::uint32_t* out)
 
 } // namespace
 
+#ifdef DECKLINK_CUDA_DVP_ENABLED
+namespace {
+
+// Process-level refcount for the DVP GL context. dvpInitGLContext /
+// dvpCloseGLContext act on the current (mixer) GL context, so with several DVP
+// ports sharing one GL thread they must be initialised once and closed once —
+// otherwise the first port's teardown would close the context out from under
+// the others (R7). All acquire/release calls run on the mixer GL thread, so the
+// mutex only guards the refcount and cached alignment constants.
+struct dvp_gl_ctx
+{
+    std::mutex    mtx;
+    int           refs         = 0;
+    bool          ok           = false;
+    std::uint32_t buf_align    = 0;
+    std::uint32_t stride_align = 0;
+    std::uint32_t sem_align    = 0;
+    std::uint32_t sem_size     = 0;
+};
+
+dvp_gl_ctx& dvp_ctx()
+{
+    static dvp_gl_ctx c;
+    return c;
+}
+
+// GL thread only (context current). Returns the DVP alignment constants.
+bool dvp_ctx_acquire(std::uint32_t& buf_align,
+                     std::uint32_t& stride_align,
+                     std::uint32_t& sem_align,
+                     std::uint32_t& sem_size)
+{
+    auto&                       c = dvp_ctx();
+    std::lock_guard<std::mutex> lk(c.mtx);
+    if (c.refs == 0) {
+        c.ok = false;
+        if (dvpInitGLContext(DVP_DEVICE_FLAGS_SHARE_APP_CONTEXT) == DVP_STATUS_OK) {
+            std::uint32_t po = 0, ps = 0;
+            if (dvpGetRequiredConstantsGLCtx(&c.buf_align, &c.stride_align, &c.sem_align, &c.sem_size, &po, &ps) ==
+                DVP_STATUS_OK)
+                c.ok = true;
+            else
+                dvpCloseGLContext();
+        }
+    }
+    if (!c.ok)
+        return false;
+    ++c.refs;
+    buf_align    = c.buf_align;
+    stride_align = c.stride_align;
+    sem_align    = c.sem_align;
+    sem_size     = c.sem_size;
+    return true;
+}
+
+// GL thread only (context current). Closes the context on the last release.
+void dvp_ctx_release()
+{
+    auto&                       c = dvp_ctx();
+    std::lock_guard<std::mutex> lk(c.mtx);
+    if (c.refs > 0 && --c.refs == 0 && c.ok) {
+        dvpCloseGLContext();
+        c.ok = false;
+    }
+}
+
+} // namespace
+#endif // DECKLINK_CUDA_DVP_ENABLED
+
 struct ogl_gl_strategy::impl
 {
     const bool                       is_hdr_;
@@ -292,6 +361,7 @@ struct ogl_gl_strategy::impl
     };
 
     bool            dvp_inited_    = false; // dvpInitGLContext done
+    bool            dvp_ctx_held_  = false; // holds a dvp_ctx() refcount
     bool            dvp_failed_    = false; // gave up -> use glGetBufferSubData
     bool            dvp_logged_ok_ = false;
     std::uint32_t   dvp_buf_align_ = 0, dvp_stride_align_ = 0, dvp_sem_align_ = 0, dvp_sem_size_ = 0;
@@ -318,17 +388,12 @@ struct ogl_gl_strategy::impl
 
     bool dvp_init_ctx()
     {
-        if (dvpInitGLContext(DVP_DEVICE_FLAGS_SHARE_APP_CONTEXT) != DVP_STATUS_OK)
+        if (!dvp_ctx_acquire(dvp_buf_align_, dvp_stride_align_, dvp_sem_align_, dvp_sem_size_))
             return false;
-        std::uint32_t sem_payload_off = 0, sem_payload_sz = 0;
-        if (dvpGetRequiredConstantsGLCtx(&dvp_buf_align_,
-                                         &dvp_stride_align_,
-                                         &dvp_sem_align_,
-                                         &dvp_sem_size_,
-                                         &sem_payload_off,
-                                         &sem_payload_sz) != DVP_STATUS_OK)
-            return false;
-        return dvp_init_sync(dvp_ext_sync_) && dvp_init_sync(dvp_gpu_sync_);
+        dvp_ctx_held_ = true;
+        if (dvp_init_sync(dvp_ext_sync_) && dvp_init_sync(dvp_gpu_sync_))
+            return true;
+        return false;
     }
 
     DVPBufferHandle dvp_register_sysmem(void* p, std::size_t bytes)
@@ -449,11 +514,14 @@ struct ogl_gl_strategy::impl
             dvpFreeSyncObject(dvp_ext_sync_.handle);
         if (dvp_gpu_sync_.handle)
             dvpFreeSyncObject(dvp_gpu_sync_.handle);
-        dvpCloseGLContext();
         if (dvp_ext_sync_.sem)
             _aligned_free(const_cast<std::uint32_t*>(dvp_ext_sync_.sem));
         if (dvp_gpu_sync_.sem)
             _aligned_free(const_cast<std::uint32_t*>(dvp_gpu_sync_.sem));
+        if (dvp_ctx_held_) {
+            dvp_ctx_release();
+            dvp_ctx_held_ = false;
+        }
         dvp_inited_ = false;
     }
 #endif // DECKLINK_CUDA_DVP_ENABLED
