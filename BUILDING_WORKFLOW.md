@@ -28,6 +28,34 @@ Quick reference for AI agents and developers building CasparVP on this machine.
 cmd /c ""C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat"" && cmake --build d:\Github\CasparVP\build --target <targets>
 ```
 
+> ### ⚠ Toolset pinning required after the VS 14.51 update (2026-07)
+>
+> `CMakeCache.txt` pins `cl.exe` **14.50.35717** from the **BuildTools** install
+> (`C:\Program Files (x86)\...\18\BuildTools\...`). A VS update added toolset
+> **14.51.36231**, and plain `vcvars64.bat` now selects 14.51's headers. That
+> combination breaks in two places:
+>
+> | Symptom | Cause |
+> |---|---|
+> | `include\variant(292): error C2988` / `C3855` while compiling `accelerator/vulkan/util/device.cpp` | 14.50 `cl.exe` parsing the 14.51 STL |
+> | `LINK : fatal error LNK1104: cannot open 'atls.lib'` linking `casparcg.exe` | the 14.50 toolset ships no `atlmfc`; `decklink` and `flash` use ATL |
+>
+> Until CMake is reconfigured, pin the toolset to 14.50 and add 14.51's ATL
+> import libs for the link step only:
+>
+> ```bat
+> call "C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxiliary\Build\vcvars64.bat" -vcvars_ver=14.50
+> set LIB=%LIB%;C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Tools\MSVC\14.51.36231\atlmfc\lib\x64
+> cmake --build d:\Github\CasparVP\build --target <targets>
+> ```
+>
+> **Durable fix:** reconfigure CMake onto 14.51, which has both the STL and ATL
+> in one place. That forces a full rebuild, so it is a deliberate action rather
+> than something to do mid-task.
+>
+> Note: `run_build.py`, referenced below, is **not present** in the tree. Use the
+> `cmd`/`.bat` route.
+
 ### Why this is the only correct method
 
 `vcvars64.bat` is a thin stub that calls `vcvarsall.bat` through nested `call` chains. The INCLUDE, LIB, and LIBPATH environment variables are only fully set for the `cmd.exe` session that executed the bat file. Any approach that captures env vars in a subprocess and re-injects them into a *new* process (Python `os.environ`, PowerShell `$env:`, etc.) will silently miss variables set by nested `call` chains — resulting in `C1083: Cannot open include file: 'vector'` style fatal errors.
