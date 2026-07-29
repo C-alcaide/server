@@ -295,6 +295,49 @@ bool operator==(const rectangle& lhs, const rectangle& rhs)
     return boost::range::equal(lhs.ul, rhs.ul, eq) && boost::range::equal(lhs.lr, rhs.lr, eq);
 }
 
+// Every field of `projection` must be compared here.
+//
+// This equality is not cosmetic: image_transform equality feeds the mixers'
+// still-frame cache, which skips GPU composition when it reports "unchanged".
+// A field missing from this comparison means a change to it does not
+// invalidate the cache, so the channel keeps outputting a stale frame. The
+// previous inline comparison inside image_transform's operator== omitted
+// source_lens, screen_arc_v, eye_distance, curve_auto and the entire ICVFX
+// block — so a tracked camera moving the inner frustum over a static plate
+// froze the output.
+//
+// When adding a field to `projection`, add it here too.
+bool operator==(const projection& lhs, const projection& rhs)
+{
+    return lhs.enable == rhs.enable && eq(lhs.yaw, rhs.yaw) && eq(lhs.pitch, rhs.pitch) &&
+           eq(lhs.roll, rhs.roll) && eq(lhs.fov, rhs.fov) && eq(lhs.offset_x, rhs.offset_x) &&
+           eq(lhs.offset_y, rhs.offset_y) && eq(lhs.frustum_h, rhs.frustum_h) &&
+           eq(lhs.frustum_v, rhs.frustum_v) && eq(lhs.lens_k1, rhs.lens_k1) && eq(lhs.lens_k2, rhs.lens_k2) &&
+           eq(lhs.lens_k3, rhs.lens_k3) && eq(lhs.lens_p1, rhs.lens_p1) && eq(lhs.lens_p2, rhs.lens_p2) &&
+           lhs.source_lens == rhs.source_lens && lhs.curve_enable == rhs.curve_enable &&
+           lhs.curve_type == rhs.curve_type && eq(lhs.screen_arc, rhs.screen_arc) &&
+           eq(lhs.screen_arc_v, rhs.screen_arc_v) && eq(lhs.eye_distance, rhs.eye_distance) &&
+           lhs.curve_auto == rhs.curve_auto && eq(lhs.edge_blend_left, rhs.edge_blend_left) &&
+           eq(lhs.edge_blend_right, rhs.edge_blend_right) && eq(lhs.edge_blend_top, rhs.edge_blend_top) &&
+           eq(lhs.edge_blend_bottom, rhs.edge_blend_bottom) && eq(lhs.edge_blend_gamma, rhs.edge_blend_gamma) &&
+           lhs.icvfx_enable == rhs.icvfx_enable && eq(lhs.inner_yaw, rhs.inner_yaw) &&
+           eq(lhs.inner_pitch, rhs.inner_pitch) && eq(lhs.inner_roll, rhs.inner_roll) &&
+           eq(lhs.inner_fov, rhs.inner_fov) && eq(lhs.inner_eye_distance, rhs.inner_eye_distance) &&
+           eq(lhs.inner_offset_x, rhs.inner_offset_x) && eq(lhs.inner_offset_y, rhs.inner_offset_y) &&
+           eq(lhs.icvfx_q0x, rhs.icvfx_q0x) && eq(lhs.icvfx_q0y, rhs.icvfx_q0y) &&
+           eq(lhs.icvfx_q1x, rhs.icvfx_q1x) && eq(lhs.icvfx_q1y, rhs.icvfx_q1y) &&
+           eq(lhs.icvfx_q2x, rhs.icvfx_q2x) && eq(lhs.icvfx_q2y, rhs.icvfx_q2y) &&
+           eq(lhs.icvfx_q3x, rhs.icvfx_q3x) && eq(lhs.icvfx_q3y, rhs.icvfx_q3y) &&
+           eq(lhs.icvfx_feather, rhs.icvfx_feather) && eq(lhs.icvfx_outer_dim, rhs.icvfx_outer_dim) &&
+           eq(lhs.icvfx_inner_dim, rhs.icvfx_inner_dim) && eq(lhs.icvfx_inner_gain_r, rhs.icvfx_inner_gain_r) &&
+           eq(lhs.icvfx_inner_gain_g, rhs.icvfx_inner_gain_g) &&
+           eq(lhs.icvfx_inner_gain_b, rhs.icvfx_inner_gain_b) &&
+           eq(lhs.icvfx_outer_gain_r, rhs.icvfx_outer_gain_r) &&
+           eq(lhs.icvfx_outer_gain_g, rhs.icvfx_outer_gain_g) && eq(lhs.icvfx_outer_gain_b, rhs.icvfx_outer_gain_b);
+}
+
+bool operator!=(const projection& lhs, const projection& rhs) { return !(lhs == rhs); }
+
 bool operator==(const image_transform& lhs, const image_transform& rhs)
 {
     return eq(lhs.opacity, rhs.opacity) && eq(lhs.contrast, rhs.contrast) && eq(lhs.brightness, rhs.brightness) &&
@@ -320,26 +363,7 @@ bool operator==(const image_transform& lhs, const image_transform& rhs)
                eq(lhs.levels.gamma,      rhs.levels.gamma)      &&
                eq(lhs.levels.min_output, rhs.levels.min_output) &&
                eq(lhs.levels.max_output, rhs.levels.max_output) &&
-               lhs.projection.enable == rhs.projection.enable && eq(lhs.projection.yaw, rhs.projection.yaw) &&
-               eq(lhs.projection.pitch, rhs.projection.pitch) && eq(lhs.projection.roll, rhs.projection.roll) &&
-               eq(lhs.projection.fov, rhs.projection.fov) &&
-               eq(lhs.projection.offset_x, rhs.projection.offset_x) &&
-               eq(lhs.projection.offset_y, rhs.projection.offset_y) &&
-               eq(lhs.projection.frustum_h, rhs.projection.frustum_h) &&
-               eq(lhs.projection.frustum_v, rhs.projection.frustum_v) &&
-               eq(lhs.projection.lens_k1, rhs.projection.lens_k1) &&
-               eq(lhs.projection.lens_k2, rhs.projection.lens_k2) &&
-               eq(lhs.projection.lens_k3, rhs.projection.lens_k3) &&
-               eq(lhs.projection.lens_p1, rhs.projection.lens_p1) &&
-               eq(lhs.projection.lens_p2, rhs.projection.lens_p2) &&
-               lhs.projection.curve_enable == rhs.projection.curve_enable &&
-               lhs.projection.curve_type   == rhs.projection.curve_type   &&
-               eq(lhs.projection.screen_arc, rhs.projection.screen_arc)   &&
-               eq(lhs.projection.edge_blend_left,   rhs.projection.edge_blend_left)   &&
-               eq(lhs.projection.edge_blend_right,  rhs.projection.edge_blend_right)  &&
-               eq(lhs.projection.edge_blend_top,    rhs.projection.edge_blend_top)    &&
-               eq(lhs.projection.edge_blend_bottom, rhs.projection.edge_blend_bottom) &&
-               eq(lhs.projection.edge_blend_gamma,  rhs.projection.edge_blend_gamma)  &&
+               lhs.projection == rhs.projection &&
                lhs.color_grade.enable == rhs.color_grade.enable &&
                lhs.color_grade.input_transfer == rhs.color_grade.input_transfer &&
                lhs.color_grade.input_gamut == rhs.color_grade.input_gamut &&

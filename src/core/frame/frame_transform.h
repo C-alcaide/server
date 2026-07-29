@@ -409,6 +409,12 @@ struct image_transform final
                                  const tweener&         tween);
 };
 
+/// Compares every field of `projection`. Used by image_transform equality
+/// (which feeds the mixers' still-frame cache) and by the stage's OSC
+/// publication. Keep it exhaustive — see the note on the definition.
+bool operator==(const projection& lhs, const projection& rhs);
+bool operator!=(const projection& lhs, const projection& rhs);
+
 bool operator==(const image_transform& lhs, const image_transform& rhs);
 bool operator!=(const image_transform& lhs, const image_transform& rhs);
 
