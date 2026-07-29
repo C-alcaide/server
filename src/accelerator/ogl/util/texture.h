@@ -66,6 +66,11 @@ class texture final : public core::texture
     /// Called automatically by ogl::device::create_texture().
     void set_device(std::weak_ptr<device> dev);
 
+    /// The device that owns this texture's GL context, or nullptr. Lets a
+    /// consumer dispatch GL work (e.g. a compute pack) onto the mixer's GL
+    /// thread where this texture and its context are valid.
+    std::shared_ptr<device> get_device() const;
+
     bool tex_is_hbd() const override { return depth() != common::bit_depth::bit8; }
 
     /// Read pixel data from the GPU texture (dispatches to GL thread).

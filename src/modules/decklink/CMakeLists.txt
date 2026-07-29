@@ -26,6 +26,8 @@ set(SOURCES
 		consumer/format_strategy.h
 		consumer/gpu_output_buffer_pool.cpp
 		consumer/gpu_output_buffer_pool.h
+		consumer/ogl_gl_strategy.cpp
+		consumer/ogl_gl_strategy.h
 		consumer/dvp_support.cpp
 		consumer/dvp_support.h
 		consumer/config.cpp
@@ -135,6 +137,14 @@ else()
 			dl
 	)
 endif ()
+
+# OpenGL-mixer GPU pack (GL compute v210/BGRA) needs GLEW for GL entry points.
+# The calls run on the ogl accelerator's GL thread (context current there).
+target_link_libraries(decklink PRIVATE GLEW::glew)
+set_source_files_properties(
+	consumer/ogl_gl_strategy.cpp
+	PROPERTIES SKIP_PRECOMPILE_HEADERS ON
+)
 
 # CUDA-VK direct GPU strategy dependencies
 if(DECKLINK_CUDA_VK)

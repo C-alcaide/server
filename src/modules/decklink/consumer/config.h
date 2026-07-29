@@ -127,6 +127,18 @@ struct configuration
         dvp,
     };
 
+    // v210/BGRA packing location for the OpenGL mixer's DeckLink output:
+    //   gpu = pack on the GPU with a GL compute shader (skip the CPU pack + the
+    //         full-frame readback); cpu = classic AVX2 pack; auto = cpu for now
+    //   (opt-in via gpu until it is the proven default). Only affects the OGL
+    //   mixer's progressive, non-key-only ports.
+    enum class gpu_pack_t
+    {
+        auto_select,
+        gpu,
+        cpu,
+    };
+
     bool                 embedded_audio              = false;
     keyer_t              keyer                       = keyer_t::default_keyer;
     duplex_t             duplex                      = duplex_t::default_duplex;
@@ -138,6 +150,7 @@ struct configuration
     pixel_format_t       pixel_format                = pixel_format_t::rgba;
     gpu_readback_mode_t  gpu_readback_mode            = gpu_readback_mode_t::auto_select;
     gpu_transfer_t       gpu_transfer                 = gpu_transfer_t::auto_select;
+    gpu_pack_t           gpu_pack                     = gpu_pack_t::auto_select;
 
     port_configuration              primary;
     std::vector<port_configuration> secondaries;

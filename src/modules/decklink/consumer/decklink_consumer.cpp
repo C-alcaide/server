@@ -27,6 +27,7 @@
 #include "decklink_consumer.h"
 #include "format_strategy.h"
 #include "monitor.h"
+#include "ogl_gl_strategy.h"
 #include "vanc.h"
 
 #ifdef DECKLINK_CUDA_VK_ENABLED
@@ -228,7 +229,7 @@ core::video_format_desc get_decklink_format(const port_configuration&      confi
     return fallback_format_desc;
 }
 
-spl::shared_ptr<format_strategy> create_format_strategy(const configuration& config, bool use_vulkan = false)
+spl::shared_ptr<format_strategy> create_format_strategy(const configuration& config, bool use_vulkan = false, bool ogl_gpu_direct = false)
 {
     // HDR mode always signals BT.2020 on SDI, so v210 must use BT.2020 matrix.
     // SDR mode: use the configured color_space (bt709 or bt601; P3/Adobe falls back to bt709).
@@ -238,8 +239,16 @@ spl::shared_ptr<format_strategy> create_format_strategy(const configuration& con
                ? create_sdr_v210_strategy(config.color_space)
                : create_sdr_bgra_strategy());
 
-    if (!use_vulkan)
+    if (!use_vulkan) {
+        // OpenGL mixer: optionally pack v210/BGRA on the GPU (GL compute) instead of the CPU.
+        if (ogl_gpu_direct) {
+            bool is_hdr     = config.hdr;
+            bool use_bt2020 = config.hdr || config.color_space == core::color_space::bt2020;
+            bool needs_v210 = config.hdr || config.pixel_format == configuration::pixel_format_t::yuv;
+            return try_create_ogl_gl_strategy(is_hdr, use_bt2020, std::move(cpu_strategy), needs_v210);
+        }
         return cpu_strategy;
+    }
 
     bool is_hdr     = config.hdr;
     bool use_bt2020 = config.color_space == core::color_space::bt2020;
@@ -285,6 +294,20 @@ spl::shared_ptr<format_strategy> create_format_strategy(const configuration& con
     }
 
     return cpu_strategy;
+}
+
+// The OpenGL GPU pack (GL compute v210/BGRA) is used only when explicitly enabled
+// (<gpu-pack>gpu</>) and the output is progressive with no key-only ports (v1).
+bool ogl_gpu_pack_eligible(const configuration& config, bool use_vulkan, int field_count)
+{
+    if (use_vulkan || config.gpu_pack != configuration::gpu_pack_t::gpu || field_count != 1)
+        return false;
+    if (config.primary.key_only)
+        return false;
+    for (const auto& s : config.secondaries)
+        if (s.key_only)
+            return false;
+    return true;
 }
 
 enum EOTF
@@ -570,7 +593,10 @@ struct decklink_secondary_port final : public IDeckLinkVideoOutputCallback
                             bool                           use_vulkan = false)
         : config_(config)
         , output_config_(std::move(output_config))
-        , format_strategy_(create_format_strategy(config, use_vulkan))
+        , format_strategy_(create_format_strategy(
+              config,
+              use_vulkan,
+              ogl_gpu_pack_eligible(config, use_vulkan, main_decklink_format_desc.field_count)))
         , device_sync_group_(device_sync_group)
         , channel_format_desc_(std::move(channel_format_desc))
         , decklink_format_desc_(get_decklink_format(output_config_, main_decklink_format_desc))
@@ -772,7 +798,10 @@ struct decklink_consumer final : public IDeckLinkVideoOutputCallback
         : channel_index_(channel_index)
         , config_(config)
         , use_vulkan_(use_vulkan)
-        , format_strategy_(create_format_strategy(config, use_vulkan))
+        , format_strategy_(create_format_strategy(
+              config,
+              use_vulkan,
+              ogl_gpu_pack_eligible(config, use_vulkan, get_decklink_format(config.primary, channel_format_desc).field_count)))
         , channel_format_desc_(std::move(channel_format_desc))
         , decklink_format_desc_(get_decklink_format(config.primary, channel_format_desc_))
     {
@@ -1376,6 +1405,11 @@ struct decklink_consumer_proxy : public core::frame_consumer
         // queue that races with the GPU strategy's texture import via CUDA
         // external memory or VK external memory, causing black/corrupt output.
         if (use_vulkan_ && config_.gpu_readback_mode != configuration::gpu_readback_mode_t::cpu)
+            return false;
+        // OpenGL mixer with GPU pack (<gpu-pack>gpu</>): the packed frame is produced on
+        // the GPU, so skip the core's full-frame host readback (same rationale as Vulkan).
+        if (!use_vulkan_ && format_desc_.width > 0 &&
+            ogl_gpu_pack_eligible(config_, use_vulkan_, get_decklink_format(config_.primary, format_desc_).field_count))
             return false;
         // CPU mode or non-Vulkan accelerator needs pixel data in host memory.
         return true;

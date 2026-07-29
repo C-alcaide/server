@@ -170,6 +170,17 @@ configuration parse_xml_config(const boost::property_tree::wptree&  ptree,
             config.gpu_transfer = configuration::gpu_transfer_t::auto_select;
     }
 
+    {
+        // OpenGL-mixer v210/BGRA pack location (GL compute vs CPU AVX2).
+        auto gpu_pack = ptree.get(L"gpu-pack", L"auto");
+        if (gpu_pack == L"gpu")
+            config.gpu_pack = configuration::gpu_pack_t::gpu;
+        else if (gpu_pack == L"cpu")
+            config.gpu_pack = configuration::gpu_pack_t::cpu;
+        else
+            config.gpu_pack = configuration::gpu_pack_t::auto_select;
+    }
+
     config.primary = parse_output_config(ptree, format_repository);
     if (config.primary.device_index == -1)
         config.primary.device_index = 1;

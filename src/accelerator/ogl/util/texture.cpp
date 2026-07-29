@@ -157,6 +157,8 @@ int               texture::id() const { return impl_->id_; }
 
 void texture::set_device(std::weak_ptr<device> dev) { impl_->device_ = std::move(dev); }
 
+std::shared_ptr<device> texture::get_device() const { return impl_->device_.lock(); }
+
 std::vector<std::uint8_t> texture::read_pixels() const
 {
     auto dev = impl_->device_.lock();
