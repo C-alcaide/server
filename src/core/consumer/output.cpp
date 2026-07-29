@@ -34,6 +34,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <iomanip>
 #include <map>
 #include <optional>
@@ -56,6 +57,12 @@ struct output::impl
     std::map<int, spl::shared_ptr<frame_consumer>> consumers_;
 
     std::atomic<uint64_t>      tick_count_{0};
+    std::mutex                 tick_mutex_;
+    std::condition_variable    tick_cv_;
+
+    // Which consumer last forced a CPU readback, for transition-only logging.
+    // Compared by address only — never dereferenced outside consumers_mutex_.
+    const frame_consumer* last_cpu_requester_ = nullptr;
 
     std::optional<time_point_t> time_;
 
@@ -75,6 +82,26 @@ struct output::impl
     {
     }
 
+    /// Blocks until the tick loop has certainly dropped any snapshot it holds
+    /// of a consumer removed from consumers_ just now, so the caller's
+    /// shared_ptr is the last reference and destruction happens here (on the
+    /// calling AMCP thread) instead of on the realtime channel thread.
+    ///
+    /// operator() increments tick_count_ *before* its local `consumers`
+    /// snapshot goes out of scope, so seeing one increment is not enough —
+    /// two are needed to prove the snapshot is gone. The previous code slept in
+    /// 1 ms steps and waited for a single increment, so it was both quantised
+    /// and one epoch short of the guarantee it claimed.
+    void wait_for_consumer_snapshot_release()
+    {
+        const auto target   = tick_count_.load(std::memory_order_acquire) + 2;
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(200);
+
+        std::unique_lock<std::mutex> lock(tick_mutex_);
+        tick_cv_.wait_until(
+            lock, deadline, [&] { return tick_count_.load(std::memory_order_acquire) >= target; });
+    }
+
     void add(int index, spl::shared_ptr<frame_consumer> consumer)
     {
         // Extract old consumer without destroying it under the lock.
@@ -89,14 +116,10 @@ struct output::impl
         }
 
         if (old) {
-            // Wait for the tick loop to finish its current iteration so it
-            // drops its shared_ptr copy of the old consumer.  At 25 fps a
-            // tick takes ~40 ms; we wait up to 200 ms (5 frames).
-            auto pre = tick_count_.load();
-            for (int i = 0; i < 200 && tick_count_.load() == pre; ++i) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            }
-            // Destroy old consumer — joins its GL/render thread.
+            wait_for_consumer_snapshot_release();
+            // Destroy old consumer — joins its GL/render thread. Kept
+            // synchronous so that REMOVE/ADD on the same hardware device
+            // releases it before the replacement tries to claim it.
             old.reset();
         }
 
@@ -124,15 +147,11 @@ struct output::impl
             consumers_.erase(it);
         }
 
-        // Wait for the tick loop to finish its current iteration so it
-        // drops its shared_ptr snapshot of the old consumer.  Without this,
-        // the old consumer may be destroyed later (when the tick snapshot
-        // goes out of scope) and race with a newly-added consumer at the
-        // same index.
-        auto pre = tick_count_.load();
-        for (int i = 0; i < 200 && tick_count_.load() == pre; ++i) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
+        // Wait for the tick loop to drop its shared_ptr snapshot of the old
+        // consumer. Without this, the old consumer may be destroyed later (when
+        // the tick snapshot goes out of scope) and race with a newly-added
+        // consumer at the same index.
+        wait_for_consumer_snapshot_release();
         old.reset();
         log_sync_recommendation();
         return true;
@@ -366,27 +385,38 @@ struct output::impl
         return consumers_.size();
     }
 
+    // Evaluated every tick on purpose: a consumer's answer can change at
+    // runtime (a GPU strategy failing over to CPU, a Spout/ProRes shared
+    // context dropping out), and the mixer must follow it. The cost is one
+    // uncontended lock plus a couple of virtual calls; only the logging is
+    // worth keeping out of the steady state, which is done by reporting
+    // transitions rather than counting calls.
     bool any_consumer_needs_cpu_data()
     {
         std::lock_guard<std::mutex> lock(consumers_mutex_);
+
+        const frame_consumer* requester = nullptr;
         for (auto& p : consumers_) {
             if (p.second->needs_cpu_frame_data()) {
-                static int log_count = 0;
-                if (log_count < 5) {
-                    CASPAR_LOG(info) << L"[output] Consumer forcing CPU readback: "
-                                    << p.second->name() << L" (index=" << p.first << L")"
-                                    << L" needs_cpu=" << p.second->needs_cpu_frame_data();
-                    log_count++;
-                }
-                return true;
+                requester = p.second.get();
+                break;
             }
         }
-        static bool logged_skip = false;
-        if (!logged_skip && !consumers_.empty()) {
-            CASPAR_LOG(info) << L"[output] No consumer needs CPU readback (" << consumers_.size() << L" consumers)";
-            logged_skip = true;
+
+        // Log only when the answer changes. These used to be function-level
+        // statics, so the diagnostic was shared across every channel in the
+        // process and went silent after the first few lines server-wide.
+        if (requester != last_cpu_requester_) {
+            if (requester != nullptr) {
+                CASPAR_LOG(info) << print() << L" CPU readback required by consumer " << requester->name() << L".";
+            } else if (!consumers_.empty()) {
+                CASPAR_LOG(info) << print() << L" No consumer needs CPU readback (" << consumers_.size()
+                                 << L" consumers); mixer readback skipped.";
+            }
+            last_cpu_requester_ = requester;
         }
-        return false;
+
+        return requester != nullptr;
     }
 
     void operator()(const const_frame&             input_frame1,
@@ -532,6 +562,14 @@ struct output::impl
         state_ = std::move(state);
 
         tick_count_.fetch_add(1, std::memory_order_release);
+        {
+            // Publish the new epoch to any add()/remove() waiting for this
+            // tick's consumer snapshot to be released. Taking the mutex
+            // (uncontended, ~tens of ns) closes the lost-wakeup window between
+            // a waiter's predicate check and its wait.
+            std::lock_guard<std::mutex> tick_lock(tick_mutex_);
+        }
+        tick_cv_.notify_all();
 
         const auto needs_sync = std::all_of(
             consumers.begin(), consumers.end(), [](auto& p) { return !p.second->has_synchronization_clock(); });
