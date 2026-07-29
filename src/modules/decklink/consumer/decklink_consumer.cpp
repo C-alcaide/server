@@ -245,7 +245,8 @@ spl::shared_ptr<format_strategy> create_format_strategy(const configuration& con
             bool is_hdr     = config.hdr;
             bool use_bt2020 = config.hdr || config.color_space == core::color_space::bt2020;
             bool needs_v210 = config.hdr || config.pixel_format == configuration::pixel_format_t::yuv;
-            return try_create_ogl_gl_strategy(is_hdr, use_bt2020, std::move(cpu_strategy), needs_v210);
+            bool use_dvp    = config.gpu_transfer == configuration::gpu_transfer_t::dvp;
+            return try_create_ogl_gl_strategy(is_hdr, use_bt2020, std::move(cpu_strategy), needs_v210, use_dvp);
         }
         return cpu_strategy;
     }

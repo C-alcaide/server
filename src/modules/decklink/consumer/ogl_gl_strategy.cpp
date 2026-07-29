@@ -35,6 +35,15 @@
 #include <string>
 #include <vector>
 
+// NVIDIA GPUDirect for Video (DVP) — optional Tier-2 GPU->sysmem readback tail.
+// Only available on CUDA/DVP builds; the DVP headers pull in GL/gl.h, which GLEW
+// has already superseded above (its include guards make gl.h a no-op).
+#ifdef DECKLINK_CUDA_DVP_ENABLED
+#include <dvpapi_gl.h>
+#include <malloc.h>
+#include <unordered_map>
+#endif
+
 namespace caspar { namespace decklink {
 
 namespace {
@@ -222,6 +231,7 @@ struct ogl_gl_strategy::impl
     const bool                       is_hdr_;
     const bool                       use_bt2020_;
     const bool                       needs_v210_;
+    const bool                       use_dvp_;
     spl::shared_ptr<format_strategy> fallback_;
 
     std::shared_ptr<gpu_output_buffer_pool> pool_;
@@ -234,10 +244,11 @@ struct ogl_gl_strategy::impl
     bool                                    broken_  = false; // shader failed to build
     bool                                    parity_done_ = false; // one-shot self-test
 
-    impl(bool is_hdr, bool use_bt2020, spl::shared_ptr<format_strategy> fallback, bool needs_v210)
+    impl(bool is_hdr, bool use_bt2020, spl::shared_ptr<format_strategy> fallback, bool needs_v210, bool use_dvp)
         : is_hdr_(is_hdr)
         , use_bt2020_(use_bt2020)
         , needs_v210_(needs_v210)
+        , use_dvp_(use_dvp)
         , fallback_(std::move(fallback))
     {
     }
@@ -245,9 +256,16 @@ struct ogl_gl_strategy::impl
     ~impl()
     {
         auto dev = gl_device_.lock();
-        if (dev && (prog_ || ssbo_)) {
+        bool has_dvp = false;
+#ifdef DECKLINK_CUDA_DVP_ENABLED
+        has_dvp = dvp_inited_;
+#endif
+        if (dev && (prog_ || ssbo_ || has_dvp)) {
             GLuint prog = prog_, ssbo = ssbo_;
             dev->dispatch_sync([&] {
+#ifdef DECKLINK_CUDA_DVP_ENABLED
+                dvp_teardown();
+#endif
                 if (prog)
                     glDeleteProgram(prog);
                 if (ssbo)
@@ -260,6 +278,185 @@ struct ogl_gl_strategy::impl
     {
         return needs_v210_ ? ((width + 47) / 48) * 128 : width * 4;
     }
+
+#ifdef DECKLINK_CUDA_DVP_ENABLED
+    // NVIDIA GPUDirect-for-Video (DVP) readback state. Replaces glGetBufferSubData
+    // with a hardware-synchronised GPU-buffer -> page-locked-sysmem DMA. All calls
+    // run on the mixer GL thread (context current) as SHARE_APP_CONTEXT requires.
+    struct dvp_sync
+    {
+        volatile std::uint32_t* sem     = nullptr;
+        std::uint32_t           acquire = 0;
+        std::uint32_t           release = 0;
+        DVPSyncObjectHandle     handle  = 0;
+    };
+
+    bool            dvp_inited_    = false; // dvpInitGLContext done
+    bool            dvp_failed_    = false; // gave up -> use glGetBufferSubData
+    bool            dvp_logged_ok_ = false;
+    std::uint32_t   dvp_buf_align_ = 0, dvp_stride_align_ = 0, dvp_sem_align_ = 0, dvp_sem_size_ = 0;
+    GLuint          dvp_gpu_ssbo_  = 0; // ssbo id currently registered
+    DVPBufferHandle dvp_gpu_buf_   = 0; // registered ssbo handle
+    dvp_sync        dvp_ext_sync_;
+    dvp_sync        dvp_gpu_sync_;
+    std::unordered_map<void*, DVPBufferHandle> dvp_sysmem_; // pinned out ptr -> handle
+
+    bool dvp_init_sync(dvp_sync& s)
+    {
+        s.sem = static_cast<volatile std::uint32_t*>(_aligned_malloc(dvp_sem_size_, dvp_sem_align_));
+        if (!s.sem)
+            return false;
+        s.sem[0]  = 0;
+        s.acquire = 0;
+        s.release = 0;
+        DVPSyncObjectDesc d{};
+        d.externalClientWaitFunc = nullptr;
+        d.sem                    = const_cast<std::uint32_t*>(s.sem);
+        d.flags                  = 0;
+        return dvpImportSyncObject(&d, &s.handle) == DVP_STATUS_OK;
+    }
+
+    bool dvp_init_ctx()
+    {
+        if (dvpInitGLContext(DVP_DEVICE_FLAGS_SHARE_APP_CONTEXT) != DVP_STATUS_OK)
+            return false;
+        std::uint32_t sem_payload_off = 0, sem_payload_sz = 0;
+        if (dvpGetRequiredConstantsGLCtx(&dvp_buf_align_,
+                                         &dvp_stride_align_,
+                                         &dvp_sem_align_,
+                                         &dvp_sem_size_,
+                                         &sem_payload_off,
+                                         &sem_payload_sz) != DVP_STATUS_OK)
+            return false;
+        return dvp_init_sync(dvp_ext_sync_) && dvp_init_sync(dvp_gpu_sync_);
+    }
+
+    DVPBufferHandle dvp_register_sysmem(void* p, std::size_t bytes)
+    {
+        auto it = dvp_sysmem_.find(p);
+        if (it != dvp_sysmem_.end())
+            return it->second;
+        DVPSysmemBufferDesc desc{};
+        desc.width   = static_cast<std::uint32_t>(bytes);
+        desc.height  = 1;
+        desc.stride  = static_cast<std::uint32_t>(bytes);
+        desc.size    = static_cast<std::uint32_t>(bytes);
+        desc.format  = DVP_BUFFER;
+        desc.type    = DVP_UNSIGNED_BYTE;
+        desc.bufAddr = p;
+        DVPBufferHandle h = 0;
+        if (dvpCreateBuffer(&desc, &h) != DVP_STATUS_OK)
+            return 0;
+        if (dvpBindToGLCtx(h) != DVP_STATUS_OK) {
+            dvpDestroyBuffer(h);
+            return 0;
+        }
+        dvp_sysmem_[p] = h;
+        return h;
+    }
+
+    // Called before the compute dispatch: ensure DVP is initialised, the SSBO and
+    // the sysmem output are registered, and GL waits for any prior DVP read of the
+    // SSBO to finish. Returns true when DVP is ready to service this frame.
+    bool dvp_prepare(GLuint ssbo, void* out, std::size_t bytes)
+    {
+        if (dvp_failed_)
+            return false;
+        if (!dvp_inited_) {
+            if (!dvp_init_ctx()) {
+                dvp_failed_ = true;
+                CASPAR_LOG(warning) << L"[ogl_gl_strategy] DVP-GL init failed; using glGetBufferSubData.";
+                return false;
+            }
+            dvp_inited_ = true;
+        }
+        if (dvp_gpu_ssbo_ != ssbo) {
+            if (dvp_gpu_buf_) {
+                dvpFreeBuffer(dvp_gpu_buf_);
+                dvp_gpu_buf_ = 0;
+            }
+            if (dvpCreateGPUBufferGL(ssbo, &dvp_gpu_buf_) != DVP_STATUS_OK) {
+                dvp_failed_ = true;
+                return false;
+            }
+            dvp_gpu_ssbo_ = ssbo;
+        }
+        if (!dvp_register_sysmem(out, bytes)) {
+            dvp_failed_ = true;
+            return false;
+        }
+        // GL must not overwrite the SSBO until the previous DVP read completed.
+        dvpMapBufferWaitAPI(dvp_gpu_buf_);
+        return true;
+    }
+
+    // Called after the compute dispatch + glMemoryBarrier: DMA the packed SSBO to
+    // the page-locked sysmem output with HW sync. Returns true on success.
+    bool dvp_finish(void* out, std::size_t bytes)
+    {
+        auto it = dvp_sysmem_.find(out);
+        if (it == dvp_sysmem_.end()) {
+            dvp_failed_ = true;
+            return false;
+        }
+        // Signal that GL has finished writing the SSBO, then have DVP wait on it.
+        if (dvpMapBufferEndAPI(dvp_gpu_buf_) != DVP_STATUS_OK) {
+            dvp_failed_ = true;
+            return false;
+        }
+        dvp_gpu_sync_.release++;
+        dvpBegin();
+        dvpMapBufferWaitDVP(dvp_gpu_buf_);
+        DVPStatus st = dvpMemcpy(dvp_gpu_buf_,
+                                 dvp_ext_sync_.handle,
+                                 dvp_ext_sync_.acquire,
+                                 DVP_TIMEOUT_IGNORED,
+                                 it->second,
+                                 dvp_gpu_sync_.handle,
+                                 dvp_gpu_sync_.release,
+                                 0,
+                                 0,
+                                 static_cast<std::uint32_t>(bytes));
+        dvpMapBufferEndDVP(dvp_gpu_buf_);
+        dvpEnd();
+        if (st != DVP_STATUS_OK) {
+            dvp_failed_ = true;
+            return false;
+        }
+        // Block until the copy has landed in sysmem before DeckLink DMAs the frame.
+        dvpBegin();
+        dvpSyncObjClientWaitComplete(dvp_gpu_sync_.handle, DVP_TIMEOUT_IGNORED);
+        dvpEnd();
+        if (!dvp_logged_ok_) {
+            CASPAR_LOG(info) << L"[ogl_gl_strategy] DVP-GL readback active (GPUDirect for Video).";
+            dvp_logged_ok_ = true;
+        }
+        return true;
+    }
+
+    void dvp_teardown()
+    {
+        if (!dvp_inited_)
+            return;
+        for (auto& kv : dvp_sysmem_) {
+            dvpUnbindFromGLCtx(kv.second);
+            dvpDestroyBuffer(kv.second);
+        }
+        dvp_sysmem_.clear();
+        if (dvp_gpu_buf_)
+            dvpFreeBuffer(dvp_gpu_buf_);
+        if (dvp_ext_sync_.handle)
+            dvpFreeSyncObject(dvp_ext_sync_.handle);
+        if (dvp_gpu_sync_.handle)
+            dvpFreeSyncObject(dvp_gpu_sync_.handle);
+        dvpCloseGLContext();
+        if (dvp_ext_sync_.sem)
+            _aligned_free(const_cast<std::uint32_t*>(dvp_ext_sync_.sem));
+        if (dvp_gpu_sync_.sem)
+            _aligned_free(const_cast<std::uint32_t*>(dvp_gpu_sync_.sem));
+        dvp_inited_ = false;
+    }
+#endif // DECKLINK_CUDA_DVP_ENABLED
 
     struct field_pass
     {
@@ -311,6 +508,12 @@ struct ogl_gl_strategy::impl
         }
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, ssbo_);
 
+        bool dvp_ready = false;
+#ifdef DECKLINK_CUDA_DVP_ENABLED
+        if (use_dvp_)
+            dvp_ready = dvp_prepare(ssbo_, out, out_sz);
+#endif
+
         for (const auto& p : passes) {
             glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(p.tex_id));
             glUniform1i(glGetUniformLocation(prog_, "u_first_line"), p.first_line);
@@ -325,7 +528,16 @@ struct ogl_gl_strategy::impl
         }
 
         glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT | GL_SHADER_STORAGE_BARRIER_BIT);
-        glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, out_sz, out);
+
+        bool read_done = false;
+#ifdef DECKLINK_CUDA_DVP_ENABLED
+        if (dvp_ready)
+            read_done = dvp_finish(out, out_sz);
+#endif
+        if (!read_done) {
+            glBindBuffer(GL_SHADER_STORAGE_BUFFER, ssbo_);
+            glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, out_sz, out);
+        }
 
         // One-shot correctness gate: compare the GPU pack of row 0 against an
         // independent C++ reference of the same math on the actual texels. Fires
@@ -461,11 +673,13 @@ struct ogl_gl_strategy::impl
 ogl_gl_strategy::ogl_gl_strategy(bool                             is_hdr,
                                  bool                             use_bt2020,
                                  spl::shared_ptr<format_strategy> fallback,
-                                 bool                             needs_v210)
-    : impl_(std::make_unique<impl>(is_hdr, use_bt2020, std::move(fallback), needs_v210))
+                                 bool                             needs_v210,
+                                 bool                             use_dvp)
+    : impl_(std::make_unique<impl>(is_hdr, use_bt2020, std::move(fallback), needs_v210, use_dvp))
 {
     CASPAR_LOG(info) << L"[ogl_gl_strategy] GPU-direct OpenGL output: " << (needs_v210 ? L"v210" : L"bgra")
-                     << (is_hdr ? L" hdr" : L"") << (use_bt2020 ? L" bt2020" : L"");
+                     << (is_hdr ? L" hdr" : L"") << (use_bt2020 ? L" bt2020" : L"")
+                     << (use_dvp ? L" dvp" : L"");
 }
 
 ogl_gl_strategy::~ogl_gl_strategy() = default;
@@ -498,9 +712,10 @@ std::shared_ptr<void> ogl_gl_strategy::convert_frame_for_port(const core::video_
 spl::shared_ptr<format_strategy> try_create_ogl_gl_strategy(bool                             is_hdr,
                                                             bool                             use_bt2020,
                                                             spl::shared_ptr<format_strategy> fallback,
-                                                            bool                             needs_v210)
+                                                            bool                             needs_v210,
+                                                            bool                             use_dvp)
 {
-    return spl::make_shared<ogl_gl_strategy>(is_hdr, use_bt2020, std::move(fallback), needs_v210);
+    return spl::make_shared<ogl_gl_strategy>(is_hdr, use_bt2020, std::move(fallback), needs_v210, use_dvp);
 }
 
 }} // namespace caspar::decklink

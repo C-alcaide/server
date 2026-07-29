@@ -42,7 +42,8 @@ class ogl_gl_strategy final : public format_strategy
     ogl_gl_strategy(bool                             is_hdr,
                     bool                             use_bt2020,
                     spl::shared_ptr<format_strategy> fallback,
-                    bool                             needs_v210);
+                    bool                             needs_v210,
+                    bool                             use_dvp);
     ~ogl_gl_strategy() override;
 
     BMDPixelFormat        get_pixel_format() override;
@@ -61,9 +62,12 @@ class ogl_gl_strategy final : public format_strategy
 };
 
 // Returns an ogl_gl_strategy, or the fallback if the OGL GPU path can't be built.
+// use_dvp requests the NVIDIA GPUDirect-for-Video (DVP) readback tail instead of
+// glGetBufferSubData; it self-probes at runtime and falls back if DVP is absent.
 spl::shared_ptr<format_strategy> try_create_ogl_gl_strategy(bool                             is_hdr,
                                                             bool                             use_bt2020,
                                                             spl::shared_ptr<format_strategy> fallback,
-                                                            bool                             needs_v210);
+                                                            bool                             needs_v210,
+                                                            bool                             use_dvp);
 
 }} // namespace caspar::decklink
