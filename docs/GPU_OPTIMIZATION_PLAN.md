@@ -194,6 +194,38 @@ mixer-level readback when the FFmpeg consumer is the only one attached.
 
 ## Phase 5: FFmpeg Producer D3D11VA → GL Direct
 
+> ### ⚠ Status correction (2026-07-29): this path has never actually run
+>
+> Three separate reasons, found by instrumenting the decision rather than reading
+> the code:
+>
+> 1. **A missing forwarder.** `ogl::image_mixer::impl` overrides
+>    `gpu_device_handle()`, but the outer `image_mixer` — the `frame_factory`
+>    producers hold — did not forward it, so it returned the base class's
+>    `nullptr`. Every interop path that asks the mixer for its GL device declined
+>    silently. Fixed.
+> 2. **The eligibility check runs too early.** It requires
+>    `dec.sw_pix_fmt != AV_PIX_FMT_NONE`, but a D3D11VA decoder only resolves
+>    `ctx->sw_pix_fmt` after its first `get_format` callback — i.e. during
+>    decoding, not at `avcodec_open2`. At producer start it is always `NONE`, so
+>    the path declines every time. **Still open**: the decision has to be deferred
+>    until the first hardware frame arrives.
+> 3. **It failed silently**, so 1 and 2 were invisible. Each branch now logs its
+>    reason once, and a one-shot diagnostic reports the layout decoded frames
+>    arrive in and the mixer format they map to.
+>
+> The path is now **opt-in** via
+> `configuration.ffmpeg.producer.gpu-direct-decode` (default `false`). Fixing the
+> forwarder alone would have silently switched every progressive H.264/HEVC clip
+> on the OpenGL backend onto the VideoProcessor's driver-defined colour
+> conversion.
+>
+> **The right completion is no longer this design.** Now that
+> `core::pixel_format::nv12` exists (phase 6), the decoded NV12 surface should be
+> imported as its two planes and converted by the mixer's shader — bit-exact with
+> the software path by construction, and 10-bit capable — instead of being
+> converted by the VideoProcessor and imported as BGRA.
+
 ### Overview
 
 **Before:** D3D11VA decode → `av_hwframe_transfer_data` → CPU NV12 → memcpy into
