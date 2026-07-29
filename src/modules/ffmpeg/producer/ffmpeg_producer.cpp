@@ -26,6 +26,7 @@
 #include "av_producer.h"
 
 #include <common/env.h>
+#include <common/executor.h>
 #include <common/os/filesystem.h>
 #include <common/param.h>
 
@@ -56,6 +57,48 @@ extern "C" {
 namespace caspar { namespace ffmpeg {
 
 using namespace std::chrono_literals;
+
+namespace {
+
+/// Bounded pool of workers that perform AVProducer teardown off the realtime
+/// thread. Bounded on purpose: the previous thread-per-producer approach let a
+/// mass CLEAR/REMOVE run N concurrent ffmpeg teardowns against the shared heap.
+/// Four workers keep a slow-to-close file from blocking the others without
+/// reintroducing an unbounded fan-out.
+class destroyer_pool
+{
+    static constexpr int worker_count = 4;
+
+    std::vector<std::unique_ptr<executor>> workers_;
+    std::atomic<unsigned>                  next_{0};
+
+  public:
+    destroyer_pool()
+    {
+        for (int i = 0; i < worker_count; ++i)
+            workers_.push_back(std::make_unique<executor>(L"ffmpeg-producer-destroyer-" + std::to_wstring(i)));
+    }
+
+    template <typename Func>
+    void begin_invoke(Func&& func)
+    {
+        auto& worker = *workers_[next_.fetch_add(1, std::memory_order_relaxed) % workers_.size()];
+        auto  depth  = worker.size();
+        if (depth > 8) {
+            CASPAR_LOG(warning) << L"[ffmpeg] producer teardown backlog: " << depth
+                                << L" queued on one destroyer worker.";
+        }
+        worker.begin_invoke(std::forward<Func>(func));
+    }
+};
+
+destroyer_pool& producer_destroyer()
+{
+    static destroyer_pool instance;
+    return instance;
+}
+
+} // namespace
 
 struct ffmpeg_producer : public core::frame_producer
 {
@@ -104,13 +147,24 @@ struct ffmpeg_producer : public core::frame_producer
 
     ~ffmpeg_producer()
     {
-        std::thread([producer = std::move(producer_)]() mutable {
+        // Teardown is slow (joins decoder threads, frees codec contexts and
+        // filter graphs), so it must stay off the realtime channel thread. It
+        // used to be handed to a *detached* std::thread, one per producer: a
+        // mass CLEAR/REMOVE then freed N producers' ffmpeg allocations
+        // concurrently on the shared heap, which is the mechanism behind the
+        // long-standing 0xc0000374 heap-corruption crashes on this codebase
+        // (see docs/CasparCG_HRC_Crash_Report_2026-06-17.md).
+        //
+        // A small fixed pool keeps teardown off the hot path while bounding how
+        // many teardowns can race. It is not a single worker: one slow-to-close
+        // file would then stall every other producer's cleanup behind it.
+        producer_destroyer().begin_invoke([producer = std::move(producer_)]() mutable {
             try {
                 producer.reset();
             } catch (...) {
                 CASPAR_LOG_CURRENT_EXCEPTION();
             }
-        }).detach();
+        });
     }
 
     // frame_producer
