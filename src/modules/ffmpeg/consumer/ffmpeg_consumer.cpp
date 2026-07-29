@@ -97,6 +97,7 @@ extern "C" {
 #include <memory>
 #include <optional>
 #include <thread>
+#include <vector>
 
 namespace caspar { namespace ffmpeg {
 
@@ -315,8 +316,71 @@ struct Stream
             // TODO FF(av_opt_set_int_list(sink, "framerates", codec->supported_framerates, { 0, 0 },
             // AV_OPT_SEARCH_CHILDREN));
 
-            // Use av_opt_set_int_list for pix_fmts
-            FF(av_opt_set_int_list(sink, "pix_fmts", codec->pix_fmts, AV_PIX_FMT_NONE, AV_OPT_SEARCH_CHILDREN));
+            // ── Which pixel format to negotiate ───────────────────────────
+            // Handing the sink the codec's whole list lets it choose by
+            // conversion cost from the channel's BGRA, and for H.264/HEVC that
+            // lands on yuv444p -- High 4:4:4 Predictive, a profile most players
+            // and effectively every hardware decoder refuse. A recording that
+            // will not play back is a poor default, so prefer 8-bit 4:2:0 where
+            // the codec offers it.
+            //
+            // Deliberately narrow in scope:
+            //   - Codecs with no 4:2:0 mode (ProRes, DNxHD) keep the old
+            //     negotiation; there is nothing to prefer.
+            //   - Hardware encoders keep it too. They accept RGB and subsample
+            //     inside the encoder, which measured better than doing it here
+            //     (see the NVENC note above).
+            //   - An explicit pix_fmt from the caller wins outright. That also
+            //     closes a latent inconsistency: pix_fmt in the options dict is
+            //     applied to the codec context at avcodec_open2 and would
+            //     silently disagree with the format the sink actually emits.
+            std::vector<AVPixelFormat> pix_fmts;
+            {
+                // Consumed here rather than left in the dict: the sink is what
+                // actually decides the format, and enc->pix_fmt is read back from
+                // it below, so letting the option also reach avcodec_open2 would
+                // be redundant at best and contradictory at worst. Erasing it also
+                // stops it being reported as an unused option when it was used.
+                const auto requested = [&]() -> std::string {
+                    for (const auto* key : {"pix_fmt", "pixel_format"}) {
+                        for (auto* map : {&stream_options, &options}) {
+                            const auto it = map->find(key);
+                            if (it != map->end()) {
+                                auto value = std::move(it->second);
+                                map->erase(it);
+                                return value;
+                            }
+                        }
+                    }
+                    return {};
+                }();
+
+                const auto supports = [&](AVPixelFormat f) {
+                    for (auto p = codec->pix_fmts; p && *p != AV_PIX_FMT_NONE; ++p)
+                        if (*p == f)
+                            return true;
+                    return false;
+                };
+
+                if (!requested.empty()) {
+                    const auto f = av_get_pix_fmt(requested.c_str());
+                    if (f != AV_PIX_FMT_NONE && supports(f)) {
+                        pix_fmts = {f};
+                    } else {
+                        CASPAR_LOG(warning) << L"[ffmpeg] " << u16(codec->name) << L" does not support pix_fmt \""
+                                            << u16(requested) << L"\"; negotiating instead";
+                    }
+                } else if (!(codec->capabilities & AV_CODEC_CAP_HARDWARE) && supports(AV_PIX_FMT_YUV420P)) {
+                    pix_fmts = {AV_PIX_FMT_YUV420P};
+                }
+            }
+
+            if (!pix_fmts.empty()) {
+                pix_fmts.push_back(AV_PIX_FMT_NONE);
+                FF(av_opt_set_int_list(sink, "pix_fmts", pix_fmts.data(), AV_PIX_FMT_NONE, AV_OPT_SEARCH_CHILDREN));
+            } else {
+                FF(av_opt_set_int_list(sink, "pix_fmts", codec->pix_fmts, AV_PIX_FMT_NONE, AV_OPT_SEARCH_CHILDREN));
+            }
 
 #ifdef _MSC_VER
 #pragma warning(pop)
@@ -710,19 +774,34 @@ struct ffmpeg_consumer : public core::frame_consumer
                 std::optional<Stream> video_stream;
                 if (oc->oformat->video_codec != AV_CODEC_ID_NONE) {
                     if (oc->oformat->video_codec == AV_CODEC_ID_H264 && options.find("preset:v") == options.end()) {
-                        // The x264-style preset names are meaningless to NVENC, which
-                        // rejects them outright ("Undefined constant ... in 'veryfast'")
-                        // and fails the whole recording. This only checked "codec:v" and
-                        // "c:v", but the encoder is selected from "vcodec" as well (see
-                        // the Stream constructor), so "ADD 1 FILE out.mp4 -vcodec
-                        // h264_nvenc" -- the documented spelling -- got veryfast applied
-                        // and never recorded anything. Check every spelling that can
-                        // actually choose the encoder.
-                        auto selects_nvenc = [&](const char* key) {
-                            const auto it = options.find(key);
-                            return it != options.end() && it->second.find("nvenc") != std::string::npos;
-                        };
-                        if (!selects_nvenc("vcodec") && !selects_nvenc("codec:v") && !selects_nvenc("c:v")) {
+                        // "veryfast" is an x264/x265 preset name and means nothing to
+                        // any other encoder. NVENC rejects it outright ("Undefined
+                        // constant ... in 'veryfast'") and the whole recording fails;
+                        // ProRes merely warns. Both used to happen, for two reasons:
+                        //
+                        //  - The condition tests the *container's* default codec, and
+                        //    mov/mp4 both default to H.264 -- so the preset was injected
+                        //    even for "-vcodec prores_ks".
+                        //  - The NVENC exemption looked only at "codec:v" and "c:v", but
+                        //    the encoder is selected from "vcodec" as well (see the Stream
+                        //    constructor). "ADD 1 FILE out.mp4 -vcodec h264_nvenc" -- the
+                        //    documented spelling -- therefore got veryfast applied and
+                        //    never recorded anything.
+                        //
+                        // So key it off what it is really about: inject the preset only
+                        // when the encoder in use is x264/x265, meaning either no explicit
+                        // override (the container default resolves to libx264) or an
+                        // override naming one of them.
+                        const auto selected = [&]() -> std::string {
+                            for (const auto* key : {"vcodec", "codec:v", "c:v"}) {
+                                const auto it = options.find(key);
+                                if (it != options.end())
+                                    return it->second;
+                            }
+                            return {};
+                        }();
+                        if (selected.empty() || selected.find("x264") != std::string::npos ||
+                            selected.find("x265") != std::string::npos) {
                             options["preset:v"] = "veryfast";
                         }
                     }
