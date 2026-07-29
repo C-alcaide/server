@@ -440,6 +440,13 @@ class Decoder
     int                                  output_capacity = 8;
 
     boost::thread             thread;
+    // Set by the destructor before interrupting/joining. The decode loop tests
+    // this instead of thread.interruption_requested(): the worker used to read
+    // the `thread` member while that very member was still being assigned from
+    // the boost::thread constructor's result -- a data race on the object the
+    // lambda was being stored into. See
+    // docs/CasparCG_HRC_Crash_Report_2026-06-17.md §9.1 fix 4a.
+    std::atomic<bool>         abort_{false};
     std::atomic<bool>         flush_requested_{false};
     boost::mutex              flush_mutex_;
     boost::condition_variable flush_done_cond_;
@@ -524,7 +531,7 @@ class Decoder
         }
 
         thread = boost::thread([=]() {
-            while (!thread.interruption_requested()) {
+            while (!abort_.load(std::memory_order_relaxed)) {
                 try {
                     auto av_frame = alloc_frame();
                     auto ret      = avcodec_receive_frame(ctx.get(), av_frame.get());
@@ -536,7 +543,14 @@ class Decoder
                             // Also wake on flush_requested_ so the flush is performed
                             // from this thread (avcodec_flush_buffers is not thread-safe
                             // with concurrent send/receive calls).
-                            input_cond.wait(lock, [&]() { return !input.empty() || flush_requested_.load(); });
+                            // abort_ is part of the predicate so teardown does not
+                            // depend on a boost interruption point firing.
+                            input_cond.wait(lock, [&]() {
+                                return !input.empty() || flush_requested_.load() ||
+                                       abort_.load(std::memory_order_relaxed);
+                            });
+                            if (abort_.load(std::memory_order_relaxed))
+                                break;
                             if (flush_requested_.load()) {
                                 // Perform the in-place flush from within the decode thread.
                                 {
@@ -564,8 +578,11 @@ class Decoder
 
                         {
                             boost::unique_lock<boost::mutex> lock(output_mutex);
-                            output_cond.wait(lock, [&]() { return output.size() < output_capacity || flush_requested_.load(); });
-                            if (!flush_requested_.load())
+                            output_cond.wait(lock, [&]() {
+                                return output.size() < output_capacity || flush_requested_.load() ||
+                                       abort_.load(std::memory_order_relaxed);
+                            });
+                            if (!flush_requested_.load() && !abort_.load(std::memory_order_relaxed))
                                 output.push(std::move(av_frame));
                         }
                     } else {
@@ -663,8 +680,11 @@ class Decoder
                             boost::unique_lock<boost::mutex> lock(output_mutex);
                             // Also wake on flush_requested_ so we don't deadlock if a
                             // flush arrives while the output queue is full.
-                            output_cond.wait(lock, [&]() { return output.size() < output_capacity || flush_requested_.load(); });
-                            if (!flush_requested_.load())
+                            output_cond.wait(lock, [&]() {
+                                return output.size() < output_capacity || flush_requested_.load() ||
+                                       abort_.load(std::memory_order_relaxed);
+                            });
+                            if (!flush_requested_.load() && !abort_.load(std::memory_order_relaxed))
                                 output.push(std::move(av_frame));
                         }
                     }
@@ -689,6 +709,12 @@ class Decoder
     ~Decoder()
     {
         try {
+            // Raise the flag before interrupting so the loop exits even if it is
+            // between waits, and wake anything blocked on the queues.
+            abort_.store(true, std::memory_order_relaxed);
+            input_cond.notify_all();
+            output_cond.notify_all();
+
             if (thread.joinable()) {
                 thread.interrupt();
                 thread.join();
