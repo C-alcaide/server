@@ -264,6 +264,55 @@ Producers can attach a GPU texture at construction time. The mixer's `visit()`
 method checks `frame.texture()` and uses it directly when present, bypassing
 the normal CPU upload path.
 
+### The frame contract, made explicit
+
+Three additions turned this from a set of conventions into something checkable.
+
+**1. `host_image_state()`** — `image_data()` returned an empty array both when
+readback had been deliberately skipped and when it merely had not landed yet.
+Callers reading "empty" as "black" emitted black frames; callers reading it as
+"has pixels" dereferenced null (the risk noted in Phase 1.1 above).
+`const_frame::host_image_state()` now returns `unavailable` / `deferred` /
+`available`, and `has_host_image()` is the shorthand. Resolving a completed
+readback is free, so it is cheap to call, and it never blocks on one in flight.
+
+**2. `core::texture::owner_device()`** — an opaque identity of the device owning
+the memory (the `VkDevice`, or the `ogl::device`). A mixer may bind a texture
+natively **only** when this matches its own device. `dynamic_pointer_cast` alone
+distinguishes backends, not devices, and with per-channel GPU affinity a route
+between channels on different GPUs hands over memory the receiving device must
+not touch.
+
+**3. One resolver per mixer** — `resolve_item_textures()` replaced three
+divergent branches per backend with a single documented order:
+
+| Step | Source | Notes |
+|---|---|---|
+| 1 | GPU texture owned by this device | zero copy |
+| 2 | GPU texture owned by another device | external-memory import **not implemented**; falls through |
+| 3 | pre-staged upload futures on `opaque()` | validated against the owning device |
+| 4 | host planes | rejected when `host_image_state() == unavailable` |
+| 5 | nothing usable | item dropped, warned once |
+
+#### Cross-GPU routes were silently broken
+
+Verified on a two-GPU host (RTX A4000 + Quadro P4000), channel 1 on GPU 0 routed
+into channel 2 on GPU 1. Three defects stacked up, none of which produced a
+diagnostic:
+
+| Defect | Symptom |
+|---|---|
+| `opaque()` carried the pre-staged upload futures with no owner, and the receiving mixer trusted them | GPU 0's `VkImage`s bound on GPU 1 — channel 2 rendered nothing, silently |
+| `device::copy_async()` reused the staging buffer embedded in the source array regardless of which device owned it | a GPU 0 `VkBuffer` referenced in a submit to GPU 1 → `vk::Queue::submit: ErrorDeviceLost`, killing the channel |
+| `const_frame::with_tag()` dropped the pending readback future (it copied `image_data_` — a vector of *empty* arrays when unresolved — and built a non-lazy frame) | every routed frame permanently lost the ability to produce CPU pixels; `route_producer` retags every frame |
+
+All three are fixed: the staged payload and the staging buffers carry their
+owning device (VMA allocator for Vulkan, an owner tag for OpenGL) and are
+rejected when foreign, and `with_tag()` preserves the future. The cross-GPU route
+now falls back to a host upload with a one-shot warning instead of rendering
+nothing or taking the GPU down. Implementing step 2 (external-memory import)
+would remove that readback.
+
 ### `frame_factory` GPU Device Handle
 
 **File**: `src/core/frame/frame_factory.h`
