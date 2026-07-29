@@ -66,11 +66,44 @@ struct output::impl
 
     std::optional<time_point_t> time_;
 
-    // Channel-level periodic timing diagnostic
+    // ── Channel timing telemetry ──────────────────────────────────────────
+    // The channel is paced by consumer back-pressure (an audio ring buffer, a
+    // genlocked SDI card) with a wall-clock sleep as the fallback. That design
+    // is defensible, but it was entirely unmeasured: there was no way to tell a
+    // healthy channel from one whose clock consumer is fighting another, or one
+    // sitting permanently late. These figures are published in state() under
+    // "timing" so the 360-client and the test runner can assert on them.
     std::chrono::steady_clock::time_point timing_start_{std::chrono::steady_clock::now()};
     std::chrono::steady_clock::time_point timing_last_frame_{};
     uint64_t timing_frames_ = 0;
     uint64_t timing_late_   = 0;
+
+    // Rolling window, reset with the periodic report.
+    double   period_sum_ms_  = 0.0;
+    double   period_min_ms_  = 0.0;
+    double   period_max_ms_  = 0.0;
+    uint64_t period_samples_ = 0;
+
+    // Last published values, so state() does not depend on where the window is.
+    double   last_avg_ms_    = 0.0;
+    double   last_min_ms_    = 0.0;
+    double   last_max_ms_    = 0.0;
+    double   last_jitter_ms_ = 0.0;
+    uint64_t last_late_      = 0;
+    uint64_t total_late_     = 0;
+    uint64_t total_frames_   = 0;
+
+    // How long the consumers' send() futures took to settle. With a hardware
+    // clock this is the back-pressure itself, i.e. the channel's real pacing
+    // signal, and its size relative to the frame period is the headroom left.
+    double   last_consume_ms_ = 0.0;
+    double   consume_max_ms_  = 0.0;
+
+    // Set when more than one consumer claims to be the channel's clock. They
+    // cannot both pace it: whichever blocks longest wins and the other drifts
+    // until its buffer absorbs or breaks.
+    bool     multi_clock_warned_ = false;
+    int      clock_source_count_  = 0;
 
   public:
     impl(const spl::shared_ptr<diagnostics::graph>& graph,
@@ -423,28 +456,45 @@ struct output::impl
                     const const_frame&             input_frame2,
                     const core::video_format_desc& format_desc)
     {
-        // Channel-level timing diagnostic
+        // Channel timing telemetry
         {
             auto now = std::chrono::steady_clock::now();
             timing_frames_++;
+            total_frames_++;
+            const double expected_ms = 1000.0 / format_desc_.hz;
+
             if (timing_last_frame_.time_since_epoch().count() > 0) {
                 double frame_ms = std::chrono::duration<double, std::milli>(now - timing_last_frame_).count();
-                double expected_ms = 1000.0 / format_desc_.hz;
-                if (frame_ms > expected_ms * 1.15)
+                if (frame_ms > expected_ms * 1.15) {
                     timing_late_++;
+                    total_late_++;
+                }
+                period_sum_ms_ += frame_ms;
+                period_min_ms_ = period_samples_ == 0 ? frame_ms : std::min(period_min_ms_, frame_ms);
+                period_max_ms_ = period_samples_ == 0 ? frame_ms : std::max(period_max_ms_, frame_ms);
+                period_samples_++;
             }
             timing_last_frame_ = now;
 
             auto elapsed = std::chrono::duration<double>(now - timing_start_).count();
-            if (elapsed >= 5.0 && timing_frames_ > 1) {
-                double avg_ms = elapsed * 1000.0 / timing_frames_;
-                CASPAR_LOG(trace) << L"[channel " << channel_info_.index << L"] TIMING: avg="
-                                  << std::fixed << std::setprecision(1) << avg_ms
-                                  << L"ms late=" << timing_late_
-                                  << L" frames=" << timing_frames_;
-                timing_start_  = now;
-                timing_frames_ = 0;
-                timing_late_   = 0;
+            if (elapsed >= 5.0 && period_samples_ > 1) {
+                last_avg_ms_    = period_sum_ms_ / static_cast<double>(period_samples_);
+                last_min_ms_    = period_min_ms_;
+                last_max_ms_    = period_max_ms_;
+                last_jitter_ms_ = period_max_ms_ - period_min_ms_;
+                last_late_      = timing_late_;
+
+                CASPAR_LOG(trace) << L"[channel " << channel_info_.index << L"] TIMING: avg=" << std::fixed
+                                  << std::setprecision(2) << last_avg_ms_ << L"ms (nominal " << expected_ms
+                                  << L") jitter=" << last_jitter_ms_ << L"ms late=" << last_late_ << L"/"
+                                  << period_samples_ << L" consume_max=" << consume_max_ms_ << L"ms";
+
+                timing_start_   = now;
+                timing_frames_  = 0;
+                timing_late_    = 0;
+                period_sum_ms_  = 0.0;
+                period_samples_ = 0;
+                consume_max_ms_ = 0.0;
             }
         }
 
@@ -547,6 +597,40 @@ struct output::impl
             }
         };
 
+        // Count the consumers claiming to pace this channel. More than one cannot
+        // be true at once: whichever blocks longest wins, and the others drift
+        // until their buffers absorb the difference -- or stop absorbing it. That
+        // is a supported configuration (a genlocked SDI card alongside an audio
+        // device, say), but it is worth stating once, because when it does go
+        // wrong the symptom is a slow drift with no obvious cause.
+        clock_source_count_ = 0;
+        for (auto& p : consumers) {
+            if (p.second->has_synchronization_clock())
+                ++clock_source_count_;
+        }
+
+        if (clock_source_count_ > 1 && !multi_clock_warned_) {
+            multi_clock_warned_ = true;
+            std::wostringstream names;
+            bool                first_name = true;
+            for (auto& p : consumers) {
+                if (!p.second->has_synchronization_clock())
+                    continue;
+                if (!first_name)
+                    names << L", ";
+                names << p.second->name();
+                first_name = false;
+            }
+            CASPAR_LOG(info) << print() << L" " << clock_source_count_
+                             << L" consumers claim a synchronization clock (" << names.str()
+                             << L"). They pace the channel jointly: the slowest wins each tick and the others rely "
+                                L"on their buffers to absorb the difference. Watch timing/jitter_ms and "
+                                L"timing/consume_load if playout drifts.";
+        }
+
+
+        const auto consume_start = std::chrono::steady_clock::now();
+
         if (format_desc_.field_count == 2) {
             do_send(core::video_field::a, input_frame1);
             do_send(core::video_field::b, input_frame2);
@@ -554,11 +638,55 @@ struct output::impl
             do_send(core::video_field::progressive, input_frame1);
         }
 
+        // With a hardware clock, this is where the channel is actually paced:
+        // send() blocks until the device accepts the frame. Its size relative to
+        // the frame period is the remaining headroom.
+        last_consume_ms_ =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - consume_start).count();
+        consume_max_ms_ = std::max(consume_max_ms_, last_consume_ms_);
+
         monitor::state state;
         for (auto& p : consumers) {
             state["port"][p.first]             = p.second->state();
             state["port"][p.first]["consumer"] = p.second->name();
         }
+
+        // The A/V pipeline model each consumer declares. log_sync_recommendation()
+        // already computes the full picture from these, then only prints it -- so
+        // nothing could assert on it. Publishing the inputs lets the 360-client
+        // and the test runner check lip-sync and cross-output alignment directly.
+        for (auto& p : consumers) {
+            const auto info = p.second->av_pipeline();
+            auto       node = state["port"][p.first]["pipeline"];
+            node["has_video"]           = info.has_video;
+            node["has_audio"]           = info.has_audio;
+            node["audio_embedded"]      = info.audio_is_embedded;
+            node["video_depth_frames"]  = static_cast<int32_t>(info.video_depth_frames);
+            node["video_delay_ms"]      = info.video_delay_ms;
+            node["video_delay_settable"] = info.video_delay_adjustable;
+            node["audio_depth_frames"]  = static_cast<int32_t>(info.audio_depth_frames);
+            node["audio_delay_frames"]  = static_cast<int32_t>(info.audio_delay_frames);
+            node["audio_device_ms"]     = info.audio_device_latency_ms;
+            node["audio_delay_settable"] = info.audio_delay_adjustable;
+            node["clock"]               = p.second->has_synchronization_clock();
+        }
+
+        const double nominal_ms = 1000.0 / format_desc_.hz;
+        state["timing"]["nominal_ms"]    = nominal_ms;
+        state["timing"]["period_avg_ms"] = last_avg_ms_;
+        state["timing"]["period_min_ms"] = last_min_ms_;
+        state["timing"]["period_max_ms"] = last_max_ms_;
+        state["timing"]["jitter_ms"]     = last_jitter_ms_;
+        // Signed: positive means the channel is running slower than nominal.
+        state["timing"]["drift_ms"]      = last_avg_ms_ > 0.0 ? last_avg_ms_ - nominal_ms : 0.0;
+        state["timing"]["late_frames"]   = static_cast<int64_t>(total_late_);
+        state["timing"]["frames"]        = static_cast<int64_t>(total_frames_);
+        state["timing"]["consume_ms"]    = last_consume_ms_;
+        // The share of the frame budget spent waiting for consumers to accept the
+        // frame. Approaching 1.0 means there is no headroom left.
+        state["timing"]["consume_load"]  = nominal_ms > 0.0 ? last_consume_ms_ / nominal_ms : 0.0;
+        state["timing"]["clock_sources"] = static_cast<int32_t>(clock_source_count_);
+
         state_ = std::move(state);
 
         tick_count_.fetch_add(1, std::memory_order_release);
@@ -571,8 +699,7 @@ struct output::impl
         }
         tick_cv_.notify_all();
 
-        const auto needs_sync = std::all_of(
-            consumers.begin(), consumers.end(), [](auto& p) { return !p.second->has_synchronization_clock(); });
+        const auto needs_sync = clock_source_count_ == 0;
 
         if (needs_sync) {
             if (!time) {

@@ -63,6 +63,38 @@ Channel tick                    Hardware callback
 
 **Key design decisions:**
 
+> ### Measuring the clock (added 2026-07-29)
+>
+> The pacing model below was previously unmeasured, so a healthy channel could not
+> be told apart from one whose clock consumer is fighting another, or one sitting
+> permanently late. `output` now publishes per-channel figures under `timing` in
+> its monitor state (visible in `INFO <channel>` and over OSC):
+>
+> | field | meaning |
+> |---|---|
+> | `nominal_ms` | the frame period the format implies |
+> | `period_avg_ms` / `min` / `max` | measured tick period over the last window |
+> | `jitter_ms` | max − min within the window |
+> | `drift_ms` | signed mean error against nominal; a standing non-zero value is the thing an explicit clock owner would fix |
+> | `consume_ms` / `consume_load` | how long consumers took to accept the frame, and that as a fraction of the budget. With a hardware clock this *is* the back-pressure, so it is the headroom indicator |
+> | `late_frames` / `frames` | ticks that overran by >15% |
+> | `clock_sources` | how many consumers claim `has_synchronization_clock()`. More than one is legal but they cannot both pace the channel — the slowest wins each tick and the others rely on their buffers |
+>
+> Each consumer's declared `av_pipeline_info` is published too, under
+> `port/<n>/pipeline`, so lip-sync and cross-output alignment can be asserted on
+> rather than read out of a log.
+>
+> **First measurements, 1080p25, wall-clock fallback (no clock consumer):**
+> mean tick error **±0.005 ms** of 40 ms — the absolute-time `sleep_until` does not
+> accumulate drift — with 3–6 ms of jitter (7–16% of a frame), 1 late frame in
+> ~700, and essentially the whole frame budget free in consume.
+>
+> **Not yet measured: the back-pressure path itself.** On the test machine
+> `system-audio` (OpenAL) does not claim a clock and PortAudio finds no output
+> device, so `clock_sources` was 0 in every run. Confirming the back-pressure
+> model needs a rig with a DeckLink output or a working audio device; the
+> telemetry above is what to read when doing it.
+
 1. **Master clock via ring buffer backpressure.** The write thread blocks until the hardware drains enough space from the ring buffer. This makes the audio device's crystal oscillator pace the entire channel, identical to how DeckLink consumers work. `has_synchronization_clock()` returns `true`.
 
 2. **Dedicated write thread.** `send()` posts work to a queue and returns a `std::future` immediately. The write thread does the blocking. This allows the PortAudio consumer's future to be awaited in parallel with other consumers (e.g. DeckLink) rather than serialising them.
