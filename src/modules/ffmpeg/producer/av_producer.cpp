@@ -881,7 +881,32 @@ class Decoder
             ctx->framerate           = av_guess_frame_rate(nullptr, stream, nullptr);
             ctx->sample_aspect_ratio = av_guess_sample_aspect_ratio(nullptr, stream, nullptr);
 
-            if (codec->id == AV_CODEC_ID_H264 || codec->id == AV_CODEC_ID_HEVC || codec->id == AV_CODEC_ID_VP9) {
+            // Ask the *decoder* whether it can use D3D11VA, rather than guessing
+            // from the codec ID.
+            //
+            // A codec ID does not identify a decoder: AV_CODEC_ID_VP9 resolves to
+            // libvpx-vp9 in this build, an external-library wrapper with no
+            // hardware support whatsoever. Attaching a hardware device context
+            // and a get_format callback to it faulted inside the decode thread --
+            // and because the project builds with /EHa, catch(...) swallowed the
+            // access violation, so VP9 clips simply stopped producing frames with
+            // "No diagnostic information available" and the channel sat black.
+            //
+            // avcodec_get_hw_config() answers the question properly and needs no
+            // hardcoded codec list.
+            const AVCodecHWConfig* hw_cfg = nullptr;
+            for (int i = 0;; ++i) {
+                const auto* cfg = avcodec_get_hw_config(codec, i);
+                if (!cfg)
+                    break;
+                if (cfg->device_type == AV_HWDEVICE_TYPE_D3D11VA &&
+                    (cfg->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX)) {
+                    hw_cfg = cfg;
+                    break;
+                }
+            }
+
+            if (hw_cfg) {
                 AVBufferRef* hw_device_ctx = nullptr;
                 if (av_hwdevice_ctx_create(&hw_device_ctx, AV_HWDEVICE_TYPE_D3D11VA, nullptr, nullptr, 0) == 0) {
                     ctx->hw_device_ctx = hw_device_ctx;
@@ -1425,6 +1450,16 @@ struct Filter
                     const auto src_fmt = (it->second.sw_pix_fmt != AV_PIX_FMT_NONE)
                                              ? it->second.sw_pix_fmt
                                              : st->pix_fmt;
+                    // "pix_fmt=-1" here means neither the decoder nor the stream has
+                    // resolved a format yet; the buffersrc rejects it and the whole
+                    // producer thread dies with an exception carrying no message.
+                    // Say what we saw before that happens.
+                    if (src_fmt == AV_PIX_FMT_NONE) {
+                        CASPAR_LOG(warning) << L"[ffmpeg] cannot configure the video filter input: neither the "
+                                               L"decoder nor the stream reports a pixel format yet (decoder "
+                                            << u16(st->codec ? st->codec->name : "?") << L").";
+                    }
+
                     auto args = (boost::format("video_size=%dx%d:pix_fmt=%d:time_base=%d/%d") % st->width % st->height %
                                  src_fmt % st->pkt_timebase.num % st->pkt_timebase.den)
                                     .str();
@@ -1759,7 +1794,15 @@ struct AVProducer::Impl
                     }
                 }
                 CASPAR_LOG_CURRENT_EXCEPTION();
+            } catch (const std::exception& e) {
+                // boost::diagnostic_information reports "No diagnostic information
+                // available" for anything that is not a boost::exception, which
+                // hides the one thing worth knowing. Name it.
+                CASPAR_LOG(error) << print() << L" producer thread stopped: " << u16(typeid(e).name()) << L": "
+                                  << u16(e.what());
+                CASPAR_LOG_CURRENT_EXCEPTION();
             } catch (...) {
+                CASPAR_LOG(error) << print() << L" producer thread stopped with a non-standard exception.";
                 CASPAR_LOG_CURRENT_EXCEPTION();
             }
         });
