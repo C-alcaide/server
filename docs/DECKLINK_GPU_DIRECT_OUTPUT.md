@@ -268,22 +268,29 @@ reference and is a no‑op when genlock already blocks the call. For production
 ## 8. Correctness: parity self‑tests
 
 The `ogl_gl_strategy` runs a one‑shot, byte‑exact self‑test the first time it packs a
-non‑black progressive frame: it reads the source texels back and packs one row with an
-**independent C++ reference** (`cpu_ref_v210_row` / `cpu_ref_bgra_row`), then compares
-against the GPU result.
+non‑black progressive frame: it reads the source texels back and packs one row with a
+C++ reference (`cpu_ref_v210_row` / `cpu_ref_bgra_row`), then compares against the GPU result.
 
-- Validates colour math, BGRA swizzle, 4:2:2 subsampling, v210 bit packing, orientation and
-  SSBO stride.
-- Clamped to **in‑bounds texels** (`limit_px = min(dst_w, tex_w − src_x)`) so cropped
-  secondary ports don't false‑warn at the texture edge.
+- The reference **faithfully mirrors the production CPU packer** (`v210_strategies.cpp`), so a
+  PASS means the GPU output equals the CPU output, not merely a sibling reference.
+- **Single source of truth for colour**: the legal‑range RGB→YCbCr matrix is computed on the
+  host (`legal_range_v210_matrix`, the same formula as the CPU's `create_int_matrix`) and
+  uploaded to the shader as `u_mat[9]`, for BT.709 and BT.2020 alike. The GPU therefore uses
+  the CPU's exact coefficients rather than hardcoded GLSL constants.
+- Validates colour math, BGRA swizzle, 4:2:2 co‑sited (nearest) chroma, v210 bit packing,
+  orientation and SSBO stride. Clamped to in‑bounds texels for cropped ports.
 - Emits `v210 parity self-test PASS (N groups @ row R)` / `bgra parity self-test PASS`.
 
-On hardware, both v210 (320 groups) and BGRA (1920 px) passed byte‑exact, including through
-the DVP path and on cropped secondary ports (286 in‑bounds groups at a `src=200,100` crop).
+On hardware, v210 (320 groups) and BGRA (1920 px) pass byte‑exact against the CPU packer,
+including through the DVP path and on cropped secondary ports.
 
-> Note: the GL shader and the C++ reference share the same coefficients (ported from the
-> scope‑verified Vulkan path), so the test catches packing/layout regressions rather than an
-> intentional coefficient change. Final SDI colour still warrants a scope/loopback check.
+> **History:** the GPU v210 packers originally used **full‑range** coefficients
+> (`0.2126 × 2²⁰`) and box‑averaged chroma, while the CPU uses **legal/limited range**
+> (`× 876/1023` luma, `× 896/1023` chroma) and co‑sited nearest chroma — a ~15% luma
+> mismatch (mid‑gray 128 → 578 vs 502) with early highlight clipping. The self‑test missed it
+> because its reference used the same wrong coefficients. Fixed for the OpenGL path (verified)
+> and the Vulkan‑mixer paths (pending Vulkan‑build verification). The self‑test is now a true
+> GPU‑vs‑CPU check. A scope/loopback check is still the final word on SDI colour.
 
 ---
 
@@ -341,8 +348,10 @@ monitoring.
 - **OpenGL GPU pack geometry**: ports with a destination offset / partial region fall back
   to the CPU strategy (v210 group alignment).
 - **DVP is OpenGL‑mixer only**; the Vulkan mixer uses its pinned CUDA/VK strategies (§9).
-- Parity self‑tests share coefficients with the shader; they catch layout/packing
-  regressions, not an intentional colour‑matrix change (§8).
+- **Vulkan‑mixer v210 colour** was corrected to match the CPU packer (legal range + co‑sited
+  chroma) but is **pending verification on a Vulkan build**; the OpenGL path is verified.
+- Parity self‑tests now mirror the CPU packer (single source of truth for coefficients), so
+  they catch colour drift; a scope/loopback check is still the final word on SDI colour (§8).
 
 ---
 
@@ -378,6 +387,8 @@ Branch `CasparVPV` (local). Chronological:
 | `19c243bd8` | `buffered=N/M` diagnostic in TIMING log. |
 | `146d0c743` | Experimental `<latency>sync</latency>` (DisplayVideoFrameSync). |
 | `c5cce66f4` | Sync‑display embedded audio + multi‑port. |
+| `ad500cadb` | Fix OpenGL v210 pack to CPU parity (legal range + co‑sited chroma). |
+| `dd926872a` | Fix Vulkan‑mixer v210 packers likewise (pending VK‑build verification). |
 
 ---
 
