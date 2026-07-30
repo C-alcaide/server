@@ -100,6 +100,29 @@ hardware-decoded H.264/HEVC. Opt in with
 only, and it declines with a logged reason for anything it cannot handle
 (High 10 and 4:4:4 are not hardware-decodable here, so they fall back).
 
+### 10-bit decoding
+
+Works, and both paths now agree. Per codec, measured:
+
+| source | hardware decode | GPU-direct | reaches the mixer as |
+|---|---|---|---|
+| HEVC Main 10 | **yes** (NVDEC) | **yes** — no host copy at all | 10-bit |
+| H.264 High 10 | no — NVDEC cannot | stands down to software, logged | `yuv420p10le` |
+| ProRes 422 HQ, v210, DNxHR | software | n/a | native 10-bit |
+
+Both 10-bit paths measure **39.63 dB** against an external reference decode —
+the same as every other 4:2:0 clip, where the residual is chroma upsampling
+differing between GPU sampling and swscale.
+
+**Hardware and software now agree to 75.0 dB.** They used to differ by ~46 dB,
+because the software path ran through a filter graph that truncated it to 8-bit
+while GPU-direct handed the mixer the true 10-bit planes. That was recorded in
+the gpudirect harness as a known quirk; it is fixed, and a difference there now
+means a real regression.
+
+Nothing needs configuring for this. 10-bit content that can be hardware-decoded
+is, 10-bit content that cannot falls back and keeps its depth either way.
+
 ### Verifying
 
 One log line per producer, at the first frame:
