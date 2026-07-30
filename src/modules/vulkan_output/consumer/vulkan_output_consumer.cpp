@@ -59,6 +59,7 @@
 #include <unistd.h>
 #endif
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <limits>
@@ -1406,13 +1407,19 @@ class vulkan_output_consumer_impl
 
         caspar::timer frame_timer;
 
-        // Compute source region (subregion crop or full frame)
-        uint32_t crop_x = static_cast<uint32_t>(config_.src_x);
-        uint32_t crop_y = static_cast<uint32_t>(config_.src_y);
-        uint32_t crop_w = config_.region_w > 0 ? static_cast<uint32_t>(config_.region_w)
-                                               : static_cast<uint32_t>(src->width());
-        uint32_t crop_h = config_.region_h > 0 ? static_cast<uint32_t>(config_.region_h)
-                                               : static_cast<uint32_t>(src->height());
+        // Compute source region (subregion crop or full frame), clamped to the
+        // actual source dimensions. config_.src_x/src_y/region_w/region_h come
+        // straight from user config with no validation against the frame size
+        // (or against being negative) -- an out-of-range value here would build
+        // an out-of-bounds VkImageBlit region below.
+        const uint32_t src_w = static_cast<uint32_t>(std::max(0, src->width()));
+        const uint32_t src_h = static_cast<uint32_t>(std::max(0, src->height()));
+        uint32_t crop_x = static_cast<uint32_t>(std::clamp(config_.src_x, 0, static_cast<int>(src_w)));
+        uint32_t crop_y = static_cast<uint32_t>(std::clamp(config_.src_y, 0, static_cast<int>(src_h)));
+        uint32_t crop_w = config_.region_w > 0 ? static_cast<uint32_t>(config_.region_w) : (src_w - crop_x);
+        uint32_t crop_h = config_.region_h > 0 ? static_cast<uint32_t>(config_.region_h) : (src_h - crop_y);
+        crop_w = std::min(crop_w, src_w - crop_x);
+        crop_h = std::min(crop_h, src_h - crop_y);
 
         vk::Result present_result = vk::Result::eSuccess;
 
