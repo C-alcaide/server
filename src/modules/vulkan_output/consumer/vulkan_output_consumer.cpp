@@ -1177,30 +1177,16 @@ class vulkan_output_consumer_impl
         setup_nvapi();
 
         // Initialize color conversion pipeline (always created, conditionally dispatched)
+        color_pipeline_device_   = vk_device;
+        color_pipeline_physical_ = physical;
         color_pipeline_ = std::make_unique<color_convert_pipeline>(
             vk_device, physical, swapchain_->width(), swapchain_->height());
 
-        // Determine tone map op from transfer/EOTF combination
-        // If hardware HDR is active, the display engine handles PQ+BT.2020 —
-        // the color pipeline should pass linear data through (identity).
-        int tone_map = 0;
-        output_gamut effective_gamut = config_.gamut;
-        output_eotf  effective_eotf = config_.eotf;
-        float        effective_nits = static_cast<float>(config_.max_cll);
-
-        if (hw_hdr_active_) {
-            // Hardware HDR: display engine performs PQ encoding + gamut mapping.
-            // Source stays linear sRGB primaries — skip compute shader conversion.
-            effective_gamut = output_gamut::bt709;
-            effective_eotf  = output_eotf::linear;
-            tone_map        = 0;
-        } else {
-            if (config_.eotf == output_eotf::hlg)
-                tone_map = 7; // hlg_ootf
-            else if (config_.gamut == output_gamut::bt2020 && config_.eotf == output_eotf::pq)
-                tone_map = 3; // aces_rrt for HDR10
-        }
-
+        output_gamut effective_gamut;
+        output_eotf  effective_eotf;
+        float        effective_nits;
+        int          tone_map;
+        resolve_color_pipeline_params(effective_gamut, effective_eotf, effective_nits, tone_map);
         color_pipeline_->update_config(effective_gamut, effective_eotf, effective_nits, tone_map);
 
         if (color_pipeline_->is_active()) {
@@ -1315,6 +1301,30 @@ class vulkan_output_consumer_impl
         }
 
         nvapi_.reset();
+    }
+
+    // Determine color_pipeline_'s gamut/eotf/nits/tone-map from config_ and
+    // hw_hdr_active_. Factored out of run() so tick() can recompute the same
+    // values when recreating the pipeline after a resize (see the resize
+    // check in tick()).
+    void resolve_color_pipeline_params(output_gamut& gamut, output_eotf& eotf, float& nits, int& tone_map) const
+    {
+        gamut    = config_.gamut;
+        eotf     = config_.eotf;
+        nits     = static_cast<float>(config_.max_cll);
+        tone_map = 0;
+
+        if (hw_hdr_active_) {
+            // Hardware HDR: display engine performs PQ encoding + gamut mapping.
+            // Source stays linear sRGB primaries — skip compute shader conversion.
+            gamut = output_gamut::bt709;
+            eotf  = output_eotf::linear;
+        } else {
+            if (config_.eotf == output_eotf::hlg)
+                tone_map = 7; // hlg_ootf
+            else if (config_.gamut == output_gamut::bt2020 && config_.eotf == output_eotf::pq)
+                tone_map = 3; // aces_rrt for HDR10
+        }
     }
 
     void tick(const std::shared_ptr<accelerator::vulkan::vulkan_queue>& queue_obj,
@@ -1458,6 +1468,25 @@ class vulkan_output_consumer_impl
                 return;
             }
 
+            // color_pipeline_ was sized to the swapchain's dimensions at
+            // startup and never revisited. A display hot-plug/resolution
+            // change recreates the swapchain (above) but left this intermediate
+            // at its old size, so blit_via_compute_and_present() would blit a
+            // stale-sized region into the new extent. Recreate it here,
+            // keeping the same gamut/eotf/tone-map config, whenever the
+            // swapchain's size has moved on.
+            if (color_pipeline_ &&
+                (color_pipeline_->width() != swapchain_->width() || color_pipeline_->height() != swapchain_->height())) {
+                output_gamut effective_gamut;
+                output_eotf  effective_eotf;
+                float        effective_nits;
+                int          tone_map;
+                resolve_color_pipeline_params(effective_gamut, effective_eotf, effective_nits, tone_map);
+                color_pipeline_ = std::make_unique<color_convert_pipeline>(
+                    color_pipeline_device_, color_pipeline_physical_, swapchain_->width(), swapchain_->height());
+                color_pipeline_->update_config(effective_gamut, effective_eotf, effective_nits, tone_map);
+            }
+
             if (color_pipeline_ && color_pipeline_->is_active()) {
                 present_result = swapchain_->blit_via_compute_and_present(
                     src->id(), crop_x, crop_y, crop_w, crop_h,
@@ -1575,6 +1604,10 @@ class vulkan_output_consumer_impl
     std::unique_ptr<output_window>          window_;
     std::unique_ptr<present_swapchain>      swapchain_;
     std::unique_ptr<color_convert_pipeline> color_pipeline_;
+    // Retained only so tick() can recreate color_pipeline_ at its own size
+    // after a swapchain resize -- see the resize check there.
+    vk::Device                              color_pipeline_device_;
+    vk::PhysicalDevice                      color_pipeline_physical_;
 
     // NvAPI automation state
     std::unique_ptr<nvapi_helpers> nvapi_;
