@@ -113,7 +113,11 @@ class gpu_affinity_context
 
     /// Upload CPU frame data to the internal texture. Returns the GL texture ID.
     /// Must be called via dispatch_sync (on the affinity thread).
-    GLuint upload_frame(const uint8_t* pixels, int width, int height, int stride);
+    /// `use_16bit` selects a 16-bit-per-channel (GL_RGBA16/GL_UNSIGNED_SHORT, 8
+    /// bytes/pixel) texture and PBOs for HDR frames instead of the default
+    /// 8-bit (GL_RGBA8/GL_UNSIGNED_BYTE, 4 bytes/pixel) path; `stride` is in
+    /// bytes either way.
+    GLuint upload_frame(const uint8_t* pixels, int width, int height, int stride, bool use_16bit = false);
 
     /// Get the current upload texture ID (valid on the affinity GL thread).
     GLuint texture_id() const { return upload_texture_; }
@@ -139,10 +143,11 @@ class gpu_affinity_context
     int height_;
 
     // GL resources (owned by the affinity thread)
-    GLuint upload_texture_ = 0;
-    GLuint pbo_[2]         = {0, 0};
-    int    pbo_index_      = 0; // Double-buffered PBO for async upload
-    bool   first_frame_    = true;
+    GLuint upload_texture_   = 0;
+    GLuint pbo_[2]           = {0, 0};
+    int    pbo_index_        = 0; // Double-buffered PBO for async upload
+    bool   first_frame_      = true;
+    bool   use_16bit_        = false; // Format of upload_texture_/pbo_ as currently allocated
 
     // Device identification
     uint8_t device_luid_[8]    = {};

@@ -529,25 +529,35 @@ void gpu_affinity_context::dispatch(std::function<void()> func)
 
 // ─── Frame upload ───────────────────────────────────────────────────────────
 
-GLuint gpu_affinity_context::upload_frame(const uint8_t* pixels, int width, int height, int stride)
+GLuint gpu_affinity_context::upload_frame(const uint8_t* pixels, int width, int height, int stride, bool use_16bit)
 {
     if (!pixels || width <= 0 || height <= 0)
         return upload_texture_;
 
-    // Resize texture if needed
-    if (width != width_ || height != height_) {
-        width_  = width;
-        height_ = height;
+    const int      bytes_per_pixel = use_16bit ? 8 : 4;
+    const GLenum   internal_format = use_16bit ? GL_RGBA16 : GL_RGBA8;
+    const GLenum   pixel_type      = use_16bit ? GL_UNSIGNED_SHORT : GL_UNSIGNED_BYTE;
+
+    // Resize/reformat texture if needed. A bit-depth change must be treated
+    // the same as a dimension change: the texture and PBOs were allocated for
+    // the previous format's byte size, and re-using them for the other format
+    // would either under-size the buffer (8-bit -> 16-bit) or misinterpret it
+    // (16-bit -> 8-bit).
+    if (width != width_ || height != height_ || use_16bit != use_16bit_) {
+        width_     = width;
+        height_    = height;
+        use_16bit_ = use_16bit;
         glBindTexture(GL_TEXTURE_2D, upload_texture_);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width_, height_, 0, GL_BGRA, GL_UNSIGNED_BYTE, nullptr);
+        glTexImage2D(GL_TEXTURE_2D, 0, internal_format, width_, height_, 0, GL_BGRA, pixel_type, nullptr);
         glBindTexture(GL_TEXTURE_2D, 0);
 
         for (int i = 0; i < 2; ++i) {
             glBindBuffer(GL_PIXEL_UNPACK_BUFFER, pbo_[i]);
-            glBufferData(GL_PIXEL_UNPACK_BUFFER, static_cast<GLsizeiptr>(width_) * height_ * 4,
+            glBufferData(GL_PIXEL_UNPACK_BUFFER, static_cast<GLsizeiptr>(width_) * height_ * bytes_per_pixel,
                          nullptr, GL_STREAM_DRAW);
         }
         glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+        first_frame_ = true; // Previous PBO holds the old format/size; don't upload it as-is
     }
 
     // Double-buffered PBO upload:
@@ -558,17 +568,17 @@ GLuint gpu_affinity_context::upload_frame(const uint8_t* pixels, int width, int 
 
     // Map current PBO and copy new pixel data into it
     glBindBuffer(GL_PIXEL_UNPACK_BUFFER, pbo_[current_pbo]);
-    glBufferData(GL_PIXEL_UNPACK_BUFFER, static_cast<GLsizeiptr>(width_) * height_ * 4,
+    glBufferData(GL_PIXEL_UNPACK_BUFFER, static_cast<GLsizeiptr>(width_) * height_ * bytes_per_pixel,
                  nullptr, GL_STREAM_DRAW); // Orphan for async
     void* mapped = glMapBuffer(GL_PIXEL_UNPACK_BUFFER, GL_WRITE_ONLY);
     if (mapped) {
-        if (stride == width * 4) {
-            memcpy(mapped, pixels, static_cast<size_t>(width) * height * 4);
+        if (stride == width * bytes_per_pixel) {
+            memcpy(mapped, pixels, static_cast<size_t>(width) * height * bytes_per_pixel);
         } else {
             for (int row = 0; row < height; ++row) {
-                memcpy(static_cast<uint8_t*>(mapped) + row * width * 4,
+                memcpy(static_cast<uint8_t*>(mapped) + row * width * bytes_per_pixel,
                        pixels + row * stride,
-                       static_cast<size_t>(width) * 4);
+                       static_cast<size_t>(width) * bytes_per_pixel);
             }
         }
         glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER);
@@ -580,7 +590,7 @@ GLuint gpu_affinity_context::upload_frame(const uint8_t* pixels, int width, int 
 
     glBindTexture(GL_TEXTURE_2D, upload_texture_);
     glBindBuffer(GL_PIXEL_UNPACK_BUFFER, pbo_[upload_pbo]);
-    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width_, height_, GL_BGRA, GL_UNSIGNED_BYTE, nullptr);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width_, height_, GL_BGRA, pixel_type, nullptr);
 
     glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
     glBindTexture(GL_TEXTURE_2D, 0);
