@@ -27,6 +27,8 @@ Bytes per frame per layer decide the ceiling, and they are a property of the
 | 10-bit 4:2:0 | 5.9 | ~30 | ~60 |
 | 8-bit RGBA | 8.3 | ~22 | ~44 |
 | 16-bit RGBA + alpha (NotchLC, ProRes 4444) | 15.0 | ~12 | ~24 |
+| Hap DXT1, via the `HAP` producer | 1.0 | — | — |
+| Hap Alpha / Hap Q, via the `HAP` producer | 2.0 | — | — |
 
 Measured plateau **9.1 GB/s**, about three quarters of the practical throughput
 of a PCIe 3.0 x16 link.
@@ -43,6 +45,10 @@ of a PCIe 3.0 x16 link.
 - For ProRes and NotchLC specifically, the `CUDA_PRORES` / `CUDA_NOTCHLC`
   producers avoid the upload entirely — see §3.1. That is the single largest
   lever available for those formats, with one caveat about alpha.
+- Hap is the cheapest source on the bus by a wide margin, because the compressed
+  texture is what gets uploaded — but only through the `HAP` producer, and the
+  layer-count column is blank deliberately: that producer has a tick-scaling
+  problem which currently binds before bandwidth does. See §3.2.
 
 ---
 
@@ -184,6 +190,62 @@ back to a default when the file declares none — note the `BT.601` above on a f
 with no metadata. If colours look wrong, state it: `COLOR_MATRIX 709`. Measured
 against the ffmpeg producer the pictures agree to 39.9 dB (422) and 46.7 dB
 (4444); the residual is the two paths' colour handling, not decode error.
+
+### 3.2 The HAP producer — the same idea, for a DXV-like codec
+
+Hap is the open equivalent of Resolume's DXV, and for the same reason: the file
+holds **GPU block-compressed texture data**, so the frame reaches the mixer
+without ever being decompressed to pixels. A 1080p Hap DXT1 frame is 0.99 MB on
+the bus against 8.3 MB for RGBA — an **8:1 cut in upload bytes**, which is a cut
+in the thing that actually limits layer count (§1).
+
+```
+PLAY 1-10 HAP <file> [LOOP] [SEEK n] ...
+```
+
+Like the CUDA producers this is a token, not a flag. Without it the file plays
+through the ffmpeg producer, which decompresses to RGBA on the CPU and uploads
+the full frame — correct picture, none of the benefit.
+
+Variants, all verified playing as of 2026-07-30:
+
+| variant | on the bus, 1080p | vs RGBA | notes |
+|---|---|---|---|
+| Hap (DXT1) | 0.99 MB | 8:1 | no alpha |
+| Hap Alpha (DXT5) | 1.98 MB | 4:1 | |
+| Hap Q (YCoCg DXT5) | 1.98 MB | 4:1 | higher quality; matches ffmpeg to 50.3 dB |
+| Hap Q Alpha | — | — | **untested**, see below |
+| Hap R (BC7) | — | — | **untested**, see below |
+
+Chunked files (multi-threaded encodes) and uncompressed-container files both
+play. Encode with `ffmpeg -c:v hap -format hap|hap_alpha|hap_q [-chunks N]`.
+
+**Two caveats, both real:**
+
+*Tick cost scales with layer count.* `receive()` on this producer waits up to
+40 ms for a frame rather than repeating its last one, and the stage pulls layers
+in turn, so the wait multiplies: measured 40 ms per tick at one layer, 82 ms at
+four, 205 ms at eight, against a 40 ms nominal. The wait is masking a defect —
+the producer's GL thread does not keep its queue filled at frame rate — and
+removing it stops playback entirely rather than fixing anything, so it stays
+until that is addressed. Budget for it: Hap is excellent for upload bandwidth
+and currently poor for layer count.
+
+*An intermittent stall exists.* The same file plays on one run and freezes on the
+next. Not yet root-caused; the trail leads back to the same GL thread. If a Hap
+layer freezes, restarting the layer clears it.
+
+> Before 2026-07-30 the producer's decoded-frame queue was unbounded. A clip
+> whose decode outran the GL thread accumulated frames without limit — measured
+> at **+6.2 GB/s of resident memory** with five worker threads pinned at 100 % —
+> until the process fell over. Builds from before that date should not run Hap
+> unattended.
+
+**Hap Q Alpha and Hap R are untested.** FFmpeg's `hap` encoder produces only
+`hap`, `hap_alpha` and `hap_q`, so no sample could be generated locally. Hap Q
+Alpha in particular needs two textures per frame, and the source notes the
+zero-copy path cannot supply them — so it is the variant least likely to work.
+Test with a sample from elsewhere before relying on either.
 
 ### Verifying
 
@@ -364,6 +426,11 @@ this work:
   frames — pin a frame with `SEEK` when comparing pixels.
 - **Colour strings are `#AARRGGBB`.** `#FF0000FF` is opaque *blue*. A result
   that is exactly the wrong primary is usually this.
+- **To prove playback is advancing, read the producer's own `<time>` in `INFO`**,
+  or record and hash consecutive frames. Two `PRINT`s a second apart look
+  identical on a slow-moving source and identical on a frozen one, and which
+  answer you get depends on machine load. `blackframe=amount=0` is worse still —
+  it reports every frame unconditionally, so everything scores zero.
 - **Reference decodes of metadata-less content disagree with the channel.** The
   channel assumes BT.709 for HD; swscale defaults to BT.601. That is a spurious
   ~10 dB gap, not a regression.
@@ -383,6 +450,10 @@ this work:
   that makes the path kernel-free. Ask for `-pix_fmt p010le` and you get 10-bit
   via the host path.
 - GPU-direct **decode** is OpenGL-only and progressive-only.
+- The `HAP` producer costs 40 ms of tick per layer and stalls intermittently.
+  Both come back to its GL thread not sustaining frame rate. It is the cheapest
+  format on the bus and the least reliable producer to stack — see §3.2 before
+  building a show around it.
 
 ---
 
