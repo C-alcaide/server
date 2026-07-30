@@ -469,9 +469,13 @@ this work:
   blue mirrors the hue wheel. Vulkan was always correct. **Any hue grade saved
   against an older OpenGL build is inverted** — check the sign before reusing
   one.
-- Still unexamined, same cause: `MIXER QUALIFIER` keys on a target hue and
-  chroma keying derives one from a key colour, both through the same path on
-  OpenGL. Green keys are unaffected, green being the middle channel.
+- **Chroma keying anything but green was broken on OpenGL before 2026-07-30**,
+  same cause. Green sits at its own mirror image so green keys always worked;
+  every other key selected the wrong colour, and asking for blue keyed red.
+  `MIXER QUALIFIER` selected the opposite colour to the one asked for. Six
+  grading operations — tone balance, split tone, CDL, linear saturation, film
+  grain and the qualifier — also weighted Rec.709 luma with red's coefficient on
+  blue. Greys were never affected, only saturated colour.
 - **Hap Q Alpha decodes on the CPU under the Vulkan mixer.** It needs two
   textures per frame and the zero-copy path takes one, so that variant alone
   gives up the codec's whole advantage there. Every other variant stays on the
