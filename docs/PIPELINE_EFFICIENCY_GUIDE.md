@@ -27,8 +27,8 @@ Bytes per frame per layer decide the ceiling, and they are a property of the
 | 10-bit 4:2:0 | 5.9 | ~30 | ~60 |
 | 8-bit RGBA | 8.3 | ~22 | ~44 |
 | 16-bit RGBA + alpha (NotchLC, ProRes 4444) | 15.0 | ~12 | ~24 |
-| Hap DXT1, via the `HAP` producer | 1.0 | — | — |
-| Hap Alpha / Hap Q, via the `HAP` producer | 2.0 | — | — |
+| Hap DXT1, via the `HAP` producer | 1.0 | ~180 | ~360 |
+| Hap Alpha / Hap Q / Hap R, via the `HAP` producer | 2.0 | ~90 | ~180 |
 
 Measured plateau **9.1 GB/s**, about three quarters of the practical throughput
 of a PCIe 3.0 x16 link.
@@ -46,9 +46,9 @@ of a PCIe 3.0 x16 link.
   producers avoid the upload entirely — see §3.1. That is the single largest
   lever available for those formats, with one caveat about alpha.
 - Hap is the cheapest source on the bus by a wide margin, because the compressed
-  texture is what gets uploaded — but only through the `HAP` producer, and the
-  layer-count column is blank deliberately: that producer has a tick-scaling
-  problem which currently binds before bandwidth does. See §3.2.
+  texture is what gets uploaded — but only through the `HAP` producer. An
+  ordinary `PLAY` sends the file through ffmpeg, which decompresses to RGBA on
+  the CPU and uploads the full 8.3 MB. See §3.2.
 
 ---
 
@@ -207,45 +207,48 @@ Like the CUDA producers this is a token, not a flag. Without it the file plays
 through the ffmpeg producer, which decompresses to RGBA on the CPU and uploads
 the full frame — correct picture, none of the benefit.
 
-Variants, all verified playing as of 2026-07-30:
+Every variant plays, on both mixers, as of 2026-07-30:
 
-| variant | on the bus, 1080p | vs RGBA | notes |
-|---|---|---|---|
-| Hap (DXT1) | 0.99 MB | 8:1 | no alpha |
-| Hap Alpha (DXT5) | 1.98 MB | 4:1 | |
-| Hap Q (YCoCg DXT5) | 1.98 MB | 4:1 | higher quality; matches ffmpeg to 50.3 dB |
-| Hap Q Alpha | — | — | **untested**, see below |
-| Hap R (BC7) | — | — | **untested**, see below |
+| variant | on the bus, 1080p | vs RGBA | alpha | notes |
+|---|---|---|---|---|
+| Hap (DXT1) | 0.99 MB | 8:1 | no | cheapest thing you can put on a channel |
+| Hap Alpha (DXT5) | 1.98 MB | 4:1 | yes | |
+| Hap Q (YCoCg DXT5) | 1.98 MB | 4:1 | no | better colour than DXT1 at the same size |
+| Hap Q Alpha (YCoCg + BC4) | 2.97 MB | 2.8:1 | yes | two textures; **CPU decode on Vulkan** |
+| Hap R (BC7) | 1.98 MB | 4:1 | yes | best quality; nothing here can encode it |
 
-Chunked files (multi-threaded encodes) and uncompressed-container files both
-play. Encode with `ffmpeg -c:v hap -format hap|hap_alpha|hap_q [-chunks N]`.
+Chunked files (multi-threaded encodes), uncompressed-container files, and sizes
+that are not multiples of four (Hap pads to the 4×4 block grid) all play.
 
-**Two caveats, both real:**
+Encode with `ffmpeg -c:v hap -format hap|hap_alpha|hap_q [-chunks N]`. FFmpeg
+cannot produce Hap Q Alpha or Hap R — for those you need Resolume Alley,
+TouchDesigner, or the AVF Batch Exporter on macOS.
 
-*Tick cost scales with layer count.* `receive()` on this producer waits up to
-40 ms for a frame rather than repeating its last one, and the stage pulls layers
-in turn, so the wait multiplies: measured 40 ms per tick at one layer, 82 ms at
-four, 205 ms at eight, against a 40 ms nominal. The wait is masking a defect —
-the producer's GL thread does not keep its queue filled at frame rate — and
-removing it stops playback entirely rather than fixing anything, so it stays
-until that is addressed. Budget for it: Hap is excellent for upload bandwidth
-and currently poor for layer count.
+**Hap Q Alpha is the one to think about.** It carries colour and alpha as two
+separate textures, and the Vulkan zero-copy path takes one texture per frame, so
+on the Vulkan mixer this variant alone falls back to **decoding on the CPU** —
+you keep the small file and lose the point of the codec. On OpenGL it stays on
+the GPU. If you are on Vulkan and need alpha, prefer Hap Alpha or Hap R.
 
-*An intermittent stall exists.* The same file plays on one run and freezes on the
-next. Not yet root-caused; the trail leads back to the same GL thread. If a Hap
-layer freezes, restarting the layer clears it.
+**Backend parity.** The two mixers agree on Hap to within their own difference:
+every variant measures 41.8–42.1 dB between OpenGL and Vulkan, and a lossless
+still with no Hap involved measures 42.02 dB. Hap costs nothing on top of the
+composite difference that is already there.
 
-> Before 2026-07-30 the producer's decoded-frame queue was unbounded. A clip
-> whose decode outran the GL thread accumulated frames without limit — measured
-> at **+6.2 GB/s of resident memory** with five worker threads pinned at 100 % —
-> until the process fell over. Builds from before that date should not run Hap
-> unattended.
-
-**Hap Q Alpha and Hap R are untested.** FFmpeg's `hap` encoder produces only
-`hap`, `hap_alpha` and `hap_q`, so no sample could be generated locally. Hap Q
-Alpha in particular needs two textures per frame, and the source notes the
-zero-copy path cannot supply them — so it is the variant least likely to work.
-Test with a sample from elsewhere before relying on either.
+> Three defects were fixed on 2026-07-30. Builds from before it should not run
+> Hap.
+>
+> - The decoded-frame queue was unbounded — a clip whose decode outran the GL
+>   thread grew resident memory at **6.2 GB/s** with five threads pinned at
+>   100 %, until the process fell over.
+> - A handover race deadlocked the producer outright: four layers stopped within
+>   seconds, every run. The same defect at one layer looked like an intermittent
+>   stall, and it was what made the tick scale to 205 ms at eight layers.
+> - Hap R was rejected by the demuxer and could never be played at all, and any
+>   clip whose dimensions were not multiples of four failed on the CPU decode
+>   path — which is the only path Hap Q Alpha has on Vulkan.
+>
+> Tick is now nominal at 1, 4, 8 and 12 layers with zero underruns.
 
 ### Verifying
 
@@ -450,10 +453,13 @@ this work:
   that makes the path kernel-free. Ask for `-pix_fmt p010le` and you get 10-bit
   via the host path.
 - GPU-direct **decode** is OpenGL-only and progressive-only.
-- The `HAP` producer costs 40 ms of tick per layer and stalls intermittently.
-  Both come back to its GL thread not sustaining frame rate. It is the cheapest
-  format on the bus and the least reliable producer to stack — see §3.2 before
-  building a show around it.
+- **Hap Q Alpha decodes on the CPU under the Vulkan mixer.** It needs two
+  textures per frame and the zero-copy path takes one, so that variant alone
+  gives up the codec's whole advantage there. Every other variant stays on the
+  GPU on both backends. On Vulkan, prefer Hap Alpha or Hap R when you need
+  transparency.
+- FFmpeg cannot encode Hap Q Alpha or Hap R, so neither can be produced by this
+  server or by the bundled ffmpeg. They play; they have to be authored elsewhere.
 
 ---
 
