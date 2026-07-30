@@ -132,9 +132,9 @@ ADD 1 FILE out.mp4 -vcodec h264_nvenc -b:v 60M
 Measured **5.8 % less server CPU at 1080p and 15–18 % at 4K**, and the recorded
 picture is **pixel-identical** to the host path (`inf` dB, same encoder).
 
-**To stay on it, avoid:** a `-filter:v` (lavfi filters need host frames), a
-16-bit channel, or a Vulkan mixer. Any of those silently and correctly falls back
-— and says so:
+**To stay on it, avoid:** a `-filter:v`, an explicit `-pix_fmt`, a 16-bit
+channel, or a Vulkan mixer. Any of those silently and correctly falls back — and
+says so:
 
 ```
 [ffmpeg] GPU-direct recording active: the composited texture goes straight to NVENC, with no readback.
@@ -146,6 +146,39 @@ Confirm the readback really stopped:
 ```
 output[1] No consumer needs CPU readback (1 consumers); mixer readback skipped.
 ```
+
+### 10-bit recording — and what the 8-bit gate actually means
+
+**NVENC is not limited to 8-bit, and neither is recording here.** The gate above
+says "8-bit channel" because of how *this* fast path works, not because of the
+hardware. Measured on the reference rig:
+
+| encoder | 10-bit? |
+|---|---|
+| `h264_nvenc` | **no** — H.264 NVENC is 8-bit only in hardware. Fed 10-bit it reports *"No capable devices found"* |
+| `hevc_nvenc` | **yes** — Main 10, verified producing `yuv420p10le` |
+| `av1_nvenc` | not on Pascal or Ampere; fails at 8-bit too, so this is the GPU generation, not the depth |
+
+To record 10-bit, ask for it:
+
+```
+ADD 1 FILE out.mp4 -vcodec hevc_nvenc -pix_fmt p010le
+```
+
+That works from an 8-bit **or** a 16-bit channel, and it takes the host path by
+design — an explicit pixel format is a request the GPU path cannot honour,
+because its frames are CUDA/RGB0 and lavfi cannot reformat device frames.
+
+So the trade is explicit: **GPU-direct gives you 8-bit output with less CPU;
+`-pix_fmt p010le` gives you 10-bit through the host path.** You choose per
+recording, and the log says which you got.
+
+Why the fast path is 8-bit: it copies the mixer's `GL_RGBA8` texture
+byte-for-byte into an `AV_PIX_FMT_RGB0` frame, which is what makes it kernel-free.
+A 16-bit channel's texture is RGBA16, and NVENC accepts no packed 16-bit RGB
+format that matches it byte-for-byte (`x2rgb10le` is 10 bits in 32; `gbrp16le`
+and `yuv444p16le` are planar). Supporting it means a conversion kernel — exactly
+what the current design avoids.
 
 ### Recording with alpha
 
@@ -260,6 +293,10 @@ this work:
 - GPU-direct **recording** is OpenGL-only. The Vulkan mixer's composition target
   is not allocated with export capability, so CUDA cannot import it. That is a
   mixer allocation change, not a consumer one.
+- GPU-direct **recording** is 8-bit output only, by construction. This is not an
+  NVENC limitation — `hevc_nvenc` does Main 10 — it is the byte-for-byte copy
+  that makes the path kernel-free. Ask for `-pix_fmt p010le` and you get 10-bit
+  via the host path.
 - GPU-direct **decode** is OpenGL-only and progressive-only.
 
 ---

@@ -1129,6 +1129,37 @@ Both cost a debugging cycle and are worth knowing before touching this code.
   rather than during recording. The uploader remembers the device on first use and
   `~ffmpeg_consumer` calls `release()` before the contexts go.
 
+### Bit depth: an NVENC limit and a limit of this path, which are not the same
+
+Worth stating precisely, because "GPU-direct is 8-bit" invites the wrong
+conclusion. Measured on the reference rig by feeding each encoder `p010le`:
+
+| encoder | 10-bit output |
+|---|---|
+| `h264_nvenc` | **no** — 8-bit only in hardware; reports *"No capable devices found"* |
+| `hevc_nvenc` | **yes** — Main 10, produces `yuv420p10le` |
+| `av1_nvenc` | unavailable on Pascal/Ampere — fails at 8-bit too, so this is the GPU generation rather than the depth |
+
+So NVENC is not the constraint. The constraint is this path's byte-for-byte copy
+of a `GL_RGBA8` texture into `AV_PIX_FMT_RGB0`, which is what makes it
+kernel-free. A 16-bit channel's texture is RGBA16 and NVENC accepts no packed
+16-bit RGB format matching it (`x2rgb10le` is 10 bits in 32; `gbrp16le` and
+`yuv444p16le` are planar), so supporting it needs the conversion kernel the
+design was built to avoid.
+
+Ten-bit recording therefore works today, through the host path, from an 8-bit or
+a 16-bit channel: `-vcodec hevc_nvenc -pix_fmt p010le`.
+
+**A defect this exposed, fixed here.** An explicit `-pix_fmt` combined with
+GPU-direct produced *no file at all*. The buffersink was narrowed to the
+requested format while the graph carried CUDA frames, and configuration failed
+with *"Impossible to convert between the formats supported by the filter
+'Parsed_null_0'"*. An explicit pixel format is now a decline condition, alongside
+a user filter, so the request is honoured through the host path instead of
+breaking the recording. Verified: `hevc_nvenc -pix_fmt p010le` records
+`yuv420p10le` from both an 8-bit and a 16-bit channel, and the ordinary
+GPU-direct path is still pixel-identical to the host path at `inf` dB.
+
 ### Not done: Vulkan, and the reason is not the import path
 
 The obvious assumption — that this only needs `cuda_vk_texture.h` in place of

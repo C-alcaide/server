@@ -1005,12 +1005,24 @@ struct ffmpeg_consumer : public core::frame_consumer
                             return {};
                         }();
                         const bool has_filter = options.count("filter:v") > 0 || options.count("vf") > 0;
+                        // An explicit pixel format is a request the GPU path cannot
+                        // honour: its frames are CUDA/RGB0 and lavfi cannot convert
+                        // device frames to an arbitrary host format. Without this,
+                        // "-vcodec hevc_nvenc -pix_fmt p010le" configured the sink for
+                        // p010le, graph configuration failed with "Impossible to convert
+                        // between the formats supported by the filter 'Parsed_null_0'"
+                        // and the recording produced no file at all.
+                        const bool has_pix_fmt = options.count("pix_fmt") > 0 || options.count("pix_fmt:v") > 0 ||
+                                                 options.count("pixel_format") > 0 ||
+                                                 options.count("pixel_format:v") > 0;
 
                         const char* decline = nullptr;
                         if (selected_codec.find("nvenc") == std::string::npos)
                             decline = "encoder is not NVENC";
                         else if (has_filter)
                             decline = "a video filter was supplied";
+                        else if (has_pix_fmt)
+                            decline = "an explicit pixel format was requested";
                         else if (depth_ != common::bit_depth::bit8)
                             decline = "channel is not 8-bit";
                         else if (use_vulkan_)

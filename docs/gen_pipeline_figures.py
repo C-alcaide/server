@@ -228,18 +228,19 @@ def fig_recording():
 # ---------------------------------------------------------------- figure 5
 def fig_gpudirect_gate():
     """Every condition GPU-direct recording checks, and why."""
-    fig, ax = plt.subplots(figsize=(10.6, 5.7))
-    ax.set_xlim(0, 10.6); ax.set_ylim(0, 5.7); ax.axis("off")
-    ax.text(0.15, 5.36, "When GPU-direct recording engages", fontsize=13, weight="bold", color=C_TEXT)
+    fig, ax = plt.subplots(figsize=(11.2, 6.4))
+    ax.set_xlim(0, 11.2); ax.set_ylim(0, 6.4); ax.axis("off")
+    ax.text(0.15, 6.06, "When GPU-direct recording engages", fontsize=13, weight="bold", color=C_TEXT)
 
     gates = [
         ("encoder is NVENC", "the only encoder here that reads device memory"),
         ("no user video filter", "lavfi filters operate on host frames"),
-        ("8-bit channel", "NVENC's RGB inputs are 8-bit; RGBA16 does not fit"),
+        ("no explicit -pix_fmt", "the frames are CUDA/RGB0; lavfi cannot reformat them"),
+        ("8-bit channel", "the copy is byte-for-byte from an RGBA8 texture"),
         ("OpenGL mixer", "the Vulkan target is not allocated exportable"),
         ("CUDA device present", ""),
     ]
-    y = 4.62
+    y = 5.32
     for name, why in gates:
         box(ax, 0.15, y - 0.32, 3.0, 0.62, name, C_GPU, fs=9.5)
         ax.text(3.45, y, "→", color=C_MUTED, fontsize=12, va="center")
