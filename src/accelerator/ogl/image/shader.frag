@@ -600,11 +600,14 @@ vec3 apply_lmg(vec3 c, vec3 lift, vec3 midtone, vec3 gain)
 // we extract the peak luminance, normalise, rotate, then re-scale.
 vec3 apply_hue_shift(vec3 c, float degrees)
 {
+    // Same channel-order correction as apply_hue_curves -- `c` is BGR here, and
+    // an unswizzled rgb2hsv mirrors the hue wheel, so a positive rotation came
+    // out negative. `peak` is a max over all three and does not care about order.
     float peak = max(max(c.r, c.g), max(c.b, 0.0001));
     vec3 norm  = c / peak;
-    vec3 hsv   = rgb2hsv(clamp(norm, 0.0, 1.0));
+    vec3 hsv   = rgb2hsv(clamp(norm.bgr, 0.0, 1.0));
     hsv.x      = fract(hsv.x + degrees / 360.0);
-    return hsv2rgb(hsv) * peak;
+    return hsv2rgb(hsv).bgr * peak;
 }
 
 // ---- Tonal Balance (Shadows / Highlights separation) ----
@@ -684,7 +687,20 @@ vec3 apply_lut3d(vec3 c, float strength)
 // 4-channel LUT indexed by hue: R=hue offset, G=sat multiplier, B=lum offset, A=sat-vs-sat
 vec3 apply_hue_curves(vec3 c)
 {
-    vec3  hsv  = rgb2hsv(clamp(c, 0.0, 1.0));
+    // `c` is BGR-ordered here: this backend carries the pixel through grading in
+    // the mixer's native BGRA channel order, so c.r holds blue. rgb2hsv does not
+    // know what the channels mean -- it treats the first as red -- and exchanging
+    // red and blue mirrors the hue wheel. Feeding it BGR unswizzled negated every
+    // hue offset: a request for +0.25 delivered -0.25. Measured by sweeping the
+    // requested offset against the delivered one (0.125 -> -0.125, 0.25 -> -0.25,
+    // 0.75 -> -0.75; 0.0 and 0.5 agreed only because they are their own
+    // negations). The Vulkan backend grades in RGB and was already correct.
+    //
+    // Swizzling in and back out makes the hue domain a real hue domain, so a
+    // positive offset rotates positively as the LUT and the AMCP command intend.
+    // Saturation and value are unchanged by the exchange, which is why only
+    // hue-vs-hue was visibly wrong.
+    vec3  hsv  = rgb2hsv(clamp(c.bgr, 0.0, 1.0));
     float hue  = hsv.x;  // 0..1
     vec4  offsets = texture(hue_curve_tex, vec2(hue, 0.5));
     // R channel: Hue-vs-Hue offset (signed, Â±0.5 range mapped from Â±180Â°)
@@ -695,8 +711,8 @@ vec3 apply_hue_curves(vec3 c)
     vec4 sat_offsets = texture(hue_curve_tex, vec2(hsv.y, 0.5));
     hsv.y *= sat_offsets.a;
     // B channel: Hue-vs-Lum offset (signed)
-    vec3 result = hsv2rgb(hsv);
-    result += offsets.b;
+    vec3 result = hsv2rgb(hsv).bgr;   // back to the channel order the chain uses
+    result += offsets.b;              // applied to all three equally, order moot
     return result;
 }
 
