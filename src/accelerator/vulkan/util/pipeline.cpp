@@ -129,12 +129,25 @@ struct pipeline::impl
     {
         vk::SamplerCreateInfo samplerInfo{};
 
-        samplerInfo.magFilter               = vk::Filter::eLinear;
-        samplerInfo.minFilter               = vk::Filter::eLinear;
-        samplerInfo.mipmapMode              = vk::SamplerMipmapMode::eLinear;
-        samplerInfo.addressModeU            = vk::SamplerAddressMode::eRepeat;
-        samplerInfo.addressModeV            = vk::SamplerAddressMode::eRepeat;
-        samplerInfo.addressModeW            = vk::SamplerAddressMode::eRepeat;
+        samplerInfo.magFilter  = vk::Filter::eLinear;
+        samplerInfo.minFilter  = vk::Filter::eLinear;
+        samplerInfo.mipmapMode = vk::SamplerMipmapMode::eLinear;
+        // Clamp, matching the OpenGL backend, where every texture is created
+        // with GL_CLAMP_TO_EDGE (ogl/util/texture.cpp) and only the hue curve
+        // departs from it.
+        //
+        // This was eRepeat on all three axes, which meant a bilinear tap at any
+        // texture boundary pulled in the opposite edge instead of holding the
+        // last texel. The interiors matched exactly, so it only showed at the
+        // frame's outermost pixel column -- 0.1 % of the picture, and invisible
+        // in a PSNR figure, but it is the column that has to line up when a
+        // channel drives one segment of a video wall. borderColor below was
+        // already set to opaque black, which only has meaning under
+        // eClampToBorder: clamping was intended here and the address mode was
+        // never brought into line with it.
+        samplerInfo.addressModeU            = vk::SamplerAddressMode::eClampToEdge;
+        samplerInfo.addressModeV            = vk::SamplerAddressMode::eClampToEdge;
+        samplerInfo.addressModeW            = vk::SamplerAddressMode::eClampToEdge;
         samplerInfo.mipLodBias              = 0.0f;
         samplerInfo.anisotropyEnable        = VK_FALSE;
         samplerInfo.maxAnisotropy           = 2;
