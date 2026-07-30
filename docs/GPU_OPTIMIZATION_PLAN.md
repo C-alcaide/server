@@ -955,6 +955,64 @@ silently-wrong colour declaration would have been hardest to track down.
 
 ---
 
+## CUDA ProRes producer discarded 4444 alpha — fixed 2026-07-30
+
+The `CUDA_PRORES` producer decodes on the GPU and hands the mixer a texture it
+allocated itself, so the uncompressed frame never crosses the bus — measured at
+47 % less server CPU on six layers of ProRes 422 HQ, 55 % on twelve, and 68 % on
+ProRes 4444. Since upload bandwidth is what limits layer count, that removes the
+clip's contribution to the binding constraint rather than merely saving CPU.
+
+But every ffmpeg-encoded ProRes 4444 clip composited as **opaque**: black where
+the background should have shown, and `a=255` in a recorded transparent channel,
+while the same file through the ffmpeg producer was correct.
+
+### Cause
+
+`decode_alpha_to_host` parsed the slice header for Y, Cb and Cr exactly as
+FFmpeg does, but took the alpha payload size from an explicit field:
+
+```c
+if (hdr_bytes > 9)
+    alpha_size = ((int)sl[8] << 8) | sl[9];   // otherwise stays 0
+```
+
+FFmpeg never reads such a field. In `decode_slice_thread` the alpha size is
+always the remainder, `slice_data_size - y - u - v - slice_hdr_size`. And
+`prores_ks` writes an **8-byte** slice header, so `hdr_bytes > 9` was false,
+`alpha_size` stayed 0 for every slice, and each one took the "fill fully opaque"
+path a few lines below.
+
+Confirmed against a real file before changing anything — first slice:
+`total=28 hdr_bytes=8 y=7 cb=5 cr=5`, leaving **3 bytes of alpha** that the
+parser was reading as none. The frame header's byte 17 was `0x02`, correctly
+identifying 16-bit alpha, so the failure was specifically the payload size and
+not alpha detection.
+
+Now computed as the remainder when it is not explicitly sized. Only reachable for
+4444 — `decode_alpha_to_host` is called under `is_444` — so a 4:2:2 slice never
+evaluates it.
+
+### Verification
+
+| | before | after |
+|---|---|---|
+| 4444 with transparency, over red: corner | (0,0,0) black | **(255,0,0) red** |
+| transparent channel recorded: corner alpha | `a=255` | **`a=0`** |
+| ProRes 422, 6 layers | 2.55 → 1.35 cores | 2.58 → 1.38 |
+| ProRes 4444, 6 layers | 4.86 → 1.44 cores | 4.85 → 1.54 |
+| picture vs ffmpeg producer | 39.87 / 46.68 dB | 39.87 / 46.68 dB |
+
+The CPU savings and picture are unchanged; only the alpha channel differs.
+
+Worth noting how it was found: the failure was uniform opacity rather than
+noise, which pointed at a fill path rather than a decode error, and the "fill
+fully opaque in case alpha plane is absent" comment named the branch. Parsing the
+file's own slice header then turned a hypothesis into a measurement before any
+code changed.
+
+---
+
 ## QuickTime RLE / Animation with alpha — verified end to end 2026-07-30
 
 The format work above changed what these clips hand the mixer (`argb` → `rgba`),

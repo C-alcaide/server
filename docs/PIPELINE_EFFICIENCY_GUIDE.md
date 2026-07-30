@@ -165,18 +165,19 @@ host frame path at all. The producer logs its own line instead:
 [prores_producer] CUDA-GL interop active
 ```
 
-> ### ⚠ Alpha is not preserved — use the ffmpeg producer for keyed ProRes
->
-> Measured: a ProRes 4444 clip with genuine transparency composites as **opaque**
-> through `CUDA_PRORES`. Over a red background the transparent region comes out
-> black (0,0,0) instead of red, and recording a transparent channel gives
-> `a=255`. The same file through the ffmpeg producer is correct.
->
-> This looks like a defect rather than a design limit — the CUDA decode path does
-> decode the 4444 alpha channel and the 4:4:4 kernel writes it — so it is likely
-> recoverable, but it has not been root-caused. **Until it is, keyed or fill/key
-> ProRes must use the ordinary ffmpeg producer.** Opaque ProRes is unaffected and
-> is where the numbers above apply.
+**Alpha works** on ProRes 4444, including fill/key: a clip with genuine
+transparency composites correctly and a transparent channel records `a=0`,
+matching the ffmpeg producer exactly.
+
+> That was not true until 2026-07-30. Every ffmpeg-encoded ProRes 4444 clip
+> composited as **opaque** through `CUDA_PRORES` — black where the background
+> should show. The slice-header parser read the alpha payload size only from an
+> explicit field present when the header exceeds 9 bytes; `prores_ks` writes an
+> 8-byte slice header and, like FFmpeg's own decoder, expects alpha to be the
+> remainder after Y, Cb and Cr. So `alpha_size` was 0 for every slice, each one
+> took the "fill fully opaque" path, and the alpha channel was silently
+> discarded. If you are running a build from before that date, keyed ProRes must
+> use the ffmpeg producer.
 
 **Colour matrix.** These producers read the file's matrix and log it, falling
 back to a default when the file declares none — note the `BT.601` above on a file

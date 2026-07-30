@@ -339,8 +339,22 @@ static void decode_alpha_to_host(
             cr_size = ((int)sl[6] << 8) | sl[7];
         else
             cr_size = total - hdr_bytes - y_size - cb_size;
-        if (hdr_bytes > 9)
+        if (hdr_bytes > 9) {
             alpha_size = ((int)sl[8] << 8) | sl[9];
+        } else {
+            // Alpha is whatever is left after Y, Cb and Cr -- it is never given
+            // an explicit size in an 8-byte slice header, which is what FFmpeg's
+            // prores_ks writes (see decode_slice_thread in FFmpeg's decoder:
+            // a_data_size is always the remainder).
+            //
+            // Reading it only when hdr_bytes > 9 left alpha_size at 0 for every
+            // slice of every ffmpeg-encoded ProRes 4444 file, so each slice took
+            // the "fill fully opaque" path below and the alpha channel was
+            // silently discarded: a clip with real transparency composited as
+            // opaque black. Only reached for 4444 -- decode_alpha_to_host is
+            // called under is_444 -- so a 4:2:2 slice never computes this.
+            alpha_size = total - hdr_bytes - y_size - cb_size - cr_size;
+        }
         if (y_size < 0 || cb_size < 0 || alpha_size < 0 || cr_size < 0) continue;
 
         int s_col           = s % slices_per_row;
