@@ -62,6 +62,7 @@ if (MSVC)
 		# driver-API call.
 		target_link_libraries(ffmpeg PRIVATE CUDA::cudart_static CUDA::cuda_driver)
 		target_compile_definitions(ffmpeg PRIVATE CASPAR_FFMPEG_HAS_CUDA=1)
+
 	else()
 		message(STATUS "ffmpeg: CUDA toolkit not found - NVENC GPU-direct recording disabled")
 	endif()

@@ -392,6 +392,15 @@ vec4 get_rgba_color(vec2 uv){
     case 0: return vec4(texture(textures[PLANE0],uv).rrr*precision_factor[0],1.0);
     case 1: return texture(textures[PLANE0],uv).bgra*precision_factor[0];
     case 2: return texture(textures[PLANE0],uv).rgba*precision_factor[0];
+    // Cases 3 and 4 (argb, abgr) are WRONG and unreachable -- and note they do not
+    // even agree with the OpenGL shader, which uses .brga and .grab for the same
+    // two formats. Two backends disagreeing is the clearest evidence neither was
+    // ever exercised: the producer's filter graph always converted packed alpha
+    // formats to planar before the mixer saw them. Measured, an argb source
+    // renders at 6.4 dB where every other format scores 38 dB or better.
+    // AV_PIX_FMT_ARGB/ABGR are now excluded from what the producer will
+    // negotiate and nothing else produces these pixel_formats. See the longer
+    // note in the OpenGL shader before re-enabling either.
     case 3: return texture(textures[PLANE0],uv).gbar*precision_factor[0];
     case 4: return texture(textures[PLANE0],uv).abgr*precision_factor[0];
     case 5:{float y=texture(textures[PLANE0],uv).r*precision_factor[0];float cb=texture(textures[PLANE1],uv).r*precision_factor[1];float cr=texture(textures[PLANE2],uv).r*precision_factor[2];return ycbcra_to_rgba(y,cb,cr,1.0);}

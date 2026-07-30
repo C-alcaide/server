@@ -612,30 +612,35 @@ struct Stream
     std::shared_ptr<AVFrame> make_cuda_video_frame(const core::const_frame& in_frame)
     {
         auto tex = in_frame.texture();
-        if (!tex || !gpu_uploader)
-            return nullptr;
-        auto* gl_tex = dynamic_cast<accelerator::ogl::texture*>(tex.get());
-        if (!gl_tex)
-            return nullptr;
-        auto dev = gl_tex->get_device();
-        if (!dev)
+        if (!tex)
             return nullptr;
 
         auto frame = alloc_frame();
         if (av_hwframe_get_buffer(gpu_frames_ctx, frame.get(), 0) < 0)
             return nullptr;
 
-        // On the mixer's own GL thread: CUDA registers GL objects against the
-        // calling thread's context, and dispatching here avoids standing up a
-        // second shared context (see cuda_gl_upload.h).
-        const bool ok = dev->dispatch_sync([&] {
-            return gpu_uploader->copy_to_device(*gl_tex, frame->data[0], static_cast<size_t>(frame->linesize[0]));
-        });
-        if (!ok)
-            return nullptr;
+        if (gpu_uploader) {
+            auto* gl_tex = dynamic_cast<accelerator::ogl::texture*>(tex.get());
+            if (!gl_tex)
+                return nullptr;
+            auto dev = gl_tex->get_device();
+            if (!dev)
+                return nullptr;
 
-        frame->width  = gl_tex->width();
-        frame->height = gl_tex->height();
+            // On the mixer's own GL thread: CUDA registers GL objects against the
+            // calling thread's context, and dispatching here avoids standing up a
+            // second shared context (see cuda_gl_upload.h).
+            const bool ok = dev->dispatch_sync([&] {
+                return gpu_uploader->copy_to_device(*gl_tex, frame->data[0], static_cast<size_t>(frame->linesize[0]));
+            });
+            if (!ok)
+                return nullptr;
+        } else {
+            return nullptr;
+        }
+
+        frame->width  = tex->tex_width();
+        frame->height = tex->tex_height();
         return frame;
     }
 
@@ -1009,7 +1014,8 @@ struct ffmpeg_consumer : public core::frame_consumer
                         else if (depth_ != common::bit_depth::bit8)
                             decline = "channel is not 8-bit";
                         else if (use_vulkan_)
-                            decline = "Vulkan mixer (needs the cuda_vk bridge)";
+                            decline = "Vulkan mixer: its composition target is not allocated exportable, so CUDA "
+                                      "cannot import it";
                         else if (!cuda_gl_uploader::available())
                             decline = "no usable CUDA device";
 

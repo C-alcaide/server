@@ -784,6 +784,25 @@ struct device::impl : public std::enable_shared_from_this<impl>
         auto depth_pool_index = depth == common::bit_depth::bit8 ? 0 : 1;
         auto format           = INTERNAL_FORMAT[depth_pool_index][stride];
 
+        // A 3-component format is the one entry in that table Vulkan does not
+        // oblige an implementation to support as a sampled image, and this one
+        // does not: creating the image throws, from the channel's tick, taking
+        // the channel down. It reached here once, from an FFV1 RGB clip whose
+        // decoder emits rgb24, and the failure gave no hint of the cause.
+        //
+        // Producers no longer negotiate packed 3-byte RGB (see av_producer.cpp),
+        // so this should be unreachable -- say so clearly if it ever is not,
+        // rather than failing with a driver error a caller cannot interpret.
+        if (stride == 3) {
+            auto props = _physical_device.getFormatProperties(format);
+            if (!(props.optimalTilingFeatures & vk::FormatFeatureFlagBits::eSampledImage)) {
+                CASPAR_THROW_EXCEPTION(not_supported()
+                                       << msg_info("This GPU cannot sample 3-component 8-bit images, so the Vulkan "
+                                                   "mixer cannot take packed 24-bit RGB. Convert to a 4-component or "
+                                                   "planar format before the mixer, or use the OpenGL accelerator."));
+            }
+        }
+
         auto pool   = &device_pools_[depth_pool_index][stride - 1][(width << 16 & 0xFFFF0000) | (height & 0x0000FFFF)];
         auto extent = vk::Extent3D{static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1};
         std::shared_ptr<texture> tex;

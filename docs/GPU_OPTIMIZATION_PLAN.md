@@ -949,6 +949,64 @@ silently-wrong colour declaration would have been hardest to track down.
 
 ---
 
+## Three follow-ups closed by measurement — 2026-07-30
+
+Recorded because each looked like a defect and two turned out not to be.
+
+### v210 rendering 10 dB below ProRes 422 — not a defect
+
+Both arrive as `yuv422p10le` and take the same mixer path, yet v210 measured
+29.79 dB against a reference decode where ProRes measured 39.79. The cause was
+the harness. **The v210 decoder reports no colour metadata at all**
+(`color_space=unknown`) where ProRes reports `bt470bg`; the channel then assumes
+BT.709, which is correct for HD, while swscale defaults to BT.601. Decoding the
+reference with `in_color_matrix=bt709` puts v210 at **39.56 dB**, in line with
+everything else.
+
+`quality_matrix.py` now detects a source with no declared matrix and pins the
+reference to BT.709 to match the channel. Worth knowing generally: any
+comparison against an ffmpeg decode of metadata-less content will show a
+spurious ~10 dB gap.
+
+### Packed ARGB/ABGR shader swizzles — real, unreachable, left alone
+
+The bug is real: an `argb` source renders at 6.4 dB. But after excluding
+`AV_PIX_FMT_{ARGB,ABGR}` from what the producer negotiates, **nothing in the
+tree can produce `pixel_format::argb` or `::abgr`** — `av_util.cpp` is the only
+source of them, and `write_frame.cpp` only consumes them. The shader cases are
+dead code.
+
+Two further facts made fixing them a poor use of effort:
+
+- The two backends **disagree** on the swizzle for the same format (OpenGL uses
+  `.brga`/`.grab`, Vulkan `.gbar`/`.abgr`). Two implementations differing is
+  conclusive proof neither was ever exercised.
+- The reachable packed case verifies at `inf` dB with an identity-looking
+  swizzle, which does *not* follow from reading `FORMAT[stride]=GL_BGRA`. So the
+  upload byte order is not what the code suggests, and deriving the correct
+  swizzle on paper produces the wrong answer — it would have to be established
+  empirically, by re-enabling a format that nothing uses.
+
+Both shaders now carry a comment saying the cases are wrong, unreachable, and
+must not be re-enabled without deriving the swizzles by experiment.
+
+### Vulkan cannot sample `rgb24` — declined as a feature, made diagnosable
+
+Supporting packed 24-bit RGB on Vulkan would mean expanding to four components
+during upload, i.e. **33 % more upload bytes** than the `gbrp` fallback that
+negotiation already picks and that renders at `inf`. Upload bandwidth is the
+binding constraint on layer count (above), so this would be strictly worse than
+doing nothing.
+
+What was worth fixing is the failure mode. The VK mixer threw from inside the
+channel tick with a driver-level error, taking the channel down, and gave no
+hint why. It now checks `optimalTilingFeatures` for the 3-component format and
+throws a message naming the cause and the two ways out. It should be
+unreachable — producers no longer negotiate these formats — but an unreachable
+path that kills a channel is worth one format query.
+
+---
+
 ## GPU-direct recording: NVENC without the readback — 2026-07-30
 
 With NVENC taking host BGRA, a recording made a full round trip: the channel read
@@ -1033,11 +1091,39 @@ Both cost a debugging cycle and are worth knowing before touching this code.
   rather than during recording. The uploader remembers the device on first use and
   `~ffmpeg_consumer` calls `release()` before the contexts go.
 
-### Not done
+### Not done: Vulkan, and the reason is not the import path
 
-Vulkan. `frame.texture()` there is a `vulkan::texture` and the import path is
-`cuda_vk_texture.h` rather than `cudaGraphicsGLRegisterImage`. On a Vulkan mixer
-the consumer declines with a logged reason and records exactly as before.
+The obvious assumption — that this only needs `cuda_vk_texture.h` in place of
+`cudaGraphicsGLRegisterImage` — is wrong, and the attempt is worth recording so
+nobody repeats it.
+
+The import machinery is all present and correct: `CudaVkTexture` imports a
+VkImage's memory as a `cudaArray_t`, `texture_wrapper` exposes the render
+timeline semaphore for a GPU-side wait, and unlike OpenGL no context has to be
+made current, so the copy can run on the consumer's own thread. That was built
+and it compiled. It then failed at run time with:
+
+```
+[cuda_vk_texture] cudaImportExternalMemory: OS call failed or operation not
+supported on this OS
+```
+
+**The mixer's composition target is not allocated with export capability.**
+`create_exportable_texture()` exists but is used only by *producers* that create
+their own textures to hand to the mixer (`cuda_prores`, `cuda_notchlc`, `ofx`,
+`remotewall`). The mixer's own output comes from `pass->default_attachment()`,
+out of the renderpass attachment pool, which allocates ordinary device memory.
+
+Making that exportable is not a consumer-side change. It means allocating
+attachments with `VkExportMemoryAllocateInfo` throughout the Vulkan mixer, and
+exportable allocations generally cannot be sub-allocated by VMA — they need
+dedicated allocations. So it changes the memory behaviour of every attachment on
+every Vulkan channel, and needs its own validation of VRAM use and allocation
+count before it could be trusted. That is the prerequisite, and it is the whole
+of the remaining work; the consumer side is understood.
+
+Until then the consumer declines on a Vulkan mixer with that reason logged, and
+records exactly as before.
 
 Harness: `CasparCG-TestRunner/vkdispatch/gpurec_check.py` and
 `readback_scale.py`.

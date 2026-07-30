@@ -1315,6 +1315,17 @@ vec4 get_rgba_color(vec2 uv)
         return get_sample(plane[0], uv).bgra * precision_factor[0];
     case 2:		//rgba,
         return get_sample(plane[0], uv).rgba * precision_factor[0];
+    // NOTE: cases 3 and 4 are WRONG and currently unreachable. A QuickTime RLE
+    // clip, whose decoder emits argb, rendered at 6.4 dB against a reference
+    // where every other format scored 38 dB or better. They were never exercised
+    // because the producer's filter graph always converted packed alpha formats
+    // to planar before the mixer saw them; AV_PIX_FMT_ARGB/ABGR are now excluded
+    // from the formats it will negotiate (av_producer.cpp), and nothing else in
+    // the tree produces pixel_format::argb or ::abgr. Do not re-enable them
+    // without deriving the swizzles empirically -- the reachable packed cases
+    // (rgba here) verify at inf dB, so the upload byte order is not what a
+    // reading of FORMAT[stride]=GL_BGRA would suggest, and reasoning about it on
+    // paper produces the wrong answer.
     case 3:		//argb,
         return get_sample(plane[0], uv).brga * precision_factor[0];
     case 4:		//abgr,
