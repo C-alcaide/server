@@ -462,12 +462,16 @@ this work:
   that makes the path kernel-free. Ask for `-pix_fmt p010le` and you get 10-bit
   via the host path.
 - GPU-direct **decode** is OpenGL-only and progressive-only.
-- **The two backends disagree on hue curves.** `MIXER HUECURVE` measures 4.0 dB
-  between OpenGL and Vulkan on a shift across the hue seam and 18.3 dB on a
-  saturation curve — a large, visible difference, unlike everything else in the
-  mixer, which is byte-identical. Not sampling: it reproduces with the sampler
-  fix reverted. The two implementations of the curve itself differ. Grade on the
-  accelerator you will play out on until this is chased down.
+- **Hue rotated the wrong way on OpenGL before 2026-07-30.** `MIXER HUECURVE`
+  and `MIXER HUESHIFT` delivered the negation of what you asked for: +0.25 came
+  out as −0.25, and only 0.0 and 0.5 looked right, being their own negations.
+  The OpenGL grading chain runs on BGR-ordered pixels, and exchanging red and
+  blue mirrors the hue wheel. Vulkan was always correct. **Any hue grade saved
+  against an older OpenGL build is inverted** — check the sign before reusing
+  one.
+- Still unexamined, same cause: `MIXER QUALIFIER` keys on a target hue and
+  chroma keying derives one from a key colour, both through the same path on
+  OpenGL. Green keys are unaffected, green being the middle channel.
 - **Hap Q Alpha decodes on the CPU under the Vulkan mixer.** It needs two
   textures per frame and the zero-copy path takes one, so that variant alone
   gives up the codec's whole advantage there. Every other variant stays on the
