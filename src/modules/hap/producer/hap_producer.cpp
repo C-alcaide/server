@@ -113,6 +113,11 @@ struct DecompressedItem {
     uint32_t               epoch = 0;
     HapFrameResult         result;
     std::vector<int32_t>   audio_samples;
+    // A worker that cannot produce a picture for its packet still has to hand
+    // the sequence number on. gl_loop consumes the sequence strictly in order,
+    // so a number that is taken from the queue and never delivered stops it for
+    // good -- a single unparseable frame would end playback rather than blink.
+    bool                   skipped = false;
 };
 
 // Min-heap on sequence number for reordering.
@@ -189,6 +194,33 @@ struct hap_producer_impl final : public core::frame_producer
     // Mirror of gl_loop's next_seq, so a Snappy worker can tell whether the item
     // it is holding is the one gl_loop is blocked on. See the push below.
     std::atomic<uint64_t>                     gl_next_seq_{0};
+
+    // Where the pipeline is spending itself, published under hap/ in state().
+    // The producer stalls intermittently and needs a 40 ms wait in receive_impl
+    // to play at all; both point at gl_loop, and these say which of its three
+    // blocking points is responsible rather than leaving it to inference.
+    std::atomic<int64_t> st_recv_{0};        // receive_impl calls
+    std::atomic<int64_t> st_underrun_{0};    // ...that found ready_queue_ empty
+    std::atomic<int64_t> st_pushed_{0};      // frames gl_loop delivered
+    std::atomic<int64_t> st_io_pkts_{0};     // packets the io thread read
+    std::atomic<int64_t> st_decomp_{0};      // items the Snappy workers finished
+    std::atomic<int64_t> st_wait_done_us_{0};   // gl_loop waiting for its next seq
+    std::atomic<int64_t> st_wait_space_us_{0};  // gl_loop waiting for queue space
+    std::atomic<int64_t> st_decode_us_{0};      // gl_loop actually decoding
+    std::atomic<int>     st_where_{0};       // 0=running 1=wait-seq 2=wait-space 3=decode
+    std::atomic<int64_t> st_next_seq_{0};    // the sequence number gl_loop wants
+    std::atomic<int64_t> st_top_seq_{-1};    // lowest sequence number in done_pq_
+    std::atomic<int>     st_donepq_{0};      // done_pq_ depth
+    std::atomic<int>     st_rawq_{0};        // raw_queue_ depth
+    std::atomic<int>     st_readyq_{0};      // ready_queue_ depth
+    std::atomic<int>     st_blocked_workers_{0}; // workers parked on the done_pq_ bound
+    // Every route by which a worker consumes a sequence number without
+    // delivering it. gl_loop needs the sequence contiguous, so any of these
+    // stops it permanently; these say which one fired.
+    std::atomic<int64_t> st_drop_eof_{0};
+    std::atomic<int64_t> st_drop_epoch1_{0};
+    std::atomic<int64_t> st_drop_parse_{0};
+    std::atomic<int64_t> st_drop_epoch2_{0};
     int64_t                                   in_frame_          = 0;
     int64_t                                   out_frame_         = -1;
     int64_t                                   video_frame_start_ = 0;
@@ -415,6 +447,12 @@ struct hap_producer_impl final : public core::frame_producer
                 fps_frame_acc_ = 0;
                 seek_epoch_.fetch_add(1u, std::memory_order_release);
                 raw_cv_.notify_all();
+                // gl_loop watches seek_epoch_ from inside its wait on done_cv_,
+                // and the workers that would otherwise have notified it are about
+                // to discard everything from the old epoch. Without this it can
+                // sit waiting for a sequence number that nobody is going to send.
+                done_cv_.notify_all();
+                queue_cv_.notify_all();
                 seek_done_.store(true, std::memory_order_release);
                 continue;
             }
@@ -457,7 +495,9 @@ struct hap_producer_impl final : public core::frame_producer
             {
                 const uint32_t cur_epoch = seek_epoch_.load(std::memory_order_relaxed);
                 std::lock_guard<std::mutex> lk(raw_mutex_);
+                ++st_io_pkts_;
                 raw_queue_.push({std::move(pkt), pkt_seq++, cur_epoch});
+                st_rawq_.store((int)raw_queue_.size(), std::memory_order_relaxed);
             }
             raw_cv_.notify_one();
 
@@ -529,11 +569,15 @@ struct hap_producer_impl final : public core::frame_producer
             }
             raw_cv_.notify_all();
 
-            if (rp.pkt.is_eof) break;
-
-            // Epoch check: discard stale packets
-            if (rp.epoch != seek_epoch_.load(std::memory_order_acquire))
+            // Stale packets from before a seek are the one case where dropping a
+            // sequence number is safe: gl_loop abandons the whole epoch and
+            // restarts its count, so numbers from the old one are never waited
+            // for. Everything else must hand its number on even when it has no
+            // picture to go with it -- see DecompressedItem::skipped.
+            if (rp.epoch != seek_epoch_.load(std::memory_order_acquire)) {
+                ++st_drop_epoch1_;
                 continue;
+            }
 
             // Parse HAP frame header + Snappy decompress
             DecompressedItem item;
@@ -541,14 +585,28 @@ struct hap_producer_impl final : public core::frame_producer
             item.epoch = rp.epoch;
             item.audio_samples = std::move(rp.pkt.audio_samples);
 
-            if (!parse_hap_frame(rp.pkt.payload_data(), rp.pkt.payload_size(), item.result)) {
-                CASPAR_LOG(warning) << L"[hap_producer] Failed to parse/decompress HAP frame";
-                continue;
+            if (rp.pkt.is_eof) {
+                // io_loop handles end-of-file itself and does not queue a packet
+                // for it, so this is unreachable today. It used to `break`, which
+                // would have retired one of the four workers for the life of the
+                // producer; deliver the number and carry on instead.
+                ++st_drop_eof_;
+                item.skipped = true;
+            } else if (!parse_hap_frame(rp.pkt.payload_data(), rp.pkt.payload_size(),
+                                        item.result)) {
+                ++st_drop_parse_;
+                CASPAR_LOG(warning) << L"[hap_producer] Failed to parse/decompress HAP frame "
+                                    << item.seq << L" -- skipping it";
+                item.skipped = true;
             }
 
-            // Second epoch check after decompression
-            if (rp.epoch != seek_epoch_.load(std::memory_order_acquire))
+            // Second epoch check after decompression: a seek landed while this
+            // packet was being decompressed, so the same reasoning as above
+            // applies and the number can go.
+            if (rp.epoch != seek_epoch_.load(std::memory_order_acquire)) {
+                ++st_drop_epoch2_;
                 continue;
+            }
 
             {
                 std::unique_lock<std::mutex> lk(done_mutex_);
@@ -559,14 +617,19 @@ struct hap_producer_impl final : public core::frame_producer
                 // waits for N and the worker holding N blocks for space. Let the
                 // item gl_loop is actually waiting for through regardless.
                 const uint64_t my_seq = item.seq;
+                ++st_blocked_workers_;
                 done_cv_.wait(lk, [this, my_seq] {
                     return stop_flag_ || (int)done_pq_.size() < DONE_QUEUE_CAP ||
                            my_seq <= gl_next_seq_.load(std::memory_order_acquire) ||
                            seek_request_.load() >= 0;
                 });
+                --st_blocked_workers_;
                 if (stop_flag_)
                     break;
+                ++st_decomp_;
                 done_pq_.push(std::move(item));
+                st_donepq_.store((int)done_pq_.size(), std::memory_order_relaxed);
+                st_top_seq_.store((int64_t)done_pq_.top().seq, std::memory_order_relaxed);
             }
             // notify_all, not notify_one: done_cv_ now has both gl_loop (waiting
             // for the next sequence number) and the other Snappy workers (waiting
@@ -637,6 +700,8 @@ struct hap_producer_impl final : public core::frame_producer
             bool        epoch_changed = false;
             DecompressedItem item;
             {
+                caspar::timer wt;
+                st_where_.store(1, std::memory_order_relaxed);
                 std::unique_lock<std::mutex> lk(done_mutex_);
                 done_cv_.wait(lk, [&] {
                     if (stop_flag_) return true;
@@ -652,6 +717,8 @@ struct hap_producer_impl final : public core::frame_producer
                            done_pq_.top().epoch == seen_epoch &&
                            done_pq_.top().seq   == next_seq;
                 });
+                st_wait_done_us_ += (int64_t)(wt.elapsed() * 1e6);
+                st_where_.store(0, std::memory_order_relaxed);
                 if (stop_flag_) break;
 
                 const uint32_t cur_epoch = seek_epoch_.load(std::memory_order_acquire);
@@ -672,6 +739,23 @@ struct hap_producer_impl final : public core::frame_producer
                 } else {
                     item = std::move(const_cast<DecompressedItem&>(done_pq_.top()));
                     done_pq_.pop();
+                    // Advance the sequence here, under done_mutex_, and not after
+                    // the lock is dropped.
+                    //
+                    // A worker parked on the queue bound tests `my_seq <=
+                    // gl_next_seq_` to decide whether it is holding the item this
+                    // loop is about to wait for -- the escape that stops the bound
+                    // deadlocking. A condition variable only re-tests its predicate
+                    // when notified, so publishing gl_next_seq_ after releasing the
+                    // lock and after the notify means every worker evaluates the
+                    // *previous* value, finds it false, and sleeps again with the
+                    // needed item in hand. Nothing wakes them after that, and this
+                    // loop waits for a sequence number that is sitting three feet
+                    // away. Publishing it inside the critical section makes the
+                    // notify below carry the new value.
+                    ++next_seq;
+                    gl_next_seq_.store(next_seq, std::memory_order_release);
+                    st_next_seq_.store((int64_t)next_seq, std::memory_order_relaxed);
                 }
             }
             done_cv_.notify_all();
@@ -687,15 +771,23 @@ struct hap_producer_impl final : public core::frame_producer
                 continue;
             }
 
-            ++next_seq;
-            gl_next_seq_.store(next_seq, std::memory_order_release);
+            // A packet that could not be turned into a picture still had to come
+            // through to keep the sequence contiguous. Its number has been
+            // consumed above; there is simply nothing to draw, so the previously
+            // shown frame stands for one frame longer.
+            if (item.skipped)
+                continue;
 
             // Backpressure: wait for mixer
             {
+                caspar::timer wt;
+                st_where_.store(2, std::memory_order_relaxed);
                 std::unique_lock<std::mutex> lk(queue_mutex_);
                 queue_cv_.wait(lk, [this] {
                     return stop_flag_ || (int)ready_queue_.size() < MAX_QUEUED;
                 });
+                st_wait_space_us_ += (int64_t)(wt.elapsed() * 1e6);
+                st_where_.store(3, std::memory_order_relaxed);
                 if (stop_flag_) break;
             }
 
@@ -1003,7 +1095,11 @@ struct hap_producer_impl final : public core::frame_producer
                 gl_slot = (gl_slot + 1) % NUM_SLOTS;
             }
 
-            { std::lock_guard<std::mutex> lk(queue_mutex_); ready_queue_.push(std::move(df)); }
+            st_decode_us_ += (int64_t)(decode_timer.elapsed() * 1e6);
+            st_where_.store(0, std::memory_order_relaxed);
+            ++st_pushed_;
+            { std::lock_guard<std::mutex> lk(queue_mutex_); ready_queue_.push(std::move(df));
+              st_readyq_.store((int)ready_queue_.size(), std::memory_order_relaxed); }
             queue_cv_.notify_one();
         }
 
@@ -1106,30 +1202,30 @@ struct hap_producer_impl final : public core::frame_producer
             return cached_frame_ ? cached_frame_ : core::draw_frame{};
 
         std::unique_lock<std::mutex> lk(queue_mutex_);
-        // This wait is a workaround for a defect further up, and removing it
-        // without fixing that defect makes things worse, so leave it be.
+        // Block only when there is nothing at all to show yet.
         //
-        // It costs real time: receive() is pulled for every layer in turn on the
-        // stage thread, so 40 ms -- one whole frame at 25p -- is multiplied by the
-        // layer count. Measured 82 ms per tick at four layers and 205 ms at eight,
-        // against a 40 ms nominal, with "produce" owning all of it.
+        // This used to wait up to 40 ms on every call. receive() is pulled for
+        // each layer in turn on the stage thread, so that is multiplied by the
+        // layer count -- it measured 82 ms per tick at four layers and 205 ms at
+        // eight, against a 40 ms nominal. It was covering for a deadlock in
+        // gl_loop (see the sequence handover there); with that fixed, the queue
+        // does not run dry and the wait never fires -- zero underruns at one,
+        // four and eight layers, tick nominal at all three.
         //
-        // But it is not the cause. gl_loop does not keep ready_queue_ filled at
-        // frame rate, and the wait is what hides that. Taking it out and returning
-        // the last good frame -- which is what every other producer does -- stops
-        // playback dead: the producer's own reported position sat at 0.80 s across
-        // three samples two seconds apart, on every variant. Verified by restoring
-        // only this wait, with the queue bound below still in place: all five
-        // variants advance again.
-        //
-        // The real fix is whatever stops gl_loop delivering 25 frames a second;
-        // until then this stays.
-        if (!eof_paused_) {
+        // Keeping it for the first frame only is what the wait was really
+        // earning. Before any frame has been decoded cached_frame_ is empty and
+        // returning immediately puts black on air for the first few ticks; after
+        // that, repeating the last frame on an underrun is both what every other
+        // producer does and the only behaviour that cannot multiply the tick.
+        if (!eof_paused_ && !cached_frame_) {
             queue_cv_.wait_for(lk, std::chrono::milliseconds(40),
                                [this] { return !ready_queue_.empty() || stop_flag_ || eof_paused_; });
         }
-        if (ready_queue_.empty())
+        ++st_recv_;
+        if (ready_queue_.empty()) {
+            ++st_underrun_;
             return cached_frame_;
+        }
 
         double spd = speed_.load();
         const double fps_ratio = (file_fps_ > 0.0 && format_desc_.fps > 0.0)
@@ -1252,6 +1348,28 @@ struct hap_producer_impl final : public core::frame_producer
         monitor_state_["file/loop"]  = loop_;
         monitor_state_["width"]      = frame_info_.width;
         monitor_state_["height"]     = frame_info_.height;
+        // Pipeline counters -- see the declarations. Cheap enough to leave on:
+        // plain atomic loads once per tick, against a producer that has an
+        // intermittent stall nobody can reproduce on demand.
+        monitor_state_["hap/recv"]         = static_cast<int64_t>(st_recv_);
+        monitor_state_["hap/underrun"]     = static_cast<int64_t>(st_underrun_);
+        monitor_state_["hap/pushed"]       = static_cast<int64_t>(st_pushed_);
+        monitor_state_["hap/io-packets"]   = static_cast<int64_t>(st_io_pkts_);
+        monitor_state_["hap/decompressed"] = static_cast<int64_t>(st_decomp_);
+        monitor_state_["hap/wait-seq-ms"]  = static_cast<int64_t>(st_wait_done_us_ / 1000);
+        monitor_state_["hap/wait-space-ms"]= static_cast<int64_t>(st_wait_space_us_ / 1000);
+        monitor_state_["hap/decode-ms"]    = static_cast<int64_t>(st_decode_us_ / 1000);
+        monitor_state_["hap/blocked-on"]   = st_where_.load(std::memory_order_relaxed);
+        monitor_state_["hap/next-seq"]     = static_cast<int64_t>(st_next_seq_);
+        monitor_state_["hap/top-seq"]      = static_cast<int64_t>(st_top_seq_);
+        monitor_state_["hap/donepq"]       = st_donepq_.load(std::memory_order_relaxed);
+        monitor_state_["hap/rawq"]         = st_rawq_.load(std::memory_order_relaxed);
+        monitor_state_["hap/readyq"]       = st_readyq_.load(std::memory_order_relaxed);
+        monitor_state_["hap/blocked-wk"]   = st_blocked_workers_.load(std::memory_order_relaxed);
+        monitor_state_["hap/drop-eof"]     = static_cast<int64_t>(st_drop_eof_);
+        monitor_state_["hap/drop-epoch1"]  = static_cast<int64_t>(st_drop_epoch1_);
+        monitor_state_["hap/drop-parse"]   = static_cast<int64_t>(st_drop_parse_);
+        monitor_state_["hap/drop-epoch2"]  = static_cast<int64_t>(st_drop_epoch2_);
         return monitor_state_;
     }
 
