@@ -188,8 +188,17 @@ std::shared_ptr<void> vk_device_manager::sync_group_join(int sync_group)
                              << L": participant left (total=" << it->second.participants << L")";
             if (it->second.participants <= 0) {
                 sync_.erase(it);
+            } else if (it->second.waiting >= it->second.participants) {
+                // Everyone still in the group is already parked in sync_group_wait.
+                // A leave can make that true on its own (a non-waiting participant
+                // exits while >=2 others are already waiting) — without opening the
+                // barrier here, those waiters only re-check generation/participants,
+                // neither of which changes again, so they'd sit until timeout_ms
+                // instead of proceeding immediately.
+                it->second.waiting = 0;
+                it->second.generation++;
             }
-            // Wake anyone blocked — participant count changed
+            // Wake anyone blocked — participant count (and maybe generation) changed
             sync_cv_.notify_all();
         }
     });
