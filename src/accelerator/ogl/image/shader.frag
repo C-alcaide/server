@@ -508,6 +508,19 @@ float AngleDiff(float angle1, float angle2)
     return 0.5 - abs(abs(angle1 - angle2) - 0.5);
 }
 
+// ---- Rec.709 luma ----
+// `c` is BGR-ordered throughout this chain -- see the note in apply_hue_curves.
+// The weights are therefore applied to the swizzled vector, not to c directly,
+// or blue gets red's coefficient and vice versa. ContrastSaturationBrightness
+// already did this by hand (luma_coeff.bgr); the grading functions added later
+// did not, so every one of them weighted the wrong channels. Greys are
+// unaffected, which is why it went unseen -- the error only shows on saturated
+// colour.
+float luma709(vec3 c)
+{
+    return dot(c.bgr, vec3(0.2126, 0.7152, 0.0722));
+}
+
 float AngleDiffDirectional(float angle1, float angle2)
 {
     float diff = angle1 - angle2;
@@ -554,10 +567,16 @@ vec3 supress_spill(vec3 c)
 // Key on any color
 vec4 ChromaOnCustomColor(vec4 c)
 {
-    vec3 hsv		= rgb2hsv(c.rgb);
+    // Keyed on a mirrored hue until now: c is BGR, so rgb2hsv reported the
+    // opposite side of the wheel and ColorDistance compared it against an
+    // unmirrored chroma_target_hue. Green happens to sit at its own mirror
+    // image (1/3 maps to 1/3), so green keys have always worked and nothing
+    // else has -- asking for blue keyed red. The Vulkan mixer grades in RGB and
+    // has always been right.
+    vec3 hsv		= rgb2hsv(c.bgr);
     float distance	= ColorDistance(hsv);
     float d			= distance * -2.0 + 1.0;
-    vec4 suppressed	= vec4(hsv2rgb(supress_spill(hsv)), 1.0);
+    vec4 suppressed	= vec4(hsv2rgb(supress_spill(hsv)).bgr, 1.0);
     float alpha		= alpha_map(d);
 
     suppressed *= alpha;
@@ -615,7 +634,7 @@ vec3 apply_hue_shift(vec3 c, float degrees)
 // No clamping â€” preserves HDR headroom for downstream tonemapping.
 vec3 apply_tone_balance(vec3 c, float shadows, float highlights)
 {
-    float lum         = dot(c, vec3(0.2126, 0.7152, 0.0722));
+    float lum         = luma709(c);
     float shadow_mask = 1.0 - smoothstep(0.0, 0.6, lum);
     float hl_mask     = smoothstep(0.4, 1.0, lum);
     c += vec3(shadows    * 0.5 * shadow_mask);
@@ -627,7 +646,7 @@ vec3 apply_tone_balance(vec3 c, float shadows, float highlights)
 // Mix with luminance in scene-linear working space.  No clamping.
 vec3 apply_linear_saturation(vec3 c, float sat_val)
 {
-    float lum = dot(c, vec3(0.2126, 0.7152, 0.0722));
+    float lum = luma709(c);
     return mix(vec3(lum), c, sat_val);
 }
 
@@ -637,7 +656,7 @@ vec3 apply_linear_saturation(vec3 c, float sat_val)
 vec3 apply_cdl(vec3 c, vec3 slope, vec3 off, vec3 pwr, float sat_val)
 {
     c = pow(max(c * slope + off, vec3(0.0)), pwr);
-    float lum = dot(c, vec3(0.2126, 0.7152, 0.0722));
+    float lum = luma709(c);
     c = mix(vec3(lum), c, sat_val);
     return c;
 }
@@ -646,7 +665,7 @@ vec3 apply_cdl(vec3 c, vec3 slope, vec3 off, vec3 pwr, float sat_val)
 // Luminance-based tint: additive color offsets for shadows and highlights.
 vec3 apply_split_tone(vec3 c, vec3 shad_col, vec3 hi_col, float bal)
 {
-    float lum     = dot(c, vec3(0.2126, 0.7152, 0.0722));
+    float lum     = luma709(c);
     float shad_mk = 1.0 - smoothstep(bal - 0.3, bal + 0.3, lum);
     float hi_mk   = smoothstep(bal - 0.3, bal + 0.3, lum);
     c += shad_col * shad_mk;
@@ -759,7 +778,7 @@ vec3 apply_film_grain(vec3 c, vec2 uv, float intensity, float size_val, int fram
 {
     vec2 grain_uv = uv * target_size / max(size_val, 0.5);
     float noise   = grain_hash(grain_uv, frame_seed) * 2.0 - 1.0;  // -1..+1
-    float lum     = dot(c, vec3(0.2126, 0.7152, 0.0722));
+    float lum     = luma709(c);
     // Photographic response: more grain in midtones
     float response = smoothstep(0.0, 0.15, lum) * (1.0 - smoothstep(0.8, 1.0, lum));
     c += vec3(noise * intensity * response);
@@ -773,7 +792,11 @@ vec3 apply_qualifier(vec3 c, float tgt_hue, float hue_w, float min_s, float max_
                      float min_l, float max_l, float soft, float exp_off,
                      float sat_off, float hue_off)
 {
-    vec3  hsv = rgb2hsv(clamp(c, 0.0, 1.0));
+    // Mirrored hue, same cause as apply_hue_curves: c is BGR here, so an
+    // unswizzled rgb2hsv puts the pixel's hue on the opposite side of the wheel
+    // from the target the user asked for, and the qualifier keys the wrong
+    // colour entirely.
+    vec3  hsv = rgb2hsv(clamp(c.bgr, 0.0, 1.0));
     float hue_dist = AngleDiff(hsv.x, tgt_hue) * 2.0;
     // Compute qualification mask
     float hue_mask = 1.0 - smoothstep(hue_w - soft, hue_w + soft, hue_dist);
@@ -788,7 +811,7 @@ vec3 apply_qualifier(vec3 c, float tgt_hue, float hue_w, float min_s, float max_
     // Exposure offset (additive in linear)
     graded *= (1.0 + exp_off);
     // Saturation offset
-    float glum = dot(graded, vec3(0.2126, 0.7152, 0.0722));
+    float glum = luma709(graded);
     graded = mix(vec3(glum), graded, 1.0 + sat_off);
     // Hue rotation
     if (abs(hue_off) > 0.01) {
