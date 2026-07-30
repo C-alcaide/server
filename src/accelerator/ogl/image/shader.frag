@@ -371,10 +371,16 @@ vec3 supress_spill(vec3 c)
 // Key on any color
 vec4 ChromaOnCustomColor(vec4 c)
 {
-    vec3 hsv		= rgb2hsv(c.rgb);
+    // Keyed on a mirrored hue until now: c is BGR, so rgb2hsv reported the
+    // opposite side of the wheel and ColorDistance compared it against an
+    // unmirrored chroma_target_hue. Green happens to sit at its own mirror
+    // image (1/3 maps to 1/3), so green keys have always worked and nothing
+    // else has -- asking for blue keyed red. The Vulkan mixer grades in RGB and
+    // has always been right.
+    vec3 hsv		= rgb2hsv(c.bgr);
     float distance	= ColorDistance(hsv);
     float d			= distance * -2.0 + 1.0;
-    vec4 suppressed	= vec4(hsv2rgb(supress_spill(hsv)), 1.0);
+    vec4 suppressed	= vec4(hsv2rgb(supress_spill(hsv)).bgr, 1.0);
     float alpha		= alpha_map(d);
 
     suppressed *= alpha;
