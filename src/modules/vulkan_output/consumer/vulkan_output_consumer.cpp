@@ -1625,10 +1625,15 @@ class vulkan_output_consumer_impl
     vk::Device vblank_device_; // The VkDevice that owns the fence (may be separate from accelerator)
 
     // Phase-aligned pacing (MAILBOX mode)
-    int64_t pacer_epoch_ns_     = 0;  // Timestamp of first frame (0 = not set)
-    int64_t frame_interval_ns_  = 0;  // Frame period in nanoseconds
-    uint64_t frames_presented_  = 0;  // Total frames presented (used for pacing)
-    uint64_t frames_dropped_    = 0;  // Total frames dropped in send()
+    int64_t  pacer_epoch_ns_    = 0;  // Timestamp of first frame (0 = not set)
+    int64_t  frame_interval_ns_ = 0;  // Frame period in nanoseconds
+    // frames_presented_ is incremented only on the present thread but read from
+    // state() (monitor/OSC thread); frames_dropped_ is incremented in send()
+    // (a channel/mixer thread) and also read from state(). Both need to be
+    // atomic for that cross-thread access -- display_lost_/device_dead_/
+    // adapter_mismatch_ already are, these two were missed.
+    std::atomic<uint64_t> frames_presented_{0}; // Total frames presented (used for pacing)
+    std::atomic<uint64_t> frames_dropped_{0};   // Total frames dropped in send()
     bool     use_pacer_         = false; // True if MAILBOX present mode active
 
     // Software present barrier (sync group frame-lock)
