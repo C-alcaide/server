@@ -40,6 +40,9 @@ of a PCIe 3.0 x16 link.
   change to headroom if you run many such layers.
 - Do not benchmark with lossless RGBA (NotchLC, ProRes 4444, `bars.mov`). It
   costs five times ordinary material and will mislead you about capacity.
+- For ProRes and NotchLC specifically, the `CUDA_PRORES` / `CUDA_NOTCHLC`
+  producers avoid the upload entirely — see §3.1. That is the single largest
+  lever available for those formats, with one caveat about alpha.
 
 ---
 
@@ -108,7 +111,9 @@ Works, and both paths now agree. Per codec, measured:
 |---|---|---|---|
 | HEVC Main 10 | **yes** (NVDEC) | **yes** — no host copy at all | 10-bit |
 | H.264 High 10 | no — NVDEC cannot | stands down to software, logged | `yuv420p10le` |
-| ProRes 422 HQ, v210, DNxHR | software | n/a | native 10-bit |
+| ProRes (via the ffmpeg producer) | software | n/a | native 10-bit |
+| ProRes (via `CUDA_PRORES`) | **GPU** | n/a — decodes straight into a texture | see §3.1 |
+| v210, DNxHR | software | n/a | native 10-bit |
 
 Both 10-bit paths measure **39.63 dB** against an external reference decode —
 the same as every other 4:2:0 clip, where the residual is chroma upsampling
@@ -122,6 +127,62 @@ means a real regression.
 
 Nothing needs configuring for this. 10-bit content that can be hardware-decoded
 is, 10-bit content that cannot falls back and keeps its depth either way.
+
+### 3.1 The CUDA producers — ProRes and NotchLC
+
+These are **separate producers**, selected by a token as the first parameter, not
+a flag on an ordinary `PLAY`:
+
+```
+PLAY 1-10 CUDA_PRORES  <file> [LOOP] [SEEK n] [LENGTH n] [OUT n] [SPEED x]
+                              [DEVICE n] [COLOR_MATRIX 709|2020|601|AUTO]
+PLAY 1-10 CUDA_NOTCHLC <file> ...
+```
+
+They decode on the GPU and hand the mixer a texture they allocated themselves,
+so **the uncompressed frame is never uploaded** — only the compressed bitstream
+crosses the bus. Since upload bandwidth is what limits layer count (§1), this
+does not merely save CPU; it removes the clip's contribution to the binding
+constraint almost entirely.
+
+Measured, 1080p25, against the same files through the ffmpeg producer:
+
+| clip | layers | ffmpeg producer | `CUDA_PRORES` | saving |
+|---|---|---|---|---|
+| ProRes 422 HQ | 6 | 2.55 cores | 1.35 | 47 % |
+| ProRes 422 HQ | 12 | 3.70 cores | 1.65 | **55 %** |
+| ProRes 4444 | 6 | 4.86 cores | 1.44 | **70 %** |
+
+The saving grows with layer count, and is largest on 4444 — which is also the
+most expensive format to upload. Both held the channel at nominal rate.
+
+You can confirm it is engaged by what is **missing** from the log: there is no
+`decoded frames arrive as …` line, because the frame never passes through the
+host frame path at all. The producer logs its own line instead:
+
+```
+[prores_producer] 1920x1080 profile=4 color_matrix=5 (BT.601) LOOP
+[prores_producer] CUDA-GL interop active
+```
+
+> ### ⚠ Alpha is not preserved — use the ffmpeg producer for keyed ProRes
+>
+> Measured: a ProRes 4444 clip with genuine transparency composites as **opaque**
+> through `CUDA_PRORES`. Over a red background the transparent region comes out
+> black (0,0,0) instead of red, and recording a transparent channel gives
+> `a=255`. The same file through the ffmpeg producer is correct.
+>
+> This looks like a defect rather than a design limit — the CUDA decode path does
+> decode the 4444 alpha channel and the 4:4:4 kernel writes it — so it is likely
+> recoverable, but it has not been root-caused. **Until it is, keyed or fill/key
+> ProRes must use the ordinary ffmpeg producer.** Opaque ProRes is unaffected and
+> is where the numbers above apply.
+
+**Colour matrix.** These producers read the file's matrix and log it, falling
+back to a default when the file declares none — note the `BT.601` above on a file
+with no metadata. If colours look wrong, state it: `COLOR_MATRIX 709`. Measured
+against the ffmpeg producer the pictures agree to 39.9 dB (422) and 46.7 dB
+(4444); the residual is the two paths' colour handling, not decode error.
 
 ### Verifying
 
