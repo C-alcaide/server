@@ -1106,12 +1106,28 @@ struct hap_producer_impl final : public core::frame_producer
             return cached_frame_ ? cached_frame_ : core::draw_frame{};
 
         std::unique_lock<std::mutex> lk(queue_mutex_);
-        // No blocking wait here. receive() is pulled for every layer in turn on
-        // the stage thread, so any wait is multiplied by the layer count: a 40 ms
-        // wait_for -- one whole frame at 25p -- made an eight-layer channel tick
-        // at 327 ms instead of 40, with "produce" owning all of it. Returning the
-        // last good frame on an underrun is what every other producer does and
-        // what layer::receive already expects.
+        // This wait is a workaround for a defect further up, and removing it
+        // without fixing that defect makes things worse, so leave it be.
+        //
+        // It costs real time: receive() is pulled for every layer in turn on the
+        // stage thread, so 40 ms -- one whole frame at 25p -- is multiplied by the
+        // layer count. Measured 82 ms per tick at four layers and 205 ms at eight,
+        // against a 40 ms nominal, with "produce" owning all of it.
+        //
+        // But it is not the cause. gl_loop does not keep ready_queue_ filled at
+        // frame rate, and the wait is what hides that. Taking it out and returning
+        // the last good frame -- which is what every other producer does -- stops
+        // playback dead: the producer's own reported position sat at 0.80 s across
+        // three samples two seconds apart, on every variant. Verified by restoring
+        // only this wait, with the queue bound below still in place: all five
+        // variants advance again.
+        //
+        // The real fix is whatever stops gl_loop delivering 25 frames a second;
+        // until then this stays.
+        if (!eof_paused_) {
+            queue_cv_.wait_for(lk, std::chrono::milliseconds(40),
+                               [this] { return !ready_queue_.empty() || stop_flag_ || eof_paused_; });
+        }
         if (ready_queue_.empty())
             return cached_frame_;
 
