@@ -949,6 +949,38 @@ silently-wrong colour declaration would have been hardest to track down.
 
 ---
 
+## QuickTime RLE / Animation with alpha — verified end to end 2026-07-30
+
+The format work above changed what these clips hand the mixer (`argb` → `rgba`),
+and it was verified on `smptehdbars`, which is opaque. Animation is used *for*
+its alpha, so that is the case that needed checking. A clip with genuine
+transparency — an opaque green disc on a fully transparent field, `qtrle`,
+`argb`, corner RGBA `00000000` — was played and recorded on both mixers:
+
+| | OpenGL | Vulkan |
+|---|---|---|
+| arrives at mixer as | `rgba` | `rgba` |
+| composited over red: corner / centre | 255,0,0 / 0,255,0 | 255,0,0 / 0,255,0 |
+| recording to `qtrle` | `argb`, 136 frames | `argb`, 137 frames |
+| transparent channel recorded, corner RGBA | `0,0,0,0` | `0,0,0,0` |
+
+So: alpha survives decode, compositing and encode, on both backends. The corner
+showing the background layer rather than black is the thing to look for — black
+there means the alpha was ignored and transparent pixels were drawn.
+
+Two notes for anyone repeating this. CasparCG colour strings are `#AARRGGBB`, so
+`#FF0000FF` is opaque *blue*; a "wrong" result that is exactly the wrong primary
+is usually this. And `qtrle` negotiates `argb` on its own — the pixel-format
+preference added above only narrows codecs that offer 4:2:0, which `qtrle` does
+not, so alpha-capable codecs are left to negotiate as before.
+
+GPU-direct recording does not engage here and should not: it is NVENC-only, and
+NVENC carries no alpha. `qtrle` recordings take the host path.
+
+Harness: `CasparCG-TestRunner/vkdispatch/qtrle_check.py`.
+
+---
+
 ## Three follow-ups closed by measurement — 2026-07-30
 
 Recorded because each looked like a defect and two turned out not to be.
