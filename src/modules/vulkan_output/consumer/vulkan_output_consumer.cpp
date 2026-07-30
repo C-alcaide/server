@@ -135,6 +135,7 @@ class present_swapchain
     ~present_swapchain()
     {
         device_.waitIdle();
+        destroy_scratch();
         for (auto& f : frames_) {
             device_.destroySemaphore(f.image_available);
             device_.destroySemaphore(f.render_finished);
@@ -176,13 +177,16 @@ class present_swapchain
 
     // Record and submit a blit from src_image to the swapchain image at image_index.
     // src_x/src_y define the top-left crop offset; src_width/src_height the crop size.
+    // src_format is the mixer texture's actual format (R8G8B8A8 or R16G16B16A16),
+    // needed to reproduce its byte layout on the swapchain -- see the note below.
     // Returns the vk::Result from vkQueuePresentKHR.
-    vk::Result blit_and_present(VkImage  src_image,
-                          uint32_t src_x,
-                          uint32_t src_y,
-                          uint32_t src_width,
-                          uint32_t src_height,
-                          uint32_t image_index)
+    vk::Result blit_and_present(VkImage    src_image,
+                          uint32_t   src_x,
+                          uint32_t   src_y,
+                          uint32_t   src_width,
+                          uint32_t   src_height,
+                          vk::Format src_format,
+                          uint32_t   image_index)
     {
         auto& sync = current_frame();
         auto  cmd  = sync.cmd_buffer;
@@ -220,20 +224,90 @@ class present_swapchain
                             nullptr,
                             barrier_src);
 
-        // Blit (handles scaling if source != swapchain size)
-        vk::ImageBlit region{};
-        region.srcSubresource = vk::ImageSubresourceLayers{vk::ImageAspectFlagBits::eColor, 0, 0, 1};
-        region.srcOffsets[0]  = vk::Offset3D{static_cast<int32_t>(src_x), static_cast<int32_t>(src_y), 0};
-        region.srcOffsets[1]  = vk::Offset3D{static_cast<int32_t>(src_x + src_width), static_cast<int32_t>(src_y + src_height), 1};
-        region.dstSubresource = vk::ImageSubresourceLayers{vk::ImageAspectFlagBits::eColor, 0, 0, 1};
-        region.dstOffsets[0]  = vk::Offset3D{0, 0, 0};
-        region.dstOffsets[1]  = vk::Offset3D{static_cast<int32_t>(extent_.width), static_cast<int32_t>(extent_.height), 1};
-        cmd.blitImage(src_image,
-                      vk::ImageLayout::eTransferSrcOptimal,
-                      images_[image_index],
-                      vk::ImageLayout::eTransferDstOptimal,
-                      region,
-                      vk::Filter::eLinear);
+        // The mixer's fragment shader writes `color.bgra` into an attachment
+        // declared R8G8B8A8/R16G16B16A16 ("attachments store color in bgra
+        // format to match opengl accelerator" -- image_kernel.cpp), so this
+        // image's R component actually holds blue and its B component holds
+        // red. vkCmdBlitImage performs a component-semantic conversion (reads
+        // src.R, writes dst.R, wherever each lives in memory for that format)
+        // rather than a raw byte copy, so blitting straight into a B8G8R8A8
+        // swapchain silently swaps red and blue on screen. vkCmdCopyImage
+        // instead copies texel bytes verbatim between same-size formats,
+        // which is exactly what's needed here: the source's byte layout
+        // (blue, green, red, alpha) is already what a correct B8G8R8A8 image
+        // must contain. When scaling is needed, blit at the mixer's own
+        // format first (a pure resize -- both sides use the same component
+        // layout, so nothing gets relabelled) and only reinterpret via copy
+        // once sizes already match.
+        if (src_width == extent_.width && src_height == extent_.height) {
+            vk::ImageCopy region{};
+            region.srcSubresource = vk::ImageSubresourceLayers{vk::ImageAspectFlagBits::eColor, 0, 0, 1};
+            region.srcOffset      = vk::Offset3D{static_cast<int32_t>(src_x), static_cast<int32_t>(src_y), 0};
+            region.dstSubresource = vk::ImageSubresourceLayers{vk::ImageAspectFlagBits::eColor, 0, 0, 1};
+            region.dstOffset      = vk::Offset3D{0, 0, 0};
+            region.extent         = vk::Extent3D{extent_.width, extent_.height, 1};
+            cmd.copyImage(src_image,
+                          vk::ImageLayout::eTransferSrcOptimal,
+                          images_[image_index],
+                          vk::ImageLayout::eTransferDstOptimal,
+                          region);
+        } else {
+            ensure_scratch(src_format);
+
+            vk::ImageMemoryBarrier bar_scratch_to_dst{};
+            bar_scratch_to_dst.srcAccessMask    = scratch_initialized_ ? vk::AccessFlags{vk::AccessFlagBits::eTransferRead} : vk::AccessFlags{};
+            bar_scratch_to_dst.dstAccessMask    = vk::AccessFlagBits::eTransferWrite;
+            bar_scratch_to_dst.oldLayout        = scratch_initialized_ ? vk::ImageLayout::eTransferSrcOptimal
+                                                                       : vk::ImageLayout::eUndefined;
+            bar_scratch_to_dst.newLayout        = vk::ImageLayout::eTransferDstOptimal;
+            bar_scratch_to_dst.image            = scratch_image_;
+            bar_scratch_to_dst.subresourceRange = vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
+            cmd.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
+                                vk::PipelineStageFlagBits::eTransfer,
+                                {}, nullptr, nullptr, bar_scratch_to_dst);
+
+            // Scale into the scratch image. Same format on both sides, so this
+            // is a pure resize -- no component relabelling, unlike the blit
+            // into the swapchain this replaces.
+            vk::ImageBlit scale_region{};
+            scale_region.srcSubresource = vk::ImageSubresourceLayers{vk::ImageAspectFlagBits::eColor, 0, 0, 1};
+            scale_region.srcOffsets[0]  = vk::Offset3D{static_cast<int32_t>(src_x), static_cast<int32_t>(src_y), 0};
+            scale_region.srcOffsets[1]  = vk::Offset3D{static_cast<int32_t>(src_x + src_width), static_cast<int32_t>(src_y + src_height), 1};
+            scale_region.dstSubresource = vk::ImageSubresourceLayers{vk::ImageAspectFlagBits::eColor, 0, 0, 1};
+            scale_region.dstOffsets[0]  = vk::Offset3D{0, 0, 0};
+            scale_region.dstOffsets[1]  = vk::Offset3D{static_cast<int32_t>(extent_.width), static_cast<int32_t>(extent_.height), 1};
+            cmd.blitImage(src_image,
+                          vk::ImageLayout::eTransferSrcOptimal,
+                          scratch_image_,
+                          vk::ImageLayout::eTransferDstOptimal,
+                          scale_region,
+                          vk::Filter::eLinear);
+
+            vk::ImageMemoryBarrier bar_scratch_to_src{};
+            bar_scratch_to_src.srcAccessMask    = vk::AccessFlagBits::eTransferWrite;
+            bar_scratch_to_src.dstAccessMask    = vk::AccessFlagBits::eTransferRead;
+            bar_scratch_to_src.oldLayout        = vk::ImageLayout::eTransferDstOptimal;
+            bar_scratch_to_src.newLayout        = vk::ImageLayout::eTransferSrcOptimal;
+            bar_scratch_to_src.image            = scratch_image_;
+            bar_scratch_to_src.subresourceRange = vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
+            cmd.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
+                                vk::PipelineStageFlagBits::eTransfer,
+                                {}, nullptr, nullptr, bar_scratch_to_src);
+            scratch_initialized_ = true;
+
+            // Reinterpret via raw copy, now that sizes match.
+            vk::ImageCopy region{};
+            region.srcSubresource = vk::ImageSubresourceLayers{vk::ImageAspectFlagBits::eColor, 0, 0, 1};
+            region.srcOffset      = vk::Offset3D{0, 0, 0};
+            region.dstSubresource = vk::ImageSubresourceLayers{vk::ImageAspectFlagBits::eColor, 0, 0, 1};
+            region.dstOffset      = vk::Offset3D{0, 0, 0};
+            region.extent         = vk::Extent3D{extent_.width, extent_.height, 1};
+            cmd.copyImage(scratch_image_,
+                          vk::ImageLayout::eTransferSrcOptimal,
+                          images_[image_index],
+                          vk::ImageLayout::eTransferDstOptimal,
+                          region);
+        }
 
         // Transition source back: transfer src -> shader read
         vk::ImageMemoryBarrier barrier_src_back{};
@@ -290,6 +364,71 @@ class present_swapchain
 
         current_frame_idx_ = (current_frame_idx_ + 1) % MAX_FRAMES_IN_FLIGHT;
         return present_result;
+    }
+
+    // (Re)creates scratch_image_ to match `format` at the current swapchain
+    // extent, if it doesn't already. Used by blit_and_present() when scaling
+    // is needed (see the comment there for why a same-format scratch image is
+    // required instead of blitting straight into the swapchain).
+    void ensure_scratch(vk::Format format)
+    {
+        if (scratch_image_ && scratch_format_ == format && scratch_width_ == extent_.width &&
+            scratch_height_ == extent_.height)
+            return;
+
+        destroy_scratch();
+
+        vk::ImageCreateInfo ci{};
+        ci.imageType   = vk::ImageType::e2D;
+        ci.format      = format;
+        ci.extent      = vk::Extent3D{extent_.width, extent_.height, 1};
+        ci.mipLevels   = 1;
+        ci.arrayLayers = 1;
+        ci.samples     = vk::SampleCountFlagBits::e1;
+        ci.tiling      = vk::ImageTiling::eOptimal;
+        ci.usage       = vk::ImageUsageFlagBits::eTransferSrc | vk::ImageUsageFlagBits::eTransferDst;
+        ci.sharingMode = vk::SharingMode::eExclusive;
+        scratch_image_ = device_.createImage(ci);
+
+        auto mem_reqs  = device_.getImageMemoryRequirements(scratch_image_);
+        auto mem_props = physical_.getMemoryProperties();
+        uint32_t mem_type_idx = std::numeric_limits<uint32_t>::max();
+        for (uint32_t i = 0; i < mem_props.memoryTypeCount; ++i) {
+            if ((mem_reqs.memoryTypeBits & (1u << i)) &&
+                (mem_props.memoryTypes[i].propertyFlags & vk::MemoryPropertyFlagBits::eDeviceLocal)) {
+                mem_type_idx = i;
+                break;
+            }
+        }
+        if (mem_type_idx == std::numeric_limits<uint32_t>::max()) {
+            device_.destroyImage(scratch_image_);
+            scratch_image_ = nullptr;
+            CASPAR_THROW_EXCEPTION(caspar_exception()
+                << msg_info("vulkan_output: no device-local memory type for the present scratch image"));
+        }
+
+        vk::MemoryAllocateInfo alloc_info{};
+        alloc_info.allocationSize  = mem_reqs.size;
+        alloc_info.memoryTypeIndex = mem_type_idx;
+        scratch_memory_ = device_.allocateMemory(alloc_info);
+        device_.bindImageMemory(scratch_image_, scratch_memory_, 0);
+
+        scratch_format_       = format;
+        scratch_width_        = extent_.width;
+        scratch_height_       = extent_.height;
+        scratch_initialized_  = false; // Fresh image: undefined layout, not transfer-src yet
+    }
+
+    void destroy_scratch()
+    {
+        if (scratch_image_) {
+            device_.destroyImage(scratch_image_);
+            scratch_image_ = nullptr;
+        }
+        if (scratch_memory_) {
+            device_.freeMemory(scratch_memory_);
+            scratch_memory_ = nullptr;
+        }
     }
 
     // Record and submit: blit src → intermediate, dispatch color compute, blit intermediate → swapchain.
@@ -625,6 +764,16 @@ class present_swapchain
     vk::CommandPool            cmd_pool_;
     frame_sync                 frames_[MAX_FRAMES_IN_FLIGHT];
     int                        current_frame_idx_ = 0;
+
+    // Scratch image used by blit_and_present() only when scaling is needed:
+    // same format as the mixer source, swapchain-extent sized, reused across
+    // frames. See ensure_scratch()/blit_and_present().
+    vk::Image        scratch_image_        = nullptr;
+    vk::DeviceMemory scratch_memory_       = nullptr;
+    vk::Format       scratch_format_       = vk::Format::eUndefined;
+    uint32_t         scratch_width_        = 0;
+    uint32_t         scratch_height_       = 0;
+    bool             scratch_initialized_  = false; // false until its first transfer-src transition
 };
 
 // ----------------------------------------------------------------------------
@@ -1276,8 +1425,11 @@ class vulkan_output_consumer_impl
                     src->id(), crop_x, crop_y, crop_w, crop_h,
                     *color_pipeline_, image_index);
             } else {
+                vk::Format src_format = src->depth() == common::bit_depth::bit8
+                                             ? vk::Format::eR8G8B8A8Unorm
+                                             : vk::Format::eR16G16B16A16Unorm;
                 present_result = swapchain_->blit_and_present(
-                    src->id(), crop_x, crop_y, crop_w, crop_h, image_index);
+                    src->id(), crop_x, crop_y, crop_w, crop_h, src_format, image_index);
             }
         } catch (const vk::DeviceLostError&) {
             device_dead_ = true;
