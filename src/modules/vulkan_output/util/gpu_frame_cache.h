@@ -151,6 +151,11 @@ class gpu_frame_cache
 
     int                                      gpu_index_;
     std::shared_ptr<vulkan_device>           device_;
+    // Retained only so ~gpu_frame_cache() can tear interop_ctx_ down on the
+    // thread that created it (see the destructor -- interop_context's hidden
+    // HWND must be destroyed on its creating thread, and gpu_frame_cache is
+    // usually destroyed from a consumer's own shutdown thread instead).
+    std::shared_ptr<accelerator::ogl::device> ogl_device_;
     std::unique_ptr<shared_texture_pool>     pool_;
     std::unique_ptr<interop_context>         interop_ctx_;
     std::unique_ptr<gpu_affinity_context>    affinity_ctx_;

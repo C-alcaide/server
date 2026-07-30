@@ -100,6 +100,7 @@ gpu_frame_cache::gpu_frame_cache(
     bool                                       use_16bit)
     : gpu_index_(gpu_index)
     , device_(std::move(device))
+    , ogl_device_(ogl_device)
 {
     // Acquire a dedicated queue for coordinator submits (binary → timeline bridge)
     coord_queue_idx_ = device_->acquire_queue();
@@ -280,6 +281,17 @@ void gpu_frame_cache::init_cross_gpu(
 
 gpu_frame_cache::~gpu_frame_cache()
 {
+    // interop_context's hidden HWND was created on ogl_device_'s dedicated
+    // thread (init_same_gpu() constructs it inside ogl_device->dispatch_sync).
+    // Win32 requires DestroyWindow to run on that same thread; letting the
+    // implicit member destructor run it here (on whichever thread destroys
+    // this gpu_frame_cache -- typically a consumer's own shutdown thread)
+    // leaks the HWND and its window class registration.
+    if (interop_ctx_ && ogl_device_) {
+        auto ctx = std::move(interop_ctx_);
+        ogl_device_->dispatch_sync([&] { ctx.reset(); });
+    }
+
     // Stop pump thread
     pump_running_ = false;
     pump_cv_.notify_one();
