@@ -87,6 +87,18 @@ namespace caspar { namespace hap {
 static constexpr int NUM_SLOTS     = 5;
 static constexpr int MAX_QUEUED    = 2;
 static constexpr int IO_QUEUE_CAP  = 4;
+// Decompressed frames waiting for the GL thread. Without a bound here the four
+// Snappy workers drain the (bounded) raw queue as fast as they can, which keeps
+// the io thread reading, so the whole front half of the pipeline runs flat out
+// while gl_loop consumes at frame rate. Measured: five threads pegged at 1.00
+// core each and resident memory growing 6 GB/s on a single 1080p layer.
+//
+// Safe against the obvious deadlock -- gl_loop waiting for sequence N while the
+// worker holding N is blocked on a full queue -- because workers pop the raw
+// queue in order and there are only four of them, so at most three completed
+// items can ever sit ahead of a missing N. Any cap above the worker count has
+// margin; this one has plenty.
+static constexpr int DONE_QUEUE_CAP = 12;
 
 // Raw packet from I/O thread → Snappy workers.
 struct RawPacket {
@@ -174,6 +186,9 @@ struct hap_producer_impl final : public core::frame_producer
     double                                    fps_display_    = 0.0;
 
     std::atomic<int64_t>                      seek_request_{-1LL};
+    // Mirror of gl_loop's next_seq, so a Snappy worker can tell whether the item
+    // it is holding is the one gl_loop is blocked on. See the push below.
+    std::atomic<uint64_t>                     gl_next_seq_{0};
     int64_t                                   in_frame_          = 0;
     int64_t                                   out_frame_         = -1;
     int64_t                                   video_frame_start_ = 0;
@@ -536,10 +551,29 @@ struct hap_producer_impl final : public core::frame_producer
                 continue;
 
             {
-                std::lock_guard<std::mutex> lk(done_mutex_);
+                std::unique_lock<std::mutex> lk(done_mutex_);
+                // Backpressure: gl_loop notifies done_cv_ after each drain.
+                // The size check alone deadlocks. Workers do not stay in
+                // lockstep: a fast one takes later packets while a slow one still
+                // holds sequence N, so the queue can fill with N+1.. while gl_loop
+                // waits for N and the worker holding N blocks for space. Let the
+                // item gl_loop is actually waiting for through regardless.
+                const uint64_t my_seq = item.seq;
+                done_cv_.wait(lk, [this, my_seq] {
+                    return stop_flag_ || (int)done_pq_.size() < DONE_QUEUE_CAP ||
+                           my_seq <= gl_next_seq_.load(std::memory_order_acquire) ||
+                           seek_request_.load() >= 0;
+                });
+                if (stop_flag_)
+                    break;
                 done_pq_.push(std::move(item));
             }
-            done_cv_.notify_one();
+            // notify_all, not notify_one: done_cv_ now has both gl_loop (waiting
+            // for the next sequence number) and the other Snappy workers (waiting
+            // for space) sleeping on it, so waking exactly one can wake a worker
+            // while gl_loop stays asleep with an item ready for it. That showed up
+            // as the channel ticking at N x the frame period for N layers.
+            done_cv_.notify_all();
         }
         } catch (const std::exception& e) {
             CASPAR_LOG(error) << L"[hap_producer] snappy_loop exception: " << e.what();
@@ -597,6 +631,7 @@ struct hap_producer_impl final : public core::frame_producer
         int                  audio_frame_idx = 0;
         uint32_t             seen_epoch = seek_epoch_.load(std::memory_order_acquire);
         uint64_t             next_seq   = 0;
+        gl_next_seq_.store(0, std::memory_order_release);
 
         while (!stop_flag_) {
             bool        epoch_changed = false;
@@ -632,6 +667,7 @@ struct hap_producer_impl final : public core::frame_producer
                     done_pq_ = std::move(fresh_pq);
                     seen_epoch = cur_epoch;
                     next_seq   = 0;
+                    gl_next_seq_.store(0, std::memory_order_release);
                     epoch_changed = true;
                 } else {
                     item = std::move(const_cast<DecompressedItem&>(done_pq_.top()));
@@ -652,6 +688,7 @@ struct hap_producer_impl final : public core::frame_producer
             }
 
             ++next_seq;
+            gl_next_seq_.store(next_seq, std::memory_order_release);
 
             // Backpressure: wait for mixer
             {
@@ -1069,11 +1106,14 @@ struct hap_producer_impl final : public core::frame_producer
             return cached_frame_ ? cached_frame_ : core::draw_frame{};
 
         std::unique_lock<std::mutex> lk(queue_mutex_);
-        if (!eof_paused_) {
-            queue_cv_.wait_for(lk, std::chrono::milliseconds(40),
-                               [this] { return !ready_queue_.empty() || stop_flag_ || eof_paused_; });
-        }
-        if (ready_queue_.empty()) return cached_frame_;
+        // No blocking wait here. receive() is pulled for every layer in turn on
+        // the stage thread, so any wait is multiplied by the layer count: a 40 ms
+        // wait_for -- one whole frame at 25p -- made an eight-layer channel tick
+        // at 327 ms instead of 40, with "produce" owning all of it. Returning the
+        // last good frame on an underrun is what every other producer does and
+        // what layer::receive already expects.
+        if (ready_queue_.empty())
+            return cached_frame_;
 
         double spd = speed_.load();
         const double fps_ratio = (file_fps_ > 0.0 && format_desc_.fps > 0.0)
