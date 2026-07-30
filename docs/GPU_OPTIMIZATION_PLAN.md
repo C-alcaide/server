@@ -30,7 +30,7 @@ on unnecessary GPU→CPU→GPU roundtrips.
 | DeckLink (CUDA-VK) | `false` | VK texture → CUDA surface → v210 pack on GPU |
 | **Spout** *(Phase 2)* | `!gpu_path_active_` | Shared GL context + `glCopyImageSubData` → `SendTexture` |
 | **ProRes encoder** *(Phase 3)* | `!gpu_direct_active_` | Shared GL context + CUDA GL register → GPU-direct encode |
-| **FFmpeg consumer** *(Phase 4)* | `true` (never overridden) | Still takes the readback. NVENC now receives RGB with no host conversion; the readback removal is outstanding — see Phase 4 |
+| **FFmpeg consumer** *(Phase 4)* | `!gpu_direct_` | NVENC: mixer texture → CUDA frame → encoder, no readback (OpenGL only). Host path everywhere else |
 
 ### Consumers that still use CPU readback
 | Consumer | Issue | Impact |
@@ -235,17 +235,8 @@ bool needs_cpu_frame_data() const override { return !gpu_direct_active_; }
 >   local; the graph and encoder each took a reference and the original was never
 >   released.
 >
-> **Still outstanding — the readback itself.** The remaining cost is the
-> GPU→CPU readback of the composited frame, which this does not touch. Removing
-> it needs mixer texture → CUDA external memory → a BGRA→NV12 kernel →
-> `AV_PIX_FMT_CUDA`, with `needs_cpu_frame_data()` false while that path is live.
-> `src/modules/cuda_prores/consumer/prores_consumer.cu` is a working template for
-> the OGL half (`frame.texture()` → `cudaGraphicsGLRegisterImage` → kernel, with
-> `needs_cpu_frame_data() { return !gpu_direct_active_; }`) and
-> `cuda_vk_texture.h` for the VK half. Note that prores acquires its GL context
-> with a private `wglShareLists` context — do not copy that part; dispatch onto
-> the mixer's GL thread as Phase 5 ended up doing, for the reasons recorded in
-> `GPU_AFFINITY_PLAN.md`.
+> **The readback is now gone too — done 2026-07-30, OpenGL only.** See
+> "GPU-direct recording" below.
 
 The FFmpeg file-output consumer accepts GPU textures from the mixer, reading
 them back to CPU only when needed for software encoding. This avoids the
@@ -955,6 +946,101 @@ expected result: the declaration was wrong, but with the format restriction in
 place no conversion in these graphs depended on it. It matters for graphs where
 one *does* occur — user-supplied filters, scaling — which is exactly where a
 silently-wrong colour declaration would have been hardest to track down.
+
+---
+
+## GPU-direct recording: NVENC without the readback — 2026-07-30
+
+With NVENC taking host BGRA, a recording made a full round trip: the channel read
+the composited frame back, and NVENC uploaded the identical pixels again. The
+consumer now copies the mixer's texture straight into a CUDA frame and hands that
+to the encoder, and `needs_cpu_frame_data()` returns false while it does — so a
+record-only channel skips its readback entirely.
+
+**No colour-conversion kernel is involved, and none is needed.** NVENC accepts RGB
+input (this is what the earlier BGRA-direct fix established), so a CUDA frames
+context with `sw_format = AV_PIX_FMT_RGB0` takes the mixer's `GL_RGBA8` texels
+byte-for-byte. That means no `.cu` file and no nvcc — just `cudart`, the driver
+library and the CUDA runtime API.
+
+### Why it is worth having at 4K and marginal at HD
+
+The readback's cost scales with pixel count while the frame budget does not.
+Measured from the OpenGL device's own estimate:
+
+| format | MB/frame | readback | effective rate |
+|---|---|---|---|
+| 1080p | 7.91 | 2.95 ms | 2.62 GB/s |
+| 2160p | 31.64 | **11.50 ms** | 2.69 GB/s |
+
+Readback runs at ~2.7 GB/s, roughly 3.4× slower than the ~9.1 GB/s upload rate
+measured elsewhere in this document — GPU→host is the less optimised direction.
+At 4K the round trip is about 11.4 ms down plus 3.4 ms back up, per frame.
+
+Server CPU, same encoder and settings, GPU path versus host path:
+
+| | GPU-direct | host | saving |
+|---|---|---|---|
+| 1080p, 4 layers | 1.14 cores | 1.21 | 5.8 % |
+| 2160p, 2 layers | 0.89 / 1.76 / 1.69 | 1.09 / 2.06 / 1.99 | **18.3 / 14.6 / 15.1 %** |
+
+Three runs at 4K; absolute CPU varies between runs on this machine, the ~0.3 core
+delta does not.
+
+### Correctness
+
+**Pixel-identical.** Recording the same fixed frame twice with `h264_nvenc`, once
+GPU-direct and once with `-filter:v null` to decline it, gives **inf dB** between
+the two files. Same encoder, same settings, only the frame path differs — which
+is the control that matters, because comparing against `libx264` measures
+encoder differences (28.8 dB) rather than the thing under test.
+
+The log confirms the readback stops: `No consumer needs CPU readback (1
+consumers); mixer readback skipped`.
+
+### When it engages
+
+All of these, each for a concrete reason:
+
+| condition | why |
+|---|---|
+| encoder is NVENC | the only encoder here that takes device memory, and it accepts RGB |
+| no user video filter | lavfi filters operate on host frames |
+| 8-bit channel | a 16-bit channel's texture is RGBA16; NVENC's RGB inputs are 8-bit |
+| OpenGL mixer | the Vulkan path needs `cuda_vk_texture` and is not built |
+| CUDA present | — |
+
+Anything else leaves the host path exactly as it was, and the reason is logged
+whenever NVENC was selected. If the interop fails mid-recording the frame is
+dropped, `gpu_direct` is cleared, and since `needs_cpu_frame_data()` is polled
+every tick the channel resumes readbacks from the next one.
+
+### Two things that crash rather than fail
+
+Both cost a debugging cycle and are worth knowing before touching this code.
+
+- **The CUDA context is not interchangeable.** FFmpeg's CUDA device context
+  creates its own `CUcontext`, and device pointers are not valid across contexts —
+  writing the encoder's frames through a pointer from another context killed the
+  process with an access violation and no exception to catch. Asking FFmpeg for
+  the primary context instead (`primary_ctx`) does not work either: the DeckLink
+  DVP and CUDA ProRes modules activate it during startup, and FFmpeg then refuses
+  with *"Primary context already active with incompatible flags"*. The copies
+  therefore push FFmpeg's own context, via the driver API.
+- **The GL registrations must be released deliberately.** They have to be undone
+  on the mixer's GL thread and while the CUDA context is still alive. Leaving that
+  to member destruction order does neither, and the process died at `REMOVE`
+  rather than during recording. The uploader remembers the device on first use and
+  `~ffmpeg_consumer` calls `release()` before the contexts go.
+
+### Not done
+
+Vulkan. `frame.texture()` there is a `vulkan::texture` and the import path is
+`cuda_vk_texture.h` rather than `cudaGraphicsGLRegisterImage`. On a Vulkan mixer
+the consumer declines with a logged reason and records exactly as before.
+
+Harness: `CasparCG-TestRunner/vkdispatch/gpurec_check.py` and
+`readback_scale.py`.
 
 ---
 

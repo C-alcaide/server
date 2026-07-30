@@ -10,6 +10,8 @@ set(SOURCES
 	producer/ffmpeg_producer.h
 	consumer/ffmpeg_consumer.cpp
 	consumer/ffmpeg_consumer.h
+	consumer/cuda_gl_upload.cpp
+	consumer/cuda_gl_upload.h
 
 	util/av_util.cpp
 	util/av_util.h
@@ -48,6 +50,21 @@ if (MSVC)
 		# D3DCompile, for the NV12 plane-extraction shaders in that path
 		d3dcompiler
 	)
+
+	# CUDA runtime only -- no kernels, so no CUDA language and no nvcc. The
+	# consumer's GPU-direct NVENC path copies the mixer's texture into a CUDA
+	# frame with the runtime API; NVENC accepts RGB input, so no colour
+	# conversion is needed and there is nothing to write a kernel for.
+	find_package(CUDAToolkit QUIET)
+	if (CUDAToolkit_FOUND)
+		target_include_directories(ffmpeg PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
+		# cuda_driver too: the copies push the encoder's CUcontext, which is a
+		# driver-API call.
+		target_link_libraries(ffmpeg PRIVATE CUDA::cudart_static CUDA::cuda_driver)
+		target_compile_definitions(ffmpeg PRIVATE CASPAR_FFMPEG_HAS_CUDA=1)
+	else()
+		message(STATUS "ffmpeg: CUDA toolkit not found - NVENC GPU-direct recording disabled")
+	endif()
 else()
 	target_link_libraries(ffmpeg PRIVATE
 			${FFMPEG_LIBRARIES}

@@ -23,6 +23,10 @@
 
 #include "../util/av_assert.h"
 #include "../util/av_util.h"
+#include "cuda_gl_upload.h"
+
+#include <accelerator/ogl/util/device.h>
+#include <accelerator/ogl/util/texture.h>
 
 #include <chrono>
 #include <sstream>
@@ -80,6 +84,7 @@ extern "C" {
 #include <libavformat/avformat.h>
 #include <libavutil/channel_layout.h>
 #include <libavutil/hwcontext.h>
+#include <libavutil/hwcontext_cuda.h>
 #include <libavutil/opt.h>
 #include <libavutil/pixdesc.h>
 #include <libavutil/pixfmt.h>
@@ -117,6 +122,12 @@ struct Stream
     bool                            is_ltc = false;
     uint32_t                        last_frame_number = 0;
 
+    // Non-owning: the consumer owns these and outlives the Stream.
+    AVBufferRef*             gpu_frames_ctx = nullptr;
+    class cuda_gl_uploader*  gpu_uploader   = nullptr;
+    std::atomic<bool>*       gpu_direct     = nullptr;
+    int                      gpu_failures   = 0;
+
     Stream(AVFormatContext*                    oc,
            std::string                         suffix,
            AVCodecID                           codec_id,
@@ -125,7 +136,13 @@ struct Stream
            common::bit_depth                   depth,
            std::map<std::string, std::string>& options,
            core::color_space                   channel_cs       = core::color_space::bt709,
-           core::color_transfer                channel_transfer = core::color_transfer::sdr)
+           core::color_transfer                channel_transfer = core::color_transfer::sdr,
+           AVBufferRef*                        gpu_frames       = nullptr,
+           class cuda_gl_uploader*             uploader         = nullptr,
+           std::atomic<bool>*                  gpu_direct_flag  = nullptr)
+        : gpu_frames_ctx(gpu_frames)
+        , gpu_uploader(uploader)
+        , gpu_direct(gpu_direct_flag)
     {
         if (codec_id == AV_CODEC_ID_TIMECODE) {
             is_ltc = true;
@@ -273,7 +290,12 @@ struct Stream
                                  boost::rational<int>(format_desc.width, format_desc.height);
 
                 // 8-bit mixer outputs BGRA (.bgra shader swizzle); 16-bit outputs RGBA directly.
-                const auto pix_fmt = (depth == common::bit_depth::bit8) ? AV_PIX_FMT_BGRA : AV_PIX_FMT_RGBA64LE;
+                // With the GPU-direct path the graph carries CUDA frames, so the
+                // buffersrc has to be told that and given the frames context --
+                // otherwise it is configured for host BGRA and rejects them.
+                const auto pix_fmt = gpu_frames_ctx ? AV_PIX_FMT_CUDA
+                                     : (depth == common::bit_depth::bit8) ? AV_PIX_FMT_BGRA
+                                                                          : AV_PIX_FMT_RGBA64LE;
 
                 auto args = (boost::format("video_size=%dx%d:pix_fmt=%d:time_base=%d/%d:sar=%d/%d:frame_rate=%d/%d") %
                              format_desc.width % format_desc.height % pix_fmt % format_desc.duration %
@@ -285,6 +307,18 @@ struct Stream
 
                 FF(avfilter_graph_create_filter(
                     &source, avfilter_get_by_name("buffer"), name.c_str(), args.c_str(), nullptr, graph.get()));
+
+                if (gpu_frames_ctx) {
+                    AVBufferSrcParameters* par = av_buffersrc_parameters_alloc();
+                    if (!par)
+                        FF_RET(AVERROR(ENOMEM), "av_buffersrc_parameters_alloc");
+                    par->format        = AV_PIX_FMT_CUDA;
+                    par->hw_frames_ctx = gpu_frames_ctx;
+                    // Not named "ret": the FF macro declares its own.
+                    const auto set_result = av_buffersrc_parameters_set(source, par);
+                    av_free(par);
+                    FF(set_result);
+                }
                 FF(avfilter_link(source, 0, cur->filter_ctx, cur->pad_idx));
             } else if (codec->type == AVMEDIA_TYPE_AUDIO) {
                 auto args = (boost::format("time_base=%d/%d:sample_rate=%d:sample_fmt=%s:channel_layout=%#x") % 1 %
@@ -480,9 +514,12 @@ struct Stream
             // path. Worth one line at open time -- it is otherwise invisible.
             if (const char* fmt_name = av_get_pix_fmt_name(enc->pix_fmt)) {
                 const auto* d      = av_pix_fmt_desc_get(enc->pix_fmt);
+                const bool  is_hw  = d && (d->flags & AV_PIX_FMT_FLAG_HWACCEL);
                 const bool  is_rgb = d && (d->flags & AV_PIX_FMT_FLAG_RGB);
                 CASPAR_LOG(info) << L"[ffmpeg] " << u16(codec->name) << L" input format " << u16(fmt_name)
-                                 << (is_rgb ? L" (no host conversion)" : L" (host conversion via libswscale)");
+                                 << (is_hw    ? L" (device frames, no readback)"
+                                     : is_rgb ? L" (no host conversion)"
+                                              : L" (host conversion via libswscale)");
             }
 
             enc->color_range         = AVCOL_RANGE_MPEG;
@@ -528,6 +565,18 @@ struct Stream
             enc->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
         }
 
+        // GPU-direct: the buffersink emits the CUDA frames the buffersrc was given,
+        // and NVENC refuses device memory without being told which pool it came
+        // from ("hw_frames_ctx must be set when using GPU frames as input").
+        if (gpu_frames_ctx) {
+            if (auto* sink_frames = av_buffersink_get_hw_frames_ctx(sink))
+                enc->hw_frames_ctx = av_buffer_ref(sink_frames);
+            else
+                enc->hw_frames_ctx = av_buffer_ref(gpu_frames_ctx);
+            if (auto* frames = reinterpret_cast<AVHWFramesContext*>(enc->hw_frames_ctx->data))
+                enc->hw_device_ctx = av_buffer_ref(frames->device_ref);
+        }
+
         // Only reached when the caller's own filter chain contains cuda filters.
         if (use_nvenc_hw_ && hw_device_ctx_) {
             enc->hw_device_ctx = av_buffer_ref(hw_device_ctx_);
@@ -556,6 +605,38 @@ struct Stream
         if (hw_device_ctx_) {
             av_buffer_unref(&hw_device_ctx_);
         }
+    }
+
+    /// Wraps the mixer's composited texture in a CUDA frame the encoder can read.
+    /// Returns null if the frame carries no usable OpenGL texture or the copy fails.
+    std::shared_ptr<AVFrame> make_cuda_video_frame(const core::const_frame& in_frame)
+    {
+        auto tex = in_frame.texture();
+        if (!tex || !gpu_uploader)
+            return nullptr;
+        auto* gl_tex = dynamic_cast<accelerator::ogl::texture*>(tex.get());
+        if (!gl_tex)
+            return nullptr;
+        auto dev = gl_tex->get_device();
+        if (!dev)
+            return nullptr;
+
+        auto frame = alloc_frame();
+        if (av_hwframe_get_buffer(gpu_frames_ctx, frame.get(), 0) < 0)
+            return nullptr;
+
+        // On the mixer's own GL thread: CUDA registers GL objects against the
+        // calling thread's context, and dispatching here avoids standing up a
+        // second shared context (see cuda_gl_upload.h).
+        const bool ok = dev->dispatch_sync([&] {
+            return gpu_uploader->copy_to_device(*gl_tex, frame->data[0], static_cast<size_t>(frame->linesize[0]));
+        });
+        if (!ok)
+            return nullptr;
+
+        frame->width  = gl_tex->width();
+        frame->height = gl_tex->height();
+        return frame;
     }
 
     void send(std::tuple<core::const_frame, std::int64_t, std::int64_t>& data,
@@ -593,7 +674,26 @@ struct Stream
 
         if (in_frame) {
             if (enc->codec_type == AVMEDIA_TYPE_VIDEO) {
-                frame      = make_av_video_frame(in_frame, format_desc);
+                if (gpu_frames_ctx) {
+                    frame = make_cuda_video_frame(in_frame);
+                    if (!frame) {
+                        // The graph and the encoder are configured for CUDA frames,
+                        // so there is no host frame to fall back to for *this*
+                        // frame; drop it, as the consumer already does when it
+                        // cannot keep up. gpu_direct is cleared so the channel
+                        // resumes readbacks and a later rebuild takes the CPU path.
+                        if (gpu_failures++ == 0 && gpu_direct) {
+                            gpu_direct->store(false, std::memory_order_relaxed);
+                            CASPAR_LOG(error)
+                                << L"[ffmpeg] GPU-direct recording failed ("
+                                << u16(gpu_uploader ? gpu_uploader->last_error() : "no uploader")
+                                << L"); dropping the frame and reverting to the host path.";
+                        }
+                        return;
+                    }
+                } else {
+                    frame = make_av_video_frame(in_frame, format_desc);
+                }
                 frame->pts = video_pts;
             } else if (enc->codec_type == AVMEDIA_TYPE_AUDIO) {
                 frame      = make_av_audio_frame(in_frame, format_desc);
@@ -656,6 +756,72 @@ struct ffmpeg_consumer : public core::frame_consumer
     std::thread                                                                              frame_thread_;
 
     common::bit_depth depth_;
+    bool              use_vulkan_ = false;
+
+    // ── GPU-direct recording ──────────────────────────────────────────────
+    // When the encoder is NVENC and nothing in the chain needs host pixels, the
+    // composited texture is copied straight into a CUDA frame and handed to the
+    // encoder. Otherwise the channel reads the frame back and NVENC uploads the
+    // same pixels again: measured 2.95 ms down at 1080p and 11.50 ms at 4K, plus
+    // the upload, for a round trip that produces nothing.
+    //
+    // Decided once, at construction, because the encoder and the filter graph are
+    // configured for one or the other and cannot change per frame. If the interop
+    // later fails, gpu_direct_ goes false; needs_cpu_frame_data() is polled every
+    // tick, so the channel resumes readbacks from the next one.
+    std::atomic<bool>            gpu_direct_{false};
+    cuda_gl_uploader             gpu_uploader;
+
+    using av_buffer_ptr = std::unique_ptr<AVBufferRef, void (*)(AVBufferRef*)>;
+    static av_buffer_ptr null_av_buffer() { return {nullptr, [](AVBufferRef* p) { av_buffer_unref(&p); }}; }
+    av_buffer_ptr gpu_device_ctx = null_av_buffer();
+    av_buffer_ptr gpu_frames_ctx = null_av_buffer();
+
+    /// A CUDA frames pool the encoder can read directly.
+    ///
+    /// sw_format is RGB0 because the mixer's target texture is GL_RGBA8 -- four
+    /// bytes per texel in R,G,B,A order -- and the copy out of it is byte-for-byte.
+    /// NVENC lists RGB formats among its inputs and converts to YCbCr internally,
+    /// which measured *better* than converting on the host beforehand.
+    av_buffer_ptr make_cuda_frames_ctx(int width, int height)
+    {
+        auto fail = null_av_buffer();
+
+        AVBufferRef* dev = nullptr;
+        if (av_hwdevice_ctx_create(&dev, AV_HWDEVICE_TYPE_CUDA, nullptr, nullptr, 0) < 0)
+            return fail;
+        gpu_device_ctx = av_buffer_ptr(dev, [](AVBufferRef* p) { av_buffer_unref(&p); });
+
+        AVBufferRef* frames = av_hwframe_ctx_alloc(gpu_device_ctx.get());
+        if (!frames)
+            return fail;
+        auto owned = av_buffer_ptr(frames, [](AVBufferRef* p) { av_buffer_unref(&p); });
+
+        auto* ctx     = reinterpret_cast<AVHWFramesContext*>(owned->data);
+        ctx->format    = AV_PIX_FMT_CUDA;
+        ctx->sw_format = AV_PIX_FMT_RGB0;
+        ctx->width     = width;
+        ctx->height    = height;
+        // Deep enough that the encoder holding a couple of frames never starves
+        // the copy, shallow enough not to sit on VRAM: 4K RGB0 is 33 MB a frame.
+        ctx->initial_pool_size = 8;
+
+        if (av_hwframe_ctx_init(owned.get()) < 0)
+            return fail;
+
+        // The copies must run in the same CUDA context the encoder's frames were
+        // allocated from -- device pointers are not valid across contexts, and
+        // using one from the wrong context kills the process outright with no
+        // exception to catch. Asking FFmpeg for the primary context instead is
+        // not an option: the DeckLink DVP and CUDA ProRes modules have already
+        // activated it by now, and FFmpeg refuses with "Primary context already
+        // active with incompatible flags".
+        auto* hw_dev  = reinterpret_cast<AVHWDeviceContext*>(gpu_device_ctx->data);
+        auto* cuda_hw = static_cast<AVCUDADeviceContext*>(hw_dev->hwctx);
+        gpu_uploader.set_context(cuda_hw->cuda_ctx);
+
+        return owned;
+    }
 
     // FPS counter
     std::chrono::steady_clock::time_point last_fps_update_;
@@ -663,7 +829,7 @@ struct ffmpeg_consumer : public core::frame_consumer
     double                  current_fps_ = 0.0;
 
   public:
-    ffmpeg_consumer(std::string path, std::string args, bool realtime, common::bit_depth depth)
+    ffmpeg_consumer(std::string path, std::string args, bool realtime, common::bit_depth depth, bool use_vulkan)
         : channel_index_([&] {
             boost::crc_16_type result;
             result.process_bytes(path.data(), path.length());
@@ -673,6 +839,7 @@ struct ffmpeg_consumer : public core::frame_consumer
         , path_(std::move(path))
         , args_(std::move(args))
         , depth_(depth)
+        , use_vulkan_(use_vulkan)
     {
         state_["file/path"] = u8(path_);
 
@@ -690,6 +857,12 @@ struct ffmpeg_consumer : public core::frame_consumer
             frame_buffer_.push({core::const_frame{}, -1, -1});
             frame_thread_.join();
         }
+
+        // Before the CUDA contexts below are released. The uploader's GL
+        // registrations have to be undone on the mixer's GL thread and while the
+        // context they were made in is still alive; leaving it to member
+        // destruction order does neither, and the process dies at teardown.
+        gpu_uploader.release();
     }
 
     // frame consumer
@@ -805,7 +978,57 @@ struct ffmpeg_consumer : public core::frame_consumer
                             options["preset:v"] = "veryfast";
                         }
                     }
-                    video_stream.emplace(oc, ":v", oc->oformat->video_codec, format_desc, realtime_, depth_, options, channel_info.default_color_space, channel_info.default_color_transfer);
+                    // ── Decide the GPU-direct path ────────────────────────
+                    // Everything here has to hold, and each for a concrete reason:
+                    //   NVENC          -- it is the only encoder that takes device
+                    //                     memory here, and it accepts RGB so no
+                    //                     colour conversion kernel is needed.
+                    //   no user filter -- lavfi filters operate on host frames.
+                    //   8-bit channel  -- a 16-bit channel's texture is RGBA16 and
+                    //                     NVENC's RGB inputs are 8-bit.
+                    //   OpenGL mixer   -- the Vulkan equivalent needs
+                    //                     cuda_vk_texture and is not built yet.
+                    //   CUDA present   -- obviously.
+                    // Anything false leaves the existing host path untouched.
+                    {
+                        const auto selected_codec = [&]() -> std::string {
+                            for (const auto* key : {"vcodec", "codec:v", "c:v"}) {
+                                const auto it = options.find(key);
+                                if (it != options.end())
+                                    return it->second;
+                            }
+                            return {};
+                        }();
+                        const bool has_filter = options.count("filter:v") > 0 || options.count("vf") > 0;
+
+                        const char* decline = nullptr;
+                        if (selected_codec.find("nvenc") == std::string::npos)
+                            decline = "encoder is not NVENC";
+                        else if (has_filter)
+                            decline = "a video filter was supplied";
+                        else if (depth_ != common::bit_depth::bit8)
+                            decline = "channel is not 8-bit";
+                        else if (use_vulkan_)
+                            decline = "Vulkan mixer (needs the cuda_vk bridge)";
+                        else if (!cuda_gl_uploader::available())
+                            decline = "no usable CUDA device";
+
+                        if (decline == nullptr) {
+                            gpu_frames_ctx = make_cuda_frames_ctx(format_desc.width, format_desc.height);
+                            if (!gpu_frames_ctx)
+                                decline = "could not create the CUDA frames context";
+                        }
+
+                        if (decline == nullptr) {
+                            gpu_direct_.store(true, std::memory_order_relaxed);
+                            CASPAR_LOG(info) << L"[ffmpeg] GPU-direct recording active: the composited texture goes "
+                                                L"straight to NVENC, with no readback.";
+                        } else if (selected_codec.find("nvenc") != std::string::npos) {
+                            CASPAR_LOG(info) << L"[ffmpeg] GPU-direct recording not used: " << u16(decline) << L".";
+                        }
+                    }
+
+                    video_stream.emplace(oc, ":v", oc->oformat->video_codec, format_desc, realtime_, depth_, options, channel_info.default_color_space, channel_info.default_color_transfer, gpu_frames_ctx.get(), &gpu_uploader, &gpu_direct_);
 
                     {
                         std::lock_guard<std::mutex> lock(state_mutex_);
@@ -974,6 +1197,11 @@ struct ffmpeg_consumer : public core::frame_consumer
 
     bool has_synchronization_clock() const override { return false; }
 
+    /// False only while the GPU-direct path is actually carrying frames. The
+    /// channel polls this every tick, so a mid-run failure restores the readback
+    /// on the next one.
+    bool needs_cpu_frame_data() const override { return !gpu_direct_.load(std::memory_order_relaxed); }
+
     int index() const override { return 100000 + channel_index_; }
 
     core::monitor::state state() const override
@@ -997,7 +1225,8 @@ spl::shared_ptr<core::frame_consumer> create_consumer(const std::vector<std::wst
         args.emplace_back(u8(params[n]));
     }
     return spl::make_shared<ffmpeg_consumer>(
-        path, boost::join(args, " "), boost::iequals(params.at(0), L"STREAM"), channel_info.depth);
+        path, boost::join(args, " "), boost::iequals(params.at(0), L"STREAM"), channel_info.depth,
+        channel_info.use_vulkan);
 }
 
 spl::shared_ptr<core::frame_consumer>
@@ -1009,6 +1238,7 @@ create_preconfigured_consumer(const boost::property_tree::wptree&               
     return spl::make_shared<ffmpeg_consumer>(u8(ptree.get<std::wstring>(L"path", L"")),
                                              u8(ptree.get<std::wstring>(L"args", L"")),
                                              ptree.get(L"realtime", false),
-                                             channel_info.depth);
+                                             channel_info.depth,
+                                             channel_info.use_vulkan);
 }
 }} // namespace caspar::ffmpeg
