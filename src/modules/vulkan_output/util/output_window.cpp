@@ -112,7 +112,13 @@ static void register_window_class()
         wc.hCursor       = nullptr; // No cursor
         wc.hbrBackground = static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
         wc.lpszClassName = kWindowClassName;
-        RegisterClassExW(&wc);
+        // std::call_once means this runs exactly once per process, so a failure
+        // here isn't transient -- every later CreateWindowExW in this process
+        // would otherwise fail with the unhelpful ERROR_CLASS_DOES_NOT_EXIST and
+        // no indication why.
+        if (!RegisterClassExW(&wc)) {
+            CASPAR_LOG(error) << L"[vulkan_output] RegisterClassExW failed, error=" << GetLastError();
+        }
     });
 }
 
