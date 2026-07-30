@@ -87,6 +87,7 @@ struct pipeline::impl
 
     vk::Sampler                    textureSampler_;
     vk::Sampler                    keySampler_;
+    vk::Sampler                    hueCurveSampler_;
     vk::DescriptorSetLayout        descriptorSetLayout_;
     vk::DescriptorPool             descriptorPool_;
     std::vector<vk::DescriptorSet> descriptorSets_;
@@ -205,12 +206,25 @@ struct pipeline::impl
     {
         vk::SamplerCreateInfo samplerInfo{};
 
-        samplerInfo.magFilter               = vk::Filter::eLinear;
-        samplerInfo.minFilter               = vk::Filter::eLinear;
-        samplerInfo.mipmapMode              = vk::SamplerMipmapMode::eLinear;
-        samplerInfo.addressModeU            = vk::SamplerAddressMode::eRepeat;
-        samplerInfo.addressModeV            = vk::SamplerAddressMode::eRepeat;
-        samplerInfo.addressModeW            = vk::SamplerAddressMode::eRepeat;
+        samplerInfo.magFilter  = vk::Filter::eLinear;
+        samplerInfo.minFilter  = vk::Filter::eLinear;
+        samplerInfo.mipmapMode = vk::SamplerMipmapMode::eLinear;
+        // Clamp, matching the OpenGL backend, where every texture is created
+        // with GL_CLAMP_TO_EDGE (ogl/util/texture.cpp) and only the hue curve
+        // departs from it.
+        //
+        // This was eRepeat on all three axes, which meant a bilinear tap at any
+        // texture boundary pulled in the opposite edge instead of holding the
+        // last texel. The interiors matched exactly, so it only showed at the
+        // frame's outermost pixel column -- 0.1 % of the picture, and invisible
+        // in a PSNR figure, but it is the column that has to line up when a
+        // channel drives one segment of a video wall. borderColor below was
+        // already set to opaque black, which only has meaning under
+        // eClampToBorder: clamping was intended here and the address mode was
+        // never brought into line with it.
+        samplerInfo.addressModeU            = vk::SamplerAddressMode::eClampToEdge;
+        samplerInfo.addressModeV            = vk::SamplerAddressMode::eClampToEdge;
+        samplerInfo.addressModeW            = vk::SamplerAddressMode::eClampToEdge;
         samplerInfo.mipLodBias              = 0.0f;
         samplerInfo.anisotropyEnable        = VK_FALSE;
         samplerInfo.maxAnisotropy           = 2;
@@ -227,6 +241,20 @@ struct pipeline::impl
         samplerInfo.minFilter  = vk::Filter::eNearest;
         samplerInfo.mipmapMode = vk::SamplerMipmapMode::eNearest;
         keySampler_            = device_.createSampler(samplerInfo);
+
+        // The hue curve is the one texture that must wrap, and only across S:
+        // it is indexed by hue, so the far end of the curve is adjacent to the
+        // near end and a red-region adjustment has to carry across the seam.
+        // OpenGL sets exactly this -- GL_REPEAT on S, GL_CLAMP_TO_EDGE on T
+        // (ogl/image/image_kernel.cpp). Sharing one repeating sampler with
+        // everything else got this right by accident and everything else wrong.
+        samplerInfo.magFilter    = vk::Filter::eLinear;
+        samplerInfo.minFilter    = vk::Filter::eLinear;
+        samplerInfo.mipmapMode   = vk::SamplerMipmapMode::eLinear;
+        samplerInfo.addressModeU = vk::SamplerAddressMode::eRepeat;
+        samplerInfo.addressModeV = vk::SamplerAddressMode::eClampToEdge;
+        samplerInfo.addressModeW = vk::SamplerAddressMode::eClampToEdge;
+        hueCurveSampler_         = device_.createSampler(samplerInfo);
     }
 
   public:
@@ -453,7 +481,8 @@ struct pipeline::impl
         // Binding 4: hue curve (if present)
         vk::DescriptorImageInfo hueCurveInfo{};
         if (textures[8]) {
-            hueCurveInfo.sampler     = textureSampler_;
+            // Wraps across S -- the only texture here that should. See setup_sampler.
+            hueCurveInfo.sampler     = hueCurveSampler_;
             hueCurveInfo.imageView   = textures[8];
             hueCurveInfo.imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal;
 
@@ -533,6 +562,7 @@ struct pipeline::impl
         device_.destroyDescriptorSetLayout(descriptorSetLayout_);
         device_.destroySampler(textureSampler_);
         device_.destroySampler(keySampler_);
+        device_.destroySampler(hueCurveSampler_);
 
         device_.destroyPipeline(pipeline_);
         device_.destroyPipelineLayout(pipelineLayout_);
