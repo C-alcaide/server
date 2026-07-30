@@ -620,6 +620,22 @@ class present_swapchain
         device_.destroySwapchainKHR(swapchain_);
         swapchain_ = nullptr;
 
+        // vkAcquireNextImageKHR signals image_available even on VK_SUBOPTIMAL_KHR
+        // (a success code -- the image was acquired), and this class treats
+        // suboptimal the same as OUT_OF_DATE: it calls recreate() and returns
+        // without ever submitting the work that would wait on that semaphore.
+        // Recreating the swapchain alone leaves that already-signaled binary
+        // semaphore in place; the next acquire on the same frame-in-flight slot
+        // would signal it a second time with nothing having consumed the first
+        // signal, which is invalid. Recreate every frame's sync objects here so
+        // each starts unsignaled/reset, matching a fresh present_swapchain.
+        for (auto& f : frames_) {
+            device_.destroySemaphore(f.image_available);
+            device_.destroySemaphore(f.render_finished);
+            device_.destroyFence(f.in_flight);
+        }
+        create_sync_objects();
+
         // Recreate
         create_swapchain(desired_images);
         current_frame_idx_ = 0;
@@ -633,6 +649,9 @@ class present_swapchain
     {
         auto caps = physical_.getSurfaceCapabilitiesKHR(surface_);
         auto formats = physical_.getSurfaceFormatsKHR(surface_);
+        if (formats.empty())
+            CASPAR_THROW_EXCEPTION(caspar_exception()
+                << msg_info("vulkan_output: surface reports no supported formats"));
 
         // Use preferred format if it was explicitly set and is available
         vk::SurfaceFormatKHR chosen{};
@@ -696,15 +715,27 @@ class present_swapchain
         }
 #endif
 
-        swapchain_ = device_.createSwapchainKHR(ci);
-
 #ifdef _WIN32
-        if (!swapchain_ && fse_chained) {
-            // FSE chain failed — retry without it
-            CASPAR_LOG(warning) << L"[vulkan_output] Swapchain creation with FSE failed. Retrying without.";
-            ci.pNext = nullptr;
+        if (fse_chained) {
+            // vulkan.hpp's createSwapchainKHR() throws vk::SystemError on failure
+            // rather than returning a null handle (no VULKAN_HPP_NO_EXCEPTIONS in
+            // this tree), so a real FSE-related driver rejection -- documented to
+            // happen on some NVIDIA drivers -- threw out of create_swapchain()
+            // uncaught instead of falling back to non-FSE, failing the consumer's
+            // startup entirely. Catch it and retry without the FSE chain.
+            try {
+                swapchain_ = device_.createSwapchainKHR(ci);
+            } catch (const vk::SystemError& e) {
+                CASPAR_LOG(warning) << L"[vulkan_output] Swapchain creation with FSE failed (" << e.what()
+                                    << L"). Retrying without.";
+                ci.pNext   = nullptr;
+                swapchain_ = device_.createSwapchainKHR(ci);
+            }
+        } else {
             swapchain_ = device_.createSwapchainKHR(ci);
         }
+#else
+        swapchain_ = device_.createSwapchainKHR(ci);
 #endif
         images_    = device_.getSwapchainImagesKHR(swapchain_);
 
