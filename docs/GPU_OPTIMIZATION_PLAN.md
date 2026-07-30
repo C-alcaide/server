@@ -4,6 +4,12 @@
 > strategy across all custom modules. Covers pitfalls, production risks, and
 > quality concerns that may not surface immediately during testing.
 
+> **Looking for how to *use* any of this?** See
+> [PIPELINE_EFFICIENCY_GUIDE.md](PIPELINE_EFFICIENCY_GUIDE.md) — which paths
+> exist, how to stay on them, what limits a channel, and how to diagnose one that
+> is late. This document is the reasoning, the measurements and the ideas that
+> were rejected; that one is the operating instructions.
+
 **Status**: Phases 1–7 implemented. Phase 5 (GPU-direct decode) was found never to have
 executed and has been rewritten — it is now byte-exact against the CPU path. Phases 6–7
 (native semi-planar upload; GPU planes carried separately on `const_frame`) are new.
