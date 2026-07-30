@@ -230,22 +230,19 @@ on the Vulkan mixer this variant alone falls back to **decoding on the CPU** —
 you keep the small file and lose the point of the codec. On OpenGL it stays on
 the GPU. If you are on Vulkan and need alpha, prefer Hap Alpha or Hap R.
 
-**Backend parity: the two mixers decode Hap identically.** Every variant measures
-41.8–42.1 dB between OpenGL and Vulkan, and a lossless still with no Hap in it
-measures 42.02 dB — so Hap adds nothing to a difference that is already there.
+**Backend parity: byte-identical.** OpenGL and Vulkan produce the same bytes for
+Hap DXT1, Hap Alpha and Hap R, for a plain still, and for scaled and rotated
+layers. Hap Q measures 54.3 dB, which is the YCoCg transform written once in
+each backend agreeing to about half a level — two implementations rounding
+differently, not an error.
 
-Do not read that dB figure as a picture quality difference. Taken apart, 99.90 %
-of the frame is **bit-identical** between the backends, the whole interior is
-exactly zero, and every differing sample is in the outermost one-pixel column at
-the left and right edges. Upscaling makes those pixels sample past the source
-edge, and the backends resolve it differently — OpenGL replicates the edge texel,
-Vulkan blends toward its neighbour. PSNR spreads that one line over two million
-pixels and reports ~2 levels RMS, which is not a thing you can see anywhere in
-the image.
-
-It does matter in one case: if a channel feeds one segment of a **video wall**,
-that outermost column is exactly what has to line up with the next segment, and
-it differs by backend. Keep a wall on one accelerator.
+> This was 42.02 dB until 2026-07-30, on Hap and on everything else. The Vulkan
+> sampler was set to repeat where OpenGL clamps to edge, so a bilinear tap at a
+> texture boundary pulled in the opposite edge. It only ever showed on the
+> outermost pixel column — 0.1 % of the frame, invisible in the dB figure that
+> averaged it over two million pixels, and exactly the column that has to line
+> up when a channel drives one segment of a **video wall**. If you run walls on
+> a build from before that date, keep the whole wall on one accelerator.
 
 > Three defects were fixed on 2026-07-30. Builds from before it should not run
 > Hap.
@@ -465,6 +462,12 @@ this work:
   that makes the path kernel-free. Ask for `-pix_fmt p010le` and you get 10-bit
   via the host path.
 - GPU-direct **decode** is OpenGL-only and progressive-only.
+- **The two backends disagree on hue curves.** `MIXER HUECURVE` measures 4.0 dB
+  between OpenGL and Vulkan on a shift across the hue seam and 18.3 dB on a
+  saturation curve — a large, visible difference, unlike everything else in the
+  mixer, which is byte-identical. Not sampling: it reproduces with the sampler
+  fix reverted. The two implementations of the curve itself differ. Grade on the
+  accelerator you will play out on until this is chased down.
 - **Hap Q Alpha decodes on the CPU under the Vulkan mixer.** It needs two
   textures per frame and the zero-copy path takes one, so that variant alone
   gives up the codec's whole advantage there. Every other variant stays on the
