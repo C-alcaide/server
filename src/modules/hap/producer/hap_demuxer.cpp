@@ -147,10 +147,33 @@ struct HapDemuxer::impl
         if (avformat_find_stream_info(fmt_ctx, nullptr) < 0)
             throw std::runtime_error("[hap_demuxer] avformat_find_stream_info failed");
 
+        // FFmpeg maps Hap1, Hap5, HapY and HapM to AV_CODEC_ID_HAP, but it has no
+        // decoder for Hap R and no entry for Hap7, so such a stream arrives with
+        // no codec id at all. Demuxing does not need a decoder -- this producer
+        // only ever wants the compressed payload, and hap_frame_parser handles
+        // BC7 -- so accept the four-character code directly as well. Without
+        // this, a Hap R file is rejected here and the BC7 support downstream
+        // (the parser, both texture formats, both mixer paths) is unreachable.
+        auto is_hap_fourcc = [](uint32_t tag) {
+            switch (tag) {
+            case MKTAG('H', 'a', 'p', '1'):   // Hap, RGB DXT1
+            case MKTAG('H', 'a', 'p', '5'):   // Hap Alpha, RGBA DXT5
+            case MKTAG('H', 'a', 'p', 'Y'):   // Hap Q, scaled YCoCg DXT5
+            case MKTAG('H', 'a', 'p', 'M'):   // Hap Q Alpha, YCoCg DXT5 + BC4
+            case MKTAG('H', 'a', 'p', 'A'):   // Hap Alpha-only, BC4
+            case MKTAG('H', 'a', 'p', '7'):   // Hap R, RGBA BC7
+                return true;
+            default:
+                return false;
+            }
+        };
+
         for (unsigned i = 0; i < fmt_ctx->nb_streams; ++i) {
             AVStream* st = fmt_ctx->streams[i];
             if (st->codecpar->codec_type != AVMEDIA_TYPE_VIDEO) continue;
-            if (st->codecpar->codec_id   != AV_CODEC_ID_HAP) continue;
+            if (st->codecpar->codec_id != AV_CODEC_ID_HAP &&
+                !is_hap_fourcc(st->codecpar->codec_tag))
+                continue;
             video_idx = (int)i;
             AVRational fr = st->avg_frame_rate;
             if (fr.den > 0 && fr.num > 0) { num_den[0] = fr.num; num_den[1] = fr.den; }

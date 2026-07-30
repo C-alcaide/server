@@ -37,6 +37,7 @@
 #include "hap_cpu_decode.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 
 namespace caspar { namespace hap {
@@ -64,9 +65,14 @@ static void convert_ycocg_to_bgra(uint8_t* pixels, int count)
         co /= scale;
         cg /= scale;
 
-        int r = static_cast<int>(y + co - cg);
-        int g = static_cast<int>(y + cg);
-        int b = static_cast<int>(y - co - cg);
+        // Round rather than truncate. The GL shader that decodes the same data
+        // on the other path ends in a normalised framebuffer write, which rounds
+        // to nearest; a cast to int truncates, so every channel came out biased
+        // half a level low and the two backends disagreed by ~6 dB on the same
+        // file for no reason other than this.
+        int r = static_cast<int>(std::lround(y + co - cg));
+        int g = static_cast<int>(std::lround(y + cg));
+        int b = static_cast<int>(std::lround(y - co - cg));
 
         // BGRA output
         pixels[i * 4 + 0] = static_cast<uint8_t>(std::clamp(b, 0, 255));
@@ -88,9 +94,10 @@ static void convert_ycocg_alpha_to_bgra(uint8_t* pixels, const uint8_t* alpha_pi
         co /= scale;
         cg /= scale;
 
-        int r = static_cast<int>(y + co - cg);
-        int g = static_cast<int>(y + cg);
-        int b = static_cast<int>(y - co - cg);
+        // Rounded, to match the shader -- see convert_ycocg_to_bgra.
+        int r = static_cast<int>(std::lround(y + co - cg));
+        int g = static_cast<int>(std::lround(y + cg));
+        int b = static_cast<int>(std::lround(y - co - cg));
 
         // BGRA output with external alpha
         pixels[i * 4 + 0] = static_cast<uint8_t>(std::clamp(b, 0, 255));
@@ -109,15 +116,37 @@ bool cpu_decode_hap_to_bgra(HapVariant             variant,
                             int                    height,
                             std::vector<uint8_t>&  out_pixels)
 {
-    if (width <= 0 || height <= 0 || (width & 3) || (height & 3))
+    if (width <= 0 || height <= 0)
         return false;
 
-    const int blocks_w   = width / 4;
-    const int blocks_h   = height / 4;
-    const int pixel_count = width * height;
-    const int dst_pitch  = width * 4; // bytes per row in output
+    // Block-compressed textures cover a whole 4x4 grid, so a Hap file whose
+    // dimensions are not multiples of four carries padding on the right and
+    // bottom edges -- 973x734 is stored as 244x184 blocks, or 976x736 pixels.
+    // This used to reject those outright, which took out every odd-sized clip on
+    // the CPU path, and with it Hap Q Alpha on the Vulkan mixer, since the
+    // two-texture variant has no zero-copy route and falls back to here.
+    //
+    // Decode the full block grid into scratch and copy the visible region out.
+    // When the dimensions are already aligned nothing is padded and the decode
+    // writes straight into the destination, as before.
+    const int blocks_w    = (width  + 3) / 4;
+    const int blocks_h    = (height + 3) / 4;
+    const int padded_w    = blocks_w * 4;
+    const int padded_h    = blocks_h * 4;
+    const bool is_padded  = (padded_w != width) || (padded_h != height);
 
-    out_pixels.resize(pixel_count * 4);
+    const int pixel_count = padded_w * padded_h;   // what the decoders fill
+    const int dst_pitch   = padded_w * 4;
+
+    out_pixels.resize(static_cast<size_t>(width) * height * 4);
+
+    std::vector<uint8_t> scratch;
+    if (is_padded)
+        scratch.resize(static_cast<size_t>(pixel_count) * 4);
+
+    // Everything below writes through this; `out_pixels` is the same buffer when
+    // no padding is involved.
+    std::vector<uint8_t>& decode_target = is_padded ? scratch : out_pixels;
 
     switch (variant) {
         case HapVariant::Hap: {
@@ -128,12 +157,12 @@ bool cpu_decode_hap_to_bgra(HapVariant             variant,
             const uint8_t* src = texture_data;
             for (int by = 0; by < blocks_h; ++by) {
                 for (int bx = 0; bx < blocks_w; ++bx) {
-                    uint8_t* dst = out_pixels.data() + (by * 4) * dst_pitch + (bx * 4) * 4;
+                    uint8_t* dst = decode_target.data() + (by * 4) * dst_pitch + (bx * 4) * 4;
                     bcdec_bc1(src, dst, dst_pitch);
                     src += BCDEC_BC1_BLOCK_SIZE;
                 }
             }
-            swizzle_rgba_to_bgra(out_pixels.data(), pixel_count);
+            swizzle_rgba_to_bgra(decode_target.data(), pixel_count);
             break;
         }
 
@@ -145,12 +174,12 @@ bool cpu_decode_hap_to_bgra(HapVariant             variant,
             const uint8_t* src = texture_data;
             for (int by = 0; by < blocks_h; ++by) {
                 for (int bx = 0; bx < blocks_w; ++bx) {
-                    uint8_t* dst = out_pixels.data() + (by * 4) * dst_pitch + (bx * 4) * 4;
+                    uint8_t* dst = decode_target.data() + (by * 4) * dst_pitch + (bx * 4) * 4;
                     bcdec_bc3(src, dst, dst_pitch);
                     src += BCDEC_BC3_BLOCK_SIZE;
                 }
             }
-            swizzle_rgba_to_bgra(out_pixels.data(), pixel_count);
+            swizzle_rgba_to_bgra(decode_target.data(), pixel_count);
             break;
         }
 
@@ -162,13 +191,13 @@ bool cpu_decode_hap_to_bgra(HapVariant             variant,
             const uint8_t* src = texture_data;
             for (int by = 0; by < blocks_h; ++by) {
                 for (int bx = 0; bx < blocks_w; ++bx) {
-                    uint8_t* dst = out_pixels.data() + (by * 4) * dst_pitch + (bx * 4) * 4;
+                    uint8_t* dst = decode_target.data() + (by * 4) * dst_pitch + (bx * 4) * 4;
                     bcdec_bc3(src, dst, dst_pitch);
                     src += BCDEC_BC3_BLOCK_SIZE;
                 }
             }
             // Raw decompressed: R=Co, G=Cg, B=scale, A=Y → convert to BGRA
-            convert_ycocg_to_bgra(out_pixels.data(), pixel_count);
+            convert_ycocg_to_bgra(decode_target.data(), pixel_count);
             break;
         }
 
@@ -183,7 +212,7 @@ bool cpu_decode_hap_to_bgra(HapVariant             variant,
             const uint8_t* src = texture_data;
             for (int by = 0; by < blocks_h; ++by) {
                 for (int bx = 0; bx < blocks_w; ++bx) {
-                    uint8_t* dst = out_pixels.data() + (by * 4) * dst_pitch + (bx * 4) * 4;
+                    uint8_t* dst = decode_target.data() + (by * 4) * dst_pitch + (bx * 4) * 4;
                     bcdec_bc3(src, dst, dst_pitch);
                     src += BCDEC_BC3_BLOCK_SIZE;
                 }
@@ -194,13 +223,16 @@ bool cpu_decode_hap_to_bgra(HapVariant             variant,
             const uint8_t* asrc = alpha_data;
             for (int by = 0; by < blocks_h; ++by) {
                 for (int bx = 0; bx < blocks_w; ++bx) {
-                    uint8_t* adst = alpha_buf.data() + (by * 4) * width + (bx * 4);
-                    bcdec_bc4(asrc, adst, width);
+                    // One byte per pixel, so the row stride is padded_w, not
+                    // padded_w * 4 -- and it must be the padded width to match
+                    // the block grid this walks.
+                    uint8_t* adst = alpha_buf.data() + (by * 4) * padded_w + (bx * 4);
+                    bcdec_bc4(asrc, adst, padded_w);
                     asrc += BCDEC_BC4_BLOCK_SIZE;
                 }
             }
 
-            convert_ycocg_alpha_to_bgra(out_pixels.data(), alpha_buf.data(), pixel_count);
+            convert_ycocg_alpha_to_bgra(decode_target.data(), alpha_buf.data(), pixel_count);
             break;
         }
 
@@ -212,17 +244,27 @@ bool cpu_decode_hap_to_bgra(HapVariant             variant,
             const uint8_t* src = texture_data;
             for (int by = 0; by < blocks_h; ++by) {
                 for (int bx = 0; bx < blocks_w; ++bx) {
-                    uint8_t* dst = out_pixels.data() + (by * 4) * dst_pitch + (bx * 4) * 4;
+                    uint8_t* dst = decode_target.data() + (by * 4) * dst_pitch + (bx * 4) * 4;
                     bcdec_bc7(src, dst, dst_pitch);
                     src += BCDEC_BC7_BLOCK_SIZE;
                 }
             }
-            swizzle_rgba_to_bgra(out_pixels.data(), pixel_count);
+            swizzle_rgba_to_bgra(decode_target.data(), pixel_count);
             break;
         }
 
         default:
             return false;
+    }
+
+    // Drop the block padding, keeping the visible region only.
+    if (is_padded) {
+        const size_t out_pitch = static_cast<size_t>(width) * 4;
+        for (int y = 0; y < height; ++y) {
+            std::memcpy(out_pixels.data() + static_cast<size_t>(y) * out_pitch,
+                        decode_target.data() + static_cast<size_t>(y) * dst_pitch,
+                        out_pitch);
+        }
     }
 
     return true;
