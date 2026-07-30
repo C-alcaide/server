@@ -309,6 +309,11 @@ void shared_texture_pool::create_slot(slot& s)
             break;
         }
     }
+    if (mem_type_index == UINT32_MAX) {
+        vkDestroyImage(dev, s.vk_image, nullptr);
+        CASPAR_THROW_EXCEPTION(caspar_exception()
+            << msg_info("shared_texture_pool: no device-local memory type supports this image"));
+    }
 
     VkMemoryAllocateInfo alloc_info{};
     alloc_info.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
