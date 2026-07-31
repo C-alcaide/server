@@ -1014,10 +1014,22 @@ class Decoder
                                         output.pop();
                                 }
                                 output_cond.notify_all();
+                                // Drop anything flush() cleared and a producer pushed back
+                                // in before flush_requested_ was observed; those packets
+                                // pre-date the seek.
+                                while (!input.empty())
+                                    input.pop();
                                 avcodec_flush_buffers(ctx.get());
-                                next_pts         = AV_NOPTS_VALUE;
-                                eof              = false;
-                                flush_requested_ = false;
+                                next_pts = AV_NOPTS_VALUE;
+                                eof      = false;
+                                // Clear the flag and notify under flush_mutex_. Doing it
+                                // without that lock let the notify slip between flush()'s
+                                // predicate check and its wait, and the lost wakeup then
+                                // cost the seek the full 500 ms timeout.
+                                {
+                                    boost::lock_guard<boost::mutex> flush_lock(flush_mutex_);
+                                    flush_requested_ = false;
+                                }
                                 flush_done_cond_.notify_all();
                                 continue;
                             }
