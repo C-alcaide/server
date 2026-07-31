@@ -610,8 +610,20 @@ struct ogl_gl_strategy::impl
             }
         }
         if (ssbo_sz_ < out_sz) {
-            if (ssbo_)
+            if (ssbo_) {
+#ifdef DECKLINK_CUDA_DVP_ENABLED
+                // DVP still holds a registration for this buffer object. It has to
+                // be released *before* the GL object goes away: dvp_prepare() only
+                // notices the id changed on the next frame, by which point
+                // dvpFreeBuffer() would be operating on a deleted buffer.
+                if (dvp_gpu_buf_ && dvp_gpu_ssbo_ == ssbo_) {
+                    dvpFreeBuffer(dvp_gpu_buf_);
+                    dvp_gpu_buf_  = 0;
+                    dvp_gpu_ssbo_ = 0;
+                }
+#endif
                 glDeleteBuffers(1, &ssbo_);
+            }
             glGenBuffers(1, &ssbo_);
             glBindBuffer(GL_SHADER_STORAGE_BUFFER, ssbo_);
             glBufferData(GL_SHADER_STORAGE_BUFFER, out_sz, nullptr, GL_STREAM_READ);
