@@ -322,7 +322,6 @@ struct RecvWallHandle
 	struct SyncedWall { std::vector<uint8_t> px; sync::SyncMeta meta; uint64_t sendTimeNs = 0; int bpp = 4; };
 	std::mutex syncMtx; std::condition_variable syncCv;   // reorder + presenter wakeup
 	std::map<uint64_t, SyncedWall> reorder;               // key = SEI globalFrameIndex
-	std::vector<std::vector<uint8_t>> wallPool;           // recycled wall buffers
 	uint64_t myLastComplete = SEI_NONE, myBits = 0;       // mirror of my slot
 	uint64_t lastPublishedSei = SEI_NONE;
 	uint64_t lastBeatTick = 0;                            // rx heartbeat throttle
@@ -702,7 +701,6 @@ void RecvWallHandle::enqueueSynced(std::vector<uint8_t>&& wall, const sync::Sync
 		// (or a test stream looped). Old-epoch frames are unreachable now.
 		if (myLastComplete != SEI_NONE && S + 64 < myLastComplete) {
 			epochReset = true;
-			for (auto& kv : reorder) wallPool.push_back(std::move(kv.second.px));
 			reorder.clear();
 			lastPublishedSei = SEI_NONE;
 			myBits = 0; myLastComplete = SEI_NONE;
@@ -717,10 +715,8 @@ void RecvWallHandle::enqueueSynced(std::vector<uint8_t>&& wall, const sync::Sync
 		}
 		SyncedWall sw; sw.px = std::move(wall); sw.meta = m; sw.sendTimeNs = sendTimeNs; sw.bpp = bpp;
 		reorder[S] = std::move(sw);
-		while ((int)reorder.size() > syncDepth) {
-			wallPool.push_back(std::move(reorder.begin()->second.px));
+		while ((int)reorder.size() > syncDepth)
 			reorder.erase(reorder.begin());
-		}
 	}
 	if (board.lock()) {
 		SyncSlot& s = board.bd->slots[board.mySlot];
@@ -795,10 +791,8 @@ void RecvWallHandle::presenterLoop()
 					ps = it->second.sendTimeNs; pubBpp = it->second.bpp; doPub = true;
 				} else bufferMisses.fetch_add(1);     // evicted: depth < member skew
 				lastPublishedSei = H;                 // advance regardless: never stick
-				for (auto it2 = reorder.begin(); it2 != reorder.end() && it2->first <= H; ) {
-					wallPool.push_back(std::move(it2->second.px));
+				for (auto it2 = reorder.begin(); it2 != reorder.end() && it2->first <= H; )
 					it2 = reorder.erase(it2);
-				}
 				holdSinceTick.store(0);
 			} else if (newDecoded) {                  // frames waiting, no consensus
 				uint64_t exp = 0;
