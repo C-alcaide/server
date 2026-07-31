@@ -118,7 +118,6 @@ This means the channel can be 720p50 while recording a 1080i50 input — the MOV
 |---|---|
 | `consumer/prores_bypass_consumer.cu` | Main compiled bypass consumer (registered as `CUDA_PRORES_BYPASS`) |
 | `consumer/prores_consumer.cu` | GPU-mixer-path consumer (compiled; separate registration) |
-| `consumer/prores_consumer.cpp` | **Not compiled** (not in CMakeLists) — reference only |
 | `input/decklink_capture.h/.cpp` | DeckLink capture front-end: SDI → VRAM ring, format detection, pinned pool |
 | `input/cuda_pinned_allocator.h/.cpp` | Auto-growing CUDA pinned host memory pool (IDeckLinkMemoryAllocator) |
 | `cuda/cuda_prores_frame.h/.cu` | `ProResFrameCtx` struct; encoder API; progressive + interlaced encode paths |

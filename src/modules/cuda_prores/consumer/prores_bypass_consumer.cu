@@ -141,9 +141,8 @@ struct BypassJob {
 };
 
 // ---------------------------------------------------------------------------
-// Buffer management (shared with prores_consumer.cpp via copy-paste to avoid
-// header coupling — both consumers live in the same module, same translation
-// unit is fine).
+// Buffer management (duplicated from prores_consumer.cu rather than shared, to
+// avoid header coupling — both consumers live in the same module).
 // ---------------------------------------------------------------------------
 static void alloc_bypass_ctx(ProResFrameCtx &ctx,
                               int width, int height, int profile,

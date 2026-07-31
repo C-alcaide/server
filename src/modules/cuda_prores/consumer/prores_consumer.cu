@@ -20,7 +20,7 @@
  * ProRes format reference: Apple Inc. "ProRes RAW White Paper" (public documentation).
  */
 
-// prores_consumer.cpp
+// prores_consumer.cu
 // CasparCG frame_consumer implementation for the CUDA ProRes recording pipeline.
 //
 // Frame flow
