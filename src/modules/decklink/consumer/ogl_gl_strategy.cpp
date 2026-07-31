@@ -414,7 +414,27 @@ struct ogl_gl_strategy::impl
         d.externalClientWaitFunc = nullptr;
         d.sem                    = const_cast<std::uint32_t*>(s.sem);
         d.flags                  = 0;
-        return dvpImportSyncObject(&d, &s.handle) == DVP_STATUS_OK;
+        if (dvpImportSyncObject(&d, &s.handle) != DVP_STATUS_OK) {
+            // The semaphore was ours until the import took it; on failure it is
+            // still ours to free.
+            _aligned_free(const_cast<std::uint32_t*>(s.sem));
+            s.sem    = nullptr;
+            s.handle = 0;
+            return false;
+        }
+        return true;
+    }
+
+    void dvp_free_sync(dvp_sync& s)
+    {
+        if (s.handle) {
+            dvpFreeSyncObject(s.handle);
+            s.handle = 0;
+        }
+        if (s.sem) {
+            _aligned_free(const_cast<std::uint32_t*>(s.sem));
+            s.sem = nullptr;
+        }
     }
 
     bool dvp_init_ctx()
@@ -424,6 +444,16 @@ struct ogl_gl_strategy::impl
         dvp_ctx_held_ = true;
         if (dvp_init_sync(dvp_ext_sync_) && dvp_init_sync(dvp_gpu_sync_))
             return true;
+
+        // Partial construction: dvp_inited_ stays false, so dvp_teardown() will
+        // early-return and never clean any of this up. Unwind here instead --
+        // otherwise the first sync object, its semaphore, and (worse) the
+        // process-wide dvp_gl_ctx refcount leak, so dvpCloseGLContext() is never
+        // called for the lifetime of the process.
+        dvp_free_sync(dvp_ext_sync_);
+        dvp_free_sync(dvp_gpu_sync_);
+        dvp_ctx_release();
+        dvp_ctx_held_ = false;
         return false;
     }
 
@@ -539,16 +569,13 @@ struct ogl_gl_strategy::impl
             dvpDestroyBuffer(kv.second);
         }
         dvp_sysmem_.clear();
-        if (dvp_gpu_buf_)
+        if (dvp_gpu_buf_) {
             dvpFreeBuffer(dvp_gpu_buf_);
-        if (dvp_ext_sync_.handle)
-            dvpFreeSyncObject(dvp_ext_sync_.handle);
-        if (dvp_gpu_sync_.handle)
-            dvpFreeSyncObject(dvp_gpu_sync_.handle);
-        if (dvp_ext_sync_.sem)
-            _aligned_free(const_cast<std::uint32_t*>(dvp_ext_sync_.sem));
-        if (dvp_gpu_sync_.sem)
-            _aligned_free(const_cast<std::uint32_t*>(dvp_gpu_sync_.sem));
+            dvp_gpu_buf_  = 0;
+            dvp_gpu_ssbo_ = 0;
+        }
+        dvp_free_sync(dvp_ext_sync_);
+        dvp_free_sync(dvp_gpu_sync_);
         if (dvp_ctx_held_) {
             dvp_ctx_release();
             dvp_ctx_held_ = false;
