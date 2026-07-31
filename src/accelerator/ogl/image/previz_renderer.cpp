@@ -48,6 +48,8 @@
 
 #include <cmath>
 #include <algorithm>
+#include <cstring>
+#include <limits>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -142,6 +144,79 @@ struct mat4
 
 // ---- glTF loader -----------------------------------------------------------
 
+// A validated window onto one glTF accessor's data.
+struct gltf_view
+{
+    const uint8_t* raw    = nullptr;
+    std::size_t    stride = 0;
+    std::size_t    count  = 0;
+};
+
+// Accessor indices, bufferView indices, buffer indices and byte offsets all come
+// straight from the file, so each one has to be range-checked before it reaches
+// pointer arithmetic -- a truncated or crafted model otherwise reads outside the
+// buffer. `bufferView` in particular defaults to -1 for an accessor that has
+// none (legal glTF, e.g. a sparse accessor), which indexes backwards. This is the
+// same bounds discipline load_obj_scene() below already applies.
+//
+// `min_elem_size` is the number of bytes the caller reads per element.
+// `tightly_packed` is for index accessors, which glTF forbids byteStride on.
+bool resolve_gltf_accessor(const tinygltf::Model& model,
+                           int                    acc_index,
+                           std::size_t            min_elem_size,
+                           bool                   tightly_packed,
+                           gltf_view&             out)
+{
+    if (acc_index < 0 || static_cast<std::size_t>(acc_index) >= model.accessors.size())
+        return false;
+    const auto& acc = model.accessors[acc_index];
+
+    if (acc.bufferView < 0 || static_cast<std::size_t>(acc.bufferView) >= model.bufferViews.size())
+        return false;
+    const auto& bv = model.bufferViews[acc.bufferView];
+
+    if (bv.buffer < 0 || static_cast<std::size_t>(bv.buffer) >= model.buffers.size())
+        return false;
+    const auto& data = model.buffers[bv.buffer].data;
+
+    const auto comp  = tinygltf::GetComponentSizeInBytes(static_cast<uint32_t>(acc.componentType));
+    const auto ncomp = tinygltf::GetNumComponentsInType(static_cast<uint32_t>(acc.type));
+    if (comp <= 0 || ncomp <= 0 || acc.count == 0)
+        return false;
+    const std::size_t elem = static_cast<std::size_t>(comp) * static_cast<std::size_t>(ncomp);
+    if (elem < min_elem_size)
+        return false;
+
+    std::size_t stride = elem;
+    if (!tightly_packed && bv.byteStride > 0)
+        stride = bv.byteStride;
+    if (stride < elem)
+        return false;
+
+    // begin + (count - 1) * stride + elem must fit in the buffer, computed so
+    // that neither the offset sum nor the extent can wrap.
+    const std::size_t begin = bv.byteOffset + acc.byteOffset;
+    if (begin < bv.byteOffset || begin > data.size())
+        return false;
+    const std::size_t avail = data.size() - begin;
+    if (avail < elem || (avail - elem) / stride < acc.count - 1)
+        return false;
+
+    // The accessor also has to stay inside its own buffer view.
+    if (bv.byteLength > 0) {
+        if (acc.byteOffset > bv.byteLength)
+            return false;
+        const std::size_t bv_avail = bv.byteLength - acc.byteOffset;
+        if (bv_avail < elem || (bv_avail - elem) / stride < acc.count - 1)
+            return false;
+    }
+
+    out.raw    = data.data() + begin;
+    out.stride = stride;
+    out.count  = acc.count;
+    return true;
+}
+
 void load_gltf_scene(const std::string& path, previz_scene& scene)
 {
     tinygltf::Model    model;
@@ -170,47 +245,43 @@ void load_gltf_scene(const std::string& path, previz_scene& scene)
             if (pos_it == prim.attributes.end())
                 continue;
 
-            const auto& pos_acc = model.accessors[pos_it->second];
-            const auto& pos_bv  = model.bufferViews[pos_acc.bufferView];
-            const auto* pos_raw = &model.buffers[pos_bv.buffer].data[pos_bv.byteOffset + pos_acc.byteOffset];
-            int pos_stride = pos_bv.byteStride > 0 ? static_cast<int>(pos_bv.byteStride) : 12;
+            gltf_view pos_v;
+            if (!resolve_gltf_accessor(model, pos_it->second, 3 * sizeof(float), false, pos_v)) {
+                CASPAR_LOG(warning) << L"[previz] glTF: primitive skipped, POSITION accessor out of range.";
+                continue;
+            }
 
             // Normals
-            const uint8_t* nrm_raw    = nullptr;
-            int            nrm_stride = 12;
-            auto           nrm_it     = prim.attributes.find("NORMAL");
-            if (nrm_it != prim.attributes.end()) {
-                const auto& nrm_acc = model.accessors[nrm_it->second];
-                const auto& nrm_bv  = model.bufferViews[nrm_acc.bufferView];
-                nrm_raw    = &model.buffers[nrm_bv.buffer].data[nrm_bv.byteOffset + nrm_acc.byteOffset];
-                nrm_stride = nrm_bv.byteStride > 0 ? static_cast<int>(nrm_bv.byteStride) : 12;
-            }
+            gltf_view  nrm_v;
+            auto       nrm_it   = prim.attributes.find("NORMAL");
+            const bool have_nrm = nrm_it != prim.attributes.end() &&
+                                  resolve_gltf_accessor(model, nrm_it->second, 3 * sizeof(float), false, nrm_v);
 
             // UVs
-            const uint8_t* uv_raw    = nullptr;
-            int            uv_stride = 8;
-            auto           uv_it     = prim.attributes.find("TEXCOORD_0");
-            if (uv_it != prim.attributes.end()) {
-                const auto& uv_acc = model.accessors[uv_it->second];
-                const auto& uv_bv  = model.bufferViews[uv_acc.bufferView];
-                uv_raw    = &model.buffers[uv_bv.buffer].data[uv_bv.byteOffset + uv_acc.byteOffset];
-                uv_stride = uv_bv.byteStride > 0 ? static_cast<int>(uv_bv.byteStride) : 8;
-            }
+            gltf_view  uv_v;
+            auto       uv_it   = prim.attributes.find("TEXCOORD_0");
+            const bool have_uv = uv_it != prim.attributes.end() &&
+                                 resolve_gltf_accessor(model, uv_it->second, 2 * sizeof(float), false, uv_v);
 
-            auto read_pos = [&](int i) -> std::array<float, 3> {
-                const float* p = reinterpret_cast<const float*>(pos_raw + i * pos_stride);
+            // Each attribute is bounded by its own count: an index validated against
+            // POSITION says nothing about a shorter NORMAL/TEXCOORD_0 accessor.
+            auto read_pos = [&](std::size_t i) -> std::array<float, 3> {
+                float p[3];
+                std::memcpy(p, pos_v.raw + i * pos_v.stride, sizeof(p));
                 return {p[0], p[1], p[2]};
             };
-            auto read_nrm = [&](int i) -> std::array<float, 3> {
-                if (!nrm_raw)
+            auto read_nrm = [&](std::size_t i) -> std::array<float, 3> {
+                if (!have_nrm || i >= nrm_v.count)
                     return {0.0f, 1.0f, 0.0f};
-                const float* p = reinterpret_cast<const float*>(nrm_raw + i * nrm_stride);
+                float p[3];
+                std::memcpy(p, nrm_v.raw + i * nrm_v.stride, sizeof(p));
                 return {p[0], p[1], p[2]};
             };
-            auto read_uv = [&](int i) -> std::array<float, 2> {
-                if (!uv_raw)
+            auto read_uv = [&](std::size_t i) -> std::array<float, 2> {
+                if (!have_uv || i >= uv_v.count)
                     return {0.0f, 0.0f};
-                const float* p = reinterpret_cast<const float*>(uv_raw + i * uv_stride);
+                float p[2];
+                std::memcpy(p, uv_v.raw + i * uv_v.stride, sizeof(p));
                 return {p[0], p[1]};
             };
 
@@ -229,39 +300,51 @@ void load_gltf_scene(const std::string& path, previz_scene& scene)
             }
 
             if (prim.indices >= 0) {
-                const auto& idx_acc = model.accessors[prim.indices];
-                const auto& idx_bv  = model.bufferViews[idx_acc.bufferView];
-                const auto* idx_raw = &model.buffers[idx_bv.buffer].data[idx_bv.byteOffset + idx_acc.byteOffset];
+                gltf_view idx_v;
+                if (!resolve_gltf_accessor(model, prim.indices, 1, /*tightly_packed=*/true, idx_v)) {
+                    CASPAR_LOG(warning) << L"[previz] glTF: primitive skipped, index accessor out of range.";
+                    continue;
+                }
+                const int comp_type = model.accessors[prim.indices].componentType;
 
-                auto get_index = [&](size_t i) -> int {
-                    switch (idx_acc.componentType) {
-                        case TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT:
-                            return static_cast<int>(reinterpret_cast<const uint16_t*>(idx_raw)[i]);
-                        case TINYGLTF_COMPONENT_TYPE_UNSIGNED_INT:
-                            return static_cast<int>(reinterpret_cast<const uint32_t*>(idx_raw)[i]);
+                auto get_index = [&](std::size_t i) -> long long {
+                    const uint8_t* p = idx_v.raw + i * idx_v.stride;
+                    switch (comp_type) {
+                        case TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT: {
+                            uint16_t v;
+                            std::memcpy(&v, p, sizeof(v));
+                            return static_cast<long long>(v);
+                        }
+                        case TINYGLTF_COMPONENT_TYPE_UNSIGNED_INT: {
+                            uint32_t v;
+                            std::memcpy(&v, p, sizeof(v));
+                            return static_cast<long long>(v);
+                        }
                         case TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE:
-                            return static_cast<int>(idx_raw[i]);
+                            return static_cast<long long>(*p);
                         default:
-                            return 0;
+                            return -1;
                     }
                 };
 
-                pm.vertices.reserve(idx_acc.count);
-                for (size_t i = 0; i < idx_acc.count; ++i) {
-                    int  idx      = get_index(i);
-                    if (idx < 0 || idx >= static_cast<int>(pos_acc.count))
+                // idx_v.count is now bounded by the real buffer size, so this
+                // reserve can no longer be driven to an absurd allocation.
+                pm.vertices.reserve(idx_v.count);
+                for (std::size_t i = 0; i < idx_v.count; ++i) {
+                    const long long idx = get_index(i);
+                    if (idx < 0 || static_cast<std::size_t>(idx) >= pos_v.count)
                         continue;
-                    auto [px, py, pz] = read_pos(idx);
-                    auto [nx, ny, nz] = read_nrm(idx);
-                    auto [tu, tv]     = read_uv(idx);
+                    auto [px, py, pz] = read_pos(static_cast<std::size_t>(idx));
+                    auto [nx, ny, nz] = read_nrm(static_cast<std::size_t>(idx));
+                    auto [tu, tv]     = read_uv(static_cast<std::size_t>(idx));
                     pm.vertices.push_back({px, py, pz, nx, ny, nz, tu, tv});
                 }
             } else {
-                pm.vertices.reserve(pos_acc.count);
-                for (size_t i = 0; i < pos_acc.count; ++i) {
-                    auto [px, py, pz] = read_pos(static_cast<int>(i));
-                    auto [nx, ny, nz] = read_nrm(static_cast<int>(i));
-                    auto [tu, tv]     = read_uv(static_cast<int>(i));
+                pm.vertices.reserve(pos_v.count);
+                for (std::size_t i = 0; i < pos_v.count; ++i) {
+                    auto [px, py, pz] = read_pos(i);
+                    auto [nx, ny, nz] = read_nrm(i);
+                    auto [tu, tv]     = read_uv(i);
                     pm.vertices.push_back({px, py, pz, nx, ny, nz, tu, tv});
                 }
             }
