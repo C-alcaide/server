@@ -282,6 +282,7 @@ struct RecvWallHandle
 	std::vector<CUdeviceptr> bufPool;
 	size_t compBytes = 0;
 	std::atomic<int> outBpp{4};   // composite bytes/pixel: 4 = RGBA8, 8 = RGBA16 (HDR)
+	std::atomic<unsigned long long> badTiles{0};   // tiles dropped for being outside the grid
 
 	// Latest-wins published wall (4 ch, top-down). The stride and row count are
 	// published with the pixels under latestMtx rather than recomputed by the
@@ -443,6 +444,15 @@ void RecvWallHandle::decodeWorkerCpu(uint16_t tile, TileQ* tq)
 			  // Geometry rejected (see configureLocked): expectedTiles is still 0, so the
 			  // composite below would run against a zero-sized wall. Drop the job.
 			  if (!haveGeo.load()) continue;
+			  // nv12ToWall clamps, so an out-of-grid tileId is not a memory-safety
+			  // problem here -- but it still inflates slot.size() toward expectedTiles
+			  // and can declare an incomplete wall complete. Drop it.
+			  if (m.tileId >= (unsigned)cols * (unsigned)rows) {
+			      if (badTiles.fetch_add(1) == 0)
+			          std::fprintf(stderr, "[recvwall] dropping tile %u: outside the %dx%d grid\n",
+			                       (unsigned)m.tileId, cols, rows);
+			      continue;
+			  }
 			  // Sender restart: its transport counter rebases to 0 and every new
 			  // wall would be rejected as stale by lastComplete. Large backward
 			  // jump => reset the aligner's live edge.
@@ -507,6 +517,17 @@ void RecvWallHandle::decodeWorkerGpu(uint16_t tile, TileQ* tq)
 			  configureLocked(m);
 			  // Geometry rejected (see configureLocked): nothing below can be sized. Drop it.
 			  if (!haveGeo.load()) continue;
+			  // tileId is an unvalidated uint16 from the wire and it is about to be
+			  // turned into a write offset into the composite. Unlike the CPU path --
+			  // where nv12ToWall clamps every row and column against dstW/dstH -- the
+			  // convert kernels below are handed a bare pointer, so an out-of-range
+			  // tile writes roiW*roiH pixels outside the allocation.
+			  if (m.tileId >= (unsigned)cols * (unsigned)rows) {
+			      if (badTiles.fetch_add(1) == 0)
+			          std::fprintf(stderr, "[recvwall] dropping tile %u: outside the %dx%d grid\n",
+			                       (unsigned)m.tileId, cols, rows);
+			      continue;
+			  }
 			  outBpp.store(bpp);
 			  // compBytes sizes every device composite (and every buffer in bufPool).
 			  // It used to be latched on the first frame only, while bpp is re-derived
