@@ -536,10 +536,17 @@ struct device::impl : public std::enable_shared_from_this<impl>
         _pipelines[1] = std::make_shared<pipeline>(_device, vk::Format::eR16G16B16A16Unorm, _memoryProperties);
 
         thread_ = std::thread([&] {
-            thread_id_ = std::this_thread::get_id();
             set_thread_name(L"Vulkan Device");
             io_context_.run();
         });
+        // Taken from the thread object on this thread rather than assigned from inside
+        // the lambda. That was an unsynchronised write read by dispatch_sync() and
+        // allocateCommandBuffers(), and it left a window after the thread started but
+        // before the lambda ran in which thread_id_ still held a default-constructed
+        // id -- so an early dispatch_sync() would post-and-wait instead of running
+        // inline, and the assertion in allocateCommandBuffers() could fire even when
+        // the caller really was the device thread.
+        thread_id_ = thread_.get_id();
         // Kept so busy_percent can be reported as real CPU time, not wall time.
         // On a server whose consumers are compressing video, the dispatch thread
         // spends part of every item descheduled, and a wall-clock measurement
@@ -679,9 +686,22 @@ struct device::impl : public std::enable_shared_from_this<impl>
 
     std::vector<vk::CommandBuffer> allocateCommandBuffers(uint32_t count)
     {
-        CASPAR_VERIFY(std::this_thread::get_id() == thread_id_);
-        return _device.allocateCommandBuffers(
-            vk::CommandBufferAllocateInfo(_command_pool, vk::CommandBufferLevel::ePrimary, count));
+        // _command_pool has to be externally synchronised (Vulkan requires it for
+        // vkAllocateCommandBuffers and every vkCmd* on buffers from it), and
+        // submitSingleTimeCommands() allocates from it on the device thread.
+        //
+        // This used to assert that the caller was already on that thread, and the
+        // assertion fired routinely: image_kernel's constructor calls this, and the
+        // kernel is a member of the mixer, so it is constructed on whichever thread
+        // builds the channel -- never the device thread. The assertion was reporting a
+        // genuine race with the transfer path, not a bad assumption.
+        //
+        // Dispatch to the device thread instead. dispatch_sync runs func() inline when
+        // already there, so the transfer path keeps its direct call.
+        return dispatch_sync([this, count] {
+            return _device.allocateCommandBuffers(
+                vk::CommandBufferAllocateInfo(_command_pool, vk::CommandBufferLevel::ePrimary, count));
+        });
     }
     void submit(const vk::SubmitInfo& submitInfo, vk::Fence fence) { _queue.submit(submitInfo, fence); }
 
