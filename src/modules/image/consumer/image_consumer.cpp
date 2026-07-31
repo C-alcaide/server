@@ -26,6 +26,7 @@
 #include <common/bit_depth.h>
 #include <common/env.h>
 #include <common/except.h>
+#include <common/filesystem.h>
 #include <common/future.h>
 #include <common/log.h>
 
@@ -34,9 +35,12 @@
 
 #include <boost/algorithm/string.hpp>
 #include <boost/date_time/posix_time/posix_time.hpp>
+#include <boost/filesystem/operations.hpp>
+#include <boost/filesystem/path.hpp>
 
 #include <algorithm>
 #include <fstream>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -64,6 +68,43 @@ extern "C" {
 #endif
 
 namespace caspar::image {
+
+// Resolve a client-supplied IMAGE filename to its output path, or nothing when it
+// escapes the media folder.
+//
+// The filename arrives from "ADD <channel> IMAGE <filename>" and the path used to
+// be built by concatenation with no containment check:
+//
+//     filename2 = u8(env::media_folder() + filename + L".png");
+//
+// so "ADD 1 IMAGE ../../evil" wrote outside the media folder. This is the same
+// defect bd14cab7a fixed for PRINT RAW -- which is the fork-added copy of this
+// consumer -- and unlike the recording consumers (ffmpeg, replay) this one always
+// prefixes the media folder and never honours an absolute path, so
+// media-folder-relative is unambiguously its contract.
+//
+// Subdirectories stay legal ("ADD 1 IMAGE sub/name"): only escaping is rejected.
+std::optional<boost::filesystem::path> resolve_image_output(const std::wstring& filename)
+{
+    boost::system::error_code ec;
+    const auto                base = boost::filesystem::canonical(env::media_folder(), ec);
+    if (ec)
+        return {};
+
+    // An empty filename means "timestamp it", which no client controls.
+    const std::wstring leaf =
+        filename.empty() ? boost::posix_time::to_iso_wstring(boost::posix_time::second_clock::local_time()) : filename;
+
+    // weakly_canonical because the target does not exist yet, but the directories
+    // leading to it do -- and only a real canonicalization resolves a symlink
+    // planted inside the media folder. An absolute `leaf` replaces the base here,
+    // and is then rejected by the containment check below.
+    const auto resolved = boost::filesystem::weakly_canonical(base / (leaf + L".png"), ec);
+    if (ec || !is_within_base(resolved, base))
+        return {};
+
+    return resolved;
+}
 
 struct image_consumer : public core::frame_consumer
 {
@@ -101,14 +142,12 @@ struct image_consumer : public core::frame_consumer
 
         std::thread async([frame, filename] {
             try {
-                std::string filename2;
-
-                if (filename.empty())
-                    filename2 =
-                        u8(env::media_folder() +
-                           boost::posix_time::to_iso_wstring(boost::posix_time::second_clock::local_time()) + L".png");
-                else
-                    filename2 = u8(env::media_folder() + filename + L".png");
+                const auto resolved = resolve_image_output(filename);
+                if (!resolved) {
+                    CASPAR_LOG(error) << L"[image_consumer] refusing to write outside the media folder: " << filename;
+                    return;
+                }
+                const std::string filename2 = u8(resolved->wstring());
 
                 std::fstream file_stream(filename2, std::fstream::out | std::fstream::trunc | std::fstream::binary);
                 if (!file_stream)
@@ -300,6 +339,12 @@ spl::shared_ptr<core::frame_consumer> create_consumer(const std::vector<std::wst
 
     if (params.size() > 1)
         filename = params.at(1);
+
+    // Reject at ADD time as well as at write time, so the operator gets a failure
+    // on the command rather than a silent no-op several frames later.
+    if (!filename.empty() && !resolve_image_output(filename))
+        CASPAR_THROW_EXCEPTION(user_error()
+                               << msg_info(L"IMAGE filename must resolve inside the media folder: " + filename));
 
     return spl::make_shared<image_consumer>(filename);
 }
