@@ -113,6 +113,15 @@ struct sacn_consumer : public core::frame_consumer
                     const core::channel_info& channel_info,
                     int                       port_index) override
     {
+        // initialize() can be re-invoked on a live consumer (e.g. on a channel
+        // format change) — stop and join any previous sender thread first so
+        // std::thread::operator= is never called on a still-joinable thread.
+        if (thread_.joinable()) {
+            abort_request_ = true;
+            thread_.join();
+            abort_request_ = false;
+        }
+
         thread_ = std::thread([this] {
             long long time      = 1000 / config_.refreshRate;
             auto      last_send = std::chrono::system_clock::now();

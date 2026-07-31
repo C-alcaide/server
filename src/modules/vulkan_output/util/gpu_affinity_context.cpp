@@ -193,7 +193,9 @@ bool gpu_affinity_context::create_affinity_context(int gpu_index)
     return true;
 }
 
-gpu_affinity_context::~gpu_affinity_context()
+gpu_affinity_context::~gpu_affinity_context() { shutdown_thread(); }
+
+void gpu_affinity_context::shutdown_thread()
 {
     if (running_) {
         dispatch([this] {
@@ -381,7 +383,9 @@ bool gpu_affinity_context::create_affinity_context(int gpu_index)
     return true;
 }
 
-gpu_affinity_context::~gpu_affinity_context()
+gpu_affinity_context::~gpu_affinity_context() { shutdown_thread(); }
+
+void gpu_affinity_context::shutdown_thread()
 {
     if (running_) {
         dispatch([this] {
@@ -443,21 +447,25 @@ gpu_affinity_context::gpu_affinity_context(int gpu_index, int width, int height)
     , width_(width)
     , height_(height)
 {
-    std::promise<bool> init_promise;
-    auto init_future = init_promise.get_future();
+    // Held by shared_ptr (not captured by reference) so the promise stays alive
+    // for the worker thread's whole lifetime, not just this constructor's stack
+    // frame — the thread can outlive the constructor if init_future.get() below
+    // throws before the thread has finished processing its first dispatch.
+    auto init_promise = std::make_shared<std::promise<bool>>();
+    auto init_future  = init_promise->get_future();
 
     running_ = true;
-    thread_ = std::thread([this, &init_promise] {
+    thread_ = std::thread([this, init_promise] {
         try {
             thread_func();
         } catch (...) {
-            try { init_promise.set_exception(std::current_exception()); } catch (...) {}
+            try { init_promise->set_exception(std::current_exception()); } catch (...) {}
         }
     });
 
-    dispatch([this, &init_promise] {
+    dispatch([this, init_promise] {
         if (!create_affinity_context(gpu_index_)) {
-            init_promise.set_exception(std::make_exception_ptr(
+            init_promise->set_exception(std::make_exception_ptr(
                 caspar_exception() << msg_info("Failed to create GPU affinity context for GPU " + std::to_string(gpu_index_))));
             return;
         }
@@ -466,7 +474,7 @@ gpu_affinity_context::gpu_affinity_context(int gpu_index, int width, int height)
         glewExperimental = GL_TRUE;
         auto glew_result = glewInit();
         if (glew_result != GLEW_OK) {
-            init_promise.set_exception(std::make_exception_ptr(
+            init_promise->set_exception(std::make_exception_ptr(
                 caspar_exception() << msg_info("GLEW init failed on affinity context")));
             return;
         }
@@ -512,10 +520,18 @@ gpu_affinity_context::gpu_affinity_context(int gpu_index, int width, int height)
 
         CASPAR_LOG(info) << L"[gpu_affinity] Created OGL context on GPU " << gpu_index_
                          << L" (" << width_ << L"x" << height_ << L")";
-        init_promise.set_value(true);
+        init_promise->set_value(true);
     });
 
-    init_future.get(); // Throws if init failed
+    try {
+        init_future.get(); // Throws if init failed
+    } catch (...) {
+        // Tear the worker thread down before the exception unwinds past this
+        // constructor — otherwise thread_ is destroyed while still joinable,
+        // which calls std::terminate().
+        shutdown_thread();
+        throw;
+    }
 }
 
 void gpu_affinity_context::dispatch(std::function<void()> func)

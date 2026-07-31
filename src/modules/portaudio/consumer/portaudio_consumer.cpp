@@ -139,7 +139,13 @@ struct portaudio_consumer : public core::frame_consumer
         diagnostics::register_graph(graph_);
     }
 
-    ~portaudio_consumer() override
+    ~portaudio_consumer() override { teardown_stream(); }
+
+    // Stops the write thread and closes the PortAudio stream, if either is live.
+    // Used both by the destructor and by initialize() when re-invoked on a
+    // channel format change, so the previous thread/stream/ring buffer are
+    // never replaced while still in use.
+    void teardown_stream()
     {
         stop_ = true;
         queue_cv_.notify_one();
@@ -151,6 +157,8 @@ struct portaudio_consumer : public core::frame_consumer
             Pa_CloseStream(stream_);
             stream_ = nullptr;
         }
+        stop_    = false;
+        started_ = false;
     }
 
     // --- PortAudio stream callback (called from audio hardware thread) ---
@@ -243,6 +251,13 @@ struct portaudio_consumer : public core::frame_consumer
                     const core::channel_info&      channel_info,
                     int                            /*port_index*/) override
     {
+        // initialize() can be re-invoked on a live consumer (e.g. on a channel
+        // format change) — tear down any previous thread/stream/ring buffer
+        // first so they are never replaced while the audio callback or write
+        // thread is still using them.
+        if (started_)
+            teardown_stream();
+
         format_desc_   = format_desc;
         channel_index_ = channel_info.index;
         graph_->set_text(print());

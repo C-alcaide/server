@@ -166,12 +166,16 @@ class portaudio_producer_impl : public capture_listener
 
         if (device_index_ < 0) {
             CASPAR_LOG(error) << L"[portaudio-producer] No input device available.";
+            // capture_ring_ is never allocated on this path; mark disconnected so
+            // get_frame() takes its early-return branch instead of dereferencing it.
+            disconnected_ = true;
             return;
         }
 
         const PaDeviceInfo* dev_info = Pa_GetDeviceInfo(device_index_);
         if (!dev_info) {
             CASPAR_LOG(error) << L"[portaudio-producer] Failed to get device info.";
+            disconnected_ = true;
             return;
         }
 
@@ -238,6 +242,30 @@ class portaudio_producer_impl : public capture_listener
             if (!shared_capture_) {
                 CASPAR_LOG(error) << L"[portaudio-producer] Failed to get shared capture.";
                 return;
+            }
+            // get_shared_capture() may return an existing capture opened with a
+            // different channel count than requested (e.g. another producer on
+            // this device asked for a different CHANNELS=). Adopt its actual
+            // width — on_captured_audio()/get_frame() de-interleave using
+            // device_channels_ as the stride into the shared buffer, so keeping
+            // the originally *requested* value here reads at the wrong stride.
+            if (shared_capture_->channels() != device_channels_) {
+                CASPAR_LOG(warning) << L"[portaudio-producer] Shared capture for device " << device_index_
+                                    << L" has " << shared_capture_->channels()
+                                    << L" channels, requested " << device_channels_
+                                    << L". Adopting actual channel count.";
+                device_channels_ = shared_capture_->channels();
+                // Re-validate channel selection against the adopted width.
+                if (!channel_map_.empty()) {
+                    for (auto& ch : channel_map_) {
+                        if (ch >= device_channels_)
+                            ch = device_channels_ - 1;
+                    }
+                } else {
+                    if (from_channel_ >= device_channels_)
+                        from_channel_ = 0;
+                    output_channels_ = std::min(output_channels_, device_channels_ - from_channel_);
+                }
             }
             shared_capture_->add_listener(this);
             running_ = true;

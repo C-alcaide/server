@@ -81,6 +81,15 @@ struct artnet_consumer : public core::frame_consumer
                     const core::channel_info& channel_info,
                     int                       port_index) override
     {
+        // initialize() can be re-invoked on a live consumer (e.g. on a channel
+        // format change) — stop and join any previous sender thread first so
+        // std::thread::operator= is never called on a still-joinable thread.
+        if (thread_.joinable()) {
+            abort_request_ = true;
+            thread_.join();
+            abort_request_ = false;
+        }
+
         thread_ = std::thread([this] {
             long long time      = 1000 / config.refreshRate;
             auto      last_send = std::chrono::system_clock::now();
@@ -110,6 +119,16 @@ struct artnet_consumer : public core::frame_consumer
                     memset(dmx_data, 0, 512);
 
                     for (auto computed_fixture : computed_fixtures) {
+                        // Bounds check: ensure fixture address + channels fits in DMX universe
+                        // (mirrors the equivalent guard in sacn_consumer.cpp).
+                        int channels_needed = 1;
+                        if (computed_fixture.type == FixtureType::RGB)
+                            channels_needed = 3;
+                        else if (computed_fixture.type == FixtureType::RGBW)
+                            channels_needed = 4;
+                        if (computed_fixture.address < 0 || computed_fixture.address + channels_needed > 512)
+                            continue;
+
                         auto     color = average_color(frame, computed_fixture.rectangle);
                         uint8_t* ptr   = dmx_data + computed_fixture.address;
 

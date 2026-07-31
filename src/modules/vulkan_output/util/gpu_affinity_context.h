@@ -137,6 +137,11 @@ class gpu_affinity_context
     void dispatch(std::function<void()> func);
     void thread_func();
     bool create_affinity_context(int gpu_index);
+    // Tears down the GL context/thread if the worker thread is running. Used by
+    // the destructor and, if construction fails partway through, by the
+    // constructor itself so a partially-initialized object never leaves a
+    // joinable thread_ behind for ~std::thread to std::terminate() on.
+    void shutdown_thread();
 
     int gpu_index_;
     int width_;
