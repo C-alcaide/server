@@ -111,6 +111,34 @@ struct newtek_ndi_consumer : public core::frame_consumer
                     const core::channel_info&      channel_info,
                     int                            port_index) override
     {
+        // initialize() is re-entered on a live consumer whenever the channel format
+        // changes (core/consumer/output.cpp re-initialises every consumer, which
+        // "SET <channel> MODE <format>" triggers at runtime), and everything below
+        // rebuilds state the send thread is actively using:
+        //
+        //   - send_thread is assigned at the end. boost::thread's move-assignment
+        //     *detaches* a joinable thread rather than terminating (see
+        //     BOOST_THREAD_PROVIDES_THREAD_MOVE_ASSIGN_CALLS_TERMINATE_IF_JOINABLE,
+        //     which is not defined here), so the old thread kept running and two
+        //     threads then pulled from buffer_ and pushed to the same NDI sender.
+        //   - ndi_send_instance_ is replaced below and its deleter calls
+        //     send_destroy(), pulling the sender out from under that thread.
+        //   - field_data_ is reallocated below while the thread memcpys into it.
+        //
+        // So stop the thread first, mirroring the destructor.
+        if (send_thread.joinable()) {
+            send_thread.interrupt();
+            send_thread.join();
+        }
+
+        // Frames queued for the previous format would be sent with the new
+        // geometry's stride and yres.
+        {
+            std::lock_guard<std::mutex> lock(buffer_mutex_);
+            std::queue<core::const_frame>().swap(buffer_);
+        }
+        frame_no_ = 0;
+
         format_desc_   = format_desc;
         channel_index_ = channel_info.index;
 
