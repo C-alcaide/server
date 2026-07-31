@@ -32,6 +32,7 @@
 #include <boost/container/flat_map.hpp>
 #include <boost/range/algorithm.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <map>
 #include <stack>
@@ -178,11 +179,19 @@ struct audio_mixer::impl
                 } else if (n < last_size + item_size) {
                     sample_value = static_cast<double>(ptr[n - last_size]);
                 } else {
-                    // If we run out of samples, hold the last sample value per channel
-                    int channel_pos = n % channels_;
-                    int offset      = int(item_size) - (channels_ - channel_pos);
+                    // Ran out of samples: hold this channel's last value, i.e. read it
+                    // out of the item's final complete frame.
+                    //
+                    // The negative-offset fallback used to be `offset = channel_pos`,
+                    // which is bounded by channels_ rather than by the buffer. offset
+                    // goes negative exactly when channel_pos < channels_ - item_size,
+                    // so for any item shorter than channels_/2 that fallback indexed
+                    // past the end -- with 16 channels and a 1-sample item it read
+                    // ptr[14] out of a 1-element array. Clamp to the buffer instead.
+                    const int channel_pos = n % channels_;
+                    int       offset      = static_cast<int>(item_size) - (channels_ - channel_pos);
                     if (offset < 0) {
-                        offset = channel_pos;
+                        offset = std::min(channel_pos, static_cast<int>(item_size) - 1);
                     }
                     sample_value = static_cast<double>(ptr[offset]);
                 }
