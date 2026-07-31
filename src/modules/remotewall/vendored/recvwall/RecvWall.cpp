@@ -346,12 +346,43 @@ struct RecvWallHandle
 	}
 
 	// First SyncMeta fixes the wall geometry (caller holds pendingMtx).
+	//
+	// gridCols/gridRows (uint16) and tileW/tileH (uint32) come off the wire, and
+	// every allocation below is sized from their products. Narrowing tileW to int
+	// and then computing cols*tileW in int overflowed on hostile or corrupt
+	// values, so validate in 64-bit first and leave haveGeo false (no frames are
+	// published, the producer keeps showing its marker) if anything is out of
+	// range, rather than latching a geometry that overflows.
+	static constexpr long long kMaxTileDim  = 16384;
+	static constexpr long long kMaxGridDim  = 64;
+	static constexpr long long kMaxWallDim  = 16384;
+	static constexpr long long kMaxWallPx   = 64ll << 20; // 64 Mpx (~512 MB at 8 bpp)
+
 	void configureLocked(const sync::SyncMeta& m)
 	{
 		if (cols) return;
-		cols = m.gridCols ? m.gridCols : 1; rows = m.gridRows ? m.gridRows : 1;
-		tileW = (int)m.tileW; tileH = (int)m.tileH;
-		wallW = cols * tileW; wallH = rows * tileH;
+
+		const long long c  = m.gridCols ? (long long)m.gridCols : 1;
+		const long long r  = m.gridRows ? (long long)m.gridRows : 1;
+		const long long tw = (long long)m.tileW;
+		const long long th = (long long)m.tileH;
+
+		if (c > kMaxGridDim || r > kMaxGridDim ||
+		    tw < 1 || th < 1 || tw > kMaxTileDim || th > kMaxTileDim) {
+			std::fprintf(stderr, "[recvwall] rejecting wall geometry: grid %lldx%lld tile %lldx%lld\n",
+			             c, r, tw, th);
+			return;
+		}
+
+		const long long ww = c * tw, wh = r * th;
+		if (ww > kMaxWallDim || wh > kMaxWallDim || ww * wh > kMaxWallPx) {
+			std::fprintf(stderr, "[recvwall] rejecting wall geometry: wall %lldx%lld\n", ww, wh);
+			return;
+		}
+
+		cols = (int)c; rows = (int)r;
+		tileW = (int)tw; tileH = (int)th;
+		wallW = (int)ww; wallH = (int)wh;
 		fpsNum = m.fpsNum; fpsDen = m.fpsDen ? m.fpsDen : 1;
 		if (expectedTiles <= 0) expectedTiles = cols * rows;
 		haveGeo.store(true);
@@ -388,6 +419,9 @@ void RecvWallHandle::decodeWorkerCpu(uint16_t tile, TileQ* tq)
 			sync::SyncMeta doneMeta; uint64_t doneSend = 0;
 			{ std::lock_guard<std::mutex> lk(pendingMtx);
 			  configureLocked(m);
+			  // Geometry rejected (see configureLocked): expectedTiles is still 0, so the
+			  // composite below would run against a zero-sized wall. Drop the job.
+			  if (!haveGeo.load()) continue;
 			  // Sender restart: its transport counter rebases to 0 and every new
 			  // wall would be rejected as stale by lastComplete. Large backward
 			  // jump => reset the aligner's live edge.
@@ -446,6 +480,8 @@ void RecvWallHandle::decodeWorkerGpu(uint16_t tile, TileQ* tq)
 			const int  bpp  = p016 ? 8 : 4;            // composite bytes/pixel (RGBA16 / RGBA8)
 			{ std::lock_guard<std::mutex> lk(pendingMtx);
 			  configureLocked(m);
+			  // Geometry rejected (see configureLocked): nothing below can be sized. Drop it.
+			  if (!haveGeo.load()) continue;
 			  outBpp.store(bpp);
 			  if (compBytes == 0) compBytes = (size_t)wallW * wallH * bpp;
 			  { long long lc = lastComplete.load();   // sender restart (see CPU worker)
