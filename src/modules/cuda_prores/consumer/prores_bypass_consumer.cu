@@ -255,6 +255,20 @@ public:
                     const core::channel_info& /*channel_info*/,
                     int /*port_index*/) override
     {
+        // initialize() is re-entered on a live consumer whenever the channel format
+        // changes (core/consumer/output.cpp re-initialises every consumer, which
+        // "SET <channel> MODE <format>" triggers at runtime), and encode_thread_ is
+        // assigned below: std::thread::operator= on a joinable thread calls
+        // std::terminate(). stop() drains the queue so the encode loop finalizes the
+        // muxer, joins the thread, and releases the capture and CUDA resources that
+        // this function goes on to recreate. It is safe before the first start --
+        // everything it touches is null-guarded -- but it clears running_, which is
+        // initialised true at its declaration and set nowhere else, so restore it.
+        //
+        // Same fix as the non-bypass consumer; see 10a4babf6 for the original class.
+        stop();
+        running_ = true;
+
         format_desc_ = format_desc; // kept for hz (diagnostics timing) and initial BMD mode hint
 
         prores_tables_upload();
