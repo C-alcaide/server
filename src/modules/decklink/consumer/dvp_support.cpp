@@ -63,6 +63,21 @@ bool probe_dvp()
     if (cudaGetDeviceCount(&count) != cudaSuccess || count <= 0)
         return false;
 
+    // This runs on the module-init thread, which is not this probe's to repurpose:
+    // cudaSetDevice() changes the calling thread's current device, and
+    // cudaFree(nullptr) forces the device's primary context into existence
+    // (hundreds of MB of VRAM that is never released). Probing every GPU therefore
+    // used to stand up a context on all of them and leave the current device
+    // wherever the loop happened to stop. Restore the entering device on every
+    // exit path, and stop at the first GPU that answers.
+    int entry_device = 0;
+    const bool have_entry = cudaGetDevice(&entry_device) == cudaSuccess;
+    auto restore = [&] {
+        if (have_entry)
+            cudaSetDevice(entry_device);
+        cudaGetLastError(); // don't leave a sticky error for the next caller
+    };
+
     for (int dev = 0; dev < count; ++dev) {
         cudaDeviceProp prop{};
         cudaGetDeviceProperties(&prop, dev);
@@ -77,9 +92,11 @@ bool probe_dvp()
         std::wstring who = L"CUDA device " + std::to_wstring(dev);
         if (try_init_current(who.c_str())) {
             CASPAR_LOG(info) << L"[decklink] DVP available on CUDA device " << dev << L" (" << prop.name << L").";
+            restore();
             return true;
         }
     }
+    restore();
     return false;
 }
 
