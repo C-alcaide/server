@@ -1049,6 +1049,24 @@ struct device::impl : public std::enable_shared_from_this<impl>
                                       vk::PipelineStageFlagBits2::eTransfer,
                                       cmd);
                 cmd.copyImageToBuffer2(copyInfo);
+
+                // Make the copy's writes visible to the host domain. Required
+                // (not just the invalidate below) whenever the readback buffer's
+                // memory type is HOST_VISIBLE but not HOST_COHERENT.
+                vk::BufferMemoryBarrier2 hostBarrier{};
+                hostBarrier.srcStageMask       = vk::PipelineStageFlagBits2::eTransfer;
+                hostBarrier.srcAccessMask      = vk::AccessFlagBits2::eTransferWrite;
+                hostBarrier.dstStageMask       = vk::PipelineStageFlagBits2::eHost;
+                hostBarrier.dstAccessMask      = vk::AccessFlagBits2::eHostRead;
+                hostBarrier.srcQueueFamilyIndex = vk::QueueFamilyIgnored;
+                hostBarrier.dstQueueFamilyIndex = vk::QueueFamilyIgnored;
+                hostBarrier.buffer              = buf->id();
+                hostBarrier.offset              = 0;
+                hostBarrier.size                = VK_WHOLE_SIZE;
+
+                vk::DependencyInfo hostDepInfo{};
+                hostDepInfo.setBufferMemoryBarriers(hostBarrier);
+                cmd.pipelineBarrier2(hostDepInfo);
             });
 
             return {buf, signal_value};
@@ -1064,6 +1082,11 @@ struct device::impl : public std::enable_shared_from_this<impl>
             if (res != vk::Result::eSuccess) {
                 CASPAR_LOG(warning) << L"[Vulkan] Timeout waiting for readback semaphore";
             }
+
+            // Invalidate CPU caches in case the allocator picked a HOST_VISIBLE
+            // but non-coherent memory type for this readback buffer — otherwise
+            // the CPU can read stale cache lines instead of the GPU's writes.
+            buf->invalidate();
 
             auto ptr  = reinterpret_cast<uint8_t*>(buf->data());
             auto size = buf->size();
@@ -1210,6 +1233,21 @@ std::shared_ptr<texture>
 device::create_attachment(int width, int height, common::bit_depth depth, uint32_t components_count)
 {
     return impl_->create_attachment(width, height, depth, components_count);
+}
+
+void device::reset_attachment_layout(const std::shared_ptr<class texture>& tex)
+{
+    impl_->submitSingleTimeCommands([&](vk::CommandBuffer cmd) {
+        transitionImageLayout(
+            tex->id(),
+            vk::ImageLayout::eUndefined,
+            vk::AccessFlagBits2::eNone,
+            vk::PipelineStageFlagBits2::eTopOfPipe,
+            vk::ImageLayout::eRenderingLocalRead,
+            vk::AccessFlagBits2::eColorAttachmentWrite | vk::AccessFlagBits2::eInputAttachmentRead,
+            vk::PipelineStageFlagBits2::eColorAttachmentOutput | vk::PipelineStageFlagBits2::eFragmentShader,
+            cmd);
+    });
 }
 
 std::shared_ptr<texture> device::create_texture(int width, int height, int stride, common::bit_depth depth)

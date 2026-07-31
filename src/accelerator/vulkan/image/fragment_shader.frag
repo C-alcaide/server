@@ -481,13 +481,19 @@ void main(){
         if(flag(F_SHAPE_STROKE)&&shape_stroke_width>0.0){float ra=(1.0-smoothstep(-shape_softness,0.0,abs(d)-shape_stroke_width))*fa;fl=mix(fl,shape_stroke_color,ra*shape_stroke_color.a);}
         float ca=fl.a*fa;col.rgb=col.rgb*(1.0-ca)+fl.rgb*ca;col.a=col.a*(1.0-ca)+ca;}
 
+    // Convert working space -> output space BEFORE blend so that both
+    // foreground and background are in the same display-referred encoding
+    // (matches ogl/image/shader.frag — blend modes must operate on 0-1
+    // display values, and mixing a graded layer with an already-encoded
+    // background must not double-encode either one).
+    if(flag(F_COLOR_GRADING)){if(tone_mapping_op>0)col.rgb=apply_tone_mapping(col.rgb,tone_mapping_op);col.rgb=ubo_mat3(working_to_output_c0,working_to_output_c1,working_to_output_c2)*col.rgb;if(tone_mapping_op==0)col.rgb=clamp(col.rgb,0.0,1.0);col.rgb=apply_oetf(col.rgb,output_transfer);}
+
     col*=opacity;
     if(flag(F_LOCAL_KEY))col.a*=texture(textures[LOCAL_KEY],TexCoord2.st).r;
     if(flag(F_LAYER_KEY))col.a*=texture(textures[LAYER_KEY],TexCoord2.st).r;
     col=blend_op(col);
     if(flag(F_CHROMA))col=ChromaKey(col,flag(F_CHROMA_MASK));
 
-    if(flag(F_COLOR_GRADING)){if(tone_mapping_op>0)col.rgb=apply_tone_mapping(col.rgb,tone_mapping_op);col.rgb=ubo_mat3(working_to_output_c0,working_to_output_c1,working_to_output_c2)*col.rgb;if(tone_mapping_op==0)col.rgb=clamp(col.rgb,0.0,1.0);col.rgb=apply_oetf(col.rgb,output_transfer);}
     if(flag(F_GRAIN))col.rgb=apply_grain(col.rgb,TexCoord.st/TexCoord.q,grain_intensity,grain_size,grain_frame);
     if(flag(F_EDGE_BLEND)){vec2 ub=TexCoord.st/TexCoord.q;float ba=1.0;if(edge_blend_left>0.0)ba*=pow(clamp(ub.x/edge_blend_left,0.0,1.0),edge_blend_gamma);if(edge_blend_right>0.0)ba*=pow(clamp((1.0-ub.x)/edge_blend_right,0.0,1.0),edge_blend_gamma);if(edge_blend_top>0.0)ba*=pow(clamp(ub.y/edge_blend_top,0.0,1.0),edge_blend_gamma);if(edge_blend_bottom>0.0)ba*=pow(clamp((1.0-ub.y)/edge_blend_bottom,0.0,1.0),edge_blend_gamma);col*=ba;}
     if(flag2(F2_BLEND_MASK)){vec2 um=TexCoord.st/TexCoord.q;col.rgb*=texture(blend_mask_tex,um).rgb;}

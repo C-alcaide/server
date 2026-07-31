@@ -259,6 +259,14 @@ cudaError_t prores_encode_frame(
         uint32_t  f0_bytes  = 0;
 
         for (int field = 0; field < 2; field++) {
+            // Zero the interleave target before writing — a partial last MB
+            // row/column leaves some coefficient slots untouched by the
+            // interleave kernels below, and cudaMalloc'd memory is not
+            // guaranteed zero, so stale coefficients from a previous frame
+            // (or the other field) would otherwise leak into this slice.
+            cudaMemsetAsync(ctx->d_coeffs_slice, 0,
+                            (size_t)ctx->num_slices * ctx->blocks_per_slice * 64 * sizeof(int16_t), stream);
+
             // 1. Unpack this field's lines into the half-height planes
             err = launch_v210_unpack_field(d_v210,
                                            ctx->d_y, ctx->d_cb, ctx->d_cr,
@@ -402,6 +410,11 @@ cudaError_t prores_encode_frame(
     // The padded row's bottom-half coefficient slots stay zero (caller zeroed them).
     const int luma_blocks  = (ctx->height / 8) * (ctx->width  / 8);
     const int chroma_blocks= (ctx->height / 8) * (ctx->width  / 16);
+
+    // Zero the interleave target first — see prores_encode_frame's interlaced
+    // path for why (partial last MB row/column + non-zero-guaranteed cudaMalloc).
+    cudaMemsetAsync(ctx->d_coeffs_slice, 0,
+                    (size_t)ctx->num_slices * ctx->blocks_per_slice * 64 * sizeof(int16_t), stream);
 
     // Luma: coeffs_slice[0..4*mbs-1 per slice]
     k_interleave_luma<<<(luma_blocks + T - 1) / T, T, 0, stream>>>(
@@ -567,6 +580,11 @@ cudaError_t prores_encode_frame_444(
     const int T   = 256;
     const int all_blocks = (ctx->height / 8) * (ctx->width / 8);
 
+    // Zero the interleave target first — see prores_encode_frame's interlaced
+    // path for why (partial last MB row/column + non-zero-guaranteed cudaMalloc).
+    cudaMemsetAsync(ctx->d_coeffs_slice, 0,
+                    (size_t)ctx->num_slices * ctx->blocks_per_slice * 64 * sizeof(int16_t), stream);
+
     // Y:     offsets [0       .. 4*mbs-1 ] per slice
     k_interleave_luma<<<(all_blocks + T-1)/T, T, 0, stream>>>(
         ctx->d_coeffs_y, ctx->d_coeffs_slice,
@@ -708,6 +726,12 @@ cudaError_t prores_encode_from_yuv_fields_422(
     const int16_t *field_cr[2] = {d_cr0, d_cr1};
 
     for (int field = 0; field < 2; ++field) {
+        // Zero the interleave target before writing — see prores_encode_frame's
+        // interlaced path for why (partial last MB row/column + non-zero-
+        // guaranteed cudaMalloc).
+        cudaMemsetAsync(ctx->d_coeffs_slice, 0,
+                        (size_t)ctx->num_slices * ctx->blocks_per_slice * 64 * sizeof(int16_t), stream);
+
         // DCT + quantise directly from pre-extracted field planes (no V210 unpack)
         err = launch_dct_quantise(field_y[field],  ctx->d_coeffs_y,  ctx->width,     fh,
                                   ctx->q_scale, ctx->profile, false, true, stream);

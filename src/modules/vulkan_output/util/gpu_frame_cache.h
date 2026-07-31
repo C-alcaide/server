@@ -74,7 +74,8 @@ class gpu_frame_cache
         std::shared_ptr<accelerator::ogl::device> ogl_device,
         uint32_t                                  width,
         uint32_t                                  height,
-        bool                                      use_16bit);
+        bool                                      use_16bit,
+        int                                        channel_id);
 
     ~gpu_frame_cache();
 
@@ -201,9 +202,11 @@ class gpu_frame_cache
     // Consumer tracking
     std::atomic<int>        consumer_count_{0};
 
-    // Registry — keyed by (gpu_index, width, height, use_16bit) so different
-    // channels and different bit depths get separate caches.
-    using cache_key = std::tuple<int, uint32_t, uint32_t, bool>;
+    // Registry — keyed by (gpu_index, width, height, use_16bit, channel_id) so
+    // different channels never share a texture pool even when their resolution,
+    // bit depth and GPU all match (without channel_id, two same-res channels
+    // would collide and each display the other's video — see get()).
+    using cache_key = std::tuple<int, uint32_t, uint32_t, bool, int>;
     static std::mutex                                              registry_mutex_;
     static std::map<cache_key, std::weak_ptr<gpu_frame_cache>>     registry_;
 };

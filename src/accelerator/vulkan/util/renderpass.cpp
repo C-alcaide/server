@@ -127,6 +127,12 @@ void renderpass::commit()
     vk::Extent2D extent = {_width, _height};
     vk::Rect2D   scissor{{0, 0}, extent};
 
+    // Tracks whichever attachment was actually rendered to last, so the closing
+    // store barrier below transitions the real final image — not always
+    // _default_attachment, which is wrong whenever a post-process pass (e.g.
+    // calibration LUT) renders its result into a different attachment.
+    std::shared_ptr<texture> previous_attachment = _default_attachment;
+
     if (layers_.empty()) {
         // No layers, just clear the default attachment
         vk::RenderingAttachmentInfo attachment_info{};
@@ -146,8 +152,8 @@ void renderpass::commit()
         cmd_buffer.setScissor(0, scissor);
     } else {
         // create a renderpass for each layer
-        bool                     default_cleared = false;
-        std::shared_ptr<texture> previous_attachment;
+        bool default_cleared = false;
+        previous_attachment  = nullptr; // force a fresh render pass to start below
         for (auto& layer : layers_) {
             if (layer.attachment != previous_attachment) {
                 // We need to start a new render pass
@@ -235,7 +241,7 @@ void renderpass::commit()
         storeBarrier.newLayout           = vk::ImageLayout::eColorAttachmentOptimal;
         storeBarrier.srcQueueFamilyIndex = vk::QueueFamilyIgnored;
         storeBarrier.dstQueueFamilyIndex = vk::QueueFamilyIgnored;
-        storeBarrier.image               = _default_attachment->id();
+        storeBarrier.image               = previous_attachment->id();
         storeBarrier.subresourceRange =
             vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1);
         storeBarrier.srcStageMask  = vk::PipelineStageFlagBits2::eColorAttachmentOutput;

@@ -151,11 +151,21 @@ static void alloc_frame_ctx(ProResFrameCtx &ctx,
     ctx.q_scale        = 8;
 
     // Derive macroblock geometry.
-    // slices_per_row parameter carries mbs_per_slice (power of 2: 1,2,4,8);
-    // actual slices_per_row is derived as (width_mbs / mbs_per_slice).
+    // slices_per_row parameter carries mbs_per_slice (power of 2: 1,2,4,8).
     ctx.mbs_per_slice  = slices_per_row;  // user SLICES param = MBs per slice
-    ctx.slices_per_row = (width / 16) / ctx.mbs_per_slice;
-    if ((width / 16) % ctx.mbs_per_slice != 0) ctx.slices_per_row++; // partial last slice
+    {
+        // ProRes does NOT use a simple ceil(mb_width / mbs_per_slice) slice
+        // layout — when mb_width isn't a multiple of mbs_per_slice, the
+        // remainder columns are split into power-of-two slices. This must
+        // match the decoder's formula exactly (prores_demuxer.cpp) or every
+        // slice offset after the first row is misaligned. See that file's
+        // comment for the full derivation.
+        const int mb_width  = (width + 15) / 16;
+        const int remainder = mb_width & (ctx.mbs_per_slice - 1);
+        int       popcount  = 0;
+        for (int b = remainder; b; b &= (b - 1)) ++popcount;
+        ctx.slices_per_row = (mb_width / ctx.mbs_per_slice) + popcount;
+    }
     ctx.num_slices     = ctx.slices_per_row * ((height + 15) / 16);  // total slices
 
     // blocks_per_slice: 422=8*mbs, 4444=12*mbs, 4444+alpha=16*mbs
@@ -838,7 +848,9 @@ static prores_config parse_params(const std::vector<std::wstring>& params)
             cfg.output_path = std::move(clean);
         }
     }
-    cfg.profile     = caspar::get_param(L"PROFILE", params, 3);
+    // PROFILE 0..4 (Proxy..4444) — indexes PRORES_FOURCC/quant-matrix tables,
+    // clamp so an out-of-range value can't read past them.
+    cfg.profile     = std::max(0, std::min(4, caspar::get_param(L"PROFILE", params, 3)));
     auto codec      = caspar::get_param(L"CODEC", params, std::wstring(L"MOV"));
     cfg.use_mxf     = boost::iequals(codec, L"MXF");
     // HDR: HDR SDR|HLG|PQ  (omit to inherit from channel's <color-transfer>)
@@ -866,7 +878,7 @@ static prores_config parse_xml(const boost::property_tree::wptree& elem)
     prores_config cfg;
     cfg.output_path      = elem.get(L"path",    L".");
     cfg.filename_pattern = elem.get(L"filename", L"");
-    cfg.profile          = elem.get(L"profile",  3);
+    cfg.profile          = std::max(0, std::min(4, elem.get(L"profile",  3)));
     auto codec = elem.get(L"codec", std::wstring(L"mov"));
     cfg.use_mxf = boost::iequals(codec, L"mxf");
     auto hdr = boost::to_upper_copy(elem.get(L"hdr", std::wstring(L"")));

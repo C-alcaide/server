@@ -170,11 +170,69 @@ void apply_transform_colour_values(core::image_transform& self, const core::imag
     self.flip_h ^= other.flip_h;
     self.flip_v ^= other.flip_v;
 
-    // 360 / curved projection / edge blending
-    if (other.projection.enable || other.projection.curve_enable ||
-        other.projection.edge_blend_left > 0.0 || other.projection.edge_blend_right > 0.0 ||
+    // Projection fields merge independently per feature (360, curve, edge
+    // blend, ICVFX) rather than as one wholesale struct copy — otherwise a
+    // child transform that sets only e.g. edge_blend_* would wipe a parent's
+    // ICVFX settings (or vice versa). Matches ogl/util/transforms.cpp exactly.
+    if (other.projection.enable) {
+        self.projection.enable      = true;
+        self.projection.yaw         = other.projection.yaw;
+        self.projection.pitch       = other.projection.pitch;
+        self.projection.roll        = other.projection.roll;
+        self.projection.fov         = other.projection.fov;
+        self.projection.offset_x    = other.projection.offset_x;
+        self.projection.offset_y    = other.projection.offset_y;
+        self.projection.frustum_h   = other.projection.frustum_h;
+        self.projection.frustum_v   = other.projection.frustum_v;
+        self.projection.lens_k1     = other.projection.lens_k1;
+        self.projection.lens_k2     = other.projection.lens_k2;
+        self.projection.lens_k3     = other.projection.lens_k3;
+        self.projection.lens_p1     = other.projection.lens_p1;
+        self.projection.lens_p2     = other.projection.lens_p2;
+        self.projection.source_lens = other.projection.source_lens;
+    }
+    if (other.projection.curve_enable) {
+        self.projection.curve_type   = other.projection.curve_type;
+        self.projection.screen_arc   = other.projection.screen_arc;
+        self.projection.screen_arc_v = other.projection.screen_arc_v;
+        self.projection.eye_distance = other.projection.eye_distance;
+        self.projection.curve_auto   = other.projection.curve_auto;
+    }
+    self.projection.curve_enable |= other.projection.curve_enable;
+    if (other.projection.edge_blend_left > 0.0 || other.projection.edge_blend_right > 0.0 ||
         other.projection.edge_blend_top > 0.0 || other.projection.edge_blend_bottom > 0.0) {
-        self.projection = other.projection;
+        self.projection.edge_blend_left   = other.projection.edge_blend_left;
+        self.projection.edge_blend_right  = other.projection.edge_blend_right;
+        self.projection.edge_blend_top    = other.projection.edge_blend_top;
+        self.projection.edge_blend_bottom = other.projection.edge_blend_bottom;
+        self.projection.edge_blend_gamma  = other.projection.edge_blend_gamma;
+    }
+    if (other.projection.icvfx_enable) {
+        self.projection.icvfx_enable       = true;
+        self.projection.inner_yaw          = other.projection.inner_yaw;
+        self.projection.inner_pitch        = other.projection.inner_pitch;
+        self.projection.inner_roll         = other.projection.inner_roll;
+        self.projection.inner_fov          = other.projection.inner_fov;
+        self.projection.inner_eye_distance = other.projection.inner_eye_distance;
+        self.projection.inner_offset_x     = other.projection.inner_offset_x;
+        self.projection.inner_offset_y     = other.projection.inner_offset_y;
+        self.projection.icvfx_q0x          = other.projection.icvfx_q0x;
+        self.projection.icvfx_q0y          = other.projection.icvfx_q0y;
+        self.projection.icvfx_q1x          = other.projection.icvfx_q1x;
+        self.projection.icvfx_q1y          = other.projection.icvfx_q1y;
+        self.projection.icvfx_q2x          = other.projection.icvfx_q2x;
+        self.projection.icvfx_q2y          = other.projection.icvfx_q2y;
+        self.projection.icvfx_q3x          = other.projection.icvfx_q3x;
+        self.projection.icvfx_q3y          = other.projection.icvfx_q3y;
+        self.projection.icvfx_feather      = other.projection.icvfx_feather;
+        self.projection.icvfx_outer_dim    = other.projection.icvfx_outer_dim;
+        self.projection.icvfx_inner_dim    = other.projection.icvfx_inner_dim;
+        self.projection.icvfx_inner_gain_r = other.projection.icvfx_inner_gain_r;
+        self.projection.icvfx_inner_gain_g = other.projection.icvfx_inner_gain_g;
+        self.projection.icvfx_inner_gain_b = other.projection.icvfx_inner_gain_b;
+        self.projection.icvfx_outer_gain_r = other.projection.icvfx_outer_gain_r;
+        self.projection.icvfx_outer_gain_g = other.projection.icvfx_outer_gain_g;
+        self.projection.icvfx_outer_gain_b = other.projection.icvfx_outer_gain_b;
     }
 
     self.is_key |= other.is_key;
@@ -285,11 +343,18 @@ struct wrapped_vertex
 
 static const double epsilon = 0.001;
 
-bool inline point_is_to_left_of_line(const t_point& line_1, const t_point& line_2, const t_point& vertex)
+bool inline point_is_to_left_of_line(const t_point& line_1,
+                                     const t_point& line_2,
+                                     const t_point& vertex,
+                                     bool           invert_winding)
 {
-    // use a cross product to check if the point is on the right side of the line
-    return (line_2(0) - line_1(0)) * (vertex(1) - line_1(1)) - (line_2(1) - line_1(1)) * (vertex(0) - line_1(0)) <
-           -epsilon;
+    // use a cross product to check if the point is on the right side of the line.
+    // invert_winding flips the test for a crop quad wound the opposite way
+    // (e.g. a mirrored or 180-rotated layer) — without it every vertex tests
+    // as "outside" and the layer disappears entirely (matches
+    // ogl/util/transforms.cpp's point_is_outside_of_line / upstream 6ad6f3f7c).
+    auto cross = (line_2(0) - line_1(0)) * (vertex(1) - line_1(1)) - (line_2(1) - line_1(1)) * (vertex(0) - line_1(0));
+    return invert_winding ? cross > epsilon : cross < -epsilon;
 }
 
 // http://stackoverflow.com/questions/563198/how-do-you-detect-where-two-line-segments-intersect
@@ -459,6 +524,17 @@ draw_transforms::transform_coords(const std::vector<core::frame_geometry::coord>
 
     // Perform the crop
     for (auto& crop_region : transformed_regions) {
+        // Determine the winding order of the crop region so a mirrored or
+        // 180-rotated layer (which flips the quad's winding) doesn't have
+        // every vertex classified as outside — see point_is_to_left_of_line.
+        double signed_area = 0.0;
+        for (int l = 0; l < 4; ++l) {
+            int next_l = (l + 1) % 4;
+            signed_area += (crop_region.coords[next_l](0) - crop_region.coords[l](0)) *
+                           (crop_region.coords[next_l](1) + crop_region.coords[l](1));
+        }
+        bool invert_winding = signed_area > 0;
+
         for (int l = 0; l < 4; ++l) {
             // Apply the crop, one edge at a time
             int     to_index   = l == 3 ? 0 : l + 1;
@@ -469,7 +545,7 @@ draw_transforms::transform_coords(const std::vector<core::frame_geometry::coord>
 
             // Figure out which points are 'left' of the line (outside the crop region)
             for (size_t j = 0; j < cropped_coords.size(); ++j) {
-                bool v = point_is_to_left_of_line(from_point, to_point, cropped_coords[j].vertex);
+                bool v = point_is_to_left_of_line(from_point, to_point, cropped_coords[j].vertex, invert_winding);
                 if (v)
                     points_to_left_of_line.insert(j);
             }

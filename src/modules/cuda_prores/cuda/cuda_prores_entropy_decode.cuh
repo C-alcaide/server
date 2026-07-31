@@ -289,6 +289,24 @@ __global__ void k_prores_entropy_decode(
     const uint8_t* slice = d_frame_data + d_slice_starts[s];
     const int      total = (int)d_slice_sizes[s];
 
+    // ── Coefficient buffer for this slice (fixed stride = mbs_per_slice) ──
+    const ptrdiff_t stride = (ptrdiff_t)(y_n_max + cb_n_max + cb_n_max + alpha_n_max) * 64;
+    int16_t* y_blks     = d_dec_coeffs + (ptrdiff_t)s * stride;
+    int16_t* cb_blks    = y_blks     + (ptrdiff_t)y_n_max  * 64;
+    int16_t* cr_blks    = cb_blks    + (ptrdiff_t)cb_n_max * 64;
+    int16_t* alpha_blks = cr_blks    + (ptrdiff_t)cb_n_max * 64;  // 4444 only
+
+    // Zero this slice's output — and default its q_scale to a harmless 1 —
+    // up front, before any validation below can reject it. Every subsequent
+    // `return` in this function bails out on a malformed/corrupt slice; without
+    // zeroing first, a rejected slice would render whatever was previously in
+    // this device allocation (a stale frame's coefficients, or uninitialized
+    // memory on the first frame) instead of black.
+    for (int i = 0; i < (y_n_max + cb_n_max + cb_n_max + alpha_n_max) * 64; i++) {
+        y_blks[i] = 0;
+    }
+    d_q_scales[s] = 1;
+
     if (total < 6) return;
 
     // ── Slice header ─────────────────────────────────────────────────────
@@ -328,19 +346,6 @@ __global__ void k_prores_entropy_decode(
         return;
 
     d_q_scales[s] = (uint16_t)q_scale;
-
-    // ── Coefficient buffer for this slice (fixed stride = mbs_per_slice) ──
-    const ptrdiff_t stride = (ptrdiff_t)(y_n_max + cb_n_max + cb_n_max + alpha_n_max) * 64;
-    int16_t* y_blks     = d_dec_coeffs + (ptrdiff_t)s * stride;
-    int16_t* cb_blks    = y_blks     + (ptrdiff_t)y_n_max  * 64;
-    int16_t* cr_blks    = cb_blks    + (ptrdiff_t)cb_n_max * 64;
-    int16_t* alpha_blks = cr_blks    + (ptrdiff_t)cb_n_max * 64;  // 4444 only
-
-    // Zero all coefficients (use the full fixed-stride allocation so all
-    // positions, including unused slots of partial slices, are zeroed).
-    for (int i = 0; i < (y_n_max + cb_n_max + cb_n_max + alpha_n_max) * 64; i++) {
-        y_blks[i] = 0;
-    }
 
     // Select scan table.
     const uint8_t* scan = is_interlaced ? c_scan_order_interlaced : c_scan_order;

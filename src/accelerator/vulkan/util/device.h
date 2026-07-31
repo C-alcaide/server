@@ -64,6 +64,12 @@ class device final
 
     std::shared_ptr<class texture>
     create_attachment(int width, int height, common::bit_depth depth, uint32_t components_count);
+    // Transitions an attachment texture to eRenderingLocalRead before it is
+    // reused as a render target. create_attachment() does this internally for
+    // every texture it returns (new or pooled); callers that keep their own
+    // cache of attachments across frames (see image_kernel's per-slot pool)
+    // must call this themselves on a cache hit, since they bypass create_attachment().
+    void reset_attachment_layout(const std::shared_ptr<class texture>& tex);
     std::shared_ptr<class texture> create_texture(int width, int height, int stride, common::bit_depth depth);
     std::shared_ptr<class texture>
     create_exportable_texture(int width, int height, int stride, common::bit_depth depth);

@@ -58,11 +58,15 @@ std::shared_ptr<gpu_frame_cache> gpu_frame_cache::get(
     std::shared_ptr<accelerator::ogl::device>  ogl_device,
     uint32_t                                   width,
     uint32_t                                   height,
-    bool                                       use_16bit)
+    bool                                       use_16bit,
+    int                                        channel_id)
 {
     std::lock_guard<std::mutex> lock(registry_mutex_);
 
-    cache_key key{gpu_index, width, height, use_16bit};
+    // channel_id must be part of the key — otherwise two channels of the same
+    // resolution/bit-depth on the same GPU collide on one cache/texture pool
+    // and each ends up presenting the other's video.
+    cache_key key{gpu_index, width, height, use_16bit, channel_id};
     auto it = registry_.find(key);
     if (it != registry_.end()) {
         auto ptr = it->second.lock();
