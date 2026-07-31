@@ -184,6 +184,53 @@ struct cuda_vk_strategy::impl
     int              gpu_wait_fail_count_ = 0;    // consecutive failures; retry after threshold
     static constexpr int GPU_WAIT_RETRY_INTERVAL = 500; // frames between retry attempts
 
+    // Bind to the CUDA device that is the same physical GPU as the VK texture, and
+    // create the stream on it.
+    //
+    // This used to be hardcoded to device 0 on the assumption that "the VK mixer
+    // also runs on the primary discrete GPU". This fork lets the mixer be placed on
+    // any GPU (accelerator::vulkan::device takes a gpu_index, deduplicated by LUID),
+    // so on a multi-GPU rig importing a GPU-1 texture into a device-0 context either
+    // fails outright or silently degrades to a peer copy.
+    //
+    // Vulkan hands us the owning device's LUID with the texture, and
+    // cudaDeviceProp::luid is the same Win32 adapter LUID, so the two match directly.
+    // Resolved once on the first frame; on failure it stays on device 0, which is
+    // the old behaviour.
+    bool cuda_device_ready_ = false;
+
+    void ensure_cuda_device(const uint8_t* vk_luid)
+    {
+        if (cuda_device_ready_)
+            return;
+        cuda_device_ready_ = true; // one attempt either way
+
+        int count = 0;
+        if (vk_luid && cudaGetDeviceCount(&count) == cudaSuccess) {
+            bool matched = false;
+            for (int d = 0; d < count; ++d) {
+                cudaDeviceProp p{};
+                if (cudaGetDeviceProperties(&p, d) != cudaSuccess)
+                    continue;
+                if (std::memcmp(p.luid, vk_luid, sizeof(p.luid)) == 0) {
+                    cuda_device_ = d;
+                    matched      = true;
+                    CASPAR_LOG(info) << L"[cuda_vk_strategy] Bound to CUDA device " << d << L" (" << p.name
+                                     << L") matching the mixer's Vulkan GPU by LUID.";
+                    break;
+                }
+            }
+            if (!matched)
+                CASPAR_LOG(warning) << L"[cuda_vk_strategy] No CUDA device matches the mixer's Vulkan GPU LUID; "
+                                       L"falling back to device 0 (texture import may fail on a multi-GPU rig).";
+        } else if (!vk_luid) {
+            CASPAR_LOG(info) << L"[cuda_vk_strategy] Vulkan texture reports no LUID; using CUDA device 0.";
+        }
+
+        cuda_check(cudaSetDevice(cuda_device_), "cudaSetDevice");
+        cuda_check(cudaStreamCreateWithFlags(&stream_, cudaStreamNonBlocking), "cudaStreamCreate");
+    }
+
     // A blank output frame, for the frames where the pipeline has nothing to hand
     // back yet.
     //
@@ -247,11 +294,10 @@ struct cuda_vk_strategy::impl
         , buffer_depth_(buffer_depth > 0 ? buffer_depth : 4)
         , fallback_(std::move(fallback))
     {
-        // Use the same CUDA device as the primary GPU (device 0).
-        // This matches the VK mixer which also runs on the primary discrete GPU.
-        cuda_device_ = 0;
-        cuda_check(cudaSetDevice(cuda_device_), "cudaSetDevice");
-        cuda_check(cudaStreamCreateWithFlags(&stream_, cudaStreamNonBlocking), "cudaStreamCreate");
+        // The CUDA device is not chosen here: it has to match whichever GPU the VK
+        // mixer is on, which is only discoverable from a frame's texture. See
+        // ensure_cuda_device(), called on the first frame -- the stream is created
+        // there too, since a stream belongs to the device current when it is made.
     }
 
     ~impl()
@@ -587,6 +633,7 @@ struct cuda_vk_strategy::impl
 
         // Import the VK texture into CUDA (cached — effectively free after first few frames)
         step_timer = caspar::timer();
+        ensure_cuda_device(vk_tex->device_luid());
         cudaSetDevice(cuda_device_);
         auto surf = ensure_import(handle, vk_tex->alloc_size(), src_w, src_h, is_16bit);
 
@@ -710,6 +757,7 @@ struct cuda_vk_strategy::impl
         int dst_h = decklink_format_desc.height;
 
         step_timer = caspar::timer();
+        ensure_cuda_device(vk_tex->device_luid());
         cudaSetDevice(cuda_device_);
         auto surf = ensure_import(handle, vk_tex->alloc_size(), src_w, src_h, false);
 
