@@ -47,9 +47,13 @@ class cuda_vk_strategy final : public format_strategy
     /// @param use_bt2020   True for BT.2020 color matrix, false for BT.709
     /// @param fallback     CPU strategy to use as fallback
     /// @param needs_v210   True when pixel-format=yuv (always use V210 path)
+    /// @param buffer_depth How many frames the DeckLink driver can hold scheduled
+    ///                     at once (configuration::buffer_depth()). Output buffers
+    ///                     must outlive that queue, so it sizes the pool.
     cuda_vk_strategy(bool is_hdr, bool use_bt2020,
                      spl::shared_ptr<format_strategy> fallback,
-                     bool needs_v210 = false);
+                     bool needs_v210 = false,
+                     int  buffer_depth = 4);
     ~cuda_vk_strategy() override;
 
     BMDPixelFormat        get_pixel_format() override;
@@ -72,6 +76,7 @@ class cuda_vk_strategy final : public format_strategy
 spl::shared_ptr<format_strategy> try_create_cuda_vk_strategy(
     bool is_hdr, bool use_bt2020,
     spl::shared_ptr<format_strategy> fallback,
-    bool needs_v210 = false);
+    bool needs_v210 = false,
+    int  buffer_depth = 4);
 
 }} // namespace caspar::decklink

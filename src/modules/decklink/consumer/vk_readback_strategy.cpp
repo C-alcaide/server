@@ -108,6 +108,9 @@ struct vk_readback_strategy::impl
     const bool use_bt2020_;
     const bool dma_only_;
     const bool needs_v210_;
+    // How many frames the DeckLink driver can hold scheduled at once. A staging
+    // slot handed to it must not be rewritten for at least that long.
+    const int  buffer_depth_;
     spl::shared_ptr<format_strategy> fallback_;
 
     // Vulkan device (consumer-side, same physical GPU as mixer)
@@ -215,11 +218,13 @@ struct vk_readback_strategy::impl
 
     // ─── Construction / Destruction ────────────────────────────────────────
 
-    impl(bool is_hdr, bool use_bt2020, spl::shared_ptr<format_strategy> fallback, bool dma_only, bool needs_v210)
+    impl(bool is_hdr, bool use_bt2020, spl::shared_ptr<format_strategy> fallback, bool dma_only, bool needs_v210,
+         int buffer_depth)
         : is_hdr_(is_hdr)
         , use_bt2020_(use_bt2020)
         , dma_only_(dma_only)
         , needs_v210_(needs_v210)
+        , buffer_depth_(buffer_depth > 0 ? buffer_depth : 4)
         , fallback_(std::move(fallback))
     {
     }
@@ -1425,9 +1430,10 @@ struct vk_readback_strategy::impl
 vk_readback_strategy::vk_readback_strategy(bool is_hdr, bool use_bt2020,
                                            spl::shared_ptr<format_strategy> fallback,
                                            bool dma_only,
-                                           bool needs_v210)
+                                           bool needs_v210,
+                                           int  buffer_depth)
 #ifdef ENABLE_VULKAN
-    : impl_(std::make_unique<impl>(is_hdr, use_bt2020, std::move(fallback), dma_only, needs_v210))
+    : impl_(std::make_unique<impl>(is_hdr, use_bt2020, std::move(fallback), dma_only, needs_v210, buffer_depth))
 #else
     : impl_(nullptr)
 #endif
@@ -1556,7 +1562,8 @@ spl::shared_ptr<format_strategy> try_create_vk_readback_strategy(
     bool is_hdr, bool use_bt2020,
     spl::shared_ptr<format_strategy> fallback,
     bool dma_only,
-    bool needs_v210)
+    bool needs_v210,
+    int  buffer_depth)
 {
 #ifdef ENABLE_VULKAN
     try {
@@ -1570,7 +1577,8 @@ spl::shared_ptr<format_strategy> try_create_vk_readback_strategy(
         VkInstance test_inst;
         if (vkCreateInstance(&ci, nullptr, &test_inst) == VK_SUCCESS) {
             vkDestroyInstance(test_inst, nullptr);
-            return spl::make_shared<vk_readback_strategy>(is_hdr, use_bt2020, std::move(fallback), dma_only, needs_v210);
+            return spl::make_shared<vk_readback_strategy>(
+                is_hdr, use_bt2020, std::move(fallback), dma_only, needs_v210, buffer_depth);
         }
         CASPAR_LOG(warning) << L"[vk_readback] Vulkan not available, using CPU fallback";
     } catch (const std::exception& e) {

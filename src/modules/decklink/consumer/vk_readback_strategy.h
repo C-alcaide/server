@@ -42,10 +42,14 @@ namespace caspar { namespace decklink {
 class vk_readback_strategy final : public format_strategy
 {
   public:
+    /// buffer_depth is how many frames the DeckLink driver can hold scheduled at
+    /// once (configuration::buffer_depth()); staging slots must outlive that
+    /// queue, so it sizes the slot pool.
     vk_readback_strategy(bool is_hdr, bool use_bt2020,
                          spl::shared_ptr<format_strategy> fallback,
                          bool dma_only = false,
-                         bool needs_v210 = false);
+                         bool needs_v210 = false,
+                         int  buffer_depth = 4);
     ~vk_readback_strategy() override;
 
     BMDPixelFormat        get_pixel_format() override;
@@ -72,6 +76,7 @@ spl::shared_ptr<format_strategy> try_create_vk_readback_strategy(
     bool is_hdr, bool use_bt2020,
     spl::shared_ptr<format_strategy> fallback,
     bool dma_only = false,
-    bool needs_v210 = false);
+    bool needs_v210 = false,
+    int  buffer_depth = 4);
 
 }} // namespace caspar::decklink

@@ -93,6 +93,9 @@ struct cuda_vk_strategy::impl
     const bool use_bt2020_;
     const bool is_hdr_;
     const bool needs_v210_;
+    // How many frames the DeckLink driver can hold scheduled at once. Output
+    // buffers handed to it must stay untouched for at least that long.
+    const int  buffer_depth_;
 
     // CUDA resources
     int              cuda_device_ = 0;
@@ -188,10 +191,11 @@ struct cuda_vk_strategy::impl
     double   accum_launch_ms_  = 0.0;
     double   accum_total_ms_   = 0.0;
 
-    impl(bool is_hdr, bool use_bt2020, spl::shared_ptr<format_strategy> fallback, bool needs_v210)
+    impl(bool is_hdr, bool use_bt2020, spl::shared_ptr<format_strategy> fallback, bool needs_v210, int buffer_depth)
         : use_bt2020_(use_bt2020)
         , is_hdr_(is_hdr)
         , needs_v210_(needs_v210)
+        , buffer_depth_(buffer_depth > 0 ? buffer_depth : 4)
         , fallback_(std::move(fallback))
     {
         // Use the same CUDA device as the primary GPU (device 0).
@@ -724,8 +728,9 @@ struct cuda_vk_strategy::impl
 
 cuda_vk_strategy::cuda_vk_strategy(bool is_hdr, bool use_bt2020,
                                    spl::shared_ptr<format_strategy> fallback,
-                                   bool needs_v210)
-    : impl_(std::make_unique<impl>(is_hdr, use_bt2020, std::move(fallback), needs_v210))
+                                   bool needs_v210,
+                                   int  buffer_depth)
+    : impl_(std::make_unique<impl>(is_hdr, use_bt2020, std::move(fallback), needs_v210, buffer_depth))
 {
     CASPAR_LOG(info) << L"[cuda_vk_strategy] GPU-direct decklink: "
                      << (is_hdr ? L"HDR " : L"SDR ")
@@ -803,7 +808,8 @@ std::shared_ptr<void> cuda_vk_strategy::convert_frame_for_port(
 spl::shared_ptr<format_strategy> try_create_cuda_vk_strategy(
     bool is_hdr, bool use_bt2020,
     spl::shared_ptr<format_strategy> fallback,
-    bool needs_v210)
+    bool needs_v210,
+    int  buffer_depth)
 {
     try {
         int device_count = 0;
@@ -813,7 +819,7 @@ spl::shared_ptr<format_strategy> try_create_cuda_vk_strategy(
         }
         return spl::make_shared_ptr(
             std::shared_ptr<format_strategy>(
-                std::make_shared<cuda_vk_strategy>(is_hdr, use_bt2020, std::move(fallback), needs_v210)));
+                std::make_shared<cuda_vk_strategy>(is_hdr, use_bt2020, std::move(fallback), needs_v210, buffer_depth)));
     } catch (const std::exception& ex) {
         CASPAR_LOG(warning) << L"[cuda_vk_strategy] Init failed: " << ex.what() << L" - using CPU strategy";
         return fallback;

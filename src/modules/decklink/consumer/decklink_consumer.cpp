@@ -274,9 +274,14 @@ spl::shared_ptr<format_strategy> create_format_strategy(const configuration& con
 #endif
     }
 
+    // The GPU strategies hand their output buffers straight to the driver, which
+    // keeps up to buffer_depth() frames scheduled, so they need to know how deep
+    // that queue is to size their pools.
+    const int buffer_depth = config.buffer_depth();
+
     if (strategy == configuration::gpu_readback_mode_t::cuda) {
 #ifdef DECKLINK_CUDA_VK_ENABLED
-        return try_create_cuda_vk_strategy(is_hdr, use_bt2020, std::move(cpu_strategy), needs_v210);
+        return try_create_cuda_vk_strategy(is_hdr, use_bt2020, std::move(cpu_strategy), needs_v210, buffer_depth);
 #else
         CASPAR_LOG(warning) << L"[decklink] CUDA gpu-readback-mode requested but CUDA not available, trying Vulkan";
         strategy = configuration::gpu_readback_mode_t::vulkan;
@@ -285,7 +290,8 @@ spl::shared_ptr<format_strategy> create_format_strategy(const configuration& con
 
     if (strategy == configuration::gpu_readback_mode_t::vulkan) {
 #ifdef ENABLE_VULKAN
-        return try_create_vk_readback_strategy(is_hdr, use_bt2020, std::move(cpu_strategy), /*dma_only=*/false, needs_v210);
+        return try_create_vk_readback_strategy(
+            is_hdr, use_bt2020, std::move(cpu_strategy), /*dma_only=*/false, needs_v210, buffer_depth);
 #else
         CASPAR_LOG(warning) << L"[decklink] Vulkan gpu-readback-mode requested but Vulkan not available, using CPU";
 #endif
@@ -293,7 +299,8 @@ spl::shared_ptr<format_strategy> create_format_strategy(const configuration& con
 
     if (strategy == configuration::gpu_readback_mode_t::vulkan_dma) {
 #ifdef ENABLE_VULKAN
-        return try_create_vk_readback_strategy(is_hdr, use_bt2020, std::move(cpu_strategy), /*dma_only=*/true, needs_v210);
+        return try_create_vk_readback_strategy(
+            is_hdr, use_bt2020, std::move(cpu_strategy), /*dma_only=*/true, needs_v210, buffer_depth);
 #else
         CASPAR_LOG(warning) << L"[decklink] Vulkan-DMA gpu-readback-mode requested but Vulkan not available, using CPU";
 #endif
