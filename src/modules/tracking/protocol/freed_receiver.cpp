@@ -145,8 +145,15 @@ struct freed_receiver::impl
             sender_endpoint_,
             [this](const boost::system::error_code& ec, std::size_t bytes_transferred) {
                 if (ec) {
-                    if (ec != boost::asio::error::operation_aborted)
+                    if (ec != boost::asio::error::operation_aborted) {
                         std::cerr << "[tracking/freed] receive error: " << ec.message() << "\n";
+                        // Recoverable errors (e.g. WSAEMSGSIZE from an oversized
+                        // stray packet) must not permanently end the receive loop —
+                        // re-arm so a single bad datagram doesn't kill tracking for
+                        // the rest of the session.
+                        if (running_)
+                            start_receive();
+                    }
                     return;
                 }
                 if (bytes_transferred == FREED_PACKET_LEN)

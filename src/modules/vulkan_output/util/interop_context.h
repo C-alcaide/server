@@ -25,6 +25,7 @@
 #include <windows.h>
 #endif
 
+#include <atomic>
 #include <condition_variable>
 #include <functional>
 #include <mutex>
@@ -76,7 +77,7 @@ class interop_context
     void* egl_context_ = nullptr; // EGLContext
     void* egl_surface_ = nullptr; // EGLSurface (EGL_NO_SURFACE for surfaceless)
 #endif
-    bool  valid_ = false;
+    std::atomic<bool> valid_{false};
 
     std::thread             thread_;
     std::mutex              mutex_;

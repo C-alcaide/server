@@ -177,8 +177,21 @@ shared_texture_pool::shared_texture_pool(std::shared_ptr<accelerator::ogl::devic
     ogl_device_->dispatch_sync([this] {
         load_gl_extensions();
 
-        for (int i = 0; i < BUFFER_COUNT; ++i) {
-            create_slot(slots_[i]);
+        // create_slot() throws (VK_CHECK) on any failure partway through a
+        // slot; since the constructor won't complete, ~shared_texture_pool
+        // never runs, so slots already created here would otherwise leak
+        // their VkImage/VkDeviceMemory/VkSemaphore, GL texture/memory
+        // object/semaphore, and exported Win32 handles.
+        int created = 0;
+        try {
+            for (; created < BUFFER_COUNT; ++created) {
+                create_slot(slots_[created]);
+            }
+        } catch (...) {
+            for (int i = 0; i <= created && i < BUFFER_COUNT; ++i) {
+                destroy_slot(slots_[i]);
+            }
+            throw;
         }
 
         glGenFramebuffers(1, &read_fbo_);

@@ -217,7 +217,18 @@ class vulkan_output_consumer : public core::frame_consumer
     {
         format_desc_ = format_desc;
         port_index_  = port_index;
+        channel_index_ = channel_info.index;
         mixer_auto_color_convert_ = channel_info.auto_color_convert;
+
+        // buffer-depth=0 (or negative, from a hand-edited config) makes
+        // send()'s `buffer_.size() >= buffer_depth` check always true, so
+        // buffer_.pop() below runs on an empty queue — UB. Clamp before the
+        // delay clamp, which also divides by buffer_depth.
+        if (config_.buffer_depth < 1) {
+            CASPAR_LOG(warning) << print() << L" buffer-depth (" << config_.buffer_depth
+                                << L") must be >= 1. Clamping to 1.";
+            config_.buffer_depth = 1;
+        }
 
         // Clamp delay_frames to buffer_depth - 1 to prevent the present loop
         // from stalling permanently (min_fill = delay_frames + 1 must be ≤ buffer_depth).
@@ -585,7 +596,8 @@ class vulkan_output_consumer : public core::frame_consumer
                 bool use_16bit = (config_.transfer != hdr_transfer::sdr);
                 frame_cache_ = gpu_frame_cache::get(
                     config_.gpu_index, device_, ogl_device_,
-                    format_desc_.width, format_desc_.height, use_16bit);
+                    format_desc_.width, format_desc_.height, use_16bit,
+                    channel_index_);
                 frame_cache_->add_consumer();
                 CASPAR_LOG(info) << print() << L" Frame cache acquired (consumers="
                                  << frame_cache_->consumer_count() << L")";
@@ -1917,6 +1929,21 @@ class vulkan_output_consumer : public core::frame_consumer
         if (vkEndCommandBuffer(cmd) != VK_SUCCESS) {
             CASPAR_LOG(error) << print() << L" vkEndCommandBuffer failed - skipping frame.";
             graph_->set_tag(diagnostics::tag_severity::WARNING, "dropped-frame");
+            // The acquire above already signaled frame_sync.image_available, but
+            // since we're bailing out before vkQueueSubmit, nothing will ever wait
+            // on (consume) that signal — the next acquire on this frame slot would
+            // double-signal an already-signaled semaphore (UB). Same hazard and
+            // recovery as the VK_SUBOPTIMAL_KHR path above: drain the queue, then
+            // destroy/recreate the semaphore before returning.
+            {
+                std::lock_guard<std::mutex> queue_lock(device_->queue_mutex_for(my_queue_idx_));
+                vkQueueWaitIdle(my_queue_);
+            }
+            vkDestroySemaphore(dev, frame_sync.image_available, nullptr);
+            VkSemaphoreCreateInfo sem_info{};
+            sem_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+            vkCreateSemaphore(dev, &sem_info, nullptr, &frame_sync.image_available);
+            recreate_swapchain();
             return;
         }
 
@@ -2930,8 +2957,16 @@ class vulkan_output_consumer : public core::frame_consumer
         if (size == 0)
             return;
 
+        // Derive the real bytes-per-pixel instead of assuming BGRA8 — a channel
+        // can run at 16-bit precision (RGBA16, 8 bytes/pixel) with transfer=sdr,
+        // which the pq/hlg guard above does not catch. Mirrors the same lookup
+        // used for the debug-capture path elsewhere in this file.
+        const auto&  cpu_planes      = frame.pixel_format_desc().planes;
+        const bool   cpu_is_16bit    = !cpu_planes.empty() && cpu_planes[0].depth != common::bit_depth::bit8;
+        const size_t bytes_per_pixel = cpu_is_16bit ? 8 : 4;
+
         // Validate buffer size matches expected frame dimensions to avoid GPU overread
-        const size_t expected_size = static_cast<size_t>(format_desc_.width) * format_desc_.height * 4;
+        const size_t expected_size = static_cast<size_t>(format_desc_.width) * format_desc_.height * bytes_per_pixel;
         if (size < expected_size) {
             CASPAR_LOG(warning) << print() << L" CPU upload: pixel buffer (" << size
                                 << L" bytes) smaller than expected (" << expected_size << L"). Skipping frame.";
@@ -3049,7 +3084,7 @@ class vulkan_output_consumer : public core::frame_consumer
 
             if (sw <= 0 || sh <= 0) return;
 
-            region.bufferOffset    = (static_cast<VkDeviceSize>(sy) * fw + sx) * 4;
+            region.bufferOffset    = (static_cast<VkDeviceSize>(sy) * fw + sx) * bytes_per_pixel;
             region.bufferRowLength = static_cast<uint32_t>(fw);
             region.imageOffset     = {dx, dy, 0};
             region.imageExtent     = {static_cast<uint32_t>(sw), static_cast<uint32_t>(sh), 1};
@@ -3801,6 +3836,14 @@ class vulkan_output_consumer : public core::frame_consumer
                                         L"CasparVulkanOutput", L"CasparCG Vulkan Output",
                                         WS_POPUP | WS_VISIBLE, x, y, w, h,
                                         nullptr, nullptr, GetModuleHandle(nullptr), nullptr);
+            if (!hwnd) {
+                CASPAR_LOG(error) << print() << L" CreateWindowExW failed: " << GetLastError();
+                // Must still fulfill the promise — create_fse_window() is blocked
+                // on hwnd_future.get() and would hang forever otherwise.
+                fse_msg_running_ = false;
+                hwnd_promise.set_value(nullptr);
+                return;
+            }
 
             // Store instance pointer for WM_COPYDATA debug capture
             SetWindowLongPtr(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
@@ -4049,14 +4092,21 @@ class vulkan_output_consumer : public core::frame_consumer
         nvapi_.reset();
 
 #ifdef _WIN32
+        // Teardown must not be gated on fse_hwnd_ — if CreateWindowExW failed,
+        // fse_hwnd_ stays null but fse_msg_thread_ is still running (and joinable),
+        // and skipping the join here leaves ~vulkan_output_consumer() to destroy
+        // a joinable std::thread, which calls std::terminate().
+        fse_msg_running_ = false;
         if (fse_hwnd_) {
-            // Signal message thread to stop, then post WM_NULL to wake MsgWait.
-            // The message thread owns the window and calls DestroyWindow before exiting
-            // (Win32 requires DestroyWindow from the creating thread).
-            fse_msg_running_ = false;
+            // Post WM_NULL to wake MsgWaitForMultipleObjects immediately; without
+            // a window the thread still wakes on its own via its 50ms timeout.
             PostMessageW(fse_hwnd_, WM_NULL, 0, 0);
-            if (fse_msg_thread_.joinable())
-                fse_msg_thread_.join();
+        }
+        if (fse_msg_thread_.joinable())
+            fse_msg_thread_.join();
+        if (fse_hwnd_) {
+            // The message thread owns the window and calls DestroyWindow before
+            // exiting (Win32 requires DestroyWindow from the creating thread).
             fse_hwnd_ = nullptr;
             UnregisterClassW(L"CasparVulkanOutput", GetModuleHandle(nullptr));
         }
@@ -4073,6 +4123,7 @@ class vulkan_output_consumer : public core::frame_consumer
     mutable std::mutex               config_mutex_; // Protects state() reads from config_ writes
     core::video_format_desc          format_desc_;
     int                              port_index_ = 0;
+    int                              channel_index_ = -1; // used to key gpu_frame_cache per channel
     bool                             mixer_auto_color_convert_ = true;
     spl::shared_ptr<diagnostics::graph> graph_;
     executor                         executor_;

@@ -1156,6 +1156,12 @@ struct hap_producer_impl final : public core::frame_producer
                 if (eof_paused_.load() && spd != 0.0) {
                     const int64_t resume_at = frame_count_.load();
                     seek_request_ = resume_at;
+                    // Notify both — matching the seek command below exactly.
+                    // raw_cv_ alone relies entirely on io_loop already being
+                    // blocked in its EOF-pause wait to relay the wakeup; any
+                    // other path that reaches eof_paused_ without going through
+                    // that exact wait state would miss the resume otherwise.
+                    queue_cv_.notify_one();
                     raw_cv_.notify_one();
                 }
 

@@ -375,14 +375,25 @@ void previz_texture_bridge::post_channel(int    channel_id,
     }
 
     if (!slot_ptr) {
-        // Need to create/recreate — done outside mutex since it blocks on OGL thread
+        // Need to create/recreate. Extract the old slot (if any) under the lock,
+        // then release the lock BEFORE calling dispatch_sync — the comment above
+        // applies here too: the OGL thread can be blocked in sync_to_store()
+        // waiting on this same mutex_, so calling dispatch_sync while holding it
+        // is an AB-BA deadlock (this thread waits for the OGL thread, which waits
+        // for this mutex).
+        channel_slot old_slot;
+        bool         had_old = false;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             auto it = slots_.find(channel_id);
             if (it != slots_.end()) {
-                ogl_device_->dispatch_sync([this, &it] { destroy_slot(it->second); });
+                old_slot = std::move(it->second);
+                had_old  = true;
                 slots_.erase(it);
             }
+        }
+        if (had_old) {
+            ogl_device_->dispatch_sync([this, &old_slot] { destroy_slot(old_slot); });
         }
 
         // Create new slot (blocks on OGL thread)

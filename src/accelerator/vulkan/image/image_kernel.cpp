@@ -152,6 +152,10 @@ struct vk_lut_texture
     vk::DeviceMemory staging_mem = nullptr;
     void*            mapped    = nullptr;
     vk::DeviceSize   data_size = 0;
+    // False right after create_lut_image_*() — the image is genuinely
+    // eUndefined then (its actual initialLayout). Set true after the first
+    // upload_lut_data() call, once it's actually in eShaderReadOnlyOptimal.
+    bool             ever_uploaded = false;
 
     void destroy()
     {
@@ -315,6 +319,14 @@ struct image_kernel::impl
                 if (tex && tex.use_count() == 1 &&
                     static_cast<uint32_t>(tex->width()) == width &&
                     static_cast<uint32_t>(tex->height()) == height) {
+                    // This texture was left in whatever layout the previous frame's
+                    // last use put it in (e.g. eShaderReadOnlyOptimal after being
+                    // sampled, or eTransferSrcOptimal after a readback) — it must be
+                    // transitioned back to eRenderingLocalRead before the render pass
+                    // declares that layout for it. create_attachment() below does this
+                    // for a freshly-created/device-pooled texture; this cache bypasses
+                    // that call entirely, so it must do the transition itself.
+                    parent->vulkan_->reset_attachment_layout(tex);
                     return tex;
                 }
             }
@@ -444,6 +456,12 @@ struct image_kernel::impl
     void create_lut_image_3d(vk_lut_texture& tex, uint32_t size)
     {
         auto vk_device = vulkan_->getVkDevice();
+        // tex may still be sampled by a command buffer from one of the other
+        // frames-in-flight (up to frame_buffer_size); destroying it here would
+        // otherwise be a use-after-free on the GPU. Only reached when a LUT's
+        // resolution actually changes (not every frame), so a full device wait
+        // is an acceptable one-time stall rather than a per-frame cost.
+        vk_device.waitIdle();
         tex.destroy();
         tex.device = vk_device;
 
@@ -501,6 +519,9 @@ struct image_kernel::impl
     void create_lut_image_2d(vk_lut_texture& tex, uint32_t width, vk::Format format, vk::DeviceSize byte_size)
     {
         auto vk_device = vulkan_->getVkDevice();
+        // See create_lut_image_3d — tex may still be in use by another
+        // frame-in-flight; wait before destroying its old resources.
+        vk_device.waitIdle();
         tex.destroy();
         tex.device = vk_device;
         tex.data_size = byte_size;
@@ -558,6 +579,9 @@ struct image_kernel::impl
                             vk::DeviceSize byte_size)
     {
         auto vk_device = vulkan_->getVkDevice();
+        // See create_lut_image_3d — tex may still be in use by another
+        // frame-in-flight; wait before destroying its old resources.
+        vk_device.waitIdle();
         tex.destroy();
         tex.device = vk_device;
         tex.data_size = byte_size;
@@ -609,18 +633,38 @@ struct image_kernel::impl
     void upload_lut_data(vk_lut_texture& tex, const void* data, vk::CommandBuffer cmd,
                          uint32_t width, uint32_t height, uint32_t depth_z)
     {
+        // NOTE: this memcpy into the persistently-mapped staging buffer can
+        // still race a previous frame's in-flight cmd.copyBufferToImage read
+        // of the same staging buffer (up to frame_buffer_size frames may be in
+        // flight). Fully closing that requires per-frame-slot staging buffers;
+        // the barrier below only protects the destination *image*, not this
+        // staging buffer, against a value update arriving while still being
+        // consumed by an older in-flight frame.
         if (data)
             memcpy(tex.mapped, data, tex.data_size);
 
-        // Transition: undefined → transfer dst
+        // Transition: shader-read (from a previous frame's sampling, if any) →
+        // transfer dst. Using eUndefined/eTopOfPipe unconditionally here
+        // (discarding whatever layout the image was actually in) would not
+        // wait for an in-flight fragment shader's read of this same image to
+        // finish before this transfer overwrites it — a race that can produce
+        // one torn frame whenever a LUT's value is updated while still in
+        // flight. The image really is eUndefined the first time (right after
+        // create_lut_image_*), so only use eShaderReadOnlyOptimal as the old
+        // layout once a previous upload has actually put it there.
         vk::ImageMemoryBarrier2 barrier{};
-        barrier.oldLayout     = vk::ImageLayout::eUndefined;
+        barrier.oldLayout = tex.ever_uploaded ? vk::ImageLayout::eShaderReadOnlyOptimal
+                                              : vk::ImageLayout::eUndefined;
         barrier.newLayout     = vk::ImageLayout::eTransferDstOptimal;
         barrier.image         = tex.image;
         barrier.subresourceRange = vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1);
-        barrier.srcStageMask  = vk::PipelineStageFlagBits2::eTopOfPipe;
+        barrier.srcStageMask  = tex.ever_uploaded ? vk::PipelineStageFlagBits2::eFragmentShader
+                                                  : vk::PipelineStageFlagBits2::eTopOfPipe;
+        barrier.srcAccessMask = tex.ever_uploaded ? vk::AccessFlagBits2::eShaderSampledRead
+                                                  : vk::AccessFlagBits2::eNone;
         barrier.dstStageMask  = vk::PipelineStageFlagBits2::eTransfer;
         barrier.dstAccessMask = vk::AccessFlagBits2::eTransferWrite;
+        tex.ever_uploaded     = true;
 
         vk::DependencyInfo dep{};
         dep.setImageMemoryBarriers(barrier);

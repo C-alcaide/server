@@ -101,8 +101,13 @@ struct opentrackio_receiver::impl
             sender_endpoint_,
             [this](const boost::system::error_code& ec, std::size_t bytes) {
                 if (ec) {
-                    if (ec != boost::asio::error::operation_aborted)
+                    if (ec != boost::asio::error::operation_aborted) {
                         std::cerr << "[tracking/opentrackio] receive error: " << ec.message() << "\n";
+                        // Recoverable error — re-arm rather than permanently
+                        // ending tracking over a single bad datagram.
+                        if (running_)
+                            start_receive();
+                    }
                     return;
                 }
                 process_packet(reinterpret_cast<const char*>(recv_buf_.data()), bytes);

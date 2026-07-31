@@ -208,6 +208,9 @@ class shared_portaudio_capture : public std::enable_shared_from_this<shared_port
                 // Check device health
                 if (stream_ && !Pa_IsStreamActive(stream_) && running_) {
                     disconnected_ = true;
+                    running_      = false; // else is_running() still reports true and
+                                            // get_shared_capture() hands this zombie
+                                            // capture out to new producers.
                     CASPAR_LOG(warning) << L"[shared-capture] Device " << device_index_
                                        << L" disconnected.";
                     std::lock_guard<std::mutex> lock(listeners_mutex_);

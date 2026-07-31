@@ -245,14 +245,13 @@ void command_relay::master_connection_loop()
                 }
             }
         }
-        // Connect one member at a time, releasing the lock between attempts
-        // so route_command/broadcast aren't blocked for the entire batch
+        // Connect one member at a time. connect_to_member() manages its own
+        // fine-grained locking around the blocking connect (up to ~2s) — do
+        // NOT hold members_mutex_ across this call, or every route_command/
+        // broadcast_command is stalled for that entire connect attempt.
         for (auto idx : to_connect) {
             if (!running_) break;
-            std::lock_guard<std::mutex> lock(members_mutex_);
-            if (members_[idx].state == member_state::disconnected || members_[idx].state == member_state::error) {
-                connect_to_member(members_[idx]);
-            }
+            connect_to_member(members_[idx]);
         }
         // Wait up to 2s but wake immediately on stop()
         std::unique_lock<std::mutex> lock(members_mutex_);
@@ -262,10 +261,24 @@ void command_relay::master_connection_loop()
 
 bool command_relay::connect_to_member(member_info& member)
 {
-    member.state = member_state::connecting;
+    // Snapshot what we need and mark "connecting" under the lock, then release
+    // it for the actual connect below (up to ~2s blocking on select()) — holding
+    // members_mutex_ for that whole duration stalls every concurrent
+    // route_command/broadcast_command call.
+    std::string    host;
+    unsigned short port;
+    {
+        std::lock_guard<std::mutex> lock(members_mutex_);
+        if (member.state != member_state::disconnected && member.state != member_state::error)
+            return false; // already connecting/connected — nothing to do
+        member.state = member_state::connecting;
+        host = member.host;
+        port = member.port;
+    }
 
     socket_t sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (sock == kInvalidSocket) {
+        std::lock_guard<std::mutex> lock(members_mutex_);
         member.state = member_state::error;
         return false;
     }
@@ -281,8 +294,8 @@ bool command_relay::connect_to_member(member_info& member)
 
     sockaddr_in addr = {};
     addr.sin_family  = AF_INET;
-    addr.sin_port    = htons(member.port);
-    inet_pton(AF_INET, member.host.c_str(), &addr.sin_addr);
+    addr.sin_port    = htons(port);
+    inet_pton(AF_INET, host.c_str(), &addr.sin_addr);
 
     int result = connect(sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
     if (result == kSocketError) {
@@ -298,18 +311,20 @@ bool command_relay::connect_to_member(member_info& member)
             int sel = select(static_cast<int>(sock) + 1, nullptr, &write_set, &except_set, &tv);
             if (sel <= 0 || FD_ISSET(sock, &except_set)) {
                 close_socket(sock);
+                std::lock_guard<std::mutex> lock(members_mutex_);
                 member.state = member_state::error;
                 CASPAR_LOG(debug) << L"[cluster] Connect timeout to "
-                                  << std::wstring(member.host.begin(), member.host.end())
-                                  << L":" << member.port;
+                                  << std::wstring(host.begin(), host.end())
+                                  << L":" << port;
                 return false;
             }
         } else {
             close_socket(sock);
+            std::lock_guard<std::mutex> lock(members_mutex_);
             member.state = member_state::error;
             CASPAR_LOG(debug) << L"[cluster] Failed to connect to "
-                              << std::wstring(member.host.begin(), member.host.end())
-                              << L":" << member.port;
+                              << std::wstring(host.begin(), host.end())
+                              << L":" << port;
             return false;
         }
     }
@@ -336,15 +351,18 @@ bool command_relay::connect_to_member(member_info& member)
     int nodelay = 1;
     setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&nodelay), sizeof(nodelay));
 
-    member.socket = static_cast<uintptr_t>(sock);
-    member.state  = member_state::connected;
+    {
+        std::lock_guard<std::mutex> lock(members_mutex_);
+        member.socket = static_cast<uintptr_t>(sock);
+        member.state  = member_state::connected;
+    }
 
     // Send protocol version handshake
     ::send(sock, PROTOCOL_HANDSHAKE, static_cast<int>(strlen(PROTOCOL_HANDSHAKE)), 0);
 
     CASPAR_LOG(info) << L"[cluster] Connected to member "
-                     << std::wstring(member.host.begin(), member.host.end())
-                     << L":" << member.port;
+                     << std::wstring(host.begin(), host.end())
+                     << L":" << port;
     return true;
 }
 
@@ -460,11 +478,29 @@ void command_relay::client_receive_loop(uintptr_t client_socket)
     while (running_) {
         int received = ::recv(sock, recv_buf, sizeof(recv_buf), 0);
         if (received <= 0) {
+            if (received < 0) {
+                // The 2-second SO_RCVTIMEO set above expires routinely — there is
+                // no heartbeat, so any quiet gap in traffic hits it. That is not a
+                // disconnect; without this check it fell into the same branch as a
+                // real error below, and neither path closed the socket, so no
+                // reconnect was ever attempted for the rest of the show.
+                int err = last_error();
+#ifdef _WIN32
+                if (err == WSAETIMEDOUT)
+                    continue;
+#else
+                if (err == EAGAIN || err == EWOULDBLOCK || err == EINTR)
+                    continue;
+#endif
+            }
             if (received == 0) {
                 CASPAR_LOG(info) << L"[cluster] Master disconnected gracefully";
             } else if (running_) {
                 CASPAR_LOG(warning) << L"[cluster] Lost connection to master";
             }
+            close_socket(sock);
+            if (static_cast<socket_t>(master_socket_) == sock)
+                master_socket_ = static_cast<uintptr_t>(kInvalidSocket);
             break;
         }
 

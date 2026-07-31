@@ -48,14 +48,33 @@ class LTCInputImpl {
     PaStream*   stream_  = nullptr;
     LTCDecoder* decoder_ = nullptr;
     
-    // Atomic double-buffer for timecode to avoid mutex in audio callback
+    // Seqlock-protected timecode, published by the (lock-free, allocation-free)
+    // audio callback and read by consumer threads. A plain double-buffer here
+    // (writer always targets the "inactive" slot, then flips an index) still
+    // lets the writer circle back and overwrite the slot a slow reader is
+    // mid-read on, two callbacks later — this avoids that by having readers
+    // detect and retry a torn read instead.
     struct TimecodeSlot {
         SMPTETimecode tc = {0};
         std::chrono::steady_clock::time_point signal_time;
         bool has_data = false;
     };
-    std::atomic<int> active_slot_{0};       // Index of the slot being READ by consumers
-    TimecodeSlot slots_[2];                 // Double-buffer: audio writes to !active, then swaps
+    std::atomic<uint32_t> seq_{0}; // even = stable, odd = write in progress
+    TimecodeSlot current_;
+
+    // Reads a consistent snapshot of current_, retrying if a write was in
+    // progress or completed mid-read. Safe to call from any consumer thread;
+    // never called from the audio callback (which only writes).
+    TimecodeSlot read_snapshot() const {
+        TimecodeSlot snap;
+        for (;;) {
+            uint32_t s1 = seq_.load(std::memory_order_acquire);
+            if (s1 & 1u) continue; // writer in progress — spin
+            snap = current_;
+            uint32_t s2 = seq_.load(std::memory_order_acquire);
+            if (s1 == s2) return snap;
+        }
+    }
     std::atomic<bool> valid_signal{false};
     std::atomic<bool> running{false};
     
@@ -88,12 +107,14 @@ class LTCInputImpl {
         }
 
         if (got_frame) {
-            // Write to the inactive slot, then swap atomically
-            int write_slot = 1 - self->active_slot_.load(std::memory_order_acquire);
-            self->slots_[write_slot].tc = temp_tc;
-            self->slots_[write_slot].signal_time = std::chrono::steady_clock::now();
-            self->slots_[write_slot].has_data = true;
-            self->active_slot_.store(write_slot, std::memory_order_release);
+            // Seqlock write: odd while writing, even once published. No locks
+            // or allocations here — this runs on the realtime audio thread.
+            uint32_t s = self->seq_.load(std::memory_order_relaxed);
+            self->seq_.store(s + 1, std::memory_order_relaxed);
+            self->current_.tc          = temp_tc;
+            self->current_.signal_time = std::chrono::steady_clock::now();
+            self->current_.has_data    = true;
+            self->seq_.store(s + 2, std::memory_order_release);
             self->valid_signal = true;
         }
         return paContinue;
@@ -116,7 +137,14 @@ class LTCInputImpl {
     bool start_unlocked() {
         if (running) return true;
         
-        if (!decoder_) decoder_ = ltc_decoder_create(48000, 25);
+        // ltc_decoder_create(apv, queue_len): apv is audio-frames-per-video-frame
+        // (sample_rate / video_fps), used only as the initial bit-period estimate
+        // — NOT the sample rate itself. Passing 48000 directly (~25x too high)
+        // made every real transition look like a half-bit, so the bit-length
+        // classifier converged on a wrong steady state and zero bits were never
+        // decoded. 48000 here must match the sample rate opened below; 25 (fps)
+        // is a PAL-typical assumption absent any configured LTC frame rate.
+        if (!decoder_) decoder_ = ltc_decoder_create(48000 / 25, 25);
 
         int device_idx = current_device_index_;
         if (device_idx < 0) {
@@ -224,7 +252,11 @@ public:
 
     ~LTCInputImpl() {
         // shutdown() should be called by ltc::uninit() before PortAudio terminates.
-        // Safety fallback: free decoder if shutdown() was not called.
+        // Safety fallback if it wasn't: stop the audio stream first — the
+        // callback dereferences decoder_ with only a null check, which frees
+        // right out from under it if the stream is still running.
+        std::lock_guard<std::mutex> lock(device_mutex);
+        stop_unlocked();
         if (decoder_) {
             ltc_decoder_free(decoder_);
             decoder_ = nullptr;
@@ -285,12 +317,12 @@ public:
     }
     
     std::string get_current_timecode_string() {
-        int slot = active_slot_.load(std::memory_order_acquire);
+        TimecodeSlot slot = read_snapshot();
         bool use_fallback = !valid_signal;
-        
+
         if (valid_signal) {
              auto now = std::chrono::steady_clock::now();
-             if (std::chrono::duration_cast<std::chrono::milliseconds>(now - slots_[slot].signal_time).count() > 1000) {
+             if (std::chrono::duration_cast<std::chrono::milliseconds>(now - slot.signal_time).count() > 1000) {
                  use_fallback = true;
              }
         }
@@ -309,19 +341,19 @@ public:
         }
 
         char buffer[16];
-        snprintf(buffer, sizeof(buffer), "%02d:%02d:%02d:%02d", 
-            slots_[slot].tc.hours, slots_[slot].tc.mins, 
-            slots_[slot].tc.secs, slots_[slot].tc.frame);
+        snprintf(buffer, sizeof(buffer), "%02d:%02d:%02d:%02d",
+            slot.tc.hours, slot.tc.mins,
+            slot.tc.secs, slot.tc.frame);
         return std::string(buffer);
     }
     
     uint32_t get_current_frame_number(int fps) {
-         int slot = active_slot_.load(std::memory_order_acquire);
+         TimecodeSlot slot = read_snapshot();
          bool use_fallback = !valid_signal;
-        
+
          if (valid_signal) {
              auto now = std::chrono::steady_clock::now();
-             if (std::chrono::duration_cast<std::chrono::milliseconds>(now - slots_[slot].signal_time).count() > 1000) {
+             if (std::chrono::duration_cast<std::chrono::milliseconds>(now - slot.signal_time).count() > 1000) {
                  use_fallback = true;
              }
          }
@@ -337,14 +369,14 @@ public:
              return (tstruct.tm_hour * 3600 + tstruct.tm_min * 60 + tstruct.tm_sec) * fps;
          }
 
-         return (slots_[slot].tc.hours * 3600 + slots_[slot].tc.mins * 60 + slots_[slot].tc.secs) * fps + slots_[slot].tc.frame;
+         return (slot.tc.hours * 3600 + slot.tc.mins * 60 + slot.tc.secs) * fps + slot.tc.frame;
     }
-    
+
     bool is_valid() {
         if (!valid_signal) return false;
-        int slot = active_slot_.load(std::memory_order_acquire);
+        TimecodeSlot slot = read_snapshot();
         auto now = std::chrono::steady_clock::now();
-        if (std::chrono::duration_cast<std::chrono::milliseconds>(now - slots_[slot].signal_time).count() > 1000) {
+        if (std::chrono::duration_cast<std::chrono::milliseconds>(now - slot.signal_time).count() > 1000) {
              return false;
         }
         return true;
@@ -354,14 +386,14 @@ public:
                              uint32_t&                              out_frame,
                              std::chrono::steady_clock::time_point& out_time) {
         if (!valid_signal) return false;
-        int slot = active_slot_.load(std::memory_order_acquire);
+        TimecodeSlot slot = read_snapshot();
         auto now = std::chrono::steady_clock::now();
-        if (std::chrono::duration_cast<std::chrono::milliseconds>(now - slots_[slot].signal_time).count() > 1000)
+        if (std::chrono::duration_cast<std::chrono::milliseconds>(now - slot.signal_time).count() > 1000)
             return false;
         const int  rate = fps > 0 ? fps : 25;
-        const auto& tc  = slots_[slot].tc;
+        const auto& tc  = slot.tc;
         out_frame = static_cast<uint32_t>((tc.hours * 3600 + tc.mins * 60 + tc.secs) * rate + tc.frame);
-        out_time  = slots_[slot].signal_time;
+        out_time  = slot.signal_time;
         return true;
     }
     

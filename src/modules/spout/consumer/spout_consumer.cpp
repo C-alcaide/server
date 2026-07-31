@@ -306,10 +306,18 @@ struct spout_consumer_impl : public core::frame_consumer
 
     ~spout_consumer_impl()
     {
-        // Drain the executor before releasing resources it uses on its thread.
-        executor_.invoke([] {});
-        if (sender_)
-            sender_->ReleaseSender();
+        // context_ (and its HWND/HGLRC, created lazily on the executor thread
+        // in send()) must be destroyed on that same thread — Win32 windows and
+        // WGL contexts are single-thread-owned. Destroying them here, on
+        // whatever thread drops this consumer, would call DestroyWindow/
+        // wglDeleteContext cross-thread. Run the teardown as an executor task
+        // instead of just draining the queue.
+        executor_.invoke([this] {
+            if (sender_)
+                sender_->ReleaseSender();
+            sender_.reset();
+            context_.reset();
+        });
         free_sws_ctxs();
     }
 

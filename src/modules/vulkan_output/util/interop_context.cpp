@@ -150,6 +150,12 @@ void interop_context::dispatch_sync(std::function<void()> task)
     bool done = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        if (stop_ || !valid_) {
+            // Context never came up (make-current failed on the worker thread)
+            // or is shutting down — there is no thread left to run this task.
+            CASPAR_LOG(warning) << L"[interop_context] dispatch_sync called on an invalid/stopped context; skipping.";
+            return;
+        }
         tasks_.push([&] {
             task();
             {
@@ -162,7 +168,13 @@ void interop_context::dispatch_sync(std::function<void()> task)
     cv_.notify_one();
 
     std::unique_lock<std::mutex> lock(mutex_);
-    done_cv_.wait(lock, [&] { return done; });
+    // Also wake (without hanging forever) if the worker thread fails to make
+    // its context current and exits without ever servicing the queue —
+    // thread_func sets stop_ and notifies done_cv_ on that path.
+    done_cv_.wait(lock, [&] { return done || stop_; });
+    if (!done) {
+        CASPAR_LOG(warning) << L"[interop_context] dispatch_sync task did not run — context became invalid.";
+    }
 }
 
 void interop_context::thread_func()
@@ -171,7 +183,16 @@ void interop_context::thread_func()
 
     if (!wglMakeCurrent(hdc_, hglrc_)) {
         CASPAR_LOG(error) << L"[interop_context] Failed to make shared GL context current.";
-        valid_ = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            valid_ = false;
+            stop_  = true;
+        }
+        // Wake any dispatch_sync callers already blocked waiting for a task
+        // this thread will now never run, and any dispatch_async task queued
+        // just before this — the queue is simply abandoned.
+        cv_.notify_all();
+        done_cv_.notify_all();
         return;
     }
 
@@ -287,6 +308,12 @@ void interop_context::dispatch_sync(std::function<void()> task)
     bool done = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        if (stop_ || !valid_) {
+            // Context never came up (make-current failed on the worker thread)
+            // or is shutting down — there is no thread left to run this task.
+            CASPAR_LOG(warning) << L"[interop_context] dispatch_sync called on an invalid/stopped context; skipping.";
+            return;
+        }
         tasks_.push([&] {
             task();
             {
@@ -299,7 +326,13 @@ void interop_context::dispatch_sync(std::function<void()> task)
     cv_.notify_one();
 
     std::unique_lock<std::mutex> lock(mutex_);
-    done_cv_.wait(lock, [&] { return done; });
+    // Also wake (without hanging forever) if the worker thread fails to make
+    // its context current and exits without ever servicing the queue —
+    // thread_func sets stop_ and notifies done_cv_ on that path.
+    done_cv_.wait(lock, [&] { return done || stop_; });
+    if (!done) {
+        CASPAR_LOG(warning) << L"[interop_context] dispatch_sync task did not run — context became invalid.";
+    }
 }
 
 void interop_context::thread_func()
@@ -314,7 +347,13 @@ void interop_context::thread_func()
                         EGL_NO_SURFACE, EGL_NO_SURFACE,
                         static_cast<EGLContext>(egl_context_))) {
         CASPAR_LOG(error) << L"[interop_context] Failed to make shared EGL context current.";
-        valid_ = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            valid_ = false;
+            stop_  = true;
+        }
+        cv_.notify_all();
+        done_cv_.notify_all();
         return;
     }
 

@@ -68,12 +68,21 @@ std::array<vk::VertexInputAttributeDescription, 2> get_attribute_descriptions(ui
     return attributeDescriptions;
 }
 
-// Descriptor set ring buffer size. With ~12 draw calls per frame and 3 frames in flight,
-// we consume ~36 sets before the GPU retires the oldest frame. 128 gives ~10 frames of
-// headroom without any per-set fence tracking. A future improvement could add per-slot
-// timeline semaphore stamps (vkGetSemaphoreCounterValue) to guarantee safety regardless
-// of pool size, but the overhead is unnecessary while 128 >> typical in-flight usage.
-const int DescriptorPoolSize = 128;
+// Descriptor set ring buffer size, SHARED by every channel using this bit depth
+// on this device (see device::get_pipeline) — not per-channel. With ~12 draw
+// calls per frame and 3 frames in flight, one channel consumes ~36 sets before
+// the GPU retires its oldest frame; N concurrent channels consume ~36*N. At the
+// previous size of 128, two 8-bit channels with ~20 layers each (~132 sets)
+// already exceeded it, silently rewriting a slot still bound by an in-flight
+// command buffer. 2048 gives headroom for a much larger multi-channel rig
+// without any per-set fence tracking. This is a mitigation, not a proof of
+// safety — a future improvement should add per-slot timeline semaphore stamps
+// (vkGetSemaphoreCounterValue) to make this correct regardless of pool size or
+// channel count; there is currently no in-process access to the completion
+// semaphore's value at the point acquire_descriptor_set() is called (frame_context
+// only exposes an OS-exportable HANDLE, not the vk::Semaphore + value pair
+// needed to wait in-process) without a larger cross-file change to that interface.
+const int DescriptorPoolSize = 2048;
 const int BindlessTextureCount = 8;
 // UBO ring buffer: round sizeof(uniform_block) up to multiple of 256 for alignment
 const vk::DeviceSize UBO_SLOT_SIZE  = (sizeof(uniform_block) + 255) & ~vk::DeviceSize(255);
@@ -414,25 +423,32 @@ struct pipeline::impl
         // Copy UBO data to the ring buffer slot
         std::memcpy(uboMapped_ + setIndex * UBO_SLOT_SIZE, &params, sizeof(uniform_block));
 
-        // Bind planes, local_key, and layer_key to the bindless texture array
+        // Bind planes, local_key, and layer_key to the bindless texture array.
+        // Not every pixel format populates all 4 plane slots, and local_key/
+        // layer_key are frequently absent — write only the slots that actually
+        // have an image view. Writing a null VkImageView here is only valid
+        // with VK_EXT_robustness2's nullDescriptor, which is merely opportunistic
+        // (enable_extension_features_if_present) rather than guaranteed; relying
+        // on ePartiallyBound (already set on this binding, see the LUT/hue-curve/
+        // blend-mask bindings below which already skip absent entries the same way)
+        // works on every device instead.
         std::array<vk::DescriptorImageInfo, 6> textureInfos;
+        std::vector<vk::WriteDescriptorSet>    texture_writes;
         for (int i = 0; i < 6; ++i) {
-            textureInfos[i].sampler     = textureSampler_;
+            if (!textures[i + 1])
+                continue;
+            textureInfos[i].sampler     = (i == 4 || i == 5) ? keySampler_ : textureSampler_;
             textureInfos[i].imageView   = textures[i + 1];
             textureInfos[i].imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal;
+
+            vk::WriteDescriptorSet write{};
+            write.dstSet          = descriptorSet;
+            write.dstBinding      = 0;
+            write.dstArrayElement = static_cast<uint32_t>(i);
+            write.descriptorType  = vk::DescriptorType::eCombinedImageSampler;
+            write.setImageInfo(textureInfos[i]);
+            texture_writes.push_back(write);
         }
-
-        // Override samplers for local_key and layer_key to use nearest filtering
-        textureInfos[4].sampler = keySampler_;
-        textureInfos[5].sampler = keySampler_;
-
-        vk::WriteDescriptorSet texturesWrite{};
-        texturesWrite.dstSet          = descriptorSet;
-        texturesWrite.dstBinding      = 0;
-        texturesWrite.dstArrayElement = 0;
-        texturesWrite.descriptorType  = vk::DescriptorType::eCombinedImageSampler;
-        texturesWrite.setImageInfo(textureInfos);
-        texturesWrite.descriptorCount = 6;
 
         // Bind background attachment as input attachment
         vk::DescriptorImageInfo backgroundInfo{};
@@ -460,7 +476,8 @@ struct pipeline::impl
         uboWrite.setBufferInfo(uboInfo);
 
         // Collect writes
-        std::vector<vk::WriteDescriptorSet> writes{backgroundWrite, texturesWrite, uboWrite};
+        std::vector<vk::WriteDescriptorSet> writes{backgroundWrite, uboWrite};
+        writes.insert(writes.end(), texture_writes.begin(), texture_writes.end());
 
         // Binding 3: 3D LUT (if present)
         vk::DescriptorImageInfo lut3dInfo{};
