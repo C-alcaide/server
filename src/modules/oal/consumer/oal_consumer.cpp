@@ -211,19 +211,26 @@ struct oal_consumer : public core::frame_consumer
         diagnostics::register_graph(graph_);
     }
 
+    // Stop and delete the source and buffers. Must run on executor_, which is the
+    // thread the OpenAL context is current on.
+    void destroy_al_objects()
+    {
+        if (source_ != 0u) {
+            alSourceStop(source_);
+            alDeleteSources(1, &source_);
+            source_ = 0;
+        }
+
+        for (auto& buffer : buffers_) {
+            if (buffer != 0u)
+                alDeleteBuffers(1, &buffer);
+        }
+        buffers_.clear();
+    }
+
     ~oal_consumer() override
     {
-        executor_.invoke([=] {
-            if (source_ != 0u) {
-                alSourceStop(source_);
-                alDeleteSources(1, &source_);
-            }
-
-            for (auto& buffer : buffers_) {
-                if (buffer != 0u)
-                    alDeleteBuffers(1, &buffer);
-            }
-        });
+        executor_.invoke([=] { destroy_al_objects(); });
     }
 
     // frame consumer
@@ -237,6 +244,15 @@ struct oal_consumer : public core::frame_consumer
         graph_->set_text(print());
 
         executor_.begin_invoke([=] {
+            // initialize() is re-entered on a live consumer whenever the channel
+            // format changes (core/consumer/output.cpp re-initialises every consumer,
+            // which "SET <channel> MODE <format>" triggers at runtime). alGenBuffers
+            // and alGenSources below overwrite source_/buffers_ with fresh names, so
+            // without this the previous ones were leaked -- 8 buffers and a source per
+            // format change -- and the old source was never stopped, so it kept
+            // playing its queued audio underneath the new one.
+            destroy_al_objects();
+
             duration_ = *std::min_element(format_desc_.audio_cadence.begin(), format_desc_.audio_cadence.end());
             buffers_.resize(8);
             alGenBuffers(static_cast<ALsizei>(buffers_.size()), buffers_.data());
