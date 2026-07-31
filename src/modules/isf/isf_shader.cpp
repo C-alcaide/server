@@ -307,7 +307,18 @@ int eval_size_expr(const std::string&                                expr,
         return 0.0;
     };
     expr_eval e(expr, var);
-    int       v = static_cast<int>(std::lround(e.parse()));
+    const double d = e.parse();
+
+    // The result becomes a render-target dimension, so it has to survive a
+    // hostile expression: lround() on a non-finite or out-of-range double is
+    // undefined, and an arbitrarily large finite result would be handed
+    // straight to a texture allocation.
+    if (!std::isfinite(d))
+        return fallback;
+    constexpr double MAX_DIM = 16384.0; // beyond any GL_MAX_TEXTURE_SIZE in practice
+    if (d < 1.0 || d > MAX_DIM)
+        return fallback;
+    const int v = static_cast<int>(std::lround(d));
     return v > 0 ? v : fallback;
 }
 
