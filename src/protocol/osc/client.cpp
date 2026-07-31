@@ -34,6 +34,7 @@
 #include <boost/asio.hpp>
 
 #include <condition_variable>
+#include <cstdint>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -78,6 +79,7 @@ struct client::impl : public spl::enable_shared_from_this<client::impl>
     uint64_t time_ = 0;
 
     std::atomic<bool> abort_request_{false};
+    std::uint64_t     send_failures_{0}; // send thread only; rate-limits the error log
     std::thread       thread_;
 
   public:
@@ -87,8 +89,16 @@ struct client::impl : public spl::enable_shared_from_this<client::impl>
         , buffer_(1000000)
     {
         thread_ = std::thread([=] {
-            try {
-                while (!abort_request_) {
+            // The try sits INSIDE the loop deliberately. It used to wrap the loop, so
+            // any throw logged once and ended the thread -- OSC feedback was then dead
+            // for the rest of the process's life with nothing further to indicate it.
+            // The reachable throw is oscpack's OutOfBufferMemoryException: the
+            // `o.Size() < 2048` guard below is only evaluated before a message is
+            // added, so a single oversized one can still overrun the stream. Log it and
+            // carry on to the next bundle instead, the way the tracking receivers were
+            // taught to re-arm in 397b6bdac.
+            while (!abort_request_) {
+                try {
                     core::monitor::state       bundle;
                     uint64_t                   bundle_time;
                     std::vector<udp::endpoint> endpoints;
@@ -143,9 +153,12 @@ struct client::impl : public spl::enable_shared_from_this<client::impl>
                             socket_.send_to(boost::asio::buffer(o.Data(), o.Size()), endpoint, 0, ec);
                         }
                     }
+                } catch (...) {
+                    // Drop this bundle, keep the thread. Rate-limited: a persistently
+                    // oversized state would otherwise flood the log every tick.
+                    if (send_failures_++ % 500 == 0)
+                        CASPAR_LOG_CURRENT_EXCEPTION();
                 }
-            } catch (...) {
-                CASPAR_LOG_CURRENT_EXCEPTION();
             }
         });
     }
