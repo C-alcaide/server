@@ -131,8 +131,18 @@ struct output::impl
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(200);
 
         std::unique_lock<std::mutex> lock(tick_mutex_);
-        tick_cv_.wait_until(
+        bool released = tick_cv_.wait_until(
             lock, deadline, [&] { return tick_count_.load(std::memory_order_acquire) >= target; });
+        if (!released) {
+            // Callers proceed as if the old consumer's snapshot on the tick
+            // thread were guaranteed gone (see add()/remove()) — on a timeout
+            // that guarantee silently doesn't hold, reintroducing the "consumer
+            // destroyed on the realtime channel thread" hazard this exists to
+            // prevent. A slow tick (blocking hardware consumer, GC pause, etc.)
+            // is the only way to hit this in practice.
+            CASPAR_LOG(warning) << L"Timed out waiting for consumer snapshot release after 200ms"
+                                   L" — old consumer may be destroyed on the channel tick thread.";
+        }
     }
 
     void add(int index, spl::shared_ptr<frame_consumer> consumer)

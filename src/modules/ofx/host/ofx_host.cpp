@@ -1199,8 +1199,26 @@ host::create_effect(const std::string& identifier, effect_context context, int w
             return nullptr;
         }
 
+        // A plug-in whose bundle doesn't declare the clips this context needs
+        // (malformed, but loadable) would otherwise leave every later
+        // getClip("Output")-based codepath (working_bytes(), render setup)
+        // silently degraded instead of failing fast at creation time.
+        if (instance->getClip("Output") == nullptr ||
+            (ofx_context != kOfxImageEffectContextGenerator && instance->getClip("Source") == nullptr)) {
+            delete instance;
+            return nullptr;
+        }
+
         OfxPointD rs{1.0, 1.0};
-        instance->beginRenderAction(0, 0, 1, false, rs, true, false);
+        const OfxStatus begin_stat = instance->beginRenderAction(0, 0, 1, false, rs, true, false);
+        if (begin_stat != kOfxStatOK && begin_stat != kOfxStatReplyDefault) {
+            // The plug-in refused to enter a render session at this size/depth —
+            // treating it as usable anyway would leave render_open=true for a
+            // session the plug-in itself never opened, and the eventual
+            // endRenderAction() in ~impl() would then be unbalanced against it.
+            delete instance;
+            return nullptr;
+        }
 
         std::unique_ptr<effect> e(new effect());
         e->impl_->instance    = instance;
@@ -1215,10 +1233,14 @@ host::create_effect(const std::string& identifier, effect_context context, int w
         try {
             auto& dprops = instance->getDescriptor().getProps();
 #ifdef OFX_SUPPORTS_OPENGLRENDER
-            plugin_gl = dprops.getStringProperty(kOfxImageEffectPropOpenGLRenderSupported) != "false";
+            // Exact spec match — "!= false" misclassifies a malformed/empty
+            // property value (e.g. a fetch failure swallowed elsewhere) as
+            // GPU-capable, routing a CPU-only plug-in down the zero-copy
+            // GL/CUDA path it never implements.
+            plugin_gl = dprops.getStringProperty(kOfxImageEffectPropOpenGLRenderSupported) == "true";
 #endif
 #ifdef CASPAR_OFX_CUDA
-            plugin_cuda = dprops.getStringProperty(kOfxImageEffectPropCudaRenderSupported) != "false";
+            plugin_cuda = dprops.getStringProperty(kOfxImageEffectPropCudaRenderSupported) == "true";
 #endif
         } catch (...) {
         }

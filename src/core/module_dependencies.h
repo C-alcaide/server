@@ -27,8 +27,11 @@
 #include "producer/cg_proxy.h"
 #include "producer/frame_producer_registry.h"
 
+#include <vector>
+
 namespace caspar::protocol::amcp {
 class amcp_command_repository_wrapper;
+class channel_context;
 }
 
 namespace caspar::core {
@@ -39,15 +42,22 @@ struct module_dependencies
     const spl::shared_ptr<frame_producer_registry>                         producer_registry;
     const spl::shared_ptr<frame_consumer_registry>                         consumer_registry;
     const std::shared_ptr<protocol::amcp::amcp_command_repository_wrapper> command_repository;
+    // Lets a module (e.g. cluster) read live channel state — such as
+    // video_format_desc — that isn't otherwise reachable from module init.
+    // Never null (spl::shared_ptr always holds an object), but may be empty
+    // if no channels have been set up yet at module-init time.
+    const spl::shared_ptr<std::vector<protocol::amcp::channel_context>> channels;
 
     module_dependencies(const spl::shared_ptr<cg_producer_registry>&                            cg_registry,
                         const spl::shared_ptr<frame_producer_registry>&                         producer_registry,
                         const spl::shared_ptr<frame_consumer_registry>&                         consumer_registry,
-                        const std::shared_ptr<protocol::amcp::amcp_command_repository_wrapper>& command_repository)
+                        const std::shared_ptr<protocol::amcp::amcp_command_repository_wrapper>& command_repository,
+                        const spl::shared_ptr<std::vector<protocol::amcp::channel_context>>&     channels)
         : cg_registry(cg_registry)
         , producer_registry(producer_registry)
         , consumer_registry(consumer_registry)
         , command_repository(command_repository)
+        , channels(channels)
     {
     }
 };

@@ -168,9 +168,15 @@ static std::wstring tracking_bind_command(command_context& ctx)
         if (!stage_ptr)
             return L"403 TRACKING ERROR Invalid channel\r\n";
 
-        // Release old receiver reference if there was a previous binding
         int ch    = ctx.channel_index;
         int layer = ctx.layer_index();
+
+        // Acquire the new receiver BEFORE releasing the old one. Releasing
+        // first (the previous order) drops a same-protocol/port rebind's
+        // socket and immediately recreates it — losing packets in between —
+        // and if the new acquire then throws, the old binding is left
+        // pointing at a receiver that was already torn down.
+        receiver_manager::instance().ensure_receiver(proto, port, host);
 
         if (tracker_registry::instance().has_binding(ch, layer)) {
             auto old_b = tracker_registry::instance().get_binding(ch, layer);
@@ -178,9 +184,6 @@ static std::wstring tracking_bind_command(command_context& ctx)
                 receiver_manager::instance().release_receiver(
                     old_b->receiver.protocol, old_b->receiver.port, old_b->receiver.host);
         }
-
-        // Ensure receiver is running
-        receiver_manager::instance().ensure_receiver(proto, port, host);
 
         // Create binding
         tracker_binding b;

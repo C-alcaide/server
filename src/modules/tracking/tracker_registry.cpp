@@ -311,11 +311,12 @@ static double compute_fov(const tracker_binding& b, uint16_t zoom_raw)
 /// Shortest-path angular interpolation (handles wrap-around at ±π).
 static double lerp_angle(double a, double b, double t)
 {
-    double diff = b - a;
-    while (diff > M_PI)
-        diff -= 2.0 * M_PI;
-    while (diff < -M_PI)
-        diff += 2.0 * M_PI;
+    // a/b come from wire-supplied pose data (OSC/OpenTrackIO); the previous
+    // while-loop normalization could spin proportionally to |diff|/2π on a
+    // garbage or absurd value (e.g. 1e300), hanging the receiver thread
+    // indefinitely. std::remainder normalizes in one step regardless of
+    // magnitude, and is exact for finite inputs.
+    double diff = std::remainder(b - a, 2.0 * M_PI);
     return a + diff * t;
 }
 

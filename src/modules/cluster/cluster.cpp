@@ -25,6 +25,8 @@
 #include <protocol/util/ClientInfo.h>
 #include <protocol/util/tokenize.h>
 
+#include <boost/rational.hpp>
+
 #include <memory>
 #include <mutex>
 #include <sstream>
@@ -45,10 +47,22 @@ struct cluster_state
     std::shared_ptr<sync::frame_clock>          frame_clock;
     std::shared_ptr<sync::command_scheduler>    scheduler;
     std::shared_ptr<sync::content_sync>         watchdog;
-    std::unique_ptr<relay::virtual_channel_map> channel_map;
-    std::unique_ptr<relay::command_relay>       relay;
+    // shared_ptr (not unique_ptr) so command handlers can copy a reference out
+    // under g_state_mutex and use it after releasing the lock, instead of
+    // racing uninit()'s destruction of these objects.
+    std::shared_ptr<relay::virtual_channel_map> channel_map;
+    std::shared_ptr<relay::command_relay>       relay;
     bool                                        active          = false;
     bool                                        watchdog_armed  = false; // true once channels are captured
+
+    // Populated from module_dependencies at init() — used to keep frame_clock's
+    // framerate in sync with the local channel's actual format instead of the
+    // hardcoded 50fps it's constructed with. May be empty if no channels were
+    // configured yet at module-init time (channel_context entries are shared
+    // with shell/server.cpp and get their raw_channel populated later in
+    // startup, so re-reading this at command time, not init time, is required).
+    spl::shared_ptr<std::vector<protocol::amcp::channel_context>> channels;
+    boost::rational<int>                                          last_synced_framerate{0, 1};
 
     // For executing scheduled commands through the AMCP parser
     std::weak_ptr<protocol::amcp::amcp_command_repository> command_repo;
@@ -58,8 +72,9 @@ struct cluster_state
 std::mutex    g_state_mutex;
 cluster_state g_state;
 
-// Forward declaration
+// Forward declarations
 void arm_watchdog(const spl::shared_ptr<std::vector<channel_context>>& channels);
+void sync_framerate_from_channels();
 
 // ─── AMCP command: CLUSTER STATUS ───────────────────────────────────────────
 
@@ -152,13 +167,27 @@ std::wstring cluster_status_command(protocol::amcp::command_context& ctx)
 
 std::wstring cluster_schedule_command(protocol::amcp::command_context& ctx)
 {
-    // Deferred arm: channels are available now (outside state mutex for blocking ops)
+    // Copy out everything this command needs while holding the lock, so the
+    // rest of the function (which can block on relay->route_command, and runs
+    // unlocked) can't race uninit() resetting/destroying these on another
+    // thread mid-command.
+    std::shared_ptr<sync::frame_clock>          frame_clock;
+    std::shared_ptr<sync::command_scheduler>    scheduler;
+    std::shared_ptr<relay::virtual_channel_map> channel_map;
+    std::shared_ptr<relay::command_relay>       relay;
+    int64_t                                     sync_margin = 0;
     {
         std::lock_guard<std::mutex> lock(g_state_mutex);
         if (!g_state.active || !g_state.scheduler) {
             return L"501 CLUSTER SCHEDULE FAILED\r\n";
         }
         arm_watchdog(ctx.channels);
+        sync_framerate_from_channels();
+        frame_clock = g_state.frame_clock;
+        scheduler   = g_state.scheduler;
+        channel_map = g_state.channel_map;
+        relay       = g_state.relay;
+        sync_margin = g_state.config.sync_margin;
     }
 
     // Parameters: SCHEDULE <channel-layer> <command> AT <frame>
@@ -194,7 +223,7 @@ std::wstring cluster_schedule_command(protocol::amcp::command_context& ctx)
             cmd << p;
         }
         command_text = cmd.str();
-        target_frame = g_state.frame_clock->current_frame() + g_state.config.sync_margin;
+        target_frame = frame_clock->current_frame() + sync_margin;
     }
 
     // Parse virtual channel from command (first token like "1-10")
@@ -214,17 +243,48 @@ std::wstring cluster_schedule_command(protocol::amcp::command_context& ctx)
     }
 
     // Route: local or remote?
-    if (g_state.channel_map && virtual_channel > 0 && !g_state.channel_map->is_local(virtual_channel)) {
+    if (channel_map && virtual_channel > 0 && !channel_map->is_local(virtual_channel)) {
         // Forward to remote member
-        g_state.relay->route_command(target_frame, virtual_channel, command_text);
+        relay->route_command(target_frame, virtual_channel, command_text);
     } else {
         // Schedule locally
-        g_state.scheduler->schedule(target_frame, command_text);
+        scheduler->schedule(target_frame, command_text);
     }
 
     std::wostringstream reply;
     reply << L"202 CLUSTER SCHEDULE OK " << target_frame << L"\r\n";
     return reply.str();
+}
+
+// ─── Keep frame_clock's framerate in sync with the local channel's actual
+//     format (default-constructed at a hardcoded 50fps otherwise) ───────────
+// Called with g_state_mutex already held, from the same call sites that call
+// arm_watchdog() — cheap (no I/O), so safe to re-check on every command rather
+// than only once.
+
+void sync_framerate_from_channels()
+{
+    if (!g_state.frame_clock || g_state.channels->empty())
+        return;
+
+    // The cluster's <channels> config maps virtual channels to physical ones;
+    // frame_clock represents this member's own timeline, so it should track
+    // whichever physical channel is configured first (matching how
+    // command_relay/virtual_channel_map treat "the local channel" elsewhere).
+    for (const auto& ch_ctx : *g_state.channels) {
+        if (!ch_ctx.raw_channel)
+            continue;
+        auto fps = ch_ctx.raw_channel->stage()->video_format_desc().framerate;
+        if (fps.numerator() <= 0 || fps.denominator() <= 0)
+            continue;
+        if (fps != g_state.last_synced_framerate) {
+            g_state.frame_clock->set_framerate(fps.numerator(), fps.denominator());
+            g_state.last_synced_framerate = fps;
+            CASPAR_LOG(info) << L"[cluster] frame_clock framerate synced to " << fps.numerator()
+                             << L"/" << fps.denominator();
+        }
+        return; // only the first channel with a live raw_channel
+    }
 }
 
 // ─── Arm watchdog (deferred until channels are available) ───────────────────
@@ -272,16 +332,23 @@ void arm_watchdog(const spl::shared_ptr<std::vector<channel_context>>& channels)
 
 std::wstring cluster_track_command(protocol::amcp::command_context& ctx)
 {
-    // Arm watchdog on first use (outside state mutex)
+    // Copy out watchdog/frame_clock under the lock — the rest of this function
+    // can block (producer queries below have their own timeouts) and must not
+    // race uninit() resetting/destroying these on another thread meanwhile.
+    std::shared_ptr<sync::content_sync> watchdog;
+    std::shared_ptr<sync::frame_clock>  frame_clock;
     {
         std::lock_guard<std::mutex> lock(g_state_mutex);
         if (!g_state.active) {
             return L"501 CLUSTER TRACK FAILED\r\n";
         }
         arm_watchdog(ctx.channels);
+        sync_framerate_from_channels();
         if (!g_state.watchdog) {
             return L"501 CLUSTER TRACK FAILED - NO WATCHDOG\r\n";
         }
+        watchdog    = g_state.watchdog;
+        frame_clock = g_state.frame_clock;
     }
 
     if (ctx.parameters.empty()) {
@@ -310,7 +377,7 @@ std::wstring cluster_track_command(protocol::amcp::command_context& ctx)
 
     // Whole-channel tracking (watchdog has its own mutex)
     if (layer_index < 0) {
-        g_state.watchdog->track_channel(channel_index);
+        watchdog->track_channel(channel_index);
         std::wostringstream reply;
         reply << L"202 CLUSTER TRACK OK channel=" << (channel_index + 1) << L" (auto-discover)\r\n";
         return reply.str();
@@ -365,9 +432,9 @@ std::wstring cluster_track_command(protocol::amcp::command_context& ctx)
     }
 
     // Start frame = current global frame (producer starts now)
-    int64_t start_frame = g_state.frame_clock->current_frame();
+    int64_t start_frame = frame_clock->current_frame();
 
-    g_state.watchdog->track_producer(channel_index, layer_index, start_frame, duration, looping);
+    watchdog->track_producer(channel_index, layer_index, start_frame, duration, looping);
 
     std::wostringstream reply;
     reply << L"202 CLUSTER TRACK OK duration=" << duration
@@ -485,12 +552,12 @@ void start_cluster(const cluster_config& config,
     g_state.scheduler->start();
 
     // 4. Setup channel map and relay
-    g_state.channel_map = std::make_unique<relay::virtual_channel_map>();
+    g_state.channel_map = std::make_shared<relay::virtual_channel_map>();
     for (const auto& ch : config.channels) {
         g_state.channel_map->add_mapping(ch.virtual_channel, ch.host, ch.physical_channel);
     }
 
-    g_state.relay = std::make_unique<relay::command_relay>(*g_state.channel_map, config.sync_margin);
+    g_state.relay = std::make_shared<relay::command_relay>(*g_state.channel_map, config.sync_margin);
 
     if (config.mode == cluster_mode::master) {
         // Master: connect to all members
@@ -536,6 +603,11 @@ void init(const core::module_dependencies& dependencies)
             L"Cluster Commands", L"CLUSTER UNTRACK", cluster_untrack_command, 1);
     }
 
+    {
+        std::lock_guard<std::mutex> lock(g_state_mutex);
+        g_state.channels = dependencies.channels;
+    }
+
     // Parse config and start cluster if configured
     auto config = parse_cluster_config(env::properties());
 
@@ -548,34 +620,39 @@ void init(const core::module_dependencies& dependencies)
 
 void uninit()
 {
-    std::lock_guard<std::mutex> lock(g_state_mutex);
-    if (!g_state.active) {
-        return;
+    // Extract the components under the lock, then stop()/join them with the
+    // lock released. scheduler's executor and relay's client command handler
+    // both lock g_state_mutex from their own worker threads (see start_cluster)
+    // — calling stop() (which joins those threads) while still holding the
+    // lock here would deadlock: this thread waits for the worker to exit,
+    // the worker waits for this thread to release the mutex.
+    std::shared_ptr<sync::content_sync>      watchdog;
+    std::shared_ptr<sync::command_scheduler> scheduler;
+    std::shared_ptr<relay::command_relay>    relay;
+    std::shared_ptr<ptp::ptp_clock>          ptp;
+    {
+        std::lock_guard<std::mutex> lock(g_state_mutex);
+        if (!g_state.active) {
+            return;
+        }
+
+        CASPAR_LOG(info) << L"[cluster] Shutting down cluster module...";
+
+        watchdog  = std::move(g_state.watchdog);
+        scheduler = std::move(g_state.scheduler);
+        relay     = std::move(g_state.relay);
+        ptp       = std::move(g_state.ptp);
+        g_state.frame_clock.reset();
+        g_state.channel_map.reset();
+        g_state.internal_client.reset();
+        g_state.active = false;
     }
 
-    CASPAR_LOG(info) << L"[cluster] Shutting down cluster module...";
-
-    // Stop components in reverse dependency order
-    if (g_state.watchdog) {
-        g_state.watchdog->stop();
-        g_state.watchdog.reset();
-    }
-    if (g_state.scheduler) {
-        g_state.scheduler->stop();
-        g_state.scheduler.reset();
-    }
-    if (g_state.relay) {
-        g_state.relay->stop();
-        g_state.relay.reset();
-    }
-    if (g_state.ptp) {
-        g_state.ptp->stop();
-        g_state.ptp.reset();
-    }
-    g_state.frame_clock.reset();
-    g_state.channel_map.reset();
-    g_state.internal_client.reset();
-    g_state.active = false;
+    // Stop components in reverse dependency order, lock released.
+    if (watchdog)  watchdog->stop();
+    if (scheduler) scheduler->stop();
+    if (relay)     relay->stop();
+    if (ptp)       ptp->stop();
 
     CASPAR_LOG(info) << L"[cluster] Shutdown complete.";
 }

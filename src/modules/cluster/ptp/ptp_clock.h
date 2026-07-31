@@ -110,6 +110,10 @@ class ptp_clock
     // Follow-up correlation
     int64_t  last_sync_recv_time_ns_ = 0;
     uint16_t last_sync_sequence_     = 0;
+    // (T2 - T1) from the most recent Sync/Follow-Up pair, retained until the
+    // next Delay_Resp so the mean-path-delay formula can use both halves:
+    // meanDelay = ((T2-T1) + (T4-T3)) / 2. See handle_delay_resp().
+    int64_t  last_sync_interval_ns_  = 0;
 
     // Offset filter (simple exponential moving average)
     double filtered_offset_ns_ = 0.0;

@@ -210,7 +210,13 @@ bool ReplaySegmentedWriter::WriteFrame(const void* data, size_t size, uint64_t t
     replay_index_entry_v2 entry;
     entry.file_offset = offset;
     entry.timestamp = timestamp;
-    fwrite(&entry, sizeof(entry), 1, file_idx_);
+    if (fwrite(&entry, sizeof(entry), 1, file_idx_) != 1) {
+        // A short/failed index write desyncs the index from .mav — every
+        // later GetFrame() in this segment would compute frame boundaries
+        // from the wrong index entries. Fail the frame the same way the
+        // data write above already does, rather than continuing silently.
+        return false;
+    }
     fflush(file_idx_);
 
     // Update current segment end time
@@ -391,11 +397,20 @@ bool ReplaySegmentedReader::Open(const boost::filesystem::path& base_path)
         long long entry_count = (size - (long long)sizeof(header)) / (long long)sizeof(replay_index_entry_v2);
         if (entry_count > 0) {
             seg.indices.resize((size_t)entry_count);
-            fread(seg.indices.data(), sizeof(replay_index_entry_v2), (size_t)entry_count, f);
-
+            size_t read_count = fread(seg.indices.data(), sizeof(replay_index_entry_v2), (size_t)entry_count, f);
+            if (read_count < (size_t)entry_count) {
+                // A short read leaves the unread tail zero-filled (from resize
+                // above) — truncate instead of treating those zero
+                // timestamp/offset entries as real data.
+                seg.indices.resize(read_count);
+            }
+            if (seg.indices.empty()) {
+                seg.start_timestamp = seg.end_timestamp = 0;
+            } else {
             // Correct timestamps from entries
             seg.start_timestamp = seg.indices.front().timestamp;
             seg.end_timestamp = seg.indices.back().timestamp;
+            }
             
             seg.global_start_frame = total_frames_;
             total_frames_ += entry_count;
@@ -637,11 +652,17 @@ void ReplaySegmentedReader::Refresh()
             new_seg.mav_path = mav_s;
             
             new_seg.indices.resize(count);
-            fread(new_seg.indices.data(), sizeof(replay_index_entry_v2), count, f2);
-            new_seg.start_timestamp = new_seg.indices.front().timestamp;
-            new_seg.end_timestamp = new_seg.indices.back().timestamp;
+            size_t read_count = fread(new_seg.indices.data(), sizeof(replay_index_entry_v2), count, f2);
+            if (read_count < (size_t)count) {
+                new_seg.indices.resize(read_count);
+                count = (long long)read_count;
+            }
+            if (!new_seg.indices.empty()) {
+                new_seg.start_timestamp = new_seg.indices.front().timestamp;
+                new_seg.end_timestamp = new_seg.indices.back().timestamp;
+            }
             new_seg.global_start_frame = total_frames_;
-            
+
             total_frames_ += (size_t)count;
             segments_.push_back(new_seg);
         }

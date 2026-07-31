@@ -103,6 +103,13 @@ class keyframe_timeline
     std::vector<keyframe_t>  kfs_;             // sorted by time_secs
     std::vector<std::string> all_field_names_; // unique, rebuilt on mutation
 
+    // Per-field time-sorted indices into kfs_ (only keyframes that define that
+    // field), rebuilt alongside all_field_names_ on every mutation. Lets
+    // interpolate() — called every frame, unlike add()/remove()/patch_at_time()
+    // — binary-search for kf_before/kf_after per field instead of scanning all
+    // keyframes for every field on every call.
+    std::unordered_map<std::string, std::vector<std::size_t>> field_keyframe_indices_;
+
     void rebuild_field_index();
 };
 

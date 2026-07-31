@@ -245,14 +245,18 @@ kf_values keyframe_timeline::interpolate(double time_secs) const
         // Find the first keyframe after `time_secs` that contains this field
         const keyframe_t* kf_after = nullptr;
 
-        for (const auto& kf : kfs_) {
-            auto it = kf.values.find(field_name);
-            if (it == kf.values.end())
-                continue;
-            if (kf.time_secs <= time_secs)
-                kf_before = &kf;
-            else if (!kf_after)
-                kf_after = &kf;
+        auto idx_it = field_keyframe_indices_.find(field_name);
+        if (idx_it != field_keyframe_indices_.end()) {
+            const auto& indices = idx_it->second;
+            // First index whose keyframe time is > time_secs (binary search,
+            // O(log n) instead of scanning every keyframe for every field).
+            auto after_it = std::upper_bound(
+                indices.begin(), indices.end(), time_secs,
+                [this](double t, std::size_t idx) { return t < kfs_[idx].time_secs; });
+            if (after_it != indices.end())
+                kf_after = &kfs_[*after_it];
+            if (after_it != indices.begin())
+                kf_before = &kfs_[*std::prev(after_it)];
         }
 
         if (kf_before && kf_after) {
@@ -307,6 +311,15 @@ void keyframe_timeline::rebuild_field_index()
         for (const auto& [k, v] : kf.values)
             names.insert(k);
     all_field_names_.assign(names.begin(), names.end());
+
+    // Per-field index: for each field, the indices into kfs_ (already
+    // time-sorted) of keyframes that define it, in the same order.
+    field_keyframe_indices_.clear();
+    field_keyframe_indices_.reserve(all_field_names_.size());
+    for (std::size_t i = 0; i < kfs_.size(); ++i) {
+        for (const auto& [k, v] : kfs_[i].values)
+            field_keyframe_indices_[k].push_back(i);
+    }
 }
 
 }} // namespace caspar::keyframes

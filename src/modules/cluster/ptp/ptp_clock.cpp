@@ -545,6 +545,12 @@ void ptp_clock::handle_follow_up(const follow_up_message& msg)
     // T2 = local receive time of Sync
     int64_t t2 = last_sync_recv_time_ns_;
 
+    // Retained for the next Delay_Resp's mean-path-delay calculation — see
+    // handle_delay_resp(). Storing (T2-T1) directly (rather than T1) avoids
+    // needing t2 there too, since last_sync_recv_time_ns_ may be overwritten
+    // by a newer Sync before the Delay_Resp for this exchange arrives.
+    last_sync_interval_ns_ = t2 - t1;
+
     // offset = T1 - T2 + delay
     // We compute a raw offset; delay is added from Delay_Resp
     int64_t raw_offset = t1 - t2 + delay_ns_.load(std::memory_order_relaxed);
@@ -568,9 +574,13 @@ void ptp_clock::handle_delay_resp(const delay_resp_message& msg)
     // T4 = receive timestamp from master
     int64_t t4 = msg.receive_timestamp.to_nanoseconds();
 
-    // Mean path delay = (T4 - T3 - offset) / 2
-    // Simplified: delay = (T4 - T3) / 2 (first order)
-    int64_t delay = (t4 - t3) / 2;
+    // Mean path delay = ((T2-T1) + (T4-T3)) / 2 — the standard PTP formula.
+    // The previous (T4-T3)/2 "simplification" isn't a simplification of this
+    // at all: it drops the (T2-T1) term entirely, so the client's own clock
+    // offset from the master leaks into the delay estimate and never
+    // converges out (the filtered offset settles near -(offset+delay)/2
+    // instead of -offset).
+    int64_t delay = (last_sync_interval_ns_ + (t4 - t3)) / 2;
     if (delay > 0) {
         delay_ns_.store(delay, std::memory_order_relaxed);
     }

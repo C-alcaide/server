@@ -190,6 +190,20 @@ class ofx_producer : public core::frame_producer
     }
 
     /// (Re)create the effect for the given frame size and bit depth. Must hold effect_mutex_.
+    //
+    // KNOWN LIMITATION: getImage() (ofx_clip_instance.cpp) hands plugins raw
+    // pointers directly into src_rgba_/dst_rgba_ below. A plugin that retains
+    // an image handle past the render call that produced it (a spec
+    // violation, but a real bug seen in some third-party plugins — e.g. one
+    // that queues the pointer for an async GPU submission) will read/write
+    // freed or repurposed memory the next time this function actually
+    // resizes (a frame-size or bit-depth change), since effect_ itself is
+    // destroyed and replaced on the next line and the buffers are reassigned
+    // below. All well-behaved plugins (including every first-party effect
+    // bundled with CasparCG) release images within the render call and are
+    // unaffected. Fully closing this requires either refcount-gating the
+    // resize on outstanding image references or copying each render's
+    // source into a distinct, non-reused buffer — not done here.
     bool ensure_effect(int w, int h, int bytes)
     {
         if (effect_ && effect_->valid() && w == width_ && h == height_ && bytes == bytes_per_channel_)
