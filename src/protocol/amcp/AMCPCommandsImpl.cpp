@@ -3782,9 +3782,13 @@ std::wstring previz_scene_command(command_context& ctx)
         bool is_save     = boost::iequals(path_param, L"SAVE");
         auto media_base  = boost::filesystem::canonical(env::media_folder());
         auto resolved    = boost::filesystem::path(media_base) / ctx.parameters.at(1);
-        // Guard against path traversal outside the media folder.
-        auto check       = resolved.lexically_normal();
-        if (!is_within_base(check, media_base))
+        // Guard against path traversal outside the media folder. weakly_canonical
+        // (not lexically_normal) because SAVE's target need not exist yet, but only
+        // a real canonicalization resolves a symlink planted inside the media
+        // folder -- which is what otherwise makes this a write-anywhere. Same
+        // treatment as PRINT RAW, whose output file likewise does not exist yet.
+        resolved = boost::filesystem::weakly_canonical(resolved);
+        if (!is_within_base(resolved, media_base))
             return L"403 PREVIZ FORBIDDEN\r\n";
         try {
             if (is_save) {
