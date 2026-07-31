@@ -54,7 +54,9 @@
 #endif
 
 #include <atomic>
+#include <deque>
 #include <stdexcept>
+#include <vector>
 
 // C-linkage CUDA kernel launchers (defined in cuda_vk_kernels.cu)
 extern "C" {
@@ -100,26 +102,43 @@ struct cuda_vk_strategy::impl
     // CUDA resources
     int              cuda_device_ = 0;
     cudaStream_t     stream_      = nullptr;
-    uint32_t*        d_v210_[3]   = {};  // triple-buffered device V210 output
-    uint8_t*         d_bgra_[3]   = {};  // triple-buffered device BGRA8 output (SDR only)
+    static constexpr int NUM_DEV_BUFS = 3;
+    uint32_t*        d_v210_[NUM_DEV_BUFS] = {};  // device V210 pack targets
+    uint8_t*         d_bgra_[NUM_DEV_BUFS] = {};  // device BGRA8 pack targets (SDR only)
+    size_t           dev_buf_sz_  = 0;
+    int              dev_idx_     = 0;
 
-    // Async triple-buffer: three pinned host buffers (rotating).
-    // Each frame we: (1) wait for the buffer written 2 frames ago (the "read"
-    // buffer), (2) launch kernel + D2H into buf[write_idx_], (3) return the
-    // read buffer.  With 3 buffers and a rotating index, the buffer we sync
-    // on has had 2 full frame intervals to complete its D2H — matching the
-    // OGL PBO triple-buffer pipeline depth that achieves perfect 60fps.
-    static constexpr int NUM_ASYNC_BUFS = 3;
-    void*            h_pinned_[NUM_ASYNC_BUFS] = {};  // pinned host output buffers
-    size_t           h_pinned_sz_  = 0;
-    int              write_idx_    = 0;   // buffer being written to this frame
-    int              warmup_count_ = 0;   // counts up to NUM_ASYNC_BUFS-1 during startup
+    // Pipeline depth: the D2H for frame N is not waited on until frame
+    // N + PIPELINE_DEPTH, so the copy has that many frame intervals to land.
+    // This is a latency/throughput knob only -- it says nothing about how long a
+    // buffer must stay valid, which is what buffer_depth_ governs.
+    static constexpr int PIPELINE_DEPTH = 2;
 
-    // Per-buffer CUDA events: recorded after D2H for each buffer.
-    // Before reusing buffer[i], we wait on d2h_event_[i] (which was recorded
-    // NUM_ASYNC_BUFS-1 frames ago, giving 2 frame intervals for GPU work to
-    // complete — significantly more slack than the previous 1-frame double-buffer).
-    cudaEvent_t      d2h_event_[NUM_ASYNC_BUFS] = {};
+    // Output buffers come from a refcounted pool, NOT a fixed ring.
+    //
+    // Previously this was three pinned buffers rotated by write_idx_, handed to
+    // DeckLink through a shared_ptr with a no-op deleter. DeckLink keeps
+    // buffer_depth() frames (4-5) scheduled and DMAs each at display time, so a
+    // 3-slot ring rewrote the buffer it had just handed over -- the buffer
+    // returned on frame N was the D2H target again on frame N+1, while still
+    // queued. That produced stale and torn SDI frames with nothing logged.
+    //
+    // gpu_output_buffer_pool already solves this for the CPU strategies: its
+    // shared_ptr deleter returns the buffer to the free list, so a buffer cannot
+    // be reused until DeckLink has released the frame holding it.
+    std::shared_ptr<gpu_output_buffer_pool> pool_;
+    size_t                                  pool_buf_sz_ = 0;
+
+    // In-flight D2H copies, oldest first. Each entry owns its pooled buffer for
+    // as long as it is queued here; handing it out transfers that ownership to
+    // the caller (and ultimately to DeckLink).
+    struct inflight
+    {
+        std::shared_ptr<void> buf;
+        cudaEvent_t           done = nullptr;
+    };
+    std::deque<inflight>     inflight_;
+    std::vector<cudaEvent_t> event_pool_;   // recycled events
 
     // Multi-slot import cache: the VK attachment pool rotates through N textures
     // (typically 3-4). We cache the CUDA import for each one so we only pay the
@@ -164,23 +183,34 @@ struct cuda_vk_strategy::impl
     int              gpu_wait_fail_count_ = 0;    // consecutive failures; retry after threshold
     static constexpr int GPU_WAIT_RETRY_INTERVAL = 500; // frames between retry attempts
 
-    // Shared sentinel to prevent dangling pointers.  The returned shared_ptr<void>
-    // from convert_v210/convert_bgra captures this; if the consumer outlives the
-    // strategy, the custom deleter safely no-ops instead of accessing freed memory.
-    std::shared_ptr<std::atomic<bool>> alive_ = std::make_shared<std::atomic<bool>>(true);
-
-    // Wrap a pinned host pointer in a shared_ptr that holds a weak reference to
-    // the alive_ sentinel.  The pinned memory is NOT freed by the deleter — it's
-    // owned by h_pinned_[] and freed in ~impl().  The sentinel just prevents
-    // access after the strategy is destroyed.
-    std::shared_ptr<void> make_pinned_ref(void* pinned)
+    // Acquire an event, reusing a retired one when available.
+    cudaEvent_t take_event()
     {
-        auto guard = alive_;
-        return std::shared_ptr<void>(pinned, [guard](void*) {
-            // No-op deleter: pinned memory is owned by impl, not by this shared_ptr.
-            // The captured 'guard' keeps the sentinel alive so that even if the
-            // consumer's shared_ptr outlives the strategy, no crash occurs.
-        });
+        if (!event_pool_.empty()) {
+            auto e = event_pool_.back();
+            event_pool_.pop_back();
+            return e;
+        }
+        cudaEvent_t e = nullptr;
+        cuda_check(cudaEventCreateWithFlags(&e, cudaEventDisableTiming), "cudaEventCreate");
+        return e;
+    }
+
+    // Ensure the pool exists and its buffers are big enough for `bytes`.
+    //
+    // Sized buffer_depth_ + PIPELINE_DEPTH + 1: DeckLink can hold buffer_depth_
+    // frames, this strategy holds up to PIPELINE_DEPTH more in inflight_, and one
+    // is being filled. The pool grows on demand anyway, so this is the steady-state
+    // count rather than a hard cap.
+    void ensure_pool(size_t bytes)
+    {
+        if (pool_ && pool_buf_sz_ >= bytes)
+            return;
+        // A larger frame needs a new pool; the old one stays alive as long as any
+        // buffer it handed out is still referenced (its state block is shared).
+        pool_        = std::make_shared<gpu_output_buffer_pool>(
+            bytes, buffer_depth_ + PIPELINE_DEPTH + 1, gpu_output_buffer_pool::pin_kind::cuda_pinned);
+        pool_buf_sz_ = bytes;
     }
 
     // Timing diagnostics (periodic log)
@@ -203,23 +233,30 @@ struct cuda_vk_strategy::impl
         cuda_device_ = 0;
         cuda_check(cudaSetDevice(cuda_device_), "cudaSetDevice");
         cuda_check(cudaStreamCreateWithFlags(&stream_, cudaStreamNonBlocking), "cudaStreamCreate");
-        for (int i = 0; i < NUM_ASYNC_BUFS; ++i)
-            cuda_check(cudaEventCreateWithFlags(&d2h_event_[i], cudaEventDisableTiming), "cudaEventCreate");
     }
 
     ~impl()
     {
-        // Mark sentinel so any outstanding shared_ptr<void> from convert_v210/bgra
-        // won't attempt to use this impl's pinned buffers after destruction.
-        alive_->store(false, std::memory_order_release);
-
         // Ensure all async GPU work has completed before destroying resources.
         // Without this, in-flight D2H copies or semaphore waits could access
         // freed buffers or destroyed events.
+        //
+        // The output buffers themselves need no such care: they belong to
+        // gpu_output_buffer_pool, whose allocations outlive the pool object for
+        // exactly as long as any frame still references them -- so a frame left in
+        // the DeckLink queue at shutdown stays valid until the driver releases it.
+        // (The old code freed them here with cudaFreeHost while the card could
+        // still be reading, and relied on an `alive_` sentinel that nothing ever
+        // checked.)
         if (stream_) {
             cudaSetDevice(cuda_device_);
             cudaStreamSynchronize(stream_);
         }
+
+        drain_inflight();
+        for (auto e : event_pool_)
+            cudaEventDestroy(e);
+        event_pool_.clear();
 
         for (int i = 0; i < num_cached_sems_; ++i) {
             if (cached_sems_[i].sem) cudaDestroyExternalSemaphore(cached_sems_[i].sem);
@@ -228,15 +265,9 @@ struct cuda_vk_strategy::impl
         for (int i = 0; i < num_cached_; ++i)
             cached_slots_[i].cleanup();
         num_cached_ = 0;
-        for (int i = 0; i < NUM_ASYNC_BUFS; ++i) {
-            if (d2h_event_[i]) { cudaEventDestroy(d2h_event_[i]); d2h_event_[i] = nullptr; }
-        }
-        for (int i = 0; i < NUM_ASYNC_BUFS; ++i) {
+        for (int i = 0; i < NUM_DEV_BUFS; ++i) {
             if (d_v210_[i]) { cudaFree(d_v210_[i]); d_v210_[i] = nullptr; }
             if (d_bgra_[i]) { cudaFree(d_bgra_[i]); d_bgra_[i] = nullptr; }
-        }
-        for (int i = 0; i < NUM_ASYNC_BUFS; ++i) {
-            if (h_pinned_[i]) { cudaFreeHost(h_pinned_[i]); h_pinned_[i] = nullptr; }
         }
         if (stream_) { cudaStreamDestroy(stream_); stream_ = nullptr; }
     }
@@ -324,38 +355,72 @@ struct cuda_vk_strategy::impl
         return slot.surf;
     }
 
+    // Device-side pack targets. One per pipeline stage (not per DeckLink frame --
+    // the card never sees these), rotated by dev_idx_.
     void ensure_output_buffers(int dst_w, int dst_h, bool need_v210)
     {
-        if (need_v210) {
-            size_t v210_row = (size_t)((dst_w + 47) / 48) * 128;
-            size_t v210_sz  = v210_row * dst_h;
-            if (!d_v210_[0] || h_pinned_sz_ < v210_sz) {
-                for (int i = 0; i < NUM_ASYNC_BUFS; ++i) {
-                    if (d_v210_[i]) cudaFree(d_v210_[i]);
-                    cuda_check(cudaMalloc(&d_v210_[i], v210_sz), "cudaMalloc v210");
-                }
-                for (int i = 0; i < NUM_ASYNC_BUFS; ++i) {
-                    if (h_pinned_[i]) cudaFreeHost(h_pinned_[i]);
-                    cuda_check(cudaMallocHost(&h_pinned_[i], v210_sz), "cudaMallocHost v210");
-                }
-                h_pinned_sz_ = v210_sz;
-                warmup_count_ = 0;  // buffers reallocated, must re-fill pipeline
-            }
-        } else {
-            size_t bgra_sz = (size_t)dst_w * dst_h * 4;
-            if (!d_bgra_[0] || h_pinned_sz_ < bgra_sz) {
-                for (int i = 0; i < NUM_ASYNC_BUFS; ++i) {
-                    if (d_bgra_[i]) cudaFree(d_bgra_[i]);
-                    cuda_check(cudaMalloc(&d_bgra_[i], bgra_sz), "cudaMalloc bgra");
-                }
-                for (int i = 0; i < NUM_ASYNC_BUFS; ++i) {
-                    if (h_pinned_[i]) cudaFreeHost(h_pinned_[i]);
-                    cuda_check(cudaMallocHost(&h_pinned_[i], bgra_sz), "cudaMallocHost bgra");
-                }
-                h_pinned_sz_ = bgra_sz;
-                warmup_count_ = 0;  // buffers reallocated, must re-fill pipeline
+        const size_t need = need_v210 ? (size_t)((dst_w + 47) / 48) * 128 * dst_h
+                                      : (size_t)dst_w * dst_h * 4;
+        auto** bufs = need_v210 ? reinterpret_cast<void**>(d_v210_) : reinterpret_cast<void**>(d_bgra_);
+        if (bufs[0] && dev_buf_sz_ >= need)
+            return;
+
+        // Drain first: these buffers are the source of D2H copies that may still be
+        // in flight, and cudaFree on a live copy's source is a use-after-free. The
+        // old code reallocated without any synchronisation at all.
+        drain_inflight();
+        cuda_check(cudaStreamSynchronize(stream_), "cudaStreamSynchronize (realloc)");
+
+        for (int i = 0; i < NUM_DEV_BUFS; ++i) {
+            if (d_v210_[i]) { cudaFree(d_v210_[i]); d_v210_[i] = nullptr; }
+            if (d_bgra_[i]) { cudaFree(d_bgra_[i]); d_bgra_[i] = nullptr; }
+        }
+        for (int i = 0; i < NUM_DEV_BUFS; ++i) {
+            if (need_v210)
+                cuda_check(cudaMalloc(&d_v210_[i], need), "cudaMalloc v210");
+            else
+                cuda_check(cudaMalloc(&d_bgra_[i], need), "cudaMalloc bgra");
+        }
+        dev_buf_sz_ = need;
+        dev_idx_    = 0;
+    }
+
+    // Wait out and release every queued copy. Their pooled buffers go back to the
+    // pool as the entries are destroyed (unless DeckLink still holds a reference).
+    void drain_inflight()
+    {
+        for (auto& f : inflight_) {
+            if (f.done) {
+                cudaEventSynchronize(f.done);
+                event_pool_.push_back(f.done);
             }
         }
+        inflight_.clear();
+    }
+
+    // Queue this frame's copy and hand back the oldest completed one, preserving
+    // the previous 2-frame pipeline depth.
+    //
+    // Returns null while the queue is still filling: for the first PIPELINE_DEPTH
+    // frames there is genuinely no copy old enough to have completed. The caller
+    // falls back to the CPU strategy for those, which is what it already does for
+    // any frame the GPU path declines. Crucially, a buffer leaves this queue
+    // exactly once -- handing one out while it is still queued is the whole defect
+    // being fixed, so the fill case must not hand out the entry it just pushed.
+    std::shared_ptr<void> push_and_take(std::shared_ptr<void> buf)
+    {
+        auto ev = take_event();
+        cuda_check(cudaEventRecord(ev, stream_), "cudaEventRecord");
+        inflight_.push_back({std::move(buf), ev});
+
+        if ((int)inflight_.size() <= PIPELINE_DEPTH)
+            return nullptr;
+
+        auto oldest = std::move(inflight_.front());
+        inflight_.pop_front();
+        cuda_check(cudaEventSynchronize(oldest.done), "cudaEventSynchronize");
+        event_pool_.push_back(oldest.done);
+        return std::move(oldest.buf);
     }
 
     // Invalidate any cached semaphore associated with a given Win32 HANDLE.
@@ -512,18 +577,17 @@ struct cuda_vk_strategy::impl
         ensure_output_buffers(dst_w, dst_h, true);
         double import_ms = step_timer.elapsed() * 1000.0;
 
-        int cur_write = write_idx_;
-        // Read buffer is the one written 2 frames ago (oldest in the ring).
-        // With triple-buffering, this buffer has had 2 full frame intervals
-        // for its D2H to complete, compared to only 1 with double-buffering.
-        int cur_read  = (cur_write + 1) % NUM_ASYNC_BUFS;
+        // A fresh pooled buffer for this frame's D2H. Its shared_ptr is what keeps
+        // it out of circulation until DeckLink is finished with the frame.
+        ensure_pool(v210_sz);
+        auto out_buf = pool_->acquire(v210_sz);
+        if (!out_buf)
+            return nullptr;   // pool exhausted and out of memory: fall back to CPU
 
-        // Wait for buffer[cur_read]'s D2H to complete — this is the data we'll return.
-        // With 3 buffers, this event was recorded 2 frames ago so the wait is
-        // typically a no-op (already complete), matching OGL PBO pipeline depth.
-        step_timer = caspar::timer();
-        if (warmup_count_ >= NUM_ASYNC_BUFS - 1)
-            cuda_check(cudaEventSynchronize(d2h_event_[cur_read]), "cudaEventSynchronize");
+        const int cur_dev = dev_idx_;
+        dev_idx_          = (cur_dev + 1) % NUM_DEV_BUFS;
+
+        step_timer     = caspar::timer();
         double sync_ms = step_timer.elapsed() * 1000.0;
 
         // Enqueue GPU-side wait for VK render completion on the CUDA stream.
@@ -544,7 +608,7 @@ struct cuda_vk_strategy::impl
         step_timer = caspar::timer();
         auto err = cuda_vk_launch_surface_to_v210(
             surf,
-            d_v210_[cur_write],
+            d_v210_[cur_dev],
             src_x, src_y,
             dst_w, dst_h,
             src_w, src_h,
@@ -557,17 +621,12 @@ struct cuda_vk_strategy::impl
             return nullptr;
         }
 
-        // Enqueue D2H copy into the write buffer — does NOT block
-        cuda_check(cudaMemcpyAsync(h_pinned_[cur_write], d_v210_[cur_write], v210_sz,
+        // Enqueue D2H copy into this frame's own buffer — does NOT block
+        cuda_check(cudaMemcpyAsync(out_buf.get(), d_v210_[cur_dev], v210_sz,
                                    cudaMemcpyDeviceToHost, stream_), "cudaMemcpyAsync D2H");
-        // Record event so we know when this buffer's D2H is done
-        cuda_check(cudaEventRecord(d2h_event_[cur_write], stream_), "cudaEventRecord");
         double launch_ms = step_timer.elapsed() * 1000.0;
 
         double total_ms = total_timer.elapsed() * 1000.0;
-
-        // Advance write index through the ring (0 → 1 → 2 → 0 ...)
-        write_idx_ = (cur_write + 1) % NUM_ASYNC_BUFS;
 
         // Periodic timing report (every 50 frames)
         accum_fence_ms_   += fence_ms;
@@ -587,18 +646,9 @@ struct cuda_vk_strategy::impl
             accum_fence_ms_ = accum_import_ms_ = accum_sync_ms_ = accum_launch_ms_ = accum_total_ms_ = 0.0;
         }
 
-        if (warmup_count_ < NUM_ASYNC_BUFS - 1) {
-            // Warmup: not enough frames queued yet to return a completed buffer.
-            // Block-wait for the current frame so we have valid data to return.
-            cuda_check(cudaStreamSynchronize(stream_), "cudaStreamSynchronize (warmup)");
-            warmup_count_++;
-            auto pinned = h_pinned_[cur_write];
-            return make_pinned_ref(pinned);
-        }
-
-        // Steady state: return the buffer written 2 frames ago (fully complete)
-        auto pinned = h_pinned_[cur_read];
-        return make_pinned_ref(pinned);
+        // Null while the pipeline fills -> convert_frame_for_port() uses the CPU
+        // strategy for those first frames.
+        return push_and_take(std::move(out_buf));
 #else
         return nullptr;
 #endif
@@ -648,12 +698,15 @@ struct cuda_vk_strategy::impl
         ensure_output_buffers(dst_w, dst_h, false);
         double import_ms = step_timer.elapsed() * 1000.0;
 
-        int cur_write = write_idx_;
-        int cur_read  = (cur_write + 1) % NUM_ASYNC_BUFS;
+        ensure_pool(bgra_sz);
+        auto out_buf = pool_->acquire(bgra_sz);
+        if (!out_buf)
+            return nullptr;
 
-        step_timer = caspar::timer();
-        if (warmup_count_ >= NUM_ASYNC_BUFS - 1)
-            cuda_check(cudaEventSynchronize(d2h_event_[cur_read]), "cudaEventSynchronize");
+        const int cur_dev = dev_idx_;
+        dev_idx_          = (cur_dev + 1) % NUM_DEV_BUFS;
+
+        step_timer     = caspar::timer();
         double sync_ms = step_timer.elapsed() * 1000.0;
 
         // GPU-side wait for VK render, fallback to CPU fence
@@ -669,7 +722,7 @@ struct cuda_vk_strategy::impl
 
         step_timer = caspar::timer();
         auto err = cuda_vk_launch_surface_to_bgra8(
-            surf, d_bgra_[cur_write],
+            surf, d_bgra_[cur_dev],
             src_x, src_y,
             dst_w, dst_h,
             src_w, src_h,
@@ -680,14 +733,11 @@ struct cuda_vk_strategy::impl
             return nullptr;
         }
 
-        cuda_check(cudaMemcpyAsync(h_pinned_[cur_write], d_bgra_[cur_write], bgra_sz,
+        cuda_check(cudaMemcpyAsync(out_buf.get(), d_bgra_[cur_dev], bgra_sz,
                                    cudaMemcpyDeviceToHost, stream_), "cudaMemcpyAsync D2H");
-        cuda_check(cudaEventRecord(d2h_event_[cur_write], stream_), "cudaEventRecord");
         double launch_ms = step_timer.elapsed() * 1000.0;
 
         double total_ms = total_timer.elapsed() * 1000.0;
-
-        write_idx_ = (cur_write + 1) % NUM_ASYNC_BUFS;
 
         // Periodic timing report (shared with v210 path)
         accum_fence_ms_   += fence_ms;
@@ -707,15 +757,7 @@ struct cuda_vk_strategy::impl
             accum_fence_ms_ = accum_import_ms_ = accum_sync_ms_ = accum_launch_ms_ = accum_total_ms_ = 0.0;
         }
 
-        if (warmup_count_ < NUM_ASYNC_BUFS - 1) {
-            cuda_check(cudaStreamSynchronize(stream_), "cudaStreamSynchronize (warmup)");
-            warmup_count_++;
-            auto pinned = h_pinned_[cur_write];
-            return make_pinned_ref(pinned);
-        }
-
-        auto pinned = h_pinned_[cur_read];
-        return make_pinned_ref(pinned);
+        return push_and_take(std::move(out_buf));
 #else
         return nullptr;
 #endif
