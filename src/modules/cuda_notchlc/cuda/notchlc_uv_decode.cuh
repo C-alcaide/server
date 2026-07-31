@@ -101,9 +101,10 @@ __global__ void k_notch_uv_decode(
     const uint16_t escape = read_le16(dgb, dp + 2);
     dp += 4;
 
-    // Base pixel coordinates for this block in the output planes.
-    // NotchLC requires width/height to be multiples of 16, so every block is
-    // fully interior — no bounds check needed on pixel writes.
+    // Base pixel coordinates for this block in the output planes. NotchLC is
+    // documented to require width/height multiples of 16, but that precondition
+    // isn't enforced anywhere upstream of this kernel, so edge blocks are
+    // clamped below rather than assumed interior.
     const int px_x = bx * 16;
     const int px_y = by * 16;
 
@@ -120,9 +121,12 @@ __global__ void k_notch_uv_decode(
                 const uint16_t vv = (uint16_t)lerp3(v0, vdif, l);
                 for (int ii = 0; ii < 4; ii++) {
                     for (int jj = 0; jj < 4; jj++) {
-                        const int oi = (px_y + i + ii) * width + (px_x + j + jj);
-                        d_out_u[oi] = uv;
-                        d_out_v[oi] = vv;
+                        const int row = px_y + i + ii, col = px_x + j + jj;
+                        if (row < height && col < width) {
+                            const int oi = row * width + col;
+                            d_out_u[oi] = uv;
+                            d_out_v[oi] = vv;
+                        }
                     }
                 }
             }
@@ -150,10 +154,13 @@ __global__ void k_notch_uv_decode(
                             const uint16_t vv = (uint16_t)lerp3(v0, vdif, l);
                             for (int iii = 0; iii < 2; iii++) {
                                 for (int jjj = 0; jjj < 2; jjj++) {
-                                    const int o = (px_y + oi_base + ii + iii) * width
-                                                + (px_x + oj_base + jj + jjj);
-                                    d_out_u[o] = uv;
-                                    d_out_v[o] = vv;
+                                    const int row = px_y + oi_base + ii + iii;
+                                    const int col = px_x + oj_base + jj + jjj;
+                                    if (row < height && col < width) {
+                                        const int o = row * width + col;
+                                        d_out_u[o] = uv;
+                                        d_out_v[o] = vv;
+                                    }
                                 }
                             }
                         }
@@ -169,11 +176,17 @@ __global__ void k_notch_uv_decode(
                             const int udif = u1 - u0, vdif = v1 - v0;
                             for (int iii = 0; iii < 4; iii++) {
                                 for (int jjj = 0; jjj < 4; jjj++) {
+                                    // loc must still be consumed even for an
+                                    // out-of-bounds pixel — it's a sequential
+                                    // bitstream read, not just an output index.
                                     const int l = (int)(loc & 3u); loc >>= 2;
-                                    const int o = (px_y + oi_base + ii + iii) * width
-                                                + (px_x + oj_base + jj + jjj);
-                                    d_out_u[o] = (uint16_t)lerp3(u0, udif, l);
-                                    d_out_v[o] = (uint16_t)lerp3(v0, vdif, l);
+                                    const int row = px_y + oi_base + ii + iii;
+                                    const int col = px_x + oj_base + jj + jjj;
+                                    if (row < height && col < width) {
+                                        const int o = row * width + col;
+                                        d_out_u[o] = (uint16_t)lerp3(u0, udif, l);
+                                        d_out_v[o] = (uint16_t)lerp3(v0, vdif, l);
+                                    }
                                 }
                             }
                         }
@@ -183,10 +196,12 @@ __global__ void k_notch_uv_decode(
                     // (Original code relied on int u[16][16] = {} zero-initialisation.)
                     for (int ii = 0; ii < 8; ii++) {
                         for (int jj = 0; jj < 8; jj++) {
-                            const int o = (px_y + oi_base + ii) * width
-                                        + (px_x + oj_base + jj);
-                            d_out_u[o] = 0;
-                            d_out_v[o] = 0;
+                            const int row = px_y + oi_base + ii, col = px_x + oj_base + jj;
+                            if (row < height && col < width) {
+                                const int o = row * width + col;
+                                d_out_u[o] = 0;
+                                d_out_v[o] = 0;
+                            }
                         }
                     }
                 }

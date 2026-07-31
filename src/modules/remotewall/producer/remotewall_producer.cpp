@@ -72,7 +72,10 @@ namespace {
 // colour-space / transfer enums so the mixer applies the right colour handling / tone-map.
 std::pair<core::color_space, core::color_transfer> parse_colorspace(const char* cs)
 {
-    std::string s = cs ? cs : "";
+    // cs is always info_.colorSpace, a fixed char[16] wire field with no
+    // guaranteed NUL terminator if all 16 bytes are used — bound the length
+    // instead of treating it as a plain C-string.
+    std::string s = cs ? std::string(cs, ::strnlen(cs, 16)) : std::string();
     for (auto& ch : s)
         ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
 
@@ -407,7 +410,7 @@ class remotewall_producer : public core::frame_producer
         s["remotewall/grid"]           = std::vector<int>{static_cast<int>(info_.gridCols),
                                                           static_cast<int>(info_.gridRows)};
         s["remotewall/fps"]            = info_.fpsDen ? static_cast<double>(info_.fpsNum) / info_.fpsDen : 0.0;
-        s["remotewall/colorspace"]     = std::string(info_.colorSpace);
+        s["remotewall/colorspace"]     = std::string(info_.colorSpace, ::strnlen(info_.colorSpace, sizeof(info_.colorSpace)));
         s["remotewall/frame"]          = static_cast<double>(info_.globalFrameIndex);
         if (info_.tcValid) {
             char tc[24];
@@ -438,6 +441,9 @@ class remotewall_producer : public core::frame_producer
     std::future<std::wstring> call(const std::vector<std::wstring>& params) override
     {
         std::wstring result;
+        // Was only taken by the SET branch; INFO/CAMERA read rw_/info_ without
+        // it, racing a concurrent SET's teardown_receiver()/init_receiver().
+        std::lock_guard<std::mutex> lk(rw_mtx_);
         if (!params.empty() && boost::iequals(params.at(0), L"REMOTEWALL")) {
             const std::wstring sub = params.size() > 1 ? params.at(1) : L"";
             if (boost::iequals(sub, L"INFO")) {
@@ -452,7 +458,8 @@ class remotewall_producer : public core::frame_producer
                 os << "port " << static_cast<int>(cfg_.listenPort) << " wall " << wall_w_ << "x" << wall_h_ << " grid "
                    << info_.gridCols << "x" << info_.gridRows << " fps "
                    << (info_.fpsDen ? static_cast<double>(info_.fpsNum) / info_.fpsDen : 0.0) << " tc " << tc
-                   << " colorspace " << info_.colorSpace << " depth " << (rw_ ? RecvWallGetPixelBytes(rw_) * 2 : 8)
+                   << " colorspace " << std::string(info_.colorSpace, ::strnlen(info_.colorSpace, sizeof(info_.colorSpace)))
+                   << " depth " << (rw_ ? RecvWallGetPixelBytes(rw_) * 2 : 8)
                    << " device " << device_ << " frame " << info_.globalFrameIndex << " fec " << st.fecRecovered
                    << " drops " << st.auQueueDrops << "\r\n";
                 result = u16(os.str());
@@ -472,7 +479,6 @@ class remotewall_producer : public core::frame_producer
                 // race receive_impl. Keys: port | syncgroup | bindip.
                 const std::wstring key = params.at(2);
                 const std::wstring val = params.at(3);
-                std::lock_guard<std::mutex> lk(rw_mtx_);
                 bool ok = true;
                 if (boost::iequals(key, L"port")) {
                     try {

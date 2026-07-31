@@ -43,6 +43,9 @@ struct ProResDecodeCtx {
     int coeff_stride;       // (y_n + cb_n + cr_n) * 64 per slice
 
     // ── Device buffers ──────────────────────────────────────────────────────
+    size_t    max_frame_bytes;   // allocation size of d_bitstream; frames larger than
+                                  // this must be rejected, not uploaded (the first packet
+                                  // seen sizes this buffer and later frames can be larger)
     uint8_t*  d_bitstream;       // raw icpf frame bytes (worst-case: ~width*height*3)
     uint32_t* d_slice_starts;    // [num_slices] byte offset from d_bitstream start
     uint16_t* d_slice_sizes;     // [num_slices] slice byte sizes

@@ -119,6 +119,15 @@ static inline uint32_t read_le32h(const uint8_t* b, int off)
 
 // NotchBlockHeader is now defined in notchlc_decode.h
 
+// Multiplies a raw header field by 4 the way the *_offset fields require,
+// saturating to UINT32_MAX on overflow instead of silently wrapping — an
+// overflowed offset must fail the data_end bound check below, not pass it
+// by accident by wrapping back into range.
+static inline uint32_t mul4_checked(uint32_t raw)
+{
+    return (raw > (0xFFFFFFFFu / 4u)) ? 0xFFFFFFFFu : raw * 4u;
+}
+
 static cudaError_t parse_block_header(
     const uint8_t* h_header_buf,   // must be at least 256 bytes
     uint32_t        uncompressed_size,
@@ -126,19 +135,29 @@ static cudaError_t parse_block_header(
 {
     out.width                  = read_le32h(h_header_buf,  0);
     out.height                 = read_le32h(h_header_buf,  4);
-    out.uv_offset_data_offset  = read_le32h(h_header_buf,  8) * 4u;
-    out.y_control_data_offset  = read_le32h(h_header_buf, 12) * 4u;
-    out.a_control_word_offset  = read_le32h(h_header_buf, 16) * 4u;
-    out.uv_data_offset         = read_le32h(h_header_buf, 20) * 4u;
+    out.uv_offset_data_offset  = mul4_checked(read_le32h(h_header_buf,  8));
+    out.y_control_data_offset  = mul4_checked(read_le32h(h_header_buf, 12));
+    out.a_control_word_offset  = mul4_checked(read_le32h(h_header_buf, 16));
+    out.uv_data_offset         = mul4_checked(read_le32h(h_header_buf, 20));
     out.y_data_size            = read_le32h(h_header_buf, 24);   // NOT *4
-    out.a_data_offset          = read_le32h(h_header_buf, 28) * 4u;
-    out.a_count_size           = read_le32h(h_header_buf, 32) * 4u;
+    out.a_data_offset          = mul4_checked(read_le32h(h_header_buf, 28));
+    out.a_count_size           = mul4_checked(read_le32h(h_header_buf, 32));
     out.data_end               = read_le32h(h_header_buf, 36);   // NOT *4
     out.y_data_row_offsets     = 40u;
 
     if (out.data_end > uncompressed_size)
         return cudaErrorInvalidValue;
     if (out.data_end <= out.y_data_size)
+        return cudaErrorInvalidValue;
+
+    // Every section offset the Y/UV/alpha kernels index into d_uncompressed
+    // with must fall within the validated data_end — these come straight off
+    // the wire/file and were previously only checked implicitly (or not at all).
+    if (out.uv_offset_data_offset > out.data_end ||
+        out.y_control_data_offset > out.data_end ||
+        out.a_control_word_offset > out.data_end ||
+        out.uv_data_offset > out.data_end ||
+        out.a_data_offset > out.data_end)
         return cudaErrorInvalidValue;
 
     out.y_data_offset    = out.data_end - out.y_data_size;
@@ -481,6 +500,14 @@ cudaError_t notchlc_decode_cpu_phase(
             return cudaErrorInvalidValue;
         }
         std::memcpy(ctx->h_compressed, h_compressed, compressed_size);
+        // uncompressed_size comes straight from the packet header (untrusted)
+        // and is used below as a memcpy length into h_uncompressed/d_uncompressed
+        // — bound it the same way compressed_size is bounded above.
+        if ((size_t)uncompressed_size > ctx->max_uncompressed_bytes ||
+            (size_t)uncompressed_size > compressed_size) {
+            NOTCH_LOG_ERROR("[notchlc_decode] uncompressed_size exceeds max_uncompressed_bytes");
+            return cudaErrorInvalidValue;
+        }
         actual_uncompressed_out = (size_t)uncompressed_size;
         uint8_t h_hdr_buf[256] = {};
         const size_t hdr_read = (actual_uncompressed_out >= 256u) ? 256u : actual_uncompressed_out;
@@ -509,8 +536,13 @@ cudaError_t notchlc_decode_gpu_phase(
 {
     cudaStream_t s = ctx->stream;
 
-    if ((int)hdr.width != ctx->width || (int)hdr.height != ctx->height)
-        NOTCH_LOG_WARNING("[notchlc_decode] block header dimensions mismatch context");
+    if ((int)hdr.width != ctx->width || (int)hdr.height != ctx->height) {
+        // The Y/UV/alpha kernels size their grids and buffer strides from
+        // hdr.width/height, which are all allocated for ctx->width/height —
+        // proceeding would overrun those allocations.
+        NOTCH_LOG_ERROR("[notchlc_decode] block header dimensions mismatch context");
+        return cudaErrorInvalidValue;
+    }
 
     CUDA_CHECK(cudaMemcpyAsync(ctx->d_uncompressed, ctx->h_uncompressed,
                                actual_uncompressed, cudaMemcpyHostToDevice, s));
@@ -531,7 +563,7 @@ cudaError_t notchlc_decode_gpu_phase(
             cudaMemcpyDeviceToDevice, s));
     }
 
-    cudaStreamSynchronize(s);
+    CUDA_CHECK(cudaStreamSynchronize(s));
     return cudaSuccess;
 }
 

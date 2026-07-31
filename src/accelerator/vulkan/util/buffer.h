@@ -46,6 +46,13 @@ class buffer final
     int      size() const;
     bool     write() const;
 
+    /// Invalidates CPU caches for this buffer's mapped range. Must be called
+    /// after waiting for GPU writes to complete and before reading data()
+    /// on a non-write (readback) buffer — VMA_MEMORY_USAGE_AUTO may pick a
+    /// HOST_VISIBLE-but-not-HOST_COHERENT memory type, in which case skipping
+    /// this yields stale/garbage reads on some GPUs/drivers.
+    void invalidate();
+
     /// The VMA allocator that owns this buffer -- one per vulkan::device, so it
     /// identifies the owning device. A VkBuffer may only be referenced in commands
     /// submitted to the device that created it; see device::copy_async.

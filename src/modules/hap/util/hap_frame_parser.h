@@ -217,6 +217,12 @@ inline bool decompress_chunked(const uint8_t* data, size_t size,
     if (!compressor_table || !size_table || num_chunks <= 0)
         return false;
 
+    // Bound checks below compare against this span using size_t arithmetic
+    // rather than forming `chunk_base + c_offset` first — c_offset comes
+    // straight from file data, and pointer arithmetic that overflows/wraps
+    // before the resulting pointer is checked is undefined behavior.
+    const size_t chunk_span = (size_t)(end - chunk_base);
+
     // First pass: compute total uncompressed size
     size_t total_uncompressed = 0;
     std::vector<size_t> chunk_uncomp_sizes(num_chunks);
@@ -233,8 +239,8 @@ inline bool decompress_chunked(const uint8_t* data, size_t size,
         }
         running_offset += c_size;
 
+        if ((size_t)c_offset + c_size > chunk_span) return false;
         const uint8_t* chunk_ptr = chunk_base + c_offset;
-        if (chunk_ptr + c_size > end) return false;
 
         size_t uncomp_len = 0;
         if (compressor_table[i] == 0x0B) { // Snappy
@@ -265,6 +271,9 @@ inline bool decompress_chunked(const uint8_t* data, size_t size,
         }
         running_offset += c_size;
 
+        // Re-validated independently of the first pass — this loop must not
+        // rely solely on a check several dozen lines away having run first.
+        if ((size_t)c_offset + c_size > chunk_span) return false;
         const uint8_t* chunk_ptr = chunk_base + c_offset;
 
         if (compressor_table[i] == 0x0B) { // Snappy
@@ -365,7 +374,12 @@ inline bool parse_hap_frame(const uint8_t* data, size_t size, HapFrameResult& re
                                     result.texture_format, result.texture_data))
             return false;
 
-        // Parse second sub-section (alpha)
+        // Parse second sub-section (alpha). Re-check the bound right here
+        // rather than relying solely on the `sub_hdr_sz + sub_len > inner_len`
+        // check above still holding after any future edit to this function —
+        // this subtraction underflows to a huge size_t if it doesn't.
+        if ((size_t)sub_hdr_sz + sub_len > inner_len)
+            return false;
         const uint8_t* second      = inner + sub_hdr_sz + sub_len;
         const size_t   second_left = inner_len - (sub_hdr_sz + sub_len);
 

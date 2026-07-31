@@ -834,7 +834,9 @@ struct notchlc_producer_impl final : public core::frame_producer
                 err = notchlc_decode_gpu_phase(&ctx, item.hdr, item.actual_uncompressed, cm, nullptr);
                 if (err == cudaSuccess) {
                     const size_t out_bytes = (size_t)ctx.width * ctx.height * 4 * sizeof(uint16_t);
-                    std::memcpy(h_bgra16_[cur_slot], ctx.d_bgra16, out_bytes);
+                    // ctx.d_bgra16 is a CUDA device pointer — std::memcpy from it on the
+                    // host is undefined behavior. Must go through the CUDA runtime.
+                    err = cudaMemcpy(h_bgra16_[cur_slot], ctx.d_bgra16, out_bytes, cudaMemcpyDeviceToHost);
                 }
             }
 

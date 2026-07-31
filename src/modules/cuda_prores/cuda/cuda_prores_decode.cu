@@ -102,6 +102,7 @@ cudaError_t prores_decode_ctx_create(ProResDecodeCtx* ctx,
     const size_t n_chroma   = is_444 ? n_pix : (size_t)(width / 2) * height;
     const size_t coeff_bytes = (size_t)num_slices * ctx->coeff_stride * sizeof(int16_t);
 
+    ctx->max_frame_bytes = max_frame_bytes;
     CUDA_CHECK(cudaMalloc(&ctx->d_bitstream,   max_frame_bytes));
     CUDA_CHECK(cudaMalloc((void**)&ctx->d_slice_starts, (size_t)num_slices * sizeof(uint32_t)));
     CUDA_CHECK(cudaMalloc((void**)&ctx->d_slice_sizes,  (size_t)num_slices * sizeof(uint16_t)));
@@ -219,6 +220,12 @@ static bool build_slice_table(
     uint32_t cursor = 0;
     for (int s = 0; s < num_slices; s++) {
         uint16_t slice_sz = (uint16_t)(((uint16_t)index_ptr[s*2] << 8) | index_ptr[s*2 + 1]);
+        // Reject the frame if this slice's bytes would run past the actual
+        // buffer — the index table is file/wire data and slice_sz is not
+        // otherwise validated before slice pointers are dereferenced by the
+        // entropy-decode kernel.
+        if ((uint64_t)base_offset + cursor + slice_sz > (uint64_t)size)
+            return false;
         h_slice_starts[s] = base_offset + cursor;
         h_slice_sizes [s] = slice_sz;
         cursor += slice_sz;
@@ -329,7 +336,10 @@ static void decode_alpha_to_host(
         if (total < 6) continue;
 
         int hdr_bytes  = sl[0] / 8;
-        if (hdr_bytes < 6) continue;
+        // Upper-bound check mirrors the GPU entropy-decode kernel's guard
+        // (cuda_prores_entropy_decode.cuh) — without it, a corrupt hdr_bytes
+        // can read sl[6..9] past the end of this slice's buffer.
+        if (hdr_bytes < 6 || hdr_bytes > total) continue;
 
         int y_size     = ((int)sl[2] << 8) | sl[3];
         int cb_size    = ((int)sl[4] << 8) | sl[5];
@@ -432,6 +442,14 @@ cudaError_t prores_decode_frame(
                            ctx->h_slice_sizes,
                            &ctx->alpha_bits)) {
         PRORES_DEC_LOG_ERROR("[cuda_prores_decode] build_slice_table failed");
+        return cudaErrorInvalidValue;
+    }
+
+    // A slate/black first frame can size ctx->d_bitstream far smaller than a
+    // later high-detail frame requires — reject rather than overrun the
+    // allocation, which would silently corrupt whatever device buffer follows it.
+    if (icpf_size > ctx->max_frame_bytes) {
+        PRORES_DEC_LOG_ERROR("[cuda_prores_decode] frame size exceeds allocated bitstream buffer");
         return cudaErrorInvalidValue;
     }
 
@@ -622,6 +640,11 @@ cudaError_t prores_decode_frame_async(
         return cudaErrorInvalidValue;
     }
 
+    if (icpf_size > ctx->max_frame_bytes) {
+        PRORES_DEC_LOG_ERROR("[cuda_prores_decode] frame size exceeds allocated bitstream buffer (async)");
+        return cudaErrorInvalidValue;
+    }
+
     CUDA_CHECK(cudaMemcpyAsync(ctx->d_bitstream, h_icpf_data, icpf_size,
                                cudaMemcpyHostToDevice, s));
     CUDA_CHECK(cudaMemcpyAsync(ctx->d_slice_starts, ctx->h_slice_starts,
@@ -721,6 +744,11 @@ cudaError_t prores_decode_frame_to_host(
                            ctx->h_slice_sizes,
                            &ctx->alpha_bits)) {
         PRORES_DEC_LOG_ERROR("[cuda_prores_decode] build_slice_table failed (to_host)");
+        return cudaErrorInvalidValue;
+    }
+
+    if (icpf_size > ctx->max_frame_bytes) {
+        PRORES_DEC_LOG_ERROR("[cuda_prores_decode] frame size exceeds allocated bitstream buffer (to_host)");
         return cudaErrorInvalidValue;
     }
 

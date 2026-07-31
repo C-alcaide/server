@@ -21,6 +21,8 @@
 
 #include "buffer.h"
 
+#include <common/except.h>
+
 #include <boost/property_tree/ptree.hpp>
 
 #include <vulkan/vulkan.hpp>
@@ -48,9 +50,9 @@ struct buffer::impl
     int  size_  = 0;
     bool write_ = false;
 
-    VkBuffer          buf;
-    VmaAllocation     alloc;
-    VmaAllocationInfo allocInfo;
+    VkBuffer          buf       = VK_NULL_HANDLE;
+    VmaAllocation     alloc     = VK_NULL_HANDLE;
+    VmaAllocationInfo allocInfo = {};
 
     VmaAllocator allocator_;
 
@@ -73,7 +75,12 @@ struct buffer::impl
             write ? VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT
                   : VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
 
-        vmaCreateBuffer(allocator_, &bufCreateInfo, &allocCreateInfo, &buf, &alloc, &allocInfo);
+        VkResult result = vmaCreateBuffer(allocator_, &bufCreateInfo, &allocCreateInfo, &buf, &alloc, &allocInfo);
+        if (result != VK_SUCCESS) {
+            CASPAR_THROW_EXCEPTION(caspar_exception()
+                                   << msg_info("Failed to create Vulkan buffer of size " + std::to_string(size) +
+                                              " (VkResult " + std::to_string(static_cast<int>(result)) + ")"));
+        }
 
         (write ? g_w_total_count : g_r_total_count)++;
         (write ? g_w_total_size : g_r_total_size) += size_;
@@ -103,6 +110,7 @@ buffer& buffer::operator=(buffer&& other)
     return *this;
 }
 void*    buffer::data() { return impl_->allocInfo.pMappedData; }
+void     buffer::invalidate() { vmaInvalidateAllocation(impl_->allocator_, impl_->alloc, 0, VK_WHOLE_SIZE); }
 bool     buffer::write() const { return impl_->write_; }
 VmaAllocator buffer::allocator() const { return impl_->allocator_; }
 int      buffer::size() const { return static_cast<int>(impl_->allocInfo.size); }
