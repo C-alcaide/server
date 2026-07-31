@@ -61,6 +61,9 @@
 #endif
 
 #include <atomic>
+#include <deque>
+#include <mutex>
+#include <vector>
 #include <cstring>
 #include <stdexcept>
 
@@ -132,8 +135,10 @@ struct vk_readback_strategy::impl
     // Command pool & buffers
     VkCommandPool cmd_pool_ = VK_NULL_HANDLE;
 
-    // Triple-buffered pipeline
-    static constexpr int NUM_BUFS = 3;
+    // Pipeline depth: a slot's fence is not waited on until PIPELINE_DEPTH frames
+    // later, so the readback has that long to land. Distinct from how long a slot
+    // must stay valid, which is buffer_depth_ (see the slot pool below).
+    static constexpr int PIPELINE_DEPTH = 2;
 
     struct frame_slot
     {
@@ -152,12 +157,27 @@ struct vk_readback_strategy::impl
         // Descriptor set for this slot
         VkDescriptorSet desc_set     = VK_NULL_HANDLE;
     };
-    frame_slot   slots_[NUM_BUFS]  = {};
-    VkDescriptorPool desc_pool_    = VK_NULL_HANDLE;
+    // Slots are pooled, NOT rotated.
+    //
+    // This used to be a fixed array of 3 rotated by write_idx_, with the mapped
+    // staging pointer handed to DeckLink through a no-op deleter. DeckLink keeps
+    // buffer_depth() frames scheduled and DMAs each at display time, so a 3-slot
+    // rotation overwrote staging memory the card still owned. Sized
+    // buffer_depth_ + PIPELINE_DEPTH + 1 and reclaimed by the shared_ptr deleter,
+    // a slot cannot be reused until the driver has released the frame using it.
+    std::vector<frame_slot> slots_;
+    VkDescriptorPool        desc_pool_ = VK_NULL_HANDLE;
 
-    int    write_idx_     = 0;
-    int    warmup_count_  = 0;
-    size_t buf_size_      = 0;   // current allocation size
+    // free_ is touched from the DeckLink completion thread (via the deleter) as
+    // well as from whichever thread calls convert_frame_for_port, so it needs its
+    // own lock. Nothing in the deleter touches Vulkan -- it only returns an index.
+    std::mutex       free_mtx_;
+    std::vector<int> free_;
+
+    // Slots whose readback has been submitted, oldest first.
+    std::deque<int> inflight_;
+
+    size_t buf_size_ = 0;   // current allocation size
 
     // Imported texture cache (like CUDA strategy's cached_slots_)
     struct imported_texture
@@ -186,25 +206,80 @@ struct vk_readback_strategy::impl
     // Format tracking
     VkFormat current_format_ = VK_FORMAT_UNDEFINED;
 
-    // Alive sentinel (same pattern as cuda_vk_strategy)
-    std::shared_ptr<std::atomic<bool>> alive_ = std::make_shared<std::atomic<bool>>(true);
-
-    std::shared_ptr<void> make_staging_ref(void* mapped)
+    // Shared free-list state, so a slot handed to DeckLink can be returned even if
+    // the strategy is destroyed first (the deleter only pushes an index into this
+    // block; the Vulkan objects are torn down by ~impl once the device is idle).
+    struct free_list
     {
-        auto guard = alive_;
-        return std::shared_ptr<void>(mapped, [guard](void*) {});
+        std::mutex       mtx;
+        std::vector<int> idx;
+    };
+    std::shared_ptr<free_list> free_list_ = std::make_shared<free_list>();
+
+    // Take a free slot, or -1 when every slot is still held by DeckLink.
+    int acquire_slot()
+    {
+        std::lock_guard<std::mutex> lk(free_list_->mtx);
+        if (free_list_->idx.empty())
+            return -1;
+        const int i = free_list_->idx.back();
+        free_list_->idx.pop_back();
+        return i;
+    }
+
+    // Hand the slot's mapped staging pointer out; the deleter reclaims the slot
+    // when DeckLink releases the frame that used it.
+    std::shared_ptr<void> make_staging_ref(int slot_index)
+    {
+        auto fl = free_list_;
+        return std::shared_ptr<void>(slots_[slot_index].mapped, [fl, slot_index](void*) {
+            std::lock_guard<std::mutex> lk(fl->mtx);
+            fl->idx.push_back(slot_index);
+        });
+    }
+
+    // Queue the slot whose readback was just submitted and hand back the oldest
+    // completed one, preserving the previous 2-frame pipeline depth.
+    //
+    // Returns -1 while the queue is still filling: for the first PIPELINE_DEPTH
+    // frames no submitted readback is old enough to have landed. The caller then
+    // returns null and convert_frame_for_port falls back to the CPU strategy, as it
+    // already does for any frame the GPU path declines. A slot leaves this queue
+    // exactly once -- handing one out while it is still queued is the defect being
+    // fixed, so the filling case must not hand out the slot it just pushed.
+    int push_and_take(int submitted)
+    {
+        inflight_.push_back(submitted);
+        if ((int)inflight_.size() <= PIPELINE_DEPTH)
+            return -1;
+
+        const int oldest = inflight_.front();
+        inflight_.pop_front();
+
+        auto& s = slots_[oldest];
+        VK_CHECK(vkWaitForFences(device_, 1, &s.fence, VK_TRUE, UINT64_MAX), "vkWaitForFences");
+
+        // HOST_CACHED staging needs an explicit invalidate before the CPU reads it.
+        VkMappedMemoryRange range{};
+        range.sType  = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
+        range.memory = s.stage_mem;
+        range.offset = 0;
+        range.size   = VK_WHOLE_SIZE;
+        vkInvalidateMappedMemoryRanges(device_, 1, &range);
+        return oldest;
     }
 
     // Wait for all in-flight slot fences (targeted alternative to vkDeviceWaitIdle).
     // Fences start signaled, so this is safe to call even before first submit.
     void wait_all_slot_fences()
     {
-        VkFence fences[NUM_BUFS];
-        int count = 0;
+        std::vector<VkFence> fences;
+        fences.reserve(slots_.size());
         for (auto& s : slots_)
-            if (s.fence) fences[count++] = s.fence;
-        if (count > 0)
-            vkWaitForFences(device_, count, fences, VK_TRUE, 500'000'000); // 500ms timeout
+            if (s.fence) fences.push_back(s.fence);
+        if (!fences.empty())
+            vkWaitForFences(device_, static_cast<uint32_t>(fences.size()), fences.data(), VK_TRUE,
+                            500'000'000); // 500ms timeout
     }
 
     // Timing diagnostics
@@ -231,8 +306,6 @@ struct vk_readback_strategy::impl
 
     ~impl()
     {
-        alive_->store(false, std::memory_order_release);
-
         if (device_ != VK_NULL_HANDLE) {
             vkDeviceWaitIdle(device_);
 
@@ -540,14 +613,14 @@ struct vk_readback_strategy::impl
     {
         VkDescriptorPoolSize sizes[2]{};
         sizes[0].type            = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        sizes[0].descriptorCount = NUM_BUFS;
+        sizes[0].descriptorCount = static_cast<uint32_t>(slot_count());
         sizes[1].type            = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        sizes[1].descriptorCount = NUM_BUFS;
+        sizes[1].descriptorCount = static_cast<uint32_t>(slot_count());
 
         VkDescriptorPoolCreateInfo dp_ci{};
         dp_ci.sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
         dp_ci.flags         = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-        dp_ci.maxSets       = NUM_BUFS;
+        dp_ci.maxSets       = static_cast<uint32_t>(slot_count());
         dp_ci.poolSizeCount = 2;
         dp_ci.pPoolSizes    = sizes;
         VK_CHECK(vkCreateDescriptorPool(device_, &dp_ci, nullptr, &desc_pool_),
@@ -563,8 +636,21 @@ struct vk_readback_strategy::impl
         VK_CHECK(vkCreateCommandPool(device_, &cp_ci, nullptr, &cmd_pool_), "vkCreateCommandPool");
     }
 
+    // Enough slots for everything that can hold one at once: buffer_depth_ frames
+    // queued in the driver, PIPELINE_DEPTH readbacks in flight here, and one being
+    // filled.
+    int slot_count() const { return buffer_depth_ + PIPELINE_DEPTH + 1; }
+
     void create_frame_slots()
     {
+        slots_.assign(slot_count(), frame_slot{});
+        {
+            std::lock_guard<std::mutex> lk(free_list_->mtx);
+            free_list_->idx.clear();
+            for (int i = static_cast<int>(slots_.size()) - 1; i >= 0; --i)
+                free_list_->idx.push_back(i);
+        }
+
         VkCommandBufferAllocateInfo cb_ai{};
         cb_ai.sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
         cb_ai.commandPool        = cmd_pool_;
@@ -597,11 +683,25 @@ struct vk_readback_strategy::impl
             needed = (size_t)dst_w * dst_h * 4;
         }
 
-        if (buf_size_ >= needed && slots_[0].stage_buf != VK_NULL_HANDLE)
+        if (buf_size_ >= needed && !slots_.empty() && slots_[0].stage_buf != VK_NULL_HANDLE)
             return;
 
         // Wait for all in-flight work before reallocating
         wait_all_slot_fences();
+
+        // The staging memory about to be unmapped and freed may still be referenced
+        // by frames sitting in the DeckLink queue -- there is no way to recall those,
+        // so this remains a hazard on a live format change (documented, not fixed:
+        // it needs the driver's frames drained, which the consumer does not expose).
+        // At least stop handing the slots out: clear the pipeline and rebuild the
+        // free list so no stale index survives the reallocation.
+        inflight_.clear();
+        {
+            std::lock_guard<std::mutex> lk(free_list_->mtx);
+            free_list_->idx.clear();
+            for (int i = static_cast<int>(slots_.size()) - 1; i >= 0; --i)
+                free_list_->idx.push_back(i);
+        }
 
         for (auto& s : slots_) {
             if (s.dev_buf)   { vkDestroyBuffer(device_, s.dev_buf, nullptr); s.dev_buf = VK_NULL_HANDLE; }
@@ -660,10 +760,9 @@ struct vk_readback_strategy::impl
             }
         }
 
-        buf_size_      = needed;
-        warmup_count_  = 0;
+        buf_size_ = needed;
 
-        CASPAR_LOG(debug) << L"[vk_readback] Allocated " << NUM_BUFS << L" buffer slots, "
+        CASPAR_LOG(debug) << L"[vk_readback] Allocated " << slots_.size() << L" buffer slots, "
                           << (needed / 1024) << L" KB each"
                           << (dma_only_ ? L" (DMA-only, raw pixels)" : L"");
     }
@@ -1023,14 +1122,14 @@ struct vk_readback_strategy::impl
 
         ensure_buffers(dst_w, dst_h);
 
-        int cur_write = write_idx_;
-        int cur_read  = (cur_write + 1) % NUM_BUFS;
-        auto& slot    = slots_[cur_write];
+        // Every slot still held by DeckLink means we cannot start another readback;
+        // let the caller use the CPU strategy for this frame.
+        const int cur_write = acquire_slot();
+        if (cur_write < 0)
+            return {};
+        auto& slot = slots_[cur_write];
 
-        // Wait for this slot's fence
-        step_timer = caspar::timer();
-        if (warmup_count_ >= NUM_BUFS - 1)
-            VK_CHECK(vkWaitForFences(device_, 1, &slot.fence, VK_TRUE, UINT64_MAX), "vkWaitForFences (dma)");
+        step_timer     = caspar::timer();
         double sync_ms = step_timer.elapsed() * 1000.0;
 
         // Import timeline semaphore for GPU-side wait
@@ -1136,9 +1235,6 @@ struct vk_readback_strategy::impl
 
         double total_ms = total_timer.elapsed() * 1000.0;
 
-        // Advance write index
-        write_idx_ = (cur_write + 1) % NUM_BUFS;
-
         // Periodic timing report
         accum_import_ms_  += import_ms;
         accum_sync_ms_    += sync_ms;
@@ -1155,32 +1251,13 @@ struct vk_readback_strategy::impl
             accum_import_ms_ = accum_sync_ms_ = accum_submit_ms_ = accum_total_ms_ = 0.0;
         }
 
-        // Warmup
-        if (warmup_count_ < NUM_BUFS - 1) {
-            VK_CHECK(vkWaitForFences(device_, 1, &slot.fence, VK_TRUE, UINT64_MAX), "vkWaitForFences (dma warmup)");
+        // Hand back the readback submitted PIPELINE_DEPTH frames ago; null while the
+        // queue is still filling (the caller then uses the CPU strategy).
+        const int ready = push_and_take(cur_write);
+        if (ready < 0)
+            return {};
 
-            VkMappedMemoryRange range{};
-            range.sType  = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
-            range.memory = slot.stage_mem;
-            range.offset = 0;
-            range.size   = VK_WHOLE_SIZE;
-            vkInvalidateMappedMemoryRanges(device_, 1, &range);
-
-            warmup_count_++;
-            return {make_staging_ref(slot.mapped), dst_w, dst_h};
-        }
-
-        // Steady state: return the buffer written 2 frames ago
-        auto& read_slot = slots_[cur_read];
-
-        VkMappedMemoryRange range{};
-        range.sType  = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
-        range.memory = read_slot.stage_mem;
-        range.offset = 0;
-        range.size   = VK_WHOLE_SIZE;
-        vkInvalidateMappedMemoryRanges(device_, 1, &range);
-
-        return {make_staging_ref(read_slot.mapped), dst_w, dst_h};
+        return {make_staging_ref(ready), dst_w, dst_h};
     }
 
     // ─── Frame conversion ──────────────────────────────────────────────────
@@ -1229,14 +1306,14 @@ struct vk_readback_strategy::impl
         // Ensure output buffers
         ensure_buffers(dst_w, dst_h);
 
-        int cur_write = write_idx_;
-        int cur_read  = (cur_write + 1) % NUM_BUFS;
-        auto& slot    = slots_[cur_write];
+        // Every slot still held by DeckLink means we cannot start another readback;
+        // let the caller use the CPU strategy for this frame.
+        const int cur_write = acquire_slot();
+        if (cur_write < 0)
+            return nullptr;
+        auto& slot = slots_[cur_write];
 
-        // Wait for this slot's fence (from 3 frames ago) to complete
-        step_timer = caspar::timer();
-        if (warmup_count_ >= NUM_BUFS - 1)
-            VK_CHECK(vkWaitForFences(device_, 1, &slot.fence, VK_TRUE, UINT64_MAX), "vkWaitForFences");
+        step_timer     = caspar::timer();
         double sync_ms = step_timer.elapsed() * 1000.0;
 
         // Import timeline semaphore for GPU-side wait
@@ -1371,9 +1448,6 @@ struct vk_readback_strategy::impl
 
         double total_ms = total_timer.elapsed() * 1000.0;
 
-        // Advance write index
-        write_idx_ = (cur_write + 1) % NUM_BUFS;
-
         // Periodic timing report
         accum_import_ms_  += import_ms;
         accum_sync_ms_    += sync_ms;
@@ -1390,34 +1464,13 @@ struct vk_readback_strategy::impl
             accum_import_ms_ = accum_sync_ms_ = accum_submit_ms_ = accum_total_ms_ = 0.0;
         }
 
-        // Warmup: not enough frames queued yet
-        if (warmup_count_ < NUM_BUFS - 1) {
-            VK_CHECK(vkWaitForFences(device_, 1, &slot.fence, VK_TRUE, UINT64_MAX), "vkWaitForFences (warmup)");
+        // Hand back the readback submitted PIPELINE_DEPTH frames ago; null while the
+        // queue is still filling (the caller then uses the CPU strategy).
+        const int ready = push_and_take(cur_write);
+        if (ready < 0)
+            return nullptr;
 
-            // Invalidate mapped memory (HOST_CACHED needs explicit invalidate)
-            VkMappedMemoryRange range{};
-            range.sType  = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
-            range.memory = slot.stage_mem;
-            range.offset = 0;
-            range.size   = VK_WHOLE_SIZE;
-            vkInvalidateMappedMemoryRanges(device_, 1, &range);
-
-            warmup_count_++;
-            return make_staging_ref(slot.mapped);
-        }
-
-        // Steady state: return the buffer written 2 frames ago
-        auto& read_slot = slots_[cur_read];
-
-        // Invalidate the read slot's mapped memory
-        VkMappedMemoryRange range{};
-        range.sType  = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
-        range.memory = read_slot.stage_mem;
-        range.offset = 0;
-        range.size   = VK_WHOLE_SIZE;
-        vkInvalidateMappedMemoryRanges(device_, 1, &range);
-
-        return make_staging_ref(read_slot.mapped);
+        return make_staging_ref(ready);
     }
 };
 
