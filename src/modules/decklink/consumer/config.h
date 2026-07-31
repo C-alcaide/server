@@ -120,7 +120,11 @@ struct configuration
     //   copy = pack on GPU, one pinned copy to host, driver DMAs it (Tier 1);
     //   dvp  = NVIDIA GPUDirect for Video hardware-synced transfer (Tier 2,
     //          Quadro only); falls back to copy when DVP is unavailable;
-    //   auto = dvp when available (Quadro + runtime present), else copy.
+    //   auto = copy. DVP is opt-in: it is only used when explicitly asked for.
+    // NOTE: auto deliberately does NOT select DVP even where dvp_available()
+    // reports it. DVP is Quadro-only and needs dvp.dll staged next to the
+    // executable, so silently switching the output path on hardware that merely
+    // happens to support it is not wanted -- ask for it by name.
     enum class gpu_transfer_t
     {
         auto_select,
