@@ -126,6 +126,28 @@ namespace caspar { namespace protocol { namespace amcp {
 using namespace core;
 namespace pt = boost::property_tree;
 
+// Is `resolved` inside `base`?
+//
+// The commands that accept a client-supplied path used a bare string prefix
+// test, `resolved.wstring().find(base.wstring()) != 0`, which has no separator
+// boundary: with a media folder of "D:\casparcg\media" it also accepts
+// "D:\casparcg\media_evil\x", because that string starts with the base string
+// too. A sibling directory whose name merely begins with the base's name was
+// therefore reachable by any of them.
+//
+// lexically_relative gives the boundary for free: the result is empty when the
+// paths are unrelated and starts with ".." when `resolved` is outside `base`.
+// Callers must still canonicalize (or weakly_canonicalize) first -- this is a
+// lexical test and does not resolve symlinks.
+static bool is_within_base(const boost::filesystem::path& resolved, const boost::filesystem::path& base)
+{
+    const auto rel = resolved.lexically_relative(base);
+    if (rel.empty())
+        return false;
+    const auto first = rel.begin();
+    return first == rel.end() || first->wstring() != L"..";
+}
+
 std::wstring read_utf8_file(const boost::filesystem::path& file)
 {
     std::wstringstream           result;
@@ -592,7 +614,7 @@ std::wstring print_raw_command(command_context& ctx)
     boost::filesystem::create_directories(raw_base, ec);
     raw_base = boost::filesystem::canonical(raw_base);
     auto resolved = boost::filesystem::weakly_canonical(raw_base / (filename + L".png"));
-    if (resolved.wstring().find(raw_base.wstring()) != 0) {
+    if (!is_within_base(resolved, raw_base)) {
         CASPAR_LOG(warning) << L"PRINT RAW: rejected path escaping _raw folder: " << filename;
         return L"403 PRINT RAW FORBIDDEN\r\n";
     }
@@ -2076,7 +2098,7 @@ std::future<std::wstring> mixer_mesh_command(command_context& ctx)
         return make_ready_future<std::wstring>(L"404 MIXER ERROR\r\n");
     }
     resolved = boost::filesystem::canonical(resolved);
-    if (resolved.wstring().find(media_base.wstring()) != 0) {
+    if (!is_within_base(resolved, media_base)) {
         return make_ready_future<std::wstring>(L"403 MIXER FORBIDDEN\r\n");
     }
 
@@ -2143,7 +2165,7 @@ std::future<std::wstring> mixer_projection_blend_mask_command(command_context& c
         return make_ready_future<std::wstring>(L"404 MIXER ERROR\r\n");
     }
     resolved = boost::filesystem::canonical(resolved);
-    if (resolved.wstring().find(media_base.wstring()) != 0) {
+    if (!is_within_base(resolved, media_base)) {
         return make_ready_future<std::wstring>(L"403 MIXER FORBIDDEN\r\n");
     }
 
@@ -3762,7 +3784,7 @@ std::wstring previz_scene_command(command_context& ctx)
         auto resolved    = boost::filesystem::path(media_base) / ctx.parameters.at(1);
         // Guard against path traversal outside the media folder.
         auto check       = resolved.lexically_normal();
-        if (check.wstring().find(media_base.wstring()) != 0)
+        if (!is_within_base(check, media_base))
             return L"403 PREVIZ FORBIDDEN\r\n";
         try {
             if (is_save) {
@@ -3785,7 +3807,7 @@ std::wstring previz_scene_command(command_context& ctx)
     if (!boost::filesystem::exists(resolved))
         return L"404 PREVIZ ERROR\r\n";
     resolved = boost::filesystem::canonical(resolved);
-    if (resolved.wstring().find(media_base.wstring()) != 0)
+    if (!is_within_base(resolved, media_base))
         return L"403 PREVIZ FORBIDDEN\r\n";
 
     try {
