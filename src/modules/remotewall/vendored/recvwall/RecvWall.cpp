@@ -283,9 +283,16 @@ struct RecvWallHandle
 	size_t compBytes = 0;
 	std::atomic<int> outBpp{4};   // composite bytes/pixel: 4 = RGBA8, 8 = RGBA16 (HDR)
 
-	// Latest-wins published wall (8 bpc, 4 ch, top-down, pitch = wallW*4).
+	// Latest-wins published wall (4 ch, top-down). The stride and row count are
+	// published with the pixels under latestMtx rather than recomputed by the
+	// reader from wallW/outBpp: outBpp tracks the newest decoded frame, so a
+	// reader deriving the stride from it can read a 4 bpp buffer as if it were
+	// 8 bpp and run off the end of latestPx.
 	std::mutex latestMtx; std::condition_variable latestCv;
 	std::vector<uint8_t> latestPx; RecvWallFrameInfo latestInfo{};
+	size_t latestPitch = 0;   // bytes per row of latestPx
+	int    latestRows  = 0;   // rows in latestPx
+	int    latestBpp   = 4;   // bytes per pixel of latestPx
 	std::atomic<unsigned long long> version{0};
 
 	// GPU-direct output: registered D3D11 texture the GPU path publishes into
@@ -309,7 +316,9 @@ struct RecvWallHandle
 	SyncBoardConn board;
 	bool syncOn = false;
 	int syncDepth = 8;
-	struct SyncedWall { std::vector<uint8_t> px; sync::SyncMeta meta; uint64_t sendTimeNs = 0; };
+	// bpp travels with the buffer: a wall queued at 4 bpp must not be published
+	// with a stride derived from a later frame's 8 bpp (see publish()).
+	struct SyncedWall { std::vector<uint8_t> px; sync::SyncMeta meta; uint64_t sendTimeNs = 0; int bpp = 4; };
 	std::mutex syncMtx; std::condition_variable syncCv;   // reorder + presenter wakeup
 	std::map<uint64_t, SyncedWall> reorder;               // key = SEI globalFrameIndex
 	std::vector<std::vector<uint8_t>> wallPool;           // recycled wall buffers
@@ -322,22 +331,34 @@ struct RecvWallHandle
 	std::thread presenter;
 
 	void enqueueSynced(std::vector<uint8_t>&& wall, const sync::SyncMeta& m,
-	                   uint64_t sendTimeNs, bool fixAlpha);
+	                   uint64_t sendTimeNs, int bpp, bool fixAlpha);
 	void presenterLoop();
 
 	void publish(std::vector<uint8_t>& wall, const sync::SyncMeta& m, uint64_t sendTimeNs,
-	             bool fixAlpha = false)
+	             int bpp, bool fixAlpha = false)
 	{
 		// The SDK's Nv12ToColor32 kernel writes RGB and leaves alpha at 0; hosts
 		// that honor alpha (Resolve float RGBA) composite that to black. Force
 		// opaque here so every client gets A=255 on both convert paths.
 		if (fixAlpha)
 			for (size_t i = 3; i < wall.size(); i += 4) wall[i] = 255;
+
+		// Describe the buffer we actually have, and refuse to publish one that is
+		// short for its own geometry -- a reader trusts pitch/rows blindly.
+		const size_t pitch = (size_t)wallW * (size_t)bpp;
+		if (wallH <= 0 || pitch == 0 || wall.size() < pitch * (size_t)wallH) {
+			std::fprintf(stderr, "[recvwall] dropping short wall: %zu bytes for %dx%d @ %d bpp\n",
+			             wall.size(), wallW, wallH, bpp);
+			return;
+		}
 		{
 			// version advances under latestMtx so RecvWallWaitNewFrame can't miss
 			// the notify between its predicate check and going to sleep.
 			std::lock_guard<std::mutex> lk(latestMtx);
 			latestPx.swap(wall);
+			latestPitch = pitch;
+			latestRows  = wallH;
+			latestBpp   = bpp;
 			fillInfo(latestInfo, m, sendTimeNs, wallW, wallH);
 			version.fetch_add(1);
 		}
@@ -449,8 +470,8 @@ void RecvWallHandle::decodeWorkerCpu(uint16_t tile, TileQ* tq)
 					           tc * tileW, tr * tileH, wallW, wallH, yLut, cLut, cfg.pixelOrder == 1,
 					           matrixFor(doneMeta.colorSpace));
 				}
-				if (syncOn) enqueueSynced(std::move(wall), doneMeta, doneSend, false);
-				else publish(wall, doneMeta, doneSend);
+				if (syncOn) enqueueSynced(std::move(wall), doneMeta, doneSend, 4, false);
+				else publish(wall, doneMeta, doneSend, 4);
 			}
 		}
 	}
@@ -475,7 +496,11 @@ void RecvWallHandle::decodeWorkerGpu(uint16_t tile, TileQ* tq)
 			uint8_t* fr = dec.GetFrame();
 			if (!fr || metas.empty()) continue;
 			const sync::SyncMeta& m = metas.back();
-			bool fresh = false; CUdeviceptr myBuf = 0; sync::SyncMeta doneMeta; uint64_t doneSend = 0;
+			// myBufBytes travels with myBuf: compBytes can be resized by another
+			// worker on a bit-depth change while this one is compositing outside the
+			// lock, and reading the buffer at the new size would overrun it.
+			bool fresh = false; CUdeviceptr myBuf = 0; size_t myBufBytes = 0;
+			sync::SyncMeta doneMeta; uint64_t doneSend = 0;
 			const bool p016 = dec.GetBitDepth() > 8;   // 10/12-bit HDR surface (P016)
 			const int  bpp  = p016 ? 8 : 4;            // composite bytes/pixel (RGBA16 / RGBA8)
 			{ std::lock_guard<std::mutex> lk(pendingMtx);
@@ -483,7 +508,22 @@ void RecvWallHandle::decodeWorkerGpu(uint16_t tile, TileQ* tq)
 			  // Geometry rejected (see configureLocked): nothing below can be sized. Drop it.
 			  if (!haveGeo.load()) continue;
 			  outBpp.store(bpp);
-			  if (compBytes == 0) compBytes = (size_t)wallW * wallH * bpp;
+			  // compBytes sizes every device composite (and every buffer in bufPool).
+			  // It used to be latched on the first frame only, while bpp is re-derived
+			  // per frame from the decoder's bit depth -- so an 8->10-bit transition
+			  // left every composite half the size the tile writes and the DtoH copy
+			  // below expect, overrunning both. Resize on change and drop the buffers
+			  // that were allocated at the old size.
+			  const size_t needComp = (size_t)wallW * wallH * bpp;
+			  if (compBytes != needComp) {
+			      for (auto& kv : gframes) if (kv.second.dComp) cuMemFree(kv.second.dComp);
+			      gframes.clear();
+			      for (auto d : bufPool) cuMemFree(d);
+			      bufPool.clear();
+			      if (compBytes != 0)   // not the first frame: a real format change
+			          std::fprintf(stderr, "[recvwall] composite resized to %dx%d @ %d bpp\n", wallW, wallH, bpp);
+			      compBytes = needComp;
+			  }
 			  { long long lc = lastComplete.load();   // sender restart (see CPU worker)
 			    if (lc > 300 && (long long)job.frame + 300 < lc) {
 			        for (auto& kv : gframes) if (kv.second.dComp) bufPool.push_back(kv.second.dComp);
@@ -529,7 +569,7 @@ void RecvWallHandle::decodeWorkerGpu(uint16_t tile, TileQ* tq)
 			  }
 			  if (++gf.written >= expectedTiles) {
 			      fresh = (long long)job.frame > lastComplete.load();
-			      myBuf = gf.dComp; doneMeta = gf.meta; doneSend = gf.sendTimeNs;
+			      myBuf = gf.dComp; myBufBytes = compBytes; doneMeta = gf.meta; doneSend = gf.sendTimeNs;
 			      if (fresh) lastComplete.store((long long)job.frame);
 			      // reclaim this + any older (stale) frame buffers
 			      for (auto it = gframes.begin(); it != gframes.end() && it->first <= job.frame; ) {
@@ -604,20 +644,22 @@ void RecvWallHandle::decodeWorkerGpu(uint16_t tile, TileQ* tq)
 						if (wentDirect) { complete.fetch_add(1); latestCv.notify_all(); }
 					}
 					if (!wentDirect) {
-						std::vector<uint8_t> wall(compBytes);
-						cuMemcpyDtoH(wall.data(), myBuf, compBytes);
+						std::vector<uint8_t> wall(myBufBytes);
+						cuMemcpyDtoH(wall.data(), myBuf, myBufBytes);
 						// The convert kernel leaves alpha 0; force opaque host-side
 						// (depth-aware: 8-bit alpha every 4th byte, 16-bit every 8th).
 						if (bpp == 8)
 							for (size_t a = 6; a + 2 <= wall.size(); a += 8) { wall[a] = 0xFF; wall[a + 1] = 0xFF; }
 						else
 							for (size_t a = 3; a < wall.size(); a += 4) wall[a] = 0xFF;
-						if (syncOn) enqueueSynced(std::move(wall), doneMeta, doneSend, /*fixAlpha=*/false);
-						else publish(wall, doneMeta, doneSend, /*fixAlpha=*/false);
+						if (syncOn) enqueueSynced(std::move(wall), doneMeta, doneSend, bpp, /*fixAlpha=*/false);
+						else publish(wall, doneMeta, doneSend, bpp, /*fixAlpha=*/false);
 					}
 				}
 				std::lock_guard<std::mutex> lk(pendingMtx);
-				bufPool.push_back(myBuf);
+				// Only recycle it if the composite size has not moved on under us.
+				if (myBufBytes == compBytes) bufPool.push_back(myBuf);
+				else cuMemFree(myBuf);
 			}
 		}
 	}
@@ -626,7 +668,7 @@ void RecvWallHandle::decodeWorkerGpu(uint16_t tile, TileQ* tq)
 // Completed wall -> reorder buffer keyed by SEI index + publish my slot on the
 // board. The presenter decides what (and whether) to actually present.
 void RecvWallHandle::enqueueSynced(std::vector<uint8_t>&& wall, const sync::SyncMeta& m,
-                                   uint64_t sendTimeNs, bool fixAlpha)
+                                   uint64_t sendTimeNs, int bpp, bool fixAlpha)
 {
 	const uint64_t S = m.globalFrameIndex;   // SEI index: the cross-stream truth
 	if (fixAlpha)
@@ -652,7 +694,7 @@ void RecvWallHandle::enqueueSynced(std::vector<uint8_t>&& wall, const sync::Sync
 		} else if (myLastComplete - S < 64) {
 			myBits |= 1ull << (myLastComplete - S);   // late completion inside window
 		}
-		SyncedWall sw; sw.px = std::move(wall); sw.meta = m; sw.sendTimeNs = sendTimeNs;
+		SyncedWall sw; sw.px = std::move(wall); sw.meta = m; sw.sendTimeNs = sendTimeNs; sw.bpp = bpp;
 		reorder[S] = std::move(sw);
 		while ((int)reorder.size() > syncDepth) {
 			wallPool.push_back(std::move(reorder.begin()->second.px));
@@ -720,7 +762,7 @@ void RecvWallHandle::presenterLoop()
 			}
 		}
 
-		std::vector<uint8_t> toPub; sync::SyncMeta pm{}; uint64_t ps = 0; bool doPub = false;
+		std::vector<uint8_t> toPub; sync::SyncMeta pm{}; uint64_t ps = 0; bool doPub = false; int pubBpp = 4;
 		{
 			std::lock_guard<std::mutex> lk(syncMtx);
 			const bool newDecoded = myLastComplete != SEI_NONE &&
@@ -729,7 +771,7 @@ void RecvWallHandle::presenterLoop()
 				auto it = reorder.find(H);
 				if (it != reorder.end()) {
 					toPub = std::move(it->second.px); pm = it->second.meta;
-					ps = it->second.sendTimeNs; doPub = true;
+					ps = it->second.sendTimeNs; pubBpp = it->second.bpp; doPub = true;
 				} else bufferMisses.fetch_add(1);     // evicted: depth < member skew
 				lastPublishedSei = H;                 // advance regardless: never stick
 				for (auto it2 = reorder.begin(); it2 != reorder.end() && it2->first <= H; ) {
@@ -744,7 +786,7 @@ void RecvWallHandle::presenterLoop()
 				holdSinceTick.store(0);               // nothing new at all
 			}
 		}
-		if (doPub) publish(toPub, pm, ps);            // alpha already fixed at enqueue
+		if (doPub) publish(toPub, pm, ps, pubBpp);    // alpha already fixed at enqueue
 	}
 }
 
@@ -904,9 +946,17 @@ int RecvWallGetLatest(RecvWallHandle* h, unsigned char* dst, int dstPitch,
 	if (v == *ioVersion) return 0;
 	std::lock_guard<std::mutex> lk(h->latestMtx);
 	if (h->latestPx.empty()) return 0;
-	const int srcPitch = h->wallW * h->outBpp.load();
-	if (dstPitch < srcPitch || (long long)dstCapBytes < (long long)dstPitch * h->wallH) return -1;
-	for (int y = 0; y < h->wallH; ++y)
+	// Stride and row count come from the published buffer itself, not from
+	// wallW * outBpp: outBpp tracks the newest decoded frame, so on a bit-depth
+	// change it can say 8 bpp while latestPx still holds a 4 bpp composite, and
+	// this loop would read twice the buffer's length into the caller's frame.
+	const size_t    srcPitch = h->latestPitch;
+	const int       rows     = h->latestRows;
+	if (srcPitch == 0 || rows <= 0) return 0;
+	if (h->latestPx.size() < srcPitch * (size_t)rows) return -1;   // never trust it blindly
+	if (dstPitch <= 0 || (size_t)dstPitch < srcPitch ||
+	    (long long)dstCapBytes < (long long)dstPitch * rows) return -1;
+	for (int y = 0; y < rows; ++y)
 		std::memcpy(dst + (size_t)y * dstPitch, h->latestPx.data() + (size_t)y * srcPitch, srcPitch);
 	if (outInfo) *outInfo = h->latestInfo;
 	*ioVersion = h->version.load();
