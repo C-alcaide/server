@@ -122,6 +122,26 @@ class expr_eval
     std::size_t                                       p_ = 0;
     const std::function<double(const std::string&)>&  var_;
 
+    // The grammar recurses once per '(' and once per unary +/-, both of which an
+    // ISF file controls without limit, so a long run of either overflows the
+    // stack. Bail out at a depth no legitimate size expression reaches.
+    static constexpr int MAX_DEPTH = 64;
+    int                  depth_    = 0;
+
+    // RAII depth counter: every recursive entry point takes one.
+    struct depth_guard
+    {
+        expr_eval& e;
+        bool       ok;
+        explicit depth_guard(expr_eval& ev)
+            : e(ev)
+            , ok(ev.depth_ < MAX_DEPTH)
+        {
+            ++e.depth_;
+        }
+        ~depth_guard() { --e.depth_; }
+    };
+
   public:
     expr_eval(const std::string& s, const std::function<double(const std::string&)>& var)
         : s_(s)
@@ -147,6 +167,9 @@ class expr_eval
     }
     double expr()
     {
+        depth_guard g(*this);
+        if (!g.ok)
+            return 0.0;
         double v = term();
         for (;;) {
             skip();
@@ -179,6 +202,9 @@ class expr_eval
     }
     double factor()
     {
+        depth_guard g(*this);
+        if (!g.ok)
+            return 0.0;
         skip();
         if (match('+'))
             return factor();
