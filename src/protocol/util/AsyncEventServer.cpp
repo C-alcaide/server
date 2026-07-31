@@ -280,11 +280,34 @@ struct AsyncEventServer::implementation : public spl::enable_shared_from_this<im
 
     implementation(std::shared_ptr<boost::asio::io_context>    io_context,
                    const protocol_strategy_factory<char>::ptr& protocol,
-                   unsigned short                              port)
+                   unsigned short                              port,
+                   const std::wstring&                         host)
         : io_context_(std::move(io_context))
-        , acceptor_(*io_context_, tcp::endpoint(tcp::v4(), port))
+        , acceptor_(*io_context_)
         , protocol_factory_(protocol)
     {
+        tcp::endpoint endpoint;
+        if (host.empty()) {
+            endpoint = tcp::endpoint(tcp::v4(), port);
+        } else {
+            // Resolve as IPv4 only — the rest of this class (connection::ipv4_address())
+            // assumes IPv4 client addresses, so an IPv6 bind host is rejected here
+            // rather than silently producing a listener the rest of the code can't
+            // describe correctly.
+            tcp::resolver              resolver(*io_context_);
+            boost::system::error_code ec;
+            auto results = resolver.resolve(tcp::v4(), u8(host), std::to_string(port), ec);
+            if (ec || results.empty()) {
+                CASPAR_THROW_EXCEPTION(caspar_exception()
+                                       << msg_info(L"Failed to resolve controller bind host: " + host));
+            }
+            endpoint = results.begin()->endpoint();
+        }
+
+        acceptor_.open(endpoint.protocol());
+        acceptor_.set_option(tcp::acceptor::reuse_address(true));
+        acceptor_.bind(endpoint);
+        acceptor_.listen();
     }
 
     void stop()
@@ -352,8 +375,9 @@ struct AsyncEventServer::implementation : public spl::enable_shared_from_this<im
 
 AsyncEventServer::AsyncEventServer(std::shared_ptr<boost::asio::io_context>    io_context,
                                    const protocol_strategy_factory<char>::ptr& protocol,
-                                   unsigned short                              port)
-    : impl_(new implementation(std::move(io_context), protocol, port))
+                                   unsigned short                              port,
+                                   const std::wstring&                         host)
+    : impl_(new implementation(std::move(io_context), protocol, port, host))
 {
     impl_->start_accept();
 }

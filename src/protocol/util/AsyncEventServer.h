@@ -36,9 +36,13 @@ using lifecycle_factory_t =
 class AsyncEventServer
 {
   public:
+    // `host`, when non-empty, restricts the listener to that bind address
+    // (resolved as IPv4) instead of every interface (0.0.0.0). Empty (the
+    // default) preserves the previous wildcard-bind behavior.
     explicit AsyncEventServer(std::shared_ptr<boost::asio::io_context>    io_context,
                               const protocol_strategy_factory<char>::ptr& protocol,
-                              unsigned short                              port);
+                              unsigned short                              port,
+                              const std::wstring&                         host = L"");
     ~AsyncEventServer();
 
     void add_client_lifecycle_object_factory(const lifecycle_factory_t& lifecycle_factory);

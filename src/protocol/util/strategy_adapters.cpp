@@ -73,7 +73,8 @@ class from_unicode_client_connection : public client_connection<wchar_t>
         if (data.length() < 512) {
             boost::replace_all(data, L"\n", L"\\n");
             boost::replace_all(data, L"\r", L"\\r");
-            CASPAR_LOG(info) << L"Sent message to " << client_->address() << L":" << data;
+            CASPAR_LOG(info) << L"Sent message to " << client_->address() << L":"
+                            << log::replace_nonprintable_copy(data, L'?');
         } else
             CASPAR_LOG(info) << L"Sent more than 512 bytes to " << client_->address();
     }

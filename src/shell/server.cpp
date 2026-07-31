@@ -147,7 +147,7 @@ struct server::impl
         CASPAR_LOG(info) << L"Initialized command repository.";
 
         module_dependencies dependencies(
-            cg_registry_, producer_registry_, consumer_registry_, amcp_command_repo_wrapper_);
+            cg_registry_, producer_registry_, consumer_registry_, amcp_command_repo_wrapper_, channels_);
         initialize_modules(dependencies);
         CASPAR_LOG(info) << L"Initialized modules.";
 
@@ -575,12 +575,14 @@ struct server::impl
 
             if (name == L"tcp") {
                 auto port = ptree_get<unsigned int>(xml_controller.second, L"port");
+                auto host = xml_controller.second.get(L"host", L"");
 
                 try {
                     auto asyncbootstrapper = spl::make_shared<IO::AsyncEventServer>(
                         io_context_,
                         create_protocol(protocol, L"TCP Port " + std::to_wstring(port)),
-                        static_cast<short>(port));
+                        static_cast<short>(port),
+                        host);
                     async_servers_.push_back(asyncbootstrapper);
 
                     if (!primary_amcp_server_ && boost::iequals(protocol, L"AMCP"))

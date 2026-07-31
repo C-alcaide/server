@@ -584,6 +584,20 @@ std::wstring print_raw_command(command_context& ctx)
         filename = L"raw_" + std::to_wstring(ctx.channel_index + 1) + L"-" + std::to_wstring(layer_index);
     }
 
+    // Resolve the output path relative to <media>/_raw and verify it can't
+    // escape that folder via "..", an absolute path, etc. — mirrors the
+    // containment check used by MIXER MESH / PROJECTION_BLEND_MASK.
+    auto                       raw_base = boost::filesystem::canonical(env::media_folder()) / L"_raw";
+    boost::system::error_code ec;
+    boost::filesystem::create_directories(raw_base, ec);
+    raw_base = boost::filesystem::canonical(raw_base);
+    auto resolved = boost::filesystem::weakly_canonical(raw_base / (filename + L".png"));
+    if (resolved.wstring().find(raw_base.wstring()) != 0) {
+        CASPAR_LOG(warning) << L"PRINT RAW: rejected path escaping _raw folder: " << filename;
+        return L"403 PRINT RAW FORBIDDEN\r\n";
+    }
+    std::wstring output_path = resolved.wstring();
+
     // Get the foreground producer for this layer
     auto producer = ctx.channel.stage->foreground(layer_index).get();
     if (!producer || producer == core::frame_producer::empty()) {
@@ -624,8 +638,7 @@ std::wstring print_raw_command(command_context& ctx)
     auto frame = extractor.result;
 
     // Write to disk asynchronously
-    std::thread async([frame, filename] {
-        std::wstring output_path = env::media_folder() + L"_raw/" + filename + L".png";
+    std::thread async([frame, output_path] {
         core::write_frame_png(frame, output_path);
     });
     async.detach();
