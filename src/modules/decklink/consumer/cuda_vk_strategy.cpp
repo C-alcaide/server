@@ -54,6 +54,7 @@
 #endif
 
 #include <atomic>
+#include <cstring>
 #include <deque>
 #include <stdexcept>
 #include <vector>
@@ -182,6 +183,24 @@ struct cuda_vk_strategy::impl
     bool             gpu_wait_available_ = true;  // assume available until proven otherwise
     int              gpu_wait_fail_count_ = 0;    // consecutive failures; retry after threshold
     static constexpr int GPU_WAIT_RETRY_INTERVAL = 500; // frames between retry attempts
+
+    // A blank output frame, for the frames where the pipeline has nothing to hand
+    // back yet.
+    //
+    // It must NOT be produced by falling through to the CPU strategy. This consumer
+    // reports needs_cpu_frame_data()==false whenever a GPU readback mode is active
+    // (decklink_consumer.cpp), so the mixer deliberately skips the host readback and
+    // const_frame::image_data() is `unavailable` -- the CPU v210 packer then reads an
+    // empty array and takes the process down. Zero-filled matches what the
+    // consumer's own preroll schedules before playback starts.
+    std::shared_ptr<void> blank_output(size_t bytes)
+    {
+        ensure_pool(bytes);
+        auto b = pool_->acquire(bytes);
+        if (b)
+            std::memset(b.get(), 0, bytes);
+        return b; // null only if the pool is out of memory; caller then declines
+    }
 
     // Acquire an event, reusing a retired one when available.
     cudaEvent_t take_event()
@@ -403,10 +422,10 @@ struct cuda_vk_strategy::impl
     //
     // Returns null while the queue is still filling: for the first PIPELINE_DEPTH
     // frames there is genuinely no copy old enough to have completed. The caller
-    // falls back to the CPU strategy for those, which is what it already does for
-    // any frame the GPU path declines. Crucially, a buffer leaves this queue
-    // exactly once -- handing one out while it is still queued is the whole defect
-    // being fixed, so the fill case must not hand out the entry it just pushed.
+    // must emit a blank frame for those -- see blank_output(), and do NOT route them
+    // to the CPU strategy. Crucially, a buffer leaves this queue exactly once --
+    // handing one out while it is still queued is the whole defect being fixed, so
+    // the fill case must not hand out the entry it just pushed.
     std::shared_ptr<void> push_and_take(std::shared_ptr<void> buf)
     {
         auto ev = take_event();
@@ -646,9 +665,9 @@ struct cuda_vk_strategy::impl
             accum_fence_ms_ = accum_import_ms_ = accum_sync_ms_ = accum_launch_ms_ = accum_total_ms_ = 0.0;
         }
 
-        // Null while the pipeline fills -> convert_frame_for_port() uses the CPU
-        // strategy for those first frames.
-        return push_and_take(std::move(out_buf));
+        if (auto ready = push_and_take(std::move(out_buf)))
+            return ready;
+        return blank_output(v210_sz); // pipeline still filling
 #else
         return nullptr;
 #endif
@@ -757,7 +776,9 @@ struct cuda_vk_strategy::impl
             accum_fence_ms_ = accum_import_ms_ = accum_sync_ms_ = accum_launch_ms_ = accum_total_ms_ = 0.0;
         }
 
-        return push_and_take(std::move(out_buf));
+        if (auto ready = push_and_take(std::move(out_buf)))
+            return ready;
+        return blank_output(bgra_sz); // pipeline still filling
 #else
         return nullptr;
 #endif
@@ -838,7 +859,21 @@ std::shared_ptr<void> cuda_vk_strategy::convert_frame_for_port(
         }
     }
 
-    // Fallback to CPU strategy for interlaced, empty frames, or on error
+    // Fallback to CPU strategy for interlaced, empty frames, or on error.
+    //
+    // Only usable when the frame actually carries host pixels. This consumer reports
+    // needs_cpu_frame_data()==false whenever a GPU readback mode is active, so for a
+    // GPU-only frame the CPU v210 packer reads an `unavailable` image_data() and
+    // takes the process down. Emit a blank frame in that case instead. (This also
+    // covers interlaced output, which has always taken this path and has the same
+    // problem -- a pre-existing hazard, not one introduced here.)
+    if (frame1 && frame1.host_image_state() == core::host_image_availability::unavailable) {
+        const size_t bytes = static_cast<size_t>(get_row_bytes(decklink_format_desc.width)) *
+                             decklink_format_desc.height;
+        CASPAR_LOG(debug) << L"[cuda_vk_strategy] No host pixels for the CPU fallback; emitting a blank frame.";
+        return impl_->blank_output(bytes);
+    }
+
     return impl_->fallback_->convert_frame_for_port(
         channel_format_desc, decklink_format_desc, config, frame1, frame2, field_dominance);
 }

@@ -238,15 +238,40 @@ struct vk_readback_strategy::impl
         });
     }
 
+    // A blank output frame, for the frames where the pipeline has nothing to hand
+    // back yet, or where every slot is still held by DeckLink.
+    //
+    // It must NOT be produced by falling through to the CPU strategy. This consumer
+    // reports needs_cpu_frame_data()==false whenever a GPU readback mode is active
+    // (decklink_consumer.cpp), so the mixer deliberately skips the host readback and
+    // const_frame::image_data() is `unavailable` -- the CPU v210 packer then reads an
+    // empty array and takes the process down. Zero-filled matches what the
+    // consumer's own preroll schedules before playback starts.
+    int row_bytes_for(int width) const
+    {
+        return (is_hdr_ || use_bt2020_ || needs_v210_) ? ((width + 47) / 48) * 128 : width * 4;
+    }
+
+    std::shared_ptr<void> blank_output(const core::video_format_desc& decklink_format_desc)
+    {
+        const size_t bytes =
+            static_cast<size_t>(row_bytes_for(decklink_format_desc.width)) * decklink_format_desc.height;
+        auto b = acquire_pinned_output(blank_pool_, bytes, 128); // same helper the CPU strategies use
+        if (b)
+            std::memset(b.get(), 0, bytes);
+        return b;
+    }
+    std::shared_ptr<gpu_output_buffer_pool> blank_pool_;
+
     // Queue the slot whose readback was just submitted and hand back the oldest
     // completed one, preserving the previous 2-frame pipeline depth.
     //
     // Returns -1 while the queue is still filling: for the first PIPELINE_DEPTH
-    // frames no submitted readback is old enough to have landed. The caller then
-    // returns null and convert_frame_for_port falls back to the CPU strategy, as it
-    // already does for any frame the GPU path declines. A slot leaves this queue
-    // exactly once -- handing one out while it is still queued is the defect being
-    // fixed, so the filling case must not hand out the slot it just pushed.
+    // frames no submitted readback is old enough to have landed. The caller must
+    // emit a blank frame for those -- see blank_output(), and do NOT route them to
+    // the CPU strategy. A slot leaves this queue exactly once -- handing one out
+    // while it is still queued is the defect being fixed, so the filling case must
+    // not hand out the slot it just pushed.
     int push_and_take(int submitted)
     {
         inflight_.push_back(submitted);
@@ -1079,6 +1104,10 @@ struct vk_readback_strategy::impl
         std::shared_ptr<void> pixels;
         int                   width  = 0;
         int                   height = 0;
+        // Set when `pixels` is an already-packed blank output frame rather than raw
+        // staging pixels: the caller must pass it straight through instead of
+        // running the CPU RGBA->v210 conversion over it.
+        bool                  is_blank = false;
     };
 
     dma_result convert_frame_dma(
@@ -1126,7 +1155,7 @@ struct vk_readback_strategy::impl
         // let the caller use the CPU strategy for this frame.
         const int cur_write = acquire_slot();
         if (cur_write < 0)
-            return {};
+            return {blank_output(decklink_format_desc), dst_w, dst_h, /*is_blank=*/true};
         auto& slot = slots_[cur_write];
 
         step_timer     = caspar::timer();
@@ -1251,11 +1280,11 @@ struct vk_readback_strategy::impl
             accum_import_ms_ = accum_sync_ms_ = accum_submit_ms_ = accum_total_ms_ = 0.0;
         }
 
-        // Hand back the readback submitted PIPELINE_DEPTH frames ago; null while the
-        // queue is still filling (the caller then uses the CPU strategy).
+        // Hand back the readback submitted PIPELINE_DEPTH frames ago; a blank frame
+        // while the queue is still filling.
         const int ready = push_and_take(cur_write);
         if (ready < 0)
-            return {};
+            return {blank_output(decklink_format_desc), dst_w, dst_h, /*is_blank=*/true};
 
         return {make_staging_ref(ready), dst_w, dst_h};
     }
@@ -1310,7 +1339,7 @@ struct vk_readback_strategy::impl
         // let the caller use the CPU strategy for this frame.
         const int cur_write = acquire_slot();
         if (cur_write < 0)
-            return nullptr;
+            return blank_output(decklink_format_desc);
         auto& slot = slots_[cur_write];
 
         step_timer     = caspar::timer();
@@ -1464,11 +1493,11 @@ struct vk_readback_strategy::impl
             accum_import_ms_ = accum_sync_ms_ = accum_submit_ms_ = accum_total_ms_ = 0.0;
         }
 
-        // Hand back the readback submitted PIPELINE_DEPTH frames ago; null while the
-        // queue is still filling (the caller then uses the CPU strategy).
+        // Hand back the readback submitted PIPELINE_DEPTH frames ago; a blank frame
+        // while the queue is still filling.
         const int ready = push_and_take(cur_write);
         if (ready < 0)
-            return nullptr;
+            return blank_output(decklink_format_desc);
 
         return make_staging_ref(ready);
     }
@@ -1545,6 +1574,14 @@ std::shared_ptr<void> vk_readback_strategy::convert_frame_for_port(
             if (impl_->dma_only_) {
                 // DMA mode: VK DMA copy raw pixels → CPU v210 conversion via fallback
                 auto dma = impl_->convert_frame_dma(decklink_format_desc, config, frame1);
+                if (dma.pixels && dma.is_blank) {
+                    // Already a packed blank output frame (pipeline filling, or every
+                    // slot still held by DeckLink). Must not be run through the CPU
+                    // RGBA->v210 conversion below, and must not fall through to the
+                    // CPU strategy: needs_cpu_frame_data() is false for GPU readback
+                    // modes, so frame1 carries no host pixels.
+                    return dma.pixels;
+                }
                 if (dma.pixels) {
                     // Wrap the staging buffer as a const_frame for the CPU v210 strategy.
                     // The staging has raw RGBA pixels (UNORM 8 or 16-bit) for the subregion
@@ -1603,7 +1640,15 @@ std::shared_ptr<void> vk_readback_strategy::convert_frame_for_port(
             CASPAR_LOG(warning) << L"[vk_readback] GPU conversion failed: " << e.what()
                                 << L" - falling back to CPU";
         }
-        // Fallback
+        // Fallback. Only usable when the frame actually carries host pixels: this
+        // consumer reports needs_cpu_frame_data()==false for GPU readback modes, so
+        // for a GPU-only frame the CPU packer would read an `unavailable`
+        // image_data() and crash. Emit a blank frame in that case instead.
+        // (This also covers interlaced output, which has always taken this path.)
+        if (frame1 && frame1.host_image_state() == core::host_image_availability::unavailable) {
+            CASPAR_LOG(debug) << L"[vk_readback] No host pixels for the CPU fallback; emitting a blank frame.";
+            return impl_->blank_output(decklink_format_desc);
+        }
         return impl_->fallback_->convert_frame_for_port(
             channel_format_desc, decklink_format_desc, config, frame1, frame2, field_dominance);
     }
