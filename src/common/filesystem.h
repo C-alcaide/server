@@ -32,6 +32,22 @@ find_file_within_dir_or_absolute(const std::wstring&                            
                                  const std::wstring&                                        filename,
                                  const std::function<bool(const boost::filesystem::path&)>& is_valid_file);
 
+/// Is `resolved` inside `base`?
+///
+/// For containing a client-supplied path to a folder. Note this is deliberately
+/// NOT what find_file_within_dir_or_absolute above does: that one accepts absolute
+/// paths by design, which is right for reading media an operator points at, and
+/// wrong for anything that writes.
+///
+/// A plain string-prefix test is not enough -- it has no boundary at the separator,
+/// so a base of "D:\casparcg\media" also accepts "D:\casparcg\media_evil\x".
+/// lexically_relative gives the boundary: the result is empty when the paths are
+/// unrelated and begins with ".." when `resolved` is outside `base`.
+///
+/// Purely lexical, so callers must canonicalize (or weakly_canonicalize) first --
+/// otherwise a symlink inside `base` still escapes it.
+bool is_within_base(const boost::filesystem::path& resolved, const boost::filesystem::path& base);
+
 boost::filesystem::path get_relative(const boost::filesystem::path& file, const boost::filesystem::path& relative_to);
 boost::filesystem::path get_relative_without_extension(const boost::filesystem::path& file,
                                                        const boost::filesystem::path& relative_to);

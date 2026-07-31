@@ -126,28 +126,6 @@ namespace caspar { namespace protocol { namespace amcp {
 using namespace core;
 namespace pt = boost::property_tree;
 
-// Is `resolved` inside `base`?
-//
-// The commands that accept a client-supplied path used a bare string prefix
-// test, `resolved.wstring().find(base.wstring()) != 0`, which has no separator
-// boundary: with a media folder of "D:\casparcg\media" it also accepts
-// "D:\casparcg\media_evil\x", because that string starts with the base string
-// too. A sibling directory whose name merely begins with the base's name was
-// therefore reachable by any of them.
-//
-// lexically_relative gives the boundary for free: the result is empty when the
-// paths are unrelated and starts with ".." when `resolved` is outside `base`.
-// Callers must still canonicalize (or weakly_canonicalize) first -- this is a
-// lexical test and does not resolve symlinks.
-static bool is_within_base(const boost::filesystem::path& resolved, const boost::filesystem::path& base)
-{
-    const auto rel = resolved.lexically_relative(base);
-    if (rel.empty())
-        return false;
-    const auto first = rel.begin();
-    return first == rel.end() || first->wstring() != L"..";
-}
-
 std::wstring read_utf8_file(const boost::filesystem::path& file)
 {
     std::wstringstream           result;

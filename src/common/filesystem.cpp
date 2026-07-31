@@ -76,6 +76,15 @@ find_file_within_dir_or_absolute(const std::wstring&                            
     return probe_path(full_path, is_valid_file);
 }
 
+bool is_within_base(const boost::filesystem::path& resolved, const boost::filesystem::path& base)
+{
+    const auto rel = resolved.lexically_relative(base);
+    if (rel.empty())
+        return false;
+    const auto first = rel.begin();
+    return first == rel.end() || first->wstring() != L"..";
+}
+
 boost::filesystem::path get_relative(const boost::filesystem::path& file, const boost::filesystem::path& relative_to)
 {
     auto result       = file.filename();
