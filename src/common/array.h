@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <new>
 #include <vector>
 
 namespace caspar {
@@ -21,13 +22,30 @@ class array final
 
     array() = default;
 
+    /// Allocates `size` ELEMENTS, zero-filled.
+    ///
+    /// size_ is an element count everywhere else in this class -- size() returns it
+    /// and end() is ptr_ + size_ -- but this constructor used to malloc/memset the
+    /// argument as if it were a byte count. For T wider than a byte that made the
+    /// two conventions disagree, and either reading of the argument was then wrong:
+    /// pass bytes and the array reports sizeof(T)x more elements than it holds (which
+    /// is what AudioResampler did, and audio_mixer duly read past the allocation);
+    /// pass elements and the allocation is sizeof(T)x too small.
+    ///
+    /// Scaling by sizeof(T) here makes the argument mean elements consistently. It is
+    /// a no-op for every existing caller: after the AudioResampler fix they are all
+    /// byte-typed (device::create_array in both accelerators returns array<uint8_t>,
+    /// and av_producer's zero-length image plane is array<const uint8_t>).
     explicit array(std::size_t size)
         : size_(size)
     {
         if (size_ > 0) {
-            auto storage = std::shared_ptr<void>(std::malloc(size), std::free);
-            ptr_         = reinterpret_cast<T*>(storage.get());
-            std::memset(ptr_, 0, size_);
+            const std::size_t bytes = size_ * sizeof(T);
+            auto              storage = std::shared_ptr<void>(std::malloc(bytes), std::free);
+            if (!storage)
+                throw std::bad_alloc();
+            ptr_ = reinterpret_cast<T*>(storage.get());
+            std::memset(ptr_, 0, bytes);
             storage_ = std::make_shared<std::any>(std::move(storage));
         }
     }
