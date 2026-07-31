@@ -378,6 +378,32 @@ public:
                     const core::channel_info& channel_info,
                     int /*port_index*/) override
     {
+        // initialize() is re-entered on a live consumer whenever the channel format
+        // changes (core/consumer/output.cpp re-initialises every consumer, which
+        // "SET <channel> MODE <format>" triggers at runtime). Everything below
+        // assumes a fresh object, so tear the previous recording down first:
+        //
+        //   - encode_thread_ is assigned below. std::thread::operator= on a joinable
+        //     thread calls std::terminate(), so without this the process died the
+        //     first time an operator changed format while recording.
+        //   - the encode loop is what closes the muxer, so replacing it without
+        //     draining left the file being written unfinalized.
+        //   - the CUDA/GL-interop resources are rebuilt below, under the running
+        //     thread that owns the GL context.
+        //
+        // stop() already does all of that and is safe before the first start (every
+        // resource it touches is null-guarded). It clears running_, which is
+        // initialised true at its declaration and set nowhere else, so restore it
+        // afterwards or the restarted encode loop exits immediately and send()
+        // rejects every frame.
+        stop();
+        running_ = true;
+
+        // A field::a buffered for the old geometry must not be paired with a
+        // field::b of the new one.
+        pending_field_a_ = core::const_frame{};
+        pending_audio_a_.clear();
+
         format_desc_ = format_desc;
         prores_tables_upload();
 
