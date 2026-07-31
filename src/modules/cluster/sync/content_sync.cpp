@@ -15,6 +15,7 @@
 #include <core/producer/frame_producer.h>
 
 #include <chrono>
+#include <future>
 #include <limits>
 
 namespace caspar { namespace cluster { namespace sync {
@@ -400,17 +401,26 @@ void content_sync::check_producer(tracked_producer& tp)
         return;
     }
 
-    // Cooldown after a correction: wait before issuing another seek
-    // This prevents seek storms when the decoder can't land precisely on the target frame
-    if (tp.requery_cooldown > 0) {
-        tp.requery_cooldown--;
-        return;
-    }
+    // (The post-correction cooldown is enforced by the requery_cooldown check
+    // earlier in this function, which decrements it on every frame it is non-zero
+    // and returns -- so execution never reaches here with a cooldown outstanding.
+    // A second check at this point would be dead code.)
 
-    // Issue seek correction
+    // Issue seek correction.
+    //
+    // stage()->call() runs the seek on the channel's executor and reports failure
+    // through the future, not by throwing here -- so discarding the future (as this
+    // did) threw away the only notification that a correction had failed, and the
+    // catch below could only ever see errors raised synchronously. Keep it and
+    // check it, with a short timeout: this is the watchdog thread, and blocking it
+    // on a stalled channel would stop every other tracked layer from being checked.
     try {
         std::vector<std::wstring> seek_params = {L"seek", std::to_wstring(expected)};
-        channel->stage()->call(tp.layer_index, seek_params);
+        auto                      seek_future = channel->stage()->call(tp.layer_index, seek_params);
+
+        if (seek_future.wait_for(std::chrono::milliseconds(20)) == std::future_status::ready)
+            seek_future.get(); // rethrows whatever the executor caught
+        // Still pending: the seek is queued and will run; treat it as issued.
 
         tp.corrections++;
         total_corrections_.fetch_add(1, std::memory_order_relaxed);
