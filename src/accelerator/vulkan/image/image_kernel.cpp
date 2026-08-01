@@ -922,7 +922,20 @@ struct image_kernel::impl
         // 8-bit render targets use BGRA output swizzle in the shader to match
         // VK_FORMAT_B8G8R8A8_UNORM import expectation.  16-bit renders RGBA
         // directly since VK_FORMAT_B16G16R16A16_UNORM does not exist in Vulkan.
-        if (depth_ == common::bit_depth::bit8) {
+        //
+        // Not for a key pass. A key is not a picture that will be scanned out --
+        // it is sampled back through textures[LOCAL_KEY].r by whichever item the
+        // key applies to. Swizzling on the way in put the key in blue and left
+        // red at zero, so that sample returned 0 and multiplied the next item's
+        // alpha away entirely. The OpenGL backend never had this to get wrong:
+        // it allocates a single-channel texture for the key, so there is nothing
+        // to swizzle.
+        //
+        // Seen as a Spout frame with alpha rendering opaque-over-nothing on the
+        // Vulkan mixer while OpenGL composited it correctly -- a Spout frame
+        // arrives as two items, a key followed by the picture, so it takes this
+        // path where an ordinary clip does not.
+        if (depth_ == common::bit_depth::bit8 && !transforms.image_transform.is_key) {
             uniforms.flags2 |= static_cast<uint32_t>(shader_flags2::output_bgra);
         }
 
