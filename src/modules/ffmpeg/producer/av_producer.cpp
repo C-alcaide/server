@@ -688,16 +688,36 @@ AVPixelFormat get_pix_fmt_with_alpha(AVPixelFormat fmt)
     return fmt;
 }
 
-const AVCodec* get_decoder(AVCodecID codec_id)
+const AVCodec* get_decoder(AVCodecID codec_id, const AVStream* stream)
 {
-    // enforce use of libvpx for vp8 and vp9 codecs to be able
-    // to decode webm files with alpha channel
-    const AVCodec* result = nullptr;
-    if (codec_id == AV_CODEC_ID_VP9)
-        result = avcodec_find_decoder_by_name("libvpx-vp9");
-    else if (codec_id == AV_CODEC_ID_VP8)
-        result = avcodec_find_decoder_by_name("libvpx");
-    return result != nullptr ? result : avcodec_find_decoder(codec_id);
+    // libvpx is the only VP8/VP9 decoder that reads the alpha channel out of a
+    // WebM, so it used to be forced for every VP8 and VP9 file. That bought
+    // alpha at the cost of hardware decoding for all of them, because libvpx is
+    // a software-only external library: FFmpeg's own vp9 decoder advertises
+    // dxva2, d3d11va, d3d12va, cuda and vaapi, and none of it was reachable.
+    // GPU-direct decode declined every VP9 clip with "decoder is not using
+    // D3D11VA", which is true but reads like a hardware limitation rather than
+    // a choice made here.
+    //
+    // The choice only has to be made per file. Matroska records alpha on the
+    // track and the demuxer copies it to stream metadata as alpha_mode (see
+    // matroskadec.c), so it is known before a decoder is opened. Take libvpx
+    // when the file actually declares alpha, and the native decoder -- with
+    // whatever hardware support it has -- otherwise.
+    const bool declares_alpha =
+        stream != nullptr && av_dict_get(stream->metadata, "alpha_mode", nullptr, 0) != nullptr;
+
+    if (declares_alpha) {
+        const AVCodec* result = nullptr;
+        if (codec_id == AV_CODEC_ID_VP9)
+            result = avcodec_find_decoder_by_name("libvpx-vp9");
+        else if (codec_id == AV_CODEC_ID_VP8)
+            result = avcodec_find_decoder_by_name("libvpx");
+        if (result != nullptr)
+            return result;
+    }
+
+    return avcodec_find_decoder(codec_id);
 }
 
 // TODO (fix) Handle ts discontinuities.
@@ -869,7 +889,7 @@ class Decoder
     explicit Decoder(AVStream* stream)
         : st(stream)
     {
-        const auto codec = get_decoder(stream->codecpar->codec_id);
+        const auto codec = get_decoder(stream->codecpar->codec_id, stream);
 
         if (!codec) {
             FF_RET(AVERROR_DECODER_NOT_FOUND, "avcodec_find_decoder");
