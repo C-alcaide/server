@@ -969,6 +969,44 @@ enum class av1_hw_support
     main10, ///< AV1 Profile 0, 8- and 10-bit
 };
 
+/// Which DXGI adapter the decoder should put its D3D11VA device on.
+///
+/// It used to be adapter 0 unconditionally, which was harmless while GPU-direct
+/// was OpenGL-only -- the OpenGL mixer refuses gpu_index != 0, so the mixer was
+/// always GPU 0 too. 489b02fbc brought GPU-direct to the Vulkan mixer, and
+/// Vulkan *does* implement GPU affinity, so a channel on GPU 1 had its frames
+/// decoded on adapter 0 and then handed to d3d11_import_bridge, which cannot
+/// import across devices: "this D3D11 handle is not importable (result=-3)",
+/// and the channel silently dropped to the host transfer path.
+///
+/// Returns -1 for "the default adapter", which is what a null device string
+/// gives av_hwdevice_ctx_create.
+int resolve_decode_adapter(const core::frame_factory* factory)
+{
+    // An explicit setting always wins -- it is the escape hatch when DXGI
+    // enumeration and the mixer disagree, or when the decode should deliberately
+    // run on a different card from the mixer.
+    const int configured = env::properties().get(L"configuration.ffmpeg.producer.hardware-decode-adapter", -1);
+    if (configured >= 0)
+        return configured;
+
+#ifdef _WIN32
+    if (!factory || factory->gpu_device_backend() != core::gpu_backend::vulkan)
+        return -1; // OpenGL has no affinity, so its mixer is always the default adapter
+
+    // The lookup lives in the accelerator: matching a VkPhysicalDevice to a DXGI
+    // adapter needs the Vulkan headers, which this module does not carry.
+    const int index = accelerator::vulkan::dxgi_adapter_for_vk_device(factory->gpu_device_handle());
+    if (index < 0) {
+        CASPAR_LOG(warning) << L"[av_producer] no DXGI adapter matches the mixer's GPU; hardware decode will use "
+                               L"the default adapter and GPU-direct may decline";
+    }
+    return index;
+#else
+    return -1;
+#endif
+}
+
 #ifdef _WIN32
 /// Ask the adapter the decoder will actually use whether it decodes AV1.
 ///
@@ -983,12 +1021,28 @@ enum class av1_hw_support
 /// static query -- no decoding, no packets -- and it is the same question the
 /// decoder will ask later, put to the same adapter.
 ///
-/// Cached: one D3D11 device creation per process, not per file.
-av1_hw_support probe_av1_hw_decode()
+/// Cached per adapter: one D3D11 device creation each, not one per file. The
+/// adapter matters -- on a mixed rig the answer differs between cards, and this
+/// machine is exactly that case (Ampere A4000 decodes AV1, Pascal P4000 does
+/// not), so a process-wide answer would be wrong for one of them.
+av1_hw_support probe_av1_hw_decode(int adapter)
 {
-    static const av1_hw_support value = [] {
+    static std::mutex                    cache_mutex;
+    static std::map<int, av1_hw_support> cache;
+    {
+        std::lock_guard<std::mutex> lock(cache_mutex);
+        auto                        it = cache.find(adapter);
+        if (it != cache.end())
+            return it->second;
+    }
+
+    const auto probe = [&]() -> av1_hw_support {
+        const std::string adapter_str = adapter >= 0 ? std::to_string(adapter) : std::string();
+
         AVBufferRef* hw_ctx = nullptr;
-        if (av_hwdevice_ctx_create(&hw_ctx, AV_HWDEVICE_TYPE_D3D11VA, nullptr, nullptr, 0) != 0 || !hw_ctx) {
+        if (av_hwdevice_ctx_create(
+                &hw_ctx, AV_HWDEVICE_TYPE_D3D11VA, adapter >= 0 ? adapter_str.c_str() : nullptr, nullptr, 0) != 0 ||
+            !hw_ctx) {
             CASPAR_LOG(info) << L"[av_producer] AV1 probe: no D3D11VA device; AV1 will decode in software";
             return av1_hw_support::none;
         }
@@ -1052,11 +1106,17 @@ av1_hw_support probe_av1_hw_decode()
                              : result == av1_hw_support::main8 ? L"Profile 0, 8-bit only"
                                                                : L"not supported");
         return result;
-    }();
-    return value;
+    };
+
+    const auto result = probe();
+    {
+        std::lock_guard<std::mutex> lock(cache_mutex);
+        cache[adapter] = result;
+    }
+    return result;
 }
 #else
-av1_hw_support probe_av1_hw_decode() { return av1_hw_support::none; }
+av1_hw_support probe_av1_hw_decode(int /*adapter*/) { return av1_hw_support::none; }
 #endif
 
 /// configuration.ffmpeg.producer.av1-decoder: auto | hardware | software.
@@ -1077,7 +1137,7 @@ std::wstring av1_decoder_mode()
 
 /// Which AV1 decoder to open, and why. Split out so the reason can be logged
 /// once per file rather than inferred from a black picture.
-const AVCodec* choose_av1_decoder(const AVStream* stream, std::wstring& reason)
+const AVCodec* choose_av1_decoder(const AVStream* stream, int adapter, std::wstring& reason)
 {
     const auto* software = avcodec_find_decoder_by_name("libdav1d");
     const auto* hardware = avcodec_find_decoder_by_name("av1");
@@ -1123,7 +1183,7 @@ const AVCodec* choose_av1_decoder(const AVStream* stream, std::wstring& reason)
     const bool needs_10bit = stream->codecpar->format == AV_PIX_FMT_YUV420P10LE ||
                              stream->codecpar->bits_per_raw_sample > 8;
 
-    const auto support = probe_av1_hw_decode();
+    const auto support = probe_av1_hw_decode(adapter);
     if (support == av1_hw_support::none) {
         reason = L"this GPU has no AV1 decoder";
         return software;
@@ -1137,7 +1197,7 @@ const AVCodec* choose_av1_decoder(const AVStream* stream, std::wstring& reason)
     return hardware;
 }
 
-const AVCodec* get_decoder(AVCodecID codec_id, const AVStream* stream)
+const AVCodec* get_decoder(AVCodecID codec_id, const AVStream* stream, int decode_adapter)
 {
     // libvpx is the only VP8/VP9 decoder that reads the alpha channel out of a
     // WebM, so it used to be forced for every VP8 and VP9 file. That bought
@@ -1174,7 +1234,7 @@ const AVCodec* get_decoder(AVCodecID codec_id, const AVStream* stream)
     // reversed. See choose_av1_decoder.
     if (codec_id == AV_CODEC_ID_AV1) {
         std::wstring reason;
-        const auto*  chosen = choose_av1_decoder(stream, reason);
+        const auto*  chosen = choose_av1_decoder(stream, decode_adapter, reason);
         if (chosen != nullptr) {
             if (reason.empty()) {
                 CASPAR_LOG(info) << L"[av_producer] AV1: using the hardware decoder";
@@ -1352,12 +1412,20 @@ class Decoder
     boost::condition_variable                 hw_output_cond;
 #endif
 
+    /// DXGI adapter for the hardware decode device; -1 = default adapter.
+    int decode_adapter_ = -1;
+
     Decoder() = default;
 
-    explicit Decoder(AVStream* stream)
+    /// `decode_adapter` is the DXGI adapter the hardware decoder should run on,
+    /// or -1 for the default. It has to match the mixer's GPU or the decoded
+    /// surfaces cannot be imported by the GPU-direct bridge -- see
+    /// resolve_decode_adapter.
+    explicit Decoder(AVStream* stream, int decode_adapter = -1)
         : st(stream)
+        , decode_adapter_(decode_adapter)
     {
-        const auto codec = get_decoder(stream->codecpar->codec_id, stream);
+        const auto codec = get_decoder(stream->codecpar->codec_id, stream, decode_adapter);
 
         if (!codec) {
             FF_RET(AVERROR_DECODER_NOT_FOUND, "avcodec_find_decoder");
@@ -1415,8 +1483,18 @@ class Decoder
             }
 
             if (hw_cfg) {
+                // Put the decode device on the adapter the mixer lives on. A
+                // null device string means adapter 0, which is only right when
+                // the mixer happens to be there too.
+                const std::string adapter_str =
+                    decode_adapter_ >= 0 ? std::to_string(decode_adapter_) : std::string();
+
                 AVBufferRef* hw_device_ctx = nullptr;
-                if (av_hwdevice_ctx_create(&hw_device_ctx, AV_HWDEVICE_TYPE_D3D11VA, nullptr, nullptr, 0) == 0) {
+                if (av_hwdevice_ctx_create(&hw_device_ctx,
+                                           AV_HWDEVICE_TYPE_D3D11VA,
+                                           decode_adapter_ >= 0 ? adapter_str.c_str() : nullptr,
+                                           nullptr,
+                                           0) == 0) {
                     ctx->hw_device_ctx = hw_device_ctx;
                     ctx->get_format    = get_hw_format;
                 }
@@ -1905,7 +1983,8 @@ struct Filter
            std::map<int, Decoder>&        streams,
            int64_t                        start_time,
            AVMediaType                    media_type,
-           const core::video_format_desc& format_desc)
+           const core::video_format_desc& format_desc,
+           int                            decode_adapter = -1)
     {
         // Whether bwdif ends up in the graph. The output format restriction below
         // needs to know, because bwdif's chroma handling is what makes interlaced
@@ -2109,7 +2188,11 @@ struct Filter
 
                 auto it = streams.find(index);
                 if (it == streams.end()) {
-                    it = streams.emplace(index, input->streams[index]).first;
+                    it = streams
+                             .emplace(std::piecewise_construct,
+                                      std::forward_as_tuple(index),
+                                      std::forward_as_tuple(input->streams[index], decode_adapter))
+                             .first;
                 }
 
                 auto st = it->second.ctx;
@@ -2495,6 +2578,10 @@ struct AVProducer::Impl
     Filter                 video_filter_;
     Filter                 audio_filter_;
 
+    /// DXGI adapter the hardware decoder runs on, resolved once from the mixer's
+    /// GPU. -1 = default adapter. See resolve_decode_adapter.
+    const int decode_adapter_ = -1;
+
     std::map<int, std::vector<AVFilterContext*>> sources_;
 
     // Stream-level color metadata from the container/decoder, used as fallback
@@ -2590,6 +2677,7 @@ struct AVProducer::Impl
         , name_(name)
         , path_(path)
         , input_(path, graph_, seekable >= 0 && seekable < 2 ? std::optional<bool>(false) : std::optional<bool>())
+        , decode_adapter_(resolve_decode_adapter(frame_factory.get()))
         , start_(start ? av_rescale_q(*start, format_tb_, TIME_BASE_Q) : AV_NOPTS_VALUE)
         , duration_(duration ? av_rescale_q(*duration, format_tb_, TIME_BASE_Q) : AV_NOPTS_VALUE)
         , loop_(loop)
@@ -4028,7 +4116,8 @@ struct AVProducer::Impl
             audio_param_tweens_.clear();
         }
 
-        video_filter_ = Filter(vfilter_, input_, decoders_, start_time, AVMEDIA_TYPE_VIDEO, format_desc_);
+        video_filter_ =
+            Filter(vfilter_, input_, decoders_, start_time, AVMEDIA_TYPE_VIDEO, format_desc_, decode_adapter_);
         audio_filter_ = Filter(afilter_, input_, decoders_, start_time, AVMEDIA_TYPE_AUDIO, format_desc_);
 
         sources_.clear();

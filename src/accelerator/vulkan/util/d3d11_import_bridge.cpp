@@ -26,8 +26,13 @@
 #include "texture_wrapper.h"
 
 #include <common/log.h>
+#include <common/vulkan/gpu_luid.h>
 
+#include <array>
 #include <chrono>
+#include <cstring>
+
+#include <dxgi.h>
 
 #include <vulkan/vulkan.hpp>
 #include <vulkan/vulkan_win32.h>
@@ -447,6 +452,39 @@ bool d3d11_import_bridge::copy_planes(void*                           y_handle,
     out_y  = std::make_shared<texture_wrapper>(std::move(y_tex));
     out_uv = std::make_shared<texture_wrapper>(std::move(uv_tex));
     return true;
+}
+
+int dxgi_adapter_for_vk_device(void* vk_device)
+{
+    auto* dev = static_cast<device*>(vk_device);
+    if (!dev)
+        return -1;
+
+    std::array<uint8_t, 8> luid{};
+    if (!vulkan_common::query_device_luid(dev->getVkPhysicalDevice(), luid))
+        return -1;
+
+    IDXGIFactory1* factory = nullptr;
+    if (FAILED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(&factory))) || !factory)
+        return -1;
+
+    int           found   = -1;
+    IDXGIAdapter* adapter = nullptr;
+    for (UINT i = 0; factory->EnumAdapters(i, &adapter) != DXGI_ERROR_NOT_FOUND; ++i) {
+        DXGI_ADAPTER_DESC desc = {};
+        const bool match = SUCCEEDED(adapter->GetDesc(&desc)) &&
+                           std::memcmp(&desc.AdapterLuid, luid.data(), sizeof(LUID)) == 0;
+        adapter->Release();
+        adapter = nullptr;
+        if (match) {
+            found = static_cast<int>(i);
+            CASPAR_LOG(info) << L"[vk::d3d11_import] the mixer's GPU is DXGI adapter " << found << L" (\""
+                             << desc.Description << L"\")";
+            break;
+        }
+    }
+    factory->Release();
+    return found;
 }
 
 }}} // namespace caspar::accelerator::vulkan

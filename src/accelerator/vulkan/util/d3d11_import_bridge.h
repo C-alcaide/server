@@ -116,6 +116,21 @@ class d3d11_import_bridge
     std::unique_ptr<impl> impl_;
 };
 
+/**
+ * The DXGI adapter index whose LUID matches `vk_device`, or -1 if it cannot be
+ * determined.
+ *
+ * A caller that creates a D3D11 device to feed this bridge has to put it on the
+ * same physical adapter as the mixer, or the shared handles it produces are not
+ * importable here ("this D3D11 handle is not importable"). The producer decides
+ * that before any Vulkan type is in scope, so the lookup lives on this side of
+ * the boundary and takes the device as void*, exactly like the constructor.
+ *
+ * `vk_device` is an `accelerator::vulkan::device*`, as returned by
+ * `core::frame_factory::gpu_device_handle()` when the backend is Vulkan.
+ */
+int dxgi_adapter_for_vk_device(void* vk_device);
+
 }}} // namespace caspar::accelerator::vulkan
 
 #endif // _WIN32
