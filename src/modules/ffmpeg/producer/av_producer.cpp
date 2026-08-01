@@ -1431,8 +1431,15 @@ class Decoder
                                 av_frame->pts = av_frame->best_effort_timestamp;
                                 {
                                     boost::unique_lock<boost::mutex> lock(hw_output_mutex);
-                                    hw_output_cond.wait(lock, [&]() { return hw_output.size() < output_capacity || flush_requested_.load(); });
-                                    if (!flush_requested_.load())
+                                    // Same predicate as the software queue above,
+                                    // abort_ included: this is where the thread
+                                    // rests for most of its life in GPU-direct
+                                    // mode, so it is the one that has to notice.
+                                    hw_output_cond.wait(lock, [&]() {
+                                        return hw_output.size() < output_capacity || flush_requested_.load() ||
+                                               abort_.load(std::memory_order_relaxed);
+                                    });
+                                    if (!flush_requested_.load() && !abort_.load(std::memory_order_relaxed))
                                         hw_output.push(std::move(av_frame));
                                 }
                                 hw_output_cond.notify_all();
@@ -1553,6 +1560,9 @@ class Decoder
             abort_.store(true, std::memory_order_relaxed);
             input_cond.notify_all();
             output_cond.notify_all();
+#ifdef _WIN32
+            hw_output_cond.notify_all();
+#endif
 
             if (thread.joinable()) {
                 thread.interrupt();
@@ -1580,6 +1590,19 @@ class Decoder
         eof              = false;
         input_cond.notify_all();
         output_cond.notify_all();
+#ifdef _WIN32
+        // Including the hardware queue, which this did not wake. In GPU-direct
+        // mode the decode thread's usual resting place is the hw_output_cond
+        // wait -- the queue runs full, because nothing pulls from it faster than
+        // the decoder fills it -- and a flush that does not notify there is
+        // simply not seen. flush() then spent its whole 500 ms timeout, logged
+        // "Decoder flush timed out - continuing anyway", and cleared
+        // flush_requested_ itself, so the flush never happened at all:
+        // avcodec_flush_buffers was not called and hw_output kept its pre-seek
+        // surfaces. The reader served those, so roughly a second of pre-seek
+        // video played after every SEEK before the new position appeared.
+        hw_output_cond.notify_all();
+#endif
         // 3. Wait until the decode thread confirms the flush is done.
         boost::unique_lock<boost::mutex> lock(flush_mutex_);
         if (!flush_done_cond_.wait_for(lock, boost::chrono::milliseconds(500), [&]() { return !flush_requested_.load(); })) {
@@ -3595,11 +3618,39 @@ struct AVProducer::Impl
                 for (auto& p : decoders_) {
                     p.second.push(nullptr);
                 }
-            } else if (sources_.find(packet->stream_index) != sources_.end()) {
-                auto it = decoders_.find(packet->stream_index);
-                if (it != decoders_.end()) {
-                    // TODO (fix): limit it->second.input.size()?
-                    it->second.push(std::move(packet));
+            } else {
+                // sources_ is the filter-graph routing table, and it was also
+                // the only thing deciding which decoder a packet reaches. The
+                // GPU-direct video decoder is deliberately absent from it --
+                // reset() skips registering it because its frames go straight
+                // to the mixer -- so after the first seek it was fed nothing
+                // and every video packet was dropped on the floor.
+                //
+                // It worked until the first seek only by accident of ordering:
+                // the initial reset() runs before gpu_direct_video_ is set, so
+                // the video stream was registered that one time. Every later
+                // reset() -- and a loop wrap is one -- dropped it.
+                //
+                // What that looked like: the clip played to the end, wrapped to
+                // 0.00 and froze there for ever, on both mixers, with nothing
+                // in the log. Nothing was logged because the run loop still saw
+                // progress (schedule() kept popping and discarding packets)
+                // right up until the input hit real end-of-file, at which point
+                // frame_count_ was still 0 and the `frame_count_ > 2` guard
+                // turned the loop wrap off. An explicit mid-clip SEEK froze the
+                // same way, which is what ruled out anything loop-specific.
+                bool routed = sources_.find(packet->stream_index) != sources_.end();
+#ifdef _WIN32
+                // Route by decoder, not by filter source, for the one decoder
+                // that has no filter source by design.
+                routed = routed || (gpu_direct_video_ && packet->stream_index == gpu_direct_decoder_idx_);
+#endif
+                if (routed) {
+                    auto it = decoders_.find(packet->stream_index);
+                    if (it != decoders_.end()) {
+                        // TODO (fix): limit it->second.input.size()?
+                        it->second.push(std::move(packet));
+                    }
                 }
             }
         }
