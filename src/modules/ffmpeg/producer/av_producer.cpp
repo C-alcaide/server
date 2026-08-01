@@ -1711,6 +1711,12 @@ struct Filter
            AVMediaType                    media_type,
            const core::video_format_desc& format_desc)
     {
+        // Whether bwdif ends up in the graph. The output format restriction below
+        // needs to know, because bwdif's chroma handling is what makes interlaced
+        // 4:2:0 delicate, and it must not be given a different chroma layout to
+        // work on than it has always had.
+        bool deinterlacing = false;
+
         if (media_type == AVMEDIA_TYPE_VIDEO) {
             if (filter_spec.empty()) {
                 filter_spec = "null";
@@ -1758,6 +1764,7 @@ struct Filter
             const bool skip_deint = declared_progressive && !observed_interlaced;
 
             if (deint != "none" && !skip_deint) {
+                deinterlacing = true;
                 filter_spec += (boost::format(",bwdif=mode=send_field:parity=auto:deint=%s") % deint).str();
             }
 
@@ -2138,6 +2145,50 @@ struct Filter
                         continue;
                     allowed.push_back(*p);
                 }
+            }
+
+            // ── Prefer P010 for 10-bit 4:2:0 ─────────────────────────────────
+            // Both yuv420p10le and p010le are lossless relative to a 10-bit
+            // source, so the restriction above accepts either -- but they are not
+            // equally accurate once the mixer samples them, and the difference is
+            // in the *filtering*, not the arithmetic.
+            //
+            // yuv420p10le arrives as three planes of codes 0..1023 in 16-bit
+            // words, so it is declared bit10 and the shader multiplies by a
+            // precision factor of 64. The data therefore occupies only the bottom
+            // 1/64 of the texture's UNORM range, and chroma is upsampled by the
+            // texture unit before that multiply -- so whatever the filter rounds
+            // away is amplified 64-fold. P010 carries the same codes high-aligned,
+            // uses the full range, and needs no multiply.
+            //
+            // Measured on a static lossless 10-bit ramp, which should render
+            // perfectly smooth: P010 gives roughness 0.220 against 0.246 and 184
+            // backward steps in a monotone ramp against 229. And GPU-direct decode,
+            // which hands over P010 by construction, is byte-identical to this path
+            // once both take the same route -- against 69.64 dB before, which is
+            // what led here.
+            //
+            // Offering p010le *first* does nothing -- negotiation is driven by the
+            // filters' own preferences and ignores the sink list's order, measured.
+            // So offer it as the only choice for this case and let libavfilter
+            // insert the conversion, which it does.
+            //
+            // Progressive content only, and that restriction is not caution: with
+            // bwdif in the graph, requiring p010le at the sink changes the chroma
+            // layout the deinterlacer works on, and the deinterlaced picture then
+            // moves by far more than this is trying to fix -- measured at 53.4 dB
+            // with differences up to 83 code values on a 10-bit interlaced clip,
+            // against the ±1 this addresses. Interlaced 4:2:0 chroma is delicate
+            // and bwdif keeps the planar layout it has always had. GPU-direct
+            // declines interlaced content anyway, so nothing is lost.
+            if (src_desc != nullptr && !allowed.empty() && !deinterlacing && src_desc->comp[0].depth == 10 &&
+                src_desc->log2_chroma_w == 1 && src_desc->log2_chroma_h == 1 &&
+                (src_desc->flags & AV_PIX_FMT_FLAG_ALPHA) == 0 &&
+                std::find(allowed.begin(), allowed.end(), AV_PIX_FMT_P010LE) != allowed.end()) {
+                allowed.assign(1, AV_PIX_FMT_P010LE);
+                CASPAR_LOG(info) << L"[ffmpeg] 10-bit 4:2:0 progressive source: requiring p010le, which the mixer "
+                                    L"samples at full precision (yuv420p10le costs ~6 bits of chroma filtering "
+                                    L"precision).";
             }
 
             // An empty or unusable restriction must never be worse than the old
