@@ -34,7 +34,16 @@
 #include <accelerator/ogl/util/device.h>
 #include <accelerator/ogl/util/texture.h>
 
+#ifdef ENABLE_VULKAN
+#include <accelerator/vulkan/image/image_mixer.h>
+#include <accelerator/vulkan/util/device.h>
+#include <accelerator/vulkan/util/gl_export_bridge.h>
+#include <accelerator/vulkan/util/texture.h>
+#include <accelerator/vulkan/util/texture_wrapper.h>
+#endif
+
 #include <common/log.h>
+#include <common/utf.h>
 
 #include <windows.h>
 
@@ -120,6 +129,68 @@ unsigned int texture_gl_id(const std::shared_ptr<core::texture>& tex)
 {
     auto ogl_tex = std::dynamic_pointer_cast<accelerator::ogl::texture>(tex);
     return ogl_tex ? static_cast<unsigned int>(ogl_tex->id()) : 0u;
+}
+
+// ─── Vulkan mixer ───────────────────────────────────────────────────────────
+
+vk_device_handle get_mixer_vk_device(core::frame_factory& factory)
+{
+#ifdef ENABLE_VULKAN
+    auto* vk_mixer = dynamic_cast<accelerator::vulkan::image_mixer*>(&factory);
+    if (vk_mixer == nullptr)
+        return nullptr;
+
+    auto device = vk_mixer->get_vk_device();
+    if (!device)
+        return nullptr;
+
+    return std::static_pointer_cast<void>(device);
+#else
+    (void)factory;
+    return nullptr;
+#endif
+}
+
+std::vector<vk_shared_slot>
+create_vk_shared_slots(const vk_device_handle& device, int width, int height, int count)
+{
+    std::vector<vk_shared_slot> slots;
+#ifdef ENABLE_VULKAN
+    if (!device || width <= 0 || height <= 0 || count <= 0)
+        return slots;
+
+    auto dev = std::static_pointer_cast<accelerator::vulkan::device>(device);
+
+    try {
+        for (int i = 0; i < count; ++i) {
+            // Allocated on the Vulkan device (create_exportable_texture
+            // dispatches to its thread itself), then imported here, on the
+            // caller's GL context -- which is the receive thread's, and the only
+            // one allowed to use or free the GL name.
+            auto vk_tex = dev->create_exportable_texture(width, height, 4, common::bit_depth::bit8);
+            auto import = std::make_shared<accelerator::vulkan::gl_shared_texture>(vk_tex);
+
+            vk_shared_slot slot;
+            slot.gl_id         = import->gl_id();
+            slot.frame_texture = std::static_pointer_cast<core::texture>(
+                std::make_shared<accelerator::vulkan::VkReadableTextureWrapper>(vk_tex, dev));
+            slot.import = std::static_pointer_cast<void>(import);
+            slots.push_back(std::move(slot));
+        }
+    } catch (const std::exception& e) {
+        // Partial slots are useless and their GL names belong to this context,
+        // so drop them here rather than handing back half a ring.
+        slots.clear();
+        CASPAR_LOG(warning) << L"[spout_producer] cannot share a Vulkan texture with OpenGL ("
+                            << u16(e.what()) << L"); using the readback path.";
+    }
+#else
+    (void)device;
+    (void)width;
+    (void)height;
+    (void)count;
+#endif
+    return slots;
 }
 
 }} // namespace caspar::spout

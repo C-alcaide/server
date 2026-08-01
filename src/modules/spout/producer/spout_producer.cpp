@@ -150,6 +150,10 @@ struct spout_producer : public core::frame_producer
     // into a texture the mixer owns and never touch host memory. Any other
     // mixer keeps the readback path.
     ogl_device_handle                         ogl_device_;
+    // Non-null only on the Vulkan mixer. There is no list sharing to exploit
+    // there, so instead Vulkan exports an image's memory and GL imports it, and
+    // Spout receives into a texture that aliases what the mixer samples.
+    vk_device_handle                          vk_device_;
     void*                                     mixer_hglrc_ = nullptr;
     // Enough textures that one being read by the mixer is never the one being
     // written by the next receive. The mixer holds at most a couple of frames.
@@ -190,6 +194,8 @@ struct spout_producer : public core::frame_producer
         // The mixer's own GL context has to be fetched from the GL thread, and
         // only exists at all when the mixer is OpenGL.
         ogl_device_ = get_mixer_ogl_device(*frame_factory_);
+        if (!ogl_device_)
+            vk_device_ = get_mixer_vk_device(*frame_factory_);
 
         graph_ = spl::make_shared<diagnostics::graph>();
         graph_->set_text(print());
@@ -250,6 +256,10 @@ struct spout_producer : public core::frame_producer
             wglMakeCurrent(reinterpret_cast<HDC>(shared_hdc), reinterpret_cast<HGLRC>(shared_hglrc));
 
         std::unique_ptr<gl_context> context;
+        // On the Vulkan mixer there are no lists to share, so the receive goes
+        // into a standalone context -- but into a texture whose memory is a
+        // Vulkan image the mixer samples, so it still never reaches the host.
+        bool vk_shared = false;
         if (!zero_copy) {
             destroy_shared_context(shared_hglrc);
             shared_hglrc = nullptr;
@@ -258,12 +268,20 @@ struct spout_producer : public core::frame_producer
                 CASPAR_LOG(error) << "Spout Producer: Failed to create GL context";
                 return;
             }
+            vk_shared = !force_readback && vk_device_ != nullptr;
         }
         CASPAR_LOG(info) << L"[spout_producer] "
-                         << (zero_copy
-                                 ? L"GL context shared with the mixer -- receiving straight into a mixer "
-                                   L"texture, no readback."
+                         << (zero_copy ? L"GL context shared with the mixer -- receiving straight into a mixer "
+                                         L"texture, no readback."
+                             : vk_shared
+                                 ? L"receiving into a GL texture backed by Vulkan mixer memory, no readback."
                                  : L"no shared GL context -- receiving into host memory (readback path).");
+
+        // Declared after `context` so these are released while it is still
+        // current: the GL names belong to it, and this thread is the only one
+        // allowed to free them.
+        std::vector<vk_shared_slot> vk_slots;
+        int                         vk_next = 0;
 
         auto receiver = std::make_unique<Spout>();
 
@@ -296,6 +314,16 @@ struct spout_producer : public core::frame_producer
                                 tex_ring_.push_back(create_mixer_texture(
                                     ogl_device_, static_cast<int>(cur_w), static_cast<int>(cur_h)));
                             tex_next_ = 0;
+                        } else if (vk_shared) {
+                            vk_slots = create_vk_shared_slots(
+                                vk_device_, static_cast<int>(cur_w), static_cast<int>(cur_h), TEX_SLOTS);
+                            vk_next = 0;
+                            if (vk_slots.empty()) {
+                                // The driver refused the import. Keep going on the
+                                // path that always works rather than stopping.
+                                vk_shared = false;
+                                pixel_buf.resize(static_cast<size_t>(cur_w) * cur_h * 4);
+                            }
                         } else {
                             pixel_buf.resize(static_cast<size_t>(cur_w) * cur_h * 4);
                         }
@@ -351,6 +379,61 @@ struct spout_producer : public core::frame_producer
                             if (frames_.size() > 5) frames_.pop();
                         }
                         frame_received = true;
+                        gpu_path_active_ = true;
+                        tick_fps();
+                    }
+                }
+
+                graph_->set_value("frame-time", frame_timer_.elapsed() * 1000.0);
+                {
+                    std::lock_guard<std::mutex> lock(frames_mutex_);
+                    graph_->set_value("buffer-size", static_cast<double>(frames_.size()));
+                }
+                if (!frame_received)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                continue;
+            }
+
+            // ---- Vulkan mixer: receive into shared Vulkan memory ---------------
+            // Same shape as the OpenGL branch above, and the same saving: Spout's
+            // GPU-to-GPU copy lands in memory the mixer already owns. The
+            // difference is only how the destination came to be reachable from
+            // here -- imported Vulkan memory rather than a shared list.
+            if (vk_shared && !vk_slots.empty()) {
+                unsigned int new_w = receiver->GetSenderWidth();
+                unsigned int new_h = receiver->GetSenderHeight();
+                if (new_w != cur_w || new_h != cur_h) {
+                    cur_w = cur_h = 0;
+                    vk_slots.clear();
+                } else {
+                    auto& slot = vk_slots[vk_next];
+                    vk_next    = (vk_next + 1) % static_cast<int>(vk_slots.size());
+
+                    if (receiver->ReceiveTexture(slot.gl_id, GL_TEXTURE_2D, false, 0)) {
+                        // Nothing else orders this write against the mixer's read.
+                        glFinish();
+
+                        // rgba, not bgra: see vk_shared_slot::frame_texture. The
+                        // mixer's bgra case swizzles, and Spout has already left
+                        // these bytes in RGBA order.
+                        core::pixel_format_desc pfd(core::pixel_format::rgba);
+                        pfd.planes.push_back(core::pixel_format_desc::plane(
+                            static_cast<int>(cur_w), static_cast<int>(cur_h), 4, common::bit_depth::bit8));
+
+                        auto                                   empty = std::make_shared<std::vector<uint8_t>>(0);
+                        std::vector<array<const std::uint8_t>> img;
+                        img.emplace_back(empty->data(), 0, std::move(empty));
+                        auto                      astore = std::make_shared<std::vector<std::int32_t>>(0);
+                        array<const std::int32_t> audio(astore->data(), 0, std::move(astore));
+
+                        {
+                            std::lock_guard<std::mutex> lock(frames_mutex_);
+                            frames_.push(core::draw_frame(core::const_frame(
+                                this, std::move(img), std::move(audio), pfd, slot.frame_texture)));
+                            if (frames_.size() > 5)
+                                frames_.pop();
+                        }
+                        frame_received   = true;
                         gpu_path_active_ = true;
                         tick_fps();
                     }

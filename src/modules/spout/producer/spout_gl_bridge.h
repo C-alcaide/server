@@ -35,6 +35,7 @@
 #pragma once
 
 #include <memory>
+#include <vector>
 
 namespace caspar {
 
@@ -75,5 +76,49 @@ create_mixer_texture(const ogl_device_handle& device, int width, int height);
 /// The GL name of a texture returned by create_mixer_texture, for handing to
 /// Spout's ReceiveTexture.
 unsigned int texture_gl_id(const std::shared_ptr<core::texture>& tex);
+
+// ─── Vulkan mixer ───────────────────────────────────────────────────────────
+//
+// The Vulkan mixer cannot share GL lists, so the trick the OpenGL path uses does
+// not apply. Instead Vulkan allocates the image and exports its memory, GL
+// imports it, and Spout receives into the GL texture that aliases it -- so the
+// pixels land in the mixer's own memory without a host round trip either way.
+// See accelerator/vulkan/util/gl_export_bridge.h for what that mechanism can and
+// cannot do.
+
+/// Opaque handle to the mixer's Vulkan device. Null when the mixer is not
+/// Vulkan, which is the signal that this path does not apply.
+using vk_device_handle = std::shared_ptr<void>;
+
+/// Returns the mixer's Vulkan device, or null if this is not a Vulkan mixer.
+vk_device_handle get_mixer_vk_device(core::frame_factory& factory);
+
+/// One receive slot: a Vulkan image the mixer samples and the GL texture name
+/// aliasing the same memory for Spout to receive into.
+struct vk_shared_slot
+{
+    /// Hand this to the mixer as the frame's texture.
+    ///
+    /// Label the frame `pixel_format::rgba`, not `bgra`: Spout's ReceiveTexture
+    /// leaves RGBA-ordered bytes in the destination, and the Vulkan mixer's
+    /// bgra case applies a .bgra swizzle that would exchange red and blue. The
+    /// OpenGL path labels the same pixels bgra because its own upload path
+    /// reorders on the way in and the two have to agree; this one has no upload.
+    std::shared_ptr<core::texture> frame_texture;
+
+    /// Give this to Spout's ReceiveTexture.
+    unsigned int gl_id = 0;
+
+    /// Owns the GL import. Must be released with the same GL context current
+    /// that created it, so keep slots on the receive thread and let them die
+    /// there -- before the context does.
+    std::shared_ptr<void> import;
+};
+
+/// Allocate `count` slots of `width` x `height` on the Vulkan device and import
+/// each into the *current* GL context. Returns an empty vector if the driver
+/// refuses, which is the caller's signal to use the readback path.
+std::vector<vk_shared_slot>
+create_vk_shared_slots(const vk_device_handle& device, int width, int height, int count);
 
 }} // namespace caspar::spout

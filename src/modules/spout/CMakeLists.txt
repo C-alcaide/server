@@ -59,3 +59,9 @@ target_link_libraries(spout PRIVATE
     # device, and accelerator/ogl/util/device.h includes GL/glew.h.
     GLEW::glew
 )
+
+# On the Vulkan mixer the destination is imported Vulkan memory instead
+# (accelerator/vulkan/util/gl_export_bridge.h).
+IF(ENABLE_VULKAN)
+    target_link_libraries(spout PRIVATE Vulkan::Headers)
+ENDIF()
