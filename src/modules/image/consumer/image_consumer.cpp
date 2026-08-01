@@ -122,20 +122,38 @@ struct image_consumer : public core::frame_consumer
     {
     }
 
+    // How many ticks to wait for the mixer's CPU readback to land before giving up.
+    //
+    // Adding this consumer is itself what turns readback on -- output.cpp only reads
+    // back when some consumer asks for it -- so the frames immediately after ADD
+    // legitimately have no host pixels: the enable has to propagate and a composited
+    // frame has to make the GPU->host round trip. The budget used to be 4 ticks, which
+    // on a 1080i50 channel is 4 fields, i.e. 40 ms / two frames, and that was not
+    // enough on a Vulkan channel that had readback switched off: roughly half the
+    // captures in a deck+screen configuration timed out. Ticks are cheap (this
+    // consumer only exists for the duration of one capture) so the budget is generous.
+    static constexpr int max_wait_ticks = 50;
+
     std::future<bool> send(core::video_field field, core::const_frame frame) override
     {
-        // The vulkan mixer's 1-frame pipeline delay means the first frame
-        // after this consumer is added may have empty CPU readback data
-        // (rendered before cpu_readback_needed was set).  Skip it and wait
-        // for the next tick which will have valid pixel data.
         const auto& data = frame.image_data(0);
         if (data.data() == nullptr || data.size() == 0) {
-            if (++frames_waited_ < 4) {
-                return make_ready_future(true);  // stay alive, wait for valid frame
+            if (++frames_waited_ < max_wait_ticks) {
+                return make_ready_future(true); // stay alive, wait for valid frame
             }
-            // Give up after 4 empty frames to avoid hanging forever
-            CASPAR_LOG(warning) << L"[image_consumer] No valid CPU frame data after "
-                                << frames_waited_ << L" ticks - capturing empty frame.";
+            // Give up -- but do NOT fall through to the encoder. It builds a
+            // std::vector from image_data(0).begin() and .begin() + size, which on an
+            // empty array is nullptr plus an offset, and it threw from there: the
+            // capture produced no file, and the only trace was a stack dump reading
+            // "Exception: No diagnostic information available." The previous message
+            // here claimed it was "capturing empty frame", which it never did.
+            //
+            // Deliberately not writing a black placeholder either: a black PNG would
+            // flow into an image comparison and read as a render regression, which is
+            // a worse failure than an obviously absent file plus this message.
+            CASPAR_LOG(error) << L"[image_consumer] No CPU frame data after " << frames_waited_
+                              << L" ticks - giving up, no file written for '" << filename_ << L"'.";
+            return make_ready_future(false);
         }
 
         auto filename = filename_;
