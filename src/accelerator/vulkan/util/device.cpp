@@ -1331,8 +1331,14 @@ device::create_exportable_texture(int width, int height, int stride, common::bit
         imageInfo.initialLayout = vk::ImageLayout::eUndefined;
         imageInfo.samples       = vk::SampleCountFlagBits::e1;
         imageInfo.tiling        = vk::ImageTiling::eOptimal;
+        // eColorAttachment is what lets another API render *into* this image
+        // rather than only sample it -- the GL -> Vulkan route imports the
+        // memory and attaches the GL texture to a framebuffer. Proved on the
+        // reference GPU: RGBA8 + eColorAttachment exports, imports into GL,
+        // renders, and reads back byte-identically at 1080p (eOptimal tiling;
+        // eLinear is rejected by GL as "memory object too small").
         imageInfo.usage = vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled |
-                          vk::ImageUsageFlagBits::eTransferSrc;
+                          vk::ImageUsageFlagBits::eTransferSrc | vk::ImageUsageFlagBits::eColorAttachment;
         imageInfo.sharingMode = vk::SharingMode::eExclusive;
         auto image            = dev.createImage(imageInfo);
 
