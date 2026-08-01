@@ -289,8 +289,16 @@ class isf_producer : public core::frame_producer
         }
         if (!gl_ctx_)
             return core::draw_frame::empty();
-        const bool rendered =
-            shader_->render_readback(*gl_ctx_, w, h, time, time_delta, frame_index, images, readback_);
+        // The frame is made first so the shader can read straight into its
+        // mapped memory. Going via an intermediate buffer and copying afterwards
+        // cost a second full-frame copy on every frame.
+        core::pixel_format_desc pfd(core::pixel_format::bgra);
+        pfd.planes.push_back(core::pixel_format_desc::plane(w, h, 4, common::bit_depth::bit8));
+        auto      frame  = frame_factory_->create_frame(this, pfd);
+        const int stride = frame.pixel_format_desc().planes[0].linesize;
+
+        const bool rendered = shader_->render_readback(
+            *gl_ctx_, w, h, time, time_delta, frame_index, images, frame.image_data(0).data(), stride);
         // Hand the context back before returning, on every path. It is created
         // and used here on the channel thread but destroyed on the producer
         // destroyer pool, and an SFML context left active on one thread cannot
@@ -299,15 +307,6 @@ class isf_producer : public core::frame_producer
         if (!rendered)
             return core::draw_frame::empty();
         shader_->reset_events();
-
-        core::pixel_format_desc pfd(core::pixel_format::bgra);
-        pfd.planes.push_back(core::pixel_format_desc::plane(w, h, 4, common::bit_depth::bit8));
-        auto      frame  = frame_factory_->create_frame(this, pfd);
-        const int stride = frame.pixel_format_desc().planes[0].linesize;
-        for (int y = 0; y < h; ++y)
-            std::memcpy(frame.image_data(0).data() + static_cast<std::size_t>(y) * stride,
-                        readback_.data() + static_cast<std::size_t>(y) * w * 4,
-                        static_cast<std::size_t>(w) * 4);
         if (audio_src) {
             const auto& a = audio_src->audio_data();
             if (a.size() > 0)

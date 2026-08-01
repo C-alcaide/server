@@ -956,28 +956,39 @@ struct shader::impl
         return last_tex;
     }
 
+    /// Scratch for readback_bgra, kept across frames.
+    ///
+    /// This used to be a local, so a 1080p shader allocated and freed 8.3 MB on
+    /// every single frame.
+    std::vector<unsigned char> readback_tmp_;
+
     /// Read a raw GL texture (bottom-up RGBA) back into a tightly-packed, top-down BGRA CPU buffer
     /// (the layout a CPU const_frame labelled bgra expects).
-    void readback_bgra(GLuint tex, int tw, int th, int out_w, int out_h, std::vector<unsigned char>& out)
+    void readback_bgra(GLuint tex, int tw, int th, int out_w, int out_h, unsigned char* dst, int dst_stride)
     {
-        std::vector<unsigned char> tmp(static_cast<std::size_t>(tw) * th * 4);
+        const std::size_t need = static_cast<std::size_t>(tw) * th * 4;
+        if (readback_tmp_.size() < need)
+            readback_tmp_.resize(need);
+
         glBindTexture(GL_TEXTURE_2D, tex);
         glPixelStorei(GL_PACK_ALIGNMENT, 1);
-        glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, tmp.data());
+        // GL_BGRA, not GL_RGBA: the driver reorders during the transfer, which
+        // costs nothing, and it is the order the frame wants. Reading RGBA and
+        // swapping afterwards meant a scalar loop over every pixel -- two
+        // million iterations a frame at 1080p, four byte moves each -- purely to
+        // exchange two channels.
+        glGetTexImage(GL_TEXTURE_2D, 0, GL_BGRA, GL_UNSIGNED_BYTE, readback_tmp_.data());
         glBindTexture(GL_TEXTURE_2D, 0);
 
-        out.assign(static_cast<std::size_t>(out_w) * out_h * 4, 0);
         const int w = std::min(tw, out_w);
         const int h = std::min(th, out_h);
+        // GL hands back bottom-up, the frame wants top-down, so the rows are
+        // walked in reverse -- but each row is now a straight copy.
+        const std::size_t row = static_cast<std::size_t>(w) * 4;
         for (int y = 0; y < h; ++y) {
-            const unsigned char* s = tmp.data() + static_cast<std::size_t>(th - 1 - y) * tw * 4; // bottom-up
-            unsigned char*       d = out.data() + static_cast<std::size_t>(y) * out_w * 4;        // top-down
-            for (int x = 0; x < w; ++x) {
-                d[x * 4 + 0] = s[x * 4 + 2]; // B
-                d[x * 4 + 1] = s[x * 4 + 1]; // G
-                d[x * 4 + 2] = s[x * 4 + 0]; // R
-                d[x * 4 + 3] = s[x * 4 + 3]; // A
-            }
+            const unsigned char* s = readback_tmp_.data() + static_cast<std::size_t>(th - 1 - y) * tw * 4;
+            unsigned char*       d = dst + static_cast<std::size_t>(y) * dst_stride;
+            std::memcpy(d, s, row);
         }
     }
 
@@ -987,13 +998,14 @@ struct shader::impl
                          double                            time_delta,
                          int                               frame_index,
                          const std::vector<image_binding>& images,
-                         std::vector<unsigned char>&       out_bgra)
+                         unsigned char*                    dst,
+                         int                               dst_stride)
     {
         int    lw = 0, lh = 0;
         GLuint ft = render_gl(width, height, time, time_delta, frame_index, images, lw, lh);
         if (!ft)
             return false;
-        readback_bgra(ft, lw, lh, width, height, out_bgra);
+        readback_bgra(ft, lw, lh, width, height, dst, dst_stride);
         while (glGetError() != GL_NO_ERROR) {}
         return true;
     }
@@ -1113,13 +1125,14 @@ bool shader::render_readback(gl_context&                       ctx,
                              double                            time_delta,
                              int                               frame_index,
                              const std::vector<image_binding>& images,
-                             std::vector<unsigned char>&       out_bgra_top_down)
+                             unsigned char*                    dst,
+                             int                               dst_stride)
 {
     if (impl_->failed_ || width <= 0 || height <= 0)
         return false;
     if (!ctx.make_current())
         return false;
-    return impl_->render_readback(width, height, time, time_delta, frame_index, images, out_bgra_top_down);
+    return impl_->render_readback(width, height, time, time_delta, frame_index, images, dst, dst_stride);
 }
 
 }} // namespace caspar::isf

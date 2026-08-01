@@ -110,7 +110,11 @@ class shader
                          double                            time_delta,
                          int                               frame_index,
                          const std::vector<image_binding>& images,
-                         std::vector<unsigned char>&       out_bgra_top_down);
+                         /// Written directly, top-down BGRA. This is the frame's own
+                         /// mapped memory: going via a vector and copying afterwards
+                         /// meant a second full-frame copy every frame.
+                         unsigned char*                    dst,
+                         int                               dst_stride);
 
   private:
     struct impl;
