@@ -86,9 +86,17 @@ speculative:
 |---|---|
 | NV12 `eG8B8R82Plane420Unorm` sampled | **yes**, with midpoint chroma |
 | P010 `eG10X6B10X6R10X62Plane420Unorm3Pack16` sampled | **yes** — 10-bit is open later |
-| import NV12 as `eD3D11Texture` | **importable** |
-| import NV12 as `eD3D11TextureKmt` | **importable** |
-| import NV12 as `eOpaqueWin32` | **importable** |
+| import NV12 as `eD3D11Texture` | **importable**, and works in practice |
+| import NV12 as `eD3D11TextureKmt` | **importable**, and works in practice |
+| ~~import NV12 as `eOpaqueWin32`~~ | query says importable, **but a real D3D11 NV12 texture does not import through it** |
+
+The last row is a correction to this table, and the distinction matters:
+`getImageFormatProperties2` answers *"could this format be imported through this
+handle type"*, not *"will this resource import"*. Asked to import an actual
+shared D3D11 NV12 texture, `eOpaqueWin32` fails --
+`vkGetMemoryWin32HandleProperties` returns `ERROR_INITIALIZATION_FAILED` and
+`vkAllocateMemory` returns `ERROR_OUT_OF_DEVICE_MEMORY`. Only the two
+D3D11-specific handle types work. A capability query is not a feasibility test.
 
 The Vulkan mixer already accepts what this produces: `core::pixel_format::nv12`
 exists and the Vulkan fragment shader has the case for it, sampling PLANE0 as Y
@@ -96,11 +104,52 @@ and PLANE1 as interleaved CbCr. So the hand-over is the same shape the OpenGL
 path already builds -- a two-plane desc, Y at full resolution and CbCr at half --
 and no shader work is needed.
 
+**Shape settled by measurement: two separate single-plane imports, not one
+multi-planar import.**
+
+Plane views were provable -- `ePlane0` and `ePlane1` views on one imported
+multi-planar `VkImage` both create successfully. That was not the blocker. The
+blocker is a layout disagreement found immediately after, isolated with a
+four-case control under the validation layer:
+
+| case | isolates | result |
+|---|---|---|
+| Y plane, D3D11 writes, VK reads `PLANE_0` | luma across the boundary | byte-identical |
+| pure-Vulkan NV12, VK writes and reads `PLANE_1` | is Vulkan's plane handling sane? | correct |
+| imported NV12, VK writes and reads `PLANE_1` | is Vulkan self-consistent on imported memory? | correct |
+| imported NV12, **D3D11 writes**, VK reads `PLANE_1` | do the two APIs agree? | **844800 / 1036800 bytes wrong** |
+| two separate textures, R8 + R8G8, D3D11 writes, VK reads | the alternative shape | **byte-identical** |
+
+Rows two and three passing while row four fails is the decisive pair: Vulkan's
+plane machinery is correct and Vulkan is self-consistent on the imported
+allocation, so what disagrees is D3D11 and the Vulkan driver about where plane 1
+sits inside a shared NV12 allocation. Luma agrees; chroma does not. The
+corruption is a tiling or swizzle disagreement rather than an offset -- a base
+offset would not leave 18.5 % of bytes coincidentally matching -- so there is no
+arithmetic fix. Validation was clean throughout, and the alternative copy extent
+is rejected by `VUID-vkCmdCopyImage-srcOffset-00144`, so no untried spelling
+remains. The D3D11 side was cleared separately: a staging readback of the shared
+texture after `CopySubresourceRegion` is byte-exact in both planes.
+
+**This makes the item smaller, not larger, and the result more portable.**
+`d3d11_gl_bridge::setup_planes` already creates exactly the two textures the
+working case imports -- `y_texture_` R8_UNORM at full resolution and
+`uv_texture_` R8G8_UNORM at half -- filled by a deliberately arithmetic-free
+`Load()` pass-through shader. The Vulkan bridge reuses that extraction verbatim
+and differs only in adding `D3D11_RESOURCE_MISC_SHARED |
+D3D11_RESOURCE_MISC_SHARED_NTHANDLE` to those two textures and importing each
+handle as an ordinary single-plane `VkImage`, where the OpenGL path calls
+`wglDXRegisterObjectNV`. The two-plane hand-over is unchanged, so
+byte-identical-to-software is preserved by construction. It also removes any
+dependence on the two APIs agreeing about multi-planar layout, which is a
+better property to have than a fallback.
+
 **Remaining risk.** Frame lifetime: the decoder pool is ~20 frames deep and
-holding imports too long stalls it, which is already noted for the OpenGL path.
-Two per-plane image views on one imported multi-planar image need the image
-created with the plane aspects available, so `ePlane0`/`ePlane1` view creation
-is the first thing to prove in code.
+holding imports too long stalls it, already noted for the OpenGL path. Also
+unmeasured: what the cross-API synchronisation costs per frame in the server (a
+`D3D11_QUERY_EVENT` wait was correct in the probes but its cost is unknown), and
+whether P010/P016 behave the same -- moot for layout now the shape is two
+single-plane imports, but untested.
 
 **Verification.** The gpu-direct matrix already exists: four codecs, software vs
 GPU-direct, CPU and tick, plus a picture comparison against the software path on
