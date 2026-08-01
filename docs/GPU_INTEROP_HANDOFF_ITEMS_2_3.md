@@ -41,10 +41,23 @@ here:
   the SDK writes, so it labels the frame `rgba` instead and the mixer's
   swizzle stays out of the way.
 
-**One known defect is open and separate**: GPU-direct decode does not resume
-after a seek, which is why looping stalls. It has its own hand-off,
-`GPUDIRECT_SEEK_STALL.md`. It does not block items 2 or 3, and the two should not
-be mixed into one change.
+**The separate GPU-direct seek defect is fixed** (`1423934ec`, `b8ca62ff7`,
+`08deff786`), so the caution in the ground rules about not benchmarking a looping
+clip no longer has a stalling producer behind it. `GPUDIRECT_SEEK_STALL.md` has
+the three defects it turned out to be.
+
+**What is left of this plan.** Nothing in items 1–3. Two threads it opened and
+never closed:
+
+- **HTML/CEF**, the fourth row of the plan's table, which was never turned into a
+  numbered item. Both mixers still take CPU `OnPaint`, and it is still "not
+  measured" — measure before designing anything. Item 1 built the D3D11 → Vulkan
+  bridge that accelerated paint would need, so the mechanism is no longer the
+  obstacle.
+- **10-bit GPU-direct.** P010 sampling was confirmed on the GPU but P010/P016
+  were never run end to end; item 1 shipped 8-bit NV12 only. The two
+  single-plane imports make the multi-planar layout disagreement irrelevant
+  here, so this is expected to be small, which is not the same as tested.
 
 ## What item 1 changed under item 2's feet
 
