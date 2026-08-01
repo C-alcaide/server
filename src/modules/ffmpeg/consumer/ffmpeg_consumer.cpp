@@ -757,6 +757,13 @@ struct ffmpeg_consumer : public core::frame_consumer
     std::exception_ptr exception_;
     std::mutex         exception_mutex_;
 
+    // Satisfied once every stream is open and the header is written, or with the
+    // exception that stopped that happening. initialize() waits on it so that a
+    // consumer which can never encode a frame is reported at ADD time rather
+    // than answering 202 and failing silently. See initialize().
+    std::promise<void> open_result_;
+    bool               open_result_set_ = false;
+
     tbb::concurrent_bounded_queue<std::tuple<core::const_frame, std::int64_t, std::int64_t>> frame_buffer_;
     std::thread                                                                              frame_thread_;
 
@@ -1074,6 +1081,14 @@ struct ffmpeg_consumer : public core::frame_consumer
                     options = to_map(&dict);
                 }
 
+                // Everything that can fail up front has succeeded: the encoders
+                // are open and the container header is written. Release
+                // initialize(), which has been waiting to find out.
+                if (!open_result_set_) {
+                    open_result_set_ = true;
+                    open_result_.set_value();
+                }
+
                 {
                     for (auto& p : options) {
                         CASPAR_LOG(warning) << print() << " Unused option " << p.first << "=" << p.second;
@@ -1162,10 +1177,36 @@ struct ffmpeg_consumer : public core::frame_consumer
 
                 packet_thread.join();
             } catch (...) {
-                std::lock_guard<std::mutex> lock(exception_mutex_);
-                exception_ = std::current_exception();
+                {
+                    std::lock_guard<std::mutex> lock(exception_mutex_);
+                    exception_ = std::current_exception();
+                }
+                // If we never got as far as writing the header, initialize() is
+                // still waiting; hand it the reason rather than letting it time
+                // out. After that point the promise is already satisfied and the
+                // exception surfaces through send() as before.
+                if (!open_result_set_) {
+                    open_result_set_ = true;
+                    open_result_.set_exception(std::current_exception());
+                }
             }
         });
+
+        // Wait for the encoder to actually open. Everything above runs on the
+        // frame thread, so without this ADD answered 202 OK for a consumer that
+        // could never encode anything -- "ADD 1 FILE out.mp4 -vcodec av1_nvenc"
+        // on hardware with no AV1 encoder reported success, wrote no file, and
+        // only surfaced as a 404 on REMOVE.
+        //
+        // Bounded, because a slow-but-valid encoder must not be reported as a
+        // failure: on timeout we say nothing and let the old behaviour stand,
+        // with send() rethrowing if it does turn out to have failed.
+        auto opened = open_result_.get_future();
+        if (opened.wait_for(std::chrono::seconds(5)) == std::future_status::ready) {
+            opened.get(); // rethrows the open failure to the caller of ADD
+        } else {
+            CASPAR_LOG(info) << print() << L" still opening after 5s; reporting success and continuing to wait.";
+        }
     }
 
     std::future<bool> send(core::video_field field, core::const_frame frame) override
