@@ -111,15 +111,20 @@ static constexpr int DONE_QUEUE_CAP = 12;
 // path calls read_pixels(), and it is correct for every variant the zero-copy
 // path handles -- including HAP Q, whose YCoCg the mixer resolves in a shader
 // but which cpu_decode_hap_to_bgra resolves on its own.
-class hap_vk_texture_wrapper final : public accelerator::vulkan::texture_wrapper
+// Derives from VkReadableTextureWrapper rather than the plain texture_wrapper so
+// that it keeps the same shared_ptr<device> the base holds: a frame can outlive the
+// producer, and the vulkan::texture destructor needs the VkDevice still alive to
+// destroy its image.
+class hap_vk_texture_wrapper final : public accelerator::vulkan::VkReadableTextureWrapper
 {
   public:
     hap_vk_texture_wrapper(std::shared_ptr<accelerator::vulkan::texture> tex,
+                           std::shared_ptr<accelerator::vulkan::device>  vk_dev,
                            HapVariant                                    variant,
                            std::shared_ptr<std::vector<uint8_t>>         texture_data,
                            int                                           width,
                            int                                           height)
-        : texture_wrapper(std::move(tex))
+        : VkReadableTextureWrapper(std::move(tex), std::move(vk_dev))
         , variant_(variant)
         , texture_data_(std::move(texture_data))
         , width_(width)
@@ -941,7 +946,7 @@ struct hap_producer_impl final : public core::frame_producer
                     array<const int32_t> audio_arr(audio_store->data(), audio_store->size(), std::move(audio_store));
 
                     auto wrapper = std::make_shared<hap_vk_texture_wrapper>(
-                        vk_tex, item.result.variant, std::move(tex_store),
+                        vk_tex, vk_device_, item.result.variant, std::move(tex_store),
                         frame_info_.width, frame_info_.height);
 
                     df = core::draw_frame(core::const_frame(
