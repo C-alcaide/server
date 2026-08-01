@@ -3274,9 +3274,17 @@ struct AVProducer::Impl
                                 if (planes.first && planes.second) {
                                     if (!gpu_direct_logged_) {
                                         gpu_direct_logged_ = true;
+                                        // Name the format actually decoded, not a
+                                        // guess: this line used to say NV12 for
+                                        // everything, which reads as "your 10-bit
+                                        // clip was handed over as 8-bit".
+                                        // setup_planes accepts only these three.
+                                        const wchar_t* surface = hw_desc.Format == DXGI_FORMAT_P010   ? L"P010"
+                                                                 : hw_desc.Format == DXGI_FORMAT_P016 ? L"P016"
+                                                                                                      : L"NV12";
                                         CASPAR_LOG(info)
-                                            << print()
-                                            << L" D3D11 GPU-direct video active: NV12 planes handed to the mixer, "
+                                            << print() << L" D3D11 GPU-direct video active: " << surface
+                                            << L" planes handed to the mixer, "
                                                L"which performs the colour conversion (no CPU frame, no "
                                                L"VideoProcessor).";
                                     }
