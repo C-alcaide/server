@@ -212,8 +212,18 @@ struct spout_producer : public core::frame_producer
             }
 
             // ---- Steady-state receive phase ----------------------------------------
-            // bInvert=true: flip from OpenGL bottom-up to CasparCG top-down convention.
-            if (receiver->ReceiveImage(pixel_buf.data(), GL_BGRA_EXT, true, 0)) {
+            // bInvert=false: what Spout shares is already top-down.
+            //
+            // This used to pass true, on the reasoning that a Spout texture is
+            // an OpenGL texture and therefore bottom-up. The shared texture is
+            // not what a sender handed over, though -- the SDK normalises on the
+            // way in, which is why SendTexture defaults bInvert to true (a GL
+            // texture is bottom-up, so invert it) while SendImage defaults it to
+            // false (a pixel buffer already is not). Both defaults land on the
+            // same orientation, and receiving with true then turned the picture
+            // upside down. Demonstrated with this server's own Spout consumer
+            // feeding this producer: identical content, inverted.
+            if (receiver->ReceiveImage(pixel_buf.data(), GL_BGRA_EXT, false, 0)) {
                 // Detect sender resolution change — will reconnect next iteration.
                 unsigned int new_w = receiver->GetSenderWidth();
                 unsigned int new_h = receiver->GetSenderHeight();
