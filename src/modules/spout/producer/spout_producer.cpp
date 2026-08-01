@@ -25,6 +25,14 @@
 #include <core/producer/frame_producer.h>
 #include <core/frame/frame_factory.h>
 #include <core/frame/draw_frame.h>
+#include <core/frame/frame.h>
+#include <core/frame/pixel_format.h>
+
+// The zero-copy receive needs a texture owned by the mixer's OpenGL device.
+// Reaching that device means GLEW, and GLEW cannot share a translation unit
+// with the Spout SDK -- both declare the GL framebuffer entry points, with
+// different linkage. The GLEW side is behind this header.
+#include "spout_gl_bridge.h"
 #include <common/log.h>
 #include <common/timer.h>
 #include <common/diagnostics/graph.h>
@@ -63,9 +71,15 @@ class gl_context
     HWND  hwnd_ = nullptr;
     HDC   hdc_  = nullptr;
     HGLRC hglrc_ = nullptr;
+    bool  shared_ = false;
 
   public:
-    gl_context()
+    /// `share_context` is the mixer's HGLRC. Sharing lists with it is what makes
+    /// a texture created on the mixer's device usable from this thread, and so
+    /// what allows Spout to deliver straight into it instead of into host
+    /// memory. Passing nullptr gives the previous behaviour: a standalone
+    /// context, usable only for the readback path.
+    explicit gl_context(void* share_context = nullptr)
     {
         WNDCLASS wc      = {0};
         wc.lpfnWndProc   = DefWindowProc;
@@ -91,8 +105,19 @@ class gl_context
             SetPixelFormat(hdc_, format, &pfd);
 
             hglrc_ = wglCreateContext(hdc_);
+
+            if (hglrc_ && share_context) {
+                if (wglShareLists(reinterpret_cast<HGLRC>(share_context), hglrc_)) {
+                    shared_ = true;
+                } else {
+                    CASPAR_LOG(warning)
+                        << L"[spout_producer] wglShareLists failed; falling back to the readback path.";
+                }
+            }
         }
     }
+
+    bool is_shared() const { return shared_; }
 
     ~gl_context()
     {
@@ -118,7 +143,20 @@ struct spout_producer : public core::frame_producer
     std::string                          sender_name_ascii_;
 
     spl::shared_ptr<core::frame_factory> frame_factory_;
-    
+
+    // Non-null only on the OpenGL mixer. Spout shares a texture between
+    // processes, so when the mixer is OpenGL the frame can be received straight
+    // into a texture the mixer owns and never touch host memory. Any other
+    // mixer keeps the readback path.
+    ogl_device_handle                         ogl_device_;
+    void*                                     mixer_hglrc_ = nullptr;
+    // Enough textures that one being read by the mixer is never the one being
+    // written by the next receive. The mixer holds at most a couple of frames.
+    static constexpr int                                          TEX_SLOTS = 4;
+    std::vector<std::shared_ptr<core::texture>>                    tex_ring_;
+    int                                                            tex_next_ = 0;
+    std::atomic<bool>                                             gpu_path_active_{false};
+
     std::thread                          worker_thread_;
     std::atomic<bool>                    running_;
 
@@ -148,6 +186,10 @@ struct spout_producer : public core::frame_producer
             sender_name_ascii_ = "Spout Sender";
         }
         
+        // The mixer's own GL context has to be fetched from the GL thread, and
+        // only exists at all when the mixer is OpenGL.
+        ogl_device_ = get_mixer_ogl_device(*frame_factory_);
+
         graph_ = spl::make_shared<diagnostics::graph>();
         graph_->set_text(print());
         graph_->set_color("frame-time", diagnostics::color(0.5f, 1.0f, 0.2f));
@@ -170,13 +212,51 @@ struct spout_producer : public core::frame_producer
         });
     }
 
+    /// Shared by both receive paths so the reported rate means the same thing
+    /// whichever one is running.
+    void tick_fps()
+    {
+        const auto now = std::chrono::steady_clock::now();
+        ++frames_since_update_;
+        const auto dur =
+            std::chrono::duration_cast<std::chrono::duration<double>>(now - last_fps_update_).count();
+        if (dur >= 1.0) {
+            current_fps_         = frames_since_update_ / dur;
+            frames_since_update_ = 0;
+            last_fps_update_     = now;
+            std::wstringstream ss;
+            ss << std::fixed << std::setprecision(2) << print() << L" Fps: " << current_fps_;
+            graph_->set_text(ss.str());
+        }
+    }
+
     void worker_loop()
     {
-        auto context = std::make_unique<gl_context>();
-        if (!context->make_current()) {
-            CASPAR_LOG(error) << "Spout Producer: Failed to create GL context";
-            return;
+        // Preferred: a context on the mixer's own DC, sharing its lists, so
+        // Spout can deliver into a texture the mixer owns. Anything else (a
+        // Vulkan mixer, or sharing refused) falls back to the standalone
+        // context and the readback path below.
+        void* shared_hglrc = nullptr;
+        void* shared_hdc   = nullptr;
+        const bool zero_copy =
+            ogl_device_ && create_shared_context(ogl_device_, shared_hglrc, shared_hdc) &&
+            wglMakeCurrent(reinterpret_cast<HDC>(shared_hdc), reinterpret_cast<HGLRC>(shared_hglrc));
+
+        std::unique_ptr<gl_context> context;
+        if (!zero_copy) {
+            destroy_shared_context(shared_hglrc);
+            shared_hglrc = nullptr;
+            context      = std::make_unique<gl_context>();
+            if (!context->make_current()) {
+                CASPAR_LOG(error) << "Spout Producer: Failed to create GL context";
+                return;
+            }
         }
+        CASPAR_LOG(info) << L"[spout_producer] "
+                         << (zero_copy
+                                 ? L"GL context shared with the mixer -- receiving straight into a mixer "
+                                   L"texture, no readback."
+                                 : L"no shared GL context -- receiving into host memory (readback path).");
 
         auto receiver = std::make_unique<Spout>();
 
@@ -200,10 +280,21 @@ struct spout_producer : public core::frame_producer
                 if (receiver->ReceiveTexture()) {
                     cur_w = receiver->GetSenderWidth();
                     cur_h = receiver->GetSenderHeight();
-                    if (cur_w > 0 && cur_h > 0)
-                        pixel_buf.resize(static_cast<size_t>(cur_w) * cur_h * 4);
-                    else
+                    if (cur_w > 0 && cur_h > 0) {
+                        if (zero_copy) {
+                            // Allocated on the GL thread, which owns the device;
+                            // shared lists make them visible from this one.
+                            tex_ring_.clear();
+                            for (int i = 0; i < TEX_SLOTS; ++i)
+                                tex_ring_.push_back(create_mixer_texture(
+                                    ogl_device_, static_cast<int>(cur_w), static_cast<int>(cur_h)));
+                            tex_next_ = 0;
+                        } else {
+                            pixel_buf.resize(static_cast<size_t>(cur_w) * cur_h * 4);
+                        }
+                    } else {
                         cur_w = cur_h = 0;
+                    }
                 }
                 if (cur_w == 0) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -212,6 +303,63 @@ struct spout_producer : public core::frame_producer
             }
 
             // ---- Steady-state receive phase ----------------------------------------
+            // ---- Zero-copy receive ---------------------------------------------
+            // Spout shares a GPU texture between processes. With lists shared
+            // with the mixer, it can be copied GPU-to-GPU into a texture the
+            // mixer owns, and the frame is handed over as that texture. The
+            // readback path below pulls the same pixels through host memory --
+            // 8.3 MB per 1080p frame down and the same back up -- to deliver an
+            // identical picture.
+            if (zero_copy && !tex_ring_.empty()) {
+                unsigned int new_w = receiver->GetSenderWidth();
+                unsigned int new_h = receiver->GetSenderHeight();
+                if (new_w != cur_w || new_h != cur_h) {
+                    cur_w = cur_h = 0;
+                    tex_ring_.clear();
+                } else {
+                    auto& tex = tex_ring_[tex_next_];
+                    tex_next_ = (tex_next_ + 1) % static_cast<int>(tex_ring_.size());
+
+                    // Dimensions come from the connect phase above; this overload
+                    // takes the destination texture and the invert flag only.
+                    if (receiver->ReceiveTexture(texture_gl_id(tex), GL_TEXTURE_2D, false, 0)) {
+                        // The mixer reads this texture on its own context, so the
+                        // copy has to have landed before the frame is published.
+                        glFinish();
+
+                        core::pixel_format_desc pfd(core::pixel_format::bgra);
+                        pfd.planes.push_back(core::pixel_format_desc::plane(
+                            static_cast<int>(cur_w), static_cast<int>(cur_h), 4, common::bit_depth::bit8));
+
+                        auto empty = std::make_shared<std::vector<uint8_t>>(0);
+                        std::vector<array<const std::uint8_t>> img;
+                        img.emplace_back(empty->data(), 0, std::move(empty));
+                        auto astore = std::make_shared<std::vector<std::int32_t>>(0);
+                        array<const std::int32_t> audio(astore->data(), 0, std::move(astore));
+
+                        {
+                            std::lock_guard<std::mutex> lock(frames_mutex_);
+                            frames_.push(core::draw_frame(core::const_frame(
+                                this, std::move(img), std::move(audio), pfd, tex)));
+                            if (frames_.size() > 5) frames_.pop();
+                        }
+                        frame_received = true;
+                        gpu_path_active_ = true;
+                        tick_fps();
+                    }
+                }
+
+                graph_->set_value("frame-time", frame_timer_.elapsed() * 1000.0);
+                {
+                    std::lock_guard<std::mutex> lock(frames_mutex_);
+                    graph_->set_value("buffer-size", static_cast<double>(frames_.size()));
+                }
+                if (!frame_received)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                continue;
+            }
+
+            // ---- Readback path (any mixer other than OpenGL) -------------------
             // bInvert=false: what Spout shares is already top-down.
             //
             // This used to pass true, on the reasoning that a Spout texture is
@@ -283,6 +431,11 @@ struct spout_producer : public core::frame_producer
         }
 
         receiver->ReleaseReceiver();
+
+        if (shared_hglrc) {
+            wglMakeCurrent(nullptr, nullptr);
+            destroy_shared_context(shared_hglrc);
+        }
     }
 
     core::draw_frame receive_impl(core::video_field /*field*/, int /*nb_samples*/) override

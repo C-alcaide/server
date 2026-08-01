@@ -20,6 +20,8 @@ set(SOURCES
     consumer/spout_consumer.cpp
     consumer/spout_consumer.h
     producer/spout_producer.cpp
+    producer/spout_gl_bridge.cpp
+    producer/spout_gl_bridge.h
     producer/spout_producer.h
     ${SPOUT_SDK_DIR}/SpoutGL/Spout.cpp
     ${SPOUT_SDK_DIR}/SpoutGL/SpoutGL.cpp
@@ -53,4 +55,7 @@ target_link_libraries(spout PRIVATE
     common
     accelerator
     ffmpeg
+    # The producer receives straight into a texture owned by the mixer's OpenGL
+    # device, and accelerator/ogl/util/device.h includes GL/glew.h.
+    GLEW::glew
 )
