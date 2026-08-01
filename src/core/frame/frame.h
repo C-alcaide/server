@@ -1,5 +1,7 @@
 #pragma once
 
+#include "pixel_format.h"
+
 #include <common/array.h>
 
 #include <any>
@@ -8,6 +10,7 @@
 #include <functional>
 #include <future>
 #include <memory>
+#include <optional>
 #include <vector>
 
 namespace caspar { namespace core {
@@ -56,6 +59,14 @@ class texture
     /// Only called by consumers that explicitly need CPU pixels (e.g. PRINT RAW).
     /// Default: returns empty (no readback capability).
     virtual std::vector<std::uint8_t> read_pixels() const { return {}; }
+
+    /// Layout of the buffer read_pixels() returns, when it differs from the
+    /// frame's own pixel_format_desc. A block-compressed texture is the case
+    /// that needs this: the frame describes how the mixer must sample the
+    /// image (ycocg_dxt5 for HAP Q, say), but a host-side decode necessarily
+    /// hands back packed 8-bit pixels instead.
+    /// Empty means "same as the frame's descriptor".
+    virtual std::optional<pixel_format> read_pixels_format() const { return std::nullopt; }
 };
 
 class mutable_frame final

@@ -127,13 +127,16 @@ bool write_frame_png(const const_frame& frame, const std::wstring& path)
                     array<const uint8_t> img_arr(store->data(), store->size(), store);
                     std::vector<array<const uint8_t>> img_vec;
                     img_vec.push_back(std::move(img_arr));
-                    // Use the frame's own pixel format — it encodes the correct
+                    // Default to the frame's own pixel format — it encodes the correct
                     // channel interpretation for whatever wrote the texture:
                     //   OGL+CUDA: glGetTextureImage(GL_BGRA) applies R↔B swap on
                     //             internal channels, producing RGBA in memory → frame says rgba.
                     //   Vulkan:   raw cudaMemcpy gives BGRA in memory → frame says bgra.
+                    // A wrapper whose readback does not come from the image verbatim —
+                    // a host-side BCn decode, say — overrides it via read_pixels_format().
                     auto tex_depth = tex->tex_is_hbd() ? common::bit_depth::bit16 : common::bit_depth::bit8;
-                    auto readback_fmt = frame.pixel_format_desc().format;
+                    auto readback_fmt =
+                        tex->read_pixels_format().value_or(frame.pixel_format_desc().format);
                     pixel_format_desc pfd(readback_fmt);
                     pfd.planes.push_back(pixel_format_desc::plane(width, height, 4, tex_depth));
                     const_frame readback_frame(frame.stream_tag(), std::move(img_vec),

@@ -100,6 +100,67 @@ static constexpr int IO_QUEUE_CAP  = 4;
 // margin; this one has plenty.
 static constexpr int DONE_QUEUE_CAP = 12;
 
+// Hands the Vulkan mixer the zero-copy BC texture, but answers read_pixels()
+// -- PRINT RAW, write_frame_png -- from a host decode of the same compressed
+// bytes rather than from the image.
+//
+// The image itself cannot be read back: copyImageToBuffer on a block-compressed
+// VkImage yields BC blocks, an eighth of the bytes a caller expecting packed
+// pixels asks for, and vulkan::device::copy_async now declines the request
+// outright. Decoding here costs nothing during playback because nothing on that
+// path calls read_pixels(), and it is correct for every variant the zero-copy
+// path handles -- including HAP Q, whose YCoCg the mixer resolves in a shader
+// but which cpu_decode_hap_to_bgra resolves on its own.
+class hap_vk_texture_wrapper final : public accelerator::vulkan::texture_wrapper
+{
+  public:
+    hap_vk_texture_wrapper(std::shared_ptr<accelerator::vulkan::texture> tex,
+                           HapVariant                                    variant,
+                           std::shared_ptr<std::vector<uint8_t>>         texture_data,
+                           int                                           width,
+                           int                                           height)
+        : texture_wrapper(std::move(tex))
+        , variant_(variant)
+        , texture_data_(std::move(texture_data))
+        , width_(width)
+        , height_(height)
+    {
+    }
+
+    // The frame's own descriptor says how the mixer must sample the compressed
+    // image; the host decode below always produces packed BGRA regardless.
+    std::optional<core::pixel_format> read_pixels_format() const override
+    {
+        return core::pixel_format::bgra;
+    }
+
+    std::vector<std::uint8_t> read_pixels() const override
+    {
+        if (!texture_data_)
+            return {};
+
+        std::vector<std::uint8_t> bgra;
+        if (!cpu_decode_hap_to_bgra(variant_,
+                                    texture_data_->data(),
+                                    texture_data_->size(),
+                                    nullptr,
+                                    0,
+                                    width_,
+                                    height_,
+                                    bgra)) {
+            CASPAR_LOG(warning) << L"[hap_producer] host BCn decode failed for texture readback";
+            return {};
+        }
+        return bgra;
+    }
+
+  private:
+    HapVariant                            variant_;
+    std::shared_ptr<std::vector<uint8_t>> texture_data_;
+    int                                   width_;
+    int                                   height_;
+};
+
 // Raw packet from I/O thread → Snappy workers.
 struct RawPacket {
     HapPacket pkt;
@@ -831,7 +892,8 @@ struct hap_producer_impl final : public core::frame_producer
                     // Upload compressed texture data to Vulkan BC image
                     auto tex_store = std::make_shared<std::vector<uint8_t>>(
                         item.result.texture_data.begin(), item.result.texture_data.end());
-                    array<const uint8_t> tex_data(tex_store->data(), tex_store->size(), std::move(tex_store));
+                    // Keep tex_store: the wrapper below decodes it on demand for readback.
+                    array<const uint8_t> tex_data(tex_store->data(), tex_store->size(), tex_store);
 
                     auto tex_future = vk_device_->copy_compressed_async(
                         tex_data, frame_info_.width, frame_info_.height, vk_fmt);
@@ -878,7 +940,9 @@ struct hap_producer_impl final : public core::frame_producer
                     auto audio_store = std::make_shared<std::vector<int32_t>>(std::move(frame_audio));
                     array<const int32_t> audio_arr(audio_store->data(), audio_store->size(), std::move(audio_store));
 
-                    auto wrapper = std::make_shared<accelerator::vulkan::VkReadableTextureWrapper>(vk_tex, vk_device_);
+                    auto wrapper = std::make_shared<hap_vk_texture_wrapper>(
+                        vk_tex, item.result.variant, std::move(tex_store),
+                        frame_info_.width, frame_info_.height);
 
                     df = core::draw_frame(core::const_frame(
                         this,
