@@ -156,8 +156,16 @@ depends on the build and the GPU. Seven decoders advertise it here: `av1`,
 `h264`, `hevc`, `mpeg2video`, `vc1`, `vp9`, `wmv3`. Advertising is not the same
 as engaging:
 
-- **confirmed working** — H.264, HEVC, MPEG-2, VP9
-- **untested** — AV1, VC1, WMV3
+- **confirmed working** — H.264, HEVC, MPEG-2, VP9, AV1
+- **untested** — VC1, WMV3
+
+> AV1 declined until 2026-08-02, with the same *"decoder is not using D3D11VA"*
+> as VP9 and for the same reason: `avcodec_find_decoder(AV_CODEC_ID_AV1)`
+> resolves to `libdav1d`, which advertises no hwaccel, so the producer never
+> attached a hardware device context. It was **unreachable rather than
+> untested** — the `av1` in the advertising list above is a decoder the producer
+> never asked for. See the AV1 section below, because unlike VP9 the fix could
+> not simply reverse the choice.
 
 > VP9 declined until 2026-08-01, logged as *"decoder is not using D3D11VA"*.
 > The producer forced `libvpx-vp9` for every VP8/VP9 file, because libvpx is the
@@ -167,12 +175,20 @@ as engaging:
 > alpha still decodes in software and will not reach GPU-direct** — that is
 > inherent, not a gap: no hardware decoder produces the alpha plane.
 
-**It declines, with a logged reason, for:** the Vulkan mixer (needs the OpenGL
-device), any video filter (`-vf`), interlaced content, a framerate that does not
-match the channel, auto-deinterlace being active, a codec whose decoder is not
-using D3D11VA, or the `WGL_NV_DX_interop2` bridge failing to initialise. Read the
-log rather than inferring from timings — a silent fallback looks exactly like a
-codec with no benefit.
+**It declines, with a logged reason, for:** any video filter (`-vf`), interlaced
+content, a framerate that does not match the channel, auto-deinterlace being
+active, a codec whose decoder is not using D3D11VA, or the bridge failing to
+initialise. Read the log rather than inferring from timings — a silent fallback
+looks exactly like a codec with no benefit.
+
+The Vulkan mixer is no longer on that list: since `489b02fbc` it has its own
+bridge (`d3d11_import_bridge`), so GPU-direct runs on both backends. That does
+put a requirement on multi-GPU setups — the decoder's D3D11 device has to be on
+the same adapter as the mixer, or the shared handles are not importable
+(*"this D3D11 handle is not importable (result=-3)"*) and the channel drops to
+the host transfer path. The adapter is matched to the mixer's GPU by LUID as of
+`cdaa530a8`; `configuration.ffmpeg.producer.hardware-decode-adapter` overrides
+it if enumeration and the mixer ever disagree.
 
 ### 10-bit decoding
 
@@ -198,6 +214,62 @@ means a real regression.
 
 Nothing needs configuring for this. 10-bit content that can be hardware-decoded
 is, 10-bit content that cannot falls back and keeps its depth either way.
+
+### AV1 — hardware-decoded, but only where it can be
+
+AV1 is decoded by hardware when the adapter and the stream allow it, and by
+`libdav1d` otherwise. Nothing to configure; the log says which ran and why.
+
+Measured, 20 s of 1080p10 AV1 at 6 Mbps:
+
+| decoder | CPU | cores/layer at realtime |
+|---|---|---|
+| `libdav1d` (what ran before 2026-08-02) | 4.69 s | 0.23 |
+| native `av1` on D3D11VA | 0.28 s | **0.014** |
+| `av1_cuvid` | 0.50 s | 0.025 |
+
+Output is unchanged: 40/40 in the harness at **44.8 dB**, the same as before, and
+hardware and software captures are **bit-identical** — including on a clip that
+genuinely carries film grain, which was the one place they were entitled to
+differ (dav1d synthesises grain in software, the decoder does it in hardware).
+
+**Why this needs a gate at all, when VP9 did not.** FFmpeg's native `av1` decoder
+is hwaccel-only. It has no software path, so on a stream or adapter it cannot
+handle it does not run slower — it fails outright:
+
+```
+Your platform doesn't support hardware accelerated AV1 decoding.
+Error submitting packet to decoder: Function not implemented
+```
+
+which is a black channel. `av1_cuvid` is no better: a pure hardware wrapper that
+returns `CUDA_ERROR_NOT_SUPPORTED`. Only `libdav1d` and `libaom-av1` decode AV1
+in software. So the decoder is chosen rather than simply switched:
+
+- **Profile 0 only.** Profile 0 (Main) is 4:2:0 8/10-bit by specification;
+  Profile 1 is 4:4:4 and Profile 2 is 12-bit, and no hardware decodes those.
+  **They stay on `libdav1d` by necessity, not by omission.** The gate reads the
+  profile from the container rather than the pixel format, because
+  `codecpar->format` can still be `NONE` before the first frame.
+- **The adapter must say so**, via `ID3D11VideoDevice::CheckVideoDecoderFormat`
+  for `AV1_VLD_PROFILE0` against NV12 and P010 — a static query, asked once per
+  adapter, on the adapter the decoder will actually use. Per adapter and not per
+  process because the answer differs between cards: on the reference rig the
+  A4000 reports *"Profile 0, 8- and 10-bit"* and the P4000 *"not supported"*, so
+  the same file hardware-decodes on one channel and falls back on another.
+
+```
+configuration.ffmpeg.producer.av1-decoder = auto | hardware | software
+```
+
+`auto` is the default and is what the above describes. `software` forces
+`libdav1d` — the escape hatch if a driver claims a capability it does not have.
+`hardware` bypasses the gate entirely and is a diagnostic, not a setting to
+deploy: pointed at a 4:4:4 file it produces exactly the failure above.
+
+The AV1 fixtures in the test matrix exist for this gate specifically —
+`av1_444` (Profile 1) and `av1_12bit` (Profile 2) must keep decoding in
+software, and `av1_filmgrain` must keep matching software output.
 
 ### 3.1 The CUDA producers — ProRes and NotchLC
 
@@ -410,6 +482,30 @@ GPU-direct is NVENC-only and NVENC carries no alpha. **Keyed and fill/key
 recordings must use the host path** — `qtrle`, ProRes 4444 — which is what
 happens automatically. Verified end to end: a transparent channel recorded to
 `qtrle` keeps `a=0`, on both mixers.
+
+### Recording AV1
+
+Works today with no special support — the consumer is codec-generic. Verified
+end to end: `ADD 1 FILE out.mp4 -vcodec libsvtav1 -preset 12 -crf 35` produced
+1080p AV1 Main with AAC audio.
+
+It is a software encode, and priced accordingly (1080p, cost to sustain
+realtime):
+
+| encoder | cores | max realtime |
+|---|---|---|
+| `libsvtav1 -preset 8` | 4.75 | ×1.7 |
+| `libsvtav1 -preset 10` | 2.35 | ×4.0 |
+| `libsvtav1 -preset 12` | 1.42 | ×6.1 |
+| `hevc_nvenc` (for comparison) | **0.31** | ×12.2 |
+| `av1_nvenc` | — | fails: *"No capable devices found"* |
+
+`av1_nvenc` needs an Ada-generation GPU; neither the Pascal nor the Ampere card
+here has an AV1 encoder. **Prefer `hevc_nvenc` unless AV1 output is specifically
+required** — it costs about a fifth of the CPU of the fastest usable SVT preset.
+
+> An encoder that cannot start is now reported at `ADD` time. It used to answer
+> `202 ADD OK`, write nothing, and only show up as a `404` on `REMOVE`.
 
 ### Encoder defaults worth knowing
 
