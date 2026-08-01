@@ -56,10 +56,16 @@ inline constexpr const char* kExtSemExtName = VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTEN
 #endif
 
 // ─── GL import handle type ──────────────────────────────────────────────────
+//
+// The values GL_EXT_memory_object{,_win32,_fd} actually defines. They used to
+// read 0x9462 and 0x9464, which are GL_DEVICE_LUID_EXT and GL_DEVICE_NODE_MASK_EXT
+// -- not handle types at all. The driver rejected every import with
+// GL_INVALID_VALUE and "Unknown handle type", and because no call site checked
+// glGetError, every VK -> GL import silently produced an unusable texture.
 #ifdef _WIN32
-inline constexpr unsigned int kGlHandleType = 0x9462; // GL_HANDLE_TYPE_OPAQUE_WIN32_EXT
+inline constexpr unsigned int kGlHandleType = 0x9587; // GL_HANDLE_TYPE_OPAQUE_WIN32_EXT
 #else
-inline constexpr unsigned int kGlHandleType = 0x9464; // GL_HANDLE_TYPE_OPAQUE_FD_EXT
+inline constexpr unsigned int kGlHandleType = 0x9586; // GL_HANDLE_TYPE_OPAQUE_FD_EXT
 #endif
 
 // ─── Platform native handle type ────────────────────────────────────────────

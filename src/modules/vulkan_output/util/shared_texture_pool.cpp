@@ -36,7 +36,7 @@
 #endif
 
 #include <algorithm>
-
+#include <iomanip>
 #include <mutex>
 
 namespace caspar { namespace vulkan_output {
@@ -407,6 +407,8 @@ void shared_texture_pool::create_slot(slot& s)
 
     // ─── GL side: import memory + create texture ─────────────────────────────
 
+    while (glGetError() != GL_NO_ERROR) {}
+
     // Import VK memory into GL
     glCreateMemoryObjectsEXT_(1, &s.gl_memory_object);
 #ifdef _WIN32
@@ -445,6 +447,14 @@ void shared_texture_pool::create_slot(slot& s)
     // fd is consumed by import on Linux — mark as invalid to prevent double-close
     s.semaphore_handle = platform::kInvalidHandle;
 #endif
+
+    // None of the above used to be checked, which is how a wrong handle-type
+    // constant went unnoticed: the imports failed on every slot and the only
+    // symptom was a texture with no content.
+    if (GLenum err = glGetError(); err != GL_NO_ERROR) {
+        CASPAR_LOG(error) << L"[vulkan_output] GL import of the shared VK image or semaphore failed (GL error 0x"
+                          << std::hex << static_cast<unsigned>(err) << std::dec << L").";
+    }
 }
 
 void shared_texture_pool::destroy_slot(slot& s)

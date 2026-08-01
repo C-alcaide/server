@@ -37,6 +37,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <iomanip>
 
 namespace caspar { namespace accelerator { namespace vulkan {
 
@@ -286,6 +287,8 @@ void previz_texture_bridge::create_slot(channel_slot& s, int width, int height, 
     // ── GL: Import memory + create texture ───────────────────────────────
 
     if (interop_available_) {
+        while (glGetError() != GL_NO_ERROR) {}
+
         glCreateMemoryObjectsEXT_(1, &s.gl_memory_object);
 #ifdef _WIN32
         glImportMemoryWin32HandleEXT_(s.gl_memory_object,
@@ -311,6 +314,15 @@ void previz_texture_bridge::create_slot(channel_slot& s, int width, int height, 
         glTextureStorageMem2DEXT_(s.gl_texture, 1,
                                   use_16bit ? GL_RGBA16 : GL_RGBA8,
                                   width, height, s.gl_memory_object, 0);
+
+        // Nothing here used to be checked, which is how a wrong handle-type
+        // constant went unnoticed: the import failed on every frame and the
+        // only symptom was a texture that never had any content.
+        if (GLenum err = glGetError(); err != GL_NO_ERROR) {
+            CASPAR_LOG(error) << L"[previz_bridge] GL import of the shared VK image failed (GL error 0x"
+                              << std::hex << static_cast<unsigned>(err) << std::dec
+                              << L"). Previz channel textures will be blank.";
+        }
     } else {
         // CPU fallback: create a regular GL texture for upload
         int bpp = use_16bit ? 8 : 4;
