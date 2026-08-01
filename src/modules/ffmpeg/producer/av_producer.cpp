@@ -2390,11 +2390,24 @@ struct AVProducer::Impl
                     if (gpu_direct_video_) {
                         // GPU-direct: video comes from decoder hw_output, not filter graph
                         if (!video_filter_.frame) {
-                            auto& dec = decoders_.at(gpu_direct_decoder_idx_);
-                            auto hw_frame = dec.pop_hw();
-                            if (hw_frame) {
-                                video_filter_.frame = std::move(hw_frame);
-                                progress = true;
+                            // find(), not at(): every other access to this map
+                            // is written this way, and the one that was not
+                            // threw on every iteration when the decoder went
+                            // missing. If it is gone, stand down to the software
+                            // path rather than throw -- the frame is still
+                            // delivered, just not by this route.
+                            auto it = decoders_.find(gpu_direct_decoder_idx_);
+                            if (it == decoders_.end()) {
+                                gpu_direct_video_ = false;
+                                CASPAR_LOG(warning)
+                                    << print()
+                                    << L" D3D11 GPU-direct video stood down: the decoder went away.";
+                            } else {
+                                auto hw_frame = it->second.pop_hw();
+                                if (hw_frame) {
+                                    video_filter_.frame = std::move(hw_frame);
+                                    progress            = true;
+                                }
                             }
                         }
                     } else
@@ -3344,6 +3357,17 @@ struct AVProducer::Impl
         // Flush unused inputs.
         for (auto& p : decoders_) {
             if (sources_.find(p.first) == sources_.end()) {
+#ifdef _WIN32
+                // The GPU-direct video decoder has no filter-graph source on
+                // purpose -- see the guard above, which skips registering it
+                // because the frames go straight from the decoder to the mixer.
+                // That makes it look unused here, so it was being erased out
+                // from under the reader, and the decode loop then threw
+                // "invalid map<K, T> key" from decoders_.at() on every
+                // iteration for the life of the producer. It is in use; skip it.
+                if (gpu_direct_video_ && p.first == gpu_direct_decoder_idx_)
+                    continue;
+#endif
                 keys.push_back(p.first);
             }
         }
