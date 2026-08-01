@@ -47,6 +47,7 @@ struct texture::impl
     common::bit_depth depth_;
     uint8_t           device_luid_[8] = {};
     bool              has_luid_ = false;
+    bool              compressed_ = false;
     mutable platform::native_handle_t native_handle_ = platform::kInvalidHandle;
 
     impl(const impl&)            = delete;
@@ -132,6 +133,10 @@ void texture::set_device_luid(const uint8_t* luid)
         impl_->has_luid_ = true;
     }
 }
+
+bool texture::compressed() const { return impl_->compressed_; }
+
+void texture::set_compressed(bool compressed) { impl_->compressed_ = compressed; }
 
 platform::native_handle_t texture::export_native_handle() const
 {

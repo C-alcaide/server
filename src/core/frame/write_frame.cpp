@@ -109,6 +109,19 @@ bool write_frame_png(const const_frame& frame, const std::wstring& path)
             if (tex) {
                 auto gpu_pixels = tex->read_pixels();
                 if (!gpu_pixels.empty()) {
+                    // The readback is about to be described as width*height packed
+                    // 4-component pixels. Check that it actually is that long: a short
+                    // buffer used to be accepted and rendered as a partly-filled frame,
+                    // which reads as a decode fault rather than as the readback failure
+                    // it is.
+                    const size_t bytes_per_pixel = tex->tex_is_hbd() ? 8 : 4;
+                    const size_t expected = static_cast<size_t>(width) * height * bytes_per_pixel;
+                    if (gpu_pixels.size() < expected) {
+                        CASPAR_LOG(warning) << L"write_frame_png: GPU readback returned "
+                                            << gpu_pixels.size() << L" bytes, need " << expected
+                                            << L" for " << width << L"x" << height;
+                        return false;
+                    }
                     CASPAR_LOG(debug) << L"write_frame_png: using GPU readback (" << gpu_pixels.size() << L" bytes)";
                     auto store = std::make_shared<std::vector<uint8_t>>(std::move(gpu_pixels));
                     array<const uint8_t> img_arr(store->data(), store->size(), store);

@@ -79,6 +79,13 @@ class texture final
     const uint8_t*    device_luid() const;
     void              set_device_luid(const uint8_t* luid);
 
+    /// True when the image was created with a block-compressed format (BC1/BC3/BC7).
+    /// Such an image samples fine, but size() -- width*height*stride -- describes the
+    /// pixels it represents, not the bytes it holds: a BC1 image stores an eighth of
+    /// that. Anything that copies the image out by byte count has to check this first.
+    bool              compressed() const;
+    void              set_compressed(bool compressed);
+
   private:
     struct impl;
     std::unique_ptr<impl> impl_;

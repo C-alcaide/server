@@ -1001,6 +1001,10 @@ struct device::impl : public std::enable_shared_from_this<impl>
 
             auto tex = std::make_shared<texture>(width, height, 4, common::bit_depth::bit8,
                                                  image, imageMemory, imageView, _device, memReq.size);
+            // size() now reports width*height*4, which is what the image *represents*,
+            // not what it holds. Flag it so copy_async refuses to read it back by that
+            // count -- see the comment there.
+            tex->set_compressed(true);
 
             // Copy staging buffer → compressed image (extent is in texels, not blocks)
             vk::BufferImageCopy region(0,
@@ -1041,6 +1045,21 @@ struct device::impl : public std::enable_shared_from_this<impl>
 
     std::future<array<const uint8_t>> copy_async(const std::shared_ptr<texture>& source)
     {
+        // A block-compressed image cannot be read back this way. create_buffer below
+        // sizes the staging buffer from source->size() (width*height*stride), but
+        // copyImageToBuffer writes only the BC blocks -- an eighth of that for BC1 --
+        // and leaves the remainder untouched. The caller then gets a buffer of exactly
+        // the length it expected whose tail is zeroes and whose head is raw block data
+        // read as pixels, which is indistinguishable from a successful readback. That
+        // is how PRINT RAW on a native-HAP frame produced a frame 88% black instead of
+        // failing. Owners of compressed textures must supply their own host decode
+        // (see hap_producer's wrapper); there is nothing sensible to return here.
+        if (source && source->compressed()) {
+            CASPAR_LOG(warning) << L"vulkan::device::copy_async: refusing to read back a "
+                                   L"block-compressed texture -- the caller must decode on the host";
+            return std::async(std::launch::deferred, [] { return array<const uint8_t>(); });
+        }
+
         auto f = dispatch_async(
             [this, source]() -> std::pair<std::shared_ptr<buffer>, uint64_t> {
             auto buf = create_buffer(source->size(), false);
