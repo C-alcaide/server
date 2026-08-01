@@ -113,7 +113,7 @@ Measured at four layers of 1080p25, against the same clips on the software path:
 | H.264 8-bit 4:2:0 | 2.02 cores | 1.15 | **43 %** | **byte-identical** |
 | HEVC 8-bit 4:2:0 | 2.02 | 1.18 | **42 %** | **byte-identical** |
 | MPEG-2 | 2.55 | 2.15 | 16 % | 78.6 dB |
-| VP9 | 3.50 | 3.35 | 4 % | *declines — see below* |
+| VP9 | 2.05 | 1.17 | **43 %** | — |
 
 The picture being identical is worth stating plainly: this path hands the
 mixer the NV12 planes and lets it do the colour conversion, rather than
@@ -126,11 +126,16 @@ depends on the build and the GPU. Seven decoders advertise it here: `av1`,
 `h264`, `hevc`, `mpeg2video`, `vc1`, `vp9`, `wmv3`. Advertising is not the same
 as engaging:
 
-- **confirmed working** — H.264, HEVC, MPEG-2
-- **advertises but declines** — VP9. FFmpeg resolves VP9 to `libvpx-vp9`, an
-  external-library wrapper with no hardware support, so the decoder that runs is
-  not the one that advertised. Logged as *"decoder is not using D3D11VA"*.
+- **confirmed working** — H.264, HEVC, MPEG-2, VP9
 - **untested** — AV1, VC1, WMV3
+
+> VP9 declined until 2026-08-01, logged as *"decoder is not using D3D11VA"*.
+> The producer forced `libvpx-vp9` for every VP8/VP9 file, because libvpx is the
+> only decoder that reads alpha out of a WebM — but that applied to files with
+> no alpha too, and libvpx is software-only. It is now chosen per file, from the
+> `alpha_mode` the Matroska demuxer puts in stream metadata. **A VP9 file with
+> alpha still decodes in software and will not reach GPU-direct** — that is
+> inherent, not a gap: no hardware decoder produces the alpha plane.
 
 **It declines, with a logged reason, for:** the Vulkan mixer (needs the OpenGL
 device), any video filter (`-vf`), interlaced content, a framerate that does not
