@@ -103,11 +103,41 @@ converted to fit a filter's preferences. In particular 10-bit stays 10-bit and
 4:4:4 stays 4:4:4, where both used to be reduced to 8-bit 4:2:0 before the mixer
 ever saw them.
 
-**GPU-direct decode** (the dashed path) bypasses host memory entirely for
-hardware-decoded H.264/HEVC. Opt in with
-`configuration.ffmpeg.producer.gpu-direct-decode`. OpenGL mixer only, progressive
-only, and it declines with a logged reason for anything it cannot handle
-(High 10 and 4:4:4 are not hardware-decodable here, so they fall back).
+**GPU-direct decode** (the dashed path) bypasses host memory entirely. Opt in
+with `configuration.ffmpeg.producer.gpu-direct-decode`.
+
+Measured at four layers of 1080p25, against the same clips on the software path:
+
+| codec | software | GPU-direct | saving | picture |
+|---|---|---|---|---|
+| H.264 8-bit 4:2:0 | 2.02 cores | 1.15 | **43 %** | **byte-identical** |
+| HEVC 8-bit 4:2:0 | 2.02 | 1.18 | **42 %** | **byte-identical** |
+| MPEG-2 | 2.55 | 2.15 | 16 % | 78.6 dB |
+| VP9 | 3.50 | 3.35 | 4 % | *declines — see below* |
+
+The picture being identical is worth stating plainly: this path hands the
+mixer the NV12 planes and lets it do the colour conversion, rather than
+converting with the D3D11 VideoProcessor whose matrix and range behaviour is
+driver-defined. There is no colour risk to weigh against the CPU saving.
+
+**Which codecs.** There is no hardcoded list — the producer asks
+`avcodec_get_hw_config()` whether the *decoder* supports D3D11VA, so the answer
+depends on the build and the GPU. Seven decoders advertise it here: `av1`,
+`h264`, `hevc`, `mpeg2video`, `vc1`, `vp9`, `wmv3`. Advertising is not the same
+as engaging:
+
+- **confirmed working** — H.264, HEVC, MPEG-2
+- **advertises but declines** — VP9. FFmpeg resolves VP9 to `libvpx-vp9`, an
+  external-library wrapper with no hardware support, so the decoder that runs is
+  not the one that advertised. Logged as *"decoder is not using D3D11VA"*.
+- **untested** — AV1, VC1, WMV3
+
+**It declines, with a logged reason, for:** the Vulkan mixer (needs the OpenGL
+device), any video filter (`-vf`), interlaced content, a framerate that does not
+match the channel, auto-deinterlace being active, a codec whose decoder is not
+using D3D11VA, or the `WGL_NV_DX_interop2` bridge failing to initialise. Read the
+log rather than inferring from timings — a silent fallback looks exactly like a
+codec with no benefit.
 
 ### 10-bit decoding
 
