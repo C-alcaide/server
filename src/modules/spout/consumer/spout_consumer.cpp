@@ -133,9 +133,17 @@ class gl_context
                     if (hglrc_) {
                         shared_ = true;
                     } else {
+                        CASPAR_LOG(warning)
+                            << L"[spout_consumer] could not share a GL context with the mixer (error "
+                            << static_cast<unsigned int>(GetLastError())
+                            << L"); falling back to reading the frame back and sending pixels.";
                         // Re-establish bootstrap context on failure
                         wglMakeCurrent(hdc_, temp_ctx);
                     }
+                } else {
+                    CASPAR_LOG(warning)
+                        << L"[spout_consumer] the channel exposed no GL context to share; falling back to "
+                           L"reading the frame back and sending pixels.";
                 }
 
                 if (!hglrc_)
