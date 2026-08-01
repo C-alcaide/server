@@ -31,6 +31,7 @@
 #ifdef _WIN32
 #include <d3d11.h>
 #include <d3d11_3.h>
+#include <d3d11_4.h>
 #include <d3dcompiler.h>
 #include <cstring>
 #include <dxgi1_2.h>
@@ -41,6 +42,11 @@
 #include <GL/wglew.h>
 #include <accelerator/ogl/util/device.h>
 #include <accelerator/ogl/util/texture.h>
+#ifdef ENABLE_VULKAN
+// Header-only in the Vulkan sense: it exposes no Vulkan types, so this
+// translation unit needs neither the Vulkan headers nor its dispatch loader.
+#include <accelerator/vulkan/util/d3d11_import_bridge.h>
+#endif
 #endif
 
 #ifdef _MSC_VER
@@ -69,6 +75,7 @@ extern "C" {
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <deque>
 #include <iomanip>
 #include <memory>
@@ -81,12 +88,38 @@ namespace caspar { namespace ffmpeg {
 
 const AVRational TIME_BASE_Q = {1, AV_TIME_BASE};
 
-// ── D3D11 → OpenGL GPU-direct bridge ────────────────────────────────────────
-// Avoids GPU→CPU→GPU roundtrip for D3D11VA decoded frames by using
-// WGL_NV_DX_interop2 + D3D11 Video Processor (NV12→BGRA on GPU).
+// ── D3D11 → mixer GPU-direct bridge ─────────────────────────────────────────
+// Avoids the GPU→CPU→GPU round trip for D3D11VA decoded frames by handing the
+// mixer the decoded NV12 planes as GPU textures.
+//
+// The D3D11 half is shared by both mixers: a tiny pass-through pixel shader
+// extracts the decoded surface's two planes into an R8 and an R8G8 texture (see
+// setup_planes). Only the last step differs:
+//
+//   OpenGL — WGL_NV_DX_interop2 registers the two plane textures with GL and
+//            they are copied into pooled GL textures.
+//   Vulkan — the two plane textures carry D3D11 shared NT handles, which are
+//            imported as VkImages and copied into pooled mixer textures by
+//            accelerator::vulkan::d3d11_import_bridge.
+//
+// Vulkan imports the two single-plane textures rather than the decoded NV12
+// surface as one multi-planar image, because the latter was measured not to
+// work: D3D11 and the Vulkan driver disagree about where plane 1 lives inside a
+// shared allocation. See docs/GPU_INTEROP_PLAN.md item 1 and the comment on
+// d3d11_import_bridge.
 #ifdef _WIN32
-class d3d11_gl_bridge
+class d3d11_bridge
 {
+  public:
+    enum class backend
+    {
+        opengl,
+        vulkan
+    };
+
+  private:
+    backend backend_ = backend::opengl;
+
     // D3D11 objects
     ID3D11Device*                       d3d11_device_      = nullptr;
     ID3D11DeviceContext*                d3d11_ctx_         = nullptr;
@@ -135,6 +168,38 @@ class d3d11_gl_bridge
     GLuint                    uv_gl_tex_      = 0;
     bool                      plane_path_ok_  = false;
 
+    // ── Vulkan hand-off ──────────────────────────────────────────────────────
+    // Shared NT handles onto the same two plane textures, and the importer that
+    // turns them into mixer textures. Null on the OpenGL path.
+    HANDLE y_shared_handle_  = nullptr;
+    HANDLE uv_shared_handle_ = nullptr;
+#ifdef ENABLE_VULKAN
+    std::unique_ptr<accelerator::vulkan::d3d11_import_bridge> vk_import_;
+#endif
+
+    // The cross-API wait: D3D11 writes the planes on its own queue and Vulkan
+    // reads them on another, so the CPU has to order them. Measured rather than
+    // assumed, because a GPU-direct path that wins on decode and gives it back
+    // on a sync stall looks identical to a win in a CPU figure -- and at four
+    // layers this wait is milliseconds, not microseconds, so *how* it waits
+    // matters as much as that it waits.
+    //
+    // An ID3D11Fence signalled on the immediate context and waited on through a
+    // Win32 event blocks the thread. The ID3D11Query fallback below can only be
+    // polled, which means spinning: at four layers that spin cost about 0.2
+    // cores and gave back roughly a third of what GPU-direct saves. The fence
+    // path is preferred wherever D3D11.4 is available, which is every OS this
+    // runs on; the query remains for the case where it is not.
+    ID3D11Fence*         sync_fence_    = nullptr;
+    ID3D11DeviceContext4* d3d11_ctx4_   = nullptr;
+    HANDLE               sync_event_    = nullptr;
+    uint64_t             sync_value_    = 0;
+    ID3D11Query*         sync_query_    = nullptr; // fallback: poll, no fence available
+    int64_t              sync_wait_us_  = 0;       // D3D11 completion wait, accumulated
+    int64_t              vk_wait_us_    = 0;       // waiting for the previous Vulkan copy
+    int64_t              sync_frames_   = 0;
+    bool                 sync_reported_ = false;
+
     // The mixer's GL device. All GL and interop work is dispatched onto its
     // thread, where its context is current: a private context is not an option
     // because wglShareLists fails against a context that is current on another
@@ -150,14 +215,16 @@ class d3d11_gl_bridge
     bool active_ = false;
 
   public:
-    bool init(AVBufferRef* hw_device_ctx, void* ogl_device_ptr)
+    bool init(AVBufferRef* hw_device_ctx, void* gpu_device_ptr, backend which)
     {
-        if (!hw_device_ctx || !ogl_device_ptr) {
-            CASPAR_LOG(warning) << L"[av_producer] bridge init: no hw_device_ctx or no GL device";
+        if (!hw_device_ctx || !gpu_device_ptr) {
+            CASPAR_LOG(warning) << L"[av_producer] bridge init: no hw_device_ctx or no mixer GPU device";
             return false;
         }
 
-        ogl_dev_ = static_cast<accelerator::ogl::device*>(ogl_device_ptr);
+        backend_ = which;
+        if (backend_ == backend::opengl)
+            ogl_dev_ = static_cast<accelerator::ogl::device*>(gpu_device_ptr);
 
         // Get the D3D11 device from FFmpeg's hw_device_ctx
         auto* hwctx = reinterpret_cast<AVHWDeviceContext*>(hw_device_ctx->data);
@@ -171,6 +238,23 @@ class d3d11_gl_bridge
         if (!d3d11_device_ || !d3d11_ctx_) {
             CASPAR_LOG(warning) << L"[av_producer] bridge init: null D3D11 device/context";
             return false;
+        }
+
+        if (backend_ == backend::vulkan) {
+#ifdef ENABLE_VULKAN
+            try {
+                vk_import_ = std::make_unique<accelerator::vulkan::d3d11_import_bridge>(gpu_device_ptr);
+            } catch (...) {
+                CASPAR_LOG(warning) << L"[av_producer] D3D11->Vulkan import bridge failed to initialise";
+                return false;
+            }
+            CASPAR_LOG(info) << L"[av_producer] D3D11->Vulkan GPU-direct bridge initialized";
+            active_ = true;
+            return true;
+#else
+            CASPAR_LOG(warning) << L"[av_producer] built without Vulkan support";
+            return false;
+#endif
         }
 
         // Load the interop entry points and open the interop device on the
@@ -433,6 +517,11 @@ class d3d11_gl_bridge
             td.SampleDesc.Count     = 1;
             td.Usage                = D3D11_USAGE_DEFAULT;
             td.BindFlags            = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+            // The only difference between the two mixers' plane textures.
+            // WGL_NV_DX_interop2 shares a texture without one; Vulkan needs a
+            // real shared handle to import through VK_KHR_external_memory_win32.
+            if (backend_ == backend::vulkan)
+                td.MiscFlags = D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
             if (FAILED(d3d11_device_->CreateTexture2D(&td, nullptr, tex)))
                 return false;
             return SUCCEEDED(d3d11_device_->CreateRenderTargetView(*tex, nullptr, rtv));
@@ -441,6 +530,63 @@ class d3d11_gl_bridge
         if (!make_plane(width, height, y_view_format_, &y_texture_, &y_rtv_) ||
             !make_plane(width / 2, height / 2, uv_view_format_, &uv_texture_, &uv_rtv_))
             return false;
+
+        if (backend_ == backend::vulkan) {
+            auto share = [&](ID3D11Texture2D* tex, HANDLE* out) -> bool {
+                IDXGIResource1* res = nullptr;
+                if (FAILED(tex->QueryInterface(__uuidof(IDXGIResource1), reinterpret_cast<void**>(&res))) || !res)
+                    return false;
+                auto hr = res->CreateSharedHandle(
+                    nullptr, DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE, nullptr, out);
+                res->Release();
+                return SUCCEEDED(hr) && *out != nullptr;
+            };
+            if (!share(y_texture_, &y_shared_handle_) || !share(uv_texture_, &uv_shared_handle_)) {
+                CASPAR_LOG(warning) << L"[av_producer] bridge: could not create shared handles for the NV12 planes";
+                return false;
+            }
+
+            // Used once per frame to know the D3D11 extraction has actually
+            // finished before Vulkan reads the planes. Prefer the fence, which
+            // can be waited on rather than polled.
+            ID3D11Device5* dev5 = nullptr;
+            if (SUCCEEDED(d3d11_device_->QueryInterface(__uuidof(ID3D11Device5), reinterpret_cast<void**>(&dev5))) &&
+                dev5) {
+                if (FAILED(dev5->CreateFence(0, D3D11_FENCE_FLAG_NONE, __uuidof(ID3D11Fence),
+                                             reinterpret_cast<void**>(&sync_fence_))))
+                    sync_fence_ = nullptr;
+                dev5->Release();
+            }
+            if (sync_fence_ &&
+                FAILED(d3d11_ctx_->QueryInterface(__uuidof(ID3D11DeviceContext4),
+                                                  reinterpret_cast<void**>(&d3d11_ctx4_)))) {
+                sync_fence_->Release();
+                sync_fence_ = nullptr;
+            }
+            if (sync_fence_) {
+                sync_event_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+                if (!sync_event_) {
+                    sync_fence_->Release();
+                    sync_fence_ = nullptr;
+                    d3d11_ctx4_->Release();
+                    d3d11_ctx4_ = nullptr;
+                }
+            }
+
+            if (!sync_fence_) {
+                D3D11_QUERY_DESC qd = {D3D11_QUERY_EVENT, 0};
+                if (FAILED(d3d11_device_->CreateQuery(&qd, &sync_query_))) {
+                    CASPAR_LOG(warning) << L"[av_producer] bridge: no way to wait for the D3D11 plane extraction "
+                                           L"(neither an ID3D11Fence nor a query could be created)";
+                    return false;
+                }
+                CASPAR_LOG(info) << L"[av_producer] bridge: ID3D11Fence unavailable; polling a query instead, "
+                                    L"which costs CPU while it waits";
+            }
+
+            plane_path_ok_ = true;
+            return true;
+        }
 
         // GL object creation and interop registration belong on the mixer's GL
         // thread, where the context these names live in is current.
@@ -463,11 +609,11 @@ class d3d11_gl_bridge
         return true;
     }
 
-    /// Extracts the decoded NV12 surface into two GL textures (Y, and CbCr
+    /// Extracts the decoded NV12 surface into two mixer textures (Y, and CbCr
     /// interleaved at half resolution), leaving colour conversion to the mixer.
     /// Returns a pair of nulls on any failure.
-    std::pair<std::shared_ptr<void>, std::shared_ptr<void>>
-    convert_planes(ID3D11Texture2D* nv12, int array_idx, accelerator::ogl::device& ogl_dev)
+    std::pair<std::shared_ptr<core::texture>, std::shared_ptr<core::texture>>
+    convert_planes(ID3D11Texture2D* nv12, int array_idx)
     {
         if (!plane_path_ok_ || !nv12) {
             CASPAR_LOG(warning) << L"[av_producer] extract: planes not set up";
@@ -538,6 +684,14 @@ class d3d11_gl_bridge
             d3d11_ctx_->PSSetShaderResources(0, 1, &none);
         };
 
+        // Vulkan may still be reading last frame's planes; the D3D11 draws below
+        // overwrite them, and nothing but this orders the two queues. Done
+        // before taking the decoder's lock so the wait never blocks the decoder.
+#ifdef ENABLE_VULKAN
+        if (backend_ == backend::vulkan && vk_import_)
+            vk_wait_us_ += vk_import_->wait_for_previous_copy();
+#endif
+
         // The decoder shares this immediate context, and it is not free-threaded.
         if (d3d11_hwctx_ && d3d11_hwctx_->lock)
             d3d11_hwctx_->lock(d3d11_hwctx_->lock_ctx);
@@ -546,27 +700,80 @@ class d3d11_gl_bridge
         draw_plane(uv_rtv_, uv_srv, width_ / 2, height_ / 2);
         d3d11_ctx_->Flush();
 
+        // Vulkan reads these textures from a different queue, so "submitted" is
+        // not good enough -- it has to be "finished". GL does not need this:
+        // wglDXLockObjectsNV synchronises for us.
+        //
+        // Only the *signal* belongs inside the decoder's lock. The wait that
+        // follows it must not hold the lock: it is milliseconds long at four
+        // layers, and the decoder needs the context during exactly that window.
+        const bool     use_fence  = backend_ == backend::vulkan && sync_fence_ != nullptr;
+        const bool     use_query  = backend_ == backend::vulkan && !use_fence && sync_query_ != nullptr;
+        const auto     sync_start = std::chrono::steady_clock::now();
+
+        if (use_fence)
+            d3d11_ctx4_->Signal(sync_fence_, ++sync_value_);
+
+        if (use_query) {
+            // No fence available. GetData is an immediate-context call, so this
+            // has to poll with the decoder's lock held, and it burns a core
+            // while it does. See the note on sync_fence_.
+            d3d11_ctx_->End(sync_query_);
+            BOOL done = FALSE;
+            while (d3d11_ctx_->GetData(sync_query_, &done, sizeof(done), 0) != S_OK)
+                std::this_thread::yield();
+        }
+
         if (d3d11_hwctx_ && d3d11_hwctx_->unlock)
             d3d11_hwctx_->unlock(d3d11_hwctx_->lock_ctx);
+
+        // Fence methods are free-threaded, so this half happens with the lock
+        // released -- which is the point of using a fence at all.
+        if (use_fence && sync_fence_->GetCompletedValue() < sync_value_ &&
+            SUCCEEDED(sync_fence_->SetEventOnCompletion(sync_value_, sync_event_))) {
+            // Bounded: a lost signal must fall the producer back, not wedge its
+            // decode thread for good.
+            if (WaitForSingleObject(sync_event_, 2000) != WAIT_OBJECT_0)
+                CASPAR_LOG(warning) << L"[av_producer] timed out waiting for the D3D11 plane extraction";
+        }
+
+        if (use_fence || use_query)
+            sync_wait_us_ += std::chrono::duration_cast<std::chrono::microseconds>(
+                                 std::chrono::steady_clock::now() - sync_start)
+                                 .count();
 
         y_srv->Release();
         uv_srv->Release();
         dev3->Release();
+
+        if (backend_ == backend::vulkan) {
+#ifdef ENABLE_VULKAN
+            std::shared_ptr<core::texture> y_out;
+            std::shared_ptr<core::texture> uv_out;
+            if (!vk_import_ || !vk_import_->copy_planes(y_shared_handle_, uv_shared_handle_, width_, height_,
+                                                        width_ / 2, height_ / 2, plane_depth_, y_out, uv_out))
+                return {};
+            report_sync_cost();
+            return {std::move(y_out), std::move(uv_out)};
+#else
+            return {};
+#endif
+        }
 
         // Hand both planes to GL and copy into pooled textures, so the D3D11
         // surfaces are free for the next frame immediately.
         std::shared_ptr<accelerator::ogl::texture> y_out;
         std::shared_ptr<accelerator::ogl::texture> uv_out;
 
-        ogl_dev.dispatch_sync([&] {
+        ogl_dev_->dispatch_sync([&] {
             HANDLE objs[2] = {y_interop_obj_, uv_interop_obj_};
             if (!wglDXLockObjectsNV_(interop_device_, 2, objs)) {
                 CASPAR_LOG(warning) << L"[av_producer] extract: wglDXLockObjectsNV failed";
                 return;
             }
 
-            y_out  = ogl_dev.create_texture(width_, height_, 1, plane_depth_, false);
-            uv_out = ogl_dev.create_texture(width_ / 2, height_ / 2, 2, plane_depth_, false);
+            y_out  = ogl_dev_->create_texture(width_, height_, 1, plane_depth_, false);
+            uv_out = ogl_dev_->create_texture(width_ / 2, height_ / 2, 2, plane_depth_, false);
             if (y_out && uv_out) {
                 glCopyImageSubData(y_gl_tex_, GL_TEXTURE_2D, 0, 0, 0, 0, y_out->id(), GL_TEXTURE_2D, 0, 0, 0, 0,
                                    width_, height_, 1);
@@ -580,11 +787,73 @@ class d3d11_gl_bridge
         if (!y_out || !uv_out)
             return {};
 
-        return {std::static_pointer_cast<void>(y_out), std::static_pointer_cast<void>(uv_out)};
+        return {std::static_pointer_cast<core::texture>(y_out), std::static_pointer_cast<core::texture>(uv_out)};
+    }
+
+    /// Reports what the cross-API synchronisation actually costs, once at info
+    /// so it always lands in the log, then at debug so it stays measurable
+    /// without becoming noise. Reported per frame, not per window, because that
+    /// is the number that can be compared against the frame budget.
+    void report_sync_cost()
+    {
+        constexpr int64_t kWindow = 250;
+        if (++sync_frames_ < kWindow)
+            return;
+
+        const auto d3d11_us = static_cast<double>(sync_wait_us_) / static_cast<double>(sync_frames_);
+        const auto vk_us    = static_cast<double>(vk_wait_us_) / static_cast<double>(sync_frames_);
+
+        std::wostringstream msg;
+        msg << L"[av_producer] GPU-direct (Vulkan) cross-API sync per frame: D3D11 completion wait "
+            << std::fixed << std::setprecision(3) << d3d11_us / 1000.0 << L" ms, previous-copy wait "
+            << vk_us / 1000.0 << L" ms, over " << sync_frames_ << L" frames.";
+        if (!sync_reported_) {
+            sync_reported_ = true;
+            CASPAR_LOG(info) << msg.str();
+        } else {
+            CASPAR_LOG(debug) << msg.str();
+        }
+
+        sync_wait_us_ = 0;
+        vk_wait_us_   = 0;
+        sync_frames_  = 0;
     }
 
     void teardown_planes()
     {
+#ifdef ENABLE_VULKAN
+        // The importer holds VkImages aliasing the D3D11 textures released
+        // below, and a copy may still be in flight reading them. Drop the
+        // imports first -- but keep the importer itself, because this also runs
+        // when the frame size changes and the path has to carry on afterwards.
+        if (vk_import_)
+            vk_import_->release_imports();
+#endif
+        if (sync_query_) {
+            sync_query_->Release();
+            sync_query_ = nullptr;
+        }
+        if (sync_fence_) {
+            sync_fence_->Release();
+            sync_fence_ = nullptr;
+        }
+        if (d3d11_ctx4_) {
+            d3d11_ctx4_->Release();
+            d3d11_ctx4_ = nullptr;
+        }
+        if (sync_event_) {
+            CloseHandle(sync_event_);
+            sync_event_ = nullptr;
+        }
+        sync_value_ = 0;
+        if (y_shared_handle_) {
+            CloseHandle(y_shared_handle_);
+            y_shared_handle_ = nullptr;
+        }
+        if (uv_shared_handle_) {
+            CloseHandle(uv_shared_handle_);
+            uv_shared_handle_ = nullptr;
+        }
         if (y_interop_obj_) {
             wglDXUnregisterObjectNV_(interop_device_, y_interop_obj_);
             y_interop_obj_ = nullptr;
@@ -619,6 +888,9 @@ class d3d11_gl_bridge
     void cleanup()
     {
         teardown_planes();
+#ifdef ENABLE_VULKAN
+        vk_import_.reset();
+#endif
         teardown_interop();
         teardown_video_processor();
 
@@ -635,7 +907,7 @@ class d3d11_gl_bridge
         active_         = false;
     }
 
-    ~d3d11_gl_bridge() { cleanup(); }
+    ~d3d11_bridge() { cleanup(); }
 
   private:
     void teardown_interop()
@@ -1133,7 +1405,7 @@ class Decoder
 #ifdef _WIN32
                             if (gpu_direct_mode_.load()) {
                                 // GPU-direct path: keep D3D11 frame, push to hw_output queue.
-                                // The Impl thread will use d3d11_gl_bridge to convert on GPU.
+                                // The Impl thread will use d3d11_bridge to convert on GPU.
                                 av_frame->pts = av_frame->best_effort_timestamp;
                                 {
                                     boost::unique_lock<boost::mutex> lock(hw_output_mutex);
@@ -1924,8 +2196,8 @@ struct AVProducer::Impl
     AVChromaLocation                 stream_chroma_loc_  = AVCHROMA_LOC_UNSPECIFIED;
 
 #ifdef _WIN32
-    // D3D11→GL GPU-direct video path (bypasses filter graph + CPU transfer)
-    std::unique_ptr<d3d11_gl_bridge> d3d11_bridge_;
+    // D3D11→mixer GPU-direct video path (bypasses filter graph + CPU transfer)
+    std::unique_ptr<d3d11_bridge>    d3d11_bridge_;
     // Cheap preconditions passed; the bridge is created lazily when the first
     // hardware surface arrives (see get_hw_format: sw_pix_fmt is not resolved
     // until then).
@@ -1934,7 +2206,6 @@ struct AVProducer::Impl
     bool                             gpu_direct_failed_ = false;
     bool                             gpu_direct_logged_ = false;
     int                              gpu_direct_decoder_idx_ = -1;
-    accelerator::ogl::device*        ogl_device_ = nullptr;
 #endif
 
     std::atomic<int64_t> start_{AV_NOPTS_VALUE};
@@ -2178,40 +2449,45 @@ struct AVProducer::Impl
         set_thread_name(L"[ffmpeg::av_producer]");
 
 #ifdef _WIN32
-        // ── Initialize D3D11→GL GPU-direct path ──────────────────────────
+        // ── Initialize D3D11→mixer GPU-direct path ───────────────────────
         // Conditions: D3D11VA active, no user vfilter, progressive content,
-        // matching framerate, and WGL_NV_DX_interop2 available.
+        // matching framerate, and an interop route to the mixer's GPU device
+        // (WGL_NV_DX_interop2 on OpenGL, VK_KHR_external_memory_win32 on Vulkan).
         {
             // Every branch below reports why the path was or was not taken. It
             // used to fail silently, so there was no way to tell "GPU-direct is
-            // running" from "GPU-direct quietly declined" -- which matters,
-            // because this path converts NV12 with the D3D11 VideoProcessor and
-            // therefore does NOT use the mixer's colour management (see
-            // docs/GPU_OPTIMIZATION_PLAN.md). Knowing whether it is live is a
+            // running" from "GPU-direct quietly declined" -- which matters
+            // because a silent fallback and a path with no benefit look
+            // identical in a CPU figure. Knowing whether it is live is a
             // prerequisite for trusting the picture.
             const auto declined = [&](const std::wstring& why) {
-                CASPAR_LOG(info) << print() << L" D3D11->GL GPU-direct video not used: " << why << L".";
+                CASPAR_LOG(info) << print() << L" D3D11 GPU-direct video not used: " << why << L".";
             };
 
-            // Opt-in. NV12->BGRA is done by the D3D11 VideoProcessor, whose
-            // matrix and range are driver-defined, so this path does NOT go
-            // through the mixer's colour management and can differ from the
-            // software path. It stays off until it is made colour-exact (by
-            // importing the NV12 planes and letting the shader convert, which
-            // core::pixel_format::nv12 now supports).
+            // Opt-in. The extraction pass is arithmetic-free and the mixer's
+            // shader does the colour conversion, so the picture matches the
+            // software path byte for byte -- but it is still a different route
+            // through the driver, and it stays opt-in until each new backend has
+            // been verified against that standard.
             const bool gpu_direct_enabled =
                 env::properties().get(L"configuration.ffmpeg.producer.gpu-direct-decode", false);
 
-            void* gpu_dev = frame_factory_->gpu_device_handle();
+            void*      gpu_dev     = frame_factory_->gpu_device_handle();
+            const auto gpu_backend = frame_factory_->gpu_device_backend();
+
+            auto bridge_backend = d3d11_bridge::backend::opengl;
+            if (gpu_backend == core::gpu_backend::vulkan)
+                bridge_backend = d3d11_bridge::backend::vulkan;
+
             if (!gpu_direct_enabled) {
-                declined(L"disabled (set configuration.ffmpeg.producer.gpu-direct-decode to true to enable; "
-                         L"note its colour conversion is driver-defined)");
-            } else if (!gpu_dev) {
-                declined(L"mixer exposes no OpenGL device (Vulkan backend, or GPU affinity moved it)");
+                declined(L"disabled (set configuration.ffmpeg.producer.gpu-direct-decode to true to enable)");
+            } else if (!gpu_dev || gpu_backend == core::gpu_backend::none) {
+                declined(L"the mixer exposes no GPU device (GPU affinity moved it, or this is a CPU mixer)");
             } else if (!vfilter_.empty()) {
                 declined(L"a video filter is set (" + u16(vfilter_) + L"), which requires CPU frames");
             } else {
-                ogl_device_ = static_cast<accelerator::ogl::device*>(gpu_dev);
+                // The handle is passed straight to the bridge, which is the only
+                // thing that knows which backend it belongs to and how to cast it.
 
                 // Find the video decoder with D3D11VA active
                 bool found_video = false;
@@ -2259,14 +2535,16 @@ struct AVProducer::Impl
                         // first one arrives, which is the earliest moment the
                         // surface format and dimensions are actually known. If
                         // that fails we fall back to the transfer path and say so.
-                        // init() only needs the D3D11 device and the GL context,
-                        // both known now. The size-dependent resources are built
-                        // on the first hardware frame, which is also the first
-                        // moment the surface format is resolved.
-                        d3d11_bridge_ = std::make_unique<d3d11_gl_bridge>();
-                        if (!d3d11_bridge_->init(dec.ctx->hw_device_ctx, gpu_dev)) {
+                        // init() only needs the D3D11 device and the mixer's GPU
+                        // device, both known now. The size-dependent resources
+                        // are built on the first hardware frame, which is also
+                        // the first moment the surface format is resolved.
+                        d3d11_bridge_ = std::make_unique<d3d11_bridge>();
+                        if (!d3d11_bridge_->init(dec.ctx->hw_device_ctx, gpu_dev, bridge_backend)) {
                             d3d11_bridge_.reset();
-                            declined(L"WGL_NV_DX_interop2 bridge failed to initialise");
+                            declined(bridge_backend == d3d11_bridge::backend::vulkan
+                                         ? L"the D3D11->Vulkan import bridge failed to initialise"
+                                         : L"the WGL_NV_DX_interop2 bridge failed to initialise");
                         } else {
                             gpu_direct_requested_ = true;
                             // The decoder must start emitting hardware surfaces
@@ -2277,9 +2555,9 @@ struct AVProducer::Impl
                             gpu_direct_decoder_idx_ = idx;
                             dec.gpu_direct_mode_    = true;
                             CASPAR_LOG(info)
-                                << print()
-                                << L" D3D11 GPU-direct video eligible; plane extraction starts on the first "
-                                   L"hardware frame.";
+                                << print() << L" D3D11 GPU-direct video eligible on the "
+                                << (bridge_backend == d3d11_bridge::backend::vulkan ? L"Vulkan" : L"OpenGL")
+                                << L" mixer; plane extraction starts on the first hardware frame.";
                         }
                     }
                     break; // Only one video decoder
@@ -2561,7 +2839,7 @@ struct AVProducer::Impl
                                 d3d11_bridge_->setup_planes(frame.video->width, frame.video->height,
                                                             hw_desc.Format)) {
 
-                                auto planes = d3d11_bridge_->convert_planes(d3d11_tex, array_idx, *ogl_device_);
+                                auto planes = d3d11_bridge_->convert_planes(d3d11_tex, array_idx);
                                 if (planes.first && planes.second) {
                                     if (!gpu_direct_logged_) {
                                         gpu_direct_logged_ = true;
@@ -2626,11 +2904,11 @@ struct AVProducer::Impl
                                     image_data.emplace_back(static_cast<std::size_t>(0));
                                     image_data.emplace_back(static_cast<std::size_t>(0));
 
+                                    // Already core::texture on both backends, so
+                                    // the hand-over below is identical for each.
                                     std::vector<std::shared_ptr<core::texture>> textures;
-                                    textures.push_back(std::static_pointer_cast<core::texture>(
-                                        std::static_pointer_cast<accelerator::ogl::texture>(planes.first)));
-                                    textures.push_back(std::static_pointer_cast<core::texture>(
-                                        std::static_pointer_cast<accelerator::ogl::texture>(planes.second)));
+                                    textures.push_back(std::move(planes.first));
+                                    textures.push_back(std::move(planes.second));
 
                                     return core::const_frame(this, std::move(image_data), std::move(audio_data), desc,
                                                              std::move(textures));

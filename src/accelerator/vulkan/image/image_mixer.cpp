@@ -891,6 +891,14 @@ struct image_mixer::impl
         return create_frame(tag, desc, common::bit_depth::bit8);
     }
 
+    /// Producers that can hand this mixer a GPU texture need its device. Until
+    /// this existed the base's nullptr was returned, and the ffmpeg producer
+    /// read that as "no GPU device" and declined GPU-direct decode outright --
+    /// so choosing the Vulkan mixer meant silently losing hardware decode.
+    void* gpu_device_handle() const override { return vulkan_.get(); }
+
+    core::gpu_backend gpu_device_backend() const override { return core::gpu_backend::vulkan; }
+
     core::mutable_frame
     create_frame(const void* tag, const core::pixel_format_desc& desc, common::bit_depth depth) override
     {
@@ -991,6 +999,8 @@ common::bit_depth image_mixer::depth() const { return impl_->depth(); }
 void image_mixer::set_cpu_readback_needed(bool needed) { impl_->renderer_.set_cpu_readback_needed(needed); }
 
 std::shared_ptr<device> image_mixer::get_vk_device() const { return impl_->vulkan_; }
+void*             image_mixer::gpu_device_handle() const { return impl_->gpu_device_handle(); }
+core::gpu_backend image_mixer::gpu_device_backend() const { return impl_->gpu_device_backend(); }
 
 void image_mixer::set_previz_ogl_device(const std::shared_ptr<ogl::device>& ogl_dev)
 {

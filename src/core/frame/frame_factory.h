@@ -25,6 +25,17 @@
 
 namespace caspar { namespace core {
 
+/// Which accelerator a gpu_device_handle() belongs to. A producer that wants to
+/// hand the mixer a GPU texture has to know which API to build it with, and the
+/// handle alone cannot say -- it used to be assumed to be OpenGL, which is why
+/// the Vulkan mixer silently lost the ffmpeg GPU-direct decode path entirely.
+enum class gpu_backend
+{
+    none,
+    opengl,
+    vulkan
+};
+
 class frame_factory
 {
   public:
@@ -38,9 +49,14 @@ class frame_factory
     virtual class mutable_frame
     create_frame(const void* video_stream_tag, const struct pixel_format_desc& desc, common::bit_depth depth) = 0;
 
-    /// Return an opaque handle to the underlying GPU device (e.g. ogl::device*).
+    /// Return an opaque handle to the underlying GPU device (e.g. ogl::device*
+    /// or vulkan::device*, per gpu_device_backend()).
     /// Returns nullptr if the mixer has no GPU device or doesn't support direct import.
     virtual void* gpu_device_handle() const { return nullptr; }
+
+    /// Which API gpu_device_handle() should be interpreted as. Callers must
+    /// check this before casting: the two backends' device types are unrelated.
+    virtual gpu_backend gpu_device_backend() const { return gpu_backend::none; }
 };
 
 }} // namespace caspar::core

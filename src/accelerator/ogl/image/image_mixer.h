@@ -76,6 +76,8 @@ class image_mixer final : public core::image_mixer
     /// path, which therefore never ran.
     void* gpu_device_handle() const override;
 
+    core::gpu_backend gpu_device_backend() const override;
+
     void* native_gl_context() const override;
     void* native_egl_display() const override;
 

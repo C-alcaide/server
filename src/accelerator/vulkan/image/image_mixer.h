@@ -74,6 +74,12 @@ class image_mixer final : public core::image_mixer
 
     bool is_vulkan() const override { return true; }
 
+    /// The mixer's vulkan::device, for producers that can import a D3D11 or
+    /// other foreign texture straight onto it instead of round-tripping via the
+    /// host. Paired with gpu_device_backend() so the caller knows what to cast.
+    void*             gpu_device_handle() const override;
+    core::gpu_backend gpu_device_backend() const override;
+
     void set_cpu_readback_needed(bool needed) override;
 
     std::shared_ptr<class device> get_vk_device() const;

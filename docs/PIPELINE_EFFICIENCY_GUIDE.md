@@ -104,21 +104,51 @@ converted to fit a filter's preferences. In particular 10-bit stays 10-bit and
 ever saw them.
 
 **GPU-direct decode** (the dashed path) bypasses host memory entirely. Opt in
-with `configuration.ffmpeg.producer.gpu-direct-decode`.
+with `configuration.ffmpeg.producer.gpu-direct-decode`. **It works on both
+mixers**: OpenGL bridges the decoded surface with `WGL_NV_DX_interop2`, Vulkan
+imports it through `VK_KHR_external_memory_win32`. Until 2026-08-01 the Vulkan
+mixer declined the path outright, so choosing Vulkan meant silently giving up
+hardware decode.
 
-Measured at four layers of 1080p25, against the same clips on the software path:
+Measured at four layers of 1080p25, against the same clips on the *same mixer's*
+software path — comparing across mixers would fold their own costs in:
 
-| codec | software | GPU-direct | saving | picture |
+| codec | mixer | software | GPU-direct | saving |
 |---|---|---|---|---|
-| H.264 8-bit 4:2:0 | 2.02 cores | 1.15 | **43 %** | **byte-identical** |
-| HEVC 8-bit 4:2:0 | 2.02 | 1.18 | **42 %** | **byte-identical** |
-| MPEG-2 | 2.55 | 2.15 | 16 % | 78.6 dB |
-| VP9 | 2.05 | 1.17 | **43 %** | — |
+| H.264 8-bit 4:2:0 | OpenGL | 2.01 cores | 1.22 | **39 %** |
+| H.264 8-bit 4:2:0 | Vulkan | 1.96 | 1.16 | **41 %** |
+| HEVC 8-bit 4:2:0 | OpenGL | 1.99 | 1.26 | **37 %** |
+| HEVC 8-bit 4:2:0 | Vulkan | 1.87 | 1.16 | **38 %** |
+| VP9 | OpenGL | 2.04 | 1.26 | **38 %** |
+| VP9 | Vulkan | 1.85 | 1.14 | **38 %** |
+| MPEG-2 | OpenGL | 2.55 | 2.15 | 16 % |
 
-The picture being identical is worth stating plainly: this path hands the
-mixer the NV12 planes and lets it do the colour conversion, rather than
-converting with the D3D11 VideoProcessor whose matrix and range behaviour is
-driver-defined. There is no colour risk to weigh against the CPU saving.
+The picture is byte-identical to the software path on both mixers, and the two
+mixers' GPU-direct output is byte-identical to each other. That is worth stating
+plainly: this path hands the mixer the NV12 planes and lets it do the colour
+conversion, rather than converting with the D3D11 VideoProcessor whose matrix
+and range behaviour is driver-defined. There is no colour risk to weigh against
+the CPU saving.
+
+> **Measure this with a clip longer than the run, and do not loop it.** The
+> earlier figures in this table were taken on a 4-second clip with `LOOP`, and
+> GPU-direct stalls at the loop point (`Waiting for video frame...`, on *both*
+> mixers — a defect that predates the Vulkan bridge and is still open). A window
+> that starts after the loop therefore compares a stalled producer against a
+> working one and reports the stall as a saving. `gpudirect/cpu_matrix.py` now
+> uses 90-second clips, plays without `LOOP`, and fails the row if the log
+> contains `Waiting for video frame`.
+
+**The Vulkan path's cross-API wait.** D3D11 writes the two plane textures on its
+own queue and Vulkan reads them on another, so the CPU must order them; OpenGL
+needs no equivalent because `wglDXLockObjectsNV` synchronises for it. The wait is
+1.1–5.3 ms per frame at four layers, which is real but is *latency on the
+producer's decode thread*, not CPU — as long as it blocks rather than spins. It
+is an `ID3D11Fence` waited on through a Win32 event, and the signal is issued
+under the decoder's lock while the wait happens outside it. Polling a
+`D3D11_QUERY_EVENT` instead (the fallback where D3D11.4 is unavailable) measured
+1.44 cores against the fence's 1.16 — the spin gave back a third of everything
+the path saves.
 
 **Which codecs.** There is no hardcoded list — the producer asks
 `avcodec_get_hw_config()` whether the *decoder* supports D3D11VA, so the answer
