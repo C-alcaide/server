@@ -3719,6 +3719,29 @@ struct AVProducer::Impl
     void seek_internal(int64_t time)
     {
         time = time != AV_NOPTS_VALUE ? time : 0;
+
+#ifdef _WIN32
+        // A seek lands on the keyframe at or before the target, so something has
+        // to discard the frames between the two. On the software path the filter
+        // graph does it: reset() rebuilds the spec with `fps=...:start_time=`,
+        // which drops everything before the target. GPU-direct frames never
+        // enter that graph, so their only equivalent is the run loop's
+        // drop-to-target, and that runs off current_seek_target_.
+        //
+        // Only the explicit-seek call site set it. The loop wrap did not, so a
+        // clip looping on an IN point that is not a keyframe restarted from the
+        // keyframe on every wrap -- `PLAY ... SEEK 40 LENGTH 1 LOOP` on a clip
+        // keyframed every 25 sat on frames 27-28 instead of 40, varying with
+        // timing. Setting it here covers every caller rather than one, which is
+        // the same reason the trim lives in reset() on the software side.
+        //
+        // Gated: on the software path the fps filter already trims, and the
+        // explicit-seek call site sets this unconditionally as it always has,
+        // so software behaviour is untouched.
+        if (gpu_direct_video_)
+            current_seek_target_ = time;
+#endif
+
         time = time + (input_->start_time != AV_NOPTS_VALUE ? input_->start_time : 0);
 
         // TODO (fix) Dont seek if time is close future.

@@ -6,7 +6,9 @@ wrap *is* a seek: position advanced to the end, wrapped to 0.00, and stayed ther
 for ever, on both mixers, with nothing in the log. An explicit `CALL 1-10 SEEK 20`
 behaved identically, which is what ruled out anything loop-specific.
 
-Two defects, both in `av_producer.cpp`. Neither is in the mixer or the bridge.
+Three defects, all in `av_producer.cpp`. None is in the mixer or the bridge. The
+first is the stall itself; the other two were masked by it and only became
+observable — and only became measurable — once it was gone.
 
 ## 1. The decoder was fed no packets after a reset
 
@@ -57,6 +59,39 @@ notified from `~Decoder`, matching the software queue beside it.
 This one hid behind the first: with no frames produced after a seek at all, a
 seek that served the wrong second of video was not observable.
 
+## 3. A loop wrap ignored the IN point
+
+A seek lands on the keyframe at or before the target, so something has to
+discard the frames between the two. On the software path the filter graph does
+it: `reset()` rebuilds the spec with `fps=...:start_time=`, which drops
+everything before the target. GPU-direct frames never enter that graph, so their
+only equivalent is the run loop's drop-to-target, and that runs off
+`current_seek_target_`.
+
+Only the explicit-seek call site set it. The loop wrap did not. So a clip
+looping on an IN point that is not a keyframe restarted from the keyframe on
+every wrap. `PLAY … SEEK 40 LENGTH 40 LOOP` on a clip keyframed every 25 wrapped
+to 1.00 s instead of 1.60 s, on both mixers, and the exact landing frame varied
+run to run with timing. It is now set in `seek_internal()`, which covers every
+caller rather than one — the same reason the trim lives in `reset()` on the
+software side — and gated on `gpu_direct_video_`, so the software path is
+untouched.
+
+**This was found after the first two fixes were committed, and the first round
+of verification missed it.** Two reasons, both worth not repeating:
+
+- The loop test used a clip looping from frame 0, where the IN point *is* the
+  keyframe and the correct and incorrect behaviours coincide. Any loop test
+  whose IN point is a keyframe cannot see this class of defect. `loop_inpoint.py`
+  uses `SEEK 40 LENGTH 40 LOOP` on a clip keyframed at 25 for that reason;
+  checked against the previous build, where it correctly reports the wrap
+  dipping to 1.00/1.04 on both mixers.
+- Fixing the stall is what exposed it. Before, the producer froze after the
+  first wrap and went on serving the last correctly-trimmed frame from the
+  initial play — so the picture was right *because* nothing was decoding. That
+  is also why the picture matrix looked stable beforehand: a frozen producer is
+  trivially reproducible.
+
 ## Already fixed earlier — do not re-do or revert
 
 Commit `1423934ec` fixed two genuine defects in the same area, both still needed:
@@ -84,6 +119,10 @@ nothing is exercised.
 | `PLAY … LOOP`, 26 s | 6 wraps | **6 wraps** | 6 wraps | **6 wraps** |
 | `PLAY …`, no loop | holds 4.00 | **holds 4.00** | holds 4.00 | **holds 4.00** |
 | mid-clip `SEEK 40` | plays on | **plays on** | plays on | **plays on** |
+| `SEEK 40 LENGTH 40 LOOP`, IN 1.60 s, keyframe 1.00 s | min 1.64 | **min 1.64** | min 1.64 | **min 1.60** |
+
+That last row is defect 3. On the previous build the two GPU-direct cells read
+min 1.04 and min 1.00 — the keyframe — with 21–22 samples below the IN point.
 
 `Waiting for video frame` appears zero times in any of those logs, and
 `Decoder flush timed out` — two per run before the fix, one per seek — is gone.
@@ -104,24 +143,68 @@ measured 2.00, 1.84 and 1.80 cores for the same OpenGL software row — so the
 percentage saving moves with it and is not a stable figure to hold a change to.
 Measure the absolute GPU-direct cost, or A/B within one run.
 
-**Picture**, `matrix_isolated.py` on both mixers. 25 of 28 captures are
-byte-identical to the pre-change build, and the verdict table is identical:
-`m_h264_8_prog`, `m_hevc_10_prog` and `m_vp9_8_prog` differ between on and off on
-both mixers, which is exactly the pre-existing set recorded in `489b02fbc`
-(91.5 / 70.9 / 72.8 dB). The differences are unchanged in character: 0.007 % of
-pixels in a 16×21 box for H.264, ~1–2 % spread evenly for the other two.
+**Picture**, `matrix_isolated.py` on both mixers: **6/7 identical, up from 4/7**,
+the same six on each mixer. `m_h264_8_prog` and `m_vp9_8_prog` now match the
+software path byte for byte where they used to differ.
 
-> `iso_*_on_m_vp9_8_prog.png` is **not reproducible run to run** on a single
-> build — back-to-back matrix runs of the same binary produce different hashes
-> for it and for nothing else. Do not read a changed hash on that one capture as
-> a regression; it is why the "byte-identical to the software path" bar reads
-> 4/7 or 5/7 depending on the run, at HEAD as well.
+Those two were **not** colour differences. `489b02fbc` recorded three clips
+differing between on and off (91.5 / 70.9 / 72.8 dB) and called them
+pre-existing; two of the three were defect 3 — the harness pins each clip with
+`SEEK 40 LENGTH 1 LOOP`, which is a wrap on every frame, so GPU-direct was
+capturing a frame near the keyframe while software captured frame 40. On a
+static source that reads as a small, evenly spread pixel difference rather than
+as an obviously wrong picture, which is how it passed for a precision artefact.
+Confirmed by reading `<time>` at the moment of capture: GPU-direct reported
+1.12 s / 1.08 s (frames 28 / 27, keyframe at 25) against software's 1.64 s, and
+the capture hash tracked the reported position exactly. It now reports 1.64 s on
+both mixers, stable across 15 runs, hash-identical to software.
+
+`m_hevc_10_prog` still differs, and that one is real: both paths land on 1.64 s
+and both are bit-stable across runs, so it is a genuine deterministic difference
+in the picture, not a frame mismatch. Pre-existing and out of scope here.
+
+> The earlier note in this file claiming `iso_*_on_m_vp9_8_prog.png` was
+> inherently unreproducible "at HEAD as well" was wrong, and wrong in an
+> instructive way: it rested on a single HEAD run. The instability was defect 3,
+> and HEAD looked stable only because its producer was frozen. One sample cannot
+> establish that something is stable — if a capture is going to be called flaky,
+> count the distinct hashes over at least half a dozen runs of each build.
+
+**Late frames are not affected**, though the first measurement said otherwise.
+`cpu_matrix.py` reported 9–15 late frames on the OpenGL GPU-direct row against
+1–3 for the previous build, reproducibly, which looked like a CPU saving bought
+with dropped frames. It was not. `<late_frames>` is cumulative from channel
+start and `cpu_matrix.py` reads it once at the end, so it counts producer
+startup, which varies with machine state — the high readings came after ~40
+server launches, the low ones straight after a fresh build. A paired A/B
+alternating two prebuilt binaries round by round, differencing the counter
+across the measurement window, gives **0 late frames in the window for both**
+over five rounds each, and 1.225 vs 1.239 cores. Alternate the arms; three runs
+of one then three of the other cannot separate a real difference from a drifting
+machine.
 
 ## Ground rules that earned their place here
 
-- **Instrument before theorising.** Both defects above were found by measurement
-  — a `grep` for `Decoder flush timed out` in the run log settled the second one
-  in seconds, after the mechanism had been guessed at wrongly twice.
+- **Instrument before theorising.** A `grep` for `Decoder flush timed out`
+  settled defect 2 in seconds, after the mechanism had been guessed at wrongly
+  twice. Defect 3 was found by reading `<time>` at the moment of capture rather
+  than reasoning about pixel differences.
+- **A frozen producer looks like a stable one.** Every "pre-existing, stable"
+  property measured while the stall was present is suspect, because a producer
+  that decodes nothing repeats itself perfectly. Two of the three recorded
+  picture differences turned out to be this. Re-measure baselines after fixing a
+  stall; do not carry them over.
+- **Loop tests must loop on a non-keyframe IN point.** Looping from frame 0
+  cannot distinguish "wraps to the IN point" from "wraps to the keyframe",
+  because they are the same frame. That blind spot cost a commit.
+- **Check a probe fails on the broken build before trusting it to pass.** The
+  IN-point probe was run against the previous binary first and does report the
+  defect there; a test that passes on both builds proves nothing.
+- **Difference a cumulative counter across the window, and alternate the arms.**
+  `<late_frames>` counts from channel start, so reading it once at the end
+  measures startup as much as the run, and back-to-back arms confound the
+  comparison with machine drift. That combination produced a convincing,
+  reproducible late-frame regression that did not exist.
 - **Measure on a clip longer than the run, and do not loop it, when measuring
   CPU.** A stalled producer costs less than a working one, so a looping benchmark
   reports the stall as a saving. That produced plausible, documented-looking
