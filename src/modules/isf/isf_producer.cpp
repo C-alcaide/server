@@ -16,6 +16,14 @@
 #include <accelerator/ogl/util/device.h>
 #include <accelerator/ogl/util/texture.h>
 
+#ifdef ENABLE_VULKAN
+#include <accelerator/vulkan/image/image_mixer.h>
+#include <accelerator/vulkan/util/device.h>
+#include <accelerator/vulkan/util/gl_export_bridge.h>
+#include <accelerator/vulkan/util/texture.h>
+#include <accelerator/vulkan/util/texture_wrapper.h>
+#endif
+
 #include <common/array.h>
 #include <common/env.h>
 #include <common/log.h>
@@ -31,6 +39,7 @@
 #include <boost/algorithm/string.hpp>
 
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -158,6 +167,19 @@ class isf_producer : public core::frame_producer
     bool                             gl_ctx_failed_ = false;
     std::vector<unsigned char>       readback_;
 
+#ifdef ENABLE_VULKAN
+    // Vulkan mixer: render straight into Vulkan memory instead of reading back.
+    // The pool exists because the mixer keeps reading a frame's texture after
+    // this producer has moved on, so the next frame needs a different image; a
+    // slot is reusable once nothing but the pool holds its Vulkan texture.
+    std::shared_ptr<accelerator::vulkan::device>                             vk_device_;
+    std::vector<std::unique_ptr<accelerator::vulkan::gl_shared_texture>>     shared_pool_;
+    int                                                                     shared_w_      = 0;
+    int                                                                     shared_h_      = 0;
+    bool                                                                    shared_failed_ = false;
+    bool                                                                    shared_logged_ = false;
+#endif
+
   public:
     isf_producer(const core::frame_producer_dependencies& deps,
                  const std::string&                        source,
@@ -175,8 +197,7 @@ class isf_producer : public core::frame_producer
         fps_ = deps.format_desc.duration != 0
                    ? static_cast<double>(deps.format_desc.time_scale) / static_cast<double>(deps.format_desc.duration)
                    : 25.0;
-        if (auto* ogl_mixer = dynamic_cast<accelerator::ogl::image_mixer*>(frame_factory_.get()))
-            ogl_device_ = ogl_mixer->get_ogl_device();
+        detect_mixer();
     }
 
     /// Transition constructor: blends from_ -> to_ over `frames`.
@@ -200,8 +221,49 @@ class isf_producer : public core::frame_producer
         fps_ = deps.format_desc.duration != 0
                    ? static_cast<double>(deps.format_desc.time_scale) / static_cast<double>(deps.format_desc.duration)
                    : 25.0;
-        if (auto* ogl_mixer = dynamic_cast<accelerator::ogl::image_mixer*>(frame_factory_.get()))
+        detect_mixer();
+    }
+
+    ~isf_producer()
+    {
+#ifdef ENABLE_VULKAN
+        // The pool's GL textures belong to gl_ctx_, and a producer is destroyed on the destroyer
+        // pool rather than the channel thread that rendered on it. So make the context current
+        // here to delete them, and release it again afterwards -- an SFML context left active on
+        // one thread cannot be destroyed from another, which is the crash bc357e7d1 fixed.
+        if (gl_ctx_ && !shared_pool_.empty()) {
+            try {
+                gl_ctx_->make_current();
+                shared_pool_.clear();
+                gl_ctx_->release();
+            } catch (...) {
+            }
+        }
+#endif
+    }
+
+    /// Which mixer is active decides how a rendered frame is delivered: the OpenGL mixer takes a
+    /// texture from its own device, the Vulkan mixer takes one whose memory this producer's GL
+    /// context renders into, and anything else gets a CPU frame.
+    void detect_mixer()
+    {
+        if (auto* ogl_mixer = dynamic_cast<accelerator::ogl::image_mixer*>(frame_factory_.get())) {
             ogl_device_ = ogl_mixer->get_ogl_device();
+            return;
+        }
+#ifdef ENABLE_VULKAN
+        if (auto* vk_mixer = dynamic_cast<accelerator::vulkan::image_mixer*>(frame_factory_.get())) {
+            // The readback path is what runs on any driver without
+            // GL_EXT_memory_object, so it has to stay working. This switch is how
+            // it gets exercised on a rig where the fast path would otherwise
+            // always win -- the same reason CASPAR_SPOUT_FORCE_READBACK exists.
+            if (std::getenv("CASPAR_ISF_FORCE_READBACK") != nullptr) {
+                shared_failed_ = true;
+                CASPAR_LOG(info) << L"[isf] CASPAR_ISF_FORCE_READBACK is set; using the CPU readback path.";
+            }
+            vk_device_ = vk_mixer->get_vk_device();
+        }
+#endif
     }
 
     /// Build an image binding from a source frame: sample a texture-backed frame directly, else
@@ -262,6 +324,76 @@ class isf_producer : public core::frame_producer
 
         return core::draw_frame(core::const_frame(this, std::move(img), std::move(audio), pfd, std::move(tex)));
     }
+
+#ifdef ENABLE_VULKAN
+    /// Render on the self-contained GL context straight into a Vulkan image the mixer can sample,
+    /// replacing the GPU->host->GPU round trip the readback path pays.
+    ///
+    /// Returns an empty frame when the shared path cannot serve this frame -- no free slot, or the
+    /// driver refused the import -- and the caller falls back to readback. That fallback is not
+    /// theoretical: it is what runs on a driver without GL_EXT_memory_object.
+    core::draw_frame produce_vk_shared(int                                    w,
+                                       int                                    h,
+                                       double                                 time,
+                                       double                                 time_delta,
+                                       int                                    frame_index,
+                                       const std::vector<isf::image_binding>& images,
+                                       const core::const_frame*               audio_src)
+    {
+        if (!gl_ctx_->make_current())
+            return core::draw_frame::empty();
+
+        if (shared_w_ != w || shared_h_ != h) {
+            shared_pool_.clear();
+            shared_w_ = w;
+            shared_h_ = h;
+        }
+
+        // A slot is reusable once nothing outside the pool holds its Vulkan
+        // texture; while a frame is in flight the mixer still needs those pixels.
+        accelerator::vulkan::gl_shared_texture* slot = nullptr;
+        for (auto& s : shared_pool_) {
+            if (s->vk_texture().use_count() == 1) {
+                slot = s.get();
+                break;
+            }
+        }
+
+        if (!slot) {
+            // Deep enough for the frames the mixer keeps in flight; beyond that,
+            // readback for a frame is better than growing without bound.
+            constexpr std::size_t kMaxSlots = 4;
+            if (shared_pool_.size() >= kMaxSlots)
+                return core::draw_frame::empty();
+            try {
+                auto vk_tex = vk_device_->create_exportable_texture(w, h, 4, common::bit_depth::bit8);
+                shared_pool_.push_back(
+                    std::make_unique<accelerator::vulkan::gl_shared_texture>(std::move(vk_tex)));
+                slot = shared_pool_.back().get();
+            } catch (const std::exception& e) {
+                shared_failed_ = true;
+                CASPAR_LOG(warning) << L"[isf] '" << name_
+                                    << L"' cannot share a Vulkan texture with OpenGL (" << u16(e.what())
+                                    << L"); using CPU readback.";
+                return core::draw_frame::empty();
+            }
+        }
+
+        if (!shader_->render_into_shared(*gl_ctx_, w, h, time, time_delta, frame_index, images, slot->gl_id()))
+            return core::draw_frame::empty();
+
+        if (!shared_logged_) {
+            shared_logged_ = true;
+            CASPAR_LOG(info) << L"[isf] '" << name_
+                             << L"' renders directly into Vulkan memory (zero-copy, no readback).";
+        }
+
+        auto core_tex = std::static_pointer_cast<core::texture>(
+            std::make_shared<accelerator::vulkan::VkReadableTextureWrapper>(slot->vk_texture(), vk_device_));
+        return wrap_texture(std::move(core_tex), w, h, audio_src);
+    }
+#endif
+
     /// Render `images` through the shader and deliver a frame: zero-copy texture on the OpenGL mixer,
     /// or a self-contained GL context + CPU readback on any other mixer. Assumes mutex_ is held.
     core::draw_frame produce(int w, int h, int frame_index, const std::vector<isf::image_binding>& images,
@@ -289,6 +421,21 @@ class isf_producer : public core::frame_producer
         }
         if (!gl_ctx_)
             return core::draw_frame::empty();
+
+#ifdef ENABLE_VULKAN
+        // On the Vulkan mixer the render can land in memory the mixer already
+        // owns, which removes the readback entirely.
+        if (vk_device_ && !shared_failed_) {
+            auto shared = produce_vk_shared(w, h, time, time_delta, frame_index, images, audio_src);
+            gl_ctx_->release();
+            if (shared) {
+                shader_->reset_events();
+                return shared;
+            }
+            // Nothing free, or the import was refused: fall through to readback.
+        }
+#endif
+
         // The frame is made first so the shader can read straight into its
         // mapped memory. Going via an intermediate buffer and copying afterwards
         // cost a second full-frame copy on every frame.

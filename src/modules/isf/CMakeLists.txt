@@ -22,6 +22,10 @@ casparcg_add_module_project(isf
 # GL rendering (fullscreen ISF pass on the mixer's OGL device or a self-contained context);
 # image module + FFmpeg for IMPORTED; SFML for the self-contained context (non-OGL mixers).
 target_link_libraries(isf PRIVATE GLEW::glew sfml-window sfml-system image)
+# Vulkan mixer: render into a shared VK texture instead of reading back (gl_export_bridge).
+IF(ENABLE_VULKAN)
+	target_link_libraries(isf PRIVATE Vulkan::Headers)
+ENDIF()
 target_include_directories(isf PRIVATE .. ${FFMPEG_INCLUDE_PATH})
 
 # Prototype: GL + boost-json code is relaxed from the global /W4 /WX to avoid warning-as-error churn.

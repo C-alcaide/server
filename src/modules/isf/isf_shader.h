@@ -116,6 +116,22 @@ class shader
                          unsigned char*                    dst,
                          int                               dst_stride);
 
+    /// Render on a self-contained GL context straight into `dst_gl_texture` -- a GL texture whose
+    /// storage is a Vulkan image's memory (see accelerator/vulkan/util/gl_export_bridge.h), so the
+    /// Vulkan mixer samples what this writes with no host round trip.
+    ///
+    /// The result is top-down and BGRA-ordered: byte-for-byte what render_readback puts in a CPU
+    /// frame, which is what keeps the two paths interchangeable. Ends with glFinish(), so the
+    /// pixels are complete for Vulkan when this returns. Returns false on failure.
+    bool render_into_shared(gl_context&                       ctx,
+                            int                               width,
+                            int                               height,
+                            double                            time,
+                            double                            time_delta,
+                            int                               frame_index,
+                            const std::vector<image_binding>& images,
+                            unsigned int                      dst_gl_texture);
+
   private:
     struct impl;
     std::unique_ptr<impl> impl_;

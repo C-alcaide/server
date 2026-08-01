@@ -55,6 +55,7 @@ IF(ENABLE_VULKAN)
 		vulkan/util/transforms.cpp
 		vulkan/util/texture_wrapper.cpp
 		vulkan/util/d3d11_import_bridge.cpp
+		vulkan/util/gl_export_bridge.cpp
 	)
 	set(VULKAN_HEADERS
 		vulkan/image/image_mixer.h
@@ -71,6 +72,7 @@ IF(ENABLE_VULKAN)
 		vulkan/util/uniform_block.h
 		vulkan/util/texture_wrapper.h
 		vulkan/util/d3d11_import_bridge.h
+		vulkan/util/gl_export_bridge.h
 
 		vk_image_vertex.h
 		vk_image_fragment.h

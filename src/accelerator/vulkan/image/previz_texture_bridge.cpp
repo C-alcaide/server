@@ -20,6 +20,7 @@
 #include "previz_texture_bridge.h"
 
 #include "../util/device.h"
+#include "../util/gl_export_bridge.h"
 #include "../../ogl/image/previz_scene.h"
 #include "../../ogl/util/device.h"
 
@@ -51,49 +52,6 @@ namespace {
                                    << msg_info("VK call failed: " #call " = " + std::to_string(result_)));             \
         }                                                                                                              \
     } while (0)
-
-// GL_EXT_memory_object function pointers
-PFNGLCREATEMEMORYOBJECTSEXTPROC        glCreateMemoryObjectsEXT_       = nullptr;
-PFNGLDELETEMEMORYOBJECTSEXTPROC        glDeleteMemoryObjectsEXT_       = nullptr;
-PFNGLTEXTURESTORAGEMEM2DEXTPROC        glTextureStorageMem2DEXT_       = nullptr;
-
-#ifdef _WIN32
-PFNGLIMPORTMEMORYWIN32HANDLEEXTPROC    glImportMemoryWin32HandleEXT_   = nullptr;
-#else
-using PFNGLIMPORTMEMORYFDEXTPROC = void (*)(GLuint, GLuint64, GLenum, GLint);
-PFNGLIMPORTMEMORYFDEXTPROC             glImportMemoryFdEXT_            = nullptr;
-#endif
-
-std::once_flag gl_ext_flag;
-bool           gl_ext_loaded = false;
-
-void try_load_gl_extensions()
-{
-    std::call_once(gl_ext_flag, [] {
-#ifdef _WIN32
-        glCreateMemoryObjectsEXT_      = (PFNGLCREATEMEMORYOBJECTSEXTPROC)wglGetProcAddress("glCreateMemoryObjectsEXT");
-        glDeleteMemoryObjectsEXT_      = (PFNGLDELETEMEMORYOBJECTSEXTPROC)wglGetProcAddress("glDeleteMemoryObjectsEXT");
-        glImportMemoryWin32HandleEXT_  = (PFNGLIMPORTMEMORYWIN32HANDLEEXTPROC)wglGetProcAddress("glImportMemoryWin32HandleEXT");
-        glTextureStorageMem2DEXT_      = (PFNGLTEXTURESTORAGEMEM2DEXTPROC)wglGetProcAddress("glTextureStorageMem2DEXT");
-
-        gl_ext_loaded = glCreateMemoryObjectsEXT_ && glImportMemoryWin32HandleEXT_ &&
-                        glTextureStorageMem2DEXT_;
-#else
-        glCreateMemoryObjectsEXT_      = (PFNGLCREATEMEMORYOBJECTSEXTPROC)eglGetProcAddress("glCreateMemoryObjectsEXT");
-        glDeleteMemoryObjectsEXT_      = (PFNGLDELETEMEMORYOBJECTSEXTPROC)eglGetProcAddress("glDeleteMemoryObjectsEXT");
-        glImportMemoryFdEXT_           = (PFNGLIMPORTMEMORYFDEXTPROC)eglGetProcAddress("glImportMemoryFdEXT");
-        glTextureStorageMem2DEXT_      = (PFNGLTEXTURESTORAGEMEM2DEXTPROC)eglGetProcAddress("glTextureStorageMem2DEXT");
-
-        gl_ext_loaded = glCreateMemoryObjectsEXT_ && glImportMemoryFdEXT_ &&
-                        glTextureStorageMem2DEXT_;
-#endif
-
-        if (!gl_ext_loaded) {
-            CASPAR_LOG(warning) << L"[previz_bridge] GL_EXT_memory_object not available - "
-                                   L"falling back to CPU readback for previz channel textures.";
-        }
-    });
-}
 
 } // anonymous namespace
 
@@ -157,10 +115,7 @@ previz_texture_bridge::previz_texture_bridge(const spl::shared_ptr<device>&     
     });
 
     // Load GL extensions on the OGL thread
-    ogl_device_->dispatch_sync([this] {
-        try_load_gl_extensions();
-        interop_available_ = gl_ext_loaded;
-    });
+    ogl_device_->dispatch_sync([this] { interop_available_ = gl_import_supported(); });
 
     CASPAR_LOG(info) << L"[previz_bridge] Initialized ("
                      << (interop_available_ ? L"zero-copy interop" : L"CPU fallback") << L").";
@@ -172,10 +127,7 @@ previz_texture_bridge::~previz_texture_bridge()
     if (ogl_device_) {
         ogl_device_->dispatch_sync([this] {
             for (auto& [id, s] : slots_) {
-                if (s.gl_texture)
-                    glDeleteTextures(1, &s.gl_texture);
-                if (s.gl_memory_object && glDeleteMemoryObjectsEXT_)
-                    glDeleteMemoryObjectsEXT_(1, &s.gl_memory_object);
+                gl_release_imported_texture(s.gl_memory_object, s.gl_texture);
                 if (s.cpu_gl_texture)
                     glDeleteTextures(1, &s.cpu_gl_texture);
             }
@@ -287,41 +239,25 @@ void previz_texture_bridge::create_slot(channel_slot& s, int width, int height, 
     // ── GL: Import memory + create texture ───────────────────────────────
 
     if (interop_available_) {
-        while (glGetError() != GL_NO_ERROR) {}
-
-        glCreateMemoryObjectsEXT_(1, &s.gl_memory_object);
+        // Shared with the GL -> Vulkan path in gl_export_bridge rather than
+        // repeated here. Nothing used to check the result, which is how a wrong
+        // handle-type constant went unnoticed: the import failed on every frame
+        // and the only symptom was a texture that never had any content.
 #ifdef _WIN32
-        glImportMemoryWin32HandleEXT_(s.gl_memory_object,
-                                      mem_reqs.size,
-                                      platform::kGlHandleType,
-                                      s.memory_handle);
+        void* raw = s.memory_handle;
 #else
-        // glImportMemoryFdEXT consumes the fd — duplicate it first since we
-        // want to keep memory_handle valid for the slot's lifetime.
-        int import_fd = dup(s.memory_handle);
-        glImportMemoryFdEXT_(s.gl_memory_object,
-                             mem_reqs.size,
-                             platform::kGlHandleType,
-                             import_fd);
-        // fd is consumed by GL, no need to close import_fd
+        void* raw = reinterpret_cast<void*>(static_cast<intptr_t>(s.memory_handle));
 #endif
-
-        glCreateTextures(GL_TEXTURE_2D, 1, &s.gl_texture);
-        glTextureParameteri(s.gl_texture, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTextureParameteri(s.gl_texture, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        glTextureParameteri(s.gl_texture, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTextureParameteri(s.gl_texture, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-        glTextureStorageMem2DEXT_(s.gl_texture, 1,
-                                  use_16bit ? GL_RGBA16 : GL_RGBA8,
-                                  width, height, s.gl_memory_object, 0);
-
-        // Nothing here used to be checked, which is how a wrong handle-type
-        // constant went unnoticed: the import failed on every frame and the
-        // only symptom was a texture that never had any content.
-        if (GLenum err = glGetError(); err != GL_NO_ERROR) {
-            CASPAR_LOG(error) << L"[previz_bridge] GL import of the shared VK image failed (GL error 0x"
-                              << std::hex << static_cast<unsigned>(err) << std::dec
-                              << L"). Previz channel textures will be blank.";
+        auto err = gl_import_memory_as_texture(raw,
+                                               static_cast<unsigned long long>(mem_reqs.size),
+                                               use_16bit ? GL_RGBA16 : GL_RGBA8,
+                                               width,
+                                               height,
+                                               s.gl_memory_object,
+                                               s.gl_texture);
+        if (!err.empty()) {
+            CASPAR_LOG(error) << L"[previz_bridge] " << u16(err)
+                              << L" -- previz channel textures will be blank.";
         }
     } else {
         // CPU fallback: create a regular GL texture for upload
@@ -342,10 +278,7 @@ void previz_texture_bridge::create_slot(channel_slot& s, int width, int height, 
 void previz_texture_bridge::destroy_slot(channel_slot& s)
 {
     // GL cleanup (must be on OGL thread — caller responsible)
-    if (s.gl_texture)
-        glDeleteTextures(1, &s.gl_texture);
-    if (s.gl_memory_object && glDeleteMemoryObjectsEXT_)
-        glDeleteMemoryObjectsEXT_(1, &s.gl_memory_object);
+    gl_release_imported_texture(s.gl_memory_object, s.gl_texture);
     if (s.cpu_gl_texture)
         glDeleteTextures(1, &s.cpu_gl_texture);
 
