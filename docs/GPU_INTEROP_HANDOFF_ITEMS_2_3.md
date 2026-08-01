@@ -48,10 +48,11 @@ the three defects it turned out to be.
 
 **What is left of this plan.** Nothing in items 1–3. Two threads it opened and
 never closed, both now measured — see the two sections at the end of this
-document. Neither is a coding task waiting to start; one is a decision, and the
-other is a worse idea than the plan assumed.
+document. 10-bit turned out to be already implemented, and the one thing wrong
+with it was on the software side rather than in GPU-direct; it is fixed. CEF is a
+worse idea than the plan assumed, and is not worth starting.
 
-## 10-bit GPU-direct: it already works, and it is not byte-exact
+## 10-bit GPU-direct: it already worked, and what differed was the other path
 
 Nothing gated it. `d3d11_gl_bridge::setup_planes` has always mapped
 `DXGI_FORMAT_P010`/`P016` to `R16_UNORM` / `R16G16_UNORM` and declared the planes
@@ -67,36 +68,50 @@ Tested (`gpudirect/cpu_matrix.py` with the new `L_hevc_10_prog`, four layers):
 | OpenGL | 2.61 cores | 1.21 | **−53.7 %** |
 | Vulkan | 2.56 | 1.15 | **−55.0 %** |
 
+(Those are the figures as first measured. The fix below made the software column
+cheaper, so the saving is now 42 % / 51 % against a better baseline — the
+GPU-direct column did not move.)
+
 A larger saving than 8-bit's 41 % / 38 %, which stands to reason: the host
 transfer it removes is twice the size. H.264 High10 is not hardware-decoded on
 this GPU and falls back to software cleanly on both mixers, which is the right
 behaviour and worth keeping in the matrix as the negative case.
 
-**But the picture is not byte-identical to the software path**, and item 1's
-standard was that it must be. `matrix_isolated.py` reports `m_hevc_10_prog` as
-DIFFERS on *both* mixers — so this is shared 10-bit handling, not the Vulkan
-bridge. Characterised rather than guessed at:
+**The ±1 difference against the software path is fixed** (`f171f56ea`), and it
+was never GPU-direct's defect. It reported 69.637010 dB, ±1 code value on 2 % of
+pixels, identically on both mixers. GPU-direct is byte-identical to the software
+path as soon as both hand the mixer the same layout; the residual was a precision
+loss on the *software* side.
 
-| | |
-|---|---|
-| PSNR against the mixer's own software path | 69.637010 dB |
-| largest difference, any channel | **1** code value at 8-bit output |
-| pixels differing | 41 243 of 2 073 600 (2.0 %) |
-| signed mean per channel | −0.004, +0.003, −0.002 — no bias |
-| the two mixers against each other | identical to six decimals |
-| mean gradient where pixels differ / agree | 1.86 / 0.58 |
+`yuv420p10le` arrives as three planes of codes 0..1023 in 16-bit words, so it is
+declared `bit10` and the shader multiplies by a precision factor of 64. The data
+occupies only the bottom 1/64 of the texture's UNORM range, and chroma is
+upsampled by the texture unit *before* that multiply — so whatever the filter
+rounds away is amplified 64-fold. P010 carries the same codes high-aligned and
+needs no multiply. 8-bit was byte-identical all along precisely because there the
+software path already delivers `nv12`: 10-bit was the only case comparing two
+different routes through the mixer.
 
-±1 with no bias, concentrated on edges (differing pixels are three times as
-likely to sit on a gradient), and both mixers agree exactly. That is a chroma
-resampling or siting difference between the software path's three-plane
-`yuv420p10le` and GPU-direct's two-plane P010 — not a scale error, which would
-bias the mean, and not the plane extraction, which is byte-exact at 8-bit.
+Progressive 10-bit 4:2:0 now requires `p010le` at the filter sink. The picture
+matrix is 7/7 identical on both mixers, the two mixers agree at `inf` dB on every
+clip, and the software path got *cheaper* — 2.61 → 2.20 cores on OpenGL, 2.56 →
+2.32 on Vulkan — because these clips decode in hardware even with GPU-direct off,
+so converting the already-P010 surface to `yuv420p10le` every frame was the cost
+of the less accurate layout.
 
-**This is a decision, not a bug hunt.** Either accept ±1 LSB on 2 % of pixels for
-10-bit and document that the byte-identical guarantee is 8-bit only, or find the
-chroma difference first. The saving is 55 % and the error is below anything
-visible, but it is a real weakening of the standard item 1 was held to, so it
-should be chosen deliberately rather than absorbed.
+**Progressive only, and deliberately.** With `bwdif` in the graph, requiring
+`p010le` changes the chroma layout the deinterlacer works on, and the
+deinterlaced picture moves by 53.4 dB with differences up to 83 code values —
+two orders of magnitude more than the ±1 being fixed. Interlaced 4:2:0 chroma is
+delicate; `bwdif` keeps the planar layout it has always had, and interlaced
+10-bit is verified byte-identical to the pre-change build. GPU-direct declines
+interlaced content anyway, so the fast path loses nothing.
+
+Two dead ends on the way there, both plausible and both wrong. The decoders were
+suspected of disagreeing — they are bit-exact, confirmed by decoding one frame
+both ways outside the server. And the error was expected to follow chroma-sample
+parity — it does not, because chroma texel centres land *between* output pixels,
+so every pixel is interpolated and there is no parity signature.
 
 ## HTML/CEF accelerated paint: measured, and the premise is wrong
 
