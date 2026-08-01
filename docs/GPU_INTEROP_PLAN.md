@@ -78,10 +78,29 @@ through `VK_KHR_external_memory_win32`, importing the D3D11 shared handle as a
    byte-identical to software there. Keep that property.
 4. Relax the decline in `av_producer` so a Vulkan mixer is eligible.
 
-**Risks.** NV12 as two Vulkan planes needs `eG8B8R82Plane420Unorm` or two
-single-plane images; check `formatProperties` before assuming. Keyed-frame
-lifetime matters — the decoder pool is ~20 frames deep and holding imports too
-long stalls it, which is already noted for the OpenGL path.
+**Feasibility: checked, both unknowns cleared.** Queried on the reference GPU
+before any code was written, which is the only reason this item is not
+speculative:
+
+| | result |
+|---|---|
+| NV12 `eG8B8R82Plane420Unorm` sampled | **yes**, with midpoint chroma |
+| P010 `eG10X6B10X6R10X62Plane420Unorm3Pack16` sampled | **yes** — 10-bit is open later |
+| import NV12 as `eD3D11Texture` | **importable** |
+| import NV12 as `eD3D11TextureKmt` | **importable** |
+| import NV12 as `eOpaqueWin32` | **importable** |
+
+The Vulkan mixer already accepts what this produces: `core::pixel_format::nv12`
+exists and the Vulkan fragment shader has the case for it, sampling PLANE0 as Y
+and PLANE1 as interleaved CbCr. So the hand-over is the same shape the OpenGL
+path already builds -- a two-plane desc, Y at full resolution and CbCr at half --
+and no shader work is needed.
+
+**Remaining risk.** Frame lifetime: the decoder pool is ~20 frames deep and
+holding imports too long stalls it, which is already noted for the OpenGL path.
+Two per-plane image views on one imported multi-planar image need the image
+created with the plane aspects available, so `ePlane0`/`ePlane1` view creation
+is the first thing to prove in code.
 
 **Verification.** The gpu-direct matrix already exists: four codecs, software vs
 GPU-direct, CPU and tick, plus a picture comparison against the software path on
