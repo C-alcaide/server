@@ -497,6 +497,16 @@ this work:
   that makes the path kernel-free. Ask for `-pix_fmt p010le` and you get 10-bit
   via the host path.
 - GPU-direct **decode** is OpenGL-only and progressive-only.
+- **`[ISF]` shaders cost more on the Vulkan mixer** — 20 % more CPU at one layer,
+  79 % at four. OpenGL hands the mixer the rendered texture; every other mixer
+  renders on a self-contained GL context and reads the result back through host
+  memory. The picture is identical either way. Before 2026-08-01 an ISF layer
+  also took the server down on `CLEAR` under Vulkan.
+- **Spout into a Vulkan channel lost the alpha** before 2026-08-01. A Spout frame
+  arrives as a key plus a picture, and the Vulkan mixer was BGRA-swizzling the
+  key pass, which put the key in the wrong channel and multiplied the alpha to
+  zero. It affected any keyed composite on that mixer where the key came from a
+  separate item, not only Spout.
 - **Hue rotated the wrong way on OpenGL before 2026-07-30.** `MIXER HUECURVE`
   and `MIXER HUESHIFT` delivered the negation of what you asked for: +0.25 came
   out as −0.25, and only 0.0 and 0.5 looked right, being their own negations.
