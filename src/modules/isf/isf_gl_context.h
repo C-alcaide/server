@@ -27,6 +27,16 @@ class gl_context
 
     bool make_current();
 
+    /// Detach the context from the calling thread.
+    ///
+    /// An SFML context belongs to whichever thread it is active on, and this one
+    /// is created and used on the channel thread but destroyed on the producer
+    /// destroyer pool. Left active, that destruction happens from a thread that
+    /// does not own it -- SFML reports "Failed to activate OpenGL context: the
+    /// requested resource is already in use" and the server does not survive it.
+    /// Releasing after each render leaves nothing owned across threads.
+    void release();
+
   private:
     struct impl;
     std::unique_ptr<impl> impl_;

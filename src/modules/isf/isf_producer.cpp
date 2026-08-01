@@ -289,7 +289,14 @@ class isf_producer : public core::frame_producer
         }
         if (!gl_ctx_)
             return core::draw_frame::empty();
-        if (!shader_->render_readback(*gl_ctx_, w, h, time, time_delta, frame_index, images, readback_))
+        const bool rendered =
+            shader_->render_readback(*gl_ctx_, w, h, time, time_delta, frame_index, images, readback_);
+        // Hand the context back before returning, on every path. It is created
+        // and used here on the channel thread but destroyed on the producer
+        // destroyer pool, and an SFML context left active on one thread cannot
+        // be destroyed from another. See gl_context::release.
+        gl_ctx_->release();
+        if (!rendered)
             return core::draw_frame::empty();
         shader_->reset_events();
 

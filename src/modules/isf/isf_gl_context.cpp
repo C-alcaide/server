@@ -48,4 +48,6 @@ gl_context::~gl_context() = default;
 
 bool gl_context::make_current() { return impl_->context.setActive(true); }
 
+void gl_context::release() { impl_->context.setActive(false); }
+
 }} // namespace caspar::isf
