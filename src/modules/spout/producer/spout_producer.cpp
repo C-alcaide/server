@@ -47,6 +47,7 @@
 #include <thread>
 #include <vector>
 #include <cstring>
+#include <cstdlib>
 #include <iostream>
 #include <condition_variable>
 
@@ -238,8 +239,14 @@ struct spout_producer : public core::frame_producer
         // context and the readback path below.
         void* shared_hglrc = nullptr;
         void* shared_hdc   = nullptr;
+        // CASPAR_SPOUT_FORCE_READBACK exists to compare the two receive paths on
+        // one mixer. Without it the zero-copy path is taken whenever it can be,
+        // so the readback path is only ever seen on a non-OpenGL mixer and any
+        // difference between them is confounded with the mixer.
+        const bool force_readback = std::getenv("CASPAR_SPOUT_FORCE_READBACK") != nullptr;
         const bool zero_copy =
-            ogl_device_ && create_shared_context(ogl_device_, shared_hglrc, shared_hdc) &&
+            !force_readback && ogl_device_ &&
+            create_shared_context(ogl_device_, shared_hglrc, shared_hdc) &&
             wglMakeCurrent(reinterpret_cast<HDC>(shared_hdc), reinterpret_cast<HGLRC>(shared_hglrc));
 
         std::unique_ptr<gl_context> context;
