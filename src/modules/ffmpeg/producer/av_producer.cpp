@@ -1306,6 +1306,28 @@ class Decoder
                                         output.pop();
                                 }
                                 output_cond.notify_all();
+#ifdef _WIN32
+                                // The same, for the GPU-direct queue. It was left
+                                // alone here, so a seek emptied the software frames
+                                // and kept the hardware ones -- and every seek that
+                                // matters is a loop point.
+                                //
+                                // What that looked like: with LOOP, playback reached
+                                // the end and stopped dead, the position frozen a few
+                                // frames short and the log repeating "Waiting for
+                                // video frame...". The reader was being handed
+                                // pre-seek surfaces whose timestamps sit past the
+                                // point just seeked to, so it never accepted one and
+                                // the position never moved again. On both mixers, and
+                                // it also pinned decoder pool surfaces that the
+                                // decoder needed back.
+                                {
+                                    boost::lock_guard<boost::mutex> hw_lock(hw_output_mutex);
+                                    while (!hw_output.empty())
+                                        hw_output.pop();
+                                }
+                                hw_output_cond.notify_all();
+#endif
                                 // Drop anything flush() cleared and a producer pushed back
                                 // in before flush_requested_ was observed; those packets
                                 // pre-date the seek.
@@ -1615,6 +1637,22 @@ class Decoder
     }
 
 #ifdef _WIN32
+    /// Whether the decoder has reached end of file.
+    ///
+    /// Public alongside pop_hw() because the GPU-direct reader needs both: the
+    /// frames, and the fact that there will be no more. On the software path
+    /// that second fact travels as a sentinel through the filter graph, which
+    /// GPU-direct frames do not enter.
+    bool at_eof() const { return eof.load(); }
+
+    /// Whether a flush has been asked for but not yet carried out.
+    ///
+    /// The flush happens on the decode thread, so between a seek being requested
+    /// and that thread acting on it the decoder still reports the end of file it
+    /// reached before the seek. A reader that acts on eof during that window
+    /// seeks again, and again.
+    bool flush_pending() const { return flush_requested_.load(); }
+
     std::shared_ptr<AVFrame> pop_hw()
     {
         std::shared_ptr<AVFrame> frame;
@@ -2705,6 +2743,41 @@ struct AVProducer::Impl
                                 if (hw_frame) {
                                     video_filter_.frame = std::move(hw_frame);
                                     progress            = true;
+                                } else {
+                                    // Carry the decoder's end-of-file across to the
+                                    // filter's flag, because nothing else will.
+                                    //
+                                    // On the software path the decoder marks EOF by
+                                    // pushing a sentinel into `output`, and the video
+                                    // filter reads it and raises video_filter_.eof.
+                                    // GPU-direct frames bypass the filter graph
+                                    // entirely, so that sentinel is never read and the
+                                    // flag stayed false for ever.
+                                    //
+                                    // buffer_eof_ is computed from it, and the loop
+                                    // wrap is gated on buffer_eof_. So a looping clip
+                                    // played with gpu-direct-decode ran to a few
+                                    // frames short of the end and stopped dead --
+                                    // position frozen, "Waiting for video frame..."
+                                    // repeating, nothing decoded again. On both
+                                    // mixers. An explicit SEEK moved it and it then
+                                    // froze at the new position, which is what
+                                    // separated this from a stale-queue problem.
+                                    // Mirrored from the decoder every time, never
+                                    // latched. Setting it once and leaving it made the
+                                    // clip wrap and then sit at 0.00 for ever: the
+                                    // wrap resets the decoder's eof, but a latched
+                                    // flag still said end-of-file, so nothing was
+                                    // decoded after the first loop.
+                                    // ...and not while a flush is outstanding. A
+                                    // loop wrap requests the seek and returns; the
+                                    // decode thread performs it later. In that window
+                                    // the decoder still reports the end of file it had
+                                    // already reached, so acting on it here asked for
+                                    // the wrap again -- the clip reached 0.00 and sat
+                                    // there, re-seeking to the start for ever instead
+                                    // of playing from it.
+                                    video_filter_.eof = it->second.at_eof() && !it->second.flush_pending();
                                 }
                             }
                         }
