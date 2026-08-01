@@ -7,6 +7,7 @@
 #include "../util/av_color.h"
 #include "../util/av_util.h"
 
+#include <boost/algorithm/string.hpp>
 #include <boost/exception/exception.hpp>
 #include <boost/format.hpp>
 #include <boost/property_tree/ptree.hpp>
@@ -960,6 +961,182 @@ AVPixelFormat get_pix_fmt_with_alpha(AVPixelFormat fmt)
     return fmt;
 }
 
+/// What the decode adapter can do with AV1, as reported by D3D11 itself.
+enum class av1_hw_support
+{
+    none,   ///< no AV1 decoder on this adapter
+    main8,  ///< AV1 Profile 0, 8-bit only
+    main10, ///< AV1 Profile 0, 8- and 10-bit
+};
+
+#ifdef _WIN32
+/// Ask the adapter the decoder will actually use whether it decodes AV1.
+///
+/// This has to be asked, not assumed, because FFmpeg's native `av1` decoder has
+/// NO software path -- it is hwaccel-only, and on an adapter without an AV1
+/// engine it does not degrade, it fails outright:
+///
+///     Your platform doesn't support hardware accelerated AV1 decoding.
+///     Error submitting packet to decoder: Function not implemented
+///
+/// which for a playout server is a black channel. CheckVideoDecoderFormat is a
+/// static query -- no decoding, no packets -- and it is the same question the
+/// decoder will ask later, put to the same adapter.
+///
+/// Cached: one D3D11 device creation per process, not per file.
+av1_hw_support probe_av1_hw_decode()
+{
+    static const av1_hw_support value = [] {
+        AVBufferRef* hw_ctx = nullptr;
+        if (av_hwdevice_ctx_create(&hw_ctx, AV_HWDEVICE_TYPE_D3D11VA, nullptr, nullptr, 0) != 0 || !hw_ctx) {
+            CASPAR_LOG(info) << L"[av_producer] AV1 probe: no D3D11VA device; AV1 will decode in software";
+            return av1_hw_support::none;
+        }
+
+        auto unref = [&] { av_buffer_unref(&hw_ctx); };
+
+        auto* hwctx  = reinterpret_cast<AVHWDeviceContext*>(hw_ctx->data);
+        auto* d3dctx = static_cast<AVD3D11VADeviceContext*>(hwctx->hwctx);
+        if (!d3dctx || !d3dctx->device) {
+            unref();
+            return av1_hw_support::none;
+        }
+
+        ID3D11VideoDevice* video_device = nullptr;
+        if (FAILED(d3dctx->device->QueryInterface(__uuidof(ID3D11VideoDevice),
+                                                  reinterpret_cast<void**>(&video_device))) ||
+            !video_device) {
+            CASPAR_LOG(info) << L"[av_producer] AV1 probe: adapter exposes no ID3D11VideoDevice";
+            unref();
+            return av1_hw_support::none;
+        }
+
+        // Name the adapter. On a multi-GPU box the decoder takes DXGI adapter 0,
+        // which need not be the card anyone expects, and "AV1 decodes in
+        // software" is otherwise indistinguishable from "wrong card".
+        std::wstring adapter_name = L"<unknown>";
+        {
+            IDXGIDevice*  dxgi_device  = nullptr;
+            IDXGIAdapter* dxgi_adapter = nullptr;
+            if (SUCCEEDED(d3dctx->device->QueryInterface(__uuidof(IDXGIDevice),
+                                                         reinterpret_cast<void**>(&dxgi_device))) &&
+                dxgi_device) {
+                if (SUCCEEDED(dxgi_device->GetAdapter(&dxgi_adapter)) && dxgi_adapter) {
+                    DXGI_ADAPTER_DESC desc = {};
+                    if (SUCCEEDED(dxgi_adapter->GetDesc(&desc)))
+                        adapter_name = desc.Description;
+                    dxgi_adapter->Release();
+                }
+                dxgi_device->Release();
+            }
+        }
+
+        const auto supports = [&](DXGI_FORMAT fmt) {
+            BOOL ok = FALSE;
+            return SUCCEEDED(video_device->CheckVideoDecoderFormat(&D3D11_DECODER_PROFILE_AV1_VLD_PROFILE0, fmt, &ok)) &&
+                   ok;
+        };
+
+        // Profile 0 is 4:2:0 8- or 10-bit by specification; NV12 and P010 are the
+        // two surface formats that can carry it.
+        const bool nv12 = supports(DXGI_FORMAT_NV12);
+        const bool p010 = supports(DXGI_FORMAT_P010);
+
+        video_device->Release();
+        unref();
+
+        const auto result = p010 ? av1_hw_support::main10 : (nv12 ? av1_hw_support::main8 : av1_hw_support::none);
+
+        CASPAR_LOG(info) << L"[av_producer] AV1 hardware decode on \"" << adapter_name << L"\": "
+                         << (result == av1_hw_support::main10  ? L"Profile 0, 8- and 10-bit"
+                             : result == av1_hw_support::main8 ? L"Profile 0, 8-bit only"
+                                                               : L"not supported");
+        return result;
+    }();
+    return value;
+}
+#else
+av1_hw_support probe_av1_hw_decode() { return av1_hw_support::none; }
+#endif
+
+/// configuration.ffmpeg.producer.av1-decoder: auto | hardware | software.
+/// `hardware` bypasses the capability gate -- see the warning where it is used.
+std::wstring av1_decoder_mode()
+{
+    static const std::wstring value = [] {
+        auto v = env::properties().get<std::wstring>(L"configuration.ffmpeg.producer.av1-decoder", L"auto");
+        boost::to_lower(v);
+        if (v != L"auto" && v != L"hardware" && v != L"software") {
+            CASPAR_LOG(warning) << L"[av_producer] unknown av1-decoder value \"" << v << L"\"; using auto";
+            return std::wstring(L"auto");
+        }
+        return v;
+    }();
+    return value;
+}
+
+/// Which AV1 decoder to open, and why. Split out so the reason can be logged
+/// once per file rather than inferred from a black picture.
+const AVCodec* choose_av1_decoder(const AVStream* stream, std::wstring& reason)
+{
+    const auto* software = avcodec_find_decoder_by_name("libdav1d");
+    const auto* hardware = avcodec_find_decoder_by_name("av1");
+
+    // NOTE: avcodec_find_decoder(AV_CODEC_ID_AV1) resolves to libdav1d, which
+    // advertises no hwaccel at all. That is why AV1 never reached D3D11VA and
+    // why the hardware decoder has to be asked for by name.
+    if (!hardware) {
+        reason = L"the native av1 decoder is not in this build";
+        return software;
+    }
+    if (!software) {
+        // Nothing to fall back to; the gate below would be meaningless.
+        reason = L"libdav1d is not in this build";
+        return hardware;
+    }
+
+    const auto mode = av1_decoder_mode();
+    if (mode == L"software") {
+        reason = L"av1-decoder=software";
+        return software;
+    }
+    if (mode == L"hardware") {
+        reason = L"av1-decoder=hardware (capability gate bypassed; unsupported streams will fail to decode)";
+        return hardware;
+    }
+
+    if (!stream || !stream->codecpar) {
+        reason = L"no stream parameters to check";
+        return software;
+    }
+
+    // Profile 0 (Main) is 4:2:0 8/10-bit. Profile 1 is 4:4:4 and Profile 2 is
+    // 4:2:2/12-bit, neither of which NVDEC or DXVA decode -- and the native
+    // decoder cannot fall back to software for them. Gate on the profile rather
+    // than the pixel format: the profile is in the container, whereas
+    // codecpar->format can still be NONE before the first frame.
+    if (stream->codecpar->profile != AV_PROFILE_AV1_MAIN) {
+        reason = L"stream is not AV1 Profile 0 (4:4:4 and 12-bit have no hardware decoder)";
+        return software;
+    }
+
+    const bool needs_10bit = stream->codecpar->format == AV_PIX_FMT_YUV420P10LE ||
+                             stream->codecpar->bits_per_raw_sample > 8;
+
+    const auto support = probe_av1_hw_decode();
+    if (support == av1_hw_support::none) {
+        reason = L"this GPU has no AV1 decoder";
+        return software;
+    }
+    if (needs_10bit && support != av1_hw_support::main10) {
+        reason = L"this GPU decodes AV1 at 8-bit only and the stream is 10-bit";
+        return software;
+    }
+
+    reason.clear();
+    return hardware;
+}
+
 const AVCodec* get_decoder(AVCodecID codec_id, const AVStream* stream)
 {
     // libvpx is the only VP8/VP9 decoder that reads the alpha channel out of a
@@ -987,6 +1164,25 @@ const AVCodec* get_decoder(AVCodecID codec_id, const AVStream* stream)
             result = avcodec_find_decoder_by_name("libvpx");
         if (result != nullptr)
             return result;
+    }
+
+    // AV1 has the same shape of problem as VP9 did, with a sharper edge:
+    // avcodec_find_decoder resolves to libdav1d, which is software-only, so the
+    // hardware engine went unused and GPU-direct declined every AV1 clip with
+    // "decoder is not using D3D11VA". Unlike VP9 the native decoder has no
+    // software path to fall back to, so the choice is gated rather than simply
+    // reversed. See choose_av1_decoder.
+    if (codec_id == AV_CODEC_ID_AV1) {
+        std::wstring reason;
+        const auto*  chosen = choose_av1_decoder(stream, reason);
+        if (chosen != nullptr) {
+            if (reason.empty()) {
+                CASPAR_LOG(info) << L"[av_producer] AV1: using the hardware decoder";
+            } else {
+                CASPAR_LOG(info) << L"[av_producer] AV1: using " << u16(chosen->name) << L" -- " << reason;
+            }
+            return chosen;
+        }
     }
 
     return avcodec_find_decoder(codec_id);

@@ -49,6 +49,9 @@ if (MSVC)
 		opengl32
 		# D3DCompile, for the NV12 plane-extraction shaders in that path
 		d3dcompiler
+		# Definitions of the D3D11 decoder-profile GUIDs (d3d11.h only declares
+		# them), used to ask the adapter whether it decodes AV1.
+		dxguid
 	)
 
 	# CUDA runtime only -- no kernels, so no CUDA language and no nvcc. The
