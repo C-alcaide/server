@@ -47,17 +47,105 @@ clip no longer has a stalling producer behind it. `GPUDIRECT_SEEK_STALL.md` has
 the three defects it turned out to be.
 
 **What is left of this plan.** Nothing in items 1–3. Two threads it opened and
-never closed:
+never closed, both now measured — see the two sections at the end of this
+document. Neither is a coding task waiting to start; one is a decision, and the
+other is a worse idea than the plan assumed.
 
-- **HTML/CEF**, the fourth row of the plan's table, which was never turned into a
-  numbered item. Both mixers still take CPU `OnPaint`, and it is still "not
-  measured" — measure before designing anything. Item 1 built the D3D11 → Vulkan
-  bridge that accelerated paint would need, so the mechanism is no longer the
-  obstacle.
-- **10-bit GPU-direct.** P010 sampling was confirmed on the GPU but P010/P016
-  were never run end to end; item 1 shipped 8-bit NV12 only. The two
-  single-plane imports make the multi-planar layout disagreement irrelevant
-  here, so this is expected to be small, which is not the same as tested.
+## 10-bit GPU-direct: it already works, and it is not byte-exact
+
+Nothing gated it. `d3d11_gl_bridge::setup_planes` has always mapped
+`DXGI_FORMAT_P010`/`P016` to `R16_UNORM` / `R16G16_UNORM` and declared the planes
+`bit16`, which is correct because P010's significant bits are high-aligned and so
+already normalise — `precision_factor` 64 is for *low*-aligned 10-bit, which is
+what the software path carries. There is no 10-bit condition anywhere in the
+decline logic either. It was untested, not unimplemented.
+
+Tested (`gpudirect/cpu_matrix.py` with the new `L_hevc_10_prog`, four layers):
+
+| | software | GPU-direct | |
+|---|---|---|---|
+| OpenGL | 2.61 cores | 1.21 | **−53.7 %** |
+| Vulkan | 2.56 | 1.15 | **−55.0 %** |
+
+A larger saving than 8-bit's 41 % / 38 %, which stands to reason: the host
+transfer it removes is twice the size. H.264 High10 is not hardware-decoded on
+this GPU and falls back to software cleanly on both mixers, which is the right
+behaviour and worth keeping in the matrix as the negative case.
+
+**But the picture is not byte-identical to the software path**, and item 1's
+standard was that it must be. `matrix_isolated.py` reports `m_hevc_10_prog` as
+DIFFERS on *both* mixers — so this is shared 10-bit handling, not the Vulkan
+bridge. Characterised rather than guessed at:
+
+| | |
+|---|---|
+| PSNR against the mixer's own software path | 69.637010 dB |
+| largest difference, any channel | **1** code value at 8-bit output |
+| pixels differing | 41 243 of 2 073 600 (2.0 %) |
+| signed mean per channel | −0.004, +0.003, −0.002 — no bias |
+| the two mixers against each other | identical to six decimals |
+| mean gradient where pixels differ / agree | 1.86 / 0.58 |
+
+±1 with no bias, concentrated on edges (differing pixels are three times as
+likely to sit on a gradient), and both mixers agree exactly. That is a chroma
+resampling or siting difference between the software path's three-plane
+`yuv420p10le` and GPU-direct's two-plane P010 — not a scale error, which would
+bias the mean, and not the plane extraction, which is byte-exact at 8-bit.
+
+**This is a decision, not a bug hunt.** Either accept ±1 LSB on 2 % of pixels for
+10-bit and document that the byte-identical guarantee is 8-bit only, or find the
+chroma difference first. The saving is 55 % and the error is below anything
+visible, but it is a real weakening of the standard item 1 was held to, so it
+should be chosen deliberately rather than absorbed.
+
+## HTML/CEF accelerated paint: measured, and the premise is wrong
+
+The plan's table says HTML is CPU `OnPaint` on both mixers, cost "not measured",
+and item 1 notes its D3D11 → Vulkan bridge would later unlock accelerated paint.
+The mechanism is indeed there — CEF 142's `OnAcceleratedPaint` hands over a
+shared D3D11 texture handle, and item 1 built the import for exactly that. The
+mechanism is not the obstacle. The configuration is.
+
+`OnAcceleratedPaint` is only reached when `CefWindowInfo::shared_texture_enabled`
+is set, which needs CEF's GPU compositor. CasparCG launches CEF with
+`--disable-gpu --disable-gpu-compositing` by default —
+`configuration.html.enable-gpu` is false, with a comment that a single 1080p
+producer cannot run smoothly otherwise. So the first question is not what the
+bridge saves but what turning GPU compositing on costs. Measured
+(`vkdispatch/html_gpu.py`, animated 1080p page):
+
+| mixer | CEF GPU | 1 layer | 4 layers | per extra layer |
+|---|---|---|---|---|
+| OpenGL | off | 1.41 cores | 2.24 | +0.274 |
+| OpenGL | on | 1.54 | 2.66 | +0.372 |
+| Vulkan | off | 1.38 | 2.15 | +0.254 |
+| Vulkan | on | 1.54 | 2.81 | **+0.422** |
+
+Enabling it costs **more**, by +0.10 cores per layer on OpenGL and +0.17 on
+Vulkan — 66 % more per layer on the mixer that would benefit. `inf` dB either
+way, so it renders the same page; this is overhead, not a different picture.
+
+That is the bar accelerated paint has to clear before it wins anything, and what
+it removes is one host-to-host BGRA memcpy per frame per layer. For scale, ISF's
+full GPU → host → GPU round trip measured +0.230 cores per layer and a memcpy is
+a fraction of that. **On these numbers accelerated paint plausibly loses**, and
+nothing should be built until that is settled.
+
+Two constraints for whoever does take it on, both from the CEF header rather than
+from reasoning: the shared texture is "released to the underlying pool for reuse
+when the callback returns from client code", so it must be copied into a pooled
+texture *inside* `OnAcceleratedPaint` — the same shape as
+`d3d11_import_bridge::copy_planes`, and for the same reason. And it is
+"instantiated without a keyed mutex", so synchronisation is entirely the caller's
+problem.
+
+One trap already paid for: CEF paints on damage, so a **static** page reaches
+`OnPaint` about twice and then never again. The first version of this measurement
+used one and reported +0.003 cores per layer, a confident-looking figure for four
+idle producers. The producer also resolves a bare name against the *template*
+folder without the extension — pass a filename and CEF tries it as a hostname,
+logs `ERR_NAME_NOT_RESOLVED`, and renders nothing. `html_gpu.py` now fails loudly
+on both.
 
 ## What item 1 changed under item 2's feet
 
