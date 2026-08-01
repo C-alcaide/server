@@ -9,10 +9,16 @@ GPU→host→GPU round trip per frame to reach the same place:
 
 | path | on OpenGL | on Vulkan | measured cost of the gap |
 |---|---|---|---|
-| GPU-direct decode | works | **declines outright** | 43 % more CPU on H.264/HEVC/VP9 at four layers |
-| ISF | zero-copy texture | readback | +0.230 cores per layer, ≈9.2 ms per layer per frame |
-| Spout producer | zero-copy texture | readback | 7.02 → 4.43 cores measured on OpenGL; Vulkan still pays the 7.02 |
+| ~~GPU-direct decode~~ | works | **works** (item 1, `489b02fbc`) | was 43 % more CPU at four layers |
+| ~~ISF~~ | zero-copy texture | **zero-copy texture** (item 2a, `b1f591025`) | was +0.230 cores per layer; now +0.019 |
+| ~~Spout producer~~ | zero-copy texture | **zero-copy texture** (item 2a, `9193ea300`) | was 6.33 cores on Vulkan; now 4.39 |
 | HTML/CEF | CPU `OnPaint` | CPU `OnPaint` | not measured |
+
+**Items 1 and 2 are done and item 3 is closed as not worth doing.** The current
+figures, the corrections to the baselines below, and the reasoning for closing
+item 3 are in `GPU_INTEROP_HANDOFF_ITEMS_2_3.md`; this document is kept for the
+design and the mechanism survey. HTML/CEF is the only line left, and it wants
+item 1's D3D11 → Vulkan bridge rather than anything here.
 
 The first line is the one that should drive the ordering. GPU-direct decode is
 not merely slower on Vulkan, it is **unavailable** — the producer logs *"mixer
@@ -45,12 +51,20 @@ to prefer one mechanism over the other; correctness, reuse and portability are.
 |---|---|---|---|
 | CUDA ↔ VK | yes, `CudaVkTexture` | ProRes, NotchLC, OFX, remotewall | aliasing; timeline semaphores already exported from `texture_wrapper.h` |
 | GL → CUDA | yes, `cuda_gl_uploader` | ffmpeg NVENC recording | `cudaGraphicsGLRegisterImage` |
-| VK → GL | yes, `previz_texture_bridge` | previz | `GL_EXT_memory_object_win32`, the import half is reusable |
+| VK → GL | yes, `gl_export_bridge` | ISF, Spout, previz | `GL_EXT_memory_object_win32` |
 | **GL → VK** | **no** | — | wanted by ISF and Spout |
-| **D3D11 → VK** | **no** | — | wanted by GPU-direct decode and HTML |
+| D3D11 → VK | yes, `d3d11_import_bridge` | GPU-direct decode | `VK_KHR_external_memory_win32` (item 1) |
 | D3D11 → GL | yes, in `av_producer` | GPU-direct decode | `WGL_NV_DX_interop2` |
 
 Only two are missing, and each serves more than one caller.
+
+**Both have since been built.** D3D11 → VK is `d3d11_import_bridge` (item 1).
+GL → VK turned out not to be the right shape at all: rather than moving a GL
+render into Vulkan, Vulkan allocates and exports and GL renders into that, so
+what exists is a VK → GL memory export — `gl_export_bridge`, which also replaced
+`previz_texture_bridge`'s copy of the same code. The "VK → GL: yes" row above was
+also wrong when written: the mechanism was there but the handle-type constant was
+not a handle type, so no import had ever succeeded (`edf668551`).
 
 ---
 
@@ -160,6 +174,21 @@ match its own software path to the same standard before this is considered done.
 
 ## Item 2 — GL → Vulkan
 
+**Done, route 2a, both callers** (`b1f591025`, `9193ea300`). 2b was not needed.
+Four things this section got wrong, kept because each was a real mistake:
+
+1. The import half did not "already exist" in a working state — the handle-type
+   constant was `GL_DEVICE_LUID_EXT` and no import had ever succeeded
+   (`edf668551`). A mechanism nobody checks the error code of is not a mechanism.
+2. `eOptimal` tiling is mandatory. GL rejects Vulkan `eLinear` memory as "memory
+   object too small", so previz's Pascal `eLinear` workaround cannot use this path.
+3. `eGeneral` was not needed. The mixer already handles exportable images written
+   by another API — that is what the CUDA producers do — and no explicit layout
+   transition was added.
+4. `glFinish` was the right call, and now for a measured reason: 0.053 ms per
+   frame against the ≈9.2 ms per layer it replaces. `GL_EXT_semaphore` stays
+   deferred on evidence.
+
 **Unlocks:** ISF, and the Spout producer's zero-copy receive on Vulkan.
 
 Two routes. Prefer the direct one.
@@ -201,6 +230,13 @@ sender/receiver combinations, currently 19.226120 dB on all four.
 
 ## Item 3 — Share one GL context across ISF producers
 
+**Closed as not worth doing.** With item 2 in, per-producer contexts cost about
+0.002 cores per layer — Vulkan's +0.016 against OpenGL's +0.014 at eight layers,
+where OpenGL creates no such context at all. The readback was hiding the fact
+that there was nothing there. Reasoning and figures in
+`GPU_INTEROP_HANDOFF_ITEMS_2_3.md`.
+
+
 **Unlocks:** less context switching when several ISF layers run at once.
 
 Each ISF producer creates its own SFML context today, so four layers mean four
@@ -220,12 +256,14 @@ context across producers puts the same question back on the table.
 
 ## Ordering
 
-1. **Item 1**, D3D11 → Vulkan. It is the only one that turns something off into
-   something on, and 43 % on every hardware-decoded clip is the largest number
-   on the page.
-2. **Item 2a**, GL → Vulkan direct, serving ISF and Spout together. Fall back to
-   2b if the driver argues.
-3. **Item 3**, shared ISF context, once item 2 has settled what ISF still needs.
+1. ~~**Item 1**, D3D11 → Vulkan.~~ Done, `489b02fbc`.
+2. ~~**Item 2a**, GL → Vulkan direct, serving ISF and Spout together.~~ Done,
+   `b1f591025` and `9193ea300`. 2b never became necessary.
+3. ~~**Item 3**, shared ISF context.~~ Closed: item 2 removed the reason for it,
+   which is why it was scheduled last.
+
+The ordering held up. Putting item 3 last is what turned it from work into a
+measurement.
 
 ## Ground rules
 

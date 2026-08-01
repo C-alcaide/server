@@ -13,8 +13,33 @@ Read the plan first. Do not re-derive it from here.
 OpenGL's GPU-direct output on all seven clips, with the OpenGL path proved
 untouched by hashing captures against HEAD.
 
-**Items 2 and 3 are not started.** Item 2 is GL → Vulkan, serving both ISF and
-the Spout producer. Item 3 is a shared GL context across ISF producers.
+**Item 2 is done, route 2a, both callers.** ISF (`b1f591025`) and the Spout
+producer (`9193ea300`) now render and receive straight into Vulkan memory. The
+figures are in the table below and in those commit messages. Route 2b, via CUDA,
+was not needed.
+
+**Item 3 is measured and not worth doing.** See the section below. The plan
+guessed item 2 might delete most of it; it deleted effectively all of it.
+
+Two things found on the way that are worth knowing before reading anything else
+here:
+
+- **`kGlHandleType` was `GL_DEVICE_LUID_EXT`** (`edf668551`). The constant every
+  VK → GL import passed to the driver was `0x9462`, which is not a handle type;
+  `GL_EXT_memory_object` defines `0x9587` on Windows and `0x9586` on Linux. No
+  call site checked `glGetError`, so every import had been failing silently —
+  previz's channel textures and the `vulkan_output` consumer's shared slots
+  both. This is what "the import half already exists in
+  `previz_texture_bridge`" actually meant, and it is why the item 2a probe
+  failed at first with previz's own settings.
+- **The mixers disagree about the byte order of a texture-backed `bgra` frame,**
+  and each is self-consistent. OpenGL wants RGBA bytes in the texture, because
+  its own CPU upload path reorders through `GL_BGRA` and the two paths must
+  agree on the result. Vulkan wants BGRA bytes, because its upload is a verbatim
+  copy. Get this wrong and red and blue exchange, silently, on the fast path
+  only. ISF writes BGRA and stays labelled `bgra`; Spout cannot swizzle what
+  the SDK writes, so it labels the frame `rgba` instead and the mixer's
+  swizzle stays out of the way.
 
 **One known defect is open and separate**: GPU-direct decode does not resume
 after a seek, which is why looping stalls. It has its own hand-off,
@@ -68,46 +93,71 @@ right order, but **measure what `glFinish` costs** rather than assuming it is
 free. If it is large, that measurement is the argument for the semaphore, and it
 belongs in the commit message either way.
 
-## Baselines to beat, and to not break
+## What item 2 achieved
 
-Measured on the reference rig, on the current build.
+Both harnesses now run the slow path as an explicit column rather than trusting
+that it still works: `CASPAR_ISF_FORCE_READBACK` and `CASPAR_SPOUT_FORCE_READBACK`.
 
-**ISF** (`isftest.fs`, deterministic, so the mixers must stay byte-identical):
+**ISF** — `vkdispatch/isf_matrix.py`, `isftest.fs`, NDI consumer attached:
 
 | | 1 layer | 4 layers | per extra layer |
 |---|---|---|---|
-| OpenGL | 1.19 cores | 1.19 | +0.000 |
-| Vulkan | 1.37 | 2.06 | **+0.230** |
+| OpenGL | 1.18 cores | 1.21 | +0.008 |
+| Vulkan, zero-copy | 1.16 | 1.22 | **+0.019** |
+| Vulkan, readback (before) | 1.35 | 2.08 | +0.242 |
 
-That +0.230 — about 9.2 ms per layer per frame — is the target. OpenGL's +0.000
-is what success looks like. Picture is `inf` dB between mixers today and must
-stay so.
++0.242 → +0.019, against OpenGL's +0.008. The readback row reproduces the
+1.37 / 2.06 / +0.230 this document used to record, which is how the new harness
+was checked rather than merely believed. `inf` dB against OpenGL on both paths.
 
-**Spout** (loopback, two instances, still source):
+**Spout** — `vkdispatch/spout_loop.py`, still source, OpenGL sender throughout
+so only the receiver varies:
 
-| | |
-|---|---|
-| OpenGL receiver, readback | 7.02 cores |
-| OpenGL receiver, zero-copy | 4.43 |
-| picture, all four sender/receiver combinations | 19.226120 dB |
+| receiver | path | CPU |
+|---|---|---|
+| OpenGL | zero-copy | 4.44 cores |
+| OpenGL | readback | 6.44 |
+| Vulkan | zero-copy | **4.39** |
+| Vulkan | readback (before) | 6.33 |
 
-Vulkan receivers still pay the 7.02. All four combinations currently agree to six
-decimals; that must survive.
+19.226120 dB on all four, the figure this document already recorded.
 
-## Item 3, and why it is last
+**Correction to the old baselines.** The readback receiver is recorded above as
+7.02 cores and measures 6.4 on the current build. The gap and its ordering hold;
+the absolute 7.02 does not, and should not be quoted as current. Also, the Spout
+*consumer* reports no GPU texture path in every one of these runs, so the sender
+side is on its own readback throughout — identical across the comparison, but it
+means none of the sender figures measure anything that improved.
+
+## Item 3: measured, and the recommendation is to drop it
 
 Each ISF producer creates its own SFML context, so four layers mean four contexts
-and four `setActive` pairs per frame. Sharing one, guarded by the mutex that
-already serialises rendering, removes that.
+and four `setActive` pairs per frame. Item 3 was to share one, guarded by the
+mutex that already serialises rendering.
 
-It is deliberately last because item 2 may delete most of it — if ISF stops
-rendering on its own GL context under Vulkan, there is less to share. Doing it
-first risks work that item 2 throws away.
+It was left last because item 2 might delete most of it. It did. What is left to
+win is now bounded by measurement rather than estimated — `isf_matrix.py 1,8`:
 
-When it is done, re-run the three play-and-clear cycles as well as the CPU
-figures. The context-lifetime crash fixed in `bc357e7d1` lived in exactly this
-area, and sharing a context between producers puts the same question — who owns
-it, and on which thread is it destroyed — straight back on the table.
+| mixer | 1 layer | 8 layers | per extra layer |
+|---|---|---|---|
+| OpenGL | 1.17 cores | 1.27 | +0.014 |
+| Vulkan | 1.16 | 1.27 | +0.016 |
+
+The OpenGL path creates no SFML context at all, so the difference between the two
+rows is an upper bound on what per-producer contexts cost: **about 0.002 cores
+per layer**, roughly 0.08 ms per layer per frame, and 0.016 cores across eight
+layers. Before item 2 the Vulkan row was +0.230 and a context per producer was a
+plausible contributor; the readback was hiding it, and with the readback gone
+there is nothing there.
+
+Against that, sharing one context across producers puts back exactly the question
+`bc357e7d1` was a crash about — who owns the context, and on which thread is it
+destroyed — and ISF already has to hand its context back after every render for
+that reason. **Recommendation: close item 3 as not worth doing**, and reopen it
+only if a profile of many simultaneous ISF layers points here specifically.
+
+If it is done anyway, re-run the three play-and-clear cycles as well as the CPU
+figures.
 
 ## Ground rules
 
@@ -151,6 +201,11 @@ compositing and nothing is exercised. Configs in `build/shell/`:
 `smoke_amcp.config` (OpenGL, AMCP 5260), `smoke_amcp_vk.config` (Vulkan); copy
 one and change the port for a second instance, which the Spout loopback needs.
 
-Harnesses: `d:/Github/CasparCG-TestRunner/vkdispatch/` (ISF, Spout loopback) and
-`gpudirect/` (the decode matrix). One item per commit, before-and-after figures
-in the message, stage files by name — another session may be in this repository.
+Harnesses: `d:/Github/CasparCG-TestRunner/vkdispatch/` (`isf_matrix.py`,
+`spout_loop.py`, `spout_matrix.py`) and `gpudirect/` (the decode matrix). One item
+per commit, before-and-after figures in the message, stage files by name — another
+session may be in this repository.
+
+The Spout loopback needs two instances, so `smoke_amcp_b.config` and
+`smoke_amcp_vk_b.config` (the same configs on AMCP 5261) must exist in
+`build/shell`. They are not in the repository — `build/` is ignored.
