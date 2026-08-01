@@ -113,6 +113,16 @@ both ways outside the server. And the error was expected to follow chroma-sample
 parity — it does not, because chroma texel centres land *between* output pixels,
 so every pixel is interpolated and there is no parity signature.
 
+**`m_int_10` is the regression check for this**, and it is not in the decode
+matrix. It is the only 10-bit 4:2:0 *interlaced* clip in `media/`, so it is the
+one thing the progressive-only condition exists to protect; the matrix's
+interlaced clip is 8-bit and its other 10-bit clips are progressive. It must keep
+arriving as `yuv420p10le -> pixel_format 5 (3 planes)`. If it ever arrives as
+`p010le`, the condition has been loosened and the deinterlaced picture has moved.
+There is no harness for it: it was checked by stashing the change, rebuilding,
+capturing, restoring and comparing — worth repeating rather than trusting, because
+nothing else will catch it.
+
 ## HTML/CEF accelerated paint: measured, and the premise is wrong
 
 The plan's table says HTML is CPU `OnPaint` on both mixers, cost "not measured",
@@ -282,6 +292,13 @@ Each of these is a mistake already made in this work, not general advice.
 - **Compare on still sources.** Three separate measurements here were wrong
   because two servers sat on different frames of moving content and the
   difference was read as a defect.
+  - Pausing and seeking to a fixed frame is the other way to get one, and it
+    beats encoding a still clip when the content has to be real footage.
+    Results can vary by codec, so check that the two ends actually landed on the
+    same frame rather than assuming a seek is exact.
+  - And check that a "still" source is still. `gradients` animates by default,
+    which produced a comparison of two different frames here and a set of
+    numbers that meant nothing until the source was verified flat first.
 - **Read the log to decide which path ran**, never infer from timings. A silent
   fallback and a path with no benefit are indistinguishable in a CPU figure.
   Both Spout and GPU-direct log which path they took for exactly this reason.
@@ -316,6 +333,17 @@ A consumer must be attached (`ADD 1 NDI NAME "x"`) or the channel skips
 compositing and nothing is exercised. Configs in `build/shell/`:
 `smoke_amcp.config` (OpenGL, AMCP 5260), `smoke_amcp_vk.config` (Vulkan); copy
 one and change the port for a second instance, which the Spout loopback needs.
+
+Two AMCP details that cost time here:
+
+- **`VF`, not `FILTER`, for a video filter.** `FILTER` sets the video *and* audio
+  graphs, so a video-only filter reaches the audio graph and it fails to build
+  with "Media type mismatch" — the producer then plays nothing and the reason is
+  four lines further up the log than the failure.
+- **`[HTML]` resolves a bare name against the *template* folder, without the
+  extension.** Pass a filename and CEF treats it as a hostname, logs
+  `ERR_NAME_NOT_RESOLVED`, and renders an empty page that still composites
+  happily.
 
 Harnesses: `d:/Github/CasparCG-TestRunner/vkdispatch/` (`isf_matrix.py`,
 `spout_loop.py`, `spout_matrix.py`) and `gpudirect/` (the decode matrix). One item
