@@ -365,7 +365,13 @@ class vulkan_output_consumer : public core::frame_consumer
 
     std::wstring name() const override { return L"vulkan-output"; }
 
-    bool needs_cpu_frame_data() const override { return false; }
+    // Normally false -- this consumer's whole point is taking the mixer's image as a
+    // texture. But it keeps host-pixel fallbacks for the routes where that cannot
+    // work, and those need the readback armed; see host_pixels_needed_.
+    bool needs_cpu_frame_data() const override
+    {
+        return host_pixels_needed_.load(std::memory_order_relaxed);
+    }
 
     int index() const override
     {
@@ -606,6 +612,18 @@ class vulkan_output_consumer : public core::frame_consumer
                     << L" Frame cache unavailable, falling back to CPU: " << e.what();
                 frame_cache_.reset();
             }
+        }
+
+        // The two host-pixel routes that are known before a frame arrives: an adapter
+        // mismatch presents through GDI, and a cross-GPU cache stages through the host
+        // because Pascal cannot write a VK-external texture from GL. Seeding rather
+        // than waiting for the fallback to latch means the first presented frame is
+        // right instead of the second.
+        if (adapter_mismatch_ || (frame_cache_ && frame_cache_->is_cross_gpu())) {
+            host_pixels_needed_.store(true, std::memory_order_relaxed);
+            CASPAR_LOG(info) << print() << L" presenting via host pixels ("
+                             << (adapter_mismatch_ ? L"adapter mismatch, GDI" : L"cross-GPU staging")
+                             << L"); the channel's readback stays armed for this consumer.";
         }
 
         // Color space conversion pipeline: DISABLED.
@@ -2165,6 +2183,11 @@ class vulkan_output_consumer : public core::frame_consumer
 #ifdef _WIN32
     void present_frame_gdi(const core::const_frame& frame)
     {
+        // StretchDIBits takes host pixels and nothing else, so this route always needs
+        // the readback. Normally already seeded at initialize() from adapter_mismatch_;
+        // stated here too so the requirement lives with the code that has it.
+        require_host_pixels(L"GDI present");
+
         // GDI fallback for indirect displays (IddCx/VDD) that don't expose DXGI outputs.
         // StretchDIBits acquires a global win32k.sys kernel lock, so with multiple outputs
         // the system becomes sluggish. Throttle to half frame rate to reduce lock contention
@@ -2924,6 +2947,22 @@ class vulkan_output_consumer : public core::frame_consumer
     }
 #endif // CASPAR_CUDA_PEER_ENABLED
 
+    /// Declare that this consumer is on a route that reads host pixels, so
+    /// needs_cpu_frame_data() starts saying so. Idempotent; logs the first time only.
+    ///
+    /// Called from the present thread. The frame in hand is already composed and is
+    /// still hostless, so it is lost -- output::do_send skips a consumer that needs
+    /// pixels a frame has none of. From the next frame on there are pixels.
+    void require_host_pixels(const wchar_t* why)
+    {
+        if (host_pixels_needed_.exchange(true, std::memory_order_relaxed))
+            return;
+
+        CASPAR_LOG(info) << print() << L" " << why
+                         << L" needs host pixels; re-arming the channel's readback for this consumer. "
+                            L"One frame is dropped while the mixer catches up.";
+    }
+
     void upload_frame_cpu(const core::const_frame& frame, VkImage dst_image, VkCommandBuffer cmd)
     {
         // CPU path: create/reuse staging buffer and copy pixel data
@@ -2947,6 +2986,12 @@ class vulkan_output_consumer : public core::frame_consumer
                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear_color, 1, &range);
             return;
         }
+
+        // Past the HDR guard above, which clears to black and never reads a pixel.
+        // From here host pixels are required, so say so -- otherwise the readback stays
+        // off, image_data(0) is empty for ever, and the two early returns below leave
+        // dst_image holding whatever it held, which the caller then blits and presents.
+        require_host_pixels(L"CPU staging upload");
 
         const auto& img = frame.image_data(0);
         const auto* pixels = img.data();
@@ -4166,6 +4211,26 @@ class vulkan_output_consumer : public core::frame_consumer
     std::atomic<bool>                display_lost_{false};
     std::atomic<bool>                device_dead_{false}; // TDR — device permanently invalid
     bool                             adapter_mismatch_{false}; // Display on different GPU — no Vulkan presentation (Windows only)
+    /// Whether this consumer is on a route that reads host pixels, which
+    /// needs_cpu_frame_data() reports so the mixer produces them.
+    ///
+    /// Every GPU route here has a CPU fallback -- handle export failure, VK import
+    /// failure with CUDA peer unavailable, the cross-GPU shared-pool path, and the GDI
+    /// path for an adapter mismatch all end at upload_frame_cpu() or
+    /// present_frame_gdi(). Both read const_frame::image_data(0), and this consumer
+    /// used to answer needs_cpu_frame_data() == false unconditionally, so none of them
+    /// ever had pixels to read: upload_frame_cpu() returned before writing and the
+    /// blit ran against an unwritten image.
+    ///
+    /// That was masked for as long as anything else on the channel armed the readback
+    /// -- the shipped config puts <system-audio /> on channel 1, which did until
+    /// audio-only consumers stopped forcing it.
+    ///
+    /// Seeded at initialize() for the two cases known before a frame arrives, latched
+    /// by the fallbacks for the ones that are not. Latched, not tracked per frame: the
+    /// mixer answers this a frame late, so clearing it on the next successful GPU
+    /// frame would alternate between a good frame and an empty one.
+    std::atomic<bool>                host_pixels_needed_{false};
     uint64_t                         hotplug_retry_counter_ = 0;
     std::atomic<uint64_t>                frames_presented_{0};
     std::atomic<uint64_t>                frame_generation_{0};  // Monotonic counter for frame cache coordination
