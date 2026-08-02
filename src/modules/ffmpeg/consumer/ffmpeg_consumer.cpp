@@ -301,11 +301,24 @@ struct Stream
                                      : (depth == common::bit_depth::bit8) ? AV_PIX_FMT_BGRA
                                                                           : AV_PIX_FMT_RGBA64LE;
 
-                auto args = (boost::format("video_size=%dx%d:pix_fmt=%d:time_base=%d/%d:sar=%d/%d:frame_rate=%d/%d") %
+                // colorspace/range are not decoration. Left unspecified, the graph has
+                // no input colour information, so the scale filter libswscale inserts
+                // to reach the encoder's YCbCr format converts with its own default
+                // matrix -- BT.601 -- while the encoder tags the file BT.709. The
+                // recording then decodes with the wrong matrix: neutrals survive and
+                // saturated colour shifts, which is why it went unnoticed.
+                //
+                // The mixer's frames are full-range RGB, and make_av_video_frame tags
+                // them AVCOL_SPC_RGB / AVCOL_RANGE_JPEG. Declaring the same here is
+                // what lets the conversion be negotiated instead of guessed.
+                auto args = (boost::format("video_size=%dx%d:pix_fmt=%d:time_base=%d/%d:sar=%d/%d:frame_rate=%d/%d"
+                                           ":colorspace=%d:range=%d") %
                              format_desc.width % format_desc.height % pix_fmt % format_desc.duration %
                              (format_desc.time_scale * format_desc.field_count) % sar.numerator() % sar.denominator() %
                              (format_desc.framerate.numerator() * format_desc.field_count) %
-                             format_desc.framerate.denominator())
+                             format_desc.framerate.denominator() %
+                             static_cast<int>(gpu_frames_ctx ? AVCOL_SPC_RGB : AVCOL_SPC_RGB) %
+                             static_cast<int>(AVCOL_RANGE_JPEG))
                                 .str();
                 auto name = (boost::format("in_%d") % 0).str();
 
@@ -420,6 +433,66 @@ struct Stream
                 FF(av_opt_set_int_list(sink, "pix_fmts", codec->pix_fmts, AV_PIX_FMT_NONE, AV_OPT_SEARCH_CHILDREN));
             }
 
+            // ── Which matrix libswscale converts RGB->YCbCr with ──────────
+            // The encoder below is told the channel's colour space, so the file
+            // is *tagged* BT.709. Nothing told the graph, so libswscale used its
+            // own default -- BT.601 -- and the recording came out encoded with
+            // one matrix and labelled with the other.
+            //
+            // The error is invisible on neutrals and obvious on saturated
+            // colour, which is why it survived: a grey ramp round-trips fine
+            // while a saturated green went (15,223,5) in and (0,189,0) out, a
+            // shift that reproduces exactly as "encode 601, decode 709". The
+            // GPU-direct NVENC path was never affected -- it hands RGB to the
+            // encoder and never runs libswscale -- so the two recording paths
+            // disagreed with each other, which is how it surfaced.
+            //
+            // Constraining the sink rather than inserting a scale filter keeps
+            // format negotiation intact: an RGB encoder still gets RGB and no
+            // conversion is inserted at all.
+            {
+                // Is every format the sink may settle on an RGB one? An RGB encoder
+                // takes the channel's frames as they are, and asking for a YCbCr
+                // matrix there is meaningless -- the link genuinely is RGB.
+                const auto is_rgb_fmt = [](AVPixelFormat f) {
+                    const auto* d = av_pix_fmt_desc_get(f);
+                    return d && (d->flags & AV_PIX_FMT_FLAG_RGB);
+                };
+                bool rgb_output = true;
+                if (!pix_fmts.empty()) {
+                    for (auto f : pix_fmts)
+                        if (f != AV_PIX_FMT_NONE && !is_rgb_fmt(f))
+                            rgb_output = false;
+                } else {
+                    for (auto q = codec->pix_fmts; q && *q != AV_PIX_FMT_NONE; ++q)
+                        if (!is_rgb_fmt(*q))
+                            rgb_output = false;
+                }
+
+                if (!rgb_output) {
+                    // Exactly one matrix, and not AVCOL_SPC_RGB alongside it. Offering
+                    // RGB as an alternative is not harmless: converting from the
+                    // channel's RGB costs nothing, so negotiation picks it and the
+                    // constraint silently does nothing -- the sink then reports
+                    // "matrix gbr" on a yuv420p link and libswscale converts with its
+                    // own default anyway. That was the first attempt at this fix.
+                    const AVColorSpace cs = channel_cs == core::color_space::bt2020 ? AVCOL_SPC_BT2020_NCL
+                                            : channel_cs == core::color_space::bt601
+                                                ? AVCOL_SPC_SMPTE170M
+                                                : AVCOL_SPC_BT709;
+                    const AVColorSpace spaces[] = {cs, AVCOL_SPC_UNSPECIFIED};
+                    FF(av_opt_set_int_list(sink, "color_spaces", spaces, AVCOL_SPC_UNSPECIFIED,
+                                           AV_OPT_SEARCH_CHILDREN));
+
+                    // Matches enc->color_range below. A full/limited mismatch is the
+                    // same class of bug with a different signature: crushed blacks and
+                    // clipped whites rather than shifted saturated colour.
+                    const AVColorRange ranges[] = {AVCOL_RANGE_MPEG, AVCOL_RANGE_UNSPECIFIED};
+                    FF(av_opt_set_int_list(sink, "color_ranges", ranges, AVCOL_RANGE_UNSPECIFIED,
+                                           AV_OPT_SEARCH_CHILDREN));
+                }
+            }
+
 #ifdef _MSC_VER
 #pragma warning(pop)
 #endif
@@ -520,10 +593,13 @@ struct Stream
                 const auto* d      = av_pix_fmt_desc_get(enc->pix_fmt);
                 const bool  is_hw  = d && (d->flags & AV_PIX_FMT_FLAG_HWACCEL);
                 const bool  is_rgb = d && (d->flags & AV_PIX_FMT_FLAG_RGB);
+                const auto neg_cs = av_buffersink_get_colorspace(sink);
                 CASPAR_LOG(info) << L"[ffmpeg] " << u16(codec->name) << L" input format " << u16(fmt_name)
                                  << (is_hw    ? L" (device frames, no readback)"
                                      : is_rgb ? L" (no host conversion)"
-                                              : L" (host conversion via libswscale)");
+                                              : L" (host conversion via libswscale)")
+                                 << L", matrix " << u16(av_color_space_name(neg_cs) ? av_color_space_name(neg_cs)
+                                                                                    : "unknown");
             }
 
             enc->color_range         = AVCOL_RANGE_MPEG;

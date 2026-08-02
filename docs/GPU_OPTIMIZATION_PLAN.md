@@ -1746,3 +1746,61 @@ Consistent with that, the two files disagree about what they are: NVENC writes
 actually encoded, which is why it round-trips accurately. libx264's says BT.709 and
 does not deliver it. **Do not "fix" the NVENC tag to bt709 without re-measuring** — the
 picture is currently correct and the tag is what makes it decode that way.
+
+## Root cause of the recording colour difference — 2026-08-02
+
+The GPU-direct and host recording paths disagreed. The earlier note here concluded the
+GPU path was the faithful one and left the host path "characterised, not root-caused".
+It is root-caused now, and it was a real bug in the host path.
+
+**The host recording was encoded with BT.601 and tagged BT.709.**
+
+Established by arithmetic before touching code: of every matrix/range permutation, only
+"encode BT.601, decode BT.709" turns the mixer's `(15,223,5)` into the observed
+`(0,189,0)` — it predicts `(0,190,0)`, one off. Confirmed by decoding the recording
+both ways: forced to BT.601 it scores 40.92 dB against the mixer's own readback, forced
+to BT.709 (which is what the file says) 28.48 dB.
+
+The encoder is told the channel's colour space, so the file is *tagged* correctly.
+Nothing told the **filter graph**. The `buffer` source declared `video_size`,
+`pix_fmt`, `time_base`, `sar` and `frame_rate` but neither `colorspace` nor `range`, so
+the scale filter libswscale inserts to reach the encoder's YCbCr format had no input
+colour information and converted with its own default matrix.
+
+Two things now: the source declares `colorspace=RGB, range=JPEG`, matching what
+`make_av_video_frame` already tags on the frames; and the sink is constrained to the
+channel's matrix and range, so the conversion is negotiated rather than guessed.
+
+| against the mixer's own readback | before | after |
+|---|---|---|
+| `libx264` (host path) | 28.48 dB, mean 5.11 | **40.71 dB, mean 0.76** |
+| `h264_nvenc` (GPU-direct) | 40.97 dB | 40.97 dB (unchanged) |
+
+The saturated green now reads `(14,222,4)` on both paths against a true `(15,223,5)`.
+
+### Two traps in the fix itself
+
+**Do not offer `AVCOL_SPC_RGB` alongside the wanted matrix in the sink's list.**
+Converting from the channel's RGB costs nothing, so negotiation picks RGB, the sink
+then reports `matrix gbr` on a `yuv420p` link, and libswscale converts with its default
+anyway — the constraint silently does nothing. The first attempt at this fix did
+exactly that and measured *identical* to no fix at all, which is the only reason it was
+caught.
+
+**But the constraint must still be skipped when the output really is RGB.** An RGB
+encoder takes the channel's frames unconverted, and demanding a YCbCr matrix on that
+link fails graph configuration. So it is applied only when some candidate pixel format
+is non-RGB. Verified both ways: `qtrle` still configures and records (`argb`,
+`matrix gbr`), `libx264` gets `matrix bt709`.
+
+The negotiated matrix is now in the existing per-encoder log line, so the next mismatch
+is visible at ADD time instead of inferred from the picture.
+
+### Why the GPU-direct path was never affected
+
+It hands RGB device frames straight to NVENC and never runs libswscale, so there was no
+conversion to get wrong. NVENC's own RGB→YCbCr is internally consistent with the
+`bt470bg` tag it writes, which is why that path measured accurately throughout despite
+metadata that looks wrong. That tag is still worth revisiting, but it is a labelling
+question, not a picture one — and correcting it without re-measuring would break a
+picture that is currently right.
