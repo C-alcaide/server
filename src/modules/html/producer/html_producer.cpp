@@ -70,6 +70,10 @@
 #include "../html.h"
 #include "../util.h"
 
+#ifdef _WIN32
+#include "html_gpu_bridge.h"
+#endif
+
 namespace caspar { namespace html {
 
 inline std::int_least64_t now()
@@ -147,6 +151,14 @@ class html_client
 
     CefRefPtr<CefBrowser> browser_;
 
+#ifdef _WIN32
+    /// Non-null only when the GPU-direct path was set up successfully, which is
+    /// decided before the browser exists (CEF binds the paint callback at
+    /// creation from whether we asked for shared textures).
+    std::unique_ptr<html_gpu_bridge> gpu_bridge_;
+    bool                             was_probing_ = true;
+#endif
+
     // FPS counter
     std::chrono::steady_clock::time_point last_fps_update_;
     int                     frames_since_update_ = 0;
@@ -165,6 +177,12 @@ class html_client
         , gpu_enabled_(gpu_enabled)
     {
         graph_->set_color("browser-tick-time", diagnostics::color(0.1f, 1.0f, 0.1f));
+        // Both of these were plotted without a colour, so they drew unstyled.
+        // "memcpy" is the host copy path's per-frame cost; "gpu-stage-time" is its
+        // GPU-direct counterpart, so they are deliberately the same hue -- only one
+        // of the two can ever be populated for a given producer.
+        graph_->set_color("memcpy", diagnostics::color(1.0f, 0.4f, 0.0f));
+        graph_->set_color("gpu-stage-time", diagnostics::color(1.0f, 0.4f, 0.0f));
         graph_->set_color("tick-time", diagnostics::color(0.0f, 0.6f, 0.9f));
         graph_->set_color("dropped-frame", diagnostics::color(0.3f, 0.6f, 0.3f));
         graph_->set_color("late-frame", diagnostics::color(0.6f, 0.1f, 0.1f));
@@ -341,6 +359,27 @@ class html_client
         return state_;
     }
 
+#ifdef _WIN32
+    /// Handed over after construction, because the bridge's completion callback
+    /// has to name this client -- and before CreateBrowser, because whether the
+    /// bridge exists is what decides which paint callback CEF will bind.
+    void set_gpu_bridge(std::unique_ptr<html_gpu_bridge> bridge) { gpu_bridge_ = std::move(bridge); }
+
+    /// Called from the bridge's worker thread, in submission order. Shares the
+    /// queue and the drop-oldest policy with OnPaint so pacing behaves identically
+    /// on both paths.
+    void push_gpu_frame(core::draw_frame frame)
+    {
+        std::lock_guard<std::mutex> lock(frames_mutex_);
+        frames_.push(presentation_frame(std::move(frame)));
+        while (frames_.size() > frames_max_size_) {
+            frames_.pop();
+            graph_->set_tag(diagnostics::tag_severity::WARNING, "dropped-frame");
+        }
+        graph_->set_value("buffered-frames", (double)frames_.size() / frames_max_size_);
+    }
+#endif
+
   private:
     void GetViewRect(CefRefPtr<CefBrowser> browser, CefRect& rect) override
     {
@@ -348,6 +387,52 @@ class html_client
 
         rect = CefRect(0, 0, format_desc_.square_width, format_desc_.square_height);
     }
+
+#ifdef _WIN32
+    /// GPU-direct paint: the composited page arrives as a D3D11 shared texture and
+    /// goes to the mixer as a texture, never touching host memory.
+    ///
+    /// CEF calls either this or OnPaint, decided at browser creation from
+    /// CefWindowInfo::shared_texture_enabled -- never both, and never switching. So
+    /// there is no runtime failover here: if the bridge stops working the producer
+    /// simply stops queueing frames and receive() holds the last good one.
+    void OnAcceleratedPaint(CefRefPtr<CefBrowser>          browser,
+                            PaintElementType               type,
+                            const RectList&                dirtyRects,
+                            const CefAcceleratedPaintInfo& info) override
+    {
+        if (closing_ || not_found_ || type != PET_VIEW)
+            return;
+
+        CASPAR_ASSERT(CefCurrentlyOn(TID_UI));
+        graph_->set_value("browser-tick-time", paint_timer_.elapsed() * format_desc_.fps * 0.5);
+        paint_timer_.restart();
+
+        if (!gpu_bridge_ || !gpu_bridge_->healthy())
+            return;
+
+        const auto order = info.format == CEF_COLOR_TYPE_RGBA_8888 ? shared_surface_order::rgba8
+                                                                   : shared_surface_order::bgra8;
+        const auto& vis  = info.extra.visible_rect;
+
+        // visible_rect, never coded_size: the latter includes allocation padding,
+        // and copying it yields a frame that is subtly shifted rather than
+        // obviously wrong. dirtyRects is ignored on purpose -- a partial update
+        // needs a persistent destination, which is incompatible with drawing the
+        // destination from the mixer's pool and with the mixer holding a frame
+        // across several channel ticks.
+        const bool queued = gpu_bridge_->submit(info.shared_texture_handle, order, vis.x, vis.y, vis.width, vis.height);
+
+        graph_->set_value("gpu-stage-time", gpu_bridge_->take_stage_wait_us() * 1e-6 * format_desc_.fps * 0.5);
+        if (!queued)
+            graph_->set_tag(diagnostics::tag_severity::WARNING, "dropped-frame");
+
+        if (was_probing_ && !gpu_bridge_->probing()) {
+            was_probing_ = false;
+            CASPAR_LOG(info) << print() << L" GPU-direct active (no host copy).";
+        }
+    }
+#endif
 
     void OnPaint(CefRefPtr<CefBrowser> browser,
                  PaintElementType      type,
@@ -603,6 +688,29 @@ class html_producer : public core::frame_producer
             window_info.bounds.width                 = format_desc.square_width;
             window_info.bounds.height                = format_desc.square_height;
             window_info.windowless_rendering_enabled = true;
+
+#ifdef _WIN32
+            // CEF binds OnPaint vs OnAcceleratedPaint here, once, and will not change
+            // its mind for the life of the browser. So the bridge has to be built
+            // first and its success is what we ask CEF for: everything that can be
+            // checked without a frame in hand -- adapter match, device, staging ring,
+            // Vulkan import, a self-test round trip -- has already happened by the
+            // time shared_texture_enabled is set.
+            if (gpu_direct_requested()) {
+                std::wstring reason;
+                auto*        client = client_.get();
+                auto         bridge = html_gpu_bridge::create(
+                    *frame_factory, client, [client](core::draw_frame f) { client->push_gpu_frame(std::move(f)); },
+                    reason);
+
+                if (bridge) {
+                    client_->set_gpu_bridge(std::move(bridge));
+                    window_info.shared_texture_enabled = true;
+                } else {
+                    CASPAR_LOG(info) << L"[html] GPU-direct declined: " << reason << L"; using the host copy path.";
+                }
+            }
+#endif
 
             CefBrowserSettings browser_settings;
             browser_settings.webgl = enable_gpu ? cef_state_t::STATE_ENABLED : cef_state_t::STATE_DISABLED;

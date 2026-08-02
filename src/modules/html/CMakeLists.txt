@@ -4,6 +4,8 @@ project (html)
 set(SOURCES
 		producer/html_cg_proxy.cpp
 		producer/html_cg_proxy.h
+		producer/html_gpu_bridge.cpp
+		producer/html_gpu_bridge.h
 		producer/html_producer.cpp
 		producer/html_producer.h
 
@@ -19,6 +21,13 @@ casparcg_add_module_project(html
 	CLI_INTERCEPTOR "html::intercept_command_line"
 )
 target_link_libraries(html PRIVATE ffmpeg CEF::CEF)
+
+if (MSVC)
+	# GPU-direct path: CEF's OnAcceleratedPaint hands back a DXGI shared NT handle,
+	# opened with ID3D11Device1::OpenSharedResource1 on the mixer's adapter and then
+	# imported through accelerator's Vulkan d3d11_import_bridge.
+	target_link_libraries(html PRIVATE d3d11 dxgi accelerator)
+endif()
 
 target_include_directories(html PRIVATE
     ..

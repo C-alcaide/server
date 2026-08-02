@@ -33,4 +33,11 @@ bool intercept_command_line(int argc, char** argv);
 void init(const core::module_dependencies& dependencies);
 void uninit();
 
+/// Whether `configuration.html.gpu-direct` asks for the shared-texture path.
+///
+/// Implies enable-gpu and angle-backend=d3d11, both of which init() forces on (and
+/// logs) when this is set -- without them CEF's accelerated paint callback either
+/// cannot fire or does not produce a D3D11 surface. Always false off Windows.
+bool gpu_direct_requested();
+
 } // namespace caspar::html

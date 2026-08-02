@@ -97,6 +97,25 @@ class remove_handler : public CefV8Handler
     IMPLEMENT_REFCOUNTING(remove_handler);
 };
 
+/// Is the GPU-direct (shared-texture) path requested?
+///
+/// Windows-only: OnAcceleratedPaint hands back a DXGI shared NT handle there. On
+/// Linux CEF fills a native-pixmap/dmabuf variant instead, which needs a different
+/// importer, so the flag is ignored rather than half-honoured.
+///
+/// Implies enable-gpu and angle-backend=d3d11. Neither is optional: with
+/// enable-gpu off the browser process gets --disable-gpu-compositing and
+/// OnAcceleratedPaint can never fire, and use-angle=gl (today's default) does not
+/// back the surface with a D3D11 texture.
+bool gpu_direct_requested()
+{
+#ifdef _WIN32
+    return env::properties().get(L"configuration.html.gpu-direct", false);
+#else
+    return false;
+#endif
+}
+
 class renderer_application
     : public CefApp
     , CefRenderProcessHandler
@@ -179,8 +198,31 @@ class renderer_application
 
             // This gives better performance on the gpu->cpu readback, but can perform worse with intense templates
             auto backend = env::properties().get(L"configuration.html.angle-backend", default_backend);
+
+            if (gpu_direct_requested() && backend != L"d3d11") {
+                // Not a preference: the shared texture OnAcceleratedPaint returns is a
+                // D3D11 resource, and only the d3d11 ANGLE backend produces one.
+                CASPAR_LOG(warning) << L"[html] gpu-direct is on, so angle-backend is forced to d3d11 (configured: "
+                                    << (backend.empty() ? L"<empty>" : backend) << L").";
+                backend = L"d3d11";
+            }
+
             if (backend.size() > 0) {
                 command_line->AppendSwitchWithValue("use-angle", backend);
+            }
+
+            if (gpu_direct_requested()) {
+                // Steer Chromium's GPU process onto the adapter the mixer runs on.
+                // Chromium picks its own otherwise, and on a multi-GPU box a texture
+                // allocated on the wrong adapter cannot be imported -- it fails at
+                // OpenSharedResource1, on the first frame, at runtime.
+                //
+                // CefInitialize happens once per process, long before any channel or
+                // mixer exists, so there is no per-channel choice available here: one
+                // adapter is nominated for every html producer in the server.
+                const auto luid = env::properties().get(L"configuration.html.gpu-direct-adapter-luid", L"");
+                if (!luid.empty())
+                    command_line->AppendSwitchWithValue("use-adapter-luid", luid);
             }
         }
 
@@ -231,7 +273,15 @@ void init(const core::module_dependencies& dependencies)
 #ifdef WIN32
         SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
 #endif
-        const bool enable_gpu = env::properties().get(L"configuration.html.enable-gpu", false);
+        bool enable_gpu = env::properties().get(L"configuration.html.enable-gpu", false);
+
+        if (gpu_direct_requested() && !enable_gpu) {
+            // Left alone, the browser process would get --disable-gpu-compositing and
+            // then render nothing at all through the accelerated callback -- a blank
+            // channel, which is a far worse failure than falling back to the copy path.
+            CASPAR_LOG(warning) << L"[html] gpu-direct requires enable-gpu; enabling it (configured: false).";
+            enable_gpu = true;
+        }
 
         CefSettings settings;
         settings.command_line_args_disabled   = false;

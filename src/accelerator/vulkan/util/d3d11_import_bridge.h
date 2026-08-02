@@ -94,10 +94,30 @@ class d3d11_import_bridge
                      std::shared_ptr<core::texture>& out_uv);
 
     /**
-     * Blocks until the copy submitted by the previous `copy_planes()` has
-     * completed on the GPU. The caller must call this before letting D3D11
-     * overwrite the shared textures, because nothing else orders the Vulkan
-     * read against the next D3D11 write.
+     * Single-plane variant, for a source that is one packed 4-byte surface rather
+     * than two YCbCr planes -- a browser's composited output, say.
+     *
+     * The image is imported as `eR8G8B8A8Unorm` whether the source calls itself
+     * BGRA or RGBA. The two are byte-compatible and the copy is a straight memory
+     * move, so importing under a single format keeps `vkCmdCopyImage`'s
+     * size-compatibility rule out of the picture; the byte order travels to the
+     * mixer on the frame's `pixel_format` instead, where the shader swizzle costs
+     * nothing.
+     *
+     * Imports are cached by handle, in a small ring. That assumes the caller
+     * rotates through a *stable* set of handles -- its own staging textures, not
+     * handles borrowed from someone else's pool. A handle whose underlying
+     * resource can change behind the same value must not be passed here.
+     *
+     * Returns false and leaves `out` untouched on any failure.
+     */
+    bool copy_texture(void* handle, int width, int height, std::shared_ptr<core::texture>& out);
+
+    /**
+     * Blocks until the copy submitted by the previous `copy_planes()` or
+     * `copy_texture()` has completed on the GPU. The caller must call this before
+     * letting D3D11 overwrite the shared textures, because nothing else orders the
+     * Vulkan read against the next D3D11 write.
      *
      * Returns the time spent waiting, in microseconds.
      */

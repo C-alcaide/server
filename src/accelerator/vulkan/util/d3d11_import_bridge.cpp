@@ -31,6 +31,7 @@
 #include <array>
 #include <chrono>
 #include <cstring>
+#include <vector>
 
 #include <dxgi.h>
 
@@ -91,6 +92,15 @@ struct d3d11_import_bridge::impl
     imported y_;
     imported uv_;
 
+    /// Imports for copy_texture(). Separate from y_/uv_ so copy_planes' two fixed
+    /// slots keep behaving exactly as before. A ring rather than a single slot
+    /// because a single-plane caller typically rotates through a few staging
+    /// textures to keep the GPU busy; sized to cover that without growing without
+    /// bound if a caller does hand over fresh handles.
+    static constexpr std::size_t kTexCacheSize = 8;
+    std::vector<imported>        tex_cache_;
+    std::size_t                  tex_cache_next_ = 0;
+
     vk::CommandBuffer cmd_;
     vk::Fence         fence_;
     bool              copy_pending_ = false;
@@ -116,7 +126,49 @@ struct d3d11_import_bridge::impl
             vk_device_.destroyFence(fence_);
         release(y_);
         release(uv_);
+        for (auto& im : tex_cache_)
+            release(im);
         // cmd_ belongs to the device's command pool and is reclaimed with it.
+    }
+
+    /// The cached import for `handle`, importing it if this is the first sighting.
+    /// Returns nullptr on failure.
+    imported* find_or_import(void* handle, int width, int height, vk::Format format)
+    {
+        for (auto& im : tex_cache_) {
+            if (im.matches(handle, width, height, format))
+                return &im;
+        }
+
+        // A handle we have seen before but at a different size (the page resized)
+        // has a stale import; drop it rather than adding a second entry for the
+        // same handle.
+        for (auto& im : tex_cache_) {
+            if (im.handle == handle) {
+                release(im);
+                if (!ensure_import(im, handle, width, height, format))
+                    return nullptr;
+                return &im;
+            }
+        }
+
+        if (tex_cache_.size() < kTexCacheSize) {
+            tex_cache_.emplace_back();
+            if (!ensure_import(tex_cache_.back(), handle, width, height, format)) {
+                tex_cache_.pop_back();
+                return nullptr;
+            }
+            return &tex_cache_.back();
+        }
+
+        // Full: evict round-robin. Safe because wait_for_previous_copy() has
+        // already run, so nothing in flight is reading the victim.
+        auto& victim = tex_cache_[tex_cache_next_];
+        tex_cache_next_ = (tex_cache_next_ + 1) % kTexCacheSize;
+        release(victim);
+        if (!ensure_import(victim, handle, width, height, format))
+            return nullptr;
+        return &victim;
     }
 
     void release(imported& im)
@@ -309,6 +361,10 @@ void d3d11_import_bridge::release_imports()
     impl_->wait_for_previous_copy();
     impl_->release(impl_->y_);
     impl_->release(impl_->uv_);
+    for (auto& im : impl_->tex_cache_)
+        impl_->release(im);
+    impl_->tex_cache_.clear();
+    impl_->tex_cache_next_ = 0;
 }
 
 bool d3d11_import_bridge::copy_planes(void*                           y_handle,
@@ -451,6 +507,119 @@ bool d3d11_import_bridge::copy_planes(void*                           y_handle,
     // VkDevice; texture_wrapper is what carries that identity across.
     out_y  = std::make_shared<texture_wrapper>(std::move(y_tex));
     out_uv = std::make_shared<texture_wrapper>(std::move(uv_tex));
+    return true;
+}
+
+bool d3d11_import_bridge::copy_texture(void* handle, int width, int height, std::shared_ptr<core::texture>& out)
+{
+    auto& m = *impl_;
+
+    // Anything in flight is reading an import; it must finish before this copy is
+    // recorded and before the caller reuses the source.
+    m.wait_for_previous_copy();
+
+    // Always eR8G8B8A8Unorm -- see the header. The mixer texture matches, so the
+    // copy is a straight memory move and channel order is the frame's business.
+    constexpr auto kFormat = vk::Format::eR8G8B8A8Unorm;
+
+    std::shared_ptr<texture> tex;
+
+    const bool ok = m.dev_->dispatch_sync([&]() -> bool {
+        auto* src = m.find_or_import(handle, width, height, kFormat);
+        if (!src)
+            return false;
+
+        // Copy into a pooled mixer texture rather than binding the import: the
+        // source belongs to the caller's staging ring and has to be free again by
+        // the next frame.
+        tex = m.dev_->create_texture(width, height, 4, common::bit_depth::bit8);
+        if (!tex)
+            return false;
+
+        try {
+            m.cmd_.reset();
+            m.cmd_.begin(vk::CommandBufferBeginInfo{vk::CommandBufferUsageFlagBits::eOneTimeSubmit});
+
+            const auto range = vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1);
+
+            std::array<vk::ImageMemoryBarrier2, 2> barriers{};
+            // Source stays in eGeneral (see ensure_import) -- eGeneral to eGeneral
+            // makes the D3D11 write visible to the transfer stage without
+            // discarding it.
+            {
+                auto& b               = barriers[0];
+                b.oldLayout           = vk::ImageLayout::eGeneral;
+                b.newLayout           = vk::ImageLayout::eGeneral;
+                b.srcQueueFamilyIndex = vk::QueueFamilyIgnored;
+                b.dstQueueFamilyIndex = vk::QueueFamilyIgnored;
+                b.image               = src->image;
+                b.subresourceRange    = range;
+                b.srcStageMask        = vk::PipelineStageFlagBits2::eAllCommands;
+                b.srcAccessMask       = vk::AccessFlagBits2::eMemoryWrite;
+                b.dstStageMask        = vk::PipelineStageFlagBits2::eTransfer;
+                b.dstAccessMask       = vk::AccessFlagBits2::eTransferRead;
+            }
+            // Destination is overwritten whole, so eUndefined is honest.
+            {
+                auto& b               = barriers[1];
+                b.oldLayout           = vk::ImageLayout::eUndefined;
+                b.newLayout           = vk::ImageLayout::eTransferDstOptimal;
+                b.srcQueueFamilyIndex = vk::QueueFamilyIgnored;
+                b.dstQueueFamilyIndex = vk::QueueFamilyIgnored;
+                b.image               = tex->id();
+                b.subresourceRange    = range;
+                b.srcStageMask        = vk::PipelineStageFlagBits2::eTopOfPipe;
+                b.dstStageMask        = vk::PipelineStageFlagBits2::eTransfer;
+                b.dstAccessMask       = vk::AccessFlagBits2::eTransferWrite;
+            }
+            {
+                vk::DependencyInfo dep;
+                dep.setImageMemoryBarriers(barriers);
+                m.cmd_.pipelineBarrier2(dep);
+            }
+
+            const auto      layers = vk::ImageSubresourceLayers(vk::ImageAspectFlagBits::eColor, 0, 0, 1);
+            vk::ImageCopy   c(layers, vk::Offset3D{}, layers, vk::Offset3D{},
+                              vk::Extent3D{static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1});
+            m.cmd_.copyImage(src->image, vk::ImageLayout::eGeneral, tex->id(),
+                             vk::ImageLayout::eTransferDstOptimal, c);
+
+            vk::ImageMemoryBarrier2 to_read{};
+            to_read.oldLayout           = vk::ImageLayout::eTransferDstOptimal;
+            to_read.newLayout           = vk::ImageLayout::eShaderReadOnlyOptimal;
+            to_read.srcQueueFamilyIndex = vk::QueueFamilyIgnored;
+            to_read.dstQueueFamilyIndex = vk::QueueFamilyIgnored;
+            to_read.image               = tex->id();
+            to_read.subresourceRange    = range;
+            to_read.srcStageMask        = vk::PipelineStageFlagBits2::eTransfer;
+            to_read.srcAccessMask       = vk::AccessFlagBits2::eTransferWrite;
+            to_read.dstStageMask        = vk::PipelineStageFlagBits2::eFragmentShader;
+            to_read.dstAccessMask       = vk::AccessFlagBits2::eShaderRead;
+            {
+                vk::DependencyInfo dep;
+                dep.setImageMemoryBarriers(to_read);
+                m.cmd_.pipelineBarrier2(dep);
+            }
+
+            m.cmd_.end();
+
+            vk::SubmitInfo si{};
+            si.setCommandBuffers(m.cmd_);
+            m.vk_device_.resetFences(m.fence_);
+            m.dev_->submit(si, m.fence_);
+            m.copy_pending_ = true;
+        } catch (const vk::SystemError& e) {
+            CASPAR_LOG(warning) << L"[vk::d3d11_import] texture copy failed: " << u16(e.what());
+            return false;
+        }
+
+        return true;
+    });
+
+    if (!ok)
+        return false;
+
+    out = std::make_shared<texture_wrapper>(std::move(tex));
     return true;
 }
 
