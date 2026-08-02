@@ -19,7 +19,9 @@
 
 #include "ofx_cuda_render.h"
 
+#include <common/log.h>
 #include <stdexcept>
+#include <vector>
 #include <string>
 
 #ifdef CASPAR_OFX_CUDA
@@ -60,6 +62,8 @@ struct cuda_backend::impl
     std::size_t  raw_sz  = 0;
     std::size_t  swap_sz = 0;
     std::size_t  conv_sz = 0;
+    void*        premul  = nullptr; // premultiply scratch; see convert_source step 4
+    std::size_t  premul_sz = 0;
     std::size_t  flip_sz = 0;
     cudaStream_t stream_ = nullptr;
     NppStreamContext npp_ctx_{};
@@ -179,11 +183,39 @@ void* cuda_backend::convert_source(const std::uint8_t* raw,
                                      impl_->npp_ctx_),
                "nppiMirror source vertical");
 
-    // 4) Premultiply straight alpha in place.
-    if (straight_alpha)
-        npp_verify(nppiAlphaPremul_8u_AC4IR_Ctx(
-                       static_cast<Npp8u*>(impl_->conv), step, roi, impl_->npp_ctx_),
+
+    // 4) Premultiply straight alpha.
+    //
+    // Not the in-place variant. nppiAlphaPremul_8u_AC4IR is documented to leave the
+    // alpha channel alone, and measurably does not: an opaque source goes in as
+    // (0,0,255,255) and comes out (0,0,255,0), RGB correct and alpha destroyed. That
+    // is what made every OFX CUDA plug-in that reads its source emit a fully
+    // transparent frame -- invisible on a fill+key output, and correct-looking in any
+    // test that only checks RGB.
+    if (straight_alpha) {
+        impl_->ensure(impl_->premul, impl_->premul_sz, sz);
+        npp_verify(nppiAlphaPremul_8u_AC4R_Ctx(static_cast<const Npp8u*>(impl_->conv),
+                                               step,
+                                               static_cast<Npp8u*>(impl_->premul),
+                                               step,
+                                               roi,
+                                               impl_->npp_ctx_),
                    "nppiAlphaPremul source");
+        // Put the alpha channel back. Measured, not inferred: NPP writes zero into the
+        // destination's alpha whichever variant is used -- in-place or not, and whatever
+        // the destination held beforehand. Both were tried. Copying channel 3 across
+        // afterwards is the only form that survives the test.
+        npp_verify(nppiCopy_8u_C4CR_Ctx(static_cast<const Npp8u*>(impl_->conv) + 3,
+                                        step,
+                                        static_cast<Npp8u*>(impl_->premul) + 3,
+                                        step,
+                                        roi,
+                                        impl_->npp_ctx_),
+                   "restore alpha after premultiply");
+        std::swap(impl_->conv, impl_->premul);
+        std::swap(impl_->conv_sz, impl_->premul_sz);
+    }
+
 
     return impl_->conv;
 }
