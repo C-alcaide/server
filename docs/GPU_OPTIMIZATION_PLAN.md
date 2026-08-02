@@ -1586,11 +1586,14 @@ active (no readback)`, the quadrants are correct, and the output is **bit-identi
 the Vulkan zero-copy path**, which is exactly the parity the mechanism is supposed to
 give.
 
-It was reverted anyway, because it is bit-identical to a path that zeroes alpha.
-OpenGL users are on the host path today and get *correct* alpha; shipping this would
-trade that for speed. For a fill+key deployment that is not a trade worth making.
+It was reverted at first, because being bit-identical to a path that zeroes alpha is
+not a good reason to move OpenGL users off a host path that gets alpha right. The alpha
+bug was then found and fixed (see the commit above), and the OpenGL path landed
+afterwards: alpha 255, quadrants correct, and bit-identical both to the pre-change
+OpenGL host path and to the Vulkan zero-copy path.
 
-**Fix the alpha bug first, then land the OpenGL path** -- at which point both backends
+The original reasoning is left here because the sequence is the point --
+**fix the alpha bug first, then land the OpenGL path** -- at which point both backends
 get the win and neither has the defect. The revert is mechanical to redo: a
 `CudaGLTexture` beside `cuda_vk_texture.h` (registration and map/unmap both on the
 mixer's GL thread, with `cudaSetDevice(select_cuda_gl_device())` pinned there -- mapping

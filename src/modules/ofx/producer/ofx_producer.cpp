@@ -38,6 +38,13 @@
 #include <cuda_runtime.h>
 #endif
 
+#if defined(CASPAR_OFX_CUDA)
+// CUDA <-> OpenGL zero-copy, for a CUDA plug-in on the OpenGL mixer. Gated on
+// CASPAR_OFX_CUDA rather than the Vulkan flag: the GL side needs no Vulkan at all.
+#include "../../cuda_gl_texture.h"
+#include <cuda_runtime.h>
+#endif
+
 #include <core/frame/draw_frame.h>
 #include <core/frame/frame.h>
 #include <core/frame/frame_factory.h>
@@ -257,6 +264,53 @@ class ofx_producer : public core::frame_producer
                                 << L"falling back to CPU for some frames.";
         }
         return nullptr; // all pooled textures still in flight -> skip zero-copy this frame
+    }
+#endif
+
+#if defined(CASPAR_OFX_CUDA)
+    std::vector<std::shared_ptr<CudaGLTexture>> gl_cuda_pool_;
+    bool                                        gl_cuda_device_set_ = false;
+
+    /// A mixer GL texture registered with CUDA, from a small pool. Pooled for the same
+    /// reason the Vulkan one is: cudaGraphicsGLRegisterImage is expensive, and the
+    /// mixer holds a frame texture after this producer has moved on, so a slot is only
+    /// reusable once nothing else references it.
+    std::shared_ptr<CudaGLTexture> acquire_gl_cuda_texture(int w, int h)
+    {
+        for (auto& t : gl_cuda_pool_) {
+            if (t && t->is_free() && t->gl_texture()->width() == w && t->gl_texture()->height() == h)
+                return t;
+        }
+        if (gl_cuda_pool_.size() < 4) {
+            try {
+                std::shared_ptr<CudaGLTexture> cgt;
+                ogl_device_->dispatch_sync([&] {
+                    // Pin the GL thread to the CUDA device interoperable with its
+                    // context. CUDA's default is not necessarily that one on a multi-GPU
+                    // box, and a mismatch fails the map rather than degrading. The query
+                    // needs a current GL context, so it happens here.
+                    if (!gl_cuda_device_set_) {
+                        cudaSetDevice(select_cuda_gl_device());
+                        gl_cuda_device_set_ = true;
+                    }
+                    auto gl_tex = ogl_device_->create_texture(w, h, 4, common::bit_depth::bit8, false);
+                    cgt         = std::make_shared<CudaGLTexture>(std::move(gl_tex));
+                });
+                if (cgt)
+                    gl_cuda_pool_.push_back(cgt);
+                return cgt;
+            } catch (const std::exception& e) {
+                CASPAR_LOG(warning) << L"[ofx] CUDA-GL interop texture creation failed: " << u16(e.what());
+                return nullptr;
+            }
+        }
+        static bool gl_pool_warned = false;
+        if (!gl_pool_warned) {
+            gl_pool_warned = true;
+            CASPAR_LOG(warning) << L"[ofx] CUDA-GL zero-copy texture pool exhausted (all in flight); "
+                                << L"falling back to CPU for some frames.";
+        }
+        return nullptr;
     }
 #endif
 
@@ -567,6 +621,91 @@ class ofx_producer : public core::frame_producer
 
                             return core::draw_frame(core::const_frame(
                                 this, std::move(img_vec), std::move(audio_arr), tex_pfd, cvt->core_texture()));
+                        }
+                    }
+                }
+                return source_frame; // CUDA zero-copy failed -> pass source through
+            }
+#endif
+
+#if defined(CASPAR_OFX_CUDA)
+            // The same thing for the OpenGL mixer. A CUDA-capable plug-in used to get no
+            // zero-copy here at all: it took the host-buffer path, which converts the
+            // source on the CPU, uploads it, downloads the result and converts back --
+            // four full-frame CPU passes and two PCIe crossings, for a plug-in that never
+            // wanted host pixels. The mechanism differs from the Vulkan one (CUDA
+            // registers the GL texture rather than importing exported memory) but the
+            // shape and the preconditions are identical.
+            if (ogl_device_ && bytes == 1 && working_bytes_ == 1 && effect_->cuda_capable() &&
+                cf.has_host_image()) {
+                apply_animation(t);
+                void* out_dev = effect_->render_cuda(cf.image_data(0).data(),
+                                                     pfd.planes[0].linesize,
+                                                     !src_rgba,
+                                                     pfd.is_straight_alpha,
+                                                     w,
+                                                     h,
+                                                     t,
+                                                     to_field_kind(field));
+                if (out_dev) {
+                    auto cgt = acquire_gl_cuda_texture(w, h);
+                    if (cgt) {
+                        // All of this on the mixer GL thread: cudaGraphicsMapResources
+                        // needs the GL context current on the calling thread, and mapping
+                        // from the producer thread fails with "invalid OpenGL or DirectX
+                        // context".
+                        const bool ok = ogl_device_->dispatch_sync([&]() -> bool {
+                            try {
+                                auto        arr = cgt->map();
+                                cudaError_t e   = cudaMemcpy2DToArray(arr,
+                                                                    0,
+                                                                    0,
+                                                                    out_dev,
+                                                                    static_cast<size_t>(w) * 4,
+                                                                    static_cast<size_t>(w) * 4,
+                                                                    static_cast<size_t>(h),
+                                                                    cudaMemcpyDeviceToDevice);
+                                if (e == cudaSuccess)
+                                    e = cudaDeviceSynchronize();
+                                cgt->unmap();
+                                if (e != cudaSuccess) {
+                                    CASPAR_LOG(warning)
+                                        << L"[ofx] CUDA-GL copy failed: " << u16(cudaGetErrorString(e));
+                                    return false;
+                                }
+                                return true;
+                            } catch (const std::exception& ex) {
+                                CASPAR_LOG(warning) << L"[ofx] CUDA-GL map failed: " << u16(ex.what());
+                                return false;
+                            }
+                        });
+
+                        if (ok) {
+                            // Plug-in output is RGBA (byte0 = R). The OGL mixer "rgba"
+                            // case samples straight and reads .r as blue, so a texture in
+                            // that order is labelled bgra for the shader swizzle to put
+                            // the channels back -- the same relabelling the GL zero-copy
+                            // path below documents. The Vulkan branch above tags rgba
+                            // because its shader convention differs.
+                            core::pixel_format_desc tex_pfd(core::pixel_format::bgra, pfd.color_space, pfd.color_transfer);
+                            tex_pfd.is_straight_alpha = !effect_->output_premultiplied();
+                            tex_pfd.planes.push_back(core::pixel_format_desc::plane(w, h, 4, common::bit_depth::bit8));
+
+                            auto empty_store = std::make_shared<std::vector<std::uint8_t>>(0);
+                            array<const std::uint8_t> dummy_img(empty_store->data(), 0, std::move(empty_store));
+                            std::vector<array<const std::uint8_t>> img_vec;
+                            img_vec.push_back(std::move(dummy_img));
+
+                            const auto& zaud = cf.audio_data();
+                            auto audio_store = std::make_shared<std::vector<std::int32_t>>(zaud.data(), zaud.data() + zaud.size());
+                            array<const std::int32_t> audio_arr(audio_store->data(), audio_store->size(), std::move(audio_store));
+
+                            static bool logged = false;
+                            if (!logged) { logged = true;
+                                CASPAR_LOG(info) << L"[ofx] CUDA-OpenGL zero-copy producer path active (no readback)."; }
+
+                            return core::draw_frame(core::const_frame(
+                                this, std::move(img_vec), std::move(audio_arr), tex_pfd, cgt->core_texture()));
                         }
                     }
                 }
