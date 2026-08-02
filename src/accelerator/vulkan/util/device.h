@@ -90,6 +90,12 @@ class device final
     /// for a consumer that needs a summary of the picture rather than the picture;
     /// see core::texture::read_pixels_reduced().
     ///
+    /// A blit maps components, not bytes, so the result carries the source's channel
+    /// order into 8 bits unchanged -- BGRA from an 8-bit attachment, RGBA from a
+    /// 16-bit one, since only the 8-bit shader path swizzles. read_pixels_reduced()
+    /// normalises that to the BGRA it promises its callers; do not do it here, or the
+    /// 8-bit case gets swapped twice.
+    ///
     /// The result is allocated through create_attachment(), not create_texture():
     /// pooled textures carry only eTransferDst|eSampled, and a blit source and a
     /// readback source both need eTransferSrc. It is returned in

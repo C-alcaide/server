@@ -4,6 +4,9 @@
 
 #include <common/log.h>
 
+#include <algorithm>
+#include <cstddef>
+
 namespace caspar { namespace accelerator { namespace vulkan {
 
 std::vector<std::uint8_t> texture_wrapper::read_pixels() const
@@ -47,7 +50,32 @@ std::vector<std::uint8_t> texture_wrapper::read_pixels_reduced(int levels, int& 
 
         out_width  = reduced->width();
         out_height = reduced->height();
-        return std::vector<std::uint8_t>(arr.data(), arr.data() + arr.size());
+
+        std::vector<std::uint8_t> out(arr.data(), arr.data() + arr.size());
+
+        // core::texture::read_pixels_reduced promises packed 8-bit BGRA whatever the
+        // texture's own depth. reduce_texture() delivers the depth half -- it always
+        // runs at least one pass into an 8-bit target -- but not the order.
+        //
+        // A blit maps components, not bytes: R goes to R. An 8-bit mixer attachment
+        // already holds BGRA bytes, because the shader writes col.bgra into an
+        // eR8G8B8A8Unorm image, so component R *is* blue and the bytes come out in the
+        // promised order. A 16-bit attachment does not -- there is no
+        // eB16G16R16A16Unorm, so the shader writes RGBA directly (see
+        // image_kernel.cpp, which sets F2_OUTPUT_BGRA only at bit8) -- and the blit
+        // faithfully carries that RGBA order into the 8-bit result.
+        //
+        // So swap it here rather than at the call site. The one caller today indexes
+        // [2]=R,[0]=B (dmx::average_color) and would have read red and blue swapped on
+        // a 16-bit Vulkan channel, silently. The image is the reduced one -- 240x135 at
+        // levels=3 -- so this costs nothing measurable, and it keeps the contract true
+        // in one place instead of asking every future caller to know this.
+        if (tex_->depth() != common::bit_depth::bit8) {
+            for (std::size_t i = 0; i + 3 < out.size(); i += 4)
+                std::swap(out[i], out[i + 2]);
+        }
+
+        return out;
     } catch (...) {
         CASPAR_LOG(warning) << L"[vulkan::texture_wrapper] reduced readback failed; the caller will fall back.";
         return {};
