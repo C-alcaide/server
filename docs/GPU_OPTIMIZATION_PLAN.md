@@ -1804,3 +1804,51 @@ conversion to get wrong. NVENC's own RGB→YCbCr is internally consistent with t
 metadata that looks wrong. That tag is still worth revisiting, but it is a labelling
 question, not a picture one — and correcting it without re-measuring would break a
 picture that is currently right.
+
+---
+
+## The UYVY plane alias, finally executed (commit `e491c684d`)
+
+That commit called itself "byte-verifiable" and the byte verification was never run.
+This is it, and running it took longer than the change did — because **no clip in the
+test set decodes to UYVY**, which is why it slipped through in the first place.
+
+### Getting UYVY to the mixer at all
+
+Three things have to line up, and the first two are non-obvious:
+
+1. **A genuinely packed source.** Nothing in `media/` is one.
+   `ffmpeg -i m_h264_8_prog.mp4 -t 3 -c:v rawvideo -pix_fmt uyvy422 uyvy_src.avi`.
+2. **`VF`, not `FILTER`.** `FILTER` sets the audio filter chain too
+   ([ffmpeg_producer.cpp:468](../src/modules/ffmpeg/producer/ffmpeg_producer.cpp#L468)),
+   and a video `format` filter cannot link to `aresample`: *"Media type mismatch"*, and
+   the producer throws.
+3. **`<auto-deinterlace>none</auto-deinterlace>`.** Even with `VF "format=uyvy422"` the
+   mixer still saw `yuv422p`. `bwdif` has no packed-4:2:2 support, and the AVI does not
+   declare itself progressive, so the skip-the-deinterlacer path
+   ([av_producer.cpp:2039](../src/modules/ffmpeg/producer/av_producer.cpp#L2039)) does not
+   engage and libavfilter inserts a scale *after* the format filter. Same mechanism the
+   NV12 note above describes, observed from the other side.
+
+Only then: `decoded frames arrive as uyvy422 -> mixer pixel_format 10 (2 plane(s), 2 stride)`.
+
+### Result
+
+Paused on the same seeked frame, four captures, all pairs compared per channel (not
+`getbbox` — on RGBA that inspects alpha only):
+
+| | differing pixels |
+|---|---|
+| pre-work run 2 vs HEAD run 1 | **0** |
+| pre-work run 2 vs HEAD run 2 | **0** |
+| HEAD run 1 vs HEAD run 2 | **0** |
+| pre-work run 1 vs *each of the other three* | 32, at ±1 |
+
+The alias is bit-neutral. The odd one out is the pre-work binary's **first** run, which
+differs from the second run of *its own binary* by exactly the same 32 pixels — a
+cold-start artefact, not a code difference. Worth remembering as the noise floor for
+this method: a single capture pair at 96.98 dB would have looked like a real regression.
+
+### Still unexecuted: the DeckLink AVFrame refcount (`dc36e6b3c`)
+
+Needs a card. It stays flagged rather than claimed.
