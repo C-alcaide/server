@@ -1463,3 +1463,26 @@ the CEF UI thread.
 With frame delivery pinned to full rate in every run it cannot be a throughput
 difference, and the counter is a coarse busy-time fraction rather than a work measure,
 so no story is invented for it.
+
+### Both backends, measured
+
+The html bridge implements the same thing twice, because the two APIs reach a D3D11
+texture by unrelated mechanisms: Vulkan imports the shared NT handle through
+`VK_KHR_external_memory_win32`, OpenGL registers the `ID3D11Texture2D` itself through
+`WGL_NV_DX_interop2`. Four 1080p50 producers:
+
+| mixer | host copy | gpu-direct | |
+|---|---|---|---|
+| Vulkan | 4.03 cores | 1.04 cores | −74% |
+| OpenGL | 3.85 cores | 1.17 cores | −70% |
+
+Output is bit-identical in three directions: OpenGL host copy vs OpenGL gpu-direct,
+Vulkan host copy vs Vulkan gpu-direct, and OpenGL gpu-direct vs Vulkan gpu-direct. The
+two backends produce the same picture, not merely each their own correct one.
+
+One asymmetry worth knowing: Vulkan can be asked which DXGI adapter it is on, via the
+device LUID. OpenGL cannot -- there is no way to ask a GL context which GPU it belongs
+to -- so the bridge instead tries `wglDXOpenDeviceNV` against each adapter in turn and
+keeps the one that opens. On this dual-GPU machine that lands on the A4000 on the
+first try, and the failure mode on the wrong adapter is a clean refusal rather than a
+wrong picture.

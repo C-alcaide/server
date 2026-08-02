@@ -25,7 +25,8 @@ target_link_libraries(html PRIVATE ffmpeg CEF::CEF)
 if (MSVC)
 	# GPU-direct path: CEF's OnAcceleratedPaint hands back a DXGI shared NT handle,
 	# opened with ID3D11Device1::OpenSharedResource1 on the mixer's adapter and then
-	# imported through accelerator's Vulkan d3d11_import_bridge.
+	# handed to whichever accelerator the mixer is using -- Vulkan's
+	# d3d11_import_bridge or OpenGL's dx_interop.
 	target_link_libraries(html PRIVATE d3d11 dxgi accelerator)
 endif()
 

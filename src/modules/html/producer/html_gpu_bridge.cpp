@@ -35,7 +35,10 @@
 
 #ifdef _WIN32
 
+#include <accelerator/ogl/util/dx_interop.h>
+#ifdef ENABLE_VULKAN
 #include <accelerator/vulkan/util/d3d11_import_bridge.h>
+#endif
 
 #include <d3d11_1.h>
 #include <d3d11_4.h>
@@ -100,7 +103,59 @@ struct html_gpu_bridge::impl
     /// Fence path unavailable (pre-11.4 runtime): fall back to polling a query.
     ComPtr<ID3D11Query> flush_query_;
 
-    std::unique_ptr<accelerator::vulkan::d3d11_import_bridge> import_;
+    // Exactly one of these is set, from the mixer's backend. Both turn a D3D11
+    // texture into a pooled mixer texture; they share nothing else, because the
+    // mechanisms are unrelated (external-memory import versus WGL registration).
+#ifdef ENABLE_VULKAN
+    std::unique_ptr<accelerator::vulkan::d3d11_import_bridge> vk_import_;
+#endif
+    std::unique_ptr<accelerator::ogl::dx_interop> gl_import_;
+
+    /// Turns the staging slot at `index` into a mixer texture, whichever backend
+    /// this bridge was built for. Null on failure.
+    std::shared_ptr<core::texture> import_slot(int index, int width, int height)
+    {
+        auto& s = slots_[index];
+#ifdef ENABLE_VULKAN
+        if (vk_import_) {
+            std::shared_ptr<core::texture> tex;
+            if (!vk_import_->copy_texture(s.shared, width, height, tex))
+                return nullptr;
+            // The Vulkan copy reads the staging texture, so the slot cannot be
+            // reused until it has retired. copy_texture guarantees that on its next
+            // call, but the next call may be for a different slot -- so wait here.
+            vk_import_->wait_for_previous_copy();
+            return tex;
+        }
+#endif
+        if (gl_import_) {
+            // copy_to_pooled locks, copies and unlocks before returning, so the slot
+            // is free the moment it does.
+            return gl_import_->copy_to_pooled(s.tex.Get(), width, height);
+        }
+        return nullptr;
+    }
+
+    /// True when the mixer-side import needs a shared NT handle per staging
+    /// texture (Vulkan) rather than the D3D11 object itself (OpenGL).
+    bool uses_shared_handles() const
+    {
+#ifdef ENABLE_VULKAN
+        if (vk_import_)
+            return true;
+#endif
+        return false;
+    }
+
+    void release_imports()
+    {
+#ifdef ENABLE_VULKAN
+        if (vk_import_)
+            vk_import_->release_imports();
+#endif
+        if (gl_import_)
+            gl_import_->release_registrations();
+    }
 
     slot                                  slots_[kSlots];
     DXGI_FORMAT                           slot_format_ = DXGI_FORMAT_UNKNOWN;
@@ -117,15 +172,17 @@ struct html_gpu_bridge::impl
     ~impl()
     {
         // Ordering matters and is easy to get wrong: stop accepting work, drain
-        // the worker (phase two may be mid-copy), release the Vulkan imports
-        // (which waits on the GPU), and only then let the D3D11 textures the
-        // imports alias go.
+        // the worker (phase two may be mid-copy), release the imports (which on
+        // Vulkan waits on the GPU, and on OpenGL unregisters the objects), and only
+        // then let the D3D11 textures those imports alias go.
         healthy_ = false;
         if (worker_)
             worker_.reset();
-        if (import_)
-            import_->release_imports();
-        import_.reset();
+        release_imports();
+#ifdef ENABLE_VULKAN
+        vk_import_.reset();
+#endif
+        gl_import_.reset();
 
         for (auto& s : slots_) {
             if (s.shared)
@@ -219,10 +276,12 @@ struct html_gpu_bridge::impl
         td.SampleDesc     = {1, 0};
         td.Usage          = D3D11_USAGE_DEFAULT;
         td.BindFlags      = D3D11_BIND_SHADER_RESOURCE;
-        // NT handle so Vulkan can import it; no keyed mutex, because the only two
-        // users are this device and the import, and the fence below already orders
-        // them.
-        td.MiscFlags      = D3D11_RESOURCE_MISC_SHARED_NTHANDLE | D3D11_RESOURCE_MISC_SHARED;
+        // Vulkan imports these by shared NT handle, so they have to be shareable.
+        // WGL_NV_DX_interop2 registers the ID3D11Texture2D object itself and needs
+        // no handle at all -- and the ffmpeg producer's interop path deliberately
+        // uses MiscFlags = 0, so don't ask for sharing we won't use.
+        const bool need_shared_handle = uses_shared_handles();
+        td.MiscFlags = need_shared_handle ? (D3D11_RESOURCE_MISC_SHARED_NTHANDLE | D3D11_RESOURCE_MISC_SHARED) : 0;
 
         for (auto& s : slots_) {
             s.tex.Reset();
@@ -235,22 +294,36 @@ struct html_gpu_bridge::impl
                 reason = L"CreateTexture2D failed " + hr_hex(hr);
                 return false;
             }
-            ComPtr<IDXGIResource1> res;
-            if (FAILED(s.tex.As(&res))) {
-                reason = L"IDXGIResource1 unavailable on the staging texture";
-                return false;
-            }
-            hr = res->CreateSharedHandle(nullptr, DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE, nullptr,
-                                         &s.shared);
-            if (FAILED(hr)) {
-                reason = L"CreateSharedHandle failed " + hr_hex(hr);
-                return false;
+            if (need_shared_handle) {
+                ComPtr<IDXGIResource1> res;
+                if (FAILED(s.tex.As(&res))) {
+                    reason = L"IDXGIResource1 unavailable on the staging texture";
+                    return false;
+                }
+                hr = res->CreateSharedHandle(nullptr, DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE, nullptr,
+                                             &s.shared);
+                if (FAILED(hr)) {
+                    reason = L"CreateSharedHandle failed " + hr_hex(hr);
+                    return false;
+                }
             }
             s.width  = width;
             s.height = height;
             s.busy   = false;
         }
         slot_format_ = format;
+
+        // The GL path caches a registration per texture, so a rebuilt ring has to be
+        // re-registered. (The Vulkan path caches by handle and does the equivalent in
+        // release_imports().)
+        if (gl_import_) {
+            for (auto& s : slots_) {
+                if (!gl_import_->register_texture(s.tex.Get())) {
+                    reason = L"wglDXRegisterObjectNV failed for a staging texture";
+                    return false;
+                }
+            }
+        }
         return true;
     }
 
@@ -304,19 +377,13 @@ struct html_gpu_bridge::impl
     {
         auto& s = slots_[index];
 
-        std::shared_ptr<core::texture> tex;
-        const bool ok = import_ && import_->copy_texture(s.shared, width, height, tex);
-        // The Vulkan copy reads the staging texture, so the slot cannot be reused
-        // until it has retired -- which copy_texture guarantees on its next call,
-        // but the next call may be for a different slot. Wait here instead.
-        if (import_)
-            import_->wait_for_previous_copy();
+        auto tex = import_slot(index, width, height);
 
         s.busy = false;
         in_flight_.fetch_sub(1);
 
-        if (!ok || !tex) {
-            note_failure(L"Vulkan import/copy failed");
+        if (!tex) {
+            note_failure(L"the mixer-side import could not copy the staging texture");
             return;
         }
 
@@ -363,12 +430,10 @@ struct html_gpu_bridge::impl
             return false;
         }
 
-        std::shared_ptr<core::texture> tex;
-        if (!import_->copy_texture(slots_[0].shared, slots_[0].width, slots_[0].height, tex) || !tex) {
-            reason = L"self-test: the Vulkan import could not copy the staging texture";
+        if (!import_slot(0, slots_[0].width, slots_[0].height)) {
+            reason = L"self-test: the mixer-side import could not copy the staging texture";
             return false;
         }
-        import_->wait_for_previous_copy();
         return true;
     }
 };
@@ -385,23 +450,10 @@ std::unique_ptr<html_gpu_bridge> html_gpu_bridge::create(core::frame_factory&   
                                                          std::function<void(core::draw_frame)> on_frame,
                                                          std::wstring&                         reason)
 {
-    if (factory.gpu_device_backend() != core::gpu_backend::vulkan) {
-        // The OpenGL mixer needs the WGL_NV_DX_interop2 route instead. It is a
-        // different mechanism, not a parameter, and is not built yet -- say so
-        // rather than failing obscurely.
-        reason = L"only the Vulkan mixer is supported (the OpenGL WGL_NV_DX_interop path is not built)";
-        return nullptr;
-    }
-
-    auto* vk_device = factory.gpu_device_handle();
-    if (!vk_device) {
+    const auto backend = factory.gpu_device_backend();
+    auto*      gpu     = factory.gpu_device_handle();
+    if (!gpu) {
         reason = L"the mixer reported no GPU device";
-        return nullptr;
-    }
-
-    const int adapter = accelerator::vulkan::dxgi_adapter_for_vk_device(vk_device);
-    if (adapter < 0) {
-        reason = L"could not match the mixer's Vulkan device to a DXGI adapter";
         return nullptr;
     }
 
@@ -411,13 +463,72 @@ std::unique_ptr<html_gpu_bridge> html_gpu_bridge::create(core::frame_factory&   
     m.stream_tag_ = stream_tag;
     m.on_frame_   = std::move(on_frame);
 
-    if (!m.create_device(adapter, reason))
-        return nullptr;
+    int adapter = -1;
 
-    try {
-        m.import_ = std::make_unique<accelerator::vulkan::d3d11_import_bridge>(vk_device);
-    } catch (const std::exception& e) {
-        reason = L"d3d11_import_bridge: " + u16(e.what());
+    if (backend == core::gpu_backend::vulkan) {
+#ifdef ENABLE_VULKAN
+        // Vulkan can be asked directly which adapter it is on, via the device LUID.
+        adapter = accelerator::vulkan::dxgi_adapter_for_vk_device(gpu);
+        if (adapter < 0) {
+            reason = L"could not match the mixer's Vulkan device to a DXGI adapter";
+            return nullptr;
+        }
+        if (!m.create_device(adapter, reason))
+            return nullptr;
+        try {
+            m.vk_import_ = std::make_unique<accelerator::vulkan::d3d11_import_bridge>(gpu);
+        } catch (const std::exception& e) {
+            reason = L"d3d11_import_bridge: " + u16(e.what());
+            return nullptr;
+        }
+#else
+        reason = L"this build has no Vulkan support";
+        return nullptr;
+#endif
+    } else if (backend == core::gpu_backend::opengl) {
+        // OpenGL has no equivalent of the LUID query -- there is no way to ask a GL
+        // context which DXGI adapter it belongs to. wglDXOpenDeviceNV succeeding *is*
+        // the adapter test, and the only reliable one, so walk the adapters until one
+        // opens. On a single-GPU machine that is adapter 0 on the first try.
+        ComPtr<IDXGIFactory1> dxgi;
+        if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&dxgi)))) {
+            reason = L"CreateDXGIFactory1 failed";
+            return nullptr;
+        }
+
+        std::wstring          last;
+        ComPtr<IDXGIAdapter1> probe;
+        for (UINT i = 0; dxgi->EnumAdapters1(i, probe.ReleaseAndGetAddressOf()) != DXGI_ERROR_NOT_FOUND; ++i) {
+            DXGI_ADAPTER_DESC1 d{};
+            probe->GetDesc1(&d);
+            if (d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE)
+                continue;
+            if (!m.create_device(static_cast<int>(i), last))
+                continue;
+            m.gl_import_ = accelerator::ogl::dx_interop::create(gpu, m.device_.Get(), last);
+            if (m.gl_import_) {
+                adapter = static_cast<int>(i);
+                break;
+            }
+            // Wrong adapter: drop the device and try the next one.
+            m.device_.Reset();
+            m.device1_.Reset();
+            m.context_.Reset();
+            m.context4_.Reset();
+            m.fence_.Reset();
+            m.flush_query_.Reset();
+            if (m.fence_event_) {
+                CloseHandle(m.fence_event_);
+                m.fence_event_ = nullptr;
+            }
+        }
+
+        if (!m.gl_import_) {
+            reason = L"no DXGI adapter could be opened for WGL_NV_DX_interop2 (" + last + L")";
+            return nullptr;
+        }
+    } else {
+        reason = L"the mixer has no GPU backend";
         return nullptr;
     }
 
@@ -449,13 +560,18 @@ bool html_gpu_bridge::submit(void* shared_handle, shared_surface_order order, in
     if (m.slots_[0].width != w || m.slots_[0].height != h || m.slot_format_ != want) {
         if (m.worker_)
             m.worker_->invoke([] {});
+
+        // Release before rebuilding, not after. build_slots drops each old
+        // ID3D11Texture2D, and on the GL path those are still registered with the
+        // interop device at that point -- unregistering afterwards would be too late,
+        // and would also undo the registrations build_slots itself just made.
+        m.release_imports();
+
         std::wstring reason;
         if (!m.build_slots(w, h, want, reason)) {
             m.note_failure(L"could not rebuild the staging ring: " + reason);
             return false;
         }
-        if (m.import_)
-            m.import_->release_imports();
         CASPAR_LOG(info) << L"[html/gpu] staging ring rebuilt for " << w << L"x" << h << L".";
     }
 

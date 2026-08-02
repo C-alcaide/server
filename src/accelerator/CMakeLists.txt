@@ -10,6 +10,7 @@ set(SOURCES
 	ogl/util/buffer.cpp
 	ogl/util/context.cpp
 	ogl/util/device.cpp
+	ogl/util/dx_interop.cpp
 	ogl/util/shader.cpp
 	ogl/util/texture.cpp
 	ogl/util/matrix.cpp
@@ -27,6 +28,7 @@ set(HEADERS
 	ogl/util/buffer.h
 	ogl/util/context.h
 	ogl/util/device.h
+	ogl/util/dx_interop.h
 	ogl/util/shader.h
 	ogl/util/texture.h
 	ogl/util/matrix.h
