@@ -1391,3 +1391,43 @@ Harness: `CasparCG-TestRunner/vkdispatch/upload_matrix.py` and `deint_check.py`.
 Not worth pursuing unless the Vizrt license is already available. The standard SDK's CPU
 path remains the practical ceiling. Phase 1 optimizations (readback skip + still-frame
 cache) already reduce the cost of producing CPU frames for NDI.
+
+---
+
+## Measured: what skipping the readback actually buys — 2026-08-02
+
+Baseline is the tree immediately before this work (`1ff94e989`), built with the same
+toolchain and run against the same binary directory, so only the source differs.
+
+**Scenario:** four 1080p50 channels, each with `<system-audio />` as its only consumer,
+each playing a *moving* clip on loop (static content lets the still-frame cache skip
+composition entirely and masks the whole test). Baseline reads back 4 × 8.29 MB × 50 =
+1.66 GB/s; the current tree reads back nothing. 25 s warm-up discarded, 60 s measured,
+GPU sampled twice a second on the mixer's adapter.
+
+| | CPU (s/60 s) | GPU util | mem util | private MB |
+|---|---|---|---|---|
+| before, run 1 | 164.3 | 32.8% | 1.9% | 2833 |
+| before, run 2 | 161.0 | 32.6% | 2.1% | 2856 |
+| after, run 1 | 162.4 | 25.1% | 5.2% | 2747 |
+| after, run 2 | 167.3 | 26.0% | 6.8% | 2757 |
+
+**~22% less GPU utilisation** on the mixer's adapter, and about 90 MB less private
+memory — consistent with not allocating readback staging buffers for four channels.
+
+**Process CPU time does not move at all**, and that corrects how this was originally
+justified. A readback is `glGetTextureImage` into a PBO followed by a fence wait that
+*yields* rather than blocks; the transfer is done by the GPU's copy engine. So "415
+MB/s" is a true statement about bytes and a false one about host cycles. The saving is
+GPU time, PCIe bandwidth and VRAM, which is what buys headroom on a busy mixer — not
+CPU.
+
+It is also below the noise floor on a **single** 1080p50 channel: the first pass at
+that scale showed 95.6 s vs 97.2 s CPU and no measurable difference. The effect scales
+with pixels × channels × rate, so it is worth having on a multi-channel or 4K server
+and is invisible on a small one.
+
+`utilization.memory` rising rather than falling is reported as observed. It is a
+coarse "fraction of time the memory controller was busy" counter, not a bandwidth
+figure, and with overall GPU busy time down by a quarter the distribution it samples is
+not comparable between the two runs. Not over-interpreted here.
