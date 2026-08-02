@@ -1683,3 +1683,66 @@ at 1080p. Not investigated.
   `frame_geometry::get_default_vflip()` it would let OFX and ISF use instead of their
   own output flip blits. Nine ad-hoc GPU blits collapse into one. Maintainability
   rather than measured performance, so it wants the same scrutiny as the item above.
+
+## The 2160p crash: a regression from the readback change — 2026-08-02
+
+Earlier notes in this file recorded this crash as pre-existing. **That was wrong.** The
+binary it was tested against still contained the Tier 1 readback change, so it was
+never a baseline; the actual pre-work binary does not crash.
+
+Adding any host-path consumer to a channel that had gone GPU-resident took the process
+down with an access violation. It needs neither 4K nor OFX — those were incidental to
+how it was first seen. `ADD 1 FILE ... -vcodec libx264` at 1080p on either mixer is
+enough; `h264_nvenc` is not, because it takes GPU-direct and never asks for host pixels.
+
+Making audio-only consumers stop forcing the readback is what made it reachable. Before
+that, `<system-audio />` pinned readback on for the channel's life and the GPU-only →
+readback transition never occurred. Now it does, and **the mixer runs a frame behind
+the flag**: the first frame a newly attached consumer sees was composed while readback
+was still off, so it has no host image.
+
+Nothing caught it on the way through. `output::operator()` validates the frame size,
+but `const_frame::size()` comes from the `pixel_format_desc` rather than the buffer, so
+a GPU-only frame reports full size and passes. `do_send` then handed it over and the
+consumer dereferenced `image_data(0).data()`.
+
+`do_send` now withholds such a frame from consumers that declared
+`needs_cpu_frame_data()`. One frame at attach, logged once.
+
+A second crash surfaced during the same investigation, also mine: removing a GPU-direct
+NVENC consumer destroyed `cuda_vk_uploader`'s external-memory imports after FFmpeg's
+CUDA context had gone. The destructor already released the OpenGL uploader explicitly,
+with a comment explaining exactly this hazard; the Vulkan one was added beside it
+without the matching release.
+
+## The NVENC colour question, answered — and it points the other way
+
+The byte-order fix (RGB0 vs BGR0 per mixer) could have been masking a real colour
+difference rather than fixing one, since the GPU-direct path lets NVENC do RGB→YCbCr
+internally while the host path converts with swscale. Checked against a PRINT capture
+— a lossless PNG off the mixer's own readback, i.e. the pixels every host consumer sees
+— rather than against the other recording, so a shared error could not hide.
+
+Same paused frame, both mixers, identical results:
+
+| against the mixer's own readback | PSNR | mean abs diff |
+|---|---|---|
+| `libx264` (host path) | 28.48 dB | 5.11 |
+| `h264_nvenc` (GPU-direct) | **40.97 dB** | **0.78** |
+
+**The GPU-direct path is the more faithful of the two.** The byte-order fix was
+correct and is not hiding anything.
+
+What the check did surface is a colour error in the **host** recording path. Greys come
+through fine — 191→190, 234→232 — while a saturated green goes (15,223,5) → (0,189,0).
+Error confined to saturated colour with neutrals intact is a colour-matrix signature,
+not encoder quality or subsampling. It is identical on both mixers, so it is in the
+host RGB→YUV encode and nothing to do with the composition target. Not root-caused
+here, and untouched by this work.
+
+Consistent with that, the two files disagree about what they are: NVENC writes
+`colorspace=bt470bg` with `primaries=bt709, transfer=bt709`, while libx264 writes
+`bt709` throughout. NVENC's tag is internally odd but evidently matches what it
+actually encoded, which is why it round-trips accurately. libx264's says BT.709 and
+does not deliver it. **Do not "fix" the NVENC tag to bt709 without re-measuring** — the
+picture is currently correct and the tag is what makes it decode that way.
