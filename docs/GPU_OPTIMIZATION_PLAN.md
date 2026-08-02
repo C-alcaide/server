@@ -1486,3 +1486,49 @@ to -- so the bridge instead tries `wglDXOpenDeviceNV` against each adapter in tu
 keeps the one that opens. On this dual-GPU machine that lands on the A4000 on the
 first try, and the failure mode on the wrong adapter is a clean refusal rather than a
 wrong picture.
+
+## The ISF Vulkan input gap: reproduced, and why the obvious fix does not close it — 2026-08-02
+
+`isf_producer::build_binding` returns false for any texture-backed source that is not
+an `ogl::texture`, and `receive_impl` then logs *"source is not single-plane 8-bit
+BGRA/RGBA"* and passes the source through unfiltered. On the Vulkan mixer that means
+an ISF effect over a GPU-native producer silently does nothing.
+
+**Reproduced**, on the Vulkan mixer:
+
+```
+PLAY 1-10 [ISF] isf_invert [HTML] "cefalpha"     (with configuration.html.gpu-direct on)
+  -> [warning] [isf] 'isf_invert.fs' source is not single-plane 8-bit BGRA/RGBA; passing it through.
+```
+
+Two things are worth recording, because both cost a cycle to learn.
+
+**It is not reproducible with HAP.** `[ISF] <shader> "m_hap"` renders correctly on the
+Vulkan mixer, on the pre-existing code, and matches the OpenGL result byte for byte.
+Whatever HAP delivers there still has host pixels, so `build_binding` takes its CPU
+branch and the gap is never reached. A test that "passes" against HAP proves nothing
+about this.
+
+**Aliasing the source into GL is not sufficient.** The obvious fix -- import the
+source's Vulkan memory as a GL texture with `gl_import_memory_as_texture`, the same
+primitive `produce_vk_shared` already uses in the other direction -- was written and
+does not work for the case above. The frames it needs to import come from
+`d3d11_import_bridge::copy_texture`, which allocates through `device::create_texture`:
+pooled, and therefore **not exportable**. `export_native_handle()` has nothing to
+give, and the import declines. The change was reverted rather than shipped, since it
+could not be shown to fix any reachable case.
+
+A real fix has to decide where exportability comes from, and neither option is free:
+
+- Allocate producer-facing textures with `create_exportable_texture`. Exportable
+  allocations are dedicated rather than pooled, so this is an allocation per frame per
+  producer, not a flag.
+- Give ISF a readback fallback for a source it cannot alias, so it produces the right
+  picture at the cost of a round trip instead of silently producing the wrong one.
+  Cheaper and strictly better than today, but note the composited frame's
+  `texture_wrapper` is the base class, whose `read_pixels()` returns empty -- so this
+  needs the readable wrapper, or the base to grow the capability.
+
+The second is the smaller, safer change and is what a follow-up should do first. Until
+then the honest statement is: **ISF over a host-less Vulkan source passes through
+unfiltered, and warns when it does.**
