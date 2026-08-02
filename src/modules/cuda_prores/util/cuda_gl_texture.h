@@ -36,6 +36,26 @@
 //
 // Lifetime: CudaGLTexture MUST be destroyed before the underlying ogl::texture
 // is released (i.e. before the shared_ptr ref-count drops to zero).
+//
+// ── Do not copy this file for a new module ──────────────────────────────────
+// The canonical version is src/modules/cuda_gl_texture.h. Use that one.
+//
+// This copy and cuda_notchlc's differ from it in one way that is not stylistic:
+// **the caller must hold caspar::cuda_gl_interop_mutex() across construction and
+// destruction** -- see prores_producer.cpp:458 and :921. The canonical class
+// takes that lock itself. The mutex is not optional: cudaGraphicsGLRegisterImage
+// and cudaGraphicsUnregisterResource are not thread-safe against each other even
+// for distinct textures, and two producers swapping on one layer make the driver
+// dereference freed memory (BUILDING_WORKFLOW.md #4). Copying this header without
+// also copying those two lock_guards compiles cleanly and crashes rarely.
+//
+// These two copies are deliberately left alone rather than merged: the canonical
+// class throws where notchlc's discards the unmap error, and notchlc calls unmap
+// outside a try, so a merge changes what happens in that decoder on GPU failure.
+// That wants ProRes and NotchLC content under TDR to validate, not a diff.
+// A merge would also need the four caller-side lock_guards deleted in the same
+// commit -- cuda_gl_interop_mutex() is a plain std::mutex, so keeping both is an
+// immediate self-deadlock.
 // ---------------------------------------------------------------------------
 #pragma once
 

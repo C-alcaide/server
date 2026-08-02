@@ -23,8 +23,32 @@
 
 // util/cuda_gl_texture.h
 // Thin RAII wrapper that registers an OGL texture with CUDA for zero-copy
-// device→GL writes.  Identical to cuda_prores/util/cuda_gl_texture.h except
-// the namespace is caspar::cuda_notchlc.
+// device→GL writes.
+//
+// It is no longer true that this is "identical to cuda_prores' copy except the
+// namespace", as this comment used to claim. The two have drifted: that one has a
+// move constructor, throws std::logic_error on a double map, and checks the unmap's
+// error code. This one has no move constructor, warns instead of throwing when
+// destroyed while mapped, and discards the unmap error -- which matters, because
+// notchlc_producer.cpp:832 calls unmap outside the try that guards map.
+//
+// ── Do not copy this file for a new module ──────────────────────────────────
+// The canonical version is src/modules/cuda_gl_texture.h. Use that one.
+//
+// The difference that is not stylistic: **the caller must hold
+// caspar::cuda_gl_interop_mutex() across construction and destruction** -- see
+// notchlc_producer.cpp:675 and :946. The canonical class takes that lock itself.
+// The mutex is not optional: cudaGraphicsGLRegisterImage and
+// cudaGraphicsUnregisterResource are not thread-safe against each other even for
+// distinct textures, and two producers swapping on one layer make the driver
+// dereference freed memory (BUILDING_WORKFLOW.md #4). Copying this header without
+// also copying those two lock_guards compiles cleanly and crashes rarely.
+//
+// This copy is deliberately left unmerged: adopting the canonical class changes
+// what this decoder does when unmap fails, from silence to an exception escaping
+// the decode thread. That wants NotchLC content under TDR to validate, not a diff.
+// A merge would also need the caller-side lock_guards deleted in the same commit --
+// cuda_gl_interop_mutex() is a plain std::mutex, so keeping both self-deadlocks.
 #pragma once
 
 #include <accelerator/ogl/util/texture.h>

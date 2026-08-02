@@ -34,6 +34,11 @@
  * alone deliberately: merging them changes one decoder's behaviour under GPU error
  * conditions, which wants ProRes and NotchLC content to validate rather than a diff.
  *
+ * If that merge is ever done: this class locks cuda_gl_interop_mutex() internally
+ * and both decoders already hold it at their call sites (prores_producer.cpp:458
+ * and :921, notchlc_producer.cpp:675 and :946). It is a plain std::mutex, so those
+ * four lock_guards must go in the same commit or the first clip self-deadlocks.
+ *
  * ── Two things that are not obvious ──────────────────────────────────────────
  * cudaGraphicsGLRegisterImage and cudaGraphicsUnregisterResource are not thread-safe
  * against each other, even for distinct textures; two producers swapping on one layer
