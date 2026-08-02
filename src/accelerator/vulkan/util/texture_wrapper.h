@@ -61,9 +61,18 @@ class texture_wrapper : public core::texture
     {
     }
 
-    /// Box-filtered reduction plus readback. Available only when the wrapper was
-    /// given the owning device -- the mixer passes it for the composited frame,
-    /// which is the one consumers ask this of. See core::texture.
+    /// On-demand GPU->CPU readback. Available only when the wrapper was given the
+    /// owning device; without one this returns empty, as core::texture's default does.
+    ///
+    /// On the base rather than only on VkReadableTextureWrapper because "can this
+    /// texture produce host pixels" is a property of knowing the device, not of which
+    /// constructor was used -- and a caller holding a core::texture cannot tell the
+    /// two apart anyway. A producer that hands over a bare texture still gets the
+    /// empty default.
+    std::vector<std::uint8_t> read_pixels() const override;
+
+    /// Box-filtered reduction plus readback. Same availability rule as read_pixels().
+    /// See core::texture.
     std::vector<std::uint8_t> read_pixels_reduced(int levels, int& out_width, int& out_height) const override;
 
     void bind(int /*index*/) override {} // No-op for Vulkan
@@ -130,10 +139,12 @@ class texture_wrapper : public core::texture
 };
 
 /**
- * Extends texture_wrapper with on-demand GPU readback via the Vulkan device.
- * Used by producers that write directly to VK textures without CUDA
- * (e.g. hap_producer).  read_pixels() uses vulkan::device::copy_async()
- * which is zero-cost during normal playback.
+ * A texture_wrapper that carries its device, and so can be read back.
+ *
+ * Kept as a named type because the call sites read better for it (hap_producer and
+ * isf_producer both say what they mean by constructing one), but it no longer adds
+ * behaviour: read_pixels() lives on the base and keys off the device pointer, which
+ * this constructor is simply a clearer way to set.
  */
 class VkReadableTextureWrapper : public texture_wrapper
 {
@@ -142,10 +153,8 @@ class VkReadableTextureWrapper : public texture_wrapper
                              std::shared_ptr<device>          vk_dev)
         : texture_wrapper(std::move(tex))
     {
-        vk_device_ = std::move(vk_dev); // the base owns it now; see texture_wrapper
+        vk_device_ = std::move(vk_dev);
     }
-
-    std::vector<std::uint8_t> read_pixels() const override;
 };
 
 }}} // namespace caspar::accelerator::vulkan

@@ -619,7 +619,16 @@ bool d3d11_import_bridge::copy_texture(void* handle, int width, int height, std:
     if (!ok)
         return false;
 
-    out = std::make_shared<texture_wrapper>(std::move(tex));
+    // Readable, not just bindable. A single-plane import is a whole composited
+    // picture -- a browser page, say -- and things downstream legitimately want host
+    // pixels from it: PRINT, an ISF or OFX filter wrapping the producer, or any
+    // consumer that has not got a GPU path. Handing over the device is what lets
+    // them ask, instead of finding a texture they cannot read and silently giving up.
+    //
+    // copy_planes' outputs deliberately do not get this: those are half-resolution
+    // chroma and luma planes of a hardware-decoded frame, and a host copy of one
+    // plane is not a picture anyone can use.
+    out = std::make_shared<VkReadableTextureWrapper>(std::move(tex), m.dev_->shared_from_this());
     return true;
 }
 

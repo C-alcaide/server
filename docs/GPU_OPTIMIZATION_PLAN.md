@@ -1529,6 +1529,22 @@ A real fix has to decide where exportability comes from, and neither option is f
   `texture_wrapper` is the base class, whose `read_pixels()` returns empty -- so this
   needs the readable wrapper, or the base to grow the capability.
 
-The second is the smaller, safer change and is what a follow-up should do first. Until
-then the honest statement is: **ISF over a host-less Vulkan source passes through
-unfiltered, and warns when it does.**
+The second is the smaller, safer change, and is what was done: `build_binding` now
+falls back to `core::texture::read_pixels()` for a source it cannot sample, converts
+that to the bottom-up RGBA the shader expects, and says so once in the log. A round
+trip is a poor outcome; the wrong picture is not an outcome at all.
+
+For that to work the frame has to be readable, and the ones from
+`d3d11_import_bridge::copy_texture` were not: they were wrapped in a bare
+`texture_wrapper`, whose `read_pixels()` returns empty. `read_pixels()` therefore moved
+onto the base wrapper, keyed off whether the wrapper was given its device — "can this
+produce host pixels" is a property of knowing the device, not of which constructor ran
+— and `copy_texture` now passes it. That also makes html gpu-direct frames readable by
+anything else that wants host pixels: PRINT, an OFX filter, a consumer with no GPU path.
+
+Verified on the reproduction above: the passthrough warning is replaced by the readback
+notice, and the shader's channel swap holds exactly (`out == src.brg`) at 300/300
+sampled points against the unfiltered source.
+
+Aliasing remains the better answer and is still open; it needs the exportability
+decision above.

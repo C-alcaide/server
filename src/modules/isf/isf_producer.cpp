@@ -285,7 +285,39 @@ class isf_producer : public core::frame_producer
                 out.bgra   = false;
                 return true;
             }
-            return false; // texture-backed but not an OGL texture (e.g. Vulkan) - can't sample here
+
+            // Texture-backed but not one this GL context can sample -- a Vulkan
+            // source on the Vulkan mixer. Read it back rather than giving up.
+            //
+            // Giving up is what happened before, and it was worse than it sounds:
+            // receive_impl passed the source through unfiltered, so an ISF effect
+            // over any GPU-native producer silently did nothing for the rest of the
+            // run. A round trip is a poor outcome; the wrong picture is not an
+            // outcome at all.
+            //
+            // Aliasing the source into this context with GL_EXT_memory_object would
+            // be better and is the obvious next step, but it needs the source to be
+            // an exportable allocation, and the ones that reach here are pooled. See
+            // docs/GPU_OPTIMIZATION_PLAN.md.
+            if (cf.pixel_format_desc().planes.size() == 1 &&
+                cf.pixel_format_desc().planes[0].depth == common::bit_depth::bit8) {
+                auto host = t->read_pixels();
+                if (host.size() >= static_cast<std::size_t>(w) * h * 4) {
+                    auto        fmt      = t->read_pixels_format().value_or(cf.pixel_format_desc().format);
+                    const bool  src_rgba = fmt == core::pixel_format::rgba;
+                    static bool logged   = false;
+                    if (!logged) {
+                        logged = true;
+                        CASPAR_LOG(info) << L"[isf] the source is a GPU texture this context cannot sample; "
+                                            L"reading it back per frame. Correct, but not free.";
+                    }
+                    buf.resize(static_cast<std::size_t>(w) * h * 4);
+                    to_rgba_bottom_up(host.data(), w * 4, src_rgba, buf.data(), w, h);
+                    out.rgba = buf.data();
+                    return true;
+                }
+            }
+            return false;
         }
         const auto& pfd = cf.pixel_format_desc();
         const bool  ok  = (pfd.format == core::pixel_format::bgra || pfd.format == core::pixel_format::rgba) &&

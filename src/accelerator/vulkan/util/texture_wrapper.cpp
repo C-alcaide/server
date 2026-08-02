@@ -6,10 +6,13 @@
 
 namespace caspar { namespace accelerator { namespace vulkan {
 
-std::vector<std::uint8_t> VkReadableTextureWrapper::read_pixels() const
+std::vector<std::uint8_t> texture_wrapper::read_pixels() const
 {
     if (!vk_device_ || !tex_)
         return {};
+
+    // The caller may be on any thread and asynchronous to the channel's render.
+    ensure_render_complete();
 
     auto future = vk_device_->copy_async(tex_);
     auto arr    = future.get();
