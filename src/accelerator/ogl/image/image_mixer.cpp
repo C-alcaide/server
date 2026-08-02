@@ -819,8 +819,19 @@ struct image_mixer::impl
     create_frame(const void* tag, const core::pixel_format_desc& desc, common::bit_depth depth) override
     {
         std::vector<array<std::uint8_t>> image_data;
-        for (auto& plane : desc.planes) {
-            auto bytes_per_pixel = depth == common::bit_depth::bit8 ? 1 : 2;
+        for (std::size_t n = 0; n < desc.planes.size(); ++n) {
+            const auto& plane           = desc.planes[n];
+            auto        bytes_per_pixel = depth == common::bit_depth::bit8 ? 1 : 2;
+
+            // An aliasing plane shares the buffer of the plane it names instead of
+            // getting its own: same bytes, a different sampling rate on the GPU side.
+            // Each plane still gets its own texture below; only the staging buffer and
+            // the producer's memcpy into it are shared.
+            if (plane.alias_of >= 0 && plane.alias_of < static_cast<int>(n)) {
+                image_data.push_back(image_data[plane.alias_of].alias());
+                continue;
+            }
+
             image_data.push_back(ogl_->create_array(plane.size * bytes_per_pixel));
         }
 

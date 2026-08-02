@@ -111,6 +111,13 @@ core::mutable_frame make_frame(void*                            tag,
                 // memory -- a full-frame CPU pass per decoded frame whose only
                 // purpose was to reshape data the GPU can sample directly.
                 for (int n = 0; n < static_cast<int>(pix_desc.planes.size()); ++n) {
+                    // This plane shares the buffer of an earlier one, so its bytes are
+                    // already there -- copying them again would write the same values
+                    // over themselves. (UYVY, where data_map points both planes at
+                    // data[0]; that duplicated copy is what alias_of removes.)
+                    if (pix_desc.planes[n].alias_of >= 0)
+                        continue;
+
                     auto frame_plan_index = data_map.empty() ? n : data_map.at(n);
 
                     tbb::parallel_for(0, pix_desc.planes[n].height, [&](int y) {
@@ -324,8 +331,17 @@ core::pixel_format_desc pixel_format_desc(AVPixelFormat     pix_fmt,
             return desc;
         }
         case core::pixel_format::uyvy: {
+            // One packed buffer, described twice: a full-rate 2-component luma view and
+            // a half-rate 4-component chroma view, so the shader can sample Y per pixel
+            // and CbCr per pair. Both views have linesize == linesizes[0] and the same
+            // size, i.e. they are byte-identical, not merely overlapping.
             desc.planes.push_back(core::pixel_format_desc::plane(linesizes[0] / 2, height, 2, depth));
             desc.planes.push_back(core::pixel_format_desc::plane(linesizes[0] / 4, height, 4, depth));
+
+            // Share one staging buffer between them. Previously the frame factory
+            // allocated two and make_frame memcpy'd the same bytes into both -- 4.15 MB
+            // of pointless copy per 1080p frame, on the capture thread, per input.
+            desc.planes[1].alias_of = 0;
 
             data_map.clear();
             data_map.push_back(0);

@@ -88,6 +88,24 @@ class array final
         return *this;
     }
 
+    /// A second handle on the same memory, sharing the same owner.
+    ///
+    /// The copy constructor is deleted so that a writable buffer has exactly one
+    /// owner, and that is still the rule -- this is a named exception for the one
+    /// case that needs it: a pixel_format_desc plane that deliberately aliases an
+    /// earlier plane's bytes, where the same buffer is handed to the GPU twice under
+    /// two different interpretations (UYVY exposes one row of bytes as both a
+    /// full-rate luma view and a half-rate chroma view). Writing through either
+    /// handle writes the one buffer; there is no copy-on-write.
+    array alias() const
+    {
+        array a;
+        a.ptr_     = ptr_;
+        a.size_    = size_;
+        a.storage_ = storage_;
+        return a;
+    }
+
     T*          begin() const { return ptr_; }
     T*          data() const { return ptr_; }
     T*          end() const { return ptr_ + size_; }

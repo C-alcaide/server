@@ -96,6 +96,20 @@ struct pixel_format_desc final
         int               stride   = 0;
         common::bit_depth depth    = common::bit_depth::bit8;
 
+        /// Index of an earlier plane whose host bytes this plane shares, or -1 for
+        /// its own buffer.
+        ///
+        /// Some packed formats are described to the mixer as several planes over the
+        /// same bytes so the shader can sample them at different rates -- UYVY is one
+        /// buffer presented as a full-rate 2-component luma view and a half-rate
+        /// 4-component chroma view. Without this the frame factory allocated a staging
+        /// buffer per plane and the producer memcpy'd the identical bytes into each,
+        /// doubling the host cost of every UYVY frame (decklink and NDI input, and
+        /// ffmpeg software decode).
+        ///
+        /// Only the host buffer is shared. Each plane still gets its own texture.
+        int alias_of = -1;
+
         plane() = default;
 
         plane(int width, int height, int stride, common::bit_depth depth = common::bit_depth::bit8)
@@ -131,7 +145,8 @@ struct pixel_format_desc final
 inline bool operator==(const pixel_format_desc::plane& lhs, const pixel_format_desc::plane& rhs)
 {
     return lhs.linesize == rhs.linesize && lhs.width == rhs.width && lhs.height == rhs.height &&
-           lhs.size == rhs.size && lhs.stride == rhs.stride && lhs.depth == rhs.depth;
+           lhs.size == rhs.size && lhs.stride == rhs.stride && lhs.depth == rhs.depth &&
+           lhs.alias_of == rhs.alias_of;
 }
 
 inline bool operator!=(const pixel_format_desc::plane& lhs, const pixel_format_desc::plane& rhs)
