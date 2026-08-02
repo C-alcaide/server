@@ -1548,3 +1548,53 @@ sampled points against the unfiltered source.
 
 Aliasing remains the better answer and is still open; it needs the exportability
 decision above.
+
+## ⚠ The OFX CUDA zero-copy path destroys the alpha channel — 2026-08-02
+
+**An OFX CUDA plug-in on the Vulkan mixer emits a fully transparent frame today.** This
+is pre-existing, not introduced by any of the work above, and it matters here because
+the html/CG output on this system is fill+key.
+
+Reproduced with the in-tree test plug-ins (`BUILD_OFX_SAMPLE_PLUGINS=ON`, plug-ins land
+in `build/ofx-plugins`, point `OFX_PLUGIN_PATH` at it and set
+`CASPARCG_OFX_ENABLE_CUDA=1`) over an opaque 4-quadrant source:
+
+| | alpha out |
+|---|---|
+| `caspar.test:CudaPassthrough`, host path (OpenGL mixer) | 255 — correct |
+| `caspar.test:CudaPassthrough`, CUDA zero-copy (Vulkan mixer) | **0** |
+| `caspar.test:CudaPassthrough`, CUDA zero-copy, *pre-work binary* | **0** — pre-existing |
+| `caspar.test:CudaFill` (cudaMemset 64 into all four bytes), zero-copy | 64 — correct |
+
+RGB is correct in every case, and the four quadrants land in the right corners, so
+orientation and channel order are fine. It is specifically alpha, specifically on the
+zero-copy route, specifically when the plug-in reads the source.
+
+What that combination rules out: the zero-copy *delivery* is not at fault (CudaFill
+proves a plug-in's alpha reaches the mixer intact), and the descriptor labelling is not
+at fault (RGB would be wrong too). The remaining suspect is the source-through-plug-in
+route on the CUDA path. `convert_source` and `mirror_output` in `ofx_cuda_render.cpp`
+both read correctly on inspection -- the swizzle order is `{2,1,0,3}` and every NPP call
+is a `C4R` variant -- so the cause was not found and is not guessed at here.
+
+### Why the OpenGL half of this parity gap is not shipped
+
+A CUDA-capable plug-in on the **OpenGL** mixer currently gets no zero-copy at all: it
+takes the host-buffer path, four full-frame CPU passes and two PCIe crossings. Closing
+that was written and works -- the log reports `CUDA-OpenGL zero-copy producer path
+active (no readback)`, the quadrants are correct, and the output is **bit-identical to
+the Vulkan zero-copy path**, which is exactly the parity the mechanism is supposed to
+give.
+
+It was reverted anyway, because it is bit-identical to a path that zeroes alpha.
+OpenGL users are on the host path today and get *correct* alpha; shipping this would
+trade that for speed. For a fill+key deployment that is not a trade worth making.
+
+**Fix the alpha bug first, then land the OpenGL path** -- at which point both backends
+get the win and neither has the defect. The revert is mechanical to redo: a
+`CudaGLTexture` beside `cuda_vk_texture.h` (registration and map/unmap both on the
+mixer's GL thread, with `cudaSetDevice(select_cuda_gl_device())` pinned there -- mapping
+from the producer thread fails with "invalid OpenGL or DirectX context", and CUDA's
+default device is not necessarily the GL-interoperable one on a multi-GPU box), plus a
+branch in `ofx_producer` mirroring the `CASPAR_OFX_VULKAN_CUDA` one but tagging the
+frame `bgra` rather than `rgba`, per the OGL shader's swizzle convention.
