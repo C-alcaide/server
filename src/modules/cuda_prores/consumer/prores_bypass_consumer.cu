@@ -392,6 +392,12 @@ public:
         return caspar::make_ready_future(static_cast<bool>(running_));
     }
 
+    // The frame above is discarded unread, so the mixer must not be asked to read
+    // the composited frame back to host memory for us. Left at the base class
+    // default this consumer would pin a full-frame readback on its channel for
+    // literally nothing.
+    bool needs_cpu_frame_data() const override { return false; }
+
     std::future<bool> call(const std::vector<std::wstring>& params) override
     {
         if (!params.empty()) {

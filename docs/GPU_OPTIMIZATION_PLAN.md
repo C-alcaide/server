@@ -43,7 +43,31 @@ on unnecessary GPU→CPU→GPU roundtrips.
 |----------|-------|--------|
 | NDI | `image_data()` → raw pointer to NDI SDK | MEDIUM — no GPU path in standard SDK |
 | Replay (VMX) | `image_data()` → VMX CPU encode | LOW — VMX designed for CPU |
-| sACN / ArtNet | Few pixels at low refresh rate | LOW — minimal bandwidth |
+| Image (PRINT) | `image_data()` → PNG encode | LOW — one frame per capture, not per tick |
+| sACN / ArtNet | Reads ~2.4% of the pixels, forces 100% of the readback | **HIGH — see below** |
+
+> **"Few pixels at low refresh rate" is not the same as low bandwidth.** The DMX
+> consumers rasterise a handful of fixture quads on their own 10–30 Hz thread, but
+> `needs_cpu_frame_data()` is polled per channel tick, so declaring it forces the
+> mixer to read the *whole* composited frame back at the *channel's* rate — 8.29 MB
+> at 50 fps, 415 MB/s, to compute a few RGB triples. On an LED-wall channel that is
+> the single most expensive consumer attached, and it is the one whose output needs
+> the fewest bytes. Fix planned: `texture::read_pixels_reduced()`, a box-filtered
+> 1/8 readback pulled by the consumer on its own clock (129 KB at 10 Hz).
+
+### Consumers that never touch pixels
+
+These declared nothing and so defaulted to `needs_cpu_frame_data() == true`, re-arming
+the readback for the entire channel. Since `any_consumer_needs_cpu_data()` short-circuits
+on the first `true`, one of these was enough to defeat every GPU-native consumer sharing
+the channel — and the shipped config puts `<system-audio />` on channel 1, so a stock
+install paid for it.
+
+| Consumer | `needs_cpu_frame_data()` | Why it is safe |
+|----------|:---:|---|
+| OAL (`system-audio`) | `false` | `send()` reads `frame.audio_data()` only |
+| PortAudio | `false` | same |
+| ProRes bypass | `false` | `send()` discards the frame; recording is driven off DeckLink callbacks |
 
 ### Producer optimizations
 | Producer | Status |

@@ -429,6 +429,12 @@ struct portaudio_consumer : public core::frame_consumer
 
     bool has_synchronization_clock() const override { return true; }
 
+    // Audio-only: send() reads frame.audio_data() and never touches a pixel, so the
+    // mixer does not need to produce host pixels on this consumer's behalf. See the
+    // note in oal_consumer.cpp -- one consumer defaulting to true re-arms the
+    // full-frame readback for the whole channel.
+    bool needs_cpu_frame_data() const override { return false; }
+
     int index() const override { return 510; }
 
     core::monitor::state state() const override

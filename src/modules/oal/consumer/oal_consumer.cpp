@@ -395,6 +395,13 @@ struct oal_consumer : public core::frame_consumer
 
     bool has_synchronization_clock() const override { return false; }
 
+    // Audio-only: send() reads frame.audio_data() and never touches a pixel. Without
+    // this the base class defaults to true, and because output::any_consumer_needs_cpu_data()
+    // short-circuits on the first consumer that says yes, the shipped config
+    // (<system-audio /> on channel 1) forces a full-frame GPU->CPU readback of the
+    // composited frame on every stock install.
+    bool needs_cpu_frame_data() const override { return false; }
+
     int index() const override { return 500; }
 
     core::monitor::state state() const override
