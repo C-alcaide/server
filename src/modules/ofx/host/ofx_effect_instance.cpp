@@ -67,7 +67,14 @@ OfxStatus ofx_effect_instance::renderAction(OfxTime            time,
                                             bool               draftRender)
 {
     // Render-mode negotiation: CUDA > OpenGL > CPU.
-    if (cuda_enabled_) {
+    //
+    // ctx_.external_gl means the caller already set the OpenGL zero-copy path up: the plug-in is
+    // expected to render into a mixer texture on the mixer's GL context, and neither raw_source nor
+    // source_rgba is populated. Taking the CUDA branch there produced a silent black frame -- a
+    // dual-capable plug-in got a null source_dev, rendered into output_dev, output_rgba was null so
+    // nothing was read back, the status came out OK, and the caller then blitted a render texture
+    // that had never been written. Honour the caller's choice instead of re-deciding here.
+    if (cuda_enabled_ && !ctx_.external_gl) {
         try {
             if (!cuda_)
                 cuda_ = std::make_unique<cuda_backend>();

@@ -338,6 +338,20 @@ class ofx_producer : public core::frame_producer
         if (!ok(pf) || !ok(pt))
             return from_df;
 
+        // The transition path is CPU-only -- both inputs are converted through host buffers
+        // below -- so a GPU-only frame on either side would be a null dereference. It passes
+        // ok() above unchanged, so this is the only thing stopping it.
+        if (!cf_from.has_host_image() || !cf_to.has_host_image()) {
+            static bool warned_nohost = false;
+            if (!warned_nohost) {
+                warned_nohost = true;
+                CASPAR_LOG(warning) << L"[ofx] transition '" << plugin_id_
+                                    << L"' needs host pixels but an input is GPU-only "
+                                       L"(no readback); showing the From input.";
+            }
+            return from_df;
+        }
+
         const int w = static_cast<int>(cf_from.width());
         const int h = static_cast<int>(cf_from.height());
         if (static_cast<int>(cf_to.width()) != w || static_cast<int>(cf_to.height()) != h)
@@ -496,7 +510,14 @@ class ofx_producer : public core::frame_producer
             // Zero-copy CUDA fast path: Vulkan mixer + CUDA-capable plug-in + 8-bit. The plug-in
             // renders into a CUDA device buffer which is copied device-to-device into an exportable
             // VK texture the mixer consumes directly — no CPU readback.
-            if (vk_device_ && bytes == 1 && working_bytes_ == 1 && effect_->cuda_capable()) {
+            // has_host_image() is load-bearing here, not defensive: render_cuda takes a host
+            // pointer, and a GPU-only source (hap, cuda_prores, notchlc, isf's wrap_texture, or a
+            // GPU-direct html producer) has none -- image_data(0).data() on one of those is null.
+            // Such a frame passes the single-plane BGRA/RGBA filter above unchanged, so nothing
+            // else stops it. Falling through rather than bailing keeps the OGL zero-copy branch
+            // below reachable, and leaves room for a texture-fed render_cuda later.
+            if (vk_device_ && bytes == 1 && working_bytes_ == 1 && effect_->cuda_capable() &&
+                cf.has_host_image()) {
                 // No CPU conversion pass: hand the raw source to render_cuda, which uploads it once
                 // and does the swizzle/flip/premultiply on the device (NPP) and mirrors the plug-in
                 // output back to top-down. The returned buffer is top-down RGBA, ready for a single
@@ -635,6 +656,22 @@ class ofx_producer : public core::frame_producer
                 // Otherwise it was a genuine render failure -> pass the source through.
                 if (effect_->zerocopy_gl_supported())
                     return source_frame;
+            }
+
+            // Past this point every path reads cf.image_data(0).data() directly. Only the
+            // texture-backed OGL branch above can cope with a GPU-only source; if we are here
+            // with one, that pointer is null. Pass the source through rather than dereferencing
+            // it. Reachable today with [OFX] over hap / cuda_prores / cuda_notchlc / isf on the
+            // Vulkan mixer, or over any of them with a non-GL plug-in.
+            if (!cf.has_host_image()) {
+                static bool warned_nohost = false;
+                if (!warned_nohost) {
+                    warned_nohost = true;
+                    CASPAR_LOG(warning) << L"[ofx] '" << plugin_id_
+                                        << L"' needs host pixels but the source is GPU-only "
+                                           L"(no readback); passing source through.";
+                }
+                return source_frame;
             }
 
             const int src_stride = pfd.planes[0].linesize;
