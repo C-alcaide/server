@@ -25,6 +25,7 @@
 
 #include <common/bit_depth.h>
 #include <common/gl/gl_check.h>
+#include <common/log.h>
 
 #include <GL/glew.h>
 
@@ -177,6 +178,36 @@ std::vector<std::uint8_t> texture::read_pixels() const
         GL(glGetTextureImage(tex_id, 0, FORMAT[s], TYPE[depth_idx][s], total, result.data()));
     });
     return result;
+}
+
+std::vector<std::uint8_t> texture::read_pixels_reduced(int levels, int& out_width, int& out_height) const
+{
+    out_width = out_height = 0;
+
+    auto dev = impl_->device_.lock();
+    if (!dev)
+        return {};
+
+    // The device owns the downscale chain and the readback: it has the FBOs, the
+    // pool the intermediates are drawn from, and the non-blocking fence wait that
+    // must not be duplicated here.
+    //
+    // Blocking by design. This is issued from a consumer's own thread -- the DMX
+    // senders run at 10-30 Hz, well off the channel tick -- never from the channel
+    // thread or the GL thread. Blocking is also what makes passing a bare GL name
+    // safe: this texture cannot be destroyed while the call is outstanding.
+    try {
+        auto [data, w, h] = dev->reduce_and_copy_async(impl_->id_, impl_->width_, impl_->height_, levels).get();
+        if (!data.data() || data.size() == 0)
+            return {};
+
+        out_width  = w;
+        out_height = h;
+        return std::vector<std::uint8_t>(data.begin(), data.end());
+    } catch (...) {
+        CASPAR_LOG(warning) << L"[ogl::texture] reduced readback failed; the caller will fall back to a full one.";
+        return {};
+    }
 }
 
 }}} // namespace caspar::accelerator::ogl

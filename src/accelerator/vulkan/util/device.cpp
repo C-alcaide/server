@@ -1043,6 +1043,113 @@ struct device::impl : public std::enable_shared_from_this<impl>
             dispatch_kind::upload);
     }
 
+    std::shared_ptr<texture> reduce_texture(const std::shared_ptr<texture>& source, int levels)
+    {
+        if (!source || source->compressed())
+            return nullptr;
+
+        const int n = std::clamp(levels, 0, 8);
+
+        std::vector<std::pair<int, int>> chain;
+        int                              w = source->width();
+        int                              h = source->height();
+        for (int i = 0; i < n; ++i) {
+            const int nw = std::max(1, w / 2);
+            const int nh = std::max(1, h / 2);
+            if (nw == w && nh == h)
+                break; // already 1x1
+            chain.emplace_back(nw, nh);
+            w = nw;
+            h = nh;
+        }
+        // Always at least one pass, so the result is an 8-bit 4-component image
+        // whatever the source depth -- the documented contract of the caller.
+        if (chain.empty())
+            chain.emplace_back(w, h);
+
+        return dispatch_sync([&]() -> std::shared_ptr<texture> {
+            try {
+                auto cur   = source;
+                int  cur_w = source->width();
+                int  cur_h = source->height();
+                // The mixer's attachment arrives in eColorAttachmentOptimal; every
+                // intermediate after it is left in eTransferDstOptimal by its blit.
+                auto cur_layout = vk::ImageLayout::eColorAttachmentOptimal;
+                auto cur_access = vk::AccessFlagBits2::eColorAttachmentWrite;
+                auto cur_stage  = vk::PipelineStageFlagBits2::eColorAttachmentOutput;
+
+                std::shared_ptr<texture> dst;
+                for (auto [nw, nh] : chain) {
+                    // create_attachment, not create_texture: a pooled texture is
+                    // only eTransferDst|eSampled, and this has to be blitted from
+                    // and then read back, both of which need eTransferSrc.
+                    dst = create_attachment(nw, nh, common::bit_depth::bit8, 4);
+                    if (!dst)
+                        return nullptr;
+
+                    const auto src_img = cur->id();
+                    const auto dst_img = dst->id();
+                    const int  sw = cur_w, sh = cur_h;
+
+                    submitSingleTimeCommands([&](vk::CommandBuffer cmd) {
+                        transitionImageLayout(src_img, cur_layout, cur_access, cur_stage,
+                                              vk::ImageLayout::eTransferSrcOptimal,
+                                              vk::AccessFlagBits2::eTransferRead,
+                                              vk::PipelineStageFlagBits2::eTransfer, cmd);
+                        // create_attachment hands it back in eRenderingLocalRead;
+                        // it is overwritten whole, so eUndefined is honest and skips
+                        // preserving contents.
+                        transitionImageLayout(dst_img, vk::ImageLayout::eUndefined,
+                                              vk::AccessFlagBits2::eNone,
+                                              vk::PipelineStageFlagBits2::eTopOfPipe,
+                                              vk::ImageLayout::eTransferDstOptimal,
+                                              vk::AccessFlagBits2::eTransferWrite,
+                                              vk::PipelineStageFlagBits2::eTransfer, cmd);
+
+                        const auto layers = vk::ImageSubresourceLayers(vk::ImageAspectFlagBits::eColor, 0, 0, 1);
+                        vk::ImageBlit2 region{};
+                        region.srcSubresource = layers;
+                        region.dstSubresource = layers;
+                        region.srcOffsets[0]  = vk::Offset3D{0, 0, 0};
+                        region.srcOffsets[1]  = vk::Offset3D{sw, sh, 1};
+                        region.dstOffsets[0]  = vk::Offset3D{0, 0, 0};
+                        region.dstOffsets[1]  = vk::Offset3D{nw, nh, 1};
+
+                        vk::BlitImageInfo2 blit{};
+                        blit.srcImage       = src_img;
+                        blit.srcImageLayout = vk::ImageLayout::eTransferSrcOptimal;
+                        blit.dstImage       = dst_img;
+                        blit.dstImageLayout = vk::ImageLayout::eTransferDstOptimal;
+                        blit.filter         = vk::Filter::eLinear;
+                        blit.setRegions(region);
+                        cmd.blitImage2(blit);
+                    });
+
+                    cur        = dst;
+                    cur_w      = nw;
+                    cur_h      = nh;
+                    cur_layout = vk::ImageLayout::eTransferDstOptimal;
+                    cur_access = vk::AccessFlagBits2::eTransferWrite;
+                    cur_stage  = vk::PipelineStageFlagBits2::eTransfer;
+                }
+
+                // Hand it back in the layout copy_async() assumes, so the caller can
+                // chain the two without knowing anything about layouts.
+                submitSingleTimeCommands([&](vk::CommandBuffer cmd) {
+                    transitionImageLayout(cur->id(), cur_layout, cur_access, cur_stage,
+                                          vk::ImageLayout::eColorAttachmentOptimal,
+                                          vk::AccessFlagBits2::eColorAttachmentWrite,
+                                          vk::PipelineStageFlagBits2::eColorAttachmentOutput, cmd);
+                });
+
+                return cur;
+            } catch (const vk::SystemError& e) {
+                CASPAR_LOG(warning) << L"[vulkan::device] reduce_texture failed: " << u16(e.what());
+                return nullptr;
+            }
+        });
+    }
+
     std::future<array<const uint8_t>> copy_async(const std::shared_ptr<texture>& source)
     {
         // A block-compressed image cannot be read back this way. create_buffer below
@@ -1380,6 +1487,10 @@ device::copy_compressed_async(const array<const uint8_t>& source, int width, int
 std::future<array<const uint8_t>> device::copy_async(const std::shared_ptr<texture>& source)
 {
     return impl_->copy_async(source);
+}
+std::shared_ptr<texture> device::reduce_texture(const std::shared_ptr<texture>& source, int levels)
+{
+    return impl_->reduce_texture(source, levels);
 }
 void device::dispatch(std::function<void()> func)
 {

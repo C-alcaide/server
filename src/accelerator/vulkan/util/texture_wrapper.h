@@ -32,6 +32,8 @@
 
 namespace caspar { namespace accelerator { namespace vulkan {
 
+class device;
+
 /**
  * Wraps a vulkan::texture as a core::texture so that it can be returned
  * from image_mixer::render() and inspected by consumers downstream.
@@ -49,13 +51,20 @@ class texture_wrapper : public core::texture
     }
 
     texture_wrapper(std::shared_ptr<vulkan::texture> tex, std::function<void()> wait_fn,
-                    void* sem_handle = nullptr, uint64_t sem_value = 0)
+                    void* sem_handle = nullptr, uint64_t sem_value = 0,
+                    std::shared_ptr<device> vk_dev = nullptr)
         : tex_(std::move(tex))
         , wait_fn_(std::move(wait_fn))
         , sem_handle_(sem_handle)
         , sem_value_(sem_value)
+        , vk_device_(std::move(vk_dev))
     {
     }
+
+    /// Box-filtered reduction plus readback. Available only when the wrapper was
+    /// given the owning device -- the mixer passes it for the composited frame,
+    /// which is the one consumers ask this of. See core::texture.
+    std::vector<std::uint8_t> read_pixels_reduced(int levels, int& out_width, int& out_height) const override;
 
     void bind(int /*index*/) override {} // No-op for Vulkan
     void unbind() override {}            // No-op for Vulkan
@@ -114,10 +123,11 @@ class texture_wrapper : public core::texture
     void*                                 sem_handle_ = nullptr;
     uint64_t                              sem_value_  = 0;
     mutable std::atomic_flag              wait_completed_ = ATOMIC_FLAG_INIT;
+    /// Optional. Set for the mixer's composited frame, which is the wrapper
+    /// consumers reach for; left null by producers that only need the texture to
+    /// be bindable.
+    std::shared_ptr<device>               vk_device_;
 };
-
-// Forward declaration
-class device;
 
 /**
  * Extends texture_wrapper with on-demand GPU readback via the Vulkan device.
@@ -131,14 +141,11 @@ class VkReadableTextureWrapper : public texture_wrapper
     VkReadableTextureWrapper(std::shared_ptr<vulkan::texture> tex,
                              std::shared_ptr<device>          vk_dev)
         : texture_wrapper(std::move(tex))
-        , vk_device_(std::move(vk_dev))
     {
+        vk_device_ = std::move(vk_dev); // the base owns it now; see texture_wrapper
     }
 
     std::vector<std::uint8_t> read_pixels() const override;
-
-  private:
-    std::shared_ptr<device> vk_device_;
 };
 
 }}} // namespace caspar::accelerator::vulkan

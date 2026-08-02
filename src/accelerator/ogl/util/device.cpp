@@ -68,6 +68,14 @@ struct device::impl : public std::enable_shared_from_this<impl>
 
     GLuint fbo_;
 
+    /// Dedicated read/draw pair for the downscale chain in
+    /// reduce_and_copy_async(). Separate from fbo_, which the kernels keep bound
+    /// as GL_FRAMEBUFFER; these are only ever touched through the DSA
+    /// glBlitNamedFramebuffer path, so a reduction cannot disturb whatever the
+    /// mixer has attached. Created lazily -- most servers never ask for one.
+    GLuint reduce_read_fbo_ = 0;
+    GLuint reduce_draw_fbo_ = 0;
+
     std::wstring version_;
 
     io_context                             io_context_;
@@ -146,6 +154,10 @@ struct device::impl : public std::enable_shared_from_this<impl>
 
         // Use raw call instead of GL() macro — destructors must not throw.
         glDeleteFramebuffers(1, &fbo_);
+        if (reduce_read_fbo_)
+            glDeleteFramebuffers(1, &reduce_read_fbo_);
+        if (reduce_draw_fbo_)
+            glDeleteFramebuffers(1, &reduce_draw_fbo_);
         while (glGetError() != GL_NO_ERROR) {}
     }
 
@@ -269,72 +281,148 @@ struct device::impl : public std::enable_shared_from_this<impl>
 
     std::future<array<const uint8_t>> copy_async(const std::shared_ptr<texture>& source)
     {
-        return spawn_async([=](yield_context yield) {
-            auto buf = create_buffer(source->size(), false);
-            source->copy_to(*buf);
+        return spawn_async([=](yield_context yield) { return read_back(source, yield); });
+    }
 
-            auto fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+    /// Downscale by successive exact halvings, then read the small result back.
+    ///
+    /// A GL_LINEAR blit into an exactly-halved target samples the four contributing
+    /// texels at equal weight, so each pass is a true 2x2 box average and `levels`
+    /// of them compose into a 2^levels box filter -- the same thing a caller
+    /// averaging a region would compute, just done on the GPU over 1/4^levels the
+    /// bytes. glGenerateMipmap is not an option: pooled textures are allocated with
+    /// glTextureStorage2D(..., levels=1, ...) and have no mip chain.
+    std::future<std::tuple<array<const uint8_t>, int, int>>
+    reduce_and_copy_async(GLuint source_id, int source_width, int source_height, int levels)
+    {
+        return spawn_async([=](yield_context yield) -> std::tuple<array<const uint8_t>, int, int> {
+            const int n = std::clamp(levels, 0, 8);
 
-            GL(glFlush());
+            std::vector<std::pair<int, int>> chain;
+            int                              w = source_width;
+            int                              h = source_height;
+            for (int i = 0; i < n; ++i) {
+                const int nw = std::max(1, w / 2);
+                const int nh = std::max(1, h / 2);
+                if (nw == w && nh == h)
+                    break; // already 1x1
+                chain.emplace_back(nw, nh);
+                w = nw;
+                h = nh;
+            }
+            // Always at least one pass, so the result is RGBA8 even when the source
+            // is a 16-bit channel texture -- the documented contract is packed
+            // 8-bit regardless of the texture's own depth.
+            if (chain.empty())
+                chain.emplace_back(w, h);
 
-            // Wait for the readback by yielding to the io_context between checks,
-            // never by blocking: this runs on the single GL thread, so blocking it
-            // would stall every other channel's uploads and composition too.
-            //
-            // The wait used to be a flat 2 ms poll, which cost up to 2 ms of
-            // latency per frame per channel and woke the thread on a fixed cadence
-            // regardless of how long the copy actually takes. Readback duration is
-            // very stable for a given resolution, so predict it: sleep for roughly
-            // the last measured duration, then poll finely. Warm, this lands within
-            // a few hundred microseconds of completion after a single wakeup.
-            const auto start = std::chrono::steady_clock::now();
-
-            auto predicted_us = readback_us_.load(std::memory_order_relaxed);
-            // Undershoot the prediction so the fine poll converges from below
-            // rather than overshooting into added latency.
-            auto first_wait_us = predicted_us > fine_poll_us ? predicted_us - fine_poll_us : 0;
-
-            deadline_timer timer(io_context_);
-            for (auto n = 0;; ++n) {
-                const auto wait_us = n == 0 ? first_wait_us : fine_poll_us;
-                if (wait_us > 0) {
-                    timer.expires_from_now(boost::posix_time::microseconds(wait_us));
-                    timer.async_wait(yield);
-                }
-
-                auto wait = glClientWaitSync(fence, 0, 1);
-                if (wait == GL_ALREADY_SIGNALED || wait == GL_CONDITION_SATISFIED) {
-                    break;
-                }
+            if (!reduce_read_fbo_) {
+                GL(glCreateFramebuffers(1, &reduce_read_fbo_));
+                GL(glCreateFramebuffers(1, &reduce_draw_fbo_));
             }
 
-            glDeleteSync(fence);
+            // The first blit reads the caller's texture by name; everything after
+            // that reads the previous pooled intermediate.
+            std::shared_ptr<texture> cur;
+            GLuint                   cur_id = source_id;
+            int                      cur_w  = source_width;
+            int                      cur_h  = source_height;
 
-            const auto elapsed_us = static_cast<int64_t>(
-                std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start)
-                    .count());
-
-            // Asymmetric moving average. Sleeping for a prediction that is too
-            // LONG turns directly into output latency, so track downwards fast
-            // (weight 1/2) and upwards slowly (weight 1/8): an abrupt drop in
-            // GPU load converges in two or three frames, while a one-off
-            // scheduling spike barely moves the estimate.
-            int64_t next;
-            if (predicted_us == 0) {
-                next = elapsed_us;
-            } else if (elapsed_us < predicted_us) {
-                next = (predicted_us + elapsed_us) / 2;
-            } else {
-                next = (predicted_us * 7 + elapsed_us) / 8;
+            for (auto [nw, nh] : chain) {
+                auto dst = create_texture(nw, nh, 4, common::bit_depth::bit8, false);
+                GL(glNamedFramebufferTexture(reduce_read_fbo_, GL_COLOR_ATTACHMENT0, cur_id, 0));
+                GL(glNamedFramebufferTexture(reduce_draw_fbo_, GL_COLOR_ATTACHMENT0, dst->id(), 0));
+                GL(glNamedFramebufferReadBuffer(reduce_read_fbo_, GL_COLOR_ATTACHMENT0));
+                GL(glNamedFramebufferDrawBuffer(reduce_draw_fbo_, GL_COLOR_ATTACHMENT0));
+                GL(glBlitNamedFramebuffer(reduce_read_fbo_, reduce_draw_fbo_, 0, 0, cur_w, cur_h, 0, 0, nw, nh,
+                                          GL_COLOR_BUFFER_BIT, GL_LINEAR));
+                cur    = dst;
+                cur_id = static_cast<GLuint>(dst->id());
+                cur_w  = nw;
+                cur_h  = nh;
             }
-            readback_us_.store(std::clamp<int64_t>(next, 0, max_predicted_wait_us), std::memory_order_relaxed);
 
-            auto ptr  = reinterpret_cast<uint8_t*>(buf->data());
-            auto size = buf->size();
-            return array<const uint8_t>(ptr, size, std::move(buf));
+            // Detach so the chain does not keep the last texture alive inside the
+            // FBO after it goes back to the pool.
+            GL(glNamedFramebufferTexture(reduce_read_fbo_, GL_COLOR_ATTACHMENT0, 0, 0));
+            GL(glNamedFramebufferTexture(reduce_draw_fbo_, GL_COLOR_ATTACHMENT0, 0, 0));
+
+            return {read_back(cur, yield), cur_w, cur_h};
         });
     }
 
+  private:
+    /// The readback itself: copy to a PBO, then wait for the fence without ever
+    /// blocking the GL thread. Shared by copy_async() and reduce_and_copy_async()
+    /// so the wait prediction below has one implementation and one set of
+    /// statistics.
+    array<const uint8_t> read_back(const std::shared_ptr<texture>& source, yield_context yield)
+    {
+        auto buf = create_buffer(source->size(), false);
+        source->copy_to(*buf);
+
+        auto fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+
+        GL(glFlush());
+
+        // Wait for the readback by yielding to the io_context between checks,
+        // never by blocking: this runs on the single GL thread, so blocking it
+        // would stall every other channel's uploads and composition too.
+        //
+        // The wait used to be a flat 2 ms poll, which cost up to 2 ms of
+        // latency per frame per channel and woke the thread on a fixed cadence
+        // regardless of how long the copy actually takes. Readback duration is
+        // very stable for a given resolution, so predict it: sleep for roughly
+        // the last measured duration, then poll finely. Warm, this lands within
+        // a few hundred microseconds of completion after a single wakeup.
+        const auto start = std::chrono::steady_clock::now();
+
+        auto predicted_us = readback_us_.load(std::memory_order_relaxed);
+        // Undershoot the prediction so the fine poll converges from below
+        // rather than overshooting into added latency.
+        auto first_wait_us = predicted_us > fine_poll_us ? predicted_us - fine_poll_us : 0;
+
+        deadline_timer timer(io_context_);
+        for (auto n = 0;; ++n) {
+            const auto wait_us = n == 0 ? first_wait_us : fine_poll_us;
+            if (wait_us > 0) {
+                timer.expires_from_now(boost::posix_time::microseconds(wait_us));
+                timer.async_wait(yield);
+            }
+
+            auto wait = glClientWaitSync(fence, 0, 1);
+            if (wait == GL_ALREADY_SIGNALED || wait == GL_CONDITION_SATISFIED) {
+                break;
+            }
+        }
+
+        glDeleteSync(fence);
+
+        const auto elapsed_us = static_cast<int64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start)
+                .count());
+
+        // Asymmetric moving average. Sleeping for a prediction that is too
+        // LONG turns directly into output latency, so track downwards fast
+        // (weight 1/2) and upwards slowly (weight 1/8): an abrupt drop in
+        // GPU load converges in two or three frames, while a one-off
+        // scheduling spike barely moves the estimate.
+        int64_t next;
+        if (predicted_us == 0) {
+            next = elapsed_us;
+        } else if (elapsed_us < predicted_us) {
+            next = (predicted_us + elapsed_us) / 2;
+        } else {
+            next = (predicted_us * 7 + elapsed_us) / 8;
+        }
+        readback_us_.store(std::clamp<int64_t>(next, 0, max_predicted_wait_us), std::memory_order_relaxed);
+
+        auto ptr  = reinterpret_cast<uint8_t*>(buf->data());
+        auto size = buf->size();
+        return array<const uint8_t>(ptr, size, std::move(buf));
+    }
+
+  public:
     boost::property_tree::wptree info() const
     {
         boost::property_tree::wptree info;
@@ -465,6 +553,11 @@ device::copy_async(const array<const uint8_t>& source, int width, int height, in
 std::future<array<const uint8_t>> device::copy_async(const std::shared_ptr<texture>& source)
 {
     return impl_->copy_async(source);
+}
+std::future<std::tuple<array<const uint8_t>, int, int>>
+device::reduce_and_copy_async(unsigned int source_id, int source_width, int source_height, int levels)
+{
+    return impl_->reduce_and_copy_async(static_cast<GLuint>(source_id), source_width, source_height, levels);
 }
 void device::dispatch(std::function<void()> func) { boost::asio::dispatch(impl_->io_context_, std::move(func)); }
 std::wstring                 device::version() const { return impl_->version(); }

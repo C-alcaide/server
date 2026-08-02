@@ -67,6 +67,31 @@ class texture
     /// hands back packed 8-bit pixels instead.
     /// Empty means "same as the frame's descriptor".
     virtual std::optional<pixel_format> read_pixels_format() const { return std::nullopt; }
+
+    /// GPU→CPU readback of a box-filtered reduction of this texture: `levels`
+    /// successive 2x2 averagings, so levels==3 is 1/8 per axis and 1/64 the bytes.
+    ///
+    /// For a consumer that needs a *summary* of the picture rather than the
+    /// picture -- DMX fixture colours, say, which average a few regions at 10-30 Hz.
+    /// Declaring needs_cpu_frame_data() to get those makes the channel read back
+    /// the whole composited frame every tick, which at 1080p50 is 415 MB/s to
+    /// produce a handful of bytes. This lets the consumer pull a small image on its
+    /// own clock instead, leaving the channel GPU-resident.
+    ///
+    /// Always packed 8-bit BGRA with stride == out_width * 4 and no row padding,
+    /// whatever the texture's own depth, so callers index it exactly as they index
+    /// a bgra frame. Dimensions floor at each halving, so `out_width`/`out_height`
+    /// are written back and may not be exactly width>>levels -- scale coordinates
+    /// by out_width/tex_width() per axis rather than assuming the power of two.
+    ///
+    /// Returns {} when unsupported (the default) or on failure. Callers must have a
+    /// fallback: the idiom is a dynamic needs_cpu_frame_data() that re-arms the
+    /// full readback, as spout/ffmpeg/decklink already do for their GPU paths.
+    virtual std::vector<std::uint8_t> read_pixels_reduced(int levels, int& out_width, int& out_height) const
+    {
+        out_width = out_height = 0;
+        return {};
+    }
 };
 
 class mutable_frame final

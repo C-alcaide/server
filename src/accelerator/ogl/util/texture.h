@@ -81,6 +81,10 @@ class texture final : public core::texture
     /// Zero-cost during normal playback — only called by write_frame_png.
     std::vector<std::uint8_t> read_pixels() const override;
 
+    /// Box-filtered reduction plus readback, for a consumer that needs a summary
+    /// of the picture rather than the picture. See core::texture.
+    std::vector<std::uint8_t> read_pixels_reduced(int levels, int& out_width, int& out_height) const override;
+
   private:
     struct impl;
     std::unique_ptr<impl> impl_;

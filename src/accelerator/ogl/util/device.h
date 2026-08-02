@@ -52,6 +52,26 @@ class device final
     std::future<std::shared_ptr<class texture>>
     copy_async(const array<const uint8_t>& source, int width, int height, int stride, common::bit_depth depth);
     std::future<array<const uint8_t>> copy_async(const std::shared_ptr<class texture>& source);
+
+    /// Box-filtered reduction of `source` followed by a readback: `levels`
+    /// successive exact 2x2 averagings on the GPU, then one small copy back.
+    ///
+    /// For a consumer that wants a summary of the frame rather than the frame --
+    /// see core::texture::read_pixels_reduced(). Reading level 3 of a 1080p frame
+    /// moves 129 KB instead of 8.29 MB.
+    ///
+    /// The returned array is always packed 8-bit BGRA; the tuple carries the
+    /// reduced width and height, which floor at each halving and so are not
+    /// necessarily width>>levels.
+    ///
+    /// Takes the source as a bare GL name and dimensions rather than a
+    /// shared_ptr<texture>, because the caller is texture::read_pixels_reduced(),
+    /// a const member with no shared handle on itself. Safe because that caller
+    /// blocks on the returned future, so the source outlives the chain -- only the
+    /// first blit reads it, and every intermediate is drawn from the device's own
+    /// pool.
+    std::future<std::tuple<array<const uint8_t>, int, int>>
+    reduce_and_copy_async(unsigned int source_id, int source_width, int source_height, int levels);
     template <typename Func>
     auto dispatch_async(Func&& func)
     {

@@ -283,7 +283,13 @@ class image_renderer
                 auto wait_fn = [p = pass]() { p->wait_for_completion(); };
                 auto sem_handle = pass->render_semaphore_handle();
                 auto sem_value  = pass->render_semaphore_value();
-                auto wrapper = std::make_shared<texture_wrapper>(target, std::move(wait_fn), sem_handle, sem_value);
+                // The device goes in too, so a consumer can ask the composited
+                // frame for a reduced readback (core::texture::read_pixels_reduced)
+                // instead of declaring needs_cpu_frame_data and pulling the whole
+                // frame back every tick. Only this wrapper gets it -- producers'
+                // own textures have no use for it.
+                auto wrapper =
+                    std::make_shared<texture_wrapper>(target, std::move(wait_fn), sem_handle, sem_value, vulkan_);
                 // When no consumer needs CPU pixel data (e.g. only vulkan-output
                 // consumers are attached), skip the GPU→CPU readback entirely.
                 // This avoids a staging buffer allocation, a layout transition

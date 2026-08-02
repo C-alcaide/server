@@ -80,6 +80,30 @@ class device final
     std::future<std::shared_ptr<class texture>>
     copy_compressed_async(const array<const uint8_t>& source, int width, int height, vk::Format format);
     std::future<array<const uint8_t>> copy_async(const std::shared_ptr<class texture>& source);
+
+    /// Box-filtered downscale of `source` by `levels` successive exact halvings,
+    /// returned as a new texture. Blocking; safe to call from a consumer thread.
+    ///
+    /// Each pass is a vkCmdBlitImage with VK_FILTER_LINEAR into an exactly-halved
+    /// target, which weights the four contributing texels equally -- a true 2x2 box
+    /// average, so `levels` of them compose into a 2^levels box filter. Intended
+    /// for a consumer that needs a summary of the picture rather than the picture;
+    /// see core::texture::read_pixels_reduced().
+    ///
+    /// The result is allocated through create_attachment(), not create_texture():
+    /// pooled textures carry only eTransferDst|eSampled, and a blit source and a
+    /// readback source both need eTransferSrc. It is returned in
+    /// eColorAttachmentOptimal, which is exactly what copy_async() above assumes,
+    /// so the two compose without a further transition.
+    ///
+    /// `source` is left in eTransferSrcOptimal. That is safe for a mixer attachment
+    /// because the attachment pool calls reset_attachment_layout() (from
+    /// eUndefined) before reusing one -- the same reason copy_async() may leave it
+    /// that way.
+    ///
+    /// Returns nullptr if the reduction fails.
+    std::shared_ptr<class texture> reduce_texture(const std::shared_ptr<class texture>& source, int levels);
+
     template <typename Func>
     auto dispatch_async(Func&& func)
     {
