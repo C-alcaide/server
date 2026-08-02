@@ -1632,3 +1632,54 @@ values — the residual is H.264 being lossy across two independent encodes, not
 This is worth remembering as a class of bug: a byte-order mismatch between two GPU
 paths looks like a colour-management problem, and colour management is where you would
 start looking.
+
+## Not done, and why — 2026-08-02
+
+### Parallelising the OFX host conversions (tried, reverted)
+
+`ofx_image_bridge.cpp`'s eleven conversions are scalar, single-threaded per-pixel row
+loops, and they are the host path for every OFX plug-in without a GPU render extension
+— a transition runs five or six of them per frame. Wrapping the row loops in
+`tbb::parallel_for` is mechanically safe (rows are independent) and follows what
+`av_util::make_frame` already does. It was written and reverted, because no measurement
+showed it helping:
+
+- **CPU-seconds cannot see it.** Parallelising spreads the same work over more cores;
+  for a rate-locked channel the total is unchanged. Measured 63.58 s serial vs 63.30 s
+  parallel over 45 s with the OpenFX `Invert` sample at 1080p25 — noise. What it would
+  buy is per-frame latency, i.e. headroom, which only matters when the channel cannot
+  keep up.
+- **The saturation test that would have shown it was invalid.** Comparing at 2160p50
+  looked decisive — the "serial" run produced nothing and the "parallel" run delivered
+  1492/1500 frames — until the logs showed the two binaries also differed by the
+  NVENC-on-Vulkan fix. The first fell back to CPU readback at 4K; the second did not.
+  The frame difference was that, not the conversions.
+
+Redoing it needs a serial build of the *current* tree, and a load where the conversions
+are genuinely the bottleneck. Worth doing before assuming the change is free value.
+
+Two notes for whoever picks it up. `caspar.test:TransitionMix` is **not** a usable probe
+— `[OFX] <plugin> TRANSITION <a> <b>` never logged a created effect, so the transition
+path did not engage and an early benchmark measured nothing at all. The OpenFX `Invert`
+sample (`uk.co.thefoundry.OfxInvertExample`, built by `BUILD_OFX_SAMPLE_PLUGINS`) is a
+real CPU filter and does exercise the conversions: it moved the channel from 1.01 to
+1.41 cores, which is the signal to look for.
+
+### A 2160p crash worth chasing
+
+Both binaries in that test took an access violation (`0xC0000005`) at 2160p50 with a
+CPU OFX filter, immediately after `ADD 1 FILE` switched the channel to CPU readback
+(`output[1] CPU readback required by consumer ffmpeg`). It reproduced on a binary
+containing none of the OFX changes, so it is not from this work, and it did not appear
+at 1080p. Not investigated.
+
+### Still open
+
+- **OFX transition and generator GPU paths.** The transition costs five or six
+  full-frame host passes and the generator one. Both need a GPU transition/generator
+  plug-in to validate, and none exists in-tree — the CUDA and CoreGL test plug-ins are
+  all filters. Writing one is the prerequisite.
+- **The shared `ogl::device::convert` helper**, and the dead
+  `frame_geometry::get_default_vflip()` it would let OFX and ISF use instead of their
+  own output flip blits. Nine ad-hoc GPU blits collapse into one. Maintainability
+  rather than measured performance, so it wants the same scrutiny as the item above.
