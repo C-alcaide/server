@@ -61,6 +61,7 @@ extern "C" {
 #include <libavfilter/buffersink.h>
 #include <libavfilter/buffersrc.h>
 #include <libavformat/avformat.h>
+#include <libavutil/buffer.h>
 #include <libavutil/channel_layout.h>
 #include <libavutil/opt.h>
 #include <libavutil/pixfmt.h>
@@ -407,6 +408,31 @@ struct Decoder
                 frame->height      = video->GetHeight();
                 frame->data[0]     = reinterpret_cast<uint8_t*>(video_bytes);
                 frame->linesize[0] = video->GetRowBytes();
+
+                // Refcount the card's DMA buffer so the filter graph references it instead of
+                // copying it. av_buffersrc_write_frame is add_frame_flags(..., KEEP_REF), which
+                // av_frame_ref's the input -- and a frame with buf[0] == nullptr cannot be
+                // referenced, so it gets allocated and memcpy'd wholesale. That was a full
+                // 4.15 MB copy per 1080p frame per input, on the driver's callback thread,
+                // happening purely because this AVFrame was unmanaged.
+                //
+                // READONLY because the memory belongs to the driver: a filter that needs to
+                // write must then copy-on-write rather than scribble on the capture buffer.
+                {
+                    const int plane_size = video->GetRowBytes() * video->GetHeight();
+                    video->AddRef(); // released by the AVBufferRef's free callback below
+                    frame->buf[0] = av_buffer_create(
+                        frame->data[0],
+                        plane_size,
+                        [](void* opaque, uint8_t*) { static_cast<IDeckLinkVideoInputFrame*>(opaque)->Release(); },
+                        video,
+                        AV_BUFFER_FLAG_READONLY);
+                    if (!frame->buf[0]) {
+                        // Ownership never transferred; drop the ref we just took. The frame is
+                        // still usable, it just falls back to being copied by buffersrc.
+                        video->Release();
+                    }
+                }
 #if LIBAVCODEC_VERSION_MAJOR < 61
                 frame->key_frame = 1;
 #else
