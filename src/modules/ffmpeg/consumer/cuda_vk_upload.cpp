@@ -206,7 +206,14 @@ bool cuda_vk_uploader::available()
 
 void cuda_vk_uploader::set_context(void* cu_context) { impl_->context_ = static_cast<CUcontext>(cu_context); }
 
-void cuda_vk_uploader::release() { impl_->release(); }
+void cuda_vk_uploader::release()
+{
+    // Under the context the imports were made in. The runtime API acts on whichever
+    // context is current, so destroying them under a different one -- or after
+    // FFmpeg's has gone -- is how this takes the process down at teardown.
+    impl::scoped_context ctx(impl_->context_);
+    impl_->release();
+}
 
 const char* cuda_vk_uploader::last_error() const
 {

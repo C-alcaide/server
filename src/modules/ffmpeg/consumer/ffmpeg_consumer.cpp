@@ -887,11 +887,13 @@ struct ffmpeg_consumer : public core::frame_consumer
             frame_thread_.join();
         }
 
-        // Before the CUDA contexts below are released. The uploader's GL
-        // registrations have to be undone on the mixer's GL thread and while the
-        // context they were made in is still alive; leaving it to member
+        // Before the CUDA contexts below are released. The uploaders' resources --
+        // the OpenGL one's registrations, the Vulkan one's external-memory imports --
+        // have to be undone while the context they were made in is still alive, and
+        // the GL ones additionally on the mixer's GL thread. Leaving it to member
         // destruction order does neither, and the process dies at teardown.
         gpu_uploader.release();
+        gpu_uploader_vk.release();
     }
 
     // frame consumer
