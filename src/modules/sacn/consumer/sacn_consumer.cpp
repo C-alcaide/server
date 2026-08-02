@@ -80,6 +80,14 @@ struct sacn_consumer : public core::frame_consumer
     const configuration           config_;
     std::vector<computed_fixture> computed_fixtures_;
 
+    /// How far to downscale before sampling; see dmx::pick_reduction_levels.
+    int reduction_levels_ = 0;
+
+    /// Set once the GPU reduction has actually worked, cleared if it stops.
+    /// Polled every channel tick through needs_cpu_frame_data() below, so a
+    /// runtime failure re-arms the full readback on the next frame.
+    std::atomic<bool> gpu_reduction_ok_{false};
+
   public:
     explicit sacn_consumer(configuration config)
         : config_(std::move(config))
@@ -148,6 +156,19 @@ struct sacn_consumer : public core::frame_consumer
                     if (!frame)
                         continue;
 
+                    // Ask the GPU for a small box-filtered version of the frame
+                    // rather than making the channel read the whole thing back at
+                    // its own rate so that this thread can average 2% of it at 10 Hz.
+                    dmx::sampling_source pixels(frame, reduction_levels_);
+                    gpu_reduction_ok_.store(pixels.reduced(), std::memory_order_relaxed);
+                    if (!pixels) {
+                        // Neither a reduction nor host pixels this tick. Emit nothing
+                        // rather than black: needs_cpu_frame_data() has just gone back
+                        // to true, so the next tick will have pixels, and blinking the
+                        // fixtures off for one frame is worse than holding.
+                        continue;
+                    }
+
                     uint8_t dmx_data[512];
                     memset(dmx_data, 0, 512);
 
@@ -159,7 +180,7 @@ struct sacn_consumer : public core::frame_consumer
                         if (cf.address < 0 || cf.address + channels_needed > 512)
                             continue;
 
-                        auto     color = average_color(frame, cf.rectangle);
+                        auto     color = pixels.average(cf.rectangle);
                         uint8_t* ptr   = dmx_data + cf.address;
 
                         switch (cf.type) {
@@ -210,9 +231,16 @@ struct sacn_consumer : public core::frame_consumer
 
     int index() const override { return 1338; }
 
+    /// Only while the GPU reduction is not working. Averaging a few fixture
+    /// regions does not justify pulling the whole composited frame back to host
+    /// memory at the channel's rate.
+    bool needs_cpu_frame_data() const override { return !gpu_reduction_ok_.load(std::memory_order_relaxed); }
+
     core::monitor::state state() const override
     {
         core::monitor::state state;
+        state["sacn/gpu-reduction"]    = gpu_reduction_ok_.load(std::memory_order_relaxed);
+        state["sacn/reduction-levels"] = reduction_levels_;
         state["sacn/universe"]     = config_.universe;
         state["sacn/host"]         = config_.host;
         state["sacn/port"]         = config_.port;
@@ -248,6 +276,10 @@ struct sacn_consumer : public core::frame_consumer
                 computed_fixtures_.push_back(cf);
             }
         }
+
+        // Fixture geometry is static configuration, so the reduction factor is
+        // decided once here rather than per frame.
+        reduction_levels_ = dmx::pick_reduction_levels(computed_fixtures_);
     }
 
     // Build and send an E1.31 (sACN) Data Packet per ANSI E1.31-2018

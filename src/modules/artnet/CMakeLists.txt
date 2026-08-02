@@ -8,7 +8,6 @@ set(SOURCES
 	producer/dmx_producer.cpp
 	producer/dmx_producer.h
 
-	util/fixture_calculation.cpp
 	util/fixture_calculation.h
 
 	artnet.cpp
@@ -19,6 +18,9 @@ casparcg_add_module_project(artnet
 	SOURCES ${SOURCES}
 	INIT_FUNCTION "artnet::init"
 )
+
+# The rasteriser and fixture geometry now live in dmx_common, shared with sacn.
+target_link_libraries(artnet PRIVATE dmx_common)
 
 set_target_properties(artnet PROPERTIES FOLDER modules)
 source_group(sources\\consumer consumer/*)

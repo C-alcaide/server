@@ -34,6 +34,7 @@ if(ENABLE_VULKAN)
     add_subdirectory(vulkan_output)
 endif()
 add_subdirectory(newtek)
+add_subdirectory(dmx_common) # shared by artnet and sacn; must come first
 add_subdirectory(artnet)
 add_subdirectory(sacn)
 message(STATUS "sACN module enabled")

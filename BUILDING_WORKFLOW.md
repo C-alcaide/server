@@ -355,6 +355,30 @@ ADD 1 ARTNET UNIVERSE 0 HOST 127.0.0.1 PORT 6454 REFRESH-RATE 10 FIXTURE RGB 1 3
 ADD 1 SACN UNIVERSE 1 HOST 127.0.0.1 PORT 5568 PRIORITY 100 MULTICAST-TTL 10 REFRESH-RATE 10 FIXTURE RGBW 1 6 4 0.0 0.0 1920.0 200.0 0.0
 ```
 
+**The nine FIXTURE arguments, in order** (`get_fixtures_params`, artnet_consumer.cpp):
+
+```
+FIXTURE <type> <start_addr> <count> <channels> <x> <y> <width> <height> <rotation>
+```
+
+Two things the examples above hide, both of which will silently produce wrong DMX
+rather than an error:
+
+- **`count` comes before `channels`.** The ArtNet example uses `3 3` for both, so it
+  reads the same either way; the sACN one uses `6 4`, meaning 6 fixtures of 4
+  channels. Getting these backwards builds a different number of fixtures at
+  different addresses and still succeeds.
+- **`start_addr` is 1-based on the wire and stored 0-based.** The consumer does
+  `f.startAddress = startAddress - 1`, so `FIXTURE RGB 1 ...` writes DMX slots
+  0,1,2 of the packet payload. A receiver indexing from the 1-based address reads
+  one channel late.
+
+Ten RGB fixtures starting at DMX address 1, across a 500×100 box at (960,540):
+
+```
+ADD 1 ARTNET UNIVERSE 0 HOST 127.0.0.1 PORT 6454 REFRESH-RATE 10 FIXTURE RGB 1 10 3 960.0 540.0 500.0 100.0 0.0
+```
+
 **Consumer indices (REMOVE command):** ArtNet = 1337, sACN = 1338 (hard-coded in `index()` overrides).
 
 ---

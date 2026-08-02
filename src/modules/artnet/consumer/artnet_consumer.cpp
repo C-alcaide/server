@@ -115,6 +115,19 @@ struct artnet_consumer : public core::frame_consumer
                     if (!frame)
                         continue; // No frame available
 
+                    // Ask the GPU for a small box-filtered version of the frame
+                    // rather than making the channel read the whole thing back at
+                    // its own rate so that this thread can average 2% of it at 30 Hz.
+                    dmx::sampling_source pixels(frame, reduction_levels_);
+                    gpu_reduction_ok_.store(pixels.reduced(), std::memory_order_relaxed);
+                    if (!pixels) {
+                        // Neither a reduction nor host pixels this tick. Emit nothing
+                        // rather than black: needs_cpu_frame_data() has just gone back
+                        // to true, so the next tick will have pixels, and blinking the
+                        // fixtures off for one frame is worse than holding.
+                        continue;
+                    }
+
                     uint8_t dmx_data[512];
                     memset(dmx_data, 0, 512);
 
@@ -129,7 +142,7 @@ struct artnet_consumer : public core::frame_consumer
                         if (computed_fixture.address < 0 || computed_fixture.address + channels_needed > 512)
                             continue;
 
-                        auto     color = average_color(frame, computed_fixture.rectangle);
+                        auto     color = pixels.average(computed_fixture.rectangle);
                         uint8_t* ptr   = dmx_data + computed_fixture.address;
 
                         switch (computed_fixture.type) {
@@ -180,9 +193,16 @@ struct artnet_consumer : public core::frame_consumer
 
     int index() const override { return 1337; }
 
+    /// Only while the GPU reduction is not working. Averaging a few fixture
+    /// regions does not justify pulling the whole composited frame back to host
+    /// memory at the channel's rate.
+    bool needs_cpu_frame_data() const override { return !gpu_reduction_ok_.load(std::memory_order_relaxed); }
+
     core::monitor::state state() const override
     {
         core::monitor::state state;
+        state["artnet/gpu-reduction"]     = gpu_reduction_ok_.load(std::memory_order_relaxed);
+        state["artnet/reduction-levels"]  = reduction_levels_;
         state["artnet/computed-fixtures"] = computed_fixtures.size();
         state["artnet/fixtures"]          = config.fixtures.size();
         state["artnet/universe"]          = config.universe;
@@ -196,6 +216,15 @@ struct artnet_consumer : public core::frame_consumer
   private:
     core::const_frame last_frame_;
     std::mutex        frame_mutex_;
+
+    /// How far to downscale before sampling; see dmx::pick_reduction_levels.
+    int reduction_levels_ = 0;
+
+    /// Set once the GPU reduction has actually worked, cleared if it stops.
+    /// Polled every channel tick through needs_cpu_frame_data() below, so a
+    /// runtime failure re-arms the full readback on the next frame -- the same
+    /// dynamic idiom the spout, ffmpeg and decklink consumers use.
+    std::atomic<bool> gpu_reduction_ok_{false};
 
     std::thread       thread_;
     std::atomic<bool> abort_request_{false};
@@ -217,6 +246,10 @@ struct artnet_consumer : public core::frame_consumer
                 computed_fixtures.push_back(computed_fixture);
             }
         }
+
+        // Fixture geometry is static configuration, so the reduction factor is
+        // decided once here rather than per frame.
+        reduction_levels_ = dmx::pick_reduction_levels(computed_fixtures);
     }
 
     void send_dmx_data(const std::uint8_t* data, std::size_t length)

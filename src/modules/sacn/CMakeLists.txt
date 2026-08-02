@@ -5,7 +5,6 @@ set(SOURCES
 	consumer/sacn_consumer.cpp
 	consumer/sacn_consumer.h
 
-	util/fixture_calculation.cpp
 	util/fixture_calculation.h
 
 	sacn.cpp
@@ -16,6 +15,9 @@ casparcg_add_module_project(sacn
 	SOURCES ${SOURCES}
 	INIT_FUNCTION "sacn::init"
 )
+
+# The rasteriser and fixture geometry now live in dmx_common, shared with artnet.
+target_link_libraries(sacn PRIVATE dmx_common)
 
 set_target_properties(sacn PROPERTIES FOLDER modules)
 source_group(sources\\consumer consumer/*)
