@@ -1242,7 +1242,21 @@ breaking the recording. Verified: `hevc_nvenc -pix_fmt p010le` records
 `yuv420p10le` from both an 8-bit and a 16-bit channel, and the ordinary
 GPU-direct path is still pixel-identical to the host path at `inf` dB.
 
-### Not done: Vulkan, and the reason is not the import path
+### ~~Not done: Vulkan~~ — done 2026-08-02, and the diagnosis below was wrong
+
+> **Superseded.** GPU-direct NVENC now works on the Vulkan mixer; see
+> *NVENC GPU-direct on the Vulkan mixer* below. The conclusion this section
+> reached — that the mixer's composition target is not allocated exportable — is
+> **false**, and it is the reason the work sat undone for two days. `create_attachment`
+> has always allocated with `vk::ExportMemoryAllocateInfo` and
+> `vk::ExternalMemoryImageCreateInfo`, and decklink's `cuda_vk_strategy` had been
+> importing that same attachment all along.
+>
+> The section is kept because the *failure* it records is real and someone will
+> hit it again: `cudaImportExternalMemory` returning "OS call failed or operation
+> not supported on this OS" does not mean the memory is unexportable. Read the
+> rest as a worked example of a plausible wrong diagnosis, not as the state of
+> the code.
 
 The obvious assumption — that this only needs `cuda_vk_texture.h` in place of
 `cudaGraphicsGLRegisterImage` — is wrong, and the attempt is worth recording so
@@ -1273,8 +1287,9 @@ every Vulkan channel, and needs its own validation of VRAM use and allocation
 count before it could be trusted. That is the prerequisite, and it is the whole
 of the remaining work; the consumer side is understood.
 
-Until then the consumer declines on a Vulkan mixer with that reason logged, and
-records exactly as before.
+~~Until then the consumer declines on a Vulkan mixer with that reason logged, and
+records exactly as before.~~ — none of the preceding paragraph was necessary. The
+attachments were already exportable; the consumer no longer declines.
 
 Harness: `CasparCG-TestRunner/vkdispatch/gpurec_check.py` and
 `readback_scale.py`.
@@ -1549,10 +1564,18 @@ sampled points against the unfiltered source.
 Aliasing remains the better answer and is still open; it needs the exportability
 decision above.
 
-## ⚠ The OFX CUDA zero-copy path destroys the alpha channel — 2026-08-02
+## The OFX CUDA zero-copy path destroyed the alpha channel — found and fixed 2026-08-02
 
-**An OFX CUDA plug-in on the Vulkan mixer emits a fully transparent frame today.** This
-is pre-existing, not introduced by any of the work above, and it matters here because
+> **Fixed.** `nppiAlphaPremul_8u_AC4IR` zeroes the destination's alpha whichever
+> variant is used; `convert_source` now copies channel 3 back with
+> `nppiCopy_8u_C4CR` afterwards. Alpha is 255 and the CUDA zero-copy output is
+> bit-identical to the host path on both backends. The investigation is kept below
+> because the elimination sequence is the useful part — and because the NPP
+> behaviour contradicts its own documentation, so the next person to reach for
+> `AC4IR` needs to know.
+
+**An OFX CUDA plug-in on the Vulkan mixer emitted a fully transparent frame.** This was
+pre-existing, not introduced by any of the work above, and it mattered here because
 the html/CG output on this system is fill+key.
 
 Reproduced with the in-tree test plug-ins (`BUILD_OFX_SAMPLE_PLUGINS=ON`, plug-ins land
@@ -1575,12 +1598,23 @@ proves a plug-in's alpha reaches the mixer intact), and the descriptor labelling
 at fault (RGB would be wrong too). The remaining suspect is the source-through-plug-in
 route on the CUDA path. `convert_source` and `mirror_output` in `ofx_cuda_render.cpp`
 both read correctly on inspection -- the swizzle order is `{2,1,0,3}` and every NPP call
-is a `C4R` variant -- so the cause was not found and is not guessed at here.
+is a `C4R` variant -- so the cause was not found by inspection.
 
-### Why the OpenGL half of this parity gap is not shipped
+It was found by probing `convert_source` step by step: the uploaded source read
+(255,0,0,255) and the post-mirror buffer (0,0,255,255), so alpha survived to the
+premultiply and was zero immediately after it. `nppiAlphaPremul_8u_AC4IR` zeroes the
+destination's alpha, which is not what "AC4" implies and not a fresh-allocation
+artefact either — the non-in-place `AC4R` does the same, and seeding the destination
+beforehand does not help. All three were measured. Copying channel 3 back afterwards
+with `nppiCopy_8u_C4CR` is the only form that survives.
 
-A CUDA-capable plug-in on the **OpenGL** mixer currently gets no zero-copy at all: it
-takes the host-buffer path, four full-frame CPU passes and two PCIe crossings. Closing
+### ~~Why the OpenGL half of this parity gap is not shipped~~ — it shipped, after the fix
+
+*Kept because the sequence is the point: fix the alpha bug first, then land the
+OpenGL path, so both backends get the win and neither has the defect.*
+
+A CUDA-capable plug-in on the **OpenGL** mixer used to get no zero-copy at all: it took
+the host-buffer path, four full-frame CPU passes and two PCIe crossings. Closing
 that was written and works -- the log reports `CUDA-OpenGL zero-copy producer path
 active (no readback)`, the quadrants are correct, and the output is **bit-identical to
 the Vulkan zero-copy path**, which is exactly the parity the mechanism is supposed to
@@ -1592,9 +1626,8 @@ bug was then found and fixed (see the commit above), and the OpenGL path landed
 afterwards: alpha 255, quadrants correct, and bit-identical both to the pre-change
 OpenGL host path and to the Vulkan zero-copy path.
 
-The original reasoning is left here because the sequence is the point --
-**fix the alpha bug first, then land the OpenGL path** -- at which point both backends
-get the win and neither has the defect. The revert is mechanical to redo: a
+What shipped, for reference — this was the revert-and-redo, and it is what is in the
+tree now: a
 `CudaGLTexture` beside `cuda_vk_texture.h` (registration and map/unmap both on the
 mixer's GL thread, with `cudaSetDevice(select_cuda_gl_device())` pinned there -- mapping
 from the producer thread fails with "invalid OpenGL or DirectX context", and CUDA's
