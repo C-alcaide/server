@@ -103,6 +103,9 @@ struct output::impl
     // cannot both pace it: whichever blocks longest wins and the other drifts
     // until its buffer absorbs or breaks.
     bool     multi_clock_warned_ = false;
+    /// Logged once: a frame was withheld from a consumer that needs host pixels
+    /// because it had none. Expected exactly at a readback transition.
+    bool     skipped_hostless_warned_ = false;
     int      clock_source_count_  = 0;
 
   public:
@@ -564,7 +567,33 @@ struct output::impl
         auto do_send = [this, &consumers](core::video_field field, const core::const_frame& frame) {
             std::map<int, std::future<bool>> futures;
 
+            // A consumer that asked for CPU pixels must never be handed a frame that
+            // has none. That holds in the steady state, but not across the tick where
+            // the answer changes: the mixer runs a frame behind, so the first frame a
+            // newly attached consumer sees was composed while readback was still off.
+            //
+            // The size check above does not catch it -- const_frame::size() comes from
+            // the pixel_format_desc, not from the buffer, so a GPU-only frame reports
+            // the full size and passes. The consumer then reads image_data(0).data(),
+            // which is null, and the process dies.
+            //
+            // Skipping costs one frame at attach and is invisible; not skipping is an
+            // access violation the moment anything is added to a channel that had gone
+            // GPU-resident. That combination only became reachable once audio-only
+            // consumers stopped forcing the readback permanently.
+            const bool host_available = frame.has_host_image();
+
             for (auto it = consumers.begin(); it != consumers.end();) {
+                if (!host_available && it->second->needs_cpu_frame_data()) {
+                    if (!skipped_hostless_warned_) {
+                        skipped_hostless_warned_ = true;
+                        CASPAR_LOG(info) << print() << L" consumer " << it->second->name()
+                                         << L" needs CPU pixels and this frame has none (the mixer is a frame "
+                                            L"behind the change); skipping it for this consumer.";
+                    }
+                    ++it;
+                    continue;
+                }
                 try {
                     futures.emplace(it->first, it->second->send(field, frame));
                     ++it;
