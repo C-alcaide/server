@@ -1431,3 +1431,35 @@ and is invisible on a small one.
 coarse "fraction of time the memory controller was busy" counter, not a bandwidth
 figure, and with overall GPU busy time down by a quarter the distribution it samples is
 not comparable between the two runs. Not over-interpreted here.
+
+## Measured: html GPU-direct — 2026-08-02
+
+Same binary both sides, `configuration.html.gpu-direct` toggled, so the only variable
+is the transport. 1080p50 channels, one `[HTML]` producer each, animated template
+(a static page would let the still-frame cache mask the whole thing). 25–30 s warm-up
+discarded, 60 s measured.
+
+| | CPU (s/60 s) | cores | GPU util | private MB |
+|---|---|---|---|---|
+| 1 producer, host copy | 118.1 | 1.81 | 29.5% | 801 |
+| 1 producer, gpu-direct | 67.3 | 1.03 | 38.0% | 734 |
+| 4 producers, host copy | 263.3 | 4.03 | 39.2% | 1060 |
+| 4 producers, gpu-direct | 67.9 | **1.04** | 24.2% | 916 |
+
+**The host path scales with producer count and the GPU-direct path does not.** Three
+additional html producers cost 2.2 cores on the copy path and 0.01 cores on the direct
+one. At four producers that is **−74% process CPU** for identical output.
+
+Identical output is not assumed — it is checked. Both configurations were recorded
+through a FILE consumer for a fixed 30 s wall time and both produced exactly **1499
+frames**, i.e. full rate. So the copy path was not quietly dropping frames to save
+work; it was spending four times the CPU to deliver the same picture.
+
+Unlike the readback change, this one is plainly visible in host CPU, because the work
+removed genuinely was host work: an 8.29 MB memcpy per frame per producer, executed on
+the CEF UI thread.
+
+`utilization.gpu` rising at one producer and falling at four is not explained here.
+With frame delivery pinned to full rate in every run it cannot be a throughput
+difference, and the counter is a coarse busy-time fraction rather than a work measure,
+so no story is invented for it.
