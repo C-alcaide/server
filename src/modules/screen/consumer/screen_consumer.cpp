@@ -496,6 +496,14 @@ struct screen_consumer
     std::atomic<bool> is_running_{true};
     std::thread       thread_;
 
+    /// Latched by gpu_strategy when it has to upload host pixels because the VK→GL
+    /// interop did not come up. The proxy's needs_cpu_frame_data() reads it, which is
+    /// what re-arms the mixer's readback; without that the fallback uploads a buffer
+    /// nothing ever wrote. Latched rather than tracked per frame on purpose: toggling
+    /// it back on the next successful interop frame would alternate between a good
+    /// frame and an empty one, since the mixer answers the question a frame late.
+    std::atomic<bool> host_pixels_needed_{false};
+
     spl::shared_ptr<display_strategy> strategy_;
 
     screen_consumer(const screen_consumer&)            = delete;
@@ -1559,7 +1567,25 @@ struct gpu_strategy : public display_strategy
                     // (texture already bound by try_vk_interop)
 #endif
                 } else {
-                    // Non-OGL texture (Vulkan mixer) — upload CPU pixels via PBO
+                    // Non-OGL texture (Vulkan mixer) — upload CPU pixels via PBO.
+                    //
+                    // Reaching here means the VK→GL interop did not come up, and this
+                    // path needs host pixels the consumer has not been asking for:
+                    // needs_cpu_frame_data() answered !use_vulkan_, i.e. false on the
+                    // very channel that lands here, so the mixer skipped the readback
+                    // and image_data(0) below is empty. The upload then wrote nothing
+                    // and the window showed an unwritten persistent mapping.
+                    //
+                    // Latching this re-arms the readback from the next frame on. The
+                    // frame in hand is still hostless -- the mixer is a frame behind
+                    // the answer -- so zero-fill rather than upload stale bytes, which
+                    // is what the host_strategy path already does.
+                    if (!self->host_pixels_needed_.exchange(true, std::memory_order_relaxed)) {
+                        CASPAR_LOG(info) << self->print()
+                                         << L" VK->GL interop unavailable; falling back to a host upload and "
+                                            L"re-arming the channel's readback.";
+                    }
+
                     auto w   = self->format_desc_.width;
                     auto h   = self->format_desc_.height;
                     auto hbd = self->config_.high_bitdepth;
@@ -1594,6 +1620,8 @@ struct gpu_strategy : public display_strategy
                     auto& img = in_frame.image_data(0);
                     if (img.data() && static_cast<GLsizeiptr>(img.size()) >= sz)
                         std::memcpy(fallback_ptr_, img.data(), sz);
+                    else
+                        std::memset(fallback_ptr_, 0, sz);
 
                     GL(glBindBuffer(GL_PIXEL_UNPACK_BUFFER, fallback_pbo_));
                     // 8-bit mixer outputs BGRA; 16-bit outputs RGBA directly.
@@ -1662,7 +1690,15 @@ struct screen_consumer_proxy : public core::frame_consumer
 
     // When Vulkan mixer is active, gpu_strategy is always used (auto-promoted)
     // and VK→GL zero-copy interop bypasses CPU entirely.
-    bool needs_cpu_frame_data() const override { return !use_vulkan_; }
+    //
+    // Unless it doesn't: gpu_strategy has a host-upload fallback for when the interop
+    // does not come up, and that fallback needs the pixels this answer suppresses. So
+    // ask the consumer whether it has taken it -- the dynamic form core::texture
+    // documents, and the one spout/ffmpeg/decklink already use.
+    bool needs_cpu_frame_data() const override
+    {
+        return !use_vulkan_ || (consumer_ && consumer_->host_pixels_needed_.load(std::memory_order_relaxed));
+    }
 
     int index() const override { return 600 + (config_.key_only ? 10 : 0) + config_.screen_index; }
 
