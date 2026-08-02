@@ -1885,3 +1885,114 @@ this method: a single capture pair at 96.98 dB would have looked like a real reg
 ### Still unexecuted: the DeckLink AVFrame refcount (`dc36e6b3c`)
 
 Needs a card. It stays flagged rather than claimed.
+
+---
+
+## Open items from the 2026-08-02 audit
+
+An audit of the whole GPU-direct / zero-copy series (the ~60 commits from
+`489b02fbc` to `265991e71`). Three defects came out of it and are fixed —
+`fix(screen)`, `fix(vulkan_output)`, `fix(vulkan)` above — along with the two stale
+sections of this document. What follows is everything else the audit turned up,
+recorded so it does not have to be found twice. None of it is on fire; each entry
+says why, and what the fix is.
+
+### 1. The ISF Vulkan readback closes only part of the gap it set out to close
+
+`4fcaa834e` made `build_binding` read a Vulkan source back instead of declining,
+because declining meant `receive_impl` returned `source_frame` and the effect
+silently did nothing for the rest of the run. The readback is gated on
+`planes.size() == 1 && depth == bit8` (`isf_producer.cpp`, in the
+`cf.texture()` branch). Two source shapes still fall through to `return false`
+and get the original silent pass-through:
+
+- a **16-bit** channel, where the mixer attachment is `eR16G16B16A16Unorm`;
+- a **multi-plane GPU frame** — the NV12/P010 pair a GPU-direct hardware decode
+  hands over, which is exactly the kind of source the series added.
+
+The second is the more likely one in practice: `[ISF]` over a GPU-direct clip. The
+16-bit case needs a 16→8 conversion (or a 16-bit binding); the multi-plane case
+needs either a per-plane readback plus a host colour conversion, or the shader-side
+route the section above prefers. Neither is hard; both need a picture to compare
+against, which is why they are listed rather than guessed at.
+
+**Do not ship a partial fix without checking the pass-through warning fires** — see
+the next item, which is why it may not.
+
+### 2. Two ISF diagnostics are function-local statics, so only the first producer logs
+
+`static bool logged` (the readback notice) and `static bool warned_fmt` (the
+pass-through warning) in `isf_producer.cpp` are function-level, not per-producer.
+On a server with more than one ISF producer, whichever runs first consumes the one
+log line and every other producer is silent for the life of the process — including
+the pass-through warning that is the only signal for item 1.
+
+`output.cpp`'s `any_consumer_needs_cpu_data()` carries a comment describing this
+exact bug and its fix (per-instance member instead of a function static); do the
+same here. Cheap, and it makes item 1 diagnosable.
+
+### 3. `alias_of`'s two guards disagree about what is a valid alias
+
+`e491c684d` added `pixel_format_desc::plane::alias_of`. The two readers do not
+apply the same test:
+
+| site | condition |
+|---|---|
+| `ogl/image/image_mixer.cpp`, `vulkan/image/image_mixer.cpp` (`create_frame`) | `alias_of >= 0 && alias_of < n` |
+| `ffmpeg/util/av_util.cpp` (`make_frame`) | `alias_of >= 0` |
+
+A descriptor naming a forward reference or itself therefore gets its own
+freshly-zeroed buffer from the mixer *and* has its copy skipped by `make_frame` —
+a black plane, silently. Unreachable today: the only alias in the tree is UYVY's
+`planes[1].alias_of = 0`, and nothing else sets the field.
+
+Make the two agree on the mixer's bound (`>= 0 && < n`), which is the meaningful
+one, and consider rejecting an out-of-range `alias_of` outright rather than
+treating it as "not an alias".
+
+### 4. `const_frame::with_tag` keeps only the first texture on the lazy branch
+
+`frame.cpp`: the lazy-readback branch rebuilds the frame with
+`impl_->texture()` — plane 0 only — while the non-lazy branch passes the whole
+`impl_->textures_`. Correct today, because a lazy frame is by construction the
+mixer's single-texture composited output and multi-plane GPU frames are never
+lazy. It is a trap if that ever stops being true, and `route_producer` retags
+every routed frame, so the blast radius would be wide and the symptom would be a
+missing chroma plane rather than a crash.
+
+Either carry `textures_` through both branches, or assert the invariant where the
+lazy constructor is called so the assumption fails loudly instead of quietly.
+
+### 5. A permanently hostless channel starves a CPU consumer with one log line
+
+`output::do_send` withholds a frame from a consumer that needs host pixels when the
+frame has none, and logs it once via `skipped_hostless_warned_`. That is right for
+what it was written for — the one-frame transition at attach, where the mixer is a
+frame behind. It reads the same as a *persistent* condition: if the readback is
+armed but keeps failing (`copy_async` refusing a block-compressed texture is one
+real way), the consumer is skipped every tick for ever and the only evidence is a
+single info line from whenever it started.
+
+Worth distinguishing: either re-log periodically, or publish the skip count in the
+channel's monitor state so it shows up in `INFO` rather than only in a log nobody
+is tailing.
+
+### 6. `cuda_prores`'s `CudaGLTexture` example contradicts the threading rule
+
+`265991e71` documented that three copies of this class exist, that the two module
+copies require the caller to hold `cuda_gl_interop_mutex()`, and that
+`cuda_prores/util/cuda_gl_texture.h` is the file someone will copy for a fourth
+CUDA-GL producer. That header's usage example still says:
+
+```
+//   // Outside GL thread (CUDA thread / producer thread):
+//   CudaGLTexture cgt(tex);           // registers with CUDA once
+```
+
+The canonical copy states the opposite — construction, map, unmap and destruction
+must all run on the thread whose GL context owns the texture — and it is the
+canonical one that is right: `prores_producer.cpp` calls `wglMakeCurrent(hdc_,
+shared_hglrc_)` and only then constructs. Registering from a thread with no
+current context fails with "invalid OpenGL or DirectX context".
+
+Correct the example in the copy that is most likely to be copied.
