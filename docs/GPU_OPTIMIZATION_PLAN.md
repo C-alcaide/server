@@ -1601,3 +1601,34 @@ from the producer thread fails with "invalid OpenGL or DirectX context", and CUD
 default device is not necessarily the GL-interoperable one on a multi-GPU box), plus a
 branch in `ofx_producer` mirroring the `CASPAR_OFX_VULKAN_CUDA` one but tagging the
 frame `bgra` rather than `rgba`, per the OGL shader's swizzle convention.
+
+## NVENC GPU-direct on the Vulkan mixer — 2026-08-02
+
+GPU-direct recording used to decline on the Vulkan mixer with *"its composition target
+is not allocated exportable, so CUDA cannot import it"*. That was simply not true:
+`device::create_attachment` allocates with `vk::ExportMemoryAllocateInfo` and
+`vk::ExternalMemoryImageCreateInfo` precisely so consumers can import it, and decklink's
+`cuda_vk_strategy` had been importing that same attachment all along. The gap was a
+stale assumption, not a limitation.
+
+`cuda_vk_upload` is the Vulkan counterpart of `cuda_gl_upload`: same job, unrelated
+mechanism (import exported memory rather than register a GL object), and no device
+thread to hop onto because there is no context to be current.
+
+### The part that was not just plumbing
+
+The first Vulkan recording came out with red and blue swapped — 9.79 dB against the
+OpenGL recording of the same paused frame. **The two mixers write different channel
+orders into identically-typed images.** The Vulkan attachment's `VkFormat` is
+`eR8G8B8A8Unorm`, which reads like RGBA and is not: the format names the storage, the
+shader decides what goes in it, and what goes in it is B,G,R,A. Decklink has always
+read that attachment as BGRA; the OFX and ISF producers each carry a comment about
+relabelling for the same reason.
+
+So `sw_format` has to follow the mixer rather than being a constant: `AV_PIX_FMT_RGB0`
+for OpenGL, `AV_PIX_FMT_BGR0` for Vulkan. After that, 82.31 dB with identical sample
+values — the residual is H.264 being lossy across two independent encodes, not colour.
+
+This is worth remembering as a class of bug: a byte-order mismatch between two GPU
+paths looks like a colour-management problem, and colour management is where you would
+start looking.

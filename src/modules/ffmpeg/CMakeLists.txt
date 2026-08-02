@@ -12,6 +12,8 @@ set(SOURCES
 	consumer/ffmpeg_consumer.h
 	consumer/cuda_gl_upload.cpp
 	consumer/cuda_gl_upload.h
+	consumer/cuda_vk_upload.cpp
+	consumer/cuda_vk_upload.h
 
 	util/av_util.cpp
 	util/av_util.h

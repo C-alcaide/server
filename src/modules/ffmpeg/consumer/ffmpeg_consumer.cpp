@@ -24,6 +24,7 @@
 #include "../util/av_assert.h"
 #include "../util/av_util.h"
 #include "cuda_gl_upload.h"
+#include "cuda_vk_upload.h"
 
 #include <accelerator/ogl/util/device.h>
 #include <accelerator/ogl/util/texture.h>
@@ -125,6 +126,7 @@ struct Stream
     // Non-owning: the consumer owns these and outlives the Stream.
     AVBufferRef*             gpu_frames_ctx = nullptr;
     class cuda_gl_uploader*  gpu_uploader   = nullptr;
+    class cuda_vk_uploader*  gpu_uploader_vk = nullptr;
     std::atomic<bool>*       gpu_direct     = nullptr;
     int                      gpu_failures   = 0;
 
@@ -139,10 +141,12 @@ struct Stream
            core::color_transfer                channel_transfer = core::color_transfer::sdr,
            AVBufferRef*                        gpu_frames       = nullptr,
            class cuda_gl_uploader*             uploader         = nullptr,
-           std::atomic<bool>*                  gpu_direct_flag  = nullptr)
+           std::atomic<bool>*                  gpu_direct_flag  = nullptr,
+           class cuda_vk_uploader*             uploader_vk      = nullptr)
         : gpu_frames_ctx(gpu_frames)
         , gpu_uploader(uploader)
         , gpu_direct(gpu_direct_flag)
+        , gpu_uploader_vk(uploader_vk)
     {
         if (codec_id == AV_CODEC_ID_TIMECODE) {
             is_ltc = true;
@@ -619,9 +623,8 @@ struct Stream
         if (av_hwframe_get_buffer(gpu_frames_ctx, frame.get(), 0) < 0)
             return nullptr;
 
-        if (gpu_uploader) {
-            auto* gl_tex = dynamic_cast<accelerator::ogl::texture*>(tex.get());
-            if (!gl_tex)
+        if (auto* gl_tex = dynamic_cast<accelerator::ogl::texture*>(tex.get())) {
+            if (!gpu_uploader)
                 return nullptr;
             auto dev = gl_tex->get_device();
             if (!dev)
@@ -634,6 +637,11 @@ struct Stream
                 return gpu_uploader->copy_to_device(*gl_tex, frame->data[0], static_cast<size_t>(frame->linesize[0]));
             });
             if (!ok)
+                return nullptr;
+        } else if (gpu_uploader_vk) {
+            // Vulkan: no device thread to hop onto and no context to be current --
+            // the image's exported memory is imported straight into CUDA.
+            if (!gpu_uploader_vk->copy_to_device(tex, frame->data[0], static_cast<size_t>(frame->linesize[0])))
                 return nullptr;
         } else {
             return nullptr;
@@ -783,6 +791,7 @@ struct ffmpeg_consumer : public core::frame_consumer
     // tick, so the channel resumes readbacks from the next one.
     std::atomic<bool>            gpu_direct_{false};
     cuda_gl_uploader             gpu_uploader;
+    cuda_vk_uploader             gpu_uploader_vk;
 
     using av_buffer_ptr = std::unique_ptr<AVBufferRef, void (*)(AVBufferRef*)>;
     static av_buffer_ptr null_av_buffer() { return {nullptr, [](AVBufferRef* p) { av_buffer_unref(&p); }}; }
@@ -791,10 +800,17 @@ struct ffmpeg_consumer : public core::frame_consumer
 
     /// A CUDA frames pool the encoder can read directly.
     ///
-    /// sw_format is RGB0 because the mixer's target texture is GL_RGBA8 -- four
-    /// bytes per texel in R,G,B,A order -- and the copy out of it is byte-for-byte.
-    /// NVENC lists RGB formats among its inputs and converts to YCbCr internally,
-    /// which measured *better* than converting on the host beforehand.
+    /// The copy out of the mixer's target is byte-for-byte, so sw_format has to name
+    /// the byte order the mixer actually wrote -- and the two mixers do not agree.
+    /// The OpenGL target is R,G,B,A, so RGB0. The Vulkan target is B,G,R,A despite its
+    /// VkFormat being eR8G8B8A8Unorm: the format names the storage, the shader decides
+    /// what goes in it, and decklink's cuda_vk_strategy has always read that same
+    /// attachment as BGRA. Declaring RGB0 for it swaps red and blue -- which is exactly
+    /// what the first Vulkan recording did, and the kind of thing that looks like a
+    /// colour-management problem rather than a byte-order one.
+    ///
+    /// NVENC lists both among its inputs and converts to YCbCr internally, which
+    /// measured *better* than converting on the host beforehand.
     av_buffer_ptr make_cuda_frames_ctx(int width, int height)
     {
         auto fail = null_av_buffer();
@@ -811,7 +827,7 @@ struct ffmpeg_consumer : public core::frame_consumer
 
         auto* ctx     = reinterpret_cast<AVHWFramesContext*>(owned->data);
         ctx->format    = AV_PIX_FMT_CUDA;
-        ctx->sw_format = AV_PIX_FMT_RGB0;
+        ctx->sw_format = use_vulkan_ ? AV_PIX_FMT_BGR0 : AV_PIX_FMT_RGB0;
         ctx->width     = width;
         ctx->height    = height;
         // Deep enough that the encoder holding a couple of frames never starves
@@ -831,6 +847,7 @@ struct ffmpeg_consumer : public core::frame_consumer
         auto* hw_dev  = reinterpret_cast<AVHWDeviceContext*>(gpu_device_ctx->data);
         auto* cuda_hw = static_cast<AVCUDADeviceContext*>(hw_dev->hwctx);
         gpu_uploader.set_context(cuda_hw->cuda_ctx);
+        gpu_uploader_vk.set_context(cuda_hw->cuda_ctx);
 
         return owned;
     }
@@ -998,8 +1015,13 @@ struct ffmpeg_consumer : public core::frame_consumer
                     //   no user filter -- lavfi filters operate on host frames.
                     //   8-bit channel  -- a 16-bit channel's texture is RGBA16 and
                     //                     NVENC's RGB inputs are 8-bit.
-                    //   OpenGL mixer   -- the Vulkan equivalent needs
-                    //                     cuda_vk_texture and is not built yet.
+                    //   either mixer   -- OpenGL registers the mixer texture with
+                    //                     CUDA, Vulkan imports the attachment's
+                    //                     exported memory. This used to decline on
+                    //                     Vulkan claiming the composition target was
+                    //                     not exportable; create_attachment allocates
+                    //                     with ExportMemoryAllocateInfo and decklink
+                    //                     had been importing it all along.
                     //   CUDA present   -- obviously.
                     // Anything false leaves the existing host path untouched.
                     {
@@ -1032,10 +1054,7 @@ struct ffmpeg_consumer : public core::frame_consumer
                             decline = "an explicit pixel format was requested";
                         else if (depth_ != common::bit_depth::bit8)
                             decline = "channel is not 8-bit";
-                        else if (use_vulkan_)
-                            decline = "Vulkan mixer: its composition target is not allocated exportable, so CUDA "
-                                      "cannot import it";
-                        else if (!cuda_gl_uploader::available())
+                        else if (use_vulkan_ ? !cuda_vk_uploader::available() : !cuda_gl_uploader::available())
                             decline = "no usable CUDA device";
 
                         if (decline == nullptr) {
@@ -1053,7 +1072,7 @@ struct ffmpeg_consumer : public core::frame_consumer
                         }
                     }
 
-                    video_stream.emplace(oc, ":v", oc->oformat->video_codec, format_desc, realtime_, depth_, options, channel_info.default_color_space, channel_info.default_color_transfer, gpu_frames_ctx.get(), &gpu_uploader, &gpu_direct_);
+                    video_stream.emplace(oc, ":v", oc->oformat->video_codec, format_desc, realtime_, depth_, options, channel_info.default_color_space, channel_info.default_color_transfer, gpu_frames_ctx.get(), &gpu_uploader, &gpu_direct_, &gpu_uploader_vk);
 
                     {
                         std::lock_guard<std::mutex> lock(state_mutex_);
