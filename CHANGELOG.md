@@ -1,3 +1,63 @@
+CasparVP — Unreleased
+==========================================
+
+### ⚠ Behaviour change: ArtNet / sACN fixture colours
+
+**Every existing ArtNet and sACN installation will send different DMX values after
+this build. Re-check your fixture positions.**
+
+The fixture rasteriser had a degenerate case on the last scanline of an unrotated
+fixture rectangle — which is the common case, since `rotation` defaults to 0. The
+active-edge pair selected there shared an endpoint, the slope guard skipped the
+interpolation, and the horizontal span silently kept its initial values of `0` and
+`width - 1`. Each fixture's bottom row was therefore sampled across the **full width
+of the frame** rather than across the fixture.
+
+Measured on the shipped example geometry (ten 50×100 fixtures in a 500×100 box):
+7020 pixels were accumulated where 5151 are actually covered, and a fixture over a
+region of pure red averaged to 181 instead of 247 — **27% of every fixture's value
+came from outside the fixture**. A rotated fixture was unaffected (it has no
+horizontal edge, so the table never degenerated): the same test gives 254 before
+and after.
+
+Fixture colours are now sampled only from the pixels the fixture actually covers.
+Anyone who nudged fixture boxes to compensate for the old behaviour will want to
+re-trim them.
+
+Note on the related divide-by-zero: sACN guarded a zero pixel count and ArtNet did
+not, but neither could reach it — the old rasteriser always produced at least one
+(full-width) scanline. With correct spans a fixture positioned entirely off-frame
+genuinely yields no samples, so the guard is now load-bearing and lives in the
+shared implementation. Such a fixture emits black instead of an average of a row it
+does not touch.
+
+### Consumers
+##### Fixes
+* OAL (`system-audio`), PortAudio and the ProRes bypass consumer no longer force a
+  full-frame GPU→CPU readback on their channel. None of them reads a pixel, but
+  `needs_cpu_frame_data()` defaults to true and `any_consumer_needs_cpu_data()`
+  short-circuits on the first consumer that says yes — so `<system-audio />` on
+  channel 1, which the shipped config includes, was enough to defeat every
+  GPU-native consumer sharing that channel.
+* ArtNet / sACN: fixture geometry and rasterisation deduplicated into
+  `modules/dmx_common`; the two copies had already drifted apart by one bug fix.
+
+### Producers
+##### Fixes
+* OFX: passing a GPU-only source (HAP, CUDA ProRes, NotchLC, ISF) to a plug-in
+  dereferenced a null host pointer. Such frames now pass through unprocessed with a
+  warning, except on the OpenGL zero-copy path which handles them natively.
+* OFX: a plug-in advertising both the CUDA and OpenGL render extensions rendered a
+  black frame on the OpenGL mixer — the host took the CUDA branch, which wrote
+  nothing the caller then blitted.
+##### Improvements
+* DeckLink input: the capture buffer is now reference-counted into the filter
+  graph instead of being copied into it, removing a full-frame copy per frame per
+  input from the driver's callback thread.
+* UYVY sources (DeckLink input, NDI input, ffmpeg software decode) share one
+  staging buffer between their luma and chroma plane views instead of having the
+  identical bytes copied into two, halving the host cost of every UYVY frame.
+
 CasparCG 2.5.0 Stable
 ==========================================
 
