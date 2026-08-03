@@ -80,6 +80,7 @@ set(SOURCES
     util/shared_texture_pool.cpp
     util/shared_texture_pool.h
     util/platform_handles.h
+    util/os_display_support.h
     util/interop_context.cpp
     util/interop_context.h
     util/gpu_affinity_context.cpp

@@ -316,7 +316,17 @@ The module automates steps 3–5:
 - If detach succeeds but enumeration still fails, it warns that a restart is needed and reattaches the display
 - If configureDriver fails or is unavailable, or if the OS is Windows 10, the module falls back to FSE immediately
 
-**On Windows 10**: VK_KHR_display is **not available**. The "Specialized Monitors" / "Remove display from desktop" feature does not exist in Windows 10. All output goes through `VK_EXT_full_screen_exclusive` + Win32 surfaces. The `configureDriver --set 6` command may succeed silently but has no effect.
+**How step 1 is detected** ([util/os_display_support.h](../src/modules/vulkan_output/util/os_display_support.h)): the OS build number is read via `RtlGetVersion` from `ntdll.dll`. `GetVersionExW` and `VerifyVersionInfo` are shimmed by the application manifest and report 6.2 unless the executable declares a Windows 10+ `supportedOS` GUID, so they cannot be used here. Windows 10 and Windows 11 both report major.minor 10.0 — the build number (≥ 22000) is the only discriminator. If the version cannot be read at all, the answer is "unsupported": a wrong *yes* costs a UAC prompt and a live desktop topology change, a wrong *no* only forgoes a path that was almost certainly unavailable.
+
+The result feeds the tier decision as `vulkan_device::khr_display_blocked_by_os()`. It does **not** demote the tier — a Pro GPU on Windows 10 still gets present barrier, Quadro Sync and the Pro FSE path — it suppresses the recovery sequence and makes the reason visible:
+- `configureDriver.exe` is not launched and the display is not detached (neither can succeed)
+- the startup line reads `Tier: Pro (fullscreen — VK_KHR_display unavailable on this OS)`
+- `GPU n: … (tier=pro, …, khr_display_os_ok=0)` is logged at device selection, followed by the build number and what would be required
+- the monitor key `vulkan-output/khr-display-os-support` reports `false`
+
+The edition requirement is checked separately via `GetProductInfo` and is **advisory only** — an unlisted edition produces a log line but the attempt still proceeds, because the authoritative test is whether `vkGetPhysicalDeviceDisplayPropertiesKHR` returns a display. Note that the Windows SDK does not define `PRODUCT_PRO_WORKSTATION`, so the numeric SKU values (`0xA1`/`0xA2` Pro for Workstations, `0xBC` IoT Enterprise) are spelled out in the header.
+
+**On Windows 10**: VK_KHR_display is **not available**. The "Specialized Monitors" / "Remove display from desktop" feature does not exist in Windows 10. All output goes through `VK_EXT_full_screen_exclusive` + Win32 surfaces. The `configureDriver --set 6` command may succeed silently but has no effect — which is why the module no longer runs it there.
 
 **Bottom line**: On Windows 10, all output uses the FSE fullscreen window path. On Windows 11 with the correct edition and setup, VK_KHR_display direct scanout is possible but requires one-time admin setup + restart.
 
@@ -1804,6 +1814,7 @@ The following state paths are published via OSC:
 vulkan-output/gpu             = 0
 vulkan-output/output          = 1
 vulkan-output/tier            = "pro"
+vulkan-output/khr-display-os-support = true   # false on Windows 10: "pro" tier runs the FSE path
 vulkan-output/frames          = 123456
 vulkan-output/display-lost    = false
 vulkan-output/sync-group      = 1

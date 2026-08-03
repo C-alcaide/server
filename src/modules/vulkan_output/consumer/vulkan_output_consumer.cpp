@@ -31,6 +31,7 @@
 #endif
 #include "../util/nvapi_helpers.h"
 #include "../util/color_convert_pipeline.h"
+#include "../util/os_display_support.h"
 
 #include <accelerator/ogl/image/image_mixer.h>
 #include <accelerator/ogl/util/device.h>
@@ -415,6 +416,10 @@ class vulkan_output_consumer : public core::frame_consumer
         s["vulkan-output/tier"]   = device_ ? (device_->tier() == gpu_tier::pro ? std::wstring(L"pro")
                                                                                  : std::wstring(L"consumer"))
                                             : std::wstring(L"none");
+        // Distinguishes "Pro GPU on direct scanout" from "Pro GPU forced to the
+        // FSE path because the OS has no VK_KHR_display support".
+        s["vulkan-output/khr-display-os-support"] =
+            std::wstring(device_ && device_->khr_display_blocked_by_os() ? L"false" : L"true");
         s["vulkan-output/frames"] = std::to_wstring(frames_presented_.load());
         s["vulkan-output/display-lost"] = std::wstring(display_lost_.load() ? L"true" : L"false");
         s["vulkan-output/sync-group"]   = std::to_wstring(config_.sync_group);
@@ -464,10 +469,21 @@ class vulkan_output_consumer : public core::frame_consumer
 
 #ifdef _WIN32
             // If VK_KHR_display returned zero displays, the target display may still
-            // be part of the Windows desktop. Try detaching it programmatically.
-            // This is the Windows 11 equivalent of Settings → Display → Advanced →
-            // "Remove display from desktop".
-            if (!found && displays.empty()) {
+            // be part of the Windows desktop — but only Windows 11 can hand it over.
+            // Windows 10 has no "Remove display from desktop" feature, so the whole
+            // recovery sequence (configureDriver + detach) cannot succeed there:
+            // it would cost a UAC prompt at channel startup and a live desktop
+            // topology change for nothing. Check the OS before touching either.
+            if (!found && displays.empty() && device_->khr_display_blocked_by_os()) {
+                CASPAR_LOG(info) << print() << L" VK_KHR_display direct scanout is not available on "
+                                 << os_support::os_version_string() << L" (requires Windows 11 build "
+                                 << os_support::kWindows11FirstBuild
+                                 << L"+). Skipping configureDriver and display detach; "
+                                    L"using the fullscreen exclusive output path.";
+            } else if (!found && displays.empty()) {
+                // Windows 11: the display may still be owned by the desktop.
+                // This is the equivalent of Settings → Display → Advanced →
+                // "Remove display from desktop", done programmatically.
                 // First, ensure the NVIDIA driver exports VK_KHR_display (configureDriver --set 6).
                 bool driver_configured = ensure_vk_khr_display_exported();
 
@@ -713,6 +729,8 @@ class vulkan_output_consumer : public core::frame_consumer
         CASPAR_LOG(info) << print() << L" initialized. Tier: "
                          << (adapter_mismatch_ ? L"GDI fallback (cross-adapter)" :
                              (device_->tier() == gpu_tier::pro && found) ? L"Pro (direct display)" :
+                             (device_->tier() == gpu_tier::pro && device_->khr_display_blocked_by_os())
+                                 ? L"Pro (fullscreen — VK_KHR_display unavailable on this OS)" :
                              device_->tier() == gpu_tier::pro ? L"Pro (fullscreen)" : L"Consumer (fullscreen)")
                          << (config_.delay_frames > 0 || config_.delay_ms > 0.0
                                  ? L" Delay: " + std::to_wstring(config_.delay_frames) + L" frames"
@@ -3291,6 +3309,15 @@ class vulkan_output_consumer : public core::frame_consumer
         static bool result = false;
         static std::once_flag once;
         std::call_once(once, [] {
+            // Never launch the utility on an OS that cannot use the extension —
+            // the call sites gate on this too, this is the backstop for any
+            // future caller. Logged at debug: the call site logs the reason.
+            if (!os_support::khr_display_supported_by_os()) {
+                CASPAR_LOG(debug) << L"[vulkan_output] Skipping configureDriver: "
+                                  << os_support::os_version_string() << L" cannot support VK_KHR_display.";
+                return;
+            }
+
             // Quick check: if VK_KHR_display already reports displays, nothing to do.
             auto displays = vulkan_device::enumerate_displays();
             for (const auto& d : displays) {
@@ -4431,6 +4458,15 @@ std::wstring enumerate_outputs()
 
     result += L"Vulkan Display Outputs:\n";
     result += L"───────────────────────────────────────────────────────────────\n";
+
+    // A "Pro" tag below means the GPU qualifies; on an OS without VK_KHR_display
+    // support those outputs still run through the fullscreen exclusive path.
+    if (!os_support::khr_display_supported_by_os()) {
+        result += L"  Note: " + os_support::os_version_string() +
+                  L" has no VK_KHR_display support (needs Windows 11 build " +
+                  std::to_wstring(os_support::kWindows11FirstBuild) +
+                  L"+); Pro outputs use the fullscreen exclusive path.\n";
+    }
 
     // Initialize NvAPI for EDID info
     nvapi_helpers nvapi;

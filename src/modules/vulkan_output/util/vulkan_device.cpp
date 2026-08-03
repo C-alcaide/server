@@ -18,6 +18,7 @@
  */
 
 #include "vulkan_device.h"
+#include "os_display_support.h"
 #include "platform_handles.h"
 
 #include <common/except.h>
@@ -245,10 +246,31 @@ void vulkan_device::select_physical_device(int gpu_index)
     else
         tier_ = gpu_tier::none;
 
+    // The GPU may qualify for Pro tier while the host OS cannot deliver the
+    // direct-scanout path: VK_KHR_display needs Windows 11's "Specialized
+    // Monitors" feature.  Record that separately rather than demoting the tier —
+    // a Pro GPU still gets present barrier, Quadro Sync and the Pro FSE path.
+    khr_display_blocked_by_os_ = !os_support::khr_display_supported_by_os();
+
     CASPAR_LOG(info) << L"[vulkan_output] Selected GPU " << gpu_index << L": " << props.deviceName
                      << L" (tier=" << (tier_ == gpu_tier::pro ? L"pro" : tier_ == gpu_tier::consumer ? L"consumer" : L"none")
                      << L", ext_mem=" << has_ext_mem
-                     << L", present_barrier=" << has_present_barrier << L")";
+                     << L", present_barrier=" << has_present_barrier
+                     << L", khr_display_os_ok=" << !khr_display_blocked_by_os_ << L")";
+
+    if (tier_ == gpu_tier::pro && khr_display_blocked_by_os_) {
+        CASPAR_LOG(info) << L"[vulkan_output] VK_KHR_display direct scanout unavailable on "
+                         << os_support::os_version_string()
+                         << L" (requires Windows 11 build " << os_support::kWindows11FirstBuild
+                         << L"+ for 'Remove display from desktop'). "
+                            L"Pro GPU will use the fullscreen exclusive output path.";
+    } else if (tier_ == gpu_tier::pro && !os_support::edition_documented_for_specialized_monitors()) {
+        // Build is high enough but the edition is not one of the documented
+        // ones. Still attempted — this only explains a later failure.
+        CASPAR_LOG(info) << L"[vulkan_output] " << os_support::os_version_string()
+                         << L" edition is not one of Enterprise / Pro for Workstations / IoT Enterprise; "
+                            L"VK_KHR_display direct scanout may be unavailable.";
+    }
 
     // Warn if the driver's Vulkan API version is below 1.3 — older drivers have
     // known multi-GPU stability issues (TDR during VkDevice creation, broken

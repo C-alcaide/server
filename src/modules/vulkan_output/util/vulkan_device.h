@@ -67,6 +67,13 @@ class vulkan_device
     gpu_tier         tier() const { return tier_; }
     int              gpu_index() const { return gpu_index_; }
 
+    // True when the host OS cannot support VK_KHR_display direct scanout at all
+    // (Windows 10: the "Specialized Monitors" / "Remove display from desktop"
+    // feature is Windows 11 build 22000+ only).  A Pro-tier GPU on such a host
+    // still uses the fullscreen exclusive path — callers should skip the
+    // configureDriver / display-detach recovery sequence, which cannot succeed.
+    bool             khr_display_blocked_by_os() const { return khr_display_blocked_by_os_; }
+
     // Multi-queue API: each consumer acquires a queue index.
     // If more consumers than queues (unlikely: NVIDIA exposes 16), indices wrap
     // and consumers sharing a queue serialize via the per-queue mutex.
@@ -127,6 +134,7 @@ class vulkan_device
     uint32_t                 queue_count_          = 0;
     std::atomic<uint32_t>    next_queue_index_{0};
     gpu_tier                 tier_                 = gpu_tier::none;
+    bool                     khr_display_blocked_by_os_ = false;
     int                      gpu_index_            = 0;
     uint8_t                  device_luid_[8]       = {};
     bool                     device_luid_valid_    = false;
