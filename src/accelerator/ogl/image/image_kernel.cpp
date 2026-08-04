@@ -451,6 +451,18 @@ struct image_kernel::impl
             shader_->set("blur_enable", false);
         }
 
+        // Did the automatic colour conversion below turn gamut compression on?
+        //
+        // It has to be remembered here, because the MANUAL gamut-compress block runs later
+        // and unconditionally, and its `else` set `gamut_compress_enable` to false. So the
+        // auto path's decision was overwritten on every draw and automatic gamut
+        // compression never reached the shader at all on this backend: with
+        // `auto-gamut-compress` on and no `MIXER GAMUT-COMPRESS`, the flag was cleared, and
+        // with both on the manual limits won. The Vulkan kernel ORs a flag bit and never
+        // clears it, so its auto path worked -- an OpenGL-only divergence, and the reason
+        // the limit-order fix in 1288dc032 was correct but inert.
+        bool gamut_compress_from_auto = false;
+
         // Color grading: ACES-based gamut/transfer/tonemapping pipeline
         // Gamut index: 0=bt709, 1=bt2020, 2=dcip3_d65, 3=aces_ap0, 4=aces_ap1(acescg), 5=arri_wg3, 6=sgamut3_cine
 
@@ -690,6 +702,7 @@ struct image_kernel::impl
                 // wide→narrow gamut conversions to prevent hard-clipping of
                 // out-of-gamut colors (e.g. BT.2020→BT.709).
                 if (params.auto_gamut_compress && ig != og) {
+                    gamut_compress_from_auto = true;
                     shader_->set("gamut_compress_enable", true);
                     // Default ACES 1.3 limits, in the BGRA order this shader consumes
                     // them: .r is the blue channel's distance, which is the YELLOW
@@ -860,6 +873,11 @@ struct image_kernel::impl
         }
 
         // Gamut compression (ACES 1.3 Reference Gamut Compress)
+        //
+        // An explicit MIXER GAMUT-COMPRESS wins, because it names its own limits. But the
+        // `else` may only disable what the AUTO path did not already enable: this block
+        // runs unconditionally and later, so an unconditional `false` here silently
+        // cancelled automatic gamut compression on every draw.
         if (transforms.image_transform.gamut_compress) {
             shader_->set("gamut_compress_enable", true);
             // BGRA order: .r=Blue(yellow), .g=Green(magenta), .b=Red(cyan)
@@ -867,7 +885,7 @@ struct image_kernel::impl
                          static_cast<float>(transforms.image_transform.gc_yellow),
                          static_cast<float>(transforms.image_transform.gc_magenta),
                          static_cast<float>(transforms.image_transform.gc_cyan));
-        } else {
+        } else if (!gamut_compress_from_auto) {
             shader_->set("gamut_compress_enable", false);
         }
 

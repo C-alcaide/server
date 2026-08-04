@@ -149,6 +149,26 @@ $$\text{response} = 4 \cdot L \cdot (1 - L)$$
 
 This peaks at midtone luminance ($L = 0.5$) and falls off to zero in pure black and pure white — matching how silver halide film grain is most visible in mid-exposure areas.
 
+### Known deviation: the hash is biased slightly dark
+
+**Grain has a small DC offset. It is not centred on zero, so adding grain darkens the
+image a little as well as adding noise.**
+
+Measured 2026-08-04: the hash's mean output is **≈ 0.44** rather than 0.5, which puts grain
+about **1 LSB dark at `intensity 0.1`**. The noise itself is real and has the right standard
+deviation — measured sigma 0.0593 against a predicted 0.0577 — so this is a centring error,
+not a broken generator.
+
+Cause: the upstream Dave Hoskins hash mixes in a constant `+ 33.33`, which this
+implementation replaced with `float(frame_seed) * 0.00137`. That term is near zero for small
+frame numbers, so early frames get almost none of the intended mixing.
+
+**Deliberately not fixed.** Correcting the hash changes the noise field itself, so every
+look that was graded by eye against the current grain would shift. That is a creative call
+about the house look, not a correctness one — it belongs to whoever owns the look, not to a
+bug fix. If you are choosing: the fix is to restore a non-trivial mixing constant, and it
+should land with a note that saved grades need re-checking.
+
 ### Examples
 
 ```amcp
