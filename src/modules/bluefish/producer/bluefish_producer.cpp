@@ -445,6 +445,25 @@ struct bluefish_producer
                 auto src_audio = alloc_frame();
 
                 // video
+                //
+                // KNOWN GAP: rgb24 is packed 3-byte RGB, which the VULKAN mixer cannot
+                // sample. Vulkan does not oblige an implementation to support a
+                // 3-component format as a sampled image and NVIDIA Quadro/RTX does not, so
+                // a Bluefish capture on a Vulkan-mixer channel is dropped by
+                // vk::image_mixer with a warning naming the format, and the layer is black.
+                // OpenGL samples it fine, and that is the only reason this went unnoticed.
+                //
+                // The same defect in the image producer blanked every opaque still and,
+                // before the guard existed, threw from the channel tick once per frame.
+                // `av_producer` refuses to negotiate rgb24 for exactly this reason.
+                //
+                // Two ways out, neither verifiable without the card: ask the card for a
+                // 4-component layout (`memory_format_on_card_`, which also fixes the
+                // `width * 3` linesize below), or swscale to BGRA here — gated on
+                // `frame_factory.gpu_device_backend()`, since an unconditional convert
+                // would cost every OpenGL user a full-frame CPU pass per captured frame.
+                // Left alone deliberately: shipping an unmeasured change to a hardware
+                // capture path is worse than a named gap.
                 src_video->format           = AV_PIX_FMT_RGB24;
                 src_video->width            = width;
                 src_video->height           = height;
