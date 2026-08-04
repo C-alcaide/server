@@ -757,11 +757,23 @@ struct image_kernel::impl
             auto lut_b = build_curve_lut(cv.blue);
             auto lut_m = build_curve_lut(cv.master);
 
+            // Pack in RGBA order, NOT the OpenGL kernel's BGRA order.
+            //
+            // The OpenGL kernel stores (B, G, R, M) on purpose: it carries the pixel
+            // through grading in BGRA, so its `.r` slot is the blue-displayed
+            // channel. This backend grades in RGB, and `apply_curves` reads slot 0
+            // for `c.r` — so copying that packing verbatim applied the user's BLUE
+            // curve to RED and vice versa. Measured before the fix: 20.8 LSB on the
+            // single-op row and ~21 on every stack containing it, OpenGL clean.
+            //
+            // Green and master are their own inverse under the exchange, which is
+            // why only the red and blue curves were visibly wrong and why a grey
+            // ramp would not have caught it.
             curve_lut_pending_data_.resize(256 * 4);
             for (int i = 0; i < 256; ++i) {
-                curve_lut_pending_data_[i * 4 + 0] = lut_b[i];
+                curve_lut_pending_data_[i * 4 + 0] = lut_r[i];
                 curve_lut_pending_data_[i * 4 + 1] = lut_g[i];
-                curve_lut_pending_data_[i * 4 + 2] = lut_r[i];
+                curve_lut_pending_data_[i * 4 + 2] = lut_b[i];
                 curve_lut_pending_data_[i * 4 + 3] = lut_m[i];
             }
 
