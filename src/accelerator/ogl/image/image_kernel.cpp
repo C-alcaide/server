@@ -928,8 +928,22 @@ struct image_kernel::impl
         // Secondary qualifier
         if (transforms.image_transform.qualifier_enable) {
             shader_->set("qualifier_enable", true);
-            shader_->set("qual_target_hue",  static_cast<float>(transforms.image_transform.qual_target_hue));
-            shader_->set("qual_hue_width",   static_cast<float>(transforms.image_transform.qual_hue_width));
+            // AMCP carries these in DEGREES; the shader keys on rgb2hsv's 0..1 hue.
+            // They used to be uploaded raw, so `AngleDiff(hsv.x, 210.0)` compared a
+            // value in [0,1] against 210 and `hue_mask` came out 1 for every pixel —
+            // the qualifier keyed on saturation and luminance alone and ignored hue
+            // entirely. Measured before the fix: a 64 LSB error on a green patch that
+            // a 210-degree (blue) key must not touch at all.
+            //
+            // /360 for the centre, because hue is a full turn. /180 for the width,
+            // because the shader compares it against `AngleDiff(...)*2` and AngleDiff
+            // saturates at 0.5 — so 1.0 on that scale is 180 degrees, which is also
+            // the documented maximum for this argument.
+            //
+            // The chroma keyer at line 321 has always divided its own target hue by
+            // 360; this brings the qualifier in line with it.
+            shader_->set("qual_target_hue",  static_cast<float>(transforms.image_transform.qual_target_hue / 360.0));
+            shader_->set("qual_hue_width",   static_cast<float>(transforms.image_transform.qual_hue_width / 180.0));
             shader_->set("qual_min_sat",     static_cast<float>(transforms.image_transform.qual_min_sat));
             shader_->set("qual_max_sat",     static_cast<float>(transforms.image_transform.qual_max_sat));
             shader_->set("qual_min_lum",     static_cast<float>(transforms.image_transform.qual_min_lum));

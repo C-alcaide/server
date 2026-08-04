@@ -1463,8 +1463,12 @@ struct image_kernel::impl
         // ── Secondary Qualifier ──────────────────────────────────────
         if (transforms.image_transform.qualifier_enable) {
             uniforms.flags |= static_cast<uint32_t>(shader_flags::qualifier_enable);
-            uniforms.qual_target_hue = static_cast<float>(transforms.image_transform.qual_target_hue);
-            uniforms.qual_hue_width  = static_cast<float>(transforms.image_transform.qual_hue_width);
+            // Degrees in, normalised hue out — /360 for the centre, /180 for the
+            // width, which the shader compares against `AngleDiff(...)*2`. Same fix
+            // as the OpenGL kernel; see the longer note there. Uploaded raw, the hue
+            // mask evaluated to 1 for every pixel and the key ignored hue.
+            uniforms.qual_target_hue = static_cast<float>(transforms.image_transform.qual_target_hue / 360.0);
+            uniforms.qual_hue_width  = static_cast<float>(transforms.image_transform.qual_hue_width / 180.0);
             uniforms.qual_min_sat    = static_cast<float>(transforms.image_transform.qual_min_sat);
             uniforms.qual_max_sat    = static_cast<float>(transforms.image_transform.qual_max_sat);
             uniforms.qual_min_lum    = static_cast<float>(transforms.image_transform.qual_min_lum);
