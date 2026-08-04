@@ -44,8 +44,10 @@
 #include <core/diagnostics/call_context.h>
 #include <core/mixer/image/image_mixer.h>
 
+#include <chrono>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 
@@ -188,6 +190,10 @@ struct video_channel::impl final
             set_thread_name(L"channel-" + std::to_wstring(channel_info_.index));
 
             while (!abort_request_) {
+                // Started outside the try because the catch needs it: the loop's
+                // pacing comes from the consumers, and a phase that throws before
+                // output_() is reached skips that wait entirely. See the catch.
+                caspar::timer tick_timer;
                 try {
                     frames_since_update_++;
                     auto   now          = std::chrono::steady_clock::now();
@@ -339,6 +345,30 @@ struct video_channel::impl final
                     tick_window_.osc.add(osc_elapsed * 1000.0);
                 } catch (...) {
                     CASPAR_LOG_CURRENT_EXCEPTION();
+
+                    // Nothing paces this loop except the consumers. output_() is what
+                    // blocks on the DeckLink clock (or on a file consumer's queue), and
+                    // it is the last phase — so an exception thrown in produce or mix
+                    // returns straight to the top of the while and the channel free-runs
+                    // as fast as the GPU will take work.
+                    //
+                    // Measured, Vulkan mixer, 1080p25, one still-image layer whose rgb24
+                    // upload throws in the mixer every frame: 28,997 exceptions in 6.0 s
+                    // = ~4,800 ticks/s against a nominal 25. That turned one unsupported
+                    // pixel format into a pegged CPU core, ~5,000 log lines a second, and
+                    // 90x the compositing the channel consumes -- all of which read as
+                    // separate faults. Sleeping out the remainder of the frame period
+                    // bounds a persistent failure to one occurrence per frame.
+                    //
+                    // Only the REMAINDER, so a tick that already overran is not delayed
+                    // further, and a transient exception costs nothing.
+                    const auto hz = stage_->video_format_desc().hz;
+                    if (hz > 0.0) {
+                        const auto remaining = 1.0 / hz - tick_timer.elapsed();
+                        if (remaining > 0.0) {
+                            std::this_thread::sleep_for(std::chrono::duration<double>(remaining));
+                        }
+                    }
                 }
             }
         });
