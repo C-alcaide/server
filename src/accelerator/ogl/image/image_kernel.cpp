@@ -396,6 +396,22 @@ struct image_kernel::impl
                          std::max(static_cast<float>(proj.icvfx_outer_gain_b), 0.0f));
         }
 
+        // Target size — needed by blur, sharpening AND grain, so it is set
+        // unconditionally. It used to live inside the blur branch below, which meant
+        // that with blur off (the normal case) it kept the GLSL default vec2(0,0):
+        //
+        //   * apply_film_grain computed `uv * target_size` = (0,0) for every pixel,
+        //     and grain_hash(0,0,seed) is exactly 0 whatever the seed — so `noise`
+        //     was -1 everywhere and GRAIN was not noise at all, just a flat
+        //     darkening. Measured: `MIXER 1-1 GRAIN 0.1` on a #808080 patch produced
+        //     a uniform 102/255 frame, zero variance, 26 LSB down.
+        //   * apply_sharpen computed `1.0/target_size` = infinity, so all four taps
+        //     sampled far outside the image and clamped to the edge texel.
+        //
+        // The Vulkan kernel has always set this unconditionally, so this was also an
+        // OpenGL-only divergence.
+        shader_->set("target_size", static_cast<float>(params.target_width), static_cast<float>(params.target_height));
+
         if (transforms.image_transform.blur.enable) {
             shader_->set("blur_enable", true);
             shader_->set("blur_radius", static_cast<float>(transforms.image_transform.blur.radius));
@@ -405,7 +421,6 @@ struct image_kernel::impl
                          static_cast<float>(transforms.image_transform.blur.center[1]));
             shader_->set("blur_tilt",   static_cast<float>(transforms.image_transform.blur.tilt_y),
                          static_cast<float>(transforms.image_transform.blur.tilt_h));
-            shader_->set("target_size", static_cast<float>(params.target_width), static_cast<float>(params.target_height));
         } else {
             shader_->set("blur_enable", false);
         }
