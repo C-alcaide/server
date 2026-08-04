@@ -59,6 +59,37 @@ every row at or below 0.56 LSB — the 8-bit quantisation half-step.
   the source, not measured — reaching it needs a wide-gamut source on an
   auto-converting channel, which the conformance rig deliberately does not have.
 
+### ⚠ Behaviour change: automatic gamut compression now actually happens (OpenGL)
+
+**A channel with `<auto-gamut-compress>true</auto-gamut-compress>` on the OpenGL mixer was
+not compressing anything. It now does, so wide-gamut sources converted to a narrower
+channel gamut will render differently — highly saturated colours that used to hard-clip are
+now rolled off.**
+
+`image_kernel::draw` writes the gamut-compress uniform in two places. The automatic path
+sets it inside the colour-conversion branch when `auto_gamut_compress && ig != og`. The
+manual `MIXER GAMUT-COMPRESS` block runs **later and unconditionally**, and its `else` set
+`gamut_compress_enable` to `false` — so it overwrote the automatic decision on every draw:
+
+| config | what happened |
+| :--- | :--- |
+| `auto-gamut-compress` on, no `MIXER GAMUT-COMPRESS` | flag cleared — no compression at all |
+| both on | manual limits win, auto limits never used |
+
+The automatic path's limits were therefore unreachable in either case, and
+`image_transform.gamut_compress` defaults to `false`, which is the first row. The Vulkan
+kernel ORs a flag bit and never clears it, so its automatic path worked — this was an
+OpenGL-only divergence, and it is why the cyan/yellow limit-order fix in `1288dc032` was
+correct but inert.
+
+An explicit `MIXER GAMUT-COMPRESS` still wins, because it names its own limits. The `else`
+now only disables what the automatic path did not already enable.
+
+Not measured on a live channel: reaching this code needs a wide-gamut source on an
+auto-converting channel, which the conformance rig deliberately does not have — the same
+coverage gap that let it survive. Established by reading the two writes, which are both at
+function-body scope in `draw`, in that order, with no early return between them.
+
 ### ⚠ Behaviour change: DeckLink v210 output on the CPU pack path
 
 **Any DeckLink consumer with `<pixel-format>yuv</pixel-format>` that packed v210 on the
