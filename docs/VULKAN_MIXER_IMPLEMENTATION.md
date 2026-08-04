@@ -646,8 +646,8 @@ The format is **unsigned normalized integer** (`UNORM`), not half-float
 
 ### 11.2 Source Texture Formats
 
-Input textures support all CasparCG pixel formats (via `pixel_format` enum
-in the UBO):
+Input textures cover the CasparCG pixel formats via the `pixel_format` enum in the
+UBO — **except packed 3-byte RGB, which this backend cannot take at all**:
 
 | Format | Planes | Components |
 |---|---|---|
@@ -656,9 +656,39 @@ in the UBO):
 | `ycbcr` | 3 | Y, Cb, Cr (4:2:0 / 4:2:2) |
 | `ycbcra` | 4 | Y, Cb, Cr, A |
 | `ycbcr_a` | 2 | Packed YCbCr + separate A |
+| `bgr` / `rgb` | 1 | **not supported** — see below |
 
-The fragment shader handles colorspace conversion from any source format to
-the target attachment format.
+The fragment shader handles colorspace conversion from any source format it is given
+to the target attachment format.
+
+#### The 3-component exclusion
+
+`bgr` and `rgb` (`rgb24`/`bgr24`, one plane of stride 3) reach
+`device::create_texture` as `eR8G8B8Unorm`. Vulkan does **not** oblige an
+implementation to support a 3-component format as a sampled image, and NVIDIA
+Quadro/RTX do not — so the image cannot be created. This is a hard limit of the
+backend, not a shader gap: the OpenGL mixer samples the same layout correctly, so it
+is a **parity floor**.
+
+What that means in practice:
+
+* **Producers must convert before the mixer.** `av_producer` excludes `rgb24`/`bgr24`
+  from filter-graph negotiation, and the image module's `ensure_mixer_compatible()`
+  converts to BGRA (8-bit) or GBRAP16 (>8-bit). A still is converted once at load, so
+  this costs nothing per frame.
+* **`device::can_sample_packed(stride, depth)`** answers the question, from a table
+  probed once at device construction. `vk::image_mixer::resolve_item_textures` asks it
+  before *any* of its four texture routes, because every route ends in the same
+  `create_texture` — including the pre-staged one, where the frame factory has already
+  handed the producer a `copy_async` future whose exception would surface on the
+  **channel thread** rather than where the frame was built.
+* A layer the mixer cannot sample is **dropped**, with one warning naming the format.
+  It used to throw once per frame from inside the channel tick instead, which blanked
+  the output, pegged a core and free-ran the channel at ~190× its frame rate (fixed in
+  `a0bf96bb6`, `3377edb78`).
+* `bluefish_producer` still emits `rgb24`, so a Bluefish capture on a Vulkan-mixer
+  channel is a dropped layer. Known, named at the call site, and not fixable without
+  the card to measure against.
 
 ---
 
