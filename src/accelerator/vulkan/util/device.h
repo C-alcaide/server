@@ -71,6 +71,15 @@ class device final
     // must call this themselves on a cache hit, since they bypass create_attachment().
     void reset_attachment_layout(const std::shared_ptr<class texture>& tex);
     std::shared_ptr<class texture> create_texture(int width, int height, int stride, common::bit_depth depth);
+
+    /// Can this GPU sample a packed `stride`-component image of `depth`, i.e. will
+    /// create_texture() / copy_async() accept that layout?
+    ///
+    /// Ask before uploading a plane whose stride is 3. Vulkan does not oblige an
+    /// implementation to support a 3-component format as a sampled image and this GPU does
+    /// not, so create_texture() throws for one -- from inside the channel's tick, on every
+    /// frame, which pinned a CPU core and blanked the output rather than dropping a layer.
+    bool can_sample_packed(int stride, common::bit_depth depth) const;
     std::shared_ptr<class texture>
     create_exportable_texture(int width, int height, int stride, common::bit_depth depth);
     array<uint8_t>                 create_array(int size);

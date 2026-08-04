@@ -46,7 +46,29 @@ bool is_frame_compatible_with_mixer(const std::shared_ptr<AVFrame>& src)
     std::vector<int> data_map;
     auto             sample_pix_desc = ffmpeg::pixel_format_desc(
         static_cast<AVPixelFormat>(src->format), src->width, src->height, data_map, core::color_space::bt709);
-    return sample_pix_desc.format != core::pixel_format::invalid;
+    if (sample_pix_desc.format == core::pixel_format::invalid)
+        return false;
+
+    // Packed 3-byte RGB is describable but not uploadable.
+    //
+    // Vulkan does not oblige an implementation to support a 3-component format as a
+    // sampled image, and this GPU does not, so device::create_texture throws for a
+    // stride-3 plane -- from inside the channel tick, on every frame. An opaque PNG or
+    // JPEG decodes to rgb24, so the whole still-image path was dead on the Vulkan mixer:
+    // 1080p25, blank SDI output, 28,997 exceptions in six seconds.
+    //
+    // `av_producer` already refuses to negotiate rgb24/bgr24 for exactly this reason,
+    // and device.cpp's throw carries a comment saying producers no longer offer it and
+    // it should be unreachable. The image module was the producer that still did --
+    // because "compatible with the mixer" was asking whether *core* can describe the
+    // layout, which rgb24 can, rather than whether the mixer can sample it.
+    //
+    // OpenGL takes stride-3 fine; converting for both keeps one path and costs nothing
+    // measurable here, since a still is converted once at load and not per frame.
+    if (sample_pix_desc.format == core::pixel_format::bgr || sample_pix_desc.format == core::pixel_format::rgb)
+        return false;
+
+    return true;
 }
 
 std::shared_ptr<AVFrame> convert_image_frame(const std::shared_ptr<AVFrame>& src, AVPixelFormat pixFmt)

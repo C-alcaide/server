@@ -127,6 +127,11 @@ struct device::impl : public std::enable_shared_from_this<impl>
 
     std::array<tbb::concurrent_unordered_map<size_t, texture_queue_t>, 2>                attachment_pools_;
     std::array<std::array<tbb::concurrent_unordered_map<size_t, texture_queue_t>, 4>, 2> device_pools_;
+
+    /// [8-bit|16-bit][component count] -> can this GPU sample that packed format.
+    /// Index 0 is unused (there is no 0-component format). Filled by
+    /// probe_sampled_formats() at construction; see can_sample_packed().
+    std::array<std::array<bool, 5>, 2> sampled_ok_{};
     std::array<tbb::concurrent_unordered_map<size_t, buffer_queue_t>, 2>                 host_pools_;
 
     std::wstring version_;
@@ -524,6 +529,8 @@ struct device::impl : public std::enable_shared_from_this<impl>
 
         _memoryProperties = _physical_device.getMemoryProperties();
 
+        probe_sampled_formats();
+
         // Query device LUID for cross-GPU identification
         {
             std::array<uint8_t, 8> luid{};
@@ -785,42 +792,91 @@ struct device::impl : public std::enable_shared_from_this<impl>
             ptr, [tex = std::move(tex), pool, self = shared_from_this()](texture*) mutable { pool->push(tex); });
     }
 
+    /// The sampled-image format an upload of `stride` packed components at `depth` uses.
+    static vk::Format internal_format(int stride, common::bit_depth depth)
+    {
+        static const vk::Format INTERNAL_FORMAT[][5] = {{vk::Format::eUndefined,
+                                                         vk::Format::eR8Unorm,
+                                                         vk::Format::eR8G8Unorm,
+                                                         vk::Format::eR8G8B8Unorm,
+                                                         vk::Format::eR8G8B8A8Unorm},
+                                                        {vk::Format::eUndefined,
+                                                         vk::Format::eR16Unorm,
+                                                         vk::Format::eR16G16Unorm,
+                                                         vk::Format::eR16G16B16Unorm,
+                                                         vk::Format::eR16G16B16A16Unorm}};
+
+        if (stride < 1 || stride > 4)
+            return vk::Format::eUndefined;
+        return INTERNAL_FORMAT[depth == common::bit_depth::bit8 ? 0 : 1][stride];
+    }
+
+    /// Can this GPU sample a packed `stride`-component image of `depth`?
+    ///
+    /// Only stride 3 can answer false in practice -- a 3-component format is the one
+    /// entry in the table above that Vulkan does not oblige an implementation to support
+    /// as a sampled image, and this GPU does not. Callers that ask FIRST can drop or
+    /// convert the item; callers that do not get the throw in create_texture, from inside
+    /// the channel's tick, once per frame.
+    ///
+    /// Answered from a table filled once, because the mixer asks per plane per item per
+    /// frame and this must not become a driver round-trip on the channel thread.
+    bool can_sample_packed(int stride, common::bit_depth depth) const
+    {
+        if (stride < 1 || stride > 4)
+            return false;
+        return sampled_ok_[depth == common::bit_depth::bit8 ? 0 : 1][stride];
+    }
+
+    void probe_sampled_formats()
+    {
+        for (int d = 0; d < 2; ++d) {
+            const auto depth = d == 0 ? common::bit_depth::bit8 : common::bit_depth::bit16;
+            for (int stride = 1; stride <= 4; ++stride) {
+                const auto format = internal_format(stride, depth);
+                const auto props  = _physical_device.getFormatProperties(format);
+                sampled_ok_[d][stride] =
+                    static_cast<bool>(props.optimalTilingFeatures & vk::FormatFeatureFlagBits::eSampledImage);
+            }
+            if (!sampled_ok_[d][3]) {
+                CASPAR_LOG(info) << L"[vk::device] this GPU cannot sample packed 3-component "
+                                 << (d == 0 ? L"8" : L"16") << L"-bit images; producers must convert packed "
+                                 << (d == 0 ? L"24" : L"48") << L"-bit RGB before the mixer.";
+            }
+        }
+    }
+
     std::shared_ptr<texture> create_texture(int width, int height, int stride, common::bit_depth depth, bool clear)
     {
         CASPAR_VERIFY(stride > 0 && stride < 5);
         CASPAR_VERIFY(width > 0 && height > 0);
 
-        static vk::Format INTERNAL_FORMAT[][5] = {{vk::Format::eUndefined,
-                                                   vk::Format::eR8Unorm,
-                                                   vk::Format::eR8G8Unorm,
-                                                   vk::Format::eR8G8B8Unorm,
-                                                   vk::Format::eR8G8B8A8Unorm},
-                                                  {vk::Format::eUndefined,
-                                                   vk::Format::eR16Unorm,
-                                                   vk::Format::eR16G16Unorm,
-                                                   vk::Format::eR16G16B16Unorm,
-                                                   vk::Format::eR16G16B16A16Unorm}};
-
         auto depth_pool_index = depth == common::bit_depth::bit8 ? 0 : 1;
-        auto format           = INTERNAL_FORMAT[depth_pool_index][stride];
+        auto format           = internal_format(stride, depth);
 
-        // A 3-component format is the one entry in that table Vulkan does not
-        // oblige an implementation to support as a sampled image, and this one
-        // does not: creating the image throws, from the channel's tick, taking
-        // the channel down. It reached here once, from an FFV1 RGB clip whose
-        // decoder emits rgb24, and the failure gave no hint of the cause.
+        // Packed 3-byte RGB, on a GPU that cannot sample it. This is a hard stop and not
+        // a fallback, because there is nothing to fall back to here: widening to 4
+        // components would need a second staging buffer and a per-pixel expansion, which
+        // belongs at the call site that still has the source planes.
         //
-        // Producers no longer negotiate packed 3-byte RGB (see av_producer.cpp),
-        // so this should be unreachable -- say so clearly if it ever is not,
-        // rather than failing with a driver error a caller cannot interpret.
-        if (stride == 3) {
-            auto props = _physical_device.getFormatProperties(format);
-            if (!(props.optimalTilingFeatures & vk::FormatFeatureFlagBits::eSampledImage)) {
-                CASPAR_THROW_EXCEPTION(not_supported()
-                                       << msg_info("This GPU cannot sample 3-component 8-bit images, so the Vulkan "
-                                                   "mixer cannot take packed 24-bit RGB. Convert to a 4-component or "
-                                                   "planar format before the mixer, or use the OpenGL accelerator."));
-            }
+        // It reached here twice, both times from a producer that had not asked
+        // can_sample_packed() first: an FFV1 RGB clip decoding to rgb24, and -- for far
+        // longer, on every opaque PNG or JPEG -- the image producer. Both are fixed, and
+        // the Vulkan image_mixer now asks before uploading, so this should be unreachable.
+        // Keep it, and keep it specific: a driver error a caller cannot interpret is what
+        // made the first one take a session to find.
+        //
+        // Restricted to stride 3 deliberately, rather than gating every stride on
+        // can_sample_packed(). 16-bit UNORM formats are not on Vulkan's mandatory
+        // sampled-image list either, and the 16-bit mixer works on this hardware today --
+        // so asking the driver about them here could only turn a working path into a
+        // throw on some future GPU, for no diagnostic gain.
+        if (stride == 3 && !can_sample_packed(stride, depth)) {
+            CASPAR_THROW_EXCEPTION(
+                not_supported() << msg_info("This GPU cannot sample 3-component images at this depth, so the Vulkan "
+                                            "mixer cannot take a packed 3-byte-per-pixel layout (rgb24/bgr24 and "
+                                            "friends). Convert to a 4-component or planar format before the mixer, "
+                                            "or use the OpenGL accelerator."));
         }
 
         auto pool   = &device_pools_[depth_pool_index][stride - 1][(width << 16 & 0xFFFF0000) | (height & 0x0000FFFF)];
@@ -1399,6 +1455,11 @@ void device::reset_attachment_layout(const std::shared_ptr<class texture>& tex)
 std::shared_ptr<texture> device::create_texture(int width, int height, int stride, common::bit_depth depth)
 {
     return impl_->create_texture(width, height, stride, depth, true);
+}
+
+bool device::can_sample_packed(int stride, common::bit_depth depth) const
+{
+    return impl_->can_sample_packed(stride, depth);
 }
 
 std::shared_ptr<texture>

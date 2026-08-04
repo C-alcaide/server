@@ -602,6 +602,7 @@ struct image_mixer::impl
     // frame -- so they must be visible, but not once per frame.
     std::atomic<bool> foreign_texture_logged_{false};
     std::atomic<bool> no_source_logged_{false};
+    std::atomic<bool> unsupported_stride_logged_{false};
 
     double aspect_ratio_ = 1.0;
 
@@ -708,6 +709,36 @@ struct image_mixer::impl
     bool resolve_item_textures(item& item, const core::const_frame& frame)
     {
         const auto host_state = frame.host_image_state();
+
+        // Can this GPU sample the layout at all? Asked first, before any of the four
+        // routes below, because it is a property of `pix_desc` and every route ends in the
+        // same create_texture -- including the pre-staged one, where the frame factory
+        // already handed the producer a copy_async future. That future is only awaited
+        // during draw, so the throw surfaced on the CHANNEL thread, once per frame, rather
+        // than where the frame was built.
+        //
+        // Packed 3-byte RGB (rgb24/bgr24) is the case that reaches this. On this GPU it
+        // cost an opaque PNG its picture entirely: a blank SDI output, ~4,800 exceptions a
+        // second, and a channel free-running at 190x its frame rate -- none of which named
+        // a pixel format.
+        //
+        // Dropping the item loses the layer, which is worse than OpenGL (it samples
+        // stride-3 fine). That is a parity floor the codebase already took: producers are
+        // expected to convert before the mixer, and the ffmpeg and image producers both do.
+        // This is the guard for the ones that do not, and the reason it says so out loud.
+        for (const auto& plane : item.pix_desc.planes) {
+            if (!vulkan_->can_sample_packed(plane.stride, plane.depth)) {
+                if (!unsupported_stride_logged_.exchange(true)) {
+                    CASPAR_LOG(warning)
+                        << L"[vk::image_mixer] this GPU cannot sample a packed " << plane.stride
+                        << L"-component image at this depth, so the layer cannot be uploaded; dropping it. Packed "
+                           L"3-byte RGB (rgb24/bgr24) is the case that reaches this -- the producer should convert "
+                           L"to a 4-component or planar layout, or the channel should use the OpenGL accelerator.";
+                }
+                item.textures.clear();
+                return false;
+            }
+        }
 
         if (!frame.textures().empty()) {
             // Every plane must belong to this device; a partially-usable set is

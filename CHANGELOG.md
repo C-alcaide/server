@@ -59,6 +59,75 @@ every row at or below 0.56 LSB — the 8-bit quantisation half-step.
   the source, not measured — reaching it needs a wide-gamut source on an
   auto-converting channel, which the conformance rig deliberately does not have.
 
+### ⚠ Behaviour change: still images on the Vulkan mixer render at all
+
+**Any opaque PNG, JPEG or TGA played on a channel using the Vulkan mixer produced a black
+frame and took the channel with it. It now renders, and measures identically to the OpenGL
+mixer. Nothing that worked before changes; a whole path that did not, now does.**
+
+An image without alpha decodes to `rgb24`. `image_producer` asked
+`is_frame_compatible_with_mixer()` whether to convert it, and that function answered by
+asking whether **core** can describe the layout — which it can, as `pixel_format::rgb`, one
+plane of stride 3. The question that mattered is whether the *mixer* can sample it, and the
+Vulkan one cannot: Vulkan does not oblige an implementation to support a 3-component format
+as a sampled image, and this GPU (Quadro P4000 / RTX A4000, driver 582.53) does not. So
+`device::create_texture` threw — from inside a `copy_async` dispatch whose future the mixer
+only awaits during draw, i.e. **on the channel thread, once per frame, for as long as the
+layer was on air.**
+
+`av_producer` already excludes `rgb24`/`bgr24` from filter-graph negotiation for exactly
+this reason, and the throw in `device.cpp` carried a comment saying producers no longer
+offer packed 3-byte RGB so it should be unreachable. The image module was the producer that
+still did.
+
+Measured, DeckLink SDI out, FFmpeg reading back on an independent card input, 1080p25,
+against the same reference and rig that measured the OpenGL mixer:
+
+| case | OpenGL | Vulkan before | Vulkan after |
+| :--- | ---: | ---: | ---: |
+| `pixel-format=rgba`, 8-bit channel | 37.46 dB | **blank** | **37.46 dB** |
+| `pixel-format=yuv`, 8-bit channel | 48.28 dB | **blank** | **48.28 dB** |
+| `pixel-format=yuv`, 16-bit channel | 52.53 dB | **blank** | **52.53 dB** |
+
+Identical to the OpenGL figures in all three, including the +4.26 dB depth gain — the
+patches are flat, so a correct implementation quantises identically, and equality is the
+parity evidence rather than a coincidence.
+
+Two guards were added so this cannot be silent again:
+
+* The Vulkan `image_mixer` asks `device::can_sample_packed()` **before** uploading a plane,
+  and drops the item with one warning naming the format if the answer is no. Losing a layer
+  is worse than OpenGL, which samples stride-3 fine — but it is the parity floor the
+  codebase already chose, and it no longer costs the channel.
+* The device logs at startup which packed component counts it cannot sample, so the
+  constraint is visible before something trips over it.
+
+### ⚠ Behaviour change: a channel whose tick throws now keeps its frame rate
+
+**Previously a channel that failed in produce or mix ran as fast as the CPU allowed. The
+symptoms were a pegged core, thousands of log lines a second, and diagnostics counters that
+looked like unrelated performance faults. It is now bounded to one occurrence per frame.**
+
+Nothing paces the tick loop except its consumers: `output_()` is what blocks on the DeckLink
+clock (or a file consumer's queue), and it is the last phase. An exception before it returned
+straight to the top of the `while`.
+
+Measured on the Vulkan/`rgb24` failure above, 1080p25, one still-image layer:
+
+| | before | after |
+| :--- | ---: | ---: |
+| exceptions in a 6.0 s window | 28,997 (~4,833/s) | **148 (24.9/s)** |
+| server log lines, same window | 116,258 | **834** |
+
+24.9/s against a nominal 25 is one occurrence per frame. This is also why the underlying
+defect read as four: the same failure produced a blank output, an exception storm, a pegged
+core, and a mixer render-tick count of 28,000 draws against ~100 delivered frames — which
+had been recorded as a separate "90× more compositing than the channel consumes"
+performance defect. There was one bug.
+
+The catch sleeps out only the *remainder* of the frame period, so a tick that already
+overran is not delayed further and a transient exception costs nothing.
+
 ### ⚠ Behaviour change: automatic gamut compression now actually happens (OpenGL)
 
 **A channel with `<auto-gamut-compress>true</auto-gamut-compress>` on the OpenGL mixer was
