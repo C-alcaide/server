@@ -695,9 +695,25 @@ vec3 apply_gamut_compress(vec3 c, vec3 lim)
 // ---- 3D LUT ----
 // Trilinear lookup in a 3D texture.  Input clamped to 0..1 for LUT range.
 // Swizzles BGRAâ†’RGB for lookup and back.
+//
+// THE COORDINATE SCALE IS NOT OPTIONAL. Entry k of an N-cube describes input
+// k/(N-1), and it lives at texel centre (k+0.5)/N. Passing the colour value straight
+// in as the texture coordinate — which this did — puts it at texel position v*N-0.5
+// instead of v*(N-1), so every value but 0.5 was read from the wrong place, by up to
+// half a texel at the ends.
+//
+// Measured on the live server with an IDENTITY cube, where the correct output is the
+// input and no model is involved: a 17-cube deviated by up to 7 LSB and a 33-cube by
+// up to 4, antisymmetric about v=0.5 and exactly zero there — the signature of a
+// half-texel offset rather than of a bad parser or a swizzle.
+//
+// textureSize() rather than a uniform: the size is a property of the bound texture,
+// and a uniform is one more thing that can go stale when the LUT is swapped.
 vec3 apply_lut3d(vec3 c, float strength)
 {
+    float n      = float(textureSize(lut3d_tex, 0).x);
     vec3 rgb_in  = clamp(c.bgr, 0.0, 1.0);  // BGRAâ†’RGB, clamp for LUT domain
+    rgb_in       = (rgb_in * (n - 1.0) + 0.5) / n;   // value -> texel centre
     vec3 rgb_out = texture(lut3d_tex, rgb_in).rgb;
     return mix(c, rgb_out.bgr, strength);    // RGBâ†’BGRA, mix with original
 }

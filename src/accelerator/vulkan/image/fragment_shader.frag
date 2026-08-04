@@ -331,7 +331,11 @@ vec3 apply_linear_sat(vec3 c,float s){float l=dot(c,vec3(0.2126,0.7152,0.0722));
 vec3 apply_cdl(vec3 c,vec3 sl,vec3 of,vec3 pw,float s){c=pow(max(c*sl+of,vec3(0.0)),pw);float l=dot(c,vec3(0.2126,0.7152,0.0722));return mix(vec3(l),c,s);}
 vec3 apply_split_tone(vec3 c,vec3 sc,vec3 hc,float b){float l=dot(c,vec3(0.2126,0.7152,0.0722));c+=sc*(1.0-smoothstep(b-0.3,b+0.3,l));c+=hc*smoothstep(b-0.3,b+0.3,l);return c;}
 vec3 apply_gamut_compress(vec3 c,vec3 lim){float a=max(max(c.r,c.g),max(c.b,0.0));if(a<=0.0)return c;vec3 d=(a-c)/abs(a);float thr=0.815;for(int i=0;i<3;++i)if(d[i]>thr&&lim[i]>1.0001){float nd=(d[i]-thr)/(lim[i]-thr);d[i]=thr+nd/(1.0+nd)*(lim[i]-thr);}return a-d*abs(a);}
-vec3 apply_lut3d(vec3 c,float st){return mix(c,texture(lut3d_tex,clamp(c,0.0,1.0)).rgb,st);}
+// Entry k of an N-cube describes input k/(N-1) and sits at texel centre (k+0.5)/N,
+// so the value has to be rescaled before it is used as a coordinate. Without this the
+// whole LUT is read half a texel off at the ends — measured at up to 7 LSB on a
+// 17-cube. Same fix as the OpenGL shader; see the longer note there.
+vec3 apply_lut3d(vec3 c,float st){float n=float(textureSize(lut3d_tex,0).x);vec3 i=(clamp(c,0.0,1.0)*(n-1.0)+0.5)/n;return mix(c,texture(lut3d_tex,i).rgb,st);}
 vec3 apply_hue_curves(vec3 c){vec3 h=rgb2hsv(clamp(c,0.0,1.0));vec4 o=texture(hue_curve_tex,vec2(h.x,0.5));h.x=fract(h.x+o.r);h.y*=o.g;vec4 so=texture(hue_curve_tex,vec2(h.y,0.5));h.y*=so.a;return hsv2rgb(h)+o.b;}
 vec3 apply_qualifier(vec3 c,float th,float hw,float ms,float xs,float ml,float xl,float sf,float eo,float so,float ho){
     vec3 h=rgb2hsv(clamp(c,0.0,1.0));float hd=AngleDiff(h.x,th)*2.0;
