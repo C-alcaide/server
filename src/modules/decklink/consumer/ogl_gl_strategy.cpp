@@ -90,8 +90,23 @@ void main() {
         } else if (u_is_16bit != 0) {
             R[i] = int(p.r * 1023.0 + 0.5); G[i] = int(p.g * 1023.0 + 0.5); B[i] = int(p.b * 1023.0 + 0.5);
         } else {
-            // 8-bit mixer texture is BGRA in memory: un-swizzle to real RGB, then 8->10 bit (<<2) like the CPU packer.
-            R[i] = int(p.b * 255.0 + 0.5) << 2; G[i] = int(p.g * 255.0 + 0.5) << 2; B[i] = int(p.r * 255.0 + 0.5) << 2;
+            // NO UN-SWIZZLE. texelFetch reads the TEXTURE's components, and the mixer's
+            // render target holds true RGB: the image shader ends with
+            // `fragColor = col.bgra`, which converts its internally BGR-ordered working
+            // colour back to RGB order on the way out. So p.r is red here.
+            //
+            // This used to read p.b into R and p.r into B, "un-swizzling to real RGB" as
+            // though the texture were BGRA. That is the HOST byte order — `texture.cpp`
+            // transfers with GL_BGRA, so host buffers really are B,G,R,A, which is why
+            // the BGRA memcpy consumer path is correct — but it is not what a texel
+            // fetch sees. The un-swizzle therefore CREATED a red/blue exchange.
+            //
+            // Measured on an SDI loopback with a saturated reference: a pure red patch
+            // came back pure blue, 6.44 dB against the reference, and 46.94 dB once the
+            // capture was R/B-swapped back — i.e. an exact channel exchange with the
+            // picture otherwise pristine. The 16-bit branch above never un-swizzled and
+            // was correct all along.
+            R[i] = int(p.r * 255.0 + 0.5) << 2; G[i] = int(p.g * 255.0 + 0.5) << 2; B[i] = int(p.b * 255.0 + 0.5) << 2;
         }
     }
     int Y[6];
@@ -206,9 +221,19 @@ std::array<std::int32_t, 9> legal_range_v210_matrix(bool bt2020)
 }
 
 // Independent C++ reference of the v210 shader math, used by the one-shot parity
-// self-test. It mirrors the CPU packer (v210_strategies.cpp) exactly: legal-range
-// matrix `m`, 8-bit input scaled <<2, co-sited nearest chroma (even pixel). The
-// source row is RGBA8 texels of the mixer's BGRA texture, i.e. p[0]=B,p[1]=G,p[2]=R.
+// self-test: legal-range matrix `m`, 8-bit input scaled <<2, co-sited nearest chroma
+// (even pixel).
+//
+// The row is downloaded with `glGetTexImage(..., GL_RGBA, ...)`, so p[0] is the
+// TEXTURE's red component — and the mixer's render target holds true RGB (its image
+// shader ends `fragColor = col.bgra`). So p[0]=R, p[1]=G, p[2]=B.
+//
+// This previously claimed "mixer memory BGRA: p[0]=B, p[1]=G, p[2]=R" and read p[2]
+// into R, mirroring the same mistake in the shader. Because reference and shader shared
+// the assumption they agreed, the parity self-test PASSED while both were wrong — a
+// reference that copies the implementation's assumption cannot audit it. Fixing only
+// one of the two would have turned this into a loud parity failure instead, which is
+// the behaviour to want.
 void cpu_ref_v210_row(const std::uint8_t*                rgba,
                       int                                dst_w,
                       int                                groups_per_row,
@@ -221,10 +246,10 @@ void cpu_ref_v210_row(const std::uint8_t*                rgba,
         for (int i = 0; i < 6; ++i) {
             int px = g * 6 + i;
             if (px < dst_w) {
-                const std::uint8_t* p = rgba + px * 4; // mixer memory BGRA: p[0]=B, p[1]=G, p[2]=R
-                R[i] = int(p[2]) << 2;
+                const std::uint8_t* p = rgba + px * 4; // GL_RGBA download of an RGB target
+                R[i] = int(p[0]) << 2;
                 G[i] = int(p[1]) << 2;
-                B[i] = int(p[0]) << 2;
+                B[i] = int(p[2]) << 2;
             } else {
                 R[i] = G[i] = B[i] = 0;
             }
