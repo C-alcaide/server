@@ -567,16 +567,22 @@ vec3 supress_spill(vec3 c)
 // Key on any color
 vec4 ChromaOnCustomColor(vec4 c)
 {
-    // Keyed on a mirrored hue until now: c is BGR, so rgb2hsv reported the
-    // opposite side of the wheel and ColorDistance compared it against an
-    // unmirrored chroma_target_hue. Green happens to sit at its own mirror
-    // image (1/3 maps to 1/3), so green keys have always worked and nothing
-    // else has -- asking for blue keyed red. The Vulkan mixer grades in RGB and
-    // has always been right.
-    vec3 hsv		= rgb2hsv(c.bgr);
+    // NO SWIZZLE HERE. Unlike every other function in the grading chain, this one
+    // does not receive the BGR working colour: its only caller is chroma_key() below,
+    // which already converts with `ChromaOnCustomColor(c.bgra).bgra`. The channels
+    // are RGB by the time they arrive, so `c.rgb` is correct as written.
+    //
+    // A `.bgr` was added here on the assumption that this function saw BGR like the
+    // rest of the chain. Composed with the wrapper's swizzle that is a double
+    // exchange, which re-mirrors the hue wheel about the green-magenta axis and undoes
+    // a conversion that was already right. Measured with the swizzle present:
+    // MIXER CHROMA BLUE keyed pure red, a hue-0 key keyed blue, and a hue-60 key
+    // keyed cyan. Green and magenta are the two fixed points of that mirror, so
+    // green screens kept working throughout and hid it.
+    vec3 hsv		= rgb2hsv(c.rgb);
     float distance	= ColorDistance(hsv);
     float d			= distance * -2.0 + 1.0;
-    vec4 suppressed	= vec4(hsv2rgb(supress_spill(hsv)).bgr, 1.0);
+    vec4 suppressed	= vec4(hsv2rgb(supress_spill(hsv)), 1.0);
     float alpha		= alpha_map(d);
 
     suppressed *= alpha;
