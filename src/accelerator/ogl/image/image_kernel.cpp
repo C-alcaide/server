@@ -123,8 +123,16 @@ static std::array<float, 256> build_curve_lut(const core::curve_channel& cc)
         double t = k / 255.0;
         if (t <= pts.front().first) { lut[k] = static_cast<float>(std::max(0.0, std::min(1.0, pts.front().second))); continue; }
         if (t >= pts.back().first)  { lut[k] = static_cast<float>(std::max(0.0, std::min(1.0, pts.back().second)));  continue; }
+        // `n - 1`, not `n - 2`. There are n-1 intervals between n control points and
+        // the search has to be able to reach the last one; with `n - 2` it never
+        // examined [pts[n-2], pts[n-1]), `seg` kept its initial 0, and the final
+        // stretch of every curve with three or more points was evaluated with the
+        // FIRST segment's control points and tangents at a parameter far outside
+        // [0,1]. Measured on the live server for ((0,0),(0.3,0.05),(0.35,0.95),(1,1)):
+        // the output fell from 0.9255 at x=0.3451 to 0.0824 at x=0.3529, a 215 LSB
+        // cliff, then climbed again as segment 0's spline was re-traversed.
         int seg = 0;
-        for (int i = 0; i < n - 2; ++i)
+        for (int i = 0; i < n - 1; ++i)
             if (t >= pts[i].first && t < pts[i + 1].first) { seg = i; break; }
         double h_   = dx[seg];
         double t_   = (h_ > 1e-10) ? (t - pts[seg].first) / h_ : 0.0;

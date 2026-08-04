@@ -119,8 +119,12 @@ static std::array<float, 256> build_curve_lut(const core::curve_channel& cc)
         double t = k / 255.0;
         if (t <= pts.front().first) { lut[k] = static_cast<float>(std::max(0.0, std::min(1.0, pts.front().second))); continue; }
         if (t >= pts.back().first)  { lut[k] = static_cast<float>(std::max(0.0, std::min(1.0, pts.back().second)));  continue; }
+        // `n - 1`, not `n - 2` — same fix as the OpenGL kernel, which carries the same
+        // duplicated builder. See the longer note there; in short, the last of the
+        // n-1 intervals was unreachable, so `seg` stayed 0 and the end of every
+        // three-point-or-longer curve was evaluated with the first segment's data.
         int seg = 0;
-        for (int i = 0; i < n - 2; ++i)
+        for (int i = 0; i < n - 1; ++i)
             if (t >= pts[i].first && t < pts[i + 1].first) { seg = i; break; }
         double h_   = dx[seg];
         double t_   = (h_ > 1e-10) ? (t - pts[seg].first) / h_ : 0.0;
