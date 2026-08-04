@@ -40,6 +40,7 @@
 #include <common/log.h>
 #include <common/diagnostics/graph.h>
 #include <common/timer.h>
+#include <common/utf.h>
 
 #ifdef ENABLE_VULKAN
 #include <accelerator/vulkan/util/texture_wrapper.h>
@@ -56,7 +57,10 @@
 #include <atomic>
 #include <cstring>
 #include <deque>
+#include <map>
+#include <mutex>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 // C-linkage CUDA kernel launchers (defined in cuda_vk_kernels.cu)
@@ -229,6 +233,44 @@ struct cuda_vk_strategy::impl
 
         cuda_check(cudaSetDevice(cuda_device_), "cudaSetDevice");
         cuda_check(cudaStreamCreateWithFlags(&stream_, cudaStreamNonBlocking), "cudaStreamCreate");
+    }
+
+    /// Decline the GPU path, saying which precondition failed.
+    ///
+    /// Every caller of this used to `return nullptr` into one shared caller-side message,
+    /// `GPU path returned null (no VK texture)`, which named one of four possible causes
+    /// and gave no way to tell them apart. That matters more here than usual: declining
+    /// ends at `blank_output()`, a memset-zero buffer, which is illegal super-black on the
+    /// wire and reads downstream exactly like a dead card or an unplugged cable.
+    ///
+    /// At warning, because this is a silent full-black output rather than a tuning detail,
+    /// and it should not need `debug` to be visible.
+    ///
+    /// COUNTED, not one-shot. A one-shot version of this was actively misleading: the
+    /// channel legitimately has no layers during preroll, so `texture()` is null before
+    /// anything is playing (image_mixer.cpp's `layers.empty()` bypass returns a null
+    /// texture by design). The first occurrence therefore always fires at startup and says
+    /// nothing about playback -- "logged once at startup, harmless" and "happening on every
+    /// frame" produced identical logs. The running total is what separates them.
+    std::shared_ptr<void> decline(const char* why) const
+    {
+        static std::mutex                            m;
+        static std::map<std::string, std::uint64_t>  counts;
+        std::uint64_t n = 0;
+        {
+            std::lock_guard<std::mutex> lock(m);
+            n = ++counts[why];
+        }
+        // First one, then sparsely: enough to show it is persistent without flooding.
+        if (n == 1 || n == 10 || n == 100 || (n % 500) == 0) {
+            CASPAR_LOG(warning) << L"[cuda_vk_strategy] declining the GPU path (occurrence "
+                                << n << L"): " << u16(why)
+                                << L" -- this frame's output is blank."
+                                << (n == 1 ? L" A single occurrence at startup is expected:"
+                                             L" the channel has no layers before playout."
+                                           : L"");
+        }
+        return nullptr;
     }
 
     // A blank output frame, for the frames where the pipeline has nothing to hand
@@ -600,12 +642,23 @@ struct cuda_vk_strategy::impl
         const core::const_frame&       frame)
     {
 #ifdef ENABLE_VULKAN
-        // Get the VK texture from the frame
+        // Four separate preconditions, each of which used to `return nullptr` into a
+        // single caller-side message reading "GPU path returned null (no VK texture)".
+        // Failing any of them ends in `blank_output()` -- a memset-zero buffer, i.e.
+        // illegal super-black on the wire -- so the four causes are indistinguishable from
+        // each other AND from a dead card. Naming them is the difference between a
+        // diagnosis and a shrug.
         auto tex = frame.texture();
-        if (!tex) return nullptr;
+        if (!tex)
+            return decline("the frame carries no texture at all (const_frame::texture() is "
+                           "null) -- the mixer did not attach one, or something retagged "
+                           "the frame and dropped it");
 
         auto* wrapper = dynamic_cast<accelerator::vulkan::texture_wrapper*>(tex.get());
-        if (!wrapper) return nullptr;
+        if (!wrapper)
+            return decline("the frame's texture is not a vulkan texture_wrapper -- an "
+                           "OpenGL mixer output, a producer's own texture, or RTTI not "
+                           "matching across the module boundary");
 
         caspar::timer total_timer;
         caspar::timer step_timer;
@@ -615,11 +668,15 @@ struct cuda_vk_strategy::impl
         uint64_t sem_value  = wrapper->render_semaphore_value();
 
         auto vk_tex = wrapper->vk_texture();
-        if (!vk_tex) return nullptr;
+        if (!vk_tex)
+            return decline("the texture_wrapper holds no vk_texture");
 
         // Get Win32 handle for CUDA import
         void* handle = vk_tex->export_native_handle();
-        if (!handle) return nullptr;
+        if (!handle)
+            return decline("the vk_texture exports no native handle -- the image was not "
+                           "created with an external-memory handle type, so CUDA cannot "
+                           "import it");
 
         bool is_16bit = vk_tex->depth() != common::bit_depth::bit8;
         int src_w = vk_tex->width();
@@ -727,11 +784,15 @@ struct cuda_vk_strategy::impl
         const core::const_frame&       frame)
     {
 #ifdef ENABLE_VULKAN
+        // Same four preconditions as convert_v210, named for the same reason.
         auto tex = frame.texture();
-        if (!tex) return nullptr;
+        if (!tex)
+            return decline("the frame carries no texture at all (const_frame::texture() is "
+                           "null)");
 
         auto* wrapper = dynamic_cast<accelerator::vulkan::texture_wrapper*>(tex.get());
-        if (!wrapper) return nullptr;
+        if (!wrapper)
+            return decline("the frame's texture is not a vulkan texture_wrapper");
 
         caspar::timer total_timer;
         caspar::timer step_timer;
@@ -740,10 +801,12 @@ struct cuda_vk_strategy::impl
         uint64_t sem_value  = wrapper->render_semaphore_value();
 
         auto vk_tex = wrapper->vk_texture();
-        if (!vk_tex) return nullptr;
+        if (!vk_tex)
+            return decline("the texture_wrapper holds no vk_texture");
 
         void* handle = vk_tex->export_native_handle();
-        if (!handle) return nullptr;
+        if (!handle)
+            return decline("the vk_texture exports no native handle");
 
         // The BGRA8 kernel only supports 8-bit textures. For 16-bit textures,
         // fall back to CPU path (the V210 path handles 16-bit natively).
@@ -889,11 +952,9 @@ std::shared_ptr<void> cuda_vk_strategy::convert_frame_for_port(
                 result = impl_->convert_bgra(channel_format_desc, decklink_format_desc, config, frame1);
             }
             if (result) return result;
-            static bool logged_null = false;
-            if (!logged_null) {
-                CASPAR_LOG(debug) << L"[cuda_vk_strategy] GPU path returned null (no VK texture) - using CPU fallback";
-                logged_null = true;
-            }
+            // No message here on purpose: `decline()` has already named which precondition
+            // failed. This used to assert "no VK texture", which was one of four possible
+            // causes stated as though it were the only one.
         } catch (const std::exception& ex) {
             CASPAR_LOG(warning) << L"[cuda_vk_strategy] GPU path failed, falling back to CPU: " << ex.what();
         }

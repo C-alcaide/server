@@ -223,6 +223,22 @@ class image_renderer
     std::future<std::tuple<std::shared_future<array<const std::uint8_t>>, std::shared_ptr<core::texture>>>
     operator()(std::vector<layer> layers, const core::video_format_desc& format_desc)
     {
+        // Counted, because this bypass is the ONLY path out of this function that returns a
+        // null texture, and a null texture makes every GPU-native consumer fall back to a
+        // blank frame — a silently black SDI output. Distinguishing "no layers, correctly"
+        // from "no layers, and that is the bug" needs the count and the layer total.
+        {
+            static std::atomic<std::uint64_t> empty_ticks{0}, drawn_ticks{0};
+            const auto n = layers.empty() ? ++empty_ticks : ++drawn_ticks;
+            if (n == 1 || n == 100 || (n % 1000) == 0) {
+                CASPAR_LOG(debug) << L"[vk_mixer] render tick with "
+                                  << static_cast<std::uint64_t>(layers.size())
+                                  << L" layer(s) (occurrence " << n << L"; empty="
+                                  << empty_ticks.load() << L" drawn=" << drawn_ticks.load()
+                                  << L")";
+            }
+        }
+
         if (layers.empty()) { // Bypass GPU with empty frame.
             // Release cached textures so VRAM from the last rendered frame is freed
             // (e.g. after STOP clears all layers).

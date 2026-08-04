@@ -35,6 +35,8 @@
 #include <core/frame/pixel_format.h>
 #include <core/video_format.h>
 
+#include <atomic>
+#include <cstdint>
 #include <queue>
 #include <unordered_map>
 #include <vector>
@@ -115,6 +117,27 @@ struct mixer::impl
                 desc.planes.push_back(pixel_format_desc::plane(format_desc.width, format_desc.height, 4, depth));
                 auto tuple = std::move(result.get());
                 auto& tex_ptr = std::get<1>(tuple);
+                // Did the accelerator hand back a texture with this frame?
+                //
+                // Counted, because it is the one fact that splits "the mixer never
+                // attached one" from "something downstream dropped it" — and a GPU-native
+                // consumer that finds `const_frame::texture()` null falls back to a blank
+                // frame, i.e. a silently black SDI output. Every path through the Vulkan
+                // mixer's render() returns the wrapper except the `layers.empty()` bypass,
+                // so a persistent null here means the layer list was empty, and a
+                // persistent NON-null here means the loss is past this point.
+                {
+                    static std::atomic<std::uint64_t> with_tex{0}, without_tex{0};
+                    const auto n = tex_ptr ? ++with_tex : ++without_tex;
+                    if (n == 1 || n == 100 || (n % 1000) == 0) {
+                        CASPAR_LOG(debug)
+                            << L"[mixer] frame " << (tex_ptr ? L"WITH" : L"WITHOUT")
+                            << L" an accelerator texture (occurrence " << n << L"; with="
+                            << with_tex.load() << L" without=" << without_tex.load()
+                            << L"; is_vulkan=" << (is_vulkan ? L"yes" : L"no")
+                            << L" depth=" << static_cast<int>(depth) << L")";
+                    }
+                }
                 // Pass the shared_future<array<const uint8_t>> to const_frame for lazy readback.
                 // GPU→CPU copy is deferred until a consumer actually calls image_data().
                 auto frame = const_frame(tag, std::move(std::get<0>(tuple)), std::move(audio), desc, std::move(tex_ptr));
