@@ -665,8 +665,14 @@ struct image_kernel::impl
                 // out-of-gamut colors (e.g. BT.2020→BT.709).
                 if (params.auto_gamut_compress && ig != og) {
                     shader_->set("gamut_compress_enable", true);
-                    // Default ACES 1.3 gamut compress limits (cyan, magenta, yellow)
-                    shader_->set("gc_limit", 1.147f, 1.264f, 1.312f);
+                    // Default ACES 1.3 limits, in the BGRA order this shader consumes
+                    // them: .r is the blue channel's distance, which is the YELLOW
+                    // axis. This used to pass (cyan, magenta, yellow) straight through
+                    // — the RGB order — so the cyan and yellow limits were exchanged
+                    // and the auto path disagreed with both the manual path below and
+                    // with the Vulkan kernel, which grades in RGB and was correct.
+                    shader_->set("gc_limit", 1.312f /*yellow(B)*/, 1.264f /*magenta(G)*/,
+                                 1.147f /*cyan(R)*/);
                 } else {
                     shader_->set("gamut_compress_enable", false);
                 }
