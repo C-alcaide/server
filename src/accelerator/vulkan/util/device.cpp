@@ -127,12 +127,12 @@ struct device::impl : public std::enable_shared_from_this<impl>
 
     std::array<tbb::concurrent_unordered_map<size_t, texture_queue_t>, 2>                attachment_pools_;
     std::array<std::array<tbb::concurrent_unordered_map<size_t, texture_queue_t>, 4>, 2> device_pools_;
+    std::array<tbb::concurrent_unordered_map<size_t, buffer_queue_t>, 2>                 host_pools_;
 
     /// [8-bit|16-bit][component count] -> can this GPU sample that packed format.
     /// Index 0 is unused (there is no 0-component format). Filled by
     /// probe_sampled_formats() at construction; see can_sample_packed().
     std::array<std::array<bool, 5>, 2> sampled_ok_{};
-    std::array<tbb::concurrent_unordered_map<size_t, buffer_queue_t>, 2>                 host_pools_;
 
     std::wstring version_;
 
