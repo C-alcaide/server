@@ -140,6 +140,26 @@ struct pixel_format_desc final
     core::color_space     color_space      = core::color_space::bt709;
     core::color_transfer  color_transfer   = core::color_transfer::sdr;
     core::chroma_location chroma_location  = core::chroma_location::unspecified;
+
+    /// Did the source actually SAY what its colour space is, or is `color_space`
+    /// just the default?
+    ///
+    /// `color_space` defaults to bt709, so a genuinely BT.709-tagged frame and a frame
+    /// that declared nothing are indistinguishable without this. The mixers need to
+    /// tell them apart: untagged sub-720 material is conventionally BT.601, but a file
+    /// that explicitly says BT.709 must be honoured whatever its size.
+    ///
+    /// Before this flag existed the kernels applied the SD convention unconditionally —
+    /// `height > 700 ? declared : bt601` — which silently discarded correct metadata
+    /// for every sub-720 YCbCr source. Measured on the SDI rig, a 601/709 mismatch is
+    /// ~12 dB PSNR: a visible hue shift on saturated colour, and invisible on greys,
+    /// which is why it survived every ramp-based check. LED-panel content authored at
+    /// odd small sizes (960x540, 1024x640) and tagged BT.709 was the case that made it
+    /// matter.
+    ///
+    /// Producers that know set this; a producer that does not is treated exactly as it
+    /// was before, so leaving one alone cannot regress it.
+    bool color_space_specified = false;
 };
 
 inline bool operator==(const pixel_format_desc::plane& lhs, const pixel_format_desc::plane& rhs)
@@ -161,7 +181,8 @@ inline bool operator==(const pixel_format_desc& lhs, const pixel_format_desc& rh
 {
     return lhs.format == rhs.format && lhs.is_straight_alpha == rhs.is_straight_alpha &&
            lhs.color_space == rhs.color_space && lhs.color_transfer == rhs.color_transfer &&
-           lhs.chroma_location == rhs.chroma_location && lhs.planes == rhs.planes;
+           lhs.chroma_location == rhs.chroma_location &&
+           lhs.color_space_specified == rhs.color_space_specified && lhs.planes == rhs.planes;
 }
 
 inline bool operator!=(const pixel_format_desc& lhs, const pixel_format_desc& rhs) { return !(lhs == rhs); }

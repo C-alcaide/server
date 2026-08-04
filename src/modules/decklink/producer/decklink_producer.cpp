@@ -454,14 +454,28 @@ struct Decoder
     }
 };
 
-core::color_space get_color_space(IDeckLinkVideoInputFrame* video, core::color_space fallback = core::color_space::bt709)
+/// `specified`, when given, reports whether the CARD supplied colorspace metadata, as
+/// opposed to the caller's fallback being used. The mixers need that: an SDI input
+/// carries no colour space in the payload, so a sub-720 signal with no metadata is
+/// conventionally BT.601, while metadata that says BT.709 must be honoured whatever the
+/// raster size.
+core::color_space get_color_space(IDeckLinkVideoInputFrame* video,
+                                 core::color_space         fallback  = core::color_space::bt709,
+                                 bool*                     specified = nullptr)
 {
+    if (specified != nullptr) {
+        *specified = false;
+    }
+
     IDeckLinkVideoFrameMetadataExtensions* md = nullptr;
 
     if (SUCCEEDED(video->QueryInterface(IID_IDeckLinkVideoFrameMetadataExtensions, (void**)&md))) {
         auto     metadata = wrap_raw<com_ptr>(md, true);
         LONGLONG color_space;
         if (SUCCEEDED(md->GetInt(bmdDeckLinkFrameMetadataColorspace, &color_space))) {
+            if (specified != nullptr) {
+                *specified = true;
+            }
             if (color_space == bmdColorspaceRec2020) {
                 return core::color_space::bt2020;
             } else if (color_space == bmdColorspaceRec601) {
@@ -1073,6 +1087,10 @@ class decklink_producer : public IDeckLinkInputCallback
             // don't carry color metadata via IDeckLinkVideoFrameMetadataExtensions
             // (that API only works for HDMI). The metadata will override if available.
             core::color_space    color_space    = hdr_ ? core::color_space::bt2020 : core::color_space::bt709;
+            // Set only when the card supplies colorspace metadata. SDI carries none in
+            // the payload, so this is normally false and the mixer's SD fallback still
+            // applies to untagged sub-720 signals — which is correct for SD SDI.
+            bool                 color_space_specified = false;
             core::color_transfer color_transfer = hdr_ ? core::color_transfer::hlg  : core::color_transfer::sdr;
 
             if (video) {
@@ -1091,7 +1109,7 @@ class decklink_producer : public IDeckLinkInputCallback
                     return S_OK;
                 }
 
-                color_space    = get_color_space(video, color_space);
+                color_space    = get_color_space(video, color_space, &color_space_specified);
                 color_transfer = get_color_transfer(video, color_transfer);
                 auto src    = video_decoder_.decode(video, mode_);
 
@@ -1210,7 +1228,15 @@ class decklink_producer : public IDeckLinkInputCallback
                 graph_->set_value("in-sync", in_sync * 2.0 + 0.5);
                 graph_->set_value("out-sync", out_sync * 2.0 + 0.5);
 
-                auto frame = core::draw_frame(make_frame(this, *frame_factory_, av_video, av_audio, color_space, core::frame_geometry::scale_mode::stretch, false, color_transfer));
+                auto frame = core::draw_frame(make_frame(this,
+                                                        *frame_factory_,
+                                                        av_video,
+                                                        av_audio,
+                                                        color_space,
+                                                        core::frame_geometry::scale_mode::stretch,
+                                                        false,
+                                                        color_transfer,
+                                                        color_space_specified));
                 auto field = core::video_field::progressive;
                 if (format_desc_.field_count == 2) {
                     field = frame_count_ % 2 == 0 ? core::video_field::a : core::video_field::b;

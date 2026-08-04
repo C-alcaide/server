@@ -35,6 +35,29 @@ extern "C" {
 
 namespace caspar { namespace ffmpeg {
 
+/// Did this frame (or its stream) actually DECLARE a colour space?
+///
+/// `get_color_space` collapses "unspecified" onto BT.709, so its return value cannot
+/// distinguish a file that says BT.709 from one that says nothing. The mixers need that
+/// distinction: untagged sub-720 material is conventionally BT.601, but a small file
+/// that explicitly says BT.709 must be honoured. Without this the kernels applied the
+/// SD convention unconditionally and discarded correct metadata.
+///
+/// Deliberately mirrors `get_color_space`'s resolution order — frame first, then the
+/// stream fallback — so the two cannot disagree about which value was used.
+inline bool is_color_space_specified(const std::shared_ptr<AVFrame>& video,
+                                    AVColorSpace fallback = AVCOL_SPC_UNSPECIFIED)
+{
+    AVColorSpace cs = AVCOL_SPC_UNSPECIFIED;
+    if (video) {
+        cs = static_cast<AVColorSpace>(video->colorspace);
+    }
+    if (cs == AVCOL_SPC_UNSPECIFIED) {
+        cs = fallback;
+    }
+    return cs != AVCOL_SPC_UNSPECIFIED;
+}
+
 inline core::color_space get_color_space(const std::shared_ptr<AVFrame>& video,
                                          AVColorSpace fallback = AVCOL_SPC_UNSPECIFIED)
 {

@@ -443,6 +443,10 @@ class image_renderer
     {
         draw_params draw_params;
         draw_params.target_width  = format_desc.square_width;
+        // A custom channel format is an LED wall or projector, not an SD broadcast
+        // destination; the kernel uses this to stop a small raster implying BT.601.
+        draw_params.target_is_custom_format =
+            format_desc.format == core::video_format::custom;
         draw_params.target_height = format_desc.square_height;
         draw_params.target_color_space    = target_color_space;
         draw_params.target_color_transfer = target_color_transfer;
@@ -505,6 +509,10 @@ class image_renderer
 
         draw_params draw_params;
         draw_params.target_width    = format_desc.square_width;
+        // A custom channel format is an LED wall or projector, not an SD broadcast
+        // destination; the kernel uses this to stop a small raster implying BT.601.
+        draw_params.target_is_custom_format =
+            format_desc.format == core::video_format::custom;
         draw_params.target_height   = format_desc.square_height;
         // 8-bit attachments store BGRA (shader .bgra swizzle); 16-bit store RGBA directly.
         draw_params.pix_desc.format = (source_texture->depth() == common::bit_depth::bit8)
@@ -536,6 +544,10 @@ class image_renderer
 
         draw_params draw_params;
         draw_params.target_width    = format_desc.square_width;
+        // A custom channel format is an LED wall or projector, not an SD broadcast
+        // destination; the kernel uses this to stop a small raster implying BT.601.
+        draw_params.target_is_custom_format =
+            format_desc.format == core::video_format::custom;
         draw_params.target_height   = format_desc.square_height;
         // 8-bit attachments store BGRA (shader .bgra swizzle); 16-bit store RGBA directly.
         draw_params.pix_desc.format = (source_texture->depth() == common::bit_depth::bit8)

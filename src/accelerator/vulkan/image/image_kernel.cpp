@@ -916,8 +916,17 @@ struct image_kernel::impl
             uniforms.precision_factor[n] = get_precision_factor(params.textures[n]->depth());
         }
 
-        const auto is_hd           = params.pix_desc.planes.at(0).height > 700;
-        const auto color_space     = is_hd ? params.pix_desc.color_space : core::color_space::bt601;
+        // The SD convention as a FALLBACK, not an override — see the longer note in the
+        // OpenGL kernel. Short version: untagged sub-720 YCbCr is conventionally
+        // BT.601, but a source that declared its colour space must be honoured whatever
+        // its size, and a CUSTOM channel format is an LED wall or projector rather than
+        // an SD broadcast destination, so a small raster there implies nothing about
+        // colour space.
+        const auto is_hd = params.pix_desc.planes.at(0).height > 700;
+        const auto color_space =
+            (params.pix_desc.color_space_specified || is_hd || params.target_is_custom_format)
+                ? params.pix_desc.color_space
+                : core::color_space::bt601;
         // YCbCr decode: only indices 0-2 (bt601/bt709/bt2020) are valid in the shader arrays.
         // Wide-gamut spaces (P3, Adobe RGB) use BT.709 coefficients as fallback,
         // because if the source had BT.2020 matrix, av_color.h would have returned bt2020 directly.

@@ -57,6 +57,13 @@ struct draw_params final
     float                                       display_peak_luminance = 1000.0f;
     float                                       sdr_reference_white    = 100.0f;
     bool                                        auto_gamut_compress    = false;
+
+    /// Is the channel configured with a CUSTOM video mode?
+    ///
+    /// Used only to defeat the sub-720 BT.601 fallback: a custom format is an LED wall
+    /// or a projector, where a small raster is a panel size and implies nothing about
+    /// colour space. Set from `format_desc.format == core::video_format::custom`.
+    bool                                        target_is_custom_format = false;
 };
 
 }}} // namespace caspar::accelerator::vulkan

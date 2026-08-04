@@ -54,14 +54,18 @@ core::mutable_frame make_frame(void*                            tag,
                                core::color_space                color_space,
                                core::frame_geometry::scale_mode scale_mode,
                                bool                             is_straight_alpha,
-                               core::color_transfer             color_transfer)
+                               core::color_transfer             color_transfer,
+                               bool                             color_space_specified)
 {
     std::vector<int> data_map; // TODO(perf) when using data_map, avoid uploading duplicate planes
 
-    auto pix_desc =
-        video ? pixel_format_desc(
-                    static_cast<AVPixelFormat>(video->format), video->width, video->height, data_map, color_space)
-              : core::pixel_format_desc(core::pixel_format::invalid);
+    auto pix_desc = video ? pixel_format_desc(static_cast<AVPixelFormat>(video->format),
+                                              video->width,
+                                              video->height,
+                                              data_map,
+                                              color_space,
+                                              color_space_specified)
+                          : core::pixel_format_desc(core::pixel_format::invalid);
     pix_desc.is_straight_alpha = is_straight_alpha;
     pix_desc.color_transfer    = color_transfer;
 
@@ -252,7 +256,8 @@ core::pixel_format_desc pixel_format_desc(AVPixelFormat     pix_fmt,
                                           int               width,
                                           int               height,
                                           std::vector<int>& data_map,
-                                          core::color_space color_space)
+                                          core::color_space color_space,
+                                          bool              color_space_specified)
 {
     // Get linesizes
     int linesizes[4];
@@ -260,6 +265,7 @@ core::pixel_format_desc pixel_format_desc(AVPixelFormat     pix_fmt,
 
     const auto fmt   = get_pixel_format(pix_fmt);
     auto       desc  = core::pixel_format_desc(std::get<0>(fmt), color_space);
+    desc.color_space_specified = color_space_specified;
     auto       depth = std::get<1>(fmt);
     auto       bpc   = depth == common::bit_depth::bit8 ? 1 : 2;
 

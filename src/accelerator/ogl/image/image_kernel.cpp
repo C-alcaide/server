@@ -275,8 +275,34 @@ struct image_kernel::impl
             params.layer_key->bind(static_cast<int>(texture_id::layer_key));
         }
 
-        const auto is_hd       = params.pix_desc.planes.at(0).height > 700;
-        const auto color_space = is_hd ? params.pix_desc.color_space : core::color_space::bt601;
+        // The SD convention, applied as a FALLBACK rather than as an override.
+        //
+        // Untagged sub-720 YCbCr material is conventionally BT.601, and honouring that
+        // is right. What was wrong was applying it unconditionally: this used to be
+        // `height > 700 ? pix_desc.color_space : bt601`, which discarded correct
+        // metadata for every small source. A 960x540 or 1024x640 clip explicitly tagged
+        // BT.709 — ordinary LED-panel content — was matrixed as BT.601. Measured on the
+        // SDI rig a 601/709 mismatch is ~12 dB PSNR: a visible hue shift on saturated
+        // colour, invisible on greys, which is why no ramp-based check ever caught it.
+        //
+        // Three conditions now defeat the fallback, and each answers a different
+        // question:
+        //   * the source SAID what it is           -> never second-guess metadata
+        //   * the source is larger than SD         -> the original heuristic
+        //   * the channel is a CUSTOM video mode   -> not an SD broadcast destination.
+        //     A custom mode is an LED wall or a projector, where a small raster is a
+        //     panel size and carries no implication about colour space. Defaulting
+        //     those to BT.601 because the numbers happen to be small is the same
+        //     mistake one level up.
+        //
+        // Nothing downstream can repair a wrong choice here: this matrix is applied in
+        // `ycbcra_to_rgba` at texture-fetch time, before the colour-management block,
+        // so `auto-color-convert` and `MIXER COLORSPACE` both act too late.
+        const auto is_hd = params.pix_desc.planes.at(0).height > 700;
+        const auto color_space =
+            (params.pix_desc.color_space_specified || is_hd || params.target_is_custom_format)
+                ? params.pix_desc.color_space
+                : core::color_space::bt601;
 
         // YCbCr decode matrices — only bt601/bt709/bt2020 exist for YCbCr.
         // Wide-gamut spaces (P3, Adobe RGB) use BT.709 coefficients as fallback,
