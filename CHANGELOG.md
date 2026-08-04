@@ -59,6 +59,49 @@ every row at or below 0.56 LSB — the 8-bit quantisation half-step.
   the source, not measured — reaching it needs a wide-gamut source on an
   auto-converting channel, which the conformance rig deliberately does not have.
 
+### ⚠ Behaviour change: DeckLink v210 output on the CPU pack path
+
+**Any DeckLink consumer with `<pixel-format>yuv</pixel-format>` that packed v210 on the
+CPU was putting red and blue approximately exchanged on the SDI wire. If a downstream
+device, LUT or camera-match was trimmed against that output, re-check it.**
+
+`rgb_to_yuv_avx2` emitted each chroma pair as **(Cr, Cb)** — `_mm256_hadd_epi32` puts its
+first argument's sums in the low elements, and the arguments were `(cbcr4[1], cbcr4[0])`.
+`pack_v210_avx2`'s multiplier table `[1, 16, 4, 1, 16, 4]` is the correct v210 placement
+for **(Cb, Cr)**: Cb at dword 0 bits 0-9, Cr at bits 20-29. So every 48-pixel AVX2 batch
+wrote `Cr | Y<<10 | Cb<<20` where the scalar `pack_v210` in the same file — and
+`cpu_ref_v210_row` in `ogl_gl_strategy.cpp`, and the v210 specification — write
+`Cb | Y<<10 | Cr<<20`.
+
+Exchanging Cb and Cr is **not** an exact red/blue swap: R reconstructs from 1.5748·Cr and
+B from 1.8556·Cb, and green mixes both. That is why it could not be undone downstream, and
+why it read as two faults rather than one.
+
+Measured on SDI, OpenGL mixer, `pixel-format=yuv`, `gpu-pack=cpu`, 1080p25, against a
+reference read back by FFmpeg on an independent card input:
+
+| | before | after |
+| :--- | ---: | ---: |
+| 8-bit channel | 6.67 dB | **48.28 dB** |
+| 16-bit channel | not measured | **52.53 dB** |
+| as-is with red/blue exchanged in software | 23.34 dB | — |
+
+The +4.26 dB the 16-bit channel gains over the 8-bit one reproduces the +4.23 dB measured
+independently on the GPU packer, which is the cross-check that the two implementations now
+agree.
+
+Scope: every v210 path that packs on the CPU — SDR and HDR, 8-bit and 16-bit, both
+mixers — since `rgb_to_yuv_avx2` is shared. The GL compute packer (`<gpu-pack>gpu</>`) has
+its own implementation and was never affected, which is why `gpu-pack=gpu` was a valid
+workaround. The scalar `pack_v210` only ever handles the sub-48-pixel row remainder and
+the black fill, and black has Cb == Cr == 512, so nothing in the fill could reveal the
+disagreement.
+
+A one-shot self-audit now runs at strategy construction and packs a synthetic
+asymmetric-per-channel pattern both ways, logging
+`[v210_strategy] AVX2/scalar pack parity PASS` or a mismatch with the first differing
+word. Two independent implementations existed all along; nothing compared them.
+
 ### ⚠ Behaviour change: ArtNet / sACN fixture colours
 
 **Every existing ArtNet and sACN installation will send different DMX values after

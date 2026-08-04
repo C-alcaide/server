@@ -105,9 +105,29 @@ inline void rgb_to_yuv_avx2(__m256i                     pixel_pairs[4],
             cbcr4[i * 2 + 1] = _mm256_mullo_epi32(pixel_pairs[i * 2], cr_coeff);
         }
 
-        // sum products
-        __m256i cbcr_sum02    = _mm256_hadd_epi32(cbcr4[1], cbcr4[0]);
-        __m256i cbcr_sum46    = _mm256_hadd_epi32(cbcr4[3], cbcr4[2]);
+        // Sum products. CB MUST COME OUT FIRST.
+        //
+        // `_mm256_hadd_epi32(a, b)` puts a's sums in the low two elements of each lane
+        // and b's in the high two, so the first argument decides which of the pair leads.
+        // These were `hadd(cbcr4[1], cbcr4[0])` — cr first — which handed
+        // `pack_v210_avx2` its chroma as (Cr, Cb) per pair while its multiplier table
+        // `[1, 16, 4, 1, 16, 4]` is the v210 placement for (Cb, Cr): Cb at dword0 bits
+        // 0-9, Cr at bits 20-29. So every 48-pixel AVX2 batch wrote
+        // `Cr | Y<<10 | Cb<<20` where both the scalar `pack_v210` below and
+        // `cpu_ref_v210_row` in ogl_gl_strategy.cpp write `Cb | Y<<10 | Cr<<20`.
+        //
+        // On the wire that exchanges Cb and Cr, which decodes as an APPROXIMATE red/blue
+        // swap and not an exact one — R reconstructs from 1.5748*Cr, B from 1.8556*Cb,
+        // and green mixes both — so undoing the swap in software could not recover it.
+        // Measured on SDI: 6.67 dB as-is, 23.34 dB with red and blue exchanged, against
+        // 47.03 dB for the same config on the GPU packer, which has its own
+        // implementation and was never affected.
+        //
+        // The scalar path only ever sees the <48-pixel row remainder and the black fill,
+        // and black has Cb == Cr == 512, so nothing in the fill could reveal the
+        // disagreement.
+        __m256i cbcr_sum02    = _mm256_hadd_epi32(cbcr4[0], cbcr4[1]);
+        __m256i cbcr_sum46    = _mm256_hadd_epi32(cbcr4[2], cbcr4[3]);
         __m256i cbcr_sum_0426 = _mm256_hadd_epi32(cbcr_sum02, cbcr_sum46);
         *chroma_out           = _mm256_srli_epi32(_mm256_add_epi32(cbcr_sum_0426, c_offset),
                                         20); // add offset and shift down to 10 bit precision
@@ -281,6 +301,66 @@ class v210_strategy
         memset(black, 0, sizeof(black));
         memset(&black_batch, 0, sizeof(__m128i));
         pack_v210(black, color_matrix, reinterpret_cast<uint32_t*>(&black_batch), 6);
+
+        static bool audited = false;
+        if (!audited) {
+            audited = true;
+            audit_avx2_against_scalar<uint8_t>(L"8-bit");
+            audit_avx2_against_scalar<uint16_t>(L"16-bit");
+        }
+    }
+
+    /// Do the AVX2 pack and the scalar pack agree, bit for bit?
+    ///
+    /// They are two independent implementations of the same v210 layout, and for as long
+    /// as both existed they did not agree: `rgb_to_yuv_avx2` emitted each chroma pair as
+    /// (Cr, Cb) while `pack_v210_avx2`'s multiplier table places (Cb, Cr), so the AVX2
+    /// path wrote `Cr | Y<<10 | Cb<<20` against the scalar path's
+    /// `Cb | Y<<10 | Cr<<20`. Nothing compared them, because the scalar path only ever
+    /// sees the sub-48-pixel row remainder and the black fill — and black has
+    /// Cb == Cr == 512, so the fill could not reveal it.
+    ///
+    /// The pattern is synthetic and asymmetric per channel deliberately. Auditing against
+    /// real content would be defeated by a grey frame, where a Cb/Cr exchange is
+    /// invisible — the same reason a colour test may not use equal per-channel values.
+    ///
+    /// Logged rather than thrown, matching the parity gate in ogl_gl_strategy.cpp: a
+    /// wrong picture on SDI is better than no picture while the cause is diagnosed.
+    template <typename T>
+    void audit_avx2_against_scalar(const wchar_t* label) const
+    {
+        alignas(32) ARGBPixel<T> pattern[48];
+        const auto               peak = static_cast<int>(std::is_same<T, uint8_t>() ? 255 : 65535);
+        for (int i = 0; i < 48; ++i) {
+            // Coprime strides so no two channels of a pixel agree and no pixel is grey.
+            pattern[i].R = static_cast<T>(peak * ((i * 5 + 11) % 47) / 47);
+            pattern[i].G = static_cast<T>(peak * ((i * 13 + 3) % 47) / 47);
+            pattern[i].B = static_cast<T>(peak * ((i * 29 + 31) % 47) / 47);
+            pattern[i].A = static_cast<T>(peak);
+        }
+
+        alignas(16) uint32_t simd[32]{};
+        alignas(16) uint32_t scalar[32]{};
+        const ARGBPixel<T>*  src  = pattern;
+        auto*                dest = reinterpret_cast<__m128i*>(simd);
+        convert_48_pixels_avx2<T>(src, dest);
+        pack_v210(pattern, color_matrix, scalar, 48);
+
+        int mismatches = 0, first = -1;
+        for (int i = 0; i < 32; ++i) {
+            if (simd[i] != scalar[i]) {
+                ++mismatches;
+                if (first < 0)
+                    first = i;
+            }
+        }
+        if (mismatches == 0) {
+            CASPAR_LOG(info) << L"[v210_strategy] AVX2/scalar pack parity PASS (" << label << L").";
+        } else {
+            CASPAR_LOG(error) << L"[v210_strategy] AVX2/scalar pack parity FAIL (" << label << L"): " << mismatches
+                              << L"/32 words differ, first@" << first << L" avx2=" << simd[first] << L" scalar="
+                              << scalar[first] << L" — v210 output on this path is wrong.";
+        }
     }
 
     BMDPixelFormat get_pixel_format() override { return bmdFormat10BitYUV; }
