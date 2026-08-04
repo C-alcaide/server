@@ -1,6 +1,64 @@
 CasparVP — Unreleased
 ==========================================
 
+### ⚠ Behaviour change: colour grading output
+
+**Six defects in the grading chain are fixed below. Any look built by eye against the
+old behaviour — a tone curve, a 3D LUT, a qualifier key, film grain — will render
+differently. Re-check saved grades.**
+
+Found by a new mathematical conformance battery in CasparCG-TestRunner
+(`cli.py grading`): flat colour patches through a channel with no colour conversion
+active, compared against a closed-form model of the shader at a 1 LSB gate, plus
+multi-op stacks that check the pipeline order and the independence of the enable
+flags. After these fixes it passes **48/48 on both the OpenGL and Vulkan mixers**,
+every row at or below 0.56 LSB — the 8-bit quantisation half-step.
+
+##### Grading fixes
+* **Tone curves lost their last segment.** `build_curve_lut`'s segment search ran to
+  `n - 2`, so the final interval between the last two control points was never
+  matched and `seg` kept its initial `0` — the end of every curve with three or more
+  points was evaluated with the *first* segment's control points and tangents.
+  Measured on `((0,0),(0.3,0.05),(0.35,0.95),(1,1))`: the output fell from 0.9255 at
+  x=0.3451 to 0.0824 at x=0.3529, a **215 LSB cliff**, then climbed again. Two-point
+  curves were unaffected. Both backends carried the duplicated builder; both fixed.
+* **The 3D LUT was sampled half a texel off.** Both shaders used the colour value
+  directly as the texture coordinate, putting value `v` at texel position `v*N - 0.5`
+  when entry `k` describes input `k/(N-1)` and belongs at `v*(N-1)`. Measured with an
+  identity cube, where the correct output is the input: **up to 7 LSB on a 17-cube**
+  and 4 on a 33-cube, antisymmetric about v=0.5 and exact only there. Now
+  `(v*(N-1) + 0.5)/N`, with N from `textureSize()`. An identity cube is now exact at
+  every sampled value on both backends.
+* **The secondary qualifier ignored hue entirely.** `MIXER QUALIFIER` takes degrees;
+  both kernels uploaded the centre and width raw into uniforms the shader compares
+  against `rgb2hsv`'s 0..1 hue, so `hue_mask` evaluated to 1 for every pixel and the
+  key selected on saturation and luminance alone. Measured: a 64 LSB shift on a green
+  patch from a key targeting 210°. Now `/360` for the centre and `/180` for the width
+  — the width is compared against `AngleDiff(...)*2`, which saturates at half a turn.
+  The chroma keyer has always divided its target hue by 360; this matches it.
+* **Film grain was a flat darkening, not noise (OpenGL).** `target_size` was only
+  uploaded inside the blur branch, so with blur off it kept the GLSL default
+  `vec2(0,0)`. `grain_hash(0,0,seed)` is exactly 0 for any seed, so `noise` was −1 for
+  every pixel: `MIXER GRAIN 0.1` on `#808080` produced a uniform 102/255 frame with
+  zero variance. The same uniform made `apply_sharpen` compute `1.0/target_size` =
+  infinity, so all four taps clamped to the edge texel. Now uploaded
+  unconditionally, as the Vulkan kernel always did. Measured after: grain sigma
+  0.0593 against a predicted 0.0577, and the two backends agree to four decimals.
+
+##### Parity fixes (OpenGL / Vulkan)
+* **Red and blue tone curves were exchanged on Vulkan.** The OpenGL kernel packs the
+  four curve LUTs as `(B, G, R, master)` deliberately, because it carries the pixel
+  through grading in BGRA. The Vulkan kernel copied that packing but grades in RGB,
+  so the user's blue curve was applied to red and vice versa — 20.8 LSB, OpenGL
+  clean. Green and master are their own inverse under the exchange, which is why a
+  grey ramp would never have caught it. Vulkan now packs `(R, G, B, master)`.
+* **Automatic gamut compression swapped the cyan and yellow limits (OpenGL).** The
+  auto path passed the ACES 1.3 limits in RGB order into a uniform this shader
+  consumes in BGRA, so the yellow axis was compressed with the cyan limit and vice
+  versa. Its own manual path and the Vulkan kernel were both correct. Reasoned from
+  the source, not measured — reaching it needs a wide-gamut source on an
+  auto-converting channel, which the conformance rig deliberately does not have.
+
 ### ⚠ Behaviour change: ArtNet / sACN fixture colours
 
 **Every existing ArtNet and sACN installation will send different DMX values after
