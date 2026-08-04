@@ -55,9 +55,9 @@ every row at or below 0.56 LSB — the 8-bit quantisation half-step.
 * **Automatic gamut compression swapped the cyan and yellow limits (OpenGL).** The
   auto path passed the ACES 1.3 limits in RGB order into a uniform this shader
   consumes in BGRA, so the yellow axis was compressed with the cyan limit and vice
-  versa. Its own manual path and the Vulkan kernel were both correct. Reasoned from
-  the source, not measured — reaching it needs a wide-gamut source on an
-  auto-converting channel, which the conformance rig deliberately does not have.
+  versa. Its own manual path and the Vulkan kernel were both correct. **Now measured**
+  (see the behaviour-change entry below): a BT.2020 PQ source on a BT.709 SDR
+  auto-converting channel matches the model on both mixers, with the flag off and on.
 
 ### ⚠ Behaviour change: still images on the Vulkan mixer render at all
 
@@ -154,10 +154,34 @@ correct but inert.
 An explicit `MIXER GAMUT-COMPRESS` still wins, because it names its own limits. The `else`
 now only disables what the automatic path did not already enable.
 
-Not measured on a live channel: reaching this code needs a wide-gamut source on an
-auto-converting channel, which the conformance rig deliberately does not have — the same
-coverage gap that let it survive. Established by reading the two writes, which are both at
-function-body scope in `draw`, in that order, with no early return between them.
+**Measured 2026-08-04**, and this is the first time anything reached the automatic path.
+`CasparCG-TestRunner`'s new `cli.py gamut-compress` plays a BT.2020 PQ source on a BT.709
+SDR auto-converting channel and runs each source as an **(off, on) pair**, because a row
+compared only against its own model cannot tell a flag that was read from one stuck
+permanently either way:
+
+| | OpenGL | Vulkan |
+| :--- | :--- | :--- |
+| flag off, vs the model | **pass** | **pass** |
+| flag on, vs the model | **pass** | **pass** |
+| off vs on, same source | **255 LSB** | **255 LSB** |
+
+So automatic gamut compression now demonstrably reaches the shader, and its limits — the
+cyan/yellow order fixed in `1288dc032` — are correct on both backends. Both of those fixes
+had been reasoned from the source and shipped unverified; they are now measured.
+
+Getting there needed one more fix in the harness, not the server: `TestCase.config_key`
+omitted `auto_gamut_compress`, so the two halves of each pair shared a server and the second
+ran against the first's config. Both rows captured byte-identical frames and the pair check
+reported that the flag changed nothing — which read exactly like these two fixes being
+inert. The server's own trace (`gamut_compress=true`, `ig=1 og=0`, no `NO_CONVERT`) is what
+separated the two readings.
+
+Still open from the same run, and unrelated to gamut compression: the **HLG** source
+(`prores_422_hlg`) misses the 45 dB colour gate at 37.8-40.4 dB on both mixers, with SSIM
+0.99999 and with both rows moving when the flag changes. That is a systematic level offset
+on the HLG→SDR path, not a compression fault, and it is not yet attributed between the
+server and the model.
 
 ### ⚠ Behaviour change: DeckLink v210 output on the CPU pack path
 
