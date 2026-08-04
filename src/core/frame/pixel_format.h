@@ -89,6 +89,18 @@ struct pixel_format_desc final
     bool               is_straight_alpha = false;
     std::vector<plane> planes;
     core::color_space  color_space = core::color_space::bt709;
+
+    /// Did the source actually DECLARE its colour space, or is `color_space` just the
+    /// default?
+    ///
+    /// `color_space` defaults to bt709, so a genuinely BT.709-tagged frame and a frame
+    /// that declared nothing are indistinguishable without this. The mixers need to
+    /// tell them apart: untagged sub-720 material is conventionally BT.601, but a file
+    /// that explicitly says BT.709 must be honoured whatever its size.
+    ///
+    /// Producers that know set this. Anything that does not is treated exactly as
+    /// before, so leaving a producer alone cannot change its behaviour.
+    bool color_space_specified = false;
 };
 
 }} // namespace caspar::core

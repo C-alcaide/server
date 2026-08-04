@@ -290,8 +290,29 @@ struct image_kernel::impl
             uniforms.precision_factor[n] = get_precision_factor(params.textures[n]->depth());
         }
 
-        const auto is_hd           = params.pix_desc.planes.at(0).height > 700;
-        const auto color_space     = is_hd ? params.pix_desc.color_space : core::color_space::bt601;
+        // The SD convention, applied as a FALLBACK rather than an override.
+        //
+        // Untagged sub-720 YCbCr material is conventionally BT.601, and honouring that
+        // is right. Applying it unconditionally was not: this discarded correct metadata
+        // for every small source, so a 960x540 or 1024x640 clip explicitly tagged
+        // BT.709 -- ordinary LED-panel content -- was matrixed as BT.601 on any channel.
+        // The condition is on the SOURCE height, so the destination never entered into
+        // it.
+        //
+        // Nothing downstream can repair the choice: this matrix is applied in
+        // ycbcra_to_rgba at texture-fetch time, before any colour management.
+        //
+        // Three conditions defeat the fallback, each answering a different question:
+        //   * the source SAID what it is         -> never second-guess metadata
+        //   * the source is larger than SD       -> the original heuristic, unchanged
+        //   * the channel is a CUSTOM format     -> an LED wall or projector, not an SD
+        //     broadcast destination. A small raster there is a panel size and implies
+        //     nothing about colour space.
+        const auto is_hd = params.pix_desc.planes.at(0).height > 700;
+        const auto color_space =
+            (params.pix_desc.color_space_specified || is_hd || params.target_is_custom_format)
+                ? params.pix_desc.color_space
+                : core::color_space::bt601;
         uniforms.color_space_index = static_cast<uint32_t>(color_space);
 
         if (params.pix_desc.is_straight_alpha) {

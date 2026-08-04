@@ -95,6 +95,17 @@ const AVCodec* get_decoder(AVCodecID codec_id)
 // TODO (fix) Handle ts discontinuities.
 // TODO (feat) Forward options.
 
+/// Did this frame actually DECLARE a colour space?
+///
+/// `get_color_space` maps "unspecified" onto BT.709, so its return value cannot
+/// distinguish a file that says BT.709 from one that says nothing. The mixers need that
+/// distinction: untagged sub-720 material is conventionally BT.601, while a small file
+/// that explicitly says BT.709 must be honoured.
+bool is_color_space_specified(const std::shared_ptr<AVFrame>& video)
+{
+    return video && video->colorspace != AVColorSpace::AVCOL_SPC_UNSPECIFIED;
+}
+
 core::color_space get_color_space(const std::shared_ptr<AVFrame>& video)
 {
     auto result = core::color_space::bt709;
@@ -955,7 +966,14 @@ struct AVProducer::Impl
             }
 
             frame.frame = core::draw_frame(
-                make_frame(this, *frame_factory_, frame.video, frame.audio, get_color_space(frame.video), scale_mode_));
+                make_frame(this,
+                                                    *frame_factory_,
+                                                    frame.video,
+                                                    frame.audio,
+                                                    get_color_space(frame.video),
+                                                    scale_mode_,
+                                                    /*is_straight_alpha=*/false,
+                                                    is_color_space_specified(frame.video)));
             frame.frame_count = frame_count_++;
 
             graph_->set_value("decode-time", decode_timer.elapsed() * format_desc_.fps * 0.5);

@@ -178,6 +178,10 @@ class image_renderer
     {
         draw_params draw_params;
         draw_params.target_width  = format_desc.square_width;
+        // A custom channel format is an LED wall or projector, not an SD broadcast
+        // destination; the kernel uses this to stop a small raster implying BT.601.
+        draw_params.target_is_custom_format =
+            format_desc.format == core::video_format::custom;
         draw_params.target_height = format_desc.square_height;
         // TODO: Pass the target color_space
 
@@ -237,6 +241,10 @@ class image_renderer
 
         draw_params draw_params;
         draw_params.target_width    = format_desc.square_width;
+        // A custom channel format is an LED wall or projector, not an SD broadcast
+        // destination; the kernel uses this to stop a small raster implying BT.601.
+        draw_params.target_is_custom_format =
+            format_desc.format == core::video_format::custom;
         draw_params.target_height   = format_desc.square_height;
         draw_params.pix_desc.format = core::pixel_format::bgra;
         draw_params.pix_desc.planes = {core::pixel_format_desc::plane(
