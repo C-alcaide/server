@@ -97,6 +97,16 @@ core::mutable_frame make_frame(void*                            tag,
                              << L" -> mixer pixel_format " << static_cast<int>(pix_desc.format) << L" ("
                              << static_cast<int>(pix_desc.planes.size()) << L" plane(s), "
                              << (pix_desc.planes.empty() ? 0 : pix_desc.planes[0].stride) << L" stride)";
+            // The SOURCE linesize, which the descriptor does not carry: `pixel_format_desc`
+            // derives its planes from av_image_fill_linesizes(), i.e. the TIGHT linesize for
+            // the width, while the row copy below reads at this one. If they differ, the two
+            // disagree about the source layout and only the copy knows it.
+            CASPAR_LOG(info) << L"[ffmpeg] source frame " << video->width << L"x" << video->height
+                             << L" av linesize = [" << video->linesize[0] << L", "
+                             << video->linesize[1] << L", " << video->linesize[2] << L"]"
+                             << L"; the mixer's plane linesizes = ["
+                             << (pix_desc.planes.size() > 0 ? pix_desc.planes[0].linesize : 0) << L", "
+                             << (pix_desc.planes.size() > 1 ? pix_desc.planes[1].linesize : 0) << L"]";
         }
     }
 
