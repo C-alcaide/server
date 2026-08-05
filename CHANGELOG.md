@@ -1,6 +1,41 @@
 CasparVP — Unreleased
 ==========================================
 
+### ⚠ Fixed: the Vulkan mixer produced garbage on any non-square-pixel video mode
+
+**A PAL channel on the Vulkan mixer rendered unrecognisable striping — not a colour
+shift, no picture at all.** OpenGL was correct throughout. If you run SD on Vulkan,
+this is the fix.
+
+The Vulkan mixer created its render target at `square_width x square_height` where the
+OpenGL mixer uses `width x height`. `square_*` is the size a non-square-pixel raster
+would occupy on a square-pixel display — PAL is **720x576 stored, 1024x576 displayed**
+— and it belongs in the aspect maths, not in the size of the surface that is rendered
+into and read back. The channel's frame is 720x576, so handing the consumer a 1024x576
+readback sheared every row by 304 pixels.
+
+Measured, `png_8` through a PAL channel, Vulkan against OpenGL:
+
+| | before | after |
+| :--- | ---: | ---: |
+| PAL (720x576) | unrecognisable | **byte-identical to OpenGL** |
+| PAL SDI capture (`sdi-input`) | 7.96 dB, SSIM 0.0057 | **39.67 dB, SSIM 0.9885** |
+
+NTSC was wrong too and looked plausible: its `square_height` is 540 against a real 486,
+so the row pitch matched and only the bottom of the frame was lost — a crop rather than
+a shear. It is now byte-identical to OpenGL as well.
+
+**Every other mode is unaffected**, because `square_width == width` for all of them —
+1080i5000, 1080p2500 and the custom 2600x1500p25 are byte-identical to OpenGL before
+and after. `cli.py conformance` still passes **100/100 conversions within 1.0 LSB** on
+Vulkan and `cli.py grading` **48/48**, so the colour chain is untouched.
+
+**Why no battery caught it.** `conformance` reports 36/36 within 1.0 LSB at PAL on the
+broken build. Its patches are flat, and a flat patch is invariant under a sampling
+displacement — every texel it could wrongly sample holds the same value. A flat-patch
+battery certifies a colour chain, not a mixer; catching this needs one case per mode
+carrying spatial detail.
+
 ### ⚠ Behaviour change: colour grading output
 
 **Six defects in the grading chain are fixed below. Any look built by eye against the

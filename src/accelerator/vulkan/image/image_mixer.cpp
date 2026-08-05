@@ -276,7 +276,25 @@ class image_renderer
             [this, format_desc, cal_lut = calibration_lut_, cal_strength = calibration_strength_,
              cal_bypass = calibration_bypass_, layers = std::move(layers)]() mutable
             -> std::tuple<std::shared_future<array<const std::uint8_t>>, std::shared_ptr<core::texture>> {
-                auto pass   = kernel_.create_renderpass(format_desc.square_width, format_desc.square_height);
+                // THE RASTER IS `width x height`, NOT `square_width x square_height`.
+                //
+                // `square_*` is the display size a non-square-pixel format would occupy on a
+                // square-pixel screen -- PAL is 720x576 stored, 1024x576 displayed. It belongs
+                // in the aspect maths (`draw_params.target_width` below, exactly as the OpenGL
+                // mixer sets it) and NOT in the size of the thing we render into and read back:
+                // the channel's frame is `format_desc.width x format_desc.height`, and the
+                // consumer interprets the readback at that size.
+                //
+                // Rendering into 1024x576 and handing back 1024x576 bytes for a frame declared
+                // 720x576 shears every row by 304 pixels. PAL rendered as unrecognisable
+                // striping; OpenGL was correct all along because it creates its target with
+                // `format_desc.width, format_desc.height` (ogl/image/image_mixer.cpp).
+                //
+                // Invisible everywhere `square_width == width`, which is every other mode on
+                // this rig -- NTSC (720x486, square 720x540), 1080i/p and the custom
+                // 2600x1500 all pass. And invisible to `cli.py conformance`, whose flat
+                // patches cannot show a sampling displacement at all.
+                auto pass   = kernel_.create_renderpass(format_desc.width, format_desc.height);
                 auto target = pass->default_attachment();
 
                 draw(target, std::move(layers), format_desc, pass);
