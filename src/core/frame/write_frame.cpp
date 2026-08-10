@@ -104,6 +104,60 @@ bool write_frame_png(const const_frame& frame, const std::wstring& path)
         // Get pixel data (triggers lazy GPU readback if needed)
         const auto& plane0 = frame.image_data(0);
         if (plane0.size() == 0) {
+            // A PLANAR GPU FRAME: read every plane, not just the first.
+            //
+            // The GPU-direct producer hands the mixer two textures — Y and UV for
+            // P010/NV12 (`av_producer.cpp`, "P010 planes handed to the mixer... no CPU
+            // frame") — and `frame.texture()` returns only the first of them. The packed
+            // path below then measured that single-component luma plane against
+            // `width * height * 4 components` and rejected it:
+            //
+            //     write_frame_png: GPU readback returned 4147200 bytes,
+            //                      need 16588800 for 1920x1080
+            //
+            // 4147200 is exactly the Y plane — 1920*1080*1 component*2 bytes — so the
+            // readback was working the whole time and only the expectation was wrong.
+            // PRINT RAW then wrote nothing for every GPU-direct case while still
+            // answering `202 OK`, because the write is dispatched to a detached thread.
+            //
+            // Nothing new is needed to convert them: the frame carries its own nv12
+            // `pixel_format_desc` with correct plane geometry, chroma siting and colour
+            // space, and the semi-planar branch further down already handles it for
+            // software decodes. This only has to fill in the host bytes it describes.
+            const auto& textures = frame.textures();
+            const auto& src_desc = frame.pixel_format_desc();
+            if (textures.size() > 1 && src_desc.planes.size() == textures.size()) {
+                std::vector<array<const uint8_t>> img_vec;
+                bool all_read = true;
+                for (size_t i = 0; i < textures.size(); ++i) {
+                    const auto& p = src_desc.planes[i];
+                    if (!textures[i]) {
+                        all_read = false;
+                        break;
+                    }
+                    auto px = textures[i]->read_pixels();
+                    // Per plane, against the size the plane itself declares — the packed
+                    // `width * height * components` guess is what broke this.
+                    if (px.size() < static_cast<size_t>(p.size)) {
+                        CASPAR_LOG(warning)
+                            << L"write_frame_png: plane " << i << L" readback returned " << px.size()
+                            << L" bytes, need " << p.size << L" for " << p.width << L"x" << p.height;
+                        all_read = false;
+                        break;
+                    }
+                    auto store = std::make_shared<std::vector<uint8_t>>(std::move(px));
+                    img_vec.emplace_back(store->data(), store->size(), store);
+                }
+                if (all_read) {
+                    CASPAR_LOG(debug) << L"write_frame_png: read back " << textures.size()
+                                      << L" GPU planes";
+                    const_frame planar_frame(frame.stream_tag(), std::move(img_vec),
+                                             frame.audio_data(), src_desc, nullptr);
+                    return write_frame_png(planar_frame, path);
+                }
+                return false;
+            }
+
             // No CPU data — try on-demand GPU readback via the texture
             auto tex = frame.texture();
             if (tex) {

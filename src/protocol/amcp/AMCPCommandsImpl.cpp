@@ -637,11 +637,22 @@ std::wstring print_raw_command(command_context& ctx)
 
     auto frame = extractor.result;
 
-    // Write to disk asynchronously
-    std::thread async([frame, output_path] {
-        core::write_frame_png(frame, output_path);
-    });
-    async.detach();
+    // Write synchronously, and report what actually happened.
+    //
+    // This was a detached thread whose result nobody could observe, so the command
+    // answered `202 OK` before the write was attempted and every failure inside
+    // `write_frame_png` was invisible. Measured: on the GPU-direct path it wrote no file
+    // at all for months while returning OK on every call, and the test harness — which
+    // has no other way to know — recorded the missing decoder check as simply absent
+    // rather than as a failure.
+    //
+    // A 1080p PNG encode costs tens of milliseconds and PRINT RAW is an explicitly
+    // invoked debug command, not a per-frame path. Blocking the AMCP thread for that is
+    // a better trade than a status code that cannot be wrong.
+    if (!core::write_frame_png(frame, output_path)) {
+        CASPAR_LOG(warning) << L"PRINT RAW: write_frame_png failed for " << output_path;
+        return L"404 PRINT RAW FAILED\r\n";
+    }
 
     return L"202 PRINT RAW OK\r\n";
 }

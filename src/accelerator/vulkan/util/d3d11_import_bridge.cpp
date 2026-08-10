@@ -505,8 +505,21 @@ bool d3d11_import_bridge::copy_planes(void*                           y_handle,
 
     // The mixer binds a frame's textures only if they belong to its own
     // VkDevice; texture_wrapper is what carries that identity across.
-    out_y  = std::make_shared<texture_wrapper>(std::move(y_tex));
-    out_uv = std::make_shared<texture_wrapper>(std::move(uv_tex));
+    //
+    // THESE CARRY THE DEVICE NOW, so they can be read back. They deliberately did not,
+    // on the grounds that "a host copy of one plane is not a picture anyone can use" —
+    // which was true while `write_frame_png` read `frame.texture()`, the first plane and
+    // only the first. It reads every plane in `frame.textures()` now and converts them
+    // through the semi-planar nv12 path the software decoder already uses, so two planes
+    // are exactly a picture.
+    //
+    // Without this the Vulkan half of GPU-direct had no PRINT RAW at all: readback
+    // returned `{}` on the first line of `texture_wrapper::read_pixels` because
+    // `vk_device_` was null, and the OpenGL half worked. Measured as
+    // `plane 0 readback returned 0 bytes, need 4147200` once the command started
+    // reporting its failures.
+    out_y  = std::make_shared<VkReadableTextureWrapper>(std::move(y_tex), m.dev_->shared_from_this());
+    out_uv = std::make_shared<VkReadableTextureWrapper>(std::move(uv_tex), m.dev_->shared_from_this());
     return true;
 }
 
@@ -625,9 +638,9 @@ bool d3d11_import_bridge::copy_texture(void* handle, int width, int height, std:
     // consumer that has not got a GPU path. Handing over the device is what lets
     // them ask, instead of finding a texture they cannot read and silently giving up.
     //
-    // copy_planes' outputs deliberately do not get this: those are half-resolution
-    // chroma and luma planes of a hardware-decoded frame, and a host copy of one
-    // plane is not a picture anyone can use.
+    // copy_planes' outputs carry it too, as of 2026-08-10. They deliberately did not
+    // while a host copy of one plane was all a caller could get; `write_frame_png` reads
+    // every plane now, so the pair reconstructs the picture.
     out = std::make_shared<VkReadableTextureWrapper>(std::move(tex), m.dev_->shared_from_this());
     return true;
 }

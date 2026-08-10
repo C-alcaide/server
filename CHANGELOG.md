@@ -1,6 +1,50 @@
 CasparVP — Unreleased
 ==========================================
 
+### Fixed: `PRINT RAW` wrote nothing on the GPU-direct path, and said `202 OK` anyway
+
+Two independent bugs, and the second is why the first went unnoticed for so long.
+
+**`write_frame_png` read only the first plane.** A GPU-direct frame is P010 — two plane
+textures, Y and UV — but the readback called `frame.texture()`, which returns just the
+first, and then measured it against `width x height x 4 components`:
+
+```
+write_frame_png: GPU readback returned 4147200 bytes, need 16588800 for 1920x1080
+```
+
+4147200 is exactly the luma plane (1920x1080, one component, 16-bit), so the readback had
+been working the whole time and only the expectation was wrong. It now reads every
+texture in `frame.textures()` and converts them through the semi-planar `nv12` branch the
+software decode path already used — the frame carries its own plane geometry, chroma
+siting and colour space, so no new colour code was needed.
+
+**And `PRINT RAW` could not report the failure.** The write was dispatched to a detached
+thread, so the command returned `202 PRINT RAW OK` before the write was attempted and no
+error inside `write_frame_png` could ever reach the caller. It is synchronous now and
+returns `404 PRINT RAW FAILED` when the write fails. A 1080p PNG encode costs tens of
+milliseconds on an explicitly invoked debug command — a better trade than a status code
+that cannot be wrong.
+
+**The Vulkan half needed one more thing.** `d3d11_import_bridge::copy_planes` built its
+two plane wrappers without a device pointer, so `texture_wrapper::read_pixels` returned
+`{}` on its first line and Vulkan GPU-direct had no `PRINT RAW` at all while OpenGL
+worked. That was deliberate — the comment read *"a host copy of one plane is not a
+picture anyone can use"* — and it was right until the readback learned to read both
+planes. They are `VkReadableTextureWrapper` now.
+
+Measured, `h265_hdr10` / `h265_10bit` / `av1` on both mixers, 16 cases:
+
+| | before | after |
+| :--- | ---: | ---: |
+| cases with a `PRINT RAW` frame | 8 of 16 | **16 of 16** |
+| independent decoder check | half the cases | **every case**, 48.0 dB |
+| colour gate on GPU-direct cases | 25 dB vs an FFmpeg decode | **45 dB vs the mixer's own decode**, 53.0 dB |
+
+This affects diagnostics only — `write_frame_png` has exactly one caller, `PRINT RAW`.
+Rendering is unchanged: `conformance` 100/100 within 1.0 LSB and `grading` 48/48 on both
+mixers, and `mixer-parity` 6/6 rasters byte-identical between the backends.
+
 ### ⚠ Fixed: the Vulkan mixer produced garbage on any non-square-pixel video mode
 
 **A PAL channel on the Vulkan mixer rendered unrecognisable striping — not a colour
