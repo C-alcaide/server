@@ -2286,6 +2286,91 @@ static std::wstring to_wstring_tonemap(int tm) {
     }
 }
 
+// MIXER <ch>-<layer> OCIO                  -> query
+// MIXER <ch>-<layer> OCIO <source-space>   -> convert this layer's source encoding to the
+//                                             mixer's ACEScg working space via OpenColorIO
+// MIXER <ch>-<layer> OCIO NONE             -> back to the built-in path
+//
+// The alternative front end to MIXER COLORSPACE. Both write the same stage of the chain
+// (COLOR_GRADING.md steps 4-7), so they are mutually exclusive and this command refuses
+// rather than silently overriding -- an operator who set a COLORSPACE and then an OCIO space
+// has contradicted themselves, and quietly picking one produces a look nobody chose. The
+// same check exists in mixer_colorspace_command for the other direction.
+//
+// The creative grading tools in the middle of the chain are unaffected either way: they
+// operate on scene-linear ACEScg regardless of which front end produced it, so a CDL or a
+// curve keeps its meaning across this switch.
+std::future<std::wstring> mixer_ocio_command(command_context& ctx)
+{
+    if (ctx.parameters.empty()) {
+        auto transform2 = get_current_transform(ctx).share();
+        return std::async(std::launch::deferred, [transform2]() -> std::wstring {
+            const auto o = transform2.get().image_transform.ocio;
+            return L"201 MIXER OK\r\n" + (o.enable ? u16(o.source_space) : std::wstring(L"NONE")) + L"\r\n";
+        });
+    }
+
+    transforms_applier transforms(ctx);
+
+    if (boost::iequals(ctx.parameters.at(0), L"NONE") || boost::iequals(ctx.parameters.at(0), L"OFF")) {
+        transforms.add(stage::transform_tuple_t(
+            ctx.layer_index(),
+            [](frame_transform t) {
+                t.image_transform.ocio.enable = false;
+                t.image_transform.ocio.source_space.clear();
+                t.image_transform.ocio.cache_id.clear();
+                return t;
+            },
+            0,
+            L"linear"));
+        transforms.apply();
+        return make_ready_future<std::wstring>(L"202 MIXER OK\r\n");
+    }
+
+    if (!accelerator::ocio::available()) {
+        CASPAR_LOG(warning) << L"[ocio] MIXER OCIO refused: this server was built without OCIO support";
+        return make_ready_future<std::wstring>(L"501 MIXER FAILED\r\n");
+    }
+
+    const auto source_space = u8(ctx.parameters.at(0));
+
+    // Validated against the loaded config at command time so a wrong name fails the command,
+    // never the frame. A colour space that does not exist must not become a black layer or a
+    // silently untransformed one mid-show.
+    if (!accelerator::ocio::has_colorspace(source_space)) {
+        CASPAR_LOG(warning) << L"[ocio] MIXER OCIO refused: '" << ctx.parameters.at(0)
+                            << L"' is not a colour space in " << u16(accelerator::ocio::config_uri())
+                            << L". Use INFO OCIO COLORSPACES to list them.";
+        return make_ready_future<std::wstring>(L"404 MIXER ERROR\r\n");
+    }
+
+    // Blocking read of the layer's current transform, to enforce the exclusion. Safe here:
+    // the stage runs on its own thread, so there is no self-wait, and the query branch above
+    // already depends on the same future.
+    if (get_current_transform(ctx).get().image_transform.color_grade.enable) {
+        CASPAR_LOG(warning) << L"[ocio] MIXER OCIO refused: MIXER COLORSPACE is active on this layer. "
+                               L"They are mutually exclusive -- clear it with MIXER COLORSPACE NONE first.";
+        return make_ready_future<std::wstring>(L"403 MIXER ERROR\r\n");
+    }
+
+    transforms.add(stage::transform_tuple_t(
+        ctx.layer_index(),
+        [source_space](frame_transform transform) -> frame_transform {
+            auto& o = transform.image_transform.ocio;
+            o.enable       = true;
+            o.source_space = source_space;
+            // cache_id is filled in by the mixer once it has built the processor: only it
+            // can ask OCIO, and the value depends on the config's contents rather than on
+            // the name typed here.
+            o.cache_id.clear();
+            return transform;
+        },
+        0,
+        L"linear"));
+    transforms.apply();
+    return make_ready_future<std::wstring>(L"202 MIXER OK\r\n");
+}
+
 std::future<std::wstring> mixer_colorspace_command(command_context& ctx)
 {
     if (ctx.parameters.empty()) {
@@ -2307,6 +2392,15 @@ std::future<std::wstring> mixer_colorspace_command(command_context& ctx)
     // MIXER 1-1 COLORSPACE [input_transfer] [input_gamut] [tonemapping] [output_gamut] [output_transfer] [exposure]
     // Disable with: MIXER 1-1 COLORSPACE NONE
     transforms_applier transforms(ctx);
+
+    // Mutually exclusive with MIXER OCIO -- see mixer_ocio_command. Refusing NONE would be
+    // unhelpful, so only an enabling form is blocked.
+    if (!boost::iequals(ctx.parameters.at(0), L"NONE") &&
+        get_current_transform(ctx).get().image_transform.ocio.enable) {
+        CASPAR_LOG(warning) << L"[ocio] MIXER COLORSPACE refused: MIXER OCIO is active on this layer. "
+                               L"They are mutually exclusive -- clear it with MIXER OCIO NONE first.";
+        return make_ready_future<std::wstring>(L"403 MIXER ERROR\r\n");
+    }
 
     if (boost::iequals(ctx.parameters.at(0), L"NONE")) {
         transforms.add(stage::transform_tuple_t(
@@ -4701,6 +4795,7 @@ void register_commands(std::shared_ptr<amcp_command_repository_wrapper>& repo)
     repo->register_channel_command(L"Mixer Commands", L"MIXER MESH",                  mixer_mesh_command,                  0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER FLIP",             mixer_flip_command,              0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER COLORSPACE",        mixer_colorspace_command,        0);
+    repo->register_channel_command(L"Mixer Commands", L"MIXER OCIO",              mixer_ocio_command,              0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER WHITEBALANCE", mixer_whitebalance_command, 0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER LIFT",         mixer_lift_command,         0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER MIDTONE",      mixer_midtone_command,      0);

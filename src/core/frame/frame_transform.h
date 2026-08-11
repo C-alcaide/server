@@ -180,6 +180,42 @@ struct color_grade final
     float exposure        = 1.0f;
 };
 
+// ---- OCIO input transform (per layer) --------------------------------------
+//
+// The alternative front end to color_grade above: source encoding -> the mixer's ACEScg
+// working space, computed by OpenColorIO from a config rather than from the k_direct matrix
+// table and the built-in transfer functions.
+//
+// The two are MUTUALLY EXCLUSIVE and that is enforced at command time, not here. Both write
+// the same stage of the chain (COLOR_GRADING.md steps 4-7), so running both would apply two
+// input transforms in series. The existing precedent is COLOR_GRADING.md:494, where
+// MIXER COLORSPACE and auto-color-convert already exclude each other.
+//
+// What this does NOT touch is the creative grading in the middle of the chain. Those tools
+// operate on scene-linear ACEScg either way, so a CDL or a curve means the same thing with
+// OCIO on as with k_direct on -- see docs/OCIO_INTEGRATION_STUDY.md section 4.2.
+//
+// `source_space` is a config-defined string, deliberately not an enum: enumerating it would
+// defeat the point of using a config, and the names differ between the CG and Studio
+// configs. It is validated against the loaded config when the command is accepted.
+struct ocio_transform final
+{
+    bool        enable = false;
+    std::string source_space;
+
+    /// OCIO's own cache identifier for the resulting processor. Set by the mixer once it has
+    /// built the processor, and used as the shader variant cache key -- it accounts for the
+    /// config's contents rather than just the space name, so it stays correct across a
+    /// config change that reuses a name.
+    std::string cache_id;
+
+    bool operator==(const ocio_transform& other) const
+    {
+        return enable == other.enable && source_space == other.source_space;
+    }
+    bool operator!=(const ocio_transform& other) const { return !(*this == other); }
+};
+
 // ---- Per-channel RGB Levels ------------------------------------------------
 struct rgb_levels_channel final
 {
@@ -317,6 +353,7 @@ struct image_transform final
     core::chroma          chroma;
     core::projection      projection;
     core::color_grade     color_grade;
+    core::ocio_transform  ocio;
 
     // White balance (temperature/tint)
     double temperature = 0.0;  // -1..+1  (neg=cool/blue, pos=warm/orange)

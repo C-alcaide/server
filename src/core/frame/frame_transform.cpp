@@ -350,6 +350,7 @@ bool operator==(const image_transform& lhs, const image_transform& rhs)
                lhs.flip_h == rhs.flip_h && lhs.flip_v == rhs.flip_v &&
                lhs.is_mix == rhs.is_mix &&
                lhs.blend_mode == rhs.blend_mode && lhs.layer_depth == rhs.layer_depth &&
+               lhs.ocio == rhs.ocio &&
                lhs.chroma.enable == rhs.chroma.enable && lhs.chroma.show_mask == rhs.chroma.show_mask &&
                eq(lhs.chroma.target_hue, rhs.chroma.target_hue) && eq(lhs.chroma.hue_width, rhs.chroma.hue_width) &&
                eq(lhs.chroma.min_saturation, rhs.chroma.min_saturation) &&
