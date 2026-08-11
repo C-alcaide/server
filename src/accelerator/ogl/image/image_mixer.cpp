@@ -284,6 +284,13 @@ class image_renderer
                     target_texture = cal_texture;
                 }
 
+                // Everything a consumer can reach is integer, so a float working space has
+                // to be resolved before it leaves the mixer. Skipped entirely on unorm
+                // channels, which is why they stay bit-identical.
+                if (render_format_ != common::render_format::unorm) {
+                    target_texture = resolve_to_output(target_texture, format_desc);
+                }
+
                 if (!needs_cpu) {
                     auto empty = make_ready_future<array<const std::uint8_t>>(
                         array<const std::uint8_t>(nullptr, 0, true));
@@ -547,6 +554,58 @@ class image_renderer
         draw_params.transforms.image_transform.lut3d_strength = strength;
 
         kernel_.draw(std::move(draw_params));
+    }
+
+    /// Convert a float render target into the channel's output depth.
+    ///
+    /// Mandatory whenever render_format_ is not unorm, and not an optimisation: the
+    /// channel hands consumers `array<const uint8_t>` from copy_async() and a
+    /// core::texture they may read directly, and both of those interfaces mean integer.
+    /// A half-float target reaching a DeckLink, screen, ffmpeg or GPU-direct consumer
+    /// would be reinterpreted as unsigned shorts -- not clipped, not dim, but garbage,
+    /// because the bit patterns are unrelated.
+    ///
+    /// The conversion itself is a straight blit through the kernel with no colour work.
+    /// That is correct rather than lazy: the OGL chain applies the OETF at the end of the
+    /// same fragment pass that composites a layer (COLOR_GRADING.md steps 27-29), so the
+    /// composite target already holds display-encoded values. All the float target adds is
+    /// that whatever fell outside [0,1] survived being written down. Writing into a
+    /// normalized target clamps it here, which is exactly where the display range should
+    /// be imposed.
+    ///
+    /// This is also where an OCIO display/view transform belongs, so that a channel has
+    /// one ordered output chain (composite -> calibration -> display transform -> resolve)
+    /// rather than several competing full-screen passes.
+    std::shared_ptr<texture> resolve_to_output(std::shared_ptr<texture>&      source_texture,
+                                               const core::video_format_desc& format_desc)
+    {
+        auto out = ogl_->create_texture(
+            format_desc.width, format_desc.height, 4, depth_, true, common::render_format::unorm);
+
+        draw_params draw_params;
+        draw_params.target_width  = format_desc.square_width;
+        draw_params.target_height = format_desc.square_height;
+        draw_params.target_is_custom_format = format_desc.format == core::video_format::custom;
+        draw_params.pix_desc.format = core::pixel_format::bgra;
+        draw_params.pix_desc.planes = {core::pixel_format_desc::plane(
+            source_texture->width(), source_texture->height(), 4, source_texture->depth())};
+        draw_params.pix_desc.color_space    = target_color_space;
+        draw_params.pix_desc.color_transfer = target_color_transfer;
+        draw_params.target_color_space      = target_color_space;
+        draw_params.target_color_transfer   = target_color_transfer;
+        // No colour conversion and no tone mapping: the picture is already in the
+        // channel's output encoding by this point. Enabling either here would apply a
+        // second transform to an already-encoded image.
+        draw_params.auto_color_convert = false;
+        draw_params.auto_tone_map      = 0;
+        draw_params.textures           = {spl::make_shared_ptr(source_texture)};
+        draw_params.blend_mode         = core::blend_mode::normal;
+        draw_params.background         = out;
+        draw_params.geometry           = core::frame_geometry::get_default();
+
+        kernel_.draw(std::move(draw_params));
+
+        return out;
     }
 };
 
