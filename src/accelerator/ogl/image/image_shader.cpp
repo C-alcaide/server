@@ -26,6 +26,7 @@
 #include <common/except.h>
 
 #include <algorithm>
+#include <cstring>
 #include <mutex>
 #include <vector>
 
@@ -70,13 +71,29 @@ std::string build_fragment_source(const shader_variant& variant, const char* bas
     if (variant.is_base())
         return std::string(base);
 
-    // Splice points are deliberately not implemented yet: no caller supplies a non-base
-    // variant, and inventing the markers before the generated code exists would mean
-    // guessing at their shape. The variant reaching here is a programming error rather
-    // than a runtime condition.
-    CASPAR_THROW_EXCEPTION(not_implemented()
-                           << msg_info("shader variant splicing is not implemented yet (variant '" + variant.id +
-                                       "')"));
+    // The markers are comments, so a base program containing them is still valid GLSL and
+    // the un-spliced shader compiles and runs. That is what makes the substitution safe to
+    // get wrong loudly rather than quietly: a missing marker throws here, at configure time,
+    // instead of producing a program that silently omits the transform.
+    static constexpr const char* DECL_MARKER = "//__CASPAR_OCIO_DECLARATIONS__";
+    static constexpr const char* CALL_MARKER = "//__CASPAR_OCIO_TRANSFORM__";
+
+    std::string source(base);
+
+    const auto decl_at = source.find(DECL_MARKER);
+    const auto call_at = source.find(CALL_MARKER);
+    if (decl_at == std::string::npos || call_at == std::string::npos) {
+        CASPAR_THROW_EXCEPTION(caspar_exception() << msg_info(
+                                   "shader.frag is missing an OCIO splice marker; cannot build variant '" +
+                                   variant.id + "'"));
+    }
+
+    // Replace the call site first: inserting the (much longer) declarations first would
+    // invalidate the offset found for the call.
+    source.replace(call_at, std::strlen(CALL_MARKER), variant.transform_call);
+    source.replace(decl_at, std::strlen(DECL_MARKER), variant.prologue);
+
+    return source;
 }
 
 } // namespace

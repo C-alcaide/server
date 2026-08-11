@@ -139,6 +139,12 @@ void apply_transform_colour_values(core::image_transform& self, const core::imag
     if (other.color_grade.enable) {
         self.color_grade = other.color_grade;
     }
+    // Easy to miss, and it fails silently: this merge is explicit field by field, so a new
+    // image_transform member that is not listed here simply never reaches the kernel. The
+    // symptom is a command that reports 202 and changes nothing.
+    if (other.ocio.enable) {
+        self.ocio = other.ocio;
+    }
     if (other.blur.enable) {
         self.blur = other.blur;
     }

@@ -41,6 +41,9 @@
 #include <algorithm>
 #include <cmath>
 #include <utility>
+#include <accelerator/ocio/ocio_config.h>
+#include <map>
+#include <common/utf.h>
 #include <vector>
 
 namespace caspar::accelerator::ogl {
@@ -154,7 +157,10 @@ static const double epsilon = 0.001;
 struct image_kernel::impl
 {
     spl::shared_ptr<device> ogl_;
+    /// The program for the item currently being drawn. Rebound at the top of draw().
     spl::shared_ptr<shader> shader_;
+    /// The un-spliced program, used whenever no generated transform is active.
+    spl::shared_ptr<shader> base_program_;
     GLuint                  vao_;
     GLuint                  vbo_;
     GLuint                  curve_lut_tex_id_ = 0;
@@ -165,9 +171,30 @@ struct image_kernel::impl
     const core::blend_mask_data* blend_mask_data_ptr_ = nullptr;  // tracks which data is uploaded
     int                     frame_counter_    = 0;
 
+    // ---- OCIO input-transform variants ------------------------------------------
+    //
+    // One entry per colour space in use, keyed by OCIO's processor cache ID. Holds the
+    // compiled program plus the GL textures its generated source samples. Kept per kernel
+    // rather than globally because the textures are GL objects belonging to this device's
+    // context, even though the programs themselves come from the shared variant cache.
+    struct ocio_variant
+    {
+        spl::shared_ptr<shader>  program;
+        std::vector<GLuint>      texture_ids;
+        std::vector<std::string> sampler_names;
+        std::vector<int>         sampler_dims;
+        bool                     failed = false; ///< do not retry a broken transform every frame
+    };
+    std::map<std::string, ocio_variant> ocio_variants_;
+
+    /// First texture unit available to a generated transform. The mixer's own samplers
+    /// occupy 0..blend_mask_tex; anything OCIO needs is bound above them.
+    static constexpr int OCIO_FIRST_TEXTURE_UNIT = static_cast<int>(texture_id::blend_mask_tex) + 1;
+
     explicit impl(const spl::shared_ptr<device>& ogl)
         : ogl_(ogl)
         , shader_(ogl_->dispatch_sync([&] { return get_image_shader(ogl); }))
+        , base_program_(shader_)
     {
         ogl_->dispatch_sync([&] {
             GL(glGenVertexArrays(1, &vao_));
@@ -189,6 +216,88 @@ struct image_kernel::impl
             if (blend_mask_tex_id_)
                 GL(glDeleteTextures(1, &blend_mask_tex_id_));
         });
+    }
+
+    /// The compiled+uploaded variant for this item's OCIO transform, or nullptr when the
+    /// item does not use one (or the transform could not be built).
+    ///
+    /// Compiles on a cache miss, which means on the frame path. That is a known cost and it
+    /// is logged: the first frame after a MIXER OCIO command pays a program build, tens to
+    /// hundreds of milliseconds. Every later frame is a map lookup. Pre-warming a channel's
+    /// transforms at configuration time is the proper fix and is not done here -- see
+    /// docs/OCIO_INTEGRATION_STUDY.md section 8.7.
+    const ocio_variant* select_ocio_variant(const draw_params& params)
+    {
+        const auto& o = params.transforms.image_transform.ocio;
+        if (!o.enable || o.source_space.empty())
+            return nullptr;
+
+        // Ask OCIO for the transform. This is a cache hit inside OCIO after the AMCP command
+        // already built it once for validation, so it costs a lookup rather than a rebuild --
+        // and it is what yields the cache ID that keys everything below.
+        caspar::accelerator::ocio::gpu_shader generated;
+        if (!caspar::accelerator::ocio::build_input_transform(o.source_space, generated))
+            return nullptr;
+
+        auto it = ocio_variants_.find(generated.cache_id);
+        if (it != ocio_variants_.end())
+            return it->second.failed ? nullptr : &it->second;
+
+        CASPAR_LOG(warning) << L"[ogl_kernel] compiling an OCIO program on the frame path for '"
+                            << u16(o.source_space) << L"'. Expect one dropped frame; every later frame "
+                            << L"is a cache hit.";
+
+        ocio_variant v{base_program_};
+        try {
+            shader_variant sv;
+            sv.id       = generated.cache_id;
+            sv.prologue = generated.source;
+            // ⚠ The swizzle is the point. This shader carries BGR, the generated function
+            // expects true RGB, exactly as the matrix multiply it replaces uses col.bgr.
+            // Without it every grey is still correct and the hue wheel is mirrored.
+            sv.transform_call =
+                "col.bgr = " + generated.function_name + "(vec4(col.bgr, col.a)).rgb;";
+
+            v.program = spl::make_shared_ptr(get_image_shader(ogl_, sv));
+
+            // Upload whatever LUTs the generated source samples. Camera log spaces need none;
+            // display-referred and ADX spaces need one 2D image holding a 1D LUT.
+            for (const auto& t : generated.textures) {
+                GLuint id = 0;
+                if (t.dimensions == 3) {
+                    GL(glCreateTextures(GL_TEXTURE_3D, 1, &id));
+                    GL(glTextureStorage3D(id, 1, GL_RGB32F, t.edge_len, t.edge_len, t.edge_len));
+                    GL(glTextureSubImage3D(id, 0, 0, 0, 0, t.edge_len, t.edge_len, t.edge_len,
+                                           GL_RGB, GL_FLOAT, t.values.data()));
+                    GL(glTextureParameteri(id, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE));
+                } else {
+                    const auto internal = t.channels == 1 ? GL_R32F : GL_RGB32F;
+                    const auto format   = t.channels == 1 ? GL_RED : GL_RGB;
+                    GL(glCreateTextures(GL_TEXTURE_2D, 1, &id));
+                    GL(glTextureStorage2D(id, 1, internal, t.width, std::max(1, t.height)));
+                    GL(glTextureSubImage2D(id, 0, 0, 0, t.width, std::max(1, t.height), format,
+                                           GL_FLOAT, t.values.data()));
+                }
+                const auto filter = t.interpolate_linear ? GL_LINEAR : GL_NEAREST;
+                GL(glTextureParameteri(id, GL_TEXTURE_MIN_FILTER, filter));
+                GL(glTextureParameteri(id, GL_TEXTURE_MAG_FILTER, filter));
+                GL(glTextureParameteri(id, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE));
+                GL(glTextureParameteri(id, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE));
+
+                v.texture_ids.push_back(id);
+                v.sampler_names.push_back(t.sampler_name);
+                v.sampler_dims.push_back(t.dimensions);
+            }
+        } catch (...) {
+            // Remember the failure so a broken transform costs one compile, not one per
+            // frame. The layer falls back to the base program, which leaves it untransformed
+            // -- visibly wrong, and preferable to a stall on every tick.
+            CASPAR_LOG_CURRENT_EXCEPTION();
+            v.failed = true;
+        }
+
+        auto [pos, inserted] = ocio_variants_.emplace(generated.cache_id, std::move(v));
+        return pos->second.failed ? nullptr : &pos->second;
     }
 
     void draw(draw_params params)
@@ -321,7 +430,25 @@ struct image_kernel::impl
         const auto  luma_coeff              = luma_coefficients[cs_idx];
 
         // Setup shader
+        // Rebind shader_ to the program this item needs before any uniform is set. Safe as
+        // plain assignment because every draw happens on the GL thread, one item at a time;
+        // it avoids threading a program argument through the ~100 uniform sets below.
+        const auto* ocio = select_ocio_variant(params);
+        if (ocio)
+            shader_ = ocio->program;
+        else
+            shader_ = base_program_;
+
         shader_->use();
+
+        // Bind whatever LUTs the generated transform samples, above the mixer's own units.
+        if (ocio) {
+            for (size_t i = 0; i < ocio->texture_ids.size(); ++i) {
+                const int unit = OCIO_FIRST_TEXTURE_UNIT + static_cast<int>(i);
+                GL(glBindTextureUnit(unit, ocio->texture_ids[i]));
+                shader_->set(ocio->sampler_names[i], unit);
+            }
+        }
 
         shader_->set("is_straight_alpha", params.pix_desc.is_straight_alpha);
         shader_->set("plane[0]", texture_id::plane0);
@@ -500,8 +627,61 @@ struct image_kernel::impl
             // ACEScg -> sgamut3.cine (computed inverse)
             { 1.4235761f, -0.3158537f, -0.1077233f, -0.0682645f,  1.1859178f, -0.1176531f,  0.0041827f, -0.0110575f,  1.0068749f}
         };
+        // Enum -> shader index mappings, shared by the OCIO branch and the auto branch
+        // below. Hoisted rather than duplicated: two copies of the same mapping drift.
+            // Map core enums to shader indices.
+        // Gamut indices for the k_direct matrix (0=bt709, 1=bt2020, 2=p3_d65, 3=p3_dci, 4=adobe_rgb)
+        auto gamut_index = [](core::color_space cs) -> int {
+            switch (cs) {
+                case core::color_space::bt2020:    return 1;
+                case core::color_space::p3_d65:   return 2;
+                case core::color_space::p3_dci:   return 3;
+                case core::color_space::adobe_rgb:return 4;
+                default:                          return 0; // bt601/bt709 → index 0
+            }
+        };
+        // EOTF indices: 1=srgb,2=rec709,3=pq,4=hlg,5=logc3,6=slog3,7=linear,8=gamma24,9=gamma26
+        auto eotf_index = [](core::color_transfer ct) -> int {
+            switch (ct) {
+                case core::color_transfer::pq:      return 3;
+                case core::color_transfer::hlg:     return 4;
+                case core::color_transfer::linear:  return 7;
+                case core::color_transfer::gamma24: return 8;
+                case core::color_transfer::gamma26: return 9;
+                default:                            return 2; // sdr → rec709 (BT.1886)
+            }
+        };
+        // OETF indices: 1=srgb,2=rec709,3=pq,4=hlg,5=linear,6=gamma24,7=gamma26
+        auto oetf_index = [](core::color_transfer ct) -> int {
+            switch (ct) {
+                case core::color_transfer::pq:      return 3;
+                case core::color_transfer::hlg:     return 4;
+                case core::color_transfer::linear:  return 5;
+                case core::color_transfer::gamma24: return 6;
+                case core::color_transfer::gamma26: return 7;
+                default:                            return 2; // sdr → rec709 (BT.1886)
+            }
+        };
+
         const auto& cg = transforms.image_transform.color_grade;
-        if (cg.enable) {
+        if (ocio) {
+            // OCIO produced the working-space pixel, so the shader's own input conversion is
+            // off. The output half still has to run, driven by the channel's target: without
+            // it the layer would reach the render target in scene-linear ACEScg with no OETF
+            // and the wrong primaries.
+            shader_->set("do_input_convert",  false);
+            shader_->set("do_output_convert", true);
+            shader_->set("output_transfer",   oetf_index(params.target_color_transfer));
+            shader_->set("tone_mapping_op",   params.auto_tone_map);
+            shader_->set("display_peak_luminance", params.display_peak_luminance);
+            shader_->set("exposure",          1.0f);
+            shader_->set("luminance_scale",   1.0f);
+            // Not available on this path: exposure and gamut compression live in the
+            // color_grade struct inside the input block OCIO replaces. Neither belongs to an
+            // input transform's job, but the gap is real and documented.
+            shader_->set("gamut_compress_enable", false);
+            shader_->set_matrix3("working_to_output", k_to_output[gamut_index(params.target_color_space)]);
+        } else if (cg.enable) {
             int ig = std::min(std::max(cg.input_gamut,  0), 6);
             int og = std::min(std::max(cg.output_gamut, 0), 6);
             // MIXER COLORSPACE owns both halves of the conversion.
@@ -574,39 +754,6 @@ struct image_kernel::impl
                     << L" fmt=" << static_cast<int>(params.pix_desc.format);
             }
             // Auto color conversion: source differs from channel output.
-            // Map core enums to shader indices.
-            // Gamut indices for the k_direct matrix (0=bt709, 1=bt2020, 2=p3_d65, 3=p3_dci, 4=adobe_rgb)
-            auto gamut_index = [](core::color_space cs) -> int {
-                switch (cs) {
-                    case core::color_space::bt2020:    return 1;
-                    case core::color_space::p3_d65:   return 2;
-                    case core::color_space::p3_dci:   return 3;
-                    case core::color_space::adobe_rgb:return 4;
-                    default:                          return 0; // bt601/bt709 → index 0
-                }
-            };
-            // EOTF indices: 1=srgb,2=rec709,3=pq,4=hlg,5=logc3,6=slog3,7=linear,8=gamma24,9=gamma26
-            auto eotf_index = [](core::color_transfer ct) -> int {
-                switch (ct) {
-                    case core::color_transfer::pq:      return 3;
-                    case core::color_transfer::hlg:     return 4;
-                    case core::color_transfer::linear:  return 7;
-                    case core::color_transfer::gamma24: return 8;
-                    case core::color_transfer::gamma26: return 9;
-                    default:                            return 2; // sdr → rec709 (BT.1886)
-                }
-            };
-            // OETF indices: 1=srgb,2=rec709,3=pq,4=hlg,5=linear,6=gamma24,7=gamma26
-            auto oetf_index = [](core::color_transfer ct) -> int {
-                switch (ct) {
-                    case core::color_transfer::pq:      return 3;
-                    case core::color_transfer::hlg:     return 4;
-                    case core::color_transfer::linear:  return 5;
-                    case core::color_transfer::gamma24: return 6;
-                    case core::color_transfer::gamma26: return 7;
-                    default:                            return 2; // sdr → rec709 (BT.1886)
-                }
-            };
             int ig = gamut_index(params.pix_desc.color_space);
             int og = gamut_index(params.target_color_space);
             // Skip if the mapped indices are identical (e.g. bt601 source on bt709 channel)

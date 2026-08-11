@@ -1686,6 +1686,11 @@ vec4 shape_compute_fill(vec2 uv)
     return mix(shape_color1, shape_color2, t);
 }
 
+// A generated colour transform's declarations are spliced here. Empty for the base program,
+// which is why the base program is byte-identical to what the build embeds -- see
+// image_shader.cpp's build_fragment_source().
+//__CASPAR_OCIO_DECLARATIONS__
+
 void main()
 {
     vec2 base_uv = TexCoord.st / TexCoord.q;
@@ -1747,6 +1752,16 @@ void main()
         // Applied here, at the start of the grading chain, matching DaVinci Resolve.
         col.rgb *= exposure;
     }
+
+    // A generated colour transform's call is spliced here, replacing the block above rather
+    // than following it: MIXER OCIO and MIXER COLORSPACE are mutually exclusive, so
+    // do_input_convert is false whenever this is non-empty.
+    //
+    // ⚠ The splice MUST swizzle. This shader carries the pixel in BGR order -- col.r holds
+    // blue -- while a generated transform expects true RGB, exactly as the matrix multiply
+    // above uses col.bgr. Omitting it mirrors the hue wheel, and every grey passes, so a
+    // ramp will not catch it.
+    //__CASPAR_OCIO_TRANSFORM__
 
     // ASC CDL (Slope/Offset/Power)
     if (cdl_enable) {
