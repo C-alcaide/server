@@ -1,6 +1,10 @@
 # OpenColorIO in CasparVP — Design Study
 
-**Status: study, not a commitment. Nothing here is implemented.** Written 2026-08-11.
+**Status: study, and now partly implemented.** Written 2026-08-11.
+
+> **Implementation in progress on branch `feature/ocio-mixer`.** The OGL input transform is
+> done and verified; Vulkan is 4 batches of 6 through. Current state, resume point and the
+> list of what is compiled-but-never-run: [`OCIO_HANDOFF_2026-08-11.md`](OCIO_HANDOFF_2026-08-11.md).
 
 This document exists because OCIO was attempted once, on branch `origin/feature/ocio-support`,
 and abandoned. It first establishes *why* that attempt could not have worked — the reasons
