@@ -34,6 +34,7 @@
 #include <common/bit_depth.h>
 #include <common/future.h>
 #include <common/log.h>
+#include <common/render_format.h>
 
 #include <core/frame/frame.h>
 #include <core/frame/frame_transform.h>
@@ -155,6 +156,12 @@ class image_renderer
     common::bit_depth       depth_;
     std::atomic<bool>       cpu_readback_needed_{true};
 
+    // The numeric format of every intermediate this renderer composites into. Distinct
+    // from depth_, which stays the channel's *output* depth and is what consumers are told
+    // (see A0.2's resolve pass): the float working space lives inside the mixer only.
+    // unorm keeps every existing configuration bit-identical.
+    common::render_format render_format_ = common::render_format::unorm;
+
     // Still-frame cache: skip GPU composition when inputs are unchanged.
     render_fingerprint                            prev_fingerprint_;
     std::shared_ptr<core::texture>                cached_texture_;
@@ -193,13 +200,22 @@ class image_renderer
         cached_cpu_ = {};
     }
 
-    explicit image_renderer(const spl::shared_ptr<device>& ogl, const size_t max_frame_size, common::bit_depth depth)
+    explicit image_renderer(const spl::shared_ptr<device>& ogl,
+                            const size_t                   max_frame_size,
+                            common::bit_depth              depth,
+                            common::render_format          render_format = common::render_format::unorm)
         : ogl_(ogl)
         , kernel_(ogl_)
         , max_frame_size_(max_frame_size)
         , depth_(depth)
+        , render_format_(render_format)
     {
+        if (render_format_ != common::render_format::unorm) {
+            CASPAR_LOG(info) << L"[ogl_renderer] compositing into fp16 render targets";
+        }
     }
+
+    common::render_format render_format() const { return render_format_; }
 
     void set_cpu_readback_needed(bool needed)
     {
@@ -256,12 +272,14 @@ class image_renderer
         auto f = std::move(
             ogl_->dispatch_async([=, layers = std::move(layers)]() mutable
                                  -> std::tuple<std::shared_future<array<const std::uint8_t>>, std::shared_ptr<core::texture>> {
-                auto target_texture = ogl_->create_texture(format_desc.width, format_desc.height, 4, depth_);
+                auto target_texture =
+                    ogl_->create_texture(format_desc.width, format_desc.height, 4, depth_, true, render_format_);
                 draw(target_texture, std::move(layers), format_desc);
 
                 // Channel-master LED-wall calibration LUT (final full-screen pass).
                 if (cal_lut && !cal_bypass && cal_lut->size > 0) {
-                    auto cal_texture = ogl_->create_texture(format_desc.width, format_desc.height, 4, depth_);
+                    auto cal_texture =
+                        ogl_->create_texture(format_desc.width, format_desc.height, 4, depth_, true, render_format_);
                     apply_calibration_lut(target_texture, cal_texture, format_desc, cal_lut, cal_strength);
                     target_texture = cal_texture;
                 }
@@ -367,7 +385,8 @@ class image_renderer
         std::shared_ptr<texture> local_mix_texture;
 
         if (layer.blend_mode != core::blend_mode::normal) {
-            auto layer_texture = ogl_->create_texture(target_texture->width(), target_texture->height(), 4, depth_);
+            auto layer_texture = ogl_->create_texture(
+                target_texture->width(), target_texture->height(), 4, depth_, true, render_format_);
 
             for (auto& item : layer.items)
                 draw(layer_texture,
@@ -431,7 +450,8 @@ class image_renderer
                 .is_key) { // A key means we will use it for the next non-key item as a mask
             local_key_texture =
                 local_key_texture ? local_key_texture
-                                  : ogl_->create_texture(target_texture->width(), target_texture->height(), 1, depth_);
+                                  : ogl_->create_texture(
+                                        target_texture->width(), target_texture->height(), 1, depth_, true, render_format_);
 
             draw_params.background = local_key_texture;
             draw_params.local_key  = nullptr;
@@ -442,7 +462,8 @@ class image_renderer
                        .is_mix) { // A mix means precomp the items to a texture, before drawing to the channel
             local_mix_texture =
                 local_mix_texture ? local_mix_texture
-                                  : ogl_->create_texture(target_texture->width(), target_texture->height(), 4, depth_);
+                                  : ogl_->create_texture(
+                                        target_texture->width(), target_texture->height(), 4, depth_, true, render_format_);
 
             draw_params.background = local_mix_texture;
             draw_params.local_key  = std::move(local_key_texture); // Use and reset the key
@@ -550,10 +571,14 @@ struct image_mixer::impl
     double aspect_ratio_ = 1.0;
 
   public:
-    impl(const spl::shared_ptr<device>& ogl, const int channel_id, const size_t max_frame_size, common::bit_depth depth)
+    impl(const spl::shared_ptr<device>& ogl,
+         const int                      channel_id,
+         const size_t                   max_frame_size,
+         common::bit_depth              depth,
+         common::render_format          render_format)
         : ogl_(ogl)
         , channel_id_(channel_id)
-        , renderer_(ogl, max_frame_size, depth)
+        , renderer_(ogl, max_frame_size, depth, render_format)
         , previz_renderer_(ogl)
         , transform_stack_(1)
     {
@@ -788,7 +813,15 @@ struct image_mixer::impl
                         [this, store, format_desc]() mutable
                         -> std::tuple<std::shared_future<array<const std::uint8_t>>, std::shared_ptr<core::texture>> {
                             auto target_texture =
-                                ogl_->create_texture(format_desc.width, format_desc.height, 4, renderer_.depth());
+                                ogl_->create_texture(format_desc.width,
+                                                     format_desc.height,
+                                                     4,
+                                                     renderer_.depth(),
+                                                     true,
+                                                     // Previz bypasses the 2D composite and is read back
+                                                     // directly, so it has no resolve pass to convert a
+                                                     // float target. Keep it unorm.
+                                                     common::render_format::unorm);
                             previz_renderer_.render(target_texture, *store, format_desc.width, format_desc.height);
                             return {ogl_->copy_async(target_texture).share(), target_texture};
                         });
@@ -882,8 +915,9 @@ struct image_mixer::impl
 image_mixer::image_mixer(const spl::shared_ptr<device>& ogl,
                          const int                      channel_id,
                          const size_t                   max_frame_size,
-                         common::bit_depth              depth)
-    : impl_(std::make_unique<impl>(ogl, channel_id, max_frame_size, depth))
+                         common::bit_depth              depth,
+                         common::render_format          render_format)
+    : impl_(std::make_unique<impl>(ogl, channel_id, max_frame_size, depth, render_format))
 {
 }
 image_mixer::~image_mixer() {}

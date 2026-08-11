@@ -24,6 +24,7 @@
 #include <accelerator/accelerator.h>
 #include <common/array.h>
 #include <common/bit_depth.h>
+#include <common/render_format.h>
 
 #include <functional>
 #include <future>
@@ -46,7 +47,18 @@ class device final
 
     device& operator=(const device&) = delete;
 
-    std::shared_ptr<class texture> create_texture(int width, int height, int stride, common::bit_depth depth, bool clear = true);
+    /// `format` selects unorm (the default, and what every input texture must use) or
+    /// fp16 for a render target on a channel with a linear working space. It participates
+    /// in the texture pool key, because GL fixes the internal format at allocation.
+    ///
+    /// It is deliberately the last parameter: `clear` keeps its position so the existing
+    /// callers that pass it positionally are untouched.
+    std::shared_ptr<class texture> create_texture(int                   width,
+                                                  int                   height,
+                                                  int                   stride,
+                                                  common::bit_depth     depth,
+                                                  bool                  clear  = true,
+                                                  common::render_format format = common::render_format::unorm);
     array<uint8_t>                 create_array(int size);
 
     std::future<std::shared_ptr<class texture>>

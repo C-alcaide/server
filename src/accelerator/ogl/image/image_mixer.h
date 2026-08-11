@@ -24,6 +24,7 @@
 #include <common/array.h>
 #include <common/bit_depth.h>
 #include <common/memory.h>
+#include <common/render_format.h>
 
 #include <core/frame/frame.h>
 #include <core/frame/pixel_format.h>
@@ -41,10 +42,16 @@ class channel_texture_store;
 class image_mixer final : public core::image_mixer
 {
   public:
+    /// `render_format` is the numeric format of the mixer's *internal* render targets, and
+    /// is independent of `depth`, which stays the channel's output depth. unorm is
+    /// bit-identical to the behaviour before this parameter existed; fp16 buys range
+    /// (negatives and values above 1.0) for a linear working space. See
+    /// common/render_format.h and docs/OCIO_INTEGRATION_STUDY.md section 4.3.
     image_mixer(const spl::shared_ptr<class device>& ogl,
                 int                                  channel_id,
                 const size_t                         max_frame_size,
-                common::bit_depth                    depth);
+                common::bit_depth                    depth,
+                common::render_format                render_format = common::render_format::unorm);
     image_mixer(const image_mixer&) = delete;
 
     ~image_mixer();

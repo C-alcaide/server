@@ -63,7 +63,8 @@ struct device::impl : public std::enable_shared_from_this<impl>
 
     std::unique_ptr<device_context> context_;
 
-    std::array<std::array<tbb::concurrent_unordered_map<size_t, texture_queue_t>, 4>, 2> device_pools_;
+    // Outer dimension: 0 = unorm8, 1 = unorm16, 2 = fp16. See create_texture.
+    std::array<std::array<tbb::concurrent_unordered_map<size_t, texture_queue_t>, 4>, 3> device_pools_;
     std::array<tbb::concurrent_unordered_map<size_t, buffer_queue_t>, 2>                 host_pools_;
 
     GLuint fbo_;
@@ -199,19 +200,27 @@ struct device::impl : public std::enable_shared_from_this<impl>
 
     std::wstring version() { return version_; }
 
-    std::shared_ptr<texture> create_texture(int width, int height, int stride, common::bit_depth depth, bool clear)
+    std::shared_ptr<texture>
+    create_texture(int width, int height, int stride, common::bit_depth depth, bool clear, common::render_format format)
     {
         CASPAR_VERIFY(stride > 0 && stride < 5);
         CASPAR_VERIFY(width > 0 && height > 0);
 
-        auto depth_pool_index = depth == common::bit_depth::bit8 ? 0 : 1;
+        // The pool index must include the render format, not just the depth. GL fixes a
+        // texture's internal format at glTextureStorage2D and it cannot be changed
+        // afterwards, so pooling fp16 and unorm16 textures together would hand an fp16
+        // texture back as a unorm16 one -- set_depth() would agree and the storage would
+        // silently disagree. Rows: 0 = unorm8, 1 = unorm16, 2 = fp16.
+        const auto depth_pool_index = format == common::render_format::fp16
+                                          ? 2
+                                          : (depth == common::bit_depth::bit8 ? 0 : 1);
 
         // TODO (perf) Shared pool.
         auto pool = &device_pools_[depth_pool_index][stride - 1][(width << 16 & 0xFFFF0000) | (height & 0x0000FFFF)];
 
         std::shared_ptr<texture> tex;
         if (!pool->try_pop(tex)) {
-            tex = std::make_shared<texture>(width, height, stride, depth);
+            tex = std::make_shared<texture>(width, height, stride, depth, format);
         }
         tex->set_depth(depth);
 
@@ -272,7 +281,8 @@ struct device::impl : public std::enable_shared_from_this<impl>
                 std::memcpy(buf->data(), source.data(), source.size());
             }
 
-            auto tex = create_texture(width, height, stride, depth, false);
+            // Frame upload: always unorm, the source is an integer AVFrame.
+            auto tex = create_texture(width, height, stride, depth, false, common::render_format::unorm);
             tex->copy_from(*buf);
             // TODO (perf) save tex on source
             return tex;
@@ -329,7 +339,7 @@ struct device::impl : public std::enable_shared_from_this<impl>
             int                      cur_h  = source_height;
 
             for (auto [nw, nh] : chain) {
-                auto dst = create_texture(nw, nh, 4, common::bit_depth::bit8, false);
+                auto dst = create_texture(nw, nh, 4, common::bit_depth::bit8, false, common::render_format::unorm);
                 GL(glNamedFramebufferTexture(reduce_read_fbo_, GL_COLOR_ATTACHMENT0, cur_id, 0));
                 GL(glNamedFramebufferTexture(reduce_draw_fbo_, GL_COLOR_ATTACHMENT0, dst->id(), 0));
                 GL(glNamedFramebufferReadBuffer(reduce_read_fbo_, GL_COLOR_ATTACHMENT0));
@@ -538,9 +548,14 @@ device::device()
 {
 }
 device::~device() {}
-std::shared_ptr<texture> device::create_texture(int width, int height, int stride, common::bit_depth depth, bool clear)
+std::shared_ptr<texture> device::create_texture(int                   width,
+                                                int                   height,
+                                                int                   stride,
+                                                common::bit_depth     depth,
+                                                bool                  clear,
+                                                common::render_format format)
 {
-    auto tex = impl_->create_texture(width, height, stride, depth, clear);
+    auto tex = impl_->create_texture(width, height, stride, depth, clear, format);
     tex->set_device(shared_from_this());
     return tex;
 }

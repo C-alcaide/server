@@ -22,6 +22,7 @@
 #pragma once
 
 #include <common/bit_depth.h>
+#include <common/render_format.h>
 #include <core/frame/frame.h>
 #include <cstdint>
 #include <memory>
@@ -34,7 +35,13 @@ class device;
 class texture final : public core::texture
 {
   public:
-    texture(int width, int height, int stride, common::bit_depth depth = common::bit_depth::bit8);
+    texture(int               width,
+            int               height,
+            int               stride,
+            common::bit_depth depth  = common::bit_depth::bit8,
+            /// Render targets on a channel with a linear working space pass fp16 here.
+            /// Input textures, which are fed from integer AVFrames, must stay unorm.
+            common::render_format format = common::render_format::unorm);
     texture(const texture&) = delete;
     texture(texture&& other);
     ~texture();
@@ -59,8 +66,14 @@ class texture final : public core::texture
     int               stride() const;
     common::bit_depth depth() const;
     void              set_depth(common::bit_depth depth);
-    int               size() const;
-    int               id() const;
+
+    /// The numeric format this texture's storage was created with. Immutable: GL fixes the
+    /// internal format at glTextureStorage2D, which is why the device's texture pool keys
+    /// on it rather than calling a setter (see device::create_texture).
+    common::render_format format() const;
+
+    int size() const;
+    int id() const;
 
     /// Enable on-demand GPU readback for PRINT RAW.
     /// Called automatically by ogl::device::create_texture().

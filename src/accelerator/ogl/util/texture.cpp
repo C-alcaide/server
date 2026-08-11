@@ -31,39 +31,59 @@
 
 namespace caspar { namespace accelerator { namespace ogl {
 
-static GLenum FORMAT[]             = {0, GL_RED, GL_RG, GL_BGR, GL_BGRA};
-static GLenum INTERNAL_FORMAT[][5] = {{0, GL_R8, GL_RG8, GL_RGB8, GL_RGBA8}, {0, GL_R16, GL_RG16, GL_RGB16, GL_RGBA16}};
-static GLenum TYPE[][5] = {{0, GL_UNSIGNED_BYTE, GL_UNSIGNED_BYTE, GL_UNSIGNED_BYTE, GL_UNSIGNED_INT_8_8_8_8_REV},
-                           {0, GL_UNSIGNED_SHORT, GL_UNSIGNED_SHORT, GL_UNSIGNED_SHORT, GL_UNSIGNED_SHORT}};
+static GLenum FORMAT[] = {0, GL_RED, GL_RG, GL_BGR, GL_BGRA};
+
+// Row 0 is unorm8, row 1 unorm16, row 2 fp16. The fp16 row is selected by
+// render_format rather than by bit_depth -- see common/render_format.h for why the two
+// are separate concepts. External format stays GL_BGRA for stride 4, exactly as the
+// unorm16 row does, so channel order is unchanged on the float path.
+static GLenum INTERNAL_FORMAT[][5] = {{0, GL_R8, GL_RG8, GL_RGB8, GL_RGBA8},
+                                      {0, GL_R16, GL_RG16, GL_RGB16, GL_RGBA16},
+                                      {0, GL_R16F, GL_RG16F, GL_RGB16F, GL_RGBA16F}};
+static GLenum TYPE[][5]            = {{0, GL_UNSIGNED_BYTE, GL_UNSIGNED_BYTE, GL_UNSIGNED_BYTE, GL_UNSIGNED_INT_8_8_8_8_REV},
+                           {0, GL_UNSIGNED_SHORT, GL_UNSIGNED_SHORT, GL_UNSIGNED_SHORT, GL_UNSIGNED_SHORT},
+                           {0, GL_HALF_FLOAT, GL_HALF_FLOAT, GL_HALF_FLOAT, GL_HALF_FLOAT}};
+
+/// Which row of INTERNAL_FORMAT/TYPE a (depth, format) pair selects.
+static int format_row(common::bit_depth depth, common::render_format fmt)
+{
+    if (fmt == common::render_format::fp16)
+        return 2;
+    return depth == common::bit_depth::bit8 ? 0 : 1;
+}
 
 struct texture::impl
 {
-    GLuint            id_     = 0;
-    GLsizei           width_  = 0;
-    GLsizei           height_ = 0;
-    GLsizei           stride_ = 0;
-    GLsizei           size_   = 0;
-    common::bit_depth depth_;
+    GLuint                id_     = 0;
+    GLsizei               width_  = 0;
+    GLsizei               height_ = 0;
+    GLsizei               stride_ = 0;
+    GLsizei               size_   = 0;
+    common::bit_depth     depth_;
+    common::render_format format_;
     std::weak_ptr<device> device_;
 
     impl(const impl&)            = delete;
     impl& operator=(const impl&) = delete;
 
   public:
-    impl(int width, int height, int stride, common::bit_depth depth)
+    impl(int width, int height, int stride, common::bit_depth depth, common::render_format format)
         : width_(width)
         , height_(height)
         , stride_(stride)
         , depth_(depth)
-        , size_(width * height * stride * (depth == common::bit_depth::bit8 ? 1 : 2))
+        , format_(format)
+        // fp16 is two bytes per component, the same as unorm16, so the readback size is
+        // unchanged -- what differs is the interpretation, not the extent.
+        , size_(width * height * stride *
+                ((depth == common::bit_depth::bit8 && format == common::render_format::unorm) ? 1 : 2))
     {
         GL(glCreateTextures(GL_TEXTURE_2D, 1, &id_));
         GL(glTextureParameteri(id_, GL_TEXTURE_MIN_FILTER, GL_LINEAR));
         GL(glTextureParameteri(id_, GL_TEXTURE_MAG_FILTER, GL_LINEAR));
         GL(glTextureParameteri(id_, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE));
         GL(glTextureParameteri(id_, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE));
-        GL(glTextureStorage2D(
-            id_, 1, INTERNAL_FORMAT[depth_ == common::bit_depth::bit8 ? 0 : 1][stride_], width_, height_));
+        GL(glTextureStorage2D(id_, 1, INTERNAL_FORMAT[format_row(depth_, format_)][stride_], width_, height_));
     }
 
     ~impl() { glDeleteTextures(1, &id_); }
@@ -82,7 +102,7 @@ struct texture::impl
 
     void clear()
     {
-        GL(glClearTexImage(id_, 0, FORMAT[stride_], TYPE[depth_ == common::bit_depth::bit8 ? 0 : 1][stride_], nullptr));
+        GL(glClearTexImage(id_, 0, FORMAT[stride_], TYPE[format_row(depth_, format_)][stride_], nullptr));
     }
 
 #ifdef WIN32
@@ -110,7 +130,7 @@ struct texture::impl
                                width_,
                                height_,
                                FORMAT[stride_],
-                               TYPE[depth_ == common::bit_depth::bit8 ? 0 : 1][stride_],
+                               TYPE[format_row(depth_, format_)][stride_],
                                nullptr));
 
         src.unbind();
@@ -120,13 +140,13 @@ struct texture::impl
     {
         dst.bind();
         GL(glGetTextureImage(
-            id_, 0, FORMAT[stride_], TYPE[depth_ == common::bit_depth::bit8 ? 0 : 1][stride_], size_, nullptr));
+            id_, 0, FORMAT[stride_], TYPE[format_row(depth_, format_)][stride_], size_, nullptr));
         dst.unbind();
     }
 };
 
-texture::texture(int width, int height, int stride, common::bit_depth depth)
-    : impl_(new impl(width, height, stride, depth))
+texture::texture(int width, int height, int stride, common::bit_depth depth, common::render_format format)
+    : impl_(new impl(width, height, stride, depth, format))
 {
 }
 texture::texture(texture&& other)
@@ -153,6 +173,7 @@ int               texture::height() const { return impl_->height_; }
 int               texture::stride() const { return impl_->stride_; }
 common::bit_depth texture::depth() const { return impl_->depth_; }
 void              texture::set_depth(common::bit_depth depth) { impl_->depth_ = depth; }
+common::render_format texture::format() const { return impl_->format_; }
 int               texture::size() const { return impl_->size_; }
 int               texture::id() const { return impl_->id_; }
 
@@ -170,7 +191,7 @@ std::vector<std::uint8_t> texture::read_pixels() const
 
     const GLuint tex_id    = impl_->id_;
     const int    s         = impl_->stride_;
-    const int    depth_idx = impl_->depth_ == common::bit_depth::bit8 ? 0 : 1;
+    const int    depth_idx = format_row(impl_->depth_, impl_->format_);
     const int    total     = impl_->size_;
 
     std::vector<std::uint8_t> result(total);
