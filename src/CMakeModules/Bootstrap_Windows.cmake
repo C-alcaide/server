@@ -232,7 +232,9 @@ if (ENABLE_OCIO)
 	set(OCIO_INCLUDE_PATH "${INSTALL_DIR}/include")
 	link_directories("${INSTALL_DIR}/lib")
 	casparcg_add_runtime_dependency("${INSTALL_DIR}/bin/OpenColorIO_2_5.dll")
-	add_definitions(-DCASPAR_ENABLE_OCIO)
+	# CASPAR_ENABLE_OCIO is set on the accelerator target rather than globally: only
+	# accelerator/ocio/ocio_config.cpp includes OCIO headers, and its facade is std-only,
+	# so no other target needs either the macro or the include path.
 endif ()
 
 # OpenFX (host) — used by the ofx module to load OFX plug-ins.

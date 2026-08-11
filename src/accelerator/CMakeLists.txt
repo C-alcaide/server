@@ -16,6 +16,8 @@ set(SOURCES
 	ogl/util/matrix.cpp
 	ogl/util/transforms.cpp
 
+	ocio/ocio_config.cpp
+
 	accelerator.cpp
 )
 set(HEADERS
@@ -38,6 +40,8 @@ set(HEADERS
 	ogl_image_fragment.h
 	ogl_previz_vertex.h
 	ogl_previz_fragment.h
+
+	ocio/ocio_config.h
 
 	accelerator.h
 	StdAfx.h
@@ -140,6 +144,9 @@ ENDIF()
 IF(ENABLE_OCIO)
 	target_include_directories(accelerator PRIVATE ${OCIO_INCLUDE_PATH})
 	target_link_libraries(accelerator PRIVATE OpenColorIO)
+	# accelerator/ocio/ocio_config.cpp is the only translation unit that includes OCIO
+	# headers; its facade is std-only, so nothing downstream needs the include path.
+	target_compile_definitions(accelerator PRIVATE CASPAR_ENABLE_OCIO)
 ENDIF()
 
 source_group(sources ./.*)

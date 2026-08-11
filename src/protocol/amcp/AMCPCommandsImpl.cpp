@@ -40,6 +40,7 @@
 #include <common/filesystem.h>
 #include <common/future.h>
 #include <common/log.h>
+#include <accelerator/ocio/ocio_config.h>
 #include <common/os/filesystem.h>
 #include <common/param.h>
 
@@ -3582,6 +3583,77 @@ std::wstring info_paths_command(command_context& ctx)
     return replyString.str();
 }
 
+// INFO OCIO               -> whether OCIO is available, its version, the loaded config URI
+// INFO OCIO COLORSPACES   -> every colour space name in the loaded config
+// INFO OCIO DISPLAYS      -> every display, with the views available for each
+//
+// One command branching on its argument rather than three registered commands, because
+// AMCP's dispatcher resolves exactly one level of subcommand: find_command() tries
+// `name + " " + tokens.front()` and nothing deeper, so "INFO OCIO COLORSPACES" registered
+// as a name is unreachable -- it matches "INFO OCIO" with COLORSPACES arriving as a
+// parameter. Registering it anyway silently does nothing, which is how this was first
+// written and only testing caught it.
+//
+// These exist so a client can populate its controls from the server rather than from a
+// hardcoded list. The operator-facing surface goes from ~20 documented enums to hundreds of
+// config-defined strings, and the mitigation is that the operator never types one -- which
+// only holds if the client can discover what THIS server actually has. Without them, a
+// client's lists drift from the server's config and a show file silently references a
+// colour space that no longer exists.
+//
+// The version is reported alongside the config URI on purpose: together they determine what
+// a colour space name means, so a client can warn when they are not what a stored look was
+// approved against.
+std::wstring info_ocio_command(command_context& ctx)
+{
+    const auto what =
+        ctx.parameters.empty() ? std::wstring() : boost::to_upper_copy(ctx.parameters.at(0));
+
+    boost::property_tree::wptree info;
+    std::wstring                 reply_name = L"INFO OCIO";
+
+    if (what.empty()) {
+        const bool have = accelerator::ocio::available();
+        info.add(L"ocio.available", have ? L"true" : L"false");
+
+        if (have) {
+            info.add(L"ocio.version", u16(accelerator::ocio::version()));
+            info.add(L"ocio.config", u16(accelerator::ocio::config_uri()));
+            info.add(L"ocio.colorspace-count", std::to_wstring(accelerator::ocio::colorspaces().size()));
+            info.add(L"ocio.display-count", std::to_wstring(accelerator::ocio::displays().size()));
+        }
+    } else if (what == L"COLORSPACES") {
+        reply_name = L"INFO OCIO COLORSPACES";
+        for (const auto& name : accelerator::ocio::colorspaces())
+            info.add(L"colorspaces.colorspace", u16(name));
+    } else if (what == L"DISPLAYS") {
+        reply_name = L"INFO OCIO DISPLAYS";
+        for (const auto& display : accelerator::ocio::displays()) {
+            boost::property_tree::wptree node;
+            node.add(L"name", u16(display));
+            // Views are nested under their display rather than listed flat: the same view
+            // name can appear under several displays and means a different transform in
+            // each, so a flat list would be ambiguous for exactly the client that has to
+            // build a menu from it.
+            for (const auto& view : accelerator::ocio::views(display))
+                node.add(L"views.view", u16(view));
+
+            info.add_child(L"displays.display", node);
+        }
+    } else {
+        return L"403 INFO OCIO ERROR\r\n";
+    }
+
+    std::wstringstream replyString;
+    replyString << L"201 " << reply_name << L" OK\r\n";
+
+    pt::xml_writer_settings<std::wstring> w(' ', 3);
+    pt::xml_parser::write_xml(replyString, info, w);
+
+    replyString << L"\r\n";
+    return replyString.str();
+}
+
 std::wstring info_ltc_command(command_context& ctx)
 {
     boost::property_tree::wptree info;
@@ -4687,6 +4759,7 @@ void register_commands(std::shared_ptr<amcp_command_repository_wrapper>& repo)
     repo->register_command(L"Query Commands", L"INFO", info_command, 0);
     repo->register_command(L"Query Commands", L"INFO CONFIG", info_config_command, 0);
     repo->register_command(L"Query Commands", L"INFO PATHS", info_paths_command, 0);
+    repo->register_command(L"Query Commands", L"INFO OCIO", info_ocio_command, 0);
     repo->register_command(L"Query Commands", L"INFO LTC", info_ltc_command, 0);
     repo->register_command(L"Query Commands", L"INFO PORTAUDIO", info_portaudio_command, 0);
     repo->register_command(L"LTC Commands", L"LTC LOAD", ltc_load_command, 1);
