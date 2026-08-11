@@ -22,10 +22,27 @@
 #pragma once
 
 #include "uniform_block.h"
+#include <array>
+#include <cstdint>
+#include <vector>
 #include <vulkan/vulkan.hpp>
+
 namespace caspar { namespace accelerator { namespace vulkan {
 
-#include <vector>
+/// LUT bindings reserved in descriptor set 1 for a generated colour transform. OCIO keeps
+/// binding 0 of that set for its uniform buffer and declares its textures from binding 1
+/// upward, so this is the highest binding the set layout provides.
+///
+/// Eight is generous on purpose: across all 55 colour spaces in the pinned studio config the
+/// most any input transform emits is one. Display transforms, which A5 adds, are the case
+/// that could need more.
+inline constexpr uint32_t OCIO_MAX_TEXTURES = 8;
+
+/// The image views a generated transform's samplers read, indexed so that slot i is
+/// binding i+1 -- the binding OCIO wrote into the shader source, not one chosen here. A null
+/// slot is a binding the transform did not declare and is simply not written; every sampler
+/// binding in the set layout is ePartiallyBound for exactly that reason.
+using ocio_texture_views = std::array<vk::ImageView, OCIO_MAX_TEXTURES>;
 
 class pipeline final
 {
@@ -48,12 +65,16 @@ class pipeline final
              const std::vector<uint32_t>&        frag_spirv = {});
     ~pipeline();
 
+    /// `ocio_textures` fills descriptor set 1. Defaulted to all-null, which writes nothing
+    /// there and leaves the set holding only its uniform buffer -- the state every draw was
+    /// in before a generated transform existed.
     void         draw(vk::CommandBuffer                    commandBuffer,
                       vk::Buffer                           vertexBuffer,
                       uint32_t                             coords_count,
                       uint32_t                             vertex_buffer_offset,
                       const uniform_block&                 params,
-                      const std::array<vk::ImageView, 11>& textures);
+                      const std::array<vk::ImageView, 11>& textures,
+                      const ocio_texture_views&            ocio_textures = {});
     vk::Pipeline id() const;
 
   private:

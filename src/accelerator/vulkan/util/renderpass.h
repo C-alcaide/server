@@ -30,6 +30,7 @@
 #include <vulkan/vulkan.hpp>
 
 #include "draw_params.h"
+#include "pipeline.h"
 #include "uniform_block.h"
 
 namespace caspar { namespace accelerator { namespace vulkan {
@@ -45,6 +46,11 @@ struct lut_views
     vk::ImageView hue_curve  = nullptr;
     vk::ImageView curve_lut  = nullptr;
     vk::ImageView blend_mask = nullptr;
+
+    /// LUTs a generated colour transform samples, filling descriptor set 1 rather than the
+    /// mixer's own set. Separate from the four above because their bindings are the mixer's
+    /// to assign and these are OCIO's, written into the generated source.
+    ocio_texture_views ocio{};
 };
 struct frame_context
 {
@@ -93,6 +99,7 @@ class renderpass
         std::shared_ptr<class texture>           local_key_attachment;
         std::shared_ptr<class texture>           layer_key_attachment;
         std::array<vk::ImageView, 11>            textures;
+        ocio_texture_views                       ocio_textures{};
         std::vector<core::frame_geometry::coord> coords;
         uniform_block                            uniforms;
         uint32_t                                 vertex_buffer_offset = 0;

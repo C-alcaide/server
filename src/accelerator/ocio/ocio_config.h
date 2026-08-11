@@ -76,6 +76,19 @@ bool has_display_view(const std::string& display, const std::string& view);
 // AVFrame, and why the previous attempt -- OCIO as a CPU filter in the producer's filter
 // chain -- was the wrong shape rather than merely slow.
 
+/// Which shading language to generate, and with it how resources are declared.
+///
+/// Not a cosmetic difference. GLSL 4.0 emits `uniform sampler2D name;` and leaves binding to
+/// the application; Vulkan GLSL emits `layout(set=N, binding=M) uniform sampler2D name;` and
+/// so decides its own bindings, which the pipeline layout then has to match. The two
+/// generated programs are not interchangeable, and OCIO's cache ID leads with the language,
+/// so a cache keyed on it cannot confuse them.
+enum class gpu_target
+{
+    opengl, ///< GPU_LANGUAGE_GLSL_4_0, for the OGL mixer
+    vulkan  ///< GPU_LANGUAGE_GLSL_VK_4_6 at descriptor set 1, textures from binding 1
+};
+
 /// One LUT the generated shader samples. The application owns uploading it.
 struct gpu_texture
 {
@@ -86,6 +99,12 @@ struct gpu_texture
     int         edge_len   = 0; ///< 3D only: values are edge_len^3 * 3
     int         channels   = 3; ///< 1 (red) or 3 (rgb)
     bool        interpolate_linear = true;
+
+    /// The binding this sampler was declared at, from OCIO rather than inferred: the
+    /// generated source hard-codes it, so a descriptor written anywhere else is read as
+    /// whatever happens to be bound there. Meaningless on the OpenGL target, which declares
+    /// no binding and takes a texture unit chosen by the caller.
+    int binding = 0;
 
     std::vector<float> values;
 };
@@ -104,6 +123,14 @@ struct gpu_shader
     /// Name of the generated entry point, as called from the splice site.
     std::string function_name;
 
+    /// Bytes OCIO wants for the uniform buffer it declares at binding 0 of its descriptor
+    /// set (Vulkan target only). **Zero for every input transform in the studio config** --
+    /// measured across all 55 colour spaces, none has a dynamic property, so none declares
+    /// a uniform block at all. The reserved binding stays declared and written anyway: a
+    /// descriptor set may legally carry a binding the shader never reads, and a display
+    /// transform with a dynamic exposure would need it.
+    std::size_t uniform_buffer_size = 0;
+
     std::vector<gpu_texture> textures;
 };
 
@@ -114,6 +141,8 @@ struct gpu_shader
 ///
 /// Expensive: builds an OCIO processor and generates source. Call it when a configuration
 /// changes, not per frame.
-bool build_input_transform(const std::string& source_space, gpu_shader& out);
+bool build_input_transform(const std::string& source_space,
+                           gpu_shader&        out,
+                           gpu_target         target = gpu_target::opengl);
 
 }}} // namespace caspar::accelerator::ocio

@@ -124,13 +124,16 @@ struct pipeline::impl
     // switch between them would need the descriptor sets rebound.
     vk::DescriptorSetLayout        ocioSetLayout_;
     std::vector<vk::DescriptorSet> ocioDescriptorSets_;
-    /// Placeholder for OCIO's uniform buffer at set 1 binding 0. Sized at the Vulkan
-    /// minimum guaranteed maximum for a UBO range rather than from
-    /// GpuShaderDesc::getUniformBufferSize(), because no transform is generated yet; A4e
-    /// replaces this with the real size. A bound-but-unused UBO keeps the set valid.
+    /// OCIO's uniform buffer at set 1 binding 0, and it stays a zero-filled placeholder.
+    ///
+    /// getUniformBufferSize() answers 0 for every one of the 55 colour spaces in the pinned
+    /// studio config: an input transform has no dynamic property, so OCIO declares no uniform
+    /// block at all and the generated source never reads this. Written anyway, because a
+    /// descriptor set may carry a binding the shader ignores but not one left unwritten, and
+    /// because a display transform with a dynamic exposure -- A5 -- is what would fill it.
+    /// 256 bytes is the Vulkan minimum guaranteed UBO range, so it fits anything that comes.
     vk::Buffer                     ocioUbo_;
     vk::DeviceMemory               ocioUboMemory_;
-    static constexpr uint32_t      OCIO_MAX_TEXTURES = 8;
     static constexpr vk::DeviceSize OCIO_UBO_SIZE    = 256;
 
     vk::PipelineLayout pipelineLayout_;
@@ -542,11 +545,12 @@ struct pipeline::impl
     ///
     /// The slot matters because descriptor set 1 is allocated one-per-slot in the same ring:
     /// a draw has to bind set 1 from the SAME slot, or a later draw rewriting set 1 would
-    /// disturb one still referenced by an in-flight command buffer. Today every slot of set 1
-    /// holds the identical placeholder UBO and the index is therefore unobservable, which is
-    /// exactly why it is worth wiring correctly now rather than when it starts to matter.
+    /// disturb one still referenced by an in-flight command buffer. That became observable
+    /// the moment a generated transform's LUTs started being written here, which is why it
+    /// was worth wiring correctly while every slot still held the identical placeholder.
     std::pair<vk::DescriptorSet, size_t> acquire_descriptor_set(const uniform_block& params,
-                                              const std::array<vk::ImageView, 11>& textures)
+                                              const std::array<vk::ImageView, 11>& textures,
+                                              const ocio_texture_views&            ocio_textures)
     {
         // C++ textures array layout:
         //   [0] = background attachment, [1..4] = planes, [5] = local_key, [6] = layer_key
@@ -683,6 +687,34 @@ struct pipeline::impl
             writes.push_back(blendMaskWrite);
         }
 
+        // Descriptor set 1: a generated transform's LUTs, at the bindings OCIO declared.
+        //
+        // Written into this ring slot's set 1, the same slot the mixer's own set came from,
+        // so an in-flight command buffer's set is never rewritten underneath it. Slot i of
+        // ocio_textures is binding i+1; a null slot is a binding the transform did not
+        // declare, left unwritten under ePartiallyBound rather than written null.
+        // ocioInfos must outlive updateDescriptorSets: setImageInfo stores a pointer into it,
+        // not a copy.
+        std::array<vk::DescriptorImageInfo, OCIO_MAX_TEXTURES> ocioInfos;
+        for (uint32_t i = 0; i < OCIO_MAX_TEXTURES; ++i) {
+            if (!ocio_textures[i])
+                continue;
+            // OCIO's own LUTs are indexed by a computed coordinate and must clamp, never
+            // wrap: textureSampler_, not hueCurveSampler_. A wrap here folds the top of a
+            // 1D LUT onto its bottom and shows up only in the extreme highlights.
+            ocioInfos[i].sampler     = textureSampler_;
+            ocioInfos[i].imageView   = ocio_textures[i];
+            ocioInfos[i].imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal;
+
+            vk::WriteDescriptorSet w{};
+            w.dstSet          = ocioDescriptorSets_[setIndex];
+            w.dstBinding      = i + 1;
+            w.dstArrayElement = 0;
+            w.descriptorType  = vk::DescriptorType::eCombinedImageSampler;
+            w.setImageInfo(ocioInfos[i]);
+            writes.push_back(w);
+        }
+
         device_.updateDescriptorSets(writes, nullptr);
 
         return {descriptorSet, setIndex};
@@ -693,9 +725,10 @@ struct pipeline::impl
               uint32_t                             coords_count,
               uint32_t                             vertex_buffer_offset,
               const uniform_block&                 params,
-              const std::array<vk::ImageView, 11>& textures)
+              const std::array<vk::ImageView, 11>& textures,
+              const ocio_texture_views&            ocio_textures)
     {
-        auto [descriptorSet, setIndex] = acquire_descriptor_set(params, textures);
+        auto [descriptorSet, setIndex] = acquire_descriptor_set(params, textures, ocio_textures);
         commandBuffer.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline_);
         commandBuffer.bindVertexBuffers(0, vertexBuffer, {vertex_buffer_offset});
         // Both sets, always. Vulkan only requires binding what the pipeline statically uses,
@@ -747,9 +780,11 @@ void pipeline::draw(vk::CommandBuffer                    commandBuffer,
                     uint32_t                             coords_count,
                     uint32_t                             vertex_buffer_offset,
                     const uniform_block&                 params,
-                    const std::array<vk::ImageView, 11>& textures)
+                    const std::array<vk::ImageView, 11>& textures,
+                    const ocio_texture_views&            ocio_textures)
 {
-    impl_->draw(commandBuffer, vertexBuffer, coords_count, vertex_buffer_offset, params, textures);
+    impl_->draw(commandBuffer, vertexBuffer, coords_count, vertex_buffer_offset, params, textures,
+                ocio_textures);
 }
 
 vk::Pipeline pipeline::id() const { return impl_->pipeline_; }

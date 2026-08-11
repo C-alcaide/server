@@ -115,6 +115,7 @@ void renderpass::draw(const draw_params& params)
         params.local_key,
         params.layer_key,
         std::move(textures),
+        luts.ocio,
         std::move(coords),
         uniforms,
     });
@@ -237,7 +238,8 @@ void renderpass::commit()
                             static_cast<uint32_t>(layer.coords.size()),
                             layer.vertex_buffer_offset,
                             layer.uniforms,
-                            layer.textures);
+                            layer.textures,
+                            layer.ocio_textures);
         }
     }
 

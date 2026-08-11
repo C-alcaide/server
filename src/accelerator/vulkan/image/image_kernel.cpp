@@ -27,7 +27,10 @@
 #include "../util/renderpass.h"
 #include "../util/texture.h"
 
+#include <accelerator/ocio/ocio_config.h>
 #include <common/assert.h>
+#include <common/log.h>
+#include <common/utf.h>
 
 #ifdef _WIN32
 #include <vulkan/vulkan_win32.h>
@@ -42,6 +45,8 @@
 #include <array>
 #include <cmath>
 #include <algorithm>
+#include <map>
+#include <string>
 #include <vector>
 
 namespace caspar::accelerator::vulkan {
@@ -194,6 +199,43 @@ struct image_kernel::impl
     const core::blend_mask_data* blend_mask_data_ptr_ = nullptr;  // tracks which data is uploaded
 
     lut_views               current_lut_views_{};
+
+    // ── OCIO input-transform variants ────────────────────────────────────
+    //
+    // One entry per colour space in use, keyed by OCIO's processor cache ID -- the same key
+    // the OGL kernel uses, and safe to share the concept with because the cache ID leads
+    // with the shading language, so the GLSL 4.0 and Vulkan builds of one colour space are
+    // different entries by construction.
+    //
+    // Holds only the LUT images here. The pipeline that samples them is the variant pipeline
+    // cache's business (device::get_variant_pipeline), because a Vulkan pipeline is bound to
+    // its shader module and outlives any one kernel; the images are this device's and are
+    // destroyed with the kernel.
+    /// One generated-transform LUT: its image, and the extent to copy into it. The extent is
+    /// kept here because vk_lut_texture carries only a byte count, and a 4096x17 image and a
+    /// 69632x1 one are the same number of bytes.
+    struct ocio_lut
+    {
+        vk_lut_texture tex{};
+        uint32_t       width  = 0;
+        uint32_t       height = 1;
+        uint32_t       depth  = 1;
+    };
+
+    struct ocio_variant
+    {
+        std::vector<ocio_lut> textures;
+        /// The views again, indexed by binding-1 so they can be handed to the pipeline
+        /// without it having to know which slot came from which LUT.
+        ocio_texture_views views{};
+        bool               failed = false; ///< do not retry a broken transform every frame
+    };
+    std::map<std::string, ocio_variant> ocio_variants_;
+
+    /// Variants whose staging buffers are filled but whose images have not been copied into
+    /// yet. Drained by do_upload_pending_luts() inside the frame's command buffer, because
+    /// that is the only command buffer ordered against the draw that samples them.
+    std::vector<ocio_variant*> ocio_upload_queue_;
     // ─────────────────────────────────────────────────────────────────────
 
     struct frame_data : public frame_context
@@ -388,6 +430,11 @@ struct image_kernel::impl
         hue_curve_tex_.destroy();
         curve_lut_tex_.destroy();
         blend_mask_tex_.destroy();
+
+        for (auto& [id, variant] : ocio_variants_) {
+            for (auto& lut : variant.textures)
+                lut.tex.destroy();
+        }
 
         for (auto& frame : frames_) {
             if (frame.buffer) {
@@ -720,6 +767,131 @@ struct image_kernel::impl
     uint32_t blend_mask_pending_w_      = 0;
     uint32_t blend_mask_pending_h_      = 0;
 
+    /// The uploaded LUT set for this item's OCIO transform, or nullptr when the item does
+    /// not use one (or the transform could not be built or uploaded).
+    ///
+    /// Builds on a cache miss, which means on the frame path: one device stall to create the
+    /// images plus OCIO's generation, logged as a warning. Every later frame is a map lookup.
+    /// Pre-warming at MIXER OCIO command time is the proper fix -- see
+    /// docs/OCIO_INTEGRATION_STUDY.md section 8.7 -- and is not done here.
+    const ocio_variant* select_ocio_variant(const std::string& source_space)
+    {
+        // A cache hit inside OCIO after the AMCP command already built this space once for
+        // validation, so it costs a lookup rather than a rebuild -- and it is what yields the
+        // cache ID that keys everything below.
+        caspar::accelerator::ocio::gpu_shader generated;
+        if (!caspar::accelerator::ocio::build_input_transform(
+                source_space, generated, caspar::accelerator::ocio::gpu_target::vulkan))
+            return nullptr;
+
+        auto it = ocio_variants_.find(generated.cache_id);
+        if (it != ocio_variants_.end())
+            return it->second.failed ? nullptr : &it->second;
+
+        // Warn only when there is actually something to upload. Most colour spaces emit no
+        // LUT at all -- every camera log encoding in this config is pure arithmetic -- and
+        // for those this costs a map insert, not a device stall. A warning there would train
+        // the reader to ignore the one that matters.
+        if (generated.textures.empty()) {
+            CASPAR_LOG(debug) << L"[vk_kernel] OCIO transform for '" << u16(source_space)
+                              << L"' needs no LUT texture";
+        } else {
+            CASPAR_LOG(warning) << L"[vk_kernel] uploading " << generated.textures.size()
+                                << L" OCIO LUT(s) on the frame path for '" << u16(source_space)
+                                << L"'. Expect one dropped frame; every later frame is a cache hit.";
+        }
+
+        ocio_variant v;
+        try {
+            v.textures.reserve(generated.textures.size());
+            for (const auto& t : generated.textures) {
+                // The binding is OCIO's, written into the generated source. Anything outside
+                // the range the set layout declares would be a descriptor the shader reads
+                // from an unbound slot, so refuse rather than silently write elsewhere.
+                if (t.binding < 1 || t.binding > static_cast<int>(OCIO_MAX_TEXTURES)) {
+                    CASPAR_LOG(error) << L"[vk_kernel] OCIO declared '" << u16(t.sampler_name)
+                                      << L"' at binding " << t.binding << L", outside the 1.."
+                                      << OCIO_MAX_TEXTURES << L" reserved in descriptor set 1";
+                    v.failed = true;
+                    break;
+                }
+
+                v.textures.emplace_back();
+                auto& lut = v.textures.back();
+                auto& tex = lut.tex;
+
+                if (t.dimensions == 3) {
+                    // Not reachable with the pinned studio config -- no colour space in it
+                    // emits a 3D LUT, all 55 measured. The path is here because MIXER LUT3D
+                    // already exercises these same two helpers every time a cube file is
+                    // loaded, so a custom config that does emit one lands on proven code
+                    // rather than on a refusal.
+                    const uint32_t sz = static_cast<uint32_t>(t.edge_len);
+                    create_lut_image_3d(tex, sz); // sets data_size to the padded RGBA size
+                    pad_rgb_to_rgba(static_cast<float*>(tex.mapped), t.values.data(),
+                                    static_cast<size_t>(sz) * sz * sz);
+                    lut.width = lut.height = lut.depth = sz;
+                } else {
+                    const uint32_t w = static_cast<uint32_t>(t.width);
+                    const uint32_t h = static_cast<uint32_t>(std::max(1, t.height));
+                    if (t.channels == 1) {
+                        // Single-channel, which is what every LUT-bearing space in this
+                        // config emits: a 4096x17 red-channel image holding a 1D LUT.
+                        // Uploaded as-is; no padding, and R32_SFLOAT rather than a 4-channel
+                        // format because the generated source reads only .r.
+                        const vk::DeviceSize byte_size =
+                            static_cast<vk::DeviceSize>(w) * h * sizeof(float);
+                        create_image_2d_wh(tex, w, h, vk::Format::eR32Sfloat, byte_size);
+                        memcpy(tex.mapped, t.values.data(), byte_size);
+                    } else {
+                        const vk::DeviceSize byte_size =
+                            static_cast<vk::DeviceSize>(w) * h * 4 * sizeof(float);
+                        create_image_2d_wh(tex, w, h, vk::Format::eR32G32B32A32Sfloat, byte_size);
+                        pad_rgb_to_rgba(static_cast<float*>(tex.mapped), t.values.data(),
+                                        static_cast<size_t>(w) * h);
+                    }
+                    lut.width  = w;
+                    lut.height = h;
+                }
+
+                v.views[static_cast<size_t>(t.binding) - 1] = tex.view;
+            }
+        } catch (...) {
+            // Remember the failure so a broken transform costs one attempt, not one per
+            // frame. The layer then renders untransformed -- visibly wrong, and preferable
+            // to a device stall on every tick.
+            CASPAR_LOG_CURRENT_EXCEPTION();
+            v.failed = true;
+        }
+
+        if (v.failed) {
+            for (auto& lut : v.textures)
+                lut.tex.destroy();
+            v.textures.clear();
+            v.views = {};
+        }
+
+        auto [pos, inserted] = ocio_variants_.emplace(generated.cache_id, std::move(v));
+        if (pos->second.failed)
+            return nullptr;
+        if (!pos->second.textures.empty())
+            ocio_upload_queue_.push_back(&pos->second);
+        return &pos->second;
+    }
+
+    /// Widen a tightly-packed RGB float array into the RGBA staging layout Vulkan images
+    /// use here. Three-channel formats are not reliably supported as sampled images, which
+    /// is why the 3D LUT and blend mask already do exactly this.
+    static void pad_rgb_to_rgba(float* dst, const float* src, size_t count)
+    {
+        for (size_t i = 0; i < count; ++i) {
+            dst[i * 4 + 0] = src[i * 3 + 0];
+            dst[i * 4 + 1] = src[i * 3 + 1];
+            dst[i * 4 + 2] = src[i * 3 + 2];
+            dst[i * 4 + 3] = 1.0f;
+        }
+    }
+
     /// Prepare LUT textures from draw_params transforms.
     /// Called during draw() — writes staging buffers and sets pending flags.
     void prepare_lut_textures(const draw_params& params)
@@ -838,6 +1010,17 @@ struct image_kernel::impl
             current_lut_views_.blend_mask = nullptr;
             if (!mask) blend_mask_data_ptr_ = nullptr;
         }
+
+        // ── OCIO input transform ─────────────────────────────────────────
+        // Cleared first: these views land in descriptor set 1, and a layer without an OCIO
+        // transform must leave every one of its sampler bindings unwritten rather than
+        // inherit the previous layer's.
+        current_lut_views_.ocio = {};
+        const auto& ocio_tf = transforms.image_transform.ocio;
+        if (ocio_tf.enable && !ocio_tf.source_space.empty()) {
+            if (const auto* variant = select_ocio_variant(ocio_tf.source_space))
+                current_lut_views_.ocio = variant->views;
+        }
     }
 
     /// Record GPU upload commands for any LUTs that were prepared.
@@ -860,6 +1043,15 @@ struct image_kernel::impl
             upload_lut_data(blend_mask_tex_, nullptr, cmd, blend_mask_pending_w_, blend_mask_pending_h_, 1);
             blend_mask_upload_pending_ = false;
         }
+        // A generated transform's LUTs are uploaded once, when its variant is first built.
+        // They are immutable afterwards: OCIO derives them from the config and the colour
+        // space, neither of which can change without producing a different cache ID and so a
+        // different variant.
+        for (auto* variant : ocio_upload_queue_) {
+            for (auto& lut : variant->textures)
+                upload_lut_data(lut.tex, nullptr, cmd, lut.width, lut.height, lut.depth);
+        }
+        ocio_upload_queue_.clear();
     }
     // ─────────────────────────────────────────────────────────────────────
 
