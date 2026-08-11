@@ -109,6 +109,30 @@ struct pipeline::impl
     vk::DescriptorPool             descriptorPool_;
     std::vector<vk::DescriptorSet> descriptorSets_;
 
+    // ---- Descriptor set 1: a generated colour transform's resources ----------
+    //
+    // OCIO's Vulkan output declares its own resources with explicit
+    // layout(set=N, binding=M), and its contract reserves binding 0 of that set for its
+    // uniform buffer with textures from binding 1 upward
+    // (GpuShaderDesc::setDescriptorSetIndex). The mixer's own set is full -- bindings 0..6
+    // are all assigned -- so a generated transform gets a set of its own rather than
+    // squeezing into this one.
+    //
+    // Declared and bound even when nothing uses it, so that the pipeline layout is the same
+    // shape whether or not a variant is active. The alternative -- two layouts differing by
+    // one set -- means the base and variant pipelines are not layout-compatible, and every
+    // switch between them would need the descriptor sets rebound.
+    vk::DescriptorSetLayout        ocioSetLayout_;
+    std::vector<vk::DescriptorSet> ocioDescriptorSets_;
+    /// Placeholder for OCIO's uniform buffer at set 1 binding 0. Sized at the Vulkan
+    /// minimum guaranteed maximum for a UBO range rather than from
+    /// GpuShaderDesc::getUniformBufferSize(), because no transform is generated yet; A4e
+    /// replaces this with the real size. A bound-but-unused UBO keeps the set valid.
+    vk::Buffer                     ocioUbo_;
+    vk::DeviceMemory               ocioUboMemory_;
+    static constexpr uint32_t      OCIO_MAX_TEXTURES = 8;
+    static constexpr vk::DeviceSize OCIO_UBO_SIZE    = 256;
+
     vk::PipelineLayout pipelineLayout_;
     vk::Pipeline       pipeline_;
 
@@ -194,6 +218,45 @@ struct pipeline::impl
 
         descriptorSetLayout_ = device_.createDescriptorSetLayout(layoutInfo);
 
+        // Set 1, for a generated colour transform. Binding 0 is OCIO's uniform buffer by its
+        // own contract; bindings 1..OCIO_MAX_TEXTURES are its LUTs. Every sampler binding is
+        // partially bound, because a transform uses as many as it needs and usually none:
+        // camera log encodings generate no LUT at all, while ADX and display-referred spaces
+        // generate one.
+        {
+            std::vector<vk::DescriptorSetLayoutBinding> ocioBindings;
+            vk::DescriptorSetLayoutBinding             ocioUboBinding{};
+            ocioUboBinding.binding         = 0;
+            ocioUboBinding.descriptorType  = vk::DescriptorType::eUniformBuffer;
+            ocioUboBinding.descriptorCount = 1;
+            ocioUboBinding.stageFlags      = vk::ShaderStageFlagBits::eFragment;
+            ocioBindings.push_back(ocioUboBinding);
+
+            for (uint32_t i = 1; i <= OCIO_MAX_TEXTURES; ++i) {
+                vk::DescriptorSetLayoutBinding b{};
+                b.binding         = i;
+                // eCombinedImageSampler covers both sampler2D and sampler3D -- the
+                // descriptor type is the same, only the image view type differs, which
+                // matters because OCIO emits either depending on the LUT.
+                b.descriptorType  = vk::DescriptorType::eCombinedImageSampler;
+                b.descriptorCount = 1;
+                b.stageFlags      = vk::ShaderStageFlagBits::eFragment;
+                ocioBindings.push_back(b);
+            }
+
+            std::vector<vk::DescriptorBindingFlags> ocioFlags(ocioBindings.size(),
+                                                              vk::DescriptorBindingFlagBits::ePartiallyBound);
+            ocioFlags[0] = vk::DescriptorBindingFlags{}; // the UBO is always written
+
+            vk::DescriptorSetLayoutBindingFlagsCreateInfo ocioFlagsInfo;
+            ocioFlagsInfo.setBindingFlags(ocioFlags);
+
+            vk::DescriptorSetLayoutCreateInfo ocioLayoutInfo{};
+            ocioLayoutInfo.setBindings(ocioBindings);
+            ocioLayoutInfo.pNext = &ocioFlagsInfo;
+            ocioSetLayout_       = device_.createDescriptorSetLayout(ocioLayoutInfo);
+        }
+
         // Create descriptor pool
         vk::DescriptorPoolSize samplerPoolSize(vk::DescriptorType::eCombinedImageSampler,
                                                (BindlessTextureCount + 4) * DescriptorPoolSize);
@@ -202,10 +265,18 @@ struct pipeline::impl
         vk::DescriptorPoolSize uboPoolSize(vk::DescriptorType::eUniformBuffer,
                                            1 * DescriptorPoolSize);
 
-        std::array poolSizes{samplerPoolSize, inputAttachmentPoolSize, uboPoolSize};
+        // Capacity for set 1 too: one UBO and OCIO_MAX_TEXTURES samplers per slot.
+        vk::DescriptorPoolSize ocioSamplerPoolSize(vk::DescriptorType::eCombinedImageSampler,
+                                                   OCIO_MAX_TEXTURES * DescriptorPoolSize);
+        vk::DescriptorPoolSize ocioUboPoolSize(vk::DescriptorType::eUniformBuffer,
+                                                1 * DescriptorPoolSize);
+
+        std::array poolSizes{samplerPoolSize, inputAttachmentPoolSize, uboPoolSize,
+                             ocioSamplerPoolSize, ocioUboPoolSize};
 
         vk::DescriptorPoolCreateInfo poolInfo{};
-        poolInfo.maxSets = DescriptorPoolSize;
+        // Twice the sets: one per slot for the mixer's own bindings, one for set 1.
+        poolInfo.maxSets = DescriptorPoolSize * 2;
 
         poolInfo.setPoolSizes(poolSizes);
         descriptorPool_ = device_.createDescriptorPool(poolInfo);
@@ -217,6 +288,51 @@ struct pipeline::impl
         allocInfo.setSetLayouts(layouts);
 
         descriptorSets_ = device_.allocateDescriptorSets(allocInfo);
+
+        // Set 1, one per slot so it can be rewritten per draw later without touching a set
+        // still referenced by an in-flight command buffer -- the same reason the mixer's own
+        // sets are a ring.
+        std::vector<vk::DescriptorSetLayout> ocioLayouts(DescriptorPoolSize, ocioSetLayout_);
+        vk::DescriptorSetAllocateInfo        ocioAllocInfo;
+        ocioAllocInfo.descriptorPool = descriptorPool_;
+        ocioAllocInfo.setSetLayouts(ocioLayouts);
+        ocioDescriptorSets_ = device_.allocateDescriptorSets(ocioAllocInfo);
+
+        // A placeholder UBO, written into every set-1 slot. The binding is not partially
+        // bound, so a set bound with binding 0 unwritten is invalid -- and the validation
+        // layers are entitled to reject the draw. Zero-filled and unread until A4e supplies
+        // OCIO's real uniform data.
+        {
+            vk::BufferCreateInfo bufferInfo{};
+            bufferInfo.size        = OCIO_UBO_SIZE;
+            bufferInfo.usage       = vk::BufferUsageFlagBits::eUniformBuffer;
+            bufferInfo.sharingMode = vk::SharingMode::eExclusive;
+            ocioUbo_               = device_.createBuffer(bufferInfo);
+
+            auto memReq = device_.getBufferMemoryRequirements(ocioUbo_);
+
+            vk::MemoryAllocateInfo memAlloc{};
+            memAlloc.allocationSize  = memReq.size;
+            memAlloc.memoryTypeIndex = findMemoryType(
+                memReq.memoryTypeBits,
+                vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent);
+            ocioUboMemory_ = device_.allocateMemory(memAlloc);
+            device_.bindBufferMemory(ocioUbo_, ocioUboMemory_, 0);
+
+            auto* mapped = device_.mapMemory(ocioUboMemory_, 0, OCIO_UBO_SIZE);
+            std::memset(mapped, 0, static_cast<size_t>(OCIO_UBO_SIZE));
+            device_.unmapMemory(ocioUboMemory_);
+
+            std::vector<vk::DescriptorBufferInfo> bufferInfos(ocioDescriptorSets_.size());
+            std::vector<vk::WriteDescriptorSet>   writes(ocioDescriptorSets_.size());
+            for (size_t i = 0; i < ocioDescriptorSets_.size(); ++i) {
+                bufferInfos[i] = vk::DescriptorBufferInfo(ocioUbo_, 0, OCIO_UBO_SIZE);
+                writes[i]      = vk::WriteDescriptorSet(ocioDescriptorSets_[i], 0, 0, 1,
+                                                        vk::DescriptorType::eUniformBuffer,
+                                                        nullptr, &bufferInfos[i]);
+            }
+            device_.updateDescriptorSets(writes, nullptr);
+        }
     }
 
     void setup_sampler()
@@ -370,8 +486,12 @@ struct pipeline::impl
         colorBlending.setAttachments(colorBlendAttachment);
 
         // Pipeline layout (no push constants — we use UBO)
+        // Two sets: the mixer's own, then a generated colour transform's. Declared
+        // unconditionally so base and variant pipelines share one layout and stay
+        // layout-compatible -- see the ocioSetLayout_ member comment.
+        std::array setLayouts{descriptorSetLayout_, ocioSetLayout_};
         vk::PipelineLayoutCreateInfo pipelineLayoutInfo{};
-        pipelineLayoutInfo.setSetLayouts(descriptorSetLayout_);
+        pipelineLayoutInfo.setSetLayouts(setLayouts);
 
         pipelineLayout_ = device_.createPipelineLayout(pipelineLayoutInfo);
 
@@ -418,7 +538,14 @@ struct pipeline::impl
         }
     }
 
-    vk::DescriptorSet acquire_descriptor_set(const uniform_block& params,
+    /// Returns the acquired set together with its ring slot.
+    ///
+    /// The slot matters because descriptor set 1 is allocated one-per-slot in the same ring:
+    /// a draw has to bind set 1 from the SAME slot, or a later draw rewriting set 1 would
+    /// disturb one still referenced by an in-flight command buffer. Today every slot of set 1
+    /// holds the identical placeholder UBO and the index is therefore unobservable, which is
+    /// exactly why it is worth wiring correctly now rather than when it starts to matter.
+    std::pair<vk::DescriptorSet, size_t> acquire_descriptor_set(const uniform_block& params,
                                               const std::array<vk::ImageView, 11>& textures)
     {
         // C++ textures array layout:
@@ -558,7 +685,7 @@ struct pipeline::impl
 
         device_.updateDescriptorSets(writes, nullptr);
 
-        return descriptorSet;
+        return {descriptorSet, setIndex};
     }
 
     void draw(vk::CommandBuffer                    commandBuffer,
@@ -568,10 +695,15 @@ struct pipeline::impl
               const uniform_block&                 params,
               const std::array<vk::ImageView, 11>& textures)
     {
-        auto descriptorSet = acquire_descriptor_set(params, textures);
+        auto [descriptorSet, setIndex] = acquire_descriptor_set(params, textures);
         commandBuffer.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline_);
         commandBuffer.bindVertexBuffers(0, vertexBuffer, {vertex_buffer_offset});
-        commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, pipelineLayout_, 0, descriptorSet, nullptr);
+        // Both sets, always. Vulkan only requires binding what the pipeline statically uses,
+        // but binding set 1 unconditionally means a switch to a variant pipeline needs no
+        // extra bookkeeping, and an unbound-but-declared set is the sort of thing the
+        // validation layers flag inconsistently across drivers.
+        std::array boundSets{descriptorSet, ocioDescriptorSets_[setIndex]};
+        commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, pipelineLayout_, 0, boundSets, nullptr);
         commandBuffer.draw(coords_count, 1, 0, 0);
     }
 
@@ -589,6 +721,9 @@ struct pipeline::impl
 
         device_.destroyDescriptorPool(descriptorPool_);
         device_.destroyDescriptorSetLayout(descriptorSetLayout_);
+        device_.destroyDescriptorSetLayout(ocioSetLayout_);
+        device_.destroyBuffer(ocioUbo_);
+        device_.freeMemory(ocioUboMemory_);
         device_.destroySampler(textureSampler_);
         device_.destroySampler(keySampler_);
         device_.destroySampler(hueCurveSampler_);
