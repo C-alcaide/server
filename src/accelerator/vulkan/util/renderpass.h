@@ -50,7 +50,9 @@ struct lut_views
     /// LUTs a generated colour transform samples, filling descriptor set 1 rather than the
     /// mixer's own set. Separate from the four above because their bindings are the mixer's
     /// to assign and these are OCIO's, written into the generated source.
-    ocio_texture_views ocio{};
+    ocio_texture_views   ocio{};
+    /// Which of those OCIO asked to be point-sampled.
+    ocio_texture_filters ocio_nearest{};
 };
 struct frame_context
 {
@@ -112,6 +114,7 @@ class renderpass
         std::shared_ptr<class texture>           layer_key_attachment;
         std::array<vk::ImageView, 11>            textures;
         ocio_texture_views                       ocio_textures{};
+        ocio_texture_filters                     ocio_nearest{};
         /// Null means the pass's base pipeline; non-null is a generated colour transform's.
         std::shared_ptr<class pipeline>          pipeline;
         std::vector<core::frame_geometry::coord> coords;

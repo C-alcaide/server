@@ -223,9 +223,10 @@ struct image_kernel::impl
     struct ocio_lut
     {
         vk_lut_texture tex{};
-        uint32_t       width  = 0;
-        uint32_t       height = 1;
-        uint32_t       depth  = 1;
+        uint32_t       width   = 0;
+        uint32_t       height  = 1;
+        uint32_t       depth   = 1;
+        bool           nearest = false; ///< OCIO asked for INTERP_NEAREST on this table
     };
 
     struct ocio_variant
@@ -234,6 +235,10 @@ struct image_kernel::impl
         /// The views again, indexed by binding-1 so they can be handed to the pipeline
         /// without it having to know which slot came from which LUT.
         ocio_texture_views views{};
+        /// Which of those need point sampling, same indexing. Carried alongside rather than
+        /// inferred from the image, because nothing about a 363x1 R32_SFLOAT says whether
+        /// interpolating it is meaningful.
+        ocio_texture_filters nearest{};
         /// The pipeline whose fragment shader contains this transform's spliced source.
         /// Null only when the variant failed.
         std::shared_ptr<class pipeline> pipeline;
@@ -666,6 +671,61 @@ struct image_kernel::impl
         tex.mapped = vk_device.mapMemory(tex.staging_mem, 0, byte_size);
     }
 
+    // A genuinely 1D image, for a generated transform's sampler1D tables. Not an Nx1 2D
+    // image: the view type has to match what the shader declares.
+    void create_image_1d(vk_lut_texture& tex, uint32_t width, vk::Format format, vk::DeviceSize byte_size)
+    {
+        auto vk_device = vulkan_->getVkDevice();
+        // See create_lut_image_3d — tex may still be in use by another frame-in-flight.
+        vk_device.waitIdle();
+        tex.destroy();
+        tex.device    = vk_device;
+        tex.data_size = byte_size;
+
+        vk::ImageCreateInfo img_info{};
+        img_info.imageType     = vk::ImageType::e1D;
+        img_info.format        = format;
+        img_info.extent        = vk::Extent3D(width, 1, 1);
+        img_info.mipLevels     = 1;
+        img_info.arrayLayers   = 1;
+        img_info.samples       = vk::SampleCountFlagBits::e1;
+        img_info.tiling        = vk::ImageTiling::eOptimal;
+        img_info.usage         = vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eTransferDst;
+        img_info.sharingMode   = vk::SharingMode::eExclusive;
+        img_info.initialLayout = vk::ImageLayout::eUndefined;
+        tex.image              = vk_device.createImage(img_info);
+
+        auto                   mem_req = vk_device.getImageMemoryRequirements(tex.image);
+        vk::MemoryAllocateInfo alloc{};
+        alloc.allocationSize  = mem_req.size;
+        alloc.memoryTypeIndex = findDedicatedMemoryType(mem_req.memoryTypeBits,
+                                                        vk::MemoryPropertyFlagBits::eDeviceLocal);
+        tex.memory = vk_device.allocateMemory(alloc);
+        vk_device.bindImageMemory(tex.image, tex.memory, 0);
+
+        vk::ImageViewCreateInfo view_info{};
+        view_info.image            = tex.image;
+        view_info.viewType         = vk::ImageViewType::e1D;
+        view_info.format           = format;
+        view_info.subresourceRange = vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1);
+        tex.view                   = vk_device.createImageView(view_info);
+
+        vk::BufferCreateInfo buf_info{};
+        buf_info.size  = byte_size;
+        buf_info.usage = vk::BufferUsageFlagBits::eTransferSrc;
+        tex.staging    = vk_device.createBuffer(buf_info);
+
+        auto                   buf_req = vk_device.getBufferMemoryRequirements(tex.staging);
+        vk::MemoryAllocateInfo buf_alloc{};
+        buf_alloc.allocationSize  = buf_req.size;
+        buf_alloc.memoryTypeIndex = findDedicatedMemoryType(buf_req.memoryTypeBits,
+                                                             vk::MemoryPropertyFlagBits::eHostVisible |
+                                                             vk::MemoryPropertyFlagBits::eHostCoherent);
+        tex.staging_mem = vk_device.allocateMemory(buf_alloc);
+        vk_device.bindBufferMemory(tex.staging, tex.staging_mem, 0);
+        tex.mapped = vk_device.mapMemory(tex.staging_mem, 0, byte_size);
+    }
+
     // Like create_lut_image_2d but with an explicit height (used for the
     // arbitrary-resolution projection blend mask).
     void create_image_2d_wh(vk_lut_texture& tex, uint32_t width, uint32_t height, vk::Format format,
@@ -854,29 +914,47 @@ struct image_kernel::impl
                                     static_cast<size_t>(sz) * sz * sz);
                     lut.width = lut.height = lut.depth = sz;
                 } else {
-                    const uint32_t w = static_cast<uint32_t>(t.width);
-                    const uint32_t h = static_cast<uint32_t>(std::max(1, t.height));
-                    if (t.channels == 1) {
-                        // Single-channel, which is what every LUT-bearing space in this
-                        // config emits: a 4096x17 red-channel image holding a 1D LUT.
-                        // Uploaded as-is; no padding, and R32_SFLOAT rather than a 4-channel
-                        // format because the generated source reads only .r.
-                        const vk::DeviceSize byte_size =
-                            static_cast<vk::DeviceSize>(w) * h * sizeof(float);
-                        create_image_2d_wh(tex, w, h, vk::Format::eR32Sfloat, byte_size);
+                    // 1D and 2D differ by more than a name. A Vulkan image view's type must
+                    // match the sampler the shader declares, and an ACES display transform
+                    // declares sampler1D for its reach and gamut-cusp tables. Creating those
+                    // as an Nx1 2D image -- which is what "not 3D means 2D" produced until
+                    // display transforms existed -- is a type mismatch, not a layout detail.
+                    const bool     one_d = t.dimensions == 1;
+                    const uint32_t w     = static_cast<uint32_t>(t.width);
+                    const uint32_t h     = one_d ? 1u : static_cast<uint32_t>(std::max(1, t.height));
+
+                    // Single-channel uploads as-is into R32_SFLOAT because the generated
+                    // source reads only .r; three-channel pads to RGBA, since 3-component
+                    // formats are not reliably supported as sampled images.
+                    const vk::Format     format    = t.channels == 1 ? vk::Format::eR32Sfloat
+                                                                     : vk::Format::eR32G32B32A32Sfloat;
+                    const uint32_t       comps     = t.channels == 1 ? 1u : 4u;
+                    const vk::DeviceSize byte_size = static_cast<vk::DeviceSize>(w) * h * comps * sizeof(float);
+
+                    if (one_d)
+                        create_image_1d(tex, w, format, byte_size);
+                    else
+                        create_image_2d_wh(tex, w, h, format, byte_size);
+
+                    if (t.channels == 1)
                         memcpy(tex.mapped, t.values.data(), byte_size);
-                    } else {
-                        const vk::DeviceSize byte_size =
-                            static_cast<vk::DeviceSize>(w) * h * 4 * sizeof(float);
-                        create_image_2d_wh(tex, w, h, vk::Format::eR32G32B32A32Sfloat, byte_size);
+                    else
                         pad_rgb_to_rgba(static_cast<float*>(tex.mapped), t.values.data(),
                                         static_cast<size_t>(w) * h);
-                    }
+
                     lut.width  = w;
                     lut.height = h;
                 }
 
+                // An ACES display transform's 1D tables are INTERP_NEAREST. Sampling them
+                // linearly interpolates between entries that were never meant to be
+                // interpolated, which is wrong rather than merely soft -- and every
+                // input-transform LUT was linear, so this could be taken for granted until
+                // display transforms arrived.
+                lut.nearest = !t.interpolate_linear;
+
                 v.views[static_cast<size_t>(t.binding) - 1] = tex.view;
+                v.nearest[static_cast<size_t>(t.binding) - 1] = lut.nearest;
             }
 
             if (!v.failed) {

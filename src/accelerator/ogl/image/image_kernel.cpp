@@ -229,39 +229,72 @@ struct image_kernel::impl
     const ocio_variant* select_ocio_variant(const draw_params& params)
     {
         const auto& o = params.transforms.image_transform.ocio;
-        if (!o.enable || o.source_space.empty())
+
+        const bool want_input   = o.enable && !o.source_space.empty();
+        const bool want_display = !params.ocio_display.empty() && !params.ocio_view.empty();
+        if (!want_input && !want_display)
             return nullptr;
 
-        // Ask OCIO for the transform. This is a cache hit inside OCIO after the AMCP command
-        // already built it once for validation, so it costs a lookup rather than a rebuild --
-        // and it is what yields the cache ID that keys everything below.
-        caspar::accelerator::ocio::gpu_shader generated;
-        if (!caspar::accelerator::ocio::build_input_transform(o.source_space, generated))
+        // Ask OCIO for whichever halves are configured. These are cache hits inside OCIO
+        // after the AMCP commands already built them once for validation, so they cost a
+        // lookup rather than a rebuild -- and they are what yield the cache IDs that key
+        // everything below.
+        caspar::accelerator::ocio::gpu_shader in_shader;
+        caspar::accelerator::ocio::gpu_shader out_shader;
+        if (want_input && !caspar::accelerator::ocio::build_input_transform(o.source_space, in_shader))
+            return nullptr;
+        if (want_display &&
+            !caspar::accelerator::ocio::build_display_transform(params.ocio_display, params.ocio_view, out_shader))
             return nullptr;
 
-        auto it = ocio_variants_.find(generated.cache_id);
+        // The key names the PAIR. Both halves are spliced into one program, so two source
+        // spaces through one display are two programs; keying on either alone would serve
+        // one layer the other's transform.
+        const auto key = in_shader.cache_id + "|" + out_shader.cache_id;
+
+        auto it = ocio_variants_.find(key);
         if (it != ocio_variants_.end())
             return it->second.failed ? nullptr : &it->second;
 
         CASPAR_LOG(warning) << L"[ogl_kernel] compiling an OCIO program on the frame path for '"
-                            << u16(o.source_space) << L"'. Expect one dropped frame; every later frame "
-                            << L"is a cache hit.";
+                            << u16(want_input ? o.source_space : std::string("-")) << L"' -> '"
+                            << u16(want_display ? params.ocio_display + " / " + params.ocio_view
+                                                : std::string("-"))
+                            << L"'. Expect one dropped frame; every later frame is a cache hit.";
 
         ocio_variant v{base_program_};
         try {
             shader_variant sv;
-            sv.id       = generated.cache_id;
-            sv.prologue = generated.source;
-            // ⚠ The swizzle is the point. This shader carries BGR, the generated function
-            // expects true RGB, exactly as the matrix multiply it replaces uses col.bgr.
-            // Without it every grey is still correct and the hue wheel is mirrored.
-            sv.transform_call =
-                "col.bgr = " + generated.function_name + "(vec4(col.bgr, col.a)).rgb;";
+            sv.id       = key;
+            sv.prologue = in_shader.source + out_shader.source;
+            // ⚠ The swizzle is the point, on both call sites. This shader carries BGR and the
+            // generated functions expect true RGB, exactly as the matrix multiplies they
+            // replace use col.bgr. Without it every grey is still correct and the hue wheel
+            // is mirrored. The Vulkan kernel's equivalent must NOT swizzle.
+            if (want_input)
+                sv.transform_call = "col.bgr = " + in_shader.function_name + "(vec4(col.bgr, col.a)).rgb;";
+            if (want_display)
+                sv.display_call = "col.bgr = " + out_shader.function_name + "(vec4(col.bgr, col.a)).rgb;";
 
             v.program = spl::make_shared_ptr(get_image_shader(ogl_, sv));
 
+            // One list, both halves, in binding order. The texture unit each sampler gets is
+            // this kernel's to choose on OpenGL -- unlike Vulkan, where OCIO writes the
+            // binding into the source -- so appending is enough and the disjoint binding
+            // ranges do not matter here.
+            auto generated = in_shader;
+            generated.textures.insert(generated.textures.end(),
+                                      out_shader.textures.begin(),
+                                      out_shader.textures.end());
+
             // Upload whatever LUTs the generated source samples. Camera log spaces need none;
-            // display-referred and ADX spaces need one 2D image holding a 1D LUT.
+            // display-referred and ADX spaces need one 2D image holding a 1D LUT; an ACES
+            // display transform needs up to three, two of which are genuinely 1D.
+            //
+            // The texture TARGET must match the sampler the generated source declares --
+            // sampler1D, sampler2D or sampler3D -- so `dimensions` selects it rather than
+            // being collapsed to "3D or not". Display transforms are what made that real:
+            // input transforms only ever emit 2D.
             for (const auto& t : generated.textures) {
                 GLuint id = 0;
                 if (t.dimensions == 3) {
@@ -270,6 +303,13 @@ struct image_kernel::impl
                     GL(glTextureSubImage3D(id, 0, 0, 0, 0, t.edge_len, t.edge_len, t.edge_len,
                                            GL_RGB, GL_FLOAT, t.values.data()));
                     GL(glTextureParameteri(id, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE));
+                    GL(glTextureParameteri(id, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE));
+                } else if (t.dimensions == 1) {
+                    const auto internal = t.channels == 1 ? GL_R32F : GL_RGB32F;
+                    const auto format   = t.channels == 1 ? GL_RED : GL_RGB;
+                    GL(glCreateTextures(GL_TEXTURE_1D, 1, &id));
+                    GL(glTextureStorage1D(id, 1, internal, t.width));
+                    GL(glTextureSubImage1D(id, 0, 0, t.width, format, GL_FLOAT, t.values.data()));
                 } else {
                     const auto internal = t.channels == 1 ? GL_R32F : GL_RGB32F;
                     const auto format   = t.channels == 1 ? GL_RED : GL_RGB;
@@ -277,12 +317,16 @@ struct image_kernel::impl
                     GL(glTextureStorage2D(id, 1, internal, t.width, std::max(1, t.height)));
                     GL(glTextureSubImage2D(id, 0, 0, 0, t.width, std::max(1, t.height), format,
                                            GL_FLOAT, t.values.data()));
+                    GL(glTextureParameteri(id, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE));
                 }
+                // Not decoration: an ACES display transform's reach and gamut-cusp tables are
+                // INTERP_NEAREST, and interpolating between their entries is wrong rather
+                // than merely soft. Every input-transform LUT was linear, which is why this
+                // could be taken for granted until now.
                 const auto filter = t.interpolate_linear ? GL_LINEAR : GL_NEAREST;
                 GL(glTextureParameteri(id, GL_TEXTURE_MIN_FILTER, filter));
                 GL(glTextureParameteri(id, GL_TEXTURE_MAG_FILTER, filter));
                 GL(glTextureParameteri(id, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE));
-                GL(glTextureParameteri(id, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE));
 
                 v.texture_ids.push_back(id);
                 v.sampler_names.push_back(t.sampler_name);
@@ -296,7 +340,7 @@ struct image_kernel::impl
             v.failed = true;
         }
 
-        auto [pos, inserted] = ocio_variants_.emplace(generated.cache_id, std::move(v));
+        auto [pos, inserted] = ocio_variants_.emplace(key, std::move(v));
         return pos->second.failed ? nullptr : &pos->second;
     }
 
@@ -663,12 +707,20 @@ struct image_kernel::impl
             }
         };
 
+        // The two halves are independent. A layer can have an OCIO input transform with the
+        // channel's built-in output conversion, a channel OCIO display transform over the
+        // built-in input conversion, or both -- so neither branch may assume it owns the
+        // other's half.
+        const bool ocio_in  = transforms.image_transform.ocio.enable &&
+                              !transforms.image_transform.ocio.source_space.empty();
+        const bool ocio_out = !params.ocio_display.empty() && !params.ocio_view.empty();
+
         const auto& cg = transforms.image_transform.color_grade;
-        if (ocio) {
+        if (ocio_in) {
             // OCIO produced the working-space pixel, so the shader's own input conversion is
             // off. The output half still has to run, driven by the channel's target: without
             // it the layer would reach the render target in scene-linear ACEScg with no OETF
-            // and the wrong primaries.
+            // and the wrong primaries. Unless a display transform owns it -- see below.
             shader_->set("do_input_convert",  false);
             shader_->set("do_output_convert", true);
             shader_->set("output_transfer",   oetf_index(params.target_color_transfer));
@@ -881,6 +933,15 @@ struct image_kernel::impl
                     << L" fmt=" << static_cast<int>(params.pix_desc.format);
             }
             shader_->set("do_input_convert",  false);
+            shader_->set("do_output_convert", false);
+        }
+
+        // A channel display transform owns the output half outright, whichever branch above
+        // ran. Applied last and unconditionally rather than folded into the chain, because it
+        // is orthogonal to how the INPUT half was decided: the layer may have reached the
+        // working space via MIXER OCIO, via MIXER COLORSPACE, via auto-convert or not at all,
+        // and in every one of those cases the display transform is what encodes it for output.
+        if (ocio_out) {
             shader_->set("do_output_convert", false);
         }
 

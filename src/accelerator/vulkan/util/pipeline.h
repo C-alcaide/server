@@ -44,6 +44,14 @@ inline constexpr uint32_t OCIO_MAX_TEXTURES = 8;
 /// binding in the set layout is ePartiallyBound for exactly that reason.
 using ocio_texture_views = std::array<vk::ImageView, OCIO_MAX_TEXTURES>;
 
+/// Which of those bindings must be point-sampled, same indexing.
+///
+/// OCIO says per texture whether it wants INTERP_NEAREST, and for an ACES display transform
+/// two of its three tables do -- interpolating between their entries is wrong, not soft.
+/// Every input-transform LUT was linear, so binding one sampler to all of them was correct
+/// by accident until display transforms arrived.
+using ocio_texture_filters = std::array<bool, OCIO_MAX_TEXTURES>;
+
 class pipeline final
 {
     pipeline(const pipeline&);
@@ -74,7 +82,8 @@ class pipeline final
                       uint32_t                             vertex_buffer_offset,
                       const uniform_block&                 params,
                       const std::array<vk::ImageView, 11>& textures,
-                      const ocio_texture_views&            ocio_textures = {});
+                      const ocio_texture_views&            ocio_textures = {},
+                      const ocio_texture_filters&          ocio_nearest  = {});
     vk::Pipeline id() const;
 
   private:

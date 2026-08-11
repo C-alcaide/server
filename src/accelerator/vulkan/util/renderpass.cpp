@@ -116,6 +116,7 @@ void renderpass::draw(const draw_params& params)
         params.layer_key,
         std::move(textures),
         luts.ocio,
+        luts.ocio_nearest,
         _ctx->get_layer_pipeline(),
         std::move(coords),
         uniforms,
@@ -245,7 +246,8 @@ void renderpass::commit()
                                  layer.vertex_buffer_offset,
                                  layer.uniforms,
                                  layer.textures,
-                                 layer.ocio_textures);
+                                 layer.ocio_textures,
+                                 layer.ocio_nearest);
         }
     }
 

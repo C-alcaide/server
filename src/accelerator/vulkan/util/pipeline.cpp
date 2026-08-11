@@ -550,7 +550,8 @@ struct pipeline::impl
     /// was worth wiring correctly while every slot still held the identical placeholder.
     std::pair<vk::DescriptorSet, size_t> acquire_descriptor_set(const uniform_block& params,
                                               const std::array<vk::ImageView, 11>& textures,
-                                              const ocio_texture_views&            ocio_textures)
+                                              const ocio_texture_views&            ocio_textures,
+                                              const ocio_texture_filters&          ocio_nearest)
     {
         // C++ textures array layout:
         //   [0] = background attachment, [1..4] = planes, [5] = local_key, [6] = layer_key
@@ -700,9 +701,14 @@ struct pipeline::impl
             if (!ocio_textures[i])
                 continue;
             // OCIO's own LUTs are indexed by a computed coordinate and must clamp, never
-            // wrap: textureSampler_, not hueCurveSampler_. A wrap here folds the top of a
+            // wrap: neither of these is hueCurveSampler_. A wrap here folds the top of a
             // 1D LUT onto its bottom and shows up only in the extreme highlights.
-            ocioInfos[i].sampler     = textureSampler_;
+            //
+            // The filter is OCIO's to choose, per texture. An ACES display transform's reach
+            // and gamut-cusp tables are INTERP_NEAREST and interpolating them is wrong;
+            // keySampler_ is the existing clamp-to-edge nearest sampler and matches what
+            // those tables need exactly.
+            ocioInfos[i].sampler     = ocio_nearest[i] ? keySampler_ : textureSampler_;
             ocioInfos[i].imageView   = ocio_textures[i];
             ocioInfos[i].imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal;
 
@@ -726,9 +732,10 @@ struct pipeline::impl
               uint32_t                             vertex_buffer_offset,
               const uniform_block&                 params,
               const std::array<vk::ImageView, 11>& textures,
-              const ocio_texture_views&            ocio_textures)
+              const ocio_texture_views&            ocio_textures,
+              const ocio_texture_filters&          ocio_nearest)
     {
-        auto [descriptorSet, setIndex] = acquire_descriptor_set(params, textures, ocio_textures);
+        auto [descriptorSet, setIndex] = acquire_descriptor_set(params, textures, ocio_textures, ocio_nearest);
         commandBuffer.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline_);
         commandBuffer.bindVertexBuffers(0, vertexBuffer, {vertex_buffer_offset});
         // Both sets, always. Vulkan only requires binding what the pipeline statically uses,
@@ -781,10 +788,11 @@ void pipeline::draw(vk::CommandBuffer                    commandBuffer,
                     uint32_t                             vertex_buffer_offset,
                     const uniform_block&                 params,
                     const std::array<vk::ImageView, 11>& textures,
-                    const ocio_texture_views&            ocio_textures)
+                    const ocio_texture_views&            ocio_textures,
+                    const ocio_texture_filters&          ocio_nearest)
 {
     impl_->draw(commandBuffer, vertexBuffer, coords_count, vertex_buffer_offset, params, textures,
-                ocio_textures);
+                ocio_textures, ocio_nearest);
 }
 
 vk::Pipeline pipeline::id() const { return impl_->pipeline_; }
