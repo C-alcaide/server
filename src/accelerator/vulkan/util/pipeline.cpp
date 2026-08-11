@@ -34,7 +34,8 @@
 
 namespace caspar { namespace accelerator { namespace vulkan {
 
-std::vector<vk::PipelineShaderStageCreateInfo> create_shader_program(vk::Device device)
+std::vector<vk::PipelineShaderStageCreateInfo> create_shader_program(vk::Device device,
+                                                                    const std::vector<uint32_t>& frag_spirv)
 {
     // Helper to create shader module
     auto createShaderModule = [&](const uint8_t* code, size_t size) {
@@ -45,7 +46,12 @@ std::vector<vk::PipelineShaderStageCreateInfo> create_shader_program(vk::Device 
     };
 
     auto vertShaderModule = createShaderModule(vertex_shader, sizeof(vertex_shader) - 1);
-    auto fragShaderModule = createShaderModule(fragment_shader, sizeof(fragment_shader) - 1);
+    // The build-time SPIR-V unless a caller supplied its own. sizeof-1 drops bin2c's
+    // terminating NUL, which is not part of the SPIR-V.
+    auto fragShaderModule = frag_spirv.empty()
+                                ? createShaderModule(fragment_shader, sizeof(fragment_shader) - 1)
+                                : createShaderModule(reinterpret_cast<const uint8_t*>(frag_spirv.data()),
+                                                     frag_spirv.size() * sizeof(uint32_t));
 
     vk::PipelineShaderStageCreateInfo vertShaderStageInfo;
     vertShaderStageInfo.stage  = vk::ShaderStageFlagBits::eVertex;
@@ -98,6 +104,8 @@ struct pipeline::impl
     vk::Sampler                    keySampler_;
     vk::Sampler                    hueCurveSampler_;
     vk::DescriptorSetLayout        descriptorSetLayout_;
+    /// Empty when this pipeline uses the SPIR-V built by glslc at configure time.
+    std::vector<uint32_t>          frag_spirv_;
     vk::DescriptorPool             descriptorPool_;
     std::vector<vk::DescriptorSet> descriptorSets_;
 
@@ -301,10 +309,14 @@ struct pipeline::impl
         uboMapped_ = static_cast<uint8_t*>(device_.mapMemory(uboMemory_, 0, UBO_TOTAL_SIZE));
     }
 
-    impl(vk::Device device, vk::Format format, vk::PhysicalDeviceMemoryProperties memProperties)
+    impl(vk::Device                         device,
+         vk::Format                         format,
+         vk::PhysicalDeviceMemoryProperties memProperties,
+         std::vector<uint32_t>              frag_spirv)
         : device_(device)
         , format_(format)
         , memProperties_(memProperties)
+        , frag_spirv_(std::move(frag_spirv))
     {
         setup_descriptors();
 
@@ -379,7 +391,7 @@ struct pipeline::impl
         pipelineInfo.renderPass          = nullptr;
         pipelineInfo.subpass             = 0;
 
-        auto shaderStages = std::move(create_shader_program(device_));
+        auto shaderStages = std::move(create_shader_program(device_, frag_spirv_));
         pipelineInfo.setStages(shaderStages);
 
         vk::PipelineRenderingCreateInfo rendering_info{};
@@ -586,8 +598,11 @@ struct pipeline::impl
     }
 };
 
-pipeline::pipeline(vk::Device device, vk::Format format, vk::PhysicalDeviceMemoryProperties memProperties)
-    : impl_(new impl(device, format, memProperties))
+pipeline::pipeline(vk::Device                         device,
+                   vk::Format                         format,
+                   vk::PhysicalDeviceMemoryProperties memProperties,
+                   const std::vector<uint32_t>&        frag_spirv)
+    : impl_(new impl(device, format, memProperties, frag_spirv))
 {
 }
 pipeline::~pipeline() {}

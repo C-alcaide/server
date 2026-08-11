@@ -25,13 +25,27 @@
 #include <vulkan/vulkan.hpp>
 namespace caspar { namespace accelerator { namespace vulkan {
 
+#include <vector>
+
 class pipeline final
 {
     pipeline(const pipeline&);
     pipeline& operator=(const pipeline&);
 
   public:
-    pipeline(vk::Device device, vk::Format format, vk::PhysicalDeviceMemoryProperties memProperties);
+    /// `frag_spirv` overrides the fragment stage. Empty means use the SPIR-V glslc compiled
+    /// at build time, which is the normal path and byte-identical to before this parameter
+    /// existed.
+    ///
+    /// A non-empty vector is how a generated colour transform gets in: OCIO emits GLSL text,
+    /// which is spliced into this shader's source and compiled at runtime. Passing the
+    /// result here rather than reaching into the pipeline keeps SPIR-V production and
+    /// pipeline construction separable -- and separately testable, which is why the runtime
+    /// path can be exercised with the BASE shader before any OCIO code exists.
+    pipeline(vk::Device                          device,
+             vk::Format                          format,
+             vk::PhysicalDeviceMemoryProperties  memProperties,
+             const std::vector<uint32_t>&        frag_spirv = {});
     ~pipeline();
 
     void         draw(vk::CommandBuffer                    commandBuffer,

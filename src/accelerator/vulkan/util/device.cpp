@@ -24,6 +24,13 @@
 #include "../image/image_kernel.h"
 #include "buffer.h"
 #include "pipeline.h"
+#include <cstdlib>
+#include "glsl_compiler.h"
+
+#pragma warning(push)
+#pragma warning(disable : 4838 4309)
+#include "vk_image_fragment_src.h"
+#pragma warning(pop)
 #include "platform_config.h"
 #include "texture.h"
 
@@ -543,9 +550,31 @@ struct device::impl : public std::enable_shared_from_this<impl>
                 std::memcpy(_device_luid, luid.data(), 8);
         }
 
-        _pipelines[0] = std::make_shared<pipeline>(_device, vk::Format::eR8G8B8A8Unorm, _memoryProperties);
-        _pipelines[1] = std::make_shared<pipeline>(_device, vk::Format::eR16G16B16A16Unorm, _memoryProperties);
-        _pipelines[2] = std::make_shared<pipeline>(_device, vk::Format::eR16G16B16A16Sfloat, _memoryProperties);
+        // Proving the runtime GLSL->SPIR-V path with the BASE shader, before any generated
+        // colour transform exists. With CASPAR_VK_RUNTIME_SHADER=1 every pipeline is built
+        // from source compiled by shaderc instead of the SPIR-V glslc produced at configure
+        // time, so the conformance and grading batteries answer one question on its own:
+        // can we compile this shader at runtime and get the same pixels?
+        //
+        // Keeping that separable matters because the alternative is discovering a shaderc
+        // problem while also debugging an OCIO splice, with no way to tell which is at
+        // fault. Off by default, and the default path is byte-identical to before.
+        std::vector<uint32_t> runtime_frag;
+        if (const char* env = std::getenv("CASPAR_VK_RUNTIME_SHADER"); env && *env == '1') {
+            runtime_frag = compile_glsl_fragment_to_spirv(
+                std::string(reinterpret_cast<const char*>(fragment_shader_src)), "base(runtime)");
+            if (runtime_frag.empty()) {
+                CASPAR_LOG(error) << L"[vulkan::device] CASPAR_VK_RUNTIME_SHADER=1 but the base "
+                                     L"shader did not compile; falling back to the built-in SPIR-V";
+            } else {
+                CASPAR_LOG(info) << L"[vulkan::device] base fragment shader compiled at runtime: "
+                                 << runtime_frag.size() << L" SPIR-V words";
+            }
+        }
+
+        _pipelines[0] = std::make_shared<pipeline>(_device, vk::Format::eR8G8B8A8Unorm, _memoryProperties, runtime_frag);
+        _pipelines[1] = std::make_shared<pipeline>(_device, vk::Format::eR16G16B16A16Unorm, _memoryProperties, runtime_frag);
+        _pipelines[2] = std::make_shared<pipeline>(_device, vk::Format::eR16G16B16A16Sfloat, _memoryProperties, runtime_frag);
 
         thread_ = std::thread([&] {
             set_thread_name(L"Vulkan Device");
