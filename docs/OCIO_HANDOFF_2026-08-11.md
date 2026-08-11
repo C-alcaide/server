@@ -3,40 +3,30 @@
 Resume point for the OCIO work on branch **`feature/ocio-mixer`**, off `CasparVPV`. Plan of
 record: [`OCIO_INTEGRATION_STUDY.md`](OCIO_INTEGRATION_STUDY.md).
 
-**A4e is done.** Updated in place rather than as a second file — four same-dated handoffs
-once existed in the harness repo and which was current could only be recovered from git
-timestamps.
+**A4e and A4f are done: the OCIO input transform now works on both mixers, at parity.**
+Updated in place rather than as a second file — four same-dated handoffs once existed in the
+harness repo and which was current could only be recovered from git timestamps.
 
-## Resume here: A4f
+## Resume here: A5, once two decisions are settled
 
-**Splice OCIO's generated source into the Vulkan fragment shader and select the variant
-pipeline per draw.**
+The input transform is finished and measured. What remains before A5 (the display
+transform) is not code:
 
-Everything below A4f is built, run and measured. What is left is genuinely two things:
+1. **Channel or consumer?** Decided channel-level for now, and it is the wrong default for
+   the case that motivates A5: a channel feeding an LED processor *and* an SDI monitor needs
+   two different views from one composite. Settle this before building, because it decides
+   where the transform's state lives.
+2. **Pre-warming, which A4f made twice as expensive.** A new colour space now costs, on the
+   frame path: OCIO generation, a LUT image creation with a `waitIdle`, a shaderc compile,
+   and a driver pipeline build. Measured at roughly 1.2 s and one dropped frame; the OCIO
+   battery has to sleep 1.5 s on the first patch of each case to let it settle. The fix is
+   to build the variant when `MIXER OCIO` is accepted — the processor is already built there
+   for validation — not to cache it. See "Open decisions".
 
-1. **The splice.** Markers are in place at `fragment_shader.frag` —
-   `//__CASPAR_OCIO_DECLARATIONS__` before `main()` and `//__CASPAR_OCIO_TRANSFORM__` after
-   the input block. ⚠ **It must NOT swizzle.** That shader carries true RGB
-   (`col.rgb = ubo_mat3(...) * col.rgb`) where OGL carries BGR
-   (`col.bgr = input_to_working * col.bgr`), so the OGL splice's `.bgr` is wrong here.
-   Both markers carry this warning in the source. The generated text is spliceable verbatim:
-   no `#version`, no `#extension`, no bare non-opaque uniform — verified across all six
-   measured spaces.
-
-2. **A per-layer pipeline, which the renderpass does not currently have.** This is the real
-   structural work and it is not obvious from the task name. `renderpass` takes ONE pipeline
-   at construction (`renderpass.cpp:57`, `_pipeline(ctx->get_pipeline())`) and uses it for
-   every layer in `commit()`. Per-draw variant selection means `layer_info` needs its own
-   `std::shared_ptr<pipeline>`, chosen in `renderpass::draw()` where the transform is known,
-   and `commit()` must bind it per layer. `device::get_variant_pipeline` already exists and
-   is keyed on (variant id, attachment format); the kernel just cannot reach it from where
-   the pipeline is currently decided.
-
-Also still to settle before A4f is finished: **the uniform half.** With OCIO producing the
-working-space pixel, the shader's own input conversion must be switched off and the output
-half left running — the OGL kernel does this at `image_kernel.cpp` (`do_input_convert=false`,
-`working_to_output` from the channel's target). Nothing on the Vulkan side sets those yet, so
-a splice alone would double-convert.
+Everything an A5 display transform needs structurally is now in place: `gpu_target::vulkan`
+generation, a two-set pipeline layout, per-layer variant pipelines, the LUT upload path, and
+the reserved-but-unused uniform buffer at set 1 binding 0 that a *dynamic* property (an
+exposure a display transform can vary per frame) is what would finally fill.
 
 ## What A4e established, and how
 
@@ -154,6 +144,20 @@ refresh deployed DLLs (see `BUILDING_WORKFLOW.md` #7).
 * **The Vulkan loader's `Located json file` is not `Insert instance layer`.** It logs the
   first for every layer it can see, used or not. Matching it read as proof that validation
   was active when nothing had been loaded. Pinned by `tests/test_vk_validation.py`.
+* **A header change does not trigger a rebuild in this tree, and the timestamp check does
+  not notice.** This cost the most time of anything in this session and produced a bug report
+  that was entirely fictitious: after A4f the server aborted with `0xC0000409` on the first
+  composited frame under the validation layers, reproducibly, bisecting cleanly to the
+  commit, and with **no OCIO in the path** — a stale object file calling through a shifted
+  vtable slot after one virtual was added to `frame_context`. A full recompile made it
+  vanish permanently. The tell was **zero validation messages before the abort**: the layers
+  were not reporting a violation, so nothing was wrong with the Vulkan usage. Root cause and
+  the touch-everything workaround are in `BUILDING_WORKFLOW.md`.
+* **`cli.py vk-validation` reported that crash as a PASS**, because it counted VUIDs and
+  never asked whether the server survived the scenario — 4 of 24 commands ran, exit 0. It
+  now tracks refusals and the server's exit code and reports inconclusive. Every measurement
+  tool in this pair of repos has now failed in the same direction at least once: silence
+  reported as success.
 
 ## Open decisions
 

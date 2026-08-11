@@ -1,6 +1,52 @@
 CasparVP — Unreleased
 ==========================================
 
+### Added: `MIXER OCIO` works on the Vulkan mixer (A4f)
+
+The generated transform is spliced into the mixer's fragment shader, compiled to SPIR-V at
+runtime, and selected per draw. OCIO input transforms now work on both mixers.
+
+**Measured, 6 colour spaces × 23 patches against OCIO's own CPU processor:**
+
+| | worst delta |
+| :--- | ---: |
+| ACEScct | 0.51 LSB |
+| ACES2065-1 | 0.55 LSB |
+| ARRI LogC3 (EI800) | 0.53 LSB |
+| S-Log3 S-Gamut3.Cine | 0.39 LSB |
+| ADX10 | 0.53 LSB |
+| Rec.2100-PQ - Display | 0.54 LSB |
+
+**6/6 within the 1.0 LSB gate on Vulkan, and every figure is identical to OpenGL's** — not
+merely the same to two decimals, but the same worst-case patch for each of the six spaces.
+Two mixers with different channel orders, different shading languages and different resource
+binding models agreeing that precisely means the residual is OCIO's GPU-vs-CPU arithmetic,
+not either integration.
+
+Vulkan API usage checked separately under the Khronos validation layers: 12/12 commands
+accepted, **0 VUIDs**, with the best-practices control proving the layers were reporting.
+
+That identity also closes the channel-order trap empirically. The patches are asymmetric
+(`#3080A0`, `#BF8040`, `#4080BF`), and a red/blue exchange in the Vulkan splice would show
+as a large delta on every one of them while leaving greys correct. The splice deliberately
+does **not** swizzle: this shader carries true RGB where the OpenGL one carries BGR, so
+copying the OGL call site's `.bgr` would have mirrored the hue wheel.
+
+**A pipeline is now chosen per layer rather than per pass.** `renderpass` took one pipeline
+at construction and used it for every layer, so a pass compositing two layers with different
+colour spaces would have applied one layer's transform to both. `layer_info` carries its own,
+null meaning the base pipeline.
+
+**Cost, and it is not small.** A colour space new to the process pays, on the frame path:
+OCIO generation, a LUT image creation with a device `waitIdle`, a shaderc compile and a
+driver pipeline build — about 1.2 s and one dropped frame, logged as a warning. Every later
+frame is a map lookup. Pre-warming at `MIXER OCIO` command time is the fix and is not done
+yet; see `docs/OCIO_HANDOFF_2026-08-11.md`.
+
+Unchanged on this path: user `exposure` and gamut compression, which live in the
+`color_grade` struct inside the input block OCIO replaces. Neither belongs to an input
+transform's job, but the gap is real.
+
 ### Fixed: `MIXER OCIO` on a Vulkan channel was accepted and then discarded
 
 `MIXER 1-1 OCIO "ACEScct"` returned `202 OK` on a Vulkan channel, logged its processor
