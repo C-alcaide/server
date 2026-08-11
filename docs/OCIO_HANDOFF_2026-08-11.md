@@ -17,26 +17,37 @@ and one of them invalidates code A4e already shipped.
 
 ### What is done
 
-`accelerator/ocio/ocio_config.{h,cpp}`: `build_display_transform(display, view, out, target)`
-generates the working-space → display/view program for either backend, sharing
-`fill_from_processor` with the input transform so the texture walk and the binding-index
-read exist once.
+* **`build_display_transform(display, view, out, target)`** generates the working-space →
+  display/view program for either backend, sharing `fill_from_processor` with the input
+  transform so the texture walk and the binding-index read exist once.
+* **1D LUT images, on both backends.** `GL_TEXTURE_1D` on OpenGL; a real `e1D` image and
+  view on Vulkan rather than an Nx1 2D one. See the measurement below — this was a genuine
+  gap in what A4e shipped.
+* **Per-texture filtering.** OCIO says NEAREST or LINEAR per table and the Vulkan side was
+  binding its linear sampler to everything. It now selects `keySampler_` (clamp-to-edge
+  nearest) for the tables that ask for it. OpenGL already did this correctly.
+* **The second splice site**, `//__CASPAR_OCIO_DISPLAY__`, in both shaders, at the output
+  block it replaces — before the blend, where the block it replaces sits. ⚠ The OGL marker
+  swizzles, the Vulkan one must not.
+* **`draw_params.ocio_display` / `.ocio_view`** on both backends, and the OGL kernel builds,
+  caches, splices and uploads both halves. The variant cache key is now the **pair** of
+  cache IDs, because two source spaces through one display are two programs.
 
 ### What is left, in order
 
-1. **A second splice site.** `fragment_shader.frag` (both mixers) has markers for the input
-   transform only. The display transform replaces the *output* half — the
-   `working_to_output` matrix, the OETF and the tone map — so it needs its own marker at
-   that block, and the uniform side must clear `F2_OUTPUT_CONVERT` the way A4f clears
-   `F2_INPUT_CONVERT`. ⚠ Same no-swizzle rule on Vulkan.
-2. **1D LUT images** — see below, this is a real gap.
-3. **Channel-level state.** Follow the LED calibration LUT, which is already a channel-master
+1. **Nothing populates `draw_params.ocio_display` yet**, so all of the above is inert. It
+   compiles, it is regression-clean, and it has never executed. That is the next commit.
+2. **Channel-level state.** Follow the LED calibration LUT, which is already a channel-master
    setting applied over the composited frame (`ogl/image/image_mixer.cpp`,
-   `set_calibration_lut`). Note it also has a render-fingerprint field, and a display
+   `set_calibration_lut`). Note it also has a **render-fingerprint field**, and a display
    transform needs one too or the still-frame cache will serve a stale look.
-4. **AMCP.** `MIXER <ch> OCIO_DISPLAY "<display>" "<view>"` and `NONE`, validated at command
+3. **AMCP.** `MIXER <ch> OCIO_DISPLAY "<display>" "<view>"` and `NONE`, validated at command
    time against `has_display_view()` — which already exists. Quote both arguments; every
    display and view name in this config contains spaces.
+4. **The Vulkan kernel**, mirroring the OGL work in (5) above: pair-keyed variant, both
+   halves spliced, `F2_OUTPUT_CONVERT` cleared. The uniform half on OGL is already wired —
+   `ocio_out` forces `do_output_convert` false last, independently of how the input half was
+   decided, because a layer may have reached the working space by any of four routes.
 5. **A harness battery.** `cli.py ocio` compares an input transform against OCIO's CPU
    processor; the display half needs the same treatment and the oracle already has the
    pieces.
@@ -44,12 +55,13 @@ read exist once.
 ### Three measurements that shape it
 
 **Display transforms emit `sampler1D`, and input transforms never did.** Two of the three
-textures in an ACES 2.0 HDR view are 1D (the reach and gamut-cusp tables). **A4e's Vulkan
-uploader treats every non-3D LUT as 2D** — `create_image_2d_wh` with an `e2D` view — so it
-will produce an image whose view type does not match the `sampler1D` the shader declares.
-That needs an `e1D` image and view before A5 renders anything, and the OpenGL side needs
-`GL_TEXTURE_1D` for the same reason. It is unreached today only because no input transform
-emits one.
+textures in an ACES 2.0 HDR view are 1D — the reach and gamut-cusp tables, 363×1 and
+**`INTERP_NEAREST`**, one of them 3-channel. A4e's Vulkan uploader treated every non-3D LUT
+as 2D and bound its linear sampler to all of them, both of which are wrong for those tables:
+an `e2D` view does not match a `sampler1D` declaration, and interpolating between entries
+that were never meant to be interpolated is wrong rather than soft. **Both fixed**, on both
+backends. Unreached until now only because every input-transform LUT is 2D and linear —
+which is exactly how "not 3D means 2D" and "one sampler for all of them" survived.
 
 **Input and display transforms collide at binding 1 unless told otherwise.** Both declare
 their first sampler there. They now take disjoint ranges — input 1..4, display 5..8, inside
@@ -188,16 +200,30 @@ refresh deployed DLLs (see `BUILDING_WORKFLOW.md` #7).
 
 ## Traps that cost time here — all recorded in-tree
 
-* **The harness misattributes startup failures.** `server_manager.py` prints a
-  `caspar::user_error` from *another worker's* log as "the server's last relevant log line",
-  with that other log's **timestamp**, which is what makes it convincing. Hit three times
-  this session — `conformance --mixer ogl` (port 5250) and `grading --mixer vulkan` twice
-  (5252, 5326). All three were port/readiness races: ogl re-ran clean at 100/100, and
-  grading vulkan passed 48/48 once run `--sequential` on an idle machine. **Fixing this is
-  still on the list**, and it is now the single most expensive thing left in the harness.
-* **Do not run a second battery beside one.** Two of those three failures were provoked by
-  overlapping runs — including one I caused by starting `vk-validation` alongside `grading`.
-  The registry protects pids; it does not make the readiness timeout any longer.
+* **"Server did not become ready" is often the GPU running out of memory, not a port race.**
+  This is a correction to what this document said earlier. `server_manager.py` reports the
+  failure as `Cannot connect to localhost:<port>` and quotes a `caspar::user_error` taken
+  from *another worker's* log, with that other log's **timestamp** — which is what makes the
+  port explanation convincing. It was accepted as a port/readiness race five times in one
+  session before anyone looked at the Windows event log:
+
+  > The NVIDIA OpenGL driver has encountered an out of memory error. (pid=… casparcg.exe)
+
+  **198 of those in the 30 minutes covering two failed `conformance` runs**, and 390 across
+  the session, every cluster lining up with a battery. Seven parallel servers each hold an
+  OpenGL context — and on the Vulkan mixer a *second*, dedicated OGL device for previz — on
+  an 8 GB P4000 (adapter 0, where both mixers render; the 16 GB A4000 is not where the work
+  goes). The server dies before it can answer AMCP, so the harness only sees a connect
+  timeout.
+
+  It is marginal rather than absolute: the same battery passed at 8 instances earlier in the
+  same session. **`--instances 4` is the reliable setting on this box**, and re-running at
+  the default is what makes this look intermittent.
+
+  So the fix in `server_manager.py` is worth more than "stop quoting the wrong log": it
+  should read the event log, or at least stop asserting a cause it has not established.
+* **Do not run a second battery beside one**, and expect the same failure if you do — it is
+  the same GPU. The registry protects pids; it does not make VRAM appear.
 * **`CASPAR_VK_RUNTIME_SHADER=1` is incompatible with parallel battery runs** — use
   `--sequential`.
 * **`glslangValidator -S frag` fails on the *Vulkan* shader** (`input_attachment_index`).
