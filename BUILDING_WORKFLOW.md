@@ -116,7 +116,8 @@ cmake --build ...   # ← cl.exe cannot find standard headers
 | `decklink` | DeckLink producer + consumer |
 | `core` | Core mixer, frame pipeline |
 | `casparcg` | Full server executable (links all modules) |
-| `casparcg_copy_dependencies` | Copies DLLs next to the exe |
+| `casparcg_copy_dependencies` | Copies DLLs next to the exe — **not implied by `casparcg`**, see pitfall #7 |
+| `opencolorio` | OpenColorIO + its bundled deps, as an ExternalProject (slow, first build only) |
 
 ---
 
@@ -380,6 +381,47 @@ ADD 1 ARTNET UNIVERSE 0 HOST 127.0.0.1 PORT 6454 REFRESH-RATE 10 FIXTURE RGB 1 1
 ```
 
 **Consumer indices (REMOVE command):** ArtNet = 1337, sACN = 1338 (hard-coded in `index()` overrides).
+
+---
+
+### #6 — A third-party sub-build fails and the error names nothing recognisable
+
+`ENABLE_OCIO` (on by default) builds OpenColorIO as an ExternalProject with
+`OCIO_INSTALL_EXT_PACKAGES=ALL`, which has OCIO fetch and build its own dependencies —
+Imath, yaml-cpp, pystring, minizip-ng, expat, zlib — nesting each one under:
+
+```
+<build>/opencolorio-prefix/src/opencolorio-build/ext/build/<dep>/src/<dep>_install-build/...
+```
+
+That is deep before any of CMake's own scratch directories are appended. **Windows caps an
+object file's full path at 250 characters** and CMake says so, then keeps going and fails
+later somewhere unrelated-looking:
+
+```
+.../ext/build/libexpat/src/expat_install-build/CMakeFiles/CMakeScratch/TryCompile-jovtov/...
+  has 237 characters.  The maximum full path to an object file is 250
+  characters (see CMAKE_OBJECT_PATH_MAX).
+...
+ninja: build stopped: subcommand failed.
+```
+
+The failure mentions expat, not OCIO, and mentions a path without saying the path is the
+problem. Measured: from `d:\Github\CasparVP\build` the deepest generated path lands near
+**204** characters — it fits, with roughly 46 to spare. From a directory whose name carries
+a long prefix (a temp dir with a UUID in it, say) it does not.
+
+**So: keep the build directory shallow.** If OCIO's sub-build breaks after you move or
+rename the build tree, suspect this before suspecting the toolset. Building with
+`-DENABLE_OCIO=OFF` skips it entirely and is a fast way to confirm the diagnosis.
+
+### #7 — Deployed DLLs are stale after `--target casparcg`
+
+`--target casparcg` links the executable. It does **not** copy runtime DLLs: that is a
+`POST_BUILD` step on the separate `casparcg_copy_dependencies` target. After adding or
+updating a dependency (a new `casparcg_add_runtime_dependency`, a rebuilt
+`OpenColorIO_2_5.dll`), the exe will link fine and then fail at load or run against the
+previous DLL. Build `casparcg_copy_dependencies`, or the default target, to refresh them.
 
 ---
 
