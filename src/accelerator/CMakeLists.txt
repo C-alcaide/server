@@ -84,6 +84,7 @@ IF(ENABLE_VULKAN)
 
 		vk_image_vertex.h
 		vk_image_fragment.h
+		vk_image_fragment_src.h
 	)
 
 	find_program(GLSLC glslc HINTS "$ENV{VULKAN_SDK}/Bin" REQUIRED)
@@ -108,6 +109,18 @@ IF(ENABLE_VULKAN)
 
 	bin2c_file("${VK_VERT_SPV}" "vk_image_vertex.h" "caspar::accelerator::vulkan" "vertex_shader")
 	bin2c_file("${VK_FRAG_SPV}" "vk_image_fragment.h" "caspar::accelerator::vulkan" "fragment_shader")
+
+	# The GLSL SOURCE as well as the compiled SPIR-V.
+	#
+	# The SPIR-V above is what the mixer normally uses, built by glslc at configure time and
+	# unchanged. But a generated colour transform arrives as GLSL text and has to be spliced
+	# into this shader's source, then compiled at runtime -- and SPIR-V cannot be spliced. The
+	# OGL backend never needed this step because bin2c already embeds shader.frag as text:
+	# OpenGL compiles GLSL itself, so the source was there all along. Vulkan embeds only the
+	# binary, so without this there is nothing at runtime to splice INTO.
+	#
+	# Costs ~30 KB in the binary and nothing at run time until a variant is requested.
+	bin2c("vulkan/image/fragment_shader.frag" "vk_image_fragment_src.h" "caspar::accelerator::vulkan" "fragment_shader_src")
 
 	list(APPEND SOURCES ${VULKAN_SOURCES})
 	list(APPEND HEADERS ${VULKAN_HEADERS})
