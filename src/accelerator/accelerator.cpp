@@ -57,7 +57,11 @@ struct accelerator::impl
     }
 
     std::unique_ptr<core::image_mixer>
-    create_image_mixer(int channel_id, common::bit_depth depth, int gpu_index, bool gpu_index_explicit)
+    create_image_mixer(int                   channel_id,
+                       common::bit_depth     depth,
+                       int                   gpu_index,
+                       bool                  gpu_index_explicit,
+                       common::render_format render_format)
     {
         // GPU affinity is only implemented for the Vulkan backend
         // (GPU_AFFINITY_PLAN.md phase 4 is unimplemented). Silently falling
@@ -83,7 +87,8 @@ struct accelerator::impl
                 spl::make_shared_ptr(std::dynamic_pointer_cast<vulkan::device>(get_device(gpu_index))),
                 channel_id,
                 format_repository_.get_max_video_format_size(),
-                depth);
+                depth,
+                render_format);
             // Previz (3D monitoring) is bridged to a dedicated OGL device on GPU 0.
             // Only wire it up for mixers that also run on GPU 0; mixers on other
             // GPUs would require a cross-device bridge that is not yet implemented.
@@ -102,7 +107,8 @@ struct accelerator::impl
             spl::make_shared_ptr(std::dynamic_pointer_cast<ogl::device>(get_device(gpu_index))),
             channel_id,
             format_repository_.get_max_video_format_size(),
-            depth);
+            depth,
+            render_format);
         mixer->set_channel_texture_store(get_channel_texture_store());
         return mixer;
     }
@@ -191,9 +197,13 @@ accelerator::~accelerator() {}
 void accelerator::set_backend(accelerator_backend backend) { impl_->set_backend(backend); }
 
 std::unique_ptr<core::image_mixer>
-accelerator::create_image_mixer(const int channel_id, common::bit_depth depth, int gpu_index, bool gpu_index_explicit)
+accelerator::create_image_mixer(const int             channel_id,
+                                common::bit_depth     depth,
+                                int                   gpu_index,
+                                bool                  gpu_index_explicit,
+                                common::render_format render_format)
 {
-    return impl_->create_image_mixer(channel_id, depth, gpu_index, gpu_index_explicit);
+    return impl_->create_image_mixer(channel_id, depth, gpu_index, gpu_index_explicit, render_format);
 }
 
 std::shared_ptr<accelerator_device> accelerator::get_device() const

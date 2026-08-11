@@ -25,6 +25,7 @@
 #include <accelerator/accelerator.h>
 
 #include <common/bit_depth.h>
+#include <common/render_format.h>
 #include <common/env.h>
 #include <common/except.h>
 #include <common/memory.h>
@@ -319,6 +320,29 @@ struct server::impl
             auto weak_client = std::weak_ptr<osc::client>(osc_client_);
             auto channel_id  = static_cast<int>(channels_->size() + 1);
             auto depth       = color_depth == 16 ? common::bit_depth::bit16 : common::bit_depth::bit8;
+
+            // <render-format>unorm|fp16</render-format> -- the numeric format of the
+            // mixer's *internal* render targets, independent of <color-depth>, which stays
+            // the channel's output depth.
+            //
+            // unorm (default) is bit-identical to the behaviour before this option existed.
+            // fp16 lets the composite carry negative values and values above 1.0, which is
+            // what a scene-referred linear working space requires; a final resolve pass
+            // converts back to the output depth, so consumers are unaffected either way.
+            //
+            // fp16 is not a free upgrade: near 1.0 its ulp is ~32x coarser than unorm16's,
+            // so it is the right format for a linear buffer and the wrong one for a
+            // display-encoded one. See docs/OCIO_INTEGRATION_STUDY.md section 4.3.
+            auto render_format_str = boost::to_lower_copy(xml_channel.second.get(L"render-format", L"unorm"));
+            if (render_format_str != L"unorm" && render_format_str != L"fp16")
+                CASPAR_THROW_EXCEPTION(user_error()
+                                       << msg_info(L"Invalid render-format, must be unorm or fp16"));
+            auto render_format = render_format_str == L"fp16" ? common::render_format::fp16
+                                                             : common::render_format::unorm;
+            if (render_format != common::render_format::unorm) {
+                CASPAR_LOG(info) << L"[server] Channel " << channel_id << L" render-format "
+                                 << render_format_str << L" (float working space).";
+            }
             auto default_color_space =
                 color_space_str == L"bt2020"    ? core::color_space::bt2020
               : color_space_str == L"p3-d65"   ? core::color_space::p3_d65
@@ -387,7 +411,7 @@ struct server::impl
                                                 format_desc,
                                                 default_color_space,
                                                 accelerator_.create_image_mixer(
-                                                    channel_id, depth, gpu_index, gpu_index_explicit),
+                                                    channel_id, depth, gpu_index, gpu_index_explicit, render_format),
                                                 [channel_id, weak_client](core::monitor::state channel_state) {
                                                     monitor::state state;
                                                     state[""]["channel"][channel_id] = channel_state;

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <common/bit_depth.h>
+#include <common/render_format.h>
 
 #include <core/frame/pixel_format.h>
 #include <core/mixer/mixer.h>
@@ -57,7 +58,11 @@ class accelerator
     /// of that error: true when the user wrote `<gpu>` on the channel, false
     /// when it was inherited from a `<vulkan-output>` consumer.
     std::unique_ptr<caspar::core::image_mixer>
-    create_image_mixer(int channel_id, common::bit_depth depth, int gpu_index = 0, bool gpu_index_explicit = false);
+    create_image_mixer(int                   channel_id,
+                       common::bit_depth     depth,
+                       int                   gpu_index          = 0,
+                       bool                  gpu_index_explicit = false,
+                       common::render_format render_format      = common::render_format::unorm);
 
     std::shared_ptr<accelerator_device> get_device() const;
 
