@@ -177,6 +177,9 @@ struct image_kernel::impl
 {
     spl::shared_ptr<device> vulkan_;
     common::bit_depth       depth_;
+    // The format of every attachment this kernel allocates, and so also which pipeline it
+    // binds. Independent of depth_, which stays the channel's output depth.
+    common::render_format   render_format_ = common::render_format::unorm;
     int32_t                 frame_counter_ = 0;
 
     // ── Persistent LUT textures ──────────────────────────────────────────
@@ -220,7 +223,10 @@ struct image_kernel::impl
         virtual draw_data create_draw_data(const draw_params& params) { return parent->draw(params); }
         virtual lut_views get_lut_views() const override { return parent->current_lut_views_; }
         virtual void upload_pending_luts(vk::CommandBuffer cmd) override { parent->do_upload_pending_luts(cmd); }
-        virtual std::shared_ptr<class pipeline> get_pipeline() { return parent->vulkan_->get_pipeline(parent->depth_); }
+        virtual std::shared_ptr<class pipeline> get_pipeline()
+        {
+            return parent->vulkan_->get_pipeline(parent->depth_, parent->render_format_);
+        }
         virtual vk::CommandBuffer               get_command_buffer() { return cmd_buffer; }
         virtual void                            submit()
         {
@@ -334,7 +340,8 @@ struct image_kernel::impl
                     return tex;
                 }
             }
-            auto tex = parent->vulkan_->create_attachment(width, height, parent->depth_, components_count);
+            auto tex = parent->vulkan_->create_attachment(
+                width, height, parent->depth_, components_count, parent->render_format_);
             // Cap pool to prevent unbounded VRAM growth when consumers hold refs.
             static constexpr size_t MAX_ATTACHMENT_POOL = 4;
             if (attachment_pool_.size() < MAX_ATTACHMENT_POOL)
@@ -349,9 +356,12 @@ struct image_kernel::impl
     frame_data frames_[frame_buffer_size];
     uint32_t   current_frame_index_ = 0;
 
-    explicit impl(const spl::shared_ptr<device>& vulkan, common::bit_depth depth)
+    explicit impl(const spl::shared_ptr<device>& vulkan,
+                  common::bit_depth               depth,
+                  common::render_format           render_format)
         : vulkan_(vulkan)
         , depth_(depth)
+        , render_format_(render_format)
         , frames_{frame_data{this}, frame_data{this}, frame_data{this}}
     {
         auto cmd_buffers = vulkan_->allocateCommandBuffers(frame_buffer_size);
@@ -1573,8 +1583,10 @@ struct image_kernel::impl
     }
 };
 
-image_kernel::image_kernel(const spl::shared_ptr<device>& device, common::bit_depth depth)
-    : impl_(new impl(device, depth))
+image_kernel::image_kernel(const spl::shared_ptr<device>& device,
+                           common::bit_depth              depth,
+                           common::render_format          render_format)
+    : impl_(new impl(device, depth, render_format))
 {
 }
 image_kernel::~image_kernel() {}

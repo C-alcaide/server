@@ -125,7 +125,10 @@ struct device::impl : public std::enable_shared_from_this<impl>
     using texture_queue_t = tbb::concurrent_bounded_queue<std::shared_ptr<texture>>;
     using buffer_queue_t  = tbb::concurrent_bounded_queue<std::shared_ptr<buffer>>;
 
-    std::array<tbb::concurrent_unordered_map<size_t, texture_queue_t>, 2>                attachment_pools_;
+    // 0 = unorm8, 1 = unorm16, 2 = fp16. The render format has to be part of the key:
+    // a VkImage's format is fixed at creation, so pooling fp16 with unorm16 would hand
+    // an fp16 attachment back as a unorm16 one. Same hazard as the OGL texture pool.
+    std::array<tbb::concurrent_unordered_map<size_t, texture_queue_t>, 3>                attachment_pools_;
     std::array<std::array<tbb::concurrent_unordered_map<size_t, texture_queue_t>, 4>, 2> device_pools_;
     std::array<tbb::concurrent_unordered_map<size_t, buffer_queue_t>, 2>                 host_pools_;
 
@@ -148,7 +151,8 @@ struct device::impl : public std::enable_shared_from_this<impl>
     uint8_t _device_luid[8] = {};
     bool    _device_luid_valid = false;
 
-    std::array<std::shared_ptr<pipeline>, 2> _pipelines;
+    // One pipeline per attachment format, indexed as attachment_pools_ is.
+    std::array<std::shared_ptr<pipeline>, 3> _pipelines;
 
     struct inflight_command_buffer
     {
@@ -541,6 +545,7 @@ struct device::impl : public std::enable_shared_from_this<impl>
 
         _pipelines[0] = std::make_shared<pipeline>(_device, vk::Format::eR8G8B8A8Unorm, _memoryProperties);
         _pipelines[1] = std::make_shared<pipeline>(_device, vk::Format::eR16G16B16A16Unorm, _memoryProperties);
+        _pipelines[2] = std::make_shared<pipeline>(_device, vk::Format::eR16G16B16A16Sfloat, _memoryProperties);
 
         thread_ = std::thread([&] {
             set_thread_name(L"Vulkan Device");
@@ -713,12 +718,16 @@ struct device::impl : public std::enable_shared_from_this<impl>
     void submit(const vk::SubmitInfo& submitInfo, vk::Fence fence) { _queue.submit(submitInfo, fence); }
 
     std::shared_ptr<texture>
-    create_attachment(int width, int height, common::bit_depth depth, uint32_t components_count)
+    create_attachment(int                   width,
+                      int                   height,
+                      common::bit_depth     depth,
+                      uint32_t              components_count,
+                      common::render_format render_format)
     {
         CASPAR_VERIFY(width > 0 && height > 0);
 
-        auto depth_pool_index = depth == common::bit_depth::bit8 ? 0 : 1;
-        auto format = depth == common::bit_depth::bit8 ? vk::Format::eR8G8B8A8Unorm : vk::Format::eR16G16B16A16Unorm;
+        const auto depth_pool_index = attachment_pool_index(depth, render_format);
+        const auto format           = attachment_format(depth, render_format);
 
         // TODO (perf) Shared pool.
         auto pool   = &attachment_pools_[depth_pool_index][static_cast<size_t>(width) << 16 | static_cast<size_t>(height)];
@@ -792,7 +801,25 @@ struct device::impl : public std::enable_shared_from_this<impl>
             ptr, [tex = std::move(tex), pool, self = shared_from_this()](texture*) mutable { pool->push(tex); });
     }
 
+    /// Which pipeline / attachment pool a (depth, render_format) pair selects. fp16 is a
+    /// third row rather than a variant of the 16-bit row, because a VkImage's format is
+    /// immutable and a pipeline is built against one attachment format.
+    static int attachment_pool_index(common::bit_depth depth, common::render_format render_format)
+    {
+        if (render_format == common::render_format::fp16)
+            return 2;
+        return depth == common::bit_depth::bit8 ? 0 : 1;
+    }
+
+    static vk::Format attachment_format(common::bit_depth depth, common::render_format render_format)
+    {
+        if (render_format == common::render_format::fp16)
+            return vk::Format::eR16G16B16A16Sfloat;
+        return depth == common::bit_depth::bit8 ? vk::Format::eR8G8B8A8Unorm : vk::Format::eR16G16B16A16Unorm;
+    }
+
     /// The sampled-image format an upload of `stride` packed components at `depth` uses.
+    /// Uploads are always unorm: their source is an integer AVFrame.
     static vk::Format internal_format(int stride, common::bit_depth depth)
     {
         static const vk::Format INTERNAL_FORMAT[][5] = {{vk::Format::eUndefined,
@@ -1139,7 +1166,7 @@ struct device::impl : public std::enable_shared_from_this<impl>
                     // create_attachment, not create_texture: a pooled texture is
                     // only eTransferDst|eSampled, and this has to be blitted from
                     // and then read back, both of which need eTransferSrc.
-                    dst = create_attachment(nw, nh, common::bit_depth::bit8, 4);
+                    dst = create_attachment(nw, nh, common::bit_depth::bit8, 4, common::render_format::unorm);
                     if (!dst)
                         return nullptr;
 
@@ -1426,15 +1453,18 @@ void       device::submit(const vk::SubmitInfo& submitInfo, vk::Fence fence) { i
 vk::Device         device::getVkDevice() const { return impl_->_device; }
 vk::PhysicalDevice device::getVkPhysicalDevice() const { return impl_->_physical_device; }
 vk::CommandPool    device::getCommandPool() const { return impl_->_command_pool; }
-std::shared_ptr<pipeline> device::get_pipeline(common::bit_depth depth)
+std::shared_ptr<pipeline> device::get_pipeline(common::bit_depth depth, common::render_format render_format)
 {
-    return impl_->_pipelines[depth == common::bit_depth::bit8 ? 0 : 1];
+    return impl_->_pipelines[impl::attachment_pool_index(depth, render_format)];
 }
 
-std::shared_ptr<texture>
-device::create_attachment(int width, int height, common::bit_depth depth, uint32_t components_count)
+std::shared_ptr<texture> device::create_attachment(int                   width,
+                                                   int                   height,
+                                                   common::bit_depth     depth,
+                                                   uint32_t              components_count,
+                                                   common::render_format render_format)
 {
-    return impl_->create_attachment(width, height, depth, components_count);
+    return impl_->create_attachment(width, height, depth, components_count, render_format);
 }
 
 void device::reset_attachment_layout(const std::shared_ptr<class texture>& tex)

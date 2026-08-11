@@ -24,6 +24,7 @@
 #include <core/mixer/image/blend_modes.h>
 
 #include <common/memory.h>
+#include <common/render_format.h>
 #include <utility>
 #include <vulkan/vulkan.hpp>
 
@@ -40,7 +41,9 @@ class image_kernel final : public std::enable_shared_from_this<image_kernel>
     image_kernel& operator=(const image_kernel&);
 
   public:
-    image_kernel(const spl::shared_ptr<class device>& device, common::bit_depth depth);
+    image_kernel(const spl::shared_ptr<class device>& device,
+                 common::bit_depth                     depth,
+                 common::render_format                 render_format = common::render_format::unorm);
     ~image_kernel();
 
     spl::shared_ptr<class renderpass> create_renderpass(uint32_t width, uint32_t height);

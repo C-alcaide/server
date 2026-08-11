@@ -24,6 +24,7 @@
 #include <accelerator/accelerator.h>
 #include <common/array.h>
 #include <common/bit_depth.h>
+#include <common/render_format.h>
 #include <core/frame/geometry.h>
 
 #include <functional>
@@ -51,7 +52,10 @@ class device final
 
     device& operator=(const device&) = delete;
 
-    std::shared_ptr<class pipeline> get_pipeline(common::bit_depth depth);
+    /// The pipeline built against the attachment format this (depth, render_format) pair
+    /// implies. A pipeline is bound to one attachment format, so fp16 needs its own.
+    std::shared_ptr<class pipeline> get_pipeline(common::bit_depth     depth,
+                                                common::render_format render_format = common::render_format::unorm);
     std::pair<vk::Buffer, vk::DeviceMemory>
     upload_vertex_buffer(const std::vector<core::frame_geometry::coord>& coords);
 
@@ -62,8 +66,15 @@ class device final
     vk::PhysicalDevice                 getVkPhysicalDevice() const;
     vk::CommandPool                    getCommandPool() const;
 
-    std::shared_ptr<class texture>
-    create_attachment(int width, int height, common::bit_depth depth, uint32_t components_count);
+    /// `render_format` selects the attachment's numeric format. unorm is the historical
+    /// behaviour; fp16 gives a render target that can carry negatives and values above
+    /// 1.0, for a linear working space. It participates in the attachment pool key,
+    /// because a VkImage's format is fixed at creation.
+    std::shared_ptr<class texture> create_attachment(int                   width,
+                                                     int                   height,
+                                                     common::bit_depth     depth,
+                                                     uint32_t              components_count,
+                                                     common::render_format render_format = common::render_format::unorm);
     // Transitions an attachment texture to eRenderingLocalRead before it is
     // reused as a render target. create_attachment() does this internally for
     // every texture it returns (new or pooled); callers that keep their own
