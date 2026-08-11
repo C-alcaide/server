@@ -187,6 +187,146 @@ bool has_display_view(const std::string& display, const std::string& view)
     return false;
 }
 
+namespace {
+
+/// The mixer grades in ACEScg. Named by role where possible so the same code works against a
+/// config that spells the space differently; ACES - ACEScg is the studio config's name.
+/// Caller must hold g_mutex and have a config loaded.
+const char* working_space_locked()
+{
+    return g_config->getColorSpace(OCIO_NS::ROLE_SCENE_LINEAR) ? OCIO_NS::ROLE_SCENE_LINEAR
+                                                               : "ACES - ACEScg";
+}
+
+/// Generate source and collect resources from an already-built processor.
+///
+/// Shared by the input and display transforms because everything after "which processor"
+/// is identical -- the language selection, the descriptor set index, the texture walk and
+/// the once-per-cache-ID logging. They differed only in the two names, and keeping two
+/// copies of the texture walk is how one of them would quietly stop reading the binding
+/// index from OCIO.
+bool fill_from_processor(const OCIO_NS::ConstProcessorRcPtr& processor,
+                         const char*                        function_name,
+                         const char*                        resource_prefix,
+                         const std::wstring&                what,
+                         gpu_target                         target,
+                         unsigned                           texture_binding_start,
+                         gpu_shader&                        out)
+{
+    auto gpu = processor->getDefaultGPUProcessor();
+
+    auto desc = OCIO_NS::GpuShaderDesc::CreateShaderDesc();
+    // GLSL 4.0 matches the OGL mixer's own shader; GLSL_VK_4_6 matches the Vulkan one.
+    // They differ in how samplers and uniforms are declared, so the two cannot share a
+    // generated program -- and do not, because the language leads OCIO's cache ID.
+    if (target == gpu_target::vulkan) {
+        desc->setLanguage(OCIO_NS::GPU_LANGUAGE_GLSL_VK_4_6);
+        // Set 1 for the generated transform's own resources. Binding 0 is OCIO's uniform
+        // buffer by its own contract, and textures start where the caller says -- because a
+        // layer can carry an input transform AND a display transform, both spliced into the
+        // same shader, and both would otherwise declare their first sampler at binding 1.
+        desc->setDescriptorSetIndex(1, texture_binding_start);
+    } else {
+        desc->setLanguage(OCIO_NS::GPU_LANGUAGE_GLSL_4_0);
+    }
+    desc->setFunctionName(function_name);
+    // Prefixing every generated identifier keeps a 55-space config from colliding with
+    // the ~200 uniforms the mixer's own shader already declares -- and keeps an input
+    // and a display transform, which are spliced into the SAME shader, from colliding
+    // with each other.
+    desc->setResourcePrefix(resource_prefix);
+
+    gpu->extractGpuShaderInfo(desc);
+
+    out = gpu_shader{};
+    out.cache_id            = desc->getCacheID();
+    out.source              = desc->getShaderText();
+    out.function_name       = desc->getFunctionName();
+    out.uniform_buffer_size = desc->getUniformBufferSize();
+
+    const unsigned num_2d = desc->getNumTextures();
+    for (unsigned i = 0; i < num_2d; ++i) {
+        const char*                        tex_name    = nullptr;
+        const char*                        samp_name   = nullptr;
+        unsigned                           w           = 0;
+        unsigned                           h           = 0;
+        OCIO_NS::GpuShaderDesc::TextureType channel     = OCIO_NS::GpuShaderDesc::TEXTURE_RGB_CHANNEL;
+        OCIO_NS::GpuShaderCreator::TextureDimensions dims = OCIO_NS::GpuShaderCreator::TEXTURE_2D;
+        OCIO_NS::Interpolation             interp      = OCIO_NS::INTERP_LINEAR;
+        desc->getTexture(i, tex_name, samp_name, w, h, channel, dims, interp);
+
+        const float* values = nullptr;
+        desc->getTextureValues(i, values);
+
+        gpu_texture t;
+        t.sampler_name       = samp_name ? samp_name : "";
+        t.dimensions         = dims == OCIO_NS::GpuShaderCreator::TEXTURE_1D ? 1 : 2;
+        t.width              = static_cast<int>(w);
+        t.height             = static_cast<int>(h);
+        t.channels           = channel == OCIO_NS::GpuShaderDesc::TEXTURE_RED_CHANNEL ? 1 : 3;
+        t.interpolate_linear = interp != OCIO_NS::INTERP_NEAREST;
+        // Asked for rather than computed as textureBindingStart + i: OCIO writes the
+        // binding into the source, and the two only coincide while nothing else claims
+        // an index.
+        t.binding            = static_cast<int>(desc->getTextureShaderBindingIndex(i));
+        if (values) {
+            const size_t n = static_cast<size_t>(w) * std::max(1u, h) * t.channels;
+            t.values.assign(values, values + n);
+        }
+        out.textures.push_back(std::move(t));
+    }
+
+    const unsigned num_3d = desc->getNum3DTextures();
+    for (unsigned i = 0; i < num_3d; ++i) {
+        const char*            tex_name  = nullptr;
+        const char*            samp_name = nullptr;
+        unsigned               edge      = 0;
+        OCIO_NS::Interpolation interp    = OCIO_NS::INTERP_LINEAR;
+        desc->get3DTexture(i, tex_name, samp_name, edge, interp);
+
+        const float* values = nullptr;
+        desc->get3DTextureValues(i, values);
+
+        gpu_texture t;
+        t.sampler_name       = samp_name ? samp_name : "";
+        t.dimensions         = 3;
+        t.edge_len           = static_cast<int>(edge);
+        t.channels           = 3;
+        t.interpolate_linear = interp != OCIO_NS::INTERP_NEAREST;
+        t.binding            = static_cast<int>(desc->get3DTextureShaderBindingIndex(i));
+        if (values) {
+            const size_t n = static_cast<size_t>(edge) * edge * edge * 3;
+            t.values.assign(values, values + n);
+        }
+        out.textures.push_back(std::move(t));
+    }
+
+    // Once per distinct transform, not once per frame. See g_logged_builds.
+    if (g_logged_builds.insert(out.cache_id).second) {
+        CASPAR_LOG(info) << L"[ocio] built " << what << L" ("
+                         << (target == gpu_target::vulkan ? L"vulkan" : L"opengl") << L"): cache_id "
+                         << u16(out.cache_id) << L", " << out.source.size() << L" chars of GLSL, " << num_2d
+                         << L" 1D/2D + " << num_3d << L" 3D textures, uniform buffer "
+                         << out.uniform_buffer_size << L" bytes";
+
+        // The generated source at debug level, not info: it is thousands of characters and
+        // would bury the log on every colour change. But when a transform looks wrong, this
+        // is the only place the actual arithmetic is visible -- the C++ that assembled it
+        // says nothing about what OCIO decided to emit.
+        CASPAR_LOG(debug) << L"[ocio] generated GLSL for " << what << L":\n" << u16(out.source);
+        for (const auto& t : out.textures) {
+            CASPAR_LOG(debug) << L"[ocio]   texture " << u16(t.sampler_name) << L" " << t.dimensions << L"D "
+                              << (t.dimensions == 3 ? t.edge_len : t.width) << L"x"
+                              << (t.dimensions == 3 ? t.edge_len : t.height) << L" ch=" << t.channels
+                              << L" binding=" << t.binding << L" values=" << t.values.size();
+        }
+    }
+
+    return true;
+}
+
+} // namespace
+
 bool build_input_transform(const std::string& source_space, gpu_shader& out, gpu_target target)
 {
     std::lock_guard<std::mutex> lock(g_mutex);
@@ -197,124 +337,51 @@ bool build_input_transform(const std::string& source_space, gpu_shader& out, gpu
     }
 
     try {
-        // The mixer grades in ACEScg. Named by role where possible so the same code works
-        // against a config that spells the space differently; ACES - ACEScg is the studio
-        // config's name for it.
-        const char* working = g_config->getColorSpace(OCIO_NS::ROLE_SCENE_LINEAR)
-                                  ? OCIO_NS::ROLE_SCENE_LINEAR
-                                  : "ACES - ACEScg";
-
-        auto processor = g_config->getProcessor(source_space.c_str(), working);
-        auto gpu       = processor->getDefaultGPUProcessor();
-
-        auto desc = OCIO_NS::GpuShaderDesc::CreateShaderDesc();
-        // GLSL 4.0 matches the OGL mixer's own shader; GLSL_VK_4_6 matches the Vulkan one.
-        // They differ in how samplers and uniforms are declared, so the two cannot share a
-        // generated program -- and do not, because the language leads OCIO's cache ID.
-        if (target == gpu_target::vulkan) {
-            desc->setLanguage(OCIO_NS::GPU_LANGUAGE_GLSL_VK_4_6);
-            // Set 1 for the generated transform's own resources; textures from binding 1,
-            // because OCIO reserves binding 0 of that set for its uniform buffer. Both halves
-            // are matched by the pipeline layout the Vulkan mixer declares.
-            desc->setDescriptorSetIndex(1, 1);
-        } else {
-            desc->setLanguage(OCIO_NS::GPU_LANGUAGE_GLSL_4_0);
-        }
-        desc->setFunctionName("caspar_ocio_input");
-        // Prefixing every generated identifier keeps a 55-space config from colliding with
-        // the ~200 uniforms the mixer's own shader already declares.
-        desc->setResourcePrefix("ocio_in_");
-
-        gpu->extractGpuShaderInfo(desc);
-
-        out = gpu_shader{};
-        out.cache_id            = desc->getCacheID();
-        out.source              = desc->getShaderText();
-        out.function_name       = desc->getFunctionName();
-        out.uniform_buffer_size = desc->getUniformBufferSize();
-
-        const unsigned num_2d = desc->getNumTextures();
-        for (unsigned i = 0; i < num_2d; ++i) {
-            const char*                        tex_name    = nullptr;
-            const char*                        samp_name   = nullptr;
-            unsigned                           w           = 0;
-            unsigned                           h           = 0;
-            OCIO_NS::GpuShaderDesc::TextureType channel     = OCIO_NS::GpuShaderDesc::TEXTURE_RGB_CHANNEL;
-            OCIO_NS::GpuShaderCreator::TextureDimensions dims = OCIO_NS::GpuShaderCreator::TEXTURE_2D;
-            OCIO_NS::Interpolation             interp      = OCIO_NS::INTERP_LINEAR;
-            desc->getTexture(i, tex_name, samp_name, w, h, channel, dims, interp);
-
-            const float* values = nullptr;
-            desc->getTextureValues(i, values);
-
-            gpu_texture t;
-            t.sampler_name       = samp_name ? samp_name : "";
-            t.dimensions         = dims == OCIO_NS::GpuShaderCreator::TEXTURE_1D ? 1 : 2;
-            t.width              = static_cast<int>(w);
-            t.height             = static_cast<int>(h);
-            t.channels           = channel == OCIO_NS::GpuShaderDesc::TEXTURE_RED_CHANNEL ? 1 : 3;
-            t.interpolate_linear = interp != OCIO_NS::INTERP_NEAREST;
-            // Asked for rather than computed as textureBindingStart + i: OCIO writes the
-            // binding into the source, and the two only coincide while nothing else claims
-            // an index.
-            t.binding            = static_cast<int>(desc->getTextureShaderBindingIndex(i));
-            if (values) {
-                const size_t n = static_cast<size_t>(w) * std::max(1u, h) * t.channels;
-                t.values.assign(values, values + n);
-            }
-            out.textures.push_back(std::move(t));
-        }
-
-        const unsigned num_3d = desc->getNum3DTextures();
-        for (unsigned i = 0; i < num_3d; ++i) {
-            const char*            tex_name  = nullptr;
-            const char*            samp_name = nullptr;
-            unsigned               edge      = 0;
-            OCIO_NS::Interpolation interp    = OCIO_NS::INTERP_LINEAR;
-            desc->get3DTexture(i, tex_name, samp_name, edge, interp);
-
-            const float* values = nullptr;
-            desc->get3DTextureValues(i, values);
-
-            gpu_texture t;
-            t.sampler_name       = samp_name ? samp_name : "";
-            t.dimensions         = 3;
-            t.edge_len           = static_cast<int>(edge);
-            t.channels           = 3;
-            t.interpolate_linear = interp != OCIO_NS::INTERP_NEAREST;
-            t.binding            = static_cast<int>(desc->get3DTextureShaderBindingIndex(i));
-            if (values) {
-                const size_t n = static_cast<size_t>(edge) * edge * edge * 3;
-                t.values.assign(values, values + n);
-            }
-            out.textures.push_back(std::move(t));
-        }
-
-        // Once per distinct transform, not once per frame. See g_logged_builds.
-        if (g_logged_builds.insert(out.cache_id).second) {
-            CASPAR_LOG(info) << L"[ocio] built " << u16(source_space) << L" -> " << u16(working) << L" ("
-                             << (target == gpu_target::vulkan ? L"vulkan" : L"opengl") << L"): cache_id "
-                             << u16(out.cache_id) << L", " << out.source.size() << L" chars of GLSL, " << num_2d
-                             << L" 1D/2D + " << num_3d << L" 3D textures, uniform buffer "
-                             << out.uniform_buffer_size << L" bytes";
-
-            // The generated source at debug level, not info: it is thousands of characters
-            // and would bury the log on every colour change. But when a transform looks
-            // wrong, this is the only place the actual arithmetic is visible -- the C++ that
-            // assembled it says nothing about what OCIO decided to emit.
-            CASPAR_LOG(debug) << L"[ocio] generated GLSL for " << u16(source_space) << L":\n" << u16(out.source);
-            for (const auto& t : out.textures) {
-                CASPAR_LOG(debug) << L"[ocio]   texture " << u16(t.sampler_name) << L" " << t.dimensions << L"D "
-                                  << (t.dimensions == 3 ? t.edge_len : t.width) << L"x"
-                                  << (t.dimensions == 3 ? t.edge_len : t.height) << L" ch=" << t.channels
-                                  << L" binding=" << t.binding << L" values=" << t.values.size();
-            }
-        }
-
-        return true;
+        const char* working = working_space_locked();
+        return fill_from_processor(g_config->getProcessor(source_space.c_str(), working),
+                                   "caspar_ocio_input",
+                                   "ocio_in_",
+                                   u16(source_space) + L" -> " + u16(working),
+                                   target,
+                                   INPUT_TEXTURE_BINDING_START,
+                                   out);
     } catch (const OCIO_NS::Exception& e) {
         CASPAR_LOG(error) << L"[ocio] could not build a transform from " << u16(source_space) << L": "
                           << u16(e.what());
+        return false;
+    }
+}
+
+bool build_display_transform(const std::string& display,
+                             const std::string& view,
+                             gpu_shader&        out,
+                             gpu_target         target)
+{
+    std::lock_guard<std::mutex> lock(g_mutex);
+    ensure_loaded_locked();
+    if (!g_config) {
+        CASPAR_LOG(error) << L"[ocio] cannot build a display transform: no config is loaded";
+        return false;
+    }
+
+    try {
+        const char* working = working_space_locked();
+        // FORWARD is working space -> display. The inverse direction is what a *display* used
+        // as a source needs, and that is build_input_transform's job via the colour space of
+        // the same name -- not this.
+        return fill_from_processor(g_config->getProcessor(working,
+                                                          display.c_str(),
+                                                          view.c_str(),
+                                                          OCIO_NS::TRANSFORM_DIR_FORWARD),
+                                   "caspar_ocio_display",
+                                   "ocio_out_",
+                                   u16(working) + L" -> " + u16(display) + L" / " + u16(view),
+                                   target,
+                                   DISPLAY_TEXTURE_BINDING_START,
+                                   out);
+    } catch (const OCIO_NS::Exception& e) {
+        CASPAR_LOG(error) << L"[ocio] could not build a display transform for " << u16(display) << L" / "
+                          << u16(view) << L": " << u16(e.what());
         return false;
     }
 }
@@ -335,6 +402,7 @@ std::vector<std::string> views(const std::string&) { return {}; }
 bool                     has_colorspace(const std::string&) { return false; }
 bool                     has_display_view(const std::string&, const std::string&) { return false; }
 bool                     build_input_transform(const std::string&, gpu_shader&, gpu_target) { return false; }
+bool build_display_transform(const std::string&, const std::string&, gpu_shader&, gpu_target) { return false; }
 
 #endif // CASPAR_ENABLE_OCIO
 

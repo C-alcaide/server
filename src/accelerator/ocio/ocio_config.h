@@ -89,11 +89,35 @@ enum class gpu_target
     vulkan  ///< GPU_LANGUAGE_GLSL_VK_4_6 at descriptor set 1, textures from binding 1
 };
 
+/// Where each kind of transform's textures start in the Vulkan descriptor set.
+///
+/// A layer can carry an input transform and a display transform at once, spliced into the
+/// same shader. Both would otherwise declare their first sampler at binding 1 and collide,
+/// so they get disjoint ranges: **input 1..4, display 5..8**, inside the 8 bindings the
+/// mixer's descriptor set 1 reserves. Binding 0 is OCIO's uniform buffer by its own
+/// contract and belongs to neither.
+///
+/// The split is 4/4 because of what was measured across the pinned studio config: an input
+/// transform emits at most **1** texture (55 colour spaces checked) and a display transform
+/// at most **3** (all 41 display/view combinations checked). Both sides have headroom, and
+/// exceeding a range is refused rather than silently overlapping.
+///
+/// Meaningless on the OpenGL target, which declares no bindings and takes texture units the
+/// caller assigns.
+constexpr unsigned INPUT_TEXTURE_BINDING_START   = 1;
+constexpr unsigned DISPLAY_TEXTURE_BINDING_START = 5;
+
 /// One LUT the generated shader samples. The application owns uploading it.
 struct gpu_texture
 {
     std::string sampler_name; ///< the sampler as declared in the generated source
-    int         dimensions = 2; ///< 1, 2 or 3
+
+    /// 1, 2 or 3 — and **1 really happens**. Display transforms declare `sampler1D` for
+    /// their reach and gamut-cusp tables; input transforms never did, so a backend that
+    /// treats "not 3D" as "2D" is wrong the moment a display transform is added. On Vulkan
+    /// the image view type must match what the shader declares, so a 1D LUT needs an `e1D`
+    /// image and view, not an Nx1 2D one.
+    int         dimensions = 2;
     int         width      = 0;
     int         height     = 1;
     int         edge_len   = 0; ///< 3D only: values are edge_len^3 * 3
@@ -144,5 +168,25 @@ struct gpu_shader
 bool build_input_transform(const std::string& source_space,
                            gpu_shader&        out,
                            gpu_target         target = gpu_target::opengl);
+
+/// Build the GLSL for the mixer's working space -> `display` / `view`.
+///
+/// The output half of an OCIO pipeline: tone mapping, gamut compression and the display's
+/// own encoding, which together are what "an ACES look" means to an operator. It replaces
+/// the mixer's built-in `working_to_output` matrix plus OETF, exactly as an input transform
+/// replaces the built-in EOTF plus `input_to_working`.
+///
+/// Measured across all 41 display/view combinations in the pinned studio config: at most 3
+/// textures, no 3D LUT, no dynamic uniform. So this needs nothing from the Vulkan side that
+/// an input transform did not already need -- the same descriptor set 1, the same 2D image
+/// views, the same unused uniform buffer at binding 0. The generated source is an order of
+/// magnitude larger though (~16 KB against ~1.5 KB), which is paid at compile time.
+///
+/// Same failure contract as build_input_transform: nothing on failure, having logged why,
+/// and a caller must refuse the command rather than render without it.
+bool build_display_transform(const std::string& display,
+                             const std::string& view,
+                             gpu_shader&        out,
+                             gpu_target         target = gpu_target::opengl);
 
 }}} // namespace caspar::accelerator::ocio
