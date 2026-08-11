@@ -131,6 +131,17 @@ const uint F_STRAIGHT_ALPHA=1u<<0, F_LOCAL_KEY=1u<<1, F_LAYER_KEY=1u<<2,
 bool flag(uint f) { return (flags & f) != 0u; }
 
 // Extended flags (flags2)
+// F_COLOR_GRADING (first word, bit 10) used to gate BOTH the input conversion and the
+// output conversion. An OCIO input transform owns only the input half -- it converts the
+// source encoding to the working space itself and still needs the shader to encode the
+// result for the display -- so the two halves need separate gates.
+//
+// They live in the second word because the first is full: F_EDGE_BLEND is bit 31.
+//
+// F_COLOR_GRADING is still set by the paths that own both halves, and the shader now reads
+// these two instead. Every pre-existing path sets both, so the behaviour is unchanged.
+const uint F2_INPUT_CONVERT=1u<<3;
+const uint F2_OUTPUT_CONVERT=1u<<4;
 const uint F2_OUTPUT_BGRA=1u<<0;
 const uint F2_ICVFX=1u<<1;
 const uint F2_BLEND_MASK=1u<<2;
@@ -446,6 +457,10 @@ float sdf_ellipse(vec2 p,vec2 ab){p=abs(p);if(p.x>p.y){p=p.yx;ab=ab.yx;}float l=
 vec4 shape_fill(vec2 uv){if(shape_fill_type==0)return shape_color1;float t;if(shape_fill_type==1){float r=shape_gradient_angle*PI/180.0;t=dot(uv-0.5,vec2(cos(r),sin(r)))+0.5;}else if(shape_fill_type==2)t=length(uv-shape_gradient_center)/0.5;else{vec2 d=uv-shape_gradient_center;t=atan(d.y,d.x)/(2.0*PI)+0.5;}return mix(shape_color1,shape_color2,clamp(t,0.0,1.0));}
 
 // ── Main ────────────────────────────────────────────────────────────────
+// A generated colour transform's declarations are spliced here. Empty for the base program,
+// which is what keeps the base SPIR-V identical to what glslc produces at build time.
+//__CASPAR_OCIO_DECLARATIONS__
+
 void main(){
     vec2 buv=TexCoord.st/TexCoord.q;vec4 col;
     // Destination curve compensation composes with the source projection:
@@ -462,7 +477,15 @@ void main(){
     if(flag(F_SHARPEN)){col.rgb=apply_sharpen(uv,col.rgb,sharpen_amount,sharpen_radius);}
     if(flag(F_STRAIGHT_ALPHA))col.rgb*=col.a;
 
-    if(flag(F_COLOR_GRADING)){col.rgb=apply_eotf(col.rgb,input_transfer);col.rgb*=exposure;col.rgb=ubo_mat3(input_to_working_c0,input_to_working_c1,input_to_working_c2)*col.rgb;if(flag(F_GAMUT_COMPRESS))col.rgb=apply_gamut_compress(col.rgb,gc_limit_pad.xyz);}
+    if(flag2(F2_INPUT_CONVERT)){col.rgb=apply_eotf(col.rgb,input_transfer);col.rgb*=exposure;col.rgb=ubo_mat3(input_to_working_c0,input_to_working_c1,input_to_working_c2)*col.rgb;if(flag(F_GAMUT_COMPRESS))col.rgb=apply_gamut_compress(col.rgb,gc_limit_pad.xyz);}
+    // A generated colour transform's call is spliced here, replacing the input block above
+    // rather than following it: MIXER OCIO and MIXER COLORSPACE are mutually exclusive, so
+    // F2_INPUT_CONVERT is clear whenever this is non-empty.
+    //
+    // NO SWIZZLE, unlike the OGL shader. This one carries true RGB -- see the matrix
+    // multiply above, which uses col.rgb directly where OGL uses col.bgr. Adding a swizzle
+    // here would mirror the hue wheel while leaving every grey correct.
+    //__CASPAR_OCIO_TRANSFORM__
     if(flag(F_CDL))col.rgb=apply_cdl(col.rgb,cdl_slope_sat.xyz,cdl_offset_pad.xyz,cdl_power_pad.xyz,cdl_slope_sat.w);
     if(flag(F_LUT3D))col.rgb=apply_lut3d(col.rgb,lut3d_strength);
     if(flag(F_LINEAR_SAT))col.rgb=apply_linear_sat(col.rgb,linear_sat_value);
@@ -490,7 +513,7 @@ void main(){
     // (matches ogl/image/shader.frag — blend modes must operate on 0-1
     // display values, and mixing a graded layer with an already-encoded
     // background must not double-encode either one).
-    if(flag(F_COLOR_GRADING)){if(tone_mapping_op>0)col.rgb=apply_tone_mapping(col.rgb,tone_mapping_op);col.rgb=ubo_mat3(working_to_output_c0,working_to_output_c1,working_to_output_c2)*col.rgb;if(tone_mapping_op==0)col.rgb=clamp(col.rgb,0.0,1.0);col.rgb=apply_oetf(col.rgb,output_transfer);}
+    if(flag2(F2_OUTPUT_CONVERT)){if(tone_mapping_op>0)col.rgb=apply_tone_mapping(col.rgb,tone_mapping_op);col.rgb=ubo_mat3(working_to_output_c0,working_to_output_c1,working_to_output_c2)*col.rgb;if(tone_mapping_op==0)col.rgb=clamp(col.rgb,0.0,1.0);col.rgb=apply_oetf(col.rgb,output_transfer);}
 
     col*=opacity;
     if(flag(F_LOCAL_KEY))col.a*=texture(textures[LOCAL_KEY],TexCoord2.st).r;

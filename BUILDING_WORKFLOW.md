@@ -415,6 +415,25 @@ a long prefix (a temp dir with a UUID in it, say) it does not.
 rename the build tree, suspect this before suspecting the toolset. Building with
 `-DENABLE_OCIO=OFF` skips it entirely and is a fast way to confirm the diagnosis.
 
+### #6b — `glslangValidator -S frag` rejects the *Vulkan* shader
+
+The syntax check quoted in `CLAUDE.md` works for `ogl/image/shader.frag` and fails on
+`vulkan/image/fragment_shader.frag`:
+
+```
+ERROR: 0:14: 'input_attachment_index' : only allowed when using GLSL for Vulkan
+```
+
+That is the checker's default target, not a defect in the shader. Either pass a Vulkan
+target, or use the compiler the build actually uses:
+
+```powershell
+& "C:\VulkanSDK\1.4.341.1\Bin\glslc.exe" src\accelerator\vulkan\image\fragment_shader.frag -o out.spv
+```
+
+Worth knowing because following the documented command after editing that shader produces
+two errors that look exactly like your edit broke something.
+
 ### #7 — Deployed DLLs are stale after `--target casparcg`
 
 `--target casparcg` links the executable. It does **not** copy runtime DLLs: that is a

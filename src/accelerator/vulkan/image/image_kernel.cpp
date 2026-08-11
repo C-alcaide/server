@@ -1175,7 +1175,10 @@ struct image_kernel::impl
 
             const auto& cg = transforms.image_transform.color_grade;
             if (cg.enable) {
+                // MIXER COLORSPACE owns both halves of the conversion.
                 uniforms.flags |= static_cast<uint32_t>(shader_flags::color_grading);
+                uniforms.flags2 |= static_cast<uint32_t>(shader_flags2::input_convert) |
+                                   static_cast<uint32_t>(shader_flags2::output_convert);
                 uniforms.input_transfer  = cg.input_transfer;
                 uniforms.output_transfer = cg.output_transfer;
                 uniforms.tone_mapping_op = cg.tone_mapping;
@@ -1273,7 +1276,10 @@ struct image_kernel::impl
                     int ot = oetf_index(params.target_color_transfer);
                     // Use channel's configured auto tone-map operator (default: hard clamp).
                     int tm = params.auto_tone_map;
+                    // auto-color-convert owns both halves too.
                     uniforms.flags |= static_cast<uint32_t>(shader_flags::color_grading);
+                    uniforms.flags2 |= static_cast<uint32_t>(shader_flags2::input_convert) |
+                                       static_cast<uint32_t>(shader_flags2::output_convert);
                     uniforms.input_transfer  = it;
                     uniforms.output_transfer = ot;
                     uniforms.tone_mapping_op = tm;

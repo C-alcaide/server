@@ -262,6 +262,15 @@ enum class shader_flags2 : uint32_t
     output_bgra  = 1u << 0,  // Apply .bgra swizzle on fragment output (8-bit path)
     icvfx_enable = 1u << 1,  // Inner/outer frustum (in-camera VFX) blend active
     blend_mask   = 1u << 2,  // Per-pixel projection blend mask multiply active
+    // The input and output halves of the colour conversion, gated separately.
+    //
+    // shader_flags::color_grading (first word, bit 10) used to gate both. An OCIO input
+    // transform owns only the input half, so the two need separate gates -- and they live
+    // here because the first word is full (edge_blend is bit 31).
+    //
+    // Every path that owns both halves sets both of these, so behaviour is unchanged.
+    input_convert  = 1u << 3,
+    output_convert = 1u << 4,
 };
 
 }}} // namespace caspar::accelerator::vulkan
