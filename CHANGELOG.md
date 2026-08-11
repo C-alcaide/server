@@ -1,6 +1,63 @@
 CasparVP — Unreleased
 ==========================================
 
+### Fixed: `MIXER OCIO` on a Vulkan channel was accepted and then discarded
+
+`MIXER 1-1 OCIO "ACEScct"` returned `202 OK` on a Vulkan channel, logged its processor
+build, and changed nothing — because the value never reached the mixer.
+
+`accelerator/vulkan/util/transforms.cpp`'s `apply_transform_colour_values` merges the
+image transform **field by field**, and `ocio` was not one of the fields it copied. The
+OpenGL copy of that function has carried the member since the OCIO work began, together
+with a comment saying precisely what happens when one is missed:
+
+> Easy to miss, and it fails silently: this merge is explicit field by field, so a new
+> `image_transform` member that is not listed here simply never reaches the kernel. The
+> symptom is a command that reports 202 and changes nothing.
+
+That is the whole defect. It was found while wiring the Vulkan side of the OCIO input
+transform: the kernel's new code did not run, the server log carried the AMCP command's
+`(opengl)` validation build and no `(vulkan)` build at all, and every downstream symptom
+was of a value that was never delivered rather than of anything the mixer computed.
+
+No rendered output changes yet — the Vulkan shader splice (A4f) is still to come, so an
+OCIO transform on that mixer remains a no-op end to end. What changes is that the
+transform now reaches the kernel, which is the prerequisite for it doing anything at all.
+Verified by the OCIO battery re-run being bit-identical before and after
+(0/6 on Vulkan, worst 143.39 LSB, unchanged), with the log showing the Vulkan build and
+LUT upload now happening for exactly the two colour spaces that emit a texture.
+
+### Fixed: OCIO logged a full processor description every frame
+
+`build_input_transform` is called per layer per frame — both kernels ask OCIO for the
+transform first and consult their own caches afterwards, because OCIO's cache ID is what
+they key on and only OCIO can produce it. Its `info`-level "built X -> Y" line therefore
+went to the log 25 times a second per layer with an OCIO transform set. It is now emitted
+once per distinct cache ID, and reset when a config is loaded.
+
+### Added: Vulkan mixer generates and uploads OCIO's resources (A4e)
+
+`build_input_transform` takes a `gpu_target`, and the Vulkan mixer asks for
+`GPU_LANGUAGE_GLSL_VK_4_6` with `setDescriptorSetIndex(1, 1)`. The generated LUTs are
+uploaded as Vulkan images and written into descriptor set 1 at the bindings OCIO declared
+in the source, read back from `getTextureShaderBindingIndex()` rather than assumed.
+
+Two things were measured across all 55 colour spaces in the pinned studio config before
+any of it was wired:
+
+* **Nothing emits a 3D texture or declares `sampler3D`.** Every LUT-bearing space produces
+  one 2D single-channel image; the most any space needs is one. The 3D path is implemented
+  anyway, on the same two helpers `MIXER LUT3D` already exercises.
+* **Nothing emits a uniform buffer** — `getUniformBufferSize()` is 0 everywhere, because an
+  input transform has no dynamic property. The reserved binding 0 stays declared and
+  written as a zero-filled placeholder, which is legal and is what a display transform with
+  a dynamic exposure would use.
+
+Verified under the Khronos validation layers, forced on via the loader because the server
+requests them only under `_DEBUG`: **0 VUIDs** across four colour spaces, with a
+best-practices positive control proving the layers were reporting rather than merely
+loaded (`CasparCG-TestRunner`, `cli.py vk-validation`).
+
 ### Fixed: `PRINT RAW` wrote nothing on the GPU-direct path, and said `202 OK` anyway
 
 Two independent bugs, and the second is why the first went unnoticed for so long.
