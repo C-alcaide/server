@@ -48,6 +48,14 @@ cmake --build d:\Github\CasparVP\build --target casparcg
 - Confirm the build happened: `build\shell\casparcg.exe`'s `LastWriteTime` must be
   newer than the newest file under `src\`. A no-op invocation leaves it older, and an
   inherited binary may not match the tree.
+- **A header change does not trigger a rebuild, and the timestamp check above will not
+  notice.** Ninja's localized `/showIncludes` prefix is stored with a broken encoding, so it
+  records no header dependencies at all: only the `.cpp` files you also edited get
+  recompiled, and everything else keeps objects built against the old header. Change a class
+  layout or a vtable and the result is a binary whose halves disagree — which presented once
+  as a reproducible `0xC0000409` abort in the Vulkan mixer that bisected cleanly to an
+  innocent commit. **Touch every source before building whenever a header changed**;
+  `BUILDING_WORKFLOW.md` has the one-liner and the full account.
 - A wrong `vcvars` path fails as `C1083: cannot open include file 'cstdint'` on every
   translation unit. Missing *standard library* headers means the environment was never
   initialised — don't go looking at the includes.

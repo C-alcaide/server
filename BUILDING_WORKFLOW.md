@@ -192,6 +192,71 @@ A build was successful if:
 - The `.lib` / `.exe` timestamp matches the time the build ran
 - No `error C` or `error LNK` lines appear in the output
 
+**None of that detects the failure below.** All three were true of a binary whose object
+files disagreed with each other about a class layout.
+
+---
+
+## ⚠ Header changes do NOT trigger a rebuild in this tree
+
+**Editing a `.h` and rebuilding produces a binary in which only the `.cpp` files you also
+edited saw the change.** Every other translation unit keeps an object file compiled against
+the old header. If the header changed a class layout, a vtable, or an enum, those objects
+are now lying to each other and the program does undefined things at runtime.
+
+### Why
+
+Ninja learns header dependencies from MSVC's `/showIncludes` output by matching a prefix
+string, which CMake probes at configure time and writes to
+`build/CMakeFiles/rules.ninja`. On this machine `cl.exe` is **Spanish-localized**, and the
+probe was stored with a broken encoding:
+
+```
+msvc_deps_prefix = Nota: inclusi<?> del archivo:      <-- the ó is mojibake
+```
+
+`cl.exe` emits `Nota: inclusión del archivo:` correctly at build time, the comparison never
+matches, and ninja records **zero** header dependencies for every object in the tree.
+`VSLANG=1033` does not fix it — only the Spanish resource pack is installed, so `cl` stays
+localized regardless.
+
+### What it cost
+
+An afternoon, and it very nearly landed as a fabricated bug report. After a change that
+added one virtual to `frame_context` and one member to `layer_info` (both in
+`vulkan/util/renderpass.h`), the server began aborting with `0xC0000409` on the first
+composited frame under the Vulkan validation layers. It reproduced perfectly, bisected
+cleanly to the commit, and reproduced with **no OCIO in the path at all** — every sign of a
+real defect in the mixer. It was a stale object file calling through a shifted vtable slot.
+A full rebuild made it vanish and it has never returned.
+
+The tell, in hindsight: **zero validation messages before the abort.** The layers were not
+reporting a violation, so nothing was wrong with the Vulkan usage; something was jumping to
+the wrong address.
+
+### What to do
+
+**Whenever you change a header, touch every source before building:**
+
+```powershell
+Get-ChildItem d:\Github\CasparVP\src -Recurse -Include *.cpp,*.h -File |
+    ForEach-Object { $_.LastWriteTime = Get-Date }
+```
+
+Then build as usual. It is a full recompile of the project's own translation units (~286
+targets, several minutes); it does **not** rebuild the external projects, so it is far
+cheaper than a `--clean-first`.
+
+If you only edited `.cpp` files, an ordinary incremental build is correct and fast.
+
+### Fixing it properly
+
+Correct the prefix in `build/CMakeFiles/rules.ninja` to the exact bytes `cl.exe` emits, or
+re-run the CMake configure in a console whose codepage matches what CMake reads. Either way
+the fix is undone by the next configure until the root cause is addressed upstream, so the
+touch-everything rule stays the safe default. Installing the English MSVC language pack
+would make the prefix pure ASCII and end the problem outright.
+
 ---
 
 ## Forcing a recompile of specific files
