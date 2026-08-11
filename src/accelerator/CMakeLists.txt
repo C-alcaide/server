@@ -123,6 +123,14 @@ IF(ENABLE_VULKAN)
 	target_compile_definitions(accelerator PRIVATE VULKAN_HPP_DISPATCH_LOADER_DYNAMIC=1)
 ENDIF()
 
+# OpenColorIO lives in the mixer, so the accelerator is where it links. The link directory
+# comes from Bootstrap_Windows.cmake's link_directories() on the ExternalProject install
+# tree, the same way ffmpeg and zlib are handled.
+IF(ENABLE_OCIO)
+	target_include_directories(accelerator PRIVATE ${OCIO_INCLUDE_PATH})
+	target_link_libraries(accelerator PRIVATE OpenColorIO)
+ENDIF()
+
 source_group(sources ./.*)
 source_group(sources\\cpu\\image cpu/image/.*)
 source_group(sources\\cpu\\util cpu/util/.*)

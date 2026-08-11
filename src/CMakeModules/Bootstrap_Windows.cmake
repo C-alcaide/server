@@ -184,6 +184,57 @@ ExternalProject_Get_Property(zlib BINARY_DIR)
 set(ZLIB_INCLUDE_PATH "${SOURCE_DIR};${BINARY_DIR}")
 link_directories(${BINARY_DIR})
 
+# OPENCOLORIO — colour management for the mixer.
+#
+# Built from source as an ExternalProject rather than taken from a package manager,
+# because the whole tree is pinned to MSVC 14.50 (nvcc 12.9 cannot use 14.51) and
+# EXTERNAL_CMAKE_ARGS forwards that pinned compiler/linker/ar/mt down, exactly as zlib
+# above relies on. A previously abandoned attempt (b304665b8) instead pulled MSYS2/MinGW64
+# binaries into this MSVC process -- libOpenColorIO plus libstdc++-6, libgcc_s_seh-1 and
+# libwinpthread-1 -- which is two C++ runtimes and two heaps in one address space. Do not
+# do that again; see docs/OCIO_INTEGRATION_STUDY.md section 1.3.
+#
+# OCIO_INSTALL_EXT_PACKAGES=ALL has OCIO download and statically link its own dependencies
+# (Imath, yaml-cpp, pystring, minizip-ng, expat, zlib) into the one OpenColorIO DLL, so
+# this adds a single runtime dependency rather than six.
+#
+# ⚠ PATH LENGTH. That option nests each dependency under
+# <build>/ext/build/<dep>/src/<dep>_install-build/..., which is deep. A probe run from a
+# directory with a long name blew Windows' 250-character object-path limit inside expat's
+# TryCompile, and the failure names neither OCIO nor the path -- it surfaces as a broken
+# sub-build. Keep the build directory shallow; verified working from d:/Github/CasparVP/build.
+option(ENABLE_OCIO "Enable OpenColorIO colour management" ON)
+if (ENABLE_OCIO)
+	message(STATUS "CHECKPOINT: Adding OpenColorIO")
+	casparcg_add_external_project(opencolorio)
+	ExternalProject_Add(opencolorio
+		GIT_REPOSITORY https://github.com/AcademySoftwareFoundation/OpenColorIO.git
+		# 2.5.2 is a floor, not a preference: 2.5.1 reworked the Vulkan texture binding
+		# indices and broke ABI, and 2.5.2 fixes CVE-2026-42450, stack buffer overflows in
+		# the .spi3d/.spi1d/.cube/.lut parsers. This server already ingests
+		# operator-supplied LUT files.
+		GIT_TAG        v2.5.2
+		GIT_SHALLOW    TRUE
+		CMAKE_ARGS     ${EXTERNAL_CMAKE_ARGS}
+		               "-DCMAKE_INSTALL_PREFIX:PATH=<INSTALL_DIR>"
+		               -DOCIO_INSTALL_EXT_PACKAGES=ALL
+		               -DOCIO_BUILD_APPS=OFF
+		               -DOCIO_BUILD_PYTHON=OFF
+		               -DOCIO_BUILD_TESTS=OFF
+		               -DOCIO_BUILD_GPU_TESTS=OFF
+		               -DOCIO_BUILD_DOCS=OFF
+		               -DOCIO_BUILD_NUKE=OFF
+		               # 14.50 emits warnings OCIO's CI has not seen; a new warning must
+		               # not fail this build.
+		               -DOCIO_WARNING_AS_ERROR=OFF
+	)
+	ExternalProject_Get_Property(opencolorio INSTALL_DIR)
+	set(OCIO_INCLUDE_PATH "${INSTALL_DIR}/include")
+	link_directories("${INSTALL_DIR}/lib")
+	casparcg_add_runtime_dependency("${INSTALL_DIR}/bin/OpenColorIO_2_5.dll")
+	add_definitions(-DCASPAR_ENABLE_OCIO)
+endif ()
+
 # OpenFX (host) — used by the ofx module to load OFX plug-ins.
 # We vendor the OpenFX C API headers + the BSD-3 HostSupport C++ library and build
 # HostSupport as an internal static lib (openfx_host). HostSupport uses expat for its
