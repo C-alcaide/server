@@ -100,7 +100,18 @@ uniform vec3  icvfx_inner_gain;   // inner-region RGB gain (white-balance / tint
 uniform vec3  icvfx_outer_gain;   // outer-region RGB gain (white-balance / tint)
 
 // Color Grading (ACES workflow)
-uniform bool  color_grading;
+// The input and output halves of the colour conversion are gated separately.
+//
+// They used to share one `color_grading` flag, which was fine while the only producers of a
+// conversion were MIXER COLORSPACE and auto-color-convert -- both of which own both halves.
+// An OCIO input transform owns only the input half: it converts the source encoding to the
+// working space itself, and still needs the shader to encode the result for the display.
+// With a single flag, enabling OCIO would have skipped the output block too and left the
+// layer in scene-linear ACEScg with no OETF -- not subtly wrong but obviously so.
+//
+// Every path that existed before this split sets both to the same value.
+uniform bool  do_input_convert;
+uniform bool  do_output_convert;
 uniform int   input_transfer;    // 0=linear,1=srgb,2=rec709,3=pq,4=hlg,5=logc3,6=slog3
 uniform int   output_transfer;
 uniform mat3  input_to_working;  // input gamut -> ACEScg (AP1)
@@ -1715,7 +1726,7 @@ void main()
         col.rgb *= col.a;
 
     // Convert input -> working space (Linear ACEScg usually)
-    if (color_grading) {
+    if (do_input_convert) {
         // EOTF: encoded -> linear (unless input is already linear)
         col.rgb = apply_eotf(col.rgb, input_transfer);
 
@@ -1843,7 +1854,7 @@ void main()
     // This ensures correct compositing when layers have different color
     // spaces/transfers (e.g. HDR PQ over SDR) and makes blend modes
     // (Multiply, Screen, etc.) operate on 0-1 display values as designed.
-    if (color_grading) {
+    if (do_output_convert) {
         // Tone Mapping (LDR compression)
         if (tone_mapping_op > 0) {
             col.rgb = apply_tone_mapping(col.rgb, tone_mapping_op);

@@ -504,7 +504,9 @@ struct image_kernel::impl
         if (cg.enable) {
             int ig = std::min(std::max(cg.input_gamut,  0), 6);
             int og = std::min(std::max(cg.output_gamut, 0), 6);
-            shader_->set("color_grading",     true);
+            // MIXER COLORSPACE owns both halves of the conversion.
+            shader_->set("do_input_convert",  true);
+            shader_->set("do_output_convert", true);
             shader_->set("input_transfer",    cg.input_transfer);
             shader_->set("output_transfer",   cg.output_transfer);
             shader_->set("tone_mapping_op",   cg.tone_mapping);
@@ -609,13 +611,16 @@ struct image_kernel::impl
             int og = gamut_index(params.target_color_space);
             // Skip if the mapped indices are identical (e.g. bt601 source on bt709 channel)
             if (ig == og && params.pix_desc.color_transfer == params.target_color_transfer) {
-                shader_->set("color_grading", false);
+                shader_->set("do_input_convert",  false);
+                shader_->set("do_output_convert", false);
             } else {
                 int it = eotf_index(params.pix_desc.color_transfer);
                 int ot = oetf_index(params.target_color_transfer);
                 // Use channel's configured auto tone-map operator (default: hard clamp).
                 int tm = params.auto_tone_map;
-                shader_->set("color_grading",     true);
+                // auto-color-convert owns both halves too.
+                shader_->set("do_input_convert",  true);
+                shader_->set("do_output_convert", true);
                 shader_->set("input_transfer",    it);
                 shader_->set("output_transfer",   ot);
                 shader_->set("tone_mapping_op",   tm);
@@ -728,7 +733,8 @@ struct image_kernel::impl
                     << L" tgt_ct=" << static_cast<int>(params.target_color_transfer)
                     << L" fmt=" << static_cast<int>(params.pix_desc.format);
             }
-            shader_->set("color_grading", false);
+            shader_->set("do_input_convert",  false);
+            shader_->set("do_output_convert", false);
         }
 
         // Setup blend_func
