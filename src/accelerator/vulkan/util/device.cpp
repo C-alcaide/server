@@ -25,6 +25,9 @@
 #include "buffer.h"
 #include "pipeline.h"
 #include <cstdlib>
+#include <string>
+#include <mutex>
+#include <map>
 #include "glsl_compiler.h"
 
 #pragma warning(push)
@@ -158,8 +161,26 @@ struct device::impl : public std::enable_shared_from_this<impl>
     uint8_t _device_luid[8] = {};
     bool    _device_luid_valid = false;
 
-    // One pipeline per attachment format, indexed as attachment_pools_ is.
+    // One pipeline per attachment format, indexed as attachment_pools_ is. These are the
+    // BASE pipelines, built from the SPIR-V glslc produced at configure time, and they are
+    // kept as a fixed array rather than folded into the cache below so that the path taken
+    // by every existing draw is unchanged and cannot be perturbed by cache behaviour.
     std::array<std::shared_ptr<pipeline>, 3> _pipelines;
+
+    // Pipelines for generated colour transforms, keyed on (variant id, attachment format).
+    //
+    // A Vulkan pipeline is bound to its shader module, so a variant is a whole pipeline and
+    // not merely a different program -- which is why this exists on Vulkan and the OGL side
+    // needed only a shader cache. The format is part of the key because a pipeline is also
+    // bound to its attachment format: the same transform on an 8-bit and an fp16 channel are
+    // two pipelines.
+    //
+    // Unbounded on purpose, unlike the OGL shader cache's retention window. The number of
+    // live variants is bounded by the number of distinct colour spaces in use on this device,
+    // which is small and operator-driven; evicting a pipeline that a later draw needs would
+    // trade a bounded amount of memory for an unbounded recompile stall on the frame path.
+    std::map<std::pair<std::string, int>, std::shared_ptr<pipeline>> _variant_pipelines;
+    std::mutex                                                      _variant_mutex;
 
     struct inflight_command_buffer
     {
@@ -1493,6 +1514,39 @@ vk::CommandPool    device::getCommandPool() const { return impl_->_command_pool;
 std::shared_ptr<pipeline> device::get_pipeline(common::bit_depth depth, common::render_format render_format)
 {
     return impl_->_pipelines[impl::attachment_pool_index(depth, render_format)];
+}
+
+std::shared_ptr<pipeline> device::get_variant_pipeline(common::bit_depth            depth,
+                                                      common::render_format        render_format,
+                                                      const std::string&           variant_id,
+                                                      const std::vector<uint32_t>& frag_spirv)
+{
+    // An empty id means the base program; do not build a second copy of it.
+    if (variant_id.empty() || frag_spirv.empty())
+        return get_pipeline(depth, render_format);
+
+    const auto format_index = impl::attachment_pool_index(depth, render_format);
+    const auto key          = std::make_pair(variant_id, format_index);
+
+    std::lock_guard<std::mutex> lock(impl_->_variant_mutex);
+
+    auto it = impl_->_variant_pipelines.find(key);
+    if (it != impl_->_variant_pipelines.end())
+        return it->second;
+
+    // Built on the calling thread. Callers must not reach this from the frame path -- see
+    // the note on the OGL shader cache; the same applies here and more so, because a Vulkan
+    // pipeline build is the driver's SPIR-V-to-ISA step on top of the shaderc compile.
+    auto built = std::make_shared<pipeline>(impl_->_device,
+                                            impl::attachment_format(depth, render_format),
+                                            impl_->_memoryProperties,
+                                            frag_spirv);
+    impl_->_variant_pipelines.emplace(key, built);
+
+    CASPAR_LOG(info) << L"[vulkan::device] built a variant pipeline for '" << u16(variant_id)
+                     << L"' at format index " << format_index << L" (" << impl_->_variant_pipelines.size()
+                     << L" cached)";
+    return built;
 }
 
 std::shared_ptr<texture> device::create_attachment(int                   width,

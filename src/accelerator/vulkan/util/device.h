@@ -25,6 +25,8 @@
 #include <common/array.h>
 #include <common/bit_depth.h>
 #include <common/render_format.h>
+#include <vector>
+#include <string>
 #include <core/frame/geometry.h>
 
 #include <functional>
@@ -54,6 +56,20 @@ class device final
 
     /// The pipeline built against the attachment format this (depth, render_format) pair
     /// implies. A pipeline is bound to one attachment format, so fp16 needs its own.
+    /// The pipeline for a generated colour transform, built on first request.
+    ///
+    /// Keyed on (variant_id, attachment format): a Vulkan pipeline is bound to both its
+    /// shader module and its attachment format, so the same transform on an 8-bit and an
+    /// fp16 channel are two pipelines. An empty variant_id or empty SPIR-V returns the base
+    /// pipeline rather than building a duplicate of it.
+    ///
+    /// Builds on the calling thread and must not be called from the frame path: this is the
+    /// driver's SPIR-V-to-ISA step on top of shaderc's compile.
+    std::shared_ptr<class pipeline> get_variant_pipeline(common::bit_depth            depth,
+                                                        common::render_format        render_format,
+                                                        const std::string&           variant_id,
+                                                        const std::vector<uint32_t>& frag_spirv);
+
     std::shared_ptr<class pipeline> get_pipeline(common::bit_depth     depth,
                                                 common::render_format render_format = common::render_format::unorm);
     std::pair<vk::Buffer, vk::DeviceMemory>
