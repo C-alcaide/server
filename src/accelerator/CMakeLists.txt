@@ -58,6 +58,7 @@ IF(ENABLE_VULKAN)
 		vulkan/util/texture_wrapper.cpp
 		vulkan/util/d3d11_import_bridge.cpp
 		vulkan/util/gl_export_bridge.cpp
+		vulkan/util/glsl_compiler.cpp
 	)
 	set(VULKAN_HEADERS
 		vulkan/image/image_mixer.h
@@ -73,6 +74,7 @@ IF(ENABLE_VULKAN)
 		vulkan/util/draw_params.h
 		vulkan/util/uniform_block.h
 		vulkan/util/texture_wrapper.h
+		vulkan/util/glsl_compiler.h
 		vulkan/util/d3d11_import_bridge.h
 		vulkan/util/gl_export_bridge.h
 
@@ -121,6 +123,15 @@ target_link_libraries(accelerator PRIVATE common core GLEW::glew sfml-window)
 IF(ENABLE_VULKAN)
 	target_link_libraries(accelerator PRIVATE vk-bootstrap::vk-bootstrap VulkanMemoryAllocator Vulkan::Headers)
 	target_compile_definitions(accelerator PRIVATE VULKAN_HPP_DISPATCH_LOADER_DYNAMIC=1)
+
+	# shaderc, for compiling a generated colour transform to SPIR-V at runtime. The mixer's
+	# own shader is still compiled at build time by glslc and embedded; this is only for
+	# source that does not exist until a transform is chosen.
+	#
+	# Vulkan::shaderc_combined rather than the shared library: it is the imported target
+	# CMake's own FindVulkan provides, so no SDK path is hardcoded, and being static there
+	# is no additional DLL to deploy alongside the server.
+	target_link_libraries(accelerator PRIVATE Vulkan::shaderc_combined)
 ENDIF()
 
 # OpenColorIO lives in the mixer, so the accelerator is where it links. The link directory

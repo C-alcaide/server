@@ -447,7 +447,11 @@ casparcg_add_runtime_dependency("${openal_SOURCE_DIR}/bin/Win64/OpenAL32.dll")
 
 # Vulkan: auto-detect from SDK if not explicitly set via -DENABLE_VULKAN=ON/OFF
 if(NOT DEFINED ENABLE_VULKAN)
-	find_package(Vulkan QUIET)
+	# shaderc_combined is requested as a component so a missing one is a clear
+	# configure-time error rather than an unresolved symbol at link time. It is needed
+	# because a generated colour transform arrives as GLSL text and has to be compiled to
+	# SPIR-V at runtime; the mixer's own shader is still built by glslc and embedded.
+	find_package(Vulkan QUIET COMPONENTS shaderc_combined)
 	if(Vulkan_FOUND)
 		set(ENABLE_VULKAN ON CACHE BOOL "Enable Vulkan accelerator backend")
 		message(STATUS "Vulkan SDK found: ${Vulkan_INCLUDE_DIR} (auto-enabled)")
@@ -457,7 +461,7 @@ if(NOT DEFINED ENABLE_VULKAN)
 	endif()
 else()
 	if(ENABLE_VULKAN)
-		find_package(Vulkan REQUIRED)
+		find_package(Vulkan REQUIRED COMPONENTS shaderc_combined)
 		message(STATUS "Vulkan SDK: ${Vulkan_INCLUDE_DIR} (explicitly enabled)")
 	endif()
 endif()
