@@ -2621,14 +2621,50 @@ std::future<std::wstring> mixer_gamutcompress_command(command_context& ctx)
 // MIXER LUT3D <path.cube> [strength] — load a .cube 3D LUT file
 // MIXER LUT3D NONE — disable 3D LUT
 // MIXER LUT3D — query current state
+// The largest LUT_3D_SIZE we will accept. 128 costs 128^3 * 3 floats = 25 MB, which is
+// already far beyond anything a grading tool emits (Resolve tops out at 65); the point of
+// the cap is that `size` arrives from the file and is cubed, so an unbounded value is a
+// memory-exhaustion primitive. "LUT_3D_SIZE 2000" used to ask reserve() for ~96 GB. The
+// AMCP dispatcher does catch the resulting bad_alloc, so this was never a crash -- but a
+// live server could be walked into an allocation storm by a single malformed file.
+static constexpr int MAX_LUT_3D_SIZE = 128;
+
+// LUT strength arrives as an operator-typed AMCP argument. std::stof throws on anything
+// non-numeric, and neither LUT call site handled it -- the AMCP dispatcher's catch-all
+// turned "MIXER 1-1 LUT3D my.cube abc" into an opaque failure with no indication of which
+// argument was at fault. Returns false so the caller can answer 400 instead.
+static bool parse_lut_strength(const std::wstring& text, float& out)
+{
+    try {
+        size_t consumed = 0;
+        const float value = std::stof(text, &consumed);
+        if (consumed != text.size())
+            return false;
+        out = std::clamp(value, 0.0f, 1.0f);
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
 static std::shared_ptr<const core::lut3d_data> parse_cube_file(const std::wstring& path)
 {
     std::ifstream file(path);
     if (!file.is_open())
         return nullptr;
 
-    auto lut = std::make_shared<core::lut3d_data>();
+    auto        lut = std::make_shared<core::lut3d_data>();
     std::string line;
+
+    // DOMAIN_MIN/DOMAIN_MAX declare the input range the table is indexed over. Both
+    // shaders index with clamp(c, 0, 1), so a non-unit domain would need the lookup
+    // coordinate rescaled before the fetch -- it cannot be baked into the table data.
+    // These lines used to be skipped outright, which silently misapplied every LUT
+    // authored over a non-unit domain (routine for log LUTs). Refusing is not a
+    // regression: such a LUT was never being honoured, it was being applied wrongly.
+    float domain_min[3] = {0.0f, 0.0f, 0.0f};
+    float domain_max[3] = {1.0f, 1.0f, 1.0f};
+
     while (std::getline(file, line)) {
         // Skip comments and empty lines
         if (line.empty() || line[0] == '#')
@@ -2639,16 +2675,47 @@ static std::shared_ptr<const core::lut3d_data> parse_cube_file(const std::wstrin
             continue;
         line = line.substr(start);
 
-        if (line.rfind("TITLE", 0) == 0 || line.rfind("DOMAIN_MIN", 0) == 0 || line.rfind("DOMAIN_MAX", 0) == 0)
+        if (line.rfind("TITLE", 0) == 0)
             continue;
 
+        if (line.rfind("DOMAIN_MIN", 0) == 0) {
+            if (sscanf(line.c_str(), "DOMAIN_MIN %f %f %f", &domain_min[0], &domain_min[1], &domain_min[2]) != 3) {
+                CASPAR_LOG(warning) << L"[lut3d] " << path << L": malformed DOMAIN_MIN";
+                return nullptr;
+            }
+            continue;
+        }
+        if (line.rfind("DOMAIN_MAX", 0) == 0) {
+            if (sscanf(line.c_str(), "DOMAIN_MAX %f %f %f", &domain_max[0], &domain_max[1], &domain_max[2]) != 3) {
+                CASPAR_LOG(warning) << L"[lut3d] " << path << L": malformed DOMAIN_MAX";
+                return nullptr;
+            }
+            continue;
+        }
+
         if (line.rfind("LUT_3D_SIZE", 0) == 0) {
-            lut->size = std::stoi(line.substr(12));
-            lut->data.reserve(static_cast<size_t>(lut->size) * lut->size * lut->size * 3);
+            if (lut->size != 0) {
+                CASPAR_LOG(warning) << L"[lut3d] " << path << L": more than one LUT_3D_SIZE";
+                return nullptr;
+            }
+
+            int size = 0;
+            if (sscanf(line.c_str(), "LUT_3D_SIZE %d", &size) != 1) {
+                CASPAR_LOG(warning) << L"[lut3d] " << path << L": malformed LUT_3D_SIZE";
+                return nullptr;
+            }
+            if (size < 2 || size > MAX_LUT_3D_SIZE) {
+                CASPAR_LOG(warning) << L"[lut3d] " << path << L": LUT_3D_SIZE " << size
+                                    << L" out of range (2.." << MAX_LUT_3D_SIZE << L")";
+                return nullptr;
+            }
+
+            lut->size = size;
+            lut->data.reserve(static_cast<size_t>(size) * size * size * 3);
             continue;
         }
         if (line.rfind("LUT_1D_SIZE", 0) == 0)
-            continue;  // skip 1D LUT sections
+            continue; // skip 1D LUT sections
 
         // Try to parse as R G B data line
         if (lut->size > 0) {
@@ -2661,9 +2728,21 @@ static std::shared_ptr<const core::lut3d_data> parse_cube_file(const std::wstrin
         }
     }
 
+    for (int i = 0; i < 3; ++i) {
+        if (domain_min[i] != 0.0f || domain_max[i] != 1.0f) {
+            CASPAR_LOG(warning) << L"[lut3d] " << path
+                                << L": non-unit domain is not supported -- the lookup is indexed over [0,1]. "
+                                   L"Re-export the LUT over a 0..1 domain.";
+            return nullptr;
+        }
+    }
+
     size_t expected = static_cast<size_t>(lut->size) * lut->size * lut->size * 3;
-    if (lut->size <= 0 || lut->data.size() != expected)
+    if (lut->size <= 0 || lut->data.size() != expected) {
+        CASPAR_LOG(warning) << L"[lut3d] " << path << L": expected " << expected << L" values, read "
+                            << lut->data.size();
         return nullptr;
+    }
 
     return lut;
 }
@@ -2706,7 +2785,9 @@ std::future<std::wstring> mixer_lut3d_command(command_context& ctx)
     if (!lut)
         return make_ready_future<std::wstring>(L"404 LUT3D LOAD FAILED\r\n");
 
-    float strength = ctx.parameters.size() > 1 ? std::stof(ctx.parameters[1]) : 1.0f;
+    float strength = 1.0f;
+    if (ctx.parameters.size() > 1 && !parse_lut_strength(ctx.parameters[1], strength))
+        return make_ready_future<std::wstring>(L"400 MIXER FAILED\r\n");
 
     transforms_applier transforms(ctx);
     transforms.add(stage::transform_tuple_t(
@@ -2777,7 +2858,10 @@ std::future<std::wstring> calibration_command(command_context& ctx)
         if (!lut)
             return make_ready_future<std::wstring>(L"404 CALIBRATION LOAD FAILED\r\n");
 
-        float strength = ctx.parameters.size() > 2 ? std::stof(ctx.parameters[2]) : 1.0f;
+        float strength = 1.0f;
+        if (ctx.parameters.size() > 2 && !parse_lut_strength(ctx.parameters[2], strength))
+            return make_ready_future<std::wstring>(L"403 CALIBRATION ERROR\r\n");
+
         image_mixer->set_calibration_lut(lut, strength, path);
         return make_ready_future<std::wstring>(L"202 CALIBRATION OK\r\n");
     }
