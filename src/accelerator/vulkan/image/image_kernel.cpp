@@ -22,10 +22,15 @@
 #include "image_kernel.h"
 
 #include "../util/device.h"
+#include "../util/glsl_compiler.h"
 #include "../util/pipeline.h"
 #include "../util/platform_config.h"
 #include "../util/renderpass.h"
 #include "../util/texture.h"
+
+// The mixer's own fragment shader as GLSL text, for splicing a generated transform into.
+// The SPIR-V glslc built at configure time is what every other draw uses and is unchanged.
+#include "vk_image_fragment_src.h"
 
 #include <accelerator/ocio/ocio_config.h>
 #include <common/assert.h>
@@ -45,6 +50,7 @@
 #include <array>
 #include <cmath>
 #include <algorithm>
+#include <cstring>
 #include <map>
 #include <string>
 #include <vector>
@@ -207,10 +213,10 @@ struct image_kernel::impl
     // with the shading language, so the GLSL 4.0 and Vulkan builds of one colour space are
     // different entries by construction.
     //
-    // Holds only the LUT images here. The pipeline that samples them is the variant pipeline
-    // cache's business (device::get_variant_pipeline), because a Vulkan pipeline is bound to
-    // its shader module and outlives any one kernel; the images are this device's and are
-    // destroyed with the kernel.
+    // Holds the LUT images and the pipeline that samples them. The pipeline itself is owned
+    // by the variant pipeline cache (device::get_variant_pipeline) and merely referenced
+    // here, because a Vulkan pipeline is bound to its shader module and outlives any one
+    // kernel; the images are this device's and are destroyed with the kernel.
     /// One generated-transform LUT: its image, and the extent to copy into it. The extent is
     /// kept here because vk_lut_texture carries only a byte count, and a 4096x17 image and a
     /// 69632x1 one are the same number of bytes.
@@ -228,7 +234,10 @@ struct image_kernel::impl
         /// The views again, indexed by binding-1 so they can be handed to the pipeline
         /// without it having to know which slot came from which LUT.
         ocio_texture_views views{};
-        bool               failed = false; ///< do not retry a broken transform every frame
+        /// The pipeline whose fragment shader contains this transform's spliced source.
+        /// Null only when the variant failed.
+        std::shared_ptr<class pipeline> pipeline;
+        bool failed = false; ///< do not retry a broken transform every frame
     };
     std::map<std::string, ocio_variant> ocio_variants_;
 
@@ -236,6 +245,15 @@ struct image_kernel::impl
     /// yet. Drained by do_upload_pending_luts() inside the frame's command buffer, because
     /// that is the only command buffer ordered against the draw that samples them.
     std::vector<ocio_variant*> ocio_upload_queue_;
+
+    /// The pipeline the layer currently being prepared needs, or null for the base one.
+    ///
+    /// Set alongside current_lut_views_ and read by the renderpass immediately afterwards,
+    /// for the same reason: draw() prepares one layer at a time, and both are properties of
+    /// that layer rather than of the pass. A pass composites layers with different colour
+    /// spaces, so a pipeline chosen once for the whole pass would apply one layer's transform
+    /// to all of them.
+    std::shared_ptr<class pipeline> current_ocio_pipeline_;
     // ─────────────────────────────────────────────────────────────────────
 
     struct frame_data : public frame_context
@@ -264,6 +282,10 @@ struct image_kernel::impl
         }
         virtual draw_data create_draw_data(const draw_params& params) { return parent->draw(params); }
         virtual lut_views get_lut_views() const override { return parent->current_lut_views_; }
+        virtual std::shared_ptr<class pipeline> get_layer_pipeline() const override
+        {
+            return parent->current_ocio_pipeline_;
+        }
         virtual void upload_pending_luts(vk::CommandBuffer cmd) override { parent->do_upload_pending_luts(cmd); }
         virtual std::shared_ptr<class pipeline> get_pipeline()
         {
@@ -856,6 +878,30 @@ struct image_kernel::impl
 
                 v.views[static_cast<size_t>(t.binding) - 1] = tex.view;
             }
+
+            if (!v.failed) {
+                // Splice, compile, and hand the SPIR-V to the variant cache. All three are
+                // expensive and all three happen once per colour space, not per frame.
+                const auto spliced = splice_ocio(
+                    std::string(reinterpret_cast<const char*>(fragment_shader_src)),
+                    generated.source, generated.function_name);
+                if (spliced.empty()) {
+                    v.failed = true;
+                } else {
+                    const auto spirv = compile_glsl_fragment_to_spirv(spliced, generated.cache_id);
+                    if (spirv.empty()) {
+                        // The compiler has already logged its diagnostic. Refuse rather than
+                        // fall back to the base pipeline silently: an untransformed layer that
+                        // looks merely wrong is harder to diagnose than one that says why.
+                        CASPAR_LOG(error) << L"[vk_kernel] the spliced shader for '"
+                                          << u16(source_space) << L"' did not compile";
+                        v.failed = true;
+                    } else {
+                        v.pipeline = vulkan_->get_variant_pipeline(depth_, render_format_,
+                                                                   generated.cache_id, spirv);
+                    }
+                }
+            }
         } catch (...) {
             // Remember the failure so a broken transform costs one attempt, not one per
             // frame. The layer then renders untransformed -- visibly wrong, and preferable
@@ -868,7 +914,8 @@ struct image_kernel::impl
             for (auto& lut : v.textures)
                 lut.tex.destroy();
             v.textures.clear();
-            v.views = {};
+            v.views   = {};
+            v.pipeline = nullptr;
         }
 
         auto [pos, inserted] = ocio_variants_.emplace(generated.cache_id, std::move(v));
@@ -877,6 +924,39 @@ struct image_kernel::impl
         if (!pos->second.textures.empty())
             ocio_upload_queue_.push_back(&pos->second);
         return &pos->second;
+    }
+
+    /// Splice a generated transform into the mixer's own fragment shader source.
+    ///
+    /// Two markers, both replaced, and the second one is where the channel-order trap lives.
+    /// **This shader carries true RGB**, so the call is `col.rgb = f(vec4(col.rgb, col.a)).rgb`
+    /// -- no swizzle. The OGL kernel's equivalent uses `.bgr` because that shader grades in
+    /// BGR, and copying it here would mirror the hue wheel while leaving every grey correct,
+    /// which is exactly the class of defect a grey ramp cannot catch.
+    ///
+    /// Returns empty if either marker is missing, which would otherwise compile cleanly into
+    /// a shader that silently ignores the transform.
+    static std::string splice_ocio(const std::string& base,
+                                   const std::string& declarations,
+                                   const std::string& function_name)
+    {
+        static constexpr const char* DECL_MARKER = "//__CASPAR_OCIO_DECLARATIONS__";
+        static constexpr const char* CALL_MARKER = "//__CASPAR_OCIO_TRANSFORM__";
+
+        const auto decl_at = base.find(DECL_MARKER);
+        const auto call_at = base.find(CALL_MARKER);
+        if (decl_at == std::string::npos || call_at == std::string::npos) {
+            CASPAR_LOG(error) << L"[vk_kernel] the fragment shader is missing an OCIO splice "
+                                 L"marker; refusing to build a transform that would be ignored";
+            return {};
+        }
+
+        std::string out = base;
+        // The call site first: replacing the declarations changes every offset after it.
+        out.replace(call_at, std::strlen(CALL_MARKER),
+                    "col.rgb = " + function_name + "(vec4(col.rgb, col.a)).rgb;");
+        out.replace(decl_at, std::strlen(DECL_MARKER), declarations);
+        return out;
     }
 
     /// Widen a tightly-packed RGB float array into the RGBA staging layout Vulkan images
@@ -894,7 +974,7 @@ struct image_kernel::impl
 
     /// Prepare LUT textures from draw_params transforms.
     /// Called during draw() — writes staging buffers and sets pending flags.
-    void prepare_lut_textures(const draw_params& params)
+    void prepare_lut_textures(const draw_params& params, const ocio_variant* ocio)
     {
         const auto& transforms = params.transforms;
 
@@ -1016,10 +1096,10 @@ struct image_kernel::impl
         // transform must leave every one of its sampler bindings unwritten rather than
         // inherit the previous layer's.
         current_lut_views_.ocio = {};
-        const auto& ocio_tf = transforms.image_transform.ocio;
-        if (ocio_tf.enable && !ocio_tf.source_space.empty()) {
-            if (const auto* variant = select_ocio_variant(ocio_tf.source_space))
-                current_lut_views_.ocio = variant->views;
+        current_ocio_pipeline_  = nullptr;
+        if (ocio) {
+            current_lut_views_.ocio = ocio->views;
+            current_ocio_pipeline_  = ocio->pipeline;
         }
     }
 
@@ -1073,6 +1153,15 @@ struct image_kernel::impl
 
         auto coords     = params.geometry.data();
         auto transforms = params.transforms;
+
+        // Selected once for this layer and used twice below: the uniform block needs to know
+        // whether OCIO owns the input half, and prepare_lut_textures needs its LUTs and its
+        // pipeline. Selecting twice would regenerate OCIO's shader source and re-copy its LUT
+        // values twice per layer per frame -- a cache hit inside OCIO is not a free call.
+        const auto& ocio_tf = transforms.image_transform.ocio;
+        const ocio_variant* ocio = (ocio_tf.enable && !ocio_tf.source_space.empty())
+                                       ? select_ocio_variant(ocio_tf.source_space)
+                                       : nullptr;
 
         auto const first_plane = params.pix_desc.planes.at(0);
         if (params.geometry.mode() != core::frame_geometry::scale_mode::stretch && first_plane.width > 0 &&
@@ -1365,8 +1454,64 @@ struct image_kernel::impl
                 dst[8]=src[2]; dst[9]=src[5]; dst[10]=src[8]; dst[11]=0; // column 2
             };
 
+            // Enum -> shader index mappings, shared by the OCIO branch and the auto branch
+            // below. Hoisted rather than duplicated: two copies of the same mapping drift,
+            // and this repo has paid for that three times (see the harness's
+            // test_single_source_of_truth.py). Matches ogl/image/image_kernel.cpp, which
+            // hoisted them for exactly this reason when its OCIO branch landed.
+            //
+            // Gamut indices (0=bt709, 1=bt2020, 2=p3_d65, 3=p3_dci, 4=adobe_rgb)
+            auto gamut_index = [](core::color_space cs) -> int {
+                switch (cs) {
+                    case core::color_space::bt2020:    return 1;
+                    case core::color_space::p3_d65:   return 2;
+                    case core::color_space::p3_dci:   return 3;
+                    case core::color_space::adobe_rgb:return 4;
+                    default:                          return 0; // bt601/bt709 → index 0
+                }
+            };
+            // EOTF indices (apply_eotf): 1=srgb,2=rec709,3=pq,4=hlg,5=logc3,6=slog3,7=linear,8=gamma24,9=gamma26
+            auto eotf_index = [](core::color_transfer ct) -> int {
+                switch (ct) {
+                    case core::color_transfer::pq:      return 3;
+                    case core::color_transfer::hlg:     return 4;
+                    case core::color_transfer::linear:  return 7;
+                    case core::color_transfer::gamma24: return 8;
+                    case core::color_transfer::gamma26: return 9;
+                    default:                            return 2; // sdr → rec709 (BT.1886)
+                }
+            };
+            // OETF indices (apply_oetf): 1=srgb,2=rec709,3=pq,4=hlg,5=linear,6=gamma24,7=gamma26
+            auto oetf_index = [](core::color_transfer ct) -> int {
+                switch (ct) {
+                    case core::color_transfer::pq:      return 3;
+                    case core::color_transfer::hlg:     return 4;
+                    case core::color_transfer::linear:  return 5;
+                    case core::color_transfer::gamma24: return 6;
+                    case core::color_transfer::gamma26: return 7;
+                    default:                            return 2; // sdr → rec709 (BT.1886)
+                }
+            };
+
             const auto& cg = transforms.image_transform.color_grade;
-            if (cg.enable) {
+            if (ocio) {
+                // OCIO produced the working-space pixel, so the shader's own input conversion
+                // is off -- its spliced call replaces that block rather than following it. The
+                // output half still has to run, driven by the channel's target: without it the
+                // layer would reach the render target in scene-linear ACEScg with no OETF and
+                // the wrong primaries.
+                uniforms.flags2 |= static_cast<uint32_t>(shader_flags2::output_convert);
+                uniforms.output_transfer = oetf_index(params.target_color_transfer);
+                uniforms.tone_mapping_op = params.auto_tone_map;
+                uniforms.display_peak_luminance = params.display_peak_luminance;
+                // This backend folds the BT.2408 luminance scale into `exposure`; there is no
+                // separate uniform for it, unlike the OGL shader. Neutral on this path.
+                uniforms.exposure = 1.0f;
+                // Not available on this path: user exposure and gamut compression live in the
+                // color_grade struct inside the input block OCIO replaces. Neither belongs to
+                // an input transform's job, but the gap is real and documented.
+                set_mat3(uniforms.working_to_output, k_to_output[gamut_index(params.target_color_space)]);
+            } else if (cg.enable) {
                 // MIXER COLORSPACE owns both halves of the conversion.
                 uniforms.flags |= static_cast<uint32_t>(shader_flags::color_grading);
                 uniforms.flags2 |= static_cast<uint32_t>(shader_flags2::input_convert) |
@@ -1428,38 +1573,7 @@ struct image_kernel::impl
                        (params.pix_desc.color_space != params.target_color_space ||
                         params.pix_desc.color_transfer != params.target_color_transfer)) {
                 // Auto color conversion: source differs from channel output.
-                // Gamut indices for the k_direct matrix (0=bt709, 1=bt2020, 2=p3_d65, 3=p3_dci, 4=adobe_rgb)
-                auto gamut_index = [](core::color_space cs) -> int {
-                    switch (cs) {
-                        case core::color_space::bt2020:    return 1;
-                        case core::color_space::p3_d65:   return 2;
-                        case core::color_space::p3_dci:   return 3;
-                        case core::color_space::adobe_rgb:return 4;
-                        default:                          return 0; // bt601/bt709 → index 0
-                    }
-                };
-                // EOTF indices (apply_eotf): 1=srgb,2=rec709,3=pq,4=hlg,5=logc3,6=slog3,7=linear,8=gamma24,9=gamma26
-                auto eotf_index = [](core::color_transfer ct) -> int {
-                    switch (ct) {
-                        case core::color_transfer::pq:      return 3;
-                        case core::color_transfer::hlg:     return 4;
-                        case core::color_transfer::linear:  return 7;
-                        case core::color_transfer::gamma24: return 8;
-                        case core::color_transfer::gamma26: return 9;
-                        default:                            return 2; // sdr → rec709 (BT.1886)
-                    }
-                };
-                // OETF indices (apply_oetf): 1=srgb,2=rec709,3=pq,4=hlg,5=linear,6=gamma24,7=gamma26
-                auto oetf_index = [](core::color_transfer ct) -> int {
-                    switch (ct) {
-                        case core::color_transfer::pq:      return 3;
-                        case core::color_transfer::hlg:     return 4;
-                        case core::color_transfer::linear:  return 5;
-                        case core::color_transfer::gamma24: return 6;
-                        case core::color_transfer::gamma26: return 7;
-                        default:                            return 2; // sdr → rec709 (BT.1886)
-                    }
-                };
+                // gamut_index / eotf_index / oetf_index are the hoisted copies above.
                 int ig = gamut_index(params.pix_desc.color_space);
                 int og = gamut_index(params.target_color_space);
                 // Skip if the mapped indices are identical (e.g. bt601 source on bt709 channel)
@@ -1785,7 +1899,7 @@ struct image_kernel::impl
         }
 
         // Prepare LUT texture data in staging buffers (uploaded at commit time)
-        prepare_lut_textures(params);
+        prepare_lut_textures(params, ocio);
 
         return {std::move(coords), uniforms};
     }

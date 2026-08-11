@@ -78,6 +78,18 @@ struct frame_context
     /// space it is resolving.
     virtual std::shared_ptr<class texture>
     create_attachment_as(uint32_t width, uint32_t height, uint32_t components_count, common::render_format format) = 0;
+
+    /// The pipeline the layer just prepared by create_draw_data() needs, or null for the
+    /// pass's base pipeline.
+    ///
+    /// Per layer, not per pass. A pass composites layers that may each carry a different
+    /// generated colour transform -- or none -- and a pipeline chosen once at construction
+    /// would apply one layer's transform to every layer in the pass.
+    ///
+    /// **Appended, not inserted.** Adding a virtual anywhere but the end of this interface
+    /// shifts every later vtable slot, and an object file compiled against the old layout
+    /// then calls through the wrong one. Keep new virtuals here.
+    virtual std::shared_ptr<class pipeline> get_layer_pipeline() const { return nullptr; }
 };
 
 class renderpass
@@ -100,6 +112,8 @@ class renderpass
         std::shared_ptr<class texture>           layer_key_attachment;
         std::array<vk::ImageView, 11>            textures;
         ocio_texture_views                       ocio_textures{};
+        /// Null means the pass's base pipeline; non-null is a generated colour transform's.
+        std::shared_ptr<class pipeline>          pipeline;
         std::vector<core::frame_geometry::coord> coords;
         uniform_block                            uniforms;
         uint32_t                                 vertex_buffer_offset = 0;

@@ -116,6 +116,7 @@ void renderpass::draw(const draw_params& params)
         params.layer_key,
         std::move(textures),
         luts.ocio,
+        _ctx->get_layer_pipeline(),
         std::move(coords),
         uniforms,
     });
@@ -233,13 +234,18 @@ void renderpass::commit()
                 cmd_buffer.pipelineBarrier2(dependencyInfo);
             }
 
-            _pipeline->draw(cmd_buffer,
-                            vertex_buffer,
-                            static_cast<uint32_t>(layer.coords.size()),
-                            layer.vertex_buffer_offset,
-                            layer.uniforms,
-                            layer.textures,
-                            layer.ocio_textures);
+            // Per layer, not per pass. Layout-compatible with the base pipeline by
+            // construction -- both declare the same two descriptor set layouts -- so
+            // switching between them mid-pass needs no descriptor rebinding beyond what
+            // draw() already does.
+            const auto& layer_pipeline = layer.pipeline ? layer.pipeline : _pipeline;
+            layer_pipeline->draw(cmd_buffer,
+                                 vertex_buffer,
+                                 static_cast<uint32_t>(layer.coords.size()),
+                                 layer.vertex_buffer_offset,
+                                 layer.uniforms,
+                                 layer.textures,
+                                 layer.ocio_textures);
         }
     }
 
