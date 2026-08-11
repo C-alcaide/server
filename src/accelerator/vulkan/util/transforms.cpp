@@ -67,6 +67,18 @@ void apply_transform_colour_values(core::image_transform& self, const core::imag
     if (other.color_grade.enable) {
         self.color_grade = other.color_grade;
     }
+    // Easy to miss, and it fails silently: this merge is explicit field by field, so a new
+    // image_transform member that is not listed here simply never reaches the kernel. The
+    // symptom is a command that reports 202 and changes nothing.
+    //
+    // Which is exactly what happened. ogl/util/transforms.cpp carries this block and its
+    // warning; this file did not, so `MIXER OCIO` on a Vulkan channel was accepted, logged
+    // its processor build, and then had no member set on the transform that reached the
+    // mixer. Every Vulkan-side OCIO symptom was downstream of a value that was never
+    // delivered.
+    if (other.ocio.enable) {
+        self.ocio = other.ocio;
+    }
 
     // ---- Extended color grading (combined so a default `other` is a no-op) ----
     // White balance
