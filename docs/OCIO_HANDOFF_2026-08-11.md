@@ -7,26 +7,89 @@ record: [`OCIO_INTEGRATION_STUDY.md`](OCIO_INTEGRATION_STUDY.md).
 Updated in place rather than as a second file — four same-dated handoffs once existed in the
 harness repo and which was current could only be recovered from git timestamps.
 
-## Resume here: A5, once two decisions are settled
+## Resume here: A5, channel-level display transform
 
-The input transform is finished and measured. What remains before A5 (the display
-transform) is not code:
+**Decided: channel-level first, consumer-level added afterwards as an option.**
 
-1. **Channel or consumer?** Decided channel-level for now, and it is the wrong default for
-   the case that motivates A5: a channel feeding an LED processor *and* an SDI monitor needs
-   two different views from one composite. Settle this before building, because it decides
-   where the transform's state lives.
-2. **Pre-warming, which A4f made twice as expensive.** A new colour space now costs, on the
-   frame path: OCIO generation, a LUT image creation with a `waitIdle`, a shaderc compile,
-   and a driver pipeline build. Measured at roughly 1.2 s and one dropped frame; the OCIO
-   battery has to sleep 1.5 s on the first patch of each case to let it settle. The fix is
-   to build the variant when `MIXER OCIO` is accepted — the processor is already built there
-   for validation — not to cache it. See "Open decisions".
+`build_display_transform()` exists and is measured. What is left is the render integration
+and the operator surface. Read the next section first — three measurements shape the design
+and one of them invalidates code A4e already shipped.
 
-Everything an A5 display transform needs structurally is now in place: `gpu_target::vulkan`
-generation, a two-set pipeline layout, per-layer variant pipelines, the LUT upload path, and
-the reserved-but-unused uniform buffer at set 1 binding 0 that a *dynamic* property (an
-exposure a display transform can vary per frame) is what would finally fill.
+### What is done
+
+`accelerator/ocio/ocio_config.{h,cpp}`: `build_display_transform(display, view, out, target)`
+generates the working-space → display/view program for either backend, sharing
+`fill_from_processor` with the input transform so the texture walk and the binding-index
+read exist once.
+
+### What is left, in order
+
+1. **A second splice site.** `fragment_shader.frag` (both mixers) has markers for the input
+   transform only. The display transform replaces the *output* half — the
+   `working_to_output` matrix, the OETF and the tone map — so it needs its own marker at
+   that block, and the uniform side must clear `F2_OUTPUT_CONVERT` the way A4f clears
+   `F2_INPUT_CONVERT`. ⚠ Same no-swizzle rule on Vulkan.
+2. **1D LUT images** — see below, this is a real gap.
+3. **Channel-level state.** Follow the LED calibration LUT, which is already a channel-master
+   setting applied over the composited frame (`ogl/image/image_mixer.cpp`,
+   `set_calibration_lut`). Note it also has a render-fingerprint field, and a display
+   transform needs one too or the still-frame cache will serve a stale look.
+4. **AMCP.** `MIXER <ch> OCIO_DISPLAY "<display>" "<view>"` and `NONE`, validated at command
+   time against `has_display_view()` — which already exists. Quote both arguments; every
+   display and view name in this config contains spaces.
+5. **A harness battery.** `cli.py ocio` compares an input transform against OCIO's CPU
+   processor; the display half needs the same treatment and the oracle already has the
+   pieces.
+
+### Three measurements that shape it
+
+**Display transforms emit `sampler1D`, and input transforms never did.** Two of the three
+textures in an ACES 2.0 HDR view are 1D (the reach and gamut-cusp tables). **A4e's Vulkan
+uploader treats every non-3D LUT as 2D** — `create_image_2d_wh` with an `e2D` view — so it
+will produce an image whose view type does not match the `sampler1D` the shader declares.
+That needs an `e1D` image and view before A5 renders anything, and the OpenGL side needs
+`GL_TEXTURE_1D` for the same reason. It is unreached today only because no input transform
+emits one.
+
+**Input and display transforms collide at binding 1 unless told otherwise.** Both declare
+their first sampler there. They now take disjoint ranges — input 1..4, display 5..8, inside
+the 8 that descriptor set 1 reserves — via `INPUT_TEXTURE_BINDING_START` /
+`DISPLAY_TEXTURE_BINDING_START`. Verified: with start 5, OCIO emits bindings 5, 6, 7 and the
+sampler names do not collide either (`ocio_in_` vs `ocio_out_`).
+
+**Everything else A4e built covers display transforms unchanged.** Across all 41
+display/view combinations: **at most 3 textures**, **zero 3D LUTs**, **zero dynamic
+uniforms**. So no `e3D` view is needed, the 8 reserved bindings are enough, and the
+placeholder uniform buffer stays unused. The generated source is ~16 KB against ~1.5 KB for
+an input transform, which lands entirely on compile time.
+
+### The architectural point, and why channel-level is built this way
+
+A display transform must consume **working-space** pixels. The mixer converts to display
+space **per layer, before blending** — deliberately, so blend modes operate on display
+values — so by the time a composite exists it is already display-encoded and a
+post-composite pass is too late.
+
+So channel-level is implemented as a channel-scoped *setting* applied where the built-in
+output conversion already runs, per layer. With one transform for the whole channel the
+result is exactly a channel display transform, blend semantics are unchanged, and it needs
+nothing from the float path.
+
+**Consumer-level cannot be added on top of that.** One composite feeding two different views
+requires the composite to still be in working space, which means turning off the per-layer
+output conversion, compositing in float, and blending in linear — a blend-semantics change
+and a hard dependency on the fp16 render target, which is still the "compiled but never
+executed" item below. Treat consumer-level as that larger piece of work rather than an
+increment on channel-level.
+
+### Also still open
+
+**Pre-warming, which A4f made twice as expensive and A5 will make worse again.** A new
+colour space costs OCIO generation, a LUT image creation with a `waitIdle`, a shaderc
+compile and a driver pipeline build on the frame path — ~1.2 s and one dropped frame, and
+the OCIO battery has to sleep 1.5 s on the first patch of each case. A display transform's
+source is ten times larger, so its compile will be longer. The fix is to build the variant
+when the command is accepted, where the processor is already built for validation.
 
 ## What A4e established, and how
 
