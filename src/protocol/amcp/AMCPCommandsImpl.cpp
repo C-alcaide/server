@@ -2291,6 +2291,16 @@ static std::wstring to_wstring_tonemap(int tm) {
 //                                             mixer's ACEScg working space via OpenColorIO
 // MIXER <ch>-<layer> OCIO NONE             -> back to the built-in path
 //
+// ⚠ QUOTE THE COLOUR SPACE NAME. AMCP tokenizes on whitespace, and 40 of the 55 spaces in
+// the pinned studio config contain spaces or parentheses:
+//
+//     MIXER 1-1 OCIO "ARRI LogC3 (EI800)"     -> 202
+//     MIXER 1-1 OCIO ARRI LogC3 (EI800)       -> 404, having looked for a space named "ARRI"
+//
+// The unquoted form fails cleanly rather than doing something surprising, but the 404 says
+// nothing about quoting, so clients must quote and operators must be told to. The tokenizer
+// already handles quotes; this needs no special support here.
+//
 // The alternative front end to MIXER COLORSPACE. Both write the same stage of the chain
 // (COLOR_GRADING.md steps 4-7), so they are mutually exclusive and this command refuses
 // rather than silently overriding -- an operator who set a COLORSPACE and then an OCIO space
@@ -2341,6 +2351,20 @@ std::future<std::wstring> mixer_ocio_command(command_context& ctx)
         CASPAR_LOG(warning) << L"[ocio] MIXER OCIO refused: '" << ctx.parameters.at(0)
                             << L"' is not a colour space in " << u16(accelerator::ocio::config_uri())
                             << L". Use INFO OCIO COLORSPACES to list them.";
+        return make_ready_future<std::wstring>(L"404 MIXER ERROR\r\n");
+    }
+
+    // Build the transform now, rather than only checking that the name exists. A space can
+    // be present in the config and still fail to produce a processor -- a missing LUT file
+    // referenced by a FileTransform, an unresolvable role -- and the difference matters,
+    // because by the time the mixer needs it there is no way to report the failure except by
+    // rendering something wrong. Discarding the result here is deliberate: this is
+    // validation, and the mixer rebuilds it on the GL thread where the textures belong. The
+    // second build is a cache hit inside OCIO.
+    accelerator::ocio::gpu_shader probe;
+    if (!accelerator::ocio::build_input_transform(source_space, probe)) {
+        CASPAR_LOG(warning) << L"[ocio] MIXER OCIO refused: '" << ctx.parameters.at(0)
+                            << L"' exists but no GPU transform could be built from it";
         return make_ready_future<std::wstring>(L"404 MIXER ERROR\r\n");
     }
 

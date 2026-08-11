@@ -68,4 +68,52 @@ bool has_colorspace(const std::string& name);
 /// Whether `display` exists and offers `view`.
 bool has_display_view(const std::string& display, const std::string& view);
 
+// ---- GPU shader generation -------------------------------------------------
+//
+// OCIO's GPU path is a shader *generator*, not a pixel processor. Once per transform it
+// emits GLSL source plus the LUT textures and uniforms that source expects; per frame there
+// is nothing to do but keep the uniforms current. That is why this belongs nowhere near an
+// AVFrame, and why the previous attempt -- OCIO as a CPU filter in the producer's filter
+// chain -- was the wrong shape rather than merely slow.
+
+/// One LUT the generated shader samples. The application owns uploading it.
+struct gpu_texture
+{
+    std::string sampler_name; ///< the sampler as declared in the generated source
+    int         dimensions = 2; ///< 1, 2 or 3
+    int         width      = 0;
+    int         height     = 1;
+    int         edge_len   = 0; ///< 3D only: values are edge_len^3 * 3
+    int         channels   = 3; ///< 1 (red) or 3 (rgb)
+    bool        interpolate_linear = true;
+
+    std::vector<float> values;
+};
+
+/// Everything needed to compile and feed one generated transform.
+struct gpu_shader
+{
+    /// OCIO's own identifier for this processor. Stable across cosmetic differences in code
+    /// generation and sensitive to the config's contents, which is what makes it a better
+    /// shader-cache key than a hash of the source text or the colour space name.
+    std::string cache_id;
+
+    /// Declarations plus the entry function, to be spliced ahead of the host shader's body.
+    std::string source;
+
+    /// Name of the generated entry point, as called from the splice site.
+    std::string function_name;
+
+    std::vector<gpu_texture> textures;
+};
+
+/// Build the GLSL for `source_space` -> the mixer's working space (ACEScg / ACES - ACEScg).
+///
+/// Returns nothing on failure, having logged why. Callers must treat that as a reason to
+/// refuse a command, never to render without the transform.
+///
+/// Expensive: builds an OCIO processor and generates source. Call it when a configuration
+/// changes, not per frame.
+bool build_input_transform(const std::string& source_space, gpu_shader& out);
+
 }}} // namespace caspar::accelerator::ocio
