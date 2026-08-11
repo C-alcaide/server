@@ -160,6 +160,9 @@ class image_renderer
     image_kernel            kernel_;
     const size_t            max_frame_size_;
     common::bit_depth       depth_;
+    // The format the kernel composites into. depth_ stays the channel's output depth,
+    // which is what the resolve target and every consumer use.
+    common::render_format   render_format_ = common::render_format::unorm;
     std::atomic<bool>       cpu_readback_needed_{true};
 
     // Still-frame cache: skip GPU composition when inputs are unchanged.
@@ -200,13 +203,22 @@ class image_renderer
         cached_result_cpu_ = {};
     }
 
-    explicit image_renderer(const spl::shared_ptr<device>& vulkan, const size_t max_frame_size, common::bit_depth depth)
+    explicit image_renderer(const spl::shared_ptr<device>& vulkan,
+                            const size_t                   max_frame_size,
+                            common::bit_depth              depth,
+                            common::render_format          render_format = common::render_format::unorm)
         : vulkan_(vulkan)
-        , kernel_(vulkan_, depth)
+        , kernel_(vulkan_, depth, render_format)
         , max_frame_size_(max_frame_size)
         , depth_(depth)
+        , render_format_(render_format)
     {
+        if (render_format_ != common::render_format::unorm) {
+            CASPAR_LOG(info) << L"[vulkan_renderer] compositing into fp16 attachments";
+        }
     }
+
+    common::render_format render_format() const { return render_format_; }
 
     void set_cpu_readback_needed(bool needed)
     {
@@ -306,7 +318,20 @@ class image_renderer
                     target = cal_target;
                 }
 
+                // Everything downstream of the mixer means integer, so a float working
+                // space has to be resolved before the frame leaves. Requested before
+                // commit() so the blit lands in the same command buffer as the composite
+                // and is ordered against it without an extra submit or a stall.
+                if (render_format_ != common::render_format::unorm) {
+                    pass->set_resolve_target(pass->create_attachment_as(common::render_format::unorm));
+                }
+
                 pass->commit();
+
+                // result_attachment() is the resolve target when one was set, and otherwise
+                // whichever attachment was rendered to last -- so this is correct whether or
+                // not the calibration pass redirected the output.
+                target = pass->result_attachment();
 
                 // Wrap the render fence into the texture_wrapper so the consumer
                 // can wait on it just before importing.  This allows the channel
@@ -636,9 +661,10 @@ struct image_mixer::impl
     impl(const spl::shared_ptr<device>& device,
          const int                      channel_id,
          const size_t                   max_frame_size,
-         common::bit_depth              depth)
+         common::bit_depth              depth,
+         common::render_format          render_format)
         : vulkan_(device)
-        , renderer_(device, max_frame_size, depth)
+        , renderer_(device, max_frame_size, depth, render_format)
         , transform_stack_(1)
         , channel_id_(channel_id)
     {
@@ -1060,8 +1086,9 @@ struct image_mixer::impl
 image_mixer::image_mixer(const spl::shared_ptr<device>& vulkan,
                          const int                      channel_id,
                          const size_t                   max_frame_size,
-                         common::bit_depth              depth)
-    : impl_(std::make_unique<impl>(vulkan, channel_id, max_frame_size, depth))
+                         common::bit_depth              depth,
+                         common::render_format          render_format)
+    : impl_(std::make_unique<impl>(vulkan, channel_id, max_frame_size, depth, render_format))
 {
 }
 image_mixer::~image_mixer()

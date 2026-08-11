@@ -23,6 +23,7 @@
 
 #include <common/array.h>
 #include <common/bit_depth.h>
+#include <common/render_format.h>
 #include <common/memory.h>
 
 #include <core/frame/frame.h>
@@ -50,7 +51,8 @@ class image_mixer final : public core::image_mixer
     image_mixer(const spl::shared_ptr<class device>& vulkan,
                 int                                  channel_id,
                 const size_t                         max_frame_size,
-                common::bit_depth                    depth);
+                common::bit_depth                    depth,
+                common::render_format                 render_format = common::render_format::unorm);
     image_mixer(const image_mixer&) = delete;
 
     ~image_mixer();

@@ -23,6 +23,7 @@
 
 #include <common/bit_depth.h>
 #include <common/memory.h>
+#include <common/render_format.h>
 #include <tbb/concurrent_queue.h>
 #include <tbb/concurrent_unordered_map.h>
 #include <vector>
@@ -62,8 +63,15 @@ struct frame_context
     virtual void*                           render_complete_semaphore_handle()                  { return nullptr; }
     /// Returns the timeline semaphore value signaled by the most recent submit().
     virtual uint64_t                        render_complete_semaphore_value()                   { return 0; }
+    /// An attachment in whatever format this context composites in.
     virtual std::shared_ptr<class texture>
     create_attachment(uint32_t width, uint32_t height, uint32_t components_count) = 0;
+
+    /// An attachment in an explicitly chosen format. The resolve target is the one caller
+    /// that needs this, because it is by definition a different format from the working
+    /// space it is resolving.
+    virtual std::shared_ptr<class texture>
+    create_attachment_as(uint32_t width, uint32_t height, uint32_t components_count, common::render_format format) = 0;
 };
 
 class renderpass
@@ -74,6 +82,10 @@ class renderpass
     uint32_t                        _height;
 
     std::shared_ptr<class texture> _default_attachment;
+    std::shared_ptr<class texture> _resolve_target;
+    // Set by commit() to whichever attachment was rendered to last, so result_attachment()
+    // is correct even when a post-process pass redirected the output.
+    std::shared_ptr<class texture> _final_attachment;
 
     struct layer_info
     {
@@ -96,6 +108,30 @@ class renderpass
 
     ~renderpass();
     std::shared_ptr<class texture> create_attachment(uint32_t components_count = 4);
+
+    /// A full-size attachment in `format`, for use as commit()'s resolve target.
+    std::shared_ptr<class texture> create_attachment_as(common::render_format format,
+                                                        uint32_t              components_count = 4);
+
+    /// Ask commit() to blit the final attachment into `target` inside the same command
+    /// buffer, converting format on the way.
+    ///
+    /// Required when this pass composites into a float attachment: everything downstream
+    /// of the mixer -- copy_async(), texture_wrapper, every consumer -- means integer, and
+    /// a half-float image reaching them is reinterpreted as unsigned shorts, which is
+    /// garbage rather than merely clipped.
+    ///
+    /// It has to happen here rather than in a separate submit. The composite's work is
+    /// only ordered by this command buffer, so a standalone submitSingleTimeCommands()
+    /// blit would race it, and waiting for the pass first would stall the pipeline every
+    /// frame -- defeating the semaphore handoff that lets the channel tick continue while
+    /// the previous frame is still in flight.
+    void set_resolve_target(std::shared_ptr<class texture> target) { _resolve_target = std::move(target); }
+
+    /// The image callers should treat as the pass's result: the resolve target when one
+    /// was set, otherwise whichever attachment was rendered to last.
+    std::shared_ptr<class texture> result_attachment() const;
+
     void                           draw(const draw_params& params);
     virtual void                   commit();
     void                           wait_for_completion() { _ctx->wait_for_completion(); }

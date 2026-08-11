@@ -68,6 +68,18 @@ std::shared_ptr<texture> renderpass::create_attachment(uint32_t components_count
     return _ctx->create_attachment(_width, _height, components_count);
 }
 
+std::shared_ptr<texture> renderpass::create_attachment_as(common::render_format format, uint32_t components_count)
+{
+    return _ctx->create_attachment_as(_width, _height, components_count, format);
+}
+
+std::shared_ptr<texture> renderpass::result_attachment() const
+{
+    if (_resolve_target)
+        return _resolve_target;
+    return _final_attachment ? _final_attachment : _default_attachment;
+}
+
 void renderpass::draw(const draw_params& params)
 {
     auto attachment         = params.background;
@@ -252,6 +264,95 @@ void renderpass::commit()
         vk::DependencyInfo depInfo{};
         depInfo.setImageMemoryBarriers(storeBarrier);
         cmd_buffer.pipelineBarrier2(depInfo);
+    }
+
+    _final_attachment = previous_attachment;
+
+    // Float working space -> the channel's output format, inside this same command buffer
+    // so it is ordered after the composite without an extra submit or a stall. See
+    // set_resolve_target().
+    if (_resolve_target && _resolve_target != previous_attachment) {
+        const auto src_img = previous_attachment->id();
+        const auto dst_img = _resolve_target->id();
+
+        // The store barrier above left the source in eColorAttachmentOptimal with
+        // dstStageMask eAllCommands, which is what makes this transition legal here.
+        {
+            vk::ImageMemoryBarrier2 toSrc{};
+            toSrc.oldLayout        = vk::ImageLayout::eColorAttachmentOptimal;
+            toSrc.newLayout        = vk::ImageLayout::eTransferSrcOptimal;
+            toSrc.srcQueueFamilyIndex = vk::QueueFamilyIgnored;
+            toSrc.dstQueueFamilyIndex = vk::QueueFamilyIgnored;
+            toSrc.image            = src_img;
+            toSrc.subresourceRange = vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1);
+            toSrc.srcStageMask     = vk::PipelineStageFlagBits2::eColorAttachmentOutput;
+            toSrc.srcAccessMask    = vk::AccessFlagBits2::eColorAttachmentWrite;
+            toSrc.dstStageMask     = vk::PipelineStageFlagBits2::eTransfer;
+            toSrc.dstAccessMask    = vk::AccessFlagBits2::eTransferRead;
+
+            // The resolve target is overwritten whole, so eUndefined is honest and lets
+            // the driver skip preserving contents. create_attachment hands it back in
+            // eRenderingLocalRead.
+            vk::ImageMemoryBarrier2 toDst{};
+            toDst.oldLayout        = vk::ImageLayout::eUndefined;
+            toDst.newLayout        = vk::ImageLayout::eTransferDstOptimal;
+            toDst.srcQueueFamilyIndex = vk::QueueFamilyIgnored;
+            toDst.dstQueueFamilyIndex = vk::QueueFamilyIgnored;
+            toDst.image            = dst_img;
+            toDst.subresourceRange = vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1);
+            toDst.srcStageMask     = vk::PipelineStageFlagBits2::eTopOfPipe;
+            toDst.srcAccessMask    = vk::AccessFlagBits2::eNone;
+            toDst.dstStageMask     = vk::PipelineStageFlagBits2::eTransfer;
+            toDst.dstAccessMask    = vk::AccessFlagBits2::eTransferWrite;
+
+            std::array<vk::ImageMemoryBarrier2, 2> barriers{toSrc, toDst};
+            vk::DependencyInfo                     depInfo{};
+            depInfo.setImageMemoryBarriers(barriers);
+            cmd_buffer.pipelineBarrier2(depInfo);
+        }
+
+        const auto     layers = vk::ImageSubresourceLayers(vk::ImageAspectFlagBits::eColor, 0, 0, 1);
+        vk::ImageBlit2 region{};
+        region.srcSubresource = layers;
+        region.dstSubresource = layers;
+        region.srcOffsets[0]  = vk::Offset3D{0, 0, 0};
+        region.srcOffsets[1]  = vk::Offset3D{static_cast<int32_t>(_width), static_cast<int32_t>(_height), 1};
+        region.dstOffsets[0]  = vk::Offset3D{0, 0, 0};
+        region.dstOffsets[1]  = vk::Offset3D{static_cast<int32_t>(_width), static_cast<int32_t>(_height), 1};
+
+        vk::BlitImageInfo2 blit{};
+        blit.srcImage       = src_img;
+        blit.srcImageLayout = vk::ImageLayout::eTransferSrcOptimal;
+        blit.dstImage       = dst_img;
+        blit.dstImageLayout = vk::ImageLayout::eTransferDstOptimal;
+        // eNearest, not eLinear: this is 1:1, so there is nothing to interpolate and
+        // eLinear would only invite half-texel error. Conversion to a normalized
+        // destination format clamps out-of-range values, which is where the display range
+        // should be imposed.
+        blit.filter = vk::Filter::eNearest;
+        blit.setRegions(region);
+        cmd_buffer.blitImage2(blit);
+
+        // Hand the resolve target on in the layout copy_async() and texture_wrapper
+        // assume, so callers chain the two without knowing anything about layouts --
+        // the same contract reduce_texture() honours.
+        {
+            vk::ImageMemoryBarrier2 toColor{};
+            toColor.oldLayout        = vk::ImageLayout::eTransferDstOptimal;
+            toColor.newLayout        = vk::ImageLayout::eColorAttachmentOptimal;
+            toColor.srcQueueFamilyIndex = vk::QueueFamilyIgnored;
+            toColor.dstQueueFamilyIndex = vk::QueueFamilyIgnored;
+            toColor.image            = dst_img;
+            toColor.subresourceRange = vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1);
+            toColor.srcStageMask     = vk::PipelineStageFlagBits2::eTransfer;
+            toColor.srcAccessMask    = vk::AccessFlagBits2::eTransferWrite;
+            toColor.dstStageMask     = vk::PipelineStageFlagBits2::eAllCommands;
+            toColor.dstAccessMask    = vk::AccessFlagBits2::eMemoryRead;
+
+            vk::DependencyInfo depInfo{};
+            depInfo.setImageMemoryBarriers(toColor);
+            cmd_buffer.pipelineBarrier2(depInfo);
+        }
     }
 
     cmd_buffer.end();

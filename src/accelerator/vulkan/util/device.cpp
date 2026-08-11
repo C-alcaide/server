@@ -776,8 +776,16 @@ struct device::impl : public std::enable_shared_from_this<impl>
 
             auto imageView = _device.createImageView(createInfo);
 
-            tex = std::make_shared<texture>(
-                width, height, components_count, depth, image, imageMemory, imageView, _device, memReq.size);
+            tex = std::make_shared<texture>(width,
+                                            height,
+                                            components_count,
+                                            depth,
+                                            image,
+                                            imageMemory,
+                                            imageView,
+                                            _device,
+                                            memReq.size,
+                                            render_format);
             if (_device_luid_valid)
                 tex->set_device_luid(_device_luid);
         }

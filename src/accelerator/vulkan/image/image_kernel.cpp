@@ -319,6 +319,12 @@ struct image_kernel::impl
         virtual std::shared_ptr<class texture>
         create_attachment(uint32_t width, uint32_t height, uint32_t components_count)
         {
+            return create_attachment_as(width, height, components_count, parent->render_format_);
+        }
+
+        virtual std::shared_ptr<class texture>
+        create_attachment_as(uint32_t width, uint32_t height, uint32_t components_count, common::render_format format)
+        {
             // Reuse an attachment texture from a previous frame on this slot
             // if the consumer has released its reference (use_count == 1 means
             // only our pool holds it).  This keeps the underlying VkDeviceMemory
@@ -326,9 +332,13 @@ struct image_kernel::impl
             // CUDA import on the consumer side valid — avoiding the extremely
             // expensive cudaImportExternalMemory call (~10-150 ms) every frame.
             for (auto& tex : attachment_pool_) {
+                // Format, not just dimensions: a VkImage's format is fixed at creation, so
+                // matching on size alone would hand a caller asking for the resolve
+                // target's unorm image back an fp16 one from the working space (or the
+                // reverse). Same hazard as the device attachment pool.
                 if (tex && tex.use_count() == 1 &&
                     static_cast<uint32_t>(tex->width()) == width &&
-                    static_cast<uint32_t>(tex->height()) == height) {
+                    static_cast<uint32_t>(tex->height()) == height && tex->format() == format) {
                     // This texture was left in whatever layout the previous frame's
                     // last use put it in (e.g. eShaderReadOnlyOptimal after being
                     // sampled, or eTransferSrcOptimal after a readback) — it must be
@@ -340,8 +350,8 @@ struct image_kernel::impl
                     return tex;
                 }
             }
-            auto tex = parent->vulkan_->create_attachment(
-                width, height, parent->depth_, components_count, parent->render_format_);
+            auto tex =
+                parent->vulkan_->create_attachment(width, height, parent->depth_, components_count, format);
             // Cap pool to prevent unbounded VRAM growth when consumers hold refs.
             static constexpr size_t MAX_ATTACHMENT_POOL = 4;
             if (attachment_pool_.size() < MAX_ATTACHMENT_POOL)

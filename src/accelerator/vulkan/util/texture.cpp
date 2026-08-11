@@ -45,6 +45,10 @@ struct texture::impl
     int               size_   = 0;
     vk::DeviceSize    alloc_size_ = 0;
     common::bit_depth depth_;
+    // Which numeric format this image was created with. A VkImage's format is fixed at
+    // creation, so anything that recycles images has to match on this as well as on the
+    // dimensions -- see image_kernel's per-slot attachment cache.
+    common::render_format format_ = common::render_format::unorm;
     uint8_t           device_luid_[8] = {};
     bool              has_luid_ = false;
     bool              compressed_ = false;
@@ -62,7 +66,8 @@ struct texture::impl
          vk::DeviceMemory  memory,
          vk::ImageView     imageView,
          vk::Device        device,
-         vk::DeviceSize    alloc_size = 0)
+         vk::DeviceSize    alloc_size = 0,
+         common::render_format format = common::render_format::unorm)
         : image_(image)
         , memory_(memory)
         , imageView_(imageView)
@@ -73,6 +78,7 @@ struct texture::impl
         , size_(width * height * stride * (depth == common::bit_depth::bit8 ? 1 : 2))
         , alloc_size_(alloc_size > 0 ? alloc_size : static_cast<vk::DeviceSize>(size_))
         , depth_(depth)
+        , format_(format)
     {
     }
 
@@ -93,8 +99,9 @@ texture::texture(int               width,
                  vk::DeviceMemory  memory,
                  vk::ImageView     imageView,
                  vk::Device        device,
-                 vk::DeviceSize    alloc_size)
-    : impl_(new impl(width, height, stride, depth, image, memory, imageView, device, alloc_size))
+                 vk::DeviceSize        alloc_size,
+                 common::render_format format)
+    : impl_(new impl(width, height, stride, depth, image, memory, imageView, device, alloc_size, format))
 {
 }
 texture::texture(texture&& other)
@@ -113,6 +120,7 @@ vk::ImageView texture::view() const { return impl_->imageView_; }
 int               texture::width() const { return impl_->width_; }
 int               texture::height() const { return impl_->height_; }
 int               texture::stride() const { return impl_->stride_; }
+common::render_format texture::format() const { return impl_->format_; }
 common::bit_depth texture::depth() const { return impl_->depth_; }
 void              texture::set_depth(common::bit_depth depth) { impl_->depth_ = depth; }
 int               texture::size() const { return impl_->size_; }

@@ -22,6 +22,7 @@
 #pragma once
 
 #include <common/bit_depth.h>
+#include <common/render_format.h>
 #include "platform_config.h"
 
 #include <core/frame/frame.h>
@@ -40,8 +41,9 @@ class texture final
             vk::Image         image,
             vk::DeviceMemory  memory,
             vk::ImageView     imageView,
-            vk::Device        device,
-            vk::DeviceSize    alloc_size = 0);
+            vk::Device            device,
+            vk::DeviceSize        alloc_size = 0,
+            common::render_format format     = common::render_format::unorm);
     texture(const texture&) = delete;
     texture(texture&& other);
     ~texture();
@@ -56,6 +58,10 @@ class texture final
     int               stride() const;
     common::bit_depth depth() const;
     void              set_depth(common::bit_depth depth);
+
+    /// The numeric format the image was created with. Immutable in Vulkan, which is why
+    /// every cache and pool that recycles attachments must key on it.
+    common::render_format format() const;
     int               size() const;
     VkImage           id() const;
     VkDeviceMemory    memory() const;
