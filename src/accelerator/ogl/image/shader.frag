@@ -1889,6 +1889,15 @@ void main()
         // OETF: linear -> encoded
         col.rgb = apply_oetf(col.rgb, output_transfer);
     }
+    // A generated DISPLAY transform's call is spliced here, replacing the output block above
+    // rather than following it: it owns the tone map, the gamut compression and the display's
+    // own encoding, so do_output_convert is false whenever this is non-empty.
+    //
+    // ⚠ THE SWIZZLE IS THE POINT, as with the input splice. This shader carries BGR -- see
+    // `col.bgr = working_to_output * col.bgr` above -- and the generated function expects
+    // true RGB. Without it every grey stays correct and the hue wheel is mirrored. The Vulkan
+    // shader's equivalent marker must NOT swizzle; it grades in RGB.
+    //__CASPAR_OCIO_DISPLAY__
 
 	col *= opacity;
 

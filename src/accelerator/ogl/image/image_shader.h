@@ -66,6 +66,15 @@ struct shader_variant
     /// Empty leaves the base program's own conversion in place.
     std::string transform_call;
 
+    /// The expression spliced in at the DISPLAY point, replacing the output conversion.
+    /// Independent of `transform_call`: a channel can carry a display transform with no
+    /// input transform on a layer, or the reverse, or both.
+    ///
+    /// Both live in one variant because they are spliced into one program, so the cache key
+    /// has to name the pair -- two colour spaces through one display are two programs, and
+    /// keying on either alone would serve the wrong one.
+    std::string display_call;
+
     bool is_base() const { return id.empty(); }
 };
 

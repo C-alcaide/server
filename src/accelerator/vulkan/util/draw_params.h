@@ -58,6 +58,19 @@ struct draw_params final
     float                                       sdr_reference_white    = 100.0f;
     bool                                        auto_gamut_compress    = false;
 
+    /// Channel-level OCIO display transform: the composited look. Empty means none.
+    ///
+    /// Channel-level rather than per layer, and stamped onto every draw by the mixer, because
+    /// it describes the output the whole channel is being graded FOR. Applied where the
+    /// built-in output conversion runs -- per layer, before the blend -- so that foreground
+    /// and background reach the blend in the same display encoding, exactly as today. With
+    /// one transform for the whole channel that is equivalent to transforming the composite.
+    ///
+    /// A consumer-level view would need the composite to still be in working space, which is
+    /// a different and larger change; see docs/OCIO_HANDOFF_2026-08-11.md.
+    std::string                                 ocio_display;
+    std::string                                 ocio_view;
+
     /// Is the channel configured with a CUSTOM video mode?
     ///
     /// Used only to defeat the sub-720 BT.601 fallback: a custom format is an LED wall

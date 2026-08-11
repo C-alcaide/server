@@ -75,21 +75,26 @@ std::string build_fragment_source(const shader_variant& variant, const char* bas
     // the un-spliced shader compiles and runs. That is what makes the substitution safe to
     // get wrong loudly rather than quietly: a missing marker throws here, at configure time,
     // instead of producing a program that silently omits the transform.
-    static constexpr const char* DECL_MARKER = "//__CASPAR_OCIO_DECLARATIONS__";
-    static constexpr const char* CALL_MARKER = "//__CASPAR_OCIO_TRANSFORM__";
+    static constexpr const char* DECL_MARKER    = "//__CASPAR_OCIO_DECLARATIONS__";
+    static constexpr const char* CALL_MARKER    = "//__CASPAR_OCIO_TRANSFORM__";
+    static constexpr const char* DISPLAY_MARKER = "//__CASPAR_OCIO_DISPLAY__";
 
     std::string source(base);
 
-    const auto decl_at = source.find(DECL_MARKER);
-    const auto call_at = source.find(CALL_MARKER);
-    if (decl_at == std::string::npos || call_at == std::string::npos) {
+    const auto decl_at    = source.find(DECL_MARKER);
+    const auto call_at    = source.find(CALL_MARKER);
+    const auto display_at = source.find(DISPLAY_MARKER);
+    if (decl_at == std::string::npos || call_at == std::string::npos ||
+        display_at == std::string::npos) {
         CASPAR_THROW_EXCEPTION(caspar_exception() << msg_info(
                                    "shader.frag is missing an OCIO splice marker; cannot build variant '" +
                                    variant.id + "'"));
     }
 
-    // Replace the call site first: inserting the (much longer) declarations first would
-    // invalidate the offset found for the call.
+    // Back to front. Every replacement shifts the offsets after it, and the declarations are
+    // by far the longest, so replacing them first would invalidate both call sites. The
+    // display marker sits after the transform marker, which sits after the declarations.
+    source.replace(display_at, std::strlen(DISPLAY_MARKER), variant.display_call);
     source.replace(call_at, std::strlen(CALL_MARKER), variant.transform_call);
     source.replace(decl_at, std::strlen(DECL_MARKER), variant.prologue);
 

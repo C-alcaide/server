@@ -459,6 +459,11 @@ vec4 shape_fill(vec2 uv){if(shape_fill_type==0)return shape_color1;float t;if(sh
 // ── Main ────────────────────────────────────────────────────────────────
 // A generated colour transform's declarations are spliced here. Empty for the base program,
 // which is what keeps the base SPIR-V identical to what glslc produces at build time.
+//
+// Both halves land here -- an input transform (working space in) and a display transform
+// (display encoding out). They coexist without colliding because OCIO is asked for disjoint
+// identifier prefixes (ocio_in_ / ocio_out_) and disjoint texture binding ranges
+// (1..4 / 5..8); see accelerator/ocio/ocio_config.h.
 //__CASPAR_OCIO_DECLARATIONS__
 
 void main(){
@@ -514,6 +519,14 @@ void main(){
     // display values, and mixing a graded layer with an already-encoded
     // background must not double-encode either one).
     if(flag2(F2_OUTPUT_CONVERT)){if(tone_mapping_op>0)col.rgb=apply_tone_mapping(col.rgb,tone_mapping_op);col.rgb=ubo_mat3(working_to_output_c0,working_to_output_c1,working_to_output_c2)*col.rgb;if(tone_mapping_op==0)col.rgb=clamp(col.rgb,0.0,1.0);col.rgb=apply_oetf(col.rgb,output_transfer);}
+    // A generated DISPLAY transform's call is spliced here, replacing the output block above
+    // rather than following it: it owns the tone map, the gamut compression and the display's
+    // own encoding, so F2_OUTPUT_CONVERT is clear whenever this is non-empty.
+    //
+    // NO SWIZZLE, for the same reason as the input splice above -- this shader carries true
+    // RGB. And it must sit BEFORE the blend, exactly where the block it replaces sits: both
+    // foreground and background have to reach the blend in the same display encoding.
+    //__CASPAR_OCIO_DISPLAY__
 
     col*=opacity;
     if(flag(F_LOCAL_KEY))col.a*=texture(textures[LOCAL_KEY],TexCoord2.st).r;
