@@ -2921,6 +2921,96 @@ std::future<std::wstring> mixer_lut3d_command(command_context& ctx)
     return make_ready_future<std::wstring>(L"202 MIXER OK\r\n");
 }
 
+// OCIO_DISPLAY <channel> "<display>" "<view>"   set the channel's display transform
+// OCIO_DISPLAY <channel> NONE                    clear it
+// OCIO_DISPLAY <channel> [INFO]                  query
+//
+// CHANNEL-LEVEL, and unlike `MIXER OCIO` that is not a simplification. An INPUT transform
+// describes where the pixels came from, which is a property of each layer. A DISPLAY
+// transform describes what screen they are going to, and every layer in a channel goes to
+// the same screen -- two layers with different display transforms would blend a PQ-encoded
+// layer with a Rec.709-encoded one, and that composite is not in any space.
+//
+// Applied in the post-composite stage, so it REQUIRES <working-space-composite>. A display
+// transform consumes working-space pixels; without it the composite is already
+// display-encoded by the time this stage runs, and applying a display transform to it would
+// encode twice. Refused rather than rendered.
+//
+// Quote both arguments. Every display and view name in the bundled ACES config contains
+// spaces, and AMCP tokenizes on whitespace.
+std::future<std::wstring> ocio_display_command(command_context& ctx)
+{
+    auto image_mixer = ctx.channel.raw_channel->mixer().get_image_mixer();
+
+    if (ctx.parameters.empty() || boost::iequals(ctx.parameters.at(0), L"INFO")) {
+        auto st = image_mixer->get_ocio_display();
+        std::wstringstream result;
+        result << L"201 OCIO_DISPLAY OK\r\n";
+        if (st.enabled)
+            result << u16(st.display) << L" / " << u16(st.view) << L"\r\n";
+        else
+            result << L"NONE\r\n";
+        return make_ready_future<std::wstring>(result.str());
+    }
+
+    if (boost::iequals(ctx.parameters.at(0), L"NONE") || boost::iequals(ctx.parameters.at(0), L"OFF")) {
+        image_mixer->set_ocio_display("", "");
+        return make_ready_future<std::wstring>(L"202 OCIO_DISPLAY OK\r\n");
+    }
+
+    if (!accelerator::ocio::available()) {
+        CASPAR_LOG(warning) << L"[ocio] OCIO_DISPLAY refused: this server was built without OCIO support";
+        return make_ready_future<std::wstring>(L"501 OCIO_DISPLAY FAILED\r\n");
+    }
+
+    if (ctx.parameters.size() < 2) {
+        CASPAR_LOG(warning) << L"[ocio] OCIO_DISPLAY needs a display AND a view, both quoted. "
+                               L"Use INFO OCIO DISPLAYS to list them.";
+        return make_ready_future<std::wstring>(L"400 OCIO_DISPLAY FAILED\r\n");
+    }
+
+    const auto display = u8(ctx.parameters.at(0));
+    const auto view    = u8(ctx.parameters.at(1));
+
+    if (!accelerator::ocio::has_display_view(display, view)) {
+        CASPAR_LOG(warning) << L"[ocio] OCIO_DISPLAY refused: '" << ctx.parameters.at(0) << L"' / '"
+                            << ctx.parameters.at(1) << L"' is not a display/view pair in this config. "
+                            << L"Use INFO OCIO DISPLAYS to list them.";
+        return make_ready_future<std::wstring>(L"404 OCIO_DISPLAY ERROR\r\n");
+    }
+
+    // The precondition, checked before the build so the operator gets the real reason rather
+    // than a shader that renders a double-encoded picture.
+    if (!image_mixer->composites_in_working_space()) {
+        CASPAR_LOG(warning) << L"[ocio] OCIO_DISPLAY refused: this channel does not composite in the "
+                               L"working space. A display transform consumes working-space pixels; add "
+                               L"<working-space-composite>true</working-space-composite> (and the fp16 "
+                               L"render format it requires) to the channel.";
+        return make_ready_future<std::wstring>(L"403 OCIO_DISPLAY ERROR\r\n");
+    }
+
+    // Build it now rather than only checking that the names exist. A pair can be present in
+    // the config and still fail to produce a processor -- a missing LUT file behind a
+    // FileTransform, an unresolvable role -- and by the time the mixer needs it there is no
+    // way to report that except by rendering something wrong.
+    //
+    // It is also the pre-warm: OCIO's own guidance is that building a processor is expensive
+    // and thread-blocking and should happen "as infrequently as is sensible". Doing it here
+    // puts the cost on the command rather than on the first composited frame, and the
+    // mixer's own build is then a cache hit inside OCIO.
+    accelerator::ocio::gpu_shader probe;
+    if (!accelerator::ocio::build_display_transform(display, view, probe,
+                                                    accelerator::ocio::gpu_target::opengl)) {
+        CASPAR_LOG(warning) << L"[ocio] OCIO_DISPLAY refused: '" << ctx.parameters.at(0) << L"' / '"
+                            << ctx.parameters.at(1)
+                            << L"' exists but no GPU transform could be built from it";
+        return make_ready_future<std::wstring>(L"404 OCIO_DISPLAY ERROR\r\n");
+    }
+
+    image_mixer->set_ocio_display(display, view);
+    return make_ready_future<std::wstring>(L"202 OCIO_DISPLAY OK\r\n");
+}
+
 // CALIBRATION <channel> LUT <file.cube> [strength]   load a channel-master LED calibration LUT
 // CALIBRATION <channel> CLEAR                         remove the calibration LUT
 // CALIBRATION <channel> BYPASS <0|1>                  temporarily bypass without unloading
@@ -4845,6 +4935,7 @@ void register_commands(std::shared_ptr<amcp_command_repository_wrapper>& repo)
     repo->register_command(L"Mixer Commands", L"CHANNEL_GRID", channel_grid_command, 0);
 
     repo->register_channel_command(L"Calibration Commands", L"CALIBRATION", calibration_command, 0);
+    repo->register_channel_command(L"Mixer Commands", L"OCIO_DISPLAY", ocio_display_command, 0);
 
     repo->register_channel_command(L"Previz Commands", L"PREVIZ SCENE",     previz_scene_command,     0);
     repo->register_channel_command(L"Previz Commands", L"PREVIZ MAP",       previz_map_command,       2);

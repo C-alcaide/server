@@ -45,6 +45,20 @@ struct calibration_lut_state
     std::wstring path;               // source .cube path (for diagnostics)
 };
 
+/// A channel-level OCIO display/view transform: what screen the composite is going to.
+///
+/// Channel-level rather than per layer, and that is not a simplification. An INPUT transform
+/// describes where pixels came from, which is a property of each layer; a DISPLAY transform
+/// describes what screen they are going to, and every layer in a channel goes to the same
+/// screen. Two layers with different display transforms would blend a PQ-encoded layer with
+/// a Rec.709-encoded one, and that composite is not in any space.
+struct ocio_display_state
+{
+    bool        enabled = false;
+    std::string display;
+    std::string view;
+};
+
 class image_mixer
     : public frame_visitor
     , public frame_factory
@@ -94,6 +108,26 @@ class image_mixer
         (void)straight_alpha_grading;
         (void)working_space_composite;
     }
+
+    /// The channel's OCIO display/view transform, applied in the post-composite stage.
+    ///
+    /// Requires `<working-space-composite>`: a display transform consumes WORKING-space
+    /// pixels, and without it the composite is already display-encoded by the time this
+    /// stage runs. `set_ocio_display` is refused in that case rather than rendering
+    /// something plausible from the wrong input.
+    ///
+    /// Empty display or view clears it.
+    virtual void set_ocio_display(const std::string& display, const std::string& view)
+    {
+        (void)display;
+        (void)view;
+    }
+
+    virtual ocio_display_state get_ocio_display() const { return {}; }
+
+    /// Does this mixer composite in the working space? The AMCP layer asks before
+    /// accepting a display transform, so the refusal names the real reason.
+    virtual bool composites_in_working_space() const { return false; }
 
     /// Channel-master LED-wall calibration LUT. Applied to the final composited
     /// frame (channel→output, post-grade) so every consumer receives the

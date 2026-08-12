@@ -133,6 +133,8 @@ struct render_fingerprint
     bool                 auto_gamut_compress    = false;
     bool                 straight_alpha_grading = false;
     bool                 working_space_composite = false;
+    std::string          ocio_display;
+    std::string          ocio_view;
     const void*          calibration_lut        = nullptr;
     float                calibration_strength   = 0.0f;
     bool                 calibration_bypass     = false;
@@ -147,6 +149,7 @@ struct render_fingerprint
                sdr_reference_white == other.sdr_reference_white && auto_gamut_compress == other.auto_gamut_compress &&
                straight_alpha_grading == other.straight_alpha_grading &&
                working_space_composite == other.working_space_composite &&
+               ocio_display == other.ocio_display && ocio_view == other.ocio_view &&
                calibration_lut == other.calibration_lut && calibration_strength == other.calibration_strength &&
                calibration_bypass == other.calibration_bypass;
     }
@@ -181,6 +184,12 @@ class image_renderer
     bool                 auto_gamut_compress    = false;
     bool                 straight_alpha_grading = false;
     bool                 working_space_composite = false;
+
+    // The channel's OCIO display/view transform, applied in the post-composite stage.
+    // Empty means none. Guarded by working_space_composite: a display transform consumes
+    // working-space pixels.
+    std::string          ocio_display;
+    std::string          ocio_view;
 
     // Channel-master LED-wall calibration LUT, applied as a final full-screen
     // pass over the composited frame (output-agnostic — every consumer sees it).
@@ -350,6 +359,8 @@ class image_renderer
         fp.auto_gamut_compress    = auto_gamut_compress;
         fp.straight_alpha_grading = straight_alpha_grading;
         fp.working_space_composite = working_space_composite;
+        fp.ocio_display           = ocio_display;
+        fp.ocio_view              = ocio_view;
         fp.calibration_lut        = calibration_lut_.get();
         fp.calibration_strength   = calibration_strength_;
         fp.calibration_bypass     = calibration_bypass_;
@@ -613,6 +624,13 @@ class image_renderer
         draw_params.auto_color_convert      = false;
         draw_params.working_space_composite = false;
         draw_params.output_convert_only     = true;
+        // The display transform, if any, owns the output half of THIS pass: the kernel's
+        // `ocio_out` check clears do_output_convert and splices the generated program in
+        // its place. Set here and nowhere else -- a layer draw with a display transform
+        // would encode each layer separately, which is the per-layer arrangement this
+        // stage exists to replace.
+        draw_params.ocio_display            = ocio_display;
+        draw_params.ocio_view               = ocio_view;
         // Composes with the alpha-domain fix: with straight-alpha grading on, the output
         // encoding is applied to the straight colour and re-premultiplied, which is the
         // same rule every layer draw follows.
@@ -731,6 +749,23 @@ struct image_mixer::impl
         renderer_.auto_gamut_compress    = gamut_compress;
         renderer_.straight_alpha_grading = straight_alpha;
         renderer_.working_space_composite = ws_composite;
+    }
+
+    void set_ocio_display(const std::string& display, const std::string& view)
+    {
+        CASPAR_LOG(info) << L"[mixer] set_ocio_display display=\"" << u16(display)
+                         << L"\" view=\"" << u16(view) << L"\"";
+        renderer_.ocio_display = display;
+        renderer_.ocio_view    = view;
+    }
+
+    core::ocio_display_state get_ocio_display() const
+    {
+        core::ocio_display_state st;
+        st.display = renderer_.ocio_display;
+        st.view    = renderer_.ocio_view;
+        st.enabled = !st.display.empty() && !st.view.empty();
+        return st;
     }
 
     std::wstring calibration_path_;
@@ -1104,5 +1139,17 @@ void image_mixer::set_calibration_lut(std::shared_ptr<const core::lut3d_data> lu
 void image_mixer::set_calibration_bypass(bool bypass) { impl_->set_calibration_bypass(bypass); }
 
 core::calibration_lut_state image_mixer::get_calibration_state() const { return impl_->get_calibration_state(); }
+
+void image_mixer::set_ocio_display(const std::string& display, const std::string& view)
+{
+    impl_->set_ocio_display(display, view);
+}
+
+core::ocio_display_state image_mixer::get_ocio_display() const { return impl_->get_ocio_display(); }
+
+bool image_mixer::composites_in_working_space() const
+{
+    return impl_->renderer_.working_space_composite;
+}
 
 }}} // namespace caspar::accelerator::ogl

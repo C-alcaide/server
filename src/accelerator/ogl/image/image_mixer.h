@@ -98,6 +98,9 @@ class image_mixer final : public core::image_mixer
 
     void set_calibration_lut(std::shared_ptr<const core::lut3d_data> lut, float strength, const std::wstring& path) override;
     void set_calibration_bypass(bool bypass) override;
+    void set_ocio_display(const std::string& display, const std::string& view) override;
+    core::ocio_display_state get_ocio_display() const override;
+    bool composites_in_working_space() const override;
     core::calibration_lut_state get_calibration_state() const override;
 
   private:

@@ -194,7 +194,53 @@ New order:
      "source already matches target" skip each leave the pixel somewhere other than AP1,
      and a composite of layers in different spaces is not in any space.
    * **It requires fp16**, which §1 verified, and it is opt-in because it changes blending.
-3. **Channel-level display transform** in that stage, as the default view.
+3. ~~**Channel-level display transform** in that stage, as the default view.~~
+   **DONE 2026-08-12, with one open finding.** `OCIO_DISPLAY <ch> "<display>" "<view>"`,
+   channel-level, applied in the post-composite stage. Requires `<working-space-composite>`
+   and refuses with a 403 naming the reason. The command validates against
+   `has_display_view()` and then BUILDS the processor, which is both the real validation and
+   the pre-warm OCIO's own guidance asks for.
+
+   **The inert A5 code needed no rewriting after all.** The splice site, the binding ranges
+   and the `draw_params.ocio_display` plumbing all work unchanged — they simply had to be
+   driven from the post-composite pass rather than from layer draws. The kernel's existing
+   `ocio_out` override already suppresses the built-in output half, so the display transform
+   owns the output of that pass exactly as intended.
+
+   Measured with the new `cli.py ocio-display`, OGL and Vulkan **identical**:
+
+   | view | worst |
+   | :--- | ---: |
+   | `Raw` | 0.45 LSB |
+   | `ACES 2.0 - SDR 100 nits (Rec.709)` | 0.62 LSB |
+   | `Un-tone-mapped` | **4.00 LSB** |
+   | `Video (colorimetric)` | **4.00 LSB** |
+
+   **OPEN: 4 LSB of positive floor on channels that should be black.** Greys are exact to
+   0.05 LSB and the dominant channel to 0.05; what moves is the near-zero channels of
+   saturated primaries. Mechanism established, and the arithmetic closes:
+
+   * The composite is **fp16**, which this stage mandates. A BT.709→ACEScg→BT.709 round trip
+     is a cancellation, and fp16 makes its residual ~5000× larger: −2.5e-8 becomes −1.28e-4.
+     Still negative, still invisible.
+   * The display transform then **encodes that negative by magnitude rather than clamping
+     it**: `|−1.28e-4|^(1/2.2) × 255 = 4.34 LSB`, against 4.00 measured. From the exact value
+     the same encoding gives 0.09.
+
+   The built-in output block clamps before its OETF (`clamp(col, 0.0, 1.0)`, BT.2408 Method
+   0). An OCIO display transform replaces that block **entirely**, clamp included. So the
+   decision is where a negative belongs on this path — clamped before the display transform,
+   or accepted as OCIO's business. `ACES 2.0` passes because its tone map removes the
+   negative before the encode, which is why the two failing views are the two worth keeping.
+
+   The gate was deliberately **not** widened: 1.0 LSB is right and 4.00 is the answer to
+   report until that is decided. `tests/test_ocio_display.py` pins the mechanism so a change
+   that merely moves the number cannot be mistaken for a fix.
+
+   Also confirmed open: **the frame-path compile stall is real and now measurable.** A 1.6 s
+   settle after `OCIO_DISPLAY` produced no frame at all — the ACES 2.0 program is ~15 KB of
+   GLSL and compiles on the frame path. The AMCP command pre-warms OCIO's *processor*, not
+   the GPU program.
 4. **Consumer override** — a fan-out in the mixer, one pass per distinct view.
 
 Surviving the reorder: `build_display_transform`, the binding-range split, the 1D/NEAREST
