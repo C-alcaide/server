@@ -249,6 +249,43 @@ New order:
    GLSL and compiles on the frame path. The AMCP command pre-warms OCIO's *processor*, not
    the GPU program.
 4. **Consumer override** — a fan-out in the mixer, one pass per distinct view.
+   **NOT STARTED.** Design scouted 2026-08-12; every claim below was checked against the
+   source rather than assumed, and the obstacles are named because they are what makes this
+   bigger than steps 2 and 3 were.
+
+   **The fan-out must live inside the mixer, before the resolve.** Once the display
+   transform runs, the working-space composite is gone — and a display transform is not
+   invertible, so a second view cannot be derived from the first. The mixer has to keep the
+   composite and run one post-composite pass per distinct view. That part is cheap and
+   already built: `apply_output_convert` is the pass, and it takes the view from
+   `draw_params.ocio_display` / `.ocio_view`.
+
+   **What is genuinely new is the contract.** Three things, in order of blast radius:
+
+   * `mixer::operator()` returns **one** `const_frame` (`core/mixer/mixer.h:56`). It must
+     return per-view frames.
+   * `output`'s `do_send` (`core/consumer/output.cpp:567`) hands **the same frame to every
+     consumer**. It must route per consumer.
+   * a consumer must be able to declare a view. `frame_consumer` has no such hook, but
+     `needs_cpu_frame_data()` (`frame_consumer.h:80`) is the precedent for exactly this
+     shape — a per-consumer property the output stage reads and acts on.
+
+   **Two obstacles that are not obvious from the plan:**
+
+   * **N views cost N resolves, not just N passes.** The float composite has to be resolved
+     to the channel's output depth per texture, and on Vulkan a renderpass carries **one**
+     resolve target — `_resolve_target` is a single member (`vulkan/util/renderpass.h:153`).
+     So N views need N renderpasses, or that member becomes a list. OpenGL's
+     `resolve_to_output` is a plain call per texture and needs no such change.
+   * **The still-frame cache must become per view.** Its fingerprint now includes
+     `ocio_display`/`ocio_view`, which is right for one view and wrong for several: a single
+     cached texture would be served to whichever view asked next. It needs a cache entry per
+     view, keyed by the pair.
+
+   **What is already in place and does not need revisiting:** the post-composite stage
+   itself, `OCIO_DISPLAY` and its validation/pre-warm, the per-view variant cache in both
+   kernels, the binding-range split, and `cli.py ocio-display` with its fp16 band — which
+   will measure a second view exactly as it measures the first.
 
 Surviving the reorder: `build_display_transform`, the binding-range split, the 1D/NEAREST
 fixes, and the per-layer variant machinery (which input transforms still need). Rewritten:
