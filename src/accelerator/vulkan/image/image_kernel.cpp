@@ -856,17 +856,43 @@ struct image_kernel::impl
     /// images plus OCIO's generation, logged as a warning. Every later frame is a map lookup.
     /// Pre-warming at MIXER OCIO command time is the proper fix -- see
     /// docs/OCIO_INTEGRATION_STUDY.md section 8.7 -- and is not done here.
-    const ocio_variant* select_ocio_variant(const std::string& source_space)
+    const ocio_variant* select_ocio_variant(const std::string& source_space,
+                                            const std::string& display,
+                                            const std::string& view)
     {
-        // A cache hit inside OCIO after the AMCP command already built this space once for
-        // validation, so it costs a lookup rather than a rebuild -- and it is what yields the
-        // cache ID that keys everything below.
-        caspar::accelerator::ocio::gpu_shader generated;
-        if (!caspar::accelerator::ocio::build_input_transform(
-                source_space, generated, caspar::accelerator::ocio::gpu_target::vulkan))
+        namespace ocio_ns = caspar::accelerator::ocio;
+
+        const bool want_input   = !source_space.empty();
+        const bool want_display = !display.empty() && !view.empty();
+        if (!want_input && !want_display)
             return nullptr;
 
-        auto it = ocio_variants_.find(generated.cache_id);
+        // Cache hits inside OCIO after the AMCP commands already built these once for
+        // validation, so they cost a lookup rather than a rebuild -- and they are what yield
+        // the cache IDs that key everything below.
+        ocio_ns::gpu_shader in_shader;
+        ocio_ns::gpu_shader out_shader;
+        if (want_input &&
+            !ocio_ns::build_input_transform(source_space, in_shader, ocio_ns::gpu_target::vulkan))
+            return nullptr;
+        if (want_display &&
+            !ocio_ns::build_display_transform(display, view, out_shader, ocio_ns::gpu_target::vulkan))
+            return nullptr;
+
+        // One program holds both halves, so the key names the pair. Two source spaces through
+        // one display are two programs, and keying on either alone would serve a layer the
+        // other's transform. The disjoint binding ranges (input 1..4, display 5..8) are what
+        // let their textures share descriptor set 1 without colliding.
+        const auto key = in_shader.cache_id + "|" + out_shader.cache_id;
+
+        // One list, both halves. Each texture already carries the binding OCIO wrote into the
+        // source, so order here is irrelevant -- the binding is what places it.
+        ocio_ns::gpu_shader generated = in_shader;
+        generated.cache_id = key;
+        generated.textures.insert(generated.textures.end(),
+                                  out_shader.textures.begin(), out_shader.textures.end());
+
+        auto it = ocio_variants_.find(key);
         if (it != ocio_variants_.end())
             return it->second.failed ? nullptr : &it->second;
 
@@ -962,7 +988,9 @@ struct image_kernel::impl
                 // expensive and all three happen once per colour space, not per frame.
                 const auto spliced = splice_ocio(
                     std::string(reinterpret_cast<const char*>(fragment_shader_src)),
-                    generated.source, generated.function_name);
+                    in_shader.source + out_shader.source,
+                    want_input ? in_shader.function_name : std::string(),
+                    want_display ? out_shader.function_name : std::string());
                 if (spliced.empty()) {
                     v.failed = true;
                 } else {
@@ -1016,23 +1044,35 @@ struct image_kernel::impl
     /// a shader that silently ignores the transform.
     static std::string splice_ocio(const std::string& base,
                                    const std::string& declarations,
-                                   const std::string& function_name)
+                                   const std::string& input_function,
+                                   const std::string& display_function)
     {
-        static constexpr const char* DECL_MARKER = "//__CASPAR_OCIO_DECLARATIONS__";
-        static constexpr const char* CALL_MARKER = "//__CASPAR_OCIO_TRANSFORM__";
+        static constexpr const char* DECL_MARKER    = "//__CASPAR_OCIO_DECLARATIONS__";
+        static constexpr const char* CALL_MARKER    = "//__CASPAR_OCIO_TRANSFORM__";
+        static constexpr const char* DISPLAY_MARKER = "//__CASPAR_OCIO_DISPLAY__";
 
-        const auto decl_at = base.find(DECL_MARKER);
-        const auto call_at = base.find(CALL_MARKER);
-        if (decl_at == std::string::npos || call_at == std::string::npos) {
+        const auto decl_at    = base.find(DECL_MARKER);
+        const auto call_at    = base.find(CALL_MARKER);
+        const auto display_at = base.find(DISPLAY_MARKER);
+        if (decl_at == std::string::npos || call_at == std::string::npos ||
+            display_at == std::string::npos) {
             CASPAR_LOG(error) << L"[vk_kernel] the fragment shader is missing an OCIO splice "
                                  L"marker; refusing to build a transform that would be ignored";
             return {};
         }
 
+        // A call for each half that is configured; an empty function name leaves the marker
+        // replaced by nothing, which is what keeps the other half's built-in block in charge.
+        const auto call = [](const std::string& fn) {
+            return fn.empty() ? std::string() : "col.rgb = " + fn + "(vec4(col.rgb, col.a)).rgb;";
+        };
+
         std::string out = base;
-        // The call site first: replacing the declarations changes every offset after it.
-        out.replace(call_at, std::strlen(CALL_MARKER),
-                    "col.rgb = " + function_name + "(vec4(col.rgb, col.a)).rgb;");
+        // Back to front. Every replacement shifts the offsets after it, and the declarations
+        // are by far the longest; the display marker sits after the transform marker, which
+        // sits after the declarations.
+        out.replace(display_at, std::strlen(DISPLAY_MARKER), call(display_function));
+        out.replace(call_at, std::strlen(CALL_MARKER), call(input_function));
         out.replace(decl_at, std::strlen(DECL_MARKER), declarations);
         return out;
     }
@@ -1237,9 +1277,11 @@ struct image_kernel::impl
         // pipeline. Selecting twice would regenerate OCIO's shader source and re-copy its LUT
         // values twice per layer per frame -- a cache hit inside OCIO is not a free call.
         const auto& ocio_tf = transforms.image_transform.ocio;
-        const ocio_variant* ocio = (ocio_tf.enable && !ocio_tf.source_space.empty())
-                                       ? select_ocio_variant(ocio_tf.source_space)
-                                       : nullptr;
+        const bool          ocio_in  = ocio_tf.enable && !ocio_tf.source_space.empty();
+        const bool          ocio_out = !params.ocio_display.empty() && !params.ocio_view.empty();
+        const ocio_variant* ocio     = select_ocio_variant(ocio_in ? ocio_tf.source_space : std::string(),
+                                                           params.ocio_display,
+                                                           params.ocio_view);
 
         auto const first_plane = params.pix_desc.planes.at(0);
         if (params.geometry.mode() != core::frame_geometry::scale_mode::stretch && first_plane.width > 0 &&
@@ -1572,7 +1614,7 @@ struct image_kernel::impl
             };
 
             const auto& cg = transforms.image_transform.color_grade;
-            if (ocio) {
+            if (ocio_in) {
                 // OCIO produced the working-space pixel, so the shader's own input conversion
                 // is off -- its spliced call replaces that block rather than following it. The
                 // output half still has to run, driven by the channel's target: without it the
@@ -1752,6 +1794,19 @@ struct image_kernel::impl
                     }
                 }
             }
+        }
+
+        // A channel display transform owns the output half outright, whichever branch above
+        // ran. Applied after the whole chain and unconditionally, because it is orthogonal to
+        // how the INPUT half was decided: the layer may have reached the working space via
+        // MIXER OCIO, via MIXER COLORSPACE, via auto-convert or not at all, and in every one
+        // of those cases the display transform is what encodes it for output.
+        //
+        // Outside the chain rather than inside it -- an earlier attempt put this between two
+        // `else if` arms, which silently gated auto-convert on there being no display
+        // transform.
+        if (ocio_out) {
+            uniforms.flags2 &= ~static_cast<uint32_t>(shader_flags2::output_convert);
         }
 
         // ── White Balance ─────────────────────────────────────────────

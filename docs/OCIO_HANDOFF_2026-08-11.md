@@ -29,14 +29,20 @@ and one of them invalidates code A4e already shipped.
 * **The second splice site**, `//__CASPAR_OCIO_DISPLAY__`, in both shaders, at the output
   block it replaces — before the blend, where the block it replaces sits. ⚠ The OGL marker
   swizzles, the Vulkan one must not.
-* **`draw_params.ocio_display` / `.ocio_view`** on both backends, and the OGL kernel builds,
-  caches, splices and uploads both halves. The variant cache key is now the **pair** of
-  cache IDs, because two source spaces through one display are two programs.
+* **`draw_params.ocio_display` / `.ocio_view`** on both backends, and **both kernels** build,
+  cache, splice and upload both halves. The variant cache key is the **pair** of cache IDs,
+  because two source spaces through one display are two programs.
+* **The output-half override sits outside the branch chain, on both backends.** An earlier
+  attempt anchored it between two `else if` arms, which compiled cleanly and silently gated
+  auto colour conversion on there being no display transform. Anchor uniqueness is not
+  anchor correctness in a 2000-line function; read the patched region.
 
 ### What is left, in order
 
 1. **Nothing populates `draw_params.ocio_display` yet**, so all of the above is inert. It
-   compiles, it is regression-clean, and it has never executed. That is the next commit.
+   compiles, it is regression-clean, and it has never executed. **Both kernels are now
+   ready**, so the channel state and the AMCP command light up OpenGL and Vulkan together
+   rather than shipping a parity gap. That is the next commit.
 2. **Channel-level state.** Follow the LED calibration LUT, which is already a channel-master
    setting applied over the composited frame (`ogl/image/image_mixer.cpp`,
    `set_calibration_lut`). Note it also has a **render-fingerprint field**, and a display
@@ -44,11 +50,7 @@ and one of them invalidates code A4e already shipped.
 3. **AMCP.** `MIXER <ch> OCIO_DISPLAY "<display>" "<view>"` and `NONE`, validated at command
    time against `has_display_view()` — which already exists. Quote both arguments; every
    display and view name in this config contains spaces.
-4. **The Vulkan kernel**, mirroring the OGL work in (5) above: pair-keyed variant, both
-   halves spliced, `F2_OUTPUT_CONVERT` cleared. The uniform half on OGL is already wired —
-   `ocio_out` forces `do_output_convert` false last, independently of how the input half was
-   decided, because a layer may have reached the working space by any of four routes.
-5. **A harness battery.** `cli.py ocio` compares an input transform against OCIO's CPU
+4. **A harness battery.** `cli.py ocio` compares an input transform against OCIO's CPU
    processor; the display half needs the same treatment and the oracle already has the
    pieces.
 
