@@ -11,6 +11,12 @@ uniform sampler2D	curve_lut_tex;
 
 uniform bool        is_straight_alpha;
 
+// Channel-level: run the whole colour chain on STRAIGHT (unpremultiplied) RGB, as OCIO
+// documents, rather than on premultiplied RGB as this shader has always done. Off by
+// default -- it changes rendered output wherever content has soft edges and any non-linear
+// transform is configured. See the two sites that read it, near the top and bottom of main().
+uniform bool        straight_alpha_grading;
+
 uniform mat3		color_matrix;
 uniform vec3		luma_coeff;
 uniform bool		has_local_key;
@@ -1727,8 +1733,31 @@ void main()
         col.rgb = apply_sharpen(sharp_uv, col.rgb, sharpen_amount, sharpen_radius);
     }
     
-    if (is_straight_alpha)
+    // ALPHA DOMAIN. Everything below this point until the re-premultiply near `blend()`
+    // operates on whichever domain this block leaves the pixel in.
+    //
+    // Legacy (straight_alpha_grading false): premultiply here, so every non-linear stage
+    // downstream -- the EOTF, the OCIO splice, the grading tools, the OETF -- sees a*c.
+    // MEASURED, both mixers, 2026-08-12: that is what the mixer does today, selected over
+    // the straight-domain model at <=0.51 LSB against 13.5-116 LSB. See
+    // CasparCG-TestRunner/docs/alpha_domain_2026-08-12.md.
+    //
+    // straight_alpha_grading true: put the pixel in the STRAIGHT domain instead and leave
+    // it there through the whole chain, which is what OCIO documents and what OIIO's
+    // `unpremult` on `colorconvert` exists for. C(a*c) != a*C(c) for any non-linear C, so
+    // the transform belongs on the surface colour and the coverage is reapplied after.
+    //
+    // The two branches are exactly equivalent at alpha 0 and alpha 1 -- which is precisely
+    // why no flat-patch battery could see the difference until one drove partial alpha.
+    if (straight_alpha_grading) {
+        // A premultiplied-declaring source has to be divided back out. Guard alpha 0:
+        // fully transparent has no surface colour to recover, and 0/0 is a NaN that
+        // survives the whole chain and lands in the blend.
+        if (!is_straight_alpha && col.a > 0.0)
+            col.rgb /= col.a;
+    } else if (is_straight_alpha) {
         col.rgb *= col.a;
+    }
 
     // Convert input -> working space (Linear ACEScg usually)
     if (do_input_convert) {
@@ -1899,13 +1928,29 @@ void main()
     // shader's equivalent marker must NOT swizzle; it grades in RGB.
     //__CASPAR_OCIO_DISPLAY__
 
-	col *= opacity;
+    // Opacity is coverage, not colour. In the straight domain it therefore scales alpha
+    // alone; the legacy path scales both because its RGB already carries a factor of alpha.
+    if (straight_alpha_grading)
+        col.a *= opacity;
+    else
+        col *= opacity;
 
     if (has_local_key)
         col.a *= texture(local_key, TexCoord2.st).r;
 
     if (has_layer_key)
         col.a *= texture(layer_key, TexCoord2.st).r;
+
+    // Re-premultiply once, AFTER every alpha modification and immediately before the
+    // blend, which is the only consumer that requires it (`fore + (1.0-fore.a)*back`).
+    //
+    // Doing it here rather than straight after the output conversion also fixes something
+    // the legacy path gets wrong today: `opacity`, `local_key` and `layer_key` each scale
+    // col.a while col.rgb already carries the OLD alpha, so RGB and alpha disagree by the
+    // time they reach the blend. That disagreement is invisible at alpha 1 with no keys,
+    // which is why it has survived.
+    if (straight_alpha_grading)
+        col.rgb *= col.a;
 
     col = blend(col);
 

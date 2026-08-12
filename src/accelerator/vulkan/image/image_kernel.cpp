@@ -1357,6 +1357,13 @@ struct image_kernel::impl
             uniforms.flags |= static_cast<uint32_t>(shader_flags::is_straight_alpha);
         }
 
+        // Channel-level, and in flags2 because the first word is full (edge_blend is bit
+        // 31). The shader reads it at two sites: it decides whether to unpremultiply above
+        // the colour chain, and whether to re-premultiply below it.
+        if (params.straight_alpha_grading) {
+            uniforms.flags2 |= static_cast<uint32_t>(shader_flags2::straight_alpha_grading);
+        }
+
         if (static_cast<bool>(params.local_key)) {
             uniforms.flags |= static_cast<uint32_t>(shader_flags::has_local_key);
         }

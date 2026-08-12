@@ -131,6 +131,7 @@ struct render_fingerprint
     float                display_peak_luminance = 0.0f;
     float                sdr_reference_white    = 0.0f;
     bool                 auto_gamut_compress    = false;
+    bool                 straight_alpha_grading = false;
     const void*          calibration_lut        = nullptr;
     float                calibration_strength   = 0.0f;
     bool                 calibration_bypass     = false;
@@ -143,6 +144,7 @@ struct render_fingerprint
                auto_color_convert == other.auto_color_convert && auto_tone_map == other.auto_tone_map &&
                display_peak_luminance == other.display_peak_luminance &&
                sdr_reference_white == other.sdr_reference_white && auto_gamut_compress == other.auto_gamut_compress &&
+               straight_alpha_grading == other.straight_alpha_grading &&
                calibration_lut == other.calibration_lut && calibration_strength == other.calibration_strength &&
                calibration_bypass == other.calibration_bypass;
     }
@@ -175,6 +177,7 @@ class image_renderer
     float                display_peak_luminance = 1000.0f;
     float                sdr_reference_white    = 100.0f;
     bool                 auto_gamut_compress    = false;
+    bool                 straight_alpha_grading = false;
 
     // Channel-master LED-wall calibration LUT, applied as a final full-screen
     // pass over the composited frame (output-agnostic — every consumer sees it).
@@ -331,6 +334,7 @@ class image_renderer
         fp.display_peak_luminance = display_peak_luminance;
         fp.sdr_reference_white    = sdr_reference_white;
         fp.auto_gamut_compress    = auto_gamut_compress;
+        fp.straight_alpha_grading = straight_alpha_grading;
         fp.calibration_lut        = calibration_lut_.get();
         fp.calibration_strength   = calibration_strength_;
         fp.calibration_bypass     = calibration_bypass_;
@@ -442,6 +446,7 @@ class image_renderer
         draw_params.display_peak_luminance = display_peak_luminance;
         draw_params.sdr_reference_white    = sdr_reference_white;
         draw_params.auto_gamut_compress    = auto_gamut_compress;
+        draw_params.straight_alpha_grading = straight_alpha_grading;
 
         draw_params.pix_desc   = std::move(item.pix_desc);
         draw_params.transforms = std::move(item.transforms);
@@ -646,12 +651,13 @@ struct image_mixer::impl
 
     void update_aspect_ratio(double aspect_ratio) { aspect_ratio_ = aspect_ratio; }
 
-    void set_target_color(core::color_space cs, core::color_transfer ct, bool auto_convert, int auto_tone_map, float peak_luminance, float sdr_ref_white, bool gamut_compress)
+    void set_target_color(core::color_space cs, core::color_transfer ct, bool auto_convert, int auto_tone_map, float peak_luminance, float sdr_ref_white, bool gamut_compress, bool straight_alpha)
     {
         CASPAR_LOG(trace) << L"[ogl_mixer] set_target_color cs=" << static_cast<int>(cs)
                           << L" ct=" << static_cast<int>(ct) << L" auto=" << auto_convert
                           << L" tone_map=" << auto_tone_map << L" peak_lum=" << peak_luminance
-                          << L" sdr_ref_white=" << sdr_ref_white << L" gamut_compress=" << gamut_compress;
+                          << L" sdr_ref_white=" << sdr_ref_white << L" gamut_compress=" << gamut_compress
+                          << L" straight_alpha_grading=" << straight_alpha;
         renderer_.target_color_space    = cs;
         renderer_.target_color_transfer = ct;
         renderer_.auto_color_convert    = auto_convert;
@@ -659,6 +665,7 @@ struct image_mixer::impl
         renderer_.display_peak_luminance = peak_luminance;
         renderer_.sdr_reference_white    = sdr_ref_white;
         renderer_.auto_gamut_compress    = gamut_compress;
+        renderer_.straight_alpha_grading = straight_alpha;
     }
 
     std::wstring calibration_path_;
@@ -1019,9 +1026,9 @@ void image_mixer::set_channel_texture_store(std::shared_ptr<channel_texture_stor
     impl_->channel_tex_store_ = std::move(store);
 }
 
-void image_mixer::set_target_color(core::color_space cs, core::color_transfer ct, bool auto_convert, int auto_tone_map, float peak_luminance, float sdr_reference_white, bool auto_gamut_compress)
+void image_mixer::set_target_color(core::color_space cs, core::color_transfer ct, bool auto_convert, int auto_tone_map, float peak_luminance, float sdr_reference_white, bool auto_gamut_compress, bool straight_alpha_grading)
 {
-    impl_->set_target_color(cs, ct, auto_convert, auto_tone_map, peak_luminance, sdr_reference_white, auto_gamut_compress);
+    impl_->set_target_color(cs, ct, auto_convert, auto_tone_map, peak_luminance, sdr_reference_white, auto_gamut_compress, straight_alpha_grading);
 }
 
 void image_mixer::set_calibration_lut(std::shared_ptr<const core::lut3d_data> lut, float strength, const std::wstring& path)

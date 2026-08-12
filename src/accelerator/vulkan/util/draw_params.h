@@ -58,6 +58,12 @@ struct draw_params final
     float                                       sdr_reference_white    = 100.0f;
     bool                                        auto_gamut_compress    = false;
 
+    /// Run the colour chain on straight (unpremultiplied) RGB, as OCIO documents, rather
+    /// than on premultiplied RGB. Channel-level and off by default: it changes rendered
+    /// output wherever content has soft edges and any non-linear transform is configured.
+    /// Measured account in CasparCG-TestRunner/docs/alpha_domain_2026-08-12.md.
+    bool                                        straight_alpha_grading = false;
+
     /// Channel-level OCIO display transform: the composited look. Empty means none.
     ///
     /// Channel-level rather than per layer, and stamped onto every draw by the mixer, because

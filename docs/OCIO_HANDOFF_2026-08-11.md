@@ -16,9 +16,9 @@ answerable only from git timestamps.*
 **Do not write more A5 render code yet.** Two decisions taken on 2026-08-12 change the shape
 of the work, and one open question is wider than A5.
 
-**Status 2026-08-12: the alpha measurement below is done and the defect is real.** The next
-step is the fix in §1, which needs the two decisions recorded there. Everything after §1 is
-unchanged.
+**Status 2026-08-12: the alpha measurement below is done, the defect was real, and the fix
+has landed behind `<straight-alpha-grading>` (default off).** §1 records both. The next step
+is the reorder in §2 — the float composite. Everything after §1 is unchanged.
 
 ### 1. ~~Measure the alpha domain first~~ — MEASURED 2026-08-12, and it is real
 
@@ -66,31 +66,39 @@ transform. Everything below that point is measured; the line itself is still onl
 *"Porter-Duff 'over' composite (straight alpha)"* while the pixel reaching it is
 premultiplied. A fix to the alpha domain has to decide about that block too.
 
-#### The fix, and the two things it has to decide
+#### The fix — DONE, behind `<straight-alpha-grading>` (default off)
 
-Unpremultiply above the transform chain and premultiply below it — symmetric, and it makes
-the `is_straight_alpha` flag select *which* end needs the operation rather than gating one:
+Unpremultiply above the transform chain and premultiply once below it. The
+`is_straight_alpha` flag now selects *which* end needs the operation rather than gating one:
 
 ```
 if (!is_straight_alpha && col.a > 0.0) col.rgb /= col.a;   // premultiplied source -> straight
 <input convert / OCIO splice, grading, output convert / OCIO display>
-col.rgb *= col.a;                                          // back to premultiplied, before blend
+col.a *= opacity; col.a *= local_key; col.a *= layer_key;  // alpha alone, in this domain
+col.rgb *= col.a;                                          // premultiply once, before blend
 ```
 
-Neither of the two questions is answered yet:
+Both questions the fix had to settle were answered before it was written:
 
-* **Where exactly the re-premultiply goes.** `col *= opacity` scales RGB and alpha together,
-  and `col.a *= local_key` / `layer_key` scale alpha *alone* — which already leaves RGB and
-  alpha disagreeing today. Premultiplying once after all three, immediately before `blend()`,
-  fixes that as a side effect and is provably identical to today's behaviour at alpha 1.0.
-  Worth confirming that identity is what is wanted before treating it as free.
-* **It changes rendered output for existing configs** wherever content has soft edges and any
-  non-linear transform is configured — which is most lower-thirds. That belongs in
-  `CHANGELOG.md` with this measurement attached, and it is a decision rather than a
-  correction to apply quietly.
+* **The re-premultiply goes after opacity and both key multiplies**, immediately before
+  `blend()` — not straight after the output conversion. It is provably identical to the old
+  behaviour at alpha 1.0, and it fixes a second defect in passing: `opacity`, `local_key`
+  and `layer_key` each scale col.a while the legacy path's col.rgb still carries the OLD
+  alpha, so the two reach the blend disagreeing.
+* **Default off**, because it changes rendered output wherever content has soft edges and a
+  non-linear transform is configured. `CHANGELOG.md` carries the entry with the measurement.
 
-Acceptance criterion when it is done: `cli.py alpha-domain` exits **0** on both mixers. It
-exits **1** on both today.
+Measured after, both mixers, reports byte-identical to each other: every discriminating
+patch selects the straight model at **≤0.46 LSB**. Default path unregressed — conformance
+100/100, grading 48/48, `ocio` 6/6 (worst 0.55) on both mixers, `mixer-parity` 6/6 rasters
+identical, `vk-validation` 0 VUIDs.
+
+`cli.py alpha-domain` now asserts the verdict against the channel's setting rather than
+reporting a one-way finding: exit **0** when the domain matches `<straight-alpha-grading>`,
+**1** when it does not, **2** for inconclusive. Both settings exit 0 on both mixers.
+
+**Still not covered:** a straight-alpha source, and `shader.frag`'s shape/fill composite (see
+above). Both unchanged by this work.
 
 ### 2. The plan is reordered — go straight to the working-space composite
 

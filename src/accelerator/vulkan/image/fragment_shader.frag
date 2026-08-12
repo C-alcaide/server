@@ -142,6 +142,10 @@ bool flag(uint f) { return (flags & f) != 0u; }
 // these two instead. Every pre-existing path sets both, so the behaviour is unchanged.
 const uint F2_INPUT_CONVERT=1u<<3;
 const uint F2_OUTPUT_CONVERT=1u<<4;
+// Channel-level: run the whole colour chain on STRAIGHT (unpremultiplied) RGB, as OCIO
+// documents, rather than on premultiplied RGB as both mixers have always done. Off by
+// default. Read at exactly two sites, near the top and bottom of main().
+const uint F2_STRAIGHT_ALPHA_GRADING=1u<<5;
 const uint F2_OUTPUT_BGRA=1u<<0;
 const uint F2_ICVFX=1u<<1;
 const uint F2_BLEND_MASK=1u<<2;
@@ -480,7 +484,17 @@ void main(){
     if(flag2(F2_ICVFX)){float m=icvfx_mask(buv);col.rgb*=icvfx_outer_dim*vec3(icvfx_outer_gain_r,icvfx_outer_gain_g,icvfx_outer_gain_b);if(m>0.0){vec2 iuv=flag(F_360)?get_equirect_uv_ex(vuv,inner_yaw,inner_pitch,inner_roll,inner_fov,inner_offset_x,inner_offset_y):vuv;if(flag(F_FLIP_H))iuv.s=1.0-iuv.s;if(flag(F_FLIP_V))iuv.t=1.0-iuv.t;vec4 icol=get_blurred_color(iuv);icol.rgb*=icvfx_inner_dim*vec3(icvfx_inner_gain_r,icvfx_inner_gain_g,icvfx_inner_gain_b);col=mix(col,icol,m);}}
 
     if(flag(F_SHARPEN)){col.rgb=apply_sharpen(uv,col.rgb,sharpen_amount,sharpen_radius);}
-    if(flag(F_STRAIGHT_ALPHA))col.rgb*=col.a;
+    // ALPHA DOMAIN -- mirrors ogl/image/shader.frag, where the full account lives.
+    //
+    // Legacy: premultiply here, so every non-linear stage downstream sees a*c. MEASURED on
+    // both mixers 2026-08-12 as what they do today, selected over the straight-domain model
+    // at <=0.51 LSB against 13.5-116 LSB (CasparCG-TestRunner/docs/alpha_domain_2026-08-12.md).
+    //
+    // F2_STRAIGHT_ALPHA_GRADING: put the pixel in the STRAIGHT domain and leave it there
+    // through the chain, which is what OCIO documents -- C(a*c) != a*C(c). The alpha-0
+    // guard is load-bearing: 0/0 is a NaN that survives the whole chain into the blend.
+    if(flag2(F2_STRAIGHT_ALPHA_GRADING)){if(!flag(F_STRAIGHT_ALPHA)&&col.a>0.0)col.rgb/=col.a;}
+    else if(flag(F_STRAIGHT_ALPHA))col.rgb*=col.a;
 
     if(flag2(F2_INPUT_CONVERT)){col.rgb=apply_eotf(col.rgb,input_transfer);col.rgb*=exposure;col.rgb=ubo_mat3(input_to_working_c0,input_to_working_c1,input_to_working_c2)*col.rgb;if(flag(F_GAMUT_COMPRESS))col.rgb=apply_gamut_compress(col.rgb,gc_limit_pad.xyz);}
     // A generated colour transform's call is spliced here, replacing the input block above
@@ -528,9 +542,17 @@ void main(){
     // foreground and background have to reach the blend in the same display encoding.
     //__CASPAR_OCIO_DISPLAY__
 
-    col*=opacity;
+    // Opacity is coverage, not colour: in the straight domain it scales alpha alone, while
+    // the legacy path scales both because its RGB already carries a factor of alpha.
+    if(flag2(F2_STRAIGHT_ALPHA_GRADING))col.a*=opacity;else col*=opacity;
     if(flag(F_LOCAL_KEY))col.a*=texture(textures[LOCAL_KEY],TexCoord2.st).r;
     if(flag(F_LAYER_KEY))col.a*=texture(textures[LAYER_KEY],TexCoord2.st).r;
+    // Re-premultiply once, AFTER every alpha modification and immediately before the blend,
+    // which is the only consumer that needs it. Doing it here rather than after the output
+    // conversion also fixes what the legacy path gets wrong today: opacity and both keys
+    // scale col.a while col.rgb still carries the OLD alpha, so the two disagree by the time
+    // they reach the blend -- invisible at alpha 1 with no keys, which is how it survived.
+    if(flag2(F2_STRAIGHT_ALPHA_GRADING))col.rgb*=col.a;
     col=blend_op(col);
     if(flag(F_CHROMA))col=ChromaKey(col,flag(F_CHROMA_MASK));
 

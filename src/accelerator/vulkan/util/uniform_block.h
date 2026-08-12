@@ -271,6 +271,12 @@ enum class shader_flags2 : uint32_t
     // Every path that owns both halves sets both of these, so behaviour is unchanged.
     input_convert  = 1u << 3,
     output_convert = 1u << 4,
+    // Channel-level: run the colour chain on straight (unpremultiplied) RGB, as OCIO
+    // documents, rather than on premultiplied RGB as both mixers have always done. Off by
+    // default -- it changes rendered output wherever content has soft edges and any
+    // non-linear transform is configured. Must equal F2_STRAIGHT_ALPHA_GRADING in
+    // image/fragment_shader.frag.
+    straight_alpha_grading = 1u << 5,
 };
 
 }}} // namespace caspar::accelerator::vulkan

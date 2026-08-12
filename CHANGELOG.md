@@ -1,6 +1,55 @@
 CasparVP — Unreleased
 ==========================================
 
+### Added: `<straight-alpha-grading>` — the colour chain on unpremultiplied RGB
+
+Both mixers apply the whole colour chain — the EOTF, `MIXER COLORSPACE`, `MIXER OCIO`, every
+grading tool, the OETF — to **premultiplied** RGB. OCIO documents the opposite, and OIIO
+exposes `unpremult` on `colorconvert` for exactly this reason: a colour transform describes
+the surface colour, and `C(a·c) ≠ a·C(c)` for any non-linear `C`.
+
+**Measured before the change, on both mixers** (`CasparCG-TestRunner/cli.py alpha-domain`;
+full account in that repo's `docs/alpha_domain_2026-08-12.md`). Four transforms, five
+partial-alpha patches each, compared against two closed-form models:
+
+| transform | worst Δ from the premultiplied model | Δ from the straight model |
+| :--- | ---: | ---: |
+| `srgb/bt709 → bt709/linear` | 0.46 LSB | 17.3 – 56.4 |
+| `sdr/bt709 → bt709/pq` | 0.51 LSB | 13.5 – 23.0 |
+| `pq/bt2020 → bt709/sdr` | 0.22 LSB | 20.0 – 116.0 |
+| `OCIO ACEScct → bt709/rec709` | 0.49 LSB | 23.0 – 63.0 |
+
+The OpenGL and Vulkan reports are byte-identical apart from the mixer's name. The sharpest
+single number: `MIXER COLORSPACE PQ BT2020 NONE BT709 REC709` on `#8073401A` (alpha 0x80)
+renders **243.8** where the straight domain gives **128.0**.
+
+**The new channel element turns it around**, unpremultiplying above the chain and
+re-premultiplying once below it:
+
+```xml
+<channel>
+    <straight-alpha-grading>true</straight-alpha-grading>
+</channel>
+```
+
+Measured after, both mixers, byte-identical to each other again: every discriminating patch
+selects the straight model at **≤0.46 LSB**.
+
+**Default off, because it changes rendered output** wherever content has soft edges and a
+non-linear transform is configured — most lower thirds. Opaque content is bit-identical
+either way, which is why the three flat-patch batteries could never see this: they all drive
+alpha 0xFF, and at alpha 1.0 the two domains are algebraically identical.
+
+The re-premultiply lands after `MIXER OPACITY` and both key multiplies rather than straight
+after the output conversion, which fixes a second defect in passing: those three scale alpha
+alone while the default path's RGB still carries the old alpha, so the two reach the blend
+disagreeing.
+
+Default path unregressed, re-measured after the change: conformance **100/100**, grading
+**48/48**, `ocio` **6/6** (worst 0.55) on **both** mixers, `mixer-parity` 6/6 rasters
+identical, `vk-validation` 0 VUIDs with the control reporting, and `alpha-domain` without
+the flag still selects the premultiplied domain.
+
 ### Added: `MIXER OCIO` works on the Vulkan mixer (A4f)
 
 The generated transform is spliced into the mixer's fragment shader, compiled to SPIR-V at

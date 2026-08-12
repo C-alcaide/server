@@ -56,6 +56,12 @@ cmake --build d:\Github\CasparVP\build --target casparcg
   as a reproducible `0xC0000409` abort in the Vulkan mixer that bisected cleanly to an
   innocent commit. **Touch every source before building whenever a header changed**;
   `BUILDING_WORKFLOW.md` has the one-liner and the full account.
+- **And touching every source is not enough if the header is in a precompiled header.**
+  The `.pch` files carry the same untracked dependency, so every translation unit
+  recompiles and every one of them reads the *old* declaration. It shows up as a compile
+  error that contradicts the source on screen — an `override` that "did not override" a
+  base method identical to it. Delete `build/**/cmake_pch.*.pch` too;
+  `BUILDING_WORKFLOW.md` has the sweep.
 - A wrong `vcvars` path fails as `C1083: cannot open include file 'cstdint'` on every
   translation unit. Missing *standard library* headers means the environment was never
   initialised — don't go looking at the includes.

@@ -82,7 +82,8 @@ class video_channel final
                            int                                       auto_tone_map          = 0,
                            float                                     display_peak_luminance = 1000.0f,
                            float                                     sdr_reference_white    = 100.0f,
-                           bool                                      auto_gamut_compress    = false);
+                           bool                                      auto_gamut_compress    = false,
+                           bool                                      straight_alpha_grading = false);
     ~video_channel();
 
     core::monitor::state state() const;

@@ -458,7 +458,7 @@ All color grading runs on the GPU in a single fragment shader pass. The processi
 | :--- | :--- | :--- |
 | 1 | **Texture Fetch** | UV coordinates (projection, curve warp, flip) |
 | 2 | **Sharpening** | `MIXER SHARPEN` |
-| 3 | **Premultiply Alpha** | Automatic (if straight alpha source) |
+| 3 | **Alpha domain** | Automatic. Premultiply if the source is straight (default), or *un*premultiply if the source is premultiplied and `<straight-alpha-grading>` is on |
 | 4 | **EOTF** (decode to linear) | `MIXER COLORSPACE` or auto-color-convert |
 | 5 | **Input Gamut → Working Space** | `MIXER COLORSPACE` or auto-color-convert (see below) |
 | 6 | **Gamut Compression** | `MIXER GAMUTCOMPRESS` |
@@ -479,6 +479,7 @@ All color grading runs on the GPU in a single fragment shader pass. The processi
 | 21 | **Invert** | `MIXER INVERT` |
 | 22 | **Shape Overlay** | `MIXER SHAPE` |
 | 23 | **Opacity** | `MIXER OPACITY` |
+| 23b | **Re-premultiply** | Automatic, only with `<straight-alpha-grading>` on — after opacity and both keys, immediately before the blend |
 | 24 | **Keying** | `MIXER KEYER` |
 | 25 | **Blend Mode** | `MIXER BLEND` |
 | 26 | **Chroma Key** | `MIXER CHROMA` |
@@ -486,6 +487,37 @@ All color grading runs on the GPU in a single fragment shader pass. The processi
 | 28 | **Working Space → Output Gamut** | `MIXER COLORSPACE` or auto-color-convert (see below) |
 | 29 | **OETF** (encode for display) | `MIXER COLORSPACE` or auto-color-convert |
 | 30 | **Film Grain** | `MIXER GRAIN` |
+
+### The alpha domain — `<straight-alpha-grading>`
+
+Everything between steps 3 and 23b operates on **premultiplied** RGB by default. That is
+what the mixer has always done, and it is measurably wrong for partially transparent pixels:
+a colour transform describes the *surface colour*, and `C(a·c) ≠ a·C(c)` for any non-linear
+`C`. OCIO documents the opposite order — unpremultiply, transform, re-premultiply — and OIIO
+exposes `unpremult` on `colorconvert` for exactly this.
+
+```xml
+<channel>
+    <straight-alpha-grading>true</straight-alpha-grading>
+</channel>
+```
+
+With it on, the chain runs on straight RGB throughout and the coverage is reapplied once at
+step 23b, after opacity and both key multiplies and immediately before the blend.
+
+**Default off, because it changes rendered output** wherever content has soft edges *and* a
+non-linear transform is configured — which describes most lower thirds. Opaque content is
+bit-identical either way, which is why no flat-patch battery could see the difference until
+one drove partial alpha: at alpha 1.0 the two domains are algebraically identical.
+
+Measured on both mixers, 2026-08-12 — `CasparCG-TestRunner/docs/alpha_domain_2026-08-12.md`
+and `cli.py alpha-domain`. The sharpest case: `MIXER COLORSPACE PQ BT2020 NONE BT709 REC709`
+on a 50%-alpha patch renders **243.8** in the premultiplied domain against **128.0** in the
+straight one.
+
+It also fixes a smaller defect that only shows with the flag on: `MIXER OPACITY` and both
+key multiplies scale alpha alone while the default path's RGB still carries the old alpha,
+so the two disagree by the time they reach the blend.
 
 > **Design note:** Grading operations (steps 8–21) run in scene-linear space, after the EOTF decode and gamut conversion but before tone mapping and output encoding. This ensures perceptually correct, display-independent results. Sharpening runs on raw texture samples (step 2) to avoid sharpening color grading artifacts. Film grain is applied last (step 30) in display-referred space so it has the correct photographic response.
 

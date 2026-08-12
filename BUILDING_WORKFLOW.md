@@ -249,6 +249,38 @@ cheaper than a `--clean-first`.
 
 If you only edited `.cpp` files, an ordinary incremental build is correct and fast.
 
+### Touching every source is NOT enough when the header is in a precompiled header
+
+Each target compiles through `/Yu…cmake_pch.hxx` with a prebuilt `cmake_pch.cxx.pch`, and
+the PCH's own dependency on the headers it aggregates is not tracked either. So a change to
+a header that the PCH pulls in — `core/mixer/image/image_mixer.h` is one — is invisible even
+after the touch-everything sweep: every translation unit recompiles, and every one of them
+reads the *old* declaration out of the stale `.pch`.
+
+It presents as a compile error that contradicts the source in front of you. Measured
+2026-08-12, after adding an 8th parameter to `set_target_color`:
+
+```
+image_mixer.h(97): error C3668: 'set_target_color': el método con el especificador
+                   de invalidación 'override' no invalidó ningún método de clase base
+```
+
+— with the base and the override on screen, byte-for-byte identical in their parameter
+lists. The tell is in the `/showIncludes` trail: the base class's header does **not** appear
+in it, because it arrived through `/FIcmake_pch.hxx` instead.
+
+**So when a header changes, delete the precompiled headers as well as touching the sources:**
+
+```powershell
+Get-ChildItem d:\Github\CasparVP\build -Recurse `
+    -Include cmake_pch.cxx.pch,cmake_pch.c.pch,cmake_pch.cxx.obj,cmake_pch.c.obj -File |
+    ForEach-Object { Remove-Item $_.FullName -Force }
+```
+
+Ninja regenerates them on the next build. Cheap — one PCH per target — and it is the
+difference between a build that fails confusingly and one that succeeds while linking
+halves that disagree, which is the far worse outcome documented above.
+
 ### Fixing it properly
 
 Correct the prefix in `build/CMakeFiles/rules.ninja` to the exact bytes `cl.exe` emits, or

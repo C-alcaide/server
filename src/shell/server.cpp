@@ -386,6 +386,27 @@ struct server::impl
             // true = ACES-style soft compression (prevents visible clipping on saturated content).
             auto auto_gamut_compress = xml_channel.second.get(L"auto-gamut-compress", false);
 
+            // Run the colour chain on STRAIGHT (unpremultiplied) RGB, as OCIO documents and
+            // as OIIO's `unpremult` on `colorconvert` exists for, rather than on
+            // premultiplied RGB as both mixers have always done. C(a*c) != a*C(c) for any
+            // non-linear C, so a transform belongs on the surface colour with the coverage
+            // reapplied after.
+            //
+            // Default false because it CHANGES RENDERED OUTPUT wherever content has soft
+            // edges and any non-linear transform is configured -- which is most lower
+            // thirds. Opaque content is bit-identical either way, which is exactly why no
+            // flat-patch battery could see the difference until one drove partial alpha.
+            //
+            // Measured on both mixers 2026-08-12:
+            // CasparCG-TestRunner/docs/alpha_domain_2026-08-12.md.
+            auto straight_alpha_grading = xml_channel.second.get(L"straight-alpha-grading", false);
+            if (straight_alpha_grading) {
+                CASPAR_LOG(info) << L"[server] Channel " << channel_id
+                                 << L" straight-alpha-grading ON: the colour chain runs on "
+                                    L"unpremultiplied RGB. Partial-alpha content renders "
+                                    L"differently from the default.";
+            }
+
             // Resolve which physical GPU this channel's mixer should run on.
             // Priority: explicit <gpu> at channel level, else inherit from the
             // channel's first <vulkan-output> consumer's <gpu>, else default 0.
@@ -425,7 +446,8 @@ struct server::impl
                                                 auto_tone_map,
                                                 display_peak_luminance,
                                                 sdr_reference_white,
-                                                auto_gamut_compress);
+                                                auto_gamut_compress,
+                                                straight_alpha_grading);
 
             const std::wstring lifecycle_key = L"lock" + std::to_wstring(channel_id);
             channels_->emplace_back(channel, channel->stage(), lifecycle_key);
