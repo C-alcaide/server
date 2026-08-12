@@ -101,6 +101,35 @@ reporting a one-way finding: exit **0** when the domain matches `<straight-alpha
 **Still not covered:** a straight-alpha source, and `shader.frag`'s shape/fill composite (see
 above). Both unchanged by this work.
 
+### 1b. STOP — four ACEScg gamut matrices are wrong, found 2026-08-12
+
+Found while designing step 2 below, by checking the tables the design was going to build on.
+**`k_to_working` and `k_to_output` are not the matrices they claim to be for `bt2020`,
+`p3_d65`, `arri_wg3` and `sgamut3cine`** — identical numbers on both mixers. Full account,
+evidence and the correct rows: [`GAMUT_MATRIX_DEFECT_2026-08-12.md`](GAMUT_MATRIX_DEFECT_2026-08-12.md).
+
+Three independent lines agree: a colorimetric derivation that reproduces the correct `bt709`
+row to 1.5e-5, a round trip needing no external reference, and OCIO's own matrices. Worst
+deviation 0.41 per element.
+
+**This blocks step 2.** A working-space composite is defined by the conversion into and out
+of ACEScg, and four of the seven routes are wrong. Building on them would produce a
+carefully measured composite in the wrong space.
+
+It also lands on what this fork is for: `MIXER COLORSPACE LOGC3 ARRI_WG3 …` is the first
+usage example in `COLOR_GRADING.md`, and `MIXER OCIO` on a BT.2020 channel takes
+`k_to_output[1]`.
+
+**No battery could have caught it**, and that is the second finding: the harness's
+`color_math` and `ocio_reference` transcribe these same tables, so a wrong matrix is
+compared against a copy of itself. `CasparCG-TestRunner/core/gamut_reference.py` now derives
+them from OCIO instead, and `tests/test_gamut_matrices.py` holds the four as
+`xfail(strict=True)` so they fail loudly when the server is fixed.
+
+The fix is not applied: it changes rendered output for every existing configuration using
+those paths, wants both kernels and both harness models moved together, and `k_direct_cg` /
+`k_direct` should be audited the same way first — this audit did not cover them.
+
 ### 2. The plan is reordered — go straight to the working-space composite
 
 Channel-level as *"applied where the built-in output conversion runs, per layer"* — which is
@@ -139,7 +168,21 @@ New order:
    now emit `<render-format>`, which is what the previous handoff said to do first.
 2. **A post-composite colour stage.** The LED calibration LUT is already exactly this shape
    (`ogl/image/image_mixer.cpp`, `apply_calibration_lut`) — a precedent to follow rather
-   than invent.
+   than invent. **Blocked on §1b**, and the design is already established:
+
+   * **No shader change is needed.** The input and output halves are independent uniforms
+     already (`do_input_convert` / `do_output_convert`, `F2_INPUT_CONVERT` /
+     `F2_OUTPUT_CONVERT`) — that is what A4e's split bought.
+   * **The post-composite pass reuses the OCIO input-transform branch verbatim**
+     (`image_kernel.cpp:719`): input half off, output half on, `luminance_scale` 1.0,
+     `k_to_output[target]`. It is exactly what that branch already sets up, so the change is
+     `if (ocio_in || params.output_convert_only)` rather than a fourth branch.
+   * **Layer draws need `working_space_composite`** to do two things: suppress the output
+     half (an override outside the branch chain, where `ocio_out` already sits), and force
+     the input half through the ACEScg route. `k_direct_cg`, `k_direct` and the
+     "source already matches target" skip each leave the pixel somewhere other than AP1,
+     and a composite of layers in different spaces is not in any space.
+   * **It requires fp16**, which §1 verified, and it is opt-in because it changes blending.
 3. **Channel-level display transform** in that stage, as the default view.
 4. **Consumer override** — a fan-out in the mixer, one pass per distinct view.
 
