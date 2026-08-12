@@ -132,6 +132,7 @@ struct render_fingerprint
     float                sdr_reference_white    = 0.0f;
     bool                 auto_gamut_compress    = false;
     bool                 straight_alpha_grading = false;
+    bool                 working_space_composite = false;
     const void*          calibration_lut        = nullptr;
     float                calibration_strength   = 0.0f;
     bool                 calibration_bypass     = false;
@@ -145,6 +146,7 @@ struct render_fingerprint
                display_peak_luminance == other.display_peak_luminance &&
                sdr_reference_white == other.sdr_reference_white && auto_gamut_compress == other.auto_gamut_compress &&
                straight_alpha_grading == other.straight_alpha_grading &&
+               working_space_composite == other.working_space_composite &&
                calibration_lut == other.calibration_lut && calibration_strength == other.calibration_strength &&
                calibration_bypass == other.calibration_bypass;
     }
@@ -178,6 +180,7 @@ class image_renderer
     float                sdr_reference_white    = 100.0f;
     bool                 auto_gamut_compress    = false;
     bool                 straight_alpha_grading = false;
+    bool                 working_space_composite = false;
 
     // Channel-master LED-wall calibration LUT, applied as a final full-screen
     // pass over the composited frame (output-agnostic — every consumer sees it).
@@ -271,6 +274,7 @@ class image_renderer
         auto cal_lut      = calibration_lut_;
         auto cal_strength = calibration_strength_;
         auto cal_bypass   = calibration_bypass_;
+        auto ws_composite = working_space_composite;
 
         auto f = std::move(
             ogl_->dispatch_async([=, layers = std::move(layers)]() mutable
@@ -278,6 +282,16 @@ class image_renderer
                 auto target_texture =
                     ogl_->create_texture(format_desc.width, format_desc.height, 4, depth_, true, render_format_);
                 draw(target_texture, std::move(layers), format_desc);
+
+                // The channel's output conversion, once, over the composite. Ahead of the
+                // calibration LUT because that LUT is authored against DISPLAY values -- an
+                // LED wall's correction is measured on the wall, not in scene-linear.
+                if (ws_composite) {
+                    auto oc_texture =
+                        ogl_->create_texture(format_desc.width, format_desc.height, 4, depth_, true, render_format_);
+                    apply_output_convert(target_texture, oc_texture, format_desc);
+                    target_texture = oc_texture;
+                }
 
                 // Channel-master LED-wall calibration LUT (final full-screen pass).
                 if (cal_lut && !cal_bypass && cal_lut->size > 0) {
@@ -335,6 +349,7 @@ class image_renderer
         fp.sdr_reference_white    = sdr_reference_white;
         fp.auto_gamut_compress    = auto_gamut_compress;
         fp.straight_alpha_grading = straight_alpha_grading;
+        fp.working_space_composite = working_space_composite;
         fp.calibration_lut        = calibration_lut_.get();
         fp.calibration_strength   = calibration_strength_;
         fp.calibration_bypass     = calibration_bypass_;
@@ -447,6 +462,7 @@ class image_renderer
         draw_params.sdr_reference_white    = sdr_reference_white;
         draw_params.auto_gamut_compress    = auto_gamut_compress;
         draw_params.straight_alpha_grading = straight_alpha_grading;
+        draw_params.working_space_composite = working_space_composite;
 
         draw_params.pix_desc   = std::move(item.pix_desc);
         draw_params.transforms = std::move(item.transforms);
@@ -561,6 +577,54 @@ class image_renderer
         kernel_.draw(std::move(draw_params));
     }
 
+    /// The channel's post-composite output conversion.
+    ///
+    /// The other half of `working_space_composite`: every layer reached the composite in
+    /// scene-linear ACEScg with its output half suppressed, so the display encoding -- tone
+    /// map, k_to_output, clamp, OETF -- is applied ONCE here, to the composite.
+    ///
+    /// Same shape as `apply_calibration_lut` above, which is the precedent this follows
+    /// rather than invents. `output_convert_only` routes the kernel into the branch the OCIO
+    /// input transform already uses, which is exactly this configuration.
+    void apply_output_convert(std::shared_ptr<texture>&      source_texture,
+                              std::shared_ptr<texture>&      target_texture,
+                              const core::video_format_desc& format_desc)
+    {
+        if (!source_texture)
+            return;
+
+        draw_params draw_params;
+        draw_params.target_width  = format_desc.square_width;
+        draw_params.target_height = format_desc.square_height;
+        draw_params.target_is_custom_format = format_desc.format == core::video_format::custom;
+        draw_params.pix_desc.format = core::pixel_format::bgra;
+        draw_params.pix_desc.planes = {core::pixel_format_desc::plane(
+            source_texture->width(), source_texture->height(), 4, source_texture->depth())};
+        draw_params.pix_desc.color_space    = target_color_space;
+        draw_params.pix_desc.color_transfer = target_color_transfer;
+        draw_params.target_color_space      = target_color_space;
+        draw_params.target_color_transfer   = target_color_transfer;
+        draw_params.auto_tone_map           = auto_tone_map;
+        draw_params.display_peak_luminance  = display_peak_luminance;
+        draw_params.sdr_reference_white     = sdr_reference_white;
+        // Off, both of them: this draw is the output half and nothing else. auto_color_convert
+        // would try to own both halves, and working_space_composite belongs to LAYER draws --
+        // setting it here would suppress the very conversion this pass exists to apply.
+        draw_params.auto_color_convert      = false;
+        draw_params.working_space_composite = false;
+        draw_params.output_convert_only     = true;
+        // Composes with the alpha-domain fix: with straight-alpha grading on, the output
+        // encoding is applied to the straight colour and re-premultiplied, which is the
+        // same rule every layer draw follows.
+        draw_params.straight_alpha_grading  = straight_alpha_grading;
+        draw_params.textures                = {spl::make_shared_ptr(source_texture)};
+        draw_params.blend_mode              = core::blend_mode::normal;
+        draw_params.background              = target_texture;
+        draw_params.geometry                = core::frame_geometry::get_default();
+
+        kernel_.draw(std::move(draw_params));
+    }
+
     /// Convert a float render target into the channel's output depth.
     ///
     /// Mandatory whenever render_format_ is not unorm, and not an optimisation: the
@@ -651,7 +715,7 @@ struct image_mixer::impl
 
     void update_aspect_ratio(double aspect_ratio) { aspect_ratio_ = aspect_ratio; }
 
-    void set_target_color(core::color_space cs, core::color_transfer ct, bool auto_convert, int auto_tone_map, float peak_luminance, float sdr_ref_white, bool gamut_compress, bool straight_alpha)
+    void set_target_color(core::color_space cs, core::color_transfer ct, bool auto_convert, int auto_tone_map, float peak_luminance, float sdr_ref_white, bool gamut_compress, bool straight_alpha, bool ws_composite)
     {
         CASPAR_LOG(trace) << L"[ogl_mixer] set_target_color cs=" << static_cast<int>(cs)
                           << L" ct=" << static_cast<int>(ct) << L" auto=" << auto_convert
@@ -666,6 +730,7 @@ struct image_mixer::impl
         renderer_.sdr_reference_white    = sdr_ref_white;
         renderer_.auto_gamut_compress    = gamut_compress;
         renderer_.straight_alpha_grading = straight_alpha;
+        renderer_.working_space_composite = ws_composite;
     }
 
     std::wstring calibration_path_;
@@ -1026,9 +1091,9 @@ void image_mixer::set_channel_texture_store(std::shared_ptr<channel_texture_stor
     impl_->channel_tex_store_ = std::move(store);
 }
 
-void image_mixer::set_target_color(core::color_space cs, core::color_transfer ct, bool auto_convert, int auto_tone_map, float peak_luminance, float sdr_reference_white, bool auto_gamut_compress, bool straight_alpha_grading)
+void image_mixer::set_target_color(core::color_space cs, core::color_transfer ct, bool auto_convert, int auto_tone_map, float peak_luminance, float sdr_reference_white, bool auto_gamut_compress, bool straight_alpha_grading, bool working_space_composite)
 {
-    impl_->set_target_color(cs, ct, auto_convert, auto_tone_map, peak_luminance, sdr_reference_white, auto_gamut_compress, straight_alpha_grading);
+    impl_->set_target_color(cs, ct, auto_convert, auto_tone_map, peak_luminance, sdr_reference_white, auto_gamut_compress, straight_alpha_grading, working_space_composite);
 }
 
 void image_mixer::set_calibration_lut(std::shared_ptr<const core::lut3d_data> lut, float strength, const std::wstring& path)

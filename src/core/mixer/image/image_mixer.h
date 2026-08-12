@@ -82,7 +82,7 @@ class image_mixer
 
     virtual void set_cpu_readback_needed(bool needed) { (void)needed; }
 
-    virtual void set_target_color(color_space cs, color_transfer ct, bool auto_convert, int auto_tone_map = 0, float peak_luminance = 1000.0f, float sdr_reference_white = 100.0f, bool auto_gamut_compress = false, bool straight_alpha_grading = false)
+    virtual void set_target_color(color_space cs, color_transfer ct, bool auto_convert, int auto_tone_map = 0, float peak_luminance = 1000.0f, float sdr_reference_white = 100.0f, bool auto_gamut_compress = false, bool straight_alpha_grading = false, bool working_space_composite = false)
     {
         (void)cs;
         (void)ct;
@@ -92,6 +92,7 @@ class image_mixer
         (void)sdr_reference_white;
         (void)auto_gamut_compress;
         (void)straight_alpha_grading;
+        (void)working_space_composite;
     }
 
     /// Channel-master LED-wall calibration LUT. Applied to the final composited

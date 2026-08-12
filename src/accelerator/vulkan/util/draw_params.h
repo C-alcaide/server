@@ -64,6 +64,30 @@ struct draw_params final
     /// Measured account in CasparCG-TestRunner/docs/alpha_domain_2026-08-12.md.
     bool                                        straight_alpha_grading = false;
 
+    /// Composite in the WORKING space (scene-linear ACEScg) rather than in display space.
+    ///
+    /// Set on every LAYER draw of a channel configured for it. Two effects in image_kernel,
+    /// and they are the whole feature: every layer's input half is forced through the
+    /// ACEScg route so the layers agree on a space, and every layer's OUTPUT half is
+    /// suppressed -- the channel converts once, post-composite, via `output_convert_only`.
+    ///
+    /// Blend modes then operate on scene-linear values instead of 0-1 display values, which
+    /// is exactly what the comment beside the output block warns about. That is the point
+    /// rather than a side effect, and it is why the channel element is opt-in.
+    ///
+    /// Requires fp16 (ACEScg carries values above 1.0 and below 0) and auto-color-convert
+    /// (every layer needs a defined route INTO the working space). server.cpp refuses the
+    /// config otherwise.
+    bool                                        working_space_composite = false;
+
+    /// This draw IS the channel's post-composite output conversion.
+    ///
+    /// Input half off, output half on, driven by the channel's target -- and luminance_scale
+    /// 1.0, because each layer's input half already moved the pixel into the target's
+    /// luminance domain. That is exactly the configuration the OCIO input-transform branch
+    /// sets up, so the kernel reuses that branch rather than growing a fourth.
+    bool                                        output_convert_only = false;
+
     /// Channel-level OCIO display transform: the composited look. Empty means none.
     ///
     /// Channel-level rather than per layer, and stamped onto every draw by the mixer, because

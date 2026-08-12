@@ -167,9 +167,19 @@ New order:
    The first was confirmed against the server's own log line rather than against the battery
    passing, because a silently dropped element would have passed too. `config_generator` can
    now emit `<render-format>`, which is what the previous handoff said to do first.
-2. **A post-composite colour stage.** The LED calibration LUT is already exactly this shape
-   (`ogl/image/image_mixer.cpp`, `apply_calibration_lut`) — a precedent to follow rather
-   than invent. **Blocked on §1b**, and the design is already established:
+2. ~~**A post-composite colour stage.**~~ **DONE 2026-08-12** — `<working-space-composite>`,
+   default off, both mixers. Every layer converts into ACEScg, none out; the channel applies
+   the display encoding once, ahead of the calibration LUT. Preconditions fp16 and
+   auto-color-convert, both refused rather than warned about.
+
+   Measured with the new `cli.py blend-domain`, both mixers byte-identical: default reports
+   the display domain at worst 0.50 LSB, the option reports the working domain at worst
+   0.60. A 50% mix of black and white reads 128 blending display values and 191 blending
+   light.
+
+   **`conformance` and `grading` are structurally blind to this** — one layer over black is
+   the same pixel either way — which is why `blend-domain` had to exist. Everything below
+   was the design, and it held:
 
    * **No shader change is needed.** The input and output halves are independent uniforms
      already (`do_input_convert` / `do_output_convert`, `F2_INPUT_CONVERT` /

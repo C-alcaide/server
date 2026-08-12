@@ -168,11 +168,12 @@ struct video_channel::impl final
          float                                     display_peak_luminance = 1000.0f,
          float                                     sdr_reference_white    = 100.0f,
          bool                                      auto_gamut_compress    = false,
-         bool                                      straight_alpha_grading = false)
+         bool                                      straight_alpha_grading = false,
+         bool                                      working_space_composite = false)
         : channel_info_(index, image_mixer->depth(), default_color_space, default_color_transfer, image_mixer->is_vulkan(), image_mixer->native_gl_context(), auto_color_convert, image_mixer->native_egl_display())
         , output_(graph_, format_desc, channel_info_)
         , image_mixer_(std::move(image_mixer))
-        , mixer_(index, graph_, image_mixer_, default_color_space, default_color_transfer, auto_color_convert, auto_tone_map, display_peak_luminance, sdr_reference_white, auto_gamut_compress, straight_alpha_grading)
+        , mixer_(index, graph_, image_mixer_, default_color_space, default_color_transfer, auto_color_convert, auto_tone_map, display_peak_luminance, sdr_reference_white, auto_gamut_compress, straight_alpha_grading, working_space_composite)
         , stage_(std::make_shared<core::stage>(index, graph_, format_desc))
         , tick_(std::move(tick))
     {
@@ -444,8 +445,9 @@ video_channel::video_channel(int                                       index,
                              float                                     display_peak_luminance,
                              float                                     sdr_reference_white,
                              bool                                      auto_gamut_compress,
-                             bool                                      straight_alpha_grading)
-    : impl_(new impl(index, format_desc, default_color_space, std::move(image_mixer), std::move(tick), default_color_transfer, auto_color_convert, auto_tone_map, display_peak_luminance, sdr_reference_white, auto_gamut_compress, straight_alpha_grading))
+                             bool                                      straight_alpha_grading,
+                             bool                                      working_space_composite)
+    : impl_(new impl(index, format_desc, default_color_space, std::move(image_mixer), std::move(tick), default_color_transfer, auto_color_convert, auto_tone_map, display_peak_luminance, sdr_reference_white, auto_gamut_compress, straight_alpha_grading, working_space_composite))
 {
 }
 video_channel::~video_channel() {}

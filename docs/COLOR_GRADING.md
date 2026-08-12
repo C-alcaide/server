@@ -484,9 +484,51 @@ All color grading runs on the GPU in a single fragment shader pass. The processi
 | 25 | **Blend Mode** | `MIXER BLEND` |
 | 26 | **Chroma Key** | `MIXER CHROMA` |
 | 27 | **Tone Mapping** | `MIXER COLORSPACE` tonemapping / auto (ACES RRT for HDR→SDR) |
-| 28 | **Working Space → Output Gamut** | `MIXER COLORSPACE` or auto-color-convert (see below) |
-| 29 | **OETF** (encode for display) | `MIXER COLORSPACE` or auto-color-convert |
+| 28 | **Working Space → Output Gamut** | `MIXER COLORSPACE` or auto-color-convert (see below). **Moves to step 31 under `<working-space-composite>`** |
+| 29 | **OETF** (encode for display) | `MIXER COLORSPACE` or auto-color-convert. **Moves to step 31 under `<working-space-composite>`** |
 | 30 | **Film Grain** | `MIXER GRAIN` |
+| 31 | **Post-composite output conversion** | Automatic, only with `<working-space-composite>` — steps 27–29 applied once to the composite instead of per layer, ahead of the LED calibration LUT |
+
+### The blend domain — `<working-space-composite>`
+
+Steps 4–7 and 27–29 run **per layer**, and the output half runs *before* the blend, on
+purpose — so that both foreground and background reach the blend in the same display
+encoding and blend modes operate on 0–1 display values.
+
+```xml
+<channel>
+    <render-format>fp16</render-format>
+    <auto-color-convert>true</auto-color-convert>
+    <working-space-composite>true</working-space-composite>
+</channel>
+```
+
+With it on, every layer converts **into** scene-linear ACEScg and none of them out of it;
+the channel applies the display encoding **once**, to the composite, immediately before the
+LED calibration LUT. Layers then blend in light rather than in display values.
+
+**Both preconditions are refused rather than warned about.** fp16 because ACEScg carries
+values above 1.0 and below 0 that a unorm target would clamp away; `auto-color-convert`
+because every layer needs a defined route into the working space, and without one a layer
+would reach an ACEScg composite still display-encoded with nothing downstream able to tell.
+
+**Default off, because it changes every composite of two or more layers.** Measured: a 50%
+mix of black and white reads **128** blending in display space and **191** blending in
+light. `CasparCG-TestRunner/cli.py blend-domain` is the measurement, and it reports which
+domain a channel is actually in.
+
+Three consequences worth knowing before turning it on:
+
+* **`MIXER COLORSPACE`'s output half is overridden.** The channel owns the output encoding
+  now, so a layer cannot ask for a different one. Its input half still applies.
+* **The `k_direct` / `k_direct_cg` shortcuts do not run.** They leave the pixel in the
+  output gamut, and the composite has to be in AP1 — so every layer takes the ACEScg route.
+* **A single layer is unaffected.** One layer over black is the same pixel either way,
+  which is why `conformance` and `grading` cannot see this option at all.
+
+It is also the prerequisite for a channel-level OCIO display transform and for per-consumer
+views: a display transform is not invertible, so a composite that is already display-encoded
+cannot be re-encoded for a second view.
 
 ### The alpha domain — `<straight-alpha-grading>`
 

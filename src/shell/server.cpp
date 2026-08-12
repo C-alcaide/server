@@ -400,6 +400,44 @@ struct server::impl
             // Measured on both mixers 2026-08-12:
             // CasparCG-TestRunner/docs/alpha_domain_2026-08-12.md.
             auto straight_alpha_grading = xml_channel.second.get(L"straight-alpha-grading", false);
+
+            // Composite in the WORKING space (scene-linear ACEScg) instead of in display
+            // space. Every layer converts INTO ACEScg and none of them out of it; the
+            // channel applies the display encoding once, after the composite.
+            //
+            // Blend modes then operate on scene-linear values rather than on 0-1 display
+            // values -- which is what the shader comment beside the output block warns
+            // about, and is the point rather than a side effect. Default false: it changes
+            // every composite of two or more layers.
+            //
+            // Two hard preconditions, refused rather than warned about, because either one
+            // missing turns this into a silently wrong picture:
+            //
+            //   fp16              ACEScg carries values above 1.0 and below 0. On a unorm
+            //                     target the composite clamps them away and the output
+            //                     conversion then works from clipped data.
+            //   auto-color-convert  every layer needs a defined route INTO the working
+            //                     space. Without it a layer with no MIXER COLORSPACE and no
+            //                     OCIO transform would enter an ACEScg composite still
+            //                     display-encoded, and nothing downstream could tell.
+            auto working_space_composite = xml_channel.second.get(L"working-space-composite", false);
+            if (working_space_composite) {
+                if (render_format != common::render_format::fp16)
+                    CASPAR_THROW_EXCEPTION(user_error() << msg_info(
+                        L"working-space-composite requires <render-format>fp16</render-format>: "
+                        L"a scene-linear ACEScg composite carries values outside [0,1] and a "
+                        L"unorm target would clamp them."));
+                if (!auto_color_convert)
+                    CASPAR_THROW_EXCEPTION(user_error() << msg_info(
+                        L"working-space-composite requires <auto-color-convert>true</auto-color-convert>: "
+                        L"every layer needs a defined conversion into the working space, or it "
+                        L"reaches the composite still display-encoded."));
+                CASPAR_LOG(info) << L"[server] Channel " << channel_id
+                                 << L" working-space-composite ON: layers blend in scene-linear "
+                                    L"ACEScg and the display encoding is applied once, after the "
+                                    L"composite. Existing looks that rely on display-space "
+                                    L"blending will change.";
+            }
             if (straight_alpha_grading) {
                 CASPAR_LOG(info) << L"[server] Channel " << channel_id
                                  << L" straight-alpha-grading ON: the colour chain runs on "
@@ -447,7 +485,8 @@ struct server::impl
                                                 display_peak_luminance,
                                                 sdr_reference_white,
                                                 auto_gamut_compress,
-                                                straight_alpha_grading);
+                                                straight_alpha_grading,
+                                                working_space_composite);
 
             const std::wstring lifecycle_key = L"lock" + std::to_wstring(channel_id);
             channels_->emplace_back(channel, channel->stage(), lifecycle_key);

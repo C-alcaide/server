@@ -1,6 +1,60 @@
 CasparVP — Unreleased
 ==========================================
 
+### Added: `<working-space-composite>` — blending in scene-linear light
+
+Both mixers convert each layer to the channel's display encoding **before** the blend, on
+purpose, so that blend modes operate on 0–1 display values. This option turns that around:
+every layer converts **into** scene-linear ACEScg, none of them out of it, and the channel
+applies the display encoding **once** to the composite, immediately ahead of the LED
+calibration LUT.
+
+```xml
+<channel>
+    <render-format>fp16</render-format>
+    <auto-color-convert>true</auto-color-convert>
+    <working-space-composite>true</working-space-composite>
+</channel>
+```
+
+**Both preconditions are refused, not warned about.** fp16 because ACEScg carries values
+above 1.0 and below 0 that a unorm target clamps away; `auto-color-convert` because every
+layer needs a defined route into the working space, and without one a layer reaches an
+ACEScg composite still display-encoded with nothing downstream able to tell.
+
+**Default off, because it changes every composite of two or more layers.** Measured with
+`CasparCG-TestRunner/cli.py blend-domain`, both mixers byte-identical:
+
+| | verdict | worst Δ from the selected model |
+| :--- | :--- | ---: |
+| default | display domain — **unchanged** | 0.50 LSB |
+| `<working-space-composite>` | **working domain** | 0.60 LSB |
+
+The textbook figure: a 50% mix of black and white reads **128** blending display values and
+**191** blending light.
+
+**No shader change was needed.** The input and output halves have been independent uniforms
+since A4e split them, so the layer draws simply suppress the output half, and the
+post-composite pass reuses the branch the OCIO input transform already uses — input half
+off, output half on, `luminance_scale` 1.0. The pass itself follows `apply_calibration_lut`
+rather than inventing a shape.
+
+Three consequences, all documented in `COLOR_GRADING.md`:
+
+* **`MIXER COLORSPACE`'s output half is overridden** — the channel owns the output encoding
+  now. Its input half still applies.
+* **The `k_direct` / `k_direct_cg` shortcuts do not run**; they leave the pixel in the
+  output gamut and the composite has to be in AP1.
+* **A single layer is unaffected**, which is why `conformance` and `grading` cannot see this
+  option at all and `blend-domain` had to exist.
+
+This is the prerequisite for a channel-level OCIO display transform and for per-consumer
+views: a display transform is not invertible, so a composite that is already display-encoded
+cannot be re-encoded for a second view.
+
+Default path unregressed: `conformance` 100/100 and `ocio` 18/18 on both mixers, `grading`
+48/48, and `blend-domain` without the flag still reports the display domain.
+
 ### Fixed: four of seven ACEScg gamut matrices, and six auto-convert entries
 
 **`k_to_working` and `k_to_output` were not the matrices they claimed to be for `bt2020`,

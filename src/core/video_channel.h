@@ -83,7 +83,8 @@ class video_channel final
                            float                                     display_peak_luminance = 1000.0f,
                            float                                     sdr_reference_white    = 100.0f,
                            bool                                      auto_gamut_compress    = false,
-                           bool                                      straight_alpha_grading = false);
+                           bool                                      straight_alpha_grading = false,
+                           bool                                      working_space_composite = false);
     ~video_channel();
 
     core::monitor::state state() const;

@@ -1279,6 +1279,15 @@ struct image_kernel::impl
         const auto& ocio_tf = transforms.image_transform.ocio;
         const bool          ocio_in  = ocio_tf.enable && !ocio_tf.source_space.empty();
         const bool          ocio_out = !params.ocio_display.empty() && !params.ocio_view.empty();
+        // A working-space composite converts every layer INTO ACEScg and none of them out of
+        // it. The input halves must therefore take the ACEScg route even where they would
+        // otherwise shortcut -- `k_direct_cg`, `k_direct` and the "source already matches the
+        // target" skip each leave the pixel somewhere other than AP1, and a composite of
+        // layers in different spaces is not in any space.
+        //
+        // Declared beside ocio_out rather than next to `cg`, because the output-half override
+        // near the end of this function needs it and that sits in this scope.
+        const bool          ws_composite = params.working_space_composite;
         const ocio_variant* ocio     = select_ocio_variant(ocio_in ? ocio_tf.source_space : std::string(),
                                                            params.ocio_display,
                                                            params.ocio_view);
@@ -1671,8 +1680,9 @@ struct image_kernel::impl
                 }
             };
 
+
             const auto& cg = transforms.image_transform.color_grade;
-            if (ocio_in) {
+            if (ocio_in || params.output_convert_only) {
                 // OCIO produced the working-space pixel, so the shader's own input conversion
                 // is off -- its spliced call replaces that block rather than following it. The
                 // output half still has to run, driven by the channel's target: without it the
@@ -1738,8 +1748,10 @@ struct image_kernel::impl
                 };
                 static const float k_identity_cg[9] = {1,0,0, 0,1,0, 0,0,1};
 
-                if (cg.tone_mapping == 0 && ig <= 1 && og <= 1) {
-                    // Direct D65↔D65 conversion — no ACEScg intermediate needed
+                if (cg.tone_mapping == 0 && ig <= 1 && og <= 1 && !ws_composite) {
+                    // Direct D65↔D65 conversion — no ACEScg intermediate needed.
+                    // Unavailable under a working-space composite: it leaves the pixel in
+                    // the OUTPUT gamut, and the composite has to be in AP1.
                     set_mat3(uniforms.input_to_working,  k_direct_cg[ig][og]);
                     set_mat3(uniforms.working_to_output, k_identity_cg);
                 } else {
@@ -1748,14 +1760,17 @@ struct image_kernel::impl
                     set_mat3(uniforms.working_to_output, k_to_output[og]);
                 }
             } else if (params.auto_color_convert &&
-                       (params.pix_desc.color_space != params.target_color_space ||
+                       (ws_composite ||
+                        params.pix_desc.color_space != params.target_color_space ||
                         params.pix_desc.color_transfer != params.target_color_transfer)) {
                 // Auto color conversion: source differs from channel output.
                 // gamut_index / eotf_index / oetf_index are the hoisted copies above.
                 int ig = gamut_index(params.pix_desc.color_space);
                 int og = gamut_index(params.target_color_space);
                 // Skip if the mapped indices are identical (e.g. bt601 source on bt709 channel)
-                if (ig != og || params.pix_desc.color_transfer != params.target_color_transfer) {
+                // Never skip under a working-space composite -- see the OGL kernel for why.
+                if (ws_composite || ig != og ||
+                    params.pix_desc.color_transfer != params.target_color_transfer) {
                     int it = eotf_index(params.pix_desc.color_transfer);
                     int ot = oetf_index(params.target_color_transfer);
                     // Use channel's configured auto tone-map operator (default: hard clamp).
@@ -1837,7 +1852,14 @@ struct image_kernel::impl
                         },
                     };
                     static const float k_identity[9] = {1,0,0, 0,1,0, 0,0,1};
-                    set_mat3(uniforms.input_to_working,  k_direct[ig][og]);
+                    if (ws_composite) {
+                        // Into ACEScg, not to the display. The output half is suppressed
+                        // below and the channel's post-composite pass supplies k_to_output.
+                        set_mat3(uniforms.input_to_working,
+                                 k_to_working[working_gamut_index(params.pix_desc.color_space)]);
+                    } else {
+                        set_mat3(uniforms.input_to_working,  k_direct[ig][og]);
+                    }
                     set_mat3(uniforms.working_to_output, k_identity);
 
                     // Auto gamut compression: enable ACES-style soft compress for
@@ -1863,7 +1885,7 @@ struct image_kernel::impl
         // Outside the chain rather than inside it -- an earlier attempt put this between two
         // `else if` arms, which silently gated auto-convert on there being no display
         // transform.
-        if (ocio_out) {
+        if (ocio_out || ws_composite) {
             uniforms.flags2 &= ~static_cast<uint32_t>(shader_flags2::output_convert);
         }
 

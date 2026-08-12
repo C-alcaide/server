@@ -50,7 +50,8 @@ class mixer final
                    float                                       display_peak_luminance = 1000.0f,
                    float                                       sdr_reference_white    = 100.0f,
                    bool                                        auto_gamut_compress    = false,
-                   bool                                        straight_alpha_grading = false);
+                   bool                                        straight_alpha_grading = false,
+                   bool                                        working_space_composite = false);
 
     const_frame operator()(std::vector<draw_frame> frames, const video_format_desc& format_desc, int nb_samples);
 

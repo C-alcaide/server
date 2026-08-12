@@ -753,8 +753,15 @@ struct image_kernel::impl
                               !transforms.image_transform.ocio.source_space.empty();
         const bool ocio_out = !params.ocio_display.empty() && !params.ocio_view.empty();
 
+        // A working-space composite converts every layer INTO ACEScg and none of them out of
+        // it. So the layers' input halves must take the ACEScg route even where they would
+        // otherwise shortcut: `k_direct_cg`, `k_direct` and the "source already matches the
+        // target" skip each leave the pixel somewhere other than AP1, and a composite of layers
+        // in different spaces is not in any space.
+        const bool ws_composite = params.working_space_composite;
+
         const auto& cg = transforms.image_transform.color_grade;
-        if (ocio_in) {
+        if (ocio_in || params.output_convert_only) {
             // OCIO produced the working-space pixel, so the shader's own input conversion is
             // off. The output half still has to run, driven by the channel's target: without
             // it the layer would reach the render target in scene-linear ACEScg with no OETF
@@ -798,8 +805,10 @@ struct image_kernel::impl
             };
             static const float k_identity_cg[9] = {1,0,0, 0,1,0, 0,0,1};
 
-            if (cg.tone_mapping == 0 && ig <= 1 && og <= 1) {
-                // Direct D65↔D65 conversion — no ACEScg intermediate needed
+            if (cg.tone_mapping == 0 && ig <= 1 && og <= 1 && !ws_composite) {
+                // Direct D65↔D65 conversion — no ACEScg intermediate needed.
+                // Unavailable under a working-space composite: it leaves the pixel in the
+                // OUTPUT gamut, and the composite has to be in AP1.
                 shader_->set_matrix3("input_to_working",  k_direct_cg[ig][og]);
                 shader_->set_matrix3("working_to_output", k_identity_cg);
             } else {
@@ -831,7 +840,8 @@ struct image_kernel::impl
             };
             shader_->set("luminance_scale", get_luminance_scale(cg.input_transfer, cg.output_transfer));
         } else if (params.auto_color_convert &&
-                   (params.pix_desc.color_space != params.target_color_space ||
+                   (ws_composite ||
+                    params.pix_desc.color_space != params.target_color_space ||
                     params.pix_desc.color_transfer != params.target_color_transfer)) {
             static int convert_count = 0;
             convert_count++;
@@ -846,8 +856,14 @@ struct image_kernel::impl
             // Auto color conversion: source differs from channel output.
             int ig = gamut_index(params.pix_desc.color_space);
             int og = gamut_index(params.target_color_space);
-            // Skip if the mapped indices are identical (e.g. bt601 source on bt709 channel)
-            if (ig == og && params.pix_desc.color_transfer == params.target_color_transfer) {
+            // Skip if the mapped indices are identical (e.g. bt601 source on bt709 channel).
+            //
+            // Never skip under a working-space composite: "no conversion needed" is a
+            // statement about source and target being the same DISPLAY space, and it would
+            // leave this layer display-encoded in an ACEScg composite. The saving is real
+            // only when the pixel's destination is the display, which here it is not.
+            if (ig == og && params.pix_desc.color_transfer == params.target_color_transfer &&
+                !ws_composite) {
                 shader_->set("do_input_convert",  false);
                 shader_->set("do_output_convert", false);
             } else {
@@ -904,8 +920,16 @@ struct image_kernel::impl
                     },
                 };
                 static const float k_identity[9] = {1,0,0, 0,1,0, 0,0,1};
-                shader_->set_matrix3("input_to_working",  k_direct[ig][og]);
-                shader_->set_matrix3("working_to_output", k_identity);
+                if (ws_composite) {
+                    // Into ACEScg, not to the display. The output half is suppressed below
+                    // and the channel's post-composite pass supplies k_to_output.
+                    shader_->set_matrix3("input_to_working",
+                                         k_to_working[working_gamut_index(params.pix_desc.color_space)]);
+                    shader_->set_matrix3("working_to_output", k_identity);
+                } else {
+                    shader_->set_matrix3("input_to_working",  k_direct[ig][og]);
+                    shader_->set_matrix3("working_to_output", k_identity);
+                }
                 static bool logged_matrices = false;
                 if (!logged_matrices) {
                     CASPAR_LOG(trace) << L"[ogl_kernel] GAMUT: ig=" << ig << L" og=" << og
@@ -979,7 +1003,11 @@ struct image_kernel::impl
         // is orthogonal to how the INPUT half was decided: the layer may have reached the
         // working space via MIXER OCIO, via MIXER COLORSPACE, via auto-convert or not at all,
         // and in every one of those cases the display transform is what encodes it for output.
-        if (ocio_out) {
+        if (ocio_out || ws_composite) {
+            // A working-space composite suppresses the output half on every LAYER draw, for
+            // the same reason a display transform does: the channel converts once,
+            // post-composite. The post-composite draw itself arrives with
+            // output_convert_only set and ws_composite clear, so it is unaffected.
             shader_->set("do_output_convert", false);
         }
 
