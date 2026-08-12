@@ -7,13 +7,109 @@ record: [`OCIO_INTEGRATION_STUDY.md`](OCIO_INTEGRATION_STUDY.md).
 Updated in place rather than as a second file — four same-dated handoffs once existed in the
 harness repo and which was current could only be recovered from git timestamps.
 
-## Resume here: A5, channel-level display transform
+*Covers work through 2026-08-12. Kept as one file rather than split at midnight: the work is
+continuous, and four same-dated handoffs in the harness repo once made "which one is current"
+answerable only from git timestamps.*
 
-**Decided: channel-level first, consumer-level added afterwards as an option.**
+## Resume here: an A5 design note, and one measurement before it
 
-`build_display_transform()` exists and is measured. What is left is the render integration
-and the operator surface. Read the next section first — three measurements shape the design
-and one of them invalidates code A4e already shipped.
+**Do not write more A5 render code yet.** Two decisions taken on 2026-08-12 change the shape
+of the work, and one open question is wider than A5.
+
+### 1. Measure the alpha domain first
+
+OCIO's documented practice is to **unpremultiply, transform, then re-premultiply** — OIIO
+exposes `unpremult` on `colorconvert` for exactly this. Both mixers do the opposite:
+`if(flag(F_STRAIGHT_ALPHA)) col.rgb *= col.a;` runs **before** the input-convert block and
+before the OCIO splice, so every non-linear transform — OCIO's *and* the built-in EOTF — is
+applied to premultiplied RGB.
+
+* **Pre-existing.** The built-in chain has always done this; the OCIO work inherited it.
+* **Only wrong where `0 < alpha < 1`.** Opaque content is unaffected.
+* **No battery can see it.** `conformance`, `grading` and `ocio` are all flat *opaque*
+  patches. Structurally the same blind spot as the grey-ramp/channel-swap one, and it lands
+  on exactly the content this fork cares about — HTML graphics are fill+key with soft edges.
+
+**This is a claim from reading the shader, not a measurement.** Settle it with a partial-alpha
+case in the harness before designing around it. If it is real it affects the built-in chain
+too, which makes it a correctness issue wider than A5 and one to fix before building on top.
+
+### 2. The plan is reordered — go straight to the working-space composite
+
+Channel-level as *"applied where the built-in output conversion runs, per layer"* — which is
+what the inert code below implements — is a **stepping stone that gets replaced**, not
+extended, if consumer-level is the destination. It is, and effort is not the constraint.
+
+New order:
+
+1. **Float composite.** Enable fp16, run the B2 banding measurement on a `bit12` channel,
+   decide fp16 vs fp32. Prerequisite for everything below, and already on the roadmap.
+2. **A post-composite colour stage.** The LED calibration LUT is already exactly this shape
+   (`ogl/image/image_mixer.cpp`, `apply_calibration_lut`) — a precedent to follow rather
+   than invent.
+3. **Channel-level display transform** in that stage, as the default view.
+4. **Consumer override** — a fan-out in the mixer, one pass per distinct view.
+
+Surviving the reorder: `build_display_transform`, the binding-range split, the 1D/NEAREST
+fixes, and the per-layer variant machinery (which input transforms still need). Rewritten:
+the display splice location and the `draw_params.ocio_display` plumbing.
+
+### 3. Answered: layer-level is wrong for a display transform
+
+An **input** transform describes where the pixels came from — per layer, correctly. A
+**display** transform describes what screen they are going to, and every layer in a channel
+goes to the same screen. Two layers with different display transforms would blend a
+PQ-encoded layer with a Rec.709-encoded one, and that composite is not in any space. The
+per-layer "look" people usually mean is the creative grade, which already exists per layer
+and operates in ACEScg.
+
+### 4. Consumer-level: two real costs, neither fatal
+
+* **It changes blending permanently for any channel using it.** One composite serving two
+  views must stay in working space, so layers blend in scene-linear ACEScg rather than in
+  display-encoded values — and the shader comment is right that blend modes were designed
+  for 0–1 display values. Unavoidable rather than an implementation choice: display
+  transforms are not invertible, so you cannot composite in one display space and convert to
+  another. Arguably more correct — it is what film compositors do — but existing looks shift.
+* **fp16/fp32 stops being optional.** ACEScg needs range above 1.0 and below 0; unorm clamps
+  both.
+
+**Not a problem, despite sounding like one:** consumers need no GPU passes of their own. The
+transform runs in the mixer; only the *configuration* lives with the consumer. The mixer does
+N passes over one working-space composite and hands each consumer a finished texture. No
+cross-device work, no consumer touching the mixer's device.
+
+### 5. What the design note must settle
+
+Beyond the three-level model (input = layer, look = layer, display = channel default +
+consumer override) and fp16 vs fp32:
+
+* **Alpha domain**, after the measurement above.
+* **`isData` policy.** OCIO bypasses data colour spaces by default and v2 lets the
+  application opt in. We never check `isData`. For a server whose key channel is an output,
+  that deserves a decision rather than an accident.
+* **Config source.** The docs point at `GetCurrentConfig()`, which auto-initialises from
+  `$OCIO`. We pin a built-in URI instead. The pin is right — approved looks must not change
+  because an environment variable did — but it should be a *stated deviation*, and
+  `MIXER OCIO CONFIG` should probably accept `$OCIO` explicitly.
+* **Pre-warming**, reframed: OCIO's own guidance is that building a processor is expensive
+  and thread-blocking and should happen "as infrequently as is sensible". Following the
+  standard, not a performance nicety.
+* **Dynamic properties** are the documented mechanism for exposure/gamma without rebuilding
+  the processor — and are what the reserved, currently unused UBO at set 1 binding 0 exists
+  for. That is where the missing `exposure` on the OCIO path belongs.
+
+The study (`OCIO_INTEGRATION_STUDY.md`) predates all of this and several of its assumptions
+have since been measured wrong — no post-composite stage (there is one), the UBO, `sampler3D`.
+It needs a successor, not an edit.
+
+## Sources for the practice claims above
+
+* [Developing with OpenColorIO](https://opencolorio.readthedocs.io/en/latest/guides/developing/developing.html)
+  — roles, display/view, processor cost
+* [Colorspaces — `isData`](https://opencolorio.readthedocs.io/en/latest/guides/authoring/colorspaces.html)
+* [OCIO 2.0 release notes — data space handling](https://github.com/AcademySoftwareFoundation/OpenColorIO/blob/main/docs/releases/ocio_2_0.rst)
+* [OpenImageIO `colorconvert` / `unpremult`](https://github.com/OpenImageIO/oiio/blob/master/src/include/OpenImageIO/imagebufalgo.h)
 
 ### What is done
 
@@ -37,22 +133,26 @@ and one of them invalidates code A4e already shipped.
   auto colour conversion on there being no display transform. Anchor uniqueness is not
   anchor correctness in a 2000-line function; read the patched region.
 
-### What is left, in order
+### Status of the code above
 
-1. **Nothing populates `draw_params.ocio_display` yet**, so all of the above is inert. It
-   compiles, it is regression-clean, and it has never executed. **Both kernels are now
-   ready**, so the channel state and the AMCP command light up OpenGL and Vulkan together
-   rather than shipping a parity gap. That is the next commit.
-2. **Channel-level state.** Follow the LED calibration LUT, which is already a channel-master
-   setting applied over the composited frame (`ogl/image/image_mixer.cpp`,
-   `set_calibration_lut`). Note it also has a **render-fingerprint field**, and a display
-   transform needs one too or the still-frame cache will serve a stale look.
-3. **AMCP.** `MIXER <ch> OCIO_DISPLAY "<display>" "<view>"` and `NONE`, validated at command
-   time against `has_display_view()` — which already exists. Quote both arguments; every
-   display and view name in this config contains spaces.
-4. **A harness battery.** `cli.py ocio` compares an input transform against OCIO's CPU
-   processor; the display half needs the same treatment and the oracle already has the
-   pieces.
+**Nothing populates `draw_params.ocio_display`, so all of the display work is inert.** It
+compiles, it is regression-clean, and it has never executed. Both kernels were brought to
+readiness together deliberately, so the operator surface would light OpenGL and Vulkan up at
+once rather than shipping a parity gap.
+
+Per the reorder in "Resume here", the splice location and the `draw_params` plumbing are
+expected to be **rewritten** for a post-composite stage. Leave them — they cost nothing and
+they document the shape. `build_display_transform`, the binding ranges and the 1D/NEAREST
+fixes survive unchanged.
+
+Still true whenever the operator surface is built: the LED calibration LUT carries a
+**render-fingerprint field**, and a display transform needs one too or the still-frame cache
+serves a stale look. `MIXER <ch> OCIO_DISPLAY "<display>" "<view>"` should validate against
+`has_display_view()`, which already exists — and quote both arguments, because every display
+and view name in this config contains spaces.
+
+A harness battery is still owed: `cli.py ocio` compares an input transform against OCIO's CPU
+processor, and the display half needs the same treatment. The oracle already has the pieces.
 
 ### Three measurements that shape it
 
@@ -77,24 +177,15 @@ uniforms**. So no `e3D` view is needed, the 8 reserved bindings are enough, and 
 placeholder uniform buffer stays unused. The generated source is ~16 KB against ~1.5 KB for
 an input transform, which lands entirely on compile time.
 
-### The architectural point, and why channel-level is built this way
+### The architectural point
 
 A display transform must consume **working-space** pixels. The mixer converts to display
 space **per layer, before blending** — deliberately, so blend modes operate on display
-values — so by the time a composite exists it is already display-encoded and a
-post-composite pass is too late.
+values — so by the time a composite exists it is already display-encoded, and a
+post-composite pass is too late *as the mixer stands today*.
 
-So channel-level is implemented as a channel-scoped *setting* applied where the built-in
-output conversion already runs, per layer. With one transform for the whole channel the
-result is exactly a channel display transform, blend semantics are unchanged, and it needs
-nothing from the float path.
-
-**Consumer-level cannot be added on top of that.** One composite feeding two different views
-requires the composite to still be in working space, which means turning off the per-layer
-output conversion, compositing in float, and blending in linear — a blend-semantics change
-and a hard dependency on the fp16 render target, which is still the "compiled but never
-executed" item below. Treat consumer-level as that larger piece of work rather than an
-increment on channel-level.
+That is what the inert code above works around, and it is why the plan was reordered: the fix
+is to stop converting per layer, not to work around the fact that we do. See "Resume here".
 
 ### Also still open
 
