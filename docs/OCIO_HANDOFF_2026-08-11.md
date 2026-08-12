@@ -216,26 +216,33 @@ New order:
    | `Un-tone-mapped` | **4.00 LSB** |
    | `Video (colorimetric)` | **4.00 LSB** |
 
-   **OPEN: 4 LSB of positive floor on channels that should be black.** Greys are exact to
-   0.05 LSB and the dominant channel to 0.05; what moves is the near-zero channels of
-   saturated primaries. Mechanism established, and the arithmetic closes:
+   **The 4 LSB deviation is the fp16 composite's precision, not a defect — and the first
+   explanation of it recorded here was wrong.** `<working-space-composite>` requires fp16, so
+   the working-space value the display transform receives has a 10-bit mantissa. Where the
+   transform then CANCELS two mid-range numbers into a near-zero one — a wide-to-narrow
+   gamut conversion at a saturated primary — that quantisation is amplified. Perturbing the
+   working value by one fp16 ulp per channel moves the output by:
 
-   * The composite is **fp16**, which this stage mandates. A BT.709→ACEScg→BT.709 round trip
-     is a cancellation, and fp16 makes its residual ~5000× larger: −2.5e-8 becomes −1.28e-4.
-     Still negative, still invisible.
-   * The display transform then **encodes that negative by magnitude rather than clamping
-     it**: `|−1.28e-4|^(1/2.2) × 255 = 4.34 LSB`, against 4.00 measured. From the exact value
-     the same encoding gives 0.09.
+   | patch | `Un-tone-mapped` | `ACES 2.0 - SDR 100 nits` |
+   | :--- | ---: | ---: |
+   | `#00BF00` | **6.96 LSB** | 0.24 LSB |
+   | `#FF0000` | **4.42 LSB** | 0.24 LSB |
+   | `#BFBFBF` | 0.40 LSB | 0.16 LSB |
 
-   The built-in output block clamps before its OETF (`clamp(col, 0.0, 1.0)`, BT.2408 Method
-   0). An OCIO display transform replaces that block **entirely**, clamp included. So the
-   decision is where a negative belongs on this path — clamped before the display transform,
-   or accepted as OCIO's business. `ACES 2.0` passes because its tone map removes the
-   negative before the encode, which is why the two failing views are the two worth keeping.
+   So 4.00 LSB sits inside what the format allows, and the battery's first run reporting it
+   as a failure was the gate being wrong rather than the server. `cli.py ocio-display` now
+   gates each patch at `max(1 LSB, fp16 band)` and **reports how many patches used the
+   band** — 9 of 23 on the two un-tone-mapped views, 0 on `Raw` and `ACES 2.0`. 4/4 views
+   pass on both mixers.
 
-   The gate was deliberately **not** widened: 1.0 LSB is right and 4.00 is the answer to
-   report until that is decided. `tests/test_ocio_display.py` pins the mechanism so a change
-   that merely moves the number cannot be mistaken for a fix.
+   **The wrong explanation is kept in `core/ocio_display.py` on purpose.** It looked like the
+   transform encoded a negative by magnitude instead of clamping: `|−1.28e-4|^(1/2.2) × 255
+   = 4.34` against 4.00 measured. Feeding OCIO's own CPU the fp16-quantised value refutes it
+   — 0 there, and +2.59 at `#0000FF` where the server gives 0. The disagreement runs both
+   ways, which no systematic encoding rule produces. One number matching an arithmetic story
+   is not a mechanism, and this one fit to within 8%.
+
+   No clamp decision is needed after all: nothing is being encoded wrongly.
 
    Also confirmed open: **the frame-path compile stall is real and now measurable.** A 1.6 s
    settle after `OCIO_DISPLAY` produced no frame at all — the ACES 2.0 program is ~15 KB of
