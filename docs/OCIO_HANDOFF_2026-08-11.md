@@ -16,7 +16,11 @@ answerable only from git timestamps.*
 **Do not write more A5 render code yet.** Two decisions taken on 2026-08-12 change the shape
 of the work, and one open question is wider than A5.
 
-### 1. Measure the alpha domain first
+**Status 2026-08-12: the alpha measurement below is done and the defect is real.** The next
+step is the fix in §1, which needs the two decisions recorded there. Everything after §1 is
+unchanged.
+
+### 1. ~~Measure the alpha domain first~~ — MEASURED 2026-08-12, and it is real
 
 OCIO's documented practice is to **unpremultiply, transform, then re-premultiply** — OIIO
 exposes `unpremult` on `colorconvert` for exactly this. Both mixers do the opposite:
@@ -26,13 +30,67 @@ applied to premultiplied RGB.
 
 * **Pre-existing.** The built-in chain has always done this; the OCIO work inherited it.
 * **Only wrong where `0 < alpha < 1`.** Opaque content is unaffected.
-* **No battery can see it.** `conformance`, `grading` and `ocio` are all flat *opaque*
+* **No battery could see it.** `conformance`, `grading` and `ocio` are all flat *opaque*
   patches. Structurally the same blind spot as the grey-ramp/channel-swap one, and it lands
   on exactly the content this fork cares about — HTML graphics are fill+key with soft edges.
 
-**This is a claim from reading the shader, not a measurement.** Settle it with a partial-alpha
-case in the harness before designing around it. If it is real it affects the built-in chain
-too, which makes it a correctness issue wider than A5 and one to fix before building on top.
+**No longer a claim from reading.** `CasparCG-TestRunner/cli.py alpha-domain` now measures it,
+and both mixers transform **premultiplied RGB** — 20 discriminating patches each, every one
+selecting that model at **≤0.51 LSB** while the straight-domain model sits **13.5 to 116 LSB**
+away. The OGL and Vulkan reports are byte-identical apart from the mixer's name. Full account:
+`CasparCG-TestRunner/docs/alpha_domain_2026-08-12.md`.
+
+The sharpest single number: `MIXER COLORSPACE PQ BT2020 NONE BT709 REC709` on `#8073401A`
+(alpha 0x80) renders **243.8** where the straight domain gives **128.0**. Not a tolerance
+question.
+
+Two controls, both able to fail, are what make that readable rather than plausible. A pure
+gamut matrix separates the two models by exactly **0.00 LSB** — a matrix commutes with a
+scalar — so the rig cannot be manufacturing differences. And the ten patches where the two
+hypotheses coincide (alpha 0xFF, plus the whole matrix case) hold at **1 LSB, worst 0.49**, so
+the rig reduces to `conformance` when alpha is taken out of the picture.
+
+**Confirmed wider than OCIO, as predicted.** The cleanest row has no OCIO, no matrix and no
+output encoding in it — `srgb → linear`, a per-channel power law — and it separates by up to
+56 LSB. So the built-in EOTF/OETF chain and every non-linear grading tool downstream inherit
+this, and it is a correctness issue to fix before building A5 on top.
+
+**What the measurement does not cover:** a source that declares *straight* alpha. The colour
+producer declares premultiplied (`color_producer.cpp:46`; `is_straight_alpha` defaults false
+at `pixel_format.h:138`), so `col.rgb *= col.a` never ran for these patches — the pixel was in
+the premultiplied domain by declaration. `image_producer.cpp:64` passes `true`, so every PNG
+and TGA still reaches the same domain via that multiply, one unbranched line above the same
+transform. Everything below that point is measured; the line itself is still only read.
+
+**Also flagged, not measured:** `shader.frag:1861`, the shape/fill composite, is commented
+*"Porter-Duff 'over' composite (straight alpha)"* while the pixel reaching it is
+premultiplied. A fix to the alpha domain has to decide about that block too.
+
+#### The fix, and the two things it has to decide
+
+Unpremultiply above the transform chain and premultiply below it — symmetric, and it makes
+the `is_straight_alpha` flag select *which* end needs the operation rather than gating one:
+
+```
+if (!is_straight_alpha && col.a > 0.0) col.rgb /= col.a;   // premultiplied source -> straight
+<input convert / OCIO splice, grading, output convert / OCIO display>
+col.rgb *= col.a;                                          // back to premultiplied, before blend
+```
+
+Neither of the two questions is answered yet:
+
+* **Where exactly the re-premultiply goes.** `col *= opacity` scales RGB and alpha together,
+  and `col.a *= local_key` / `layer_key` scale alpha *alone* — which already leaves RGB and
+  alpha disagreeing today. Premultiplying once after all three, immediately before `blend()`,
+  fixes that as a side effect and is provably identical to today's behaviour at alpha 1.0.
+  Worth confirming that identity is what is wanted before treating it as free.
+* **It changes rendered output for existing configs** wherever content has soft edges and any
+  non-linear transform is configured — which is most lower-thirds. That belongs in
+  `CHANGELOG.md` with this measurement attached, and it is a decision rather than a
+  correction to apply quietly.
+
+Acceptance criterion when it is done: `cli.py alpha-domain` exits **0** on both mixers. It
+exits **1** on both today.
 
 ### 2. The plan is reordered — go straight to the working-space composite
 
@@ -84,7 +142,9 @@ cross-device work, no consumer touching the mixer's device.
 Beyond the three-level model (input = layer, look = layer, display = channel default +
 consumer override) and fp16 vs fp32:
 
-* **Alpha domain**, after the measurement above.
+* **Alpha domain** — measured, see §1. The transform runs on premultiplied RGB on both
+  mixers; the design note has to state which domain A5's display transform consumes, and the
+  fix in §1 should land before it rather than after.
 * **`isData` policy.** OCIO bypasses data colour spaces by default and v2 lets the
   application opt in. We never check `isData`. For a server whose key channel is an output,
   that deserves a decision rather than an accident.
