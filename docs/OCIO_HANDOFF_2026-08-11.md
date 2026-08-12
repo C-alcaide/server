@@ -16,9 +16,10 @@ answerable only from git timestamps.*
 **Do not write more A5 render code yet.** Two decisions taken on 2026-08-12 change the shape
 of the work, and one open question is wider than A5.
 
-**Status 2026-08-12: the alpha measurement below is done, the defect was real, and the fix
-has landed behind `<straight-alpha-grading>` (default off).** §1 records both. The next step
-is the reorder in §2 — the float composite. Everything after §1 is unchanged.
+**Status 2026-08-12.** §1 is closed: the alpha defect was real and the fix has landed behind
+`<straight-alpha-grading>` (default off). **§2 step 1 is closed too** — fp16 is measured, and
+so are the two paths that had never executed. The next step is §2 step 2, a post-composite
+colour stage. Everything from §3 on is unchanged.
 
 ### 1. ~~Measure the alpha domain first~~ — MEASURED 2026-08-12, and it is real
 
@@ -108,8 +109,34 @@ extended, if consumer-level is the destination. It is, and effort is not the con
 
 New order:
 
-1. **Float composite.** Enable fp16, run the B2 banding measurement on a `bit12` channel,
-   decide fp16 vs fp32. Prerequisite for everything below, and already on the roadmap.
+1. ~~**Float composite.**~~ **DONE 2026-08-12, with one correction to the plan.**
+
+   **There is no `bit12` channel to measure on.** `<color-depth>` accepts only 8 or 16
+   (`server.cpp:302-304`); `bit12` is only ever a *source* pixel format. So the measurement
+   was reframed to the render target's actual quantum per signal level, which is answerable
+   and stronger — a 16-bit capture resolves 1/32 of fp16's ulp near white, better than a
+   12-bit path could have.
+
+   **fp16's quantum measures 32.0 LSB16 near white** — 2.0x a 12-bit output step, 0.5x a
+   10-bit one — halving per octave exactly as `2^(e-10)` predicts (32, 32, 16, 4, 1). unorm
+   reads 1.0 at every level; both mixers byte-identical. `cli.py banding`, and
+   `CasparCG-TestRunner/docs/render_format_quantum_2026-08-12.md`.
+
+   So **fp16 is a real highlight regression only against a 12-bit or better consumer**, and
+   12-bit is a consumer property rather than a channel one. Undecided, and this instrument
+   cannot decide it: whether fp16's *shadow* precision is worth having — the half of §4.3.4
+   that argues FOR fp16 sits below a 16-bit unorm capture's floor.
+
+   **Both fp16 paths listed under "What is NOT verified" are now executed:**
+
+   | | |
+   | :--- | :--- |
+   | the fp16 render target, both mixers | `conformance --render-format fp16` **100/100 within 1.0 LSB** |
+   | the Vulkan fp16 resolve blit under the layers | `vk-validation --render-format fp16` **0 VUIDs**, 12/12 commands, server survived |
+
+   The first was confirmed against the server's own log line rather than against the battery
+   passing, because a silently dropped element would have passed too. `config_generator` can
+   now emit `<render-format>`, which is what the previous handoff said to do first.
 2. **A post-composite colour stage.** The LED calibration LUT is already exactly this shape
    (`ogl/image/image_mixer.cpp`, `apply_calibration_lut`) — a precedent to follow rather
    than invent.
@@ -328,12 +355,14 @@ reporting"; it exits **2 for inconclusive** rather than folding that into a pass
 
 ## What is NOT verified — compiled but never executed
 
-1. **The fp16 render target on either mixer.** No config selects it. `<render-format>fp16</render-format>`
-   is parsed; nothing sets it. `config_generator` in the harness cannot emit the element
-   either, so `vk-validation` cannot yet be aimed at it — teach it that first.
-2. **The Vulkan fp16 resolve blit** (`renderpass::commit()`). Barriers written against the
-   documented contracts and never exercised. `cli.py vk-validation` now exists precisely for
-   this moment.
+1. ~~**The fp16 render target on either mixer.**~~ **VERIFIED 2026-08-12.**
+   `config_generator` emits `<render-format>` now, and `conformance --render-format fp16`
+   is **100/100 within 1.0 LSB on both mixers** — confirmed against the server's own
+   `[server] Channel 1 render-format fp16 (float working space)` log line, because a
+   silently dropped element would have passed the battery too.
+2. ~~**The Vulkan fp16 resolve blit** (`renderpass::commit()`).~~ **VERIFIED 2026-08-12.**
+   `vk-validation --render-format fp16`: **0 VUIDs**, 12/12 commands accepted, server
+   survived, positive control produced 8 messages. The barriers were correct as written.
 3. **A 3D LUT through the Vulkan OCIO path.** Implemented, and unreachable with the pinned
    config — no colour space in it emits one. It reuses the two helpers `MIXER LUT3D` already
    exercises, so it is inherited-proven rather than measured.
@@ -417,9 +446,10 @@ refresh deployed DLLs (see `BUILDING_WORKFLOW.md` #7).
   shape (the LUT image creation does a `waitIdle`), and the same pre-warm removes both.
 * **`exposure` and `gamut_compress` are unavailable on the OCIO path.** Both live in the
   `color_grade` struct inside the block OCIO replaces. Needs a decision and a doc line.
-* **fp16 vs fp32** for the float path — needs the B2 banding measurement on a `bit12`
-  channel, not a calculation. Study §4.3.4: fp16 is ~2× coarser than a 12-bit output near
-  white.
+* **fp16 vs fp32** — half answered, 2026-08-12. Measured: fp16's quantum is 32.0 LSB16 near
+  white, exactly 2× a 12-bit output step, and there is no `bit12` channel to have measured
+  it on (12-bit is a consumer property). What remains is whether fp16's *shadow* precision
+  is worth having, which a 16-bit unorm capture cannot see. `cli.py banding`.
 * **A5's display transform: channel or consumer?** Decided channel-level for now; a channel
   feeding an LED processor *and* an SDI monitor needs two views from one composite, which
   argues for consumer-level. Settle before building A5.

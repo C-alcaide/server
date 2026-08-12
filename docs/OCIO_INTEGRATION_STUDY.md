@@ -484,11 +484,35 @@ in `IMAGE_SEQUENCE_AND_TIMELINE_PLAN.md` §3.5 tier 3.
 5. **Does the existing `MIXER LUT` path stay, or move to OCIO's `FileTransform`?** OCIO
    would bring better format coverage and, at ≥2.5.2, a hardened parser — but it also
    makes an operator-facing feature depend on the new stack.
-6. **`fp16` or `fp32` for the float path?** §4.3.4 shows `fp16` is 2x coarser than a
-   12-bit output near white, so a `bit12` channel wanting a linear working space may need
-   `fp32`. Deciding this needs a measurement — banding on a shallow highlight ramp through
-   the five intermediates of §4.3.1 at each format — not a calculation. It also decides
-   whether the format enum needs one float entry or two.
+6. ~~**`fp16` or `fp32` for the float path?**~~ **MEASURED 2026-08-12** —
+   `CasparCG-TestRunner/cli.py banding`, and
+   `CasparCG-TestRunner/docs/render_format_quantum_2026-08-12.md`.
+
+   §4.3.4's arithmetic holds exactly. fp16's render-target quantum measures **32.0 LSB16
+   near white** (LSB16 = 1/65535) — **2.0x a 12-bit output step**, 0.5x a 10-bit one — and
+   halves per octave down the range precisely as `2^(e-10)` predicts: 32, 32, 16, 4, 1 at
+   levels 0.9, 0.6, 0.3, 0.1, 0.02. unorm reads 1.0 at every level. Both mixers
+   byte-identical.
+
+   So fp16 is a real highlight regression against a **12-bit or better** output and
+   comfortably fine for 10-bit and below. The regression is confined to the top two
+   octaves.
+
+   **Two corrections to the premise of this entry**, both from trying to run it as written:
+
+   * **There is no `bit12` channel.** `<color-depth>` accepts only 8 or 16
+     (`server.cpp:302-304`) and the channel depth is `color_depth == 16 ? bit16 : bit8`.
+     `bit12` is only ever a *source* pixel format. §4.3.4's "on a 12-bit path" is an
+     argument about a path no configuration produces — 12-bit is a **consumer** property,
+     so the answer depends on the deepest consumer a float channel feeds.
+   * **The measurement does not cover the five intermediates of §4.3.1.** It measures the
+     composite that reaches the consumer. Open question 7 is untouched.
+
+   **Still undecided, and this battery cannot decide it:** whether fp16's *shadow*
+   precision is worth having — the half of §4.3.4 that argues FOR fp16, and the reason to
+   want a float working space at all. At 0.002 fp16's ulp is an eighth of a 16-bit capture
+   LSB, so a 16-bit unorm capture floors out and both formats read the same. Neither
+   confirmed nor refuted; it needs a different instrument.
 7. **Do the five intermediates all need the same format?** The calibration LUT pass
    (`cal_texture`) is the last thing before output and is display-encoded by then, so it
    may be able to stay `unorm16` even on a float channel — saving bandwidth at the point

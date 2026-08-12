@@ -1,6 +1,48 @@
 CasparVP — Unreleased
 ==========================================
 
+### Verified: `<render-format>fp16</render-format>` renders correctly on both mixers
+
+The element has been parsed since the float-composite work landed and **no configuration
+had ever selected it**, on either mixer, so neither the fp16 render target nor the Vulkan
+fp16 resolve blit in `renderpass::commit()` had executed once.
+
+Both now have:
+
+| | |
+| :--- | :--- |
+| fp16 render target, OpenGL and Vulkan | `conformance --render-format fp16` — **100/100 conversions within 1.0 LSB** |
+| the Vulkan fp16 resolve blit under the Khronos validation layers | **0 VUIDs**, 12/12 commands accepted, server survived, positive control reporting |
+
+Confirmed against the server's own `[server] Channel 1 render-format fp16 (float working
+space)` log line rather than against the battery passing, because a silently dropped element
+would have passed too.
+
+**No server code changed.** The barriers and the resolve path were correct as written; what
+was missing was any way to aim a measurement at them.
+
+**And the precision cost is now measured rather than calculated.** `cli.py banding` reports
+the render target's actual quantisation step per signal level:
+
+| level | unorm | fp16 | predicted `2^(e-10)` |
+| ---: | ---: | ---: | ---: |
+| 0.9 | 1.0 | **32.0** | 32.0 |
+| 0.6 | 1.0 | **32.0** | 32.0 |
+| 0.3 | 1.0 | **16.0** | 16.0 |
+| 0.1 | 1.0 | **4.0** | 4.0 |
+| 0.02 | 1.0 | **1.0** | 1.0 |
+
+LSB16 = 1/65535; a 12-bit output step is 16.0 and a 10-bit one 64.1. So **fp16 near white is
+exactly 2× coarser than a 12-bit output and half a 10-bit step** — a real highlight
+regression for a 12-bit or better consumer, and comfortably fine below that. Both mixers
+byte-identical.
+
+Two corrections to what `OCIO_INTEGRATION_STUDY.md` §4.3.4 assumed. There is **no `bit12`
+channel**: `<color-depth>` accepts only 8 or 16 and `bit12` is only ever a source pixel
+format, so 12-bit is a consumer property rather than a channel one. And fp16's *shadow*
+advantage — the half of §4.3.4 that argues for it — sits below a 16-bit capture's floor and
+is neither confirmed nor refuted.
+
 ### Added: `<straight-alpha-grading>` — the colour chain on unpremultiplied RGB
 
 Both mixers apply the whole colour chain — the EOTF, `MIXER COLORSPACE`, `MIXER OCIO`, every
