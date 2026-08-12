@@ -1,6 +1,59 @@
 CasparVP — Unreleased
 ==========================================
 
+### Fixed: four of seven ACEScg gamut matrices, and six auto-convert entries
+
+**`k_to_working` and `k_to_output` were not the matrices they claimed to be for `bt2020`,
+`p3_d65`, `arri_wg3` and `sgamut3cine`** — worst deviation 0.41 per element, identical on
+both mixers. `k_direct` (auto-color-convert) had **6 of 16 checkable entries wrong**. Found
+while designing the working-space composite, by checking the tables it would sit on.
+
+Full account, evidence and the corrected rows: `docs/GAMUT_MATRIX_DEFECT_2026-08-12.md`.
+
+**This changes rendered output, and neutrals are exactly where it does not.** Measured, in
+8-bit LSB after the output OETF:
+
+| patch | bt2020 channel | p3-d65 channel | ARRI WG3 source | S-Gamut3.Cine source |
+| :--- | ---: | ---: | ---: | ---: |
+| mid grey | **0.0** | **0.0** | **0.0** | **0.0** |
+| warm skin | 6.1 | 4.5 | 13.2 | 11.5 |
+| saturated red | 18.2 | 15.9 | 30.9 | 52.6 |
+| saturated green | 66.6 | 9.1 | 58.6 | 60.3 |
+
+Grey invariance is why it survived — the same blind spot `CLAUDE.md` documents for channel
+swaps. Anyone with an approved look on a wide-gamut channel or a camera-log source will see
+a change; it is a correction, not a regression.
+
+**Affected paths**, all of them ones this fork exists for: `MIXER OCIO` on a BT.2020 or P3
+channel, `MIXER COLORSPACE LOGC3 ARRI_WG3 …` (the first usage example in
+`COLOR_GRADING.md`), `MIXER COLORSPACE SLOG3 SGAMUT3_CINE …`, and any tone-mapped
+conversion. **Not** affected: the default BT.709↔BT.2020 manual path, which uses
+`k_direct_cg` — audited and correct in all four entries, which is why `conformance` reported
+100/100 throughout.
+
+**Also fixed, a separate defect:** `k_to_output` was addressed with the wrong index space.
+`gamut_index()` returns the `k_direct` index (p3_dci=3, adobe_rgb=4) and was used to index
+`k_to_output`, whose order is the MIXER COLORSPACE enum (3=AP0, 4=AP1) — so `MIXER OCIO` on
+a p3-dci channel applied ACEScg→AP0 and on an adobe-rgb channel applied the identity. Both
+tables now carry p3-dci and adobe-rgb rows of their own, addressed by a separately named
+`working_gamut_index()`.
+
+**Where the numbers come from:** OCIO 2.5.2 through the pinned studio config, which is what
+the server links. The config has no linear P3-DCI space, so those rows come from a
+colorimetric derivation validated against OCIO to **1.1e-7** across the gamuts whose
+primaries are exact by standard. The derivation is deliberately not used for the camera
+gamuts, where it disagrees with OCIO by up to 0.0056 — published primaries vary in the last
+digits and the config is authoritative.
+
+**No battery could have caught this**, which is the second finding. The harness transcribes
+these same tables, so a wrong matrix was compared against a copy of itself and passed.
+`CasparCG-TestRunner/core/gamut_reference.py` now derives them from OCIO instead, and
+`cli.py ocio` sweeps the channel gamut — it previously ran on BT.709 only, one of the three
+rows that happened to be correct.
+
+Verified: `ocio` **18/18 within 1.0 LSB** (3 channel gamuts × 6 spaces, worst 0.55) on both
+mixers, `conformance` 100/100 both, `grading` 48/48 both, 1247 harness tests.
+
 ### Verified: `<render-format>fp16</render-format>` renders correctly on both mixers
 
 The element has been parsed since the float-composite work landed and **no configuration

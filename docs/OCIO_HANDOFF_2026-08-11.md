@@ -101,7 +101,7 @@ reporting a one-way finding: exit **0** when the domain matches `<straight-alpha
 **Still not covered:** a straight-alpha source, and `shader.frag`'s shape/fill composite (see
 above). Both unchanged by this work.
 
-### 1b. STOP — four ACEScg gamut matrices are wrong, found 2026-08-12
+### 1b. Four ACEScg gamut matrices were wrong — found AND FIXED 2026-08-12
 
 Found while designing step 2 below, by checking the tables the design was going to build on.
 **`k_to_working` and `k_to_output` are not the matrices they claim to be for `bt2020`,
@@ -112,9 +112,11 @@ Three independent lines agree: a colorimetric derivation that reproduces the cor
 row to 1.5e-5, a round trip needing no external reference, and OCIO's own matrices. Worst
 deviation 0.41 per element.
 
-**This blocks step 2.** A working-space composite is defined by the conversion into and out
-of ACEScg, and four of the seven routes are wrong. Building on them would produce a
-carefully measured composite in the wrong space.
+**This blocked step 2** — a working-space composite is defined by the conversion into and
+out of ACEScg, and four of the seven routes were wrong. **Now fixed**, so step 2 is
+unblocked. Auditing the direct tables as well found `k_direct` had 6 of 16 checkable
+entries wrong too, while `k_direct_cg` was clean. Verified after: `ocio` 18/18 across three
+channel gamuts, `conformance` 100/100, `grading` 48/48, both mixers.
 
 It also lands on what this fork is for: `MIXER COLORSPACE LOGC3 ARRI_WG3 …` is the first
 usage example in `COLOR_GRADING.md`, and `MIXER OCIO` on a BT.2020 channel takes
@@ -126,9 +128,8 @@ compared against a copy of itself. `CasparCG-TestRunner/core/gamut_reference.py`
 them from OCIO instead, and `tests/test_gamut_matrices.py` holds the four as
 `xfail(strict=True)` so they fail loudly when the server is fixed.
 
-The fix is not applied: it changes rendered output for every existing configuration using
-those paths, wants both kernels and both harness models moved together, and `k_direct_cg` /
-`k_direct` should be audited the same way first — this audit did not cover them.
+The fix changes rendered output for every existing configuration using those paths —
+neutrals not at all, saturated colour by up to 67 LSB. `CHANGELOG.md` carries the table.
 
 ### 2. The plan is reordered — go straight to the working-space composite
 

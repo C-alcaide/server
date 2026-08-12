@@ -1,4 +1,4 @@
-# Four of seven ACEScg gamut matrices are wrong — found 2026-08-12
+# Four of seven ACEScg gamut matrices were wrong — found and fixed 2026-08-12
 
 **`k_to_working` and `k_to_output` — the matrices that convert into and out of the ACEScg
 working space — are not the matrices they claim to be for `bt2020`, `p3_d65`, `arri_wg3`
@@ -70,8 +70,9 @@ every path this fork exists for:
   when it is off).
 
 Not affected: the default `MIXER COLORSPACE` path between BT.709 and BT.2020 with no tone
-mapping, which uses `k_direct_cg`; and `auto-color-convert`, which uses `k_direct`. Those
-tables were not audited here and should be.
+mapping, which uses `k_direct_cg` — **audited since, and correct in all four entries**,
+which is why `conformance` reported 100/100 throughout. `auto-color-convert`'s `k_direct`
+was audited too and was **not** clean: see "Scope grew" below.
 
 ## A second finding: no battery could have caught this
 
@@ -88,13 +89,85 @@ matrix is the exception it did not name: it is ours, transcribed identically on 
 so a bug in it cancels too.
 
 `CasparCG-TestRunner/core/gamut_reference.py` closes that hole by deriving the matrices from
-OCIO instead of from us, and `tests/test_gamut_matrices.py` pins the state — the four wrong
-gamuts are `xfail(strict=True)`, so they **fail loudly the day the server is fixed** and the
-transcriptions are not updated with it.
+OCIO instead of from us, and `tests/test_gamut_matrices.py` asserts all nine rows against it.
+While the defect stood, the four wrong gamuts were held as `xfail(strict=True)` so that
+fixing the server without moving the transcriptions would fail loudly; the fix moved both
+together, so those marks are gone and the assertions are ordinary.
 
-## The fix, and why it is not applied here
+## FIXED, 2026-08-12
 
-The correct rows, from OCIO 2.5.2 and the pinned config:
+Applied to both kernels, both harness models and the tests, in one change.
+
+**Scope grew once `k_direct` was audited too.** The original finding covered the ACEScg
+tables; auditing the direct tables as this document recommended found more:
+
+| table | verdict |
+| :--- | :--- |
+| `k_to_working` / `k_to_output` | **4 of 7 gamuts wrong** — bt2020, p3_d65, arri_wg3, sgamut3cine |
+| `k_direct_cg` (manual path, no tone map) | **correct**, all 4 entries — which is why `conformance` passed 100/100 throughout |
+| `k_direct` (auto-color-convert) | **6 of 16 checkable entries wrong** — every bt2020↔p3_d65 pair, and everything involving adobe_rgb except to/from bt709 |
+
+Also fixed, and a separate defect from the numbers: **`k_to_output` was addressed with the
+wrong index space.** `gamut_index()` returns the `k_direct` index (p3_dci=3, adobe_rgb=4)
+and was used to index `k_to_output`, whose order is the MIXER COLORSPACE enum (3=AP0,
+4=AP1). So `MIXER OCIO` on a p3-dci channel applied ACEScg→AP0 and on an adobe-rgb channel
+applied the identity. Both tables are now extended to 9 rows with p3-dci and adobe-rgb
+entries of their own, and `working_gamut_index()` addresses them — named separately from
+`gamut_index()`, with a comment saying why they are not interchangeable.
+
+### Where the numbers came from
+
+OCIO 2.5.2 through the pinned studio config wherever OCIO can answer. The config has **no
+linear P3-DCI space**, so those rows come from a colorimetric derivation — which is
+validated first: `gamut_reference.derivation_error()` requires it to reproduce OCIO across
+the exact-primary gamuts, and it does to **1.1e-7**. P3-DCI shares its primaries exactly
+with P3-D65, which is in that validated set, and differs only in white point.
+
+The derivation is deliberately **not** used for `arri_wg3` and `sgamut3cine`: it disagrees
+with OCIO by up to 0.0056 there, because published primaries for the camera gamuts vary in
+the last digits and the config is authoritative for what the server links. That is a
+statement about our primaries, not about OCIO, and `authoritative()` keeps it out of the
+kernel.
+
+### What changed on screen
+
+Neutrals do not move at all. That is the whole reason this survived — the same
+grey-invariance blind spot `CLAUDE.md` already warns about for channel swaps.
+
+| patch | bt2020 channel | p3-d65 channel | ARRI WG3 source | S-Gamut3.Cine source |
+| :--- | ---: | ---: | ---: | ---: |
+| mid grey | **0.0** | **0.0** | **0.0** | **0.0** |
+| warm skin | 6.1 | 4.5 | 13.2 | 11.5 |
+| saturated red | 18.2 | 15.9 | 30.9 | 52.6 |
+| saturated green | 66.6 | 9.1 | 58.6 | 60.3 |
+
+8-bit LSB after the output OETF. Anyone with an approved look on a wide-gamut channel or a
+camera-log source **will see a change**, and it is a correction rather than a regression.
+
+### Verification
+
+| | |
+| :--- | :--- |
+| `cli.py ocio`, now sweeping **3 channel gamuts** | **18/18 within 1.0 LSB, worst 0.55**, both mixers |
+| `conformance` | 100/100 both mixers — unchanged, because it exercises `k_direct_cg`, which was correct |
+| `grading` | 48/48 both mixers |
+| harness unit tests | 1247 pass, and the four `xfail(strict)` marks are gone because the rows are now right |
+
+The `ocio` battery previously ran on a **BT.709 channel only**, which was one of the three
+rows that happened to be correct — so the battery that exists to prove the OCIO integration
+was reporting 6/6 on the single gamut where the output matrix was right. It now sweeps
+bt709, bt2020 and p3_d65.
+
+**And it caught an orphan while proving it.** The first post-fix run connected to a stale
+server from an earlier battery — a pre-fix binary — and only gave itself away because
+`INFO OCIO` came back as an `INFO` channel listing. `ocio_conformance` now claims its port
+from the run registry, as `shader_conformance` has since the registry landed.
+
+## The correct rows, for reference
+
+From OCIO 2.5.2 and the pinned config. These are what the kernels now carry — regenerate
+them with `CasparCG-TestRunner/core/gamut_reference.authoritative()` rather than copying
+from here, so there is one source and not a fourth transcription:
 
 ```
 // bt2020 -> ACEScg
@@ -115,22 +188,5 @@ The correct rows, from OCIO 2.5.2 and the pinned config:
 {1.0650269f, -0.1199250f, 0.0548981f, 0.0470203f, 0.7912176f, 0.1617622f, 0.0260986f, 0.0202137f, 0.9536877f},
 ```
 
-Applying them **changes rendered output for every existing configuration that uses these
-paths** — every ARRI or Sony log source through `MIXER COLORSPACE`, every BT.2020 or P3
-channel under `MIXER OCIO`, every tone-mapped conversion. On saturated content the BT.2020
-output matrix alone moves a pixel by roughly a quarter of full scale.
-
-That is a correction rather than a feature, so it does not belong behind a flag the way
-`<straight-alpha-grading>` does — but it is a large visible change to approved looks, and
-which release it lands in is a decision rather than a detail. It also wants three things
-doing together:
-
-1. the four rows in **both** kernels;
-2. the harness transcriptions, and the `xfail(strict)` marks removed;
-3. `k_direct_cg` and `k_direct` audited the same way — this audit did not cover them, and
-   the same copy-paste hazard applies.
-
-Recommended before the fix lands: extend `cli.py ocio` to sweep the **channel** gamut. It
-currently uses a BT.709 channel only, which is one of the three rows that happens to be
-correct — so the battery that exists to prove the OCIO integration has been reporting 6/6
-on the single gamut where the output matrix is right.
+Applying them changed rendered output for every existing configuration on those paths —
+see "What changed on screen" above for the measured figures.
