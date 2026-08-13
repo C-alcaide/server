@@ -116,12 +116,22 @@ void apply_transform_colour_values(core::image_transform& self, const core::imag
     }
     self.cdl_saturation *= other.cdl_saturation;
 
-    // Split toning
+    // Split toning: colours add, and the balance of whichever transform actually has
+    // split toning active wins. split_balance is a crossover position in luma, not a
+    // strength, so no arithmetic composition means anything (0.5 + 0.5 = everything is
+    // shadow; 0.5 * 0.5 = 0.25), and the shader has one crossover for one colour pair.
+    // Testing other.split_balance != 0.5 instead is a float equality test against a
+    // sentinel and misreads a tweened 0.4999999 as an explicit setting. Kept in step with
+    // the OpenGL mixer -- parity is required.
+    const auto is_set = [](double v) { return v != 0.0; };
+    const bool other_splits =
+        std::any_of(other.split_shadow_color.begin(), other.split_shadow_color.end(), is_set) ||
+        std::any_of(other.split_highlight_color.begin(), other.split_highlight_color.end(), is_set);
     for (int i = 0; i < 3; ++i) {
         self.split_shadow_color[i]    += other.split_shadow_color[i];
         self.split_highlight_color[i] += other.split_highlight_color[i];
     }
-    if (other.split_balance != 0.5)
+    if (other_splits)
         self.split_balance = other.split_balance;
 
     // Gamut compression
