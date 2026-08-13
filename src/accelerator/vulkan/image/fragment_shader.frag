@@ -339,7 +339,10 @@ vec3 apply_tone_mapping(vec3 r,int op){switch(op){case 1:return tonemap_reinhard
 // White balance in RGB working space: warm (+t) boosts red, cuts blue; tint (+ti) boosts green.
 // (Matches the OGL shader, which expresses the same gains in its BGRA convention.)
 vec3 apply_white_balance(vec3 c,float t,float ti){c.r*=1.0+t*0.20;c.g*=1.0+ti*0.10;c.b*=1.0-t*0.20;return c;}
-vec3 apply_lmg(vec3 c,vec3 l,vec3 m,vec3 g){return pow(max(c*g+l,vec3(0.0)),max(vec3(0.01),1.0/m));}
+// m is clamped before the reciprocal: max(0.01, 1.0/0.0) is Inf, so guarding the
+// exponent does not protect against midtone 0 -- it collapses the channel to 0 below
+// white and +Inf above. [0.01,100] reproduces the old exponent bounds exactly.
+vec3 apply_lmg(vec3 c,vec3 l,vec3 m,vec3 g){return pow(max(c*g+l,vec3(0.0)),1.0/clamp(m,vec3(0.01),vec3(100.0)));}
 vec3 apply_hue_shift(vec3 c,float deg){float pk=max(max(c.r,c.g),max(c.b,0.0001));vec3 h=rgb2hsv(clamp(c/pk,0.0,1.0));h.x=fract(h.x+deg/360.0);return hsv2rgb(h)*pk;}
 vec3 apply_tone_balance(vec3 c,float s,float h){float l=dot(c,vec3(0.2126,0.7152,0.0722));c+=vec3(s*0.5*(1.0-smoothstep(0.0,0.6,l)));c+=vec3(h*0.5*smoothstep(0.4,1.0,l));return c;}
 vec3 apply_linear_sat(vec3 c,float s){float l=dot(c,vec3(0.2126,0.7152,0.0722));return mix(vec3(l),c,s);}

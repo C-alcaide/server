@@ -630,10 +630,16 @@ vec3 apply_white_balance(vec3 c, float temp, float tint_val)
 // Matches DaVinci Resolve CDL-style primary wheels.
 // Formula: out = pow(max(c * gain + lift, 0.0), 1.0 / midtone)
 // No upper clamp â€” allows HDR pass-through.  Only clamp negatives for pow safety.
+// midtone is clamped BEFORE the reciprocal, not after: at midtone == 0 the reciprocal
+// is +Inf and pow() collapses the channel to 0 below white and +Inf above it, which
+// then reaches the blend stage as NaN. Clamping the exponent cannot undo that --
+// max(0.01, Inf) is Inf -- and a negative midtone would otherwise invert the curve.
+// Clamping the base to [0.01, 100] bounds the exponent to the same [0.01, 100] the old
+// max() gave, so no in-range grade changes.
 vec3 apply_lmg(vec3 c, vec3 lift, vec3 midtone, vec3 gain)
 {
     c = max(c * gain + lift, vec3(0.0));
-    c = pow(c, max(vec3(0.01), 1.0 / midtone));
+    c = pow(c, 1.0 / clamp(midtone, vec3(0.01), vec3(100.0)));
     return c;
 }
 
