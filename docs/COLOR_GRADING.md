@@ -530,6 +530,42 @@ It is also the prerequisite for a channel-level OCIO display transform and for p
 views: a display transform is not invertible, so a composite that is already display-encoded
 cannot be re-encoded for a second view.
 
+### Per-consumer views
+
+The channel's view (`OCIO_DISPLAY`) is a default. Any consumer may override it, and the
+mixer renders one extra post-composite pass **per distinct view** over the same
+working-space composite — so one channel can feed an LED processor and an SDI monitor
+different looks without compositing twice. Consumers do no GPU work of their own.
+
+```xml
+<consumers>
+    <decklink>
+        <device>1</device>
+        <ocio-display>Gamma 2.2 Rec.709 - Display</ocio-display>
+        <ocio-view>ACES 2.0 - SDR 100 nits (Rec.709)</ocio-view>
+    </decklink>
+    <screen>
+        <ocio-display>Gamma 2.2 Rec.709 - Display</ocio-display>
+        <ocio-view>Un-tone-mapped</ocio-view>
+    </screen>
+</consumers>
+```
+
+Both elements or neither — a display without a view is not a transform, and accepting one
+silently would render the channel's view while looking configured. The IMAGE consumer takes
+its view as `ADD` parameters instead, because it is transient:
+`ADD 1 IMAGE <name> "<display>" "<view>"`.
+
+Carried by `decklink`, `screen` and `image` today. Any other consumer gains one by
+implementing `frame_consumer::ocio_view()` and parsing the two elements in its factory.
+
+**Requires `<working-space-composite>`.** Without it the composite is already
+display-encoded and there is nothing to fan out from; a consumer that asked for a view then
+gets the channel's frame, which is the honest fallback rather than a second encoding.
+
+Measured on both mixers with `CasparCG-TestRunner/cli.py consumer-view --consumer
+{image,screen,decklink}`: 4/4 patches routed in every case, the two views 28–50 LSB apart.
+
 ### The alpha domain — `<straight-alpha-grading>`
 
 Everything between steps 3 and 23b operates on **premultiplied** RGB by default. That is

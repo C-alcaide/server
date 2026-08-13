@@ -1590,6 +1590,12 @@ struct decklink_consumer_proxy : public core::frame_consumer
     bool                               use_vulkan_ = false;
 
   public:
+    /// This port's own OCIO view, if it was configured with one. See config.h.
+    std::pair<std::string, std::string> ocio_view() const override
+    {
+        return {config_.ocio_display, config_.ocio_view};
+    }
+
     explicit decklink_consumer_proxy(const configuration& config)
         : config_(config)
         , executor_(L"decklink_consumer[" + std::to_wstring(config.primary.device_index) + L"]")

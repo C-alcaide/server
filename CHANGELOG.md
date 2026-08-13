@@ -1,6 +1,39 @@
 CasparVP — Unreleased
 ==========================================
 
+### Added: `<ocio-display>` / `<ocio-view>` on the DeckLink and screen consumers
+
+The per-consumer view override existed but only the IMAGE consumer declared one, so the
+case it was built for — a channel feeding an LED processor *and* an SDI monitor two views of
+one composite — could not actually be configured. It can now:
+
+```xml
+<decklink>
+    <device>1</device>
+    <ocio-display>Gamma 2.2 Rec.709 - Display</ocio-display>
+    <ocio-view>ACES 2.0 - SDR 100 nits (Rec.709)</ocio-view>
+</decklink>
+```
+
+Both elements or neither; the server refuses one alone rather than rendering the channel's
+view while looking configured.
+
+**Measured on both mixers**, `cli.py consumer-view --consumer {image,screen,decklink}`:
+4/4 patches routed in every case, the two views 28–50 LSB apart.
+
+| consumer | readback | deviation from its own view |
+| :--- | :--- | ---: |
+| image | the PNG the mixer produced | 0.2–0.4 LSB |
+| screen | `PrintWindow(PW_CLIENTONLY)` | 0.2–0.4 LSB |
+| decklink | over the SDI wire, second card looped back | 3.2–5.2 LSB |
+
+The DeckLink figure is the wire — RGB → 4:2:2 → back, limited range — not a wrong view, and
+it is held to its own gate for that reason while the exact paths stay at 1 LSB.
+
+Nothing else changed: the mixer fan-out and `output` routing are the same code the IMAGE
+consumer already used. Each new consumer costs an `ocio_view()` override and two lines of
+config parsing.
+
 ### Fixed: OCIO transforms no longer compile on the frame path
 
 Selecting an OCIO transform cost a dropped frame. The GPU program — OCIO generation, LUT

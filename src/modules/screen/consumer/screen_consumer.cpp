@@ -403,6 +403,11 @@ struct configuration
     };
 
     std::wstring    name          = L"Screen consumer";
+    // This window's own OCIO display/view, if it wants one other than the channel's.
+    // <ocio-display> and <ocio-view>, both or neither. Requires <working-space-composite>
+    // on the channel; without it the consumer gets the channel's frame.
+    std::string     ocio_display;
+    std::string     ocio_view;
     int             screen_index  = 0;
     int             screen_x      = 0;
     int             screen_y      = 0;
@@ -1651,6 +1656,12 @@ struct screen_consumer_proxy : public core::frame_consumer
     bool                             use_vulkan_ = false;
 
   public:
+    /// This window's own OCIO view, if it was configured with one.
+    std::pair<std::string, std::string> ocio_view() const override
+    {
+        return {config_.ocio_display, config_.ocio_view};
+    }
+
     explicit screen_consumer_proxy(configuration config)
         : config_(std::move(config))
     {
@@ -1822,6 +1833,16 @@ create_preconfigured_consumer(const boost::property_tree::wptree&               
     config.no_taskbar    = ptree.get(L"no-taskbar", config.no_taskbar);
     config.closeable     = ptree.get(L"closeable", config.closeable);
     config.no_activate   = ptree.get(L"no-activate", config.no_activate);
+
+    // Both or neither: a display without a view is not a transform, and accepting one
+    // silently would render the channel's view while looking configured.
+    auto ocio_display_w = ptree.get(L"ocio-display", L"");
+    auto ocio_view_w    = ptree.get(L"ocio-view", L"");
+    if (ocio_display_w.empty() != ocio_view_w.empty())
+        CASPAR_THROW_EXCEPTION(user_error() << msg_info(
+            L"screen consumer needs <ocio-display> AND <ocio-view>, or neither."));
+    config.ocio_display = u8(ocio_display_w);
+    config.ocio_view    = u8(ocio_view_w);
 
     auto colour_space_value = ptree.get(L"colour-space", L"RGB");
     config.colour_space     = configuration::colour_spaces::RGB;

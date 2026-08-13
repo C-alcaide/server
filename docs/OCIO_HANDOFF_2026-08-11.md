@@ -302,9 +302,18 @@ New order:
    frame still matches *a* model — the channel's — and a naive per-frame check would report
    success.
 
-   **Not done:** only the IMAGE consumer carries a view so far. Any other consumer gains one
-   by implementing `frame_consumer::ocio_view()` and having its factory parse it; nothing
-   else needs to change.
+   **DeckLink and screen carry a view too, since 2026-08-13** — `<ocio-display>` /
+   `<ocio-view>` in the consumer block, both or neither. That is what makes the case this
+   was built for actually configurable: until then only a still capture could take a
+   different view, so the LED-processor-plus-SDI-monitor scenario was proven but not
+   reachable.
+
+   Measured on both mixers, `cli.py consumer-view --consumer {image,screen,decklink}`: 4/4
+   routed in every case. The DeckLink readback sits 3.2–5.2 LSB from its own view — the wire,
+   not a wrong view — and is held to its own gate while the exact paths stay at 1 LSB.
+
+   Any remaining consumer gains one the same way: an `ocio_view()` override and two lines of
+   config parsing. Nothing in the mixer or the routing changes.
 
 ### 3. Answered: layer-level is wrong for a display transform
 

@@ -21,6 +21,7 @@
 
 #include "config.h"
 
+#include <common/except.h>
 #include <common/param.h>
 #include <common/ptree.h>
 
@@ -101,6 +102,16 @@ configuration parse_xml_config(const boost::property_tree::wptree&  ptree,
                                const core::channel_info&            channel_info)
 {
     configuration config;
+
+    // Both or neither: a display without a view is not a transform, and accepting one
+    // silently would render the channel's view while looking configured.
+    auto ocio_display = ptree.get(L"ocio-display", L"");
+    auto ocio_view    = ptree.get(L"ocio-view", L"");
+    if (ocio_display.empty() != ocio_view.empty())
+        CASPAR_THROW_EXCEPTION(user_error() << msg_info(
+            L"decklink consumer needs <ocio-display> AND <ocio-view>, or neither."));
+    config.ocio_display = u8(ocio_display);
+    config.ocio_view    = u8(ocio_view);
 
     auto duplex = ptree.get(L"duplex", L"default");
     if (duplex == L"full") {

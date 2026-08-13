@@ -162,6 +162,19 @@ struct configuration
 
     core::color_space      color_space    = core::color_space::bt709;
     core::color_transfer   color_transfer = core::color_transfer::sdr;
+
+    // This port's own OCIO display/view, if it wants one other than the channel's.
+    //
+    // <ocio-display> and <ocio-view>, both or neither. The mixer renders one extra
+    // post-composite pass per distinct view over the same working-space composite and hands
+    // this consumer the result -- so one channel can feed an LED processor and an SDI
+    // monitor different looks without compositing twice.
+    //
+    // Requires <working-space-composite> on the channel. Without it the composite is already
+    // display-encoded and there is nothing to fan out from; the consumer then gets the
+    // channel's frame, which is the honest fallback rather than a second encoding.
+    std::string ocio_display;
+    std::string ocio_view;
     hdr_meta_configuration hdr_meta;
 
     vanc_configuration vanc;
