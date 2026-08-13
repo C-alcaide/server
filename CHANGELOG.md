@@ -1,6 +1,81 @@
 CasparVP — Unreleased
 ==========================================
 
+### Fixed: three grading defects found reviewing the same code upstream
+
+Ported back from the review of `CasparCG/server#1765`, which is where these six tools
+originated. All three are on **both** mixers.
+
+**`MIXER MIDTONE 0` produced `Inf` on HDR samples rather than a clamped curve.**
+`apply_lmg` guarded the exponent instead of the value: `max(vec3(0.01), 1.0 / midtone)`. At
+`midtone == 0` the reciprocal is `+Inf` and `max(0.01, Inf)` is `Inf`, so the guard does
+nothing for the case it looks like it guards — `pow()` returns 0 below white and `+Inf` for
+any sample above 1.0, and the `Inf` then reaches `color *= opacity` and the blend stage as
+`NaN`. A negative `midtone` was silently turned into exponent `0.01` rather than rejected.
+Now `pow(c, 1.0 / clamp(midtone, 0.01, 100.0))`.
+
+**No in-range grade changes.** `[0.01, 100]` was chosen to reproduce the old exponent bounds
+exactly: swept `midtone` over `[0.01, 100]` against `c` over `(0, 4]`, old and new agree to
+**0.0** — over that range they are the same expression. Only previously broken input moves:
+`midtone` of 0 or below now behaves as `0.01` instead of collapsing the channel.
+
+**Accumulated hue shift was unbounded.** Combining transforms added `hue_shift` without
+bound, so layer + channel + tween could walk it arbitrarily far from zero. Now wrapped with
+`std::remainder(…, 360.0)` — wrapped, not clamped, because 200° of rotation is −160°, not
+180°. This changes no rendered pixel: the shader rotates with `fract()`, so 540° already
+rendered identically to 180°. What it fixes is precision loss in `fract()` at large
+magnitudes, and the `abs(hue_shift) > epsilon` test that reads an accumulated 360 as active
+when it is exactly identity. Verified: `0→0, 15→15, 180→180, -180→-180, 200→-160, 360→0,
+540→-180, 1080.5→0.5`.
+
+**Split-tone balance was selected by a float equality test.** `other.split_balance != 0.5`
+treated a tweened `0.4999999` as an explicit setting. It now keys off whether the incoming
+transform actually has split toning active, which is the test the mixer already uses to
+decide whether to run the effect. The override itself stays and the comment now says why:
+`split_balance` is a crossover *position* in luma, not a strength, so no arithmetic
+composition of two of them means anything (0.5 + 0.5 puts everything in shadow; 0.5 × 0.5 =
+0.25), and the shader has one crossover for one colour pair — two stacked split tones cannot
+both be represented however they are combined.
+
+**Not ported: the `glUniform3f` fix**, which this fork already carries. Upstream's
+`shader::set(name, double, double, double)` passes `value1` twice, so every `vec3` uniform
+arrives as `(x, y, y)`; that is what made `MIXER CDL`, `MIXER LIFT/MIDTONE/GAIN` and
+`MIXER SPLITTONE` miss the model by 31.83, 15.68 and 15.00 LSB on an upstream build, and
+0.51, 0.55 and 0.50 LSB after. Recorded here because it is the reason this fork's grading
+battery passes and an upstream build's does not.
+
+**Measured on both mixers**, `cli.py grading`: **48/48 inside gate on each**, and the three
+affected ops return the same number on both backends —
+
+| op | OpenGL | Vulkan |
+| :--- | ---: | ---: |
+| `Lmg` — `MIXER LIFT`/`MIDTONE`/`GAIN` | 0.55 LSB | 0.55 LSB |
+| `SplitTone` | 0.50 LSB | 0.50 LSB |
+| `HueShift` | 0.42 LSB | 0.42 LSB |
+
+each op's neutral row exact at **0.00** on both, and all eight interaction stacks giving the
+same pixel when their commands are sent in reverse order. The OpenGL figures also match an
+upstream build carrying the same three changes to the digit, which is the cross-check that
+the two codebases have not drifted on these ops.
+
+`cli.py conformance` is **100/100 within 1 LSB on both mixers** as well. Both `.frag` files
+were edited, so the whole shader binary is rebuilt on both backends and the colour-conversion
+path is worth re-gating even though nothing in it was touched.
+
+**What that proves, and what it does not.** It is a regression gate, not a demonstration of
+the fixes. Every parameter in the battery sits inside the range where old and new agree by
+construction — midtone `1.10/0.95/1.20`, a single-layer hue shift, split balance `0.45` with
+non-zero colours — so 48/48 says nothing broke, and the numeric verification quoted above
+is what says each fix is right.
+
+**The fixes are not reachable by this battery at all**, which is worth recording rather than
+hiding. `MIXER MIDTONE 0` diverges only for a sample above 1.0, and the battery's flat
+patches are 8-bit `PLAY #RRGGBB` colours that cannot exceed it — an 8-bit case would pass
+identically against the broken build, which is exactly the "proves nothing happened" failure
+the battery guards against elsewhere. The hue accumulation needs two stacked transforms
+(layer plus channel) and every case here is single-layer. Both are real coverage gaps, not
+oversights in this change.
+
 ### Fixed: `MIXER GAMUTCOMPRESS` did nothing on a layer using `MIXER OCIO`
 
 The command was accepted, returned `202`, and the kernel set `gamut_compress_enable` true —
