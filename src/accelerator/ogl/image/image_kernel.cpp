@@ -226,7 +226,12 @@ struct image_kernel::impl
     /// hundreds of milliseconds. Every later frame is a map lookup. Pre-warming a channel's
     /// transforms at configuration time is the proper fix and is not done here -- see
     /// docs/OCIO_INTEGRATION_STUDY.md section 8.7.
-    const ocio_variant* select_ocio_variant(const draw_params& params)
+    /// `on_frame_path` is what the log line reports, and it is not cosmetic: this function
+    /// is the ONLY place a variant is built, so the warning fires for a pre-warm too. Left
+    /// as it was, "compiling on the frame path" appeared even when the compile had been
+    /// moved OFF it -- which made the log unable to answer the one question the pre-warm
+    /// exists to settle.
+    const ocio_variant* select_ocio_variant(const draw_params& params, bool on_frame_path = true)
     {
         const auto& o = params.transforms.image_transform.ocio;
 
@@ -256,11 +261,19 @@ struct image_kernel::impl
         if (it != ocio_variants_.end())
             return it->second.failed ? nullptr : &it->second;
 
-        CASPAR_LOG(warning) << L"[ogl_kernel] compiling an OCIO program on the frame path for '"
-                            << u16(want_input ? o.source_space : std::string("-")) << L"' -> '"
-                            << u16(want_display ? params.ocio_display + " / " + params.ocio_view
-                                                : std::string("-"))
-                            << L"'. Expect one dropped frame; every later frame is a cache hit.";
+        if (on_frame_path) {
+            CASPAR_LOG(warning) << L"[ogl_kernel] compiling an OCIO program ON THE FRAME PATH for '"
+                                << u16(want_input ? o.source_space : std::string("-")) << L"' -> '"
+                                << u16(want_display ? params.ocio_display + " / " + params.ocio_view
+                                                    : std::string("-"))
+                                << L"'. Expect one dropped frame; every later frame is a cache hit.";
+        } else {
+            CASPAR_LOG(info) << L"[ogl_kernel] pre-warming an OCIO program (off the frame path) for '"
+                             << u16(want_input ? o.source_space : std::string("-")) << L"' -> '"
+                             << u16(want_display ? params.ocio_display + " / " + params.ocio_view
+                                                 : std::string("-"))
+                             << L"'.";
+        }
 
         ocio_variant v{base_program_};
         try {
@@ -342,6 +355,27 @@ struct image_kernel::impl
 
         auto [pos, inserted] = ocio_variants_.emplace(key, std::move(v));
         return pos->second.failed ? nullptr : &pos->second;
+    }
+
+    /// Build and cache an OCIO program WITHOUT drawing.
+    ///
+    /// The frame-path compile is the cost this removes: a variant is generated, its LUTs
+    /// uploaded and its GLSL compiled and linked on the first draw that needs it, which
+    /// costs ~1.2 s and a dropped frame. A display transform is ten times the source of an
+    /// input transform -- measured 2026-08-13, a capture 1.6 s after `OCIO_DISPLAY` got NO
+    /// FRAME AT ALL because the ACES 2.0 program (15 KB of GLSL) was still compiling.
+    ///
+    /// It goes through `select_ocio_variant` rather than reimplementing the build, so the
+    /// cache key is by construction the one the later draw will compute. A pre-warm that
+    /// keyed differently would compile twice and warm nothing.
+    void prewarm_ocio(const std::string& source_space, const std::string& display, const std::string& view)
+    {
+        draw_params p;
+        p.transforms.image_transform.ocio.enable       = !source_space.empty();
+        p.transforms.image_transform.ocio.source_space = source_space;
+        p.ocio_display                                 = display;
+        p.ocio_view                                    = view;
+        select_ocio_variant(p, /*on_frame_path=*/false);
     }
 
     void draw(draw_params params)
@@ -1443,5 +1477,11 @@ image_kernel::image_kernel(const spl::shared_ptr<device>& ogl)
 }
 image_kernel::~image_kernel() {}
 void image_kernel::draw(const draw_params& params) { impl_->draw(params); }
+void image_kernel::prewarm_ocio(const std::string& source_space,
+                                const std::string& display,
+                                const std::string& view)
+{
+    impl_->prewarm_ocio(source_space, display, view);
+}
 
 } // namespace caspar::accelerator::ogl

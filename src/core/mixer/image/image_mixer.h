@@ -175,6 +175,26 @@ class image_mixer
     /// channel's display space.
     virtual void set_consumer_views(std::vector<ocio_view_key> views) { (void)views; }
 
+    /// Build an OCIO program NOW, off the frame path.
+    ///
+    /// Called when the AMCP command that selects a transform is accepted, where the OCIO
+    /// processor has already been built for validation. Without it the GPU program is
+    /// generated, its LUTs uploaded and its GLSL compiled on the first draw that needs it:
+    /// ~1.2 s and a dropped frame for an input transform, and worse for a display
+    /// transform, whose source is ten times larger.
+    ///
+    /// Fire and forget: it dispatches to the device thread and does not wait. A caller that
+    /// blocked would move the stall from the frame path onto the command, which is the same
+    /// stall wearing a different hat.
+    virtual void prewarm_ocio(const std::string& source_space,
+                              const std::string& display,
+                              const std::string& view)
+    {
+        (void)source_space;
+        (void)display;
+        (void)view;
+    }
+
     /// Does this mixer composite in the working space? The AMCP layer asks before
     /// accepting a display transform, so the refusal names the real reason.
     virtual bool composites_in_working_space() const { return false; }

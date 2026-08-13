@@ -2392,6 +2392,13 @@ std::future<std::wstring> mixer_ocio_command(command_context& ctx)
         0,
         L"linear"));
     transforms.apply();
+
+    // Same pre-warm as OCIO_DISPLAY, and for the same reason: the processor is built above
+    // for validation, but the GPU program -- LUT upload, GLSL compile, driver pipeline
+    // build -- happens on the first draw unless it is asked for here. ~1.2 s and one
+    // dropped frame, on the tick where an operator selects a look.
+    ctx.channel.raw_channel->mixer().get_image_mixer()->prewarm_ocio(source_space, "", "");
+
     return make_ready_future<std::wstring>(L"202 MIXER OK\r\n");
 }
 
@@ -3008,6 +3015,13 @@ std::future<std::wstring> ocio_display_command(command_context& ctx)
     }
 
     image_mixer->set_ocio_display(display, view);
+
+    // Build the GPU program now, off the frame path. The processor above is already a cache
+    // hit inside OCIO; what this adds is the LUT upload and the GLSL compile, which are what
+    // actually cost a frame. Measured 2026-08-13: a capture 1.6 s after this command
+    // returned NO FRAME AT ALL, because the ACES 2.0 program is ~15 KB of GLSL.
+    image_mixer->prewarm_ocio("", display, view);
+
     return make_ready_future<std::wstring>(L"202 OCIO_DISPLAY OK\r\n");
 }
 

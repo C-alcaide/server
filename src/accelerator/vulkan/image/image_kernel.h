@@ -48,6 +48,9 @@ class image_kernel final : public std::enable_shared_from_this<image_kernel>
 
     spl::shared_ptr<class renderpass> create_renderpass(uint32_t width, uint32_t height);
 
+    /// Build and cache an OCIO program without drawing, off the frame path.
+    void prewarm_ocio(const std::string& source_space, const std::string& display, const std::string& view);
+
   private:
     struct impl;
     spl::unique_ptr<impl> impl_;

@@ -443,12 +443,10 @@ is to stop converting per layer, not to work around the fact that we do. See "Re
 
 ### Also still open
 
-**Pre-warming, which A4f made twice as expensive and A5 will make worse again.** A new
-colour space costs OCIO generation, a LUT image creation with a `waitIdle`, a shaderc
-compile and a driver pipeline build on the frame path — ~1.2 s and one dropped frame, and
-the OCIO battery has to sleep 1.5 s on the first patch of each case. A display transform's
-source is ten times larger, so its compile will be longer. The fix is to build the variant
-when the command is accepted, where the processor is already built for validation.
+~~**Pre-warming, which A4f made twice as expensive and A5 will make worse again.**~~
+**DONE 2026-08-13** — see "Frame-path compile stall" under Open decisions. Both mixers, both
+halves (input transform and display transform), and consumer views too. The batteries can
+keep their generous settles: they now absorb capture latency rather than a compile.
 
 ## What A4e established, and how
 
@@ -599,19 +597,35 @@ refresh deployed DLLs (see `BUILDING_WORKFLOW.md` #7).
 
 ## Open decisions
 
-* **Frame-path compile stall.** A variant compiles on first draw: ~1.2 s, one dropped frame.
-  **Pre-warming is the fix, not caching** — compile when `MIXER OCIO` is accepted, where the
-  processor is already built for validation. A4e adds a second frame-path cost of the same
-  shape (the LUT image creation does a `waitIdle`), and the same pre-warm removes both.
+* ~~**Frame-path compile stall.**~~ **FIXED 2026-08-13, both mixers.** `prewarm_ocio()` on
+  the image mixer builds the GPU program — generation, LUT upload, GLSL compile — on the
+  device thread when the command is accepted, and returns immediately. `MIXER OCIO` and
+  `OCIO_DISPLAY` call it; **consumer views are pre-warmed by the mixer when the view set
+  changes**, because a consumer has no command to hang it on.
+
+  It routes through the same `select_ocio_variant` the draw uses, so the cache key is by
+  construction the one the draw will compute — a pre-warm that keyed differently would
+  compile twice and warm nothing.
+
+  **Measured by the log, after making the log able to answer.** The warning lives *inside*
+  the variant builder, so it fired for a pre-warm too and still read "on the frame path" —
+  the signal could not distinguish the two states it was being used to compare. It now says
+  which, and with that: **0 compiles on the frame path on either mixer**, against one per
+  view before. `OCIO_DISPLAY` returns in 34 ms.
+
+  Worth keeping in view: before this, a capture 1.6 s after `OCIO_DISPLAY` got **no frame at
+  all**, because an ACES 2.0 display transform is ~15 KB of GLSL.
 * **`exposure` and `gamut_compress` are unavailable on the OCIO path.** Both live in the
   `color_grade` struct inside the block OCIO replaces. Needs a decision and a doc line.
 * **fp16 vs fp32** — half answered, 2026-08-12. Measured: fp16's quantum is 32.0 LSB16 near
   white, exactly 2× a 12-bit output step, and there is no `bit12` channel to have measured
   it on (12-bit is a consumer property). What remains is whether fp16's *shadow* precision
   is worth having, which a 16-bit unorm capture cannot see. `cli.py banding`.
-* **A5's display transform: channel or consumer?** Decided channel-level for now; a channel
-  feeding an LED processor *and* an SDI monitor needs two views from one composite, which
-  argues for consumer-level. Settle before building A5.
+* ~~**A5's display transform: channel or consumer?**~~ **ANSWERED 2026-08-13: both, and
+  they compose.** The channel has a default view (`OCIO_DISPLAY`) and any consumer may
+  override it (`frame_consumer::ocio_view()`). The question read as either/or because the
+  fan-out looked expensive; it is one extra full-screen pass and one resolve per distinct
+  view over a composite that already exists. §2 step 4.
 
 ## Cleanup
 

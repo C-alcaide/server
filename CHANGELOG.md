@@ -1,6 +1,33 @@
 CasparVP — Unreleased
 ==========================================
 
+### Fixed: OCIO transforms no longer compile on the frame path
+
+Selecting an OCIO transform cost a dropped frame. The GPU program — OCIO generation, LUT
+upload, GLSL compile, driver pipeline build — was built on the **first draw that needed it**,
+~1.2 s for an input transform and worse for a display transform, whose source is ten times
+larger. Measured before the fix: a capture **1.6 s after `OCIO_DISPLAY` returned no frame at
+all**, because an ACES 2.0 display transform is ~15 KB of GLSL.
+
+`image_mixer::prewarm_ocio()` now builds it on the device thread when the command is
+accepted, and returns immediately — the compile still costs what it costs, but it no longer
+costs a frame. `MIXER OCIO` and `OCIO_DISPLAY` call it, and **the mixer pre-warms consumer
+views itself when the view set changes**, because a consumer has no command to hang it on.
+
+It goes through the same `select_ocio_variant` a draw uses, so the cache key is by
+construction the one the draw computes.
+
+**Measured: 0 compiles on the frame path on either mixer**, against one per view before.
+`OCIO_DISPLAY` returns in 34 ms.
+
+Getting that number required fixing the measurement first. The warning lives *inside* the
+variant builder, so it fired for a pre-warm too and still said "on the frame path" — it
+could not distinguish the two states it was being used to compare. It now reports which, so
+"compiling ON THE FRAME PATH" means what it says and pre-warms are logged separately.
+
+Unregressed: `ocio` 18/18, `ocio-display` 4/4 and `consumer-view` 4/4 on both mixers,
+`vk-validation --render-format fp16` 0 VUIDs.
+
 ### Added: per-consumer OCIO views — one composite, several looks
 
 A channel feeding an LED processor and an SDI monitor can now give them different views of

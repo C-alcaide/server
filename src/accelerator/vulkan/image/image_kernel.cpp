@@ -856,9 +856,22 @@ struct image_kernel::impl
     /// images plus OCIO's generation, logged as a warning. Every later frame is a map lookup.
     /// Pre-warming at MIXER OCIO command time is the proper fix -- see
     /// docs/OCIO_INTEGRATION_STUDY.md section 8.7 -- and is not done here.
+    /// Build and cache an OCIO program WITHOUT drawing -- see the OGL kernel for the
+    /// measurement that motivates it. Routed through `select_ocio_variant` so the cache key
+    /// is by construction the one the later draw computes.
+    void prewarm_ocio(const std::string& source_space, const std::string& display, const std::string& view)
+    {
+        select_ocio_variant(source_space, display, view, /*on_frame_path=*/false);
+    }
+
+    /// `on_frame_path` is what the log reports. This function is the only place a variant
+    /// is built, so the warning fires for a pre-warm too -- and reporting "on the frame
+    /// path" when the compile has been moved OFF it makes the log unable to answer the
+    /// question the pre-warm exists to settle.
     const ocio_variant* select_ocio_variant(const std::string& source_space,
                                             const std::string& display,
-                                            const std::string& view)
+                                            const std::string& view,
+                                            bool               on_frame_path = true)
     {
         namespace ocio_ns = caspar::accelerator::ocio;
 
@@ -903,10 +916,15 @@ struct image_kernel::impl
         if (generated.textures.empty()) {
             CASPAR_LOG(debug) << L"[vk_kernel] OCIO transform for '" << u16(source_space)
                               << L"' needs no LUT texture";
-        } else {
+        } else if (on_frame_path) {
             CASPAR_LOG(warning) << L"[vk_kernel] uploading " << generated.textures.size()
-                                << L" OCIO LUT(s) on the frame path for '" << u16(source_space)
+                                << L" OCIO LUT(s) ON THE FRAME PATH for '" << u16(source_space)
                                 << L"'. Expect one dropped frame; every later frame is a cache hit.";
+        } else {
+            CASPAR_LOG(info) << L"[vk_kernel] pre-warming " << generated.textures.size()
+                             << L" OCIO LUT(s) (off the frame path) for '" << u16(source_space)
+                             << L"' -> '" << u16(display.empty() ? std::string("-") : display + " / " + view)
+                             << L"'.";
         }
 
         ocio_variant v;
@@ -2129,6 +2147,13 @@ image_kernel::~image_kernel() {}
 spl::shared_ptr<renderpass> image_kernel::create_renderpass(uint32_t width, uint32_t height)
 {
     return impl_->create_renderpass(width, height);
+}
+
+void image_kernel::prewarm_ocio(const std::string& source_space,
+                                const std::string& display,
+                                const std::string& view)
+{
+    impl_->prewarm_ocio(source_space, display, view);
 }
 
 } // namespace caspar::accelerator::vulkan

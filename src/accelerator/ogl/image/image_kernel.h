@@ -125,6 +125,9 @@ class image_kernel final
 
     void draw(const draw_params& params);
 
+    /// Build and cache an OCIO program without drawing. See the implementation.
+    void prewarm_ocio(const std::string& source_space, const std::string& display, const std::string& view);
+
   private:
     struct impl;
     spl::unique_ptr<impl> impl_;

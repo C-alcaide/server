@@ -18,6 +18,7 @@
  *
  * Author: Robert Nagy, ronag89@gmail.com
  */
+#include <algorithm>
 #include "image_mixer.h"
 
 #include "image_kernel.h"
@@ -372,6 +373,12 @@ class image_renderer
     }
 
     common::bit_depth depth() const { return depth_; }
+
+    /// Forward to the kernel, which owns the variant cache. Called on the GL thread.
+    void prewarm_ocio(const std::string& source_space, const std::string& display, const std::string& view)
+    {
+        kernel_.prewarm_ocio(source_space, display, view);
+    }
 
   private:
     /// Collects the full description of what composition would draw, including
@@ -800,7 +807,38 @@ struct image_mixer::impl
 
     void set_consumer_views(std::vector<core::ocio_view_key> views)
     {
+        // Pre-warm anything NEW since the last tick.
+        //
+        // This is called every tick, so the comparison is what stops it dispatching a build
+        // 25 times a second -- the build itself would be a cache hit, but the dispatch is
+        // not free and the log line would be.
+        //
+        // Without it a consumer's view is the one path left compiling on the frame path:
+        // measured 2026-08-13, `OCIO_DISPLAY` pre-warmed correctly while a consumer's view
+        // still logged "compiling an OCIO program ON THE FRAME PATH" -- the channel had a
+        // command to hang the pre-warm on and the consumer had none.
+        for (const auto& v : views) {
+            if (std::find(prewarmed_views_.begin(), prewarmed_views_.end(), v) == prewarmed_views_.end()) {
+                prewarm_ocio("", v.display, v.view);
+                prewarmed_views_.push_back(v);
+            }
+        }
         renderer_.consumer_views_ = std::move(views);
+    }
+
+    //: Views already pre-warmed. Grows only; a view that goes away has its program cached in
+    //: the kernel anyway, so re-warming it later would be a no-op and forgetting it would
+    //: cost a frame if the consumer came back.
+    std::vector<core::ocio_view_key> prewarmed_views_;
+
+    void prewarm_ocio(const std::string& source_space, const std::string& display, const std::string& view)
+    {
+        // On the GL thread, because it creates textures and compiles a program -- and
+        // asynchronously, so the AMCP command returns immediately. The compile still costs
+        // what it costs; the point is that it no longer costs a FRAME.
+        ogl_->dispatch_async([this, source_space, display, view] {
+            renderer_.prewarm_ocio(source_space, display, view);
+        });
     }
 
     core::ocio_display_state get_ocio_display() const
@@ -1197,6 +1235,13 @@ core::ocio_display_state image_mixer::get_ocio_display() const { return impl_->g
 void image_mixer::set_consumer_views(std::vector<core::ocio_view_key> views)
 {
     impl_->set_consumer_views(std::move(views));
+}
+
+void image_mixer::prewarm_ocio(const std::string& source_space,
+                               const std::string& display,
+                               const std::string& view)
+{
+    impl_->prewarm_ocio(source_space, display, view);
 }
 
 bool image_mixer::composites_in_working_space() const
