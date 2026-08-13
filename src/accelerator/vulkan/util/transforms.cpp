@@ -1,6 +1,7 @@
 #include "transforms.h"
 
 #include <algorithm>
+#include <cmath>
 #include <unordered_set>
 
 namespace caspar::accelerator::vulkan {
@@ -92,8 +93,13 @@ void apply_transform_colour_values(core::image_transform& self, const core::imag
         self.gain[i]    *= other.gain[i];     // multiplicative,  default 1
     }
 
-    // Hue shift
-    self.hue_shift += other.hue_shift;
+    // Hue shift: additive, then wrapped into [-180, 180]. Wrapped, not clamped -- 200
+    // degrees of rotation is -160, not 180. The shader rotates with fract(), so this does
+    // not change what is rendered; it bounds the accumulation across stacked layer,
+    // channel and tweened transforms, which otherwise costs precision in fract() and
+    // makes the "is this effect active" test read an accumulated 360 as active when it is
+    // exactly identity. Kept in step with the OpenGL mixer -- parity is required.
+    self.hue_shift = std::remainder(self.hue_shift + other.hue_shift, 360.0);
 
     // Tonal balance
     self.shadows    += other.shadows;
