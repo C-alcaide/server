@@ -35,9 +35,15 @@ asks for limits `1.20 / 1.35 / 1.50` rather than the ACES defaults, so a build t
 the arguments and applied its own constants cannot pass either. The control is what says the
 working-space gate holds.
 
-`exposure` remains unavailable on the OCIO path, deliberately: it has no standalone command,
-and adding one requires first settling where it belongs in the chain, which the two mixers
-still disagree about.
+`exposure` remains unavailable on the OCIO path — it has no standalone command, and its only
+setter (`MIXER COLORSPACE`'s 6th argument) is mutually exclusive with `MIXER OCIO`. But the
+reason it looked *blocked* was wrong and is worth recording: the two mixers apply exposure at
+different points (OpenGL after the gamut matrix, Vulkan before), and that was read as a
+parity hazard serious enough to pin the argument at 1.0 in the conformance battery. It is not
+one. A scalar commutes with the matrix, which is linear, and with `apply_gamut_compress`,
+which is homogeneous of degree one — `compress(s·c) == s·compress(c)`, max deviation 1.1e-15
+over 200k random colours. Measured at exposure **0.5, 1.6 and 2.5**: 100/100 and 36/36 within
+1 LSB on **both** mixers. `cli.py conformance --exposure` now carries it.
 
 ### Added: `<ocio-display>` / `<ocio-view>` on the DeckLink and screen consumers
 

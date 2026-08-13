@@ -819,9 +819,18 @@ struct image_kernel::impl
             shader_->set("luminance_scale",   1.0f);
             // Still not available on this path: exposure lives in the color_grade struct
             // inside the input block OCIO replaces, and its only setter -- MIXER COLORSPACE's
-            // 6th argument -- is mutually exclusive with MIXER OCIO. Making it reachable means
-            // settling where it belongs in the chain first, because the two backends disagree.
-            // Gamut compression no longer belongs on this list: it moved out of the block.
+            // 6th argument -- is mutually exclusive with MIXER OCIO. So it is UNREACHABLE
+            // here rather than silently ignored, and surfacing it is a new command rather
+            // than a fix. Gamut compression no longer belongs on this list: it moved out.
+            //
+            // What does NOT block that command: the two backends' apparent disagreement
+            // about where exposure sits. This kernel applies it after the gamut matrix and
+            // Vulkan folds it in before, and that was read as a parity hazard for months.
+            // It is not one. A scalar commutes with the matrix, which is linear, and with
+            // `apply_gamut_compress`, which is homogeneous of degree one -- `compress(s*c)
+            // == s*compress(c)`, because the distance `(a - c)/|a|` it works on is
+            // scale-invariant. Measured rather than argued: `cli.py conformance --exposure`
+            // at 0.5, 1.6 and 2.5 gives 100/100 and 36/36 within 1 LSB on BOTH mixers.
             shader_->set("gamut_compress_enable", false);
             shader_->set_matrix3("working_to_output", k_to_output[working_gamut_index(params.target_color_space)]);
         } else if (cg.enable) {

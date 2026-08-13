@@ -1726,9 +1726,14 @@ struct image_kernel::impl
                 in_working_space = true;
                 // Still not available on this path: user exposure lives in the color_grade
                 // struct inside the input block OCIO replaces, and its only setter -- MIXER
-                // COLORSPACE's 6th argument -- is mutually exclusive with MIXER OCIO. Making
-                // it reachable means settling where it belongs in the chain first, because
-                // the two backends do not currently agree.
+                // COLORSPACE's 6th argument -- is mutually exclusive with MIXER OCIO. So it
+                // is UNREACHABLE here rather than silently ignored.
+                //
+                // This backend applying exposure BEFORE the matrix while OGL applies it
+                // after is not a divergence: a scalar commutes with a linear matrix, and
+                // with `apply_gamut_compress`, which is homogeneous of degree one.
+                // `cli.py conformance --exposure` at 0.5, 1.6 and 2.5 -- both mixers,
+                // within 1 LSB of the same model. See the OGL kernel for the full note.
                 set_mat3(uniforms.working_to_output, k_to_output[working_gamut_index(params.target_color_space)]);
             } else if (cg.enable) {
                 // MIXER COLORSPACE owns both halves of the conversion.

@@ -645,14 +645,30 @@ refresh deployed DLLs (see `BUILDING_WORKFLOW.md` #7).
   This also removed an OGL/Vulkan ordering divergence: OGL applied compression *before*
   exposure and Vulkan *after*, and both now apply it after.
 
-* **`exposure` is still unavailable on the OCIO path, deliberately.** It has no standalone
-  setter — its only source is `MIXER COLORSPACE`'s 6th argument, which is mutually exclusive
-  with `MIXER OCIO` — so it is *unreachable* rather than silently ignored, which is the
-  benign half of the original pair. Making it reachable means adding `MIXER EXPOSURE`, and
-  that should not be done first: **the two mixers do not agree on where exposure belongs**
-  (OGL after the gamut matrix, Vulkan before it), and `shader_conformance` pins it at 1.0
-  precisely so the divergence never shows. Settling the order is the prerequisite, and it
-  is a rendered-output change of its own. Do not ship the command on top of it.
+* **`exposure` is still unavailable on the OCIO path**, but the reason it looked *blocked*
+  was wrong, and that correction matters more than the gap. It has no standalone setter —
+  its only source is `MIXER COLORSPACE`'s 6th argument, which is mutually exclusive with
+  `MIXER OCIO` — so it is *unreachable* rather than silently ignored, which is the benign
+  half of the original pair. Surfacing it is a new command, `MIXER EXPOSURE`, and nothing
+  else.
+
+  **The "the two mixers order exposure differently" hazard does not exist.** OGL applies it
+  after the gamut matrix and Vulkan folds it in before, and `shader_conformance` pinned the
+  argument at 1.0 for months on the strength of that reading. Neither half survives:
+
+  - a scalar commutes with the gamut matrix, which is linear;
+  - and with `apply_gamut_compress`, which is **homogeneous of degree one** —
+    `compress(s·c) == s·compress(c)`, because the distance `(a − c)/|a|` it works on is
+    scale-invariant and the result scales with `a`. Verified over 200k random colours,
+    out-of-gamut included: max deviation **1.1e-15**;
+  - and on the `MIXER COLORSPACE` path compression is never enabled at all, so the question
+    never arose there in the first place.
+
+  Measured, not argued: `cli.py conformance --exposure` at **0.5, 1.6 and 2.5** gives
+  **100/100** (full battery) and **36/36** (quick) within 1 LSB on **both** mixers, against
+  the same model. The argument is unpinned; `Conversion.exposure` carries it.
+
+  So `MIXER EXPOSURE` is an ordinary feature, not a feature behind a parity fix.
 * **fp16 vs fp32** — half answered, 2026-08-12. Measured: fp16's quantum is 32.0 LSB16 near
   white, exactly 2× a 12-bit output step, and there is no `bit12` channel to have measured
   it on (12-bit is a consumer property). What remains is whether fp16's *shadow* precision
