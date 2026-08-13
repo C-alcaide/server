@@ -984,8 +984,28 @@ struct image_mixer::impl
         layer_stack_.resize(transform_stack_.back().image_transform.layer_depth);
     }
 
+    /// The public contract: one tick's outputs.
+    ///
+    /// A thin wrapper over `render_composite()`, which is unchanged and still returns the
+    /// (readback, texture) pair it always has. Keeping the internal paths -- normal
+    /// compositing, the previz branch and the texture-store branch -- on that pair is
+    /// deliberate: the per-view fan-out belongs where the working-space composite exists,
+    /// inside the renderer, not spread across three return sites here.
+    ///
+    /// `views` is left empty by this wrapper, so this is behaviour-neutral.
+    std::future<core::render_output> render(const core::video_format_desc& format_desc)
+    {
+        auto t = render_composite(format_desc);
+        return std::async(std::launch::deferred, [t = std::move(t)]() mutable -> core::render_output {
+            auto tup = t.get();
+            core::render_output out;
+            out.primary = {std::move(std::get<0>(tup)), std::move(std::get<1>(tup))};
+            return out;
+        });
+    }
+
     std::future<std::tuple<std::shared_future<array<const std::uint8_t>>, std::shared_ptr<core::texture>>>
-    render(const core::video_format_desc& format_desc)
+    render_composite(const core::video_format_desc& format_desc)
     {
         // ── Previz path ────────────────────────────────────────────────────
         // When previz is active: (1) do normal VK compositing, (2) post the
@@ -1198,8 +1218,7 @@ void image_mixer::push(const core::frame_transform& transform) { impl_->push(tra
 void image_mixer::visit(const core::const_frame& frame) { impl_->visit(frame); }
 void image_mixer::pop() { impl_->pop(); }
 void image_mixer::update_aspect_ratio(double aspect_ratio) { impl_->update_aspect_ratio(aspect_ratio); }
-std::future<std::tuple<std::shared_future<array<const std::uint8_t>>, std::shared_ptr<core::texture>>>
-image_mixer::render(const core::video_format_desc& format_desc)
+std::future<core::render_output> image_mixer::render(const core::video_format_desc& format_desc)
 {
     return impl_->render(format_desc);
 }

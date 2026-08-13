@@ -173,6 +173,11 @@ class image_renderer
     render_fingerprint                            prev_fingerprint_;
     std::shared_ptr<core::texture>                cached_texture_;
     std::shared_future<array<const std::uint8_t>> cached_cpu_;
+    //: The cached tick's extra views, cached alongside the primary rather than recomputed.
+    //: Compared by COUNT before the cache is trusted: a consumer attaching or detaching
+    //: changes the view set without changing a single layer, so the fingerprint alone would
+    //: happily replay a tick that no longer has the right outputs in it.
+    std::vector<std::pair<core::ocio_view_key, core::render_result>> cached_views_;
 
   public:
     core::color_space    target_color_space    = core::color_space::bt709;
@@ -190,6 +195,9 @@ class image_renderer
     // working-space pixels.
     std::string          ocio_display;
     std::string          ocio_view;
+
+    //: Distinct views the consumers asked for, beyond the channel's own. Set once per tick.
+    std::vector<core::ocio_view_key> consumer_views_;
 
     // Channel-master LED-wall calibration LUT, applied as a final full-screen
     // pass over the composited frame (output-agnostic — every consumer sees it).
@@ -244,7 +252,7 @@ class image_renderer
         }
     }
 
-    std::future<std::tuple<std::shared_future<array<const std::uint8_t>>, std::shared_ptr<core::texture>>>
+    std::future<core::render_output>
     operator()(std::vector<layer> layers, const core::video_format_desc& format_desc)
     {
         if (layers.empty()) { // Bypass GPU with empty frame.
@@ -257,8 +265,9 @@ class image_renderer
                                                                                                        0);
             auto ready = make_ready_future<array<const std::uint8_t>>(
                 array<const std::uint8_t>(buffer.data(), format_desc.size, true));
-            return make_ready_future<std::tuple<std::shared_future<array<const std::uint8_t>>, std::shared_ptr<core::texture>>>(
-                {ready.share(), nullptr});
+            core::render_output empty;
+            empty.primary = {ready.share(), nullptr};
+            return make_ready_future<core::render_output>(std::move(empty));
         }
 
         // ── Still-frame cache ──────────────────────────────────────────────
@@ -267,11 +276,16 @@ class image_renderer
         {
             auto fingerprint = build_fingerprint(layers, format_desc);
 
-            if (!fingerprint.items.empty() && fingerprint.matches(prev_fingerprint_) && cached_texture_) {
+            // The cache holds the WHOLE tick, views included. Caching only the primary
+            // and replaying it for every view would hand one view another's picture --
+            // silently, and only on the ticks where nothing moved.
+            if (!fingerprint.items.empty() && fingerprint.matches(prev_fingerprint_) && cached_texture_ &&
+                cached_views_.size() == consumer_views_.size()) {
                 layers.clear();
-                return make_ready_future<std::tuple<std::shared_future<array<const std::uint8_t>>,
-                                                    std::shared_ptr<core::texture>>>(
-                    {cached_cpu_, cached_texture_});
+                core::render_output cached;
+                cached.primary = {cached_cpu_, cached_texture_};
+                cached.views   = cached_views_;
+                return make_ready_future<core::render_output>(std::move(cached));
             }
             prev_fingerprint_ = std::move(fingerprint);
         }
@@ -284,56 +298,76 @@ class image_renderer
         auto cal_strength = calibration_strength_;
         auto cal_bypass   = calibration_bypass_;
         auto ws_composite = working_space_composite;
+        // Only meaningful under a working-space composite: without one there is nothing to
+        // fan out FROM, because every layer has already been converted to the channel's
+        // display space and a second view would be a second encoding of an encoded picture.
+        auto views        = ws_composite ? consumer_views_ : std::vector<core::ocio_view_key>{};
+        auto ch_display   = ocio_display;
+        auto ch_view      = ocio_view;
 
         auto f = std::move(
-            ogl_->dispatch_async([=, layers = std::move(layers)]() mutable
-                                 -> std::tuple<std::shared_future<array<const std::uint8_t>>, std::shared_ptr<core::texture>> {
+            ogl_->dispatch_async([=, layers = std::move(layers)]() mutable -> core::render_output {
                 auto target_texture =
                     ogl_->create_texture(format_desc.width, format_desc.height, 4, depth_, true, render_format_);
                 draw(target_texture, std::move(layers), format_desc);
 
-                // The channel's output conversion, once, over the composite. Ahead of the
-                // calibration LUT because that LUT is authored against DISPLAY values -- an
-                // LED wall's correction is measured on the wall, not in scene-linear.
-                if (ws_composite) {
-                    auto oc_texture =
-                        ogl_->create_texture(format_desc.width, format_desc.height, 4, depth_, true, render_format_);
-                    apply_output_convert(target_texture, oc_texture, format_desc);
-                    target_texture = oc_texture;
-                }
+                // THE WORKING-SPACE COMPOSITE, before anything encodes it. Every view below
+                // starts from this same texture, which is the whole reason the fan-out lives
+                // here: a display transform is not invertible, so a second view cannot be
+                // derived from the first once one has been applied.
+                auto composite = target_texture;
 
-                // Channel-master LED-wall calibration LUT (final full-screen pass).
-                if (cal_lut && !cal_bypass && cal_lut->size > 0) {
-                    auto cal_texture =
-                        ogl_->create_texture(format_desc.width, format_desc.height, 4, depth_, true, render_format_);
-                    apply_calibration_lut(target_texture, cal_texture, format_desc, cal_lut, cal_strength);
-                    target_texture = cal_texture;
-                }
+                // Everything after the composite, for ONE view. The calibration LUT is
+                // inside because it is authored against display values, so each view needs
+                // its own; the resolve is inside because it is per texture.
+                // `texture` unqualified is ogl::texture here, which is what the three
+                // helpers below take by reference; core::render_result stores the base
+                // pointer, so the conversion happens once, on return.
+                auto finish = [&](std::shared_ptr<texture> tex,
+                                  const std::string& disp,
+                                  const std::string& vw) -> core::render_result {
+                    if (ws_composite) {
+                        auto oc = ogl_->create_texture(format_desc.width, format_desc.height, 4,
+                                                       depth_, true, render_format_);
+                        apply_output_convert(tex, oc, format_desc, disp, vw);
+                        tex = oc;
+                    }
+                    if (cal_lut && !cal_bypass && cal_lut->size > 0) {
+                        auto cal = ogl_->create_texture(format_desc.width, format_desc.height, 4,
+                                                        depth_, true, render_format_);
+                        apply_calibration_lut(tex, cal, format_desc, cal_lut, cal_strength);
+                        tex = cal;
+                    }
+                    if (render_format_ != common::render_format::unorm) {
+                        tex = resolve_to_output(tex, format_desc);
+                    }
+                    if (!needs_cpu) {
+                        auto e = make_ready_future<array<const std::uint8_t>>(
+                            array<const std::uint8_t>(nullptr, 0, true));
+                        return {e.share(), tex};
+                    }
+                    return {ogl_->copy_async(tex).share(), tex};
+                };
 
-                // Everything a consumer can reach is integer, so a float working space has
-                // to be resolved before it leaves the mixer. Skipped entirely on unorm
-                // channels, which is why they stay bit-identical.
-                if (render_format_ != common::render_format::unorm) {
-                    target_texture = resolve_to_output(target_texture, format_desc);
-                }
+                core::render_output out;
+                out.primary = finish(composite, ch_display, ch_view);
+                for (const auto& v : views)
+                    out.views.emplace_back(v, finish(composite, v.display, v.view));
+                return out;
 
-                if (!needs_cpu) {
-                    auto empty = make_ready_future<array<const std::uint8_t>>(
-                        array<const std::uint8_t>(nullptr, 0, true));
-                    return {empty.share(), target_texture};
-                }
-
-                return {ogl_->copy_async(target_texture).share(), target_texture};
             }));
 
         return std::async(
             std::launch::deferred,
-            [this, f = std::move(f)]() mutable -> std::tuple<std::shared_future<array<const std::uint8_t>>, std::shared_ptr<core::texture>> {
-                auto tuple = std::move(f.get());
-                // Update the still-frame cache with the freshly rendered result.
-                cached_cpu_     = std::get<0>(tuple);
-                cached_texture_ = std::get<1>(tuple);
-                return {std::move(std::get<0>(tuple)), std::move(std::get<1>(tuple))};
+            [this, f = std::move(f)]() mutable -> core::render_output {
+                auto out = std::move(f.get());
+                // Update the still-frame cache with the freshly rendered result -- views
+                // included, so a cached tick replays every view rather than the primary
+                // alone.
+                cached_cpu_     = out.primary.image;
+                cached_texture_ = out.primary.texture;
+                cached_views_   = out.views;
+                return out;
             });
     }
 
@@ -599,7 +633,9 @@ class image_renderer
     /// input transform already uses, which is exactly this configuration.
     void apply_output_convert(std::shared_ptr<texture>&      source_texture,
                               std::shared_ptr<texture>&      target_texture,
-                              const core::video_format_desc& format_desc)
+                              const core::video_format_desc& format_desc,
+                              const std::string&             display,
+                              const std::string&             view)
     {
         if (!source_texture)
             return;
@@ -629,8 +665,11 @@ class image_renderer
         // its place. Set here and nowhere else -- a layer draw with a display transform
         // would encode each layer separately, which is the per-layer arrangement this
         // stage exists to replace.
-        draw_params.ocio_display            = ocio_display;
-        draw_params.ocio_view               = ocio_view;
+        // Whichever view THIS pass is for -- the channel's own, or a consumer's. Empty
+        // leaves the built-in output conversion in charge, which is the no-display-transform
+        // case that `output_convert_only` above already set up.
+        draw_params.ocio_display            = display;
+        draw_params.ocio_view               = view;
         // Composes with the alpha-domain fix: with straight-alpha grading on, the output
         // encoding is applied to the straight colour and re-premultiplied, which is the
         // same rule every layer draw follows.
@@ -757,6 +796,11 @@ struct image_mixer::impl
                          << L"\" view=\"" << u16(view) << L"\"";
         renderer_.ocio_display = display;
         renderer_.ocio_view    = view;
+    }
+
+    void set_consumer_views(std::vector<core::ocio_view_key> views)
+    {
+        renderer_.consumer_views_ = std::move(views);
     }
 
     core::ocio_display_state get_ocio_display() const
@@ -942,7 +986,7 @@ struct image_mixer::impl
         layer_stack_.resize(transform_stack_.back().image_transform.layer_depth);
     }
 
-    std::future<std::tuple<std::shared_future<array<const std::uint8_t>>, std::shared_ptr<core::texture>>>
+    std::future<core::render_output>
     render(const core::video_format_desc& format_desc)
     {
         // If previz is active, first do normal 2D compositing to post this
@@ -962,10 +1006,10 @@ struct image_mixer::impl
             return std::async(
                 std::launch::deferred,
                 [this, composited = std::move(composited), store, ch_id, format_desc]() mutable
-                -> std::tuple<std::shared_future<array<const std::uint8_t>>, std::shared_ptr<core::texture>> {
+                -> core::render_output {
                     // Resolve composited result (runs the queued GL work)
-                    auto comp_tuple = composited.get();
-                    auto& comp_tex  = std::get<1>(comp_tuple);
+                    auto comp_out  = composited.get();
+                    auto& comp_tex = comp_out.primary.texture;
                     if (comp_tex) {
                         auto* ogl_tex = dynamic_cast<ogl::texture*>(comp_tex.get());
                         if (ogl_tex)
@@ -975,9 +1019,12 @@ struct image_mixer::impl
                     }
 
                     // Now dispatch the previz 3D render on the GL thread
+                    // Previz replaces the 2D output entirely and has no working-space
+                    // composite of its own, so it carries no per-view outputs. A consumer
+                    // that asked for a view gets the primary, which is the honest answer:
+                    // there is nothing else to give it.
                     auto f = ogl_->dispatch_async(
-                        [this, store, format_desc]() mutable
-                        -> std::tuple<std::shared_future<array<const std::uint8_t>>, std::shared_ptr<core::texture>> {
+                        [this, store, format_desc]() mutable -> core::render_output {
                             auto target_texture =
                                 ogl_->create_texture(format_desc.width,
                                                      format_desc.height,
@@ -989,7 +1036,9 @@ struct image_mixer::impl
                                                      // float target. Keep it unorm.
                                                      common::render_format::unorm);
                             previz_renderer_.render(target_texture, *store, format_desc.width, format_desc.height);
-                            return {ogl_->copy_async(target_texture).share(), target_texture};
+                            core::render_output pv;
+                            pv.primary = {ogl_->copy_async(target_texture).share(), target_texture};
+                            return pv;
                         });
 
                     return std::move(f.get());
@@ -1005,16 +1054,15 @@ struct image_mixer::impl
             auto store = channel_tex_store_;
             return std::async(
                 std::launch::deferred,
-                [result = std::move(result), ch_id, store]() mutable
-                -> std::tuple<std::shared_future<array<const std::uint8_t>>, std::shared_ptr<core::texture>> {
-                    auto tuple = result.get();
-                    auto& tex = std::get<1>(tuple);
+                [result = std::move(result), ch_id, store]() mutable -> core::render_output {
+                    auto out  = result.get();
+                    auto& tex = out.primary.texture;
                     if (tex) {
                         auto* ogl_tex = dynamic_cast<ogl::texture*>(tex.get());
                         if (ogl_tex)
                             store->update(ch_id, tex, static_cast<unsigned int>(ogl_tex->id()), ogl_tex->width(), ogl_tex->height());
                     }
-                    return tuple;
+                    return out;
                 });
         }
 
@@ -1091,8 +1139,7 @@ void image_mixer::push(const core::frame_transform& transform) { impl_->push(tra
 void image_mixer::visit(const core::const_frame& frame) { impl_->visit(frame); }
 void image_mixer::pop() { impl_->pop(); }
 void image_mixer::update_aspect_ratio(double aspect_ratio) { impl_->update_aspect_ratio(aspect_ratio); }
-std::future<std::tuple<std::shared_future<array<const std::uint8_t>>, std::shared_ptr<core::texture>>>
-image_mixer::render(const core::video_format_desc& format_desc)
+std::future<core::render_output> image_mixer::render(const core::video_format_desc& format_desc)
 {
     return impl_->render(format_desc);
 }
@@ -1146,6 +1193,11 @@ void image_mixer::set_ocio_display(const std::string& display, const std::string
 }
 
 core::ocio_display_state image_mixer::get_ocio_display() const { return impl_->get_ocio_display(); }
+
+void image_mixer::set_consumer_views(std::vector<core::ocio_view_key> views)
+{
+    impl_->set_consumer_views(std::move(views));
+}
 
 bool image_mixer::composites_in_working_space() const
 {

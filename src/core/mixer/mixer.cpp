@@ -115,8 +115,8 @@ struct mixer::impl
                 auto pf = (is_vulkan && depth != common::bit_depth::bit8) ? pixel_format::rgba : pixel_format::bgra;
                 auto desc = pixel_format_desc(pf, default_color_space, default_color_transfer);
                 desc.planes.push_back(pixel_format_desc::plane(format_desc.width, format_desc.height, 4, depth));
-                auto tuple = std::move(result.get());
-                auto& tex_ptr = std::get<1>(tuple);
+                auto rendered = std::move(result.get());
+                auto& tex_ptr = rendered.primary.texture;
                 // Did the accelerator hand back a texture with this frame?
                 //
                 // Counted, because it is the one fact that splits "the mixer never
@@ -140,7 +140,8 @@ struct mixer::impl
                 }
                 // Pass the shared_future<array<const uint8_t>> to const_frame for lazy readback.
                 // GPU→CPU copy is deferred until a consumer actually calls image_data().
-                auto frame = const_frame(tag, std::move(std::get<0>(tuple)), std::move(audio), desc, std::move(tex_ptr));
+                auto frame = const_frame(tag, std::move(rendered.primary.image), std::move(audio), desc,
+                                         std::move(tex_ptr));
                 return frame;
             }));
 

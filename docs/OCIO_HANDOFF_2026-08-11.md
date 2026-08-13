@@ -270,6 +270,20 @@ New order:
      `needs_cpu_frame_data()` (`frame_consumer.h:80`) is the precedent for exactly this
      shape — a per-consumer property the output stage reads and acts on.
 
+   **The Vulkan fan-out, worked out concretely 2026-08-13.** The obstacle below is real but
+   the way round it is not N renderpasses:
+
+   * **One renderpass, N attachments, one commit, one fence.** The composite is an
+     attachment; each view gets its own chain of attachments off it. All the draws land in
+     the same command buffer, so one fence covers them all and each view's
+     `texture_wrapper` can share it. N *renderpasses* would instead need the composite
+     readable across passes, with the barriers and layout transitions that implies.
+   * **The resolve has to become an explicit draw for this to work.** `set_resolve_target`
+     is per pass and singular, and `result_attachment()` returns one. Mirroring OpenGL's
+     `resolve_to_output` — a plain full-screen draw into a `create_attachment_as(unorm)` —
+     removes the singularity. It does mean the primary's fp16 resolve moves off the path
+     `vk-validation` has already cleared, so that pass gets re-run rather than assumed.
+
    **Two obstacles that are not obvious from the plan:**
 
    * **N views cost N resolves, not just N passes.** The float composite has to be resolved

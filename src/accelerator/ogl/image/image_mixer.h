@@ -58,8 +58,7 @@ class image_mixer final : public core::image_mixer
 
     image_mixer& operator=(const image_mixer&) = delete;
 
-    std::future<std::tuple<std::shared_future<array<const std::uint8_t>>, std::shared_ptr<core::texture>>>
-                        render(const core::video_format_desc& format_desc) override;
+    std::future<core::render_output> render(const core::video_format_desc& format_desc) override;
     core::mutable_frame create_frame(const void* tag, const core::pixel_format_desc& desc) override;
     core::mutable_frame
     create_frame(const void* video_stream_tag, const core::pixel_format_desc& desc, common::bit_depth depth) override;
@@ -100,6 +99,7 @@ class image_mixer final : public core::image_mixer
     void set_calibration_bypass(bool bypass) override;
     void set_ocio_display(const std::string& display, const std::string& view) override;
     core::ocio_display_state get_ocio_display() const override;
+    void set_consumer_views(std::vector<core::ocio_view_key> views) override;
     bool composites_in_working_space() const override;
     core::calibration_lut_state get_calibration_state() const override;
 

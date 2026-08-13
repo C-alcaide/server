@@ -30,6 +30,8 @@
 #include <future>
 #include <memory>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace caspar { namespace core {
 
@@ -59,6 +61,44 @@ struct ocio_display_state
     std::string view;
 };
 
+/// A (display, view) pair, as a map key. Empty means "the channel's own view".
+struct ocio_view_key
+{
+    std::string display;
+    std::string view;
+
+    bool empty() const { return display.empty() || view.empty(); }
+    bool operator==(const ocio_view_key& o) const { return display == o.display && view == o.view; }
+    bool operator<(const ocio_view_key& o) const
+    {
+        return display != o.display ? display < o.display : view < o.view;
+    }
+};
+
+/// One rendered output: the lazy CPU readback and the GPU texture, exactly the pair
+/// `render()` has always returned.
+struct render_result
+{
+    std::shared_future<array<const std::uint8_t>> image;
+    std::shared_ptr<class texture>                texture;
+};
+
+/// What one tick produces.
+///
+/// `primary` is the channel's own view and is what every consumer gets unless it asked for
+/// something else. `views` carries one extra result per DISTINCT consumer view, rendered
+/// from the same working-space composite -- which is the whole reason the fan-out lives in
+/// the mixer: a display transform is not invertible, so a second view cannot be derived
+/// from the first once one has been applied.
+///
+/// `views` is empty unless `set_consumer_views()` asked for something, so a channel with no
+/// per-consumer views produces exactly what it produced before this type existed.
+struct render_output
+{
+    render_result                                        primary;
+    std::vector<std::pair<ocio_view_key, render_result>> views;
+};
+
 class image_mixer
     : public frame_visitor
     , public frame_factory
@@ -76,8 +116,7 @@ class image_mixer
 
     virtual void update_aspect_ratio(double aspect_ratio) = 0;
 
-    virtual std::future<std::tuple<std::shared_future<array<const std::uint8_t>>, std::shared_ptr<texture>>>
-    render(const struct video_format_desc& format_desc) = 0;
+    virtual std::future<render_output> render(const struct video_format_desc& format_desc) = 0;
 
     class mutable_frame create_frame(const void* tag, const struct pixel_format_desc& desc) override = 0;
     class mutable_frame create_frame(const void*                     video_stream_tag,
@@ -124,6 +163,17 @@ class image_mixer
     }
 
     virtual ocio_display_state get_ocio_display() const { return {}; }
+
+    /// The distinct views this channel's consumers asked for, beyond the channel's own.
+    ///
+    /// Set once per tick by `mixer`, from what the consumers declare. One post-composite
+    /// pass runs per entry over the SAME working-space composite -- one extra full-screen
+    /// draw plus one resolve each, and nothing recomposites.
+    ///
+    /// Ignored unless the channel composites in the working space: without one there is no
+    /// composite to fan out from, because every layer has already been converted to the
+    /// channel's display space.
+    virtual void set_consumer_views(std::vector<ocio_view_key> views) { (void)views; }
 
     /// Does this mixer composite in the working space? The AMCP layer asks before
     /// accepting a display transform, so the refusal names the real reason.
