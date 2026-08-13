@@ -118,9 +118,23 @@ MIXER <ch>-<layer> MESH NONE        # clear
 >
 > Both are fixed and measured (`cli.py blend-mask` in the test harness, both mixers
 > byte-identical). **Anything that drove this command before will now see the mask take
-> effect**, which is correct but is a visible change. A *neutral* mask — equal in all three
-> channels, which a soft-edge overlap ramp normally is — is unaffected by the channel fix
-> specifically, so only the "it now applies at all" half will show for those.
+> effect**, which is correct but is a visible change.
+>
+> **The specific risk is a doubly-attenuated seam.** Phase E applies the rectangular
+> `PROJECTION_BLEND` bands *and* the per-pixel mask — the client's own tooltip says "in
+> addition to" — and the shader multiplies both: `col *= blend_alpha` for the bands, then
+> `col.rgb *= mask`. While the mask was inert the bands were doing the whole job, so a venue
+> tuned in that state was tuned against band-only behaviour. Turn the mask on now and the
+> overlap is attenuated twice: two 0.5 ramps meeting in a seam give 0.25, a visibly dark
+> band exactly where the blend was supposed to be invisible.
+>
+> If a Phase E calibration was built before this fix, re-check the seam. The usual answer is
+> to let the per-pixel mask own the overlap and back the rectangular bands off, rather than
+> keeping both at values that each assumed they were alone.
+>
+> The channel half of the fix affects almost nobody: `blend_mask.py` writes **grayscale**
+> masks ("the same value in R, G and B"), and grey is invariant under a red/blue exchange.
+> Only a hand-authored per-channel mask was ever rendered wrong.
 
 ## Phase B — Distortion & Blend
 
