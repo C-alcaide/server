@@ -70,8 +70,30 @@ cmake --build d:\Github\CasparVP\build --target casparcg
 
 `src/accelerator/ogl/image/shader.frag` is embedded via `bin2c` into a generated
 header; `src/accelerator/vulkan/image/fragment_shader.frag` is compiled to SPIR-V by
-`glslc`. Both are build-time, so a rebuild picks up edits — but **GLSL errors do not
-surface at C++ compile time**. Syntax-check before building:
+`glslc`. Both are build-time — but **a shader edit is a header change**, and so it hits the
+missing-header-dependency trap above: ninja regenerates the header and does *not* recompile
+the `.cpp` that embeds it, so the binary keeps the old shader while any `.cpp` you edited in
+the same commit is up to date. The result is a binary whose halves disagree, and the
+`casparcg.exe` timestamp check does not notice because the exe *did* relink.
+
+Measured 2026-08-13: `ogl_image_fragment.h` regenerated at 13:47:10, `casparcg.exe` last
+linked 13:45:20 — an exe two minutes *older* than its own shader. It presented as a kernel
+change that had provably taken effect (a trace confirmed the uniform was set) driving a
+shader that had not. **Touch the embedding sources before building whenever a `.frag`
+changed:**
+
+```
+src/accelerator/ogl/image/image_shader.cpp
+src/accelerator/vulkan/image/image_kernel.cpp
+src/accelerator/vulkan/util/device.cpp
+src/accelerator/vulkan/util/pipeline.cpp
+```
+
+Then confirm `build/shell/casparcg.exe` is newer than
+`build/accelerator/ogl_image_fragment.h` and `vk_image_fragment.h`, not just newer than
+`src/`.
+
+**GLSL errors also do not surface at C++ compile time**. Syntax-check before building:
 
 ```
 & "C:\VulkanSDK\1.4.341.1\Bin\glslangValidator.exe" -S frag <path to .frag>

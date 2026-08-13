@@ -280,6 +280,25 @@ MIXER 1-10 GAMUTCOMPRESS 1 1.1 1.2 1.3
 MIXER 1-10 GAMUTCOMPRESS 0
 ```
 
+### The layer has to be in the working space
+
+Compression operates on ACEScg, after the conversion into it, so it only runs on a layer
+that actually reached the working space. Any route there will do:
+
+* `MIXER OCIO <source space>`
+* `MIXER COLORSPACE …`
+* the channel's `<auto-color-convert>`, when the source and target differ
+* a `<working-space-composite>` channel
+
+On a layer with none of those the pixel is still display-encoded, and compressing there
+would not be a gamut operation — so the command sets its state and the shader does nothing.
+`MIXER GAMUTCOMPRESS` on such a layer is a no-op by design.
+
+> Before 2026-08-13 the same silence applied to `MIXER OCIO` layers, which was a defect
+> rather than a design: the compressor lived inside the block the OCIO splice replaces, so
+> the command returned `202`, set its uniform, and never ran. It reaches OCIO layers now.
+> Verified on both mixers by `cli.py ocio-gamut-compress` in the test harness.
+
 ---
 
 ## Hue Curves

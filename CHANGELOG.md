@@ -1,6 +1,44 @@
 CasparVP — Unreleased
 ==========================================
 
+### Fixed: `MIXER GAMUTCOMPRESS` did nothing on a layer using `MIXER OCIO`
+
+The command was accepted, returned `202`, and the kernel set `gamut_compress_enable` true —
+after the OCIO branch had cleared it, so the uniform was correct and the shader still never
+executed the compressor. `apply_gamut_compress` sat *inside* the input-conversion block, and
+the OCIO splice **replaces** that block rather than following it. A command that reported
+success and changed nothing.
+
+The call now lives outside that block on both backends, immediately after the splice, which
+is where it belonged: it operates on ACEScg after the matrix, so it is a working-space
+operation and not part of the conversion. It is gated on the pixel having reached the
+working space by any route — `MIXER OCIO`, `MIXER COLORSPACE`, `<auto-color-convert>` or a
+working-space composite. A layer with no conversion at all is still display-encoded, and
+compressing there would mean nothing, so the command remains inert there as before.
+
+**Behaviour change beyond the fix.** On OpenGL the compressor ran *before* the exposure
+multiply and on Vulkan *after*; it now runs after on both. This changes OpenGL output only
+for a layer that sets a non-default exposure — reachable solely through `MIXER COLORSPACE`'s
+6th argument — and it moves OpenGL onto Vulkan's answer rather than away from it.
+
+**Measured on both mixers, byte-identical**, `cli.py ocio-gamut-compress`:
+
+| source space | vs. model | (off, on) separation |
+| :--- | ---: | ---: |
+| ARRI LogC3 (EI800) | 0.53 LSB | 28.0 LSB |
+| S-Log3 S-Gamut3.Cine | 0.51 LSB | 25.0 LSB |
+| control — layer in no working space | — | **0.00 LSB** |
+
+The separation is the load-bearing number: a shader that ignores the flag matches the "off"
+model perfectly, so only an (off, on) pair that moves says the flag was read. The battery
+asks for limits `1.20 / 1.35 / 1.50` rather than the ACES defaults, so a build that ignored
+the arguments and applied its own constants cannot pass either. The control is what says the
+working-space gate holds.
+
+`exposure` remains unavailable on the OCIO path, deliberately: it has no standalone command,
+and adding one requires first settling where it belongs in the chain, which the two mixers
+still disagree about.
+
 ### Added: `<ocio-display>` / `<ocio-view>` on the DeckLink and screen consumers
 
 The per-consumer view override existed but only the IMAGE consumer declared one, so the

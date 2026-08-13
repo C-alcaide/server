@@ -624,8 +624,35 @@ refresh deployed DLLs (see `BUILDING_WORKFLOW.md` #7).
 
   Worth keeping in view: before this, a capture 1.6 s after `OCIO_DISPLAY` got **no frame at
   all**, because an ACES 2.0 display transform is ~15 KB of GLSL.
-* **`exposure` and `gamut_compress` are unavailable on the OCIO path.** Both live in the
-  `color_grade` struct inside the block OCIO replaces. Needs a decision and a doc line.
+* ~~**`exposure` and `gamut_compress` are unavailable on the OCIO path.**~~ **SPLIT AND
+  HALF ANSWERED, 2026-08-13.** They turned out to be different problems.
+
+  **Gamut compression was a live defect, and is fixed.** `MIXER GAMUTCOMPRESS` writes its
+  own `image_transform` field, and the kernel set `gamut_compress_enable` true *after* the
+  OCIO branch cleared it — so on an OCIO layer the command returned **202, set its uniform,
+  and never executed**, because `apply_gamut_compress` sat inside the input block the splice
+  replaces. The call now lives outside that block on both backends, immediately after the
+  splice, gated on the pixel having reached the working space by any route
+  (`in_working_space`). It is a working-space operation, not part of the conversion.
+
+  Measured on both mixers, byte-identical: **0.53 LSB** (ARRI LogC3) and **0.51 LSB**
+  (S-Log3 S-Gamut3.Cine) against `apply_ocio_pipeline(..., gamut_compress=limits)`, with the
+  (off, on) pair separating by **28.0** and **25.0 LSB** against a 2.0 requirement — the
+  separation is what says the flag was read at all. The control, a layer that reached no
+  working space, is **byte-identical** with the command on and off. `cli.py
+  ocio-gamut-compress`.
+
+  This also removed an OGL/Vulkan ordering divergence: OGL applied compression *before*
+  exposure and Vulkan *after*, and both now apply it after.
+
+* **`exposure` is still unavailable on the OCIO path, deliberately.** It has no standalone
+  setter — its only source is `MIXER COLORSPACE`'s 6th argument, which is mutually exclusive
+  with `MIXER OCIO` — so it is *unreachable* rather than silently ignored, which is the
+  benign half of the original pair. Making it reachable means adding `MIXER EXPOSURE`, and
+  that should not be done first: **the two mixers do not agree on where exposure belongs**
+  (OGL after the gamut matrix, Vulkan before it), and `shader_conformance` pins it at 1.0
+  precisely so the divergence never shows. Settling the order is the prerequisite, and it
+  is a rendered-output change of its own. Do not ship the command on top of it.
 * **fp16 vs fp32** — half answered, 2026-08-12. Measured: fp16's quantum is 32.0 LSB16 near
   white, exactly 2× a 12-bit output step, and there is no `bit12` channel to have measured
   it on (12-bit is a consumer property). What remains is whether fp16's *shadow* precision

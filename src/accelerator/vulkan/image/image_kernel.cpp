@@ -1306,6 +1306,14 @@ struct image_kernel::impl
         // Declared beside ocio_out rather than next to `cg`, because the output-half override
         // near the end of this function needs it and that sits in this scope.
         const bool          ws_composite = params.working_space_composite;
+
+        // Did the pixel REACH the working space, by any route?
+        //
+        // Gamut compression now runs outside the input-conversion block (see
+        // ogl/image/shader.frag for the account), so this is what decides whether running it
+        // means anything: compressing a pixel that is still display-encoded, because the
+        // layer had no conversion at all, would not be a gamut operation.
+        bool                in_working_space = false;
         const ocio_variant* ocio     = select_ocio_variant(ocio_in ? ocio_tf.source_space : std::string(),
                                                            params.ocio_display,
                                                            params.ocio_view);
@@ -1713,12 +1721,18 @@ struct image_kernel::impl
                 // This backend folds the BT.2408 luminance scale into `exposure`; there is no
                 // separate uniform for it, unlike the OGL shader. Neutral on this path.
                 uniforms.exposure = 1.0f;
-                // Not available on this path: user exposure and gamut compression live in the
-                // color_grade struct inside the input block OCIO replaces. Neither belongs to
-                // an input transform's job, but the gap is real and documented.
+                // OCIO put it in the working space; output_convert_only means it was already
+                // there. Either way gamut compression below is now reachable here.
+                in_working_space = true;
+                // Still not available on this path: user exposure lives in the color_grade
+                // struct inside the input block OCIO replaces, and its only setter -- MIXER
+                // COLORSPACE's 6th argument -- is mutually exclusive with MIXER OCIO. Making
+                // it reachable means settling where it belongs in the chain first, because
+                // the two backends do not currently agree.
                 set_mat3(uniforms.working_to_output, k_to_output[working_gamut_index(params.target_color_space)]);
             } else if (cg.enable) {
                 // MIXER COLORSPACE owns both halves of the conversion.
+                in_working_space = true;
                 uniforms.flags |= static_cast<uint32_t>(shader_flags::color_grading);
                 uniforms.flags2 |= static_cast<uint32_t>(shader_flags2::input_convert) |
                                    static_cast<uint32_t>(shader_flags2::output_convert);
@@ -1794,6 +1808,7 @@ struct image_kernel::impl
                     // Use channel's configured auto tone-map operator (default: hard clamp).
                     int tm = params.auto_tone_map;
                     // auto-color-convert owns both halves too.
+                    in_working_space = true;
                     uniforms.flags |= static_cast<uint32_t>(shader_flags::color_grading);
                     uniforms.flags2 |= static_cast<uint32_t>(shader_flags2::input_convert) |
                                        static_cast<uint32_t>(shader_flags2::output_convert);
@@ -2004,7 +2019,7 @@ struct image_kernel::impl
         }
 
         // ── Gamut Compression ─────────────────────────────────────────
-        if (transforms.image_transform.gamut_compress) {
+        if (transforms.image_transform.gamut_compress && in_working_space) {
             uniforms.flags |= static_cast<uint32_t>(shader_flags::gamut_compress);
             // RGBA order: .r=Red(cyan limit), .g=Green(magenta limit), .b=Blue(yellow limit)
             uniforms.gc_limit[0] = static_cast<float>(transforms.image_transform.gc_cyan);

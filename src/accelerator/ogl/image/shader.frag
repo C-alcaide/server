@@ -1772,11 +1772,6 @@ void main()
         // Shader uses BGRA convention (.r=B, .b=R), swizzle to RGB for matrix
         col.bgr = input_to_working * col.bgr;
 
-        // Gamut compression: compress out-of-gamut values toward achromatic axis
-        if (gamut_compress_enable) {
-            col.rgb = apply_gamut_compress(col.rgb, gc_limit);
-        }
-
         // Exposure (linear gain in scene-linear working space)
         // Applied here, at the start of the grading chain, matching DaVinci Resolve.
         col.rgb *= exposure;
@@ -1791,6 +1786,25 @@ void main()
     // above uses col.bgr. Omitting it mirrors the hue wheel, and every grey passes, so a
     // ramp will not catch it.
     //__CASPAR_OCIO_TRANSFORM__
+
+    // Gamut compression: compress out-of-gamut values toward the achromatic axis.
+    //
+    // OUTSIDE the input block, and after the OCIO splice, because it is a WORKING-SPACE
+    // operation rather than part of the conversion: it runs on ACEScg, after the matrix, and
+    // is really the first step of the grade. Inside the block it was unreachable for any
+    // layer using MIXER OCIO -- the splice replaces that block, so `MIXER GAMUTCOMPRESS`
+    // was accepted, set its uniform, and never executed.
+    //
+    // The kernel only enables it when the pixel actually REACHED the working space, by any
+    // route; a layer with no conversion at all is still in display space and compressing
+    // there would mean nothing.
+    //
+    // This also moves OGL's ordering onto Vulkan's: compression now follows exposure on both
+    // backends, where before OGL applied it first. The two only differ for exposure != 1.0,
+    // which no reachable command sets on this path today.
+    if (gamut_compress_enable) {
+        col.rgb = apply_gamut_compress(col.rgb, gc_limit);
+    }
 
     // ASC CDL (Slope/Offset/Power)
     if (cdl_enable) {

@@ -281,6 +281,51 @@ Ninja regenerates them on the next build. Cheap — one PCH per target — and i
 difference between a build that fails confusingly and one that succeeds while linking
 halves that disagree, which is the far worse outcome documented above.
 
+### A shader edit is a header change
+
+`.frag` files are not compiled directly into anything. `src/accelerator/ogl/image/shader.frag`
+goes through `bin2c` into `build/accelerator/ogl_image_fragment.h`, and
+`src/accelerator/vulkan/image/fragment_shader.frag` through `glslc` into
+`vk_image_fragment.h` / `vk_image_fragment_src.h`. Ninja *does* regenerate those headers —
+that rule's dependency is declared — and then stops, because the `.cpp` files that `#include`
+them have no recorded header dependency, for the same `/showIncludes` reason as above.
+
+So the shader on disk, the generated header, and the binary can all disagree, and **the
+`casparcg.exe` timestamp check will not catch it**: the exe relinks (some other object
+changed), so it is newer than `src/`, while the object holding the shader is stale.
+
+Measured 2026-08-13, moving one call in `shader.frag`:
+
+```
+build/accelerator/ogl_image_fragment.h   13:47:10   <- regenerated, contains the edit
+build/shell/casparcg.exe                 13:45:20   <- older than its own shader
+```
+
+It presented as a change that half-worked: a trace proved the C++ kernel was setting
+`gamut_compress_enable` true, and the shader ignored it, because the binary still held the
+version where the call sat inside a block that path does not enter. Two measurement runs
+were spent on the wrong binary.
+
+**When a `.frag` changes, touch the four sources that embed the generated headers:**
+
+```powershell
+@("src\accelerator\ogl\image\image_shader.cpp",
+  "src\accelerator\vulkan\image\image_kernel.cpp",
+  "src\accelerator\vulkan\util\device.cpp",
+  "src\accelerator\vulkan\util\pipeline.cpp") |
+    ForEach-Object { (Get-Item "d:\Github\CasparVP\$_").LastWriteTime = Get-Date }
+```
+
+`grep -rl "ogl_image_fragment.h\|vk_image_fragment.h\|vk_image_fragment_src.h" src/` is what
+produced that list; re-derive it rather than trusting it if the accelerator layout moves.
+Then check the exe against the *headers*, not against `src/`:
+
+```powershell
+(Get-Item build\shell\casparcg.exe).LastWriteTime
+(Get-Item build\accelerator\ogl_image_fragment.h).LastWriteTime
+(Get-Item build\accelerator\vk_image_fragment.h).LastWriteTime
+```
+
 ### Fixing it properly
 
 Correct the prefix in `build/CMakeFiles/rules.ninja` to the exact bytes `cl.exe` emits, or

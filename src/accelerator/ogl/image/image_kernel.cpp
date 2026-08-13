@@ -669,6 +669,14 @@ struct image_kernel::impl
         // the limit-order fix in 1288dc032 was correct but inert.
         bool gamut_compress_from_auto = false;
 
+        // Did the pixel REACH the working space, by any route?
+        //
+        // Gamut compression now runs outside the input-conversion block (see shader.frag), so
+        // this is what decides whether running it means anything. Compressing a pixel that is
+        // still display-encoded, because the layer had no conversion at all, would not be a
+        // gamut operation -- so the manual command below requires it.
+        bool in_working_space = false;
+
         // Color grading: ACES-based gamut/transfer/tonemapping pipeline
         // Gamut index: 0=bt709, 1=bt2020, 2=dcip3_d65, 3=aces_ap0, 4=aces_ap1(acescg), 5=arri_wg3, 6=sgamut3_cine
 
@@ -802,20 +810,25 @@ struct image_kernel::impl
             // and the wrong primaries. Unless a display transform owns it -- see below.
             shader_->set("do_input_convert",  false);
             shader_->set("do_output_convert", true);
+            // OCIO put it in the working space; output_convert_only means it was already there.
+            in_working_space = true;
             shader_->set("output_transfer",   oetf_index(params.target_color_transfer));
             shader_->set("tone_mapping_op",   params.auto_tone_map);
             shader_->set("display_peak_luminance", params.display_peak_luminance);
             shader_->set("exposure",          1.0f);
             shader_->set("luminance_scale",   1.0f);
-            // Not available on this path: exposure and gamut compression live in the
-            // color_grade struct inside the input block OCIO replaces. Neither belongs to an
-            // input transform's job, but the gap is real and documented.
+            // Still not available on this path: exposure lives in the color_grade struct
+            // inside the input block OCIO replaces, and its only setter -- MIXER COLORSPACE's
+            // 6th argument -- is mutually exclusive with MIXER OCIO. Making it reachable means
+            // settling where it belongs in the chain first, because the two backends disagree.
+            // Gamut compression no longer belongs on this list: it moved out of the block.
             shader_->set("gamut_compress_enable", false);
             shader_->set_matrix3("working_to_output", k_to_output[working_gamut_index(params.target_color_space)]);
         } else if (cg.enable) {
             int ig = std::min(std::max(cg.input_gamut,  0), 6);
             int og = std::min(std::max(cg.output_gamut, 0), 6);
             // MIXER COLORSPACE owns both halves of the conversion.
+            in_working_space = true;
             shader_->set("do_input_convert",  true);
             shader_->set("do_output_convert", true);
             shader_->set("input_transfer",    cg.input_transfer);
@@ -906,6 +919,7 @@ struct image_kernel::impl
                 // Use channel's configured auto tone-map operator (default: hard clamp).
                 int tm = params.auto_tone_map;
                 // auto-color-convert owns both halves too.
+                in_working_space = true;
                 shader_->set("do_input_convert",  true);
                 shader_->set("do_output_convert", true);
                 shader_->set("input_transfer",    it);
@@ -1192,7 +1206,7 @@ struct image_kernel::impl
         // `else` may only disable what the AUTO path did not already enable: this block
         // runs unconditionally and later, so an unconditional `false` here silently
         // cancelled automatic gamut compression on every draw.
-        if (transforms.image_transform.gamut_compress) {
+        if (transforms.image_transform.gamut_compress && in_working_space) {
             shader_->set("gamut_compress_enable", true);
             // BGRA order: .r=Blue(yellow), .g=Green(magenta), .b=Red(cyan)
             shader_->set("gc_limit",

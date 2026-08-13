@@ -496,7 +496,7 @@ void main(){
     if(flag2(F2_STRAIGHT_ALPHA_GRADING)){if(!flag(F_STRAIGHT_ALPHA)&&col.a>0.0)col.rgb/=col.a;}
     else if(flag(F_STRAIGHT_ALPHA))col.rgb*=col.a;
 
-    if(flag2(F2_INPUT_CONVERT)){col.rgb=apply_eotf(col.rgb,input_transfer);col.rgb*=exposure;col.rgb=ubo_mat3(input_to_working_c0,input_to_working_c1,input_to_working_c2)*col.rgb;if(flag(F_GAMUT_COMPRESS))col.rgb=apply_gamut_compress(col.rgb,gc_limit_pad.xyz);}
+    if(flag2(F2_INPUT_CONVERT)){col.rgb=apply_eotf(col.rgb,input_transfer);col.rgb*=exposure;col.rgb=ubo_mat3(input_to_working_c0,input_to_working_c1,input_to_working_c2)*col.rgb;}
     // A generated colour transform's call is spliced here, replacing the input block above
     // rather than following it: MIXER OCIO and MIXER COLORSPACE are mutually exclusive, so
     // F2_INPUT_CONVERT is clear whenever this is non-empty.
@@ -505,6 +505,11 @@ void main(){
     // multiply above, which uses col.rgb directly where OGL uses col.bgr. Adding a swizzle
     // here would mirror the hue wheel while leaving every grey correct.
     //__CASPAR_OCIO_TRANSFORM__
+    // Gamut compression, outside the input block and after the splice -- a WORKING-SPACE
+    // operation, not part of the conversion. See ogl/image/shader.frag for the full account.
+    // Moving it out is a no-op here (it was already last in the block) and is what lets
+    // MIXER GAMUTCOMPRESS reach a layer using MIXER OCIO.
+    if(flag(F_GAMUT_COMPRESS))col.rgb=apply_gamut_compress(col.rgb,gc_limit_pad.xyz);
     if(flag(F_CDL))col.rgb=apply_cdl(col.rgb,cdl_slope_sat.xyz,cdl_offset_pad.xyz,cdl_power_pad.xyz,cdl_slope_sat.w);
     if(flag(F_LUT3D))col.rgb=apply_lut3d(col.rgb,lut3d_strength);
     if(flag(F_LINEAR_SAT))col.rgb=apply_linear_sat(col.rgb,linear_sat_value);
