@@ -2023,6 +2023,17 @@ struct image_kernel::impl
             }
         }
 
+        // ── Exposure ─────────────────────────────────────────────────
+        //
+        // `MIXER EXPOSURE` composes with whatever the conversion path already put here --
+        // on this backend that includes the folded-in BT.2408 luminance scale. Both are
+        // scalars, so multiplying is the only answer that is not arbitrary.
+        //
+        // Gated on having reached the working space, like gamut compression below: a
+        // "linear" gain on a pixel that is still display-encoded is not a gain on light.
+        if (in_working_space)
+            uniforms.exposure *= static_cast<float>(transforms.image_transform.exposure);
+
         // ── Gamut Compression ─────────────────────────────────────────
         if (transforms.image_transform.gamut_compress && in_working_space) {
             uniforms.flags |= static_cast<uint32_t>(shader_flags::gamut_compress);

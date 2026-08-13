@@ -385,6 +385,15 @@ struct image_transform final
     std::array<double, 3> split_highlight_color = {0.0, 0.0, 0.0};  // RGB offset for highlights
     double                split_balance         = 0.5;               // 0..1 crossover point
 
+    // Exposure: a linear gain applied in the WORKING space, after the conversion into it.
+    //
+    // Separate from color_grade::exposure, which is MIXER COLORSPACE's 6th argument and is
+    // therefore unreachable on a layer using MIXER OCIO -- the two commands are mutually
+    // exclusive. This one applies on any route into the working space, exactly like
+    // gamut_compress above it, and the kernel multiplies the two rather than choosing:
+    // they are both scalars, so composition is the only answer that is not arbitrary.
+    double exposure = 1.0;
+
     // Gamut compression (ACES 1.3 Reference Gamut Compress)
     bool   gamut_compress = false;
     double gc_cyan    = 1.147;  // ACES default limit

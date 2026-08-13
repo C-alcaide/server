@@ -2708,6 +2708,52 @@ std::future<std::wstring> mixer_splittone_command(command_context& ctx)
     return make_ready_future<std::wstring>(L"202 MIXER OK\r\n");
 }
 
+// MIXER EXPOSURE <stops-as-linear-gain>
+// MIXER EXPOSURE — query
+//
+// A linear gain in the WORKING space, applied after the conversion into it and before the
+// grade. Distinct from `MIXER COLORSPACE`'s 6th argument, which lives in the color_grade
+// struct and is mutually exclusive with `MIXER OCIO`; this one applies on any route into
+// the working space, so it is the only exposure an OCIO layer can be given. Where both are
+// set they multiply -- see image_transform::exposure.
+//
+// Inert on a layer that reaches no working space, for the same reason MIXER GAMUTCOMPRESS
+// is: an un-converted pixel is still display-encoded and a "linear" gain on it is not a
+// linear gain on light.
+std::future<std::wstring> mixer_exposure_command(command_context& ctx)
+{
+    if (ctx.parameters.empty()) {
+        auto transform2 = get_current_transform(ctx).share();
+        return std::async(std::launch::deferred, [transform2]() -> std::wstring {
+            return L"201 MIXER OK\r\n" +
+                   std::to_wstring(transform2.get().image_transform.exposure) + L"\r\n";
+        });
+    }
+
+    transforms_applier transforms(ctx);
+    double             value = std::stod(ctx.parameters.at(0));
+    if (!(value >= 0.0) || !std::isfinite(value)) {
+        // NaN fails `>= 0.0` too, which is why the test is written that way round. A
+        // negative gain is not an exposure, it is a channel inversion with a sign error.
+        CASPAR_THROW_EXCEPTION(user_error() << msg_info(
+            L"MIXER EXPOSURE takes a finite, non-negative linear gain; got " +
+            ctx.parameters.at(0)));
+    }
+    int  duration = ctx.parameters.size() > 1 ? std::stoi(ctx.parameters[1]) : 0;
+    auto tween    = ctx.parameters.size() > 2 ? ctx.parameters[2] : L"linear";
+
+    transforms.add(stage::transform_tuple_t(
+        ctx.layer_index(),
+        [=](frame_transform transform) -> frame_transform {
+            transform.image_transform.exposure = value;
+            return transform;
+        },
+        duration,
+        tween));
+    transforms.apply();
+    return make_ready_future<std::wstring>(L"202 MIXER OK\r\n");
+}
+
 // MIXER GAMUTCOMPRESS <0|1> [cyan_limit] [magenta_limit] [yellow_limit]
 std::future<std::wstring> mixer_gamutcompress_command(command_context& ctx)
 {
@@ -4932,6 +4978,7 @@ void register_commands(std::shared_ptr<amcp_command_repository_wrapper>& repo)
     repo->register_channel_command(L"Mixer Commands", L"MIXER LINEARSATURATION", mixer_linearsaturation_command, 0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER CDL",          mixer_cdl_command,          0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER SPLITTONE",    mixer_splittone_command,    0);
+    repo->register_channel_command(L"Mixer Commands", L"MIXER EXPOSURE", mixer_exposure_command, 0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER GAMUTCOMPRESS", mixer_gamutcompress_command, 0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER LUT3D",        mixer_lut3d_command,        0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER HUECURVE",     mixer_huecurve_command,     0);

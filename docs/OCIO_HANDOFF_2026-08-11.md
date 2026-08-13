@@ -645,7 +645,15 @@ refresh deployed DLLs (see `BUILDING_WORKFLOW.md` #7).
   This also removed an OGL/Vulkan ordering divergence: OGL applied compression *before*
   exposure and Vulkan *after*, and both now apply it after.
 
-* **`exposure` is still unavailable on the OCIO path**, but the reason it looked *blocked*
+* ~~**`exposure` is still unavailable on the OCIO path**~~ **DONE 2026-08-13.** `MIXER
+  EXPOSURE` exists, on `image_transform` rather than in the colour-grade state, so it applies
+  on any route into the working space — including an OCIO layer. The multiply moved out of
+  the block the splice replaces, exactly as gamut compression did, and is gated the same way.
+  Where both it and `MIXER COLORSPACE`'s sixth argument are set they multiply. Measured on
+  both mixers: `cli.py ocio-exposure`. The note below is kept because the *reason* the gap
+  looked blocked was wrong, and that is the part worth not repeating.
+
+* **Why it looked blocked, and did not have to be** — the reason it looked *blocked*
   was wrong, and that correction matters more than the gap. It has no standalone setter —
   its only source is `MIXER COLORSPACE`'s 6th argument, which is mutually exclusive with
   `MIXER OCIO` — so it is *unreachable* rather than silently ignored, which is the benign

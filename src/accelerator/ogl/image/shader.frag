@@ -1778,9 +1778,6 @@ void main()
         // Shader uses BGRA convention (.r=B, .b=R), swizzle to RGB for matrix
         col.bgr = input_to_working * col.bgr;
 
-        // Exposure (linear gain in scene-linear working space)
-        // Applied here, at the start of the grading chain, matching DaVinci Resolve.
-        col.rgb *= exposure;
     }
 
     // A generated colour transform's call is spliced here, replacing the block above rather
@@ -1792,6 +1789,19 @@ void main()
     // above uses col.bgr. Omitting it mirrors the hue wheel, and every grey passes, so a
     // ramp will not catch it.
     //__CASPAR_OCIO_TRANSFORM__
+
+    // Exposure: a linear gain in the scene-linear working space, at the start of the grade.
+    //
+    // Outside the input block and after the OCIO splice, for the same reason gamut
+    // compression below is: it is a working-space operation, not part of the conversion,
+    // and inside the block it was unreachable for any layer using MIXER OCIO. The kernel
+    // only makes it non-1.0 when the pixel actually reached the working space.
+    //
+    // Moving it past the gamut matrix changes nothing on any path: a scalar commutes with
+    // a linear matrix. Vulkan applied it before the matrix and OGL after, and the two agree
+    // to within 1 LSB at exposure 0.5, 1.6 and 2.5 -- measured, `cli.py conformance
+    // --exposure`. Both now apply it here.
+    col.rgb *= exposure;
 
     // Gamut compression: compress out-of-gamut values toward the achromatic axis.
     //

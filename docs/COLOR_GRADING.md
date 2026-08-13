@@ -11,15 +11,16 @@ For virtual production features (360° projection, curved screen compensation, p
 3. [3D LUT](#3d-lut) — Load `.cube` look-up tables for creative looks
 4. [Linear Saturation](#linear-saturation) — Scene-linear saturation control
 5. [Split Toning](#split-toning) — Independent shadow/highlight color tinting
-6. [Gamut Compression](#gamut-compression) — ACES-style out-of-gamut recovery
-7. [Hue Curves](#hue-curves) — Hue-vs-Hue, Hue-vs-Saturation, Hue-vs-Luminance, Sat-vs-Sat curves
-8. [Secondary Qualifier](#secondary-qualifier) — HSL keyer with per-key corrections
-9. [Sharpening](#sharpening) — Laplacian unsharp mask
-10. [Film Grain](#film-grain) — Procedural photographic grain emulation
-11. [Internal Pipeline](#internal-pipeline) — Full processing order, two color management paths
-12. [Supported Standards](#supported-standards)
-13. [Limitations & Best Practices](#limitations--best-practices)
-14. [Common Workflows](#common-workflows)
+6. [Exposure](#exposure) — Linear gain in the working space, on any conversion path
+7. [Gamut Compression](#gamut-compression) — ACES-style out-of-gamut recovery
+8. [Hue Curves](#hue-curves) — Hue-vs-Hue, Hue-vs-Saturation, Hue-vs-Luminance, Sat-vs-Sat curves
+9. [Secondary Qualifier](#secondary-qualifier) — HSL keyer with per-key corrections
+10. [Sharpening](#sharpening) — Laplacian unsharp mask
+11. [Film Grain](#film-grain) — Procedural photographic grain emulation
+12. [Internal Pipeline](#internal-pipeline) — Full processing order, two color management paths
+13. [Supported Standards](#supported-standards)
+14. [Limitations & Best Practices](#limitations--best-practices)
+15. [Common Workflows](#common-workflows)
 
 ---
 
@@ -242,6 +243,48 @@ MIXER 1-10 SPLITTONE 0.0 0.0 0.15 0.0 0.0 0.0 0.3
 # Reset
 MIXER 1-10 SPLITTONE RESET
 ```
+
+---
+
+## Exposure
+
+A linear gain applied in the **working space**, after the conversion into it and before the
+rest of the grade.
+
+### AMCP Command
+
+```bash
+MIXER [channel]-[layer] EXPOSURE [gain] [duration] [tween]
+MIXER [channel]-[layer] EXPOSURE            # Query
+```
+
+`gain` is a linear multiplier, not stops: `2.0` is one stop up, `0.5` one stop down. It must
+be finite and non-negative — a negative "gain" is a channel inversion with a sign error, and
+the server refuses it rather than rendering it.
+
+### Two exposures, and how they compose
+
+`MIXER COLORSPACE`'s sixth argument is also an exposure. It lives inside the colour-grade
+state and is therefore **unavailable on a layer using `MIXER OCIO`**, because the two
+commands are mutually exclusive. `MIXER EXPOSURE` is separate: it applies on any route into
+the working space, so it is the only exposure an OCIO layer can be given.
+
+Where both are set they **multiply**. They are both scalars, so composition is the only
+answer that is not arbitrary, and existing `MIXER COLORSPACE` behaviour is unchanged.
+
+### The layer has to be in the working space
+
+Like gamut compression below, exposure only runs on a layer that actually reached the
+working space — `MIXER OCIO`, `MIXER COLORSPACE`, `<auto-color-convert>` or a
+`<working-space-composite>` channel. On a layer with none of those the pixel is still
+display-encoded, and a "linear" gain on it would not be a gain on light, so the command sets
+its state and the shader does nothing.
+
+> Both mixers apply exposure at the same point in the chain. They did not always: OpenGL
+> applied it after the gamut matrix and Vulkan before. That never produced different output
+> — a scalar commutes with a linear matrix — but it was believed to, and the belief was
+> enough to keep this command from existing. Verified across exposures 0.5, 1.6 and 2.5:
+> both mixers within 1 LSB of the same model.
 
 ---
 
@@ -479,9 +522,9 @@ All color grading runs on the GPU in a single fragment shader pass. The processi
 | 2 | **Sharpening** | `MIXER SHARPEN` |
 | 3 | **Alpha domain** | Automatic. Premultiply if the source is straight (default), or *un*premultiply if the source is premultiplied and `<straight-alpha-grading>` is on |
 | 4 | **EOTF** (decode to linear) | `MIXER COLORSPACE` or auto-color-convert |
-| 5 | **Input Gamut → Working Space** | `MIXER COLORSPACE` or auto-color-convert (see below) |
-| 6 | **Gamut Compression** | `MIXER GAMUTCOMPRESS` |
-| 7 | **Exposure** | `MIXER COLORSPACE` exposure / auto luminance scaling |
+| 5 | **Input Gamut → Working Space** | `MIXER COLORSPACE`, auto-color-convert, or **`MIXER OCIO`**, whose generated transform *replaces* steps 4–5 rather than following them |
+| 6 | **Exposure** | `MIXER EXPOSURE` × `MIXER COLORSPACE` exposure / auto luminance scaling |
+| 7 | **Gamut Compression** | `MIXER GAMUTCOMPRESS` |
 | 8 | **ASC CDL** | `MIXER CDL` |
 | 9 | **3D LUT** | `MIXER LUT3D` |
 | 10 | **Linear Saturation** | `MIXER LINEARSATURATION` |

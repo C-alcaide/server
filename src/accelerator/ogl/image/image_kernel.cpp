@@ -677,6 +677,14 @@ struct image_kernel::impl
         // gamut operation -- so the manual command below requires it.
         bool in_working_space = false;
 
+        // The exposure the CONVERSION path wants, before the user's own. Kept in a local
+        // and uploaded once below rather than set per branch, because exposure now runs
+        // OUTSIDE the input block: an uploaded uniform persists on this program between
+        // draws, so a branch that simply did not set it -- the no-conversion `else` --
+        // would inherit the previous layer's value. Vulkan cannot have this bug; its
+        // uniform_block is default-constructed per draw.
+        float path_exposure = 1.0f;
+
         // Color grading: ACES-based gamut/transfer/tonemapping pipeline
         // Gamut index: 0=bt709, 1=bt2020, 2=dcip3_d65, 3=aces_ap0, 4=aces_ap1(acescg), 5=arri_wg3, 6=sgamut3_cine
 
@@ -815,7 +823,7 @@ struct image_kernel::impl
             shader_->set("output_transfer",   oetf_index(params.target_color_transfer));
             shader_->set("tone_mapping_op",   params.auto_tone_map);
             shader_->set("display_peak_luminance", params.display_peak_luminance);
-            shader_->set("exposure",          1.0f);
+            path_exposure = 1.0f;
             shader_->set("luminance_scale",   1.0f);
             // Still not available on this path: exposure lives in the color_grade struct
             // inside the input block OCIO replaces, and its only setter -- MIXER COLORSPACE's
@@ -844,7 +852,7 @@ struct image_kernel::impl
             shader_->set("output_transfer",   cg.output_transfer);
             shader_->set("tone_mapping_op",   cg.tone_mapping);
             shader_->set("display_peak_luminance", params.display_peak_luminance);
-            shader_->set("exposure",          cg.exposure);
+            path_exposure = static_cast<float>(cg.exposure);
 
             // When no artistic tone mapping is applied and both gamuts are D65-based
             // (BT.709=0, BT.2020=1), use direct ITU-R BT.2087 matrices to avoid
@@ -935,7 +943,7 @@ struct image_kernel::impl
                 shader_->set("output_transfer",   ot);
                 shader_->set("tone_mapping_op",   tm);
                 shader_->set("display_peak_luminance", params.display_peak_luminance);
-                shader_->set("exposure",          1.0f);
+                path_exposure = 1.0f;
 
                 // Direct gamut matrices for auto conversion.
                 // 5 gamuts: 0=bt709, 1=bt2020, 2=p3_d65, 3=p3_dci, 4=adobe_rgb
@@ -1208,6 +1216,19 @@ struct image_kernel::impl
                 shader_->set("split_tone_enable", false);
             }
         }
+
+        // Exposure, uploaded once for every path.
+        //
+        // `MIXER EXPOSURE` composes with whatever the conversion path already wanted --
+        // both are scalars, so multiplying is the only answer that is not arbitrary, and
+        // it keeps MIXER COLORSPACE's 6th argument doing exactly what it did.
+        //
+        // Gated on having reached the working space, like gamut compression below: a
+        // "linear" gain on a pixel that is still display-encoded is not a gain on light.
+        shader_->set("exposure",
+                     in_working_space
+                         ? path_exposure * static_cast<float>(transforms.image_transform.exposure)
+                         : 1.0f);
 
         // Gamut compression (ACES 1.3 Reference Gamut Compress)
         //

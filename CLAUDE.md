@@ -99,6 +99,33 @@ Then confirm `build/shell/casparcg.exe` is newer than
 & "C:\VulkanSDK\1.4.341.1\Bin\glslangValidator.exe" -S frag <path to .frag>
 ```
 
+### A new `image_transform` field is dead until you add it to the allowlist
+
+`apply_transform_colour_values` (`src/accelerator/{ogl,vulkan}/util/transforms.cpp`) composes
+a layer's `image_transform` onto the accumulated one, **field by hand-written field**. A
+field that is not named there is silently dropped: the AMCP command sets it on the stage,
+the query reads it back correctly, and the kernel sees the default on every frame.
+
+It presents as a command that returns `202` and changes nothing — the same symptom as a
+shader that never runs the code, and distinguishable from it only by a trace. Measured
+2026-08-13: `MIXER EXPOSURE` accepted, uniform plumbed, shader correct, and
+`[EXPTRACE] user=1` on every draw because the value never survived composition.
+
+**Both mixers keep their own copy of this list.** Add a field to one and not the other and
+the backends diverge in a way no single-backend test can see.
+
+Choose the composition deliberately, because the function is doing real work rather than
+copying: `opacity`, `brightness` and `exposure` **multiply**; `levels` take a min/max;
+`chroma` takes a max; the flags OR or XOR; `layer_depth` adds. For a gain, the product is
+the answer.
+
+**Fields still absent from the list, checked 2026-08-13**: the geometry ones (`anchor`,
+`fill_translation`, `fill_scale`, `angle`, `geometry_override`), which the geometry half of
+`combine_transform` handles and which are therefore fine — and **`blend_mask`, which is
+not**. `image_kernel.cpp` reads it from the composed transform, so
+`MIXER … BLEND_MASK` looks like the same defect. Not verified, and it needs a mask file to
+measure rather than a flat patch.
+
 ### The channel-order trap
 
 The OpenGL mixer carries the pixel through the whole grading chain in the mixer's

@@ -76,6 +76,46 @@ the battery guards against elsewhere. The hue accumulation needs two stacked tra
 (layer plus channel) and every case here is single-layer. Both are real coverage gaps, not
 oversights in this change.
 
+### Added: `MIXER EXPOSURE`, and exposure now reaches an OCIO layer
+
+```
+MIXER 1-10 EXPOSURE 0.6 [duration] [tween]
+MIXER 1-10 EXPOSURE            # query
+```
+
+A linear gain in the working space. Until now exposure existed only as `MIXER COLORSPACE`'s
+sixth argument, which lives in the colour-grade state and is mutually exclusive with
+`MIXER OCIO` — so on an OCIO layer exposure was **unreachable**. The multiply also sat
+inside the input-conversion block the OCIO splice replaces, the same place gamut compression
+was, so moving it out was the other half of that fix.
+
+Like gamut compression, it is gated on the pixel having reached the working space by any
+route; on a layer with no conversion the command sets its state and the shader does nothing,
+because a "linear" gain on a display-encoded pixel is not a gain on light. Where both
+`MIXER EXPOSURE` and `MIXER COLORSPACE`'s sixth argument are set they **multiply** — both
+are scalars, so composition is the only answer that is not arbitrary, and existing
+`MIXER COLORSPACE` behaviour is unchanged. Negative and non-finite gains are refused.
+
+**No rendered-output change for any existing configuration.** Exposure moved past the gamut
+matrix on Vulkan and stayed where it was on OpenGL; a scalar commutes with a linear matrix,
+so both produce what they produced before. The OpenGL kernel additionally now uploads the
+uniform on *every* path — it previously left it unset on the no-conversion branch, which was
+harmless only because the multiply was inside a block that branch does not enter.
+
+**A field is not plumbed until it is in the allowlist.** The first working build of this
+command was accepted, stored, queryable and completely inert:
+`apply_transform_colour_values` in `src/accelerator/{ogl,vulkan}/util/transforms.cpp`
+composes a layer's `image_transform` field by hand-written field, and a field not named
+there is dropped, so the kernel read the default `1.0` every frame. Both mixers keep their
+own copy of that list. `exposure` now composes **multiplicatively**, like `opacity`
+alongside it — nested transforms each contribute a gain and the composition of two gains is
+their product.
+
+Measured on both mixers, `cli.py ocio-exposure`: **0.51 LSB** against the model on both
+source spaces, with the (1.0, 0.6) pair separating by **26.0** and **24.0 LSB**, and the
+no-working-space control byte-identical. Plus `cli.py conformance --exposure` at 0.5, 1.6
+and 2.5: 100/100 within 1 LSB, both backends.
+
 ### Fixed: `MIXER GAMUTCOMPRESS` did nothing on a layer using `MIXER OCIO`
 
 The command was accepted, returned `202`, and the kernel set `gamut_compress_enable` true —

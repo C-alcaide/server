@@ -180,6 +180,7 @@ image_transform image_transform::tween(double                 time,
         result.split_highlight_color[i] = do_tween(time, source.split_highlight_color[i], dest.split_highlight_color[i], duration, tween);
     }
     result.split_balance = do_tween(time, source.split_balance, dest.split_balance, duration, tween);
+    result.exposure       = do_tween(time, source.exposure, dest.exposure, duration, tween);
     result.gamut_compress = dest.gamut_compress;
     result.gc_cyan    = do_tween(time, source.gc_cyan,    dest.gc_cyan,    duration, tween);
     result.gc_magenta = do_tween(time, source.gc_magenta, dest.gc_magenta, duration, tween);
@@ -386,6 +387,7 @@ bool operator==(const image_transform& lhs, const image_transform& rhs)
                boost::range::equal(lhs.split_shadow_color,    rhs.split_shadow_color,    eq) &&
                boost::range::equal(lhs.split_highlight_color, rhs.split_highlight_color, eq) &&
                eq(lhs.split_balance, rhs.split_balance) &&
+               eq(lhs.exposure, rhs.exposure) &&
                lhs.gamut_compress == rhs.gamut_compress &&
                eq(lhs.gc_cyan, rhs.gc_cyan) && eq(lhs.gc_magenta, rhs.gc_magenta) &&
                eq(lhs.gc_yellow, rhs.gc_yellow) &&

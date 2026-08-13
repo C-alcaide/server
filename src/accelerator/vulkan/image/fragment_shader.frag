@@ -499,7 +499,7 @@ void main(){
     if(flag2(F2_STRAIGHT_ALPHA_GRADING)){if(!flag(F_STRAIGHT_ALPHA)&&col.a>0.0)col.rgb/=col.a;}
     else if(flag(F_STRAIGHT_ALPHA))col.rgb*=col.a;
 
-    if(flag2(F2_INPUT_CONVERT)){col.rgb=apply_eotf(col.rgb,input_transfer);col.rgb*=exposure;col.rgb=ubo_mat3(input_to_working_c0,input_to_working_c1,input_to_working_c2)*col.rgb;}
+    if(flag2(F2_INPUT_CONVERT)){col.rgb=apply_eotf(col.rgb,input_transfer);col.rgb=ubo_mat3(input_to_working_c0,input_to_working_c1,input_to_working_c2)*col.rgb;}
     // A generated colour transform's call is spliced here, replacing the input block above
     // rather than following it: MIXER OCIO and MIXER COLORSPACE are mutually exclusive, so
     // F2_INPUT_CONVERT is clear whenever this is non-empty.
@@ -508,6 +508,10 @@ void main(){
     // multiply above, which uses col.rgb directly where OGL uses col.bgr. Adding a swizzle
     // here would mirror the hue wheel while leaving every grey correct.
     //__CASPAR_OCIO_TRANSFORM__
+    // Exposure, outside the input block and after the splice -- a working-space operation.
+    // This backend used to apply it BEFORE the gamut matrix; a scalar commutes with a linear
+    // matrix, so moving it after changes nothing, and it now sits where OGL has it.
+    col.rgb*=exposure;
     // Gamut compression, outside the input block and after the splice -- a WORKING-SPACE
     // operation, not part of the conversion. See ogl/image/shader.frag for the full account.
     // Moving it out is a no-op here (it was already last in the block) and is what lets

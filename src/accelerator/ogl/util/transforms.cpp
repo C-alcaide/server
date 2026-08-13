@@ -211,6 +211,16 @@ void apply_transform_colour_values(core::image_transform& self, const core::imag
     if (other_splits)
         self.split_balance = other.split_balance;
 
+    // Exposure. MULTIPLIES, like opacity at the top of this function: nested transforms
+    // each contribute a gain and the composition of two gains is their product.
+    //
+    // It has to be here at all because this function is an ALLOWLIST -- a field a layer
+    // transform sets is dropped unless it is named. That is what made `MIXER EXPOSURE`
+    // return 202 and change nothing: the value reached the stage and never reached the
+    // kernel, which read the default 1.0 every frame. Both mixers keep their own copy of
+    // this list, so a new colour field has to be added twice or the backends diverge.
+    self.exposure *= other.exposure;
+
     // Gamut compression
     if (other.gamut_compress) {
         self.gamut_compress = true;
