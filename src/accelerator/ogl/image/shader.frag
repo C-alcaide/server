@@ -2010,9 +2010,20 @@ void main()
     }
 
     // Per-pixel projection blend mask (arbitrary soft-edge overlap multiply)
+    //
+    // ⚠ `.bgr`, not `.rgb`. This shader carries the pixel in BGR here -- the next line is
+    // `fragColor = col.bgra` -- while the mask texture is uploaded RGB, so a straight
+    // `.rgb` multiplies red by the mask's blue and blue by its red. The Vulkan kernel
+    // grades in RGB and must NOT swizzle; see the channel-order trap in CLAUDE.md.
+    //
+    // This was invisible until 2026-08-13 because the mask never reached the shader at all
+    // (it was missing from `apply_transform_colour_values`), and it stayed invisible for one
+    // capture after that because a NEUTRAL mask is invariant under the exchange. Measured
+    // with an asymmetric mask (0.8, 0.6, 0.4): the picture came back multiplied by
+    // (0.4, 0.6, 0.8). `cli.py blend-mask`.
     if (blend_mask_enable) {
         vec2 uv_mask = TexCoord.st / TexCoord.q;
-        col.rgb *= texture(blend_mask_tex, uv_mask).rgb;
+        col.rgb *= texture(blend_mask_tex, uv_mask).bgr;
     }
 
 	fragColor = col.bgra;

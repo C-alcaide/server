@@ -119,12 +119,22 @@ copying: `opacity`, `brightness` and `exposure` **multiply**; `levels` take a mi
 `chroma` takes a max; the flags OR or XOR; `layer_depth` adds. For a gain, the product is
 the answer.
 
-**Fields still absent from the list, checked 2026-08-13**: the geometry ones (`anchor`,
+**Fields still absent from the list, checked 2026-08-13**: only the geometry ones (`anchor`,
 `fill_translation`, `fill_scale`, `angle`, `geometry_override`), which the geometry half of
-`combine_transform` handles and which are therefore fine — and **`blend_mask`, which is
-not**. `image_kernel.cpp` reads it from the composed transform, so
-`MIXER … BLEND_MASK` looks like the same defect. Not verified, and it needs a mask file to
-measure rather than a flat patch.
+`combine_transform` handles and which are therefore fine.
+
+`blend_mask` was the other one, and it was the same defect: `MIXER PROJECTION_BLEND_MASK`
+returned 202, the query read the mask back at its right dimensions, and all four patches
+rendered **byte-identical to no mask at all**, on both backends. Fixed by naming it here
+(innermost wins, like the LUT — two masks cannot be composed without resampling one onto the
+other's raster).
+
+**And fixing it exposed a second defect underneath, which is the part worth remembering.**
+Once the mask reached the shader the OpenGL picture came back multiplied by `(0.4, 0.6, 0.8)`
+where `(0.8, 0.6, 0.4)` was asked for: `col.rgb *= texture(...).rgb` on a shader that carries
+BGR. That code had never executed, so it had never been wrong before. A dead code path is
+not a correct one — when you make one reachable, measure it with **asymmetric** values,
+because a neutral mask is invariant under the exchange and would have passed.
 
 ### The channel-order trap
 

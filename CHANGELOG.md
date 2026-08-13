@@ -76,6 +76,43 @@ the battery guards against elsewhere. The hue accumulation needs two stacked tra
 (layer plus channel) and every case here is single-layer. Both are real coverage gaps, not
 oversights in this change.
 
+### Fixed: `MIXER PROJECTION_BLEND_MASK` never reached the shader, and had the wrong channels underneath
+
+Two defects, one on top of the other, in a feature that has never worked.
+
+**The mask was dropped during transform composition.** `apply_transform_colour_values` in
+`src/accelerator/{ogl,vulkan}/util/transforms.cpp` composes a layer's `image_transform` field
+by hand-written field, and `blend_mask` was not named in either copy. So the command returned
+`202`, `MIXER PROJECTION_BLEND_MASK` reported the mask back at its correct dimensions, and
+the shader saw nothing. Measured before the fix: all four patches **byte-identical to no mask
+at all**, on both mixers. It now composes innermost-wins, like the 3D LUT — two masks cannot
+be combined without resampling one onto the other's raster, and picking a resampling rule
+silently is worse than picking the layer's own.
+
+**And once the mask arrived, OpenGL multiplied the wrong channels.** `col.rgb *=
+texture(blend_mask_tex, uv).rgb` on a shader that carries the pixel in **BGR** — the next
+line is `fragColor = col.bgra`. Asked for a mask of `(0.8, 0.6, 0.4)`, the picture came back
+multiplied by `(0.4, 0.6, 0.8)`. Now `.bgr`. The Vulkan kernel grades in RGB and correctly
+does not swizzle; it passed unchanged, which is what says the two agree for a reason.
+
+That second defect had never been reachable, and it is the reason a neutral mask is not an
+acceptable test: grey is invariant under a red/blue exchange, so an equal-channel mask passes
+whether or not the swizzle is right.
+
+**Measured on both mixers, byte-identical**, `cli.py blend-mask` — reference is the *measured*
+unmasked frame times the mask, so no colour model is involved:
+
+| patch | delta | separation | `NONE` restores |
+| :--- | ---: | ---: | ---: |
+| (0.80, 0.60, 0.40) | 0.20 LSB | 61 LSB | 0.00 LSB |
+| (0.70, 0.50, 0.30) | 0.40 LSB | 51 LSB | 0.00 LSB |
+| (0.60, 0.45, 0.75) | 0.40 LSB | 115 LSB | 0.00 LSB |
+| (0.50, 0.35, 0.65) | 0.40 LSB | 100 LSB | 0.00 LSB |
+
+Behaviour change for anyone who had a blend mask configured: it did nothing before and does
+something now. That is the fix, but it will look like a regression to a configuration that
+was silently ignoring the mask.
+
 ### Added: `MIXER EXPOSURE`, and exposure now reaches an OCIO layer
 
 ```

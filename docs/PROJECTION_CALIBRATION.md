@@ -110,6 +110,18 @@ MIXER <ch>-<layer> MESH "warp_ch1.glb"
 MIXER <ch>-<layer> MESH NONE        # clear
 ```
 
+> **`PROJECTION_BLEND_MASK` did nothing at all before 2026-08-13**, on both mixers. The
+> command was accepted, the query reported the mask back at its correct dimensions, and the
+> mask was dropped during transform composition before it ever reached the shader — so a
+> calibration run that set one and saw no change was observing a defect, not a bad mask.
+> Underneath that, the OpenGL path multiplied the mask's red into blue and vice versa.
+>
+> Both are fixed and measured (`cli.py blend-mask` in the test harness, both mixers
+> byte-identical). **Anything that drove this command before will now see the mask take
+> effect**, which is correct but is a visible change. A *neutral* mask — equal in all three
+> channels, which a soft-edge overlap ramp normally is — is unaffected by the channel fix
+> specifically, so only the "it now applies at all" half will show for those.
+
 ## Phase B — Distortion & Blend
 
 * **Lens distortion** — add several **checkerboard** captures from different

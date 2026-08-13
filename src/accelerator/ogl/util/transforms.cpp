@@ -229,6 +229,21 @@ void apply_transform_colour_values(core::image_transform& self, const core::imag
         self.gc_yellow      = other.gc_yellow;
     }
 
+    // Per-pixel projection blend mask.
+    //
+    // Innermost wins, like the LUT and the hue curves below: two masks cannot be composed
+    // without resampling one onto the other's raster, and silently picking a resampling
+    // rule is worse than picking the layer's own.
+    //
+    // It has to be named here at all for the reason `exposure` above does: this function is
+    // an ALLOWLIST, and a field it does not mention is dropped during composition. Measured
+    // 2026-08-13 before the fix -- `MIXER PROJECTION_BLEND_MASK` returned 202, the query
+    // read the mask back at its right dimensions, and all four patches rendered
+    // byte-identical to no mask at all on both backends. `cli.py blend-mask`.
+    if (other.blend_mask) {
+        self.blend_mask = other.blend_mask;
+    }
+
     // 3D LUT
     if (other.lut3d) {
         self.lut3d          = other.lut3d;
