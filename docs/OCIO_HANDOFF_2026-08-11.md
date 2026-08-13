@@ -11,10 +11,20 @@ harness repo and which was current could only be recovered from git timestamps.
 continuous, and four same-dated handoffs in the harness repo once made "which one is current"
 answerable only from git timestamps.*
 
-## Resume here: an A5 design note, and one measurement before it
+## Status: the reorder is complete
 
-**Do not write more A5 render code yet.** Two decisions taken on 2026-08-12 change the shape
-of the work, and one open question is wider than A5.
+**2026-08-13 — §1 and all four steps of §2 are done, on both mixers.** What was "an A5 design
+note and one measurement before it" is now shipped: the alpha domain measured and fixed, fp16
+verified and its precision measured, four wrong gamut matrices found and corrected, the
+working-space composite, the channel display transform, and the per-consumer view override.
+
+Each has a battery in `CasparCG-TestRunner` — `alpha-domain`, `banding`, `blend-domain`,
+`ocio-display`, `consumer-view` — and OGL/Vulkan agree byte-for-byte on every one.
+
+What remains is listed at the end of §2 step 4 and in "Also still open" below; the largest
+is that only the IMAGE consumer carries a view so far.
+
+The original note follows, kept because its reasoning is what produced the order of work.
 
 **Status 2026-08-12.** §1 is closed: the alpha defect was real and the fix has landed behind
 `<straight-alpha-grading>` (default off). **§2 step 1 is closed too** — fp16 is measured, and
@@ -248,62 +258,53 @@ New order:
    settle after `OCIO_DISPLAY` produced no frame at all — the ACES 2.0 program is ~15 KB of
    GLSL and compiles on the frame path. The AMCP command pre-warms OCIO's *processor*, not
    the GPU program.
-4. **Consumer override** — a fan-out in the mixer, one pass per distinct view.
-   **NOT STARTED.** Design scouted 2026-08-12; every claim below was checked against the
-   source rather than assumed, and the obstacles are named because they are what makes this
-   bigger than steps 2 and 3 were.
+4. ~~**Consumer override** — a fan-out in the mixer, one pass per distinct view.~~
+   **DONE 2026-08-13, both mixers.** One composite, N views, each consumer handed the one it
+   asked for:
 
-   **The fan-out must live inside the mixer, before the resolve.** Once the display
-   transform runs, the working-space composite is gone — and a display transform is not
-   invertible, so a second view cannot be derived from the first. The mixer has to keep the
-   composite and run one post-composite pass per distinct view. That part is cheap and
-   already built: `apply_output_convert` is the pass, and it takes the view from
-   `draw_params.ocio_display` / `.ocio_view`.
+   ```
+   OCIO_DISPLAY 1 "<display>" "<A>"        the channel's own view
+   ADD 1 IMAGE <name> "<display>" "<B>"    this consumer's view
+   ```
 
-   **What is genuinely new is the contract.** Three things, in order of blast radius:
+   Measured with the new `cli.py consumer-view`, OGL and Vulkan **byte-identical**: 4/4
+   patches routed, each frame within 0.5 LSB of OCIO's CPU model for ITS OWN view, with the
+   two views 28–50 LSB apart.
 
-   * `mixer::operator()` returns **one** `const_frame` (`core/mixer/mixer.h:56`). It must
-     return per-view frames.
-   * `output`'s `do_send` (`core/consumer/output.cpp:567`) hands **the same frame to every
-     consumer**. It must route per consumer.
-   * a consumer must be able to declare a view. `frame_consumer` has no such hook, but
-     `needs_cpu_frame_data()` (`frame_consumer.h:80`) is the precedent for exactly this
-     shape — a per-consumer property the output stage reads and acts on.
+   **How it is built.** `image_mixer::render()` returns `core::render_output` — a primary
+   plus one result per distinct view. The renderer keeps the working-space composite and
+   runs output-convert → calibration → resolve once per view from it. `video_channel` asks
+   `output` for the distinct set each tick and hands it to the mixer before mixing; `output`
+   routes each consumer its frame, falling back to the channel's if the view is not there.
 
-   **The Vulkan fan-out, worked out concretely 2026-08-13.** The obstacle below is real but
-   the way round it is not N renderpasses:
+   On Vulkan it is **one renderpass with N attachments and one fence**, as designed — and the
+   resolve became an explicit draw (`apply_passthrough`) because `set_resolve_target` is
+   singular. That moved the primary's fp16 resolve off the path `vk-validation` had cleared,
+   so it was re-run: **0 VUIDs**, and `conformance --render-format fp16` **100/100**.
 
-   * **One renderpass, N attachments, one commit, one fence.** The composite is an
-     attachment; each view gets its own chain of attachments off it. All the draws land in
-     the same command buffer, so one fence covers them all and each view's
-     `texture_wrapper` can share it. N *renderpasses* would instead need the composite
-     readable across passes, with the barriers and layout transitions that implies.
-   * **The resolve has to become an explicit draw for this to work.** `set_resolve_target`
-     is per pass and singular, and `result_attachment()` returns one. Mirroring OpenGL's
-     `resolve_to_output` — a plain full-screen draw into a `create_attachment_as(unorm)` —
-     removes the singularity. It does mean the primary's fp16 resolve moves off the path
-     `vk-validation` has already cleared, so that pass gets re-run rather than assumed.
+   **Three things bit, and all three were invisible in the picture:**
 
-   **Two obstacles that are not obvious from the plan:**
+   * **Both consumer proxies in `frame_consumer_registry.cpp` forward every virtual by
+     hand.** A newly added one is not in the list, so `ocio_view()` returned the base
+     default and the consumer was never asked. Same shape as the `image_transform` member
+     that "simply never reaches the kernel", which this tree already documents — and the
+     symptom was identical to the feature not existing.
+   * **A consumer's view takes one tick to take effect.** Views are collected at the START
+     of a tick, so a consumer attaching during one is not in that set yet. Long-lived
+     consumers sort themselves out immediately; the IMAGE consumer is one-shot and captured
+     the fallback every time until it learned to wait (`view_settle_ticks`).
+   * **Adding a virtual to `frame_consumer.h` changes every consumer's vtable**, and without
+     the touch-everything rebuild the modules linked against the old layout. `ADD 1 IMAGE`
+     failed with "No diagnostic information available" — the documented trap, hit again.
 
-   * **N views cost N resolves, not just N passes.** The float composite has to be resolved
-     to the channel's output depth per texture, and on Vulkan a renderpass carries **one**
-     resolve target — `_resolve_target` is a single member (`vulkan/util/renderpass.h:153`).
-     So N views need N renderpasses, or that member becomes a list. OpenGL's
-     `resolve_to_output` is a plain call per texture and needs no such change.
-   * **The still-frame cache must become per view.** Its fingerprint now includes
-     `ocio_display`/`ocio_view`, which is right for one view and wrong for several: a single
-     cached texture would be served to whichever view asked next. It needs a cache entry per
-     view, keyed by the pair.
+   The battery is built so a **silent fallback cannot pass**: the two views must differ by
+   ≥10 LSB, and `FELL BACK` is a distinct verdict, because on a fallback the consumer's
+   frame still matches *a* model — the channel's — and a naive per-frame check would report
+   success.
 
-   **What is already in place and does not need revisiting:** the post-composite stage
-   itself, `OCIO_DISPLAY` and its validation/pre-warm, the per-view variant cache in both
-   kernels, the binding-range split, and `cli.py ocio-display` with its fp16 band — which
-   will measure a second view exactly as it measures the first.
-
-Surviving the reorder: `build_display_transform`, the binding-range split, the 1D/NEAREST
-fixes, and the per-layer variant machinery (which input transforms still need). Rewritten:
-the display splice location and the `draw_params.ocio_display` plumbing.
+   **Not done:** only the IMAGE consumer carries a view so far. Any other consumer gains one
+   by implementing `frame_consumer::ocio_view()` and having its factory parse it; nothing
+   else needs to change.
 
 ### 3. Answered: layer-level is wrong for a display transform
 

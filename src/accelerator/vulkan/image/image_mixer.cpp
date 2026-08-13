@@ -176,6 +176,8 @@ class image_renderer
     render_fingerprint                            prev_fingerprint_;
     std::shared_ptr<core::texture>                cached_result_wrapper_;
     std::shared_future<array<const std::uint8_t>> cached_result_cpu_;
+    //: The cached tick's extra views, cached alongside the primary.
+    std::vector<std::pair<core::ocio_view_key, core::render_result>> cached_views_;
 
   public:
     core::color_space    target_color_space    = core::color_space::bt709;
@@ -193,6 +195,9 @@ class image_renderer
     // working-space pixels.
     std::string          ocio_display;
     std::string          ocio_view;
+
+    //: Distinct views the consumers asked for, beyond the channel's own. Set once per tick.
+    std::vector<core::ocio_view_key> consumer_views_;
 
     // Channel-master LED-wall calibration LUT, applied as a final full-screen
     // pass over the composited frame (output-agnostic — every consumer sees it).
@@ -247,7 +252,7 @@ class image_renderer
         }
     }
 
-    std::future<std::tuple<std::shared_future<array<const std::uint8_t>>, std::shared_ptr<core::texture>>>
+    std::future<core::render_output>
     operator()(std::vector<layer> layers, const core::video_format_desc& format_desc)
     {
         // Counted, because this bypass is the ONLY path out of this function that returns a
@@ -277,8 +282,9 @@ class image_renderer
                                                                                                        0);
             auto ready = make_ready_future<array<const std::uint8_t>>(
                 array<const std::uint8_t>(buffer.data(), format_desc.size, true));
-            return make_ready_future<std::tuple<std::shared_future<array<const std::uint8_t>>, std::shared_ptr<core::texture>>>(
-                {ready.share(), nullptr});
+            core::render_output empty;
+            empty.primary = {ready.share(), nullptr};
+            return make_ready_future<core::render_output>(std::move(empty));
         }
 
         // ── Still-frame cache ──────────────────────────────────────────────
@@ -290,11 +296,17 @@ class image_renderer
         {
             auto fingerprint = build_fingerprint(layers, format_desc);
 
-            if (!fingerprint.items.empty() && fingerprint.matches(prev_fingerprint_) && cached_result_wrapper_) {
+            // The cache holds the WHOLE tick, views included, and the view COUNT is part
+            // of the decision: a consumer attaching or detaching changes the view set
+            // without changing a single layer, so the fingerprint alone would replay a tick
+            // that no longer has the right outputs in it.
+            if (!fingerprint.items.empty() && fingerprint.matches(prev_fingerprint_) &&
+                cached_result_wrapper_ && cached_views_.size() == consumer_views_.size()) {
                 layers.clear();   // release the layer data
-                return make_ready_future<std::tuple<std::shared_future<array<const std::uint8_t>>,
-                                                    std::shared_ptr<core::texture>>>(
-                    {cached_result_cpu_, cached_result_wrapper_});
+                core::render_output cached;
+                cached.primary = {cached_result_cpu_, cached_result_wrapper_};
+                cached.views   = cached_views_;
+                return make_ready_future<core::render_output>(std::move(cached));
             }
             prev_fingerprint_ = std::move(fingerprint);
         }
@@ -302,8 +314,9 @@ class image_renderer
         auto f = std::move(vulkan_->dispatch_async(
             [this, format_desc, cal_lut = calibration_lut_, cal_strength = calibration_strength_,
              cal_bypass = calibration_bypass_, ws_composite = working_space_composite,
-             layers = std::move(layers)]() mutable
-            -> std::tuple<std::shared_future<array<const std::uint8_t>>, std::shared_ptr<core::texture>> {
+             ch_display = ocio_display, ch_view = ocio_view,
+             views = (working_space_composite ? consumer_views_ : std::vector<core::ocio_view_key>{}),
+             layers = std::move(layers)]() mutable -> core::render_output {
                 // THE RASTER IS `width x height`, NOT `square_width x square_height`.
                 //
                 // `square_*` is the display size a non-square-pixel format would occupy on a
@@ -327,81 +340,97 @@ class image_renderer
 
                 draw(target, std::move(layers), format_desc, pass);
 
-                // The channel's output conversion, once, over the composite. Ahead of the
-                // calibration LUT because that LUT is authored against DISPLAY values.
-                if (ws_composite) {
-                    auto oc_target = pass->create_attachment();
-                    apply_output_convert(target, oc_target, format_desc, pass);
-                    target = oc_target;
-                }
+                // THE WORKING-SPACE COMPOSITE, before anything encodes it. Every view
+                // below starts from this same attachment -- a display transform is not
+                // invertible, so a second view cannot be derived from the first once one
+                // has been applied.
+                auto composite = target;
 
-                // Channel-master LED-wall calibration LUT (final full-screen pass).
-                if (cal_lut && !cal_bypass && cal_lut->size > 0) {
-                    auto cal_target = pass->create_attachment();
-                    apply_calibration_lut(target, cal_target, format_desc, pass, cal_lut, cal_strength);
-                    target = cal_target;
-                }
+                // Everything after the composite, for ONE view. All of it lands in this
+                // renderpass's single command buffer, so one fence covers every view and
+                // each wrapper below can share it -- which is why this is one pass with N
+                // attachments rather than N passes sharing a texture across them.
+                auto finish = [&](std::shared_ptr<texture> tex,
+                                  const std::string&       disp,
+                                  const std::string&       vw) -> std::shared_ptr<texture> {
+                    if (ws_composite) {
+                        auto a = pass->create_attachment();
+                        apply_output_convert(tex, a, format_desc, pass, disp, vw);
+                        tex = a;
+                    }
+                    if (cal_lut && !cal_bypass && cal_lut->size > 0) {
+                        auto a = pass->create_attachment();
+                        apply_calibration_lut(tex, a, format_desc, pass, cal_lut, cal_strength);
+                        tex = a;
+                    }
+                    // Everything downstream of the mixer means integer, so a float working
+                    // space is resolved here. An explicit draw rather than
+                    // set_resolve_target(), because that is per pass and singular -- see
+                    // apply_passthrough.
+                    if (render_format_ != common::render_format::unorm) {
+                        auto a = pass->create_attachment_as(common::render_format::unorm);
+                        apply_passthrough(tex, a, format_desc, pass);
+                        tex = a;
+                    }
+                    return tex;
+                };
 
-                // Everything downstream of the mixer means integer, so a float working
-                // space has to be resolved before the frame leaves. Requested before
-                // commit() so the blit lands in the same command buffer as the composite
-                // and is ordered against it without an extra submit or a stall.
-                if (render_format_ != common::render_format::unorm) {
-                    pass->set_resolve_target(pass->create_attachment_as(common::render_format::unorm));
-                }
+                auto                                  primary_target = finish(composite, ch_display, ch_view);
+                std::vector<std::shared_ptr<texture>> view_targets;
+                view_targets.reserve(views.size());
+                for (const auto& v : views)
+                    view_targets.push_back(finish(composite, v.display, v.view));
 
                 pass->commit();
 
-                // result_attachment() is the resolve target when one was set, and otherwise
-                // whichever attachment was rendered to last -- so this is correct whether or
-                // not the calibration pass redirected the output.
-                target = pass->result_attachment();
-
-                // Wrap the render fence into the texture_wrapper so the consumer
-                // can wait on it just before importing.  This allows the channel
-                // tick loop to continue (produce + mix next frame) while the
-                // previous frame's GPU work is still in flight.  The frame_data
-                // slot's own fence-wait in create_renderpass() still protects
-                // against overwriting an in-flight command buffer.
-                auto wait_fn = [p = pass]() { p->wait_for_completion(); };
+                // One fence and one semaphore for the whole pass, shared by every view's
+                // wrapper: all the draws above are in the same command buffer, so waiting
+                // on the pass covers all of them.
+                auto wait_fn    = [p = pass]() { p->wait_for_completion(); };
                 auto sem_handle = pass->render_semaphore_handle();
                 auto sem_value  = pass->render_semaphore_value();
-                // The device goes in too, so a consumer can ask the composited
-                // frame for a reduced readback (core::texture::read_pixels_reduced)
-                // instead of declaring needs_cpu_frame_data and pulling the whole
-                // frame back every tick. Only this wrapper gets it -- producers'
-                // own textures have no use for it.
-                auto wrapper =
-                    std::make_shared<texture_wrapper>(target, std::move(wait_fn), sem_handle, sem_value, vulkan_);
-                // When no consumer needs CPU pixel data (e.g. only vulkan-output
-                // consumers are attached), skip the GPU→CPU readback entirely.
-                // This avoids a staging buffer allocation, a layout transition
-                // barrier, and ~127 MB/frame of wasted VRAM bandwidth at 4K 16-bit.
-                if (!cpu_readback_needed_.load(std::memory_order_relaxed)) {
+
+                const bool needs_cpu = cpu_readback_needed_.load(std::memory_order_relaxed);
+                if (!needs_cpu) {
                     static bool logged_skip = false;
                     if (!logged_skip) {
                         CASPAR_LOG(info) << L"[vk_mixer] CPU readback SKIPPED - all consumers use GPU-native paths";
                         logged_skip = true;
                     }
-                    auto empty = make_ready_future<array<const std::uint8_t>>(
-                        array<const std::uint8_t>(nullptr, 0, true));
-                    return {empty.share(), wrapper};
                 }
-                // GPU→CPU readback is deferred: copy_async returns a future that
-                // is only evaluated when a consumer calls const_frame::image_data().
-                // VK-native consumers (vulkan_output) never trigger the readback.
-                return {vulkan_->copy_async(target).share(), wrapper};
+
+                // The device goes into each wrapper so a consumer can ask for a reduced
+                // readback instead of declaring needs_cpu_frame_data and pulling the whole
+                // frame back every tick.
+                auto make_result = [&](std::shared_ptr<texture> tex) -> core::render_result {
+                    auto wrapper = std::make_shared<texture_wrapper>(
+                        tex, wait_fn, sem_handle, sem_value, vulkan_);
+                    if (!needs_cpu) {
+                        auto empty = make_ready_future<array<const std::uint8_t>>(
+                            array<const std::uint8_t>(nullptr, 0, true));
+                        return {empty.share(), wrapper};
+                    }
+                    return {vulkan_->copy_async(tex).share(), wrapper};
+                };
+
+                core::render_output out;
+                out.primary = make_result(primary_target);
+                for (size_t k = 0; k < views.size(); ++k)
+                    out.views.emplace_back(views[k], make_result(view_targets[k]));
+                return out;
             }));
 
         return std::async(
             std::launch::deferred,
-            [this, f = std::move(f)]() mutable -> std::tuple<std::shared_future<array<const std::uint8_t>>, std::shared_ptr<core::texture>> {
-                auto tuple = std::move(f.get());
-                // Update the still-frame cache so the next tick can skip
-                // GPU composition if the inputs haven't changed.
-                cached_result_cpu_     = std::get<0>(tuple);
-                cached_result_wrapper_ = std::get<1>(tuple);
-                return {std::move(std::get<0>(tuple)), std::move(std::get<1>(tuple))};
+            [this, f = std::move(f)]() mutable -> core::render_output {
+                auto out = std::move(f.get());
+                // Update the still-frame cache so the next tick can skip GPU composition if
+                // the inputs haven't changed -- views included, or a cached tick replays the
+                // primary for every view.
+                cached_result_cpu_     = out.primary.image;
+                cached_result_wrapper_ = out.primary.texture;
+                cached_views_          = out.views;
+                return out;
             });
     }
 
@@ -624,10 +653,53 @@ class image_renderer
     /// The channel's post-composite output conversion. Mirrors the OGL mixer, where the
     /// full account lives: every layer reached the composite in scene-linear ACEScg with its
     /// output half suppressed, so the display encoding is applied ONCE here.
+    /// A straight blit through the kernel with no colour work -- the explicit form of what
+    /// `set_resolve_target()` does implicitly.
+    ///
+    /// Needed because that setter is per renderpass and singular (`_resolve_target` is one
+    /// member) and `result_attachment()` returns one texture, so it cannot serve several
+    /// views. Drawing instead keeps every view's resolve in the SAME command buffer, which
+    /// is the property the setter's comment was protecting: ordered against the composite
+    /// without an extra submit or a stall.
+    void apply_passthrough(std::shared_ptr<texture>&      source_texture,
+                           std::shared_ptr<texture>&      target_texture,
+                           const core::video_format_desc& format_desc,
+                           spl::shared_ptr<renderpass>    pass)
+    {
+        if (!source_texture)
+            return;
+
+        draw_params draw_params;
+        draw_params.target_width  = format_desc.square_width;
+        draw_params.target_height = format_desc.square_height;
+        draw_params.target_is_custom_format = format_desc.format == core::video_format::custom;
+        draw_params.pix_desc.format = (source_texture->depth() == common::bit_depth::bit8)
+                                          ? core::pixel_format::bgra
+                                          : core::pixel_format::rgba;
+        draw_params.pix_desc.planes = {core::pixel_format_desc::plane(
+            source_texture->width(), source_texture->height(), 4, source_texture->depth())};
+        draw_params.pix_desc.color_space    = target_color_space;
+        draw_params.pix_desc.color_transfer = target_color_transfer;
+        draw_params.target_color_space      = target_color_space;
+        draw_params.target_color_transfer   = target_color_transfer;
+        // No conversion and no tone mapping: the picture is already in the channel's output
+        // encoding by this point, and either would apply a second transform to it.
+        draw_params.auto_color_convert      = false;
+        draw_params.auto_tone_map           = 0;
+        draw_params.textures                = {spl::make_shared_ptr(source_texture)};
+        draw_params.blend_mode              = core::blend_mode::normal;
+        draw_params.background              = target_texture;
+        draw_params.geometry                = core::frame_geometry::get_default();
+
+        pass->draw(std::move(draw_params));
+    }
+
     void apply_output_convert(std::shared_ptr<texture>&      source_texture,
                               std::shared_ptr<texture>&      target_texture,
                               const core::video_format_desc& format_desc,
-                              spl::shared_ptr<renderpass>    pass)
+                              spl::shared_ptr<renderpass>    pass,
+                              const std::string&             display,
+                              const std::string&             view)
     {
         if (!source_texture)
             return;
@@ -659,8 +731,9 @@ class image_renderer
         // its place. Set here and nowhere else -- a layer draw with a display transform
         // would encode each layer separately, which is the per-layer arrangement this
         // stage exists to replace.
-        draw_params.ocio_display            = ocio_display;
-        draw_params.ocio_view               = ocio_view;
+        // Whichever view THIS pass is for -- the channel's own, or a consumer's.
+        draw_params.ocio_display            = display;
+        draw_params.ocio_view               = view;
         draw_params.straight_alpha_grading  = straight_alpha_grading;
         draw_params.textures                = {spl::make_shared_ptr(source_texture)};
         draw_params.blend_mode              = core::blend_mode::normal;
@@ -771,6 +844,11 @@ struct image_mixer::impl
                          << L"\" view=\"" << u16(view) << L"\"";
         renderer_.ocio_display = display;
         renderer_.ocio_view    = view;
+    }
+
+    void set_consumer_views(std::vector<core::ocio_view_key> views)
+    {
+        renderer_.consumer_views_ = std::move(views);
     }
 
     core::ocio_display_state get_ocio_display() const
@@ -984,28 +1062,8 @@ struct image_mixer::impl
         layer_stack_.resize(transform_stack_.back().image_transform.layer_depth);
     }
 
-    /// The public contract: one tick's outputs.
-    ///
-    /// A thin wrapper over `render_composite()`, which is unchanged and still returns the
-    /// (readback, texture) pair it always has. Keeping the internal paths -- normal
-    /// compositing, the previz branch and the texture-store branch -- on that pair is
-    /// deliberate: the per-view fan-out belongs where the working-space composite exists,
-    /// inside the renderer, not spread across three return sites here.
-    ///
-    /// `views` is left empty by this wrapper, so this is behaviour-neutral.
-    std::future<core::render_output> render(const core::video_format_desc& format_desc)
-    {
-        auto t = render_composite(format_desc);
-        return std::async(std::launch::deferred, [t = std::move(t)]() mutable -> core::render_output {
-            auto tup = t.get();
-            core::render_output out;
-            out.primary = {std::move(std::get<0>(tup)), std::move(std::get<1>(tup))};
-            return out;
-        });
-    }
-
-    std::future<std::tuple<std::shared_future<array<const std::uint8_t>>, std::shared_ptr<core::texture>>>
-    render_composite(const core::video_format_desc& format_desc)
+    std::future<core::render_output>
+    render(const core::video_format_desc& format_desc)
     {
         // ── Previz path ────────────────────────────────────────────────────
         // When previz is active: (1) do normal VK compositing, (2) post the
@@ -1025,11 +1083,10 @@ struct image_mixer::impl
             return std::async(
                 std::launch::deferred,
                 [bridge, store, ch_id, ogl, previz, depth, format_desc,
-                 composited = std::move(composited)]() mutable
-                -> std::tuple<std::shared_future<array<const std::uint8_t>>, std::shared_ptr<core::texture>> {
+                 composited = std::move(composited)]() mutable -> core::render_output {
                     // Wait for VK compositing to complete
-                    auto comp_tuple = composited.get();
-                    auto& comp_tex  = std::get<1>(comp_tuple);
+                    auto  comp_out = composited.get();
+                    auto& comp_tex = comp_out.primary.texture;
 
                     // Post the composited VK texture to the bridge
                     if (comp_tex) {
@@ -1056,8 +1113,10 @@ struct image_mixer::impl
 
                     // Render previz on the OGL thread
                     auto f = ogl->dispatch_async(
+                        // Previz replaces the 2D output and has no working-space composite
+                        // of its own, so it carries no per-view outputs.
                         [bridge, store, previz, format_desc, depth, ogl]() mutable
-                        -> std::tuple<std::shared_future<array<const std::uint8_t>>, std::shared_ptr<core::texture>> {
+                        -> core::render_output {
                             // Sync bridge textures into the channel store
                             bridge->sync_to_store(*store);
 
@@ -1070,8 +1129,10 @@ struct image_mixer::impl
                                 format_desc.width, format_desc.height, 4, depth, false);
                             previz->render(target, *store, format_desc.width, format_desc.height);
 
-                            return std::make_tuple(ogl->copy_async(target).share(),
-                                                   std::static_pointer_cast<core::texture>(target));
+                            core::render_output pv;
+                            pv.primary = {ogl->copy_async(target).share(),
+                                          std::static_pointer_cast<core::texture>(target)};
+                            return pv;
                         });
 
                     return std::move(f.get());
@@ -1089,10 +1150,9 @@ struct image_mixer::impl
 
             return std::async(
                 std::launch::deferred,
-                [result = std::move(result), bridge, ch_id, depth]() mutable
-                -> std::tuple<std::shared_future<array<const std::uint8_t>>, std::shared_ptr<core::texture>> {
-                    auto tuple = result.get();
-                    auto& tex = std::get<1>(tuple);
+                [result = std::move(result), bridge, ch_id, depth]() mutable -> core::render_output {
+                    auto  out = result.get();
+                    auto& tex = out.primary.texture;
                     if (tex) {
                         auto* wrapper = dynamic_cast<texture_wrapper*>(tex.get());
                         if (wrapper) {
@@ -1106,7 +1166,7 @@ struct image_mixer::impl
                                                  depth != common::bit_depth::bit8);
                         }
                     }
-                    return tuple;
+                    return out;
                 });
         }
 
@@ -1280,6 +1340,11 @@ void image_mixer::set_ocio_display(const std::string& display, const std::string
 }
 
 core::ocio_display_state image_mixer::get_ocio_display() const { return impl_->get_ocio_display(); }
+
+void image_mixer::set_consumer_views(std::vector<core::ocio_view_key> views)
+{
+    impl_->set_consumer_views(std::move(views));
+}
 
 bool image_mixer::composites_in_working_space() const
 {

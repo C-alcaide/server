@@ -109,11 +109,27 @@ std::optional<boost::filesystem::path> resolve_image_output(const std::wstring& 
 struct image_consumer : public core::frame_consumer
 {
     const std::wstring filename_;
+    const std::string  ocio_display_;
+    const std::string  ocio_view_;
     int                frames_waited_{0};
 
-    explicit image_consumer(std::wstring filename)
+    explicit image_consumer(std::wstring filename, std::string display = {}, std::string view = {})
         : filename_(std::move(filename))
+        , ocio_display_(std::move(display))
+        , ocio_view_(std::move(view))
     {
+    }
+
+    /// This consumer's own view, if it was given one.
+    ///
+    /// The IMAGE consumer is the first to carry one because it is the one a measurement can
+    /// read back: capturing through it while the channel holds a DIFFERENT view is what
+    /// distinguishes "the mixer fanned out and output routed correctly" from "everyone got
+    /// the channel's view", and it does so at the same 1 LSB gate as every other flat-patch
+    /// battery.
+    std::pair<std::string, std::string> ocio_view() const override
+    {
+        return {ocio_display_, ocio_view_};
     }
 
     void initialize(const core::video_format_desc& /*format_desc*/,
@@ -134,8 +150,26 @@ struct image_consumer : public core::frame_consumer
     // consumer only exists for the duration of one capture) so the budget is generous.
     static constexpr int max_wait_ticks = 50;
 
+    /// Ticks to let a requested view actually get rendered before capturing.
+    ///
+    /// `video_channel` collects the consumers' views at the START of a tick and hands them
+    /// to the mixer, so a consumer that attached DURING a tick is not in that set yet and
+    /// the frame it receives is the channel's own view. Every long-lived consumer sorts
+    /// itself out on the next tick; this one is one-shot and would capture the fallback
+    /// every time.
+    ///
+    /// Measured 2026-08-13: without this, a capture asking for `Un-tone-mapped` on a channel
+    /// showing `ACES 2.0` came back byte-identical to the channel's view -- the fallback,
+    /// indistinguishable from the feature not working at all.
+    static constexpr int view_settle_ticks = 3;
+
     std::future<bool> send(core::video_field field, core::const_frame frame) override
     {
+        if (!ocio_display_.empty() && frames_waited_ < view_settle_ticks) {
+            ++frames_waited_;
+            return make_ready_future(true);
+        }
+
         const auto& data = frame.image_data(0);
         if (data.data() == nullptr || data.size() == 0) {
             if (++frames_waited_ < max_wait_ticks) {
@@ -358,13 +392,26 @@ spl::shared_ptr<core::frame_consumer> create_consumer(const std::vector<std::wst
     if (params.size() > 1)
         filename = params.at(1);
 
+    // ADD <ch> IMAGE <name> ["<display>" "<view>"] -- this consumer's own OCIO view.
+    //
+    // Both or neither: a display without a view is not a transform, and accepting it
+    // silently would render the channel's view while looking configured.
+    std::string display, view;
+    if (params.size() > 3) {
+        display = u8(params.at(2));
+        view    = u8(params.at(3));
+    } else if (params.size() == 3) {
+        CASPAR_THROW_EXCEPTION(user_error() << msg_info(
+            L"IMAGE takes a display AND a view, both quoted, or neither."));
+    }
+
     // Reject at ADD time as well as at write time, so the operator gets a failure
     // on the command rather than a silent no-op several frames later.
     if (!filename.empty() && !resolve_image_output(filename))
         CASPAR_THROW_EXCEPTION(user_error()
                                << msg_info(L"IMAGE filename must resolve inside the media folder: " + filename));
 
-    return spl::make_shared<image_consumer>(filename);
+    return spl::make_shared<image_consumer>(filename, std::move(display), std::move(view));
 }
 
 } // namespace caspar::image

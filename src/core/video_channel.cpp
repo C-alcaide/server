@@ -252,21 +252,30 @@ struct video_channel::impl final
                     image_mixer_->set_cpu_readback_needed(
                         has_consumers && output_.any_consumer_needs_cpu_data());
 
+                    // Tell the mixer which views the consumers want, BEFORE mixing.
+                    //
+                    // Asked every tick rather than cached: consumers come and go, and the
+                    // set is what decides how many post-composite passes run. The mixer's
+                    // still-frame cache compares the count for the same reason -- a
+                    // consumer attaching changes nothing about the layers.
+                    image_mixer_->set_consumer_views(output_.distinct_consumer_views());
+
                     // Mix
-                    caspar::timer mix_timer;
-                    auto          mixed_frame =
+                    caspar::timer      mix_timer;
+                    mixer::output_frames mixed_frame =
                         has_consumers ? mixer_(stage_frames.frames, stage_frames.format_desc, stage_frames.nb_samples)
-                                               : const_frame{};
-                    auto mixed_frame2 =
+                                      : mixer::output_frames{};
+                    mixer::output_frames mixed_frame2 =
                         has_consumers && stage_frames.format_desc.field_count == 2
                             ? mixer_(stage_frames.frames2, stage_frames.format_desc, stage_frames.nb_samples)
-                            : const_frame{};
+                            : mixer::output_frames{};
                     const auto mix_elapsed = mix_timer.elapsed();
                     graph_->set_value("mix-time", mix_elapsed * format_desc.hz * 0.5);
 
                     // Consume
                     caspar::timer consume_timer;
-                    output_(mixed_frame, mixed_frame2, stage_frames.format_desc);
+                    output_(mixed_frame.primary, mixed_frame2.primary, stage_frames.format_desc,
+                            mixed_frame.views, mixed_frame2.views);
                     auto consume_elapsed = consume_timer.elapsed();
                     graph_->set_value("consume-time", consume_elapsed * stage_frames.format_desc.hz * 0.5);
 

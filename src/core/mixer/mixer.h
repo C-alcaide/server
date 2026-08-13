@@ -26,7 +26,10 @@
 
 #include <core/frame/pixel_format.h>
 #include <core/fwd.h>
+#include <core/mixer/image/image_mixer.h>
 #include <core/monitor/monitor.h>
+#include <vector>
+#include <utility>
 
 namespace caspar::diagnostics {
 class graph;
@@ -53,7 +56,14 @@ class mixer final
                    bool                                        straight_alpha_grading = false,
                    bool                                        working_space_composite = false);
 
-    const_frame operator()(std::vector<draw_frame> frames, const video_format_desc& format_desc, int nb_samples);
+    /// One tick's frames: the channel's own, plus one per distinct consumer view.
+    struct output_frames
+    {
+        const_frame                                       primary;
+        std::vector<std::pair<ocio_view_key, const_frame>> views;
+    };
+
+    output_frames operator()(std::vector<draw_frame> frames, const video_format_desc& format_desc, int nb_samples);
 
     void  set_master_volume(float volume);
     float get_master_volume();

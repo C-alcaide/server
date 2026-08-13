@@ -52,7 +52,7 @@ struct mixer::impl
     spl::shared_ptr<image_mixer>         image_mixer_;
     core::color_space                    default_color_space_{core::color_space::bt709};
     core::color_transfer                 default_color_transfer_{core::color_transfer::sdr};
-    std::queue<std::future<const_frame>> buffer_;
+    std::queue<std::future<mixer::output_frames>> buffer_;
 
     impl(const impl&)            = delete;
     impl& operator=(const impl&) = delete;
@@ -67,14 +67,14 @@ struct mixer::impl
         image_mixer_->set_target_color(default_color_space_, default_color_transfer_, auto_color_convert, auto_tone_map, display_peak_luminance, sdr_reference_white, auto_gamut_compress, straight_alpha_grading, working_space_composite);
     }
 
-    const_frame operator()(std::vector<draw_frame> frames, const video_format_desc& format_desc, int nb_samples)
+    mixer::output_frames operator()(std::vector<draw_frame> frames, const video_format_desc& format_desc, int nb_samples)
     {
         // Evaluate the previous tick's deferred result BEFORE rendering the
         // current tick.  This ensures the image_mixer's still-frame cache is
         // up-to-date when render() checks it, preventing a 1-tick stale-cache
         // race that caused frames to display out of order.
-        const_frame prev_result;
-        bool        have_prev = static_cast<int>(buffer_.size()) >= format_desc.field_count;
+        mixer::output_frames prev_result;
+        bool                 have_prev = static_cast<int>(buffer_.size()) >= format_desc.field_count;
         if (have_prev) {
             auto f = std::move(buffer_.front());
             buffer_.pop();
@@ -140,12 +140,21 @@ struct mixer::impl
                 }
                 // Pass the shared_future<array<const uint8_t>> to const_frame for lazy readback.
                 // GPU→CPU copy is deferred until a consumer actually calls image_data().
-                auto frame = const_frame(tag, std::move(rendered.primary.image), std::move(audio), desc,
-                                         std::move(tex_ptr));
-                return frame;
+                mixer::output_frames out;
+                out.primary = const_frame(tag, std::move(rendered.primary.image), std::move(audio), desc,
+                                          std::move(tex_ptr));
+                // One frame per extra view, sharing the audio-free description. Audio goes
+                // on the primary only: a view is a different PICTURE of the same programme,
+                // and duplicating the samples would have every consumer mixing its own copy.
+                for (auto& v : rendered.views) {
+                    out.views.emplace_back(
+                        v.first,
+                        const_frame(tag, std::move(v.second.image), {}, desc, std::move(v.second.texture)));
+                }
+                return out;
             }));
 
-        return have_prev ? prev_result : const_frame{};
+        return have_prev ? std::move(prev_result) : mixer::output_frames{};
     }
 
     void set_master_volume(float volume) { audio_mixer_.set_master_volume(volume); }
@@ -170,7 +179,7 @@ mixer::mixer(int channel_index, spl::shared_ptr<diagnostics::graph> graph, spl::
 void        mixer::set_master_volume(float volume) { impl_->set_master_volume(volume); }
 float       mixer::get_master_volume() { return impl_->get_master_volume(); }
 void        mixer::flush() { impl_->flush(); }
-const_frame mixer::operator()(std::vector<draw_frame> frames, const video_format_desc& format_desc, int nb_samples)
+mixer::output_frames mixer::operator()(std::vector<draw_frame> frames, const video_format_desc& format_desc, int nb_samples)
 {
     return (*impl_)(std::move(frames), format_desc, nb_samples);
 }

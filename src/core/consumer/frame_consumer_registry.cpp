@@ -100,6 +100,11 @@ class destroy_consumer_proxy : public frame_consumer
     std::wstring         name() const override { return consumer_->name(); }
     bool                 has_synchronization_clock() const override { return consumer_->has_synchronization_clock(); }
     bool                 needs_cpu_frame_data() const override { return consumer_->needs_cpu_frame_data(); }
+    // EVERY virtual has to be listed here, in BOTH proxies. One that is not simply reports
+    // the base class default and the wrapped consumer is never asked -- which is how a
+    // consumer's OCIO view read as "none" on 2026-08-13 while the consumer itself held it,
+    // and the symptom was a capture that silently showed the channel's view instead.
+    std::pair<std::string, std::string> ocio_view() const override { return consumer_->ocio_view(); }
     int                  index() const override { return consumer_->index(); }
     core::monitor::state state() const override { return consumer_->state(); }
     av_pipeline_info     av_pipeline() const override { return consumer_->av_pipeline(); }
@@ -138,6 +143,11 @@ class print_consumer_proxy : public frame_consumer
     std::wstring         name() const override { return consumer_->name(); }
     bool                 has_synchronization_clock() const override { return consumer_->has_synchronization_clock(); }
     bool                 needs_cpu_frame_data() const override { return consumer_->needs_cpu_frame_data(); }
+    // EVERY virtual has to be listed here, in BOTH proxies. One that is not simply reports
+    // the base class default and the wrapped consumer is never asked -- which is how a
+    // consumer's OCIO view read as "none" on 2026-08-13 while the consumer itself held it,
+    // and the symptom was a capture that silently showed the channel's view instead.
+    std::pair<std::string, std::string> ocio_view() const override { return consumer_->ocio_view(); }
     int                  index() const override { return consumer_->index(); }
     core::monitor::state state() const override { return consumer_->state(); }
     av_pipeline_info     av_pipeline() const override { return consumer_->av_pipeline(); }

@@ -31,6 +31,7 @@
 #include <common/except.h>
 #include <common/memory.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -465,9 +466,29 @@ struct output::impl
         return requester != nullptr;
     }
 
+    std::vector<ocio_view_key> distinct_consumer_views() const
+    {
+        std::vector<ocio_view_key> out;
+        for (auto& p : consumers_) {
+            auto [display, view] = p.second->ocio_view();
+            if (display.empty() || view.empty())
+                continue;
+            ocio_view_key v{display, view};
+            // Deduplicate: two consumers asking for the same view must cost ONE
+            // post-composite pass, not two. The list is tiny, so a linear scan is the right
+            // structure and keeps the order stable, which matters because `render_output`
+            // is matched to consumers by key rather than by position.
+            if (std::find(out.begin(), out.end(), v) == out.end())
+                out.push_back(std::move(v));
+        }
+        return out;
+    }
+
     void operator()(const const_frame&             input_frame1,
                     const const_frame&             input_frame2,
-                    const core::video_format_desc& format_desc)
+                    const core::video_format_desc& format_desc,
+                    const output::view_frames&     views,
+                    const output::view_frames&     views2)
     {
         // Channel timing telemetry
         {
@@ -564,7 +585,31 @@ struct output::impl
             consumers = consumers_;
         }
 
-        auto do_send = [this, &consumers](core::video_field field, const core::const_frame& frame) {
+        // Which frame does this consumer get? Its own view if it asked for one AND the
+        // mixer rendered it; otherwise the channel's. The fallback is not a formality: a
+        // consumer can be added between the mixer collecting the view set and the frame
+        // arriving, and the honest answer for that one tick is the channel's own view
+        // rather than nothing.
+        auto want_view = [](const frame_consumer& c) -> ocio_view_key {
+            auto [d, v] = c.ocio_view();
+            return ocio_view_key{d, v};
+        };
+
+        auto frame_for = [](const output::view_frames& vf,
+                            const core::const_frame&   fallback,
+                            const ocio_view_key&       want) -> const core::const_frame& {
+            if (want.display.empty() || want.view.empty())
+                return fallback;
+            for (auto& e : vf) {
+                if (e.first == want)
+                    return e.second;
+            }
+            return fallback;
+        };
+
+        auto do_send = [this, &consumers, &frame_for, &want_view](core::video_field field,
+                                                      const core::const_frame&   frame,
+                                                      const output::view_frames& vf) {
             std::map<int, std::future<bool>> futures;
 
             // A consumer that asked for CPU pixels must never be handed a frame that
@@ -595,7 +640,8 @@ struct output::impl
                     continue;
                 }
                 try {
-                    futures.emplace(it->first, it->second->send(field, frame));
+                    futures.emplace(it->first,
+                                    it->second->send(field, frame_for(vf, frame, want_view(*it->second))));
                     ++it;
                 } catch (...) {
                     CASPAR_LOG_CURRENT_EXCEPTION();
@@ -671,10 +717,10 @@ struct output::impl
         const auto consume_start = std::chrono::steady_clock::now();
 
         if (format_desc_.field_count == 2) {
-            do_send(core::video_field::a, input_frame1);
-            do_send(core::video_field::b, input_frame2);
+            do_send(core::video_field::a, input_frame1, views);
+            do_send(core::video_field::b, input_frame2, views2);
         } else {
-            do_send(core::video_field::progressive, input_frame1);
+            do_send(core::video_field::progressive, input_frame1, views);
         }
 
         // With a hardware clock, this is where the channel is actually paced:
@@ -772,9 +818,17 @@ std::future<bool> output::call(int index, const std::vector<std::wstring>& param
 }
 size_t output::consumer_count() const { return impl_->consumer_count(); }
 bool   output::any_consumer_needs_cpu_data() const { return impl_->any_consumer_needs_cpu_data(); }
-void   output::operator()(const const_frame& frame, const const_frame& frame2, const video_format_desc& format_desc)
+void output::operator()(const const_frame&       frame,
+                        const const_frame&       frame2,
+                        const video_format_desc& format_desc,
+                        const view_frames&       views,
+                        const view_frames&       views2)
 {
-    return (*impl_)(frame, frame2, format_desc);
+    return (*impl_)(frame, frame2, format_desc, views, views2);
+}
+std::vector<ocio_view_key> output::distinct_consumer_views() const
+{
+    return impl_->distinct_consumer_views();
 }
 core::monitor::state output::state() const { return impl_->state_; }
 }} // namespace caspar::core

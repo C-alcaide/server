@@ -35,6 +35,7 @@
 #include <functional>
 #include <future>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace caspar { namespace core {
@@ -78,6 +79,20 @@ class frame_consumer
     virtual std::wstring name() const  = 0;
     virtual bool         has_synchronization_clock() const { return false; }
     virtual bool         needs_cpu_frame_data() const { return true; }
+
+    /// Which OCIO display/view this consumer wants, if not the channel's own.
+    ///
+    /// Empty -- the default -- means "whatever the channel is showing", which is what every
+    /// consumer got before this existed. A non-empty pair makes the mixer render one extra
+    /// post-composite pass from the same working-space composite and hand THIS consumer the
+    /// result, so a channel can feed an LED processor and an SDI monitor different views of
+    /// one composite.
+    ///
+    /// Ignored unless the channel has `<working-space-composite>`: without it there is no
+    /// working-space composite to fan out from. Declared here rather than configured
+    /// centrally for the same reason `needs_cpu_frame_data()` is -- it is a property of the
+    /// consumer, and the output stage is what has to act on it.
+    virtual std::pair<std::string, std::string> ocio_view() const { return {}; }
     virtual int          index() const = 0;
 
     virtual av_pipeline_info av_pipeline() const { return {}; }

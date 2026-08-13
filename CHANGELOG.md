@@ -1,6 +1,45 @@
 CasparVP — Unreleased
 ==========================================
 
+### Added: per-consumer OCIO views — one composite, several looks
+
+A channel feeding an LED processor and an SDI monitor can now give them different views of
+the same composite. The mixer runs one post-composite pass per **distinct** view over the
+same working-space composite and hands each consumer the frame it asked for; consumers do no
+GPU work of their own.
+
+```
+OCIO_DISPLAY 1 "<display>" "<A>"        the channel's own view
+ADD 1 IMAGE <name> "<display>" "<B>"    this consumer's view
+```
+
+A consumer declares its view by implementing `frame_consumer::ocio_view()`. The IMAGE
+consumer is the first to do so — because it is the one a measurement can read back. Any
+other consumer gains one by implementing that and parsing it in its factory; nothing else
+needs to change.
+
+Requires `<working-space-composite>`, for the same reason the channel display transform
+does: a display transform is not invertible, so a second view cannot be derived from the
+first once one has been applied. The fan-out has to happen while the composite still exists.
+
+**Measured** with `CasparCG-TestRunner/cli.py consumer-view`, OGL and Vulkan
+**byte-identical**: 4/4 patches routed, each frame within **0.5 LSB** of OCIO's CPU model
+for its own view, the two views 28–50 LSB apart.
+
+**Implementation.** `image_mixer::render()` now returns `core::render_output` — a primary
+plus one result per view. On Vulkan it is one renderpass with N attachments and one fence,
+and the float resolve became an explicit draw because `set_resolve_target` is per pass and
+singular. That moved the primary's fp16 resolve off the path the validation layers had
+already cleared, so it was re-run: **0 VUIDs**, and `conformance --render-format fp16`
+**100/100**.
+
+The still-frame cache caches the whole tick, views included, and compares the view **count**
+before trusting itself — a consumer attaching or detaching changes the view set without
+changing a single layer.
+
+Unregressed: conformance 100/100, grading 48/48, `ocio` 18/18, `ocio-display` 4/4,
+`blend-domain` correct in both domains, `mixer-parity` 6/6 rasters identical.
+
 ### Added: `<working-space-composite>` — blending in scene-linear light
 
 Both mixers convert each layer to the channel's display encoding **before** the blend, on
