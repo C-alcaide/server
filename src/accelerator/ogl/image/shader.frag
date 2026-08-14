@@ -529,7 +529,7 @@ float AngleDiff(float angle1, float angle2)
     return 0.5 - abs(abs(angle1 - angle2) - 0.5);
 }
 
-// ---- Rec.709 luma ----
+// ---- Working luma ----
 // `c` is BGR-ordered throughout this chain -- see the note in apply_hue_curves.
 // The weights are therefore applied to the swizzled vector, not to c directly,
 // or blue gets red's coefficient and vice versa. ContrastSaturationBrightness
