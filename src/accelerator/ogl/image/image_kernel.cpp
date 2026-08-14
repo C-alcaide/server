@@ -472,7 +472,7 @@ struct image_kernel::impl
         const int cs_idx = static_cast<int>(color_space) > 2 ? 1 : static_cast<int>(color_space);
 
         const float color_matrices[3][9] = {
-            {1.0, 0.0, 1.402, 1.0, -0.344, -0.71414, 1.0, 1.772, 0.0},                          // bt.601
+            {1.0, 0.0, 1.402, 1.0, -0.344136, -0.714136, 1.0, 1.772, 0.0},                     // bt.601
             {1.0, 0.0, 1.5748, 1.0, -0.1873, -0.4681, 1.0, 1.8556, 0.0},                      // bt.709
             {1.0, 0.0, 1.4746, 1.0, -0.16455312684366, -0.57135312684366, 1.0, 1.8814, 0.0}}; // bt.2020
         const auto color_matrix = color_matrices[cs_idx];
