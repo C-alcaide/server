@@ -35,29 +35,13 @@ extern "C" {
 
 namespace caspar { namespace ffmpeg {
 
-/// Did this frame (or its stream) actually DECLARE a colour space?
+/// The colour space this frame DECLARES, or `unknown` if it declares none.
 ///
-/// `get_color_space` collapses "unspecified" onto BT.709, so its return value cannot
-/// distinguish a file that says BT.709 from one that says nothing. The mixers need that
-/// distinction: untagged sub-720 material is conventionally BT.601, but a small file
-/// that explicitly says BT.709 must be honoured. Without this the kernels applied the
-/// SD convention unconditionally and discarded correct metadata.
-///
-/// Deliberately mirrors `get_color_space`'s resolution order — frame first, then the
-/// stream fallback — so the two cannot disagree about which value was used.
-inline bool is_color_space_specified(const std::shared_ptr<AVFrame>& video,
-                                    AVColorSpace fallback = AVCOL_SPC_UNSPECIFIED)
-{
-    AVColorSpace cs = AVCOL_SPC_UNSPECIFIED;
-    if (video) {
-        cs = static_cast<AVColorSpace>(video->colorspace);
-    }
-    if (cs == AVCOL_SPC_UNSPECIFIED) {
-        cs = fallback;
-    }
-    return cs != AVCOL_SPC_UNSPECIFIED;
-}
-
+/// `unknown` is a real answer rather than a missing one: `core::decode_color_space` turns
+/// it into the SD/HD convention for the chroma matrix, and `core::source_gamut` reads it
+/// as BT.709 for colour management. This used to return BT.709 for an undeclared source
+/// and a separate bool carried "was it actually declared", which meant two functions had
+/// to walk the same frame-then-stream fallback chain and agree by hand.
 inline core::color_space get_color_space(const std::shared_ptr<AVFrame>& video,
                                          AVColorSpace fallback = AVCOL_SPC_UNSPECIFIED)
 {
@@ -80,7 +64,8 @@ inline core::color_space get_color_space(const std::shared_ptr<AVFrame>& video,
             break;
     }
 
-    // Check color_primaries for wide-gamut detection (matrix coefficients don't distinguish P3/Adobe)
+    // Check color_primaries for wide-gamut detection (matrix coefficients don't distinguish P3/Adobe).
+    // Primaries are themselves a declaration, so these win over `unknown` below.
     if (video) {
         switch (static_cast<AVColorPrimaries>(video->color_primaries)) {
             case AVCOL_PRI_SMPTE432: return core::color_space::p3_d65;
@@ -89,7 +74,9 @@ inline core::color_space get_color_space(const std::shared_ptr<AVFrame>& video,
         }
     }
 
-    return core::color_space::bt709;
+    // Anything else that was stated -- BT.709 itself, or a value with no core equivalent --
+    // is BT.709. Nothing stated at all is `unknown`, for the mixers to resolve.
+    return cs == AVCOL_SPC_UNSPECIFIED ? core::color_space::unknown : core::color_space::bt709;
 }
 
 inline core::color_transfer get_color_transfer(const std::shared_ptr<AVFrame>& video,

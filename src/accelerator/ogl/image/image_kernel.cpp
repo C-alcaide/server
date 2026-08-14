@@ -462,34 +462,9 @@ struct image_kernel::impl
             params.layer_key->bind(static_cast<int>(texture_id::layer_key));
         }
 
-        // The SD convention, applied as a FALLBACK rather than as an override.
-        //
-        // Untagged sub-720 YCbCr material is conventionally BT.601, and honouring that
-        // is right. What was wrong was applying it unconditionally: this used to be
-        // `height > 700 ? pix_desc.color_space : bt601`, which discarded correct
-        // metadata for every small source. A 960x540 or 1024x640 clip explicitly tagged
-        // BT.709 — ordinary LED-panel content — was matrixed as BT.601. Measured on the
-        // SDI rig a 601/709 mismatch is ~12 dB PSNR: a visible hue shift on saturated
-        // colour, invisible on greys, which is why no ramp-based check ever caught it.
-        //
-        // Three conditions now defeat the fallback, and each answers a different
-        // question:
-        //   * the source SAID what it is           -> never second-guess metadata
-        //   * the source is larger than SD         -> the original heuristic
-        //   * the channel is a CUSTOM video mode   -> not an SD broadcast destination.
-        //     A custom mode is an LED wall or a projector, where a small raster is a
-        //     panel size and carries no implication about colour space. Defaulting
-        //     those to BT.601 because the numbers happen to be small is the same
-        //     mistake one level up.
-        //
-        // Nothing downstream can repair a wrong choice here: this matrix is applied in
-        // `ycbcra_to_rgba` at texture-fetch time, before the colour-management block,
-        // so `auto-color-convert` and `MIXER COLORSPACE` both act too late.
-        const auto is_hd = params.pix_desc.planes.at(0).height > 700;
-        const auto color_space =
-            (params.pix_desc.color_space_specified || is_hd || params.target_is_custom_format)
-                ? params.pix_desc.color_space
-                : core::color_space::bt601;
+        // Both mixers must resolve this identically, so the rule lives in
+        // core::decode_color_space -- see the account there.
+        const auto color_space = core::decode_color_space(params.pix_desc, params.target_is_custom_format);
 
         // YCbCr decode matrices — only bt601/bt709/bt2020 exist for YCbCr.
         // Wide-gamut spaces (P3, Adobe RGB) use BT.709 coefficients as fallback,
@@ -926,20 +901,20 @@ struct image_kernel::impl
             shader_->set("luminance_scale", get_luminance_scale(cg.input_transfer, cg.output_transfer));
         } else if (params.auto_color_convert &&
                    (ws_composite ||
-                    params.pix_desc.color_space != params.target_color_space ||
+                    core::source_gamut(params.pix_desc) != params.target_color_space ||
                     params.pix_desc.color_transfer != params.target_color_transfer)) {
             static int convert_count = 0;
             convert_count++;
             if (convert_count <= 3 || convert_count % 100 == 0) {
                 CASPAR_LOG(trace) << L"[ogl_kernel] auto_color_convert frame #" << convert_count
-                    << L" src_cs=" << static_cast<int>(params.pix_desc.color_space)
+                    << L" src_cs=" << static_cast<int>(core::source_gamut(params.pix_desc))
                     << L" src_ct=" << static_cast<int>(params.pix_desc.color_transfer)
                     << L" tgt_cs=" << static_cast<int>(params.target_color_space)
                     << L" tgt_ct=" << static_cast<int>(params.target_color_transfer)
                     << L" fmt=" << static_cast<int>(params.pix_desc.format);
             }
             // Auto color conversion: source differs from channel output.
-            int ig = gamut_index(params.pix_desc.color_space);
+            int ig = gamut_index(core::source_gamut(params.pix_desc));
             int og = gamut_index(params.target_color_space);
             // Skip if the mapped indices are identical (e.g. bt601 source on bt709 channel).
             //
@@ -1010,7 +985,7 @@ struct image_kernel::impl
                     // Into ACEScg, not to the display. The output half is suppressed below
                     // and the channel's post-composite pass supplies k_to_output.
                     shader_->set_matrix3("input_to_working",
-                                         k_to_working[working_gamut_index(params.pix_desc.color_space)]);
+                                         k_to_working[working_gamut_index(core::source_gamut(params.pix_desc))]);
                     shader_->set_matrix3("working_to_output", k_identity);
                 } else {
                     shader_->set_matrix3("input_to_working",  k_direct[ig][og]);
@@ -1074,7 +1049,7 @@ struct image_kernel::impl
             if (no_convert_count <= 5 || no_convert_count % 100 == 0) {
                 CASPAR_LOG(trace) << L"[ogl_kernel] NO_CONVERT frame #" << no_convert_count
                     << L" auto=" << params.auto_color_convert
-                    << L" src_cs=" << static_cast<int>(params.pix_desc.color_space)
+                    << L" src_cs=" << static_cast<int>(core::source_gamut(params.pix_desc))
                     << L" src_ct=" << static_cast<int>(params.pix_desc.color_transfer)
                     << L" tgt_cs=" << static_cast<int>(params.target_color_space)
                     << L" tgt_ct=" << static_cast<int>(params.target_color_transfer)

@@ -1381,17 +1381,9 @@ struct image_kernel::impl
                                         ? 65535.0f / 256.0f
                                         : 255.0f;
 
-        // The SD convention as a FALLBACK, not an override — see the longer note in the
-        // OpenGL kernel. Short version: untagged sub-720 YCbCr is conventionally
-        // BT.601, but a source that declared its colour space must be honoured whatever
-        // its size, and a CUSTOM channel format is an LED wall or projector rather than
-        // an SD broadcast destination, so a small raster there implies nothing about
-        // colour space.
-        const auto is_hd = params.pix_desc.planes.at(0).height > 700;
-        const auto color_space =
-            (params.pix_desc.color_space_specified || is_hd || params.target_is_custom_format)
-                ? params.pix_desc.color_space
-                : core::color_space::bt601;
+        // Both mixers must resolve this identically, so the rule lives in
+        // core::decode_color_space -- see the account there.
+        const auto color_space = core::decode_color_space(params.pix_desc, params.target_is_custom_format);
         // YCbCr decode: only indices 0-2 (bt601/bt709/bt2020) are valid in the shader arrays.
         // Wide-gamut spaces (P3, Adobe RGB) use BT.709 coefficients as fallback,
         // because if the source had BT.2020 matrix, av_color.h would have returned bt2020 directly.
@@ -1807,11 +1799,11 @@ struct image_kernel::impl
                 }
             } else if (params.auto_color_convert &&
                        (ws_composite ||
-                        params.pix_desc.color_space != params.target_color_space ||
+                        core::source_gamut(params.pix_desc) != params.target_color_space ||
                         params.pix_desc.color_transfer != params.target_color_transfer)) {
                 // Auto color conversion: source differs from channel output.
                 // gamut_index / eotf_index / oetf_index are the hoisted copies above.
-                int ig = gamut_index(params.pix_desc.color_space);
+                int ig = gamut_index(core::source_gamut(params.pix_desc));
                 int og = gamut_index(params.target_color_space);
                 // Skip if the mapped indices are identical (e.g. bt601 source on bt709 channel)
                 // Never skip under a working-space composite -- see the OGL kernel for why.
@@ -1903,7 +1895,7 @@ struct image_kernel::impl
                         // Into ACEScg, not to the display. The output half is suppressed
                         // below and the channel's post-composite pass supplies k_to_output.
                         set_mat3(uniforms.input_to_working,
-                                 k_to_working[working_gamut_index(params.pix_desc.color_space)]);
+                                 k_to_working[working_gamut_index(core::source_gamut(params.pix_desc))]);
                     } else {
                         set_mat3(uniforms.input_to_working,  k_direct[ig][og]);
                     }

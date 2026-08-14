@@ -65,6 +65,15 @@ enum class color_space
     p3_d65,    // DCI-P3 with D65 white point (Display P3)
     p3_dci,    // DCI-P3 with DCI white point (cinema)
     adobe_rgb, // Adobe RGB (1998)
+
+    /// The source did not DECLARE a colour space. `decode_color_space` below resolves it
+    /// for the YCbCr matrix; everywhere it is read as a source GAMUT it falls through to
+    /// bt709, which is what the field defaulted to before this value existed.
+    ///
+    /// Must stay last. Both kernels index their matrix tables with this enum's numeric
+    /// value, clamped as `> 2 ? 1 : value`, so an `unknown` that leaked would silently
+    /// decode as BT.709 rather than reading past the table.
+    unknown,
 };
 
 enum class color_transfer
@@ -126,7 +135,7 @@ struct pixel_format_desc final
     pixel_format_desc() = default;
 
     explicit pixel_format_desc(pixel_format          format,
-                               core::color_space     color_space    = core::color_space::bt709,
+                               core::color_space     color_space    = core::color_space::unknown,
                                core::color_transfer  color_transfer = core::color_transfer::sdr)
         : format(format)
         , color_space(color_space)
@@ -137,29 +146,9 @@ struct pixel_format_desc final
     pixel_format          format            = pixel_format::invalid;
     bool                  is_straight_alpha = false;
     std::vector<plane>    planes;
-    core::color_space     color_space      = core::color_space::bt709;
+    core::color_space     color_space      = core::color_space::unknown;
     core::color_transfer  color_transfer   = core::color_transfer::sdr;
     core::chroma_location chroma_location  = core::chroma_location::unspecified;
-
-    /// Did the source actually SAY what its colour space is, or is `color_space`
-    /// just the default?
-    ///
-    /// `color_space` defaults to bt709, so a genuinely BT.709-tagged frame and a frame
-    /// that declared nothing are indistinguishable without this. The mixers need to
-    /// tell them apart: untagged sub-720 material is conventionally BT.601, but a file
-    /// that explicitly says BT.709 must be honoured whatever its size.
-    ///
-    /// Before this flag existed the kernels applied the SD convention unconditionally —
-    /// `height > 700 ? declared : bt601` — which silently discarded correct metadata
-    /// for every sub-720 YCbCr source. Measured on the SDI rig, a 601/709 mismatch is
-    /// ~12 dB PSNR: a visible hue shift on saturated colour, and invisible on greys,
-    /// which is why it survived every ramp-based check. LED-panel content authored at
-    /// odd small sizes (960x540, 1024x640) and tagged BT.709 was the case that made it
-    /// matter.
-    ///
-    /// Producers that know set this; a producer that does not is treated exactly as it
-    /// was before, so leaving one alone cannot regress it.
-    bool color_space_specified = false;
 };
 
 inline bool operator==(const pixel_format_desc::plane& lhs, const pixel_format_desc::plane& rhs)
@@ -181,10 +170,53 @@ inline bool operator==(const pixel_format_desc& lhs, const pixel_format_desc& rh
 {
     return lhs.format == rhs.format && lhs.is_straight_alpha == rhs.is_straight_alpha &&
            lhs.color_space == rhs.color_space && lhs.color_transfer == rhs.color_transfer &&
-           lhs.chroma_location == rhs.chroma_location &&
-           lhs.color_space_specified == rhs.color_space_specified && lhs.planes == rhs.planes;
+           lhs.chroma_location == rhs.chroma_location && lhs.planes == rhs.planes;
 }
 
 inline bool operator!=(const pixel_format_desc& lhs, const pixel_format_desc& rhs) { return !(lhs == rhs); }
+
+/// The matrix to decode this source's chroma with: whatever it declared, or a convention
+/// when it declared nothing. Both mixers must pick the same one, so it lives here rather
+/// than once per backend — the two copies of this rule had already drifted once.
+///
+/// Untagged sub-720 material is conventionally BT.601, and honouring that is right. What
+/// was wrong was applying it as an OVERRIDE: `height > 700 ? declared : bt601` discarded
+/// correct metadata, so a 960x540 clip tagged BT.709 — ordinary LED-panel content — was
+/// matrixed as BT.601 on any channel. A 601/709 mismatch is ~12 dB PSNR: a visible hue
+/// shift on saturated colour, invisible on greys, which is why no ramp-based check caught
+/// it. Nothing downstream can repair it either; the matrix is applied in `ycbcra_to_rgba`
+/// at texture-fetch time, before the colour-management block, so `auto-color-convert` and
+/// `MIXER COLORSPACE` both act too late.
+///
+/// `target_is_custom_format` is CasparVP-only and deliberately keys off the DESTINATION: a
+/// custom video mode is an LED wall or a projector, where a small raster is a panel size
+/// and implies nothing about colour space. Upstream rejected this term (CasparCG/server
+/// #1775) on the grounds that a file's encoding matrix cannot depend on where it is shown,
+/// and it costs a real case — measured on the Vulkan mixer, an untagged BT.601 clip on a
+/// custom raster decodes as BT.709 at 0.54 LSB, i.e. wrongly. It is kept because LED-wall
+/// content at odd small sizes is this fork's primary input; revisit it if that stops being
+/// true, and note the harness's two CUSTOM rows encode UPSTREAM's expectation and so fail
+/// here by design.
+inline color_space decode_color_space(const pixel_format_desc& desc, bool target_is_custom_format = false)
+{
+    if (desc.color_space != color_space::unknown) {
+        return desc.color_space;
+    }
+    if (target_is_custom_format) {
+        return color_space::bt709;
+    }
+    return desc.planes.at(0).height > 700 ? color_space::bt709 : color_space::bt601;
+}
+
+/// The source GAMUT, for the colour-management chain rather than the chroma decode.
+///
+/// A separate resolution from `decode_color_space` on purpose: the SD convention is about
+/// which matrix encoded the chroma and says nothing about primaries, so an undeclared
+/// source is BT.709 here at every raster. That is what the field defaulted to before
+/// `unknown` existed, which is what keeps this behaviour-preserving.
+inline color_space source_gamut(const pixel_format_desc& desc)
+{
+    return desc.color_space == color_space::unknown ? color_space::bt709 : desc.color_space;
+}
 
 }} // namespace caspar::core

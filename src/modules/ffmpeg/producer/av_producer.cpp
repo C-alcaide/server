@@ -3024,8 +3024,7 @@ struct AVProducer::Impl
                             // We hit EOF while fast-forwarding to a seek target (the target was beyond the video).
                             // Render and push the very last dropped frame so we don't output a black screen.
                             last_dropped_frame.frame = core::draw_frame(
-                                make_frame(this, *frame_factory_, last_dropped_frame.video, last_dropped_frame.audio, get_color_space(last_dropped_frame.video, stream_color_space_), scale_mode_, false, get_color_transfer(last_dropped_frame.video, stream_color_trc_),
-                                           is_color_space_specified(last_dropped_frame.video, stream_color_space_)));
+                                make_frame(this, *frame_factory_, last_dropped_frame.video, last_dropped_frame.audio, get_color_space(last_dropped_frame.video, stream_color_space_), scale_mode_, false, get_color_transfer(last_dropped_frame.video, stream_color_trc_)));
                             last_dropped_frame.frame_count = frame_count_++;
 
                             boost::unique_lock<boost::mutex> buffer_lock(buffer_mutex_);
@@ -3304,8 +3303,6 @@ struct AVProducer::Impl
                                     desc.planes.push_back(core::pixel_format_desc::plane(
                                         frame.video->width / 2, frame.video->height / 2, 2, plane_depth));
                                     desc.color_space    = get_color_space(frame.video, stream_color_space_);
-                                    desc.color_space_specified =
-                                        is_color_space_specified(frame.video, stream_color_space_);
                                     desc.color_transfer = get_color_transfer(frame.video, stream_color_trc_);
                                     if (frame.video->chroma_location != AVCHROMA_LOC_UNSPECIFIED) {
                                         switch (frame.video->chroma_location) {
@@ -3389,7 +3386,7 @@ struct AVProducer::Impl
                                 get_color_transfer(frame.video, stream_color_trc_)));
                     }()
 #else
-                    make_frame(this, *frame_factory_, frame.video, frame.audio, get_color_space(frame.video, stream_color_space_), scale_mode_, false, get_color_transfer(frame.video, stream_color_trc_), is_color_space_specified(frame.video, stream_color_space_))
+                    make_frame(this, *frame_factory_, frame.video, frame.audio, get_color_space(frame.video, stream_color_space_), scale_mode_, false, get_color_transfer(frame.video, stream_color_trc_))
 #endif
                 );
 
