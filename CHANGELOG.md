@@ -1,6 +1,84 @@
 CasparVP — Unreleased
 ==========================================
 
+### Changed: the grading chain weights luminance by the source's colour space
+
+**This changes rendered output** for `MIXER CDL`, `TONEBALANCE`, `SPLITTONE`, `QUALIFIER`,
+`LINEARSATURATION` and `GRAIN` on any BT.601 or BT.2020 source. BT.709 sources are
+unaffected — exactly, not approximately.
+
+Those six read a hardcoded `vec3(0.2126, 0.7152, 0.0722)` while
+`ContrastSaturationBrightness` — `MIXER SATURATION` — read the `luma_coeff` uniform, which
+both kernels set from the source's colour space. One chain, two definitions of luminance,
+disagreeing on the same pixel in the same draw. All of them now read one helper,
+`working_luma()`, matching CasparCG/server#1765.
+
+Worth knowing when reading any flat-patch measurement of this: the colour producer builds a
+frame **one pixel high** and declares no colour space, so the sub-720 convention resolves it
+to BT.601. Every flat-patch battery has always run on BT.601 luma weights whatever the
+channel is set to. Against a model taking its coefficients from the source, as the kernel
+does — grading, both mixers, 48/48 inside a 1 LSB gate:
+
+| row | vs a Rec.709 model | vs the source's coefficients |
+| :--- | ---: | ---: |
+| Cdl | 3.98 LSB | 0.53 LSB |
+| SplitTone | 5.36 | 0.50 |
+| ToneBalance | 4.10 | 0.46 |
+| LinearSaturation | 9.23 | 0.47 |
+| Qualifier | 2.17 | 0.29 |
+
+### Changed: the LENS blur weighted its bokeh by a luma with red and blue exchanged
+
+**This changes rendered output** for `MIXER BLUR 5` on saturated highlights. Greys are
+unaffected, which is why it survived.
+
+The bokeh weight is `1 + pow(max(lum - 0.3, 0), 3) * 15`, and `lum` was
+`dot(col.rgb, vec3(0.299, 0.587, 0.114))` — Rec.601 weights, applied to a BGR-ordered pixel
+on the OpenGL side, so red took blue's coefficient and the bloom formed around the wrong
+highlights.
+
+Measured as a sign test rather than a tolerance: yellow and cyan carry identical energy and
+differ only in luma, which the exchange swaps, so the verdict is the sign of
+`bloom(yellow) − bloom(cyan)`.
+
+| OpenGL | yellow | cyan | difference |
+| :--- | ---: | ---: | ---: |
+| before | 15.03 | 23.39 | **−8.36** (exchanged) |
+| after | 25.45 | 18.67 | **+6.78** (correct) |
+
+Vulkan after: +6.79, agreeing with OpenGL to 0.01.
+
+### Changed: grading commands now refuse out-of-range parameters
+
+**This changes AMCP behaviour.** Values a client could previously send are now answered with
+`403 MIXER <COMMAND> FAILED`: `MIXER MIDTONE 0` (a division by zero in the shader), `nan`
+(which `std::stod` accepts), ASC CDL violations such as a negative slope or a zero power, and
+short parameter lists. `core::grade_limits` is one table, used both to validate commands and
+to clamp combined transforms, so stacking two legal layers cannot reach a value no single
+command would accept.
+
+**Deliberately scoped to the grading commands.** `MIXER OPACITY -5`, `BRIGHTNESS`,
+`SATURATION`, `CONTRAST`, `ROTATION` and `VOLUME` are unchanged — retrofitting those would
+break existing clients and belongs in its own change. Verified against a running server:
+64 cases, 24 legal accepted and 40 illegal refused, 0 wrong.
+
+No rendering change: every value the grading battery sends is inside its range and so is
+every combined value, so nothing is clamped. grading 48/48, conformance 100/100, both mixers.
+
+### Fixed: RGBLEVELS clamped the exponent instead of the gamma, differently per backend
+
+Only reachable with an out-of-range gamma, which the validation above now refuses at the
+AMCP boundary — but the two mixers disagreed at opposite ends until this, and the same
+defect had already been fixed once in `apply_lmg`. Vulkan computed
+`pow(c, max(1.0/gamma, 0.01))`, so gamma 0 gave `pow(c, Inf)` and collapsed the channel to
+black; OpenGL had no upper clamp at all. Both now read
+`pow(c, 1.0 / clamp(gamma, 0.01, 100.0))`, the form `apply_lmg` uses.
+
+| | OpenGL | Vulkan |
+| :--- | ---: | ---: |
+| gamma → 0 | 0.00 LSB | 78.00 → **0.00** |
+| gamma → 1e6 | 7.00 → **0.00** | 0.00 LSB |
+
 ### Changed: the YCbCr decode matrix no longer depends on the channel's video mode
 
 **This changes rendered output** for one configuration: an untagged sub-720 YCbCr source on
