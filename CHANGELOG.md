@@ -76,6 +76,49 @@ the battery guards against elsewhere. The hue accumulation needs two stacked tra
 (layer plus channel) and every case here is single-layer. Both are real coverage gaps, not
 oversights in this change.
 
+### Fixed: every 10-bit YCbCr source carried a fixed chroma bias
+
+`ycbcra_to_rgba` counted in **8-bit code units**:
+
+```glsl
+vec3 YCbCr = vec3(Y, Cb, Cr) * 255;
+YCbCr -= vec3(16.0, 128.0, 128.0);
+```
+
+For an 8-bit source that is exact — `v/255 * 255 - 128 = v - 128`. For 10-bit video in a
+16-bit texture the neutral chroma normalises to `32768/65535`, so `* 255 - 128` leaves
+**−0.4981** and can never reach zero. Every high-bit-depth YCbCr source therefore arrived
+with a constant chroma offset, which shows as a **green cast on neutrals**: a clip holding
+`u = v = 512` (neutral by construction, decoded channel spread exactly 0.0) rendered with
+1.48 LSB of spread with colour conversion off, and 1.9–3.5 LSB with it on. Identical on both
+mixers, so no parity check could see it either.
+
+The scale is now chosen from the texture's depth: `65535/256` for 16-bit, which puts legal
+black on exactly 16, neutral chroma on exactly 128 and legal white on exactly 235. **The
+8-bit path is bit-identical** — the uniform is exactly `255.0f` there, the same literal as
+before.
+
+**Measured on both mixers:**
+
+| | before | after |
+| :--- | ---: | ---: |
+| neutral in → neutral out (channel spread) | 1.48–2.95 LSB | **0.00 LSB** |
+| the auto path against `color_math`, unclipped channels, 45 samples | mean 1.58, max 5.02 LSB | **mean 0.009, max 0.06 LSB** |
+
+That second row is the whole story: the automatic colour conversion now agrees with the
+closed-form model to a hundredth of an LSB, and every LSB of the disagreement that had been
+attributed to the conversion was this one line.
+
+**Why it survived so long.** `conformance` and `grading` drive a colour producer, which is
+BGRA — they never call `ycbcra_to_rgba` at all, so the 1 LSB batteries could not reach this
+code. The picture-based batteries do reach it but gate on PSNR over a decoded frame, where
+1.5 LSB of chroma bias disappears. It took a *flat decoded* fixture, which the harness
+recorded as impossible until this session.
+
+**Behaviour change:** every 10-bit YCbCr source — which is most HDR material — shifts
+slightly, toward correct. Anything colour-critical that was matched against the old output
+will need re-checking.
+
 ### Fixed: `MIXER PROJECTION_BLEND_MASK` never reached the shader, and had the wrong channels underneath
 
 Two defects, one on top of the other, in a feature that has never worked.

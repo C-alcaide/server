@@ -136,6 +136,34 @@ BGR. That code had never executed, so it had never been wrong before. A dead cod
 not a correct one — when you make one reachable, measure it with **asymmetric** values,
 because a neutral mask is invariant under the exchange and would have passed.
 
+### The YCbCr decode counted in 8-bit codes — fixed, and worth knowing how it hid
+
+`ycbcra_to_rgba` did `vec3(Y,Cb,Cr) * 255 - vec3(16,128,128)`. Exact for an 8-bit texture,
+where the sample IS `code/255`. For 10-bit video in a 16-bit texture the neutral chroma
+normalises to `32768/65535`, so `* 255 - 128` leaves **-0.4981** and can never be zero: every
+high-bit-depth YCbCr source arrived with a constant chroma offset, a green cast on greys.
+
+The scale now comes from the texture depth — `65535/256` for 16-bit, which lands legal black
+on 16, neutral chroma on 128 and legal white on 235; `255.0f` for 8-bit, the same literal as
+before, so that path is bit-identical.
+
+**What it cost to find, and why:**
+
+* `conformance` and `grading` drive a **colour producer**, which is BGRA. The 1 LSB batteries
+  never call the YCbCr decode at all — they *cannot* see a decode bug.
+* The picture-based batteries do call it, but gate on PSNR over a decoded frame, where 1.5
+  LSB of chroma bias vanishes.
+* Both mixers were wrong identically, so every parity check passed.
+
+It took a **flat decoded** fixture — neutral by construction, `u = v = 512`, so "neutral in,
+neutral out" needs no model at all — and the harness had recorded such a fixture as
+impossible. When a whole class of bug is invisible to every battery, the gap is usually in
+what the fixtures can *be*, not in the gates.
+
+Measured, both mixers: channel spread on a neutral source 1.48-2.95 LSB before, **0.00**
+after; the auto path against the closed-form model, over 45 unclipped samples, mean 1.58 /
+max 5.02 LSB before, **mean 0.009 / max 0.06** after.
+
 ### The channel-order trap
 
 The OpenGL mixer carries the pixel through the whole grading chain in the mixer's

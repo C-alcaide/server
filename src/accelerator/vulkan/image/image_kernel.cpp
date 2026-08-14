@@ -1372,6 +1372,15 @@ struct image_kernel::impl
             uniforms.precision_factor[n] = get_precision_factor(params.textures[n]->depth());
         }
 
+        // The scale that turns a normalised sample into an 8-bit-equivalent code for the
+        // YCbCr decode -- see `ycbcra_to_rgba` in fragment_shader.frag. 255 is correct only
+        // for an 8-bit texture; a 16-bit one carrying video normalises neutral chroma to
+        // 32768/65535, and `* 255 - 128` then leaves a bias that can never be zero.
+        uniforms.ycbcr_code_scale = (!params.textures.empty() &&
+                                     params.textures[0]->depth() != common::bit_depth::bit8)
+                                        ? 65535.0f / 256.0f
+                                        : 255.0f;
+
         // The SD convention as a FALLBACK, not an override — see the longer note in the
         // OpenGL kernel. Short version: untagged sub-720 YCbCr is conventionally
         // BT.601, but a source that declared its colour space must be honoured whatever

@@ -968,12 +968,25 @@ vec4 chroma_key(vec4 c)
     return ChromaOnCustomColor(c.bgra).bgra;
 }
 
+// The scale that turns a normalised sample into an 8-bit-equivalent CODE value.
+//
+// 255 is only correct when the sample IS `code/255`, i.e. an 8-bit texture. A 16-bit
+// texture carrying 10-bit video normalises its neutral chroma to 32768/65535, and
+// `* 255 - 128` then leaves -0.4981 instead of 0 -- a chroma offset that can never be zero,
+// so a neutral source renders with a fixed green cast. Measured before the fix: a flat clip
+// holding u = v = 512 (decoded channel spread exactly 0.0) rendered with 1.48 LSB of spread
+// with the colour conversion OFF, growing to 2.95 with it on, identically on both mixers.
+//
+// 65535/256 puts legal black at exactly 16, neutral chroma at exactly 128 and legal white at
+// exactly 235; 255 keeps the 8-bit path bit-identical. The kernel picks by texture depth.
+uniform float ycbcr_code_scale;
+
 vec4 ycbcra_to_rgba(float Y, float Cb, float Cr, float A)
 {
     const float luma_coefficient = 255.0/219.0;
     const float chroma_coefficient = 255.0/224.0;
 
-    vec3 YCbCr = vec3(Y, Cb, Cr) * 255;
+    vec3 YCbCr = vec3(Y, Cb, Cr) * ycbcr_code_scale;
     YCbCr -= vec3(16.0, 128.0, 128.0);
     YCbCr *= vec3(luma_coefficient, chroma_coefficient, chroma_coefficient);
 

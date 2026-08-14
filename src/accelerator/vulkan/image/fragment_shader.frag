@@ -285,9 +285,15 @@ vec3 supress_spill(vec3 c){float d=AngleDiffDir(c.x,chroma_target_hue);float dis
 vec4 ChromaKey(vec4 c,bool sm){vec3 h=rgb2hsv(c.rgb);float d=ColorDist(h)*-2.0+1.0;vec4 s=vec4(hsv2rgb(supress_spill(h)),1.0)*alpha_map(d);return sm?vec4(s.a,s.a,s.a,1):s;}
 
 // ── YCbCr ───────────────────────────────────────────────────────────────
+// `rgb_max_output_pad.w` carries the YCbCr code scale -- it was std140 padding, so using it
+// changes no offsets. 255 is right only when the sample IS `code/255`, i.e. an 8-bit
+// texture; a 16-bit texture carrying video normalises neutral chroma to 32768/65535 and
+// `*255-128` then leaves a bias that can never be zero, so neutral sources render with a
+// fixed green cast. 65535/256 puts legal black on 16, neutral chroma on 128, white on 235.
+// The OGL shader carries the same value in its own `ycbcr_code_scale` uniform.
 vec4 ycbcra_to_rgba(float Y,float Cb,float Cr,float A){
     mat3 cm=transpose(color_matrices[color_space_index]);
-    vec3 v=vec3(Y,Cb,Cr)*255-vec3(16,128,128); v*=vec3(255.0/219.0,255.0/224.0,255.0/224.0);
+    vec3 v=vec3(Y,Cb,Cr)*rgb_max_output_pad.w-vec3(16,128,128); v*=vec3(255.0/219.0,255.0/224.0,255.0/224.0);
     return vec4(cm*v/255,A);
 }
 

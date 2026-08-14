@@ -454,6 +454,17 @@ struct image_kernel::impl
             precision_factor[n] = get_precision_factor(params.textures[n]->depth());
         }
 
+        // The scale that turns a normalised sample into an 8-bit-equivalent code, for the
+        // YCbCr decode. See `ycbcr_code_scale` in shader.frag: 255 is right only when the
+        // sample IS `code/255`, and a 16-bit texture carrying video normalises its neutral
+        // chroma to 32768/65535, so `* 255 - 128` leaves a bias that can never be zero.
+        // 65535/256 lands legal black on 16, neutral chroma on 128 and legal white on 235.
+        shader_->set("ycbcr_code_scale",
+                     (!params.textures.empty() &&
+                      params.textures[0]->depth() != common::bit_depth::bit8)
+                         ? 65535.0f / 256.0f
+                         : 255.0f);
+
         if (params.local_key) {
             params.local_key->bind(static_cast<int>(texture_id::local_key));
         }

@@ -153,7 +153,10 @@ struct alignas(16) uniform_block
     float rgb_levels_min_output[3] = {0, 0, 0};   // 572
     float _padB = 0;                                // 584
     float rgb_levels_max_output[3] = {1, 1, 1};   // 588
-    float _padC = 0;                                // 600
+    // Was `_padC`. std140 padding reused, so no offset moves: this is
+    // `rgb_max_output_pad.w` in the shader, and it is the YCbCr code scale -- 255 for an
+    // 8-bit texture, 65535/256 for a 16-bit one. See fragment_shader.frag.
+    float ycbcr_code_scale = 255.0f;                // 600
 
     // ── Blur ────────────────────────────────────────────────────────────
     float   blur_radius = 0;               // 604
