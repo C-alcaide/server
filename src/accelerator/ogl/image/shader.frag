@@ -867,19 +867,27 @@ vec3 apply_qualifier(vec3 c, float tgt_hue, float hue_w, float min_s, float max_
 
 // ---- Per-channel RGB Levels ----
 // Applies independent input range, gamma, and output range per R, G, B channel.
+//
+// The gamma is bounded to [0.01, 100] BEFORE the reciprocal, matching apply_lmg.
+// Clamping after it instead -- max(1.0/gamma, 0.01) -- is what the Vulkan kernel did,
+// and the two backends then disagreed outside the sane range in both directions: at
+// gamma 0 the reciprocal is Inf, max(Inf, 0.01) is Inf and pow(c, Inf) collapses the
+// channel to black, where this side gave an exponent of 100; above gamma 100 this side
+// kept shrinking the exponent while the other floored it at 0.01. Inside the range the
+// two forms are algebraically identical, which is why nothing showed in normal use.
 vec3 apply_rgb_levels(vec3 c)
 {
     // R
     c.r = clamp((c.r - rgb_levels_min_input[0]) / max(rgb_levels_max_input[0] - rgb_levels_min_input[0], 0.0001), 0.0, 1.0);
-    c.r = pow(c.r, 1.0 / max(rgb_levels_gamma[0], 0.01));
+    c.r = pow(c.r, 1.0 / clamp(rgb_levels_gamma[0], 0.01, 100.0));
     c.r = mix(rgb_levels_min_output[0], rgb_levels_max_output[0], c.r);
     // G
     c.g = clamp((c.g - rgb_levels_min_input[1]) / max(rgb_levels_max_input[1] - rgb_levels_min_input[1], 0.0001), 0.0, 1.0);
-    c.g = pow(c.g, 1.0 / max(rgb_levels_gamma[1], 0.01));
+    c.g = pow(c.g, 1.0 / clamp(rgb_levels_gamma[1], 0.01, 100.0));
     c.g = mix(rgb_levels_min_output[1], rgb_levels_max_output[1], c.g);
     // B
     c.b = clamp((c.b - rgb_levels_min_input[2]) / max(rgb_levels_max_input[2] - rgb_levels_min_input[2], 0.0001), 0.0, 1.0);
-    c.b = pow(c.b, 1.0 / max(rgb_levels_gamma[2], 0.01));
+    c.b = pow(c.b, 1.0 / clamp(rgb_levels_gamma[2], 0.01, 100.0));
     c.b = mix(rgb_levels_min_output[2], rgb_levels_max_output[2], c.b);
     return c;
 }
