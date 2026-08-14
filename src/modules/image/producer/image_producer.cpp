@@ -57,7 +57,22 @@ struct image_producer : public core::frame_producer
             av_frame = convert_image_frame(av_frame, AV_PIX_FMT_BGRA);
 
         auto frame =
-            ffmpeg::make_frame(this, *frame_factory, av_frame, nullptr, core::color_space::bt709, scale_mode, true);
+            ffmpeg::make_frame(this,
+                               *frame_factory,
+                               av_frame,
+                               nullptr,
+                               core::color_space::bt709,
+                               scale_mode,
+                               /*is_straight_alpha=*/true,
+                               // Marked as specified so the mixers' sub-720 BT.601
+                               // fallback does not fire on a small still. This producer
+                               // states BT.709 rather than defaulting to it, and the
+                               // frame is BGRA: there is no YCbCr matrix to choose, so
+                               // the SD convention has nothing to say about it. Without
+                               // this a 640x480 PNG would be treated as BT.601, which
+                               // also picks the luma coefficients the grading chain and
+                               // MIXER SATURATION use.
+                               /*color_space_specified=*/true);
         frame_ = core::draw_frame(std::move(frame));
 
         state_["file/path"] = description_;
@@ -78,7 +93,22 @@ struct image_producer : public core::frame_producer
             av_frame = convert_image_frame(av_frame, AV_PIX_FMT_BGRA);
 
         auto frame =
-            ffmpeg::make_frame(this, *frame_factory, av_frame, nullptr, core::color_space::bt709, scale_mode, true);
+            ffmpeg::make_frame(this,
+                               *frame_factory,
+                               av_frame,
+                               nullptr,
+                               core::color_space::bt709,
+                               scale_mode,
+                               /*is_straight_alpha=*/true,
+                               // Marked as specified so the mixers' sub-720 BT.601
+                               // fallback does not fire on a small still. This producer
+                               // states BT.709 rather than defaulting to it, and the
+                               // frame is BGRA: there is no YCbCr matrix to choose, so
+                               // the SD convention has nothing to say about it. Without
+                               // this a 640x480 PNG would be treated as BT.601, which
+                               // also picks the luma coefficients the grading chain and
+                               // MIXER SATURATION use.
+                               /*color_space_specified=*/true);
         frame_ = core::draw_frame(std::move(frame));
 
         CASPAR_LOG(info) << print() << L" Initialized";
