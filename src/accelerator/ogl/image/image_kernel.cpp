@@ -201,17 +201,21 @@ struct image_kernel::impl
         // Nothing downstream can repair the choice: this matrix is applied in
         // ycbcra_to_rgba at texture-fetch time, before any colour management.
         //
-        // Three conditions defeat the fallback, each answering a different question:
-        //   * the source SAID what it is         -> never second-guess metadata
-        //   * the source is larger than SD       -> the original heuristic, unchanged
-        //   * the channel is a CUSTOM format     -> an LED wall or projector, not an SD
-        //     broadcast destination. A small raster there is a panel size and implies
-        //     nothing about colour space.
+        // Two conditions defeat the fallback:
+        //   * the source SAID what it is    -> never second-guess metadata
+        //   * the source is larger than SD  -> the original heuristic, unchanged
+        //
+        // Deliberately nothing about the DESTINATION. What matrix a file was encoded with
+        // is a property of the file; the channel raster cannot know it. Keying off the
+        // channel would trade one guess for another -- it would read untagged BT.601
+        // material as BT.709 on any non-broadcast raster, which is a regression for
+        // exactly the SD content this convention exists to serve. Where the guess is
+        // wrong and the file cannot be re-tagged, the answer is an explicit override, not
+        // a second heuristic.
         const auto is_hd = params.pix_desc.planes.at(0).height > 700;
-        const auto color_space =
-            (params.pix_desc.color_space_specified || is_hd || params.target_is_custom_format)
-                ? params.pix_desc.color_space
-                : core::color_space::bt601;
+        const auto color_space = (params.pix_desc.color_space_specified || is_hd)
+                                     ? params.pix_desc.color_space
+                                     : core::color_space::bt601;
 
         const float color_matrices[3][9] = {
             {1.0, 0.0, 1.402, 1.0, -0.344, -0.509, 1.0, 1.772, 0.0},                          // bt.601

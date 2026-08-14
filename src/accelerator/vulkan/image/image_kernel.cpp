@@ -302,17 +302,15 @@ struct image_kernel::impl
         // Nothing downstream can repair the choice: this matrix is applied in
         // ycbcra_to_rgba at texture-fetch time, before any colour management.
         //
-        // Three conditions defeat the fallback, each answering a different question:
-        //   * the source SAID what it is         -> never second-guess metadata
-        //   * the source is larger than SD       -> the original heuristic, unchanged
-        //   * the channel is a CUSTOM format     -> an LED wall or projector, not an SD
-        //     broadcast destination. A small raster there is a panel size and implies
-        //     nothing about colour space.
+        // Two conditions defeat the fallback:
+        //   * the source SAID what it is    -> never second-guess metadata
+        //   * the source is larger than SD  -> the original heuristic, unchanged
+        //
+        // Deliberately nothing about the DESTINATION -- see the OpenGL kernel for why.
         const auto is_hd = params.pix_desc.planes.at(0).height > 700;
-        const auto color_space =
-            (params.pix_desc.color_space_specified || is_hd || params.target_is_custom_format)
-                ? params.pix_desc.color_space
-                : core::color_space::bt601;
+        const auto color_space = (params.pix_desc.color_space_specified || is_hd)
+                                     ? params.pix_desc.color_space
+                                     : core::color_space::bt601;
         uniforms.color_space_index = static_cast<uint32_t>(color_space);
 
         if (params.pix_desc.is_straight_alpha) {
