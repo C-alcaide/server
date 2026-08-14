@@ -1,6 +1,71 @@
 CasparVP — Unreleased
 ==========================================
 
+### Changed: the YCbCr decode matrix no longer depends on the channel's video mode
+
+**This changes rendered output** for one configuration: an untagged sub-720 YCbCr source on
+a channel in a CUSTOM video mode now decodes as BT.601 where it decoded as BT.709.
+
+The fork carried a `target_is_custom_format` term that defeated the sub-720 BT.601
+convention whenever the channel was a custom mode, reasoning that an LED wall's small raster
+is a panel size rather than SD broadcast content. Upstream rejected it
+(CasparCG/server#1775): what matrix a file was encoded with is a property of the file, and
+keying off the channel trades one guess for another — it read untagged BT.601 material as
+BT.709 on any custom raster, which is a regression for exactly the SD content the convention
+exists to serve. Measured before the change, an untagged BT.601 clip on a 1280x720 custom
+channel decoded as BT.709 at 0.54 LSB against the model, i.e. confidently wrong.
+
+There was a second cost, and it is the one that settled the decision: the rule became
+**unimplementable outside the mixer**. `write_frame_png` has no channel to ask, so PRINT RAW
+could not reproduce the mixer's choice — see the entry below. With the term gone,
+`core::decode_color_space(desc)` takes only the source descriptor and every path that needs a
+decode matrix agrees by construction. The `draw_params` field is removed from both backends.
+
+Where the SD convention guesses wrong and a file cannot be re-tagged, the answer is an
+explicit override rather than a second heuristic.
+
+Measured, both mixers, source-colorspace — each case matched against closed-form predictions
+of both candidate decodes rather than against a tolerance:
+
+| clip | channel | decoded | residual |
+| :--- | :--- | :--- | ---: |
+| tagged BT.709 640x480 | 1080p | bt709 | 1.66 LSB |
+| tagged SMPTE170M 640x480 | 1080p | bt601 | 0.41 LSB |
+| untagged, true 601 | 1080p | bt601 | 0.41 LSB |
+| untagged, true 709 | 1080p | bt601 | 1.23 LSB |
+| untagged, true 709 | 1280x720 **custom** | bt601 | 1.23 LSB |
+| untagged, true 601 | 1280x720 **custom** | bt601 | 0.41 LSB |
+
+The last two rows are the change; they now produce the residuals their standard-channel twins
+do, which is the point — the channel no longer enters into it. Residuals identical on OpenGL
+and Vulkan. Unchanged elsewhere: conformance **100/100** within 1.0 LSB and `flat-decoded`
+**6/6 formats PASS** (8/10/12-bit x 420/422/444, worst delta 0.01 LSB / neutral spread 0.00),
+both mixers.
+
+### Fixed: PRINT RAW decoded YCbCr with a different matrix than the composite
+
+`write_frame_png` passed the raw `pix_desc.color_space` to its CPU YCbCr→RGB conversion. An
+undeclared source carries `unknown`, which falls to the BT.709 branch, while the mixer
+resolves it to BT.601 below 720 lines — so `PRINT RAW` wrote a picture the composite never
+showed. Computed over four saturated patches, the two decodes differ by up to **27.9 LSB**
+per channel, and **not at all on greys**.
+
+Now `core::decode_color_space(desc)`, the same resolution the kernels use, at all four
+conversion sites (8-bit and high-bit-depth, `ycbcr`/`nv12` and `ycbcra`). This is a one-line
+fix per site only because the change above removed the channel-dependent term; while that
+term existed, the same edit would have been correct on standard channels and newly wrong on
+custom ones.
+
+**Why nothing caught it, which is the part worth keeping.** The right check already exists —
+`mixer.raw_vs_composite` compares the PRINT RAW dump against the mixer output on an internal
+oracle gated at 55 dB PSNR, about 0.45 LSB RMS, so 27.9 LSB would fail it enormously. It has
+never had the chance: every fixture is 1920x1080, and PRINT RAW dumps the **source** raster,
+so even on a PAL channel both sides see 1080 lines and agree on BT.709. Meanwhile
+`source-colorspace`, the one battery with 640x480 fixtures, captures the composite through a
+screen consumer and never calls PRINT RAW. The check with the right oracle had no SD source;
+the battery with SD sources did not touch the path. **Still unmeasured** — closing it needs a
+sub-720 YCbCr fixture on a matching SD channel with conversion off.
+
 ### Fixed: `ycbcr_code_scale` was written to whichever program was bound last
 
 `image_kernel.cpp` set this uniform beside the texture binding — where the source's bit

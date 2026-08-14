@@ -188,22 +188,20 @@ inline bool operator!=(const pixel_format_desc& lhs, const pixel_format_desc& rh
 /// at texture-fetch time, before the colour-management block, so `auto-color-convert` and
 /// `MIXER COLORSPACE` both act too late.
 ///
-/// `target_is_custom_format` is CasparVP-only and deliberately keys off the DESTINATION: a
-/// custom video mode is an LED wall or a projector, where a small raster is a panel size
-/// and implies nothing about colour space. Upstream rejected this term (CasparCG/server
-/// #1775) on the grounds that a file's encoding matrix cannot depend on where it is shown,
-/// and it costs a real case — measured on the Vulkan mixer, an untagged BT.601 clip on a
-/// custom raster decodes as BT.709 at 0.54 LSB, i.e. wrongly. It is kept because LED-wall
-/// content at odd small sizes is this fork's primary input; revisit it if that stops being
-/// true, and note the harness's two CUSTOM rows encode UPSTREAM's expectation and so fail
-/// here by design.
-inline color_space decode_color_space(const pixel_format_desc& desc, bool target_is_custom_format = false)
+/// Nothing about the DESTINATION enters into it, and that is deliberate. This fork used to
+/// carry a `target_is_custom_format` term that defeated the convention on a custom video
+/// mode, reasoning that an LED wall's small raster is a panel size rather than SD broadcast
+/// content. It was wrong twice over. Upstream rejected it (CasparCG/server#1775) because a
+/// file's encoding matrix cannot depend on where it is shown — measured, an untagged BT.601
+/// clip on a custom raster decoded as BT.709, i.e. wrongly, at 0.54 LSB against the model.
+/// And it made this rule unimplementable outside the mixer: `write_frame_png` has no channel
+/// to ask, so PRINT RAW decoded with BT.709 while the composite used BT.601, a disagreement
+/// of up to 27.9 LSB on saturated colour. With the term gone the only input is the source
+/// descriptor, so every path that resolves a decode matrix agrees by construction.
+inline color_space decode_color_space(const pixel_format_desc& desc)
 {
     if (desc.color_space != color_space::unknown) {
         return desc.color_space;
-    }
-    if (target_is_custom_format) {
-        return color_space::bt709;
     }
     return desc.planes.at(0).height > 700 ? color_space::bt709 : color_space::bt601;
 }

@@ -501,10 +501,6 @@ class image_renderer
     {
         draw_params draw_params;
         draw_params.target_width  = format_desc.square_width;
-        // A custom channel format is an LED wall or projector, not an SD broadcast
-        // destination; the kernel uses this to stop a small raster implying BT.601.
-        draw_params.target_is_custom_format =
-            format_desc.format == core::video_format::custom;
         draw_params.target_height = format_desc.square_height;
         draw_params.target_color_space    = target_color_space;
         draw_params.target_color_transfer = target_color_transfer;
@@ -574,10 +570,6 @@ class image_renderer
 
         draw_params draw_params;
         draw_params.target_width    = format_desc.square_width;
-        // A custom channel format is an LED wall or projector, not an SD broadcast
-        // destination; the kernel uses this to stop a small raster implying BT.601.
-        draw_params.target_is_custom_format =
-            format_desc.format == core::video_format::custom;
         draw_params.target_height   = format_desc.square_height;
         draw_params.pix_desc.format = core::pixel_format::bgra;
         draw_params.pix_desc.planes = {core::pixel_format_desc::plane(
@@ -605,10 +597,6 @@ class image_renderer
 
         draw_params draw_params;
         draw_params.target_width    = format_desc.square_width;
-        // A custom channel format is an LED wall or projector, not an SD broadcast
-        // destination; the kernel uses this to stop a small raster implying BT.601.
-        draw_params.target_is_custom_format =
-            format_desc.format == core::video_format::custom;
         draw_params.target_height   = format_desc.square_height;
         draw_params.pix_desc.format = core::pixel_format::bgra;
         draw_params.pix_desc.planes = {core::pixel_format_desc::plane(
@@ -650,7 +638,6 @@ class image_renderer
         draw_params draw_params;
         draw_params.target_width  = format_desc.square_width;
         draw_params.target_height = format_desc.square_height;
-        draw_params.target_is_custom_format = format_desc.format == core::video_format::custom;
         draw_params.pix_desc.format = core::pixel_format::bgra;
         draw_params.pix_desc.planes = {core::pixel_format_desc::plane(
             source_texture->width(), source_texture->height(), 4, source_texture->depth())};
@@ -718,7 +705,6 @@ class image_renderer
         draw_params draw_params;
         draw_params.target_width  = format_desc.square_width;
         draw_params.target_height = format_desc.square_height;
-        draw_params.target_is_custom_format = format_desc.format == core::video_format::custom;
         draw_params.pix_desc.format = core::pixel_format::bgra;
         draw_params.pix_desc.planes = {core::pixel_format_desc::plane(
             source_texture->width(), source_texture->height(), 4, source_texture->depth())};

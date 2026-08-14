@@ -67,6 +67,14 @@ bool is_hbd(const pixel_format_desc& desc)
 // cr_to_r = 2*(1-Kr), cb_to_b = 2*(1-Kb)
 // cb_to_g = -Kb*(1-Kb)/Kg * 2, cr_to_g = -Kr*(1-Kr)/Kg * 2
 // where Kg = 1 - Kr - Kb
+//
+// Call this with `core::decode_color_space(desc)`, never `desc.color_space`. An undeclared
+// source carries `unknown`, which falls through to the BT.709 branch below, while the mixer
+// resolves it to BT.601 under 720 lines -- so PRINT RAW wrote a picture the composite never
+// showed, disagreeing by up to 27.9 LSB on saturated colour and not at all on greys. No
+// battery could see it: the check that would (`mixer.raw_vs_composite`, PRINT RAW against
+// the mixer output) has only ever had 1920x1080 fixtures, and PRINT RAW dumps the SOURCE
+// raster, so both sides picked BT.709 and agreed.
 struct ycbcr_coeffs {
     double cr_to_r, cb_to_g, cr_to_g, cb_to_b;
 };
@@ -261,7 +269,7 @@ bool write_frame_png(const const_frame& frame, const std::wstring& path)
                 const double y_rng  = 219.0 * scale;
                 const double c_off  = 128.0 * scale;
                 const double c_rng  = 224.0 * scale;
-                const auto   coeff  = get_ycbcr_coeffs(desc.color_space);
+                const auto   coeff  = get_ycbcr_coeffs(decode_color_space(desc));
 
                 for (int row = 0; row < height; ++row) {
                     for (int col = 0; col < width; ++col) {
@@ -319,7 +327,7 @@ bool write_frame_png(const const_frame& frame, const std::wstring& path)
                 const double y_rng  = 219.0 * scale;
                 const double c_off  = 128.0 * scale;
                 const double c_rng  = 224.0 * scale;
-                const auto   coeff  = get_ycbcr_coeffs(desc.color_space);
+                const auto   coeff  = get_ycbcr_coeffs(decode_color_space(desc));
 
                 for (int row = 0; row < height; ++row) {
                     for (int col = 0; col < width; ++col) {
@@ -429,7 +437,7 @@ bool write_frame_png(const const_frame& frame, const std::wstring& path)
             const int   cb_h  = desc.planes[1].height;
             const int   sub_x = (cb_w < width) ? (width / cb_w) : 1;
             const int   sub_y = (cb_h < height) ? (height / cb_h) : 1;
-            const auto  coeff = get_ycbcr_coeffs(desc.color_space);
+            const auto  coeff = get_ycbcr_coeffs(decode_color_space(desc));
 
             auto* dst = rgba.data();
             for (int row = 0; row < height; ++row) {
@@ -462,7 +470,7 @@ bool write_frame_png(const const_frame& frame, const std::wstring& path)
             const int   cb_h  = desc.planes[1].height;
             const int   sub_x = (cb_w < width) ? (width / cb_w) : 1;
             const int   sub_y = (cb_h < height) ? (height / cb_h) : 1;
-            const auto  coeff = get_ycbcr_coeffs(desc.color_space);
+            const auto  coeff = get_ycbcr_coeffs(decode_color_space(desc));
 
             auto* dst = rgba.data();
             for (int row = 0; row < height; ++row) {

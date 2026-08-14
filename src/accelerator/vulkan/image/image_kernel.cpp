@@ -1383,7 +1383,7 @@ struct image_kernel::impl
 
         // Both mixers must resolve this identically, so the rule lives in
         // core::decode_color_space -- see the account there.
-        const auto color_space = core::decode_color_space(params.pix_desc, params.target_is_custom_format);
+        const auto color_space = core::decode_color_space(params.pix_desc);
         // YCbCr decode: only indices 0-2 (bt601/bt709/bt2020) are valid in the shader arrays.
         // Wide-gamut spaces (P3, Adobe RGB) use BT.709 coefficients as fallback,
         // because if the source had BT.2020 matrix, av_color.h would have returned bt2020 directly.
