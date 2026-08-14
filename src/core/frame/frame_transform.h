@@ -328,6 +328,97 @@ struct shape_config final
     std::array<double, 4> stroke_color    = {1.0, 1.0, 1.0, 1.0}; // RGBA
 };
 
+/// An inclusive range for a grading parameter, and the clamp that enforces it.
+struct grade_range final
+{
+    double lo;
+    double hi;
+
+    [[nodiscard]] constexpr bool contains(double v) const
+    {
+        // Written as a positive test so a NaN falls outside: every comparison against
+        // NaN is false. std::stod("nan") succeeds, so without this a MIXER command
+        // could put a NaN into the transform and every pixel it touched would go black.
+        return v >= lo && v <= hi;
+    }
+
+    [[nodiscard]] constexpr double clamp(double v) const
+    {
+        if (!(v >= lo)) // also catches NaN, which must not survive as itself
+            return lo;
+        return v > hi ? hi : v;
+    }
+};
+
+/// Legal ranges for the grading parameters.
+///
+/// One table, used twice: the MIXER commands refuse anything outside it, and combining
+/// transforms clamps the result back into it. Both have to agree, or a value no single
+/// command could set becomes reachable by stacking two layers.
+///
+/// The bounds are deliberately generous rather than tasteful. They exist to keep the
+/// arithmetic defined and to stop a typo from blacking out a layer, not to enforce a
+/// look, so they sit well outside what a grade would normally use. Where a standard
+/// gives one it is followed: ASC CDL requires slope >= 0, power > 0 and saturation >= 0.
+///
+/// Kept identical to upstream's table (CasparCG/server#1765 and the four grading PRs
+/// that followed) for every parameter the two have in common, so a value legal there is
+/// legal here. The fork adds only what it has extra commands for.
+namespace grade_limits {
+
+inline constexpr grade_range temperature{-1.0, 1.0};
+inline constexpr grade_range tint{-1.0, 1.0};
+inline constexpr grade_range lift{-1.0, 1.0};
+/// The shader raises to 1/midtone, so zero is a division by zero and negatives invert
+/// the curve. Matches the clamp in apply_lmg.
+inline constexpr grade_range midtone{0.01, 100.0};
+inline constexpr grade_range gain{0.0, 10.0};
+/// Rotation is periodic, so this is a wrap rather than a clamp -- see
+/// apply_transform_colour_values. 200 degrees is -160, not 180.
+inline constexpr grade_range hue_shift{-180.0, 180.0};
+inline constexpr grade_range tone{-1.0, 1.0}; // shadows / highlights
+inline constexpr grade_range split_color{-1.0, 1.0};
+inline constexpr grade_range split_balance{0.0, 1.0};
+inline constexpr grade_range cdl_slope{0.0, 10.0};
+inline constexpr grade_range cdl_offset{-1.0, 1.0};
+inline constexpr grade_range cdl_power{0.01, 10.0};
+inline constexpr grade_range cdl_saturation{0.0, 10.0};
+
+// Secondary qualifier, gamut compression and per-channel levels.
+inline constexpr grade_range gamut_limit{1.0, 2.0};
+inline constexpr grade_range hue_degrees{0.0, 360.0};
+inline constexpr grade_range hue_width{0.0, 180.0};
+inline constexpr grade_range unit{0.0, 1.0}; // saturation / luminance bounds, softness
+inline constexpr grade_range offset{-1.0, 1.0};
+inline constexpr grade_range level{0.0, 1.0};
+/// RGBLEVELS' per-channel gamma. Same bounds as `midtone` and the same reason: the
+/// shader raises to 1/gamma. apply_rgb_levels clamps to exactly this range.
+inline constexpr grade_range level_gamma{0.01, 100.0};
+
+// Image effects.
+inline constexpr grade_range blur_radius{0.0, 200.0};
+inline constexpr grade_range blur_angle{-360.0, 360.0};
+inline constexpr grade_range sharpen_amount{0.0, 5.0};
+inline constexpr grade_range sharpen_radius{0.1, 10.0};
+inline constexpr grade_range grain_intensity{0.0, 1.0};
+inline constexpr grade_range grain_size{0.5, 10.0};
+
+// LUTs and curves.
+inline constexpr grade_range lut3d_strength{0.0, 1.0};
+inline constexpr grade_range curve_coord{0.0, 1.0};
+inline constexpr grade_range hue_curve_offset{-1.0, 1.0};
+/// Hue-vs-sat and sat-vs-sat are MULTIPLIERS, not offsets, so they need their own range.
+/// Sharing `hue_curve_offset` refused a legal command: 1.45 is an ordinary saturation
+/// boost and sits outside -1..1.
+inline constexpr grade_range hue_curve_scale{0.0, 4.0};
+
+/// A linear gain in the working space. Serves both `MIXER COLORSPACE`'s 6th argument
+/// (core::color_grade::exposure) and the fork's own `MIXER EXPOSURE`, which are separate
+/// fields but the same quantity: 16 stops of headroom either way.
+inline constexpr grade_range exposure{0.0, 16.0};
+
+} // namespace grade_limits
+
 struct image_transform final
 {
     double opacity    = 1.0;
