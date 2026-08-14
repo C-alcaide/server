@@ -1628,8 +1628,14 @@ vec4 get_blurred_color(vec2 uv)
 
             vec4 col = sample_wrap(uv + offset);
 
-            // Optical intensity mapping for distinct highlight bokeh
-            float lum = dot(col.rgb, vec3(0.299, 0.587, 0.114));
+            // Optical intensity mapping for distinct highlight bokeh.
+            //
+            // working_luma(), not a hand-written dot product: `col` is BGR here like the rest
+            // of the chain, so weighting it directly gave blue red's coefficient and red
+            // blue's, and the bokeh bloomed around the wrong highlights. The weights were
+            // Rec.601 as well, ignoring the source's own coefficients. Greys are
+            // invariant under the exchange, so only saturated highlights showed it.
+            float lum = working_luma(col.rgb);
             float weight = 1.0 + pow(max(lum - 0.3, 0.0), 3.0) * 15.0;
 
             // Optical ring weighting (brighter towards edge)
