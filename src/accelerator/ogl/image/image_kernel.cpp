@@ -1037,8 +1037,8 @@ struct image_kernel::impl
                     // — the RGB order — so the cyan and yellow limits were exchanged
                     // and the auto path disagreed with both the manual path below and
                     // with the Vulkan kernel, which grades in RGB and was correct.
-                    shader_->set("gc_limit", 1.312f /*yellow(B)*/, 1.264f /*magenta(G)*/,
-                                 1.147f /*cyan(R)*/);
+                    shader_->set("gc_limit", 1.147f /*cyan*/, 1.264f /*magenta*/,
+                                 1.312f /*yellow*/);
                 } else {
                     shader_->set("gamut_compress_enable", false);
                 }
@@ -1138,9 +1138,11 @@ struct image_kernel::impl
                 shader_->set("lmg_enable",  true);
                 // Shader internal: color.r=Blue_displayed, color.b=Red_displayed
                 // Upload as [B_param, G_param, R_param] so .r affects displayed Blue, .b affects displayed Red
-                shader_->set("lmg_lift",    lift[2],    lift[1],    lift[0]);
-                shader_->set("lmg_midtone", midtone[2], midtone[1], midtone[0]);
-                shader_->set("lmg_gain",    gain[2],    gain[1],    gain[0]);
+                // RGB, like every other per-channel uniform. The shader carries the
+                // pixel in BGR and applies `.bgr` at the call site.
+                shader_->set("lmg_lift",    lift[0],    lift[1],    lift[2]);
+                shader_->set("lmg_midtone", midtone[0], midtone[1], midtone[2]);
+                shader_->set("lmg_gain",    gain[0],    gain[1],    gain[2]);
             } else {
                 shader_->set("lmg_enable", false);
             }
@@ -1186,9 +1188,9 @@ struct image_kernel::impl
             if (cdl_active) {
                 shader_->set("cdl_enable", true);
                 // Swap R<->B for BGRA convention: user R=[0], shader .b=Red -> index [2]
-                shader_->set("cdl_slope",      s[2], s[1], s[0]);
-                shader_->set("cdl_offset",     o[2], o[1], o[0]);
-                shader_->set("cdl_power",      p[2], p[1], p[0]);
+                shader_->set("cdl_slope",      s[0], s[1], s[2]);
+                shader_->set("cdl_offset",     o[0], o[1], o[2]);
+                shader_->set("cdl_power",      p[0], p[1], p[2]);
                 shader_->set("cdl_saturation", static_cast<float>(cs));
             } else {
                 shader_->set("cdl_enable", false);
@@ -1234,11 +1236,10 @@ struct image_kernel::impl
         // cancelled automatic gamut compression on every draw.
         if (transforms.image_transform.gamut_compress && in_working_space) {
             shader_->set("gamut_compress_enable", true);
-            // BGRA order: .r=Blue(yellow), .g=Green(magenta), .b=Red(cyan)
             shader_->set("gc_limit",
-                         static_cast<float>(transforms.image_transform.gc_yellow),
+                         static_cast<float>(transforms.image_transform.gc_cyan),
                          static_cast<float>(transforms.image_transform.gc_magenta),
-                         static_cast<float>(transforms.image_transform.gc_cyan));
+                         static_cast<float>(transforms.image_transform.gc_yellow));
         } else if (!gamut_compress_from_auto) {
             shader_->set("gamut_compress_enable", false);
         }
@@ -1380,23 +1381,24 @@ struct image_kernel::impl
             const auto& rl = transforms.image_transform.per_channel_levels;
             if (rl.enable) {
                 shader_->set("rgb_levels_enable", true);
-                // Shader [0] -> color.r = Blue_displayed, [2] -> color.b = Red_displayed
-                // Map user's R channel -> index [2], B channel -> index [0]
-                shader_->set("rgb_levels_min_input[0]",  static_cast<float>(rl.b.min_input));
+                // Slot [0] is the user's RED channel. apply_rgb_levels() reads the slot
+                // for each channel rather than the slot at its own index, because the
+                // shader carries the pixel in BGR.
+                shader_->set("rgb_levels_min_input[0]",   static_cast<float>(rl.r.min_input));
                 shader_->set("rgb_levels_min_input[1]",  static_cast<float>(rl.g.min_input));
-                shader_->set("rgb_levels_min_input[2]",  static_cast<float>(rl.r.min_input));
-                shader_->set("rgb_levels_max_input[0]",  static_cast<float>(rl.b.max_input));
+                shader_->set("rgb_levels_min_input[2]",   static_cast<float>(rl.b.min_input));
+                shader_->set("rgb_levels_max_input[0]",   static_cast<float>(rl.r.max_input));
                 shader_->set("rgb_levels_max_input[1]",  static_cast<float>(rl.g.max_input));
-                shader_->set("rgb_levels_max_input[2]",  static_cast<float>(rl.r.max_input));
-                shader_->set("rgb_levels_gamma[0]",      static_cast<float>(rl.b.gamma));
+                shader_->set("rgb_levels_max_input[2]",   static_cast<float>(rl.b.max_input));
+                shader_->set("rgb_levels_gamma[0]",       static_cast<float>(rl.r.gamma));
                 shader_->set("rgb_levels_gamma[1]",      static_cast<float>(rl.g.gamma));
-                shader_->set("rgb_levels_gamma[2]",      static_cast<float>(rl.r.gamma));
-                shader_->set("rgb_levels_min_output[0]", static_cast<float>(rl.b.min_output));
+                shader_->set("rgb_levels_gamma[2]",       static_cast<float>(rl.b.gamma));
+                shader_->set("rgb_levels_min_output[0]",  static_cast<float>(rl.r.min_output));
                 shader_->set("rgb_levels_min_output[1]", static_cast<float>(rl.g.min_output));
-                shader_->set("rgb_levels_min_output[2]", static_cast<float>(rl.r.min_output));
-                shader_->set("rgb_levels_max_output[0]", static_cast<float>(rl.b.max_output));
+                shader_->set("rgb_levels_min_output[2]",  static_cast<float>(rl.b.min_output));
+                shader_->set("rgb_levels_max_output[0]",  static_cast<float>(rl.r.max_output));
                 shader_->set("rgb_levels_max_output[1]", static_cast<float>(rl.g.max_output));
-                shader_->set("rgb_levels_max_output[2]", static_cast<float>(rl.r.max_output));
+                shader_->set("rgb_levels_max_output[2]",  static_cast<float>(rl.b.max_output));
             } else {
                 shader_->set("rgb_levels_enable", false);
             }
@@ -1411,15 +1413,14 @@ struct image_kernel::impl
                 auto lut_b = build_curve_lut(cv.blue);
                 auto lut_m = build_curve_lut(cv.master);
 
-                // Pack 4 LUTs into interleaved RGBA data
-                // Channel 0 (.r) -> color.r = Blue_displayed -> store user's Blue LUT
-                // Channel 2 (.b) -> color.b = Red_displayed  -> store user's Red LUT
+                // Packed RGBA, matching the Vulkan kernel. apply_curves() reads the
+                // slot for each channel rather than the slot at its own index.
                 std::vector<float> rgba_data(256 * 4);
                 for (int i = 0; i < 256; ++i) {
-                    rgba_data[i * 4 + 0] = lut_b[i];  // .r slot = Blue displayed
-                    rgba_data[i * 4 + 1] = lut_g[i];  // .g slot = Green (unchanged)
-                    rgba_data[i * 4 + 2] = lut_r[i];  // .b slot = Red displayed
-                    rgba_data[i * 4 + 3] = lut_m[i];  // .a slot = master (unchanged)
+                    rgba_data[i * 4 + 0] = lut_r[i];
+                    rgba_data[i * 4 + 1] = lut_g[i];
+                    rgba_data[i * 4 + 2] = lut_b[i];
+                    rgba_data[i * 4 + 3] = lut_m[i];  // master
                 }
 
                 // Create texture on first use

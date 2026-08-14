@@ -166,7 +166,7 @@ uniform float split_balance;
 
 // Gamut compression (ACES 1.3 Reference Gamut Compress)
 uniform bool  gamut_compress_enable;
-uniform vec3  gc_limit;  // .r=yellow(B), .g=magenta(G), .b=cyan(R) in BGRA order
+uniform vec3  gc_limit;  // (cyan, magenta, yellow) in RGB order; swizzled at the call site
 
 // 3D LUT
 uniform bool      lut3d_enable;
@@ -888,18 +888,22 @@ vec3 apply_qualifier(vec3 c, float tgt_hue, float hue_w, float min_s, float max_
 // two forms are algebraically identical, which is why nothing showed in normal use.
 vec3 apply_rgb_levels(vec3 c)
 {
-    // R
-    c.r = clamp((c.r - rgb_levels_min_input[0]) / max(rgb_levels_max_input[0] - rgb_levels_min_input[0], 0.0001), 0.0, 1.0);
-    c.r = pow(c.r, 1.0 / clamp(rgb_levels_gamma[0], 0.01, 100.0));
-    c.r = mix(rgb_levels_min_output[0], rgb_levels_max_output[0], c.r);
-    // G
+    // The uniforms are indexed by the USER's channel -- [0] is red -- while `c` is BGR, so
+    // c.r (which holds blue) reads slot [2] and c.b reads slot [0]. This is the array form
+    // of the `.bgr` the other per-channel uniforms take at their call sites; an array
+    // cannot be swizzled, so the exchange lives in the indices instead.
+    // c.r holds BLUE -> slot [2]
+    c.r = clamp((c.r - rgb_levels_min_input[2]) / max(rgb_levels_max_input[2] - rgb_levels_min_input[2], 0.0001), 0.0, 1.0);
+    c.r = pow(c.r, 1.0 / clamp(rgb_levels_gamma[2], 0.01, 100.0));
+    c.r = mix(rgb_levels_min_output[2], rgb_levels_max_output[2], c.r);
+    // c.g holds GREEN -> slot [1]
     c.g = clamp((c.g - rgb_levels_min_input[1]) / max(rgb_levels_max_input[1] - rgb_levels_min_input[1], 0.0001), 0.0, 1.0);
     c.g = pow(c.g, 1.0 / clamp(rgb_levels_gamma[1], 0.01, 100.0));
     c.g = mix(rgb_levels_min_output[1], rgb_levels_max_output[1], c.g);
-    // B
-    c.b = clamp((c.b - rgb_levels_min_input[2]) / max(rgb_levels_max_input[2] - rgb_levels_min_input[2], 0.0001), 0.0, 1.0);
-    c.b = pow(c.b, 1.0 / clamp(rgb_levels_gamma[2], 0.01, 100.0));
-    c.b = mix(rgb_levels_min_output[2], rgb_levels_max_output[2], c.b);
+    // c.b holds RED -> slot [0]
+    c.b = clamp((c.b - rgb_levels_min_input[0]) / max(rgb_levels_max_input[0] - rgb_levels_min_input[0], 0.0001), 0.0, 1.0);
+    c.b = pow(c.b, 1.0 / clamp(rgb_levels_gamma[0], 0.01, 100.0));
+    c.b = mix(rgb_levels_min_output[0], rgb_levels_max_output[0], c.b);
     return c;
 }
 
@@ -922,10 +926,12 @@ float sample_lut_256(float val, int ch)
 
 vec3 apply_curves(vec3 c)
 {
-    // Per-channel curves first
-    c.r = sample_lut_256(c.r, 0);
+    // Per-channel curves first. The texture is packed RGBA and `c` is BGR, so c.r
+    // (blue) reads slot 2 and c.b (red) reads slot 0 -- the same exchange as
+    // apply_rgb_levels above.
+    c.r = sample_lut_256(c.r, 2);
     c.g = sample_lut_256(c.g, 1);
-    c.b = sample_lut_256(c.b, 2);
+    c.b = sample_lut_256(c.b, 0);
     // Master curve applied as global tone (same remap to each channel)
     c.r = sample_lut_256(c.r, 3);
     c.g = sample_lut_256(c.g, 3);
@@ -1857,12 +1863,12 @@ void main()
     // backends, where before OGL applied it first. The two only differ for exposure != 1.0,
     // which no reachable command sets on this path today.
     if (gamut_compress_enable) {
-        col.rgb = apply_gamut_compress(col.rgb, gc_limit);
+        col.rgb = apply_gamut_compress(col.rgb, gc_limit.bgr);
     }
 
     // ASC CDL (Slope/Offset/Power)
     if (cdl_enable) {
-        col.rgb = apply_cdl(col.rgb, cdl_slope, cdl_offset, cdl_power, cdl_saturation);
+        col.rgb = apply_cdl(col.rgb, cdl_slope.bgr, cdl_offset.bgr, cdl_power.bgr, cdl_saturation);
     }
 
     // 3D LUT (creative look)
@@ -1881,7 +1887,7 @@ void main()
 
     // Apply Lift/Midtone/Gain
     if (lmg_enable) {
-        col.rgb = apply_lmg(col.rgb, lmg_lift, lmg_midtone, lmg_gain);
+        col.rgb = apply_lmg(col.rgb, lmg_lift.bgr, lmg_midtone.bgr, lmg_gain.bgr);
     }
 
     // Apply Split Toning
