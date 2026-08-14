@@ -21,8 +21,13 @@ working-space composite, the channel display transform, and the per-consumer vie
 Each has a battery in `CasparCG-TestRunner` — `alpha-domain`, `banding`, `blend-domain`,
 `ocio-display`, `consumer-view` — and OGL/Vulkan agree byte-for-byte on every one.
 
-What remains is listed at the end of §2 step 4 and in "Also still open" below; the largest
-is that only the IMAGE consumer carries a view so far.
+**2026-08-14 — the phases are finished.** What remains is listed under "What is NOT verified"
+and "Cleanup"; none of it is a phase. The largest is that **no custom OCIO config can be
+loaded**, which is what makes the 3D-LUT path unreachable rather than merely untested — see
+that section.
+
+*(An earlier revision of this line said the largest gap was that only the IMAGE consumer
+carried a view. DeckLink and screen gained one on 2026-08-13, §2 step 4.)*
 
 The original note follows, kept because its reasoning is what produced the order of work.
 
@@ -398,24 +403,36 @@ It needs a successor, not an edit.
 
 ### Status of the code above
 
-**Nothing populates `draw_params.ocio_display`, so all of the display work is inert.** It
-compiles, it is regression-clean, and it has never executed. Both kernels were brought to
-readiness together deliberately, so the operator surface would light OpenGL and Vulkan up at
-once rather than shipping a parity gap.
+**No longer inert — driven since §2 step 3, 2026-08-12.** This section is kept as written
+because its two predictions were both wrong in an instructive direction, and the record of
+that is worth more than a tidy paragraph.
 
-Per the reorder in "Resume here", the splice location and the `draw_params` plumbing are
-expected to be **rewritten** for a post-composite stage. Leave them — they cost nothing and
-they document the shape. `build_display_transform`, the binding ranges and the 1D/NEAREST
-fixes survive unchanged.
+*The original text:* **"Nothing populates `draw_params.ocio_display`, so all of the display
+work is inert. It compiles, it is regression-clean, and it has never executed."** True when
+written. Both kernels were brought to readiness together deliberately, so the operator surface
+would light OpenGL and Vulkan up at once rather than shipping a parity gap — and that part
+held: step 3 landed on both mixers at once.
 
-Still true whenever the operator surface is built: the LED calibration LUT carries a
+*The prediction that did not hold:* the splice location and the `draw_params` plumbing were
+expected to be **rewritten** for a post-composite stage. **They were not.** They simply had to
+be *driven from* the post-composite pass rather than from layer draws; the kernel's existing
+`ocio_out` override already suppressed the built-in output half. "Leave them — they cost
+nothing" turned out to understate it: they cost nothing and they were the answer.
+
+Note the standing hazard in that code, still true: **⚠ the OGL marker swizzles, the Vulkan one
+must not.**
+
+~~Still true whenever the operator surface is built: the LED calibration LUT carries a
 **render-fingerprint field**, and a display transform needs one too or the still-frame cache
-serves a stale look. `MIXER <ch> OCIO_DISPLAY "<display>" "<view>"` should validate against
-`has_display_view()`, which already exists — and quote both arguments, because every display
-and view name in this config contains spaces.
+serves a stale look.~~ **DONE — verified in source 2026-08-14.** `ocio_display` and
+`ocio_view` are fingerprint fields on both mixers, compared in `matches` and populated in
+`build_fingerprint`: `ogl/image/image_mixer.cpp:137,153,403` and
+`vulkan/image/image_mixer.cpp:143,159,464`. The command validates against `has_display_view()`
+and quotes both arguments, as this paragraph asked.
 
-A harness battery is still owed: `cli.py ocio` compares an input transform against OCIO's CPU
-processor, and the display half needs the same treatment. The oracle already has the pieces.
+~~A harness battery is still owed: `cli.py ocio` compares an input transform against OCIO's
+CPU processor, and the display half needs the same treatment.~~ **DONE** — `cli.py
+ocio-display`, §2 step 3, 4/4 views on both mixers.
 
 ### Three measurements that shape it
 
@@ -529,10 +546,56 @@ reporting"; it exits **2 for inconclusive** rather than folding that into a pass
 2. ~~**The Vulkan fp16 resolve blit** (`renderpass::commit()`).~~ **VERIFIED 2026-08-12.**
    `vk-validation --render-format fp16`: **0 VUIDs**, 12/12 commands accepted, server
    survived, positive control produced 8 messages. The barriers were correct as written.
-3. **A 3D LUT through the Vulkan OCIO path.** Implemented, and unreachable with the pinned
-   config — no colour space in it emits one. It reuses the two helpers `MIXER LUT3D` already
-   exercises, so it is inherited-proven rather than measured.
-4. **Vulkan OCIO end to end** — A4f.
+3. **A 3D LUT through the OCIO path, either mixer.** Implemented, and **unreachable — not
+   merely untested.** Traced 2026-08-14:
+
+   **`accelerator::ocio::load_config(uri)` has no caller.** It is written, it dispatches
+   `ocio://` against a filesystem path correctly, it logs and it handles reload — and nothing
+   in the tree calls it. `ensure_loaded_locked` hardcodes `DEFAULT_CONFIG_URI`, and there is
+   no `$OCIO` environment route. So the config is permanently the pinned built-in one, whose
+   55 colour spaces emit **zero** 3D textures. An earlier revision of this entry said "a
+   custom config that does emit one lands on proven code", which implies a configurability
+   that does not exist.
+
+   **The Vulkan code is sound where it can be checked by reading.** The three places a 3D
+   upload usually breaks are all correct:
+
+   * `edge_len` is populated from `get3DTexture` (`ocio_config.cpp:293`), not left at 0 —
+     which would have produced a zero-extent image;
+   * `create_lut_image_3d` is the same helper `MIXER LUT3D` calls
+     (`vulkan/image/image_kernel.cpp:956` and `:1124`), so the inherited-proof claim holds
+     for the allocation;
+   * **the copy covers the volume.** `ocio_lut.depth` defaults to 1 and is set to `sz` only
+     on the 3D branch, and `upload_lut_data` builds `Extent3D{w, h, depth_z}` from it. A
+     hardcoded `depth = 1` here would have uploaded one slice of the cube and rendered a
+     wrong look with no error anywhere.
+
+   **What is genuinely unproven is one thing, and it is the class of bug that already bit
+   here**: whether OCIO's generated `sampler3D` declaration matches the `e3D` view we create,
+   at an OCIO-chosen binding. That is structurally the same defect as the `sampler1D`-against-
+   an-Nx1-`e2D`-view mismatch found in A5 — which survived only because no input transform had
+   ever emitted that dimensionality. The 3D case is the same bet on a different number.
+
+   **The fix, in the order it has to happen:**
+
+   1. **Give `load_config` a caller** — an `<ocio-config>` element, validated, refusing rather
+      than warning. Worth doing on its own merits: studios have their own configs, and this is
+      the only reason the pin is absolute rather than a default.
+   2. **Then measure it.** One colour space whose transform is a `FileTransform` to a small
+      `.cube` forces `getNum3DTextures() == 1`; run it through the CPU-processor oracle
+      `cli.py ocio` already uses, on both mixers. That converts the class from inherited to
+      measured and covers the declaration match above.
+
+   Reaching it by hardcoding a different URI in a scratch build answers the question without
+   step 1, but leaves nothing behind that would catch a regression.
+
+   **Portability note, shared with `MIXER LUT3D` and therefore not new**:
+   `R32G32B32A32_SFLOAT` is a required format for `SAMPLED_IMAGE` but **not** for
+   `SAMPLED_IMAGE_FILTER_LINEAR`, which is what a 3D LUT wants. It works on this hardware —
+   `MIXER LUT3D` is measured here — so it is a portability caveat rather than a defect.
+4. ~~**Vulkan OCIO end to end** — A4f.~~ **Stale, removed 2026-08-14**: the top of this file
+   has said "A4e and A4f are done… at parity" since it was written, and `cli.py ocio --mixer
+   vulkan` is in the gates below. The entry contradicted its own document.
 
 Also unverified: whether `(0,202,255)`-style agreement holds at **16-bit**.
 
@@ -677,10 +740,26 @@ refresh deployed DLLs (see `BUILDING_WORKFLOW.md` #7).
   the same model. The argument is unpinned; `Conversion.exposure` carries it.
 
   So `MIXER EXPOSURE` is an ordinary feature, not a feature behind a parity fix.
-* **fp16 vs fp32** — half answered, 2026-08-12. Measured: fp16's quantum is 32.0 LSB16 near
-  white, exactly 2× a 12-bit output step, and there is no `bit12` channel to have measured
-  it on (12-bit is a consumer property). What remains is whether fp16's *shadow* precision
-  is worth having, which a 16-bit unorm capture cannot see. `cli.py banding`.
+* ~~**fp16 vs fp32** — half answered, 2026-08-12.~~ **ANSWERED 2026-08-13.** The remaining
+  half was whether fp16's *shadow* precision is worth having. It is not, and the reason is
+  structural rather than a tighter measurement:
+
+  **In a display-encoded composite the render target's value IS the output value**, and no
+  consumer exceeds 16 bits — so a quantum finer than the output's own resolution cannot reach
+  anybody. fp16's shadow advantage is unobservable *by construction*, not merely below this
+  instrument's floor, while its highlight cost is measured: 4.0 LSB16 at 0.1 and 32 LSB16 near
+  white, the latter 2× a 12-bit output step.
+
+  **And where the shadows would be amplified into visibility — a scene-linear working space,
+  whose OETF multiplies a shadow quantum by 23× at 0.001 — the server already mandates fp16**,
+  because ACEScg carries values outside [0,1] that unorm cannot represent at all. There is no
+  unorm alternative there to compare against, so no choice exists to make.
+
+  **So: unorm for a display-encoded composite, fp16 only where the working space compels it.**
+  A blanket switch would trade an invisible gain for a measured highlight regression. §4.3.4's
+  argument for fp16 is sound about the arithmetic and moot about the configurations that
+  exist. Measured with `cli.py banding`; the table and the derivation are in that module's
+  docstring, including the level at which the instrument floors out rather than fp16.
 * ~~**A5's display transform: channel or consumer?**~~ **ANSWERED 2026-08-13: both, and
   they compose.** The channel has a default view (`OCIO_DISPLAY`) and any consumer may
   override it (`frame_consumer::ocio_view()`). The question read as either/or because the
@@ -695,7 +774,18 @@ refresh deployed DLLs (see `BUILDING_WORKFLOW.md` #7).
 
 ## Harness repo
 
-`CasparCG-TestRunner`, unpushed. `7b18ac9` (the OCIO oracle), `70f6c6f` (the `ocio` battery +
-tolerance doc), plus this session's `core/vk_validation.py`, its `cli.py` subcommand and
-`tests/test_vk_validation.py`. That last one earned itself immediately: it caught a message
-counter that double-counted one layer message as two.
+`CasparCG-TestRunner`, branch `audit-reporting-fixes`, **40 commits ahead of origin and still
+unpushed as of 2026-08-14** — the whole of this arc's measurement evidence lives there, so
+nothing above is reproducible from a fresh clone until it is.
+
+Batteries this arc added, each named where it is cited above: `ocio_reference` (the CPU
+oracle), `ocio_conformance`, `ocio_display`, `ocio_exposure`, `ocio_gamut_compress`,
+`blend_mask`, `blend_domain`, `consumer_view`, `banding`, `flat_decoded`, `vk_validation`.
+`vk_validation` earned itself immediately: it caught a message counter that double-counted one
+layer message as two.
+
+**Every battery claims its AMCP port** as of `893a094`. Before that, nine took 5250 on trust
+and would drive whichever server already answered — which `banding` actually did, sweeping
+`MIXER OPACITY` on `gamut-compress`'s server and corrupting a Vulkan baseline mint into what
+looked like a parity failure. If a measurement here ever disagrees with one recorded above,
+check what else was running before you check the mixer.

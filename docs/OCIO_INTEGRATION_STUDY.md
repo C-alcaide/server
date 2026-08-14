@@ -105,6 +105,20 @@ LUT directories, no install-path configuration. For a playout server this materi
 reduces the operational surface — and pinning the URI makes the colour behaviour of a
 build reproducible.
 
+**As shipped the pin is absolute, not a default — noted 2026-08-14.**
+`accelerator::ocio::load_config(uri)` implements custom-config loading correctly and **has no
+caller**; `ensure_loaded_locked` hardcodes the built-in URI and there is no `$OCIO`
+environment route. Two consequences, one intended and one not:
+
+* *Intended:* a build's colour behaviour cannot be changed by anything on the machine, which
+  is the strongest form of the reproducibility argument above.
+* *Not:* a studio with its own config has no way to use it, and — because no built-in space
+  emits a 3D LUT — the 3D-LUT branch of both OCIO uploaders is unreachable code that can
+  never be measured. See `OCIO_HANDOFF_2026-08-11.md`, "What is NOT verified" item 3.
+
+Giving `load_config` a caller (an `<ocio-config>` element, validated, refusing rather than
+warning) resolves both. The pin stays the default; it stops being the only possibility.
+
 ### 2.3 The substantive quality argument
 
 The fork's chain is built on **ACES 1.x approximations**: `COLOR_GRADING.md` describes
