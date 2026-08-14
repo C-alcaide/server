@@ -491,7 +491,11 @@ vec3 BlendLuminosity(vec3 base, vec3 blend)
 //      by F. van den Bergh & V. Lalioti
 // but as a pixel shader algorithm.
 //
-vec4  grey_xfer  = vec4(luma_coeff, 0);
+// `.bgr` for the same reason working_luma() has it: this chain carries the pixel in BGR,
+// so unswizzled coefficients would give blue red's weight. Currently UNUSED -- nothing
+// reads grey_xfer -- and left correct rather than removed because a dead path that is
+// wrong is a trap for whoever makes it live, which has already cost this file once.
+vec4  grey_xfer  = vec4(luma_coeff.bgr, 0);
 
 // This allows us to implement the paper's alphaMap curve in software
 // rather than a largeish array
@@ -533,9 +537,16 @@ float AngleDiff(float angle1, float angle2)
 // did not, so every one of them weighted the wrong channels. Greys are
 // unaffected, which is why it went unseen -- the error only shows on saturated
 // colour.
-float luma709(vec3 c)
+//
+// The weights come from `luma_coeff`, which the kernel sets from the SOURCE's colour
+// space, rather than from a hardcoded Rec.709 triple. Before this, MIXER SATURATION
+// (via ContrastSaturationBrightness) followed the source and CDL, TONEBALANCE,
+// SPLITTONE, QUALIFIER and the grain response did not -- two definitions of luminance
+// in one chain, differing on any BT.601 or BT.2020 source and agreeing exactly on
+// BT.709, which is why it never showed on the usual material.
+float working_luma(vec3 c)
 {
-    return dot(c.bgr, vec3(0.2126, 0.7152, 0.0722));
+    return dot(c.bgr, luma_coeff);
 }
 
 float AngleDiffDirectional(float angle1, float angle2)
@@ -663,7 +674,7 @@ vec3 apply_hue_shift(vec3 c, float degrees)
 // No clamping â€” preserves HDR headroom for downstream tonemapping.
 vec3 apply_tone_balance(vec3 c, float shadows, float highlights)
 {
-    float lum         = luma709(c);
+    float lum         = working_luma(c);
     float shadow_mask = 1.0 - smoothstep(0.0, 0.6, lum);
     float hl_mask     = smoothstep(0.4, 1.0, lum);
     c += vec3(shadows    * 0.5 * shadow_mask);
@@ -675,7 +686,7 @@ vec3 apply_tone_balance(vec3 c, float shadows, float highlights)
 // Mix with luminance in scene-linear working space.  No clamping.
 vec3 apply_linear_saturation(vec3 c, float sat_val)
 {
-    float lum = luma709(c);
+    float lum = working_luma(c);
     return mix(vec3(lum), c, sat_val);
 }
 
@@ -685,7 +696,7 @@ vec3 apply_linear_saturation(vec3 c, float sat_val)
 vec3 apply_cdl(vec3 c, vec3 slope, vec3 off, vec3 pwr, float sat_val)
 {
     c = pow(max(c * slope + off, vec3(0.0)), pwr);
-    float lum = luma709(c);
+    float lum = working_luma(c);
     c = mix(vec3(lum), c, sat_val);
     return c;
 }
@@ -694,7 +705,7 @@ vec3 apply_cdl(vec3 c, vec3 slope, vec3 off, vec3 pwr, float sat_val)
 // Luminance-based tint: additive color offsets for shadows and highlights.
 vec3 apply_split_tone(vec3 c, vec3 shad_col, vec3 hi_col, float bal)
 {
-    float lum     = luma709(c);
+    float lum     = working_luma(c);
     float shad_mk = 1.0 - smoothstep(bal - 0.3, bal + 0.3, lum);
     float hi_mk   = smoothstep(bal - 0.3, bal + 0.3, lum);
     c += shad_col * shad_mk;
@@ -823,7 +834,7 @@ vec3 apply_film_grain(vec3 c, vec2 uv, float intensity, float size_val, int fram
 {
     vec2 grain_uv = uv * target_size / max(size_val, 0.5);
     float noise   = grain_hash(grain_uv, frame_seed) * 2.0 - 1.0;  // -1..+1
-    float lum     = luma709(c);
+    float lum     = working_luma(c);
     // Photographic response: more grain in midtones
     float response = smoothstep(0.0, 0.15, lum) * (1.0 - smoothstep(0.8, 1.0, lum));
     c += vec3(noise * intensity * response);
@@ -856,7 +867,7 @@ vec3 apply_qualifier(vec3 c, float tgt_hue, float hue_w, float min_s, float max_
     // Exposure offset (additive in linear)
     graded *= (1.0 + exp_off);
     // Saturation offset
-    float glum = luma709(graded);
+    float glum = working_luma(graded);
     graded = mix(vec3(glum), graded, 1.0 + sat_off);
     // Hue rotation
     if (abs(hue_off) > 0.01) {

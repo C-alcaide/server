@@ -161,13 +161,22 @@ const vec3 luma_coefficients[3] = vec3[3](
     vec3(0.299,0.587,0.114), vec3(0.2126,0.7152,0.0722), vec3(0.2627,0.6780,0.0593)
 );
 mat3 ubo_mat3(vec4 c0, vec4 c1, vec4 c2) { return mat3(c0.xyz, c1.xyz, c2.xyz); }
+// Luminance in the working space, weighted by the SOURCE's colour space rather than by a
+// hardcoded Rec.709 triple. This backend grades in RGB, so unlike the OpenGL kernel there
+// is no swizzle -- see the note on working_luma() there.
+//
+// Every grading function below used to carry its own `vec3(0.2126,0.7152,0.0722)` while
+// ContrastSaturationBrightness read the table, so one chain held two definitions of
+// luminance. They agree exactly on BT.709 and differ on BT.601 and BT.2020, which is why
+// the split never showed on the usual material. One place indexes the table now.
+float working_luma(vec3 c) { return dot(c, luma_coefficients[color_space_index]); }
+
 
 // ── CSB / Levels ────────────────────────────────────────────────────────
 vec3 ContrastSaturationBrightness(vec4 color, float brt_v, float sat_v, float con_v) {
-    vec3 lc = luma_coefficients[color_space_index];
     if (color.a > 0.0) color.rgb /= color.a;
     vec3 brtC = color.rgb * brt_v;
-    vec3 intens = vec3(dot(brtC, lc));
+    vec3 intens = vec3(working_luma(brtC));
     vec3 satC = mix(intens, brtC, sat_v);
     vec3 conC = mix(vec3(0.5), satC, con_v);
     return conC * color.a;
@@ -350,10 +359,10 @@ vec3 apply_white_balance(vec3 c,float t,float ti){c.r*=1.0+t*0.20;c.g*=1.0+ti*0.
 // white and +Inf above. [0.01,100] reproduces the old exponent bounds exactly.
 vec3 apply_lmg(vec3 c,vec3 l,vec3 m,vec3 g){return pow(max(c*g+l,vec3(0.0)),1.0/clamp(m,vec3(0.01),vec3(100.0)));}
 vec3 apply_hue_shift(vec3 c,float deg){float pk=max(max(c.r,c.g),max(c.b,0.0001));vec3 h=rgb2hsv(clamp(c/pk,0.0,1.0));h.x=fract(h.x+deg/360.0);return hsv2rgb(h)*pk;}
-vec3 apply_tone_balance(vec3 c,float s,float h){float l=dot(c,vec3(0.2126,0.7152,0.0722));c+=vec3(s*0.5*(1.0-smoothstep(0.0,0.6,l)));c+=vec3(h*0.5*smoothstep(0.4,1.0,l));return c;}
-vec3 apply_linear_sat(vec3 c,float s){float l=dot(c,vec3(0.2126,0.7152,0.0722));return mix(vec3(l),c,s);}
-vec3 apply_cdl(vec3 c,vec3 sl,vec3 of,vec3 pw,float s){c=pow(max(c*sl+of,vec3(0.0)),pw);float l=dot(c,vec3(0.2126,0.7152,0.0722));return mix(vec3(l),c,s);}
-vec3 apply_split_tone(vec3 c,vec3 sc,vec3 hc,float b){float l=dot(c,vec3(0.2126,0.7152,0.0722));c+=sc*(1.0-smoothstep(b-0.3,b+0.3,l));c+=hc*smoothstep(b-0.3,b+0.3,l);return c;}
+vec3 apply_tone_balance(vec3 c,float s,float h){float l=working_luma(c);c+=vec3(s*0.5*(1.0-smoothstep(0.0,0.6,l)));c+=vec3(h*0.5*smoothstep(0.4,1.0,l));return c;}
+vec3 apply_linear_sat(vec3 c,float s){float l=working_luma(c);return mix(vec3(l),c,s);}
+vec3 apply_cdl(vec3 c,vec3 sl,vec3 of,vec3 pw,float s){c=pow(max(c*sl+of,vec3(0.0)),pw);float l=working_luma(c);return mix(vec3(l),c,s);}
+vec3 apply_split_tone(vec3 c,vec3 sc,vec3 hc,float b){float l=working_luma(c);c+=sc*(1.0-smoothstep(b-0.3,b+0.3,l));c+=hc*smoothstep(b-0.3,b+0.3,l);return c;}
 vec3 apply_gamut_compress(vec3 c,vec3 lim){float a=max(max(c.r,c.g),max(c.b,0.0));if(a<=0.0)return c;vec3 d=(a-c)/abs(a);float thr=0.815;for(int i=0;i<3;++i)if(d[i]>thr&&lim[i]>1.0001){float nd=(d[i]-thr)/(lim[i]-thr);d[i]=thr+nd/(1.0+nd)*(lim[i]-thr);}return a-d*abs(a);}
 // Entry k of an N-cube describes input k/(N-1) and sits at texel centre (k+0.5)/N,
 // so the value has to be rescaled before it is used as a coordinate. Without this the
@@ -365,7 +374,7 @@ vec3 apply_qualifier(vec3 c,float th,float hw,float ms,float xs,float ml,float x
     vec3 h=rgb2hsv(clamp(c,0.0,1.0));float hd=AngleDiff(h.x,th)*2.0;
     float hm=1.0-smoothstep(hw-sf,hw+sf,hd);float sm=smoothstep(ms-sf,ms+sf,h.y)*(1.0-smoothstep(xs-sf,xs+sf,h.y));
     float lm=smoothstep(ml-sf,ml+sf,h.z)*(1.0-smoothstep(xl-sf,xl+sf,h.z));float mk=hm*sm*lm;if(mk<0.001)return c;
-    vec3 g=c*(1.0+eo);float gl=dot(g,vec3(0.2126,0.7152,0.0722));g=mix(vec3(gl),g,1.0+so);if(abs(ho)>0.01)g=apply_hue_shift(g,ho);return mix(c,g,mk);}
+    vec3 g=c*(1.0+eo);float gl=working_luma(g);g=mix(vec3(gl),g,1.0+so);if(abs(ho)>0.01)g=apply_hue_shift(g,ho);return mix(c,g,mk);}
 // Gamma bounded BEFORE the reciprocal, matching apply_lmg above and the OpenGL kernel.
 // This clamped after it -- max(1.0/gm, 0.01) -- which at gamma 0 leaves pow(c, Inf) and
 // collapses the channel to black where OpenGL gave an exponent of 100, and above gamma
@@ -377,7 +386,7 @@ vec3 apply_rgb_levels(vec3 c){
 float sample_lut(float v,int ch){float s=clamp(v,0.0,1.0)*255.0;int lo=int(s),hi=min(lo+1,255);float f=fract(s);vec4 l4=texelFetch(curve_lut_tex,ivec2(lo,0),0);vec4 h4=texelFetch(curve_lut_tex,ivec2(hi,0),0);vec4 v4=mix(l4,h4,f);if(ch==0)return v4.r;if(ch==1)return v4.g;if(ch==2)return v4.b;return v4.a;}
 vec3 apply_curves(vec3 c){c.r=sample_lut(c.r,0);c.g=sample_lut(c.g,1);c.b=sample_lut(c.b,2);c.r=sample_lut(c.r,3);c.g=sample_lut(c.g,3);c.b=sample_lut(c.b,3);return c;}
 float grain_hash(vec2 p,int fs){vec3 p3=fract(vec3(p.xyx)*0.1031);p3+=dot(p3,p3.yzx+float(fs)*0.00137);return fract((p3.x+p3.y)*p3.z);}
-vec3 apply_grain(vec3 c,vec2 uv,float in_v,float sz,int fs){vec2 gu=uv*target_size/max(sz,0.5);float n=grain_hash(gu,fs)*2.0-1.0;float l=dot(c,vec3(0.2126,0.7152,0.0722));float r=smoothstep(0.0,0.15,l)*(1.0-smoothstep(0.8,1.0,l));return c+vec3(n*in_v*r);}
+vec3 apply_grain(vec3 c,vec2 uv,float in_v,float sz,int fs){vec2 gu=uv*target_size/max(sz,0.5);float n=grain_hash(gu,fs)*2.0-1.0;float l=working_luma(c);float r=smoothstep(0.0,0.15,l)*(1.0-smoothstep(0.8,1.0,l));return c+vec3(n*in_v*r);}
 
 // ── 360° / Curved ───────────────────────────────────────────────────────
 // Physical viewing-angle warp for a curved DESTINATION screen.  k = eye_distance
