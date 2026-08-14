@@ -546,8 +546,36 @@ reporting"; it exits **2 for inconclusive** rather than folding that into a pass
 2. ~~**The Vulkan fp16 resolve blit** (`renderpass::commit()`).~~ **VERIFIED 2026-08-12.**
    `vk-validation --render-format fp16`: **0 VUIDs**, 12/12 commands accepted, server
    survived, positive control produced 8 messages. The barriers were correct as written.
-3. **A 3D LUT through the OCIO path, either mixer.** Implemented, and **unreachable — not
-   merely untested.** Traced 2026-08-14:
+3. ~~**A 3D LUT through the OCIO path, either mixer.**~~ **REACHED AND MEASURED 2026-08-14,
+   and it was broken on OpenGL.** `<ocio-config>` gave `load_config` its caller;
+   `cli.py ocio-lut3d` drives a generated config whose one colour space emits exactly one 3D
+   texture. Both mixers now **6/6 within 1.0 LSB, worst 0.71**, identical.
+
+   **The defect was not where this entry predicted.** It said the unproven part was the
+   `sampler3D`-to-`e3D` view match. That was fine. What was wrong was
+   `shader_->set("ycbcr_code_scale", …)` sitting **69 lines above `shader_->use()`** in the
+   OpenGL kernel, so the uniform was written into whichever program the previous draw left
+   bound. A steady state re-binds the same program every frame and the write lands by
+   accident; selecting an OCIO variant changes the program between draws, the cached location
+   collided with `working_to_output` (a `mat3`), `GL_INVALID_OPERATION` aborted the draw, and
+   the frame rendered with no colour transform at all. See CHANGELOG.
+
+   **The Vulkan 3D path needed no change** — correct as written, which is what the reading
+   below established and what execution confirmed.
+
+   Two lessons worth more than the fix:
+
+   * **A dead code path is not a correct one, and it is not the only thing that breaks when
+     you make it reachable.** The defect was in code that had run millions of times; it took a
+     *new* path to change the program between draws and expose it.
+   * **`SMFL_GLCheckError` accepted the failing expression and threw it away**, so a session of
+     reading the 3D upload — which was correct — found nothing. Fixed; the uniform was named
+     on the first run afterwards.
+
+   The original analysis follows, kept because the parts it established by reading were right
+   and are still the reason the upload is trusted.
+
+   Traced 2026-08-14:
 
    **`accelerator::ocio::load_config(uri)` has no caller.** It is written, it dispatches
    `ocio://` against a filesystem path correctly, it logs and it handles reload — and nothing

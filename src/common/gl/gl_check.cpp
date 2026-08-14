@@ -25,6 +25,7 @@
 
 #include "../except.h"
 #include "../log.h"
+#include "../utf.h"
 
 #include <GL/glew.h>
 
@@ -41,7 +42,17 @@ static constexpr int          GL_ERROR_LOG_LIMIT  = 10;   // max messages per wi
 static constexpr std::int64_t GL_ERROR_WINDOW_NS  =
     std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::seconds(1)).count();
 
-void SMFL_GLCheckError(const std::string& /*unused*/, const char* func, const char* file, unsigned int line)
+/// `expr`, `func`, `file` and `line` were all accepted and then discarded, so every GL error
+/// this server has ever logged read "OpenGL Error: 1282 Unknown error" with nothing to say
+/// which call produced it. The macro has always passed the expression — it was thrown away
+/// one frame short of being useful.
+///
+/// It cost a session to notice: the first execution of the OCIO 3D-LUT path raised
+/// GL_INVALID_OPERATION six times and the log could not distinguish "the 3D texture upload"
+/// from "the consumer readback that happens to run at the same moment". A diagnostic that
+/// cannot localise the fault is the same defect as the pre-warm warning that fired for both
+/// states it was being used to tell apart.
+void SMFL_GLCheckError(const std::string& expr, const char* func, const char* file, unsigned int line)
 {
     // Get the last error
     GLenum LastErrorCode = GL_NO_ERROR;
@@ -61,7 +72,12 @@ void SMFL_GLCheckError(const std::string& /*unused*/, const char* func, const ch
         ++tl_error_count;
         if (tl_error_count <= GL_ERROR_LOG_LIMIT) {
             std::string str(reinterpret_cast<const char*>(glewGetErrorString(ErrorCode)));
-            CASPAR_LOG(error) << "OpenGL Error: " << ErrorCode << L" " << str;
+            // The expression first: it is the one field that identifies the call, and a
+            // reader scanning a log for "which GL call failed" should not have to reach the
+            // end of the line to find out.
+            CASPAR_LOG(error) << "OpenGL Error: " << ErrorCode << L" " << str << L" in `"
+                              << u16(expr) << L"` (" << u16(func ? func : "?") << L", "
+                              << u16(file ? file : "?") << L":" << line << L")";
         } else if (!tl_suppressed) {
             tl_suppressed = true;
             CASPAR_LOG(error) << "GL error flood detected - suppressing further GL error "

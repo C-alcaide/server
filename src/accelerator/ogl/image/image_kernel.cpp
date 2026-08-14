@@ -454,17 +454,6 @@ struct image_kernel::impl
             precision_factor[n] = get_precision_factor(params.textures[n]->depth());
         }
 
-        // The scale that turns a normalised sample into an 8-bit-equivalent code, for the
-        // YCbCr decode. See `ycbcr_code_scale` in shader.frag: 255 is right only when the
-        // sample IS `code/255`, and a 16-bit texture carrying video normalises its neutral
-        // chroma to 32768/65535, so `* 255 - 128` leaves a bias that can never be zero.
-        // 65535/256 lands legal black on 16, neutral chroma on 128 and legal white on 235.
-        shader_->set("ycbcr_code_scale",
-                     (!params.textures.empty() &&
-                      params.textures[0]->depth() != common::bit_depth::bit8)
-                         ? 65535.0f / 256.0f
-                         : 255.0f);
-
         if (params.local_key) {
             params.local_key->bind(static_cast<int>(texture_id::local_key));
         }
@@ -538,6 +527,27 @@ struct image_kernel::impl
                 shader_->set(ocio->sampler_names[i], unit);
             }
         }
+
+        // The scale that turns a normalised sample into an 8-bit-equivalent code, for the
+        // YCbCr decode. See `ycbcr_code_scale` in shader.frag: 255 is right only when the
+        // sample IS `code/255`, and a 16-bit texture carrying video normalises its neutral
+        // chroma to 32768/65535, so `* 255 - 128` leaves a bias that can never be zero.
+        // 65535/256 lands legal black on 16, neutral chroma on 128 and legal white on 235.
+        //
+        // MUST stay below `shader_->use()`. It was set beside the texture binding 69 lines
+        // above it, which is where the depth is known but where NO program is bound yet:
+        // `glUniform*` writes into the *currently bound* program, so the value landed in
+        // whichever program the previous draw left bound. It went unnoticed because a
+        // steady state re-binds the same program every frame, so the write lands correctly
+        // — until the program changes between draws, which is exactly what selecting an
+        // OCIO variant does. On the first OCIO 3D-LUT draw the cached location collided
+        // with `working_to_output` (a mat3), GL_INVALID_OPERATION aborted the draw, and
+        // the frame came back untransformed.
+        shader_->set("ycbcr_code_scale",
+                     (!params.textures.empty() &&
+                      params.textures[0]->depth() != common::bit_depth::bit8)
+                         ? 65535.0f / 256.0f
+                         : 255.0f);
 
         shader_->set("is_straight_alpha", params.pix_desc.is_straight_alpha);
         shader_->set("straight_alpha_grading", params.straight_alpha_grading);

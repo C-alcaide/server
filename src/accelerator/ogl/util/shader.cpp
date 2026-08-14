@@ -21,9 +21,12 @@
 #include "shader.h"
 
 #include <common/gl/gl_check.h>
+#include <common/log.h>
+#include <common/utf.h>
 
 #include <GL/glew.h>
 
+#include <sstream>
 #include <unordered_map>
 
 namespace caspar { namespace accelerator { namespace ogl {
@@ -117,11 +120,85 @@ struct shader::impl
         return it->second;
     }
 
+    /// Which uniform did GL reject, and what is it in the program that is actually bound?
+    ///
+    /// `GL(glUniform1f(...))` reports the call and nothing else, so a rejected uniform in a
+    /// 2000-line kernel with a hundred of them says only "1282 somewhere in set()". A
+    /// mismatched uniform is not a rare accident either: every OCIO variant is its own
+    /// program, and a name that is a float in one and something else in another is exactly
+    /// what a spliced shader can produce.
+    ///
+    /// Deliberately asks GL for the program's own idea of the type rather than reporting
+    /// what we passed — the whole question is where the two disagree.
+    ///
+    /// It LOGS AND THEN THROWS. An earlier revision only logged, which turned a draw-
+    /// aborting error into a silent one and made the failing case appear to pass — the
+    /// picture was right because the rest of the draw completed, and the defect underneath
+    /// was still there. Reporting better must not mean reporting less.
+    void report_uniform_error(const std::string& name, GLint location)
+    {
+        const GLenum code = glGetError();
+        if (code == GL_NO_ERROR)
+            return;
+
+        GLint  current = 0;
+        glGetIntegerv(GL_CURRENT_PROGRAM, &current);
+
+        std::string actual = "(no such active uniform)";
+        if (location >= 0 && current != 0) {
+            GLint  size = 0;
+            GLenum type = 0;
+            GLchar buf[256] = {0};
+            GLsizei len = 0;
+            // The index and the location are different numbers; walk the active uniforms to
+            // find the one at this location rather than assuming they coincide.
+            GLint count = 0;
+            glGetProgramiv(static_cast<GLuint>(current), GL_ACTIVE_UNIFORMS, &count);
+            for (GLint i = 0; i < count; ++i) {
+                glGetActiveUniform(static_cast<GLuint>(current), static_cast<GLuint>(i),
+                                   sizeof(buf), &len, &size, &type, buf);
+                if (glGetUniformLocation(static_cast<GLuint>(current), buf) == location) {
+                    std::stringstream s;
+                    s << "GL type 0x" << std::hex << type << std::dec << " named '" << buf << "'";
+                    actual = s.str();
+                    break;
+                }
+            }
+        }
+
+        CASPAR_LOG(error) << L"[shader] GL rejected uniform '" << u16(name) << L"' at location "
+                          << location << L" in program " << current << L"; the bound program has "
+                          << u16(actual) << L" there. A uniform set as one type and declared as "
+                          << L"another is the usual cause, and so is setting a uniform before "
+                          << L"`use()` binds the program it belongs to.";
+
+        // Same exception the GL() macro would have raised, so callers see no change in
+        // behaviour — only a log line that says which uniform.
+        if (code == GL_INVALID_OPERATION)
+            CASPAR_THROW_EXCEPTION(caspar::gl::ogl_invalid_operation()
+                                   << msg_info("the specified operation is not allowed in the "
+                                               "current state, setting uniform '" + name + "'")
+                                   << error_info("GL_INVALID_OPERATION"));
+        CASPAR_THROW_EXCEPTION(caspar::gl::ogl_invalid_value()
+                               << msg_info("GL rejected uniform '" + name + "'")
+                               << error_info("GL_INVALID_VALUE"));
+    }
+
     void set(const std::string& name, bool value) { set(name, value ? 1 : 0); }
 
-    void set(const std::string& name, int value) { GL(glUniform1i(get_uniform_location(name.c_str()), value)); }
+    void set(const std::string& name, int value)
+    {
+        const auto loc = get_uniform_location(name.c_str());
+        glUniform1i(loc, value);
+        report_uniform_error(name, loc);
+    }
 
-    void set(const std::string& name, float value) { GL(glUniform1f(get_uniform_location(name.c_str()), value)); }
+    void set(const std::string& name, float value)
+    {
+        const auto loc = get_uniform_location(name.c_str());
+        glUniform1f(loc, value);
+        report_uniform_error(name, loc);
+    }
 
     void set(const std::string& name, double value0, double value1)
     {

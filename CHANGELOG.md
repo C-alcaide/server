@@ -1,6 +1,64 @@
 CasparVP — Unreleased
 ==========================================
 
+### Fixed: `ycbcr_code_scale` was written to whichever program was bound last
+
+`image_kernel.cpp` set this uniform beside the texture binding — where the source's bit
+depth is known, and **69 lines above `shader_->use()`**, where no program is bound yet.
+`glUniform*` writes into the *currently bound* program, so the value landed in whatever the
+previous draw left there.
+
+It survived because a steady state re-binds the same program every frame, so the write lands
+correctly by accident. It only breaks when the program changes between draws — which is
+exactly what selecting an OCIO variant does.
+
+**What it looked like when it finally broke.** The first execution of the OCIO 3D-LUT path
+raised `GL_INVALID_OPERATION` on every frame and the picture came back untransformed. The
+cached location for `ycbcr_code_scale` collided with `working_to_output`, a `mat3`, in the
+spliced program; writing a float there is an error, the draw aborted, and the layer rendered
+with no colour transform at all.
+
+Moved below `use()`. Measured after: OGL and Vulkan **both 6/6 within 1.0 LSB (worst 0.71)**
+on the new 3D-LUT battery with **zero GL errors**, and unchanged elsewhere — conformance
+100/100, grading 13/13 + 8/8, `flat-decoded` 29/29, all on **both** mixers.
+
+### Added: `<ocio-config>` — the OCIO config is selectable
+
+`accelerator::ocio::load_config()` was written, correct, and **had no caller**. The config
+was therefore permanently the pinned built-in
+`ocio://studio-config-v4.0.0_aces-v2.0_ocio-v2.5`, with no `$OCIO` route either. Studios with
+their own config had no way to use it, and — because no built-in colour space emits a 3D
+texture — the 3D-LUT branch of both OCIO uploaders was unreachable code that could not be
+measured. That is how the defect above stayed hidden.
+
+Absent, the pinned built-in is still the default, so nothing changes for an existing config.
+Present, it takes another `ocio://` URI or a path to a config file, and is loaded eagerly at
+startup: an operator who named a config has asked for it, and a bad path should stop the
+server now rather than surface as a `MIXER OCIO` failure hours later. A failure **throws
+rather than warns**, because `load_config` keeps the previous config on failure — warning
+would leave the server running the built-in one while the operator believes otherwise, every
+look silently wrong.
+
+Measured: a generated config whose one colour space emits exactly one 3D texture renders to
+within **0.71 LSB** of OCIO's own CPU processor on both mixers. The Vulkan 3D path needed no
+change — it was correct as written.
+
+### Fixed: a GL error told you nothing about which call produced it
+
+`SMFL_GLCheckError` took the failing expression, the function, the file and the line, and
+discarded all four — every GL error this server has ever logged read `OpenGL Error: 1282
+Unknown error`. The macro had always passed them.
+
+It now reports the expression and location, and `shader::impl::set` additionally names the
+**uniform** and what the bound program actually declares at that location. The 3D-LUT defect
+above was localised on the first run after this landed, having survived a session of reading
+the code it was not in.
+
+Both still throw exactly as before. An earlier revision of the uniform check only logged,
+which turned a draw-aborting error into a silent one and made the broken case appear to
+pass — the picture was right because the rest of the draw completed. Reporting better must
+not mean reporting less.
+
 ### Fixed: three grading defects found reviewing the same code upstream
 
 Ported back from the review of `CasparCG/server#1765`, which is where these six tools

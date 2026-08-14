@@ -23,6 +23,7 @@
 #include "server.h"
 
 #include <accelerator/accelerator.h>
+#include <accelerator/ocio/ocio_config.h>
 
 #include <common/bit_depth.h>
 #include <common/render_format.h>
@@ -141,6 +142,10 @@ struct server::impl
         setup_accelerator(env::properties());
         CASPAR_LOG(info) << L"Initialized accelerator.";
 
+        // Before the channels: a channel may carry <ocio-display>/<ocio-view> on a consumer,
+        // and those are validated against the loaded config.
+        setup_ocio(env::properties());
+
         auto xml_channels = setup_channels(env::properties());
         CASPAR_LOG(info) << L"Initialized channels.";
 
@@ -209,6 +214,42 @@ struct server::impl
         }
 
         accelerator_.set_backend(backend);
+    }
+
+    /// `<ocio-config>` — the OpenColorIO config the whole server resolves colour space,
+    /// display and view names against.
+    ///
+    /// Absent, which is the default, leaves the pinned built-in
+    /// `ocio://studio-config-v4.0.0_aces-v2.0_ocio-v2.5`: nothing to install, and a colour
+    /// space name means the same thing on every machine running the same build. Present, it
+    /// takes either another `ocio://` built-in URI or a path to a config file.
+    ///
+    /// Loading here is deliberately eager, against `ocio_config.cpp`'s load-on-first-use
+    /// rule. That rule exists so a server with no OCIO channel does not pay to parse a
+    /// config; an operator who named one has asked for it, and a bad path should stop the
+    /// server now rather than surface as a `MIXER OCIO` failing hours later.
+    ///
+    /// A failure throws rather than warns. `load_config` keeps the previous config on
+    /// failure, so warning would leave the server running the built-in config while the
+    /// operator believes their own is loaded — every look silently wrong, nothing in the log
+    /// after startup to say so.
+    void setup_ocio(const boost::property_tree::wptree& pt)
+    {
+        const auto uri = pt.get(L"configuration.ocio-config", L"");
+        if (uri.empty())
+            return;
+
+        if (!accelerator::ocio::available())
+            CASPAR_THROW_EXCEPTION(user_error() << msg_info(
+                L"<ocio-config> is set but this build has no OpenColorIO support "
+                L"(built with ENABLE_OCIO=OFF)"));
+
+        if (!accelerator::ocio::load_config(u8(uri)))
+            CASPAR_THROW_EXCEPTION(user_error() << msg_info(
+                L"could not load <ocio-config> " + uri + L" -- see the log line above for why"));
+
+        CASPAR_LOG(info) << L"[server] OCIO config " << uri << L" (" << accelerator::ocio::colorspaces().size()
+                         << L" colour spaces, " << accelerator::ocio::displays().size() << L" displays)";
     }
 
     void setup_video_modes(const boost::property_tree::wptree& pt)
