@@ -38,13 +38,24 @@ void main()
 
     vec4 pixel = texelFetch(src_tex, ivec2(sx, sy), 0);
 
-    // RGBA → BGRA swizzle, pack as uint32
-    uint B = uint(pixel.b * 255.0 + 0.5);
-    uint G = uint(pixel.g * 255.0 + 0.5);
-    uint R = uint(pixel.r * 255.0 + 0.5);
-    uint A = uint(pixel.a * 255.0 + 0.5);
+    // The attachment ALREADY holds BGRA, so this is a straight copy: channel 0 -> byte 0.
+    //
+    // The VK mixer writes BGRA into an R8G8B8A8_UNORM image -- which is why
+    // screen_consumer.cpp applies a corrective SWIZZLE_R/SWIZZLE_B when it imports the same
+    // texture, and why vk_readback_v210.comp reads .b for red at 8 bits. This shader's
+    // comment claimed an RGBA source and swizzled to match, exchanging red and blue a
+    // second time.
+    //
+    // No bit-depth branch, unlike v210: this shader is reached only through the rgba output
+    // path, and config.cpp rejects rgba output on anything but an 8-bit channel ("The
+    // decklink consumer only supports rgba output on 8-bit channels"). So the source here
+    // is always the 8-bit BGRA attachment.
+    uint b0 = uint(pixel.r * 255.0 + 0.5);
+    uint b1 = uint(pixel.g * 255.0 + 0.5);
+    uint b2 = uint(pixel.b * 255.0 + 0.5);
+    uint A  = uint(pixel.a * 255.0 + 0.5);
 
-    uint packed = B | (G << 8u) | (R << 16u) | (A << 24u);
+    uint packed = b0 | (b1 << 8u) | (b2 << 16u) | (A << 24u);
 
     uint idx = uint(y) * uint(pc.dst_w) + uint(x);
     bgra_out.data[idx] = packed;

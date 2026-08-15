@@ -1,6 +1,38 @@
 CasparVP — Unreleased
 ==========================================
 
+### Fixed: `gpu-readback-mode=vulkan` sent red and blue exchanged to DeckLink
+
+**This changes rendered output** for any DeckLink consumer on a Vulkan channel with
+`<gpu-readback-mode>vulkan</gpu-readback-mode>` and `rgba` pixel format. Nothing else moves:
+`auto` (the default) takes the CUDA/DVP path, `vulkan-dma` its own, and both were already
+correct.
+
+`vk_readback_bgra.comp` said it read "the VK mixer's render attachment (RGBA UNORM texture)"
+and swizzled RGBA → BGRA. The attachment already holds BGRA — the VK mixer writes BGRA into
+an `R8G8B8A8_UNORM` image, which is why `screen_consumer.cpp` applies a corrective
+`SWIZZLE_R`/`SWIZZLE_B` on import and why `vk_readback_v210.comp` reads `.b` for red at
+8 bits. Swizzling again exchanged them a second time. Now a straight copy, channel 0 → byte 0.
+
+No bit-depth branch, unlike v210: this shader is reachable only through the `rgba` output
+path, and `config.cpp` rejects `rgba` on anything but an 8-bit channel, so its source is
+always the 8-bit BGRA attachment.
+
+Measured over the 1→4 SDI loopback with `#FFBF8040`, mean of the middle half:
+
+| `gpu-readback-mode` | before | after |
+| :--- | ---: | ---: |
+| `vulkan` | (62, 127, 187) — **129 LSB** | (190, 128, 62) — **2.0 LSB** |
+| `auto` | (190, 128, 62) — 2.0 LSB | unchanged |
+| `vulkan-dma` | (190, 128, 62) — 2.0 LSB | unchanged |
+| `cpu` | (190, 128, 62) — 2.0 LSB | unchanged |
+
+2.0 LSB is the 8-bit YCbCr 4:2:2 round trip, not error. The 16-bit `yuv` (v210) path reads
+1.0 LSB before and after. Conformance 36/36 within 1 LSB on both mixers.
+
+Found by loopback rather than by the screen consumer: the shared texture has two readers and
+only the screen one had ever been checked.
+
 ### Changed: the grading chain weights luminance by the source's colour space
 
 **This changes rendered output** for `MIXER CDL`, `TONEBALANCE`, `SPLITTONE`, `QUALIFIER`,
