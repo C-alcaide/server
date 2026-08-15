@@ -1590,8 +1590,21 @@ std::shared_ptr<void> vk_readback_strategy::convert_frame_for_port(
                     int bpp = is_16bit ? 8 : 4;
                     size_t data_size = (size_t)dma.width * dma.height * bpp;
 
-                    // Build a pixel_format_desc matching the raw pixels
-                    auto pfd = core::pixel_format_desc(core::pixel_format::bgra,
+                    // Build a pixel_format_desc matching the raw pixels.
+                    //
+                    // THE ORDER DEPENDS ON THE DEPTH, and this said `bgra` unconditionally.
+                    // The mixer writes BGRA into an 8-bit R8G8B8A8_UNORM attachment but
+                    // writes RGBA directly at 16-bit — the same rule `vk_readback_v210.comp`
+                    // branches on with its `is_16bit` push constant, and the reason
+                    // `screen_consumer.cpp` swizzles only when `!hbd`. Declaring bgra for
+                    // 16-bit handed the CPU v210 converter red where it expected blue.
+                    //
+                    // Measured over the 1->4 loopback, yuv@16bit on gpu-readback-mode=
+                    // vulkan-dma: 7.68 dB against the reference and 52.4 dB against it with
+                    // red and blue exchanged, where `auto` and `cpu` score 52.53. The 8-bit
+                    // wire on the same mode was always correct, which is why this survived.
+                    auto pfd = core::pixel_format_desc(is_16bit ? core::pixel_format::rgba
+                                                                : core::pixel_format::bgra,
                                                        impl_->use_bt2020_ ? core::color_space::bt2020
                                                                           : core::color_space::bt709,
                                                        core::color_transfer::sdr);

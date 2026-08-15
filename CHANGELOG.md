@@ -1,6 +1,31 @@
 CasparVP — Unreleased
 ==========================================
 
+### Fixed: `gpu-readback-mode=vulkan-dma` sent red and blue exchanged at 16 bits
+
+**This changes rendered output** for a DeckLink consumer on a 16-bit Vulkan channel with
+`<gpu-readback-mode>vulkan-dma</gpu-readback-mode>` and `yuv` (v210). The 8-bit wire on the
+same mode was always correct, which is why it survived.
+
+The DMA path hands its staging buffer to the CPU v210 converter wrapped in a
+`pixel_format_desc`, and declared that `bgra` unconditionally — two lines under its own
+comment saying the staging holds "raw RGBA pixels (UNORM 8 or 16-bit)". The mixer writes
+BGRA into an 8-bit attachment but RGBA directly at 16-bit; that is the same rule
+`vk_readback_v210.comp` branches on with `is_16bit`, and the reason `screen_consumer.cpp`
+swizzles only when `!hbd`. Now derived from the depth.
+
+Measured over the 1→4 SDI loopback, `yuv@16bit`:
+
+| `gpu-readback-mode` | before | after |
+| :--- | ---: | ---: |
+| `vulkan-dma` | **7.68 dB** (52.4 dB against a red/blue-exchanged reference) | **52.53 dB** |
+| `auto` | 52.53 dB | unchanged |
+| `vulkan` | 52.51 dB | unchanged |
+| `cpu` | 52.53 dB | unchanged |
+
+Found by `cli.py sdi-output --gpu-readback-mode all` on its first run — the readback
+strategy is a real axis and nothing had ever varied it.
+
 ### Fixed: `gpu-readback-mode=vulkan` sent red and blue exchanged to DeckLink
 
 **This changes rendered output** for any DeckLink consumer on a Vulkan channel with
