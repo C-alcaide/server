@@ -58,6 +58,26 @@ Measured over the 1→4 SDI loopback with `#FFBF8040`, mean of the middle half:
 Found by loopback rather than by the screen consumer: the shared texture has two readers and
 only the screen one had ever been checked.
 
+### Changed: unknown enumeration tokens are refused instead of silently defaulting
+
+**This changes AMCP behaviour.** `MIXER BLUR`, `MIXER SHAPE` (type and `FILL`) and the
+three `MIXER COLORSPACE` enumerations previously answered anything they did not recognise
+with their first enum value and returned `202`. A typo therefore selected a default and
+looked like it worked: `MIXER BLUR 10 lenz` rendered a gaussian, and
+`MIXER COLORSPACE … SDR …` named a transfer function that does not exist and got LINEAR.
+They now return `403`, naming both the offending token and the valid ones.
+
+**Existing clients that name a default explicitly are unaffected**, and that needed care
+rather than luck: `LINEAR`, `BT709`, `NONE`, `gaussian`, `RECT` and `SOLID` had no case of
+their own and were reachable *only* through the fallback. All six are now tokens in their
+own right, so anything that worked before still works — checked against the 360 client's
+dropdowns and the test harness's command builder, both of which send them. `REC709` is
+accepted as a gamut alias for `BT709`, and `MIXER COLORSPACE NONE` is unchanged.
+
+What now fails is what was already broken and silent. Measured: 79 AMCP cases, 31 legal
+accepted and 48 illegal refused, 0 wrong; conformance 100/100 and grading 48/48 on both
+mixers.
+
 ### Changed: the grading chain weights luminance by the source's colour space
 
 **This changes rendered output** for `MIXER CDL`, `TONEBALANCE`, `SPLITTONE`, `QUALIFIER`,
