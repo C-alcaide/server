@@ -198,6 +198,40 @@ configuration parse_xml_config(const boost::property_tree::wptree&  ptree,
     if (config.primary.device_index == -1)
         config.primary.device_index = 1;
 
+    // The GPU readback strategies implement only the subregion's SOURCE ORIGIN. `src-x` and
+    // `src-y` reach the shaders as push constants and the DMA path as an imageOffset;
+    // `dest-x`, `dest-y`, `width` and `height` reach nothing and are dropped silently, so
+    // the wire carries the whole source from the origin, placed at 0,0.
+    //
+    // Measured over an SDI loopback with `640x360 from (100,200) placed at (114,70)`: the
+    // CPU strategy puts 360x640 at (70,114) and scores 62.92 dB against the frame that
+    // geometry implies; `gpu-readback-mode=vulkan` put 1820x880 at (0,0) and scored
+    // 7.91 dB. Same configuration, different picture, no warning.
+    //
+    // Coerced HERE rather than in `create_format_strategy`, which is where the obvious fix
+    // goes and where it does not work: by then the consumer has already told the mixer that
+    // no CPU frame data is needed, so a late substitution gets a frame carrying no host
+    // pixels and puts NOTHING on the wire — measured, the capture goes flat. The comment on
+    // `dma.pixels` in vk_readback_strategy.cpp says exactly this. Deciding at parse time
+    // keeps `needs_cpu_frame_data()` consistent with the strategy that will run.
+    //
+    // `ogl_gpu_pack_eligible` already refuses the OpenGL packer on the same geometry; this
+    // is the same rule for the DeckLink readback. Note neither tests `src_x`/`src_y`: an
+    // origin-only subregion IS handled on the GPU, and measures 53.55 dB against its model.
+    {
+        auto needs_cpu_geometry = [](const port_configuration& p) {
+            return p.dest_x != 0 || p.dest_y != 0 || p.region_w != 0 || p.region_h != 0;
+        };
+        if (needs_cpu_geometry(config.primary) &&
+            config.gpu_readback_mode != configuration::gpu_readback_mode_t::cpu) {
+            CASPAR_LOG(warning)
+                << L"[decklink] <subregion> sets dest-x/dest-y/width/height, which the GPU "
+                   L"readback strategies do not implement; falling back to "
+                   L"gpu-readback-mode=cpu so the geometry is honoured.";
+            config.gpu_readback_mode = configuration::gpu_readback_mode_t::cpu;
+        }
+    }
+
     auto keyer = ptree.get(L"keyer", L"default");
     if (keyer == L"external") {
         config.keyer = configuration::keyer_t::external_keyer;

@@ -1,6 +1,34 @@
 CasparVP — Unreleased
 ==========================================
 
+### Fixed: a `<subregion>` with dest/width/height was silently ignored on the GPU readback
+
+**This changes rendered output** for a DeckLink consumer whose `<subregion>` sets `dest-x`,
+`dest-y`, `width` or `height` while `gpu-readback-mode` is anything but `cpu`.
+
+The GPU readback strategies implement only the subregion's SOURCE ORIGIN: `src-x`/`src-y`
+reach the shaders as push constants and the DMA path as an `imageOffset`, but the
+destination and size reach nothing. They were dropped without a warning, so the wire carried
+the whole source from the origin placed at 0,0.
+
+Measured over the 1→4 SDI loopback with `640x360 from (100,200) placed at (114,70)`,
+compared against the frame that geometry implies:
+
+| `gpu-readback-mode` | before | after |
+| :--- | ---: | ---: |
+| `vulkan` | **7.91 dB** (1820x880 at 0,0) | **62.92 dB** |
+| `cpu` | 62.92 dB (360x640 at 70,114) | unchanged |
+
+Now coerced to `cpu` at config-parse time, with a warning naming the reason —
+`ogl_gpu_pack_eligible` already refuses the OpenGL packer on exactly this geometry. Neither
+tests `src-x`/`src-y`: an origin-only subregion IS handled on the GPU and stays there,
+measured at 53.55 dB against its model, unchanged by this.
+
+Coerced at parse time rather than in `create_format_strategy`, which is where the obvious
+fix goes and where it does not work: by then the consumer has told the mixer no CPU frame
+data is needed, so a late substitution receives a frame with no host pixels and puts
+**nothing** on the wire — measured, the capture goes flat.
+
 ### Fixed: `gpu-readback-mode=vulkan-dma` sent red and blue exchanged at 16 bits
 
 **This changes rendered output** for a DeckLink consumer on a 16-bit Vulkan channel with
