@@ -1142,8 +1142,30 @@ std::future<std::wstring> mixer_blend_command(command_context& ctx)
     return make_ready_future<std::wstring>(L"202 MIXER OK\r\n");
 }
 
+// Refuse an unrecognised enumeration token, naming the ones that would have worked.
+//
+// The parsers below used to `return <first enum value>` for anything they did not
+// recognise, so a typo selected a default and the command answered 202. `MIXER BLUR 10
+// lenz` rendered a gaussian; `MIXER COLORSPACE ... SDR ...` asked for a transfer that does
+// not exist and got LINEAR. Both are indistinguishable, from the client's side, from
+// having worked.
+//
+// THE PART THAT MADE THIS MORE THAN A ONE-LINE CHANGE: every one of those defaults was
+// reachable ONLY through the fallback. There was no `LINEAR` case in parse_transfer_fn, no
+// `BT709` in parse_gamut_fn, no `NONE` in parse_tonemapping_fn and no `GAUSSIAN` in
+// get_blur_type -- so simply erroring on the unknown would have refused the perfectly
+// ordinary commands that name a default explicitly, which is what the test harness sends.
+// Each default is given a spelling here first, and only then is the rest rejected.
+[[noreturn]] void reject_token(const std::wstring& got, const wchar_t* what, const wchar_t* valid)
+{
+    CASPAR_THROW_EXCEPTION(user_error() << msg_info(std::wstring(what) + L" must be one of " +
+                                                    valid + L", got: " + got));
+}
+
 core::blur_type get_blur_type(const std::wstring& str)
 {
+    if (boost::iequals(str, L"gaussian"))
+        return core::blur_type::gaussian;
     if (boost::iequals(str, L"box"))
         return core::blur_type::box;
     if (boost::iequals(str, L"directional"))
@@ -1154,7 +1176,8 @@ core::blur_type get_blur_type(const std::wstring& str)
         return core::blur_type::tilt_shift;
     if (boost::iequals(str, L"lens"))
         return core::blur_type::lens;
-    return core::blur_type::gaussian;
+    reject_token(str, L"blur type",
+                 L"GAUSSIAN, BOX, DIRECTIONAL, ZOOM, TILT_SHIFT or LENS");
 }
 
 std::wstring get_blur_type_string(core::blur_type type)
@@ -1274,10 +1297,11 @@ std::future<std::wstring> mixer_blur_command(command_context& ctx)
 
 static core::shape_type parse_shape_type(const std::wstring& s)
 {
+    if (boost::iequals(s, L"RECT") || boost::iequals(s, L"RECTANGLE")) return core::shape_type::rect;
     if (boost::iequals(s, L"ROUNDED_RECT") || boost::iequals(s, L"ROUNDEDRECT")) return core::shape_type::rounded_rect;
     if (boost::iequals(s, L"CIRCLE"))   return core::shape_type::circle;
     if (boost::iequals(s, L"ELLIPSE"))  return core::shape_type::ellipse;
-    return core::shape_type::rect;
+    reject_token(s, L"shape type", L"RECT, ROUNDED_RECT, CIRCLE or ELLIPSE");
 }
 
 static std::wstring shape_type_to_string(core::shape_type t)
@@ -1292,10 +1316,11 @@ static std::wstring shape_type_to_string(core::shape_type t)
 
 static core::shape_fill_type parse_fill_type(const std::wstring& s)
 {
+    if (boost::iequals(s, L"SOLID"))  return core::shape_fill_type::solid;
     if (boost::iequals(s, L"LINEAR")) return core::shape_fill_type::linear;
     if (boost::iequals(s, L"RADIAL")) return core::shape_fill_type::radial;
     if (boost::iequals(s, L"CONIC"))  return core::shape_fill_type::conic;
-    return core::shape_fill_type::solid;
+    reject_token(s, L"shape fill type", L"SOLID, LINEAR, RADIAL or CONIC");
 }
 
 static std::wstring fill_type_to_string(core::shape_fill_type t)
@@ -2275,19 +2300,28 @@ std::future<std::wstring> mixer_flip_command(command_context& ctx)
     return make_ready_future<std::wstring>(L"202 MIXER OK\r\n");
 }
 
+// `LINEAR` is spelled out rather than being the fallback -- see reject_token. It is the
+// transfer the test harness names for an EXR and for the manual path's linear input, so it
+// has to be a token in its own right before anything else can be refused.
 static int parse_transfer_fn(const std::wstring& s)
 {
+    if (boost::iequals(s, L"LINEAR")) return 0;
     if (boost::iequals(s, L"SRGB"))   return 1;
     if (boost::iequals(s, L"REC709")) return 2;
     if (boost::iequals(s, L"PQ"))     return 3;
     if (boost::iequals(s, L"HLG"))    return 4;
     if (boost::iequals(s, L"LOGC3"))  return 5;
     if (boost::iequals(s, L"SLOG3"))  return 6;
-    return 0; // LINEAR
+    reject_token(s, L"transfer function",
+                 L"LINEAR, SRGB, REC709, PQ, HLG, LOGC3 or SLOG3");
 }
 
+// `REC709` is accepted alongside `BT709` because the two name the same primaries and both
+// spellings appear in the wild. It is unambiguous even though `REC709` is also a transfer
+// token: these parse different argument positions.
 static int parse_gamut_fn(const std::wstring& s)
 {
+    if (boost::iequals(s, L"BT709") || boost::iequals(s, L"REC709")) return 0;
     if (boost::iequals(s, L"BT2020"))        return 1;
     if (boost::iequals(s, L"DCIP3"))         return 2;
     if (boost::iequals(s, L"ACES_AP0"))      return 3;
@@ -2295,18 +2329,22 @@ static int parse_gamut_fn(const std::wstring& s)
     if (boost::iequals(s, L"ACESCG"))        return 4;
     if (boost::iequals(s, L"ARRI_WG3"))      return 5;
     if (boost::iequals(s, L"SGAMUT3_CINE"))  return 6;
-    return 0; // BT709
+    reject_token(s, L"gamut",
+                 L"BT709, BT2020, DCIP3, ACES_AP0, ACES_AP1 (ACESCG), ARRI_WG3 or SGAMUT3_CINE");
 }
 
 static int parse_tonemapping_fn(const std::wstring& s)
 {
+    if (boost::iequals(s, L"NONE"))            return 0;
     if (boost::iequals(s, L"REINHARD"))        return 1;
     if (boost::iequals(s, L"ACES_FILMIC"))     return 2;
     if (boost::iequals(s, L"ACES_RRT"))        return 3;
     if (boost::iequals(s, L"ACES_RRT_709"))    return 4;
     if (boost::iequals(s, L"ACES_RRT_P3"))     return 5;
     if (boost::iequals(s, L"ACES_RRT_2020_PQ")) return 6;
-    return 0; // NONE
+    reject_token(s, L"tone mapping operator",
+                 L"NONE, REINHARD, ACES_FILMIC, ACES_RRT, ACES_RRT_709, ACES_RRT_P3 or "
+                 L"ACES_RRT_2020_PQ");
 }
 
 static std::wstring to_wstring_transfer(int t) {
