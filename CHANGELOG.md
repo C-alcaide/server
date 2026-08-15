@@ -1,6 +1,39 @@
 CasparVP — Unreleased
 ==========================================
 
+### Removed: the screen consumer's explicit VK→GL semaphore wait, which never worked
+
+**No rendered output changes.** The wait has been inert since it was added on 2026-05-23, so
+removing it changes nothing except the log and the machine's Application log.
+
+It imported the mixer's Vulkan **timeline** semaphore as `GL_HANDLE_TYPE_OPAQUE_WIN32_EXT`
+and set `GL_D3D12_FENCE_VALUE_EXT` on it. `GL_EXT_semaphore` expresses value-based waits
+only through the D3D12 fence handle type, so the import failed on the first frame of every
+server that ran it. The result was never checked — `vk_sem_ok_` only tested that the entry
+points existed — so `[screen] Explicit VK->GL semaphore sync active` was logged one
+millisecond *after* the failure, and a `while (glGetError()) {}` drain swallowed the
+`GL_INVALID_VALUE` every subsequent frame raised on an invalid semaphore.
+
+**This was also the source of the machine's OpenGL OOM events**: the failed import reports
+`GL_OUT_OF_MEMORY  Failed to open semaphore sync object`. 321 events in the sixteen days
+before that commit, 15114 after. Measured now, a six-server `source-colorspace` run:
+**60 → 0**.
+
+Removed rather than repaired, on evidence:
+
+* The **on-air path is already synchronised** — `vk_readback_strategy` imports the same
+  timeline semaphore VK→VK, where timelines are native, and waits on it with
+  `VkTimelineSemaphoreSubmitInfo`. Only the preview window was unguarded.
+* The hazard does not reproduce: 0 torn frames in 840 captures with alternating colours,
+  across screen-only and DeckLink on `vulkan` and `vulkan-dma` — the modes the original
+  commit named — and 0 black frames after first paint across 12 runs.
+
+If it ever needs repairing rather than deleting, the mechanism is `GL_NV_timeline_semaphore`
+(set `GL_SEMAPHORE_TYPE_TIMELINE_NV` before importing, then `GL_TIMELINE_SEMAPHORE_VALUE_NV`
+for the value); this driver exposes it, and GLEW 2.2.0 does not know it exists.
+
+Conformance 36/36 within 1 LSB on both mixers.
+
 ### Fixed: a `<subregion>` with dest/width/height was silently ignored on the GPU readback
 
 **This changes rendered output** for a DeckLink consumer whose `<subregion>` sets `dest-x`,

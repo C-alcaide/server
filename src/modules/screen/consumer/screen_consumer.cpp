@@ -1175,12 +1175,6 @@ struct gpu_strategy : public display_strategy
     bool     vk_interop_ok_     = true;   // optimistic; set false on failure
     bool     vk_ext_loaded_     = false;
 
-    // GL semaphore for explicit VK→GL synchronization (avoids relying on
-    // implicit driver sync which breaks when another VK consumer accesses
-    // the same shared texture — e.g. vk_readback_strategy for DeckLink).
-    GLuint   vk_gl_semaphore_         = 0;
-    HANDLE   vk_cached_sem_handle_    = nullptr;
-    bool     vk_sem_ok_               = false;
 
     // Dynamic preview downscale: blit full-res VK texture → window-sized local GL texture.
     // This decouples the rendered frame from VK shared memory, reducing GPU contention
@@ -1197,13 +1191,6 @@ struct gpu_strategy : public display_strategy
     PFNGLIMPORTMEMORYWIN32HANDLEEXTPROC glImportMemoryWin32HandleEXT_ = nullptr;
     PFNGLTEXTURESTORAGEMEM2DEXTPROC     glTextureStorageMem2DEXT_     = nullptr;
 
-    // GL_EXT_semaphore_win32 — explicit GPU-side VK→GL sync
-    PFNGLGENSEMAPHORESEXTPROC              glGenSemaphoresEXT_              = nullptr;
-    PFNGLDELETESEMAPHORESEXTPROC           glDeleteSemaphoresEXT_           = nullptr;
-    PFNGLIMPORTSEMAPHOREWIN32HANDLEEXTPROC glImportSemaphoreWin32HandleEXT_ = nullptr;
-    PFNGLWAITSEMAPHOREEXTPROC              glWaitSemaphoreEXT_              = nullptr;
-    PFNGLSEMAPHOREPARAMETERUI64VEXTPROC    glSemaphoreParameterui64vEXT_    = nullptr;
-
     void load_vk_gl_extensions()
     {
         if (vk_ext_loaded_)
@@ -1215,39 +1202,17 @@ struct gpu_strategy : public display_strategy
         glImportMemoryWin32HandleEXT_ = (PFNGLIMPORTMEMORYWIN32HANDLEEXTPROC)wglGetProcAddress("glImportMemoryWin32HandleEXT");
         glTextureStorageMem2DEXT_     = (PFNGLTEXTURESTORAGEMEM2DEXTPROC)wglGetProcAddress("glTextureStorageMem2DEXT");
 
-        glGenSemaphoresEXT_              = (PFNGLGENSEMAPHORESEXTPROC)wglGetProcAddress("glGenSemaphoresEXT");
-        glDeleteSemaphoresEXT_           = (PFNGLDELETESEMAPHORESEXTPROC)wglGetProcAddress("glDeleteSemaphoresEXT");
-        glImportSemaphoreWin32HandleEXT_ = (PFNGLIMPORTSEMAPHOREWIN32HANDLEEXTPROC)wglGetProcAddress("glImportSemaphoreWin32HandleEXT");
-        glWaitSemaphoreEXT_              = (PFNGLWAITSEMAPHOREEXTPROC)wglGetProcAddress("glWaitSemaphoreEXT");
-        glSemaphoreParameterui64vEXT_    = (PFNGLSEMAPHOREPARAMETERUI64VEXTPROC)wglGetProcAddress("glSemaphoreParameterui64vEXT");
-
         if (!glCreateMemoryObjectsEXT_ || !glImportMemoryWin32HandleEXT_ || !glTextureStorageMem2DEXT_) {
             vk_interop_ok_ = false;
             CASPAR_LOG(info) << L"[screen] GL_EXT_memory_object_win32 not available - VK interop disabled, using PBO fallback";
         }
 
-        if (glGenSemaphoresEXT_ && glImportSemaphoreWin32HandleEXT_ && glWaitSemaphoreEXT_ &&
-            glDeleteSemaphoresEXT_ && glSemaphoreParameterui64vEXT_) {
-            vk_sem_ok_ = true;
-        } else {
-            CASPAR_LOG(info) << L"[screen] GL_EXT_semaphore_win32 not available - using implicit sync (may fail with VK readback modes)";
-        }
     }
 
     void cleanup_vk_interop()
     {
-        cleanup_vk_semaphore();
         cleanup_vk_import();
         cleanup_preview();
-    }
-
-    void cleanup_vk_semaphore()
-    {
-        if (vk_gl_semaphore_ && glDeleteSemaphoresEXT_) {
-            glDeleteSemaphoresEXT_(1, &vk_gl_semaphore_);
-            vk_gl_semaphore_ = 0;
-        }
-        vk_cached_sem_handle_ = nullptr;
     }
 
     void cleanup_vk_import()
@@ -1365,63 +1330,43 @@ struct gpu_strategy : public display_strategy
             }
         }
 
-        // Bind the imported GL texture and draw.
-        // Use explicit GL semaphore wait when available — this properly handles
-        // the case where another VK consumer (e.g. vk_readback_strategy for
-        // DeckLink) is concurrently accessing the same shared texture memory.
-        // Without this, NVIDIA's implicit VK→GL sync can miss the concurrent
-        // VK access, resulting in black/grey output.
-        if (vk_sem_ok_) {
-            void*    sem_handle = tex->render_semaphore_handle();
-            uint64_t sem_value  = tex->render_semaphore_value();
-
-            if (sem_handle && sem_value > 0) {
-                // Re-import the semaphore if the handle changed
-                if (sem_handle != vk_cached_sem_handle_) {
-                    cleanup_vk_semaphore();
-
-                    glGenSemaphoresEXT_(1, &vk_gl_semaphore_);
-
-                    HANDLE dup_sem = nullptr;
-                    DuplicateHandle(GetCurrentProcess(), static_cast<HANDLE>(sem_handle),
-                                    GetCurrentProcess(), &dup_sem,
-                                    0, FALSE, DUPLICATE_SAME_ACCESS);
-                    if (dup_sem) {
-                        glImportSemaphoreWin32HandleEXT_(vk_gl_semaphore_,
-                                                         GL_HANDLE_TYPE_OPAQUE_WIN32_EXT, dup_sem);
-                        vk_cached_sem_handle_ = sem_handle;
-
-                        static bool sem_logged = false;
-                        if (!sem_logged) {
-                            CASPAR_LOG(info) << L"[screen] Explicit VK->GL semaphore sync active";
-                            sem_logged = true;
-                        }
-                    } else {
-                        glDeleteSemaphoresEXT_(1, &vk_gl_semaphore_);
-                        vk_gl_semaphore_ = 0;
-                        vk_sem_ok_ = false;
-                        CASPAR_LOG(warning) << L"[screen] DuplicateHandle for VK semaphore failed - falling back to implicit sync";
-                    }
-                }
-
-                if (vk_gl_semaphore_) {
-                    // GPU-side wait: tells GL not to read the texture until VK
-                    // signals the timeline semaphore at sem_value.  Zero CPU cost.
-                    GLenum src_layout = GL_LAYOUT_SHADER_READ_ONLY_EXT;
-                    glSemaphoreParameterui64vEXT_(vk_gl_semaphore_, GL_D3D12_FENCE_VALUE_EXT, &sem_value);
-                    glWaitSemaphoreEXT_(vk_gl_semaphore_, 0, nullptr,
-                                        1, &vk_gl_tex_, &src_layout);
-
-                    // Drain any GL error from the semaphore calls — some drivers
-                    // report GL_INVALID_VALUE when the timeline value hasn't been
-                    // signalled yet or on first use.  The GPU-side sync still works
-                    // (the wait is enqueued in the command stream regardless of the
-                    // client-side error flag).  Without this drain the stale error
-                    // propagates to the next GL() macro and kills the render thread.
-                    while (glGetError() != GL_NO_ERROR) {}
-                }
-            }
-        }
+        // Bind the imported GL texture and draw, relying on NVIDIA's implicit VK->GL
+        // synchronisation.
+        //
+        // THERE WAS AN EXPLICIT SEMAPHORE WAIT HERE AND IT NEVER WORKED. It imported the
+        // mixer's VULKAN TIMELINE semaphore as GL_HANDLE_TYPE_OPAQUE_WIN32_EXT and then set
+        // GL_D3D12_FENCE_VALUE_EXT on it. GL_EXT_semaphore expresses value-based waits only
+        // through the D3D12 fence handle type, and GL_EXT_semaphore alone has no timeline
+        // concept at all, so the import failed on the first frame of every server that ever
+        // ran it. The result was never checked -- `vk_sem_ok_` only tested that the entry
+        // points existed -- so "Explicit VK->GL semaphore sync active" was logged one
+        // millisecond AFTER the failure, and a `while (glGetError()) {}` drain swallowed the
+        // GL_INVALID_VALUE that every subsequent frame raised on an invalid semaphore.
+        //
+        // Enabling glDebugMessageCallback on this context showed it plainly:
+        //   GL_INVALID_VALUE  Unable to open shared handle
+        //   GL_OUT_OF_MEMORY  Failed to open semaphore sync object
+        //   GL_INVALID_VALUE  Not a valid semaphore          (x264 in one short run)
+        // Those OOM lines are also the source of the ~15000 "NVIDIA OpenGL driver has
+        // encountered an out of memory error" events in the machine's Application log --
+        // 321 in the sixteen days before the commit that added this, 15114 after.
+        //
+        // Removed rather than repaired, on evidence:
+        //   * The ON-AIR path is already synchronised. `vk_readback_strategy` imports the
+        //     same timeline semaphore VK->VK, where timelines are native, and waits on it
+        //     with VkTimelineSemaphoreSubmitInfo. Only this preview window was unguarded.
+        //   * The hazard does not reproduce. Three arms -- screen alone, and with a DeckLink
+        //     consumer on gpu-readback-mode=vulkan and =vulkan-dma, the exact modes the
+        //     original commit named -- gave 0 torn frames in 840 captures with alternating
+        //     colours, and 0 black frames after first paint across 12 runs.
+        //   * It has been inert since 2026-05-23 with no black/grey output reported.
+        //
+        // If it ever needs repairing rather than deleting, the mechanism is
+        // GL_NV_timeline_semaphore: create with glCreateSemaphoresNV, set
+        // GL_SEMAPHORE_TYPE_NV to GL_SEMAPHORE_TYPE_TIMELINE_NV BEFORE importing, and use
+        // GL_TIMELINE_SEMAPHORE_VALUE_NV -- not GL_D3D12_FENCE_VALUE_EXT -- for the value.
+        // This driver exposes it and all three entry points resolve; GLEW 2.2.0 does not
+        // know it exists, so they need wglGetProcAddress. Check the import result.
 
         // Dynamic preview downscale: if the VK texture is larger than the window,
         // blit to a window-sized local GL texture.  This:
