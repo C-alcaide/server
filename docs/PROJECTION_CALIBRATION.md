@@ -47,6 +47,27 @@ to the server over AMCP.
 The camera return is **not** the embedded output preview (that is the signal we
 *send*); it is a separate camera looking at the physical surface.
 
+That distinction is the whole method, so it is worth seeing: the loop leaves the
+computer, passes through optics and a physical surface, and comes back as
+photons — which is precisely why it can measure lens distortion, focus and screen
+curvature that no amount of inspecting the outgoing frame ever could.
+
+```mermaid
+flowchart LR
+    subgraph DIGI["what we send"]
+        PAT["pattern generated at the<br/>channel's native resolution"] --> SRV["CasparVP<br/>identity perspective"]
+    end
+    SRV -->|SDI / HDMI| PROJ["projector"]
+    PROJ -->|"<b>optics + surface</b><br/>lens distortion, keystone,<br/>curvature, overlap"| SURF["physical surface"]
+    SURF -->|photons| CAM["camera<br/><i>UVC or stills</i>"]
+    CAM --> SOLVE["client solve<br/><i>OpenCV: detect → homography</i>"]
+    SOLVE -->|"AMCP <b>MIXER …</b>"| SRV
+    SRV -.->|"embedded preview —<br/><b>the signal we sent</b>,<br/>NOT a measurement"| X["✗ not the camera return"]
+```
+
+Everything the calibration corrects happens on the **projector → surface** edge.
+Comparing the outgoing frame with itself, via the preview, closes no loop at all.
+
 ## Requirements
 
 * `opencv-contrib-python >= 4.8` — required for ArUco patterns and live UVC
@@ -88,6 +109,23 @@ Phases A–D and the geometry of Phase E are applied through existing per-layer
 mixer commands. The only **server-side addition** is the per-pixel blend mask
 command `MIXER PROJECTION_BLEND_MASK` (CasparVP, used by the optional Phase E
 blend-mask step below); everything else runs against an unmodified server.
+
+Each phase measures a different physical error and leaves it in a different mixer
+command, which is why they compose rather than supersede one another — a later
+phase does not re-solve what an earlier one fixed:
+
+```mermaid
+flowchart TB
+    A["<b>Phase A</b> — corner-pin<br/><i>where the quad lands</i>"] -->|"MIXER PERSPECTIVE"| OUT
+    B["<b>Phase B</b> — optical distortion + edge blend<br/><i>lens curvature, overlap ramps</i>"] -->|"MIXER PROJECTION_DISTORTION<br/>MIXER PROJECTION_BLEND"| OUT
+    C["<b>Phase C</b> — diagnostics<br/><i>uniformity · focus · contrast · straightness</i>"] -.->|"analysis only —<br/>no AMCP apply"| OUT
+    D["<b>Phase D</b> — dense warp<br/><i>Gray-code structured light</i>"] -->|"MIXER MESH (.glb)"| OUT
+    E["<b>Phase E</b> — multi-projector<br/><i>world-UV alignment across projectors</i>"] -->|"the above, per projector<br/>+ MIXER PROJECTION_BLEND_MASK"| OUT
+    OUT["the layer's geometry state"]
+```
+
+Phase C is the odd one out and deliberately so: it applies nothing, and exists to
+tell you whether the phase before it worked.
 
 ```bash
 # Phase A — corner-pin (normalised output positions)

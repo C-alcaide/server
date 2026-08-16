@@ -46,7 +46,14 @@ This document describes the GPU-side synchronization architecture that connects 
 └──────────────────────────┘  └──────────────────────────────────────────┘
 ```
 
-The key insight: **no CPU thread blocks waiting for GPU work**. The Vulkan render signals a timeline semaphore on the GPU, and downstream consumers enqueue GPU-side waits on that semaphore. The CPU only orchestrates — it never polls or waits for render completion.
+The key insight: **no CPU thread blocks waiting for the render**. The Vulkan render signals a timeline semaphore on the GPU, and downstream consumers enqueue GPU-side waits on that semaphore. The CPU issues those waits and returns; it never polls or waits for render completion.
+
+Two blocking waits do remain, and naming them is what makes the claim above checkable — neither is a wait on the *current* frame's render:
+
+| where | call | why it does not stall |
+| :--- | :--- | :--- |
+| DeckLink `push_and_take` | `cudaEventSynchronize(oldest.done)` | on the copy `PIPELINE_DEPTH` frames back, which has long since completed in steady state — this is what makes the measured fence wait 0.06 ms instead of 22 ms |
+| cross-GPU write step | `cudaStreamSynchronize(dst_stream_)` | at the CUDA→GL handoff, where no GPU-side handshake exists (see [Async Cross-GPU Peer Copy](#async-cross-gpu-peer-copy)) |
 
 ---
 
@@ -106,7 +113,12 @@ In `cuda_vk_strategy.cpp`:
    ```
    This returns immediately — the GPU will stall the CUDA stream until the VK timeline reaches `sem_value`.
 
-4. **Double-buffered output**: Two device buffers (`d_v210_[0]`, `d_v210_[1]`) alternate. Each has a `cudaEvent_t` that marks when its D2H copy completes. Before reusing a buffer, the strategy waits on its event.
+4. **Pipelined output**, which is two separate mechanisms rather than one:
+
+   - **Device pack targets** — `NUM_DEV_BUFS = 3` buffers (`d_v210_[]`, or `d_bgra_[]` for SDR) rotated by `dev_idx_`. These are where the CUDA kernel writes.
+   - **Host output buffers** — a *refcounted pool*, not a fixed ring. DeckLink may hold a frame past the tick it was scheduled on, so a buffer returns to the pool when the last reference drops. It was previously three pinned buffers rotated by index and handed over with a no-op deleter; the pool replaced that.
+
+   `PIPELINE_DEPTH = 2` then decides *when* the D2H copy for frame N is waited on — at frame N+2, in `push_and_take`. It is a latency/throughput knob and says nothing about how long a buffer must stay valid, which is what `buffer_depth_` governs. Conflating the two is easy and gives a buffer handed to DeckLink twice.
 
 ### Why Timeline (Not Binary) Semaphores
 
@@ -124,33 +136,43 @@ When the mixer GPU (A) differs from the output GPU (B), `cuda_peer_transfer` han
 
 ### Event Synchronization Chain
 
-```
-Stream: src_stream_ (GPU A)          peer_stream_ (any)          dst_stream_ (GPU B)
-        ┃                              ┃                           ┃
-   WaitEvent(peer_event)          WaitEvent(src_ready)             ┃
-   [ensure prev DMA done]              ┃                           ┃
-        ┃                              ┃                           ┃
-   cudaMemcpy2DFromArray               ┃                           ┃
-   (OGL tex → staging_A)               ┃                           ┃
-        ┃                              ┃                           ┃
-   Record(src_ready_event)             ┃                           ┃
-        ┃                              ┃                           ┃
-        ┃                    cudaMemcpyPeerAsync                   ┃
-        ┃                    (staging_A → staging_B)               ┃
-        ┃                              ┃                           ┃
-        ┃                    Record(peer_event)                    ┃
-        ┃                              ┃                           ┃
-        ┃                              ┃               WaitEvent(peer_event)
-        ┃                              ┃               [ensure DMA arrived]
-        ┃                              ┃                           ┃
-        ┃                              ┃               cudaMemcpy → PBO
-        ┃                              ┃               glTexSubImage2D
+Three CUDA streams and one GL context, across two devices. What the diagram is for is the
+distinction between an *enqueued* wait and an *awaited* one: every `cudaStreamWaitEvent`
+below returns to the CPU immediately and stalls only the GPU stream it was issued on. There
+is exactly one call in the chain that blocks the calling thread, and it is at the end.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant CPU as CPU · affinity thread
+    participant SRC as src_stream_ · GPU A
+    participant PEER as peer_stream_ · GPU A
+    participant DST as dst_stream_ · GPU B
+    participant GL as OpenGL · GPU B
+
+    CPU->>SRC: cudaStreamWaitEvent(peer_event_)
+    Note right of SRC: enqueued — waits until the PREVIOUS<br/>DMA finished reading src_staging_
+    CPU->>SRC: cudaMemcpy2DFromArrayAsync<br/>OGL texture → src_staging_
+    CPU->>SRC: cudaEventRecord(src_ready_event_)
+
+    CPU->>PEER: cudaStreamWaitEvent(src_ready_event_)
+    CPU->>PEER: cudaMemcpyPeerAsync<br/>src_staging_ → dst_staging_
+    CPU->>PEER: cudaEventRecord(peer_event_)
+
+    CPU->>DST: cudaStreamWaitEvent(peer_event_)
+    Note right of DST: cross-DEVICE wait — see the caveat below
+    CPU->>DST: map PBO · cudaMemcpyAsync<br/>dst_staging_ → GL PBO · unmap
+
+    CPU-->>DST: cudaStreamSynchronize(dst_stream_)
+    Note over CPU,DST: ⛔ the one blocking call in the chain.<br/>glTexSubImage2D is a GL call with no GPU-side<br/>handshake back to CUDA, so the PBO write must<br/>be known complete before it is issued.
+    CPU->>GL: glTexSubImage2D — PBO → texture
 ```
 
 ### Key Properties
 
-- **Zero CPU sync points**: `src_ready_event_` and `peer_event_` are `cudaEventDisableTiming` events — lightweight GPU-only signals. No `cudaStreamSynchronize` in the read→peer→write chain.
+- **One CPU sync point, at the CUDA→GL boundary.** `src_ready_event_` and `peer_event_` are `cudaEventDisableTiming` events — lightweight GPU-only signals — and the read→peer half of the chain contains no CPU wait at all. The write half ends in `cudaStreamSynchronize(dst_stream_)` ([cuda_peer_transfer.cpp:426](../src/modules/vulkan_output/util/cuda_peer_transfer.cpp#L426)) because the GL upload that follows it cannot be made to wait on a CUDA stream. That is the cost of handing off to GL rather than staying in CUDA, and it is the only one.
 - **Overlap**: While `peer_stream_` DMAs frame N, `src_stream_` can already be reading frame N+1 into staging_A (after `WaitEvent(peer_event)` confirms the previous DMA finished reading from staging_A).
+- **The cross-device wait is not formally guaranteed.** `peer_event_` is created on `src_device_` and waited on from `dst_stream_`. The code says this plainly: supported on NVIDIA with CUDA 11+ drivers, not promised by the CUDA programming guide for all configurations, tested on Ampere + Pascal with driver 550+. Worth knowing before this is run on other hardware.
 - **Staged fallback**: When GPU architectures differ (e.g., Ampere + Pascal), direct P2P is unavailable. `cudaMemcpyPeerAsync` transparently stages through system RAM using DMA engines — still faster than CPU memcpy.
 
 ---

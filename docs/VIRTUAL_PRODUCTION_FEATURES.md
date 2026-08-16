@@ -4,6 +4,25 @@ This feature set introduces GPU-accelerated 360° projection, curved screen comp
 
 For color management and grading features, see [COLOR_GRADING.md](COLOR_GRADING.md). For blur, sharpening, and film grain, see [IMAGE_EFFECTS.md](IMAGE_EFFECTS.md). For keyframe animation, see [KEYFRAMES.md](KEYFRAMES.md). For DMX lighting integration, see [DMX_LIGHTING.md](DMX_LIGHTING.md). For LED-wall color calibration, see [LED_CALIBRATION.md](LED_CALIBRATION.md).
 
+Two colour docs sit beside `COLOR_GRADING.md` and are easy to miss from here, because
+neither is about a per-layer effect: [OCIO_USER_GUIDE.md](OCIO_USER_GUIDE.md) drives an
+OpenColorIO pipeline — a per-layer input transform plus a **channel** look and display
+transform, which is the ACES route an ICVFX stage usually wants — and
+[HDR_GUIDE.md](HDR_GUIDE.md) covers the channel's colour space, transfer function and what
+each consumer signals on the wire.
+
+Most of what this document describes is geometry — where a pixel is sampled from — which
+happens before any colour conversion and is unaffected by which colour route the channel
+uses. **[Shape Overlay](#shape-overlay) is the exception**, because it is the one command
+here that injects a *colour*: `COLOR1`/`COLOR2`/`STROKE_COLOR` are hex values applied
+straight into the pixel, uncoverted, at a point in the shader after the input conversion
+and before the output one. On an ordinary channel that lands in display-encoded space and
+`#808080` looks like mid-grey. On a channel with `<working-space-composite>` or an
+`OCIO_DISPLAY` — an ICVFX stage, typically — the same value lands in scene-linear ACEScg
+and is then display-rendered, so it will not look like the swatch you picked. Read from
+the shader and the kernel, not measured; pick shape colours by eye on such a channel
+rather than by hex value.
+
 ## Table of Contents
 
 1. [360° Equirectangular Projection](#-equirectangular-projection)

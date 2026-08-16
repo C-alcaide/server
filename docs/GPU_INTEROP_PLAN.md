@@ -66,6 +66,45 @@ what exists is a VK → GL memory export — `gl_export_bridge`, which also repl
 also wrong when written: the mechanism was there but the handle-type constant was
 not a handle type, so no import had ever succeeded (`edf668551`).
 
+### Where that leaves the topology
+
+The table above is the state *before* the work, with its corrections in the prose
+underneath — so here is what is actually wired today. Solid edges alias memory and
+copy nothing; the dashed edge is the one remaining host round trip.
+
+```mermaid
+flowchart LR
+    subgraph P["producers"]
+        PR["CUDA ProRes · NotchLC<br/>OFX · remotewall"]
+        DEC["GPU-direct decode<br/><i>d3d11va</i>"]
+        ISF["ISF · Spout · previz"]
+        CEF["HTML / CEF"]
+    end
+
+    D3D["D3D11"]
+    CU["CUDA"]
+    GL["OpenGL"]
+    VK["<b>Vulkan mixer</b>"]
+
+    PR --> CU
+    CU -->|"<b>CudaVkTexture</b><br/>aliases, no copy"| VK
+    DEC --> D3D
+    D3D -->|"<b>d3d11_import_bridge</b><br/>VK_KHR_external_memory_win32<br/><i>item 1 ✓</i>"| VK
+    D3D -->|"WGL_NV_DX_interop2<br/><i>in av_producer</i>"| GL
+    VK -->|"<b>gl_export_bridge</b><br/>GL_EXT_memory_object_win32<br/>VK allocates, GL renders into it<br/><i>item 2 ✓</i>"| GL
+    ISF --> GL
+    GL -->|"<b>cuda_gl_uploader</b><br/>cudaGraphicsGLRegisterImage"| CU
+    CEF -.->|"CPU OnPaint<br/><b>≈3.1 ms + ≈0.9 ms per frame</b>"| VK
+
+    classDef gap stroke-dasharray: 5 5
+    class CEF gap
+```
+
+Read that way, the remaining line is one node, not one bridge: **HTML/CEF is the only
+producer still crossing the host**, and it does not need a new mechanism — CEF's
+accelerated paint hands over a D3D11 shared texture, which `d3d11_import_bridge`
+already imports.
+
 ---
 
 ## Item 1 — D3D11 → Vulkan
