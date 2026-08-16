@@ -4,7 +4,7 @@
 working space — are not the matrices they claim to be for `bt2020`, `p3_d65`, `arri_wg3`
 and `sgamut3cine`.** Identical numbers on both mixers, so both are affected equally.
 
-Found while designing the working-space composite (`OCIO_HANDOFF_2026-08-11.md` §2 step 2),
+Found while designing the working-space composite (`OCIO_INTEGRATION_STUDY.md` §4),
 by checking the tables the design was going to build on.
 
 | gamut | `k_to_working` | `k_to_output` | |

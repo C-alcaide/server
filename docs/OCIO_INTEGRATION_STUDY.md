@@ -8,12 +8,18 @@
 >
 > * **Using it:** [`OCIO_USER_GUIDE.md`](OCIO_USER_GUIDE.md) — commands, config elements,
 >   refusal codes.
-> * **What was measured, and what is still unproven:**
->   [`OCIO_HANDOFF_2026-08-11.md`](OCIO_HANDOFF_2026-08-11.md).
+> * **What changed in rendered output, with the numbers:** `CHANGELOG.md`.
+> * **How it is verified:** §5.4 below.
 > * **This document** is the design rationale: why the first attempt could not have worked,
 >   and why the shipped one is shaped as it is. Read it for *why*, not for *what is done* —
 >   its banner said "in progress, Vulkan 4 batches of 6 through" for four days after the work
 >   finished, which is the failure mode a status line in a design document invites.
+>
+> `OCIO_HANDOFF_2026-08-11.md` was the resume point while this was being built. It is gone,
+> pruned 2026-08-16: every item in its "What is NOT verified" and "Open decisions" had been
+> struck through, its defect accounts live in `CHANGELOG.md`, and its four durable pieces
+> moved here — the gates to §5.4, the one remaining question to §7.9, and its sources to §9.
+> `git log -- docs/OCIO_HANDOFF_2026-08-11.md` has the rest.
 
 This document exists because OCIO was attempted once, on branch `origin/feature/ocio-support`,
 and abandoned. It first establishes *why* that attempt could not have worked — the reasons
@@ -462,6 +468,30 @@ can do, and must:
 4. **New fixtures the current path cannot represent**: patches carrying negative values
    and values above 1.0. Their existence is itself the test of §4.3.
 
+### 5.4 The gates, in the order to run them
+
+Migrated from `OCIO_HANDOFF_2026-08-11.md` when that file was pruned; it is the one part of
+it that was still worth running rather than reading.
+
+```bash
+cd d:\Github\CasparCG-TestRunner
+python cli.py conformance   --server d:\Github\CasparVP\build\shell\casparcg.exe --mixer ogl
+python cli.py grading       --server d:\Github\CasparVP\build\shell\casparcg.exe --mixer ogl
+python cli.py ocio          --server d:\Github\CasparVP\build\shell\casparcg.exe --mixer ogl
+python cli.py vk-validation --server d:\Github\CasparVP\build\shell\casparcg.exe
+# then --mixer vulkan for the first three. Parity is required, not optional.
+python -m pytest tests/ -q     # includes the OCIO oracle and the vk-validation guards
+```
+
+Since that list was written the OCIO surface has grown its own batteries — `ocio-display`,
+`ocio-gamut-compress`, `ocio-exposure`, `ocio-lut3d` and `consumer-view` — and they gate the
+parts `cli.py ocio` does not reach. The harness's own `CLAUDE.md` is the current index; this
+list is the minimum.
+
+**Redirect to a file and grep. Do not pipe a battery through `tail`** — it races the summary
+line. And check the run registry before starting: a battery competing with another session's
+run dies mid-way with no error in its own log.
+
 ---
 
 ## 6. Phasing
@@ -555,6 +585,11 @@ in `IMAGE_SEQUENCE_AND_TIMELINE_PLAN.md` §3.5 tier 3.
    worth fixing whether or not OCIO is adopted — the domain bug means operator LUTs with a
    non-unit domain are being applied incorrectly today, with no diagnostic. Bounding the size
    is a two-line change.
+9. **Does the GPU-versus-CPU agreement hold at 16 bit?** Every OCIO measurement to date is at
+   8-bit capture depth — `(0,202,255)` against a model's `(0,202,255)`, delta `[0 0 0]`. A
+   16-bit capture has 256× the resolution to disagree in, and nothing has looked. Carried
+   over from `OCIO_HANDOFF_2026-08-11.md`, where it was the only open item left when that
+   file was pruned.
 
 ---
 
@@ -701,5 +736,10 @@ throughput.
   bindings, 2.5.2, Windows x86-64 wheels; the basis of the harness model in §5.1
 * [OCIO `tests/gpu/GPUUnitTest.h`](https://github.com/AcademySoftwareFoundation/OpenColorIO/blob/master/tests/gpu/GPUUnitTest.h)
   — upstream GPU-versus-CPU parity test framework
+* [Developing with OpenColorIO](https://opencolorio.readthedocs.io/en/latest/guides/developing/developing.html)
+  — roles, display/view, processor cost
+* [Colorspaces — `isData`](https://opencolorio.readthedocs.io/en/latest/guides/authoring/colorspaces.html)
+* [OCIO 2.0 release notes — data space handling](https://github.com/AcademySoftwareFoundation/OpenColorIO/blob/main/docs/releases/ocio_2_0.rst)
+* [OpenImageIO `colorconvert` / `unpremult`](https://github.com/OpenImageIO/oiio/blob/master/src/include/OpenImageIO/imagebufalgo.h)
 * In-tree: `b304665b8`, `origin/feature/ocio-support`, `docs/COLOR_GRADING.md`,
-  `BUILDING_WORKFLOW.md`
+  `BUILDING_WORKFLOW.md`, `OCIO_USER_GUIDE.md`

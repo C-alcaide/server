@@ -916,7 +916,9 @@ null meaning the base pipeline.
 OCIO generation, a LUT image creation with a device `waitIdle`, a shaderc compile and a
 driver pipeline build — about 1.2 s and one dropped frame, logged as a warning. Every later
 frame is a map lookup. Pre-warming at `MIXER OCIO` command time is the fix and is not done
-yet; see `docs/OCIO_HANDOFF_2026-08-11.md`.
+yet. *(Done since, 2026-08-13: `prewarm_ocio()` builds the program on the device thread when
+the command is accepted — 0 compiles on the frame path on either mixer, against one per view
+before. See the entry above.)*
 
 Unchanged on this path: user `exposure` and gamut compression, which live in the
 `color_grade` struct inside the input block OCIO replaces. Neither belongs to an input

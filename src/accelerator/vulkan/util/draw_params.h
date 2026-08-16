@@ -96,8 +96,9 @@ struct draw_params final
     /// and background reach the blend in the same display encoding, exactly as today. With
     /// one transform for the whole channel that is equivalent to transforming the composite.
     ///
-    /// A consumer-level view would need the composite to still be in working space, which is
-    /// a different and larger change; see docs/OCIO_HANDOFF_2026-08-11.md.
+    /// A consumer-level view needs the composite to still be in working space, which was the
+    /// larger change this comment used to defer: `<working-space-composite>` plus one
+    /// post-composite pass per distinct view. Both shipped -- see OCIO_USER_GUIDE.md §6.2.
     std::string                                 ocio_display;
     std::string                                 ocio_view;
 };
