@@ -249,6 +249,27 @@ spl::shared_ptr<format_strategy> create_format_strategy(const configuration& con
                ? create_sdr_v210_strategy(config.color_space)
                : create_sdr_bgra_strategy());
 
+    // `<gpu-transfer>` is read in exactly ONE place — `use_dvp` below — so it is silently
+    // inert everywhere else: on the Vulkan mixer entirely, and on the OpenGL mixer unless
+    // the GL compute packer is active. Two of three configurations accept the element and
+    // ignore it.
+    //
+    // Warned rather than refused. The value is not wrong, it is inapplicable, and a config
+    // shared between mixers would be rejected on one of them for saying something harmless.
+    // There is also nothing to coerce it to, unlike `<subregion>` above, which has a CPU
+    // path that does honour the geometry. What the operator needs is to know their setting
+    // did nothing, which is precisely what was missing: a sweep of all three values came
+    // back identically clean on the Vulkan mixer, which reads exactly like a pass.
+    if (config.gpu_transfer != configuration::gpu_transfer_t::auto_select &&
+        (use_vulkan || !ogl_gpu_direct)) {
+        CASPAR_LOG(warning)
+            << L"[decklink] <gpu-transfer> is set, but it only takes effect on the OpenGL "
+               L"mixer with the GPU packer active (<gpu-pack>gpu</gpu-pack>). "
+            << (use_vulkan ? L"This channel uses the Vulkan mixer, "
+                           : L"The GPU packer is not active here, ")
+            << L"so the setting is ignored.";
+    }
+
     if (!use_vulkan) {
         // OpenGL mixer: optionally pack v210/BGRA on the GPU (GL compute) instead of the CPU.
         if (ogl_gpu_direct) {
