@@ -159,6 +159,54 @@ MIXER 1-2 OCIO "ARRI LogC3 (EI800)"                             # ACES 2.0 via t
 Pick one path per channel. If a facility has an OCIO config, use it for everything on that
 channel; if not, the built-in path is cheaper and needs no config.
 
+### Which path — the short version
+
+```mermaid
+flowchart TB
+    Q1{"Does the show carry an AMF,<br/>an OCIO config, or a show LUT?"}
+    Q1 -->|yes| O["OCIO path"]
+    Q1 -->|no| Q2{"Is the source encoding<br/>in the built-in enums?<br/>(7 transfers x 8 gamuts)"}
+    Q2 -->|no — ACEScct, an odd log curve| O
+    Q2 -->|yes| Q3{"Do different layers need<br/>DIFFERENT tone maps?"}
+    Q3 -->|yes| B["built-in path<br/><i>tone map is per LAYER</i>"]
+    Q3 -->|no| Q4{"Can the channel run<br/>fp16 + working-space-composite?"}
+    Q4 -->|no| B
+    Q4 -->|yes| O
+```
+
+Read as rules rather than a diagram:
+
+| use | when |
+| :--- | :--- |
+| **OCIO** | the show has an AMF, an OCIO config or a show LUT; the source encoding is not one of the built-in enums; you want ACES **2.0**; or you need one look applied to the whole composite |
+| **built-in** | a plain named transfer/gamut pair is all you need; the channel cannot run `fp16` + `<working-space-composite>`; or layers genuinely need **different** tone maps, which the OCIO path cannot express — its view is per channel |
+
+**Three costs of the OCIO path, so the choice is informed rather than aspirational:**
+
+* **It requires `<working-space-composite>` for anything channel-level** (`OCIO_DISPLAY`,
+  `OCIO_LOOK`, and therefore `AMF`), which needs `fp16` and `auto-color-convert` — and it
+  **changes how layers blend**, in scene-linear light rather than display-encoded values.
+  Existing looks that relied on display-space blending will move. That is a deliberate
+  decision, not a toggle to flip during a show.
+* **Selecting a transform compiles a shader.** An ACES 2.0 display program is ~15 KB of
+  GLSL. The server pre-warms on the command so it does not cost a frame, but the command
+  itself is not instant.
+* **The look lives in the config, not in the show file.** Reproducing a look on another
+  machine means shipping the config, not just the AMCP commands.
+
+### Where the newer commands fit
+
+None of these is a third path — each one *addresses* the stages above:
+
+| command | path | scope | what it is for |
+| :--- | :--- | :--- | :--- |
+| [`OCIO_LOOK`](OCIO_USER_GUIDE.md#53-ocio_look-channel--the-channels-lmt-show-look) | OCIO | channel | the show's LMT, applied to the whole composite before the view |
+| [`AMF`](OCIO_USER_GUIDE.md#54-amf-channel-layer--configure-everything-from-a-shows-metadata) | OCIO | channel + layer | sets input, look and display at once from the show's own metadata |
+| [`MIXER CDL_FILE`](#loading-a-grade-from-a-file) | **either** | layer | loads an ASC CDL grade from a `.cdl`/`.ccc`; it is a grading tool, so it works on both paths |
+
+`MIXER CDL_FILE` is the one worth noting: it sits in the **shared** part of the chain, so a
+grade from set applies whichever path the layer took.
+
 ### What is shared regardless of which path a layer took
 
 Everything from step 6 onward is the same code operating on the same working space, so the
