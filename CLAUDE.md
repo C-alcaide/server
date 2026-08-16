@@ -28,6 +28,46 @@ threshold downstream defensible.
 If the capability you need is missing, add it to the harness (`core/` + a `cli.py`
 subcommand + tests) rather than writing a script in the scratchpad.
 
+## Where the numbers come from — read this before implementing or auditing a standard
+
+Almost nothing here is invented. Colour management, transfer functions, gamut matrices,
+tone curves, YCbCr matrices, LUT formats — these are **published standards**, and a
+constant in this tree is either the standard's value or a bug. Look them up in this order:
+
+1. **The body that defines it.** ACES/AMPAS, ASWF (OpenColorIO), SMPTE, ITU-R, EBU, DCI.
+   The specification, or a reference implementation the body publishes.
+2. **The vendor, where the vendor defines it.** ARRI, Sony, Blackmagic — camera log curves
+   and native gamuts belong to them, and their SDK or white paper is the source.
+3. **Other open-source implementations, as corroboration only.** Useful for reading how a
+   thing is structured; never the authority for a number. Two projects agreeing may only
+   mean one copied the other.
+
+**Why this is first rather than obvious.** Four of the seven ACEScg gamut matrices in this
+tree were wrong — bt2020, p3-d65, arri_wg3 and sgamut3cine, by up to 0.41 per element. They
+were plausible-looking numbers that nobody had derived from primaries. What settled it was
+OCIO (an ASWF project) plus a colorimetric derivation, and the fix reached upstream only
+because the standard was consulted rather than the existing code trusted.
+
+Four rules follow, and each has already cost something here:
+
+* **Prefer a derivation you can re-run to a copied constant.** The BT.601 Cb→G coefficient
+  follows from Kr/Kb/Kg; deriving it exposed a value rounded to 3 decimals sitting among
+  5-decimal neighbours. A constant with a comment showing how it is obtained survives the
+  next person who doubts it.
+* **An internal check cannot validate against a standard.** `arri_wg3` and `sgamut3cine`
+  round-tripped `to_output @ to_working` to *exactly* the identity while both were wrong —
+  consistent inverses of each other. Round trips prove self-consistency and nothing else;
+  only an external reference proves correctness.
+* **Name the version, and check whether the quantity depends on it.** ACES 1.x and ACES 2.0
+  differ in the *rendering transform*; AP1's primaries and the ACES white point are the
+  same in both. So taking gamut matrices from an ACES 2.0 config for a 1.x path is fine,
+  and taking a tone curve would not be. Say which revision in the doc and in the token
+  name — `ACES_RRT` reads as current ACES and is 1.x.
+* **An approximation must be named as one.** Our gamut compressor carries ACES's limits but
+  a different curve, measured at mean 0.030 / max 0.350 from the reference. It was called
+  "ACES 1.3 Reference Gamut Compress" in three places, which claims conformance the code
+  does not have. Fast approximations are welcome on the frame path; mislabelled ones are not.
+
 ## Building
 
 Full detail in `BUILDING_WORKFLOW.md`. The parts that are easy to get wrong:
@@ -192,6 +232,28 @@ a doc and the shader disagree, the shader wins and the disagreement is a finding
 `CHANGELOG.md` leads with behaviour changes. Anything that alters rendered output for
 an existing config belongs there with the measurement that established it.
 
+### A feature with an order-dependent pipeline gets a diagram
+
+Prose describes a chain one step at a time; the reader has to hold the order in their head
+to see it. A picture does not. When a feature lands, the doc that owns it gets a **mermaid**
+diagram — GitHub renders it, and it lives in the markdown rather than as a binary nobody can
+edit.
+
+Three things earn one, and they are the three this tree keeps confusing people with:
+
+* **A pipeline whose ORDER is the point.** `COLOR_GRADING.md`'s flowchart is why "CDL runs
+  before the LUT" is answerable at a glance instead of by reading fourteen table rows.
+* **Two paths that reach the same place.** `MIXER COLORSPACE` and `MIXER OCIO` write the
+  same stage and are mutually exclusive — that took a comparison table and several
+  paragraphs to say, and a two-branch diagram says it first.
+* **A stage whose POSITION is the whole feature.** `<working-space-composite>` moves where
+  the display encoding happens relative to the blend; per-consumer views fan out after the
+  composite. Both are about position, which is exactly what prose is worst at.
+
+Keep them small — the stages and the branch, not every uniform. And a diagram is a claim
+like any other: it goes stale the same way, so it is covered by the rule below rather than
+exempt from it.
+
 ### Update the doc in the same commit as the change
 
 Not eventually. A doc that lags becomes a **claim that outlives the code**, and this tree
@@ -209,6 +271,8 @@ So "which doc" is not left to judgment:
 | a new AMCP command or argument | the feature doc that owns it, and `docs/OPERATIONS_GUIDE.md` |
 | a new `<configuration>` element | the feature doc that owns it |
 | a new battery, or a new number for an existing claim | the doc carrying that claim, **and** the harness `CLAUDE.md` command table |
+| a new stage in a pipeline, or a second route into an existing one | the owning doc, **and its diagram** |
+| a constant taken from a standard | the owning doc, naming the standard *and its revision* |
 | a trap that cost more than an hour | this file |
 
 **State what the measurement does not cover, in the same paragraph as the number.** A figure
