@@ -45,6 +45,10 @@ namespace caspar { namespace decklink {
 /// raster size.
 struct sdi_signalling
 {
+    /// Whether the input frame offered `IDeckLinkVideoFrameAncillaryPackets` at all. False
+    /// means the question "did a packet arrive" was never actually asked.
+    bool anc_interface_available = false;
+
     bool    vpid_present = false;
     uint8_t vpid[4]      = {0, 0, 0, 0};
 

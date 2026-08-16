@@ -500,14 +500,58 @@ sdi_signalling read_sdi_signalling(IDeckLinkVideoInputFrame* video, std::wstring
 {
     sdi_signalling out;
 
+    // A BLIND SPOT THIS FUNCTION HAD UNTIL 2026-08-16, and it mattered: every failure below
+    // used to return the same empty census, so "the input frame does not offer the ancillary
+    // interface at all" was indistinguishable from "it offers it and the frame carried
+    // nothing". Those have different causes -- the first is the capture not being in a
+    // VANC-capable pixel format, or a device that does not do ancillary capture; the second
+    // is a genuinely silent sender -- and reporting them identically is how an entire
+    // investigation ends up aimed at the wrong end of the link.
+    if (census != nullptr) {
+        wchar_t buf[64];
+        swprintf(buf, 64, L" [input pixfmt %08X]", static_cast<unsigned>(video->GetPixelFormat()));
+        *census += buf;
+    }
+
+    // THE INTEROP HEADER IN THIS TREE IS SDK 12.3.1 AND THE DRIVER IS 15.3, and the ancillary
+    // packet API was revised in between. `IDeckLinkAncillaryPacket` gained `GetDataSpace()`,
+    // which changed its IID, which cascaded to the iterator and to this container -- the
+    // previous three are what SDK 15.3 now calls `..._v15_2`, and `IID_...` in our header is
+    // the v15_2 value. Querying a 15.3 input frame with it returns E_NOINTERFACE, which is
+    // exactly the "interface not offered" this function reported.
+    //
+    // The new method was APPENDED, so the vtable prefix is unchanged and the five methods
+    // used here are identical in both revisions. Casting the new interface to the old
+    // declaration is therefore safe for everything below; what would NOT be safe is calling
+    // GetDataSpace through it, and nothing here does.
+    //
+    // Preferring the new IID and falling back keeps this working against both driver
+    // generations, which matters because the fix belongs in a regenerated interop header and
+    // this is not that.
+    static const GUID IID_AncillaryPackets_15_3 = {
+        0x8A72D630, 0x8070, 0x4D05, {0x8A, 0x93, 0xE6, 0x0C, 0x40, 0xEE, 0x08, 0x8A}};
+
     IDeckLinkVideoFrameAncillaryPackets* raw = nullptr;
-    if (FAILED(video->QueryInterface(IID_IDeckLinkVideoFrameAncillaryPackets, (void**)&raw)) || raw == nullptr) {
-        return out;
+    if (FAILED(video->QueryInterface(IID_AncillaryPackets_15_3, (void**)&raw)) || raw == nullptr) {
+        if (FAILED(video->QueryInterface(IID_IDeckLinkVideoFrameAncillaryPackets, (void**)&raw)) ||
+            raw == nullptr) {
+            if (census != nullptr) {
+                *census += L" ANCILLARY INTERFACE NOT OFFERED BY THE INPUT FRAME (neither 15.3 nor v15_2 IID)";
+            }
+            return out;
+        }
+        if (census != nullptr) {
+            *census += L" [v15_2 ancillary IID]";
+        }
     }
     auto packets = wrap_raw<com_ptr>(raw, true);
+    out.anc_interface_available = true;
 
     IDeckLinkAncillaryPacketIterator* raw_iter = nullptr;
     if (FAILED(packets->GetPacketIterator(&raw_iter)) || raw_iter == nullptr) {
+        if (census != nullptr) {
+            *census += L" INTERFACE PRESENT BUT NO ITERATOR";
+        }
         return out;
     }
     auto iter = wrap_raw<com_ptr>(raw_iter, true);

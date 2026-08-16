@@ -479,14 +479,35 @@ colorimetry and transfer characteristics. That one is the card's to insert, buil
 frame metadata the consumer already supplies, and emitting a second one risks two conflicting
 payload identifiers in a single field.
 
-**Not confirmed on the wire.** On the development rig the consumer attaches the packet and
-`AttachPacket` returns `S_OK` — logged once per consumer as `VANC attaching 1 packet(s):
-41h/0Ch@9` — but a DeckLink 8K Pro receiving the same signal over an SDI loopback reports an
-empty ancillary census, at lines 9, 13 and 18, while the picture itself arrives intact. The
-encoding is checked against the standards by unit test
-(`cmake --build build --target decklink_sdi_signalling_test`); what is unverified is whether
-this hardware carries app-inserted ancillary data at all. Confirm with an analyser before
-relying on it in a plant.
+**Known not to reach the wire yet, and the reason is not in this code.** The consumer attaches
+the packet and `AttachPacket` returns `S_OK` — logged once per consumer as `VANC attaching 1
+packet(s): 41h/0Ch@9` — yet a DeckLink 8K Pro receiving the same signal over an SDI loopback
+reports an empty ancillary census, at lines 9, 13 and 18, while the picture arrives intact.
+
+The cause is that **this tree's DeckLink interop header is SDK 12.3.1 and the installed driver
+is 15.3**, and the ancillary API was revised in between. `IDeckLinkAncillaryPacket` gained a
+`GetDataSpace()` method, which changed its IID and cascaded to the iterator, the container and
+the container's coclass:
+
+| | interop header (12.3.1) | driver (15.3) |
+| :--- | :--- | :--- |
+| `CLSID_CDeckLinkVideoFrameAncillaryPackets` | `F891AD29-D0C2-46E9-A926-4E2D0DD8CFAD` | `6F47097E-B390-4650-BCB6-C4D52FAA1643` |
+| `IID_IDeckLinkVideoFrameAncillaryPackets` | `6C186C0F-459E-41D8-AEE2-4812D81AEE68` | `8A72D630-8070-4D05-8A93-E60C40EE088A` |
+
+SDK 15.3 keeps the older pair under the name `..._v15_2`, so what the fork calls "the"
+ancillary interface is what the driver now calls the previous generation. The old coclass is
+still registered — which is why `CoCreateInstance` and `AttachPacket` both succeed and the
+whole thing looks healthy from inside the process — but `decklink_frame::QueryInterface`
+answers only the `_v15_2` IID, and a 15.3 driver scheduling a custom frame asks for the 15.3
+one. It gets `E_NOINTERFACE` and takes no ancillary data from the frame at all.
+
+**This is not specific to HDR metadata.** The same mismatch sits under OP47 and SCTE-104,
+which attach their packets through exactly the same path.
+
+The fix is to regenerate `src/modules/decklink/interop/` from the 15.3 IDL, which is a change
+to the whole module rather than to this feature. Until then the packet is built correctly —
+the encoding is checked against the standards by
+`cmake --build build --target decklink_sdi_signalling_test` — and does not leave the card.
 
 ### EOTF values sent on the wire (SDK constants)
 

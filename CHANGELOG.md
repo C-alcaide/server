@@ -20,15 +20,27 @@ consumer that does not ask for this puts the same bytes on the wire as before.
 characteristics and is the card's to insert from the frame metadata the consumer already
 supplies; a second one risks two conflicting payload identifiers in one field.
 
+**ROOT-CAUSED after the fact: it does not reach the wire, and the reason is module-wide.**
+This tree's DeckLink interop header is SDK 12.3.1 and the installed driver is 15.3, and the
+ancillary API was revised in between — `IDeckLinkAncillaryPacket` gained `GetDataSpace()`,
+changing its IID and cascading to the iterator, the container and the container's coclass
+(`6C186C0F…`→`8A72D630…`, `F891AD29…`→`6F47097E…`). SDK 15.3 keeps the older pair as
+`..._v15_2`. The old coclass is still registered, so `CoCreateInstance` and `AttachPacket`
+both succeed and the path looks healthy from inside the process; but
+`decklink_frame::QueryInterface` answers only the `_v15_2` IID, and a 15.3 driver scheduling a
+custom frame asks for the 15.3 one, gets `E_NOINTERFACE`, and takes no ancillary data from
+that frame. **The same mismatch sits under OP47 and SCTE-104**, which attach through the
+identical path — so this is not an HDR feature defect. Fixing it means regenerating
+`src/modules/decklink/interop/` from the 15.3 IDL, a module-wide change.
+
 **Measured, and the limit stated with it.** The encoding is checked against SMPTE ST 2108-1
 and, for the reader that decodes it, against the VPID words EBU Tech 3375 publishes — 18
 assertions, mutation-tested, in `decklink_sdi_signalling_test`. On the wire the consumer
 attaches the packet and `AttachPacket` returns `S_OK`, logged once as `VANC attaching 1
 packet(s): 41h/0Ch@9`. A DeckLink 8K Pro receiving that signal over an SDI loopback then
 reports an **empty ancillary census** — at lines 9, 13 and 18, at 8-bit and 10-bit ingest, on
-HD-SDI and 3G — while the picture arrives intact. So what is verified is the encoding and the
-attach; whether this hardware carries app-inserted ancillary data at all is not, and an
-analyser is needed to close it. Conformance unchanged at 36/36 within 1 LSB.
+HD-SDI and 3G — while the picture arrives intact. That census is what led to the interop
+mismatch described above. Conformance unchanged at 36/36 within 1 LSB.
 
 ### Added: the producer reads SDI colour signalling (ST 352 and ST 2108-1)
 
