@@ -459,6 +459,27 @@ struct Decoder
 /// carries no colour space in the payload, so a sub-720 signal with no metadata is
 /// conventionally BT.601, while metadata that says BT.709 must be honoured whatever the
 /// raster size.
+const wchar_t* metadata_name(core::color_space cs)
+{
+    switch (cs) {
+        case core::color_space::bt601:  return L"bt601";
+        case core::color_space::bt709:  return L"bt709";
+        case core::color_space::bt2020: return L"bt2020";
+        case core::color_space::p3_d65: return L"p3-d65";
+        case core::color_space::p3_dci: return L"p3-dci";
+        default:                        return L"unknown";
+    }
+}
+
+const wchar_t* metadata_name(core::color_transfer ct)
+{
+    switch (ct) {
+        case core::color_transfer::pq:  return L"pq";
+        case core::color_transfer::hlg: return L"hlg";
+        default:                        return L"sdr";
+    }
+}
+
 core::color_space get_color_space(IDeckLinkVideoInputFrame* video,
                                  core::color_space         fallback = core::color_space::unknown)
 {
@@ -809,6 +830,10 @@ class decklink_producer : public IDeckLinkInputCallback
     bool freeze_on_lost_;
     bool has_signal_ = false;
     bool hdr_;
+    //: One line per producer naming the colourspace/EOTF that actually arrived. Without it
+    //: "the tag the consumer signalled is the tag the producer received" is not assertable:
+    //: both readers consume the metadata and neither records what it saw.
+    bool logged_input_metadata_ = false;
 
     int sync_group_ = 0;
     int sync_peers_ = 1;
@@ -1105,6 +1130,24 @@ class decklink_producer : public IDeckLinkInputCallback
 
                 color_space    = get_color_space(video, color_space);
                 color_transfer = get_color_transfer(video, color_transfer);
+
+                // SAY WHAT ARRIVED, ONCE. The consumer signals colourspace and EOTF through
+                // IDeckLinkVideoFrameMetadataExtensions and these two readers consume them,
+                // but nothing logged or exposed the result -- so "the tag the consumer sent
+                // is the tag the producer received" was not an assertable statement, on any
+                // rig, and a loopback could only infer it from pixels. That inference is
+                // confounded: the channel's <color-space> drives the consumer's ENCODE
+                // matrix as well as the tag it signals, so a picture difference cannot
+                // separate "the tag was honoured" from "the encode changed".
+                //
+                // One line per producer, so it costs nothing per frame and still dates the
+                // observation.
+                if (!logged_input_metadata_) {
+                    logged_input_metadata_ = true;
+                    CASPAR_LOG(info) << print() << L" input metadata: colorspace="
+                                     << metadata_name(color_space)
+                                     << L" transfer=" << metadata_name(color_transfer);
+                }
                 auto src    = video_decoder_.decode(video, mode_);
 
                 BMDTimeValue duration;
