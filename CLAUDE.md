@@ -191,3 +191,34 @@ a doc and the shader disagree, the shader wins and the disagreement is a finding
 
 `CHANGELOG.md` leads with behaviour changes. Anything that alters rendered output for
 an existing config belongs there with the measurement that established it.
+
+### Update the doc in the same commit as the change
+
+Not eventually. A doc that lags becomes a **claim that outlives the code**, and this tree
+generates those faster than anyone re-reads them. Four were corrected in one sitting on
+2026-08-14: a harness battery recorded as "still owed" that had existed for two days, a
+render-fingerprint field described as "needed" that both mixers already had, an entry under
+*What is NOT verified* that the same file's own header contradicted, and an open question
+answered a session earlier. None was wrong when written.
+
+So "which doc" is not left to judgment:
+
+| what changed | where it goes |
+| :--- | :--- |
+| rendered output for an existing config | `CHANGELOG.md`, with the measurement |
+| a new AMCP command or argument | the feature doc that owns it, and `docs/OPERATIONS_GUIDE.md` |
+| a new `<configuration>` element | the feature doc that owns it |
+| a new battery, or a new number for an existing claim | the doc carrying that claim, **and** the harness `CLAUDE.md` command table |
+| a trap that cost more than an hour | this file |
+
+**State what the measurement does not cover, in the same paragraph as the number.** A figure
+without its limits reads as a stronger claim than it is. `LED_CALIBRATION.md` says 32/32 at
+1 LSB and then says, immediately, that only the IMAGE consumer was captured and only one
+layer was composited — so a reader takes it as "the LUT is applied correctly" rather than
+"`CALIBRATION` works".
+
+**Re-read a doc immediately before editing it.** Several sessions run against this tree at
+once and docs are the likeliest file for two of them to collide in — editing from a stale
+read put duplicate rows in the harness command table on 2026-08-16. If the file already
+carries another session's uncommitted work, fix your part, leave it unstaged, and say so:
+staging it sweeps their changes into your commit, which has happened twice.
