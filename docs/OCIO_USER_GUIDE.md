@@ -263,6 +263,12 @@ different prefix is accepted. Refused with `404`: a missing file, malformed XML,
 does not resolve against the loaded config, and an `outputTransform` that yields only half a
 display/view pair.
 
+**Measured, both mixers, byte-identical.** Applying an AMF renders **0.00** away from
+issuing `MIXER OCIO`, `OCIO_LOOK` and `OCIO_DISPLAY` by hand with the same IDs resolved
+independently — a comparison between two frames the server produced, so no colour model is
+involved. An AMF differing in exactly one node renders **68 LSB** away, which is what makes
+"the file was read" falsifiable rather than assumed. `cli.py amf`.
+
 > Design rationale and the evidence that the mapping is mechanical:
 > [`AMF_SUPPORT_STUDY.md`](AMF_SUPPORT_STUDY.md).
 

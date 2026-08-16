@@ -1,6 +1,32 @@
 CasparVP — Unreleased
 ==========================================
 
+### Added: `AMF` — configure a channel from an ACES Metadata File
+
+`AMF <ch>-<layer> "<file.amf>"` reads the document a show carries to name its pipeline and
+applies exactly what `MIXER OCIO`, `OCIO_LOOK` and `OCIO_DISPLAY` apply. An AMF *addresses*
+those stages; it is not a fourth colour path.
+
+**The mapping is mechanical, not a maintained table.** OCIO configs carry the AMF transform
+IDs themselves under `interchange: amf_transform_ids`, so an ID resolves through whichever
+config is loaded — point the server at your own via `<ocio-config>` and your own AMFs resolve
+against it. 86 IDs resolve from the bundled config. Nothing here transcribes ACES.
+
+An `outputTransform` is one ID where `OCIO_DISPLAY` needs a display **and** a view; that ID
+appears on exactly one colour space (whose name is the display) and one view transform, so
+the pair is determined rather than guessed.
+
+It resolves everything before applying anything — three settings from one file must not leave
+a channel showing neither the old look nor the new one — and applies display before look,
+which is forced rather than chosen, since `OCIO_LOOK` is composed into the display processor.
+The `aces:` namespace prefix is convention rather than specification, so another prefix is
+accepted. Refused with 404: missing file, malformed XML, an unresolvable ID, and an
+`outputTransform` yielding only half a display/view pair.
+
+Measured, **both mixers byte-identical**: applying an AMF renders **0.00** from the three
+commands issued by hand with independently resolved names, and an AMF differing in one node
+renders **68 LSB** away. `cli.py amf`.
+
 ### Added: `MIXER CDL_FILE` — load an ASC CDL from a `.cdl` / `.ccc` / `.cc`
 
 The CDL *maths* has been in both kernels for a long time; what was missing was the
