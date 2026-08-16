@@ -448,10 +448,10 @@ would not be a gamut operation — so the command sets its state and the shader 
 
 ### Under an ACES 2.0 display view, this becomes a look control
 
-This is the **ACES 1.3** Reference Gamut Compress, applied in the working space *before* the
-display rendering. An ACES 2.0 output transform (`OCIO_DISPLAY` with an ACES 2.0 view) does
-its own gamut handling on the way to the display, so the obvious question is whether the two
-compress the same saturation twice.
+This compressor — an approximation sharing ACES 1.3's *limits* but not its algorithm, as
+above — runs in the working space *before* the display rendering. An ACES 2.0 output
+transform (`OCIO_DISPLAY` with an ACES 2.0 view) does its own gamut handling on the way to
+the display, so the obvious question is whether the two compress the same saturation twice.
 
 **Measured 2026-08-16, and the answer is neither.** Six saturated patches through
 `MIXER OCIO "ARRI LogC3 (EI800)"`, comparing how much the picture moves when compression is
