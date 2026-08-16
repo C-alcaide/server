@@ -1,15 +1,29 @@
 # OCIO integration — handoff, 2026-08-11
 
-Resume point for the OCIO work on branch **`feature/ocio-mixer`**, off `CasparVPV`. Plan of
-record: [`OCIO_INTEGRATION_STUDY.md`](OCIO_INTEGRATION_STUDY.md).
+> **The work this file was a resume point for is finished — 2026-08-16.** It is kept, and
+> retitled in purpose rather than renamed, as **the measurement record**: what was verified,
+> against which oracle, to what number, and — the part worth keeping — what is still
+> unproven and why.
+>
+> * **Using OCIO:** [`OCIO_USER_GUIDE.md`](OCIO_USER_GUIDE.md).
+> * **Why it is shaped this way:** [`OCIO_INTEGRATION_STUDY.md`](OCIO_INTEGRATION_STUDY.md).
+> * **Here:** the numbers, and §"What is NOT verified".
+>
+> Not folded into the study, deliberately. The study argues a design and should stay
+> readable as one; this is a ledger of measurements with dates attached, and merging the two
+> would leave a document that is neither — and would lose the dates, which are what let a
+> reader tell a claim that was checked from one that was inherited.
 
-**A4e and A4f are done: the OCIO input transform now works on both mixers, at parity.**
-Updated in place rather than as a second file — four same-dated handoffs once existed in the
-harness repo and which was current could only be recovered from git timestamps.
+Originally the resume point for the OCIO work on branch **`feature/ocio-mixer`**, off
+`CasparVPV`. Plan of record: [`OCIO_INTEGRATION_STUDY.md`](OCIO_INTEGRATION_STUDY.md).
 
-*Covers work through 2026-08-12. Kept as one file rather than split at midnight: the work is
-continuous, and four same-dated handoffs in the harness repo once made "which one is current"
-answerable only from git timestamps.*
+**A4e and A4f are done: the OCIO input transform works on both mixers, at parity.** Updated
+in place rather than as a second file — four same-dated handoffs once existed in the harness
+repo and which was current could only be recovered from git timestamps.
+
+*Work recorded here runs from 2026-08-11 to 2026-08-16. Kept as one file rather than split
+at midnight: the work is continuous, and four same-dated handoffs in the harness repo once
+made "which one is current" answerable only from git timestamps.*
 
 ## Status: the reorder is complete
 
@@ -575,7 +589,18 @@ reporting"; it exits **2 for inconclusive** rather than folding that into a pass
    The original analysis follows, kept because the parts it established by reading were right
    and are still the reason the upload is trusted.
 
-   Traced 2026-08-14:
+   > **Superseded 2026-08-16.** The blocker below — `load_config` having no caller — was
+   > fixed by `<ocio-config>` (`shell/server.cpp:236`), and the measurement it was blocking
+   > has since been taken: **both mixers 6/6 within 1.0 LSB, worst 0.71**, recorded at the
+   > top of this same item. The paragraph is kept for the reasoning about *where* a 3D upload
+   > breaks, which is what made the defect findable once the path was reachable.
+   >
+   > This file said both things at once for two days — item 3 above recorded the fix on
+   > 2026-08-14 while the paragraph below still called it unfixed. A document that
+   > contradicts itself is worse than one that is merely stale, because either half can be
+   > quoted. Same failure this file called out in the entry about A4f.
+
+   Traced 2026-08-14, and **no longer true**:
 
    **`accelerator::ocio::load_config(uri)` has no caller.** It is written, it dispatches
    `ocio://` against a filesystem path correctly, it logs and it handles reload — and nothing
@@ -604,15 +629,25 @@ reporting"; it exits **2 for inconclusive** rather than folding that into a pass
    an-Nx1-`e2D`-view mismatch found in A5 — which survived only because no input transform had
    ever emitted that dimensionality. The 3D case is the same bet on a different number.
 
-   **The fix, in the order it has to happen:**
+   > **Settled 2026-08-14, and the prediction was wrong** — see the head of this item. The
+   > `sampler3D`/`e3D` match was fine; the defect was a uniform written to whichever program
+   > the previous draw left bound. Kept because the reasoning was sound and the habit of
+   > naming the most likely failure before measuring is what made the measurement worth
+   > taking — but a prediction that missed should not read as an open question.
 
-   1. **Give `load_config` a caller** — an `<ocio-config>` element, validated, refusing rather
-      than warning. Worth doing on its own merits: studios have their own configs, and this is
-      the only reason the pin is absolute rather than a default.
-   2. **Then measure it.** One colour space whose transform is a `FileTransform` to a small
-      `.cube` forces `getNum3DTextures() == 1`; run it through the CPU-processor oracle
-      `cli.py ocio` already uses, on both mixers. That converts the class from inherited to
-      measured and covers the declaration match above.
+   **The fix, in the order it had to happen — both steps done 2026-08-14:**
+
+   1. ~~**Give `load_config` a caller**~~ — done: `<ocio-config>`, validated, refusing at
+      startup rather than warning (`shell/server.cpp:236`). Worth doing on its own merits, as
+      predicted: studios have their own configs, and this was the only reason the pin was
+      absolute rather than a default.
+   2. ~~**Then measure it.**~~ — done: `cli.py ocio-lut3d` drives a generated config whose one
+      colour space emits exactly one 3D texture, against the CPU-processor oracle on both
+      mixers. **6/6 within 1.0 LSB, worst 0.71, identical.** It found a real defect on OpenGL
+      on the way, which is the return on making the path reachable rather than reasoning
+      about it.
+
+   The note below survived the fix and is still true:
 
    Reaching it by hardcoding a different URI in a scratch build answers the question without
    step 1, but leaves nothing behind that would catch a regression.

@@ -1,10 +1,19 @@
 # OpenColorIO in CasparVP — Design Study
 
-**Status: study, and now partly implemented.** Written 2026-08-11.
+**Status: study, and implemented.** Written 2026-08-11; status corrected 2026-08-16.
 
-> **Implementation in progress on branch `feature/ocio-mixer`.** The OGL input transform is
-> done and verified; Vulkan is 4 batches of 6 through. Current state, resume point and the
-> list of what is compiled-but-never-run: [`OCIO_HANDOFF_2026-08-11.md`](OCIO_HANDOFF_2026-08-11.md).
+> **The integration is done on `feature/ocio-mixer`, both mixers, at parity.** Input
+> transform, channel display transform, per-consumer views, custom configs and the
+> interactions with the built-in grading chain are all in and measured.
+>
+> * **Using it:** [`OCIO_USER_GUIDE.md`](OCIO_USER_GUIDE.md) — commands, config elements,
+>   refusal codes.
+> * **What was measured, and what is still unproven:**
+>   [`OCIO_HANDOFF_2026-08-11.md`](OCIO_HANDOFF_2026-08-11.md).
+> * **This document** is the design rationale: why the first attempt could not have worked,
+>   and why the shipped one is shaped as it is. Read it for *why*, not for *what is done* —
+>   its banner said "in progress, Vulkan 4 batches of 6 through" for four days after the work
+>   finished, which is the failure mode a status line in a design document invites.
 
 This document exists because OCIO was attempted once, on branch `origin/feature/ocio-support`,
 and abandoned. It first establishes *why* that attempt could not have worked — the reasons
@@ -105,19 +114,29 @@ LUT directories, no install-path configuration. For a playout server this materi
 reduces the operational surface — and pinning the URI makes the colour behaviour of a
 build reproducible.
 
-**As shipped the pin is absolute, not a default — noted 2026-08-14.**
-`accelerator::ocio::load_config(uri)` implements custom-config loading correctly and **has no
-caller**; `ensure_loaded_locked` hardcodes the built-in URI and there is no `$OCIO`
-environment route. Two consequences, one intended and one not:
+**The pin is now a default rather than an absolute — resolved 2026-08-14.**
 
-* *Intended:* a build's colour behaviour cannot be changed by anything on the machine, which
-  is the strongest form of the reproducibility argument above.
-* *Not:* a studio with its own config has no way to use it, and — because no built-in space
-  emits a 3D LUT — the 3D-LUT branch of both OCIO uploaders is unreachable code that can
-  never be measured. See `OCIO_HANDOFF_2026-08-11.md`, "What is NOT verified" item 3.
+This section previously recorded a finding: `accelerator::ocio::load_config(uri)` implemented
+custom-config loading correctly and **had no caller**, so a studio with its own config had no
+way to use it, and the 3D-LUT branch of both OCIO uploaders was unreachable code that could
+never be measured — no built-in space emits a 3D LUT.
 
-Giving `load_config` a caller (an `<ocio-config>` element, validated, refusing rather than
-warning) resolves both. The pin stays the default; it stops being the only possibility.
+Both are resolved. `<ocio-config>` in the `<configuration>` block gives `load_config` its
+caller (`shell/server.cpp:236`), taking a filesystem path or an `ocio://` built-in URI, and
+refusing at startup rather than warning: loading keeps the previous config on failure, so a
+warning would leave the server on the built-in config while the operator believed otherwise.
+Omitted, the pinned URI is still what loads, so the reproducibility argument above survives
+for every build that does not opt out.
+
+That also made the 3D-LUT branch reachable, and **measuring it found it broken on OpenGL** —
+`cli.py ocio-lut3d` drives a generated config whose one colour space emits exactly one 3D
+texture; both mixers now agree at 6/6 within 1.0 LSB, worst 0.71.
+
+There is still no `$OCIO` environment route, and that remains deliberate: the config comes
+from the config file or the pin, not from the machine's environment.
+
+Operator-facing detail — the element, its failure modes and the worked example — is in
+[`OCIO_USER_GUIDE.md`](OCIO_USER_GUIDE.md) §6.1.
 
 ### 2.3 The substantive quality argument
 
