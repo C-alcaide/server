@@ -239,12 +239,30 @@ legitimate:
 > `DON'T` example above is two *different* layers, so every command in it succeeds. The
 > composite is what ends up wrong. Pick one path per channel.
 
-**Not measured:** a `MIXER COLORSPACE` layer carrying a **tone map** under an `OCIO_DISPLAY`
-channel. Under `<working-space-composite>` a layer's output half — tone map included — is
-suppressed so the channel can apply the display encoding once, which should make the
-combination coherent rather than double-tone-mapped. That follows from how the suppression is
-written, and nothing here has measured it. Until something does, treat a per-layer tone map
-on an OCIO-display channel as undefined and leave `tonemapping` at `NONE`.
+**Measured 2026-08-16, both mixers byte-identical.** A `MIXER COLORSPACE` layer carrying a
+**tone map** under an `OCIO_DISPLAY` channel is *coherent, not double-tone-mapped*: under
+`<working-space-composite>` the layer's output half — tone map included — is suppressed, so
+the channel applies the display encoding exactly once.
+
+The layer's tone map simply **stops having any effect**, and that is what was measured. Three
+channel configurations, each rendering the same patch with `tonemapping` at `NONE` and at
+`ACES_RRT` and comparing the two frames the server produced:
+
+| channel | tone map `NONE` vs `ACES_RRT` |
+| :--- | ---: |
+| plain (no working-space composite) | **62–71 LSB apart** |
+| `<working-space-composite>` | **0.00** |
+| `<working-space-composite>` + `OCIO_DISPLAY` | **0.00** |
+
+The first row is the control, and it is what makes the other two mean anything: the tone-map
+argument demonstrably reaches the shader and moves the picture by 62–71 LSB when the output
+half runs. The second row is the finding — **the composite alone suppresses it, and the
+display transform is not what does it.** Frame against frame from one server, so no colour
+model enters the verdict. `cli.py ws-tonemap`.
+
+So a per-layer tone map on such a channel is not undefined and not harmful; it is **inert**.
+Leave `tonemapping` at `NONE` there anyway, because a setting that reads as configured and
+does nothing is worth not having — but a show file that carries one renders correctly.
 
 ### What is shared regardless of which path a layer took
 

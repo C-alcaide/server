@@ -51,19 +51,31 @@ and an OCIO panel in `casparcg-360-client`, which had **no OCIO controls at all*
    troubleshooting rows. It documents `ocio_panel.py`, which is still only on the client's
    local `ui-restyle` branch (see *Where things are*), and says the panel has not been run
    against a live server.
-3. **Diagrams where they would carry load, not decorate:** `GPU_INTEROP_ARCHITECTURE.md` /
-   `GPU_INTEROP_PLAN.md` (cross-API, cross-device data flow) and `PROJECTION_CALIBRATION.md`
-   (geometry).
-4. **Not measured: a `MIXER COLORSPACE` layer carrying a tone map under an `OCIO_DISPLAY`
-   channel.** Under `<working-space-composite>` the layer's output half — tone map included —
-   is suppressed, which *should* make it coherent rather than double-tone-mapped. That
-   follows from how the code reads and nothing has measured it; `COLOR_GRADING.md` says to
-   leave `tonemapping` at `NONE` there until something does. Small battery: two captures and
-   a separation.
+3. ~~**Diagrams where they would carry load, not decorate.**~~ **Done 2026-08-16.** Mermaid in
+   the two developer docs, rendered PNGs in the operator manual, per the rule added the same
+   day. Drawing them is what found the defects: `GPU_INTEROP_ARCHITECTURE.md` claimed "zero
+   CPU sync points" with one at `cuda_peer_transfer.cpp:426` that cannot be removed (GL
+   cannot wait on a CUDA stream), and described two device buffers where there are three
+   plus a refcounted pool. `GPU_INTEROP_PLAN.md`'s mechanism table is the pre-work state, so
+   the topology is now drawn as it stands — the remaining gap is one node (HTML/CEF), not one
+   bridge. `PROJECTION_CALIBRATION.md` gets the closed loop and the phase→command map.
+4. ~~**Not measured: a `MIXER COLORSPACE` layer carrying a tone map under an `OCIO_DISPLAY`
+   channel.**~~ **Measured 2026-08-16, both mixers byte-identical.** `cli.py ws-tonemap`,
+   three arms: a plain channel separates **62–71 LSB** between `tonemapping NONE` and
+   `ACES_RRT`, and both `<working-space-composite>` arms separate **0.00**. So the layer's
+   tone map is *inert* there — not double-applied, not undefined — and the **composite alone**
+   suppresses it; the display transform is not what does it. `COLOR_GRADING.md` updated from
+   "Not measured / treat as undefined" to the numbers.
 5. **The client's OCIO panel has never been seen running.** Driven headless and against real
    `INFO OCIO` payloads (55 spaces / 9 displays / 1 look parse correctly, names with parens
    survive, views nest), but nobody has opened the app.
-6. `VIRTUAL_PRODUCTION_FEATURES.md` probably needs only a link to `COLOR_GRADING.md`.
+6. ~~`VIRTUAL_PRODUCTION_FEATURES.md` probably needs only a link to `COLOR_GRADING.md`.~~
+   **Done 2026-08-16** — it already had that link; what it lacked were pointers to
+   `OCIO_USER_GUIDE.md` and `HDR_GUIDE.md`. Not just a link, because "the commands here are
+   colour-route-neutral" turned out to be false for one of them: `SHAPE`'s `COLOR1` /
+   `COLOR2` / `STROKE_COLOR` are hex values injected **unconverted** between the input and
+   output conversions, so on a working-space or OCIO channel they land in scene-linear ACEScg
+   and `#808080` is not mid-grey. Read from the shader and the kernel, flagged as unmeasured.
 7. **`d:\_ocioprobe`, 746 MB**, redundant since OCIO builds in-tree. Needs a manual
    `Remove-Item -Recurse -Force`; the sandbox blocks it.
 
