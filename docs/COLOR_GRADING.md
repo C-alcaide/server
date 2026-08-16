@@ -207,6 +207,43 @@ None of these is a third path — each one *addresses* the stages above:
 `MIXER CDL_FILE` is the one worth noting: it sits in the **shared** part of the chain, so a
 grade from set applies whichever path the layer took.
 
+### Using both at once — what is refused, and what is not
+
+**On one layer they are mutually exclusive, and the server enforces it in both directions.**
+Not by silently overriding, which would be the dangerous behaviour:
+
+```bash
+MIXER 1-1 COLORSPACE LOGC3 ARRI_WG3 ACES_RRT BT709 REC709
+MIXER 1-1 OCIO "ARRI LogC3 (EI800)"
+  -> 403 MIXER ERROR   "...is already using MIXER COLORSPACE. They are mutually
+                        exclusive -- clear it with MIXER COLORSPACE NONE first."
+```
+
+and the same the other way round. The refusal names the command to clear, because the
+failure is otherwise indistinguishable from "that colour space does not exist".
+
+**Across scopes nothing is refused, and that is deliberate**, because the combinations are
+legitimate:
+
+| combination | refused? | why |
+| :--- | :--- | :--- |
+| `MIXER COLORSPACE` + `MIXER OCIO`, same layer | **yes, 403** | both write the same stage |
+| `MIXER COLORSPACE` layer + `OCIO_DISPLAY` channel | no | different stages — the layer converts *in*, the channel renders *out* |
+| `MIXER OCIO` layer + `MIXER COLORSPACE` on a **different** layer | no | per-layer state, and each layer's own exclusion still applies |
+| `OCIO_LOOK` without `OCIO_DISPLAY` | **yes, 403** | the look is composed into the display processor; there is nothing to compose it into |
+| `OCIO_DISPLAY` / `OCIO_LOOK` without `<working-space-composite>` | **yes, 403** | they consume working-space pixels and the composite is display-encoded |
+
+> **Mixing generations across layers is still the trap**, and no refusal catches it — the
+> `DON'T` example above is two *different* layers, so every command in it succeeds. The
+> composite is what ends up wrong. Pick one path per channel.
+
+**Not measured:** a `MIXER COLORSPACE` layer carrying a **tone map** under an `OCIO_DISPLAY`
+channel. Under `<working-space-composite>` a layer's output half — tone map included — is
+suppressed so the channel can apply the display encoding once, which should make the
+combination coherent rather than double-tone-mapped. That follows from how the suppression is
+written, and nothing here has measured it. Until something does, treat a per-layer tone map
+on an OCIO-display channel as undefined and leave `tonemapping` at `NONE`.
+
 ### What is shared regardless of which path a layer took
 
 Everything from step 6 onward is the same code operating on the same working space, so the

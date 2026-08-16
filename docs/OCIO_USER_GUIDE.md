@@ -78,10 +78,10 @@ the stages that already exist:
 The input transform is the alternative front end to `MIXER COLORSPACE`. Both write the same
 stage of the chain, so **they are mutually exclusive** — see §7.
 
-Reach for OCIO when the source is a camera or grading encoding the built-in enums do not
-name (ARRI LogC3, Sony S-Log3 variants, ACEScct, a show LUT baked into a config), or when a
-facility already has an OCIO config that defines the look. Reach for `MIXER COLORSPACE` when
-a plain named transfer/gamut pair is all you need — it is cheaper and needs no config.
+**Which path to use, and what it costs, is documented once** — in
+[`COLOR_GRADING.md` § Which path](COLOR_GRADING.md#which-path--the-short-version), beside the
+comparison of the two. It is not repeated here: two copies of a recommendation drift, and the
+one that drifts is always the copy the reader happened to open.
 
 ---
 
