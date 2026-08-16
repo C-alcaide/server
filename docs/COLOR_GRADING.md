@@ -387,6 +387,27 @@ MIXER [channel]-[layer] GAMUTCOMPRESS            # Query
 
 The default limits match the ACES 1.3 Gamut Compression reference values.
 
+> **It shares the limits with ACES 1.3 RGC and not the algorithm.** Measured
+> 2026-08-16 against OpenColorIO's own `ACES 1.3 Reference Gamut Compression` look
+> (which *is* the reference implementation), over 4000 samples in ACES2065-1:
+> **mean 0.030, max 0.350** in linear ACES units. Three distinct causes:
+>
+> | | this operator | ACES 1.3 RGC |
+> | :--- | :--- | :--- |
+> | limits | 1.147 / 1.264 / 1.312 | **same** |
+> | thresholds | **0.815 for all three** | 0.815 / 0.803 / 0.880, per channel |
+> | curve | `thr + n/(1+n)·(lim−thr)`, a simple rational | power form with `p = 1.2` |
+> | all components negative | **returned unchanged** — `a = max(max(c),0)` is 0 and the `a <= 0` guard passes the pixel through | still compressed, by up to 0.336 |
+>
+> The curve is the dominant term, not the thresholds: the **red** channel shares
+> threshold 0.815 with ACES and still differs by up to **0.350** on its own.
+>
+> This is not a defect — the operator never claimed conformance, and it is a fast
+> GPU approximation with ACES-derived limits. It is recorded because "ACES 1.3" in
+> the table below sits directly above "the pinned config is the reference
+> implementation", which invites reading this row as conformance too. If you need
+> the reference algorithm, use OCIO.
+
 ### Usage Examples
 
 ```bash
@@ -802,7 +823,7 @@ INFO OCIO DISPLAYS        # every display, with its views
 | | version | what that means |
 | :--- | :--- | :--- |
 | Built-in tone mapping | **ACES 1.x** | `ACES_RRT` and `ACES_FILMIC` are published *approximations*; `ACES_RRT_709/P3/2020_PQ` use real 1.x segmented splines |
-| Gamut compression | **ACES 1.3** | limits match the ACES 1.3 Gamut Compression reference values |
+| Gamut compression | **ACES 1.3 limits only** | an approximation sharing the limits, *not* the algorithm — different thresholds, a different curve, and all-negative pixels passed through. Measured at mean 0.030 / max 0.350 against OCIO's reference look; see [Gamut Compression](#gamut-compression) |
 | OCIO path | **ACES 2.0** | the pinned config is the reference implementation |
 
 ACES 2.0 changed the rendering transform substantially, so the built-in operators and an
