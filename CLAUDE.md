@@ -232,6 +232,28 @@ a doc and the shader disagree, the shader wins and the disagreement is a finding
 `CHANGELOG.md` leads with behaviour changes. Anything that alters rendered output for
 an existing config belongs there with the measurement that established it.
 
+### A new `<configuration>` element goes in `casparcg.config` too
+
+`src/shell/casparcg.config` is two things: a working config at the top, and — from the
+`<!--` at line 65 to the end — **a commented reference listing every option the server
+accepts**, with its default and its alternatives:
+
+```xml
+<log-level> info  [trace|debug|info|warning|error|fatal]</log-level>
+<log-align-columns>true [true|false]</log-align-columns>
+```
+
+That block is where an operator looks to find out what exists. A feature doc explains a
+setting to someone who already knows it is there; this is what tells them it is there at
+all. Add the element in the same style — default first, alternatives in brackets, a short
+parenthesised note for anything non-obvious such as a prerequisite or a refusal.
+
+**Measured 2026-08-16: six elements were missing** — `ocio-config`, `ocio-display`,
+`ocio-view`, `working-space-composite`, `straight-alpha-grading` and `render-format`. Every
+one is documented in `docs/`, and none of them was discoverable from the config an operator
+actually edits. The gap is systematic rather than an oversight on one feature, which is why
+it is a rule and not a reminder.
+
 ### A feature with an order-dependent pipeline gets a diagram
 
 Prose describes a chain one step at a time; the reader has to hold the order in their head
@@ -269,7 +291,7 @@ So "which doc" is not left to judgment:
 | :--- | :--- |
 | rendered output for an existing config | `CHANGELOG.md`, with the measurement |
 | a new AMCP command or argument | the feature doc that owns it, and `docs/OPERATIONS_GUIDE.md` |
-| a new `<configuration>` element | the feature doc that owns it |
+| a new `<configuration>` element | the feature doc that owns it, **and the commented block at the bottom of `src/shell/casparcg.config`** |
 | a new battery, or a new number for an existing claim | the doc carrying that claim, **and** the harness `CLAUDE.md` command table |
 | a new stage in a pipeline, or a second route into an existing one | the owning doc, **and its diagram** |
 | a constant taken from a standard | the owning doc, naming the standard *and its revision* |
