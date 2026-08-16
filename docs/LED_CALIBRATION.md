@@ -96,7 +96,42 @@ ENABLED SIZE 33 STRENGTH 1 BYPASS 0 PATH C:/luts/wall1.cube
 - `strength` lets you dial back the correction (e.g. for A/B comparison) without
   re-exporting the LUT.
 - Calibration state is held on the channel mixer and is identical across the
-  OpenGL and Vulkan back-ends.
+  OpenGL and Vulkan back-ends. **Measured 2026-08-16**, not asserted — see below.
+
+## Verification — `cli.py calibration`
+
+Until 2026-08-16 nothing drove this command at all: it is the delivery end of the
+whole colour chain and was the least-measured thing in it. It is now gated at
+**1 LSB, 32/32 cases, byte-identical on both mixers**
+(`CasparCG-TestRunner/core/calibration.py`).
+
+Every expectation is computed from **the frame the server itself rendered with no
+calibration LUT**. The producer, the colour conversion, the OETF and the consumer
+are therefore identical on both sides of the comparison and cancel exactly, so a
+disagreement can only be the calibration pass — which is what makes a 1 LSB gate
+defensible without modelling the entire pipeline.
+
+Eight cases per patch. Three of them — `strength 0`, `BYPASS 1` and `CLEAR` — are
+identity checks against a frame the server produced, so a wrong model cannot
+satisfy them; all three come back at exactly **0.00 LSB**.
+
+Two controls are asserted by the verdict rather than printed, because 32/32
+against a model is otherwise compatible with a command that did nothing:
+
+| control | why | measured |
+| :--- | :--- | ---: |
+| the LUT must MOVE the picture | else the model is applied to a baseline that equals the measurement | ≥ 61.0 LSB |
+| the two LUTs must DIFFER | `set_calibration_lut` invalidates the still-frame cache **by hand**; a stale fingerprint would replay the previous LUT's frame, and a close pair would hide it inside the gate | ≥ 27.0 LSB (needs ≥ 8.0) |
+
+**Not covered, and the report says so in its own output.** Both are this command's
+distinguishing claims, so read 32/32 as "the LUT is applied correctly", not as
+"`CALIBRATION` works":
+
+- **that every CONSUMER sees the LUT** — every capture is through the IMAGE
+  consumer. Proving it needs two consumers reading one frame, which
+  `cli.py consumer-view` has the machinery for.
+- **that it applies once to a COMPOSITE rather than per layer** — one layer, so
+  the per-layer/channel-master distinction from `MIXER LUT3D` is untested.
 
 ## Client UI (casparcg-360-client)
 
