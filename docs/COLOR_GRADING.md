@@ -440,6 +440,44 @@ would not be a gamut operation — so the command sets its state and the shader 
 > the command returned `202`, set its uniform, and never ran. It reaches OCIO layers now.
 > Verified on both mixers by `cli.py ocio-gamut-compress` in the test harness.
 
+### Under an ACES 2.0 display view, this becomes a look control
+
+This is the **ACES 1.3** Reference Gamut Compress, applied in the working space *before* the
+display rendering. An ACES 2.0 output transform (`OCIO_DISPLAY` with an ACES 2.0 view) does
+its own gamut handling on the way to the display, so the obvious question is whether the two
+compress the same saturation twice.
+
+**Measured 2026-08-16, and the answer is neither.** Six saturated patches through
+`MIXER OCIO "ARRI LogC3 (EI800)"`, comparing how much the picture moves when compression is
+switched on — under a near-linear `Un-tone-mapped` view, then under
+`ACES 2.0 - SDR 100 nits (Rec.709)`:
+
+| patch | RGC alone | under ACES 2.0 | ratio |
+| :--- | ---: | ---: | ---: |
+| `#330D80` violet | 34.00 LSB | 40.00 LSB | 1.18 |
+| `#404C80` blue | 32.00 | 36.00 | 1.12 |
+| `#261A66` deep blue | 23.00 | 19.00 | 0.83 |
+| `#803326` red | 36.00 | 19.00 | 0.53 |
+| `#804C33` orange | 27.00 | 7.00 | 0.26 |
+| `#4C4066` mauve | 26.00 | 5.00 | 0.19 |
+
+They neither stack nor cancel — the interaction is **strongly hue-dependent**, from almost
+fully absorbed on warm colours to slightly amplified on violets. Mean ratio 0.71.
+
+Practically: on a layer heading for an ACES 2.0 view, treat `MIXER GAMUTCOMPRESS` as a
+**creative control rather than a technical correction**. ACES 2.0 already handles most of
+what the 1.3 compressor was there to fix, unevenly, so setting it "because the source is
+wide gamut" changes the look by an amount that depends on the hue rather than fixing
+anything. On the built-in path, and on OCIO layers with a linear or un-tone-mapped view, it
+does the job it always did.
+
+> **What this measurement does and does not say.** It compares how far the picture moves,
+> which conflates "how much the compressor changed the working-space value" with "how much
+> the display transform amplifies that change". So it establishes that compression still
+> visibly matters under ACES 2.0 and that the amount is hue-dependent — not that the total
+> compression is excessive. A claim about *that* needs an out-of-gamut oracle, which no
+> battery here has.
+
 ---
 
 ## Hue Curves
