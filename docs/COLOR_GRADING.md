@@ -7,20 +7,21 @@ For virtual production features (360° projection, curved screen compensation, p
 ## Table of Contents
 
 1. [ACES Color Management](#aces-color-management) — Color space conversion, HDR tone mapping, camera log handling
-2. [ASC CDL](#asc-cdl) — Industry-standard Slope/Offset/Power color correction
-3. [3D LUT](#3d-lut) — Load `.cube` look-up tables for creative looks
-4. [Linear Saturation](#linear-saturation) — Scene-linear saturation control
-5. [Split Toning](#split-toning) — Independent shadow/highlight color tinting
-6. [Exposure](#exposure) — Linear gain in the working space, on any conversion path
-7. [Gamut Compression](#gamut-compression) — ACES-style out-of-gamut recovery
-8. [Hue Curves](#hue-curves) — Hue-vs-Hue, Hue-vs-Saturation, Hue-vs-Luminance, Sat-vs-Sat curves
-9. [Secondary Qualifier](#secondary-qualifier) — HSL keyer with per-key corrections
-10. [Sharpening](#sharpening) — Laplacian unsharp mask
-11. [Film Grain](#film-grain) — Procedural photographic grain emulation
-12. [Internal Pipeline](#internal-pipeline) — Full processing order, two color management paths
-13. [Supported Standards](#supported-standards)
-14. [Limitations & Best Practices](#limitations--best-practices)
-15. [Common Workflows](#common-workflows)
+2. [OCIO Color Management](#ocio-color-management) — The other front end to the same stage: OpenColorIO input transforms and display rendering, and how it differs from the built-in ACES path
+3. [ASC CDL](#asc-cdl) — Industry-standard Slope/Offset/Power color correction
+4. [3D LUT](#3d-lut) — Load `.cube` look-up tables for creative looks
+5. [Linear Saturation](#linear-saturation) — Scene-linear saturation control
+6. [Split Toning](#split-toning) — Independent shadow/highlight color tinting
+7. [Exposure](#exposure) — Linear gain in the working space, on any conversion path
+8. [Gamut Compression](#gamut-compression) — ACES-style out-of-gamut recovery
+9. [Hue Curves](#hue-curves) — Hue-vs-Hue, Hue-vs-Saturation, Hue-vs-Luminance, Sat-vs-Sat curves
+10. [Secondary Qualifier](#secondary-qualifier) — HSL keyer with per-key corrections
+11. [Sharpening](#sharpening) — Laplacian unsharp mask
+12. [Film Grain](#film-grain) — Procedural photographic grain emulation
+13. [Internal Pipeline](#internal-pipeline) — Full processing order, two color management paths
+14. [Supported Standards](#supported-standards)
+15. [Limitations & Best Practices](#limitations--best-practices)
+16. [Common Workflows](#common-workflows)
 
 ---
 
@@ -36,6 +37,12 @@ flowchart LR
 ```
 
 The color management pipeline converts between color spaces, applies HDR tone mapping, and handles camera log curves — all per-layer.
+
+> **This is one of two paths.** [`MIXER OCIO`](#ocio-color-management) writes the same stage
+> using OpenColorIO, is mutually exclusive with this command per layer, and is built on
+> **ACES 2.0** where the operators below are ACES 1.x. The two are both correct and look
+> different — see [the comparison](#the-two-paths-overlap-and-they-do-not-match) before
+> choosing, and do not mix them across layers of one composite.
 
 ### AMCP Command
 
@@ -91,6 +98,76 @@ MIXER 1-10 COLORSPACE LOGC3 ARRI_WG3 ACES_RRT BT709 REC709 2.0
 # Disable
 MIXER 1-10 COLORSPACE NONE
 ```
+
+---
+
+## OCIO Color Management
+
+The **other** front end to the same stage. `MIXER OCIO` puts a layer into the working space
+using OpenColorIO instead of the built-in enums, and `OCIO_DISPLAY` applies the channel's
+display rendering after the composite.
+
+```bash
+MIXER [channel]-[layer] OCIO "ARRI LogC3 (EI800)"   # source encoding → ACEScg
+MIXER [channel]-[layer] OCIO NONE                   # back to the built-in path
+OCIO_DISPLAY [channel] "<display>" "<view>"         # channel display rendering
+```
+
+Full command reference, config elements and refusal codes: **[`OCIO_USER_GUIDE.md`](OCIO_USER_GUIDE.md)**.
+Design rationale: [`OCIO_INTEGRATION_STUDY.md`](OCIO_INTEGRATION_STUDY.md).
+
+> ⚠ **Quote the name.** 40 of the 55 colour spaces in the bundled config contain spaces or
+> parentheses. Unquoted, `MIXER 1-1 OCIO ARRI LogC3 (EI800)` returns `404` having looked for
+> a space called `ARRI` — and the 404 says nothing about quoting.
+
+### The two paths overlap, and they do NOT match
+
+Both write steps 4–5 of the [pipeline](#internal-pipeline), so **they are mutually exclusive
+per layer** — setting one while the other is active returns `403 MIXER ERROR` rather than
+silently overriding. Clear the other first.
+
+The overlap is not just structural. Both can deliver "an ACES look", and they will not
+produce the same picture:
+
+| | `MIXER COLORSPACE` | `MIXER OCIO` + `OCIO_DISPLAY` |
+| :--- | :--- | :--- |
+| **ACES version** | **1.x.** `ACES_RRT` is Stephen Hill's *approximation*; `ACES_FILMIC` is Narkowicz's. `ACES_RRT_709/P3/2020_PQ` use real 1.x segmented splines | **2.0, exactly** — the pinned `studio-config-v4.0.0_aces-v2.0` is the reference implementation |
+| **Source encodings** | 7 transfers × 8 gamuts, fixed enums (this document) | every colour space in the config — 55 in the bundled one |
+| **Tone mapping** | 7 operators, chosen **per layer** | the channel's view, chosen **per channel** (`OCIO_DISPLAY`) — there is no per-layer tone map |
+| **Where the look lives** | the AMCP command | the OCIO config file |
+| **Discovery** | this document | `INFO OCIO COLORSPACES` / `INFO OCIO DISPLAYS` |
+| **Prerequisites** | none | `<working-space-composite>` for `OCIO_DISPLAY` (plus `fp16` and `auto-color-convert`) |
+
+**ACES 2.0 changed the rendering transform substantially.** So a layer through
+`MIXER COLORSPACE … ACES_RRT_709` and a layer through OCIO with an ACES 2.0 SDR view are
+both correctly "ACES" and will look visibly different. Choosing between them is a
+look decision, not a technical one — but **mixing them across layers of one composite is
+not**, and that is the trap:
+
+```bash
+# DON'T — two layers, two ACES generations, one composite
+MIXER 1-1 COLORSPACE LOGC3 ARRI_WG3 ACES_RRT_709 BT709 REC709   # ACES 1.x
+MIXER 1-2 OCIO "ARRI LogC3 (EI800)"                             # ACES 2.0 via the channel view
+```
+
+Pick one path per channel. If a facility has an OCIO config, use it for everything on that
+channel; if not, the built-in path is cheaper and needs no config.
+
+### What is shared regardless of which path a layer took
+
+Everything from step 6 onward is the same code operating on the same working space, so the
+grading tools behave identically either way:
+
+| | on a `COLORSPACE` layer | on an `OCIO` layer |
+| :--- | :--- | :--- |
+| `MIXER EXPOSURE` | yes | yes — and it is the **only** exposure an OCIO layer can be given |
+| `COLORSPACE`'s 6th argument (exposure) | yes | **no** — it lives in the COLORSPACE state, which is mutually exclusive |
+| `MIXER GAMUTCOMPRESS` | yes | yes |
+| CDL, LUT3D, saturation, white balance, LMG, curves, qualifier, grain | yes | yes |
+
+Both also require the layer to have *reached* a working space at all — see
+[Exposure](#exposure) and [Gamut Compression](#gamut-compression), which are inert on a layer
+that took neither path and is still display-encoded.
 
 ---
 
@@ -708,6 +785,30 @@ The EOTF/gamut/OETF wrapper (steps 4–7 and 27–29) can be activated in two wa
 | `ARRI_WG3` | ARRI Wide Gamut 3 | ARRI camera native |
 | `SGAMUT3_CINE` | Sony S-Gamut3.Cine | Sony camera native |
 
+### On the OCIO path, this vocabulary does not apply
+
+The two tables above are the **built-in path's** enums, fixed at compile time. `MIXER OCIO`
+takes colour space names from the loaded config instead — 55 in the bundled
+`studio-config-v4.0.0_aces-v2.0_ocio-v2.5`, more or fewer in a facility's own — and they are
+strings, not enums. Ask the server rather than reading a table:
+
+```bash
+INFO OCIO COLORSPACES     # every colour space name in the loaded config
+INFO OCIO DISPLAYS        # every display, with its views
+```
+
+### ACES version
+
+| | version | what that means |
+| :--- | :--- | :--- |
+| Built-in tone mapping | **ACES 1.x** | `ACES_RRT` and `ACES_FILMIC` are published *approximations*; `ACES_RRT_709/P3/2020_PQ` use real 1.x segmented splines |
+| Gamut compression | **ACES 1.3** | limits match the ACES 1.3 Gamut Compression reference values |
+| OCIO path | **ACES 2.0** | the pinned config is the reference implementation |
+
+ACES 2.0 changed the rendering transform substantially, so the built-in operators and an
+ACES 2.0 OCIO view are not interchangeable. See
+[the comparison](#the-two-paths-overlap-and-they-do-not-match).
+
 ---
 
 ## Limitations & Best Practices
@@ -744,7 +845,7 @@ All color grading operations affect RGB channels only. The alpha channel is pass
 The pipeline order is fixed. To achieve a specific look, consider which operations interact:
 
 - **CDL** is early in the chain — it affects everything downstream including LUT and split tone.
-- **3D LUT** is applied after CDL but before saturation and white balance — use it for creative looks, not technical transforms (use `COLORSPACE` for those).
+- **3D LUT** is applied after CDL but before saturation and white balance — use it for creative looks, not technical transforms (use `COLORSPACE` or [`MIXER OCIO`](#ocio-color-management) for those; a technical LUT belongs in an OCIO config, where it is named and versioned, rather than loaded per layer).
 - **Qualifier** corrections are applied in-place without disrupting the rest of the grading chain.
 - **Film Grain** is the very last operation — it is never affected by color grading.
 
