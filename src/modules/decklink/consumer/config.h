@@ -74,6 +74,15 @@ struct configuration
     {
         internal_keyer,
         external_keyer,
+        disabled_keyer,
+        //: NOT ITS OWN VALUE, and that is upstream's choice rather than an oversight here.
+        //: Because it aliases `external_keyer`, a consumer that configures no `<keyer>` at
+        //: all takes the external branch in `set_keyer` — the guard there that exists to
+        //: skip when neither mode was asked for can never skip. On this rig that is 87
+        //: `Failed to enable external keyer` errors per run and no successes; on a card
+        //: that supports external keying it would silently ENABLE it, and external keying
+        //: makes the card composite fill over incoming video. `disabled` is the opt-out;
+        //: it does not change what an unconfigured consumer does.
         default_keyer = external_keyer
     };
 
