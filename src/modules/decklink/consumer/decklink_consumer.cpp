@@ -1651,8 +1651,15 @@ struct decklink_consumer_proxy : public core::frame_consumer
             channel_info.default_color_space != core::color_space::bt601) {
             CASPAR_LOG(warning) << L"[decklink_consumer] Channel " << channel_info.index
                 << L" is configured with a color space not supported by SDI (P3/Adobe RGB)."
-                << L" DeckLink output will carry the pixel values but SDI metadata will signal BT.2020."
-                << L" Consider setting channel color-space to bt2020 for correct SDI signaling.";
+                // Says BT.709 because that is what actually goes out. `GetInt` for
+                // bmdDeckLinkFrameMetadataColorspace tests bt2020 and bt601 and FALLS
+                // THROUGH to Rec709, and `GetFloat` falls through to the REC_709 primaries
+                // the same way -- `color_space_` is the channel's value passed straight to
+                // the frame, with no coercion anywhere between. This message said BT.2020,
+                // which would have a P3 operator believe their wire is tagged wide when it
+                // is tagged 709.
+                << L" DeckLink output will carry the pixel values but SDI metadata will signal BT.709."
+                << L" Set channel color-space to bt2020 if the wire should say BT.2020.";
         }
 
         CASPAR_LOG(info) << L"[decklink_proxy] initialize: channel=" << channel_info.index
