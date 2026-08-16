@@ -103,6 +103,28 @@ std::vector<std::string> looks();
 /// command time, so a bad name fails the command rather than the frame.
 bool has_look(const std::string& name);
 
+/// What an ACES Metadata File transform ID resolves to in the loaded config.
+///
+/// One ID can name more than one kind of object, and that is not a conflict -- it is how an
+/// AMF *output* transform yields the display/view PAIR that `OCIO_DISPLAY` needs from a
+/// single ID: the same URN appears on a colour space (whose name is also the display) and on
+/// a view transform (the view). Any field may be empty.
+struct amf_resolution
+{
+    std::string colorspace;     ///< a colour space name -- the input transform, or a display
+    std::string look;           ///< a look name
+    std::string view_transform; ///< a view transform name -- the view of a display/view pair
+};
+
+/// Resolve an AMF transform ID against the loaded config's `interchange: amf_transform_ids`.
+///
+/// Mechanical, not a table: the IDs live in the config, so a config change moves them
+/// together with the transforms they name. Nothing here transcribes ACES.
+///
+/// Returns false when the ID appears nowhere, having logged it -- a caller must refuse
+/// rather than apply a partly-resolved pipeline.
+bool resolve_amf_transform_id(const std::string& transform_id, amf_resolution& out);
+
 // ---- GPU shader generation -------------------------------------------------
 //
 // OCIO's GPU path is a shader *generator*, not a pixel processor. Once per transform it

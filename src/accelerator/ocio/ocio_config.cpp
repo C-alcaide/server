@@ -27,6 +27,7 @@
 #include <algorithm>
 #include <mutex>
 #include <set>
+#include <sstream>
 namespace OCIO_NS = OCIO_NAMESPACE;
 #endif
 
@@ -217,6 +218,73 @@ bool load_cdl(const std::string& path,
                           << L": " << u16(e.what());
         return false;
     }
+}
+
+namespace {
+
+/// Split an `amf_transform_ids` attribute, which OCIO stores as whitespace-separated URNs.
+bool has_amf_id(const char* attr, const std::string& id)
+{
+    if (!attr)
+        return false;
+    std::istringstream in{std::string(attr)};
+    std::string        token;
+    while (in >> token) {
+        if (token == id)
+            return true;
+    }
+    return false;
+}
+
+} // namespace
+
+bool resolve_amf_transform_id(const std::string& transform_id, amf_resolution& out)
+{
+    std::lock_guard<std::mutex> lock(g_mutex);
+    ensure_loaded_locked();
+    if (!g_config || transform_id.empty())
+        return false;
+
+    out = amf_resolution{};
+
+    // EVERY kind is searched and none short-circuits. An output transform ID names a colour
+    // space AND a view transform, and taking the first hit is how an early version of this
+    // reported 2 view transforms where the config has 11 -- it hid the very pairing the
+    // display/view mapping depends on.
+    try {
+        for (int i = 0; i < g_config->getNumColorSpaces(); ++i) {
+            const char* name = g_config->getColorSpaceNameByIndex(i);
+            auto        cs   = g_config->getColorSpace(name);
+            if (cs && has_amf_id(cs->getInterchangeAttribute("amf_transform_ids"), transform_id))
+                out.colorspace = name;
+        }
+        for (int i = 0; i < g_config->getNumLooks(); ++i) {
+            const char* name = g_config->getLookNameByIndex(i);
+            auto        lk   = g_config->getLook(name);
+            if (lk && has_amf_id(lk->getInterchangeAttribute("amf_transform_ids"), transform_id))
+                out.look = name;
+        }
+        for (int i = 0; i < g_config->getNumViewTransforms(); ++i) {
+            const char* name = g_config->getViewTransformNameByIndex(i);
+            auto        vt   = g_config->getViewTransform(name);
+            if (vt && has_amf_id(vt->getInterchangeAttribute("amf_transform_ids"), transform_id))
+                out.view_transform = name;
+        }
+    } catch (const OCIO_NS::Exception& e) {
+        CASPAR_LOG(error) << L"[ocio] could not resolve AMF id " << u16(transform_id) << L": "
+                          << u16(e.what());
+        return false;
+    }
+
+    if (out.colorspace.empty() && out.look.empty() && out.view_transform.empty()) {
+        CASPAR_LOG(error) << L"[ocio] AMF transform id " << u16(transform_id)
+                          << L" is not in " << u16(g_uri)
+                          << L". The config carries these ids under `interchange: "
+                          << L"amf_transform_ids`, so a file from a different ACES version "
+                          << L"will not resolve against it.";
+        return false;
+    }
+    return true;
 }
 
 std::vector<std::string> looks()
@@ -533,6 +601,10 @@ bool                     load_config(const std::string&) { return false; }
 std::vector<std::string> colorspaces() { return {}; }
 std::vector<std::string> displays() { return {}; }
 std::vector<std::string> looks() { return {}; }
+bool                     resolve_amf_transform_id(const std::string&, amf_resolution&)
+{
+    return false;
+}
 bool                     load_cdl(const std::string&, const std::string&, double*, double*, double*, double&)
 {
     return false;

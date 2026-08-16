@@ -3382,6 +3382,172 @@ std::future<std::wstring> ocio_look_command(command_context& ctx)
     return make_ready_future<std::wstring>(L"202 OCIO_LOOK OK\r\n");
 }
 
+// AMF <channel>-<layer> "<file.amf>"
+//
+// Configure a layer and its channel from an ACES Metadata File: the document a show carries
+// to say which input transform, look and output transform its pipeline uses.
+//
+// It applies exactly what the three existing commands apply, and nothing else --
+// `MIXER <ch>-<layer> OCIO`, `OCIO_LOOK <ch>` and `OCIO_DISPLAY <ch>` -- so an AMF is a way
+// of *addressing* those, not a fourth colour path. That is also how it is gated: applying an
+// AMF must render byte-identically to issuing the three by hand.
+//
+// The mapping is mechanical rather than a table. OCIO configs carry the AMF transform ids
+// under `interchange: amf_transform_ids`, so an id resolves through the loaded config and a
+// config change moves the ids with the transforms they name. See docs/AMF_SUPPORT_STUDY.md.
+//
+// RESOLVE EVERYTHING, THEN APPLY. Three settings from one file must not leave a channel half
+// configured because the third id was unknown -- the operator would be looking at a picture
+// that is neither the old look nor the new one.
+std::future<std::wstring> amf_command(command_context& ctx)
+{
+    if (!accelerator::ocio::available()) {
+        CASPAR_LOG(warning) << L"[ocio] AMF refused: this server was built without OCIO support";
+        return make_ready_future<std::wstring>(L"501 AMF FAILED\r\n");
+    }
+    if (ctx.parameters.empty()) {
+        CASPAR_LOG(warning) << L"[ocio] AMF needs a file. AMF <ch>-<layer> \"<file.amf>\"";
+        return make_ready_future<std::wstring>(L"400 AMF FAILED\r\n");
+    }
+
+    auto image_mixer = ctx.channel.raw_channel->mixer().get_image_mixer();
+
+    // As given, then under <media-path> -- the same resolution CALIBRATION LUT and
+    // MIXER CDL_FILE use.
+    std::wstring path = ctx.parameters.at(0);
+    if (!std::ifstream(path).is_open())
+        path = caspar::env::media_folder() + L"/" + path;
+
+    pt::wptree amf;
+    try {
+        boost::filesystem::wifstream file(path);
+        pt::read_xml(file, amf, pt::xml_parser::trim_whitespace | pt::xml_parser::no_comments);
+    } catch (...) {
+        CASPAR_LOG(warning) << L"[ocio] AMF refused: could not read " << path << L" as XML";
+        return make_ready_future<std::wstring>(L"404 AMF ERROR\r\n");
+    }
+
+    // The AMF namespace prefix is `aces:` by convention but is not guaranteed, and
+    // property_tree does not resolve namespaces -- it keeps the prefix in the key. So walk
+    // for a node whose LOCAL name matches rather than assuming `aces:`. A file using a
+    // different prefix is still a valid AMF and would otherwise be rejected as malformed.
+    std::function<std::wstring(const pt::wptree&, const std::wstring&)> find_id =
+        [&](const pt::wptree& node, const std::wstring& local) -> std::wstring {
+        for (const auto& child : node) {
+            const auto  key   = child.first;
+            const auto  colon = key.find_last_of(L':');
+            const auto  name  = colon == std::wstring::npos ? key : key.substr(colon + 1);
+            if (name == local) {
+                // The id may be this node's own text or a child <transformId>.
+                auto tid = child.second.get_optional<std::wstring>(L"aces:transformId");
+                if (!tid) {
+                    for (const auto& g : child.second) {
+                        const auto k = g.first;
+                        const auto c = k.find_last_of(L':');
+                        if ((c == std::wstring::npos ? k : k.substr(c + 1)) == L"transformId")
+                            tid = g.second.get_value<std::wstring>();
+                    }
+                }
+                if (tid && !tid->empty())
+                    return *tid;
+            }
+            auto deeper = find_id(child.second, local);
+            if (!deeper.empty())
+                return deeper;
+        }
+        return {};
+    };
+
+    const auto in_id   = find_id(amf, L"inputTransform");
+    const auto look_id = find_id(amf, L"lookTransform");
+    const auto out_id  = find_id(amf, L"outputTransform");
+
+    if (in_id.empty() && look_id.empty() && out_id.empty()) {
+        CASPAR_LOG(warning) << L"[ocio] AMF refused: " << path
+                            << L" carries no inputTransform, lookTransform or outputTransform";
+        return make_ready_future<std::wstring>(L"404 AMF ERROR\r\n");
+    }
+
+    // ---- resolve everything first -------------------------------------------------
+    accelerator::ocio::amf_resolution in_res, look_res, out_res;
+    auto resolve = [&](const std::wstring& id, accelerator::ocio::amf_resolution& out,
+                       const wchar_t* what) -> bool {
+        if (id.empty())
+            return true;
+        if (accelerator::ocio::resolve_amf_transform_id(u8(id), out))
+            return true;
+        CASPAR_LOG(warning) << L"[ocio] AMF refused: its " << what << L" id '" << id
+                            << L"' does not resolve against " << u16(accelerator::ocio::config_uri());
+        return false;
+    };
+    if (!resolve(in_id, in_res, L"inputTransform") || !resolve(look_id, look_res, L"lookTransform") ||
+        !resolve(out_id, out_res, L"outputTransform"))
+        return make_ready_future<std::wstring>(L"404 AMF ERROR\r\n");
+
+    // An output transform must yield BOTH halves of the display/view pair. The same id sits
+    // on a colour space (whose name is the display) and on a view transform (the view); a
+    // file that resolves only one of them cannot drive OCIO_DISPLAY and is refused rather
+    // than half-applied.
+    if (!out_id.empty() && (out_res.colorspace.empty() || out_res.view_transform.empty())) {
+        CASPAR_LOG(warning) << L"[ocio] AMF refused: its outputTransform resolved to display='"
+                            << u16(out_res.colorspace) << L"' view='" << u16(out_res.view_transform)
+                            << L"' -- both halves are needed to set a display transform";
+        return make_ready_future<std::wstring>(L"404 AMF ERROR\r\n");
+    }
+    if (!out_res.colorspace.empty() &&
+        !accelerator::ocio::has_display_view(out_res.colorspace, out_res.view_transform)) {
+        CASPAR_LOG(warning) << L"[ocio] AMF refused: '" << u16(out_res.colorspace) << L"' / '"
+                            << u16(out_res.view_transform) << L"' is not a display/view pair "
+                            << L"in this config";
+        return make_ready_future<std::wstring>(L"404 AMF ERROR\r\n");
+    }
+    if (!look_id.empty() && look_res.look.empty()) {
+        CASPAR_LOG(warning) << L"[ocio] AMF refused: its lookTransform id resolved to no look";
+        return make_ready_future<std::wstring>(L"404 AMF ERROR\r\n");
+    }
+    if (!in_id.empty() && in_res.colorspace.empty()) {
+        CASPAR_LOG(warning) << L"[ocio] AMF refused: its inputTransform id resolved to no colour space";
+        return make_ready_future<std::wstring>(L"404 AMF ERROR\r\n");
+    }
+
+    // ---- then apply, display before look ------------------------------------------
+    // Ordered, not arbitrary: OCIO_LOOK is composed into the display processor and refuses
+    // when no display transform is set, so a look applied first would be rejected by the
+    // very state this command is about to establish.
+    if (!out_res.colorspace.empty()) {
+        image_mixer->set_ocio_display(out_res.colorspace, out_res.view_transform);
+        image_mixer->prewarm_ocio("", out_res.colorspace, out_res.view_transform, look_res.look);
+    }
+    if (!look_id.empty())
+        image_mixer->set_ocio_look(look_res.look);
+
+    if (!in_res.colorspace.empty()) {
+        const auto space = in_res.colorspace;
+        transforms_applier transforms(ctx);
+        transforms.add(stage::transform_tuple_t(
+            ctx.layer_index(),
+            [space](frame_transform t) -> frame_transform {
+                t.image_transform.ocio.enable       = true;
+                t.image_transform.ocio.source_space = space;
+                return t;
+            },
+            0,
+            L"linear"));
+        transforms.apply();
+        // The input transform's own pre-warm, as MIXER OCIO does: the display half above is
+        // warmed separately, and this one is a different program.
+        image_mixer->prewarm_ocio(space, "", "");
+    }
+
+    CASPAR_LOG(info) << L"[ocio] AMF " << path << L" -> input '" << u16(in_res.colorspace)
+                     << L"' look '" << u16(look_res.look) << L"' display '"
+                     << u16(out_res.colorspace) << L"' / '" << u16(out_res.view_transform) << L"'";
+
+    std::wstringstream result;
+    result << L"202 AMF OK\r\n";
+    return make_ready_future<std::wstring>(result.str());
+}
+
 // CALIBRATION <channel> LUT <file.cube> [strength]   load a channel-master LED calibration LUT
 // CALIBRATION <channel> CLEAR                         remove the calibration LUT
 // CALIBRATION <channel> BYPASS <0|1>                  temporarily bypass without unloading
@@ -5336,6 +5502,7 @@ void register_commands(std::shared_ptr<amcp_command_repository_wrapper>& repo)
     repo->register_channel_command(L"Calibration Commands", L"CALIBRATION", calibration_command, 0);
     repo->register_channel_command(L"Mixer Commands", L"OCIO_DISPLAY", ocio_display_command, 0);
     repo->register_channel_command(L"Mixer Commands", L"OCIO_LOOK", ocio_look_command, 0);
+    repo->register_channel_command(L"Mixer Commands", L"AMF", amf_command, 1);
 
     repo->register_channel_command(L"Previz Commands", L"PREVIZ SCENE",     previz_scene_command,     0);
     repo->register_channel_command(L"Previz Commands", L"PREVIZ MAP",       previz_map_command,       2);
