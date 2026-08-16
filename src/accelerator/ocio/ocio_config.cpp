@@ -146,6 +146,79 @@ std::vector<std::string> displays()
     return out;
 }
 
+bool load_cdl(const std::string& path,
+              const std::string& cccid,
+              double             slope[3],
+              double             offset[3],
+              double             power[3],
+              double&            saturation)
+{
+    // No g_mutex and no ensure_loaded_locked(): a CDL file is self-contained ASC XML and
+    // owes nothing to the loaded config. Taking the lock would serialise file reads behind
+    // config access for no reason, and loading a config to read a .cdl would be surprising
+    // on a server that never uses OCIO otherwise.
+    try {
+        // AMBIGUITY IS REFUSED, and this is not what OCIO does on its own.
+        //
+        // `CreateFromFile(path, "")` on a collection holding several corrections silently
+        // returns the FIRST one. An operator pointing at a 200-shot `.ccc` without an id
+        // would get shot 1's grade, correctly applied, with nothing anywhere to say so --
+        // the plausible-but-wrong failure this tree keeps paying for. So count first, and
+        // make the operator choose.
+        auto group = OCIO_NS::CDLTransform::CreateGroupFromFile(path.c_str());
+        if (group && group->getNumTransforms() > 1 && cccid.empty()) {
+            std::wstring ids;
+            for (int i = 0; i < group->getNumTransforms(); ++i) {
+                auto cdl = OCIO_NS::DynamicPtrCast<const OCIO_NS::CDLTransform>(group->getTransform(i));
+                const char* id = cdl ? cdl->getID() : "";
+                ids += (ids.empty() ? L"" : L", ") + std::wstring(L"'") + u16(id ? id : "") + L"'";
+            }
+            CASPAR_LOG(error) << L"[ocio] " << u16(path) << L" holds " << group->getNumTransforms()
+                              << L" corrections and no id was given, so which one to apply is "
+                              << L"undefined. Pass one of: " << ids;
+            return false;
+        }
+
+        auto t = OCIO_NS::CDLTransform::CreateFromFile(path.c_str(), cccid.c_str());
+        if (!t) {
+            CASPAR_LOG(error) << L"[ocio] no CDL in " << u16(path)
+                              << (cccid.empty() ? std::wstring() : L" with id '" + u16(cccid) + L"'");
+            return false;
+        }
+
+        double s[3]{}, o[3]{}, p[3]{};
+        t->getSlope(s);
+        t->getOffset(o);
+        t->getPower(p);
+        const double sat = t->getSat();
+
+        // Written only once everything has been read, so a throw part-way leaves the
+        // caller's grade untouched rather than half-applied.
+        for (int i = 0; i < 3; ++i) {
+            slope[i]  = s[i];
+            offset[i] = o[i];
+            power[i]  = p[i];
+        }
+        saturation = sat;
+
+        CASPAR_LOG(info) << L"[ocio] read CDL " << u16(path)
+                         << (cccid.empty() ? std::wstring() : L" id '" + u16(cccid) + L"'")
+                         << L": slope " << s[0] << L"," << s[1] << L"," << s[2]
+                         << L" offset " << o[0] << L"," << o[1] << L"," << o[2]
+                         << L" power " << p[0] << L"," << p[1] << L"," << p[2]
+                         << L" sat " << sat;
+        return true;
+    } catch (const OCIO_NS::Exception& e) {
+        // Covers the whole family: unreadable file, malformed XML, an id that is not in the
+        // collection, and a collection with several corrections and no id to choose between
+        // them -- OCIO refuses that rather than picking one, which is the behaviour we want.
+        CASPAR_LOG(error) << L"[ocio] could not read CDL " << u16(path)
+                          << (cccid.empty() ? std::wstring() : L" id '" + u16(cccid) + L"'")
+                          << L": " << u16(e.what());
+        return false;
+    }
+}
+
 std::vector<std::string> looks()
 {
     std::lock_guard<std::mutex> lock(g_mutex);
@@ -460,6 +533,10 @@ bool                     load_config(const std::string&) { return false; }
 std::vector<std::string> colorspaces() { return {}; }
 std::vector<std::string> displays() { return {}; }
 std::vector<std::string> looks() { return {}; }
+bool                     load_cdl(const std::string&, const std::string&, double*, double*, double*, double&)
+{
+    return false;
+}
 std::vector<std::string> views(const std::string&) { return {}; }
 bool                     has_colorspace(const std::string&) { return false; }
 bool                     has_display_view(const std::string&, const std::string&) { return false; }

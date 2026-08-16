@@ -187,7 +187,37 @@ Industry-standard ASC Color Decision List (Slope/Offset/Power) with per-channel 
 MIXER [channel]-[layer] CDL [sR] [sG] [sB] [oR] [oG] [oB] [pR] [pG] [pB] [saturation] [duration] [tween]
 MIXER [channel]-[layer] CDL RESET               # Reset to identity
 MIXER [channel]-[layer] CDL                      # Query
+
+MIXER [channel]-[layer] CDL_FILE "<file>" ["<id>"] [duration] [tween]
 ```
+
+### Loading a grade from a file
+
+`CDL_FILE` reads an ASC CDL from a **`.cdl`, `.ccc` or `.cc`** file — the interchange
+format grades actually arrive in from set and from post — and sets exactly the state the
+numeric form sets. The grade runs in the same shader block; only the parsing is new.
+
+```bash
+MIXER 1-10 CDL_FILE "shot0010.cdl"              # a file holding one correction
+MIXER 1-10 CDL_FILE "show.ccc" "shot0010"       # one correction from a collection, by id
+```
+
+The path is tried as given and then under `<media-path>`, the same resolution
+`CALIBRATION LUT` uses. Values are clamped through the **same limits** as the numeric
+command, so a file cannot reach a state `MIXER CDL` would refuse. A second argument that
+parses as an integer is read as `duration`, not as an id.
+
+> **An ambiguous file is refused, and OCIO alone would not refuse it.** A collection
+> holding several corrections with no `id` given returns `404`, listing the ids it does
+> have. OCIO's own `CreateFromFile(path, "")` silently returns the **first** correction —
+> so a 200-shot `.ccc` would load shot 1's grade, correctly applied, with nothing anywhere
+> to say so.
+
+**Verified by equivalence, not by a model** (`cli.py cdl-file`, both mixers): each file
+renders **byte-identically** — delta `0.00` — to `MIXER CDL` with the same numbers typed
+out. A wrong parse cannot survive that, and no drift in the grading maths can cause a false
+failure, because both sides drift together. The two `.ccc` ids are additionally required to
+render ≥ 8 LSB apart (measured 80.0), or a parser that ignored the id would pass every case.
 
 ### Parameters
 

@@ -68,6 +68,29 @@ bool has_colorspace(const std::string& name);
 /// Whether `display` exists and offers `view`.
 bool has_display_view(const std::string& display, const std::string& view);
 
+/// Read an ASC CDL file -- `.cdl`, `.ccc` or `.cc` -- into the ten SOP+sat values.
+///
+/// Parsed by OCIO rather than by hand: it already implements the ASC schema for all three
+/// container shapes, and the parsers were hardened in 2.5.2 (CVE-2026-42450). These files
+/// are operator-supplied, so that is the half of the decision that matters.
+///
+/// `cccid` selects one correction from a `.ccc` collection (or a `.cdl` holding several) by
+/// its `id` attribute. Empty means "the only one", and a file with several then fails rather
+/// than silently taking the first.
+///
+/// Returns false having logged why. The values are untouched on failure, so a caller that
+/// ignores the result renders what it had rather than a partly-applied grade.
+///
+/// NOTE: this reaches OCIO for PARSING only. The grade itself runs in the existing shader
+/// CDL block, so the numbers here are exactly what `MIXER CDL` takes and the two paths are
+/// required to render identically.
+bool load_cdl(const std::string& path,
+              const std::string& cccid,
+              double             slope[3],
+              double             offset[3],
+              double             power[3],
+              double&            saturation);
+
 /// Look (LMT) names in the loaded config, in config order.
 ///
 /// A look is a creative or technical transform applied in the working space *before* the

@@ -1,6 +1,35 @@
 CasparVP — Unreleased
 ==========================================
 
+### Added: `MIXER CDL_FILE` — load an ASC CDL from a `.cdl` / `.ccc` / `.cc`
+
+The CDL *maths* has been in both kernels for a long time; what was missing was the
+interchange. Grades arrive from set and from post as files, and there was no way to load
+one — every value had to be retyped into `MIXER CDL`.
+
+Parsed by OCIO rather than by hand: it already implements the ASC schema for all three
+container shapes, and its parsers were hardened in 2.5.2 (CVE-2026-42450), which is the half
+that matters for operator-supplied XML. **No shader change** — the file fills exactly the
+`image_transform` fields the numeric command fills.
+
+`MIXER <ch>-<layer> CDL_FILE "<file>" ["<id>"] [duration] [tween]`. The path is tried as
+given and then under `<media-path>` (matching `CALIBRATION LUT`); values are clamped through
+the same `grade_limits` as the numeric form, so a file cannot reach a state `MIXER CDL`
+would refuse; a second argument that parses as an integer is a duration, not an id.
+
+**An ambiguous file is refused, and this is behaviour the server adds.** OCIO's
+`CreateFromFile(path, "")` on a collection holding several corrections silently returns the
+**first** one. A 200-shot `.ccc` loaded without an id would apply shot 1's grade — correctly,
+with nothing to say so. `load_cdl` counts the corrections first and returns 404 listing the
+available ids.
+
+Verified by **equivalence rather than a model**, both mixers: every file renders
+**byte-identically (0.00)** to `MIXER CDL` with the same numbers. A wrong parse — a
+transposed channel, a dropped offset, an ignored `.ccc` id — cannot survive that, and no
+drift in the grading maths can cause a false failure because both sides drift together.
+The two `.ccc` ids render 80.0 LSB apart, so "the id was honoured" is falsifiable.
+`cli.py cdl-file`.
+
 ### Added: `OCIO_LOOK` — the channel's LMT, and `INFO OCIO LOOKS`
 
 A look is the show LUT of an ACES pipeline: a creative or technical transform applied to the

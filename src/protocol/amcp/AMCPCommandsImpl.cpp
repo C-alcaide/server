@@ -2783,6 +2783,90 @@ std::future<std::wstring> mixer_cdl_command(command_context& ctx)
     return make_ready_future<std::wstring>(L"202 MIXER OK\r\n");
 }
 
+// MIXER <ch>-<layer> CDL_FILE "<path>" ["<id>"] [duration] [tween]
+//
+// Load an ASC CDL grade from a `.cdl`, `.ccc` or `.cc` file. `<id>` selects one correction
+// from a collection by its `id` attribute; omit it when the file holds exactly one.
+//
+// THE FILE IS PARSED, NOT INTERPRETED. It sets exactly the state `MIXER CDL` sets, so the
+// grade runs in the same shader block and the two commands are required to render
+// identically -- which is how the harness gates this, without needing a colour model.
+//
+// The path is tried as given and then under <media-path>, matching CALIBRATION LUT — so an
+// operator does not have to learn two rules for the two file-taking commands.
+std::future<std::wstring> mixer_cdl_file_command(command_context& ctx)
+{
+    if (!accelerator::ocio::available()) {
+        CASPAR_LOG(warning) << L"[ocio] MIXER CDL_FILE refused: this server was built without OCIO "
+                               L"support, which is what parses ASC CDL files";
+        return make_ready_future<std::wstring>(L"501 MIXER FAILED\r\n");
+    }
+
+    if (ctx.parameters.empty()) {
+        CASPAR_LOG(warning) << L"[ocio] MIXER CDL_FILE needs a path. "
+                               L"MIXER <ch>-<layer> CDL_FILE \"<file.cdl>\" [\"<id>\"]";
+        return make_ready_future<std::wstring>(L"400 MIXER FAILED\r\n");
+    }
+
+    // As-is first, then under <media-path>: the same resolution CALIBRATION LUT performs.
+    std::wstring path = ctx.parameters.at(0);
+    if (!std::ifstream(path).is_open())
+        path = caspar::env::media_folder() + L"/" + path;
+
+    // A second parameter that parses as a number is a duration, not an id: `MIXER CDL`'s
+    // trailing [duration] [tween] are the convention here, and an ASC id is a string.
+    std::wstring id;
+    size_t       tail = 1;
+    if (ctx.parameters.size() > 1) {
+        try {
+            std::stoi(ctx.parameters.at(1));
+        } catch (...) {
+            id   = ctx.parameters.at(1);
+            tail = 2;
+        }
+    }
+
+    double slope[3]{1.0, 1.0, 1.0};
+    double offset[3]{0.0, 0.0, 0.0};
+    double power[3]{1.0, 1.0, 1.0};
+    double sat = 1.0;
+    if (!accelerator::ocio::load_cdl(u8(path), u8(id), slope, offset, power, sat)) {
+        return make_ready_future<std::wstring>(L"404 MIXER ERROR\r\n");
+    }
+
+    // Clamped through the SAME limits MIXER CDL uses. A file is operator-supplied and can
+    // hold a negative slope or a zero power, and the shader's guarantees are written against
+    // those ranges -- so a file cannot reach a state the numeric command refuses.
+    const double sR = core::grade_limits::cdl_slope.clamp(slope[0]);
+    const double sG = core::grade_limits::cdl_slope.clamp(slope[1]);
+    const double sB = core::grade_limits::cdl_slope.clamp(slope[2]);
+    const double oR = core::grade_limits::cdl_offset.clamp(offset[0]);
+    const double oG = core::grade_limits::cdl_offset.clamp(offset[1]);
+    const double oB = core::grade_limits::cdl_offset.clamp(offset[2]);
+    const double pR = core::grade_limits::cdl_power.clamp(power[0]);
+    const double pG = core::grade_limits::cdl_power.clamp(power[1]);
+    const double pB = core::grade_limits::cdl_power.clamp(power[2]);
+    const double st = core::grade_limits::cdl_saturation.clamp(sat);
+
+    int          dur = ctx.parameters.size() > tail ? std::stoi(ctx.parameters[tail]) : 0;
+    std::wstring tw  = ctx.parameters.size() > tail + 1 ? ctx.parameters[tail + 1] : L"linear";
+
+    transforms_applier transforms(ctx);
+    transforms.add(stage::transform_tuple_t(
+        ctx.layer_index(),
+        [=](frame_transform transform) -> frame_transform {
+            transform.image_transform.cdl_slope      = {sR, sG, sB};
+            transform.image_transform.cdl_offset     = {oR, oG, oB};
+            transform.image_transform.cdl_power      = {pR, pG, pB};
+            transform.image_transform.cdl_saturation = st;
+            return transform;
+        },
+        dur,
+        tw));
+    transforms.apply();
+    return make_ready_future<std::wstring>(L"202 MIXER OK\r\n");
+}
+
 // MIXER SPLITTONE shad_r shad_g shad_b hi_r hi_g hi_b [balance] [duration tween]
 std::future<std::wstring> mixer_splittone_command(command_context& ctx)
 {
@@ -5230,6 +5314,7 @@ void register_commands(std::shared_ptr<amcp_command_repository_wrapper>& repo)
     repo->register_channel_command(L"Mixer Commands", L"MIXER HUESHIFT",     mixer_hueshift_command,     0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER LINEARSATURATION", mixer_linearsaturation_command, 0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER CDL",          mixer_cdl_command,          0);
+    repo->register_channel_command(L"Mixer Commands", L"MIXER CDL_FILE",     mixer_cdl_file_command,     1);
     repo->register_channel_command(L"Mixer Commands", L"MIXER SPLITTONE",    mixer_splittone_command,    0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER EXPOSURE", mixer_exposure_command, 0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER GAMUTCOMPRESS", mixer_gamutcompress_command, 0);
