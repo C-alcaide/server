@@ -146,6 +146,32 @@ std::vector<std::string> displays()
     return out;
 }
 
+std::vector<std::string> looks()
+{
+    std::lock_guard<std::mutex> lock(g_mutex);
+    ensure_loaded_locked();
+    std::vector<std::string> out;
+    if (!g_config)
+        return out;
+
+    const int n = g_config->getNumLooks();
+    out.reserve(static_cast<size_t>(n));
+    for (int i = 0; i < n; ++i)
+        out.emplace_back(g_config->getLookNameByIndex(i));
+    return out;
+}
+
+bool has_look(const std::string& name)
+{
+    std::lock_guard<std::mutex> lock(g_mutex);
+    ensure_loaded_locked();
+    if (!g_config || name.empty())
+        return false;
+    // getLook() returns null for an unknown name rather than throwing, which is what makes
+    // this usable as an AMCP argument check.
+    return static_cast<bool>(g_config->getLook(name.c_str()));
+}
+
 std::vector<std::string> views(const std::string& display)
 {
     std::lock_guard<std::mutex> lock(g_mutex);
@@ -355,7 +381,8 @@ bool build_input_transform(const std::string& source_space, gpu_shader& out, gpu
 bool build_display_transform(const std::string& display,
                              const std::string& view,
                              gpu_shader&        out,
-                             gpu_target         target)
+                             gpu_target         target,
+                             const std::string& looks)
 {
     std::lock_guard<std::mutex> lock(g_mutex);
     ensure_loaded_locked();
@@ -366,16 +393,50 @@ bool build_display_transform(const std::string& display,
 
     try {
         const char* working = working_space_locked();
+
+        // No look: the 4-argument convenience, exactly as before this parameter existed, so
+        // the generated source for every existing configuration is unchanged.
+        //
         // FORWARD is working space -> display. The inverse direction is what a *display* used
         // as a source needs, and that is build_input_transform's job via the colour space of
         // the same name -- not this.
-        return fill_from_processor(g_config->getProcessor(working,
-                                                          display.c_str(),
-                                                          view.c_str(),
-                                                          OCIO_NS::TRANSFORM_DIR_FORWARD),
+        OCIO_NS::ConstProcessorRcPtr proc;
+        if (looks.empty()) {
+            proc = g_config->getProcessor(working, display.c_str(), view.c_str(),
+                                          OCIO_NS::TRANSFORM_DIR_FORWARD);
+        } else {
+            // LOOK FIRST, THEN THE VIEW. That is the ACES order -- an LMT acts on the
+            // scene-referred image and the view renders the result -- and it is not a
+            // preference: reversing it would apply a working-space transform to
+            // display-encoded pixels.
+            //
+            // The look's own `process_space` is honoured by OCIO, which converts into it and
+            // back around the look. So a look declared in ACES2065-1 works from an ACEScg
+            // working space without anything here knowing that.
+            auto look = OCIO_NS::LookTransform::Create();
+            look->setSrc(working);
+            look->setDst(working);
+            look->setLooks(looks.c_str());
+
+            auto dv = OCIO_NS::DisplayViewTransform::Create();
+            dv->setSrc(working);
+            dv->setDisplay(display.c_str());
+            dv->setView(view.c_str());
+            // The view may name looks of its own. Those are the config author's intent for
+            // that view and stay ON; this composes with them rather than replacing them.
+
+            auto group = OCIO_NS::GroupTransform::Create();
+            group->appendTransform(look);
+            group->appendTransform(dv);
+            proc = g_config->getProcessor(group, OCIO_NS::TRANSFORM_DIR_FORWARD);
+        }
+
+        return fill_from_processor(proc,
                                    "caspar_ocio_display",
                                    "ocio_out_",
-                                   u16(working) + L" -> " + u16(display) + L" / " + u16(view),
+                                   u16(working) + L" -> " +
+                                       (looks.empty() ? std::wstring() : L"[" + u16(looks) + L"] -> ") +
+                                       u16(display) + L" / " + u16(view),
                                    target,
                                    DISPLAY_TEXTURE_BINDING_START,
                                    out);
@@ -398,9 +459,11 @@ std::string              config_uri() { return {}; }
 bool                     load_config(const std::string&) { return false; }
 std::vector<std::string> colorspaces() { return {}; }
 std::vector<std::string> displays() { return {}; }
+std::vector<std::string> looks() { return {}; }
 std::vector<std::string> views(const std::string&) { return {}; }
 bool                     has_colorspace(const std::string&) { return false; }
 bool                     has_display_view(const std::string&, const std::string&) { return false; }
+bool                     has_look(const std::string&) { return false; }
 bool                     build_input_transform(const std::string&, gpu_shader&, gpu_target) { return false; }
 bool build_display_transform(const std::string&, const std::string&, gpu_shader&, gpu_target) { return false; }
 

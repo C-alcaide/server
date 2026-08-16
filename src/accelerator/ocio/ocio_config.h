@@ -68,6 +68,18 @@ bool has_colorspace(const std::string& name);
 /// Whether `display` exists and offers `view`.
 bool has_display_view(const std::string& display, const std::string& view);
 
+/// Look (LMT) names in the loaded config, in config order.
+///
+/// A look is a creative or technical transform applied in the working space *before* the
+/// display rendering -- the show LUT of an ACES pipeline. The pinned built-in config defines
+/// exactly one, `ACES 1.3 Reference Gamut Compression`; a studio config supplies its own,
+/// which is what `<ocio-config>` is for.
+std::vector<std::string> looks();
+
+/// Whether `name` names a look in the loaded config. For validating an AMCP argument at
+/// command time, so a bad name fails the command rather than the frame.
+bool has_look(const std::string& name);
+
 // ---- GPU shader generation -------------------------------------------------
 //
 // OCIO's GPU path is a shader *generator*, not a pixel processor. Once per transform it
@@ -184,9 +196,18 @@ bool build_input_transform(const std::string& source_space,
 ///
 /// Same failure contract as build_input_transform: nothing on failure, having logged why,
 /// and a caller must refuse the command rather than render without it.
+/// `looks` is an optional LMT applied in the working space BEFORE the display rendering,
+/// composed into the same processor rather than spliced separately. Two reasons that
+/// matters: the variant cache key stays the (input, output) pair it already is, and OCIO
+/// gets to optimise the look and the view together instead of us emitting two programs.
+/// Empty means no look, and generates byte-for-byte what this generated before it existed.
+///
+/// The string is OCIO's look *expression*, so `-name` inverts a look and a comma-separated
+/// list applies several in order. It is passed through rather than parsed here.
 bool build_display_transform(const std::string& display,
                              const std::string& view,
                              gpu_shader&        out,
-                             gpu_target         target = gpu_target::opengl);
+                             gpu_target         target = gpu_target::opengl,
+                             const std::string& looks  = "");
 
 }}} // namespace caspar::accelerator::ocio

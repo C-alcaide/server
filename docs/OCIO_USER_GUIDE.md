@@ -132,6 +132,50 @@ and that composite is not in any colour space.
 
 Both arguments are required and both must be quoted.
 
+### 5.3 `OCIO_LOOK <channel>` — the channel's LMT (show look)
+
+```
+OCIO_LOOK 1 "ACES 1.3 Reference Gamut Compression"
+OCIO_LOOK 1 "-ACES 1.3 Reference Gamut Compression"   invert it
+OCIO_LOOK 1 "first,second"                            chain, in order
+OCIO_LOOK 1 NONE                                      clear (OFF also accepted)
+OCIO_LOOK 1                                           query (INFO also accepted)
+```
+
+A **look** (LMT) is a creative or technical transform applied to the scene-referred image
+**before** the display rendering — the show LUT of an ACES pipeline. Channel-level for the
+same reason `OCIO_DISPLAY` is: every layer of one composite belongs to one show. It applies
+to the primary **and to every consumer view**, because a consumer asking for a different
+view still wants the show's look.
+
+`INFO OCIO LOOKS` lists what the loaded config offers. The bundled config defines exactly
+one — `ACES 1.3 Reference Gamut Compression` — so this is mostly useful with your own
+config via [`<ocio-config>`](#61-ocio-config--use-your-own-config).
+
+> **It requires `OCIO_DISPLAY` to be set, and refuses with 403 otherwise.** The look is
+> *composed into* the display processor rather than spliced separately: that keeps the
+> shader-variant cache keyed on the (input, output) pair it already used, and lets OCIO
+> optimise the look and the view together. The cost is that there has to be a display
+> transform for it to ride on. It refuses rather than storing the look for later, because a
+> command that returns `202` and changes nothing is the worst of the available behaviours.
+
+**Measured 2026-08-16, both mixers byte-identical.** Against `sRGB - Display` /
+`ACES 2.0 - SDR 100 nits (Rec.709)`, with the look off and on:
+
+| patch | look off | look on | Δ |
+| :--- | :--- | :--- | ---: |
+| neutral `#808080` | `(92, 92, 92)` | `(92, 92, 92)` | **0.0** |
+| saturated blue `#0D05E6` | `(1, 0, 164)` | `(8, 37, 171)` | **37.0** |
+| saturated red `#E60D0D` | `(174, 17, 8)` | `(175, 22, 24)` | **16.0** |
+
+That is the signature a gamut-compression look should have — in-gamut neutrals untouched,
+saturated primaries pulled in — and it is why "the command was accepted" and "the look ran"
+are separable here rather than taken on trust.
+
+> **Not the same as `MIXER GAMUTCOMPRESS`.** The built-in operator shares ACES 1.3's
+> *limits* and not its algorithm; this look is the reference implementation. See
+> [`COLOR_GRADING.md`](COLOR_GRADING.md#gamut-compression) for the measured difference.
+
 ---
 
 ## 6. Config elements

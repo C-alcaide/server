@@ -164,6 +164,21 @@ class image_mixer
 
     virtual ocio_display_state get_ocio_display() const { return {}; }
 
+    /// The channel's LOOK (LMT) -- a creative or technical transform applied in the
+    /// working space BEFORE the display rendering. The show LUT of an ACES pipeline.
+    ///
+    /// Composed into the display processor rather than spliced separately, so it applies
+    /// to the primary AND to every consumer view: a look is creative intent, a view is
+    /// the screen it goes to, and a consumer asking for a different view still wants the
+    /// show's look. It therefore requires a display transform to ride on -- the command
+    /// refuses without one rather than silently doing nothing.
+    ///
+    /// Empty clears it. The string is OCIO's look EXPRESSION, so `-name` inverts and a
+    /// comma-separated list applies several in order.
+    virtual void set_ocio_look(const std::string& look) { (void)look; }
+
+    virtual std::string get_ocio_look() const { return {}; }
+
     /// The distinct views this channel's consumers asked for, beyond the channel's own.
     ///
     /// Set once per tick by `mixer`, from what the consumers declare. One post-composite
@@ -188,11 +203,13 @@ class image_mixer
     /// stall wearing a different hat.
     virtual void prewarm_ocio(const std::string& source_space,
                               const std::string& display,
-                              const std::string& view)
+                              const std::string& view,
+                              const std::string& look = "")
     {
         (void)source_space;
         (void)display;
         (void)view;
+        (void)look;
     }
 
     /// Does this mixer composite in the working space? The AMCP layer asks before

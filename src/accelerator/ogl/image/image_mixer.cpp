@@ -136,6 +136,9 @@ struct render_fingerprint
     bool                 working_space_composite = false;
     std::string          ocio_display;
     std::string          ocio_view;
+    //: The channel LMT. In the fingerprint because changing it changes every pixel while
+    //: leaving every layer identical -- exactly what the still-frame cache would replay.
+    std::string          ocio_look;
     const void*          calibration_lut        = nullptr;
     float                calibration_strength   = 0.0f;
     bool                 calibration_bypass     = false;
@@ -151,6 +154,7 @@ struct render_fingerprint
                straight_alpha_grading == other.straight_alpha_grading &&
                working_space_composite == other.working_space_composite &&
                ocio_display == other.ocio_display && ocio_view == other.ocio_view &&
+               ocio_look == other.ocio_look &&
                calibration_lut == other.calibration_lut && calibration_strength == other.calibration_strength &&
                calibration_bypass == other.calibration_bypass;
     }
@@ -196,6 +200,9 @@ class image_renderer
     // working-space pixels.
     std::string          ocio_display;
     std::string          ocio_view;
+    // The channel's LOOK (LMT), composed into the display processor above. Applies to
+    // the primary and to every consumer view.
+    std::string          ocio_look;
 
     //: Distinct views the consumers asked for, beyond the channel's own. Set once per tick.
     std::vector<core::ocio_view_key> consumer_views_;
@@ -305,6 +312,10 @@ class image_renderer
         auto views        = ws_composite ? consumer_views_ : std::vector<core::ocio_view_key>{};
         auto ch_display   = ocio_display;
         auto ch_view      = ocio_view;
+        // The channel's look applies to the primary AND to every consumer view: a look is
+        // creative intent and a view is the screen it goes to, so a consumer asking for a
+        // different view still wants the show's look.
+        auto ch_look      = ocio_look;
 
         auto f = std::move(
             ogl_->dispatch_async([=, layers = std::move(layers)]() mutable -> core::render_output {
@@ -330,7 +341,7 @@ class image_renderer
                     if (ws_composite) {
                         auto oc = ogl_->create_texture(format_desc.width, format_desc.height, 4,
                                                        depth_, true, render_format_);
-                        apply_output_convert(tex, oc, format_desc, disp, vw);
+                        apply_output_convert(tex, oc, format_desc, disp, vw, ch_look);
                         tex = oc;
                     }
                     if (cal_lut && !cal_bypass && cal_lut->size > 0) {
@@ -375,9 +386,10 @@ class image_renderer
     common::bit_depth depth() const { return depth_; }
 
     /// Forward to the kernel, which owns the variant cache. Called on the GL thread.
-    void prewarm_ocio(const std::string& source_space, const std::string& display, const std::string& view)
+    void prewarm_ocio(const std::string& source_space, const std::string& display, const std::string& view,
+                      const std::string& look = "")
     {
-        kernel_.prewarm_ocio(source_space, display, view);
+        kernel_.prewarm_ocio(source_space, display, view, look);
     }
 
   private:
@@ -402,6 +414,7 @@ class image_renderer
         fp.working_space_composite = working_space_composite;
         fp.ocio_display           = ocio_display;
         fp.ocio_view              = ocio_view;
+        fp.ocio_look              = ocio_look;
         fp.calibration_lut        = calibration_lut_.get();
         fp.calibration_strength   = calibration_strength_;
         fp.calibration_bypass     = calibration_bypass_;
@@ -630,7 +643,8 @@ class image_renderer
                               std::shared_ptr<texture>&      target_texture,
                               const core::video_format_desc& format_desc,
                               const std::string&             display,
-                              const std::string&             view)
+                              const std::string&             view,
+                              const std::string&             look)
     {
         if (!source_texture)
             return;
@@ -664,6 +678,7 @@ class image_renderer
         // case that `output_convert_only` above already set up.
         draw_params.ocio_display            = display;
         draw_params.ocio_view               = view;
+        draw_params.ocio_look               = look;
         // Composes with the alpha-domain fix: with straight-alpha grading on, the output
         // encoding is applied to the straight colour and re-premultiplied, which is the
         // same rule every layer draw follows.
@@ -791,6 +806,14 @@ struct image_mixer::impl
         renderer_.ocio_view    = view;
     }
 
+    void set_ocio_look(const std::string& look)
+    {
+        CASPAR_LOG(info) << L"[mixer] set_ocio_look look=\"" << u16(look) << L"\"";
+        renderer_.ocio_look = look;
+    }
+
+    std::string get_ocio_look() const { return renderer_.ocio_look; }
+
     void set_consumer_views(std::vector<core::ocio_view_key> views)
     {
         // Pre-warm anything NEW since the last tick.
@@ -817,13 +840,14 @@ struct image_mixer::impl
     //: cost a frame if the consumer came back.
     std::vector<core::ocio_view_key> prewarmed_views_;
 
-    void prewarm_ocio(const std::string& source_space, const std::string& display, const std::string& view)
+    void prewarm_ocio(const std::string& source_space, const std::string& display, const std::string& view,
+                      const std::string& look = "")
     {
         // On the GL thread, because it creates textures and compiles a program -- and
         // asynchronously, so the AMCP command returns immediately. The compile still costs
         // what it costs; the point is that it no longer costs a FRAME.
-        ogl_->dispatch_async([this, source_space, display, view] {
-            renderer_.prewarm_ocio(source_space, display, view);
+        ogl_->dispatch_async([this, source_space, display, view, look] {
+            renderer_.prewarm_ocio(source_space, display, view, look);
         });
     }
 
@@ -1218,6 +1242,10 @@ void image_mixer::set_ocio_display(const std::string& display, const std::string
 
 core::ocio_display_state image_mixer::get_ocio_display() const { return impl_->get_ocio_display(); }
 
+void image_mixer::set_ocio_look(const std::string& look) { impl_->set_ocio_look(look); }
+
+std::string image_mixer::get_ocio_look() const { return impl_->get_ocio_look(); }
+
 void image_mixer::set_consumer_views(std::vector<core::ocio_view_key> views)
 {
     impl_->set_consumer_views(std::move(views));
@@ -1225,9 +1253,10 @@ void image_mixer::set_consumer_views(std::vector<core::ocio_view_key> views)
 
 void image_mixer::prewarm_ocio(const std::string& source_space,
                                const std::string& display,
-                               const std::string& view)
+                               const std::string& view,
+                               const std::string& look)
 {
-    impl_->prewarm_ocio(source_space, display, view);
+    impl_->prewarm_ocio(source_space, display, view, look);
 }
 
 bool image_mixer::composites_in_working_space() const

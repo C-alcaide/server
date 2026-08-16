@@ -249,7 +249,9 @@ struct image_kernel::impl
         if (want_input && !caspar::accelerator::ocio::build_input_transform(o.source_space, in_shader))
             return nullptr;
         if (want_display &&
-            !caspar::accelerator::ocio::build_display_transform(params.ocio_display, params.ocio_view, out_shader))
+            !caspar::accelerator::ocio::build_display_transform(params.ocio_display, params.ocio_view, out_shader,
+                                                                caspar::accelerator::ocio::gpu_target::opengl,
+                                                                params.ocio_look))
             return nullptr;
 
         // The key names the PAIR. Both halves are spliced into one program, so two source
@@ -368,13 +370,15 @@ struct image_kernel::impl
     /// It goes through `select_ocio_variant` rather than reimplementing the build, so the
     /// cache key is by construction the one the later draw will compute. A pre-warm that
     /// keyed differently would compile twice and warm nothing.
-    void prewarm_ocio(const std::string& source_space, const std::string& display, const std::string& view)
+    void prewarm_ocio(const std::string& source_space, const std::string& display, const std::string& view,
+                      const std::string& look = "")
     {
         draw_params p;
         p.transforms.image_transform.ocio.enable       = !source_space.empty();
         p.transforms.image_transform.ocio.source_space = source_space;
         p.ocio_display                                 = display;
         p.ocio_view                                    = view;
+        p.ocio_look                                    = look;
         select_ocio_variant(p, /*on_frame_path=*/false);
     }
 
@@ -1520,9 +1524,10 @@ image_kernel::~image_kernel() {}
 void image_kernel::draw(const draw_params& params) { impl_->draw(params); }
 void image_kernel::prewarm_ocio(const std::string& source_space,
                                 const std::string& display,
-                                const std::string& view)
+                                const std::string& view,
+                                const std::string& look)
 {
-    impl_->prewarm_ocio(source_space, display, view);
+    impl_->prewarm_ocio(source_space, display, view, look);
 }
 
 } // namespace caspar::accelerator::ogl

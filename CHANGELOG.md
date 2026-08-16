@@ -1,6 +1,46 @@
 CasparVP — Unreleased
 ==========================================
 
+### Added: `OCIO_LOOK` — the channel's LMT, and `INFO OCIO LOOKS`
+
+A look is the show LUT of an ACES pipeline: a creative or technical transform applied to the
+scene-referred image **before** the display rendering. Channel-level for the same reason
+`OCIO_DISPLAY` is — every layer of one composite belongs to one show — and it applies to the
+primary and to every consumer view, because a consumer asking for a different view still
+wants the show's look.
+
+**Composed into the display processor rather than spliced separately.** A `GroupTransform`
+of `LookTransform` then `DisplayViewTransform`, so the shader-variant cache key stays the
+`(input, output)` pair it already was instead of becoming a triple product, and OCIO
+optimises the look and the view together. Look first, then the view, is not a preference:
+reversing it would apply a working-space transform to display-encoded pixels.
+
+The consequence is that `OCIO_LOOK` **requires `OCIO_DISPLAY`** and refuses with 403
+otherwise — there has to be a processor for it to ride on. It refuses rather than storing the
+look for later, because a command that returns 202 and changes nothing is the failure this
+tree has hit repeatedly.
+
+Default is no look, and with none set `build_display_transform` takes the same 4-argument
+path it always did, so **every existing configuration generates byte-identical GLSL**.
+
+Measured, both mixers **byte-identical**, against `sRGB - Display` /
+`ACES 2.0 - SDR 100 nits (Rec.709)`:
+
+| patch | look off | look on | delta |
+| :--- | :--- | :--- | ---: |
+| neutral `#808080` | (92, 92, 92) | (92, 92, 92) | **0.0** |
+| saturated blue `#0D05E6` | (1, 0, 164) | (8, 37, 171) | **37.0** |
+| saturated red `#E60D0D` | (174, 17, 8) | (175, 22, 24) | **16.0** |
+
+In-gamut neutrals untouched and saturated primaries pulled in is the signature a
+gamut-compression look should have, and it was predicted from OCIO's CPU processor before
+the server was built — 0.0 / 38.8 / 18.0 for the equivalent ACEScg triples.
+
+The bundled config defines exactly one look, `ACES 1.3 Reference Gamut Compression`, which
+is the **reference** implementation of the algorithm `MIXER GAMUTCOMPRESS` approximates; see
+the gamut-compression entry in `docs/COLOR_GRADING.md` for the measured difference between
+them. Custom looks come from `<ocio-config>`.
+
 ### Removed: the screen consumer's explicit VK→GL semaphore wait, which never worked
 
 **No rendered output changes.** The wait has been inert since it was added on 2026-05-23, so

@@ -3205,9 +3205,97 @@ std::future<std::wstring> ocio_display_command(command_context& ctx)
     // hit inside OCIO; what this adds is the LUT upload and the GLSL compile, which are what
     // actually cost a frame. Measured 2026-08-13: a capture 1.6 s after this command
     // returned NO FRAME AT ALL, because the ACES 2.0 program is ~15 KB of GLSL.
-    image_mixer->prewarm_ocio("", display, view);
+    // With the channel look included: the look is composed INTO this processor, so
+    // warming without it would compile a program the draw never asks for.
+    image_mixer->prewarm_ocio("", display, view, image_mixer->get_ocio_look());
 
     return make_ready_future<std::wstring>(L"202 OCIO_DISPLAY OK\r\n");
+}
+
+// OCIO_LOOK <channel> "<look>"     apply an LMT in the working space, before the view
+// OCIO_LOOK <channel> NONE          clear it
+// OCIO_LOOK <channel> [INFO]        query
+//
+// A look is the show LUT of an ACES pipeline: a creative or technical transform applied to
+// the scene-referred image BEFORE the display rendering. Channel-level, for the same reason
+// the display transform is -- every layer of one composite belongs to one show -- and it
+// applies to the primary AND to every consumer view, because a consumer asking for a
+// different view still wants the show's look.
+//
+// It is COMPOSED INTO the display processor rather than spliced separately. That keeps the
+// shader-variant cache key the (input, output) pair it already is, and lets OCIO optimise
+// the look and the view together. The consequence is the refusal below: without a display
+// transform there is nothing for the look to ride on.
+std::future<std::wstring> ocio_look_command(command_context& ctx)
+{
+    auto image_mixer = ctx.channel.raw_channel->mixer().get_image_mixer();
+
+    // Query: OCIO_LOOK <ch>  or  OCIO_LOOK <ch> INFO
+    if (ctx.parameters.empty() || boost::iequals(ctx.parameters.at(0), L"INFO")) {
+        const auto look = image_mixer->get_ocio_look();
+        std::wstringstream result;
+        result << L"201 OCIO_LOOK OK\r\n";
+        result << (look.empty() ? std::wstring(L"NONE") : u16(look)) << L"\r\n";
+        return make_ready_future<std::wstring>(result.str());
+    }
+
+    if (boost::iequals(ctx.parameters.at(0), L"NONE") || boost::iequals(ctx.parameters.at(0), L"OFF")) {
+        image_mixer->set_ocio_look("");
+        const auto cleared = image_mixer->get_ocio_display();
+        if (cleared.enabled)
+            image_mixer->prewarm_ocio("", cleared.display, cleared.view, "");
+        return make_ready_future<std::wstring>(L"202 OCIO_LOOK OK\r\n");
+    }
+
+    if (!accelerator::ocio::available()) {
+        CASPAR_LOG(warning) << L"[ocio] OCIO_LOOK refused: this server was built without OCIO support";
+        return make_ready_future<std::wstring>(L"501 OCIO_LOOK FAILED\r\n");
+    }
+
+    const auto look = u8(ctx.parameters.at(0));
+
+    // A single name is validated here; a look EXPRESSION (`-name` inverts, commas chain
+    // several) is left to the build below, which is the only thing that can judge it.
+    // Checking the simple case means the common typo gets the useful error.
+    if (look.find(',') == std::string::npos && look.front() != '-' && !accelerator::ocio::has_look(look)) {
+        CASPAR_LOG(warning) << L"[ocio] OCIO_LOOK refused: '" << ctx.parameters.at(0) << L"' is not a look in "
+                            << u16(accelerator::ocio::config_uri()) << L". Use INFO OCIO LOOKS to list them.";
+        return make_ready_future<std::wstring>(L"404 OCIO_LOOK ERROR\r\n");
+    }
+
+    if (!image_mixer->composites_in_working_space()) {
+        CASPAR_LOG(warning) << L"[ocio] OCIO_LOOK refused: this channel does not composite in the "
+                               L"working space. A look acts on scene-referred pixels; add "
+                               L"<working-space-composite>true</working-space-composite> (and the fp16 "
+                               L"render format it requires) to the channel.";
+        return make_ready_future<std::wstring>(L"403 OCIO_LOOK ERROR\r\n");
+    }
+
+    // The look rides on the display processor, so there has to be one. Refused rather than
+    // stored for later: a command that returns 202 and changes nothing is the exact failure
+    // this tree has hit repeatedly.
+    const auto disp = image_mixer->get_ocio_display();
+    if (!disp.enabled) {
+        CASPAR_LOG(warning) << L"[ocio] OCIO_LOOK refused: no display transform is set on this channel. "
+                               L"A look is composed into the display rendering, so set OCIO_DISPLAY first.";
+        return make_ready_future<std::wstring>(L"403 OCIO_LOOK ERROR\r\n");
+    }
+
+    // Build it now: a look can exist and still fail to produce a processor -- a missing LUT
+    // file behind a FileTransform, a process space that does not resolve -- and by the time
+    // the mixer needs it there is no way to report that except by rendering something wrong.
+    accelerator::ocio::gpu_shader probe;
+    if (!accelerator::ocio::build_display_transform(disp.display, disp.view, probe,
+                                                    accelerator::ocio::gpu_target::opengl, look)) {
+        CASPAR_LOG(warning) << L"[ocio] OCIO_LOOK refused: '" << ctx.parameters.at(0)
+                            << L"' exists but no GPU transform could be built with it";
+        return make_ready_future<std::wstring>(L"404 OCIO_LOOK ERROR\r\n");
+    }
+
+    image_mixer->set_ocio_look(look);
+    image_mixer->prewarm_ocio("", disp.display, disp.view, look);
+
+    return make_ready_future<std::wstring>(L"202 OCIO_LOOK OK\r\n");
 }
 
 // CALIBRATION <channel> LUT <file.cube> [strength]   load a channel-master LED calibration LUT
@@ -4012,6 +4100,7 @@ std::wstring info_paths_command(command_context& ctx)
 // INFO OCIO               -> whether OCIO is available, its version, the loaded config URI
 // INFO OCIO COLORSPACES   -> every colour space name in the loaded config
 // INFO OCIO DISPLAYS      -> every display, with the views available for each
+// INFO OCIO LOOKS         -> every look (LMT) name in the loaded config
 //
 // One command branching on its argument rather than three registered commands, because
 // AMCP's dispatcher resolves exactly one level of subcommand: find_command() tries
@@ -4066,6 +4155,12 @@ std::wstring info_ocio_command(command_context& ctx)
 
             info.add_child(L"displays.display", node);
         }
+    } else if (what == L"LOOKS") {
+        reply_name = L"INFO OCIO LOOKS";
+        // Flat, unlike displays: a look name is unique across the config, and OCIO_LOOK
+        // takes exactly this string.
+        for (const auto& name : accelerator::ocio::looks())
+            info.add(L"looks.look", u16(name));
     } else {
         return L"403 INFO OCIO ERROR\r\n";
     }
@@ -5155,6 +5250,7 @@ void register_commands(std::shared_ptr<amcp_command_repository_wrapper>& repo)
 
     repo->register_channel_command(L"Calibration Commands", L"CALIBRATION", calibration_command, 0);
     repo->register_channel_command(L"Mixer Commands", L"OCIO_DISPLAY", ocio_display_command, 0);
+    repo->register_channel_command(L"Mixer Commands", L"OCIO_LOOK", ocio_look_command, 0);
 
     repo->register_channel_command(L"Previz Commands", L"PREVIZ SCENE",     previz_scene_command,     0);
     repo->register_channel_command(L"Previz Commands", L"PREVIZ MAP",       previz_map_command,       2);

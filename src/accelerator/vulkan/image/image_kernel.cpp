@@ -859,9 +859,10 @@ struct image_kernel::impl
     /// Build and cache an OCIO program WITHOUT drawing -- see the OGL kernel for the
     /// measurement that motivates it. Routed through `select_ocio_variant` so the cache key
     /// is by construction the one the later draw computes.
-    void prewarm_ocio(const std::string& source_space, const std::string& display, const std::string& view)
+    void prewarm_ocio(const std::string& source_space, const std::string& display, const std::string& view,
+                      const std::string& look = "")
     {
-        select_ocio_variant(source_space, display, view, /*on_frame_path=*/false);
+        select_ocio_variant(source_space, display, view, /*on_frame_path=*/false, look);
     }
 
     /// `on_frame_path` is what the log reports. This function is the only place a variant
@@ -871,7 +872,8 @@ struct image_kernel::impl
     const ocio_variant* select_ocio_variant(const std::string& source_space,
                                             const std::string& display,
                                             const std::string& view,
-                                            bool               on_frame_path = true)
+                                            bool               on_frame_path = true,
+                                            const std::string& look          = "")
     {
         namespace ocio_ns = caspar::accelerator::ocio;
 
@@ -889,7 +891,7 @@ struct image_kernel::impl
             !ocio_ns::build_input_transform(source_space, in_shader, ocio_ns::gpu_target::vulkan))
             return nullptr;
         if (want_display &&
-            !ocio_ns::build_display_transform(display, view, out_shader, ocio_ns::gpu_target::vulkan))
+            !ocio_ns::build_display_transform(display, view, out_shader, ocio_ns::gpu_target::vulkan, look))
             return nullptr;
 
         // One program holds both halves, so the key names the pair. Two source spaces through
@@ -1316,7 +1318,9 @@ struct image_kernel::impl
         bool                in_working_space = false;
         const ocio_variant* ocio     = select_ocio_variant(ocio_in ? ocio_tf.source_space : std::string(),
                                                            params.ocio_display,
-                                                           params.ocio_view);
+                                                           params.ocio_view,
+                                                           /*on_frame_path=*/true,
+                                                           params.ocio_look);
 
         auto const first_plane = params.pix_desc.planes.at(0);
         if (params.geometry.mode() != core::frame_geometry::scale_mode::stretch && first_plane.width > 0 &&
@@ -2183,9 +2187,10 @@ spl::shared_ptr<renderpass> image_kernel::create_renderpass(uint32_t width, uint
 
 void image_kernel::prewarm_ocio(const std::string& source_space,
                                 const std::string& display,
-                                const std::string& view)
+                                const std::string& view,
+                                const std::string& look)
 {
-    impl_->prewarm_ocio(source_space, display, view);
+    impl_->prewarm_ocio(source_space, display, view, look);
 }
 
 } // namespace caspar::accelerator::vulkan

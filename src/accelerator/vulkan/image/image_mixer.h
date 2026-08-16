@@ -97,8 +97,11 @@ class image_mixer final : public core::image_mixer
     void set_calibration_bypass(bool bypass) override;
     void set_ocio_display(const std::string& display, const std::string& view) override;
     core::ocio_display_state get_ocio_display() const override;
+    void set_ocio_look(const std::string& look) override;
+    std::string get_ocio_look() const override;
     void set_consumer_views(std::vector<core::ocio_view_key> views) override;
-    void prewarm_ocio(const std::string& source_space, const std::string& display, const std::string& view) override;
+    void prewarm_ocio(const std::string& source_space, const std::string& display, const std::string& view,
+                      const std::string& look) override;
     bool composites_in_working_space() const override;
     core::calibration_lut_state get_calibration_state() const override;
 

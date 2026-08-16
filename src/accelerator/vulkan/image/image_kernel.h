@@ -49,7 +49,10 @@ class image_kernel final : public std::enable_shared_from_this<image_kernel>
     spl::shared_ptr<class renderpass> create_renderpass(uint32_t width, uint32_t height);
 
     /// Build and cache an OCIO program without drawing, off the frame path.
-    void prewarm_ocio(const std::string& source_space, const std::string& display, const std::string& view);
+    /// `look` is an optional LMT composed into the display processor -- see
+    /// `draw_params::ocio_look`. Empty means none.
+    void prewarm_ocio(const std::string& source_space, const std::string& display, const std::string& view,
+                      const std::string& look = "");
 
   private:
     struct impl;

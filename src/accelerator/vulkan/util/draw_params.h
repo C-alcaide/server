@@ -101,6 +101,11 @@ struct draw_params final
     /// post-composite pass per distinct view. Both shipped -- see OCIO_USER_GUIDE.md §6.2.
     std::string                                 ocio_display;
     std::string                                 ocio_view;
+    /// An LMT applied in the working space BEFORE the display rendering. Composed into
+    /// the display processor rather than spliced separately, so it changes the OUTPUT
+    /// half's cache id and the variant key stays the (input, output) pair it already is.
+    /// Empty means none, and generates exactly what it generated before looks existed.
+    std::string                                 ocio_look;
 };
 
 }}} // namespace caspar::accelerator::vulkan
