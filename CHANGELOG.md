@@ -20,44 +20,40 @@ consumer that does not ask for this puts the same bytes on the wire as before.
 characteristics and is the card's to insert from the frame metadata the consumer already
 supplies; a second one risks two conflicting payload identifiers in one field.
 
-**ROOT-CAUSED after the fact: it does not reach the wire, and the reason is module-wide.**
-This tree's DeckLink interop header is SDK 12.3.1 and the installed driver is 15.3, and the
-ancillary API was revised in between — `IDeckLinkAncillaryPacket` gained `GetDataSpace()`,
-changing its IID and cascading to the iterator, the container and the container's coclass
-(`6C186C0F…`→`8A72D630…`, `F891AD29…`→`6F47097E…`). SDK 15.3 keeps the older pair as
-`..._v15_2`. The old coclass is still registered, so `CoCreateInstance` and `AttachPacket`
-both succeed and the path looks healthy from inside the process; but
-`decklink_frame::QueryInterface` answers only the `_v15_2` IID, and a 15.3 driver scheduling a
-custom frame asks for the 15.3 one, gets `E_NOINTERFACE`, and takes no ancillary data from
-that frame. **The same mismatch sits under OP47 and SCTE-104**, which attach through the
-identical path — so this is not an HDR feature defect.
+**The earlier root cause in this entry was WRONG, and the real one was in the measurement.**
+This entry previously said the packet never reached the wire because the module's DeckLink
+interop headers (SDK 12.3.1) disagree with the installed driver (15.3) about the ancillary
+IIDs. The version gap is real. It is not what was happening.
 
-**And regenerating the interop header is not the fix — that was tried and reverted.** MIDL
-against the 15.3 IDL produces a correct header in seconds and it does not build: 15.3 removed
-`IDeckLinkVideoFrame::GetBytes` in favour of a separate `IDeckLinkVideoBuffer`, and replaced
-`IDeckLinkMemoryAllocator` plus `IDeckLinkInput::SetVideoInputFrameMemoryAllocator` with
-`IDeckLinkVideoBufferAllocator`/`Provider` and `EnableVideoInputWithAllocatorProvider`.
-`GetBytes` is how every frame in the module reads its own pixels and the allocator is how
-`cuda_prores` gets pinned memory for GPUDirect DMA, so the upgrade is a migration of the whole
-DeckLink data path across three modules. The driver keeps the older interfaces working — which
-is why everything else in this fork runs correctly against 15.3 — but its ancillary path asks
-only for the new IID, making ancillary the one casualty of being three SDK generations
-behind.
+**It works.** Measured over the 1->4 loopback: the packet arrives as `41h/0Ch` and decodes to
+exactly what was configured -- mastering display max 1000 / min 0.005 cd/m2, MaxCLL 1000,
+MaxFALL 100. The driver accepts the older ancillary interfaces on output without complaint.
 
-**Measured, and the limit stated with it.** The encoding is checked against SMPTE ST 2108-1
-and, for the reader that decodes it, against the VPID words EBU Tech 3375 publishes — 18
-assertions, mutation-tested, in `decklink_sdi_signalling_test`. On the wire the consumer
-attaches the packet and `AttachPacket` returns `S_OK`, logged once as `VANC attaching 1
-packet(s): 41h/0Ch@9`. A DeckLink 8K Pro receiving that signal over an SDI loopback then
-reports an **empty ancillary census** — at lines 9, 13 and 18, at 8-bit and 10-bit ingest, on
-HD-SDI and 3G — while the picture arrives intact. That census is what led to the interop
-mismatch described above. Conformance unchanged at 36/36 within 1 LSB.
+What produced a whole investigation's worth of "nothing arrives" was the producer's diagnostic
+logging the FIRST frame and no other. Ancillary is not carried on every frame -- a minimal
+SDK-based capturer watching a source emitting one CDP per frame saw the interface on 52 frames
+out of 99 -- so a first-frame sample reports an empty wire about half the time on a source
+that plainly has data. The producer now watches until it finds ancillary, giving up only after
+150 frames, and the same rig that reported nothing all session reports the packet immediately.
+
+**Measured.** The encoding is checked against SMPTE ST 2108-1, and the reader that decodes it
+against the VPID words EBU Tech 3375 publishes -- 18 assertions, mutation-tested, in
+`decklink_sdi_signalling_test`. End to end over the loopback the values survive exactly, and
+the consumer's `VANC attaching 1 packet(s): 41h/0Ch@9` line pairs with the producer's census
+so both halves are visible in one log. Conformance unchanged at 36/36 within 1 LSB.
+
+**Still not emitted, deliberately: ST 352 (VPID).** No `41h/01h` appears on the wire, which
+now means the card does not insert a payload identifier for custom frames rather than "the
+reader saw nothing" -- a distinction only available because `41h/0Ch` does arrive.
 
 ### Added: the producer reads SDI colour signalling (ST 352 and ST 2108-1)
 
 `decklink_producer` asked `IDeckLinkVideoFrameMetadataExtensions` for the incoming colourspace
-and EOTF and got nothing on every SDI input, always — that interface being for HDMI. It now
-parses the ancillary data instead: ST 352 for colorimetry and transfer characteristics,
+and EOTF and appeared to get nothing on SDI. **That appearance was a first-frame sampling
+artifact**: with the search widened, an HDR feed over SDI reports `transfer=pq` from that very
+interface, where the producer's own `10BIT` fallback would have said HLG. HDR metadata does
+survive SDI on this hardware. The producer also now parses the ancillary data, which is where
+the rest of the signalling lives: ST 352 for colorimetry and transfer characteristics,
 ST 2108-1 for mastering display and content light level. Precedence, most authoritative first:
 the card's own frame metadata, then the wire, then the `10BIT` configuration assertion, then
 the mixer's raster convention.

@@ -531,6 +531,43 @@ sdi_signalling read_sdi_signalling(IDeckLinkVideoInputFrame* video, std::wstring
     static const GUID IID_AncillaryPackets_15_3 = {
         0x8A72D630, 0x8070, 0x4D05, {0x8A, 0x93, 0xE6, 0x0C, 0x40, 0xEE, 0x08, 0x8A}};
 
+    // TWO CONTROLS, because "QueryInterface said no" is only meaningful if QueryInterface
+    // ever says yes on this object. Both of these IIDs are byte-identical between the 12.3.1
+    // header this module is built from and the 15.3 driver installed here -- checked, not
+    // assumed -- so a failure from either is about the frame rather than about a stale IID.
+    //
+    //   metadata extensions : the interface the colour readers use. If this succeeds, the
+    //                         input frame does answer optional QueryInterface calls, and the
+    //                         ancillary refusal below is a real statement about ancillary.
+    //   legacy ancillary    : IDeckLinkVideoFrameAncillary, the pre-packet line-buffer
+    //                         interface. If THIS succeeds while the packet interfaces do not,
+    //                         the card is capturing VANC and only the modern accessor is
+    //                         missing -- which would be a way in that costs no migration.
+    if (census != nullptr) {
+        IUnknown* probe = nullptr;
+        if (SUCCEEDED(video->QueryInterface(IID_IDeckLinkVideoFrameMetadataExtensions, (void**)&probe)) &&
+            probe != nullptr) {
+            probe->Release();
+            *census += L" [metadata-extensions: yes]";
+        } else {
+            *census += L" [metadata-extensions: NO]";
+        }
+        // NOT a QueryInterface. `IDeckLinkVideoFrameAncillary` is reached through
+        // `IDeckLinkVideoFrame::GetAncillaryData`, a plain method on the frame -- asking for
+        // it by IID fails on every frame ever made, which is a fact about the question and
+        // not about the card. Getting that wrong once already produced a "legacy-ancillary:
+        // NO" that meant nothing.
+        IDeckLinkVideoFrameAncillary* legacy = nullptr;
+        if (SUCCEEDED(video->GetAncillaryData(&legacy)) && legacy != nullptr) {
+            wchar_t buf[64];
+            swprintf(buf, 64, L" [legacy-ancillary: yes, pixfmt %08X]", static_cast<unsigned>(legacy->GetPixelFormat()));
+            *census += buf;
+            legacy->Release();
+        } else {
+            *census += L" [legacy-ancillary: NO]";
+        }
+    }
+
     IDeckLinkVideoFrameAncillaryPackets* raw = nullptr;
     if (FAILED(video->QueryInterface(IID_AncillaryPackets_15_3, (void**)&raw)) || raw == nullptr) {
         if (FAILED(video->QueryInterface(IID_IDeckLinkVideoFrameAncillaryPackets, (void**)&raw)) ||
@@ -948,6 +985,11 @@ class decklink_producer : public IDeckLinkInputCallback
     //: "the tag the consumer signalled is the tag the producer received" is not assertable:
     //: both readers consume the metadata and neither records what it saw.
     bool logged_input_metadata_ = false;
+    //: How many frames to watch before reporting an absence of ancillary data. 150 is about
+    //: three seconds at 50p -- long enough that "nothing in 150 frames" is a statement about
+    //: the source rather than about which frame happened to be first.
+    static constexpr int ANC_SEARCH_FRAMES = 150;
+    int                  frames_seen_      = 0;
 
     int sync_group_ = 0;
     int sync_peers_ = 1;
@@ -1249,6 +1291,14 @@ class decklink_producer : public IDeckLinkInputCallback
                 std::wstring anc_census;
                 const auto   anc = read_sdi_signalling(video, logged_input_metadata_ ? nullptr : &anc_census);
 
+                // SAMPLE ACROSS FRAMES, NOT ONE. Ancillary is not present on every frame: a
+                // minimal SDK-based capturer watching a source that emits one CDP per frame
+                // saw the ancillary interface on 52 frames out of 99. Reporting the FIRST
+                // frame therefore says "no ancillary on this input" about half the time on a
+                // source that plainly has some -- which is exactly the false negative this
+                // log spent a whole session producing. Keep looking until something turns up,
+                // and only give up after enough frames that absence means something.
+
                 // PRECEDENCE, most authoritative first:
                 //
                 //   1. the card's own frame metadata -- a parsed HDMI InfoFrame, and the only
@@ -1293,8 +1343,32 @@ class decklink_producer : public IDeckLinkInputCallback
                 // The census is here for the case that actually occurred: everything reading
                 // `unknown`. Without it, "no ancillary data reached us" and "ancillary data
                 // reached us and carried no VPID" look identical and have different fixes.
-                if (!logged_input_metadata_) {
+                ++frames_seen_;
+                const bool worth_reporting = anc.anc_interface_available || frames_seen_ >= ANC_SEARCH_FRAMES;
+                if (!logged_input_metadata_ && worth_reporting) {
                     logged_input_metadata_ = true;
+
+                    // WHAT THE CARD SAYS ABOUT ITSELF, once. The frame refuses every
+                    // ancillary accessor while answering other optional interfaces, so the
+                    // question moved from "are we asking correctly" to "does this device do
+                    // ancillary capture at all, in this profile". These four are what the SDK
+                    // points at for that: the 10-bit requirement (satisfied here -- the frame
+                    // is v210), HANC input support as the nearest published proxy for whether
+                    // the model does ancillary capture, and the profile and duplex mode,
+                    // because an 8K Pro split into four sub-devices is a different device from
+                    // the same card in one-device mode as far as capabilities go.
+                    BOOL     needs_10bit = FALSE, hanc_in = FALSE;
+                    LONGLONG profile_id = 0, duplex = 0;
+                    attributes_->GetFlag(BMDDeckLinkVANCRequires10BitYUVVideoFrames, &needs_10bit);
+                    // 'dshi' -- BMDDeckLinkSupportsHANCInput, which postdates the 12.3.1
+                    // header this module is generated from, hence the literal.
+                    attributes_->GetFlag(static_cast<BMDDeckLinkAttributeID>(0x64736869), &hanc_in);
+                    attributes_->GetInt(BMDDeckLinkProfileID, &profile_id);
+                    attributes_->GetInt(BMDDeckLinkDuplex, &duplex);
+                    CASPAR_LOG(info) << print() << L" input device: vanc-requires-10bit="
+                                     << (needs_10bit ? L"true" : L"false") << L" supports-hanc-input="
+                                     << (hanc_in ? L"true" : L"false") << L" profile=0x" << std::hex << profile_id
+                                     << L" duplex=0x" << duplex << std::dec;
                     CASPAR_LOG(info) << print() << L" input metadata: colorspace="
                                      << metadata_name(color_space)
                                      << L" transfer=" << metadata_name(color_transfer)
