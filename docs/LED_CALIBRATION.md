@@ -123,15 +123,34 @@ against a model is otherwise compatible with a command that did nothing:
 | the LUT must MOVE the picture | else the model is applied to a baseline that equals the measurement | ≥ 61.0 LSB |
 | the two LUTs must DIFFER | `set_calibration_lut` invalidates the still-frame cache **by hand**; a stale fingerprint would replay the previous LUT's frame, and a close pair would hide it inside the gate | ≥ 27.0 LSB (needs ≥ 8.0) |
 
-**Not covered, and the report says so in its own output.** Both are this command's
-distinguishing claims, so read 32/32 as "the LUT is applied correctly", not as
-"`CALIBRATION` works":
+### The two claims that distinguish it from `MIXER LUT3D`
 
-- **that every CONSUMER sees the LUT** — every capture is through the IMAGE
-  consumer. Proving it needs two consumers reading one frame, which
-  `cli.py consumer-view` has the machinery for.
-- **that it applies once to a COMPOSITE rather than per layer** — one layer, so
-  the per-layer/channel-master distinction from `MIXER LUT3D` is untested.
+Neither is visible over one layer through one consumer, so each is its own case and
+both are part of the verdict rather than reported beside it.
+
+**Applied once to the composite, not once per layer.** Two layers blended with
+`MIXER OPACITY`, and a non-linear LUT separates the hypotheses:
+`LUT(blend(a,b))` against `blend(LUT(a), LUT(b))`. Both models are built from
+**measured** frames — each layer alone, and the blend itself — so the server's own
+blend appears on both sides and cancels; nothing assumes a blend domain or a
+rounding rule. The two sit **17.9 LSB** apart, and the answer is
+**channel-master** on both mixers, at **0.35 LSB** against **18.12 LSB** for the
+per-layer alternative.
+
+**Every consumer sees it.** A LUT applied only to the IMAGE consumer would satisfy
+every other case, since IMAGE is how they are all captured — so this reads the
+**screen** window instead, a consumer that is not the capture path. **0.32 LSB**
+from the model, with the LUT moving the screen picture **88 LSB** (a LUT that
+moved nothing would make the claim unfalsifiable). No loosened gate: screen holds
+1 LSB in this rig.
+
+**Still not covered**, so read the above as "channel-master, demonstrated on a
+second consumer" rather than "every consumer":
+
+- **DeckLink and NDI.** `cli.py consumer-view` can drive DeckLink looped back to a
+  second card at a 12 LSB gate; this battery reads screen only, so "every
+  consumer" is an extrapolation from two.
+- **Any cube that is not 9³ or not `.cube`.**
 
 ## Client UI (casparcg-360-client)
 
