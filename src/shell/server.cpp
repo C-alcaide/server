@@ -236,8 +236,23 @@ struct server::impl
     void setup_ocio(const boost::property_tree::wptree& pt)
     {
         const auto uri = pt.get(L"configuration.ocio-config", L"");
-        if (uri.empty())
+        if (uri.empty()) {
+            // Say which it is, either way. Without this a default build logged NOTHING about
+            // OCIO at startup, and an operator learned it was missing only from a `501` on
+            // the first `MIXER OCIO` -- or, worse, never asked and assumed it was there.
+            //
+            // Neither call loads a config: the pinned built-in is deliberately loaded on
+            // first use, so a server with no OCIO channel does not pay to parse one.
+            if (accelerator::ocio::available())
+                CASPAR_LOG(info) << L"[server] OpenColorIO " << u16(accelerator::ocio::version())
+                                 << L" available; the pinned built-in config loads on first use. "
+                                    L"Set <ocio-config> to use your own.";
+            else
+                CASPAR_LOG(info) << L"[server] OpenColorIO NOT available -- this build was made "
+                                    L"with ENABLE_OCIO=OFF. MIXER OCIO and OCIO_DISPLAY will "
+                                    L"answer 501, and INFO OCIO reports ocio.available=false.";
             return;
+        }
 
         if (!accelerator::ocio::available())
             CASPAR_THROW_EXCEPTION(user_error() << msg_info(

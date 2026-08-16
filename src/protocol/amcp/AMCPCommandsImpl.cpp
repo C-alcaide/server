@@ -2333,18 +2333,27 @@ static int parse_gamut_fn(const std::wstring& s)
                  L"BT709, BT2020, DCIP3, ACES_AP0, ACES_AP1 (ACESCG), ARRI_WG3 or SGAMUT3_CINE");
 }
 
+// Every ACES operator here is ACES **1.x** -- `ACES_RRT` is Stephen Hill's approximation,
+// `ACES_FILMIC` is Narkowicz's, and the three RRT+ODT operators use 1.x segmented splines.
+// ACES 2.0 lives on the OCIO path (`OCIO_DISPLAY` with an ACES 2.0 view) and renders
+// visibly differently; see COLOR_GRADING.md.
+//
+// The `ACES1_` spellings are ALIASES, accepted so a command or a show file can say which
+// generation it meant. The query direction keeps emitting the original names: nothing in
+// tree reads a COLORSPACE reply back, but an unknown client might, and making a name
+// self-documenting is not worth changing what a query returns.
 static int parse_tonemapping_fn(const std::wstring& s)
 {
     if (boost::iequals(s, L"NONE"))            return 0;
     if (boost::iequals(s, L"REINHARD"))        return 1;
-    if (boost::iequals(s, L"ACES_FILMIC"))     return 2;
-    if (boost::iequals(s, L"ACES_RRT"))        return 3;
-    if (boost::iequals(s, L"ACES_RRT_709"))    return 4;
-    if (boost::iequals(s, L"ACES_RRT_P3"))     return 5;
-    if (boost::iequals(s, L"ACES_RRT_2020_PQ")) return 6;
+    if (boost::iequals(s, L"ACES_FILMIC") || boost::iequals(s, L"ACES1_FILMIC"))         return 2;
+    if (boost::iequals(s, L"ACES_RRT") || boost::iequals(s, L"ACES1_RRT"))               return 3;
+    if (boost::iequals(s, L"ACES_RRT_709") || boost::iequals(s, L"ACES1_RRT_709"))       return 4;
+    if (boost::iequals(s, L"ACES_RRT_P3") || boost::iequals(s, L"ACES1_RRT_P3"))         return 5;
+    if (boost::iequals(s, L"ACES_RRT_2020_PQ") || boost::iequals(s, L"ACES1_RRT_2020_PQ")) return 6;
     reject_token(s, L"tone mapping operator",
                  L"NONE, REINHARD, ACES_FILMIC, ACES_RRT, ACES_RRT_709, ACES_RRT_P3 or "
-                 L"ACES_RRT_2020_PQ");
+                 L"ACES_RRT_2020_PQ (each ACES operator also accepts an ACES1_ spelling)");
 }
 
 static std::wstring to_wstring_transfer(int t) {
