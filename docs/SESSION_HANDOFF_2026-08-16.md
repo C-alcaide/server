@@ -34,6 +34,11 @@ and an OCIO panel in `casparcg-360-client`, which had **no OCIO controls at all*
 
 ## Open, in the order I would take them
 
+> **Another session is also working in these repos**, and has its own record at
+> `CasparCG-TestRunner/docs/handoff_2026-08-15.md`. Its HDR work is **SDI metadata
+> signalling** — ST 352 / ST 2108-1 ancillary data, CasparVP `03e73ba62` — which is a
+> different concern from item 1 below. Read both; neither supersedes the other.
+
 1. **`HDR_GUIDE.md` does not mention OCIO.** The pinned config has 11 ACES 2.0 view
    transforms including HDR 500/1000/2000/4000 nits in P3 and Rec.2020, so there are two
    routes to an HDR channel and the HDR guide documents one. Clearest gap, and the natural
@@ -109,7 +114,8 @@ carrying someone else's uncommitted work.
 * **Harness:** `audit-reporting-fixes` on `origin` (`C-alcaide/CasparCG-TestRunner`), pushed.
   New batteries: `ocio-lut3d`, `calibration`, `ocio-look`, `cdl-file`, `amf`. Suite ~1550.
 * **Client:** `casparcg-360-client`, `ocio_panel.py` + wiring in `channel_tab.py`, committed
-  locally.
+  on branch **`ui-restyle`**, which has **no upstream** — so that work is local only. It was
+  the checked-out branch and is likely another session's; confirm before pushing it anywhere.
 * **Studies, deliberately not implemented:** [`AMF_SUPPORT_STUDY.md`](AMF_SUPPORT_STUDY.md)
   (built afterwards — kept for the rationale) and
   [`LED_PROCESSOR_CONTROL_STUDY.md`](LED_PROCESSOR_CONTROL_STUDY.md), which is a file of
