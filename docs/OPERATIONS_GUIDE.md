@@ -310,12 +310,17 @@ not something to switch on mid-show.
 After applying an **AMF**, press **Refresh**: the file sets all three at once and the
 combos would otherwise still show the previous selection.
 
-> **Not yet exercised against a live server.** This panel has been driven headless and
-> against recorded `INFO OCIO` payloads — 55 colour spaces, 9 displays and 1 look parse
-> correctly, names containing parentheses survive, views nest under their display — but
-> nobody has yet run it against a server with a real OCIO channel. The server-side
-> commands themselves are measured; see
-> [OCIO_USER_GUIDE.md](OCIO_USER_GUIDE.md).
+> **Run against a live server 2026-08-16**, on a channel with `fp16` +
+> `<working-space-composite>`: Refresh fills 55 colour spaces, 9 displays and 1 look; names
+> containing parentheses survive; views nest under their display; the Look combo stays
+> disabled until both a display and a view are chosen; and choosing a view emitted
+> `OCIO_DISPLAY 1 "sRGB - Display" "ACES 2.0 - SDR 100 nits (Rec.709)"`, which the server
+> accepted and built.
+>
+> That first run is also what found the panel could not populate **at all** — the client's
+> `send()` is fire-and-forget and returns nothing, so every discovery query read empty and
+> the panel reported "this server reports no OCIO support" at a server that had it. Fixed;
+> if you are running a client build from before 2026-08-16, that message is the symptom.
 
 ---
 

@@ -32,12 +32,19 @@ and an OCIO panel in `casparcg-360-client`, which had **no OCIO controls at all*
 
 ---
 
-## Open, in the order I would take them
+## The backlog — all seven closed 2026-08-16
+
+Kept in place rather than deleted, because what each one *turned into* is the useful part:
+three of the seven were not the task they were written as. Item 5 was "go and look at the
+panel" and the panel could not work at all; item 6 was "add a link" and the link was already
+there; item 7 had been done by someone else. **A backlog item is a hypothesis, and the first
+thing to do with one is check it still holds.**
 
 > **Another session is also working in these repos**, and has its own record at
 > `CasparCG-TestRunner/docs/handoff_2026-08-15.md`. Its HDR work is **SDI metadata
-> signalling** — ST 352 / ST 2108-1 ancillary data, CasparVP `03e73ba62` — which is a
-> different concern from item 1 below. Read both; neither supersedes the other.
+> signalling** — ST 352 / ST 2108-1 ancillary data, CasparVP `03e73ba62`, since carried
+> further in `f7aed425b` — which is a different concern from item 1 below. Read both;
+> neither supersedes the other.
 
 1. ~~**`HDR_GUIDE.md` does not mention OCIO.**~~ **Done 2026-08-16.** New section *Two routes
    to an HDR channel (built-in vs OCIO)*, with the signal → channel → consumer diagram. The
@@ -66,9 +73,18 @@ and an OCIO panel in `casparcg-360-client`, which had **no OCIO controls at all*
    tone map is *inert* there — not double-applied, not undefined — and the **composite alone**
    suppresses it; the display transform is not what does it. `COLOR_GRADING.md` updated from
    "Not measured / treat as undefined" to the numbers.
-5. **The client's OCIO panel has never been seen running.** Driven headless and against real
-   `INFO OCIO` payloads (55 spaces / 9 displays / 1 look parse correctly, names with parens
-   survive, views nest), but nobody has opened the app.
+5. ~~**The client's OCIO panel has never been seen running.**~~ **Opened 2026-08-16, and it
+   was broken.** The panel could not populate against *any* server: `AMCPClient.send` is
+   fire-and-forget and returns `None`, while `_discover_ocio` read its return value — so
+   every query came back empty and the panel reported *"this server reports no OCIO support
+   (built with ENABLE_OCIO=OFF)"* at a server answering `<available>true</available>` on the
+   same socket. It had been tested by calling `populate()` with recorded payloads: the
+   parsing was covered, the fetching was not, and the bug sat exactly on that seam.
+   Fixed on `ui-restyle` (`4970d5a`, **not pushed**) with a `send_with_callback` chain, a
+   status message that names the cause it actually established, and
+   `smoke_test.py check_ocio_discovery` driving the fetch. Verified live: 55 spaces, 9
+   displays, 1 look; parenthesised names survive; the Look combo unlocks only after a
+   display *and* a view; the emitted `OCIO_DISPLAY` was accepted and built.
 6. ~~`VIRTUAL_PRODUCTION_FEATURES.md` probably needs only a link to `COLOR_GRADING.md`.~~
    **Done 2026-08-16** — it already had that link; what it lacked were pointers to
    `OCIO_USER_GUIDE.md` and `HDR_GUIDE.md`. Not just a link, because "the commands here are
@@ -76,8 +92,20 @@ and an OCIO panel in `casparcg-360-client`, which had **no OCIO controls at all*
    `COLOR2` / `STROKE_COLOR` are hex values injected **unconverted** between the input and
    output conversions, so on a working-space or OCIO channel they land in scene-linear ACEScg
    and `#808080` is not mid-grey. Read from the shader and the kernel, flagged as unmeasured.
-7. **`d:\_ocioprobe`, 746 MB**, redundant since OCIO builds in-tree. Needs a manual
-   `Remove-Item -Recurse -Force`; the sandbox blocks it.
+7. ~~**`d:\_ocioprobe`, 746 MB**, redundant since OCIO builds in-tree.~~ **Gone as of
+   2026-08-16** — `Test-Path d:\_ocioprobe` is false, so someone removed it. Nothing to do.
+
+### What is left after those
+
+* **`casparcg-360-client` branch `ui-restyle` still has no upstream**, and now carries the
+  OCIO panel *and* its fix (`4970d5a`). Nothing there is pushed. Confirm whose branch it is
+  before pushing anything.
+* **The HDR pairing table in `HDR_GUIDE.md` is unmeasured.** No battery has captured an OCIO
+  HDR view or read back SDI signalling on an OCIO channel, and the section says so. The
+  natural next battery: an `ocio-display` variant on a PQ view, plus the ST 2108-1 readback
+  the other session has been building.
+* **`SHAPE` colours on a working-space channel** are read from the shader, not measured —
+  see item 6.
 
 ---
 
