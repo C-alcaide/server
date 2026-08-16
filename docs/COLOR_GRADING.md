@@ -77,6 +77,12 @@ MIXER [channel]-[layer] COLORSPACE              # Query
 
 > **Note:** The `ACES_RRT_709`, `ACES_RRT_P3`, and `ACES_RRT_2020_PQ` operators incorporate both RRT and ODT in a single pass. When using these, the `output_gamut` and `output_transfer` parameters are effectively overridden by the ODT's target space.
 
+> **These are all ACES 1.x, and each accepts an `ACES1_` spelling** — `ACES1_RRT`,
+> `ACES1_FILMIC`, `ACES1_RRT_709`, `ACES1_RRT_P3`, `ACES1_RRT_2020_PQ` — so a show file can
+> record which generation it meant. The originals are unchanged and a query still returns
+> them. There is no 2.0 operator here: `ACES2_RRT` is refused rather than quietly rendering
+> 1.x. ACES 2.0 is on the [OCIO path](#ocio-color-management).
+
 ### Usage Examples
 
 ```bash

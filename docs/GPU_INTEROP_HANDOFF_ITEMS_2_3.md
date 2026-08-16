@@ -1,8 +1,21 @@
-# Continuing the interop plan: items 2 and 3
+# The interop plan, items 2 and 3: what was measured
+
+> **Audited 2026-08-16. Items 1 and 2 are done and item 3 is closed — this is a record, not
+> a work list.** The title said "Continuing…" long after there was nothing to continue.
+>
+> **It is kept, unlike `OCIO_HANDOFF_2026-08-11.md`, which was pruned the same day.** That
+> one was closed *and* duplicated: every finding already lived in `CHANGELOG.md` or the
+> study. This one is closed and **load-bearing** — `GPU_INTEROP_PLAN.md` §Why explicitly
+> delegates to it for item 2's current numbers and item 3's reasoning, and the item-1
+> figures (41 % H.264, 38 % HEVC and VP9) appear in no other file. Deleting it would delete
+> the evidence.
+>
+> Fold it into the plan and prune it only together, and only after checking those numbers
+> land somewhere.
 
 Companion to `GPU_INTEROP_PLAN.md`, which holds the design and the reasoning.
-This is the delta — what has changed since it was written, what item 1 taught
-that applies to what is left, and the baselines to measure against.
+This is the delta — what changed while it was being carried out, what item 1 taught
+that applied to what was left, and the baselines that were measured against.
 
 Read the plan first. Do not re-derive it from here.
 
