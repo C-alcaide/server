@@ -172,6 +172,12 @@ That is the signature a gamut-compression look should have — in-gamut neutrals
 saturated primaries pulled in — and it is why "the command was accepted" and "the look ran"
 are separable here rather than taken on trust.
 
+Gated by `cli.py ocio-look`, which captures every patch in **both** states and compares each
+against OCIO's CPU processor for that state: 6/6 within `max(1 LSB, fp16 band)`, worst 0.65,
+both mixers byte-identical. Two of its four saturated patches move 0.00 because they sit in
+a region this look leaves alone — they gate the model, but only the movers distinguish a live
+command from one that returned `202` and did nothing.
+
 > **Not the same as `MIXER GAMUTCOMPRESS`.** The built-in operator shares ACES 1.3's
 > *limits* and not its algorithm; this look is the reference implementation. See
 > [`COLOR_GRADING.md`](COLOR_GRADING.md#gamut-compression) for the measured difference.
