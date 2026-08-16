@@ -504,10 +504,23 @@ one. It gets `E_NOINTERFACE` and takes no ancillary data from the frame at all.
 **This is not specific to HDR metadata.** The same mismatch sits under OP47 and SCTE-104,
 which attach their packets through exactly the same path.
 
-The fix is to regenerate `src/modules/decklink/interop/` from the 15.3 IDL, which is a change
-to the whole module rather than to this feature. Until then the packet is built correctly —
-the encoding is checked against the standards by
-`cmake --build build --target decklink_sdi_signalling_test` — and does not leave the card.
+**Regenerating the interop header is not the fix, and it was tried.** MIDL against the 15.3
+IDL produces a correct header in seconds, and it does not build: SDK 15.3 removed
+`IDeckLinkVideoFrame::GetBytes` in favour of a separate `IDeckLinkVideoBuffer`, and replaced
+`IDeckLinkMemoryAllocator` plus `IDeckLinkInput::SetVideoInputFrameMemoryAllocator` with
+`IDeckLinkVideoBufferAllocator`, `IDeckLinkVideoBufferAllocatorProvider` and
+`EnableVideoInputWithAllocatorProvider`. `GetBytes` is how every frame in this module reads
+and writes its own pixels, and the allocator is how `cuda_prores` gets pinned memory for
+GPUDirect DMA. So the upgrade is a migration of the whole DeckLink data path across three
+modules, not a header swap, and it wants planning rather than a late-evening commit.
+
+The driver keeps the older interfaces working — which is why output, capture and everything
+else in this fork runs correctly against 15.3 — but its ancillary path evidently asks only for
+the new IID, so ancillary is the one casualty of being three SDK generations behind.
+
+Until that migration happens the packet is built correctly — the encoding is checked against
+the standards by `cmake --build build --target decklink_sdi_signalling_test` — and does not
+leave the card.
 
 ### EOTF values sent on the wire (SDK constants)
 

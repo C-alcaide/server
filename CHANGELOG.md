@@ -30,8 +30,19 @@ both succeed and the path looks healthy from inside the process; but
 `decklink_frame::QueryInterface` answers only the `_v15_2` IID, and a 15.3 driver scheduling a
 custom frame asks for the 15.3 one, gets `E_NOINTERFACE`, and takes no ancillary data from
 that frame. **The same mismatch sits under OP47 and SCTE-104**, which attach through the
-identical path — so this is not an HDR feature defect. Fixing it means regenerating
-`src/modules/decklink/interop/` from the 15.3 IDL, a module-wide change.
+identical path — so this is not an HDR feature defect.
+
+**And regenerating the interop header is not the fix — that was tried and reverted.** MIDL
+against the 15.3 IDL produces a correct header in seconds and it does not build: 15.3 removed
+`IDeckLinkVideoFrame::GetBytes` in favour of a separate `IDeckLinkVideoBuffer`, and replaced
+`IDeckLinkMemoryAllocator` plus `IDeckLinkInput::SetVideoInputFrameMemoryAllocator` with
+`IDeckLinkVideoBufferAllocator`/`Provider` and `EnableVideoInputWithAllocatorProvider`.
+`GetBytes` is how every frame in the module reads its own pixels and the allocator is how
+`cuda_prores` gets pinned memory for GPUDirect DMA, so the upgrade is a migration of the whole
+DeckLink data path across three modules. The driver keeps the older interfaces working — which
+is why everything else in this fork runs correctly against 15.3 — but its ancillary path asks
+only for the new IID, making ancillary the one casualty of being three SDK generations
+behind.
 
 **Measured, and the limit stated with it.** The encoding is checked against SMPTE ST 2108-1
 and, for the reader that decodes it, against the VPID words EBU Tech 3375 publishes — 18
