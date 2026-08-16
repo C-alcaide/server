@@ -28,12 +28,52 @@ when the space is fine and the quoting is not. If a name you can see in
 
 ## 2. What OCIO does here, and when to use it instead of `MIXER COLORSPACE`
 
-Two things, at two different stages:
+Three things, at three different stages — and **which stage a command belongs to is the
+thing most worth getting straight**, because it decides whether it takes a layer or a
+channel, and whether two layers can disagree about it:
 
 | | command | scope | stage |
 | :--- | :--- | :--- | :--- |
-| **Input transform** | `MIXER … OCIO` | one layer | source encoding → the mixer's ACEScg working space |
-| **Display transform** | `OCIO_DISPLAY` | one channel | working space → what the screen wants, after the composite |
+| **Input transform** | `MIXER … OCIO` | one **layer** | source encoding → the mixer's ACEScg working space |
+| **Look (LMT)** | `OCIO_LOOK` | one **channel** | the show's look, in the working space, after compositing |
+| **Display transform** | `OCIO_DISPLAY` | one **channel** | working space → what the screen wants |
+
+```mermaid
+flowchart TB
+    subgraph L["per LAYER — each source arrives differently encoded"]
+        S1["layer 1<br/>ARRI LogC3"] --> I1["MIXER OCIO"]
+        S2["layer 2<br/>ACEScct"] --> I2["MIXER OCIO"]
+        S3["layer 3<br/>graphic, sRGB"] --> I3["auto-convert"]
+    end
+    I1 --> C["composite<br/><b>in ACEScg, scene-linear</b><br/>needs working-space-composite + fp16"]
+    I2 --> C
+    I3 --> C
+    subgraph CH["per CHANNEL — one show, one screen"]
+        C --> LK["OCIO_LOOK<br/><i>the show's LMT</i>"]
+        LK --> D["OCIO_DISPLAY<br/><i>display + view</i>"]
+        D --> CAL["CALIBRATION<br/><i>LED wall .cube</i>"]
+    end
+    CAL --> O1["SDI"]
+    CAL --> O2["screen"]
+    CAL --> O3["NDI / file"]
+```
+
+**Why the split is where it is.** An input transform says where pixels *came from*, which
+differs per layer. A look says what the *show* looks like and a display transform says what
+*screen* it is going to — and every layer of one composite belongs to one show and goes to
+one screen. Two layers disagreeing about either would mean compositing a PQ-encoded picture
+with a Rec.709 one, which is not a picture in any colour space.
+
+A consumer may override the **view** (§6.2) — but not the look, which is why `OCIO_LOOK`
+sits above the fan-out in the diagram: the view is the screen, the look is the intent.
+
+Two commands do not appear above because they are not stages — they are ways of *addressing*
+the stages that already exist:
+
+| | what it sets | equivalent to |
+| :--- | :--- | :--- |
+| `AMF` (§5.4) | all three at once, from a show's ACES Metadata File | `MIXER OCIO` + `OCIO_LOOK` + `OCIO_DISPLAY` |
+| `MIXER CDL_FILE` | the per-layer ASC CDL grade, from a `.cdl`/`.ccc` | `MIXER CDL` with the same numbers |
 
 The input transform is the alternative front end to `MIXER COLORSPACE`. Both write the same
 stage of the chain, so **they are mutually exclusive** — see §7.
@@ -92,6 +132,7 @@ INFO OCIO              availability, OCIO version, the loaded config URI, and ho
                        colour spaces and displays it has
 INFO OCIO COLORSPACES  every colour space name in the loaded config
 INFO OCIO DISPLAYS     every display, with its views nested underneath
+INFO OCIO LOOKS        every look (LMT) name in the loaded config
 ```
 
 Use these rather than a hardcoded list. A client whose list drifts from the server's config
@@ -181,6 +222,49 @@ command from one that returned `202` and did nothing.
 > **Not the same as `MIXER GAMUTCOMPRESS`.** The built-in operator shares ACES 1.3's
 > *limits* and not its algorithm; this look is the reference implementation. See
 > [`COLOR_GRADING.md`](COLOR_GRADING.md#gamut-compression) for the measured difference.
+
+### 5.4 `AMF <channel>-<layer>` — configure everything from a show's metadata
+
+```
+AMF 1-10 "show.amf"        input transform, look and display, from one file
+```
+
+An **ACES Metadata File** is the document a production carries to say which input transform,
+which look and which output transform its pipeline uses. Loading one sets all three at once —
+it is a way of *addressing* the commands above, not a fourth colour path.
+
+```mermaid
+flowchart LR
+    A["show.amf"] --> R{"resolve each id against<br/>the loaded OCIO config"}
+    R -->|inputTransform| I["MIXER OCIO<br/><i>ACEScct</i>"]
+    R -->|lookTransform| L["OCIO_LOOK<br/><i>ACES 1.3 RGC</i>"]
+    R -->|outputTransform| D["OCIO_DISPLAY<br/><i>sRGB - Display +<br/>ACES 2.0 SDR 100 nits</i>"]
+```
+
+**The mapping is mechanical, not a lookup table someone maintains.** OCIO configs carry the
+AMF transform IDs themselves, under `interchange: amf_transform_ids`, so an ID resolves
+through whichever config is loaded and a config change moves the IDs along with the
+transforms they name. Point the server at your own config (§6.1) and your own AMFs resolve
+against it. 86 IDs resolve from the bundled config.
+
+One detail worth knowing, because it looks like it should be a problem and is not: an
+`outputTransform` is a single ID, while `OCIO_DISPLAY` needs a display **and** a view. That
+ID appears on exactly one colour space — whose name is also the display — and on one view
+transform. The pair is determined, not guessed.
+
+**It resolves everything before it applies anything.** Three settings from one file must not
+leave a channel half configured because the third ID was unknown; the operator would be
+looking at a picture that is neither the old look nor the new one. Display is applied before
+look, which is forced rather than chosen — `OCIO_LOOK` is composed into the display processor
+and refuses when there is no display transform yet.
+
+The `aces:` namespace prefix is convention rather than specification, so a file using a
+different prefix is accepted. Refused with `404`: a missing file, malformed XML, an ID that
+does not resolve against the loaded config, and an `outputTransform` that yields only half a
+display/view pair.
+
+> Design rationale and the evidence that the mapping is mechanical:
+> [`AMF_SUPPORT_STUDY.md`](AMF_SUPPORT_STUDY.md).
 
 ---
 
