@@ -4,22 +4,30 @@ This guide covers the HDR-related features added to CasparVP: channel color conf
 
 For per-layer color grading and ACES color management (MIXER COLORSPACE, CDL, LUT3D, etc.), see [COLOR_GRADING.md](COLOR_GRADING.md). For Vulkan output architecture details, see [VULKAN_OUTPUT.md](VULKAN_OUTPUT.md).
 
+> **There is a second route to an HDR channel**, through OpenColorIO: an `OCIO_DISPLAY` view
+> such as `ACES 2.0 - HDR 1000 nits (Rec.2020)` encodes the picture instead of the channel's
+> own OETF. Everything in this guide describes the built-in route. Where the two meet — and
+> which one decides what the SDI wire says — is [Two routes to an HDR
+> channel](#two-routes-to-an-hdr-channel-built-in-vs-ocio) below. The commands themselves are
+> in [OCIO_USER_GUIDE.md](OCIO_USER_GUIDE.md).
+
 ---
 
 ## Table of Contents
 
 1. [Overview of the Pipeline](#overview-of-the-pipeline)
 2. [Channel Configuration](#channel-configuration)
-3. [DeckLink Input (Capture)](#decklink-input-capture)
-4. [DeckLink Output (Playout)](#decklink-output-playout)
-5. [Vulkan Output (Direct Display)](#vulkan-output-direct-display)
-6. [FFmpeg Consumer (File Recording)](#ffmpeg-consumer-file-recording)
-7. [CUDA ProRes Consumer (Recording)](#cuda-prores-consumer-recording)
-8. [CUDA ProRes Producer (Playback)](#cuda-prores-producer-playback)
-9. [High Frame Rate Formats](#high-frame-rate-formats)
-10. [Complete Config Examples](#complete-config-examples)
-11. [Quick Reference Table](#quick-reference-table)
-12. [Notes & Known Limitations](#notes--known-limitations)
+3. [Two routes to an HDR channel (built-in vs OCIO)](#two-routes-to-an-hdr-channel-built-in-vs-ocio)
+4. [DeckLink Input (Capture)](#decklink-input-capture)
+5. [DeckLink Output (Playout)](#decklink-output-playout)
+6. [Vulkan Output (Direct Display)](#vulkan-output-direct-display)
+7. [FFmpeg Consumer (File Recording)](#ffmpeg-consumer-file-recording)
+8. [CUDA ProRes Consumer (Recording)](#cuda-prores-consumer-recording)
+9. [CUDA ProRes Producer (Playback)](#cuda-prores-producer-playback)
+10. [High Frame Rate Formats](#high-frame-rate-formats)
+11. [Complete Config Examples](#complete-config-examples)
+12. [Quick Reference Table](#quick-reference-table)
+13. [Notes & Known Limitations](#notes--known-limitations)
 
 ---
 
@@ -230,6 +238,143 @@ For HDR output you must use 16-bit depth. 8-bit channels can carry BT.2020 metad
 ```xml
 <color-depth>16</color-depth>   <!-- required for meaningful HDR -->
 ```
+
+---
+
+## Two routes to an HDR channel (built-in vs OCIO)
+
+Everything above encodes HDR the built-in way: the channel declares `<color-transfer>pq</color-transfer>`,
+the mixer's own OETF applies it, and `<auto-tone-map>` decides what happens to values above the
+display's range. OpenColorIO is a second route to the same picture — `OCIO_DISPLAY` names a
+display and a view, and the view carries the tone map, the gamut and the encoding together.
+
+| | built-in route | OCIO route |
+| :--- | :--- | :--- |
+| what encodes the picture | the channel's `<color-transfer>` OETF and `working_to_output` gamut matrix | the view named by `OCIO_DISPLAY` |
+| tone mapping | `<auto-tone-map>`, plus `<display-peak-luminance>` | the view's own — an ACES 2.0 output transform |
+| chosen | in `casparcg.config`, fixed for the session | at runtime, over AMCP |
+| prerequisites | `<color-depth>16</color-depth>` | `<working-space-composite>` + `<render-format>fp16</render-format>` + `<auto-color-convert>` |
+| per-consumer variation | tone map only (`<auto-tone-map>` on screen / vulkan-output) | the whole view (`<ocio-display>`/`<ocio-view>` on DeckLink / screen) |
+
+### They are not additive — a display transform switches the built-in output half off
+
+When a channel has an `OCIO_DISPLAY` set, the mixer's own output conversion does not run at
+all: not the tone map, not the `working_to_output` gamut matrix, and not the `<color-transfer>`
+OETF. The generated view replaces that whole block rather than following it, in both mixers —
+`do_output_convert` is forced false in
+[image_kernel.cpp:1071-1077](../src/accelerator/ogl/image/image_kernel.cpp#L1071-L1077), and the
+`output_convert` flag is cleared in
+[image_kernel.cpp:1931-1933](../src/accelerator/vulkan/image/image_kernel.cpp#L1931-L1933).
+
+So on an OCIO channel, `<auto-tone-map>` and `<display-peak-luminance>` are inert. Choose the
+tone mapping by picking the nits ladder of the view instead.
+
+### What the pinned config offers for HDR
+
+The pinned built-in config (`ocio://studio-config-v4.0.0_aces-v2.0_ocio-v2.5`) carries 13 view
+transforms, 11 of them `ACES 2.0`, of which **9 are HDR**: 108, 500, 1000, 2000 and 4000 nits,
+in P3-D65 and Rec.2020. They are not offered on every display — four of the nine displays
+expose an HDR view:
+
+| display | HDR views it offers | what it is |
+| :--- | ---: | :--- |
+| `Rec.2100-PQ - Display` | 8 | the full ladder — 500/1000/2000/4000 nits in both P3 D65 and Rec.2020 |
+| `ST2084-P3-D65 - Display` | 5 | 108/500/1000/2000/4000 nits, P3 D65 only |
+| `Display P3 HDR - Display` | 1 | `ACES 2.0 - HDR 1000 nits (P3 D65)` |
+| `Rec.2100-HLG - Display` | 1 | `ACES 2.0 - HDR 1000 nits (P3 D65)`, HLG-encoded |
+
+The other five — `sRGB`, `Display P3`, `Gamma 2.2 Rec.709`, `P3-D65`, `Rec.1886 Rec.709` — are
+SDR-only. Enumerated from the config with PyOpenColorIO 2.5.2 on 2026-08-16; `INFO OCIO DISPLAYS`
+reports the same list from a running server, and is what to trust if `<ocio-config>` points at
+a facility config instead.
+
+> **Quote both arguments.** 48 of the 55 colour space names and every display and view name in
+> this config contain spaces or parentheses. See [OCIO_USER_GUIDE.md §1](OCIO_USER_GUIDE.md).
+
+### Where PQ/HLG is decided — pixels and signalling are decided separately
+
+This is the part worth reading twice. The OCIO view decides how the pixels are **encoded**. It
+does not decide what the output **says they are**: every consumer's colour signalling is still
+derived from the channel's `<color-depth>`, `<color-space>` and `<color-transfer>`, and no
+consumer reads any OCIO state for that purpose. The only OCIO thing a consumer knows is which
+*view* it wants rendered.
+
+```mermaid
+flowchart TB
+    subgraph PIX["what encodes the pixels"]
+        B["composite<br/><b>ACEScg, scene-linear</b>"] --> C{"OCIO_DISPLAY set<br/>on this channel?"}
+        C -->|no| D["channel OETF<br/><code>&lt;color-transfer&gt;</code> + <code>&lt;auto-tone-map&gt;</code>"]
+        C -->|yes| E["the OCIO view<br/><i>ACES 2.0 - HDR 1000 nits (Rec.2020)</i>"]
+    end
+    D --> F["composited frame"]
+    E --> F
+    SIG["<b>what the wire says it is</b><br/><code>&lt;color-depth&gt;</code> + <code>&lt;color-space&gt;</code> + <code>&lt;color-transfer&gt;</code><br/><i>always the channel — OCIO is not consulted</i>"]
+    F --> H["DeckLink · v210 + EOTF flag + primaries"]
+    SIG -.->|decides HDR on/off<br/>and the EOTF code| H
+```
+
+Nothing cross-checks the two. The DeckLink consumer computes its HDR mode from the channel
+fields alone — the identical `config.hdr = …` expression in both `create_consumer` and
+`create_preconfigured_consumer` in
+[decklink_consumer.cpp](../src/modules/decklink/consumer/decklink_consumer.cpp), reading
+`channel_info.depth`, `config.color_space` and `config.color_transfer` and nothing else. So an
+operator can render a PQ picture and signal SDR, or the reverse, and the server will not say a
+word.
+
+**Set both, consistently.** On an OCIO HDR channel, `<color-transfer>` becomes a
+signalling-only declaration — it no longer encodes anything — but it still has to be right:
+
+```xml
+<channel>
+  <video-mode>2160p5000</video-mode>
+  <color-depth>16</color-depth>
+
+  <!-- Required by OCIO_DISPLAY. -->
+  <render-format>fp16</render-format>
+  <auto-color-convert>true</auto-color-convert>
+  <working-space-composite>true</working-space-composite>
+
+  <!-- These no longer encode the picture: the OCIO view does. They are what the
+       DeckLink consumer signals on the wire, and must match the view chosen below. -->
+  <color-space>bt2020</color-space>
+  <color-transfer>pq</color-transfer>
+
+  <consumers>
+    <decklink>
+      <device>1</device>
+      <hdr-metadata>
+        <max-cll>1000</max-cll>
+        <max-fall>400</max-fall>
+      </hdr-metadata>
+    </decklink>
+  </consumers>
+</channel>
+```
+
+```
+OCIO_DISPLAY 1 "Rec.2100-PQ - Display" "ACES 2.0 - HDR 1000 nits (Rec.2020)"
+```
+
+Which is to say: the view's *encoding* must agree with `<color-transfer>` and its *primaries*
+with `<color-space>`. Matching pairs:
+
+| OCIO display | matching `<color-transfer>` | matching `<color-space>` |
+| :--- | :--- | :--- |
+| `Rec.2100-PQ - Display` | `pq` | `bt2020` |
+| `Rec.2100-HLG - Display` | `hlg` | `bt2020` |
+| `ST2084-P3-D65 - Display` | `pq` | `p3-d65` |
+| `Display P3 HDR - Display` | `pq` | `p3-d65` |
+| any of the five SDR displays | `sdr` | `bt709` or `p3-d65` per the display |
+
+The nits of the *view* (500 vs 4000) do not change the signalling — that is what
+`<hdr-metadata>` MaxCLL/MaxFALL is for, and it is also not derived from the view.
+
+> **What this section is not.** The pairings above are read from the code and the config, not
+> measured end-to-end: no battery has yet captured an OCIO HDR view and compared it against the
+> built-in PQ path, and none has read back SDI signalling on an OCIO channel. What *is*
+> measured is that a display transform renders correctly at all — `cli.py ocio-look` and
+> `cli.py amf`, both mixers byte-identical, in [OCIO_USER_GUIDE.md](OCIO_USER_GUIDE.md). Treat
+> the table as the configuration you want, not as a verified claim about the wire.
 
 ---
 
@@ -934,6 +1079,10 @@ CasparVP now captures and propagates `AVChromaLocation` metadata from the FFmpeg
 - **Dynamic per-frame transfer function switching** is supported on the *input* side (DeckLink capture and file playback detect it per frame). On the *output* side the transfer function is set at channel-start time and is fixed for the session — runtime changes require a channel restart.
 
 - **Tone mapping** is available at two levels: (1) channel-level via `<auto-tone-map>`, applied during auto color conversion when source and channel transfer functions differ; and (2) per-consumer via `<auto-tone-map>` on screen or vulkan-output consumers, applied as a display transform on the final composited output. Without an explicit tone-map setting, the auto path hard-clips to [0,1] (broadcast standard). For per-layer creative tone mapping, use `MIXER COLORSPACE` with a tone mapping operator (see [COLOR_GRADING.md](COLOR_GRADING.md)).
+
+- **`<auto-tone-map>` is inert on a channel with an `OCIO_DISPLAY`**, along with the rest of the built-in output half — the view owns the tone map, the gamut and the encoding. Not a fallback and not a compositor of the two: the generated view *replaces* that block. See [Two routes to an HDR channel](#two-routes-to-an-hdr-channel-built-in-vs-ocio).
+
+- **An OCIO view does not change what a consumer signals.** HDR mode, the EOTF code on SDI and the encoder colour tags are all derived from the channel's `<color-depth>`/`<color-space>`/`<color-transfer>`, whether or not a display transform is active, and nothing checks that the two agree. A channel rendering `ACES 2.0 - HDR 1000 nits (Rec.2020)` while declaring `<color-transfer>sdr</color-transfer>` outputs PQ pixels labelled SDR, silently. The matching table is in the same section.
 
 - **HDR static metadata** (MaxCLL, MaxFALL, mastering display luminance) is set per-consumer via `<hdr-metadata>` in the DeckLink or Vulkan consumer config. The FFmpeg consumer currently writes only the EOTF/primaries/matrix into the encoder context; mastering display SEI is not set automatically — use `-x265-params` or Dolby Vision tooling for full HDR10 SEI.
 

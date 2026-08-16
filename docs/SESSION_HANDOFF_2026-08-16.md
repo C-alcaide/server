@@ -39,12 +39,18 @@ and an OCIO panel in `casparcg-360-client`, which had **no OCIO controls at all*
 > signalling** — ST 352 / ST 2108-1 ancillary data, CasparVP `03e73ba62` — which is a
 > different concern from item 1 below. Read both; neither supersedes the other.
 
-1. **`HDR_GUIDE.md` does not mention OCIO.** The pinned config has 11 ACES 2.0 view
-   transforms including HDR 500/1000/2000/4000 nits in P3 and Rec.2020, so there are two
-   routes to an HDR channel and the HDR guide documents one. Clearest gap, and the natural
-   place for a "signal → channel → consumer" diagram showing where PQ/HLG is decided.
-2. **`OPERATIONS_GUIDE.md` does not mention OCIO** either, while it already walks through
-   `CALIBRATION`.
+1. ~~**`HDR_GUIDE.md` does not mention OCIO.**~~ **Done 2026-08-16.** New section *Two routes
+   to an HDR channel (built-in vs OCIO)*, with the signal → channel → consumer diagram. The
+   load-bearing finding: a display transform switches the built-in output half off entirely
+   (`<auto-tone-map>` included), while consumer HDR signalling is still derived from
+   `<color-depth>`/`<color-space>`/`<color-transfer>` and **nothing cross-checks the two** —
+   so a PQ picture can be signalled SDR, silently. Pairing table added; not measured
+   end-to-end, and the section says so.
+2. ~~**`OPERATIONS_GUIDE.md` does not mention OCIO.**~~ **Done 2026-08-16.** New *Colour
+   management (OCIO)* subsection in §5, plus an OCIO row in the §17 command table and five
+   troubleshooting rows. It documents `ocio_panel.py`, which is still only on the client's
+   local `ui-restyle` branch (see *Where things are*), and says the panel has not been run
+   against a live server.
 3. **Diagrams where they would carry load, not decorate:** `GPU_INTEROP_ARCHITECTURE.md` /
    `GPU_INTEROP_PLAN.md` (cross-API, cross-device data flow) and `PROJECTION_CALIBRATION.md`
    (geometry).

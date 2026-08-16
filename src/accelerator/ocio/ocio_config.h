@@ -156,7 +156,7 @@ enum class gpu_target
 ///
 /// The split is 4/4 because of what was measured across the pinned studio config: an input
 /// transform emits at most **1** texture (55 colour spaces checked) and a display transform
-/// at most **3** (all 41 display/view combinations checked). Both sides have headroom, and
+/// at most **3** (all 51 display/view combinations checked). Both sides have headroom, and
 /// exceeding a range is refused rather than silently overlapping.
 ///
 /// Meaningless on the OpenGL target, which declares no bindings and takes texture units the
@@ -233,8 +233,12 @@ bool build_input_transform(const std::string& source_space,
 /// the mixer's built-in `working_to_output` matrix plus OETF, exactly as an input transform
 /// replaces the built-in EOTF plus `input_to_working`.
 ///
-/// Measured across all 41 display/view combinations in the pinned studio config: at most 3
-/// textures, no 3D LUT, no dynamic uniform. So this needs nothing from the Vulkan side that
+/// Measured across all 51 display/view combinations in the pinned studio config: at most 3
+/// textures, no 3D LUT, no dynamic uniform -- re-checked 2026-08-16 against both generated
+/// languages, GLSL 4.0 and GLSL VK 4.6, which agree texture for texture. (An earlier note
+/// here said 41 combinations; the config has 51. The measured maxima are unchanged, and the
+/// worst case is `Rec.2100-HLG - Display` / `ACES 2.0 - HDR 1000 nits (P3 D65)` at 3.) So
+/// this needs nothing from the Vulkan side that
 /// an input transform did not already need -- the same descriptor set 1, the same 2D image
 /// views, the same unused uniform buffer at binding 0. The generated source is an order of
 /// magnitude larger though (~16 KB against ~1.5 KB), which is paid at compile time.

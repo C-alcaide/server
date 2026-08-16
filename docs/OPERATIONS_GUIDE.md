@@ -260,6 +260,63 @@ Rec.709).
 > - **Keep the LUT last.** A creative `.cube` belongs on top of a managed image,
 >   not as a substitute for one.
 
+### Colour management (OCIO)
+
+The **OCIO Color Management** panel is the other colour-management front end, sitting
+below the Colorspace panel in the same colour section. Where **Colorspace** offers a
+fixed set of transfer/gamut enums built into the server, OCIO resolves names out of
+whatever OpenColorIO config that server loaded — the bundled ACES studio config, or a
+facility's own via `<ocio-config>`.
+
+> **The two are mutually exclusive on a layer.** They write the same stage of the
+> chain, so the server refuses the second one with `403` rather than silently
+> overriding. Send `MIXER <ch>-<l> COLORSPACE NONE` before setting an OCIO input
+> transform, and vice versa.
+
+**Nothing in this panel ships with the client.** Every combo is empty until you press
+**Refresh**, which runs `INFO OCIO`, `INFO OCIO COLORSPACES`, `INFO OCIO DISPLAYS` and
+`INFO OCIO LOOKS` and fills them from the server. That is deliberate: a client with its
+own hardcoded list produces show files referencing a colour space the server does not
+have. Refresh again after pointing the server at a different config.
+
+The controls are grouped by **scope**, because picking the wrong scope is the most
+common OCIO mistake:
+
+| Group | Control | Scope | What it means |
+| :--- | :--- | :--- | :--- |
+| **Per layer** | Input transform | layer | Where these pixels came from — `MIXER <ch>-<l> OCIO` |
+| | ASC CDL file | layer | A `.cdl`/`.ccc`/`.cc` grade — `MIXER <ch>-<l> CDL_FILE`. The **id** field is required for a `.ccc` holding several corrections |
+| **Per channel** | Display + View | channel | What screen it is going to — `OCIO_DISPLAY <ch>` |
+| | Look (LMT) | channel | What the show looks like — `OCIO_LOOK <ch>` |
+| | ACES Metadata File | channel + layer | Sets input transform, look and display at once from a show's `.amf` — `AMF <ch>-<l>` |
+
+An input transform is per *layer* because each source arrives differently encoded. A
+look and a display are per *channel* because every layer of one composite belongs to one
+show and goes to one screen.
+
+> **The Look combo stays disabled until you pick a Display and View.** On the server the
+> look is composed *into* the display processor, so `OCIO_LOOK` refuses with `403` when
+> there is no display transform to ride on. The panel expresses that as a greyed-out
+> control rather than letting you meet it as an error.
+
+**Server-side prerequisite.** Display, view and look need the channel to composite in the
+working space — `<render-format>fp16</render-format>` plus
+`<working-space-composite>true</working-space-composite>` in `casparcg.config`, which the
+panel restates in its footer. Without them the server refuses with `403`. The input
+transform and CDL file have no such requirement. Note that `<working-space-composite>`
+changes how layers blend channel-wide (scene-linear rather than display-encoded) — it is
+not something to switch on mid-show.
+
+After applying an **AMF**, press **Refresh**: the file sets all three at once and the
+combos would otherwise still show the previous selection.
+
+> **Not yet exercised against a live server.** This panel has been driven headless and
+> against recorded `INFO OCIO` payloads — 55 colour spaces, 9 displays and 1 look parse
+> correctly, names containing parentheses survive, views nest under their display — but
+> nobody has yet run it against a server with a real OCIO channel. The server-side
+> commands themselves are measured; see
+> [OCIO_USER_GUIDE.md](OCIO_USER_GUIDE.md).
+
 ---
 
 ## 6. Geometry, compositing & effects
@@ -785,6 +842,7 @@ sub-command reaches the server.
 | Transport | `PLAY`, `PAUSE`, `STOP`, `LOAD`, `LOADBG`, `CALL` |
 | Mixer | `MIXER <ch>-<l> FILL/ANCHOR/ROTATION/CROP/BLEND/OPACITY` |
 | Grade | `MIXER <ch>-<l> BRIGHTNESS/CONTRAST/SATURATION/LEVELS/CURVES/HUECURVE/QUALIFIER/COLORSPACE` |
+| OCIO | `MIXER <ch>-<l> OCIO/CDL_FILE`, `OCIO_DISPLAY <ch>`, `OCIO_LOOK <ch>`, `AMF <ch>-<l>`, `INFO OCIO [COLORSPACES\|DISPLAYS\|LOOKS]` |
 | Geometry | `MIXER <ch>-<l> PERSPECTIVE/PROJECTION/PROJECTION_DISTORTION/PROJECTION_BLEND/PROJECTION_BLEND_MASK/MESH` |
 | Previz | `PREVIZ <ch> CAMERA/VIEW/SCREEN/SHOW/GRID/WIREFRAME/GIZMO` |
 | Tracking | `TRACKING <ch>-<l> BIND/UNBIND/OFFSET/SCALE/ZERO/INFO`, `TRACKING LIST` |
@@ -812,6 +870,11 @@ rundown timers. The traffic dot in the OSC widget confirms packets are arriving.
 | Projection solve fails | Pattern not fully in frame / out of focus / clipped highlights; re-run **Generate + Play** to reset to identity before solving (see the projection doc). |
 | Scopes / histogram empty | They read the embedded preview — if the viewport is black they have no input. |
 | OpenCV-dependent steps disabled | Install `opencv-contrib-python` (ArUco + live UVC). |
+| OCIO lists stay empty after **Refresh** | The server was built without OCIO (`INFO OCIO` reports it unavailable), or AMCP is disconnected. |
+| An OCIO name you can see is refused `404` | Quoting. Names contain spaces and parentheses; the panel quotes them, hand-typed AMCP must too. |
+| **Look (LMT)** combo is greyed out | Pick a **Display** and **View** first — the look is composed into that transform server-side. |
+| `OCIO_DISPLAY` / `OCIO_LOOK` refused `403` | The channel does not composite in the working space — needs `<render-format>fp16</render-format>` and `<working-space-composite>true</working-space-composite>`. |
+| Input transform refused `403` | `MIXER COLORSPACE` is active on that layer; clear it with `COLORSPACE NONE` first (they are mutually exclusive). |
 
 ---
 

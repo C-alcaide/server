@@ -11,8 +11,11 @@ pipeline relative to the built-in tools, see [`COLOR_GRADING.md`](COLOR_GRADING.
 
 ## 1. Quote every name. This is the one that bites.
 
-**40 of the 55 colour spaces in the bundled config contain spaces or parentheses**, and AMCP
-tokenizes on whitespace. Every display and view name contains spaces too.
+**48 of the 55 colour spaces in the bundled config contain spaces or parentheses**, and AMCP
+tokenizes on whitespace. Every display and view name contains spaces too. Only seven names are
+safe unquoted — `ACES2065-1`, `ACEScc`, `ACEScct`, `ACEScg`, `ADX10`, `ADX16` and `Raw` — so
+quote everything rather than remembering which. (Counted from the config, 2026-08-16; an
+earlier note here said 40.)
 
 ```
 MIXER 1-1 OCIO "ARRI LogC3 (EI800)"     → 202 MIXER OK
@@ -172,6 +175,14 @@ with different display transforms would blend a PQ-encoded layer with a Rec.709-
 and that composite is not in any colour space.
 
 Both arguments are required and both must be quoted.
+
+> **An HDR view does not signal HDR.** A display transform decides how the pixels are
+> *encoded*; what a consumer *says* they are still comes from the channel's `<color-depth>`,
+> `<color-space>` and `<color-transfer>`, and nothing checks that the two agree. If the view
+> you pick is one of the nine `ACES 2.0 - HDR …` ones, set those channel fields to match —
+> the pairing table is in
+> [`HDR_GUIDE.md` § Two routes to an HDR channel](HDR_GUIDE.md#two-routes-to-an-hdr-channel-built-in-vs-ocio),
+> which also covers what the view switches off (`<auto-tone-map>` among it).
 
 ### 5.3 `OCIO_LOOK <channel>` — the channel's LMT (show look)
 
