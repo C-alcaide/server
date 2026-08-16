@@ -22,6 +22,7 @@
 #include "../StdAfx.h"
 
 #include "decklink_producer.h"
+#include "sdi_signalling.h"
 
 #include "../util/util.h"
 
@@ -478,6 +479,75 @@ const wchar_t* metadata_name(core::color_transfer ct)
         case core::color_transfer::hlg: return L"hlg";
         default:                        return L"sdr";
     }
+}
+
+/// SMPTE ST 291-1 identifiers for the two packets that carry colour signalling on SDI.
+constexpr uint8_t ANC_DID_SMPTE_291      = 0x41;
+constexpr uint8_t ANC_SDID_ST352_VPID    = 0x01;
+constexpr uint8_t ANC_SDID_ST2108_HDRWCG = 0x0C;
+
+/// Pull ST 352 and ST 2108-1 off an incoming frame.
+///
+/// `census`, when given, is filled with every DID/SDID present rather than only the two we
+/// decode. It is what turns "the signalling did not arrive" into an answerable question:
+/// an empty census means the card handed us no ancillary data at all (on legacy hardware
+/// `IDeckLinkVideoFrameAncillaryPackets` needs a v210 input -- see
+/// `BMDDeckLinkVANCRequires10BitYUVVideoFrames`), whereas a census listing packets that do
+/// not include 41h/01h means the SOURCE is not signalling. Those two have identical symptoms
+/// and completely different fixes, and guessing between them is how this area went wrong the
+/// first time.
+sdi_signalling read_sdi_signalling(IDeckLinkVideoInputFrame* video, std::wstring* census = nullptr)
+{
+    sdi_signalling out;
+
+    IDeckLinkVideoFrameAncillaryPackets* raw = nullptr;
+    if (FAILED(video->QueryInterface(IID_IDeckLinkVideoFrameAncillaryPackets, (void**)&raw)) || raw == nullptr) {
+        return out;
+    }
+    auto packets = wrap_raw<com_ptr>(raw, true);
+
+    IDeckLinkAncillaryPacketIterator* raw_iter = nullptr;
+    if (FAILED(packets->GetPacketIterator(&raw_iter)) || raw_iter == nullptr) {
+        return out;
+    }
+    auto iter = wrap_raw<com_ptr>(raw_iter, true);
+
+    IDeckLinkAncillaryPacket* raw_packet = nullptr;
+    while (SUCCEEDED(iter->Next(&raw_packet)) && raw_packet != nullptr) {
+        auto packet = wrap_raw<com_ptr>(raw_packet, true);
+        raw_packet  = nullptr;
+
+        const uint8_t did  = packet->GetDID();
+        const uint8_t sdid = packet->GetSDID();
+
+        if (census != nullptr) {
+            wchar_t buf[32];
+            swprintf(buf, 32, L" %02Xh/%02Xh", did, sdid);
+            *census += buf;
+        }
+
+        if (did != ANC_DID_SMPTE_291) {
+            continue;
+        }
+
+        const void*  data = nullptr;
+        unsigned int size = 0;
+        // UInt8 asks for the payload as b7-b0 of each word, which is the form both standards
+        // are written in -- ST 352's own note warns that the payload uses the two LSBs of the
+        // 10-bit packet, so taking the 10-bit form here would mean shifting it back.
+        if (FAILED(packet->GetBytes(bmdAncillaryPacketFormatUInt8, &data, &size)) || data == nullptr) {
+            continue;
+        }
+        const auto* bytes = static_cast<const uint8_t*>(data);
+
+        if (sdid == ANC_SDID_ST352_VPID && size >= 4) {
+            parse_vpid(bytes, out);
+        } else if (sdid == ANC_SDID_ST2108_HDRWCG && size >= 2) {
+            parse_st2108(bytes, size, out);
+        }
+    }
+
+    return out;
 }
 
 core::color_space get_color_space(IDeckLinkVideoInputFrame* video,
@@ -1128,25 +1198,78 @@ class decklink_producer : public IDeckLinkInputCallback
                     return S_OK;
                 }
 
-                color_space    = get_color_space(video, color_space);
-                color_transfer = get_color_transfer(video, color_transfer);
+                // The frame-metadata interface first, since a card that populates it has
+                // already done this work; the ancillary data underneath it when it does not,
+                // which on SDI is always. Order matters only in that the two must not
+                // contradict each other silently -- see the log below, which reports both.
+                std::wstring anc_census;
+                const auto   anc = read_sdi_signalling(video, logged_input_metadata_ ? nullptr : &anc_census);
 
-                // SAY WHAT ARRIVED, ONCE. The consumer signals colourspace and EOTF through
-                // IDeckLinkVideoFrameMetadataExtensions and these two readers consume them,
-                // but nothing logged or exposed the result -- so "the tag the consumer sent
-                // is the tag the producer received" was not an assertable statement, on any
-                // rig, and a loopback could only infer it from pixels. That inference is
-                // confounded: the channel's <color-space> drives the consumer's ENCODE
-                // matrix as well as the tag it signals, so a picture difference cannot
-                // separate "the tag was honoured" from "the encode changed".
+                // PRECEDENCE, most authoritative first:
                 //
-                // One line per producer, so it costs nothing per frame and still dates the
-                // observation.
+                //   1. the card's own frame metadata -- a parsed HDMI InfoFrame, and the only
+                //      source here that has already been decoded for us
+                //   2. ST 352 on the wire -- what the sender actually declared
+                //   3. the 10BIT configuration assertion -- an operator's claim about a feed,
+                //      made without seeing it
+                //   4. the mixer's raster convention, for a signal that declares nothing
+                //
+                // Asking with an `unknown`/`sdr` fallback is what keeps 1 and 3 apart: called
+                // with the configured value as the fallback, a card that said nothing and a
+                // card that agreed with the configuration return the same answer, and the
+                // wire could then never outrank a flag typed at the command line.
+                const auto card_space    = get_color_space(video, core::color_space::unknown);
+                const auto card_transfer = get_color_transfer(video, core::color_transfer::sdr);
+
+                if (card_space != core::color_space::unknown) {
+                    color_space = card_space;
+                } else if (anc.colorimetry_specified) {
+                    color_space = anc.color_space;
+                }
+
+                // No `unknown` exists in `color_transfer`, so "the card declared SDR" and "the
+                // card declared nothing" are the same value and cannot be told apart here.
+                // The wire therefore wins outright when it specifies: a VPID that says PQ is a
+                // statement, and an absent InfoFrame is not.
+                if (anc.transfer_specified) {
+                    color_transfer = anc.color_transfer;
+                } else if (card_transfer != core::color_transfer::sdr) {
+                    color_transfer = card_transfer;
+                }
+
+                // SAY WHAT ARRIVED, ONCE. The consumer signals colourspace and EOTF, and
+                // these readers consume them, but nothing logged or exposed the result -- so
+                // "the tag the consumer sent is the tag the producer received" was not an
+                // assertable statement, on any rig, and a loopback could only infer it from
+                // pixels. That inference is confounded: the channel's <color-space> drives
+                // the consumer's ENCODE matrix as well as the tag it signals, so a picture
+                // difference cannot separate "the tag was honoured" from "the encode
+                // changed".
+                //
+                // The census is here for the case that actually occurred: everything reading
+                // `unknown`. Without it, "no ancillary data reached us" and "ancillary data
+                // reached us and carried no VPID" look identical and have different fixes.
                 if (!logged_input_metadata_) {
                     logged_input_metadata_ = true;
                     CASPAR_LOG(info) << print() << L" input metadata: colorspace="
                                      << metadata_name(color_space)
-                                     << L" transfer=" << metadata_name(color_transfer);
+                                     << L" transfer=" << metadata_name(color_transfer)
+                                     << L" | anc packets:" << (anc_census.empty() ? L" (none)" : anc_census);
+                    if (anc.vpid_present) {
+                        wchar_t vpid[64];
+                        swprintf(vpid, 64, L"%02X %02X %02X %02X", anc.vpid[0], anc.vpid[1], anc.vpid[2], anc.vpid[3]);
+                        CASPAR_LOG(info) << print() << L" ST 352 VPID: " << vpid;
+                    }
+                    if (anc.mastering_display_present) {
+                        CASPAR_LOG(info) << print() << L" ST 2108-1 mastering display: max="
+                                         << anc.max_display_mastering_luminance << L" cd/m2 min="
+                                         << anc.min_display_mastering_luminance << L" cd/m2";
+                    }
+                    if (anc.content_light_level_present) {
+                        CASPAR_LOG(info) << print() << L" ST 2108-1 content light level: MaxCLL="
+                                         << anc.max_content_light_level << L" MaxFALL="
+                                         << anc.max_frame_average_light_level;
+                    }
                 }
                 auto src    = video_decoder_.decode(video, mode_);
 

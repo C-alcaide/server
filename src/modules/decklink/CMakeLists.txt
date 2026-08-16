@@ -40,7 +40,9 @@ set(SOURCES
 		consumer/vanc_op47_strategy.cpp
 
 		producer/decklink_producer.cpp
+		producer/sdi_signalling.cpp
 		producer/decklink_producer.h
+		producer/sdi_signalling.h
 
 		util/util.h
 
@@ -186,3 +188,29 @@ if(ENABLE_VULKAN)
 	)
 endif()
 
+
+# The SDI signalling parsers, checked against EBU Tech 3375's published payload-identifier
+# bytes. EXCLUDE_FROM_ALL because this fork has no test infrastructure and a normal build
+# must not change shape; build it explicitly:
+#
+#   cmake --build build --target decklink_sdi_signalling_test
+#   build/modules/decklink/decklink_sdi_signalling_test.exe
+#
+# It is worth the target rather than a scratchpad script because the vectors are the only
+# third-party ground truth available for this code -- the loopback on this rig carries no
+# ancillary data at all, so the decode cannot be exercised end to end here.
+add_executable(decklink_sdi_signalling_test EXCLUDE_FROM_ALL
+	producer/test_sdi_signalling.cpp
+	producer/sdi_signalling.cpp
+)
+target_include_directories(decklink_sdi_signalling_test PRIVATE
+	${CMAKE_CURRENT_SOURCE_DIR}/../..
+	${CMAKE_CURRENT_SOURCE_DIR}/..
+	${CMAKE_CURRENT_SOURCE_DIR}/producer
+)
+# Deliberately links nothing. `common` would pull GLEW and TBB in behind it, and the point of
+# keeping these parsers free of every dependency but the colour enums is that the test then
+# needs no graphics stack, no DeckLink card and no server -- it is bytes in, enums out.
+set_target_properties(decklink_sdi_signalling_test PROPERTIES
+	DISABLE_PRECOMPILE_HEADERS ON
+)
