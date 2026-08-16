@@ -484,11 +484,26 @@ to exactly what was configured: mastering display max 1000 / min 0.005 cd/m2, Ma
 MaxFALL 100. The consumer logs `VANC attaching 1 packet(s): 41h/0Ch@9` once per consumer and
 the producer logs the census it read, so both ends of the claim appear in one server log.
 
-What is NOT emitted is ST 352, the payload identifier carrying colorimetry and transfer
-characteristics. That is the card's to insert and a second one risks two conflicting payload
-identifiers in a field. No `41h/01h` is seen on the wire, which -- now that `41h/0Ch` demonstrably
-arrives -- means the card does not insert one for the custom frames CasparCG outputs, rather
-than meaning the reader is blind.
+**ST 352 (VPID) is not emitted here, and must not be** -- the card already inserts it, and a
+second payload identifier in the same field is worse than none. That is measured, not assumed.
+Setting the channel's colour space and transfer and reading them back over the loopback:
+
+| consumer configured | card reports at the producer |
+| :--- | :--- |
+| `bt709` / `sdr` | `bt709` / `sdr` |
+| `bt2020` / `hlg` | `bt2020` / `hlg` |
+| `bt2020` / `pq` | `bt2020` / `pq` |
+
+Neither result can be a fallback: the producer's own `10BIT` default is `bt2020`/`hlg`, which
+the first and third rows contradict. **So colorimetry and transfer signalling already work end
+to end**, through the frame metadata the consumer sets -- the driver builds the payload
+identifier from it and the receiving driver parses it back.
+
+`41h/01h` never appears in the ancillary census because the input driver CONSUMES the payload
+identifier rather than listing it as a packet; it surfaces the result through
+`IDeckLinkVideoFrameMetadataExtensions` instead. ST 2108-1 has no such treatment, which is why
+`41h/0Ch` is visible in the census and VPID is not. Reading the census alone would say the
+signalling is absent, and it is not.
 
 **A caution worth more than the feature.** This took most of a session to confirm, because the
 diagnostic that said "no ancillary arrived" sampled the FIRST frame only. Ancillary is not

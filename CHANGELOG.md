@@ -42,9 +42,14 @@ against the VPID words EBU Tech 3375 publishes -- 18 assertions, mutation-tested
 the consumer's `VANC attaching 1 packet(s): 41h/0Ch@9` line pairs with the producer's census
 so both halves are visible in one log. Conformance unchanged at 36/36 within 1 LSB.
 
-**Still not emitted, deliberately: ST 352 (VPID).** No `41h/01h` appears on the wire, which
-now means the card does not insert a payload identifier for custom frames rather than "the
-reader saw nothing" -- a distinction only available because `41h/0Ch` does arrive.
+**ST 352 (VPID) is not emitted here, and must not be: the card already inserts it.** Measured
+across three arms -- `bt709`/`sdr`, `bt2020`/`hlg`, `bt2020`/`pq` -- each comes back at the
+producer exactly as configured, and neither the first nor the third can be a fallback because
+the producer's own `10BIT` default is `bt2020`/`hlg`. So colorimetry and transfer signalling
+already work end to end through the frame metadata the consumer sets. `41h/01h` is absent from
+the ancillary census because the input driver consumes the payload identifier rather than
+listing it, surfacing the result through `IDeckLinkVideoFrameMetadataExtensions` instead --
+which is also how EOTF reaches the producer, since ST 2108-1 does not carry it.
 
 ### Added: the producer reads SDI colour signalling (ST 352 and ST 2108-1)
 

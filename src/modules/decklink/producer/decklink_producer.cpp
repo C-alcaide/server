@@ -1369,6 +1369,17 @@ class decklink_producer : public IDeckLinkInputCallback
                                      << (needs_10bit ? L"true" : L"false") << L" supports-hanc-input="
                                      << (hanc_in ? L"true" : L"false") << L" profile=0x" << std::hex << profile_id
                                      << L" duplex=0x" << duplex << std::dec;
+                    // THE CARD'S RAW ANSWER, separate from the resolved one. The resolved
+                    // value cannot answer "did the wire tell us this": `sdr` doubles as "no
+                    // information", and under `10BIT` the fallback is bt2020/hlg, so a
+                    // resolved `hlg` may be the card speaking or may be the flag. Printing
+                    // what GetInt actually returned makes VPID's arrival observable even
+                    // though the driver consumes the packet rather than listing it.
+                    CASPAR_LOG(info) << print() << L" card metadata: colorspace="
+                                     << metadata_name(card_space) << L" transfer="
+                                     << metadata_name(card_transfer)
+                                     << L" (card_space_known=" << (card_space != core::color_space::unknown)
+                                     << L")";
                     CASPAR_LOG(info) << print() << L" input metadata: colorspace="
                                      << metadata_name(color_space)
                                      << L" transfer=" << metadata_name(color_transfer)
