@@ -38,6 +38,8 @@ set(SOURCES
 		consumer/vanc.h
 		consumer/vanc_scte104_strategy.cpp
 		consumer/vanc_op47_strategy.cpp
+		consumer/vanc_hdr_strategy.cpp
+		consumer/color_primaries.h
 
 		producer/decklink_producer.cpp
 		producer/sdi_signalling.cpp

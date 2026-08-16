@@ -1,6 +1,48 @@
 CasparVP — Unreleased
 ==========================================
 
+### Added: `<hdr-line>` — HDR metadata on the SDI wire as SMPTE ST 2108-1
+
+`<hdr-metadata>` hands MaxCLL, MaxFALL and the mastering display luminances to the DRIVER,
+through `IDeckLinkVideoFrameMetadataExtensions`. That interface is HDMI-shaped — the SDK's own
+helpstring for its 11.5 revision says "HDMI HDR information" — and on SDI those values have
+their own transport, which nothing here was using. `<vanc><hdr-line>N</hdr-line></vanc>` emits
+them as the ST 291-1 ancillary packet SMPTE ST 2108-1 defines (DID `41h`, SDID `0Ch`), as the
+two static-metadata frames of that standard: mastering display colour volume from `min-dml`,
+`max-dml` and the channel's primaries, and content light level from `max-cll` and `max-fall`.
+Both are H.265 SEI messages byte for byte, the same ones that reach an HDMI display or a
+distribution encoder.
+
+**No existing configuration changes.** The line number defaults to 0, which disables it, so a
+consumer that does not ask for this puts the same bytes on the wire as before.
+
+**ST 352 (VPID) is deliberately not emitted.** That packet carries colorimetry and transfer
+characteristics and is the card's to insert from the frame metadata the consumer already
+supplies; a second one risks two conflicting payload identifiers in one field.
+
+**Measured, and the limit stated with it.** The encoding is checked against SMPTE ST 2108-1
+and, for the reader that decodes it, against the VPID words EBU Tech 3375 publishes — 18
+assertions, mutation-tested, in `decklink_sdi_signalling_test`. On the wire the consumer
+attaches the packet and `AttachPacket` returns `S_OK`, logged once as `VANC attaching 1
+packet(s): 41h/0Ch@9`. A DeckLink 8K Pro receiving that signal over an SDI loopback then
+reports an **empty ancillary census** — at lines 9, 13 and 18, at 8-bit and 10-bit ingest, on
+HD-SDI and 3G — while the picture arrives intact. So what is verified is the encoding and the
+attach; whether this hardware carries app-inserted ancillary data at all is not, and an
+analyser is needed to close it. Conformance unchanged at 36/36 within 1 LSB.
+
+### Added: the producer reads SDI colour signalling (ST 352 and ST 2108-1)
+
+`decklink_producer` asked `IDeckLinkVideoFrameMetadataExtensions` for the incoming colourspace
+and EOTF and got nothing on every SDI input, always — that interface being for HDMI. It now
+parses the ancillary data instead: ST 352 for colorimetry and transfer characteristics,
+ST 2108-1 for mastering display and content light level. Precedence, most authoritative first:
+the card's own frame metadata, then the wire, then the `10BIT` configuration assertion, then
+the mixer's raster convention.
+
+One line per producer names what arrived, including a census of every DID/SDID on the frame.
+The census is the point: "no ancillary data was delivered" and "ancillary data arrived carrying
+no VPID" are identical symptoms with different fixes.
+
 ### Added: `AMF` — configure a channel from an ACES Metadata File
 
 `AMF <ch>-<layer> "<file.amf>"` reads the document a show carries to name its pipeline and

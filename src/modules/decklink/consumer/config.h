@@ -58,6 +58,13 @@ struct vanc_configuration
     uint32_t     op47_line_field2 = 0;
     uint32_t     scte104_line     = 0;
     std::wstring op47_dummy_header;
+
+    //: SMPTE ST 2108-1 HDR/WCG metadata. Opt-in and line-numbered like the two above, and
+    //: for the same reason: ancillary space is finite and shared, so which line a packet
+    //: lands on is a plant-level decision rather than something this consumer should assume.
+    //: 0 disables, which keeps every existing configuration byte-identical on the wire.
+    bool     enable_hdr = false;
+    uint32_t hdr_line   = 0;
 };
 
 struct hdr_meta_configuration

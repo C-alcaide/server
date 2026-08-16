@@ -28,6 +28,7 @@
 #include "format_strategy.h"
 #include "monitor.h"
 #include "ogl_gl_strategy.h"
+#include "color_primaries.h"
 #include "vanc.h"
 
 #ifdef DECKLINK_CUDA_VK_ENABLED
@@ -363,21 +364,9 @@ enum EOTF
     HLG = 3
 };
 
-struct ChromaticityCoordinates
-{
-    double RedX;
-    double RedY;
-    double GreenX;
-    double GreenY;
-    double BlueX;
-    double BlueY;
-    double WhiteX;
-    double WhiteY;
-};
-
-const auto REC_709  = ChromaticityCoordinates{0.640, 0.330, 0.300, 0.600, 0.150, 0.060, 0.3127, 0.3290};
-const auto REC_2020 = ChromaticityCoordinates{0.708, 0.292, 0.170, 0.797, 0.131, 0.046, 0.3127, 0.3290};
-const auto REC_601  = ChromaticityCoordinates{0.630, 0.340, 0.310, 0.595, 0.155, 0.070, 0.3127, 0.3290};
+// ChromaticityCoordinates and REC_709/REC_2020/REC_601 moved to color_primaries.h, so the
+// ST 2108-1 mastering display SEI is built from the same numbers this frame reports through
+// GetFloat rather than from a second copy of them.
 
 class decklink_frame
     : public IDeckLinkVideoFrame
@@ -913,6 +902,7 @@ struct decklink_consumer final : public IDeckLinkVideoOutputCallback
 
     std::atomic<bool>              abort_request_{false};
     std::shared_ptr<decklink_vanc> vanc_;
+    bool                           logged_vanc_attach_ = false;
 
     // Experimental synchronous-display path (DisplayVideoFrameSync). When enabled,
     // a worker thread pops frames and blocks on DisplayVideoFrameSync instead of
@@ -993,7 +983,7 @@ struct decklink_consumer final : public IDeckLinkVideoOutputCallback
                                        L"data are both 10-bit YUV pixel format.";
             } else {
                 CASPAR_LOG(info) << print() << L" DeckLink hardware supports VANC.";
-                vanc_ = create_vanc(config.vanc);
+                vanc_ = create_vanc(config.vanc, config.hdr_meta, config.color_space);
             }
         }
 
@@ -1506,6 +1496,25 @@ struct decklink_consumer final : public IDeckLinkVideoOutputCallback
         if (vanc_ && vanc_->has_data()) {
             auto ancillary_packets = iface_cast<IDeckLinkVideoFrameAncillaryPackets>(fill_frame);
             auto packets           = vanc_->pop_packets();
+            // SAY WHAT WAS ATTACHED, ONCE. `AttachPacket` returning S_OK is the last
+            // observable point on the way out: past here the packet is the driver's and
+            // whether it reaches the wire cannot be seen from this process. When the
+            // receiving end reports an empty ancillary census -- which is what happens on
+            // this rig -- that single fact decides between "we never attached anything" and
+            // "we attached it and the card did not carry it", and nothing else in the log
+            // distinguishes them.
+            if (!logged_vanc_attach_) {
+                logged_vanc_attach_ = true;
+                std::wstring dids;
+                for (auto& packet : packets) {
+                    wchar_t buf[32];
+                    swprintf(buf, 32, L" %02Xh/%02Xh@%u", get_raw(packet)->GetDID(),
+                             get_raw(packet)->GetSDID(), get_raw(packet)->GetLineNumber());
+                    dids += buf;
+                }
+                CASPAR_LOG(info) << print() << L" VANC attaching " << packets.size()
+                                 << L" packet(s):" << (dids.empty() ? L" (none)" : dids);
+            }
             for (auto& packet : packets) {
                 if (FAILED(ancillary_packets->AttachPacket(get_raw(packet)))) {
                     CASPAR_LOG(error) << print() << L" Failed to add ancillary packet.";

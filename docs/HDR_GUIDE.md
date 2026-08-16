@@ -443,9 +443,50 @@ No explicit `<hdr>true</hdr>` flag is needed — it is derived from the channel'
       <max-fall>100</max-fall>    <!-- max frame-average light level (nits) -->
       <max-cll>1000</max-cll>     <!-- max content light level (nits)        -->
     </hdr-metadata>
+
+    <!-- Optional: also carry that metadata on the WIRE as SMPTE ST 2108-1.  -->
+    <!-- The number is the VANC line. 0 or absent disables it.               -->
+    <vanc>
+      <hdr-line>9</hdr-line>
+    </vanc>
   </decklink>
 </consumers>
 ```
+
+### `<hdr-line>` — the same metadata as an ancillary packet
+
+`<hdr-metadata>` on its own hands the values to the **driver**, through
+`IDeckLinkVideoFrameMetadataExtensions`. That interface is HDMI-shaped — the SDK's helpstring
+for its 11.5 revision says "HDMI HDR information" — and on SDI the mastering display volume
+and content light level have their own transport: **SMPTE ST 2108-1**, an ST 291-1 ancillary
+packet with DID `41h` and SDID `0Ch`. `<hdr-line>` emits it, carrying exactly the four values
+above as the two static-metadata frames the standard defines:
+
+| frame type | payload | source |
+| :--- | :--- | :--- |
+| 0 | mastering display colour volume (ST 2086) | `min-dml`, `max-dml`, and the channel's primaries |
+| 1 | content light level (CTA-861.3) | `max-cll`, `max-fall` |
+
+Both are H.265 SEI messages byte for byte, so they are the same bytes that reach an HDMI
+display or a distribution encoder. Nothing about them is Blackmagic-specific.
+
+Pick the line to suit the plant — ancillary space is shared. RP 168 puts the switching point
+for 1080-line formats on line 7 and ST 2108-1 allows from the second line after it through the
+last line before active picture, so 9 is the first legal choice.
+
+**What is NOT emitted, deliberately: ST 352 (VPID),** which is the packet that carries
+colorimetry and transfer characteristics. That one is the card's to insert, built from the
+frame metadata the consumer already supplies, and emitting a second one risks two conflicting
+payload identifiers in a single field.
+
+**Not confirmed on the wire.** On the development rig the consumer attaches the packet and
+`AttachPacket` returns `S_OK` — logged once per consumer as `VANC attaching 1 packet(s):
+41h/0Ch@9` — but a DeckLink 8K Pro receiving the same signal over an SDI loopback reports an
+empty ancillary census, at lines 9, 13 and 18, while the picture itself arrives intact. The
+encoding is checked against the standards by unit test
+(`cmake --build build --target decklink_sdi_signalling_test`); what is unverified is whether
+this hardware carries app-inserted ancillary data at all. Confirm with an analyser before
+relying on it in a plant.
 
 ### EOTF values sent on the wire (SDK constants)
 

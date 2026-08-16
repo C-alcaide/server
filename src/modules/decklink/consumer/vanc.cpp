@@ -68,8 +68,13 @@ class decklink_vanc_packet : public IDeckLinkAncillaryPacket
     unsigned char STDMETHODCALLTYPE GetDataStreamIndex(void) override { return 0; }
 };
 
-decklink_vanc::decklink_vanc(const vanc_configuration& config)
+decklink_vanc::decklink_vanc(const vanc_configuration&     config,
+                             const hdr_meta_configuration& hdr,
+                             core::color_space             color_space)
 {
+    if (config.enable_hdr) {
+        strategies_.push_back(create_hdr_strategy(config.hdr_line, hdr, color_space));
+    }
     if (config.enable_scte104) {
         strategies_.push_back(create_scte104_strategy(config.scte104_line));
     }
@@ -119,9 +124,10 @@ bool decklink_vanc::try_push_data(const std::vector<std::wstring>& params)
     return false;
 }
 
-std::shared_ptr<decklink_vanc> create_vanc(const vanc_configuration& config)
+std::shared_ptr<decklink_vanc>
+create_vanc(const vanc_configuration& config, const hdr_meta_configuration& hdr, core::color_space color_space)
 {
-    return std::make_shared<decklink_vanc>(config);
+    return std::make_shared<decklink_vanc>(config, hdr, color_space);
 }
 
 }} // namespace caspar::decklink

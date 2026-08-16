@@ -50,7 +50,13 @@ class decklink_vanc
     std::vector<std::shared_ptr<decklink_vanc_strategy>> strategies_;
 
   public:
-    explicit decklink_vanc(const vanc_configuration& config);
+    /// Takes the HDR configuration and the channel's colour space alongside the VANC
+    /// configuration because ST 2108-1 describes the MASTERING DISPLAY, which is a property
+    /// of the channel rather than of the ancillary space. Passing them here keeps the
+    /// strategy free of any back-reference to the consumer.
+    decklink_vanc(const vanc_configuration&     config,
+                  const hdr_meta_configuration& hdr,
+                  core::color_space             color_space);
     bool                                                             has_data() const;
     std::vector<caspar::decklink::com_ptr<IDeckLinkAncillaryPacket>> pop_packets(bool field2 = false);
     bool try_push_data(const std::vector<std::wstring>& params);
@@ -59,6 +65,9 @@ class decklink_vanc
 std::shared_ptr<decklink_vanc_strategy>
 create_op47_strategy(uint32_t line_number, uint32_t line_number_2, uint32_t sd_line, const std::wstring& dummy_header);
 std::shared_ptr<decklink_vanc_strategy> create_scte104_strategy(uint32_t line_number);
+std::shared_ptr<decklink_vanc_strategy>
+create_hdr_strategy(uint32_t line_number, const hdr_meta_configuration& hdr, core::color_space color_space);
 
-std::shared_ptr<decklink_vanc> create_vanc(const vanc_configuration& config);
+std::shared_ptr<decklink_vanc>
+create_vanc(const vanc_configuration& config, const hdr_meta_configuration& hdr, core::color_space color_space);
 }} // namespace caspar::decklink

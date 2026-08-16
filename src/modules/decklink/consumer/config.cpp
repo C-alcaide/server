@@ -67,6 +67,8 @@ vanc_configuration parse_vanc_config(const boost::property_tree::wptree& vanc_tr
     vanc_config.scte104_line      = vanc_tree.get(L"scte104-line", vanc_config.scte104_line);
     vanc_config.enable_scte104    = vanc_config.scte104_line > 0;
     vanc_config.op47_dummy_header = vanc_tree.get(L"op47-dummy-header", L"");
+    vanc_config.hdr_line          = vanc_tree.get(L"hdr-line", vanc_config.hdr_line);
+    vanc_config.enable_hdr        = vanc_config.hdr_line > 0;
 
     return vanc_config;
 };
