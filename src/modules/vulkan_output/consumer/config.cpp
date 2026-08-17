@@ -90,6 +90,10 @@ configuration parse_config(const boost::property_tree::wptree& ptree)
     if (hdr_meta) {
         config.max_cll  = hdr_meta->get(L"max-cll", 1000);
         config.max_fall = hdr_meta->get(L"max-fall", 400);
+        // Same spelling as the DeckLink and FFmpeg consumers: the same four numbers describe
+        // the same mastering display, and an operator should not need three vocabularies.
+        config.min_dml  = hdr_meta->get(L"min-dml", 0.005);
+        config.max_dml  = hdr_meta->get(L"max-dml", 1000.0);
 
         auto t = hdr_meta->get(L"transfer", L"");
         if (t == L"pq")  config.transfer = hdr_transfer::pq;

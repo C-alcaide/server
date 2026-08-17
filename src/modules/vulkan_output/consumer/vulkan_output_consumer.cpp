@@ -1086,7 +1086,8 @@ class vulkan_output_consumer : public core::frame_consumer
             if (nvapi_display_id_ != 0 && nvapi_->supports_hdr_output(nvapi_display_id_)) {
                 int cll  = config_.max_cll  > 0 ? config_.max_cll  : 1000;
                 int fall = config_.max_fall > 0 ? config_.max_fall : 400;
-                hw_hdr_active_ = nvapi_->enable_hdr_output(nvapi_display_id_, cll, fall);
+                hw_hdr_active_ = nvapi_->enable_hdr_output(nvapi_display_id_, cll, fall,
+                                                           config_.min_dml, config_.max_dml);
                 if (hw_hdr_active_) {
                     CASPAR_LOG(info) << print()
                         << L" Hardware HDR active - display engine handles PQ + BT.2020.";

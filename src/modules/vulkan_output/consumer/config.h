@@ -80,6 +80,12 @@ struct configuration
     output_eotf  eotf         = output_eotf::srgb;    // Output transfer function
     int          max_cll      = 1000;
     int          max_fall     = 400;
+    //: The MASTERING DISPLAY's luminance range, which is not the same thing as the content
+    //: light level above and was previously conflated with it -- `max_cll` was being sent as
+    //: `max_display_mastering_luminance`. Content light level describes the PICTURE; these
+    //: describe the DISPLAY it was graded on, and a receiver tone-maps using both.
+    double       min_dml      = 0.005;
+    double       max_dml      = 1000.0;
     bool         identify_on_start = false;
 
     // Display disconnect behavior

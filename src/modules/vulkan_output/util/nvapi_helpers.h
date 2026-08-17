@@ -166,7 +166,14 @@ class nvapi_helpers
     // Source must be scRGB FP16 (linear, sRGB primaries). The swapchain should use
     // VK_FORMAT_R16G16B16A16_SFLOAT with linear values where RGB(1,1,1) = 80 nits.
     // Returns true if the display engine accepted the HDR mode.
-    bool enable_hdr_output(uint32_t display_id, int max_cll, int max_fall);
+    /// Enable UHDA HDR on `display_id` and read back what the driver actually holds.
+    ///
+    /// `min_dml`/`max_dml` are the MASTERING DISPLAY's luminance range in cd/m2 -- distinct
+    /// from the content light levels, which describe the picture rather than the display it
+    /// was graded on. They were previously not passed at all and `max_cll` was sent in their
+    /// place.
+    bool enable_hdr_output(uint32_t display_id, int max_cll, int max_fall,
+                           double min_dml = 0.005, double max_dml = 1000.0);
 
     // Disable hardware HDR output, returning the display to SDR mode.
     bool disable_hdr_output(uint32_t display_id);

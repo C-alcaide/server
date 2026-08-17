@@ -27,6 +27,7 @@
 #include <nvapi.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <vector>
 
@@ -1013,7 +1014,8 @@ bool nvapi_helpers::supports_hdr_output(uint32_t display_id)
     return hdr_caps.isST2084EotfSupported != 0;
 }
 
-bool nvapi_helpers::enable_hdr_output(uint32_t display_id, int max_cll, int max_fall)
+bool nvapi_helpers::enable_hdr_output(uint32_t display_id, int max_cll, int max_fall,
+                                      double min_dml, double max_dml)
 {
     if (!available_ || display_id == 0)
         return false;
@@ -1059,9 +1061,21 @@ bool nvapi_helpers::enable_hdr_output(uint32_t display_id, int max_cll, int max_
     hdr_data.mastering_display_data.displayPrimary_y2 =  2300; // Blue:  0.046
     hdr_data.mastering_display_data.displayWhitePoint_x = 15635; // D65: 0.3127
     hdr_data.mastering_display_data.displayWhitePoint_y = 16450; // D65: 0.3290
+    // THE MASTERING DISPLAY, NOT THE CONTENT. `max_display_mastering_luminance` used to be
+    // set from `max_cll`, which conflates two different quantities: content light level
+    // describes the PICTURE, mastering display luminance describes the DISPLAY it was graded
+    // on, and a receiver tone-maps using both. A grade made on a 1000-nit display whose
+    // brightest pixel reaches 4000 is perfectly ordinary, and the old code could not say it.
+    //
+    // Units differ between the two fields and the header is the authority: max is
+    // [0x0001-0xFFFF] = [1.0 - 65535.0] cd/m2, so a nits value goes in directly; min is
+    // [0x0001-0xFFFF] = [1.0 - 6.5535] cd/m2, so it is in steps of 0.0001 cd/m2 and 0.005
+    // nits is 50. Reading either the other way is wrong by four orders of magnitude while
+    // still producing a plausible-looking number.
     hdr_data.mastering_display_data.max_display_mastering_luminance =
-        static_cast<NvU16>((std::min)(max_cll, 65535));
-    hdr_data.mastering_display_data.min_display_mastering_luminance = 1; // 0.0001 cd/m²
+        static_cast<NvU16>(std::clamp<long>(std::lround(max_dml), 1, 65535));
+    hdr_data.mastering_display_data.min_display_mastering_luminance =
+        static_cast<NvU16>(std::clamp<long>(std::lround(min_dml * 10000.0), 1, 65535));
     hdr_data.mastering_display_data.max_content_light_level =
         static_cast<NvU16>((std::min)(max_cll, 65535));
     hdr_data.mastering_display_data.max_frame_average_light_level =
@@ -1080,9 +1094,51 @@ bool nvapi_helpers::enable_hdr_output(uint32_t display_id, int max_cll, int max_
         return false;
     }
 
+    // READ IT BACK. `SET` returning NVAPI_OK says the call was accepted, not that the driver
+    // holds what we asked for -- it may clamp, round or ignore fields depending on the display
+    // and the current mode. This is the last observable point on this side of the wire: there
+    // is no capture card for an HDMI/DP output here, so an HDMI analyser or a sink that
+    // reports its received metadata is the only thing beyond it. Reading back at least turns
+    // "we called the API" into "the driver is holding these numbers".
+    NV_HDR_COLOR_DATA readback{};
+    readback.version = NV_HDR_COLOR_DATA_VER;
+    readback.cmd     = NV_HDR_CMD_GET;
+    if (NvAPI_Disp_HdrColorControl(display_id, &readback) == NVAPI_OK) {
+        const auto& got = readback.mastering_display_data;
+        CASPAR_LOG(info) << L"[vulkan_output] HDR readback from driver: mode="
+                         << static_cast<int>(readback.hdrMode) << L" bpc="
+                         << static_cast<int>(readback.hdrBpc)
+                         << L" mastering display max=" << got.max_display_mastering_luminance
+                         << L" cd/m2 min=" << (got.min_display_mastering_luminance / 10000.0)
+                         << L" cd/m2 MaxCLL=" << got.max_content_light_level
+                         << L" MaxFALL=" << got.max_frame_average_light_level;
+
+        const bool matches =
+            readback.hdrMode == NV_HDR_MODE_UHDA &&
+            got.max_display_mastering_luminance == hdr_data.mastering_display_data.max_display_mastering_luminance &&
+            got.max_content_light_level == hdr_data.mastering_display_data.max_content_light_level &&
+            got.max_frame_average_light_level == hdr_data.mastering_display_data.max_frame_average_light_level;
+        if (!matches) {
+            // Not fatal: a driver is entitled to clamp to what the display advertises. Worth
+            // saying out loud, because the difference between "we sent 4000" and "the display
+            // is being told 1000" is invisible everywhere else.
+            CASPAR_LOG(warning)
+                << L"[vulkan_output] the driver is not holding what was asked for -- requested "
+                   L"mastering display max="
+                << hdr_data.mastering_display_data.max_display_mastering_luminance << L" MaxCLL="
+                << hdr_data.mastering_display_data.max_content_light_level << L" MaxFALL="
+                << hdr_data.mastering_display_data.max_frame_average_light_level
+                << L". The wire carries the driver's values, not ours.";
+        }
+    } else {
+        CASPAR_LOG(warning) << L"[vulkan_output] HDR readback unavailable; the SET was accepted "
+                               L"but nothing here can confirm what the driver holds.";
+    }
+
     CASPAR_LOG(info) << L"[vulkan_output] Hardware HDR enabled (NvAPI UHDA mode). "
                      << L"Display engine performs PQ + BT.2020 conversion. "
-                     << L"MaxCLL=" << max_cll << L" MaxFALL=" << max_fall;
+                     << L"MaxCLL=" << max_cll << L" MaxFALL=" << max_fall
+                     << L" mastering display " << max_dml << L"/" << min_dml << L" cd/m2";
     return true;
 }
 
