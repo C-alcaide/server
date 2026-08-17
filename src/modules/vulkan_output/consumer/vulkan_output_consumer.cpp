@@ -220,6 +220,41 @@ class vulkan_output_consumer : public core::frame_consumer
         port_index_  = port_index;
         channel_index_ = channel_info.index;
         mixer_auto_color_convert_ = channel_info.auto_color_convert;
+        channel_color_space_    = channel_info.default_color_space;
+        channel_color_transfer_ = channel_info.default_color_transfer;
+
+        // TWO SILENT HAZARDS, SAID OUT LOUD. Neither is new; both were invisible.
+        //
+        // 1. <gamut> does nothing. The colour-conversion pipeline further down is disabled
+        //    behind `if (false && ...)`, and the comment there says so -- but a config asking
+        //    for a P3 display got no warning and no conversion, which looks exactly like a
+        //    conversion that worked. Same shape as `gpu-transfer` being inert on the Vulkan
+        //    mixer: an option that is read, accepted and ignored.
+        if (config_.gamut != output_gamut::bt709) {
+            CASPAR_LOG(warning)
+                << print()
+                << L" <gamut> is currently INERT on this consumer: the per-consumer colour "
+                   L"conversion pipeline is disabled, so the framebuffer carries the CHANNEL's "
+                   L"colour space unchanged. Set the channel's <color-space> instead.";
+        }
+
+        // 2. The hardware-HDR path declares the surface as scRGB -- extended sRGB LINEAR,
+        //    which is BT.709 primaries -- and the display engine maps that to BT.2020 PQ at
+        //    scanout. That is only correct if the framebuffer really holds BT.709-primaries
+        //    linear values. With a BT.2020 channel it holds BT.2020 primaries, which the
+        //    display engine then treats as 709 and expands AGAIN: a double gamut conversion,
+        //    visible as over-saturation and indistinguishable from a deliberate look. Not
+        //    fixed here -- the fix is the conversion pipeline in the plan below, and verifying
+        //    it needs an HDR display -- but no longer silent.
+        if ((config_.transfer == hdr_transfer::pq || config_.transfer == hdr_transfer::hlg) &&
+            channel_color_space_ != core::color_space::bt709) {
+            CASPAR_LOG(warning)
+                << print()
+                << L" hardware HDR presents an scRGB (BT.709 primaries, linear) surface and lets "
+                   L"the display engine map it to BT.2020, but this channel's colour space is not "
+                   L"BT.709 -- so those primaries are mapped a second time. Expect over-saturation "
+                   L"until the per-consumer conversion is enabled.";
+        }
 
         // buffer-depth=0 (or negative, from a hand-edited config) makes
         // send()'s `buffer_.size() >= buffer_depth` check always true, so
@@ -4198,6 +4233,8 @@ class vulkan_output_consumer : public core::frame_consumer
     int                              port_index_ = 0;
     int                              channel_index_ = -1; // used to key gpu_frame_cache per channel
     bool                             mixer_auto_color_convert_ = true;
+    core::color_space                channel_color_space_    = core::color_space::bt709;
+    core::color_transfer             channel_color_transfer_ = core::color_transfer::sdr;
     spl::shared_ptr<diagnostics::graph> graph_;
     executor                         executor_;
 
