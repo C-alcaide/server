@@ -2590,6 +2590,44 @@ struct AVProducer::Impl
     AVColorTransferCharacteristic    stream_color_trc_   = AVCOL_TRC_UNSPECIFIED;
     AVChromaLocation                 stream_chroma_loc_  = AVCHROMA_LOC_UNSPECIFIED;
 
+    //: SAY WHAT THIS SOURCE DECLARED, ONCE. The producer resolves a colour space and transfer
+    //: for every frame and reported neither, so "the file/stream we ingest is tagged PQ
+    //: BT.2020 and we saw that" was not an assertable statement -- only inferrable from the
+    //: picture, which cannot separate a correct reading from a lucky one. The DeckLink
+    //: producer grew the same line for the same reason; this is its FFmpeg counterpart, and it
+    //: is what `cli.py signalling --stream` reads.
+    bool logged_colour_ = false;
+
+    /// Resolve the transfer, and name both halves the first time through.
+    core::color_transfer note_colour(const std::shared_ptr<AVFrame>& video)
+    {
+        const auto trc = get_color_transfer(video, stream_color_trc_);
+        if (!logged_colour_) {
+            logged_colour_ = true;
+            const auto cs = get_color_space(video, stream_color_space_);
+            const auto space_name = [&] {
+                switch (cs) {
+                    case core::color_space::bt601:  return L"bt601";
+                    case core::color_space::bt709:  return L"bt709";
+                    case core::color_space::bt2020: return L"bt2020";
+                    case core::color_space::p3_d65: return L"p3-d65";
+                    case core::color_space::p3_dci: return L"p3-dci";
+                    default:                        return L"unknown";
+                }
+            }();
+            const auto transfer_name = [&] {
+                switch (trc) {
+                    case core::color_transfer::pq:  return L"pq";
+                    case core::color_transfer::hlg: return L"hlg";
+                    default:                        return L"sdr";
+                }
+            }();
+            CASPAR_LOG(info) << print() << L" source colour: colorspace=" << space_name
+                             << L" transfer=" << transfer_name;
+        }
+        return trc;
+    }
+
 #ifdef _WIN32
     // D3D11→mixer GPU-direct video path (bypasses filter graph + CPU transfer)
     std::unique_ptr<d3d11_bridge>    d3d11_bridge_;
@@ -3303,7 +3341,7 @@ struct AVProducer::Impl
                                     desc.planes.push_back(core::pixel_format_desc::plane(
                                         frame.video->width / 2, frame.video->height / 2, 2, plane_depth));
                                     desc.color_space    = get_color_space(frame.video, stream_color_space_);
-                                    desc.color_transfer = get_color_transfer(frame.video, stream_color_trc_);
+                                    desc.color_transfer = note_colour(frame.video);
                                     if (frame.video->chroma_location != AVCHROMA_LOC_UNSPECIFIED) {
                                         switch (frame.video->chroma_location) {
                                             case AVCHROMA_LOC_LEFT:
@@ -3383,10 +3421,10 @@ struct AVProducer::Impl
                         return core::const_frame(
                             make_frame(this, *frame_factory_, frame.video, frame.audio,
                                 get_color_space(frame.video, stream_color_space_), scale_mode_, false,
-                                get_color_transfer(frame.video, stream_color_trc_)));
+                                note_colour(frame.video)));
                     }()
 #else
-                    make_frame(this, *frame_factory_, frame.video, frame.audio, get_color_space(frame.video, stream_color_space_), scale_mode_, false, get_color_transfer(frame.video, stream_color_trc_))
+                    make_frame(this, *frame_factory_, frame.video, frame.audio, get_color_space(frame.video, stream_color_space_), scale_mode_, false, note_colour(frame.video))
 #endif
                 );
 
