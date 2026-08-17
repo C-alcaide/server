@@ -63,6 +63,7 @@ extern "C" {
 #include <libavutil/avutil.h>
 #include <libavutil/channel_layout.h>
 #include <libavutil/error.h>
+#include <libavutil/mastering_display_metadata.h>
 #include <libavutil/opt.h>
 #include <libavutil/pixdesc.h>
 #include <libavutil/pixfmt.h>
@@ -2598,9 +2599,64 @@ struct AVProducer::Impl
     //: is what `cli.py signalling --stream` reads.
     bool logged_colour_ = false;
 
+    //: HDR10 STATIC METADATA THE SOURCE DECLARES: ST 2086 mastering display volume and
+    //: CTA-861.3 content light level, decoded from the bitstream's SEI.
+    //:
+    //: REPORTED, NOT PROPAGATED, and that is a decision rather than an omission. These
+    //: describe the display a SOURCE was graded on. A channel's output is a composite of
+    //: however many layers are on it, and there is no single mastering display for a
+    //: composite -- picking one layer's would be inventing a claim about a picture nobody
+    //: graded. So the values are surfaced here, on the producer, where they are true, and the
+    //: OUTPUT's `<hdr-metadata>` stays what an operator declares about their own programme.
+    //:
+    //: Not on every frame either: the decoder attaches them once it has seen the SEI, so this
+    //: keeps looking until it finds them rather than sampling the first frame -- the mistake
+    //: that cost a day on the DeckLink side.
+    std::atomic<bool> hdr10_seen_{false};
+    double            hdr10_max_dml_  = 0.0;
+    double            hdr10_min_dml_  = 0.0;
+    int               hdr10_max_cll_  = 0;
+    int               hdr10_max_fall_ = 0;
+
+    void note_hdr10(const std::shared_ptr<AVFrame>& video)
+    {
+        if (hdr10_seen_.load(std::memory_order_relaxed) || !video) {
+            return;
+        }
+
+        const auto* mdm_sd = av_frame_get_side_data(video.get(), AV_FRAME_DATA_MASTERING_DISPLAY_METADATA);
+        const auto* cll_sd = av_frame_get_side_data(video.get(), AV_FRAME_DATA_CONTENT_LIGHT_LEVEL);
+        if (mdm_sd == nullptr && cll_sd == nullptr) {
+            return;
+        }
+
+        if (mdm_sd != nullptr) {
+            const auto* mdm = reinterpret_cast<const AVMasteringDisplayMetadata*>(mdm_sd->data);
+            if (mdm->has_luminance) {
+                // Both are AVRational in cd/m2 already -- av_q2d rather than a scale factor,
+                // because the units live in the denominator (10000000/10000 is 1000 nits) and
+                // reading the numerator alone is wrong by four orders of magnitude.
+                hdr10_max_dml_ = av_q2d(mdm->max_luminance);
+                hdr10_min_dml_ = av_q2d(mdm->min_luminance);
+            }
+        }
+        if (cll_sd != nullptr) {
+            const auto* cll = reinterpret_cast<const AVContentLightMetadata*>(cll_sd->data);
+            hdr10_max_cll_  = static_cast<int>(cll->MaxCLL);
+            hdr10_max_fall_ = static_cast<int>(cll->MaxFALL);
+        }
+
+        hdr10_seen_.store(true, std::memory_order_relaxed);
+        CASPAR_LOG(info) << print() << L" source hdr10: mastering display " << hdr10_max_dml_ << L"/"
+                         << hdr10_min_dml_ << L" cd/m2, MaxCLL " << hdr10_max_cll_ << L", MaxFALL "
+                         << hdr10_max_fall_;
+    }
+
     /// Resolve the transfer, and name both halves the first time through.
     core::color_transfer note_colour(const std::shared_ptr<AVFrame>& video)
     {
+        note_hdr10(video);
+
         const auto trc = get_color_transfer(video, stream_color_trc_);
         if (!logged_colour_) {
             logged_colour_ = true;
@@ -3482,6 +3538,14 @@ struct AVProducer::Impl
         state_["file/time"] = {time() / format_desc_.fps, file_duration().value_or(0) / format_desc_.fps};
         state_["loop"]      = loop_.load();
         state_["pingpong"]  = pingpong_.load();
+        if (hdr10_seen_.load(std::memory_order_relaxed)) {
+            // Queryable rather than only logged, so automation can read what a source
+            // declares without scraping a log line.
+            state_["file/hdr10/max-dml"]  = hdr10_max_dml_;
+            state_["file/hdr10/min-dml"]  = hdr10_min_dml_;
+            state_["file/hdr10/max-cll"]  = hdr10_max_cll_;
+            state_["file/hdr10/max-fall"] = hdr10_max_fall_;
+        }
     }
 
     core::draw_frame prev_frame(const core::video_field field)

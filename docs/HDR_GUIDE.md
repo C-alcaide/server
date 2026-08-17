@@ -732,6 +732,37 @@ Two deliberate constraints:
 * **They are ignored on an SDR channel**, with a warning. ST 2086 beside an SDR stream is a
   contradiction, and CTA-861.3 has no meaning without an HDR EOTF.
 
+### Reading HDR10 back in (FFmpeg producer)
+
+An ingested file or stream carrying HDR10 is decoded and reported. The producer logs it once
+and publishes it to monitor state, so automation can query it rather than scrape a log:
+
+```
+source colour: colorspace=bt2020 transfer=pq
+source hdr10: mastering display 1000/0.005 cd/m2, MaxCLL 1000, MaxFALL 400
+```
+
+| monitor key | meaning |
+| :--- | :--- |
+| `file/hdr10/max-dml` | mastering display peak luminance, cd/m2 |
+| `file/hdr10/min-dml` | mastering display black level, cd/m2 |
+| `file/hdr10/max-cll` | maximum content light level |
+| `file/hdr10/max-fall` | maximum frame-average light level |
+
+**Reported, not propagated — and that is a decision rather than an omission.** These values
+describe the display a *source* was graded on. A channel's output is a composite of however
+many layers are on it, and a composite has no single mastering display; picking one layer's
+and putting it on the wire would be inventing a claim about a picture nobody graded. So the
+values surface on the producer, where they are true, and the output's `<hdr-metadata>` stays
+what an operator declares about their own programme.
+
+Colorimetry and transfer are different: they describe how to *decode* a picture, the mixer
+converts every layer into the channel's space, and the channel's own setting is the honest
+answer for the output. Those are propagated.
+
+`cli.py signalling --stream` asserts the whole of it end to end -- what ffprobe sees leaving
+us, and what the producer reads coming back, for colour and for HDR10.
+
 > **The obvious implementation does not work, and fails silently.** Attaching the metadata to
 > each `AVFrame` is the natural reading of the API and produces a stream with no HDR10 SEI at
 > all -- confirmed with both libx264 and libx265. FFmpeg's encoder wrappers build that SEI
