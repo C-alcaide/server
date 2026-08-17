@@ -181,6 +181,17 @@ uniform sampler2D hue_curve_tex;  // 256x1 RGBA32F: R=HvH, G=HvS, B=HvL, A=SvS
 uniform bool      blend_mask_enable;
 uniform sampler2D blend_mask_tex;  // RGB intensity map, sampled at output screen UV
 
+// ---- Grading node pass ------------------------------------------------------
+// When grade_node_only is set this draw is ONE node's full-screen pass over the
+// layer's already-composited attachment: sample, evaluate the window, apply the
+// node's operation inside it, write out. Nothing else in this shader runs.
+uniform bool  grade_node_only;
+uniform vec2  gn_center;    // frame space, 0..1
+uniform vec2  gn_radius;    // frame space, 0..1
+uniform float gn_feather;   // fraction of radius, isotropic
+uniform bool  gn_invert;
+uniform float gn_exposure;
+
 // Sharpening (unsharp mask)
 uniform bool  sharpen_enable;
 uniform float sharpen_amount;
@@ -1399,6 +1410,24 @@ vec2 get_equirect_uv(vec2 screen_uv) {
                               view_fov, view_offset_x, view_offset_y);
 }
 
+// Grading-node window: soft-edged ellipse in frame space.
+//
+// The feather is a fraction of the radius rather than an absolute distance in UV,
+// which makes it isotropic on any raster. `icvfx_mask` below feathers in output-NDC
+// units instead, so its edge is wider horizontally on a 16:9 frame -- correct for a
+// frustum boundary, wrong for a grading window. Deliberately not shared with it.
+//
+// Normalising the offset by the radii turns the ellipse into a unit circle, so the
+// distance is already dimensionless and one smoothstep covers both axes.
+float grade_node_mask(vec2 uv)
+{
+    vec2  d = (uv - gn_center) / max(gn_radius, vec2(1e-6));
+    float r = length(d);
+    float f = max(gn_feather, 1e-4);
+    float m = 1.0 - smoothstep(1.0 - f, 1.0 + f, r);
+    return gn_invert ? 1.0 - m : m;
+}
+
 // ICVFX camera-frustum mask: returns 1 inside the projected camera quad,
 // 0 outside, feathered across icvfx_feather (output-NDC units).  Winding
 // independent so the quad orientation does not need normalising upstream.
@@ -1758,6 +1787,23 @@ void main()
     if (flip_h) uv.s = 1.0 - uv.s;
     if (flip_v) uv.t = 1.0 - uv.t;
     col = get_blurred_color(uv);
+
+    // ---- Grading node pass -------------------------------------------------
+    // One node, then out. Placed here rather than at the top of main() so it reuses
+    // the tested sampling path; every projection/flip/blur uniform is at its default
+    // on a node pass, so `uv == base_uv` and none of that path does anything.
+    //
+    // Everything below this point already ran during the layer pass that produced
+    // this attachment. Falling through would apply the whole chain a second time.
+    if (grade_node_only) {
+        float m = grade_node_mask(base_uv);
+        // Uniform scale, so this is correct whatever order the channels are in --
+        // see the note on grade_node::exposure. A per-channel operation here would
+        // need `.bgr` on this side and no swizzle on Vulkan's.
+        col.rgb = mix(col.rgb, col.rgb * gn_exposure, m);
+        fragColor = col.bgra;
+        return;
+    }
 
     // ICVFX inner/outer frustum: blend a parallax-correct inner sample over the
     // dimmed outer sample inside the feathered camera-frustum quad mask.

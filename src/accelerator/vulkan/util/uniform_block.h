@@ -214,7 +214,18 @@ struct alignas(16) uniform_block
     float    icvfx_outer_gain_r = 1.0f;     // 840  outer-region RGB gain (white-balance / tint)
     float    icvfx_outer_gain_g = 1.0f;     // 844
     float    icvfx_outer_gain_b = 1.0f;     // 848
-    // Total: 852 bytes
+    // ── Grading node pass ───────────────────────────────────────────────
+    // Appended at the end, like the lens block above, so every offset before this
+    // is untouched. Must match the tail of ParamsBlock in image/fragment_shader.frag
+    // field for field and in this order -- the block is `layout(scalar)`, so a
+    // mismatch silently reinterprets neighbouring floats rather than failing.
+    float    gn_center_x    = 0.5f;         // 852  window centre, frame space
+    float    gn_center_y    = 0.5f;         // 856
+    float    gn_radius_x    = 0.25f;        // 860  window radii, frame space
+    float    gn_radius_y    = 0.25f;        // 864
+    float    gn_feather     = 0.2f;         // 868  fraction of radius, isotropic
+    float    gn_exposure    = 1.0f;         // 872  uniform scale, channel-order agnostic
+    // Total: 876 bytes
 };
 
 // Bit flags for `flags` field
@@ -280,6 +291,13 @@ enum class shader_flags2 : uint32_t
     // non-linear transform is configured. Must equal F2_STRAIGHT_ALPHA_GRADING in
     // image/fragment_shader.frag.
     straight_alpha_grading = 1u << 5,
+    // This draw IS one grading node's full-screen pass: evaluate the window, apply the
+    // node's operation, write out, and run nothing else. Must equal F2_GRADE_NODE in
+    // image/fragment_shader.frag.
+    grade_node_only = 1u << 6,
+    // Window inverted (grade outside the ellipse rather than inside). Must equal
+    // F2_GRADE_NODE_INVERT.
+    grade_node_invert = 1u << 7,
 };
 
 }}} // namespace caspar::accelerator::vulkan

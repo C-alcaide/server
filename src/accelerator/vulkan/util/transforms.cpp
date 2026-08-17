@@ -181,6 +181,12 @@ void apply_transform_colour_values(core::image_transform& self, const core::imag
         self.blend_mask = other.blend_mask;
     }
 
+    // Grading node chain -- innermost wins. Mirror of the OpenGL copy of this function;
+    // both lists are hand-written and a field named in only one diverges the backends.
+    if (other.grade_nodes) {
+        self.grade_nodes = other.grade_nodes;
+    }
+
     // 3D LUT
     if (other.lut3d) {
         self.lut3d          = other.lut3d;

@@ -395,6 +395,18 @@ bool operator==(const image_transform& lhs, const image_transform& rhs)
                eq(static_cast<double>(lhs.lut3d_strength), static_cast<double>(rhs.lut3d_strength)) &&
                lhs.hue_curves.get() == rhs.hue_curves.get() &&
                lhs.blend_mask.get() == rhs.blend_mask.get() &&
+               // Grading node chain. Pointer identity, like the three above: the graph is
+               // immutable once built and every mutation rebuilds it, so a changed pointer
+               // IS a changed graph.
+               //
+               // This is the THIRD hand-written allowlist a new image_transform field has to
+               // be named in -- the other two are apply_transform_colour_values in each
+               // backend. Omitting it here does not drop the value on the way to the kernel;
+               // it defeats the still-frame cache, so a window change leaves the previous
+               // frame on air while the query reads back the new one. `item_fingerprint`
+               // stores a whole image_transform and compares it with this operator, so this
+               // line is the entire fingerprint wiring.
+               lhs.grade_nodes.get() == rhs.grade_nodes.get() &&
                eq(lhs.sharpen_amount, rhs.sharpen_amount) &&
                eq(lhs.sharpen_radius, rhs.sharpen_radius) &&
                eq(lhs.grain_intensity, rhs.grain_intensity) &&

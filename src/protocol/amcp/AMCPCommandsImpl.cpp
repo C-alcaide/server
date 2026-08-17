@@ -3909,6 +3909,105 @@ std::future<std::wstring> mixer_qualifier_command(command_context& ctx)
     return make_ready_future<std::wstring>(L"202 MIXER OK\r\n");
 }
 
+// MIXER GRADE — windowed grading node chain (PROTOTYPE)
+//
+// One window shape (soft-edged ellipse in FRAME space) and one operation (exposure).
+// The narrowest surface that exercises the node PASS and the variable-length data model
+// end to end; design study in docs/GRADING_NODE_GRAPH_STUDY.md.
+//
+//   MIXER <ch>-<layer> GRADE NODE <n> <cx> <cy> <rx> <ry> <feather> <exposure> [<invert>]
+//   MIXER <ch>-<layer> GRADE CLEAR    — drop the whole chain
+//   MIXER <ch>-<layer> GRADE          — query
+//
+// No DURATION/TWEEN. Tweening would have to address node[n].window.field, which the
+// tween system cannot express -- named as an open question in the study rather than
+// quietly half-built here.
+std::future<std::wstring> mixer_grade_command(command_context& ctx)
+{
+    if (ctx.parameters.empty()) {
+        auto transform2 = get_current_transform(ctx).share();
+        return std::async(std::launch::deferred, [transform2]() -> std::wstring {
+            auto graph = transform2.get().image_transform.grade_nodes;
+            if (!graph || graph->nodes.empty())
+                return L"201 MIXER OK\r\nDISABLED\r\n";
+            auto         f = [](double v) { return std::to_wstring(v); };
+            std::wstring out = L"201 MIXER OK\r\n";
+            for (size_t i = 0; i < graph->nodes.size(); ++i) {
+                const auto& n = graph->nodes[i];
+                out += std::to_wstring(i) + L" " + (n.enable ? L"1" : L"0") + L" " +
+                       f(n.window.center[0]) + L" " + f(n.window.center[1]) + L" " +
+                       f(n.window.radius[0]) + L" " + f(n.window.radius[1]) + L" " +
+                       f(n.window.feather) + L" " + f(n.exposure) + L" " +
+                       (n.window.invert ? L"1" : L"0") + L"\r\n";
+            }
+            return out;
+        });
+    }
+
+    if (boost::iequals(ctx.parameters.at(0), L"CLEAR")) {
+        transforms_applier transforms(ctx);
+        transforms.add(stage::transform_tuple_t(
+            ctx.layer_index(),
+            [](frame_transform t) {
+                t.image_transform.grade_nodes = nullptr;
+                return t;
+            },
+            0,
+            L"linear"));
+        transforms.apply();
+        return make_ready_future<std::wstring>(L"202 MIXER OK\r\n");
+    }
+
+    if (!boost::iequals(ctx.parameters.at(0), L"NODE"))
+        CASPAR_THROW_EXCEPTION(user_error() << msg_info(
+                                   "MIXER GRADE NODE <n> cx cy rx ry feather exposure [invert] | CLEAR"));
+
+    grade_require(ctx, 8, L"MIXER GRADE NODE <n> cx cy rx ry feather exposure [invert]");
+    const int index = std::stoi(ctx.parameters.at(1));
+    if (index < 0 || index > 15)
+        CASPAR_THROW_EXCEPTION(user_error() << msg_info("MIXER GRADE node index must be 0-15"));
+
+    const double cx      = grade_param(ctx.parameters.at(2), core::grade_limits::unit, L"centre x");
+    const double cy      = grade_param(ctx.parameters.at(3), core::grade_limits::unit, L"centre y");
+    const double rx      = grade_param(ctx.parameters.at(4), core::grade_limits::unit, L"radius x");
+    const double ry      = grade_param(ctx.parameters.at(5), core::grade_limits::unit, L"radius y");
+    const double feather = grade_param(ctx.parameters.at(6), core::grade_limits::unit, L"feather");
+    const double expos   = grade_param(ctx.parameters.at(7), core::grade_limits::exposure, L"exposure");
+    const bool   invert  = ctx.parameters.size() > 8 && ctx.parameters.at(8) != L"0";
+
+    transforms_applier transforms(ctx);
+    transforms.add(stage::transform_tuple_t(
+        ctx.layer_index(),
+        [=](frame_transform transform) -> frame_transform {
+            // Copy-on-write, and it is load-bearing rather than tidy: composition
+            // (apply_transform_colour_values) and equality (image_transform::operator==,
+            // which is what the still-frame cache compares) both use POINTER identity. A
+            // graph mutated in place would compare equal to itself and the cache would
+            // replay the previous frame -- the exact defect the fingerprint exists to
+            // prevent. Every mutation therefore allocates.
+            auto next = std::make_shared<core::grade_graph>();
+            if (transform.image_transform.grade_nodes)
+                next->nodes = transform.image_transform.grade_nodes->nodes;
+            if (next->nodes.size() <= static_cast<size_t>(index))
+                next->nodes.resize(static_cast<size_t>(index) + 1);
+
+            auto& n            = next->nodes[static_cast<size_t>(index)];
+            n.enable           = true;
+            n.window.center    = {cx, cy};
+            n.window.radius    = {rx, ry};
+            n.window.feather   = feather;
+            n.window.invert    = invert;
+            n.exposure         = expos;
+
+            transform.image_transform.grade_nodes = next;
+            return transform;
+        },
+        0,
+        L"linear"));
+    transforms.apply();
+    return make_ready_future<std::wstring>(L"202 MIXER OK\r\n");
+}
+
 // MIXER RGBLEVELS — per-channel independent levels
 // Query:  MIXER 1-1 RGBLEVELS
 // Reset:  MIXER 1-1 RGBLEVELS RESET
@@ -5490,6 +5589,7 @@ void register_commands(std::shared_ptr<amcp_command_repository_wrapper>& repo)
     repo->register_channel_command(L"Mixer Commands", L"MIXER SHARPEN",      mixer_sharpen_command,      0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER GRAIN",        mixer_grain_command,        0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER QUALIFIER",    mixer_qualifier_command,    0);
+    repo->register_channel_command(L"Mixer Commands", L"MIXER GRADE",        mixer_grade_command,        0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER RGBLEVELS",    mixer_rgblevels_command,    0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER CURVES",       mixer_curves_command,       0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER VOLUME",      mixer_volume_command,       0);

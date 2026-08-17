@@ -109,6 +109,14 @@ layout(scalar, binding = 2) uniform ParamsBlock {
     float icvfx_outer_gain_r;
     float icvfx_outer_gain_g;
     float icvfx_outer_gain_b;
+    // ── Grading node pass ───────────────────────────────────────────────────
+    // Must match the tail of uniform_block in util/uniform_block.h field for field
+    // and in this order. The block is layout(scalar), so a mismatch reinterprets
+    // neighbouring floats instead of failing to compile.
+    float gn_center_x, gn_center_y;
+    float gn_radius_x, gn_radius_y;
+    float gn_feather;
+    float gn_exposure;
 };
 layout(binding = 3) uniform sampler3D lut3d_tex;
 layout(binding = 4) uniform sampler2D hue_curve_tex;
@@ -149,6 +157,9 @@ const uint F2_STRAIGHT_ALPHA_GRADING=1u<<5;
 const uint F2_OUTPUT_BGRA=1u<<0;
 const uint F2_ICVFX=1u<<1;
 const uint F2_BLEND_MASK=1u<<2;
+// Must equal shader_flags2::grade_node_only / ::grade_node_invert in util/uniform_block.h.
+const uint F2_GRADE_NODE=1u<<6;
+const uint F2_GRADE_NODE_INVERT=1u<<7;
 bool flag2(uint f) { return (flags2 & f) != 0u; }
 
 const float PI = 3.14159265359;
@@ -501,6 +512,28 @@ void main(){
     vec2 uv=flag(F_360)?get_equirect_uv(vuv):vuv;
     if(flag(F_FLIP_H))uv.s=1.0-uv.s;if(flag(F_FLIP_V))uv.t=1.0-uv.t;
     col=get_blurred_color(uv);
+
+    // ---- Grading node pass -------------------------------------------------
+    // Mirror of ogl/image/shader.frag, where the full account lives. One node, then
+    // out: everything below already ran during the layer pass that produced this
+    // attachment, so falling through would apply the whole chain twice.
+    //
+    // The feather is a fraction of the radius rather than a distance in UV, which
+    // makes the edge isotropic on any raster -- unlike icvfx_mask below, which
+    // feathers in NDC units. Deliberately not shared with it.
+    //
+    // No swizzle on the exposure: it is a uniform scale over all three channels, so
+    // it is correct in either channel order. A per-channel operation added here would
+    // need `.bgr` on the OpenGL side and none on this one -- the channel-order trap.
+    if(flag2(F2_GRADE_NODE)){
+        vec2 d=(buv-vec2(gn_center_x,gn_center_y))/max(vec2(gn_radius_x,gn_radius_y),vec2(1e-6));
+        float f=max(gn_feather,1e-4);
+        float m=1.0-smoothstep(1.0-f,1.0+f,length(d));
+        if(flag2(F2_GRADE_NODE_INVERT))m=1.0-m;
+        col.rgb=mix(col.rgb,col.rgb*gn_exposure,m);
+        fragColor=flag2(F2_OUTPUT_BGRA)?col.bgra:col;
+        return;
+    }
 
     // ICVFX inner/outer frustum: blend parallax-correct inner sample over the
     // dimmed outer sample inside the feathered camera-frustum quad mask.

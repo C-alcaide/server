@@ -59,6 +59,54 @@ struct blend_mask_data final
     std::vector<float> data;  // width*height*3 RGB float values (0..1)
 };
 
+// ---- Grading node graph -----------------------------------------------------
+//
+// PROTOTYPE SLICE. One window shape (ellipse), one operation (exposure), which is
+// deliberately the narrowest thing that exercises the machinery end to end:
+//
+//   * a variable-length per-layer structure flowing through a transform system built
+//     for fixed scalar fields (composition, equality, the still-frame fingerprint);
+//   * the node PASS -- a full-screen draw per node, ping-ponged between pooled
+//     attachments, routed by `draw_params::grade_node_only`.
+//
+// Design study, including the shapes and operators this does NOT implement:
+// docs/GRADING_NODE_GRAPH_STUDY.md.
+//
+// ⚠ The window is in FRAME space, not the layer's source UV. A node pass draws a
+// full-screen attachment with `frame_geometry::get_default()`, so its UV spans the
+// frame; by the time a node runs, the layer has already been placed. An image-locked
+// window needs the layer's geometry transform carried into the pass, which this slice
+// does not do. The study's §3.4 assumed source UV was the cheap default and it is not.
+struct grade_window final
+{
+    std::array<double, 2> center = {0.5, 0.5};   // frame space, 0..1
+    std::array<double, 2> radius = {0.25, 0.25}; // frame space, 0..1
+
+    // Isotropic, as a fraction of the ellipse radius. Deliberately NOT the
+    // output-NDC feather `icvfx_feather` uses: that one is anisotropic on a
+    // non-square raster, which is right for a frustum edge and wrong for a
+    // grading window. See the study §3.2.
+    double feather = 0.2;
+    bool   invert  = false;
+};
+
+struct grade_node final
+{
+    bool         enable   = true;
+    grade_window window;
+
+    // Uniform scale across all three channels, so this operation is
+    // channel-order agnostic -- which is why it is the one chosen first. If the
+    // two backends disagree on this slice, it is the mask and not the swizzle.
+    // Any per-channel operation added later inherits the channel-order trap.
+    double exposure = 1.0;
+};
+
+struct grade_graph final
+{
+    std::vector<grade_node> nodes;
+};
+
 struct chroma
 {
     enum class legacy_type
@@ -500,6 +548,16 @@ struct image_transform final
 
     // Per-pixel projection blend mask (loaded from a PNG, sampled in output space)
     std::shared_ptr<const blend_mask_data> blend_mask;  // nullptr = disabled
+
+    // Windowed grading node chain. nullptr or no enabled nodes = disabled, and the
+    // layer then renders through exactly the path it did before this existed --
+    // no extra attachment, no extra draw, no extra uniform upload. That fast path
+    // is structural rather than incidental: almost every layer has no graph.
+    //
+    // Innermost wins on composition, like `lut3d` and `blend_mask`, and for the same
+    // reason: two graphs cannot be merged without deciding whose windows apply in
+    // whose space.
+    std::shared_ptr<const grade_graph> grade_nodes;  // nullptr = disabled
 
     // Per-channel RGB levels and tone curves
     core::rgb_levels  per_channel_levels;

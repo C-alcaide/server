@@ -623,12 +623,85 @@ class image_renderer
             // If there is a mix, this is the end so draw it and reset
             draw(target_texture, std::move(local_mix_texture), format_desc, pass, core::blend_mode::normal);
 
-            draw_params.background = target_texture;
+            // Mirror of the OpenGL mixer, including the reason this is read out before the
+            // move: `grade_nodes` lives in draw_params and reading it afterwards is UB.
+            std::shared_ptr<const core::grade_graph> graph = draw_params.transforms.image_transform.grade_nodes;
+            int                                     enabled_nodes = 0;
+            if (graph) {
+                for (const auto& n : graph->nodes)
+                    if (n.enable)
+                        ++enabled_nodes;
+            }
+
+            // No graph = the path that existed before this feature, unchanged: one draw
+            // straight into the target, no attachment.
+            std::shared_ptr<texture> node_texture;
+            if (enabled_nodes > 0) {
+                // ⚠ Same prototype limitation as the OpenGL side: routing the item through
+                // a private attachment changes how it meets the composite, so keyer, keys
+                // and non-normal blend modes are not exercised by this slice.
+                node_texture           = pass->create_attachment();
+                draw_params.background = node_texture;
+            } else {
+                draw_params.background = target_texture;
+            }
             draw_params.local_key  = std::move(local_key_texture);
             draw_params.layer_key  = layer_key_texture;
 
             pass->draw(std::move(draw_params));
+
+            if (enabled_nodes > 0) {
+                auto src = node_texture;
+                for (const auto& n : graph->nodes) {
+                    if (!n.enable)
+                        continue;
+                    auto dst = pass->create_attachment();
+                    apply_grade_node(src, dst, format_desc, pass, n);
+                    src = dst;
+                }
+                draw(target_texture, std::move(src), format_desc, pass, core::blend_mode::normal);
+            }
         }
+    }
+
+    /// One grading node's full-screen pass. Mirror of the OpenGL mixer's version, and
+    /// modelled on `apply_calibration_lut` below for the same reason: source in `textures`
+    /// sampled as an ordinary sampler2D (not through `subpassInput background`), destination
+    /// in `background`, both conversion halves off.
+    void apply_grade_node(std::shared_ptr<texture>&      source_texture,
+                          std::shared_ptr<texture>&      target_texture,
+                          const core::video_format_desc& format_desc,
+                          spl::shared_ptr<renderpass>    pass,
+                          const core::grade_node&        node)
+    {
+        if (!source_texture)
+            return;
+
+        draw_params draw_params;
+        draw_params.target_width  = format_desc.square_width;
+        draw_params.target_height = format_desc.square_height;
+        // 8-bit attachments store BGRA (shader .bgra swizzle); 16-bit store RGBA directly.
+        // Getting this wrong exchanges red and blue, and the node's own operation is a
+        // uniform scale that would not reveal it.
+        draw_params.pix_desc.format = (source_texture->depth() == common::bit_depth::bit8)
+                                          ? core::pixel_format::bgra
+                                          : core::pixel_format::rgba;
+        draw_params.pix_desc.planes = {core::pixel_format_desc::plane(
+            source_texture->width(), source_texture->height(), 4, source_texture->depth())};
+        draw_params.pix_desc.color_space    = target_color_space;
+        draw_params.pix_desc.color_transfer = target_color_transfer;
+        draw_params.target_color_space      = target_color_space;
+        draw_params.target_color_transfer   = target_color_transfer;
+        draw_params.auto_color_convert      = false;
+        draw_params.auto_tone_map           = 0;
+        draw_params.textures                = {spl::make_shared_ptr(source_texture)};
+        draw_params.blend_mode              = core::blend_mode::normal;
+        draw_params.background              = target_texture;
+        draw_params.geometry                = core::frame_geometry::get_default();
+        draw_params.grade_node_only         = true;
+        draw_params.grade_node              = node;
+
+        pass->draw(std::move(draw_params));
     }
 
     void draw(std::shared_ptr<texture>&   target_texture,

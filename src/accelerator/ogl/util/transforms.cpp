@@ -258,6 +258,14 @@ void apply_transform_colour_values(core::image_transform& self, const core::imag
         self.blend_mask = other.blend_mask;
     }
 
+    // Grading node chain -- innermost wins, same rule and same reason as the mask above:
+    // two graphs cannot be composed without resampling one set of windows onto the other's
+    // space. Must be mirrored in the Vulkan copy of this function or the backends diverge in
+    // a way no single-backend test can see.
+    if (other.grade_nodes) {
+        self.grade_nodes = other.grade_nodes;
+    }
+
     // 3D LUT
     if (other.lut3d) {
         self.lut3d          = other.lut3d;

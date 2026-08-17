@@ -1330,6 +1330,21 @@ struct image_kernel::impl
             }
         }
 
+        // ---- Grading node pass ------------------------------------------------
+        // Set unconditionally, both ways. A bool uniform left over from the previous
+        // draw is how a node pass would leak into an ordinary layer -- the same class
+        // of defect as `ycbcr_code_scale` being written to whichever program was bound
+        // last. Every draw states which kind it is.
+        shader_->set("grade_node_only", params.grade_node_only);
+        if (params.grade_node_only) {
+            const auto& n = params.grade_node;
+            shader_->set("gn_center", n.window.center[0], n.window.center[1]);
+            shader_->set("gn_radius", n.window.radius[0], n.window.radius[1]);
+            shader_->set("gn_feather", static_cast<float>(n.window.feather));
+            shader_->set("gn_invert", n.window.invert);
+            shader_->set("gn_exposure", static_cast<float>(n.exposure));
+        }
+
         // Sharpening
         if (std::abs(transforms.image_transform.sharpen_amount) > epsilon) {
             shader_->set("sharpen_enable", true);

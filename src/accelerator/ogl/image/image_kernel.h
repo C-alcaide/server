@@ -112,6 +112,20 @@ struct draw_params final
     /// half's cache id and the variant key stays the (input, output) pair it already is.
     /// Empty means none, and generates exactly what it generated before looks existed.
     std::string                                 ocio_look;
+
+    /// This draw IS one grading node's pass.
+    ///
+    /// Deliberately the same shape as `output_convert_only` above, which is the precedent
+    /// this follows rather than invents: a full-screen draw through the ordinary kernel with
+    /// the source in `textures` and the destination in `background`, tagged so that the
+    /// colour-conversion halves do not run.
+    ///
+    /// It routes the shader past everything the layer pass already did -- both conversion
+    /// halves, the whole primary grading chain, alpha handling, keying, blending, chroma,
+    /// grain and the projection blend mask -- and runs the node's mask and operation only.
+    /// Double-applying any of those is the failure mode this flag exists to prevent.
+    bool             grade_node_only = false;
+    core::grade_node grade_node{};
 };
 
 class image_kernel final

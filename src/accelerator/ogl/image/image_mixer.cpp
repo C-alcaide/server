@@ -565,12 +565,95 @@ class image_renderer
             // If there is a mix, this is the end so draw it and reset
             draw(target_texture, std::move(local_mix_texture), format_desc, core::blend_mode::normal);
 
-            draw_params.background = target_texture;
+            // Copied out BEFORE draw_params is moved from, and the enabled-node count
+            // decided here rather than inside the branch: `graph` is a reference into
+            // draw_params and reading it after the move is undefined.
+            std::shared_ptr<const core::grade_graph> graph = draw_params.transforms.image_transform.grade_nodes;
+            int                                     enabled_nodes = 0;
+            if (graph) {
+                for (const auto& n : graph->nodes)
+                    if (n.enable)
+                        ++enabled_nodes;
+            }
+
+            // The no-graph fast path is the ordinary one and must stay byte-identical:
+            // same target, same keys, one draw, no attachment. Anything else regresses
+            // every layer in every production to buy a feature almost none of them use.
+            std::shared_ptr<texture> node_texture;
+            if (enabled_nodes > 0) {
+                // With a graph the item renders into a private attachment so the node
+                // chain has something of its own to work on, and the result is then
+                // composited normally.
+                //
+                // ⚠ PROTOTYPE LIMITATION: that intermediate changes how this layer meets
+                // the composite. `keyer`, `local_key`/`layer_key` and a non-normal blend
+                // mode all interact with the target during the item draw, and routing
+                // through an attachment first is only equivalent for an ordinary opaque
+                // layer. Getting this right means running the chain inside the layer draw
+                // rather than after it -- see the study's open questions.
+                node_texture = ogl_->create_texture(
+                    target_texture->width(), target_texture->height(), 4, depth_, true, render_format_);
+                draw_params.background = node_texture;
+            } else {
+                draw_params.background = target_texture;
+            }
             draw_params.local_key  = std::move(local_key_texture);
             draw_params.layer_key  = layer_key_texture;
 
             kernel_.draw(std::move(draw_params));
+
+            if (enabled_nodes > 0) {
+                // Ping-pong. Two attachments cover any node count because each node reads
+                // only its immediate predecessor; both come from the device pool, so this
+                // is pool hits rather than allocations.
+                auto src = node_texture;
+                for (const auto& n : graph->nodes) {
+                    if (!n.enable)
+                        continue;
+                    auto dst = ogl_->create_texture(
+                        target_texture->width(), target_texture->height(), 4, depth_, true, render_format_);
+                    apply_grade_node(src, dst, format_desc, n);
+                    src = dst;
+                }
+                draw(target_texture, std::move(src), format_desc, core::blend_mode::normal);
+            }
         }
+    }
+
+    /// One grading node's full-screen pass.
+    ///
+    /// Modelled on `apply_calibration_lut` below, which is the precedent rather than a
+    /// coincidence: source in `textures`, destination in `background`, `pix_desc` tagged
+    /// with the target's colour space and `auto_color_convert` off, so neither conversion
+    /// half runs and the pixel is passed through untouched except by the node.
+    void apply_grade_node(std::shared_ptr<texture>&      source_texture,
+                          std::shared_ptr<texture>&      target_texture,
+                          const core::video_format_desc& format_desc,
+                          const core::grade_node&        node)
+    {
+        if (!source_texture)
+            return;
+
+        draw_params draw_params;
+        draw_params.target_width    = format_desc.square_width;
+        draw_params.target_height   = format_desc.square_height;
+        draw_params.pix_desc.format = core::pixel_format::bgra;
+        draw_params.pix_desc.planes = {core::pixel_format_desc::plane(
+            source_texture->width(), source_texture->height(), 4, source_texture->depth())};
+        draw_params.pix_desc.color_space    = target_color_space;
+        draw_params.pix_desc.color_transfer = target_color_transfer;
+        draw_params.target_color_space      = target_color_space;
+        draw_params.target_color_transfer   = target_color_transfer;
+        draw_params.auto_color_convert      = false;
+        draw_params.auto_tone_map           = 0;
+        draw_params.textures                = {spl::make_shared_ptr(source_texture)};
+        draw_params.blend_mode              = core::blend_mode::normal;
+        draw_params.background              = target_texture;
+        draw_params.geometry                = core::frame_geometry::get_default();
+        draw_params.grade_node_only         = true;
+        draw_params.grade_node              = node;
+
+        kernel_.draw(std::move(draw_params));
     }
 
     void draw(std::shared_ptr<texture>&  target_texture,

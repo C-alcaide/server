@@ -106,6 +106,18 @@ struct draw_params final
     /// half's cache id and the variant key stays the (input, output) pair it already is.
     /// Empty means none, and generates exactly what it generated before looks existed.
     std::string                                 ocio_look;
+
+    /// This draw IS one grading node's pass. Mirror of the OpenGL flag of the same name;
+    /// see accelerator/ogl/image/image_kernel.h for the full account.
+    ///
+    /// On this backend the source has to arrive in `textures` and be sampled as an ordinary
+    /// sampler2D: the fragment shader reads the composite through `subpassInput background`,
+    /// which must be an attachment of the same render pass read at the same pixel, and a
+    /// node pass reads its predecessor instead. `apply_output_convert` and
+    /// `apply_calibration_lut` already work this way, which is why this fits without a new
+    /// pass structure.
+    bool             grade_node_only = false;
+    core::grade_node grade_node{};
 };
 
 }}} // namespace caspar::accelerator::vulkan

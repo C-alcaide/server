@@ -1550,6 +1550,24 @@ struct image_kernel::impl
             }
         }
 
+        // ── Grading node pass ─────────────────────────────────────────
+        // `uniforms` is a fresh uniform_block per draw, so there is nothing to clear on
+        // the false branch -- unlike the OpenGL kernel, where a bool uniform persists
+        // in the program until the next draw overwrites it and therefore has to be set
+        // both ways.
+        if (params.grade_node_only) {
+            const auto& n = params.grade_node;
+            uniforms.flags2 |= static_cast<uint32_t>(shader_flags2::grade_node_only);
+            if (n.window.invert)
+                uniforms.flags2 |= static_cast<uint32_t>(shader_flags2::grade_node_invert);
+            uniforms.gn_center_x = static_cast<float>(n.window.center[0]);
+            uniforms.gn_center_y = static_cast<float>(n.window.center[1]);
+            uniforms.gn_radius_x = static_cast<float>(n.window.radius[0]);
+            uniforms.gn_radius_y = static_cast<float>(n.window.radius[1]);
+            uniforms.gn_feather  = static_cast<float>(n.window.feather);
+            uniforms.gn_exposure = static_cast<float>(n.exposure);
+        }
+
         // ── ICVFX inner/outer frustum ─────────────────────────────────
         if (transforms.image_transform.projection.icvfx_enable) {
             const auto& proj = transforms.image_transform.projection;
