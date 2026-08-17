@@ -655,14 +655,35 @@ core::color_space get_color_space(IDeckLinkVideoInputFrame* video,
     return fallback;
 }
 
-core::color_transfer get_color_transfer(IDeckLinkVideoInputFrame* video, core::color_transfer fallback = core::color_transfer::sdr)
+/// `specified`, when given, reports whether the CARD supplied a transfer function, as opposed
+/// to the caller's fallback being used.
+///
+/// THIS OUT-PARAMETER IS NOT DECORATION, and the bug it fixes shipped. `color_transfer` has no
+/// `unknown` member, so `sdr` means both "the card declared SDR" and "the card declared
+/// nothing". A caller that cannot tell those apart has to guess, and the guess was to distrust
+/// a declared `sdr` -- which meant a 10-bit SDR feed, correctly reported as SDR by the card,
+/// was handed to the mixer as HLG by the `10BIT` fallback. That is an inverse HLG EOTF applied
+/// to an entire SDR feed: not a metadata nit, a wrong picture.
+///
+/// Measured 2026-08-17 before the fix: `card metadata: transfer=sdr` and `input metadata:
+/// transfer=hlg` in the same frame's log lines.
+core::color_transfer get_color_transfer(IDeckLinkVideoInputFrame* video,
+                                        core::color_transfer     fallback  = core::color_transfer::sdr,
+                                        bool*                    specified = nullptr)
 {
+    if (specified != nullptr) {
+        *specified = false;
+    }
+
     IDeckLinkVideoFrameMetadataExtensions* md = nullptr;
 
     if (SUCCEEDED(video->QueryInterface(IID_IDeckLinkVideoFrameMetadataExtensions, (void**)&md))) {
         auto     metadata = wrap_raw<com_ptr>(md, true);
         LONGLONG eotf;
         if (SUCCEEDED(md->GetInt(bmdDeckLinkFrameMetadataHDRElectroOpticalTransferFunc, &eotf))) {
+            if (specified != nullptr) {
+                *specified = true;
+            }
             if (eotf == 2) {        // CEA 861.3: PQ (ST 2084)
                 return core::color_transfer::pq;
             } else if (eotf == 3) { // CEA 861.3: HLG (ARIB STD-B67)
@@ -672,7 +693,8 @@ core::color_transfer get_color_transfer(IDeckLinkVideoInputFrame* video, core::c
         }
     }
 
-    // Metadata not available (typical for SDI inputs) — use caller's fallback.
+    // The card said nothing. On SDI it usually does say something -- see the note on the
+    // 10BIT assertion in the frame handler -- so this is the uncommon path now.
     return fallback;
 }
 
@@ -1322,8 +1344,10 @@ class decklink_producer : public IDeckLinkInputCallback
                 // with the configured value as the fallback, a card that said nothing and a
                 // card that agreed with the configuration return the same answer, and the
                 // wire could then never outrank a flag typed at the command line.
+                bool       card_transfer_specified = false;
                 const auto card_space    = get_color_space(video, core::color_space::unknown);
-                const auto card_transfer = get_color_transfer(video, core::color_transfer::sdr);
+                const auto card_transfer =
+                    get_color_transfer(video, core::color_transfer::sdr, &card_transfer_specified);
 
                 if (card_space != core::color_space::unknown) {
                     color_space = card_space;
@@ -1331,14 +1355,16 @@ class decklink_producer : public IDeckLinkInputCallback
                     color_space = anc.color_space;
                 }
 
-                // No `unknown` exists in `color_transfer`, so "the card declared SDR" and "the
-                // card declared nothing" are the same value and cannot be told apart here.
-                // The wire therefore wins outright when it specifies: a VPID that says PQ is a
-                // statement, and an absent InfoFrame is not.
-                if (anc.transfer_specified) {
-                    color_transfer = anc.color_transfer;
-                } else if (card_transfer != core::color_transfer::sdr) {
+                // A DECLARED `sdr` IS INFORMATION. This used to read `card_transfer != sdr`,
+                // on the reasoning that `sdr` might only mean "nothing was declared" -- which
+                // it can, since the enum has no `unknown`. The cost of that guess was that a
+                // 10-bit SDR feed, correctly reported as SDR by the card, reached the mixer as
+                // HLG because the `10BIT` fallback outranked it. `specified` removes the
+                // ambiguity at the source, so the card is believed whatever it says.
+                if (card_transfer_specified) {
                     color_transfer = card_transfer;
+                } else if (anc.transfer_specified) {
+                    color_transfer = anc.color_transfer;
                 }
 
                 // SAY WHAT ARRIVED, ONCE. The consumer signals colourspace and EOTF, and
@@ -1390,7 +1416,7 @@ class decklink_producer : public IDeckLinkInputCallback
                     // colour is a configuration guess rather than a reading, which is exactly
                     // the case an operator needs to know about and the one that used to be
                     // indistinguishable from a correct reading.
-                    if (hdr_ && card_space == core::color_space::unknown && !anc.colorimetry_specified) {
+                    if (hdr_ && !card_transfer_specified && !anc.transfer_specified) {
                         CASPAR_LOG(warning)
                             << print()
                             << L" the 10BIT flag is deciding the colour: this feed declares no colour space, so it is"
