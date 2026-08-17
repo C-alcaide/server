@@ -701,12 +701,43 @@ evidence about the stream rather than about our encoder agreeing with our decode
 
 So **colorimetry and transfer survive a stream**, exactly as they survive a file.
 
-**Mastering display volume and MaxCLL/MaxFALL do NOT.** Nothing in the ffmpeg module attaches
-`AV_FRAME_DATA_MASTERING_DISPLAY_METADATA` or `..._CONTENT_LIGHT_LEVEL` side data, so the
-encoder has nothing to turn into an HEVC SEI, and ffprobe finds none in the stream — the only
-side data present is x264's own version SEI. The SDI path carries these through SMPTE ST 2108-1
-(`<vanc><hdr-line>`); the FFmpeg path has no equivalent today. For HDR10 delivery, which
-requires ST 2086 and CTA-861.3, that is a real gap rather than a formality.
+**Mastering display volume and MaxCLL/MaxFALL travel too, when you ask for them.** Give the
+ffmpeg consumer the same `<hdr-metadata>` block the DeckLink consumer takes:
+
+```xml
+<ffmpeg>
+  <path>srt://host:9000?mode=caller</path>
+  <args>-format mpegts -vcodec libx265 -acodec aac -ac 2</args>
+  <hdr-metadata>
+    <min-dml>0.005</min-dml>
+    <max-dml>1000</max-dml>
+    <max-cll>1000</max-cll>
+    <max-fall>400</max-fall>
+  </hdr-metadata>
+</ffmpeg>
+```
+
+and the stream carries ST 2086 mastering display volume and CTA-861.3 content light level --
+which is what HDR10 delivery requires. Measured over UDP, read back with ffprobe: `red_x
+35400/50000` (0.708, BT.2020 red), `white_point 15635/50000` (0.3127, D65), `max_luminance
+10000000/10000` (1000 cd/m2), `min_luminance 50/10000` (0.005), `max_content 1000`,
+`max_average 400`. Both **libx265 and libx264** carry it.
+
+Two deliberate constraints:
+
+* **Nothing is attached unless `<hdr-metadata>` is present.** These four numbers describe the
+  display a grade was made on, which the server cannot know. Defaulting them would put a claim
+  about someone's grading suite into every HDR stream, and a downstream tone-mapper would act
+  on it -- worse than sending nothing.
+* **They are ignored on an SDR channel**, with a warning. ST 2086 beside an SDR stream is a
+  contradiction, and CTA-861.3 has no meaning without an HDR EOTF.
+
+> **The obvious implementation does not work, and fails silently.** Attaching the metadata to
+> each `AVFrame` is the natural reading of the API and produces a stream with no HDR10 SEI at
+> all -- confirmed with both libx264 and libx265. FFmpeg's encoder wrappers build that SEI
+> during **init**, from `AVCodecContext::decoded_side_data`, so anything arriving with the
+> frames is simply dropped. There is no error and no return code; only a capture of the stream
+> shows it.
 
 > **`ADD 1 STREAM` fails out of the box on a default channel.** MPEG-TS defaults to **mp2**
 > audio, which refuses the 16-channel (`hexadecagonal`) layout a standard CasparCG channel

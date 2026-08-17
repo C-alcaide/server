@@ -84,6 +84,8 @@ extern "C" {
 #include <libavfilter/buffersrc.h>
 #include <libavformat/avformat.h>
 #include <libavutil/channel_layout.h>
+#include <libavutil/csp.h>
+#include <libavutil/mastering_display_metadata.h>
 #include <libavutil/hwcontext.h>
 #include <libavutil/hwcontext_cuda.h>
 #include <libavutil/opt.h>
@@ -129,6 +131,15 @@ struct Stream
     class cuda_vk_uploader*  gpu_uploader_vk = nullptr;
     std::atomic<bool>*       gpu_direct     = nullptr;
     int                      gpu_failures   = 0;
+
+    //: HDR10 static metadata, attached to every frame handed to the encoder when the channel
+    //: is PQ or HLG and <hdr-metadata> was configured. Off unless both are true -- see the
+    //: note where it is read.
+    bool   hdr_static_metadata = false;
+    double hdr_min_dml         = 0.0;
+    double hdr_max_dml         = 0.0;
+    int    hdr_max_cll         = 0;
+    int    hdr_max_fall        = 0;
 
     Stream(AVFormatContext*                    oc,
            std::string                         suffix,
@@ -623,6 +634,107 @@ struct Stream
                     enc->colorspace      = AVCOL_SPC_BT709;
                     enc->color_trc       = AVCOL_TRC_BT709;
                     break;
+            }
+
+            // HDR10 STATIC METADATA, and only when it was actually configured.
+            //
+            // The colour fields above describe how to DECODE the picture and can be derived
+            // from the channel. These four describe the DISPLAY the content was graded on,
+            // which nothing in the server can know -- so they are attached only when
+            // <hdr-metadata> says so. Inventing defaults would put a claim about someone's
+            // grading suite into every HDR stream we emit, which is worse than sending
+            // nothing: a downstream tone-mapper would act on it.
+            //
+            // Gated on the transfer as well: ST 2086 alongside an SDR stream is a
+            // contradiction, and CTA-861.3 has no meaning without an HDR EOTF.
+            {
+                const auto take = [&](const char* key) -> std::string {
+                    const auto it = options.find(key);
+                    if (it == options.end()) {
+                        return {};
+                    }
+                    auto value = it->second;
+                    // Erased so it never reaches the encoder's AVDictionary, where an
+                    // unrecognised option is an error rather than a no-op.
+                    options.erase(it);
+                    return value;
+                };
+                const auto max_dml  = take("hdr_max_dml");
+                const auto min_dml  = take("hdr_min_dml");
+                const auto max_cll  = take("hdr_max_cll");
+                const auto max_fall = take("hdr_max_fall");
+
+                const bool is_hdr = channel_transfer == core::color_transfer::pq ||
+                                    channel_transfer == core::color_transfer::hlg;
+                if (!max_dml.empty() && is_hdr) {
+                    hdr_static_metadata = true;
+                    hdr_max_dml         = std::stod(max_dml);
+                    hdr_min_dml         = min_dml.empty() ? 0.005 : std::stod(min_dml);
+                    hdr_max_cll         = max_cll.empty() ? 0 : std::stoi(max_cll);
+                    hdr_max_fall        = max_fall.empty() ? 0 : std::stoi(max_fall);
+
+                    // ON THE CODEC CONTEXT, BEFORE avcodec_open2 -- not on the frames.
+                    //
+                    // Attaching it per frame is the obvious reading of the API and produces
+                    // nothing: measured with both libx264 and libx265, the stream carried only
+                    // x264's own version SEI. FFmpeg's encoder wrappers build their HDR10 SEI
+                    // during INIT, from `avctx->decoded_side_data`, so anything arriving with
+                    // the frames is too late and is simply ignored -- silently, which is why
+                    // this needed a stream capture to notice rather than a return code.
+                    const auto add_side_data = [&](AVFrameSideDataType type, size_t size) -> void* {
+                        auto* sd = av_frame_side_data_new(&enc->decoded_side_data,
+                                                          &enc->nb_decoded_side_data, type, size,
+                                                          AV_FRAME_SIDE_DATA_FLAG_UNIQUE);
+                        if (sd != nullptr) {
+                            std::memset(sd->data, 0, size);
+                        }
+                        return sd != nullptr ? sd->data : nullptr;
+                    };
+
+                    if (auto* raw = add_side_data(AV_FRAME_DATA_MASTERING_DISPLAY_METADATA,
+                                                  sizeof(AVMasteringDisplayMetadata))) {
+                        auto* mdm = reinterpret_cast<AVMasteringDisplayMetadata*>(raw);
+                        // Primaries from FFmpeg's own table for whatever the encoder is tagged
+                        // with, so they cannot drift from `enc->color_primaries` the way a
+                        // second hardcoded copy would.
+                        if (const auto* desc = av_csp_primaries_desc_from_id(enc->color_primaries)) {
+                            // NOTE the order: this struct is documented r, g, b, which is NOT
+                            // the g, b, r the H.265 SEI uses -- the wrapper reorders it.
+                            // Filling it in SEI order here yields a packet that parses cleanly
+                            // and describes a display that does not exist.
+                            mdm->display_primaries[0][0] = desc->prim.r.x;
+                            mdm->display_primaries[0][1] = desc->prim.r.y;
+                            mdm->display_primaries[1][0] = desc->prim.g.x;
+                            mdm->display_primaries[1][1] = desc->prim.g.y;
+                            mdm->display_primaries[2][0] = desc->prim.b.x;
+                            mdm->display_primaries[2][1] = desc->prim.b.y;
+                            mdm->white_point[0]          = desc->wp.x;
+                            mdm->white_point[1]          = desc->wp.y;
+                            mdm->has_primaries           = 1;
+                        }
+                        mdm->max_luminance = av_d2q(hdr_max_dml, INT_MAX);
+                        mdm->min_luminance = av_d2q(hdr_min_dml, INT_MAX);
+                        mdm->has_luminance = 1;
+                    }
+
+                    if (hdr_max_cll > 0 || hdr_max_fall > 0) {
+                        if (auto* raw = add_side_data(AV_FRAME_DATA_CONTENT_LIGHT_LEVEL,
+                                                      sizeof(AVContentLightMetadata))) {
+                            auto* cll    = reinterpret_cast<AVContentLightMetadata*>(raw);
+                            cll->MaxCLL  = static_cast<unsigned>(hdr_max_cll);
+                            cll->MaxFALL = static_cast<unsigned>(hdr_max_fall);
+                        }
+                    }
+
+                    CASPAR_LOG(info) << L"[ffmpeg] HDR10 static metadata: mastering display "
+                                     << hdr_max_dml << L"/" << hdr_min_dml << L" cd/m2, MaxCLL "
+                                     << hdr_max_cll << L", MaxFALL " << hdr_max_fall;
+                } else if (!max_dml.empty()) {
+                    CASPAR_LOG(warning)
+                        << L"[ffmpeg] <hdr-metadata> ignored: the channel's transfer is not PQ or "
+                           L"HLG, and mastering display metadata alongside an SDR stream would be "
+                           L"a contradiction rather than extra information.";
+                }
             }
         } else if (codec->type == AVMEDIA_TYPE_AUDIO) {
             st->time_base = {1, av_buffersink_get_sample_rate(sink)};
@@ -1391,8 +1503,26 @@ create_preconfigured_consumer(const boost::property_tree::wptree&               
                               const std::vector<spl::shared_ptr<core::video_channel>>& channels,
                               const core::channel_info&                                channel_info)
 {
+    // <hdr-metadata> is spelled the same way as on the DeckLink consumer deliberately: the
+    // same four numbers describe the same mastering display, and an operator should not have
+    // to learn two spellings to say one thing about their grade. They are folded into the
+    // args string because that is the only channel into the encoder setup, and consumed there
+    // before FFmpeg sees them.
+    auto args = u8(ptree.get<std::wstring>(L"args", L""));
+    if (const auto hdr = ptree.get_child_optional(L"hdr-metadata")) {
+        const auto append = [&](const char* key, const wchar_t* element) {
+            if (const auto value = hdr->get_optional<double>(element)) {
+                args += " -" + std::string(key) + " " + std::to_string(*value);
+            }
+        };
+        append("hdr_max_dml", L"max-dml");
+        append("hdr_min_dml", L"min-dml");
+        append("hdr_max_cll", L"max-cll");
+        append("hdr_max_fall", L"max-fall");
+    }
+
     return spl::make_shared<ffmpeg_consumer>(u8(ptree.get<std::wstring>(L"path", L"")),
-                                             u8(ptree.get<std::wstring>(L"args", L"")),
+                                             args,
                                              ptree.get(L"realtime", false),
                                              channel_info.depth,
                                              channel_info.use_vulkan);
