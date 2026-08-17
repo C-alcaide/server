@@ -1258,13 +1258,23 @@ class decklink_producer : public IDeckLinkInputCallback
 
             BMDTimeValue         in_video_pts   = 0LL;
             BMDTimeValue         in_audio_pts   = 0LL;
-            // When hdr_ is set (10BIT mode), default to BT.2020/HLG since SDI inputs
-            // don't carry color metadata via IDeckLinkVideoFrameMetadataExtensions
-            // (that API only works for HDMI). The metadata will override if available.
-            // BT.2020 under hdr_ is an assertion by configuration, so it is a DECLARED space
-            // and is honoured at any raster. An SDR input declares nothing, hence `unknown`:
-            // the mixer's SD convention then still applies to untagged sub-720 signals, which
-            // is what an SD-SDI feed wants.
+            // `10BIT` asserts BT.2020/HLG. It is a LAST RESORT and no longer the usual case.
+            //
+            // The rationale that used to sit here said SDI inputs do not carry colour metadata
+            // because that interface "only works for HDMI". That is false on this hardware and
+            // was measured false on 2026-08-16: the card writes an ST 352 payload identifier
+            // from the consumer's frame metadata, the receiving driver parses it, and the
+            // producer reads bt709/sdr, bt2020/hlg and bt2020/pq back exactly as configured.
+            // The reason it looked otherwise for so long is that the diagnostic sampled one
+            // frame -- see the census in `read_sdi_signalling`.
+            //
+            // So the ordering in the frame handler puts the card's own answer first and this
+            // assertion third, behind the wire. What remains true is that `10BIT` is a
+            // BIT-DEPTH request being read as a colour declaration, which is a guess about
+            // content the operator may not have seen. It is kept because removing it would
+            // change behaviour for anyone relying on it, and because a genuinely untagged
+            // 10-bit feed has to be called something -- but when it is what decides the
+            // colour, that is now logged rather than silent.
             core::color_space    color_space    = hdr_ ? core::color_space::bt2020 : core::color_space::unknown;
             core::color_transfer color_transfer = hdr_ ? core::color_transfer::hlg  : core::color_transfer::sdr;
 
@@ -1375,6 +1385,18 @@ class decklink_producer : public IDeckLinkInputCallback
                     // resolved `hlg` may be the card speaking or may be the flag. Printing
                     // what GetInt actually returned makes VPID's arrival observable even
                     // though the driver consumes the packet rather than listing it.
+                    // SAY WHEN THE FLAG DECIDED IT. With the card supplying real values this
+                    // should almost never fire; if it does, the feed is untagged and the
+                    // colour is a configuration guess rather than a reading, which is exactly
+                    // the case an operator needs to know about and the one that used to be
+                    // indistinguishable from a correct reading.
+                    if (hdr_ && card_space == core::color_space::unknown && !anc.colorimetry_specified) {
+                        CASPAR_LOG(warning)
+                            << print()
+                            << L" the 10BIT flag is deciding the colour: this feed declares no colour space, so it is"
+                               L" being treated as BT.2020/HLG by configuration rather than by anything on the wire";
+                    }
+
                     CASPAR_LOG(info) << print() << L" card metadata: colorspace="
                                      << metadata_name(card_space) << L" transfer="
                                      << metadata_name(card_transfer)
