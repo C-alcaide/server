@@ -685,6 +685,42 @@ color_transfer=smpte2084    ← PQ
 color_transfer=arib-std-b67 ← HLG
 ```
 
+### Streaming: SRT, UDP, TCP — measured 2026-08-17
+
+The colour description is in the **video bitstream**, as VUI in H.264/HEVC, not in the
+container. MPEG-TS has no colour signalling of its own, so the transport cannot affect it —
+and since that is a structural argument, it was measured rather than asserted. A channel
+streamed over MPEG-TS and read back with **ffprobe** (which is not our code, so the reading is
+evidence about the stream rather than about our encoder agreeing with our decoder):
+
+| channel | over UDP | over SRT |
+| :--- | :--- | :--- |
+| `bt709` / `sdr` | `bt709` / `bt709` / `bt709` | — |
+| `bt2020` / `hlg` | `bt2020` / `arib-std-b67` / `bt2020nc` | — |
+| `bt2020` / `pq` | `bt2020` / `smpte2084` / `bt2020nc` | `bt2020` / `smpte2084` / `bt2020nc` |
+
+So **colorimetry and transfer survive a stream**, exactly as they survive a file.
+
+**Mastering display volume and MaxCLL/MaxFALL do NOT.** Nothing in the ffmpeg module attaches
+`AV_FRAME_DATA_MASTERING_DISPLAY_METADATA` or `..._CONTENT_LIGHT_LEVEL` side data, so the
+encoder has nothing to turn into an HEVC SEI, and ffprobe finds none in the stream — the only
+side data present is x264's own version SEI. The SDI path carries these through SMPTE ST 2108-1
+(`<vanc><hdr-line>`); the FFmpeg path has no equivalent today. For HDR10 delivery, which
+requires ST 2086 and CTA-861.3, that is a real gap rather than a formality.
+
+> **`ADD 1 STREAM` fails out of the box on a default channel.** MPEG-TS defaults to **mp2**
+> audio, which refuses the 16-channel (`hexadecagonal`) layout a standard CasparCG channel
+> carries, so `avcodec_open2` fails on the AUDIO encoder and the whole `ADD` returns `501` —
+> with an error naming `avcodec_open2` and nothing about audio. Constrain the audio:
+>
+> ```
+> ADD 1 STREAM "srt://host:9000?mode=caller" -format mpegts -vcodec libx264 -acodec aac -ac 2
+> ```
+>
+> Also note the option is **`-format`**, not `-f`: the consumer looks the container up under
+> the key `format`, so `-f mpegts` is silently not a format and the open fails with "Unable to
+> choose an output format", which reads like a problem with the URL.
+
 ### Recommended FFmpeg consumer config for HDR ProRes 4444 XQ
 
 ```xml
