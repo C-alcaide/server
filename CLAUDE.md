@@ -28,6 +28,47 @@ threshold downstream defensible.
 If the capability you need is missing, add it to the harness (`core/` + a `cli.py`
 subcommand + tests) rather than writing a script in the scratchpad.
 
+### Which battery for which change — this is not left to judgement either
+
+The two commands above are for **mixer work**, and they sit at the top of this file, so they
+get run reflexively for changes they cannot possibly see. Measured 2026-08-17: a
+`conformance --mixer ogl` run after a change to **Vulkan consumer metadata**, which that
+command misses three times over — `--mixer ogl` runs the OpenGL mixer, `conformance` captures
+through the IMAGE consumer and never instantiates the one that changed, and it compares
+**pixels against a colour model** while metadata is by definition not pixels.
+
+**A battery that cannot fail for your change is worse than running nothing.** Nothing is
+honestly nothing; a green run is a false negative that the next reader will take as evidence.
+`CasparCG-TestRunner/docs/mutation_battery.md` states the general form — *a check that cannot
+catch its mutation cannot fail*.
+
+| what you changed | what actually covers it |
+| :--- | :--- |
+| the shader, the colour maths, a grading operator | `conformance` + `grading`, **both mixers** |
+| a new `image_transform` field | the battery owning that command, **both mixers** — and check the allowlist trap below, which no battery can see for you |
+| an OCIO stage | `ocio`, `ocio-display`, `ocio-look`, `ocio-lut3d`, `consumer-view` as the stage dictates |
+| the composite / blend / alpha domain | `blend-domain`, `alpha-domain`, `mix-stage` |
+| the decode path | `flat-decoded` (the only 1 LSB decode gate), `sdi-input`, `source-colorspace` |
+| consumer **metadata** — colour signalling, HDR static data | `signalling` (DeckLink), `signalling --stream` (FFmpeg). **Vulkan output has no coverage — see below** |
+| consumer **pixels** | `sdi-output` (`--hdr-metadata` for the DeckLink HDR block), `consumer-view`, or `cli.py run --consumer <name>` |
+| Vulkan API usage rather than picture | `vk-validation` |
+| geometry, rasters, projection | `geometry`, `mixer-parity` |
+| docs only | nothing |
+
+Two rules that outrank the table:
+
+* **`--mixer ogl` and `--mixer vulkan` are separate runs**, and parity is required rather than
+  nice. A fault the two backends share passes every check that compares them to each other.
+* **If nothing in the table covers what you changed, say so in the commit** rather than
+  running the nearest battery. That sentence is what turns a gap into a tracked item; the
+  Vulkan-consumer-metadata gap below was found exactly that way.
+
+**Known gap, 2026-08-17: nothing measures Vulkan output consumer metadata.** No harness module
+references `nvapi`, `UHDA` or `edid`; `signalling` drives DeckLink and the FFmpeg stream, and
+`vulkan_out` is reachable only through `cli.py run`, which checks pictures. So a change to
+what that consumer *signals* — as opposed to what it renders — currently has no test that can
+fail. Tracked in `CasparCG-TestRunner/docs/handoff_2026-08-15.md` with a `VERIFY` line.
+
 ## Where the numbers come from — read this before implementing or auditing a standard
 
 Almost nothing here is invented. Colour management, transfer functions, gamut matrices,
