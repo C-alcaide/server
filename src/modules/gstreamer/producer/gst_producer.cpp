@@ -168,6 +168,13 @@ struct gst_producer : public core::frame_producer
     std::atomic<uint64_t> frames_dropped_{0};
     std::atomic<uint64_t> audio_underruns_{0};
     std::atomic<uint64_t> restarts_{0};
+
+    // Whether the pipeline is keeping ahead of the channel, which "frames received" cannot
+    // say: a source delivering 25 fps into a 50 fps channel still counts every frame it sent.
+    // `starved` counts ticks that found the queue empty and had to repeat the last picture —
+    // the direct symptom — and `queue_peak` says how much slack there was when it did not.
+    std::atomic<uint64_t> frames_starved_{0};
+    std::atomic<uint64_t> queue_peak_{0};
     std::atomic<bool>     is_failed_{false};
     std::thread           video_thread_;
     std::thread           audio_thread_;
@@ -802,10 +809,19 @@ struct gst_producer : public core::frame_producer
         tick_timer_.restart();
 
         std::lock_guard<std::mutex> lock(frames_mutex_);
+
+        queue_peak_ = std::max(queue_peak_.load(), static_cast<uint64_t>(frames_.size()));
+
         if (!frames_.empty()) {
             last_frame_ = frames_.front();
             frames_.pop();
+        } else if (last_frame_) {
+            // Only once a picture has been shown: the ticks before the first frame arrives are
+            // startup, not starvation, and counting them would make every producer look bad
+            // for the first second of its life.
+            ++frames_starved_;
         }
+
         return last_frame_;
     }
 
@@ -841,6 +857,8 @@ struct gst_producer : public core::frame_producer
         state["gstreamer/underruns"] = static_cast<int64_t>(audio_underruns_.load());
         state["gstreamer/gpu-frames"] = static_cast<int64_t>(frames_on_gpu_.load());
         state["gstreamer/restarts"]   = static_cast<int64_t>(restarts_.load());
+        state["gstreamer/starved"]    = static_cast<int64_t>(frames_starved_.load());
+        state["gstreamer/queue-peak"] = static_cast<int64_t>(queue_peak_.load());
         state["gstreamer/failed"]     = is_failed_.load();
         state["gstreamer/position"]   = static_cast<int64_t>(query_position_frames());
         state["gstreamer/length"]     = static_cast<int64_t>(query_duration_frames());
