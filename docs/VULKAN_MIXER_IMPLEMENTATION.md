@@ -809,7 +809,7 @@ GPU compute contention when CUDA decode workloads saturate the SMs.
 <channels>
   <channel>
     <video-mode>7680x2160p6000</video-mode>
-    <accelerator>vulkan</accelerator>    <!-- or "ogl" -->
+    <accelerator>vulkan</accelerator>    <!-- or "opengl"; auto|opengl|vulkan only -->
     <consumers>
       <decklink>
         <gpu-readback-mode>auto</gpu-readback-mode>

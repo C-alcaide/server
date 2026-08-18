@@ -123,12 +123,11 @@ class image_mixer
                                      const struct pixel_format_desc& desc,
                                      common::bit_depth               depth) override                               = 0;
 
-#ifdef WIN32
-    class const_frame import_d3d_texture(const void*                                             tag,
-                                         const std::shared_ptr<accelerator::d3d::d3d_texture2d>& d3d_texture,
-                                         core::pixel_format                                      format,
-                                         common::bit_depth                                       depth) override = 0;
-#endif
+// DEFERRED: upstream's CEF shared-texture path (2427604fa) declares
+// frame_factory::import_d3d_texture and implements it here. This fork carries its own
+// GPU-direct HTML path instead (html_gpu_bridge + ogl/util/dx_interop), so the base
+// method is not declared and this override cannot exist. Reconciling the two is
+// tracked; see docs/UPSTREAM_SYNC_2026-08-18.md.
 
     virtual common::bit_depth depth() const = 0;
 

@@ -233,7 +233,7 @@ struct video_channel::impl final
                     caspar::timer produce_timer;
                     auto          stage_frames = (*stage_)(frame_counter_, background_routes, routesCb);
                     const auto produce_elapsed = produce_timer.elapsed();
-                    graph_->set_value("produce-time", produce_elapsed * format_desc.hz * 0.5);
+                    graph_->set_value("produce-time", produce_elapsed * stage_frames.format_desc.hz * 0.5);
 
                     // This is a little race prone, but at worst a new consumer will start with a frame of black
                     bool has_consumers = output_.consumer_count() > 0;
@@ -270,7 +270,7 @@ struct video_channel::impl final
                             ? mixer_(stage_frames.frames2, stage_frames.format_desc, stage_frames.nb_samples)
                             : mixer::output_frames{};
                     const auto mix_elapsed = mix_timer.elapsed();
-                    graph_->set_value("mix-time", mix_elapsed * format_desc.hz * 0.5);
+                    graph_->set_value("mix-time", mix_elapsed * stage_frames.format_desc.hz * 0.5);
 
                     // Consume
                     caspar::timer consume_timer;

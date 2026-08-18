@@ -116,10 +116,10 @@ class gl_context
             if (!temp_ctx) return;
             wglMakeCurrent(hdc_, temp_ctx);
 
-            auto wglCreateContextAttribsARB = reinterpret_cast<PFNWGLCREATECONTEXTATTRIBSARBPROC>(
+            auto wglCreateContextAttribsARB_fn = reinterpret_cast<PFNWGLCREATECONTEXTATTRIBSARBPROC>(
                 wglGetProcAddress("wglCreateContextAttribsARB"));
 
-            if (wglCreateContextAttribsARB) {
+            if (wglCreateContextAttribsARB_fn) {
                 int attribs[] = {
                     WGL_CONTEXT_MAJOR_VERSION_ARB, 4,
                     WGL_CONTEXT_MINOR_VERSION_ARB, 5,
@@ -129,7 +129,7 @@ class gl_context
 
                 // Try shared context with the OGL mixer (enables zero-copy texture path)
                 if (share_context) {
-                    hglrc_ = wglCreateContextAttribsARB(hdc_, reinterpret_cast<HGLRC>(share_context), attribs);
+                    hglrc_ = wglCreateContextAttribsARB_fn(hdc_, reinterpret_cast<HGLRC>(share_context), attribs);
                     if (hglrc_) {
                         shared_ = true;
                     } else {
@@ -147,7 +147,7 @@ class gl_context
                 }
 
                 if (!hglrc_)
-                    hglrc_ = wglCreateContextAttribsARB(hdc_, nullptr, attribs);
+                    hglrc_ = wglCreateContextAttribsARB_fn(hdc_, nullptr, attribs);
 
                 wglMakeCurrent(nullptr, nullptr);
                 wglDeleteContext(temp_ctx);

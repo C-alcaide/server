@@ -429,6 +429,9 @@ struct configuration
     int             tone_map_op   = 0;    // 0=none(passthrough), 7=hlg_ootf
     float           display_peak_luminance = 1000.0f;
     int             channel_transfer = 0;  // set at init: 2=sdr/rec709, 3=pq, 4=hlg
+    // Presentation delay, from <delay> / DELAY=. Upstream 91a102022; the screen half of
+    // that commit IS adopted (the OAL half is not -- see docs/UPSTREAM_SYNC_2026-08-18.md).
+    timespan        delay;
 };
 
 struct frame

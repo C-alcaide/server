@@ -148,17 +148,17 @@ bool gpu_affinity_context::create_affinity_context(int gpu_index)
     SetPixelFormat(affinity_dc_, pf, &pfd);
 
     // Step 4: Create the real OGL context on the affinity DC
-    auto wglCreateContextAttribsARB = reinterpret_cast<HGLRC(WINAPI*)(HDC, HGLRC, const int*)>(
+    auto wglCreateContextAttribsARB_fn = reinterpret_cast<HGLRC(WINAPI*)(HDC, HGLRC, const int*)>(
         wglGetProcAddress("wglCreateContextAttribsARB"));
 
-    if (wglCreateContextAttribsARB) {
+    if (wglCreateContextAttribsARB_fn) {
         int attribs[] = {
             0x2091, 4, // WGL_CONTEXT_MAJOR_VERSION_ARB
             0x2092, 5, // WGL_CONTEXT_MINOR_VERSION_ARB
             0x9126, 0x00000001, // WGL_CONTEXT_PROFILE_MASK_ARB = CORE
             0 // terminator
         };
-        affinity_rc_ = wglCreateContextAttribsARB(affinity_dc_, nullptr, attribs);
+        affinity_rc_ = wglCreateContextAttribsARB_fn(affinity_dc_, nullptr, attribs);
     }
 
     if (!affinity_rc_) {

@@ -192,30 +192,6 @@ struct server::impl
         core::diagnostics::osd::shutdown();
     }
 
-    void setup_accelerator(const boost::property_tree::wptree& pt)
-    {
-        auto backend_str = pt.get(L"configuration.accelerator", L"opengl");
-        boost::algorithm::to_lower(backend_str);
-
-        accelerator::accelerator_backend backend = accelerator::accelerator_backend::opengl;
-
-        if (backend_str == L"opengl" || backend_str == L"ogl" || backend_str == L"auto") {
-            backend = accelerator::accelerator_backend::opengl;
-            CASPAR_LOG(info) << L"Using OpenGL accelerator backend.";
-        }
-#ifdef ENABLE_VULKAN
-        else if (backend_str == L"vulkan" || backend_str == L"vk") {
-            backend = accelerator::accelerator_backend::vulkan;
-            CASPAR_LOG(info) << L"Using Vulkan accelerator backend.";
-        }
-#endif
-        else {
-            CASPAR_LOG(warning) << L"Unknown accelerator backend: " << backend_str << L". Falling back to OpenGL.";
-        }
-
-        accelerator_.set_backend(backend);
-    }
-
     /// `<ocio-config>` — the OpenColorIO config the whole server resolves colour space,
     /// display and view names against.
     ///

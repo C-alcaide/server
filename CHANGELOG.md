@@ -1,6 +1,51 @@
 CasparVP — Unreleased
 ==========================================
 
+### Changed: `<accelerator>` no longer accepts `ogl` or `vk`, and refuses an unknown value
+
+Synced onto `upstream/master`, which brought upstream's `setup_accelerator`
+(`src/shell/server.cpp`). Both implementations were present after the merge and only one can
+be; upstream's was kept.
+
+**What changes for an existing config.** `auto`, `opengl` and `vulkan` behave exactly as
+before. `ogl` and `vk` were undocumented CasparVP aliases and now raise
+`Invalid accelerator: <value>` at startup instead of selecting the OpenGL or Vulkan mixer.
+Anything else unrecognised also now refuses to start, where before it logged a warning and
+silently fell back to OpenGL.
+
+**Why upstream's, when this fork's was more permissive.** Three reasons, in order of weight:
+
+* A silent fallback to OpenGL when an operator asked for Vulkan is the exact failure this
+  tree's harness exists to catch elsewhere — a GPU path standing down without saying so. It
+  costs a cross-GPU copy per frame on the output path and presents as "Vulkan is slow".
+* `src/shell/casparcg.config`'s own reference block already documented
+  `auto [auto|opengl|vulkan]` — upstream's accepted set, not this fork's. The aliases were
+  reachable but undocumented, which is the worst of both.
+* Nothing in the measurement path needs them: `CasparCG-TestRunner`'s config generator maps
+  its own mixer name `ogl` to the portable spelling `opengl` at the boundary
+  (`core/config_generator.py`), having measured `Invalid accelerator: ogl` against an
+  upstream build on 2026-08-13.
+
+**Measured.** `docs/VULKAN_MIXER_IMPLEMENTATION.md` was the only place in the tree still
+advertising the alias (`<!-- or "ogl" -->`) and is corrected in the same commit. No `.config`
+in the tree used it. Server starts and answers `201 VERSION OK / 2.6.0 bc94f4713 Dev` with
+`<accelerator>vulkan</accelerator>`.
+
+### Fixed: a fresh build directory produced a `casparcg.exe` that could not start
+
+`dvp.dll` (NVIDIA GPUDirect for Video, used by the DeckLink consumer) was a load-time import
+that the build never staged — `src/modules/decklink/CMakeLists.txt` carried a NOTE saying it
+"must be staged next to casparcg.exe (copied manually for dev runs)". Existing build
+directories worked because the DLL had been copied into them by hand months earlier; any new
+one produced a binary that died at exit 127 with `dvp.dll: cannot open shared object file`,
+before its logger existed, so with no log to diagnose from.
+
+Now staged by `casparcg_add_runtime_dependency` from the same configure-time
+`DECKLINK_GPUDIRECT_SDK` path that supplies `dvp.lib`, with a build warning if the import lib
+is found and the DLL is not. **Measured 2026-08-18**: reproduced on a fresh `build-sync/`,
+fixed, server then starts and answers AMCP.
+
+
 ### Added: `<hdr-line>` — HDR metadata on the SDI wire as SMPTE ST 2108-1
 
 `<hdr-metadata>` hands MaxCLL, MaxFALL and the mastering display luminances to the DRIVER,

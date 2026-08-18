@@ -279,14 +279,18 @@ void init(const core::module_dependencies& dependencies)
 #ifdef WIN32
         SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
 #endif
-        bool enable_gpu = env::properties().get(L"configuration.html.enable-gpu", false);
+        // (enable_gpu, shared_texture). The second is upstream's CEF shared-texture probe and
+        // needs a D3D device; this fork's GPU-direct path is html_gpu_bridge instead, so a
+        // (true, false) pair is the correct answer for it -- GPU compositing on, CEF's own
+        // shared-texture handover off.
+        auto gpu = is_gpu_shared_texture_enabled();
 
-        if (gpu_direct_requested() && !enable_gpu) {
+        if (gpu_direct_requested() && !gpu.first) {
             // Left alone, the browser process would get --disable-gpu-compositing and
             // then render nothing at all through the accelerated callback -- a blank
             // channel, which is a far worse failure than falling back to the copy path.
             CASPAR_LOG(warning) << L"[html] gpu-direct requires enable-gpu; enabling it (configured: false).";
-            enable_gpu = true;
+            gpu.first = true;
         }
 
         CefSettings settings;

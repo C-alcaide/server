@@ -8,6 +8,10 @@
 .idea
 .vs
 build
+# Out-of-tree build and measurement dirs. `build` above matches only that exact name,
+# so build-sync/, build-sync-baseline/, build-ffmpeg8/ and build-sdcs/ were all tracked
+# and would be swept in by `git add -A`.
+build-*/
 dist
 CMakeFiles
 casparcg_server

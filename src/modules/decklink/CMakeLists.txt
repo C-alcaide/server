@@ -175,8 +175,20 @@ if(DECKLINK_CUDA_VK)
 		target_link_libraries(decklink PRIVATE
 			"${DECKLINK_GPUDIRECT_SDK}/lib/x64/dvp.lib"
 			CUDA::cuda_driver)
-		# NOTE: dvp.dll from ${DECKLINK_GPUDIRECT_SDK}/bin/x64 must be staged next to
-		# casparcg.exe (done by the packaging step / copied manually for dev runs).
+		# dvp.dll must sit beside casparcg.exe or the exe does not start AT ALL: it is a
+		# load-time import, so the process dies before its logger exists and the only
+		# evidence is a bare "cannot open shared object file". This used to say "copied
+		# manually for dev runs", and the consequence was that a FRESH build directory
+		# produced a non-starting binary while the old one worked -- the DLL was present in
+		# build/shell only because somebody had copied it there once, months earlier.
+		# Measured 2026-08-18 on build-sync/: exit 127, `dvp.dll: cannot open shared object
+		# file`, with every other runtime dependency correctly staged.
+		if(EXISTS "${DECKLINK_GPUDIRECT_SDK}/bin/x64/dvp.dll")
+			casparcg_add_runtime_dependency("${DECKLINK_GPUDIRECT_SDK}/bin/x64/dvp.dll")
+		else()
+			message(WARNING "decklink: dvp.lib found but ${DECKLINK_GPUDIRECT_SDK}/bin/x64/dvp.dll is missing; "
+			                "casparcg.exe will fail to start. Stage it manually or clear DECKLINK_GPUDIRECT_SDK.")
+		endif()
 	endif()
 endif()
 

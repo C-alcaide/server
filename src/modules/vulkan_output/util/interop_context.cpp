@@ -77,17 +77,17 @@ interop_context::interop_context()
     }
 
     // Create a shared GL context via wglCreateContextAttribsARB (GL 4.5 core)
-    auto wglCreateContextAttribsARB = reinterpret_cast<HGLRC(WINAPI*)(HDC, HGLRC, const int*)>(
+    auto wglCreateContextAttribsARB_fn = reinterpret_cast<HGLRC(WINAPI*)(HDC, HGLRC, const int*)>(
         wglGetProcAddress("wglCreateContextAttribsARB"));
 
-    if (wglCreateContextAttribsARB) {
+    if (wglCreateContextAttribsARB_fn) {
         int attribs[] = {
             0x2091, 4, // WGL_CONTEXT_MAJOR_VERSION_ARB
             0x2092, 5, // WGL_CONTEXT_MINOR_VERSION_ARB
             0x9126, 0x00000001, // WGL_CONTEXT_PROFILE_MASK_ARB = CORE
             0
         };
-        hglrc_ = wglCreateContextAttribsARB(hdc_, parent_rc, attribs);
+        hglrc_ = wglCreateContextAttribsARB_fn(hdc_, parent_rc, attribs);
     }
 
     if (!hglrc_) {

@@ -65,6 +65,17 @@ class device final
     copy_async(const array<const uint8_t>& source, int width, int height, int stride, common::bit_depth depth);
     std::future<array<const uint8_t>> copy_async(const std::shared_ptr<class texture>& source);
 
+#ifdef WIN32
+    /// The WGL_NV_DX_interop2 device handle, or null when interop was not set up.
+    ///
+    /// Exposed for upstream's `accelerator/d3d/d3d_texture2d`, which registers and unlocks
+    /// shared D3D textures against it. The handle itself is not new -- `impl_` has held it
+    /// since dx_interop landed -- only this accessor is, and it is the whole reason those
+    /// files can be compiled without adopting upstream's frame-import path. See
+    /// docs/UPSTREAM_SYNC_2026-08-18.md section 4.1.
+    std::shared_ptr<void> d3d_interop() const;
+#endif
+
     /// Box-filtered reduction of `source` followed by a readback: `levels`
     /// successive exact 2x2 averagings on the GPU, then one small copy back.
     ///

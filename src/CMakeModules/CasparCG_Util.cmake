@@ -38,6 +38,23 @@ FUNCTION (casparcg_add_library TARGET)
 	# Setup the library and some default config
 	ADD_LIBRARY (${TARGET} ${PARSED_ARGS_SOURCES})
 	target_compile_features (${TARGET} PRIVATE cxx_std_20)
+
+	# CUDA stays at C++17 while C++ moved to C++20 (upstream f9fa5c342).
+	#
+	# CUDA 12.9's nvcc cannot parse MSVC 14.50's C++20 <chrono>, which the fork's .cu files
+	# pull in transitively through common/log.h:
+	#   include/chrono(5125): error C2760: syntax error: '}' unexpected here
+	# It hits cuda_prores and cuda_notchlc; decklink and remotewall also carry .cu sources,
+	# so this is set for every module rather than the two that happened to fail first.
+	#
+	# Keeping CUDA at 17 leaves those translation units on exactly the standard the whole
+	# tree used before the sync, i.e. the configuration they were last known to build under.
+	# KNOWN RISK, not yet verified: this makes the link boundary mixed-standard, and std
+	# types (std::wstring, spl::shared_ptr, boost::property_tree) do cross it -- every CUDA
+	# module registers a consumer or producer factory. MSVC's library is ABI-compatible
+	# across /std:c++17 and /std:c++20 in practice but does not promise to be. Revisit when
+	# CUDA gains a C++20 host parser; see docs/UPSTREAM_SYNC_2026-08-18.md.
+	set_target_properties(${TARGET} PROPERTIES CUDA_STANDARD 17 CUDA_STANDARD_REQUIRED ON)
 	target_include_directories(${TARGET} SYSTEM PRIVATE
 		${BOOST_INCLUDE_PATH}
 	)

@@ -48,6 +48,25 @@ set(HEADERS
 	StdAfx.h
 )
 
+# Upstream's D3D11 device wrappers (2427604fa). Compiled, but their FRAME-IMPORT path is
+# not adopted: `frame_factory::import_d3d_texture` stays undeclared because this fork has
+# its own GPU-direct HTML path (html_gpu_bridge + ogl/util/dx_interop). These three files
+# are needed anyway because html.cpp's is_gpu_shared_texture_enabled() probes the D3D
+# device to decide whether CEF can hand over a shared texture at all, and without them that
+# is an unresolved symbol at link time. See docs/UPSTREAM_SYNC_2026-08-18.md.
+if (MSVC)
+	list(APPEND SOURCES
+		d3d/d3d_device.cpp
+		d3d/d3d_device_context.cpp
+		d3d/d3d_texture2d.cpp
+	)
+	list(APPEND HEADERS
+		d3d/d3d_device.h
+		d3d/d3d_device_context.h
+		d3d/d3d_texture2d.h
+	)
+endif ()
+
 IF(ENABLE_VULKAN)
 	set(VULKAN_SOURCES
 		vulkan/image/image_mixer.cpp

@@ -586,6 +586,10 @@ device::copy_async(const array<const uint8_t>& source, int width, int height, in
 {
     return impl_->copy_async(source, width, height, stride, depth);
 }
+#ifdef WIN32
+std::shared_ptr<void> device::d3d_interop() const { return impl_->interop_handle_; }
+#endif
+
 std::future<array<const uint8_t>> device::copy_async(const std::shared_ptr<texture>& source)
 {
     return impl_->copy_async(source);
