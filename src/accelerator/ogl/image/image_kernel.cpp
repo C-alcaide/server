@@ -475,6 +475,15 @@ struct image_kernel::impl
         // because if the source had BT.2020 matrix, av_color.h would have returned bt2020 directly.
         const int cs_idx = static_cast<int>(color_space) > 2 ? 1 : static_cast<int>(color_space);
 
+        // Row order is R, G, B; columns are Y, Cb, Cr. Each row follows from the
+        // luma coefficients: Cr->R is 2(1-Kr), Cb->B is 2(1-Kb), and the two green terms
+        // are -2(1-Kb)Kb/Kg and -2(1-Kr)Kr/Kg.
+        //
+        // The BT.601 Cr->G term was -0.509 and should be -0.714136:
+        // -2(1-0.299)(0.299)/0.587. BT.709 and BT.2020 were both already correct, which
+        // is what made this hard to see -- only SD material was affected, and only in
+        // green. Measured on flat patches decoded as BT.601, green was out by up to 20
+        // LSB on saturated colour while red and blue were exact.
         const float color_matrices[3][9] = {
             {1.0, 0.0, 1.402, 1.0, -0.344136, -0.714136, 1.0, 1.772, 0.0},                     // bt.601
             {1.0, 0.0, 1.5748, 1.0, -0.1873, -0.4681, 1.0, 1.8556, 0.0},                      // bt.709
