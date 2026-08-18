@@ -361,10 +361,23 @@ differently for the two standards, both object files carry a definition and the 
 one arbitrarily. Layout parity makes that unlikely to matter for these types; it does not
 prove it.
 
-So the residual risk is narrower than first declared, and what would catch it is still a run
-rather than a compile: `cli.py run --decoder cuda_prores` and `--decoder cuda_notchlc`, plus
-`sdi-output` for the DeckLink `.cu` readback paths. **None has been run.** Revisit if CUDA
-ships a C++20 host path, or take §6.3's escape route above and remove the boundary entirely.
+**Runtime: exercised, and it holds.** `cli.py run --decoder cuda_prores --mixer vulkan
+--codec prores_422` over 24 cases on the 8.1.2 build: the module loads, registers its producer
+factory, and decodes. So `std::wstring`, `spl::shared_ptr` and `boost::property_tree` do cross
+the C++17/C++20 boundary in real use — factory registration and AMCP-driven producer creation
+both traverse it — without corruption or crash.
+
+4 of those 24 cases fail at PSNR 24.5, tagged `[decoder]`. **That is pre-existing, not the
+sync:** the same matrix on the PRE-SYNC 7.0.2 binary (C++17 throughout, no mixed boundary)
+fails 5 of 24 at the identical PSNR and the identical fault stage. The failing sets only
+partly overlap, so it is intermittent rather than deterministic — a separate cuda_prores
+defect worth its own investigation, and explicitly not evidence about the standard mismatch.
+
+So the residual risk is now narrow: layout is measured identical, the boundary is exercised
+behaviourally, and what remains unproven is only ODR on `_HAS_CXX20`-conditional inline
+bodies, which no runtime pass can rule out. Still owed: `--decoder cuda_notchlc`, and
+`sdi-output` for the DeckLink `.cu` readback paths. Revisit if CUDA ships a C++20 host path,
+or take the escape route above and remove the boundary entirely.
 
 ---
 
