@@ -93,9 +93,44 @@ not a defect. What is **not** explained by gate tightness is the **backend asymm
 the gate were merely too tight, both mixers would fail it. It needs its own investigation.
 The default 8-bit runs are structurally blind to it, which is why it had not been seen.
 
-Ruled out already: the exe did not change mid-run, and `<render-format>` defaults to
-`unorm` (`server.cpp:416`), so the 32-LSB16 fp16 quantum recorded in the harness's
-`render_format_quantum_2026-08-12.md` is not the explanation either.
+**Characterised further 2026-08-18, and it is now well bounded.** A second, independent
+battery reproduces it, and four candidate causes are eliminated.
+
+`image-convert` (new, §9 item 6) loads a flat still through the IMAGE producer and compares
+against the value the file holds — no colour model, no conversion, no arithmetic:
+
+| mixer | bit-depth | control (no swscale) | worst | verdict |
+| :--- | :--- | ---: | ---: | :--- |
+| ogl | 8 | 0.00 | 0.00 | PASS |
+| ogl | **16** | **9.00 LSB16** | 10.00 | FAIL |
+| vulkan | **16** | **0.00** | 0.00 | PASS |
+
+So the same asymmetry appears on a still image as on `conformance`'s colour producer, which
+makes it a property of the OGL path rather than of either fixture.
+
+**Eliminated:**
+
+* **Not swscale.** The `rgba8` control never reaches `convert_image_frame` and carries the
+  same 9 LSB16. Excess over the control is +1.00 LSB, i.e. swscale contributes essentially
+  nothing.
+* **Not the render target's quantisation.** `banding` on the OGL mixer reports *"unorm
+  control: 1.0 LSB worst across 5 levels, against unorm16's own 1.0"* — the unorm16 target
+  resolves a true 16-bit step. The 32-LSB16 fp16 quantum in the harness's
+  `render_format_quantum_2026-08-12.md` is a property of `<render-format>fp16`, and
+  `<render-format>` defaults to `unorm` (`server.cpp:416`).
+* **Not a stale or contended capture.** The exe hash did not change mid-run, and the clean
+  serial re-runs reproduce it.
+* **Not the decode.** `flat-decoded` passes on both mixers (§8.2), and this reproduces with
+  no decoder in the path at all.
+
+**What it looks like** is a small *offset or scale* error rather than a precision loss: 9
+LSB16 on a nominal 52428 (0.8) is a relative error of 1.7e-4, too small to be any output bit
+depth's step and too large to be 16-bit rounding. It is invisible at 8 bits (0.035 LSB8),
+which is why every default-depth battery passes and why it went unseen.
+
+**Out of scope for this sync — it is pre-existing and reproduces on the 7.0.2 binary too.** It
+wants its own session, and the two batteries above plus `banding` are the instruments to
+start from.
 
 ---
 
