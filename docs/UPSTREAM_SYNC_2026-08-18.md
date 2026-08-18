@@ -236,7 +236,17 @@ of a feature.
 Not a merge error — a genuine consequence of upstream's `f9fa5c342`, and the one thing in
 this sync upstream cannot have hit, because upstream has no CUDA modules.
 
-**CUDA 12.9's nvcc cannot parse MSVC 14.50's C++20 `<chrono>`:**
+**Measured 2026-08-18, and the first description of this was imprecise.** The change was
+originally made after seeing one error and pinning the standard, without establishing that
+C++20 could not work. It has since been established, by compiling one real `.cu` twice with
+the exact flags ninja used and only `-std` differing:
+
+| `-std` | result |
+| :--- | :--- |
+| `c++20` | exit 2, **exactly one error** |
+| `c++17` | **exit 0**, clean |
+
+The error:
 
 ```
 C:\...\MSVC.50.35717\include\chrono(5125):
@@ -246,7 +256,24 @@ C:\...\MSVC.50.35717\include\chrono(5125):
 It fires on `cuda_prores/consumer/prores_consumer.cu`,
 `cuda_prores/consumer/prores_bypass_consumer.cu` and
 `cuda_notchlc/cuda/notchlc_decode.cu`, which reach `<chrono>` transitively through
-`common/log.h`. `decklink` and `remotewall` also carry `.cu` sources and would follow.
+`common/log.h` -> Boost.Log.
+
+**The construct, and whose fault it is.** `chrono:5125` is a C++20 **designated
+initializer** — `return {.tm_sec = _Seconds, .tm_min = _Minutes, ...}` — inside a region
+guarded by `#if _HAS_CXX20` (nearest guard at `chrono:2890`), which is why `-std=c++17`
+never sees it.
+
+It is NOT that `cl.exe` cannot compile that header at C++20: it does, in every ordinary
+`.cpp` in this tree, since the whole C++ side is C++20 and `common/log.h` is everywhere.
+The error arrives from `cl.exe` compiling nvcc's **generated intermediate**
+(`tmpxft_*_notchlc_decode.compute_89.cudafe1.cpp`), so what fails is the nvcc
+preprocess-and-rewrite step feeding cl.exe something it then rejects. A two-pass pipeline
+limitation, not an MSVC one.
+
+**One error, one construct, one header — not a class of failure.** An earlier draft of this
+section implied the latter; the probe says otherwise. Other C++20 constructs could still
+appear in other headers a `.cu` reaches, but that is an unquantified risk rather than an
+observed one. `decklink` and `remotewall` also carry `.cu` sources and would follow.
 
 **Fix applied:** `CUDA_STANDARD 17` / `CUDA_STANDARD_REQUIRED ON` in
 `casparcg_add_module_project`, so every module's CUDA sources stay at C++17 while its C++
@@ -256,6 +283,23 @@ because the other two have the same exposure.
 **Why this is defensible:** it leaves the `.cu` translation units on exactly the standard
 the whole tree used before this sync — the configuration they were last known to build
 under — rather than inventing a third one.
+
+**Why not simply move to a newer CUDA.** `CMAKE_CUDA_ARCHITECTURES` is `52;61;80;86;89`,
+and `52`/`61` are Maxwell and Pascal. `nvcc --list-gpu-arch` on 12.9 still lists
+`compute_50/52/53` and `compute_60/61/62`; **CUDA 13.0 removes those families**, so 12.9 is
+the last toolkit that can target them and upgrading to escape this is a hardware-support
+decision, not a build one. Note the flags already carry
+`-Wno-deprecated-gpu-targets` — the toolkit is warning about those arches today, so this is
+a hold rather than a settled position.
+
+**The escape route, if the mixed boundary ever proves troublesome.** Because the failure is
+one construct in `<chrono>`, reached only transitively via `common/log.h` -> Boost.Log, the
+alternative to pinning the standard is to stop pulling `<chrono>` into `.cu` translation
+units at all — a thin logging shim declared in a header with no Boost in it and defined in a
+`.cpp`. That would let CUDA compile at C++20 and remove the mixed-standard boundary entirely.
+It costs `CASPAR_LOG` inside `.cu` files and is a bounded refactor rather than a rewrite.
+Worth doing only if the boundary below is measured to be a real problem; `CUDA_STANDARD 17`
+is the cheaper answer while it is not.
 
 **KNOWN RISK, declared rather than resolved.** This makes the link boundary
 mixed-standard, and std types DO cross it: every CUDA module registers a consumer or
