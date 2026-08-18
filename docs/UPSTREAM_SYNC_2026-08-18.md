@@ -301,15 +301,35 @@ It costs `CASPAR_LOG` inside `.cu` files and is a bounded refactor rather than a
 Worth doing only if the boundary below is measured to be a real problem; `CUDA_STANDARD 17`
 is the cheaper answer while it is not.
 
-**KNOWN RISK, declared rather than resolved.** This makes the link boundary
-mixed-standard, and std types DO cross it: every CUDA module registers a consumer or
-producer factory, so `std::wstring`, `spl::shared_ptr` and `boost::property_tree` pass
-between a C++17 object and a C++20 one. MSVC's standard library is ABI-compatible across
-`/std:c++17` and `/std:c++20` in practice but does not contractually promise to be, and
-nothing here has measured it. What would catch a problem is not a compile but a run:
-`cli.py run --decoder cuda_prores` and `--decoder cuda_notchlc`, plus `sdi-output` for the
-DeckLink `.cu` readback paths. **None has been run.** Revisit when CUDA ships a C++20 host
-parser.
+**The risk this creates, and how much of it is now measured.** The link boundary is
+mixed-standard and std types DO cross it: every CUDA module registers a consumer or producer
+factory, so `std::wstring`, `spl::shared_ptr` and `boost::property_tree` pass between a
+C++17 object and a C++20 one.
+
+**Layout: measured, no difference.** A probe compiled twice with identical flags and only
+`/std:` differing reports the same size and alignment for every crossing type, on the same
+STL (`_MSVC_STL_VERSION=145`, `_ITERATOR_DEBUG_LEVEL=0`), with `_HAS_CXX20` flipping 0 -> 1
+as expected:
+
+| type | C++17 | C++20 |
+| :--- | :--- | :--- |
+| `std::string` / `std::wstring` | 32 / 8 | 32 / 8 |
+| `std::shared_ptr<T>` / `weak_ptr<T>` | 16 / 8 | 16 / 8 |
+| `std::unique_ptr<T>` | 8 / 8 | 8 / 8 |
+| `std::vector<std::wstring>` | 24 / 8 | 24 / 8 |
+| `std::map<std::wstring, int>` | 16 / 8 | 16 / 8 |
+| `boost::property_tree::ptree` / `wptree` | 40 / 8 | 40 / 8 |
+
+**What that does NOT settle**, and it is the half that cannot be settled statically: **ODR on
+inline function bodies that differ under `_HAS_CXX20`.** Where a header defines a member
+differently for the two standards, both object files carry a definition and the linker keeps
+one arbitrarily. Layout parity makes that unlikely to matter for these types; it does not
+prove it.
+
+So the residual risk is narrower than first declared, and what would catch it is still a run
+rather than a compile: `cli.py run --decoder cuda_prores` and `--decoder cuda_notchlc`, plus
+`sdi-output` for the DeckLink `.cu` readback paths. **None has been run.** Revisit if CUDA
+ships a C++20 host path, or take §6.3's escape route above and remove the boundary entirely.
 
 ---
 
