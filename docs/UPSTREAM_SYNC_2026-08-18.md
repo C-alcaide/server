@@ -176,7 +176,53 @@ sampled and compare it against the byte that was uploaded. That isolates upload 
 from readback, which no battery here can currently do. Do NOT change the mixer before that
 measurement exists; two hypotheses have already died in this paragraph.
 
-**Out of scope for this sync — it is pre-existing and reproduces on the 7.0.2 binary too.**
+### 3.1.1 FOUND AND FIXED: swscale's BGRA64 -> RGBA64 permutation is lossy
+
+**Cause.** `image_consumer` hands `convert_image_frame` a `AV_PIX_FMT_BGRA64LE` frame and asks
+for `AV_PIX_FMT_RGBA64BE`. That is a channel permutation plus a byte swap, and swscale gets
+the permutation WRONG. Measured on a single pixel through `ffmpeg` alone, with no CasparCG in
+the picture:
+
+```
+bgra64le -> rgba64be   52428,39321,26214  ->  52420,39327,26205     LOSSY (-8,+6,-9)
+bgra64le -> rgba64le   52428,39321,26214  ->  52420,39327,26205     LOSSY (identical)
+bgra64le -> bgra64le   52428,39321,26214  ->  52428,39321,26214     exact (no-op)
+rgba64le -> rgba64be   52428,39321,26214  ->  52428,39321,26214     exact (byte swap only)
+```
+
+So the loss is in the **permutation**, not the endianness, and it is cross-channel: greys
+drifted 1-4 LSB16 while a saturated colour drifted 8-9, G gaining where R and B lost. That is
+the shape of a round trip through a YUV intermediate.
+
+**Why it looked like an OGL defect.** The OGL mixer reports `pixel_format::bgra`; the Vulkan
+mixer reports `rgba`. So Vulkan's capture was a byte swap and came out exact, OGL's went
+through the permutation, and the difference presented as a 16-bit precision defect in the OGL
+backend. It is neither OGL's nor Vulkan's — it is the capture path, and it was invisible at 8
+bits (0.035 LSB8) which is why every default-depth battery passed.
+
+**Not FFmpeg 8.** Identical numbers on 7.0.2 (`84e64ff22`) and 8.1.2 (`bc94f4713`), so it
+predates the migration by a long way.
+
+**Fix.** Do the B/R exchange by hand in the un-premultiply loop that already makes a writable
+copy, then declare the frame `RGBA64LE` so swscale is left with only the byte swap. Exact by
+construction.
+
+**Verified:**
+
+| measurement | before | after |
+| :--- | :--- | :--- |
+| `image-convert --mixer ogl --bit-depth 16` | control 9.00, worst 10.00 LSB16, **FAIL** | control 0.00, worst 0.00, **4/4 PASS** |
+| `conformance --mixer ogl --bit-depth 16`, worst delta | **33.00 LSB16** | **<= 0.36 LSB16** |
+
+**One symptom owed before this is called finished.** The post-fix `conformance` 16-bit run
+showed **8 capture timeouts** ("IMAGE consumer did not produce a complete ... within 10.0s"),
+where the pre-fix runs showed zero. Part of that was another session's battery competing for
+the GPU, but not all of it — 8 remained on a quiet box. A single capture is unaffected
+(`image-convert` completes cleanly), so the suspicion is the 5-way parallel 16-bit load
+tipping a marginal budget rather than the exchange itself, which is one `std::swap` per pixel.
+Needs timing before this is shipped.
+
+**The original finding was pre-existing and reproduces on the 7.0.2 binary too.**
 
 ---
 

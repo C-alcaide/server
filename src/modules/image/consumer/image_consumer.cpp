@@ -213,6 +213,40 @@ struct image_consumer : public core::frame_consumer
                 // For 16-bit frames, output PNG16 (RGBA64BE); for 8-bit, standard RGBA
                 AVPixelFormat target_fmt = is_hi_dep ? AV_PIX_FMT_RGBA64BE : AV_PIX_FMT_RGBA;
 
+                // What the MIXER handed us, before this consumer touches a byte.
+                //
+                // Diagnostic for the OGL 16-bit deviation: a flat still renders 8-10 LSB16 off
+                // nominal on the OGL mixer and exactly on nominal on Vulkan, with no colour
+                // conversion running. Everything downstream of here -- the un-premultiply and
+                // convert_image_frame -- is shared by both backends, so logging the first
+                // pixel as it arrives splits "the mixer produced this" from "this consumer
+                // mangled it", which no battery can currently distinguish.
+                //
+                // Trace level only, so it costs nothing at the default log level.
+                if (frame.image_data(0).size() > 0) {
+                    const auto& d0  = frame.image_data(0);
+                    const auto* p16 = reinterpret_cast<const std::uint16_t*>(d0.data());
+                    const auto* p8  = d0.data();
+                    CASPAR_LOG(trace) << L"[image_consumer] MIXER_OUT"
+                                      << L" fmt=" << static_cast<int>(pix_desc.format)
+                                      << L" planes=" << pix_desc.planes.size()
+                                      << L" depth0=" << static_cast<int>(pix_desc.planes[0].depth)
+                                      << L" hi_dep=" << (is_hi_dep ? 1 : 0)
+                                      << L" bytes=" << d0.size()
+                                      << L" first8="
+                                      << (is_hi_dep && d0.size() >= 16
+                                              ? (std::to_wstring(p16[0]) + L"," + std::to_wstring(p16[1]) + L"," +
+                                                 std::to_wstring(p16[2]) + L"," + std::to_wstring(p16[3]) + L"," +
+                                                 std::to_wstring(p16[4]) + L"," + std::to_wstring(p16[5]) + L"," +
+                                                 std::to_wstring(p16[6]) + L"," + std::to_wstring(p16[7]))
+                                          : d0.size() >= 8
+                                              ? (std::to_wstring(p8[0]) + L"," + std::to_wstring(p8[1]) + L"," +
+                                                 std::to_wstring(p8[2]) + L"," + std::to_wstring(p8[3]) + L"," +
+                                                 std::to_wstring(p8[4]) + L"," + std::to_wstring(p8[5]) + L"," +
+                                                 std::to_wstring(p8[6]) + L"," + std::to_wstring(p8[7]))
+                                              : std::wstring(L"(short)"));
+                }
+
                 ctx->width     = static_cast<int>(frame.width());
                 ctx->height    = static_cast<int>(frame.height());
                 ctx->pix_fmt   = target_fmt;
@@ -282,6 +316,9 @@ struct image_consumer : public core::frame_consumer
                     const int stride16 = av_frame->linesize[0] / 2; // in uint16_t units
                     const int w        = av_frame->width;
                     const int h        = av_frame->height;
+                    // Only a BGRA source needs the components exchanged; an RGBA one is
+                    // already in the order the PNG target wants.
+                    const bool swap_br = pix_desc.format == core::pixel_format::bgra;
                     for (int y = 0; y < h; ++y) {
                         uint16_t* row = data + y * stride16;
                         for (int x = 0; x < w; ++x) {
@@ -295,9 +332,44 @@ struct image_consumer : public core::frame_consumer
                                 c1 = static_cast<uint16_t>(std::min(65535, static_cast<int>(c1) * 65535 / a));
                                 c2 = static_cast<uint16_t>(std::min(65535, static_cast<int>(c2) * 65535 / a));
                             }
+                            // Swap B and R here rather than letting swscale do it.
+                            //
+                            // swscale's BGRA64 -> RGBA64 channel permutation IS LOSSY, which
+                            // is a surprising thing for a permutation to be. Measured
+                            // 2026-08-18 on a single pixel through `ffmpeg` alone, no
+                            // CasparCG involved:
+                            //
+                            //   bgra64le -> rgba64be   52428,39321,26214 -> 52420,39327,26205
+                            //   bgra64le -> rgba64le   52428,39321,26214 -> 52420,39327,26205
+                            //   bgra64le -> bgra64le   exact (no-op)
+                            //   rgba64le -> rgba64be   exact (byte swap only)
+                            //
+                            // so the loss is in the PERMUTATION, not the endianness, and it
+                            // is cross-channel: greys drifted 1-4 LSB16 while a saturated
+                            // colour drifted 8-9, with G gaining where R and B lost. That is
+                            // the shape of a trip through a YUV intermediate.
+                            //
+                            // It only ever bit the OGL mixer, because OGL reports
+                            // pixel_format::bgra while Vulkan reports rgba -- so Vulkan's
+                            // capture was a byte swap and came out exact, and OGL's looked
+                            // like a 16-bit precision defect in the OGL backend for as long
+                            // as nobody compared the two through this function. Present
+                            // identically on FFmpeg 7.0.2 and 8.1.2, so it long predates the
+                            // FFmpeg 8 migration.
+                            //
+                            // Doing it by hand is exact by construction and leaves swscale
+                            // with nothing but the LE->BE swap below, which is exact.
+                            if (swap_br) {
+                                std::swap(c0, c2);
+                            }
                         }
                     }
                     av_frame->data[0] = buf.data();
+                    // The data is RGBA-ordered now whatever it arrived as, so say so: this is
+                    // what reduces the conversion below to a byte swap.
+                    if (swap_br) {
+                        av_frame->format = AV_PIX_FMT_RGBA64LE;
+                    }
 
                     // Convert the un-premultiplied source to RGBA64BE for PNG encoding
                     auto av_frame2 = convert_image_frame(av_frame, target_fmt);
