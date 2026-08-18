@@ -14,6 +14,9 @@ if (NOT GSTREAMER_ROOT OR NOT EXISTS "${GSTREAMER_ROOT}/include/gstreamer-1.0/gs
 endif()
 
 set(SOURCES
+		consumer/gst_consumer.cpp
+		consumer/gst_consumer.h
+
 		producer/gst_producer.cpp
 		producer/gst_producer.h
 

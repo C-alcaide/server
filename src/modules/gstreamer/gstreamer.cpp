@@ -21,9 +21,11 @@
 
 #include "gstreamer.h"
 
+#include "consumer/gst_consumer.h"
 #include "producer/gst_producer.h"
 #include "util/gst_runtime.h"
 
+#include <core/consumer/frame_consumer.h>
 #include <core/producer/frame_producer.h>
 
 #include <common/env.h>
@@ -36,6 +38,7 @@ namespace caspar { namespace gstreamer {
 void init(const core::module_dependencies& dependencies)
 {
     dependencies.producer_registry->register_producer_factory(L"GStreamer Producer", create_producer);
+    dependencies.consumer_registry->register_consumer_factory(L"GStreamer Consumer", create_consumer);
 
     // GStreamer is loaded on first use, so a server with no installation starts normally and
     // only a PLAY that asks for it fails. auto-load turns that into a startup diagnostic,
