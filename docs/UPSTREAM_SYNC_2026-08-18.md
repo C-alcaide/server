@@ -203,24 +203,34 @@ bits (0.035 LSB8) which is why every default-depth battery passed.
 **Not FFmpeg 8.** Identical numbers on 7.0.2 (`84e64ff22`) and 8.1.2 (`bc94f4713`), so it
 predates the migration by a long way.
 
-**Fix.** Do the B/R exchange by hand in the un-premultiply loop that already makes a writable
-copy, then declare the frame `RGBA64LE` so swscale is left with only the byte swap. Exact by
-construction.
+**Fix.** Do the **whole** conversion by hand in the un-premultiply loop that already makes a
+writable copy — exchange B/R if the source is BGRA, and byte-swap every component — so the
+frame leaves that loop already `RGBA64BE` and swscale is not called at all.
+
+**The obvious smaller fix was tried first and was wrong.** Doing only the permutation by hand
+and leaving swscale the `RGBA64LE -> RGBA64BE` byte swap is exact in isolation, and it still
+failed in practice: `convert_image_frame` builds a fresh `SwsContext` per call and that format
+pair has no fast path, so captures started timing out at 10 s under `conformance`'s parallel
+16-bit load. The measured result was **28/36 conversions, heavy timeouts, and surviving
+deltas up to 65535 LSB16** — worse than the defect it fixed, because a capture that never
+completes reports as a wild value rather than as a missing one. Correct pixels that arrive too
+late are not an improvement.
 
 **Verified:**
 
-| measurement | before | after |
-| :--- | :--- | :--- |
-| `image-convert --mixer ogl --bit-depth 16` | control 9.00, worst 10.00 LSB16, **FAIL** | control 0.00, worst 0.00, **4/4 PASS** |
-| `conformance --mixer ogl --bit-depth 16`, worst delta | **33.00 LSB16** | **<= 0.36 LSB16** |
+| measurement | before | first attempt (swscale byte swap) | final (no swscale) |
+| :--- | :--- | :--- | :--- |
+| `image-convert --mixer ogl --bit-depth 16` | control 9.00, worst 10.00, **FAIL** | 4/4 PASS | control 0.00, worst 0.00, **4/4 PASS** |
+| `image-convert --mixer vulkan --bit-depth 16` | 4/4 PASS | — | **4/4 PASS** (no regression) |
+| `image-convert --mixer ogl --bit-depth 8` | 4/4 PASS | — | **4/4 PASS** (no regression) |
+| `conformance --mixer ogl --bit-depth 16 --quick` | — | 28/36, worst 65535, many timeouts | **36/36, worst 0.96 LSB16, 0 timeouts** |
+| `conformance --mixer ogl --bit-depth 16` (full 100) | **0/100**, worst 33.00 | — | see below |
 
-**One symptom owed before this is called finished.** The post-fix `conformance` 16-bit run
-showed **8 capture timeouts** ("IMAGE consumer did not produce a complete ... within 10.0s"),
-where the pre-fix runs showed zero. Part of that was another session's battery competing for
-the GPU, but not all of it — 8 remained on a quiet box. A single capture is unaffected
-(`image-convert` completes cleanly), so the suspicion is the 5-way parallel 16-bit load
-tipping a marginal budget rather than the exchange itself, which is one `std::swap` per pixel.
-Needs timing before this is shipped.
+**A verification claim in an earlier revision of this section was wrong and is retracted.** It
+reported the post-fix `conformance` worst delta as "<= 0.36 LSB16". That figure came from three
+grepped lines of a run that had completed only **13 of 15** conversions while another session's
+battery was competing for the GPU — a truncated, contended run read as if it were a clean one.
+The `--quick` numbers above are from a quiet box with the summary captured in full.
 
 **The original finding was pre-existing and reproduces on the 7.0.2 binary too.**
 

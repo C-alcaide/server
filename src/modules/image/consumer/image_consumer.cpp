@@ -357,22 +357,33 @@ struct image_consumer : public core::frame_consumer
                             // identically on FFmpeg 7.0.2 and 8.1.2, so it long predates the
                             // FFmpeg 8 migration.
                             //
-                            // Doing it by hand is exact by construction and leaves swscale
-                            // with nothing but the LE->BE swap below, which is exact.
-                            if (swap_br) {
-                                std::swap(c0, c2);
-                            }
+                            // Doing the whole thing by hand -- permutation AND byte swap --
+                            // is exact by construction and skips swscale entirely.
+                            //
+                            // An intermediate version did only the permutation and left
+                            // swscale the RGBA64LE->RGBA64BE byte swap, which is exact in
+                            // isolation. It was still wrong in practice: convert_image_frame
+                            // builds a fresh SwsContext per call, and that format pair
+                            // evidently has no fast path, so captures began timing out at
+                            // 10 s under conformance's parallel 16-bit load. Correct pixels
+                            // that arrive too late to be captured are not an improvement.
+                            // Produce RGBA64BE right here: exchange B/R if the source was
+                            // BGRA, and byte-swap every component. That leaves swscale with
+                            // nothing to do at all, which is the point -- see below.
+                            const uint16_t r = swap_br ? c2 : c0;
+                            const uint16_t g = c1;
+                            const uint16_t b = swap_br ? c0 : c2;
+                            c0 = static_cast<uint16_t>((r >> 8) | (r << 8));
+                            c1 = static_cast<uint16_t>((g >> 8) | (g << 8));
+                            c2 = static_cast<uint16_t>((b >> 8) | (b << 8));
+                            row[x * 4 + 3] = static_cast<uint16_t>((a >> 8) | (a << 8));
                         }
                     }
                     av_frame->data[0] = buf.data();
-                    // The data is RGBA-ordered now whatever it arrived as, so say so: this is
-                    // what reduces the conversion below to a byte swap.
-                    if (swap_br) {
-                        av_frame->format = AV_PIX_FMT_RGBA64LE;
-                    }
+                    // Already RGBA64BE, so hand it to the encoder untouched.
+                    av_frame->format = AV_PIX_FMT_RGBA64BE;
 
-                    // Convert the un-premultiplied source to RGBA64BE for PNG encoding
-                    auto av_frame2 = convert_image_frame(av_frame, target_fmt);
+                    auto av_frame2 = av_frame;
 
                     FF(avcodec_send_frame(ctx.get(), av_frame2.get()));
                     FF(avcodec_send_frame(ctx.get(), nullptr));
