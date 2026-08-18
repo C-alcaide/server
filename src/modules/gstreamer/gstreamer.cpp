@@ -39,6 +39,8 @@ void init(const core::module_dependencies& dependencies)
 {
     dependencies.producer_registry->register_producer_factory(L"GStreamer Producer", create_producer);
     dependencies.consumer_registry->register_consumer_factory(L"GStreamer Consumer", create_consumer);
+    dependencies.consumer_registry->register_preconfigured_consumer_factory(L"gstreamer",
+                                                                            create_preconfigured_consumer);
 
     // GStreamer is loaded on first use, so a server with no installation starts normally and
     // only a PLAY that asks for it fails. auto-load turns that into a startup diagnostic,

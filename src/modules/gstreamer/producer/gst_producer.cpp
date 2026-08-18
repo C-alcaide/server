@@ -38,6 +38,7 @@
 
 #include <common/diagnostics/graph.h>
 #include <common/except.h>
+#include <common/future.h>
 #include <common/log.h>
 #include <common/param.h>
 #include <common/timer.h>
@@ -59,6 +60,7 @@ extern "C" {
 
 #include <atomic>
 #include <chrono>
+#include <limits>
 #include <deque>
 #include <mutex>
 #include <queue>
@@ -634,7 +636,128 @@ struct gst_producer : public core::frame_producer
         }
     }
 
+    // ---------------------------------------------------------------- transport
+
+    /// Frames, from GStreamer's nanoseconds. Returns 0 when the pipeline cannot answer —
+    /// a live source has no duration, and reporting one would be worse than reporting none.
+    uint32_t query_duration_frames() const
+    {
+        std::shared_lock<std::shared_mutex> lock(pipeline_mutex_);
+        if (pipeline_ == nullptr)
+            return 0;
+
+        gint64 duration_ns = 0;
+        if (!gst_element_query_duration(pipeline_, GST_FORMAT_TIME, &duration_ns) || duration_ns <= 0)
+            return 0;
+
+        return static_cast<uint32_t>(gst_util_uint64_scale(static_cast<guint64>(duration_ns),
+                                                           format_desc_.framerate.numerator(),
+                                                           format_desc_.framerate.denominator() * GST_SECOND));
+    }
+
+    uint32_t query_position_frames() const
+    {
+        std::shared_lock<std::shared_mutex> lock(pipeline_mutex_);
+        if (pipeline_ == nullptr)
+            return 0;
+
+        gint64 position_ns = 0;
+        if (!gst_element_query_position(pipeline_, GST_FORMAT_TIME, &position_ns) || position_ns < 0)
+            return 0;
+
+        return static_cast<uint32_t>(gst_util_uint64_scale(static_cast<guint64>(position_ns),
+                                                           format_desc_.framerate.numerator(),
+                                                           format_desc_.framerate.denominator() * GST_SECOND));
+    }
+
+    /// A flushing, accurate seek.
+    ///
+    /// FLUSH so the queued frames go with it — without it the channel keeps showing what was
+    /// already buffered for up to four frames, which reads as the seek having been ignored.
+    ///
+    /// ACCURATE rather than KEY_UNIT because an operator who asks for frame 300 means frame
+    /// 300. Measured with KEY_UNIT on a clip with keyframes every 250: SEEK 300 landed at 250
+    /// and the position read back 324 after a second and a half of play — plausible enough to
+    /// be believed and wrong by two seconds. The cost is a slower seek on a long GOP, which is
+    /// the right trade for a command whose whole purpose is to land somewhere exact.
+    bool seek_to_frame(uint32_t frame)
+    {
+        const auto position_ns = gst_util_uint64_scale(frame,
+                                                       GST_SECOND * format_desc_.framerate.denominator(),
+                                                       format_desc_.framerate.numerator());
+
+        bool ok = false;
+        {
+            std::shared_lock<std::shared_mutex> lock(pipeline_mutex_);
+            if (pipeline_ == nullptr)
+                return false;
+
+            ok = gst_element_seek_simple(pipeline_,
+                                         GST_FORMAT_TIME,
+                                         static_cast<GstSeekFlags>(GST_SEEK_FLAG_FLUSH | GST_SEEK_FLAG_ACCURATE),
+                                         static_cast<gint64>(position_ns));
+        }
+
+        if (ok) {
+            std::lock_guard<std::mutex> lock(frames_mutex_);
+            std::queue<core::draw_frame>().swap(frames_);
+        }
+
+        return ok;
+    }
+
+    bool set_paused(bool paused)
+    {
+        std::shared_lock<std::shared_mutex> lock(pipeline_mutex_);
+        if (pipeline_ == nullptr)
+            return false;
+
+        const auto target = paused ? GST_STATE_PAUSED : GST_STATE_PLAYING;
+        return gst_element_set_state(pipeline_, target) != GST_STATE_CHANGE_FAILURE;
+    }
+
     // frame_producer
+
+    /// PAUSE, RESUME, SEEK <frame>, LENGTH, POSITION. Deliberately a subset of what the
+    /// FFmpeg producer answers: LOOP, IN and OUT are properties of a *file* producer that
+    /// owns its own reader, and this one owns a pipeline whose source may be a socket. A
+    /// command that cannot mean anything here is refused rather than silently accepted.
+    std::future<std::wstring> call(const std::vector<std::wstring>& params) override
+    {
+        if (params.empty())
+            CASPAR_THROW_EXCEPTION(user_error() << msg_info("CALL needs a command."));
+
+        const auto  cmd   = params.at(0);
+        const auto  value = params.size() > 1 ? params.at(1) : std::wstring();
+        std::wstring result;
+
+        if (boost::iequals(cmd, L"pause")) {
+            result = set_paused(true) ? L"true" : L"false";
+        } else if (boost::iequals(cmd, L"resume") || boost::iequals(cmd, L"play")) {
+            result = set_paused(false) ? L"true" : L"false";
+        } else if (boost::iequals(cmd, L"seek")) {
+            if (value.empty())
+                CASPAR_THROW_EXCEPTION(user_error() << msg_info("SEEK needs a frame number."));
+            result = seek_to_frame(boost::lexical_cast<uint32_t>(value)) ? L"true" : L"false";
+        } else if (boost::iequals(cmd, L"length")) {
+            result = std::to_wstring(query_duration_frames());
+        } else if (boost::iequals(cmd, L"position") || boost::iequals(cmd, L"time")) {
+            result = std::to_wstring(query_position_frames());
+        } else {
+            CASPAR_THROW_EXCEPTION(user_error() << msg_info(
+                                       u8(L"The GStreamer producer does not answer '" + cmd +
+                                          L"'. It takes PAUSE, RESUME, SEEK <frame>, LENGTH and POSITION.")));
+        }
+
+        return make_ready_future(std::move(result));
+    }
+
+    uint32_t nb_frames() const override
+    {
+        const auto frames = query_duration_frames();
+        // The base class's answer for "unbounded", which is the honest one for a live source.
+        return frames > 0 ? frames : std::numeric_limits<uint32_t>::max();
+    }
 
     core::draw_frame receive_impl(const core::video_field field, int nb_samples) override
     {
@@ -682,6 +805,8 @@ struct gst_producer : public core::frame_producer
         state["gstreamer/gpu-frames"] = static_cast<int64_t>(frames_on_gpu_.load());
         state["gstreamer/restarts"]   = static_cast<int64_t>(restarts_.load());
         state["gstreamer/failed"]     = is_failed_.load();
+        state["gstreamer/position"]   = static_cast<int64_t>(query_position_frames());
+        state["gstreamer/length"]     = static_cast<int64_t>(query_duration_frames());
         {
             std::lock_guard<std::mutex> lock(frames_mutex_);
             state["gstreamer/queue"] = static_cast<int64_t>(frames_.size());

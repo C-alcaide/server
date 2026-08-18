@@ -39,6 +39,7 @@
 #include <common/utf.h>
 
 #include <boost/algorithm/string.hpp>
+#include <boost/property_tree/ptree.hpp>
 #include <boost/lexical_cast.hpp>
 
 #include <gst/app/gstappsrc.h>
@@ -434,6 +435,23 @@ create_consumer(const std::vector<std::wstring>&                        params,
 
     if (description.empty())
         CASPAR_THROW_EXCEPTION(user_error() << msg_info("The GStreamer pipeline description is empty."));
+
+    return spl::make_shared<gst_consumer>(std::move(description));
+}
+
+spl::shared_ptr<core::frame_consumer>
+create_preconfigured_consumer(const boost::property_tree::wptree&                      ptree,
+                              const core::video_format_repository&                     format_repository,
+                              const std::vector<spl::shared_ptr<core::video_channel>>& channels,
+                              const core::channel_info&                                channel_info)
+{
+    auto description = ptree.get<std::wstring>(L"pipeline", L"");
+    boost::trim(description);
+
+    if (description.empty())
+        CASPAR_THROW_EXCEPTION(user_error() << msg_info(
+                                   "<gstreamer> consumer needs a <pipeline> element: the gst-launch "
+                                   "description to send this channel through."));
 
     return spl::make_shared<gst_consumer>(std::move(description));
 }
