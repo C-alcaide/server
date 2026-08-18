@@ -145,9 +145,15 @@ struct pipeline::impl
         samplerInfo.magFilter               = vk::Filter::eLinear;
         samplerInfo.minFilter               = vk::Filter::eLinear;
         samplerInfo.mipmapMode              = vk::SamplerMipmapMode::eLinear;
-        samplerInfo.addressModeU            = vk::SamplerAddressMode::eRepeat;
-        samplerInfo.addressModeV            = vk::SamplerAddressMode::eRepeat;
-        samplerInfo.addressModeW            = vk::SamplerAddressMode::eRepeat;
+        // Clamp, not repeat: the OpenGL mixer sets GL_CLAMP_TO_EDGE, and a sampler that
+        // wraps makes every frame border sample the opposite edge. Measured before this
+        // change, on one decoded 1920x1080 frame through the FFmpeg producer: the two mixers
+        // differed on 5996 pixels, max 71 LSB, all of them at edges, with the top-left corner
+        // reading (177,190,233) on Vulkan against (191,191,191) on OpenGL — the blue bar from
+        // the right-hand side of the picture, wrapped around.
+        samplerInfo.addressModeU            = vk::SamplerAddressMode::eClampToEdge;
+        samplerInfo.addressModeV            = vk::SamplerAddressMode::eClampToEdge;
+        samplerInfo.addressModeW            = vk::SamplerAddressMode::eClampToEdge;
         samplerInfo.mipLodBias              = 0.0f;
         samplerInfo.anisotropyEnable        = VK_FALSE;
         samplerInfo.maxAnisotropy           = 2;
