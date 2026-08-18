@@ -544,6 +544,56 @@ else on the box — produced the numbers above in about 3.5 minutes per arm.
 
 ---
 
+## 8.3 KNOWN REGRESSION, already reported upstream: the FFmpeg consumer's audio
+
+**This is a shipping blocker for the FFmpeg consumer on 8.x, and an upstream PR for it already
+exists** (opened by this team before this sync was measured; fill in the number here). No fix
+is carried in this fork -- take upstream's when it lands. Recorded only because the blast
+radius measured here is worth having and because nothing else in this document would tell a
+reader why `signalling --stream` fails.
+
+`ADD 1 STREAM ... -acodec aac` returns **501 ADD FAILED**, with the server logging
+
+```
+[aac] Unsupported channel layout "9.1.6"
+ffmpeg_consumer.cpp: avcodec_open2(enc.get(), codec, &dict) -> EINVAL (-22)
+[warning] Unused option ac=2
+```
+
+`9.1.6` is sixteen channels, CasparCG's internal count. The sink is never constrained to the
+layouts the encoder accepts -- `ffmpeg_consumer.cpp:591` still carries the original
+`// TODO: need to translate codec->ch_layouts` -- so the graph hands the encoder the source
+layout and any encoder with a restricted list refuses it. `-ac` does not help: it is reported
+as unused.
+
+**Blast radius, one FRESH SERVER per variant** (a first pass reused one server and produced a
+non-monotonic result set, which is what consumer accumulation looks like rather than data):
+
+| variant | 7.0.2 | 8.1.2 |
+| :--- | :--- | :--- |
+| video only (audio defaults to mp2) | **FAIL** | FAIL |
+| x265 + aac, no `-ac` | OK | **FAIL** |
+| x265 + aac `-ac 2` | OK | **FAIL** |
+| x265 + pcm_s16le `-ac 2` | OK | OK |
+| x264 + aac `-ac 2` | OK | **FAIL** |
+| x264 + aac, no `-ac` | OK | **FAIL** |
+
+So on 8.1.2 every real audio encoder fails and only PCM survives, which covers essentially
+all streaming and recording. Two details worth keeping:
+
+* **`video only` fails on 7.0.2 as well.** That arm takes the container's default audio codec
+  (mp2, which advertises only mono and stereo), so it is the same defect reached by a
+  different route and it is NOT new in 8.x -- it was simply never measured, because no battery
+  drives a video-only stream.
+* Setting the sink's layouts from `avcodec_get_supported_config(nullptr, codec,
+  AV_CODEC_CONFIG_CHANNEL_LAYOUT, ...)` plus buffersink's new array-typed `channel_layouts`
+  option fixes the **mp2** case and NOT the aac one -- measured here before the change was
+  reverted. Presumably the native AAC encoder advertises no static list without a configured
+  context, so the query returns nothing and the constraint is skipped. Noting it so the
+  upstream fix is not assumed to be that one-liner.
+
+---
+
 ## 9. Owed
 
 1. ~~**The after-image**~~ — **done, §8.1: 800 per-conversion results, zero differences.**
