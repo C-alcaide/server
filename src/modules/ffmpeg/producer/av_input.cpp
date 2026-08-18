@@ -42,9 +42,12 @@ Input::Input(const std::string& filename, std::shared_ptr<diagnostics::graph> gr
     thread_ = boost::thread([=] {
         set_thread_name(L"[ffmpeg::av_producer::Input]");
 
+        int consecutive_enomem = 0;
+
         while (true) {
             try {
                 auto packet = alloc_packet();
+                int  ret    = 0;
 
                 {
                     std::unique_lock<std::mutex> lock(ic_mutex_);
@@ -55,32 +58,67 @@ Input::Input(const std::string& filename, std::shared_ptr<diagnostics::graph> gr
                     }
 
                     // TODO (perf) Non blocking av_read_frame when possible.
-                    auto ret = av_read_frame(ic_.get(), packet.get());
+                    ret = av_read_frame(ic_.get(), packet.get());
+                }
 
-                    if (ret == AVERROR_EXIT) {
-                        break;
-                    } else if (ret == AVERROR(EAGAIN)) {
-                        boost::this_thread::yield();
-                    } else if (ret == AVERROR_EOF) {
-                        if (growing_) {
-                            if (ic_->pb) {
+                // Every branch below runs OUTSIDE ic_mutex_, deliberately (upstream 8139e1e20):
+                // logging, sleeping and seeking while holding it stalled every other user of ic_.
+                // The one branch that must touch ic_ -- the growing-file re-seek -- retakes the
+                // lock for exactly that call and nothing else.
+                if (abort_request_) {
+                    break;
+                }
+
+                if (ret == AVERROR_EXIT) {
+                    break;
+                } else if (ret == AVERROR(EAGAIN)) {
+                    boost::this_thread::yield();
+                    continue;
+                } else if (ret == AVERROR_EOF) {
+                    if (growing_) {
+                        // A growing file has no true EOF: nudge the AVIO layer so the next read
+                        // sees bytes appended since the last one, and try again.
+                        {
+                            std::unique_lock<std::mutex> lock(ic_mutex_);
+                            if (ic_ && ic_->pb) {
                                 avio_seek(ic_->pb, 0, SEEK_CUR);
                             }
-                            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                            continue;
                         }
-                        eof_   = true;
-                        packet = nullptr;
-                    } else if (ret < 0) {
-                        // Instead of throwing an exception and permanently killing the read thread,
-                        // log the error and wait a moment before trying again or continuing.
-                        char errbuf[AV_ERROR_MAX_STRING_SIZE];
-                        av_strerror(ret, errbuf, sizeof(errbuf));
-                        CASPAR_LOG(warning) << "av_read_frame error: " << errbuf << " (" << ret << ") - treating as EOF";
-                        eof_   = true;
-                        packet = nullptr;
+                        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                        continue;
                     }
+                    eof_   = true;
+                    packet = nullptr;
+                } else if (ret == AVERROR(ENOMEM)) {
+                    // Transient allocation failure inside the demuxer; retry rather than let it
+                    // kill the read thread permanently. Capped, because an unbounded retry on a
+                    // genuine exhaustion is a hang rather than a failure.
+                    ++consecutive_enomem;
+                    if (consecutive_enomem == 1) {
+                        CASPAR_LOG(warning) << "av_input[" << filename_ << "] av_read_frame: out of memory, retrying";
+                    } else if (consecutive_enomem >= 20) {
+                        CASPAR_LOG(error) << "av_input[" << filename_
+                                          << "] av_read_frame: too many consecutive out-of-memory errors, aborting";
+
+                        // Pretend we reached EOF, to avoid the producer stalling expecting more packets
+                        eof_   = true;
+                        packet = nullptr;
+                        buffer_.push(std::move(packet));
+                        break;
+                    }
+                    boost::this_thread::sleep_for(boost::chrono::milliseconds(5));
+                    continue;
+                } else if (ret < 0) {
+                    // Any other demuxer error: log and treat as EOF rather than throwing. Upstream
+                    // calls FF_RET here, which ends the read thread for the producer's lifetime.
+                    char errbuf[AV_ERROR_MAX_STRING_SIZE];
+                    av_strerror(ret, errbuf, sizeof(errbuf));
+                    CASPAR_LOG(warning) << "av_read_frame error: " << errbuf << " (" << ret << ") - treating as EOF";
+                    eof_   = true;
+                    packet = nullptr;
                 }
+
+                consecutive_enomem = 0;
 
                 buffer_.push(std::move(packet));
                 graph_->set_value("input", (static_cast<double>(buffer_.size()) / buffer_.capacity()));

@@ -365,10 +365,7 @@ struct Stream
         }
 
         if (codec->type == AVMEDIA_TYPE_VIDEO) {
-            // Allocate the filter but do not initialize it yet
-            sink = avfilter_graph_alloc_filter(graph.get(), avfilter_get_by_name("buffersink"), "out");
-            if (!sink)
-                FF(AVERROR(ENOMEM));
+            sink = FFMEM(avfilter_graph_alloc_filter(graph.get(), avfilter_get_by_name("buffersink"), "out"));
 
 #ifdef _MSC_VER
 #pragma warning(push)
@@ -437,11 +434,47 @@ struct Stream
                 }
             }
 
+            // buffersink's `pix_fmts` / `color_spaces` / `color_ranges` options are
+            // AV_OPT_FLAG_DEPRECATED in FFmpeg 8 and disappear with libavfilter 12
+            // (FF_API_BUFFERSINK_OPTS), replaced by array-typed `pixel_formats` /
+            // `colorspaces` / `colorranges`. Both forms resolve on 8.1, so this guard is
+            // the FFmpeg 9 bill paid early rather than something 8.1 requires.
+            //
+            // The array form takes a COUNT where the int-list form took a TERMINATOR, so
+            // each count is read before any terminator is appended -- appending first
+            // would offer the sink AV_PIX_FMT_NONE as though it were a real format.
             if (!pix_fmts.empty()) {
+#if LIBAVUTIL_VERSION_MAJOR >= 60 // FFmpeg 8
+                FF(av_opt_set_array(sink,
+                                    "pixel_formats",
+                                    AV_OPT_SEARCH_CHILDREN | AV_OPT_ARRAY_REPLACE,
+                                    0,
+                                    static_cast<unsigned int>(pix_fmts.size()),
+                                    AV_OPT_TYPE_PIXEL_FMT,
+                                    pix_fmts.data()));
+#else
                 pix_fmts.push_back(AV_PIX_FMT_NONE);
                 FF(av_opt_set_int_list(sink, "pix_fmts", pix_fmts.data(), AV_PIX_FMT_NONE, AV_OPT_SEARCH_CHILDREN));
+#endif
             } else {
+#if LIBAVUTIL_VERSION_MAJOR >= 60 // FFmpeg 8
+                // Counted from codec->pix_fmts rather than read via
+                // avcodec_get_supported_config, so that this and the `supports` lambda
+                // above read the SAME list. Two sources of truth here could offer the
+                // sink a format `supports` had already rejected.
+                unsigned int nb_codec_fmts = 0;
+                for (auto q = codec->pix_fmts; q != nullptr && *q != AV_PIX_FMT_NONE; ++q)
+                    ++nb_codec_fmts;
+                FF(av_opt_set_array(sink,
+                                    "pixel_formats",
+                                    AV_OPT_SEARCH_CHILDREN | AV_OPT_ARRAY_REPLACE,
+                                    0,
+                                    nb_codec_fmts,
+                                    AV_OPT_TYPE_PIXEL_FMT,
+                                    codec->pix_fmts));
+#else
                 FF(av_opt_set_int_list(sink, "pix_fmts", codec->pix_fmts, AV_PIX_FMT_NONE, AV_OPT_SEARCH_CHILDREN));
+#endif
             }
 
             // ── Which matrix libswscale converts RGB->YCbCr with ──────────
@@ -492,42 +525,73 @@ struct Stream
                                                 ? AVCOL_SPC_SMPTE170M
                                                 : AVCOL_SPC_BT709;
                     const AVColorSpace spaces[] = {cs, AVCOL_SPC_UNSPECIFIED};
+#if LIBAVUTIL_VERSION_MAJOR >= 60 // FFmpeg 8
+                    // ONE element, not two: AVCOL_SPC_UNSPECIFIED is the int-list
+                    // terminator, and passing it as a member of the array would offer
+                    // "unspecified" as an acceptable matrix -- which is the
+                    // no-constraint case this whole block exists to prevent.
+                    FF(av_opt_set_array(sink,
+                                        "colorspaces",
+                                        AV_OPT_SEARCH_CHILDREN | AV_OPT_ARRAY_REPLACE,
+                                        0,
+                                        1,
+                                        AV_OPT_TYPE_INT,
+                                        spaces));
+#else
                     FF(av_opt_set_int_list(sink, "color_spaces", spaces, AVCOL_SPC_UNSPECIFIED,
                                            AV_OPT_SEARCH_CHILDREN));
+#endif
 
                     // Matches enc->color_range below. A full/limited mismatch is the
                     // same class of bug with a different signature: crushed blacks and
                     // clipped whites rather than shifted saturated colour.
                     const AVColorRange ranges[] = {AVCOL_RANGE_MPEG, AVCOL_RANGE_UNSPECIFIED};
+#if LIBAVUTIL_VERSION_MAJOR >= 60 // FFmpeg 8
+                    FF(av_opt_set_array(sink,
+                                        "colorranges",
+                                        AV_OPT_SEARCH_CHILDREN | AV_OPT_ARRAY_REPLACE,
+                                        0,
+                                        1,
+                                        AV_OPT_TYPE_INT,
+                                        ranges));
+#else
                     FF(av_opt_set_int_list(sink, "color_ranges", ranges, AVCOL_RANGE_UNSPECIFIED,
                                            AV_OPT_SEARCH_CHILDREN));
+#endif
                 }
             }
 
 #ifdef _MSC_VER
 #pragma warning(pop)
 #endif
-            // Now initialize the filter
-            FF(avfilter_init_str(sink, nullptr));
-
         } else if (codec->type == AVMEDIA_TYPE_AUDIO) {
-            // Allocate the filter but do not initialize it yet
-            sink = avfilter_graph_alloc_filter(graph.get(), avfilter_get_by_name("abuffersink"), "out");
-            if (!sink)
-                FF(AVERROR(ENOMEM));
-
+            sink = FFMEM(avfilter_graph_alloc_filter(graph.get(), avfilter_get_by_name("abuffersink"), "out"));
 #ifdef _MSC_VER
 #pragma warning(push)
 #pragma warning(disable : 4245)
 #endif
             // TODO codec->profiles
-            
-            // Set sample_fmts using av_opt_set_int_list
-            FF(av_opt_set_int_list(sink, "sample_fmts", codec->sample_fmts, AV_SAMPLE_FMT_NONE, AV_OPT_SEARCH_CHILDREN));
 
-            // Set samplerates using av_opt_set_int_list
-            // Note: supported_samplerates is terminated by 0
+#if LIBAVUTIL_VERSION_MAJOR >= 60 // FFmpeg 8
+            const void* sample_fmts;
+            int nb_sample_fmts = 0;
+            FF(avcodec_get_supported_config(nullptr, codec, AV_CODEC_CONFIG_SAMPLE_FORMAT, 0, &sample_fmts, &nb_sample_fmts));
+
+            FF(av_opt_set_array(sink, "sample_formats", AV_OPT_SEARCH_CHILDREN | AV_OPT_ARRAY_REPLACE,
+                0, nb_sample_fmts, AV_OPT_TYPE_SAMPLE_FMT, sample_fmts)
+            );
+
+            const void* sample_rates;
+            int nb_sample_rates = 0;
+            FF(avcodec_get_supported_config(nullptr, codec, AV_CODEC_CONFIG_SAMPLE_RATE, 0, &sample_rates, &nb_sample_rates));
+
+            FF(av_opt_set_array(sink, "samplerates", AV_OPT_SEARCH_CHILDREN | AV_OPT_ARRAY_REPLACE,
+                0, nb_sample_rates, AV_OPT_TYPE_INT, sample_rates)
+            );
+#else
+            FF(av_opt_set_int_list(sink, "sample_fmts", codec->sample_fmts, -1, AV_OPT_SEARCH_CHILDREN));
             FF(av_opt_set_int_list(sink, "sample_rates", codec->supported_samplerates, 0, AV_OPT_SEARCH_CHILDREN));
+#endif
 
             // Set channel_layouts
             // TODO: need to translate codec->ch_layouts into something that can be passed via av_opt_set_*
@@ -536,13 +600,12 @@ struct Stream
 #ifdef _MSC_VER
 #pragma warning(pop)
 #endif
-            // Now initialize the filter
-            FF(avfilter_init_str(sink, nullptr));
-
         } else {
             CASPAR_THROW_EXCEPTION(ffmpeg_error_t()
                                    << boost::errinfo_errno(EINVAL) << msg_info_t("invalid output media type"));
         }
+
+        FF(avfilter_init_str(sink, nullptr));
 
         {
             const auto cur = outputs;

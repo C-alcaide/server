@@ -571,5 +571,11 @@ string(REPLACE "/EHsc" "" CMAKE_CXX_FLAGS ${CMAKE_CXX_FLAGS})
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /EHa /Zi /W4 /WX /MP /fp:fast /Zm192 /FIcommon/compiler/vs/disable_silly_warnings.h")
 set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG}	/D TBB_USE_ASSERT=1 /D TBB_USE_DEBUG /bigobj")
+# Deliberate divergence from upstream, which dropped /arch:AVX2 in 2b97ac61d. Kept at AVX2
+# here for two reasons: `decklink/consumer/v210_strategies.cpp` uses AVX2 intrinsics with no
+# runtime CPU dispatch in either tree, so lowering the baseline buys this fork no portability
+# it can actually use; and /arch: changes the auto-vectorisation baseline for every
+# translation unit, which can move floating-point results in the mixer. Revisit only together
+# with a runtime dispatch, and measure the mixer when you do.
 set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE}	/Oi /arch:AVX2 /Ot /Gy /bigobj")
 set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "${CMAKE_CXX_FLAGS_RELWITHDEBINFO} /Oi /arch:AVX2 /Ot /Gy /bigobj")
