@@ -28,6 +28,44 @@ rgba64le -> rgba64be   exact (byte swap only)
 Only the OGL mixer is affected, because OGL reports `pixel_format::bgra` and Vulkan reports
 `rgba`, so Vulkan's capture is a byte swap and comes out exact.
 
+### 1.1 Who is affected: this fork only
+
+Checked 2026-08-19, because it decides whether there is a CasparCG-upstream PR to make (there
+is not) and whether the FFmpeg report stands alone (it does).
+
+**The swscale defect is FFmpeg's**, present identically in 7.0.2 and 8.1.2. **Upstream
+CasparCG never triggers it.** Its entire tree contains exactly one `sws_getContext`
+(`image_converter.cpp`) and four `convert_image_frame` call sites, and every one of them
+targets an **8-bit packed** format:
+
+| upstream call site | target |
+| :--- | :--- |
+| `image_consumer.cpp:120` | `AV_PIX_FMT_RGBA` |
+| `image_producer.cpp:57`, `:78` | `AV_PIX_FMT_BGRA` |
+| `image_scroll_producer.cpp:132` | `AV_PIX_FMT_BGRA` |
+
+and the 8-bit permutation is **exact**:
+
+```
+bgra   -> rgba     102,153,204,255 -> 204,153,102,255   EXACT
+bgra64 -> rgba64   26214,39321,52428 -> 52420,39327,26205   LOSSY
+```
+
+**This fork triggers it because this fork added the 16-bit capture path.** Our
+`image_consumer` is 444 lines to upstream's 182, and the difference includes
+`is_hi_dep` / `AV_PIX_FMT_RGBA64BE` / `AV_PIX_FMT_BGRA64LE` — none of which exist upstream.
+Of the fork's own conversion sites, only that one targets a 16-bit packed format;
+`image_producer` (`BGRA`, `GBRAP16LE`), `image_scroll_producer` (`BGRA`) and `isf_image_load`
+(`RGBA`) do not, and the planar `rgb48be -> GBRAP16LE` conversion measures exact.
+
+Worth stating plainly, because it cuts both ways: upstream **does** support
+`<color-depth>16</color-depth>` (`server.cpp:296`), and its IMAGE consumer downconverts such a
+channel to an 8-bit PNG unconditionally. So upstream cannot observe this defect, and also
+cannot capture a 16-bit frame at all — which is exactly why the fork added the path.
+
+**Consequences for this plan:** no CasparCG-upstream PR is warranted; §6's FFmpeg report is
+the only outward-facing item; and the fix is entirely ours to make and ours to gate.
+
 ---
 
 ## 2. Step 0 — the cheap fix, already ruled out
