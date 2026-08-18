@@ -495,13 +495,62 @@ A green result on eight arms is evidence about eight arms.
 
 ---
 
+## 8.2 The decode path: bit-identical, and the PNG prediction confirmed
+
+The gap §8.1 declared largest. `flat-decoded` is the only 1 LSB decode gate here, and its
+load-bearing check needs no colour model at all: a clip holding `u = v = neutral` must render
+grey.
+
+| binary | mixer | result | worst delta | neutral spread |
+| :--- | :--- | :--- | ---: | ---: |
+| 7.0.2 | ogl | 29/29 PASS | 0.01 | 0.00-0.01 |
+| **8.1.2** | **ogl** | **29/29 PASS** | **0.01** | **0.00-0.01** |
+| **8.1.2** | **vulkan** | **29/29 PASS** | **0.00** | **0.00** |
+
+Six formats each — `420p10 pq`, `420p10 hlg`, `422p10 pq`, `444p10 pq`, `420p12 pq`,
+`420p8 sdr`. One patch is skipped in `420p12 pq` because the *encoder* could not hold the
+frame uniform (2 distinct values), which the battery reports as skipped rather than passed.
+
+**The strong version of the claim comes from the captures, not the summaries.** Each run
+saves the rendered frame per patch, so the two OGL runs can be compared directly:
+
+    files differing in BYTES : 29 / 29
+    files differing in PIXELS:  0 / 29      worst channel delta: 0
+
+So FFmpeg 8.1.2 decodes every one of these formats to **bit-identical** pixels, and both
+mixers agree. Combined with §8.1's 800 identical conformance results, the two largest
+surfaces of this migration are measured and unmoved.
+
+**And the byte/pixel split is `FFMPEG_8_MIGRATION.md` §5.2 happening in front of us.** That
+section predicted FFmpeg 8.0's `pngenc` switch to PAETH prediction would change PNG file bytes
+while leaving decoded pixels identical. Every capture differs in bytes; none differs in a
+pixel. That also retroactively earns the check made earlier in this work — that no harness
+module hashes PNG bytes rather than comparing pixels. If one did, it would be failing right
+now, on every capture, for a reason that has nothing to do with correctness.
+
+### 8.2.1 The first attempt at this measurement was invalid, and why
+
+The first `flat-decoded` run reported `delta inf` on all 29 patches — no measurement at all,
+not a wrong value — while the server's own log carried one benign warning. **Self-inflicted
+contention**: the full `pytest` suite and two compiler probes were running against the same
+GPU at the same time, and the driving shell then survived a `TaskStop` and kept launching
+further arms, each spawning its own server.
+
+Two things worth carrying forward. `inf` is not a failure to investigate as a colour defect —
+it means the capture never settled, and the first question is what else was running.
+And stopping a battery mid-flight does **not** stop the battery: the shell dies, its `python`
+children do not, and their servers outlive both. The clean re-run — one arm at a time, nothing
+else on the box — produced the numbers above in about 3.5 minutes per arm.
+
+---
+
 ## 9. Owed
 
 1. ~~**The after-image**~~ — **done, §8.1: 800 per-conversion results, zero differences.**
-2. `flat-decoded`, `sdi-input`, `signalling --stream`, `sdi-output`, `mixer-parity`,
-   `vk-validation` — none has been run on either side of this sync. `flat-decoded` is the
-   most valuable of these by a distance: it is the only 1 LSB decode gate, and the decoders
-   are the largest part of what FFmpeg 8 changed.
+2. ~~`flat-decoded`~~ — **done, §8.2: bit-identical decoded pixels, both mixers.** Still
+   owed: `sdi-input`, `signalling --stream`, `sdi-output`, `mixer-parity`, `vk-validation`.
+   The FFmpeg *consumer* is now the largest unmeasured surface, since that is where §5's
+   array-option migration actually lives and `signalling --stream` is the battery for it.
 3. `cli.py run --decoder cuda_prores` / `--decoder cuda_notchlc`, to exercise the
    mixed-standard C++17/C++20 link boundary §6.3 introduces.
 3. Reconcile the two GPU-direct HTML paths (§4.1).
