@@ -221,7 +221,9 @@ as a missing one. The pre-fix code has **zero** timeouts on that same matrix. Tr
 not sufficient evidence: the defect it needed to expose only appears at the full matrix's
 parallelism.
 
-**What a landing fix needs.** Not a raw `std::vector` handed to the encoder. The by-hand
+**The plan for landing it is [`PLAN_BGRA64_CAPTURE_FIX.md`](PLAN_BGRA64_CAPTURE_FIX.md)**,
+which carries the design, the ruled-out cheap fix, the verification gates and the upstream
+report. In short: Not a raw `std::vector` handed to the encoder. The by-hand
 conversion should fill a properly allocated destination (`av_frame_get_buffer`, 64-byte
 aligned, refcounted) rather than reusing the un-premultiply scratch buffer, since alignment and
 refcounting are the plausible reasons the encoder slowed down. Then re-measure the **full**
