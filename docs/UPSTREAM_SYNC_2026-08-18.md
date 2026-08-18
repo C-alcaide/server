@@ -122,6 +122,15 @@ The boundary actually drawn, after the first attempt at it failed to build (§6.
 **Owed:** reconcile the two GPU-direct HTML paths, or delete one. Until then these files
 re-conflict at every sync.
 
+**Investigated 2026-08-18 and decided — see
+[`CEF_GPU_DIRECT_RECONCILIATION.md`](CEF_GPU_DIRECT_RECONCILIATION.md).** Keep this fork's
+`html_gpu_bridge`: upstream's `import_d3d_texture` is a **throw stub on the Vulkan
+accelerator** (`vulkan/image/image_mixer.cpp:389`) and nothing in their path checks the mixer
+backend before requesting shared textures, so adopting it would mean a per-frame exception on
+this fork's default `<accelerator>vulkan</accelerator>`. That document also carries the
+comparison, the shape an upstream PR would take, and the harness the efficiency half of the
+argument would need first — none of which is acted on.
+
 ### 4.2 Upstream's OAL consumer rewrite (part of `91a102022`)
 
 `src/modules/oal/consumer/oal_consumer.cpp` was restored to its pre-M4 state. Upstream
