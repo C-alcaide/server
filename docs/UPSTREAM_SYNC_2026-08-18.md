@@ -373,11 +373,64 @@ every number at once and survives every parity check. `sdi-output` and `signalli
 
 ---
 
+## 8.1 The after-image: FFmpeg 8.1.2 moved nothing that is gated
+
+`build-sync/shell/casparcg.exe`, sha256
+`511ffafce7bde79063b933e88d15d3903c218c9bd6e2263f2fc70aff80a64fc5`, unchanged before and
+after the run. Same eight arms as §3, same commands, so the numbers compare arm for arm.
+
+| arm | 7.0.2 | 8.1.2 | |
+| :--- | :--- | :--- | :--- |
+| `conformance --mixer ogl --bit-depth 8` | 100/100, worst 0.55 at `#BFBFBF` | 100/100, worst 0.55 at `#BFBFBF` | same |
+| `conformance --mixer vulkan --bit-depth 8` | 100/100, worst 0.55 at `#BFBFBF` | 100/100, worst 0.55 at `#BFBFBF` | same |
+| `conformance --mixer ogl --bit-depth 16` | 0/100, worst 33.00 at `#FF00FF` | 0/100, worst 33.00 at `#FF00FF` | same |
+| `conformance --mixer vulkan --bit-depth 16` | 99/100, worst 1.12 at `#4080BF` | 99/100, worst 1.12 at `#4080BF` | same |
+| `grading --mixer ogl --bit-depth 8` | 48/48 | 48/48 | same |
+| `grading --mixer vulkan --bit-depth 8` | 48/48 | 48/48 | same |
+| `grading --mixer ogl --bit-depth 16` | 0/48 | 0/48 | same |
+| `grading --mixer vulkan --bit-depth 16` | 46/48 | 46/48 | same |
+
+Pass counts matching is the weak version of this claim. The strong version: comparing the
+**per-conversion** result lines — each carrying its verdict, its worst LSB figure and the
+patch that figure occurred at — across the four `conformance` arms gives **800 results and
+zero differences**. Not "within tolerance": identical, including the pre-existing OGL 16-bit
+failures reproducing at exactly 33.00 LSB at exactly `#FF00FF`.
+
+So the swscale re-architecture did not move a gated number through
+`convert_image_frame`, on either flag path — `flags=0` at 8-bit and
+`SWS_ACCURATE_RND | SWS_FULL_CHR_H_INT` at 16-bit — on either mixer. Which is the answer one
+would predict for two conversions that are channel permutations and byte-order swaps with no
+resampling and no arithmetic, and it is now measured rather than predicted.
+
+**What this does NOT establish**, and the list is longer than the result:
+
+* **No decode ran.** `conformance` and `grading` drive a BGRA colour producer, so the YCbCr
+  path, `flat-decoded`, `sdi-input` and `source-colorspace` are all untouched. FFmpeg 8's
+  decoders are the largest part of the change and none of it was exercised.
+* **No consumer but IMAGE.** `sdi-output`, `signalling`, `signalling --stream`,
+  `consumer-view` — none run. The FFmpeg *consumer* is where the array-option migration of
+  §5 actually lives, and nothing here touched it.
+* **The two uncovered swscale sites are still uncovered** (§9): the still-load conversions in
+  `image_producer`, and the Spout `SWS_FAST_BILINEAR` downscale, which is the only site that
+  resamples and therefore the one most exposed to a rewrite.
+* **The mixed-standard CUDA link boundary is untested** (§6.3). Nothing ran
+  `cuda_prores` or `cuda_notchlc`.
+* **`mixer-parity` and `vk-validation` did not run**, so the two backends were compared only
+  against the colour model, never against each other on a picture with spatial detail.
+
+A green result on eight arms is evidence about eight arms.
+
+---
+
 ## 9. Owed
 
-1. **The after-image**: re-run the §3 matrix on the new binary and diff against it.
+1. ~~**The after-image**~~ — **done, §8.1: 800 per-conversion results, zero differences.**
 2. `flat-decoded`, `sdi-input`, `signalling --stream`, `sdi-output`, `mixer-parity`,
-   `vk-validation` — none has been run on either side of this sync.
+   `vk-validation` — none has been run on either side of this sync. `flat-decoded` is the
+   most valuable of these by a distance: it is the only 1 LSB decode gate, and the decoders
+   are the largest part of what FFmpeg 8 changed.
+3. `cli.py run --decoder cuda_prores` / `--decoder cuda_notchlc`, to exercise the
+   mixed-standard C++17/C++20 link boundary §6.3 introduces.
 3. Reconcile the two GPU-direct HTML paths (§4.1).
 4. Merge or retire the OAL consumer divergence (§4.2).
 5. Investigate the OGL 16-bit asymmetry (§3.1) — pre-existing, not caused here.
