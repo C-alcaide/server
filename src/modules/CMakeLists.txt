@@ -13,6 +13,10 @@ if (ENABLE_HTML)
 	add_subdirectory(html)
 endif ()
 
+if (ENABLE_GSTREAMER)
+	add_subdirectory(gstreamer)
+endif ()
+
 if (MSVC)
 	add_subdirectory(flash)
 	add_subdirectory(bluefish)
