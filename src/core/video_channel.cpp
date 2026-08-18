@@ -187,7 +187,7 @@ struct video_channel::impl final
 
         CASPAR_LOG(info) << print() << " Successfully Initialized.";
 
-        thread_ = std::thread([=] {
+        thread_ = std::thread([this] {
             set_thread_realtime_priority();
             set_thread_name(L"channel-" + std::to_wstring(channel_info_.index));
 

@@ -21,10 +21,6 @@
 
 #include "../StdAfx.h"
 
-#if defined(_MSC_VER)
-#pragma warning(push, 1) // TODO: Legacy code, just disable warnings
-#endif
-
 #include "AMCPCommandsImpl.h"
 
 #include "../util/http_request.h"
@@ -82,6 +78,10 @@
 #include <optional>
 #include <thread>
 
+#if defined(__GNUC__) && __GNUC__ == 14
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wstringop-overflow"
+#endif
 #include <boost/algorithm/string.hpp>
 #include <boost/algorithm/string/regex.hpp>
 #include <boost/archive/iterators/base64_from_binary.hpp>
@@ -96,6 +96,9 @@
 #include <boost/range/adaptor/transformed.hpp>
 #include <boost/range/algorithm/copy.hpp>
 #include <boost/regex.hpp>
+#if defined(__GNUC__) && __GNUC__ == 14
+#pragma GCC diagnostic pop
+#endif
 
 #include <tbb/concurrent_unordered_map.h>
 
@@ -4250,7 +4253,7 @@ std::wstring channel_grid_command(command_context& ctx)
     auto& self  = ctx.channels->back();
 
     core::diagnostics::scoped_call_context save;
-    core::diagnostics::call_context::for_thread().video_channel = ctx.channels->size();
+    core::diagnostics::call_context::for_thread().video_channel = static_cast<int>(ctx.channels->size());
 
     std::vector<std::wstring> params;
     params.emplace_back(L"SCREEN");

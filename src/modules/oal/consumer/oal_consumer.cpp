@@ -42,10 +42,6 @@
 
 #include <tbb/concurrent_queue.h>
 
-#if defined(_MSC_VER)
-#pragma warning(push)
-#pragma warning(disable : 4244)
-#endif
 extern "C" {
 #define __STDC_CONSTANT_MACROS
 #define __STDC_LIMIT_MACROS
@@ -53,9 +49,6 @@ extern "C" {
 #include <libavutil/samplefmt.h>
 #include <libswresample/swresample.h>
 }
-#if defined(_MSC_VER)
-#pragma warning(pop)
-#endif
 
 #include <memory>
 #include <vector>
@@ -264,7 +257,7 @@ struct oal_consumer : public core::frame_consumer
 
     std::future<bool> send(core::video_field field, core::const_frame frame) override
     {
-        executor_.begin_invoke([=] {
+        executor_.begin_invoke([=, this] {
             auto dst         = std::shared_ptr<AVFrame>(av_frame_alloc(), [](AVFrame* ptr) { av_frame_free(&ptr); });
             dst->format      = AV_SAMPLE_FMT_S16;
             dst->sample_rate = format_desc_.audio_sample_rate;

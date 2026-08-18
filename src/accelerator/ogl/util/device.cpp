@@ -35,6 +35,7 @@
 #include <GL/glew.h>
 
 #ifdef WIN32
+#include "../../d3d/d3d_device.h"
 #include <GL/wglew.h>
 #endif
 
@@ -78,6 +79,11 @@ struct device::impl : public std::enable_shared_from_this<impl>
     GLuint reduce_draw_fbo_ = 0;
 
     std::wstring version_;
+
+#ifdef WIN32
+    std::shared_ptr<d3d::d3d_device> d3d_device_;
+    std::shared_ptr<void>            interop_handle_;
+#endif
 
     io_context                             io_context_;
     decltype(make_work_guard(io_context_)) work_;
@@ -129,6 +135,21 @@ struct device::impl : public std::enable_shared_from_this<impl>
         GL(glBindFramebuffer(GL_FRAMEBUFFER, fbo_));
 
         context_->unbind();
+
+#ifdef WIN32
+        if (env::properties().get(L"configuration.html.enable-gpu", false)) {
+            d3d_device_ = d3d::d3d_device::get_device();
+        }
+        if (d3d_device_) {
+            interop_handle_ = std::shared_ptr<void>(wglDXOpenDeviceNV(d3d_device_->device()), [](void* p) {
+                if (p)
+                    wglDXCloseDeviceNV(p);
+            });
+
+            if (!interop_handle_)
+                CASPAR_THROW_EXCEPTION(gl::ogl_exception() << msg_info("Failed to initialize d3d interop."));
+        }
+#endif
 
         thread_ = std::thread([&] {
             thread_id_ = std::this_thread::get_id();
@@ -265,7 +286,7 @@ struct device::impl : public std::enable_shared_from_this<impl>
     std::future<std::shared_ptr<texture>>
     copy_async(const array<const uint8_t>& source, int width, int height, int stride, common::bit_depth depth)
     {
-        return dispatch_async([=] {
+        return dispatch_async([=, this] {
             std::shared_ptr<buffer> buf;
 
             // The array may already carry the PBO it was written into, which lets
@@ -522,7 +543,7 @@ struct device::impl : public std::enable_shared_from_this<impl>
 
     std::future<void> gc()
     {
-        return spawn_async([=](yield_context yield) {
+        return spawn_async([this](yield_context yield) {
             CASPAR_LOG(info) << " ogl: Running GC.";
 
             try {

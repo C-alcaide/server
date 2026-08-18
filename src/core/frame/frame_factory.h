@@ -23,6 +23,14 @@
 
 #include <common/bit_depth.h>
 
+#ifdef WIN32
+#include <core/frame/pixel_format.h>
+#include <memory>
+namespace caspar::accelerator::d3d {
+class d3d_texture2d;
+}
+#endif
+
 namespace caspar { namespace core {
 
 /// Which accelerator a gpu_device_handle() belongs to. A producer that wants to

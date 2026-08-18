@@ -60,23 +60,21 @@ constexpr AVCodecID AV_CODEC_ID_TIMECODE = static_cast<AVCodecID>(0x17800);
 #include <core/frame/frame.h>
 #include <core/video_format.h>
 
+#if defined(__GNUC__) && __GNUC__ == 14
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wstringop-overflow"
+#endif
 #include <boost/algorithm/string.hpp>
 #include <boost/filesystem.hpp>
 #include <boost/format.hpp>
 #include <boost/property_tree/ptree.hpp>
 #include <boost/regex.hpp>
-
-#pragma warning(push)
-#pragma warning(disable : 4244)
-#pragma warning(disable : 4245)
-#pragma warning(disable : 4701)
-#include <boost/crc.hpp>
-#pragma warning(pop)
-
-#ifdef _MSC_VER
-#pragma warning(push)
-#pragma warning(disable : 4244)
+#if defined(__GNUC__) && __GNUC__ == 14
+#pragma GCC diagnostic pop
 #endif
+
+#include <boost/crc.hpp>
+
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavfilter/avfilter.h>
@@ -93,9 +91,6 @@ extern "C" {
 #include <libavutil/pixfmt.h>
 #include <libavutil/samplefmt.h>
 }
-#ifdef _MSC_VER
-#pragma warning(pop)
-#endif
 
 #include <tbb/concurrent_queue.h>
 #include <tbb/parallel_for.h>
@@ -367,10 +362,6 @@ struct Stream
         if (codec->type == AVMEDIA_TYPE_VIDEO) {
             sink = FFMEM(avfilter_graph_alloc_filter(graph.get(), avfilter_get_by_name("buffersink"), "out"));
 
-#ifdef _MSC_VER
-#pragma warning(push)
-#pragma warning(disable : 4245)
-#endif
             // TODO codec->profiles
             // TODO FF(av_opt_set_int_list(sink, "framerates", codec->supported_framerates, { 0, 0 },
             // AV_OPT_SEARCH_CHILDREN));
@@ -561,33 +552,36 @@ struct Stream
                 }
             }
 
-#ifdef _MSC_VER
-#pragma warning(pop)
-#endif
         } else if (codec->type == AVMEDIA_TYPE_AUDIO) {
             sink = FFMEM(avfilter_graph_alloc_filter(graph.get(), avfilter_get_by_name("abuffersink"), "out"));
-#ifdef _MSC_VER
-#pragma warning(push)
-#pragma warning(disable : 4245)
-#endif
             // TODO codec->profiles
 
 #if LIBAVUTIL_VERSION_MAJOR >= 60 // FFmpeg 8
             const void* sample_fmts;
-            int nb_sample_fmts = 0;
-            FF(avcodec_get_supported_config(nullptr, codec, AV_CODEC_CONFIG_SAMPLE_FORMAT, 0, &sample_fmts, &nb_sample_fmts));
+            int         nb_sample_fmts = 0;
+            FF(avcodec_get_supported_config(
+                nullptr, codec, AV_CODEC_CONFIG_SAMPLE_FORMAT, 0, &sample_fmts, &nb_sample_fmts));
 
-            FF(av_opt_set_array(sink, "sample_formats", AV_OPT_SEARCH_CHILDREN | AV_OPT_ARRAY_REPLACE,
-                0, nb_sample_fmts, AV_OPT_TYPE_SAMPLE_FMT, sample_fmts)
-            );
+            FF(av_opt_set_array(sink,
+                                "sample_formats",
+                                AV_OPT_SEARCH_CHILDREN | AV_OPT_ARRAY_REPLACE,
+                                0,
+                                nb_sample_fmts,
+                                AV_OPT_TYPE_SAMPLE_FMT,
+                                sample_fmts));
 
             const void* sample_rates;
-            int nb_sample_rates = 0;
-            FF(avcodec_get_supported_config(nullptr, codec, AV_CODEC_CONFIG_SAMPLE_RATE, 0, &sample_rates, &nb_sample_rates));
+            int         nb_sample_rates = 0;
+            FF(avcodec_get_supported_config(
+                nullptr, codec, AV_CODEC_CONFIG_SAMPLE_RATE, 0, &sample_rates, &nb_sample_rates));
 
-            FF(av_opt_set_array(sink, "samplerates", AV_OPT_SEARCH_CHILDREN | AV_OPT_ARRAY_REPLACE,
-                0, nb_sample_rates, AV_OPT_TYPE_INT, sample_rates)
-            );
+            FF(av_opt_set_array(sink,
+                                "samplerates",
+                                AV_OPT_SEARCH_CHILDREN | AV_OPT_ARRAY_REPLACE,
+                                0,
+                                nb_sample_rates,
+                                AV_OPT_TYPE_INT,
+                                sample_rates));
 #else
             FF(av_opt_set_int_list(sink, "sample_fmts", codec->sample_fmts, -1, AV_OPT_SEARCH_CHILDREN));
             FF(av_opt_set_int_list(sink, "sample_rates", codec->supported_samplerates, 0, AV_OPT_SEARCH_CHILDREN));
@@ -597,9 +591,6 @@ struct Stream
             // TODO: need to translate codec->ch_layouts into something that can be passed via av_opt_set_*
             // FF(av_opt_set_chlayout(sink, "ch_layouts", codec->ch_layouts, AV_OPT_SEARCH_CHILDREN));
 
-#ifdef _MSC_VER
-#pragma warning(pop)
-#endif
         } else {
             CASPAR_THROW_EXCEPTION(ffmpeg_error_t()
                                    << boost::errinfo_errno(EINVAL) << msg_info_t("invalid output media type"));

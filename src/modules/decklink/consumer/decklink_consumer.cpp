@@ -1640,7 +1640,7 @@ struct decklink_consumer_proxy : public core::frame_consumer
 
     ~decklink_consumer_proxy() override
     {
-        executor_.invoke([=] {
+        executor_.invoke([=, this] {
             set_thread_realtime_priority();
             consumer_.reset();
             com_uninitialize();
@@ -1682,12 +1682,12 @@ struct decklink_consumer_proxy : public core::frame_consumer
 
     std::future<bool> send(core::video_field field, core::const_frame frame) override
     {
-        return executor_.begin_invoke([=] { return consumer_->send(field, frame); });
+        return executor_.begin_invoke([=, this] { return consumer_->send(field, frame); });
     }
 
     std::future<bool> call(const std::vector<std::wstring>& params) override
     {
-        return executor_.begin_invoke([=] { return consumer_->call(params); });
+        return executor_.begin_invoke([=, this] { return consumer_->call(params); });
     }
 
     [[nodiscard]] std::wstring print() const override

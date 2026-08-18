@@ -37,7 +37,7 @@ FUNCTION (casparcg_add_library TARGET)
 
 	# Setup the library and some default config
 	ADD_LIBRARY (${TARGET} ${PARSED_ARGS_SOURCES})
-	target_compile_features (${TARGET} PRIVATE cxx_std_17)
+	target_compile_features (${TARGET} PRIVATE cxx_std_20)
 	target_include_directories(${TARGET} SYSTEM PRIVATE
 		${BOOST_INCLUDE_PATH}
 	)
@@ -115,7 +115,7 @@ FUNCTION (casparcg_add_module_project TARGET)
 			CACHE INTERNAL ""
 		)
 	ENDIF ()
-  
+
 ENDFUNCTION ()
 
 # http://stackoverflow.com/questions/7172670/best-shortest-way-to-join-a-list-in-cmake

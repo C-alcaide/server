@@ -7,10 +7,6 @@
 
 #include <common/bit_depth.h>
 
-#if defined(_MSC_VER)
-#pragma warning(push)
-#pragma warning(disable : 4244)
-#endif
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavfilter/avfilter.h>
@@ -19,9 +15,6 @@ extern "C" {
 #include <libavutil/imgutils.h>
 #include <libavutil/pixfmt.h>
 }
-#if defined(_MSC_VER)
-#pragma warning(pop)
-#endif
 
 #include <array>
 #include <tbb/parallel_for.h>
