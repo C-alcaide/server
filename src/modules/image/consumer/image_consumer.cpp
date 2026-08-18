@@ -215,14 +215,14 @@ struct image_consumer : public core::frame_consumer
 
                 // What the MIXER handed us, before this consumer touches a byte.
                 //
-                // Diagnostic for the OGL 16-bit deviation: a flat still renders 8-10 LSB16 off
-                // nominal on the OGL mixer and exactly on nominal on Vulkan, with no colour
-                // conversion running. Everything downstream of here -- the un-premultiply and
-                // convert_image_frame -- is shared by both backends, so logging the first
-                // pixel as it arrives splits "the mixer produced this" from "this consumer
-                // mangled it", which no battery can currently distinguish.
+                // Kept because it is what identified the swscale BGRA64->RGBA64 defect
+                // described in docs/UPSTREAM_SYNC_2026-08-18.md section 3.1.1: everything
+                // downstream of here is shared by both mixer backends, so logging the frame
+                // as it arrives is what splits "the mixer produced this" from "this consumer
+                // mangled it". No battery can currently distinguish those, and without this
+                // line the defect reads as a 16-bit precision fault in the OGL backend.
                 //
-                // Trace level only, so it costs nothing at the default log level.
+                // Trace level, so it costs nothing at the default log level.
                 if (frame.image_data(0).size() > 0) {
                     const auto& d0  = frame.image_data(0);
                     const auto* p16 = reinterpret_cast<const std::uint16_t*>(d0.data());
@@ -316,9 +316,6 @@ struct image_consumer : public core::frame_consumer
                     const int stride16 = av_frame->linesize[0] / 2; // in uint16_t units
                     const int w        = av_frame->width;
                     const int h        = av_frame->height;
-                    // Only a BGRA source needs the components exchanged; an RGBA one is
-                    // already in the order the PNG target wants.
-                    const bool swap_br = pix_desc.format == core::pixel_format::bgra;
                     for (int y = 0; y < h; ++y) {
                         uint16_t* row = data + y * stride16;
                         for (int x = 0; x < w; ++x) {
@@ -332,58 +329,12 @@ struct image_consumer : public core::frame_consumer
                                 c1 = static_cast<uint16_t>(std::min(65535, static_cast<int>(c1) * 65535 / a));
                                 c2 = static_cast<uint16_t>(std::min(65535, static_cast<int>(c2) * 65535 / a));
                             }
-                            // Swap B and R here rather than letting swscale do it.
-                            //
-                            // swscale's BGRA64 -> RGBA64 channel permutation IS LOSSY, which
-                            // is a surprising thing for a permutation to be. Measured
-                            // 2026-08-18 on a single pixel through `ffmpeg` alone, no
-                            // CasparCG involved:
-                            //
-                            //   bgra64le -> rgba64be   52428,39321,26214 -> 52420,39327,26205
-                            //   bgra64le -> rgba64le   52428,39321,26214 -> 52420,39327,26205
-                            //   bgra64le -> bgra64le   exact (no-op)
-                            //   rgba64le -> rgba64be   exact (byte swap only)
-                            //
-                            // so the loss is in the PERMUTATION, not the endianness, and it
-                            // is cross-channel: greys drifted 1-4 LSB16 while a saturated
-                            // colour drifted 8-9, with G gaining where R and B lost. That is
-                            // the shape of a trip through a YUV intermediate.
-                            //
-                            // It only ever bit the OGL mixer, because OGL reports
-                            // pixel_format::bgra while Vulkan reports rgba -- so Vulkan's
-                            // capture was a byte swap and came out exact, and OGL's looked
-                            // like a 16-bit precision defect in the OGL backend for as long
-                            // as nobody compared the two through this function. Present
-                            // identically on FFmpeg 7.0.2 and 8.1.2, so it long predates the
-                            // FFmpeg 8 migration.
-                            //
-                            // Doing the whole thing by hand -- permutation AND byte swap --
-                            // is exact by construction and skips swscale entirely.
-                            //
-                            // An intermediate version did only the permutation and left
-                            // swscale the RGBA64LE->RGBA64BE byte swap, which is exact in
-                            // isolation. It was still wrong in practice: convert_image_frame
-                            // builds a fresh SwsContext per call, and that format pair
-                            // evidently has no fast path, so captures began timing out at
-                            // 10 s under conformance's parallel 16-bit load. Correct pixels
-                            // that arrive too late to be captured are not an improvement.
-                            // Produce RGBA64BE right here: exchange B/R if the source was
-                            // BGRA, and byte-swap every component. That leaves swscale with
-                            // nothing to do at all, which is the point -- see below.
-                            const uint16_t r = swap_br ? c2 : c0;
-                            const uint16_t g = c1;
-                            const uint16_t b = swap_br ? c0 : c2;
-                            c0 = static_cast<uint16_t>((r >> 8) | (r << 8));
-                            c1 = static_cast<uint16_t>((g >> 8) | (g << 8));
-                            c2 = static_cast<uint16_t>((b >> 8) | (b << 8));
-                            row[x * 4 + 3] = static_cast<uint16_t>((a >> 8) | (a << 8));
                         }
                     }
                     av_frame->data[0] = buf.data();
-                    // Already RGBA64BE, so hand it to the encoder untouched.
-                    av_frame->format = AV_PIX_FMT_RGBA64BE;
 
-                    auto av_frame2 = av_frame;
+                    // Convert the un-premultiplied source to RGBA64BE for PNG encoding
+                    auto av_frame2 = convert_image_frame(av_frame, target_fmt);
 
                     FF(avcodec_send_frame(ctx.get(), av_frame2.get()));
                     FF(avcodec_send_frame(ctx.get(), nullptr));

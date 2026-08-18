@@ -176,12 +176,11 @@ sampled and compare it against the byte that was uploaded. That isolates upload 
 from readback, which no battery here can currently do. Do NOT change the mixer before that
 measurement exists; two hypotheses have already died in this paragraph.
 
-### 3.1.1 FOUND AND FIXED: swscale's BGRA64 -> RGBA64 permutation is lossy
+### 3.1.1 CAUSE FOUND: swscale's BGRA64 -> RGBA64 permutation is lossy. FIX NOT LANDED.
 
-**Cause.** `image_consumer` hands `convert_image_frame` a `AV_PIX_FMT_BGRA64LE` frame and asks
-for `AV_PIX_FMT_RGBA64BE`. That is a channel permutation plus a byte swap, and swscale gets
-the permutation WRONG. Measured on a single pixel through `ffmpeg` alone, with no CasparCG in
-the picture:
+**Cause, proven outside CasparCG entirely.** `image_consumer` hands `convert_image_frame` an
+`AV_PIX_FMT_BGRA64LE` frame and asks for `AV_PIX_FMT_RGBA64BE` — a channel permutation plus a
+byte swap. swscale gets the permutation wrong. One pixel, through `ffmpeg` alone:
 
 ```
 bgra64le -> rgba64be   52428,39321,26214  ->  52420,39327,26205     LOSSY (-8,+6,-9)
@@ -190,49 +189,49 @@ bgra64le -> bgra64le   52428,39321,26214  ->  52428,39321,26214     exact (no-op
 rgba64le -> rgba64be   52428,39321,26214  ->  52428,39321,26214     exact (byte swap only)
 ```
 
-So the loss is in the **permutation**, not the endianness, and it is cross-channel: greys
-drifted 1-4 LSB16 while a saturated colour drifted 8-9, G gaining where R and B lost. That is
-the shape of a round trip through a YUV intermediate.
+The loss is in the **permutation**, not the endianness, and it is cross-channel: greys drifted
+1-4 LSB16 while a saturated colour drifted 8-9, G gaining where R and B lost — the shape of a
+round trip through a YUV intermediate.
 
-**Why it looked like an OGL defect.** The OGL mixer reports `pixel_format::bgra`; the Vulkan
-mixer reports `rgba`. So Vulkan's capture was a byte swap and came out exact, OGL's went
-through the permutation, and the difference presented as a 16-bit precision defect in the OGL
-backend. It is neither OGL's nor Vulkan's — it is the capture path, and it was invisible at 8
-bits (0.035 LSB8) which is why every default-depth battery passed.
+**Why it looked like an OGL defect.** OGL reports `pixel_format::bgra`, Vulkan reports `rgba`.
+So Vulkan's capture was a byte swap and exact; OGL's went through the permutation. It is
+neither backend's fault — it is the capture path — and it is invisible at 8 bits (0.035 LSB8),
+which is why every default-depth battery passes. Identical on 7.0.2 and 8.1.2, so it long
+predates the FFmpeg 8 migration.
 
-**Not FFmpeg 8.** Identical numbers on 7.0.2 (`84e64ff22`) and 8.1.2 (`bc94f4713`), so it
-predates the migration by a long way.
+**Confirmed by instrumentation**, not inference: a `MIXER_OUT` trace in this consumer (kept,
+at trace level) logs the frame as it arrives. For five colour-producer patches the mixer's
+values were **exact** while every resulting PNG was deviated — which is what moved the fault
+from the mixer to the capture path.
 
-**Fix.** Do the **whole** conversion by hand in the un-premultiply loop that already makes a
-writable copy — exchange B/R if the source is BGRA, and byte-swap every component — so the
-frame leaves that loop already `RGBA64BE` and swscale is not called at all.
+### Two fixes attempted, both REVERTED
 
-**The obvious smaller fix was tried first and was wrong.** Doing only the permutation by hand
-and leaving swscale the `RGBA64LE -> RGBA64BE` byte swap is exact in isolation, and it still
-failed in practice: `convert_image_frame` builds a fresh `SwsContext` per call and that format
-pair has no fast path, so captures started timing out at 10 s under `conformance`'s parallel
-16-bit load. The measured result was **28/36 conversions, heavy timeouts, and surviving
-deltas up to 65535 LSB16** — worse than the defect it fixed, because a capture that never
-completes reports as a wild value rather than as a missing one. Correct pixels that arrive too
-late are not an improvement.
+| attempt | pixels | capture timing |
+| :--- | :--- | :--- |
+| hand permutation, swscale does the byte swap | exact | **28/36 conversions, heavy timeouts, deltas to 65535** |
+| hand permutation AND byte swap, no swscale at all | exact — `image-convert` 4/4 on ogl16, vk16, ogl8; `conformance --quick` 36/36 worst 0.96, 0 timeouts | **full 100-conversion matrix: 18 timeouts, 85/89, worst 49780** |
 
-**Verified:**
+Both were reverted. The second is the instructive one: it is *exactly right on pixels* and
+still unshippable, because at full parallel load 18 of 2300 captures never completed inside
+the harness's 10 s budget — and a capture that does not complete reports as a wild value, not
+as a missing one. The pre-fix code has **zero** timeouts on that same matrix. Trading a
+0.035 LSB8 error nobody can see for 18 lost captures is a bad trade.
 
-| measurement | before | first attempt (swscale byte swap) | final (no swscale) |
-| :--- | :--- | :--- | :--- |
-| `image-convert --mixer ogl --bit-depth 16` | control 9.00, worst 10.00, **FAIL** | 4/4 PASS | control 0.00, worst 0.00, **4/4 PASS** |
-| `image-convert --mixer vulkan --bit-depth 16` | 4/4 PASS | — | **4/4 PASS** (no regression) |
-| `image-convert --mixer ogl --bit-depth 8` | 4/4 PASS | — | **4/4 PASS** (no regression) |
-| `conformance --mixer ogl --bit-depth 16 --quick` | — | 28/36, worst 65535, many timeouts | **36/36, worst 0.96 LSB16, 0 timeouts** |
-| `conformance --mixer ogl --bit-depth 16` (full 100) | **0/100**, worst 33.00 | — | see below |
+`--quick` (36 conversions) showed 0 timeouts and passed cleanly, which is exactly why it was
+not sufficient evidence: the defect it needed to expose only appears at the full matrix's
+parallelism.
 
-**A verification claim in an earlier revision of this section was wrong and is retracted.** It
-reported the post-fix `conformance` worst delta as "<= 0.36 LSB16". That figure came from three
-grepped lines of a run that had completed only **13 of 15** conversions while another session's
-battery was competing for the GPU — a truncated, contended run read as if it were a clean one.
-The `--quick` numbers above are from a quiet box with the summary captured in full.
+**What a landing fix needs.** Not a raw `std::vector` handed to the encoder. The by-hand
+conversion should fill a properly allocated destination (`av_frame_get_buffer`, 64-byte
+aligned, refcounted) rather than reusing the un-premultiply scratch buffer, since alignment and
+refcounting are the plausible reasons the encoder slowed down. Then re-measure the **full**
+matrix, not `--quick`, and require 0 timeouts as a gate alongside the LSB figure.
 
-**The original finding was pre-existing and reproduces on the 7.0.2 binary too.**
+**Until then the pre-existing behaviour stands**: OGL 16-bit captures carry ~9 LSB16 of error
+from this permutation, invisible at 8 bits, and `conformance --bit-depth 16 --mixer ogl` fails
+by construction. It is not a regression from this sync.
+
+**Out of scope for this sync — it is pre-existing and reproduces on the 7.0.2 binary too.**
 
 ---
 
