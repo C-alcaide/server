@@ -128,9 +128,55 @@ LSB16 on a nominal 52428 (0.8) is a relative error of 1.7e-4, too small to be an
 depth's step and too large to be 16-bit rounding. It is invisible at 8 bits (0.035 LSB8),
 which is why every default-depth battery passes and why it went unseen.
 
-**Out of scope for this sync — it is pre-existing and reproduces on the 7.0.2 binary too.** It
-wants its own session, and the two batteries above plus `banding` are the instruments to
-start from.
+**Hunted 2026-08-18, narrowed considerably, CAUSE NOT FOUND.** Recorded in full because two
+plausible explanations were tested and disproved, and re-deriving them would be waste.
+
+The exact 16-bit values, read with ffmpeg rather than PIL (PIL truncates 16-bit RGBA silently,
+which cost one wrong conclusion here):
+
+| variant | upload format | want R,G,B | OGL deviation | Vulkan |
+| :--- | :--- | :--- | :--- | :--- |
+| `rgba8` (no swscale) | `rgba` 8-bit | 52428, 39321, 26214 | **-8, +6, -9** | 0, 0, 0 |
+| `rgb8` | -> BGRA 8-bit | 45746, 29555, 16448 | **-7, +5, -8** | 0, 0, 0 |
+| `rgb16` | -> GBRAP16LE | 39321, 22873, 49087 | **+10, -3, -10** | 0, 0, 0 |
+| `rgba16` | -> GBRAP16LE | 32896, 19532, 42662 | **+9, -2, -9** | 0, 0, 0 |
+
+**Established:**
+
+* **Spatially uniform.** Exactly ONE distinct value per channel across all 2,073,600 pixels.
+  So not dithering, not the 64x64 -> 1920x1080 upscale, not sampling — a deterministic
+  per-value transform.
+* **Not a function of the value alone.** 0.6 appears twice: as `rgba8`'s G at **+6** and
+  `rgb16`'s R at **+10**. That rules out a transfer-curve round trip and any scalar gain,
+  both of which would map equal inputs to equal outputs.
+* **It pairs by UPLOAD PIXEL FORMAT.** The two GBRAP16LE variants share a signature; the two
+  8-bit packed variants share another. That points at the OGL upload/sample of a given
+  `pixel_format`, not at anything downstream.
+* **No colour conversion runs.** Confirmed at trace level, not inferred:
+  `[ogl_kernel] NO_CONVERT frame #1 auto=false src_cs=1 src_ct=0 tgt_cs=1 tgt_ct=0 fmt=12`.
+  So `do_input_convert` / `do_output_convert` are false and neither gamut matrix is applied.
+* **Not swscale.** `rgba8` reaches the mixer without `convert_image_frame` and still deviates.
+* **A colour producer through the same OGL path at 16-bit is accurate to 1.0 LSB16**
+  (`banding`'s unorm control), where the image producer is 9 LSB16 out. So it is specific to
+  the still-image upload rather than general to OGL at 16 bits.
+
+**Disproved along the way, both of which looked convincing:**
+
+1. *"The 16-bit arms secretly capture 8-bit."* PIL reports `mode="RGBA"` for 16-bit RGBA PNGs
+   while truncating them. The IHDR of the same files says `bit_depth=16`. The captures are
+   genuinely 16-bit.
+2. *"It is a near-identity gamut round trip."* A single 3x3 fits the deviations with residuals
+   of 0.39 LSB16 against deviations up to 10 — but that is 12 equations against 9 free
+   parameters, so the fit proves far less than it appears to, and the trace above shows no
+   matrix is applied at all.
+
+**The next step, for whoever picks this up:** instrument the OGL upload and sample for
+`pixel_format::rgba` and `pixel_format::gbrap16` specifically — read back the texel the shader
+sampled and compare it against the byte that was uploaded. That isolates upload from render
+from readback, which no battery here can currently do. Do NOT change the mixer before that
+measurement exists; two hypotheses have already died in this paragraph.
+
+**Out of scope for this sync — it is pre-existing and reproduces on the 7.0.2 binary too.**
 
 ---
 
