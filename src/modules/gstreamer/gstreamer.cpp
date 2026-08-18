@@ -23,10 +23,13 @@
 
 #include "consumer/gst_consumer.h"
 #include "producer/gst_producer.h"
+#include "util/gst_query.h"
 #include "util/gst_runtime.h"
 
 #include <core/consumer/frame_consumer.h>
 #include <core/producer/frame_producer.h>
+
+#include <protocol/amcp/amcp_command_repository_wrapper.h>
 
 #include <common/env.h>
 #include <common/log.h>
@@ -41,6 +44,12 @@ void init(const core::module_dependencies& dependencies)
     dependencies.consumer_registry->register_consumer_factory(L"GStreamer Consumer", create_consumer);
     dependencies.consumer_registry->register_preconfigured_consumer_factory(L"gstreamer",
                                                                             create_preconfigured_consumer);
+
+    // Query commands, so "which elements does this box have" and "did anything get
+    // blacklisted" are answerable over the control protocol rather than by restarting the
+    // server with GST_DEBUG turned up.
+    dependencies.command_repository->register_command(L"Query Commands", L"GST INFO", info_command, 0);
+    dependencies.command_repository->register_command(L"Query Commands", L"GST LIST", list_command, 1);
 
     // GStreamer is loaded on first use, so a server with no installation starts normally and
     // only a PLAY that asks for it fails. auto-load turns that into a startup diagnostic,

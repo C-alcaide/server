@@ -26,6 +26,9 @@ set(SOURCES
 		util/gst_frame.cpp
 		util/gst_frame.h
 
+		util/gst_query.cpp
+		util/gst_query.h
+
 		util/gst_runtime.cpp
 		util/gst_runtime.h
 
