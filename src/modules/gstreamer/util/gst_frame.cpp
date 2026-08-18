@@ -100,7 +100,10 @@ const char* supported_caps_formats()
            "I420_10LE, I422_10LE, Y444_10LE";
 }
 
-core::draw_frame make_frame(void* tag, core::frame_factory& frame_factory, GstSample* sample)
+core::draw_frame make_frame(void*                    tag,
+                            core::frame_factory&     frame_factory,
+                            GstSample*               sample,
+                            std::shared_ptr<AVFrame> audio)
 {
     auto* caps   = gst_sample_get_caps(sample);
     auto* buffer = gst_sample_get_buffer(sample);
@@ -146,7 +149,7 @@ core::draw_frame make_frame(void* tag, core::frame_factory& frame_factory, GstSa
     // make_frame copies every plane into a frame the mixer owns, so the mapping above only has
     // to outlive this call — which is why unmapping on scope exit is safe.
     return core::draw_frame(
-        ffmpeg::make_frame(tag, frame_factory, std::move(av_frame), nullptr, to_color_space(info)));
+        ffmpeg::make_frame(tag, frame_factory, std::move(av_frame), std::move(audio), to_color_space(info)));
 }
 
 }} // namespace caspar::gstreamer

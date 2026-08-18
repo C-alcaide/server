@@ -36,6 +36,14 @@
 #include <common/timer.h>
 #include <common/utf.h>
 
+#include <ffmpeg/util/av_util.h>
+
+extern "C" {
+#include <libavutil/channel_layout.h>
+#include <libavutil/frame.h>
+#include <libavutil/samplefmt.h>
+}
+
 #include <boost/algorithm/string.hpp>
 #include <boost/lexical_cast.hpp>
 
@@ -43,6 +51,7 @@
 #include <gst/gst.h>
 
 #include <atomic>
+#include <deque>
 #include <mutex>
 #include <queue>
 #include <thread>
@@ -55,6 +64,11 @@ namespace {
 /// absorb a decode that is briefly late, shallow enough that a producer switched away from
 /// and back does not present stale pictures.
 constexpr std::size_t max_queued_frames = 4;
+
+/// The names the module looks for after parsing, and writes into the description when it
+/// appends the sink itself.
+constexpr const char* video_sink_name = "caspar_video";
+constexpr const char* audio_sink_name = "caspar_audio";
 
 std::wstring describe_error(GstMessage* message)
 {
@@ -84,8 +98,9 @@ struct gst_producer : public core::frame_producer
     spl::shared_ptr<core::frame_factory> frame_factory_;
     const core::video_format_desc        format_desc_;
 
-    GstElement* pipeline_ = nullptr;
-    GstElement* appsink_  = nullptr;
+    GstElement* pipeline_   = nullptr;
+    GstElement* video_sink_ = nullptr;
+    GstElement* audio_sink_ = nullptr;
 
     spl::shared_ptr<diagnostics::graph> graph_;
     timer                               tick_timer_;
@@ -95,11 +110,21 @@ struct gst_producer : public core::frame_producer
     mutable std::mutex           frames_mutex_;
     core::draw_frame             last_frame_;
 
+    // Audio arrives on its own sink and its own thread, and is only paired with a picture when
+    // one is built — the channel takes audio attached to a frame, at a cadence the format
+    // decides, not at whatever rate the pipeline happens to deliver it.
+    std::deque<int32_t> audio_samples_;
+    mutable std::mutex  audio_mutex_;
+    std::atomic<int>    audio_channels_{0};
+    std::size_t         cadence_counter_ = 0;
+
     std::atomic<bool>     is_running_{true};
     std::atomic<bool>     is_eos_{false};
     std::atomic<uint64_t> frames_received_{0};
     std::atomic<uint64_t> frames_dropped_{0};
-    std::thread           thread_;
+    std::atomic<uint64_t> audio_underruns_{0};
+    std::thread           video_thread_;
+    std::thread           audio_thread_;
 
   public:
     gst_producer(spl::shared_ptr<core::frame_factory> frame_factory,
@@ -114,67 +139,114 @@ struct gst_producer : public core::frame_producer
         graph_->set_color("frame-time", diagnostics::color(0.5f, 1.0f, 0.2f));
         graph_->set_color("tick-time", diagnostics::color(0.0f, 0.6f, 0.9f));
         graph_->set_color("dropped-frame", diagnostics::color(0.3f, 0.6f, 0.3f));
+        graph_->set_color("audio-underrun", diagnostics::color(0.6f, 0.3f, 0.3f));
         diagnostics::register_graph(graph_);
 
         build_pipeline();
 
-        if (gst_element_set_state(pipeline_, GST_STATE_PLAYING) == GST_STATE_CHANGE_FAILURE) {
+        // set_state returning ASYNC says only that the change was accepted. A pipeline that
+        // cannot link — the commonest description mistake — fails afterwards, on the bus, and
+        // reporting 202 for it puts the error in the log minutes after the operator stopped
+        // looking. So wait for the change to settle, and treat the failure as a failed PLAY.
+        auto change = gst_element_set_state(pipeline_, GST_STATE_PLAYING);
+        if (change == GST_STATE_CHANGE_ASYNC) {
+            GstState state = GST_STATE_NULL;
+            change         = gst_element_get_state(pipeline_, &state, nullptr, 5 * GST_SECOND);
+
+            if (change == GST_STATE_CHANGE_ASYNC) {
+                // Still settling after 5 s. A slow network source is a legitimate reason, so
+                // this is a warning and the producer carries on.
+                CASPAR_LOG(warning) << print() << L" Still preparing after 5 s; continuing.";
+                change = GST_STATE_CHANGE_SUCCESS;
+            }
+        }
+
+        if (change == GST_STATE_CHANGE_FAILURE) {
             const auto reason = drain_bus_error();
             destroy_pipeline();
             CASPAR_LOG(error) << print() << L" Failed to start: " << reason;
             CASPAR_THROW_EXCEPTION(user_error() << msg_info(u8(L"Failed to start GStreamer pipeline: " + reason)));
         }
 
-        thread_ = std::thread([this] { run(); });
+        video_thread_ = std::thread([this] { run_video(); });
+        if (audio_sink_ != nullptr)
+            audio_thread_ = std::thread([this] { run_audio(); });
 
-        CASPAR_LOG(info) << print() << L" Initialized.";
+        CASPAR_LOG(info) << print() << L" Initialized" << (audio_sink_ != nullptr ? L" with audio." : L".");
     }
 
     ~gst_producer()
     {
         is_running_ = false;
-        if (thread_.joinable())
-            thread_.join();
+        if (video_thread_.joinable())
+            video_thread_.join();
+        if (audio_thread_.joinable())
+            audio_thread_.join();
         destroy_pipeline();
     }
 
-    // The description names everything up to but not including the sink, so the sink is ours:
-    // a bin with a ghosted src pad, then videoconvert/videorate, then an appsink whose caps
-    // pin the formats gst_frame can map and the channel's rate.
+    // The description is gst-launch syntax, and it is parsed as such — which is what makes a
+    // dynamic source work: gst_parse_launch installs delayed links, so "filesrc ! decodebin"
+    // links to our sink when decodebin produces its pad, minutes of code later avoided.
+    //
+    // A description that does not name caspar_video gets the sink appended, which covers the
+    // single-chain case. A description that does name it is taken as written, so a second
+    // chain can be routed to caspar_audio.
     void build_pipeline()
     {
-        GError* error = nullptr;
-        auto*   bin   = gst_parse_bin_from_description(u8(description_).c_str(), TRUE, &error);
+        auto launch = u8(description_);
 
-        if (bin == nullptr) {
+        if (launch.find(video_sink_name) == std::string::npos)
+            launch += std::string(" ! videoconvert ! videorate ! appsink name=") + video_sink_name;
+
+        GError* error = nullptr;
+        pipeline_     = gst_parse_launch(launch.c_str(), &error);
+
+        if (pipeline_ == nullptr) {
             const std::wstring reason = error ? u16(std::string(error->message)) : L"unknown error";
             if (error != nullptr)
                 g_error_free(error);
             CASPAR_LOG(error) << L"[gstreamer] Failed to parse pipeline: " << reason;
             CASPAR_THROW_EXCEPTION(user_error() << msg_info(u8(L"Failed to parse GStreamer pipeline: " + reason)));
         }
-        if (error != nullptr)
+        if (error != nullptr) {
+            // gst_parse_launch reports a recoverable parse problem this way while still
+            // returning a pipeline — an element that could not be created, or a link it had to
+            // omit. The pipeline that comes back is missing whatever the message names, so it
+            // is reported as an error rather than a warning: a description whose link was
+            // dropped runs, reaches EOS and delivers nothing, which is the hardest kind of
+            // failure to read from the outside.
+            const auto reason = u16(std::string(error->message));
             g_error_free(error);
-
-        auto* convert  = gst_element_factory_make("videoconvert", "caspar_convert");
-        auto* rate     = gst_element_factory_make("videorate", "caspar_rate");
-        auto* appsink  = gst_element_factory_make("appsink", "caspar_sink");
-        pipeline_      = gst_pipeline_new(("caspar_gst_" + std::to_string(instance_no_)).c_str());
-
-        if (convert == nullptr || rate == nullptr || appsink == nullptr || pipeline_ == nullptr) {
-            gst_object_unref(bin);
             destroy_pipeline();
-            CASPAR_THROW_EXCEPTION(not_supported() << msg_info(
-                                       "GStreamer is missing videoconvert, videorate or appsink — "
-                                       "the base plugin set is not installed or not on the plugin path."));
+            CASPAR_LOG(error) << L"[gstreamer] Incomplete pipeline: " << reason;
+            CASPAR_THROW_EXCEPTION(user_error() << msg_info(u8(L"Incomplete GStreamer pipeline: " + reason)));
         }
 
+        video_sink_ = gst_bin_get_by_name(GST_BIN(pipeline_), video_sink_name);
+        audio_sink_ = gst_bin_get_by_name(GST_BIN(pipeline_), audio_sink_name);
+
+        if (video_sink_ == nullptr) {
+            destroy_pipeline();
+            CASPAR_THROW_EXCEPTION(user_error() << msg_info(
+                                       "The GStreamer description names no appsink called caspar_video. Either end "
+                                       "the description before the sink and let it be appended, or include "
+                                       "'appsink name=caspar_video' yourself."));
+        }
+
+        configure_video_sink();
+        if (audio_sink_ != nullptr)
+            configure_audio_sink();
+    }
+
+    void configure_video_sink()
+    {
         const auto caps_text = std::string("video/x-raw, format=(string){ ") + supported_caps_formats() +
                                " }, framerate=(fraction)" + std::to_string(format_desc_.framerate.numerator()) + "/" +
                                std::to_string(format_desc_.framerate.denominator());
-        auto* caps = gst_caps_from_string(caps_text.c_str());
 
-        g_object_set(G_OBJECT(appsink),
+        auto* caps = gst_caps_from_string(caps_text.c_str());
+        g_object_set(G_OBJECT(video_sink_),
                      "emit-signals",
                      FALSE,
                      "sync",
@@ -187,27 +259,48 @@ struct gst_producer : public core::frame_producer
                      caps,
                      nullptr);
         gst_caps_unref(caps);
+    }
 
-        gst_bin_add_many(GST_BIN(pipeline_), bin, convert, rate, appsink, nullptr);
+    void configure_audio_sink()
+    {
+        // Interleaved S32 at the channel's rate, which is what core::mutable_frame carries.
+        // Channel count is left free: whatever the source has, make_frame maps into the
+        // channel's 16.
+        const auto caps_text = std::string("audio/x-raw, format=(string)S32LE, layout=(string)interleaved, "
+                                           "rate=(int)") +
+                               std::to_string(format_desc_.audio_sample_rate);
 
-        if (!gst_element_link_many(bin, convert, rate, appsink, nullptr)) {
-            destroy_pipeline();
-            CASPAR_THROW_EXCEPTION(user_error() << msg_info(
-                                       "Failed to link the GStreamer pipeline to the sink. The description must "
-                                       "end in an element with an unlinked video src pad — no sink of its own."));
-        }
-
-        appsink_ = appsink;
+        auto* caps = gst_caps_from_string(caps_text.c_str());
+        g_object_set(G_OBJECT(audio_sink_),
+                     "emit-signals",
+                     FALSE,
+                     "sync",
+                     TRUE,
+                     "max-buffers",
+                     static_cast<guint>(64),
+                     "drop",
+                     TRUE,
+                     "caps",
+                     caps,
+                     nullptr);
+        gst_caps_unref(caps);
     }
 
     void destroy_pipeline()
     {
+        if (video_sink_ != nullptr) {
+            gst_object_unref(video_sink_);
+            video_sink_ = nullptr;
+        }
+        if (audio_sink_ != nullptr) {
+            gst_object_unref(audio_sink_);
+            audio_sink_ = nullptr;
+        }
         if (pipeline_ != nullptr) {
             gst_element_set_state(pipeline_, GST_STATE_NULL);
             gst_object_unref(pipeline_);
             pipeline_ = nullptr;
         }
-        appsink_ = nullptr;
     }
 
     std::wstring drain_bus_error()
@@ -256,13 +349,49 @@ struct gst_producer : public core::frame_producer
         gst_object_unref(bus);
     }
 
-    void run()
+    /// Takes one frame's worth of audio out of the buffer, at the format's rotating cadence.
+    /// Short reads are padded with silence and counted rather than stalling the picture.
+    std::shared_ptr<AVFrame> take_audio()
+    {
+        const auto channels = audio_channels_.load();
+        if (audio_sink_ == nullptr || channels <= 0)
+            return nullptr;
+
+        const auto cadence = format_desc_.audio_cadence[cadence_counter_++ % format_desc_.audio_cadence.size()];
+        const auto wanted  = static_cast<std::size_t>(cadence) * channels;
+
+        auto buffer = std::make_shared<std::vector<int32_t>>(wanted, 0);
+        {
+            std::lock_guard<std::mutex> lock(audio_mutex_);
+            const auto                  available = std::min(wanted, audio_samples_.size());
+            std::copy_n(audio_samples_.begin(), available, buffer->begin());
+            audio_samples_.erase(audio_samples_.begin(), audio_samples_.begin() + available);
+
+            if (available < wanted) {
+                ++audio_underruns_;
+                graph_->set_tag(diagnostics::tag_severity::WARNING, "audio-underrun");
+            }
+        }
+
+        auto frame = ffmpeg::alloc_frame();
+        av_channel_layout_default(&frame->ch_layout, channels);
+        frame->format      = AV_SAMPLE_FMT_S32;
+        frame->sample_rate = format_desc_.audio_sample_rate;
+        frame->nb_samples  = cadence;
+        frame->data[0]     = reinterpret_cast<uint8_t*>(buffer->data());
+
+        // make_frame copies out of data[0] before returning, so the vector only has to outlive
+        // that call — it is captured here so it cannot be freed before the AVFrame is used.
+        return std::shared_ptr<AVFrame>(frame.get(), [frame, buffer](AVFrame*) {});
+    }
+
+    void run_video()
     {
         while (is_running_) {
             poll_bus();
 
             // 100 ms, so a stalled pipeline still lets the loop see is_running_ and the bus.
-            auto* sample = gst_app_sink_try_pull_sample(GST_APP_SINK(appsink_), 100 * GST_MSECOND);
+            auto* sample = gst_app_sink_try_pull_sample(GST_APP_SINK(video_sink_), 100 * GST_MSECOND);
 
             if (sample == nullptr)
                 continue;
@@ -270,7 +399,7 @@ struct gst_producer : public core::frame_producer
             try {
                 frame_timer_.restart();
 
-                auto frame = make_frame(this, *frame_factory_, sample);
+                auto frame = make_frame(this, *frame_factory_, sample, take_audio());
 
                 if (frame) {
                     std::lock_guard<std::mutex> lock(frames_mutex_);
@@ -286,6 +415,48 @@ struct gst_producer : public core::frame_producer
                 graph_->set_value("frame-time", frame_timer_.elapsed() * format_desc_.fps * 0.5);
             } catch (...) {
                 CASPAR_LOG_CURRENT_EXCEPTION();
+            }
+
+            gst_sample_unref(sample);
+        }
+    }
+
+    void run_audio()
+    {
+        // A second of audio at 16 channels. Past that the picture is not keeping up, and old
+        // audio is worth less than bounded memory.
+        const std::size_t max_samples = static_cast<std::size_t>(format_desc_.audio_sample_rate) * 16;
+
+        while (is_running_) {
+            auto* sample = gst_app_sink_try_pull_sample(GST_APP_SINK(audio_sink_), 100 * GST_MSECOND);
+
+            if (sample == nullptr)
+                continue;
+
+            auto* caps   = gst_sample_get_caps(sample);
+            auto* buffer = gst_sample_get_buffer(sample);
+
+            gint channels = 0;
+            if (caps != nullptr && gst_caps_get_size(caps) > 0)
+                gst_structure_get_int(gst_caps_get_structure(caps, 0), "channels", &channels);
+
+            if (buffer != nullptr && channels > 0) {
+                GstMapInfo map;
+                if (gst_buffer_map(buffer, &map, GST_MAP_READ)) {
+                    const auto* data  = reinterpret_cast<const int32_t*>(map.data);
+                    const auto  count = map.size / sizeof(int32_t);
+
+                    audio_channels_ = channels;
+                    {
+                        std::lock_guard<std::mutex> lock(audio_mutex_);
+                        audio_samples_.insert(audio_samples_.end(), data, data + count);
+                        if (audio_samples_.size() > max_samples) {
+                            audio_samples_.erase(audio_samples_.begin(),
+                                                 audio_samples_.begin() + (audio_samples_.size() - max_samples));
+                        }
+                    }
+                    gst_buffer_unmap(buffer, &map);
+                }
             }
 
             gst_sample_unref(sample);
@@ -331,10 +502,12 @@ struct gst_producer : public core::frame_producer
     core::monitor::state state() const override
     {
         core::monitor::state state;
-        state["gstreamer/pipeline"] = u8(description_);
-        state["gstreamer/received"] = static_cast<int64_t>(frames_received_.load());
-        state["gstreamer/dropped"]  = static_cast<int64_t>(frames_dropped_.load());
-        state["gstreamer/eos"]      = is_eos_.load();
+        state["gstreamer/pipeline"]  = u8(description_);
+        state["gstreamer/received"]  = static_cast<int64_t>(frames_received_.load());
+        state["gstreamer/dropped"]   = static_cast<int64_t>(frames_dropped_.load());
+        state["gstreamer/eos"]       = is_eos_.load();
+        state["gstreamer/audio"]     = audio_channels_.load();
+        state["gstreamer/underruns"] = static_cast<int64_t>(audio_underruns_.load());
         {
             std::lock_guard<std::mutex> lock(frames_mutex_);
             state["gstreamer/queue"] = static_cast<int64_t>(frames_.size());

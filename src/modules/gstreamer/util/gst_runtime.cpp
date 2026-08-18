@@ -26,12 +26,16 @@
 #include <common/log.h>
 #include <common/utf.h>
 
+#include <boost/algorithm/string.hpp>
 #include <boost/filesystem.hpp>
 #include <boost/property_tree/ptree.hpp>
 
 #include <gst/gst.h>
 
+#include <iterator>
 #include <mutex>
+#include <set>
+#include <vector>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -79,6 +83,51 @@ bool load_by_path(const boost::filesystem::path& dll)
         return true; // already in the process, by base name; a second load would be the same module
 
     return LoadLibraryExW(dll.wstring().c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH) != nullptr;
+}
+
+std::set<std::wstring> dll_names(const boost::filesystem::path& directory)
+{
+    std::set<std::wstring>    names;
+    boost::system::error_code ec;
+
+    for (boost::filesystem::directory_iterator it(directory, ec), end; it != end; it.increment(ec)) {
+        auto name = it->path().filename().wstring();
+        if (boost::algorithm::iends_with(name, L".dll"))
+            names.insert(boost::algorithm::to_lower_copy(name));
+    }
+
+    return names;
+}
+
+/// GStreamer's plugins are loaded by GStreamer, with a plain LoadLibrary that knows nothing of
+/// the explicit paths above — so a plugin needing gstaudio-1.0-0.dll or orc-0.4-0.dll finds
+/// nothing and is dropped, which is how audioresample went missing. Its bin/ has to be on the
+/// process search path.
+///
+/// SetDllDirectory rather than PATH: this process only, and it is searched *after* the
+/// application directory, so nothing shipped next to casparcg.exe can be displaced by a name
+/// in GStreamer's bin. That is the safety argument, and it is checked rather than asserted —
+/// the two directories are compared and every shared base name is reported. On FFmpeg 8 the
+/// set is empty; on FFmpeg 7 it was six, every one of them an av* library, which is why this
+/// module could not have existed before the migration.
+void add_to_search_path(const boost::filesystem::path& bin)
+{
+    const auto ours   = dll_names(boost::filesystem::path(env::initial_folder()));
+    const auto theirs = dll_names(bin);
+
+    std::vector<std::wstring> shared;
+    std::set_intersection(ours.begin(), ours.end(), theirs.begin(), theirs.end(), std::back_inserter(shared));
+
+    if (!shared.empty()) {
+        CASPAR_LOG(warning) << L"[gstreamer] " << shared.size()
+                            << L" DLL name(s) exist both next to casparcg.exe and in GStreamer's bin. Ours win, "
+                               L"because the application directory is searched first, but a GStreamer plugin "
+                               L"resolving against ours may then fail to load:";
+        for (const auto& name : shared)
+            CASPAR_LOG(warning) << L"[gstreamer]     " << name;
+    }
+
+    SetDllDirectoryW(bin.wstring().c_str());
 }
 #endif
 
@@ -165,6 +214,8 @@ void initialize_once(state& s)
             return;
         }
     }
+
+    add_to_search_path(bin);
 #endif
 
     // Everything below this line is a delay-loaded call, and is only reachable because the

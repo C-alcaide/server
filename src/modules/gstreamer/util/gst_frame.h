@@ -22,8 +22,10 @@
 #include <core/frame/draw_frame.h>
 #include <core/frame/frame_factory.h>
 
+#include <memory>
 #include <string>
 
+struct AVFrame;
 typedef struct _GstSample GstSample;
 
 namespace caspar { namespace gstreamer {
@@ -33,8 +35,12 @@ namespace caspar { namespace gstreamer {
 /// decides what crosses the boundary without a CPU conversion — not what can be played.
 const char* supported_caps_formats();
 
-/// Copies one sample into a mixer frame. Returns an empty draw_frame — never throws — when
-/// the sample carries a format this module does not map; the caller logs and drops it.
-core::draw_frame make_frame(void* tag, core::frame_factory& frame_factory, GstSample* sample);
+/// Copies one sample into a mixer frame, with the audio the caller paired to it (which may be
+/// null). Returns an empty draw_frame — never throws — when the sample carries a format this
+/// module does not map; the caller logs and drops it.
+core::draw_frame make_frame(void*                    tag,
+                            core::frame_factory&     frame_factory,
+                            GstSample*               sample,
+                            std::shared_ptr<AVFrame> audio = nullptr);
 
 }} // namespace caspar::gstreamer
