@@ -60,7 +60,8 @@ class image_mixer
     class const_frame import_d3d_texture(const void*                                             tag,
                                          const std::shared_ptr<accelerator::d3d::d3d_texture2d>& d3d_texture,
                                          core::pixel_format                                      format,
-                                         common::bit_depth                                       depth) override = 0;
+                                         common::bit_depth                                       depth,
+                                         array<std::int32_t> audio) override = 0;
 #endif
 
     virtual common::bit_depth depth() const = 0;

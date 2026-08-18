@@ -21,6 +21,7 @@
 
 #pragma once
 
+#include <common/array.h>
 #include <common/bit_depth.h>
 
 #ifdef WIN32
@@ -47,10 +48,15 @@ class frame_factory
     create_frame(const void* video_stream_tag, const struct pixel_format_desc& desc, common::bit_depth depth) = 0;
 
 #ifdef WIN32
+    /// `audio` rides along because a frame built from an imported texture has nowhere else to
+    /// put it: the const_frame that comes back owns an opaque holding the GPU textures, so it
+    /// cannot be taken apart and rebuilt with samples added afterwards. Defaulted, so the CEF
+    /// shared-texture path — the only caller before this — is unchanged.
     virtual class const_frame import_d3d_texture(const void* video_stream_tag,
                                                  const std::shared_ptr<accelerator::d3d::d3d_texture2d>& d3d_texture,
                                                  core::pixel_format                                      format,
-                                                 common::bit_depth                                       depth) = 0;
+                                                 common::bit_depth                                       depth,
+                                                 array<std::int32_t> audio = array<std::int32_t>{}) = 0;
 #endif
 };
 

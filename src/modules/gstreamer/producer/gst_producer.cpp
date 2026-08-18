@@ -28,6 +28,8 @@
 #include "../util/gst_d3d11.h"
 #endif
 
+#include <common/array.h>
+
 #include <core/frame/draw_frame.h>
 #include <core/frame/frame_factory.h>
 #include <core/frame/pixel_format.h>
@@ -215,16 +217,10 @@ struct gst_producer : public core::frame_producer
         }
 
 #ifdef _WIN32
-        // Built only when the frames can actually stay on the GPU all the way to the mixer.
-        // With an audio sink there is no route: import_d3d_texture returns a const_frame, and a
-        // const_frame has nowhere to carry the samples this producer would otherwise attach.
-        if (want_gpu_ && audio_sink_ == nullptr) {
+        // Audio is no longer a reason to refuse: import_d3d_texture takes the samples and puts
+        // them on the frame it builds, so a pipeline with both keeps its picture on the GPU.
+        if (want_gpu_)
             gpu_bridge_ = std::make_unique<d3d11_bridge>();
-        } else if (want_gpu_) {
-            CASPAR_LOG(info) << print()
-                             << L" GPU frames not used: the pipeline carries audio, and the GPU "
-                                L"import path cannot carry it with the picture.";
-        }
 #endif
 
         video_thread_ = std::thread([this] { run_video(); });
@@ -426,22 +422,31 @@ struct gst_producer : public core::frame_producer
         gst_object_unref(bus);
     }
 
-    /// Takes one frame's worth of audio out of the buffer, at the format's rotating cadence.
-    /// Short reads are padded with silence and counted rather than stalling the picture.
-    std::shared_ptr<AVFrame> take_audio()
+    /// One frame's worth of audio, at the format's rotating cadence, **already widened to the
+    /// channel's 16**. Short reads are padded with silence and counted rather than stalling the
+    /// picture.
+    ///
+    /// The widening is here rather than left to `ffmpeg::make_frame` because only one of the
+    /// two frame paths goes through make_frame. Handing the source's own channel count to
+    /// `import_d3d_texture` produced a frame whose audio was read as 16-channel interleaved:
+    /// measured, a mono 1 kHz sine came back with no peak at 1 kHz at all and energy smeared
+    /// across every channel, because sample n of a mono source was being read as channel n of
+    /// sixteen. Doing it once, here, means both paths carry the same thing.
+    std::vector<int32_t> take_audio_samples()
     {
         const auto channels = audio_channels_.load();
         if (audio_sink_ == nullptr || channels <= 0)
-            return nullptr;
+            return {};
 
-        const auto cadence = format_desc_.audio_cadence[cadence_counter_++ % format_desc_.audio_cadence.size()];
-        const auto wanted  = static_cast<std::size_t>(cadence) * channels;
+        const auto cadence  = format_desc_.audio_cadence[cadence_counter_++ % format_desc_.audio_cadence.size()];
+        const auto out_channels = format_desc_.audio_channels;
+        const auto wanted   = static_cast<std::size_t>(cadence) * channels;
 
-        auto buffer = std::make_shared<std::vector<int32_t>>(wanted, 0);
+        std::vector<int32_t> source(wanted, 0);
         {
             std::lock_guard<std::mutex> lock(audio_mutex_);
             const auto                  available = std::min(wanted, audio_samples_.size());
-            std::copy_n(audio_samples_.begin(), available, buffer->begin());
+            std::copy_n(audio_samples_.begin(), available, source.begin());
             audio_samples_.erase(audio_samples_.begin(), audio_samples_.begin() + available);
 
             if (available < wanted) {
@@ -450,16 +455,38 @@ struct gst_producer : public core::frame_producer
             }
         }
 
+        if (channels == out_channels)
+            return source;
+
+        std::vector<int32_t> widened(static_cast<std::size_t>(cadence) * out_channels, 0);
+        const auto           copy_channels = std::min(channels, out_channels);
+        for (int frame = 0; frame < cadence; ++frame) {
+            for (int ch = 0; ch < copy_channels; ++ch) {
+                widened[static_cast<std::size_t>(frame) * out_channels + ch] =
+                    source[static_cast<std::size_t>(frame) * channels + ch];
+            }
+        }
+
+        return widened;
+    }
+
+    /// An AVFrame view over samples the caller owns, for the host path. The samples are
+    /// already at the channel's width, so make_frame's own mapping becomes the identity. The
+    /// vector must outlive the returned frame; `ffmpeg::make_frame` copies out of it before
+    /// returning, so in practice that means the same statement.
+    std::shared_ptr<AVFrame> as_av_audio(std::vector<int32_t>& samples)
+    {
+        if (samples.empty())
+            return nullptr;
+
         auto frame = ffmpeg::alloc_frame();
-        av_channel_layout_default(&frame->ch_layout, channels);
+        av_channel_layout_default(&frame->ch_layout, format_desc_.audio_channels);
         frame->format      = AV_SAMPLE_FMT_S32;
         frame->sample_rate = format_desc_.audio_sample_rate;
-        frame->nb_samples  = cadence;
-        frame->data[0]     = reinterpret_cast<uint8_t*>(buffer->data());
+        frame->nb_samples  = static_cast<int>(samples.size() / format_desc_.audio_channels);
+        frame->data[0]     = reinterpret_cast<uint8_t*>(samples.data());
 
-        // make_frame copies out of data[0] before returning, so the vector only has to outlive
-        // that call — it is captured here so it cannot be freed before the AVFrame is used.
-        return std::shared_ptr<AVFrame>(frame.get(), [frame, buffer](AVFrame*) {});
+        return frame;
     }
 
     /// Tear the pipeline down and build it again. Called only from the video thread, which
@@ -506,7 +533,7 @@ struct gst_producer : public core::frame_producer
         }
 
 #ifdef _WIN32
-        if (want_gpu_ && audio_sink_ == nullptr)
+        if (want_gpu_)
             gpu_bridge_ = std::make_unique<d3d11_bridge>();
 #endif
 
@@ -542,12 +569,20 @@ struct gst_producer : public core::frame_producer
 
                 core::draw_frame frame;
 
+                // Drawn once, before either path, so the cadence advances exactly once per
+                // picture no matter which route the picture takes.
+                auto audio_samples = take_audio_samples();
+
 #ifdef _WIN32
                 if (gpu_bridge_ && d3d11_bridge::handles(sample)) {
                     if (auto texture = gpu_bridge_->import(sample)) {
                         try {
-                            frame = core::draw_frame(frame_factory_->import_d3d_texture(
-                                this, texture, core::pixel_format::bgra, common::bit_depth::bit8));
+                            frame = core::draw_frame(
+                                frame_factory_->import_d3d_texture(this,
+                                                                   texture,
+                                                                   core::pixel_format::bgra,
+                                                                   common::bit_depth::bit8,
+                                                                   caspar::array<std::int32_t>(audio_samples)));
                             ++frames_on_gpu_;
                         } catch (...) {
                             // The Vulkan mixer throws here by design — it has no D3D11 import.
@@ -563,7 +598,7 @@ struct gst_producer : public core::frame_producer
 #endif
 
                 if (!frame)
-                    frame = make_frame(this, *frame_factory_, sample, take_audio());
+                    frame = make_frame(this, *frame_factory_, sample, as_av_audio(audio_samples));
 
                 if (frame) {
                     std::lock_guard<std::mutex> lock(frames_mutex_);

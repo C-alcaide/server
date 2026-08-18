@@ -384,7 +384,8 @@ struct image_mixer::impl
     core::const_frame import_d3d_texture(const void*                                tag,
                                          const std::shared_ptr<d3d::d3d_texture2d>& d3d_texture,
                                          core::pixel_format                         format,
-                                         common::bit_depth                          depth) override
+                                         common::bit_depth                          depth,
+                                         array<std::int32_t>                        audio) override
     {
         throw std::runtime_error("d3d texture import not supported on vulkan accelerator");
     }
@@ -425,9 +426,10 @@ image_mixer::create_frame(const void* tag, const core::pixel_format_desc& desc, 
 core::const_frame image_mixer::import_d3d_texture(const void*                                tag,
                                                   const std::shared_ptr<d3d::d3d_texture2d>& d3d_texture,
                                                   core::pixel_format                         format,
-                                                  common::bit_depth                          depth)
+                                                  common::bit_depth                          depth,
+                                                  array<std::int32_t>                        audio)
 {
-    return impl_->import_d3d_texture(tag, d3d_texture, format, depth);
+    return impl_->import_d3d_texture(tag, d3d_texture, format, depth, std::move(audio));
 }
 #endif
 

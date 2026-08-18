@@ -57,7 +57,8 @@ class image_mixer final : public core::image_mixer
     core::const_frame import_d3d_texture(const void*                                tag,
                                          const std::shared_ptr<d3d::d3d_texture2d>& d3d_texture,
                                          core::pixel_format                         format,
-                                         common::bit_depth                          depth) override;
+                                         common::bit_depth                          depth,
+                                         array<std::int32_t>                        audio) override;
 #endif
 
     void update_aspect_ratio(double aspect_ratio) override;

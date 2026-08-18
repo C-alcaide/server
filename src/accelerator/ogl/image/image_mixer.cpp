@@ -376,7 +376,8 @@ struct image_mixer::impl
     core::const_frame import_d3d_texture(const void*                                tag,
                                          const std::shared_ptr<d3d::d3d_texture2d>& d3d_texture,
                                          core::pixel_format                         format,
-                                         common::bit_depth                          depth) override
+                                         common::bit_depth                          depth,
+                                         array<std::int32_t>                        audio) override
     {
         // map directx texture with wgl texture
         if (d3d_texture->gl_texture_id() == 0)
@@ -397,7 +398,7 @@ struct image_mixer::impl
         auto frame = core::mutable_frame(
             tag,
             std::vector<array<uint8_t>>{},
-            array<int32_t>{},
+            std::move(audio),
             desc,
             [weak_self, texs = std::move(textures)](std::vector<array<const std::uint8_t>> image_data) -> std::any {
                 auto self = weak_self.lock();
@@ -446,9 +447,10 @@ image_mixer::create_frame(const void* tag, const core::pixel_format_desc& desc, 
 core::const_frame image_mixer::import_d3d_texture(const void*                                tag,
                                                   const std::shared_ptr<d3d::d3d_texture2d>& d3d_texture,
                                                   core::pixel_format                         format,
-                                                  common::bit_depth                          depth)
+                                                  common::bit_depth                          depth,
+                                                  array<std::int32_t>                        audio)
 {
-    return impl_->import_d3d_texture(tag, d3d_texture, format, depth);
+    return impl_->import_d3d_texture(tag, d3d_texture, format, depth, std::move(audio));
 }
 #endif
 
