@@ -20,6 +20,7 @@ set(SOURCES
 
 	accelerator.cpp
 )
+
 set(HEADERS
 	ogl/image/image_kernel.h
 	ogl/image/image_mixer.h
@@ -124,6 +125,36 @@ IF(ENABLE_VULKAN)
 
 	list(APPEND SOURCES ${VULKAN_SOURCES})
 	list(APPEND HEADERS ${VULKAN_HEADERS})
+ENDIF()
+
+IF (ENABLE_VULKAN)
+	find_program(glslc_executable NAMES glslc HINTS Vulkan::glslc)
+	set(SHADER_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/vulkan/image)
+	set(SHADER_BINARY_DIR ${CMAKE_CURRENT_SOURCE_DIR}/vulkan/image)
+
+	file(GLOB SHADERS
+		${SHADER_SOURCE_DIR}/vertex_shader.vert
+		${SHADER_SOURCE_DIR}/fragment_shader.frag)
+
+	foreach(source IN LISTS SHADERS)
+		get_filename_component(FILENAME ${source} NAME_WLE)
+		add_custom_command(
+			COMMAND
+				${glslc_executable}
+				#      -MD -MF ${SHADER_BINARY_DIR}/${FILENAME}.d
+				-o ${SHADER_BINARY_DIR}/${FILENAME}.spv
+				${source}
+			OUTPUT ${SHADER_BINARY_DIR}/${FILENAME}.spv
+			DEPENDS ${source} ${SHADER_BINARY_DIR}
+			COMMENT "Compiling ${FILENAME}"
+		)
+		list(APPEND SPV_SHADERS ${SHADER_BINARY_DIR}/${FILENAME}.spv)
+	endforeach()
+
+	add_custom_target(shaders ALL DEPENDS ${SPV_SHADERS})
+
+	bin2c("vulkan/image/vertex_shader.spv" "vulkan_image_vertex.h" "caspar::accelerator::vulkan" "vertex_shader")
+	bin2c("vulkan/image/fragment_shader.spv" "vulkan_image_fragment.h" "caspar::accelerator::vulkan" "fragment_shader")
 ENDIF()
 
 bin2c("ogl/image/shader.vert" "ogl_image_vertex.h" "caspar::accelerator::ogl" "vertex_shader")

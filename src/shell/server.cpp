@@ -343,6 +343,30 @@ struct server::impl
         }
     }
 
+    void setup_accelerator(const boost::property_tree::wptree& pt)
+    {
+        using boost::property_tree::wptree;
+        using namespace boost::asio::ip;
+
+#ifdef ENABLE_VULKAN
+        caspar::accelerator::accelerator_backend backend = caspar::accelerator::accelerator_backend::invalid;
+        auto accelerator = boost::to_lower_copy(pt.get(L"configuration.accelerator", L"auto"));
+        if (accelerator == L"auto") {
+            backend = caspar::accelerator::accelerator_backend::opengl;
+        } else if (accelerator == L"opengl") {
+            backend = caspar::accelerator::accelerator_backend::opengl;
+        } else if (accelerator == L"vulkan") {
+            backend = caspar::accelerator::accelerator_backend::vulkan;
+        } else {
+            CASPAR_THROW_EXCEPTION(user_error() << msg_info(L"Invalid accelerator: " + accelerator));
+        }
+#else
+        caspar::accelerator::accelerator_backend backend = caspar::accelerator::accelerator_backend::opengl;
+#endif
+
+        accelerator_.set_backend(backend);
+    }
+
     std::vector<boost::property_tree::wptree> setup_channels(const boost::property_tree::wptree& pt)
     {
         using boost::property_tree::wptree;
