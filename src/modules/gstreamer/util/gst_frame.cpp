@@ -35,6 +35,8 @@ extern "C" {
 #include <gst/gst.h>
 #include <gst/video/video.h>
 
+#include <vector>
+
 namespace caspar { namespace gstreamer {
 
 namespace {
@@ -47,10 +49,8 @@ AVPixelFormat to_av_pixel_format(GstVideoFormat format)
 {
     switch (format) {
         case GST_VIDEO_FORMAT_BGRA:
-        case GST_VIDEO_FORMAT_BGRx:
             return AV_PIX_FMT_BGRA;
         case GST_VIDEO_FORMAT_RGBA:
-        case GST_VIDEO_FORMAT_RGBx:
             return AV_PIX_FMT_RGBA;
         case GST_VIDEO_FORMAT_ARGB:
             return AV_PIX_FMT_ARGB;
@@ -62,12 +62,8 @@ AVPixelFormat to_av_pixel_format(GstVideoFormat format)
             return AV_PIX_FMT_YUV422P;
         case GST_VIDEO_FORMAT_Y444:
             return AV_PIX_FMT_YUV444P;
-        case GST_VIDEO_FORMAT_NV12:
-            return AV_PIX_FMT_NV12;
         case GST_VIDEO_FORMAT_UYVY:
             return AV_PIX_FMT_UYVY422;
-        case GST_VIDEO_FORMAT_YUY2:
-            return AV_PIX_FMT_YUYV422;
         case GST_VIDEO_FORMAT_I420_10LE:
             return AV_PIX_FMT_YUV420P10LE;
         case GST_VIDEO_FORMAT_I422_10LE:
@@ -96,8 +92,14 @@ core::color_space to_color_space(const GstVideoInfo& info)
 
 const char* supported_caps_formats()
 {
-    return "BGRA, BGRx, RGBA, RGBx, ARGB, ABGR, I420, Y42B, Y444, NV12, UYVY, YUY2, "
-           "I420_10LE, I422_10LE, Y444_10LE";
+    // This list is not "what GStreamer can produce" — it is exactly what ffmpeg::make_frame
+    // can describe to the mixer, and it earns that narrowness. NV12 and YUY2 were here first,
+    // because GStreamer and FFmpeg both have them and the mapping looked obvious; the mixer
+    // does not, so pixel_format_desc returned `invalid`, the frame came back with no planes,
+    // and a hardware-decoded file played as 164 perfectly black frames with no warning
+    // anywhere. The x-padded variants (BGRx, RGBx) are out for a related reason: they map onto
+    // a format with alpha, and the padding byte is not required to be opaque.
+    return "BGRA, RGBA, ARGB, ABGR, I420, Y42B, Y444, UYVY, I420_10LE, I422_10LE, Y444_10LE";
 }
 
 core::draw_frame make_frame(void*                    tag,
@@ -121,6 +123,18 @@ core::draw_frame make_frame(void*                    tag,
     if (pix_fmt == AV_PIX_FMT_NONE) {
         CASPAR_LOG(warning) << L"[gstreamer] Unsupported video format "
                             << u16(std::string(gst_video_format_to_string(GST_VIDEO_INFO_FORMAT(&info))));
+        return core::draw_frame{};
+    }
+
+    // The caps above should make this unreachable, but a format the mixer cannot describe
+    // produces a frame with no planes rather than an error, and that renders as black with
+    // nothing logged. Ask first.
+    std::vector<int> data_map;
+    if (ffmpeg::pixel_format_desc(pix_fmt, GST_VIDEO_INFO_WIDTH(&info), GST_VIDEO_INFO_HEIGHT(&info), data_map)
+            .format == core::pixel_format::invalid) {
+        CASPAR_LOG(warning) << L"[gstreamer] The mixer has no pixel format for "
+                            << u16(std::string(gst_video_format_to_string(GST_VIDEO_INFO_FORMAT(&info))))
+                            << L"; dropping the frame rather than rendering black.";
         return core::draw_frame{};
     }
 
