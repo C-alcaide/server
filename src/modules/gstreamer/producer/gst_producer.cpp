@@ -58,9 +58,11 @@ extern "C" {
 #include <gst/gst.h>
 
 #include <atomic>
+#include <chrono>
 #include <deque>
 #include <mutex>
 #include <queue>
+#include <shared_mutex>
 #include <thread>
 
 namespace caspar { namespace gstreamer {
@@ -71,6 +73,12 @@ namespace {
 /// absorb a decode that is briefly late, shallow enough that a producer switched away from
 /// and back does not present stale pictures.
 constexpr std::size_t max_queued_frames = 4;
+
+/// How long to wait before rebuilding a pipeline that errored, and the ceiling that backoff
+/// climbs to. A live source that drops — a sender restarted, a network that blinked — must not
+/// take the layer down with it, and must not spin on a source that is simply gone either.
+constexpr auto reconnect_delay_initial = std::chrono::milliseconds(500);
+constexpr auto reconnect_delay_max     = std::chrono::seconds(5);
 
 /// The names the module looks for after parsing, and writes into the description when it
 /// appends the sink itself.
@@ -84,11 +92,18 @@ constexpr const char* host_tail = " ! videoconvert ! videorate ! appsink name=";
 constexpr const char* gpu_tail =
     " ! d3d11upload ! d3d11convert ! video/x-raw(memory:D3D11Memory),format=BGRA ! appsink name=";
 
-std::wstring describe_error(GstMessage* message)
+/// Reads whichever of the two a message actually carries. Parsing a WARNING with
+/// gst_message_parse_error leaves the GError null and prints "unknown error", which is how
+/// every warning this producer logged came out saying nothing at all.
+std::wstring describe_message(GstMessage* message)
 {
     GError* error = nullptr;
     gchar*  debug = nullptr;
-    gst_message_parse_error(message, &error, &debug);
+
+    if (GST_MESSAGE_TYPE(message) == GST_MESSAGE_WARNING)
+        gst_message_parse_warning(message, &error, &debug);
+    else
+        gst_message_parse_error(message, &error, &debug);
 
     std::wstring text = error ? u16(std::string(error->message)) : L"unknown error";
     if (debug != nullptr)
@@ -112,9 +127,14 @@ struct gst_producer : public core::frame_producer
     spl::shared_ptr<core::frame_factory> frame_factory_;
     const core::video_format_desc        format_desc_;
 
-    GstElement* pipeline_   = nullptr;
-    GstElement* video_sink_ = nullptr;
-    GstElement* audio_sink_ = nullptr;
+    // Guards the three pointers below against a rebuild happening under the pull threads.
+    // Shared, not exclusive, for the pulls: both threads block in try_pull_sample for up to
+    // 100 ms at a time and serialising them would halve the throughput of a producer that is
+    // working perfectly well, to protect against something that happens when it is not.
+    mutable std::shared_mutex pipeline_mutex_;
+    GstElement*               pipeline_   = nullptr;
+    GstElement*               video_sink_ = nullptr;
+    GstElement*               audio_sink_ = nullptr;
 
     spl::shared_ptr<diagnostics::graph> graph_;
     timer                               tick_timer_;
@@ -143,6 +163,8 @@ struct gst_producer : public core::frame_producer
     std::atomic<uint64_t> frames_received_{0};
     std::atomic<uint64_t> frames_dropped_{0};
     std::atomic<uint64_t> audio_underruns_{0};
+    std::atomic<uint64_t> restarts_{0};
+    std::atomic<bool>     is_failed_{false};
     std::thread           video_thread_;
     std::thread           audio_thread_;
 
@@ -217,6 +239,8 @@ struct gst_producer : public core::frame_producer
             video_thread_.join();
         if (audio_thread_.joinable())
             audio_thread_.join();
+
+        std::unique_lock<std::shared_mutex> lock(pipeline_mutex_);
         destroy_pipeline();
     }
 
@@ -355,7 +379,7 @@ struct gst_producer : public core::frame_producer
             return reason;
 
         while (auto* message = gst_bus_pop_filtered(bus, GST_MESSAGE_ERROR)) {
-            reason = describe_error(message);
+            reason = describe_message(message);
             gst_message_unref(message);
         }
         gst_object_unref(bus);
@@ -365,6 +389,10 @@ struct gst_producer : public core::frame_producer
 
     void poll_bus()
     {
+        std::shared_lock<std::shared_mutex> lock(pipeline_mutex_);
+        if (pipeline_ == nullptr)
+            return;
+
         auto* bus = gst_element_get_bus(pipeline_);
         if (bus == nullptr)
             return;
@@ -373,11 +401,15 @@ struct gst_producer : public core::frame_producer
                    bus, static_cast<GstMessageType>(GST_MESSAGE_ERROR | GST_MESSAGE_WARNING | GST_MESSAGE_EOS))) {
             switch (GST_MESSAGE_TYPE(message)) {
                 case GST_MESSAGE_ERROR:
-                    CASPAR_LOG(error) << print() << L" " << describe_error(message);
-                    is_running_ = false;
+                    // Not is_running_ = false. That was the original behaviour and it is the
+                    // wrong one for everything this module is for: a live source that drops
+                    // took the layer down permanently, with the producer still on air showing
+                    // its last frame and no way back short of a re-PLAY.
+                    CASPAR_LOG(error) << print() << L" " << describe_message(message);
+                    is_failed_ = true;
                     break;
                 case GST_MESSAGE_WARNING:
-                    CASPAR_LOG(warning) << print() << L" " << describe_error(message);
+                    CASPAR_LOG(warning) << print() << L" " << describe_message(message);
                     break;
                 case GST_MESSAGE_EOS:
                     CASPAR_LOG(info) << print() << L" End of stream.";
@@ -428,13 +460,77 @@ struct gst_producer : public core::frame_producer
         return std::shared_ptr<AVFrame>(frame.get(), [frame, buffer](AVFrame*) {});
     }
 
+    /// Tear the pipeline down and build it again. Called only from the video thread, which
+    /// is also the one that reads the bus, so there is exactly one restarter.
+    void restart()
+    {
+        auto delay = reconnect_delay_initial * (1 << std::min<uint64_t>(restarts_.load(), 3));
+        delay      = std::min(std::chrono::duration_cast<std::chrono::milliseconds>(delay),
+                              std::chrono::duration_cast<std::chrono::milliseconds>(reconnect_delay_max));
+
+        CASPAR_LOG(warning) << print() << L" restarting in " << delay.count() << L" ms (attempt "
+                            << (restarts_.load() + 1) << L").";
+
+#ifdef _WIN32
+        // The ring holds textures created on GStreamer's D3D11 device, and a rebuilt pipeline
+        // may come up on a different one. Copying into a texture that belongs to another
+        // device is not a slow path, it is undefined behaviour, so the bridge goes with the
+        // pipeline it was built for.
+        gpu_bridge_.reset();
+#endif
+
+        {
+            std::unique_lock<std::shared_mutex> lock(pipeline_mutex_);
+            destroy_pipeline();
+        }
+
+        // Outside the lock: the pull threads must be able to time out and notice the sinks are
+        // gone rather than block on a rebuild that is deliberately slow.
+        std::this_thread::sleep_for(delay);
+        if (!is_running_)
+            return;
+
+        try {
+            std::unique_lock<std::shared_mutex> lock(pipeline_mutex_);
+            build_pipeline();
+            if (gst_element_set_state(pipeline_, GST_STATE_PLAYING) == GST_STATE_CHANGE_FAILURE) {
+                destroy_pipeline();
+                CASPAR_LOG(warning) << print() << L" restart failed to start the pipeline.";
+                return;
+            }
+        } catch (...) {
+            CASPAR_LOG(warning) << print() << L" restart could not build the pipeline.";
+            return;
+        }
+
+#ifdef _WIN32
+        if (want_gpu_ && audio_sink_ == nullptr)
+            gpu_bridge_ = std::make_unique<d3d11_bridge>();
+#endif
+
+        ++restarts_;
+        is_failed_ = false;
+        CASPAR_LOG(info) << print() << L" restarted.";
+    }
+
     void run_video()
     {
         while (is_running_) {
             poll_bus();
 
+            if (is_failed_) {
+                restart();
+                continue;
+            }
+
             // 100 ms, so a stalled pipeline still lets the loop see is_running_ and the bus.
-            auto* sample = gst_app_sink_try_pull_sample(GST_APP_SINK(video_sink_), 100 * GST_MSECOND);
+            GstSample* sample = nullptr;
+            {
+                std::shared_lock<std::shared_mutex> lock(pipeline_mutex_);
+                if (video_sink_ == nullptr)
+                    continue;
+                sample = gst_app_sink_try_pull_sample(GST_APP_SINK(video_sink_), 100 * GST_MSECOND);
+            }
 
             if (sample == nullptr)
                 continue;
@@ -494,7 +590,16 @@ struct gst_producer : public core::frame_producer
         const std::size_t max_samples = static_cast<std::size_t>(format_desc_.audio_sample_rate) * 16;
 
         while (is_running_) {
-            auto* sample = gst_app_sink_try_pull_sample(GST_APP_SINK(audio_sink_), 100 * GST_MSECOND);
+            GstSample* sample = nullptr;
+            {
+                std::shared_lock<std::shared_mutex> lock(pipeline_mutex_);
+                if (audio_sink_ == nullptr) {
+                    lock.unlock();
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                    continue;
+                }
+                sample = gst_app_sink_try_pull_sample(GST_APP_SINK(audio_sink_), 100 * GST_MSECOND);
+            }
 
             if (sample == nullptr)
                 continue;
@@ -575,6 +680,8 @@ struct gst_producer : public core::frame_producer
         state["gstreamer/audio"]     = audio_channels_.load();
         state["gstreamer/underruns"] = static_cast<int64_t>(audio_underruns_.load());
         state["gstreamer/gpu-frames"] = static_cast<int64_t>(frames_on_gpu_.load());
+        state["gstreamer/restarts"]   = static_cast<int64_t>(restarts_.load());
+        state["gstreamer/failed"]     = is_failed_.load();
         {
             std::lock_guard<std::mutex> lock(frames_mutex_);
             state["gstreamer/queue"] = static_cast<int64_t>(frames_.size());
