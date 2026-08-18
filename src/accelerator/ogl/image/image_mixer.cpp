@@ -27,6 +27,7 @@
 #include "../util/texture.h"
 
 #ifdef WIN32
+#include "../../d3d/d3d_device.h"
 #include "../../d3d/d3d_texture2d.h"
 #endif
 
@@ -373,6 +374,31 @@ struct image_mixer::impl
     }
 
 #ifdef WIN32
+    core::const_frame import_shared_texture(const void*         tag,
+                                            void*               shared_handle,
+                                            int                 width,
+                                            int                 height,
+                                            core::pixel_format  format,
+                                            common::bit_depth   depth,
+                                            array<std::int32_t> audio) override
+    {
+        // This mixer's native form is the opened texture, so opening is all this adds. The
+        // device is null when WGL_NV_DX_interop2 is absent, which is the same condition that
+        // makes the whole path unavailable — worth its own message rather than a null deref.
+        const auto& device = d3d::d3d_device::get_device();
+        if (!device)
+            CASPAR_THROW_EXCEPTION(not_supported() << msg_info(
+                                       "this OpenGL device has no WGL_NV_DX_interop2, so a shared D3D11 texture "
+                                       "cannot be imported"));
+
+        auto opened = device->open_shared_texture(shared_handle);
+        if (!opened)
+            CASPAR_THROW_EXCEPTION(caspar_exception()
+                                   << msg_info("could not open the shared D3D11 texture on the mixer's device"));
+
+        return import_d3d_texture(tag, opened, format, depth, std::move(audio));
+    }
+
     core::const_frame import_d3d_texture(const void*                                tag,
                                          const std::shared_ptr<d3d::d3d_texture2d>& d3d_texture,
                                          core::pixel_format                         format,
@@ -444,6 +470,17 @@ image_mixer::create_frame(const void* tag, const core::pixel_format_desc& desc, 
 }
 
 #ifdef WIN32
+core::const_frame image_mixer::import_shared_texture(const void*         tag,
+                                                     void*               shared_handle,
+                                                     int                 width,
+                                                     int                 height,
+                                                     core::pixel_format  format,
+                                                     common::bit_depth   depth,
+                                                     array<std::int32_t> audio)
+{
+    return impl_->import_shared_texture(tag, shared_handle, width, height, format, depth, std::move(audio));
+}
+
 core::const_frame image_mixer::import_d3d_texture(const void*                                tag,
                                                   const std::shared_ptr<d3d::d3d_texture2d>& d3d_texture,
                                                   core::pixel_format                         format,

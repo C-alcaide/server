@@ -62,6 +62,14 @@ class image_mixer
                                          core::pixel_format                                      format,
                                          common::bit_depth                                       depth,
                                          array<std::int32_t> audio) override = 0;
+
+    class const_frame import_shared_texture(const void*         tag,
+                                            void*               shared_handle,
+                                            int                 width,
+                                            int                 height,
+                                            core::pixel_format  format,
+                                            common::bit_depth   depth,
+                                            array<std::int32_t> audio) override = 0;
 #endif
 
     virtual common::bit_depth depth() const = 0;

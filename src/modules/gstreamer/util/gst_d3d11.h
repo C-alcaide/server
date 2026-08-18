@@ -26,11 +26,17 @@
 
 typedef struct _GstSample GstSample;
 
-namespace caspar { namespace accelerator { namespace d3d {
-class d3d_texture2d;
-}}} // namespace caspar::accelerator::d3d
-
 namespace caspar { namespace gstreamer {
+
+/// What the mixer needs to import a frame: a shared NT handle and the size behind it.
+struct shared_texture
+{
+    void* handle = nullptr;
+    int   width  = 0;
+    int   height = 0;
+
+    explicit operator bool() const { return handle != nullptr; }
+};
 
 /// Carries a decoded frame from GStreamer's D3D11 device to the mixer's, without it ever
 /// touching host memory.
@@ -51,8 +57,8 @@ namespace caspar { namespace gstreamer {
 /// * A sample that is not D3D11 memory. The caller falls back to the CPU path.
 /// * A GStreamer device on a different adapter from the mixer's. `OpenSharedResource1` fails
 ///   across adapters, and a cross-adapter copy would be slower than the host path it replaces.
-/// * The Vulkan mixer, whose `import_d3d_texture` throws outright. The first failure is caught,
-///   logged once, and the bridge disables itself for the rest of the producer's life.
+/// * A mixer that cannot import a shared texture at all. The first failure is caught, logged
+///   once, and the bridge disables itself for the rest of the producer's life.
 class d3d11_bridge
 {
   public:
@@ -65,9 +71,14 @@ class d3d11_bridge
     /// True when the sample carries D3D11 memory this bridge could take.
     static bool handles(GstSample* sample);
 
-    /// A texture on the mixer's device holding this sample's picture, or nullptr — in which
-    /// case the caller must use the CPU path. Never throws.
-    std::shared_ptr<accelerator::d3d::d3d_texture2d> import(GstSample* sample);
+    /// A shared handle holding this sample's picture, or an empty one — in which case the
+    /// caller must use the CPU path. Never throws.
+    ///
+    /// A handle rather than an opened texture, because opening one is a thing only the OpenGL
+    /// mixer can do: `d3d_texture2d` registers with WGL_NV_DX_interop2 on construction, and
+    /// the device it needs does not exist on a Vulkan server. The handle is what both mixers
+    /// accept.
+    shared_texture import(GstSample* sample);
 
     /// Why the bridge gave up, for the log. Empty while it is still working.
     const std::wstring& disabled_reason() const;

@@ -578,11 +578,13 @@ struct gst_producer : public core::frame_producer
                     if (auto texture = gpu_bridge_->import(sample)) {
                         try {
                             frame = core::draw_frame(
-                                frame_factory_->import_d3d_texture(this,
-                                                                   texture,
-                                                                   core::pixel_format::bgra,
-                                                                   common::bit_depth::bit8,
-                                                                   caspar::array<std::int32_t>(audio_samples)));
+                                frame_factory_->import_shared_texture(this,
+                                                                      texture.handle,
+                                                                      texture.width,
+                                                                      texture.height,
+                                                                      core::pixel_format::bgra,
+                                                                      common::bit_depth::bit8,
+                                                                      caspar::array<std::int32_t>(audio_samples)));
                             ++frames_on_gpu_;
                         } catch (...) {
                             // The Vulkan mixer throws here by design — it has no D3D11 import.

@@ -23,12 +23,6 @@
 
 #include "gst_d3d11.h"
 
-// d3d_texture2d.h is deliberately NOT included: it names ogl::device without declaring it,
-// so it only compiles for a translation unit that already pulled in the OpenGL accelerator.
-// Nothing here calls into the texture — it is stored and handed on — and a shared_ptr keeps
-// the deleter it was built with, so the incomplete type d3d_device.h declares is enough.
-#include <accelerator/d3d/d3d_device.h>
-
 #include <common/log.h>
 #include <common/utf.h>
 
@@ -86,15 +80,21 @@ struct d3d11_bridge::impl
 {
     std::wstring disabled_reason;
 
-    // The ring lives on GStreamer's device; each entry is also already open on ours, so the
-    // per-frame cost is the copy and nothing else.
+    // The ring lives on GStreamer's device; each entry carries the shared handle the mixer
+    // imports, so the per-frame cost is the copy and nothing else.
     struct slot
     {
-        CComPtr<ID3D11Texture2D>                          source_side;
-        std::shared_ptr<accelerator::d3d::d3d_texture2d>  mixer_side;
+        CComPtr<ID3D11Texture2D> source_side;
+        HANDLE                   handle = nullptr;
+
+        ~slot()
+        {
+            if (handle != nullptr)
+                CloseHandle(handle);
+        }
     };
 
-    std::vector<slot> ring;
+    std::vector<std::unique_ptr<slot>> ring;
     std::size_t       next = 0;
 
     UINT                     width  = 0;
@@ -144,48 +144,25 @@ struct d3d11_bridge::impl
         // synchronisation; the fence below is what orders the copy against the read.
         desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
 
-        const auto& mixer_device = accelerator::d3d::d3d_device::get_device();
-        if (!mixer_device) {
-            disable(L"the mixer has no D3D11 device.");
-            return false;
-        }
-
         for (std::size_t n = 0; n < ring_size; ++n) {
-            slot s;
-            auto hr = gst_device->CreateTexture2D(&desc, nullptr, &s.source_side);
+            auto s  = std::make_unique<slot>();
+            auto hr = gst_device->CreateTexture2D(&desc, nullptr, &s->source_side);
             if (FAILED(hr)) {
                 disable(L"could not create a shared texture on GStreamer's device (hr " +
                         hresult_text(hr) + L").");
                 return false;
             }
 
-            CComQIPtr<IDXGIResource1> resource(s.source_side.p);
-            HANDLE                    handle = nullptr;
+            CComQIPtr<IDXGIResource1> resource(s->source_side.p);
             if (!resource) {
                 disable(L"the texture does not implement IDXGIResource1, so it cannot be shared.");
                 return false;
             }
 
             hr = resource->CreateSharedHandle(
-                nullptr, DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE, nullptr, &handle);
+                nullptr, DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE, nullptr, &s->handle);
             if (FAILED(hr)) {
                 disable(L"could not create a shared handle for the texture (hr " + hresult_text(hr) + L").");
-                return false;
-            }
-
-            try {
-                s.mixer_side = mixer_device->open_shared_texture(handle);
-            } catch (...) {
-                s.mixer_side = nullptr;
-            }
-            CloseHandle(handle); // the opened texture holds its own reference
-
-            if (!s.mixer_side) {
-                // The usual cause is the two devices being on different adapters, which is
-                // worth naming because the fix is a pipeline change (`d3d11h264dec` versus
-                // `d3d11h264device1dec`) rather than anything in this code.
-                disable(L"the mixer could not open GStreamer's shared texture — most likely "
-                        L"the two are on different adapters.");
                 return false;
             }
 
@@ -204,40 +181,40 @@ struct d3d11_bridge::impl
         return true;
     }
 
-    std::shared_ptr<accelerator::d3d::d3d_texture2d> import(GstSample* sample)
+    shared_texture import(GstSample* sample)
     {
         if (!disabled_reason.empty())
-            return nullptr;
+            return {};
 
         auto* mem = d3d11_memory_of(sample);
         if (mem == nullptr)
-            return nullptr;
+            return {};
 
         D3D11_TEXTURE2D_DESC src_desc = {};
         if (!gst_d3d11_memory_get_texture_desc(mem, &src_desc))
-            return nullptr;
+            return {};
 
         if (src_desc.Format != accepted_format) {
             disable(L"the pipeline delivered " + std::to_wstring(static_cast<int>(src_desc.Format)) +
                     L" rather than BGRA on the GPU; ask the pipeline for "
                     L"video/x-raw(memory:D3D11Memory),format=BGRA.");
-            return nullptr;
+            return {};
         }
 
         if (!ensure_ring(mem, src_desc))
-            return nullptr;
+            return {};
 
         auto* source = gst_d3d11_memory_get_resource_handle(mem);
         if (source == nullptr)
-            return nullptr;
+            return {};
 
-        auto& s = ring[next];
+        auto& s = *ring[next];
         next    = (next + 1) % ring.size();
 
         auto* context = gst_d3d11_device_get_device_context_handle(mem->device);
         if (context == nullptr) {
             disable(L"GStreamer's D3D11 context handle was null.");
-            return nullptr;
+            return {};
         }
 
         // GStreamer's device context is shared with its own streaming threads and is not
@@ -262,16 +239,16 @@ struct d3d11_bridge::impl
                 break;
             if (FAILED(hr)) {
                 disable(L"the fence query failed while waiting for the GPU copy.");
-                return nullptr;
+                return {};
             }
         }
 
         if (!done) {
             disable(L"the GPU copy did not complete in time.");
-            return nullptr;
+            return {};
         }
 
-        return s.mixer_side;
+        return shared_texture{s.handle, static_cast<int>(width), static_cast<int>(height)};
     }
 };
 
@@ -284,14 +261,14 @@ d3d11_bridge::~d3d11_bridge() = default;
 
 bool d3d11_bridge::handles(GstSample* sample) { return d3d11_memory_of(sample) != nullptr; }
 
-std::shared_ptr<accelerator::d3d::d3d_texture2d> d3d11_bridge::import(GstSample* sample)
+shared_texture d3d11_bridge::import(GstSample* sample)
 {
     try {
         return impl_->import(sample);
     } catch (...) {
         impl_->disable(L"an exception escaped the GPU import path.");
         CASPAR_LOG_CURRENT_EXCEPTION();
-        return nullptr;
+        return {};
     }
 }
 

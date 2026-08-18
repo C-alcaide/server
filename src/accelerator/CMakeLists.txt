@@ -43,7 +43,9 @@ IF(ENABLE_VULKAN)
 		vulkan/image/image_mixer.cpp
 
 		vulkan/util/buffer.cpp
-		vulkan/util/device.cpp
+		vulkan/util/d3d11_import_bridge.cpp
+        vulkan/util/d3d11_import_bridge.h
+        vulkan/util/device.cpp
 		vulkan/util/pipeline.cpp
 		vulkan/util/renderpass.cpp
 		vulkan/util/texture.cpp

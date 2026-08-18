@@ -54,6 +54,14 @@ class image_mixer final : public core::image_mixer
     create_frame(const void* video_stream_tag, const core::pixel_format_desc& desc, common::bit_depth depth) override;
 
 #ifdef WIN32
+    core::const_frame import_shared_texture(const void*         tag,
+                                            void*               shared_handle,
+                                            int                 width,
+                                            int                 height,
+                                            core::pixel_format  format,
+                                            common::bit_depth   depth,
+                                            array<std::int32_t> audio = array<std::int32_t>{}) override;
+
     core::const_frame import_d3d_texture(const void*                                tag,
                                          const std::shared_ptr<d3d::d3d_texture2d>& d3d_texture,
                                          core::pixel_format                         format,

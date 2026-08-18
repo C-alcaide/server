@@ -57,6 +57,26 @@ class frame_factory
                                                  core::pixel_format                                      format,
                                                  common::bit_depth                                       depth,
                                                  array<std::int32_t> audio = array<std::int32_t>{}) = 0;
+
+    /// The same handoff, from a shared NT handle rather than an opened texture.
+    ///
+    /// `d3d_texture2d` is an OpenGL-side object: constructing one registers the texture with
+    /// WGL_NV_DX_interop2, and `d3d_device::get_device()` returns null altogether unless that
+    /// extension is present. So on a Vulkan server there is no way to *make* the argument
+    /// import_d3d_texture wants, and a caller holding a perfectly good shared texture could
+    /// not hand it over at all. The handle is what both backends can actually take: Vulkan
+    /// imports it through VK_KHR_external_memory_win32, OpenGL opens it and carries on as
+    /// before.
+    ///
+    /// Both mixers implement it. One that cannot do the import at all throws `not_supported`,
+    /// which the caller is expected to catch and fall back from.
+    virtual class const_frame import_shared_texture(const void*         video_stream_tag,
+                                                    void*               shared_handle,
+                                                    int                 width,
+                                                    int                 height,
+                                                    core::pixel_format  format,
+                                                    common::bit_depth   depth,
+                                                    array<std::int32_t> audio = array<std::int32_t>{}) = 0;
 #endif
 };
 

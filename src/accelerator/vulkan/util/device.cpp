@@ -34,6 +34,9 @@
 
 #include <VkBootstrap.h>
 #include <vulkan/vulkan.hpp>
+#ifdef WIN32
+#include <vulkan/vulkan_win32.h>
+#endif
 
 VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
 
@@ -210,6 +213,17 @@ struct device::impl : public std::enable_shared_from_this<impl>
         vk::PhysicalDeviceRobustness2FeaturesEXT robustness2Features;
         robustness2Features.nullDescriptor = true;
         _vkb_physical_device.enable_extension_features_if_present(robustness2Features);
+
+#ifdef WIN32
+        // What lets a shared D3D11 texture be imported — import_shared_texture, and through
+        // it the CEF and GStreamer GPU paths. If_present rather than required on purpose: a
+        // device without it must still come up and mix, and the import says so and falls back
+        // to host memory rather than taking the server down at startup.
+        if (!_vkb_physical_device.enable_extension_if_present(VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME)) {
+            CASPAR_LOG(info) << L"Vulkan device has no " << VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME
+                             << L"; shared D3D11 textures cannot be imported on this device.";
+        }
+#endif
 
         // Create the logical device
         auto device_builder = vkb::DeviceBuilder(_vkb_physical_device);

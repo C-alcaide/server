@@ -24,6 +24,9 @@
 
 #include "../util/buffer.h"
 #include "../util/device.h"
+#ifdef WIN32
+#include "../util/d3d11_import_bridge.h"
+#endif
 #include "../util/renderpass.h"
 #include "../util/texture.h"
 
@@ -265,6 +268,12 @@ struct image_mixer::impl
     std::vector<layer>           layers_; // layer/stream/items
     std::vector<layer*>          layer_stack_;
 
+#ifdef WIN32
+    /// Built on first use, because most channels never import a D3D11 texture and the bridge
+    /// creates a fence and a command buffer of its own.
+    std::unique_ptr<d3d11_import_bridge> import_bridge_;
+#endif
+
     double aspect_ratio_ = 1.0;
 
   public:
@@ -387,7 +396,58 @@ struct image_mixer::impl
                                          common::bit_depth                          depth,
                                          array<std::int32_t>                        audio) override
     {
-        throw std::runtime_error("d3d texture import not supported on vulkan accelerator");
+        return import_shared_texture(tag,
+                                     d3d_texture->share_handle(),
+                                     static_cast<int>(d3d_texture->width()),
+                                     static_cast<int>(d3d_texture->height()),
+                                     format,
+                                     depth,
+                                     std::move(audio));
+    }
+
+    core::const_frame import_shared_texture(const void*         tag,
+                                            void*               shared_handle,
+                                            int                 width,
+                                            int                 height,
+                                            core::pixel_format  format,
+                                            common::bit_depth   depth,
+                                            array<std::int32_t> audio) override
+    {
+        // Ported from CasparVP's d3d11_import_bridge, single-plane half. The OpenGL mixer
+        // reaches a D3D11 texture through WGL_NV_DX_interop2; this is the same journey through
+        // VK_KHR_external_memory_win32. Until now the Vulkan mixer threw, which meant anything
+        // handing over a shared texture worked on one backend and not the other.
+        if (!import_bridge_)
+            import_bridge_ = std::make_unique<d3d11_import_bridge>(vulkan_.get());
+
+        std::shared_ptr<vulkan::texture> imported;
+        if (!import_bridge_->copy_texture(shared_handle, width, height, imported)) {
+            CASPAR_THROW_EXCEPTION(caspar_exception()
+                                   << msg_info("the Vulkan import could not copy the shared D3D11 texture"));
+        }
+
+        // The copy reads the caller's texture, so it must retire before the caller is free to
+        // write the next frame into it. The bridge would do that on its next call, but the next
+        // call may be for a different handle.
+        import_bridge_->wait_for_previous_copy();
+
+        core::pixel_format_desc desc(format);
+        desc.planes.push_back(core::pixel_format_desc::plane(width, height, 4, depth));
+
+        // The texture reaches the renderer the same way every other frame's does: through the
+        // frame's opaque, as a vector of future_texture. `core::const_frame`'s own texture
+        // parameter is not that route — this mixer never reads it — and using it would produce
+        // a frame that looks right and draws nothing.
+        std::vector<future_texture> textures{make_ready_future(std::move(imported)).share()};
+
+        return core::const_frame(core::mutable_frame(
+            tag,
+            std::vector<array<std::uint8_t>>{},
+            std::move(audio),
+            desc,
+            [textures = std::move(textures)](std::vector<array<const std::uint8_t>>) mutable -> std::any {
+                return std::make_shared<std::vector<future_texture>>(std::move(textures));
+            }));
     }
 #endif
 
@@ -423,6 +483,17 @@ image_mixer::create_frame(const void* tag, const core::pixel_format_desc& desc, 
 
 
 #ifdef WIN32
+core::const_frame image_mixer::import_shared_texture(const void*         tag,
+                                                     void*               shared_handle,
+                                                     int                 width,
+                                                     int                 height,
+                                                     core::pixel_format  format,
+                                                     common::bit_depth   depth,
+                                                     array<std::int32_t> audio)
+{
+    return impl_->import_shared_texture(tag, shared_handle, width, height, format, depth, std::move(audio));
+}
+
 core::const_frame image_mixer::import_d3d_texture(const void*                                tag,
                                                   const std::shared_ptr<d3d::d3d_texture2d>& d3d_texture,
                                                   core::pixel_format                         format,
