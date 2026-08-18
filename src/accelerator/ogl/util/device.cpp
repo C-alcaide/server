@@ -44,6 +44,8 @@
 #include <boost/asio/spawn.hpp>
 #include <boost/property_tree/ptree.hpp>
 
+#include <mutex>
+
 #include <tbb/concurrent_queue.h>
 #include <tbb/concurrent_unordered_map.h>
 
@@ -72,6 +74,7 @@ struct device::impl : public std::enable_shared_from_this<impl>
 #ifdef WIN32
     std::shared_ptr<d3d::d3d_device> d3d_device_;
     std::shared_ptr<void>            interop_handle_;
+    std::mutex                       interop_mutex_;
 #endif
 
     io_context                             io_context_;
@@ -117,6 +120,9 @@ struct device::impl : public std::enable_shared_from_this<impl>
         context_->unbind();
 
 #ifdef WIN32
+        // Opened here when the HTML module is going to want it, and on demand otherwise —
+        // see ensure_d3d_interop(). Eagerly first because this runs with the context already
+        // current and because a failure at startup is easier to read than one mid-show.
         if (env::properties().get(L"configuration.html.enable-gpu", false)) {
             d3d_device_ = d3d::d3d_device::get_device();
         }
@@ -188,6 +194,51 @@ struct device::impl : public std::enable_shared_from_this<impl>
     {
         return dispatch_async(std::forward<Func>(func)).get();
     }
+
+#ifdef WIN32
+    /// The WGL/D3D interop, opened on first use if it was not opened at startup.
+    ///
+    /// It used to exist only when `<html><enable-gpu>` was set, which reads as though the
+    /// interop were an HTML feature. It is not: it is how *any* D3D11 texture reaches this
+    /// mixer, and the GStreamer producer's GPU path needs exactly the same thing. Gating a
+    /// general capability on one module's setting meant a working pipeline failed with
+    /// "d3d interop not setup to bind shared d3d texture" and a configuration file that
+    /// mentioned neither GStreamer nor D3D.
+    ///
+    /// `wglDXOpenDeviceNV` needs a current GL context, so the work is dispatched onto the
+    /// device thread rather than run on the caller's.
+    std::shared_ptr<void> ensure_d3d_interop()
+    {
+        {
+            std::lock_guard<std::mutex> lock(interop_mutex_);
+            if (interop_handle_)
+                return interop_handle_;
+        }
+
+        dispatch_sync([&] {
+            std::lock_guard<std::mutex> lock(interop_mutex_);
+            if (interop_handle_)
+                return;
+
+            if (!d3d_device_)
+                d3d_device_ = d3d::d3d_device::get_device();
+
+            if (!d3d_device_)
+                return;
+
+            interop_handle_ = std::shared_ptr<void>(wglDXOpenDeviceNV(d3d_device_->device()), [](void* p) {
+                if (p)
+                    wglDXCloseDeviceNV(p);
+            });
+
+            if (interop_handle_)
+                CASPAR_LOG(info) << L"Opened D3D interop on demand.";
+        });
+
+        std::lock_guard<std::mutex> lock(interop_mutex_);
+        return interop_handle_;
+    }
+#endif
 
     std::wstring version() { return version_; }
 
@@ -457,7 +508,7 @@ std::future<array<const uint8_t>> device::copy_async(const std::shared_ptr<textu
 }
 
 #ifdef WIN32
-std::shared_ptr<void> device::d3d_interop() const { return impl_->interop_handle_; }
+std::shared_ptr<void> device::d3d_interop() const { return impl_->ensure_d3d_interop(); }
 std::future<std::shared_ptr<texture>>
 device::copy_async(GLuint source, int width, int height, int stride, common::bit_depth depth)
 {

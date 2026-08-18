@@ -17,6 +17,9 @@ set(SOURCES
 		producer/gst_producer.cpp
 		producer/gst_producer.h
 
+		util/gst_d3d11.cpp
+		util/gst_d3d11.h
+
 		util/gst_frame.cpp
 		util/gst_frame.h
 
@@ -40,6 +43,9 @@ target_include_directories(gstreamer PRIVATE
 	${GSTREAMER_ROOT}/include/gstreamer-1.0
 	${GSTREAMER_ROOT}/include/glib-2.0
 	${GSTREAMER_ROOT}/lib/glib-2.0/include
+	# gstd3d11config.h is generated at build time and installed beside the plugins rather
+	# than with the headers, so gst/d3d11/gstd3d11.h does not compile without this.
+	${GSTREAMER_ROOT}/lib/gstreamer-1.0/include
 )
 
 target_link_libraries(gstreamer PRIVATE
@@ -47,6 +53,7 @@ target_link_libraries(gstreamer PRIVATE
 	${GSTREAMER_ROOT}/lib/gstreamer-1.0.lib
 	${GSTREAMER_ROOT}/lib/gstapp-1.0.lib
 	${GSTREAMER_ROOT}/lib/gstvideo-1.0.lib
+	${GSTREAMER_ROOT}/lib/gstd3d11-1.0.lib
 	${GSTREAMER_ROOT}/lib/gobject-2.0.lib
 	${GSTREAMER_ROOT}/lib/glib-2.0.lib
 )
@@ -61,10 +68,16 @@ if (MSVC)
 		"/DELAYLOAD:gstreamer-1.0-0.dll"
 		"/DELAYLOAD:gstapp-1.0-0.dll"
 		"/DELAYLOAD:gstvideo-1.0-0.dll"
+		"/DELAYLOAD:gstd3d11-1.0-0.dll"
 		"/DELAYLOAD:gobject-2.0-0.dll"
 		"/DELAYLOAD:glib-2.0-0.dll"
 	)
 endif()
+
+# The d3d11 library is declared unstable API upstream and says so at every include. We
+# use it deliberately -- it is the only public route from a GstD3D11Memory to its texture --
+# so the acknowledgement is explicit rather than a wall of build noise.
+target_compile_definitions(gstreamer PRIVATE GST_USE_UNSTABLE_API)
 
 target_precompile_headers(gstreamer PRIVATE "StdAfx.h")
 

@@ -207,7 +207,8 @@ void initialize_once(state& s)
                              L"gstreamer-1.0-0.dll",
                              L"gstbase-1.0-0.dll",
                              L"gstvideo-1.0-0.dll",
-                             L"gstapp-1.0-0.dll"}) {
+                             L"gstapp-1.0-0.dll",
+                             L"gstd3d11-1.0-0.dll"}) {
         if (!load_by_path(bin / name)) {
             s.error = L"Failed to load " + std::wstring(name) + L" from " + bin.wstring() +
                       L" (error " + std::to_wstring(GetLastError()) + L").";

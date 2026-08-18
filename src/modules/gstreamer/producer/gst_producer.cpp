@@ -24,10 +24,17 @@
 #include "../util/gst_frame.h"
 #include "../util/gst_runtime.h"
 
+#ifdef _WIN32
+#include "../util/gst_d3d11.h"
+#endif
+
 #include <core/frame/draw_frame.h>
 #include <core/frame/frame_factory.h>
+#include <core/frame/pixel_format.h>
 #include <core/monitor/monitor.h>
 #include <core/video_format.h>
+
+#include <common/bit_depth.h>
 
 #include <common/diagnostics/graph.h>
 #include <common/except.h>
@@ -69,6 +76,13 @@ constexpr std::size_t max_queued_frames = 4;
 /// appends the sink itself.
 constexpr const char* video_sink_name = "caspar_video";
 constexpr const char* audio_sink_name = "caspar_audio";
+
+/// What gets appended when the description names no sink of its own. The GPU tail keeps the
+/// frame in video memory from the decoder to the mixer; the host tail is the portable one and
+/// stays the default.
+constexpr const char* host_tail = " ! videoconvert ! videorate ! appsink name=";
+constexpr const char* gpu_tail =
+    " ! d3d11upload ! d3d11convert ! video/x-raw(memory:D3D11Memory),format=BGRA ! appsink name=";
 
 std::wstring describe_error(GstMessage* message)
 {
@@ -118,6 +132,12 @@ struct gst_producer : public core::frame_producer
     std::atomic<int>    audio_channels_{0};
     std::size_t         cadence_counter_ = 0;
 
+    const bool want_gpu_;
+#ifdef _WIN32
+    std::unique_ptr<d3d11_bridge> gpu_bridge_;
+#endif
+    std::atomic<uint64_t> frames_on_gpu_{0};
+
     std::atomic<bool>     is_running_{true};
     std::atomic<bool>     is_eos_{false};
     std::atomic<uint64_t> frames_received_{0};
@@ -129,11 +149,13 @@ struct gst_producer : public core::frame_producer
   public:
     gst_producer(spl::shared_ptr<core::frame_factory> frame_factory,
                  core::video_format_desc              format_desc,
-                 std::wstring                         description)
+                 std::wstring                         description,
+                 bool                                 want_gpu)
         : instance_no_(instances_++)
         , description_(std::move(description))
         , frame_factory_(std::move(frame_factory))
         , format_desc_(std::move(format_desc))
+        , want_gpu_(want_gpu)
     {
         graph_->set_text(print());
         graph_->set_color("frame-time", diagnostics::color(0.5f, 1.0f, 0.2f));
@@ -168,6 +190,19 @@ struct gst_producer : public core::frame_producer
             CASPAR_THROW_EXCEPTION(user_error() << msg_info(u8(L"Failed to start GStreamer pipeline: " + reason)));
         }
 
+#ifdef _WIN32
+        // Built only when the frames can actually stay on the GPU all the way to the mixer.
+        // With an audio sink there is no route: import_d3d_texture returns a const_frame, and a
+        // const_frame has nowhere to carry the samples this producer would otherwise attach.
+        if (want_gpu_ && audio_sink_ == nullptr) {
+            gpu_bridge_ = std::make_unique<d3d11_bridge>();
+        } else if (want_gpu_) {
+            CASPAR_LOG(info) << print()
+                             << L" GPU frames not used: the pipeline carries audio, and the GPU "
+                                L"import path cannot carry it with the picture.";
+        }
+#endif
+
         video_thread_ = std::thread([this] { run_video(); });
         if (audio_sink_ != nullptr)
             audio_thread_ = std::thread([this] { run_audio(); });
@@ -197,7 +232,7 @@ struct gst_producer : public core::frame_producer
         auto launch = u8(description_);
 
         if (launch.find(video_sink_name) == std::string::npos)
-            launch += std::string(" ! videoconvert ! videorate ! appsink name=") + video_sink_name;
+            launch += std::string(want_gpu_ ? gpu_tail : host_tail) + video_sink_name;
 
         GError* error = nullptr;
         pipeline_     = gst_parse_launch(launch.c_str(), &error);
@@ -241,9 +276,17 @@ struct gst_producer : public core::frame_producer
 
     void configure_video_sink()
     {
-        const auto caps_text = std::string("video/x-raw, format=(string){ ") + supported_caps_formats() +
-                               " }, framerate=(fraction)" + std::to_string(format_desc_.framerate.numerator()) + "/" +
-                               std::to_string(format_desc_.framerate.denominator());
+        const auto rate = std::string(", framerate=(fraction)") +
+                          std::to_string(format_desc_.framerate.numerator()) + "/" +
+                          std::to_string(format_desc_.framerate.denominator());
+
+        // On the GPU path both are offered, GPU first: a source that cannot reach D3D11 memory
+        // then negotiates the host caps and the producer keeps working rather than failing to
+        // link, which is the difference between an optimisation and a restriction.
+        const auto caps_text =
+            (want_gpu_ ? std::string("video/x-raw(memory:D3D11Memory), format=(string)BGRA") + rate + "; "
+                       : std::string("")) +
+            std::string("video/x-raw, format=(string){ ") + supported_caps_formats() + " }" + rate;
 
         auto* caps = gst_caps_from_string(caps_text.c_str());
         g_object_set(G_OBJECT(video_sink_),
@@ -399,7 +442,30 @@ struct gst_producer : public core::frame_producer
             try {
                 frame_timer_.restart();
 
-                auto frame = make_frame(this, *frame_factory_, sample, take_audio());
+                core::draw_frame frame;
+
+#ifdef _WIN32
+                if (gpu_bridge_ && d3d11_bridge::handles(sample)) {
+                    if (auto texture = gpu_bridge_->import(sample)) {
+                        try {
+                            frame = core::draw_frame(frame_factory_->import_d3d_texture(
+                                this, texture, core::pixel_format::bgra, common::bit_depth::bit8));
+                            ++frames_on_gpu_;
+                        } catch (...) {
+                            // The Vulkan mixer throws here by design — it has no D3D11 import.
+                            // One attempt, one message, then the host path for good.
+                            CASPAR_LOG(info)
+                                << print()
+                                << L" the mixer would not take a D3D11 texture; using host memory instead.";
+                            CASPAR_LOG_CURRENT_EXCEPTION();
+                            gpu_bridge_.reset();
+                        }
+                    }
+                }
+#endif
+
+                if (!frame)
+                    frame = make_frame(this, *frame_factory_, sample, take_audio());
 
                 if (frame) {
                     std::lock_guard<std::mutex> lock(frames_mutex_);
@@ -508,6 +574,7 @@ struct gst_producer : public core::frame_producer
         state["gstreamer/eos"]       = is_eos_.load();
         state["gstreamer/audio"]     = audio_channels_.load();
         state["gstreamer/underruns"] = static_cast<int64_t>(audio_underruns_.load());
+        state["gstreamer/gpu-frames"] = static_cast<int64_t>(frames_on_gpu_.load());
         {
             std::lock_guard<std::mutex> lock(frames_mutex_);
             state["gstreamer/queue"] = static_cast<int64_t>(frames_.size());
@@ -543,7 +610,13 @@ spl::shared_ptr<core::frame_producer> create_producer(const core::frame_producer
 
     runtime::ensure_initialized();
 
-    return spl::make_shared<gst_producer>(dependencies.frame_factory, dependencies.format_desc, description);
+    // Opt-in rather than automatic. The GPU path changes which elements the pipeline has to
+    // negotiate with, and a source that cannot reach D3D11 memory pays an upload for nothing —
+    // so it is asked for, per PLAY, by a caller who knows the source is decoded on the GPU.
+    const bool want_gpu = contains_param(L"GPU", params);
+
+    return spl::make_shared<gst_producer>(
+        dependencies.frame_factory, dependencies.format_desc, description, want_gpu);
 }
 
 }} // namespace caspar::gstreamer
