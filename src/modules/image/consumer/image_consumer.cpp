@@ -29,6 +29,7 @@
 #include <common/filesystem.h>
 #include <common/future.h>
 #include <common/log.h>
+#include <common/timer.h>
 
 #include <core/consumer/channel_info.h>
 #include <core/frame/frame.h>
@@ -333,11 +334,30 @@ struct image_consumer : public core::frame_consumer
                     }
                     av_frame->data[0] = buf.data();
 
-                    // Convert the un-premultiplied source to RGBA64BE for PNG encoding
-                    auto av_frame2 = convert_image_frame(av_frame, target_fmt);
+                    // Convert the un-premultiplied source to RGBA64BE for PNG encoding.
+                    //
+                    // KNOWN DEFECT, deliberately still here. swscale's BGRA64 -> RGBA64
+                    // component permutation is LOSSY: it costs the OGL mixer's 16-bit captures
+                    // about 9 LSB16 (invisible at 8 bits, which is why it went unseen for so
+                    // long). No swscale flag avoids it -- nine were tried, `bitexact` among
+                    // them.
+                    //
+                    // Replacing it with a hand-written permutation is EXACT on pixels and was
+                    // still reverted twice: a full `conformance --bit-depth 16` run took 480 s
+                    // with 10 capture timeouts, against 155 s and zero for this line, measured
+                    // back to back in one session. The per-capture conversion measures the SAME
+                    // 3 ms either way, so that 3x is unexplained and is the open question.
+                    //
+                    // See docs/PLAN_BGRA64_CAPTURE_FIX.md before attempting it a third time.
+                    caspar::timer conv_timer;
+                    auto          av_frame2 = convert_image_frame(av_frame, target_fmt);
+                    const auto conv_ms = conv_timer.elapsed() * 1000.0;
 
+                    caspar::timer enc_timer;
                     FF(avcodec_send_frame(ctx.get(), av_frame2.get()));
                     FF(avcodec_send_frame(ctx.get(), nullptr));
+                    CASPAR_LOG(trace) << L"[image_consumer] TIMING convert=" << conv_ms
+                                      << L"ms send=" << (enc_timer.elapsed() * 1000.0) << L"ms";
 
                     auto pkt =
                         std::shared_ptr<AVPacket>(av_packet_alloc(), [](AVPacket* ptr) { av_packet_free(&ptr); });

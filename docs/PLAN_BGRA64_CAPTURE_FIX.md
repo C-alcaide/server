@@ -238,6 +238,57 @@ noticing the discrepancy by hand, and it belongs in the harness whether or not t
 
 ---
 
+## 8.1 ATTEMPT 3 — implemented as planned, and reverted. Read this first.
+
+**2026-08-19.** The design in §5 was implemented exactly as written: a `pack16_to_rgba64be`
+that allocates its destination with `av_frame_get_buffer(dest, 64)`, walks rows by both
+linesizes, carries the metadata, does not touch the source, and never calls swscale. It was
+**exact on pixels** — `image-convert` 4/4 with control 0.00 and excess +0.00 on all four arms
+(ogl/vulkan × 8/16 bit).
+
+**It failed the §7.2 timing gate, measured back to back in one session on a quiet box:**
+
+| build | elapsed | capture timeouts | result |
+| :--- | ---: | ---: | :--- |
+| swscale (this line, unchanged) | **155 s** | **0** | 0/100, worst 33.00 LSB16 |
+| `pack16_to_rgba64be` | **480 s** | **10** | 93/100, worst 65535 |
+
+**And the cause of the 3x is NOT the conversion.** Instrumenting both paths with the same
+timer gives the *same* number:
+
+```
+pack16_to_rgba64be   convert=3ms   send=26ms
+convert_image_frame  convert=3ms   send=27ms     (19ms on the first call: SwsContext creation)
+```
+
+3 ms is the memory-bandwidth floor for touching 32 MB, so no amount of shuffling helps — a
+word-at-a-time version using `_byteswap_uint64` plus a rotate measured 3 ms as well.
+
+**So the 3x is unexplained, and that is the open question.** Hypotheses eliminated:
+
+* *allocation discipline* — attempt 3 allocated exactly as `convert_image_frame` does, and
+  still failed;
+* *conversion cost* — measured identical, both 3 ms;
+* *encode cost / entropy* — the captured PNGs are the same size, 18876 vs 18877 bytes mean
+  over 2277 and 2300 files;
+* *ambient flakiness* — the baseline was re-run in the same session under the same conditions
+  and produced 0 timeouts against the fix's 10, and the
+  `Timed out waiting for consumer snapshot release` warning (`output.cpp:147`) appears 13 times
+  in the fixed run and **zero** times in both the baseline and the original.
+
+That last point is the strongest lead for attempt 4: `output.cpp:133` gives a departing
+consumer two ticks / 200 ms to release its snapshot, and something about the fixed build makes
+that wait time out. Since per-capture cost is identical, the difference is more likely in
+*lifetime or refcounting* — how long `dest` stays alive, or which thread drops the last
+reference — than in throughput. Instrument `output.cpp`'s tick counter and the frame's
+refcount, not the conversion.
+
+**Status: not landed.** The lossy `convert_image_frame` call remains, with a comment at the
+site recording the defect, the measurement and the pointer here. Three attempts have now been
+reverted; a fourth should start from the paragraph above rather than from §5.
+
+---
+
 ## 9. Rollback
 
 The fix is one new function plus a one-line call-site change, so reverting is a single commit.
