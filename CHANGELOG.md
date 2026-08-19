@@ -38,6 +38,20 @@ per sweep, which is what the CUDA producers already did.
 the forward buffer and the reverse batch. Instrumenting only the forward path is what initially
 made this look like a total stall rather than a partial one.
 
+**What "once per sweep" does and does not claim.** The producer now *delivers* each endpoint once.
+Re-measured at the **channel** — recording the output and reading the marker from every recorded
+frame — the OUT frame is still *displayed* for two ticks at each turnaround: the reverse batch is
+not decoded yet, so the producer holds its last frame for one tick rather than delivering it
+again. Over 279 recorded frames that is 17 turnarounds with `27` twice, and reverse loop shows
+the same at the IN point, 19 wraps with `20` twice.
+
+That is a decode-latency margin, not a logic fault, and it is **not universal**: `cuda_prores`
+records 276 frames of ping-pong over the same range with **no repeated delivery at all**, because
+its queue is already full when the turnaround happens. `hap_native` holds **both** endpoints.
+Closing the gap means decoding the new direction before the boundary is reached rather than after,
+which is a prefetch change on the reverse path and is tracked with the reverse-batching work
+rather than done here.
+
 | case, `SEEK 20 LENGTH 8`, 1080p25 | before | after |
 | :--- | :--- | :--- |
 | ping-pong | `20…27 r27 r26 r25 r24 r23 r22` then nothing — 14 frames, then halt | `20…27 \| r26…r20 \| 21…27 \| r26…r20 \|` — 107 frames, 7 complete sweeps, no halt |

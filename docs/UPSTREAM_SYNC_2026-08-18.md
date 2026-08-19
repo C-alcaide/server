@@ -940,6 +940,53 @@ producers, offset 0 — and unreliable during playback, where HAP reported frame
 clip. Every finding that survived came from the burnt-in frame marker in the captured picture.
 A matrix built on the reported position produced numbers that looked quantitative and were not.
 
+### 9.3 Loop, reverse and ping-pong across every producer — measured from a calibrated oracle
+
+The audit pointed at the loop / speed / reverse / EOF paths, so those were measured directly:
+record the channel output and read the burnt-in marker from **every recorded frame**, which is the
+only oracle here that can see delivery *order*. All three producers, three modes, `SEEK 20 LENGTH
+8` at 1080p25, ~278 delivered frames per arm.
+
+**The recording path is calibrated before any verdict is read.** A forward loop has a known order,
+so it must come back frame-exact or nothing else from that setup counts — a file consumer that
+dropped or duplicated a frame would otherwise be blamed on the producer. All three calibrated:
+frame-exact over 269–278 frames, no repeats, no omissions.
+
+| producer | forward loop | reverse loop | ping-pong |
+| :--- | :--- | :--- | :--- |
+| `cuda_prores` | clean | clean | **clean** — full range, no repeated delivery |
+| `ffmpeg` (av_producer) | clean | `20` displayed twice at each of 19 wraps | `27` displayed twice at 17 of 19 turnarounds |
+| `hap_native` | clean | clean | **both** endpoints displayed twice, every sweep |
+
+**Every arm delivers the full requested range, in correct monotonic order, with nothing missing
+and no stall.** Loop, reverse loop and ping-pong work on all three producers. The reverse
+ping-pong halt this measurement found in `av_producer` is fixed (`916d688a5`); it was pre-existing
+and was confirmed against the pre-fix binary at `bdc6432cc` rather than assumed.
+
+**The residue is a display duration, not an order fault.** At a turnaround the producer has
+nothing decoded in the new direction yet, so it holds its last frame for one tick instead of
+delivering a new one. `cuda_prores` does not, because its queue is already full when the
+turnaround happens — so this is a decode-latency margin and `cuda_prores` is the proof it can be
+closed. Closing it means decoding the new direction *before* the boundary rather than after, which
+is prefetch work on the reverse path and belongs with the reverse-batching item, not here. It will
+be worse on the 12K asset, which is exactly the case that item exists for.
+
+**Two earlier findings are retracted, both sampling artefacts rather than server behaviour:**
+
+* **"A different frame missing on each run."** Sampling captures at ~1.5 s against a 320 ms loop
+  aliases: with `k` captures over an `n`-frame loop the frames never sampled *by chance* number
+  `n * (1 - 1/n)**k`, which is **1.83** for 64 captures over 25 frames. The three producers missed
+  1, 2 and 0 — all inside the noise floor. There was no loss to explain.
+* **`cuda_prores` ping-pong "inset by one frame at both ends."** Read from the sampled set and the
+  reported position. The recording shows all of 20..27 across 276 delivered frames with no
+  repeats, so the sweep is not inset and the arithmetic must not be "corrected". This is the
+  seventh code-reading or sampling conclusion this sync that a direct measurement overturned, and
+  the reason the earlier attempt to "fix" it was reverted turns out to be that there was nothing
+  to fix.
+
+Oracle and analysis live in the harness as `core/delivery_order.py` with tests; a `loop-boundary`
+subcommand wrapping it is owed.
+
 ### Two things this sync learned that outlive it
 
 * **A timing verdict from `conformance` needs two interleaved runs per arm.** Three attempts at
