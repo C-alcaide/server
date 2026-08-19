@@ -555,6 +555,29 @@ struct prores_producer_impl final : public core::frame_producer
             prev_slot = -1;
         };
 
+        // Wait for the consumer to take what has already been decoded, instead of throwing it
+        // away. At a LOOP boundary the frames sitting in ready_queue_ are the LAST FRAMES OF THE
+        // CLIP, not stale ones -- discarding them lost max_queued_ frames of every iteration.
+        //
+        // MEASURED 2026-08-19, from the picture rather than the counter: a 4-frame loop
+        // (SEEK 40 LENGTH 4 LOOP) sampled over 26 captures showed markers {40, 41} only --
+        // frames 42 and 43 NEVER reached the screen, which is max_queued_ = 2 frames lost per
+        // iteration. The HAP producer, which flushes nothing at its wrap, showed all four.
+        //
+        // The wait is deliberately UNBOUNDED in time, with two escapes instead:
+        //   * stop_flag_       -- shutdown must never block on a consumer;
+        //   * seek_request_    -- a user seek pre-empts a pending wrap rather than queueing
+        //                         behind it, and its own path discards, which is correct there.
+        // A PAUSED channel does not pop, so the wrap simply does not happen until it resumes,
+        // and the clip holds its last frame -- which is what a paused layer should do. A timeout
+        // here would instead drop those frames after N seconds, which is the defect this fixes.
+        auto drain_ready_queue = [&] {
+            std::unique_lock<std::mutex> lk(queue_mutex_);
+            while (!ready_queue_.empty() && !stop_flag_ && seek_request_.load() < 0) {
+                queue_cv_.wait_for(lk, std::chrono::milliseconds(10));
+            }
+        };
+
         while (true) {
             caspar::timer iter_timer;
             double t_wait = 0, t_demux = 0, t_submit = 0, t_flush = 0;
@@ -625,15 +648,13 @@ struct prores_producer_impl final : public core::frame_producer
                     seek_done_      = true;
                     continue;
                 } else if (loop_) {
-                    // Sync/release pending async slot (discard — queue will be flushed).
-                    flush_all_pending(false);
-                    // Flush pre-buffered end-of-file frames so receive_impl cannot pop
-                    // stale frames and increment frame_count_ away from in_frame_.
-                    {
-                        std::lock_guard<std::mutex> qlk(queue_mutex_);
-                        while (!ready_queue_.empty()) ready_queue_.pop();
-                    }
-                    queue_cv_.notify_all();
+                    // PUSH the in-flight slot rather than discarding it: at a loop wrap it holds
+                    // the clip's last decoded frame.
+                    flush_all_pending(true);
+                    // Then let the consumer drain the tail before repositioning. The counter is
+                    // reset below only once the queue is empty, so it cannot be carried away
+                    // from in_frame_ -- which is what the discard was protecting.
+                    drain_ready_queue();
                     demuxer_->seek_to_frame(in_frame_);
                     video_frame_count = in_frame_;
                     frame_count_      = in_frame_;
@@ -851,12 +872,8 @@ struct prores_producer_impl final : public core::frame_producer
                     audio_frame_idx = 0;
                     seek_done_      = true;
                 } else if (loop_) {
-                    flush_all_pending(false);
-                    {
-                        std::lock_guard<std::mutex> qlk(queue_mutex_);
-                        while (!ready_queue_.empty()) ready_queue_.pop();
-                    }
-                    queue_cv_.notify_all();
+                    flush_all_pending(true);   // the tail is real picture; see drain_ready_queue
+                    drain_ready_queue();
                     demuxer_->seek_to_frame(in_frame_);
                     video_frame_count = in_frame_;
                     frame_count_      = in_frame_;
@@ -886,13 +903,9 @@ struct prores_producer_impl final : public core::frame_producer
                     audio_frame_idx = 0;
                     seek_done_      = true;
                 } else if (loop_) {
-                    flush_all_pending(false);
+                    flush_all_pending(true);   // the tail is real picture; see drain_ready_queue
                     int64_t target = (out_frame_ >= 0) ? out_frame_ - 1 : std::max(0LL, total_frames_ - 1);
-                    {
-                        std::lock_guard<std::mutex> qlk(queue_mutex_);
-                        while (!ready_queue_.empty()) ready_queue_.pop();
-                    }
-                    queue_cv_.notify_all();
+                    drain_ready_queue();
                     demuxer_->seek_to_frame(target);
                     video_frame_count = target;
                     frame_count_      = target;

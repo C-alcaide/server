@@ -3166,6 +3166,35 @@ struct AVProducer::Impl
                             // Only auto-loop if no user seek is pending; if seek_ is set the
                             // next iteration will consume it and we must not override it with start.
                             // ALSO disabled if playing in reverse, let frontend logic handle reverse boundary.
+                            //
+                            // Let the consumer take the decoded tail FIRST. seek_internal() clears
+                            // buffer_ -- correct for a user seek, which must discard, and wrong
+                            // here: at a loop boundary those frames are the clip's last frames and
+                            // clearing them loses one iteration's tail every time round.
+                            //
+                            // MEASURED 2026-08-19 from the picture, not the counter: a 4-frame loop
+                            // (SEEK 40 LENGTH 4 LOOP) over 26 captures showed markers {40, 41, 43}
+                            // -- frame 42 never reached the screen. The HAP producer, which flushes
+                            // nothing at its wrap, showed all four.
+                            //
+                            // Hence the drain is HERE and not in seek_internal, which is the mirror
+                            // image of speed_accum_: that belongs inside seek_internal because every
+                            // caller invalidates it, this belongs only at the loop caller because
+                            // the explicit-seek caller must still discard.
+                            //
+                            // Unbounded in time on purpose, with two escapes that always release
+                            // it: a pending user seek, and shutdown -- boost's wait_for is itself
+                            // an interruption point, so the thread_interrupted this loop already
+                            // catches breaks it without needing a flag. A paused channel does not
+                            // drain, so the wrap waits for it and the clip holds its last frame,
+                            // which is what a paused layer should do.
+                            {
+                                boost::unique_lock<boost::mutex> buffer_lock(buffer_mutex_);
+                                while (!buffer_.empty() && seek_.load() == AV_NOPTS_VALUE) {
+                                    buffer_cond_.wait_for(buffer_lock,
+                                                          boost::chrono::milliseconds(10));
+                                }
+                            }
                             frame = Frame{};
                             seek_internal(start);
                         } else {
@@ -4241,6 +4270,17 @@ struct AVProducer::Impl
         {
             boost::lock_guard<boost::mutex> buffer_lock(buffer_mutex_);
             buffer_.clear();
+            // The frame-advance accumulator has to go with them. It counts progress towards
+            // the next frame of a timeline position that no longer applies, and the buffer it
+            // was counting against has just been emptied -- so carrying it over makes the first
+            // tick after the discontinuity advance further than the speed asked for.
+            //
+            // Here rather than at the call sites, for the same reason current_seek_target_ is
+            // set here (see the note above): this function is the common path for the explicit
+            // seek, the loop wrap and the initial start, and only the pingpong flips and
+            // speed() were resetting it. The loop wrap was the one that got forgotten, which is
+            // the same omission that comment records.
+            speed_accum_ = 0.0;
             buffer_cond_.notify_all();
         }
 
