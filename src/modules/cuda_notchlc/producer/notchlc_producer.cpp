@@ -739,7 +739,13 @@ struct notchlc_producer_impl final : public core::frame_producer
         int                  gl_slot           = 0;
         std::vector<int32_t> audio_accum;
         int                  audio_frame_idx   = 0;
-        int64_t              video_frame_count = in_frame_;
+        // No frame counter here, deliberately. ProRes carries one and USES it -- 25
+        // references, driving its OUT-bound check and its loop/pingpong re-seeks. This module was
+        // copied from it and kept the counter without any of the logic that reads it: declared,
+        // reset on a user seek, incremented, and never read once. A counter that looks
+        // authoritative and is never consulted is worse than none, because the next reader trusts
+        // it -- on 2026-08-19 its reset-to-start-instead-of-target was written up as a real
+        // position bug before anyone checked that nothing reads it.
         uint32_t             seen_epoch  = seek_epoch_.load(std::memory_order_acquire);
         uint64_t             next_seq    = 0;  // monotonically increasing; resets only on user seek
 
@@ -808,7 +814,6 @@ struct notchlc_producer_impl final : public core::frame_producer
             lz4_done_cv_.notify_all();  // wake lz4 workers: space freed
 
             if (epoch_changed) {
-                video_frame_count = video_frame_start_;
                 audio_accum.clear();
                 audio_frame_idx   = 0;
                 {
@@ -975,7 +980,6 @@ struct notchlc_producer_impl final : public core::frame_producer
 
             { std::lock_guard<std::mutex> lk(queue_mutex_); ready_queue_.push(std::move(df)); }
             queue_cv_.notify_one();
-            ++video_frame_count;
 
             // WGL handles are decoupled from LZ4 slots. 
             // We advance the WGL ring index ensuring we don't clobber what CasparCG is currently rendering.
