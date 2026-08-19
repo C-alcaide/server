@@ -15,11 +15,19 @@ the reverse sweep is seeded from them, so the turn costs no seek and no decode.
 
 The ring is bounded in **bytes**, not frames, so its depth scales itself with the raster instead of
 needing a threshold per resolution: about 6 frames at 1080p, 2 at 4K, and **zero** at 12288x6144,
-where one frame is ~600 MB. That is the intended answer for the 12K virtual-production assets — they
+where one frame is ~300 MB. That is the intended answer for the 12K virtual-production assets — they
 play through `cuda_prores`, which has no turnaround hold to fix, so there is nothing to buy there
-with gigabytes of RAM. The GPU-direct path is excluded outright: those frames share one y/uv texture
-pair per producer, so a retained frame does not own its picture and reusing it would show whatever
-the newest decode had overwritten — wrong pictures, not merely stale ones.
+with gigabytes of RAM.
+
+**The ring keeps the mixer frame and drops the decoded `AVFrame`**, which matters on both paths for
+different reasons. On the software path the `draw_frame` already holds the mixer's own copy, so
+keeping the `AVFrame` beside it would double the cost for nothing. On the **GPU-direct** path the
+`AVFrame` is a D3D11 decoder surface from a *bounded* DXVA pool, and holding several of those hostage
+would starve the hardware decoder — that, and not picture ownership, is the real hazard there. The
+shared y/uv texture pair is only staging: every frame is copied out of it into a texture from
+`device::create_texture`, whose pool recycles it only once the last reference drops, so a retained
+GPU-direct frame does own its picture. **Measured on h264 with GPU-direct confirmed active: the OUT
+endpoint went from being held 3 ticks at every turnaround to 0.**
 
 **`hap_native`: an off-by-one, in three places.** `out_frame_` is exclusive
 (`out_frame = start_frame + length_param`), and the IO thread advances its counter *after* pushing a
@@ -40,10 +48,20 @@ LENGTH 8`; the full-clip arms drive all 75 frames so the turnaround goes through
 | `hap_native` ping-pong | `27` x17 **and** `20` x16 — both ends, every sweep | **0** across 3 runs |
 | `hap_native` full clip (real EOF) | `74` held **3** ticks per turnaround | **0** across 2 runs |
 | `ffmpeg` full clip (real EOF) | — | **0** — its EOF and LENGTH turnarounds share one flip site |
+| `ffmpeg` h264 + **GPU-direct**, ping-pong OUT | `27` held **3** ticks, ×15 | **0** |
 | `cuda_prores` ping-pong | already clean | unchanged, clean |
 
 No frames are lost or reordered anywhere: all nine arms of the final matrix deliver the full range
 in correct monotonic order, and forward loop is frame-exact on all three producers.
+
+**Pre-existing, unrelated to this change, found while measuring it, and confirmed against the
+earlier binary rather than assumed.** On an **inter-frame** source every boundary that needs a
+*forward* decode still costs a tick, because it needs a keyframe seek that no retained frame can
+substitute for: on h264 the forward loop wrap holds OUT for 2 ticks at all 28 wraps, and the
+ping-pong IN end holds `20` for 2. The ring fixes only the direction that needs no seek. Separately,
+`PLAY ... SEEK 20 LENGTH 8` on h264 with GPU-direct **delivers frames 0..19 once at startup** — the
+keyframe pre-roll reaches the screen instead of being dropped — after which all 28 wraps are a clean
+20..27. A ~0.8 s flash of the wrong content when the clip starts, not a per-wrap fault.
 
 **Not fixed, and measured rather than assumed:** `ffmpeg` reverse **loop** still delivers the IN frame
 twice at each wrap (12 of 12); `cuda_prores` and `hap_native` do not. That is a different site — a

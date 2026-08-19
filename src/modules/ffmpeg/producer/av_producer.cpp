@@ -4184,7 +4184,7 @@ struct AVProducer::Impl
 
     /// Budget for `shown_`, in bytes rather than frames, so the depth scales itself with the
     /// raster instead of needing a threshold per resolution: about 6 frames at 1080p, 2 at 4K, and
-    /// ZERO at 12288x6144, where one frame is ~600 MB. That is the intended answer for the 12K
+    /// ZERO at 12288x6144, where one frame is ~300 MB. That is the intended answer for the 12K
     /// virtual-production assets -- they are played through cuda_prores, which has no turnaround
     /// hold to fix, and buying a smoother turn there for gigabytes of RAM would be a bad trade.
     static constexpr int64_t SHOWN_RING_BUDGET = 128LL << 20;
@@ -4193,11 +4193,16 @@ struct AVProducer::Impl
     {
         if (!f.video)
             return 0;
-        const int64_t n = av_image_get_buffer_size(static_cast<AVPixelFormat>(f.video->format),
-                                                   f.video->width, f.video->height, 1);
-        // Doubled: the retained Frame holds the decoded AVFrame *and* a core::draw_frame with the
-        // mixer's own copy, so accounting for one of the two would under-budget by half.
-        return n > 0 ? n * 2 : 0;
+        int64_t n = av_image_get_buffer_size(static_cast<AVPixelFormat>(f.video->format),
+                                             f.video->width, f.video->height, 1);
+        if (n <= 0) {
+            // A hardware frame carries no host buffer size, so this fails for D3D11. What
+            // retention actually holds there is the pair of extracted mixer textures, so
+            // estimate NV12 at 16 bits per sample. Deliberately pessimistic: erring high only
+            // shortens the ring, erring low would let it run past its budget.
+            n = static_cast<int64_t>(f.video->width) * f.video->height * 3;
+        }
+        return n;
     }
 
     /// Remember a frame that has just been delivered forward. On the frame path, so it is a push
@@ -4205,12 +4210,7 @@ struct AVProducer::Impl
     void retain_shown(const Frame& f)
     {
         // Only ping-pong turns around, so nothing else pays for this.
-        //
-        // GPU-direct is excluded on purpose rather than special-cased: those frames share ONE
-        // y/uv texture pair per producer, so a retained Frame does not own its picture -- it would
-        // hand the reverse sweep whatever the newest decode had overwritten the texture with.
-        // That would be wrong pictures, not merely stale ones.
-        if (!pingpong_.load() || gpu_direct_video_) {
+        if (!pingpong_.load()) {
             if (!shown_.empty())
                 shown_.clear();
             return;
@@ -4226,7 +4226,29 @@ struct AVProducer::Impl
             return;
         }
 
-        shown_.push_back(f);
+        // Retain the MIXER frame and drop the decoded AVFrame. This matters on both paths, for
+        // different reasons:
+        //
+        //   * software -- the draw_frame already holds the mixer's own copy of the picture, so
+        //     keeping the AVFrame beside it would double the cost of the ring for nothing;
+        //   * GPU-direct -- the AVFrame is a D3D11 decoder surface from a BOUNDED DXVA pool.
+        //     Holding a handful of those hostage would starve the hardware decoder, which is the
+        //     real hazard on that path. It is NOT that a retained frame lacks its own picture:
+        //     the shared y/uv pair is staging that every frame is copied OUT of, into textures
+        //     from device::create_texture, whose pool only recycles them once the last reference
+        //     drops. So the picture is genuinely owned -- it is the decode surface that must not
+        //     be.
+        //
+        // The reverse path reads only .frame, .pts and .duration from these, so nothing
+        // downstream misses the rest.
+        Frame keep;
+        keep.frame       = f.frame;
+        keep.start_time  = f.start_time;
+        keep.pts         = f.pts;
+        keep.duration    = f.duration;
+        keep.frame_count = f.frame_count;
+
+        shown_.push_back(std::move(keep));
         while (static_cast<int>(shown_.size()) > cap)
             shown_.pop_front();
     }
