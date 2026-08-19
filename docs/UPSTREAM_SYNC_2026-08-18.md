@@ -825,10 +825,16 @@ covering for, diagnosed and written up on 2026-08-18 in
   refusal for an SDR channel. The first hypothesis here — that §5's option migration had broken
   the fork's HDR options — is wrong, and the isolation is what killed it.
 * **`-ac 2` is ignored.** The battery passes it and the encoder still reports `9.1.6`, so the
-  requested channel count never reaches the audio graph. The existing write-up records that
-  `-c:a`, `-acodec` and container changes do not help; it never tested `-ac`. This matters
-  because the known `ch_layouts` patch fixes `ac3` and `mp2` but provably **not** `aac` (the
-  native AAC encoder publishes no layout list), whereas honouring `-ac` would.
+  requested channel count never reaches the audio graph. This matters because the `ch_layouts`
+  patch fixes `ac3` and `mp2` but provably **not** `aac` (the native AAC encoder publishes no
+  layout list), whereas honouring `-ac` does.
+
+  **Correction, same day:** this was described here as new relative to
+  `PR_ffmpeg8_aac_16ch.md`, which is true of that file but false of what was actually known —
+  upstream PR **#1777**, filed 2026-08-18 15:12, already states in its body that "`-ac` and
+  `-af` are ignored, only `filter` is read", and offers `-filter:a
+  "aformat=channel_layouts=stereo"` as the interim workaround. Re-deriving it here cost nothing,
+  but claiming it as a finding was wrong: read the filed PR, not only the local draft.
 
 **And the blast radius is wider than the existing write-up states.** That document is titled
 "recording audio to AAC is broken" and frames the failure around AAC in mp4. Running `cli.py run`
