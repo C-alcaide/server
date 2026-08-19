@@ -16,6 +16,7 @@ set(SOURCES
 		consumer/output.cpp
 
 		diagnostics/call_context.cpp
+		diagnostics/log_graph.cpp
 		diagnostics/osd_graph.cpp
 
 		frame/draw_frame.cpp
@@ -51,6 +52,7 @@ set(HEADERS
 		consumer/output.h
 
 		diagnostics/call_context.h
+		diagnostics/log_graph.h
 		diagnostics/osd_graph.h
 
 		frame/draw_frame.h

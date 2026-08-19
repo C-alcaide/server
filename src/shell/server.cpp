@@ -35,6 +35,7 @@
 
 #include <core/consumer/output.h>
 #include <core/diagnostics/call_context.h>
+#include <core/diagnostics/log_graph.h>
 #include <core/diagnostics/osd_graph.h>
 #include <core/frame/pixel_format.h>
 #include <core/mixer/image/image_mixer.h>
@@ -132,6 +133,11 @@ struct server::impl
         , shutdown_server_now_(std::move(shutdown_server_now))
     {
         caspar::core::diagnostics::osd::register_sink();
+        // Same metrics, to the log as well, for anything that cannot read a graph -- a test
+        // battery, or a post-mortem. Off by default: it is per-graph output on the frame path.
+        if (env::properties().get(L"configuration.log-diagnostics", false)) {
+            caspar::core::diagnostics::log::register_sink();
+        }
     }
 
     void start()
