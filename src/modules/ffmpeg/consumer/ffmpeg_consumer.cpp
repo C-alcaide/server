@@ -587,9 +587,110 @@ struct Stream
             FF(av_opt_set_int_list(sink, "sample_rates", codec->supported_samplerates, 0, AV_OPT_SEARCH_CHILDREN));
 #endif
 
-            // Set channel_layouts
-            // TODO: need to translate codec->ch_layouts into something that can be passed via av_opt_set_*
-            // FF(av_opt_set_chlayout(sink, "ch_layouts", codec->ch_layouts, AV_OPT_SEARCH_CHILDREN));
+            // -- Which channel layout to negotiate ------------------------
+            //
+            // A CasparCG channel always carries 16 audio channels, and nothing here
+            // constrained the sink's layout, so those 16 reached the encoder unchanged
+            // and the graph never downmixed. FFmpeg 7's native AAC encoder took them
+            // anyway and wrote `channel_layout=unknown`; FFmpeg 8 refuses with
+            // `Unsupported channel layout "9.1.6"` and avcodec_open2 returns EINVAL --
+            // so every file and stream consumer carrying audio failed to open. A latent
+            // bug that FFmpeg 8 stopped covering for, not an FFmpeg 8 regression.
+            //
+            // Measured 2026-08-19: h264, h265, prores, dnxhd, dnxhr and xdcam consumers
+            // all failed, so this was never AAC-specific despite presenting that way.
+            //
+            // Two sources of truth, in this order:
+            //
+            //   1. An explicit `-ac N` from the caller wins, and it has to be honoured
+            //      HERE. `ac` is a CLI-level option, not an AVCodecContext AVOption, so
+            //      passing it through to avcodec_open2 did nothing whatsoever -- the
+            //      encoder still saw 16 channels. This is also the ONLY route that fixes
+            //      the native AAC encoder, which publishes no layout list to constrain
+            //      against.
+            //   2. Otherwise the encoder's own published list, when it has one. That
+            //      fixes ac3 and mp2, which have the same latent bug.
+            //
+            // Deliberately NOT a blanket downmix default: PCM in WAV records all 16
+            // channels correctly today and must keep doing so, and an encoder that
+            // accepts any layout publishes no list precisely because it needs none.
+            const auto requested_channels = [&]() -> int {
+                // Consumed rather than left in the dict, like pix_fmt above: the sink is
+                // what decides the layout, enc->ch_layout is read back from it below, and
+                // leaving the key in place would have it reported as an unused option
+                // when it was in fact used.
+                for (const auto* key : {"ac", "channels"}) {
+                    for (auto* map : {&stream_options, &options}) {
+                        const auto it = map->find(key);
+                        if (it != map->end()) {
+                            const auto value = std::move(it->second);
+                            map->erase(it);
+                            try {
+                                const auto n = std::stoi(value);
+                                if (n <= 0 || n > 64) {
+                                    CASPAR_THROW_EXCEPTION(
+                                        ffmpeg_error_t()
+                                        << boost::errinfo_errno(EINVAL)
+                                        << msg_info_t("audio channel count out of range: " + value));
+                                }
+                                return n;
+                            } catch (const std::invalid_argument&) {
+                                CASPAR_THROW_EXCEPTION(ffmpeg_error_t()
+                                                       << boost::errinfo_errno(EINVAL)
+                                                       << msg_info_t("invalid audio channel count: " + value));
+                            } catch (const std::out_of_range&) {
+                                CASPAR_THROW_EXCEPTION(ffmpeg_error_t()
+                                                       << boost::errinfo_errno(EINVAL)
+                                                       << msg_info_t("audio channel count out of range: " + value));
+                            }
+                        }
+                    }
+                }
+                return 0;
+            }();
+
+#if LIBAVUTIL_VERSION_MAJOR >= 60 // FFmpeg 8
+            if (requested_channels > 0) {
+                AVChannelLayout want{};
+                av_channel_layout_default(&want, requested_channels);
+                const auto set_result = av_opt_set_array(sink,
+                                                         "channel_layouts",
+                                                         AV_OPT_SEARCH_CHILDREN | AV_OPT_ARRAY_REPLACE,
+                                                         0,
+                                                         1,
+                                                         AV_OPT_TYPE_CHLAYOUT,
+                                                         &want);
+                av_channel_layout_uninit(&want);
+                FF(set_result);
+            } else {
+                const void* ch_layouts    = nullptr;
+                int         nb_ch_layouts = 0;
+                FF(avcodec_get_supported_config(
+                    nullptr, codec, AV_CODEC_CONFIG_CHANNEL_LAYOUT, 0, &ch_layouts, &nb_ch_layouts));
+
+                // A NULL list means "publishes no constraint", which is NOT the same as
+                // "supports nothing". pcm_s16le accepts any layout and publishes none;
+                // the native AAC encoder also publishes none and then rejects 16 channels
+                // inside its own init, against a table it does not expose. So the list can
+                // only be applied when one actually exists, and its absence is why `-ac`
+                // above is the only lever for AAC.
+                if (ch_layouts != nullptr && nb_ch_layouts > 0) {
+                    FF(av_opt_set_array(sink,
+                                        "channel_layouts",
+                                        AV_OPT_SEARCH_CHILDREN | AV_OPT_ARRAY_REPLACE,
+                                        0,
+                                        nb_ch_layouts,
+                                        AV_OPT_TYPE_CHLAYOUT,
+                                        ch_layouts));
+                }
+            }
+#else
+            if (requested_channels > 0) {
+                const int64_t layouts[] = {
+                    static_cast<int64_t>(get_channel_layout_mask_for_channels(requested_channels)), 0};
+                FF(av_opt_set_int_list(sink, "channel_layouts", layouts, 0, AV_OPT_SEARCH_CHILDREN));
+            }
+#endif
 
         } else {
             CASPAR_THROW_EXCEPTION(ffmpeg_error_t()
