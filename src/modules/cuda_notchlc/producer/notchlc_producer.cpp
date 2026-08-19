@@ -1120,6 +1120,19 @@ struct notchlc_producer_impl final : public core::frame_producer
         std::unique_lock<std::mutex> lk(queue_mutex_);
         if (ready_queue_.empty()) {
             lk.unlock();
+                // Put the one-shot seek flag BACK. It was taken with exchange(false) above, but
+                // no frame was consumed, so the seek's "deliver exactly the target frame" has not
+                // happened yet. Losing it here lets the next tick advance from the accumulator
+                // instead and land on target+1.
+                //
+                // Measured 2026-08-19: after the accumulator reset alone, the matrix run went
+                // from 12 to 8 one-frame-late captures out of 26 -- real progress, but the
+                // residual was this. Every remaining failure decoded frame 8 while every pass
+                // decoded frame 7, and the race is far likelier under the four parallel server
+                // instances the matrix uses than in a single-server probe, which is why a probe
+                // showed 7 and the battery still showed 8.
+                if (seek_just_done)
+                    seek_done_.store(true, std::memory_order_relaxed);
             // No frame consumed — don't deduct from speed_accum_.
             speed_accum_ = (std::min)(speed_accum_, 2.0);
             return cached_frame_;
