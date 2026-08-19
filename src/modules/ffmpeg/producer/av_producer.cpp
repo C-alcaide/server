@@ -3710,7 +3710,26 @@ struct AVProducer::Impl
         // frame_flush_ is never cleared and frame_ is never updated.
         // By consuming here we also handle the EOF-with-1-frame case (buffer_eof_=true
         // but only 1 frame decoded so the size<2 pre-roll guard would otherwise stall).
-        if (frame_flush_ && !buffer_.empty() && !in_reverse) {
+        //
+        // GATED on the two cases the comment above actually describes. Ungated, this block runs
+        // on every seek and every loop wrap DURING NORMAL PLAYBACK too -- and because it pops
+        // without returning, execution falls through to the normal consumption path below, which
+        // pops again. The frame taken here is then overwritten before it is ever shown, so one
+        // frame is silently eaten per discontinuity.
+        //
+        // MEASURED 2026-08-19 from the picture: `SEEK 40 LENGTH 8 LOOP` showed markers
+        // {41..47} and never 40; from IN 20 it showed {21..27} and never 20 -- always exactly
+        // the IN frame, independent of IN and LENGTH. A trace of the decode loop proved the
+        // frame was not the producer's fault: all eight frames were pushed to buffer_ on every
+        // iteration, pts 1600000..1880000, so the loss was entirely on the consumer side.
+        //
+        // speed == 0: frames_to_advance is always 0, the normal path never runs, and without
+        //             this frame_flush_ is never cleared and frame_ never updated -- the
+        //             original reason for the block.
+        // buffer_eof_: the EOF-with-one-frame case, where the 2-frame pre-roll guard below would
+        //             otherwise stall forever. Also from the original comment.
+        if (frame_flush_ && !buffer_.empty() && !in_reverse &&
+            (speed_.load() == 0.0 || buffer_eof_)) {
             frame_          = buffer_[0].frame;
             frame_time_     = buffer_[0].pts;
             frame_duration_ = buffer_[0].duration;
