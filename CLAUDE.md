@@ -109,6 +109,76 @@ Four rules follow, and each has already cost something here:
   "ACES 1.3 Reference Gamut Compress" in three places, which claims conformance the code
   does not have. Fast approximations are welcome on the frame path; mislabelled ones are not.
 
+## Several sessions share this working tree — check before any command that cannot be undone
+
+`d:\Github\CasparVP` and `d:\Github\CasparCG-server` are each worked in by more than one
+session at a time, in the **same** working tree. Measured 2026-08-18: another session reset
+hard to its own branch and back while a second session had uncommitted work there. The branch
+refs survived; **every uncommitted file did not** — about an hour of work, with no conflict, no
+stash and no warning. Afterwards `git status` came back clean, which reads as "nothing to
+commit" rather than "your work was deleted", so nobody noticed until someone thought to look.
+
+Two causes, needing different fixes:
+
+* **Two sessions pointed at the same folder**, usually because one session's working
+  directory was never set to a different one.
+* **One session deliberately sharing the folder** and reaching for a destructive command to
+  "get back to a clean state".
+
+### The pre-flight check
+
+Run it before **any** command that cannot be undone — every time, not when it feels risky,
+because the whole problem is that the risk is invisible. The list to treat this way:
+
+- `git reset --hard`, `git checkout -f`, `git checkout -- <path>`, `git restore <path>`
+- `git clean` with force/directory flags
+- `git stash` — it moves *someone else's* work out from under them
+- `git branch -D`, `git push --force`
+- `git rebase` or `git commit --amend` on a branch another session may hold
+- `git worktree remove --force`, `git gc --prune=now`
+- recursive deletion of `build/` or any generated tree
+
+```powershell
+git rev-parse --show-toplevel   # WHICH tree am I about to mutate? several are configured
+git status --porcelain          # anything modified or untracked that is NOT mine?
+git stash list                  # someone else's parked work
+git worktree list               # who else holds a checkout of this repo
+git reflog -8 --date=iso        # a reset I did not make
+Test-Path .git\index.lock       # another git process mid-operation
+Get-Process casparcg,ninja,python -ErrorAction SilentlyContinue
+```
+
+The first line is not filler. With three working folders and scratchpad worktrees in play, the
+likeliest way to destroy something is to run a correct command in the wrong tree.
+
+**The question is not "is the tree dirty" but "is any of this dirt mine".** You know which
+files you edited this session; anything else modified — especially with an mtime inside the
+last few minutes — belongs to someone still typing. On 2026-08-18 two untracked docs sat in
+this tree holding another session's day of work, and nothing in `git status` distinguished them
+from junk.
+
+Clean of other people's work → proceed. Otherwise **do not run the command**; pick from below.
+
+### What to do instead
+
+| Situation | Do this |
+| :--- | :--- |
+| You need a different line of development, and sharing the folder is otherwise fine | **Branch.** `git checkout -b <name>` carries your uncommitted work across and destroys nothing. Almost always the answer. |
+| Both sessions must work **fully in parallel** for their whole duration | **A separate working folder.** `git worktree add <path> -b <name>` — its own directory and checkout over one shared object store, so no re-clone. Two worktrees cannot check out the same branch, which is the guard rail rather than an annoyance. |
+| You want a clean tree because **your own** edits went wrong | Still not a hard reset in a shared clone. `git stash push -- <only your paths>`, or commit a WIP and revert it. |
+| Another session's uncommitted work is in your way | Ask. Do not stash, reset, or commit it on their behalf — a WIP commit under your name on your branch is nearly as confusing as deleting it. |
+
+Build directories have the same problem for their own reasons; `BUILDING_WORKFLOW.md` covers a
+live server holding `build\shell` against a copy step.
+
+### And commit at every checkpoint
+
+A WIP commit costs nothing and is **the only thing another session's hard reset cannot take**.
+Not tidiness — it is the difference between the two outcomes measured in this tree on the same
+day: an hour of uncommitted GStreamer work destroyed, and a grading-node prototype that
+survived a branch switch back to `upstream-sync-ffmpeg8` completely untouched, because it had
+been committed to `grading-nodes` twenty minutes earlier.
+
 ## Building
 
 Full detail in `BUILDING_WORKFLOW.md`. The parts that are easy to get wrong:
