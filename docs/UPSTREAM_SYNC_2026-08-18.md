@@ -748,10 +748,12 @@ all streaming and recording. Two details worth keeping:
 ## 9. Owed
 
 1. ~~**The after-image**~~ — **done, §8.1: 800 per-conversion results, zero differences.**
-2. ~~`flat-decoded`~~ — **done, §8.2: bit-identical decoded pixels, both mixers.** Still
-   owed: `sdi-input`, `signalling --stream`, `sdi-output`, `mixer-parity`, `vk-validation`.
-   The FFmpeg *consumer* is now the largest unmeasured surface, since that is where §5's
-   array-option migration actually lives and `signalling --stream` is the battery for it.
+2. ~~`flat-decoded`~~ — **done, §8.2: bit-identical decoded pixels, both mixers.**
+   ~~Still owed: `sdi-input`, `signalling --stream`, `sdi-output`, `mixer-parity`,
+   `vk-validation`.~~ **All measured 2026-08-19, §9.1 — seven of seven pass.** The FFmpeg
+   consumer was the largest unmeasured surface and it was indeed broken, by the 16-channel
+   audio-layout defect rather than by §5's option migration; fixed in `24a182b85` and upstream
+   in PR #1777.
 3. ~~`cli.py run --decoder cuda_prores` / `--decoder cuda_notchlc`~~ — **the link boundary is
    verified; NotchLC decode is not, and cannot be.** Measured 2026-08-19. Both CUDA modules
    load and initialise at runtime — `[cuda_prores] Module initialised`,
@@ -759,33 +761,42 @@ all streaming and recording. Two details worth keeping:
    decoded 11 of 26 cases successfully, best PSNR 52.2. A C++17/C++20 ABI or unresolved-symbol
    fault would fail every case rather than eleven, so §6.3's mixed-standard boundary works in
    practice and not only at link time.
-   * **12 of the 26 failed at PSNR 24.5 against a 35 dB gate, and it is at least three
-     separate things rather than one.** Characterised 2026-08-19 by hashing each case's
-     `decoded_frame.png` — CasparCG's own decode, via `PRINT RAW` — and cross-tabulating against
-     source, `<auto-color-convert>` and outcome. Failures are bimodal, 24.5 dB against passes at
-     52.2–54.8, so this is not gate calibration:
+   * **12 of the 26 failed at PSNR 24.5 against a 35 dB gate, and it is ONE thing: the
+     capture is one frame late.** Read from the fixtures' burnt-in frame marker at confidence
+     1.0 — **every failing capture is frame 8, every passing one frame 7**, against a pin of
+     `PINNED_FRAME = 7`. The 24.5 dB is the difference between two adjacent frames of moving
+     content. There is no ProRes decode defect, no chroma fault and no colour fault.
 
-     | source | behaviour |
-     | :--- | :--- |
-     | `prores_4444a` | **clean.** 6/6 pass, one decoded frame, either `auto-color-convert` |
-     | `prores_422_hdr10` | **tracks `auto-color-convert`** — `false` fails, `true` passes, consistently, one frame each. Legitimate conversion behaviour rather than a defect |
-     | `prores_422` (plain) | **deterministic failure.** All 5 cases fail, a single decoded frame, both `auto-color-convert` values. A real reproducible decode-vs-reference mismatch |
-     | `prores_422_hlg` | **non-deterministic.** Identical source AND identical `auto-color-convert` yield **two different decoded pictures**, one passing at ~54 dB and one failing at 24.5 |
+     Superseded, and worth recording because each was believed in turn: the split is *not*
+     explained by the transfer combination, *not* by 4:2:2 versus 4:4:4 subsampling, and *not*
+     by `<auto-color-convert>` — those are timing correlates of a race, not causes. A single
+     diff of one pass/fail pair suggested `auto-color-convert` and the full cross-tabulation
+     refuted it.
 
-     The last row is the important one: two pictures from one file and one config is **frame
-     drift**, not colour. `core/parallel.py`'s own comment on this band says as much — it records
-     three table rows rewritten from "identical" to 90/73/71 dB where two of three turned out to
-     be a frame mismatch, and warns that the explanation "turned a real defect into an expected
-     value".
+     **Attributed to the producer, not to the seek.** With everything else held equal —
+     fixture, mode, mixer, consumer — `--decoder ffmpeg` captures frame 7 on 6 of 6 and
+     `--decoder cuda_prores` captures frame 8 on 5 of 6. But `SEEK` itself is exact on **both**
+     producers: the seek battery, once given a decoder axis, reports 7/7 landed with the
+     picture agreeing with the server on all three fixtures for each producer. So the CUDA
+     ProRes producer seeks correctly and then delivers one frame too many under the executor's
+     capture timing.
 
-     **Still owed, now as two tracked items rather than one vague one:** (a) why plain
-     `prores_422` fails deterministically — needs a pre-sync baseline to say whether the merge
-     caused it, and `build-sdcs/shell/casparcg.exe` is not one, because it already carries
-     FFmpeg 8 DLLs; (b) frame pinning for `prores_422_hlg`, which is a harness capture-timing
-     question rather than a server one.
+     **The mechanism is not diagnosed, and is deliberately not guessed at.** The two candidate
+     sites in `prores_producer.cpp` are the one-shot `seek_done_` flag, which `receive_impl`
+     clears without consuming a frame when the queue is briefly empty, and `frames_to_advance`
+     coming from `speed_accum_` on a layer that should be paused after `LOAD`. Discriminating
+     them needs a trace of pop counts and flag transitions under both batteries — a build and a
+     run, not more source reading.
 
-     Neither is caused by anything in this sync as far as the evidence goes, and neither is
-     cleared by it either.
+     **Harness half fixed** (`CasparCG-TestRunner` `0f67278`): `run_seek_check` now takes a
+     `decoder`, `SeekReport` records which producer answered, and report rows are labelled with
+     it. `frame_pin.py`'s claim that "`cli.py seek` measures that 7/7 lands correctly on every
+     producer family" was unsupportable — the battery had no decoder axis at all — and is
+     corrected, along with the stronger point it obscured: **a seek that lands right is not a
+     capture that lands right.** The `--decoder` CLI flag is owed behind another session's
+     `cli.py` work.
+
+     Not caused by this sync as far as the evidence goes, and not cleared by it either.
    * **`cuda_notchlc` decode is unreachable: the harness has no NotchLC source media.** 664
      cases reference a `notchlc` source and no such file exists under `media/sources`, so the
      decoder ran zero cases. The module loading is all that is currently checkable. Generating
