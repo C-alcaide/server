@@ -1,6 +1,69 @@
 CasparVP — Unreleased
 ==========================================
 
+### Added: a looping range can stay resident, so the loop plays with no decoder at all
+
+When every frame of a `LOOP` or `PINGPONG` range fits in a memory budget, playback is served from
+the resident frames and the decoder goes idle for that layer. A boundary stops being a seek plus a
+decode and becomes an index step, which removes the endpoint hitch at a wrap or a turnaround
+outright rather than shortening it.
+
+**Where the memory sits depends on the decode path, and the difference is the point.** Software
+frames sit in host RAM and still cost the usual upload each time they are shown — the decode is what
+is saved. `gpu-direct-decode` frames are already mixer textures, so replay costs **no decode, no
+seek and no upload**: a short loop becomes GPU-resident playback.
+
+Configured with `<loop-cache-mb>` (default 256, `0` disables). The budget is in megabytes and the
+depth follows from the raster, so nothing is configured per format: ~6 frames of 1080p fit in 50 MB,
+and a single 12288x6144 frame is ~300 MB, which switches the cache off by itself. That is intended —
+those assets play through `cuda_prores`, which has no turnaround hitch to remove.
+
+Only a bounded, repeating range qualifies. A `LOOP` with no `LENGTH` has no declared range and is
+left to the decoder; a growing or live input never qualifies; an explicit `SEEK` discards the cache,
+because the frames held are no longer where playback is going.
+
+**Measured**, recording the channel and reading the marker from every recorded frame, ~278 frames
+per arm at 1080p25, `SEEK 20 LENGTH 8`:
+
+| arm | before | with the cache |
+| :--- | :--- | :--- |
+| ProRes (software) forward loop | frame-exact already | frame-exact, decoder idle |
+| ProRes (software) ping-pong | endpoint once, no repeats | unchanged, decoder idle |
+| ProRes (software) reverse loop | IN frame twice at ~12 of ~34 wraps | **0, 1, 0** over three runs |
+| **h264 + GPU-direct** forward loop | OUT held 2 ticks at **all 28 wraps** | **0** |
+| **h264 + GPU-direct** ping-pong | `27` x3 **and** `20` x2 every sweep | **0** |
+| **h264 + GPU-direct** reverse loop | — | 1 (the first pass, while filling) |
+
+The residual single is inherent: the first time through the range the frames are still being decoded,
+so the first boundary behaves as it always did. Every subsequent one is free. The log says so once
+per range — `loop cache serving 8 frames; the decoder is idle for this range`.
+
+**This corrects a claim in the previous entry.** That said the retained-frame ring "only fixes the
+direction that needs no seek", and that an inter-frame source must therefore pay a tick at any
+boundary needing a forward decode. True of a *tail* of frames; false of a *complete range*. With the
+whole range resident there is no forward decode to wait for, which is why the h264 numbers above go
+to zero rather than improving.
+
+**Two things had to be got right, and both were wrong first.** The cache is not dropped in
+`seek_internal`: that function is the common path for the explicit seek, the loop wrap **and** the
+initial start, and the wrap runs on the *decode* thread, which is ahead of the consumer. Dropping it
+there wiped the cache every time round the loop while the consumer was still mid-range, so the
+resident run never reached both ends — measured sitting at 2-7 frames of an 8-frame range forever.
+The drop belongs at the explicit-seek call site instead. This is the mirror image of `speed_accum_`,
+which belongs *inside* `seek_internal` precisely because every caller invalidates it. For the same
+reason the in-range boundaries — both ping-pong flips and the reverse wrap — no longer drop it: a
+wrap *within* the range does not invalidate a cache *of* that range, and while they did, reverse loop
+never engaged at all.
+
+The cache also fills in **both** directions. Frames arrive ascending when playing forward and
+descending in reverse, and a reverse loop never delivers a forward frame, so a cache that only
+appended would never fill for `SPEED -1 LOOP` — which is one of the cases this exists for.
+
+Regression gates: `seek` 7/7 fixtures with 49/49 seeks landing and agreeing with the server;
+`flat-decoded` 29/29 patches on both mixers. `<loop-cache-mb>` verified in both directions: `0`
+engages the cache zero times, `256` engages it, which also exercises the over-budget path a 12K frame
+reaches on its own.
+
 ### Fixed: ping-pong showed its endpoint frame twice at every turnaround
 
 Reversing at the end of a ping-pong range held or re-delivered the endpoint, so the frame at each

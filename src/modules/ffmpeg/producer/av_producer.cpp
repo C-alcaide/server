@@ -2767,6 +2767,12 @@ struct AVProducer::Impl
     // Reversing away from OUT means showing OUT-1, OUT-2 ... which are precisely the frames
     // just displayed, so nothing needs decoding at the turn.
     std::deque<Frame>                shown_;
+    // Once `shown_` holds EVERY frame of a looping range, contiguously, playback needs no
+    // decoder at all and each boundary becomes an index step instead of a seek and a decode.
+    int64_t                          cache_budget_   = 0;      // bytes; 0 disables the cache
+    bool                             cache_complete_ = false;  // the whole range is resident
+    bool                             cache_serving_  = false;  // playback is coming from it
+    int                              cache_index_    = 0;      // cursor, in ascending pts order
     core::draw_frame                 frame_;
 
     std::deque<Frame>         buffer_;
@@ -2832,6 +2838,14 @@ struct AVProducer::Impl
 
         const int default_buffer_depth = std::max(1, static_cast<int>(format_desc_.fps) / 4);
         buffer_capacity_ = default_buffer_depth;
+
+        // Memory a LOOP or PINGPONG range may keep resident so it can be replayed without
+        // decoding. Where it lives depends on the decode path and is worth knowing: software
+        // frames sit in host RAM and still cost an upload per show, while GPU-direct frames are
+        // already mixer textures, so replay costs nothing at all. 0 disables it.
+        cache_budget_ = static_cast<int64_t>(
+                            env::properties().get(L"configuration.ffmpeg.producer.loop-cache-mb", 256))
+                        << 20;
         CASPAR_LOG(debug) << print() << " buffer-depth: " << buffer_capacity_;
 
         state_["file/name"] = u8(name_);
@@ -3676,6 +3690,19 @@ struct AVProducer::Impl
 
         boost::lock_guard<boost::mutex> lock(buffer_mutex_);
 
+        // ---- the resident range, if there is one -------------------------------------------
+        if (cache_serving_ && !cache_can_serve()) {
+            // A seek arrived, or LOOP/PINGPONG was turned off. The decoder has been parked
+            // wherever it last was, so put it back where the cache left off instead of
+            // resuming from somewhere unrelated.
+            cache_serving_ = false;
+            seek_          = frame_time_;
+            buffer_.clear();
+            buffer_cond_.notify_all();
+        } else if (cache_can_serve()) {
+            return serve_from_cache();
+        }
+
         // When speed is negative and no frame has been produced yet, the decode
         // thread will have started buffering from the IN point.  Issue an initial
         // seek to the OUT point so reverse playback starts from the end of the clip.
@@ -3792,7 +3819,6 @@ struct AVProducer::Impl
                             ring_low = std::min(ring_low, sf.pts);
                         }
                     }
-                    shown_.clear();
                     if (!rev_frames_.empty())
                         rev_batch_top_ = ring_low;   // the batch below must not replay the ring
 
@@ -3897,6 +3923,7 @@ struct AVProducer::Impl
                     frame_          = rev_frames_.back().frame;
                     frame_time_     = rev_frames_.back().pts;
                     frame_duration_ = rev_frames_.back().duration;
+                    retain_shown(rev_frames_.back());
                     rev_frames_.pop_back();
 
                     graph_->set_value("buffer", static_cast<double>(rev_frames_.size()) /
@@ -3909,7 +3936,6 @@ struct AVProducer::Impl
                             speed_accum_ = 0.0;
                             rev_frames_.clear();
                             rev_batch_top_ = INT64_MAX;
-                            shown_.clear();
                             // The IN frame has just been shown in reverse, so forward resumes
                             // at the NEXT one -- the same endpoint-once rule as the OUT end.
                             // Falls back to start_l for a single-frame range, where there is no
@@ -3936,7 +3962,6 @@ struct AVProducer::Impl
                                 end_abs - static_cast<int64_t>(buffer_capacity_) * one_f);
                             rev_frames_.clear();
                             rev_batch_top_ = INT64_MAX;
-                            shown_.clear();
                             seek_ = seek_pos;
                             buffer_.clear();
                             buffer_cond_.notify_all();
@@ -4085,6 +4110,10 @@ struct AVProducer::Impl
             boost::lock_guard<boost::mutex> lock(buffer_mutex_);
             buffer_.clear();
             rev_frames_.clear();
+            // An explicit seek is the one case that really does invalidate the resident range:
+            // the user is asking for somewhere else, and the frames held are somewhere they no
+            // longer are. The loop wrap, which shares seek_internal() with this, must not.
+            drop_cache();
 
             // Pre-announce the seek position so that time() / frame_number() reflect
             // the new position immediately — even on a paused layer where next_frame()
@@ -4187,7 +4216,7 @@ struct AVProducer::Impl
     /// ZERO at 12288x6144, where one frame is ~300 MB. That is the intended answer for the 12K
     /// virtual-production assets -- they are played through cuda_prores, which has no turnaround
     /// hold to fix, and buying a smoother turn there for gigabytes of RAM would be a bad trade.
-    static constexpr int64_t SHOWN_RING_BUDGET = 128LL << 20;
+    /// Default budget, overridable with `<loop-cache-mb>`. 0 disables the cache entirely.
 
     static int64_t frame_bytes(const Frame& f)
     {
@@ -4209,20 +4238,57 @@ struct AVProducer::Impl
     /// and a bounded pop and nothing else.
     void retain_shown(const Frame& f)
     {
-        // Only ping-pong turns around, so nothing else pays for this.
-        if (!pingpong_.load()) {
+        // Only a bounded, repeating range can be replayed, and a growing input is not one.
+        if (cache_budget_ <= 0 || growing_ || !(loop_.load() || pingpong_.load())) {
             if (!shown_.empty())
-                shown_.clear();
+                drop_cache();
             return;
         }
 
+        // The cache is only usable as a CONTIGUOUS run: an index step has to mean one frame.
+        // A gap means frames were dropped or the position jumped, so the run restarts rather
+        // than being quietly wrong by however many frames went missing.
+        //
+        // It can grow from EITHER end. Frames arrive ascending when playing forward and
+        // DESCENDING when playing in reverse, and a reverse loop never delivers a forward frame
+        // at all -- so a cache that only appended would never fill for `SPEED -1 LOOP`, which is
+        // exactly one of the cases this exists to smooth.
+        enum class grow
+        {
+            back,
+            front,
+            have_it,
+            restart
+        } how = grow::restart;
+
+        if (shown_.empty()) {
+            how = grow::back;
+        } else if (f.pts >= shown_.front().pts && f.pts <= shown_.back().pts) {
+            how = grow::have_it;   // replaying a frame already resident: not a discontinuity
+        } else if (shown_.back().duration > 0 && f.pts == shown_.back().pts + shown_.back().duration) {
+            how = grow::back;
+        } else if (f.duration > 0 && f.pts + f.duration == shown_.front().pts) {
+            how = grow::front;
+        }
+
+        if (how == grow::have_it)
+            return;
+        if (how == grow::restart) {
+            drop_cache();
+            how = grow::back;
+        }
+
         const int64_t sz  = frame_bytes(f);
-        const int     cap =
-            sz > 0 ? static_cast<int>(std::min<int64_t>(SHOWN_RING_BUDGET / sz, buffer_capacity_))
-                   : 0;
+        // Bounded by BYTES, so the depth scales itself with the raster rather than needing a
+        // threshold per resolution, and a 12K frame at ~300 MB opts the whole thing out on its
+        // own. NOT capped at buffer_capacity_ any more: a complete range is the point, and a
+        // range longer than the decode buffer is exactly the case worth caching.
+        const int cap = sz > 0 ? static_cast<int>(cache_budget_ / sz) : 0;
         if (cap <= 0) {
+            // One frame is already over budget -- a 12K raster reaches this, which is the
+            // intended way for the cache to switch itself off rather than by a resolution test.
             if (!shown_.empty())
-                shown_.clear();
+                drop_cache();
             return;
         }
 
@@ -4248,9 +4314,108 @@ struct AVProducer::Impl
         keep.duration    = f.duration;
         keep.frame_count = f.frame_count;
 
-        shown_.push_back(std::move(keep));
-        while (static_cast<int>(shown_.size()) > cap)
-            shown_.pop_front();
+        if (how == grow::front)
+            shown_.push_front(std::move(keep));
+        else
+            shown_.push_back(std::move(keep));
+
+        // Over budget: drop from the end OPPOSITE the one just extended, so the window keeps
+        // moving with playback instead of eating the frames it is about to need.
+        while (static_cast<int>(shown_.size()) > cap) {
+            if (how == grow::front)
+                shown_.pop_back();
+            else
+                shown_.pop_front();
+            cache_complete_ = false;   // losing an end means the range is no longer whole
+        }
+
+        // Complete when the run spans the requested range. Contiguity is already guaranteed
+        // above, so the two ends are enough to know every frame between them is present.
+        const int64_t s_c = start_.load() != AV_NOPTS_VALUE ? start_.load() : 0LL;
+        const int64_t d_c = duration_.load();
+        if (d_c != AV_NOPTS_VALUE && d_c > 0 && !shown_.empty()) {
+            cache_complete_ = shown_.front().pts <= s_c &&
+                              shown_.back().pts + shown_.back().duration >= s_c + d_c;
+        } else {
+            // No declared duration means no known range to be complete over. A whole-file loop
+            // is left to the decoder rather than guessed at.
+            cache_complete_ = false;
+        }
+    }
+
+    void drop_cache()
+    {
+        shown_.clear();
+        cache_complete_ = false;
+        cache_serving_  = false;
+        cache_index_    = 0;
+    }
+
+    bool cache_can_serve() const
+    {
+        return cache_complete_ && cache_budget_ > 0 && !growing_ &&
+               seek_.load() == AV_NOPTS_VALUE && (loop_.load() || pingpong_.load());
+    }
+
+    /// Play the resident range directly. No decoder, no seek, and on the GPU-direct path no
+    /// upload either -- the frames are already mixer textures.
+    core::draw_frame serve_from_cache()
+    {
+        const int n = static_cast<int>(shown_.size());
+        if (n <= 0)
+            return core::draw_frame::still(frame_);
+
+        if (!cache_serving_) {
+            // Line the cursor up with the frame just delivered, so entering the cache is not
+            // itself a jump.
+            cache_index_ = 0;
+            for (int i = 0; i < n; ++i) {
+                if (shown_[i].pts == frame_time_) {
+                    cache_index_ = i;
+                    break;
+                }
+            }
+            cache_serving_ = true;
+            CASPAR_LOG(info) << print() << L" loop cache serving " << n
+                              << L" frames; the decoder is idle for this range";
+        }
+
+        const double spd = speed_.load();
+        speed_accum_ += spd;
+        const int step = static_cast<int>(speed_accum_);
+        speed_accum_ -= static_cast<double>(step);
+        if (step == 0)
+            return core::draw_frame::still(frame_);   // slow motion: no new frame this tick
+
+        int idx = cache_index_;
+        for (int i = 0; i < std::abs(step); ++i) {
+            idx += step > 0 ? 1 : -1;
+            if (idx >= n) {
+                if (pingpong_.load() && n >= 2) {
+                    speed_ = -std::abs(spd);
+                    idx    = n - 2;      // endpoint once per sweep, as everywhere else
+                } else {
+                    idx = 0;             // loop wrap
+                }
+            } else if (idx < 0) {
+                if (pingpong_.load() && n >= 2) {
+                    speed_ = std::abs(spd);
+                    idx    = 1;
+                } else {
+                    idx = n - 1;         // reverse loop wrap
+                }
+            }
+        }
+        idx = std::max(0, std::min(n - 1, idx));
+
+        cache_index_    = idx;
+        frame_          = shown_[idx].frame;
+        frame_time_     = shown_[idx].pts;
+        frame_duration_ = shown_[idx].duration;
+        frames_since_update_ += std::abs(step);
+
+        graph_->set_value("buffer", 1.0);
+        return frame_;
     }
 
     void speed(double spd)
@@ -4262,7 +4427,8 @@ struct AVProducer::Impl
             boost::lock_guard<boost::mutex> lock(buffer_mutex_);
             rev_frames_.clear();
             rev_batch_top_ = INT64_MAX;
-            shown_.clear();   // the retained run is no longer adjacent to where playback resumes
+            // The cache is NOT dropped on a direction change: it holds a RANGE, and
+            // reversing through that range needs exactly the frames it already has.
             rev_active_ = false;  // reset so initial-seek fires for new reverse session
             speed_accum_ = 0.0;
             
@@ -4468,7 +4634,17 @@ struct AVProducer::Impl
             // Same argument for the retained run: it is a contiguous stretch ending where playback
             // WAS, and after a seek or a loop wrap it no longer adjoins where playback resumes, so
             // seeding a turnaround from it would serve frames from the wrong part of the clip.
-            shown_.clear();
+            // The CACHE is deliberately NOT dropped here, and that is the whole difference
+            // between this working and not. seek_internal() is the common path for the explicit
+            // seek, the LOOP WRAP and the initial start -- and the wrap runs on the DECODE
+            // thread, which is ahead of the consumer. Dropping the cache here wiped it every
+            // time round the loop, while the consumer was still mid-range, so the resident run
+            // could never reach both ends and the cache never completed. MEASURED: it sat at 2-7
+            // frames of an 8-frame range forever.
+            //
+            // This is the mirror image of speed_accum_ directly above, which belongs here
+            // precisely BECAUSE every caller invalidates it. A user seek does invalidate the
+            // cache, so that drop lives at the explicit-seek call site in seek() instead.
             buffer_cond_.notify_all();
         }
 
