@@ -752,12 +752,112 @@ all streaming and recording. Two details worth keeping:
    owed: `sdi-input`, `signalling --stream`, `sdi-output`, `mixer-parity`, `vk-validation`.
    The FFmpeg *consumer* is now the largest unmeasured surface, since that is where §5's
    array-option migration actually lives and `signalling --stream` is the battery for it.
-3. `cli.py run --decoder cuda_prores` / `--decoder cuda_notchlc`, to exercise the
-   mixed-standard C++17/C++20 link boundary §6.3 introduces.
-3. Reconcile the two GPU-direct HTML paths (§4.1).
-4. Merge or retire the OAL consumer divergence (§4.2).
-5. Investigate the OGL 16-bit asymmetry (§3.1) — pre-existing, not caused here.
-6. A battery for the still-load swscale conversions, which nothing covers; the oracle needs
-   no colour model, because an 8-bit RGB PNG and an 8-bit RGBA PNG holding the same values
-   differ only in whether `is_frame_compatible_with_mixer` sends them through swscale.
-   Asymmetric per-channel values are mandatory — these are channel permutations.
+3. ~~`cli.py run --decoder cuda_prores` / `--decoder cuda_notchlc`~~ — **the link boundary is
+   verified; NotchLC decode is not, and cannot be.** Measured 2026-08-19. Both CUDA modules
+   load and initialise at runtime — `[cuda_prores] Module initialised`,
+   `Initialized cuda_prores module.`, `[cuda_notchlc] Module initialised` — and `cuda_prores`
+   decoded 11 of 26 cases successfully, best PSNR 52.2. A C++17/C++20 ABI or unresolved-symbol
+   fault would fail every case rather than eleven, so §6.3's mixed-standard boundary works in
+   practice and not only at link time.
+   * **12 of the 26 failed at a uniform PSNR 24.5, and that is unexplained.** The pass/fail
+     split is *not* accounted for by the transfer combination — the same combination appears on
+     both sides — and there is no pre-sync baseline for these cases, so it cannot be called
+     pre-existing either. Owed as its own investigation.
+   * **`cuda_notchlc` decode is unreachable: the harness has no NotchLC source media.** 664
+     cases reference a `notchlc` source and no such file exists under `media/sources`, so the
+     decoder ran zero cases. The module loading is all that is currently checkable. Generating
+     or obtaining a NotchLC fixture is owed before that half means anything.
+4. Reconcile the two GPU-direct HTML paths (§4.1). **Parked by decision, 2026-08-18** — the
+   findings, the PR shape and the harness it would need are written up in
+   `docs/CEF_GPU_DIRECT_RECONCILIATION.md`. Not a gap in this sync; a deferred choice.
+5. Merge or retire the OAL consumer divergence (§4.2). **Still open, and it is a decision
+   rather than a measurement** — both implementations work; what is missing is a ruling on
+   which one this fork keeps.
+6. ~~Investigate the OGL 16-bit asymmetry (§3.1)~~ — **done, 2026-08-19, and it was not the
+   mixer.** It was `swscale`'s packed-16 to packed-16 component permutation in the IMAGE
+   consumer, which dithers a conversion that reduces no bit depth. Pre-existing and fork-only:
+   upstream's `convert_image_frame` call sites all target 8 bit, where the same permutation is
+   exact. OpenGL 16-bit conformance goes **0/100 -> 99/100** within 1.0 LSB, which is exactly
+   the Vulkan figure. Full account in `docs/PLAN_BGRA64_CAPTURE_FIX.md` §8.2, the FFmpeg
+   reproducer in `docs/swsprobe/`.
+7. ~~A battery for the still-load swscale conversions~~ — **written, `image-convert`**, 4 PNG
+   flavours with an `rgba8` control that bypasses swscale, asymmetric per-channel values, and a
+   depth-mismatch guard. 26 tests pass. **Not yet committed** in the harness repo: `cli.py` and
+   `CLAUDE.md` there carry another session's uncommitted work, and staging them would sweep it
+   into this commit.
+
+### 9.1 Measured 2026-08-19 — five of seven pass; one real blocker, not ours
+
+| arm | verdict |
+| :--- | :--- |
+| `vk-validation` | **pass** — core validation, best-practices positive control, 12/12 commands accepted |
+| `sdi-output --mixer ogl` | **pass** — v210 AVX2/scalar pack parity PASS (16-bit), 16-bit v210 +4.26 dB over 8-bit |
+| `sdi-output --mixer vulkan` | **pass** — figures byte-identical to OpenGL, which is the parity requirement |
+| `sdi-input` | **pass** — CasparCG 43.20 dB, FFmpeg on the same wire 42.61 dB (−0.60 dB) |
+| `signalling` (DeckLink loopback 1:4) | **pass** — colour survives bt709/sdr, bt2020/hlg, bt2020/pq |
+| `signalling --stream` | **FAIL — blocked, see below** |
+| `mixer-parity` | **pass** — 6/6 rasters identical between backends, max diff **0**, gate 1 LSB (PAL, NTSC, 1080i5000, 1080p2500, 2160p2500, 2600x1500p25) |
+
+So the DeckLink surface is verified on both backends, and the Vulkan API-usage check is clean.
+
+**`signalling --stream` is blocked by the known 16-channel audio-layout defect, not by this
+sync.** Isolated across five consumer option sets — bare mpegts, +aac 2ch, +one HDR option,
++all four HDR options, and h264+aac — **all five fail identically** with
+`avcodec_open2 → EINVAL`, from:
+
+```
+[aac @ ...] Unsupported channel layout "9.1.6"
+[mp2 @ ...] Specified channel layout ... is not supported by the mp2 encoder
+[mp2 @ ...] Supported channel layouts:  mono  stereo
+```
+
+CasparCG channels always carry 16 channels, and `ffmpeg_consumer.cpp` constrains the audio
+buffersink's sample formats and rates to what the encoder supports but not its channel layouts
+— the commented-out `ch_layouts` TODO is still there. FFmpeg 7 encoded 16-channel AAC anyway
+and wrote `channel_layout=unknown`; FFmpeg 8 refuses. A latent bug that FFmpeg 8 stopped
+covering for, diagnosed and written up on 2026-08-18 in
+`d:\Github\CasparCG-server\PR_ffmpeg8_aac_16ch.md`, still unfiled.
+
+**Two things this measurement adds to that write-up.**
+
+* The HDR consumer options are **not** implicated, and are in fact working correctly: the log
+  carries `<hdr-metadata> ignored: the channel's transfer is not PQ or HLG`, which is the right
+  refusal for an SDR channel. The first hypothesis here — that §5's option migration had broken
+  the fork's HDR options — is wrong, and the isolation is what killed it.
+* **`-ac 2` is ignored.** The battery passes it and the encoder still reports `9.1.6`, so the
+  requested channel count never reaches the audio graph. The existing write-up records that
+  `-c:a`, `-acodec` and container changes do not help; it never tested `-ac`. This matters
+  because the known `ch_layouts` patch fixes `ac3` and `mp2` but provably **not** `aac` (the
+  native AAC encoder publishes no layout list), whereas honouring `-ac` would.
+
+**And the blast radius is wider than the existing write-up states.** That document is titled
+"recording audio to AAC is broken" and frames the failure around AAC in mp4. Running `cli.py run`
+over 381 cases before it was stopped, **every single error was an FFmpeg consumer**, across
+codecs that do not share an audio codec:
+
+```
+56  ffmpeg_h264 / h265      14  ffmpeg_prores       13  ffmpeg_dnxhd
+11  ffmpeg_dnxhr             6  ffmpeg_dnxh          3  ffmpeg_xdcam
+```
+
+Not one non-FFmpeg consumer errored. So **recording to file is broadly broken in this fork on
+FFmpeg 8**, not merely AAC-in-mp4, and that is a larger problem than the stalled verification
+arm it was found through. Whether all of them fail for the identical channel-layout reason is
+not yet confirmed — ProRes in `.mov` and XDCAM in `.mxf` default to different audio codecs — so
+the per-consumer cause is owed before the scope claim is rewritten upstream.
+
+**This arm therefore stays owed, and it is an audio-graph change rather than a verification.**
+It is out of scope for the sync itself: nothing in §5's migration caused it, and `signalling
+--stream` measures colour and HDR10 signalling, which cannot be reached while the consumer
+refuses to open.
+
+### Two things this sync learned that outlive it
+
+* **A timing verdict from `conformance` needs two interleaved runs per arm.** Three attempts at
+  the §3.1 fix were reverted for a 3x wall-clock regression that did not exist: every attempt
+  was measured on its first run after a build and compared against a control that was not. Two
+  runs of the *same* binary, back to back on a settled box, differ by 1.9x — larger than the
+  effect being chased. Owed as a harness change, not a note here.
+* **Capture timeouts are not currently a gating signal.** A run can report a pass count while
+  silently failing to capture; the count is then over the patches that survived. `conformance`
+  should fail, or at minimum flag, a run with any capture timeout.
