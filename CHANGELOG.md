@@ -1,6 +1,33 @@
 CasparVP — Unreleased
 ==========================================
 
+### Fixed: recording and streaming to FFmpeg consumers failed on FFmpeg 8
+
+Any FFmpeg file or stream consumer carrying audio failed to open: AMCP answered `202 ADD OK` —
+the consumer is created before it initialises — and then nothing was written. The log said
+`Unsupported channel layout "9.1.6"` and `avcodec_open2` returned EINVAL.
+
+A CasparCG channel always carries 16 audio channels, and the consumer constrained the audio
+filtergraph's sample formats and rates to what the encoder supports but never its **channel
+layouts**, so the graph never downmixed. FFmpeg 7's AAC encoder accepted 16 channels anyway and
+wrote `channel_layout=unknown`; FFmpeg 8 refuses. A latent bug that FFmpeg 8 stopped covering
+for, not an FFmpeg 8 regression — and not AAC-specific: h264, h265, ProRes, DNxHD, DNxHR and
+XDCAM consumers all failed.
+
+**Fixed** by constraining the sink to the encoder's published channel layouts, and by honouring
+an explicit `-ac N` from the caller — which previously did nothing at all, because `ac` is a
+CLI-level option rather than an `AVCodecContext` option, so it never reached the audio graph.
+
+**Measured**, `signalling --stream`: before, `AMCP 501` and zero packets captured; after, 3/3
+arms pass with 455 packets each, `bt709/sdr`, `bt2020/hlg` and `bt2020/pq` all correct through
+ffprobe and through our own producer, and HDR10 static metadata round-tripping. `ADD 1 FILE
+out.wav` still writes 16-channel PCM.
+
+**Not fixed:** `ADD 1 FILE out.mp4` with no `-ac` still fails. AAC publishes no supported-layout
+list, so there is nothing to constrain against and no non-arbitrary channel count to choose;
+pass `-ac 2`. Making stereo the default is a behaviour change rather than a fix and has not been
+made.
+
 ### Fixed: 16-bit PNG captures from the OpenGL mixer were wrong by up to 16 LSB16
 
 The IMAGE consumer converted the OpenGL mixer's `BGRA64LE` readback to `RGBA64BE` for PNG

@@ -786,7 +786,7 @@ all streaming and recording. Two details worth keeping:
    `CLAUDE.md` there carry another session's uncommitted work, and staging them would sweep it
    into this commit.
 
-### 9.1 Measured 2026-08-19 — five of seven pass; one real blocker, not ours
+### 9.1 Measured 2026-08-19 — seven of seven, after fixing the blocker
 
 | arm | verdict |
 | :--- | :--- |
@@ -795,7 +795,7 @@ all streaming and recording. Two details worth keeping:
 | `sdi-output --mixer vulkan` | **pass** — figures byte-identical to OpenGL, which is the parity requirement |
 | `sdi-input` | **pass** — CasparCG 43.20 dB, FFmpeg on the same wire 42.61 dB (−0.60 dB) |
 | `signalling` (DeckLink loopback 1:4) | **pass** — colour survives bt709/sdr, bt2020/hlg, bt2020/pq |
-| `signalling --stream` | **FAIL — blocked, see below** |
+| `signalling --stream` | **pass, after the fix below** — 3/3 arms, 455 packets each, HDR10 round-trips |
 | `mixer-parity` | **pass** — 6/6 rasters identical between backends, max diff **0**, gate 1 LSB (PAL, NTSC, 1080i5000, 1080p2500, 2160p2500, 2600x1500p25) |
 
 So the DeckLink surface is verified on both backends, and the Vulkan API-usage check is clean.
@@ -846,7 +846,19 @@ arm it was found through. Whether all of them fail for the identical channel-lay
 not yet confirmed — ProRes in `.mov` and XDCAM in `.mxf` default to different audio codecs — so
 the per-consumer cause is owed before the scope claim is rewritten upstream.
 
-**This arm therefore stays owed, and it is an audio-graph change rather than a verification.**
+**FIXED 2026-08-19, commit `24a182b85`.** The audio buffersink is now constrained by the
+encoder's published channel layouts, and `-ac N` is honoured in the graph instead of being
+dropped. `signalling --stream` goes from `AMCP 501` with zero packets and an aborted battery to
+**3/3 arms passing, 455 packets each**, with HDR10 static metadata round-tripping through both
+ffprobe and our own producer. `ADD 1 FILE out.wav` still writes 16-channel PCM, so the path that
+worked is untouched.
+
+**Still not fixed, as a stated limit:** `ADD 1 FILE out.mp4` with no `-ac` fails, because AAC
+publishes no layout list and there is no non-arbitrary channel count to pick. Defaulting it to
+stereo is a behaviour decision rather than a bug fix. `ac3` and `mp2` now open where they
+refused, but a finalised-file measurement for them is owed — the first attempt used a `bytes > 0`
+gate that an empty 48-byte mp4 container passes, which is the exact class of check this repo's
+own notes warn against.
 It is out of scope for the sync itself: nothing in §5's migration caused it, and `signalling
 --stream` measures colour and HDR10 signalling, which cannot be reached while the consumer
 refuses to open.
