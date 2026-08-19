@@ -759,10 +759,33 @@ all streaming and recording. Two details worth keeping:
    decoded 11 of 26 cases successfully, best PSNR 52.2. A C++17/C++20 ABI or unresolved-symbol
    fault would fail every case rather than eleven, so §6.3's mixed-standard boundary works in
    practice and not only at link time.
-   * **12 of the 26 failed at a uniform PSNR 24.5, and that is unexplained.** The pass/fail
-     split is *not* accounted for by the transfer combination — the same combination appears on
-     both sides — and there is no pre-sync baseline for these cases, so it cannot be called
-     pre-existing either. Owed as its own investigation.
+   * **12 of the 26 failed at PSNR 24.5 against a 35 dB gate, and it is at least three
+     separate things rather than one.** Characterised 2026-08-19 by hashing each case's
+     `decoded_frame.png` — CasparCG's own decode, via `PRINT RAW` — and cross-tabulating against
+     source, `<auto-color-convert>` and outcome. Failures are bimodal, 24.5 dB against passes at
+     52.2–54.8, so this is not gate calibration:
+
+     | source | behaviour |
+     | :--- | :--- |
+     | `prores_4444a` | **clean.** 6/6 pass, one decoded frame, either `auto-color-convert` |
+     | `prores_422_hdr10` | **tracks `auto-color-convert`** — `false` fails, `true` passes, consistently, one frame each. Legitimate conversion behaviour rather than a defect |
+     | `prores_422` (plain) | **deterministic failure.** All 5 cases fail, a single decoded frame, both `auto-color-convert` values. A real reproducible decode-vs-reference mismatch |
+     | `prores_422_hlg` | **non-deterministic.** Identical source AND identical `auto-color-convert` yield **two different decoded pictures**, one passing at ~54 dB and one failing at 24.5 |
+
+     The last row is the important one: two pictures from one file and one config is **frame
+     drift**, not colour. `core/parallel.py`'s own comment on this band says as much — it records
+     three table rows rewritten from "identical" to 90/73/71 dB where two of three turned out to
+     be a frame mismatch, and warns that the explanation "turned a real defect into an expected
+     value".
+
+     **Still owed, now as two tracked items rather than one vague one:** (a) why plain
+     `prores_422` fails deterministically — needs a pre-sync baseline to say whether the merge
+     caused it, and `build-sdcs/shell/casparcg.exe` is not one, because it already carries
+     FFmpeg 8 DLLs; (b) frame pinning for `prores_422_hlg`, which is a harness capture-timing
+     question rather than a server one.
+
+     Neither is caused by anything in this sync as far as the evidence goes, and neither is
+     cleared by it either.
    * **`cuda_notchlc` decode is unreachable: the harness has no NotchLC source media.** 664
      cases reference a `notchlc` source and no such file exists under `media/sources`, so the
      decoder ran zero cases. The module loading is all that is currently checkable. Generating
