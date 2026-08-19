@@ -903,6 +903,43 @@ It is out of scope for the sync itself: nothing in §5's migration caused it, an
 --stream` measures colour and HDR10 signalling, which cannot be reached while the consumer
 refuses to open.
 
+### 9.2 The deep audit — four surfaces, no silent reverts
+
+Asked for after the sync, on the concern that the merge mechanism which produced four build
+defects (a feature split across conflicting and non-conflicting hunks, the conflicted half
+resolved and the other half silently taking upstream's version) could also have produced the
+same defect where the code still compiles.
+
+| surface | pre-merge | HEAD | lost |
+| :--- | ---: | ---: | :--- |
+| AMCP command registrations | 129 | 129 | **none** |
+| `configuration.*` keys the code reads | 39 | 42 | **none** (added: `log-diagnostics`, `log-diagnostics-interval`, upstream's `ndi.discovery-server`) |
+| numeric constants, colour/maths paths | 167 | 167 | **none** — both shaders and both `transforms.cpp` byte-identical in every literal with 3+ decimals |
+| `apply_transform_colour_values` allowlist | 113 / 114 | 113 / 114 | **none**, and the two mixers remain in step |
+
+Deletion pass: 400 substantive deleted lines in `src/` → 363 fork-authored → 162 survived
+elsewhere → 77 in 28 files after removing MSVC-pragma noise → **0 genuine reverts** once each was
+read. Everything resolved to intended (`setup_accelerator` swap, dead `LIBAVFORMAT < 59` block,
+`cxx_std_17`→C++20, `shared_ptr::unique()` removal), refactored (HTML's `enable-gpu` →
+`is_gpu_shared_texture_enabled()`; NDI v5→v6 with `allow_fields` intact), strengthened
+(`av_input.cpp`'s read-thread resilience gained a capped ENOMEM retry), or edits from the auditing
+session itself.
+
+**The features named in the request are specifically clear.** Variable speed, reverse playback and
+the CUDA rate/pingpong pipeline do not appear in the deletion set at all, and `690d0abdd`'s
+resolution-adaptive queue depth — `MAX_QUEUED` 2→4 above 25 M pixels, `NUM_SLOTS = MAX_QUEUED + 3`
+— survives intact.
+
+**What the audit did turn up was not a revert.** Auditing the loop/speed/reverse/EOF paths the
+deletion pass pointed at found pre-existing frame loss in two producers, fixed in `c3103f996` and
+`272661d72`. Those defects predate the merge; the audit is what surfaced them.
+
+**Method note.** Two oracles disagreed, and only one was trustworthy. The producers' reported
+position (OSC / `frame_count_`) is exact when settled — calibrated at frames 10/40/74 on all three
+producers, offset 0 — and unreliable during playback, where HAP reported frame 76 of a 75-frame
+clip. Every finding that survived came from the burnt-in frame marker in the captured picture.
+A matrix built on the reported position produced numbers that looked quantitative and were not.
+
 ### Two things this sync learned that outlive it
 
 * **A timing verdict from `conformance` needs two interleaved runs per arm.** Three attempts at
