@@ -1,6 +1,12 @@
 # swscale: packed 16-bit RGB component permutation is lossy and dithers when it must not
 
-**Version:** ffmpeg 8.1.1 (also reproduced on 7.0.2), Windows x86_64, gcc 15.2.0.
+**Versions tested:** 7.0.2, 8.1.1 and 8.1.2 (gyan.dev full builds, Windows x86_64). All three
+give **byte-identical** error: maxabs 32, 734 of 1024 components wrong on the 16x16 probe.
+
+That the error is unchanged across FFmpeg 8's swscale re-architecture (`SwsGraph` / `SwsOps`)
+suggests the fault is not in the scaler internals but in how this conversion is negotiated --
+a shuffle fast path not being selected, and a dither stage left active for a conversion whose
+input and output depths are equal.
 
 ## Summary
 
