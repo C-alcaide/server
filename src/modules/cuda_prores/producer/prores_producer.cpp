@@ -1019,17 +1019,41 @@ struct prores_producer_impl final : public core::frame_producer
         const double fps_ratio = (file_fps_ > 0.0 && format_desc_.fps > 0.0)
                                      ? file_fps_ / format_desc_.fps
                                      : 1.0;
+        const bool seek_just_done = seek_done_.exchange(false);
+
+        // A seek is a DISCONTINUITY, so the advance accumulated before it is meaningless:
+        // it counts frames of a timeline position that no longer applies. Carrying it over
+        // makes the first post-seek tick consume more than the seek target.
+        //
+        // Measured 2026-08-19. `LOAD` immediately followed by `CALL 1-1 SEEK 7` -- no
+        // settle, which is exactly how the matrix executor issues them -- landed on frame
+        // **8**, deterministically, while the same pair with a one-second gap landed on 7.
+        // A trace of submit/push against `frames_to_advance` showed why: `fta=2` on the
+        // first tick after the seek, so BOTH frame 7 and frame 8 were popped and 8 was left
+        // cached. `speed_accum_` had built up while the queue was still filling during
+        // initialisation -- the catch-up cap below deliberately allows up to 2.0 -- and
+        // nothing reset it across the seek.
+        //
+        // It cost more than the frame: the resulting one-frame offset presented as 12
+        // `run` cases failing at a uniform 24.5 dB against a 35 dB gate, which read as a
+        // 4:2:2 chroma fault in this decoder. `cli.py seek` could not see it because it
+        // settles before every seek, and the FFmpeg producer is immune because it has no
+        // such accumulator.
+        if (seek_just_done)
+            speed_accum_ = 0.0;
+
         speed_accum_ += std::abs(spd) * fps_ratio;
         int frames_to_advance = static_cast<int>(speed_accum_);
 
-        const bool seek_just_done = seek_done_.exchange(false);
+        // Exactly the target frame after a seek, never more. The old guard only corrected
+        // the zero case, which is the one that could not go wrong.
+        if (seek_just_done)
+            frames_to_advance = 1;
+
         if (frames_to_advance == 0 && !seek_just_done) {
             // No new frame needed this tick — return cached without blocking.
             return cached_frame_ ? core::draw_frame::still(cached_frame_) : core::draw_frame{};
         }
-        if (frames_to_advance == 0 && seek_just_done)
-            frames_to_advance = 1;
-
         // First field or progressive: fetch the next decoded frame.
         std::unique_lock<std::mutex> lk(queue_mutex_);
         if (ready_queue_.empty()) {

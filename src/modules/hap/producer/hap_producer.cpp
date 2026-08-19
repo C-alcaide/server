@@ -506,6 +506,16 @@ struct hap_producer_impl final : public core::frame_producer
                     std::lock_guard<std::mutex> lk(raw_mutex_);
                     while (!raw_queue_.empty()) raw_queue_.pop();
                 }
+                // The DECODED queue has to go too, and synchronously, here. `gl_loop` does
+                // clear it when it notices the epoch change, but that is asynchronous: the
+                // channel can pop a pre-seek frame first, and because the post-seek pop is
+                // one-shot it then STAYS on that frame. Measured 2026-08-19: `SEEK 7` after
+                // a one-second settle showed frame 1 -- the next stale frame after the
+                // cached one -- and held it for the rest of the run.
+                {
+                    std::lock_guard<std::mutex> lk(queue_mutex_);
+                    while (!ready_queue_.empty()) ready_queue_.pop();
+                }
                 demuxer_->seek_to_frame(seek_target);
                 io_frame_count = seek_target;
                 pkt_seq        = 0;
@@ -1306,18 +1316,32 @@ struct hap_producer_impl final : public core::frame_producer
         const double fps_ratio = (file_fps_ > 0.0 && format_desc_.fps > 0.0)
                                      ? file_fps_ / format_desc_.fps
                                      : 1.0;
+        const bool seek_just_done = seek_done_.exchange(false, std::memory_order_relaxed);
+
+        // A seek is a DISCONTINUITY, so any advance accumulated before it counts frames of
+        // a timeline position that no longer applies. Carrying it over makes the first
+        // post-seek tick consume more than the seek target.
+        //
+        // Measured 2026-08-19 on the ProRes producer, which had the identical logic:
+        // `LOAD` immediately followed by `CALL 1-1 SEEK 7` landed on frame 8,
+        // deterministically, because `frames_to_advance` was 2 on the first tick after the
+        // seek -- so both frame 7 and frame 8 were popped. The old guard only corrected the
+        // `== 0` case, which is the one that could not go wrong.
+        //
+        // Measured on THIS producer the same day: `LOAD` + `SEEK 7` with no settle showed
+        // frame 8. Worse, the old code only consulted `seek_done_` when
+        // `frames_to_advance == 0`, so a non-zero advance skipped the seek target outright.
+        if (seek_just_done)
+            speed_accum_ = 0.0;
+
         speed_accum_ += std::abs(spd) * fps_ratio;
         int frames_to_advance = static_cast<int>(speed_accum_);
         speed_accum_ -= static_cast<double>(frames_to_advance);
 
+        if (seek_just_done)
+            frames_to_advance = 1;   // exactly the target frame, never more
+
         if (frames_to_advance == 0) {
-            if (seek_done_.exchange(false, std::memory_order_relaxed) && !ready_queue_.empty()) {
-                cached_frame_ = std::move(ready_queue_.front());
-                ready_queue_.pop();
-                lk.unlock();
-                queue_cv_.notify_all();
-                return cached_frame_;
-            }
             lk.unlock();
             return cached_frame_ ? core::draw_frame::still(cached_frame_) : core::draw_frame{};
         }
