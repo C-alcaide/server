@@ -484,6 +484,36 @@ struct notchlc_producer_impl final : public core::frame_producer
                 fps_frame_acc_ = 0;
                 seek_epoch_.fetch_add(1u, std::memory_order_release);
                 raw_cv_.notify_all();
+                // read_loop watches seek_epoch_ from INSIDE its wait on lz4_done_cv_, and a
+                // condition variable only re-evaluates its predicate when notified. Nothing
+                // else was going to notify it: the lz4 workers that normally do are blocked on
+                // slot_pool_cv_ holding slots that only read_loop releases, so the two waited
+                // on each other and no frame was ever produced again after a seek.
+                //
+                // MEASURED 2026-08-19 against a 12288x6144 NotchLC asset. Traced across one
+                // LOAD + `SEEK 500`: the seek was processed (`io_seek target=500 epoch=1`) and
+                // six packets were read with the new epoch, but read_loop logged NO epoch
+                // change, took NO item and pushed NO frame, while the channel spun 350 ticks on
+                // an empty queue. Seeks to 0, 500 and 900 with a 30 s settle produced
+                // byte-identical pictures, identical to never seeking at all.
+                //
+                // The HAP producer already carries this notify, and its comment describes this
+                // exact failure -- "it can sit waiting for a sequence number that nobody is
+                // going to send". This module was derived from it without the line.
+                lz4_done_cv_.notify_all();
+                slot_pool_cv_.notify_all();
+                // ...and queue_cv_, which is the one that actually had read_loop parked.
+                //
+                // read_loop takes an item and then waits here on backpressure:
+                //     queue_cv_.wait(lk, [] { return ready_queue_.size() < MAX_QUEUED; });
+                // A PAUSED channel never drains ready_queue_ -- last_frame() pops only when
+                // seek_done_ is set or cached_frame_ is empty -- so the queue fills and
+                // read_loop parks. `call()` notifies queue_cv_ when the SEEK arrives, but that
+                // is before io_loop gets here to flush the queue, so the predicate is still
+                // false and read_loop goes straight back to sleep. Flushing the queue without
+                // notifying afterwards leaves it asleep forever, and no frame is ever produced
+                // again.
+                queue_cv_.notify_all();
                 seek_done_.store(true, std::memory_order_release);
                 continue;
             }
@@ -615,6 +645,7 @@ struct notchlc_producer_impl final : public core::frame_producer
             int slot = -1;
             {
                 std::unique_lock<std::mutex> lk(slot_pool_mutex_);
+                if (slot_pool_.empty())
                 slot_pool_cv_.wait(lk, [this] {
                     return stop_flag_ || !slot_pool_.empty();
                 });
