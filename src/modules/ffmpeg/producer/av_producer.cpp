@@ -2757,6 +2757,10 @@ struct AVProducer::Impl
     double                           speed_accum_    = 0.0; // fractional accumulator, protected by buffer_mutex_
     std::deque<Frame>                rev_frames_;            // batch of decoded frames for reverse playback (served back→front)
     bool                             rev_active_     = false; // true once the initial reverse seek has been issued
+    // Exclusive upper bound on the NEXT reverse batch: frames at or above this pts have already
+    // been shown this sweep. INT64_MAX = unbounded. Needed because the near-IN seek below is
+    // CLAMPED to the IN point, so the batch it fetches deliberately overlaps the previous one.
+    int64_t                          rev_batch_top_  = INT64_MAX;
     core::draw_frame                 frame_;
 
     std::deque<Frame>         buffer_;
@@ -3762,6 +3766,11 @@ struct AVProducer::Impl
                     speed_       = -spd_abs;
                     speed_accum_ = 0.0;
                     rev_frames_.clear();
+                    // The OUT frame has just been shown forward, so the reverse batch starts
+                    // BELOW it and each endpoint appears exactly once per sweep. Without this
+                    // the trace reads `... 26 27 r27 r26 ...` -- OUT twice, which the CUDA
+                    // producers do not do (measured: `... 25 26 25 ...`).
+                    rev_batch_top_ = frame_time_;
                     rev_active_  = true;   // seek is issued here, no need for initial-seek guard
                     buffer_eof_  = false;
                     const int64_t seek_pos = std::max(s0,
@@ -3857,7 +3866,17 @@ struct AVProducer::Impl
                             speed_       = std::abs(speed_.load());
                             speed_accum_ = 0.0;
                             rev_frames_.clear();
-                            seek_        = start_l;
+                            rev_batch_top_ = INT64_MAX;
+                            // The IN frame has just been shown in reverse, so forward resumes
+                            // at the NEXT one -- the same endpoint-once rule as the OUT end.
+                            // Falls back to start_l for a single-frame range, where there is no
+                            // next one and seeking past OUT would leave the range entirely.
+                            const auto    dur_pp = duration_.load();
+                            const int64_t end_pp = dur_pp != AV_NOPTS_VALUE ? start_l + dur_pp : INT64_MAX;
+                            int64_t       resume = frame_duration_ > 0 ? start_l + frame_duration_ : start_l;
+                            if (resume >= end_pp)
+                                resume = start_l;
+                            seek_        = resume;
                             buffer_.clear();
                             buffer_cond_.notify_all();
                         } else if (loop_) {
@@ -3873,6 +3892,7 @@ struct AVProducer::Impl
                             const int64_t seek_pos = std::max(start_l,
                                 end_abs - static_cast<int64_t>(buffer_capacity_) * one_f);
                             rev_frames_.clear();
+                            rev_batch_top_ = INT64_MAX;
                             seek_ = seek_pos;
                             buffer_.clear();
                             buffer_cond_.notify_all();
@@ -3890,14 +3910,27 @@ struct AVProducer::Impl
                 // --- rev_frames_ empty: capture the buffer as a new batch ---
                 // (buffer is guaranteed non-empty because the pre-roll guard passed)
                 // Capture batch in forward order; pop_back() serves highest PTS first.
-                const int64_t batch_start_pts = buffer_.front().pts;
-                const int64_t batch_start_dur = buffer_.front().duration;
-                const int64_t batch_count     = static_cast<int64_t>(buffer_.size());
                 for (const auto& f : buffer_)
-                    rev_frames_.push_back(f);
+                    if (f.pts < rev_batch_top_)
+                        rev_frames_.push_back(f);
                 frame_flush_ = false;
                 buffer_.clear();
                 buffer_cond_.notify_all();
+
+                if (rev_frames_.empty()) {
+                    // Everything decoded had already been shown. Ask for the bottom of the
+                    // range and hold the last frame. The frame at start_l is always below
+                    // rev_batch_top_ whenever that bound is above start_l, so this cannot spin.
+                    if (rev_batch_top_ != INT64_MAX && rev_batch_top_ > start_l) {
+                        seek_ = start_l;
+                        buffer_cond_.notify_all();
+                    }
+                    return core::draw_frame::still(frame_);
+                }
+
+                const int64_t batch_start_pts = rev_frames_.front().pts;
+                const int64_t batch_start_dur = rev_frames_.front().duration;
+                const int64_t batch_count     = static_cast<int64_t>(rev_frames_.size());
 
                 // Pre-issue the next batch seek so the decode thread works in
                 // parallel while we serve the current batch.
@@ -3907,9 +3940,23 @@ struct AVProducer::Impl
                     const int64_t step_back_frames = (buffer_eof_ && batch_count < static_cast<int64_t>(buffer_capacity_))
                                                          ? static_cast<int64_t>(buffer_capacity_)
                                                          : batch_count;
-                    const int64_t next_target =
-                        batch_start_pts - step_back_frames * batch_start_dur;
-                    if (next_target >= start_l) {
+                    // CLAMPED to the IN point, not skipped. Skipping is what stalled reverse
+                    // pingpong dead: MEASURED 2026-08-19, `SEEK 20 LENGTH 8 PINGPONG` delivered
+                    // 20..27 forward, then r27..r22, then NOTHING for the rest of the run. The
+                    // batch below 22 starts at pts(16), under the IN point at pts(20), so no
+                    // seek was issued at all -- rev_frames_ empty, buffer_ empty, nothing
+                    // pending, permanent halt. Any pingpong or reverse loop whose remaining
+                    // distance to IN is shorter than one batch ended there.
+                    //
+                    // Clamping makes that last short batch overlap the one just served, which
+                    // is why rev_batch_top_ exists: it trims the overlap at capture. In the
+                    // unclamped case the two are contiguous by construction and the trim is a
+                    // no-op, so ordinary mid-clip reverse is untouched.
+                    int64_t next_target = batch_start_pts - step_back_frames * batch_start_dur;
+                    if (next_target < start_l)
+                        next_target = start_l;
+                    rev_batch_top_ = batch_start_pts;
+                    if (batch_start_pts > start_l) {
                         seek_ = next_target;
                         buffer_cond_.notify_all();
                     }
@@ -4098,6 +4145,7 @@ struct AVProducer::Impl
         if ((old < 0.0) != (spd < 0.0)) {
             boost::lock_guard<boost::mutex> lock(buffer_mutex_);
             rev_frames_.clear();
+            rev_batch_top_ = INT64_MAX;
             rev_active_ = false;  // reset so initial-seek fires for new reverse session
             speed_accum_ = 0.0;
             

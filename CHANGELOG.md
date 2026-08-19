@@ -1,6 +1,56 @@
 CasparVP — Unreleased
 ==========================================
 
+### Fixed: reverse ping-pong stopped dead near the IN point, and showed each end twice
+
+`PLAY ... SEEK 20 LENGTH 8` with ping-pong on an FFmpeg-decoded clip played the range forward,
+swept part of the way back, and then **stopped delivering frames entirely** for the rest of the
+run. It was not slow or stuttering — it was over.
+
+Reverse playback serves batches: it seeks backwards, decodes a run of frames forward into a
+buffer, and serves them back to front. When a batch was exhausted the next seek target was
+computed as `batch_start - batch_count` frames and then issued **only if it was still at or
+above the IN point**:
+
+```cpp
+const int64_t next_target = batch_start_pts - step_back_frames * batch_start_dur;
+if (next_target >= start_l) {          // otherwise: no seek at all
+    seek_ = next_target;
+```
+
+So whenever the remaining distance to the IN point was shorter than one batch, the target fell
+below IN and *no seek was issued*. The reverse batch was empty, the forward buffer was empty and
+nothing was pending — a permanent halt with no error, no dropped-frame tag and no log line. It
+was not specific to ping-pong: any reverse boundary reached with less than a batch to go ended
+there.
+
+**Fixed** by clamping the target to the IN point instead of discarding the seek. Clamping makes
+that final short batch overlap the one already served, so the batch capture now also drops frames
+at or above the previous batch's start (`rev_batch_top_`). In the ordinary mid-clip case the two
+batches are contiguous by construction and the trim is a no-op, so normal reverse is untouched.
+
+**Also fixed, found by the same trace:** both ping-pong endpoints were shown twice. The forward
+sweep ended on the OUT frame and the reverse batch then began *on that same frame*; the reverse
+sweep ended on the IN frame and forward resumed *on it*. Each endpoint now appears exactly once
+per sweep, which is what the CUDA producers already did.
+
+**Measured** by logging every frame the producer delivers, in order, from both delivery paths —
+the forward buffer and the reverse batch. Instrumenting only the forward path is what initially
+made this look like a total stall rather than a partial one.
+
+| case, `SEEK 20 LENGTH 8`, 1080p25 | before | after |
+| :--- | :--- | :--- |
+| ping-pong | `20…27 r27 r26 r25 r24 r23 r22` then nothing — 14 frames, then halt | `20…27 \| r26…r20 \| 21…27 \| r26…r20 \|` — 107 frames, 7 complete sweeps, no halt |
+| ping-pong endpoints | `27` twice, `20` never reached | each endpoint once per sweep |
+| reverse loop, `SPEED -1` | — | `r27…r20` x14, all 8 frames every iteration |
+| forward loop | `20…27` x14 | unchanged, `20…27` x14 |
+| reverse, no loop or ping-pong | — | full range once, then holds the IN frame |
+
+Confirmed against the pre-fix binary at `bdc6432cc` to rule out this session's loop-drain and
+`next_frame` changes as the cause: identical 14-frames-then-halt, so the defect predates them.
+Regression gates: `seek` 7/7 fixtures with 49/49 seeks landing and agreeing with the server,
+`flat-decoded` 29/29 patches on **both** mixers.
+
 ### Fixed: recording and streaming to FFmpeg consumers failed on FFmpeg 8
 
 Any FFmpeg file or stream consumer carrying audio failed to open: AMCP answered `202 ADD OK` —
