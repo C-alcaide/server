@@ -987,6 +987,55 @@ be worse on the 12K asset, which is exactly the case that item exists for.
 Oracle and analysis live in the harness as `core/delivery_order.py` with tests; a `loop-boundary`
 subcommand wrapping it is owed.
 
+### 9.4 The 12K virtual-production assets: nothing is lost, and the bottleneck is not what was planned for
+
+The reason this feature exists is the 360 assets, so they were measured rather than reasoned about:
+`NotchLC 360 Video.mov` (12288x6144, **81.7 GiB**) and `ProRes 360 Video.mov` (**15.6 GiB**), output
+to 1080p25, `SEEK 20 LENGTH 8`, forward loop / ping-pong / reverse loop, ~360-410 recorded frames
+per arm, with the `<log-diagnostics>` sink recording producer metrics throughout.
+
+Neither asset carries a burnt-in frame counter and no NotchLC encoder exists anywhere, so order was
+recovered from per-frame hashes: distinct pictures hash distinctly, and during the first forward
+pass first-appearance order is frame order.
+
+| 12K asset | `decode-time` (fraction of frame budget) | `queue-fill` | worst `frame-time` | frames delivered |
+| :--- | :--- | :--- | :--- | :--- |
+| NotchLC, `cuda_notchlc` | mean **0.290**, max 0.400 | 0.333 - 0.667 | 19x budget | full range, all 3 modes |
+| ProRes, `cuda_prores` | mean **0.842**, max **1.125** | 0.200 - 0.600 | 25x budget | full range, all 3 modes |
+
+**No frames are lost on either asset in any mode.** All 8 frames of the range appear in forward
+loop, ping-pong and reverse loop, with no permanent stall. That is the question that mattered.
+
+**What is not smooth is pacing, and the cause is decode throughput.** 12K ProRes spends 84% of the
+frame budget in decode on average and **exceeds 100% at its peak**, so the queue never gets past 60%
+occupancy and the channel holds a frame when the next one is not ready -- `frame-time` peaks at 25x
+budget, a hitch of about a second. Nothing lost, not steady.
+
+**Three conclusions that change the planned work:**
+
+* **12K ProRes is ~3x more expensive to decode than 12K NotchLC** (0.842 vs 0.290 of budget), which
+  is the opposite of the intuition that the 81 GiB file is the hard one. NotchLC is designed for
+  exactly this and it shows.
+* **Reverse costs the same as forward** -- ProRes 0.855 vs 0.842, NotchLC 0.285 vs 0.290. So the
+  per-frame `av_seek_frame` in the GPU/HAP reverse path, which the plan was going to eliminate by
+  porting `av_producer`'s batched reverse, **is not the bottleneck at 12K**. Both codecs are
+  all-intra, so a seek lands on a frame that must be decoded anyway; the batching in `av_producer`
+  earns its keep against *keyframe* seeks on inter-frame codecs, which is what its own comment
+  says. Porting it here would add a large VRAM cost -- 7 slots x ~576 MB is already about 4 GB at
+  this raster -- to buy something the measurement says is nearly free already.
+* **Raising the queue depth would not help either.** `queue-fill` never reaches 1.0 while
+  `decode-time` sits at 0.842: the decoder cannot get ahead of the consumer, so there is nothing to
+  store. The adaptive depth from `690d0abdd` (4 queued / 7 slots above 25 MPixel) is already more
+  headroom than the decoder can fill.
+
+**Limits of this measurement, in the same breath as the numbers.** `decode-time` and `queue-fill`
+are normalised fractions of the frame budget, not milliseconds. The order oracle is the recording,
+so a repeat could in principle be the file consumer rather than the producer -- the argument that it
+is not is that the *same* recording path calibrated frame-exact on the 1080p arms (278 delivered
+frames, no repeats), so the path itself does not duplicate; under 12K load that argument is
+inference rather than a second calibration. And one box, one GPU: the mixer and both producers run
+on the RTX A4000 (CUDA device 0, 16 GB).
+
 ### Two things this sync learned that outlive it
 
 * **A timing verdict from `conformance` needs two interleaved runs per arm.** Three attempts at
