@@ -1,6 +1,34 @@
 CasparVP — Unreleased
 ==========================================
 
+### Fixed: 16-bit PNG captures from the OpenGL mixer were wrong by up to 16 LSB16
+
+The IMAGE consumer converted the OpenGL mixer's `BGRA64LE` readback to `RGBA64BE` for PNG
+encoding with a single swscale call. **swscale's packed-16 to packed-16 component permutation
+is lossy**: over a full 1920x1080 raster of pseudorandom values, `bgra64le -> rgba64be`
+deviates by up to 35 LSB16 on 5 937 403 of 8 294 400 components, and the error is
+position-dependent — the same input value maps to different outputs at different pixels, which
+is dithering, on a conversion that reduces no bit depth. No flag suppresses it: `accurate_rnd`,
+`bitexact` and every `sws_dither` setting including `none` give identical error.
+
+Its *endian swap* is exact, and so is its 8-bit permutation. That is why only the OpenGL mixer
+was affected — Vulkan hands the consumer `RGBA64LE`, which needs only the byte swap, and 8-bit
+captures take an exact path.
+
+**Fixed** by performing the B/R exchange in the un-premultiply pass that already runs over the
+frame, and labelling the buffer `RGBA64LE`, leaving swscale the endian swap it does exactly.
+No extra allocation, no extra pass, and less work for swscale than before.
+
+**Measured**, `conformance --mixer ogl --bit-depth 16`, against the same build without the fix
+on the same box: **0/100 conversions within 1.0 LSB before, 99/100 after** — which is exactly
+the Vulkan figure. The single remaining failure is byte-identical on both backends
+(`pq/bt2020 -> bt709/linear`, worst 1.12 LSB at #4080BF) and is pre-existing. 8-bit is 100/100
+on both mixers, unchanged. No wall-clock cost: 133 s against the unfixed control's 141 s.
+
+What this does not cover: only the IMAGE consumer's capture path was measured, and only through
+`conformance` and `grading`. The swscale defect itself is upstream and unreported as of this
+change; a reproducer is in `docs/swsprobe/`.
+
 ### Changed: `<accelerator>` no longer accepts `ogl` or `vk`, and refuses an unknown value
 
 Synced onto `upstream/master`, which brought upstream's `setup_accelerator`

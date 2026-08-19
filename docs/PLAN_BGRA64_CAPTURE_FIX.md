@@ -289,6 +289,138 @@ reverted; a fourth should start from the paragraph above rather than from §5.
 
 ---
 
+## 8.2 ATTEMPT 4 — the premise of the first three was wrong
+
+**2026-08-19.** Attempts 1-3 all assumed the only exact conversion is a hand-written one. That
+was never established. What had actually been shown was narrower: *swscale with nine particular
+flagsets, on one particular conversion,* is lossy. Widening the probe to other **routes** rather
+than other flags answers it immediately.
+
+Measured over a full 1920x1080 raster of pseudorandom 16-bit values (`swsprobe/probe1080.py`):
+
+| conversion | result |
+| :--- | :--- |
+| `bgra64le -> bgra64le` (identity) | exact |
+| `bgra64le -> bgra64be` (endian only) | exact |
+| **`rgba64le -> rgba64be` (endian only)** | **exact, 0 of 8 294 400 components** |
+| `bgra64le -> rgba64le` (permutation only) | lossy, max 32 |
+| `bgra64le -> rgba64be` (permutation + endian) | **lossy, max 35, wrong on 5 937 403 of 8 294 400** |
+| `bgra64le -> gbrap16le -> rgba64be` (via planar) | exact |
+| `bgra -> rgba` (same permutation, 8 bit) | exact |
+
+So swscale's endian swap is exact, its 8-bit permutation is exact, and routing through planar
+16-bit is exact. **Only the packed-16 to packed-16 component permutation is broken** — and the
+error is *position-dependent*: 52 546 of 62 535 distinct sampled values map to more than one
+error, which is dithering, on a conversion that reduces no bit depth. `sws_dither=none` does not
+suppress it. Drafted for upstream as `swsprobe/REPORT_TO_FFMPEG.md`.
+
+### The fix that follows, and why it costs nothing
+
+`rgba64le -> rgba64be` being exact is the whole answer, because the consumer **already** has a
+writable copy of the frame in hand. The un-premultiply loop immediately above the conversion
+allocates `buf`, and reads and writes all three colour components of every pixel. Exchanging B
+and R in that same loop and relabelling the frame `AV_PIX_FMT_RGBA64LE` leaves swscale the byte
+swap it performs exactly.
+
+That is strictly less work than what it replaces: no new allocation, no additional pass over
+memory, no second `SwsContext`, and swscale doing an easier job than before. It also leaves
+untouched every part of the frame's lifetime that attempt 3 changed — which matters, because
+attempt 3's unexplained 3x wall-clock regression was never traced to a mechanism, only narrowed
+to *not the conversion cost*. The safest response to an unexplained regression in newly
+introduced allocation is to introduce no allocation.
+
+The planar two-step (`-> gbrap16le ->`) was the other exact candidate and is rejected: it is
+also correct, but costs a second full pass and a second intermediate buffer, which is the shape
+of change that went wrong last time.
+
+### 8.2.1 Measured, 2026-08-19 — correctness settled, timing still open
+
+Battery: `conformance --mixer <m> --bit-depth <d>`, all arms on the same box, same DLL set,
+`build-sync/shell`. The baseline exe is the 01:42 revert build, preserved and run as
+`casparcg_base.exe` beside the identical DLLs so the control is a true A/B.
+
+| arm | elapsed | conversions | capture failures | within 1.0 LSB |
+| :--- | ---: | ---: | ---: | :--- |
+| **control** ogl 16 (no fix) | 375 s | 100 | 36 | **0/100** |
+| **fix** ogl 16 | 876 s | 62 | 38 | **61/63** |
+| fix vulkan 16 | 148 s | 100 | 0 | 99/100 |
+| fix ogl 8 | 117 s | 100 | 0 | 100/100 |
+| fix vulkan 8 | 138 s | 100 | 0 | 100/100 |
+
+**Correctness is settled.** The control fails *every one* of 100 conversions at up to 15.92
+LSB; the fixed build passes 61 of the 63 it completed. Capture failures do not turn a wrong
+pixel into a right one, so this result is independent of the timing problem below. The 8-bit
+arms and the Vulkan 16-bit arm are unchanged, as they must be: the block is `is_hi_dep`-only
+and `swap_rb` is false for a Vulkan frame.
+
+`grading` at 16 bit fails two LUT3D cases, **byte-identically on both mixers** (worst 6.74 and
+3.87 LSB at #0A1205). A change that cannot reach the Vulkan backend cannot have caused a
+failure the Vulkan backend shares, so these are pre-existing and are not a regression here.
+
+**Timing is not settled, and two counting errors were made getting here.** First, `grep -ci
+"timed out"` was compared against the matrix's `grep -c "did not produce a complete"` — two
+different metrics, giving a bogus 82-vs-18. Counted identically it is 38 vs 36 capture
+failures, i.e. roughly 1.7x per conversion, not 4.5x. What survives correct counting is wall
+clock: **14.1 s per conversion against the control's 3.75 s, a 3.8x** that closely matches
+attempt 3's 3.1x.
+
+Second, and more seriously, **the arms ran in a monotonically improving order** — 876, 375,
+148, 117, 138, 34, 37 seconds — across code paths with nothing in common. The fix arm drew the
+worst conditions of the session, immediately after two builds; the control ran fifteen minutes
+later on a settled box. That confound is large enough to account for the ratio on its own, so a
+bracketed **fix -> control -> fix** re-run on a settled box is what decides it. Do not quote the
+3.8x without that bracket.
+
+**A mechanism check that argues against the swap being the cause.** The added work is one
+`std::swap` of two `uint16_t` per pixel, inside a loop that already reads and writes both of
+them, on a buffer already in ordinary RAM (the mapped GPU memory was copied out one line
+above). At 1920x1080 that is about 2.07 M iterations; even at a pessimistic 10 ns each it is
+20 ms, and the observed gap is of the order of 10 s per capture. The swap cannot pay for that.
+`fix vulkan 16` runs the same `is_hi_dep` block and the same `rgba64le -> rgba64be` swscale
+call at 1.48 s per conversion with zero failures, differing only in `swap_rb`.
+
+**If the bracket confirms a real regression**, the next move is not another variant of this
+approach but removal of swscale from the path: `RGBA64BE` differs from `RGBA64LE` only in byte
+order, so the existing loop can un-premultiply, exchange B/R *and* byte-swap in the copy it
+already holds, set the frame's format to `AV_PIX_FMT_RGBA64BE`, and let `convert_image_frame`
+early-return on the format match. One pass, no allocation, no swscale.
+
+### 8.2.2 The bracket — the 3x was never real, and it cost three reverts
+
+Bracketed **fix -> control -> fix** on a settled box, same battery, same flags, same DLLs,
+back to back:
+
+| arm | elapsed | within 1.0 LSB | capture failures |
+| :--- | ---: | :--- | ---: |
+| fixA | 258 s | **99/100** | 4 |
+| control (no fix) | 141 s | **0/100** | 0 |
+| fixB | **133 s** | **99/100** | **0** |
+
+**fixB is faster than the control** and has no capture failures at all. And fixA against fixB
+— the *same binary, same flags, minutes apart* — differ by 1.9x. That spread is the
+measurement noise of this battery on this box, and it is larger than the effect three attempts
+were reverted for.
+
+So the "unexplained 3x wall clock" recorded in §8.1 was an artefact: every attempt was measured
+on its first run after a build, and the control it was compared against was not. The arms of
+the earlier matrix ran 876, 375, 148, 117, 138, 34, 37 seconds in that order, across code paths
+with nothing in common — a warm-up curve, read as a code regression three times over.
+
+**The lesson is procedural, and belongs in the harness rather than here:** a timing verdict from
+`conformance` needs at least two runs of each arm, interleaved, or it is not a verdict. A single
+first-run-after-build number is not comparable to anything.
+
+**Final state of the fix.** OpenGL 16-bit goes from 0/100 to 99/100 conversions within 1.0 LSB,
+which is exactly the Vulkan number. The one remaining failure is byte-identical on both
+backends — `pq/bt2020 -> bt709/linear`, worst 1.12 LSB at #4080BF — so it is pre-existing,
+shared, and marginally over the gate rather than anything this touched. 8-bit is 100/100 on both
+mixers. `grading` fails two LUT3D cases identically on both backends, also pre-existing.
+
+The byte-swap-in-place variant sketched in §8.2.1 is therefore **not needed**. It remains the
+right move only if swscale's `rgba64le -> rgba64be` ever regresses.
+
+---
+
 ## 9. Rollback
 
 The fix is one new function plus a one-line call-site change, so reverting is a single commit.

@@ -317,6 +317,33 @@ struct image_consumer : public core::frame_consumer
                     const int stride16 = av_frame->linesize[0] / 2; // in uint16_t units
                     const int w        = av_frame->width;
                     const int h        = av_frame->height;
+
+                    // Permute B and R here, in the pass that is already running, rather than
+                    // leaving it to swscale.
+                    //
+                    // swscale's packed-16 -> packed-16 COMPONENT PERMUTATION is lossy. Measured
+                    // over a 256-pixel probe: bgra64le -> rgba64be deviates by up to 32 LSB16 on
+                    // 734 of 1024 components, and no flag avoids it -- accurate_rnd, bitexact and
+                    // every sws_dither setting give byte-identical error. Its ENDIAN SWAP is not
+                    // lossy: rgba64le -> rgba64be is exact, which is precisely why only the
+                    // OpenGL mixer's 16-bit captures were ever wrong and Vulkan's never were.
+                    // (bgra64le -> gbrap16le -> rgba64be is exact too, and was the other
+                    // candidate; it costs a second pass, and this costs nothing.)
+                    //
+                    // Doing it here is free. The loop already holds a writable copy and already
+                    // reads and writes all three components, so the exchange adds no allocation,
+                    // no pass over memory and no swscale work. It only relabels what the buffer
+                    // is, leaving swscale the byte swap it performs exactly.
+                    //
+                    // Three earlier attempts at this were reverted for tripling the wall clock
+                    // of a 16-bit capture run. That regression was not real: measured back to
+                    // back on a settled box, two runs of the SAME build gave 258 s and 133 s,
+                    // and the 133 s beat the unfixed control's 141 s. The 3x was a
+                    // first-run-after-build warm-up artefact each time. Measure this path twice
+                    // before believing a timing result from it -- see
+                    // docs/PLAN_BGRA64_CAPTURE_FIX.md section 8.2.2.
+                    const bool swap_rb = (pix_desc.format == core::pixel_format::bgra);
+
                     for (int y = 0; y < h; ++y) {
                         uint16_t* row = data + y * stride16;
                         for (int x = 0; x < w; ++x) {
@@ -330,25 +357,18 @@ struct image_consumer : public core::frame_consumer
                                 c1 = static_cast<uint16_t>(std::min(65535, static_cast<int>(c1) * 65535 / a));
                                 c2 = static_cast<uint16_t>(std::min(65535, static_cast<int>(c2) * 65535 / a));
                             }
+                            // Unconditional -- the exchange is about layout, not about alpha, so
+                            // it must also happen for the fully opaque and fully clear pixels the
+                            // un-premultiply above skips.
+                            if (swap_rb)
+                                std::swap(c0, c2);
                         }
                     }
                     av_frame->data[0] = buf.data();
+                    if (swap_rb) {
+                        av_frame->format = AV_PIX_FMT_RGBA64LE;
+                    }
 
-                    // Convert the un-premultiplied source to RGBA64BE for PNG encoding.
-                    //
-                    // KNOWN DEFECT, deliberately still here. swscale's BGRA64 -> RGBA64
-                    // component permutation is LOSSY: it costs the OGL mixer's 16-bit captures
-                    // about 9 LSB16 (invisible at 8 bits, which is why it went unseen for so
-                    // long). No swscale flag avoids it -- nine were tried, `bitexact` among
-                    // them.
-                    //
-                    // Replacing it with a hand-written permutation is EXACT on pixels and was
-                    // still reverted twice: a full `conformance --bit-depth 16` run took 480 s
-                    // with 10 capture timeouts, against 155 s and zero for this line, measured
-                    // back to back in one session. The per-capture conversion measures the SAME
-                    // 3 ms either way, so that 3x is unexplained and is the open question.
-                    //
-                    // See docs/PLAN_BGRA64_CAPTURE_FIX.md before attempting it a third time.
                     caspar::timer conv_timer;
                     auto          av_frame2 = convert_image_frame(av_frame, target_fmt);
                     const auto conv_ms = conv_timer.elapsed() * 1000.0;
