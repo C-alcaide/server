@@ -550,7 +550,18 @@ struct hap_producer_impl final : public core::frame_producer
             if (pkt.is_eof) {
                 if (pingpong_.load()) {
                     speed_.store(-current_speed);
-                    io_frame_count = std::max(0LL, frame_count_.load() - 1);
+                    // Turn around on the IO clock, not the DISPLAY clock. frame_count_ is what the
+                    // consumer has shown, which lags this thread by the queue depth, so seeking to
+                    // frame_count_ - 1 aimed behind the frames already queued and the turnaround
+                    // came out timing-dependent: MEASURED 2026-08-19 on a full-clip ping-pong, the
+                    // last frame was delivered THREE times at each turnaround, and the count moved
+                    // with load rather than being a fixed off-by-one.
+                    //
+                    // io_frame_count is incremented after each packet is pushed and EOF pushes
+                    // nothing, so it is (last frame pushed) + 1. Stepping two back starts the
+                    // reverse sweep one below the frame just shown, which is the same rule the
+                    // OUT-bound branch below now follows.
+                    io_frame_count = std::max(in_frame_, io_frame_count - 2);
                     demuxer_->seek_to_frame(io_frame_count);
                     continue;
                 } else if (loop_) {
@@ -588,7 +599,14 @@ struct hap_producer_impl final : public core::frame_producer
             if (current_speed >= 0.0 && out_frame_ >= 0 && io_frame_count >= out_frame_) {
                 if (pingpong_.load()) {
                     speed_.store(-current_speed);
-                    io_frame_count = out_frame_ - 1;
+                    // out_frame_ is EXCLUSIVE (`out_frame = start_frame + length_param`), so the
+                    // frame just pushed was out_frame_ - 1 and the reverse sweep must start BELOW
+                    // it. Resuming at out_frame_ - 1 re-read the frame already in the queue, so
+                    // the OUT frame was delivered twice at every single turnaround -- measured
+                    // 2026-08-19 from a recording of the channel, 17 duplicates of frame 27 over
+                    // one 8-second run. Unlike the ffmpeg producer's version of this, it was
+                    // never a decode-latency hold: the packet really was read and pushed twice.
+                    io_frame_count = std::max(in_frame_, out_frame_ - 2);
                     demuxer_->seek_to_frame(io_frame_count);
                 } else if (loop_) {
                     demuxer_->seek_to_frame(in_frame_);
@@ -604,7 +622,13 @@ struct hap_producer_impl final : public core::frame_producer
             } else if (current_speed < 0.0 && io_frame_count < in_frame_) {
                 if (pingpong_.load()) {
                     speed_.store(-current_speed);
-                    io_frame_count = in_frame_;
+                    // Mirror of the OUT end: the counter drops below in_frame_ only after
+                    // in_frame_ itself has been pushed, so forward resumes at in_frame_ + 1.
+                    // Resuming at in_frame_ duplicated the IN frame every sweep -- 16 duplicates
+                    // of frame 20 in the same run. Clamped for a range too short to have a
+                    // "next" frame, where the only correct answer is to stay on in_frame_.
+                    io_frame_count = (out_frame_ >= 0) ? std::min(in_frame_ + 1, out_frame_ - 1)
+                                                       : in_frame_ + 1;
                     demuxer_->seek_to_frame(io_frame_count);
                 } else if (loop_) {
                     int64_t target = (out_frame_ >= 0) ? out_frame_ - 1 : std::max(0LL, total_frames_ - 1);

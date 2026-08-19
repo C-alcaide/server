@@ -1,6 +1,61 @@
 CasparVP — Unreleased
 ==========================================
 
+### Fixed: ping-pong showed its endpoint frame twice at every turnaround
+
+Reversing at the end of a ping-pong range held or re-delivered the endpoint, so the frame at each
+extreme was on screen for two ticks instead of one — a visible hitch twice per sweep. Both producers
+did it, for **different reasons**, and only one of them was a latency effect.
+
+**`ffmpeg` (av_producer): the picture was already in hand and was being fetched again.** At the OUT
+boundary the producer flipped direction, issued a backward seek and returned its last frame as a
+still while the reverse batch decoded. But reversing away from OUT means showing OUT-1, OUT-2 … —
+precisely the frames just displayed. Those are now kept in a small ring as they are delivered and
+the reverse sweep is seeded from them, so the turn costs no seek and no decode.
+
+The ring is bounded in **bytes**, not frames, so its depth scales itself with the raster instead of
+needing a threshold per resolution: about 6 frames at 1080p, 2 at 4K, and **zero** at 12288x6144,
+where one frame is ~600 MB. That is the intended answer for the 12K virtual-production assets — they
+play through `cuda_prores`, which has no turnaround hold to fix, so there is nothing to buy there
+with gigabytes of RAM. The GPU-direct path is excluded outright: those frames share one y/uv texture
+pair per producer, so a retained frame does not own its picture and reusing it would show whatever
+the newest decode had overwritten — wrong pictures, not merely stale ones.
+
+**`hap_native`: an off-by-one, in three places.** `out_frame_` is exclusive
+(`out_frame = start_frame + length_param`), and the IO thread advances its counter *after* pushing a
+packet, so turning around to `out_frame_ - 1` re-read the frame it had just pushed, and turning to
+`in_frame_` did the same at the other end. Both are now one further in. The real-EOF turnaround — the
+path taken when no LENGTH is given — was worse than an off-by-one: it seeked relative to
+`frame_count_`, the **display** clock, which lags the IO thread by the queue depth, so the error moved
+with load. It now turns around on the IO clock like the other two.
+
+**Measured** by recording the channel and reading the burnt-in marker from every recorded frame, so
+this is delivered *order and dwell*, not sampled coverage. ~278 frames per arm at 1080p25, `SEEK 20
+LENGTH 8`; the full-clip arms drive all 75 frames so the turnaround goes through the real-EOF branch.
+
+| arm | before | after |
+| :--- | :--- | :--- |
+| `ffmpeg` ping-pong, OUT end | `27` twice at **17 of 19** turnarounds | **0** across 4 runs (~76 turnarounds) |
+| `ffmpeg` ping-pong, IN end | `20` twice, 1 of 19 | 1 across 4 runs — rare before, rare after, not chased |
+| `hap_native` ping-pong | `27` x17 **and** `20` x16 — both ends, every sweep | **0** across 3 runs |
+| `hap_native` full clip (real EOF) | `74` held **3** ticks per turnaround | **0** across 2 runs |
+| `ffmpeg` full clip (real EOF) | — | **0** — its EOF and LENGTH turnarounds share one flip site |
+| `cuda_prores` ping-pong | already clean | unchanged, clean |
+
+No frames are lost or reordered anywhere: all nine arms of the final matrix deliver the full range
+in correct monotonic order, and forward loop is frame-exact on all three producers.
+
+**Not fixed, and measured rather than assumed:** `ffmpeg` reverse **loop** still delivers the IN frame
+twice at each wrap (12 of 12); `cuda_prores` and `hap_native` do not. That is a different site — a
+position jump from IN back to OUT rather than a reversal — so the retained ring cannot help: the
+frames needed are at the far end of the range, not the ones just shown. Avoiding it needs the wrap
+seek issued a frame early so the decode overlaps the last tick.
+
+Regression gates: `seek` 7/7 fixtures with 49/49 seeks landing and agreeing with the server;
+`flat-decoded` 29/29 patches on **both** mixers. One `loop_fwd` run showed two repeats and three
+re-runs came back frame-exact — first-run-after-build noise, the same effect that produced a phantom
+3x regression earlier in this work, which is why timing-shaped results get repeated runs here.
+
 ### Fixed: reverse ping-pong stopped dead near the IN point, and showed each end twice
 
 `PLAY ... SEEK 20 LENGTH 8` with ping-pong on an FFmpeg-decoded clip played the range forward,

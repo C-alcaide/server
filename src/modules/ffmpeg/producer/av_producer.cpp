@@ -63,6 +63,7 @@ extern "C" {
 #include <libavutil/avutil.h>
 #include <libavutil/channel_layout.h>
 #include <libavutil/error.h>
+#include <libavutil/imgutils.h>
 #include <libavutil/mastering_display_metadata.h>
 #include <libavutil/opt.h>
 #include <libavutil/pixdesc.h>
@@ -2761,6 +2762,11 @@ struct AVProducer::Impl
     // been shown this sweep. INT64_MAX = unbounded. Needed because the near-IN seek below is
     // CLAMPED to the IN point, so the batch it fetches deliberately overlaps the previous one.
     int64_t                          rev_batch_top_  = INT64_MAX;
+    // Frames already DELIVERED forward, oldest first, kept so a ping-pong turnaround can be
+    // served from pictures already in hand instead of waiting for a seek and a decode.
+    // Reversing away from OUT means showing OUT-1, OUT-2 ... which are precisely the frames
+    // just displayed, so nothing needs decoding at the turn.
+    std::deque<Frame>                shown_;
     core::draw_frame                 frame_;
 
     std::deque<Frame>         buffer_;
@@ -3773,11 +3779,47 @@ struct AVProducer::Impl
                     rev_batch_top_ = frame_time_;
                     rev_active_  = true;   // seek is issued here, no need for initial-seek guard
                     buffer_eof_  = false;
+
+                    // Seed the reverse sweep from frames already shown, so the turn costs no seek
+                    // and no decode. MEASURED before this existed: the OUT frame was DISPLAYED
+                    // twice at 17 of 19 turnarounds -- the last forward tick delivered OUT and
+                    // this tick returned it again as a still while the reverse batch decoded.
+                    // Delivery order was already correct; what was wrong was the dwell.
+                    int64_t ring_low = frame_time_;
+                    for (const auto& sf : shown_) {
+                        if (sf.pts < frame_time_) {   // never re-serve OUT: endpoint once per sweep
+                            rev_frames_.push_back(sf);
+                            ring_low = std::min(ring_low, sf.pts);
+                        }
+                    }
+                    shown_.clear();
+                    if (!rev_frames_.empty())
+                        rev_batch_top_ = ring_low;   // the batch below must not replay the ring
+
                     const int64_t seek_pos = std::max(s0,
-                        frame_time_ - static_cast<int64_t>(buffer_capacity_ - 1) * one_frame);
+                        rev_batch_top_ - static_cast<int64_t>(buffer_capacity_ - 1) * one_frame);
                     seek_ = seek_pos;
                     buffer_.clear();
                     buffer_cond_.notify_all();
+
+                    // Deliberately a small inline serve rather than pop_rev_frame(), which is
+                    // declared further down in this function and carries the IN-crossing logic.
+                    // So the fast path is taken only when the frame served cannot be the one that
+                    // crosses IN; anything nearer than that falls through to the still and is
+                    // handled next tick by the normal path, which is the measured one.
+                    if (!rev_frames_.empty()) {
+                        const auto& nf = rev_frames_.back();
+                        if (nf.duration > 0 && nf.pts - nf.duration >= s0) {
+                            frame_          = nf.frame;
+                            frame_time_     = nf.pts;
+                            frame_duration_ = nf.duration;
+                            rev_frames_.pop_back();
+                            graph_->set_value("buffer",
+                                              static_cast<double>(rev_frames_.size()) /
+                                                  static_cast<double>(buffer_capacity_));
+                            return frame_;
+                        }
+                    }
                     return core::draw_frame::still(frame_);
                 }
                 if (frame_time_ < end && frame_duration_ != AV_NOPTS_VALUE) {
@@ -3867,6 +3909,7 @@ struct AVProducer::Impl
                             speed_accum_ = 0.0;
                             rev_frames_.clear();
                             rev_batch_top_ = INT64_MAX;
+                            shown_.clear();
                             // The IN frame has just been shown in reverse, so forward resumes
                             // at the NEXT one -- the same endpoint-once rule as the OUT end.
                             // Falls back to start_l for a single-frame range, where there is no
@@ -3893,6 +3936,7 @@ struct AVProducer::Impl
                                 end_abs - static_cast<int64_t>(buffer_capacity_) * one_f);
                             rev_frames_.clear();
                             rev_batch_top_ = INT64_MAX;
+                            shown_.clear();
                             seek_ = seek_pos;
                             buffer_.clear();
                             buffer_cond_.notify_all();
@@ -3992,6 +4036,7 @@ struct AVProducer::Impl
         frame_duration_ = buffer_[0].duration;
         frame_flush_    = false;
 
+        retain_shown(buffer_[0]);
         buffer_.pop_front();
         buffer_cond_.notify_all();
 
@@ -4137,6 +4182,55 @@ struct AVProducer::Impl
         return av_rescale_q(input_duration, TIME_BASE_Q, format_tb_);
     }
 
+    /// Budget for `shown_`, in bytes rather than frames, so the depth scales itself with the
+    /// raster instead of needing a threshold per resolution: about 6 frames at 1080p, 2 at 4K, and
+    /// ZERO at 12288x6144, where one frame is ~600 MB. That is the intended answer for the 12K
+    /// virtual-production assets -- they are played through cuda_prores, which has no turnaround
+    /// hold to fix, and buying a smoother turn there for gigabytes of RAM would be a bad trade.
+    static constexpr int64_t SHOWN_RING_BUDGET = 128LL << 20;
+
+    static int64_t frame_bytes(const Frame& f)
+    {
+        if (!f.video)
+            return 0;
+        const int64_t n = av_image_get_buffer_size(static_cast<AVPixelFormat>(f.video->format),
+                                                   f.video->width, f.video->height, 1);
+        // Doubled: the retained Frame holds the decoded AVFrame *and* a core::draw_frame with the
+        // mixer's own copy, so accounting for one of the two would under-budget by half.
+        return n > 0 ? n * 2 : 0;
+    }
+
+    /// Remember a frame that has just been delivered forward. On the frame path, so it is a push
+    /// and a bounded pop and nothing else.
+    void retain_shown(const Frame& f)
+    {
+        // Only ping-pong turns around, so nothing else pays for this.
+        //
+        // GPU-direct is excluded on purpose rather than special-cased: those frames share ONE
+        // y/uv texture pair per producer, so a retained Frame does not own its picture -- it would
+        // hand the reverse sweep whatever the newest decode had overwritten the texture with.
+        // That would be wrong pictures, not merely stale ones.
+        if (!pingpong_.load() || gpu_direct_video_) {
+            if (!shown_.empty())
+                shown_.clear();
+            return;
+        }
+
+        const int64_t sz  = frame_bytes(f);
+        const int     cap =
+            sz > 0 ? static_cast<int>(std::min<int64_t>(SHOWN_RING_BUDGET / sz, buffer_capacity_))
+                   : 0;
+        if (cap <= 0) {
+            if (!shown_.empty())
+                shown_.clear();
+            return;
+        }
+
+        shown_.push_back(f);
+        while (static_cast<int>(shown_.size()) > cap)
+            shown_.pop_front();
+    }
+
     void speed(double spd)
     {
         const double old = speed_.exchange(spd);
@@ -4146,6 +4240,7 @@ struct AVProducer::Impl
             boost::lock_guard<boost::mutex> lock(buffer_mutex_);
             rev_frames_.clear();
             rev_batch_top_ = INT64_MAX;
+            shown_.clear();   // the retained run is no longer adjacent to where playback resumes
             rev_active_ = false;  // reset so initial-seek fires for new reverse session
             speed_accum_ = 0.0;
             
@@ -4348,6 +4443,10 @@ struct AVProducer::Impl
             // speed() were resetting it. The loop wrap was the one that got forgotten, which is
             // the same omission that comment records.
             speed_accum_ = 0.0;
+            // Same argument for the retained run: it is a contiguous stretch ending where playback
+            // WAS, and after a seek or a loop wrap it no longer adjoins where playback resumes, so
+            // seeding a turnaround from it would serve frames from the wrong part of the clip.
+            shown_.clear();
             buffer_cond_.notify_all();
         }
 
