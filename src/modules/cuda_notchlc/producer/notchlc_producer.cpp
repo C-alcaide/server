@@ -212,6 +212,7 @@ struct notchlc_producer_impl final : public core::frame_producer
     int64_t                                   in_frame_          = 0;
     int64_t                                   out_frame_         = -1;
     int64_t                                   video_frame_start_ = 0;  // initial read position (may differ from in_frame_ for negative speed)
+    bool                                      rev_started_       = false;  // a reverse session is positioned
 
     std::atomic<double>                       speed_{1.0};
     std::atomic<bool>                         pingpong_{false};
@@ -537,10 +538,62 @@ struct notchlc_producer_impl final : public core::frame_producer
             auto pkt = demuxer_->read_packet();
             double current_speed = speed_.load();
 
+            if (current_speed >= 0.0) {
+                rev_started_ = false;   // back to forward: re-arm for the next reverse session
+            } else if (!rev_started_) {
+                // Reverse from a standing start has to begin at the OUT end. video_frame_start_
+                // above covers this ONLY when in_frame_ == 0, and it reads the speed the producer
+                // was CONSTRUCTED with -- so an IN point disables it and a `CALL ... SPEED -1`
+                // sent after PLAY never reaches it.
+                //
+                // MEASURED 2026-08-20, the first time this producer's boundaries were measured at
+                // all: `PLAY ... SEEK 20 LENGTH 8` then `CALL 1-1 SPEED -1`, with neither LOOP nor
+                // PINGPONG, delivered ZERO frames for a whole run. The counter starts at
+                // in_frame_, the first decrement puts it below in_frame_, and that branch parks
+                // the read thread having decoded nothing. LOOP masked it, because the loop branch
+                // seeks to the OUT end and rescues the start by accident.
+                //
+                // Identical defect and identical fix as prores_producer and hap_producer, which
+                // this module was derived from. Repositioning is a SEEK, so it does what the seek
+                // handler above does -- all of it, including the epoch bump and the three
+                // notifies. A lighter version left the pipeline waiting on a sequence number
+                // nobody would send, measured on hap as a 269-tick hold.
+                const int64_t end_excl = out_frame_ >= 0 ? out_frame_ : total_frames_;
+                if (end_excl > 0) {
+                    const int64_t target = std::max(in_frame_, end_excl - 1);
+                    {
+                        std::lock_guard<std::mutex> lk(queue_mutex_);
+                        while (!ready_queue_.empty())
+                            ready_queue_.pop();
+                    }
+                    demuxer_->seek_to_frame(target);
+                    io_frame_count = target;
+                    pkt_seq        = 0;
+                    frame_count_.store(target, std::memory_order_release);
+                    fps_frame_acc_ = 0;
+                    seek_epoch_.fetch_add(1u, std::memory_order_release);
+                    lz4_done_cv_.notify_all();
+                    slot_pool_cv_.notify_all();
+                    queue_cv_.notify_all();
+                    raw_cv_.notify_all();
+                    seek_done_.store(true, std::memory_order_release);
+                    rev_started_ = true;
+                    continue;
+                }
+                rev_started_ = true;   // unknown length: nothing to position against
+            }
+
             if (pkt.is_eof) {
                 if (pingpong_.load()) {
                     speed_.store(-current_speed);
-                    io_frame_count = std::max(0LL, frame_count_.load() - 1);
+                    rev_started_ = true;   // this branch positions the head itself
+                    // Turn around on the IO clock, not the DISPLAY clock. frame_count_ is what the
+                    // consumer has shown, which lags this thread by the queue depth, so seeking to
+                    // frame_count_ - 1 aimed behind the frames already queued and made the
+                    // turnaround timing-dependent. io_frame_count is (last frame pushed) + 1 here,
+                    // because EOF pushes nothing, so two back starts the reverse sweep one below
+                    // the frame just shown. Same fix as hap_producer.
+                    io_frame_count = std::max(in_frame_, io_frame_count - 2);
                     demuxer_->seek_to_frame(io_frame_count);
                     continue;
                 } else if (loop_) {
@@ -577,7 +630,12 @@ struct notchlc_producer_impl final : public core::frame_producer
             if (current_speed >= 0.0 && out_frame_ >= 0 && io_frame_count >= out_frame_) {
                 if (pingpong_.load()) {
                     speed_.store(-current_speed);
-                    io_frame_count = out_frame_ - 1;
+                    rev_started_ = true;   // this branch positions the head itself
+                    // out_frame_ is EXCLUSIVE and the counter advances AFTER a packet is pushed,
+                    // so the frame just pushed was out_frame_ - 1 and the reverse sweep must start
+                    // BELOW it. Resuming at out_frame_ - 1 re-read it: MEASURED as the OUT frame
+                    // delivered twice at every turnaround.
+                    io_frame_count = std::max(in_frame_, out_frame_ - 2);
                     demuxer_->seek_to_frame(io_frame_count);
                 } else if (loop_) {
                     demuxer_->seek_to_frame(in_frame_);
@@ -594,7 +652,12 @@ struct notchlc_producer_impl final : public core::frame_producer
             } else if (current_speed < 0.0 && io_frame_count < in_frame_) {
                 if (pingpong_.load()) {
                     speed_.store(-current_speed);
-                    io_frame_count = in_frame_;
+                    // Mirror of the OUT end: the counter drops below in_frame_ only after
+                    // in_frame_ itself has been pushed, so forward resumes at in_frame_ + 1.
+                    // Resuming at in_frame_ delivered the IN frame twice every sweep. Clamped for
+                    // a range too short to have a "next" frame.
+                    io_frame_count = (out_frame_ >= 0) ? std::min(in_frame_ + 1, out_frame_ - 1)
+                                                       : in_frame_ + 1;
                     demuxer_->seek_to_frame(io_frame_count);
                 } else if (loop_) {
                     int64_t target = (out_frame_ >= 0) ? out_frame_ - 1 : std::max(0LL, total_frames_ - 1);

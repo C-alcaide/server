@@ -1,6 +1,48 @@
 CasparVP — Unreleased
 ==========================================
 
+### Fixed: the NotchLC producer duplicated both ping-pong endpoints, and showed nothing in reverse
+
+The first time this producer's boundaries were measured at all — a marked NotchLC fixture only
+existed from 2026-08-20 — it had **both** of the defect classes already fixed in the other three
+producers, and for the same reasons. It was derived from the HAP producer and inherited them.
+
+**Ping-pong delivered both endpoints twice, every sweep.** `out_frame_` is exclusive and the read
+counter advances *after* a packet is pushed, so turning around to `out_frame_ - 1` re-read the frame
+just pushed, and turning to `in_frame_` did the same at the other end. The real-EOF turnaround — the
+path with no `LENGTH` — was worse than an off-by-one: it seeked relative to `frame_count_`, the
+**display** clock, which lags the read thread by the queue depth, so the error moved with load.
+
+**And `SPEED -1` with neither `LOOP` nor `PINGPONG` delivered nothing at all.** Its reverse-start
+fired only when `in_frame_ == 0` and read the speed the producer was *constructed* with, so an IN
+point disabled it and a `CALL ... SPEED -1` after `PLAY` never reached it. The counter starts at
+`in_frame_`, the first decrement puts it below, and that branch parks the read thread having decoded
+nothing. `LOOP` masked it by seeking to the OUT end and rescuing the start by accident.
+
+All four fixes are the ones already applied to `hap_producer`: turn around one frame further in at
+both bounds, turn on the read clock rather than the display clock at EOF, and position at the OUT
+end when a reverse session begins — evaluated in the read loop at play time, doing everything the
+seek handler does including the epoch bump and the notifies, because a lighter reposition leaves the
+pipeline waiting on a sequence number nobody will send.
+
+**Measured**, recording the channel and reading the marker from every frame:
+
+| `cuda_notchlc`, `SEEK 20 LENGTH 8` | before | after |
+| :--- | :--- | :--- |
+| ping-pong | `27` and `20` **both delivered twice** every turnaround | each endpoint once, 20 fwd / 19 rev sweeps |
+| reverse, no loop | **0 frames — nothing delivered** | `rev 27..21` then holds `20` |
+| forward loop | correct already | unchanged |
+| reverse loop | correct already | unchanged |
+
+**The full matrix is now 16 arms — four producers x four boundary modes — all delivering their range
+in order, with each endpoint once and no halt.** `seek --codec notchlc` also lands 7/7 and agrees
+with the server.
+
+Worth stating why this was found only now: the producer was not untested by oversight, it was
+**unmeasurable**. Its only asset was a 12 K clip with no burnt-in counter, so there was nothing to
+read an order from. The moment a marked fixture existed, adding one line to the battery's arm list
+surfaced two shipping defects in the first run.
+
 ### Fixed: NotchLC's first decoded frame came out of an empty buffer, and a paused channel could keep it forever
 
 `LOAD` followed promptly by `CALL 1-1 SEEK n` on `CUDA_NOTCHLC` + the Vulkan mixer rendered a
