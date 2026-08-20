@@ -60,6 +60,19 @@ core::mutable_frame make_frame(void*                            tag,
     pix_desc.is_straight_alpha = is_straight_alpha;
     pix_desc.color_transfer    = color_transfer;
 
+    // The source's code range. A "J" pixel format means full range by definition even when the
+    // frame's own color_range is unset, which is how MJPEG and some camera files describe
+    // themselves, so both are consulted.
+    if (video) {
+        const auto fmt = static_cast<AVPixelFormat>(video->format);
+        const bool j_format = fmt == AV_PIX_FMT_YUVJ420P || fmt == AV_PIX_FMT_YUVJ422P ||
+                              fmt == AV_PIX_FMT_YUVJ444P || fmt == AV_PIX_FMT_YUVJ440P ||
+                              fmt == AV_PIX_FMT_YUVJ411P;
+        pix_desc.color_range = (video->color_range == AVCOL_RANGE_JPEG || j_format)
+                                   ? core::color_range::full
+                                   : core::color_range::limited;
+    }
+
     // Propagate chroma sample location for subsampled YUV content
     if (video && video->chroma_location != AVCHROMA_LOC_UNSPECIFIED) {
         switch (video->chroma_location) {
@@ -177,6 +190,20 @@ std::tuple<core::pixel_format, common::bit_depth> get_pixel_format(AVPixelFormat
             return {core::pixel_format::rgba, common::bit_depth::bit8};
         case AV_PIX_FMT_ABGR:
             return {core::pixel_format::abgr, common::bit_depth::bit8};
+        // The deprecated "J" formats are the same layouts; the J only ever meant full range,
+        // which is now carried by pix_desc.color_range instead. Without these cases they fell
+        // through to `invalid` and the frame rendered BLACK -- measured on an x264 file encoded
+        // with `-color_range pc`, which is what x264 produces for it, and on any MJPEG source.
+        case AV_PIX_FMT_YUVJ444P:
+            return {core::pixel_format::ycbcr, common::bit_depth::bit8};
+        case AV_PIX_FMT_YUVJ422P:
+            return {core::pixel_format::ycbcr, common::bit_depth::bit8};
+        case AV_PIX_FMT_YUVJ420P:
+            return {core::pixel_format::ycbcr, common::bit_depth::bit8};
+        case AV_PIX_FMT_YUVJ440P:
+            return {core::pixel_format::ycbcr, common::bit_depth::bit8};
+        case AV_PIX_FMT_YUVJ411P:
+            return {core::pixel_format::ycbcr, common::bit_depth::bit8};
         case AV_PIX_FMT_YUV444P:
             return {core::pixel_format::ycbcr, common::bit_depth::bit8};
         case AV_PIX_FMT_YUV444P10:

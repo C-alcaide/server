@@ -76,6 +76,19 @@ enum class color_space
     unknown,
 };
 
+/// Whether the source's YCbCr codes use the full code range or studio swing.
+///
+/// Defaults to `limited` everywhere, which is what broadcast material is and what every
+/// producer that does not know its range should say. `full` is the JPEG convention: black at
+/// code 0 and white at code 255 rather than 16 and 235, so decoding it with the studio-swing
+/// offsets expands it a second time -- measured at 55 where 64 was correct, a 14% error, with
+/// blacks crushed below 0 and whites clipped above 255.
+enum class color_range
+{
+    limited,
+    full,
+};
+
 enum class color_transfer
 {
     sdr,
@@ -149,6 +162,9 @@ struct pixel_format_desc final
     core::color_space     color_space      = core::color_space::unknown;
     core::color_transfer  color_transfer   = core::color_transfer::sdr;
     core::chroma_location chroma_location  = core::chroma_location::unspecified;
+    /// Studio swing unless a producer says otherwise. Set post-construction, like
+    /// `color_transfer` and `chroma_location`, so no existing call site changes.
+    core::color_range     color_range      = core::color_range::limited;
 };
 
 inline bool operator==(const pixel_format_desc::plane& lhs, const pixel_format_desc::plane& rhs)
@@ -170,7 +186,8 @@ inline bool operator==(const pixel_format_desc& lhs, const pixel_format_desc& rh
 {
     return lhs.format == rhs.format && lhs.is_straight_alpha == rhs.is_straight_alpha &&
            lhs.color_space == rhs.color_space && lhs.color_transfer == rhs.color_transfer &&
-           lhs.chroma_location == rhs.chroma_location && lhs.planes == rhs.planes;
+           lhs.chroma_location == rhs.chroma_location && lhs.color_range == rhs.color_range &&
+           lhs.planes == rhs.planes;
 }
 
 inline bool operator!=(const pixel_format_desc& lhs, const pixel_format_desc& rhs) { return !(lhs == rhs); }

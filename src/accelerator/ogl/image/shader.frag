@@ -1016,14 +1016,19 @@ vec4 chroma_key(vec4 c)
 // 65535/256 puts legal black at exactly 16, neutral chroma at exactly 128 and legal white at
 // exactly 235; 255 keeps the 8-bit path bit-identical. The kernel picks by texture depth.
 uniform float ycbcr_code_scale;
+uniform bool  ycbcr_full_range;
 
 vec4 ycbcra_to_rgba(float Y, float Cb, float Cr, float A)
 {
-    const float luma_coefficient = 255.0/219.0;
-    const float chroma_coefficient = 255.0/224.0;
+    // Studio swing expands 16..235 to 0..255. A FULL-range source is already 0..255, so
+    // expanding it again crushes blacks below 0 and clips whites above 255 -- 64 came out as
+    // 55. Chroma is centred on 128 in both conventions; only the scaling differs.
+    const float luma_coefficient   = ycbcr_full_range ? 1.0 : 255.0/219.0;
+    const float chroma_coefficient = ycbcr_full_range ? 1.0 : 255.0/224.0;
+    const float black_level        = ycbcr_full_range ? 0.0 : 16.0;
 
     vec3 YCbCr = vec3(Y, Cb, Cr) * ycbcr_code_scale;
-    YCbCr -= vec3(16.0, 128.0, 128.0);
+    YCbCr -= vec3(black_level, 128.0, 128.0);
     YCbCr *= vec3(luma_coefficient, chroma_coefficient, chroma_coefficient);
 
     return vec4(color_matrix * YCbCr / 255, A).bgra;

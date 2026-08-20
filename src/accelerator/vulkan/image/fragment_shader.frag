@@ -117,6 +117,8 @@ layout(scalar, binding = 2) uniform ParamsBlock {
     float gn_radius_x, gn_radius_y;
     float gn_feather;
     float gn_exposure;
+    // ── Source code range ───────────────────────────────────────────────────
+    int   ycbcr_full_range;
 };
 layout(binding = 3) uniform sampler3D lut3d_tex;
 layout(binding = 4) uniform sampler2D hue_curve_tex;
@@ -313,7 +315,13 @@ vec4 ChromaKey(vec4 c,bool sm){vec3 h=rgb2hsv(c.rgb);float d=ColorDist(h)*-2.0+1
 // The OGL shader carries the same value in its own `ycbcr_code_scale` uniform.
 vec4 ycbcra_to_rgba(float Y,float Cb,float Cr,float A){
     mat3 cm=transpose(color_matrices[color_space_index]);
-    vec3 v=vec3(Y,Cb,Cr)*rgb_max_output_pad.w-vec3(16,128,128); v*=vec3(255.0/219.0,255.0/224.0,255.0/224.0);
+    // Studio swing expands 16..235 to 0..255. A FULL-range source is already 0..255, so
+    // expanding it again crushes blacks below 0 and clips whites above 255 -- 64 came out as
+    // 55. Chroma is centred on 128 either way; only the scaling differs.
+    bool  fr = ycbcr_full_range != 0;
+    float bl = fr ? 0.0 : 16.0;
+    vec3  co = fr ? vec3(1.0) : vec3(255.0/219.0,255.0/224.0,255.0/224.0);
+    vec3 v=vec3(Y,Cb,Cr)*rgb_max_output_pad.w-vec3(bl,128,128); v*=co;
     return vec4(cm*v/255,A);
 }
 

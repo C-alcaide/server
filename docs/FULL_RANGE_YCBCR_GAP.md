@@ -1,7 +1,24 @@
 # Full-range YCbCr sources are stretched by 255/219
 
-**Found 2026-08-19, measured, not fixed.** Pre-existing and shared with upstream; nothing in the
-FFmpeg 8 sync caused it. Recorded because it mis-renders a whole class of source silently.
+**Found 2026-08-19. FIXED 2026-08-20** — `core::pixel_format_desc::color_range`, set from the
+frame in `make_frame`, passed as a uniform to both mixers, branched on in both copies of
+`ycbcra_to_rgba`. Measured: a flat full-range grey at code 64 rendered 55.0 before and 63.0 after,
+with the limited-range control unmoved. Pre-existing and shared with upstream; nothing in the
+FFmpeg 8 sync caused it.
+
+**A second defect was found while fixing this one:** the `yuvj*` pixel formats had no case in
+`get_pixel_format` and fell through to `pixel_format::invalid`, so JPEG-range material rendered
+**black** rather than merely stretched. Same content, same range tag, only the pixel format
+differing. Fixed in the same change.
+
+**And the scoping estimate below was wrong in an instructive way.** It predicted propagation
+plumbing "from `av_producer` (and any other YCbCr producer)". None was needed: `make_frame` already
+receives the `AVFrame` and already sets `chroma_location` from it in one block, so the range is one
+line in the same place, and every other producer keeps the `limited` default — which is correct for
+SDI, NDI and broadcast material. What the estimate missed instead was `pixel_format_desc::operator==`,
+which backs the still-frame cache, and `write_frame_png`, which still assumes limited range.
+
+The original account follows.
 
 ## What happens
 

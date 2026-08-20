@@ -1385,6 +1385,8 @@ struct image_kernel::impl
                                         ? 65535.0f / 256.0f
                                         : 255.0f;
 
+        uniforms.ycbcr_full_range = params.pix_desc.color_range == core::color_range::full ? 1 : 0;
+
         // Both mixers must resolve this identically, so the rule lives in
         // core::decode_color_space -- see the account there.
         const auto color_space = core::decode_color_space(params.pix_desc);

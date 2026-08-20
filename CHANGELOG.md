@@ -1,6 +1,61 @@
 CasparVP — Unreleased
 ==========================================
 
+### Fixed: full-range YCbCr sources were stretched, and JPEG-range pixel formats rendered black
+
+Two defects in the same corner, found together and separable only with the right fixture.
+
+**The colour range was ignored.** `ycbcra_to_rgba` in both mixers assumed studio swing
+unconditionally, subtracting a black level of 16 and expanding by 255/219. A source that is
+genuinely full range — black at code 0, white at 255 — was therefore expanded a second time, with
+blacks crushed below 0 and whites clipped above 255. Measured on a flat full-range grey at code 64:
+it rendered **55.0** where 64 was correct, a 14% error.
+
+**And the `yuvj*` pixel formats were not mapped at all.** `get_pixel_format` had no case for
+`AV_PIX_FMT_YUVJ420P` and its siblings, so they fell through to `pixel_format::invalid` and the
+frame rendered **black**. Those formats are what x264 produces from `-color_range pc`, and what
+MJPEG and many camera files carry, so this is not an exotic class: the same content that merely
+looked wrong in one pixel format did not appear at all in another. It also raised
+`Changing video frame properties on the fly is not supported by all filters`, because the graph and
+the frame disagreed about the format.
+
+**Fixed** with one field. `core::pixel_format_desc` gains `color_range`, defaulting to `limited` so
+nothing changes for existing content, and it is compared in `operator==` — the mixers' still-frame
+cache uses that, and a field left out of it is a field whose change would not invalidate the cache.
+`make_frame` sets it from the frame's own `color_range`, treating a `J` format as full range by
+definition since that is how MJPEG describes itself. Both kernels pass it as a uniform and both
+shaders branch on it: full range skips the black-level subtraction and the expansion entirely.
+Chroma is centred on 128 in both conventions, so only the scaling differs.
+
+**Measured**, both mixers, flat greys where honoured, stretched and black are three different
+numbers — the first attempt used full-range code 16, where the stretched value *is* 0 and therefore
+indistinguishable from a frame that never rendered:
+
+| source | before | after | honoured value |
+| :--- | ---: | ---: | ---: |
+| full range, `yuv420p`, code 64 | 55.0 | **63.0** | 64 |
+| full range, **`yuvj420p`**, code 64 | 0.0 (black) | **63.0** | 64 |
+| limited range control, same RGB | 62.3 | 62.3 | 63 |
+
+The ~1 LSB shortfall is common-mode: the limited-range control sits the same distance low, so it is
+the fixture's own 4:2:0 encode/decode round trip and not the range arithmetic.
+
+**Scope.** RGB sources have no YCbCr step to get wrong, so stills, HTML and the colour producer are
+unaffected. `CUDA_NOTCHLC` already converted with full-range coefficients on the GPU and measured
+correct before this. Broadcast material is limited range and by far the common case, which is why
+this survived so long — and why the control above matters more than the fix.
+
+**Still assuming limited range, and not fixed here:** the CPU YCbCr decode in `write_frame_png`,
+which is the PNG/thumbnail export path rather than the frame path. It reads the same descriptor, so
+it is a small change, but it needs its own measurement and has none yet.
+
+Regression gates, all on **both** mixers: `conformance` 100/100 within 1.0 LSB, `grading` 48/48
+inside gate, `flat-decoded` 29/29. `seek` 7/7 fixtures with 49/49 seeks landing — that one covers
+h264, h265 and vp9, so it exercises the changed format mapping. `grading` is the specific canary for
+the Vulkan half: the flag was appended to a `layout(scalar)` uniform block, where a C++/GLSL
+mismatch silently reinterprets neighbouring floats rather than failing to compile, and every one of
+those neighbours is a grading parameter.
+
 ### Changed: the loop cache reserves a whole range up front, from a server-wide allowance
 
 Two problems with how the cache introduced above decided what to hold, both about memory rather

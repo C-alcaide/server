@@ -225,7 +225,12 @@ struct alignas(16) uniform_block
     float    gn_radius_y    = 0.25f;        // 864
     float    gn_feather     = 0.2f;         // 868  fraction of radius, isotropic
     float    gn_exposure    = 1.0f;         // 872  uniform scale, channel-order agnostic
-    // Total: 876 bytes
+    // ── Source code range ───────────────────────────────────────────────
+    // Appended for the same reason as the two blocks above: every offset before it is
+    // untouched. 1 = the source's YCbCr codes use the full range (JPEG convention), so the
+    // studio-swing expansion in ycbcra_to_rgba must be skipped.
+    int32_t  ycbcr_full_range = 0;          // 876
+    // Total: 880 bytes
 };
 
 // Bit flags for `flags` field

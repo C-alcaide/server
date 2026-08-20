@@ -537,6 +537,12 @@ struct image_kernel::impl
                          ? 65535.0f / 256.0f
                          : 255.0f);
 
+        // Full-range sources skip the studio-swing expansion entirely: black is already at
+        // code 0 and white at 255. Same placement rule as ycbcr_code_scale above -- below
+        // `shader_->use()`, because glUniform writes into the bound program.
+        shader_->set("ycbcr_full_range",
+                     params.pix_desc.color_range == core::color_range::full);
+
         shader_->set("is_straight_alpha", params.pix_desc.is_straight_alpha);
         shader_->set("straight_alpha_grading", params.straight_alpha_grading);
         shader_->set("plane[0]", texture_id::plane0);
