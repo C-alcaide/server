@@ -1,6 +1,66 @@
 CasparVP — Unreleased
 ==========================================
 
+### Fixed: reverse playback showed nothing at all on the CUDA ProRes and HAP producers
+
+`PLAY ... SEEK 20 LENGTH 8` followed by `CALL 1-1 SPEED -1`, with neither `LOOP` nor `PINGPONG`,
+rendered **black for the whole run** on `cuda_prores` and `hap_native`. Not stuttering, not the
+wrong frames — nothing. `av_producer` played the range backwards and then held the IN frame, which
+is what all three should do.
+
+Both producers had a reverse-start, and it could not fire in the case that matters:
+
+```cpp
+video_frame_start_ = in_frame_;
+if (speed_.load() < 0.0 && in_frame_ == 0 && total_frames_ > 0)
+    video_frame_start_ = total_frames_ - 1;
+```
+
+Two gaps in three lines. It only fires when `in_frame_ == 0`, so **any IN point disables it**; and it
+reads the speed the producer was **constructed** with, so a `CALL ... SPEED -1` sent after `PLAY`
+never reaches it. The read counter therefore starts at `in_frame_`, the first decrement puts it
+below `in_frame_`, and with neither loop nor ping-pong that branch parks the read thread having
+decoded nothing at all. **`LOOP` masked it completely**, because the loop branch seeks to the OUT
+end and rescues the start by accident — which is why reverse looping always worked and plain
+reverse never did.
+
+**Fixed** by positioning the read head at the OUT end when a reverse session begins, evaluated in
+the read loop at play time rather than in the constructor. `av_producer` has had exactly this all
+along (`rev_active_`), which is why it was the one producer that got this right.
+
+| producer | `SPEED -1`, no loop, no ping-pong | after |
+| :--- | :--- | :--- |
+| `cuda_prores` | **0 frames — black for 10 s** | `rev 27..21` then holds `20` |
+| `hap_native` | **0 frames — black for 10 s** | `rev 27..21` then holds `20` |
+| `ffmpeg` | correct already | unchanged |
+
+**Two attempts en route were wrong, and both were caught by measurement rather than review.**
+
+The first fired at ping-pong turnarounds too, re-seeking to the OUT end and flushing the packet
+queue that the turnaround had just filled: a **266-tick stall** on one frame, and a reverse loop that
+lost its OUT frame entirely. Fixed by marking the branches that position the head themselves, so the
+standing-start seek only covers a reverse that nothing else positioned.
+
+The second was HAP-specific and instructive. Repositioning there is a *seek*, and the block did a
+lighter version of one — it flushed `raw_queue_` instead of `ready_queue_` and skipped the
+`seek_epoch_` bump. That left the GL loop waiting on a sequence number nobody was going to send,
+measured as a reverse loop holding frame 21 for **269 ticks**. The seek handler's own comment
+describes that failure, which is why the answer was to mirror it rather than write a shorter one.
+
+**Measured** by recording the channel and reading the marker from every recorded frame: the full
+matrix of three producers x forward loop, ping-pong, reverse loop and plain reverse — **12 arms, all
+covering their range with nothing outside it, no duplicated endpoints and no repeated deliveries**,
+with all three forward-loop calibrations frame-exact. For plain reverse a long tail hold **is** the
+pass: it is the analogue of a forward clip reaching EOF and freezing.
+
+Regression gates: `seek` 7/7 fixtures with 49/49 seeks landing, `flat-decoded` 29/29 on both mixers,
+`source-range` 3/3.
+
+This was the last claim about playback in this work still resting on reading the code rather than
+watching frames — and it was wrong, in the direction of a whole feature not working. Worth stating
+plainly: the code reading predicted "the counter and the demuxer disagree", which sounds like a
+glitch. What it actually did was show nothing.
+
 ### Fixed: full-range YCbCr sources were stretched, and JPEG-range pixel formats rendered black
 
 Two defects in the same corner, found together and separable only with the right fixture.

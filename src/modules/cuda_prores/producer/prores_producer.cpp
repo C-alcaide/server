@@ -191,6 +191,7 @@ struct prores_producer_impl final : public core::frame_producer
     int64_t               in_frame_  = 0;       // reverse-bounce boundary (also loop restart point)
     int64_t               out_frame_ = -1;      // forward-bounce boundary  (-1 = play to EOF)
     int64_t               video_frame_start_ = 0; // initial read position (may differ from in_frame_ for negative speed)
+    bool                  rev_started_ = false;   // a reverse session has been positioned at the OUT end
 
     std::atomic<double>   speed_{1.0};
     std::atomic<bool>     pingpong_{false};
@@ -626,12 +627,62 @@ struct prores_producer_impl final : public core::frame_producer
 
             double current_speed = speed_.load();
 
+            if (current_speed >= 0.0) {
+                rev_started_ = false;   // back to forward: re-arm for the next reverse session
+            } else if (!rev_started_) {
+                // Reverse from a standing start has to begin at the OUT end, and this is the
+                // only place that can know it. video_frame_start_ in the constructor covers this
+                // ONLY when in_frame_ == 0, and it reads the speed the producer was CONSTRUCTED
+                // with -- so `CALL ... SPEED -1` sent after PLAY never reached it, and neither did
+                // any clip with an IN point.
+                //
+                // MEASURED 2026-08-20: `PLAY ... SEEK 20 LENGTH 8` then `CALL 1-1 SPEED -1`, with
+                // neither LOOP nor PINGPONG, rendered BLACK for a whole 10 s run on this producer
+                // and on the other one, while av_producer swept the range and held the IN frame.
+                // The counter starts at in_frame_, the first decrement puts it below in_frame_,
+                // and with neither loop nor pingpong that branch parks the read thread having
+                // decoded nothing at all. LOOP masked it completely, because the loop branch seeks
+                // to the OUT end and rescues the start by accident.
+                //
+                // av_producer has had the equivalent all along (`rev_active_`), evaluated in
+                // next_frame at play time rather than in the constructor, which is why it is the
+                // one producer that got this right.
+                const int64_t end_excl = out_frame_ >= 0 ? out_frame_ : total_frames_;
+                if (end_excl > 0) {
+                    const int64_t target = std::max(in_frame_, end_excl - 1);
+                    flush_all_pending(false);
+                    {
+                        std::lock_guard<std::mutex> qlk(queue_mutex_);
+                        while (!ready_queue_.empty())
+                            ready_queue_.pop();
+                    }
+                    queue_cv_.notify_all();
+                    demuxer_->seek_to_frame(target);
+                    video_frame_count = target;
+                    frame_count_      = target;
+                    fps_frame_acc_    = 0;
+                    fps_window_timer_.restart();
+                    audio_accum.clear();
+                    audio_frame_idx   = 0;
+                    seek_done_        = true;
+                    rev_started_      = true;
+                    continue;
+                }
+                rev_started_ = true;   // unknown length: nothing to position against, play as before
+            }
+
             // ~~ Loop / EOF ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
             if (pkt.is_eof) {
                 if (pingpong_.load()) {
                     // Sync/release pending async slot (discard — queue will be flushed).
                     flush_all_pending(false);
                     speed_.store(-current_speed);
+                    // This branch positions the read head for the new direction itself, so the
+                    // standing-start seek above must not fire and re-position it. Without this,
+                    // every ping-pong turnaround re-seeked to the OUT end and flushed the packet
+                    // queue: MEASURED as a 266-tick stall on one frame, and a reverse loop that
+                    // lost its OUT frame entirely.
+                    rev_started_ = true;
                     // video_frame_count is one past the last decoded frame at EOF.
                     video_frame_count = std::max(0LL, video_frame_count - 1);
                     // Flush stale frames so receive_impl shows the turnaround immediately,
@@ -860,6 +911,12 @@ struct prores_producer_impl final : public core::frame_producer
                 if (pingpong_.load()) {
                     flush_all_pending(false);
                     speed_.store(-current_speed);
+                    // This branch positions the read head for the new direction itself, so the
+                    // standing-start seek above must not fire and re-position it. Without this,
+                    // every ping-pong turnaround re-seeked to the OUT end and flushed the packet
+                    // queue: MEASURED as a 266-tick stall on one frame, and a reverse loop that
+                    // lost its OUT frame entirely.
+                    rev_started_ = true;
                     video_frame_count = out_frame_ - 1;
                     {
                         std::lock_guard<std::mutex> qlk(queue_mutex_);
@@ -891,6 +948,12 @@ struct prores_producer_impl final : public core::frame_producer
                 if (pingpong_.load()) {
                     flush_all_pending(false);
                     speed_.store(-current_speed);
+                    // This branch positions the read head for the new direction itself, so the
+                    // standing-start seek above must not fire and re-position it. Without this,
+                    // every ping-pong turnaround re-seeked to the OUT end and flushed the packet
+                    // queue: MEASURED as a 266-tick stall on one frame, and a reverse loop that
+                    // lost its OUT frame entirely.
+                    rev_started_ = true;
                     video_frame_count = in_frame_;
                     {
                         std::lock_guard<std::mutex> qlk(queue_mutex_);
