@@ -4593,7 +4593,20 @@ struct AVProducer::Impl
         // Gated: on the software path the fps filter already trims, and the
         // explicit-seek call site sets this unconditionally as it always has,
         // so software behaviour is untouched.
-        if (gpu_direct_video_)
+        //
+        // `|| gpu_direct_decode_requested()`, because gpu_direct_video_ is not known yet the one
+        // time it matters most. The INITIAL seek runs here before the decoder has emitted a
+        // hardware surface, so the flag is still false, the target is never set, and nothing
+        // drops the keyframe pre-roll: MEASURED 2026-08-20, `PLAY ... SEEK 20 LENGTH 8` on h264
+        // with GPU-direct delivered frames 0..19 to the screen once at startup -- about 0.8 s of
+        // the wrong content -- while every one of the 28 loop wraps after it was a clean 20..27,
+        // because by then the flag was true.
+        //
+        // The config flag is known from the first call, so it stands in for "GPU-direct may
+        // engage". If it was asked for and then declines, this sets the target on a software
+        // path -- which is exactly what the explicit-seek call site has always done
+        // unconditionally, so that combination is already exercised rather than new.
+        if (gpu_direct_video_ || gpu_direct_decode_requested())
             current_seek_target_ = time;
 #endif
 

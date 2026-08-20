@@ -1,6 +1,40 @@
 CasparVP — Unreleased
 ==========================================
 
+### Fixed: GPU-direct decode showed ~0.8 s of the wrong content when a clip started at an IN point
+
+`PLAY ... SEEK 20 LENGTH 8` on an inter-frame source with `gpu-direct-decode` delivered **frames
+0..19 to the screen** before reaching frame 20. A seek lands on the keyframe at or before the target,
+so those frames are decoded as pre-roll and are supposed to be discarded; on this path they were
+shown instead. At 25 fps a 20-frame GOP is about 0.8 s of the previous scene before the clip begins.
+
+Every loop wrap after it was clean, which is the clue to the cause. GPU-direct frames never enter
+the filter graph, so the `fps=...:start_time=` trim that drops pre-roll on the software path does not
+apply to them; their only equivalent is the run loop's drop-to-target, driven by
+`current_seek_target_`, which `seek_internal` sets **only when `gpu_direct_video_` is true**.
+
+That flag is set when the decoder emits its first hardware surface — which happens *after* the
+initial seek has already run. So at the one seek where it matters the flag was still false, the
+target was never set, and nothing dropped the pre-roll. By the time the clip wrapped, the flag was
+true and the wrap dropped it correctly.
+
+**Fixed** by also accepting the configuration flag, which is known from the first call:
+`gpu_direct_video_ || gpu_direct_decode_requested()`. If GPU-direct was requested and then declines,
+this sets the target on a software path — which is what the explicit-seek call site has always done
+unconditionally, so that combination is already exercised rather than new.
+
+**Measured**, recording the channel and reading the marker from every frame:
+
+| arm | before | after |
+| :--- | :--- | :--- |
+| h264 + GPU-direct, `SEEK 20 LENGTH 8 LOOP` | frames **0..19** delivered at startup | **nothing outside 20..27**, two runs |
+| h265 + GPU-direct | — | nothing outside the range, forward loop and ping-pong |
+| ProRes, software (GPU-direct requested, declines) | — | unchanged, all three modes clean |
+
+Regression gates: `seek` 7/7 fixtures with 49/49 seeks landing and agreeing with the server — which
+covers h264, h265 and vp9, the inter-frame codecs this touches — and `flat-decoded` 29/29 patches on
+both mixers.
+
 ### Added: a looping range can stay resident, so the loop plays with no decoder at all
 
 When every frame of a `LOOP` or `PINGPONG` range fits in a memory budget, playback is served from
