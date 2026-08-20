@@ -162,7 +162,34 @@ static cudaError_t parse_block_header(
 
     out.y_data_offset    = out.data_end - out.y_data_size;
     out.uv_count_offset  = out.y_data_offset - out.a_data_offset;
-    out.has_alpha        = (out.uv_count_offset != out.a_control_word_offset);
+
+    // DOES THIS FRAME CARRY ALPHA? The test is "is the alpha control-word table
+    // non-empty", and it is a STRUCTURAL property: the table sits immediately before the
+    // UV data blob, so a zero-length table starts exactly where the UV blob starts.
+    //
+    // This used to be `uv_count_offset != a_control_word_offset`, inherited from
+    // FFmpeg's `notchlc.c:287`, which is an incidental algebraic identity rather than a
+    // property of the layout. Measured 2026-08-20 on four files:
+    //
+    //   file                                  a_ctrl == uv_data   ffmpeg's identity
+    //   ffmpeg's own big_buck_bunny sample     alpha present       alpha present
+    //   the 12K VP asset (no alpha)            no alpha            no alpha
+    //   NotchLC AME export, alpha OFF          no alpha            ALPHA (wrong)
+    //   NotchLC AME export, alpha ON           alpha present       alpha present
+    //
+    // On the third the old test sent the decoder into the alpha branch of a frame that
+    // has none, so it read the UV blob as alpha control words. The first block's
+    // "offset" came out 2155904895; blocks whose garbage offset happened to fall under
+    // the 0x40000000 guard below were dereferenced out of bounds, and the frame arrived
+    // as `illegal memory access` — which poisons the CUDA context, so every LATER frame
+    // failed too: 129 of them in one 4-second playout, and the GL interop with them.
+    // The channel went black rather than merely showing wrong alpha.
+    //
+    // FFmpeg has the same defect and refuses the file outright (AVERROR_INVALIDDATA at
+    // notchlc.c:307). NotchLC's format is not public — the SDK is commercially licensed
+    // — so "correct" here means consistent with every sample available, which the old
+    // test was not and this one is.
+    out.has_alpha        = (out.a_control_word_offset != out.uv_data_offset);
 
     return cudaSuccess;
 }
@@ -274,6 +301,7 @@ static cudaError_t launch_a_decode_or_fill(
             hdr.uv_data_offset,
             hdr.a_data_offset,          // already *4 from parse step
             width, height,
+            hdr.data_end,               // bounds every read the kernel makes
             d_a);
     }
     return cudaGetLastError();

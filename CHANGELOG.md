@@ -1,6 +1,73 @@
 CasparVP — Unreleased
 ==========================================
 
+### Fixed: a NotchLC clip encoded WITHOUT alpha played as a black channel, and took the CUDA context with it
+
+`LOAD 1-1 CUDA_NOTCHLC "clip"` on a NotchLC file carrying no alpha channel returned `202 LOAD OK`
+and then rendered **nothing** — a black channel for the whole playout, with
+`[notchlc_producer] GL map failed: cudaGraphicsMapResources: an illegal memory access was
+encountered` repeating in the log. Measured on a 1920x1080 25p file out of the NotchLC Adobe CC
+plugin 1.3.1 with *Include Alpha Channel* off: **129 failed frames in one 4-second playout**, the
+GL interop among them. The same file with alpha ON always played correctly.
+
+The frame does or does not carry alpha according to whether its **alpha control-word table is
+empty** — the table sits immediately before the UV data blob, so a zero-length table starts exactly
+where the UV blob starts. `parse_block_header` instead tested an algebraic identity inherited from
+FFmpeg's `notchlc.c:287`:
+
+```cpp
+out.uv_count_offset = out.y_data_offset - out.a_data_offset;
+out.has_alpha       = (out.uv_count_offset != out.a_control_word_offset);
+```
+
+That identity holds on some alpha-less files and not others. Measured on every NotchLC file
+available, including the two in FFmpeg's own sample archive:
+
+| file | alpha table empty? | the identity said | truth |
+| :--- | :--- | :--- | :--- |
+| `samples.ffmpeg.org` big_buck_bunny 1920x1080 | no | alpha | alpha |
+| the 12K VP asset, 12288x6144 | yes | no alpha | no alpha |
+| AME export, *Include Alpha Channel* **off** | yes | **alpha** | **no alpha** |
+| AME export, *Include Alpha Channel* on | no | alpha | alpha |
+
+On the third row the decoder therefore entered the alpha branch of a frame that has none and read
+the **UV blob as alpha control words**. The first block's "offset" came out `2155904895`.
+
+**Underneath that sat the reason it was a crash rather than wrong pixels.** `k_notch_a_decode`
+guarded its per-block data offset with `if (raw_offset >= 0x40000000u)` — which rejects an absurd
+offset and passes everything below 1 GiB straight to a dereference. A garbage offset of, say,
+300000 on a 1.5 MB frame reads ~1.2 MB past the buffer, and a CUDA illegal memory access poisons
+the context, so every *later* frame fails too. That is the difference between one bad frame and a
+dead channel.
+
+Both are fixed: the detection is now the structural test, and the alpha kernel bounds both its
+control-record and data-record reads against the validated `data_end` in 64-bit arithmetic, filling
+the block opaque on failure. The bound is worth having independently of the detection — this module
+parses untrusted files, and no header value should be able to reach a dereference unchecked.
+
+**Measured, 1080p2500, OpenGL mixer, one server per case** (a poisoned context makes every later
+case a casualty of the first, so they cannot share one):
+
+| case | before | after |
+| :--- | :--- | :--- |
+| alpha-less file, `CUDA_NOTCHLC` | **black, 0 marker, illegal memory access** | plays, frame 20, alpha opaque, flat-interior mean **4.59/255** vs the source |
+| alpha file, `CUDA_NOTCHLC` | plays | plays, frame 20, alpha exactly `255/192/128/64/0` |
+| **12K VP asset** (the regression control — the alpha-less file that always worked) | plays | plays, unchanged |
+| alpha-less file, plain `ffmpeg` producer | black | **still black** — see below |
+| CUDA errors, any case | 129 | **0** |
+
+The 12K asset is the control that matters: it is the only other file exercising the no-alpha branch,
+and the old test classified it correctly. Only the misclassified case changes behaviour.
+
+**Not fixed here, because it is upstream:** FFmpeg's own decoder has the same defect and refuses the
+file outright (`AVERROR_INVALIDDATA` at `notchlc.c:307`, every frame, on 7.0.2 and 8.1.1 alike), so
+the plain `ffmpeg` producer still renders it black. The heuristic dates from `1c3a3a4ec6`,
+"avcodec/notchlc: add *initial* alpha support", Aug 2020, with no commit message and no spec
+citation — NotchLC's format is not public, the SDK is commercially licensed, and the only public
+samples predate that commit. Worth reporting with the file attached; nothing in trac or the lists
+covers it.
+
+
 ### Fixed: reverse playback showed nothing at all on the CUDA ProRes and HAP producers
 
 `PLAY ... SEEK 20 LENGTH 8` followed by `CALL 1-1 SPEED -1`, with neither `LOOP` nor `PINGPONG`,

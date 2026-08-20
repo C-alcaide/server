@@ -53,6 +53,7 @@ __global__ void k_notch_a_fill_opaque(uint16_t* __restrict__ d_out_a, int n_pixe
 // a_data_ofs_field — the a_data_offset field value (already multiplied by 4)
 // uv_count_ofs     — uv_count_offset (= y_data_offset - a_data_offset)
 // width, height    — frame dimensions (multiples of 16)
+// data_end         — validated end of all frame data; every read is bounded by it
 // d_out_a          — output: uint16_t[height × width], 12-bit values
 // ---------------------------------------------------------------------------
 __global__ void k_notch_a_decode(
@@ -62,6 +63,7 @@ __global__ void k_notch_a_decode(
     uint32_t a_data_ofs_field,
     int      width,
     int      height,
+    uint32_t data_end,
     uint16_t* __restrict__ d_out_a)
 {
     const int blocks_x = (width  + 15) / 16;
@@ -72,24 +74,44 @@ __global__ void k_notch_a_decode(
     const int bx = idx % blocks_x;
     const int by = idx / blocks_x;
 
+    // Fill this block opaque and stop — for a control record or a data record that
+    // would fall outside the frame. Defined here because both bounds checks below want
+    // it and a partially written block is worse than a uniformly opaque one.
+    auto fill_opaque_and_return = [&]() {
+        const int px_x = bx * 16, px_y = by * 16;
+        for (int y = 0; y < 16 && (px_y+y) < height; y++)
+            for (int x = 0; x < 16 && (px_x+x) < width; x++)
+                d_out_a[(px_y+y)*width + (px_x+x)] = 4095u;
+    };
+
     // Read alpha control (8 bytes: m LE u32, offset LE u32) for this block.
+    if ((uint64_t)a_ctrl_ofs + (uint64_t)idx * 8u + 8u > (uint64_t)data_end) {
+        fill_opaque_and_return();
+        return;
+    }
     const uint8_t* ctrl_p = d_uncompressed + a_ctrl_ofs + idx * 8;
     uint32_t m = (uint32_t)ctrl_p[0] | ((uint32_t)ctrl_p[1] << 8)
                | ((uint32_t)ctrl_p[2] << 16) | ((uint32_t)ctrl_p[3] << 24);
     uint32_t raw_offset = (uint32_t)ctrl_p[4] | ((uint32_t)ctrl_p[5] << 8)
                         | ((uint32_t)ctrl_p[6] << 16) | ((uint32_t)ctrl_p[7] << 24);
-    if (raw_offset >= 0x40000000u) {
-        // Invalid offset — fill opaque.
-        const int px_x = bx * 16, px_y = by * 16;
-        for (int y = 0; y < 16 && (px_y+y) < height; y++)
-            for (int x = 0; x < 16 && (px_x+x) < width; x++)
-                d_out_a[(px_y+y)*width + (px_x+x)] = 4095u;
-        return;
-    }
+
     // Byte offset to the alpha data blob for this block:
     //   offset = raw_offset * 4 + uv_data_ofs + a_data_ofs_field
-    uint32_t abs_off = raw_offset * 4u + uv_data_ofs + a_data_ofs_field;
-    const uint8_t* dgb = d_uncompressed + abs_off;
+    //
+    // BOUNDED AGAINST data_end, not against a magic constant. This was
+    // `if (raw_offset >= 0x40000000u)`, which rejects an absurd offset and passes
+    // everything below 1 GiB straight through to a dereference — so a `raw_offset` of,
+    // say, 300000 on a 1.5 MB frame read ~1.2 MB past the buffer. Measured 2026-08-20:
+    // that is exactly how a misdetected alpha section became `illegal memory access`,
+    // and a poisoned CUDA context takes the whole channel down rather than one frame.
+    // 64-bit arithmetic so the multiply and the adds cannot wrap back into range.
+    const uint64_t abs_off64 = (uint64_t)raw_offset * 4ull
+                             + (uint64_t)uv_data_ofs + (uint64_t)a_data_ofs_field;
+    if (abs_off64 + 8ull > (uint64_t)data_end) {
+        fill_opaque_and_return();
+        return;
+    }
+    const uint8_t* dgb = d_uncompressed + (uint32_t)abs_off64;
 
     // 8-byte record per 16×16 block:
     //   [0]       alpha0 (uint8)
