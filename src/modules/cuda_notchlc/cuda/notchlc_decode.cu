@@ -572,8 +572,26 @@ cudaError_t notchlc_decode_gpu_phase(
         return cudaErrorInvalidValue;
     }
 
-    CUDA_CHECK(cudaMemcpyAsync(ctx->d_uncompressed, ctx->h_uncompressed,
-                               actual_uncompressed, cudaMemcpyHostToDevice, s));
+    // SYNCHRONOUS upload, not async-on-the-stream, and it is measured rather than
+    // defensive. The async form is issued on `s` ahead of every kernel below, so CUDA
+    // orders it — and yet on the FIRST frame of a playout `d_uncompressed[0]` reads back
+    // as 0 on the device while the host staging buffer holds a valid block header
+    // (texture_size_x = 1920, 1559 KB, gpu_phase returning cudaSuccess). Measured
+    // 2026-08-20 with a device-side probe: first frame U=0x0 / d_y=0x0, every later frame
+    // U=0x780 / d_y=0x656.
+    //
+    // The Y/UV/alpha kernels therefore decode an empty buffer and `launch_color_convert`
+    // turns the all-zero planes into a flat [0,83,0,0] with alpha 0 — 0x53e0 in 16-bit,
+    // which is exactly 1342 << 4, and 1342 is what the BT.709 YCoCg inverse produces from
+    // Y=Cb=Cr=0. Every playout produces that corrupt first frame; whether anyone SEES it
+    // depends on a race, because a paused channel keeps the first frame it pops and a
+    // second, good frame usually supersedes it first. That is the whole reason this
+    // presented as an intermittent black channel after `LOAD` + an early `SEEK`.
+    //
+    // One synchronous copy per frame against a decode that measures 0.265 of the frame
+    // budget on a 12K asset. Re-measure both if that headroom ever goes.
+    CUDA_CHECK(cudaMemcpy(ctx->d_uncompressed, ctx->h_uncompressed,
+                          actual_uncompressed, cudaMemcpyHostToDevice));
     CUDA_CHECK(launch_y_precompute_offsets(hdr, ctx, s));
     CUDA_CHECK(launch_y_decode(hdr, ctx->d_uncompressed, ctx->d_y, ctx->d_y_bit_offsets, s));
     CUDA_CHECK(launch_uv_decode(hdr, ctx->d_uncompressed, ctx->d_u, ctx->d_v, s));

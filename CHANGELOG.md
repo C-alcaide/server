@@ -1,6 +1,59 @@
 CasparVP — Unreleased
 ==========================================
 
+### Fixed: NotchLC's first decoded frame came out of an empty buffer, and a paused channel could keep it forever
+
+`LOAD` followed promptly by `CALL 1-1 SEEK n` on `CUDA_NOTCHLC` + the Vulkan mixer rendered a
+black channel that never recovered — not after 1.5 s, not after 4 s. Intermittently: measured
+pass rates between 10% and 73% on identical binaries, which is why it resisted diagnosis for a
+long time and why several confident explanations of it were wrong.
+
+**The mechanism, measured with a device-side probe.** `notchlc_decode_gpu_phase` uploaded the
+decompressed frame with `cudaMemcpyAsync` on the same stream as every kernel that reads it, so
+CUDA orders it — and yet on the FIRST frame of a playout `d_uncompressed[0]` reads back as **0
+on the device** while the host staging buffer holds a valid block header (`texture_size_x =
+1920`, 1559 KB, and `gpu_phase` returning `cudaSuccess`):
+
+| | `d_uncompressed[0]` | `d_y[600·w]` | published texel |
+| :--- | :--- | :--- | :--- |
+| first frame | **0x0** | **0x0** | **0x53e00000** |
+| every later frame | 0x780 (= 1920) | 0x656 | 0x65606560 |
+
+So the Y/UV/alpha kernels decode an empty buffer and `launch_color_convert` turns all-zero
+planes into a flat `[0,83,0,0]` with **alpha 0**. `0x53e0` is exactly `1342 << 4`, and 1342 is
+what the BT.709 YCoCg inverse produces from `Y = Cb = Cr = 0` — the arithmetic identifies the
+frame as "decoded from nothing" rather than "not decoded".
+
+**Every playout produces that corrupt first frame.** Whether anyone sees it is the race: a
+paused channel keeps the first frame it pops, and usually a second, good frame supersedes the
+bad one first. An early `SEEK` discards the good frames and leaves the empty one resident, and
+the black channel is then permanent because nothing pops again.
+
+The upload is now synchronous. **Measured, and interleaved A/B rather than before/after,
+because the failure rate drifts far enough between sweeps to invent or hide any effect:**
+
+| arm | pass rate | 95% CI | sequence |
+| :--- | :--- | :--- | :--- |
+| synchronous upload | **12/12 = 100%** | [76%, 100%] | `............` |
+| async (previous) | 4/12 = 33% | [14%, 61%] | `.XXX.XX.X.XX` |
+
+**+67 points, Fisher exact p = 0.001.** 12 clean runs bound the remaining failure rate below
+about 24% rather than proving it zero, which is what that interval means.
+
+**No throughput cost**, on the heaviest asset available — 12288x6144 NotchLC, 25 s of looping
+playout, `<log-diagnostics>`: `decode-time` mean **0.265** / max **0.287** with the synchronous
+upload against mean 0.265 / max 0.287 with the async one, and `queue-fill` 0.648 against 0.503,
+so the decoder sits further ahead rather than behind. No dropped frames either way. The
+2026-08-19 baseline for this asset is mean 0.290 / max 0.400.
+
+Reproduce with `CasparCG-TestRunner`: `cli.py flake --decoder cuda_notchlc --mixer vulkan
+--seek 7`, and `--compare-server` for the A/B.
+
+**Not the fix, but kept:** the `cudaStreamSynchronize` added earlier today implements the
+contract `cuda_vk_texture.h` documents and `cuda_prores` follows. Measured against this same
+harness it moves the rate not at all (17% vs 25%, p = 1.000); the entry below has been
+corrected accordingly.
+
 ### Corrected: the NotchLC stream-synchronisation entry below claimed a fix it does not deliver
 
 The entry that follows says the missing `cudaStreamSynchronize` turned a black channel into a
