@@ -1,6 +1,34 @@
 CasparVP — Unreleased
 ==========================================
 
+### Corrected: the NotchLC stream-synchronisation entry below claimed a fix it does not deliver
+
+The entry that follows says the missing `cudaStreamSynchronize` turned a black channel into a
+correct one, and lists eight producer/mixer combinations passing. **Every one of those numbers
+was a single run, and the failure is non-deterministic** — measured afterwards at pass rates
+between 17% and 73% on identical binaries. At a 73% pass rate a single green run has a 73%
+chance of meaning nothing.
+
+Measured properly, with the two binaries run **alternately inside one sweep** (sequential
+sweeps cannot be compared; the rate drifts far enough between them to invent or hide any
+effect — 73% [48-89] then 20% [7-45] on the same build):
+
+| arm | pass rate | 95% CI | sequence |
+| :--- | :--- | :--- | :--- |
+| with the synchronisation | 2/12 = 17% | [5%, 45%] | `XXXX..XXXXXX` |
+| without it | 3/12 = 25% | [9%, 53%] | `.XXX.XXXXXX.` |
+
+−8 points, **Fisher exact p = 1.000**. The synchronisation makes **no detectable difference**
+to this failure. 24 runs cannot resolve a small effect, but there is no sign of the large one
+that was claimed.
+
+**The code stays**, on the grounds it should have been committed on in the first place and
+not on a run: `cuda_vk_texture.h`'s own usage block ends with `cudaStreamSynchronize(stream)`,
+`cuda_prores` has two such calls, and this module had none — an unsynchronised write to a
+texture handed to another API is a defect whether or not it is the one being hunted. The
+early-seek black frame remains **unexplained and open**; see
+`CasparCG-TestRunner/cli.py flake`, which is the tool that should have been built first.
+
 ### Fixed: the CUDA NotchLC producer published Vulkan textures without waiting for its own kernels
 
 `notchlc_decode_gpu_phase` launches asynchronously on `ctx.stream`, and on the Vulkan zero-copy
