@@ -1,6 +1,46 @@
 CasparVP — Unreleased
 ==========================================
 
+### Fixed: the CUDA NotchLC producer published Vulkan textures without waiting for its own kernels
+
+`notchlc_decode_gpu_phase` launches asynchronously on `ctx.stream`, and on the Vulkan zero-copy
+path nothing ordered it against the mixer's read. The OpenGL branch gets that ordering for free
+from `cgt_->unmap(ctx.stream)`; the Vulkan branch has no unmap, because the mapping is persistent.
+**This module had no stream synchronisation at all** — `cuda_prores`, which it was derived from,
+has two (`prores_producer.cpp:504` and `:810`).
+
+It normally survives, because the mixer samples a frame later and the kernels are long done.
+Measured 2026-08-20 for the case where it does not: `CALL 1-1 SEEK n` issued **before the
+producer's first frame exists**. The frame was published from an untouched VK texture and read
+back as a flat `[0,83,0,0]`; because a paused channel keeps that frame as its cached still, it
+never recovered — not after 1.5 s, not after 4.0 s. Only this producer on this backend:
+
+| producer | Vulkan, before | Vulkan, after | OpenGL |
+| :--- | :--- | :--- | :--- |
+| `cuda_notchlc` | **black** | **OK, marker 7, mean 87.48** | OK |
+| `cuda_prores` | OK | OK | OK |
+| `hap_native` | OK | OK | OK |
+| `ffmpeg` | OK | OK | OK |
+
+Eight combinations, `LOAD` then `SEEK 7` with no wait between, IMAGE consumer capture. The one
+that failed now matches OpenGL exactly.
+
+**What this does NOT fix, and it is worth being exact.** The harness case that led here —
+`cli.py run --codec notchlc --decoder cuda_notchlc --mixer vulkan` — still produces the same flat
+frame. Driving the identical AMCP sequence against the identical config file by hand passes, so
+something in that path is still unaccounted for. Eliminated by measurement, one variable at a
+time: the consumer (`image` and `screen_gpu` both fail there, both pass by hand), `PRINT RAW`,
+`auto-color-convert` either way, the second channel the config declares, the capture filenames,
+any wait after the SEEK up to 4 s, and adding a screen consumer to the failing config. The fix
+above stands on its own — missing synchronisation on a path with no other ordering is a defect
+whether or not it is the whole story — but the harness case remains open.
+
+**Not measured: throughput.** The synchronisation blocks the decode thread until the kernels
+finish, which removes overlap between consecutive frames. `cuda_prores` carries the same
+synchronisation and paces fine, and the 1080p cases show no change, but the number that matters
+is `decode-time` on the 12K asset, recorded at mean 0.290 / max 0.400 of the frame budget on
+2026-08-19. That comparison has not been re-run.
+
 ### Fixed: a partial-alpha video layer composited wrongly — a fully transparent region rendered as opaque colour
 
 `pixel_format_desc::is_straight_alpha` says whether a source's RGB already carries its alpha.

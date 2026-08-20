@@ -886,9 +886,32 @@ struct notchlc_producer_impl final : public core::frame_producer
             if (use_gpu_zerocopy) {
                 err = notchlc_decode_gpu_phase(&ctx, item.hdr, item.actual_uncompressed, cm, arr);
 #ifdef ENABLE_VULKAN
-                if (!use_vulkan_ && cgt_[gl_slot])
+                if (use_vulkan_) {
+                    // WAIT FOR THE KERNELS before this texture is published to the mixer.
+                    // `notchlc_decode_gpu_phase` is asynchronous on `ctx.stream`, and on this
+                    // path nothing else orders it against the mixer's read: the OGL branch
+                    // below gets that ordering for free from `unmap`, and the Vulkan branch
+                    // has no unmap because the mapping is persistent. This module had NO
+                    // stream synchronisation at all; `cuda_prores`, which it was derived
+                    // from, has two.
+                    //
+                    // It normally survives: the mixer samples a frame later, by which time
+                    // the kernels are long done. Measured 2026-08-20 for the case where it
+                    // does not -- `CALL 1-1 SEEK n` issued before the producer's first frame
+                    // exists. The frame was published from an untouched VK texture, read back
+                    // as a flat [0,83,0,0], and because a paused channel keeps that frame as
+                    // its cached still it never recovered: not after 1.5 s, not after 4.0 s.
+                    // Only this producer on this backend -- `cuda_prores`, `hap_native` and
+                    // `ffmpeg` all survive the same sequence on both mixers, and
+                    // `cuda_notchlc` survives it on OpenGL.
+                    const cudaError_t sync_err = cudaStreamSynchronize(ctx.stream);
+                    if (err == cudaSuccess)
+                        err = sync_err;
+                } else
 #endif
+                if (cgt_[gl_slot]) {
                     cgt_[gl_slot]->unmap(ctx.stream);
+                }
             } else {
                 err = notchlc_decode_gpu_phase(&ctx, item.hdr, item.actual_uncompressed, cm, nullptr);
                 if (err == cudaSuccess) {
