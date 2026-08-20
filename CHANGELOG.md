@@ -1,6 +1,44 @@
 CasparVP — Unreleased
 ==========================================
 
+### Fixed: an 8-bit IMAGE capture of partial-alpha content came out the wrong COLOUR, not merely the wrong brightness
+
+`image::unmultiply()` (`src/modules/image/util/image_algorithms.h`) straightened alpha with
+`static_cast<uint8_t>(c * 255 / alpha)` and no clamp. `c * 255 / alpha` exceeds 255 for any pixel
+brighter than its own alpha, and the cast **wraps**: 442 becomes 186, so a yellow bar came out red.
+Not a highlight rolled off — a different hue.
+
+The 16-bit path never went through here and has always clamped (`image_consumer.cpp`,
+`std::min(65535, ...)`), so this is 8 bit being brought into line with its own sibling rather than a
+new convention.
+
+**Why it was invisible until now.** Every alpha-carrying video fixture in the harness was fully
+opaque — `prores_4444a` and `qtrle` both measured 0xFFFF everywhere — and `unmultiply` skips
+`alpha == 0` and `alpha == 255`. The function was reached on every 8-bit capture and had nothing to
+do. Fixtures carrying real partial alpha landed on 2026-08-20 and it failed on the first run.
+
+**Measured**, `qtrle_bt709_sdr.mov` through the IMAGE consumer at 8 bit, 1080p2500, both mixers.
+`PRINT RAW` is bit-identical to the file in every run, so the producer is not in question:
+
+| | before | after |
+| :--- | :--- | :--- |
+| capture vs the file, frame-wide | 14.97 dB | **18.88 dB** |
+| partial-alpha pixels matching `(c*255/a) mod 256` | **100.00%** | 58.6% |
+| partial-alpha pixels matching `min(255, c*255/a)` | 58.6% | **100.00%** |
+
+979 740 pixels differ from the producer's frame, and **every one of them is partial-alpha** — no
+opaque or fully-clear pixel moves, before or after.
+
+**A second finding this exposes, not fixed here.** After the clamp, **41.4% of partial-alpha
+components saturate at 255**, and the capture still sits 18.88 dB from the file. That is the
+un-premultiply itself: if the consumer's input were premultiplied, `(c*a)*255/a` could never exceed
+255 and nothing could clamp, so the clamping proves **the data reaching the IMAGE consumer is not
+premultiplied** and the division is unwarranted. The comment at `image_consumer.cpp:306` asserts the
+opposite ("mixer produces premultiplied"), and `docs/alpha_domain_2026-08-12.md` establishes only
+that the mixer *grades* premultiplied — not what it emits. Which of the two is wrong decides whether
+the fix is dropping the division or premultiplying earlier, and that changes every capture of
+partial-alpha content, so it is left open rather than guessed at.
+
 ### Fixed: a NotchLC clip encoded WITHOUT alpha played as a black channel, and took the CUDA context with it
 
 `LOAD 1-1 CUDA_NOTCHLC "clip"` on a NotchLC file carrying no alpha channel returned `202 LOAD OK`

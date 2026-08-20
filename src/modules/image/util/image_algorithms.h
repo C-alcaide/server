@@ -212,15 +212,33 @@ void unmultiply(SrcDstView& view_to_modify)
         int alpha = static_cast<int>(pixel.a());
 
         if (alpha != 0 && alpha != 255) {
+            // CLAMP, do not let the cast wrap. `c * 255 / alpha` exceeds 255 whenever the
+            // colour is brighter than its alpha, which is every partial-alpha pixel of any
+            // source that is not already premultiplied — and `static_cast<uint8_t>` of 442
+            // is 186, so a yellow bar came out red rather than merely too bright.
+            //
+            // Measured 2026-08-20 on `qtrle_bt709_sdr.mov` through the IMAGE consumer at
+            // 8 bit: the producer's own frame (`PRINT RAW`) was bit-identical to the file,
+            // and the capture differed at 979 740 pixels — every partial-alpha pixel and no
+            // other — mean 42.4/255. Modelling it as `(c * 255 / alpha) mod 256` matched
+            // 100.00% of them to within 1 LSB, which is what identified the cast.
+            //
+            // The 16-bit path does not go through here and has always clamped
+            // (`image_consumer.cpp`, `std::min(65535, ...)`). This brings 8 bit into line
+            // with its own sibling rather than choosing a new convention.
+            auto straighten = [alpha](uint8_t c) {
+                return static_cast<uint8_t>(std::min(255, static_cast<int>(c) * 255 / alpha));
+            };
+
             // We don't event try to premultiply 0 since it will be unaffected.
             if (pixel.r())
-                pixel.r() = static_cast<uint8_t>(static_cast<int>(pixel.r()) * 255 / alpha);
+                pixel.r() = straighten(pixel.r());
 
             if (pixel.g())
-                pixel.g() = static_cast<uint8_t>(static_cast<int>(pixel.g()) * 255 / alpha);
+                pixel.g() = straighten(pixel.g());
 
             if (pixel.b())
-                pixel.b() = static_cast<uint8_t>(static_cast<int>(pixel.b()) * 255 / alpha);
+                pixel.b() = straighten(pixel.b());
         }
     });
 }
