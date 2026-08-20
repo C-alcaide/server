@@ -59,15 +59,46 @@ void log_callback(void* ptr, int level, const char* fmt, va_list vl)
         return;
     line[0] = 0;
 
+    // `AVClass::item_name` IS ALLOWED TO BE NULL, and calling it anyway is a jump to
+    // address 0. FFmpeg's own formatter says so plainly -- `libavutil/log.c`:
+    //
+    //     return (cls->item_name ? cls->item_name : av_default_item_name)(obj);
+    //
+    // so a class that omits it is not malformed, it is opting into the default. Nearly every
+    // class in FFmpeg sets `av_default_item_name` explicitly, which is why this went
+    // unnoticed for years; `FFVulkanContext`'s class (`libavutil/vulkan.c`) does not:
+    //
+    //     static const AVClass vulkan_context_class = {
+    //         .class_name = "vk",
+    //         .version    = LIBAVUTIL_VERSION_INT,
+    //         .parent_log_context_offset = offsetof(FFVulkanContext, log_parent),
+    //     };
+    //
+    // So the FIRST log line FFmpeg emits from a Vulkan compute decoder killed the decode
+    // thread. Measured 2026-08-21: `prores_vulkan` reported "Vulkan decoder initialization
+    // successful" -- logged against the AVCodecContext, whose class is fine -- and then took
+    // an access violation at address 0 on the next line, 13,675 times in five seconds. It
+    // read as an FFmpeg or driver fault for hours, because everything about it pointed at
+    // Vulkan: it survived FFmpeg creating its own device, every extension and feature the
+    // decoder wanted, the queue families, the frame pool and the thread count, and the same
+    // decode of the same file worked in ffmpeg.exe -- which uses FFmpeg's own null-safe
+    // callback. Attributing it took a vectored exception handler to catch the first-chance
+    // fault (/EHa turns it into a C++ exception that `catch (...)` swallows) plus DbgHelp to
+    // resolve the return address, which named this function.
+    const auto item_name_of = [](AVClass* cls, void* obj) -> const char* {
+        return (cls->item_name != nullptr ? cls->item_name : av_default_item_name)(obj);
+    };
+
 #undef fprintf
     if (print_prefix_tss && (avc != nullptr)) {
         if (avc->parent_log_context_offset != 0) {
             AVClass** parent =
                 *reinterpret_cast<AVClass***>(static_cast<uint8_t*>(ptr) + avc->parent_log_context_offset);
             if ((parent != nullptr) && (*parent != nullptr))
-                std::snprintf(line, sizeof(line), "[%s @ %p] ", (*parent)->item_name(parent), parent);
+                std::snprintf(line, sizeof(line), "[%s @ %p] ", item_name_of(*parent, parent), parent);
         }
-        std::snprintf(line + strlen(line), sizeof(line) - strlen(line), "[%s @ %p] ", avc->item_name(ptr), ptr);
+        std::snprintf(
+            line + strlen(line), sizeof(line) - strlen(line), "[%s @ %p] ", item_name_of(avc, ptr), ptr);
     }
 
     std::vsnprintf(line + strlen(line), sizeof(line) - strlen(line), fmt, vl);

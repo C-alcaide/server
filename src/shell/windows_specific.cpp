@@ -28,6 +28,8 @@
 #include <mmsystem.h>
 #include <winnt.h>
 
+#include <atomic>
+#include <cstdint>
 #include <cstdlib>
 #include <sstream>
 #include <thread>
@@ -51,6 +53,95 @@ _declspec(dllexport) DWORD AmdPowerXpressRequestHighPerformance = 0x00000001;
 #include <common/os/windows/process.h>
 
 namespace caspar {
+
+// TEMPORARY DIAGNOSTIC (remove). A vectored handler sees the FIRST-CHANCE exception, before
+// /EHa translates an access violation into a C++ exception that a `catch (...)` swallows --
+// which is why the prores_vulkan fault has only ever been visible as "Decoder thread non-C++
+// exception". Enabled only when CASPARVP_VEH_TRACE is set.
+namespace {
+std::atomic<int> g_veh_reports{0};
+
+std::wstring module_for(void* addr)
+{
+    HMODULE mod = nullptr;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            reinterpret_cast<LPCWSTR>(addr),
+                            &mod) ||
+        !mod) {
+        return L"<no module>";
+    }
+    wchar_t path[MAX_PATH]{};
+    GetModuleFileNameW(mod, path, MAX_PATH);
+    const auto base   = reinterpret_cast<std::uintptr_t>(mod);
+    const auto offset = reinterpret_cast<std::uintptr_t>(addr) - base;
+    std::wstringstream ss;
+    const wchar_t*     name = wcsrchr(path, L'\\');
+    ss << (name ? name + 1 : path) << L"+0x" << std::hex << offset;
+    return ss.str();
+}
+
+LONG WINAPI veh_trace(EXCEPTION_POINTERS* info)
+{
+    if (info->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION)
+        return EXCEPTION_CONTINUE_SEARCH;
+    // tbbmalloc probes memory and HANDLES its own access violations; they are normal and
+    // they arrive in the hundreds, so they would eat any report budget.
+    const auto where = module_for(info->ExceptionRecord->ExceptionAddress);
+    if (where.find(L"tbbmalloc") != std::wstring::npos)
+        return EXCEPTION_CONTINUE_SEARCH;
+    if (g_veh_reports.fetch_add(1) >= 12)
+        return EXCEPTION_CONTINUE_SEARCH;
+
+    try {
+        auto* rec = info->ExceptionRecord;
+        auto* ctx = info->ContextRecord;
+
+        std::wstringstream ss;
+        ss << L"[VEH] access violation at " << rec->ExceptionAddress << L" (" << where << L")";
+        ss << L" op=" << rec->ExceptionInformation[0] << L" addr=0x" << std::hex
+           << rec->ExceptionInformation[1] << std::dec;
+
+        // A jump to a null function pointer leaves RIP at 0 and the RETURN ADDRESS on top of
+        // the stack, so [RSP] names the caller -- the only way to find out whose pointer it
+        // was. For any other fault RSP is not a return address, hence the guard.
+        if (reinterpret_cast<std::uintptr_t>(rec->ExceptionAddress) == 0 && ctx->Rsp) {
+            void* ret = nullptr;
+            if (ReadProcessMemory(GetCurrentProcess(),
+                                  reinterpret_cast<void*>(ctx->Rsp),
+                                  &ret,
+                                  sizeof(ret),
+                                  nullptr) &&
+                ret) {
+                ss << L"\n[VEH] called from " << ret << L" (" << module_for(ret) << L")";
+            }
+            ss << L"\n[VEH] rax=" << reinterpret_cast<void*>(ctx->Rax) << L" rbx="
+               << reinterpret_cast<void*>(ctx->Rbx) << L" rcx=" << reinterpret_cast<void*>(ctx->Rcx)
+               << L" rdx=" << reinterpret_cast<void*>(ctx->Rdx);
+
+            // Walk a few more stack slots: the immediate caller may itself be a thunk.
+            for (int i = 1; i <= 8; ++i) {
+                void* slot = nullptr;
+                if (!ReadProcessMemory(GetCurrentProcess(),
+                                       reinterpret_cast<void*>(ctx->Rsp + i * sizeof(void*)),
+                                       &slot,
+                                       sizeof(slot),
+                                       nullptr))
+                    break;
+                if (!slot)
+                    continue;
+                const auto m = module_for(slot);
+                if (m != L"<no module>")
+                    ss << L"\n[VEH]   stack[" << i << L"] " << slot << L" (" << m << L")";
+            }
+        }
+
+        CASPAR_LOG(error) << ss.str();
+    } catch (...) {
+    }
+
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+} // namespace
 
 LONG WINAPI UserUnhandledExceptionFilter(EXCEPTION_POINTERS* info)
 {
@@ -90,6 +181,9 @@ void setup_prerequisites()
     _setmode(_fileno(stdin), _O_U16TEXT);
 
     SetUnhandledExceptionFilter(UserUnhandledExceptionFilter);
+
+    if (std::getenv("CASPARVP_VEH_TRACE"))
+        AddVectoredExceptionHandler(1, veh_trace);
 }
 
 void change_icon(const HICON hNewIcon)
