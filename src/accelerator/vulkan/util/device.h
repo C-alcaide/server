@@ -85,6 +85,13 @@ class device final
     /// device.cpp for what FFmpeg's `AVVulkanDeviceContext` asks for and why the single
     /// graphics queue family matters.
     vk::Instance                       getVkInstance() const;
+    /// A queue reserved for another API (an FFmpeg Vulkan decoder) to submit on, so that
+    /// sharing this device does not mean sharing a queue. Check
+    /// `hasDedicatedDecodeQueue()` first: on a GPU with no separate compute family this
+    /// falls back to the graphics queue's family, which is not isolation.
+    vk::Queue                          getDecodeQueue() const;
+    uint32_t                           getDecodeQueueFamily() const;
+    bool                               hasDedicatedDecodeQueue() const;
     uint32_t                           getGraphicsQueueFamily() const;
     PFN_vkGetInstanceProcAddr          getInstanceProcAddr() const;
     vk::CommandPool                    getCommandPool() const;

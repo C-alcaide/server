@@ -156,6 +156,11 @@ struct device::impl : public std::enable_shared_from_this<impl>
     vk::Device                         _device;
     vk::Queue                          _queue;
     uint32_t                           _queue_family = 0;
+    // A queue reserved for another API to submit on -- see `getDecodeQueue`. Null, and
+    // _decode_queue_family == _queue_family, when this GPU has no separate compute family.
+    vk::Queue                          _decode_queue;
+    uint32_t                           _decode_queue_family = 0;
+    bool                               _decode_queue_dedicated = false;
     vk::CommandPool                    _command_pool;
     VmaAllocator                       _allocator;
 
@@ -533,6 +538,47 @@ struct device::impl : public std::enable_shared_from_this<impl>
         _queue            = vk::Queue(vkb_device.get_queue(vkb::QueueType::graphics).value());
         auto queue_family = vkb_device.get_queue_index(vkb::QueueType::graphics).value();
         _queue_family     = queue_family;
+
+        // A SEPARATE queue for another API to submit on, so sharing this device never
+        // means sharing a queue.
+        //
+        // Everything this class submits goes through one graphics queue with no mutex --
+        // `_queue.submit` at two sites, protected only by the invariant that all device
+        // work runs on the dispatch thread. A second API submitting to that same queue
+        // from its own thread is undefined behaviour, and FFmpeg's own queue mutexes
+        // would not help: they guard FFmpeg's submissions, not ours. Handing out a queue
+        // from a different family removes the question instead of synchronising it.
+        //
+        // Falls back to the graphics family when the GPU offers no distinct compute
+        // family. That is NOT silently equivalent, so it is recorded and reported by
+        // `hasDedicatedDecodeQueue()`; a caller that needs isolation must check rather
+        // than assume.
+        _decode_queue_family    = queue_family;
+        _decode_queue_dedicated = false;
+        // `get_queue(compute)` and not `get_dedicated_queue(compute)`. vk-bootstrap's
+        // "dedicated" means COMPUTE with neither GRAPHICS nor TRANSFER
+        // (VkBootstrap.cpp:1047-1055, called with undesired_flags = TRANSFER), and
+        // NVIDIA's compute-only family carries TRANSFER -- so it rejected the family
+        // FFmpeg itself reports as "queue family 2 (queues: 8) for compute" on this GPU,
+        // and the first version of this logged "no dedicated compute queue family" on a
+        // card that plainly has one. The plain accessor uses `get_separate_queue_index`,
+        // which is the question actually being asked: a compute family that is not the
+        // graphics one.
+        if (auto q = vkb_device.get_queue(vkb::QueueType::compute)) {
+            if (auto qf = vkb_device.get_queue_index(vkb::QueueType::compute)) {
+                _decode_queue           = vk::Queue(q.value());
+                _decode_queue_family    = qf.value();
+                _decode_queue_dedicated = _decode_queue_family != queue_family;
+            }
+        }
+        if (!_decode_queue_dedicated) {
+            CASPAR_LOG(info) << L"[vk::device] no dedicated compute queue family on this GPU; "
+                                L"an external decoder would have to share the graphics queue";
+        } else {
+            CASPAR_LOG(info) << L"[vk::device] reserved compute queue family "
+                             << _decode_queue_family << L" for external decoders (graphics is "
+                             << queue_family << L")";
+        }
 
         vk::CommandPoolCreateInfo pool_info;
         pool_info.flags            = vk::CommandPoolCreateFlagBits::eResetCommandBuffer;
@@ -1521,6 +1567,15 @@ vk::PhysicalDeviceMemoryProperties device::getMemoryProperties() { return impl_-
 // graphics family carries COMPUTE -- but it is why the Vulkan VIDEO codecs (h264/hevc/
 // av1/vp9, which need VK_KHR_video_decode_queue and a decode family) are a separate
 // question from the compute ones.
+/// A queue another API may submit on without racing the mixer. See the note at its
+/// creation for why this exists rather than a lock. Null when `hasDedicatedDecodeQueue()`
+/// is false, in which case the family index equals the graphics one.
+vk::Queue device::getDecodeQueue() const { return impl_->_decode_queue; }
+
+uint32_t device::getDecodeQueueFamily() const { return impl_->_decode_queue_family; }
+
+bool device::hasDedicatedDecodeQueue() const { return impl_->_decode_queue_dedicated; }
+
 vk::Instance device::getVkInstance() const { return vk::Instance(impl_->_vkb_instance.instance); }
 
 uint32_t device::getGraphicsQueueFamily() const { return impl_->_queue_family; }
