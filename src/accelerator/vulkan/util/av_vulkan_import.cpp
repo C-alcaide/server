@@ -1,0 +1,242 @@
+/*
+ * Copyright (c) 2026 CasparCG Contributors
+ *
+ * This file is part of CasparCG (www.casparcg.com).
+ *
+ * CasparCG is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * CasparCG is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with CasparCG. If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#include "av_vulkan_import.h"
+
+#include "device.h"
+#include "texture.h"
+#include "texture_wrapper.h"
+
+#include <common/except.h>
+#include <common/log.h>
+
+#include <exception>
+#include <vector>
+
+namespace caspar { namespace accelerator { namespace vulkan {
+
+bool copy_av_vulkan_planes(void*                                        vk_device,
+                           const std::vector<av_plane_source>&          planes,
+                           common::bit_depth                            depth,
+                           std::vector<std::shared_ptr<core::texture>>& out)
+{
+    auto* dev = static_cast<device*>(vk_device);
+    if (!dev || planes.empty())
+        return false;
+
+    // AVVkFrame carries up to AV_NUM_DATA_POINTERS planes; a YCbCr(A) frame is 3 or 4.
+    if (planes.size() > 4) {
+        CASPAR_LOG(warning) << L"[vk::av_import] " << planes.size()
+                            << L" planes is more than this path handles";
+        return false;
+    }
+
+    for (const auto& p : planes) {
+        if (!p.image || !p.semaphore || p.width <= 0 || p.height <= 0) {
+            CASPAR_LOG(warning) << L"[vk::av_import] a plane is incompletely described";
+            return false;
+        }
+        // VK_IMAGE_LAYOUT_UNDEFINED means the contents are undefined, so copying from it
+        // would produce a picture out of nothing. Refusing also lets the barriers below
+        // restore the incoming layout unconditionally, which is what keeps FFmpeg's
+        // `AVVkFrame::layout[]` bookkeeping true without the caller writing anything back.
+        if (p.layout == static_cast<int>(VK_IMAGE_LAYOUT_UNDEFINED)) {
+            CASPAR_LOG(warning) << L"[vk::av_import] a plane is still in VK_IMAGE_LAYOUT_UNDEFINED";
+            return false;
+        }
+    }
+
+    std::vector<std::shared_ptr<texture>> dst;
+
+    const bool ok = dev->dispatch_sync([&]() -> bool {
+        try {
+            for (const auto& p : planes) {
+                auto t = dev->create_texture(p.width, p.height, p.components, depth);
+                if (!t)
+                    return false;
+                dst.push_back(t);
+            }
+
+            auto cmds = dev->allocateCommandBuffers(1);
+            if (cmds.empty())
+                return false;
+            auto cmd = cmds.front();
+
+            cmd.begin(vk::CommandBufferBeginInfo{vk::CommandBufferUsageFlagBits::eOneTimeSubmit});
+
+            const auto range = vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1);
+
+            // Sources: from whatever layout FFmpeg left them in, to transfer-read. The
+            // layout is carried per plane in AVVkFrame rather than assumed, because the
+            // decoder does not promise a particular one.
+            std::vector<vk::ImageMemoryBarrier2> pre;
+            pre.reserve(planes.size() * 2);
+            for (const auto& p : planes) {
+                vk::ImageMemoryBarrier2 b{};
+                b.oldLayout           = static_cast<vk::ImageLayout>(p.layout);
+                b.newLayout           = vk::ImageLayout::eTransferSrcOptimal;
+                b.srcQueueFamilyIndex = vk::QueueFamilyIgnored;
+                b.dstQueueFamilyIndex = vk::QueueFamilyIgnored;
+                b.image               = static_cast<VkImage>(p.image);
+                b.subresourceRange    = range;
+                b.srcStageMask        = vk::PipelineStageFlagBits2::eAllCommands;
+                b.srcAccessMask       = vk::AccessFlagBits2::eMemoryWrite;
+                b.dstStageMask        = vk::PipelineStageFlagBits2::eTransfer;
+                b.dstAccessMask       = vk::AccessFlagBits2::eTransferRead;
+                pre.push_back(b);
+            }
+            // Destinations: whole-image overwrite, so eUndefined is honest and avoids
+            // preserving pooled contents nobody will read.
+            for (const auto& t : dst) {
+                vk::ImageMemoryBarrier2 b{};
+                b.oldLayout           = vk::ImageLayout::eUndefined;
+                b.newLayout           = vk::ImageLayout::eTransferDstOptimal;
+                b.srcQueueFamilyIndex = vk::QueueFamilyIgnored;
+                b.dstQueueFamilyIndex = vk::QueueFamilyIgnored;
+                b.image               = t->id();
+                b.subresourceRange    = range;
+                b.srcStageMask        = vk::PipelineStageFlagBits2::eTopOfPipe;
+                b.dstStageMask        = vk::PipelineStageFlagBits2::eTransfer;
+                b.dstAccessMask       = vk::AccessFlagBits2::eTransferWrite;
+                pre.push_back(b);
+            }
+            {
+                vk::DependencyInfo dep;
+                dep.setImageMemoryBarriers(pre);
+                cmd.pipelineBarrier2(dep);
+            }
+
+            const auto layers = vk::ImageSubresourceLayers(vk::ImageAspectFlagBits::eColor, 0, 0, 1);
+            for (size_t i = 0; i < planes.size(); ++i) {
+                vk::ImageCopy c(layers,
+                                vk::Offset3D{},
+                                layers,
+                                vk::Offset3D{},
+                                vk::Extent3D{static_cast<uint32_t>(planes[i].width),
+                                             static_cast<uint32_t>(planes[i].height),
+                                             1});
+                cmd.copyImage(static_cast<VkImage>(planes[i].image),
+                              vk::ImageLayout::eTransferSrcOptimal,
+                              dst[i]->id(),
+                              vk::ImageLayout::eTransferDstOptimal,
+                              c);
+            }
+
+            std::vector<vk::ImageMemoryBarrier2> post;
+            post.reserve(dst.size() + planes.size());
+            // Put the sources back exactly where they were found. `AVVkFrame::layout[]` is
+            // documented as updated after every barrier, and a client that moves an image
+            // and does not say so leaves FFmpeg's next barrier with a wrong oldLayout --
+            // which discards contents rather than transitioning them. Restoring here is
+            // preferable to reporting the new layout back, because it cannot be forgotten
+            // at a call site.
+            for (const auto& p : planes) {
+                vk::ImageMemoryBarrier2 b{};
+                b.oldLayout           = vk::ImageLayout::eTransferSrcOptimal;
+                b.newLayout           = static_cast<vk::ImageLayout>(p.layout);
+                b.srcQueueFamilyIndex = vk::QueueFamilyIgnored;
+                b.dstQueueFamilyIndex = vk::QueueFamilyIgnored;
+                b.image               = static_cast<VkImage>(p.image);
+                b.subresourceRange    = range;
+                b.srcStageMask        = vk::PipelineStageFlagBits2::eTransfer;
+                b.srcAccessMask       = vk::AccessFlagBits2::eTransferRead;
+                b.dstStageMask        = vk::PipelineStageFlagBits2::eAllCommands;
+                post.push_back(b);
+            }
+            for (const auto& t : dst) {
+                vk::ImageMemoryBarrier2 b{};
+                b.oldLayout           = vk::ImageLayout::eTransferDstOptimal;
+                b.newLayout           = vk::ImageLayout::eShaderReadOnlyOptimal;
+                b.srcQueueFamilyIndex = vk::QueueFamilyIgnored;
+                b.dstQueueFamilyIndex = vk::QueueFamilyIgnored;
+                b.image               = t->id();
+                b.subresourceRange    = range;
+                b.srcStageMask        = vk::PipelineStageFlagBits2::eTransfer;
+                b.srcAccessMask       = vk::AccessFlagBits2::eTransferWrite;
+                b.dstStageMask        = vk::PipelineStageFlagBits2::eFragmentShader;
+                b.dstAccessMask       = vk::AccessFlagBits2::eShaderRead;
+                post.push_back(b);
+            }
+            {
+                vk::DependencyInfo dep;
+                dep.setImageMemoryBarriers(post);
+                cmd.pipelineBarrier2(dep);
+            }
+
+            cmd.end();
+
+            // The AVVkFrame contract: wait on sem_value, signal sem_value + 1, per plane.
+            // Skipping the signal would leave FFmpeg free to reuse the image while this
+            // copy is still reading it, and the caller could not make that safe by any
+            // other means.
+            std::vector<vk::Semaphore>          sems;
+            std::vector<uint64_t>               wait_values;
+            std::vector<uint64_t>               signal_values;
+            std::vector<vk::PipelineStageFlags> stages;
+            sems.reserve(planes.size());
+            for (const auto& p : planes) {
+                sems.push_back(static_cast<VkSemaphore>(p.semaphore));
+                wait_values.push_back(p.sem_value);
+                signal_values.push_back(p.sem_value + 1);
+                stages.push_back(vk::PipelineStageFlagBits::eTransfer);
+            }
+
+            vk::TimelineSemaphoreSubmitInfo timeline{};
+            timeline.setWaitSemaphoreValues(wait_values);
+            timeline.setSignalSemaphoreValues(signal_values);
+
+            vk::SubmitInfo si{};
+            si.setCommandBuffers(cmd);
+            si.setWaitSemaphores(sems);
+            si.setWaitDstStageMask(stages);
+            si.setSignalSemaphores(sems);
+            si.pNext = &timeline;
+
+            // No fence and no host wait: this goes to the same queue the mixer's draw
+            // does, through the same dispatch thread, so the copy is ordered before any
+            // later sampling of these textures by construction.
+            dev->submit(si, vk::Fence{});
+            return true;
+        } catch (const std::exception& e) {
+            // std::exception rather than vk::SystemError: create_texture throws a
+            // caspar_exception for a layout this GPU cannot sample, and letting that
+            // escape the lambda would rethrow it out of dispatch_sync into the producer,
+            // where it reads as an unexplained decode failure.
+            CASPAR_LOG(warning) << L"[vk::av_import] plane copy failed: " << u16(e.what());
+            return false;
+        } catch (...) {
+            CASPAR_LOG(warning) << L"[vk::av_import] plane copy failed with an unknown exception";
+            return false;
+        }
+    });
+
+    if (!ok)
+        return false;
+
+    // vulkan::texture is not a core::texture; the mixer recognises a frame's planes by the
+    // device the wrapper carries, and the wrapper is also what makes PRINT RAW work on this
+    // path (see texture_wrapper::read_pixels, which keys off exactly this pointer).
+    out.clear();
+    out.reserve(dst.size());
+    for (auto& t : dst)
+        out.push_back(std::make_shared<VkReadableTextureWrapper>(std::move(t), dev->shared_from_this()));
+    return true;
+}
+
+}}} // namespace caspar::accelerator::vulkan

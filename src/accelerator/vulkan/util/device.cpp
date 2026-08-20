@@ -40,6 +40,7 @@
 #include <common/array.h>
 #include <common/assert.h>
 #include <common/env.h>
+#include <common/gpu_extension_requests.h>
 #include <common/except.h>
 #include <common/os/thread.h>
 #include <common/vulkan/gpu_luid.h>
@@ -393,6 +394,149 @@ struct device::impl : public std::enable_shared_from_this<impl>
             publish(std::wstring(L"vk.dispatch_by_kind.") + kind_name(static_cast<dispatch_kind>(i)), kind_stats_[i]);
     }
 
+    /// Enable the device features FFmpeg's Vulkan decoders assume, when configuration asks
+    /// for them.
+    ///
+    /// WHY THIS IS NECESSARY AT ALL, and it is the trap of the whole shared-device idea:
+    /// FFmpeg reads feature support from the PHYSICAL device (`ff_vk_load_props` calls
+    /// vkGetPhysicalDeviceFeatures2 on `hwctx->phys_dev`), so it learns what the GPU CAN do,
+    /// not what this logical device actually enabled. It then emits SPIR-V using those
+    /// capabilities. With the six features the mixer used to enable, `prores_vulkan`
+    /// initialised cleanly, logged "Vulkan decoder initialization successful", and took an
+    /// access violation at address 0 on its first dispatch -- measured 2026-08-21. There is
+    /// no error path for this: the mismatch is invisible to both sides.
+    ///
+    /// The list is FFmpeg's own, from `device_features_copy_needed` in
+    /// `libavutil/hwcontext_vulkan.c` (8.1) -- the exact set FFmpeg enables when it creates
+    /// its own device. Copied deliberately rather than derived: it is a statement about what
+    /// FFmpeg's shaders use, and only FFmpeg can make it.
+    ///
+    /// SUPPORTED-ONLY, and never a selection requirement. Every bit is intersected with what
+    /// this GPU reports, so a device missing one is created without it rather than rejected
+    /// -- putting these in the PhysicalDeviceSelector's required set would let an FFmpeg
+    /// feature list decide whether the mixer starts at all.
+    ///
+    /// GATED, so nothing changes for anyone who has not opted in. Enabling features is not
+    /// free of consequence -- `vulkanMemoryModel` and `bufferDeviceAddress` in particular
+    /// change what the driver may assume about every shader on the device, the mixer's own
+    /// included.
+    void enable_features_for_shared_decoders()
+    {
+        if (!env::properties().get(L"configuration.ffmpeg.producer.vulkan-decode", false))
+            return;
+
+        // EXTENSIONS FIRST, and they are not cosmetic. vkGetDeviceProcAddr returns null for
+        // every function belonging to an extension this logical device did not enable, and
+        // FFmpeg's guards are written against the extension mask it derives from
+        // `enabled_dev_extensions` -- which is a declaration, not a query. Declare an
+        // extension we did not enable and FFmpeg calls through a null pointer; enable it and
+        // do not declare it and FFmpeg simply uses less. So the two must agree, and the way
+        // to make them agree is to enable what FFmpeg asked for.
+        //
+        // The names come from `av_vk_get_optional_device_extensions()` via the registry, so
+        // this stays FFmpeg's list rather than a copy of it. `_enabled_device_extensions` is
+        // read from the builder after this returns, so whatever is enabled here is exactly
+        // what gets declared -- one source, no drift.
+        int extensions_added = 0;
+        for (const auto& name : common::requested_vulkan_device_extensions()) {
+            if (_vkb_physical_device.enable_extension_if_present(name.c_str()))
+                ++extensions_added;
+        }
+
+        vk::PhysicalDevice phys(_vkb_physical_device.physical_device);
+
+        vk::StructureChain<vk::PhysicalDeviceFeatures2,
+                           vk::PhysicalDeviceVulkan11Features,
+                           vk::PhysicalDeviceVulkan12Features,
+                           vk::PhysicalDeviceVulkan13Features>
+            supported_chain;
+        phys.getFeatures2(&supported_chain.get<vk::PhysicalDeviceFeatures2>());
+
+        const auto& s10 = supported_chain.get<vk::PhysicalDeviceFeatures2>().features;
+        const auto& s11 = supported_chain.get<vk::PhysicalDeviceVulkan11Features>();
+        const auto& s12 = supported_chain.get<vk::PhysicalDeviceVulkan12Features>();
+        const auto& s13 = supported_chain.get<vk::PhysicalDeviceVulkan13Features>();
+
+        int        enabled = 0;
+        const auto take    = [&enabled](vk::Bool32& dst, vk::Bool32 supported) {
+            if (supported) {
+                dst = VK_TRUE;
+                ++enabled;
+            }
+        };
+
+        vk::PhysicalDeviceFeatures f10{};
+        take(f10.shaderImageGatherExtended, s10.shaderImageGatherExtended);
+        take(f10.shaderStorageImageReadWithoutFormat, s10.shaderStorageImageReadWithoutFormat);
+        take(f10.shaderStorageImageWriteWithoutFormat, s10.shaderStorageImageWriteWithoutFormat);
+        take(f10.fragmentStoresAndAtomics, s10.fragmentStoresAndAtomics);
+        take(f10.vertexPipelineStoresAndAtomics, s10.vertexPipelineStoresAndAtomics);
+        take(f10.shaderInt64, s10.shaderInt64);
+        take(f10.shaderInt16, s10.shaderInt16);
+        take(f10.shaderFloat64, s10.shaderFloat64);
+
+        vk::PhysicalDeviceVulkan11Features f11{};
+        take(f11.samplerYcbcrConversion, s11.samplerYcbcrConversion);
+        take(f11.storagePushConstant16, s11.storagePushConstant16);
+        take(f11.storageBuffer16BitAccess, s11.storageBuffer16BitAccess);
+        take(f11.uniformAndStorageBuffer16BitAccess, s11.uniformAndStorageBuffer16BitAccess);
+
+        vk::PhysicalDeviceVulkan12Features f12{};
+        take(f12.timelineSemaphore, s12.timelineSemaphore);
+        take(f12.scalarBlockLayout, s12.scalarBlockLayout);
+        take(f12.bufferDeviceAddress, s12.bufferDeviceAddress);
+        take(f12.hostQueryReset, s12.hostQueryReset);
+        take(f12.storagePushConstant8, s12.storagePushConstant8);
+        take(f12.shaderInt8, s12.shaderInt8);
+        take(f12.storageBuffer8BitAccess, s12.storageBuffer8BitAccess);
+        take(f12.uniformAndStorageBuffer8BitAccess, s12.uniformAndStorageBuffer8BitAccess);
+        take(f12.shaderFloat16, s12.shaderFloat16);
+        take(f12.shaderBufferInt64Atomics, s12.shaderBufferInt64Atomics);
+        take(f12.shaderSharedInt64Atomics, s12.shaderSharedInt64Atomics);
+        take(f12.vulkanMemoryModel, s12.vulkanMemoryModel);
+        take(f12.vulkanMemoryModelDeviceScope, s12.vulkanMemoryModelDeviceScope);
+        take(f12.vulkanMemoryModelAvailabilityVisibilityChains,
+             s12.vulkanMemoryModelAvailabilityVisibilityChains);
+        take(f12.uniformBufferStandardLayout, s12.uniformBufferStandardLayout);
+        take(f12.runtimeDescriptorArray, s12.runtimeDescriptorArray);
+        take(f12.shaderSubgroupExtendedTypes, s12.shaderSubgroupExtendedTypes);
+        take(f12.shaderUniformBufferArrayNonUniformIndexing, s12.shaderUniformBufferArrayNonUniformIndexing);
+        take(f12.shaderSampledImageArrayNonUniformIndexing, s12.shaderSampledImageArrayNonUniformIndexing);
+        take(f12.shaderStorageBufferArrayNonUniformIndexing, s12.shaderStorageBufferArrayNonUniformIndexing);
+        take(f12.shaderStorageImageArrayNonUniformIndexing, s12.shaderStorageImageArrayNonUniformIndexing);
+
+        vk::PhysicalDeviceVulkan13Features f13{};
+        take(f13.dynamicRendering, s13.dynamicRendering);
+        take(f13.maintenance4, s13.maintenance4);
+        take(f13.synchronization2, s13.synchronization2);
+        take(f13.computeFullSubgroups, s13.computeFullSubgroups);
+        take(f13.subgroupSizeControl, s13.subgroupSizeControl);
+        take(f13.shaderZeroInitializeWorkgroupMemory, s13.shaderZeroInitializeWorkgroupMemory);
+
+        // Every bit was checked against this GPU above, so these cannot fail; the return
+        // value is still reported, because a false here means the intersection logic is
+        // wrong rather than that the GPU is limited.
+        const bool ok10 = _vkb_physical_device.enable_features_if_present(f10);
+        const bool ok11 = _vkb_physical_device.enable_extension_features_if_present(
+            static_cast<VkPhysicalDeviceVulkan11Features>(f11));
+        const bool ok12 = _vkb_physical_device.enable_extension_features_if_present(
+            static_cast<VkPhysicalDeviceVulkan12Features>(f12));
+        const bool ok13 = _vkb_physical_device.enable_extension_features_if_present(
+            static_cast<VkPhysicalDeviceVulkan13Features>(f13));
+
+        if (!ok10 || !ok11 || !ok12 || !ok13) {
+            CASPAR_LOG(warning) << L"[vk::device] some features FFmpeg's decoders need were reported "
+                                   L"supported and then refused (core="
+                                << ok10 << L" v11=" << ok11 << L" v12=" << ok12 << L" v13=" << ok13
+                                << L"); Vulkan decoding may fault";
+        } else {
+            CASPAR_LOG(info) << L"[vk::device] enabled " << extensions_added << L" extensions and "
+                             << enabled
+                             << L" additional device features for FFmpeg's Vulkan decoders "
+                                L"(vulkan-decode is on)";
+        }
+    }
+
     explicit impl(int gpu_index)
         : work_(make_work_guard(io_context_))
     {
@@ -526,6 +670,8 @@ struct device::impl : public std::enable_shared_from_this<impl>
         vk::PhysicalDeviceRobustness2FeaturesEXT robustness2Features;
         robustness2Features.nullDescriptor = true;
         _vkb_physical_device.enable_extension_features_if_present(robustness2Features);
+
+        enable_features_for_shared_decoders();
 
         // Create the logical device
         auto device_builder = vkb::DeviceBuilder(_vkb_physical_device);

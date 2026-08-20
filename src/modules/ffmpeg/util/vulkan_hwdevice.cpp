@@ -19,6 +19,7 @@
 
 #include "vulkan_hwdevice.h"
 
+#include <common/gpu_extension_requests.h>
 #include <common/log.h>
 
 #ifdef ENABLE_VULKAN
@@ -39,6 +40,37 @@ extern "C" {
 namespace caspar { namespace ffmpeg {
 
 #if defined(ENABLE_VULKAN) && LIBAVUTIL_VERSION_MAJOR >= 60
+
+namespace {
+/// Publish FFmpeg's own list of wanted device extensions before any Vulkan device exists.
+///
+/// `av_vk_get_optional_device_extensions()` is the list FFmpeg enables when it creates its
+/// own device, and matching that configuration is not optional: with only the mixer's four
+/// extensions declared, `prores_vulkan` initialised cleanly and then jumped to address 0 on
+/// its first dispatch -- a null device function pointer, because vkGetDeviceProcAddr returns
+/// null for anything whose extension the logical device never enabled, and FFmpeg's guards
+/// are written against what the DEVICE has rather than what it was told.
+///
+/// A static initialiser rather than module init, because the mixer's device is created
+/// before the ffmpeg module is initialised. See common/gpu_extension_requests.h.
+struct extension_registrar
+{
+    extension_registrar()
+    {
+        int          count = 0;
+        const char** names = av_vk_get_optional_device_extensions(&count);
+        if (!names || count <= 0)
+            return;
+        std::vector<std::string> list;
+        list.reserve(count);
+        for (int i = 0; i < count; ++i)
+            if (names[i])
+                list.emplace_back(names[i]);
+        common::register_vulkan_device_extension_request(std::move(list));
+    }
+};
+const extension_registrar g_extension_registrar;
+} // namespace
 
 AVBufferRef* make_vulkan_hwdevice_from_mixer(void* vk_device_handle)
 {
@@ -94,14 +126,36 @@ AVBufferRef* make_vulkan_hwdevice_from_mixer(void* vk_device_handle)
     hwctx->enabled_inst_extensions    = nullptr;
     hwctx->nb_enabled_inst_extensions = 0;
 
-    // Exactly one family, and deliberately not the graphics one. `flags` must be
-    // non-zero; COMPUTE plus TRANSFER is what NVIDIA's compute family carries, and it is
-    // what a compute decoder needs (`prores_vulkan` declares VK_QUEUE_COMPUTE_BIT).
-    hwctx->nb_qf     = 1;
+    // TWO families, and the second one is the whole reason this works.
+    //
+    // `qf[0]` is where FFmpeg actually submits: the compute family, deliberately not the
+    // graphics one. `flags` must be non-zero; COMPUTE plus TRANSFER is what NVIDIA's
+    // compute family carries and what a compute decoder needs (`prores_vulkan` declares
+    // VK_QUEUE_COMPUTE_BIT).
+    //
+    // `qf[1]` is the graphics family, and FFmpeg will never submit on it. This list is
+    // also what `hwcontext_vulkan.c` builds `pQueueFamilyIndices` from, and with a single
+    // entry it creates every decoded image VK_SHARING_MODE_EXCLUSIVE, owned by the compute
+    // family (`AVVkFrame::queue_family[i]`). The mixer's copy runs on its GRAPHICS queue,
+    // and reading an exclusively-owned image from another family without a queue family
+    // ownership transfer gives undefined contents -- a transfer this side cannot perform,
+    // because the release half must be submitted on FFmpeg's queue, which FFmpeg owns.
+    // Naming a second family makes the images CONCURRENT and `queue_family` IGNORED, so
+    // the question does not arise.
+    //
+    // It is inert for selection: `ff_vk_qf_find` returns the FIRST entry sharing ANY
+    // requested bit, so COMPUTE and TRANSFER both resolve to `qf[0]`, and no caller in
+    // lavu/lavc/lavfi asks for VK_QUEUE_GRAPHICS_BIT at all. Declaring GRAPHICS alone here
+    // understates what the family can do, which is the safe direction: FFmpeg uses less
+    // than the device offers rather than calling into something that was never enabled.
+    hwctx->nb_qf     = 2;
     hwctx->qf[0].idx = static_cast<int>(info.decode_qf);
     hwctx->qf[0].num = 1;
     hwctx->qf[0].flags =
         static_cast<VkQueueFlagBits>(VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT);
+    hwctx->qf[1].idx   = static_cast<int>(info.graphics_qf);
+    hwctx->qf[1].num   = 1;
+    hwctx->qf[1].flags = VK_QUEUE_GRAPHICS_BIT;
 
     const int err = av_hwdevice_ctx_init(ref);
     if (err < 0) {

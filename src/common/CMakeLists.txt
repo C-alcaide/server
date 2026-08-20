@@ -8,6 +8,7 @@ set(SOURCES
 
 		base64.cpp
 		env.cpp
+		gpu_extension_requests.cpp
 		filesystem.cpp
 		log.cpp
 		tweener.cpp
@@ -44,6 +45,7 @@ set(HEADERS
 		endian.h
 		enum_class.h
 		env.h
+		gpu_extension_requests.h
 		executor.h
 		except.h
 		filesystem.h

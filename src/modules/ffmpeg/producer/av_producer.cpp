@@ -48,6 +48,7 @@
 // Header-only in the Vulkan sense: it exposes no Vulkan types, so this
 // translation unit needs neither the Vulkan headers nor its dispatch loader.
 #include <accelerator/vulkan/util/d3d11_import_bridge.h>
+#include <accelerator/vulkan/util/av_vulkan_import.h>
 #endif
 #endif
 
@@ -72,6 +73,12 @@ extern "C" {
 #include <libavutil/samplefmt.h>
 #include <libavutil/hwcontext.h>
 #include <libavutil/hwcontext_d3d11va.h>
+#if defined(ENABLE_VULKAN) && LIBAVUTIL_VERSION_MAJOR >= 60
+// FFmpeg 8's Vulkan compute decoders. The module gets the Vulkan SDK's include path for
+// this one header alone (see src/modules/ffmpeg/CMakeLists.txt); it touches no Vulkan type
+// of its own beyond what AVVkFrame exposes.
+#include <libavutil/hwcontext_vulkan.h>
+#endif
 }
 
 #include <algorithm>
@@ -1290,6 +1297,75 @@ void loop_cache_release(int64_t bytes)
         g_loop_cache_bytes.fetch_sub(bytes, std::memory_order_relaxed);
 }
 
+#if defined(ENABLE_VULKAN) && LIBAVUTIL_VERSION_MAJOR >= 60
+/// Describe an AVVkFrame's planes for the mixer's importer, or return an empty vector.
+///
+/// The geometry comes from `sw_format` rather than from the VkImages, because a plane's
+/// dimensions are the pixel format's business and the images carry no subsampling
+/// information. `depth_out` and `alpha_out` describe what the mixer must be told.
+std::vector<accelerator::vulkan::av_plane_source>
+describe_av_vulkan_planes(const AVFrame* av, common::bit_depth& depth_out, bool& alpha_out)
+{
+    std::vector<accelerator::vulkan::av_plane_source> out;
+
+    if (!av || !av->hw_frames_ctx)
+        return out;
+
+    auto* vkf = reinterpret_cast<AVVkFrame*>(av->data[0]);
+    auto* fc  = reinterpret_cast<AVHWFramesContext*>(av->hw_frames_ctx->data);
+    if (!vkf || !fc)
+        return out;
+
+    const auto* pd = av_pix_fmt_desc_get(fc->sw_format);
+    if (!pd)
+        return out;
+
+    const int nb_planes = av_pix_fmt_count_planes(fc->sw_format);
+    if (nb_planes != 3 && nb_planes != 4)
+        return out; // only planar YCbCr(A) reaches the mixer's ycbcr shapes
+
+    // Each plane's VkFormat is R8_UNORM or R16_UNORM (hwcontext_vulkan's format table), so
+    // a 10-bit sample is a code 0..1023 sitting in the LOW bits of a 16-bit word. That is
+    // exactly what bit10 means to the mixer: precision factor 64. It is also why this path
+    // inherits the precision loss recorded above for yuv420p10le -- chroma is upsampled by
+    // the texture unit before the multiply, so rounding is amplified 64-fold. The decoder's
+    // output format is not ours to choose, and the alternative is a CPU round trip.
+    switch (pd->comp[0].depth) {
+        case 8:
+            depth_out = common::bit_depth::bit8;
+            break;
+        case 10:
+            depth_out = common::bit_depth::bit10;
+            break;
+        case 12:
+            depth_out = common::bit_depth::bit12;
+            break;
+        case 16:
+            depth_out = common::bit_depth::bit16;
+            break;
+        default:
+            return out;
+    }
+    alpha_out = nb_planes == 4;
+
+    for (int i = 0; i < nb_planes; ++i) {
+        accelerator::vulkan::av_plane_source ps;
+        ps.image     = vkf->img[i];
+        ps.semaphore = vkf->sem[i];
+        ps.sem_value = vkf->sem_value[i];
+        ps.layout    = static_cast<int>(vkf->layout[i]);
+        // Chroma planes only; alpha in yuva* is full resolution like luma.
+        const bool sub = i == 1 || i == 2;
+        ps.width      = sub ? AV_CEIL_RSHIFT(av->width, pd->log2_chroma_w) : av->width;
+        ps.height     = sub ? AV_CEIL_RSHIFT(av->height, pd->log2_chroma_h) : av->height;
+        ps.components = 1;
+        out.push_back(ps);
+    }
+
+    return out;
+}
+#endif
+
 /// Whether the GPU-direct decode path is enabled in configuration. Read once.
 bool gpu_direct_decode_requested()
 {
@@ -1310,10 +1386,44 @@ class Decoder
         // for this callback to prepare -- FFmpeg allocates the pool on the device it was
         // handed. Everything below is D3D11-specific and does not apply.
         for (p = pix_fmts; *p != -1; p++) {
-            if (*p == AV_PIX_FMT_VULKAN) {
-                CASPAR_LOG(debug) << L"[av_producer] decoder chose AV_PIX_FMT_VULKAN";
-                return AV_PIX_FMT_VULKAN;
+            if (*p != AV_PIX_FMT_VULKAN)
+                continue;
+#if defined(ENABLE_VULKAN) && LIBAVUTIL_VERSION_MAJOR >= 60
+            // ONE PLANE PER VkImage, and the whole hand-over depends on it. FFmpeg
+            // defaults to a single multi-planar VkImage where the format allows one --
+            // yuv422p10le has VK_FORMAT_G16_B16_R16_3PLANE_422_UNORM, so ProRes would
+            // arrive as `img[0]` alone with three disjoint aspect planes inside it.
+            // The mixer samples one VkImage per plane and its importer copies with
+            // VK_IMAGE_ASPECT_COLOR_BIT, so a multiplane frame would be read as if it
+            // were a single colour image: wrong size, wrong contents, no error.
+            //
+            // Set on the frames context rather than the device because the device is
+            // hand-filled here (av_hwdevice_ctx_alloc + _init), which never reads the
+            // `disable_multiplane` option a device-creation string would carry.
+            //
+            // Failing is not fatal: without a frames context FFmpeg allocates its own
+            // and the publish side declines, falling back to the CPU transfer path.
+            if (!ctx->hw_frames_ctx && ctx->hw_device_ctx) {
+                AVBufferRef* frames_ref = nullptr;
+                if (avcodec_get_hw_frames_parameters(ctx, ctx->hw_device_ctx, AV_PIX_FMT_VULKAN, &frames_ref) >= 0 &&
+                    frames_ref) {
+                    auto* frames = reinterpret_cast<AVHWFramesContext*>(frames_ref->data);
+                    auto* vk     = static_cast<AVVulkanFramesContext*>(frames->hwctx);
+                    // `flags` is a C enum, so |= needs the cast back in C++.
+                    vk->flags = static_cast<AVVkFrameFlags>(vk->flags | AV_VK_FRAME_FLAG_DISABLE_MULTIPLANE);
+                    if (av_hwframe_ctx_init(frames_ref) >= 0) {
+                        ctx->hw_frames_ctx = frames_ref;
+                    } else {
+                        CASPAR_LOG(warning) << L"[av_producer] could not initialise a single-plane Vulkan "
+                                               L"frame pool; the decoded frames will not reach the mixer "
+                                               L"directly";
+                        av_buffer_unref(&frames_ref);
+                    }
+                }
             }
+#endif
+            CASPAR_LOG(debug) << L"[av_producer] decoder chose AV_PIX_FMT_VULKAN";
+            return AV_PIX_FMT_VULKAN;
         }
 
         for (p = pix_fmts; *p != -1; p++) {
@@ -1638,9 +1748,17 @@ class Decoder
             // built its own default pool -- leaving the surfaces unbindable for
             // shader access. The pool with SHADER_RESOURCE is created in
             // get_format instead, which is where it works.
+            // Ask about the format this device actually produces. Probing for
+            // AV_PIX_FMT_D3D11 against a Vulkan device simply fails, leaving sw_pix_fmt
+            // unset -- harmless but pointless, and it hides the answer from the fallback
+            // path that does want it.
+            auto probe_fmt = AV_PIX_FMT_D3D11;
+#if defined(ENABLE_VULKAN) && LIBAVUTIL_VERSION_MAJOR >= 60
+            if (reinterpret_cast<AVHWDeviceContext*>(ctx->hw_device_ctx->data)->type == AV_HWDEVICE_TYPE_VULKAN)
+                probe_fmt = AV_PIX_FMT_VULKAN;
+#endif
             AVBufferRef* probe = nullptr;
-            if (avcodec_get_hw_frames_parameters(ctx.get(), ctx->hw_device_ctx, AV_PIX_FMT_D3D11, &probe) >= 0 &&
-                probe) {
+            if (avcodec_get_hw_frames_parameters(ctx.get(), ctx->hw_device_ctx, probe_fmt, &probe) >= 0 && probe) {
                 sw_pix_fmt = reinterpret_cast<AVHWFramesContext*>(probe->data)->sw_format;
                 av_buffer_unref(&probe);
             }
@@ -1661,9 +1779,17 @@ class Decoder
 
         thread = boost::thread([=]() {
             while (!abort_.load(std::memory_order_relaxed)) {
+                // Named so the catch below can say WHERE, which is the only reason the
+                // prores_vulkan fault could be attributed at all: "Decoder thread
+                // non-C++ exception" alone is true of the whole loop, and under /EHa an
+                // access violation inside FFmpeg arrives here looking exactly like one
+                // from our own code.
+                const char* stage = "enter";
                 try {
                     auto av_frame = alloc_frame();
+                    stage     = "avcodec_receive_frame";
                     auto ret      = avcodec_receive_frame(ctx.get(), av_frame.get());
+                    stage     = "after receive_frame";
 
                     if (ret == AVERROR(EAGAIN)) {
                         std::shared_ptr<AVPacket> packet;
@@ -1773,7 +1899,16 @@ class Decoder
                         if (frame_interlaced)
                             saw_interlaced_frame_.store(true, std::memory_order_relaxed);
 
-                        if (av_frame->format != AV_PIX_FMT_D3D11 && gpu_direct_mode_.load())
+                        // A hardware surface is not a software frame, and there are two
+                        // kinds now. Reading AV_PIX_FMT_VULKAN as "the decoder fell back to
+                        // software" stood the path down on exactly the frames it exists for.
+                        const bool hw_surface = av_frame->format == AV_PIX_FMT_D3D11
+#if defined(ENABLE_VULKAN) && LIBAVUTIL_VERSION_MAJOR >= 60
+                                                || av_frame->format == AV_PIX_FMT_VULKAN
+#endif
+                            ;
+
+                        if (!hw_surface && gpu_direct_mode_.load())
                             saw_software_frame_.store(true, std::memory_order_relaxed);
 
                         // sw_pix_fmt is probed from the hardware frames context when the
@@ -1786,7 +1921,7 @@ class Decoder
                         // and copes, but it is a false declaration and it repeated on
                         // every filter rebuild. An ordinary frame is authoritative about
                         // its own layout, so take it.
-                        if (av_frame->format != AV_PIX_FMT_D3D11 && av_frame->format != AV_PIX_FMT_NONE &&
+                        if (!hw_surface && av_frame->format != AV_PIX_FMT_NONE &&
                             sw_pix_fmt != static_cast<AVPixelFormat>(av_frame->format)) {
                             const auto* was = av_get_pix_fmt_name(sw_pix_fmt);
                             const auto* now = av_get_pix_fmt_name(static_cast<AVPixelFormat>(av_frame->format));
@@ -1797,7 +1932,7 @@ class Decoder
                         }
 
                         // Handle HW frame transfer
-                        if (av_frame->format == AV_PIX_FMT_D3D11) {
+                        if (hw_surface) {
                             // Resolve the actual SW pixel format from the HW frames context.
                             // ctx->sw_pix_fmt may not be set until after get_format is called
                             // during the first decode, so we update it here from the frame's
@@ -1919,8 +2054,10 @@ class Decoder
                 } catch (boost::thread_interrupted&) {
                     break;
                 } catch (const std::exception& e) {
-                    CASPAR_LOG(warning) << "Decoder thread exception (packet dropped): " << e.what();
+                    CASPAR_LOG(warning) << "Decoder thread exception (packet dropped) at " << stage << ": "
+                                        << e.what();
                 } catch (...) {
+                    CASPAR_LOG(error) << "Decoder thread non-C++ exception at " << stage;
                     CASPAR_LOG_CURRENT_EXCEPTION();
                 }
             }
@@ -2935,16 +3072,17 @@ struct AVProducer::Impl
         , path_(path)
         , input_(path, graph_, seekable >= 0 && seekable < 2 ? std::optional<bool>(false) : std::optional<bool>())
         , decode_adapter_(resolve_decode_adapter(frame_factory.get()))
-        // OFF unless asked for, and the reason is not caution: the decode half works and
-        // the FRAME HANDOFF DOES NOT. An AV_PIX_FMT_VULKAN frame carries an AVVkFrame in
-        // data[0], not pixels, and everything downstream of the decoder here reads it as
-        // host memory -- measured 2026-08-20, `PLAY prores.mov` on the Vulkan mixer
-        // reached "decoder chose AV_PIX_FMT_VULKAN" and then took an access violation at
-        // address 0 (0xC0000005) one tick later. Until an AVVkFrame is wrapped as a mixer
-        // texture, enabling this crashes the channel.
+        // Opt-in, on the same grounds gpu-direct-decode was: it is a different route
+        // through the driver and stays off until measured on this hardware.
+        //
+        // GATED ON gpu-direct-decode TOO, and that is not belt-and-braces. Without a
+        // GPU-direct publish path the decoded AVVkFrame has to be read back to host memory,
+        // and a Vulkan decode plus a readback was measured standalone at 78% BELOW software
+        // decode throughput -- the worst of the three arms. Enabling one knob without the
+        // other would make the server slower and look like the decoder's fault.
         , vk_mixer_device_(
               env::properties().get(L"configuration.ffmpeg.producer.vulkan-decode", false) &&
-                      frame_factory &&
+                      gpu_direct_decode_requested() && frame_factory &&
                       frame_factory->gpu_device_backend() == core::gpu_backend::vulkan
                   ? frame_factory->gpu_device_handle()
                   : nullptr)
@@ -3186,7 +3324,7 @@ struct AVProducer::Impl
                     found_video = true;
 
                     if (!dec.ctx->hw_device_ctx) {
-                        declined(L"decoder is not using D3D11VA (codec not hardware-accelerated here)");
+                        declined(L"the decoder has no hardware device (codec not hardware-accelerated here)");
                         break;
                     }
 
@@ -3227,6 +3365,28 @@ struct AVProducer::Impl
                         // device, both known now. The size-dependent resources
                         // are built on the first hardware frame, which is also
                         // the first moment the surface format is resolved.
+#if defined(ENABLE_VULKAN) && LIBAVUTIL_VERSION_MAJOR >= 60
+                        // A Vulkan decoder needs no bridge at all: its frames are already
+                        // on the mixer's device, so there is nothing to import and the
+                        // D3D11 bridge would be handed a VkDevice and fail. Detected from
+                        // the hardware context's own type rather than from configuration,
+                        // because the ordered hwaccel preference in create_decoder may have
+                        // fallen back to D3D11VA after asking for Vulkan.
+                        const bool vulkan_hwaccel =
+                            reinterpret_cast<AVHWDeviceContext*>(dec.ctx->hw_device_ctx->data)->type ==
+                            AV_HWDEVICE_TYPE_VULKAN;
+                        if (vulkan_hwaccel) {
+                            gpu_direct_requested_   = true;
+                            gpu_direct_video_       = true;
+                            gpu_direct_decoder_idx_ = idx;
+                            dec.gpu_direct_mode_    = true;
+                            CASPAR_LOG(info) << print()
+                                             << L" Vulkan GPU-direct video eligible: the decoder allocates on "
+                                                L"the mixer's own device, so no import bridge is needed.";
+                            break; // Only one video decoder
+                        }
+#endif
+
                         d3d11_bridge_ = std::make_unique<d3d11_bridge>();
                         if (!d3d11_bridge_->init(dec.ctx->hw_device_ctx, gpu_dev, bridge_backend)) {
                             d3d11_bridge_.reset();
@@ -3564,7 +3724,127 @@ struct AVProducer::Impl
                         // still set up to wait for hardware surfaces, and the
                         // channel stalls on "Waiting for video frame...". Stand the
                         // GPU-direct path down the moment a software frame appears.
-                        if (gpu_direct_video_ && frame.video && frame.video->format != AV_PIX_FMT_D3D11) {
+#if defined(ENABLE_VULKAN) && LIBAVUTIL_VERSION_MAJOR >= 60
+                        // FFmpeg's Vulkan compute decoders (prores, prores_raw, ffv1, dpx)
+                        // allocate on the mixer's own device, so their planes reach the
+                        // mixer with a device-local copy and no host memory at all.
+                        // Handled before the stand-down below, which would otherwise read
+                        // "not D3D11" as "decoding in software".
+                        if (gpu_direct_video_ && vk_mixer_device_ && frame.video &&
+                            frame.video->format == AV_PIX_FMT_VULKAN && !gpu_direct_failed_) {
+                            common::bit_depth plane_depth = common::bit_depth::bit8;
+                            bool              has_alpha   = false;
+                            auto              planes = describe_av_vulkan_planes(frame.video.get(), plane_depth, has_alpha);
+                            if (!gpu_direct_logged_) {
+                                CASPAR_LOG(debug) << L"[av_producer] AVVkFrame described as "
+                                                  << static_cast<int>(planes.size()) << L" planes, depth "
+                                                  << static_cast<int>(plane_depth) << L", alpha " << has_alpha;
+                            }
+
+                            std::vector<std::shared_ptr<core::texture>> textures;
+                            if (!planes.empty() && accelerator::vulkan::copy_av_vulkan_planes(
+                                                       vk_mixer_device_, planes, plane_depth, textures)) {
+                                // The copy waited on sem_value and signalled sem_value + 1,
+                                // per plane. FFmpeg waits on the value recorded here before
+                                // reusing a pooled frame, so not incrementing it would let
+                                // the decoder overwrite an image the copy is still reading.
+                                auto* vkf = reinterpret_cast<AVVkFrame*>(frame.video->data[0]);
+                                for (std::size_t i = 0; i < planes.size(); ++i)
+                                    vkf->sem_value[i] += 1;
+
+                                if (!gpu_direct_logged_) {
+                                    gpu_direct_logged_ = true;
+                                    CASPAR_LOG(info)
+                                        << print() << L" Vulkan GPU-direct video active: "
+                                        << static_cast<int>(planes.size())
+                                        << L" planes decoded by an FFmpeg compute shader on the mixer's own "
+                                           L"device and copied device-local (no CPU frame, no readback).";
+                                }
+
+                                auto desc = core::pixel_format_desc(has_alpha ? core::pixel_format::ycbcra
+                                                                              : core::pixel_format::ycbcr);
+                                for (const auto& pl : planes)
+                                    desc.planes.push_back(
+                                        core::pixel_format_desc::plane(pl.width, pl.height, 1, plane_depth));
+                                desc.color_space    = get_color_space(frame.video, stream_color_space_);
+                                desc.color_transfer = note_colour(frame.video);
+                                switch (frame.video->chroma_location) {
+                                    case AVCHROMA_LOC_CENTER:
+                                        desc.chroma_location = core::chroma_location::center;
+                                        break;
+                                    case AVCHROMA_LOC_TOPLEFT:
+                                        desc.chroma_location = core::chroma_location::topleft;
+                                        break;
+                                    default:
+                                        desc.chroma_location = core::chroma_location::left;
+                                        break;
+                                }
+
+                                array<const std::int32_t> audio_data;
+                                if (frame.audio) {
+                                    const int                 channel_count = 16;
+                                    std::vector<std::int32_t> buf(frame.audio->nb_samples * channel_count, 0);
+                                    auto  src_channels = frame.audio->ch_layout.nb_channels;
+                                    auto* src          = reinterpret_cast<std::int32_t*>(frame.audio->data[0]);
+                                    for (int i = 0; i < frame.audio->nb_samples; ++i) {
+                                        for (int j = 0; j < std::min(channel_count, src_channels); ++j) {
+                                            buf[i * channel_count + j] = src[i * src_channels + j];
+                                        }
+                                    }
+                                    audio_data = array<const std::int32_t>(buf);
+                                }
+
+                                // No host pixels, reported honestly by host_image_state().
+                                std::vector<array<const std::uint8_t>> image_data;
+                                for (std::size_t i = 0; i < planes.size(); ++i)
+                                    image_data.emplace_back(static_cast<std::size_t>(0));
+
+                                return core::const_frame(this, std::move(image_data), std::move(audio_data), desc,
+                                                         std::move(textures));
+                            }
+
+                            // Stop trying rather than pay for a failed import every frame.
+                            gpu_direct_failed_ = true;
+                            CASPAR_LOG(warning) << print()
+                                                << L" Vulkan GPU-direct plane copy failed; falling back to the "
+                                                   L"CPU transfer path for this producer.";
+                        }
+
+                        // A Vulkan frame the branch above declined still must not be read as
+                        // a software frame by the stand-down below: the decoder is a hardware
+                        // one and will keep producing AV_PIX_FMT_VULKAN.
+                        if (frame.video && frame.video->format == AV_PIX_FMT_VULKAN) {
+                            auto sw_frame = alloc_frame();
+                            // AV_PIX_FMT_NONE lets av_hwframe_transfer_data pick the pool's
+                            // own software format, which is the decoder's native planar
+                            // layout -- there is no single right answer to hardcode here the
+                            // way NV12 is for D3D11.
+                            sw_frame->format = AV_PIX_FMT_NONE;
+                            if (av_hwframe_transfer_data(sw_frame.get(), frame.video.get(), 0) == 0) {
+                                av_frame_copy_props(sw_frame.get(), frame.video.get());
+                                frame.video = std::move(sw_frame);
+                            }
+
+                            // Stand the path down HERE, with the true reason. Leaving it to
+                            // the check below would log "this stream decodes in software",
+                            // which is exactly what did not happen: the decoder is a Vulkan
+                            // one and the copy to the mixer is what declined.
+                            if (gpu_direct_video_) {
+                                gpu_direct_video_ = false;
+                                if (gpu_direct_decoder_idx_ >= 0) {
+                                    auto it = decoders_.find(gpu_direct_decoder_idx_);
+                                    if (it != decoders_.end())
+                                        it->second.gpu_direct_mode_ = false;
+                                }
+                                CASPAR_LOG(info) << print()
+                                                 << L" Vulkan GPU-direct video stood down; decoded frames are "
+                                                    L"being read back to host memory.";
+                            }
+                        }
+#endif
+
+                        if (gpu_direct_video_ && frame.video && frame.video->format != AV_PIX_FMT_D3D11 &&
+                            frame.video->format != AV_PIX_FMT_VULKAN) {
                             gpu_direct_video_ = false;
                             if (gpu_direct_decoder_idx_ >= 0) {
                                 auto it = decoders_.find(gpu_direct_decoder_idx_);
