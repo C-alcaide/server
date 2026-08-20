@@ -1,0 +1,523 @@
+# Migrating CasparVP from FFmpeg 7.0.2 to 8.x — Investigation
+
+**Status: investigation written 2026-08-17, corrected 2026-08-18.** The migration it plans
+for was already carried out upstream, and the tree has since been built and run against
+8.1.2 — see the correction below.
+
+> **Headline: the API migration is far smaller than expected — close to zero.** Of the 24
+> deprecated API groups FFmpeg removed in the 8.x cycle, **CasparVP references none of
+> them**, and the two that would have bitten (`FF_API_INTERLACED_FRAME`,
+> `FF_API_TICKS_PER_FRAME`) already have version-guarded dual paths in the tree, one of them
+> gated on `< 62` — i.e. someone already wrote the FFmpeg 8 branch.
+>
+> The real cost is **not** the API. It is a swscale engine rewrite that can change rendered
+> bytes, through `convert_image_frame` and the Spout downscale.
+>
+> **Amended 2026-08-18:** this used to read "confined to two call sites… neither in the 1 LSB
+> path". Both halves were wrong. `convert_image_frame` has four callers, one of them the
+> **IMAGE consumer**, which runs it on every captured frame — so the swscale rewrite sits
+> inside `conformance` and `grading` rather than outside them. See §5.1.
+>
+> This corrects [`GSTREAMER_INTEGRATION_PLAN.md`](GSTREAMER_INTEGRATION_PLAN.md) §4.1, which
+> called the migration "the one genuinely large unknown in this plan". On the evidence below
+> it is not.
+
+---
+
+## 0. Correction, 2026-08-18 — upstream already migrated
+
+Everything below was written against **CasparVP's** tree, which is pinned to 7.0.2. It did
+not check where **upstream** stood. Upstream `CasparCG/server` master has carried FFmpeg 8
+since before this document was written:
+
+| Commit | What it did |
+| :--- | :--- |
+| `480e9b00e` `feat: support FFmpeg 8 (#1715)` | the API work in `ffmpeg_consumer.cpp` and `av_producer.cpp` |
+| `88ccb0303` `feat: build with ffmpeg 8.1 on windows` | the pin, the sonames, and `bluefish_producer.cpp` |
+| `d9dd82632` `fix: decklink producer ffmpeg 8` | the DeckLink producer |
+| `0525dca72` / `970245ecd` | the libpostproc removal (§5.3), and its Windows walk-back on the 2.5.x branch |
+
+`upstream/master`'s `Bootstrap_Windows.cmake` pins `ffmpeg-8.1.2-full_build-shared.7z` with
+`avcodec-62`, `avdevice-62`, `avfilter-11`, `avformat-62`, `avutil-60`, `swresample-6`,
+`swscale-9` and **no `postproc` line** — which is §7's steps 3 and 5, already done.
+
+**So for this fork the job is a rebase, not a migration.** `grading-nodes` is **71 commits
+behind** `upstream/master`, and those 71 also carry C++20 and the merged Vulkan accelerator,
+which is the actual cost — not the FFmpeg API.
+
+**Built and run, 2026-08-18.** Branch `proto/gstreamer-ffmpeg8` in `d:\Github\CasparCG-server`,
+off `upstream/master`, Ninja + RelWithDebInfo + MSVC 14.50, 213 targets, 22 runtime DLLs
+shipped; the server answers AMCP with `201 VERSION OK / 2.6.0 30fcb2f4e Dev` and
+`200 INFO OK / 1 1080p5000 PLAYING`. §1's caveat — *only a build proves the build* — is
+discharged for the upstream tree.
+
+**It is not discharged for this fork.** Nothing fork-only has been compiled against 8.x:
+`cuda_prores`, `cuda_notchlc`, `spout`, `isf`, `ofx`, the OCIO stages and the Vulkan mixer.
+Those are where §1's unknowns (struct layout, header reorganisation, unchanged signatures
+with changed semantics) can still land.
+
+One fix was needed on top of upstream to get a running binary, and it is not FFmpeg's:
+the imported SFML targets have Debug and Release configurations only, so RelWithDebInfo
+falls back to Debug and the exe imports `sfml-*-d-2.dll` while the copy step ships
+`sfml-*-2.dll`. It then exits `STATUS_DLL_NOT_FOUND` before its logger starts. CasparVP
+already carried the `MAP_IMPORTED_CONFIG_RELWITHDEBINFO Release` mapping; upstream did not.
+
+---
+
+## 1. Method, and what it does not prove
+
+Changelogs describe intent; headers describe fact. So rather than read release notes, this
+compared **what we use** against **what exists**, mechanically:
+
+1. Every file including a libav header — **27 files across 10 modules**, not just the
+   `ffmpeg` module (`bluefish`, `cuda_notchlc`, `cuda_prores`, `decklink`, `hap`, `image`,
+   `isf`, `newtek`, `oal`, `spout` all touch libav).
+2. Extracted 156 distinct FFmpeg function-style symbols, 132 constants and 224 struct member
+   names used by those files.
+3. Tested each for existence in the FFmpeg 8.1 public headers — `d:\Github\FFmpeg` at
+   `n8.1.1-7-g3728de467d`, the project that defines them.
+4. Independently, took FFmpeg's own git history for the 24 `FF_API_*` removal commits in the
+   8.x cycle, extracted the identifiers each removal actually deleted, and intersected that
+   with our usage.
+
+**What this does not prove: that it compiles.** It cannot see struct *layout* changes, header
+reorganisation, changed semantics behind an unchanged signature, or member accesses written
+as `.field` rather than `->field`. Only a build against 8.x proves the build. Treat §3 as
+"nothing known-removed is referenced", not as "it will compile clean".
+
+---
+
+## 2. Sonames — why any of this is on the table
+
+| Library | 7.x (current pin) | 8.x |
+| :--- | :--- | :--- |
+| libavcodec | 61 | **62** |
+| libavutil | 59 | **60** |
+| libavformat | 61 | **62** |
+| libavfilter | 10 | **11** |
+| libswscale | 8 | **9** |
+| libswresample | 5 | **6** |
+
+Read from `libav*/version_major.h` and `libavutil/version.h`. Every DLL base name changes,
+which is what makes GStreamer's own FFmpeg (61/59/61/10/8/5) stop colliding — but that is a
+consequence, not the subject of this document.
+
+---
+
+## 3. What breaks at compile time
+
+### 3.1 Removed API we reference: none
+
+All 24 removal groups: `FF_API_ALLOW_FLUSH`, `FF_API_AVCODEC_CLOSE`, `FF_API_AVFFT`,
+`FF_API_AVSTREAM_SIDE_DATA`, `FF_API_BKTR_DEVICE`, `FF_API_BUFFER_MIN_SIZE`,
+`FF_API_DROPCHANGED`, `FF_API_FF_PROFILE_LEVEL`, `FF_API_FRAME_KEY`, `FF_API_FRAME_PKT`,
+`FF_API_GET_DUR_ESTIMATE_METHOD`, `FF_API_H274_FILM_GRAIN_VCS`,
+`FF_API_HDR_VIVID_THREE_SPLINE`, `FF_API_INTERLACED_FRAME`, `FF_API_LAVF_SHORTEST`,
+`FF_API_LINK_PUBLIC`, `FF_API_OPENGL_DEVICE`, `FF_API_PALETTE_HAS_CHANGED`,
+`FF_API_QUALITY_FACTOR`, `FF_API_SDL2_DEVICE`, `FF_API_SUBFRAMES`,
+`FF_API_TICKS_PER_FRAME`, `FF_API_VDPAU_ALLOC_GET_SET`, `FF_API_VULKAN_CONTIGUOUS_MEMORY`.
+
+**Intersection with our source: empty.**
+
+`FF_API_LINK_PUBLIC` deserves a note because it looks like it should have hurt — it makes
+`AVFilterLink` members private, and both [`decklink_producer.cpp`](../src/modules/decklink/producer/decklink_producer.cpp)
+and [`ffmpeg_consumer.cpp`](../src/modules/ffmpeg/consumer/ffmpeg_consumer.cpp) drive filter
+graphs. They are safe because they already read link properties through the accessors —
+`av_buffersink_get_w`, `av_buffersink_get_h`, `av_buffersink_get_frame_rate`,
+`av_buffersink_get_time_base`, `av_buffersink_get_colorspace`, `av_buffersink_get_ch_layout` —
+rather than touching fields.
+
+### 3.2 Already migrated, ahead of time
+
+| Removal | Site | State |
+| :--- | :--- | :--- |
+| `FF_API_INTERLACED_FRAME` (`AVFrame.interlaced_frame`, `.top_field_first`) | [`av_producer.cpp:1661`](../src/modules/ffmpeg/producer/av_producer.cpp#L1661), [`:1759`](../src/modules/ffmpeg/producer/av_producer.cpp#L1759), [`decklink_producer.cpp:437`](../src/modules/decklink/producer/decklink_producer.cpp#L437), [`:444`](../src/modules/decklink/producer/decklink_producer.cpp#L444) | `#if LIBAVCODEC_VERSION_MAJOR < 61` guards; the ≥61 branch already uses `AV_FRAME_FLAG_INTERLACED` / `AV_FRAME_FLAG_TOP_FIELD_FIRST` |
+| `FF_API_TICKS_PER_FRAME` (`AVCodecContext.ticks_per_frame`) | [`av_producer.cpp:1775`](../src/modules/ffmpeg/producer/av_producer.cpp#L1775) | `#if LIBAVCODEC_VERSION_MAJOR < 62` — the FFmpeg 8 branch derives ticks from `AV_CODEC_PROP_FIELDS`, and cites the upstream commit |
+| `AV_CODEC_ID_TIMECODE` (removed in 7) | [`ffmpeg_consumer.cpp:45`](../src/modules/ffmpeg/consumer/ffmpeg_consumer.cpp#L45) | guarded local sentinel |
+| `AV_FRAME_FLAG_KEY` | `bluefish_producer.cpp:474`, `decklink_producer.cpp:440` | already the new flag |
+
+`bluefish_producer.cpp` sets only the new flags with no guard, so it is 8.x-ready and
+7.0-incompatible-by-luck rather than by design — worth noticing but not a defect, since 61 is
+the floor.
+
+---
+
+## 4. What compiles but incurs debt
+
+Present in 8.1, marked `attribute_deprecated`. These do **not** block the migration; they are
+the FFmpeg 9 bill.
+
+| API | Sites | Replacement |
+| :--- | :--- | :--- |
+| `AVCodec.pix_fmts` | [`ffmpeg_consumer.cpp:421`](../src/modules/ffmpeg/consumer/ffmpeg_consumer.cpp#L421), `:444`, `:478` | `avcodec_get_supported_config(…, AV_CODEC_CONFIG_PIX_FORMAT, …)` |
+| `AVCodec.sample_fmts` | `ffmpeg_consumer.cpp:526` | `AV_CODEC_CONFIG_SAMPLE_FORMAT` |
+| `AVCodec.supported_samplerates` | `ffmpeg_consumer.cpp:530` | `AV_CODEC_CONFIG_SAMPLE_RATE` |
+| `AVCodec.ch_layouts` | `ffmpeg_consumer.cpp:533` — already a `TODO`, commented out | `AV_CODEC_CONFIG_CHANNEL_LAYOUT` |
+| `av_init_packet` | [`decklink_producer.cpp:401`](../src/modules/decklink/producer/decklink_producer.cpp#L401) — one call | `av_packet_alloc` / zero-init |
+
+`av_stream_get_parser` (`av_producer.cpp:1784`) is **not** deprecated in 8.1 — it is a plain
+public function. No action.
+
+The `pix_fmts` cluster is worth doing during the migration rather than after: it is five
+mechanical edits, `avcodec_get_supported_config` already exists in 7.1 so the change is
+back-compatible with the current pin, and it removes the only real deprecation cluster in the
+tree.
+
+---
+
+## 5. What we lose, and how to mitigate
+
+### 5.1 swscale output may change — the actual risk
+
+FFmpeg 8 carries an extensive swscale re-architecture: a new `SwsGraph` / `SwsOps` / `uops`
+pipeline with per-component dependency solving, new SIMD backends and 3DLUT support. This is
+an engine rewrite, not a tidy-up, and `sws_getContext` now carries the note *"this function is
+to be removed after a saner alternative is written"*.
+
+**Corrected 2026-08-18: swscale is in the 1 LSB path, on the capture side.** The claim this
+paragraph used to make — that `conformance`, `grading` and `flat-decoded` cannot touch
+swscale and therefore cannot detect a regression in it — is wrong, and it was wrong in the
+direction that matters: it declared a gap where coverage exists, and it would have sent the
+next reader looking for a new battery instead of re-running the two that already gate at
+1 LSB.
+
+`convert_image_frame` is not the still-image loader's private helper. It has **four**
+callers, and one of them is the **IMAGE consumer**:
+
+| Caller | Conversion | Flags |
+| :--- | :--- | :--- |
+| [`image_consumer.cpp:310`](../src/modules/image/consumer/image_consumer.cpp#L310), [`:333`](../src/modules/image/consumer/image_consumer.cpp#L333) | mixer readback → `AV_PIX_FMT_RGBA` (8-bit) or `AV_PIX_FMT_RGBA64BE` (16-bit), per [`:221`](../src/modules/image/consumer/image_consumer.cpp#L221) | `0` / `SWS_ACCURATE_RND \| SWS_FULL_CHR_H_INT` |
+| [`image_producer.cpp:56`](../src/modules/image/producer/image_producer.cpp#L56), [`:82`](../src/modules/image/producer/image_producer.cpp#L82) | still load: `rgb24`/`bgr24` → `BGRA`; anything >8-bit or undescribable → `GBRAP16LE` | as above, by source depth |
+| [`image_scroll_producer.cpp:143`](../src/modules/image/producer/image_scroll_producer.cpp#L143) | → `BGRA` | `0` |
+| [`isf_image_load.cpp:29`](../src/modules/isf/isf_image_load.cpp#L29) | → `RGBA` | `0` |
+
+The consumer's call is **unconditional on every captured frame**. The mixer hands it BGRA or
+BGRA64, the PNG target is RGBA or RGBA64BE, so `src->format == pixFmt` is never true and
+`convert_image_frame`'s early return never fires. Sixteen-bit captures take the
+`SWS_ACCURATE_RND | SWS_FULL_CHR_H_INT` branch, because the flag choice is on source depth.
+
+So **every battery that captures through the IMAGE consumer runs swscale once per frame** —
+`conformance`, `grading`, `blend-mask`, `grade-window`, `alpha-domain`, `blend-domain`,
+`grade-extremes`, `calibration`, `flat-decoded`, the `ocio*` family. Both conversions are
+channel permutations and byte-order swaps with no resampling and no arithmetic, so the
+correct answer is **exactly lossless** and the existing 1 LSB gates are the right instrument
+at the right tolerance.
+
+Two consequences, and the second is the reason this is worth a paragraph rather than a
+footnote:
+
+* **The before-image is a `conformance` + `grading` run**, both mixers, not a bespoke
+  fixture set. That is cheaper than what step 1 of §8 asks for, and it is already automated.
+* **It is a common-mode risk.** A swscale change moves every captured number in every
+  battery at once, which presents as *"the mixer changed"* rather than *"the capture
+  changed"* — and the two mixers would move together, so parity passes. If a broad, uniform
+  shift appears after the pin moves, the IMAGE consumer is the first suspect and the shader
+  is the last. The distinguishing probe is a non-IMAGE consumer: `sdi-output` and
+  `signalling` do not go through `convert_image_frame`.
+
+**What genuinely has no coverage** is narrower than the old claim, and still real:
+
+| Site | Flags | Covered by |
+| :--- | :--- | :--- |
+| `image_producer` still load — `rgb24`→`BGRA`, `rgb48`→`GBRAP16LE` | `0` / `SWS_ACCURATE_RND \| SWS_FULL_CHR_H_INT` | **nothing** — no battery loads a still through the IMAGE producer |
+| [`spout_consumer.cpp:230`](../src/modules/spout/consumer/spout_consumer.cpp#L230) | `SWS_FAST_BILINEAR` | **nothing** — reachable only via `cli.py run`, and it is the one site that actually *scales* |
+| `image_scroll_producer`, `isf_image_load` | `0` | nothing, but both are permutations to 8-bit packed and the least exposed of the set |
+
+`SWS_FAST_BILINEAR` remains the most exposed flag in the tree: it is explicitly a
+speed-over-accuracy path, which is what an engine rewrite re-tunes, and it is the only one
+doing real resampling.
+
+**Mitigation, in order:**
+
+1. Capture reference output from both sites under 7.0.2 **before** changing the pin — a
+   handful of fixtures through `image_converter` and one Spout capture. Without a
+   before-image there is nothing to compare against afterwards.
+2. `SWS_FAST_BILINEAR` is the more exposed of the two: it is explicitly a
+   speed-over-accuracy path, which is exactly the kind of thing a rewrite re-tunes. If it
+   moves, `SWS_BILINEAR` is the conservative substitute, at a measured cost.
+3. Longer term, both sites are candidates for removal rather than migration — the tree
+   already scales on GPU everywhere else, and `spout_consumer` notes `sws_scale` costing
+   "50+ ms for 6000×1700".
+
+### 5.2 PNG byte-level output changes
+
+FFmpeg 8.0 sets `pngenc`'s default prediction method to PAETH. PNG is lossless, so **decoded
+pixels are identical** and any pixel-comparing test is unaffected — including `conformance`,
+which captures through the IMAGE consumer and compares against a colour model. What changes
+is file bytes and size. Mitigation: nothing, unless something hashes PNG files rather than
+comparing pixels; worth confirming no harness module does.
+
+### 5.3 libpostproc is gone entirely
+
+FFmpeg removed the whole library in commit `8c920c4c39`, 2025-05-05 — there is no
+`libpostproc/` in the 8.1 tree at all, so there is no `postproc-*.dll` to ship.
+
+**Impact: one line.** We reference it only as a file to copy —
+[`Bootstrap_Windows.cmake:97`](../src/CMakeModules/Bootstrap_Windows.cmake#L97),
+`casparcg_add_runtime_dependency(".../postproc-58.dll")`. No source file in the tree
+includes a postproc header or calls into it, so nothing is lost in function; the line just
+has to go, or the copy step fails on a missing file.
+
+### 5.4 Things to check but probably not losses
+
+* **Old HLS protocol handler removed (8.1).** Grep configs and media paths for `hls://`
+  before the switch. Almost certainly unused here.
+* **TLS peer certificate verification on by default** — announced in 8.0 as landing "on the
+  next major version bump", so FFmpeg 9, not 8. When it lands, HTTPS/TLS sources with
+  self-signed certificates start failing closed. Track it; do not pre-empt it.
+* **OpenSSL < 1.1.1 support dropped, yasm support dropped.** Build-side only; we consume
+  prebuilt shared binaries.
+* **OpenMAX encoders deprecated.** Unused.
+
+### 5.5 Build-level: nothing appears to be lost
+
+Our 7.0.2 is a gyan full build with 90 configure flags — `--enable-gpl --enable-version3
+--enable-libsrt --enable-libx264 --enable-libx265 --enable-nvenc --enable-nvdec
+--enable-cuda-llvm`. gyan's 8.1.2 full build advertises all of those plus `libplacebo`,
+`libvpl`, `libjxl`, `libsvtjpegxs`, `librist`, `libsvtav1`, `vulkan` and `amf`.
+
+**Verified 2026-08-18, from the artifact rather than the download page.** CMake's
+`ExternalProject_Add` extracts the `.7z` itself, so the check needed no 7z extractor — only
+a configure. `ffmpeg.exe -version` on the extracted `ffmpeg-8.1.2-full_build-shared.7z`
+reports `8.1.2-full_build-www.gyan.dev`, libs `60.26.102 / 62.28.102 / 62.12.102 /
+11.14.102 / 9.5.102 / 6.3.102`, and a configure line carrying every flag §5.5 claimed plus
+the ones §6 depends on:
+
+```
+--enable-gpl --enable-version3 --enable-shared
+--enable-vulkan --enable-libshaderc --enable-libplacebo --enable-opencl
+--enable-nvenc --enable-nvdec --enable-cuvid --enable-ffnvcodec --enable-cuda-llvm
+--enable-d3d11va --enable-d3d12va --enable-dxva2 --enable-libvpl --enable-amf --enable-vaapi
+--enable-libsvtjpegxs --enable-liboapv --enable-libjxl --enable-libsvtav1 --enable-libvvenc
+--enable-libx264 --enable-libx265 --enable-libaom --enable-libdav1d --enable-librav1e
+--enable-libsrt --enable-librist --enable-libzmq --enable-libssh --enable-gnutls
+--enable-libzimg --enable-lcms2 --enable-mediafoundation
+```
+
+So JPEG-XS (`libsvtjpegxs`), APV (`liboapv`), the Vulkan stack and the D3D12 hwaccels in §6
+are present in the package we would actually ship, not merely in the upstream tree. Nothing
+in our 7.0.2 flag set is absent; `postproc` is gone, which is §5.3 and expected.
+
+---
+
+## 6. What we gain
+
+Beyond making GStreamer conflict-free. We are on 7.0.2, so 7.1 lands too.
+
+### 6.1 Vulkan hardware paths — the largest gain for this fork
+
+This tree has a Vulkan mixer and an explicit GPU-direct thesis
+([`GPU_INTEROP_ARCHITECTURE.md`](GPU_INTEROP_ARCHITECTURE.md)). FFmpeg 8 adds:
+
+| Feature | Version |
+| :--- | :--- |
+| **ProRes Vulkan hwaccel** and **ProRes Vulkan encoder** | 8.1 |
+| **ProRes RAW decoder** and ProRes RAW Vulkan hwaccel | 8.0 |
+| **swscale Vulkan support** | 8.1 |
+| DPX Vulkan hwaccel | 8.1 |
+| VP9 Vulkan hwaccel | 8.0 |
+| AV1 Vulkan encoder | 8.0 |
+| Vulkan compute codec optimisations | 8.1 |
+
+ProRes on Vulkan is the striking one: [`cuda_prores`](../src/modules/cuda_prores/) exists
+because ProRes needed a GPU path and CUDA was the only one available. A Vulkan hwaccel
+decodes into an image the Vulkan mixer can consume without an interop hop — and unlike the
+CUDA path it is not NVIDIA-only. ProRes **RAW** decoding is a capability the tree does not
+have at all.
+
+### 6.2 Codecs that matter in this domain
+
+* **JPEG-XS** — decoder, encoder, parser and raw muxer/demuxer via `libsvtjpegxs` (8.1). The
+  mezzanine codec for SMPTE 2110-22 contribution. Pairs directly with GStreamer's
+  `rtpvrawpay`/`rtpvrawdepay` story in the integration plan.
+* **APV** (Advanced Professional Video) — decoder, encoder via `libopenapv`, parser, and
+  MP4/ISOBMFF muxing (8.0). A new professional intermediate codec.
+* **VVC** — decoder complete including all Screen Content Coding (IBC, palette mode, ACT),
+  plus VVC in Matroska and VAAPI decode (8.0).
+* **LCEVC** — parser, metadata bitstream filter, enhancement-layer export in MPEG-TS (8.1).
+* **MPEG-H 3D Audio** decoding via `mpeghdec` (8.1).
+
+### 6.3 D3D12 and Windows capture
+
+`vf_scale_d3d12`, `vf_deinterlace_d3d12`, `vf_mestimate_d3d12`, D3D12 H.264 and AV1 encoders
+(8.1), `vf_scale_d3d11` (8.0), and `gfxcapture` — Windows.Graphics.Capture based window and
+monitor capture (8.1).
+
+The D3D12 additions are more interesting than they look in isolation: GStreamer's
+`d3d12fisheyedewarp` and `d3d12remap` — the elements flagged as most relevant to the
+projection work — are also D3D12. A migration that brings D3D12 into the FFmpeg path makes
+that a shared problem with one bridge rather than two.
+
+### 6.4 Broadcast metadata
+
+* **RCWT closed-caption demuxer** (7.1) — the FFmpeg half of the caption story that
+  GStreamer's `ccextractor`/`cccombiner` covers from the other side.
+* **HDR10+ metadata passthrough** when decoding/encoding with libaom-av1 (8.0) — relevant to
+  [`HDR_GUIDE.md`](HDR_GUIDE.md).
+* **EXIF metadata parsing** (8.1); `colordetect` filter (8.0).
+
+### 6.5 API quality
+
+`avcodec_get_supported_config()` replaces four separate deprecated arrays with one queryable
+call that works on a configured context rather than a static codec — which is the correct
+answer for the negotiation logic in `ffmpeg_consumer.cpp` and materially simpler than what is
+there now.
+
+---
+
+## 7. FFmpeg 9 is out, and this still stops at 8.1.2
+
+Checked 2026-08-18 against the FFmpeg tree, not a release note. **FFmpeg 9.0 is real** —
+`RELEASE` reads `9.0`, tag `n9.0` and branch `release/9.0` are dated **2026-08-03**.
+
+| Library | 7.x | 8.x | **9.0** |
+| :--- | :--- | :--- | :--- |
+| libavcodec | 61 | 62 | **63** |
+| libavutil | 59 | 60 | **61** |
+| libavformat | 61 | 62 | **63** |
+| libavfilter | 10 | 11 | **12** |
+| libswscale | 8 | 9 | **10** |
+| libswresample | 5 | 6 | **7** |
+
+**It buys nothing for the reason the migration is on the table.** The GStreamer motive is
+soname collision with GStreamer 1.28.6's 61/59/61/10/8/5. 8.x already has zero overlap;
+9.0's overlap is equally zero. Any major bump settles it, and 8.1.2 is the one both upstream
+and the `CasparCG/dependencies` mirror already ship.
+
+**And unlike 7→8, it costs.** §4 called the deprecation cluster "the FFmpeg 9 bill"; 9.0 is
+where it comes due, and it breaks code **upstream ships today**:
+
+| Removed at 9.0 | Evidence | Site |
+| :--- | :--- | :--- |
+| `AVCodec.pix_fmts`, `.sample_fmts`, `.supported_samplerates` | `libavcodec/codec.h` matches `pix_fmts` once at `n8.1.2`, **zero times** at `n9.0` | `ffmpeg_consumer.cpp:223`, `:257`, `:258` |
+| `av_init_packet` | still declared at `n9.0` but inside `#if FF_API_INIT_PACKET`, which is `(LIBAVCODEC_VERSION_MAJOR < 63)` — false at 63 | `decklink_producer.cpp:354` |
+| default-off TLS verification | `FF_API_NO_DEFAULT_TLS_VERIFY` is `(LIBAVFORMAT_VERSION_MAJOR < 63)` | not a compile error — HTTPS sources with self-signed certificates begin failing closed, which §5.4 predicted for this release |
+
+Two that were expected to hurt and do not: `av_stream_get_parser` is still a plain public
+function at `n9.0`, and `AVFilterContext`'s `inputs` / `nb_inputs` / `outputs` are still
+public members — `FF_API_CONTEXT_PUBLIC` does not privatise them.
+
+Three more reasons the answer is "not yet":
+
+* **No package.** `CasparCG/dependencies`, `ffmpeg` tag, holds `5.1.2`, `7.0.2`, `8.0.1`
+  and `8.1.2` only. Pinning 9 means hosting our own artifact and diverging from upstream's
+  `Bootstrap_Windows.cmake` — the exact divergence the rebase exists to remove.
+* **swscale has not settled.** 9 continues the rewrite behind §5.1's risk: `doc/APIchanges`
+  records `SwsBackend` and `SwsContext.backends` added 2026-06-03. Moving to 9 re-opens the
+  same unmeasured question rather than closing it.
+* **It is two weeks old.** No point release yet.
+
+**The cheap hedge is worth taking now, on 8.1.2.** Replacing the three `AVCodec` arrays with
+`avcodec_get_supported_config()` and the one `av_init_packet` with `av_packet_alloc` is
+about five mechanical sites, compiles against 8.1 and 7.1 alike, and is the **whole** of the
+FFmpeg 9 API bill. Done on the current pin it is verifiable against the existing batteries,
+and it is a clean upstream contribution on its own.
+
+---
+
+## 8. Proposed order of work
+
+**Revised 2026-08-18.** Steps 3 and 5 of the original list — bump the pin, delete the
+`postproc` line, build — were done upstream (§0), so the remaining work is a port rather
+than a migration.
+
+1. **Capture swscale references under 7.0.2.** Unchanged, and still first: there is no going
+   back for a before-image. It now applies only to the **fork's own** call sites, since
+   upstream has neither — `image_converter.cpp` and `spout_consumer.cpp` (§5.1).
+2. **Migrate the deprecation cluster on the current pin** — `avcodec_get_supported_config`
+   and the one `av_init_packet`. Back-compatible with 7.0.2 and 8.1, verifiable against the
+   existing batteries, and it is the entire FFmpeg 9 bill (§7).
+3. **Rebase the fork onto `upstream/master`.** 71 commits, of which FFmpeg 8 is the small
+   part; C++20 and the merged Vulkan accelerator are the large part.
+4. **Build the fork-only modules against 8.x** — `cuda_prores`, `cuda_notchlc`, `spout`,
+   `isf`, `ofx`, the OCIO stages, the Vulkan mixer. This is where §1's unknowns can still
+   land; upstream building proves nothing about them. Remember that a header change does not
+   trigger a rebuild in this tree — touch every source, and delete `build/**/cmake_pch.*.pch`,
+   per `BUILDING_WORKFLOW.md`.
+5. **Run the full battery set**, both mixers, then re-measure the step 1 swscale fixtures.
+6. **GStreamer is already unblocked** — coexistence with FFmpeg 8 was measured on
+   2026-08-18 and is recorded in [`GSTREAMER_INTEGRATION_PLAN.md`](GSTREAMER_INTEGRATION_PLAN.md)
+   §3.5. It does not wait on steps 3–5, because it needs only a host built against 8.x, and
+   one now exists.
+
+Steps 1–2 are useful on their own and carry no FFmpeg 8 risk, which makes them the right
+place to start regardless of when the rebase happens.
+
+---
+
+## 9. Verification
+
+| What changed | What covers it |
+| :--- | :--- |
+| FFmpeg pin, decode path | `flat-decoded` (the 1 LSB decode gate), `sdi-input`, `source-colorspace` |
+| FFmpeg consumer pixels/metadata | `signalling --stream`, `sdi-output` |
+| Anything reaching the mixer | `conformance` + `grading`, **both mixers** |
+| swscale on the **capture** side (`image_consumer` → RGBA / RGBA64BE) | `conformance` + `grading`, **both mixers** — see §5.1 |
+| swscale on the **still-load** side (`image_producer`) | **nothing** |
+| swscale **scaling** (`spout_consumer`, `SWS_FAST_BILINEAR`) | **nothing** — `cli.py run --consumer spout` captures a picture, at no gate |
+
+**Corrected 2026-08-18.** This table used to say `image_converter` had no coverage at all.
+It has coverage on its busiest path: the IMAGE consumer calls it on every captured frame, so
+every 1 LSB battery in the harness exercises it once per frame (§5.1). Re-running
+`conformance` and `grading` on both mixers before and after the pin moves **is** the swscale
+before/after for that path, and no new battery is needed for it.
+
+**Two real gaps remain**, and they are narrower than the retracted claim:
+
+* **The still-load conversions.** Nothing in the harness loads a still image through the
+  IMAGE producer, so `rgb24`→`BGRA` and `rgb48`→`GBRAP16LE` are unmeasured. This is worth a
+  battery and it is cheap to build honestly, because the oracle needs no colour model: an
+  8-bit RGB PNG and an 8-bit RGBA PNG holding *the same values* differ only in whether
+  `is_frame_compatible_with_mixer` sends them through swscale, so the RGBA capture is the
+  reference for the RGB one. Same construction at 16 bits with `rgb48` against `rgba64`.
+  Asymmetric per-channel values are mandatory — these are channel permutations, and a grey
+  patch is invariant under every way of getting one wrong.
+* **The Spout downscale.** The only site that resamples, on the only flag
+  (`SWS_FAST_BILINEAR`) a rewrite is likely to re-tune, reachable only through `cli.py run`.
+
+**And one trap that the coverage creates.** Because the capture-side conversion is common to
+every battery and to both mixers, a swscale regression moves every number at once and
+survives every parity check. It reads as a mixer fault and is not one. `sdi-output` and
+`signalling` bypass `convert_image_frame` entirely and are therefore the probes that
+separate the two.
+
+---
+
+## 10. Open items
+
+* ~~Verify gyan 8.1.2's actual configure line (§5.5)~~ — **closed 2026-08-18**. CMake
+  extracts the `.7z` during configure, so no 7z extractor was needed; the flags are in §5.5.
+* Whether anything in configs or media paths uses `hls://` (§5.4).
+* ~~Whether any harness module hashes PNG bytes rather than comparing pixels (§5.2)~~ —
+  **closed 2026-08-18: none does, and the two that hash are immune anyway.** No module
+  references a stored PNG digest. `core/mix_cases.py`'s `sha256` compares one channel against
+  another *within a single run* (the `route://` tripwire), and `core/check_plan.py`'s `md5` is
+  frame-to-frame *within one recording*. Both compare outputs of the same encoder build to
+  each other, so a change to `pngenc`'s default prediction method cancels. `source_digest`
+  (`media/generate_references.py:162`) digests the **fixture file**, not a render, and
+  fixtures come from PATH FFmpeg rather than the server — already 8.1.1 — so the pin bump
+  causes no digest churn either.
+* ~~The build itself~~ — **closed for the upstream tree 2026-08-18** (§0): it configures,
+  builds and runs. **Still open for the fork's own modules**, which have not been compiled
+  against 8.x at all.
+* The §5.1 swscale before/after. **Revised 2026-08-18**: the capture-side path is covered by
+  `conformance` + `grading` and needs a re-run, not a battery (§9). What still has no battery
+  is the **still-load** path through the IMAGE producer and the **Spout downscale**, and §9
+  now says how the first of those would be built.
+
+## 11. Sources
+
+* **FFmpeg 8.1** — `d:\Github\FFmpeg` at `n8.1.1-7-g3728de467d`. Sonames from
+  `libav*/version_major.h` and `libavutil/version.h`; removals from the project's own git
+  history (`git log --grep="remove deprecated FF_API"`, 24 commits); deprecation markers and
+  the `sws_getContext` note from the headers; feature lists from `Changelog`.
+* **CasparVP** — the 27 files including a libav header, at `feature/ocio-mixer`.
+* **gyan.dev** — the builds page, for 8.1.2's advertised external libraries. Advertised, not
+  verified against the artifact.
+* **`CasparCG/dependencies`** — GitHub releases, `ffmpeg` tag, for package availability;
+  re-read 2026-08-18 for §7 (`5.1.2`, `7.0.2`, `8.0.1`, `8.1.2`; no 9.x).
+* **FFmpeg 9.0** (§7) — the same local tree at tags `n8.1.2` and `n9.0`: `RELEASE`,
+  `libav*/version_major.h`, `libavcodec/codec.h`, `libavcodec/packet.h`,
+  `libavformat/version_major.h`, `libavfilter/avfilter.h`, `doc/APIchanges`.
+* **The 8.1.2 artifact itself** (§5.5) — `ffmpeg.exe -version` from the package CMake
+  extracted into `build-ffmpeg8/ffmpeg-lib-prefix`, rather than the download page.

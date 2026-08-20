@@ -57,3 +57,10 @@ src/modules/vulkan_output/shaders/color_convert_spv.h
 
 # Backup files
 src/modules/ffmpeg/producer/av_producer.cpp.bak
+
+# Python bytecode from the docs/diagrams generators
+__pycache__/
+*.pyc
+
+# Per-machine Claude Code permissions, and its backups
+.claude/
