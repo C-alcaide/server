@@ -31,13 +31,62 @@
 
 namespace caspar { namespace accelerator { namespace vulkan {
 
-bool copy_av_vulkan_planes(void*                                        vk_device,
-                           const std::vector<av_plane_source>&          planes,
-                           common::bit_depth                            depth,
-                           std::vector<std::shared_ptr<core::texture>>& out)
+struct av_vulkan_importer::impl
+{
+    device*           dev_ = nullptr;
+    vk::Device        vk_device_;
+    vk::CommandBuffer cmd_;
+    vk::Fence         fence_;
+    bool              copy_pending_ = false;
+
+    explicit impl(device* dev)
+        : dev_(dev)
+        , vk_device_(dev->getVkDevice())
+    {
+        // Allocated once, and outside any dispatch: allocateCommandBuffers hops to the
+        // device thread itself, and doing it per frame would both leak the buffer and
+        // defeat that thread's own recycling. Same reasoning as d3d11_import_bridge.
+        cmd_   = dev_->allocateCommandBuffers(1).front();
+        fence_ = vk_device_.createFence(vk::FenceCreateInfo{});
+    }
+
+    ~impl()
+    {
+        // The copy may still be reading the decoder's images and writing the mixer's;
+        // tearing the fence down under it would be a use-after-free on the GPU.
+        wait_for_previous_copy();
+        if (fence_)
+            vk_device_.destroyFence(fence_);
+    }
+
+    void wait_for_previous_copy()
+    {
+        if (!copy_pending_ || !fence_)
+            return;
+        const auto res = vk_device_.waitForFences(fence_, VK_TRUE, 1'000'000'000ull);
+        if (res != vk::Result::eSuccess)
+            CASPAR_LOG(warning) << L"[vk::av_import] waiting for the previous plane copy timed out";
+        copy_pending_ = false;
+    }
+};
+
+av_vulkan_importer::av_vulkan_importer(void* vk_device)
 {
     auto* dev = static_cast<device*>(vk_device);
-    if (!dev || planes.empty())
+    if (!dev)
+        CASPAR_THROW_EXCEPTION(caspar_exception() << msg_info("av_vulkan_importer needs a Vulkan device"));
+    impl_ = std::make_unique<impl>(dev);
+}
+
+av_vulkan_importer::~av_vulkan_importer() = default;
+
+bool av_vulkan_importer::copy_planes(const std::vector<av_plane_source>&          planes,
+                                     common::bit_depth                            depth,
+                                     std::vector<std::shared_ptr<core::texture>>& out)
+{
+    auto& m   = *impl_;
+    auto* dev = m.dev_;
+    if (planes.empty())
         return false;
 
     // AVVkFrame carries up to AV_NUM_DATA_POINTERS planes; a YCbCr(A) frame is 3 or 4.
@@ -73,11 +122,14 @@ bool copy_av_vulkan_planes(void*                                        vk_devic
                 dst.push_back(t);
             }
 
-            auto cmds = dev->allocateCommandBuffers(1);
-            if (cmds.empty())
-                return false;
-            auto cmd = cmds.front();
+            // Re-recording a command buffer the GPU may still be reading is undefined
+            // behaviour, so the previous copy has to have retired first. This is the only
+            // host wait in the path and it is against a copy from a PREVIOUS frame, so in
+            // steady state it does not block.
+            m.wait_for_previous_copy();
 
+            auto cmd = m.cmd_;
+            cmd.reset(vk::CommandBufferResetFlags{});
             cmd.begin(vk::CommandBufferBeginInfo{vk::CommandBufferUsageFlagBits::eOneTimeSubmit});
 
             const auto range = vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1);
@@ -208,10 +260,12 @@ bool copy_av_vulkan_planes(void*                                        vk_devic
             si.setSignalSemaphores(sems);
             si.pNext = &timeline;
 
-            // No fence and no host wait: this goes to the same queue the mixer's draw
-            // does, through the same dispatch thread, so the copy is ordered before any
-            // later sampling of these textures by construction.
-            dev->submit(si, vk::Fence{});
+            // The fence is for buffer reuse, not for the mixer: this goes to the same
+            // queue the mixer's draw does, through the same dispatch thread, so the copy
+            // is already ordered before any later sampling of these textures.
+            m.vk_device_.resetFences(m.fence_);
+            dev->submit(si, m.fence_);
+            m.copy_pending_ = true;
             return true;
         } catch (const std::exception& e) {
             // std::exception rather than vk::SystemError: create_texture throws a

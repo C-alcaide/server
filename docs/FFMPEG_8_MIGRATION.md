@@ -325,6 +325,60 @@ decodes into an image the Vulkan mixer can consume without an interop hop — an
 CUDA path it is not NVIDIA-only. ProRes **RAW** decoding is a capability the tree does not
 have at all.
 
+#### 6.1.1 Measured, 2026-08-21: adopted, plumbed, and blocked inside `avcodec_receive_frame`
+
+The ProRes Vulkan hwaccel is now wired end to end behind
+`<vulkan-decode>` (off by default, and requiring `<gpu-direct-decode>`). Everything up to
+and including the decoder's own initialisation works; the decode call itself faults.
+
+**What was built.** FFmpeg is handed the *mixer's* `VkDevice` through
+`AVVulkanDeviceContext` on a reserved compute queue family
+(`src/modules/ffmpeg/util/vulkan_hwdevice.cpp`), and the mixer imports the decoded
+`AVVkFrame` by copying its per-plane images into pooled mixer textures on the graphics
+queue (`src/accelerator/vulkan/util/av_vulkan_import.cpp`), honouring FFmpeg's
+timeline-semaphore contract. Three details are load-bearing and each is documented at its
+site: `AV_VK_FRAME_FLAG_DISABLE_MULTIPLANE`, so a 3-plane 10-bit frame arrives as three
+`VkImage`s rather than one multi-planar image; a **second declared queue family**, so the
+images are allocated `VK_SHARING_MODE_CONCURRENT` and the graphics-queue copy needs no
+queue-family ownership transfer; and enabling, at mixer device creation, the ~24 extensions
+and ~39 features FFmpeg's decoders assume — FFmpeg reads feature support from the *physical*
+device, so it emits SPIR-V for capabilities the logical device may never have enabled, with
+no error path on either side.
+
+**What blocks it.** `avcodec_receive_frame` takes an access violation on the first frame:
+13,675 faults in five seconds, every one at that call, before any of the above runs. The
+identical decode of the identical file succeeds in `ffmpeg.exe` 8.1.2 launched *from
+`build/shell`* — the same DLLs and the same local Vulkan loader — at 75 frames and 0 decode
+errors. So it is specific to decoding inside the server process.
+
+Ruled out, one A/B run each:
+
+| candidate | result |
+| :--- | :--- |
+| the mixer's shared device | FFmpeg creating its own Vulkan device faults identically |
+| the device extension and feature set | 24 extensions + 39 features enabled; no change |
+| the queue family / image sharing mode | no change; CONCURRENT is required for the copy regardless |
+| our pre-created single-plane frame pool | letting FFmpeg allocate its own faults identically |
+| frame threading | `threads=1` only turns a fatal crash into a caught per-frame fault |
+| the `vulkan-1.dll` shipped in `build/shell` | removing it, so the process uses the 1.4.309 system loader, changes nothing |
+
+The remaining untested axis is whether FFmpeg's Vulkan decode can coexist with the mixer's
+own Vulkan instance in one process at all. Attributing it needs a debugger, which this
+machine does not have (`cdb` is absent and the process's own unhandled-exception filter
+returns `EXECUTE_HANDLER`, so Windows Error Reporting never produces a dump).
+
+**Two things that made this hard to see, worth carrying forward:**
+
+* **A default `get_format` picks the software format even with `-hwaccel vulkan`.** The
+  standalone probe that "verified prores_vulkan" reported `Format yuv422p10le chosen by
+  get_format()` — the Vulkan decoder was never exercised. It needs
+  `-hwaccel_output_format vulkan` to be forced. Any measurement of this decoder must show
+  the `Format vulkan chosen by get_format()` line or it measured the software path.
+* **`build/shell/ffmpeg.exe` is FFmpeg 7.0.2** while the DLLs beside it are 8.1.2, and it
+  loads the 7.x `avcodec-61.dll`/`avutil-59.dll` that also sit there. A probe run with it
+  cannot use any 8.x feature. The 8.1.2 CLI is at
+  `build/ffmpeg-lib-prefix/src/ffmpeg-lib/bin/ffmpeg.exe`.
+
 ### 6.2 Codecs that matter in this domain
 
 * **JPEG-XS** — decoder, encoder, parser and raw muxer/demuxer via `libsvtjpegxs` (8.1). The
