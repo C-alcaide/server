@@ -333,6 +333,35 @@ Consequences, all of which have bitten:
 - Greys are invariant under a red/blue exchange, so a grey ramp passes every one of
   these defects. Colour tests must use asymmetric per-channel values.
 
+## `seek_internal` is the common path, which is exactly why half the fixes do not belong in it
+
+`av_producer::seek_internal` is called by three different things: the **explicit seek**, the **loop
+wrap**, and the **initial start**. That makes it the right home for anything every caller
+invalidates — and the wrong home for anything only one caller invalidates. The distinction cost time
+three times in one session, in both directions:
+
+| what | where it belongs | why |
+| :--- | :--- | :--- |
+| `speed_accum_ = 0.0` | **inside** `seek_internal` | every discontinuity invalidates accumulated progress; the loop wrap was the caller that got forgotten |
+| the **drain** before wrapping | **at the loop-wrap call site** | an explicit seek must still *discard* the decoded tail. Draining there would play frames the user just seeked away from |
+| dropping the **resident loop cache** | **at the explicit-seek call site** | a wrap stays inside the range, so it does not invalidate a cache *of* that range |
+
+The third one is the instructive failure, because it looks like it works. The wrap runs on the
+**decode thread**, which is ahead of the consumer, so dropping the cache in `seek_internal` wiped it
+every time round the loop *while the consumer was still mid-range*. The cache therefore never
+reached both ends of the range and never completed: measured sitting at 2-7 frames of an 8-frame
+range, forever, with no error and nothing in the log. A gate that never opens looks identical to a
+feature that is switched off.
+
+**And a flag set by the decoder is not available to the initial seek.** `current_seek_target_` — the
+GPU-direct path's only equivalent of the software filter trim — was set under
+`if (gpu_direct_video_)`, and that flag goes true when the decoder emits its first hardware surface,
+which is *after* `seek_internal` has already run for the initial start. So the one seek where
+dropping the keyframe pre-roll mattered was the one seek that did not do it: `SEEK 20` on h264
+showed frames 0..19 on screen, then looped cleanly forever. When a guard depends on state the
+decoder discovers, check whether the first call has it yet — the symptom is a defect that appears
+exactly once per PLAY and never reproduces afterwards.
+
 ## Docs
 
 `docs/` is extensive and kept current — `COLOR_GRADING.md`, `VIRTUAL_PRODUCTION_FEATURES.md`,
