@@ -310,7 +310,7 @@ struct vk_readback_strategy::impl
     // Timing diagnostics
     int    frame_count_      = 0;
     double accum_import_ms_  = 0.0;
-    double accum_sync_ms_    = 0.0;
+    double accum_wait_ms_    = 0.0;
     double accum_submit_ms_  = 0.0;
     double accum_total_ms_   = 0.0;
 
@@ -1158,9 +1158,6 @@ struct vk_readback_strategy::impl
             return {blank_output(decklink_format_desc), dst_w, dst_h, /*is_blank=*/true};
         auto& slot = slots_[cur_write];
 
-        step_timer     = caspar::timer();
-        double sync_ms = step_timer.elapsed() * 1000.0;
-
         // Import timeline semaphore for GPU-side wait
         void*    sem_handle = wrapper->render_semaphore_handle();
         uint64_t sem_value  = wrapper->render_semaphore_value();
@@ -1262,11 +1259,19 @@ struct vk_readback_strategy::impl
         VK_CHECK(vkQueueSubmit(compute_queue_, 1, &submit, slot.fence), "vkQueueSubmit (dma)");
         double submit_ms = step_timer.elapsed() * 1000.0;
 
+        // Hand back the readback submitted PIPELINE_DEPTH frames ago, and TIME IT.
+        // `push_and_take` contains the only call here that blocks the DeckLink thread --
+        // vkWaitForFences with UINT64_MAX. Reading `total_ms` before it, as this code did
+        // until 2026-08-20, excluded the one wait the number exists to account for.
+        caspar::timer wait_timer;
+        const int     ready   = push_and_take(cur_write);
+        double        wait_ms = wait_timer.elapsed() * 1000.0;
+
         double total_ms = total_timer.elapsed() * 1000.0;
 
         // Periodic timing report
         accum_import_ms_  += import_ms;
-        accum_sync_ms_    += sync_ms;
+        accum_wait_ms_    += wait_ms;
         accum_submit_ms_  += submit_ms;
         accum_total_ms_   += total_ms;
         frame_count_++;
@@ -1274,15 +1279,12 @@ struct vk_readback_strategy::impl
             double n = 50.0;
             CASPAR_LOG(info) << L"[vk_readback] DMA DIAG avg/50: "
                              << L"import=" << (accum_import_ms_ / n) << L"ms "
-                             << L"sync=" << (accum_sync_ms_ / n) << L"ms "
+                             << L"wait=" << (accum_wait_ms_ / n) << L"ms "
                              << L"submit=" << (accum_submit_ms_ / n) << L"ms "
                              << L"total=" << (accum_total_ms_ / n) << L"ms";
-            accum_import_ms_ = accum_sync_ms_ = accum_submit_ms_ = accum_total_ms_ = 0.0;
+            accum_import_ms_ = accum_wait_ms_ = accum_submit_ms_ = accum_total_ms_ = 0.0;
         }
 
-        // Hand back the readback submitted PIPELINE_DEPTH frames ago; a blank frame
-        // while the queue is still filling.
-        const int ready = push_and_take(cur_write);
         if (ready < 0)
             return {blank_output(decklink_format_desc), dst_w, dst_h, /*is_blank=*/true};
 
@@ -1341,9 +1343,6 @@ struct vk_readback_strategy::impl
         if (cur_write < 0)
             return blank_output(decklink_format_desc);
         auto& slot = slots_[cur_write];
-
-        step_timer     = caspar::timer();
-        double sync_ms = step_timer.elapsed() * 1000.0;
 
         // Import timeline semaphore for GPU-side wait
         void*    sem_handle = wrapper->render_semaphore_handle();
@@ -1475,11 +1474,19 @@ struct vk_readback_strategy::impl
         VK_CHECK(vkQueueSubmit(compute_queue_, 1, &submit, slot.fence), "vkQueueSubmit");
         double submit_ms = step_timer.elapsed() * 1000.0;
 
+        // Hand back the readback submitted PIPELINE_DEPTH frames ago, and TIME IT.
+        // `push_and_take` contains the only call here that blocks the DeckLink thread --
+        // vkWaitForFences with UINT64_MAX. Reading `total_ms` before it, as this code did
+        // until 2026-08-20, excluded the one wait the number exists to account for.
+        caspar::timer wait_timer;
+        const int     ready   = push_and_take(cur_write);
+        double        wait_ms = wait_timer.elapsed() * 1000.0;
+
         double total_ms = total_timer.elapsed() * 1000.0;
 
         // Periodic timing report
         accum_import_ms_  += import_ms;
-        accum_sync_ms_    += sync_ms;
+        accum_wait_ms_    += wait_ms;
         accum_submit_ms_  += submit_ms;
         accum_total_ms_   += total_ms;
         frame_count_++;
@@ -1487,15 +1494,12 @@ struct vk_readback_strategy::impl
             double n = 50.0;
             CASPAR_LOG(info) << L"[vk_readback] DIAG avg/50: "
                              << L"import=" << (accum_import_ms_ / n) << L"ms "
-                             << L"sync=" << (accum_sync_ms_ / n) << L"ms "
+                             << L"wait=" << (accum_wait_ms_ / n) << L"ms "
                              << L"submit=" << (accum_submit_ms_ / n) << L"ms "
                              << L"total=" << (accum_total_ms_ / n) << L"ms";
-            accum_import_ms_ = accum_sync_ms_ = accum_submit_ms_ = accum_total_ms_ = 0.0;
+            accum_import_ms_ = accum_wait_ms_ = accum_submit_ms_ = accum_total_ms_ = 0.0;
         }
 
-        // Hand back the readback submitted PIPELINE_DEPTH frames ago; a blank frame
-        // while the queue is still filling.
-        const int ready = push_and_take(cur_write);
         if (ready < 0)
             return blank_output(decklink_format_desc);
 

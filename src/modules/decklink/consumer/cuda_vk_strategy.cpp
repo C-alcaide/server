@@ -325,7 +325,7 @@ struct cuda_vk_strategy::impl
     int      frame_count_ = 0;
     double   accum_fence_ms_   = 0.0;
     double   accum_import_ms_  = 0.0;
-    double   accum_sync_ms_    = 0.0;
+    double   accum_wait_ms_    = 0.0;
     double   accum_launch_ms_  = 0.0;
     double   accum_total_ms_   = 0.0;
 
@@ -710,9 +710,6 @@ struct cuda_vk_strategy::impl
         const int cur_dev = dev_idx_;
         dev_idx_          = (cur_dev + 1) % NUM_DEV_BUFS;
 
-        step_timer     = caspar::timer();
-        double sync_ms = step_timer.elapsed() * 1000.0;
-
         // Enqueue GPU-side wait for VK render completion on the CUDA stream.
         // This replaces the CPU fence wait — the GPU blocks on the semaphore
         // instead of the CPU, freeing the DeckLink thread to return immediately.
@@ -749,12 +746,20 @@ struct cuda_vk_strategy::impl
                                    cudaMemcpyDeviceToHost, stream_), "cudaMemcpyAsync D2H");
         double launch_ms = step_timer.elapsed() * 1000.0;
 
+        // Hand the buffer over, and TIME IT. `push_and_take` contains the only call in
+        // this path that blocks the DeckLink thread -- cudaEventSynchronize on the frame
+        // PIPELINE_DEPTH back. Reading `total_ms` before this, as this code did until
+        // 2026-08-20, excluded the one wait the number was being used to rule out.
+        caspar::timer wait_timer;
+        auto          ready   = push_and_take(std::move(out_buf));
+        double        wait_ms = wait_timer.elapsed() * 1000.0;
+
         double total_ms = total_timer.elapsed() * 1000.0;
 
         // Periodic timing report (every 50 frames)
         accum_fence_ms_   += fence_ms;
         accum_import_ms_  += import_ms;
-        accum_sync_ms_    += sync_ms;
+        accum_wait_ms_    += wait_ms;
         accum_launch_ms_  += launch_ms;
         accum_total_ms_   += total_ms;
         frame_count_++;
@@ -763,13 +768,13 @@ struct cuda_vk_strategy::impl
             CASPAR_LOG(debug) << L"[cuda_vk_strategy] avg over 50 frames: "
                               << L"fence=" << (accum_fence_ms_ / n) << L"ms "
                               << L"import=" << (accum_import_ms_ / n) << L"ms "
-                              << L"sync=" << (accum_sync_ms_ / n) << L"ms "
+                              << L"wait=" << (accum_wait_ms_ / n) << L"ms "
                               << L"launch=" << (accum_launch_ms_ / n) << L"ms "
                               << L"total=" << (accum_total_ms_ / n) << L"ms";
-            accum_fence_ms_ = accum_import_ms_ = accum_sync_ms_ = accum_launch_ms_ = accum_total_ms_ = 0.0;
+            accum_fence_ms_ = accum_import_ms_ = accum_wait_ms_ = accum_launch_ms_ = accum_total_ms_ = 0.0;
         }
 
-        if (auto ready = push_and_take(std::move(out_buf)))
+        if (ready)
             return ready;
         return blank_output(v210_sz); // pipeline still filling
 #else
@@ -836,9 +841,6 @@ struct cuda_vk_strategy::impl
         const int cur_dev = dev_idx_;
         dev_idx_          = (cur_dev + 1) % NUM_DEV_BUFS;
 
-        step_timer     = caspar::timer();
-        double sync_ms = step_timer.elapsed() * 1000.0;
-
         // GPU-side wait for VK render, fallback to CPU fence
         step_timer = caspar::timer();
         if (sem_handle && gpu_wait_available_) {
@@ -867,12 +869,20 @@ struct cuda_vk_strategy::impl
                                    cudaMemcpyDeviceToHost, stream_), "cudaMemcpyAsync D2H");
         double launch_ms = step_timer.elapsed() * 1000.0;
 
+        // Hand the buffer over, and TIME IT. `push_and_take` contains the only call in
+        // this path that blocks the DeckLink thread -- cudaEventSynchronize on the frame
+        // PIPELINE_DEPTH back. Reading `total_ms` before this, as this code did until
+        // 2026-08-20, excluded the one wait the number was being used to rule out.
+        caspar::timer wait_timer;
+        auto          ready   = push_and_take(std::move(out_buf));
+        double        wait_ms = wait_timer.elapsed() * 1000.0;
+
         double total_ms = total_timer.elapsed() * 1000.0;
 
         // Periodic timing report (shared with v210 path)
         accum_fence_ms_   += fence_ms;
         accum_import_ms_  += import_ms;
-        accum_sync_ms_    += sync_ms;
+        accum_wait_ms_    += wait_ms;
         accum_launch_ms_  += launch_ms;
         accum_total_ms_   += total_ms;
         frame_count_++;
@@ -881,13 +891,13 @@ struct cuda_vk_strategy::impl
             CASPAR_LOG(debug) << L"[cuda_vk_strategy] avg over 50 frames (BGRA): "
                               << L"fence=" << (accum_fence_ms_ / n) << L"ms "
                               << L"import=" << (accum_import_ms_ / n) << L"ms "
-                              << L"sync=" << (accum_sync_ms_ / n) << L"ms "
+                              << L"wait=" << (accum_wait_ms_ / n) << L"ms "
                               << L"launch=" << (accum_launch_ms_ / n) << L"ms "
                               << L"total=" << (accum_total_ms_ / n) << L"ms";
-            accum_fence_ms_ = accum_import_ms_ = accum_sync_ms_ = accum_launch_ms_ = accum_total_ms_ = 0.0;
+            accum_fence_ms_ = accum_import_ms_ = accum_wait_ms_ = accum_launch_ms_ = accum_total_ms_ = 0.0;
         }
 
-        if (auto ready = push_and_take(std::move(out_buf)))
+        if (ready)
             return ready;
         return blank_output(bgra_sz); // pipeline still filling
 #else
