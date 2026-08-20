@@ -80,6 +80,13 @@ class device final
     void                               submit(const vk::SubmitInfo& submitInfo, vk::Fence fence);
     vk::Device                         getVkDevice() const;
     vk::PhysicalDevice                 getVkPhysicalDevice() const;
+
+    /// Enough of this device to hand it to another API that wants to share it -- see
+    /// device.cpp for what FFmpeg's `AVVulkanDeviceContext` asks for and why the single
+    /// graphics queue family matters.
+    vk::Instance                       getVkInstance() const;
+    uint32_t                           getGraphicsQueueFamily() const;
+    PFN_vkGetInstanceProcAddr          getInstanceProcAddr() const;
     vk::CommandPool                    getCommandPool() const;
 
     /// `render_format` selects the attachment's numeric format. unorm is the historical

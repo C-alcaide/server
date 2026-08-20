@@ -155,6 +155,7 @@ struct device::impl : public std::enable_shared_from_this<impl>
     vk::PhysicalDevice                 _physical_device;
     vk::Device                         _device;
     vk::Queue                          _queue;
+    uint32_t                           _queue_family = 0;
     vk::CommandPool                    _command_pool;
     VmaAllocator                       _allocator;
 
@@ -531,6 +532,7 @@ struct device::impl : public std::enable_shared_from_this<impl>
         VULKAN_HPP_DEFAULT_DISPATCHER.init(_device);
         _queue            = vk::Queue(vkb_device.get_queue(vkb::QueueType::graphics).value());
         auto queue_family = vkb_device.get_queue_index(vkb::QueueType::graphics).value();
+        _queue_family     = queue_family;
 
         vk::CommandPoolCreateInfo pool_info;
         pool_info.flags            = vk::CommandPoolCreateFlagBits::eResetCommandBuffer;
@@ -1503,6 +1505,30 @@ device::device(int gpu_index)
 device::~device() {}
 
 vk::PhysicalDeviceMemoryProperties device::getMemoryProperties() { return impl_->_memoryProperties; }
+
+// ---- for handing this device to another API -------------------------------------------
+//
+// FFmpeg 8 can decode ProRes, FFV1 and DPX with Vulkan COMPUTE shaders, and the way to
+// get those frames without a copy is to let it use the device the mixer already owns --
+// `AVVulkanDeviceContext` is designed to be filled in by the application rather than
+// created by FFmpeg. It needs more than the device handle: the instance, the queue
+// family, and the loader entry point.
+//
+// Measured 2026-08-20 against `ffmpeg -init_hw_device vulkan`, which builds its OWN device
+// on this GPU with 5 queue families (graphics/transfer/compute/decode/encode) and 23
+// extensions. This device has ONE graphics family. That is not necessarily a problem for
+// the compute codecs -- `prores_vulkan` declares `VK_QUEUE_COMPUTE_BIT` and NVIDIA's
+// graphics family carries COMPUTE -- but it is why the Vulkan VIDEO codecs (h264/hevc/
+// av1/vp9, which need VK_KHR_video_decode_queue and a decode family) are a separate
+// question from the compute ones.
+vk::Instance device::getVkInstance() const { return vk::Instance(impl_->_vkb_instance.instance); }
+
+uint32_t device::getGraphicsQueueFamily() const { return impl_->_queue_family; }
+
+PFN_vkGetInstanceProcAddr device::getInstanceProcAddr() const
+{
+    return impl_->_vkb_instance.fp_vkGetInstanceProcAddr;
+}
 std::vector<vk::CommandBuffer>     device::allocateCommandBuffers(uint32_t count)
 {
     return impl_->allocateCommandBuffers(count);
