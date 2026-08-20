@@ -584,6 +584,51 @@ updating a dependency (a new `casparcg_add_runtime_dependency`, a rebuilt
 `OpenColorIO_2_5.dll`), the exe will link fine and then fail at load or run against the
 previous DLL. Build `casparcg_copy_dependencies`, or the default target, to refresh them.
 
+**And the copy step fails PARTWAY, quietly, leaving a mixed set.** Each dependency is its
+own `add_custom_command` of the form `echo && copy && copy`, run in the order they were
+registered — so one locked file aborts that command and everything registered after it,
+while everything before it is already updated. Nobody building `--target casparcg` ever sees
+the error, because that target does not run this step at all.
+
+Measured 2026-08-21. `Bootstrap_Windows.cmake` registers FFmpeg as seven DLLs and then, last,
+`ffmpeg.exe` and `ffprobe.exe`. In `build\shell`:
+
+```
+avcodec-62.dll   19/08/2026 21:59:40   <- all seven 8.1.2 DLLs, copied
+...
+swscale-9.dll    19/08/2026 21:59:40
+ffmpeg.exe       16/08/2026 16:21:22   <- FFmpeg 7.0.2, the two LAST entries, not copied
+ffprobe.exe      16/08/2026 16:21:22
+```
+
+That is not cosmetic: **`scanner.exe` shells out to the `ffprobe` beside it**, so the media
+scanner was probing files with FFmpeg 7.0.2 while the server decoded them with 8.1.2. A
+format 8.x reads and 7.x cannot probe shows up as a file missing its duration in the media
+list while `PLAY` on the same file works — which reads as a scanner bug and is not one. It
+also cost real time in a Vulkan-decode investigation, where a probe run with
+`build\shell\ffmpeg.exe` could not possibly have used an FFmpeg 8 decoder.
+
+**The copy step also never DELETES anything**, and FFmpeg 8 bumped every soname
+(avcodec 61→62, avutil 59→60, avfilter 10→11, avformat 61→62, swresample 5→6, swscale 8→9,
+libpostproc removed). So the entire 7.x set stayed on disk beside the new one. A running
+server loads only the 8.x set — verified by enumerating its loaded modules — so they are
+inert for the server, but not for everything: Windows resolves a DLL from the **application
+directory first**, so a GStreamer `gstlibav.dll` loaded in-process would bind to the stale
+`avcodec-61.dll` (61.3.100) instead of GStreamer's own 61.19.100. They are quarantined in
+`build\shell\_stale_ffmpeg7\` with a README, and are safe to delete.
+
+**So after any dependency-version change, check the tools and not just the DLLs:**
+
+```powershell
+cmake --build d:\Github\CasparVP\build --target casparcg_copy_dependencies
+d:\Github\CasparVP\build\shell\ffmpeg.exe -version   # must match the pin in Bootstrap_Windows.cmake
+Get-ChildItem d:\Github\CasparVP\build\shell\av*.dll, d:\Github\CasparVP\build\shell\ffmpeg.exe |
+  Select-Object Name, LastWriteTime    # one timestamp cluster, not two
+```
+
+The exe-newer-than-`src\` check below cannot see any of this: `casparcg.exe` is freshly
+linked and every DLL beside it may be from a previous pin.
+
 ---
 
 The scripts are tracked in git. After modifying any build script, commit:

@@ -374,10 +374,14 @@ returns `EXECUTE_HANDLER`, so Windows Error Reporting never produces a dump).
   get_format()` — the Vulkan decoder was never exercised. It needs
   `-hwaccel_output_format vulkan` to be forced. Any measurement of this decoder must show
   the `Format vulkan chosen by get_format()` line or it measured the software path.
-* **`build/shell/ffmpeg.exe` is FFmpeg 7.0.2** while the DLLs beside it are 8.1.2, and it
-  loads the 7.x `avcodec-61.dll`/`avutil-59.dll` that also sit there. A probe run with it
-  cannot use any 8.x feature. The 8.1.2 CLI is at
-  `build/ffmpeg-lib-prefix/src/ffmpeg-lib/bin/ffmpeg.exe`.
+* **`build/shell/ffmpeg.exe` was FFmpeg 7.0.2** while the DLLs beside it were 8.1.2, so a
+  probe run with it could not use any 8.x feature. **Fixed 2026-08-21** by running
+  `--target casparcg_copy_dependencies`; the cause and the standing check are in
+  `BUILDING_WORKFLOW.md` pitfall #7. It was not only a probe hazard — `scanner.exe` shells
+  out to the `ffprobe` beside it, so the media scanner was probing files with 7.0.2 while
+  the server decoded them with 8.1.2. The whole 7.x DLL set is quarantined in
+  `build/shell/_stale_ffmpeg7/`; a running server was verified to load only the 8.x set. The
+  8.1.2 CLI also lives at `build/ffmpeg-lib-prefix/src/ffmpeg-lib/bin/ffmpeg.exe`.
 
 ### 6.2 Codecs that matter in this domain
 
