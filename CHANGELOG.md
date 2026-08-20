@@ -1,6 +1,56 @@
 CasparVP — Unreleased
 ==========================================
 
+### Fixed: a partial-alpha video layer composited wrongly — a fully transparent region rendered as opaque colour
+
+`pixel_format_desc::is_straight_alpha` says whether a source's RGB already carries its alpha.
+The shader premultiplies when it is **not** set, and `blend()` documents itself as requiring
+premultiplied input. The field defaults to `false` — "already premultiplied" — and **no video
+producer in this tree or upstream ever set it**, so the premultiply never ran and the blend was
+handed straight RGB. Stills already declared straight; video did not.
+
+**Measured**, both mixers, 1080p2500, a qtrle clip with alpha strips at 255/192/128/64/0 over an
+opaque `[0,0,191]` background, selecting between two closed-form models:
+
+| | before | after |
+| :--- | :--- | :--- |
+| matches `c + bg*(1-a)` (straight treated as premultiplied) | **100.0%** of 1 152 000 px, mean 0.03 | 31.5% |
+| matches `c*a + bg*(1-a)` (correct) | 33.7% | **100.0%**, mean 0.23, max 0.5 |
+| a fully **transparent** region, background `[0,0,191]` | rendered `[101,101,255]` | renders `[0,0,191]` |
+
+That last row is the whole defect in one line: at alpha 0 the layer was visible, and *added* to
+what was behind it.
+
+**Why it survived.** `col.rgb *= 1.0` is a no-op, so content without partial alpha is
+bit-identical either way — and every alpha-carrying test fixture was fully opaque until
+2026-08-20. HTML was never affected for a different reason: CEF hands over genuinely
+premultiplied BGRA, so `false` was the truth there and stays.
+
+`docs/COLOR_GRADING.md` has described the intended behaviour all along — *"Premultiply if the
+source is straight (default)"*. Only the flag went unset.
+
+**The fix.** Decoded media declares straight, at all 11 sites across the FFmpeg, CUDA ProRes,
+CUDA NotchLC and HAP producers. Both mixers already honoured the flag, so no shader changed.
+And because the assumption is about a convention rather than a signal in the file, it is
+overridable — some Adobe ProRes 4444 exports really are premultiplied:
+
+```
+PLAY 1-1 "clip"                  straight (default)
+PLAY 1-1 "clip" PREMULTIPLIED    the RGB already carries its alpha
+PLAY 1-1 "clip" STRAIGHT         explicit
+```
+
+`PREMULTIPLIED` reproduces the old rendering exactly — measured, the old model at 100.0% /
+mean 0.03 — so anyone whose content was authored against the previous behaviour has a way back.
+See `src/core/frame/alpha_mode.h`.
+
+**Second-order:** the IMAGE consumer's un-premultiply now has something to undo, so an 8-bit
+capture of partial-alpha content lands within **2 LSB** of the source over every visible pixel
+(49.90 dB, mean 0.46). Only alpha-0 pixels differ, and there the surface colour is `0/0` — no
+premultiplied pipeline can carry it, and nothing visible depends on it.
+
+**Not fixed here:** the same defect is present upstream, where no caller sets the flag either.
+
 ### Fixed: an 8-bit IMAGE capture of partial-alpha content came out the wrong COLOUR, not merely the wrong brightness
 
 `image::unmultiply()` (`src/modules/image/util/image_algorithms.h`) straightened alpha with

@@ -57,6 +57,7 @@
 #include <core/frame/draw_frame.h>
 #include <core/frame/frame.h>
 #include <core/frame/frame_factory.h>
+#include <core/frame/alpha_mode.h>
 #include <core/frame/pixel_format.h>
 #include <core/monitor/monitor.h>
 #include <core/producer/frame_producer.h>
@@ -128,6 +129,8 @@ struct notchlc_producer_impl final : public core::frame_producer
     bool                                      loop_                   = false;
     // -1=AUTO(709); 1=BT.709; 6=BT.601; 9=BT.2020; 100=LINEAR
     int                                       color_matrix_override_  = -1;
+    // Decoded media is straight-alpha; see core/frame/alpha_mode.h.
+    bool                                      straight_alpha_         = true;
     spl::shared_ptr<core::frame_factory>      frame_factory_;
     std::shared_ptr<accelerator::ogl::device> ogl_device_;
     core::video_format_desc                   format_desc_;
@@ -217,11 +220,12 @@ struct notchlc_producer_impl final : public core::frame_producer
     mutable core::monitor::state              monitor_state_;
 
     notchlc_producer_impl(const std::wstring& path, int cuda_device, bool loop,
-                          bool pingpong, int color_matrix_override,
+                          bool pingpong, int color_matrix_override, bool straight_alpha,
                           int64_t in_frame, int64_t out_frame, double initial_speed,
                           const core::frame_producer_dependencies& deps)
         : path_(path), cuda_device_(cuda_device), loop_(loop)
         , color_matrix_override_(color_matrix_override)
+        , straight_alpha_(straight_alpha)
         , in_frame_(in_frame), out_frame_(out_frame)
         , speed_(initial_speed), pingpong_(pingpong)
         , frame_factory_(deps.frame_factory)
@@ -943,6 +947,7 @@ struct notchlc_producer_impl final : public core::frame_producer
             if (has_gpu_tex) {
                 const auto pf = use_vulkan_ ? core::pixel_format::bgra : core::pixel_format::rgba;
                 core::pixel_format_desc pfd(pf);
+                pfd.is_straight_alpha = straight_alpha_;
                 pfd.planes.push_back(core::pixel_format_desc::plane(
                     frame_info_.width, frame_info_.height, 4, common::bit_depth::bit16));
 
@@ -970,6 +975,7 @@ struct notchlc_producer_impl final : public core::frame_producer
                     gpu_tex));
             } else {
                 core::pixel_format_desc pfd(core::pixel_format::bgra);
+                pfd.is_straight_alpha = straight_alpha_;
                 pfd.planes.push_back(core::pixel_format_desc::plane(
                     frame_info_.width, frame_info_.height, 4, common::bit_depth::bit16));
                 auto mf = frame_factory_->create_frame(this, pfd);
@@ -1281,6 +1287,7 @@ create_notchlc_producer(const core::frame_producer_dependencies& deps,
     bool    pingpong_flag           = false;
     double  initial_speed           = 1.0;
     int     color_matrix_override   = -1;   // -1 = AUTO  709
+    bool    straight_alpha           = core::source_is_straight_alpha(params);
     int64_t start_frame = 0, out_frame = -1, length_param = -1;
 
     for (size_t i = 1; i < params.size(); ++i) {
@@ -1331,7 +1338,7 @@ create_notchlc_producer(const core::frame_producer_dependencies& deps,
 
     try {
         return spl::make_shared<notchlc_producer_impl>(
-            path, cuda_device, loop, pingpong_flag, color_matrix_override,
+            path, cuda_device, loop, pingpong_flag, color_matrix_override, straight_alpha,
             start_frame, out_frame, initial_speed, deps);
     } catch (const std::exception& ex) {
         CASPAR_LOG(error) << L"[notchlc_producer] " << ex.what();

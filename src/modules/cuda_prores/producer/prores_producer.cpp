@@ -55,6 +55,7 @@
 #include <common/timer.h>
 #include <common/utf.h>
 
+#include <core/frame/alpha_mode.h>
 #include <core/frame/draw_frame.h>
 #include <core/frame/frame.h>
 #include <core/frame/frame_factory.h>
@@ -114,6 +115,8 @@ struct prores_producer_impl final : public core::frame_producer
     bool                                  loop_          = false;
     // -1 = use per-frame metadata; 1 = force BT.709; 6 = force BT.601; 9 = force BT.2020
     int                                   color_matrix_override_ = -1;
+    // Decoded media is straight-alpha; see core/frame/alpha_mode.h.
+    bool                                  straight_alpha_        = true;
     spl::shared_ptr<core::frame_factory>  frame_factory_;
     std::shared_ptr<accelerator::ogl::device> ogl_device_;
     bool                                   use_vulkan_ = false;
@@ -200,11 +203,13 @@ struct prores_producer_impl final : public core::frame_producer
     mutable core::monitor::state monitor_state_;
 
     prores_producer_impl(const std::wstring& path, int cuda_device, bool loop, bool pingpong,
-                         int color_matrix_override, int64_t in_frame, int64_t out_frame,
+                         int color_matrix_override, bool straight_alpha,
+                         int64_t in_frame, int64_t out_frame,
                          double initial_speed,
                          const core::frame_producer_dependencies& deps)
         : path_(path), cuda_device_(cuda_device), loop_(loop)
         , color_matrix_override_(color_matrix_override)
+        , straight_alpha_(straight_alpha)
         , in_frame_(in_frame), out_frame_(out_frame)
         , speed_(initial_speed)
         , pingpong_(pingpong)
@@ -521,6 +526,7 @@ struct prores_producer_impl final : public core::frame_producer
 
             const auto pf = use_vulkan_ ? core::pixel_format::bgra : core::pixel_format::rgba;
             core::pixel_format_desc pfd(pf, pfd_cs, pfd_ct);
+            pfd.is_straight_alpha = straight_alpha_;
             pfd.planes.push_back(core::pixel_format_desc::plane(
                 sfi.width, sfi.height, 4, common::bit_depth::bit16));
 
@@ -885,6 +891,7 @@ struct prores_producer_impl final : public core::frame_producer
                                   : core::color_transfer::sdr;
 
                 core::pixel_format_desc pfd(core::pixel_format::bgra, pfd_cs, pfd_ct);
+                pfd.is_straight_alpha = straight_alpha_;
                 pfd.planes.push_back(core::pixel_format_desc::plane(fi.width, fi.height, 4, common::bit_depth::bit16));
                 auto mf = frame_factory_->create_frame(this, pfd);
                 std::memcpy(mf.image_data(0).begin(), h_bgra16_[slot], mf.image_data(0).size());
@@ -1380,7 +1387,7 @@ create_prores_producer(const core::frame_producer_dependencies& deps, const std:
     }
 
     try {
-        return spl::make_shared<prores_producer_impl>(path, cuda_device, loop, pingpong_flag, color_matrix_override, start_frame, out_frame, initial_speed, deps);
+        return spl::make_shared<prores_producer_impl>(path, cuda_device, loop, pingpong_flag, color_matrix_override, core::source_is_straight_alpha(params), start_frame, out_frame, initial_speed, deps);
     }
     catch (const std::exception& ex) { CASPAR_LOG(error) << L"[prores_producer] " << ex.what(); return core::frame_producer::empty(); }
 }

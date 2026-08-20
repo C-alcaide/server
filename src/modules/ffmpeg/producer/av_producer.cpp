@@ -2788,6 +2788,7 @@ struct AVProducer::Impl
 
     int                              seekable_ = 2;
     core::frame_geometry::scale_mode scale_mode_;
+    std::atomic<bool>                straight_alpha_{true};
     int64_t                          frame_count_    = 0;
     bool                             frame_flush_    = true;
     int64_t                          frame_time_     = AV_NOPTS_VALUE;
@@ -3218,7 +3219,7 @@ struct AVProducer::Impl
                             // We hit EOF while fast-forwarding to a seek target (the target was beyond the video).
                             // Render and push the very last dropped frame so we don't output a black screen.
                             last_dropped_frame.frame = core::draw_frame(
-                                make_frame(this, *frame_factory_, last_dropped_frame.video, last_dropped_frame.audio, get_color_space(last_dropped_frame.video, stream_color_space_), scale_mode_, false, get_color_transfer(last_dropped_frame.video, stream_color_trc_)));
+                                make_frame(this, *frame_factory_, last_dropped_frame.video, last_dropped_frame.audio, get_color_space(last_dropped_frame.video, stream_color_space_), scale_mode_, straight_alpha_, get_color_transfer(last_dropped_frame.video, stream_color_trc_)));
                             last_dropped_frame.frame_count = frame_count_++;
 
                             boost::unique_lock<boost::mutex> buffer_lock(buffer_mutex_);
@@ -3605,11 +3606,11 @@ struct AVProducer::Impl
                         }
                         return core::const_frame(
                             make_frame(this, *frame_factory_, frame.video, frame.audio,
-                                get_color_space(frame.video, stream_color_space_), scale_mode_, false,
+                                get_color_space(frame.video, stream_color_space_), scale_mode_, straight_alpha_,
                                 note_colour(frame.video)));
                     }()
 #else
-                    make_frame(this, *frame_factory_, frame.video, frame.audio, get_color_space(frame.video, stream_color_space_), scale_mode_, false, note_colour(frame.video))
+                    make_frame(this, *frame_factory_, frame.video, frame.audio, get_color_space(frame.video, stream_color_space_), scale_mode_, straight_alpha_, note_colour(frame.video))
 #endif
                 );
 
@@ -4906,6 +4907,12 @@ AVProducer::AVProducer(std::shared_ptr<core::frame_factory> frame_factory,
                      scale_mode,
                      growing))
 {
+}
+
+AVProducer& AVProducer::straight_alpha(bool straight)
+{
+    impl_->straight_alpha_ = straight;
+    return *this;
 }
 
 core::draw_frame AVProducer::next_frame(const core::video_field field) { return impl_->next_frame(field); }

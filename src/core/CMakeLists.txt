@@ -55,6 +55,7 @@ set(HEADERS
 		diagnostics/log_graph.h
 		diagnostics/osd_graph.h
 
+		frame/alpha_mode.h
 		frame/draw_frame.h
 		frame/frame.h
 		frame/frame_factory.h

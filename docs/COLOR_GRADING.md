@@ -797,7 +797,7 @@ All color grading runs on the GPU in a single fragment shader pass. The processi
 | :--- | :--- | :--- |
 | 1 | **Texture Fetch** | UV coordinates (projection, curve warp, flip) |
 | 2 | **Sharpening** | `MIXER SHARPEN` |
-| 3 | **Alpha domain** | Automatic. Premultiply if the source is straight (default), or *un*premultiply if the source is premultiplied and `<straight-alpha-grading>` is on |
+| 3 | **Alpha domain** | Automatic, from the source's own declaration — decoded media is straight, HTML/CEF is premultiplied, `PREMULTIPLIED` overrides. Premultiply if the source is straight (default), or *un*premultiply if the source is premultiplied and `<straight-alpha-grading>` is on |
 | 4 | **EOTF** (decode to linear) | `MIXER COLORSPACE` or auto-color-convert |
 | 5 | **Input Gamut → Working Space** | `MIXER COLORSPACE`, auto-color-convert, or **`MIXER OCIO`**, whose generated transform *replaces* steps 4–5 rather than following them |
 | 6 | **Exposure** | `MIXER EXPOSURE` × `MIXER COLORSPACE` exposure / auto luminance scaling |
@@ -904,6 +904,43 @@ gets the channel's frame, which is the honest fallback rather than a second enco
 
 Measured on both mixers with `CasparCG-TestRunner/cli.py consumer-view --consumer
 {image,screen,decklink}`: 4/4 patches routed in every case, the two views 28–50 LSB apart.
+
+### Which domain the source arrives in — `STRAIGHT` / `PREMULTIPLIED`
+
+Step 3 acts on the source's *declaration*, and until 2026-08-20 no video producer made one.
+`pixel_format_desc::is_straight_alpha` defaults to `false` — "already premultiplied" — and
+nothing set it, so the premultiply never ran and `blend()`, which requires premultiplied
+input, was handed straight RGB.
+
+What that looked like, measured on both mixers with a 1080p clip carrying alpha strips at
+255/192/128/64/0 over an opaque background:
+
+| | |
+| :--- | :--- |
+| composite matched `c + bg*(1-a)` | **100.0%** of 1 152 000 partial-alpha pixels (mean 0.03) |
+| the correct `c*a + bg*(1-a)` | 43.05 away |
+| a **fully transparent** region | rendered `[101,101,255]` over a `[0,0,191]` background — visible, and *added* to what was behind it |
+
+After the fix the same measurement selects the correct model on 100.0% of those pixels
+(mean 0.23, max 0.5), and alpha 0 renders as the background alone.
+
+**Opaque content is bit-identical either way** — `col.rgb *= 1.0` — which is why this
+survived for years and why HTML was never affected: CEF hands over genuinely premultiplied
+BGRA, so `false` was the truth there and still is.
+
+Decoded media is **straight** by default, because that is what the formats store and there
+is no signal in the container to detect it from. Stills already declared straight; video,
+ProRes, HAP and NotchLC now do too. Where content really is premultiplied — some Adobe
+ProRes 4444 exports are — declare it:
+
+```
+PLAY 1-1 "clip"                  straight (default)
+PLAY 1-1 "clip" PREMULTIPLIED    the RGB already carries its alpha
+PLAY 1-1 "clip" STRAIGHT         explicit
+```
+
+`PREMULTIPLIED` reproduces the pre-2026-08-20 rendering exactly — measured, the old model
+at 100.0% / mean 0.03 — so it is also the escape hatch for content authored against it.
 
 ### The alpha domain — `<straight-alpha-grading>`
 

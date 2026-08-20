@@ -59,6 +59,13 @@ class AVProducer
     // Requires no separate LOOP command — ping-pong implies continuous looping.
     // Speed magnitude is preserved on each direction flip.
     AVProducer& pingpong(bool enable);
+
+    /// Is this file's RGB straight (unpremultiplied)? True for anything an NLE wrote.
+    /// A setter rather than a constructor argument because `spl::make_shared` tops out
+    /// at 13 arguments and `ffmpeg_producer` already uses all of them; it is set from
+    /// `create_producer` immediately after construction, exactly as `pingpong` and
+    /// `speed` are. See core/frame/alpha_mode.h.
+    AVProducer& straight_alpha(bool straight);
     bool        pingpong() const;
 
     /**
