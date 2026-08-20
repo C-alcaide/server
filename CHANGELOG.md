@@ -45,8 +45,10 @@ control-record and data-record reads against the validated `data_end` in 64-bit 
 the block opaque on failure. The bound is worth having independently of the detection — this module
 parses untrusted files, and no header value should be able to reach a dereference unchecked.
 
-**Measured, 1080p2500, OpenGL mixer, one server per case** (a poisoned context makes every later
-case a casualty of the first, so they cannot share one):
+**Measured, 1080p2500, one server per case** (a poisoned context makes every later case a
+casualty of the first, so they cannot share one). **The OpenGL and Vulkan mixers returned
+identical numbers on all six cases** — the producer picks `bgra` or `rgba` by mixer, so that is
+a real parity check rather than a formality:
 
 | case | before | after |
 | :--- | :--- | :--- |
