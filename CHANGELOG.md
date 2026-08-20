@@ -1,6 +1,50 @@
 CasparVP — Unreleased
 ==========================================
 
+### Changed: GPU-direct decode is ON by default, and the buffer depth is tunable again
+
+`<gpu-direct-decode>` shipped **off**, and the config said why: not because the picture differs,
+but because "it is a different route through the driver, and each backend is verified against
+that standard before being trusted". That verification had never been performed — nothing in the
+harness compared the two paths against *each other*; `cli.py run` measures each `gpu_path_mode`
+against a reference, and `flat-decoded` hardcodes `auto`.
+
+It has been performed now, and it holds. `cli.py gpu-direct-parity` captures the same pinned
+frame with the option off and on and requires **byte-identity** — no tolerance, because the
+extraction pass is arithmetic-free and the same shader converts either way, so a difference would
+have no mechanism:
+
+| codec | ogl | vulkan |
+| :--- | :--- | :--- |
+| h264 8-bit (NV12) | 0 differing pixels | 0 differing pixels |
+| h265 10-bit (P010) | 0 | 0 |
+| h265 HDR10 BT.2020 PQ | 0 | 0 |
+| VP9 | 0 | — |
+
+Every case confirms frame identity from the burnt-in marker and proves the two arms took
+different paths, so an identical result cannot come from the knob doing nothing.
+
+**What it saves**, from `cli.py decode-cost` — server-process CPU, four 1080p25 layers, three
+interleaved rounds per arm, one binary:
+
+| mixer | software | gpu-direct |
+| :--- | ---: | ---: |
+| ogl | 0.60 cores [0.59–0.62] | **0.20** [0.20–0.21] |
+| vulkan | 1.53 cores | **1.10** |
+
+GPU utilisation also fell on Vulkan, 9.0% → 6.1%, which is the upload the path stops doing.
+
+The documented declines are unchanged: a video filter, an interlaced source, an fps mismatch, no
+mixer GPU device, or a stream that decodes in software all still fall back with the reason logged.
+Set `<gpu-direct-decode>false</gpu-direct-decode>` to force the host transfer path.
+
+**Not covered:** one raster and one frame per codec, and the decline list itself is unexercised.
+
+Also restored: **`<buffer-depth>`**. The producer's output buffer is the largest latency term in
+that path — `fps/4`, so 12 frames or ~250 ms at 50p — and it used to be operator-settable. The
+config read had been lost while the declaration still read `// set in constructor from config`, so
+there was no way to trade latency against robustness at all. `-1` keeps following the video mode.
+
 ### Fixed: the NotchLC producer duplicated both ping-pong endpoints, and showed nothing in reverse
 
 The first time this producer's boundaries were measured at all — a marked NotchLC fixture only

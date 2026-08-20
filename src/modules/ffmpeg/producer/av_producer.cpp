@@ -1293,7 +1293,7 @@ void loop_cache_release(int64_t bytes)
 bool gpu_direct_decode_requested()
 {
     static const bool value =
-        env::properties().get(L"configuration.ffmpeg.producer.gpu-direct-decode", false);
+        env::properties().get(L"configuration.ffmpeg.producer.gpu-direct-decode", true);
     return value;
 }
 } // namespace
@@ -2878,7 +2878,16 @@ struct AVProducer::Impl
         graph_->set_color("fps", diagnostics::color(1.0f, 0.6f, 0.0f));
 
         const int default_buffer_depth = std::max(1, static_cast<int>(format_desc_.fps) / 4);
-        buffer_capacity_ = default_buffer_depth;
+        // Operator-tunable again. This is the largest latency term in the producer path --
+        // fps/4 is 12 frames at 50p, ~250 ms -- and it used to be settable. The config read
+        // was lost at some point while the declaration kept saying "set in constructor from
+        // config", so there was no way to trade latency against robustness at all.
+        // -1 (the documented default) means "follow the video mode". Clamping a negative
+        // to 1 instead would give a 1-frame buffer to anyone who wrote the documented
+        // value, which is worse than not offering the option.
+        const int configured =
+            env::properties().get(L"configuration.ffmpeg.producer.buffer-depth", -1);
+        buffer_capacity_ = configured > 0 ? configured : default_buffer_depth;
 
         // Memory a LOOP or PINGPONG range may keep resident so it can be replayed without
         // decoding. Where it lives depends on the decode path and is worth knowing: software
@@ -3061,7 +3070,7 @@ struct AVProducer::Impl
             // through the driver, and it stays opt-in until each new backend has
             // been verified against that standard.
             const bool gpu_direct_enabled =
-                env::properties().get(L"configuration.ffmpeg.producer.gpu-direct-decode", false);
+                env::properties().get(L"configuration.ffmpeg.producer.gpu-direct-decode", true);
 
             void*      gpu_dev     = frame_factory_->gpu_device_handle();
             const auto gpu_backend = frame_factory_->gpu_device_backend();
@@ -3071,7 +3080,7 @@ struct AVProducer::Impl
                 bridge_backend = d3d11_bridge::backend::vulkan;
 
             if (!gpu_direct_enabled) {
-                declined(L"disabled (set configuration.ffmpeg.producer.gpu-direct-decode to true to enable)");
+                declined(L"disabled (configuration.ffmpeg.producer.gpu-direct-decode is false)");
             } else if (!gpu_dev || gpu_backend == core::gpu_backend::none) {
                 declined(L"the mixer exposes no GPU device (GPU affinity moved it, or this is a CPU mixer)");
             } else if (!vfilter_.empty()) {
