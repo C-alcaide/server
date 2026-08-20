@@ -199,6 +199,24 @@ cmake --build d:\Github\CasparVP\build --target casparcg
 - Confirm the build happened: `build\shell\casparcg.exe`'s `LastWriteTime` must be
   newer than the newest file under `src\`. A no-op invocation leaves it older, and an
   inherited binary may not match the tree.
+- **"Newer than my edits" is not "matches HEAD", and measuring the difference invents
+  defects.** Several sessions commit to this tree, so an inherited `casparcg.exe` can be a
+  perfectly valid build of a tree that is now several commits old. The timestamp check above
+  passes — the exe *is* newer than `src\` if nobody has edited since — and every number you
+  take from it belongs to code that is no longer there.
+
+  Measured 2026-08-20. An exe built at Aug 19 02:00 was probed as the "before" for a NotchLC
+  fix. It predated `4a42009d7` (source colour range) and `56f0c4487` (CUDA producer reverse
+  start), so the run produced **two defects that had already been fixed**: the ffmpeg route
+  rendering NotchLC too dark, written up as ffmpeg's `AVCOL_SPC_RGB` labelling and linked to
+  an upstream trac ticket — it was the full-range double expansion — and a `SEEK 20` landing
+  on frame 2. Both evaporated on rebuild, and neither had anything to do with the change
+  under test. One real finding, two fabricated ones, all three reported with equal confidence.
+
+  So before a before/after: `git log --oneline <exe-build-point>..HEAD`, or just rebuild
+  first and measure the *rebuilt* binary as the baseline. And when a number moves in a
+  subsystem your change does not touch, that is the signal — attribute it before believing
+  it. A plausible number from the wrong binary is the hardest kind of wrong.
 - **A header change does not trigger a rebuild, and the timestamp check above will not
   notice.** Ninja's localized `/showIncludes` prefix is stored with a broken encoding, so it
   records no header dependencies at all: only the `.cpp` files you also edited get
