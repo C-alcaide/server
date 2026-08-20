@@ -49,6 +49,25 @@ so the decoder sits further ahead rather than behind. No dropped frames either w
 Reproduce with `CasparCG-TestRunner`: `cli.py flake --decoder cuda_notchlc --mixer vulkan
 --seek 7`, and `--compare-server` for the A/B.
 
+**The sibling producers were checked and deliberately NOT changed.** `cuda_prores` shares the
+`cudaMemcpyAsync` upload shape, so it was the obvious candidate — but measured on the same
+scenario it is **15/15 clean** (CI [80%, 100%]), and it is structurally protected in a way
+NotchLC was not: its zero-copy path submits and returns, then **syncs the stream and pushes a
+whole slot cycle later** via `flush_async_slot` (`prores_producer.cpp:495`, ~70 ms of GPU time
+by its own comment), so an incomplete first decode is never what gets published.
+
+Applying a per-frame synchronous upload there would remove that deliberate overlap, and ProRes
+is the *expensive* decoder — 0.842 of the frame budget at 12K against NotchLC's 0.290 — so the
+same change carries a real throughput risk and has no measured benefit. `hap_native` has no
+host-to-device copy in the module at all and is 11/11 clean.
+
+Neither result proves absence: 15 and 11 clean runs bound those failure rates below about 20%
+and 26%. What they do rule out is a NotchLC-scale problem, which ran at 27% to 90%.
+
+One unrelated thing the sweep surfaced, recorded rather than chased: one HAP run answered
+`SEEK 7` with **frame 0** — a wrong-frame delivery, which is neither a pass nor the black
+failure and which a pass/fail split would have hidden.
+
 **Not the fix, but kept:** the `cudaStreamSynchronize` added earlier today implements the
 contract `cuda_vk_texture.h` documents and `cuda_prores` follows. Measured against this same
 harness it moves the rate not at all (17% vs 25%, p = 1.000); the entry below has been
