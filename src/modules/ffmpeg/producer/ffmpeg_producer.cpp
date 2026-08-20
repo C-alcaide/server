@@ -141,6 +141,7 @@ struct ffmpeg_producer : public core::frame_producer
     // Post-construction helpers called from create_producer
     void pingpong(bool pp)    { producer_->pingpong(pp); }
     void straight_alpha(bool s) { producer_->straight_alpha(s); }
+    void alpha_declaration(core::alpha_declaration d) { producer_->alpha_declaration(static_cast<int>(d)); }
     void speed(double spd)    { producer_->speed(spd); }
 
     ~ffmpeg_producer()
@@ -442,9 +443,10 @@ spl::shared_ptr<core::frame_producer> create_producer(const core::frame_producer
     auto filter_str = get_param(L"FILTER", params, L"");
 
     auto scale_mode = core::scale_mode_from_string(get_param(L"SCALE_MODE", params, L"STRETCH"));
-    // Decoded media is straight-alpha unless the operator says otherwise; the container
-    // carries no signal for it. See core/frame/alpha_mode.h.
-    auto straight_alpha = core::source_is_straight_alpha(params);
+    // Three answers, not two: FFmpeg 8 lets some formats DECLARE their alpha mode, so
+    // "the operator said nothing" has to stay distinguishable from "the operator said
+    // straight" or the convention would outrank the file. See core/frame/alpha_mode.h.
+    auto alpha_decl = core::source_alpha_declaration(params);
 
     boost::ireplace_all(filter_str, L"DEINTERLACE_BOB", L"YADIF=1:-1");
     boost::ireplace_all(filter_str, L"DEINTERLACE_LQ", L"SEPARATEFIELDS");
@@ -484,7 +486,7 @@ spl::shared_ptr<core::frame_producer> create_producer(const core::frame_producer
                                                       growing);
         // Before anything is drawn: the decode thread is running, and the default is
         // already the common case, so only a PREMULTIPLIED declaration depends on this.
-        prod->straight_alpha(straight_alpha);
+        prod->alpha_declaration(alpha_decl);
         if (pingpong)
             prod->pingpong(true);
         if (has_speed)

@@ -942,6 +942,39 @@ PLAY 1-1 "clip" STRAIGHT         explicit
 `PREMULTIPLIED` reproduces the pre-2026-08-20 rendering exactly — measured, the old model
 at 100.0% / mean 0.03 — so it is also the escape hatch for content authored against it.
 
+#### Some files now say it themselves (FFmpeg 8)
+
+The paragraph above says there is "no signal in the container to detect it from". That was
+true of FFmpeg 7 and is no longer true of every format. FFmpeg 8 added `AVFrame.alpha_mode`
+and `AVCodecParameters.alpha_mode`, so the ffmpeg producer asks the decoder before falling
+back to the convention. The precedence, from 2026-08-21:
+
+| | |
+| :--- | :--- |
+| 1. the operator | `PREMULTIPLIED` / `STRAIGHT`. Still on top, because the override exists for content whose *file* is wrong, and because it is the escape hatch above |
+| 2. the file | `AVFrame.alpha_mode`, read from the frame leaving the filter graph so a graph that legitimately premultiplies is believed over the decoder |
+| 3. the convention | decoded media is straight |
+
+**Which formats actually declare it, in FFmpeg 8.1:** `png` (straight), `exr`
+(premultiplied, unconditionally), `libjxl` and the JPEG XL parser (either, from the
+`alpha_associated` flag), and Matroska where the track is tagged. **ProRes and QuickTime
+Animation declare nothing**, and between them they are most of the alpha content this fork
+sees — so for the common case nothing changes and the convention still decides.
+
+That is worth stating plainly: **this adoption does not move a pixel today.** Every format
+that declares and is reachable through the ffmpeg producer declares *straight*, which is
+what the convention already assumed. It replaces a guess with a signal, and the value is in
+the case that has not arrived yet rather than in a measurement.
+
+**One thing it surfaced, not yet acted on.** FFmpeg's EXR decoder sets
+`AVALPHA_MODE_PREMULTIPLIED` unconditionally (`libavcodec/exr.c`), while `.exr` in this tree
+is loaded by the **image** module — which hardcodes straight for every format it reads
+(`image_producer.cpp`, the literal `true` argument to `make_frame`). If the OpenEXR
+convention really is associated/premultiplied alpha, every EXR with soft edges is being
+premultiplied a second time here. FFmpeg agreeing is corroboration, not authority: this
+needs the ASWF/OpenEXR specification and a partial-alpha EXR fixture before anything is
+changed, since it would move rendered output for an existing configuration.
+
 ### The alpha domain — `<straight-alpha-grading>`
 
 Everything between steps 3 and 23b operates on **premultiplied** RGB by default. That is

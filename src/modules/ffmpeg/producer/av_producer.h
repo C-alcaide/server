@@ -66,6 +66,11 @@ class AVProducer
     /// `create_producer` immediately after construction, exactly as `pingpong` and
     /// `speed` are. See core/frame/alpha_mode.h.
     AVProducer& straight_alpha(bool straight);
+
+    /// Declare the source's alpha mode as `core::alpha_declaration`, passed as its integer
+    /// value so this header stays free of the core include. `unspecified` lets the decoder's
+    /// own `AVFrame.alpha_mode` decide, falling back to the straight-alpha convention.
+    AVProducer& alpha_declaration(int declaration);
     bool        pingpong() const;
 
     /**

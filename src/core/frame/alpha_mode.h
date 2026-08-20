@@ -74,4 +74,32 @@ bool source_is_straight_alpha(C&& params, bool default_straight = true)
     return default_straight;
 }
 
+/// What the OPERATOR said, kept separate from what we would assume.
+enum class alpha_declaration
+{
+    unspecified = 0, //< nothing was said; a source that knows may speak, else the convention
+    straight,
+    premultiplied,
+};
+
+/// The same three keywords, read as three answers rather than two.
+///
+/// `source_is_straight_alpha` collapses "nothing was said" into "straight", which is right
+/// for a producer with nothing better to consult. It is wrong for one that has: FFmpeg 8
+/// carries `AVFrame.alpha_mode`, and a PNG or EXR or alpha-tagged Matroska now DECLARES its
+/// mode. Collapsing first would let the fallback silently outrank the file.
+///
+/// So the precedence is: the operator, then the file, then the convention. The operator
+/// stays on top because the override exists for content the file is wrong about -- some
+/// Adobe ProRes 4444 exports -- and ProRes carries no declaration anyway.
+template <class C>
+alpha_declaration source_alpha_declaration(C&& params)
+{
+    if (contains_param(L"PREMULTIPLIED", params))
+        return alpha_declaration::premultiplied;
+    if (contains_param(L"STRAIGHT", params))
+        return alpha_declaration::straight;
+    return alpha_declaration::unspecified;
+}
+
 }} // namespace caspar::core

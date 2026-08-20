@@ -27,6 +27,7 @@
 #include <common/timer.h>
 
 #include <core/frame/draw_frame.h>
+#include <core/frame/alpha_mode.h>
 #include <core/frame/frame_factory.h>
 #include <core/monitor/monitor.h>
 
@@ -1551,6 +1552,12 @@ class Decoder
     // the filter graph. Atomic because those are genuinely different threads.
     std::atomic<AVColorSpace> frame_colorspace{AVCOL_SPC_UNSPECIFIED};
     std::atomic<AVColorRange> frame_color_range{AVCOL_RANGE_UNSPECIFIED};
+#if LIBAVUTIL_VERSION_MAJOR >= 60
+    /// Whether the decoder DECLARED how its alpha relates to the colour values, which
+    /// FFmpeg 8 is the first version able to say. Latched from the first frame that states
+    /// it, exactly like the two above and for the same reason: the container often does not.
+    std::atomic<int> frame_alpha_mode{AVALPHA_MODE_UNSPECIFIED};
+#endif
 
     // Set if any decoded frame was actually flagged interlaced. The deinterlacer
     // is omitted for streams whose container declares them progressive (see the
@@ -1888,6 +1895,17 @@ class Decoder
                             frame_color_range.store(static_cast<AVColorRange>(av_frame->color_range),
                                                     std::memory_order_relaxed);
                         }
+#if LIBAVUTIL_VERSION_MAJOR >= 60
+                        // Read PRE-filter, because this is the decoder's statement and the
+                        // buffersrc is configured from it below. Only png, exr, jpegxl and
+                        // Matroska set it in FFmpeg 8.1 -- prores and qtrle, which is most
+                        // of the alpha content this fork sees, say nothing and fall back to
+                        // the convention.
+                        if (av_frame->alpha_mode != AVALPHA_MODE_UNSPECIFIED &&
+                            frame_alpha_mode.load(std::memory_order_relaxed) == AVALPHA_MODE_UNSPECIFIED) {
+                            frame_alpha_mode.store(av_frame->alpha_mode, std::memory_order_relaxed);
+                        }
+#endif
 
                         // Recorded, not judged: whether it matters depends on what the
                         // container claimed, which the filter graph decides and logs.
@@ -2512,11 +2530,23 @@ struct Filter
                     if (src_rng == AVCOL_RANGE_UNSPECIFIED)
                         src_rng = it->second.frame_color_range.load(std::memory_order_relaxed);
 
-                    if (src_csp != AVCOL_SPC_UNSPECIFIED || src_rng != AVCOL_RANGE_UNSPECIFIED) {
+                    // Declared on the buffersrc so the graph carries it: AVFilterLink has an
+                    // alpha_mode of its own, and a link left unspecified hands the sink
+                    // frames that no longer say what the decoder said.
+                    int src_alpha = AVALPHA_MODE_UNSPECIFIED;
+#if LIBAVUTIL_VERSION_MAJOR >= 60
+                    src_alpha = it->second.frame_alpha_mode.load(std::memory_order_relaxed);
+#endif
+
+                    if (src_csp != AVCOL_SPC_UNSPECIFIED || src_rng != AVCOL_RANGE_UNSPECIFIED ||
+                        src_alpha != AVALPHA_MODE_UNSPECIFIED) {
                         AVBufferSrcParameters* par = av_buffersrc_parameters_alloc();
                         if (par) {
                             par->color_space = src_csp;
                             par->color_range = src_rng;
+#if LIBAVUTIL_VERSION_MAJOR >= 60
+                            par->alpha_mode = static_cast<AVAlphaMode>(src_alpha);
+#endif
                             av_buffersrc_parameters_set(source, par);
                             av_free(par);
                         }
@@ -2863,7 +2893,8 @@ struct AVProducer::Impl
     const int decode_adapter_ = -1;
     /// The mixer's Vulkan device when the mixer is Vulkan, else null. Used only to let an
     /// FFmpeg Vulkan compute decoder allocate on it; see vulkan_hwdevice.h.
-    void* const vk_mixer_device_ = nullptr;
+    void* const                                                  vk_mixer_device_ = nullptr;
+    std::unique_ptr<accelerator::vulkan::av_vulkan_importer>     vk_importer_;
 
     std::map<int, std::vector<AVFilterContext*>> sources_;
 
@@ -2935,6 +2966,43 @@ struct AVProducer::Impl
     }
 
     /// Resolve the transfer, and name both halves the first time through.
+    /// Does this frame's RGB already carry a factor of its own alpha?
+    ///
+    /// Three answers in precedence order, and the order is the point:
+    ///
+    ///   1. the OPERATOR, via PREMULTIPLIED / STRAIGHT. On top because the override exists
+    ///      for content whose file is wrong -- some Adobe ProRes 4444 exports -- and
+    ///      because it is also the escape hatch back to the pre-2026-08-20 rendering.
+    ///   2. the FILE, via `AVFrame.alpha_mode`. New in FFmpeg 8, and the first time this
+    ///      tree has had a signal rather than a convention. Only png, exr, jpegxl and
+    ///      alpha-tagged Matroska set it in 8.1.
+    ///   3. the CONVENTION: decoded media is straight, because that is what the formats
+    ///      store and what every NLE writes. See core/frame/alpha_mode.h.
+    ///
+    /// Read from the frame that leaves the filter graph rather than the latched decoder
+    /// value, so a graph that legitimately premultiplies is believed over the decoder.
+    bool straight_alpha_for(const std::shared_ptr<AVFrame>& video)
+    {
+        const auto declared = static_cast<core::alpha_declaration>(alpha_declaration_.load());
+        if (declared == core::alpha_declaration::premultiplied)
+            return false;
+        if (declared == core::alpha_declaration::straight)
+            return true;
+
+#if LIBAVUTIL_VERSION_MAJOR >= 60
+        if (video && video->alpha_mode != AVALPHA_MODE_UNSPECIFIED) {
+            const bool straight = video->alpha_mode == AVALPHA_MODE_STRAIGHT;
+            if (!alpha_source_logged_.exchange(true)) {
+                CASPAR_LOG(info) << print() << L" alpha is "
+                                 << (straight ? L"STRAIGHT" : L"PREMULTIPLIED")
+                                 << L" because the file says so, not by convention.";
+            }
+            return straight;
+        }
+#endif
+        return straight_alpha_.load();
+    }
+
     core::color_transfer note_colour(const std::shared_ptr<AVFrame>& video)
     {
         note_hdr10(video);
@@ -3000,7 +3068,13 @@ struct AVProducer::Impl
 
     int                              seekable_ = 2;
     core::frame_geometry::scale_mode scale_mode_;
-    std::atomic<bool>                straight_alpha_{true};
+    /// What the operator declared, which outranks everything below.
+    std::atomic<int> alpha_declaration_{static_cast<int>(core::alpha_declaration::unspecified)};
+    /// The effective answer make_frame consumes: operator, then the file, then the
+    /// convention that decoded media is straight. Computed rather than stored so a stream
+    /// that only declares itself on frame 30 is still honoured from frame 30.
+    std::atomic<bool> straight_alpha_{true};
+    std::atomic<bool> alpha_source_logged_{false};
     int64_t                          frame_count_    = 0;
     bool                             frame_flush_    = true;
     int64_t                          frame_time_     = AV_NOPTS_VALUE;
@@ -3476,7 +3550,7 @@ struct AVProducer::Impl
                             // We hit EOF while fast-forwarding to a seek target (the target was beyond the video).
                             // Render and push the very last dropped frame so we don't output a black screen.
                             last_dropped_frame.frame = core::draw_frame(
-                                make_frame(this, *frame_factory_, last_dropped_frame.video, last_dropped_frame.audio, get_color_space(last_dropped_frame.video, stream_color_space_), scale_mode_, straight_alpha_, get_color_transfer(last_dropped_frame.video, stream_color_trc_)));
+                                make_frame(this, *frame_factory_, last_dropped_frame.video, last_dropped_frame.audio, get_color_space(last_dropped_frame.video, stream_color_space_), scale_mode_, straight_alpha_for(last_dropped_frame.video), get_color_transfer(last_dropped_frame.video, stream_color_trc_)));
                             last_dropped_frame.frame_count = frame_count_++;
 
                             boost::unique_lock<boost::mutex> buffer_lock(buffer_mutex_);
@@ -3741,9 +3815,23 @@ struct AVProducer::Impl
                                                   << static_cast<int>(plane_depth) << L", alpha " << has_alpha;
                             }
 
+                            // Built on the first Vulkan frame, not at producer start: the
+                            // importer needs nothing but the device, but constructing it
+                            // eagerly would allocate a command buffer and a fence for every
+                            // producer whether or not the decoder ever chose Vulkan.
+                            if (!planes.empty() && !vk_importer_) {
+                                try {
+                                    vk_importer_ =
+                                        std::make_unique<accelerator::vulkan::av_vulkan_importer>(vk_mixer_device_);
+                                } catch (const std::exception& e) {
+                                    CASPAR_LOG(warning) << print() << L" Vulkan GPU-direct importer failed: "
+                                                        << u16(e.what());
+                                }
+                            }
+
                             std::vector<std::shared_ptr<core::texture>> textures;
-                            if (!planes.empty() && accelerator::vulkan::copy_av_vulkan_planes(
-                                                       vk_mixer_device_, planes, plane_depth, textures)) {
+                            if (!planes.empty() && vk_importer_ &&
+                                vk_importer_->copy_planes(planes, plane_depth, textures)) {
                                 // The copy waited on sem_value and signalled sem_value + 1,
                                 // per plane. FFmpeg waits on the value recorded here before
                                 // reusing a pooled frame, so not incrementing it would let
@@ -3983,11 +4071,12 @@ struct AVProducer::Impl
                         }
                         return core::const_frame(
                             make_frame(this, *frame_factory_, frame.video, frame.audio,
-                                get_color_space(frame.video, stream_color_space_), scale_mode_, straight_alpha_,
+                                get_color_space(frame.video, stream_color_space_), scale_mode_,
+                                straight_alpha_for(frame.video),
                                 note_colour(frame.video)));
                     }()
 #else
-                    make_frame(this, *frame_factory_, frame.video, frame.audio, get_color_space(frame.video, stream_color_space_), scale_mode_, straight_alpha_, note_colour(frame.video))
+                    make_frame(this, *frame_factory_, frame.video, frame.audio, get_color_space(frame.video, stream_color_space_), scale_mode_, straight_alpha_for(frame.video), note_colour(frame.video))
 #endif
                 );
 
@@ -5285,6 +5374,19 @@ AVProducer::AVProducer(std::shared_ptr<core::frame_factory> frame_factory,
                      scale_mode,
                      growing))
 {
+}
+
+AVProducer& AVProducer::alpha_declaration(int declaration)
+{
+    impl_->alpha_declaration_ = declaration;
+    // Keep the effective default consistent with an explicit declaration, so a frame that
+    // says nothing and a stream that never speaks both land on the operator's answer.
+    const auto d = static_cast<core::alpha_declaration>(declaration);
+    if (d == core::alpha_declaration::premultiplied)
+        impl_->straight_alpha_ = false;
+    else if (d == core::alpha_declaration::straight)
+        impl_->straight_alpha_ = true;
+    return *this;
 }
 
 AVProducer& AVProducer::straight_alpha(bool straight)
