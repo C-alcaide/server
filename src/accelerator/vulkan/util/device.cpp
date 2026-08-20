@@ -161,6 +161,10 @@ struct device::impl : public std::enable_shared_from_this<impl>
     vk::Queue                          _decode_queue;
     uint32_t                           _decode_queue_family = 0;
     bool                               _decode_queue_dedicated = false;
+    // The device extensions actually enabled, kept because another API sharing this
+    // device has to be told what it may rely on -- FFmpeg's `enabled_dev_extensions`
+    // is the app's declaration, not a query.
+    std::vector<std::string>           _enabled_device_extensions;
     vk::CommandPool                    _command_pool;
     VmaAllocator                       _allocator;
 
@@ -526,6 +530,10 @@ struct device::impl : public std::enable_shared_from_this<impl>
         // Create the logical device
         auto device_builder = vkb::DeviceBuilder(_vkb_physical_device);
         _physical_device    = vk::PhysicalDevice(_vkb_physical_device.physical_device);
+
+        // Recorded before build(), because this is the list the builder was asked for and
+        // is what another API sharing the device is allowed to assume.
+        _enabled_device_extensions = _vkb_physical_device.get_extensions();
 
         auto device_res = device_builder.build();
         if (!device_res) {
@@ -1570,6 +1578,11 @@ vk::PhysicalDeviceMemoryProperties device::getMemoryProperties() { return impl_-
 /// A queue another API may submit on without racing the mixer. See the note at its
 /// creation for why this exists rather than a lock. Null when `hasDedicatedDecodeQueue()`
 /// is false, in which case the family index equals the graphics one.
+const std::vector<std::string>& device::getEnabledDeviceExtensions() const
+{
+    return impl_->_enabled_device_extensions;
+}
+
 vk::Queue device::getDecodeQueue() const { return impl_->_decode_queue; }
 
 uint32_t device::getDecodeQueueFamily() const { return impl_->_decode_queue_family; }

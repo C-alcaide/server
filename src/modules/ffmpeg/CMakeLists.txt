@@ -17,6 +17,8 @@ set(SOURCES
 
 	util/av_util.cpp
 	util/av_util.h
+	util/vulkan_hwdevice.cpp
+	util/vulkan_hwdevice.h
 	util/audio_resampler.cpp
 	util/audio_resampler.h
 	util/av_assert.h
@@ -35,6 +37,13 @@ casparcg_add_module_project(ffmpeg
 target_include_directories(ffmpeg PRIVATE
     ${FFMPEG_INCLUDE_PATH}
     )
+
+# FFmpeg's hwcontext_vulkan.h includes <vulkan/vulkan.h>, so this module needs the SDK's
+# include path even though it touches no Vulkan type of its own -- the accelerator side is
+# reached through the pure-std shared_device_info.h.
+IF(ENABLE_VULKAN)
+    target_include_directories(ffmpeg PRIVATE ${Vulkan_INCLUDE_DIRS} ${Vulkan_INCLUDE_DIR})
+ENDIF()
 target_precompile_headers(ffmpeg PRIVATE "StdAfx.h")
 
 set_target_properties(ffmpeg PROPERTIES FOLDER modules)

@@ -81,6 +81,8 @@ IF(ENABLE_VULKAN)
 		vulkan/util/transforms.cpp
 		vulkan/util/texture_wrapper.cpp
 		vulkan/util/d3d11_import_bridge.cpp
+		vulkan/util/shared_device_info.cpp
+		vulkan/util/shared_device_info.h
 		vulkan/util/gl_export_bridge.cpp
 		vulkan/util/glsl_compiler.cpp
 	)

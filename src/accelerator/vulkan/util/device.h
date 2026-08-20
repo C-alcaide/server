@@ -89,6 +89,10 @@ class device final
     /// sharing this device does not mean sharing a queue. Check
     /// `hasDedicatedDecodeQueue()` first: on a GPU with no separate compute family this
     /// falls back to the graphics queue's family, which is not isolation.
+    /// The device extensions this device enabled. Another API sharing it must be told
+    /// what it may rely on; FFmpeg's `enabled_dev_extensions` is a declaration by the
+    /// application, not something it can query.
+    const std::vector<std::string>&    getEnabledDeviceExtensions() const;
     vk::Queue                          getDecodeQueue() const;
     uint32_t                           getDecodeQueueFamily() const;
     bool                               hasDedicatedDecodeQueue() const;

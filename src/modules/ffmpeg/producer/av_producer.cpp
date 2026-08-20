@@ -6,6 +6,7 @@
 #include "../util/av_assert.h"
 #include "../util/av_color.h"
 #include "../util/av_util.h"
+#include "../util/vulkan_hwdevice.h"
 
 #include <boost/algorithm/string.hpp>
 #include <boost/exception/exception.hpp>
@@ -1304,6 +1305,17 @@ class Decoder
     {
         const enum AVPixelFormat* p;
 
+        // Vulkan first, when the decoder offers it. An FFmpeg Vulkan compute decoder on
+        // the mixer's own device produces frames that need no copy, so there is nothing
+        // for this callback to prepare -- FFmpeg allocates the pool on the device it was
+        // handed. Everything below is D3D11-specific and does not apply.
+        for (p = pix_fmts; *p != -1; p++) {
+            if (*p == AV_PIX_FMT_VULKAN) {
+                CASPAR_LOG(debug) << L"[av_producer] decoder chose AV_PIX_FMT_VULKAN";
+                return AV_PIX_FMT_VULKAN;
+            }
+        }
+
         for (p = pix_fmts; *p != -1; p++) {
             if (*p != AV_PIX_FMT_D3D11)
                 continue;
@@ -1451,6 +1463,11 @@ class Decoder
 
     /// DXGI adapter for the hardware decode device; -1 = default adapter.
     int decode_adapter_ = -1;
+    /// The mixer's Vulkan device, when the mixer IS Vulkan, so an FFmpeg Vulkan compute
+    /// decoder can allocate its frames there instead of on a device of its own. Null on
+    /// the OpenGL mixer and on any build without Vulkan. Threaded like decode_adapter_
+    /// rather than fetched from a global, for the same reason.
+    void* vk_mixer_device_ = nullptr;
 
     Decoder() = default;
 
@@ -1458,9 +1475,10 @@ class Decoder
     /// or -1 for the default. It has to match the mixer's GPU or the decoded
     /// surfaces cannot be imported by the GPU-direct bridge -- see
     /// resolve_decode_adapter.
-    explicit Decoder(AVStream* stream, int decode_adapter = -1)
+    explicit Decoder(AVStream* stream, int decode_adapter = -1, void* vk_mixer_device = nullptr)
         : st(stream)
         , decode_adapter_(decode_adapter)
+        , vk_mixer_device_(vk_mixer_device)
     {
         const auto codec = get_decoder(stream->codecpar->codec_id, stream, decode_adapter);
 
@@ -1507,15 +1525,68 @@ class Decoder
             //
             // avcodec_get_hw_config() answers the question properly and needs no
             // hardcoded codec list.
-            const AVCodecHWConfig* hw_cfg = nullptr;
-            for (int i = 0;; ++i) {
-                const auto* cfg = avcodec_get_hw_config(codec, i);
-                if (!cfg)
-                    break;
-                if (cfg->device_type == AV_HWDEVICE_TYPE_D3D11VA &&
-                    (cfg->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX)) {
-                    hw_cfg = cfg;
-                    break;
+            // An ORDERED preference, still asking the decoder rather than guessing from a
+            // codec list -- the comment above is why that matters.
+            //
+            // Vulkan first, but only when the mixer is Vulkan. FFmpeg 8 decodes ProRes,
+            // ProRes RAW, FFV1 and DPX with compute shaders, and on the mixer's own device
+            // those frames need no copy at all. Measured standalone on this hardware:
+            // 64% less host CPU for 13% less decode throughput with the frames left on the
+            // GPU, against 48%/78% once a readback is added -- so the copy is the whole
+            // question, and sharing the device is how it is avoided.
+            //
+            // D3D11VA otherwise, unchanged: it is what h264/hevc/vp9/av1 use, it is what
+            // the GPU-direct plane bridge is built on, and nothing here alters it.
+            const AVCodecHWConfig* hw_cfg      = nullptr;
+            bool                   want_vulkan = false;
+
+            if (vk_mixer_device_) {
+                for (int i = 0;; ++i) {
+                    const auto* cfg = avcodec_get_hw_config(codec, i);
+                    if (!cfg)
+                        break;
+                    if (cfg->device_type == AV_HWDEVICE_TYPE_VULKAN &&
+                        (cfg->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX)) {
+                        hw_cfg      = cfg;
+                        want_vulkan = true;
+                        break;
+                    }
+                }
+            }
+
+            if (!hw_cfg) {
+                for (int i = 0;; ++i) {
+                    const auto* cfg = avcodec_get_hw_config(codec, i);
+                    if (!cfg)
+                        break;
+                    if (cfg->device_type == AV_HWDEVICE_TYPE_D3D11VA &&
+                        (cfg->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX)) {
+                        hw_cfg = cfg;
+                        break;
+                    }
+                }
+            }
+
+            if (want_vulkan) {
+                // Refuses and returns null rather than sharing the mixer's graphics queue;
+                // falling through to D3D11VA (or software) is the correct outcome then.
+                if (auto* vk_ctx = make_vulkan_hwdevice_from_mixer(vk_mixer_device_)) {
+                    ctx->hw_device_ctx = vk_ctx;
+                    ctx->get_format    = get_hw_format;
+                    hw_cfg             = nullptr;   // handled; skip the D3D11 setup below
+                } else {
+                    want_vulkan = false;
+                    hw_cfg      = nullptr;
+                    for (int i = 0;; ++i) {
+                        const auto* cfg = avcodec_get_hw_config(codec, i);
+                        if (!cfg)
+                            break;
+                        if (cfg->device_type == AV_HWDEVICE_TYPE_D3D11VA &&
+                            (cfg->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX)) {
+                            hw_cfg = cfg;
+                            break;
+                        }
+                    }
                 }
             }
 
@@ -2021,7 +2092,8 @@ struct Filter
            int64_t                        start_time,
            AVMediaType                    media_type,
            const core::video_format_desc& format_desc,
-           int                            decode_adapter = -1)
+           int                            decode_adapter    = -1,
+           void*                          vk_mixer_device   = nullptr)
     {
         // Whether bwdif ends up in the graph. The output format restriction below
         // needs to know, because bwdif's chroma handling is what makes interlaced
@@ -2228,7 +2300,7 @@ struct Filter
                     it = streams
                              .emplace(std::piecewise_construct,
                                       std::forward_as_tuple(index),
-                                      std::forward_as_tuple(input->streams[index], decode_adapter))
+                                      std::forward_as_tuple(input->streams[index], decode_adapter, vk_mixer_device))
                              .first;
                 }
 
@@ -2652,6 +2724,9 @@ struct AVProducer::Impl
     /// DXGI adapter the hardware decoder runs on, resolved once from the mixer's
     /// GPU. -1 = default adapter. See resolve_decode_adapter.
     const int decode_adapter_ = -1;
+    /// The mixer's Vulkan device when the mixer is Vulkan, else null. Used only to let an
+    /// FFmpeg Vulkan compute decoder allocate on it; see vulkan_hwdevice.h.
+    void* const vk_mixer_device_ = nullptr;
 
     std::map<int, std::vector<AVFilterContext*>> sources_;
 
@@ -2860,6 +2935,19 @@ struct AVProducer::Impl
         , path_(path)
         , input_(path, graph_, seekable >= 0 && seekable < 2 ? std::optional<bool>(false) : std::optional<bool>())
         , decode_adapter_(resolve_decode_adapter(frame_factory.get()))
+        // OFF unless asked for, and the reason is not caution: the decode half works and
+        // the FRAME HANDOFF DOES NOT. An AV_PIX_FMT_VULKAN frame carries an AVVkFrame in
+        // data[0], not pixels, and everything downstream of the decoder here reads it as
+        // host memory -- measured 2026-08-20, `PLAY prores.mov` on the Vulkan mixer
+        // reached "decoder chose AV_PIX_FMT_VULKAN" and then took an access violation at
+        // address 0 (0xC0000005) one tick later. Until an AVVkFrame is wrapped as a mixer
+        // texture, enabling this crashes the channel.
+        , vk_mixer_device_(
+              env::properties().get(L"configuration.ffmpeg.producer.vulkan-decode", false) &&
+                      frame_factory &&
+                      frame_factory->gpu_device_backend() == core::gpu_backend::vulkan
+                  ? frame_factory->gpu_device_handle()
+                  : nullptr)
         , start_(start ? av_rescale_q(*start, format_tb_, TIME_BASE_Q) : AV_NOPTS_VALUE)
         , duration_(duration ? av_rescale_q(*duration, format_tb_, TIME_BASE_Q) : AV_NOPTS_VALUE)
         , loop_(loop)
@@ -4764,7 +4852,8 @@ struct AVProducer::Impl
         }
 
         video_filter_ =
-            Filter(vfilter_, input_, decoders_, start_time, AVMEDIA_TYPE_VIDEO, format_desc_, decode_adapter_);
+            Filter(vfilter_, input_, decoders_, start_time, AVMEDIA_TYPE_VIDEO, format_desc_, decode_adapter_,
+                   vk_mixer_device_);
         audio_filter_ = Filter(afilter_, input_, decoders_, start_time, AVMEDIA_TYPE_AUDIO, format_desc_);
 
         sources_.clear();
