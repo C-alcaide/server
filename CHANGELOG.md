@@ -1,6 +1,44 @@
 CasparVP — Unreleased
 ==========================================
 
+### Changed: the loop cache reserves a whole range up front, from a server-wide allowance
+
+Two problems with how the cache introduced above decided what to hold, both about memory rather
+than pictures.
+
+**It filled up to a per-frame cap and hoped the range would fit.** When the range was larger than
+the budget it filled to the cap, never reached both ends, never completed — and therefore pinned
+memory that could never be served from. Measured on a 75-frame clip: 256 MB of budget held, nothing
+ever played from it. A partly resident range is strictly worse than none.
+
+**And the budget was per producer, which bounds nothing useful.** Twenty layers each holding their
+own allowance is twenty times the figure an operator thought they had set, and on the
+`gpu-direct-decode` path those bytes are VRAM shared with the mixer.
+
+Both are now handled the same way: the whole range is measured and **reserved before a single frame
+is held**, all or nothing, from an allowance shared by every producer — `<loop-cache-total-mb>`,
+default 1024. A producer that cannot reserve does not cache; it plays exactly as it did before and
+says why. The reservation is returned when the cache is dropped and when the producer is destroyed.
+
+**This also makes a whole-clip `LOOP` work**, which the previous entry said it would not. `PLAY ...
+LOOP` with no `LENGTH` does have a declared range — `duration_` is filled in from the clip — so it
+qualifies like any other; it was only ever a question of whether it fits. A 75-frame 1080p clip needs
+593 MB, so it declines at the 256 MB default and caches with a larger one.
+
+**Measured**, reading the server's own log rather than inferring from the picture:
+
+| case | per-producer | server-wide | result |
+| :--- | :--- | :--- | :--- |
+| 8-frame range | 256 MB | 1024 MB | caches |
+| **whole clip**, 75 frames | 1024 MB | 2048 MB | **caches** |
+| whole clip, 75 frames | 256 MB | 1024 MB | declines: *"the range needs 593 MB, the per-producer budget is 256 MB"* — nothing held |
+| **two layers**, 8-frame ranges | 256 MB | **100 MB** | **one caches, one declines** naming the server-wide limit |
+
+Regression: the full boundary matrix — three producers x forward loop, ping-pong, reverse loop —
+comes back with full coverage, no duplicated endpoints, no repeated deliveries and nothing outside
+the range on any arm, with all three calibrations frame-exact. `seek` 7/7 fixtures, 49/49 seeks
+landing and agreeing; `flat-decoded` 29/29 on both mixers.
+
 ### Fixed: GPU-direct decode showed ~0.8 s of the wrong content when a clip started at an IN point
 
 `PLAY ... SEEK 20 LENGTH 8` on an inter-frame source with `gpu-direct-decode` delivered **frames

@@ -1251,6 +1251,44 @@ const AVCodec* get_decoder(AVCodecID codec_id, const AVStream* stream, int decod
 // TODO (feat) Forward options.
 
 namespace {
+/// Server-wide ceiling on memory held by resident loop ranges, across every producer.
+///
+/// The per-producer budget alone does not bound anything useful: twenty layers each holding
+/// their own allowance is twenty times the number an operator thought they were setting, and on
+/// the GPU-direct path those bytes are VRAM shared with the mixer. So a range is RESERVED from a
+/// shared allowance before a single frame is held, and a producer that cannot reserve simply
+/// does not cache -- it plays exactly as it did before, which is the right way to run out.
+std::atomic<int64_t> g_loop_cache_bytes{0};
+
+int64_t loop_cache_total_limit()
+{
+    static const int64_t value =
+        static_cast<int64_t>(env::properties().get(L"configuration.ffmpeg.producer.loop-cache-total-mb", 1024))
+        << 20;
+    return value;
+}
+
+/// All-or-nothing, because a partial range is worse than none: it pins memory and can never be
+/// served from, which is the failure this replaces.
+bool loop_cache_reserve(int64_t bytes)
+{
+    if (bytes <= 0)
+        return false;
+    const int64_t limit = loop_cache_total_limit();
+    int64_t       cur   = g_loop_cache_bytes.load(std::memory_order_relaxed);
+    while (cur + bytes <= limit) {
+        if (g_loop_cache_bytes.compare_exchange_weak(cur, cur + bytes, std::memory_order_relaxed))
+            return true;
+    }
+    return false;
+}
+
+void loop_cache_release(int64_t bytes)
+{
+    if (bytes > 0)
+        g_loop_cache_bytes.fetch_sub(bytes, std::memory_order_relaxed);
+}
+
 /// Whether the GPU-direct decode path is enabled in configuration. Read once.
 bool gpu_direct_decode_requested()
 {
@@ -2773,6 +2811,8 @@ struct AVProducer::Impl
     bool                             cache_complete_ = false;  // the whole range is resident
     bool                             cache_serving_  = false;  // playback is coming from it
     int                              cache_index_    = 0;      // cursor, in ascending pts order
+    int64_t                          cache_reserved_ = 0;      // bytes held from the shared allowance
+    bool                             cache_refused_  = false;  // decided once, not re-tried per frame
     core::draw_frame                 frame_;
 
     std::deque<Frame>         buffer_;
@@ -2890,6 +2930,11 @@ struct AVProducer::Impl
         // any of that is still live is how ffmpeg allocations end up being freed
         // twice or read after free. See
         // docs/CasparCG_HRC_Crash_Report_2026-06-17.md §9.1 fix 3.
+
+        // 0. Give back the shared loop-cache allowance. Before anything else, because it is
+        //    accounting rather than teardown and must not be skipped by an exception below.
+        loop_cache_release(cache_reserved_);
+        cache_reserved_ = 0;
 
         // 1. Stop feeding the pipeline.
         input_.abort();
@@ -4278,19 +4323,48 @@ struct AVProducer::Impl
             how = grow::back;
         }
 
-        const int64_t sz  = frame_bytes(f);
-        // Bounded by BYTES, so the depth scales itself with the raster rather than needing a
-        // threshold per resolution, and a 12K frame at ~300 MB opts the whole thing out on its
-        // own. NOT capped at buffer_capacity_ any more: a complete range is the point, and a
-        // range longer than the decode buffer is exactly the case worth caching.
-        const int cap = sz > 0 ? static_cast<int>(cache_budget_ / sz) : 0;
-        if (cap <= 0) {
-            // One frame is already over budget -- a 12K raster reaches this, which is the
-            // intended way for the cache to switch itself off rather than by a resolution test.
-            if (!shown_.empty())
-                drop_cache();
+        if (cache_refused_)
             return;
+
+        const int64_t sz = frame_bytes(f);
+
+        // Decide ONCE, for the WHOLE range, before a single frame is held.
+        //
+        // Filling up to a cap and hoping the range fits is the wrong shape, and was measurably
+        // wrong: a range larger than the budget filled to the cap, never reached both ends, never
+        // completed, and therefore pinned memory that could never be served from. Reserving the
+        // whole range up front means the cache either works or costs nothing -- and it is what
+        // lets the shared allowance below be an actual bound rather than a per-layer suggestion.
+        if (cache_reserved_ == 0) {
+            const int64_t d_c  = duration_.load();
+            const int64_t fdur = f.duration;
+            if (sz <= 0 || fdur <= 0 || d_c == AV_NOPTS_VALUE || d_c <= 0) {
+                cache_refused_ = true;   // no declared range, or nothing to measure it in
+                return;
+            }
+            const int64_t frames = (d_c + fdur - 1) / fdur;
+            const int64_t need   = frames * sz;
+
+            if (need > cache_budget_) {
+                cache_refused_ = true;
+                CASPAR_LOG(debug) << print() << L" loop cache declined: the range needs "
+                                  << (need >> 20) << L" MB, the per-producer budget is "
+                                  << (cache_budget_ >> 20) << L" MB";
+                return;
+            }
+            if (!loop_cache_reserve(need)) {
+                cache_refused_ = true;
+                CASPAR_LOG(info) << print() << L" loop cache declined: " << (need >> 20)
+                                 << L" MB would exceed the server-wide loop-cache-total-mb of "
+                                 << (loop_cache_total_limit() >> 20) << L" MB";
+                return;
+            }
+            cache_reserved_ = need;
         }
+
+        // Safety bound only: the reservation above already sized this, so exceeding it would mean
+        // the range is not what it was measured to be.
+        const int cap = static_cast<int>(cache_reserved_ / sz);
 
         // Retain the MIXER frame and drop the decoded AVFrame. This matters on both paths, for
         // different reasons:
@@ -4349,6 +4423,11 @@ struct AVProducer::Impl
         cache_complete_ = false;
         cache_serving_  = false;
         cache_index_    = 0;
+        loop_cache_release(cache_reserved_);
+        cache_reserved_ = 0;
+        // A new range may well fit where the last one did not, so the refusal is not permanent.
+        // This runs on an explicit seek or when looping is turned off, never per frame.
+        cache_refused_ = false;
     }
 
     bool cache_can_serve() const
