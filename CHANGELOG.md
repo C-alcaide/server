@@ -50,6 +50,79 @@ Two defects were found and fixed while landing this, both invisible until the pa
 and `dpx_vulkan` are reachable by the same code but unmeasured, nothing here measures decode
 *latency*, and the flakiness above means none of it is a production recommendation yet.
 
+### Fixed: a GPU wait that timed out carried on anyway, and reset resources still in flight
+
+Every fence wait in the Vulkan backend was `waitForFences(f, true, 1s)` followed by a warning
+and then the work the wait was there to protect. That reads as a safety net and is the
+opposite of one. A fence that has not signalled is still owned by a submission that is still
+executing, so what came next was undefined behaviour by the letter of the specification:
+
+* `vkResetFences` "must not be used on a fence that is in use by a queue submission";
+* `vkResetCommandBuffer` requires the buffer not be in the **pending** state.
+
+On this driver the consequence is not a wrong picture. It is a GPU hang, which the watchdog
+turns into a TDR, which turns every context on the device into `VK_ERROR_DEVICE_LOST`.
+
+**Measured**, four ProRes producers on `<vulkan-decode>`, reproduced at one round in ten:
+
+```
+14:03:08.682  [Vulkan image_kernel] Timeout waiting for render completion
+14:03:08.691  [vk::av_import] waiting for the previous plane copy timed out
+14:03:09.696  [vk::av_import] waiting for the previous plane copy timed out
+14:03:10.072  [prores @ ...] [vk @ ...] Unable to submit command buffer: VK_ERROR_DEVICE_LOST
+14:03:11      Windows event 4101 -- nvlddmkm stopped responding and has recovered
+```
+
+The timeouts arrive **1.4 s before** the device loss, and the driver's own TDR record arrives
+after it, so the order settles which is cause and which is symptom: one frame ran long, the
+code below the wait recycled a submission that was still executing, and the GPU wedged. A slow
+frame is survivable. Recycling a pending submission is not.
+
+Four sites did this, and the fifth is the one that shows what correct looks like:
+
+| site | on a timeout, before |
+| :--- | :--- |
+| `image_kernel::create_renderpass` | reset the fence **and** the command buffer -- the initiator |
+| `image_kernel::wait_for_completion` | returned, and the caller handed the slot on as rendered |
+| `av_vulkan_importer` previous copy | cleared `copy_pending_` and re-recorded the buffer |
+| `d3d11_import_bridge` previous copy | the same -- and this one is on the **default** path |
+| `device.cpp` readback semaphore | read the buffer anyway, so a stale or half-written frame |
+| `av_vulkan_importer` decoder wait | **declined the frame** -- already correct, and the model |
+
+They now share `wait_for_fence` / `wait_for_semaphores` (`util/gpu_wait.h`), which keep waiting
+and never return on a timeout. `eTimeout` means slow, not dead: a genuinely lost device throws
+`DeviceLostError` from the wait itself, which the callers already handle. The per-second
+warning is kept, so the slow-frame signal that was the only useful part of the old code
+survives. After 10 s the wait throws, because losing a frame to an exception is strictly
+better than losing the GPU to undefined behaviour.
+
+**The OpenGL backend was already right**, and that is the part worth keeping. Its readback
+loops on `glClientWaitSync` until the sync is signalled and has no give-up branch at all, so
+the backends had diverged and the divergence WAS the defect -- one of them treated a timeout
+as completion. Only Vulkan is changed here; the Vulkan side is now bounded where OpenGL still
+loops without limit, which is the one remaining asymmetry and the safer direction.
+
+**Not confined to the experimental path.** `d3d11_import_bridge` is the import used by
+`<gpu-direct-decode>`, which is now on by default, so any configuration whose GPU misses a
+one-second fence -- four layers, a driver hiccup, a cold start -- could reach the same
+undefined behaviour without `<vulkan-decode>` being enabled at all. Nothing in this tree had
+attributed a TDR to it, and an operator who has seen unexplained Vulkan instability has one
+more cause accounted for.
+
+**Measured after the change**, Vulkan mixer: `conformance` **100/100** within 1.0 LSB,
+`flat-decoded` **29/29**, and `vk-validation` **0 VUID findings** with 12/12 commands accepted
+and its positive control firing 8 messages, so that last one could have failed. No rendered
+change is expected and none appeared -- this removes undefined behaviour, it does not alter
+arithmetic.
+
+**What is NOT yet established.** The gates above cannot see the defect: none of them runs four
+producers, and the hang needed a frame that overran a full second. Reproducing the TDR took
+eight attempts of a four-layer soak to hit once, so the absence of one is only worth what the
+sample size makes it worth -- a re-run of the same soak is under way, and until it reports, the
+evidence for the fix is the specification and the ordering in the log above rather than a
+measured rate. The reproduction harness is a scratchpad script, not a battery, which is its own
+gap: nothing in the harness drives four producers *and* watches for a device loss.
+
 ### Fixed: `caspar::timer` had 1 ms resolution, so every sub-millisecond figure read zero
 
 `timer::now()` was `duration_cast<milliseconds>`, so `elapsed()` could only ever return whole

@@ -18,6 +18,7 @@
  */
 
 #include "d3d11_import_bridge.h"
+#include "gpu_wait.h"
 
 #ifdef _WIN32
 
@@ -192,10 +193,11 @@ struct d3d11_import_bridge::impl
         const auto start = std::chrono::steady_clock::now();
         // A one-second cap rather than UINT64_MAX: a lost submit must not wedge
         // the producer's decode thread forever, it must fall back.
-        const auto res = vk_device_.waitForFences(fence_, VK_TRUE, 1'000'000'000ull);
-        copy_pending_  = false;
-        if (res != vk::Result::eSuccess)
-            CASPAR_LOG(warning) << L"[vk::d3d11_import] timed out waiting for the previous plane copy";
+        // Same contract as the Vulkan importer: a timeout means the previous copy is still
+        // in flight, so reusing this command buffer and fence is undefined behaviour. This
+        // one is on the DEFAULT gpu-direct path, so it matters more, not less.
+        wait_for_fence(vk_device_, fence_, L"[vk::d3d11_import] previous plane copy");
+        copy_pending_ = false;
 
         return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count();
     }

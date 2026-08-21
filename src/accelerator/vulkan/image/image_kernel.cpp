@@ -22,6 +22,7 @@
 #include "image_kernel.h"
 
 #include "../util/device.h"
+#include "../util/gpu_wait.h"
 #include "../util/glsl_compiler.h"
 #include "../util/pipeline.h"
 #include "../util/platform_config.h"
@@ -379,10 +380,10 @@ struct image_kernel::impl
         virtual void                            wait_for_completion()
         {
             if (fence) {
-                auto result = parent->vulkan_->getVkDevice().waitForFences(fence, true, 1000000000);
-                if (result == vk::Result::eTimeout) {
-                    CASPAR_LOG(warning) << L"[Vulkan image_kernel] Timeout waiting for render completion";
-                }
+                // The caller treats this as "the render is done" and hands the slot on, so a
+                // timeout that returned would let the next frame overwrite a live one.
+                wait_for_fence(parent->vulkan_->getVkDevice(), fence,
+                               L"[Vulkan image_kernel] render completion");
             }
         }
         virtual std::shared_ptr<class texture>
@@ -486,10 +487,10 @@ struct image_kernel::impl
         auto  device = vulkan_->getVkDevice();
         auto& ctx    = frames_[(++current_frame_index_) % frame_buffer_size];
         if (ctx.fence) {
-            auto result = device.waitForFences(ctx.fence, true, 1000000000); // wait up to one second
-            if (result == vk::Result::eTimeout) {
-                CASPAR_LOG(warning) << L"[Vulkan image_kernel] Timeout waiting for fence";
-            }
+            // NEVER reset on a timeout: this slot's previous submission may still be
+            // executing, and resetting its fence and command buffer under it is undefined
+            // behaviour that presents as a GPU hang and then a TDR. See gpu_wait.h.
+            wait_for_fence(device, ctx.fence, L"[Vulkan image_kernel] renderpass slot");
             device.resetFences(ctx.fence);
         }
 

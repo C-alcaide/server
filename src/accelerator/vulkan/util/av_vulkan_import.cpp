@@ -18,6 +18,7 @@
  */
 
 #include "av_vulkan_import.h"
+#include "gpu_wait.h"
 
 #include "device.h"
 #include "texture.h"
@@ -96,9 +97,9 @@ struct av_vulkan_importer::impl
     {
         if (!copy_pending_ || !fence_)
             return;
-        const auto res = vk_device_.waitForFences(fence_, VK_TRUE, 1'000'000'000ull);
-        if (res != vk::Result::eSuccess)
-            CASPAR_LOG(warning) << L"[vk::av_import] waiting for the previous plane copy timed out";
+        // Proceeding here re-recorded a command buffer that was still executing. Waiting is
+        // the only safe response; see gpu_wait.h for the TDR this produced.
+        wait_for_fence(vk_device_, fence_, L"[vk::av_import] previous plane copy");
         copy_pending_ = false;
     }
 };

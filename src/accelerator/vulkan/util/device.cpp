@@ -20,6 +20,7 @@
  */
 
 #include "device.h"
+#include "gpu_wait.h"
 
 #include "../image/image_kernel.h"
 #include "buffer.h"
@@ -1691,10 +1692,9 @@ struct device::impl : public std::enable_shared_from_this<impl>
             vk::SemaphoreWaitInfo waitInfo{};
             waitInfo.setSemaphores(_semaphore);
             waitInfo.setValues(signal_value);
-            auto res = _device.waitSemaphores(waitInfo, 1000000000);
-            if (res != vk::Result::eSuccess) {
-                CASPAR_LOG(warning) << L"[Vulkan] Timeout waiting for readback semaphore";
-            }
+            // Reading the buffer after a timeout returned whatever was in it -- a stale or
+            // half-written frame, silently, with only a warning to say so.
+            wait_for_semaphores(_device, waitInfo, L"[Vulkan] readback");
 
             // Invalidate CPU caches in case the allocator picked a HOST_VISIBLE
             // but non-coherent memory type for this readback buffer — otherwise
