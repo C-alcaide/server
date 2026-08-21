@@ -47,6 +47,12 @@ struct shared_device_info
     /// False when this GPU has no compute family distinct from graphics, in which case
     /// `decode_qf == graphics_qf` and sharing would mean sharing a queue.
     bool     decode_qf_isolated = false;
+    /// The VIDEO ENCODE family, for an FFmpeg Vulkan encoder. Only meaningful when
+    /// `encode_qf_present`: the `VK_KHR_video_encode` codecs need a family carrying
+    /// `VK_QUEUE_VIDEO_ENCODE_BIT_KHR`, and substituting the compute one is what made VP9
+    /// fault rather than decline on the decode side.
+    uint32_t encode_qf         = 0;
+    bool     encode_qf_present = false;
     /// Device extensions the mixer enabled. Another API sharing the device may rely on
     /// these and nothing else.
     std::vector<std::string> enabled_device_extensions;

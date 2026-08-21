@@ -96,6 +96,18 @@ class device final
     vk::Queue                          getDecodeQueue() const;
     uint32_t                           getDecodeQueueFamily() const;
     bool                               hasDedicatedDecodeQueue() const;
+    /// The VIDEO ENCODE queue family, for an FFmpeg Vulkan *encoder* sharing this device.
+    ///
+    /// Separate from the decode accessors above because it is a different thing: those hand
+    /// out a COMPUTE family (which is all `prores_vulkan` and friends need), while
+    /// `h264_vulkan`/`hevc_vulkan` are `VK_KHR_video_encode` codecs and need a family with
+    /// `VK_QUEUE_VIDEO_ENCODE_BIT_KHR`. Declaring the compute family for those is what made
+    /// VP9 *fault* rather than decline on the decode side.
+    ///
+    /// `hasEncodeQueue()` is false on a GPU with no such family, and the caller must then
+    /// refuse rather than substitute another one.
+    uint32_t                           getEncodeQueueFamily() const;
+    bool                               hasEncodeQueue() const;
     uint32_t                           getGraphicsQueueFamily() const;
     PFN_vkGetInstanceProcAddr          getInstanceProcAddr() const;
     vk::CommandPool                    getCommandPool() const;

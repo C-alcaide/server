@@ -180,6 +180,11 @@ struct device::impl : public std::enable_shared_from_this<impl>
     vk::Queue                          _decode_queue;
     uint32_t                           _decode_queue_family = 0;
     bool                               _decode_queue_dedicated = false;
+    // The VIDEO ENCODE family, for an FFmpeg Vulkan encoder. vk-bootstrap creates one queue
+    // for EVERY family by default (VkBootstrap.cpp:1613-1617), so this family already has a
+    // queue on the logical device -- only its index has to be found and handed over.
+    uint32_t                           _encode_queue_family = 0;
+    bool                               _encode_queue_present = false;
     // The device extensions actually enabled, kept because another API sharing this
     // device has to be told what it may rely on -- FFmpeg's `enabled_dev_extensions`
     // is the app's declaration, not a query.
@@ -866,6 +871,27 @@ struct device::impl : public std::enable_shared_from_this<impl>
             CASPAR_LOG(info) << L"[vk::device] reserved compute queue family "
                              << _decode_queue_family << L" for external decoders (graphics is "
                              << queue_family << L")";
+        }
+
+        // The VIDEO ENCODE family, found by querying the physical device: vk-bootstrap has no
+        // notion of video queue types, and the encode codecs need a family carrying
+        // VK_QUEUE_VIDEO_ENCODE_BIT_KHR rather than the compute one reserved above.
+        {
+            const auto families = _physical_device.getQueueFamilyProperties();
+            for (uint32_t i = 0; i < families.size(); ++i) {
+                if (families[i].queueFlags & vk::QueueFlagBits::eVideoEncodeKHR) {
+                    _encode_queue_family  = i;
+                    _encode_queue_present = true;
+                    break;
+                }
+            }
+            if (_encode_queue_present) {
+                CASPAR_LOG(info) << L"[vk::device] video ENCODE queue family "
+                                 << _encode_queue_family << L" is available to an external encoder";
+            } else {
+                CASPAR_LOG(info) << L"[vk::device] this GPU exposes no video encode queue family; "
+                                    L"the VK_KHR_video_encode codecs cannot run on it";
+            }
         }
 
         vk::CommandPoolCreateInfo pool_info;
@@ -1877,6 +1903,8 @@ vk::Queue device::getDecodeQueue() const { return impl_->_decode_queue; }
 uint32_t device::getDecodeQueueFamily() const { return impl_->_decode_queue_family; }
 
 bool device::hasDedicatedDecodeQueue() const { return impl_->_decode_queue_dedicated; }
+uint32_t device::getEncodeQueueFamily() const { return impl_->_encode_queue_family; }
+bool     device::hasEncodeQueue() const { return impl_->_encode_queue_present; }
 
 vk::Instance device::getVkInstance() const { return vk::Instance(impl_->_vkb_instance.instance); }
 

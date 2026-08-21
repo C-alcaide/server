@@ -83,6 +83,7 @@ IF(ENABLE_VULKAN)
 		vulkan/util/d3d11_import_bridge.cpp
 		vulkan/util/shared_device_info.cpp
 		vulkan/util/av_vulkan_import.cpp
+		vulkan/util/av_vulkan_export.cpp
 		vulkan/util/shared_device_info.h
 		vulkan/util/gl_export_bridge.cpp
 		vulkan/util/glsl_compiler.cpp
@@ -104,6 +105,7 @@ IF(ENABLE_VULKAN)
 		vulkan/util/glsl_compiler.h
 		vulkan/util/d3d11_import_bridge.h
 		vulkan/util/av_vulkan_import.h
+		vulkan/util/av_vulkan_export.h
 		vulkan/util/gl_export_bridge.h
 
 		vk_image_vertex.h

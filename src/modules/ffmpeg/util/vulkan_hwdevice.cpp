@@ -198,6 +198,32 @@ AVBufferRef* make_vulkan_hwdevice_from_mixer(void* vk_device_handle)
     hwctx->qf[1].num   = 1;
     hwctx->qf[1].flags = VK_QUEUE_GRAPHICS_BIT;
 
+    // `qf[2]`, THE VIDEO ENCODE FAMILY, and unlike `qf[1]` it is NOT inert: `h264_vulkan` and
+    // `hevc_vulkan` are `VK_KHR_video_encode` codecs and ask for VK_QUEUE_VIDEO_ENCODE_BIT_KHR.
+    // `ff_vk_qf_find` returns the first entry sharing any requested bit AND carrying the
+    // requested `video_caps`, so an encoder skips qf[0] (compute|transfer) and qf[1] (graphics)
+    // and lands here. The decode-side lesson applies in reverse: handing an encode codec the
+    // COMPUTE family would be handing it a queue that cannot do the work, which is how VP9
+    // came to fault instead of declining.
+    //
+    // `video_caps` names only H.264 and H.265 because those are the encode extensions this
+    // device reports. AV1 is deliberately absent, and nothing here needs to special-case it:
+    // FFmpeg queries the device itself and `av1_vulkan` refuses with "Device does not support
+    // encoding av1!" -- measured 2026-08-22 on an RTX A4000, which is Ampere and has no AV1
+    // encoder at all.
+    //
+    // Omitted entirely when the GPU has no such family, so an encoder gets no queue to find
+    // and declines, rather than being pointed at a family that cannot serve it.
+    if (info.encode_qf_present) {
+        hwctx->qf[2].idx   = static_cast<int>(info.encode_qf);
+        hwctx->qf[2].num   = 1;
+        hwctx->qf[2].flags = static_cast<VkQueueFlagBits>(VK_QUEUE_VIDEO_ENCODE_BIT_KHR);
+        hwctx->qf[2].video_caps =
+            static_cast<VkVideoCodecOperationFlagBitsKHR>(VK_VIDEO_CODEC_OPERATION_ENCODE_H264_BIT_KHR |
+                                                          VK_VIDEO_CODEC_OPERATION_ENCODE_H265_BIT_KHR);
+        hwctx->nb_qf = 3;
+    }
+
     const int err = av_hwdevice_ctx_init(ref);
     if (err < 0) {
         char msg[AV_ERROR_MAX_STRING_SIZE]{};

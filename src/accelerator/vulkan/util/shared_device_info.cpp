@@ -38,6 +38,8 @@ shared_device_info describe_shared_device(void* vk_device)
     info.graphics_qf     = dev->getGraphicsQueueFamily();
     info.decode_qf       = dev->getDecodeQueueFamily();
     info.decode_qf_isolated        = dev->hasDedicatedDecodeQueue();
+    info.encode_qf                 = dev->getEncodeQueueFamily();
+    info.encode_qf_present         = dev->hasEncodeQueue();
     info.enabled_device_extensions = dev->getEnabledDeviceExtensions();
     return info;
 }
