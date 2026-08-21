@@ -1456,6 +1456,25 @@ float icvfx_mask(vec2 screen_uv) {
 }
 
 
+
+// 4:2:2 / 4:2:0 CHROMA SITING. Horizontal chroma is CO-SITED (ITU-R BT.601/709): sample k
+// shares its position with luma 2k, so luma 2k wants C[k] exactly and luma 2k+1 wants
+// (C[k]+C[k+1])/2. A linear sampler reading a half-width plane at u=(x+0.5)/W lands on chroma
+// texel (x+0.5)/2 -- 0.75/0.25 either side of a centre for BOTH parities, a quarter-sample
+// blur. Co-siting needs (x+1)/2, so u gains half a LUMA pixel.
+//
+// v is deliberately NOT shifted: 4:2:0 chroma is CENTRED vertically between the two luma rows,
+// which is exactly what sampling at the luma centre already gives.
+//
+// The ratio makes this a no-op on 4:4:4. Kept identical to the Vulkan shader's `chroma_uv`,
+// since a siting fix on one backend only would put the two out of parity on every 4:2:2 source.
+vec2 chroma_uv(sampler2D luma, sampler2D chroma, vec2 uv)
+{
+    float lw = float(textureSize(luma, 0).x);
+    float cw = float(textureSize(chroma, 0).x);
+    return vec2(uv.x + (lw/cw - 1.0) * 0.5 / lw, uv.y);
+}
+
 vec4 get_sample(sampler2D sampler, vec2 coords)
 {
     return texture(sampler, coords);
@@ -1488,16 +1507,18 @@ vec4 get_rgba_color(vec2 uv)
         return get_sample(plane[0], uv).grab * precision_factor[0];
     case 5:		//ycbcr,
         {
+            vec2  cuv = chroma_uv(plane[0], plane[1], uv);
             float y  = get_sample(plane[0], uv).r * precision_factor[0];
-            float cb = get_sample(plane[1], uv).r * precision_factor[1];
-            float cr = get_sample(plane[2], uv).r * precision_factor[2];
+            float cb = get_sample(plane[1], cuv).r * precision_factor[1];
+            float cr = get_sample(plane[2], cuv).r * precision_factor[2];
             return ycbcra_to_rgba(y, cb, cr, 1.0);
         }
     case 6:		//ycbcra
         {
+            vec2  cuv = chroma_uv(plane[0], plane[1], uv);
             float y  = get_sample(plane[0], uv).r * precision_factor[0];
-            float cb = get_sample(plane[1], uv).r * precision_factor[1];
-            float cr = get_sample(plane[2], uv).r * precision_factor[2];
+            float cb = get_sample(plane[1], cuv).r * precision_factor[1];
+            float cr = get_sample(plane[2], cuv).r * precision_factor[2];
             float a  = get_sample(plane[3], uv).r * precision_factor[3];
             return ycbcra_to_rgba(y, cb, cr, a);
         }
@@ -1512,9 +1533,10 @@ vec4 get_rgba_color(vec2 uv)
         return vec4(get_sample(plane[0], uv).rgb * precision_factor[0], 1.0);
 	case 10:	// uyvy
 		{
+			vec2 cuv = chroma_uv(plane[0], plane[1], uv);
 			float y = get_sample(plane[0], uv).g * precision_factor[0];
-			float cb = get_sample(plane[1], uv).b * precision_factor[1];
-			float cr = get_sample(plane[1], uv).r * precision_factor[1];
+			float cb = get_sample(plane[1], cuv).b * precision_factor[1];
+			float cr = get_sample(plane[1], cuv).r * precision_factor[1];
 			return ycbcra_to_rgba(y, cb, cr, 1.0);
 		}
     case 11:    // gbrp

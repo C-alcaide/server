@@ -70,6 +70,53 @@ Two defects were found and fixed while landing this, both invisible until the pa
 and `dpx_vulkan` are reachable by the same code but unmeasured, nothing here measures decode
 *latency*, and the flakiness above means none of it is a production recommendation yet.
 
+### Fixed: 4:2:2 chroma was reconstructed at the wrong position, on both mixers and in the CUDA ProRes decoder
+
+**This changes rendered output for every subsampled video source** -- 4:2:2 and 4:2:0, every
+codec, both backends. Flat areas are unaffected; the change is at colour transitions.
+
+Horizontal chroma in 4:2:2 is **co-sited** (ITU-R BT.601/709): chroma sample *k* shares its
+position with luma *2k*. So the correct reconstruction is `C[k]` on even columns and
+`(C[k] + C[k+1])/2` on odd. Neither path did that:
+
+| | even column | odd column | worst error |
+| :--- | :--- | :--- | :--- |
+| co-sited target | `C[k]` | `(C[k]+C[k+1])/2` | -- |
+| **mixer**, before | `0.75C[k] + 0.25C[k-1]` | `0.75C[k] + 0.25C[k+1]` | **0.25 x step** |
+| **CUDA ProRes**, before | `C[k]` (exact) | `C[k]` | **0.50 x step** |
+
+The mixer sampled the half-width chroma plane at the *luma* coordinate with a linear sampler,
+which lands a quarter texel off centre for both parities -- a quarter-sample blur. The CUDA
+producer replicated, which is exact on even columns and half a sample adrift on odd ones: a
+chroma shift, visible as one-sided colour fringing on saturated vertical edges.
+
+`u` now gains half a luma pixel in both shaders (`chroma_uv`, kept identical between them), and
+the CUDA kernel averages adjacent chroma for odd columns. **`v` is deliberately unchanged**:
+4:2:0 chroma is *centred* vertically, and sampling at the luma centre is already the correct
+interpolation for that -- offsetting it would introduce the error this removes. The ratio makes
+both a no-op on 4:4:4.
+
+**And the CUDA module was not the inverse of itself.** Its consumer box-filters on the way out
+(`(Cb0 + Cb1 + 1) >> 1`) while its producer replicated on the way back in, so a round trip
+through this fork's own ProRes encode and decode was asymmetric regardless of which convention
+one preferred.
+
+**Measured**, `cli.py prores-parity` on ProRes 422, worst per-channel error against the FFmpeg
+route: CUDA **59 -> 2 LSB**, with the share of samples over 3 LSB going from 0.54% to **0.00%**.
+On 4444, CUDA 2 and Vulkan 1. The 59 was not arbitrary -- it is `0.25 x` a saturated bar's
+chroma step of ~236, which is the arithmetic of the defect and what identified it.
+
+**Validated against an independent implementation, not against itself.** Both halves of this
+were changed together, so agreement between them proves nothing on its own. Decoding the same
+frame with **swscale** (`ffmpeg -pix_fmt rgb24`) and comparing: ffmpeg route worst 3, CUDA worst
+3, Vulkan worst 4, and **0.00% of samples over 3 LSB on all three**. The residual mean of 1.76
+is uniform rather than edge-localised, so it is colour-pipeline rounding and not siting.
+
+No regression on the 1 LSB gates, as expected -- neither can see this change, which is the
+point of running them: `conformance` 100/100 and `flat-decoded` 29/29 on **both** mixers.
+`conformance` drives a colour producer with no chroma plane at all, and `flat-decoded` uses flat
+patches with no chroma edges, so they bound the collateral rather than confirm the fix.
+
 ### Fixed: a GPU wait that timed out carried on anyway, and reset resources still in flight
 
 Every fence wait in the Vulkan backend was `waitForFences(f, true, 1s)` followed by a warning

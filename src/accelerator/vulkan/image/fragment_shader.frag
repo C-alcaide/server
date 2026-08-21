@@ -306,6 +306,29 @@ float alpha_map(float d){return 1.0-smoothstep(1.0,chroma_softness,d);}
 vec3 supress_spill(vec3 c){float d=AngleDiffDir(c.x,chroma_target_hue);float dist=abs(d)/chroma_spill_suppress;if(dist<1){c.x=d<0?chroma_target_hue-chroma_spill_suppress:chroma_target_hue+chroma_spill_suppress;c.y*=min(1.0,dist+chroma_spill_suppress_saturation);}return c;}
 vec4 ChromaKey(vec4 c,bool sm){vec3 h=rgb2hsv(c.rgb);float d=ColorDist(h)*-2.0+1.0;vec4 s=vec4(hsv2rgb(supress_spill(h)),1.0)*alpha_map(d);return sm?vec4(s.a,s.a,s.a,1):s;}
 
+
+// ── 4:2:2 / 4:2:0 chroma siting ──────────────────────────────────────────
+// Sampling a SUBSAMPLED chroma plane at the luma coordinate is off by a quarter texel in x.
+// Horizontal chroma is CO-SITED (ITU-R BT.601/709): sample k shares its position with luma 2k,
+// so luma 2k wants C[k] exactly and luma 2k+1 wants (C[k]+C[k+1])/2. A linear sampler reading
+// a half-width plane at u=(x+0.5)/W lands on chroma texel (x+0.5)/2, which is 0.75/0.25 either
+// side of a centre for BOTH parities -- a quarter-sample blur. Co-siting needs (x+1)/2, so u
+// gains half a LUMA pixel.
+//
+// v is deliberately NOT shifted. 4:2:0 chroma is CENTRED vertically between the two luma rows,
+// and sampling at the luma centre is already the correct interpolation for that -- offsetting
+// it would introduce the error this removes.
+//
+// Derived rather than tuned, and the ratio makes it a no-op on 4:4:4 (ratio 1 -> offset 0).
+// Measured 2026-08-21: the mixer's quarter-sample error is 0.25*(chroma step) at an edge, and
+// the CUDA ProRes producer's replication was 0.5*(step) -- 59 of 255 on a saturated bar, which
+// is what `prores-parity` reported before both were fixed.
+vec2 chroma_uv(vec2 uv, uint luma_plane, uint chroma_plane){
+    float lw = float(textureSize(textures[luma_plane],0).x);
+    float cw = float(textureSize(textures[chroma_plane],0).x);
+    return vec2(uv.x + (lw/cw - 1.0)*0.5/lw, uv.y);
+}
+
 // ── YCbCr ───────────────────────────────────────────────────────────────
 // `rgb_max_output_pad.w` carries the YCbCr code scale -- it was std140 padding, so using it
 // changes no offsets. 255 is right only when the sample IS `code/255`, i.e. an 8-bit
@@ -464,12 +487,12 @@ vec4 get_rgba_color(vec2 uv){
     // note in the OpenGL shader before re-enabling either.
     case 3: return texture(textures[PLANE0],uv).gbar*precision_factor[0];
     case 4: return texture(textures[PLANE0],uv).abgr*precision_factor[0];
-    case 5:{float y=texture(textures[PLANE0],uv).r*precision_factor[0];float cb=texture(textures[PLANE1],uv).r*precision_factor[1];float cr=texture(textures[PLANE2],uv).r*precision_factor[2];return ycbcra_to_rgba(y,cb,cr,1.0);}
-    case 6:{float y=texture(textures[PLANE0],uv).r*precision_factor[0];float cb=texture(textures[PLANE1],uv).r*precision_factor[1];float cr=texture(textures[PLANE2],uv).r*precision_factor[2];float a=texture(textures[PLANE3],uv).r*precision_factor[3];return ycbcra_to_rgba(y,cb,cr,a);}
+    case 5:{vec2 cuv=chroma_uv(uv,PLANE0,PLANE1);float y=texture(textures[PLANE0],uv).r*precision_factor[0];float cb=texture(textures[PLANE1],cuv).r*precision_factor[1];float cr=texture(textures[PLANE2],cuv).r*precision_factor[2];return ycbcra_to_rgba(y,cb,cr,1.0);}
+    case 6:{vec2 cuv=chroma_uv(uv,PLANE0,PLANE1);float y=texture(textures[PLANE0],uv).r*precision_factor[0];float cb=texture(textures[PLANE1],cuv).r*precision_factor[1];float cr=texture(textures[PLANE2],cuv).r*precision_factor[2];float a=texture(textures[PLANE3],uv).r*precision_factor[3];return ycbcra_to_rgba(y,cb,cr,a);}
     case 7:{vec3 y3=texture(textures[PLANE0],uv).rrr*precision_factor[0];return vec4((y3-0.0627451)/0.858824,1.0);}
     case 8: return vec4(texture(textures[PLANE0],uv).bgr*precision_factor[0],1.0);
     case 9: return vec4(texture(textures[PLANE0],uv).rgb*precision_factor[0],1.0);
-    case 10:{float y=texture(textures[PLANE0],uv).g*precision_factor[0];float cb=texture(textures[PLANE1],uv).r*precision_factor[1];float cr=texture(textures[PLANE1],uv).b*precision_factor[1];return ycbcra_to_rgba(y,cb,cr,1.0);}
+    case 10:{vec2 cuv=chroma_uv(uv,PLANE0,PLANE1);float y=texture(textures[PLANE0],uv).g*precision_factor[0];float cb=texture(textures[PLANE1],cuv).r*precision_factor[1];float cr=texture(textures[PLANE1],cuv).b*precision_factor[1];return ycbcra_to_rgba(y,cb,cr,1.0);}
     case 11:{float g=texture(textures[PLANE0],uv).r*precision_factor[0];float b=texture(textures[PLANE1],uv).r*precision_factor[1];float r=texture(textures[PLANE2],uv).r*precision_factor[2];return vec4(r,g,b,1.0);}
     case 12:{float g=texture(textures[PLANE0],uv).r*precision_factor[0];float b=texture(textures[PLANE1],uv).r*precision_factor[1];float r=texture(textures[PLANE2],uv).r*precision_factor[2];float a=texture(textures[PLANE3],uv).r*precision_factor[3];return vec4(r,g,b,a);}
     case 13:{vec4 c=texture(textures[PLANE0],uv);float scale=(c.b*(255.0/8.0))+1.0;float Co=(c.r-0.5)/scale;float Cg=(c.g-0.5)/scale;float Y=c.a;return vec4(clamp(Y+Co-Cg,0.0,1.0),clamp(Y+Cg,0.0,1.0),clamp(Y-Co-Cg,0.0,1.0),1.0);}

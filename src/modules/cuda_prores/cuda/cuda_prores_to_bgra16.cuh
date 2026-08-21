@@ -134,14 +134,45 @@ __global__ void k_ycbcr422p10_to_bgra16(
     const int y = blockIdx.y * blockDim.y + threadIdx.y;
     if (x >= width || y >= height) return;
 
-    const int luma_idx  = y * width + x;
-    const int chroma_x  = x >> 1;   // 4:2:2 horizontal sub-sampling
-    const int chroma_idx = y * (width >> 1) + chroma_x;
+    const int luma_idx   = y * width + x;
+    const int chroma_w   = width >> 1;
+    const int chroma_x   = x >> 1;   // 4:2:2 horizontal sub-sampling
+    const int chroma_row = y * chroma_w;
+    const int chroma_idx = chroma_row + chroma_x;
 
-    // Load and level-shift.
-    int iy  = (int)d_y [luma_idx]   - 64;
-    int icb = (int)d_cb[chroma_idx] - 512;
-    int icr = (int)d_cr[chroma_idx] - 512;
+    // CO-SITED RECONSTRUCTION, not replication.
+    //
+    // 4:2:2 chroma is co-sited horizontally (ITU-R BT.601/709): sample k shares its position
+    // with luma 2k, so luma 2k takes C[k] exactly and luma 2k+1 sits HALFWAY between C[k] and
+    // C[k+1]. This used to read C[x>>1] for both pixels of the pair, which is right for the
+    // even one and half a chroma sample to the left for the odd one -- a half-pixel chroma
+    // shift, visible as one-sided colour fringing on saturated vertical edges.
+    //
+    // MEASURED, 2026-08-21, against FFmpeg's decode through the mixer (`cli.py prores-parity`
+    // on ProRes 422): worst 59 of 255 on 0.54% of samples, with 100.0% of the significant
+    // disagreement adjacent to a chroma edge and flat areas matching exactly. The magnitude is
+    // the arithmetic of the defect rather than a coincidence -- the error at an edge is
+    // 0.25 * (chroma step) for the mixer's own reconstruction and 0.5 * (step) here, and a
+    // saturated bar transition of ~236 gives the 59 that was measured.
+    //
+    // THE MODULE WAS ALSO NOT THE INVERSE OF ITSELF: `cuda_bgra_to_field422p10.cuh` box-filters
+    // on the way out, `(Cb0 + Cb1 + 1) >> 1`, while this replicated on the way back in. So a
+    // round trip through this module's own encoder and decoder was asymmetric, independent of
+    // which convention one prefers.
+    //
+    // The last odd column has no C[k+1], so it clamps to C[k] -- the same edge convention the
+    // encoder's box filter implies, and one sample wide.
+    const int chroma_next = chroma_row + min(chroma_x + 1, chroma_w - 1);
+    const bool odd_luma   = (x & 1) != 0;
+
+    // Load and level-shift. Averaging BEFORE the level shift and in int keeps this exact:
+    // the two codes are 10-bit, so their sum cannot overflow and the +1 rounds half-up the
+    // same way the encoder's box filter does.
+    int iy  = (int)d_y [luma_idx] - 64;
+    int icb = (odd_luma ? (((int)d_cb[chroma_idx] + (int)d_cb[chroma_next] + 1) >> 1)
+                        : (int)d_cb[chroma_idx]) - 512;
+    int icr = (odd_luma ? (((int)d_cr[chroma_idx] + (int)d_cr[chroma_next] + 1) >> 1)
+                        : (int)d_cr[chroma_idx]) - 512;
 
     int64_t r, g, b;
 
