@@ -229,7 +229,12 @@ cmake --build d:\Github\CasparVP\build --target casparcg
   The `.pch` files carry the same untracked dependency, so every translation unit
   recompiles and every one of them reads the *old* declaration. It shows up as a compile
   error that contradicts the source on screen — an `override` that "did not override" a
-  base method identical to it. Delete `build/**/cmake_pch.*.pch` too;
+  base method identical to it. Delete the PCH **and its object** --
+  `cmake_pch.cxx.pch` *and* `cmake_pch.cxx.obj` -- because deleting only the `.pch`
+  BREAKS THE BUILD rather than refreshing it: ninja sees the `.obj` up to date, does not
+  re-run the PCH compile, and every translation unit then fails with
+  `C1083: cannot open precompiled header file`. Measured 2026-08-21, following this very
+  line in its shorter form;
   `BUILDING_WORKFLOW.md` has the sweep.
 - A wrong `vcvars` path fails as `C1083: cannot open include file 'cstdint'` on every
   translation unit. Missing *standard library* headers means the environment was never
