@@ -509,19 +509,58 @@ against 1.51 there — a difference in fixture, not in the decoder.
 (software 2231 MB / CUDA 473 / Vulkan 683 on 422) and cue latency (99 / 84 / 104 ms). Treat
 those as indicative and re-take them through the harness before quoting them again.
 
-**One honest wrinkle: the Vulkan arm is intermittently flaky at four layers on these
-fixtures.** The first 3-round attempt at each clip failed its own controls — `eng 2/4` with one
-stalled round on 422, and a route that changed between rounds on 4444 — and the re-runs were
-4/4 in 3/3 rounds for both. So the numbers above are from clean runs, and the path does not
-engage *every* time. The first attempt also could not be diagnosed, because the battery reused
-one log directory per arm and wiped it each round, destroying the failing round's evidence;
-that is fixed (`log_<mixer>_<arm>_r<N>`), so the next occurrence is investigable. Worth
-knowing before this is called production-ready.
+**The Vulkan arm was intermittently fatal at four layers -- CAUSE FOUND AND FIXED, and it was
+not this path's fault.** The first 3-round attempt at each clip failed its own controls
+(`eng 2/4` with a stalled round on 422, a route that changed between rounds on 4444) while the
+re-runs were 4/4 in 3/3. Reproduced at one round in ten and traced: every fence wait in the
+Vulkan backend treated a **timeout as completion** and then reset the fence and command buffer
+of a submission that was still executing. That is undefined behaviour, and on this driver it
+hangs the GPU -- the timeouts arrive 1.4 s before `VK_ERROR_DEVICE_LOST`, and Windows logs
+event 4101 (`nvlddmkm` stopped responding) after it. So `eng 2/4` was a symptom of a TDR, not
+an engagement race.
+
+**The same defect sat on the default `<gpu-direct-decode>` import** (`d3d11_import_bridge`), so
+it was reachable with no experimental flag at all; `<vulkan-decode>` at four layers was merely
+what made it reproducible. Fixed in `util/gpu_wait.h`, which never returns on a timeout. After
+it: 30/30 reproduction rounds clean with zero TDRs, `vk-decode-soak` 6/6 clean at eight
+concurrent producers, and 4/4 clean with 4/4 active on the default D3D11 route -- which that
+battery could not reach until it was given a `--route` (it hardcoded `<vulkan-decode>`).
 
 **The verdict is split, which is the finding.** `prores_vulkan` is the cheapest decoder —
 essentially free, sitting at ~1.12 cores whether the content is 422 or 4444, so what remains is
 the mixer's fixed cost. `CUDA_PRORES` is the better playout citizen: a third of the host memory,
 the fastest cue, and the only route with no frame-time excursions at all.
+
+**Phase 3.4 -- the dispatch question is settled, and PICTURE decides it, not cost.** The plan
+framed this as "if `prores_vulkan` matches or beats CUDA, the bespoke CUDA decoder becomes a
+liability; if CUDA wins, the keyword-only dispatch is itself the bug". Cost alone could not
+settle it -- the two are 0.1 cores apart and CUDA is the better citizen on late frames. So the
+deciding measurement was the one nothing had made: do the routes produce the same *picture*?
+`cli.py prores-parity` answers it, one pinned frame per route, FFmpeg as the reference:
+
+| | `prores_vulkan` | `CUDA_PRORES` |
+| :--- | :--- | :--- |
+| **422 HQ** | worst **2** LSB, no significant samples | worst **59** LSB on 0.54% of samples, **100.0% of it adjacent to a chroma edge** |
+| **4444** | worst 1 LSB, none significant | worst 2 LSB, none significant |
+
+`prores_vulkan` is picture-identical, which is not a surprise once stated: it *is* FFmpeg's
+decoder, moved to the GPU. The CUDA decoder makes a different **4:2:2 chroma-reconstruction**
+choice -- flat areas agree exactly, and every significant disagreement sits on a chroma
+transition. That is a conformant difference rather than a broken transform, and the distinction
+matters: a worst delta of 59 spread through flat areas would have been a defect report instead
+of a design note.
+
+**So the answer is neither branch of the plan's dichotomy.** `CUDA_PRORES` must not become the
+default for `.mov`, because the bar this tree set for flipping a decode default --
+`<gpu-direct-decode>`, flipped only once the output was byte-identical -- is one it does not
+meet. And the audit's original complaint, that the fast path needs a keyword nobody types, is
+answered by `<vulkan-decode>` rather than by promoting CUDA: it is the route that IS
+picture-identical, it is the cheapest, and it is selected by configuration with no AMCP keyword
+at all. The keyword stays where it belongs, on a deliberately different decoder. No dispatch
+change is made, and the reason is measured rather than asserted.
+
+What still keeps `<vulkan-decode>` opt-in is late frames (5 against CUDA's 1 on 4444) -- not
+picture, and no longer stability.
 
 **Vulkan hitched at the loop wrap — FIXED, see 6.1.3.** As first measured: 28 `fps` samples
 below nominal in a 24-second window against CUDA's 7 and software's 0, the deeper ones at
