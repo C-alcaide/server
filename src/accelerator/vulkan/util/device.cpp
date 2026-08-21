@@ -81,6 +81,23 @@ VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
 
 namespace caspar { namespace accelerator { namespace vulkan {
 
+namespace {
+#ifdef _WIN32
+extern "C" unsigned long __stdcall GetCurrentThreadId(void);
+#endif
+/// The number the Vulkan validation layer prints in a THREADING ERROR. It has to be the OS id:
+/// `std::thread::id` cannot be streamed into our log (boost's overload makes it ambiguous) and
+/// its hash is a different value, so neither correlates with a layer message.
+inline std::string os_thread_id_str()
+{
+#ifdef _WIN32
+    return std::to_string(GetCurrentThreadId());
+#else
+    return "0";
+#endif
+}
+} // namespace
+
 using namespace boost::asio;
 
 inline VKAPI_ATTR VkBool32 VKAPI_CALL default_debug_callback(VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
@@ -928,6 +945,8 @@ struct device::impl : public std::enable_shared_from_this<impl>
         // inline, and the assertion in allocateCommandBuffers() could fire even when
         // the caller really was the device thread.
         thread_id_ = thread_.get_id();
+        CASPAR_LOG(info) << L"[vulkan] device thread os_id=" << u16(os_thread_id_str())
+                         << L" -- every dispatch_sync body and every import bridge runs here";
         // Kept so busy_percent can be reported as real CPU time, not wall time.
         // On a server whose consumers are compressing video, the dispatch thread
         // spends part of every item descheduled, and a wall-clock measurement
