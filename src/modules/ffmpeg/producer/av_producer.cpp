@@ -1694,7 +1694,42 @@ class Decoder
             const AVCodecHWConfig* hw_cfg      = nullptr;
             bool                   want_vulkan = false;
 
-            if (vk_mixer_device_) {
+            // ONLY THE COMPUTE-SHADER DECODERS, and this list is a refusal rather than a
+            // claim of support -- which is the opposite of the codec list that went wrong
+            // before, and why it is safe.
+            //
+            // FFmpeg 8 advertises `AV_HWDEVICE_TYPE_VULKAN` for two different things. ProRes,
+            // ProRes RAW, FFV1 and DPX decode in COMPUTE SHADERS and need nothing of the
+            // device beyond a compute queue. H.264, HEVC, AV1 and VP9 use the
+            // `VK_KHR_video_decode` extension and need a VIDEO DECODE QUEUE, which the mixer's
+            // device does not have and which `make_vulkan_hwdevice_from_mixer` does not
+            // declare.
+            //
+            // Asking `avcodec_get_hw_config` alone cannot tell those apart -- it reports
+            // `vulkan` for both -- so accepting whatever it offers hands the second group a
+            // device that cannot back it. Measured 2026-08-21 on a VP9 file with
+            // `<vulkan-decode>` on: `Decoder thread non-C++ exception at
+            // avcodec_receive_frame`, repeating, with 0 of 2 producers ever delivering a
+            // frame. It does not decline; it faults inside FFmpeg and only the `stage` marker
+            // in the catch says where. The same file on the default D3D11 route is 2/2 clean,
+            // so the flag was the whole difference.
+            //
+            // Omitting a codec from this list costs nothing: it falls through to D3D11VA or
+            // software, which is what happened before `<vulkan-decode>` existed. Adding one
+            // that needs a video-decode queue costs a broken producer. So the list errs
+            // towards refusing, and a future compute decoder has to be added deliberately.
+            //
+            // prores and ffv1 are measured working here (engagement 2/2, clean). prores_raw
+            // and dpx are compute decoders by the same FFmpeg configuration but are UNTESTED:
+            // there is no ProRes RAW encoder to make a fixture with, and no DPX asset here.
+            static const std::set<AVCodecID> vulkan_compute_decoders = {
+                AV_CODEC_ID_PRORES,
+                AV_CODEC_ID_PRORES_RAW,
+                AV_CODEC_ID_FFV1,
+                AV_CODEC_ID_DPX,
+            };
+
+            if (vk_mixer_device_ && vulkan_compute_decoders.count(codec->id) > 0) {
                 for (int i = 0;; ++i) {
                     const auto* cfg = avcodec_get_hw_config(codec, i);
                     if (!cfg)
