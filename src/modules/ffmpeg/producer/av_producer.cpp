@@ -1386,7 +1386,23 @@ class Decoder
         // the mixer's own device produces frames that need no copy, so there is nothing
         // for this callback to prepare -- FFmpeg allocates the pool on the device it was
         // handed. Everything below is D3D11-specific and does not apply.
-        for (p = pix_fmts; *p != -1; p++) {
+        // ONLY when the attached device is actually a Vulkan one. FFmpeg 8 advertises a
+        // Vulkan hwaccel for h264, hevc, av1 and vp9 as well as the compute decoders, so
+        // AV_PIX_FMT_VULKAN appears in `pix_fmts` for those codecs on the ORDINARY D3D11VA
+        // path too. Returning it there hands the decoder a format its device cannot back:
+        // FFmpeg answers "Invalid setup for format vulkan: does not match the type of the
+        // provided device context" plus "Device does not support the
+        // VK_KHR_video_decode_queue extension", hardware decode fails, and the producer
+        // limps to software with a fatal in the log.
+        //
+        // Measured 2026-08-21: this cost `flat-decoded --mixer vulkan` two of its six
+        // formats -- and `<vulkan-decode>` was OFF for that run, which is the point. The
+        // check below is what makes this branch belong to the opt-in path only.
+        const bool vulkan_device_attached =
+            ctx->hw_device_ctx != nullptr &&
+            reinterpret_cast<AVHWDeviceContext*>(ctx->hw_device_ctx->data)->type == AV_HWDEVICE_TYPE_VULKAN;
+
+        for (p = pix_fmts; vulkan_device_attached && *p != -1; p++) {
             if (*p != AV_PIX_FMT_VULKAN)
                 continue;
 #if defined(ENABLE_VULKAN) && LIBAVUTIL_VERSION_MAJOR >= 60
