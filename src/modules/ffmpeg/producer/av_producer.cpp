@@ -1830,18 +1830,34 @@ class Decoder
                     // flush (i.e. a seek or a loop wrap) and disarmed by the first frame that
                     // actually arrives.
                     //
-                    // MEASURED SAFE, NOT MEASURED TO HELP, and the distinction is deliberate.
-                    // Safe: on a looping clip -- the worst case, since every wrap re-arms it
-                    // -- server CPU moved +4.1% in one round and -4.6% in the next, a sign
-                    // flip, which is noise and not a cost.
-                    // Unproven: cue latency, the thing it is for, came out at a median of
-                    // 78.7 vs 78.2 ms with it off and on (39 seeks, interleaved, both the
-                    // hardware and software decode paths). Every value in both arms sat
-                    // between 78 and 80 ms, i.e. pinned at two channel ticks -- so the probe
-                    // was measuring the tick cadence, and whatever the decoder saved is below
-                    // its resolution. **Do not quote a cue-latency improvement for this.**
-                    // Settling it needs a producer-side timestamp from seek to first
-                    // published frame; the AMCP-observable latency cannot see it.
+                    // WHAT THIS MEASURABLY FIXES: dropped frames at the LOOP WRAP on the
+                    // Vulkan decode path. A wrap flushes the decoder, and the frame the
+                    // channel needs is the next one -- so without this the channel starves
+                    // for a frame or two every time round. Measured 2026-08-21 on a 3-second
+                    // looping ProRes clip, 4 layers, 2 rounds, counting `fps` samples below
+                    // nominal in the server's own diagnostics:
+                    //
+                    //     arm         with      without
+                    //     vulkan         8           34      <- 4x, and the reason this exists
+                    //     software       9           12      noise
+                    //     cuda          14           12      noise, and a CONTROL: the CUDA
+                    //                                        producer bypasses avcodec, so
+                    //                                        this flag cannot reach it
+                    //
+                    // The Vulkan path is uniquely sensitive because its per-frame chain is
+                    // longer -- a host wait on the decoder's semaphore plus a copy submitted
+                    // through the device thread -- so the frame-threading delay is what
+                    // pushed the post-wrap refill past the tick budget. Before this, that
+                    // path dropped a frame every ~3 seconds and was the stated reason
+                    // <vulkan-decode> could not be a default.
+                    //
+                    // NOT measured to improve CUE LATENCY, which is what it was adopted for:
+                    // 78.7 vs 78.2 ms median over 39 interleaved seeks, every value pinned
+                    // between 78 and 80 ms because the probe resolves only to a channel tick.
+                    // So quote the loop-wrap result, not a cue-latency one.
+                    //
+                    // Safe on throughput: server CPU moved +4.1% one round and -4.6% the
+                    // next -- a sign flip, so noise.
                     int ret = 0;
 #if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(62, 22, 101)
                     if (sync_receive_) {

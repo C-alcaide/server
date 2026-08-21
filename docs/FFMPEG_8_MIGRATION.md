@@ -501,17 +501,35 @@ essentially free, sitting at ~1.12 cores whether the content is 422 or 4444, so 
 the mixer's fixed cost. `CUDA_PRORES` is the better playout citizen: a third of the host memory,
 the fastest cue, and the only route with no frame-time excursions at all.
 
-**Vulkan hitches at the loop wrap, and that is what disqualifies it as a default.** In a
-24-second window: 28 `fps` samples below nominal against CUDA's 7 and software's 0, the deeper
-ones at **0.96** (a dropped frame) against CUDA's worst of 0.995 — and they land at 10:47:59,
-:48:02, :48:05, :48:08, i.e. **every ~3 seconds on a 3-second looping clip**. Two `frame-time`
-spikes of 3.30 and 3.49 against a 0.51 mean, where neither other route exceeds 0.64. For
-playout a periodic dropped frame is worse than 0.4 of a core, so this is the work owed before
-the question can be reopened.
+**Vulkan hitched at the loop wrap — FIXED, see 6.1.3.** As first measured: 28 `fps` samples
+below nominal in a 24-second window against CUDA's 7 and software's 0, the deeper ones at
+**0.96** (a dropped frame), landing every ~3 seconds on a 3-second looping clip, plus two
+`frame-time` spikes of 3.30 and 3.49 against a 0.51 mean.
 
-`<vulkan-decode>` and the `CUDA_PRORES` keyword therefore both stay **opt-in**, deliberately
-rather than by omission. What would change that: fixing the loop-wrap hitch, and a picture
-answer for the 2/255 IDCT difference recorded in 6.1.1.
+The cause was frame-threading delay after the wrap's flush, and
+`AV_CODEC_RECEIVE_FRAME_FLAG_SYNCHRONOUS` removes it. Re-measured on the same fixture, 4
+layers, 2 rounds, `fps` samples below nominal:
+
+| arm | with the flag | without |
+| :--- | :--- | :--- |
+| **vulkan** | **8** | **34** |
+| software | 9 | 12 |
+| cuda | 14 | 12 |
+
+No `frame-time` excursion above 1.0 on any arm with it on. The CUDA row is a **control**: that
+producer bypasses avcodec entirely, so the flag cannot reach it, and its 14-vs-12 is the noise
+floor this comparison sits on. The Vulkan path is uniquely sensitive because its per-frame
+chain is the longest — a host wait on the decoder's timeline semaphore plus a copy submitted
+through the device thread — so the frame-threading delay was what pushed the post-wrap refill
+past the tick budget.
+
+So on stability Vulkan is now **level with or better than** the alternatives, and the earlier
+table's stability column should be read as history.
+
+`<vulkan-decode>` and the `CUDA_PRORES` keyword still both stay **opt-in**, but for one
+remaining reason rather than two: the **2/255 IDCT difference** recorded in 6.1.1. That is a
+rendered-output change for every existing ProRes config, which is the tree's highest bar, and
+it is FFmpeg's own difference rather than something a fix here can remove.
 
 **Two instrument defects found while producing this table**, both of the "cannot fail" kind:
 
@@ -534,7 +552,7 @@ on **every** arm, since it puts a line per graph per interval on the frame path.
 `vulkan` arms there is the follow-up — together with the loop-wrap hitch, which no battery can
 currently see.
 
-#### 6.1.3 `AV_CODEC_RECEIVE_FRAME_FLAG_SYNCHRONOUS` — adopted, safe, benefit unproven
+#### 6.1.3 `AV_CODEC_RECEIVE_FRAME_FLAG_SYNCHRONOUS` — adopted, and it fixes the loop-wrap drops
 
 Phase 4's first item. `avcodec_receive_frame_flags()` (lavc 62.22.101; our pin is 62.28.102)
 takes `AV_CODEC_RECEIVE_FRAME_FLAG_SYNCHRONOUS`, documented as *"the decoder will bypass frame
@@ -550,22 +568,71 @@ is raised to `thread_count`. So it applies to exactly the frames a cue is waitin
 **Measured safe.** On a looping clip, the worst case since every wrap re-arms it, server CPU
 moved **+4.1% in one round and −4.6% in the next** — a sign flip, so noise, not a cost.
 
-**Benefit unproven, and the instrument is why.** Cue latency came out at a median of
-**78.7 ms with it off and 78.2 ms with it on** — 39 seeks, interleaved arms from one binary,
-on both the hardware (`gpu-direct-decode` on) and software decode paths. Every single value in
-both arms sat between 78 and 80 ms: **pinned at two channel ticks**. The probe measures
-`CALL SEEK` → the playhead reported by `INFO` changing, and `INFO` only advances on a channel
-tick, so its resolution is 40 ms at 25p. Whatever the decoder saved is below that.
+**What it measurably fixes: the loop-wrap drops on the Vulkan decode path** — the very defect
+6.1.2 named as the reason that option could not be a default. A wrap flushes the decoder and
+the frame the channel needs is the next one, so the frame-threading delay starved it every
+time round. Same fixture, 4 layers, 2 rounds, `fps` samples below nominal:
 
-So this is kept as a principled change with no measured benefit, and **no cue-latency
-improvement should be quoted for it**. What would settle it: a producer-side timestamp from
-seek to first published frame. The AMCP-observable latency cannot see it, and neither can
-anything currently in the harness.
+| arm | with | without |
+| :--- | :--- | :--- |
+| **vulkan** | **8** | **34** |
+| software | 9 | 12 |
+| cuda | 14 | 12 |
+
+and no `frame-time` excursion above 1.0 with it on, against two of 3.3-3.5 without. **CUDA is
+the control**: that producer never touches avcodec, so the flag cannot reach it, and its
+14-vs-12 is the noise floor.
+
+**It does NOT measurably improve cue latency, which is what it was adopted for.** 78.7 vs
+78.2 ms median over 39 interleaved seeks, on both the hardware and software decode paths, with
+every single value in both arms between 78 and 80 ms — **pinned at two channel ticks**, because
+the probe watches the playhead in `INFO` and that only advances on a tick. So quote the
+loop-wrap result and not a cue-latency one; settling the latter needs a producer-side
+timestamp from seek to first published frame, which nothing in the harness has.
+
+The lesson is worth keeping separately from the result: the first write-up of this change said
+"measured safe, not measured to help", and it was wrong — not because the measurement was
+wrong, but because it was of the wrong quantity. Failing to find a benefit on the axis you
+expected is not the same as there being none.
 
 Worth noting for the next attempt: on a **hardware** decode path there may be nothing to skip
 at all, since hwaccel decoding is not frame-threaded the way software decoding is — which is
 its own argument for measuring the software path separately rather than assuming one number
 covers both.
+
+#### 6.1.4 The rest of Phase 4, closed with reasons rather than commits
+
+Phase 4 was explicitly "ranked by measured value, only if Phase 1 says so". Two of its items
+are done (`alpha_mode` in 6.1.x's sibling work, `RECEIVE_FRAME_FLAG_SYNCHRONOUS` in 6.1.3).
+The remainder are closed as **not worth doing**, and the reasoning is recorded so nobody
+re-derives it:
+
+**D3D11 `BindFlags`/`MiscFlags` on `AVD3D11VADeviceContext` (lavu 60.24.100) — declined.**
+The plan credited this with replacing the fork's manual frames-pool creation inside
+`get_format` "with its documented P010 hazard". It does not remove that hazard. The hazard is
+that `D3D11_BIND_SHADER_RESOURCE` lands on a pool which `av_hwframe_transfer_data` also uses,
+and 10-bit HEVC then fails outright — and the new device-level field is documented as applying
+*"globally to all AVD3D11VAFramesContext allocated from this device context"*, which is the
+same scope. So it moves where the flag is set and changes nothing about the risk.
+
+It also only replaces half of what that block does. The other half is `initial_pool_size += 16`,
+because the GPU-direct path holds surfaces while they queue for extraction and without the
+headroom the decoder hits "Static surface pool size exceeded" and the channel goes black. The
+FFmpeg-8 equivalent is `AVCodecContext.extra_hw_frames`, which this tree does not use anywhere
+— so adopting it would be an unmeasured change to pool sizing on a path that is now **on by
+default**. A refactor with no measured benefit, real regression risk on every config, and a
+hazard it does not actually fix is the wrong trade; the existing block stays, with its comment
+explaining its shape.
+
+**`ffv1_vulkan` / `dpx_vulkan` — not applicable here.** The plan gated these on "only if those
+formats are actually used". They are not: no producer in `src/` handles FFV1 or DPX, there are
+no fixtures for either in the harness, and the only mentions of those names in the tree are in
+comments describing which decoders `<vulkan-decode>` covers. Nothing to measure and nothing to
+adopt until a real asset appears.
+
+**`prores_ks_vulkan` encoder — out of scope**, as the plan itself said: it takes Vulkan frames
+with no readback and is interesting for the recording consumers, but it is an encode project
+and mixing it into a decode one is how both get half-done.
 
 ### 6.2 Codecs that matter in this domain
 
