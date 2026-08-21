@@ -496,7 +496,8 @@ reported a different decode route, and all four producers reached their arm's fa
 
 `prores_vulkan` sits at **1.16 cores whether the content is 422 or 4444**, so the decode is
 effectively free and what remains is the mixer's fixed cost. CUDA is 0.1 cores behind on both.
-On **late frames** CUDA is still the better citizen — 1 against Vulkan's 5 on 4444 — which is
+On **late frames** the raw figures are 1 for CUDA against Vulkan's 5, but see 6.1.5 below:
+that comparison crosses producers and does not survive it. What follows here is
 the same shape as every other stability measurement here.
 
 These supersede an earlier scratchpad table and are **not a continuation of it**: the fixtures
@@ -534,7 +535,8 @@ the fastest cue, and the only route with no frame-time excursions at all.
 **Phase 3.4 -- the dispatch question is settled, and PICTURE decides it, not cost.** The plan
 framed this as "if `prores_vulkan` matches or beats CUDA, the bespoke CUDA decoder becomes a
 liability; if CUDA wins, the keyword-only dispatch is itself the bug". Cost alone could not
-settle it -- the two are 0.1 cores apart and CUDA is the better citizen on late frames. So the
+settle it -- the two are 0.1 cores apart, and the late-frame gap turned out to compare
+producers rather than decoders (6.1.5). So the
 deciding measurement was the one nothing had made: do the routes produce the same *picture*?
 `cli.py prores-parity` answers it, one pinned frame per route, FFmpeg as the reference:
 
@@ -891,3 +893,51 @@ separate the two.
   `libavformat/version_major.h`, `libavfilter/avfilter.h`, `doc/APIchanges`.
 * **The 8.1.2 artifact itself** (§5.5) — `ffmpeg.exe -version` from the package CMake
   extracted into `build-ffmpeg8/ffmpeg-lib-prefix`, rather than the download page.
+
+#### 6.1.5 The late-frame gap compared PRODUCERS, not decoders
+
+`<vulkan-decode>` stayed opt-in on one objection: 4-5 late frames against `CUDA_PRORES`'s 1.
+That figure does not survive being looked at.
+
+**First, what `late` is.** `output.cpp` counts inter-frame intervals longer than **1.15x
+nominal** and zeroes the counter every TIMING period. So it is output-cadence jitter in steady
+state -- a few intervals in ~125 -- and not a decoder failing to keep up.
+
+**Second, the arms do not share a producer.**
+
+| arm | producer | decode | late |
+| :--- | :--- | :--- | :--- |
+| `force_cpu` | ffmpeg | software | **11** |
+| `vulkan` | ffmpeg | `prores_vulkan` | **4** |
+| `CUDA_PRORES` | **cuda_prores** | CUDA | **1** |
+
+`force_cpu` and `vulkan` are the same producer differing only in decode route. `CUDA_PRORES` is
+a different producer with its own queue and its own graphs -- which is why it publishes
+`queue-fill` where the others publish `buffer`/`input`. So the honest reading is the reverse of
+the old one: **within one producer, enabling Vulkan decode takes lateness from 11 to 4.** The
+1-against-4 line compares two producers and attributes the difference to the decoder.
+
+**What it is not**, each refuted by measurement rather than argument:
+
+| hypothesis | measurement |
+| :--- | :--- |
+| GPU contention between decode and mixing | late is **2 at ONE layer**, 3 at four -- it does not scale |
+| start-up cost (SPIR-V linking) | the counter resets every period; these are steady-state |
+| decode too slow | `decode-time` **0.016** of budget against CUDA's 0.535 (~1.3 ms against 43 ms) |
+| queue starvation / depth | at `--buffer-depth 16` the buffer rose 0.917 -> 0.959 and the count stayed **4** |
+| a stage overrunning | every mean ~0.5, every max <= 0.78 of budget, all three arms |
+| host CPU load | CUDA 1.25 cores with 1 late against Vulkan 1.19 with 4 |
+| the importer's host wait on the shared device thread | `force_cpu` has **no importer at all** and is the worst of the three |
+
+That last row is the useful negative. Both of the importer's waits (`wait_for_decoder`,
+`wait_for_previous_copy`) do run inside `dispatch_sync`, i.e. on the one device thread every
+importer shares, so the mechanism was real and structurally confirmed -- it simply is not what
+produces these numbers. An instrument to measure those waits was written and then reverted
+rather than committed, since putting atomics and a periodic log line on the frame path to
+measure a refuted hypothesis is not free.
+
+**So the residual is a property of the ffmpeg producer's frame delivery**, present with
+software decode and reduced by Vulkan decode, and unexplained by decode cost, queue depth or
+contention. It is the remaining open question on this path, and it is no longer an argument
+against `<vulkan-decode>` relative to the route it replaces.
+

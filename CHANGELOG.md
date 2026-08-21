@@ -32,8 +32,15 @@ things argue against making it the default, and they are why this ships off:
   device with it. See the entry above. It was **not** specific to this flag -- the same defect
   sat on the default `<gpu-direct-decode>` import -- so this path was the thing that made it
   reproducible rather than the thing that caused it.
-* **CUDA remains the better citizen on late frames**, 1 against 5 on 4444, which is the same
-  shape as every other stability measurement on this path.
+* **The late-frame comparison against CUDA was never apples-to-apples**, and once corrected it
+  argues the other way. `late` counts output intervals over 1.15x nominal, and the arms do not
+  share a producer: `force_cpu` and `vulkan` are both the **ffmpeg** producer differing only in
+  decode route, while `CUDA_PRORES` is a **different producer** with its own queue -- which is
+  why it reports `queue-fill` where the others report `buffer`. Within one producer, turning
+  Vulkan decode on takes lateness from **11 to 4**. The 1-against-4 figure compares producers.
+  Measured 2026-08-21, and it is not queue depth (at `buffer-depth 16` the buffer rose from
+  0.917 to 0.959 and the count stayed at 4), not GPU contention (2 late at ONE layer), not
+  decode cost (`decode-time` 0.016 of budget against CUDA's 0.535), and not host CPU.
 * **It requires `<gpu-direct-decode>`.** Without a GPU-direct publish path the decoded frame is
   read back, and Vulkan decode plus a readback measured **78% below** plain software decode —
   so the combination is a large regression rather than a small one, and the config refuses it.
