@@ -86,9 +86,18 @@ position with luma *2k*. So the correct reconstruction is `C[k]` on even columns
 | **CUDA ProRes**, before | `C[k]` (exact) | `C[k]` | **0.50 x step** |
 
 The mixer sampled the half-width chroma plane at the *luma* coordinate with a linear sampler,
-which lands a quarter texel off centre for both parities -- a quarter-sample blur. The CUDA
-producer replicated, which is exact on even columns and half a sample adrift on odd ones: a
+which lands a quarter texel off centre for both parities. **That is exactly the correct
+reconstruction for CENTRE-sited chroma** (`AVCHROMA_LOC_CENTER`: MPEG-1, JPEG), so the mixer was
+applying the wrong siting convention rather than no convention -- a distinction worth keeping,
+because it makes the old behaviour a defensible historical choice rather than a blunder. The
+CUDA producer replicated, which is exact on even columns and half a sample adrift on odd ones: a
 chroma shift, visible as one-sided colour fringing on saturated vertical edges.
+
+Both now assume **left/co-sited**, which is the default for every format this plays (MPEG-2,
+H.264, ProRes, DNxHD, anything tagged BT.601/709). Neither follows the source's *signalled*
+`chroma_location`, so content genuinely tagged `AVCHROMA_LOC_CENTER` is now reconstructed at the
+wrong position where it used to be the only case that was right. Plumbing
+`AVFrame.chroma_location` to a shader uniform would handle both and is not done here.
 
 `u` now gains half a luma pixel in both shaders (`chroma_uv`, kept identical between them), and
 the CUDA kernel averages adjacent chroma for odd columns. **`v` is deliberately unchanged**:
@@ -106,11 +115,24 @@ route: CUDA **59 -> 2 LSB**, with the share of samples over 3 LSB going from 0.5
 On 4444, CUDA 2 and Vulkan 1. The 59 was not arbitrary -- it is `0.25 x` a saturated bar's
 chroma step of ~236, which is the arithmetic of the defect and what identified it.
 
-**Validated against an independent implementation, not against itself.** Both halves of this
-were changed together, so agreement between them proves nothing on its own. Decoding the same
-frame with **swscale** (`ffmpeg -pix_fmt rgb24`) and comparing: ffmpeg route worst 3, CUDA worst
-3, Vulkan worst 4, and **0.00% of samples over 3 LSB on all three**. The residual mean of 1.76
-is uniform rather than edge-localised, so it is colour-pipeline rounding and not siting.
+**Corrected 2026-08-21, and the correction matters more than the number.** This entry first
+claimed validation against swscale as an independent implementation. That was wrong twice over.
+**swscale replicates chroma rather than interpolating it** -- a hard step at the boundary -- so
+it implements a *third* convention and cannot distinguish correct siting from either error. And
+the comparison strided 4 pixels in x while the artefact is a one-pixel COLUMN, so it stepped
+over the very thing being measured: on the upstream before/after pair the same comparison read
+worst 3 LSB at stride 4 and **89 at every pixel**.
+
+**What replaces it needs no reference picture at all.** With co-sited chroma, an EVEN column
+adjacent to a chroma transition must carry the chroma sample itself rather than a mixture of the
+two sides. Measured on the equivalent change to the OpenGL mixer in upstream's tree, where a
+before and after binary could both be built: **437 of 946 such columns blended before, 0 of 946
+after.** On this tree, all three ProRes routes now give **0 of 1428**.
+
+The route-to-route figures above were re-taken at dense sampling and hold (CUDA 2, Vulkan 2,
+0.00% significant), because once all three reconstruct identically there is no one-pixel column
+left to miss. The **pre-fix 59** was measured at 4-pixel stride and is therefore a lower bound;
+the upstream equivalent at every pixel is 89.
 
 No regression on the 1 LSB gates, as expected -- neither can see this change, which is the
 point of running them: `conformance` 100/100 and `flat-decoded` 29/29 on **both** mixers.

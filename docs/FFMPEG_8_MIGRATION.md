@@ -542,7 +542,7 @@ deciding measurement was the one nothing had made: do the routes produce the sam
 
 | | `prores_vulkan` | `CUDA_PRORES` |
 | :--- | :--- | :--- |
-| **422 HQ** | worst **2** LSB, no significant samples | worst **59** LSB on 0.54% of samples, **100.0% of it adjacent to a chroma edge** |
+| **422 HQ** | worst **2** LSB, no significant samples | worst **59** LSB on 0.54% of samples, **100.0% of it adjacent to a chroma edge** (a lower bound -- taken at 4-pixel stride, and the artefact is a one-pixel column; the upstream equivalent at every pixel is 89) |
 | **4444** | worst 1 LSB, none significant | worst 2 LSB, none significant |
 
 `prores_vulkan` is picture-identical, which is not a surprise once stated: it *is* FFmpeg's
@@ -551,6 +551,11 @@ choice -- flat areas agree exactly, and every significant disagreement sits on a
 transition. That is a conformant difference rather than a broken transform, and the distinction
 matters: a worst delta of 59 spread through flat areas would have been a defect report instead
 of a design note.
+
+**Both were nevertheless sited wrongly, and both are fixed** -- see `CHANGELOG.md`. The mixer's
+reconstruction was correct for *centre*-sited chroma and the CUDA producer replicated, where the
+formats in play are *left/co-sited*. All three routes now agree within 2 LSB at dense sampling
+and none blends an even column at a chroma transition (0 of 1428).
 
 **So the answer is neither branch of the plan's dichotomy.** `CUDA_PRORES` must not become the
 default for `.mov`, because the bar this tree set for flipping a decode default --
