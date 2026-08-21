@@ -3990,6 +3990,27 @@ struct AVProducer::Impl
                                         core::pixel_format_desc::plane(pl.width, pl.height, 1, plane_depth));
                                 desc.color_space    = get_color_space(frame.video, stream_color_space_);
                                 desc.color_transfer = note_colour(frame.video);
+                                // WITHOUT THIS, ALPHA IS WRONG. `make_frame` sets this for
+                                // the software path; a hand-built desc bypasses it and gets
+                                // the default `false` -- "already premultiplied" -- so the
+                                // shader skips `col.rgb *= col.a` and hands the blend straight
+                                // RGB. The composite then computes `c + bg*(1-a)` instead of
+                                // `c*a + bg*(1-a)`, which is the defect 5a9c851dd fixed
+                                // everywhere else.
+                                //
+                                // Measured 2026-08-21 on ProRes 4444: at alpha 0 the layer
+                                // rendered (53,53,242) over a (0,0,191) background -- a fully
+                                // transparent region ADDING its colour to what was behind it
+                                // -- while the alpha plane itself was provably correct
+                                // (255/192/128/64/0 read back through PRINT RAW, identical to
+                                // the software arm). The plane was never the problem; this
+                                // line was missing.
+                                //
+                                // The D3D11 branch below hand-builds a desc too and also omits
+                                // it, which is harmless there ONLY because nv12 carries no
+                                // alpha. This is the first hand-built desc with an alpha
+                                // channel, which is why it surfaced here.
+                                desc.is_straight_alpha = straight_alpha_for(frame.video);
                                 switch (frame.video->chroma_location) {
                                     case AVCHROMA_LOC_CENTER:
                                         desc.chroma_location = core::chroma_location::center;
