@@ -22,9 +22,12 @@ not alter arithmetic. `conformance --mixer vulkan` is 100/100 within 1.0 LSB and
 
 **It is not a fix for a symptom anyone reported**, and it should not be read as one. It was
 found while chasing `VK_ERROR_DEVICE_LOST` on the experimental `<vulkan-decode>` path, and it
-did **not** fix that — the device loss reproduces with the lock in place. What it removes is a
-latent race on the default GPU-direct path, where the window is one submission wide and the
-consequence is a driver reset, so an operator who has seen occasional unexplained Vulkan
+did **not** fix that — the real cause there was one `AVHWDeviceContext` per producer, so
+FFmpeg's own queue mutex (which lives on that context) was one mutex per producer guarding a
+single queue. What this lock removes is a *different* race that was simply also present, on
+the default GPU-direct path: the mixer submitting from the channel thread while an import
+bridge submits from the device thread. The window is one submission wide and the consequence
+of losing it is a driver reset, so an operator who has seen occasional unexplained Vulkan
 instability with GPU-direct decode has one fewer cause to consider.
 
 ### Changed: GPU-direct decode is ON by default, and the buffer depth is tunable again

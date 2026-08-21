@@ -325,7 +325,7 @@ decodes into an image the Vulkan mixer can consume without an interop hop — an
 CUDA path it is not NVIDIA-only. ProRes **RAW** decoding is a capability the tree does not
 have at all.
 
-#### 6.1.1 Measured, 2026-08-21: ProRes decodes on Vulkan, and the blocker was ours
+#### 6.1.1 Measured, 2026-08-21: ProRes decodes on Vulkan, and both blockers were ours
 
 The ProRes Vulkan hwaccel is now wired end to end behind
 `<vulkan-decode>` (off by default, and requiring `<gpu-direct-decode>`). Everything up to
@@ -375,38 +375,71 @@ swallows before the unhandled-exception filter can see it, and
 return address is on top of the stack; that gave `casparcg.exe+0x8898c5`, and DbgHelp against
 the PDB turned it into `caspar::ffmpeg::log_callback+0xf5`.
 
-**What it does now, with ONE producer.** `PLAY prores_422_bt709_sdr` on the Vulkan mixer with
+**What it does now.** `PLAY prores_422_bt709_sdr` on the Vulkan mixer with
 `<vulkan-decode>true` logs *"Vulkan GPU-direct video active: 3 planes decoded by an FFmpeg
 compute shader on the mixer's own device and copied device-local (no CPU frame, no
-readback)"*, with zero exceptions, and costs **0.02 cores against 0.25 for software decode —
-−90% host CPU** on 1080p ProRes 422. Two interleaved rounds per arm (0.23–0.27 against
-0.02–0.03), with the producer's own decision line read back as the control, so an arm that
-silently took the other path could not pass as a saving.
+readback)"*, and **eight concurrent ProRes layers** run with all eight on that path, no device
+loss, no fallback and no TDR. Host CPU, interleaved arms, two rounds each, with the
+producer's own decision line read back so an arm that silently took the other path could not
+pass as a saving:
 
-**With two or more concurrent ProRes producers it can lose the GPU.** `VK_ERROR_DEVICE_LOST`
-on every submission, with `nvlddmkm stopped responding and recovered` in the Windows System
-log at the same second. The channel survives — the importer declines the frame and the
-producer falls back to host transfers — but the display driver is reset. At four producers it
-happened within three seconds, every run; at two it happened in one round of two. **Still
-open**, and these are ruled out, each by its own run:
+| layers | software | vulkan-decode | |
+| :--- | :--- | :--- | :--- |
+| 1 | 1.21 cores | 1.02 | −15.5% |
+| 4 | 1.79 cores (1.75–1.84) | 1.12 (1.11–1.13) | **−37.5%** |
 
-| ruled out | how |
-| :--- | :--- |
-| FFmpeg itself | four concurrent Vulkan ProRes decoders sharing one device inside `ffmpeg.exe`, ~1500 frames each, complete cleanly at exit 0 |
-| image sharing mode | `AVVkFrame::queue_family[0]` logged as `0xffffffff` = `VK_QUEUE_FAMILY_IGNORED`, so the images really are CONCURRENT and the cross-family copy is legal |
-| unlocked frame properties | `lock_frame`/`unlock_frame` now wrap the read, submit and `sem_value` write-back, per `hwcontext_vulkan.h`; no change to the failure |
-| an external wait on the shared queue | the wait on the decoder's timeline semaphores moved from the SubmitInfo to a host wait, so an unsatisfiable value can no longer block the mixer's queue; no change to the failure |
-| an unsynchronised `VkQueue` | `device::submit` and the transfer path now share `_queue_mutex`; no change to the failure |
+The saving grows with decoding layers, which is the expected shape: the mixer's own cost is
+fixed and only the decode moves.
 
-Three of those five stay regardless, because each is correct on its own terms: Vulkan requires
-a `VkQueue` to be externally synchronised and this device has three unrelated submitters;
-FFmpeg documents the frame lock; and a wait on a shared queue is head-of-line blocking
-whether or not it is the current bug.
+**An earlier draft of this section claimed −90%, from 0.25 → 0.02 cores at one layer. That
+was wrong** and is worth recording as such: 0.25 cores for a live 1080p25 server is not
+plausible, and those figures came from a machine that had taken four TDRs in the preceding
+fifteen minutes. The same measurement on a settled machine gives the table above. A number
+that looks too good is a reason to re-measure, not to publish.
 
-**A measurement hazard this turned up.** After a TDR the driver is reset and every later
-number in the session is contaminated — the *software* arm alone moved from 1.80 to 0.83
-cores across one, with no code change and no errors in its log. Check the Windows System log
-for `nvlddmkm` events before believing any figure from this path.
+**THE CONCURRENCY BUG — one AVHWDeviceContext per producer.** This is what limited the path to
+a single producer, and it was ours.
+
+`make_vulkan_hwdevice_from_mixer` built a fresh `AVHWDeviceContext` for every producer.
+FFmpeg serialises its own queue submissions with a mutex that lives *on that context*
+(`vulkan_device_init` installs `lock_queue` when the application leaves it null), so two
+producers meant **two independent mutexes guarding one VkQueue** — the queue from the family we
+hand over. FFmpeg's decode threads then submitted to it concurrently. One shared, cached
+context per `VkDevice` fixes it: 2 layers went from failing 6 of 6 interleaved runs to 3 of 3
+clean, and 4 and 8 layers are clean.
+
+It also dissolves the result that had "ruled FFmpeg out": four concurrent Vulkan ProRes
+decoders inside one `ffmpeg.exe` complete cleanly because that is **one** context and therefore
+one mutex. The difference was never the decoder — it was how many contexts wrapped the device.
+
+**What found it: the Vulkan validation layer**, added at runtime behind
+`CASPARVP_VK_VALIDATION=1` because validation was `#ifdef _DEBUG` and every measured build is
+RelWithDebInfo — so the configuration under test could never be validated. It reported
+`UNASSIGNED-Threading-MultipleThreads-Write, vkQueueSubmit2(): THREADING ERROR : object of
+type VkQueue is simultaneously used`, repeatedly, until it hit the layer's duplicate limit.
+
+**A second real bug it found on the way:** enabling `VK_EXT_shader_object` — which is on
+FFmpeg's own optional list, so this code enabled it — without enabling
+`VkPhysicalDeviceShaderObjectFeaturesEXT::shaderObject`. FFmpeg took its shader-object path
+and called `vkCreateShadersEXT`/`vkCmdBindShadersEXT` against a device where the feature was
+false; validation named it as `VUID-vkCmdDispatch-None-08606` and three siblings. Extension
+features are now queried and enabled per extension, so the two can never disagree again. This
+did **not** fix the device loss on its own.
+
+**Four things were accused and acquitted**, and the write-ups they produced were wrong before
+this: the semaphore signal, waiting for our own copy, the frames pool, and the thread count.
+The A/B that convicted the semaphore signal — 356 device-lost with it, 0 without — was
+invalid, because the arm "without" had only one of four producers ever active and so was not
+doing concurrent work at all. Repeats then showed 6 of 6 failures in *both* arms. **A single
+30-second soak is not a verdict on a race**, and an arm that changes how much work happens is
+not a control.
+
+**One validation finding remains, and it is upstream.**
+`THREADING ERROR : object of type VkFence is simultaneously used` still appears three times in
+a 30-second four-layer run — and `ffmpeg.exe` alone, four concurrent decoders on one device
+with its own `debug=1` validation, reports the same thing plus a
+`VUID-vkCmdDispatch-storageBuffers-06936` we do not hit. So it is FFmpeg's behaviour in
+FFmpeg's own tested configuration, not something this integration introduces.
 
 **It is not byte-identical to software decode, and that is FFmpeg's.** On the same pinned
 frame (LOAD + PAUSE + SEEK 7), channel output differs on **285 of 2,073,600 pixels (0.0137%)
@@ -417,11 +450,12 @@ max 5 codes of 1023**. A compute-shader IDCT is not obliged to match a SIMD one 
 the same way JPEG's integer and float IDCTs do not. So the option stays opt-in, and no doc
 should describe this path as byte-identical.
 
-**Still owed:** the concurrency defect above, and a battery. `decode-cost` has no
-`vulkan-decode` arm — it sweeps `gpu-direct-decode`, which does nothing for ProRes because
-there is no D3D11VA ProRes decoder — so the −90% figure and the parity figures were taken by
-hand. They belong in the harness before they are quoted again, together with the
-concurrent-producer case, which is the one that would have caught the device loss.
+**Still owed: a battery.** `decode-cost` has no `vulkan-decode` arm — it sweeps
+`gpu-direct-decode`, which does nothing for ProRes because there is no D3D11VA ProRes decoder
+— so every figure here was taken by hand with scratchpad rigs. They belong in the harness
+before they are quoted again, and the case that matters most is the **concurrent-producer
+soak**: it is the one that would have caught the device loss, and the one that would have
+caught the bogus −90% too, because its control would have shown only one producer active.
 
 **Two things that made this hard to see, worth carrying forward:**
 

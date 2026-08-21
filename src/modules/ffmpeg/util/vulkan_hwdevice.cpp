@@ -35,6 +35,8 @@ extern "C" {
 #endif
 }
 
+#include <map>
+#include <mutex>
 #include <vector>
 
 namespace caspar { namespace ffmpeg {
@@ -74,6 +76,45 @@ const extension_registrar g_extension_registrar;
 
 AVBufferRef* make_vulkan_hwdevice_from_mixer(void* vk_device_handle)
 {
+    // ONE DEVICE CONTEXT PER VkDevice, SHARED BY EVERY PRODUCER. This is not an
+    // optimisation; a context per producer corrupts the GPU.
+    //
+    // FFmpeg serialises its own submissions with a mutex that lives on the
+    // AVHWDeviceContext (`vulkan_device_init` installs `lock_queue` when the application
+    // leaves it null). Two producers each building their own context therefore get two
+    // independent mutexes guarding THE SAME VkQueue -- ours, from the queue family we hand
+    // over -- and FFmpeg's decode threads then submit to it concurrently.
+    //
+    // Measured 2026-08-21 with the Vulkan validation layer
+    // (`CASPARVP_VK_VALIDATION=1`): `UNASSIGNED-Threading-MultipleThreads-Write,
+    // vkQueueSubmit2(): THREADING ERROR : object of type VkQueue is simultaneously used in
+    // current thread` -- reported until it hit the layer's duplicate limit -- followed by
+    // `VK_ERROR_DEVICE_LOST` and an `nvlddmkm` TDR. One producer survived indefinitely; two
+    // failed in 6 of 6 interleaved 25-second runs.
+    //
+    // It also explains the result that had ruled FFmpeg out: four concurrent Vulkan ProRes
+    // decoders inside one `ffmpeg.exe` sharing one `-init_hw_device vulkan` complete cleanly,
+    // because that is ONE context and therefore one mutex. The difference was never the
+    // decoder; it was how many contexts wrapped the device.
+    //
+    // The cache is keyed on the device handle and holds its own reference for the life of the
+    // process. The mixer's device outlives every producer, so that reference is deliberately
+    // never released -- one AVBufferRef per GPU, not a leak that grows.
+    //
+    // The assumption that buys is that a `device*` is stable for the process. It holds today:
+    // the Vulkan device is created once per GPU at channel setup and lives until shutdown. If
+    // a mixer device is ever destroyed and another allocated at the same address, this cache
+    // would hand out a context wrapping a dead VkDevice -- so anything that makes device
+    // lifetime dynamic has to invalidate this entry with it.
+    static std::mutex                       cache_mutex;
+    static std::map<void*, AVBufferRef*>    cache;
+    {
+        std::lock_guard<std::mutex> lock(cache_mutex);
+        const auto                  it = cache.find(vk_device_handle);
+        if (it != cache.end() && it->second != nullptr)
+            return av_buffer_ref(it->second);
+    }
+
     const auto info = accelerator::vulkan::describe_shared_device(vk_device_handle);
     if (!info.valid) {
         CASPAR_LOG(debug) << L"[vk_hwdevice] the mixer exposes no Vulkan device";
@@ -173,7 +214,20 @@ AVBufferRef* make_vulkan_hwdevice_from_mixer(void* vk_device_handle)
                         L"family " << hwctx->qf[0].idx << L" ("
                      << hwctx->nb_enabled_dev_extensions << L" extensions declared); "
                         L"decoded frames need no copy to reach the mixer";
-    return ref;
+
+    // Publish it before handing out the first reference, so every later producer shares this
+    // context -- and with it FFmpeg's queue mutex -- rather than building a rival one.
+    {
+        std::lock_guard<std::mutex> lock(cache_mutex);
+        const auto                  it = cache.find(vk_device_handle);
+        if (it != cache.end() && it->second != nullptr) {
+            // Another thread won the race; keep theirs and drop ours so there is exactly one.
+            av_buffer_unref(&ref);
+            return av_buffer_ref(it->second);
+        }
+        cache[vk_device_handle] = ref;
+    }
+    return av_buffer_ref(ref);
 }
 
 #else // no Vulkan accelerator, or FFmpeg older than 8

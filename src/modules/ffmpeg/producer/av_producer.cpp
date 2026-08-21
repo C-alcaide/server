@@ -3903,10 +3903,9 @@ struct AVProducer::Impl
                             std::vector<std::shared_ptr<core::texture>> textures;
                             if (!planes.empty() && vk_importer_ &&
                                 vk_importer_->copy_planes(planes, plane_depth, textures)) {
-                                // The copy signalled sem_value + 1 per plane, so record it --
-                                // under the lock taken above, which is the only thing that
-                                // makes this read-modify-write safe against FFmpeg's own
-                                // decode threads. FFmpeg waits on the value recorded here
+                                // Record the value the copy signalled, under the lock taken
+                                // above -- which is what makes this read-modify-write safe
+                                // against FFmpeg's own decode threads. FFmpeg waits on it
                                 // before reusing a pooled frame, so skipping it would let the
                                 // decoder overwrite an image the copy is still reading.
                                 for (std::size_t i = 0; i < planes.size(); ++i)

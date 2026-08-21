@@ -75,21 +75,31 @@ class av_vulkan_importer final
 
     /// Copy one frame's planes into freshly pooled mixer textures.
     ///
-    /// SYNCHRONISATION, and it is not optional. `AVVkFrame`'s timeline semaphores carry a
-    /// contract: a client must WAIT on `sem_value` in every submission that touches the
-    /// image and SIGNAL an incremented value. This submission does both, per plane.
-    /// Honouring the signal is what makes it safe for the caller to release the AVFrame
-    /// immediately -- FFmpeg waits on the latest value before reusing a pooled frame -- so
-    /// **the caller must add 1 to each `AVVkFrame::sem_value` after this returns true**, or
-    /// FFmpeg will wait on a value that has already passed and reuse an image this copy is
-    /// still reading.
+    /// SYNCHRONISATION follows `AVVkFrame`'s contract, with one deliberate departure.
     ///
-    /// The work is recorded and submitted through the device's own dispatch thread, so it is
-    /// serialised against the mixer's submissions on the same queue rather than racing them.
-    /// Being on that queue is also what orders the copy before the mixer's later draw, so no
-    /// host wait is needed to make the textures safe to sample. The fence exists for a
-    /// different reason: the command buffer is reused, and re-recording one the GPU is still
-    /// reading is undefined behaviour.
+    /// SIGNAL, as documented: this submission signals `sem_value + 1` per plane, and **the
+    /// caller must record that on the frame** (`av_producer.cpp` does, under `lock_frame`).
+    /// FFmpeg waits on the recorded value before reusing a pooled frame, so it is what stops
+    /// the decoder overwriting an image this copy is still reading.
+    ///
+    /// WAIT on the host instead of in the submission, which is the departure. A wait here
+    /// would sit on the mixer's single shared graphics queue, so a value not yet signalled
+    /// would block every other channel behind it -- head-of-line blocking on the one queue
+    /// that must never stall. It happens on the host before anything is recorded, and a frame
+    /// that is not ready within a second is DECLINED rather than allowed to wedge the queue.
+    ///
+    /// Worth knowing that the signal was accused of losing the GPU with concurrent producers
+    /// and acquitted. The A/B that convicted it was invalid -- the arm without it had one of
+    /// four producers active, so it was not doing concurrent work -- and repeats then failed
+    /// in both arms. The real cause was one `AVHWDeviceContext` per producer, and therefore
+    /// one copy of FFmpeg's queue mutex per producer guarding a single queue; see
+    /// `make_vulkan_hwdevice_from_mixer`. Eight concurrent producers are clean.
+    ///
+    /// The work is submitted through the device's own dispatch thread, on the same queue the
+    /// mixer draws with, which is what orders the copy before any later sampling of these
+    /// textures without a host wait. The fence exists for a different reason again: the
+    /// command buffer is reused, and re-recording one the GPU is still reading is undefined
+    /// behaviour.
     ///
     /// LAYOUTS are restored: each source image is transitioned back to the layout it arrived
     /// in, so `AVVkFrame::layout[]` -- documented as updated after every barrier -- stays

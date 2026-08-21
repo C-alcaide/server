@@ -459,10 +459,85 @@ struct device::impl : public std::enable_shared_from_this<impl>
         // read from the builder after this returns, so whatever is enabled here is exactly
         // what gets declared -- one source, no drift.
         int extensions_added = 0;
+        std::vector<std::string> extensions_enabled;
         for (const auto& name : common::requested_vulkan_device_extensions()) {
-            if (_vkb_physical_device.enable_extension_if_present(name.c_str()))
+            if (_vkb_physical_device.enable_extension_if_present(name.c_str())) {
                 ++extensions_added;
+                extensions_enabled.push_back(name);
+            }
         }
+
+        // AND THEIR FEATURES. Enabling an extension does not enable the features it
+        // introduces, and the gap between the two is undefined behaviour rather than a
+        // graceful decline.
+        //
+        // This cost a long time to find. Enabling `VK_EXT_shader_object` -- which is on
+        // FFmpeg's own optional list, so this code enabled it -- let FFmpeg's decoder take
+        // its shader-object path and call vkCreateShadersEXT/vkCmdBindShadersEXT, while
+        // `VkPhysicalDeviceShaderObjectFeaturesEXT::shaderObject` stayed FALSE. One producer
+        // survived it; two lost the GPU within seconds, `VK_ERROR_DEVICE_LOST` on every
+        // submission with an `nvlddmkm` TDR to match. Nothing in the API complains: the
+        // driver is entitled to do anything, and what it did was hang.
+        //
+        // Named by the Vulkan validation layer with synchronisation validation on
+        // (`CASPARVP_VK_VALIDATION=1`, added for exactly this) --
+        // VUID-vkCmdDispatch-None-08606, VUID-vkCmdBindShadersEXT-None-08462,
+        // VUID-vkCreateShadersEXT-None-08400, VUID-vkGetShaderBinaryDataEXT-None-08461, all
+        // of the form "the shaderObject feature is not enabled". Validation also slows things
+        // enough that the device stopped being lost while it was on, which is worth knowing
+        // before trusting a validated run as a fix.
+        //
+        // QUERY THEN ENABLE, per struct: whatever the physical device reports as supported is
+        // exactly what gets enabled, so the two can never disagree again. That is broader
+        // than FFmpeg's own list, and deliberately -- a feature is an opt-in capability, and
+        // guessing which subset a future FFmpeg needs is how this happened.
+        int ext_features_added = 0;
+        const auto enabled = [&](const char* name) {
+            return std::find(extensions_enabled.begin(), extensions_enabled.end(), std::string(name)) !=
+                   extensions_enabled.end();
+        };
+        const auto take_ext_features = [&](const char* ext_name, auto&& probe) {
+            if (!enabled(ext_name))
+                return;
+            if (probe())
+                ++ext_features_added;
+        };
+
+        vk::PhysicalDevice phys_for_feats(_vkb_physical_device.physical_device);
+        const auto         query_and_enable = [&](auto tag) {
+            using T = decltype(tag);
+            vk::StructureChain<vk::PhysicalDeviceFeatures2, T> chain;
+            phys_for_feats.getFeatures2(&chain.template get<vk::PhysicalDeviceFeatures2>());
+            return _vkb_physical_device.enable_extension_features_if_present(chain.template get<T>());
+        };
+
+        take_ext_features(VK_EXT_SHADER_OBJECT_EXTENSION_NAME,
+                          [&] { return query_and_enable(vk::PhysicalDeviceShaderObjectFeaturesEXT{}); });
+        take_ext_features(VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME,
+                          [&] { return query_and_enable(vk::PhysicalDeviceCooperativeMatrixFeaturesKHR{}); });
+        take_ext_features(VK_EXT_SHADER_ATOMIC_FLOAT_EXTENSION_NAME,
+                          [&] { return query_and_enable(vk::PhysicalDeviceShaderAtomicFloatFeaturesEXT{}); });
+        take_ext_features(VK_KHR_SHADER_SUBGROUP_ROTATE_EXTENSION_NAME,
+                          [&] { return query_and_enable(vk::PhysicalDeviceShaderSubgroupRotateFeaturesKHR{}); });
+        take_ext_features(VK_EXT_HOST_IMAGE_COPY_EXTENSION_NAME,
+                          [&] { return query_and_enable(vk::PhysicalDeviceHostImageCopyFeaturesEXT{}); });
+        take_ext_features(VK_KHR_SHADER_EXPECT_ASSUME_EXTENSION_NAME,
+                          [&] { return query_and_enable(vk::PhysicalDeviceShaderExpectAssumeFeaturesKHR{}); });
+        take_ext_features(VK_KHR_WORKGROUP_MEMORY_EXPLICIT_LAYOUT_EXTENSION_NAME, [&] {
+            return query_and_enable(vk::PhysicalDeviceWorkgroupMemoryExplicitLayoutFeaturesKHR{});
+        });
+        take_ext_features(VK_KHR_VIDEO_MAINTENANCE_1_EXTENSION_NAME,
+                          [&] { return query_and_enable(vk::PhysicalDeviceVideoMaintenance1FeaturesKHR{}); });
+#ifdef VK_KHR_shader_relaxed_extended_instruction
+        take_ext_features(VK_KHR_SHADER_RELAXED_EXTENDED_INSTRUCTION_EXTENSION_NAME, [&] {
+            return query_and_enable(vk::PhysicalDeviceShaderRelaxedExtendedInstructionFeaturesKHR{});
+        });
+#endif
+#ifdef VK_EXT_shader_replicated_composites
+        take_ext_features(VK_EXT_SHADER_REPLICATED_COMPOSITES_EXTENSION_NAME, [&] {
+            return query_and_enable(vk::PhysicalDeviceShaderReplicatedCompositesFeaturesEXT{});
+        });
+#endif
 
         vk::PhysicalDevice phys(_vkb_physical_device.physical_device);
 
@@ -478,11 +553,11 @@ struct device::impl : public std::enable_shared_from_this<impl>
         const auto& s12 = supported_chain.get<vk::PhysicalDeviceVulkan12Features>();
         const auto& s13 = supported_chain.get<vk::PhysicalDeviceVulkan13Features>();
 
-        int        enabled = 0;
-        const auto take    = [&enabled](vk::Bool32& dst, vk::Bool32 supported) {
+        int        enabled_count = 0;
+        const auto take    = [&enabled_count](vk::Bool32& dst, vk::Bool32 supported) {
             if (supported) {
                 dst = VK_TRUE;
-                ++enabled;
+                ++enabled_count;
             }
         };
 
@@ -551,9 +626,9 @@ struct device::impl : public std::enable_shared_from_this<impl>
                                 << ok10 << L" v11=" << ok11 << L" v12=" << ok12 << L" v13=" << ok13
                                 << L"); Vulkan decoding may fault";
         } else {
-            CASPAR_LOG(info) << L"[vk::device] enabled " << extensions_added << L" extensions and "
-                             << enabled
-                             << L" additional device features for FFmpeg's Vulkan decoders "
+            CASPAR_LOG(info) << L"[vk::device] enabled " << extensions_added << L" extensions, "
+                             << ext_features_added << L" extension feature sets and " << enabled_count
+                             << L" core/1.1/1.2/1.3 features for FFmpeg's Vulkan decoders "
                                 L"(vulkan-decode is on)";
         }
     }
@@ -565,7 +640,27 @@ struct device::impl : public std::enable_shared_from_this<impl>
 
         vulkan_common::filter_stale_nvidia_icds();
 
-        auto instance_builder = vkb::InstanceBuilder()
+        // Validation is normally _DEBUG-only, which means a RelWithDebInfo build -- the one
+        // everything is measured with -- can never be validated. `CASPARVP_VK_VALIDATION=1`
+        // turns it on at runtime instead, with the synchronisation checks that a
+        // VK_ERROR_DEVICE_LOST actually needs; those are an instance-creation option rather
+        // than a layer flag, hence the explicit VkValidationFeaturesEXT below.
+        const bool want_validation = std::getenv("CASPARVP_VK_VALIDATION") != nullptr;
+
+        auto instance_builder = vkb::InstanceBuilder();
+        if (want_validation) {
+            instance_builder.enable_validation_layers(true)
+                .set_debug_messenger_severity(VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
+                                              VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT)
+                .set_debug_messenger_type(VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
+                                          VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
+                                          VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT)
+                .set_debug_callback(default_debug_callback)
+                .add_validation_feature_enable(VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT);
+            CASPAR_LOG(info) << L"[vk::device] Vulkan validation + synchronisation validation ENABLED "
+                                L"(CASPARVP_VK_VALIDATION); this is slow and not for production";
+        }
+        instance_builder
 #ifdef _DEBUG
                                     .enable_validation_layers(true)
                                     .set_debug_messenger_severity(VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |

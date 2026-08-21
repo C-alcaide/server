@@ -26,6 +26,7 @@
 #include <common/except.h>
 #include <common/log.h>
 
+#include <cstdlib>
 #include <exception>
 #include <vector>
 
@@ -286,12 +287,24 @@ bool av_vulkan_importer::copy_planes(const std::vector<av_plane_source>&        
 
             cmd.end();
 
-            // SIGNAL ONLY. The AVVkFrame contract is wait-on-sem_value and
-            // signal-an-incremented-value; the wait half was moved to the host above, for the
-            // queue-sharing reason recorded there. The signal cannot move: FFmpeg waits on the
-            // latest value before reusing a pooled frame, so without it the decoder would
-            // overwrite an image this copy is still reading, and no caller could make that
-            // safe by other means.
+            // SIGNAL, per the AVVkFrame contract: wait on `sem_value`, signal an
+            // incremented value, and let the caller record it. FFmpeg waits on the recorded
+            // value before reusing a pooled frame, so this is what stops the decoder
+            // overwriting an image the copy is still reading.
+            //
+            // Worth knowing that this was accused and acquitted. It was removed for a while
+            // on the strength of an A/B that showed 356 device-lost errors with it and none
+            // without -- and that A/B was invalid, because the arm without it had only one
+            // of four producers ever active, so it was not doing concurrent work at all.
+            // With the real cause fixed (one shared AVHWDeviceContext, see
+            // make_vulkan_hwdevice_from_mixer) signalling is clean at eight concurrent
+            // producers.
+            //
+            // The WAIT half is on the host rather than in this submission, and that is not
+            // the contract's letter: a wait here would sit on the mixer's single shared
+            // graphics queue, so an unsatisfiable value would block every other channel
+            // behind it. `wait_for_decoder` above does it on the host instead, and declines
+            // the frame on timeout rather than risking the queue.
             std::vector<vk::Semaphore> sems;
             std::vector<uint64_t>      signal_values;
             sems.reserve(planes.size());
