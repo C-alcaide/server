@@ -34,14 +34,28 @@ class timer
 
     void restart() { start_time_ = now(); }
 
-    double elapsed() const { return static_cast<double>(now() - start_time_) / 1000.0; }
+    /// Seconds, as before -- only the RESOLUTION changed, from 1 ms to 1 us.
+    ///
+    /// `now()` used to be `duration_cast<milliseconds>`, so `elapsed()` could only ever
+    /// return whole milliseconds and every sub-millisecond measurement in this tree read
+    /// exactly **zero**. That is not a rounding nicety, it invalidated published numbers:
+    /// `GPU_INTEROP_ARCHITECTURE.md` carried a DeckLink table quoting a 0.06 ms fence wait,
+    /// a figure this instrument could not represent, and re-running it on 2026-08-21 gave
+    /// `fence=0ms import=0ms wait=0ms launch=0ms total=0ms` for most 50-frame windows with
+    /// occasional 0.04/0.78 -- which is one quantised 1 ms hit divided by 50, not a
+    /// measurement of anything.
+    ///
+    /// Microseconds rather than nanoseconds because int64 microseconds since the epoch has
+    /// no practical overflow and the extra three digits buy nothing on a frame path whose
+    /// steps are tens of microseconds at the low end.
+    double elapsed() const { return static_cast<double>(now() - start_time_) / 1'000'000.0; }
 
   private:
     static std::int_least64_t now()
     {
         using namespace std::chrono;
 
-        return duration_cast<milliseconds>(high_resolution_clock::now().time_since_epoch()).count();
+        return duration_cast<microseconds>(high_resolution_clock::now().time_since_epoch()).count();
     }
 };
 

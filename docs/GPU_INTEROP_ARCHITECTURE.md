@@ -221,13 +221,47 @@ NVLink pair:
 
 ### DeckLink Output (VK→CUDA Semaphore Interop)
 
-| Scenario | Fence Wait | Sync Time | Total | Notes |
-|----------|-----------|-----------|-------|-------|
-| PNG/solid (no CUDA decode) | 0ms | 2-4ms | 2-4ms | GPU idle, perfect 60fps |
-| ProRes (old CPU fence) | 22ms | 8ms | 30ms | CPU blocked on `glClientWaitSync` |
-| ProRes (GPU semaphore) | 0.06ms | 28ms | 28ms | CPU free, GPU throughput limited |
+Re-measured 2026-08-21 on a DeckLink 8K Pro, 1080p2500, averaged over 50-frame windows with
+the first window discarded (it spans startup). Every column comes from
+`[cuda_vk_strategy] avg over 50 frames`:
 
-The 28ms under heavy ProRes decode is GPU execution time (VK render + CUDA v210 conversion competing for GPU cycles), not CPU blocking. The improvement frees the CPU thread entirely.
+| Scenario | fence | import | wait | launch | **total** |
+|----------|-------|--------|------|--------|-----------|
+| solid colour (no CUDA decode) | 0.03 ms | 0.09 ms | 0.01 ms | 0.03 ms | **0.18 ms** |
+| ProRes, GPU semaphore | 0.02 ms | 0.09 ms | 0.05 ms | 0.03 ms | **0.22 ms** |
+
+`wait` is the one blocking call in the path — `cudaEventSynchronize` on the frame
+`PIPELINE_DEPTH` back, inside `push_and_take()`. It is 8-50 µs in steady state, with
+occasional windows around 0.5 ms.
+
+**The previous version of this table was invented by a broken instrument, and it is worth
+saying how.** It read:
+
+| Scenario | Fence Wait | Sync Time | Total |
+|---|---|---|---|
+| PNG/solid | 0ms | 2-4ms | 2-4ms |
+| ProRes (old CPU fence) | 22ms | 8ms | 30ms |
+| ProRes (GPU semaphore) | 0.06ms | **28ms** | **28ms** |
+
+and concluded that "the 28ms under heavy ProRes decode is GPU execution time, not CPU
+blocking". Three things were wrong with it:
+
+1. `sync_ms` came from a timer constructed and read on the *next line*, so it was
+   structurally ~0 and measured nothing.
+2. `total_ms` was read **before** `push_and_take()`, excluding the only blocking call in the
+   path — the very thing the number was being used to rule out. Both fixed in `926f5e1e9`.
+3. `caspar::timer` was **integer milliseconds** (`duration_cast<milliseconds>`), so a 0.06 ms
+   figure was not representable by the instrument that produced it. Every sub-millisecond
+   step in this tree read exactly zero. Fixed to microseconds 2026-08-21; the first
+   re-measurement after the timer fix but before the resolution fix returned
+   `fence=0ms import=0ms wait=0ms launch=0ms total=0ms` for most windows, with occasional
+   0.04 or 0.78 — one quantised 1 ms hit divided by 50, not a measurement.
+
+So the real cost of this path is **~0.2 ms per frame**, two orders of magnitude below what was
+published, and the "GPU throughput limited" conclusion was drawn from an instrument that could
+not see what it claimed to. The row for the *old CPU fence* implementation is gone rather than
+corrected: that code no longer exists, so it cannot be re-measured, and a number no instrument
+can reproduce does not belong in a table.
 
 ### Cross-GPU Transfer (Async Peer Copy)
 
@@ -235,9 +269,16 @@ The async event chain eliminates CPU `cudaStreamSynchronize` calls from the read
 
 | Transfer Type | Bandwidth | CPU Involvement |
 |--------------|-----------|-----------------|
-| NVLink | ~600 GB/s | Zero (GPU DMA) |
-| PCIe P2P | ~15 GB/s (3.0 x16) | Zero (GPU DMA) |
-| Staged (system RAM) | ~10 GB/s | Zero (GPU DMA engines, no CPU memcpy) |
+| NVLink | ~600 GB/s | No CPU **copy**; see the caveat below |
+| PCIe P2P | ~15 GB/s (3.0 x16) | No CPU **copy**; see the caveat below |
+| Staged (system RAM) | ~10 GB/s | No CPU copy, but **one blocking wait and three transfers** |
+
+**"Zero" was wrong, and the distinction matters.** No CPU *memcpy* happens — the copies are
+GPU DMA — but the staged path in `cuda_peer_transfer.cpp` is peer→staging, then
+staging→PBO (`cudaMemcpyAsync` device-to-device), then PBO→texture (`glTexSubImage2D`), with a
+**`cudaStreamSynchronize(dst_stream_)`** between the second and third. That is a blocking CPU
+wait on the calling thread, so the thread is not free even though no byte passes through it.
+Bandwidth figures are the hardware's, not measured here.
 | PBO fallback (no CUDA) | ~6 GB/s | Moderate (CPU uploads) |
 
 ---

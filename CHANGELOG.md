@@ -1,6 +1,39 @@
 CasparVP — Unreleased
 ==========================================
 
+### Fixed: `caspar::timer` had 1 ms resolution, so every sub-millisecond figure read zero
+
+`timer::now()` was `duration_cast<milliseconds>`, so `elapsed()` could only ever return whole
+milliseconds. Every per-frame GPU step in this tree is tens of microseconds, which means
+**every one of them measured exactly zero**, and any average over N frames was one quantised
+1 ms hit divided by N. It is microseconds now.
+
+**This changes what every `*_ms` log line in the server means**, so any performance figure
+taken from one before 2026-08-21 should be re-measured rather than compared against a new one.
+`elapsed()` still returns seconds as a double, and no behaviour depends on the change: the only
+places that *gate* on it compare against 1.0 s or a configured interval, never a
+sub-millisecond threshold, so this is precision, not semantics.
+
+What it looked like. `GPU_INTEROP_ARCHITECTURE.md` published a DeckLink VK→CUDA table quoting a
+0.06 ms fence wait and a 28 ms total — the first not representable by the instrument at all,
+the second from a timer that stopped before the path's only blocking call. Re-measured with
+the timer fixed but the resolution still 1 ms, most 50-frame windows returned
+`fence=0ms import=0ms wait=0ms launch=0ms total=0ms`. Re-measured again at microsecond
+resolution, on a DeckLink 8K Pro at 1080p2500:
+
+| Scenario | fence | import | wait | launch | total |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| solid colour | 0.03 ms | 0.09 ms | 0.01 ms | 0.03 ms | **0.18 ms** |
+| ProRes, GPU semaphore | 0.02 ms | 0.09 ms | 0.05 ms | 0.03 ms | **0.22 ms** |
+
+So the path costs ~0.2 ms per frame, two orders of magnitude below the published figure, and
+the table's conclusion that it was "GPU throughput limited" came from an instrument that could
+not see what it claimed to. The doc now carries the measured numbers and an account of how the
+old ones were produced.
+
+No rendered-output change: `conformance` 100/100 on both mixers and `flat-decoded --mixer
+vulkan` 29/29 after the full rebuild this required.
+
 ### Fixed: the Vulkan mixer's graphics queue had three submitters and no lock
 
 `VkQueue` must be externally synchronised — Vulkan says so, without qualification — and this
