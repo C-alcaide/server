@@ -95,6 +95,23 @@ extern "C" {
 
 namespace caspar { namespace ffmpeg {
 
+namespace {
+#ifdef _WIN32
+extern "C" unsigned long __stdcall GetCurrentThreadId(void);
+#endif
+/// The number the Vulkan validation layer prints in a THREADING ERROR. It has to be the OS id:
+/// `std::thread::id` cannot be streamed into our log (boost's overload makes it ambiguous) and
+/// its hash is a different value, so neither correlates with a layer message.
+inline std::string os_thread_id_str()
+{
+#ifdef _WIN32
+    return std::to_string(GetCurrentThreadId());
+#else
+    return "0";
+#endif
+}
+} // namespace
+
 const AVRational TIME_BASE_Q = {1, AV_TIME_BASE};
 
 // ── D3D11 → mixer GPU-direct bridge ─────────────────────────────────────────
@@ -1711,6 +1728,36 @@ class Decoder
                     ctx->hw_device_ctx = vk_ctx;
                     ctx->get_format    = get_hw_format;
                     hw_cfg             = nullptr;   // handled; skip the D3D11 setup below
+
+                    // ONE DECODE THREAD ON THIS PATH, and it is a correctness fix rather than
+                    // a tuning choice.
+                    //
+                    // With `threads=0` FFmpeg frame-threads the decoder, and under the
+                    // validation layer two of ITS OWN worker threads use one VkFence in
+                    // `vkQueueSubmit2`:
+                    //
+                    //   UNASSIGNED-Threading-MultipleThreads-Write, vkQueueSubmit2():
+                    //   THREADING ERROR : object of type VkFence is simultaneously used in
+                    //   current thread 74096 and thread 16084
+                    //
+                    // Neither id is ours -- our decode threads and device thread are logged
+                    // and do not appear -- which is how the workers were identified. That is
+                    // undefined behaviour and the residual `VK_ERROR_DEVICE_LOST` plus
+                    // `nvlddmkm` TDR, at roughly one round in fifty, sits on top of it.
+                    //
+                    // Measured, 4 producers on ProRes 4444 under synchronization validation:
+                    // threading errors in 4 of 5 runs with frame threading, 0 of 3 runs
+                    // without. `prores_vulkan` does its work in compute shaders -- decode-time
+                    // measures 0.016 of the frame budget -- so CPU frame threading buys
+                    // almost nothing here and costs the whole class of race.
+                    //
+                    // This also removes the REASON `AV_CODEC_RECEIVE_FRAME_FLAG_SYNCHRONOUS`
+                    // was needed on this path: that flag exists to bypass frame-threading
+                    // delay, and there is no longer any to bypass.
+                    FF(av_opt_set_int(ctx.get(), "threads", 1, 0));
+                    CASPAR_LOG(info) << L"[av_producer] Vulkan decode: threads=1 (frame "
+                                        L"threading shares a VkFence across FFmpeg's own "
+                                        L"workers)";
                 } else {
                     want_vulkan = false;
                     hw_cfg      = nullptr;
@@ -1812,6 +1859,14 @@ class Decoder
                 // access violation inside FFmpeg arrives here looking exactly like one
                 // from our own code.
                 const char* stage = "enter";
+                // Name this thread once so a THREADING ERROR from the validation layer can be
+                // attributed to a role rather than to a bare number.
+                static thread_local bool named_decode_thread = false;
+                if (!named_decode_thread) {
+                    named_decode_thread = true;
+                    CASPAR_LOG(info) << L"[av_producer] decode thread os_id="
+                                     << u16(os_thread_id_str());
+                }
                 try {
                     auto av_frame = alloc_frame();
                     stage     = "avcodec_receive_frame";
