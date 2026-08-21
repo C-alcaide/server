@@ -2983,6 +2983,24 @@ struct AVProducer::Impl
     AVColorTransferCharacteristic    stream_color_trc_   = AVCOL_TRC_UNSPECIFIED;
     AVChromaLocation                 stream_chroma_loc_  = AVCHROMA_LOC_UNSPECIFIED;
 
+    /// Put the stream's chroma siting back on a frame the filter graph stripped it from.
+    ///
+    /// The graph drops per-frame metadata -- the same reason `stream_color_space_` and
+    /// `stream_color_trc_` exist and say so in their own comment -- but nothing restored the
+    /// siting, so `make_frame` read UNSPECIFIED and the mixer fell back to co-sited for
+    /// everything. Measured 2026-08-21 with the new MJPEG fixture: the file says centre, the
+    /// decoded frame says centre, and `make_frame` was handed 0.
+    ///
+    /// That mattered only once the mixer began honouring siting at all; before that the value
+    /// was read by nothing, so losing it cost nothing and nothing noticed.
+    void restore_chroma_loc(const std::shared_ptr<AVFrame>& video) const
+    {
+        if (video && video->chroma_location == AVCHROMA_LOC_UNSPECIFIED &&
+            stream_chroma_loc_ != AVCHROMA_LOC_UNSPECIFIED) {
+            video->chroma_location = stream_chroma_loc_;
+        }
+    }
+
     //: SAY WHAT THIS SOURCE DECLARED, ONCE. The producer resolves a colour space and transfer
     //: for every frame and reported neither, so "the file/stream we ingest is tagged PQ
     //: BT.2020 and we saw that" was not an assertable statement -- only inferrable from the
@@ -4224,6 +4242,7 @@ struct AVProducer::Impl
                                 frame.video = sw_frame;
                             }
                         }
+                        restore_chroma_loc(frame.video);
                         return core::const_frame(
                             make_frame(this, *frame_factory_, frame.video, frame.audio,
                                 get_color_space(frame.video, stream_color_space_), scale_mode_,
@@ -4231,7 +4250,7 @@ struct AVProducer::Impl
                                 note_colour(frame.video)));
                     }()
 #else
-                    make_frame(this, *frame_factory_, frame.video, frame.audio, get_color_space(frame.video, stream_color_space_), scale_mode_, straight_alpha_for(frame.video), note_colour(frame.video))
+                    (restore_chroma_loc(frame.video), make_frame(this, *frame_factory_, frame.video, frame.audio, get_color_space(frame.video, stream_color_space_), scale_mode_, straight_alpha_for(frame.video), note_colour(frame.video)))
 #endif
                 );
 

@@ -101,6 +101,15 @@ core::mutable_frame make_frame(void*                            tag,
                              << L" -> mixer pixel_format " << static_cast<int>(pix_desc.format) << L" ("
                              << static_cast<int>(pix_desc.planes.size()) << L" plane(s), "
                              << (pix_desc.planes.empty() ? 0 : pix_desc.planes[0].stride) << L" stride)";
+            // Chroma siting as the FRAME reports it against what the descriptor ended up
+            // carrying. Reported because the two can differ: a `chroma-siting` run found MJPEG
+            // reconstructed as co-sited although the file and its frames both say centre, and
+            // nothing in the log said where the value went.
+            CASPAR_LOG(info) << L"[ffmpeg] chroma siting: frame reports "
+                             << static_cast<int>(video->chroma_location)
+                             << L" (AVCHROMA_LOC), descriptor carries "
+                             << static_cast<int>(pix_desc.chroma_location)
+                             << L" (0=unspecified 1=left 2=center 3=topleft)";
             // The SOURCE linesize, which the descriptor does not carry: `pixel_format_desc`
             // derives its planes from av_image_fill_linesizes(), i.e. the TIGHT linesize for
             // the width, while the row copy below reads at this one. If they differ, the two
