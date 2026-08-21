@@ -1,6 +1,55 @@
 CasparVP — Unreleased
 ==========================================
 
+### Added: FFmpeg 8's Vulkan compute decoders, opt-in — ProRes decoded on the mixer's own device
+
+The pinned FFmpeg 8.1.2 ships `prores_vulkan`, `prores_raw_vulkan`, `ffv1_vulkan` and
+`dpx_vulkan` — **compute-shader** decoders, so they need no ProRes block in the GPU's
+fixed-function video engine. None of them was reachable: the producer attached
+`AV_HWDEVICE_TYPE_D3D11VA` and nothing else, and `get_hw_format` actively skipped every other
+hardware pixel format. `<vulkan-decode>` (default **false**) attaches a Vulkan device instead
+when the channel runs the Vulkan mixer, and the decoded planes reach the mixer as textures
+without touching host memory.
+
+Measured with `decode-cost`, three interleaved rounds per arm on 90-second generated fixtures,
+with both controls holding in every round — each arm on a different decode route, and all four
+producers on their arm's fast path:
+
+| | software | `CUDA_PRORES` | `prores_vulkan` |
+| :--- | :--- | :--- | :--- |
+| 422 HQ, 10-bit | 1.90 cores | 1.26 (-33.7%) | **1.16 (-38.9%)** |
+| 4444 + alpha, 12-bit | 2.85 cores | 1.25 (-56.1%) | **1.16 (-59.3%)** |
+
+`prores_vulkan` costs 1.16 cores whether the content is 422 or 4444, so the decode is
+effectively free and what remains is the mixer's fixed cost. That is the case for it. Three
+things argue against making it the default, and they are why this ships off:
+
+* **It is intermittently flaky at four layers.** The first three-round attempt at *each* clip
+  failed its own controls — `eng 2/4` on 422 with a stalled round, and a route that changed
+  between rounds on 4444 — while the re-runs were 4/4 in 3/3 for both. Under investigation;
+  recorded rather than smoothed over.
+* **CUDA remains the better citizen on late frames**, 1 against 5 on 4444, which is the same
+  shape as every other stability measurement on this path.
+* **It requires `<gpu-direct-decode>`.** Without a GPU-direct publish path the decoded frame is
+  read back, and Vulkan decode plus a readback measured **78% below** plain software decode —
+  so the combination is a large regression rather than a small one, and the config refuses it.
+
+Two defects were found and fixed while landing this, both invisible until the path ran:
+
+* **Every producer built its own `AVHWDeviceContext`**, so FFmpeg's internal queue mutex —
+  which lives on that context — was one mutex per producer guarding a *single* `VkQueue`. Four
+  layers reliably produced `VK_ERROR_DEVICE_LOST`. One context is now cached per `VkDevice`;
+  `vk-decode-soak` is clean at eight layers.
+* **The Vulkan publish path hand-builds its `pixel_format_desc` and never set
+  `is_straight_alpha`**, so the shader skipped the premultiply and 4444 composited straight
+  RGB: a fully transparent region rendered (53,53,242) over a (0,0,191) background. Fixed
+  before the path shipped, and `decoded-alpha` now exists to catch it — every strip is exact
+  between the two decode routes on both 10-bit and 12-bit fixtures.
+
+**What is not covered.** These are host-CPU and late-frame figures on ProRes only: `ffv1_vulkan`
+and `dpx_vulkan` are reachable by the same code but unmeasured, nothing here measures decode
+*latency*, and the flakiness above means none of it is a production recommendation yet.
+
 ### Fixed: `caspar::timer` had 1 ms resolution, so every sub-millisecond figure read zero
 
 `timer::now()` was `duration_cast<milliseconds>`, so `elapsed()` could only ever return whole
