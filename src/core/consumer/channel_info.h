@@ -31,7 +31,7 @@ struct channel_info
     channel_info(int channel_index, common::bit_depth depth, color_space color_space,
                  color_transfer color_transfer = color_transfer::sdr, bool use_vulkan = false,
                  void* gl_share_context = nullptr, bool auto_color_convert = true,
-                 void* egl_display = nullptr)
+                 void* egl_display = nullptr, void* vk_device = nullptr)
         : index(channel_index)
         , depth(depth)
         , default_color_space(color_space)
@@ -40,6 +40,7 @@ struct channel_info
         , gl_share_context(gl_share_context)
         , auto_color_convert(auto_color_convert)
         , egl_display(egl_display)
+        , vk_device(vk_device)
     {
     }
 
@@ -51,6 +52,10 @@ struct channel_info
     void*             gl_share_context       = nullptr;
     bool              auto_color_convert     = true;
     void*             egl_display            = nullptr;
+    /// `accelerator::vulkan::device*` when `use_vulkan`, else null. For a consumer that submits
+    /// its own GPU work against the composite rather than only reading it -- the Vulkan frame
+    /// exporter, where `cuda_vk_uploader` needs just the exported OS handle.
+    void*             vk_device              = nullptr;
 };
 
 } // namespace caspar::core

@@ -170,7 +170,13 @@ struct video_channel::impl final
          bool                                      auto_gamut_compress    = false,
          bool                                      straight_alpha_grading = false,
          bool                                      working_space_composite = false)
-        : channel_info_(index, image_mixer->depth(), default_color_space, default_color_transfer, image_mixer->is_vulkan(), image_mixer->native_gl_context(), auto_color_convert, image_mixer->native_egl_display())
+        : channel_info_(index, image_mixer->depth(), default_color_space, default_color_transfer, image_mixer->is_vulkan(), image_mixer->native_gl_context(), auto_color_convert, image_mixer->native_egl_display(),
+                        // The mixer's vulkan::device, for a consumer that submits its own GPU
+                        // work against the composite. `gpu_device_handle()` already exposes it
+                        // for producers importing foreign textures; guarded on the backend so a
+                        // consumer never casts an OpenGL handle to a Vulkan device.
+                        image_mixer->gpu_device_backend() == gpu_backend::vulkan ? image_mixer->gpu_device_handle()
+                                                                                 : nullptr)
         , output_(graph_, format_desc, channel_info_)
         , image_mixer_(std::move(image_mixer))
         , mixer_(index, graph_, image_mixer_, default_color_space, default_color_transfer, auto_color_convert, auto_tone_map, display_peak_luminance, sdr_reference_white, auto_gamut_compress, straight_alpha_grading, working_space_composite)

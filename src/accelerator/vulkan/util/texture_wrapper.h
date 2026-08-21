@@ -102,6 +102,14 @@ class texture_wrapper : public core::texture
 
     std::shared_ptr<vulkan::texture> vk_texture() const { return tex_; }
 
+    /// The device this texture belongs to, when the wrapper was given one.
+    ///
+    /// For a consumer that has to submit its OWN work against this image -- the Vulkan
+    /// frame exporter does, where `cuda_vk_uploader` needs only the exported OS handle.
+    /// Null when the wrapper was built by the bare constructor, and the caller must then
+    /// decline rather than assume a device.
+    std::shared_ptr<device> owning_device() const { return vk_device_; }
+
     int width() const { return tex_->width(); }
     int height() const { return tex_->height(); }
 

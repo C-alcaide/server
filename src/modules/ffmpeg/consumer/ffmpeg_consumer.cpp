@@ -24,7 +24,9 @@
 #include "../util/av_assert.h"
 #include "../util/av_util.h"
 #include "cuda_gl_upload.h"
-#include "cuda_vk_upload.h"
+#include "cuda_vk_upload.h"
+#include <accelerator/vulkan/util/av_vulkan_export.h>
+#include "../util/vulkan_hwdevice.h"
 
 #include <accelerator/ogl/util/device.h>
 #include <accelerator/ogl/util/texture.h>
@@ -85,7 +87,10 @@ extern "C" {
 #include <libavutil/csp.h>
 #include <libavutil/mastering_display_metadata.h>
 #include <libavutil/hwcontext.h>
-#include <libavutil/hwcontext_cuda.h>
+#include <libavutil/hwcontext_cuda.h>
+#if LIBAVUTIL_VERSION_MAJOR >= 60
+#include <libavutil/hwcontext_vulkan.h>
+#endif
 #include <libavutil/opt.h>
 #include <libavutil/pixdesc.h>
 #include <libavutil/pixfmt.h>
@@ -122,6 +127,11 @@ struct Stream
 
     // Non-owning: the consumer owns these and outlives the Stream.
     AVBufferRef*             gpu_frames_ctx = nullptr;
+    /// Which hardware pixel format `gpu_frames_ctx` holds: CUDA for NVENC, Vulkan for
+    /// FFmpeg 8's Vulkan encoders. Meaningless when `gpu_frames_ctx` is null.
+    AVPixelFormat            gpu_hw_pix_fmt = AV_PIX_FMT_CUDA;
+    /// Copies the mixer's composite into a Vulkan frame. Set only on the Vulkan encode path.
+    class accelerator::vulkan::av_vulkan_exporter* vk_exporter = nullptr;
     class cuda_gl_uploader*  gpu_uploader   = nullptr;
     class cuda_vk_uploader*  gpu_uploader_vk = nullptr;
     std::atomic<bool>*       gpu_direct     = nullptr;
@@ -148,11 +158,16 @@ struct Stream
            AVBufferRef*                        gpu_frames       = nullptr,
            class cuda_gl_uploader*             uploader         = nullptr,
            std::atomic<bool>*                  gpu_direct_flag  = nullptr,
-           class cuda_vk_uploader*             uploader_vk      = nullptr)
+           class cuda_vk_uploader*             uploader_vk      = nullptr,
+           AVPixelFormat                       hw_pix_fmt       = AV_PIX_FMT_CUDA,
+           class accelerator::vulkan::av_vulkan_exporter* exporter = nullptr,
+           const char*                         vk_convert_filter = nullptr)
         : gpu_frames_ctx(gpu_frames)
         , gpu_uploader(uploader)
         , gpu_direct(gpu_direct_flag)
         , gpu_uploader_vk(uploader_vk)
+        , gpu_hw_pix_fmt(hw_pix_fmt)
+        , vk_exporter(exporter)
     {
         if (codec_id == AV_CODEC_ID_TIMECODE) {
             is_ltc = true;
@@ -192,6 +207,19 @@ struct Stream
                 stream_options.erase(it);
             }
         }
+
+        // The Vulkan encode path's own conversion filter, passed as an argument rather than
+        // pushed through the options map. Going through the map looked tidier and did not work:
+        // the caller's `options["filter:v"]` never arrived as `stream_options["filter"]`, so the
+        // chain stayed empty, lavfi inserted a software `auto_scale` after the Vulkan buffersrc,
+        // and graph configuration failed with "Impossible to convert between the formats
+        // supported by the filter 'in_0' and the filter 'auto_scale_0'". An explicit parameter
+        // cannot be lost in translation.
+        //
+        // A user-supplied filter still wins -- the decision upstream declines the Vulkan path
+        // entirely when one was given, because this chain has to own the format negotiation.
+        if (filter_spec.empty() && vk_convert_filter != nullptr)
+            filter_spec = vk_convert_filter;
 
         auto codec = avcodec_find_encoder(codec_id);
         {
@@ -303,7 +331,12 @@ struct Stream
                 // With the GPU-direct path the graph carries CUDA frames, so the
                 // buffersrc has to be told that and given the frames context --
                 // otherwise it is configured for host BGRA and rejects them.
-                const auto pix_fmt = gpu_frames_ctx ? AV_PIX_FMT_CUDA
+                // `gpu_hw_pix_fmt` rather than a hardcoded CUDA: the same GPU-direct plumbing
+                // now carries either CUDA frames (NVENC) or Vulkan frames (FFmpeg 8's Vulkan
+                // encoders), and the buffersrc has to be told which. Everything downstream --
+                // the buffersrc parameters, the encoder's hw_frames_ctx and hw_device_ctx --
+                // was already generic over the frames context and needed no change.
+                const auto pix_fmt = gpu_frames_ctx ? gpu_hw_pix_fmt
                                      : (depth == common::bit_depth::bit8) ? AV_PIX_FMT_BGRA
                                                                           : AV_PIX_FMT_RGBA64LE;
 
@@ -328,20 +361,38 @@ struct Stream
                                 .str();
                 auto name = (boost::format("in_%d") % 0).str();
 
-                FF(avfilter_graph_create_filter(
-                    &source, avfilter_get_by_name("buffer"), name.c_str(), args.c_str(), nullptr, graph.get()));
+                // ALLOCATE, PARAMETERISE, THEN INIT -- in that order, and only that order works
+                // for a hardware format.
+                //
+                // `avfilter_graph_create_filter` initialises immediately, and buffersrc
+                // validates on init: "Setting BufferSourceContext.pix_fmt to a HW format
+                // requires hw_frames_ctx to be non-NULL!". The frames context can only be
+                // supplied through `av_buffersrc_parameters_set`, which has to happen BEFORE
+                // init -- so creating and then parameterising, which is what this did, fails
+                // for every hardware format. Measured 2026-08-22: all four Vulkan encoders took
+                // the path, logged it, and produced a 0-byte file, because the graph never
+                // configured.
+                //
+                // The software path is unchanged in effect: same args, same filter, just built
+                // in two steps instead of one.
+                source = avfilter_graph_alloc_filter(graph.get(), avfilter_get_by_name("buffer"), name.c_str());
+                if (!source)
+                    FF_RET(AVERROR(ENOMEM), "avfilter_graph_alloc_filter");
 
                 if (gpu_frames_ctx) {
                     AVBufferSrcParameters* par = av_buffersrc_parameters_alloc();
                     if (!par)
                         FF_RET(AVERROR(ENOMEM), "av_buffersrc_parameters_alloc");
-                    par->format        = AV_PIX_FMT_CUDA;
+                    par->format        = gpu_hw_pix_fmt;
                     par->hw_frames_ctx = gpu_frames_ctx;
                     // Not named "ret": the FF macro declares its own.
                     const auto set_result = av_buffersrc_parameters_set(source, par);
                     av_free(par);
                     FF(set_result);
                 }
+
+                // Init last, now that a hardware format has its frames context.
+                FF(avfilter_init_str(source, args.c_str()));
                 FF(avfilter_link(source, 0, cur->filter_ctx, cur->pad_idx));
             } else if (codec->type == AVMEDIA_TYPE_AUDIO) {
                 auto args = (boost::format("time_base=%d/%d:sample_rate=%d:sample_fmt=%s:channel_layout=%#x") % 1 %
@@ -715,13 +766,47 @@ struct Stream
             FF(avfilter_link(cur->filter_ctx, cur->pad_idx, sink, 0));
         }
 
-        // Set CUDA device context on hwupload filters before graph config
-        if (use_nvenc_hw_ && hw_device_ctx_) {
+        // EVERY hardware-capable filter needs the device, whichever API it is.
+        //
+        // This used to fire only for `use_nvenc_hw_`, so on the Vulkan encode path the
+        // conversion filter got no device, could not accept hardware frames, and lavfi
+        // inserted a SOFTWARE `auto_scale` between the Vulkan buffersrc and it -- which then
+        // failed to configure at all: "Impossible to convert between the formats supported by
+        // the filter 'in_0' and the filter 'auto_scale_0'". The recording took the path, logged
+        // it, and produced a 0-byte file. Measured 2026-08-22.
+        //
+        // The device comes from the frames context on the GPU-direct paths -- that is the same
+        // device the pool was allocated from, so the filter, the pool and the encoder all agree
+        // by construction rather than by coincidence.
+        AVBufferRef* filter_device = nullptr;
+        if (gpu_frames_ctx) {
+            if (auto* frames = reinterpret_cast<AVHWFramesContext*>(gpu_frames_ctx->data))
+                filter_device = frames->device_ref;
+        }
+        if (!filter_device && use_nvenc_hw_)
+            filter_device = hw_device_ctx_;
+
+        if (filter_device) {
+            int given = 0;
             for (unsigned i = 0; i < graph->nb_filters; i++) {
                 if (graph->filters[i]->filter->flags & AVFILTER_FLAG_HWDEVICE) {
-                    graph->filters[i]->hw_device_ctx = av_buffer_ref(hw_device_ctx_);
+                    graph->filters[i]->hw_device_ctx = av_buffer_ref(filter_device);
+                    ++given;
                 }
             }
+            // Which filters actually took a device, and what the chain is. Without this the
+            // symptom -- lavfi inserting a software `auto_scale` after the hardware source --
+            // says only that some filter refused hardware frames, not which or why.
+            std::string chain;
+            for (unsigned i = 0; i < graph->nb_filters; i++) {
+                chain += (i ? " -> " : "");
+                chain += graph->filters[i]->filter->name;
+            }
+            CASPAR_LOG(info) << L"[ffmpeg] filter graph: " << u16(chain) << L"; " << given
+                             << L" of " << graph->nb_filters << L" filter(s) took the hw device";
+        } else if (gpu_frames_ctx) {
+            CASPAR_LOG(warning) << L"[ffmpeg] a GPU frames pool exists but no hw device could be "
+                                   L"derived from it; hardware filters will refuse the frames";
         }
 
         FF(avfilter_graph_config(graph.get(), nullptr));
@@ -954,6 +1039,32 @@ struct Stream
         }
     }
 
+    /// Read the one plane of an `AVVkFrame` into the exporter's pure-std description.
+    ///
+    /// `AVFrame::data[0]` on a Vulkan frame is an `AVVkFrame*`, not pixels. Its `img[0]`,
+    /// `sem[0]`, `sem_value[0]` and `layout[0]` are what the copy has to be told: the image to
+    /// write, the timeline semaphore to signal, the value to signal past, and the layout to
+    /// leave it in so FFmpeg's own bookkeeping stays true.
+    ///
+    /// Returns false when the frame is not a Vulkan frame or carries no image, which is a
+    /// refusal rather than a guess -- writing through a null image would fault inside the
+    /// driver with nothing in the log to say why.
+    static bool fill_vk_plane_dest(const AVFrame* frame, accelerator::vulkan::av_plane_dest& dest)
+    {
+#if LIBAVUTIL_VERSION_MAJOR >= 60
+        auto* vk = reinterpret_cast<AVVkFrame*>(frame->data[0]);
+        if (!vk || !vk->img[0] || !vk->sem[0])
+            return false;
+        dest.image     = reinterpret_cast<void*>(vk->img[0]);
+        dest.semaphore = reinterpret_cast<void*>(vk->sem[0]);
+        dest.sem_value = vk->sem_value[0];
+        dest.layout    = static_cast<int>(vk->layout[0]);
+        return true;
+#else
+        return false;
+#endif
+    }
+
     /// Wraps the mixer's composited texture in a CUDA frame the encoder can read.
     /// Returns null if the frame carries no usable OpenGL texture or the copy fails.
     std::shared_ptr<AVFrame> make_cuda_video_frame(const core::const_frame& in_frame)
@@ -980,6 +1091,23 @@ struct Stream
                 return gpu_uploader->copy_to_device(*gl_tex, frame->data[0], static_cast<size_t>(frame->linesize[0]));
             });
             if (!ok)
+                return nullptr;
+        } else if (vk_exporter) {
+            // The Vulkan encode path: no cross-API import at all. FFmpeg's frames live on the
+            // mixer's own VkDevice (`make_vulkan_hwdevice_from_mixer` hands out one context per
+            // device), so this is an image copy the mixer's own queue performs.
+            //
+            // The frame is BGRA here and the encoder wants planar YUV; the conversion is a
+            // `libplacebo` filter in the chain, not this copy's business. ProRes accepts only
+            // yuv422p10/yuv444p10/yuva444p10, and `scale_vulkan` cannot produce any of them.
+            accelerator::vulkan::av_plane_dest dest;
+            dest.image     = reinterpret_cast<void*>(frame->data[0]);
+            dest.semaphore = nullptr;
+            dest.width     = tex->tex_width();
+            dest.height    = tex->tex_height();
+            if (!fill_vk_plane_dest(frame.get(), dest))
+                return nullptr;
+            if (!vk_exporter->copy_from_texture(tex, dest))
                 return nullptr;
         } else if (gpu_uploader_vk) {
             // Vulkan: no device thread to hop onto and no context to be current --
@@ -1140,6 +1268,18 @@ struct ffmpeg_consumer : public core::frame_consumer
     static av_buffer_ptr null_av_buffer() { return {nullptr, [](AVBufferRef* p) { av_buffer_unref(&p); }}; }
     av_buffer_ptr gpu_device_ctx = null_av_buffer();
     av_buffer_ptr gpu_frames_ctx = null_av_buffer();
+    /// Which hardware format `gpu_frames_ctx` holds. CUDA unless the Vulkan encode path claimed
+    /// this recording.
+    AVPixelFormat gpu_hw_pix_fmt_ = AV_PIX_FMT_CUDA;
+    /// Built lazily on the first frame, because the mixer's `device*` is only reachable through
+    /// a composited texture -- the consumer is never handed one directly.
+    std::unique_ptr<accelerator::vulkan::av_vulkan_exporter> vk_exporter_;
+    /// The mixer's `accelerator::vulkan::device*`, from `channel_info`. Null on any other
+    /// backend, and the Vulkan encode path declines rather than assuming one.
+    void* vk_mixer_device_ = nullptr;
+    /// The GPU conversion filter the Vulkan encode path chose, or null. Held rather than pushed
+    /// into the options map, which silently dropped it.
+    const char* vk_convert_filter_ = nullptr;
 
     /// A CUDA frames pool the encoder can read directly.
     ///
@@ -1154,6 +1294,50 @@ struct ffmpeg_consumer : public core::frame_consumer
     ///
     /// NVENC lists both among its inputs and converts to YCbCr internally, which
     /// measured *better* than converting on the host beforehand.
+    /// A Vulkan frames pool on the MIXER's device, for an FFmpeg Vulkan encoder.
+    ///
+    /// `make_vulkan_hwdevice_from_mixer` is the same function the producers use and it caches
+    /// one context per `VkDevice` -- deliberately, because a context per user means a queue
+    /// mutex per user guarding one queue, which is what lost the device at four producers. The
+    /// consumer must therefore take that one rather than create its own.
+    ///
+    /// `sw_format` is BGRA because that is what the 8-bit mixer composites and what the exporter
+    /// copies; the encoder's own format is reached by the conversion filter downstream.
+    av_buffer_ptr make_vulkan_frames_ctx(int width, int height)
+    {
+        auto fail = null_av_buffer();
+#if defined(ENABLE_VULKAN) && LIBAVUTIL_VERSION_MAJOR >= 60
+        if (!vk_mixer_device_)
+            return fail;
+        AVBufferRef* dev = make_vulkan_hwdevice_from_mixer(vk_mixer_device_);
+        if (!dev)
+            return fail;
+        gpu_device_ctx = av_buffer_ptr(dev, [](AVBufferRef* p) { av_buffer_unref(&p); });
+
+        AVBufferRef* frames = av_hwframe_ctx_alloc(gpu_device_ctx.get());
+        if (!frames)
+            return fail;
+        auto owned = av_buffer_ptr(frames, [](AVBufferRef* p) { av_buffer_unref(&p); });
+
+        auto* ctx      = reinterpret_cast<AVHWFramesContext*>(owned->data);
+        ctx->format    = AV_PIX_FMT_VULKAN;
+        ctx->sw_format = AV_PIX_FMT_BGRA;
+        ctx->width     = width;
+        ctx->height    = height;
+        // Same reasoning as the CUDA pool: deep enough that an encoder holding a few frames
+        // never starves the copy, shallow enough not to sit on VRAM.
+        ctx->initial_pool_size = 8;
+
+        if (av_hwframe_ctx_init(owned.get()) < 0)
+            return fail;
+        return owned;
+#else
+        (void)width;
+        (void)height;
+        return fail;
+#endif
+    }
+
     av_buffer_ptr make_cuda_frames_ctx(int width, int height)
     {
         auto fail = null_av_buffer();
@@ -1251,6 +1435,7 @@ struct ffmpeg_consumer : public core::frame_consumer
 
         format_desc_   = format_desc;
         channel_index_ = channel_info.index;
+        vk_mixer_device_ = channel_info.vk_device;
 
         graph_->set_text(print());
 
@@ -1390,8 +1575,69 @@ struct ffmpeg_consumer : public core::frame_consumer
                                                  options.count("pixel_format") > 0 ||
                                                  options.count("pixel_format:v") > 0;
 
+                        // ── The Vulkan encode path ──────────────────────────────────────
+                        //
+                        // Tried first, because `-vcodec prores_ks_vulkan` is an explicit request
+                        // and must not be quietly answered by the CUDA path instead.
+                        //
+                        // THE ALLOWLIST IS BY MECHANISM, and it is a refusal rather than a claim
+                        // of support -- the same shape as the decode-side one, for the same
+                        // reason. `prores_ks_vulkan` and `ffv1_vulkan` are COMPUTE encoders and
+                        // need only the compute queue; `h264_vulkan` and `hevc_vulkan` are
+                        // `VK_KHR_video_encode` codecs and need the encode queue declared as
+                        // `qf[2]`. Omitting an encoder costs a slower recording; accepting one
+                        // the device cannot back cost a faulting decode thread last time.
+                        //
+                        // The conversion filter differs per mechanism and is not a preference:
+                        // measured 2026-08-22, `scale_vulkan` converts RGB to only
+                        // NV12/YUV420P/YUV444P (all 8-bit) so it CANNOT feed ProRes, which takes
+                        // only yuv422p10/yuv444p10/yuva444p10. `libplacebo` can.
+                        //
+                        // AV1 is deliberately absent from the table rather than refused by name:
+                        // FFmpeg queries the device itself and says "Device does not support
+                        // encoding av1!", which is a better message than one written here.
+                        const char* vk_convert_filter = nullptr;
+                        if (selected_codec == "prores_ks_vulkan" || selected_codec == "ffv1_vulkan")
+                            vk_convert_filter = "libplacebo=format=yuv422p10";
+                        else if (selected_codec == "h264_vulkan" || selected_codec == "hevc_vulkan")
+                            vk_convert_filter = "scale_vulkan=format=nv12";
+
+                        if (vk_convert_filter != nullptr) {
+                            const char* vk_decline = nullptr;
+                            if (!use_vulkan_)
+                                vk_decline = "the channel does not run the Vulkan mixer";
+                            else if (has_filter)
+                                vk_decline = "a video filter was supplied, and this path owns the chain";
+                            else if (depth_ != common::bit_depth::bit8)
+                                vk_decline = "channel is not 8-bit, and the exporter copies BGRA";
+
+                            if (vk_decline == nullptr) {
+                                gpu_frames_ctx = make_vulkan_frames_ctx(format_desc.width, format_desc.height);
+                                if (!gpu_frames_ctx)
+                                    vk_decline = "could not create the Vulkan frames context";
+                            }
+
+                            if (vk_decline == nullptr) {
+                                gpu_hw_pix_fmt_ = AV_PIX_FMT_VULKAN;
+                                vk_exporter_ = std::make_unique<accelerator::vulkan::av_vulkan_exporter>(
+                                    vk_mixer_device_);
+                                vk_convert_filter_ = vk_convert_filter;
+                                gpu_direct_.store(true, std::memory_order_relaxed);
+                                CASPAR_LOG(info) << L"[ffmpeg] Vulkan encode: " << u16(selected_codec)
+                                                 << L" on the mixer's own device, converting with "
+                                                 << u16(vk_convert_filter)
+                                                 << L" -- the composite never reaches host memory";
+                            } else {
+                                CASPAR_LOG(info) << L"[ffmpeg] Vulkan encode not used for "
+                                                 << u16(selected_codec) << L": " << u16(vk_decline)
+                                                 << L"; the host path will run instead";
+                            }
+                        }
+
                         const char* decline = nullptr;
-                        if (selected_codec.find("nvenc") == std::string::npos)
+                        if (gpu_frames_ctx)
+                            decline = "the Vulkan encode path already claimed this recording";
+                        else if (selected_codec.find("nvenc") == std::string::npos)
                             decline = "encoder is not NVENC";
                         else if (has_filter)
                             decline = "a video filter was supplied";
@@ -1417,7 +1663,7 @@ struct ffmpeg_consumer : public core::frame_consumer
                         }
                     }
 
-                    video_stream.emplace(oc, ":v", oc->oformat->video_codec, format_desc, realtime_, depth_, options, channel_info.default_color_space, channel_info.default_color_transfer, gpu_frames_ctx.get(), &gpu_uploader, &gpu_direct_, &gpu_uploader_vk);
+                    video_stream.emplace(oc, ":v", oc->oformat->video_codec, format_desc, realtime_, depth_, options, channel_info.default_color_space, channel_info.default_color_transfer, gpu_frames_ctx.get(), &gpu_uploader, &gpu_direct_, &gpu_uploader_vk, gpu_hw_pix_fmt_, vk_exporter_.get(), vk_convert_filter_);
 
                     {
                         std::lock_guard<std::mutex> lock(state_mutex_);
