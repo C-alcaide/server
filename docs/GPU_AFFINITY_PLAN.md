@@ -3,8 +3,16 @@
 ## Goal
 
 Route each channel's image mixer to the same GPU as its vulkan-output consumer
-when that relationship is unambiguous, eliminating cross-GPU PCIe copies
-(~1–2 ms per 4K frame) in multi-GPU setups.
+when that relationship is unambiguous, eliminating cross-GPU PCIe copies in multi-GPU setups.
+
+> **The "~1–2 ms per 4K frame" this document used to quote here was a PREDICTION, not a
+> measurement**, and step 5 of its own verification list — "Measure frame latency
+> (send→present) with and without affinity" — has never been run. It is removed from the goal
+> rather than restated, because a number in the justification reads as the reason to do the
+> work. For scale, the DeckLink VK→CUDA path it is compared against measures **~0.2 ms** per
+> 1080p frame once the instrument could resolve it
+> ([`GPU_INTEROP_ARCHITECTURE.md`](GPU_INTEROP_ARCHITECTURE.md)), so the saving here is worth
+> establishing before it is spent.
 
 ---
 

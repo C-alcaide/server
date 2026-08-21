@@ -1,5 +1,10 @@
 # nvJPEG + NVIDIA Optical Flow — Implementation Plan
 
+> **STATUS: UNIMPLEMENTED DESIGN, 2026-08-21.** Nothing in `src/` references `nvjpeg` or the optical-flow API — this is a
+> proposal, not a description of the server. Every figure below is a *prediction*: none of it
+> has been measured on this hardware, and some of it is priced on hardware this rig does not
+> have. Read it as a plan to evaluate, never as a capability to rely on.
+
 ## 1. Executive Summary
 
 Add **optional GPU-accelerated JPEG encoding/decoding** (nvJPEG) and

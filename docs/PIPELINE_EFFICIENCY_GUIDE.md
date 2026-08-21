@@ -103,8 +103,10 @@ converted to fit a filter's preferences. In particular 10-bit stays 10-bit and
 4:4:4 stays 4:4:4, where both used to be reduced to 8-bit 4:2:0 before the mixer
 ever saw them.
 
-**GPU-direct decode** (the dashed path) bypasses host memory entirely. Opt in
-with `configuration.ffmpeg.producer.gpu-direct-decode`. **It works on both
+**GPU-direct decode** (the dashed path) bypasses host memory entirely. **On by default**
+since the byte-identity verification it was waiting for was performed (`cli.py
+gpu-direct-parity`, 0 differing pixels on both mixers); turn it off with
+`configuration.ffmpeg.producer.gpu-direct-decode`. **It works on both
 mixers**: OpenGL bridges the decoded surface with `WGL_NV_DX_interop2`, Vulkan
 imports it through `VK_KHR_external_memory_win32`. Until 2026-08-01 the Vulkan
 mixer declined the path outright, so choosing Vulkan meant silently giving up
@@ -132,10 +134,22 @@ the CPU saving.
 
 > **Measure this with a clip longer than the run, and do not loop it.** The
 > earlier figures in this table were taken on a 4-second clip with `LOOP`, and
-> GPU-direct stalls at the loop point (`Waiting for video frame...`, on *both*
-> mixers — a defect that predates the Vulkan bridge and is still open). A window
-> that starts after the loop therefore compares a stalled producer against a
-> working one and reports the stall as a saving. `gpudirect/cpu_matrix.py` now
+> GPU-direct stalled at the loop point (`Waiting for video frame...`, on *both*
+> mixers). A window that starts after the loop therefore compares a stalled producer
+> against a working one and reports the stall as a saving.
+>
+> **That stall no longer reproduces on the D3D11 path**: three separate runs on
+> 2026-08-21 with `D3D11 GPU-direct video active` and `LOOP` over several wraps logged
+> `Waiting for video frame` **zero** times. Those runs were only 6 seconds each, so this
+> is "did not reproduce", not "proven fixed" — but the advice above stands on its own
+> merits regardless of the stall, so measure that way anyway.
+>
+> **It IS newly true of `<vulkan-decode>`**, which is a different path: measured
+> 2026-08-21, that route drops a frame every ~3 seconds on a 3-second looping clip
+> (28 `fps` samples below nominal in a 24-second window against 0 for software), with
+> `frame-time` spikes of 3.3-3.5 against a 0.51 mean. See
+> [`FFMPEG_8_MIGRATION.md`](FFMPEG_8_MIGRATION.md) §6.1.2; it is why that option stays
+> opt-in. `gpudirect/cpu_matrix.py` now
 > uses 90-second clips, plays without `LOOP`, and fails the row if the log
 > contains `Waiting for video frame`.
 
@@ -428,9 +442,10 @@ ADD 1 FILE out.mp4 -vcodec h264_nvenc -b:v 60M
 Measured **5.8 % less server CPU at 1080p and 15–18 % at 4K**, and the recorded
 picture is **pixel-identical** to the host path (`inf` dB, same encoder).
 
-**To stay on it, avoid:** a `-filter:v`, an explicit `-pix_fmt`, a 16-bit
-channel, or a Vulkan mixer. Any of those silently and correctly falls back — and
-says so:
+**To stay on it, avoid:** a `-filter:v`, an explicit `-pix_fmt`, or a 16-bit channel. Any of
+those silently and correctly falls back — and says so. A **Vulkan mixer is fine**: this list
+included it until 2026-08-21, but `ffmpeg_consumer.cpp` selects `cuda_vk_uploader` for Vulkan
+and `cuda_gl_uploader` for OpenGL, and no decline in that block mentions the backend at all:
 
 ```
 [ffmpeg] GPU-direct recording active: the composited texture goes straight to NVENC, with no readback.
@@ -622,7 +637,9 @@ this work:
   NVENC limitation — `hevc_nvenc` does Main 10 — it is the byte-for-byte copy
   that makes the path kernel-free. Ask for `-pix_fmt p010le` and you get 10-bit
   via the host path.
-- GPU-direct **decode** is OpenGL-only and progressive-only.
+- GPU-direct **decode** is progressive-only. It is **not** OpenGL-only — this line said so
+  until 2026-08-21 while the same document said "it works on both mixers" 500 lines earlier,
+  and the Vulkan half is what `d3d11_import_bridge` exists for.
 - **`[ISF]` shaders cost more on the Vulkan mixer** — 20 % more CPU at one layer,
   79 % at four. OpenGL hands the mixer the rendered texture; every other mixer
   renders on a self-contained GL context and reads the result back through host

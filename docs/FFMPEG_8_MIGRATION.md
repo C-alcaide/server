@@ -26,8 +26,11 @@ for was already carried out upstream, and the tree has since been built and run 
 
 ## 0. Correction, 2026-08-18 — upstream already migrated
 
-Everything below was written against **CasparVP's** tree, which is pinned to 7.0.2. It did
-not check where **upstream** stood. Upstream `CasparCG/server` master has carried FFmpeg 8
+Everything below was written against **CasparVP's** tree *as it then was*, pinned to 7.0.2.
+**The fork is on 8.1.2 now** — the four-stage upstream sync landed at `bc94f4713`, so every
+present-tense "we are on 7.0.2" in the sections below is describing the starting point of this
+investigation, not the tree. Section 6.1.1 onward is written against 8.1.2 and is current. It
+also did not check where **upstream** stood. Upstream `CasparCG/server` master has carried FFmpeg 8
 since before this document was written:
 
 | Commit | What it did |
