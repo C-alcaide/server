@@ -24,10 +24,14 @@ producers on their arm's fast path:
 effectively free and what remains is the mixer's fixed cost. That is the case for it. Three
 things argue against making it the default, and they are why this ships off:
 
-* **It is intermittently flaky at four layers.** The first three-round attempt at *each* clip
-  failed its own controls — `eng 2/4` on 422 with a stalled round, and a route that changed
-  between rounds on 4444 — while the re-runs were 4/4 in 3/3 for both. Under investigation;
-  recorded rather than smoothed over.
+* **It was intermittently fatal at four layers, and that is now fixed** -- though not in this
+  path. The first three-round attempt at *each* clip failed its own controls (`eng 2/4` on 422
+  with a stalled round, a route that changed between rounds on 4444), and the cause turned out
+  to be a Vulkan fence wait that treated a timeout as completion and recycled a submission
+  still in flight: undefined behaviour, a GPU hang, and a TDR that took every context on the
+  device with it. See the entry above. It was **not** specific to this flag -- the same defect
+  sat on the default `<gpu-direct-decode>` import -- so this path was the thing that made it
+  reproducible rather than the thing that caused it.
 * **CUDA remains the better citizen on late frames**, 1 against 5 on 4444, which is the same
   shape as every other stability measurement on this path.
 * **It requires `<gpu-direct-decode>`.** Without a GPU-direct publish path the decoded frame is
@@ -115,13 +119,19 @@ and its positive control firing 8 messages, so that last one could have failed. 
 change is expected and none appeared -- this removes undefined behaviour, it does not alter
 arithmetic.
 
-**What is NOT yet established.** The gates above cannot see the defect: none of them runs four
-producers, and the hang needed a frame that overran a full second. Reproducing the TDR took
-eight attempts of a four-layer soak to hit once, so the absence of one is only worth what the
-sample size makes it worth -- a re-run of the same soak is under way, and until it reports, the
-evidence for the fix is the specification and the ordering in the log above rather than a
-measured rate. The reproduction harness is a scratchpad script, not a battery, which is its own
-gap: nothing in the harness drives four producers *and* watches for a device loss.
+**Measured against the failure itself.** The reproduction that found this -- a four-layer
+soak, which hit the TDR once in eight attempts before the fix -- now runs **30 rounds clean with
+zero TDRs** in the Windows event log. `vk-decode-soak` is **6/6 clean at eight concurrent
+producers**, 8/8 active, zero device losses and zero stand-downs. If the per-round rate were
+unchanged, thirty clean rounds would happen about 4% of the time, so this is support rather
+than proof.
+
+**And the honest limit is a sample size, not a missing battery.** `vk-decode-soak` already
+drives many producers and already gates on exactly this -- `active == layers`, zero device
+losses, zero stand-downs -- and it had **passed at eight layers while this defect was live**.
+A one-in-ten event simply does not show up reliably in three thirty-second rounds. So the gap
+worth recording is that a race this rare needs a soak sized for its rate, and nothing decides
+that size from the rate itself.
 
 ### Fixed: `caspar::timer` had 1 ms resolution, so every sub-millisecond figure read zero
 
