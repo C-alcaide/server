@@ -473,6 +473,64 @@ caught the bogus −90% too, because its control would have shown only one produ
   `build/shell/_stale_ffmpeg7/`; a running server was verified to load only the 8.x set. The
   8.1.2 CLI also lives at `build/ffmpeg-lib-prefix/src/ffmpeg-lib/bin/ffmpeg.exe`.
 
+#### 6.1.2 All three ProRes routes, measured (Phase 3.1) — and why both stay opt-in
+
+The plan asked whether the GPU path should become the default for ProRes. It should not, yet,
+and the reason is that host CPU is the only axis on which the answer is obvious.
+
+Three routes, 4x 1080p layers, interleaved arms, 2-3 rounds each, on the Vulkan mixer. Two
+controls: each arm must report its own decode route from the producer's decision line, and the
+playhead must advance across the sampling window — the second one exists because two runs of
+the identical rig gave 1.83 and 0.83 cores, and 0.83 was an idle server.
+
+| | | software | `CUDA_PRORES` | `prores_vulkan` |
+| :--- | :--- | :--- | :--- | :--- |
+| **422 HQ** | CPU cores | 1.82 (1.79–1.84) | 1.51 (−16.8%) | **1.11 (−38.5%)** |
+| | peak host RSS | 2231 MB | **473 MB** | 683 MB |
+| **4444 + alpha** | CPU cores | 2.78 | 1.17 (−58%) | **1.12 (−60%)** |
+| | peak host RSS | 3580 MB | **553 MB** | 693 MB |
+| | cue latency (`CALL SEEK`) | 99 ms | **84 ms** | 104 ms |
+| | `fps` mean | 0.990 | **0.999** | 0.996 |
+| | `frame-time` mean / max | 0.497 / 0.637 | 0.500 / **0.525** | 0.511 / **3.487** |
+
+**The verdict is split, which is the finding.** `prores_vulkan` is the cheapest decoder —
+essentially free, sitting at ~1.12 cores whether the content is 422 or 4444, so what remains is
+the mixer's fixed cost. `CUDA_PRORES` is the better playout citizen: a third of the host memory,
+the fastest cue, and the only route with no frame-time excursions at all.
+
+**Vulkan hitches at the loop wrap, and that is what disqualifies it as a default.** In a
+24-second window: 28 `fps` samples below nominal against CUDA's 7 and software's 0, the deeper
+ones at **0.96** (a dropped frame) against CUDA's worst of 0.995 — and they land at 10:47:59,
+:48:02, :48:05, :48:08, i.e. **every ~3 seconds on a 3-second looping clip**. Two `frame-time`
+spikes of 3.30 and 3.49 against a 0.51 mean, where neither other route exceeds 0.64. For
+playout a periodic dropped frame is worse than 0.4 of a core, so this is the work owed before
+the question can be reopened.
+
+`<vulkan-decode>` and the `CUDA_PRORES` keyword therefore both stay **opt-in**, deliberately
+rather than by omission. What would change that: fixing the loop-wrap hitch, and a picture
+answer for the 2/255 IDCT difference recorded in 6.1.1.
+
+**Two instrument defects found while producing this table**, both of the "cannot fail" kind:
+
+* The first cue-latency probe reported **551 ms for every arm and every round** — it was
+  measuring its own 500 ms poll interval. It would have been published as "cue latency is
+  identical on all three routes". It polls at 20 ms now and reports its floor, so a value
+  pinned to the floor is visibly not a measurement.
+* The path detector looked for `cuda_prores` in the log while the producer logs under
+  `[prores_producer]`/`[prores_demuxer]`, so the CUDA arm reported itself as `software` while
+  plainly running. The path control caught it; without the control the −18% would have been
+  attributed to the wrong decoder.
+
+**Caveat on the `[diag]` columns**: they are the server's own graph values, and different
+producers publish different graph *names* — the software and Vulkan routes report `buffer`
+where the CUDA route reports `queue-fill`. Same-named columns are comparable across arms;
+different-named ones are not the same quantity. Figures came from `<log-diagnostics>`, enabled
+on **every** arm, since it puts a line per graph per interval on the frame path.
+
+**Owed:** these are scratchpad rigs. `decode-cost` is the harness home and gaining `cuda` and
+`vulkan` arms there is the follow-up — together with the loop-wrap hitch, which no battery can
+currently see.
+
 ### 6.2 Codecs that matter in this domain
 
 * **JPEG-XS** — decoder, encoder, parser and raw muxer/demuxer via `libsvtjpegxs` (8.1). The
