@@ -1387,6 +1387,10 @@ struct image_kernel::impl
                                         : 255.0f;
 
         uniforms.ycbcr_full_range = params.pix_desc.color_range == core::color_range::full ? 1 : 0;
+        // `chroma_location` was populated by the producers and read by nothing, so every
+        // source was reconstructed as though it were centre-sited.
+        uniforms.chroma_cosited =
+            params.pix_desc.chroma_location == core::chroma_location::center ? 0 : 1;
 
         // Both mixers must resolve this identically, so the rule lives in
         // core::decode_color_space -- see the account there.

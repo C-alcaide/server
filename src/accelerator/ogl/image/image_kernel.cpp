@@ -543,6 +543,12 @@ struct image_kernel::impl
         shader_->set("ycbcr_full_range",
                      params.pix_desc.color_range == core::color_range::full);
 
+        // Chroma siting, kept in step with the Vulkan kernel. `chroma_location` was filled in
+        // by the producers and read by nothing, so every source was reconstructed as though it
+        // were centre-sited.
+        shader_->set("chroma_cosited",
+                     params.pix_desc.chroma_location != core::chroma_location::center);
+
         shader_->set("is_straight_alpha", params.pix_desc.is_straight_alpha);
         shader_->set("straight_alpha_grading", params.straight_alpha_grading);
         shader_->set("plane[0]", texture_id::plane0);

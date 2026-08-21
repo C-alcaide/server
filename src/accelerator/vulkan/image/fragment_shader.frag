@@ -119,6 +119,8 @@ layout(scalar, binding = 2) uniform ParamsBlock {
     float gn_exposure;
     // ── Source code range ───────────────────────────────────────────────────
     int   ycbcr_full_range;
+    // ── Chroma siting: 1 = co-sited with luma, 0 = centred between the pair ──
+    int   chroma_cosited;
 };
 layout(binding = 3) uniform sampler3D lut3d_tex;
 layout(binding = 4) uniform sampler2D hue_curve_tex;
@@ -324,6 +326,11 @@ vec4 ChromaKey(vec4 c,bool sm){vec3 h=rgb2hsv(c.rgb);float d=ColorDist(h)*-2.0+1
 // the CUDA ProRes producer's replication was 0.5*(step) -- 59 of 255 on a saturated bar, which
 // is what `prores-parity` reported before both were fixed.
 vec2 chroma_uv(vec2 uv, uint luma_plane, uint chroma_plane){
+    // CENTRE-sited sources need NO offset: sampling the subsampled plane at the luma
+    // coordinate is already the correct interpolation for chroma centred between the pair,
+    // which is what this shader did unconditionally before the siting was plumbed through.
+    if (chroma_cosited == 0)
+        return uv;
     float lw = float(textureSize(textures[luma_plane],0).x);
     float cw = float(textureSize(textures[chroma_plane],0).x);
     return vec2(uv.x + (lw/cw - 1.0)*0.5/lw, uv.y);

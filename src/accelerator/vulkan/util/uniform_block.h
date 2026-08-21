@@ -230,7 +230,22 @@ struct alignas(16) uniform_block
     // untouched. 1 = the source's YCbCr codes use the full range (JPEG convention), so the
     // studio-swing expansion in ycbcra_to_rgba must be skipped.
     int32_t  ycbcr_full_range = 0;          // 876
-    // Total: 880 bytes
+    // ── Chroma siting ───────────────────────────────────────────────────
+    // 1 = horizontal chroma is CO-SITED with luma (AVCHROMA_LOC_LEFT/TOPLEFT: MPEG-2, H.264,
+    // ProRes, BT.601/709), 0 = CENTRED between the luma pair (AVCHROMA_LOC_CENTER: MPEG-1,
+    // JPEG/MJPEG, H.263, Theora). Defaults to co-sited, which is the convention when a source
+    // does not signal -- and the JPEG family DOES signal, so the default is not a guess for
+    // the case that differs.
+    int32_t  chroma_cosited = 1;            // 880
+    // PAD TO A 16-BYTE MULTIPLE. std140 rounds the BLOCK size up to 16, so the shader's block
+    // is 896 whatever this struct measures; `uboInfo.range = sizeof(uniform_block)` then
+    // describes less memory than the shader reads, which is a spec violation rather than a
+    // rounding detail. Measured 2026-08-21: leaving it at 884 gave a Vulkan mixer that logged
+    // no error, decoded normally, and produced NO readback at all -- conformance 0/4,
+    // flat-decoded 0/29, and the IMAGE consumer timing out with nothing in the log. The old
+    // total of 880 was a multiple of 16 for this reason; it just was not written down.
+    int32_t  _pad_to_16[3] = {0, 0, 0};     // 884..895
+    // Total: 896 bytes (56 x 16)
 };
 
 // Bit flags for `flags` field

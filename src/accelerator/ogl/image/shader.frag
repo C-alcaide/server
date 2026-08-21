@@ -1017,6 +1017,9 @@ vec4 chroma_key(vec4 c)
 // exactly 235; 255 keeps the 8-bit path bit-identical. The kernel picks by texture depth.
 uniform float ycbcr_code_scale;
 uniform bool  ycbcr_full_range;
+// 1 = horizontal chroma co-sited with luma (MPEG-2, H.264, ProRes, BT.601/709);
+// 0 = centred between the luma pair (MPEG-1, JPEG/MJPEG, H.263, Theora).
+uniform bool  chroma_cosited;
 
 vec4 ycbcra_to_rgba(float Y, float Cb, float Cr, float A)
 {
@@ -1470,6 +1473,11 @@ float icvfx_mask(vec2 screen_uv) {
 // since a siting fix on one backend only would put the two out of parity on every 4:2:2 source.
 vec2 chroma_uv(sampler2D luma, sampler2D chroma, vec2 uv)
 {
+    // CENTRE-sited sources need no offset: sampling the subsampled plane at the luma
+    // coordinate is already the correct interpolation for chroma centred between the pair,
+    // which is what this shader did unconditionally before the siting was plumbed through.
+    if (!chroma_cosited)
+        return uv;
     float lw = float(textureSize(luma, 0).x);
     float cw = float(textureSize(chroma, 0).x);
     return vec2(uv.x + (lw/cw - 1.0) * 0.5 / lw, uv.y);
