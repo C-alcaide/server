@@ -481,20 +481,42 @@ caught the bogus −90% too, because its control would have shown only one produ
 The plan asked whether the GPU path should become the default for ProRes. It should not, yet,
 and the reason is that host CPU is the only axis on which the answer is obvious.
 
-Three routes, 4x 1080p layers, interleaved arms, 2-3 rounds each, on the Vulkan mixer. Two
-controls: each arm must report its own decode route from the producer's decision line, and the
-playhead must advance across the sampling window — the second one exists because two runs of
-the identical rig gave 1.83 and 0.83 cores, and 0.83 was an idle server.
+**From the harness**, not a scratchpad rig: `cli.py decode-cost --mixer vulkan --arms
+force_cpu,cuda,vulkan --clip prores` (and `--clip prores4444`), 4x 1080p layers, 3 interleaved
+rounds per arm, 90-second generated fixtures. Both controls held in every round — each arm
+reported a different decode route, and all four producers reached their arm's fast path
+(`eng 4/4`):
 
 | | | software | `CUDA_PRORES` | `prores_vulkan` |
 | :--- | :--- | :--- | :--- | :--- |
-| **422 HQ** | CPU cores | 1.82 (1.79–1.84) | 1.51 (−16.8%) | **1.11 (−38.5%)** |
-| | peak host RSS | 2231 MB | **473 MB** | 683 MB |
-| **4444 + alpha** | CPU cores | 2.78 | 1.17 (−58%) | **1.12 (−60%)** |
-| | peak host RSS | 3580 MB | **553 MB** | 693 MB |
-| | cue latency (`CALL SEEK`) | 99 ms | **84 ms** | 104 ms |
-| | `fps` mean | 0.990 | **0.999** | 0.996 |
-| | `frame-time` mean / max | 0.497 / 0.637 | 0.500 / **0.525** | 0.511 / **3.487** |
+| **422 HQ**, 10-bit | CPU cores | 1.90 | 1.26 (−33.7%) | **1.16 (−38.9%)** |
+| | late frames | 3 | **1** | 2 |
+| **4444 + alpha**, 12-bit | CPU cores | 2.85 | 1.25 (−56.1%) | **1.16 (−59.3%)** |
+| | late frames | 4 | **1** | 5 |
+
+`prores_vulkan` sits at **1.16 cores whether the content is 422 or 4444**, so the decode is
+effectively free and what remains is the mixer's fixed cost. CUDA is 0.1 cores behind on both.
+On **late frames** CUDA is still the better citizen — 1 against Vulkan's 5 on 4444 — which is
+the same shape as every other stability measurement here.
+
+These supersede an earlier scratchpad table and are **not a continuation of it**: the fixtures
+differ (90 s generated bars, played without `LOOP`, against the 3-second harness fixtures with
+`LOOP`), the 4444 fixture is **12-bit** where the earlier one was 10-bit, and the channel is
+8-bit with a screen consumer rather than 16-bit with none. Notably CUDA came out at 1.26 here
+against 1.51 there — a difference in fixture, not in the decoder.
+
+**Still from the scratchpad rigs**, because `decode-cost` does not measure them: peak host RSS
+(software 2231 MB / CUDA 473 / Vulkan 683 on 422) and cue latency (99 / 84 / 104 ms). Treat
+those as indicative and re-take them through the harness before quoting them again.
+
+**One honest wrinkle: the Vulkan arm is intermittently flaky at four layers on these
+fixtures.** The first 3-round attempt at each clip failed its own controls — `eng 2/4` with one
+stalled round on 422, and a route that changed between rounds on 4444 — and the re-runs were
+4/4 in 3/3 rounds for both. So the numbers above are from clean runs, and the path does not
+engage *every* time. The first attempt also could not be diagnosed, because the battery reused
+one log directory per arm and wiped it each round, destroying the failing round's evidence;
+that is fixed (`log_<mixer>_<arm>_r<N>`), so the next occurrence is investigable. Worth
+knowing before this is called production-ready.
 
 **The verdict is split, which is the finding.** `prores_vulkan` is the cheapest decoder —
 essentially free, sitting at ~1.12 cores whether the content is 422 or 4444, so what remains is
