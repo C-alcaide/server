@@ -38,9 +38,18 @@ things argue against making it the default, and they are why this ships off:
   decode route, while `CUDA_PRORES` is a **different producer** with its own queue -- which is
   why it reports `queue-fill` where the others report `buffer`. Within one producer, turning
   Vulkan decode on takes lateness from **11 to 4**. The 1-against-4 figure compares producers.
-  Measured 2026-08-21, and it is not queue depth (at `buffer-depth 16` the buffer rose from
-  0.917 to 0.959 and the count stayed at 4), not GPU contention (2 late at ONE layer), not
-  decode cost (`decode-time` 0.016 of budget against CUDA's 0.535), and not host CPU.
+  **And it is a start-up transient, not a steady-state property.** Read per 5 s period instead
+  of summed over the window, the Vulkan arm goes 1, 4, **0, 0, 0** -- and 1, 3, 0, 0, 0 in the
+  other two rounds -- spiking in the second period and then exactly zero for the rest of the
+  run. The spike is FFmpeg building its compute pipelines: eight SPIR-V links land inside that
+  period and the cost never recurs. `force_cpu` by contrast never settles. **Nothing is
+  dropped**: `drops=0` on the consumer in every run with `avg=40.00ms` against a nominal 40.00,
+  so the long intervals are followed by short ones and the channel holds rate. Steady-state
+  jitter is 2.5-4.0 ms (CUDA), 5.3-7.6 ms (Vulkan) and 13-25 ms (software), all far inside a
+  40 ms frame. Not queue depth either (at `buffer-depth 16` the buffer rose 0.917 to 0.959 and
+  the count did not move), nor GPU contention, nor decode cost, nor host CPU. Measured on a
+  SCREEN consumer, which is not genlocked -- on SDI the card is the clock, so a cue-time spike
+  could repeat a frame there, and that case is unverified.
 * **It requires `<gpu-direct-decode>`.** Without a GPU-direct publish path the decoded frame is
   read back, and Vulkan decode plus a readback measured **78% below** plain software decode —
   so the combination is a large regression rather than a small one, and the config refuses it.

@@ -900,8 +900,34 @@ separate the two.
 That figure does not survive being looked at.
 
 **First, what `late` is.** `output.cpp` counts inter-frame intervals longer than **1.15x
-nominal** and zeroes the counter every TIMING period. So it is output-cadence jitter in steady
-state -- a few intervals in ~125 -- and not a decoder failing to keep up.
+nominal** and zeroes the counter every TIMING period. The battery then SUMS those per-period
+counts over the window, so "4" is a window total and not a rate -- which is what made it look
+like a steady-state property.
+
+**It is a start-up transient, and reading it per period says so at a glance:**
+
+| arm | late per 5 s period, in order |
+| :--- | :--- |
+| `CUDA_PRORES` | 1, 1, **0, 0, 0** |
+| `vulkan` | 1, **4**, **0, 0, 0** — and 1, 3, 0, 0, 0 / 1, 3, 0, 0, 0 in the other two rounds |
+| `force_cpu` | 1, 6, 2, 1, 4 / 1, 2, 3, 4, 1 / 1, 2, 0, 1, 1 |
+
+The Vulkan arm spikes in the second period and is then **exactly zero for the rest of the run,
+in every round**. `force_cpu` never settles. So the arm with a steady-state cadence problem is
+the software one, and Vulkan decode is what removes it.
+
+**The spike is FFmpeg building its compute pipelines.** Eight SPIR-V links land at
+16:36:26.593-26.604, inside the period ending 16:36:30 -- the one carrying the 4 late frames.
+Once the pipelines exist the cost never recurs.
+
+**Nothing is dropped.** `drops=0` on the consumer in every run of every arm, with `avg=40.00ms`
+against a nominal 40.00: the long intervals are followed by short ones and the channel holds
+rate. Steady-state jitter is 2.5-4.0 ms for CUDA, 5.3-7.6 ms for Vulkan and 13-25 ms for
+software, all far inside a 40 ms frame.
+
+**The caveat that matters.** This is a SCREEN consumer, which is not genlocked and absorbs
+jitter. On SDI the card is the clock, so a cue-time spike could repeat a frame there. That case
+is unverified and is the one worth checking before broadcast use.
 
 **Second, the arms do not share a producer.**
 
@@ -922,12 +948,17 @@ the old one: **within one producer, enabling Vulkan decode takes lateness from 1
 | hypothesis | measurement |
 | :--- | :--- |
 | GPU contention between decode and mixing | late is **2 at ONE layer**, 3 at four -- it does not scale |
-| start-up cost (SPIR-V linking) | the counter resets every period; these are steady-state |
 | decode too slow | `decode-time` **0.016** of budget against CUDA's 0.535 (~1.3 ms against 43 ms) |
 | queue starvation / depth | at `--buffer-depth 16` the buffer rose 0.917 -> 0.959 and the count stayed **4** |
 | a stage overrunning | every mean ~0.5, every max <= 0.78 of budget, all three arms |
 | host CPU load | CUDA 1.25 cores with 1 late against Vulkan 1.19 with 4 |
 | the importer's host wait on the shared device thread | `force_cpu` has **no importer at all** and is the worst of the three |
+
+**One of these refutations was mine and was wrong.** I first dismissed the start-up hypothesis
+because "the counter resets every period, so these are steady-state" -- a non-sequitur. The
+reset is exactly what makes the cost LOCALISABLE, and localising it puts every nonzero reading
+in the first two periods. The per-period table above is the check I should have run before
+ruling it out.
 
 That last row is the useful negative. Both of the importer's waits (`wait_for_decoder`,
 `wait_for_previous_copy`) do run inside `dispatch_sync`, i.e. on the one device thread every
