@@ -52,7 +52,7 @@ Two blocking waits do remain, and naming them is what makes the claim above chec
 
 | where | call | why it does not stall |
 | :--- | :--- | :--- |
-| DeckLink `push_and_take` | `cudaEventSynchronize(oldest.done)` | on the copy `PIPELINE_DEPTH` frames back, which has long since completed in steady state — this is what makes the measured fence wait 0.06 ms instead of 22 ms |
+| DeckLink `push_and_take` | `cudaEventSynchronize(oldest.done)` | on the copy `PIPELINE_DEPTH` frames back, which has long since completed in steady state — measured at 8-50 µs, inside a 0.02-0.03 ms fence wait. **Not** the 0.06 ms this row used to quote: that figure came from the integer-millisecond timer and was never representable, as the table further down now records |
 | cross-GPU write step | `cudaStreamSynchronize(dst_stream_)` | at the CUDA→GL handoff, where no GPU-side handshake exists (see [Async Cross-GPU Peer Copy](#async-cross-gpu-peer-copy)) |
 
 ---
@@ -272,6 +272,7 @@ The async event chain eliminates CPU `cudaStreamSynchronize` calls from the read
 | NVLink | ~600 GB/s | No CPU **copy**; see the caveat below |
 | PCIe P2P | ~15 GB/s (3.0 x16) | No CPU **copy**; see the caveat below |
 | Staged (system RAM) | ~10 GB/s | No CPU copy, but **one blocking wait and three transfers** |
+| PBO fallback (no CUDA) | ~6 GB/s | Moderate -- the CPU uploads |
 
 **"Zero" was wrong, and the distinction matters.** No CPU *memcpy* happens — the copies are
 GPU DMA — but the staged path in `cuda_peer_transfer.cpp` is peer→staging, then
@@ -279,7 +280,6 @@ staging→PBO (`cudaMemcpyAsync` device-to-device), then PBO→texture (`glTexSu
 **`cudaStreamSynchronize(dst_stream_)`** between the second and third. That is a blocking CPU
 wait on the calling thread, so the thread is not free even though no byte passes through it.
 Bandwidth figures are the hardware's, not measured here.
-| PBO fallback (no CUDA) | ~6 GB/s | Moderate (CPU uploads) |
 
 ---
 
