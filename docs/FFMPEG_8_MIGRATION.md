@@ -534,6 +534,39 @@ on **every** arm, since it puts a line per graph per interval on the frame path.
 `vulkan` arms there is the follow-up — together with the loop-wrap hitch, which no battery can
 currently see.
 
+#### 6.1.3 `AV_CODEC_RECEIVE_FRAME_FLAG_SYNCHRONOUS` — adopted, safe, benefit unproven
+
+Phase 4's first item. `avcodec_receive_frame_flags()` (lavc 62.22.101; our pin is 62.28.102)
+takes `AV_CODEC_RECEIVE_FRAME_FLAG_SYNCHRONOUS`, documented as *"the decoder will bypass frame
+threading and return the next frame as soon as possible ... may deliver frames earlier than the
+advertised `AVCodecContext.delay`"*. With `threads=0` resolving to `hardware_concurrency`, a
+frame-threaded decoder holds `thread_count` frames before emitting the first, and after a SEEK
+every one of those is latency the operator waits through.
+
+**Armed by a flush, disarmed by the first frame.** Not unconditionally: the flag defeats frame
+threading, which is what pays for steady-state throughput — the same reason `output_capacity`
+is raised to `thread_count`. So it applies to exactly the frames a cue is waiting on.
+
+**Measured safe.** On a looping clip, the worst case since every wrap re-arms it, server CPU
+moved **+4.1% in one round and −4.6% in the next** — a sign flip, so noise, not a cost.
+
+**Benefit unproven, and the instrument is why.** Cue latency came out at a median of
+**78.7 ms with it off and 78.2 ms with it on** — 39 seeks, interleaved arms from one binary,
+on both the hardware (`gpu-direct-decode` on) and software decode paths. Every single value in
+both arms sat between 78 and 80 ms: **pinned at two channel ticks**. The probe measures
+`CALL SEEK` → the playhead reported by `INFO` changing, and `INFO` only advances on a channel
+tick, so its resolution is 40 ms at 25p. Whatever the decoder saved is below that.
+
+So this is kept as a principled change with no measured benefit, and **no cue-latency
+improvement should be quoted for it**. What would settle it: a producer-side timestamp from
+seek to first published frame. The AMCP-observable latency cannot see it, and neither can
+anything currently in the harness.
+
+Worth noting for the next attempt: on a **hardware** decode path there may be nothing to skip
+at all, since hwaccel decoding is not frame-threaded the way software decoding is — which is
+its own argument for measuring the software path separately rather than assuming one number
+covers both.
+
 ### 6.2 Codecs that matter in this domain
 
 * **JPEG-XS** — decoder, encoder, parser and raw muxer/demuxer via `libsvtjpegxs` (8.1). The

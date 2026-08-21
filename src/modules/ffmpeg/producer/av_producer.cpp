@@ -1585,6 +1585,10 @@ class Decoder
 #ifdef _WIN32
     // When true, D3D11 frames are kept as-is (no CPU transfer) and placed in hw_output.
     std::atomic<bool>                         gpu_direct_mode_{false};
+    /// Armed by a flush (seek or loop wrap), cleared by the first frame that arrives. See the
+    /// receive call: it selects AV_CODEC_RECEIVE_FRAME_FLAG_SYNCHRONOUS for exactly the
+    /// frames a cue is waiting on, and nothing else.
+    bool                                      sync_receive_ = false;
     // Set when the decoder emits an ordinary frame while it was asked to produce
     // hardware surfaces -- i.e. hardware decoding declined after the fact. The
     // producer watches this so it stops waiting for surfaces that never come.
@@ -1811,7 +1815,46 @@ class Decoder
                 try {
                     auto av_frame = alloc_frame();
                     stage     = "avcodec_receive_frame";
-                    auto ret      = avcodec_receive_frame(ctx.get(), av_frame.get());
+                    // AFTER A SEEK ONLY, bypass frame threading for the frames we are
+                    // waiting on. `AV_CODEC_RECEIVE_FRAME_FLAG_SYNCHRONOUS` (lavc 62.22.101)
+                    // makes the decoder "return the next frame as soon as possible ... may
+                    // deliver frames earlier than the advertised AVCodecContext.delay", which
+                    // is exactly the cue-latency problem: with threads=0 resolving to
+                    // hardware_concurrency, a long-GOP decoder holds thread_count frames
+                    // before emitting the first one, and every one of those is latency the
+                    // operator waits through after a SEEK.
+                    //
+                    // NOT unconditionally. The flag defeats frame threading, which is what
+                    // pays for steady-state throughput -- the whole reason `output_capacity`
+                    // is raised to `thread_count` a few hundred lines up. So it is armed by a
+                    // flush (i.e. a seek or a loop wrap) and disarmed by the first frame that
+                    // actually arrives.
+                    //
+                    // MEASURED SAFE, NOT MEASURED TO HELP, and the distinction is deliberate.
+                    // Safe: on a looping clip -- the worst case, since every wrap re-arms it
+                    // -- server CPU moved +4.1% in one round and -4.6% in the next, a sign
+                    // flip, which is noise and not a cost.
+                    // Unproven: cue latency, the thing it is for, came out at a median of
+                    // 78.7 vs 78.2 ms with it off and on (39 seeks, interleaved, both the
+                    // hardware and software decode paths). Every value in both arms sat
+                    // between 78 and 80 ms, i.e. pinned at two channel ticks -- so the probe
+                    // was measuring the tick cadence, and whatever the decoder saved is below
+                    // its resolution. **Do not quote a cue-latency improvement for this.**
+                    // Settling it needs a producer-side timestamp from seek to first
+                    // published frame; the AMCP-observable latency cannot see it.
+                    int ret = 0;
+#if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(62, 22, 101)
+                    if (sync_receive_) {
+                        ret = avcodec_receive_frame_flags(ctx.get(), av_frame.get(),
+                                                          AV_CODEC_RECEIVE_FRAME_FLAG_SYNCHRONOUS);
+                        if (ret == 0)
+                            sync_receive_ = false;
+                    } else {
+                        ret = avcodec_receive_frame(ctx.get(), av_frame.get());
+                    }
+#else
+                    ret = avcodec_receive_frame(ctx.get(), av_frame.get());
+#endif
                     stage     = "after receive_frame";
 
                     if (ret == AVERROR(EAGAIN)) {
@@ -1865,6 +1908,10 @@ class Decoder
                                 while (!input.empty())
                                     input.pop();
                                 avcodec_flush_buffers(ctx.get());
+                                // The frame the operator is waiting for is the next one, so
+                                // ask for it without the frame-threading delay. Disarms
+                                // itself as soon as a frame arrives.
+                                sync_receive_ = true;
                                 next_pts = AV_NOPTS_VALUE;
                                 eof      = false;
                                 // Clear the flag and notify under flush_mutex_. Doing it
