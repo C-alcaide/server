@@ -3806,6 +3806,50 @@ struct AVProducer::Impl
                         // "not D3D11" as "decoding in software".
                         if (gpu_direct_video_ && vk_mixer_device_ && frame.video &&
                             frame.video->format == AV_PIX_FMT_VULKAN && !gpu_direct_failed_) {
+                            // LOCK THE FRAME around read, submit and write-back. FFmpeg's
+                            // own words (hwcontext_vulkan.h): "Users SHOULD only ever lock
+                            // just before command submission in order to get accurate frame
+                            // properties, and unlock immediately after command submission
+                            // without waiting for it to finish."
+                            //
+                            // Doing it unlocked is not a theoretical race. `sem_value` was
+                            // read here on the channel thread while FFmpeg's decode threads
+                            // advanced it, so our submission could signal a value FFmpeg had
+                            // already used -- and a timeline semaphore signalled twice with
+                            // the same value is undefined. Measured 2026-08-21: ONE ProRes
+                            // producer ran indefinitely; FOUR lost the device within three
+                            // seconds, with a matching `nvlddmkm stopped responding` TDR. It
+                            // is ours rather than FFmpeg's -- four concurrent Vulkan ProRes
+                            // decoders sharing one device in ffmpeg.exe, ~1500 frames each,
+                            // complete cleanly.
+                            //
+                            // The host wait inside `copy_planes` happens under this lock,
+                            // which is safe because `sem_value` is the completion value of
+                            // work FFmpeg has ALREADY submitted by the time
+                            // avcodec_receive_frame hands the frame over -- FFmpeg does not
+                            // need this lock to make that value arrive.
+                            auto* vk_fc  = reinterpret_cast<AVHWFramesContext*>(frame.video->hw_frames_ctx->data);
+                            auto* vk_fhw = static_cast<AVVulkanFramesContext*>(vk_fc->hwctx);
+                            auto* vk_f   = reinterpret_cast<AVVkFrame*>(frame.video->data[0]);
+
+                            struct frame_lock
+                            {
+                                AVVulkanFramesContext* fhw;
+                                AVHWFramesContext*     fc;
+                                AVVkFrame*             f;
+                                frame_lock(AVVulkanFramesContext* a, AVHWFramesContext* b, AVVkFrame* c)
+                                    : fhw(a), fc(b), f(c)
+                                {
+                                    if (fhw && fhw->lock_frame)
+                                        fhw->lock_frame(fc, f);
+                                }
+                                ~frame_lock()
+                                {
+                                    if (fhw && fhw->unlock_frame)
+                                        fhw->unlock_frame(fc, f);
+                                }
+                            } vk_lock(vk_fhw, vk_fc, vk_f);
+
                             common::bit_depth plane_depth = common::bit_depth::bit8;
                             bool              has_alpha   = false;
                             auto              planes = describe_av_vulkan_planes(frame.video.get(), plane_depth, has_alpha);
@@ -3813,6 +3857,17 @@ struct AVProducer::Impl
                                 CASPAR_LOG(debug) << L"[av_producer] AVVkFrame described as "
                                                   << static_cast<int>(planes.size()) << L" planes, depth "
                                                   << static_cast<int>(plane_depth) << L", alpha " << has_alpha;
+                                // The premise of copying on the mixer's graphics queue is that
+                                // these images are CONCURRENT, i.e. queue_family is
+                                // VK_QUEUE_FAMILY_IGNORED (0xFFFFFFFF). If it names a family
+                                // instead they are EXCLUSIVE and reading them from another
+                                // family is undefined -- so this is asserted out loud rather
+                                // than assumed.
+                                CASPAR_LOG(info) << L"[av_producer] AVVkFrame queue_family[0]=0x"
+                                                 << std::hex << vk_f->queue_family[0] << std::dec
+                                                 << (vk_f->queue_family[0] == VK_QUEUE_FAMILY_IGNORED
+                                                         ? L" (CONCURRENT, as intended)"
+                                                         : L" (EXCLUSIVE -- the graphics-queue copy is UNDEFINED)");
                             }
 
                             // Built on the first Vulkan frame, not at producer start: the
@@ -3832,13 +3887,14 @@ struct AVProducer::Impl
                             std::vector<std::shared_ptr<core::texture>> textures;
                             if (!planes.empty() && vk_importer_ &&
                                 vk_importer_->copy_planes(planes, plane_depth, textures)) {
-                                // The copy waited on sem_value and signalled sem_value + 1,
-                                // per plane. FFmpeg waits on the value recorded here before
-                                // reusing a pooled frame, so not incrementing it would let
-                                // the decoder overwrite an image the copy is still reading.
-                                auto* vkf = reinterpret_cast<AVVkFrame*>(frame.video->data[0]);
+                                // The copy signalled sem_value + 1 per plane, so record it --
+                                // under the lock taken above, which is the only thing that
+                                // makes this read-modify-write safe against FFmpeg's own
+                                // decode threads. FFmpeg waits on the value recorded here
+                                // before reusing a pooled frame, so skipping it would let the
+                                // decoder overwrite an image the copy is still reading.
                                 for (std::size_t i = 0; i < planes.size(); ++i)
-                                    vkf->sem_value[i] += 1;
+                                    vk_f->sem_value[i] += 1;
 
                                 if (!gpu_direct_logged_) {
                                     gpu_direct_logged_ = true;

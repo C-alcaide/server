@@ -1,6 +1,32 @@
 CasparVP — Unreleased
 ==========================================
 
+### Fixed: the Vulkan mixer's graphics queue had three submitters and no lock
+
+`VkQueue` must be externally synchronised — Vulkan says so, without qualification — and this
+device has exactly one graphics queue with three unrelated submitters:
+
+* the **mixer**, from the channel thread (`device::submit`, called by `image_kernel`),
+* the **transfer path**, from the device thread (`submitSingleTimeCommands`),
+* the **import bridges**, from the device thread inside `dispatch_sync`
+  (`d3d11_import_bridge`, and the new Vulkan plane importer).
+
+Nothing serialised them. `device::submit` went straight to `_queue.submit(...)` with no lock
+and no thread hop, so any frame in which the mixer and an import bridge submitted at the same
+moment was undefined behaviour. They now share a `_queue_mutex`, held only for the
+`vkQueueSubmit` call itself, which does not wait on anything and so cannot become a stall.
+
+**No rendered-output change, and that is the expected result** — this removes a race, it does
+not alter arithmetic. `conformance --mixer vulkan` is 100/100 within 1.0 LSB and
+`flat-decoded --mixer vulkan` 29/29 after the change, the same as before it.
+
+**It is not a fix for a symptom anyone reported**, and it should not be read as one. It was
+found while chasing `VK_ERROR_DEVICE_LOST` on the experimental `<vulkan-decode>` path, and it
+did **not** fix that — the device loss reproduces with the lock in place. What it removes is a
+latent race on the default GPU-direct path, where the window is one submission wide and the
+consequence is a driver reset, so an operator who has seen occasional unexplained Vulkan
+instability with GPU-direct decode has one fewer cause to consider.
+
 ### Changed: GPU-direct decode is ON by default, and the buffer depth is tunable again
 
 `<gpu-direct-decode>` shipped **off**, and the config said why: not because the picture differs,

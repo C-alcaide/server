@@ -192,6 +192,27 @@ struct device::impl : public std::enable_shared_from_this<impl>
     // trade a bounded amount of memory for an unbounded recompile stall on the frame path.
     std::map<std::pair<std::string, int>, std::shared_ptr<pipeline>> _variant_pipelines;
     std::mutex                                                      _variant_mutex;
+    /// Guards `_queue`. Vulkan requires a VkQueue to be externally synchronised, and this
+    /// device has exactly one graphics queue with three unrelated submitters: the mixer
+    /// (from the channel thread, via device::submit), the transfer path (from the device
+    /// thread, via submitSingleTimeCommands) and the import bridges (from the device thread,
+    /// inside dispatch_sync). Nothing serialised them.
+    ///
+    /// FOUND while chasing something else, and IT DID NOT FIX IT -- said plainly here so the
+    /// next reader does not assume otherwise. The hunt was `VK_ERROR_DEVICE_LOST` with two or
+    /// more concurrent ProRes producers on the experimental `<vulkan-decode>` path
+    /// (2026-08-21), and that still reproduces with this lock in place. What the lock removes
+    /// is a real race that was simply also there: undefined behaviour on every frame in which
+    /// the mixer and an import bridge happened to submit at the same moment.
+    ///
+    /// So this is a correctness fix with no symptom attached, which is the honest description.
+    /// `conformance --mixer vulkan` is 100/100 within 1.0 LSB with it, as it was without --
+    /// removing a race does not change arithmetic, and a battery that measures pixels could
+    /// not have seen this either way.
+    ///
+    /// The lock is held only for the vkQueueSubmit call itself, which does not wait on
+    /// anything, so it cannot become a stall.
+    std::mutex                                                      _queue_mutex;
 
     struct inflight_command_buffer
     {
@@ -940,7 +961,11 @@ struct device::impl : public std::enable_shared_from_this<impl>
         submitInfo.setCommandBuffers(cmd_buffer);
         submitInfo.setSignalSemaphores(_semaphore);
         submitInfo.pNext = &timelineInfo;
-        _queue.submit(submitInfo);
+        {
+            // Same queue as device::submit, so the same lock. See _queue_mutex.
+            std::lock_guard<std::mutex> lock(_queue_mutex);
+            _queue.submit(submitInfo);
+        }
 
         _transfer_cmd_buffers.push_back({cmd_buffer, signal_value});
         cmd_buffers_inflight_.store(static_cast<int64_t>(_transfer_cmd_buffers.size()), std::memory_order_relaxed);
@@ -967,7 +992,11 @@ struct device::impl : public std::enable_shared_from_this<impl>
                 vk::CommandBufferAllocateInfo(_command_pool, vk::CommandBufferLevel::ePrimary, count));
         });
     }
-    void submit(const vk::SubmitInfo& submitInfo, vk::Fence fence) { _queue.submit(submitInfo, fence); }
+    void submit(const vk::SubmitInfo& submitInfo, vk::Fence fence)
+    {
+        std::lock_guard<std::mutex> lock(_queue_mutex);
+        _queue.submit(submitInfo, fence);
+    }
 
     std::shared_ptr<texture>
     create_attachment(int                   width,

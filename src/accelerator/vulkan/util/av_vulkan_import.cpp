@@ -59,6 +59,38 @@ struct av_vulkan_importer::impl
             vk_device_.destroyFence(fence_);
     }
 
+    /// Block until every plane's decode work has completed, on the HOST.
+    ///
+    /// `AVVkFrame::sem_value[i]` is the value at which image i becomes accessible, so this is
+    /// a wait for work FFmpeg has already submitted. Returns false on timeout or error, and
+    /// the caller then declines the frame -- which costs one software frame, where letting an
+    /// unsatisfiable wait reach the shared graphics queue costs the device.
+    bool wait_for_decoder(const std::vector<av_plane_source>& planes)
+    {
+        std::vector<vk::Semaphore> sems;
+        std::vector<uint64_t>      values;
+        sems.reserve(planes.size());
+        values.reserve(planes.size());
+        for (const auto& p : planes) {
+            sems.push_back(static_cast<VkSemaphore>(p.semaphore));
+            values.push_back(p.sem_value);
+        }
+
+        vk::SemaphoreWaitInfo wi{};
+        wi.setSemaphores(sems);
+        wi.setValues(values);
+
+        // One second: long enough that a busy decoder is never mistaken for a stuck one,
+        // short enough that a stuck one does not hold the channel's tick for a visible time.
+        const auto res = vk_device_.waitSemaphores(wi, 1'000'000'000ull);
+        if (res != vk::Result::eSuccess) {
+            CASPAR_LOG(warning) << L"[vk::av_import] the decoder's frame never became ready ("
+                                << u16(vk::to_string(res)) << L"); declining it";
+            return false;
+        }
+        return true;
+    }
+
     void wait_for_previous_copy()
     {
         if (!copy_pending_ || !fence_)
@@ -122,10 +154,31 @@ bool av_vulkan_importer::copy_planes(const std::vector<av_plane_source>&        
                 dst.push_back(t);
             }
 
+            // WAIT ON THE HOST, NOT ON THE QUEUE, and this is the difference between one
+            // producer working and four hanging the GPU.
+            //
+            // The obvious form of this function put each plane's timeline semaphore in the
+            // SubmitInfo's wait list. That is correct for a queue this code owns, and wrong
+            // for this one: the copy runs on the mixer's SINGLE graphics queue, shared by
+            // every channel and every other producer, so a wait that is not yet satisfiable
+            // blocks the mixer and everything queued behind it -- head-of-line blocking on
+            // the one queue that must never stall. Measured 2026-08-21: one ProRes producer
+            // ran fine, four gave `VK_ERROR_DEVICE_LOST` on every submission within seconds,
+            // with a matching `nvlddmkm stopped responding and recovered` TDR in the Windows
+            // System log at the same second. A TDR at 4x25 fps is a deadlock, not overload --
+            // the same decode sustains ~2100 fps standalone.
+            //
+            // So the wait happens here, on the host, before anything is recorded. In steady
+            // state FFmpeg has already submitted the work these values belong to, so it
+            // returns immediately; if it does not, the frame is DECLINED rather than allowed
+            // to wedge the queue. The signal stays on the submission, because that is what
+            // tells FFmpeg the copy is done reading.
+            if (!m.wait_for_decoder(planes))
+                return false;
+
             // Re-recording a command buffer the GPU may still be reading is undefined
-            // behaviour, so the previous copy has to have retired first. This is the only
-            // host wait in the path and it is against a copy from a PREVIOUS frame, so in
-            // steady state it does not block.
+            // behaviour, so the previous copy has to have retired first. Against a copy from
+            // a PREVIOUS frame, so in steady state it does not block either.
             m.wait_for_previous_copy();
 
             auto cmd = m.cmd_;
@@ -233,30 +286,25 @@ bool av_vulkan_importer::copy_planes(const std::vector<av_plane_source>&        
 
             cmd.end();
 
-            // The AVVkFrame contract: wait on sem_value, signal sem_value + 1, per plane.
-            // Skipping the signal would leave FFmpeg free to reuse the image while this
-            // copy is still reading it, and the caller could not make that safe by any
-            // other means.
-            std::vector<vk::Semaphore>          sems;
-            std::vector<uint64_t>               wait_values;
-            std::vector<uint64_t>               signal_values;
-            std::vector<vk::PipelineStageFlags> stages;
+            // SIGNAL ONLY. The AVVkFrame contract is wait-on-sem_value and
+            // signal-an-incremented-value; the wait half was moved to the host above, for the
+            // queue-sharing reason recorded there. The signal cannot move: FFmpeg waits on the
+            // latest value before reusing a pooled frame, so without it the decoder would
+            // overwrite an image this copy is still reading, and no caller could make that
+            // safe by other means.
+            std::vector<vk::Semaphore> sems;
+            std::vector<uint64_t>      signal_values;
             sems.reserve(planes.size());
             for (const auto& p : planes) {
                 sems.push_back(static_cast<VkSemaphore>(p.semaphore));
-                wait_values.push_back(p.sem_value);
                 signal_values.push_back(p.sem_value + 1);
-                stages.push_back(vk::PipelineStageFlagBits::eTransfer);
             }
 
             vk::TimelineSemaphoreSubmitInfo timeline{};
-            timeline.setWaitSemaphoreValues(wait_values);
             timeline.setSignalSemaphoreValues(signal_values);
 
             vk::SubmitInfo si{};
             si.setCommandBuffers(cmd);
-            si.setWaitSemaphores(sems);
-            si.setWaitDstStageMask(stages);
             si.setSignalSemaphores(sems);
             si.pNext = &timeline;
 

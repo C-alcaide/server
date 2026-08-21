@@ -325,7 +325,7 @@ decodes into an image the Vulkan mixer can consume without an interop hop — an
 CUDA path it is not NVIDIA-only. ProRes **RAW** decoding is a capability the tree does not
 have at all.
 
-#### 6.1.1 Measured, 2026-08-21: adopted, plumbed, and blocked inside `avcodec_receive_frame`
+#### 6.1.1 Measured, 2026-08-21: ProRes decodes on Vulkan, and the blocker was ours
 
 The ProRes Vulkan hwaccel is now wired end to end behind
 `<vulkan-decode>` (off by default, and requiring `<gpu-direct-decode>`). Everything up to
@@ -345,27 +345,83 @@ and ~39 features FFmpeg's decoders assume — FFmpeg reads feature support from 
 device, so it emits SPIR-V for capabilities the logical device may never have enabled, with
 no error path on either side.
 
-**What blocks it.** `avcodec_receive_frame` takes an access violation on the first frame:
-13,675 faults in five seconds, every one at that call, before any of the above runs. The
-identical decode of the identical file succeeds in `ffmpeg.exe` 8.1.2 launched *from
-`build/shell`* — the same DLLs and the same local Vulkan loader — at 75 frames and 0 decode
-errors. So it is specific to decoding inside the server process.
+**What blocked it, and it was not Vulkan.** `avcodec_receive_frame` took an access violation
+on the first frame — 13,675 in five seconds, every one at that call. The cause was our own
+`av_log` callback: it formatted its prefix with `avc->item_name(ptr)` unconditionally, and
+`AVClass::item_name` is allowed to be NULL. `libavutil/log.c` says so itself —
+`return (cls->item_name ? cls->item_name : av_default_item_name)(obj);` — and
+`FFVulkanContext`'s class (`libavutil/vulkan.c`) omits the field. So the first log line a
+Vulkan compute decoder emitted jumped to address 0. Seven AVClass initialisers in 8.1 omit
+it, `rawdec` among them, so this was never Vulkan-specific; Vulkan is simply the first one
+this tree reached.
 
-Ruled out, one A/B run each:
+**Six A/B runs said "not this" and every one of them was right**, which is the lesson worth
+keeping: they all varied the decoder and none varied the logger.
 
 | candidate | result |
 | :--- | :--- |
-| the mixer's shared device | FFmpeg creating its own Vulkan device faults identically |
+| the mixer's shared device | FFmpeg creating its own Vulkan device faulted identically |
 | the device extension and feature set | 24 extensions + 39 features enabled; no change |
-| the queue family / image sharing mode | no change; CONCURRENT is required for the copy regardless |
-| our pre-created single-plane frame pool | letting FFmpeg allocate its own faults identically |
-| frame threading | `threads=1` only turns a fatal crash into a caught per-frame fault |
-| the `vulkan-1.dll` shipped in `build/shell` | removing it, so the process uses the 1.4.309 system loader, changes nothing |
+| the queue family / image sharing mode | no change; CONCURRENT is still required for the copy |
+| our pre-created single-plane frame pool | letting FFmpeg allocate its own faulted identically |
+| frame threading | `threads=1` only turned a fatal crash into a caught per-frame fault |
+| the `vulkan-1.dll` shipped in `build/shell` | removing it, so the process used the 1.4.309 system loader, changed nothing |
+| the stale FFmpeg 7 DLLs in `build/shell` | a running server loads only the 8.x set — checked by enumerating its modules |
 
-The remaining untested axis is whether FFmpeg's Vulkan decode can coexist with the mixer's
-own Vulkan instance in one process at all. Attributing it needs a debugger, which this
-machine does not have (`cdb` is absent and the process's own unhandled-exception filter
-returns `EXECUTE_HANDLER`, so Windows Error Reporting never produces a dump).
+What finally named it: a vectored exception handler (`CASPARVP_VEH_TRACE`), because `/EHa`
+turns the access violation into a C++ exception that the decode thread's `catch (...)`
+swallows before the unhandled-exception filter can see it, and
+`CASPAR_LOG_CURRENT_CALL_STACK()` is a `// TODO (fix)` stub. For a jump to address 0 the
+return address is on top of the stack; that gave `casparcg.exe+0x8898c5`, and DbgHelp against
+the PDB turned it into `caspar::ffmpeg::log_callback+0xf5`.
+
+**What it does now, with ONE producer.** `PLAY prores_422_bt709_sdr` on the Vulkan mixer with
+`<vulkan-decode>true` logs *"Vulkan GPU-direct video active: 3 planes decoded by an FFmpeg
+compute shader on the mixer's own device and copied device-local (no CPU frame, no
+readback)"*, with zero exceptions, and costs **0.02 cores against 0.25 for software decode —
+−90% host CPU** on 1080p ProRes 422. Two interleaved rounds per arm (0.23–0.27 against
+0.02–0.03), with the producer's own decision line read back as the control, so an arm that
+silently took the other path could not pass as a saving.
+
+**With two or more concurrent ProRes producers it can lose the GPU.** `VK_ERROR_DEVICE_LOST`
+on every submission, with `nvlddmkm stopped responding and recovered` in the Windows System
+log at the same second. The channel survives — the importer declines the frame and the
+producer falls back to host transfers — but the display driver is reset. At four producers it
+happened within three seconds, every run; at two it happened in one round of two. **Still
+open**, and these are ruled out, each by its own run:
+
+| ruled out | how |
+| :--- | :--- |
+| FFmpeg itself | four concurrent Vulkan ProRes decoders sharing one device inside `ffmpeg.exe`, ~1500 frames each, complete cleanly at exit 0 |
+| image sharing mode | `AVVkFrame::queue_family[0]` logged as `0xffffffff` = `VK_QUEUE_FAMILY_IGNORED`, so the images really are CONCURRENT and the cross-family copy is legal |
+| unlocked frame properties | `lock_frame`/`unlock_frame` now wrap the read, submit and `sem_value` write-back, per `hwcontext_vulkan.h`; no change to the failure |
+| an external wait on the shared queue | the wait on the decoder's timeline semaphores moved from the SubmitInfo to a host wait, so an unsatisfiable value can no longer block the mixer's queue; no change to the failure |
+| an unsynchronised `VkQueue` | `device::submit` and the transfer path now share `_queue_mutex`; no change to the failure |
+
+Three of those five stay regardless, because each is correct on its own terms: Vulkan requires
+a `VkQueue` to be externally synchronised and this device has three unrelated submitters;
+FFmpeg documents the frame lock; and a wait on a shared queue is head-of-line blocking
+whether or not it is the current bug.
+
+**A measurement hazard this turned up.** After a TDR the driver is reset and every later
+number in the session is contaminated — the *software* arm alone moved from 1.80 to 0.83
+cores across one, with no code change and no errors in its log. Check the Windows System log
+for `nvlddmkm` events before believing any figure from this path.
+
+**It is not byte-identical to software decode, and that is FFmpeg's.** On the same pinned
+frame (LOAD + PAUSE + SEEK 7), channel output differs on **285 of 2,073,600 pixels (0.0137%)
+by at most 2 codes of 255**; PRINT RAW agrees at 279, so the difference is in the decode
+rather than a readback route. `ffmpeg.exe` decoding the same clip its own two ways, with no
+CasparCG in the picture, differs from itself on **2,137 of 4,147,200 10-bit samples (0.0515%),
+max 5 codes of 1023**. A compute-shader IDCT is not obliged to match a SIMD one bit for bit,
+the same way JPEG's integer and float IDCTs do not. So the option stays opt-in, and no doc
+should describe this path as byte-identical.
+
+**Still owed:** the concurrency defect above, and a battery. `decode-cost` has no
+`vulkan-decode` arm — it sweeps `gpu-direct-decode`, which does nothing for ProRes because
+there is no D3D11VA ProRes decoder — so the −90% figure and the parity figures were taken by
+hand. They belong in the harness before they are quoted again, together with the
+concurrent-producer case, which is the one that would have caught the device loss.
 
 **Two things that made this hard to see, worth carrying forward:**
 
