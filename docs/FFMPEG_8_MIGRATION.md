@@ -977,3 +977,53 @@ software decode and reduced by Vulkan decode, and unexplained by decode cost, qu
 contention. It is the remaining open question on this path, and it is no longer an argument
 against `<vulkan-decode>` relative to the route it replaces.
 
+
+#### 6.1.6 The residual device loss has a name now, and two failed fixes
+
+`<vulkan-decode>` stays opt-in on ONE remaining objection: an intermittent
+`VK_ERROR_DEVICE_LOST` and `nvlddmkm` TDR, roughly one round in fifty at four producers. This is
+a *different* fault from the fence-wait defect fixed earlier -- that one announced itself with
+1.4 s of timeouts, this one gives no warning at all.
+
+**It is named.** `cli.py vk-decode-soak --validate` turns on the validation layer with
+synchronization validation, which nothing here had ever done, and it reports:
+
+```
+UNASSIGNED-Threading-MultipleThreads-Write, vkQueueSubmit2(): THREADING ERROR :
+object of type VkFence is simultaneously used in current thread A and thread B
+```
+
+plus a `vkWaitForFences` read variant. A `VkFence` used from two threads at once is undefined
+behaviour and is the class of defect that hangs a GPU. **We never call `vkQueueSubmit2`** -- only
+FFmpeg does (`libavutil/vulkan.c`) -- so the fence belongs to one of its exec pools.
+
+**FFmpeg on its own is clean.** Four concurrent `prores_vulkan` decodes in one `ffmpeg.exe`
+sharing one `-init_hw_device vulkan=vk:0,debug=1` finish with zero threading errors and exit 0.
+So this is a property of the integration, not of the decoder -- which is the useful half of the
+result, because it means it is ours to fix.
+
+**Two hypotheses tested and rejected, both reverted rather than left in:**
+
+| hypothesis | test | outcome |
+| :--- | :--- | :--- |
+| frame threading inside one decoder | same soak at ONE layer | no error in 3 rounds -- but 3 rounds cannot separate "never" from "less often", so this is suggestive only |
+| concurrent decoder BRING-UP races on pool creation | a process-wide mutex around `av_hwframe_ctx_init` in `get_hw_format` | **no improvement**: 7 distinct messages after, against 2 before. The conflict is in ongoing use, not in setup. Reverted |
+
+Ruled out by reading rather than by test: our importer is not shared (one `unique_ptr` per
+producer, so its fence and command buffer are private), `avcodec_*` calls are already confined to
+the decode thread (the flush was moved there deliberately), and FFmpeg's exec pools live in
+`VulkanFramesPriv` -- per frames context, so our one-context-per-device sharing does not put two
+producers on one pool.
+
+**The next step is attribution, and it is cheap.** The layer reports OS thread ids and nothing in
+our log says which of our threads is which, so "thread 75864 and thread 76840" names two numbers
+and no roles. One log line from the device thread and one per decode thread would settle whether
+the two threads are two producers, or a producer and the mixer's device thread. An attempt at
+this was abandoned after three build failures -- `std::thread::id` cannot be streamed into the
+log because boost's overload makes it ambiguous, so it needs the Win32 id directly -- and it is
+worth finishing before any more hypotheses are tried.
+
+**Also unresolved: whether the layer is right.** Concurrent bring-up creates and destroys many
+fences, and the layer tracks objects by handle, so handle reuse could produce a false positive.
+Nothing here distinguishes that from a genuine shared fence yet. The TDR is real either way.
+
