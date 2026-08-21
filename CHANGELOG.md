@@ -100,11 +100,18 @@ warning is kept, so the slow-frame signal that was the only useful part of the o
 survives. After 10 s the wait throws, because losing a frame to an exception is strictly
 better than losing the GPU to undefined behaviour.
 
-**The OpenGL backend was already right**, and that is the part worth keeping. Its readback
-loops on `glClientWaitSync` until the sync is signalled and has no give-up branch at all, so
-the backends had diverged and the divergence WAS the defect -- one of them treated a timeout
-as completion. Only Vulkan is changed here; the Vulkan side is now bounded where OpenGL still
-loops without limit, which is the one remaining asymmetry and the safer direction.
+**The OpenGL backend was already right about the dangerous part**, and that is worth keeping:
+its readback loops on `glClientWaitSync` until the sync signals and never recycles anything
+still in flight, so the backends had diverged and the divergence WAS the defect -- one of them
+treated a timeout as completion.
+
+It was wrong about two smaller things, now fixed with it. `GL_WAIT_FAILED` is an **error**, not
+"not yet": the sync object is unusable and will never signal, and the loop's only exit was
+success, so an error spun it forever with no diagnostic. And the loop had no bound at all --
+safe for a slow GPU, since waiting there costs latency rather than correctness, but a wedged
+driver hung the single GL thread silently and permanently, stalling every channel that shares
+it. Both now throw, on the same 10 s budget as the Vulkan side, so the two backends fail
+comparably instead of one failing loudly and the other not at all.
 
 **Not confined to the experimental path.** `d3d11_import_bridge` is the import used by
 `<gpu-direct-decode>`, which is now on by default, so any configuration whose GPU misses a
@@ -122,7 +129,10 @@ arithmetic.
 **Measured against the failure itself.** The reproduction that found this -- a four-layer
 soak, which hit the TDR once in eight attempts before the fix -- now runs **30 rounds clean with
 zero TDRs** in the Windows event log. `vk-decode-soak` is **6/6 clean at eight concurrent
-producers**, 8/8 active, zero device losses and zero stand-downs. If the per-round rate were
+producers**, 8/8 active, zero device losses and zero stand-downs -- and **4/4 clean with 4/4
+active on the DEFAULT `<gpu-direct-decode>` route**, which that battery could not reach until it
+was given one: it hardcoded `<vulkan-decode>`, so the bridge most operators actually run had
+never been soaked at all. `conformance` is 100/100 on **both** mixers after the OpenGL change. If the per-round rate were
 unchanged, thirty clean rounds would happen about 4% of the time, so this is support rather
 than proof.
 

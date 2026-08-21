@@ -425,6 +425,24 @@ struct device::impl : public std::enable_shared_from_this<impl>
             if (wait == GL_ALREADY_SIGNALED || wait == GL_CONDITION_SATISFIED) {
                 break;
             }
+            // GL_WAIT_FAILED is an ERROR, not "not yet": the sync object is unusable and
+            // will never signal, so treating it as a timeout spun this loop forever with
+            // no diagnostic. GL_TIMEOUT_EXPIRED is the only result worth another pass.
+            if (wait == GL_WAIT_FAILED) {
+                CASPAR_THROW_EXCEPTION(caspar_exception() << msg_info(
+                    "glClientWaitSync failed on a readback fence; it will never signal"));
+            }
+            // And bound the polling. This loop had no exit but success, which is the safe
+            // direction for a SLOW gpu -- unlike the Vulkan backend, it never recycled
+            // anything still in flight, so waiting cost latency rather than correctness --
+            // but it also meant a wedged driver hung the GL thread silently and forever,
+            // stalling every channel that shares it. The Vulkan side now throws after the
+            // same budget; matching it here is what keeps the two backends' failure
+            // behaviour comparable. See accelerator/vulkan/util/gpu_wait.h.
+            if (std::chrono::steady_clock::now() - start > std::chrono::seconds(10)) {
+                CASPAR_THROW_EXCEPTION(caspar_exception() << msg_info(
+                    "a readback fence did not signal within the wait budget"));
+            }
         }
 
         glDeleteSync(fence);
