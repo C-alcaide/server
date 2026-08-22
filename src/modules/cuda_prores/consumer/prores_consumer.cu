@@ -68,7 +68,10 @@
 #endif
 #include <cuda_gl_interop.h>
 
+#include <accelerator/ogl/util/device.h>
 #include <accelerator/ogl/util/texture.h>
+
+#include "../../cuda_gl_interop_lock.h"
 
 #include "../cuda/cuda_prores_frame.h"
 #include "../cuda/cuda_prores_tables.cuh"
@@ -407,18 +410,11 @@ public:
         format_desc_ = format_desc;
         prores_tables_upload();
 
-#ifdef WIN32
-        // Capture GL share context for GPU-direct path (CUDA-GL interop)
-        if (!channel_info.use_vulkan && channel_info.gl_share_context) {
-            gl_share_context_ = channel_info.gl_share_context;
-        }
-#else
-        // Linux EGL: capture EGL context + display for GPU-direct path
-        if (!channel_info.use_vulkan && channel_info.gl_share_context) {
-            gl_share_context_ = channel_info.gl_share_context;
-            egl_display_      = channel_info.egl_display;
-        }
-#endif
+        // No GL context is captured from `channel_info` any more, on either platform. It was
+        // only ever there to be handed to `wglShareLists` / `eglCreateContext` for a private
+        // context on the encode thread; the map now runs on the mixer's own thread, reached
+        // through `texture::get_device()`, so the frame carries everything needed and there is
+        // nothing to remember at construction.
 
         // Detect interlaced and field dominance from the channel format
         is_interlaced_ = (format_desc_.field_count == 2);
@@ -696,129 +692,24 @@ private:
     {
         bool first_frame = true;
 
-        // Set up shared GL context for GPU-direct CUDA-GL interop
-#ifdef WIN32
-        if (gl_share_context_ && !is_interlaced_) {
-            auto main_hglrc = static_cast<HGLRC>(gl_share_context_);
-            // Create a compatible DC using a PBUFFER-less offscreen window class
-            WNDCLASSW wc{};
-            wc.lpfnWndProc   = DefWindowProcW;
-            wc.hInstance     = GetModuleHandleW(nullptr);
-            wc.lpszClassName = L"CasparCG_ProRes_GL";
-            RegisterClassW(&wc);
-            HWND hwnd = CreateWindowW(L"CasparCG_ProRes_GL", L"", 0, 0, 0, 1, 1,
-                                      nullptr, nullptr, wc.hInstance, nullptr);
-            if (hwnd) {
-                gpu_dc_ = GetDC(hwnd);
-                PIXELFORMATDESCRIPTOR pfd{};
-                pfd.nSize    = sizeof(pfd);
-                pfd.nVersion = 1;
-                pfd.dwFlags  = PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL;
-                pfd.iPixelType = PFD_TYPE_RGBA;
-                pfd.cColorBits = 32;
-                int fmt = ChoosePixelFormat(gpu_dc_, &pfd);
-
-                // PREFER AN ACCELERATED FORMAT, and say which one was got.
-                //
-                // `wglShareLists` refuses to share between the vendor's OpenGL and Microsoft's
-                // generic software implementation, and `ChoosePixelFormat` on a bare
-                // PFD_DRAW_TO_WINDOW|PFD_SUPPORT_OPENGL request is entitled to return the
-                // generic one -- at which point the share fails and the consumer silently spends
-                // the rest of its life on the host path. Measured 2026-08-22 by `encode-matrix`:
-                // `wglShareLists failed - CPU path` on every run, so the fork's own GPU-direct
-                // ProRes route had not engaged at all, and the only trace was one warning.
-                //
-                // So walk the formats for one the driver accelerates, and if none exists say so
-                // with the reason rather than reporting a bare failure.
-                PIXELFORMATDESCRIPTOR got{};
-                if (fmt && DescribePixelFormat(gpu_dc_, fmt, sizeof(got), &got) &&
-                    (got.dwFlags & PFD_GENERIC_FORMAT)) {
-                    const int n = DescribePixelFormat(gpu_dc_, 1, sizeof(got), nullptr);
-                    for (int i = 1; i <= n; ++i) {
-                        PIXELFORMATDESCRIPTOR cand{};
-                        if (!DescribePixelFormat(gpu_dc_, i, sizeof(cand), &cand))
-                            continue;
-                        if ((cand.dwFlags & PFD_SUPPORT_OPENGL) &&
-                            (cand.dwFlags & PFD_DRAW_TO_WINDOW) &&
-                            !(cand.dwFlags & PFD_GENERIC_FORMAT) &&
-                            cand.iPixelType == PFD_TYPE_RGBA && cand.cColorBits >= 24) {
-                            fmt = i;
-                            got = cand;
-                            break;
-                        }
-                    }
-                }
-                CASPAR_LOG(debug) << L"[cuda_prores] GL share pixel format " << fmt
-                                  << (got.dwFlags & PFD_GENERIC_FORMAT ? L" (GENERIC/software)"
-                                                                       : L" (accelerated)");
-
-                if (fmt && SetPixelFormat(gpu_dc_, fmt, &pfd)) {
-                    gpu_hglrc_ = wglCreateContext(gpu_dc_);
-                    if (gpu_hglrc_) {
-                        if (wglShareLists(main_hglrc, gpu_hglrc_)) {
-                            wglMakeCurrent(gpu_dc_, gpu_hglrc_);
-                            gl_cache_ = std::make_unique<cuda_gl_read_cache>();
-                            gpu_direct_active_   = true;
-                            gpu_direct_gl_ready_ = true;
-                            CASPAR_LOG(info) << L"[cuda_prores] GPU-direct path active (CUDA-GL interop)";
-                        } else {
-                            const auto err = GetLastError();
-                            wglDeleteContext(gpu_hglrc_);
-                            gpu_hglrc_ = nullptr;
-                            // NAME THE REASON. "failed" sent three sessions looking at CUDA.
-                            // ERROR_BUSY (170) means the mixer's context is current on its own
-                            // thread, which is a lifetime problem here rather than a driver one;
-                            // ERROR_INVALID_OPERATION (4317) means this context has already been
-                            // used; a generic pixel format means the two are different OpenGL
-                            // implementations and can never be shared.
-                            CASPAR_LOG(warning) << L"[cuda_prores] wglShareLists failed (error "
-                                                << static_cast<unsigned>(err) << L", pixel format "
-                                                << fmt
-                                                << (got.dwFlags & PFD_GENERIC_FORMAT
-                                                        ? L" GENERIC/software"
-                                                        : L" accelerated")
-                                                << L") - CPU path";
-                        }
-                    }
-                }
-            }
-        }
-#else
-        // Linux EGL: create a shared context on the encode thread for CUDA-GL interop
-        if (gl_share_context_ && egl_display_ && !is_interlaced_) {
-            auto shared_ctx = static_cast<EGLContext>(gl_share_context_);
-            auto display    = static_cast<EGLDisplay>(egl_display_);
-
-            // Query the config used by the shared context
-            EGLint config_id = 0;
-            eglQueryContext(display, shared_ctx, EGL_CONFIG_ID, &config_id);
-            EGLConfig config = nullptr;
-            EGLint num_configs = 0;
-            EGLint config_attribs[] = { EGL_CONFIG_ID, config_id, EGL_NONE };
-            eglChooseConfig(display, config_attribs, &config, 1, &num_configs);
-
-            if (config && num_configs > 0) {
-                // Create encoder's own context sharing GL objects with the mixer
-                EGLint ctx_attribs[] = { EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE };
-                egl_context_ = eglCreateContext(display, config, shared_ctx, ctx_attribs);
-                if (egl_context_ != EGL_NO_CONTEXT) {
-                    // Surfaceless make-current (EGL 1.5 / EGL_KHR_surfaceless_context)
-                    if (eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, egl_context_)) {
-                        gl_cache_ = std::make_unique<cuda_gl_read_cache>();
-                        gpu_direct_active_   = true;
-                        gpu_direct_gl_ready_ = true;
-                        CASPAR_LOG(info) << L"[cuda_prores] GPU-direct path active (CUDA-EGL interop)";
-                    } else {
-                        eglDestroyContext(display, egl_context_);
-                        egl_context_ = EGL_NO_CONTEXT;
-                        CASPAR_LOG(warning) << L"[cuda_prores] eglMakeCurrent failed - CPU path";
-                    }
-                } else {
-                    CASPAR_LOG(warning) << L"[cuda_prores] eglCreateContext failed - CPU path";
-                }
-            }
-        }
-#endif
+        // NO PRIVATE GL CONTEXT HERE ANY MORE. The map runs on the mixer's own GL thread
+        // instead -- see `try_gpu_direct_upload`.
+        //
+        // What was here: an offscreen window, its own WGL context, and `wglShareLists` against
+        // the mixer's, so that this thread could register the composited texture with CUDA.
+        // Measured 2026-08-22, it had never once worked on Windows: `wglShareLists` returned
+        // ERROR_BUSY (170) with an *accelerated* pixel format, because it refuses a context that
+        // is current on another thread and the mixer's context is current on its device thread
+        // permanently. So the consumer logged one warning at startup and spent the rest of its
+        // life on a host readback. The Linux EGL variant of the same idea went with it: it may
+        // well have worked, but it is the same design and keeping one platform on it would keep
+        // the hazard.
+        //
+        // `cuda_gl_upload.h` had already written this down, and named this consumer as the
+        // exception: CUDA registers GL objects against the CALLING THREAD'S context, so the
+        // registration has to happen on the thread that owns it. `accelerator::ogl::device`
+        // exists to dispatch onto that thread, the NVENC uploader uses it, and there is no
+        // second context to stand up.
 
         while (running_ || !queue_empty()) {
             FrameJob job;
@@ -862,50 +753,98 @@ private:
         CASPAR_LOG(info) << L"[cuda_prores] Encode thread exited cleanly.";
     }
 
-    // Attempt GPU-direct upload: read OGL texture via CUDA-GL interop into d_bgra_.
-    // Returns true if successful (d_bgra_ populated on device), false if fallback needed.
+    /// Copy the composited texture into `d_bgra_` without it passing through host memory.
+    ///
+    /// Runs the CUDA-GL map ON THE MIXER'S OWN GL THREAD via `device::dispatch_sync`, because
+    /// CUDA registers GL objects against the calling thread's context. This is the pattern
+    /// `cuda_gl_upload.h` prescribes and the NVENC uploader already uses.
+    ///
+    /// Deferring the map to encode time is safe because the job holds the `const_frame`, which
+    /// holds the texture: the mixer's attachment pool cannot recycle a texture that is still
+    /// referenced, so the picture is still there when the encode thread gets to it.
     bool try_gpu_direct_upload(const core::const_frame& frame, cudaStream_t stream)
     {
-#ifdef WIN32
-        if (!gpu_direct_gl_ready_ || !gl_cache_)
+        if (is_interlaced_)
             return false;
 
         auto tex = frame.texture();
         if (!tex)
             return false;
-
         auto* ogl_tex = dynamic_cast<accelerator::ogl::texture*>(tex.get());
         if (!ogl_tex)
+            return false;              // a Vulkan channel: no CUDA-GL interop to be had
+        auto dev = ogl_tex->get_device();
+        if (!dev)
             return false;
 
-        int gl_id = ogl_tex->id();
-        int w = ogl_tex->width();
-        int h = ogl_tex->height();
+        const int gl_id = ogl_tex->id();
+        const int w     = ogl_tex->width();
+        const int h     = ogl_tex->height();
         if (w != format_desc_.width || h != format_desc_.height)
             return false;
 
-        cudaArray_t arr = gl_cache_->map_texture(gl_id, stream);
-        if (!arr)
-            return false;
+        const bool ok = dev->dispatch_sync([&]() -> bool {
+            // The runtime API's primary context is per device and shared between threads, so
+            // selecting the same device here puts this thread in the same context the encode
+            // thread uses -- which is what makes `d_bgra_` a legal destination.
+            if (cudaSetDevice(cfg_.device_index) != cudaSuccess)
+                return false;
 
-        // Copy from cudaArray (2D texture) to linear device buffer d_bgra_
-        auto err = cudaMemcpy2DFromArrayAsync(
-            d_bgra_, (size_t)w * 4,  // dst, dpitch
-            arr, 0, 0,               // src array, x offset, y offset
-            (size_t)w * 4, (size_t)h, // width in bytes, height
-            cudaMemcpyDeviceToDevice, stream);
+            std::lock_guard<std::mutex> gl_lk(caspar::cuda_gl_interop_mutex());
 
-        gl_cache_->unmap_texture(gl_id, stream);
+            // Built here rather than at start-up: its registrations belong to this thread's GL
+            // context, so it must be created, used and destroyed on this thread.
+            if (!gl_cache_)
+                gl_cache_ = std::make_unique<cuda_gl_read_cache>();
 
-        if (err != cudaSuccess) {
-            CASPAR_LOG(warning) << L"[cuda_prores] GPU-direct copy failed: "
-                                << cudaGetErrorString(err);
-            return false;
+            cudaArray_t arr = gl_cache_->map_texture(gl_id, stream);
+            if (!arr)
+                return false;
+
+            auto err = cudaMemcpy2DFromArrayAsync(d_bgra_, (size_t)w * 4,
+                                                  arr, 0, 0,
+                                                  (size_t)w * 4, (size_t)h,
+                                                  cudaMemcpyDeviceToDevice, stream);
+            gl_cache_->unmap_texture(gl_id, stream);
+            if (err != cudaSuccess) {
+                CASPAR_LOG(warning) << L"[cuda_prores] GPU-direct copy failed: "
+                                    << cudaGetErrorString(err);
+                return false;
+            }
+
+            // THE COPY IS RAW AND THE TEXTURE IS NOT IN THE SAME ORDER AS A READBACK. The
+            // attachment is GL_RGBA8 with an external format of GL_BGRA, so GL swizzles on
+            // every host transfer -- which means the host path and this path hand opposite
+            // orders to the same conversion kernel. Measured the first time this path ever
+            // actually ran: mean 166.31 LSB against the host path with only 5% of it at a
+            // chroma edge, i.e. flat areas wrong everywhere, which is an exchange and not a
+            // resampling difference.
+            err = prores_launch_swap_rb_8888(d_bgra_, w, h, stream);
+            if (err != cudaSuccess) {
+                CASPAR_LOG(warning) << L"[cuda_prores] GPU-direct R/B exchange failed: "
+                                    << cudaGetErrorString(err);
+                return false;
+            }
+            // Not synchronised here on purpose: the unmap is recorded on the same stream the
+            // encode kernels use, so the ordering holds without stalling the mixer's thread.
+            return true;
+        });
+
+        if (ok) {
+            gl_device_ = dev;
+            // THE DYNAMIC RE-ARM, which is the documented idiom (`core/frame/frame.h`) and the
+            // only safe way to declare this. Announcing GPU-direct up front would tell the
+            // channel to stop reading back before anything had proved it could work, and a
+            // later failure would then have no host pixels to fall back to. So the first
+            // success is what switches the readback off, and any failure switches it back on.
+            if (!gpu_direct_active_.exchange(true))
+                CASPAR_LOG(info) << L"[cuda_prores] GPU-direct path active (CUDA-GL interop on "
+                                    L"the mixer's own thread); the channel readback stops here";
+        } else if (gpu_direct_active_.exchange(false)) {
+            CASPAR_LOG(warning) << L"[cuda_prores] GPU-direct upload failed; re-arming the "
+                                   L"channel readback and encoding from host memory";
         }
-        return true;
-#else
-        return false;
-#endif
+        return ok;
     }
 
     bool encode_one(FrameJob &job, bool first_frame)
@@ -1054,25 +993,29 @@ private:
         if (encode_thread_.joinable())
             encode_thread_.join();
 
-        // GPU-direct cleanup (must happen after encode_thread_ joins since
-        // the GL context was made current on that thread)
-        gl_cache_.reset();
-#ifdef WIN32
-        if (gpu_hglrc_) {
-            wglMakeCurrent(nullptr, nullptr);
-            wglDeleteContext(gpu_hglrc_);
-            gpu_hglrc_ = nullptr;
+        // GPU-DIRECT CLEANUP. Was a bare `gl_cache_.reset()` on this thread, back when the
+        // registrations were made against a private context this thread owned. They now belong
+        // to the mixer's GL thread, so destroying them here would be exactly the teardown crash
+        // `cuda_gl_upload.h` warns about -- and it would have been latent rather than loud,
+        // because the old private context never successfully registered anything to destroy.
+        // On the GL thread, for the same reason it was created there: the registrations
+        // belong to that context, and unregistering from another thread crashes at teardown
+        // rather than in use -- which is a poor trade, as `cuda_gl_upload.h` puts it.
+        if (gl_cache_) {
+            if (auto dev = gl_device_.lock()) {
+                dev->dispatch_sync([&] {
+                    std::lock_guard<std::mutex> gl_lk(caspar::cuda_gl_interop_mutex());
+                    gl_cache_.reset();
+                    return true;
+                });
+            } else {
+                // No device left to dispatch onto. Leaking the registrations is worse than
+                // the alternative only in theory: the process is going down with us.
+                (void)gl_cache_.release();
+            }
         }
-#else
-        if (egl_context_ != EGL_NO_CONTEXT && egl_display_) {
-            auto display = static_cast<EGLDisplay>(egl_display_);
-            eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
-            eglDestroyContext(display, egl_context_);
-            egl_context_ = EGL_NO_CONTEXT;
-        }
-#endif
-        gpu_direct_active_   = false;
-        gpu_direct_gl_ready_ = false;
+
+        gpu_direct_active_ = false;
 
         // GPU resource cleanup
         if (encode_stream_) {
@@ -1140,17 +1083,13 @@ private:
     // ── GPU-direct path (CUDA-GL interop) ─────────────────────────────────
     // When active, reads the OGL mixer texture directly on GPU, avoiding
     // the GPU→CPU→GPU roundtrip (PBO readback + cudaMemcpyAsync H→D).
-#ifdef WIN32
-    void*                    gl_share_context_ = nullptr; // mixer's HGLRC
-    HDC                      gpu_dc_           = nullptr;
-    HGLRC                    gpu_hglrc_        = nullptr; // shared WGL context for encode thread
-#else
-    void*                    gl_share_context_ = nullptr; // mixer's EGLContext
-    void*                    egl_display_      = nullptr; // EGLDisplay for context ops
-    EGLContext               egl_context_      = EGL_NO_CONTEXT; // encode thread's shared context
-#endif
+    /// False until a frame has actually been mapped, and back to false the moment one fails.
+    /// `needs_cpu_frame_data()` is read every tick, so this is a live switch on the channel's
+    /// readback rather than a one-time declaration.
     std::atomic<bool>         gpu_direct_active_{false};
-    bool                     gpu_direct_gl_ready_ = false; // GL context made current on encode thread
+    /// The device whose thread `gl_cache_`'s registrations belong to, so they can be destroyed
+    /// there. Weak because the mixer outliving this consumer is the normal case, not a promise.
+    std::weak_ptr<accelerator::ogl::device> gl_device_;
     std::unique_ptr<cuda_gl_read_cache> gl_cache_;
 
     // ── Muxers (only one is active at a time) ─────────────────────────────

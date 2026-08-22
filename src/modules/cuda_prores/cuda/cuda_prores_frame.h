@@ -187,6 +187,18 @@ cudaError_t prores_launch_bgra_to_v210(
     int            height,
     cudaStream_t   stream);
 
+/// In-place red/blue exchange on a packed 8888 buffer.
+///
+/// For the GPU-direct upload only: the mixer's OpenGL attachment is GL_RGBA8 with an external
+/// format of GL_BGRA, so GL swizzles on every host transfer and a raw device-to-device copy of
+/// the texture delivers the opposite order from a readback. Applied at the fill site so that
+/// `d_bgra` means BGRA to every kernel downstream, whichever route filled it.
+cudaError_t prores_launch_swap_rb_8888(
+    uint8_t      *d_px,
+    int           width,
+    int           height,
+    cudaStream_t  stream);
+
 cudaError_t prores_launch_bgra8_to_field422p10(
     const uint8_t *d_bgra,
     int16_t       *d_y,

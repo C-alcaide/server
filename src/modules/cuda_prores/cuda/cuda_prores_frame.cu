@@ -31,6 +31,7 @@
 #include "cuda_prores_entropy.cu"    // includes kernel definitions
 #include "cuda_bgra_to_yuva444p10.cuh"  // direct BGRA->4444P10 for ProRes 4444
 #include "cuda_bgra_to_field422p10.cuh" // BGRA->YUV422P10 field extraction
+#include "cuda_swap_rb.cuh"             // R/B exchange for the GPU-direct upload
 
 #include <cub/device/device_scan.cuh>
 #include <cuda_runtime.h>
@@ -827,6 +828,15 @@ cudaError_t prores_encode_from_yuv_fields_422(
 // static-inline launchers directly.  This avoids nvlink "multiple definition"
 // errors under separable compilation.
 // ---------------------------------------------------------------------------
+cudaError_t prores_launch_swap_rb_8888(
+    uint8_t      *d_px,
+    int           width,
+    int           height,
+    cudaStream_t  stream)
+{
+    return launch_swap_rb_8888(d_px, width, height, stream);
+}
+
 cudaError_t prores_launch_bgra_to_v210(
     const uint8_t *d_bgra,
     uint32_t      *d_v210,
