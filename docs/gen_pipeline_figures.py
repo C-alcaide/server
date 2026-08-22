@@ -237,8 +237,7 @@ def fig_gpudirect_gate():
         ("no user video filter", "lavfi filters operate on host frames"),
         ("no explicit -pix_fmt", "the frames are CUDA/RGB0; lavfi cannot reformat them"),
         ("8-bit channel", "the copy is byte-for-byte from an RGBA8 texture"),
-        ("OpenGL mixer", "the Vulkan target is not allocated exportable"),
-        ("CUDA device present", ""),
+        ("CUDA device present", "either mixer -- OpenGL or Vulkan"),
     ]
     y = 5.32
     for name, why in gates:
@@ -256,10 +255,50 @@ def fig_gpudirect_gate():
     plt.close(fig)
 
 
+def fig_vulkan_encode_gate():
+    """The second GPU recording route, and the two things it insists on.
+
+    A separate figure rather than more rows on the NVENC one, because the point is that these
+    are TWO ROUTES to the same place with different requirements -- and the codec each can reach
+    is what decides between them, not a preference.
+    """
+    fig, ax = plt.subplots(figsize=(11.2, 6.0))
+    ax.set_xlim(0, 11.2); ax.set_ylim(0, 6.0); ax.axis("off")
+    ax.text(0.15, 5.66, "When the Vulkan encoders engage", fontsize=13, weight="bold", color=C_TEXT)
+    ax.text(0.15, 5.30, "NVENC cannot encode ProRes or FFV1. This route can, with no readback.",
+            fontsize=9.5, color=C_MUTED)
+
+    gates = [
+        ("encoder ends _vulkan", "prores_ks / ffv1 / h264 / hevc; av1 needs an Ada GPU"),
+        ("Vulkan mixer", "the exporter copies into an FFmpeg VkImage on the same device"),
+        ("16-bit channel", "libplacebo exchanges red and blue on a BGRA frame; 16-bit is RGBA"),
+        ("no user video filter", "this path owns the filter chain"),
+    ]
+    y = 4.62
+    for name, why in gates:
+        box(ax, 0.15, y - 0.32, 3.0, 0.62, name, C_GPU, fs=9.5)
+        ax.text(3.45, y, "→", color=C_MUTED, fontsize=12, va="center")
+        ax.text(3.95, y, why, color=C_MUTED, fontsize=9, va="center")
+        y -= 0.90
+
+    box(ax, 0.15, 0.85, 3.0, 0.62, "all true → engages", C_GREEN, fs=9.5)
+    ax.text(3.95, 1.16, "otherwise the host path runs, and the reason is logged",
+            color=C_TEXT, fontsize=9, va="center")
+    ax.text(0.15, 0.34,
+            "Picture agrees with the CPU encoder to a mean of 2.5 LSB. Cost is NOT measured, and "
+            "rate-control defaults are untuned — set a bitrate.",
+            fontsize=8.5, color=C_MUTED)
+
+    fig.tight_layout()
+    fig.savefig(os.path.join(OUT, "vulkan_encode_gate.png"), dpi=150)
+    plt.close(fig)
+
+
 if __name__ == "__main__":
     fig_producer_path()
     fig_capacity()
     fig_tick()
     fig_recording()
     fig_gpudirect_gate()
+    fig_vulkan_encode_gate()
     print("wrote figures to", OUT)

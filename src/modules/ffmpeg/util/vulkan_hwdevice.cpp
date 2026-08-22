@@ -74,6 +74,12 @@ struct extension_registrar
 const extension_registrar g_extension_registrar;
 } // namespace
 
+//: The mixer's queue lock, taken from `shared_device_info` once. Same pair for every device --
+//: they only cast their argument to `accelerator::vulkan::device*` and call a member -- so a
+//: single copy avoids rebuilding the descriptor on every FFmpeg submission.
+static void (*g_lock_queue)(void*)   = nullptr;
+static void (*g_unlock_queue)(void*) = nullptr;
+
 AVBufferRef* make_vulkan_hwdevice_from_mixer(void* vk_device_handle)
 {
     // ONE DEVICE CONTEXT PER VkDevice, SHARED BY EVERY PRODUCER. This is not an
@@ -254,6 +260,40 @@ AVBufferRef* make_vulkan_hwdevice_from_mixer(void* vk_device_handle)
         hwctx->device_features.pNext = f11 ? static_cast<void*>(f11) : static_cast<void*>(f12);
         hwctx->device_features.features =
             *static_cast<const VkPhysicalDeviceFeatures*>(info.features10);
+    }
+
+    // ── HAND FFMPEG THE MIXER'S QUEUE LOCK ─────────────────────────────────────────
+    //
+    // Left null, `vulkan_device_init` installs its own per-(family, index) mutex. That
+    // serialises FFmpeg's submissions and nothing else -- so FFmpeg's mutex and the mixer's
+    // `_queue_mutex` guard the SAME `VkQueue` independently. On this GPU family 0 carries
+    // graphics, compute and transfer, so FFmpeg's "compute queue" and the mixer's queue are one
+    // object, and `vkQueueSubmit` requires external synchronisation that neither party can
+    // provide alone.
+    //
+    // Measured 2026-08-22, recording through `h264_vulkan` under the validation layer:
+    // `UNASSIGNED-Threading-MultipleThreads-Write, vkQueueSubmit(): THREADING ERROR : object of
+    // type VkQueue is simultaneously used in current thread 77836 and thread 71140`. The decode
+    // path had not shown it because its own fix -- one shared context, therefore one FFmpeg
+    // mutex -- happens to cover producer-against-producer, and only the encode path adds a
+    // second submitter that is the MIXER.
+    //
+    // `user_opaque` carries the `device*` because the callback is handed an
+    // `AVHWDeviceContext*` and nothing else. This context is ours, so the field is free.
+    if (info.lock_queue && info.unlock_queue && info.mixer_device) {
+        auto* device_ctx        = reinterpret_cast<AVHWDeviceContext*>(ref->data);
+        device_ctx->user_opaque = info.mixer_device;
+        // The thunks are held in file scope rather than re-derived per call: these fire on
+        // every FFmpeg submission, and `describe_shared_device` builds the whole descriptor.
+        // They are the same two functions for every device, so one copy is correct.
+        g_lock_queue            = info.lock_queue;
+        g_unlock_queue          = info.unlock_queue;
+        hwctx->lock_queue       = [](AVHWDeviceContext* ctx, uint32_t, uint32_t) {
+            g_lock_queue(ctx->user_opaque);
+        };
+        hwctx->unlock_queue = [](AVHWDeviceContext* ctx, uint32_t, uint32_t) {
+            g_unlock_queue(ctx->user_opaque);
+        };
     }
 
     const int err = av_hwdevice_ctx_init(ref);

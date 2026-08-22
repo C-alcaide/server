@@ -40,6 +40,9 @@ shared_device_info describe_shared_device(void* vk_device)
     info.decode_qf_isolated        = dev->hasDedicatedDecodeQueue();
     info.encode_qf                 = dev->getEncodeQueueFamily();
     info.encode_qf_present         = dev->hasEncodeQueue();
+    info.mixer_device              = dev;
+    info.lock_queue   = [](void* d) { static_cast<device*>(d)->lock_queue(); };
+    info.unlock_queue = [](void* d) { static_cast<device*>(d)->unlock_queue(); };
     info.features10                = &dev->getEnabledFeatures10();
     info.features11                = &dev->getEnabledFeatures11();
     info.features12                = &dev->getEnabledFeatures12();

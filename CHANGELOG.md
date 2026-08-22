@@ -1,6 +1,80 @@
 CasparVP — Unreleased
 ==========================================
 
+### Added: GPU recording through FFmpeg 8's Vulkan encoders — and ProRes/FFV1 without a readback
+
+`-vcodec prores_ks_vulkan`, `ffv1_vulkan`, `h264_vulkan` or `hevc_vulkan` on a channel running
+the Vulkan mixer now hands the composited texture straight to the encoder. The motivating gap is
+narrow and real: GPU-direct recording already existed for NVENC, so "skip the readback" was
+banked for H.264/HEVC — but **NVENC cannot encode ProRes or FFV1**, and those recorded on the
+CPU. Measured here, the CPU ProRes encoder does not keep up at 1080p25 at all: it dropped 59 of
+~150 frames where the Vulkan encoder dropped none.
+
+**This requires `<color-depth>16</color-depth>`, and an 8-bit channel is refused with the reason
+logged.** It is a channel-order constraint, not a precision preference. Measured outside
+CasparCG entirely, on a half-red/half-blue still, `format=bgra,hwupload,libplacebo=format=...`
+comes back with **red and blue exchanged**, where `rgba` and `rgba64` do not —
+`hwupload`/`hwdownload` round-trip BGRA correctly and `scale_vulkan` reads it correctly, so it is
+`vf_libplacebo` applying the pixel descriptor's component order on top of the one
+`VK_FORMAT_B8G8R8A8_UNORM` already performs. The mixer's 8-bit attachment holds BGRA bytes; its
+16-bit attachment holds RGBA. Taking the 16-bit composite needs no swizzle and no reliance on
+two exchanges cancelling.
+
+Picture parity against the CPU encoder, 1080p2500 at 16-bit, on a still:
+
+| codec | worst | mean | >3 LSB | of those, at a chroma transition |
+| :--- | ---: | ---: | ---: | ---: |
+| `prores_ks_vulkan` | 132 | 2.55 | 4.35% | 85.6% |
+| `ffv1_vulkan` | 132 | 2.49 | 3.89% | 92.2% |
+| `h264_vulkan` | 138 | 2.59 | 6.94% | 55.2% |
+| `hevc_vulkan` | 132 | 2.53 | 6.94% | 56.9% |
+
+The edge share is the reading rather than the worst delta — two 4:2:2 implementations disagree by
+tens of LSB at a hard vertical transition and neither is wrong. **What this does not cover:** one
+still, one raster, one frame per recording, and **no cost measurement at all** — the claim is
+that the GPU encoder produces the right picture, not that it is faster. For FFV1, which is
+lossless, the 2.49 LSB is the two RGB-to-YUV converters differing (swscale against libplacebo)
+and says nothing about either encoder. Recording sizes differ by rate-control defaults nobody
+tuned: `hevc_vulkan` wrote 6.3 MB where `libx265` wrote 108 KB.
+
+`av1_vulkan` is absent from the allowlist rather than refused by name — FFmpeg queries the device
+and says *"Device does not support encoding av1!"*, which is a better message than one written
+here. This box is Ampere; AV1 encode needs Ada.
+
+### Fixed: FFmpeg and the Vulkan mixer guarded the same `VkQueue` with different mutexes
+
+`vulkan_device_init` installs its own per-(family, index) mutex when the application leaves
+`AVVulkanDeviceContext::lock_queue` null. That serialises FFmpeg's own submissions and nothing
+else — and on this GPU family 0 carries graphics, compute and transfer, so FFmpeg's "compute
+queue" and the mixer's queue are the same object. `vkQueueSubmit` requires external
+synchronisation, and neither party could provide it alone.
+
+Measured while recording through `h264_vulkan` under the validation layer:
+`UNASSIGNED-Threading-MultipleThreads-Write, vkQueueSubmit(): THREADING ERROR : object of type
+VkQueue is simultaneously used in current thread 77836 and thread 71140`. The mixer's queue lock
+is now handed to FFmpeg through `shared_device_info`.
+
+**This also hardens the decode path**, which had never shown the fault: its own fix — one shared
+device context per `VkDevice`, therefore one FFmpeg mutex — covers producer against *producer*,
+and only the encode path added a second submitter that is the mixer itself. Verified with
+`vk-decode-soak --validate` at 4 concurrent producers.
+
+Two findings remain on `h264_vulkan`/`hevc_vulkan` and are **upstream FFmpeg's**, established by
+reproducing them with plain `ffmpeg` and no CasparCG in the process:
+`VUID-vkCmdEncodeVideoKHR-pEncodeInfo-08206` (the encoder binds an image view whose image lacks
+the bound video session's profile — FFmpeg's own intermediate frame, from libplacebo's pool) and
+`VUID-vkDestroyDevice-device-05137` (objects FFmpeg created outlive the device at teardown). Both
+fire inside FFmpeg's encode session and the file decodes to the right picture; the compute
+encoders (`prores_ks_vulkan`, `ffv1_vulkan`) are unaffected and run clean.
+
+Two more defects were found and fixed on the way, both invisible to the check that had passed the
+path. `scale_vulkan` was in the converter table because the feasibility spike recorded h264/hevc
+through it as "works" on the strength of a file existing and probing as `h264` — nothing had
+looked at the picture, and it mangles the levels (253 returns as 172). And the exporter never
+wrote `AVVkFrame::sem_value` back, so FFmpeg re-signalled a consumed timeline value on every
+frame (`VUID-VkSubmitInfo2-semaphore-03882`) while encoding a correct picture: undefined
+behaviour that this driver tolerated silently.
+
 ### Added: FFmpeg 8's Vulkan compute decoders, opt-in — ProRes decoded on the mixer's own device
 
 The pinned FFmpeg 8.1.2 ships `prores_vulkan`, `prores_raw_vulkan`, `ffv1_vulkan` and

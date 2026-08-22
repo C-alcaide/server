@@ -1167,6 +1167,12 @@ struct device::impl : public std::enable_shared_from_this<impl>
         _queue.submit(submitInfo, fence);
     }
 
+    // Deliberately NOT reusing `submit`: FFmpeg calls `vkQueueSubmit` itself, between these two,
+    // so the lock has to be takeable without a submission attached. Nothing here may call
+    // `submit` while holding it -- `_queue_mutex` is not recursive.
+    void lock_queue() { _queue_mutex.lock(); }
+    void unlock_queue() { _queue_mutex.unlock(); }
+
     std::shared_ptr<texture>
     create_attachment(int                   width,
                       int                   height,
@@ -1951,6 +1957,8 @@ std::vector<vk::CommandBuffer>     device::allocateCommandBuffers(uint32_t count
     return impl_->allocateCommandBuffers(count);
 }
 void       device::submit(const vk::SubmitInfo& submitInfo, vk::Fence fence) { impl_->submit(submitInfo, fence); }
+void       device::lock_queue() { impl_->lock_queue(); }
+void       device::unlock_queue() { impl_->unlock_queue(); }
 vk::Device         device::getVkDevice() const { return impl_->_device; }
 vk::PhysicalDevice device::getVkPhysicalDevice() const { return impl_->_physical_device; }
 vk::CommandPool    device::getCommandPool() const { return impl_->_command_pool; }

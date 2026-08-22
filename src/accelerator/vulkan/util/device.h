@@ -78,6 +78,23 @@ class device final
     vk::PhysicalDeviceMemoryProperties getMemoryProperties();
     std::vector<vk::CommandBuffer>     allocateCommandBuffers(uint32_t count);
     void                               submit(const vk::SubmitInfo& submitInfo, vk::Fence fence);
+
+    /// Take and release the lock that `submit` uses, for a client that submits to the mixer's
+    /// queue ITSELF rather than through `submit`.
+    ///
+    /// FFmpeg is that client. `vulkan_device_init` installs its own per-(family, index) mutex
+    /// when the application leaves `AVVulkanDeviceContext::lock_queue` null, which serialises
+    /// FFmpeg's own submissions and NOTHING ELSE -- so FFmpeg's mutex and this one guard the
+    /// same `VkQueue` independently, and on this GPU family 0 carries graphics, compute and
+    /// transfer, so "FFmpeg's compute queue" and "the mixer's queue" are one object.
+    ///
+    /// Measured 2026-08-22 while recording through `h264_vulkan` under the validation layer:
+    /// `UNASSIGNED-Threading-MultipleThreads-Write, vkQueueSubmit(): THREADING ERROR : object
+    /// of type VkQueue is simultaneously used in current thread 77836 and thread 71140`.
+    /// External synchronisation of `vkQueueSubmit` is the application's job, and neither party
+    /// could do it alone: one lock has to be shared, and this is it.
+    void                               lock_queue();
+    void                               unlock_queue();
     vk::Device                         getVkDevice() const;
     vk::PhysicalDevice                 getVkPhysicalDevice() const;
 

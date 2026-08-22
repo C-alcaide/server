@@ -65,6 +65,21 @@ struct shared_device_info
     const void* features11 = nullptr;
     const void* features12 = nullptr;
     const void* features13 = nullptr;
+
+    /// THE MIXER'S OWN QUEUE LOCK, which FFmpeg must be given rather than left to invent.
+    ///
+    /// `vulkan_device_init` installs its own per-(family, index) mutex when the application
+    /// leaves `AVVulkanDeviceContext::lock_queue` null. That serialises FFmpeg's submissions and
+    /// nothing else, so two mutexes end up guarding one `VkQueue` -- on this GPU family 0
+    /// carries graphics, compute and transfer, so FFmpeg's "compute queue" and the mixer's queue
+    /// are the same object. Measured 2026-08-22 recording through `h264_vulkan`:
+    /// `UNASSIGNED-Threading-MultipleThreads-Write, vkQueueSubmit(): THREADING ERROR`.
+    ///
+    /// `mixer_device` is the `accelerator::vulkan::device*` to pass back in, so the consumer can
+    /// install a thunk without knowing the type.
+    void* mixer_device                = nullptr;
+    void  (*lock_queue)(void* dev)    = nullptr;
+    void  (*unlock_queue)(void* dev)  = nullptr;
     /// Device extensions the mixer enabled. Another API sharing the device may rely on
     /// these and nothing else.
     std::vector<std::string> enabled_device_extensions;

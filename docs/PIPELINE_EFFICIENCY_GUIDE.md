@@ -491,6 +491,55 @@ format that matches it byte-for-byte (`x2rgb10le` is 10 bits in 32; `gbrp16le`
 and `yuv444p16le` are planar). Supporting it means a conversion kernel — exactly
 what the current design avoids.
 
+### The other GPU route: FFmpeg's Vulkan encoders, and the one thing NVENC cannot do
+
+NVENC **cannot encode ProRes or FFV1**. Those recorded on the CPU, and the CPU ProRes encoder
+does not keep up: measured at 1080p25 it dropped 59 of ~150 frames where the GPU encoder dropped
+none. FFmpeg 8 ships Vulkan encoders that take the composite with no readback, so ask for one by
+name:
+
+```
+ADD 1 FILE out.mov -vcodec prores_ks_vulkan
+ADD 1 FILE out.mkv -vcodec ffv1_vulkan
+ADD 1 FILE out.mov -vcodec h264_vulkan
+ADD 1 FILE out.mov -vcodec hevc_vulkan
+```
+
+![Vulkan encode gating](images/pipeline/vulkan_encode_gate.png)
+
+**Two requirements, and both are refusals rather than failures.** The channel must run the
+**Vulkan mixer**, and it must be **16-bit**:
+
+```xml
+<accelerator>vulkan</accelerator>
+<color-depth>16</color-depth>
+```
+
+The 16-bit requirement is a **colour-channel-order** one, not a precision preference. The
+converter in this path is FFmpeg's `libplacebo` filter, and it exchanges red and blue on a BGRA
+Vulkan frame. The mixer's 8-bit composite is BGRA; its 16-bit composite is RGBA, which
+libplacebo handles correctly. So an 8-bit channel is refused, and says so:
+
+```
+[ffmpeg] Vulkan encode: prores_ks_vulkan on the mixer's own device, converting with libplacebo=format=yuv422p10 -- the composite never reaches host memory
+[ffmpeg] Vulkan encode not used for prores_ks_vulkan: the channel is 8-bit, whose composite is BGRA -- and libplacebo exchanges red and blue on a BGRA Vulkan frame; use <color-depth>16</color-depth>
+```
+
+Like the NVENC path, a `-filter:v` takes the recording back to the host — this path owns the
+filter chain.
+
+`av1_vulkan` needs an Ada-generation GPU. On anything older FFmpeg declines it itself with
+*"Device does not support encoding av1!"*.
+
+**What has been measured, and what has not.** The recorded picture agrees with the CPU encoder
+to a mean of **2.5 LSB** on all four codecs, with 55–92% of the significant disagreement sitting
+at a chroma transition — which is two 4:2:2 implementations reconstructing a hard vertical edge
+differently, and neither is wrong. **Cost has not been measured.** The claim is that the GPU
+encoder produces the right picture, not that it is faster; the one cost observation available is
+the dropped-frame count above. Rate-control defaults are also untuned and differ wildly from the
+CPU encoders' — `hevc_vulkan` wrote 6.3 MB where `libx265` wrote 108 KB of the same six seconds,
+so set a bitrate rather than accepting the default.
+
 ### Recording with alpha
 
 GPU-direct is NVENC-only and NVENC carries no alpha. **Keyed and fill/key
