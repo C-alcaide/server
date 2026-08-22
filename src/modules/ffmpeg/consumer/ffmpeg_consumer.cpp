@@ -1108,6 +1108,23 @@ struct Stream
 #endif
     }
 
+    /// Writes back what the exporter did to the AVVkFrame, so FFmpeg's own submits stay legal.
+    static bool store_vk_plane_result(AVFrame* frame, const accelerator::vulkan::av_plane_dest& dest)
+    {
+#if LIBAVUTIL_VERSION_MAJOR >= 60
+        auto* vk = reinterpret_cast<AVVkFrame*>(frame->data[0]);
+        if (!vk)
+            return false;
+        vk->sem_value[0] = dest.signalled_value;
+        vk->layout[0]    = static_cast<VkImageLayout>(dest.final_layout);
+        return true;
+#else
+        (void)frame;
+        (void)dest;
+        return false;
+#endif
+    }
+
     /// Wraps the mixer's composited texture in a CUDA frame the encoder can read.
     /// Returns null if the frame carries no usable OpenGL texture or the copy fails.
     std::shared_ptr<AVFrame> make_cuda_video_frame(const core::const_frame& in_frame)
@@ -1151,6 +1168,11 @@ struct Stream
             if (!fill_vk_plane_dest(frame.get(), dest))
                 return nullptr;
             if (!vk_exporter->copy_from_texture(tex, dest))
+                return nullptr;
+            // The exporter signalled the frame's timeline semaphore and moved its image, so
+            // FFmpeg's own bookkeeping has to learn both -- see `av_plane_dest`, whose comment
+            // carries the validation-layer finding this fixes.
+            if (!store_vk_plane_result(frame.get(), dest))
                 return nullptr;
         } else if (gpu_uploader_vk) {
             // Vulkan: no device thread to hop onto and no context to be current --
@@ -1363,8 +1385,26 @@ struct ffmpeg_consumer : public core::frame_consumer
         auto owned = av_buffer_ptr(frames, [](AVBufferRef* p) { av_buffer_unref(&p); });
 
         auto* ctx      = reinterpret_cast<AVHWFramesContext*>(owned->data);
-        ctx->format    = AV_PIX_FMT_VULKAN;
-        ctx->sw_format = AV_PIX_FMT_BGRA;
+        ctx->format = AV_PIX_FMT_VULKAN;
+        // RGBA64, AND THE CHANNEL MUST THEREFORE BE 16-BIT. Not a precision preference -- a
+        // channel-order one, measured 2026-08-22 outside CasparCG entirely:
+        //
+        //   format=rgba64,hwupload,libplacebo=format=yuv422p10   red stays red
+        //   format=rgba,  hwupload,libplacebo=format=yuv422p10   red stays red
+        //   format=bgra,  hwupload,libplacebo=format=yuv422p10   RED AND BLUE EXCHANGED
+        //
+        // `hwupload`/`hwdownload` round-trip BGRA correctly, and `scale_vulkan` reads it
+        // correctly, so the exchange is `vf_libplacebo` applying the pixel descriptor's
+        // component order on top of the one VK_FORMAT_B8G8R8A8_UNORM already performs. An
+        // upstream defect, and one this path must not depend on the sign of.
+        //
+        // The mixer's 8-bit attachment holds BGRA bytes -- the shader writes `col.bgra` into an
+        // eR8G8B8A8Unorm image -- and its 16-bit attachment holds RGBA, because
+        // `image_kernel.cpp` sets `output_bgra` only at bit8 (there is no eB16G16R16A16Unorm to
+        // swizzle into). So the 16-bit composite is the one that already matches a format
+        // libplacebo handles, and taking it needs no swizzle, no scratch image, and no reliance
+        // on two exchanges cancelling.
+        ctx->sw_format = AV_PIX_FMT_RGBA64;
         ctx->width     = width;
         ctx->height    = height;
         // Same reasoning as the CUDA pool: deep enough that an encoder holding a few frames
@@ -1631,10 +1671,18 @@ struct ffmpeg_consumer : public core::frame_consumer
                         // `qf[2]`. Omitting an encoder costs a slower recording; accepting one
                         // the device cannot back cost a faulting decode thread last time.
                         //
-                        // The conversion filter differs per mechanism and is not a preference:
-                        // measured 2026-08-22, `scale_vulkan` converts RGB to only
-                        // NV12/YUV420P/YUV444P (all 8-bit) so it CANNOT feed ProRes, which takes
-                        // only yuv422p10/yuv444p10/yuva444p10. `libplacebo` can.
+                        // THE CONVERTER IS `libplacebo` FOR ALL FOUR, and `scale_vulkan` is not
+                        // a fallback. Measured 2026-08-22 on a half-red/half-blue still:
+                        // `scale_vulkan` gets the channel order right but the LEVELS wrong --
+                        // 253 comes back as 172, a limited-range conversion applied to already
+                        // limited-range data -- where `libplacebo` returns 229 through the same
+                        // probe. It also converts RGB to only NV12/YUV420P/YUV444P, all 8-bit,
+                        // so it could never feed ProRes, which takes only
+                        // yuv422p10/yuv444p10/yuva444p10.
+                        //
+                        // Worth naming how `scale_vulkan` came to be in this table: the Phase 0
+                        // spike recorded h264/hevc through it as "works" on the strength of a
+                        // file being produced and probing as h264. Nothing looked at the picture.
                         //
                         // AV1 is deliberately absent from the table rather than refused by name:
                         // FFmpeg queries the device itself and says "Device does not support
@@ -1643,7 +1691,7 @@ struct ffmpeg_consumer : public core::frame_consumer
                         if (selected_codec == "prores_ks_vulkan" || selected_codec == "ffv1_vulkan")
                             vk_convert_filter = "libplacebo=format=yuv422p10";
                         else if (selected_codec == "h264_vulkan" || selected_codec == "hevc_vulkan")
-                            vk_convert_filter = "scale_vulkan=format=nv12";
+                            vk_convert_filter = "libplacebo=format=nv12";
 
                         if (vk_convert_filter != nullptr) {
                             const char* vk_decline = nullptr;
@@ -1651,8 +1699,10 @@ struct ffmpeg_consumer : public core::frame_consumer
                                 vk_decline = "the channel does not run the Vulkan mixer";
                             else if (has_filter)
                                 vk_decline = "a video filter was supplied, and this path owns the chain";
-                            else if (depth_ != common::bit_depth::bit8)
-                                vk_decline = "channel is not 8-bit, and the exporter copies BGRA";
+                            else if (depth_ == common::bit_depth::bit8)
+                                vk_decline = "the channel is 8-bit, whose composite is BGRA -- and "
+                                             "libplacebo exchanges red and blue on a BGRA Vulkan "
+                                             "frame; use <color-depth>16</color-depth>";
 
                             if (vk_decline == nullptr) {
                                 gpu_frames_ctx = make_vulkan_frames_ctx(format_desc.width, format_desc.height);

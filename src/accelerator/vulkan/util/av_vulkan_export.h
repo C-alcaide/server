@@ -36,12 +36,18 @@ namespace caspar { namespace accelerator { namespace vulkan {
 /// `VkImageLayout` as its integer value.
 ///
 /// ONE PLANE IS ENOUGH, and that is the whole reason this is simpler than the importer. The
-/// mixer composites BGRA and every Vulkan encoder wants planar YUV -- ProRes accepts only
+/// mixer composites packed RGBA and every Vulkan encoder wants planar YUV -- ProRes accepts only
 /// `YUV422P10 / YUV444P10 / YUVA444P10` -- but the conversion is not this class's job. FFmpeg's
-/// `libplacebo` filter does it on the GPU, so the hand-off is BGRA to BGRA and the encoder's
+/// `libplacebo` filter does it on the GPU, so the hand-off is packed to packed and the encoder's
 /// format is negotiated downstream. Measured 2026-08-22: `scale_vulkan` cannot do it (RGB to
-/// only NV12/YUV420P/YUV444P, all 8-bit) while `libplacebo=format=yuv422p10` produces valid
-/// ProRes HQ.
+/// only NV12/YUV420P/YUV444P, all 8-bit, and it mangles the levels) while
+/// `libplacebo=format=yuv422p10` produces valid ProRes HQ.
+///
+/// THE COMPOSITE MUST BE THE 16-BIT ONE, which is enforced by the caller rather than here. The
+/// mixer's 8-bit attachment holds BGRA bytes and `vf_libplacebo` exchanges red and blue on a
+/// BGRA Vulkan frame; the 16-bit attachment holds RGBA, which it handles correctly. This class
+/// copies bytes and does not care, so the guard lives where the decision is made --
+/// `ffmpeg_consumer.cpp`, whose `make_vulkan_frames_ctx` carries the measurement.
 struct av_plane_dest
 {
     void*    image     = nullptr; //< VkImage, from AVVkFrame::img[0]
@@ -50,6 +56,28 @@ struct av_plane_dest
     int      layout    = 0;       //< AVVkFrame::layout[0], as a VkImageLayout value
     int      width     = 0;
     int      height    = 0;
+
+    // ── Filled BY `copy_from_texture`, and the caller MUST write both back ──────────
+    //
+    // An AVVkFrame is shared bookkeeping, not just a handle: whoever signals the timeline
+    // semaphore owns telling FFmpeg the new value, and whoever moves the image owns telling
+    // FFmpeg the new layout. Leaving either stale is not cosmetic. Measured 2026-08-22 under
+    // the validation layer, with the writeback missing:
+    //
+    //   VUID-VkSubmitInfo2-semaphore-03882, vkQueueSubmit2(): pSubmits[0]
+    //     .pSignalSemaphoreInfos[1].semaphore signal value (1) must be greater than the
+    //     current timeline semaphore value
+    //
+    // -- FFmpeg's own submit, signalling a value this copy had already consumed, on every
+    // frame. It encoded a correct picture anyway on this driver, so nothing failed and nothing
+    // was logged; signalling a non-increasing timeline value is undefined behaviour and the
+    // next driver is entitled to deadlock on it.
+    //
+    // These are outputs rather than something the caller computes, so the rule stays in one
+    // place: duplicating "signal is sem_value + 1, and UNDEFINED becomes GENERAL" in the
+    // ffmpeg module would leave two copies to keep in step.
+    uint64_t signalled_value = 0; //< write to AVVkFrame::sem_value[0]
+    int      final_layout    = 0; //< write to AVVkFrame::layout[0]
 };
 
 /// Copies the mixer's composited image into a frame FFmpeg owns, for a Vulkan encoder.
@@ -81,7 +109,7 @@ class av_vulkan_exporter
     /// `src` must be a Vulkan `texture_wrapper`. Returns false -- having logged once -- on any
     /// mismatch or failure, and the caller must then fall back to the host path rather than
     /// send a frame that may hold anything.
-    bool copy_from_texture(const std::shared_ptr<core::texture>& src, const av_plane_dest& dest);
+    bool copy_from_texture(const std::shared_ptr<core::texture>& src, av_plane_dest& dest);
 
   private:
     struct impl;

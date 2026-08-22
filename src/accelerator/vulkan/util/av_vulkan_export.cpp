@@ -94,7 +94,7 @@ av_vulkan_exporter::av_vulkan_exporter(void* vk_device)
 
 av_vulkan_exporter::~av_vulkan_exporter() = default;
 
-bool av_vulkan_exporter::copy_from_texture(const std::shared_ptr<core::texture>& src, const av_plane_dest& dest)
+bool av_vulkan_exporter::copy_from_texture(const std::shared_ptr<core::texture>& src, av_plane_dest& dest)
 {
     auto& m   = *impl_;
     auto* dev = m.dev_;
@@ -226,8 +226,10 @@ bool av_vulkan_exporter::copy_from_texture(const std::shared_ptr<core::texture>&
                 // UNDEFINED there means "no promise", and a general layout is the safe answer.
                 vk::ImageMemoryBarrier2 b{};
                 b.oldLayout = vk::ImageLayout::eTransferDstOptimal;
-                b.newLayout =
+                const auto dest_new =
                     dest_old == vk::ImageLayout::eUndefined ? vk::ImageLayout::eGeneral : dest_old;
+                b.newLayout      = dest_new;
+                dest.final_layout = static_cast<int>(dest_new);
                 b.srcQueueFamilyIndex = vk::QueueFamilyIgnored;
                 b.dstQueueFamilyIndex = vk::QueueFamilyIgnored;
                 b.image               = static_cast<VkImage>(dest.image);
@@ -261,6 +263,11 @@ bool av_vulkan_exporter::copy_from_texture(const std::shared_ptr<core::texture>&
             si.setCommandBuffers(cmd);
             si.setSignalSemaphores(sem);
             si.pNext = &timeline;
+
+            // Report both back before the submit can be observed. FFmpeg reads `sem_value[0]`
+            // to decide what to wait on and what to signal next, so a stale value there is the
+            // VUID-VkSubmitInfo2-semaphore-03882 in the header.
+            dest.signalled_value = signal_value;
 
             m.vk_device_.resetFences(m.fence_);
             dev->submit(si, m.fence_);

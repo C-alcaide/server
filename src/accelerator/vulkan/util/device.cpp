@@ -673,15 +673,14 @@ struct device::impl : public std::enable_shared_from_this<impl>
             static_cast<VkPhysicalDeviceVulkan13Features>(f13));
 
         if (!ok10 || !ok11 || !ok12 || !ok13) {
-            CASPAR_LOG(warning) << L"[vk::device] some features FFmpeg's decoders need were reported "
+            CASPAR_LOG(warning) << L"[vk::device] some features FFmpeg needs were reported "
                                    L"supported and then refused (core="
                                 << ok10 << L" v11=" << ok11 << L" v12=" << ok12 << L" v13=" << ok13
-                                << L"); Vulkan decoding may fault";
+                                << L"); Vulkan decode or encode may fault";
         } else {
             CASPAR_LOG(info) << L"[vk::device] enabled " << extensions_added << L" extensions, "
                              << ext_features_added << L" extension feature sets and " << enabled_count
-                             << L" core/1.1/1.2/1.3 features for FFmpeg's Vulkan decoders "
-                                L"(vulkan-decode is on)";
+                             << L" core/1.1/1.2/1.3 features for FFmpeg's Vulkan codecs";
         }
     }
 
