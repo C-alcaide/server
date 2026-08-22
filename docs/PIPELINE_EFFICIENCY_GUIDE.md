@@ -491,19 +491,23 @@ format that matches it byte-for-byte (`x2rgb10le` is 10 bits in 32; `gbrp16le`
 and `yuv444p16le` are planar). Supporting it means a conversion kernel — exactly
 what the current design avoids.
 
-> **NVENC recording does not work in the current build.** `-vcodec h264_nvenc`,
-> `hevc_nvenc` and `av1_nvenc` all return `501 ADD FAILED`: the pinned FFmpeg is built against
-> nvenc SDK 13.1, which needs an NVIDIA driver of 610 or newer, and the reference machine runs
-> 582.53. Everything below about the NVENC path is correct about the design and currently
-> unreachable in practice. **Use `h264_vulkan` / `hevc_vulkan` instead** — they drive the same
-> NVENC silicon through Vulkan, measured at 15–39% NVENC-block utilisation. NVDEC *decoding* is
-> unaffected.
+> **NVENC recording does not work with the pinned FFmpeg, and the fix is a tool rather than a
+> driver update.** `-vcodec h264_nvenc`, `hevc_nvenc` and `av1_nvenc` all return
+> `501 ADD FAILED`: the pinned build is compiled against nvenc SDK 13.1, which requires an
+> NVIDIA driver of 610 or newer, and the reference machine runs 582.53.
 >
-> **The fix is to rebuild FFmpeg, not to raise the driver.** Pinning `nv-codec-headers` n13.0
-> instead of n13.1 keeps FFmpeg at 8.1.2 and works on 582.53. Raising the driver to R610 would
-> take the second GPU with it: Release 580 is the last branch to support Quadro Pascal, the
-> reference machine's other card is a P4000, and 582.53 is already the newest driver that serves
-> both. See `CHANGELOG.md`.
+> **Do not raise the driver to fix this.** Release 580 is the last branch that supports Quadro
+> Pascal, the machine's second GPU is a Pascal P4000, and 582.53 is already R580 U9 — the newest
+> driver that serves both slots. One Windows package serves both, so R610 would take the P4000
+> with it.
+>
+> **`tools/use_local_ffmpeg.sh apply`** swaps in a locally built FFmpeg compiled against
+> `nv-codec-headers` n13.0 (driver 570+), which restores NVENC at the same FFmpeg version. Read
+> that script before using it: the local build has a narrower codec set than the pin, and an
+> applied swap silently reverts on the next cmake build. `revert` puts the pin back.
+>
+> Without the swap, use **`h264_vulkan` / `hevc_vulkan`** — they reach the same NVENC silicon
+> through Vulkan and need no rebuild. NVDEC *decoding* is unaffected either way.
 
 ### Every route to a recording, measured side by side
 
@@ -546,11 +550,22 @@ Vulkan channel use `prores_ks_vulkan` instead.
 | `libx264` | vulkan / 16 | host | 2.18 | 0 / 0 | reference |
 | **`h264_vulkan`** | vulkan / 16 | **yes** | **1.42** | **15 / 19** | mean 2.69 LSB |
 | `libx264` | vulkan / 8 | host | 1.83 | 0 / 0 | reference |
-| `h264_nvenc` | vulkan / 8 | refused | — | — | driver too old for this build |
+| **`h264_nvenc`** † | vulkan / 8 | **yes** | **1.37** | **9 / 27** | **mean 1.66 LSB** |
 | `libx265` | vulkan / 16 | host | 2.83 | 0 / 0 | reference |
 | **`hevc_vulkan`** | vulkan / 16 | **yes** | **1.41** | **39 / 74** | mean 2.53 LSB |
 | `libx265` | vulkan / 8 | host | 2.61 | 0 / 0 | reference |
-| `hevc_nvenc` | vulkan / 8 | refused | — | — | driver too old for this build |
+| **`hevc_nvenc`** † | vulkan / 8 | **yes** | **1.39** | **11 / 34** | **mean 1.64 LSB** |
+
+† measured with `tools/use_local_ffmpeg.sh apply`. With the pinned FFmpeg these two are refused
+outright — see the note at the top of this section.
+
+**Where NVENC is available it is the better path, so the two are not interchangeable.** It is
+slightly cheaper than the Vulkan encoder, lands closer to the CPU encoder's picture (1.66 against
+2.70 LSB on H.264), and its default rate control is far more sensible: **0.1 MB against 6.7 MB**
+of the same ten seconds on HEVC. It also uses *less* of the NVENC block for the same work — 11%
+against 36% mean — which says the NVENC API drives that unit more efficiently than
+`VK_KHR_video_encode` does. `av1_nvenc` remains unavailable on any build here: Ampere has no AV1
+encoder, and FFmpeg declines it with "No capable devices found".
 
 The NVENC-block column is the useful one and it is not a proxy: `nvmlDeviceGetEncoderUtilization`
 reports that fixed-function unit specifically. It reads **0 on every CPU arm and on both compute

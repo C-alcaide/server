@@ -313,7 +313,7 @@ def fig_recording_routes():
             ("h264_vulkan", "vulkan mixer, 16-bit", "1.42", "NVENC block 15%", "best"),
             ("hevc_vulkan", "vulkan mixer, 16-bit", "1.41", "NVENC block 39%", "best"),
             ("libx264 / libx265", "any", "2.18 / 2.83", "all frames", "ok"),
-            ("h264_nvenc / hevc_nvenc", "8-bit", "--", "REFUSED by this build", "bad"),
+            ("h264_nvenc / hevc_nvenc", "8-bit", "1.37 / 1.39", "needs the local-FFmpeg swap", "warn"),
         ]),
         ("FFV1", [
             ("ffv1_vulkan", "vulkan mixer, 16-bit", "1.50", "18x the disk", "warn"),
@@ -348,9 +348,9 @@ def fig_recording_routes():
         y -= GAP
 
     ax.text(0.15, max(0.22, y + 0.10),
-            "NVENC is refused because the pinned FFmpeg needs driver 610+; the fix is to rebuild "
-            "against nv-codec-headers n13.0, NOT to raise the\n"
-            "driver, which would drop the Pascal P4000 in the other slot. No single channel serves "
+            "NVENC is refused by the PINNED FFmpeg (it needs driver 610+); tools/use_local_ffmpeg.sh "
+            "restores it. Do NOT raise the driver:\n"
+            "that would drop the Pascal P4000 in the other slot. No single channel serves "
             "all three fast paths: NVENC GPU-direct needs 8-bit, "
             "the Vulkan encoders need 16-bit, and CUDA_PRORES needs the OpenGL mixer.\n"
             "Cost figures are untuned defaults; the recorded sizes differ by over 10x.",
