@@ -1078,6 +1078,59 @@ struct Stream
             }
         }
 
+        // `-q:v` IS NOT AN AVOPTION, so passing it through the dict below did nothing at all.
+        //
+        // libavcodec has `global_quality` and, separately, `qscale` as a NAME FOR A FLAG BIT
+        // (`options_table.h`: an `AV_OPT_TYPE_CONST` in the `flags` unit). There is no `q`
+        // option and no numeric `qscale` option -- the translation from `-q:v N` to
+        // `global_quality = N * FF_QP2LAMBDA` plus `AV_CODEC_FLAG_QSCALE` lives in the ffmpeg
+        // CLI, which this consumer is not. So `-q:v 4` in a consumer's args was parsed,
+        // forwarded, refused by `avcodec_open2` as unknown, and copied back into the leftovers
+        // map where nothing looked at it: a quality setting that returned 202 and changed
+        // nothing.
+        //
+        // Measured 2026-08-23, before this: `prores422hq_vulkan_q` (`-q:v 4`) produced a
+        // 375 MB file and `prores422hq_vulkan` (no quantiser) 370 MB, from the same ten seconds
+        // of the same source. A forced quantiser of 4 cannot come out the same size as rate
+        // control, which is what said the option was inert.
+        //
+        // What it is worth on the Vulkan ProRes encoder is not marginal. `prores_ks_vulkan`
+        // runs Kostya's trellis quantiser search as a compute shader, and a non-zero
+        // `force_quant` -- which is `global_quality / FF_QP2LAMBDA`, straight out of
+        // `proresenc_kostya_common.c` -- sets the specialisation constant that bypasses it
+        // (`proresenc_kostya_vulkan.c`, the `trellis_node` pipeline). Measured 2026-08-22
+        // outside CasparCG, 500 frames of 1080p: 11 s at the default, 4 s with `-q:v 4`, and
+        // 4 s is what the RGBA64->yuv422p10 conversion costs on its own.
+        //
+        // NOTE THE UNITS. `global_quality` is in lambda, so an operator writing
+        // `-global_quality 4` directly is asking for 4/118 of a quantiser step, which rounds to
+        // the same zero that means "use rate control". That one is passed through untouched
+        // because it is a real option and the value is the operator's to choose; only `q` and
+        // `qscale` are translated, and they are erased from the dict so `avcodec_open2` does not
+        // see a name it will refuse.
+        if (codec->type == AVMEDIA_TYPE_VIDEO) {
+            for (const auto* key : {"q", "qscale"}) {
+                const auto it = stream_options.find(key);
+                if (it == stream_options.end())
+                    continue;
+                try {
+                    const auto qv = std::stod(it->second);
+                    enc->global_quality = static_cast<int>(qv * FF_QP2LAMBDA);
+                    enc->flags |= AV_CODEC_FLAG_QSCALE;
+                    CASPAR_LOG(info)
+                        << L"[ffmpeg] fixed-quantiser encoding: -" << u16(key) << L" " << qv
+                        << L" becomes global_quality=" << enc->global_quality
+                        << L" with AV_CODEC_FLAG_QSCALE. The ffmpeg CLI does this conversion "
+                           L"for you; nothing here did, so the option used to be discarded.";
+                } catch (...) {
+                    CASPAR_LOG(warning) << L"[ffmpeg] -" << u16(key) << L" " << u16(it->second)
+                                        << L" is not a number, so it is ignored.";
+                }
+                stream_options.erase(it);
+                break;
+            }
+        }
+
         auto dict = to_dict(std::move(stream_options));
         CASPAR_SCOPE_EXIT { av_dict_free(&dict); };
         FF(avcodec_open2(enc.get(), codec, &dict));
