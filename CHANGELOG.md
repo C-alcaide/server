@@ -21,6 +21,22 @@ an NVIDIA driver of **610 or newer**. The reference machine runs **582.53**.
 consumer is not implicated. A separately built FFmpeg 8.1.1 on the *same* machine and the *same*
 driver encodes `h264_nvenc` successfully.
 
+**A local build proves the fix works, and `tools/use_local_ffmpeg.sh` applies it.** Built from
+`release/8.1` in the MSYS2 UCRT64 environment, whose ffnvcodec is at NVENCAPI 13.0: `h264_nvenc`
+and `hevc_nvenc` then encode, and in the server all four arms of `encode-matrix --codec h264`
+engage for the first time. NVENC turns out to *beat* the Vulkan encoders rather than duplicate
+them — 1.37 against 1.40 cores on H.264, mean 1.66 against 2.70 LSB from the CPU reference, and
+0.1 MB against 0.3 MB of the same ten seconds; on HEVC 0.1 MB against 6.7 MB. `av1_nvenc` still
+declines with "No capable devices found", which is Ampere having no AV1 encoder rather than the
+build.
+
+It is **not the default**, and the script says why at length: the local build is 8.1.1+7 rather
+than 8.1.2, carries a narrower codec set (libjxl, libbluray, libdvdnav, frei0r, libzvbi,
+libfdk-aac, libxvid, libtheora, libspeex and the AMR/GSM family are all gone), needs 40 mingw
+DLLs copied alongside because `--pkg-config-flags=--static` does not link externals into a DLL
+build, and — the operational trap — `casparcg_add_runtime_dependency` copies the pinned DLLs on
+every build, so an applied swap silently reverts the next time anyone runs cmake.
+
 **The fix is the header pin, not the driver, and on this machine the driver is not even an
 option.** [NVENCAPI 13.0 requires driver 570 or newer](https://github.com/FFmpeg/nv-codec-headers)
 and 13.1 requires 610, so pinning `nv-codec-headers` **n13.0** keeps FFmpeg at 8.1.2 and gives
