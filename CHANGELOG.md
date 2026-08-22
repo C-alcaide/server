@@ -1,6 +1,96 @@
 CasparVP — Unreleased
 ==========================================
 
+### Fixed: `-q:v` was discarded, which capped Vulkan ProRes recording at one channel
+
+`ADD 1 FILE out.mov -vcodec prores_ks_vulkan -q:v 4` used to record at the encoder's default
+quality and take one channel's worth of the GPU. The option was not ignored — it was
+**discarded**. `q` is not an AVOption: libavcodec has `global_quality`, in lambda units, and
+separately `qscale` as a *name for a flag bit*. Turning `-q:v N` into
+`global_quality = N × FF_QP2LAMBDA` plus `AV_CODEC_FLAG_QSCALE` is something the ffmpeg CLI does
+for you, and this consumer is not the CLI, so the value was parsed, forwarded, refused by
+`avcodec_open2` as unknown, and copied into a leftovers map nothing reads.
+
+What it cost is the whole ProRes recording ceiling. `prores_ks_vulkan` runs Kostya's trellis
+quantiser search as a compute shader, and a non-zero quantiser sets the `force_quant`
+specialisation constant that bypasses it. The search saturates GPU compute below what two 25p
+channels need — so the ceiling was one channel, and the one option that would have raised it was
+being thrown away.
+
+`iso-scaling --producer route`, 1080p2500, 16-bit channels, one recording per channel, both arms
+in the **same run against the same binary**:
+
+| arm | channels | why it stopped | GPU% | VRAM |
+| :--- | ---: | :--- | ---: | ---: |
+| `prores_ks_vulkan`, no quantiser | **1** | 47 late frames at 2 channels | 59 | 1500 MB |
+| `prores_ks_vulkan -q:v 4` | **8** | reached the top of the ladder with headroom | 53 | 2997 MB |
+
+At two channels, where the default arm is already failing:
+
+| | jitter | late | MB / 10 s |
+| :--- | ---: | ---: | ---: |
+| default | 32–37 ms | 13–17 per 125 | 371 |
+| `-q:v 4` | **2.3–4.3 ms** | **0** per 125 | 310 |
+
+**It is not a new default**, because a fixed quantiser is a picture decision and belongs to the
+operator: `-q:v 4` writes a smaller file than rate control does on this source, and how much
+smaller depends on the content. What changed is that asking now works.
+
+`global_quality` is left alone — it is a real option and its units are the operator's to choose,
+though note that `-global_quality 4` asks for 4/118 of a quantiser step, which rounds to the same
+zero that means "use rate control". Only `q` and `qscale` are translated.
+
+**The first attempt set only the flag and changed nothing**, because ProRes reads
+`global_quality` directly and never checks `AV_CODEC_FLAG_QSCALE`. What caught it was file size:
+375 MB with `-q:v 4` against 370 MB without, from the same ten seconds of the same source. A
+forced quantiser cannot come out the same size as rate control. The flag is still set, because
+other encoders do gate on it.
+
+**Not covered:** nothing asserts that a consumer argument reaches the encoder at all. This was
+found by reading a ceiling, and the general case — an argument accepted with `202` and silently
+dropped — has no check that can fail.
+
+### Fixed: an idle channel abandoned the Vulkan encode path on its first frame
+
+A recording consumer declared in `casparcg.config` starts before anything is played, so its first
+frames carry no texture — `const_frame::empty()` has none. The consumer read that as a GPU-direct
+failure and acted on the **first** one: `gpu_direct_` went false, which switches the channel's CPU
+readback back on for the rest of the recording. 8 MB a frame at 8-bit and 16 at 16-bit, on the
+channel thread, consumed by nobody — the exact cost the GPU-direct path exists to remove.
+
+It did not break the recording, and the message claiming it did was wrong in both directions:
+`gpu_frames_ctx` stays non-null and `make_cuda_video_frame` remains the only way a video frame is
+built, so once the channel had something to composite the frames were device frames again. There
+is no host path to revert to, and nothing reverted.
+
+Three changes:
+
+* **A textureless composite is no longer a failure.** The Vulkan mixer attaches a texture to
+  every frame it composites, so an absent one means no composition happened — an idle channel,
+  whose picture *is* black. `av_vulkan_exporter` gained `clear_to_black`, sharing the copy's
+  barriers, timeline signal and fence through one common submission, so a black frame and a
+  copied one are indistinguishable to FFmpeg's bookkeeping. Those frames are now **in** the file
+  instead of missing from it, which is what the host path already recorded for them.
+* **The failure reason is named.** It reported `gpu_uploader->last_error()` for every cause, and
+  on the Vulkan path that object is the CUDA-GL uploader, which has not failed and returns an
+  empty string — so a real failure logged as `GPU-direct recording failed ()`. Each guard now
+  sets its own reason, pool exhaustion carries `av_strerror`, and a *change* of reason is logged
+  rather than only the first one.
+* **Giving up takes 32 consecutive misses rather than one**, and says what it means: the frames
+  are lost, not recorded another way.
+
+Measured, `prores_ks_vulkan` at 1080p2500, one recording channel on a `route://1` source:
+
+```
+before   output[2] CPU readback required by consumer ffmpeg.        (4 s in, never recovered)
+after    [vk_mixer] CPU readback SKIPPED - all consumers use GPU-native paths
+```
+
+**Not covered:** no battery measures this. `iso-scaling` drives the configuration that exposed it
+but reads only late frames and file size, and neither moved — the defect was a wasted readback,
+not a wrong picture. The CUDA/NVENC path has the same textureless-frame case and still loses
+those frames; it now says so instead of reporting an empty reason.
+
 ### Broken: every NVENC recording fails in the shipped binary — a dependency pin, not the hardware
 
 `ADD 1 FILE out.mov -vcodec h264_nvenc` returns **501 and records nothing**. The same applies to

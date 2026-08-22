@@ -865,6 +865,69 @@ dropped none — so on a moving source frame *N* of one recording is a different
 *N* of the other. `prores_422_bt709_sdr.mov` differs by 255 LSB between frames 5 and 40, which is
 the entire distribution that would have been reported as an encoder difference.
 
+#### 6.1.8 The recording ceiling, measured 2026-08-23 — and the argument that was being thrown away
+
+6.1.7 measured **one** recording channel and found the Vulkan encode free. The obvious next
+question is how many, and the first answer was **one** — `prores_ks_vulkan` went 47 frames late at
+two channels while the source channel sat at 2.8 ms of jitter. Two hypotheses were measured and
+rejected before the cause turned up somewhere else entirely, and both rejections are worth
+keeping because each looked right.
+
+**Rejected: the exporter's host waits on the shared device thread.** `copy_from_texture` runs
+inside `device::dispatch_sync`, which is one `io_context` on one thread serving the whole GPU, and
+it did two host waits in there — the mixer's render, and the previous frame's copy fence. A
+three-deep command-buffer ring plus removing the render wait was implemented and made **no
+difference at all**, and `vk.dispatch.busy_percent` then read 5.0% — wall-clock, not CPU time, so
+the thread genuinely was idle 95% of the time. Reverted.
+
+**Rejected: libplacebo's `yuv422p10` conversion.** A CLI test put it at 25% of the encode, not
+enough to explain a factor of two.
+
+**The cause was `-q:v`, and specifically that it was DISCARDED.** `prores_ks_vulkan` runs Kostya's
+trellis quantiser search as a compute shader (`proresenc_kostya_vulkan.c`, the `trellis_node`
+pipeline), and a non-zero `force_quant` — which is `global_quality / FF_QP2LAMBDA`, straight out
+of `proresenc_kostya_common.c` — sets the specialisation constant that bypasses it. Measured
+outside CasparCG on 500 frames of 1080p, the search costs 11 s against 4 s, and 4 s is what the
+RGBA64→yuv422p10 conversion costs on its own. So the search saturates GPU compute below two 25p
+channels, and the option that turns it off never reached the encoder: `q` is not an AVOption at
+all, and the translation to `global_quality` plus `AV_CODEC_FLAG_QSCALE` lives in the ffmpeg CLI.
+
+`iso-scaling --producer route`, 1080p2500, 16-bit channels, one recording per channel, both arms
+in the same run against the same binary:
+
+| arm | channels | why it stopped | GPU% | VRAM |
+| :--- | ---: | :--- | ---: | ---: |
+| `prores_ks_vulkan -q:v 4` | **8+** | the top of the ladder, with headroom | 53 | 2997 MB |
+| `prores_ks_vulkan` | **1** | 47 late frames at 2 channels | 59 | 1500 MB |
+| `prores_ks` (CPU) | **1** | 5 late frames at 2 channels | 15 | 1563 MB |
+
+At two channels: jitter 32–37 ms and 13–17 late per 125 by default, against 2.3–4.3 ms and
+**zero** with `-q:v 4`.
+
+**Three lessons, and the third is the one that generalises.**
+
+*An instrument that reads "idle" may not be able to see the thing you are looking for.* The 5.0%
+busy figure was correct and was still not evidence about the encoder, because the encoder's work
+runs on FFmpeg's own exec pool and never touches the mixer's dispatch thread. Rejecting a
+hypothesis with the wrong instrument is how the second wrong hypothesis got its turn.
+
+*Fixing the flag was not fixing the option.* The first attempt set only `AV_CODEC_FLAG_QSCALE`,
+which is what the FFmpeg documentation points you at — and ProRes reads `global_quality` directly
+and never checks that flag. The log line said the flag was set, the option looked honoured, and
+the encode was unchanged. **What caught it was file size**: 375 MB with `-q:v 4` against 370 MB
+without, from the same ten seconds of the same source. A forced quantiser cannot come out the same
+size as rate control.
+
+*A consumer argument accepted with `202` and silently dropped has no check that can fail.* This
+one was found by reading a ceiling. Nothing in the harness asserts that an option reaches the
+encoder, and until something does, every measured ceiling for a recording with arguments is a
+ceiling for whichever of those arguments happened to survive.
+
+**What this does not cover.** One raster, one source, one profile (422 HQ), and 8 is the top of
+the ladder rather than the limit — `--max-channels` was 8 and the run had headroom. The quantiser
+is a picture decision that nothing here evaluated: `-q:v 4` wrote a *smaller* file than rate
+control on this source, and whether that is acceptable depends on the content.
+
 ### 6.2 Codecs that matter in this domain
 
 * **JPEG-XS** — decoder, encoder, parser and raw muxer/demuxer via `libsvtjpegxs` (8.1). The

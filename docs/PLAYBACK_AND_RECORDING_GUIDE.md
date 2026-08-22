@@ -250,11 +250,16 @@ Software decode, or the Vulkan decoders, are configuration rather than commands:
 **Recording — a 16-bit Vulkan-mixer channel**
 
 ```
-ADD 1 FILE "out.mov" -vcodec prores_ks_vulkan -ac 2
+ADD 1 FILE "out.mov" -vcodec prores_ks_vulkan -profile:v 3 -q:v 4 -ac 2
 ADD 1 FILE "out.mkv" -vcodec ffv1_vulkan -ac 2
 ADD 1 FILE "out.mov" -vcodec h264_vulkan -b:v 50M -ac 2
-REMOVE 1 FILE "out.mov" -vcodec prores_ks_vulkan -ac 2
+REMOVE 1 FILE "out.mov" -vcodec prores_ks_vulkan -profile:v 3 -q:v 4 -ac 2
 ```
+
+**`-q:v` on the ProRes line is doing real work, and `-profile:v` is not optional either.**
+Without `-q:v` the encoder runs a trellis quantiser search that limits you to **one** recording
+channel instead of eight (§6). Without `-profile:v` it picks a profile from the input, so a
+recording you think is 422 may be 422 HQ — profile 2 is 422, profile 3 is 422 HQ.
 
 **Recording — an 8-bit channel**
 
@@ -340,6 +345,56 @@ its fast path confirmed engaged at every rung.
 | `libx264` | 2 | 29 | 1201 MB |
 | `CUDA_PRORES` | **0** — late at one channel | — | — |
 | `ffv1_vulkan` | **0** — late at one channel | — | — |
+
+> **The `prores_ks_vulkan` row above did not measure `prores_ks_vulkan`.** The table is 8-bit,
+> and the Vulkan encode path *requires* a 16-bit channel and refuses an 8-bit one with the reason
+> logged (§3). So that 5 is the host-readback path wearing the encoder's name, and the same
+> applies to `ffv1_vulkan`'s zero. The 16-bit numbers are in the next table, and they are
+> different enough to matter.
+
+#### Recording, 16-bit — where the Vulkan encoders actually run
+
+Same shape, on 16-bit channels with a `route://1` source so the decode cost is paid once and the
+figures are the recording's. Realistic content: 60 s of moving noise, looped, at a bitrate that
+suits the raster.
+
+| route | channels | why it stopped | GPU% | VRAM |
+| :--- | ---: | :--- | ---: | ---: |
+| `prores_ks_vulkan -q:v 4` | **8+** | the top of the ladder, with headroom | 53 | 2997 MB |
+| `prores_ks_vulkan` | **1** | 47 late frames at 2 channels | 59 | 1500 MB |
+| `prores_ks` (CPU) | **1** | 5 late frames at 2 channels | 15 | 1563 MB |
+
+**That eightfold difference is one argument, and it is worth understanding rather than copying.**
+`prores_ks_vulkan` runs a *trellis quantiser search* by default — a compute shader that tries
+several quantisers per slice and keeps the best. It is good at what it does and it saturates the
+GPU below what two 25p channels need, which is why the middle row stops at one. Giving the
+encoder a fixed quantiser with `-q:v` skips the search entirely:
+
+```
+ADD 1 FILE "out.mov" -vcodec prores_ks_vulkan -profile:v 3 -q:v 4 -ac 2
+```
+
+At two channels, where the default is already dropping frames, the difference is stark:
+
+| | jitter | late | MB / 10 s |
+| :--- | ---: | ---: | ---: |
+| default | 32–37 ms | 13–17 per 125 | 371 |
+| `-q:v 4` | **2.3–4.3 ms** | **0** per 125 | 310 |
+
+**It is a picture decision, not a free win.** A fixed quantiser gives up the search's
+rate/quality trade-off, and how much that costs depends on the content — on this source it also
+wrote a *smaller* file, which will not always be true. Lower numbers mean higher quality and
+larger files; 4 is a reasonable starting point for a 422 HQ ISO. If you need the search's
+judgement, budget one channel for it.
+
+Two more things this table says that the 8-bit one cannot:
+
+* **The CPU encoder also stops at one channel here**, on 5 late frames rather than 47. Recording
+  ProRes at 16-bit is simply more expensive than at 8-bit — 16 MB a frame of composite instead of
+  8 — so the 8-bit table's "3 channels for `prores_ks`" does not carry over.
+* **`-q:v` used to be discarded entirely**, so any ceiling measured before 2026-08-23 with that
+  argument in it was measured without it. If you have older numbers for a `-q:v` recording, they
+  are numbers for the default.
 
 **Choosing the right CPU encoder buys more than moving to the GPU does, for ProRes.** `prores_aw`
 reaches five channels — the same as `prores_ks_vulkan` — while `prores_ks` reaches three. If you
@@ -485,7 +540,8 @@ Without the swap, use `h264_vulkan` / `hevc_vulkan`. They reach the same silicon
 
 ### If you are recording ProRes
 
-- **Vulkan mixer, 16-bit** → `prores_ks_vulkan`.
+- **Vulkan mixer, 16-bit** → `prores_ks_vulkan -profile:v 3 -q:v 4`. Leaving `-q:v` off costs
+  you seven of the eight channels; see §6.
 - **OpenGL mixer, 8-bit** → `CUDA_PRORES`.
 - **CPU** → `prores_aw`, never `prores_ks`. The latter cannot sustain 1080p25.
 
