@@ -124,6 +124,20 @@ struct device::impl : public std::enable_shared_from_this<impl>
 
         CASPAR_LOG(info) << L"Initialized OpenGL " << version();
 
+        // GL_RENDERER, and named the same way the Vulkan mixer names its card, because a
+        // measurement harness has to know WHICH GPU to sample. GL_VERSION and GL_VENDOR give
+        // "4.5.0 NVIDIA 582.53 NVIDIA Corporation" -- a vendor, not a model -- and NVML
+        // enumerates by PCI bus id, so on a two-card box there is nothing to match against and
+        // the sampler either guesses index 0 or reports nothing.
+        //
+        // Measured 2026-08-22: every GPU and VRAM figure for an OpenGL-mixer arm of
+        // `encode-matrix` came back empty for exactly this reason, while the Vulkan arms were
+        // attributed correctly -- the Vulkan side happens to log its adapter from the D3D11
+        // import bridge (`d3d11_import_bridge.cpp`), which the OpenGL side has no equivalent of.
+        CASPAR_LOG(info) << L"[ogl::device] the mixer's GPU is OpenGL renderer (\""
+                         << u16(reinterpret_cast<const char*>(GL2(glGetString(GL_RENDERER))))
+                         << L"\")";
+
         if (!GLEW_VERSION_4_5 && !glewIsSupported("GL_ARB_sync GL_ARB_shader_objects GL_ARB_multitexture "
                                                   "GL_ARB_direct_state_access GL_ARB_texture_barrier")) {
             CASPAR_THROW_EXCEPTION(not_supported()

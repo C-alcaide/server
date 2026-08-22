@@ -717,6 +717,41 @@ private:
                 pfd.iPixelType = PFD_TYPE_RGBA;
                 pfd.cColorBits = 32;
                 int fmt = ChoosePixelFormat(gpu_dc_, &pfd);
+
+                // PREFER AN ACCELERATED FORMAT, and say which one was got.
+                //
+                // `wglShareLists` refuses to share between the vendor's OpenGL and Microsoft's
+                // generic software implementation, and `ChoosePixelFormat` on a bare
+                // PFD_DRAW_TO_WINDOW|PFD_SUPPORT_OPENGL request is entitled to return the
+                // generic one -- at which point the share fails and the consumer silently spends
+                // the rest of its life on the host path. Measured 2026-08-22 by `encode-matrix`:
+                // `wglShareLists failed - CPU path` on every run, so the fork's own GPU-direct
+                // ProRes route had not engaged at all, and the only trace was one warning.
+                //
+                // So walk the formats for one the driver accelerates, and if none exists say so
+                // with the reason rather than reporting a bare failure.
+                PIXELFORMATDESCRIPTOR got{};
+                if (fmt && DescribePixelFormat(gpu_dc_, fmt, sizeof(got), &got) &&
+                    (got.dwFlags & PFD_GENERIC_FORMAT)) {
+                    const int n = DescribePixelFormat(gpu_dc_, 1, sizeof(got), nullptr);
+                    for (int i = 1; i <= n; ++i) {
+                        PIXELFORMATDESCRIPTOR cand{};
+                        if (!DescribePixelFormat(gpu_dc_, i, sizeof(cand), &cand))
+                            continue;
+                        if ((cand.dwFlags & PFD_SUPPORT_OPENGL) &&
+                            (cand.dwFlags & PFD_DRAW_TO_WINDOW) &&
+                            !(cand.dwFlags & PFD_GENERIC_FORMAT) &&
+                            cand.iPixelType == PFD_TYPE_RGBA && cand.cColorBits >= 24) {
+                            fmt = i;
+                            got = cand;
+                            break;
+                        }
+                    }
+                }
+                CASPAR_LOG(debug) << L"[cuda_prores] GL share pixel format " << fmt
+                                  << (got.dwFlags & PFD_GENERIC_FORMAT ? L" (GENERIC/software)"
+                                                                       : L" (accelerated)");
+
                 if (fmt && SetPixelFormat(gpu_dc_, fmt, &pfd)) {
                     gpu_hglrc_ = wglCreateContext(gpu_dc_);
                     if (gpu_hglrc_) {
@@ -727,9 +762,22 @@ private:
                             gpu_direct_gl_ready_ = true;
                             CASPAR_LOG(info) << L"[cuda_prores] GPU-direct path active (CUDA-GL interop)";
                         } else {
+                            const auto err = GetLastError();
                             wglDeleteContext(gpu_hglrc_);
                             gpu_hglrc_ = nullptr;
-                            CASPAR_LOG(warning) << L"[cuda_prores] wglShareLists failed - CPU path";
+                            // NAME THE REASON. "failed" sent three sessions looking at CUDA.
+                            // ERROR_BUSY (170) means the mixer's context is current on its own
+                            // thread, which is a lifetime problem here rather than a driver one;
+                            // ERROR_INVALID_OPERATION (4317) means this context has already been
+                            // used; a generic pixel format means the two are different OpenGL
+                            // implementations and can never be shared.
+                            CASPAR_LOG(warning) << L"[cuda_prores] wglShareLists failed (error "
+                                                << static_cast<unsigned>(err) << L", pixel format "
+                                                << fmt
+                                                << (got.dwFlags & PFD_GENERIC_FORMAT
+                                                        ? L" GENERIC/software"
+                                                        : L" accelerated")
+                                                << L") - CPU path";
                         }
                     }
                 }
