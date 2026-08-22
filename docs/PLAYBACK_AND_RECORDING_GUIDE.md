@@ -315,8 +315,98 @@ Vulkan route with libplacebo. The 2.49 LSB there says nothing about either encod
 
 ## 6. How many at once
 
-*(Measured with `iso-scaling`, `playback-scaling` and `consumer-scaling`. Numbers are filled in
-below once the ladders complete — this section is deliberately empty rather than estimated.)*
+All three ladders stop at the first configuration that goes late in **steady state** — start-up
+lateness is excluded, because every configuration on this machine loses one to three frames while
+it opens files and compiles shaders, and counting those reports a ceiling of zero for everything.
+The ceiling quoted is the last configuration that held.
+
+**Read these as ±1, not as exact.** They are threshold crossings: `hevc_vulkan` measured 7
+channels in one run and 5 in the next with nothing changed. The ordering is stable; the last
+channel is not.
+
+### Recording — N channels, one recording each
+
+1080p2500, 8-bit channels, one producer and one recording consumer per channel. Every GPU row had
+its fast path confirmed engaged at every rung.
+
+| route | channels | GPU% | VRAM at ceiling |
+| :--- | ---: | ---: | ---: |
+| `h264_vulkan` | **7** | 46 | 5193 MB |
+| `hevc_vulkan` | **5** | 28 | 3774 MB |
+| `prores_ks_vulkan` | **5** | 43 | 3732 MB |
+| `prores_aw` (CPU) | **5** | 31 | 1864 MB |
+| `prores_ks` (CPU) | 3 | 22 | 2900 MB |
+| `ffv1` (CPU) | 2 | 30 | 1201 MB |
+| `libx264` | 2 | 29 | 1201 MB |
+| `CUDA_PRORES` | **0** — late at one channel | — | — |
+| `ffv1_vulkan` | **0** — late at one channel | — | — |
+
+**Choosing the right CPU encoder buys more than moving to the GPU does, for ProRes.** `prores_aw`
+reaches five channels — the same as `prores_ks_vulkan` — while `prores_ks` reaches three. If you
+are recording ProRes and cannot use a GPU route, that one word in the command is worth two
+channels.
+
+**Two rows report zero, and they are not the same kind of zero.** `ffv1_vulkan` writes about
+21 MB/s per channel (210 MB for ten seconds), so its limit is *probably* the disk rather than the
+GPU — probably, because that has not been isolated and is not asserted here. `CUDA_PRORES` engaged
+its GPU-direct path and still went late at one channel, which is not explained: `encode-matrix`
+records the same consumer at one channel with no dropped frames at all, so the difference is
+somewhere in this ladder's configuration (an H.264 source decoded through D3D11VA, where
+`encode-matrix` used ProRes) and is unattributed. **Do not read either zero as "this route cannot
+record".** Both record correctly at one channel in other measurements.
+
+### Playback — N channels, one producer each
+
+One screen output per channel, so these are playout channels rather than a bare decode test.
+
+| route | source | channels | cores | GPU% |
+| :--- | :--- | ---: | ---: | ---: |
+| Software (`<gpu-direct-decode>false`) | ProRes | **1** | 0.41 | 3 |
+| `CUDA_PRORES` | ProRes | **4** | 0.62 | 26 |
+| `<vulkan-decode>` | ProRes | **8** | 1.07 | 24 |
+| D3D11VA GPU-direct | **H.264** | **10** | 1.45 | 30 |
+
+**The first three are the comparison; the fourth is not.** Software, CUDA and Vulkan all decode
+the same ProRes clip, and 1 → 4 → 8 is the clearest result in this document. D3D11VA cannot be
+included in it: no NVIDIA GPU decodes ProRes, so that route has to be measured on an H.264 clip,
+and its 10 channels reflect a much lighter source as well as the route. Run on ProRes it declines
+every producer, correctly, and the ladder refuses to report a number.
+
+**Eight ProRes playout channels against one is the case for `<vulkan-decode>`**, and it is a much
+larger effect than the same route shows on cost alone (1.16 against 1.90 cores at one layer).
+
+### Outputs on one channel — the SDI case
+
+One channel, one producer, a real-time output always present, then recordings added to the same
+channel.
+
+| output on air | recordings added | ceiling | cores | readback |
+| :--- | :--- | ---: | ---: | :--- |
+| screen | `prores_ks_vulkan` | **8+** | 1.07 | yes |
+| screen | `prores_ks` (CPU) | **4** | 4.38 | yes |
+| DeckLink SDI | `prores_ks_vulkan` | **8+** | 1.02 | yes |
+| DeckLink SDI | `prores_ks` (CPU) | **0** | — | — |
+
+**This is the answer to "can I record while I am on air".** With an SDI output live, eight or more
+GPU ProRes recordings sit on the same channel without it going late — and **a single CPU ProRes
+recording breaks it**. Not four, not two: one. The cores column says why the CPU route runs out so
+fast: four CPU recordings cost 4.38 cores where eight GPU recordings cost 1.02.
+
+Both `8+` rows hit the top of the ladder rather than a limit, so the real ceiling is higher than
+eight and was not pursued.
+
+**A channel with no real-time output cannot be measured this way**, and the battery refuses to
+try. A channel whose only consumer is a file recording has nothing pacing it, so "late" has
+nothing fixed to be late against — measured, it reported *worse* than the same channel with an SDI
+output added, which cannot be true of a channel doing strictly less work.
+
+**One observation that did not come out as expected.** `readback` was `yes` in every
+consumer-ladder configuration, including eight `prores_ks_vulkan` recordings behind a screen
+output. The DeckLink rows are expected — that output needs host pixels, so the channel reads back
+once per tick and the GPU recordings' advantage is spent — but the screen rows are not explained,
+and no configuration here demonstrated the shared readback being *avoided*. The rule in §8 about
+not mixing a host-path consumer onto a GPU-direct channel is therefore supported on its cost side
+and unproven on its benefit side.
 
 ---
 
@@ -407,9 +497,10 @@ same channel can make the on-air output late.**
 
 Two rules follow:
 
-1. **Keep the on-air channel's consumer list short.** If you need several recordings, put them on
-   their own channels rather than on the channel that is on air. Separate channels get separate
-   frame budgets.
+1. **Use a GPU recording route, or put the recording on another channel.** Measured with a
+   DeckLink output live on the channel: **eight or more `prores_ks_vulkan` recordings fit, and a
+   single `prores_ks` CPU recording makes the channel late.** One. If you must record on the CPU,
+   give it its own channel — separate channels get separate frame budgets.
 2. **Do not mix a host-path consumer onto a GPU-direct channel.** The composite is read back once
    per tick if *any* consumer needs host pixels, and that readback is then paid by the channel
    regardless of how GPU-native the other consumers are. One CPU recording removes the benefit for
@@ -422,13 +513,20 @@ pixels.
 ### If the source is ProRes and you also want to record
 
 Decode and encode compete for the same GPU. `<vulkan-decode>` plus `prores_ks_vulkan` keeps both
-on one device with no copies, which is the least-contended combination measured — but the ceilings
-in §6 are what should decide the count, not this reasoning.
+on one device with no copies, which is the least-contended combination measured.
+
+The ceilings say how much that is worth: **eight ProRes playout channels on `<vulkan-decode>`
+against one on software decode**, and five concurrent ProRes recordings on the GPU encoder. Those
+were measured separately rather than together, so a box doing both at once has not been measured
+and the two numbers cannot simply be added.
 
 ---
 
 ## 9. What none of this covers
 
+* **Ceilings are ±1 and were each measured once.** They are threshold crossings, and
+  `hevc_vulkan` moved between 7 and 5 channels across two runs with nothing changed. The
+  ordering held; the last channel did not.
 * **1080p25 only.** No 4K, no 50p. Both change the balance: upload bandwidth and readback scale
   with pixels, so GPU routes gain as the raster grows.
 * **One clip, one still.** The cost figures use a moving ProRes clip and the picture figures a
