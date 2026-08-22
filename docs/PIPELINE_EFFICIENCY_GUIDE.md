@@ -497,7 +497,13 @@ what the current design avoids.
 > 582.53. Everything below about the NVENC path is correct about the design and currently
 > unreachable in practice. **Use `h264_vulkan` / `hevc_vulkan` instead** — they drive the same
 > NVENC silicon through Vulkan, measured at 15–39% NVENC-block utilisation. NVDEC *decoding* is
-> unaffected. See `CHANGELOG.md` for how this was established.
+> unaffected.
+>
+> **The fix is to rebuild FFmpeg, not to raise the driver.** Pinning `nv-codec-headers` n13.0
+> instead of n13.1 keeps FFmpeg at 8.1.2 and works on 582.53. Raising the driver to R610 would
+> take the second GPU with it: Release 580 is the last branch to support Quadro Pascal, the
+> reference machine's other card is a P4000, and 582.53 is already the newest driver that serves
+> both. See `CHANGELOG.md`.
 
 ### Every route to a recording, measured side by side
 
@@ -520,16 +526,18 @@ path exists only on the **OpenGL** mixer. No single channel satisfies all three.
 | `prores_aw` | vulkan / 16 | host | 2.24 | 924 | 0 | 260 | 22.4 | mean 0.17 LSB |
 | **`prores_ks_vulkan`** | vulkan / 16 | **yes** | **1.46** | 1493 | 0 | 258 | 50.9 | mean 2.55 LSB |
 | `prores_ks` | ogl / 8 | host | 2.42 | 1410 | **116** | **140** | 14.8 | reference |
-| `CUDA_PRORES` | ogl / 8 | **no — see below** | 1.64 | 923 | 0 | 260 | 55.3 | mean 0.89 LSB |
+| `CUDA_PRORES` | ogl / 8 | **yes** | 1.64 | 914 | 0 | 260 | 55.4 | mean 0.89 LSB |
 
 **`prores_ks` cannot sustain 1080p25 and `prores_aw` can.** The `ks` encoder kept 138 of 260
 frames on both mixers; `aw` kept all of them for slightly less CPU. If you are recording ProRes
 on the host, `prores_aw` is the one to ask for — and this corrects an earlier claim in this
 repository that "the CPU ProRes encoder" does not keep up. It is specifically `prores_ks`.
 
-**`CUDA_PRORES` is on a host readback**, because its `wglShareLists` GPU-direct route fails with
-ERROR_BUSY (see `CHANGELOG.md`). It still costs less than every CPU route, so 1.64 cores is a
-lower bound.
+**`CUDA_PRORES` needs the OpenGL mixer** — CUDA-GL interop has no Vulkan equivalent here, and on
+a Vulkan channel it falls back to a host readback. Its GPU-direct route was fixed on 2026-08-22
+and had never engaged before that; the CPU figure did not move when it was fixed (1.64 either
+way, inside noise at this raster), but the composite no longer makes a host round trip. On a
+Vulkan channel use `prores_ks_vulkan` instead.
 
 #### H.264 and HEVC — the Vulkan encoders reach the NVENC block
 

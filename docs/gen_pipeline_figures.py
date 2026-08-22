@@ -305,7 +305,7 @@ def fig_recording_routes():
     groups = [
         ("ProRes", [
             ("prores_ks_vulkan", "vulkan mixer, 16-bit", "1.46", "all frames", "best"),
-            ("CUDA_PRORES", "OpenGL mixer, 8-bit", "1.64", "host readback: ERROR_BUSY", "warn"),
+            ("CUDA_PRORES", "OpenGL mixer, 8-bit", "1.64", "GPU-direct, all frames", "ok"),
             ("prores_aw", "any", "2.24", "all frames", "ok"),
             ("prores_ks", "any", "2.32", "KEEPS 138 OF 260 FRAMES", "bad"),
         ]),
@@ -313,7 +313,7 @@ def fig_recording_routes():
             ("h264_vulkan", "vulkan mixer, 16-bit", "1.42", "NVENC block 15%", "best"),
             ("hevc_vulkan", "vulkan mixer, 16-bit", "1.41", "NVENC block 39%", "best"),
             ("libx264 / libx265", "any", "2.18 / 2.83", "all frames", "ok"),
-            ("h264_nvenc / hevc_nvenc", "8-bit", "--", "REFUSED: needs driver 610+", "bad"),
+            ("h264_nvenc / hevc_nvenc", "8-bit", "--", "REFUSED by this build", "bad"),
         ]),
         ("FFV1", [
             ("ffv1_vulkan", "vulkan mixer, 16-bit", "1.50", "18x the disk", "warn"),
@@ -348,7 +348,10 @@ def fig_recording_routes():
         y -= GAP
 
     ax.text(0.15, max(0.22, y + 0.10),
-            "No single channel serves all three fast paths: NVENC GPU-direct needs 8-bit, "
+            "NVENC is refused because the pinned FFmpeg needs driver 610+; the fix is to rebuild "
+            "against nv-codec-headers n13.0, NOT to raise the\n"
+            "driver, which would drop the Pascal P4000 in the other slot. No single channel serves "
+            "all three fast paths: NVENC GPU-direct needs 8-bit, "
             "the Vulkan encoders need 16-bit, and CUDA_PRORES needs the OpenGL mixer.\n"
             "Cost figures are untuned defaults; the recorded sizes differ by over 10x.",
             fontsize=8.2, color=C_MUTED)

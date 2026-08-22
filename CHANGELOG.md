@@ -19,8 +19,15 @@ an NVIDIA driver of **610 or newer**. The reference machine runs **582.53**.
 **It is the build and not the driver, and that was established rather than assumed.** The same
 `ffmpeg.exe` shipped beside the server fails identically on a plain `lavfi` source, so the
 consumer is not implicated. A separately built FFmpeg 8.1.1 on the *same* machine and the *same*
-driver encodes `h264_nvenc` successfully. So the fix is either to raise the driver past 610 or to
-pin a build compiled against the 13.0 headers.
+driver encodes `h264_nvenc` successfully.
+
+**The fix is the header pin, not the driver, and on this machine the driver is not even an
+option.** [NVENCAPI 13.0 requires driver 570 or newer](https://github.com/FFmpeg/nv-codec-headers)
+and 13.1 requires 610, so pinning `nv-codec-headers` **n13.0** keeps FFmpeg at 8.1.2 and gives
+working NVENC on 582.53. Raising the driver instead would break the other card: Release 580 is
+the **last** branch to support Quadro Maxwell, Pascal and Volta, the reference machine's second
+GPU is a Pascal Quadro P4000, and 582.53 is the R580 U9 Enterprise driver — i.e. this box is
+already on the newest driver that serves both slots, and one Windows package serves both.
 
 **Scope is exactly NVENC.** NVDEC is unaffected — `-hwaccel cuda` and `h264_cuvid` both decode
 correctly in the bundled build — and so is everything that uses the CUDA driver API rather than
@@ -37,16 +44,16 @@ Found by `encode-matrix`, which exists because nothing had ever compared the rou
 Both NVENC arms first reported only "recorded nothing readable"; a column of zeroes hid a
 dependency pin, and the battery now prints what the server said.
 
-### Broken: `CUDA_PRORES` never takes its GPU-direct path on Windows
+### Fixed: `CUDA_PRORES` now takes its GPU-direct path — and it was wrong underneath
 
-The consumer creates a private OpenGL context and calls `wglShareLists` against the mixer's, on
-its own encode thread. That fails with **ERROR_BUSY (170)** and an *accelerated* pixel format,
-because `wglShareLists` refuses a context that is current on another thread and the mixer's
-context is current on its device thread permanently. The consumer logs one warning and spends
-the rest of its life on a host readback.
+The consumer created a private OpenGL context and called `wglShareLists` against the mixer's, on
+its own encode thread. That fails with **ERROR_BUSY (170)** — with an *accelerated* pixel format,
+so it was never a format problem — because `wglShareLists` refuses a context that is current on
+another thread and the mixer's is current on its device thread permanently. The path had
+therefore never once run, on any machine, and the only trace was one warning at startup.
 
-A private shared context can never work here, whatever pixel format it picks — and this tree
-already said so. `cuda_gl_upload.h` documents the rule and names this consumer as the exception:
+This tree already had the rule written down, and had named this consumer as the exception.
+`cuda_gl_upload.h`:
 
 > MUST be called on a thread that has the mixer's GL context current — CUDA's GL interop
 > registers against the calling thread's context. Call it through
@@ -54,13 +61,47 @@ already said so. `cuda_gl_upload.h` documents the rule and names this consumer a
 > private `wglShareLists` context is what the ProRes consumer does, and it is the pattern that
 > made OGL GPU affinity impossible to add.
 
-The NVENC uploader uses `dispatch_sync` and works. Not fixed here, because moving the map onto
-the mixer's device thread changes the consumer's threading and belongs in its own change. The
-diagnostic is improved so the failure names its cause rather than saying "failed".
+The map now runs on the mixer's own GL thread through `dispatch_sync`, and the private-context
+code is gone on both platforms — the Linux EGL variant may well have worked, but keeping one
+platform on that design keeps the hazard. Deferring the map to encode time is safe because the
+job holds the `const_frame`, which holds the texture: the attachment pool cannot recycle a
+texture that is still referenced.
 
-**It still beats every CPU ProRes route while doing this**, at 1.64 cores against 2.24–2.42, so
-its measured cost is a *lower bound* and the case for fixing it is a further saving rather than a
-rescue.
+`needs_cpu_frame_data()` is now a live switch rather than a declaration, which is the idiom
+`core/frame/frame.h` documents. Announcing GPU-direct up front would tell the channel to stop
+reading back before anything had proved it could work, and a later failure would then have no
+host pixels to fall back to — so the first success switches the readback off and any failure
+switches it back on.
+
+**Making the path reachable exposed a second defect, which is the part worth remembering.** The
+first run with it live came back at **mean 166.31 LSB** against the host path with only **5%** of
+the disagreement at a chroma edge — flat areas wrong everywhere, which is the signature of a
+channel exchange rather than of a resampling difference. The mixer's OpenGL attachment is
+`GL_RGBA8` with an **external** format of `GL_BGRA`, so GL swizzles on every host transfer:
+`cudaMemcpy2DFromArray` copies the bytes untouched, and the two routes hand opposite orders to
+the same conversion kernel. Fixed with one R/B exchange at the fill site rather than a byte-order
+flag, because three kernels read that buffer and a flag would have to be threaded through all of
+them.
+
+CLAUDE.md's own warning, earned again: a dead code path is not a correct one, and when you make
+one reachable you must measure it with **asymmetric** values. A grey ramp is invariant under this
+exchange and would have passed.
+
+Measured with `encode-matrix`, 1080p2500, two interleaved rounds, and reproduced:
+
+| | before | after |
+| :--- | :--- | :--- |
+| GPU-direct engaged | no | **yes** |
+| picture vs the CPU encoder | mean 166.31 LSB | **mean 0.89, worst 37, 0.42% over 3 LSB** |
+| server CPU | 1.64 cores | 1.61–1.64 cores |
+| GPU utilisation | 32% | 38% |
+
+The picture figure after the fix is *identical* to what the host path measures, which is what
+establishes the exchange is right. **The CPU saving is not the point and should not be claimed as
+one**: at 1080p25 with a single consumer it is inside run-to-run noise. What changed is that the
+composite no longer makes an 8 MB round trip through host memory every frame, which shows up as
+the readback's work moving onto the card. Whether that pays off is a 4K and multiple-consumer
+question, and neither is measured.
 
 ### Added: GPU recording through FFmpeg 8's Vulkan encoders — and ProRes/FFV1 without a readback
 

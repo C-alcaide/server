@@ -12,20 +12,30 @@ The module provides two recording consumers **and** a GPU-accelerated ProRes pla
 
 All three share the same GPU encode/decode kernel pipeline (NVIDIA CUDA).  Consumers write `.mov` or `.mxf` files; the producer reads them back.
 
-> **The consumer's GPU-direct upload does not engage on Windows.** Measured 2026-08-22: it
-> creates a private OpenGL context and calls `wglShareLists` against the mixer's, which fails
-> with `ERROR_BUSY (170)` because the mixer's context is current on its own device thread and
-> `wglShareLists` refuses that. The log says
-> `[cuda_prores] wglShareLists failed (error 170, pixel format N accelerated) - CPU path`, and
-> the composite then reaches the encoder through **host memory**.
->
-> The *encode* is still on the GPU, so this is a slower fast path rather than a broken consumer:
-> it recorded all 260 frames of a ten-second 1080p25 test at 1.64 cores where `prores_ks` managed
-> 138 frames at 2.42. Treat that as a lower bound.
->
-> The fix is known and is not a pixel-format change: `cuda_gl_upload.h` documents that CUDA-GL
-> interop must run through `accelerator::ogl::device::dispatch_sync`, and names this consumer as
-> the one that does it the other way. See `CHANGELOG.md`.
+### The GPU-direct upload
+
+The consumer maps the mixer's composited texture straight into CUDA, so the picture never passes
+through host memory. Confirm it from the log:
+
+```
+[cuda_prores] GPU-direct path active (CUDA-GL interop on the mixer's own thread); the channel readback stops here
+output[1] No consumer needs CPU readback (1 consumers); mixer readback skipped.
+```
+
+**It requires the OpenGL mixer.** CUDA-GL interop needs an OpenGL texture; on a Vulkan channel
+the consumer falls back to a host readback, correctly and without complaint. There is no
+CUDA-Vulkan equivalent in this consumer — use `-vcodec prores_ks_vulkan` through the ffmpeg
+consumer on a Vulkan channel instead.
+
+The first frame always reads back: the consumer only stops the channel readback once a map has
+actually succeeded, and re-arms it if one ever fails, so a failure degrades to the host path
+rather than producing a frame with no pixels in it.
+
+> **Fixed 2026-08-22, and it had never worked before that.** The consumer used to create its own
+> OpenGL context and call `wglShareLists` against the mixer's, which fails with `ERROR_BUSY (170)`
+> because that call refuses a context current on another thread. Every recording before this went
+> through host memory. Fixing it also exposed a red/blue exchange on the GPU path that had never
+> been able to show itself. See `CHANGELOG.md` for both.
 
 ---
 
