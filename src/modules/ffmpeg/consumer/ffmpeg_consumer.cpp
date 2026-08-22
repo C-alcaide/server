@@ -136,6 +136,21 @@ struct Stream
     class cuda_vk_uploader*  gpu_uploader_vk = nullptr;
     std::atomic<bool>*       gpu_direct     = nullptr;
     int                      gpu_failures   = 0;
+    /// How many consecutive GPU-direct failures it takes to abandon the path.
+    ///
+    /// More than one, because the commonest failure is transient: the hardware frame pool
+    /// momentarily empty while the encoder holds every frame in it. At one, a single busy
+    /// moment demoted the whole recording to host readback -- slower, and a different picture.
+    /// 32 frames is a little over a second at 25p, long enough that a genuinely broken path
+    /// still gives up promptly and short enough that a real stall is not ridden out for
+    /// minutes. NOT reset on success: a path that misses one frame in ten is broken too, just
+    /// more slowly, and this counts every miss over the recording's life.
+    static constexpr int     kGpuFailuresBeforeGivingUp = 32;
+    /// The reason last reported, so a CHANGE of reason is logged rather than only the first
+    /// one. Without this the log says why the first frame failed and then goes silent, which
+    /// cannot distinguish "the same guard every frame" from "one guard at startup and a
+    /// different one later" -- and those want opposite fixes.
+    std::string              gpu_last_logged_reason;
 
     //: HDR10 static metadata, attached to every frame handed to the encoder when the channel
     //: is PQ or HLG and <hdr-metadata> was configured. Off unless both are true -- see the
@@ -1125,24 +1140,102 @@ struct Stream
 #endif
     }
 
-    /// Wraps the mixer's composited texture in a CUDA frame the encoder can read.
-    /// Returns null if the frame carries no usable OpenGL texture or the copy fails.
+    /// Why the last GPU-direct frame could not be built. Empty when the last one succeeded.
+    ///
+    /// THE CALLER USED TO REPORT `gpu_uploader->last_error()` FOR EVERY CAUSE, and on the
+    /// Vulkan encode path that object is the CUDA-GL uploader, which has not failed and returns
+    /// an empty string. So a real failure logged as "GPU-direct recording failed ()" -- naming
+    /// the wrong component and giving no reason at all. Measured 2026-08-22 chasing why
+    /// `prores_ks_vulkan` stops at one channel: the message appeared twice, the exporter itself
+    /// logged nothing, and there was no way from outside to tell which of five guards tripped.
+    std::string gpu_direct_reason_;
+
+    /// Wraps the mixer's composited texture in a frame the encoder can read -- a CUDA frame for
+    /// NVENC, a Vulkan frame for the FFmpeg Vulkan encoders. Returns null if the frame carries
+    /// no usable texture or the copy fails, leaving the cause in `gpu_direct_reason_`.
     std::shared_ptr<AVFrame> make_cuda_video_frame(const core::const_frame& in_frame)
     {
+        gpu_direct_reason_.clear();
+
+        // NO TEXTURE MEANS NOTHING WAS COMPOSITED, which is not a failure -- it is what a
+        // channel with no producer looks like, and what a `route://` channel looks like for the
+        // few seconds before its source plays. The Vulkan mixer attaches a texture to every
+        // frame it does composite (`image_mixer.cpp`, `make_result`), so the two cases do not
+        // overlap.
+        //
+        // This used to return null, which the caller counted as a GPU-direct failure and acted
+        // on: a recording consumer declared in `casparcg.config` starts BEFORE anything is
+        // played, so the path was abandoned on its first frame -- every time, for every such
+        // consumer.
+        //
+        // What that cost was not the recording. `gpu_frames_ctx` stays non-null and this
+        // function remains the only way a video frame is built, so once the channel had
+        // something to composite the frames were device frames again and the file was written
+        // normally. What it cost was the CPU readback that clearing the flag switches back on,
+        // for every tick of the rest of the recording, consumed by nobody: 8 MB a frame at
+        // 8-bit and 16 at 16-bit, on the channel thread, which is exactly the cost this whole
+        // path exists to avoid. Measured 2026-08-23 on a `prores422hq_vulkan` step, the mixer
+        // now logs "CPU readback SKIPPED" for the same configuration that used to log "CPU
+        // readback required by consumer ffmpeg" four seconds in and never recover.
+        //
+        // Encoding black is what the host path records for the same frame, so this is parity
+        // rather than a substitution -- and the frames before PLAY are now in the file instead
+        // of missing from it.
         auto tex = in_frame.texture();
-        if (!tex)
-            return nullptr;
 
         auto frame = alloc_frame();
-        if (av_hwframe_get_buffer(gpu_frames_ctx, frame.get(), 0) < 0)
+        const int got = av_hwframe_get_buffer(gpu_frames_ctx, frame.get(), 0);
+        if (got < 0) {
+            // POOL EXHAUSTION IS THE INTERESTING CASE, and it is transient by nature: the pool
+            // is fixed at its initial size, the encoder holds frames while it works, and an
+            // encoder momentarily behind empties it. Reported distinctly from a genuine
+            // allocation failure because the two want opposite responses -- wait, or give up.
+            char err[AV_ERROR_MAX_STRING_SIZE]{};
+            av_strerror(got, err, sizeof(err));
+            gpu_direct_reason_ = std::string("no frame available from the hardware pool (")
+                                 + err + ") -- the encoder is holding all of them";
             return nullptr;
+        }
+
+        if (!tex) {
+            if (!vk_exporter) {
+                // The CUDA/NVENC path has no equivalent clear, so an idle channel still costs
+                // it the frame. Named rather than left as an empty reason, and NOT counted as
+                // a reason to abandon the path -- see the caller.
+                gpu_direct_reason_ = "the channel composited nothing (idle) and this path "
+                                     "cannot encode black without the mixer";
+                return nullptr;
+            }
+            accelerator::vulkan::av_plane_dest dest;
+            dest.image     = reinterpret_cast<void*>(frame->data[0]);
+            dest.semaphore = nullptr;
+            dest.width     = frame->width;
+            dest.height    = frame->height;
+            if (!fill_vk_plane_dest(frame.get(), dest)) {
+                gpu_direct_reason_ = "the AVVkFrame was incompletely described";
+                return nullptr;
+            }
+            if (!vk_exporter->clear_to_black(dest)) {
+                gpu_direct_reason_ = "the black fill was refused (see [vk::av_export])";
+                return nullptr;
+            }
+            if (!store_vk_plane_result(frame.get(), dest)) {
+                gpu_direct_reason_ = "the AVVkFrame result could not be written back";
+                return nullptr;
+            }
+            return frame;
+        }
 
         if (auto* gl_tex = dynamic_cast<accelerator::ogl::texture*>(tex.get())) {
-            if (!gpu_uploader)
+            if (!gpu_uploader) {
+                gpu_direct_reason_ = "no CUDA-GL uploader on this channel";
                 return nullptr;
+            }
             auto dev = gl_tex->get_device();
-            if (!dev)
+            if (!dev) {
+                gpu_direct_reason_ = "the OpenGL texture has no device";
                 return nullptr;
+            }
 
             // On the mixer's own GL thread: CUDA registers GL objects against the
             // calling thread's context, and dispatching here avoids standing up a
@@ -1165,15 +1258,21 @@ struct Stream
             dest.semaphore = nullptr;
             dest.width     = tex->tex_width();
             dest.height    = tex->tex_height();
-            if (!fill_vk_plane_dest(frame.get(), dest))
+            if (!fill_vk_plane_dest(frame.get(), dest)) {
+                gpu_direct_reason_ = "the AVVkFrame was incompletely described";
                 return nullptr;
-            if (!vk_exporter->copy_from_texture(tex, dest))
+            }
+            if (!vk_exporter->copy_from_texture(tex, dest)) {
+                gpu_direct_reason_ = "the Vulkan image copy was refused (see [vk::av_export])";
                 return nullptr;
+            }
             // The exporter signalled the frame's timeline semaphore and moved its image, so
             // FFmpeg's own bookkeeping has to learn both -- see `av_plane_dest`, whose comment
             // carries the validation-layer finding this fixes.
-            if (!store_vk_plane_result(frame.get(), dest))
+            if (!store_vk_plane_result(frame.get(), dest)) {
+                gpu_direct_reason_ = "the AVVkFrame result could not be written back";
                 return nullptr;
+            }
         } else if (gpu_uploader_vk) {
             // Vulkan: no device thread to hop onto and no context to be current --
             // the image's exported memory is imported straight into CUDA.
@@ -1226,17 +1325,40 @@ struct Stream
                 if (gpu_frames_ctx) {
                     frame = make_cuda_video_frame(in_frame);
                     if (!frame) {
-                        // The graph and the encoder are configured for CUDA frames,
-                        // so there is no host frame to fall back to for *this*
-                        // frame; drop it, as the consumer already does when it
-                        // cannot keep up. gpu_direct is cleared so the channel
-                        // resumes readbacks and a later rebuild takes the CPU path.
-                        if (gpu_failures++ == 0 && gpu_direct) {
+                        // ONE MISS IS NOT A BROKEN PATH, and this used to abandon the path
+                        // on the FIRST one. Two of the causes are transient by nature: the
+                        // hardware frame pool momentarily empty because the encoder holds
+                        // every frame in it, and -- until the black fill above -- a channel
+                        // that had not started playing yet.
+                        //
+                        // THE FRAME IS STILL LOST, and clearing the flag does not save it.
+                        // `gpu_frames_ctx` is non-null for the whole recording and this
+                        // function is the only way a video frame is built, so there is no host
+                        // path to fall back to -- the old message promising one was false. All
+                        // clearing the flag does is make the channel resume a CPU readback
+                        // that nothing here consumes, which is a cost rather than a fallback.
+                        //
+                        // It is kept only as a last resort, after enough consecutive misses
+                        // that the path is evidently broken rather than busy, and the message
+                        // now says what it really means.
+                        ++gpu_failures;
+                        const auto reason = gpu_direct_reason_.empty()
+                                                ? std::string("no reason recorded")
+                                                : gpu_direct_reason_;
+                        if (reason != gpu_last_logged_reason) {
+                            gpu_last_logged_reason = reason;
+                            CASPAR_LOG(warning)
+                                << L"[ffmpeg] GPU-direct recording dropped a frame (" << gpu_failures
+                                << L" so far): " << u16(reason) << L".";
+                        }
+                        if (gpu_failures == kGpuFailuresBeforeGivingUp && gpu_direct) {
                             gpu_direct->store(false, std::memory_order_relaxed);
                             CASPAR_LOG(error)
-                                << L"[ffmpeg] GPU-direct recording failed ("
-                                << u16(gpu_uploader ? gpu_uploader->last_error() : "no uploader")
-                                << L"); dropping the frame and reverting to the host path.";
+                                << L"[ffmpeg] GPU-direct recording has failed "
+                                << kGpuFailuresBeforeGivingUp << L" times (" << u16(reason)
+                                << L"). This encoder takes only device frames, so the frames "
+                                   L"are being LOST rather than recorded another way -- the "
+                                   L"recording will be short by every one of them.";
                         }
                         return;
                     }

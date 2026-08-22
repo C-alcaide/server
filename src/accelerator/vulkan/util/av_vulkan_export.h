@@ -111,7 +111,28 @@ class av_vulkan_exporter
     /// send a frame that may hold anything.
     bool copy_from_texture(const std::shared_ptr<core::texture>& src, av_plane_dest& dest);
 
+    /// Fill `dest` with opaque black, signalling `dest.sem_value + 1` the same way a copy does.
+    ///
+    /// FOR A CHANNEL THAT IS COMPOSITING NOTHING. `const_frame::empty()` carries no texture, so
+    /// there is nothing to copy from -- and the consumer used to treat that as a GPU-direct
+    /// FAILURE. A recording consumer declared in `casparcg.config` starts before anything is
+    /// played, so the path was abandoned on its very first frame, every time -- and the channel
+    /// then spent the rest of the recording doing a CPU readback nobody consumed, which is the
+    /// one cost this whole class exists to remove. Measured 2026-08-23: the mixer logs "CPU
+    /// readback SKIPPED" for a configuration that used to log "CPU readback required by
+    /// consumer ffmpeg" four seconds in and never recover.
+    ///
+    /// Black is not a guess here. The Vulkan mixer attaches a texture to every frame it
+    /// composites (`image_mixer.cpp`, `make_result`), so an absent one means no composition
+    /// happened -- an idle channel, whose picture IS black. That is also exactly what the host
+    /// path records for the same frame, so this keeps the two paths recording the same thing.
+    bool clear_to_black(av_plane_dest& dest);
+
   private:
+    /// The one submission both entry points use. `source` null means clear rather than copy;
+    /// the arguments are `void*` so the header does not have to name the mixer's own types.
+    bool submit(av_plane_dest& dest, void* wrapper_ptr, void* source_ptr);
+
     struct impl;
     std::unique_ptr<impl> impl_;
 };

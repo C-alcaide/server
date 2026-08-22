@@ -96,8 +96,7 @@ av_vulkan_exporter::~av_vulkan_exporter() = default;
 
 bool av_vulkan_exporter::copy_from_texture(const std::shared_ptr<core::texture>& src, av_plane_dest& dest)
 {
-    auto& m   = *impl_;
-    auto* dev = m.dev_;
+    auto& m = *impl_;
 
     if (!dest.image || !dest.semaphore || dest.width <= 0 || dest.height <= 0) {
         m.warn_once(L"the destination frame is incompletely described");
@@ -125,6 +124,33 @@ bool av_vulkan_exporter::copy_from_texture(const std::shared_ptr<core::texture>&
         return false;
     }
 
+    return submit(dest, wrapper, source.get());
+}
+
+bool av_vulkan_exporter::clear_to_black(av_plane_dest& dest)
+{
+    auto& m = *impl_;
+
+    if (!dest.image || !dest.semaphore || dest.width <= 0 || dest.height <= 0) {
+        m.warn_once(L"the destination frame is incompletely described");
+        return false;
+    }
+    // No wrapper and no source image, which `submit` reads as "clear" rather than "copy".
+    return submit(dest, nullptr, nullptr);
+}
+
+/// `source` null means fill with black instead of copying; `wrapper` is then null too, so there
+/// is no render to wait for and no source layout to move or restore. Everything else -- the
+/// destination barriers, the timeline signal, the fence, the exception handling -- is identical,
+/// which is the point. A black frame and a copied one must be indistinguishable to FFmpeg's
+/// bookkeeping, and that only stays true while there is one copy of the bookkeeping.
+bool av_vulkan_exporter::submit(av_plane_dest& dest, void* wrapper_ptr, void* source_ptr)
+{
+    auto& m       = *impl_;
+    auto* dev     = m.dev_;
+    auto* wrapper = static_cast<texture_wrapper*>(wrapper_ptr);
+    auto* source  = static_cast<texture*>(source_ptr);
+
     // FFmpeg does not promise a layout for a freshly-allocated frame, and UNDEFINED is the
     // normal state of one from `av_hwframe_get_buffer`. Unlike the importer -- which refuses
     // UNDEFINED because it would be COPYING FROM undefined contents -- here the whole image is
@@ -138,7 +164,11 @@ bool av_vulkan_exporter::copy_from_texture(const std::shared_ptr<core::texture>&
             // carries the wait for exactly this, and it is a host wait: a queue wait would sit
             // on the mixer's single shared graphics queue and block every other channel behind
             // it, which is the head-of-line stall that cost a TDR on the decode side.
-            wrapper->ensure_render_complete();
+            //
+            // Nothing to wait for when there is no source: a black frame does not read the
+            // mixer's attachment at all.
+            if (wrapper)
+                wrapper->ensure_render_complete();
 
             // Re-recording a command buffer the GPU may still be executing is undefined
             // behaviour. Against the PREVIOUS frame's copy, so in steady state it is free.
@@ -150,10 +180,11 @@ bool av_vulkan_exporter::copy_from_texture(const std::shared_ptr<core::texture>&
 
             const auto range  = vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1);
             const auto layers = vk::ImageSubresourceLayers(vk::ImageAspectFlagBits::eColor, 0, 0, 1);
+            (void)layers; // used only by the copy branch below
 
             std::vector<vk::ImageMemoryBarrier2> pre;
             pre.reserve(2);
-            {
+            if (source) {
                 // The mixer's attachment: from shader-read (where the composite left it) to
                 // transfer-read.
                 vk::ImageMemoryBarrier2 b{};
@@ -190,20 +221,32 @@ bool av_vulkan_exporter::copy_from_texture(const std::shared_ptr<core::texture>&
                 cmd.pipelineBarrier2(dep);
             }
 
-            vk::ImageCopy c(layers,
-                            vk::Offset3D{},
-                            layers,
-                            vk::Offset3D{},
-                            vk::Extent3D{static_cast<uint32_t>(dest.width), static_cast<uint32_t>(dest.height), 1});
-            cmd.copyImage(source->id(),
-                          vk::ImageLayout::eTransferSrcOptimal,
-                          static_cast<VkImage>(dest.image),
-                          vk::ImageLayout::eTransferDstOptimal,
-                          c);
+            if (source) {
+                vk::ImageCopy c(
+                    layers,
+                    vk::Offset3D{},
+                    layers,
+                    vk::Offset3D{},
+                    vk::Extent3D{static_cast<uint32_t>(dest.width), static_cast<uint32_t>(dest.height), 1});
+                cmd.copyImage(source->id(),
+                              vk::ImageLayout::eTransferSrcOptimal,
+                              static_cast<VkImage>(dest.image),
+                              vk::ImageLayout::eTransferDstOptimal,
+                              c);
+            } else {
+                // Opaque black. Byte order does not matter for it -- (0,0,0,1) reads the same
+                // as RGBA or as BGRA -- which makes this the one place in the Vulkan path where
+                // the mixer's channel order can be ignored rather than compensated for.
+                const vk::ClearColorValue black(std::array<float, 4>{0.0f, 0.0f, 0.0f, 1.0f});
+                cmd.clearColorImage(static_cast<VkImage>(dest.image),
+                                    vk::ImageLayout::eTransferDstOptimal,
+                                    black,
+                                    range);
+            }
 
             std::vector<vk::ImageMemoryBarrier2> post;
             post.reserve(2);
-            {
+            if (source) {
                 // Put the mixer's attachment back where it was found, for the same reason the
                 // importer restores FFmpeg's: a client that moves an image and does not say so
                 // leaves the next barrier with a wrong oldLayout, which discards contents.
