@@ -224,6 +224,38 @@ AVBufferRef* make_vulkan_hwdevice_from_mixer(void* vk_device_handle)
         hwctx->nb_qf = 3;
     }
 
+    // DECLARE THE ENABLED FEATURES. `device_features` is documented as "the set of features
+    // that present and enabled during device creation" -- an application declaration, exactly
+    // like `enabled_dev_extensions`, and not something the sharing library can query.
+    //
+    // Leaving it zeroed cost a day: `libplacebo` refused the device with "Missing device
+    // feature: hostQueryReset" and "Failed importing Vulkan device!", while our own startup log
+    // said "39 core/1.1/1.2/1.3 features" enabled -- including that one. The feature was on; we
+    // simply never said so. Measured 2026-08-22.
+    //
+    // The chain points at structs the mixer's device owns, and that device outlives every
+    // consumer, so no copy or lifetime dance is needed.
+    if (info.features10 && info.features12) {
+        auto* f11 = const_cast<VkPhysicalDeviceVulkan11Features*>(
+            static_cast<const VkPhysicalDeviceVulkan11Features*>(info.features11));
+        auto* f12 = const_cast<VkPhysicalDeviceVulkan12Features*>(
+            static_cast<const VkPhysicalDeviceVulkan12Features*>(info.features12));
+        auto* f13 = const_cast<VkPhysicalDeviceVulkan13Features*>(
+            static_cast<const VkPhysicalDeviceVulkan13Features*>(info.features13));
+
+        // Chain them, since they are stored separately rather than pre-linked.
+        if (f11 && f12) {
+            f11->pNext = f12;
+            if (f13)
+                f12->pNext = f13;
+        }
+
+        hwctx->device_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+        hwctx->device_features.pNext = f11 ? static_cast<void*>(f11) : static_cast<void*>(f12);
+        hwctx->device_features.features =
+            *static_cast<const VkPhysicalDeviceFeatures*>(info.features10);
+    }
+
     const int err = av_hwdevice_ctx_init(ref);
     if (err < 0) {
         char msg[AV_ERROR_MAX_STRING_SIZE]{};

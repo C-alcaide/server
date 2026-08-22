@@ -93,6 +93,14 @@ class device final
     /// what it may rely on; FFmpeg's `enabled_dev_extensions` is a declaration by the
     /// application, not something it can query.
     const std::vector<std::string>&    getEnabledDeviceExtensions() const;
+    /// The core feature sets this device enabled. Another API sharing it must be TOLD these --
+    /// FFmpeg's `AVVulkanDeviceContext::device_features` is a declaration by the application,
+    /// not something the library can query, and leaving it zeroed makes `libplacebo` refuse the
+    /// device for a feature that is in fact enabled.
+    const vk::PhysicalDeviceFeatures&         getEnabledFeatures10() const;
+    const vk::PhysicalDeviceVulkan11Features& getEnabledFeatures11() const;
+    const vk::PhysicalDeviceVulkan12Features& getEnabledFeatures12() const;
+    const vk::PhysicalDeviceVulkan13Features& getEnabledFeatures13() const;
     vk::Queue                          getDecodeQueue() const;
     uint32_t                           getDecodeQueueFamily() const;
     bool                               hasDedicatedDecodeQueue() const;

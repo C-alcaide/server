@@ -189,6 +189,16 @@ struct device::impl : public std::enable_shared_from_this<impl>
     // device has to be told what it may rely on -- FFmpeg's `enabled_dev_extensions`
     // is the app's declaration, not a query.
     std::vector<std::string>           _enabled_device_extensions;
+    // The core feature sets actually enabled. Kept for the same reason as the extension list
+    // above and stated in the same words by FFmpeg's own header: `device_features` "should be
+    // set to the set of features that present and enabled during device creation" -- it is a
+    // DECLARATION by the application, not something the sharing library can query. Leaving it
+    // zeroed made `libplacebo` refuse the device with "Missing device feature: hostQueryReset"
+    // while that feature was enabled and reported in our own log. Measured 2026-08-22.
+    vk::PhysicalDeviceFeatures         _enabled_features10{};
+    vk::PhysicalDeviceVulkan11Features _enabled_features11{};
+    vk::PhysicalDeviceVulkan12Features _enabled_features12{};
+    vk::PhysicalDeviceVulkan13Features _enabled_features13{};
     vk::CommandPool                    _command_pool;
     VmaAllocator                       _allocator;
 
@@ -464,10 +474,24 @@ struct device::impl : public std::enable_shared_from_this<impl>
     /// free of consequence -- `vulkanMemoryModel` and `bufferDeviceAddress` in particular
     /// change what the driver may assume about every shader on the device, the mixer's own
     /// included.
-    void enable_features_for_shared_decoders()
+    /// Enable everything an FFmpeg component sharing this device may need -- decoder, ENCODER,
+    /// or filter.
+    ///
+    /// Renamed from `enable_features_for_shared_decoders` and no longer gated on
+    /// `<vulkan-decode>`, because the gate was wrong the moment anything other than a decoder
+    /// shared the device. A Vulkan ENCODER is selected per recording by AMCP, long after this
+    /// device is created, so there is no configuration to consult here -- and `libplacebo`, which
+    /// the encode path needs for its colour conversion, refuses the device outright without
+    /// them: "Missing device feature: hostQueryReset" then "Failed importing Vulkan device!".
+    /// Measured 2026-08-22; `hostQueryReset` was already in the list below and simply never
+    /// reached, because the recording had no reason to turn decoding on.
+    ///
+    /// Enabling unconditionally is safe by construction rather than by optimism: every feature
+    /// below is QUERIED and then enabled only if the device reports it, so an unsupported one is
+    /// skipped rather than requested. The cost is a longer enabled-feature list on a device that
+    /// would otherwise have a shorter one.
+    void enable_features_for_shared_ffmpeg()
     {
-        if (!env::properties().get(L"configuration.ffmpeg.producer.vulkan-decode", false))
-            return;
 
         // EXTENSIONS FIRST, and they are not cosmetic. vkGetDeviceProcAddr returns null for
         // every function belonging to an extension this logical device did not enable, and
@@ -635,6 +659,11 @@ struct device::impl : public std::enable_shared_from_this<impl>
         // Every bit was checked against this GPU above, so these cannot fail; the return
         // value is still reported, because a false here means the intersection logic is
         // wrong rather than that the GPU is limited.
+        _enabled_features10 = f10;
+        _enabled_features11 = f11;
+        _enabled_features12 = f12;
+        _enabled_features13 = f13;
+
         const bool ok10 = _vkb_physical_device.enable_features_if_present(f10);
         const bool ok11 = _vkb_physical_device.enable_extension_features_if_present(
             static_cast<VkPhysicalDeviceVulkan11Features>(f11));
@@ -810,7 +839,7 @@ struct device::impl : public std::enable_shared_from_this<impl>
         robustness2Features.nullDescriptor = true;
         _vkb_physical_device.enable_extension_features_if_present(robustness2Features);
 
-        enable_features_for_shared_decoders();
+        enable_features_for_shared_ffmpeg();
 
         // Create the logical device
         auto device_builder = vkb::DeviceBuilder(_vkb_physical_device);
@@ -1903,6 +1932,10 @@ vk::Queue device::getDecodeQueue() const { return impl_->_decode_queue; }
 uint32_t device::getDecodeQueueFamily() const { return impl_->_decode_queue_family; }
 
 bool device::hasDedicatedDecodeQueue() const { return impl_->_decode_queue_dedicated; }
+const vk::PhysicalDeviceFeatures& device::getEnabledFeatures10() const { return impl_->_enabled_features10; }
+const vk::PhysicalDeviceVulkan11Features& device::getEnabledFeatures11() const { return impl_->_enabled_features11; }
+const vk::PhysicalDeviceVulkan12Features& device::getEnabledFeatures12() const { return impl_->_enabled_features12; }
+const vk::PhysicalDeviceVulkan13Features& device::getEnabledFeatures13() const { return impl_->_enabled_features13; }
 uint32_t device::getEncodeQueueFamily() const { return impl_->_encode_queue_family; }
 bool     device::hasEncodeQueue() const { return impl_->_encode_queue_present; }
 

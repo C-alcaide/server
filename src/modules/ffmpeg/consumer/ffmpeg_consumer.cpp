@@ -313,7 +313,50 @@ struct Stream
             }
         }
 
-        FF(avfilter_graph_parse2(graph.get(), filter_spec.c_str(), &inputs, &outputs));
+        // PARSE, CREATE, GIVE THE DEVICE, *THEN* INIT -- the segment API rather than
+        // `avfilter_graph_parse2`, and the order is the whole point.
+        //
+        // `parse2` creates AND INITIALISES in one call (`graphparser.c` calls
+        // `avfilter_init_dict` inside it), and a hardware filter decides at INIT time whether
+        // it can accept hardware frames: `vf_libplacebo.c` reads `avctx->hw_device_ctx` in its
+        // init, sets `have_hwdevice` from it, and only then offers `AV_PIX_FMT_VULKAN` as an
+        // input format at all (`libplacebo_query_format`, guarded on that flag). Assigning the
+        // device afterwards is too late by construction, however early it looks in the code.
+        //
+        // The symptom was lavfi inserting a SOFTWARE `auto_scale` straight after the Vulkan
+        // buffersrc and then failing to configure: "Impossible to convert between the formats
+        // supported by the filter 'in_0' and the filter 'auto_scale_0'". A graph log made it
+        // clear the device HAD been assigned -- `1 of 3 filter(s) took the hw device` -- which
+        // is what ruled out the obvious explanations and left the ordering.
+        //
+        // This is the order `fftools/ffmpeg_filter.c` uses for exactly this reason: segment
+        // parse, `segment_create_filters`, assign `hw_device_ctx` to every filter carrying
+        // AVFILTER_FLAG_HWDEVICE, then apply. Worth copying rather than re-deriving.
+        {
+            AVFilterGraphSegment* seg = nullptr;
+            FF(avfilter_graph_segment_parse(graph.get(), filter_spec.c_str(), 0, &seg));
+            CASPAR_SCOPE_EXIT { avfilter_graph_segment_free(&seg); };
+            FF(avfilter_graph_segment_create_filters(seg, 0));
+
+            // The device the frames pool was allocated from, so filter, pool and encoder agree
+            // by construction. Falls back to the CUDA device a user's own cuda filters need.
+            AVBufferRef* filter_device = nullptr;
+            if (gpu_frames_ctx) {
+                if (auto* frames = reinterpret_cast<AVHWFramesContext*>(gpu_frames_ctx->data))
+                    filter_device = frames->device_ref;
+            }
+            if (!filter_device && use_nvenc_hw_)
+                filter_device = hw_device_ctx_;
+
+            if (filter_device) {
+                for (unsigned i = 0; i < graph->nb_filters; i++) {
+                    if (graph->filters[i]->filter->flags & AVFILTER_FLAG_HWDEVICE)
+                        graph->filters[i]->hw_device_ctx = av_buffer_ref(filter_device);
+                }
+            }
+
+            FF(avfilter_graph_segment_apply(seg, 0, &inputs, &outputs));
+        }
 
         {
             auto cur = inputs;

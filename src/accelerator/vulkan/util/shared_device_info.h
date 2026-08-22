@@ -53,6 +53,18 @@ struct shared_device_info
     /// fault rather than decline on the decode side.
     uint32_t encode_qf         = 0;
     bool     encode_qf_present = false;
+    /// Pointers to the core feature sets the mixer ENABLED, as `VkPhysicalDeviceFeatures`,
+    /// `...Vulkan11Features`, `...Vulkan12Features` and `...Vulkan13Features`. `void*` to keep
+    /// this header free of Vulkan types, like the handles above.
+    ///
+    /// They have to be handed over because FFmpeg's `device_features` is a DECLARATION by the
+    /// application rather than something a sharing library can query -- and `libplacebo` refuses
+    /// a device outright for a feature it cannot see, even one that is enabled. The structs are
+    /// owned by the device and outlive every consumer, so pointing a pNext chain at them is safe.
+    const void* features10 = nullptr;
+    const void* features11 = nullptr;
+    const void* features12 = nullptr;
+    const void* features13 = nullptr;
     /// Device extensions the mixer enabled. Another API sharing the device may rely on
     /// these and nothing else.
     std::vector<std::string> enabled_device_extensions;
