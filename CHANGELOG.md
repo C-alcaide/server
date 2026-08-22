@@ -30,12 +30,33 @@ Picture parity against the CPU encoder, 1080p2500 at 16-bit, on a still:
 | `hevc_vulkan` | 132 | 2.53 | 6.94% | 56.9% |
 
 The edge share is the reading rather than the worst delta — two 4:2:2 implementations disagree by
-tens of LSB at a hard vertical transition and neither is wrong. **What this does not cover:** one
-still, one raster, one frame per recording, and **no cost measurement at all** — the claim is
-that the GPU encoder produces the right picture, not that it is faster. For FFV1, which is
-lossless, the 2.49 LSB is the two RGB-to-YUV converters differing (swscale against libplacebo)
-and says nothing about either encoder. Recording sizes differ by rate-control defaults nobody
-tuned: `hevc_vulkan` wrote 6.3 MB where `libx265` wrote 108 KB.
+tens of LSB at a hard vertical transition and neither is wrong. For FFV1, which is lossless, the
+2.49 LSB is the two RGB-to-YUV converters differing (swscale against libplacebo) and says nothing
+about either encoder.
+
+Cost, 12 s per round with the arms interleaved:
+
+| codec | CPU encoder | Vulkan encoder | frames kept, CPU / Vulkan |
+| :--- | ---: | ---: | :--- |
+| ProRes 422 HQ | 2.31 cores | **1.46** (-36.9%) | **152 / 298** |
+| FFV1 | 2.22 cores | **1.47** (-33.5%) | 299 / 298 |
+| H.264 | 2.04 cores | **1.44** (-29.7%) | 299 / 298 |
+
+The Vulkan arm costs the same 1.44-1.47 cores whichever codec it is, where the CPU arm varies with
+the encoder's difficulty — the encode is effectively free and the residue is the channel's fixed
+cost. The ProRes row is a 37% saving *while doing twice the work*: the CPU encoder kept 152 of 298
+frames and ran the channel at 0.77 of the frame budget peaking at 1.81, where the Vulkan arm kept
+every frame at 0.42/0.51.
+
+**What this does not cover:** one still for the picture comparison, one raster, one clip for cost,
+and two rounds per arm. `frame-time` and the dropped-frame counts reproduced identically across
+four runs; the `cores` column did not — three prores runs gave -36.9/-37.3/-38.1% and a fourth
+gave -67.5% with frames, bytes and frame-time byte-identical, so that outlier is in the CPU
+sampling and is unexplained. And there is a cost that is not CPU: `ffv1_vulkan` wrote **243 MB**
+where CPU `ffv1` wrote **13.5 MB** of the same twelve seconds — 18x, for a lossless codec, so it
+is entropy coding and not quality. `hevc_vulkan` wrote 6.3 MB where `libx265` wrote 108 KB. Nobody
+tuned either encoder's defaults, and on FFV1 the disk cost is large enough to decide the trade on
+its own.
 
 `av1_vulkan` is absent from the allowlist rather than refused by name — FFmpeg queries the device
 and says *"Device does not support encoding av1!"*, which is a better message than one written

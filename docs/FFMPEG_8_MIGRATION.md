@@ -819,10 +819,40 @@ the reading rather than the worst delta: two 4:2:2 implementations disagree by t
 hard vertical transition and neither is wrong, where a disagreement spread across flat areas
 would be a defect. Reported rather than gated, for the same reason `prores-parity` reports.
 
-**What these numbers do not cover.** One still, one raster, one channel, `1080p2500`, and one
-frame extracted per recording. Nothing here measures cost — the plan's `encode-cost` sibling does
-not exist, so the claim is *"the GPU encoder produces the right picture"* and not *"it is
-faster"*. For **FFV1, which is lossless, any disagreement at all is the RGB-to-YUV converter
+**Measured cost**, 1080p2500 at 16-bit, 12 s of recording per round, arms interleaved
+cpu/vulkan so drift over the run does not map onto them:
+
+| codec | CPU encoder | Vulkan encoder | frames kept, CPU / Vulkan |
+| :--- | ---: | ---: | :--- |
+| ProRes 422 HQ | 2.31 cores | **1.46** (-36.9%) | **152 / 298** |
+| FFV1 | 2.22 cores | **1.47** (-33.5%) | 299 / 298 |
+| H.264 | 2.04 cores | **1.44** (-29.7%) | 299 / 298 |
+
+**The Vulkan arm costs the same 1.44-1.47 cores whichever codec it is**, where the CPU arm varies
+with the encoder's own difficulty -- so the encode is effectively free and what remains is the
+channel's fixed cost. That is the same shape 6.1.1 found on the decode side, where
+`prores_vulkan` cost 1.16 cores whether the content was 422 or 4444.
+
+**The ProRes row is not a 37% saving, it is a 37% saving while doing twice the work.** The CPU
+encoder kept 152 of 298 frames and ran the channel at 0.77 of the frame budget with peaks at
+1.81 -- over budget, hence the drops -- where the Vulkan arm kept every frame at 0.42/0.51. Half a
+recording is not a cheaper recording. FFV1 and H.264 keep up on the CPU, so their rows are a
+straight cost comparison.
+
+**Which column to trust.** `frame-time` and the dropped-frame counts reproduced *identically*
+across four runs. The `cores` column did not: three prores runs gave -36.9%, -37.3% and -38.1%
+and a fourth gave -67.5% with frames, bytes and frame-time byte-identical to the others. The
+workload was demonstrably the same in all four, so that outlier is in the CPU sampling and is
+unexplained; the conservative figure is quoted above and the stable columns carry the conclusion.
+
+**And a cost that is not CPU.** `ffv1_vulkan` wrote **243 MB** where CPU `ffv1` wrote **13.5 MB**
+of the same twelve seconds -- 18x, for a lossless codec, so it is entropy coding rather than
+quality. `hevc_vulkan` wrote 3x its CPU counterpart on the parity run. Nobody tuned either
+encoder's defaults, and on FFV1 the disk cost is large enough to decide the trade on its own.
+
+**What these numbers do not cover.** One still for the picture comparison, one raster, one
+channel, `1080p2500`, one frame extracted per recording, and one clip for cost. Two rounds per
+arm, so the cost figures are a difference between means of two, not a distribution. For **FFV1, which is lossless, any disagreement at all is the RGB-to-YUV converter
 rather than the encoder**: swscale on the CPU arm, libplacebo on the Vulkan one, so 2.49 LSB is
 the two converters differing and the encoders are irrelevant to it. And the recordings differ
 wildly in size for reasons that are rate control rather than quality — `hevc_vulkan` wrote 6.3 MB
