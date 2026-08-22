@@ -1,6 +1,67 @@
 CasparVP — Unreleased
 ==========================================
 
+### Broken: every NVENC recording fails in the shipped binary — a dependency pin, not the hardware
+
+`ADD 1 FILE out.mov -vcodec h264_nvenc` returns **501 and records nothing**. The same applies to
+`hevc_nvenc` and `av1_nvenc`. The server logs the reason:
+
+```
+[h264_nvenc] Driver does not support the required nvenc API version. Required: 13.1 Found: 13.0
+[h264_nvenc] The minimum required Nvidia driver for nvenc is 610.00 or newer
+Exception: avcodec_open2(enc.get(), codec, &dict)  errno 40, "Function not implemented"
+```
+
+The pinned FFmpeg — `ffmpeg-8.1.2-full_build-shared.7z`, from
+`src/CMakeModules/Bootstrap_Windows.cmake` — is built against nvenc SDK **13.1**, which requires
+an NVIDIA driver of **610 or newer**. The reference machine runs **582.53**.
+
+**It is the build and not the driver, and that was established rather than assumed.** The same
+`ffmpeg.exe` shipped beside the server fails identically on a plain `lavfi` source, so the
+consumer is not implicated. A separately built FFmpeg 8.1.1 on the *same* machine and the *same*
+driver encodes `h264_nvenc` successfully. So the fix is either to raise the driver past 610 or to
+pin a build compiled against the 13.0 headers.
+
+**Scope is exactly NVENC.** NVDEC is unaffected — `-hwaccel cuda` and `h264_cuvid` both decode
+correctly in the bundled build — and so is everything that uses the CUDA driver API rather than
+the NVENC API, including this fork's own `CUDA_PRORES` consumer and the CUDA NotchLC and ProRes
+decoders.
+
+This matters because GPU-direct recording through NVENC is a **documented, measured feature** of
+this fork, and `PIPELINE_EFFICIENCY_GUIDE.md` recommended it as the GPU recording path. On this
+build it cannot run at all. `h264_vulkan` and `hevc_vulkan` reach the same NVENC silicon through
+Vulkan — measured at 15–39% mean NVENC-block utilisation, where the compute encoders read 0 —
+so the capability is still reachable, by a different API.
+
+Found by `encode-matrix`, which exists because nothing had ever compared the routes side by side.
+Both NVENC arms first reported only "recorded nothing readable"; a column of zeroes hid a
+dependency pin, and the battery now prints what the server said.
+
+### Broken: `CUDA_PRORES` never takes its GPU-direct path on Windows
+
+The consumer creates a private OpenGL context and calls `wglShareLists` against the mixer's, on
+its own encode thread. That fails with **ERROR_BUSY (170)** and an *accelerated* pixel format,
+because `wglShareLists` refuses a context that is current on another thread and the mixer's
+context is current on its device thread permanently. The consumer logs one warning and spends
+the rest of its life on a host readback.
+
+A private shared context can never work here, whatever pixel format it picks — and this tree
+already said so. `cuda_gl_upload.h` documents the rule and names this consumer as the exception:
+
+> MUST be called on a thread that has the mixer's GL context current — CUDA's GL interop
+> registers against the calling thread's context. Call it through
+> `accelerator::ogl::device::dispatch_sync` rather than by making a second context current: a
+> private `wglShareLists` context is what the ProRes consumer does, and it is the pattern that
+> made OGL GPU affinity impossible to add.
+
+The NVENC uploader uses `dispatch_sync` and works. Not fixed here, because moving the map onto
+the mixer's device thread changes the consumer's threading and belongs in its own change. The
+diagnostic is improved so the failure names its cause rather than saying "failed".
+
+**It still beats every CPU ProRes route while doing this**, at 1.64 cores against 2.24–2.42, so
+its measured cost is a *lower bound* and the case for fixing it is a further saving rather than a
+rescue.
+
 ### Added: GPU recording through FFmpeg 8's Vulkan encoders — and ProRes/FFV1 without a readback
 
 `-vcodec prores_ks_vulkan`, `ffv1_vulkan`, `h264_vulkan` or `hevc_vulkan` on a channel running

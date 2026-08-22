@@ -491,6 +491,95 @@ format that matches it byte-for-byte (`x2rgb10le` is 10 bits in 32; `gbrp16le`
 and `yuv444p16le` are planar). Supporting it means a conversion kernel — exactly
 what the current design avoids.
 
+> **NVENC recording does not work in the current build.** `-vcodec h264_nvenc`,
+> `hevc_nvenc` and `av1_nvenc` all return `501 ADD FAILED`: the pinned FFmpeg is built against
+> nvenc SDK 13.1, which needs an NVIDIA driver of 610 or newer, and the reference machine runs
+> 582.53. Everything below about the NVENC path is correct about the design and currently
+> unreachable in practice. **Use `h264_vulkan` / `hevc_vulkan` instead** — they drive the same
+> NVENC silicon through Vulkan, measured at 15–39% NVENC-block utilisation. NVDEC *decoding* is
+> unaffected. See `CHANGELOG.md` for how this was established.
+
+### Every route to a recording, measured side by side
+
+`cli.py encode-matrix` runs every encoder available for one codec, each in the channel its own
+fast path requires, and compares cost, GPU block utilisation and picture. 1080p2500, ten seconds
+per round, two interleaved rounds, moving clip for cost and a still for picture.
+
+![Which recording route](images/pipeline/recording_routes.png)
+
+**The configurations are not interchangeable, and that is the first thing to know.** NVENC
+GPU-direct copies the mixer's RGBA8 texture byte-for-byte, so it needs an **8-bit** channel. The
+Vulkan encoders need a **16-bit** one. `CUDA_PRORES` maps through CUDA-GL interop, so its fast
+path exists only on the **OpenGL** mixer. No single channel satisfies all three.
+
+#### ProRes — four working routes
+
+| route | mixer / bit | GPU-direct | cores | VRAM peak | dropped | frames kept | MB | vs CPU at its depth |
+| :--- | :--- | :--- | ---: | ---: | ---: | ---: | ---: | :--- |
+| `prores_ks` | vulkan / 16 | host | 2.32 | 2016 | **116** | **138** | 14.4 | reference |
+| `prores_aw` | vulkan / 16 | host | 2.24 | 924 | 0 | 260 | 22.4 | mean 0.17 LSB |
+| **`prores_ks_vulkan`** | vulkan / 16 | **yes** | **1.46** | 1493 | 0 | 258 | 50.9 | mean 2.55 LSB |
+| `prores_ks` | ogl / 8 | host | 2.42 | 1410 | **116** | **140** | 14.8 | reference |
+| `CUDA_PRORES` | ogl / 8 | **no — see below** | 1.64 | 923 | 0 | 260 | 55.3 | mean 0.89 LSB |
+
+**`prores_ks` cannot sustain 1080p25 and `prores_aw` can.** The `ks` encoder kept 138 of 260
+frames on both mixers; `aw` kept all of them for slightly less CPU. If you are recording ProRes
+on the host, `prores_aw` is the one to ask for — and this corrects an earlier claim in this
+repository that "the CPU ProRes encoder" does not keep up. It is specifically `prores_ks`.
+
+**`CUDA_PRORES` is on a host readback**, because its `wglShareLists` GPU-direct route fails with
+ERROR_BUSY (see `CHANGELOG.md`). It still costs less than every CPU route, so 1.64 cores is a
+lower bound.
+
+#### H.264 and HEVC — the Vulkan encoders reach the NVENC block
+
+| route | mixer / bit | GPU-direct | cores | NVENC block, mean/peak | vs CPU at its depth |
+| :--- | :--- | :--- | ---: | ---: | :--- |
+| `libx264` | vulkan / 16 | host | 2.18 | 0 / 0 | reference |
+| **`h264_vulkan`** | vulkan / 16 | **yes** | **1.42** | **15 / 19** | mean 2.69 LSB |
+| `libx264` | vulkan / 8 | host | 1.83 | 0 / 0 | reference |
+| `h264_nvenc` | vulkan / 8 | refused | — | — | driver too old for this build |
+| `libx265` | vulkan / 16 | host | 2.83 | 0 / 0 | reference |
+| **`hevc_vulkan`** | vulkan / 16 | **yes** | **1.41** | **39 / 74** | mean 2.53 LSB |
+| `libx265` | vulkan / 8 | host | 2.61 | 0 / 0 | reference |
+| `hevc_nvenc` | vulkan / 8 | refused | — | — | driver too old for this build |
+
+The NVENC-block column is the useful one and it is not a proxy: `nvmlDeviceGetEncoderUtilization`
+reports that fixed-function unit specifically. It reads **0 on every CPU arm and on both compute
+encoders** (`prores_ks_vulkan`, `ffv1_vulkan`) and 15–39% on the two `VK_KHR_video_encode` ones —
+so H.264 and HEVC through Vulkan are running on the NVENC silicon, reached by an API this driver
+supports. Overall GPU utilisation cannot show this: it is the fraction of the window in which any
+kernel was resident, so the mixer holds it at 13–33% on every arm regardless.
+
+#### FFV1 — two routes, and a large disk cost
+
+| route | mixer / bit | GPU-direct | cores | MB for 10 s | vs CPU at its depth |
+| :--- | :--- | :--- | ---: | ---: | :--- |
+| `ffv1` | vulkan / 16 | host | 2.26 | 11.8 | reference |
+| **`ffv1_vulkan`** | vulkan / 16 | **yes** | **1.50** | **210.0** | mean 2.49 LSB |
+| `ffv1` | vulkan / 8 | host | 1.98 | 2.8 | reference |
+
+**18x the disk for a lossless codec**, which is entropy coding rather than quality. On FFV1 that
+can decide the trade on its own.
+
+#### How to read the picture column, and what none of this covers
+
+The picture figures compare one extracted frame against the CPU encoder **at the same channel
+depth**, because an 8-bit arm and a 16-bit arm encode genuinely different composites: the two CPU
+references differ from each other by 1.29–2.72 LSB depending on codec, and that is the channel's
+contribution rather than any encoder's. Most of every disagreement sits at a chroma transition
+(55–92%), which is two 4:2:2 or 4:2:0 implementations reconstructing a hard vertical edge
+differently — neither is wrong.
+
+* **VRAM is a device total**, sampled across whatever was on the card, so it includes a
+  just-exited server that has not yet released. Read it as an order of magnitude.
+* **Cores are interleaved means of two rounds.** They have to be interleaved: run sequentially,
+  the same `libx264` arm read 2.02 cores and then 1.13 with its output unchanged, so machine
+  drift on this box exceeds the effect.
+* **One clip, one raster, one channel, ten seconds.** No 4K, no multi-layer, no alpha.
+* **Nothing here is tuned.** Every encoder ran at its default rate control, which is why the MB
+  column varies by more than an order of magnitude between routes producing the same picture.
+
 ### The other GPU route: FFmpeg's Vulkan encoders, and the one thing NVENC cannot do
 
 NVENC **cannot encode ProRes or FFV1**. Those recorded on the CPU, and the CPU ProRes encoder

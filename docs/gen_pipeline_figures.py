@@ -294,6 +294,70 @@ def fig_vulkan_encode_gate():
     plt.close(fig)
 
 
+def fig_recording_routes():
+    """Which recording route to ask for, per codec, with what each one needs.
+
+    A table answers "what did they cost"; this answers "which one do I type", which is the
+    question an operator actually has. Every number is from `cli.py encode-matrix`, 1080p2500,
+    two interleaved rounds.
+    """
+    # (codec, [(route, requirement, cores, note, state)]) -- state picks the colour.
+    groups = [
+        ("ProRes", [
+            ("prores_ks_vulkan", "vulkan mixer, 16-bit", "1.46", "all frames", "best"),
+            ("CUDA_PRORES", "OpenGL mixer, 8-bit", "1.64", "host readback: ERROR_BUSY", "warn"),
+            ("prores_aw", "any", "2.24", "all frames", "ok"),
+            ("prores_ks", "any", "2.32", "KEEPS 138 OF 260 FRAMES", "bad"),
+        ]),
+        ("H.264 / HEVC", [
+            ("h264_vulkan", "vulkan mixer, 16-bit", "1.42", "NVENC block 15%", "best"),
+            ("hevc_vulkan", "vulkan mixer, 16-bit", "1.41", "NVENC block 39%", "best"),
+            ("libx264 / libx265", "any", "2.18 / 2.83", "all frames", "ok"),
+            ("h264_nvenc / hevc_nvenc", "8-bit", "--", "REFUSED: needs driver 610+", "bad"),
+        ]),
+        ("FFV1", [
+            ("ffv1_vulkan", "vulkan mixer, 16-bit", "1.50", "18x the disk", "warn"),
+            ("ffv1", "any", "2.26", "all frames", "ok"),
+        ]),
+    ]
+
+    # SIZED FROM THE ROW COUNT, not guessed. A fixed 7.4 clipped the last group's boxes off the
+    # canvas entirely and ran the footnote through a row -- and a diagram that loses a row is
+    # worse than no diagram, because the reader cannot tell it is incomplete.
+    ROW, HEAD, GAP = 0.66, 0.44, 0.16
+    n_rows = sum(len(r) for _, r in groups)
+    height = 1.30 + len(groups) * (HEAD + GAP) + n_rows * ROW + 0.70
+    fig, ax = plt.subplots(figsize=(12.4, height))
+    ax.set_xlim(0, 12.4); ax.set_ylim(0, height); ax.axis("off")
+    ax.text(0.15, height - 0.34, "Which recording route, and what it needs", fontsize=13,
+            weight="bold", color=C_TEXT)
+    ax.text(0.15, height - 0.68, "cores are for one 1080p25 layer; the winner of each group is "
+                                 "boxed in green", fontsize=9, color=C_MUTED)
+
+    colours = {"best": C_GREEN, "ok": C_HOST, "warn": C_CARD, "bad": C_RED}
+    y = height - 1.30
+    for codec, routes in groups:
+        ax.text(0.15, y, codec, fontsize=11, weight="bold", color=C_TEXT)
+        y -= HEAD
+        for name, need, cores, note, state in routes:
+            box(ax, 0.35, y - 0.28, 3.5, 0.56, name, colours[state], fs=9)
+            ax.text(4.05, y, need, color=C_MUTED, fontsize=8.6, va="center")
+            ax.text(7.15, y, cores + " cores", color=C_TEXT, fontsize=8.6, va="center")
+            ax.text(8.75, y, note, color=colours[state], fontsize=8.6, va="center")
+            y -= ROW
+        y -= GAP
+
+    ax.text(0.15, max(0.22, y + 0.10),
+            "No single channel serves all three fast paths: NVENC GPU-direct needs 8-bit, "
+            "the Vulkan encoders need 16-bit, and CUDA_PRORES needs the OpenGL mixer.\n"
+            "Cost figures are untuned defaults; the recorded sizes differ by over 10x.",
+            fontsize=8.2, color=C_MUTED)
+
+    fig.tight_layout()
+    fig.savefig(os.path.join(OUT, "recording_routes.png"), dpi=150)
+    plt.close(fig)
+
+
 if __name__ == "__main__":
     fig_producer_path()
     fig_capacity()
@@ -301,4 +365,5 @@ if __name__ == "__main__":
     fig_recording()
     fig_gpudirect_gate()
     fig_vulkan_encode_gate()
+    fig_recording_routes()
     print("wrote figures to", OUT)

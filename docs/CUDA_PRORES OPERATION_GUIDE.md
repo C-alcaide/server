@@ -12,6 +12,21 @@ The module provides two recording consumers **and** a GPU-accelerated ProRes pla
 
 All three share the same GPU encode/decode kernel pipeline (NVIDIA CUDA).  Consumers write `.mov` or `.mxf` files; the producer reads them back.
 
+> **The consumer's GPU-direct upload does not engage on Windows.** Measured 2026-08-22: it
+> creates a private OpenGL context and calls `wglShareLists` against the mixer's, which fails
+> with `ERROR_BUSY (170)` because the mixer's context is current on its own device thread and
+> `wglShareLists` refuses that. The log says
+> `[cuda_prores] wglShareLists failed (error 170, pixel format N accelerated) - CPU path`, and
+> the composite then reaches the encoder through **host memory**.
+>
+> The *encode* is still on the GPU, so this is a slower fast path rather than a broken consumer:
+> it recorded all 260 frames of a ten-second 1080p25 test at 1.64 cores where `prores_ks` managed
+> 138 frames at 2.42. Treat that as a lower bound.
+>
+> The fix is known and is not a pixel-format change: `cuda_gl_upload.h` documents that CUDA-GL
+> interop must run through `accelerator::ogl::device::dispatch_sync`, and names this consumer as
+> the one that does it the other way. See `CHANGELOG.md`.
+
 ---
 
 ## CUDA_PRORES Producer (Playback)
