@@ -50,10 +50,27 @@ CUDA_PRORES_BYPASS, and now this), and NDI takes a fifth approach by emitting on
   independently is a hazard: change one and the same timeline records with opposite field order on
   SDI and to file.
 
-**A pre-existing problem this measurement surfaced but did not cause:** `prores_ks` and
-`prores_aw` back up at 1080p and their `.mov` never gets a trailer — `moov atom not found` on a
-367 MB file. It reproduces on a progressive channel with pairing off, and encoders that keep up
-(x264 ultrafast, mpeg2video) finalise with zero drops. Not tracked down further here.
+**Correction to an earlier draft of this entry, which reported a defect that does not exist.**
+`prores_ks` and `prores_aw` recordings were written up here as ending with no `moov` atom — an
+unplayable file. They are fine. The probe was racing the consumer's drain: a backlogged encoder
+keeps writing for **seconds after** the channel is torn down (measured 4 s past `KILL` on a 431 MB
+file), and reading the file before its `Uninitialized` line appears in the log shows
+`ftyp/wide/mdat` with the `moov` not yet appended. Every one of those recordings probes clean once
+the consumer has finished:
+
+| recording | field order | frame flags | decode errors | bits/MB at `-q:v 12` |
+| :--- | :--- | :--- | ---: | ---: |
+| `prores_ks`, 1080i50 | **`tt`** | `interlaced_frame=1, top_field_first=1` | **0** | 1248 |
+| `prores_aw`, 1080i50 | **`tt`** | `interlaced_frame=1, top_field_first=1` | **0** | 1380 |
+| `prores_aw`, 1080p25 (control) | `progressive` | `interlaced_frame=0` | **0** | 1234 |
+
+So the pairing is verified on the ProRes encoders too, not only on the ones that happened to
+finish before the probe. **Wait for the consumer's `Uninitialized` log line before reading a
+recording** — the file on disk is not complete until then.
+
+A diagnostic was added for the case that genuinely would be silent: if the container trailer is
+ever skipped because a stream received no packets, the consumer now logs an error naming the
+per-stream packet counts instead of leaving an unplayable file behind.
 
 ### Fixed (upstream FFmpeg): `prores_ks_vulkan -flags +ildct` deadlocked, then corrupted the heap
 

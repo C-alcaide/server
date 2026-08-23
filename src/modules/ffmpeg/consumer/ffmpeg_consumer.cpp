@@ -2088,8 +2088,29 @@ struct ffmpeg_consumer : public core::frame_consumer
                         auto video_st = video_stream ? video_stream->st : nullptr;
                         auto audio_st = audio_stream ? audio_stream->st : nullptr;
 
-                        if ((!video_st || count[video_st->index]) && (!audio_st || count[audio_st->index])) {
+                        // The gate is upstream's, from a segfault fix: av_write_trailer on a
+                        // stream that never received a packet crashed. Skipping it silently,
+                        // though, leaves a file with no `moov` atom -- unplayable, no error, and
+                        // a plausible size on disk. This branch has never been observed to fire
+                        // here; it is instrumented because the failure it guards is invisible.
+                        //
+                        // Not to be confused with reading a recording too early: a backlogged
+                        // encoder keeps writing for SECONDS after the channel is torn down
+                        // (measured 4 s past KILL on a 431 MB file), and a file read before the
+                        // consumer's `Uninitialized` line also shows no moov -- because it has
+                        // not been appended yet. That cost a defect report before it was
+                        // measured properly.
+                        const auto v_count = video_st ? count[video_st->index] : -1;
+                        const auto a_count = audio_st ? count[audio_st->index] : -1;
+                        if ((!video_st || v_count) && (!audio_st || a_count)) {
                             FF(av_write_trailer(oc));
+                        } else {
+                            CASPAR_LOG(error)
+                                << print()
+                                << L" wrote no container trailer, so the file is UNPLAYABLE: "
+                                << L"video packets=" << v_count << L", audio packets=" << a_count
+                                << L" (-1 means the stream does not exist). A stream that "
+                                   L"received no packet at all is the cause.";
                         }
 
                     } catch (...) {

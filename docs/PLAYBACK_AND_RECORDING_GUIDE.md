@@ -484,11 +484,13 @@ Progressive channels are untouched — verified `field_order=progressive`, `inte
   2018 refactor — SD PAL/NTSC are bottom-field-first, everything else interlaced is top. This is
   the same rule `cuda_prores` derives separately, and two modules deriving it independently is a
   hazard: change one and the same timeline records with opposite field order on SDI and to file.
-* **A slow encoder on an interlaced channel can still leave an unfinalised file.** `prores_ks`
-  and `prores_aw` back up at 1080p and their `.mov` never gets a trailer written — `moov atom not
-  found`. This is **not** related to pairing: it reproduces on a progressive channel with pairing
-  off, and it does not happen with an encoder that keeps up (x264 ultrafast and mpeg2video both
-  finalised with zero drops). Use an encoder that sustains the channel.
+* **A backlogged encoder keeps writing after the channel stops, and the file is incomplete
+  until it finishes.** `prores_ks` and `prores_aw` drop frames at 1080p, and their drain ran
+  **4 seconds past `KILL`** on a 431 MB file. Read the recording before that and you get
+  `moov atom not found` — `ftyp/wide/mdat` with the `moov` not yet appended — which looks exactly
+  like a corrupt recording and is not one. **Wait for the consumer's `Uninitialized` line in the
+  log.** Verified afterwards: `prores_ks` at 1080i50 gives `tt`, `interlaced_frame=1`,
+  `top_field_first=1`, zero decode errors, 1248 bits/MB at `-q:v 12`.
 
 **One ceiling on `-q:v` itself:** the Vulkan encoder refuses a forced quantiser above **14**,
 because its score buffer is dimensioned `[16]` and indexed by quantiser. The software encoder
