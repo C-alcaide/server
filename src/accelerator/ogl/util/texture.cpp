@@ -63,6 +63,14 @@ struct texture::impl
     common::render_format format_;
     std::weak_ptr<device> device_;
 
+    /// Fence signalled when the mixer's writes to this texture have completed, or null.
+    ///
+    /// A GLsync is SHARE-GROUP STATE, which is the whole reason this works: the mixer creates it
+    /// on the device thread's context and a consumer waits on it from its own, with no handle
+    /// passing and no CPU synchronisation. Textures come from a pool and are reused, so the
+    /// previous fence is deleted when a new one is set rather than accumulating one per frame.
+    GLsync render_fence_ = nullptr;
+
     impl(const impl&)            = delete;
     impl& operator=(const impl&) = delete;
 
@@ -86,7 +94,41 @@ struct texture::impl
         GL(glTextureStorage2D(id_, 1, INTERNAL_FORMAT[format_row(depth_, format_)][stride_], width_, height_));
     }
 
-    ~impl() { glDeleteTextures(1, &id_); }
+    ~impl()
+    {
+        if (render_fence_)
+            glDeleteSync(render_fence_);
+        glDeleteTextures(1, &id_);
+    }
+
+    /// Fence the mixer's writes and flush, so a reader in another context can wait on them.
+    ///
+    /// THE FLUSH IS NOT OPTIONAL AND IS THE HALF THAT WAS MISSING. A fence that has not been
+    /// flushed is not guaranteed ever to signal, and more to the point the writes themselves are
+    /// not guaranteed visible to another context in the share group. `device::read_back` has
+    /// always done both -- fence then `glFlush` -- so every composited frame used to be published
+    /// as a side effect of being copied to host memory. A consumer declining the readback removed
+    /// the publication along with the copy, which is a coupling nobody intended.
+    void publish_render()
+    {
+        if (render_fence_)
+            glDeleteSync(render_fence_); // pooled textures are reused; do not accumulate one
+                                         // fence per frame for the life of the pool
+        render_fence_ = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+        GL(glFlush());
+    }
+
+    /// Order the calling context's subsequent commands behind the mixer's writes.
+    ///
+    /// `glWaitSync` and not `glClientWaitSync`: this is a SERVER-side wait, so it costs no CPU
+    /// and does not block the calling thread -- it only constrains the GPU's ordering. A client
+    /// wait here would stall the consumer's thread on the mixer every frame, which is the
+    /// head-of-line problem the Vulkan exporter's comments describe.
+    void wait_for_render() const
+    {
+        if (render_fence_)
+            glWaitSync(render_fence_, 0, GL_TIMEOUT_IGNORED);
+    }
 
     void bind() { GL(glBindTexture(GL_TEXTURE_2D, id_)); }
 
@@ -161,6 +203,10 @@ texture& texture::operator=(texture&& other)
 }
 void texture::bind(int index) { impl_->bind(index); }
 void texture::unbind() { impl_->unbind(); }
+
+void texture::publish_render(class device&) { impl_->publish_render(); }
+
+void texture::ensure_render_complete() const { impl_->wait_for_render(); }
 void texture::attach() { impl_->attach(); }
 void texture::clear() { impl_->clear(); }
 #ifdef WIN32

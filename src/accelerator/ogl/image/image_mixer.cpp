@@ -358,6 +358,22 @@ class image_renderer
                         tex = resolve_to_output(tex, format_desc);
                     }
                     if (!needs_cpu) {
+                        // PUBLISH THE WRITES. The readback path does this for free --
+                        // `device::read_back` fences and flushes -- so for as long as every
+                        // frame was copied to host memory, every frame was also made visible to
+                        // the other contexts in the share group. Skipping the readback silently
+                        // skipped that, and a consumer reading the texture from its own context
+                        // then saw whatever happened to be there.
+                        //
+                        // It presented as the screen consumer's zero-copy path FREEZING ON
+                        // STILLS: the mixer composites the new picture once, the still-frame
+                        // cache above then skips composition entirely, so nothing ever forces a
+                        // flush and the consumer's context keeps the pre-change contents for
+                        // good. Moving content hid it, because the next frame's work flushes
+                        // incidentally. Measured 2026-08-23: `PLAY 1-1 #FF3010` then `#1030FF`
+                        // both left the previous frame on screen while the host-upload path
+                        // rendered both exactly.
+                        tex->publish_render(*ogl_);
                         auto e = make_ready_future<array<const std::uint8_t>>(
                             array<const std::uint8_t>(nullptr, 0, true));
                         return {e.share(), tex};

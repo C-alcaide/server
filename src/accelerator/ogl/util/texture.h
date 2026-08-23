@@ -61,6 +61,24 @@ class texture final : public core::texture
     virtual void bind(int index) override;
     virtual void unbind() override;
 
+    /// Publish this texture's contents to the share group, and record a fence a reader in
+    /// another context can wait on.
+    ///
+    /// Called by the mixer when it finishes compositing into this texture AND is not about to
+    /// read it back. The readback path already flushes -- `device::read_back` creates a fence
+    /// and calls `glFlush` -- so before consumers could decline the readback, every composited
+    /// frame was published as a side effect of being copied to host memory. Declining it removed
+    /// the flush along with the copy.
+    void publish_render(class device& dev);
+
+    /// Wait, on the calling context, for the writes `publish_render` published.
+    ///
+    /// A server-side `glWaitSync`, so it costs no CPU and does not block the caller's thread; it
+    /// orders the reader's subsequent commands behind the mixer's. A no-op when nothing has been
+    /// published, which is the case for input textures and for any frame whose mixer did read
+    /// back.
+    void ensure_render_complete() const override;
+
     int               width() const;
     int               height() const;
     int               stride() const;

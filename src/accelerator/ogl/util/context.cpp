@@ -51,10 +51,42 @@ struct impl_sfml : public device_context::impl
         CASPAR_LOG(info) << L"Initializing OpenGL Device (sfml).";
     }
 
-    virtual ~impl_sfml() {}
+    virtual ~impl_sfml()
+    {
+#ifdef _MSC_VER
+        // Never made current, so nothing can be using it; and it is destroyed after the device
+        // thread has unbound, so the share group is going away anyway.
+        if (seed_hglrc_)
+            wglDeleteContext(reinterpret_cast<HGLRC>(seed_hglrc_));
+#endif
+    }
 
 #ifdef _MSC_VER
     void* cached_hglrc_ = nullptr;
+
+    /// A context in the mixer's share group that is NEVER MADE CURRENT, handed to consumers
+    /// instead of the mixer's own.
+    ///
+    /// WHY THE MIXER'S OWN CONTEXT CANNOT BE SHARED AGAINST. `device::impl` binds it on the
+    /// "OpenGL Device" thread and leaves it current for that thread's whole life
+    /// (`context_->bind()` then `io_context_.run()`). A consumer calling
+    /// `wglCreateContextAttribsARB(hdc, thatHGLRC, ...)` from its OWN thread is then sharing
+    /// against a context current in another thread, which NVIDIA refuses: it returns null and
+    /// leaves `GetLastError()` at **0**, so the failure carries no diagnosis at all.
+    ///
+    /// Measured 2026-08-23 on an RTX A4000, driver 582.53: `Shared GL context creation failed
+    /// (error=0), falling back to standalone context`, after which the screen consumer takes its
+    /// PBO upload path and the channel keeps reading the composite back to host memory. The
+    /// Spout consumer has the identical code and the identical failure, so BOTH GPU-texture
+    /// paths on the OpenGL mixer have been unreachable.
+    ///
+    /// Share groups are transitive, so a context sharing with the mixer's puts a consumer in the
+    /// mixer's group just as well -- and because this one is never current anywhere, sharing
+    /// against it from any thread is legal. Created here rather than in the consumers because
+    /// there is exactly one right moment for it: inside `bind()`, where the mixer's context is
+    /// current on THIS thread, which is the one case WGL allows.
+    void* seed_hglrc_ = nullptr;
+    bool  seed_tried_ = false;
 #endif
 
     virtual void bind() override
@@ -63,13 +95,46 @@ struct impl_sfml : public device_context::impl
 #ifdef _MSC_VER
         if (!cached_hglrc_)
             cached_hglrc_ = wglGetCurrentContext();
+
+        if (!seed_tried_) {
+            seed_tried_ = true; // once, whether or not it works
+            auto create = reinterpret_cast<HGLRC(WINAPI*)(HDC, HGLRC, const int*)>(
+                wglGetProcAddress("wglCreateContextAttribsARB"));
+            auto hdc = wglGetCurrentDC();
+            auto cur = wglGetCurrentContext();
+            if (create && hdc && cur) {
+                // Same version and profile as the mixer's, because a share group spans one
+                // GL version family and a mismatch is another silent null return.
+                const int attribs[] = {0x2091 /* MAJOR_VERSION_ARB */,
+                                       4,
+                                       0x2092 /* MINOR_VERSION_ARB */,
+                                       5,
+                                       0x9126 /* PROFILE_MASK_ARB  */,
+                                       0x00000001 /* CORE_PROFILE_BIT */,
+                                       0};
+                seed_hglrc_ = create(hdc, cur, attribs);
+            }
+            if (seed_hglrc_) {
+                CASPAR_LOG(info) << L"[ogl] share-group seed context created; consumers can take "
+                                    L"the zero-copy GPU texture path.";
+            } else {
+                CASPAR_LOG(warning)
+                    << L"[ogl] could not create a share-group seed context (error="
+                    << static_cast<unsigned int>(GetLastError())
+                    << L"); consumers will share against the mixer's own context, which is "
+                       L"current on the device thread and which some drivers refuse.";
+            }
+        }
 #endif
     }
     virtual void unbind() override { std::ignore = device_.setActive(false); }
     virtual void* native_handle() const override
     {
 #ifdef _MSC_VER
-        return cached_hglrc_;
+        // The seed when there is one. Falling back to the mixer's own context keeps the previous
+        // behaviour on a driver where the seed could not be made -- that path was already
+        // failing, so it cannot be made worse by trying it.
+        return seed_hglrc_ ? seed_hglrc_ : cached_hglrc_;
 #else
         return nullptr;
 #endif

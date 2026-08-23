@@ -1515,6 +1515,12 @@ struct gpu_strategy : public display_strategy
             if (in_frame.texture()) {
                 auto ogl_tex = std::dynamic_pointer_cast<accelerator::ogl::texture>(in_frame.texture());
                 if (ogl_tex && self->window_.shared_) {
+                    // Order this context's draw behind the mixer's writes. A server-side wait on
+                    // a share-group fence the mixer published, so it costs no CPU and does not
+                    // block this thread -- the mirror of what the VK interop branch below does
+                    // with `ensure_render_complete()`, and for the same reason. Without it the
+                    // bind below reads whatever the driver happens to have made visible.
+                    ogl_tex->ensure_render_complete();
                     // OGL mixer with shared GL contexts: bind directly (zero-copy GPU path).
                     //
                     // ⚠ THIS PATH IS BROKEN AND HAS NEVER RUN ON THE REFERENCE BOX. It is
