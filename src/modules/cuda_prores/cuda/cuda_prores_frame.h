@@ -100,7 +100,9 @@ struct ProResFrameCtx {
     int mbs_per_slice;    // macroblock columns per slice (power of 2: 1,2,4,8)
     int slices_per_row;   // = (width/16) / mbs_per_slice
     int num_slices;       // = slices_per_row * (height/16)
-    int blocks_per_slice; // = 8 * mbs_per_slice  (4Y + 2Cb + 2Cr blocks per ProRes 16×16 MB)
+    int blocks_per_slice; // transformed blocks per slice: 8*mbs for 4:2:2 (4Y+2Cb+2Cr),
+                          // 12*mbs for 4:4:4 (4Y+4Cb+4Cr). Alpha is NOT counted here --
+                          // it is raw, not transformed, and lives in d_alpha_slice.
 
     // Device buffers (all allocated by prores_frame_ctx_create)
     int16_t  *d_y,  *d_cb, *d_cr;    // unpacked planar input
@@ -131,7 +133,11 @@ struct ProResFrameCtx {
     bool     is_4444;           // true for ProRes 4444 / 4444 XQ
     bool     has_alpha;         // true ↔ input alpha plane is encoded
     int16_t *d_alpha;           // [width * height] alpha input (raw 10-bit after expand)
-    int16_t *d_coeffs_alpha;    // [num_slices * 4 * mbs_per_slice * 64] alpha coeffs
+    int16_t *d_coeffs_alpha;    // unused: ProRes alpha is not DCT coded (see d_alpha_slice)
+    // Raw alpha samples gathered per slice: [num_slices][16][16 * mbs_per_slice], 16-bit.
+    // ProRes 4444 codes alpha as a differential run-length of RAW samples in slice raster
+    // order, so it does not live in d_coeffs_slice with the transformed planes.
+    uint16_t *d_alpha_slice;
 };
 
 // ---------------------------------------------------------------------------

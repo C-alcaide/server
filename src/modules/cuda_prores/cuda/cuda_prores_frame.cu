@@ -87,15 +87,24 @@ static int build_frame_header(
 {
     uint8_t *p = dst;
     uint8_t *hdr_size_ptr = p; p += 2;   // [0..1] filled at end
-    write_u16(p, 0); p += 2;             // [2..3] version = 0
+    // [2..3] version. 1 for anything that is not 4:2:2-without-alpha, per
+    // proresenc_kostya_common.c:330 -- `chroma_factor != CFACTOR_Y422 || alpha_bits ? 1 : 0`.
+    // The decoder accepts 0 as well (it only rejects > 1), so this was silent.
+    write_u16(p, (is_4444 || has_alpha) ? 1u : 0u); p += 2;
     p[0]='C'; p[1]='U'; p[2]='D'; p[3]='A'; p += 4;  // [4..7] encoder tag
     write_u16(p, (uint16_t)width);  p += 2;  // [8..9]
     write_u16(p, (uint16_t)height); p += 2;  // [10..11]
-    // [12] frame_flags: bits[7:6] = chroma format (0b10=4:2:2, 0b00=4:4:4)
-    //                   bits[3:2] = frame type (0=progressive, 1=tff interlaced, 2=bff interlaced)
-    //                   bits[5:4] and bits[1:0] = reserved
-    // NOTE: FFmpeg proresdec reads frame_type as (buf[12] >> 2) & 3 — bits [3:2].
-    uint8_t frame_flags = is_4444 ? 0x00u : 0x80u;
+    // [12] frame_flags: bits[7:6] = chroma_factor, bits[3:2] = frame type.
+    //
+    // chroma_factor is 2 for 4:2:2 and **3 for 4:4:4** -- so the byte is 0x80 and 0xC0.
+    // This read 0x00 for 4:4:4, and the comment asserted 0b00 was the 4:4:4 code. It is not:
+    // proresenc_kostya_common.c:335 writes `ctx->chroma_factor << 6` with CFACTOR_Y444 = 3,
+    // and proresdec.c:242 selects the 4:4:4 pixel format on `(buf[12] & 0xC0) == 0xC0`.
+    // So every ProRes 4444 frame this encoder produced was labelled 4:2:2, and the decoder
+    // parsed 4:4:4 slice data against a 4:2:2 layout -- `ap4h` files reported yuva422p12le.
+    //   bits[5:4] and bits[1:0] = reserved
+    // NOTE: FFmpeg proresdec reads frame_type as (buf[12] >> 2) & 3 -- bits [3:2].
+    uint8_t frame_flags = is_4444 ? 0xC0u : 0x80u;
     if (is_interlaced) frame_flags |= is_tff ? 0x04u : 0x08u;  // TFF=1, BFF=2 at bits[3:2]
     write_u8(p++, frame_flags);
     write_u8(p++, 0);                    // [13] reserved
@@ -152,11 +161,12 @@ static int build_picture_header(
 // ---------------------------------------------------------------------------
 __global__ void k_interleave_luma(
     const int16_t *d_src,           // [height/8][width/8][64]
-    int16_t       *d_out,           // [num_slices][8*mbs_per_slice][64]
+    int16_t       *d_out,           // [num_slices][blocks_per_slice][64]
     int            blk_cols,        // = width / 8
     int            blk_rows,        // = height / 8
     int            mbs_per_slice,
-    int            slices_per_row)
+    int            slices_per_row,
+    int            blocks_per_slice) // 8*mbs for 4:2:2, 12*mbs for 4:4:4, 16*mbs with alpha
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= blk_rows * blk_cols) return;
@@ -175,8 +185,17 @@ __global__ void k_interleave_luma(
     int mb_in_slice = mb_col % mbs_per_slice;
     int slice_idx   = mb_row * slices_per_row + slice_col;
 
-    // Total blocks per slice: 4Y + 2Cb + 2Cr = 8*mbs
-    int dst_block = slice_idx * 8 * mbs_per_slice + mb_in_slice * 4 + block_in_mb;
+    // THE SLICE STRIDE IS A PARAMETER, and hardcoding it to 8*mbs is what broke ProRes 4444.
+    //
+    // A 4:2:2 slice holds 4Y + 2Cb + 2Cr = 8 blocks per macroblock. A 4:4:4 slice holds
+    // 4Y + 4Cb + 4Cr = 12, or 16 with alpha -- and `alloc_frame_ctx` allocates for exactly
+    // that (`blocks_per_slice = mbs_per_slice * (is_4444 ? (has_alpha ? 16 : 12) : 8)`).
+    // The 4444 path reuses this kernel for all four planes with correct per-plane base
+    // offsets of 4/8/12*mbs, but with an 8*mbs stride every slice after the first landed in
+    // the wrong slice's region. The decoder then read `ac tex damaged` on essentially every
+    // slice: measured 2026-08-23, 1537 error lines from a 244-frame PROFILE 4 recording,
+    // against zero for profiles 0-3.
+    int dst_block = slice_idx * blocks_per_slice + mb_in_slice * 4 + block_in_mb;
 
     const int16_t *src = d_src + (ptrdiff_t)idx * 64;
     int16_t       *dst = d_out + (ptrdiff_t)dst_block * 64;
@@ -195,7 +214,8 @@ __global__ void k_interleave_chroma(
     int            blk_cols,        // = width / 16
     int            blk_rows,        // = height / 8
     int            mbs_per_slice,
-    int            slices_per_row)
+    int            slices_per_row,
+    int            blocks_per_slice) // 8*mbs for 4:2:2; this kernel is 4:2:2-only
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= blk_rows * blk_cols) return;
@@ -211,9 +231,12 @@ __global__ void k_interleave_chroma(
     int mb_in_slice = mb_col % mbs_per_slice;
     int slice_idx   = mb_row * slices_per_row + slice_col;
 
-    // Within the slice: chroma region (after 4*mbs Y blocks), 2 blocks per MB
+    // Within the slice: chroma region (after 4*mbs Y blocks), 2 blocks per MB.
+    // Passed rather than assumed for the same reason as the luma kernel above, even though
+    // every caller of THIS one is 4:2:2 -- two kernels that must agree on a stride should
+    // not each carry their own copy of it.
     int dst_block_in_chroma = mb_in_slice * 2 + block_in_mb;  // 0..2*mbs-1
-    int dst_block = slice_idx * 8 * mbs_per_slice + dst_block_in_chroma;
+    int dst_block = slice_idx * blocks_per_slice + dst_block_in_chroma;
 
     const int16_t *src = d_src + (ptrdiff_t)idx * 64;
     int16_t       *dst = d_out + (ptrdiff_t)dst_block * 64;
@@ -288,17 +311,17 @@ cudaError_t prores_encode_frame(
             // 3. Interleave into per-slice layout (covers all ceiling block rows)
             k_interleave_luma<<<(luma_blocks + T - 1) / T, T, 0, stream>>>(
                 ctx->d_coeffs_y, ctx->d_coeffs_slice,
-                ctx->width / 8, blk_rows_y, mbs, spr);
+                ctx->width / 8, blk_rows_y, mbs, spr, ctx->blocks_per_slice);
 
             int16_t *d_cb_base = ctx->d_coeffs_slice + (ptrdiff_t)4 * mbs * 64;
             k_interleave_chroma<<<(chroma_blocks + T - 1) / T, T, 0, stream>>>(
                 ctx->d_coeffs_cb, d_cb_base,
-                ctx->width / 16, blk_rows_c, mbs, spr);
+                ctx->width / 16, blk_rows_c, mbs, spr, ctx->blocks_per_slice);
 
             int16_t *d_cr_base = ctx->d_coeffs_slice + (ptrdiff_t)6 * mbs * 64;
             k_interleave_chroma<<<(chroma_blocks + T - 1) / T, T, 0, stream>>>(
                 ctx->d_coeffs_cr, d_cr_base,
-                ctx->width / 16, blk_rows_c, mbs, spr);
+                ctx->width / 16, blk_rows_c, mbs, spr, ctx->blocks_per_slice);
 
             // 4. Entropy encode this field
             cuda_prores_enc_frame_raw(
@@ -351,6 +374,14 @@ cudaError_t prores_encode_frame(
         for (int i = 0; i < ns; i++) {
             write_u16(p, (uint16_t)(h_off[1][i + 1] - h_off[1][i]));
             p += 2;
+        }
+        // Bound-checked for the same reason as the progressive assembly above.
+        if ((size_t)(p - h_out) + f1_bytes > ctx->h_frame_buf_size) {
+            fprintf(stderr, "[cuda_prores] interlaced frame of %zu bytes exceeds the "
+                            "%zu-byte output buffer; dropping it (q_scale=%d)\n",
+                    (size_t)(p - h_out) + f1_bytes, ctx->h_frame_buf_size, ctx->q_scale);
+            *out_size = 0;
+            return cudaErrorInvalidValue;
         }
         cudaMemcpy(p, ctx->d_bitstream, f1_bytes, cudaMemcpyDeviceToHost);
         p += f1_bytes;
@@ -420,7 +451,7 @@ cudaError_t prores_encode_frame(
     // Luma: coeffs_slice[0..4*mbs-1 per slice]
     k_interleave_luma<<<(luma_blocks + T - 1) / T, T, 0, stream>>>(
         ctx->d_coeffs_y, ctx->d_coeffs_slice,
-        ctx->width / 8, ctx->height / 8, mbs, spr);
+        ctx->width / 8, ctx->height / 8, mbs, spr, ctx->blocks_per_slice);
 
     // Cb: coeffs_slice[4*mbs..6*mbs-1 per slice]
     // Each slice's Cb region starts 4*mbs blocks after the slice's Y region.
@@ -428,13 +459,13 @@ cudaError_t prores_encode_frame(
     int16_t *d_cb_base = ctx->d_coeffs_slice + (ptrdiff_t)4 * mbs * 64;
     k_interleave_chroma<<<(chroma_blocks + T - 1) / T, T, 0, stream>>>(
         ctx->d_coeffs_cb, d_cb_base,
-        ctx->width / 16, ctx->height / 8, mbs, spr);
+        ctx->width / 16, ctx->height / 8, mbs, spr, ctx->blocks_per_slice);
 
     // Cr: coeffs_slice[6*mbs..8*mbs-1 per slice]
     int16_t *d_cr_base = ctx->d_coeffs_slice + (ptrdiff_t)6 * mbs * 64;
     k_interleave_chroma<<<(chroma_blocks + T - 1) / T, T, 0, stream>>>(
         ctx->d_coeffs_cr, d_cr_base,
-        ctx->width / 16, ctx->height / 8, mbs, spr);
+        ctx->width / 16, ctx->height / 8, mbs, spr, ctx->blocks_per_slice);
 
     // 6. Entropy coding (two-pass: count â†’ prefix-sum â†’ write)
     cuda_prores_enc_frame_raw(
@@ -491,7 +522,20 @@ cudaError_t prores_encode_frame(
     }
     cudaFreeHost(h_offsets);
 
-    // (f) Slice data: async copy from device
+    // (f) Slice data: async copy from device.
+    // Bounds-checked, because the pinned frame buffer is only width*height*8 bytes -- about
+    // the UNCOMPRESSED size of a 4:4:4 12-bit frame with alpha, so it has no real headroom.
+    // Nothing used to check it. With QSCALE AUTO the quantiser reaches 1 on flat content and
+    // stays there until the content changes, so the frame after a cut to detail is encoded at
+    // the finest quantiser the codec has -- exactly the frame most likely to exceed the
+    // buffer. Refusing the frame loses one frame; the memcpy would corrupt the heap.
+    if ((size_t)(p - h_out) + total_slice_bytes > ctx->h_frame_buf_size) {
+        fprintf(stderr, "[cuda_prores] frame of %zu bytes exceeds the %zu-byte output buffer; "
+                        "dropping it (q_scale=%d)\n",
+                (size_t)(p - h_out) + total_slice_bytes, ctx->h_frame_buf_size, ctx->q_scale);
+        *out_size = 0;
+        return cudaErrorInvalidValue;
+    }
     cudaMemcpyAsync(p, ctx->d_bitstream, total_slice_bytes,
                     cudaMemcpyDeviceToHost, stream);
     cudaStreamSynchronize(stream);
@@ -508,6 +552,49 @@ cudaError_t prores_encode_frame(
 
     *out_size = (size_t)frame_bytes;
     return cudaSuccess;
+}
+
+// ---------------------------------------------------------------------------
+// Gather raw alpha samples into the per-slice layout ProRes 4444 codes them in.
+//
+// Not an interleave of transformed blocks: a slice's alpha is 16 rows of 16*mbs_per_slice
+// RAW samples in plain raster order, which is what proresdec's decode_slice_alpha copies
+// back out with sixteen memcpy. Samples are widened 10 -> 16 bit because the frame header
+// declares alpha_channel_type 2 (16-bit); the replication `(v << 6) | (v >> 4)` is the
+// inverse of the decoder's ALPHA_SHIFT_16_TO_10 and keeps 0 at 0 and 1023 at 65535.
+//
+// Out-of-picture samples in a partial trailing slice are written as 0 rather than left
+// undefined -- the run-length coder reads every sample of the slice whether or not the
+// picture covers it.
+// ---------------------------------------------------------------------------
+__global__ void k_gather_alpha_slices(
+    const int16_t *d_alpha,        // [height][width] 10-bit planar alpha
+    uint16_t      *d_out,          // [num_slices][16][16 * mbs_per_slice]
+    int            width,
+    int            height,
+    int            mbs_per_slice,
+    int            slices_per_row,
+    int            num_slices)
+{
+    const int per_slice = mbs_per_slice * 256;
+    const int total     = num_slices * per_slice;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= total) return;
+
+    const int slice = idx / per_slice;
+    const int k     = idx % per_slice;
+    const int cols  = 16 * mbs_per_slice;
+
+    const int y = (slice / slices_per_row) * 16 + k / cols;
+    const int x = (slice % slices_per_row) * cols + k % cols;
+
+    uint16_t v = 0u;
+    if (x < width && y < height) {
+        int a10 = d_alpha[(ptrdiff_t)y * width + x];
+        a10 = a10 < 0 ? 0 : (a10 > 1023 ? 1023 : a10);
+        v = (uint16_t)(((unsigned)a10 << 6) | ((unsigned)a10 >> 4));
+    }
+    d_out[idx] = v;
 }
 
 // ---------------------------------------------------------------------------
@@ -564,13 +651,16 @@ cudaError_t prores_encode_frame_444(
         ctx->q_scale, ctx->profile, true, false, stream);
     if (err != cudaSuccess) return err;
 
-    // 5. DCT + quantise — Alpha  (uses luma quant table, per Apple spec)
+    // 5. Alpha: gathered raw, NOT transformed. ProRes 4444 codes the alpha channel as a
+    //    differential run-length over raw samples; running it through the DCT produced a
+    //    bitstream the decoder read as runs and diffs and turned into noise. See
+    //    code_alpha_plane in cuda_prores_rice.cuh for the measurement.
     if (ctx->has_alpha) {
-        err = launch_dct_quantise(
-            ctx->d_alpha, ctx->d_coeffs_alpha,
+        const int total_alpha = ctx->num_slices * ctx->mbs_per_slice * 256;
+        k_gather_alpha_slices<<<(total_alpha + 255) / 256, 256, 0, stream>>>(
+            ctx->d_alpha, ctx->d_alpha_slice,
             ctx->width, ctx->height,
-            ctx->q_scale, ctx->profile, false, false, stream);
-        if (err != cudaSuccess) return err;
+            ctx->mbs_per_slice, ctx->slices_per_row, ctx->num_slices);
     }
 
     // 6. Interleave block coefficients into per-slice layout.
@@ -589,31 +679,24 @@ cudaError_t prores_encode_frame_444(
     // Y:     offsets [0       .. 4*mbs-1 ] per slice
     k_interleave_luma<<<(all_blocks + T-1)/T, T, 0, stream>>>(
         ctx->d_coeffs_y, ctx->d_coeffs_slice,
-        ctx->width / 8, ctx->height / 8, mbs, spr);
+        ctx->width / 8, ctx->height / 8, mbs, spr, ctx->blocks_per_slice);
 
     // Cb:    offsets [4*mbs   .. 8*mbs-1 ] per slice
     int16_t *d_cb_base = ctx->d_coeffs_slice + (ptrdiff_t)4 * mbs * 64;
     k_interleave_luma<<<(all_blocks + T-1)/T, T, 0, stream>>>(
         ctx->d_coeffs_cb, d_cb_base,
-        ctx->width / 8, ctx->height / 8, mbs, spr);
+        ctx->width / 8, ctx->height / 8, mbs, spr, ctx->blocks_per_slice);
 
     // Cr:    offsets [8*mbs   .. 12*mbs-1] per slice
     int16_t *d_cr_base = ctx->d_coeffs_slice + (ptrdiff_t)8 * mbs * 64;
     k_interleave_luma<<<(all_blocks + T-1)/T, T, 0, stream>>>(
         ctx->d_coeffs_cr, d_cr_base,
-        ctx->width / 8, ctx->height / 8, mbs, spr);
-
-    // Alpha: offsets [12*mbs  .. 16*mbs-1] per slice  (only when has_alpha)
-    if (ctx->has_alpha) {
-        int16_t *d_alpha_base = ctx->d_coeffs_slice + (ptrdiff_t)12 * mbs * 64;
-        k_interleave_luma<<<(all_blocks + T-1)/T, T, 0, stream>>>(
-            ctx->d_coeffs_alpha, d_alpha_base,
-            ctx->width / 8, ctx->height / 8, mbs, spr);
-    }
+        ctx->width / 8, ctx->height / 8, mbs, spr, ctx->blocks_per_slice);
 
     // 7. Two-pass entropy coding (4444)
     cuda_prores_enc_frame_raw_444(
         ctx->d_coeffs_slice,
+        ctx->d_alpha_slice,
         ctx->num_slices,
         mbs,
         ctx->q_scale,
@@ -658,6 +741,19 @@ cudaError_t prores_encode_frame_444(
     }
     cudaFreeHost(h_offsets);
 
+    // Bounds-checked, because the pinned frame buffer is only width*height*8 bytes -- about
+    // the UNCOMPRESSED size of a 4:4:4 12-bit frame with alpha, so it has no real headroom.
+    // Nothing used to check it. With QSCALE AUTO the quantiser reaches 1 on flat content and
+    // stays there until the content changes, so the frame after a cut to detail is encoded at
+    // the finest quantiser the codec has -- exactly the frame most likely to exceed the
+    // buffer. Refusing the frame loses one frame; the memcpy would corrupt the heap.
+    if ((size_t)(p - h_out) + total_slice_bytes > ctx->h_frame_buf_size) {
+        fprintf(stderr, "[cuda_prores] frame of %zu bytes exceeds the %zu-byte output buffer; "
+                        "dropping it (q_scale=%d)\n",
+                (size_t)(p - h_out) + total_slice_bytes, ctx->h_frame_buf_size, ctx->q_scale);
+        *out_size = 0;
+        return cudaErrorInvalidValue;
+    }
     cudaMemcpyAsync(p, ctx->d_bitstream, total_slice_bytes,
                     cudaMemcpyDeviceToHost, stream);
     cudaStreamSynchronize(stream);
@@ -747,17 +843,17 @@ cudaError_t prores_encode_from_yuv_fields_422(
         // Interleave block coefficients into per-slice layout
         k_interleave_luma<<<(luma_blocks + T - 1) / T, T, 0, stream>>>(
             ctx->d_coeffs_y, ctx->d_coeffs_slice,
-            ctx->width / 8, blk_rows_y, mbs, spr);
+            ctx->width / 8, blk_rows_y, mbs, spr, ctx->blocks_per_slice);
 
         int16_t *d_cb_base = ctx->d_coeffs_slice + (ptrdiff_t)4 * mbs * 64;
         k_interleave_chroma<<<(chroma_blocks + T - 1) / T, T, 0, stream>>>(
             ctx->d_coeffs_cb, d_cb_base,
-            ctx->width / 16, blk_rows_c, mbs, spr);
+            ctx->width / 16, blk_rows_c, mbs, spr, ctx->blocks_per_slice);
 
         int16_t *d_cr_base = ctx->d_coeffs_slice + (ptrdiff_t)6 * mbs * 64;
         k_interleave_chroma<<<(chroma_blocks + T - 1) / T, T, 0, stream>>>(
             ctx->d_coeffs_cr, d_cr_base,
-            ctx->width / 16, blk_rows_c, mbs, spr);
+            ctx->width / 16, blk_rows_c, mbs, spr, ctx->blocks_per_slice);
 
         // Entropy encode
         cuda_prores_enc_frame_raw(
@@ -807,6 +903,14 @@ cudaError_t prores_encode_from_yuv_fields_422(
     for (int i = 0; i < ns; i++) {
         write_u16(p, (uint16_t)(h_off[1][i + 1] - h_off[1][i]));
         p += 2;
+    }
+    // Bound-checked for the same reason as the progressive assembly above.
+    if ((size_t)(p - h_out) + f1_bytes > ctx->h_frame_buf_size) {
+        fprintf(stderr, "[cuda_prores] interlaced frame of %zu bytes exceeds the "
+                        "%zu-byte output buffer; dropping it (q_scale=%d)\n",
+                (size_t)(p - h_out) + f1_bytes, ctx->h_frame_buf_size, ctx->q_scale);
+        *out_size = 0;
+        return cudaErrorInvalidValue;
     }
     cudaMemcpy(p, ctx->d_bitstream, f1_bytes, cudaMemcpyDeviceToHost);
     p += f1_bytes;

@@ -196,7 +196,7 @@ ADD <channel> CUDA_PRORES
     FILENAME  <filename.mov>
     [PROFILE  0-5]
     [CODEC    MOV|MXF]
-    [QSCALE   1-31]
+    [QSCALE   AUTO|1-31]
     [SLICES   1|2|4|8]
     [ALPHA    0|1]
     [HDR      SDR|HLG|PQ]
@@ -210,12 +210,73 @@ ADD <channel> CUDA_PRORES
 | `FILENAME` | `prores_YYYYMMDD_HHMMSS.mov` | Output filename. If omitted, a timestamped name is generated automatically. |
 | `PROFILE` | `3` | ProRes variant. See table above. |
 | `CODEC` | `MOV` | Container format: `MOV` or `MXF`. |
-| `QSCALE` | `8` | Quantization scale 1–31. Lower = better quality / larger file. `8` matches Apple Reference Encoder HQ. `1` = maximum quality. |
+| `QSCALE` | `AUTO` | `AUTO` targets the profile's published data rate (see below). A number 1–31 pins the quantiser: lower = better quality and a larger file, `1` = maximum quality. |
 | `SLICES` | `4` | Parallel horizontal slices per macroblock row. Valid: `1`, `2`, `4`, `8`. Higher = more GPU parallelism, diminishing returns above 4. |
 | `ALPHA` | `1` | Include alpha channel. Only relevant for profiles 4 and 5 (4444). Set `ALPHA 0` to reduce file size when alpha is not needed. |
 | `HDR` | `SDR` | Colour space: `SDR` (BT.709), `HLG` (BT.2020 HLG), `PQ` (HDR10 PQ). |
 | `MAXCLL` | `1000` | Maximum Content Light Level in nits. Used only with `HDR PQ`. |
 | `MAXFALL` | `400` | Maximum Frame-Average Light Level in nits. Used only with `HDR PQ`. |
+
+### `QSCALE AUTO` — how the data rate is held
+
+**A fixed quantiser cannot hold a data rate, and this encoder has no per-slice rate search.**
+`QSCALE AUTO` closes a loop instead: after each frame it compares the bits actually spent per
+macroblock against the profile's target and steps the quantiser, damped, towards it. It
+converges within a handful of frames from a cold start and then holds.
+
+The targets are the reference encoder's, taken from `prores_profile_info[].br_tab` in FFmpeg's
+`proresenc_kostya_common.c`. They are quoted **per macroblock**, which is why one number covers
+every raster: a picture with four times the macroblocks gets four times the bits.
+
+| `PROFILE` | Apple name | target bits/MB | 1080p25 | 1080i50 | 2160p25 |
+| :--- | :--- | ---: | ---: | ---: | ---: |
+| `0` | Proxy | 194 | 39.6 Mbit/s | 39.6 | 157.1 |
+| `1` | LT | 440 | 89.8 | 89.8 | 356.4 |
+| `2` | 422 | 632 | 128.9 | 128.9 | 511.9 |
+| `3` | 422 HQ | 950 | 193.8 | 193.8 | 769.5 |
+| `4` | 4444 | 1425 | 290.7 | 290.7 | 1154.3 |
+| `5` | 4444 XQ | 2137 | 436.0 | 436.0 | 1731.0 |
+
+1080p25 and 1080i50 coincide because they carry the same macroblocks per second — interlaced
+halves the macroblocks per picture and doubles the pictures per frame. Rasters at or below
+1440×1080 use a higher bucket from the same table (`PRORES_MB_LIMITS`), so SD and 720p targets
+are higher per macroblock, not lower.
+
+**Measured 2026-08-23**, detailed noise at 1080p25, steady state after the first eight frames,
+every profile, on the OpenGL mixer:
+
+| profile | achieved | vs target | decode errors |
+| :--- | ---: | ---: | ---: |
+| Proxy | 194 bits/MB | 1.00× | 0 |
+| LT | 440 | 1.00× | 0 |
+| 422 | 632 | 1.00× | 0 |
+| 422 HQ | 950 | 1.00× | 0 |
+| 4444 | 1425 | 1.00× | 0 |
+| 4444 XQ | 2137 | 1.00× | 0 |
+
+At 4K, 422 HQ reaches 950 (769 Mbit/s) and 4444-with-alpha 1425 (1154 Mbit/s), both 1.00× and
+with no decode errors. Interlaced 1080i50 at 422 HQ reaches 950, 1.00×.
+
+**Both mixers, and they agree.** On the Vulkan mixer, 422 HQ reaches 1.00× and 4444 1.00× with no
+decode errors, and the alpha partition from a half-size fill is identical to OpenGL's down to the
+sample: 1 555 200 transparent, 518 400 opaque, and **not one value in between** on either
+backend.
+
+**Three limits on those numbers, and they matter operationally.**
+
+* **The target is a ceiling, not a floor.** On flat content the loop drives the quantiser to 1
+  — the best the codec can do — and still cannot spend the budget: measured 52 bits/MB, 0.05×,
+  on a flat colour at 422 HQ. That is correct, and it is what the reference encoder does too.
+  A recording that comes in far under target is a statement about the content.
+* **It holds a rolling average, not a per-frame cap.** The reference encoder searches per
+  slice, so it holds the rate *within* a frame as well. A single frame here can overshoot after
+  a hard cut, before the loop catches up.
+* **One source.** Detailed noise is the worst case for a DCT codec, chosen because it is the
+  content most likely to expose a rate the loop cannot reach. The convergence behaviour on
+  ordinary footage will differ in how far the quantiser has to travel, not in where it lands.
+
+A frame that would still exceed the pinned output buffer is **dropped with a log line** rather
+than written; the buffer carries 50% headroom over uncompressed for the 4444 profiles.
 
 **Note:** `CUDA_PRORES` (consumer) always occupies consumer slot **1** on the channel. Only one CUDA_PRORES consumer can be active per channel at a time. The `CUDA_PRORES` producer (`PLAY`) and consumer (`ADD`) are independent — both can be active simultaneously on the same or different channels.
 
@@ -314,7 +375,7 @@ Consumers can be defined in the config to start automatically on launch:
             <path>D:/recordings</path>
             <profile>3</profile>
             <codec>mov</codec>
-            <qscale>8</qscale>
+            <qscale>auto</qscale>
             <slices>4</slices>
         </cuda_prores>
     </consumers>
@@ -330,7 +391,7 @@ Consumers can be defined in the config to start automatically on launch:
             <device>1</device>
             <profile>3</profile>
             <codec>mov</codec>
-            <qscale>8</qscale>
+            <qscale>auto</qscale>
         </cuda_prores_bypass>
     </consumers>
 </channel>

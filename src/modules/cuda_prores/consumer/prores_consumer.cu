@@ -229,7 +229,8 @@ struct prores_config {
     bool         use_mxf        = false; // false=MOV
     int          device_index   = 0;     // CUDA device
     int          slices_per_row = 4;     // horizontal slices per MB row (1/2/4/8)
-    int          q_scale        = 8;     // quantization scale [1..31]; 1=best quality
+    int          q_scale        = 0;     // quantization scale [1..31]; 1=best quality
+    bool         q_auto         = true;  // true = target the profile's published data rate
 };
 
 // ---------------------------------------------------------------------------
@@ -269,8 +270,9 @@ static void alloc_frame_ctx(ProResFrameCtx &ctx,
     if ((width / 16) % ctx.mbs_per_slice != 0) ctx.slices_per_row++; // partial last slice
     ctx.num_slices     = ctx.slices_per_row * ((height + 15) / 16);  // total slices
 
-    // blocks_per_slice: 422=8*mbs, 4444=12*mbs, 4444+alpha=16*mbs
-    const int bpm = is_4444 ? (has_alpha ? 16 : 12) : 8;
+    // blocks_per_slice counts TRANSFORMED blocks only: 422=8*mbs, 4444=12*mbs.
+    // Alpha adds no blocks here -- it is coded as raw samples in d_alpha_slice.
+    const int bpm = is_4444 ? 12 : 8;
     ctx.blocks_per_slice = ctx.mbs_per_slice * bpm;
 
     const int y_px = width * height;
@@ -301,19 +303,27 @@ static void alloc_frame_ctx(ProResFrameCtx &ctx,
     // For interlaced, h_frame_buf must hold both picture headers + two fields' data.
     // Use full-frame height (height*2 when height=field_height) for sizing.
     const size_t buf_height = is_interlaced ? (size_t)height * 2 : (size_t)height;
-    const size_t frame_buf_size = (size_t)width * buf_height * 8; // headroom for 4444 HQ
+    // width*height*8 is EXACTLY the uncompressed size of a 4:4:4 12-bit frame with alpha,
+    // so it was headroom for nothing. ProRes is intra-only and can exceed uncompressed on
+    // pathological input, and QSCALE AUTO reaches the finest quantiser on flat content.
+    // The assembly bounds-checks this now either way; the extra 50% keeps the check from
+    // being the thing that fires.
+    const size_t frame_buf_size = (size_t)width * buf_height * (is_4444 ? 12 : 8);
     ctx.h_frame_buf_size = frame_buf_size;
     cuda_check_consumer(cudaMallocHost(&ctx.h_frame_buf, frame_buf_size), "h_frame_buf");
 
     // 4444-specific planes
     ctx.d_alpha        = nullptr;
     ctx.d_coeffs_alpha = nullptr;
+    ctx.d_alpha_slice  = nullptr;
     if (is_4444) {
         cuda_check_consumer(cudaMalloc(&ctx.d_alpha, y_px * sizeof(int16_t)), "d_alpha");
         if (has_alpha) {
-            const size_t alpha_elems = (size_t)ctx.num_slices * 4 * ctx.mbs_per_slice * 64;
-            cuda_check_consumer(cudaMalloc(&ctx.d_coeffs_alpha,
-                                           alpha_elems * sizeof(int16_t)), "d_coeffs_alpha");
+            // 16 rows x (16 * mbs_per_slice) raw 16-bit samples per slice -- the layout
+            // proresdec's decode_slice_alpha reads back with sixteen memcpy.
+            const size_t alpha_elems = (size_t)ctx.num_slices * ctx.mbs_per_slice * 256;
+            cuda_check_consumer(cudaMalloc(&ctx.d_alpha_slice,
+                                           alpha_elems * sizeof(uint16_t)), "d_alpha_slice");
         }
     }
 }
@@ -331,6 +341,7 @@ static void free_frame_ctx(ProResFrameCtx &ctx)
     cudaFreeHost(ctx.h_frame_buf);
     if (ctx.d_alpha)        cudaFree(ctx.d_alpha);
     if (ctx.d_coeffs_alpha) cudaFree(ctx.d_coeffs_alpha);
+    if (ctx.d_alpha_slice)  cudaFree(ctx.d_alpha_slice);
     std::memset(&ctx, 0, sizeof(ctx));
 }
 
@@ -364,11 +375,17 @@ public:
         diagnostics::register_graph(graph_);
         CASPAR_LOG(info) << L"[cuda_prores] Created consumer #" << index_
                          << L" profile=" << cfg_.profile
-                         << L" qscale=" << cfg_.q_scale
+                         << L" qscale=" << (cfg_.q_auto ? std::wstring(L"auto")
+                                                             : std::to_wstring(cfg_.q_scale))
                          << L" slices=" << cfg_.slices_per_row
                          << L" " << (cfg_.use_mxf ? L"MXF" : L"MOV")
                          << L" -> " << cfg_.output_path;
     }
+
+    // Rate-control state (AUTO only). q_state_ is kept in floating point so a small
+    // correction is not lost to integer rounding on every frame.
+    double target_bits_per_mb_ = 0.0;
+    double q_state_            = 12.0;
 
     ~prores_consumer_impl() override
     {
@@ -436,7 +453,18 @@ public:
         alloc_frame_ctx(frame_ctx_, format_desc_.width, enc_height,
                         cfg_.profile, cfg_.slices_per_row, is_4444, has_alpha,
                         is_interlaced_);
-        frame_ctx_.q_scale = cfg_.q_scale;
+        // The rate target is a property of the profile and the picture geometry, so it is
+        // computed once here rather than per frame.
+        target_bits_per_mb_ = prores_target_bits_per_mb(
+            cfg_.profile,
+            frame_ctx_.mbs_per_slice * frame_ctx_.slices_per_row
+                * ((enc_height + 15) / 16),
+            is_interlaced_ ? 2 : 1);
+
+        // AUTO starts mid-range and converges in a handful of frames; a pinned QSCALE
+        // starts and stays where the operator put it.
+        q_state_          = cfg_.q_auto ? 12.0 : (double)cfg_.q_scale;
+        frame_ctx_.q_scale = (int)(q_state_ + 0.5);
 
         // Patch the context for interlaced so frame headers carry correct full dimensions
         if (is_interlaced_) {
@@ -949,6 +977,30 @@ private:
             return false;
         }
 
+        // ── rate control ──────────────────────────────────────────────────────────
+        // A damped proportional step on the quantiser, driven by the frame just encoded.
+        // Bits fall roughly as 1/q over the useful range, so the ratio actual/target is a
+        // usable Newton step; the 0.5 damping keeps it from ringing on a scene cut, and it
+        // still converges within a few frames from the seed.
+        //
+        // Frame-level rather than per-slice: the reference encoder runs a trellis search
+        // per slice, which holds the rate WITHIN a frame as well. This holds a rolling
+        // average instead, so a single frame can overshoot -- see the note in
+        // docs/CUDA_PRORES OPERATION_GUIDE.md.
+        if (cfg_.q_auto && encoded_size > 0 && target_bits_per_mb_ > 0) {
+            const int mbs = frame_ctx_.mbs_per_slice * frame_ctx_.slices_per_row
+                          * ((frame_ctx_.field_height + 15) / 16)
+                          * (frame_ctx_.is_interlaced ? 2 : 1);
+            if (mbs > 0) {
+                const double actual = (double)encoded_size * 8.0 / (double)mbs;
+                const double ratio  = actual / (double)target_bits_per_mb_;
+                q_state_ = q_state_ * (1.0 + 0.5 * (ratio - 1.0));
+                if (q_state_ < 1.0)  q_state_ = 1.0;
+                if (q_state_ > 31.0) q_state_ = 31.0;
+                frame_ctx_.q_scale = (int)(q_state_ + 0.5);
+            }
+        }
+
         // Set MXF start timecode before first write
         if (first_frame && mxf_muxer_ && job.tc.valid)
             mxf_muxer_->set_start_timecode(job.tc);
@@ -1120,7 +1172,13 @@ static prores_config parse_params(const std::vector<std::wstring>& params)
 {
     prores_config cfg;
     cfg.output_path = caspar::get_param(L"PATH", params, L".");
-    cfg.profile     = caspar::get_param(L"PROFILE", params, 3);
+    // PROFILE 0..5. The clamp is not cosmetic: the quantisation matrices live in CUDA
+    // __constant__ memory dimensioned [PRORES_PROFILE_COUNT][64], so an out-of-range profile
+    // is an out-of-bounds read inside a kernel -- no diagnostic, just a plausible-looking file
+    // encoded against whatever bytes follow the table. PROFILE 5 did exactly that until the
+    // XQ entry was added (measured 2026-08-23: 851 bits/MB at QSCALE 8, against 2749 for
+    // PROFILE 4, when a finer matrix must produce MORE bits, not a third as many).
+    cfg.profile     = std::max(0, std::min(5, caspar::get_param(L"PROFILE", params, 3)));
     auto codec      = caspar::get_param(L"CODEC", params, std::wstring(L"MOV"));
     cfg.use_mxf     = boost::iequals(codec, L"MXF");
     // HDR: HDR SDR|HLG|PQ  (omit to inherit from channel's <color-transfer>)
@@ -1134,9 +1192,26 @@ static prores_config parse_params(const std::vector<std::wstring>& params)
     // ALPHA: 1|0 (default 1 for profile 4444)
     cfg.has_alpha        = (caspar::get_param(L"ALPHA", params, 1) != 0);
     cfg.filename_pattern = caspar::get_param(L"FILENAME", params, std::wstring(L""));
-    // QSCALE 1..31 (1=maximum quality/largest file; default 8 matches Apple reference)
-    int qscale   = caspar::get_param(L"QSCALE", params, 8);
-    cfg.q_scale  = std::max(1, std::min(31, qscale));
+    // QSCALE AUTO | 1..31. AUTO (the default) closes a loop on the profile's published
+    // bits-per-macroblock; a number pins the quantiser and lets the rate follow content.
+    //
+    // The old default was a fixed 8, documented as "matches Apple reference". It does not
+    // match anything: this encoder has no rate control, so a fixed quantiser produces
+    // whatever the content produces. Measured 2026-08-23 at 1080p on detailed noise,
+    // against each profile's target: LT needed QSCALE 31 for 0.99x, 422 QSCALE 28 for
+    // 1.08x, 422 HQ QSCALE 31 for 1.00x -- and the same values on flat content would land
+    // far under. One number cannot serve both, which is why the default is now a loop.
+    const auto qs_param = caspar::get_param(L"QSCALE", params, std::wstring(L"AUTO"));
+    cfg.q_auto = boost::iequals(qs_param, L"AUTO") || qs_param.empty();
+    if (!cfg.q_auto) {
+        try {
+            cfg.q_scale = std::max(1, std::min(31, std::stoi(qs_param)));
+        } catch (...) {
+            CASPAR_LOG(warning) << L"[cuda_prores] QSCALE '" << qs_param
+                                << L"' is neither AUTO nor 1..31 - using AUTO";
+            cfg.q_auto = true;
+        }
+    }
     // SLICES: parallel horizontal slices per MB row — must be 1, 2, 4, or 8
     int slices = caspar::get_param(L"SLICES", params, 4);
     cfg.slices_per_row = (slices >= 8) ? 8 : (slices >= 4) ? 4 : (slices >= 2) ? 2 : 1;
@@ -1148,7 +1223,8 @@ static prores_config parse_xml(const boost::property_tree::wptree& elem)
     prores_config cfg;
     cfg.output_path      = elem.get(L"path",    L".");
     cfg.filename_pattern = elem.get(L"filename", L"");
-    cfg.profile          = elem.get(L"profile",  3);
+    // Clamped for the same reason as the AMCP path -- see the note there.
+    cfg.profile          = std::max(0, std::min(5, elem.get(L"profile",  3)));
     auto codec = elem.get(L"codec", std::wstring(L"mov"));
     cfg.use_mxf = boost::iequals(codec, L"mxf");
     auto hdr = boost::to_upper_copy(elem.get(L"hdr", std::wstring(L"")));
@@ -1158,8 +1234,18 @@ static prores_config parse_xml(const boost::property_tree::wptree& elem)
     cfg.hdr_max_cll    = (uint16_t)elem.get(L"max_cll",  1000);
     cfg.hdr_max_fall   = (uint16_t)elem.get(L"max_fall", 400);
     cfg.has_alpha      = (elem.get(L"alpha", 1) != 0);
-    int qscale = elem.get(L"qscale", 8);
-    cfg.q_scale        = std::max(1, std::min(31, qscale));
+    // qscale: "auto" (default) or 1..31 -- see the AMCP path for why auto is the default.
+    const auto qs = boost::to_upper_copy(elem.get(L"qscale", std::wstring(L"AUTO")));
+    cfg.q_auto = (qs == L"AUTO" || qs.empty());
+    if (!cfg.q_auto) {
+        try {
+            cfg.q_scale = std::max(1, std::min(31, std::stoi(qs)));
+        } catch (...) {
+            CASPAR_LOG(warning) << L"[cuda_prores] <qscale> '" << qs
+                                << L"' is neither auto nor 1..31 - using auto";
+            cfg.q_auto = true;
+        }
+    }
     int slices = elem.get(L"slices", 4);
     cfg.slices_per_row = (slices >= 8) ? 8 : (slices >= 4) ? 4 : (slices >= 2) ? 2 : 1;
     return cfg;

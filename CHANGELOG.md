@@ -1,6 +1,99 @@
 CasparVP — Unreleased
 ==========================================
 
+### Fixed: CUDA_PRORES 4444 produced a corrupt bitstream, and its alpha channel was noise
+
+`PROFILE 4` and `PROFILE 5` on the CUDA ProRes consumer now decode cleanly and carry a correct
+alpha channel. Four independent faults had to be fixed together; each one alone is enough to
+destroy the file, so any one of them left in place hides the other three.
+
+**The slice stride was the 4:2:2 one.** `k_interleave_luma` hardcoded `8 * mbs_per_slice`, the
+number of transformed blocks in a 4:2:2 slice. A 4:4:4 slice holds twelve. The allocation and the
+entropy coder both already used the right figure, so only the interleave disagreed, and every
+slice after the first scattered its planes into the neighbouring slice's region.
+
+**The frame header declared 4:2:2.** `frame_flags` was written as `0x00` for 4:4:4, with a comment
+asserting that `0b00` was the 4:4:4 code. It is `0b11`: the reference encoder writes
+`chroma_factor << 6` with `CFACTOR_Y444 = 3`, and `proresdec.c` selects a 4:4:4 pixel format on
+`(buf[12] & 0xC0) == 0xC0`. Every `ap4h` file this encoder had produced reported `yuva422p12le` —
+4:4:4 data parsed against a 4:2:2 layout.
+
+**The slice header was the wrong length and carried the wrong field.** `slice_hdr_size` is
+`2 * num_planes`: eight bytes with alpha, **six without**. This wrote eight in both cases, and put
+the *alpha* size in bytes [6..7] — where the decoder reads the *Cr* size whenever the header is
+longer than seven bytes. So the decoder took the alpha byte count as the Cr count and then read
+the real Cr bytes as alpha, which is why the decoded alpha plane looked like a picture: it was one.
+
+**And alpha is not DCT coded at all.** ProRes 4444 codes its alpha channel as a differential
+run-length over *raw* samples in slice raster order — sixteen rows of `16 * mbs_per_slice` — not as
+a fourth transformed plane. The encoder ran it through the DCT and the VLC coder. `unpack_alpha`
+has no invalid input, so it consumed those bits as runs and diffs without complaint and produced
+noise, then walked off the end of the plane and damaged the following slice's AC stream. Replaced
+with the real coder (`code_alpha_plane`).
+
+Measured on a 1080p25 composite, 244 frames per arm:
+
+| | before | after |
+| :--- | ---: | ---: |
+| `PROFILE 4` decode errors (`ac tex damaged`) | 1542 | **0** |
+| reported pixel format | `yuva422p12le` | **`yuva444p12le`** |
+| data rate at a fixed quantiser | 995 bits/MB — *below* 422 HQ | 2749 |
+| alpha on a fully opaque composite | min 0 / max 4095 / mean 2041, bimodal | **4095 on all 2 073 600 samples** |
+| alpha on a half-size fill | transparent corner at mean 19001 | **exactly 518 400 opaque, 1 555 200 at zero** |
+
+`PROFILE 5` was additionally an out-of-bounds read: the quantisation matrices live in CUDA
+`__constant__` memory dimensioned `[PRORES_PROFILE_COUNT][64]` and the count was 5, so index 5
+encoded against whatever bytes followed the table — 851 bits/MB at `QSCALE 8` where the finer
+profile must produce *more* bits than 4444's 2749, not a third as many. The 4444 XQ entry now
+exists (`ap4x`, HQ matrices, as the reference encoder does including its own `Fix me` on that
+entry), and `PROFILE` is clamped to 0..5 in both the AMCP and the XML path.
+
+### Changed: CUDA_PRORES `QSCALE` defaults to `AUTO`, which targets the profile's published rate
+
+**Recordings now land on the ProRes data rate for their profile instead of wherever the content
+puts them.** The previous default was a fixed `QSCALE 8`, documented as matching the Apple
+reference encoder. It matched nothing: this encoder has no rate control, so a fixed quantiser
+produces whatever the content produces. Measured at 1080p on detailed noise, against each
+profile's target: LT needed `QSCALE 31` to reach 0.99×, 422 needed 28 for 1.08×, 422 HQ needed 31
+for 1.00× — and those same values on flat content land far under. One number cannot serve both.
+
+`QSCALE AUTO` closes a damped proportional loop on the profile's target bits per macroblock, taken
+from the reference encoder's `br_tab` with its four picture-size buckets. A numeric `QSCALE` still
+pins the quantiser exactly as before.
+
+Measured 2026-08-23, steady state after the first eight frames, detailed noise:
+
+| profile | target | 1080p25 | 1080i50 | 2160p25 |
+| :--- | ---: | ---: | ---: | ---: |
+| Proxy | 194 bits/MB | 1.00× | — | — |
+| LT | 440 | 1.00× | — | — |
+| 422 | 632 | 1.00× | — | — |
+| 422 HQ | 950 | 1.00× | **1.00×** | **1.00×** |
+| 4444 | 1425 | 1.00× | — | **1.00×** (with alpha) |
+| 4444 XQ | 2137 | 1.00× | — | — |
+
+Zero decode errors on every arm. **Both mixers agree**: on the Vulkan mixer 422 HQ and 4444 both
+reach 1.00× with no decode errors, and the alpha partition from a half-size fill is identical to
+OpenGL's down to the sample — 1 555 200 transparent, 518 400 opaque, nothing in between on either.
+
+Three limits, all of which change what an operator should expect:
+the target is a **ceiling** — flat content floors the quantiser at 1 and still measured 52 bits/MB
+(0.05×), which is correct and is what the reference encoder does; the loop holds a **rolling
+average**, not a per-frame cap, so one frame after a hard cut can overshoot where a per-slice
+search would not; and the sweep used a single source, detailed noise, chosen as the worst case for
+a DCT codec.
+
+The output frame buffer is also bounds-checked now, in all four assembly paths. It was sized at
+exactly the *uncompressed* size of a 4:4:4 12-bit frame with alpha and never checked, which was
+survivable only while the default quantiser was a fixed 8; `AUTO` reaches quantiser 1 on flat
+content and stays there until the content changes. A frame that would not fit is dropped with a
+log line rather than written past the end of the buffer, and the 4444 buffers carry 50% headroom.
+
+**Not covered:** `cuda-prores-bypass`, the DeckLink-input variant, still takes a fixed numeric
+`qscale` only — it is a separate parse and a separate encode entry point, and it needs a capture
+source to measure, which this run did not have. Its `<qscale>` documentation is unchanged for that
+reason.
+
 ### Fixed: the OpenGL zero-copy screen path, which had never run — and was broken when it did
 
 `<gpu-texture>true</gpu-texture>` on an OpenGL channel now does what it says: the screen consumer

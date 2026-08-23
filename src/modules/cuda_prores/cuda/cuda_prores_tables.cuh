@@ -45,8 +45,9 @@ enum ProResProfile : int {
     PRORES_LT       = 1,  // apcl  ~102 Mb/s
     PRORES_STANDARD = 2,  // apcn  ~147 Mb/s
     PRORES_HQ       = 3,  // apch  ~220 Mb/s
-    PRORES_4444     = 4,  // ap4h  ~330 Mb/s (422 variant used here, not XQ)
-    PRORES_PROFILE_COUNT = 5
+    PRORES_4444     = 4,  // ap4h  ~330 Mb/s
+    PRORES_4444_XQ  = 5,  // ap4x  ~500 Mb/s
+    PRORES_PROFILE_COUNT = 6
 };
 
 // Four-character codes for use in container stsd entries.
@@ -56,6 +57,7 @@ static constexpr uint32_t PRORES_TAG[PRORES_PROFILE_COUNT] = {
     0x6170636E, // 'apcn'
     0x61706368, // 'apch'
     0x61703468, // 'ap4h'
+    0x61703478, // 'ap4x'
 };
 
 // ---------------------------------------------------------------------------
@@ -112,6 +114,19 @@ static constexpr uint8_t PRORES_QUANT_LUMA[PRORES_PROFILE_COUNT][64] = {
          4,  4,  4,  5,  5,  6,  7,  7,
     },
     // 4444 (ap4h) — same as HQ for 422 path
+    {
+         4,  4,  4,  4,  4,  4,  4,  4,
+         4,  4,  4,  4,  4,  4,  4,  4,
+         4,  4,  4,  4,  4,  4,  4,  4,
+         4,  4,  4,  4,  4,  4,  4,  5,
+         4,  4,  4,  4,  4,  4,  5,  5,
+         4,  4,  4,  4,  4,  5,  5,  6,
+         4,  4,  4,  4,  5,  5,  6,  7,
+         4,  4,  4,  5,  5,  6,  7,  7,
+    },
+    // 4444 XQ (ap4x) — the reference encoder uses the HQ matrix here too
+    // (proresenc_kostya_common.c carries a 'Fix me : use QUANT_MAT_XQ_LUMA' on this
+    // very entry, so matching it is matching the only shipping behaviour there is).
     {
          4,  4,  4,  4,  4,  4,  4,  4,
          4,  4,  4,  4,  4,  4,  4,  4,
@@ -180,6 +195,17 @@ static constexpr uint8_t PRORES_QUANT_CHROMA[PRORES_PROFILE_COUNT][64] = {
          4,  4,  4,  4,  5,  5,  6,  7,
          4,  4,  4,  5,  5,  6,  7,  7,
     },
+    // 4444 XQ — HQ chroma, as above
+    {
+         4,  4,  4,  4,  4,  4,  4,  4,
+         4,  4,  4,  4,  4,  4,  4,  4,
+         4,  4,  4,  4,  4,  4,  4,  4,
+         4,  4,  4,  4,  4,  4,  4,  5,
+         4,  4,  4,  4,  4,  4,  5,  5,
+         4,  4,  4,  4,  4,  5,  5,  6,
+         4,  4,  4,  4,  5,  5,  6,  7,
+         4,  4,  4,  5,  5,  6,  7,  7,
+    },
 };
 
 // ---------------------------------------------------------------------------
@@ -214,18 +240,51 @@ static constexpr uint8_t PRORES_SCAN_ORDER_INTERLACED[64] = {
 };
 
 // ---------------------------------------------------------------------------
-// Target bitrate per profile (Mbit/s) at 4K (3840×2160) 25p
-// Used for adaptive q_scale selection.
-// Values based on Apple ProRes White Paper Table 1 scaled to 4K.
+// Target data rate per profile, in BITS PER MACROBLOCK
+//
+// This is how ProRes rates are actually specified, and why the same number covers 1080p
+// and 4K: the rate is per picture area, so a raster with four times the macroblocks gets
+// four times the bits at the same quality. Apple publishes Mbit/s figures for named
+// formats; the per-macroblock form is what an encoder can aim at.
+//
+// Source: FFmpeg libavcodec/proresenc_kostya_common.c, `prores_profile_info[].br_tab`
+// and `prores_mb_limits` — the reference encoder's targets, which sit about 5.6% above
+// Apple's nominal figures (950 bits/MB is 193.8 Mbit/s at 1080p25 against Apple's 183.5).
+//
+// Four buckets by picture size. The bucket is chosen by the FIRST limit that is >= the
+// macroblock count, and the loop stops at index 2 — so index 3 covers everything above
+// 6075 macroblocks, which is every raster from 1440x1080 upward including 4K.
 // ---------------------------------------------------------------------------
-static constexpr int PRORES_TARGET_MBPS[PRORES_PROFILE_COUNT] = {
-    180,   // PROXY   (~45 Mb/s at 1080p → ×4 for 4K pixel count)
-    410,   // LT
-    590,   // STANDARD
-    880,   // HQ
-    1300,  // 4444
+static constexpr int PRORES_MB_LIMITS[4] = {
+    1620,  // up to 720x576
+    2700,  // up to 960x720
+    6075,  // up to 1440x1080
+    9216,  // up to 2048x1152 -- and, because of the loop bound, everything larger
 };
 
+static constexpr int PRORES_BR_TAB[PRORES_PROFILE_COUNT][4] = {
+    {  300,  242,  220,  194 },  // PROXY
+    {  720,  560,  490,  440 },  // LT
+    { 1050,  808,  710,  632 },  // STANDARD
+    { 1566, 1216, 1070,  950 },  // HQ
+    { 2350, 1828, 1600, 1425 },  // 4444
+    { 3525, 2742, 2400, 2137 },  // 4444 XQ
+};
+
+// Target bits per macroblock for a given profile and picture geometry.
+// `mbs_per_picture` counts macroblocks in ONE picture; interlaced frames carry two.
+static inline int prores_target_bits_per_mb(int profile, int mbs_per_picture,
+                                           int pictures_per_frame)
+{
+    if (profile < 0) profile = 0;
+    if (profile >= PRORES_PROFILE_COUNT) profile = PRORES_PROFILE_COUNT - 1;
+    const int total = mbs_per_picture * pictures_per_frame;
+    int i = 0;
+    for (; i < 3; i++)
+        if (PRORES_MB_LIMITS[i] >= total)
+            break;
+    return PRORES_BR_TAB[profile][i];
+}
 // ---------------------------------------------------------------------------
 // CUDA constant memory (uploaded at encoder init)
 //

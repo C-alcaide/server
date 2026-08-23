@@ -83,6 +83,106 @@ __device__ __forceinline__ int bp_bytes(const BitPacker *bp, const uint8_t *buf_
 }
 
 // ---------------------------------------------------------------------------
+// ProRes 4444 ALPHA coding — and it is not the DCT path
+//
+// The alpha channel of ProRes 4444 is NOT transformed, quantised or VLC coded. It is a
+// differential run-length code over RAW samples, in plain raster order within the slice:
+// 16 rows of 16*mbs_per_slice samples. The decoder writes it straight to the picture
+// (proresdec.c decode_slice_alpha -> unpack_alpha, then sixteen memcpy of 16*mbs samples).
+//
+// This encoder previously ran alpha through launch_dct_quantise and encode_dc_plane /
+// encode_ac_plane like a fourth luma plane. The decoder cannot report that: unpack_alpha
+// has no invalid input, so it consumed the DCT bits as runs and diffs and produced noise.
+// Measured 2026-08-23 with a half-size fill, so three quarters of the composite is
+// transparent by construction: the fully-transparent corner decoded to a mean of 19001
+// out of 65535 instead of 0, and the divergent bit consumption then walked off the end of
+// the alpha plane and damaged the AC stream of the following slice.
+//
+// Reference: proresenc_kostya.c put_alpha_diff / put_alpha_run / encode_alpha_plane,
+// against proresdec.c unpack_alpha for the decode side.
+// ---------------------------------------------------------------------------
+
+// Bits a single diff costs, and the diff itself, sharing one derivation so the counting
+// pass and the writing pass cannot disagree.
+__device__ __forceinline__ int alpha_diff_of(int cur, int prev, int abits)
+{
+    int diff = (cur - prev) & ((1 << abits) - 1);      // av_zero_extend(diff, abits)
+    const int dsize = 1 << (((abits == 8) ? 4 : 7) - 1);
+    if (diff >= (1 << abits) - dsize) diff -= 1 << abits;
+    return diff;
+}
+
+__device__ __forceinline__ void put_alpha_diff(BitPacker *bp, int cur, int prev, int abits)
+{
+    const int dbits = (abits == 8) ? 4 : 7;
+    const int dsize = 1 << (dbits - 1);
+    const int diff  = alpha_diff_of(cur, prev, abits);
+    if (diff < -dsize || diff > dsize || !diff) {
+        bp_put(bp, 1u, 1);
+        bp_put(bp, (uint32_t)diff, abits);
+    } else {
+        bp_put(bp, 0u, 1);
+        bp_put(bp, (uint32_t)(abs(diff) - 1), dbits - 1);
+        bp_put(bp, diff < 0 ? 1u : 0u, 1);
+    }
+}
+
+__device__ __forceinline__ int alpha_diff_bits(int cur, int prev, int abits)
+{
+    const int dbits = (abits == 8) ? 4 : 7;
+    const int dsize = 1 << (dbits - 1);
+    const int diff  = alpha_diff_of(cur, prev, abits);
+    return (diff < -dsize || diff > dsize || !diff) ? (1 + abits) : (1 + dbits);
+}
+
+__device__ __forceinline__ void put_alpha_run(BitPacker *bp, int run)
+{
+    if (run) {
+        bp_put(bp, 0u, 1);
+        if (run < 0x10) bp_put(bp, (uint32_t)run, 4);
+        else            bp_put(bp, (uint32_t)run, 15);
+    } else {
+        bp_put(bp, 1u, 1);
+    }
+}
+
+__device__ __forceinline__ int alpha_run_bits(int run)
+{
+    return run ? (run < 0x10 ? 5 : 16) : 1;
+}
+
+// Code one slice's alpha plane. Pass bp == nullptr to count bits without writing.
+// `prev` starts at the all-ones value, exactly as encode_alpha_plane does.
+__device__ __forceinline__ int code_alpha_plane(const uint16_t *samples,
+                                                int             num_coeffs,
+                                                int             abits,
+                                                BitPacker      *bp)
+{
+    const int mask = (1 << abits) - 1;
+    int bits = 0, prev = mask, run = 0;
+
+    int cur = samples[0];
+    if (bp) put_alpha_diff(bp, cur, prev, abits);
+    bits += alpha_diff_bits(cur, prev, abits);
+    prev = cur;
+
+    for (int idx = 1; idx < num_coeffs; idx++) {
+        cur = samples[idx];
+        if (cur != prev) {
+            if (bp) { put_alpha_run(bp, run); put_alpha_diff(bp, cur, prev, abits); }
+            bits += alpha_run_bits(run) + alpha_diff_bits(cur, prev, abits);
+            prev = cur;
+            run  = 0;
+        } else {
+            run++;
+        }
+    }
+    if (bp) put_alpha_run(bp, run);
+    bits += alpha_run_bits(run);
+    return bits;
+}
+
+// ---------------------------------------------------------------------------
 // ProRes hybrid Rice / exp-Golomb VLC coding
 //
 // Reference: FFmpeg libavcodec/proresenc_kostya.c encode_vlc_codeword()
