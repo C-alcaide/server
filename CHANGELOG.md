@@ -25,6 +25,14 @@ progressive. Pairing also halves what the encoder sees.
 Progressive channels are unaffected, verified on the same build: `field_order=progressive`,
 `interlaced_frame=0`, 25/1, zero drops, and the pairing path does not engage.
 
+**It is selectable, not forced** — `-interlaced auto|0|1` on the ADD line. `auto` (the default)
+pairs when the channel is interlaced; `0` restores the previous behaviour of writing every tick
+as its own progressive frame, which is the right answer when the deliverable is 50p; `1` pairs and
+warns if the channel has no second field. Measured on 1080i50 with `prores_ks_vulkan`: `auto` and
+`1` give `tt, 25/1`, `0` gives `progressive, 50/1`, an unrecognised value warns and falls back to
+`auto`, and `-interlaced 1` on a progressive channel warns and records `progressive, 25/1`.
+`-interlaced 0` also lifts the NVENC refusal, since there is then nothing to interleave.
+
 **Why this had to be written at all.** The core used to do it for every consumer:
 `draw_frame::interlace()` tagged two frames upper/lower and the OpenGL mixer composited them with
 `GL_POLYGON_STIPPLE`. Upstream `e1fffcfa5` (Feb 2018, *"refactor: move interlacing handling into

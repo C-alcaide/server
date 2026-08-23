@@ -474,6 +474,20 @@ sustain the channel before may now keep up.
 Progressive channels are untouched — verified `field_order=progressive`, `interlaced_frame=0`,
 25/1, zero drops on the same build.
 
+**`-interlaced auto|0|1` chooses, and the channel only says what is possible.**
+
+| value | effect |
+| :--- | :--- |
+| `auto` (default) | pair when the channel is interlaced |
+| `0` | never pair — every tick becomes its own progressive frame, which is what this consumer did before pairing existed. Correct when the deliverable is 50p. |
+| `1` | pair; warns and records progressive if the channel has no second field |
+
+Measured on a 1080i50 channel with `prores_ks_vulkan`: `auto` and `-interlaced 1` both give
+`tt, 25/1`; `-interlaced 0` gives `progressive, 50/1`. An unrecognised value warns and falls back
+to `auto`. On a progressive channel `-interlaced 1` warns and records `progressive, 25/1`.
+
+`-interlaced 0` also lifts the NVENC refusal below, since there is then nothing to interleave.
+
 **Three things to know about it.**
 
 * **The Vulkan encode path pairs on the GPU; NVENC still declines.** The Vulkan exporter

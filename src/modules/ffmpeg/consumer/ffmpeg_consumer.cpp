@@ -176,7 +176,8 @@ struct Stream
            class cuda_vk_uploader*             uploader_vk      = nullptr,
            AVPixelFormat                       hw_pix_fmt       = AV_PIX_FMT_CUDA,
            class accelerator::vulkan::av_vulkan_exporter* exporter = nullptr,
-           const char*                         vk_convert_filter = nullptr)
+           const char*                         vk_convert_filter = nullptr,
+           int                                 field_mode_request = -1)
         : gpu_frames_ctx(gpu_frames)
         , gpu_uploader(uploader)
         , gpu_direct(gpu_direct_flag)
@@ -398,8 +399,31 @@ struct Stream
                 // cuda_prores/consumer/prores_consumer.cu's `format_is_tff`: SD PAL/NTSC are
                 // bottom-field-first, everything else interlaced is top. Two consumers deriving
                 // this separately is a hazard, and it is recorded as one in the docs.
-                pair_fields_ = format_desc.field_count == 2 &&
+                // `-interlaced` decides this; the channel only says what is possible.
+                //
+                //   auto (default)  pair when the channel is interlaced
+                //   0               never pair -- write every tick as its own progressive
+                //                   frame, which is what this consumer did before pairing
+                //                   existed. Legitimate when the deliverable is 50p.
+                //   1               pair, and complain if the channel has nothing to pair
+                const bool channel_interlaced = format_desc.field_count == 2;
+                const bool want_pair          = field_mode_request != 0;
+
+                if (field_mode_request == 1 && !channel_interlaced) {
+                    CASPAR_LOG(warning) << L"[ffmpeg] -interlaced 1 on a progressive channel: "
+                                           L"there is no second field to pair, recording "
+                                           L"progressive";
+                }
+
+                pair_fields_ = channel_interlaced && want_pair &&
                                (!gpu_frames_ctx || vk_exporter != nullptr);
+
+                if (channel_interlaced && !want_pair) {
+                    CASPAR_LOG(info) << L"[ffmpeg] -interlaced 0: recording the interlaced "
+                                        L"channel at field rate as progressive frames. Note that "
+                                        L"consecutive ticks can be the same picture, in which "
+                                        L"case this writes each one twice.";
+                }
                 tff_         = !(format_desc.format == core::video_format::pal ||
                          format_desc.format == core::video_format::ntsc);
                 if (pair_fields_) {
@@ -1763,6 +1787,10 @@ struct ffmpeg_consumer : public core::frame_consumer
         return owned;
     }
 
+    /// `-interlaced`: -1 auto (pair when the channel is interlaced), 0 never, 1 always.
+    /// Read from the AMCP options in the frame thread, before the streams are constructed.
+    int field_mode_request = -1;
+
     // FPS counter
     std::chrono::steady_clock::time_point last_fps_update_;
     int                     frames_since_update_ = 0;
@@ -1948,6 +1976,30 @@ struct ffmpeg_consumer : public core::frame_consumer
                             return {};
                         }();
                         const bool has_filter = options.count("filter:v") > 0 || options.count("vf") > 0;
+
+                        // `-interlaced auto|0|1`. Consumed here rather than passed through:
+                        // it is a CasparCG-side decision about how two channel ticks become one
+                        // frame, and anything left in `options` is handed to FFmpeg and then
+                        // reported as an unused option.
+                        for (const auto* key : {"interlaced", "interlaced:v"}) {
+                            const auto it = options.find(key);
+                            if (it == options.end())
+                                continue;
+                            const auto v = boost::to_lower_copy(it->second);
+                            if (v == "auto" || v.empty())
+                                field_mode_request = -1;
+                            else if (v == "0" || v == "false" || v == "off" || v == "progressive")
+                                field_mode_request = 0;
+                            else if (v == "1" || v == "true" || v == "on" || v == "interlaced")
+                                field_mode_request = 1;
+                            else
+                                CASPAR_LOG(warning)
+                                    << L"[ffmpeg] -interlaced '" << u16(it->second)
+                                    << L"' is not auto, 0 or 1 -- using auto";
+                            options.erase(it);
+                            break;
+                        }
+                        const bool will_pair = format_desc.field_count == 2 && field_mode_request != 0;
                         // An explicit pixel format is a request the GPU path cannot
                         // honour: its frames are CUDA/RGB0 and lavfi cannot convert
                         // device frames to an arbitrary host format. Without this,
@@ -2031,10 +2083,11 @@ struct ffmpeg_consumer : public core::frame_consumer
                         const char* decline = nullptr;
                         if (gpu_frames_ctx)
                             decline = "the Vulkan encode path already claimed this recording";
-                        else if (format_desc.field_count == 2)
+                        else if (will_pair)
                             decline = "the channel is interlaced and this route cannot interleave "
                                       "two fields -- CUDA has no strided image copy here, so the "
-                                      "host path pairs them instead";
+                                      "host path pairs them instead. Pass -interlaced 0 to record "
+                                      "field rate progressive on this route instead";
                         else if (selected_codec.find("nvenc") == std::string::npos)
                             decline = "encoder is not NVENC";
                         else if (has_filter)
@@ -2061,7 +2114,7 @@ struct ffmpeg_consumer : public core::frame_consumer
                         }
                     }
 
-                    video_stream.emplace(oc, ":v", oc->oformat->video_codec, format_desc, realtime_, depth_, options, channel_info.default_color_space, channel_info.default_color_transfer, gpu_frames_ctx.get(), &gpu_uploader, &gpu_direct_, &gpu_uploader_vk, gpu_hw_pix_fmt_, vk_exporter_.get(), vk_convert_filter_);
+                    video_stream.emplace(oc, ":v", oc->oformat->video_codec, format_desc, realtime_, depth_, options, channel_info.default_color_space, channel_info.default_color_transfer, gpu_frames_ctx.get(), &gpu_uploader, &gpu_direct_, &gpu_uploader_vk, gpu_hw_pix_fmt_, vk_exporter_.get(), vk_convert_filter_, field_mode_request);
 
                     {
                         std::lock_guard<std::mutex> lock(state_mutex_);
