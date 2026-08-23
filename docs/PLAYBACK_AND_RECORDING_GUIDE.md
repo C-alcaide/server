@@ -452,52 +452,94 @@ so the true cost of the Nth is at least this and plausibly more.
 
 One screen output per channel, so these are playout channels rather than a bare decode test.
 
-| route | source | channels | cores | GPU% |
-| :--- | :--- | ---: | ---: | ---: |
-| Software (`<gpu-direct-decode>false`) | ProRes | **1** | 0.41 | 3 |
-| `CUDA_PRORES` | ProRes | **4** | 0.62 | 26 |
-| `<vulkan-decode>` | ProRes | **8** | 1.07 | 24 |
-| D3D11VA GPU-direct | **H.264** | **10** | 1.45 | 30 |
+Measured 2026-08-23 with realistic content (60 s of moving noise, looped) on the same nine-rung
+ladder at both rasters, so the pair is comparable.
+
+| route | source | 1080p | 4K | cores @ 4K | GPU% @ 4K |
+| :--- | :--- | ---: | ---: | ---: | ---: |
+| Software (`<gpu-direct-decode>false`) | ProRes | **1** | **2** | 5.68 | 17 |
+| `CUDA_PRORES` | ProRes | **4** | **4** | 1.72 | 66 |
+| `<vulkan-decode>` | ProRes | **12** | **4** | **0.86** | **28** |
+| D3D11VA GPU-direct | **H.264** | 6 † | 12 | 1.90 | 35 |
 
 **The first three are the comparison; the fourth is not.** Software, CUDA and Vulkan all decode
-the same ProRes clip, and 1 → 4 → 8 is the clearest result in this document. D3D11VA cannot be
-included in it: no NVIDIA GPU decodes ProRes, so that route has to be measured on an H.264 clip,
-and its 10 channels reflect a much lighter source as well as the route. Run on ProRes it declines
-every producer, correctly, and the ladder refuses to report a number.
+the same ProRes clip. D3D11VA cannot be included: no NVIDIA GPU decodes ProRes, so that route has
+to be measured on an H.264 clip, and its numbers reflect a much lighter source as well as the
+route. Run on ProRes it declines every producer, correctly, and the ladder refuses to report a
+number.
 
-**Eight ProRes playout channels against one is the case for `<vulkan-decode>`**, and it is a much
-larger effect than the same route shows on cost alone (1.16 against 1.90 cores at one layer).
+† and its 1080p figure is **not** a ceiling — the 8-channel step failed to start a server, which
+the ladder reports as an absent measurement rather than a limit. Read it as "at least 6".
+
+**`<vulkan-decode>` is the case, and at 4K it is a cost case rather than a channel-count one.**
+At 1080p it reaches twelve playout channels against software's one. At 4K it ties CUDA on channels
+and wins on everything else: **half the CPU (0.86 against 1.72 cores) and a third of the GPU (28%
+against 66%)** for the same four channels. That headroom is what lets a recording or an output
+share the box.
+
+**Software decode collapses at 4K**: 5.68 cores for two channels is over half this machine for two
+pictures.
+
+**Read a 1080p-to-4K row as a ratio only where both ends are real ceilings.** Two of these rows
+were not, in an earlier version of this table: `<vulkan-decode>` and D3D11VA both *held at the top*
+of a shorter ladder at 1080p, which is a floor rather than a ceiling, and comparing a floor with a
+ceiling produced a "4K is faster than 1080p" reading that cannot be true. Both rasters here use
+the same rungs, and the software row still reads 1 at 1080p against 2 at 4K — that one is the
+late-frame noise floor rather than a real inversion, and the 1080p figure is the less trustworthy
+of the two.
 
 ### Outputs on one channel — the SDI case
 
 One channel, one producer, a real-time output always present, then recordings added to the same
 channel.
 
-| output on air | recordings added | ceiling | cores | readback |
-| :--- | :--- | ---: | ---: | :--- |
-| screen | `prores_ks_vulkan` | **8+** | 1.07 | yes |
-| screen | `prores_ks` (CPU) | **4** | 4.38 | yes |
-| DeckLink SDI | `prores_ks_vulkan` | **8+** | 1.02 | yes |
-| DeckLink SDI | `prores_ks` (CPU) | **0** | — | — |
+Re-measured 2026-08-23 with two controls the earlier version of this table did not have: the
+added consumers' **own dropped frames** (a recording that cannot keep up records less and leaves
+the channel perfectly on time), and the **frame budget** `consume_max/nominal` from the channel's
+TIMING line. Ladders extended until each arm actually failed, because an arm that stops at the
+ladder's top has not been measured.
 
-**This is the answer to "can I record while I am on air".** With an SDI output live, eight or more
-GPU ProRes recordings sit on the same channel without it going late — and **a single CPU ProRes
-recording breaks it**. Not four, not two: one. The cores column says why the CPU route runs out so
-fast: four CPU recordings cost 4.38 cores where eight GPU recordings cost 1.02.
+| output on air | recordings added | raster | ceiling | cores | GPU% | drops | readback |
+| :--- | :--- | :--- | ---: | ---: | ---: | ---: | :--- |
+| screen | `prores_ks_vulkan` | 1080p | **16+** | 2.54 | 74 | 0 | no |
+| screen | `prores_ks_vulkan` | 4K | **8** | 2.11 | 95 | 0 | no |
+| screen | `prores_ks` (CPU) | 1080p | **0** | — | — | **324** | — |
+| screen | `prores_ks` (CPU) | 4K | **0** | — | — | **453** | — |
+| DeckLink SDI | either | 1080p | **0** † | — | — | — | yes |
 
-Both `8+` rows hit the top of the ladder rather than a limit, so the real ceiling is higher than
-eight and was not pursued.
+**This is the answer to "can I record while I am on air", and it is a better answer than the
+previous one.** Sixteen GPU ProRes recordings share a 1080p channel behind a screen output with
+**zero dropped frames**, and eight do at 4K. A single **CPU** ProRes recording fails at both
+rasters — and note *how* it fails: 324 and 453 dropped frames **with the channel exactly on
+time**. The earlier version of this table called that a working configuration and reported a
+ceiling of four, because it only ever looked at whether the channel went late.
+
+**The trellis quantiser search does not change these numbers.** `prores_ks_vulkan` with the search
+on and with it forced off reach the same ceiling at both rasters — the search costs real GPU (95%
+against 54% at 4K) and is not the binding constraint here. That matters because the option which
+switches it off writes a broken picture (§6), and in *this* shape you lose nothing by leaving it
+alone. It only bites in the other shape, N channels each with one recording, where it caps at one.
+
+† **the DeckLink row is not settled, and is shown so you do not read its absence as "fine".** It
+stopped at the very first rung on two or three late frames — at the noise floor, so that stop is
+not itself trustworthy. What the logs of those runs do show is `consume_max` of **39.7, 42.8 and
+47.8 ms against a 40 ms budget**, i.e. the channel had no headroom at all, and the DeckLink output
+reporting healthy throughout (`late=0 drops=0 buffered=5/5`) — so the cost is the host readback
+that output forces rather than a fault in it. But those runs predate the frame-budget check, so
+the ladder could not *say* that at the time; a re-run with the budget instrument is outstanding
+and will either name the budget as the reason or clear the floor and give a real ceiling. Treat
+"one recording alongside an SDI output is marginal on this box" as the finding, and the 0 as
+not yet a number.
 
 **A channel with no real-time output cannot be measured this way**, and the battery refuses to
 try. A channel whose only consumer is a file recording has nothing pacing it, so "late" has
 nothing fixed to be late against — measured, it reported *worse* than the same channel with an SDI
 output added, which cannot be true of a channel doing strictly less work.
 
-**One observation that did not come out as expected.** `readback` was `yes` in every
-consumer-ladder configuration, including eight `prores_ks_vulkan` recordings behind a screen
-output. The DeckLink rows are expected — that output needs host pixels, so the channel reads back
-once per tick and the GPU recordings' advantage is spent — but the screen rows are not explained,
-and no configuration here demonstrated the shared readback being *avoided*. The rule in §8 about
+**One earlier observation is now explained.** `readback` used to read `yes` in every
+consumer-ladder configuration, including GPU-only ones, and that was recorded here as unexplained.
+With the ladders re-run it reads **`no`** for the GPU ProRes rows and `yes` only where a host-path
+consumer is present — which is what the design says should happen. The rule in §8 about
 not mixing a host-path consumer onto a GPU-direct channel is therefore supported on its cost side
 and unproven on its benefit side.
 
