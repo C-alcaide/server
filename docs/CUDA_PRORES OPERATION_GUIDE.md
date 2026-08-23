@@ -294,6 +294,26 @@ All parameters above apply, plus:
 
 `CUDA_PRORES_BYPASS` always occupies consumer slot **2**. It does not require a `PLAY` command — it captures directly from the SDI input.
 
+### Interlaced: field-coded always, and not selectable here
+
+Both CUDA consumers field-code an interlaced channel and there is **no way to ask them not to**.
+`CUDA_PRORES` takes it from the channel (`field_count == 2`), `CUDA_PRORES_BYPASS` from the
+capture signal, and neither exposes a parameter. That differs from the FFmpeg `FILE` consumer,
+which grew an `-interlaced auto|0|1` — so if you need a *progressive* file from an interlaced
+channel, that is the consumer to use, or change the channel.
+
+Measured on a 1080i50 channel: 422 HQ reaches 950 bits/MB, 1.00× target, field order `tt`, zero
+decode errors — the interlaced path is correct, it just is not optional.
+
+**For a 25p file from a 50i SDI input, change the CHANNEL, not the consumer.** The DeckLink
+*producer* deinterlaces when an interlaced input feeds a progressive channel: `decklink_producer`
+sets `i2p` for exactly that case and inserts `bwdif=mode=send_field` with the input's parity,
+followed by an `fps` stage to the channel rate. So a `1080p2500` channel fed from a 1080i50 input
+records 25p on any consumer, with no interlaced handling involved at all. Verified end to end over
+the looped DeckLink pair: the recording came out `progressive, 25/1`. Note the limit of that
+check — the generator's SDI mode was reported by the card both as `1080p25` and as `1080i50`
+during the run, so the *output* is confirmed and the `bwdif` stage engaging is not.
+
 ### `QSCALE AUTO` on the SDI path, and why the quantiser bound had to move
 
 `QSCALE AUTO` works identically here — the same loop on the same per-profile targets. What the

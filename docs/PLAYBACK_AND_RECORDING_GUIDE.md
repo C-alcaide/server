@@ -474,6 +474,18 @@ sustain the channel before may now keep up.
 Progressive channels are untouched — verified `field_order=progressive`, `interlaced_frame=0`,
 25/1, zero drops on the same build.
 
+**A 25p file from a 50i SDI input is a CHANNEL choice, not a consumer one** — and it is the
+common case, so it is worth separating from everything below. The DeckLink *producer*
+deinterlaces when an interlaced input feeds a **progressive** channel: `decklink_producer` sets
+`i2p` for exactly that case and inserts `bwdif=mode=send_field` with the input's parity, then an
+`fps` stage to the channel rate. Run the channel at `1080p2500`, point a `DECKLINK` producer at
+the 50i input, and every consumer records plain 25p — no pairing, no `-interlaced`, nothing to
+configure on the recording side. Verified over the looped DeckLink pair: `progressive, 25/1` out.
+(Limit of that check: the card reported the generator's mode both as `1080p25` and as `1080i50`
+during the run, so the output is confirmed and the `bwdif` stage engaging is not.)
+
+Everything below is about the other case: keeping the fields, on an interlaced channel.
+
 **`-interlaced auto|0|1` chooses, and the channel only says what is possible.**
 
 | value | effect |
@@ -487,6 +499,11 @@ Measured on a 1080i50 channel with `prores_ks_vulkan`: `auto` and `-interlaced 1
 to `auto`. On a progressive channel `-interlaced 1` warns and records `progressive, 25/1`.
 
 `-interlaced 0` also lifts the NVENC refusal below, since there is then nothing to interleave.
+
+**`-interlaced` is the FFmpeg consumer only.** `CUDA_PRORES` and `CUDA_PRORES_BYPASS` field-code
+an interlaced channel unconditionally — the first from `field_count`, the second from the capture
+signal — and neither exposes a switch. If you need a progressive file out of an interlaced
+channel, use the `FILE` consumer with `-interlaced 0`, or change the channel.
 
 **Three things to know about it.**
 
@@ -799,10 +816,16 @@ Without the swap, use `h264_vulkan` / `hevc_vulkan`. They reach the same silicon
   `-q:v 4`–`6` at 4K, **eight channels or more**. The quantiser is what keeps the data rate on
   profile and it does not carry between rasters; without `-q:v` it is one channel, and with it on
   an unpatched FFmpeg the file is corrupt. See §6.
-- **Interlaced (50i)** → the FFmpeg consumer pairs the channel's two ticks into one field-coded
-  25 fps frame automatically, on the host path. Pick an encoder that sustains the channel;
-  GPU-direct declines interlaced. See §6.
-- **OpenGL mixer, 8-bit** → `CUDA_PRORES`.
+- **Interlaced (50i), keeping the fields** → any consumer. The FFmpeg consumer pairs the
+  channel's two ticks into one field-coded 25 fps frame (`-interlaced auto`, the default), and the
+  Vulkan encode route does the pairing on the GPU. `CUDA_PRORES` and the bypass consumer
+  field-code unconditionally. NVENC is the one route that declines — pass `-interlaced 0` if you
+  want it. See §6.
+- **50i input, 25p file** → run the **channel** progressive (`1080p2500`) and let the DeckLink
+  producer deinterlace. Nothing on the recording side is involved. See §6.
+- **OpenGL mixer, 8-bit** → `CUDA_PRORES`, and its `QSCALE` now defaults to `AUTO`, which holds
+  the profile's published data rate instead of whatever the content produces. See
+  `docs/CUDA_PRORES OPERATION_GUIDE.md`.
 - **CPU** → `prores_aw`, never `prores_ks`. The latter cannot sustain 1080p25.
 
 ### If a DeckLink output is on air
