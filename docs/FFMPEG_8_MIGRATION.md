@@ -968,8 +968,13 @@ thing in the number (10-bit, full scale 1023):
 | `-q:v 4` | 25.0 MB | 1.93 | 15 | 52.34 dB |
 | `-q:v 2` | 34.6 MB | 0.96 | 8 | 58.02 dB |
 
-At matched size the search is marginally behind the quantiser it settles on, and `-q:v 4` is
-+9.5 dB over the default at 2.2x the bytes. It is a bitrate trade.
+At matched size the search is marginally behind the quantiser it settles on. But PSNR without
+bitrate is the wrong comparison, and it flattered the settings that simply spent more bits:
+measured against the profile's own target of 950 bits/MB (`br_tab[3]`, 193.8 Mbit/s at 25p), the
+default achieves **0.98x** and `-q:v 12` **1.01x**, while `-q:v 4` achieves **2.15x** and `-q:v 2`
+**2.97x**. So the search was hitting its target, which is its job, and the recommendation is
+`-q:v 12`: on-spec rate, 0.8 dB better than the search, and eight channels instead of one.
+`-q:v 4` declares 422 HQ and carries over twice the rate that profile describes.
 
 **What that comparison did NOT start out measuring.** The first attempt compared each arm against
 the source frame and every GPU arm came out at ~25.5 dB regardless of the quantiser, because the

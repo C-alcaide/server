@@ -82,28 +82,33 @@ per channel:
 | `prores_ks_vulkan -q:v 4` | **8+** | the top of the ladder, with headroom |
 | `prores_ks_vulkan` | **1** | 37 late frames at 2 channels |
 
-**And it is a bitrate trade, not a quality trade** — which is the opposite of what an earlier
-version of this entry said. Measured on one frame of detailed content, every setting encoding the
-*same* input, compared against the encoder's own input after the identical `libplacebo`
-conversion, so the numbers are quantisation alone with no conversion or subsampling error in them
-(10-bit, full scale 1023):
+**And which quantiser, because only one of them is still 422 HQ by data rate.** ProRes profiles
+have published rates and the trellis search exists to hit them: FFmpeg targets **950 bits per
+macroblock** for profile 3 at 1080p (`br_tab[3]`, `proresenc_kostya_common.c`) = 193.8 Mbit/s at
+25p, and Apple's nominal 220 Mbit/s at 1920×1080/29.97 scales to 183.5. Measured:
 
-| setting | 12 frames | Y mean error | Y max | Y PSNR |
-| :--- | ---: | ---: | ---: | ---: |
-| default (trellis search) | 11.4 MB | 5.60 | 73 | 42.89 dB |
-| `-q:v 12` | 11.8 MB | 5.26 | 41 | **43.70 dB** |
-| `-q:v 4` | 25.0 MB | 1.93 | 15 | **52.34 dB** |
-| `-q:v 2` | 34.6 MB | 0.96 | 8 | 58.02 dB |
+| setting | bits/MB | Mbit/s @25p | vs target | Y PSNR | channels |
+| :--- | ---: | ---: | ---: | ---: | ---: |
+| default (trellis search) | 929 | 189.5 | **0.98×** | 42.89 dB | **1** |
+| **`-q:v 12`** | 961 | 196.1 | **1.01×** | **43.70 dB** | **8+** |
+| `-q:v 8` | 1309 | 267.0 | 1.38× | 46.76 dB | 8+ |
+| `-q:v 4` | 2043 | 416.8 | **2.15×** | 52.34 dB | 8+ |
+| `-q:v 2` | 2826 | 576.5 | 2.97× | 58.02 dB | 8+ |
 
-At matched size the search is marginally *behind* forcing the quantiser it settles on — 42.89 dB
-against 43.70 dB for `-q:v 12` at 11.4 against 11.8 MB. `-q:v 4` is **+9.5 dB over the default**
-and costs 2.2x the bytes. So the recommendation is eight channels *and* a better picture, paid for
-in disk.
+PSNR is against the encoder's own input after the identical `libplacebo` conversion, so it is
+quantisation alone — no conversion or subsampling error in it (10-bit, full scale 1023).
 
-**Limits on that comparison:** one frame, and the content is detailed noise — the worst case for a
-DCT codec and the material most likely to make a trellis search look bad, so expect the search to
-do better on flatter footage. PSNR is also not a look; the maximum errors (15 against 73) say more
-about visible quality than the means, and neither is a viewing verdict.
+**`-q:v 12` is the recommendation**: on-spec rate, 0.8 dB better than the search, and eight
+recording channels instead of one. `-q:v 4` writes a file that declares 422 HQ and carries
+**2.15×** the profile's data rate — a better picture, honestly bought, but storage and SDI budgets
+sized from the profile name will be out by a factor of two. Apple's rates are nominal for a VBR
+codec so a few percent either way is ordinary; a factor of two is not.
+
+**Two earlier readings in this entry were wrong and are corrected rather than removed.** Comparing
+PSNR without bitrate said the search was "marginally behind" — it was hitting 0.98× of its target,
+which is its whole job, and the comparison rewarded whichever setting spent more bits. Before that,
+comparing frame *means* of different frames from different files could not see quantisation loss at
+all: a blurred frame and a sharp one have the same mean.
 
 **Earlier numbers are void, in two different ways.** Any ceiling measured with `-q:v` before the
 consumer fix was measured without the option; anything measured between the consumer fix and the
