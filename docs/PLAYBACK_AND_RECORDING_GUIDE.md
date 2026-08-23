@@ -410,6 +410,37 @@ somewhere in this ladder's configuration (an H.264 source decoded through D3D11V
 `encode-matrix` used ProRes) and is unattributed. **Do not read either zero as "this route cannot
 record".** Both record correctly at one channel in other measurements.
 
+### What a real input costs — the ISO ceilings are for routed pictures
+
+Every recording ceiling above uses `route://1`: one channel decodes and the rest take its
+picture. That isolates the recording, which is the point — but **a real ISO rig does not route,
+it captures**, and a capture is not free. The honest form of the ceiling is *routed ceiling,
+minus an adder per real input*.
+
+Measured by difference on the looped pair (DeckLink 1 cabled to DeckLink 4), with a standalone
+ffmpeg driving the output so that path's cost sits outside the figures, and the measured
+channel's producer swapped between `route://1` and `DECKLINK 4`:
+
+| round | `route://1` | `DECKLINK 4` | difference |
+| ---: | ---: | ---: | ---: |
+| 1 | 0.76 | 1.01 | +0.25 |
+| 2 | 0.77 | 1.00 | +0.23 |
+| 3 | 0.85 | 1.04 | +0.19 |
+
+**One capture costs about +0.23 cores**, and the range is +0.19 to +0.25.
+
+**Read the difference, never the columns.** The absolute figures moved from ~1.8 cores to ~0.8
+between two runs of this same measurement with nothing changed — this box's CPU sampling drifts
+that much over minutes. That is exactly why the arms are interleaved round by round and each
+difference is taken within its own round: a capture measured now against a route measured five
+minutes ago is two numbers minutes apart, and their difference is mostly drift.
+
+**It is an extrapolation, and a floor rather than an estimate, for the Nth input.** Connectors
+1 and 4 are the only cabled pair on this rig, so exactly one channel can capture and the
+"cost of two captures" cannot be measured here at all. Multiplying assumes every capture costs
+the same, and they may not: they contend for the card's PCIe bandwidth and its capture engine,
+so the true cost of the Nth is at least this and plausibly more.
+
 ### Playback — N channels, one producer each
 
 One screen output per channel, so these are playout channels rather than a bare decode test.
