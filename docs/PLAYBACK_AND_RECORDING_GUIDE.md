@@ -250,16 +250,18 @@ Software decode, or the Vulkan decoders, are configuration rather than commands:
 **Recording — a 16-bit Vulkan-mixer channel**
 
 ```
-ADD 1 FILE "out.mov" -vcodec prores_ks_vulkan -profile:v 3 -q:v 4 -ac 2
+ADD 1 FILE "out.mov" -vcodec prores_ks_vulkan -profile:v 3 -ac 2
 ADD 1 FILE "out.mkv" -vcodec ffv1_vulkan -ac 2
 ADD 1 FILE "out.mov" -vcodec h264_vulkan -b:v 50M -ac 2
-REMOVE 1 FILE "out.mov" -vcodec prores_ks_vulkan -profile:v 3 -q:v 4 -ac 2
+REMOVE 1 FILE "out.mov" -vcodec prores_ks_vulkan -profile:v 3 -ac 2
 ```
 
-**`-q:v` on the ProRes line is doing real work, and `-profile:v` is not optional either.**
-Without `-q:v` the encoder runs a trellis quantiser search that limits you to **one** recording
-channel instead of eight (§6). Without `-profile:v` it picks a profile from the input, so a
-recording you think is 422 may be 422 HQ — profile 2 is 422, profile 3 is 422 HQ.
+**`-profile:v` is not optional**: without it `prores_ks_vulkan` picks a profile from its input,
+so a recording you think is 422 may be 422 HQ — profile 2 is 422, profile 3 is 422 HQ.
+
+**Do not add `-q:v` to the ProRes line.** It is the option that would switch off the trellis
+quantiser search limiting this encoder to one channel, and the file it produces is unusable —
+see §6.
 
 **Recording — an 8-bit channel**
 
@@ -360,32 +362,37 @@ suits the raster.
 
 | route | channels | why it stopped | GPU% | VRAM |
 | :--- | ---: | :--- | ---: | ---: |
-| `prores_ks_vulkan -q:v 4` | **8+** | the top of the ladder, with headroom | 53 | 2997 MB |
 | `prores_ks_vulkan` | **1** | 47 late frames at 2 channels | 59 | 1500 MB |
 | `prores_ks` (CPU) | **1** | 5 late frames at 2 channels | 15 | 1563 MB |
 
-**That eightfold difference is one argument, and it is worth understanding rather than copying.**
+**One channel is the honest number, and there is currently no way to raise it.**
 `prores_ks_vulkan` runs a *trellis quantiser search* by default — a compute shader that tries
-several quantisers per slice and keeps the best. It is good at what it does and it saturates the
-GPU below what two 25p channels need, which is why the middle row stops at one. Giving the
-encoder a fixed quantiser with `-q:v` skips the search entirely:
+several quantisers per slice and keeps the best. It saturates the GPU below what two 25p
+channels need, which is why the ceiling is one. The option that switches the search off does
+reach eight channels, and the recordings are unusable:
 
-```
-ADD 1 FILE "out.mov" -vcodec prores_ks_vulkan -profile:v 3 -q:v 4 -ac 2
-```
+> **`-q:v` ON `prores_ks_vulkan` PRODUCES A BROKEN PICTURE. Do not use it.** Measured
+> 2026-08-23 and reproduced outside CasparCG entirely, so it is FFmpeg's fixed-quantiser path
+> and not this fork's plumbing:
+>
+> | | mean R,G,B of the decoded frame | max |
+> | :--- | :--- | ---: |
+> | `prores_ks_vulkan -profile:v 3` | 100.8, 105.3, 102.3 | 255 |
+> | the same `+ -q:v 4` | **0.1, 135.0, 0.1** | 130 |
+>
+> Red and blue are gone and luma is clamped at half range — the picture is green. The decoder
+> reports **`invalid plane data size`** on every frame of such a file, so the encoder is
+> writing malformed slices rather than making a quality trade-off. The quantiser value barely
+> changes the result (q2, q4 and q8 all land within 0.1 LSB of each other) while the file size
+> falls monotonically, which is what says the value arrives and the *encode* is wrong.
+>
+> `-bits_per_mb` produces a correct picture but does **not** bypass the trellis search —
+> `force_quant` is set only from `global_quality` — so it changes the rate and not the speed,
+> and measures the same one-channel ceiling.
 
-At two channels, where the default is already dropping frames, the difference is stark:
-
-| | jitter | late | MB / 10 s |
-| :--- | ---: | ---: | ---: |
-| default | 32–37 ms | 13–17 per 125 | 371 |
-| `-q:v 4` | **2.3–4.3 ms** | **0** per 125 | 310 |
-
-**It is a picture decision, not a free win.** A fixed quantiser gives up the search's
-rate/quality trade-off, and how much that costs depends on the content — on this source it also
-wrote a *smaller* file, which will not always be true. Lower numbers mean higher quality and
-larger files; 4 is a reasonable starting point for a 422 HQ ISO. If you need the search's
-judgement, budget one channel for it.
+So the useful reading of this table is that **16-bit GPU ProRes recording is a one-channel
+capability today**, and for more than one ISO at 1080p the routes that work are `h264_vulkan`
+(3–8 channels depending on the producer) or the CPU encoders at 8-bit.
 
 Two more things this table says that the 8-bit one cannot:
 
@@ -393,8 +400,8 @@ Two more things this table says that the 8-bit one cannot:
   ProRes at 16-bit is simply more expensive than at 8-bit — 16 MB a frame of composite instead of
   8 — so the 8-bit table's "3 channels for `prores_ks`" does not carry over.
 * **`-q:v` used to be discarded entirely**, so any ceiling measured before 2026-08-23 with that
-  argument in it was measured without it. If you have older numbers for a `-q:v` recording, they
-  are numbers for the default.
+  argument in it was measured without it — and any measured *after* it, with `-q:v` present, was
+  measuring the broken encode above. Both are worthless for different reasons.
 
 **Choosing the right CPU encoder buys more than moving to the GPU does, for ProRes.** `prores_aw`
 reaches five channels — the same as `prores_ks_vulkan` — while `prores_ks` reaches three. If you
@@ -571,8 +578,8 @@ Without the swap, use `h264_vulkan` / `hevc_vulkan`. They reach the same silicon
 
 ### If you are recording ProRes
 
-- **Vulkan mixer, 16-bit** → `prores_ks_vulkan -profile:v 3 -q:v 4`. Leaving `-q:v` off costs
-  you seven of the eight channels; see §6.
+- **Vulkan mixer, 16-bit** → `prores_ks_vulkan -profile:v 3`, **one channel only**. The
+  option that would buy more channels writes a broken picture; see §6.
 - **OpenGL mixer, 8-bit** → `CUDA_PRORES`.
 - **CPU** → `prores_aw`, never `prores_ks`. The latter cannot sustain 1080p25.
 

@@ -897,12 +897,36 @@ in the same run against the same binary:
 
 | arm | channels | why it stopped | GPU% | VRAM |
 | :--- | ---: | :--- | ---: | ---: |
-| `prores_ks_vulkan -q:v 4` | **8+** | the top of the ladder, with headroom | 53 | 2997 MB |
+| `prores_ks_vulkan -q:v 4` | 8+ | the top of the ladder, with headroom | 53 | 2997 MB |
 | `prores_ks_vulkan` | **1** | 47 late frames at 2 channels | 59 | 1500 MB |
 | `prores_ks` (CPU) | **1** | 5 late frames at 2 channels | 15 | 1563 MB |
 
 At two channels: jitter 32–37 ms and 13–17 late per 125 by default, against 2.3–4.3 ms and
 **zero** with `-q:v 4`.
+
+**AND THE `-q:v` RECORDINGS ARE UNUSABLE, which took another battery to find.** `encode-matrix
+--codec prores_q` compared the quantiser arms against the CPU encoder on a still, and they differ
+by a **mean of 236 LSB, 100% of pixels over 3 LSB, only 5% of those at an edge** — where the
+default arm sits at mean 2.55 with 86% at an edge. Flat-area spread is the signature of a defect;
+edge-concentrated disagreement is two 4:2:2 implementations differing. Reproduced outside
+CasparCG on `smptehdbars`:
+
+| | mean R,G,B | max |
+| :--- | :--- | ---: |
+| `prores_ks_vulkan -profile:v 3` | 100.8, 105.3, 102.3 | 255 |
+| the same `+ -q:v 4` | **0.1, 135.0, 0.1** | 130 |
+
+Green, half-range, and the decoder says **`invalid plane data size`** on every frame. q2, q4 and
+q8 land within 0.1 LSB of each other while file size falls monotonically — the value arrives, the
+encode is wrong. So the eight-channel row above is eight channels of broken recordings, and the
+real ceiling for 16-bit GPU ProRes is **one**. `-bits_per_mb` decodes correctly but does not
+bypass the search (`force_quant` comes only from `global_quality`), so it buys no speed and
+measures the same one channel.
+
+**The sequence is the lesson.** A speed measurement was taken outside CasparCG (11 s against
+4 s per 500 frames), a ceiling was measured inside it (1 against 8), and both were right; nobody
+had looked at the picture until a battery whose whole job is the picture was pointed at it. Two
+correct measurements of the wrong quantity are not evidence about the right one.
 
 **Three lessons, and the third is the one that generalises.**
 
