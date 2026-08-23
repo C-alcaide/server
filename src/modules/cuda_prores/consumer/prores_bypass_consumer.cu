@@ -126,7 +126,8 @@ struct bypass_config {
     int          device_index  = 1;     // DeckLink device (1-based, per SDK convention)
     int          cuda_device   = 0;     // CUDA device index
     int          slices_per_row = 4;    // horizontal slices per MB row (1/2/4/8)
-    int          q_scale        = 8;    // quantization scale [1..31]; 1=best quality
+    int          q_scale        = 0;    // quantization scale [1..128]; 1=best quality
+    bool         q_auto         = true; // true = target the profile's published data rate
 };
 
 // ---------------------------------------------------------------------------
@@ -237,7 +238,8 @@ public:
         CASPAR_LOG(info) << L"[cuda_prores_bypass] Created bypass consumer #" << index_
                          << L" device=" << cfg_.device_index
                          << L" profile=" << cfg_.profile
-                         << L" qscale=" << cfg_.q_scale
+                         << L" qscale=" << (cfg_.q_auto ? std::wstring(L"auto")
+                                                             : std::to_wstring(cfg_.q_scale))
                          << L" slices=" << cfg_.slices_per_row
                          << L" " << (cfg_.use_mxf ? L"MXF" : L"MOV")
                          << L" -> " << cfg_.output_path;
@@ -476,7 +478,15 @@ private:
 
         alloc_bypass_ctx(frame_ctx_, static_cast<int>(w), enc_height,
                          cfg_.profile, cfg_.slices_per_row, interlaced);
-        frame_ctx_.q_scale = cfg_.q_scale;
+        // Rate target from the profile and the picture geometry, once. `interlaced` halves
+        // the macroblocks per picture and doubles the pictures, so the two cancel and 1080i50
+        // takes the same bits/MB as 1080p25 -- see prores_target_bits_per_mb.
+        target_bits_per_mb_ = prores_target_bits_per_mb(
+            cfg_.profile,
+            frame_ctx_.mbs_per_slice * frame_ctx_.slices_per_row * ((enc_height + 15) / 16),
+            interlaced ? 2 : 1);
+        q_state_           = cfg_.q_auto ? 12.0 : (double)cfg_.q_scale;
+        frame_ctx_.q_scale = (int)(q_state_ + 0.5);
 
         if (interlaced) {
             frame_ctx_.is_interlaced = true;
@@ -677,6 +687,23 @@ private:
             return false;
         }
 
+        // ── rate control ──────────────────────────────────────────────────────────
+        // Identical to CUDA_PRORES's loop, and deliberately the same code shape: a damped
+        // proportional step towards the profile's target bits per macroblock.
+        if (cfg_.q_auto && encoded_size > 0 && target_bits_per_mb_ > 0) {
+            const int mbs = frame_ctx_.mbs_per_slice * frame_ctx_.slices_per_row
+                          * ((frame_ctx_.field_height + 15) / 16)
+                          * (frame_ctx_.is_interlaced ? 2 : 1);
+            if (mbs > 0) {
+                const double ratio = ((double)encoded_size * 8.0 / (double)mbs)
+                                   / (double)target_bits_per_mb_;
+                q_state_ = q_state_ * (1.0 + 0.5 * (ratio - 1.0));
+                if (q_state_ < 1.0)  q_state_ = 1.0;
+                if (q_state_ > 128.0) q_state_ = 128.0;
+                frame_ctx_.q_scale = (int)(q_state_ + 0.5);
+            }
+        }
+
         // Set start timecode before first write
         if (first_frame && mxf_muxer_ && job.token.tc.valid)
             mxf_muxer_->set_start_timecode(job.token.tc);
@@ -756,6 +783,11 @@ private:
     bool                     is_interlaced_ = false;
     bool                     is_tff_        = true;
 
+    // Rate-control state (QSCALE AUTO only). Kept in floating point so a small correction
+    // is not lost to integer rounding on every frame.
+    double                   target_bits_per_mb_ = 0.0;
+    double                   q_state_            = 12.0;
+
     // ── DeckLink capture ──────────────────────────────────────────────────
     std::unique_ptr<DecklinkCapture> capture_;
 
@@ -814,7 +846,20 @@ static bypass_config parse_bypass_params(const std::vector<std::wstring>& params
             cfg.output_path = std::move(clean);
         }
     }
-    cfg.profile       = caspar::get_param(L"PROFILE", params, 3);
+    // PROFILE 0..3 only. This consumer takes V210 off the wire, which is 4:2:2 by
+    // construction -- there is no 4:4:4 to encode. It nonetheless took the fourcc from a
+    // six-entry table, so PROFILE 4 or 5 stamped `ap4h`/`ap4x` on a 4:2:2 bitstream, and
+    // the decoder reads those tags as 12-bit (proresdec.c decode_init) and decodes the
+    // 10-bit samples at four times their level. Clamped rather than refused so an operator
+    // copying a CUDA_PRORES command across still gets a recording.
+    {
+        const int req = caspar::get_param(L"PROFILE", params, 3);
+        cfg.profile   = std::max(0, std::min(3, req));
+        if (req != cfg.profile)
+            CASPAR_LOG(warning) << L"[cuda_prores_bypass] PROFILE " << req
+                                << L" is 4:4:4; this consumer captures 4:2:2 - using "
+                                << cfg.profile;
+    }
     cfg.device_index  = caspar::get_param(L"DEVICE",  params, 1);
     auto codec        = caspar::get_param(L"CODEC",   params, std::wstring(L"MOV"));
     cfg.use_mxf       = boost::iequals(codec, L"MXF");
@@ -827,9 +872,30 @@ static bypass_config parse_bypass_params(const std::vector<std::wstring>& params
     cfg.hdr_max_fall  = (uint16_t)caspar::get_param(L"MAXFALL", params, 400);
     cfg.cuda_device   = caspar::get_param(L"CUDA_DEVICE", params, 0);
     cfg.filename_pattern = caspar::get_param(L"FILENAME", params, std::wstring(L""));
-    // QSCALE 1..31 (1=maximum quality/largest file; default 8 matches Apple reference)
-    int qscale   = caspar::get_param(L"QSCALE", params, 8);
-    cfg.q_scale  = std::max(1, std::min(31, qscale));
+    // QSCALE AUTO | 1..128 -- same semantics and the same reasoning as CUDA_PRORES:
+    // a fixed quantiser has no rate control, so it cannot hold a profile's data rate.
+    // The upper bound is 128, not 31. 31 was this encoder's own invention: the ProRes slice
+    // header carries q_scale in one byte, which proresdec.c clips to 1..224 and then expands
+    // (`qscale > 128 ? (qscale - 96) << 2 : qscale`), so 1..128 are all literal and legal.
+    // The decoder scales its matrix into an int16_t[64], and the coarsest ProRes matrix entry
+    // is 63, so 63 * 128 = 8064 leaves the arithmetic well inside range.
+    //
+    // It matters because 31 is reachable. Measured 2026-08-23 recording an SDI capture from
+    // the looped DeckLink pair: Proxy and 422 both SATURATED at 31 and still came in at 1.49x
+    // and 1.08x of target, because V210 straight off the wire keeps chroma detail that the
+    // mixer path low-passes on its BGRA round trip. A controller pinned at its own ceiling
+    // reports a rate it never chose.
+    const auto qs_param = caspar::get_param(L"QSCALE", params, std::wstring(L"AUTO"));
+    cfg.q_auto = boost::iequals(qs_param, L"AUTO") || qs_param.empty();
+    if (!cfg.q_auto) {
+        try {
+            cfg.q_scale = std::max(1, std::min(128, std::stoi(qs_param)));
+        } catch (...) {
+            CASPAR_LOG(warning) << L"[cuda_prores_bypass] QSCALE '" << qs_param
+                                << L"' is neither AUTO nor 1..128 - using AUTO";
+            cfg.q_auto = true;
+        }
+    }
     // SLICES: parallel horizontal slices per MB row — must be 1, 2, 4, or 8
     int slices = caspar::get_param(L"SLICES", params, 4);
     cfg.slices_per_row = (slices >= 8) ? 8 : (slices >= 4) ? 4 : (slices >= 2) ? 2 : 1;
@@ -841,7 +907,8 @@ static bypass_config parse_bypass_xml(const boost::property_tree::wptree& elem)
     bypass_config cfg;
     cfg.output_path      = elem.get(L"path",     L".");
     cfg.filename_pattern = elem.get(L"filename", L"");
-    cfg.profile          = elem.get(L"profile",  3);
+    // Clamped to 4:2:2 profiles for the reason given in the AMCP path.
+    cfg.profile          = std::max(0, std::min(3, elem.get(L"profile", 3)));
     cfg.device_index     = elem.get(L"device",   1);
     auto codec = elem.get(L"codec", std::wstring(L"mov"));
     cfg.use_mxf = boost::iequals(codec, L"mxf");
@@ -852,8 +919,17 @@ static bypass_config parse_bypass_xml(const boost::property_tree::wptree& elem)
     cfg.hdr_max_cll  = (uint16_t)elem.get(L"max_cll",  1000);
     cfg.hdr_max_fall = (uint16_t)elem.get(L"max_fall", 400);
     cfg.cuda_device  = elem.get(L"cuda_device", 0);
-    int qscale = elem.get(L"qscale", 8);
-    cfg.q_scale        = std::max(1, std::min(31, qscale));
+    const auto qs = boost::to_upper_copy(elem.get(L"qscale", std::wstring(L"AUTO")));
+    cfg.q_auto = (qs == L"AUTO" || qs.empty());
+    if (!cfg.q_auto) {
+        try {
+            cfg.q_scale = std::max(1, std::min(128, std::stoi(qs)));
+        } catch (...) {
+            CASPAR_LOG(warning) << L"[cuda_prores_bypass] <qscale> '" << qs
+                                << L"' is neither auto nor 1..128 - using auto";
+            cfg.q_auto = true;
+        }
+    }
     int slices = elem.get(L"slices", 4);
     cfg.slices_per_row = (slices >= 8) ? 8 : (slices >= 4) ? 4 : (slices >= 2) ? 2 : 1;
     return cfg;

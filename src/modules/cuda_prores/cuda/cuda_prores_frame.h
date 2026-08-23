@@ -121,7 +121,7 @@ struct ProResFrameCtx {
     uint8_t  *h_frame_buf;
     size_t    h_frame_buf_size;
 
-    int q_scale; // current adaptive quality scale [1..31]
+    int q_scale; // current quality scale [1..128]
 
     // Interlaced capture (e.g. 1080i50): true = top-field-first interlaced.
     // When true, field_height = height/2 and num_slices is per-field.

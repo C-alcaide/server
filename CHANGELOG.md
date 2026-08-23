@@ -1,6 +1,43 @@
 CasparVP — Unreleased
 ==========================================
 
+### Changed: CUDA_PRORES_BYPASS gets the same rate targeting — and the quantiser bound moves to 128
+
+**The SDI recorder now lands on its profile's published data rate too**, and finding that out
+required raising a limit the mixer path had never reached.
+
+`QSCALE` on `CUDA_PRORES_BYPASS` defaults to `AUTO` with the same loop and the same per-profile
+targets as `CUDA_PRORES`. Measured 2026-08-23 over the looped DeckLink pair — a separate `ffmpeg`
+process putting detailed noise on connector 1 as `uyvy422`, the consumer capturing connector 4:
+
+| profile | target | achieved | settled quantiser |
+| :--- | ---: | ---: | ---: |
+| Proxy | 194 bits/MB | **1.00×** | 43 |
+| LT | 440 | **1.00×** | 33 |
+| 422 | 632 | **1.00×** | 35 |
+| 422 HQ | 950 | **1.00×** | 28–29 |
+
+Zero decode errors on all four.
+
+**Three of those settled above 31, which was the encoder's hard clamp.** With it in place the same
+run gave Proxy **1.49×** and 422 **1.08×** with the quantiser pinned at its ceiling — a recorder
+reporting a rate it had not chosen, and indistinguishable in the output from a rate it had. 31 was
+never a format limit: `proresdec.c` clips the slice header's q_scale byte to 1..224 and expands
+anything over 128, so 1..128 are literal, and the coarsest ProRes matrix entry of 63 keeps
+`63 × 128` well inside the `int16_t` the decoder scales its matrix into. `QSCALE` now accepts
+1..128 on both consumers. The mixer path is unaffected — it settles at 25–30 and still measures
+1.00× on Proxy, 422 HQ and 4444.
+
+The reason the SDI path needs a coarser quantiser for the same clip is worth recording, because it
+means the two paths are not interchangeable for rate purposes: V210 off the wire keeps chroma
+detail that the mixer path low-passes, since there the frame has been decoded to RGB and
+re-subsampled on the way into the encoder, and that round trip is a filter.
+
+**Also fixed: `PROFILE 4`/`5` on the bypass consumer produced a mislabelled file.** It encodes
+V210, which is 4:2:2 by construction, but took its fourcc from a six-entry table — so a 4:2:2
+bitstream was stamped `ap4h` or `ap4x`, and a decoder reads those tags as 12-bit and renders the
+10-bit samples at four times their level. `PROFILE` is now clamped to 0..3 there with a warning.
+
 ### Fixed: CUDA_PRORES 4444 produced a corrupt bitstream, and its alpha channel was noise
 
 `PROFILE 4` and `PROFILE 5` on the CUDA ProRes consumer now decode cleanly and carry a correct

@@ -229,7 +229,7 @@ struct prores_config {
     bool         use_mxf        = false; // false=MOV
     int          device_index   = 0;     // CUDA device
     int          slices_per_row = 4;     // horizontal slices per MB row (1/2/4/8)
-    int          q_scale        = 0;     // quantization scale [1..31]; 1=best quality
+    int          q_scale        = 0;     // quantization scale [1..128]; 1=best quality
     bool         q_auto         = true;  // true = target the profile's published data rate
 };
 
@@ -996,7 +996,7 @@ private:
                 const double ratio  = actual / (double)target_bits_per_mb_;
                 q_state_ = q_state_ * (1.0 + 0.5 * (ratio - 1.0));
                 if (q_state_ < 1.0)  q_state_ = 1.0;
-                if (q_state_ > 31.0) q_state_ = 31.0;
+                if (q_state_ > 128.0) q_state_ = 128.0;
                 frame_ctx_.q_scale = (int)(q_state_ + 0.5);
             }
         }
@@ -1192,7 +1192,7 @@ static prores_config parse_params(const std::vector<std::wstring>& params)
     // ALPHA: 1|0 (default 1 for profile 4444)
     cfg.has_alpha        = (caspar::get_param(L"ALPHA", params, 1) != 0);
     cfg.filename_pattern = caspar::get_param(L"FILENAME", params, std::wstring(L""));
-    // QSCALE AUTO | 1..31. AUTO (the default) closes a loop on the profile's published
+    // QSCALE AUTO | 1..128. AUTO (the default) closes a loop on the profile's published
     // bits-per-macroblock; a number pins the quantiser and lets the rate follow content.
     //
     // The old default was a fixed 8, documented as "matches Apple reference". It does not
@@ -1201,14 +1201,25 @@ static prores_config parse_params(const std::vector<std::wstring>& params)
     // against each profile's target: LT needed QSCALE 31 for 0.99x, 422 QSCALE 28 for
     // 1.08x, 422 HQ QSCALE 31 for 1.00x -- and the same values on flat content would land
     // far under. One number cannot serve both, which is why the default is now a loop.
+    // The upper bound is 128, not 31. 31 was this encoder's own invention: the ProRes slice
+    // header carries q_scale in one byte, which proresdec.c clips to 1..224 and then expands
+    // (`qscale > 128 ? (qscale - 96) << 2 : qscale`), so 1..128 are all literal and legal.
+    // The decoder scales its matrix into an int16_t[64], and the coarsest ProRes matrix entry
+    // is 63, so 63 * 128 = 8064 leaves the arithmetic well inside range.
+    //
+    // It matters because 31 is reachable. Measured 2026-08-23 recording an SDI capture from
+    // the looped DeckLink pair: Proxy and 422 both SATURATED at 31 and still came in at 1.49x
+    // and 1.08x of target, because V210 straight off the wire keeps chroma detail that the
+    // mixer path low-passes on its BGRA round trip. A controller pinned at its own ceiling
+    // reports a rate it never chose.
     const auto qs_param = caspar::get_param(L"QSCALE", params, std::wstring(L"AUTO"));
     cfg.q_auto = boost::iequals(qs_param, L"AUTO") || qs_param.empty();
     if (!cfg.q_auto) {
         try {
-            cfg.q_scale = std::max(1, std::min(31, std::stoi(qs_param)));
+            cfg.q_scale = std::max(1, std::min(128, std::stoi(qs_param)));
         } catch (...) {
             CASPAR_LOG(warning) << L"[cuda_prores] QSCALE '" << qs_param
-                                << L"' is neither AUTO nor 1..31 - using AUTO";
+                                << L"' is neither AUTO nor 1..128 - using AUTO";
             cfg.q_auto = true;
         }
     }
@@ -1234,15 +1245,15 @@ static prores_config parse_xml(const boost::property_tree::wptree& elem)
     cfg.hdr_max_cll    = (uint16_t)elem.get(L"max_cll",  1000);
     cfg.hdr_max_fall   = (uint16_t)elem.get(L"max_fall", 400);
     cfg.has_alpha      = (elem.get(L"alpha", 1) != 0);
-    // qscale: "auto" (default) or 1..31 -- see the AMCP path for why auto is the default.
+    // qscale: "auto" (default) or 1..128 -- see the AMCP path for why auto is the default.
     const auto qs = boost::to_upper_copy(elem.get(L"qscale", std::wstring(L"AUTO")));
     cfg.q_auto = (qs == L"AUTO" || qs.empty());
     if (!cfg.q_auto) {
         try {
-            cfg.q_scale = std::max(1, std::min(31, std::stoi(qs)));
+            cfg.q_scale = std::max(1, std::min(128, std::stoi(qs)));
         } catch (...) {
             CASPAR_LOG(warning) << L"[cuda_prores] <qscale> '" << qs
-                                << L"' is neither auto nor 1..31 - using auto";
+                                << L"' is neither auto nor 1..128 - using auto";
             cfg.q_auto = true;
         }
     }

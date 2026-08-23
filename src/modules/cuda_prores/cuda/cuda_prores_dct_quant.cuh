@@ -146,7 +146,8 @@ __global__ void k_dct_quantise(
     int16_t       * __restrict__ d_out_coeffs, // output [num_blocks][64]
     int plane_width,   // luma: width, chroma: width/2
     int plane_height,  // same for luma and chroma
-    int q_scale,       // adaptive quality scale [1..31]; 1 = best quality
+    int q_scale,       // quality scale [1..128]; 1 = best quality. See the note in
+                       // prores_consumer.cu on why the bound is 128 rather than 31.
     int profile,       // ProResProfile index
     bool is_chroma,
     bool is_interlaced)
@@ -245,7 +246,7 @@ inline cudaError_t launch_dct_quantise(
 // ---------------------------------------------------------------------------
 // Adaptive q_scale: binary search targeting profile bitrate.
 // Runs k_count_bits-equivalent logic (via cuda_prores_entropy) to find
-// q_scale in [1..31] that hits ≤ target_bytes per frame.
+// q_scale in [1..128] that hits ≤ target_bytes per frame.
 // The actual binary search is done on the CPU after one counting pass;
 // described in cuda_prores_frame.cu which coordinates the multi-pass loop.
 // ---------------------------------------------------------------------------

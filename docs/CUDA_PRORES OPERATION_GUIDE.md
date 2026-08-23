@@ -196,7 +196,7 @@ ADD <channel> CUDA_PRORES
     FILENAME  <filename.mov>
     [PROFILE  0-5]
     [CODEC    MOV|MXF]
-    [QSCALE   AUTO|1-31]
+    [QSCALE   AUTO|1-128]
     [SLICES   1|2|4|8]
     [ALPHA    0|1]
     [HDR      SDR|HLG|PQ]
@@ -210,7 +210,7 @@ ADD <channel> CUDA_PRORES
 | `FILENAME` | `prores_YYYYMMDD_HHMMSS.mov` | Output filename. If omitted, a timestamped name is generated automatically. |
 | `PROFILE` | `3` | ProRes variant. See table above. |
 | `CODEC` | `MOV` | Container format: `MOV` or `MXF`. |
-| `QSCALE` | `AUTO` | `AUTO` targets the profile's published data rate (see below). A number 1–31 pins the quantiser: lower = better quality and a larger file, `1` = maximum quality. |
+| `QSCALE` | `AUTO` | `AUTO` targets the profile's published data rate (see below). A number 1–128 pins the quantiser: lower = better quality and a larger file, `1` = maximum quality. The upper bound is 128 rather than 31 because the ProRes slice header carries q_scale literally up to 128 — and 31 was reachable in practice, see the SDI section. |
 | `SLICES` | `4` | Parallel horizontal slices per macroblock row. Valid: `1`, `2`, `4`, `8`. Higher = more GPU parallelism, diminishing returns above 4. |
 | `ALPHA` | `1` | Include alpha channel. Only relevant for profiles 4 and 5 (4444). Set `ALPHA 0` to reduce file size when alpha is not needed. |
 | `HDR` | `SDR` | Colour space: `SDR` (BT.709), `HLG` (BT.2020 HLG), `PQ` (HDR10 PQ). |
@@ -290,8 +290,36 @@ All parameters above apply, plus:
 |---|---|---|
 | `DEVICE` | `1` | DeckLink device index (1-based). **Required** — specifies which physical SDI input to capture. |
 | `CUDA_DEVICE` | `0` | CUDA GPU index (0-based). Useful in multi-GPU systems to pin encoding to a specific card. |
+| `PROFILE` | `3` | **`0`–`3` only here.** This consumer encodes V210 straight off the wire, which is 4:2:2 by construction, so there is no 4:4:4 to encode. `4` or `5` is clamped to `3` with a warning — it used to stamp an `ap4h`/`ap4x` fourcc on a 4:2:2 bitstream, and a decoder reads those tags as 12-bit and renders the 10-bit samples at four times their level. |
 
 `CUDA_PRORES_BYPASS` always occupies consumer slot **2**. It does not require a `PLAY` command — it captures directly from the SDI input.
+
+### `QSCALE AUTO` on the SDI path, and why the quantiser bound had to move
+
+`QSCALE AUTO` works identically here — the same loop on the same per-profile targets. What the
+SDI path exposed is that **the quantiser range mattered**, which the mixer path never showed.
+
+Measured 2026-08-23 over the looped DeckLink pair (a separate `ffmpeg` process putting detailed
+noise on connector 1 as `uyvy422`, the consumer capturing connector 4), steady state:
+
+| profile | target | achieved | quantiser it settled on | decode errors |
+| :--- | ---: | ---: | ---: | ---: |
+| Proxy | 194 bits/MB | **1.00×** | 43 | 0 |
+| LT | 440 | **1.00×** | 33 | 0 |
+| 422 | 632 | **1.00×** | 35 | 0 |
+| 422 HQ | 950 | **1.00×** | 28–29 | 0 |
+
+Three of the four settled **above 31**, which used to be this encoder's hard clamp. With that
+clamp in place the same run gave Proxy 1.49× and 422 1.08× with the quantiser pinned at 31 — a
+recorder reporting a rate it had not chosen. 31 was never a format limit: `proresdec.c` clips the
+slice header's q_scale byte to 1..224 and expands anything above 128, so 1..128 are all literal,
+and the coarsest ProRes matrix entry of 63 keeps `63 × 128` well inside the `int16_t` the decoder
+scales its matrix into.
+
+**Why the SDI path needs a coarser quantiser than the mixer path for the same clip.** V210 off the
+wire keeps the chroma detail the mixer path low-passes: there, the frame has been decoded to RGB
+(4:2:2 → 4:4:4 → RGB) and re-subsampled on the way into the encoder, and that round trip is a
+filter. More surviving high-frequency chroma costs more bits at the same quantiser.
 
 ---
 
