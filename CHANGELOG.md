@@ -1,6 +1,55 @@
 CasparVP — Unreleased
 ==========================================
 
+### Fixed: the OpenGL zero-copy screen path, which had never run — and was broken when it did
+
+`<gpu-texture>true</gpu-texture>` on an OpenGL channel now does what it says: the screen consumer
+binds the mixer's own texture and the channel stops reading the composite back to host memory.
+Two faults had to be fixed together, and either one alone looks like the other's fault.
+
+**It was unreachable.** `device::impl` binds the mixer's GL context on the "OpenGL Device" thread
+and leaves it current for that thread's whole life, so a consumer creating a shared context from
+its own thread was refused — `wglCreateContextAttribsARB` returning null with `GetLastError()` at
+**0**, a failure that carries no diagnosis at all. The device now hands consumers a never-current
+context in the same share group; share groups are transitive, so it puts them in the mixer's group
+and is accepted from any thread. The Spout consumer has the same code and was equally affected.
+
+**And it was broken underneath.** With the path live, the window froze on stills: `PLAY 1-1
+#FF3010` then `#1030FF` both left the previous frame on screen, while the host-upload path rendered
+both exactly. The mixer only fenced and flushed inside `device::read_back`, so for as long as every
+frame was copied to host memory, every frame was *also* published to the share group — a coupling
+nobody intended. A consumer declining the readback silently declined the publication too, and once
+the still-frame cache stops compositing, nothing ever forces a flush again. Moving content hid it,
+because the next frame's work flushes incidentally.
+
+`ogl::texture` gained `publish_render()` (fence and flush, replacing the previous fence at each use
+since textures are pooled) and a real `ensure_render_complete()` — a **server-side** `glWaitSync`,
+so no CPU cost and no thread block, where a client wait would stall the consumer on the mixer every
+frame. `core::texture::ensure_render_complete()`'s documentation said "no-op for OGL textures",
+which was true within one context and false across them; that sentence is what made the omission
+look deliberate.
+
+Verified on the exact sequence that failed, all from a `PrintWindow` grab:
+
+| | result |
+| :--- | :--- |
+| `#FF3010` / `#1030FF` / `#20C040` | 255,48,16 / 16,48,255 / 32,192,64 — all exact |
+| moving → still → a different still | all exact, no freeze |
+| back to moving | two grabs differ by 255, not wedged |
+| readback | skipped; no `CPU readback required` line |
+
+**Asymmetric colours throughout, deliberately.** The frozen frame and the expected frame average to
+about the same grey, so a grey ramp or a neutral patch would have passed every one of these checks.
+
+`conformance` and `grading` on **both** mixers: 100/100 conversions within 1.0 LSB each, grading
+clean each. The first OpenGL conformance run reported two patches never captured and refused to
+call itself a pass — PNG writes not completing within 10 s under 160 GB of the day's recordings,
+unrelated to this change (the IMAGE consumer needs host pixels, so it takes the readback path where
+`publish_render` is never called). A re-run was clean.
+
+**Unchanged on the Vulkan mixer**, where `<gpu-texture>` is inert either way: `use_vulkan`
+auto-promotes to the GPU strategy whatever the config says, and that path already waited correctly.
+
 ### Fixed: `-q:v` was discarded by the consumer — and on `prores_ks_vulkan` it must not be used
 
 **Read the second half of this entry before using `-q:v`.** The consumer defect below is real

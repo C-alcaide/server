@@ -43,7 +43,15 @@ class texture
     /// Size of the GPU memory allocation backing the texture (bytes).
     virtual unsigned long long export_alloc_size() const { return 0; }
     /// Wait for any pending GPU rendering to complete before reading.
-    /// No-op for OGL textures; overridden by VK texture_wrapper.
+    ///
+    /// Overridden by both backends. The default is a no-op for textures nothing renders into --
+    /// inputs fed from AVFrames -- and NOT a statement that a backend can skip this.
+    ///
+    /// It said "no-op for OGL textures" until 2026-08-23, which was true within one GL context,
+    /// where commands are ordered, and false across contexts -- which is exactly what a
+    /// zero-copy screen or Spout output is. A consumer binding the mixer's texture from its own
+    /// context read whatever the driver happened to have made visible, and on a still that never
+    /// changed again. `ogl::texture` now waits on a fence the mixer publishes.
     virtual void               ensure_render_complete() const {}
     /// Returns a platform-native handle to a VkSemaphore signaled on render completion.
     /// For GPU-side waiting (e.g. CUDA interop) instead of CPU fence wait.

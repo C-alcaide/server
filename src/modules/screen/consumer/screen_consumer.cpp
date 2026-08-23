@@ -1523,38 +1523,28 @@ struct gpu_strategy : public display_strategy
                     ogl_tex->ensure_render_complete();
                     // OGL mixer with shared GL contexts: bind directly (zero-copy GPU path).
                     //
-                    // ⚠ THIS PATH IS BROKEN AND HAS NEVER RUN ON THE REFERENCE BOX. It is
-                    // reached only when `window_.shared_` is true, and shared context creation
-                    // fails here: `device::impl` binds the mixer's GL context on the "OpenGL
-                    // Device" thread and leaves it current for that thread's whole life, so a
-                    // consumer sharing against it from its own thread is refused --
-                    // `wglCreateContextAttribsARB` returns null with `GetLastError()` at 0.
+                    // OGL mixer with shared GL contexts: bind the mixer's own texture, no copy.
                     //
-                    // Measured 2026-08-23. Making it reachable is a one-line change (hand
-                    // consumers a never-current context in the mixer's share group instead of
-                    // the mixer's own; share groups are transitive, so it works and the log then
-                    // says "zero-copy OGL path enabled"). Doing that revealed the path does not
-                    // update the window: `PLAY 1-1 #FF3010` and then `#1030FF` both left the
-                    // previous frame on screen, while the host-upload path renders them exactly
-                    // (255,48,16 and 16,48,255 from a PrintWindow grab). Moving content did
-                    // update, so it is stills specifically, and the grab itself was verified
-                    // against moving content first.
+                    // THIS PATH WAS UNREACHABLE UNTIL 2026-08-23, AND BROKEN UNDERNEATH. Both
+                    // halves are fixed and both are worth knowing about, because either one
+                    // alone looks like the other's fault.
                     //
-                    // So the context-sharing failure has been silently guarding a broken
-                    // renderer, and fixing the sharing without fixing this trades a wasted
-                    // readback for a frozen preview. The seed-context change was reverted for
-                    // that reason.
+                    // It is reached only when `window_.shared_` is true, and shared context
+                    // creation used to fail: `device::impl` binds the mixer's GL context on the
+                    // "OpenGL Device" thread and leaves it current for that thread's whole life,
+                    // so a consumer sharing against it from its own thread was refused --
+                    // `wglCreateContextAttribsARB` returning null with `GetLastError()` at 0.
+                    // The device now hands out a never-current context in the same share group
+                    // instead (share groups are transitive), which is accepted from any thread.
                     //
-                    // WHOEVER PICKS THIS UP: it is this branch and not zero-copy in general.
-                    // The VK->GL interop branch below is the same idea on the Vulkan mixer and
-                    // it renders stills correctly -- measured the same day, `#FF3010` and
-                    // `#1030FF` exact, with `[vk_mixer] CPU readback SKIPPED` and
-                    // `[screen] VK->GL zero-copy interop active` in the log. So the mixer's
-                    // still-frame cache is NOT the explanation on its own: both paths see the
-                    // same cached frames and only this one freezes. Compare what the two
-                    // branches do around the bind -- the interop branch rebinds an imported
-                    // texture per frame, this one binds a handle the mixer may be reusing.
-                    ogl_tex->bind(0);
+                    // And with the path live it froze on stills: `PLAY 1-1 #FF3010` then
+                    // `#1030FF` both left the previous frame on screen. The mixer only fenced
+                    // and flushed inside `device::read_back`, so a consumer declining the
+                    // readback also silently declined the publication of the mixer's writes --
+                    // and once the still-frame cache stops compositing, nothing ever forces a
+                    // flush again. `image_mixer` now calls `publish_render()` on the
+                    // no-readback path, and the wait below is this side of that contract.
+                                        ogl_tex->bind(0);
 #ifdef ENABLE_VULKAN
                 } else if (try_vk_interop(in_frame, self)) {
                     // VK mixer: zero-copy via GL_EXT_memory_object_win32
