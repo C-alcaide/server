@@ -30,6 +30,7 @@
 #include <exception>
 
 #include <vulkan/vulkan.hpp>
+#include <vector>
 
 namespace caspar { namespace accelerator { namespace vulkan {
 
@@ -82,6 +83,50 @@ struct av_vulkan_exporter::impl
         CASPAR_LOG(warning) << L"[vk::av_export] " << what
                             << L" -- falling back to the host path for this recording";
     }
+
+    /// One single-line copy region per output line, split by parity.
+    ///
+    /// vkCmdCopyImage has no line stride, so interleaving two images is expressed as many
+    /// one-line regions rather than one strided copy. At 1080 that is 540 regions a field and
+    /// about 73 KB of VkImageCopy for the pair -- fixed for the whole recording, so it is built
+    /// on first use and kept. Rebuilding it per frame would be CPU cost added to the one path
+    /// whose entire purpose is to avoid CPU cost.
+    struct interlace_plan
+    {
+        std::vector<vk::ImageCopy> even; // output lines 0, 2, 4, ...
+        std::vector<vk::ImageCopy> odd;  // output lines 1, 3, 5, ...
+        int                        width  = 0;
+        int                        height = 0;
+    };
+
+    interlace_plan plan_;
+
+    const interlace_plan& interlace_regions(int width, int height)
+    {
+        if (plan_.width == width && plan_.height == height)
+            return plan_;
+
+        plan_.even.clear();
+        plan_.odd.clear();
+        plan_.width  = width;
+        plan_.height = height;
+
+        const auto layers = vk::ImageSubresourceLayers(vk::ImageAspectFlagBits::eColor, 0, 0, 1);
+        const auto extent = vk::Extent3D{static_cast<uint32_t>(width), 1u, 1u};
+
+        plan_.even.reserve((height + 1) / 2);
+        plan_.odd.reserve(height / 2);
+
+        for (int y = 0; y < height; ++y) {
+            // Source line == destination line. The two images are both full height and each
+            // contributes only its own parity, so this is a selection, not a resample.
+            const vk::Offset3D at{0, y, 0};
+            (y % 2 == 0 ? plan_.even : plan_.odd)
+                .push_back(vk::ImageCopy(layers, at, layers, at, extent));
+        }
+
+        return plan_;
+    }
 };
 
 av_vulkan_exporter::av_vulkan_exporter(void* vk_device)
@@ -127,6 +172,52 @@ bool av_vulkan_exporter::copy_from_texture(const std::shared_ptr<core::texture>&
     return submit(dest, wrapper, source.get());
 }
 
+bool av_vulkan_exporter::copy_from_textures(const std::shared_ptr<core::texture>& field_a,
+                                            const std::shared_ptr<core::texture>& field_b,
+                                            bool                                  a_is_top,
+                                            av_plane_dest&                        dest)
+{
+    auto& m = *impl_;
+
+    if (!dest.image || !dest.semaphore || dest.width <= 0 || dest.height <= 0) {
+        m.warn_once(L"the destination frame is incompletely described");
+        return false;
+    }
+
+    // Both fields must be present. A pair with one half missing is not something to substitute
+    // black or a duplicate for: either would put a wrong field into a field-coded file, which is
+    // worse than the caller falling back and saying so.
+    if (!field_a || !field_b) {
+        m.warn_once(L"an interlaced pair needs both fields");
+        return false;
+    }
+
+    texture_wrapper* wrap[2]{dynamic_cast<texture_wrapper*>(field_a.get()),
+                             dynamic_cast<texture_wrapper*>(field_b.get())};
+    if (!wrap[0] || !wrap[1]) {
+        m.warn_once(L"a composited frame in the pair is not a Vulkan texture");
+        return false;
+    }
+
+    auto src_a = wrap[0]->vk_texture();
+    auto src_b = wrap[1]->vk_texture();
+    if (!src_a || !src_b) {
+        m.warn_once(L"a Vulkan texture wrapper in the pair carries no image");
+        return false;
+    }
+
+    // The same size rule as the progressive path, applied to both -- and the two must match each
+    // other, since each supplies half the lines of one raster.
+    for (auto* t : {src_a.get(), src_b.get()}) {
+        if (t->width() != dest.width || t->height() != dest.height) {
+            m.warn_once(L"a composite in the pair differs in size from the encoder frame");
+            return false;
+        }
+    }
+
+    return submit(dest, wrap[0], src_a.get(), wrap[1], src_b.get(), a_is_top);
+}
+
 bool av_vulkan_exporter::clear_to_black(av_plane_dest& dest)
 {
     auto& m = *impl_;
@@ -144,12 +235,19 @@ bool av_vulkan_exporter::clear_to_black(av_plane_dest& dest)
 /// destination barriers, the timeline signal, the fence, the exception handling -- is identical,
 /// which is the point. A black frame and a copied one must be indistinguishable to FFmpeg's
 /// bookkeeping, and that only stays true while there is one copy of the bookkeeping.
-bool av_vulkan_exporter::submit(av_plane_dest& dest, void* wrapper_ptr, void* source_ptr)
+bool av_vulkan_exporter::submit(av_plane_dest& dest,
+                               void*          wrapper_ptr,
+                               void*          source_ptr,
+                               void*          wrapper_b_ptr,
+                               void*          source_b_ptr,
+                               bool           a_is_top)
 {
-    auto& m       = *impl_;
-    auto* dev     = m.dev_;
-    auto* wrapper = static_cast<texture_wrapper*>(wrapper_ptr);
-    auto* source  = static_cast<texture*>(source_ptr);
+    auto& m         = *impl_;
+    auto* dev       = m.dev_;
+    auto* wrapper   = static_cast<texture_wrapper*>(wrapper_ptr);
+    auto* source    = static_cast<texture*>(source_ptr);
+    auto* wrapper_b = static_cast<texture_wrapper*>(wrapper_b_ptr);
+    auto* source_b  = static_cast<texture*>(source_b_ptr);
 
     // FFmpeg does not promise a layout for a freshly-allocated frame, and UNDEFINED is the
     // normal state of one from `av_hwframe_get_buffer`. Unlike the importer -- which refuses
@@ -169,6 +267,8 @@ bool av_vulkan_exporter::submit(av_plane_dest& dest, void* wrapper_ptr, void* so
             // mixer's attachment at all.
             if (wrapper)
                 wrapper->ensure_render_complete();
+            if (wrapper_b)
+                wrapper_b->ensure_render_complete();
 
             // Re-recording a command buffer the GPU may still be executing is undefined
             // behaviour. Against the PREVIOUS frame's copy, so in steady state it is free.
@@ -183,7 +283,7 @@ bool av_vulkan_exporter::submit(av_plane_dest& dest, void* wrapper_ptr, void* so
             (void)layers; // used only by the copy branch below
 
             std::vector<vk::ImageMemoryBarrier2> pre;
-            pre.reserve(2);
+            pre.reserve(3);
             if (source) {
                 // The mixer's attachment: from shader-read (where the composite left it) to
                 // transfer-read.
@@ -193,6 +293,22 @@ bool av_vulkan_exporter::submit(av_plane_dest& dest, void* wrapper_ptr, void* so
                 b.srcQueueFamilyIndex = vk::QueueFamilyIgnored;
                 b.dstQueueFamilyIndex = vk::QueueFamilyIgnored;
                 b.image               = source->id();
+                b.subresourceRange    = range;
+                b.srcStageMask        = vk::PipelineStageFlagBits2::eAllCommands;
+                b.srcAccessMask       = vk::AccessFlagBits2::eMemoryWrite;
+                b.dstStageMask        = vk::PipelineStageFlagBits2::eTransfer;
+                b.dstAccessMask       = vk::AccessFlagBits2::eTransferRead;
+                pre.push_back(b);
+            }
+            if (source_b) {
+                // The second field's attachment, same transition. A separate barrier rather
+                // than one batched over both, because they are distinct images.
+                vk::ImageMemoryBarrier2 b{};
+                b.oldLayout           = vk::ImageLayout::eShaderReadOnlyOptimal;
+                b.newLayout           = vk::ImageLayout::eTransferSrcOptimal;
+                b.srcQueueFamilyIndex = vk::QueueFamilyIgnored;
+                b.dstQueueFamilyIndex = vk::QueueFamilyIgnored;
+                b.image               = source_b->id();
                 b.subresourceRange    = range;
                 b.srcStageMask        = vk::PipelineStageFlagBits2::eAllCommands;
                 b.srcAccessMask       = vk::AccessFlagBits2::eMemoryWrite;
@@ -221,7 +337,28 @@ bool av_vulkan_exporter::submit(av_plane_dest& dest, void* wrapper_ptr, void* so
                 cmd.pipelineBarrier2(dep);
             }
 
-            if (source) {
+            if (source && source_b) {
+                // INTERLEAVE. vkCmdCopyImage has no line stride, so a strided copy is one
+                // single-line region per output line -- 540 per field at 1080. The regions are
+                // built once per raster and cached, because rebuilding ~73 KB of VkImageCopy
+                // every frame is pure CPU cost for a pattern that never changes.
+                //
+                // Line y comes from line y of whichever field owns that parity, both sources
+                // full height: the same rule as the host path's memcpy and as the DeckLink
+                // consumer's convert_frame. Nothing is scaled, and the two copies together
+                // cover every line, so the eUndefined discard above stays honest.
+                const auto& regions = m.interlace_regions(dest.width, dest.height);
+                cmd.copyImage(source->id(),
+                              vk::ImageLayout::eTransferSrcOptimal,
+                              static_cast<VkImage>(dest.image),
+                              vk::ImageLayout::eTransferDstOptimal,
+                              a_is_top ? regions.even : regions.odd);
+                cmd.copyImage(source_b->id(),
+                              vk::ImageLayout::eTransferSrcOptimal,
+                              static_cast<VkImage>(dest.image),
+                              vk::ImageLayout::eTransferDstOptimal,
+                              a_is_top ? regions.odd : regions.even);
+            } else if (source) {
                 vk::ImageCopy c(
                     layers,
                     vk::Offset3D{},

@@ -128,10 +128,31 @@ class av_vulkan_exporter
     /// path records for the same frame, so this keeps the two paths recording the same thing.
     bool clear_to_black(av_plane_dest& dest);
 
+    /// INTERLACED pairing: one encoder frame built from two composites, taking alternate lines
+    /// from each. `a_is_top` says whether `field_a` supplies the even lines.
+    ///
+    /// An interlaced channel ticks at field rate, so a field-coded recording needs two ticks
+    /// combined; the host path does it with a per-line memcpy in `make_av_video_frame`. This is
+    /// the GPU-direct equivalent, and it is a single command buffer with two strided
+    /// `vkCmdCopyImage` calls -- one per parity -- so the composite still never reaches host
+    /// memory. Both textures must be alive at the call, which is why the consumer holds the
+    /// first field's frame rather than just its texture.
+    bool copy_from_textures(const std::shared_ptr<core::texture>& field_a,
+                            const std::shared_ptr<core::texture>& field_b,
+                            bool                                  a_is_top,
+                            av_plane_dest&                        dest);
+
   private:
-    /// The one submission both entry points use. `source` null means clear rather than copy;
-    /// the arguments are `void*` so the header does not have to name the mixer's own types.
-    bool submit(av_plane_dest& dest, void* wrapper_ptr, void* source_ptr);
+    /// The one submission every entry point uses. `source_a` null means clear rather than copy;
+    /// `source_b` non-null means interleave the two by line parity instead of copying one whole
+    /// image. The arguments are `void*` so the header does not have to name the mixer's own
+    /// types.
+    bool submit(av_plane_dest& dest,
+                void*          wrapper_a,
+                void*          source_a,
+                void*          wrapper_b = nullptr,
+                void*          source_b  = nullptr,
+                bool           a_is_top  = true);
 
     struct impl;
     std::unique_ptr<impl> impl_;

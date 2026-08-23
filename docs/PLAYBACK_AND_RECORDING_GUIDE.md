@@ -476,10 +476,11 @@ Progressive channels are untouched — verified `field_order=progressive`, `inte
 
 **Three things to know about it.**
 
-* **The GPU-direct routes decline an interlaced channel.** Pairing two *device* frames is a GPU
-  line-interleave that does not exist yet, so on a `1080i5000` channel both the Vulkan encode
-  path and NVENC GPU-direct log a refusal and the host path runs instead. That is a change: they
-  previously recorded such a channel as 50p.
+* **The Vulkan encode path pairs on the GPU; NVENC still declines.** The Vulkan exporter
+  interleaves the two composites with two strided `vkCmdCopyImage` calls in one command buffer,
+  so a field-coded interlaced recording still never touches host memory. NVENC's route has no
+  strided image copy available to it, so an interlaced channel makes it decline with that reason
+  and the host path pairs instead — which is a change from recording such a channel as 50p.
 * **Field dominance is derived from the video mode**, because the core has carried none since the
   2018 refactor — SD PAL/NTSC are bottom-field-first, everything else interlaced is top. This is
   the same rule `cuda_prores` derives separately, and two modules deriving it independently is a

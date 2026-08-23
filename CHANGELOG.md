@@ -37,10 +37,11 @@ CUDA_PRORES_BYPASS, and now this), and NDI takes a fifth approach by emitting on
 
 **Three consequences worth knowing:**
 
-* **The GPU-direct routes decline interlaced channels.** Pairing two device frames is a GPU
-  line-interleave that does not exist yet, so on an interlaced channel both the Vulkan encode
-  path and NVENC GPU-direct log a refusal and the host path runs. They previously recorded such a
-  channel as 50p.
+* **The Vulkan encode path pairs on the GPU** (added after the first version of this entry, which
+  said no GPU route could). The exporter interleaves the two composites with two strided
+  `vkCmdCopyImage` calls in one command buffer, so field-coded interlaced recording still never
+  touches host memory. **NVENC still declines** — its route has no strided image copy — and the
+  host path pairs for it, which is a change from recording such a channel as 50p.
 * **The interlaced encoder flags are set here, not by the operator.** `-flags +ildct` on an AMCP
   line never reaches the encoder — it is reported as an unused option — so the consumer sets
   `AV_CODEC_FLAG_INTERLACED_DCT | AV_CODEC_FLAG_INTERLACED_ME` itself when it pairs. Verified

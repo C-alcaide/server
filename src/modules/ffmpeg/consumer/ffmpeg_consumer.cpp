@@ -398,7 +398,8 @@ struct Stream
                 // cuda_prores/consumer/prores_consumer.cu's `format_is_tff`: SD PAL/NTSC are
                 // bottom-field-first, everything else interlaced is top. Two consumers deriving
                 // this separately is a hazard, and it is recorded as one in the docs.
-                pair_fields_ = format_desc.field_count == 2 && !gpu_frames_ctx;
+                pair_fields_ = format_desc.field_count == 2 &&
+                               (!gpu_frames_ctx || vk_exporter != nullptr);
                 tff_         = !(format_desc.format == core::video_format::pal ||
                          format_desc.format == core::video_format::ntsc);
                 if (pair_fields_) {
@@ -1268,7 +1269,11 @@ struct Stream
     /// Wraps the mixer's composited texture in a frame the encoder can read -- a CUDA frame for
     /// NVENC, a Vulkan frame for the FFmpeg Vulkan encoders. Returns null if the frame carries
     /// no usable texture or the copy fails, leaving the cause in `gpu_direct_reason_`.
-    std::shared_ptr<AVFrame> make_cuda_video_frame(const core::const_frame& in_frame)
+    /// Build a GPU frame. `second_field` non-empty pairs the two composites into one
+    /// field-coded frame, which only the Vulkan route can do -- see the interlaced branch.
+    std::shared_ptr<AVFrame> make_cuda_video_frame(const core::const_frame& in_frame,
+                                                  const core::const_frame& second_field = core::const_frame{},
+                                                  bool                     a_is_top     = true)
     {
         gpu_direct_reason_.clear();
 
@@ -1309,6 +1314,17 @@ struct Stream
             av_strerror(got, err, sizeof(err));
             gpu_direct_reason_ = std::string("no frame available from the hardware pool (")
                                  + err + ") -- the encoder is holding all of them";
+            return nullptr;
+        }
+
+        // The CUDA route has no interleave: cuda_gl_uploader/cuda_vk_uploader copy a whole
+        // texture into a CUDA frame and neither takes a line stride. Refusing is not a
+        // formality -- falling through would copy field A over the whole frame and then field B
+        // over the whole frame, so the recording would be field B alone at half rate, which
+        // looks like a working interlaced file.
+        if (second_field && !vk_exporter) {
+            gpu_direct_reason_ = "this route cannot interleave two fields (CUDA has no strided "
+                                 "image copy here); the host path pairs them instead";
             return nullptr;
         }
 
@@ -1377,7 +1393,11 @@ struct Stream
                 gpu_direct_reason_ = "the AVVkFrame was incompletely described";
                 return nullptr;
             }
-            if (!vk_exporter->copy_from_texture(tex, dest)) {
+            const bool copied =
+                second_field ? vk_exporter->copy_from_textures(tex, second_field.texture(),
+                                                              a_is_top, dest)
+                             : vk_exporter->copy_from_texture(tex, dest);
+            if (!copied) {
                 gpu_direct_reason_ = "the Vulkan image copy was refused (see [vk::av_export])";
                 return nullptr;
             }
@@ -1399,6 +1419,19 @@ struct Stream
 
         frame->width  = tex->tex_width();
         frame->height = tex->tex_height();
+
+        // The interlaced flags have to be set HERE for the GPU path, because this frame came
+        // from av_hwframe_get_buffer rather than from make_av_video_frame, which is where the
+        // host path sets them. Without them the encoder still coded interlaced -- the codec
+        // flag says so -- but signalled no dominance, and the file came out labelled BOTTOM
+        // field first while the line interleave had put field A on the TOP lines. Measured
+        // 2026-08-23: field_order=bb from a top-first pairing, which a player would show with
+        // the two fields in the wrong temporal order.
+        if (second_field) {
+            frame->flags |= AV_FRAME_FLAG_INTERLACED;
+            if (a_is_top)
+                frame->flags |= AV_FRAME_FLAG_TOP_FIELD_FIRST;
+        }
         return frame;
     }
 
@@ -1457,9 +1490,17 @@ struct Stream
                                L"dropping it";
                         return;
                     }
-                    frame          = make_av_video_frame(pending_field_, format_desc, in_frame, tff_);
+                    frame = gpu_frames_ctx
+                                ? make_cuda_video_frame(pending_field_, in_frame, tff_)
+                                : make_av_video_frame(pending_field_, format_desc, in_frame, tff_);
                     pending_field_ = core::const_frame{};
                     out_video_pts  = pair_pts_++;
+                    if (!frame) {
+                        // Same accounting as the progressive GPU miss below: the frame is lost,
+                        // and the reason is already in gpu_direct_reason_.
+                        gpu_failures++;
+                        return;
+                    }
                 } else if (gpu_frames_ctx) {
                     frame = make_cuda_video_frame(in_frame);
                     if (!frame) {
@@ -1955,9 +1996,7 @@ struct ffmpeg_consumer : public core::frame_consumer
 
                         if (vk_convert_filter != nullptr) {
                             const char* vk_decline = nullptr;
-                            if (format_desc.field_count == 2)
-                                vk_decline = "the channel is interlaced, and the host path pairs its two ticks into one field-coded frame -- pairing two DEVICE frames is a GPU line-interleave that does not exist yet";
-                            else if (!use_vulkan_)
+                            if (!use_vulkan_)
                                 vk_decline = "the channel does not run the Vulkan mixer";
                             else if (has_filter)
                                 vk_decline = "a video filter was supplied, and this path owns the chain";
@@ -1993,7 +2032,9 @@ struct ffmpeg_consumer : public core::frame_consumer
                         if (gpu_frames_ctx)
                             decline = "the Vulkan encode path already claimed this recording";
                         else if (format_desc.field_count == 2)
-                            decline = "the channel is interlaced, and the host path pairs its two ticks into one field-coded frame -- pairing two DEVICE frames is a GPU line-interleave that does not exist yet";
+                            decline = "the channel is interlaced and this route cannot interleave "
+                                      "two fields -- CUDA has no strided image copy here, so the "
+                                      "host path pairs them instead";
                         else if (selected_codec.find("nvenc") == std::string::npos)
                             decline = "encoder is not NVENC";
                         else if (has_filter)
