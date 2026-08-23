@@ -39,7 +39,16 @@ core::mutable_frame     make_frame(void*                    tag,
                                    bool                     is_straight_alpha = false,
                                    core::color_transfer     color_transfer = core::color_transfer::sdr);
 
-std::shared_ptr<AVFrame> make_av_video_frame(const core::const_frame& frame, const core::video_format_desc& format_des);
+/// Build an AVFrame from a mixer frame.
+///
+/// `second_field` turns this into an INTERLACING pair: output line y is taken from line y of
+/// whichever of the two frames owns that line's parity, so the result is one full-height
+/// line-interleaved frame built from two channel ticks. `first_field_is_top` says which parity
+/// `frame` supplies. Pass an empty `second_field` (the default) for progressive.
+std::shared_ptr<AVFrame> make_av_video_frame(const core::const_frame&        frame,
+                                             const core::video_format_desc& format_des,
+                                             const core::const_frame&       second_field = core::const_frame{},
+                                             bool                           first_field_is_top = true);
 std::shared_ptr<AVFrame> make_av_audio_frame(const core::const_frame& frame, const core::video_format_desc& format_des);
 
 AVDictionary*                      to_dict(std::map<std::string, std::string>&& map);

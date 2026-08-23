@@ -385,6 +385,35 @@ struct Stream
                 const auto sar = boost::rational<int>(format_desc.square_width, format_desc.square_height) /
                                  boost::rational<int>(format_desc.width, format_desc.height);
 
+                // PAIR FIELDS on an interlaced channel, and only on the host path.
+                //
+                // The GPU-direct routes hand the encoder a device frame per tick; pairing two of
+                // them is a GPU line-interleave that does not exist yet, so those routes decline
+                // interlaced channels outright (see the decline chains below) and this flag can
+                // simply require the host path rather than duplicate the reason here.
+                //
+                // Field dominance has to be derived from the video mode because the core has
+                // carried no field dominance since the 2018 refactor -- `video_format_desc` has
+                // `field_count` and nothing else. Same rule as
+                // cuda_prores/consumer/prores_consumer.cu's `format_is_tff`: SD PAL/NTSC are
+                // bottom-field-first, everything else interlaced is top. Two consumers deriving
+                // this separately is a hazard, and it is recorded as one in the docs.
+                pair_fields_ = format_desc.field_count == 2 && !gpu_frames_ctx;
+                tff_         = !(format_desc.format == core::video_format::pal ||
+                         format_desc.format == core::video_format::ntsc);
+                if (pair_fields_) {
+                    CASPAR_LOG(info) << L"[ffmpeg] interlaced recording: pairing two channel "
+                                        L"ticks into one "
+                                     << (tff_ ? L"top" : L"bottom")
+                                     << L"-field-first frame, so the file is "
+                                     << format_desc.framerate.numerator() /
+                                            format_desc.framerate.denominator()
+                                     << L" fps field-coded rather than "
+                                     << (format_desc.framerate.numerator() * 2) /
+                                            format_desc.framerate.denominator()
+                                     << L" fps progressive";
+                }
+
                 // 8-bit mixer outputs BGRA (.bgra shader swizzle); 16-bit outputs RGBA directly.
                 // With the GPU-direct path the graph carries CUDA frames, so the
                 // buffersrc has to be told that and given the frames context --
@@ -411,8 +440,10 @@ struct Stream
                 auto args = (boost::format("video_size=%dx%d:pix_fmt=%d:time_base=%d/%d:sar=%d/%d:frame_rate=%d/%d"
                                            ":colorspace=%d:range=%d") %
                              format_desc.width % format_desc.height % pix_fmt % format_desc.duration %
-                             (format_desc.time_scale * format_desc.field_count) % sar.numerator() % sar.denominator() %
-                             (format_desc.framerate.numerator() * format_desc.field_count) %
+                             (format_desc.time_scale * (pair_fields_ ? 1 : format_desc.field_count)) %
+                             sar.numerator() % sar.denominator() %
+                             (format_desc.framerate.numerator() *
+                              (pair_fields_ ? 1 : format_desc.field_count)) %
                              format_desc.framerate.denominator() %
                              static_cast<int>(gpu_frames_ctx ? AVCOL_SPC_RGB : AVCOL_SPC_RGB) %
                              static_cast<int>(AVCOL_RANGE_JPEG))
@@ -1055,6 +1086,19 @@ struct Stream
             enc->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
         }
 
+        // Tell the encoder the frames are field-coded. Set here rather than left to the caller
+        // because `-flags +ildct` on the AMCP line does not reach the encoder at all -- it is
+        // reported as an unused option -- so an operator has no way to ask for this, and a
+        // paired frame written without the flag is a combed picture labelled progressive.
+        //
+        // ILDCT is the one that matters for the intra codecs recorded here (it selects the
+        // interlaced scan and halves the DCT's vertical extent). ILME is set alongside it for
+        // the inter codecs, where it is what makes motion estimation field-aware; the intra
+        // encoders ignore it.
+        if (pair_fields_) {
+            enc->flags |= AV_CODEC_FLAG_INTERLACED_DCT | AV_CODEC_FLAG_INTERLACED_ME;
+        }
+
         // GPU-direct: the buffersink emits the CUDA frames the buffersrc was given,
         // and NVENC refuses device memory without being told which pool it came
         // from ("hw_frames_ctx must be set when using GPU frames as input").
@@ -1203,6 +1247,24 @@ struct Stream
     /// logged nothing, and there was no way from outside to tell which of five guards tripped.
     std::string gpu_direct_reason_;
 
+    // ── interlaced pairing ──────────────────────────────────────────────────────────────
+    // A 1080i5000 channel ticks at FIELD rate: 50 full-height frames a second, and a consumer
+    // that wants a field-coded file has to pair them itself. The core used to do this for every
+    // consumer -- `draw_frame::interlace()` tagged two frames upper/lower and the OpenGL mixer
+    // composited them with GL_POLYGON_STIPPLE -- until e1fffcfa5 (upstream, Feb 2018) deleted
+    // the field model and moved the job "into modules". DeckLink got explicit pairing in that
+    // same commit; this consumer got nothing, and still carried a `// TODO - field alignment`.
+    //
+    // What it did instead was declare the input rate as framerate * field_count and write every
+    // tick as its own progressive frame. That is not merely unsignalled: with a 25p source on a
+    // 50-tick channel it writes each picture TWICE. Measured 2026-08-23 before this change, the
+    // first eight video frames of a 1080i5000 recording hashed as four identical pairs -- double
+    // the file for the same pictures, tagged progressive.
+    bool              pair_fields_ = false;
+    bool              tff_         = true;
+    core::const_frame pending_field_;
+    std::int64_t      pair_pts_ = 0;
+
     /// Wraps the mixer's composited texture in a frame the encoder can read -- a CUDA frame for
     /// NVENC, a Vulkan frame for the FFmpeg Vulkan encoders. Returns null if the frame carries
     /// no usable texture or the copy fails, leaving the cause in `gpu_direct_reason_`.
@@ -1340,14 +1402,14 @@ struct Stream
         return frame;
     }
 
-    void send(std::tuple<core::const_frame, std::int64_t, std::int64_t>& data,
+    void send(std::tuple<core::const_frame, std::int64_t, std::int64_t, core::video_field>& data,
               const core::video_format_desc&                             format_desc,
               std::function<void(std::shared_ptr<AVPacket>)>             cb)
     {
         std::shared_ptr<AVFrame>  frame;
         std::shared_ptr<AVPacket> pkt;
 
-        const auto [in_frame, video_pts, audio_pts] = data;
+        const auto [in_frame, video_pts, audio_pts, field] = data;
 
         if (is_ltc) {
              if (!in_frame) return;
@@ -1373,9 +1435,32 @@ struct Stream
              return;
         }
 
+        // The pts a paired frame carries is its PAIR index, not the tick index: pairing halves
+        // the output rate, and the buffersrc is parameterised to match (see the constructor).
+        std::int64_t out_video_pts = video_pts;
+
         if (in_frame) {
             if (enc->codec_type == AVMEDIA_TYPE_VIDEO) {
-                if (gpu_frames_ctx) {
+                // Hold field A, emit on field B. The AUDIO stream is deliberately untouched and
+                // keeps consuming every tick -- pairing lives here, per stream, precisely so
+                // that both fields' audio is still written, which it already was.
+                if (pair_fields_) {
+                    if (field != core::video_field::b) {
+                        pending_field_ = in_frame;
+                        return;
+                    }
+                    if (!pending_field_) {
+                        // B with no preceding A. Guessing -- pairing it with itself, or emitting
+                        // it alone -- would put a wrong parity or a half-rate hole in the file.
+                        CASPAR_LOG(warning)
+                            << L"[ffmpeg] interlaced recording saw field B with no field A; "
+                               L"dropping it";
+                        return;
+                    }
+                    frame          = make_av_video_frame(pending_field_, format_desc, in_frame, tff_);
+                    pending_field_ = core::const_frame{};
+                    out_video_pts  = pair_pts_++;
+                } else if (gpu_frames_ctx) {
                     frame = make_cuda_video_frame(in_frame);
                     if (!frame) {
                         // ONE MISS IS NOT A BROKEN PATH, and this used to abandon the path
@@ -1418,7 +1503,7 @@ struct Stream
                 } else {
                     frame = make_av_video_frame(in_frame, format_desc);
                 }
-                frame->pts = video_pts;
+                frame->pts = out_video_pts;
             } else if (enc->codec_type == AVMEDIA_TYPE_AUDIO) {
                 frame      = make_av_audio_frame(in_frame, format_desc);
                 frame->pts = audio_pts;
@@ -1483,7 +1568,7 @@ struct ffmpeg_consumer : public core::frame_consumer
     std::promise<void> open_result_;
     bool               open_result_set_ = false;
 
-    tbb::concurrent_bounded_queue<std::tuple<core::const_frame, std::int64_t, std::int64_t>> frame_buffer_;
+    tbb::concurrent_bounded_queue<std::tuple<core::const_frame, std::int64_t, std::int64_t, core::video_field>> frame_buffer_;
     std::thread                                                                              frame_thread_;
 
     common::bit_depth depth_;
@@ -1668,7 +1753,7 @@ struct ffmpeg_consumer : public core::frame_consumer
     ~ffmpeg_consumer()
     {
         if (frame_thread_.joinable()) {
-            frame_buffer_.push({core::const_frame{}, -1, -1});
+            frame_buffer_.push({core::const_frame{}, -1, -1, core::video_field::progressive});
             frame_thread_.join();
         }
 
@@ -1870,7 +1955,9 @@ struct ffmpeg_consumer : public core::frame_consumer
 
                         if (vk_convert_filter != nullptr) {
                             const char* vk_decline = nullptr;
-                            if (!use_vulkan_)
+                            if (format_desc.field_count == 2)
+                                vk_decline = "the channel is interlaced, and the host path pairs its two ticks into one field-coded frame -- pairing two DEVICE frames is a GPU line-interleave that does not exist yet";
+                            else if (!use_vulkan_)
                                 vk_decline = "the channel does not run the Vulkan mixer";
                             else if (has_filter)
                                 vk_decline = "a video filter was supplied, and this path owns the chain";
@@ -1905,6 +1992,8 @@ struct ffmpeg_consumer : public core::frame_consumer
                         const char* decline = nullptr;
                         if (gpu_frames_ctx)
                             decline = "the Vulkan encode path already claimed this recording";
+                        else if (format_desc.field_count == 2)
+                            decline = "the channel is interlaced, and the host path pairs its two ticks into one field-coded frame -- pairing two DEVICE frames is a GPU line-interleave that does not exist yet";
                         else if (selected_codec.find("nvenc") == std::string::npos)
                             decline = "encoder is not NVENC";
                         else if (has_filter)
@@ -2028,7 +2117,7 @@ struct ffmpeg_consumer : public core::frame_consumer
                         state_["file/frame"] = frame_number++;
                     }
 
-                    std::tuple<core::const_frame, std::int64_t, std::int64_t> data;
+                    std::tuple<core::const_frame, std::int64_t, std::int64_t, core::video_field> data;
                     frame_buffer_.pop(data);
                     graph_->set_value("input",
                                       static_cast<double>(frame_buffer_.size() + 0.001) / frame_buffer_.capacity());
@@ -2115,7 +2204,7 @@ struct ffmpeg_consumer : public core::frame_consumer
             }
         }
 
-        if (!frame_buffer_.try_push({frame, video_pts, audio_pts})) {
+        if (!frame_buffer_.try_push({frame, video_pts, audio_pts, field})) {
             graph_->set_tag(diagnostics::tag_severity::WARNING, "dropped-frame");
             CASPAR_LOG(warning) << "Dropped frame in ffmpeg consumer [" << path_ << "]";
         }

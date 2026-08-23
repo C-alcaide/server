@@ -1,6 +1,60 @@
 CasparVP — Unreleased
 ==========================================
 
+### Changed: the FFmpeg consumer records an interlaced channel as field-coded 25 fps, not 50p
+
+**This changes the output of every existing interlaced-channel recording through the FILE/STREAM
+consumer.** An interlaced channel ticks at field rate — a `1080i5000` channel is 50 full-height
+frames a second — and the consumer wrote every one of them as its own progressive frame. It now
+holds one and line-interleaves it with the next, producing one field-coded frame per pair.
+
+Measured 2026-08-23, `1080i5000`, same source and build:
+
+| | before | after |
+| :--- | :--- | :--- |
+| rate | 50/1 **progressive** | **25/1** |
+| `field_order` | `progressive` | **`tt`** |
+| per-frame flags | — | `interlaced_frame=1, top_field_first=1` |
+| duplicate frames | **every picture twice** (first eight video frames hashed as four identical pairs) | none; all distinct |
+| dropped frames, fast encoder | — | 0 |
+
+The duplication is why this is a fix and not a preference: with a 25p source on a 50-tick channel
+the old path wrote each picture twice — double the file for the same pictures, tagged
+progressive. Pairing also halves what the encoder sees.
+
+Progressive channels are unaffected, verified on the same build: `field_order=progressive`,
+`interlaced_frame=0`, 25/1, zero drops, and the pairing path does not engage.
+
+**Why this had to be written at all.** The core used to do it for every consumer:
+`draw_frame::interlace()` tagged two frames upper/lower and the OpenGL mixer composited them with
+`GL_POLYGON_STIPPLE`. Upstream `e1fffcfa5` (Feb 2018, *"refactor: move interlacing handling into
+modules"*) deleted the field model — `field_mode`, `field_count`, `draw_frame::interlace` — and
+gave DeckLink its own pairing in the same commit. `field_count` returned the next day in
+`7d717b53d` purely as a rate multiplier. The FFmpeg consumer got nothing and has carried a
+`// TODO - field alignment` ever since; `server-upstream` at HEAD is still in that state. This is
+the fourth independent implementation of pairing in the tree (DeckLink, CUDA_PRORES,
+CUDA_PRORES_BYPASS, and now this), and NDI takes a fifth approach by emitting one field per tick.
+
+**Three consequences worth knowing:**
+
+* **The GPU-direct routes decline interlaced channels.** Pairing two device frames is a GPU
+  line-interleave that does not exist yet, so on an interlaced channel both the Vulkan encode
+  path and NVENC GPU-direct log a refusal and the host path runs. They previously recorded such a
+  channel as 50p.
+* **The interlaced encoder flags are set here, not by the operator.** `-flags +ildct` on an AMCP
+  line never reaches the encoder — it is reported as an unused option — so the consumer sets
+  `AV_CODEC_FLAG_INTERLACED_DCT | AV_CODEC_FLAG_INTERLACED_ME` itself when it pairs. Verified
+  reaching the encoder: both x264 and mpeg2video wrote `interlaced_frame=1, top_field_first=1`.
+* **Field dominance is derived from the video mode** (SD PAL/NTSC bottom-first, everything else
+  top), duplicating the rule `cuda_prores` derives separately. Two modules deriving this
+  independently is a hazard: change one and the same timeline records with opposite field order on
+  SDI and to file.
+
+**A pre-existing problem this measurement surfaced but did not cause:** `prores_ks` and
+`prores_aw` back up at 1080p and their `.mov` never gets a trailer — `moov atom not found` on a
+367 MB file. It reproduces on a progressive channel with pairing off, and encoders that keep up
+(x264 ultrafast, mpeg2video) finalise with zero drops. Not tracked down further here.
+
 ### Fixed (upstream FFmpeg): `prores_ks_vulkan -flags +ildct` deadlocked, then corrupted the heap
 
 Interlaced encoding on FFmpeg's Vulkan ProRes encoder never produced a frame. It hung

@@ -396,7 +396,10 @@ core::pixel_format_desc pixel_format_desc(AVPixelFormat     pix_fmt,
     }
 }
 
-std::shared_ptr<AVFrame> make_av_video_frame(const core::const_frame& frame, const core::video_format_desc& format_desc)
+std::shared_ptr<AVFrame> make_av_video_frame(const core::const_frame&        frame,
+                                             const core::video_format_desc& format_desc,
+                                             const core::const_frame&       second_field,
+                                             bool                           first_field_is_top)
 {
     auto av_frame = alloc_frame();
 
@@ -530,13 +533,44 @@ std::shared_ptr<AVFrame> make_av_video_frame(const core::const_frame& frame, con
 
     FF(av_frame_get_buffer(av_frame.get(), is_16bit ? 64 : 32));
 
+    // INTERLACING happens here, and it is a line-parity choice of SOURCE rather than any
+    // resampling. Output line y is copied from line y of whichever field frame owns that
+    // parity: both inputs are full height and each contributes its own alternate lines, so
+    // there is no half-height intermediate and no vertical scaling.
+    //
+    // This is deliberately the same rule as the DeckLink consumer's
+    // `sdr_bgra_strategy.cpp::convert_frame`, which walks
+    // `for (y = topField ? 0 : 1; y < height; y += field_count)` over the full-height source.
+    // Two consumers producing interlaced output from the same channel must agree on which tick
+    // owns which lines, or the same timeline records with opposite field order on SDI and to
+    // file.
+    //
+    // Only for a SINGLE-plane frame. Line parity in a vertically subsampled chroma plane is
+    // not the luma parity, so pairing a 4:2:0 source this way would interleave the wrong chroma
+    // rows -- and the mixer hands this function BGRA/BGRA64, which is one plane, so refusing
+    // the multi-plane case costs nothing real and cannot silently be wrong.
+    const bool interlace = static_cast<bool>(second_field) && planes.size() == 1;
+    if (second_field && !interlace) {
+        CASPAR_LOG(warning) << L"[ffmpeg] interlaced pairing needs a single-plane frame; got "
+                            << planes.size() << L" planes -- writing the first field only";
+    }
+
     // TODO (perf) Avoid extra memcpy.
     for (int n = 0; n < planes.size(); ++n) {
         for (int y = 0; y < av_frame->height; ++y) {
+            const auto& src = (!interlace || (y % 2 == (first_field_is_top ? 0 : 1)))
+                                  ? frame
+                                  : second_field;
             std::memcpy(av_frame->data[n] + y * av_frame->linesize[n],
-                        frame.image_data(n).data() + y * planes[n].linesize,
+                        src.image_data(n).data() + y * planes[n].linesize,
                         planes[n].linesize);
         }
+    }
+
+    if (interlace) {
+        av_frame->flags |= AV_FRAME_FLAG_INTERLACED;
+        if (first_field_is_top)
+            av_frame->flags |= AV_FRAME_FLAG_TOP_FIELD_FIRST;
     }
 
     return av_frame;

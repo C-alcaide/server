@@ -450,13 +450,45 @@ double-unref of the host-mapped packet. **Both are fixed in the patched build**:
 (0.99×), with field order signalled correctly. Written up in
 `docs/upstream/prores_ks_vulkan_qscale_corruption.md`.
 
-**But the FILE consumer cannot ask for it, and would not want to.** The consumer reports
-`-flags` as an unused option, so `+ildct` never reaches the encoder — and a `1080i5000` channel
-delivers **progressive 50p** frames to the consumer anyway, so there is no interlaced content to
-apply an interlaced DCT to. Measured 2026-08-23 on a Vulkan-mixer 16-bit `1080i5000` channel:
-with and without the flag, both recordings came out `yuv422p10le, progressive, 50/1` at 935
-bits/MB, identical to each other. If you need a field-coded 50i master, that is a consumer
-change, not an encoder one.
+**And the FILE consumer now pairs fields for you, so `+ildct` is not something you ask for.**
+An interlaced channel ticks at field rate: 50 full-height frames a second. The consumer holds
+one and interleaves it with the next, so a `1080i5000` channel records as **25 fps field-coded**
+with the interlaced flags set on the encoder and on every frame. You do not pass `-flags +ildct`
+— it would not reach the encoder anyway, it is reported as an unused option.
+
+Measured 2026-08-23 on a `1080i5000` channel, before and after:
+
+| | before | after |
+| :--- | :--- | :--- |
+| rate | 50/1 **progressive** | **25/1** |
+| `field_order` | `progressive` | **`tt`** |
+| per-frame flags | — | `interlaced_frame=1, top_field_first=1` |
+| duplicate frames | **every picture written twice** — the first eight video frames hashed as four identical pairs | none; all distinct |
+| dropped frames (fast encoder) | — | 0 |
+
+The duplication is what made the old behaviour worse than merely unsignalled: with a 25p source
+on a 50-tick channel it wrote each picture twice, so the file was double the size for the same
+pictures. Pairing also halves what the encoder sees, which is why an encoder that could not
+sustain the channel before may now keep up.
+
+Progressive channels are untouched — verified `field_order=progressive`, `interlaced_frame=0`,
+25/1, zero drops on the same build.
+
+**Three things to know about it.**
+
+* **The GPU-direct routes decline an interlaced channel.** Pairing two *device* frames is a GPU
+  line-interleave that does not exist yet, so on a `1080i5000` channel both the Vulkan encode
+  path and NVENC GPU-direct log a refusal and the host path runs instead. That is a change: they
+  previously recorded such a channel as 50p.
+* **Field dominance is derived from the video mode**, because the core has carried none since the
+  2018 refactor — SD PAL/NTSC are bottom-field-first, everything else interlaced is top. This is
+  the same rule `cuda_prores` derives separately, and two modules deriving it independently is a
+  hazard: change one and the same timeline records with opposite field order on SDI and to file.
+* **A slow encoder on an interlaced channel can still leave an unfinalised file.** `prores_ks`
+  and `prores_aw` back up at 1080p and their `.mov` never gets a trailer written — `moov atom not
+  found`. This is **not** related to pairing: it reproduces on a progressive channel with pairing
+  off, and it does not happen with an encoder that keeps up (x264 ultrafast and mpeg2video both
+  finalised with zero drops). Use an encoder that sustains the channel.
 
 **One ceiling on `-q:v` itself:** the Vulkan encoder refuses a forced quantiser above **14**,
 because its score buffer is dimensioned `[16]` and indexed by quantiser. The software encoder
@@ -750,9 +782,9 @@ Without the swap, use `h264_vulkan` / `hevc_vulkan`. They reach the same silicon
   `-q:v 4`–`6` at 4K, **eight channels or more**. The quantiser is what keeps the data rate on
   profile and it does not carry between rasters; without `-q:v` it is one channel, and with it on
   an unpatched FFmpeg the file is corrupt. See §6.
-- **Interlaced (50i)** → the channel hands the FFmpeg consumer progressive 50p, so any of these
-  encoders records it as 50p. Field-coded output needs a consumer change; `+ildct` on
-  `prores_ks_vulkan` is fixed but unreachable from AMCP. See §6.
+- **Interlaced (50i)** → the FFmpeg consumer pairs the channel's two ticks into one field-coded
+  25 fps frame automatically, on the host path. Pick an encoder that sustains the channel;
+  GPU-direct declines interlaced. See §6.
 - **OpenGL mixer, 8-bit** → `CUDA_PRORES`.
 - **CPU** → `prores_aw`, never `prores_ks`. The latter cannot sustain 1080p25.
 

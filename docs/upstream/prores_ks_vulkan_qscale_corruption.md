@@ -116,12 +116,12 @@ than one field written twice. The absolute PSNR is dominated by the libplacebo R
 conversion the Vulkan path requires, which is why the comparison is against this encoder's own
 progressive arm and not against the software encoder.
 
-**Not reachable from CasparCG's FFmpeg consumer**, for two reasons that are ours rather than
-FFmpeg's, and are recorded here so the next reader does not look for the fault upstream: the
-consumer reports `-flags` as an unused option, so `+ildct` never reaches the encoder; and a
-`1080i5000` channel delivers **progressive 50p** frames to the consumer, so there is no
-interlaced content there to apply it to. Measured 2026-08-23: both arms wrote
-`yuv422p10le, progressive, 50/1` at 935 bits/MB, identical to each other.
+**Still not reachable through CasparCG's Vulkan encode path, for a reason that is ours rather
+than FFmpeg's.** The consumer now pairs an interlaced channel's two ticks into one field-coded
+frame — but only on the host path, because pairing two *device* frames is a GPU line-interleave
+that does not exist here yet. So a `1080i5000` channel makes the Vulkan encode path decline and
+fall back, and this fix is exercised by the ffmpeg CLI rather than by the server. Recorded here
+so the next reader does not go looking for the fault upstream.
 
 ## Why it is easy to miss
 
