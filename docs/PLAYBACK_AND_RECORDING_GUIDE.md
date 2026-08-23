@@ -417,6 +417,34 @@ somewhere in this ladder's configuration (an H.264 source decoded through D3D11V
 `encode-matrix` used ProRes) and is unattributed. **Do not read either zero as "this route cannot
 record".** Both record correctly at one channel in other measurements.
 
+### `file` against `route` — what the producer costs a recording channel
+
+Every ISO ceiling here is measured two ways, and the difference is meant to be the playback cost
+per recording channel: `--producer route` decodes once on a source channel and routes the picture,
+`--producer file` gives every channel its own decoder. A real ISO rig decodes (or captures) per
+channel, so the `file` number is the operational one and the `route` number isolates the encode.
+
+| codec | `--producer file` | `--producer route` |
+| :--- | :--- | :--- |
+| `h264_vulkan` | **≥9** | **≥16** |
+| `prores_ks_vulkan` (16-bit) | **1** | **1** |
+
+**Neither H.264 figure is a ceiling, and the gap is therefore not quantified.** The route arm ran
+out of ladder at 16 with headroom to spare; the file arm stopped because the **10-channel step
+could not start a server at all** (`WinError 10053` on the AMCP connect), which the battery
+reports as an absent measurement rather than a limit. Two different non-limits. What the pair does
+establish is the *direction*: route is at least as good as file, which is what paying for one
+decode instead of nine should give.
+
+**That direction is worth stating because the first attempt got it backwards.** Before the
+late-frame floor existed, this table read `file 8` against `route 3` — routing apparently three
+times worse than nine independent decoders. The route arm had stopped on **one late frame out of
+about 500**, with 11 ms of jitter against a 40 ms budget. It was a threshold crossing on noise,
+and it was very nearly written up as a finding about `route://`.
+
+**For ProRes there is no gap to find.** One channel either way: the encoder is the limit, so how
+the picture arrives does not enter into it.
+
 ### What a real input costs — the ISO ceilings are for routed pictures
 
 Every recording ceiling above uses `route://1`: one channel decodes and the rest take its
