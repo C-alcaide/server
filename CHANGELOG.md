@@ -1,6 +1,45 @@
 CasparVP — Unreleased
 ==========================================
 
+### Fixed (upstream FFmpeg): `prores_ks_vulkan -flags +ildct` deadlocked, then corrupted the heap
+
+Interlaced encoding on FFmpeg's Vulkan ProRes encoder never produced a frame. It hung
+indefinitely with no diagnostic at any log level, leaving a 36-byte container. Two faults, and
+the first hid the second:
+
+**The deadlock.** `vulkan_encode_prores_submit_frame()` called `ff_vk_exec_start()` itself, and
+the interlaced path calls that function twice on one execution context — once per field, both
+recording into the same command buffer. `ff_vk_exec_start()` waits on the context's fence with
+`UINT64_MAX` and then resets it, so the second call waits on a fence it had just reset with
+nothing submitted. Fixed by starting the context once per frame, in the caller.
+
+**The heap corruption underneath it.** `ff_vk_exec_add_dep_buf()` with `ref == 0` takes ownership
+of the caller's reference rather than adding one, and the per-picture loop registered the same
+host-mapped packet reference once per field — two unrefs against one reference, aborting with
+`0xC0000374` after the first frame. It had been unreachable behind the deadlock, so a patch
+fixing only the hang would have turned it into a crash.
+
+Measured after both, 1080p25, ten frames of detailed content, profile 3:
+
+| encoder | `+ildct` | bits/MB | vs target | decode errors |
+| :--- | :--- | ---: | ---: | ---: |
+| `prores_ks_vulkan` | yes | **929** | **0.98×** | 0 |
+| `prores_ks` | yes | 943 | 0.99× | 0 |
+| `prores_ks_vulkan` | no | 930 | 0.98× | 0 |
+
+Field order signals correctly, and the interlaced output is within 0.09 dB of the same encoder's
+progressive output against a lossless reference — so both fields are distinct rather than one
+written twice. Fix is in `d:\Github\FFmpeg` and cherry-picked into the shared-libs worktree the
+`tools/use_local_ffmpeg.sh` swap installs; write-up in
+`docs/upstream/prores_ks_vulkan_qscale_corruption.md`.
+
+**This changes nothing for CasparCG recordings today, and the docs claiming otherwise were
+corrected.** The FFmpeg consumer reports `-flags` as an unused option so `+ildct` never reaches
+the encoder, and a `1080i5000` channel delivers **progressive 50p** frames to the consumer, so
+there is no interlaced content to apply an interlaced DCT to. Measured on a Vulkan-mixer 16-bit
+`1080i5000` channel: with and without the flag, both recordings came out `yuv422p10le,
+progressive, 50/1` at 935 bits/MB, identical. Field-coded 50i output would be a consumer change.
+
 ### Changed: CUDA_PRORES_BYPASS gets the same rate targeting — and the quantiser bound moves to 128
 
 **The SDI recorder now lands on its profile's published data rate too**, and finding that out

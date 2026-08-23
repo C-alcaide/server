@@ -262,8 +262,9 @@ so a recording you think is 422 may be 422 HQ — profile 2 is 422, profile 3 is
 **`-q:v` is what takes this from one recording channel to eight, and the value is per raster.**
 12 keeps a 1080p file on the profile's data rate; at 4K the same value gives **0.46x** of it and you
 want 4-6. §6 has the table, and two prerequisites: the patched FFmpeg from
-`tools/use_local_ffmpeg.sh apply` (on the pinned build the option writes a corrupt file), and a
-progressive mode — `+ildct` hangs this encoder, so 50i records on the CPU encoders only.
+`tools/use_local_ffmpeg.sh apply` (on the pinned build the option writes a corrupt file). The
+`+ildct` deadlock is fixed in that same patched build — see §6 for what interlaced actually does
+here, which is not what the flag suggests.
 
 **Recording — an 8-bit channel**
 
@@ -438,11 +439,24 @@ intends, from the value that is correct at 1080p. Nothing brackets 4K as neatly 
 1080p: q6 at 0.92× is the closest below, q4 at 1.25× the closest above. Pick by which side of the
 target you would rather be on.
 
-**Interlaced: use the CPU encoder.** `prores_ks_vulkan -flags +ildct` **hangs** — 30 s timeout,
-a 36-byte file, and not one line of diagnostic. The software `prores_ks` takes the same flag and
-lands on **934 bits/MB, 0.98× target**, so 50i recording works on the CPU encoders and is simply
-not available on the Vulkan one. Reported with the quantiser defect in
+**Interlaced: the flag works now, and you still will not reach it from AMCP.** Two separate
+things, and conflating them wasted a measurement here already.
+
+`prores_ks_vulkan -flags +ildct` used to hang — 30 s and a 36-byte file with no diagnostic. That
+was a deadlock in the encoder (`ff_vk_exec_start` called once per picture, waiting forever on a
+fence it had itself just reset), and fixing it exposed a heap corruption underneath from a
+double-unref of the host-mapped packet. **Both are fixed in the patched build**: measured
+**929 bits/MB, 0.98× target, zero decode errors**, against the software `prores_ks` at 943
+(0.99×), with field order signalled correctly. Written up in
 `docs/upstream/prores_ks_vulkan_qscale_corruption.md`.
+
+**But the FILE consumer cannot ask for it, and would not want to.** The consumer reports
+`-flags` as an unused option, so `+ildct` never reaches the encoder — and a `1080i5000` channel
+delivers **progressive 50p** frames to the consumer anyway, so there is no interlaced content to
+apply an interlaced DCT to. Measured 2026-08-23 on a Vulkan-mixer 16-bit `1080i5000` channel:
+with and without the flag, both recordings came out `yuv422p10le, progressive, 50/1` at 935
+bits/MB, identical to each other. If you need a field-coded 50i master, that is a consumer
+change, not an encoder one.
 
 **One ceiling on `-q:v` itself:** the Vulkan encoder refuses a forced quantiser above **14**,
 because its score buffer is dimensioned `[16]` and indexed by quantiser. The software encoder
@@ -736,8 +750,9 @@ Without the swap, use `h264_vulkan` / `hevc_vulkan`. They reach the same silicon
   `-q:v 4`–`6` at 4K, **eight channels or more**. The quantiser is what keeps the data rate on
   profile and it does not carry between rasters; without `-q:v` it is one channel, and with it on
   an unpatched FFmpeg the file is corrupt. See §6.
-- **Interlaced (50i)** → a CPU encoder, `prores_ks` or `prores_aw`. `prores_ks_vulkan` hangs on
-  `+ildct`.
+- **Interlaced (50i)** → the channel hands the FFmpeg consumer progressive 50p, so any of these
+  encoders records it as 50p. Field-coded output needs a consumer change; `+ildct` on
+  `prores_ks_vulkan` is fixed but unreachable from AMCP. See §6.
 - **OpenGL mixer, 8-bit** → `CUDA_PRORES`.
 - **CPU** → `prores_aw`, never `prores_ks`. The latter cannot sustain 1080p25.
 

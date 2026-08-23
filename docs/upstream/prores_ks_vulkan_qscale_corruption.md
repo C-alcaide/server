@@ -78,37 +78,50 @@ shader takes `force_quant` at constant id 3 and short-circuits on `if (force_qua
 seems a plausible route to slices whose written length disagrees with the header, which is what
 `invalid plane data size` reports — but I have not confirmed which of these is actually at fault.
 
-## A second, separate defect: `-flags +ildct` hangs
+## A second, separate defect, now also fixed: `-flags +ildct` deadlocked
 
-Unrelated to the quantiser, found while measuring data rates per video mode, and reported here
-because it is the same encoder.
+Unrelated to the quantiser, found while measuring data rates per video mode. Interlaced encoding
+never produced a frame: it hung indefinitely with no diagnostic at any log level, leaving a
+36-byte container behind.
 
-```sh
-ffmpeg -y -init_hw_device vulkan=vk:0 -filter_hw_device vk \
-       -f lavfi -i "smptehdbars=size=1920x1080:rate=25:duration=1" \
-       -vf "format=rgba64,hwupload,libplacebo=format=yuv422p10" \
-       -c:v prores_ks_vulkan -profile:v 3 -flags +ildct out.mov
-```
+**`vulkan_encode_prores_submit_frame()` called `ff_vk_exec_start()` itself**, and the interlaced
+path calls that function twice on the same execution context — once per picture — so that both
+fields record into one command buffer. `ff_vk_exec_start()` begins by waiting on the context's
+fence with `UINT64_MAX` and then resets it. On the second call the fence has been reset and
+nothing has been submitted, so the wait can never be satisfied. The same call would also have
+discarded the first picture's buffer dependencies. Fixed by starting the context once per frame,
+in the caller, and by propagating the second picture's return value, which was being dropped.
 
-never terminates. Killed after 30 s it leaves a 36-byte file — an empty container — and prints
-nothing at any log level: no warning, no "not supported", no error. The software encoder takes the
-same flag on the same input and produces a correct file:
+**Fixing that exposed a second fault underneath it, which had been unreachable.**
+`ff_vk_exec_add_dep_buf()` with `ref == 0` takes ownership of the caller's reference rather than
+adding one, and the per-picture loop registered the same host-mapped packet reference once per
+picture — two unrefs against one reference. It aborted with a heap corruption (`0xC0000374`)
+after the first frame. Fixed by registering it once per frame.
 
-| encoder | `+ildct` | result |
-| :--- | :--- | :--- |
-| `prores_ks` | yes | 9.53 MB for 10 frames, 934 bits/MB (0.98x the profile target) |
-| `prores_ks_vulkan` | yes | **hangs**; 36-byte output, no diagnostic |
-| `prores_ks_vulkan` | no | correct |
+That ordering is the part worth keeping: the first fault made the second one invisible, and a
+patch that fixed only the deadlock would have turned a hang into a crash.
 
-`ff_prores_kostya_encode_init()` sets `pictures_per_frame = 1 + interlaced` and halves `mb_height`
-for the interlaced case, and it selects `ff_prores_interlaced_scan`. The Vulkan encoder's dispatch
-sizes and its `slices_per_picture` specialisation constants are derived from those, so a shape
-mismatch there is the obvious place to look — I have not traced which stage stops making progress.
+Measured after both fixes, 1080p25, ten frames of detailed content, profile 3:
 
-**Refusing it cleanly would be a strict improvement** even without support: an encoder that
-declines with a message costs the caller one error, where one that hangs costs a timeout and a
-diagnosis. If interlaced is simply out of scope for this encoder, `AVERROR(ENOSYS)` at init when
-`AV_CODEC_FLAG_INTERLACED_DCT` is set would be worth having on its own.
+| encoder | `+ildct` | bits/MB | vs profile target | decode errors |
+| :--- | :--- | ---: | ---: | ---: |
+| `prores_ks_vulkan` | yes | **929** | **0.98×** | 0 |
+| `prores_ks` | yes | 943 | 0.99× | 0 |
+| `prores_ks_vulkan` | no | 930 | 0.98× | 0 |
+
+Field order is signalled correctly (bottom field first for this input, matching the software
+encoder), and the interlaced output scores within **0.09 dB** of the same encoder's progressive
+output against a lossless reference — so both fields are distinct and correctly placed rather
+than one field written twice. The absolute PSNR is dominated by the libplacebo RGB→yuv422p10
+conversion the Vulkan path requires, which is why the comparison is against this encoder's own
+progressive arm and not against the software encoder.
+
+**Not reachable from CasparCG's FFmpeg consumer**, for two reasons that are ours rather than
+FFmpeg's, and are recorded here so the next reader does not look for the fault upstream: the
+consumer reports `-flags` as an unused option, so `+ildct` never reaches the encoder; and a
+`1080i5000` channel delivers **progressive 50p** frames to the consumer, so there is no
+interlaced content there to apply it to. Measured 2026-08-23: both arms wrote
+`yuv422p10le, progressive, 50/1` at 935 bits/MB, identical to each other.
 
 ## Why it is easy to miss
 
