@@ -78,6 +78,38 @@ shader takes `force_quant` at constant id 3 and short-circuits on `if (force_qua
 seems a plausible route to slices whose written length disagrees with the header, which is what
 `invalid plane data size` reports — but I have not confirmed which of these is actually at fault.
 
+## A second, separate defect: `-flags +ildct` hangs
+
+Unrelated to the quantiser, found while measuring data rates per video mode, and reported here
+because it is the same encoder.
+
+```sh
+ffmpeg -y -init_hw_device vulkan=vk:0 -filter_hw_device vk \
+       -f lavfi -i "smptehdbars=size=1920x1080:rate=25:duration=1" \
+       -vf "format=rgba64,hwupload,libplacebo=format=yuv422p10" \
+       -c:v prores_ks_vulkan -profile:v 3 -flags +ildct out.mov
+```
+
+never terminates. Killed after 30 s it leaves a 36-byte file — an empty container — and prints
+nothing at any log level: no warning, no "not supported", no error. The software encoder takes the
+same flag on the same input and produces a correct file:
+
+| encoder | `+ildct` | result |
+| :--- | :--- | :--- |
+| `prores_ks` | yes | 9.53 MB for 10 frames, 934 bits/MB (0.98x the profile target) |
+| `prores_ks_vulkan` | yes | **hangs**; 36-byte output, no diagnostic |
+| `prores_ks_vulkan` | no | correct |
+
+`ff_prores_kostya_encode_init()` sets `pictures_per_frame = 1 + interlaced` and halves `mb_height`
+for the interlaced case, and it selects `ff_prores_interlaced_scan`. The Vulkan encoder's dispatch
+sizes and its `slices_per_picture` specialisation constants are derived from those, so a shape
+mismatch there is the obvious place to look — I have not traced which stage stops making progress.
+
+**Refusing it cleanly would be a strict improvement** even without support: an encoder that
+declines with a message costs the caller one error, where one that hangs costs a timeout and a
+diagnosis. If interlaced is simply out of scope for this encoder, `AVERROR(ENOSYS)` at init when
+`AV_CODEC_FLAG_INTERLACED_DCT` is set would be worth having on its own.
+
 ## Why it is easy to miss
 
 The option is a large speed win where the trellis search has real work to do, and the corruption

@@ -98,8 +98,28 @@ macroblock** for profile 3 at 1080p (`br_tab[3]`, `proresenc_kostya_common.c`) =
 PSNR is against the encoder's own input after the identical `libplacebo` conversion, so it is
 quantisation alone — no conversion or subsampling error in it (10-bit, full scale 1023).
 
-**`-q:v 12` is the recommendation**: on-spec rate, 0.8 dB better than the search, and eight
-recording channels instead of one. `-q:v 4` writes a file that declares 422 HQ and carries
+**`-q:v 12` is the recommendation AT 1080p, and the value does not carry between rasters.** At
+2160p the same 12 gives **0.46x** the profile's rate — worse than 422 HQ intends — and the on-spec
+value is 4 to 6:
+
+| setting | 1080p vs target | 2160p vs target |
+| :--- | ---: | ---: |
+| default (trellis search) | 0.98x | 1.01x |
+| `-q:v 4` | 2.15x | 1.25x |
+| `-q:v 6` | — | **0.92x** |
+| `-q:v 12` | **1.01x** | 0.46x |
+
+Frame rate needs no separate figure: bits-per-macroblock is a per-picture property, so 50p is the
+25p bits/MB at twice the pictures per second, and 1080i50 coincides with 1080p25 at 193.8 Mbit/s
+because it carries the same pixels per second.
+
+**And 50i does not work on this encoder at all.** `prores_ks_vulkan -flags +ildct` **hangs** — 30 s
+timeout, a 36-byte file, no diagnostic at any log level — where the software `prores_ks` takes the
+same flag and lands on 0.98x target. Interlaced recording is a CPU-encoder capability; the defect
+is written up alongside the quantiser one.
+
+At 1080p `-q:v 12` remains the recommendation: on-spec rate, 0.8 dB better than the search, and
+eight recording channels instead of one. `-q:v 4` writes a file that declares 422 HQ and carries
 **2.15×** the profile's data rate — a better picture, honestly bought, but storage and SDI budgets
 sized from the profile name will be out by a factor of two. Apple's rates are nominal for a VBR
 codec so a few percent either way is ordinary; a factor of two is not.

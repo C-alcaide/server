@@ -259,11 +259,11 @@ REMOVE 1 FILE "out.mov" -vcodec prores_ks_vulkan -profile:v 3 -q:v 12 -ac 2
 **`-profile:v` is not optional**: without it `prores_ks_vulkan` picks a profile from its input,
 so a recording you think is 422 may be 422 HQ — profile 2 is 422, profile 3 is 422 HQ.
 
-**`-q:v 12` is what takes this from one recording channel to eight**, and 12 is the value that
-keeps the file on the profile's data rate — `-q:v 4` is a better picture at **2.15x** the rate
-422 HQ describes. §6 has the numbers and the one prerequisite: it needs the patched FFmpeg
-installed by `tools/use_local_ffmpeg.sh apply`, because on the pinned build the option writes a
-corrupt file.
+**`-q:v` is what takes this from one recording channel to eight, and the value is per raster.**
+12 keeps a 1080p file on the profile's data rate; at 4K the same value gives **0.46x** of it and you
+want 4-6. §6 has the table, and two prerequisites: the patched FFmpeg from
+`tools/use_local_ffmpeg.sh apply` (on the pinned build the option writes a corrupt file), and a
+progressive mode — `+ildct` hangs this encoder, so 50i records on the CPU encoders only.
 
 **Recording — an 8-bit channel**
 
@@ -385,48 +385,77 @@ local build, and installed with `tools/use_local_ffmpeg.sh apply`. On an unpatch
 option is worse than useless, so the guard is: **if `-q:v` is in the args, check the recording
 decodes before trusting anything else about it.**
 
-### Which quantiser — and only one of them is still ProRes 422 HQ by data rate
+### Which quantiser — and it is different for every raster
 
-**Use `-q:v 12`.** It is the value that lands on the profile's bitrate, and it is also marginally
-better than the search at that bitrate.
+**`-q:v 12` at 1080p. `-q:v 4`–`6` at 4K. Nothing at all for interlaced.** The value is not
+portable, and getting it wrong is silent: the recording succeeds and simply carries the wrong data
+rate.
 
-ProRes profiles have published data rates, and the trellis search exists to hit them. FFmpeg
-targets **950 bits per macroblock** for profile 3 at 1080p (`br_tab[3]` in
-`proresenc_kostya_common.c`), which is **193.8 Mbit/s at 25p**; Apple's nominal figure for 422 HQ
-is 220 Mbit/s at 1920x1080/29.97, scaling to 183.5 at 25p, so FFmpeg aims about 5.6% above the
-vendor's number. Measured on detailed content, one frame through each setting with the same input:
+ProRes profiles have published data rates and the trellis search exists to hit them. FFmpeg targets
+**950 bits per macroblock** for profile 3 at every raster above 6075 macroblocks (`br_tab[3]` in
+`proresenc_kostya_common.c`, and the loop that selects it stops at index 3 — so 1080p and 4K share
+the same bits-per-macroblock target and differ only in how many macroblocks there are). Apple's
+nominal figure for 422 HQ is 220 Mbit/s at 1920×1080/29.97 and 880 at UHD, so FFmpeg aims about
+5.6% above the vendor's number.
+
+**The target for each mode**, which is arithmetic rather than measurement:
+
+| mode | MB/picture | pictures/s | FFmpeg target | Apple nominal |
+| :--- | ---: | ---: | ---: | ---: |
+| 1080p25 | 8160 | 25 | 193.8 Mbit/s | 183.5 |
+| 1080p50 | 8160 | 50 | 387.6 | 367.0 |
+| 1080i50 | 4080 | 50 | 193.8 | 183.5 |
+| 2160p25 | 32400 | 25 | 769.5 | 734.1 |
+| 2160p50 | 32400 | 50 | 1539.0 | 1468.1 |
+
+`1080i50` and `1080p25` coincide because they carry the same pixels per second. **Frame rate needs
+no separate measurement**: bits-per-macroblock is a per-*picture* property, so 50p is the 25p
+bits/MB at twice the pictures per second.
+
+**What each quantiser achieves at 1080p** (detailed content, one frame through each setting):
 
 | setting | bits/MB | Mbit/s @25p | vs target | Y PSNR | channels |
 | :--- | ---: | ---: | ---: | ---: | ---: |
-| default (trellis search) | 929 | 189.5 | **0.98x** | 42.89 dB | **1** |
-| **`-q:v 12`** | 961 | 196.1 | **1.01x** | **43.70 dB** | **8+** |
-| `-q:v 8` | 1309 | 267.0 | 1.38x | 46.76 dB | 8+ |
-| `-q:v 4` | 2043 | 416.8 | **2.15x** | 52.34 dB | 8+ |
-| `-q:v 2` | 2826 | 576.5 | 2.97x | 58.02 dB | 8+ |
+| default (trellis search) | 929 | 189.5 | **0.98×** | 42.89 dB | **1** |
+| **`-q:v 12`** | 961 | 196.1 | **1.01×** | **43.70 dB** | **8+** |
+| `-q:v 8` | 1309 | 267.0 | 1.38× | 46.76 dB | 8+ |
+| `-q:v 4` | 2043 | 416.8 | **2.15×** | 52.34 dB | 8+ |
+| `-q:v 2` | 2826 | 576.5 | 2.97× | 58.02 dB | 8+ |
 
-PSNR is against the encoder's own input after the identical `libplacebo` conversion, so it is
-quantisation alone with no conversion or subsampling error in it (10-bit, full scale 1023).
+**And at 4K, where the same values land somewhere else entirely:**
 
-**`-q:v 4` writes a file that declares 422 HQ and carries 2.15x the profile's data rate**, and
-`-q:v 2` nearly 3x — past ProRes 4444's nominal 330 Mbit/s. The picture is genuinely better,
-because it is spending the bits, but anyone sizing storage or an SDI budget from the profile name
-will be out by a factor of two. Apple's rates are nominal for a VBR codec, so a few percent either
-way is ordinary; a factor of two is not.
+| setting | bits/MB | Mbit/s @25p | vs target |
+| :--- | ---: | ---: | ---: |
+| default (trellis search) | 956 | 774.1 | **1.01×** |
+| `-q:v 2` | 1896 | 1535.6 | 2.00× |
+| `-q:v 4` | 1189 | 963.2 | 1.25× |
+| **`-q:v 6`** | 872 | 706.3 | **0.92×** |
+| `-q:v 8` | 683 | 553.1 | 0.72× |
+| `-q:v 12` | 439 | 355.2 | **0.46×** |
 
-**So the search was not "marginally behind" — it was doing its job.** It hit 0.98x of its target.
-An earlier version of this section compared PSNR without looking at bitrate and rewarded the
-settings that simply spent more bits, which is the wrong comparison to put in front of an operator
-choosing a recording format.
+**`-q:v 12` at 4K gives less than half the profile's data rate** — worse quality than 422 HQ
+intends, from the value that is correct at 1080p. Nothing brackets 4K as neatly as q12 does at
+1080p: q6 at 0.92× is the closest below, q4 at 1.25× the closest above. Pick by which side of the
+target you would rather be on.
 
-**`-q:v 12` dominates the default on every axis measured**: on-spec rate, 0.8 dB better, and eight
-recording channels instead of one. Reach for a lower quantiser only when you actually want a
-higher-rate mezzanine and have said so out loud.
+**Interlaced: use the CPU encoder.** `prores_ks_vulkan -flags +ildct` **hangs** — 30 s timeout,
+a 36-byte file, and not one line of diagnostic. The software `prores_ks` takes the same flag and
+lands on **934 bits/MB, 0.98× target**, so 50i recording works on the CPU encoders and is simply
+not available on the Vulkan one. Reported with the quantiser defect in
+`docs/upstream/prores_ks_vulkan_qscale_corruption.md`.
 
-**Two limits on the picture numbers.** One frame, and the content is detailed noise — the worst
-case for a DCT codec and the material most likely to make a trellis search look bad, so on flatter
-footage expect the search to do better. And PSNR is not a look: the maximum errors (41 at `-q:v 12`
-against 73 for the default) say more about visible quality than the means, and neither is a
-viewing verdict.
+**One ceiling on `-q:v` itself:** the Vulkan encoder refuses a forced quantiser above **14**,
+because its score buffer is dimensioned `[16]` and indexed by quantiser. The software encoder
+allows 64. That is ample for 422 HQ at these rasters, and would bite on a low-rate profile at 4K
+that legitimately wants a coarser quantiser.
+
+**Limits on the picture and rate figures.** One frame per arm, and the content is detailed noise —
+the worst case for a DCT codec and the material most likely to make a trellis search look bad, so
+on flatter footage expect the search to do better and the on-spec quantiser to move. PSNR is not a
+look: the maximum errors (41 at `-q:v 12` against 73 for the default) say more about visible
+quality than the means, and neither is a viewing verdict. And **the 1080p and 4K figures come from
+different source frames**, so they are not a controlled comparison of raster alone — they are two
+separate answers to "what hits target here", which is the question an operator actually has.
 
 **`-bits_per_mb` is not an alternative.** It produces a correct picture on any build but does not
 bypass the search — `force_quant` comes only from `global_quality` — so it changes the rate and
@@ -703,9 +732,12 @@ Without the swap, use `h264_vulkan` / `hevc_vulkan`. They reach the same silicon
 
 ### If you are recording ProRes
 
-- **Vulkan mixer, 16-bit** → `prores_ks_vulkan -profile:v 3 -q:v 12`, **eight channels or more**.
-  12 is the quantiser that keeps the data rate on profile; without `-q:v` it is one channel, and
-  with it on an unpatched FFmpeg the file is corrupt. See §6.
+- **Vulkan mixer, 16-bit, progressive** → `prores_ks_vulkan -profile:v 3 -q:v 12` at 1080p,
+  `-q:v 4`–`6` at 4K, **eight channels or more**. The quantiser is what keeps the data rate on
+  profile and it does not carry between rasters; without `-q:v` it is one channel, and with it on
+  an unpatched FFmpeg the file is corrupt. See §6.
+- **Interlaced (50i)** → a CPU encoder, `prores_ks` or `prores_aw`. `prores_ks_vulkan` hangs on
+  `+ildct`.
 - **OpenGL mixer, 8-bit** → `CUDA_PRORES`.
 - **CPU** → `prores_aw`, never `prores_ks`. The latter cannot sustain 1080p25.
 
