@@ -1650,16 +1650,39 @@ struct screen_consumer_proxy : public core::frame_consumer
 
     bool has_synchronization_clock() const override { return false; }
 
-    // When Vulkan mixer is active, gpu_strategy is always used (auto-promoted)
-    // and VK→GL zero-copy interop bypasses CPU entirely.
-    //
-    // Unless it doesn't: gpu_strategy has a host-upload fallback for when the interop
-    // does not come up, and that fallback needs the pixels this answer suppresses. So
-    // ask the consumer whether it has taken it -- the dynamic form core::texture
-    // documents, and the one spout/ffmpeg/decklink already use.
+    /// Does this consumer need the channel to read the composite back to host memory?
+    ///
+    /// THE ANSWER IS ABOUT THE STRATEGY, NOT THE MIXER, and keying it on the mixer cost the
+    /// OpenGL side the whole saving. `gpu_strategy` is selected by
+    /// `config.gpu_texture || use_vulkan` -- so `<gpu-texture>true</gpu-texture>` puts an
+    /// OpenGL channel on it too, where it binds the mixer's own GL texture directly
+    /// (`ogl_tex->bind(0)`) and never touches `image_data(0)`. This function answered
+    /// `!use_vulkan_`, i.e. **true on every OpenGL channel regardless**, so the mixer kept
+    /// reading the whole frame back for a consumer that does not look at it: 8 MB a frame at
+    /// 8-bit, 16 at 16-bit, on the channel thread, every tick.
+    ///
+    /// The upload was already saved; the readback is the expensive half, and
+    /// `ogl::image_mixer` has honoured `cpu_readback_needed_` all along -- it was simply
+    /// never told. Found 2026-08-23 while answering whether `<gpu-texture>` is worth
+    /// measuring separately: on the Vulkan mixer it is inert (auto-promoted either way), and
+    /// on OpenGL it was doing half of what it claims.
+    ///
+    /// THE FALLBACK IS WHY THIS IS DYNAMIC RATHER THAN JUST `!gpu_path`. `gpu_strategy` needs
+    /// `window_.shared_` for the direct bind and the VK→GL extensions for the interop; when
+    /// neither is available it uploads host pixels through a PBO, and that branch latches
+    /// `host_pixels_needed_` to re-arm the readback from the next frame. Answering a static
+    /// false would leave that path uploading a buffer nobody wrote. This is the dynamic form
+    /// `core::texture` documents and that spout/ffmpeg/decklink already use.
     bool needs_cpu_frame_data() const override
     {
-        return !use_vulkan_ || (consumer_ && consumer_->host_pixels_needed_.load(std::memory_order_relaxed));
+        // `config_.gpu_texture || use_vulkan_` must stay in step with the strategy selection in
+        // the constructor. Two copies of one condition is a latent divergence, but the
+        // alternative -- asking the strategy -- means a virtual call and a type test per tick on
+        // the channel thread for an answer that cannot change after construction.
+        const bool on_gpu_path = config_.gpu_texture || use_vulkan_;
+        if (!on_gpu_path)
+            return true; // host_strategy reads image_data() for every frame it draws
+        return consumer_ && consumer_->host_pixels_needed_.load(std::memory_order_relaxed);
     }
 
     int index() const override { return 600 + (config_.key_only ? 10 : 0) + config_.screen_index; }
