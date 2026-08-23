@@ -533,7 +533,8 @@ ladder's top has not been measured.
 | screen | `prores_ks_vulkan` | 4K | **8** | 2.11 | 95 | 0 | — | no |
 | screen | `prores_ks` (CPU) | 1080p | **0** | — | — | **329** with 1 | — | — |
 | screen | `prores_ks` (CPU) | 4K | **0** | — | — | **453** with 1 | — | — |
-| DeckLink SDI | either | 1080p | **0** † | — | — | — | 0.99–1.20 | yes |
+| DeckLink SDI | `prores_ks_vulkan` | 1080p | **8+** | 1.97 | 46 | 0 | 0.02 | no |
+| DeckLink SDI | `prores_ks` (CPU) | 1080p | **0** | — | — | — | **1.12** | — |
 
 **This is the answer to "can I record while I am on air", and it is a better answer than the
 previous one.** **Twenty-four** GPU ProRes recordings share a 1080p channel behind a screen output
@@ -556,28 +557,34 @@ against 54% at 4K) and is not the binding constraint here. That matters because 
 switches it off writes a broken picture (§6), and in *this* shape you lose nothing by leaving it
 alone. It only bites in the other shape, N channels each with one recording, where it caps at one.
 
-† **the DeckLink row is not settled, and is shown so you do not read its absence as "fine".** It
-stopped at the very first rung on two or three late frames — at the noise floor, so that stop is
-not itself trustworthy. What the logs of those runs do show is `consume_max` of **39.7, 42.8 and
-47.8 ms against a 40 ms budget**, i.e. the channel had no headroom at all, and the DeckLink output
-reporting healthy throughout (`late=0 drops=0 buffered=5/5`) — so the cost is the host readback
-that output forces rather than a fault in it. But those runs predate the frame-budget check, so
-the ladder could not *say* that at the time; a re-run with the budget instrument is outstanding
-and will either name the budget as the reason or clear the floor and give a real ceiling. Treat
-"one recording alongside an SDI output is marginal on this box" as the finding, and the 0 as
-not yet a number.
+**With an SDI output on air, the GPU recordings are essentially free and the CPU one is fatal.**
+Eight or more `prores_ks_vulkan` recordings sit alongside a live DeckLink output with the frame
+budget at **0.02** — the tick is barely touched — and eight is the top of the ladder rather than a
+limit. One **CPU** ProRes recording takes **1.12 of the budget on its own**: the channel cannot
+advance until every consumer has taken the frame, so at 1.00 there is nothing left however few
+frames went late. It showed two or three late frames, which on a late-frame count reads as noise;
+the budget is what makes it a limit and names it as one.
+
+**Two things in the previous version of this section were wrong, and both are worth flagging.** It
+reported `0` for *either* kind of recording alongside SDI, which was a pre-floor run stopping on
+noise — the GPU recordings are fine. And it explained the DeckLink rows as "that output needs host
+pixels, so the channel reads back once per tick": `readback` here is **no**, so the DeckLink output
+is on its own GPU-direct path (NVIDIA DVP, "Tier-2 GPU-direct output") and forces no readback at
+all. The readback in the CPU row is the CPU *recording's*, not the output's.
 
 **A channel with no real-time output cannot be measured this way**, and the battery refuses to
 try. A channel whose only consumer is a file recording has nothing pacing it, so "late" has
 nothing fixed to be late against — measured, it reported *worse* than the same channel with an SDI
 output added, which cannot be true of a channel doing strictly less work.
 
-**One earlier observation is now explained.** `readback` used to read `yes` in every
-consumer-ladder configuration, including GPU-only ones, and that was recorded here as unexplained.
-With the ladders re-run it reads **`no`** for the GPU ProRes rows and `yes` only where a host-path
-consumer is present — which is what the design says should happen. The rule in §8 about
-not mixing a host-path consumer onto a GPU-direct channel is therefore supported on its cost side
-and unproven on its benefit side.
+**One earlier observation is now explained, and the §8 rule is now proven on both sides.**
+`readback` used to read `yes` in every consumer-ladder configuration, including GPU-only ones, and
+that was recorded here as unexplained. Re-run, it reads **`no`** wherever every consumer is on a
+GPU path — including with a live DeckLink output, which has its own GPU-direct route — and `yes`
+only when a host-path consumer is present. So the readback being *avoided* is now demonstrated
+rather than assumed, which is what the earlier version said it could not show; and the cost of
+breaking it is measured in the same table, where one CPU recording takes 1.12 of the frame budget
+on a channel where eight GPU recordings took 0.02.
 
 ---
 
