@@ -527,17 +527,25 @@ the channel perfectly on time), and the **frame budget** `consume_max/nominal` f
 TIMING line. Ladders extended until each arm actually failed, because an arm that stops at the
 ladder's top has not been measured.
 
-| output on air | recordings added | raster | ceiling | cores | GPU% | drops | readback |
-| :--- | :--- | :--- | ---: | ---: | ---: | ---: | :--- |
-| screen | `prores_ks_vulkan` | 1080p | **16+** | 2.54 | 74 | 0 | no |
-| screen | `prores_ks_vulkan` | 4K | **8** | 2.11 | 95 | 0 | no |
-| screen | `prores_ks` (CPU) | 1080p | **0** | — | — | **324** | — |
-| screen | `prores_ks` (CPU) | 4K | **0** | — | — | **453** | — |
-| DeckLink SDI | either | 1080p | **0** † | — | — | — | yes |
+| output on air | recordings added | raster | ceiling | cores | GPU% | drops | budget | readback |
+| :--- | :--- | :--- | ---: | ---: | ---: | ---: | ---: | :--- |
+| screen | `prores_ks_vulkan` | 1080p | **24** | 2.88 | 99 | 0 | 0.02 | no |
+| screen | `prores_ks_vulkan` | 4K | **8** | 2.11 | 95 | 0 | — | no |
+| screen | `prores_ks` (CPU) | 1080p | **0** | — | — | **329** with 1 | — | — |
+| screen | `prores_ks` (CPU) | 4K | **0** | — | — | **453** with 1 | — | — |
+| DeckLink SDI | either | 1080p | **0** † | — | — | — | 0.99–1.20 | yes |
 
 **This is the answer to "can I record while I am on air", and it is a better answer than the
-previous one.** Sixteen GPU ProRes recordings share a 1080p channel behind a screen output with
-**zero dropped frames**, and eight do at 4K. A single **CPU** ProRes recording fails at both
+previous one.** **Twenty-four** GPU ProRes recordings share a 1080p channel behind a screen output
+with **zero dropped frames**, and eight do at 4K. The 1080p arm stops at 28 on **838 dropped
+frames** — a real failure, found by counting the consumers' losses rather than the channel's.
+
+**And the `budget` column says what the limit is not.** At 24 recordings the channel's frame
+budget is at **0.02** — essentially untouched. The consumers are not holding the tick, so the
+constraint is the encoders' own throughput (GPU at 99%), which surfaces as dropped frames and
+never as a late channel. That is the whole reason the drops control had to exist: on the
+late-frame count alone this arm would have climbed to the top of any ladder reporting a clean
+run. A single **CPU** ProRes recording fails at both
 rasters — and note *how* it fails: 324 and 453 dropped frames **with the channel exactly on
 time**. The earlier version of this table called that a working configuration and reported a
 ceiling of four, because it only ever looked at whether the channel went late.
