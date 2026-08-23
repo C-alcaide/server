@@ -1537,10 +1537,17 @@ struct gpu_strategy : public display_strategy
                     // So the context-sharing failure has been silently guarding a broken
                     // renderer, and fixing the sharing without fixing this trades a wasted
                     // readback for a frozen preview. The seed-context change was reverted for
-                    // that reason. Whoever picks this up: the suspect is the interaction with
-                    // the mixer's still-frame cache, which skips composition when inputs have
-                    // not changed -- but the host path sees the same frames and renders them, so
-                    // that is a starting point rather than a diagnosis.
+                    // that reason.
+                    //
+                    // WHOEVER PICKS THIS UP: it is this branch and not zero-copy in general.
+                    // The VK->GL interop branch below is the same idea on the Vulkan mixer and
+                    // it renders stills correctly -- measured the same day, `#FF3010` and
+                    // `#1030FF` exact, with `[vk_mixer] CPU readback SKIPPED` and
+                    // `[screen] VK->GL zero-copy interop active` in the log. So the mixer's
+                    // still-frame cache is NOT the explanation on its own: both paths see the
+                    // same cached frames and only this one freezes. Compare what the two
+                    // branches do around the bind -- the interop branch rebinds an imported
+                    // texture per frame, this one binds a handle the mixer may be reusing.
                     ogl_tex->bind(0);
 #ifdef ENABLE_VULKAN
                 } else if (try_vk_interop(in_frame, self)) {
