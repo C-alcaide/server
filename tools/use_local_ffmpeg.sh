@@ -102,17 +102,45 @@ case "${1:-status}" in
     for f in "$LOCAL_BUILD"/../deps.txt; do :; done
     # Recompute the dependency list rather than trusting a stored one: the set changes with the
     # configure flags, and a stale list fails as a missing-DLL dialog at server start.
-    if command -v ldd >/dev/null 2>&1; then
+    # `command -v ldd` IS NOT THE QUESTION, and asking it cost a whole measurement round.
+    #
+    # Git Bash ships an `ldd` that cannot resolve a mingw DLL's imports, so the guard passed, the
+    # grep for $UCRT_BIN matched nothing, the loop copied ZERO dependency DLLs, and `apply`
+    # reported success. The server then died 2 s after launch with 0xC0000139
+    # (STATUS_ENTRYPOINT_NOT_FOUND) or 0xC0000135 (STATUS_DLL_NOT_FOUND) depending on what the
+    # caller's PATH happened to supply -- and because it exits before logging is initialised, the
+    # step directory contains a config and no log at all. The harness reported it as
+    # "Server did not become ready: Cannot connect to localhost:5250", which sounds like a
+    # timeout and is not one: the port never opens because the process is already gone.
+    #
+    # It also hid itself: launched from a shell whose PATH includes /mingw64/bin the server
+    # STARTS, because the loader finds the DLLs there instead. So it worked by hand and failed
+    # under the harness, which is the worst possible split.
+    #
+    # Resolve the imports with MSYS2's own ldd, and COUNT what was copied rather than trusting
+    # that the loop ran.
+    MSYS_BASH="/c/msys64/usr/bin/bash.exe"
+    copied=0
+    if [ -x "$MSYS_BASH" ]; then
         for d in $FFMPEG_DLLS; do
             f=$(find "$LOCAL_BUILD" -maxdepth 2 -name "$d.dll" | head -1)
-            ldd "$f" 2>/dev/null | grep "$UCRT_BIN" | awk '{print $1}'
+            [ -n "$f" ] || continue
+            # MSYSTEM=UCRT64 is load-bearing: a plain login shell runs the MSYS environment,
+            # which cannot resolve a UCRT64 DLL's imports and returns nothing, which is how the
+            # copy loop silently produced an empty list.
+            MSYSTEM=UCRT64 "$MSYS_BASH" -lc "ldd '$f' 2>/dev/null" | awk '{print $3}' \
+                | grep -iE "ucrt64|mingw64" | xargs -r -n1 basename
         done | sort -u | while read -r dll; do
-            cp -n "$UCRT_BIN/$dll" "$SHELL_DIR/" 2>/dev/null || true
+            [ -f "$UCRT_BIN/$dll" ] && cp -n "$UCRT_BIN/$dll" "$SHELL_DIR/"
         done
-        n=$(ls "$SHELL_DIR" | wc -l)
-    else
-        echo "warning: no ldd; dependency DLLs not copied and the server will not start"
+        copied=$(ls "$SHELL_DIR"/*.dll 2>/dev/null | wc -l)
     fi
+    if [ "$copied" -lt 20 ]; then
+        die "only $copied DLLs in $SHELL_DIR after the dependency copy; the local build needs
+around 40 mingw DLLs alongside and the server will exit before it logs anything. Check that
+MSYS2 is at /c/msys64 and that its ldd resolves $LOCAL_BUILD's imports."
+    fi
+    n=$copied
     echo "applied. build/shell now reports: $(probe)"
     echo "NOTE: the next cmake build overwrites this. Re-run 'apply' afterwards."
     ;;

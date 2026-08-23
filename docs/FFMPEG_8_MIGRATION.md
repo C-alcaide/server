@@ -947,10 +947,40 @@ one was found by reading a ceiling. Nothing in the harness asserts that an optio
 encoder, and until something does, every measured ceiling for a recording with arguments is a
 ceiling for whichever of those arguments happened to survive.
 
-**What this does not cover.** One raster, one source, one profile (422 HQ), and 8 is the top of
-the ladder rather than the limit — `--max-channels` was 8 and the run had headroom. The quantiser
-is a picture decision that nothing here evaluated: `-q:v 4` wrote a *smaller* file than rate
-control on this source, and whether that is acceptable depends on the content.
+**And the eight-channel row was eight channels of CORRUPT recordings, which took a third battery
+to find.** `encode-matrix --codec prores_q` compared the quantiser arms against the CPU encoder on
+a still: mean 236 LSB from the reference, 100% of pixels over 3 LSB, only 5% of those at an edge.
+Flat-area spread is a defect; edge-concentrated disagreement is two 4:2:2 implementations
+differing. Reproduced outside CasparCG, so it was FFmpeg's fixed-quantiser path: three places
+disagreed about which quantiser index the frame was being built at. Fixed and written up in
+`docs/upstream/prores_ks_vulkan_qscale_corruption.md`; the ceiling above was re-measured against
+the patched build and holds at 8.
+
+**THE QUANTISER IS NOT A PICTURE COMPROMISE, and an earlier version of this section said it was.**
+Measured on one frame of detailed content, every setting encoding the same input, compared against
+the encoder's own input after the identical libplacebo conversion so that quantisation is the only
+thing in the number (10-bit, full scale 1023):
+
+| setting | 12 frames | Y mean error | Y max | Y PSNR |
+| :--- | ---: | ---: | ---: | ---: |
+| default (trellis search) | 11.4 MB | 5.60 | 73 | 42.89 dB |
+| `-q:v 12` | 11.8 MB | 5.26 | 41 | 43.70 dB |
+| `-q:v 4` | 25.0 MB | 1.93 | 15 | 52.34 dB |
+| `-q:v 2` | 34.6 MB | 0.96 | 8 | 58.02 dB |
+
+At matched size the search is marginally behind the quantiser it settles on, and `-q:v 4` is
++9.5 dB over the default at 2.2x the bytes. It is a bitrate trade.
+
+**What that comparison did NOT start out measuring.** The first attempt compared each arm against
+the source frame and every GPU arm came out at ~25.5 dB regardless of the quantiser, because the
+RGB-to-yuv422p10 conversion and the chroma subsampling of noise dominated the number and the
+quantiser was invisible underneath. A reference that has been through the same conversion is the
+whole reason the table above says anything.
+
+**What this does not cover.** One raster, one source, one profile (422 HQ), and 8 is the top of the
+ladder rather than the limit — `--max-channels` was 8 and the run had headroom. The picture
+comparison is one frame of detailed noise, the worst case for a DCT codec and the content most
+likely to make a trellis search look bad, and PSNR is not a look.
 
 ### 6.2 Codecs that matter in this domain
 

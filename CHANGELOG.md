@@ -50,85 +50,64 @@ unrelated to this change (the IMAGE consumer needs host pixels, so it takes the 
 **Unchanged on the Vulkan mixer**, where `<gpu-texture>` is inert either way: `use_vulkan`
 auto-promotes to the GPU strategy whatever the config says, and that path already waited correctly.
 
-### Fixed: `-q:v` was discarded by the consumer — and on `prores_ks_vulkan` it must not be used
+### Fixed: `-q:v` on `prores_ks_vulkan`, in the consumer and in FFmpeg — 1 recording channel to 8
 
-**Read the second half of this entry before using `-q:v`.** The consumer defect below is real
-and fixed; the encoder it was expected to help turns out to write a broken picture when the
-option arrives, so the ceiling this entry originally claimed has been retracted.
+Two independent defects, one in this fork and one upstream, and neither was visible while the
+other stood.
 
-`ADD 1 FILE out.mov -vcodec prores_ks_vulkan -q:v 4` used to record at the encoder's default
-quality. The option was not ignored — it was **discarded**. `q` is not an AVOption: libavcodec has `global_quality`, in lambda units, and
-separately `qscale` as a *name for a flag bit*. Turning `-q:v N` into
+**The consumer discarded the option.** `q` is not an AVOption: libavcodec has `global_quality`, in
+lambda units, and separately `qscale` as a *name for a flag bit*. Turning `-q:v N` into
 `global_quality = N × FF_QP2LAMBDA` plus `AV_CODEC_FLAG_QSCALE` is something the ffmpeg CLI does
-for you, and this consumer is not the CLI, so the value was parsed, forwarded, refused by
+for you, and this consumer is not the CLI — so the value was parsed, forwarded, refused by
 `avcodec_open2` as unknown, and copied into a leftovers map nothing reads.
 
-What it cost is the whole ProRes recording ceiling. `prores_ks_vulkan` runs Kostya's trellis
-quantiser search as a compute shader, and a non-zero quantiser sets the `force_quant`
-specialisation constant that bypasses it. The search saturates GPU compute below what two 25p
-channels need — so the ceiling was one channel, and the one option that would have raised it was
-being thrown away.
+**And FFmpeg's Vulkan ProRes encoder then wrote a corrupt file.** Three places disagreed about
+which quantiser index the frame was being built at: the estimate pass wrote its scores at index 0
+while everything downstream read `force_quant`; the trellis pass read `bits[0]` literally for the
+slice sizes and buffer offsets; and the quantisation matrices were a table of zeros at the index
+both shaders divide by. The result was green, luma clamped, and `invalid plane data size` from the
+decoder on every frame. Each fault masked the next — correcting only the first turns the error
+into "slice out of bounds", correcting the first two yields a valid file holding a uniform grey.
 
-`iso-scaling --producer route`, 1080p2500, 16-bit channels, one recording per channel, both arms
-in the **same run against the same binary**:
+Fixed in `docs/upstream/prores_ks_vulkan_qscale_corruption.md`, applied to the local FFmpeg build,
+and installed by `tools/use_local_ffmpeg.sh apply`. **On the pinned build the option is worse than
+useless**, so the operational guard is: if `-q:v` is in a consumer's args, check the recording
+decodes before trusting anything else about it.
 
-| arm | channels | why it stopped | GPU% | VRAM |
-| :--- | ---: | :--- | ---: | ---: |
-| `prores_ks_vulkan`, no quantiser | **1** | 47 late frames at 2 channels | 59 | 1500 MB |
-| `prores_ks_vulkan -q:v 4` | 8 | reached the top of the ladder with headroom | 53 | 2997 MB |
+**What it buys**, `iso-scaling --producer route` at 1080p2500 on 16-bit channels, one recording
+per channel:
 
-At two channels, where the default arm is already failing, the `-q:v` arm ran at 2.3–4.3 ms of
-jitter with zero late frames against 32–37 ms and 13–17 late.
+| arm | channels | why it stopped |
+| :--- | ---: | :--- |
+| `prores_ks_vulkan -q:v 4` | **8+** | the top of the ladder, with headroom |
+| `prores_ks_vulkan` | **1** | 37 late frames at 2 channels |
 
-**AND EVERY ONE OF THOSE EIGHT RECORDINGS IS UNUSABLE.** The speed is real; the picture is not.
-Measured the same day by `encode-matrix --codec prores_q` and then reproduced outside CasparCG
-entirely, so it is FFmpeg's fixed-quantiser path rather than this fork's plumbing:
+**And it is a bitrate trade, not a quality trade** — which is the opposite of what an earlier
+version of this entry said. Measured on one frame of detailed content, every setting encoding the
+*same* input, compared against the encoder's own input after the identical `libplacebo`
+conversion, so the numbers are quantisation alone with no conversion or subsampling error in them
+(10-bit, full scale 1023):
 
-| | mean R,G,B of the decoded frame | max |
-| :--- | :--- | ---: |
-| `prores_ks_vulkan -profile:v 3` | 100.8, 105.3, 102.3 | 255 |
-| the same `+ -q:v 4` | **0.1, 135.0, 0.1** | 130 |
+| setting | 12 frames | Y mean error | Y max | Y PSNR |
+| :--- | ---: | ---: | ---: | ---: |
+| default (trellis search) | 11.4 MB | 5.60 | 73 | 42.89 dB |
+| `-q:v 12` | 11.8 MB | 5.26 | 41 | **43.70 dB** |
+| `-q:v 4` | 25.0 MB | 1.93 | 15 | **52.34 dB** |
+| `-q:v 2` | 34.6 MB | 0.96 | 8 | 58.02 dB |
 
-Red and blue are gone and luma is clamped at half range — the picture is green. The decoder
-reports **`invalid plane data size`** on every frame, so the encoder is writing malformed slices
-rather than trading quality for speed. Against the CPU reference the `-q:v` arms differ by a
-**mean of 236 LSB with 100% of pixels over 3 LSB and only 5% of those at an edge**, where the
-default arm sits at mean 2.55 with 86% at an edge — the flat-area spread is what says defect
-rather than a 4:2:2 disagreement. q2, q4 and q8 land within 0.1 LSB of each other while the file
-size falls monotonically, which is what says the value arrives and the encode is wrong.
+At matched size the search is marginally *behind* forcing the quantiser it settles on — 42.89 dB
+against 43.70 dB for `-q:v 12` at 11.4 against 11.8 MB. `-q:v 4` is **+9.5 dB over the default**
+and costs 2.2x the bytes. So the recommendation is eight channels *and* a better picture, paid for
+in disk.
 
-`-bits_per_mb` produces a correct picture but does **not** bypass the search (`force_quant` comes
-only from `global_quality`), so it changes the rate and not the speed and measures the same
-one-channel ceiling.
+**Limits on that comparison:** one frame, and the content is detailed noise — the worst case for a
+DCT codec and the material most likely to make a trellis search look bad, so expect the search to
+do better on flatter footage. PSNR is also not a look; the maximum errors (15 against 73) say more
+about visible quality than the means, and neither is a viewing verdict.
 
-**The speed win is content-dependent, and so is the file size**, which is worth knowing because
-neither is a signal that anything is wrong. Measured on 500 frames of 1080p through the same
-filter chain: on `smptehdbars` the fixed quantiser is **no faster at all** (3.2 s against 3.4 s)
-and writes a *smaller* file; on moving noise it is **2.4x faster** (10.7 s against 4.5 s) and
-writes one *more than twice the size* of the correct output. The corruption is identical in both.
-
-Written up for upstream in `docs/upstream/prores_ks_vulkan_qscale_corruption.md`, with a
-reproducer that needs no CasparCG and the CPU encoder as the control.
-
-**So `prores_ks_vulkan` is a one-channel capability at 1080p16, and this fix does not change
-that.** What it changes is that `-q:v` now reaches the encoder at all, which is what made the
-defect visible; the option was previously thrown away, so no one could have found this.
-Reported upstream-facing rather than worked around: nothing here should paper over a broken
-encoder by silently ignoring an option the operator asked for.
-
-`global_quality` is left alone — it is a real option and its units are the operator's to choose,
-though note that `-global_quality 4` asks for 4/118 of a quantiser step, which rounds to the same
-zero that means "use rate control". Only `q` and `qscale` are translated.
-
-**The first attempt set only the flag and changed nothing**, because ProRes reads
-`global_quality` directly and never checks `AV_CODEC_FLAG_QSCALE`. What caught it was file size:
-375 MB with `-q:v 4` against 370 MB without, from the same ten seconds of the same source. A
-forced quantiser cannot come out the same size as rate control. The flag is still set, because
-other encoders do gate on it.
-
-**Not covered:** nothing asserts that a consumer argument reaches the encoder at all. This was
-found by reading a ceiling, and the general case — an argument accepted with `202` and silently
-dropped — has no check that can fail.
+**Earlier numbers are void, in two different ways.** Any ceiling measured with `-q:v` before the
+consumer fix was measured without the option; anything measured between the consumer fix and the
+FFmpeg fix was measuring a corrupt encode.
 
 ### Fixed: an idle channel abandoned the Vulkan encode path on its first frame
 
