@@ -1515,7 +1515,32 @@ struct gpu_strategy : public display_strategy
             if (in_frame.texture()) {
                 auto ogl_tex = std::dynamic_pointer_cast<accelerator::ogl::texture>(in_frame.texture());
                 if (ogl_tex && self->window_.shared_) {
-                    // OGL mixer with shared GL contexts: bind directly (zero-copy GPU path)
+                    // OGL mixer with shared GL contexts: bind directly (zero-copy GPU path).
+                    //
+                    // ⚠ THIS PATH IS BROKEN AND HAS NEVER RUN ON THE REFERENCE BOX. It is
+                    // reached only when `window_.shared_` is true, and shared context creation
+                    // fails here: `device::impl` binds the mixer's GL context on the "OpenGL
+                    // Device" thread and leaves it current for that thread's whole life, so a
+                    // consumer sharing against it from its own thread is refused --
+                    // `wglCreateContextAttribsARB` returns null with `GetLastError()` at 0.
+                    //
+                    // Measured 2026-08-23. Making it reachable is a one-line change (hand
+                    // consumers a never-current context in the mixer's share group instead of
+                    // the mixer's own; share groups are transitive, so it works and the log then
+                    // says "zero-copy OGL path enabled"). Doing that revealed the path does not
+                    // update the window: `PLAY 1-1 #FF3010` and then `#1030FF` both left the
+                    // previous frame on screen, while the host-upload path renders them exactly
+                    // (255,48,16 and 16,48,255 from a PrintWindow grab). Moving content did
+                    // update, so it is stills specifically, and the grab itself was verified
+                    // against moving content first.
+                    //
+                    // So the context-sharing failure has been silently guarding a broken
+                    // renderer, and fixing the sharing without fixing this trades a wasted
+                    // readback for a frozen preview. The seed-context change was reverted for
+                    // that reason. Whoever picks this up: the suspect is the interaction with
+                    // the mixer's still-frame cache, which skips composition when inputs have
+                    // not changed -- but the host path sees the same frames and renders them, so
+                    // that is a starting point rather than a diagnosis.
                     ogl_tex->bind(0);
 #ifdef ENABLE_VULKAN
                 } else if (try_vk_interop(in_frame, self)) {
