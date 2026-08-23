@@ -52,6 +52,15 @@ size falls monotonically, which is what says the value arrives and the encode is
 only from `global_quality`), so it changes the rate and not the speed and measures the same
 one-channel ceiling.
 
+**The speed win is content-dependent, and so is the file size**, which is worth knowing because
+neither is a signal that anything is wrong. Measured on 500 frames of 1080p through the same
+filter chain: on `smptehdbars` the fixed quantiser is **no faster at all** (3.2 s against 3.4 s)
+and writes a *smaller* file; on moving noise it is **2.4x faster** (10.7 s against 4.5 s) and
+writes one *more than twice the size* of the correct output. The corruption is identical in both.
+
+Written up for upstream in `docs/upstream/prores_ks_vulkan_qscale_corruption.md`, with a
+reproducer that needs no CasparCG and the CPU encoder as the control.
+
 **So `prores_ks_vulkan` is a one-channel capability at 1080p16, and this fix does not change
 that.** What it changes is that `-q:v` now reaches the encoder at all, which is what made the
 defect visible; the option was previously thrown away, so no one could have found this.
