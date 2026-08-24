@@ -21,6 +21,7 @@ is `src/modules/gstreamer/README.md` and it is deliberately short.
 9. [Debugging: how to find out what actually happened](#9-debugging-how-to-find-out-what-actually-happened)
 10. [Best practice, and the mistakes that cost us days](#10-best-practice-and-the-mistakes-that-cost-us-days)
 11. [Third-party plugins](#11-third-party-plugins)
+11b. [Worth exploring — surveyed, not tested](#11b-worth-exploring--surveyed-not-tested)
 12. [What this module does not do](#12-what-this-module-does-not-do)
 
 ---
@@ -468,6 +469,83 @@ None of the third-party options above have been tested against this module. `<pl
 the supported mechanism; what you load through it is yours to verify.
 
 ---
+
+## 11b. Worth exploring — surveyed, not tested
+
+The bundled install is 272 plugins and 1632 elements, and the module currently exercises maybe
+twenty of them. This is what a survey of the rest turned up, **checked for existence on this
+box but not integrated or measured**. Ordered by how large a gap it fills in CasparCG rather
+than by how interesting it is.
+
+### Fills something CasparCG does not have at all
+
+**Closed captions.** `ccextractor`, `cccombiner`, `ccconverter`, `cea608mux`, `line21decoder`,
+and — notably — `h264ccinserter` / `h265ccinserter`, which put CEA-608/708 back into an encoded
+stream. A grep of this tree finds **no caption support anywhere**, so a compliance requirement
+that arrives tomorrow currently has no answer. This is the biggest single gap the survey found.
+
+**Automatic failover.** `fallbacksrc` and `fallbackswitch` — "live source with a fallback
+stream", switching to a still or a backup input when the primary stops, and back when it
+returns. CasparCG has nothing equivalent: our `srt-recovery` case proves a layer survives its
+sender going away, but it shows the last frame while it waits. For a playout channel that is
+the difference between a freeze and a slate.
+
+**Loudness compliance.** `ebur128level` measures EBU R128 integrated/short/momentary loudness
+and true peak. `level` and `spectrum` cover simpler metering. Nothing in this tree measures
+loudness, and it is a delivery requirement in most of Europe.
+
+**Timecode-triggered playout.** `avwait` "drops all audio/video until a specific timecode or
+running time has been reached", and `timecodestamper` puts timecode onto a stream. This tree
+has an LTC module for reading timecode, but nothing that *waits* for one.
+
+**Segmented and resilient recording.** `splitmuxsink` writes a new file every N seconds or N
+bytes, so a long record is not one file that a crash truncates entirely. `hlssink3`,
+`dashsink`, `awss3hlssink` do the packaging equivalents.
+
+**WebRTC.** `whipclientsink`, `whepclientsrc`, `webrtcsink`/`webrtcsrc`, plus LiveKit and Janus
+integrations. Sub-second contribution and distribution, which SRT does not do.
+
+**IP cameras.** `rtspsrc2` for RTSP, plus `rtponvifparse`/`rtponviftimestamp` and
+`onvifmeta2relationmeta` for ONVIF cameras and their metadata.
+
+### Directly relevant to work already done here
+
+**`nvd3d11h264enc` — a zero-copy consumer without CUDA.** Its sink caps are
+`video/x-raw(memory:D3D11Memory)` with `BGRA` among the accepted formats, and it runs on this
+box. `cli.py gst-consumer-cost` measured the current consumer's host readback costing 0.20-0.27%
+of frames; the obvious fix was assumed to be `cuda_vk_uploader`, and this suggests it does not
+have to be. The mixer's texture already reaches D3D11 through `d3d11_import_bridge` /
+`dx_interop` for ingest — the same machinery, in reverse, would hand a D3D11 texture straight
+to this encoder. **That is a hypothesis, not a result.**
+
+**SRT statistics.** `srtsrc` has a `stats` property carrying RTT, bandwidth, packet loss and
+retransmission counts. Surfacing it in `INFO` would turn "the picture is breaking up" into a
+number, and this module currently reports nothing about the link itself.
+
+**PTP.** GStreamer has a PTP clock and can slave a pipeline to it. CasparCG **already has PTP**
+in the cluster module (`src/modules/cluster/ptp/ptp_clock.cpp`), so this is not a gap — it is an
+alignment question. Two independent PTP clients on one machine is worth thinking about before
+it is worth building.
+
+**The whole `d3d12` stack.** `d3d12h264dec`, `d3d12av1dec`, `d3d12convert`, `d3d12compositor`,
+`d3d12deinterlace`, `d3d12fisheyedewarp`, `d3d12screencapturesrc`. The module's GPU bridge is
+D3D11 only. Whether D3D12 is worth a second bridge is unmeasured, and the answer is probably
+"not until something needs AV1 decode".
+
+**Vendor encoders on other hardware.** `qsv*` (Intel) and `amfcodec` (AMD) plugins ship with the
+install but register no elements on this box, because it has neither. On a deployment that does,
+they are the equivalent of `nvcodec`.
+
+### Smaller, but cheap to try
+
+`zbar` (barcode/QR detection), `hsvdetector`, `combdetect` (interlacing detection),
+`videoframe-audiolevel` (audio level as video-frame metadata), `gleffects_*` filters,
+`d3d11fisheyedewarp` for 360 work, and `dvbsubenc`/`ttml` for subtitles.
+
+**None of the above is tested against this module.** Existence is not integration: several will
+need caps the appended sink cannot negotiate, and anything that produces metadata rather than
+pixels has nowhere to go today — `make_frame` carries a picture and audio, not GStreamer's
+analytics metadata.
 
 ## 12. What this module does not do
 
