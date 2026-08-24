@@ -15,6 +15,11 @@ set(CASPARCG_DOWNLOAD_CACHE ${CMAKE_CURRENT_BINARY_DIR}/external CACHE STRING "D
 
 option(ENABLE_HTML "Enable HTML module, require CEF" ON)
 
+# OFF by default, unlike every other module here, and for a reason: src/modules/gstreamer's
+# CMakeLists is a FATAL_ERROR without GSTREAMER_ROOT. That is right for somebody who asked for
+# the module and wrong for everybody who did not, so nobody gets it by accident.
+option(ENABLE_GSTREAMER "Enable GStreamer module, requires a GStreamer 1.0 installation" OFF)
+
 set(DIAG_FONT_PATH "LiberationMono-Regular.ttf" CACHE STRING
     "Path to font that will be used to load diag font at runtime. By default
     this loads the font distributed with the application from the working
