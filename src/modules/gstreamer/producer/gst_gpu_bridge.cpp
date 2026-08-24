@@ -38,6 +38,7 @@
 #include <gst/d3d11/gstd3d11.h>
 #include <gst/video/video.h>
 
+#include <d3d10.h>       // ID3D10Multithread, which lives here and applies to D3D11
 #include <d3d11_4.h>
 #include <d3dcompiler.h>
 #include <dxgi1_2.h>
@@ -367,6 +368,40 @@ core::draw_frame gst_gpu_bridge::to_frame(void*                       tag,
             return core::draw_frame{};
         }
 
+        // ── Multithread protection on GStreamer's context ─────────────────────────────────
+        // `gst_d3d11_device_lock` is GStreamer's own mutex and it is only mutual exclusion
+        // among code that takes it. The D3D11 video decoder does not: it issues
+        // `ID3D11VideoContext` calls on its own thread, and with the extraction draws running
+        // on the producer's thread the debug layer says so exactly --
+        //
+        //   SwapDeviceContextState: Two threads were found to be executing functions
+        //   associated with the same Device[Context] at the same time. This will cause
+        //   corruption of memory. Appropriate thread synchronization needs to occur external
+        //   to the Direct3D API (or through the ID3D10Multithread interface).
+        //
+        // -- and then the process takes an unhandled exception. Holding the GStreamer lock
+        // across the whole extraction was necessary and did not fix it, because the other
+        // party never takes that lock.
+        //
+        // `ID3D10Multithread` is the remedy the message names, and it is the same one FFmpeg's
+        // D3D11VA path enables for the same reason. It makes the driver serialise context use
+        // internally. Idempotent, and cheap relative to a decode.
+        {
+            ID3D10Multithread* mt = nullptr;
+            if (SUCCEEDED(m.ctx_->QueryInterface(__uuidof(ID3D10Multithread),
+                                                 reinterpret_cast<void**>(&mt))) && mt) {
+                const BOOL was = mt->SetMultithreadProtected(TRUE);
+                if (!was)
+                    CASPAR_LOG(info) << L"[gstreamer] enabled D3D11 multithread protection on "
+                                        L"GStreamer's device context (it was off).";
+                mt->Release();
+            } else {
+                m.give_up(L"GStreamer's D3D11 context does not expose ID3D10Multithread, so the "
+                          L"extraction cannot be made safe against the decoder's own thread");
+                return core::draw_frame{};
+            }
+        }
+
         auto* resource = gst_d3d11_memory_get_resource_handle(d3d_mem);
         ID3D11Texture2D* surface = nullptr;
         if (resource == nullptr ||
@@ -463,6 +498,14 @@ core::draw_frame gst_gpu_bridge::to_frame(void*                       tag,
     }
     const UINT subresource = gst_d3d11_memory_get_subresource_index(d3d_mem);
 
+#ifdef ENABLE_VULKAN
+    // Vulkan may still be reading last frame's planes, and the draws below overwrite them;
+    // nothing else orders the two queues. Deliberately BEFORE the lock below: this can block
+    // for milliseconds, and the decoder needs the context during exactly that window.
+    if (m.vk_import_)
+        m.vk_import_->wait_for_previous_copy();
+#endif
+
     ID3D11Device3* dev3 = nullptr;
     if (FAILED(m.device_->QueryInterface(__uuidof(ID3D11Device3), reinterpret_cast<void**>(&dev3))) || !dev3) {
         surface->Release();
@@ -475,10 +518,24 @@ core::draw_frame gst_gpu_bridge::to_frame(void*                       tag,
     // than the decoder's subresource index.
     ID3D11Texture2D* sample_from  = surface;
     UINT             sample_slice = subresource;
+    // ── ONE critical section for the whole extraction ─────────────────────────────────────
+    // This is GStreamer's immediate context, shared with its own streaming threads, and it is
+    // not free-threaded. Taking the lock separately around the staging copy and around the
+    // draws leaves a window between them in which the decoder can use -- and re-state -- the
+    // same context.
+    //
+    // That window is not theoretical. It presented as an unhandled exception on the 10-bit
+    // clip with the D3D11 debug layer naming it outright: "SwapDeviceContextState: Two threads
+    // were found to be executing functions associated with the same Device[Context] at the
+    // same time." The 8-bit path had the identical structure and had simply won the race every
+    // time, which is the worst way for a threading defect to behave.
+    //
+    // So the lock is held across the staging copy, the view creation and both draws. The
+    // sequence is one indivisible use of somebody else's context.
+    gst_d3d11_device_lock(m.gst_device_);
+
     if (m.need_stage_) {
-        gst_d3d11_device_lock(m.gst_device_);
         m.ctx_->CopySubresourceRegion(m.staging_, 0, 0, 0, 0, surface, subresource, nullptr);
-        gst_d3d11_device_unlock(m.gst_device_);
         sample_from  = m.staging_;
         sample_slice = 0;
     }
@@ -517,18 +574,12 @@ core::draw_frame gst_gpu_bridge::to_frame(void*                       tag,
             if (uv_srv) uv_srv->Release();
             dev3->Release();
             surface->Release();
+            gst_d3d11_device_unlock(m.gst_device_);   // still inside the critical section
             m.note_failure(L"the NV12 plane views could not be created (is the surface bound for shader access?)");
             return core::draw_frame{};
         }
     }
 
-#ifdef ENABLE_VULKAN
-    // Vulkan may still be reading last frame's planes, and the draws below overwrite them.
-    // Nothing else orders the two queues. Before GStreamer's lock is taken, so the wait never
-    // blocks its streaming thread.
-    if (m.vk_import_)
-        m.vk_import_->wait_for_previous_copy();
-#endif
 
     auto draw = [&](ID3D11RenderTargetView* rtv, ID3D11ShaderResourceView* srv, int w, int h) {
         D3D11_VIEWPORT vp = {};
@@ -551,10 +602,10 @@ core::draw_frame gst_gpu_bridge::to_frame(void*                       tag,
 
     // GStreamer's immediate context is shared with its own streaming threads and is not
     // free-threaded. This is ITS device, not one we made, so the lock is GStreamer's.
-    gst_d3d11_device_lock(m.gst_device_);
     draw(m.y_rtv_, y_srv, m.width_, m.height_);
     draw(m.uv_rtv_, uv_srv, m.width_ / 2, m.height_ / 2);
     m.ctx_->Flush();
+
     gst_d3d11_device_unlock(m.gst_device_);
 
     if (own_views) {

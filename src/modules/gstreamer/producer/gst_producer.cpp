@@ -117,8 +117,17 @@ constexpr const char* host_tail = " ! videoconvert ! videorate ! appsink name=";
 /// untouched. When they are not, it is the difference between a pipeline that works and one
 /// that refuses to link, which is what a software `decodebin` feeding `d3d11upload` does:
 /// upload changes the memory type, never the format.
+/// **Both depths, and P010 first.** Pinning this to NV12 silently threw away 10-bit: a
+/// `d3d11h265dec` producing P010 would have `d3d11convert` narrow it to 8 bits to satisfy the
+/// filter -- or, as measured, fail to reach D3D11 memory at all, so the GPU route never engaged
+/// and the producer fell back to host transfer with no reason logged anywhere. Listing both
+/// lets each source keep the depth it decoded at, and the bridge reads the surface's real
+/// format per sample rather than trusting this string.
+///
+/// No spaces inside the braces: `gst_parse_launch` splits the description on whitespace.
 constexpr const char* gpu_tail =
-    " ! d3d11upload ! d3d11convert ! video/x-raw(memory:D3D11Memory),format=NV12 ! appsink name=";
+    " ! d3d11upload ! d3d11convert ! video/x-raw(memory:D3D11Memory),format={P010_10LE,NV12} ! "
+    "appsink name=";
 #endif
 
 /// Reads whichever of the two a message actually carries. Parsing a WARNING with
@@ -377,7 +386,8 @@ struct gst_producer : public core::frame_producer
         // link, which is the difference between an optimisation and a restriction.
 #ifdef CASPAR_GST_GPU_BRIDGE
         const auto gpu_caps =
-            want_gpu_ ? std::string("video/x-raw(memory:D3D11Memory), format=(string)NV12") + rate + "; "
+            want_gpu_ ? std::string("video/x-raw(memory:D3D11Memory), format=(string){ P010_10LE, NV12 }") +
+                            rate + "; "
                       : std::string("");
 #else
         const std::string gpu_caps;
