@@ -510,13 +510,34 @@ integrations. Sub-second contribution and distribution, which SRT does not do.
 
 ### Directly relevant to work already done here
 
-**`nvd3d11h264enc` — a zero-copy consumer without CUDA.** Its sink caps are
-`video/x-raw(memory:D3D11Memory)` with `BGRA` among the accepted formats, and it runs on this
-box. `cli.py gst-consumer-cost` measured the current consumer's host readback costing 0.20-0.27%
-of frames; the obvious fix was assumed to be `cuda_vk_uploader`, and this suggests it does not
-have to be. The mixer's texture already reaches D3D11 through `d3d11_import_bridge` /
-`dx_interop` for ingest — the same machinery, in reverse, would hand a D3D11 texture straight
-to this encoder. **That is a hypothesis, not a result.**
+**A zero-copy consumer needs CUDA after all — the D3D11 route does not work.** This entry
+previously said the opposite and labelled it a hypothesis; the hypothesis was tested and is
+false, so here is what was actually found.
+
+`nvd3d11h264enc` does accept `video/x-raw(memory:D3D11Memory)` with BGRA and it does run here.
+The problem is upstream of it: **the Vulkan mixer exports its textures as
+`VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32`** (`src/common/vulkan/platform_handles.h`), and
+`ID3D11Device1::OpenSharedResource1` cannot open an opaque Vulkan handle — it wants a handle
+D3D11 itself created, or a `D3D11_TEXTURE` handle type. The ingest bridge works in the
+direction it does precisely because *D3D11* allocates there and Vulkan imports.
+
+CUDA, by contrast, imports `OPAQUE_WIN32` happily, which is why `cuda_vk_strategy.cpp` in the
+DeckLink consumer already takes the channel's Vulkan texture into CUDA today. That is the
+working precedent in this tree, and `nvh264enc` (CUDA mode, not D3D11 mode) is the encoder it
+would feed.
+
+Two routes remain, and neither is small:
+
+* **CUDA egress**, following `cuda_vk_strategy` — the shorter path, because the hard part
+  already exists and works.
+* **Make the mixer's textures D3D11-importable**, by allocating them with a D3D11-compatible
+  external handle type. That is a change to how every Vulkan mixer texture is created, with
+  consequences well beyond this module.
+
+The measured prize is 0.20-0.27% of frames and 0.02 cores (`cli.py gst-consumer-cost`), and
+that rig will verify whichever route is taken. **The OpenGL mixer has no export at all** —
+`ogl::texture` implements no `export_native_handle` — so a GL-backed channel would need the
+`dx_interop` lock-and-copy in reverse, which is a third piece of work again.
 
 **SRT statistics.** `srtsrc` has a `stats` property carrying RTT, bandwidth, packet loss and
 retransmission counts. Surfacing it in `INFO` would turn "the picture is breaking up" into a
