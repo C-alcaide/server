@@ -75,6 +75,8 @@ extern "C" {
 #include <chrono>
 #include <limits>
 #include <deque>
+#include <cstring>
+#include <map>
 #include <mutex>
 #include <queue>
 #include <shared_mutex>
@@ -195,6 +197,12 @@ struct gst_producer : public core::frame_producer
     // channel thread for `state()`, and neither should wait on a pipeline rebuild.
     mutable std::mutex format_mutex_;
     std::string        negotiated_format_;
+
+    /// Whatever the pipeline's elements have reported about themselves, flattened. See
+    /// `note_element_message`. A map rather than named fields because the whole point is that
+    /// an element nobody anticipated still reports.
+    mutable std::mutex                     element_mutex_;
+    std::map<std::string, double>          element_state_;
 
     const bool want_gpu_;
 #ifdef CASPAR_GST_GPU_BRIDGE
@@ -481,7 +489,9 @@ struct gst_producer : public core::frame_producer
             return;
 
         while (auto* message = gst_bus_pop_filtered(
-                   bus, static_cast<GstMessageType>(GST_MESSAGE_ERROR | GST_MESSAGE_WARNING | GST_MESSAGE_EOS))) {
+                   bus,
+                   static_cast<GstMessageType>(GST_MESSAGE_ERROR | GST_MESSAGE_WARNING | GST_MESSAGE_EOS |
+                                               GST_MESSAGE_ELEMENT))) {
             switch (GST_MESSAGE_TYPE(message)) {
                 case GST_MESSAGE_ERROR:
                     // Not is_running_ = false. That was the original behaviour and it is the
@@ -497,6 +507,9 @@ struct gst_producer : public core::frame_producer
                 case GST_MESSAGE_EOS:
                     CASPAR_LOG(info) << print() << L" End of stream.";
                     is_eos_ = true;
+                    break;
+                case GST_MESSAGE_ELEMENT:
+                    note_element_message(message);
                     break;
                 default:
                     break;
@@ -628,6 +641,132 @@ struct gst_producer : public core::frame_producer
         graph_->set_tag(diagnostics::tag_severity::WARNING, "restart");
         is_failed_ = false;
         CASPAR_LOG(info) << print() << L" restarted.";
+    }
+
+    /// An element's own message, flattened into this producer's monitor state.
+    ///
+    /// **This is how a whole class of GStreamer element reports at all.** `level` and
+    /// `ebur128level` publish loudness this way; `spectrum` its bands; `videoframe-audiolevel`,
+    /// the ONVIF elements and the analytics overlays likewise. None of them touch the video
+    /// they pass through, so before this the only way to see their output was the log -- which
+    /// meant the module could carry them and tell you nothing.
+    ///
+    /// Everything lands under `gstreamer/element/<name>/<field>`, so it reaches INFO and OSC
+    /// with no per-element code. That genericity is the point: an element nobody anticipated
+    /// still reports, and adding support for a new one is a pipeline change rather than a
+    /// server change.
+    ///
+    /// Only scalar fields are taken. A GstStructure can hold arrays -- `level` sends one peak
+    /// per channel -- and those are reduced to their first value with the channel count
+    /// alongside, because monitor state is a flat key/value space and a per-channel fan-out
+    /// would be unbounded on a 16-channel bus.
+    void note_element_message(GstMessage* message)
+    {
+        const auto* st = gst_message_get_structure(message);
+        if (st == nullptr)
+            return;
+
+        const std::string name = gst_structure_get_name(st);
+        // A handful of elements post high-rate structural messages that are not measurements
+        // and would only add noise -- and one of them, `GstNavigation`, arrives per mouse move.
+        if (name.rfind("Gst", 0) == 0 && name != "GstMultiFileSink")
+            return;
+
+        std::lock_guard<std::mutex> lock(element_mutex_);
+        flatten_structure(st, name);
+    }
+
+    /// Flattens a GstStructure's scalar fields into `element_state_` under `prefix`.
+    /// Caller holds `element_mutex_`.
+    void flatten_structure(const GstStructure* st, const std::string& prefix)
+    {
+        const int fields = gst_structure_n_fields(st);
+        for (int i = 0; i < fields; ++i) {
+            const char*  field = gst_structure_nth_field_name(st, i);
+            const GValue* v    = gst_structure_get_value(st, field);
+            if (field == nullptr || v == nullptr)
+                continue;
+
+            const std::string key = prefix + "/" + field;
+            if (G_VALUE_HOLDS_DOUBLE(v))
+                element_state_[key] = g_value_get_double(v);
+            else if (G_VALUE_HOLDS_INT(v))
+                element_state_[key] = static_cast<double>(g_value_get_int(v));
+            else if (G_VALUE_HOLDS_UINT(v))
+                element_state_[key] = static_cast<double>(g_value_get_uint(v));
+            else if (G_VALUE_HOLDS_INT64(v))
+                element_state_[key] = static_cast<double>(g_value_get_int64(v));
+            else if (G_VALUE_HOLDS_UINT64(v))
+                element_state_[key] = static_cast<double>(g_value_get_uint64(v));
+            else if (G_VALUE_HOLDS_BOOLEAN(v))
+                element_state_[key] = g_value_get_boolean(v) ? 1.0 : 0.0;
+            else {
+                // `GST_VALUE_HOLDS_ARRAY`/`_LIST` expand to a comparison against a DATA symbol
+                // (`_gst_value_array_type`), and a data import cannot be delay-loaded:
+                // `LNK1194: cannot delay-load gstreamer-1.0-0.dll due to the import of data
+                // symbol`. This module is delay-loaded on purpose, so that the server still
+                // starts on a machine with no GStreamer -- which makes the type NAME, resolved
+                // through a function, the only way to ask.
+                const char* type_name = G_VALUE_TYPE_NAME(v);
+                if (type_name == nullptr)
+                    continue;
+                const bool is_array = std::strcmp(type_name, "GstValueArray") == 0;
+                const bool is_list  = std::strcmp(type_name, "GstValueList") == 0;
+                if (!is_array && !is_list)
+                    continue;
+
+                const guint n_vals = is_array ? gst_value_array_get_size(v) : gst_value_list_get_size(v);
+                if (n_vals == 0)
+                    continue;
+                const GValue* first = is_array ? gst_value_array_get_value(v, 0)
+                                               : gst_value_list_get_value(v, 0);
+                if (first != nullptr && G_VALUE_HOLDS_DOUBLE(first))
+                    element_state_[key] = g_value_get_double(first);
+                element_state_[key + "-count"] = static_cast<double>(n_vals);
+            }
+        }
+    }
+
+    /// Reads a `stats` property off every element that has one, once per state() call.
+    ///
+    /// **This is the other half of how GStreamer reports about itself**, and it is not the bus:
+    /// `srtsrc` and `srtsink` publish RTT, bandwidth, packet loss and retransmission counts as
+    /// a GstStructure on a property, and nothing is ever posted about them. Without this the
+    /// module could carry an SRT link and say nothing at all about its health -- "the picture
+    /// is breaking up" would stay an opinion when the transport has the number.
+    ///
+    /// Generic on purpose, like the bus handler: any element with a `stats` property reports,
+    /// so `rtspsrc`, `rtpbin` and the RIST elements come along without another line of code.
+    void poll_element_stats()
+    {
+        std::shared_lock<std::shared_mutex> lock(pipeline_mutex_);
+        if (pipeline_ == nullptr)
+            return;
+
+        auto* it = gst_bin_iterate_recurse(GST_BIN(pipeline_));
+        if (it == nullptr)
+            return;
+
+        GValue item = G_VALUE_INIT;
+        while (gst_iterator_next(it, &item) == GST_ITERATOR_OK) {
+            auto* element = static_cast<GstElement*>(g_value_get_object(&item));
+            if (element != nullptr &&
+                g_object_class_find_property(G_OBJECT_GET_CLASS(element), "stats") != nullptr) {
+                GstStructure* stats = nullptr;
+                g_object_get(G_OBJECT(element), "stats", &stats, nullptr);
+                if (stats != nullptr) {
+                    auto* name = gst_element_get_name(element);
+                    {
+                        std::lock_guard<std::mutex> guard(element_mutex_);
+                        flatten_structure(stats, name ? std::string(name) : std::string("stats"));
+                    }
+                    g_free(name);
+                    gst_structure_free(stats);
+                }
+            }
+            g_value_unset(&item);
+        }
+        gst_iterator_free(it);
     }
 
     /// Records what the sink negotiated, including the memory type, so `state()` can answer
@@ -961,6 +1100,15 @@ struct gst_producer : public core::frame_producer
         {
             std::lock_guard<std::mutex> lock(format_mutex_);
             state["gstreamer/format"] = negotiated_format_.empty() ? std::string("none") : negotiated_format_;
+        }
+        // Properties are pulled here rather than on the video thread: they are a read of live
+        // element state, and doing it per frame would cost a recursive bin walk fifty times a
+        // second to publish numbers that update far more slowly than that.
+        const_cast<gst_producer*>(this)->poll_element_stats();
+        {
+            std::lock_guard<std::mutex> lock(element_mutex_);
+            for (const auto& [key, value] : element_state_)
+                state["gstreamer/element/" + key] = value;
         }
         state["gstreamer/restarts"]   = static_cast<int64_t>(restarts_.load());
         state["gstreamer/starved"]    = static_cast<int64_t>(frames_starved_.load());

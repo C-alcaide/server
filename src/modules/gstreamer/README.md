@@ -283,6 +283,51 @@ stops leaves `received` sitting still while the channel keeps ticking — and a 
 *slower* than the channel does not starve it, because the appended `videorate` duplicates up to
 the channel rate.
 
+## What the pipeline's own elements report
+
+A whole class of GStreamer element does its work by **posting messages** or by publishing a
+`stats` property, and touches the video not at all. Before this the module could carry such an
+element and tell you nothing about it. Both routes now land in monitor state under
+`gstreamer/element/<element>/<field>`, so they reach `INFO` and OSC.
+
+**Generic on purpose.** There is no per-element code and no allow-list: an element nobody
+anticipated still reports, and supporting a new one is a pipeline change rather than a server
+change.
+
+```
+PLAY 1-10 [GSTREAMER] "... ! ebur128level ! level ! audioconvert ! appsink name=caspar_audio"
+```
+
+    gstreamer/element/ebur128-level/momentary-loudness   -6.01
+    gstreamer/element/ebur128-level/shortterm-loudness   -6.01
+    gstreamer/element/ebur128-level/global-loudness      -6.05
+    gstreamer/element/ebur128-level/true-peak             0.50
+
+Verified against a known input: a 1 kHz sine at 0.5 amplitude reads true-peak 0.50 and
+-6.05 LUFS, where 0.5 amplitude is -6.02 dBFS. **This is EBU R128 loudness in CasparCG, which
+it has never had.**
+
+The `stats` half covers the transports:
+
+```
+PLAY 1-10 [GSTREAMER] "srtsrc uri=srt://host:9010 ! tsdemux ! h264parse ! avdec_h264"
+```
+
+    gstreamer/element/srtsrc0/rtt-ms                  0.03
+    gstreamer/element/srtsrc0/bandwidth-mbps          0.54
+    gstreamer/element/srtsrc0/packets-received-lost   0
+    gstreamer/element/srtsrc0/packets-retransmitted   0
+    gstreamer/element/srtsrc0/negotiated-latency-ms   125
+
+so "the picture is breaking up" stops being an opinion. `rtspsrc`, `rtpbin` and the RIST
+elements have the same property and come along without another line of code.
+
+Two limits worth knowing. Only **scalar** fields are taken, and an array is reduced to its
+first value plus a `-count` — monitor state is a flat key/value space and a per-channel fan-out
+would be unbounded on a 16-channel bus. And this carries **measurements, not per-frame
+metadata**: closed captions and analytics results ride on the buffer rather than the bus, and
+`core::const_frame` has nowhere to put them yet.
+
 ## Failure handling
 
 A pipeline that errors is rebuilt, backing off 500 ms → 1 s → 2 s → 4 s to a 5 s ceiling, rather
