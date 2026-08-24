@@ -226,6 +226,21 @@ struct gst_producer : public core::frame_producer
         graph_->set_color("tick-time", diagnostics::color(0.0f, 0.6f, 0.9f));
         graph_->set_color("dropped-frame", diagnostics::color(0.3f, 0.6f, 0.3f));
         graph_->set_color("audio-underrun", diagnostics::color(0.6f, 0.3f, 0.3f));
+        // How much runway is left between the pipeline and the channel, normalised to the
+        // queue's depth. The single most useful line on a live source: it falls before the
+        // producer starves, so a sender that is slipping shows here while the picture is still
+        // perfect. `buffer` rather than `queue` to match the ffmpeg producer's line of the
+        // same meaning -- two names for one quantity is worse than either name.
+        graph_->set_color("buffer", diagnostics::color(1.0f, 1.0f, 0.0f));
+        // Ticks that found the queue empty and repeated the last picture. Frame counts cannot
+        // tell a healthy producer from a frozen one -- a source that stops leaves `received`
+        // sitting still while the channel keeps ticking -- so this is the line that shows a
+        // dead source, and it had no line at all despite the README calling it the one worth
+        // knowing.
+        graph_->set_color("starved", diagnostics::color(0.9f, 0.2f, 0.2f));
+        // A pipeline rebuild. Tagged rather than plotted: it is an event, and on a live source
+        // it is the event you want to be able to point at afterwards.
+        graph_->set_color("restart", diagnostics::color(1.0f, 0.5f, 0.0f));
         diagnostics::register_graph(graph_);
 
         build_pipeline();
@@ -600,6 +615,7 @@ struct gst_producer : public core::frame_producer
 #endif
 
         ++restarts_;
+        graph_->set_tag(diagnostics::tag_severity::WARNING, "restart");
         is_failed_ = false;
         CASPAR_LOG(info) << print() << L" restarted.";
     }
@@ -879,6 +895,8 @@ struct gst_producer : public core::frame_producer
         std::lock_guard<std::mutex> lock(frames_mutex_);
 
         queue_peak_ = std::max(queue_peak_.load(), static_cast<uint64_t>(frames_.size()));
+        graph_->set_value("buffer", static_cast<double>(frames_.size()) /
+                                        static_cast<double>(max_queued_frames));
 
         if (!frames_.empty()) {
             last_frame_ = frames_.front();
@@ -888,6 +906,7 @@ struct gst_producer : public core::frame_producer
             // startup, not starvation, and counting them would make every producer look bad
             // for the first second of its life.
             ++frames_starved_;
+            graph_->set_tag(diagnostics::tag_severity::WARNING, "starved");
         }
 
         return last_frame_;

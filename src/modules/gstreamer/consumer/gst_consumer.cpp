@@ -45,6 +45,7 @@
 #include <gst/app/gstappsrc.h>
 #include <gst/gst.h>
 
+#include <algorithm>
 #include <atomic>
 #include <mutex>
 
@@ -112,6 +113,10 @@ struct gst_consumer : public core::frame_consumer
     {
         graph_->set_color("frame-time", diagnostics::color(0.5f, 1.0f, 0.2f));
         graph_->set_color("dropped-frame", diagnostics::color(0.3f, 0.6f, 0.3f));
+        // How full appsrc's own queue is, normalised to the limit it was configured with.
+        // Every other consumer in the tree graphs its input buffer under this name, and it is
+        // what distinguishes "the encoder is keeping up" from "it is about to start dropping".
+        graph_->set_color("input", diagnostics::color(0.7f, 0.4f, 0.4f));
     }
 
     ~gst_consumer()
@@ -293,6 +298,23 @@ struct gst_consumer : public core::frame_consumer
         return reason;
     }
 
+    /// How full appsrc's queue is, as a fraction of the limit it was configured with.
+    ///
+    /// `max-bytes` is set to one frame's BGRA size times four, so this reads 0.25 per frame
+    /// still in flight. A consumer whose encoder is keeping up sits near zero; one about to
+    /// start dropping climbs first, which is the whole point of plotting it rather than only
+    /// counting the drops after they happen.
+    double appsrc_fill() const
+    {
+        if (video_src_ == nullptr)
+            return 0.0;
+        const auto limit = static_cast<guint64>(format_desc_.size) * 4;
+        if (limit == 0)
+            return 0.0;
+        const auto level = gst_app_src_get_current_level_bytes(GST_APP_SRC(video_src_));
+        return std::min(1.0, static_cast<double>(level) / static_cast<double>(limit));
+    }
+
     void poll_bus()
     {
         auto* bus = gst_element_get_bus(pipeline_);
@@ -367,6 +389,7 @@ struct gst_consumer : public core::frame_consumer
             push_audio(frame, index);
 
         graph_->set_value("frame-time", frame_timer_.elapsed() * format_desc_.fps * 0.5);
+        graph_->set_value("input", appsrc_fill());
 
         return make_ready_future(true);
     }

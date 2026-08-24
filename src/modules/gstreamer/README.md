@@ -159,6 +159,18 @@ path, byte-identical to the host path.
 `INFO 1-10` carries `received`, `dropped`, `starved`, `queue`, `queue-peak`, `gpu-frames`,
 `restarts`, `underruns`, `audio`, `eos`, `position` and `length`.
 
+The diag window carries the same story for someone watching rather than polling. The
+**producer** plots `frame-time`, `tick-time` and `buffer` — the queue depth normalised to its
+own limit, which falls *before* the producer starves, so a sender that is slipping shows up
+while the picture is still perfect — and tags `dropped-frame`, `audio-underrun`, `starved` and
+`restart`. The **consumer** plots `frame-time` and `input` (how full `appsrc`'s queue is
+against its `max-bytes`) and tags `dropped-frame`.
+
+Every one of those plots a quantity `INFO` also reports, which is deliberate: the numbers are
+gated by the battery, and the graph is a second view of the same values rather than a separate
+source of truth. Note that diagnostics graphs are **drawn and nothing else** — they are not
+published over OSC or in monitor state — so nothing can assert the window itself.
+
 `starved` is the one worth knowing: it counts ticks that found the queue empty and repeated the
 last picture. Frame counts cannot tell a healthy producer from a frozen one — a source that
 stops leaves `received` sitting still while the channel keeps ticking — and a source merely
