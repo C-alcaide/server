@@ -303,10 +303,16 @@ public:
 #else
             localtime_r(&now, &t);
 #endif
-            wchar_t buf[32];
-            std::swprintf(buf, 32, L"prores_%04d%02d%02d_%02d%02d%02d",
+            // Timestamp PLUS the capture device. Second resolution with no discriminator
+            // meant two bypass consumers started in the same second wrote the same name and
+            // the second failed to open its file -- see the note in prores_consumer.cu, where
+            // the same defect cost a 2-channel ISO ladder one of its two recordings. The
+            // device index is the right discriminator here: two bypass consumers capture two
+            // different SDI inputs by definition.
+            wchar_t buf[48];
+            std::swprintf(buf, 48, L"prores_%04d%02d%02d_%02d%02d%02d_dev%d",
                           t.tm_year + 1900, t.tm_mon + 1, t.tm_mday,
-                          t.tm_hour, t.tm_min, t.tm_sec);
+                          t.tm_hour, t.tm_min, t.tm_sec, cfg_.device_index);
             filename = std::wstring(buf) + ext;
         }
         pending_full_path_ = cfg_.output_path + L"\\" + filename;

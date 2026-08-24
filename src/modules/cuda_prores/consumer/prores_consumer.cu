@@ -425,6 +425,9 @@ public:
         pending_audio_a_.clear();
 
         format_desc_ = format_desc;
+        // Kept for the auto-generated filename, which needs a per-channel discriminator --
+        // see make_timestamp_filename.
+        channel_index_ = channel_info.index;
         prores_tables_upload();
 
         // No GL context is captured from `channel_info` any more, on either platform. It was
@@ -1090,8 +1093,17 @@ private:
 
     std::wstring build_filename(int64_t /*fn*/) const
     {
-        // Generate a timestamp-based filename so successive recordings don't
-        // overwrite each other: prores_20260313_142305.mov
+        // Timestamp so successive recordings do not overwrite each other, PLUS the channel,
+        // because the timestamp alone is not unique.
+        //
+        // It has second resolution and carried no discriminator, so two consumers on two
+        // channels pointed at one directory -- which is what a multi-channel ISO rig IS --
+        // generated the same name and the second failed with "Failed to open MOV". Measured
+        // 2026-08-23: a 2-channel ISO ladder wrote one file of two, and the recording that
+        // did not happen looked exactly like a ceiling.
+        //
+        // Channel index rather than consumer index: two CUDA_PRORES consumers on different
+        // channels both sit in consumer slot 1, so the consumer index does not separate them.
         const wchar_t *ext = cfg_.use_mxf ? L".mxf" : L".mov";
         std::time_t now = std::time(nullptr);
         struct tm t;
@@ -1100,16 +1112,17 @@ private:
 #else
         localtime_r(&now, &t);
 #endif
-        wchar_t buf[32];
-        std::swprintf(buf, 32, L"prores_%04d%02d%02d_%02d%02d%02d",
+        wchar_t buf[48];
+        std::swprintf(buf, 48, L"prores_%04d%02d%02d_%02d%02d%02d_ch%d",
                       t.tm_year + 1900, t.tm_mon + 1, t.tm_mday,
-                      t.tm_hour, t.tm_min, t.tm_sec);
+                      t.tm_hour, t.tm_min, t.tm_sec, channel_index_);
         return std::wstring(buf) + ext;
     }
 
     // ── Configuration ─────────────────────────────────────────────────────
     prores_config            cfg_;
     int                      index_;
+    int                      channel_index_ = 0;
     core::video_format_desc  format_desc_;
 
     // ── Format properties ─────────────────────────────────────────────────
