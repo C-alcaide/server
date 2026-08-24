@@ -412,6 +412,34 @@ recording's and not the decode's.
 | `ffv1` (CPU) | vulkan 8 | **0** | 172 frames lost at 1 channel — and 0 in another run, so marginal |
 | `hap` | — | **n/a** | the encoder is not in this FFmpeg build |
 
+### Are these numbers plausible for the hardware?
+
+The whole table above came from one program — this server, measured by one harness, through one
+exporter. A defect anywhere in that chain that made a recording **cheaper** than it should be
+would raise the ceiling and look exactly like success, so the three highest Vulkan rows were
+re-measured with **CasparCG out of the picture entirely**: concurrent standalone `ffmpeg`
+processes, same GPU, same FFmpeg binaries, 30 s each, `smptehdbars` at 1080p25.
+
+| encoder | this server | standalone ffmpeg | |
+| :--- | ---: | ---: | :--- |
+| `prores_ks_vulkan -q:v 12` | 12 | **14** held, at 1.14× | server is 2 below the hardware |
+| `h264_vulkan` | 14 | **14** held, 16 failed at 0.94× | exact |
+| `hevc_vulkan` | 6 | **6** held, 8 failed at 0.91× | exact |
+
+Two of the three land on the server's number exactly, and the third leaves the server slightly
+under the hardware — which is the expected direction, because the server also runs a mixer, a
+producer and an output on every one of those channels. **Nothing in the table is cheaper than
+the GPU can account for.**
+
+**What this does not check.** That the recordings are *correct* — a fast encoder writing rubbish
+would pass; `encode-parity` owns the picture. And it shares the table's content bias: bars
+compress to 0.059 MB/frame against the 0.97 ProRes 422 HQ is rated for, so entropy coding is
+easier on both sides than it would be on real pictures. Two arms disagree the other way under
+that same bias and are open questions rather than corroboration: standalone holds **4** channels
+of `ffv1_vulkan` where this server records none, and **4** of `prores_ks_vulkan` without `-q:v`
+with 3.78× still spare where the server caps at 2. Both are consistent with the quantiser search
+below being content-dependent — exactly what trivial content cannot stress.
+
 > **⚠ "the source producer starved" is not a recorder ceiling.** One decoder feeding N routed
 > channels eventually cannot, and the source channel then logs `Waiting for video frame...`. Six
 > arms stopped that way, so their numbers are floors bounded by this rig rather than by the
