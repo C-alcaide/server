@@ -758,7 +758,7 @@ def decode_paths():
              "the same picture arrives four ways — what differs is how much of it the CPU ever sees",
              parent=None, color=MUTED, size=8.4, ha="center", style="italic")
 
-    W, H, GAP = 13.6, 15.0, 3.0
+    W, H, GAP = 13.6, 13.2, 3.0
 
     rows = [
         ("Software", DANGER_T, "every codec · the only route that always works", [
@@ -780,22 +780,24 @@ def decode_paths():
             ("grid", ("CUDA kernels", "parse · dequant · IDCT")),
             ("stack", ("BGRA16", "16.6 MB/frame, on the GPU")),
             ("bus", ("CUDA → GL or VK", "whichever mixer runs")),
-            ("grid", ("mixer texture", "ready to composite")),
+            ("grid", ("mixer texture", "already RGB · no convert")),
         ]),
         ("FFmpeg Vulkan compute", SUCCESS, "FFmpeg 8 · ProRes · ProRes RAW · FFV1 · DPX", [
             ("file", ("file", "on disk")),
             ("grid", ("compute shaders", "no decode hardware needed")),
-            ("stack", ("VkImage planes", "on the mixer's device")),
+            ("stack", ("VkImage planes", "8.3 MB/frame, 422p10")),
+            ("bus", ("imported in place", "same device · no copy")),
             ("prism", ("mixer shader", "YCbCr → RGB")),
         ]),
     ]
 
     for r, (name, col, note, steps) in enumerate(rows):
-        y = 74 - r * 19.0
-        lay.text(f"rn{r}", 3, y + H + 1.6, name, parent=None, color=col, size=9,
+        # 73, and the note 1.3 above the box: at 0.8 the note's descenders touched the panel's
+        # rounded top border, which reads as a strike-through across the line.
+        y = 73 - r * 19.0
+        lay.text(f"rn{r}", 3, y + H + 3.7, name, parent=None, color=col, size=9,
                  weight="bold")
-        lay.text(f"rd{r}", 97, y + H + 1.6, note, parent=None, color=MUTED, size=7.2,
-                 ha="right")
+        lay.text(f"rd{r}", 3, y + H + 1.4, note, parent=None, color=MUTED, size=7.2)
         for i, (icon, lines) in enumerate(steps):
             x = 3 + i * (W + GAP)
             _step(lay, ax, f"s{r}{i}", x, y, W, H, icon, lines, col=col)
@@ -826,7 +828,7 @@ def encode_paths():
              "one composite, four ways out — only the first one reads the picture back to the CPU",
              parent=None, color=MUTED, size=8.4, ha="center", style="italic")
 
-    W, H, GAP = 13.6, 15.0, 3.0
+    W, H, GAP = 13.6, 13.2, 3.0
 
     rows = [
         ("Host", DANGER_T, "anything with no fast path · two costs before the encoder even starts", [
@@ -861,11 +863,12 @@ def encode_paths():
     ]
 
     for r, (name, col, note, steps) in enumerate(rows):
-        y = 74 - r * 19.0
-        lay.text(f"rn{r}", 3, y + H + 1.6, name, parent=None, color=col, size=9,
+        # 73, and the note 1.3 above the box: at 0.8 the note's descenders touched the panel's
+        # rounded top border, which reads as a strike-through across the line.
+        y = 73 - r * 19.0
+        lay.text(f"rn{r}", 3, y + H + 3.7, name, parent=None, color=col, size=9,
                  weight="bold")
-        lay.text(f"rd{r}", 97, y + H + 1.6, note, parent=None, color=MUTED, size=7.2,
-                 ha="right")
+        lay.text(f"rd{r}", 3, y + H + 1.4, note, parent=None, color=MUTED, size=7.2)
         for i, (icon, lines) in enumerate(steps):
             x = 3 + i * (W + GAP)
             _step(lay, ax, f"s{r}{i}", x, y, W, H, icon, lines, col=col)
