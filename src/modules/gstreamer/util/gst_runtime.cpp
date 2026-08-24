@@ -110,23 +110,33 @@ std::set<std::wstring> dll_names(const boost::filesystem::path& directory)
 /// the two directories are compared and every shared base name is reported. On FFmpeg 8 the
 /// set is empty; on FFmpeg 7 it was six, every one of them an av* library, which is why this
 /// module could not have existed before the migration.
-void add_to_search_path(const boost::filesystem::path& bin)
+/// Which DLL base names in `dir` also exist next to casparcg.exe, reported and not acted on.
+///
+/// Ours win -- the application directory is searched first -- so the risk is not that we load
+/// something foreign, it is that a plugin expecting ITS version of a name gets ours and fails
+/// to load, or worse, loads and misbehaves. Naming them is what turns "that plugin does not
+/// work" into a five-second diagnosis.
+void report_shared_dll_names(const boost::filesystem::path& dir, const std::wstring& what)
 {
     const auto ours   = dll_names(boost::filesystem::path(env::initial_folder()));
-    const auto theirs = dll_names(bin);
+    const auto theirs = dll_names(dir);
 
     std::vector<std::wstring> shared;
     std::set_intersection(ours.begin(), ours.end(), theirs.begin(), theirs.end(), std::back_inserter(shared));
+    if (shared.empty())
+        return;
 
-    if (!shared.empty()) {
-        CASPAR_LOG(warning) << L"[gstreamer] " << shared.size()
-                            << L" DLL name(s) exist both next to casparcg.exe and in GStreamer's bin. Ours win, "
-                               L"because the application directory is searched first, but a GStreamer plugin "
-                               L"resolving against ours may then fail to load:";
-        for (const auto& name : shared)
-            CASPAR_LOG(warning) << L"[gstreamer]     " << name;
-    }
+    CASPAR_LOG(warning) << L"[gstreamer] " << shared.size() << L" DLL name(s) exist both next to "
+                           L"casparcg.exe and in " << what << L" (" << dir.wstring()
+                        << L"). Ours win, because the application directory is searched first, but a "
+                           L"plugin resolving against ours may then fail to load:";
+    for (const auto& name : shared)
+        CASPAR_LOG(warning) << L"[gstreamer]     " << name;
+}
 
+void add_to_search_path(const boost::filesystem::path& bin)
+{
+    report_shared_dll_names(bin, L"GStreamer's bin");
     SetDllDirectoryW(bin.wstring().c_str());
 }
 #endif
@@ -230,7 +240,41 @@ void initialize_once(state& s)
         g_setenv(name, u8(value).c_str(), TRUE);
     };
     set_env("GST_PLUGIN_SYSTEM_PATH_1_0", plugins.wstring());
-    set_env("GST_PLUGIN_PATH_1_0", L"");
+
+    // ── Third-party plugins ───────────────────────────────────────────────────────────────
+    // Cleared unless an operator names a directory. The bundled install is 271 plugins and
+    // covers essentially every transport, codec and filter this server has a use for; anything
+    // beyond it -- an inference element, a vendor SDK, a locally built filter -- is a
+    // deliberate act, and it should look like one in the config rather than being picked up
+    // from whatever GST_PLUGIN_PATH_1_0 happens to hold in the environment the server was
+    // started from.
+    //
+    // The isolation is not paranoia about foreign code as such. It is that **a plugin brings
+    // its own dependencies**, and on Windows those resolve by base name per process: a plugin
+    // shipping its own avcodec, OpenSSL or MSVC runtime lands in the same collision this
+    // module spent its whole existence being careful about. So the directories are audited on
+    // the way in, exactly as GStreamer's own bin is.
+    const auto extra = env::properties().get(L"configuration.gstreamer.plugin-path", L"");
+    set_env("GST_PLUGIN_PATH_1_0", extra);
+    if (!extra.empty()) {
+        CASPAR_LOG(info) << L"[gstreamer] additional plugin path: " << extra;
+#ifdef _WIN32
+        // Semicolon-separated, as GStreamer reads it on Windows.
+        std::wstringstream ss(extra);
+        std::wstring       dir;
+        while (std::getline(ss, dir, L';')) {
+            if (dir.empty())
+                continue;
+            const boost::filesystem::path d(dir);
+            if (!boost::filesystem::is_directory(d)) {
+                CASPAR_LOG(warning) << L"[gstreamer] plugin-path entry is not a directory and will "
+                                       L"be ignored by GStreamer: " << dir;
+                continue;
+            }
+            report_shared_dll_names(d, L"a plugin-path directory");
+        }
+#endif
+    }
     set_env("GST_REGISTRY", registry.wstring());
     if (boost::filesystem::exists(scanner))
         set_env("GST_PLUGIN_SCANNER_1_0", scanner.wstring());

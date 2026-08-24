@@ -386,15 +386,29 @@ core::draw_frame gst_gpu_bridge::to_frame(void*                       tag,
         // `ID3D10Multithread` is the remedy the message names, and it is the same one FFmpeg's
         // D3D11VA path enables for the same reason. It makes the driver serialise context use
         // internally. Idempotent, and cheap relative to a decode.
+        //
+        // **Under GStreamer's lock, and that is not belt-and-braces.** `SetMultithreadProtected`
+        // is itself a device-context call, so making it while the decoder is mid-frame on the
+        // same context is the very race it exists to prevent -- the debug layer named this call
+        // by name once it was added without the lock. It has to be the first thing serialised,
+        // not the thing that starts serialising.
         {
+            gst_d3d11_device_lock(m.gst_device_);
             ID3D10Multithread* mt = nullptr;
-            if (SUCCEEDED(m.ctx_->QueryInterface(__uuidof(ID3D10Multithread),
-                                                 reinterpret_cast<void**>(&mt))) && mt) {
-                const BOOL was = mt->SetMultithreadProtected(TRUE);
+            const bool         got =
+                SUCCEEDED(m.ctx_->QueryInterface(__uuidof(ID3D10Multithread),
+                                                 reinterpret_cast<void**>(&mt))) && mt != nullptr;
+            BOOL was = TRUE;
+            if (got) {
+                was = mt->SetMultithreadProtected(TRUE);
+                mt->Release();
+            }
+            gst_d3d11_device_unlock(m.gst_device_);
+
+            if (got) {
                 if (!was)
                     CASPAR_LOG(info) << L"[gstreamer] enabled D3D11 multithread protection on "
                                         L"GStreamer's device context (it was off).";
-                mt->Release();
             } else {
                 m.give_up(L"GStreamer's D3D11 context does not expose ID3D10Multithread, so the "
                           L"extraction cannot be made safe against the decoder's own thread");
