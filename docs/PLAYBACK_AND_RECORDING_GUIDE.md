@@ -336,47 +336,75 @@ channel is not.
 
 ### Recording — N channels, one recording each
 
-1080p2500, 8-bit channels, one producer and one recording consumer per channel. Every GPU row had
-its fast path confirmed engaged at every rung.
+**Re-measured 2026-08-24, and the previous version of this table was wrong.** It gated on the
+channel's *late-frame* count, which on a recording-only channel measures jitter rather than
+anything reaching the file: a late tick still produces a frame and the encoder still writes it.
+That gate put `CUDA_PRORES` at "0 — late at one channel" when it records six, and `prores_ks`
+(CPU) at 1 when it loses 717 frames at one channel and records none.
 
-| route | channels | GPU% | VRAM at ceiling |
-| :--- | ---: | ---: | ---: |
-| `h264_vulkan` | **7** | 46 | 5193 MB |
-| `hevc_vulkan` | **5** | 28 | 3774 MB |
-| `prores_ks_vulkan` | **5** | 43 | 3732 MB |
-| `prores_aw` (CPU) | **5** | 31 | 1864 MB |
-| `prores_ks` (CPU) | 3 | 22 | 2900 MB |
-| `ffv1` (CPU) | 2 | 30 | 1201 MB |
-| `libx264` | 2 | 29 | 1201 MB |
-| `CUDA_PRORES` | **0** — late at one channel | — | — |
-| `ffv1_vulkan` | **0** — late at one channel | — | — |
+What stops a rung now, in the order checked:
 
-> **The `prores_ks_vulkan` row above did not measure `prores_ks_vulkan`.** The table is 8-bit,
-> and the Vulkan encode path *requires* a 16-bit channel and refuses an 8-bit one with the reason
-> logged (§3). So that 5 is the host-readback path wearing the encoder's name, and the same
-> applies to `ffv1_vulkan`'s zero. The 16-bit numbers are in the next table, and they are
-> different enough to matter.
+1. **A recording that does not decode**, or cannot be read at all — a defect, not a ceiling.
+2. **A frame lost mid-recording**, with no tolerance. Frames lost during the consumer's start-up
+   or its close are reported separately: those are the edges of the take, not the load.
+3. **The channels behind real time once warm**, from the server's own tick rate over the steady
+   window, excluding a 30 s warm-up and a 10 s drain.
+4. **The rung's recordings differing in length** by more than 2% — an ISO set whose files do not
+   line up is a failed take however complete each file is.
 
-#### Recording, 16-bit — where the Vulkan encoders actually run
+Every rung is **180 seconds**. At the 12 s the old table used, a rung that fails under sustained
+load has not failed yet: the queues are still absorbing and nothing has throttled. And **every
+recording at every accepted rung was decode-checked** — 700+ files, zero decode errors.
 
-Same shape, on 16-bit channels with a `route://1` source so the decode cost is paid once and the
-figures are the recording's. Realistic content: 60 s of moving noise, looped, at a bitrate that
-suits the raster.
+Each arm runs at the depth and mixer its own fast path needs, so those are columns rather than
+constants. `--producer route`: one decoder feeds every channel, so the figures are the
+recording's and not the decode's.
 
-| route | channels | why it stopped | GPU% | VRAM |
-| :--- | ---: | :--- | ---: | ---: |
-| `prores_ks_vulkan -q:v 12` | **8+** | the top of the ladder, with headroom | 59 | 2973 MB |
-| `prores_ks_vulkan` | **1** | 37 late frames at 2 channels | 45 | 1501 MB |
-| `prores_ks` (CPU) | **1** | 5 late frames at 2 channels | 15 | 1563 MB |
+| route | mixer / depth | channels | stopped by |
+| :--- | :--- | ---: | :--- |
+| `h264_nvenc` | vulkan 8 | **14+** | the top of the ladder |
+| `h264_vulkan` | vulkan 16 | **14+** | the top of the ladder |
+| `mpeg2video` (XDCAM 50) | vulkan 8 | **14+** | the top of the ladder |
+| `dnxhd -b:v 120M` | vulkan 8 | **12** | ⚠ the source producer starved |
+| `prores_ks_vulkan -q:v 12` | vulkan 16 | **12** | ⚠ the source producer starved |
+| `prores_ks_vulkan -q:v 4` | vulkan 16 | **11** | ⚠ the source producer starved — at 100% GPU and 12.4 GB |
+| `libx264 -preset ultrafast` | vulkan 8 | **8** | files diverged by 401 frames at 9 |
+| `CUDA_PRORES` 422 HQ, AUTO | ogl 8 | **6–7** | files diverged at 7–8 |
+| `CUDA_PRORES` 422, AUTO | ogl 8 | **7** | files diverged by 165 frames at 8 |
+| `hevc_vulkan` | vulkan 16 | **6** | ⚠ the source producer starved |
+| `dnxhd -profile dnxhr_hq` | vulkan 8 | **4** | ⚠ the source producer starved |
+| `prores_ks_vulkan` (no `-q:v`) | vulkan 16 | **2** | files diverged at 3 |
+| `prores_ks_vulkan -bits_per_mb 2000` | vulkan 16 | **2** | files diverged at 3 |
+| `dnxhd -b:v 185M` | vulkan 8 | **1** | ⚠ the source producer starved |
+| `prores_aw` 422 / HQ | vulkan 8 | **0** | 240 / 449 frames lost mid-recording at 1 channel |
+| `ffv1_vulkan` | vulkan 16 | **0** | 594 frames lost at 1 channel |
+| `prores_ks` 422 / HQ / HQ-16bit | vulkan 8/16 | **0** | 717 / 732 / 732 frames lost at 1 channel |
+| `prores_ks -profile:v 4` (4444) | vulkan 8 | **0** | 759 frames lost at 1 channel |
+| `ffv1` (CPU) | vulkan 8 | **0** | 172 frames lost at 1 channel — and 0 in another run, so marginal |
+| `hap` | — | **n/a** | the encoder is not in this FFmpeg build |
 
-**Eight channels, with `-q:v`, and one without it.** `prores_ks_vulkan` runs a *trellis
-quantiser search* by default — a compute shader that tries several quantisers per slice and keeps
-the best. It saturates the GPU below what two 25p channels need, which is why the default row
-stops at one. Giving the encoder a fixed quantiser skips the search:
+> **⚠ "the source producer starved" is not a recorder ceiling.** One decoder feeding N routed
+> channels eventually cannot, and the source channel then logs `Waiting for video frame...`. Six
+> arms stopped that way, so their numbers are floors bounded by this rig rather than by the
+> encoder — `dnxhd -b:v 185M` at "1" says nothing about DNxHD. Re-run those with
+> `--producer file`, which gives every channel its own decoder, to separate them.
+
+**The single most useful thing in that table: `-q:v` takes `prores_ks_vulkan` from 2 channels to
+12.** The default runs a *trellis quantiser search* — a compute shader trying several quantisers
+per slice and keeping the best — and it saturates the GPU below what three 25p channels need.
+Pinning the quantiser skips the search:
 
 ```
 ADD 1 FILE "out.mov" -vcodec prores_ks_vulkan -profile:v 3 -q:v 12 -ac 2
 ```
+
+`-bits_per_mb` is **not** a substitute: it still runs the search, and still stops at 2.
+
+Between the two pinned values, **`-q:v 12` is the better setting** and not only on data rate: it
+reached the same ceiling as `-q:v 4` at **87% GPU and 4.0 GB** against `-q:v 4`'s **100% and
+12.4 GB**. At those rungs the Vulkan mixer also began logging *"renderpass slot still waiting for
+the GPU"* — refusing to recycle a submission still in flight, which is the mixer protecting
+itself rather than corrupting, but it marks the point where the GPU is the constraint.
 
 **This needs a patched FFmpeg, and the pinned build is not it.** `-q:v` on `prores_ks_vulkan`
 wrote a corrupt picture — green, luma clamped, `invalid plane data size` from the decoder on every
@@ -449,6 +477,8 @@ double-unref of the host-mapped packet. **Both are fixed in the patched build**:
 **929 bits/MB, 0.98× target, zero decode errors**, against the software `prores_ks` at 943
 (0.99×), with field order signalled correctly. Written up in
 `docs/upstream/prores_ks_vulkan_qscale_corruption.md`.
+
+![Interlaced recording: two channel ticks become one field-coded frame](images/recording_field_pairing.png)
 
 **And the FILE consumer now pairs fields for you, so `+ildct` is not something you ask for.**
 An interlaced channel ticks at field rate: 50 full-height frames a second. The consumer holds
@@ -556,14 +586,18 @@ reaches five channels — the same as `prores_ks_vulkan` — while `prores_ks` r
 are recording ProRes and cannot use a GPU route, that one word in the command is worth two
 channels.
 
-**Two rows report zero, and they are not the same kind of zero.** `ffv1_vulkan` writes about
-21 MB/s per channel (210 MB for ten seconds), so its limit is *probably* the disk rather than the
-GPU — probably, because that has not been isolated and is not asserted here. `CUDA_PRORES` engaged
-its GPU-direct path and still went late at one channel, which is not explained: `encode-matrix`
-records the same consumer at one channel with no dropped frames at all, so the difference is
-somewhere in this ladder's configuration (an H.264 source decoded through D3D11VA, where
-`encode-matrix` used ProRes) and is unattributed. **Do not read either zero as "this route cannot
-record".** Both record correctly at one channel in other measurements.
+**The `CUDA_PRORES` zero is resolved, and it was the instrument.** This paragraph used to say
+the zero was unexplained — that the consumer engaged its GPU-direct path and still "went late at
+one channel" while `encode-matrix` recorded it cleanly. The difference was the gate, not the
+configuration: the ladder stopped on the channel's late-tick count, which on a recording-only
+channel measures jitter and not anything reaching the file. Re-measured against frame loss,
+decode validity, steady-state real time and inter-file agreement, the same consumer records
+**six to seven channels**.
+
+`ffv1_vulkan`'s zero is a different thing and it is real: 594 frames lost mid-recording at one
+channel, with the recording unreadable afterwards. It writes about 21 MB/s per channel, so the
+disk is a plausible cause and still not an isolated one — that has not been tested and is not
+asserted here.
 
 ### `file` against `route` — what the producer costs a recording channel
 

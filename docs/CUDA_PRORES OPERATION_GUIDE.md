@@ -219,6 +219,8 @@ ADD <channel> CUDA_PRORES
 
 ### `QSCALE AUTO` — how the data rate is held
 
+![QSCALE AUTO: a closed loop on the profile's published data rate](images/recording_qscale_auto.png)
+
 **A fixed quantiser cannot hold a data rate, and this encoder has no per-slice rate search.**
 `QSCALE AUTO` closes a loop instead: after each frame it compares the bits actually spent per
 macroblock against the profile's target and steps the quantiser, damped, towards it. It
