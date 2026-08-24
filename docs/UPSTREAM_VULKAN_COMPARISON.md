@@ -66,6 +66,28 @@ had that fixture recorded as impossible until it was built.
 Their 8-bit `nv12` case is genuinely exact (`code/255 × 255 − 128`), so the 8-bit half of their
 verification is sound. Only the 10-bit half is measuring a shared error.
 
+### And the range fix is the bigger sibling, which has to go first
+
+Trying to produce an upstream before/after for §1 turned up something larger. **Upstream has no
+source-colour-range handling at all** — `grep -c full_range` on both its shaders is 0 — so it
+expands every YCbCr source as studio swing, and a genuinely full-range source is expanded twice.
+This fork fixed that separately: a flat full-range grey at code 64 rendered **55.0**, a 14%
+error, against 0.6% for the chroma offset above. Both live in `ycbcra_to_rgba`.
+
+That is also why the upstream before/after does not exist. Pointed at `CasparCG/server` master
+at `d603ee91f`, the flat-decoded battery is blocked three times over:
+
+* its IMAGE consumer refuses a 16-bit channel outright, so no capture is written and every patch
+  reads `inf` — which looks exactly like the defect being hunted;
+* its screen consumer throws on construction and the OGL mixer then floods `OpenGL Error: 1282`,
+  1.1 GB of log in twenty minutes, with no capture;
+* on Vulkan it does measure, and reads 10–60 LSB — far too large to be a 0.5-code offset, because
+  the missing range handling dominates. The battery's model assumes the fixed behaviour.
+
+So the model is fork-specific in a way that was invisible while it only ever ran against the
+fork. The PR carries the derivation plus this tree's numbers, attributed as a downstream
+measurement.
+
 **Action: offer the shader fix upstream.** It is not specific to their series — upstream `master`
 has carried it for every existing 10-bit YCbCr source — but their p010 path is a new instance of
 it, and the fix is small and derivable rather than a matter of taste.
