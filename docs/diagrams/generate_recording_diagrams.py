@@ -606,21 +606,55 @@ def _ic_file(ax, cx, cy, s, col, z=6):
             [y + h, y + h - fold * _AR, y + h - fold * _AR], color=col, lw=1.0, zorder=z)
 
 
-def _ic_chip(ax, cx, cy, s, col, z=6, label=None):
-    """A die with pins: a fixed-function or CPU engine."""
+def _die(ax, cx, cy, s, col, z, *, pins):
+    """The shared body of the three processor icons: a square die, optionally with pins.
+
+    Pins mean a SOCKETED, general-purpose part; a fixed-function block on the same die as
+    everything else does not have any. One icon for all of CPU decode, the GPU's decode block,
+    NVENC and a compute encoder said only "some engine", which is the one thing about those
+    boxes the reader can already tell from the words. What differs is the KIND of engine.
+    """
     w, hh = s * 0.78, s * 0.78 * _AR
     ax.add_patch(patches.Rectangle((cx - w / 2, cy - hh / 2), w, hh, fc="none", ec=col,
                                    lw=1.3, zorder=z))
-    ax.add_patch(patches.Rectangle((cx - w * 0.22, cy - hh * 0.22), w * 0.44, hh * 0.44,
-                                   fc="none", ec=col, lw=0.9, zorder=z))
-    pin, pinv = s * 0.14, s * 0.14 * _AR
-    for i in range(3):
-        ox, oy = (i - 1) * w * 0.3, (i - 1) * hh * 0.3
-        for x0, x1, y0, y1 in ((cx + ox, cx + ox, cy + hh / 2, cy + hh / 2 + pinv),
-                               (cx + ox, cx + ox, cy - hh / 2, cy - hh / 2 - pinv),
-                               (cx - w / 2, cx - w / 2 - pin, cy + oy, cy + oy),
-                               (cx + w / 2, cx + w / 2 + pin, cy + oy, cy + oy)):
-            ax.plot([x0, x1], [y0, y1], color=col, lw=0.9, zorder=z)
+    if pins:
+        pin, pinv = s * 0.14, s * 0.14 * _AR
+        for i in range(3):
+            ox, oy = (i - 1) * w * 0.3, (i - 1) * hh * 0.3
+            for x0, x1, y0, y1 in ((cx + ox, cx + ox, cy + hh / 2, cy + hh / 2 + pinv),
+                                   (cx + ox, cx + ox, cy - hh / 2, cy - hh / 2 - pinv),
+                                   (cx - w / 2, cx - w / 2 - pin, cy + oy, cy + oy),
+                                   (cx + w / 2, cx + w / 2 + pin, cy + oy, cy + oy)):
+                ax.plot([x0, x1], [y0, y1], color=col, lw=0.9, zorder=z)
+    return w, hh
+
+
+def _ic_cpu(ax, cx, cy, s, col, z=6):
+    """A pinned die holding a few big cores: a general-purpose CPU."""
+    w, hh = _die(ax, cx, cy, s, col, z, pins=True)
+    for sx in (-1, 1):
+        for sy in (-1, 1):
+            ax.add_patch(patches.Rectangle((cx + sx * w * 0.28 - w * 0.17,
+                                            cy + sy * hh * 0.28 - hh * 0.17),
+                                           w * 0.34, hh * 0.34,
+                                           fc=col, ec="none", alpha=0.55, zorder=z))
+
+
+def _ic_fixdec(ax, cx, cy, s, col, z=6):
+    """A pinless block with a play mark: the GPU's fixed-function DECODE engine."""
+    w, hh = _die(ax, cx, cy, s, col, z, pins=False)
+    ax.add_patch(patches.Polygon([(cx - w * 0.16, cy + hh * 0.24),
+                                  (cx - w * 0.16, cy - hh * 0.24),
+                                  (cx + w * 0.26, cy)],
+                                 closed=True, fc=col, ec="none", alpha=0.75, zorder=z))
+
+
+def _ic_fixenc(ax, cx, cy, s, col, z=6):
+    """A pinless block with a record dot: a fixed-function ENCODE engine, i.e. NVENC."""
+    w, hh = _die(ax, cx, cy, s, col, z, pins=False)
+    d = w * 0.42
+    ax.add_patch(patches.Ellipse((cx, cy), d, d * _AR, fc=col, ec="none", alpha=0.75,
+                                 zorder=z))
 
 
 def _ic_grid(ax, cx, cy, s, col, z=6, n=4):
@@ -696,8 +730,9 @@ def _ic_stream(ax, cx, cy, s, col, z=6):
 
 
 ICONS = {
-    "file": _ic_file, "chip": _ic_chip, "grid": _ic_grid, "ram": _ic_ram,
-    "bus": _ic_bus, "prism": _ic_prism, "stack": _ic_stack, "stream": _ic_stream,
+    "file": _ic_file, "cpu": _ic_cpu, "fixdec": _ic_fixdec, "fixenc": _ic_fixenc,
+    "grid": _ic_grid, "ram": _ic_ram, "bus": _ic_bus, "prism": _ic_prism,
+    "stack": _ic_stack, "stream": _ic_stream,
 }
 
 
@@ -713,6 +748,24 @@ def _step(lay, ax, name, x, y, w, h, icon, lines, *, col, fc=PANEL, icon_col=Non
         lay.fit_text(None, x + w / 2, y + h * 0.36 - i * (h * 0.155), ln, parent=name,
                      size=6.7, color=TEXT if i == 0 else MUTED, ha="center",
                      weight="bold" if i == 0 else "normal")
+
+
+def _terminal(lay, ax, x, y, w, h, icon, lines, *, col, rows_y):
+    """The one box all four rows end in, spanning them, with an arrow from each.
+
+    The four rows do NOT all finish on the same kind of stage -- CUDA ProRes hands the mixer an
+    RGB texture where the other three hand it YCbCr planes for the shader to convert -- so the
+    last column reads as four different endings. It is the same ending: the mixer. Drawing the
+    convergence says that, and it also fills the strip of empty page the five columns left.
+    """
+    lay.panel("term", x, y, w, h, fc="#1c1c1c", ec=col, lw=1.25)
+    ICONS[icon](ax, x + w / 2, y + h / 2 + 7.0, min(w, h / _AR) * 0.42, col)
+    for i, ln in enumerate(lines):
+        lay.fit_text(None, x + w / 2, y + h / 2 - i * 3.2, ln, parent="term",
+                     size=8.0 if i == 0 else 6.7, color=TEXT if i == 0 else MUTED,
+                     ha="center", weight="bold" if i == 0 else "normal")
+    for k, ry in enumerate(rows_y):
+        lay.arrow((x - 2.6, ry), (x - 0.4, ry), color=MUTED, lw=1.2)
 
 
 def _icon_legend(lay, ax, y, items):
@@ -763,14 +816,14 @@ def decode_paths():
     rows = [
         ("Software", DANGER_T, "every codec · the only route that always works", [
             ("file", ("file", "on disk")),
-            ("chip", ("CPU decode", "libavcodec")),
+            ("cpu", ("CPU decode", "libavcodec")),
             ("ram", ("host buffer", "yuv420p · 3.1 MB/frame")),
             ("bus", ("PCIe upload", "78 MB/s at 1080p25")),
             ("prism", ("mixer shader", "YCbCr → RGB")),
         ]),
         ("D3D11VA GPU-direct", SUCCESS, "the default · H.264 HEVC VP9 AV1 · never enters host memory", [
             ("file", ("file", "on disk")),
-            ("chip", ("GPU decode block", "NV12 · 3.1 MB/frame")),
+            ("fixdec", ("GPU decode block", "NV12 · 3.1 MB/frame")),
             ("bus", ("shared handle", "to the mixer's device")),
             ("stack", ("two plane views", "R8 · R8G8")),
             ("prism", ("mixer shader", "YCbCr → RGB")),
@@ -805,11 +858,15 @@ def decode_paths():
                 lay.arrow((x - GAP + 0.4, y + H / 2), (x - 0.4, y + H / 2),
                           color=MUTED, lw=1.2)
 
+    _terminal(lay, ax, 86.0, 16.0, 11.0, 70.2, "grid",
+              ("the mixer", "every route ends", "here — composited", "with the other layers"),
+              col=TITLE, rows_y=[73 - r * 19.0 + H / 2 for r in range(4)])
+
     _icon_legend(lay, ax, 1.8, [
-        ("file", "a file on disk"), ("chip", "a fixed engine: CPU or GPU block"),
-        ("grid", "many parallel jobs"), ("ram", "host memory"),
-        ("bus", "a transfer across a bus"), ("stack", "separate planes"),
-        ("prism", "a colour conversion"), ("stream", "a coded bitstream"),
+        ("file", "a file on disk"), ("cpu", "a CPU: general cores"),
+        ("fixdec", "a fixed decode block"), ("grid", "many parallel jobs"),
+        ("ram", "host memory"), ("bus", "a bus transfer"),
+        ("stack", "separate planes"), ("prism", "a colour conversion"),
     ])
 
     lay.check(name="recording_decode_paths")
@@ -835,21 +892,21 @@ def encode_paths():
             ("grid", ("mixer texture", "the composite")),
             ("ram", ("readback", "8.3 MB/frame · 207 MB/s")),
             ("prism", ("libswscale", "→ the encoder's format")),
-            ("chip", ("CPU encoder", "libavcodec")),
+            ("cpu", ("CPU encoder", "libavcodec")),
             ("stream", ("bitstream", "1-25 MB/s typical")),
         ]),
         ("NVENC GPU-direct", SUCCESS, "H.264 · HEVC · 8-bit channels only", [
             ("grid", ("mixer texture", "8-bit")),
             ("bus", ("CUDA copy", "8.3 MB/frame, no conversion")),
             ("stack", ("CUDA frame", "RGB0 · BGR0 by mixer")),
-            ("chip", ("NVENC block", "RGB → YCbCr in hardware")),
+            ("fixenc", ("NVENC block", "RGB → YCbCr in hardware")),
             ("stream", ("H.264 / HEVC", "the bitrate you ask for")),
         ]),
         ("FFmpeg Vulkan", SUCCESS, "ProRes · FFV1 · H.264 · HEVC · 16-bit channels only", [
             ("grid", ("mixer texture", "16-bit RGBA")),
             ("bus", ("VkImage copy", "16.6 MB/frame, same device")),
             ("prism", ("libplacebo", "→ yuv422p10 · 8.3 MB/fr")),
-            ("chip", ("encoder", "compute, or the NVENC block")),
+            ("grid", ("encoder", "compute, or NVENC")),
             ("stream", ("ProRes HQ", "0.97 MB/fr · 24 MB/s")),
         ]),
         ("CUDA_PRORES", SUCCESS,
@@ -876,11 +933,15 @@ def encode_paths():
                 lay.arrow((x - GAP + 0.4, y + H / 2), (x - 0.4, y + H / 2),
                           color=MUTED, lw=1.2)
 
+    _terminal(lay, ax, 86.0, 16.0, 11.0, 70.2, "file",
+              ("on disk", "one file per", "consumer — .mov,", ".mxf or .mp4"),
+              col=TITLE, rows_y=[73 - r * 19.0 + H / 2 for r in range(4)])
+
     _icon_legend(lay, ax, 1.8, [
-        ("grid", "many parallel jobs, or a raster"), ("ram", "host memory"),
-        ("bus", "a transfer across a bus"), ("stack", "separate planes"),
-        ("prism", "a format or colour conversion"), ("chip", "a fixed engine"),
-        ("stream", "a coded bitstream"), ("file", "a file on disk"),
+        ("grid", "many parallel jobs"), ("ram", "host memory"),
+        ("bus", "a bus transfer"), ("stack", "separate planes"),
+        ("prism", "a colour conversion"), ("cpu", "a CPU: general cores"),
+        ("fixenc", "a fixed encode block"), ("stream", "a coded bitstream"),
     ])
 
     lay.check(name="recording_encode_paths")
