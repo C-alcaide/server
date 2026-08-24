@@ -640,21 +640,90 @@ def _ic_cpu(ax, cx, cy, s, col, z=6):
                                            fc=col, ec="none", alpha=0.55, zorder=z))
 
 
+def _picture(ax, cx, cy, w, hh, col, z):
+    """A 16:9-ish frame: the thing a video engine deals in, as opposed to bytes."""
+    ax.add_patch(patches.Rectangle((cx - w / 2, cy - hh / 2), w, hh, fc="none", ec=col,
+                                   lw=1.0, zorder=z))
+
+
 def _ic_fixdec(ax, cx, cy, s, col, z=6):
-    """A pinless block with a play mark: the GPU's fixed-function DECODE engine."""
+    """A pinless block holding a picture with a play mark: the GPU's fixed VIDEO DECODE engine.
+
+    Two attempts preceded this. A bare play triangle said "media" where the point is "a block
+    wired into the GPU that does nothing but video". A three-frame filmstrip said it, and at
+    the four x-units an icon actually gets it rendered as a chip with solder pads -- right
+    shape, unreadable, which is the same as wrong next to an icon that IS a chip.
+
+    A frame plus a play mark survives the size: the frame says pictures, the mark says which
+    direction, and the pinless die keeps it in the hardware family with `cpu` and `fixenc`.
+    """
     w, hh = _die(ax, cx, cy, s, col, z, pins=False)
-    ax.add_patch(patches.Polygon([(cx - w * 0.16, cy + hh * 0.24),
-                                  (cx - w * 0.16, cy - hh * 0.24),
-                                  (cx + w * 0.26, cy)],
-                                 closed=True, fc=col, ec="none", alpha=0.75, zorder=z))
+    _picture(ax, cx, cy, w * 0.62, hh * 0.50, col, z)
+    ax.add_patch(patches.Polygon([(cx - w * 0.10, cy + hh * 0.15),
+                                  (cx - w * 0.10, cy - hh * 0.15),
+                                  (cx + w * 0.16, cy)],
+                                 closed=True, fc=col, ec="none", zorder=z))
 
 
 def _ic_fixenc(ax, cx, cy, s, col, z=6):
-    """A pinless block with a record dot: a fixed-function ENCODE engine, i.e. NVENC."""
+    """The same block with a record dot in the frame: a fixed ENCODE engine -- NVENC."""
     w, hh = _die(ax, cx, cy, s, col, z, pins=False)
-    d = w * 0.42
-    ax.add_patch(patches.Ellipse((cx, cy), d, d * _AR, fc=col, ec="none", alpha=0.75,
+    _picture(ax, cx, cy, w * 0.62, hh * 0.50, col, z)
+    d = w * 0.22
+    ax.add_patch(patches.Ellipse((cx, cy), d, d * _AR, fc=col, ec="none", zorder=z))
+
+
+def _ic_kernels(ax, cx, cy, s, col, z=6):
+    """A dot matrix inside a pinless die: thousands of GPU threads on the chip.
+
+    CUDA kernels and a Vulkan compute shader get the SAME glyph deliberately -- they are one
+    mechanism reached through two APIs, and inventing a visual difference would claim one that
+    does not exist. What was actually wrong was that the MIXER shared this glyph with them.
+    """
+    w, hh = _die(ax, cx, cy, s, col, z, pins=False)
+    n = 3
+    dw, dh = w * 0.66 / n, hh * 0.66 / n
+    for i in range(n):
+        for j in range(n):
+            ax.add_patch(patches.Rectangle((cx - w * 0.33 + i * dw + dw * 0.14,
+                                            cy - hh * 0.33 + j * dh + dh * 0.14),
+                                           dw * 0.72, dh * 0.72, fc=col, ec="none",
+                                           alpha=0.85, zorder=z))
+
+
+def _ic_enchybrid(ax, cx, cy, s, col, z=6):
+    """Threads AND a record dot: an encoder that is compute for some codecs, NVENC for others.
+
+    `prores_ks_vulkan` and `ffv1_vulkan` are compute shaders; `h264_vulkan` and `hevc_vulkan`
+    reach the NVENC block. One box, two mechanisms, so the glyph carries both marks rather than
+    picking whichever half the reader would then take as the whole.
+    """
+    w, hh = _die(ax, cx, cy, s, col, z, pins=False)
+    n = 2
+    dw, dh = w * 0.40 / n, hh * 0.62 / n
+    for i in range(n):
+        for j in range(n):
+            ax.add_patch(patches.Rectangle((cx - w * 0.36 + i * dw + dw * 0.12,
+                                            cy - hh * 0.31 + j * dh + dh * 0.12),
+                                           dw * 0.76, dh * 0.76, fc=col, ec="none",
+                                           alpha=0.85, zorder=z))
+    d = w * 0.30
+    ax.add_patch(patches.Ellipse((cx + w * 0.19, cy), d, d * _AR, fc=col, ec="none",
                                  zorder=z))
+
+
+def _ic_mixer(ax, cx, cy, s, col, z=6):
+    """Two offset layers inside an output raster: layers COMPOSITED into one frame.
+
+    This is the one that was genuinely mislabelled. The mixer was drawn as a plain cell grid,
+    the same glyph as CUDA kernels and compute shaders -- so the three most different things in
+    the figure looked identical. Compositing is layers going in and one picture coming out.
+    """
+    w, hh = _die(ax, cx, cy, s, col, z, pins=False)
+    lw_, lh = w * 0.54, hh * 0.48
+    for dx, dy, a in ((-0.15, 0.13, 0.30), (0.08, -0.11, 0.65)):
+        ax.add_patch(patches.Rectangle((cx + w * dx - lw_ / 2, cy + hh * dy - lh / 2),
+                                       lw_, lh, fc=col, ec=col, lw=0.8, alpha=a, zorder=z))
 
 
 def _ic_grid(ax, cx, cy, s, col, z=6, n=4):
@@ -729,9 +798,12 @@ def _ic_stream(ax, cx, cy, s, col, z=6):
         x += w * (r + 0.03)
 
 
+#: `grid` is deliberately NOT here: a bare cell grid was doing duty for the mixer, for CUDA
+#: kernels and for compute shaders at once. `_ic_grid` survives as the dot-matrix primitive.
 ICONS = {
     "file": _ic_file, "cpu": _ic_cpu, "fixdec": _ic_fixdec, "fixenc": _ic_fixenc,
-    "grid": _ic_grid, "ram": _ic_ram, "bus": _ic_bus, "prism": _ic_prism,
+    "kernels": _ic_kernels, "enchybrid": _ic_enchybrid, "mixer": _ic_mixer,
+    "ram": _ic_ram, "bus": _ic_bus, "prism": _ic_prism,
     "stack": _ic_stack, "stream": _ic_stream,
 }
 
@@ -743,33 +815,41 @@ def _step(lay, ax, name, x, y, w, h, icon, lines, *, col, fc=PANEL, icon_col=Non
     # extent is size * _AR. Budgeting against `h` directly -- which is what the first version
     # did -- overflowed the box top and sat on the label as soon as the icons stopped being
     # stretched. The tallest icon (the chip, box plus pins) needs 1.06 * size * _AR.
-    ICONS[icon](ax, x + w / 2, y + h - h * 0.30, min(w, h / _AR) * 0.48, icon_col or col)
+    ICONS[icon](ax, x + w / 2, y + h - h * 0.30, min(w, h / _AR) * 0.54, icon_col or col)
     for i, ln in enumerate(lines):
         lay.fit_text(None, x + w / 2, y + h * 0.36 - i * (h * 0.155), ln, parent=name,
                      size=6.7, color=TEXT if i == 0 else MUTED, ha="center",
                      weight="bold" if i == 0 else "normal")
 
 
-def _terminal(lay, ax, x, y, w, h, icon, lines, *, col, rows_y):
-    """The one box all four rows end in, spanning them, with an arrow from each.
+def _shared(lay, ax, name, x, y, w, h, icon, lines, *, col, rows_y, out):
+    """One box that all four rows share, spanning them, with an arrow to or from each.
 
-    The four rows do NOT all finish on the same kind of stage -- CUDA ProRes hands the mixer an
-    RGB texture where the other three hand it YCbCr planes for the shader to convert -- so the
-    last column reads as four different endings. It is the same ending: the mixer. Drawing the
-    convergence says that, and it also fills the strip of empty page the five columns left.
+    Used at BOTH ends. At the right it is the destination the four rows converge on: they do
+    not all finish on the same kind of stage -- CUDA ProRes hands the mixer an RGB texture
+    where the other three hand it YCbCr planes for the shader -- so the last column read as
+    four different endings when it is one ending reached four ways.
+
+    At the left it is the source, and it exists because the first column was the SAME box drawn
+    four times: "file / on disk", or "mixer texture" in the encode figure. A stage every route
+    shares is not a stage that distinguishes them, so repeating it spent a fifth of the page
+    saying nothing -- and left the row titles sitting above a column with no information in it.
     """
-    lay.panel("term", x, y, w, h, fc="#1c1c1c", ec=col, lw=1.25)
+    lay.panel(name, x, y, w, h, fc="#1c1c1c", ec=col, lw=1.25)
     ICONS[icon](ax, x + w / 2, y + h / 2 + 7.0, min(w, h / _AR) * 0.42, col)
     for i, ln in enumerate(lines):
-        lay.fit_text(None, x + w / 2, y + h / 2 - i * 3.2, ln, parent="term",
+        lay.fit_text(None, x + w / 2, y + h / 2 - i * 3.2, ln, parent=name,
                      size=8.0 if i == 0 else 6.7, color=TEXT if i == 0 else MUTED,
                      ha="center", weight="bold" if i == 0 else "normal")
-    for k, ry in enumerate(rows_y):
-        lay.arrow((x - 2.6, ry), (x - 0.4, ry), color=MUTED, lw=1.2)
+    for ry in rows_y:
+        if out:
+            lay.arrow((x + w + 0.4, ry), (x + w + 2.6, ry), color=MUTED, lw=1.2)
+        else:
+            lay.arrow((x - 2.6, ry), (x - 0.4, ry), color=MUTED, lw=1.2)
 
 
-def _icon_legend(lay, ax, y, items):
-    """The key, in two rows of four.
+def _icon_legend(lay, ax, y, items, rows=2):
+    """The key, in `rows` rows.
 
     EIGHT ACROSS DOES NOT FIT. The first version put all eight on one row, which left about
     11 units a cell: the icon and its label overlapped, and then the label overlapped the NEXT
@@ -777,25 +857,29 @@ def _icon_legend(lay, ax, y, items):
     registered panel -- so each icon now gets a real (invisible) panel and each label declares
     it as a sibling, which puts the collision back inside what the checker can report.
     """
-    rows = 2
     per_row = (len(items) + rows - 1) // rows
     # 12.5 tall, not 15: the fourth pipeline row bottoms out at y=17, and at 15 the legend's
     # own title was drawn over it -- which layout_check reported, once the icons had panels.
     lay.panel("legend", 3, y, 94, 12.5, fc="#181818", ec=BORDER_SUBTLE, blocking=False)
     lay.text(None, 50, y + 10.2, "what the shapes mean", parent="legend", color=MUTED,
              size=7.4, weight="bold", ha="center")
+    # Derived, not two constants: at three rows the 4.2 spacing of the two-row version does not
+    # fit inside the panel, and the bottom row's icons were drawn through its lower border.
+    pitch = 4.2 if rows < 3 else 3.1
+    top = 6.4 if rows < 3 else 7.6
     cell = 94.0 / per_row
     for i, (icon, txt) in enumerate(items):
         col, row = i % per_row, i // per_row
         x0 = 3 + col * cell
-        cy = y + 6.4 - row * 4.2
+        cy = y + top - row * pitch
         # `/ _AR` for the same reason as `_step`: the rows are 4.2 apart in y, and a square
         # icon of size 4.0 stands 6.9 y-units tall, so the two rows collided.
-        gs = 3.6 / _AR
-        ICONS[icon](ax, x0 + 2.6, cy, gs, MUTED)
+        gs = min(3.6, pitch * 0.86) / _AR
+        ICONS[icon](ax, x0 + 2.4, cy, gs, MUTED)
         # A real box for the glyph, so a label written over it is reported rather than drawn.
-        lay.panel(f"lg{i}", x0 + 0.4, cy - 2.1, 4.4, 4.2, fc="none", ec="none", lw=0)
-        lay.fit_text(None, x0 + 5.2, cy, txt, parent="legend", size=6.6, color=TEXT,
+        lay.panel(f"lg{i}", x0 + 0.3, cy - pitch / 2 + 0.05, 4.2, pitch - 0.1,
+                  fc="none", ec="none", lw=0)
+        lay.fit_text(None, x0 + 4.8, cy, txt, parent="legend", size=6.6, color=TEXT,
                      ha="left")
 
 
@@ -811,33 +895,34 @@ def decode_paths():
              "the same picture arrives four ways — what differs is how much of it the CPU ever sees",
              parent=None, color=MUTED, size=8.4, ha="center", style="italic")
 
-    W, H, GAP = 13.6, 13.2, 3.0
+    # 14.25 wide: the repeated first column is gone, so four steps and three gaps fill the
+    # 17..83 the two shared blocks leave -- and each box is wider than the five used to be.
+    W, H, GAP = 14.25, 13.2, 3.0
 
     rows = [
         ("Software", DANGER_T, "every codec · the only route that always works", [
-            ("file", ("file", "on disk")),
             ("cpu", ("CPU decode", "libavcodec")),
             ("ram", ("host buffer", "yuv420p · 3.1 MB/frame")),
             ("bus", ("PCIe upload", "78 MB/s at 1080p25")),
             ("prism", ("mixer shader", "YCbCr → RGB")),
         ]),
         ("D3D11VA GPU-direct", SUCCESS, "the default · H.264 HEVC VP9 AV1 · never enters host memory", [
-            ("file", ("file", "on disk")),
             ("fixdec", ("GPU decode block", "NV12 · 3.1 MB/frame")),
             ("bus", ("shared handle", "to the mixer's device")),
             ("stack", ("two plane views", "R8 · R8G8")),
             ("prism", ("mixer shader", "YCbCr → RGB")),
         ]),
         ("CUDA ProRes", SUCCESS, "the fork's own decoder · ProRes · EITHER mixer", [
-            ("file", ("file", "on disk")),
-            ("grid", ("CUDA kernels", "parse · dequant · IDCT")),
+            ("kernels", ("CUDA kernels", "parse · dequant · IDCT")),
             ("stack", ("BGRA16", "16.6 MB/frame, on the GPU")),
             ("bus", ("CUDA → GL or VK", "whichever mixer runs")),
-            ("grid", ("mixer texture", "already RGB · no convert")),
+            # Phrased as the operation the other three rows DO, negated -- the last column
+            # is otherwise three verbs and one noun, which is what made it read as a
+            # different kind of ending rather than the same one arrived at differently.
+            ("mixer", ("no convert needed", "the kernels emit RGB")),
         ]),
         ("FFmpeg Vulkan compute", SUCCESS, "FFmpeg 8 · ProRes · ProRes RAW · FFV1 · DPX", [
-            ("file", ("file", "on disk")),
-            ("grid", ("compute shaders", "no decode hardware needed")),
+            ("kernels", ("compute shaders", "no decode hardware needed")),
             ("stack", ("VkImage planes", "8.3 MB/frame, 422p10")),
             ("bus", ("imported in place", "same device · no copy")),
             ("prism", ("mixer shader", "YCbCr → RGB")),
@@ -848,25 +933,32 @@ def decode_paths():
         # 73, and the note 1.3 above the box: at 0.8 the note's descenders touched the panel's
         # rounded top border, which reads as a strike-through across the line.
         y = 73 - r * 19.0
-        lay.text(f"rn{r}", 3, y + H + 3.7, name, parent=None, color=col, size=9,
+        # x=17, over the first step that actually DISTINGUISHES the route. At x=3 the title sat
+        # above the shared source block, labelling a column common to all four rows.
+        lay.text(f"rn{r}", 17, y + H + 3.7, name, parent=None, color=col, size=9,
                  weight="bold")
-        lay.text(f"rd{r}", 3, y + H + 1.4, note, parent=None, color=MUTED, size=7.2)
+        lay.text(f"rd{r}", 17, y + H + 1.4, note, parent=None, color=MUTED, size=7.2)
         for i, (icon, lines) in enumerate(steps):
-            x = 3 + i * (W + GAP)
+            x = 17 + i * (W + GAP)
             _step(lay, ax, f"s{r}{i}", x, y, W, H, icon, lines, col=col)
             if i:
                 lay.arrow((x - GAP + 0.4, y + H / 2), (x - 0.4, y + H / 2),
                           color=MUTED, lw=1.2)
 
-    _terminal(lay, ax, 86.0, 16.0, 11.0, 70.2, "grid",
-              ("the mixer", "every route ends", "here — composited", "with the other layers"),
-              col=TITLE, rows_y=[73 - r * 19.0 + H / 2 for r in range(4)])
+    mids = [73 - r * 19.0 + H / 2 for r in range(4)]
+    _shared(lay, ax, "src", 3.0, 16.0, 11.0, 70.2, "file",
+            ("on disk", "a clip, or a", "stream — every", "route starts here"),
+            col=MUTED, rows_y=mids, out=True)
+    _shared(lay, ax, "term", 86.0, 16.0, 11.0, 70.2, "mixer",
+            ("the mixer", "every route ends", "here — composited", "with the other layers"),
+            col=TITLE, rows_y=mids, out=False)
 
     _icon_legend(lay, ax, 1.8, [
         ("file", "a file on disk"), ("cpu", "a CPU: general cores"),
-        ("fixdec", "a fixed decode block"), ("grid", "many parallel jobs"),
+        ("fixdec", "a fixed video engine"), ("kernels", "many GPU threads"),
         ("ram", "host memory"), ("bus", "a bus transfer"),
         ("stack", "separate planes"), ("prism", "a colour conversion"),
+        ("mixer", "layers composited"),
     ])
 
     lay.check(name="recording_decode_paths")
@@ -885,37 +977,35 @@ def encode_paths():
              "one composite, four ways out — only the first one reads the picture back to the CPU",
              parent=None, color=MUTED, size=8.4, ha="center", style="italic")
 
-    W, H, GAP = 13.6, 13.2, 3.0
+    # 14.25 wide: the repeated first column is gone, so four steps and three gaps fill the
+    # 17..83 the two shared blocks leave -- and each box is wider than the five used to be.
+    W, H, GAP = 14.25, 13.2, 3.0
 
     rows = [
         ("Host", DANGER_T, "anything with no fast path · two costs before the encoder even starts", [
-            ("grid", ("mixer texture", "the composite")),
             ("ram", ("readback", "8.3 MB/frame · 207 MB/s")),
             ("prism", ("libswscale", "→ the encoder's format")),
             ("cpu", ("CPU encoder", "libavcodec")),
-            ("stream", ("bitstream", "1-25 MB/s typical")),
+            ("stream", ("any codec", "1-25 MB/s typical")),
         ]),
         ("NVENC GPU-direct", SUCCESS, "H.264 · HEVC · 8-bit channels only", [
-            ("grid", ("mixer texture", "8-bit")),
             ("bus", ("CUDA copy", "8.3 MB/frame, no conversion")),
             ("stack", ("CUDA frame", "RGB0 · BGR0 by mixer")),
             ("fixenc", ("NVENC block", "RGB → YCbCr in hardware")),
-            ("stream", ("H.264 / HEVC", "the bitrate you ask for")),
+            ("stream", ("H.264 or HEVC", "the bitrate you ask for")),
         ]),
         ("FFmpeg Vulkan", SUCCESS, "ProRes · FFV1 · H.264 · HEVC · 16-bit channels only", [
-            ("grid", ("mixer texture", "16-bit RGBA")),
             ("bus", ("VkImage copy", "16.6 MB/frame, same device")),
             ("prism", ("libplacebo", "→ yuv422p10 · 8.3 MB/fr")),
-            ("grid", ("encoder", "compute, or NVENC")),
-            ("stream", ("ProRes HQ", "0.97 MB/fr · 24 MB/s")),
+            ("enchybrid", ("encoder", "compute, or NVENC")),
+            ("stream", ("ProRes or FFV1", "422 HQ: 0.97 MB/fr")),
         ]),
         ("CUDA_PRORES", SUCCESS,
          "the fork's own recorder · fast path needs OpenGL AND progressive", [
-            ("grid", ("mixer texture", "OpenGL")),
             ("bus", ("CUDA-GL map", "OpenGL only · else host")),
             ("prism", ("BGRA → v210", "or YUVA444P10")),
-            ("grid", ("GPU kernels", "DCT · quantise · entropy")),
-            ("stream", (".mov / .mxf", "422 HQ · 0.97 MB/fr")),
+            ("kernels", ("GPU kernels", "DCT · quantise · entropy")),
+            ("stream", ("ProRes 422 / HQ", "0.97 MB/fr · 24 MB/s")),
         ]),
     ]
 
@@ -923,25 +1013,33 @@ def encode_paths():
         # 73, and the note 1.3 above the box: at 0.8 the note's descenders touched the panel's
         # rounded top border, which reads as a strike-through across the line.
         y = 73 - r * 19.0
-        lay.text(f"rn{r}", 3, y + H + 3.7, name, parent=None, color=col, size=9,
+        # x=17, over the first step that actually DISTINGUISHES the route. At x=3 the title sat
+        # above the shared source block, labelling a column common to all four rows.
+        lay.text(f"rn{r}", 17, y + H + 3.7, name, parent=None, color=col, size=9,
                  weight="bold")
-        lay.text(f"rd{r}", 3, y + H + 1.4, note, parent=None, color=MUTED, size=7.2)
+        lay.text(f"rd{r}", 17, y + H + 1.4, note, parent=None, color=MUTED, size=7.2)
         for i, (icon, lines) in enumerate(steps):
-            x = 3 + i * (W + GAP)
+            x = 17 + i * (W + GAP)
             _step(lay, ax, f"s{r}{i}", x, y, W, H, icon, lines, col=col)
             if i:
                 lay.arrow((x - GAP + 0.4, y + H / 2), (x - 0.4, y + H / 2),
                           color=MUTED, lw=1.2)
 
-    _terminal(lay, ax, 86.0, 16.0, 11.0, 70.2, "file",
-              ("on disk", "one file per", "consumer — .mov,", ".mxf or .mp4"),
-              col=TITLE, rows_y=[73 - r * 19.0 + H / 2 for r in range(4)])
+    mids = [73 - r * 19.0 + H / 2 for r in range(4)]
+    _shared(lay, ax, "src", 3.0, 16.0, 11.0, 70.2, "mixer",
+            ("the composite", "one frame — every", "consumer on the", "channel gets it"),
+            col=TITLE, rows_y=mids, out=True)
+    _shared(lay, ax, "term", 86.0, 16.0, 11.0, 70.2, "file",
+            ("on disk", "the container:", ".mov, .mxf or", ".mp4 — not the codec"),
+            col=MUTED, rows_y=mids, out=False)
 
     _icon_legend(lay, ax, 1.8, [
-        ("grid", "many parallel jobs"), ("ram", "host memory"),
+        ("mixer", "layers composited"), ("ram", "host memory"),
         ("bus", "a bus transfer"), ("stack", "separate planes"),
         ("prism", "a colour conversion"), ("cpu", "a CPU: general cores"),
-        ("fixenc", "a fixed encode block"), ("stream", "a coded bitstream"),
+        ("fixenc", "a fixed video engine"), ("kernels", "many GPU threads"),
+        ("enchybrid", "compute or NVENC"), ("stream", "a coded bitstream"),
+        ("file", "a file on disk"),
     ])
 
     lay.check(name="recording_encode_paths")
