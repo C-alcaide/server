@@ -283,6 +283,24 @@ stops leaves `received` sitting still while the channel keeps ticking — and a 
 *slower* than the channel does not starve it, because the appended `videorate` duplicates up to
 the channel rate.
 
+## Closed captions — and a caveat that matters
+
+A source's CEA-608/708 captions reach the mixer, survive compositing and are re-emitted by the
+consumer. `INFO` reports `captions-in` on the producer and `captions` on the consumer, and the
+pair is the point: the picture is identical whether captions travel or vanish.
+
+**This is rate-naive, and that is a real limitation rather than a rough edge.** CEA-708 carries
+a fixed cc_data budget per frame that depends on the frame rate, so a source and a channel at
+different rates need the caption stream *re-paced* rather than copied. This carries whatever
+arrived on the frame, which is right **only when the two rates match**. The end-to-end
+measurement behind it was 50 fps into a 50 fps channel and could not have caught it.
+
+**And it is interim.** Upstream `CasparCG/server#1637` implements a fuller design -- an
+extensible side-data system named after FFmpeg's `AVFrameSideDataType`, a `side_data_mixer`,
+per-layer float priority to choose the caption source, and a rate- and interlace-aware
+`a53_cc_queue`. It is close to merge and touches the same files this does, so the plan should
+be to adopt it rather than develop this further. See `src/core/frame/frame_metadata.h`.
+
 ## What the pipeline's own elements report
 
 A whole class of GStreamer element does its work by **posting messages** or by publishing a

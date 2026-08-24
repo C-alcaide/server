@@ -26,6 +26,41 @@ namespace caspar { namespace core {
 
 /// Ancillary data that travels **with** a frame rather than in its pixels.
 ///
+/// ────────────────────────────────────────────────────────────────────────────
+/// **INTERIM. Upstream PR #1637 supersedes this and is close to merge.**
+///
+/// `CasparCG/server#1637` ("Add support for closed captions", programmerjake) implements an
+/// extensible **side-data** system -- `core::frame_side_data`, named after FFmpeg's
+/// `AVFrameSideDataType` -- with a `side_data_mixer`, per-layer float **priority** on
+/// `frame_transform` to choose the caption source, and an `a53_cc_queue` that is aware of
+/// frame rate and interlacing.
+///
+/// This file predates that being found and is a simpler parallel invention. It should be
+/// replaced by #1637's design rather than developed further, because the two touch the same
+/// files (`frame.h`, `mixer.cpp`) and would conflict on the next upstream sync.
+///
+/// **Two things #1637 gets right that this does not, and the first is a correctness bug:**
+///
+///  1. **Captions are RATE-PACED, not copied.** CEA-708 carries a fixed cc_data budget per
+///     frame that depends on the frame rate -- fewer triplets per frame at 50p than at 25p --
+///     so a source and a channel at different rates need the caption stream re-paced through a
+///     queue, popping a field or a frame's worth at a time. This file passes through whatever
+///     arrived on the frame, which is correct **only when the source and channel rates match**.
+///     The end-to-end measurement that validated it was 50 fps into a 50 fps channel and would
+///     not have caught this.
+///
+///  2. **Which layer's captions win is an operator decision**, expressed upstream as a float
+///     priority per layer, with zero/NaN/negative meaning "not a caption source" so captions
+///     can be switched off. The mixer here hardcodes first-layer-wins, which is deterministic
+///     but not selectable -- and CasparCG issue #92 identified layer precedence as the open
+///     question in 2013.
+///
+/// Also worth carrying over: #1637 handles side data on **dropped** frames per type, and its
+/// own FIXME notes that FFmpeg 8's `AVSmpte436mCodedAnc` (SMPTE 436M ANC) is probably the right
+/// thing to pass around rather than bare A53 CC data, because it retains information that is
+/// awkward to reconstruct.
+/// ────────────────────────────────────────────────────────────────────────────
+///
 /// ── Why this exists ─────────────────────────────────────────────────────────
 /// A frame has carried a picture and audio and nothing else. That is fine until a source
 /// carries something a broadcaster is obliged to preserve, and the obvious one is **closed
