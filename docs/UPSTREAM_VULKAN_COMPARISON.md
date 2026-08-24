@@ -88,6 +88,17 @@ So the model is fork-specific in a way that was invisible while it only ever ran
 fork. The PR carries the derivation plus this tree's numbers, attributed as a downstream
 measurement.
 
+**The upstream build WITH the fix was measured anyway, and the result is a good example of why it
+cannot be quoted.** Every `worst delta` is unchanged except `420p12` (27.61 → 26.61), and the
+neutral spread moves by exactly −2 LSB on every format — including the 8-bit one, whose path this
+change leaves bit-identical by construction (the scale there is the literal `255.0` it already
+was). Reproducible: two runs of each build gave identical figures, so it is not noise. It is also
+not attributable, because the measurement it moves is *already* 15–17 LSB wrong on a neutral
+8-bit source where 0 is correct — the missing range handling — so a ±2 movement inside a 17 LSB
+error says nothing about a 0.5-code offset. What the run does establish is that the Vulkan
+push-constant block still reads correctly with a field added: had the struct's layout broken,
+the deltas would not have come back identical.
+
 **Action: offer the shader fix upstream.** It is not specific to their series — upstream `master`
 has carried it for every existing 10-bit YCbCr source — but their p010 path is a new instance of
 it, and the fix is small and derivable rather than a matter of taste.
