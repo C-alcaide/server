@@ -229,10 +229,36 @@ streams.
 If that changes — 4K, many more streams, a box where this saturates — the measurement to
 re-run is above, and the justification would be a row where `starved` is not zero.
 
-The consumer is the side with a real unmeasured cost: it declares `needs_cpu_frame_data()`, so
-the channel reads the composited frame back to host memory for it, about 415 MB/s at 1080p50.
-`cuda_vk_uploader` in the ffmpeg consumer is the template for avoiding that. It has not been
-built and, unlike the ingest side, nothing here says whether it would be worth it.
+### The consumer's readback, now measured
+
+The consumer declares `needs_cpu_frame_data()`, so the channel reads the composited frame back
+for it — about 415 MB/s at 1080p50. That cost was unmeasured until 2026-08-24; it is not now.
+
+`cli.py gst-consumer-cost` compares the channel with and without a GStreamer consumer whose
+pipeline is a bare `fakesink` — a fakesink and not an encoder, so the number is the readback
+rather than the encoder. Two arms, interleaved round by round. Three runs at 1080p50 with one
+GPU-direct producer:
+
+| | late frames | server CPU |
+| :--- | :--- | :--- |
+| no GStreamer consumer | 0 / 0 / 0 | 1.85 cores |
+| with one | 4 / 3 / 4 | 1.87 cores |
+
+**The consumer arm was worse in every round of every run** — 0.20–0.27% of frames late, and
++0.02 cores. Small, consistent and load-dependent.
+
+So: the readback does cost something, and it is not nothing. `cuda_vk_uploader` in the ffmpeg
+consumer is the template for removing it. Whether a quarter of a percent of frames justifies a
+second GPU path depends on how close to the edge the deployment runs, which is a judgement for
+whoever runs it rather than one this measurement can make.
+
+The verdict is a **sign test** across interleaved rounds, not a threshold, and that matters: an
+earlier absolute late-frame budget gave opposite answers on two runs an hour apart, because
+baseline server CPU on this box was 0.86 cores in one and 1.86 in the next. Asking "was the
+consumer arm worse in every round" survives that; a fixed number decides on machine load.
+
+Not covered: several consumers (the module allows one per channel), 4K, or a machine already
+under other load.
 
 ## What it reports
 

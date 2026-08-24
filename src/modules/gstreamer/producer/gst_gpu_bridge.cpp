@@ -161,8 +161,19 @@ struct gst_gpu_bridge::impl
 
     core::gpu_backend backend_ = core::gpu_backend::none;
 
-    int           width_  = 0;
+    int           width_  = 0;      // the DISPLAY size, from the caps
     int           height_ = 0;
+    /// The decoder surface's own size, which is NOT the display size: a decoded surface is
+    /// padded up to the codec's macroblock grid, so H.264 stores 1080 as 1088. The staging
+    /// copy has to be allocated at THIS size -- `CopySubresourceRegion` copies the whole
+    /// source subresource and requires it to fit the destination, so a 1080-row staging
+    /// texture rejects a 1088-row source with "the Source box must fit within the Destination
+    /// subresource", once per frame, in the debug layer only.
+    ///
+    /// The cropping still happens where it always did, in the extraction draw: `Load()` with a
+    /// viewport of the display size indexes texels directly and takes the top-left region.
+    int           surface_width_  = 0;
+    int           surface_height_ = 0;
     DXGI_FORMAT   surface_format_ = DXGI_FORMAT_UNKNOWN;
     plane_formats planes_;
 
@@ -254,8 +265,8 @@ struct gst_gpu_bridge::impl
     bool make_staging()
     {
         D3D11_TEXTURE2D_DESC td = {};
-        td.Width                = width_;
-        td.Height               = height_;
+        td.Width                = surface_width_;      // padded, not the display size
+        td.Height               = surface_height_;
         td.MipLevels            = 1;
         td.ArraySize            = 1;
         td.Format               = surface_format_;
@@ -439,9 +450,15 @@ core::draw_frame gst_gpu_bridge::to_frame(void*                       tag,
             return core::draw_frame{};
         }
 
-        m.width_          = GST_VIDEO_INFO_WIDTH(&info);
-        m.height_         = GST_VIDEO_INFO_HEIGHT(&info);
-        m.surface_format_ = sd.Format;
+        m.width_           = GST_VIDEO_INFO_WIDTH(&info);
+        m.height_          = GST_VIDEO_INFO_HEIGHT(&info);
+        m.surface_width_   = static_cast<int>(sd.Width);
+        m.surface_height_  = static_cast<int>(sd.Height);
+        m.surface_format_  = sd.Format;
+        if (m.surface_height_ != m.height_ || m.surface_width_ != m.width_)
+            CASPAR_LOG(debug) << L"[gstreamer] decoder surface is " << m.surface_width_ << L"x"
+                              << m.surface_height_ << L" for a " << m.width_ << L"x" << m.height_
+                              << L" picture; the extraction draw crops it.";
 
         if (!m.compile_shaders()) {
             m.give_up(L"the plane extraction shaders would not compile");
