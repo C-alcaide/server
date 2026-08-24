@@ -121,6 +121,32 @@ const char* supported_caps_formats()
            "I420_10LE, I422_10LE, Y444_10LE";
 }
 
+std::shared_ptr<const core::frame_metadata> captions_of(GstBuffer* buffer)
+{
+    if (buffer == nullptr)
+        return nullptr;
+
+    // A buffer may carry more than one -- a source serving both 608 and 708 attaches one of
+    // each -- so this iterates rather than taking `gst_buffer_get_video_caption_meta`, which
+    // returns only the first and would silently drop the other.
+    auto metadata = std::make_shared<core::frame_metadata>();
+    gpointer state = nullptr;
+    while (auto* meta = gst_buffer_iterate_meta_filtered(buffer, &state, GST_VIDEO_CAPTION_META_API_TYPE)) {
+        auto* cc = reinterpret_cast<GstVideoCaptionMeta*>(meta);
+        if (cc->data == nullptr || cc->size == 0)
+            continue;
+        core::frame_metadata::caption out;
+        out.format = static_cast<int>(cc->caption_type);
+        out.data.assign(cc->data, cc->data + cc->size);
+        metadata->captions.push_back(std::move(out));
+    }
+
+    // Null rather than an empty object: `const_frame::metadata()` returns a shared empty for
+    // the overwhelmingly common no-captions case, and allocating one per frame to say "nothing
+    // here" would put a cost on the whole server to serve the few frames that carry any.
+    return metadata->captions.empty() ? nullptr : metadata;
+}
+
 core::draw_frame make_frame(void*                    tag,
                             core::frame_factory&     frame_factory,
                             GstSample*               sample,
@@ -181,8 +207,15 @@ core::draw_frame make_frame(void*                    tag,
 
     // make_frame copies every plane into a frame the mixer owns, so the mapping above only has
     // to outlive this call — which is why unmapping on scope exit is safe.
-    return core::draw_frame(
+    // `ffmpeg::make_frame` hands back a mutable_frame; metadata belongs on the const_frame,
+    // after the hand-over, because that is the form the mixer and the consumers see.
+    core::const_frame frame(
         ffmpeg::make_frame(tag, frame_factory, std::move(av_frame), std::move(audio), to_color_space(info)));
+
+    if (auto captions = captions_of(buffer))
+        frame = frame.with_metadata(std::move(captions));
+
+    return core::draw_frame(std::move(frame));
 }
 
 }} // namespace caspar::gstreamer

@@ -23,6 +23,10 @@
 
 #include "mixer.h"
 
+#include <core/frame/frame_visitor.h>
+
+#include <core/frame/frame_metadata.h>
+
 #include "../frame/frame.h"
 
 #include "audio/audio_mixer.h"
@@ -67,6 +71,34 @@ struct mixer::impl
         image_mixer_->set_target_color(default_color_space_, default_color_transfer_, auto_color_convert, auto_tone_map, display_peak_luminance, sdr_reference_white, auto_gamut_compress, straight_alpha_grading, working_space_composite);
     }
 
+    /// Finds the ancillary data the composited frame should carry.
+    ///
+    /// **Compositing destroys it otherwise, and that is not obvious.** The mixer builds a NEW
+    /// frame from the layers; whatever a layer's producer attached is on the *input* frames and
+    /// has nowhere to go. Measured before this existed: a source delivering 398 caption packets
+    /// produced a channel output carrying none, with no error anywhere -- the picture is
+    /// identical either way, which is exactly how a caption path silently becomes a caption
+    /// sink.
+    ///
+    /// **The FIRST layer that carries any wins, and that is a policy rather than a fallback.**
+    /// Captions belong to the programme feed, which is conventionally the base layer, and there
+    /// is no defined way to merge two caption streams: interleaving two CEA-708 services
+    /// produces something that decodes to neither. A deterministic pick that an operator can
+    /// reason about beats a merge that is wrong in a way nobody can see on air.
+    struct ancillary_collector final : public frame_visitor
+    {
+        std::shared_ptr<const frame_metadata> found;
+
+        void push(const frame_transform&) override {}
+        void pop() override {}
+        void visit(const const_frame& frame) override
+        {
+            if (found || frame.metadata().empty())
+                return;
+            found = std::make_shared<const frame_metadata>(frame.metadata());
+        }
+    };
+
     mixer::output_frames operator()(std::vector<draw_frame> frames, const video_format_desc& format_desc, int nb_samples)
     {
         // Evaluate the previous tick's deferred result BEFORE rendering the
@@ -84,7 +116,9 @@ struct mixer::impl
         image_mixer_->update_aspect_ratio(static_cast<double>(format_desc.square_width) /
                                           static_cast<double>(format_desc.square_height));
 
+        ancillary_collector ancillary;
         for (auto& frame : frames) {
+            frame.accept(ancillary);
             frame.accept(audio_mixer_);
             frame.transform().image_transform.layer_depth = 1;
             frame.accept(*image_mixer_);
@@ -102,6 +136,9 @@ struct mixer::impl
             std::launch::deferred,
             [result = std::move(result),
              audio  = std::move(audio),
+             // Captured, not referenced: this lambda is deferred and runs on the NEXT tick,
+             // by which time `ancillary` is long out of scope.
+             ancillary_metadata = std::move(ancillary.found),
              graph  = graph_,
              depth,
              is_vulkan,
@@ -143,6 +180,11 @@ struct mixer::impl
                 mixer::output_frames out;
                 out.primary = const_frame(tag, std::move(rendered.primary.image), std::move(audio), desc,
                                           std::move(tex_ptr));
+                // Carried onto the composited frame, so a consumer can re-emit what the source
+                // sent. Only the primary: a view is a different picture of the same programme
+                // and its consumer would emit a duplicate caption stream.
+                if (ancillary_metadata)
+                    out.primary = out.primary.with_metadata(ancillary_metadata);
                 // One frame per extra view, sharing the audio-free description. Audio goes
                 // on the primary only: a view is a different PICTURE of the same programme,
                 // and duplicating the samples would have every consumer mixing its own copy.

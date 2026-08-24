@@ -43,6 +43,7 @@
 #include <boost/lexical_cast.hpp>
 
 #include <gst/app/gstappsrc.h>
+#include <gst/video/video.h>
 #include <gst/gst.h>
 
 #include <algorithm>
@@ -103,6 +104,7 @@ struct gst_consumer : public core::frame_consumer
     timer                               frame_timer_;
 
     std::atomic<uint64_t> frames_sent_{0};
+    std::atomic<uint64_t> captions_sent_{0};
     std::atomic<uint64_t> frames_dropped_{0};
     std::atomic<bool>     is_failed_{false};
     mutable std::mutex    mutex_;
@@ -373,6 +375,23 @@ struct gst_consumer : public core::frame_consumer
         const auto index = frames_sent_.load();
         auto*      buffer = wrap(frame);
 
+        // Captions the source attached, put back on the way out. Pass-through: the bytes are
+        // the ones that arrived, because every decode-and-re-encode step is a chance to change
+        // what a broadcaster is obliged to preserve.
+        //
+        // This is what makes the channel a caption-transparent path rather than a place
+        // captions go to die -- `h264ccinserter`, `cccombiner` or a mux downstream can now put
+        // them back into a stream.
+        for (const auto& cc : frame.metadata().captions) {
+            if (cc.data.empty())
+                continue;
+            gst_buffer_add_video_caption_meta(buffer,
+                                              static_cast<GstVideoCaptionType>(cc.format),
+                                              cc.data.data(),
+                                              cc.data.size());
+            ++captions_sent_;
+        }
+
         GST_BUFFER_PTS(buffer)      = gst_util_uint64_scale(index, GST_SECOND * format_desc_.framerate.denominator(),
                                                             format_desc_.framerate.numerator());
         GST_BUFFER_DURATION(buffer) = gst_util_uint64_scale(1, GST_SECOND * format_desc_.framerate.denominator(),
@@ -438,6 +457,9 @@ struct gst_consumer : public core::frame_consumer
         core::monitor::state state;
         state["gstreamer/pipeline"] = u8(description_);
         state["gstreamer/sent"]     = static_cast<int64_t>(frames_sent_.load());
+        // Not decoration: a caption path that silently carries nothing looks exactly like one
+        // that is working, because the picture is identical either way.
+        state["gstreamer/captions"] = static_cast<int64_t>(captions_sent_.load());
         state["gstreamer/dropped"]  = static_cast<int64_t>(frames_dropped_.load());
         state["gstreamer/failed"]   = is_failed_.load();
         return state;

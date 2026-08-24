@@ -58,6 +58,7 @@ set(HEADERS
 		frame/alpha_mode.h
 		frame/draw_frame.h
 		frame/frame.h
+		frame/frame_metadata.h
 		frame/frame_factory.h
 		frame/frame_transform.h
 		frame/frame_visitor.h

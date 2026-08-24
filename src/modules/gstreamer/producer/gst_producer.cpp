@@ -70,6 +70,7 @@ extern "C" {
 
 #include <gst/app/gstappsink.h>
 #include <gst/gst.h>
+#include <gst/video/video.h>
 
 #include <atomic>
 #include <chrono>
@@ -209,6 +210,11 @@ struct gst_producer : public core::frame_producer
     std::unique_ptr<gst_gpu_bridge> gpu_bridge_;
 #endif
     std::atomic<uint64_t> frames_on_gpu_{0};
+    /// Caption packets lifted off incoming buffers. Symmetric with the consumer's `captions`,
+    /// and the pair is what makes a caption path debuggable: in-but-not-out is a carry
+    /// problem, neither is a pipeline that never attached any in the first place, and without
+    /// both you cannot tell those apart -- the picture is identical either way.
+    std::atomic<uint64_t> captions_in_{0};
 
     std::atomic<bool>     is_running_{true};
     std::atomic<bool>     is_eos_{false};
@@ -842,6 +848,12 @@ struct gst_producer : public core::frame_producer
                 if (!frame)
                     frame = make_frame(this, *frame_factory_, sample, as_av_audio(audio_samples));
 
+                if (auto* buffer = gst_sample_get_buffer(sample)) {
+                    gpointer st = nullptr;
+                    while (gst_buffer_iterate_meta_filtered(buffer, &st, GST_VIDEO_CAPTION_META_API_TYPE))
+                        ++captions_in_;
+                }
+
                 if (frame) {
                     std::lock_guard<std::mutex> lock(frames_mutex_);
                     frames_.push(std::move(frame));
@@ -1092,6 +1104,7 @@ struct gst_producer : public core::frame_producer
         state["gstreamer/audio"]     = audio_channels_.load();
         state["gstreamer/underruns"] = static_cast<int64_t>(audio_underruns_.load());
         state["gstreamer/gpu-frames"] = static_cast<int64_t>(frames_on_gpu_.load());
+        state["gstreamer/captions-in"] = static_cast<int64_t>(captions_in_.load());
         // Which format the sink actually negotiated. Not decoration: the sink offers a list,
         // and `videoconvert` will happily satisfy it by converting -- so "the pipeline names
         // d3d11h264dec, therefore the mixer got NV12" is an assumption, not an observation.
