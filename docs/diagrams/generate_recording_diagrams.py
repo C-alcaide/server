@@ -381,7 +381,7 @@ def host_memory_routes():
         ("software", True, "any codec"),
         ("D3D11VA", False, "H.264 HEVC VP9 AV1"),
         ("CUDA ProRes", False, "ProRes"),
-        ("FFmpeg Vulkan", False, "ProRes FFV1 DPX"),
+        ("FFmpeg Vulkan", False, "ProRes, RAW, DPX"),
     ]
     # THROUGH lay.fit_text, not the raw helper. The first version called `_text` directly
     # inside this loop, which bypasses the overrun check entirely -- and four of the eight
@@ -407,7 +407,7 @@ def host_memory_routes():
     encode = [
         ("host FFmpeg", True, "any encoder"),
         ("NVENC direct", False, "H.264 HEVC, 8-bit"),
-        ("Vulkan encode", False, "ProRes FFV1, 16-bit"),
+        ("Vulkan encode", False, "ProRes H.264, 16-bit"),
         ("CUDA_PRORES", False, "ProRes, OGL fast path"),
     ]
     for i, (name, crosses, note) in enumerate(encode):
@@ -921,7 +921,7 @@ def decode_paths():
             # different kind of ending rather than the same one arrived at differently.
             ("mixer", ("no convert needed", "the kernels emit RGB")),
         ]),
-        ("FFmpeg Vulkan compute", SUCCESS, "FFmpeg 8 · ProRes · ProRes RAW · FFV1 · DPX", [
+        ("FFmpeg Vulkan compute", SUCCESS, "FFmpeg 8 · ProRes · ProRes RAW · DPX · FFV1", [
             ("kernels", ("compute shaders", "no decode hardware needed")),
             ("stack", ("VkImage planes", "8.3 MB/frame, 422p10")),
             ("bus", ("imported in place", "same device · no copy")),
@@ -994,18 +994,18 @@ def encode_paths():
             ("fixenc", ("NVENC block", "RGB → YCbCr in hardware")),
             ("stream", ("H.264 or HEVC", "the bitrate you ask for")),
         ]),
-        ("FFmpeg Vulkan", SUCCESS, "ProRes · FFV1 · H.264 · HEVC · 16-bit channels only", [
+        ("FFmpeg Vulkan", SUCCESS, "ProRes · H.264 · HEVC · 16-bit channels only", [
             ("bus", ("VkImage copy", "16.6 MB/frame, same device")),
             ("prism", ("libplacebo", "→ yuv422p10 · 8.3 MB/fr")),
             ("enchybrid", ("encoder", "compute, or NVENC")),
-            ("stream", ("ProRes or FFV1", "422 HQ: 0.97 MB/fr")),
+            ("stream", ("ProRes 422 HQ", "0.97 MB/fr at -q:v 12")),
         ]),
         ("CUDA_PRORES", SUCCESS,
          "the fork's own recorder · fast path needs OpenGL AND progressive", [
             ("bus", ("CUDA-GL map", "OpenGL only · else host")),
             ("prism", ("BGRA → v210", "or YUVA444P10")),
             ("kernels", ("GPU kernels", "DCT · quantise · entropy")),
-            ("stream", ("ProRes 422 / HQ", "0.97 MB/fr · 24 MB/s")),
+            ("stream", ("ProRes 422 / HQ", "0.97 MB/fr on AUTO")),
         ]),
     ]
 

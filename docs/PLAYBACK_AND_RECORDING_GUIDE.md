@@ -60,7 +60,7 @@ one channel is not necessarily the one that reaches furthest.
 | **Software** | `<gpu-direct-decode>false</gpu-direct-decode>` | nothing | yes — decode and upload |
 | **D3D11VA GPU-direct** | `<gpu-direct-decode>true</gpu-direct-decode>` *(default)* | a codec the GPU decodes (H.264, HEVC, VP9, AV1) | **no** |
 | **CUDA ProRes** | `PLAY 1-1 CUDA_PRORES "clip"` | ProRes source, NVIDIA GPU | no |
-| **FFmpeg Vulkan** | `<vulkan-decode>true</vulkan-decode>` | Vulkan mixer; ProRes, ProRes RAW, FFV1 or DPX | no |
+| **FFmpeg Vulkan** | `<vulkan-decode>true</vulkan-decode>` | Vulkan mixer; ProRes, ProRes RAW, DPX or FFV1 | no |
 
 ### The exact path each one takes
 
@@ -109,7 +109,7 @@ file → CUDA kernels: bitstream parse, dequantise, IDCT
 **FFmpeg Vulkan compute** — new in FFmpeg 8, compute shaders rather than a fixed-function block.
 
 ```
-file → FFmpeg Vulkan compute decoder (prores · prores_raw · ffv1 · dpx)
+file → FFmpeg Vulkan compute decoder (prores · prores_raw · dpx · ffv1)
      → VkImage planes on the mixer's own device
      → imported directly, no copy across devices
      → mixer: shader converts YCbCr → RGB
@@ -148,7 +148,7 @@ the more a GPU route is worth.
 | :--- | :--- | :--- | :--- |
 | **Host (CPU encoders)** | any `-vcodec` with no fast path | nothing | yes — readback + convert |
 | **NVENC GPU-direct** | `-vcodec h264_nvenc` / `hevc_nvenc` | **8-bit** channel, CUDA | **no** |
-| **FFmpeg Vulkan** | `-vcodec prores_ks_vulkan` / `ffv1_vulkan` / `h264_vulkan` / `hevc_vulkan` | **16-bit** channel, Vulkan mixer | no |
+| **FFmpeg Vulkan** | `-vcodec prores_ks_vulkan` / `h264_vulkan` / `hevc_vulkan` / `ffv1_vulkan` | **16-bit** channel, Vulkan mixer | no |
 | **CUDA ProRes** | `ADD 1 CUDA_PRORES …` | **OpenGL** mixer, progressive — *for the fast path* | no on the fast path, yes otherwise |
 
 **No single channel satisfies all three fast paths.** NVENC needs 8-bit, the Vulkan encoders need
@@ -278,7 +278,7 @@ Software decode, or the Vulkan decoders, are configuration rather than commands:
 
 ```
 ADD 1 FILE "out.mov" -vcodec prores_ks_vulkan -profile:v 3 -q:v 12 -ac 2
-ADD 1 FILE "out.mkv" -vcodec ffv1_vulkan -ac 2
+ADD 1 FILE "out.mov" -vcodec hevc_vulkan -b:v 40M -ac 2
 ADD 1 FILE "out.mov" -vcodec h264_vulkan -b:v 50M -ac 2
 REMOVE 1 FILE "out.mov" -vcodec prores_ks_vulkan -profile:v 3 -q:v 12 -ac 2
 ```
