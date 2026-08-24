@@ -201,6 +201,39 @@ mixer will not take the textures.
 Windows only. Measured on both mixers: 64/64 (OpenGL) and 68/68 (Vulkan) frames on the GPU
 path, byte-identical to the host path.
 
+## How much it carries, and why there is no CUDA route
+
+Measured 2026-08-24 on this box (RTX-class adapter 0, driver 582.53), simultaneous 1080p50
+H.264 streams, each its own layer, each `d3d11h264dec` with `GPU`:
+
+| streams | worst delivered | starved ticks | not on the GPU path |
+| ---: | ---: | ---: | ---: |
+| 1 | 1.02x | 0 | 0 |
+| 2 | 1.05x | 0 | 0 |
+| 4 | 1.10x | 0 | 0 |
+| 6 | 1.15x | 0 | 0 |
+| 8 | 1.20x | 0 | 0 |
+
+Eight with no pressure at all and the queue never deeper than 2 of 4. (Above 1.00x because a
+`filesrc` is not real-time paced — the decoder simply runs ahead of the channel. On the
+real-time SRT source `ingest-ab` uses, both producers sit at 1.00x.)
+
+**That is why there is no CUDA ingest route**, and the absence is a decision rather than an
+omission. `nvh264dec`, `cudaupload` and `gst_cuda_context_new_wrapped` all work here, and
+`CudaVkTexture` exists in this tree, so it could be built. It would add an NVIDIA-only second
+path, a cross-context device-pointer failure mode that takes the process down rather than
+returning an error, and a second thing to keep correct — to relieve a bottleneck that the
+measurement says is not there. The D3D11 route is vendor-neutral and already carries eight
+streams.
+
+If that changes — 4K, many more streams, a box where this saturates — the measurement to
+re-run is above, and the justification would be a row where `starved` is not zero.
+
+The consumer is the side with a real unmeasured cost: it declares `needs_cpu_frame_data()`, so
+the channel reads the composited frame back to host memory for it, about 415 MB/s at 1080p50.
+`cuda_vk_uploader` in the ffmpeg consumer is the template for avoiding that. It has not been
+built and, unlike the ingest side, nothing here says whether it would be worth it.
+
 ## What it reports
 
 `INFO 1-10` carries `received`, `dropped`, `starved`, `queue`, `queue-peak`, `gpu-frames`,
