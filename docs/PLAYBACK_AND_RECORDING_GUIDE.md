@@ -96,7 +96,8 @@ Only for codecs the GPU's decode block handles. ProRes is **not** one of them �
 a ProRes decoder — so a ProRes clip on this route logs *"the decoder has no hardware device"* and
 falls back to software. That is expected, not a fault.
 
-**CUDA ProRes** — the fork's own decoder, for ProRes specifically.
+**CUDA ProRes** — the fork's own decoder, for ProRes specifically. It runs on **either** mixer:
+the finished frame is copied into whichever texture the channel's mixer owns.
 
 ```
 file → CUDA kernels: bitstream parse, dequantise, IDCT
@@ -116,6 +117,11 @@ file → FFmpeg Vulkan compute decoder (prores · prores_raw · ffv1 · dpx)
 
 Because it is a compute shader it needs no ProRes hardware, which is why ProRes decodes on the
 GPU here and cannot on the D3D11VA route.
+
+**A fifth route exists for one codec.** `CUDA_NOTCHLC` is a second CUDA decoder in this fork,
+built the same way as the ProRes one and likewise usable on either mixer. It is not in the table
+because NotchLC is not a recording format — nothing here encodes it — so it plays back and that
+is all. The CUDA decoders are a family of two, not a ProRes-only feature.
 
 ### What they cost
 
@@ -143,10 +149,17 @@ the more a GPU route is worth.
 | **Host (CPU encoders)** | any `-vcodec` with no fast path | nothing | yes — readback + convert |
 | **NVENC GPU-direct** | `-vcodec h264_nvenc` / `hevc_nvenc` | **8-bit** channel, CUDA | **no** |
 | **FFmpeg Vulkan** | `-vcodec prores_ks_vulkan` / `ffv1_vulkan` / `h264_vulkan` / `hevc_vulkan` | **16-bit** channel, Vulkan mixer | no |
-| **CUDA ProRes** | `ADD 1 CUDA_PRORES …` | **OpenGL** mixer | no |
+| **CUDA ProRes** | `ADD 1 CUDA_PRORES …` | **OpenGL** mixer, progressive — *for the fast path* | no on the fast path, yes otherwise |
 
 **No single channel satisfies all three fast paths.** NVENC needs 8-bit, the Vulkan encoders need
 16-bit, and CUDA ProRes needs the OpenGL mixer. Choose the channel for the recording you intend.
+
+**CUDA_PRORES still records where its fast path does not apply** — this is the one row whose
+requirement is not a refusal. `try_gpu_direct_upload` declines on a Vulkan channel (there is no
+CUDA-GL interop to be had) and on an interlaced channel, and the consumer then reads the frame
+back and uploads it, exactly as the host route does. The encoding is unchanged; only the two
+costs above are added. So the OpenGL and progressive requirements buy you the zero-copy, and
+their absence costs speed rather than the recording.
 
 ### The exact path each one takes
 
@@ -198,7 +211,7 @@ channel is refused outright rather than recorded wrongly.
 measured at 15–39% block utilisation, where the compute encoders read 0%. `prores_ks_vulkan` and
 `ffv1_vulkan` are compute shaders and use no fixed-function unit.
 
-**CUDA ProRes consumer.**
+**CUDA ProRes consumer.** The fast path, taken on an OpenGL progressive channel:
 
 ```
 mixer OpenGL texture → CUDA-GL map on the mixer's own thread
@@ -208,6 +221,9 @@ mixer OpenGL texture → CUDA-GL map on the mixer's own thread
                      → GPU DCT, quantise, entropy code
                      → .mov or .mxf
 ```
+
+On a Vulkan or interlaced channel the first two lines become a readback and a host upload, and
+everything from the conversion kernels down is the same.
 
 ### What they cost
 

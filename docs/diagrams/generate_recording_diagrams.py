@@ -78,7 +78,16 @@ def _arrow(ax, p0, p1, *, color=MUTED, lw=1.4, z=4, style="-|>", rad=0.0):
                                 shrinkA=2, shrinkB=2))
 
 
+#: x-units per y-unit, so a shape can be drawn visually square on a non-square figure.
+#: Set by `_new`; 1.0 until then. Both axes span 0..100 while the figure does not, so without
+#: this an icon drawn s x s renders s*(W/H) times wider than it is tall -- 1.63x on the 14x8.6
+#: pipeline figures, which is what "the icons look stretched" was.
+_AR = 1.0
+
+
 def _new(figsize):
+    global _AR
+    _AR = figsize[0] / figsize[1]
     fig, ax = plt.subplots(figsize=figsize)
     fig.patch.set_facecolor(BG)
     ax.set_facecolor(BG)
@@ -399,7 +408,7 @@ def host_memory_routes():
         ("host FFmpeg", True, "any encoder"),
         ("NVENC direct", False, "H.264 HEVC, 8-bit"),
         ("Vulkan encode", False, "ProRes FFV1, 16-bit"),
-        ("CUDA_PRORES", False, "ProRes, OpenGL mixer"),
+        ("CUDA_PRORES", False, "ProRes, OGL fast path"),
     ]
     for i, (name, crosses, note) in enumerate(encode):
         x = 52 + i * 11.5
@@ -587,53 +596,53 @@ def which_path():
 
 def _ic_file(ax, cx, cy, s, col, z=6):
     """A page with a folded corner: something on disk."""
-    w, h = s * 0.72, s
+    w, h = s * 0.72, s * _AR
     x, y = cx - w / 2, cy - h / 2
     fold = s * 0.26
     ax.add_patch(patches.Polygon(
-        [(x, y), (x, y + h), (x + w - fold, y + h), (x + w, y + h - fold), (x + w, y)],
+        [(x, y), (x, y + h), (x + w - fold, y + h), (x + w, y + h - fold * _AR), (x + w, y)],
         closed=True, fc="none", ec=col, lw=1.3, zorder=z))
-    ax.plot([x + w - fold, x + w - fold, x + w], [y + h, y + h - fold, y + h - fold],
-            color=col, lw=1.0, zorder=z)
+    ax.plot([x + w - fold, x + w - fold, x + w],
+            [y + h, y + h - fold * _AR, y + h - fold * _AR], color=col, lw=1.0, zorder=z)
 
 
 def _ic_chip(ax, cx, cy, s, col, z=6, label=None):
     """A die with pins: a fixed-function or CPU engine."""
-    w = s * 0.78
-    ax.add_patch(patches.Rectangle((cx - w / 2, cy - w / 2), w, w, fc="none", ec=col,
+    w, hh = s * 0.78, s * 0.78 * _AR
+    ax.add_patch(patches.Rectangle((cx - w / 2, cy - hh / 2), w, hh, fc="none", ec=col,
                                    lw=1.3, zorder=z))
-    ax.add_patch(patches.Rectangle((cx - w * 0.22, cy - w * 0.22), w * 0.44, w * 0.44,
+    ax.add_patch(patches.Rectangle((cx - w * 0.22, cy - hh * 0.22), w * 0.44, hh * 0.44,
                                    fc="none", ec=col, lw=0.9, zorder=z))
+    pin, pinv = s * 0.14, s * 0.14 * _AR
     for i in range(3):
-        off = (i - 1) * w * 0.3
-        for x0, x1, y0, y1 in ((cx + off, cx + off, cy + w / 2, cy + w / 2 + s * 0.14),
-                               (cx + off, cx + off, cy - w / 2, cy - w / 2 - s * 0.14),
-                               (cx - w / 2, cx - w / 2 - s * 0.14, cy + off, cy + off),
-                               (cx + w / 2, cx + w / 2 + s * 0.14, cy + off, cy + off)):
+        ox, oy = (i - 1) * w * 0.3, (i - 1) * hh * 0.3
+        for x0, x1, y0, y1 in ((cx + ox, cx + ox, cy + hh / 2, cy + hh / 2 + pinv),
+                               (cx + ox, cx + ox, cy - hh / 2, cy - hh / 2 - pinv),
+                               (cx - w / 2, cx - w / 2 - pin, cy + oy, cy + oy),
+                               (cx + w / 2, cx + w / 2 + pin, cy + oy, cy + oy)):
             ax.plot([x0, x1], [y0, y1], color=col, lw=0.9, zorder=z)
 
 
 def _ic_grid(ax, cx, cy, s, col, z=6, n=4):
     """A grid of cells: many small parallel jobs -- a compute shader, or a raster."""
-    w = s * 0.8
-    step = w / n
-    x0, y0 = cx - w / 2, cy - w / 2
+    w, hh = s * 0.8, s * 0.8 * _AR
+    sx, sy = w / n, hh / n
+    x0, y0 = cx - w / 2, cy - hh / 2
     for i in range(n):
         for j in range(n):
-            ax.add_patch(patches.Rectangle((x0 + i * step + step * 0.12,
-                                            y0 + j * step + step * 0.12),
-                                           step * 0.76, step * 0.76,
+            ax.add_patch(patches.Rectangle((x0 + i * sx + sx * 0.12, y0 + j * sy + sy * 0.12),
+                                           sx * 0.76, sy * 0.76,
                                            fc=col, ec="none", alpha=0.75, zorder=z))
 
 
 def _ic_ram(ax, cx, cy, s, col, z=6):
     """A memory stick with contacts: host memory."""
-    w, h = s * 0.95, s * 0.5
+    w, h = s * 0.95, s * 0.5 * _AR
     x, y = cx - w / 2, cy - h / 2
     ax.add_patch(patches.Rectangle((x, y), w, h, fc="none", ec=col, lw=1.3, zorder=z))
     for i in range(6):
         px = x + w * (0.12 + i * 0.152)
-        ax.plot([px, px], [y, y - s * 0.13], color=col, lw=1.0, zorder=z)
+        ax.plot([px, px], [y, y - s * 0.13 * _AR], color=col, lw=1.0, zorder=z)
     ax.add_patch(patches.Rectangle((x + w * 0.18, y + h * 0.3), w * 0.28, h * 0.4,
                                    fc=col, ec="none", alpha=0.5, zorder=z))
     ax.add_patch(patches.Rectangle((x + w * 0.54, y + h * 0.3), w * 0.28, h * 0.4,
@@ -643,35 +652,35 @@ def _ic_ram(ax, cx, cy, s, col, z=6):
 def _ic_bus(ax, cx, cy, s, col, z=6):
     """Arrows both ways over parallel lines: a transfer across a bus."""
     w = s * 0.9
-    for i, dy in enumerate((s * 0.16, -s * 0.16)):
+    for i, dy in enumerate((s * 0.16 * _AR, -s * 0.16 * _AR)):
         y = cy + dy
         ax.annotate("", xy=(cx + w / 2 if i == 0 else cx - w / 2, y),
                     xytext=(cx - w / 2 if i == 0 else cx + w / 2, y), zorder=z,
                     arrowprops=dict(arrowstyle="-|>", color=col, lw=1.1, shrinkA=0,
                                     shrinkB=0))
-    for dy in (s * 0.34, -s * 0.34):
+    for dy in (s * 0.34 * _AR, -s * 0.34 * _AR):
         ax.plot([cx - w / 2, cx + w / 2], [cy + dy, cy + dy], color=col, lw=0.7,
                 alpha=0.6, zorder=z)
 
 
 def _ic_prism(ax, cx, cy, s, col, z=6):
     """A prism splitting a ray: a colour-space conversion."""
-    h = s * 0.8
-    ax.add_patch(patches.Polygon([(cx - h * 0.42, cy - h * 0.36), (cx, cy + h * 0.44),
-                                  (cx + h * 0.42, cy - h * 0.36)],
+    h, v = s * 0.8, s * 0.8 * _AR
+    ax.add_patch(patches.Polygon([(cx - h * 0.42, cy - v * 0.36), (cx, cy + v * 0.44),
+                                  (cx + h * 0.42, cy - v * 0.36)],
                                  closed=True, fc="none", ec=col, lw=1.3, zorder=z))
     ax.plot([cx - h * 0.72, cx - h * 0.16], [cy, cy], color=col, lw=1.0, zorder=z)
-    for dy in (h * 0.16, 0, -h * 0.16):
-        ax.plot([cx + h * 0.18, cx + h * 0.74], [cy - h * 0.04, cy + dy], color=col,
+    for dy in (v * 0.16, 0, -v * 0.16):
+        ax.plot([cx + h * 0.18, cx + h * 0.74], [cy - v * 0.04, cy + dy], color=col,
                 lw=0.8, alpha=0.85, zorder=z)
 
 
 def _ic_stack(ax, cx, cy, s, col, z=6):
     """Offset sheets: separate planes of one picture."""
-    w, h = s * 0.62, s * 0.42
-    for i, off in enumerate((s * 0.2, 0.0, -s * 0.2)):
-        ax.add_patch(patches.Rectangle((cx - w / 2 + off, cy - h / 2 - off), w, h,
-                                       fc=PANEL, ec=col, lw=1.1, zorder=z + i))
+    w, h = s * 0.62, s * 0.42 * _AR
+    for i, off in enumerate((0.2, 0.0, -0.2)):
+        ax.add_patch(patches.Rectangle((cx - w / 2 + s * off, cy - h / 2 - s * off * _AR),
+                                       w, h, fc=PANEL, ec=col, lw=1.1, zorder=z + i))
 
 
 def _ic_stream(ax, cx, cy, s, col, z=6):
@@ -695,9 +704,13 @@ ICONS = {
 def _step(lay, ax, name, x, y, w, h, icon, lines, *, col, fc=PANEL, icon_col=None):
     """One stage of a pipeline: a box, an icon, and its words."""
     lay.panel(name, x, y, w, h, fc=fc, ec=col, lw=1.25)
-    ICONS[icon](ax, x + w / 2, y + h - h * 0.30, min(w, h) * 0.44, icon_col or col)
+    # `h / _AR`, not `h`: an icon's SIZE is in x-units and it is drawn square, so its vertical
+    # extent is size * _AR. Budgeting against `h` directly -- which is what the first version
+    # did -- overflowed the box top and sat on the label as soon as the icons stopped being
+    # stretched. The tallest icon (the chip, box plus pins) needs 1.06 * size * _AR.
+    ICONS[icon](ax, x + w / 2, y + h - h * 0.30, min(w, h / _AR) * 0.48, icon_col or col)
     for i, ln in enumerate(lines):
-        lay.fit_text(None, x + w / 2, y + h * 0.40 - i * (h * 0.155), ln, parent=name,
+        lay.fit_text(None, x + w / 2, y + h * 0.36 - i * (h * 0.155), ln, parent=name,
                      size=6.7, color=TEXT if i == 0 else MUTED, ha="center",
                      weight="bold" if i == 0 else "normal")
 
@@ -723,10 +736,13 @@ def _icon_legend(lay, ax, y, items):
         col, row = i % per_row, i // per_row
         x0 = 3 + col * cell
         cy = y + 6.4 - row * 4.2
-        ICONS[icon](ax, x0 + 2.6, cy, 4.0, MUTED)
+        # `/ _AR` for the same reason as `_step`: the rows are 4.2 apart in y, and a square
+        # icon of size 4.0 stands 6.9 y-units tall, so the two rows collided.
+        gs = 3.6 / _AR
+        ICONS[icon](ax, x0 + 2.6, cy, gs, MUTED)
         # A real box for the glyph, so a label written over it is reported rather than drawn.
-        lay.panel(f"lg{i}", x0 + 0.4, cy - 2.4, 4.4, 4.8, fc="none", ec="none", lw=0)
-        lay.fit_text(None, x0 + 5.6, cy, txt, parent="legend", size=6.6, color=TEXT,
+        lay.panel(f"lg{i}", x0 + 0.4, cy - 2.1, 4.4, 4.2, fc="none", ec="none", lw=0)
+        lay.fit_text(None, x0 + 5.2, cy, txt, parent="legend", size=6.6, color=TEXT,
                      ha="left")
 
 
@@ -748,22 +764,22 @@ def decode_paths():
         ("Software", DANGER_T, "every codec · the only route that always works", [
             ("file", ("file", "on disk")),
             ("chip", ("CPU decode", "libavcodec")),
-            ("ram", ("host buffer", "yuv420p / 422p10")),
-            ("bus", ("PCIe upload", "one texture per plane")),
+            ("ram", ("host buffer", "yuv420p · 3.1 MB/frame")),
+            ("bus", ("PCIe upload", "78 MB/s at 1080p25")),
             ("prism", ("mixer shader", "YCbCr → RGB")),
         ]),
         ("D3D11VA GPU-direct", SUCCESS, "the default · H.264 HEVC VP9 AV1 · never enters host memory", [
             ("file", ("file", "on disk")),
-            ("chip", ("GPU decode block", "NV12 texture")),
+            ("chip", ("GPU decode block", "NV12 · 3.1 MB/frame")),
             ("bus", ("shared handle", "to the mixer's device")),
             ("stack", ("two plane views", "R8 · R8G8")),
             ("prism", ("mixer shader", "YCbCr → RGB")),
         ]),
-        ("CUDA ProRes", SUCCESS, "the fork's own decoder · ProRes only", [
+        ("CUDA ProRes", SUCCESS, "the fork's own decoder · ProRes · EITHER mixer", [
             ("file", ("file", "on disk")),
             ("grid", ("CUDA kernels", "parse · dequant · IDCT")),
-            ("stack", ("BGRA16", "in GPU memory")),
-            ("bus", ("CUDA → GL / VK", "copy")),
+            ("stack", ("BGRA16", "16.6 MB/frame, on the GPU")),
+            ("bus", ("CUDA → GL or VK", "whichever mixer runs")),
             ("grid", ("mixer texture", "ready to composite")),
         ]),
         ("FFmpeg Vulkan compute", SUCCESS, "FFmpeg 8 · ProRes · ProRes RAW · FFV1 · DPX", [
@@ -815,31 +831,32 @@ def encode_paths():
     rows = [
         ("Host", DANGER_T, "anything with no fast path · two costs before the encoder even starts", [
             ("grid", ("mixer texture", "the composite")),
-            ("ram", ("readback", "8 MB / frame at 8-bit")),
+            ("ram", ("readback", "8.3 MB/frame · 207 MB/s")),
             ("prism", ("libswscale", "→ the encoder's format")),
             ("chip", ("CPU encoder", "libavcodec")),
-            ("stream", ("bitstream", "to file")),
+            ("stream", ("bitstream", "1-25 MB/s typical")),
         ]),
         ("NVENC GPU-direct", SUCCESS, "H.264 · HEVC · 8-bit channels only", [
             ("grid", ("mixer texture", "8-bit")),
-            ("bus", ("CUDA copy", "byte-for-byte")),
+            ("bus", ("CUDA copy", "8.3 MB/frame, no conversion")),
             ("stack", ("CUDA frame", "RGB0 · BGR0 by mixer")),
             ("chip", ("NVENC block", "RGB → YCbCr in hardware")),
-            ("stream", ("bitstream", "to file")),
+            ("stream", ("H.264 / HEVC", "the bitrate you ask for")),
         ]),
         ("FFmpeg Vulkan", SUCCESS, "ProRes · FFV1 · H.264 · HEVC · 16-bit channels only", [
             ("grid", ("mixer texture", "16-bit RGBA")),
-            ("bus", ("VkImage copy", "same device, no export")),
-            ("prism", ("libplacebo", "yuv422p10 or nv12")),
+            ("bus", ("VkImage copy", "16.6 MB/frame, same device")),
+            ("prism", ("libplacebo", "→ yuv422p10 · 8.3 MB/fr")),
             ("chip", ("encoder", "compute, or the NVENC block")),
-            ("stream", ("bitstream", "to file")),
+            ("stream", ("ProRes HQ", "0.97 MB/fr · 24 MB/s")),
         ]),
-        ("CUDA_PRORES", SUCCESS, "the fork's own recorder · ProRes · OpenGL mixer", [
+        ("CUDA_PRORES", SUCCESS,
+         "the fork's own recorder · fast path needs OpenGL AND progressive", [
             ("grid", ("mixer texture", "OpenGL")),
-            ("bus", ("CUDA-GL map", "on the mixer's thread")),
+            ("bus", ("CUDA-GL map", "OpenGL only · else host")),
             ("prism", ("BGRA → v210", "or YUVA444P10")),
             ("grid", ("GPU kernels", "DCT · quantise · entropy")),
-            ("stream", (".mov / .mxf", "written direct")),
+            ("stream", (".mov / .mxf", "422 HQ · 0.97 MB/fr")),
         ]),
     ]
 
