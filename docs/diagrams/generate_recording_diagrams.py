@@ -407,7 +407,7 @@ def host_memory_routes():
     encode = [
         ("host FFmpeg", True, "any encoder"),
         ("NVENC direct", False, "H.264 HEVC, 8-bit"),
-        ("Vulkan encode", False, "ProRes H.264, 16-bit"),
+        ("Vulkan encode", False, "ProRes/H.264, 16-bit"),
         ("CUDA_PRORES", False, "ProRes, OGL fast path"),
     ]
     for i, (name, crosses, note) in enumerate(encode):
@@ -900,21 +900,21 @@ def decode_paths():
     W, H, GAP = 14.25, 13.2, 3.0
 
     rows = [
-        ("Software", DANGER_T, "every codec · the only route that always works", [
+        ("Software", DANGER_T, "every codec, always available", [
             ("cpu", ("CPU decode", "libavcodec")),
             ("ram", ("host buffer", "yuv420p · 3.1 MB/frame")),
             ("bus", ("PCIe upload", "78 MB/s at 1080p25")),
             ("prism", ("mixer shader", "YCbCr → RGB")),
         ]),
-        ("D3D11VA GPU-direct", SUCCESS, "the default · H.264 HEVC VP9 AV1 · never enters host memory", [
+        ("D3D11VA GPU-direct", SUCCESS, "the default · H.264 · HEVC · VP9 · AV1", [
             ("fixdec", ("GPU decode block", "NV12 · 3.1 MB/frame")),
             ("bus", ("shared handle", "to the mixer's device")),
             ("stack", ("two plane views", "R8 · R8G8")),
             ("prism", ("mixer shader", "YCbCr → RGB")),
         ]),
-        ("CUDA ProRes", SUCCESS, "the fork's own decoder · ProRes · EITHER mixer", [
+        ("CUDA ProRes", SUCCESS, "the fork's own decoder · ProRes · either mixer", [
             ("kernels", ("CUDA kernels", "parse · dequant · IDCT")),
-            ("stack", ("BGRA16", "16.6 MB/frame, on the GPU")),
+            ("stack", ("BGRA16", "16.6 MB/frame · on the GPU")),
             ("bus", ("CUDA → GL or VK", "whichever mixer runs")),
             # Phrased as the operation the other three rows DO, negated -- the last column
             # is otherwise three verbs and one noun, which is what made it read as a
@@ -923,7 +923,7 @@ def decode_paths():
         ]),
         ("FFmpeg Vulkan compute", SUCCESS, "FFmpeg 8 · ProRes · ProRes RAW · DPX · FFV1", [
             ("kernels", ("compute shaders", "no decode hardware needed")),
-            ("stack", ("VkImage planes", "8.3 MB/frame, 422p10")),
+            ("stack", ("VkImage planes", "8.3 MB/frame · 422p10")),
             ("bus", ("imported in place", "same device · no copy")),
             ("prism", ("mixer shader", "YCbCr → RGB")),
         ]),
@@ -947,10 +947,10 @@ def decode_paths():
 
     mids = [73 - r * 19.0 + H / 2 for r in range(4)]
     _shared(lay, ax, "src", 3.0, 16.0, 11.0, 70.2, "file",
-            ("on disk", "a clip, or a", "stream — every", "route starts here"),
+            ("on disk", "a clip, or a", "network stream"),
             col=MUTED, rows_y=mids, out=True)
     _shared(lay, ax, "term", 86.0, 16.0, 11.0, 70.2, "mixer",
-            ("the mixer", "every route ends", "here — composited", "with the other layers"),
+            ("the mixer", "composites this", "layer with the", "others on the channel"),
             col=TITLE, rows_y=mids, out=False)
 
     _icon_legend(lay, ax, 1.8, [
@@ -982,30 +982,30 @@ def encode_paths():
     W, H, GAP = 14.25, 13.2, 3.0
 
     rows = [
-        ("Host", DANGER_T, "anything with no fast path · two costs before the encoder even starts", [
+        ("Host", DANGER_T, "anything with no fast path", [
             ("ram", ("readback", "8.3 MB/frame · 207 MB/s")),
             ("prism", ("libswscale", "→ the encoder's format")),
             ("cpu", ("CPU encoder", "libavcodec")),
             ("stream", ("any codec", "1-25 MB/s typical")),
         ]),
         ("NVENC GPU-direct", SUCCESS, "H.264 · HEVC · 8-bit channels only", [
-            ("bus", ("CUDA copy", "8.3 MB/frame, no conversion")),
-            ("stack", ("CUDA frame", "RGB0 · BGR0 by mixer")),
+            ("bus", ("CUDA copy", "8.3 MB/frame · no convert")),
+            ("stack", ("CUDA frame", "RGB0 or BGR0, by mixer")),
             ("fixenc", ("NVENC block", "RGB → YCbCr in hardware")),
             ("stream", ("H.264 or HEVC", "the bitrate you ask for")),
         ]),
         ("FFmpeg Vulkan", SUCCESS, "ProRes · H.264 · HEVC · 16-bit channels only", [
-            ("bus", ("VkImage copy", "16.6 MB/frame, same device")),
-            ("prism", ("libplacebo", "→ yuv422p10 · 8.3 MB/fr")),
-            ("enchybrid", ("encoder", "compute, or NVENC")),
-            ("stream", ("ProRes 422 HQ", "0.97 MB/fr at -q:v 12")),
+            ("bus", ("VkImage copy", "16.6 MB/frame · same device")),
+            ("prism", ("libplacebo", "→ yuv422p10 · 8.3 MB/frame")),
+            ("enchybrid", ("encoder", "compute or NVENC")),
+            ("stream", ("ProRes 422 HQ", "0.97 MB/frame at -q:v 12")),
         ]),
         ("CUDA_PRORES", SUCCESS,
-         "the fork's own recorder · fast path needs OpenGL AND progressive", [
-            ("bus", ("CUDA-GL map", "OpenGL only · else host")),
+         "the fork's own recorder · fast path needs OpenGL and progressive", [
+            ("bus", ("CUDA-GL map", "OpenGL only · else a readback")),
             ("prism", ("BGRA → v210", "or YUVA444P10")),
             ("kernels", ("GPU kernels", "DCT · quantise · entropy")),
-            ("stream", ("ProRes 422 / HQ", "0.97 MB/fr on AUTO")),
+            ("stream", ("ProRes 422 or HQ", "0.97 MB/frame on AUTO")),
         ]),
     ]
 
@@ -1030,7 +1030,7 @@ def encode_paths():
             ("the composite", "one frame — every", "consumer on the", "channel gets it"),
             col=TITLE, rows_y=mids, out=True)
     _shared(lay, ax, "term", 86.0, 16.0, 11.0, 70.2, "file",
-            ("on disk", "the container:", ".mov, .mxf or", ".mp4 — not the codec"),
+            ("on disk", ".mov, .mxf", "or .mp4"),
             col=MUTED, rows_y=mids, out=False)
 
     _icon_legend(lay, ax, 1.8, [
