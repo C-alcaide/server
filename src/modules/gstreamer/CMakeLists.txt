@@ -20,6 +20,9 @@ set(SOURCES
 		producer/gst_producer.cpp
 		producer/gst_producer.h
 
+		producer/gst_gpu_bridge.cpp
+		producer/gst_gpu_bridge.h
+
 		util/gst_frame.cpp
 		util/gst_frame.h
 
@@ -53,6 +56,7 @@ target_include_directories(gstreamer PRIVATE
 
 target_link_libraries(gstreamer PRIVATE
 	ffmpeg
+	accelerator
 	${GSTREAMER_ROOT}/lib/gstreamer-1.0.lib
 	${GSTREAMER_ROOT}/lib/gstapp-1.0.lib
 	${GSTREAMER_ROOT}/lib/gstvideo-1.0.lib
@@ -75,6 +79,14 @@ if (MSVC)
 		"/DELAYLOAD:gobject-2.0-0.dll"
 		"/DELAYLOAD:glib-2.0-0.dll"
 	)
+endif()
+
+if (MSVC)
+	# The GPU route extracts the two NV12 planes with a D3D11 draw on GStreamer's own device,
+	# and compiles its two tiny shaders at runtime -- hence d3dcompiler. dxgi is for the shared
+	# handles the Vulkan import needs.
+	target_link_libraries(gstreamer PRIVATE d3d11 dxgi d3dcompiler)
+	target_compile_definitions(gstreamer PRIVATE CASPAR_GST_GPU_BRIDGE)
 endif()
 
 # The d3d11 library is declared unstable API upstream and says so at every include. We

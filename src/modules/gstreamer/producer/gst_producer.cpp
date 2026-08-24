@@ -105,12 +105,20 @@ constexpr const char* audio_sink_name = "caspar_audio";
 /// stays the default.
 constexpr const char* host_tail = " ! videoconvert ! videorate ! appsink name=";
 #ifdef CASPAR_GST_GPU_BRIDGE
-/// No `d3d11convert`. A `d3d11*dec` already produces NV12 in D3D11 memory, and this tree can
-/// take those two planes to the mixer as they are -- so the converter is not an optimisation
-/// to skip but a *second colour path* to avoid, one that picks its own matrix and range and
-/// then has to agree with the mixer's by luck.
+/// **NV12, not BGRA**, which is what makes this tree's GPU route cheaper than upstream's: the
+/// mixer has a semi-planar pixel format, so the decoder's own two planes go straight to the
+/// shader and the mixer's colour management does the conversion. Asking for BGRA here would
+/// insert a full-frame conversion pass AND move the YCbCr maths into `d3d11convert`, where it
+/// has to agree with the mixer's by luck rather than by construction.
+///
+/// `d3d11convert` is still in the chain, and that is not a contradiction. It is a
+/// GstBaseTransform: when the decoder already produces NV12 in D3D11 memory -- the case this
+/// route exists for -- input and output caps are identical and it passes buffers through
+/// untouched. When they are not, it is the difference between a pipeline that works and one
+/// that refuses to link, which is what a software `decodebin` feeding `d3d11upload` does:
+/// upload changes the memory type, never the format.
 constexpr const char* gpu_tail =
-    " ! d3d11upload ! video/x-raw(memory:D3D11Memory),format=NV12 ! appsink name=";
+    " ! d3d11upload ! d3d11convert ! video/x-raw(memory:D3D11Memory),format=NV12 ! appsink name=";
 #endif
 
 /// Reads whichever of the two a message actually carries. Parsing a WARNING with

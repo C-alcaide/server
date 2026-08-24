@@ -21,6 +21,7 @@
 
 #ifdef _WIN32
 
+#include <common/bit_depth.h>
 #include <core/frame/frame.h>
 
 #include <memory>
@@ -93,9 +94,28 @@ class dx_interop
      * Locks the registered texture, copies it into a freshly pooled mixer texture,
      * and unlocks -- which is what frees the caller's staging texture for reuse.
      *
+     * `stride` and `depth` describe the POOLED texture and must match the registered
+     * D3D11 texture's format. glCopyImageSubData is a sized byte copy between images
+     * the driver requires to be format-compatible, so a mismatch is a GL error rather
+     * than a conversion -- nothing here converts anything.
+     *
+     * The defaults are one packed 4-byte 8-bit surface, which is what a browser's
+     * composited output or an already-converted BGRA frame is, and they keep every
+     * existing call site byte-identical.
+     *
+     * The other case is a semi-planar YCbCr plane, which is why this is no longer
+     * fixed at 4: NV12 wants an R8 luma (stride 1) and an R8G8 chroma (stride 2), and
+     * P010/P016 the same two at bit16. Those travel to the mixer as the planes of
+     * `pixel_format::nv12` and its shader does the colour maths -- which is the whole
+     * point of carrying them separately rather than converting first.
+     *
      * Returns null if the texture was never registered or the lock fails.
      */
-    std::shared_ptr<core::texture> copy_to_pooled(void* d3d11_texture, int width, int height);
+    std::shared_ptr<core::texture> copy_to_pooled(void*             d3d11_texture,
+                                                  int               width,
+                                                  int               height,
+                                                  int               stride = 4,
+                                                  common::bit_depth depth  = common::bit_depth::bit8);
 
     /// Releases every registration, leaving the interop device open. For a caller
     /// rebuilding its staging ring on a size change.
