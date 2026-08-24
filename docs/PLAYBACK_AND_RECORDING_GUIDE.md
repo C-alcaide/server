@@ -27,6 +27,8 @@ Vulkan when it needed OpenGL. The server always says so in its log. §7 is how t
 
 ## 1. Three different "how many" questions
 
+![The three how-many questions: N playout channels, N ISO recordings, and several outputs sharing one channel's frame budget](images/recording_three_questions.png)
+
 These get confused constantly, and the numbers are not interchangeable.
 
 | question | shape | what limits it |
@@ -46,6 +48,8 @@ linear in load, and upload bandwidth saturates before CPU does — so a route th
 one channel is not necessarily the one that reaches furthest.
 
 ---
+
+![Which decode and encode routes touch host memory, and which never leave the GPU](images/recording_host_memory.png)
 
 ## 2. Playback: the four decode routes
 
@@ -335,6 +339,8 @@ channels in one run and 5 in the next with nothing changed. The ordering is stab
 channel is not.
 
 ### Recording — N channels, one recording each
+
+![Measured 1080p25 recording ceilings per encoder, with the rig-bounded results marked](images/recording_ceilings.png)
 
 **Re-measured 2026-08-24, and the previous version of this table was wrong.** It gated on the
 channel's *late-frame* count, which on a recording-only channel measures jitter rather than
@@ -812,6 +818,8 @@ Playback:
 ---
 
 ## 8. Which path for which job
+
+![Which recording path to use, starting from the mixer and channel depth you have](images/recording_which_path.png)
 
 ### If the channel runs the Vulkan mixer
 
