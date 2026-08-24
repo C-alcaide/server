@@ -64,6 +64,11 @@ one channel is not necessarily the one that reaches furthest.
 
 ### The exact path each one takes
 
+![The four decode routes as pipelines, step by step](images/recording_decode_paths.png)
+
+The diagram is the summary; the blocks below are the same four paths with the exact formats and
+the reasons each restriction exists.
+
 **Software.** The safe path, and the only one that handles every codec.
 
 ```
@@ -144,6 +149,8 @@ the more a GPU route is worth.
 16-bit, and CUDA ProRes needs the OpenGL mixer. Choose the channel for the recording you intend.
 
 ### The exact path each one takes
+
+![The four encode routes as pipelines, step by step](images/recording_encode_paths.png)
 
 **Host.** Everything that has no fast path.
 

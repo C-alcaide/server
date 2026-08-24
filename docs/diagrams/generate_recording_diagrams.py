@@ -573,6 +573,300 @@ def which_path():
     _save(fig, "recording_which_path.png")
 
 
+# ── An icon vocabulary, drawn rather than typed ───────────────────────────────
+#
+# WHY DRAWN AND NOT EMOJI. An emoji renders in whatever font the reader's viewer picked, at a
+# size nobody chose, in a style that has nothing to do with the rest of the page -- and several
+# of the ones that would fit here (a chip, a memory stick) do not exist as emoji at all. These
+# are a handful of matplotlib primitives, so they scale with the figure, take the panel's own
+# palette, and mean exactly one thing each.
+#
+# The vocabulary is deliberately small. Eight shapes, each used for one kind of step, so a
+# reader who works out "grid of cells = many small parallel jobs" once has it for every
+# pipeline in the guide.
+
+def _ic_file(ax, cx, cy, s, col, z=6):
+    """A page with a folded corner: something on disk."""
+    w, h = s * 0.72, s
+    x, y = cx - w / 2, cy - h / 2
+    fold = s * 0.26
+    ax.add_patch(patches.Polygon(
+        [(x, y), (x, y + h), (x + w - fold, y + h), (x + w, y + h - fold), (x + w, y)],
+        closed=True, fc="none", ec=col, lw=1.3, zorder=z))
+    ax.plot([x + w - fold, x + w - fold, x + w], [y + h, y + h - fold, y + h - fold],
+            color=col, lw=1.0, zorder=z)
+
+
+def _ic_chip(ax, cx, cy, s, col, z=6, label=None):
+    """A die with pins: a fixed-function or CPU engine."""
+    w = s * 0.78
+    ax.add_patch(patches.Rectangle((cx - w / 2, cy - w / 2), w, w, fc="none", ec=col,
+                                   lw=1.3, zorder=z))
+    ax.add_patch(patches.Rectangle((cx - w * 0.22, cy - w * 0.22), w * 0.44, w * 0.44,
+                                   fc="none", ec=col, lw=0.9, zorder=z))
+    for i in range(3):
+        off = (i - 1) * w * 0.3
+        for x0, x1, y0, y1 in ((cx + off, cx + off, cy + w / 2, cy + w / 2 + s * 0.14),
+                               (cx + off, cx + off, cy - w / 2, cy - w / 2 - s * 0.14),
+                               (cx - w / 2, cx - w / 2 - s * 0.14, cy + off, cy + off),
+                               (cx + w / 2, cx + w / 2 + s * 0.14, cy + off, cy + off)):
+            ax.plot([x0, x1], [y0, y1], color=col, lw=0.9, zorder=z)
+
+
+def _ic_grid(ax, cx, cy, s, col, z=6, n=4):
+    """A grid of cells: many small parallel jobs -- a compute shader, or a raster."""
+    w = s * 0.8
+    step = w / n
+    x0, y0 = cx - w / 2, cy - w / 2
+    for i in range(n):
+        for j in range(n):
+            ax.add_patch(patches.Rectangle((x0 + i * step + step * 0.12,
+                                            y0 + j * step + step * 0.12),
+                                           step * 0.76, step * 0.76,
+                                           fc=col, ec="none", alpha=0.75, zorder=z))
+
+
+def _ic_ram(ax, cx, cy, s, col, z=6):
+    """A memory stick with contacts: host memory."""
+    w, h = s * 0.95, s * 0.5
+    x, y = cx - w / 2, cy - h / 2
+    ax.add_patch(patches.Rectangle((x, y), w, h, fc="none", ec=col, lw=1.3, zorder=z))
+    for i in range(6):
+        px = x + w * (0.12 + i * 0.152)
+        ax.plot([px, px], [y, y - s * 0.13], color=col, lw=1.0, zorder=z)
+    ax.add_patch(patches.Rectangle((x + w * 0.18, y + h * 0.3), w * 0.28, h * 0.4,
+                                   fc=col, ec="none", alpha=0.5, zorder=z))
+    ax.add_patch(patches.Rectangle((x + w * 0.54, y + h * 0.3), w * 0.28, h * 0.4,
+                                   fc=col, ec="none", alpha=0.5, zorder=z))
+
+
+def _ic_bus(ax, cx, cy, s, col, z=6):
+    """Arrows both ways over parallel lines: a transfer across a bus."""
+    w = s * 0.9
+    for i, dy in enumerate((s * 0.16, -s * 0.16)):
+        y = cy + dy
+        ax.annotate("", xy=(cx + w / 2 if i == 0 else cx - w / 2, y),
+                    xytext=(cx - w / 2 if i == 0 else cx + w / 2, y), zorder=z,
+                    arrowprops=dict(arrowstyle="-|>", color=col, lw=1.1, shrinkA=0,
+                                    shrinkB=0))
+    for dy in (s * 0.34, -s * 0.34):
+        ax.plot([cx - w / 2, cx + w / 2], [cy + dy, cy + dy], color=col, lw=0.7,
+                alpha=0.6, zorder=z)
+
+
+def _ic_prism(ax, cx, cy, s, col, z=6):
+    """A prism splitting a ray: a colour-space conversion."""
+    h = s * 0.8
+    ax.add_patch(patches.Polygon([(cx - h * 0.42, cy - h * 0.36), (cx, cy + h * 0.44),
+                                  (cx + h * 0.42, cy - h * 0.36)],
+                                 closed=True, fc="none", ec=col, lw=1.3, zorder=z))
+    ax.plot([cx - h * 0.72, cx - h * 0.16], [cy, cy], color=col, lw=1.0, zorder=z)
+    for dy in (h * 0.16, 0, -h * 0.16):
+        ax.plot([cx + h * 0.18, cx + h * 0.74], [cy - h * 0.04, cy + dy], color=col,
+                lw=0.8, alpha=0.85, zorder=z)
+
+
+def _ic_stack(ax, cx, cy, s, col, z=6):
+    """Offset sheets: separate planes of one picture."""
+    w, h = s * 0.62, s * 0.42
+    for i, off in enumerate((s * 0.2, 0.0, -s * 0.2)):
+        ax.add_patch(patches.Rectangle((cx - w / 2 + off, cy - h / 2 - off), w, h,
+                                       fc=PANEL, ec=col, lw=1.1, zorder=z + i))
+
+
+def _ic_stream(ax, cx, cy, s, col, z=6):
+    """Dashes of unequal length: a coded bitstream."""
+    w = s * 0.92
+    y = cy
+    runs = (0.16, 0.09, 0.22, 0.07, 0.13, 0.19)
+    x = cx - w / 2
+    for i, r in enumerate(runs):
+        ax.plot([x, x + w * r], [y, y], color=col,
+                lw=2.4 if i % 2 == 0 else 1.2, zorder=z, solid_capstyle="butt")
+        x += w * (r + 0.03)
+
+
+ICONS = {
+    "file": _ic_file, "chip": _ic_chip, "grid": _ic_grid, "ram": _ic_ram,
+    "bus": _ic_bus, "prism": _ic_prism, "stack": _ic_stack, "stream": _ic_stream,
+}
+
+
+def _step(lay, ax, name, x, y, w, h, icon, lines, *, col, fc=PANEL, icon_col=None):
+    """One stage of a pipeline: a box, an icon, and its words."""
+    lay.panel(name, x, y, w, h, fc=fc, ec=col, lw=1.25)
+    ICONS[icon](ax, x + w / 2, y + h - h * 0.30, min(w, h) * 0.44, icon_col or col)
+    for i, ln in enumerate(lines):
+        lay.fit_text(None, x + w / 2, y + h * 0.40 - i * (h * 0.155), ln, parent=name,
+                     size=6.7, color=TEXT if i == 0 else MUTED, ha="center",
+                     weight="bold" if i == 0 else "normal")
+
+
+def _icon_legend(lay, ax, y, items):
+    """The key, in two rows of four.
+
+    EIGHT ACROSS DOES NOT FIT. The first version put all eight on one row, which left about
+    11 units a cell: the icon and its label overlapped, and then the label overlapped the NEXT
+    icon. layout_check could not see any of it, because an icon is raw drawing rather than a
+    registered panel -- so each icon now gets a real (invisible) panel and each label declares
+    it as a sibling, which puts the collision back inside what the checker can report.
+    """
+    rows = 2
+    per_row = (len(items) + rows - 1) // rows
+    # 12.5 tall, not 15: the fourth pipeline row bottoms out at y=17, and at 15 the legend's
+    # own title was drawn over it -- which layout_check reported, once the icons had panels.
+    lay.panel("legend", 3, y, 94, 12.5, fc="#181818", ec=BORDER_SUBTLE, blocking=False)
+    lay.text(None, 50, y + 10.2, "what the shapes mean", parent="legend", color=MUTED,
+             size=7.4, weight="bold", ha="center")
+    cell = 94.0 / per_row
+    for i, (icon, txt) in enumerate(items):
+        col, row = i % per_row, i // per_row
+        x0 = 3 + col * cell
+        cy = y + 6.4 - row * 4.2
+        ICONS[icon](ax, x0 + 2.6, cy, 4.0, MUTED)
+        # A real box for the glyph, so a label written over it is reported rather than drawn.
+        lay.panel(f"lg{i}", x0 + 0.4, cy - 2.4, 4.4, 4.8, fc="none", ec="none", lw=0)
+        lay.fit_text(None, x0 + 5.6, cy, txt, parent="legend", size=6.6, color=TEXT,
+                     ha="left")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+def decode_paths():
+    """Section 2's four pipelines, drawn."""
+    lay, fig, ax = _new((14.0, 8.6))
+    lay.panel("frame", 1, 1, 98, 98, blocking=False, fc=BG, ec=BORDER_SUBTLE, radius=0.01)
+
+    lay.text("title", 50, 96.5, "Playback: the exact path each decode route takes",
+             parent=None, color=TITLE, size=13, weight="bold", ha="center")
+    lay.text("sub", 50, 92.5,
+             "the same picture arrives four ways — what differs is how much of it the CPU ever sees",
+             parent=None, color=MUTED, size=8.4, ha="center", style="italic")
+
+    W, H, GAP = 13.6, 15.0, 3.0
+
+    rows = [
+        ("Software", DANGER_T, "every codec · the only route that always works", [
+            ("file", ("file", "on disk")),
+            ("chip", ("CPU decode", "libavcodec")),
+            ("ram", ("host buffer", "yuv420p / 422p10")),
+            ("bus", ("PCIe upload", "one texture per plane")),
+            ("prism", ("mixer shader", "YCbCr → RGB")),
+        ]),
+        ("D3D11VA GPU-direct", SUCCESS, "the default · H.264 HEVC VP9 AV1 · never enters host memory", [
+            ("file", ("file", "on disk")),
+            ("chip", ("GPU decode block", "NV12 texture")),
+            ("bus", ("shared handle", "to the mixer's device")),
+            ("stack", ("two plane views", "R8 · R8G8")),
+            ("prism", ("mixer shader", "YCbCr → RGB")),
+        ]),
+        ("CUDA ProRes", SUCCESS, "the fork's own decoder · ProRes only", [
+            ("file", ("file", "on disk")),
+            ("grid", ("CUDA kernels", "parse · dequant · IDCT")),
+            ("stack", ("BGRA16", "in GPU memory")),
+            ("bus", ("CUDA → GL / VK", "copy")),
+            ("grid", ("mixer texture", "ready to composite")),
+        ]),
+        ("FFmpeg Vulkan compute", SUCCESS, "FFmpeg 8 · ProRes · ProRes RAW · FFV1 · DPX", [
+            ("file", ("file", "on disk")),
+            ("grid", ("compute shaders", "no decode hardware needed")),
+            ("stack", ("VkImage planes", "on the mixer's device")),
+            ("prism", ("mixer shader", "YCbCr → RGB")),
+        ]),
+    ]
+
+    for r, (name, col, note, steps) in enumerate(rows):
+        y = 74 - r * 19.0
+        lay.text(f"rn{r}", 3, y + H + 1.6, name, parent=None, color=col, size=9,
+                 weight="bold")
+        lay.text(f"rd{r}", 97, y + H + 1.6, note, parent=None, color=MUTED, size=7.2,
+                 ha="right")
+        for i, (icon, lines) in enumerate(steps):
+            x = 3 + i * (W + GAP)
+            _step(lay, ax, f"s{r}{i}", x, y, W, H, icon, lines, col=col)
+            if i:
+                lay.arrow((x - GAP + 0.4, y + H / 2), (x - 0.4, y + H / 2),
+                          color=MUTED, lw=1.2)
+
+    _icon_legend(lay, ax, 1.8, [
+        ("file", "a file on disk"), ("chip", "a fixed engine: CPU or GPU block"),
+        ("grid", "many parallel jobs"), ("ram", "host memory"),
+        ("bus", "a transfer across a bus"), ("stack", "separate planes"),
+        ("prism", "a colour conversion"), ("stream", "a coded bitstream"),
+    ])
+
+    lay.check(name="recording_decode_paths")
+    _save(fig, "recording_decode_paths.png")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+def encode_paths():
+    """Section 3's four pipelines, drawn."""
+    lay, fig, ax = _new((14.0, 8.6))
+    lay.panel("frame", 1, 1, 98, 98, blocking=False, fc=BG, ec=BORDER_SUBTLE, radius=0.01)
+
+    lay.text("title", 50, 96.5, "Recording: the exact path each encode route takes",
+             parent=None, color=TITLE, size=13, weight="bold", ha="center")
+    lay.text("sub", 50, 92.5,
+             "one composite, four ways out — only the first one reads the picture back to the CPU",
+             parent=None, color=MUTED, size=8.4, ha="center", style="italic")
+
+    W, H, GAP = 13.6, 15.0, 3.0
+
+    rows = [
+        ("Host", DANGER_T, "anything with no fast path · two costs before the encoder even starts", [
+            ("grid", ("mixer texture", "the composite")),
+            ("ram", ("readback", "8 MB / frame at 8-bit")),
+            ("prism", ("libswscale", "→ the encoder's format")),
+            ("chip", ("CPU encoder", "libavcodec")),
+            ("stream", ("bitstream", "to file")),
+        ]),
+        ("NVENC GPU-direct", SUCCESS, "H.264 · HEVC · 8-bit channels only", [
+            ("grid", ("mixer texture", "8-bit")),
+            ("bus", ("CUDA copy", "byte-for-byte")),
+            ("stack", ("CUDA frame", "RGB0 · BGR0 by mixer")),
+            ("chip", ("NVENC block", "RGB → YCbCr in hardware")),
+            ("stream", ("bitstream", "to file")),
+        ]),
+        ("FFmpeg Vulkan", SUCCESS, "ProRes · FFV1 · H.264 · HEVC · 16-bit channels only", [
+            ("grid", ("mixer texture", "16-bit RGBA")),
+            ("bus", ("VkImage copy", "same device, no export")),
+            ("prism", ("libplacebo", "yuv422p10 or nv12")),
+            ("chip", ("encoder", "compute, or the NVENC block")),
+            ("stream", ("bitstream", "to file")),
+        ]),
+        ("CUDA_PRORES", SUCCESS, "the fork's own recorder · ProRes · OpenGL mixer", [
+            ("grid", ("mixer texture", "OpenGL")),
+            ("bus", ("CUDA-GL map", "on the mixer's thread")),
+            ("prism", ("BGRA → v210", "or YUVA444P10")),
+            ("grid", ("GPU kernels", "DCT · quantise · entropy")),
+            ("stream", (".mov / .mxf", "written direct")),
+        ]),
+    ]
+
+    for r, (name, col, note, steps) in enumerate(rows):
+        y = 74 - r * 19.0
+        lay.text(f"rn{r}", 3, y + H + 1.6, name, parent=None, color=col, size=9,
+                 weight="bold")
+        lay.text(f"rd{r}", 97, y + H + 1.6, note, parent=None, color=MUTED, size=7.2,
+                 ha="right")
+        for i, (icon, lines) in enumerate(steps):
+            x = 3 + i * (W + GAP)
+            _step(lay, ax, f"s{r}{i}", x, y, W, H, icon, lines, col=col)
+            if i:
+                lay.arrow((x - GAP + 0.4, y + H / 2), (x - 0.4, y + H / 2),
+                          color=MUTED, lw=1.2)
+
+    _icon_legend(lay, ax, 1.8, [
+        ("grid", "many parallel jobs, or a raster"), ("ram", "host memory"),
+        ("bus", "a transfer across a bus"), ("stack", "separate planes"),
+        ("prism", "a format or colour conversion"), ("chip", "a fixed engine"),
+        ("stream", "a coded bitstream"), ("file", "a file on disk"),
+    ])
+
+    lay.check(name="recording_encode_paths")
+    _save(fig, "recording_encode_paths.png")
+
+
 def main():
     field_pairing()
     qscale_auto_loop()
@@ -580,6 +874,8 @@ def main():
     host_memory_routes()
     ceiling_chart()
     which_path()
+    decode_paths()
+    encode_paths()
     print("done")
 
 
