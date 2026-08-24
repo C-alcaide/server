@@ -986,7 +986,7 @@ def encode_paths():
             ("ram", ("readback", "8.3 MB/frame · 207 MB/s")),
             ("prism", ("libswscale", "→ the encoder's format")),
             ("cpu", ("CPU encoder", "libavcodec")),
-            ("stream", ("any codec", "1-25 MB/s typical")),
+            ("stream", ("any codec", "no GPU support needed")),
         ]),
         ("NVENC GPU-direct", SUCCESS, "H.264 · HEVC · 8-bit channels only", [
             ("bus", ("CUDA copy", "8.3 MB/frame · no convert")),
