@@ -1,6 +1,63 @@
 CasparVP — Unreleased
 ==========================================
 
+### Changed: semi-planar (NV12/P010) sources now sample chroma where the planar path does
+
+**This changes the rendered output of every hardware-decoded clip.** `get_rgba_color`'s
+`ycbcr`, `ycbcra` and `uyvy` cases all sample chroma through `chroma_uv`, which shifts by half
+a luma texel for LEFT-cosited 4:2:0 — what H.264 and HEVC produce. `nv12` sampled at the luma
+coordinate instead, in **both** backends, so anything reaching the mixer semi-planar had its
+chroma half a chroma texel to the right of where the same content took the planar route.
+
+That is the GPU-direct decode path (`<gpu-direct-decode>`, on by default since 2026-08-20) and
+now the GStreamer producer.
+
+Measured 2026-08-24 on SMPTE bars at 1920×1080, the same file decoded two ways and rendered
+through the two branches:
+
+| | max | mean | pixels differing |
+| :--- | ---: | ---: | ---: |
+| before | 57 LSB | 0.136 | 32 653 (1.57%) |
+| after | 0 LSB | 0.000 | 0 |
+
+Every differing pixel sat in a narrow vertical band on a colour-bar boundary, which is what a
+half-texel chroma error looks like — invisible on flat colour, which is why it lasted. Both
+backends had it identically, so no mixer-parity check could see it either.
+
+**What the measurement does not cover:** one clip, one raster, 8-bit, `bt709` limited range,
+and chroma siting reported as cosited. It says the two branches now agree; it does not
+independently establish that the shared answer is colorimetrically right, which would need a
+reference decode rather than a second path through the same shader.
+
+Verified unchanged: `conformance` 100/100 and `grading` 48/48 on both mixers,
+`gpu-direct-parity` byte-identical.
+
+### Added: a GStreamer module (off by default)
+
+Plays a GStreamer pipeline into a channel and sends a channel out through one. Nothing about a
+build without `-DENABLE_GSTREAMER=ON` changes; the libraries are delay-loaded and opened by
+explicit path, so a server built with it still starts on a machine that has no GStreamer.
+
+```
+PLAY 1-10 [GSTREAMER] "filesrc location=clip.mp4 ! decodebin"
+PLAY 1-10 [GSTREAMER] "srtsrc uri=srt://host:9010 ! tsdemux ! h264parse ! avdec_h264"
+PLAY 1-10 [GSTREAMER] "... ! d3d11h264dec" GPU
+ADD  1 GSTREAMER "videoconvert ! x264enc ! mpegtsmux ! srtsink uri=srt://:9020?mode=listener"
+CALL 1-10 PAUSE | RESUME | SEEK <frame> | LENGTH | POSITION
+GST INFO | GST LIST <substring>
+```
+
+It can exist because CasparCG moved to FFmpeg 8: GStreamer ships its own FFmpeg, and at 7.x all
+six base names collided with ours. It carries **NV12 and P010 straight to the mixer as planes**
+rather than converting first, so the mixer's own colour management does the YCbCr conversion and
+10-bit survives.
+
+`GPU` per PLAY keeps a hardware-decoded picture in video memory. Windows only. Measured on both
+mixers: byte-identical to the host path, and 129 of 132 frames GPU-direct on a 10-bit HEVC clip.
+
+Gated by `cli.py gstreamer` in `CasparCG-TestRunner` — 13 cases including a real SRT connection
+from a local sender, and recovery when that sender is killed and restarted.
+
 ### Changed: the FFmpeg consumer records an interlaced channel as field-coded 25 fps, not 50p
 
 **This changes the output of every existing interlaced-channel recording through the FILE/STREAM

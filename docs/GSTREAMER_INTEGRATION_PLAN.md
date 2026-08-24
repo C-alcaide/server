@@ -1,6 +1,29 @@
 # GStreamer alongside FFmpeg in CasparVP — Integration Plan
 
-**Status: a producer exists and plays. Written 2026-08-17, implemented 2026-08-18.**
+**Status: SUPERSEDED for this tree. It landed here on 2026-08-24, and differently.**
+
+> **Read this first.** Everything below describes the prototype on `proto/gstreamer-ffmpeg8` in
+> `d:\Github\CasparCG-server`, which is an **upstream** checkout. It is still accurate about
+> upstream and it is deliberately not being rewritten, because a record that is right about the
+> thing it describes is worth more than one edited to look current.
+>
+> Two of its conclusions are **false in CasparVP**, and both are load-bearing:
+>
+> * *"this tree has no NV12 pixel format"* (§ Not done) — CasparVP has
+>   `core::pixel_format::nv12` and both shaders carry a `case 15:`. The module here hands the
+>   mixer **NV12 and P010 planes** and lets the mixer's own colour management convert, rather
+>   than converting to BGRA first.
+> * *`frame_factory::import_shared_texture` / `import_d3d_texture`* — neither exists in this
+>   tree, deliberately (see the note at `src/core/mixer/image/image_mixer.h`). The GPU route
+>   here extracts the two planes on GStreamer's own D3D11 device and hands them to
+>   `vulkan::d3d11_import_bridge::copy_planes` or `ogl::dx_interop::copy_to_pooled`.
+>
+> §10's "there is still no harness coverage" is also no longer true: `cli.py gstreamer` is 13
+> cases, both mixers, including a real SRT connection and its recovery.
+>
+> **What is true here is `src/modules/gstreamer/README.md`.** Start there.
+
+**Original status: a producer exists and plays. Written 2026-08-17, implemented 2026-08-18.**
 
 > `src/modules/gstreamer` now exists on `proto/gstreamer-ffmpeg8` in
 > `d:\Github\CasparCG-server`, wired into CMake behind `ENABLE_GSTREAMER`, with a producer on

@@ -93,6 +93,53 @@ GST LIST <substring>
 inventing a duration. `LOOP`, `IN` and `OUT` are deliberately absent: they belong to a producer
 that owns its reader, and this one owns a pipeline whose source may be a socket.
 
+## Where the picture goes, and where the conversion happens
+
+The order is the point, so here it is once rather than four times in prose. The two routes
+reach the same mixer; what differs is whether the picture visits host memory, and **neither
+route converts colour** — that is the mixer's job, at the end, with the channel's colour
+management.
+
+```mermaid
+flowchart TD
+    SRC["source<br/><i>filesrc · srtsrc · udpsrc</i>"] --> DEC{"decoder"}
+
+    DEC -->|"software<br/>avdec_h264"| HOSTBUF["system memory<br/><i>I420 · NV12 · P010</i>"]
+    DEC -->|"hardware<br/>d3d11h264dec · d3d11h265dec"| D3D["D3D11 memory<br/><i>NV12 · P010</i><br/>decoder pool"]
+
+    HOSTBUF --> APPSINK["appsink<br/>caspar_video"]
+    D3D -->|"PLAY … GPU"| BRIDGE
+    D3D -->|"d3d11download<br/>(host route)"| HOSTBUF
+
+    APPSINK --> MAKE["make_frame<br/><i>row copy per plane</i>"]
+    MAKE --> UPLOAD["host upload"]
+
+    subgraph BRIDGE ["gst_gpu_bridge — GStreamer's D3D11 device"]
+        direction TB
+        STAGE["CopySubresourceRegion<br/><i>only if the decoder pool is not<br/>BIND_SHADER_RESOURCE</i>"]
+        EXTRACT["plane extraction draw<br/><i>Load() not Sample() — the surface<br/>is padded to the macroblock grid</i>"]
+        PLANES["R8 + R8G8 &nbsp;·&nbsp; R16 + R16G16"]
+        STAGE --> EXTRACT --> PLANES
+    end
+
+    PLANES -->|"OpenGL<br/>WGL_NV_DX_interop2"| POOLED["pooled mixer textures"]
+    PLANES -->|"Vulkan<br/>VK_KHR_external_memory_win32"| POOLED
+    UPLOAD --> POOLED
+
+    POOLED --> SHADER["mixer shader<br/><b>ycbcra_to_rgba</b><br/><i>this is the ONLY colour conversion</i>"]
+    SHADER --> OUT(["channel"])
+```
+
+Two things the picture makes obvious that the prose kept having to repeat:
+
+* **The conversion happens once, at the end, in the mixer.** No `videoconvert` and no
+  `d3d11convert` colour work sits on either route, which is why the two agree byte for byte
+  rather than by luck — and why the caps' matrix, range and chroma siting reach the shader
+  instead of being consumed on the way.
+* **The GPU route is not zero-copy and does not pretend to be.** It is one extraction pass plus
+  one mixer-side copy, against a download and an upload. The staging copy is a third pass and
+  only appears when the decoder's own pool is not shader-readable, which is the usual case.
+
 ## Semi-planar to the mixer, rather than converted on the way
 
 This tree has `core::pixel_format::nv12` and both shaders carry a case for it, so a hardware
