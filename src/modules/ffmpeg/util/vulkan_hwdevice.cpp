@@ -220,7 +220,31 @@ AVBufferRef* make_vulkan_hwdevice_from_mixer(void* vk_device_handle)
     //
     // Omitted entirely when the GPU has no such family, so an encoder gets no queue to find
     // and declines, rather than being pointed at a family that cannot serve it.
-    if (info.encode_qf_present) {
+    // AND ONLY WHEN IT IS A FAMILY OF ITS OWN. `qf[]` is not just how FFmpeg finds a queue: the
+    // indices become an image's `pQueueFamilyIndices` when it is created CONCURRENT, and that
+    // list must be unique -- VUID-VkImageCreateInfo-sharingMode-01420. A device whose
+    // video-encode family also carries compute or graphics would put the same index in twice.
+    //
+    // Not reachable on this box, where encode is a family of its own, and it is guarded rather
+    // than commented because the failure is a validation error on every frame's image rather
+    // than anything visible in the picture. The same requirement bit upstream from the other
+    // side -- niklaspandersson `d11380d1f` had `vkCreateDevice` reject a family emitted twice,
+    // because a dedicated transfer family with no dedicated compute family lays out as
+    // graphics(0), transfer(1), compute(0) -- so the shape is real hardware, not a hypothetical.
+    //
+    // Declining costs a host-path recording. Sharing the mixer's queue with an encoder is the
+    // same hazard `decode_qf_isolated` above refuses for the decoder, and for the same reason.
+    const bool encode_qf_distinct = info.encode_qf_present && info.encode_qf != info.decode_qf &&
+                                    info.encode_qf != info.graphics_qf;
+    if (info.encode_qf_present && !encode_qf_distinct) {
+        CASPAR_LOG(info) << L"[vk_hwdevice] this GPU's video-encode queue family ("
+                         << info.encode_qf
+                         << L") is also its compute or graphics family, so declaring it would "
+                            L"duplicate an index in every concurrent image; the Vulkan video "
+                            L"encoders are unavailable on this device";
+    }
+
+    if (encode_qf_distinct) {
         hwctx->qf[2].idx   = static_cast<int>(info.encode_qf);
         hwctx->qf[2].num   = 1;
         hwctx->qf[2].flags = static_cast<VkQueueFlagBits>(VK_QUEUE_VIDEO_ENCODE_BIT_KHR);
