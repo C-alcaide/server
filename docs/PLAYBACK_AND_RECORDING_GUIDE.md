@@ -179,13 +179,33 @@ the more a GPU route is worth.
 question, and the one an operator asks: how many playout channels before frames go late. 1080p25
 H.264 noise, the Vulkan mixer (`playback-scaling --routes auto,vulkan_video`, 2026-08-25):
 
-| route | clip | with a screen output per channel | decode only |
-| :--- | :--- | ---: | ---: |
-| **Vulkan Video** | H.264 | **20** | **28+** |
-| **D3D11VA** (`auto`, the default) | H.264 | **12** — marginal | **28+** |
-| **FFmpeg Vulkan compute** | ProRes | **12** | not run |
-| **CUDA ProRes** | ProRes | **4** | not run |
-| **Software** | ProRes | **4** | not run |
+| route | clip | 1080p | 2160p | decode only, 1080p |
+| :--- | :--- | ---: | ---: | ---: |
+| **Vulkan Video** | H.264 | **20** | **6** | **28+** |
+| **D3D11VA** (`auto`, the default) | H.264 | **12** — marginal | **4** | **28+** |
+| **FFmpeg Vulkan compute** | ProRes | **12** | **6** | not run |
+| **CUDA ProRes** | ProRes | **4** | **4** | not run |
+| **Software** | ProRes | **4** | **1** | not run |
+
+Every 2160p figure is at or below its 1080p one, which is the ordering check this ladder exists
+with: a 4K pipeline cannot sustain more channels than the same pipeline at 1080p, and an earlier
+version of these numbers violated that in two rows.
+
+**Software at 4K is one channel, for 3.90 cores** — near four full cores to play a single 4K ProRes
+layer. That is the number that makes the GPU routes matter at 4K rather than merely win.
+
+**And CUDA ProRes stops at 4 channels at BOTH rasters, which is a defect rather than a
+coincidence.** At 2160p it is plausibly GPU-bound, at 69% utilisation. At 1080p it stops at the
+same 4 channels while using **28% GPU and 1.76 cores** — nowhere near any resource limit, while
+FFmpeg's Vulkan compute decoder reaches 12 on the same clip and raster. A route whose ceiling does
+not move with load is not hitting a resource ceiling; that is the signature of a per-producer
+serialisation, a shared queue or thread. Tracked, not yet chased.
+
+**One caveat these 4K numbers carry:** the fixture is 5.7 GB for 60 s, or **96 MB/s per channel**,
+so Vulkan compute's failure going 6 to 8 channels sits at 768 MB/s of sustained read and this
+battery has no instrument to separate storage from decode. The three routes landing on 1, 4 and 6
+rules disk out as the shared limiter — three decoders would not stop at three different rungs on
+one disk — but not for that particular step.
 
 **The two clips are not interchangeable and the groups do not compare across the gap.** No NVIDIA
 GPU decodes ProRes, so D3D11VA cannot be measured on a ProRes fixture at all; the CUDA and
