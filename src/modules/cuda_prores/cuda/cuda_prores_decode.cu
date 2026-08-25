@@ -769,6 +769,8 @@ cudaError_t prores_decode_frame_async(
 // output transform all live in the mixer, so a producer-side conversion to RGB happens before any
 // of them. It is what the FFmpeg path already does with yuv422p10le.
 //
+// Used for 4:2:2 only -- see the header for why 4444 stays on the packed route.
+//
 // FORMAT CONTRACT, and every part of it matters:
 //   * the planes carry 10-bit LIMITED-RANGE codes, clipped to [4, 1019] by the IDCT, with
 //     neutral chroma at 512 -- exactly FFmpeg's yuv422p10le / yuva444p10le;

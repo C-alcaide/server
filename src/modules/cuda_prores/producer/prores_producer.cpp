@@ -165,7 +165,13 @@ struct prores_producer_impl final : public core::frame_producer
     // what the mixer samples every frame, and the colour conversion moves into the shader where
     // the channel's colour management can reach it.
     //
-    // The asymmetry between the two paths is deliberate. `vk_planes_` is 3 or 4.
+    // 4:2:2 ONLY, and the arithmetic is the whole argument. Planar 4:2:2 is 2 + 1 + 1 bytes
+    // a pixel against BGRA16's 8 -- half. Planar 4444 is Y, Cb, Cr and alpha all full size at
+    // 16 bits, which is 8 bytes a pixel: EXACTLY what BGRA16 already costs. There is nothing
+    // to win on 4444, and it is not free either -- see the 4444 note at the allocation below.
+    //
+    // The asymmetry between the two paths is deliberate. `vk_planes_` is 3, or 0 for the
+    // single-BGRA16-texture route that 4444 and the OpenGL mixer both still take.
     std::array<std::shared_ptr<CudaVkTexture>, 4> cvt_[NUM_SLOTS];
     int                                           vk_planes_ = 0;
 #endif
@@ -371,25 +377,45 @@ struct prores_producer_impl final : public core::frame_producer
             // `bit10` yields 64, which with `ycbcr_code_scale` of 65535/256 turns code 940 into
             // 235. `bit16` yields 1 and a picture four times too dark. Both declare the same
             // eR16Unorm storage, so nothing about the allocation tells you which you picked.
-            int        fw       = frame_info_.width, fh = frame_info_.height;
-            const bool is_444   = (frame_info_.profile == 4);
-            const int  chroma_w = is_444 ? fw : fw / 2;
-            vk_planes_          = is_444 ? 4 : 3;
+            const int  fw     = frame_info_.width, fh = frame_info_.height;
+            const bool is_444 = (frame_info_.profile == 4);
 
-            auto make_plane = [&](int w, int h) {
-                auto t = vk_device_->create_exportable_texture(w, h, 1, common::bit_depth::bit10);
-                return std::make_shared<CudaVkTexture>(t, static_cast<VkDevice>(vk_device_->getVkDevice()));
-            };
-            for (int i = 0; i < num_slots_; i++) {
-                cvt_[i][0] = make_plane(fw, fh);              // Y
-                cvt_[i][1] = make_plane(chroma_w, fh);        // Cb
-                cvt_[i][2] = make_plane(chroma_w, fh);        // Cr
-                if (is_444)
-                    cvt_[i][3] = make_plane(fw, fh);          // A
+            // 4444 KEEPS THE SINGLE BGRA16 TEXTURE, for two independent reasons.
+            //
+            // It would save nothing: four full-size 16-bit planes is 8 bytes a pixel, the same
+            // as BGRA16. The halving is a 4:2:2 property, not a planar one.
+            //
+            // And it would cost picture. FFmpeg decodes ProRes 4444 to yuva444p12, so the
+            // reference publishes 12-bit planes; this decoder produces 10-bit ones. Handing
+            // those over straight makes the mixer normalise alpha as 1023*64/65535 = 0.99904
+            // where the reference gets 0.99985, and the premultiply then lands a fraction low
+            // across a whole alpha level. MEASURED 2026-08-26 on prores_4444a_bt709_sdr, frame
+            // 12: `any diff` against the FFmpeg reference went 0.50% -> 13.87%, all of it 1 LSB
+            // and all of it in the alpha-192 band -- 40.8% of that band's samples one low, with
+            // 64 and 128 untouched. Worst stayed 2 LSB and nothing exceeded 3, so it is small;
+            // it is also a straight loss, for no saving.
+            vk_planes_ = is_444 ? 0 : 3;
+
+            if (is_444) {
+                for (int i = 0; i < num_slots_; i++) {
+                    auto t = vk_device_->create_exportable_texture(fw, fh, 4, common::bit_depth::bit16);
+                    cvt_[i][0] = std::make_shared<CudaVkTexture>(t, static_cast<VkDevice>(vk_device_->getVkDevice()));
+                }
+            } else {
+                auto make_plane = [&](int w, int h) {
+                    auto t = vk_device_->create_exportable_texture(w, h, 1, common::bit_depth::bit10);
+                    return std::make_shared<CudaVkTexture>(t, static_cast<VkDevice>(vk_device_->getVkDevice()));
+                };
+                for (int i = 0; i < num_slots_; i++) {
+                    cvt_[i][0] = make_plane(fw, fh);          // Y
+                    cvt_[i][1] = make_plane(fw / 2, fh);      // Cb
+                    cvt_[i][2] = make_plane(fw / 2, fh);      // Cr
+                }
             }
-            CASPAR_LOG(info) << L"[prores_producer] Using CUDA-Vulkan zero-copy interop"
-                             << L" (" << num_slots_ << L" slots x " << vk_planes_
-                             << L" planar 10-bit textures)";
+            CASPAR_LOG(info) << L"[prores_producer] Using CUDA-Vulkan zero-copy interop ("
+                             << num_slots_
+                             << (is_444 ? L" slots x 1 BGRA16 texture -- 4444 keeps the packed route)"
+                                        : L" slots x 3 planar 10-bit textures)");
         } else
 #endif
         {
@@ -584,14 +610,15 @@ struct prores_producer_impl final : public core::frame_producer
             // Vulkan one hands over the decoder's planes and lets the shader convert, the GL one
             // hands over a picture the decoder already converted.
             bool planar = false;
-            bool is_444 = false;
 #ifdef ENABLE_VULKAN
             planar = use_vulkan_ && vk_planes_ > 0;
-            is_444 = planar && vk_planes_ == 4;
 #endif
-            const auto pf      = !planar ? core::pixel_format::rgba
-                               : is_444  ? core::pixel_format::ycbcra
-                                         : core::pixel_format::ycbcr;
+            // Three routes, not two: planar 4:2:2 on Vulkan, packed BGRA16 on Vulkan (4444),
+            // and packed RGBA16 on OpenGL. Collapsing the middle one into the OpenGL branch
+            // would publish a BGRA texture as `rgba` and exchange red with blue.
+            const auto pf = planar        ? core::pixel_format::ycbcr
+                          : use_vulkan_   ? core::pixel_format::bgra
+                                          : core::pixel_format::rgba;
             core::pixel_format_desc pfd(pf, pfd_cs, pfd_ct);
             pfd.is_straight_alpha = straight_alpha_;
             if (planar) {
@@ -601,12 +628,10 @@ struct prores_producer_impl final : public core::frame_producer
                 // and on flat colour, which is most of what the batteries capture.
                 pfd.color_range     = core::color_range::limited;
                 pfd.chroma_location = core::chroma_location::left;
-                const int chroma_w  = is_444 ? sfi.width : sfi.width / 2;
+                const int chroma_w  = sfi.width / 2;
                 pfd.planes.push_back(core::pixel_format_desc::plane(sfi.width, sfi.height, 1, common::bit_depth::bit10));
                 pfd.planes.push_back(core::pixel_format_desc::plane(chroma_w,  sfi.height, 1, common::bit_depth::bit10));
                 pfd.planes.push_back(core::pixel_format_desc::plane(chroma_w,  sfi.height, 1, common::bit_depth::bit10));
-                if (is_444)
-                    pfd.planes.push_back(core::pixel_format_desc::plane(sfi.width, sfi.height, 1, common::bit_depth::bit10));
             } else {
                 pfd.planes.push_back(core::pixel_format_desc::plane(
                     sfi.width, sfi.height, 4, common::bit_depth::bit16));
@@ -628,6 +653,8 @@ struct prores_producer_impl final : public core::frame_producer
             if (planar) {
                 for (int p = 0; p < vk_planes_; ++p)
                     gpu_tex.push_back(cvt_[ps][p]->core_texture());
+            } else if (use_vulkan_) {
+                gpu_tex.push_back(cvt_[ps][0]->core_texture());
             } else
 #endif
                 gpu_tex.push_back(cgt_[ps]->gl_texture());
@@ -875,7 +902,9 @@ struct prores_producer_impl final : public core::frame_producer
                 bool        planar_submit = false;
 #ifdef ENABLE_VULKAN
                 if (use_vulkan_ && cvt_[slot][0]) {
-                    planar_submit = true;
+                    planar_submit = vk_planes_ > 0;
+                    if (!planar_submit)
+                        arr = cvt_[slot][0]->array();   // 4444: the packed BGRA16 route
                 } else
 #endif
                 {
@@ -898,7 +927,7 @@ struct prores_producer_impl final : public core::frame_producer
                     err = prores_decode_frame_planar_async(
                         &ctx, pkt.data.data(), pkt.data.size(), fi.frame_type != 0,
                         cvt_[slot][0]->array(), cvt_[slot][1]->array(), cvt_[slot][2]->array(),
-                        cvt_[slot][3] ? cvt_[slot][3]->array() : nullptr);
+                        nullptr);   // 4:2:2 has no alpha plane, and 4444 does not come here
                 } else
 #endif
                 err = prores_decode_frame_async(&ctx, pkt.data.data(), pkt.data.size(),

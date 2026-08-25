@@ -147,6 +147,14 @@ cudaError_t prores_decode_frame_async(
 // Sizes: Y and alpha are width x height. Cb/Cr are width/2 x height for 4:2:2 and width x height
 // for 4444. Pass nullptr for d_alpha_array on anything but 4444.
 //
+// THE PRODUCER CALLS THIS FOR 4:2:2 ONLY, and the alpha argument is carried rather than used.
+// Planar 4444 is four full-size 16-bit planes -- 8 bytes a pixel, exactly what BGRA16 costs --
+// so it saves nothing, and it loses picture: FFmpeg decodes ProRes 4444 to yuva444p12 while
+// this decoder produces 10-bit planes, which normalises alpha to 0.99904 against the
+// reference's 0.99985 and lands the premultiply a fraction low. Measured at `any diff` 0.50%
+// -> 13.87% on prores_4444a_bt709_sdr, all 1 LSB, all in one alpha band. The alpha path here
+// is correct and tested only as far as that measurement went; treat it as unexercised.
+//
 // No colour_matrix argument -- that answer belongs to the shader now.
 cudaError_t prores_decode_frame_planar_async(
     ProResDecodeCtx*  ctx,
