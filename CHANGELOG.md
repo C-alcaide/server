@@ -39,8 +39,10 @@ card, CUDA-capable encoder; anything else says why once and uses host memory the
 
 **It costs more CPU than the readback it replaces** — 2.04 cores against 1.97 at 1080p50 with
 one consumer, both arms encoding through `nvh264enc`, against 1.84 with no consumer at all.
-Late frames do not separate the arms. Off unless asked for, and `gstreamer/gpu-frames` in
-`INFO` says whether it engaged.
+Late frames do not separate the arms. Off unless asked for, and `gstreamer/egress-frames` in
+`INFO` says whether it engaged — named apart from the producer's `gstreamer/gpu-frames`
+because one `INFO` response carries both, and a shared leaf name is read by whoever asks
+first.
 
 It ships because the measurement is a narrow one: one consumer, 1080p, an idle machine. The
 readback scales with pixels and with consumer count and this route's per-frame CPU largely

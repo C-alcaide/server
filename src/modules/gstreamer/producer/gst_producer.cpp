@@ -49,6 +49,10 @@
 
 #include <common/bit_depth.h>
 
+#include <chrono>
+#include <future>
+#include <thread>
+
 #include <common/diagnostics/graph.h>
 #include <common/except.h>
 #include <common/future.h>
@@ -208,6 +212,15 @@ struct gst_producer : public core::frame_producer
     const bool want_gpu_;
 #ifdef CASPAR_GST_GPU_BRIDGE
     std::unique_ptr<gst_gpu_bridge> gpu_bridge_;
+
+    /// Set only when the pipeline's move to PLAYING did not finish in time -- i.e. a source is
+    /// blocking inside its own state change. Its presence is what tells teardown it must not
+    /// join. Null in every ordinary case.
+    std::shared_ptr<std::future<GstStateChangeReturn>> starting_;
+
+    /// Rate limit for `poll_element_stats`. Not atomic: it is only touched from `state()`,
+    /// and a duplicated poll would be harmless anyway.
+    std::chrono::steady_clock::time_point last_stats_poll_{};
 #endif
     std::atomic<uint64_t> frames_on_gpu_{0};
     /// Caption packets lifted off incoming buffers. Symmetric with the consumer's `captions`,
@@ -272,17 +285,48 @@ struct gst_producer : public core::frame_producer
         // cannot link — the commonest description mistake — fails afterwards, on the bus, and
         // reporting 202 for it puts the error in the log minutes after the operator stopped
         // looking. So wait for the change to settle, and treat the failure as a failed PLAY.
-        auto change = gst_element_set_state(pipeline_, GST_STATE_PLAYING);
-        if (change == GST_STATE_CHANGE_ASYNC) {
-            GstState state = GST_STATE_NULL;
-            change         = gst_element_get_state(pipeline_, &state, nullptr, 5 * GST_SECOND);
+        //
+        // **ON A WORKER THREAD, and that is not a refinement.** `gst_element_set_state` itself
+        // blocks for a source that waits inside NULL->READY: `srtsrc mode=listener` sits in
+        // accept() until a caller arrives, which is a completely ordinary thing to ask for --
+        // you listen, and the encoder connects when it is ready. Called on the AMCP thread it
+        // never returns, so the settle below was unreachable and the SERVER stopped answering
+        // commands entirely: process alive, port still accepting, every PLAY, INFO and CLEAR
+        // unanswered from then on. Measured 2026-08-25 with a one-line pipeline.
+        auto* pipeline  = pipeline_;
+        auto  start_job = std::make_shared<std::future<GstStateChangeReturn>>(
+            std::async(std::launch::async, [pipeline] {
+                auto change = gst_element_set_state(pipeline, GST_STATE_PLAYING);
+                if (change == GST_STATE_CHANGE_ASYNC) {
+                    GstState state = GST_STATE_NULL;
+                    change = gst_element_get_state(pipeline, &state, nullptr, 5 * GST_SECOND);
+                }
+                return change;
+            }));
 
+        auto change = GST_STATE_CHANGE_SUCCESS;
+        // 3 s, not the 5 this used to imply. The wait is paid by the AMCP client waiting for
+        // its `202 PLAY OK`, and a 6 s version measured as a client-side timeout on a PLAY the
+        // server had in fact accepted -- the same unresponsive-looking symptom, moved. Link
+        // failures, which are what this wait is for, surface immediately.
+        if (start_job->wait_for(std::chrono::seconds(3)) == std::future_status::ready) {
+            change = start_job->get();
             if (change == GST_STATE_CHANGE_ASYNC) {
-                // Still settling after 5 s. A slow network source is a legitimate reason, so
-                // this is a warning and the producer carries on.
-                CASPAR_LOG(warning) << print() << L" Still preparing after 5 s; continuing.";
+                // Still settling. A slow network source is a legitimate reason, so this is a
+                // warning and the producer carries on.
+                CASPAR_LOG(warning) << print() << L" Still preparing; continuing.";
                 change = GST_STATE_CHANGE_SUCCESS;
             }
+        } else {
+            // Blocked in the state change rather than merely slow. The layer is live and will
+            // deliver as soon as the source does; what must not happen is this thread waiting
+            // for it. Kept so teardown can avoid joining a thread that may never return.
+            starting_ = start_job;
+            CASPAR_LOG(info) << print()
+                             << L" still connecting; the layer is live and will show frames when "
+                                L"the source does. A listening `srtsrc` blocks here until a "
+                                L"caller arrives — pass `wait-for-connection=false` if you would "
+                                L"rather it gave up.";
         }
 
         if (change == GST_STATE_CHANGE_FAILURE) {
@@ -461,10 +505,35 @@ struct gst_producer : public core::frame_producer
             audio_sink_ = nullptr;
         }
         if (pipeline_ != nullptr) {
+            if (starting_ && starting_->valid() &&
+                starting_->wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
+                // The start is still blocked inside the source. Waiting for it here would hang
+                // the CHANNEL as well as the layer, which is the fault this whole change exists
+                // to remove -- so the pipeline is handed to a detached janitor and this returns
+                // immediately.
+                //
+                // `set_state(NULL)` is what asks a blocked source to give up; it may itself
+                // wait on the state lock the stuck transition holds, which is exactly why it is
+                // not run here. If the source never unblocks the janitor never finishes and one
+                // pipeline is leaked -- bounded, pathological, and a great deal better than an
+                // unresponsive server.
+                auto* orphan = pipeline_;
+                auto  job    = starting_;
+                std::thread([orphan, job] {
+                    gst_element_set_state(orphan, GST_STATE_NULL);
+                    job->wait();
+                    gst_element_set_state(orphan, GST_STATE_NULL);
+                    gst_object_unref(orphan);
+                }).detach();
+                pipeline_ = nullptr;
+                starting_.reset();
+                return;
+            }
             gst_element_set_state(pipeline_, GST_STATE_NULL);
             gst_object_unref(pipeline_);
             pipeline_ = nullptr;
         }
+        starting_.reset();
     }
 
     std::wstring drain_bus_error()
@@ -745,6 +814,24 @@ struct gst_producer : public core::frame_producer
     /// so `rtspsrc`, `rtpbin` and the RIST elements come along without another line of code.
     void poll_element_stats()
     {
+        // **Twice a second, not fifty times.** `state()` is called by the monitor at frame
+        // rate, so "once per state() call" meant a recursive bin walk plus a property read on
+        // every element, 50 times a second, to publish numbers that -- as the comment above
+        // says -- change far more slowly than that.
+        //
+        // It was not only waste. `srtsrc` logs a warning from inside the property read when
+        // its socket has no connection, so an SRT source that is waiting, retrying, or
+        // standing by as a `fallbacksrc` primary filled the server log at 50 lines a second:
+        // measured 2026-08-25, several thousand identical `failed to retrieve stats for
+        // socket ... Connection does not exist` lines, which is both the log unusable and
+        // synchronous file I/O on the path that publishes channel state.
+        {
+            const auto now = std::chrono::steady_clock::now();
+            if (now - last_stats_poll_ < std::chrono::milliseconds(500))
+                return;
+            last_stats_poll_ = now;
+        }
+
         std::shared_lock<std::shared_mutex> lock(pipeline_mutex_);
         if (pipeline_ == nullptr)
             return;

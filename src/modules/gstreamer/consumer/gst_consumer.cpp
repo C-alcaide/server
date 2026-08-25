@@ -177,6 +177,13 @@ struct gst_consumer : public core::frame_consumer
     {
         std::lock_guard<std::mutex> lock(mutex_);
 
+        // The bare `GSTREAMER` form exists so `REMOVE 1 GSTREAMER` can construct one to read
+        // its index; it is not a usable consumer. Rejecting it HERE rather than in the factory
+        // is what lets removal work while `ADD 1 GSTREAMER` with no pipeline still fails.
+        if (description_.empty())
+            CASPAR_THROW_EXCEPTION(user_error()
+                                   << msg_info("The GStreamer pipeline description is empty."));
+
         format_desc_   = format_desc;
         channel_index_ = channel_info.index;
 
@@ -547,7 +554,20 @@ struct gst_consumer : public core::frame_consumer
         state["gstreamer/captions"] = static_cast<int64_t>(captions_sent_.load());
         // A GPU route that silently stopped engaging looks exactly like one that is working,
         // because the picture is identical. This is the only thing that can tell them apart.
-        state["gstreamer/gpu-frames"] = static_cast<int64_t>(frames_on_gpu_.load());
+        // **`egress-frames`, not `gpu-frames`.** The PRODUCER publishes `gstreamer/gpu-frames`
+        // for the frames its decoder handed to the mixer on the GPU, and `INFO 1-10` returns
+        // the layer's producer state and the channel's consumer state in one response. Two
+        // different counts under one leaf name means whoever reads by tag gets whichever comes
+        // first.
+        //
+        // Measured 2026-08-25, and it cost most of a session: a host consumer (always 0 here)
+        // shadowed a producer running 199/199, which read as "the GPU bridge stopped
+        // recognising the decoder's surface". Four things were investigated and cleared --
+        // the CUDA egress, the caption pipeline, software producers, the leftover consumer --
+        // before the tell was noticed: with a GPU consumer attached the same field read 250
+        // against 200 frames received, a count larger than the frames it was supposedly
+        // counting.
+        state["gstreamer/egress-frames"] = static_cast<int64_t>(frames_on_gpu_.load());
         state["gstreamer/dropped"]  = static_cast<int64_t>(frames_dropped_.load());
         state["gstreamer/failed"]   = is_failed_.load();
         return state;
@@ -560,14 +580,22 @@ create_consumer(const std::vector<std::wstring>&                        params,
                 const std::vector<spl::shared_ptr<core::video_channel>>& channels,
                 const core::channel_info&                               channel_info)
 {
-    if (params.size() < 2 || !boost::iequals(params.at(0), L"GSTREAMER"))
+    if (params.empty() || !boost::iequals(params.at(0), L"GSTREAMER"))
         return core::frame_consumer::empty();
 
-    auto description = params.at(1);
+    // **A BARE `GSTREAMER` MUST CONSTRUCT**, and that is not a convenience: `REMOVE 1
+    // GSTREAMER` works by building a consumer from the parameters purely to read its
+    // `index()`, so refusing the one-token form makes the consumer impossible to remove by
+    // name -- `404 REMOVE FAILED`, with the consumer still attached and no way to detach it
+    // short of restarting the channel.
+    //
+    // Measured 2026-08-25. The same shape is documented for the ffmpeg consumer, where the
+    // bare `REMOVE 1 FILE` throws `file_not_found` and leaves the container unfinalised.
+    //
+    // An empty description is rejected at `initialize()` instead, so `ADD 1 GSTREAMER` with no
+    // pipeline still fails -- it just fails at the point that actually needs the description.
+    auto description = params.size() >= 2 ? params.at(1) : std::wstring{};
     boost::trim(description);
-
-    if (description.empty())
-        CASPAR_THROW_EXCEPTION(user_error() << msg_info("The GStreamer pipeline description is empty."));
 
     // `GPU` anywhere after the description, matching `PLAY … GPU` on the producer.
     bool want_gpu = false;

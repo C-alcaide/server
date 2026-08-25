@@ -297,8 +297,12 @@ machine. The readback grows with resolution and with the number of consumers rea
 channel back; this route's per-frame CPU largely does not. If you run 4K, or several
 consumers, measure it on **your** box rather than trusting either number here.
 
-`INFO 1` reports `gstreamer/gpu-frames`. If you asked for `GPU` and it reads 0, the route
+`INFO 1` reports `gstreamer/egress-frames`. If you asked for `GPU` and it reads 0, the route
 declined — the reason is in the server log, once.
+
+It is deliberately **not** called `gpu-frames`: that name belongs to the producer, counting
+frames its decoder handed to the mixer on the GPU, and a single `INFO` response carries both.
+They are different numbers about different halves of the channel.
 
 ---
 
@@ -389,7 +393,7 @@ ADD 1 GSTREAMER "videoconvert ! x264enc speed-preset=veryfast ! h264parse ! mp4m
 | `format` | what the sink actually negotiated, e.g. `NV12 (D3D11)`. **Read this before assuming** |
 | `starved` | ticks that found the queue empty and repeated the last picture — the number that shows a dead source |
 | `queue`, `queue-peak` | how much runway there is between pipeline and channel |
-| `gpu-frames` | frames that took the GPU route. 0 with `GPU` asked for means it fell back |
+| `gpu-frames` | frames the PRODUCER put on the GPU path. 0 with `GPU` asked for means it fell back. The consumer's equivalent is `egress-frames`, named apart because one INFO response carries both |
 | `captions` | caption packets re-emitted by the consumer. The picture looks identical whether captions travel or vanish, so this is the only thing that tells them apart |
 | `restarts` | pipeline rebuilds after an error |
 | `eos`, `position`, `length` | end of stream, and where you are |

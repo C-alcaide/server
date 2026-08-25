@@ -66,7 +66,8 @@ namespace caspar { namespace gstreamer {
  * under are narrow ones: one consumer, 1080p, a machine doing nothing else. The readback
  * scales with pixels and with consumer count; this route's per-frame CPU largely does not. At
  * 4K, or with several consumers, or on a box already CPU-bound, the ordering may reverse. It
- * is off unless asked for, and `gstreamer/gpu-frames` in INFO says whether it engaged.
+ * is off unless asked for, and `gstreamer/egress-frames` in INFO says whether it engaged
+ * -- named to differ from the producer's `gstreamer/gpu-frames`, because INFO carries both.
  *
  * ── What it is measured BY ──────────────────────────────────────────────────
  * The picture: `gst_cuda_egress` output downloaded through `cudadownload` and compared
