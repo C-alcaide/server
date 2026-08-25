@@ -194,16 +194,20 @@ D3D11VA read "stops at 16" until the rung was re-run and the real limit was 14. 
 is wide — Vulkan Video's 20 against a failure at 24 — the true ceiling is somewhere inside it and
 the figure quoted is the one that was demonstrated.
 
-**CUDA ProRes stops at 5 channels at BOTH rasters, and that is a defect rather than a
-coincidence.** At 2160p it is plainly saturated: 89% GPU, 3.97 cores. At 1080p it stops at the
-same 5 while using **23% GPU and 1.84 cores** — a quarter of the GPU — and it fails at 6 on
-*seven* late frames, barely over the floor, where 4K fails on 161. FFmpeg's Vulkan compute
-decoder reaches 12 on the same clip and raster. A ceiling that does not move under a fourfold
-change in pixels, at a quarter of the GPU, is not a resource ceiling; it is a per-producer
-serialisation. The CUDA-GL interop mutex is ruled out — this ran on the Vulkan mixer, where every
-producer took the CUDA-Vulkan zero-copy path with no fallback — and so is per-frame locking, since
-that mutex is taken once per producer at setup. The 5-slot texture pool per producer and the
-producer's own queue depth are the untested candidates.
+**CUDA ProRes stops at 5 channels at both rasters — and for two DIFFERENT reasons, which is why
+it looked like one.** At 2160p it is genuinely saturated: 89% GPU, 3.97 cores. At 1080p it is the
+screen output, not the decode — the same route with `--consumer none` holds **16+** channels while
+the ceiling with an output is 5, at 23% GPU. Two unrelated limits landing on the same number.
+
+An earlier version of this section read that invariance as "a per-producer serialisation" in the
+fork's own decoder. **That was wrong**, and the test that settled it is the same one that reframed
+the H.264 pair above: remove the consumer. Recorded because the wrong reading was published here
+first, and because a plausible mechanism survived three attempts to confirm it —
+the CUDA-GL interop mutex (ruled out: this runs on the Vulkan mixer, every producer on the
+zero-copy path), per-frame locking (ruled out: that mutex is taken once per producer at setup),
+and the producer's queue depth, which was raised from 2 frames to 4 and moved the ceiling **not at
+all** while spending 510 MB of VRAM. That change was reverted; the source comment carries the
+result so it is not retried.
 
 **Software at 4K is one channel, for 3.90 cores** — near four full cores to play a single 4K
 ProRes layer. That is what makes the GPU routes matter at 4K rather than merely win.

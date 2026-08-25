@@ -297,6 +297,19 @@ struct prores_producer_impl final : public core::frame_producer
         // Choose queue/slot depth based on frame pixel count.
         // Threshold: 25 M pixels (~7.5K resolution). Below that the original 2/5
         // depth is sufficient and avoids spending extra VRAM on smaller content.
+        //
+        // 4/7 EVERYWHERE WAS TRIED AND REVERTED, 2026-08-25. The theory was that 2 queued
+        // frames is too shallow for MULTI-CHANNEL playout -- the deep branch was tuned for 12K
+        // 360 material and a `speed=2` burst, never for N producers sharing a GPU -- and that
+        // jitter growing with N would turn straight into late frames. `playback-scaling` said
+        // otherwise: the 1080p ceiling stayed at exactly 5 channels, failing at 6 on 6 late
+        // frames against 7 before, while VRAM went 2354 -> 2864 MB. The slots were allocated
+        // and bought nothing.
+        //
+        // What the ceiling actually is: the SCREEN CONSUMER. The same route with
+        // `--consumer none` holds 16+ channels at 1080p. So do not spend VRAM here looking for
+        // channels -- at 1080p the decode was never the constraint, and at 2160p it is the GPU
+        // at 89% rather than this queue.
         {
             const int64_t pixels = (int64_t)frame_info_.width * frame_info_.height;
             if (pixels >= 25'000'000) {

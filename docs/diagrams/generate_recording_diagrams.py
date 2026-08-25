@@ -561,7 +561,7 @@ def playback_ceiling_chart():
         ("D3D11VA", "the default", 12, ACCENT_HOVER, "fails at 14 — MARGINAL"),
         (None, "ProRes — no GPU decode block does this codec at all", 0, None, ""),
         ("FFmpeg Vulkan compute", "<vulkan-decode>", 12, SUCCESS, "fails at 16"),
-        ("CUDA ProRes", "the fork's own decoder", 5, ACCENT_HOVER, "fails at 6 — 23% GPU"),
+        ("CUDA ProRes", "the fork's own decoder", 5, ACCENT_HOVER, "fails at 6 — 16+ with no output"),
         ("software", "no GPU-direct path", 4, DANGER_T, "fails at 6 — 4.07 cores"),
     ]
     x0, wmax, cmax = 32.0, 38.0, 24.0
