@@ -195,7 +195,8 @@ void dx_interop::release_registrations()
     });
 }
 
-std::shared_ptr<core::texture> dx_interop::copy_to_pooled(void* d3d11_texture, int width, int height)
+std::shared_ptr<core::texture>
+dx_interop::copy_to_pooled(void* d3d11_texture, int width, int height, int stride, common::bit_depth depth)
 {
     auto& m  = *impl_;
     auto  it = m.registered_.find(d3d11_texture);
@@ -217,7 +218,10 @@ std::shared_ptr<core::texture> dx_interop::copy_to_pooled(void* d3d11_texture, i
         // Copy into a pooled mixer texture rather than handing the registered one
         // over: the source belongs to the caller's staging ring and has to be free
         // again by the next frame.
-        out = m.dev_->create_texture(width, height, 4, common::bit_depth::bit8, false);
+        // stride/depth rather than a fixed 4/bit8: a semi-planar source hands over an R8 or
+        // R16 luma and an R8G8 or R16G16 chroma, and glCopyImageSubData below requires the
+        // two images to be format-compatible rather than convertible.
+        out = m.dev_->create_texture(width, height, stride, depth, false);
         if (out) {
             glCopyImageSubData(reg.gl_tex, GL_TEXTURE_2D, 0, 0, 0, 0, out->id(), GL_TEXTURE_2D, 0, 0, 0, 0, width,
                                height, 1);

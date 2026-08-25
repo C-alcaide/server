@@ -1,6 +1,251 @@
 CasparVP — Unreleased
 ==========================================
 
+### Measured: network streams are GPU-accelerated in and out, on both modules
+
+Not a change — a claim that had never been checked. Every GPU measurement in this tree used a
+**file**, and the battery's own SRT case decodes in software, so a network source with a
+hardware decoder had never actually been run. "The decline list does not mention URLs" is an
+inference, not a measurement.
+
+All four, one run, 2026-08-25:
+
+| path | result |
+| :--- | :--- |
+| GStreamer in — `srtsrc ! tsdemux ! h264parse ! d3d11h264dec` + `GPU` | 249/249 frames GPU-direct |
+| GStreamer out — CUDA egress → `nvh264enc` → `srtsink`, `GPU` | 298/298 frames, no readback |
+| FFmpeg in — `PLAY 1-10 "srt://…"` | `D3D11→Vulkan GPU-direct bridge initialized` |
+| FFmpeg out — `ADD 1 STREAM udp://… -vcodec h264_nvenc` | `GPU-direct recording active … no readback` |
+
+The transport is never the accelerated part. `STREAM` and `FILE` are the same FFmpeg consumer
+with one flag and its GPU gate never inspects it, so anything true of recording a file is true
+of sending a stream. `docs/GSTREAMER_GUIDE.md` §10a has the conditions that decide whether the
+route actually engages in each case.
+
+### Fixed: a listening `srtsrc` hung the whole server
+
+`PLAY 1-10 [GSTREAMER] "srtsrc uri=srt://:9000?mode=listener ! ..."` — listen now, let the
+encoder connect later, which is the ordinary way to run SRT ingest — made the server stop
+answering AMCP entirely. The process stayed alive, the port kept accepting connections, and
+every later `PLAY`, `INFO` and `CLEAR` went unanswered.
+
+`gst_element_set_state` blocks for a source that waits inside NULL→READY, and it was being
+called on the AMCP thread. The state change now runs on a worker: `PLAY` returns in about 3 s
+and the layer delivers when a caller arrives. Pass `wait-for-connection=false` if you would
+rather it gave up than waited.
+
+### Fixed: `REMOVE 1 GSTREAMER` returned 404
+
+The consumer could not be removed by name at all. AMCP builds a consumer from the parameters
+purely to read its index, and the factory refused the one-token form. The bare form now
+constructs; an empty pipeline description is rejected at `initialize()` instead, so
+`ADD 1 GSTREAMER` with no pipeline still fails — at the point that actually needs it.
+
+### Fixed: two waits that ran on the channel's thread
+
+* **The consumer's end-of-stream drain.** Up to 5 s, so a muxer finalises its file rather than
+  leaving a container with no index. The wait is right; the thread was not — a removed
+  consumer is destroyed on the channel's output thread, so every GStreamer consumer that did
+  not produce EOS promptly stopped the whole channel for as long as five seconds. It now runs
+  on a detached janitor, and the CUDA egress travels with the pipeline so its buffers are
+  freed after, not before.
+* **The element-stats poll.** `state()` called `g_object_get(element, "stats")`, which takes
+  the element's own lock — and `srtsrc` holds that lock across a reconnect, on the path the
+  channel publishes from. It now runs on the producer's own thread, twice a second rather than
+  at frame rate, which also stopped it filling the log at 50 lines a second whenever an SRT
+  source had no connection.
+
+### Fixed: `GPU` on an OpenGL channel killed the server
+
+The CUDA egress asked only whether a CUDA device existed — true on an OpenGL channel too — so
+it opened, the appsrc was negotiated for `memory:CUDAMemory`, and the first frame revealed
+that `ogl::texture` exposes no shareable handle. The egress dropped itself correctly and the
+consumer went on pushing host buffers into an appsrc expecting CUDA memory. It now declines on
+`channel_info::use_vulkan` before anything negotiates against it.
+
+### Fixed: `GST_DEBUG` and `GST_DEBUG_FILE` were silently ignored
+
+The module set its own default threshold unconditionally, and that call updates *every*
+category — so `GST_DEBUG` was overwritten immediately after `gst_init` parsed it and produced
+byte-identical output to not setting it. `GST_DEBUG_FILE` was dead for a second reason: the
+default log function is what writes it, and the module had removed it to route GStreamer into
+the server log.
+
+Both now defer to the environment when it is set, and with `GST_DEBUG_FILE` the detail goes to
+that file *as well as* the summary to the server log. This is the first switch anyone reaches
+for when a pipeline misbehaves; it now works.
+
+### Added: a sample that cannot be made into a frame says so
+
+`make_frame` returns an empty frame for anything it cannot describe, and the producer simply
+does not queue it — so the sample counted as *received*, the channel starved, the picture was
+black, and nothing appeared in the log. That shape has now cost two investigations in this
+tree. The producer logs it once, naming the negotiated format.
+
+### Changed: the consumer's GPU counter is `gstreamer/egress-frames`
+
+It was `gstreamer/gpu-frames`, the same leaf name the **producer** publishes for a different
+count, and one `INFO` response carries both. Anything reading by tag got whichever came first:
+a host consumer's constant 0 hid a producer running 199/199, and was diagnosed as a GPU bridge
+defect that did not exist.
+
+### Added: `GPU BGRA`, a GPU route for sources with no YCbCr to hand over
+
+`PLAY ... "d3d11screencapturesrc ..." GPU BGRA` keeps an RGB source in video memory all the
+way to the mixer. The semi-planar route was the only GPU route, so a screen capture or an RGB
+filter chain — which cannot negotiate those caps at all — fell to host memory and read back a
+full BGRA frame per tick.
+
+BGRA needs no extraction draw: the sample's texture already is the picture, so it is one
+`CopySubresourceRegion` into a texture the mixer can import. No shader, no plane views, and
+therefore no `D3D11_BIND_SHADER_RESOURCE` requirement on the source.
+
+Opt-in, and never offered alongside NV12: a `d3d11h264dec` asked for both would satisfy BGRA
+by having `d3d11convert` inserted, restoring the conversion the GPU route exists to remove,
+with no symptom except the cost.
+
+6/6 frames GPU-direct on both mixers, bars in the right order, matching the host path.
+
+**Known, and not operator-facing**: `videotestsrc` renders black through the GPU bridge — on
+plain `GPU` too, with none of this in the build. Every real source is fine, hardware- and
+software-decoded alike, including through the same `d3d11upload ! d3d11convert`. Tracked in
+the harness handoff.
+
+### Fixed: a repeated frame repeated its closed captions
+
+**This changes what a caption decoder receives whenever a channel starves.** When the
+GStreamer producer cannot keep up, the channel repeats its last picture — and the consumer
+re-emitted that picture's `cc_data` on every repeat. CEA-708 is a command stream, so a
+doubled `RollUp` or `SetPenLocation` is a visible fault rather than harmless redundancy.
+
+Measured with a source delayed to ~33 fps in a 50p channel: **177 repeated frames, 2100 of
+5376 arriving triplets now withheld as duplicates**, where every one of them used to go out.
+
+Two changes together, and neither works alone:
+
+* The consumer runs `cc_data` through a queue keyed on the frame's identity, so a picture's
+  captions are enqueued once however many times that picture is sent. The queue also holds
+  the per-frame budget the standard defines — 12 triplets at 50p, 24 at 25p, 25 at 24p, from
+  FFmpeg's `libavutil/ccfifo.c` — so a burst is spread rather than truncated.
+* **`core::mixer` shared the frame's metadata instead of copying it.** It built a fresh
+  `frame_metadata` every tick, so the identity above was new on every frame and the queue saw
+  no repeats at all: 177 repeats, zero suppressed. `const_frame::metadata_ptr()` exposes the
+  stored pointer, which is also one allocation and one copy less per frame.
+
+608 and 708-in-CDP are still passed through unpaced — 608 is two bytes per field per frame
+and a CDP carries its own framing and sequence counter, so re-packing either means rewriting
+a header rather than moving triplets. Stated in `caption_pacer.h` rather than left to be
+discovered.
+
+Gated by `cli.py gstreamer --only caption-rate`, which starves the channel deliberately. The
+existing `captions` case cannot fail for this: it runs 50 into 50, and every counter it reads
+is identical whether the channel de-duplicates or not.
+
+### Changed: the CUDA upload waits for its own copy, not for the whole device
+
+**This affects every NVENC recording, not only the new GStreamer path.**
+`cuda_vk_uploader::copy_to_device` — used by the FFmpeg consumer's GPU-direct NVENC route, the
+DeckLink consumer and now the GStreamer consumer — ended each frame with
+`cudaDeviceSynchronize()`, which blocks until **every context on the device** is idle. This
+process runs several CUDA users at once, so each frame waited on work it had nothing to do
+with, and waited longer the busier the GPU was.
+
+It now issues the copy on its own non-blocking stream and waits on a `cudaEventBlockingSync`
+event. Two changes, both narrowing what is waited for:
+
+* **the device → our stream.** The copy has one producer and one consumer; the wider wait was
+  never needed for correctness.
+* **a spin → a blocking event.** CUDA's default wait spins, burning a core polling at frame
+  rate on the consumer thread.
+
+Ordering against the mixer also moved off the CPU: where the texture exposes a timeline
+semaphore, it is imported and waited on **by the copy, on the GPU**, instead of this thread
+blocking on `ensure_render_complete()`. Textures without one keep the CPU fence wait.
+
+Measured on the GStreamer CUDA egress at 1080p50: 2.24 → 2.03 cores across the three changes.
+Picture unchanged — `encode-parity --codec h264 --gpu-arm nvenc` agrees with libx264 at mean
+1.66 LSB with 48% of significant deltas at chroma transitions, and the GStreamer route is
+byte-identical (max 0 LSB) to the channel's own capture.
+
+**That NVENC arm did not exist before this change.** Every battery touching the FFmpeg
+consumer's GPU path ran the *Vulkan* encoder, which reaches the encoder through entirely
+different code, so `cuda_vk_upload.cpp` had no coverage at all.
+
+### Added: `GPU` on the GStreamer consumer — correct, opt-in, and not currently faster
+
+`ADD 1 GSTREAMER "nvh264enc ! ..." GPU` hands the channel's composited texture to the pipeline
+as `memory:CUDAMemory`, so the frame never goes through host memory. Vulkan mixer, NVIDIA
+card, CUDA-capable encoder; anything else says why once and uses host memory thereafter.
+
+**It costs more CPU than the readback it replaces** — 2.04 cores against 1.97 at 1080p50 with
+one consumer, both arms encoding through `nvh264enc`, against 1.84 with no consumer at all.
+Late frames do not separate the arms. Off unless asked for, and `gstreamer/egress-frames` in
+`INFO` says whether it engaged — named apart from the producer's `gstreamer/gpu-frames`
+because one `INFO` response carries both, and a shared leaf name is read by whoever asks
+first.
+
+It ships because the measurement is a narrow one: one consumer, 1080p, an idle machine. The
+readback scales with pixels and with consumer count and this route's per-frame CPU largely
+does not, so the ordering may reverse at 4K or under load. `docs/GSTREAMER_GUIDE.md` §7 has
+the table and the caveat.
+
+### Changed: semi-planar (NV12/P010) sources now sample chroma where the planar path does
+
+**This changes the rendered output of every hardware-decoded clip.** `get_rgba_color`'s
+`ycbcr`, `ycbcra` and `uyvy` cases all sample chroma through `chroma_uv`, which shifts by half
+a luma texel for LEFT-cosited 4:2:0 — what H.264 and HEVC produce. `nv12` sampled at the luma
+coordinate instead, in **both** backends, so anything reaching the mixer semi-planar had its
+chroma half a chroma texel to the right of where the same content took the planar route.
+
+That is the GPU-direct decode path (`<gpu-direct-decode>`, on by default since 2026-08-20) and
+now the GStreamer producer.
+
+Measured 2026-08-24 on SMPTE bars at 1920×1080, the same file decoded two ways and rendered
+through the two branches:
+
+| | max | mean | pixels differing |
+| :--- | ---: | ---: | ---: |
+| before | 57 LSB | 0.136 | 32 653 (1.57%) |
+| after | 0 LSB | 0.000 | 0 |
+
+Every differing pixel sat in a narrow vertical band on a colour-bar boundary, which is what a
+half-texel chroma error looks like — invisible on flat colour, which is why it lasted. Both
+backends had it identically, so no mixer-parity check could see it either.
+
+**What the measurement does not cover:** one clip, one raster, 8-bit, `bt709` limited range,
+and chroma siting reported as cosited. It says the two branches now agree; it does not
+independently establish that the shared answer is colorimetrically right, which would need a
+reference decode rather than a second path through the same shader.
+
+Verified unchanged: `conformance` 100/100 and `grading` 48/48 on both mixers,
+`gpu-direct-parity` byte-identical.
+
+### Added: a GStreamer module (off by default)
+
+Plays a GStreamer pipeline into a channel and sends a channel out through one. Nothing about a
+build without `-DENABLE_GSTREAMER=ON` changes; the libraries are delay-loaded and opened by
+explicit path, so a server built with it still starts on a machine that has no GStreamer.
+
+```
+PLAY 1-10 [GSTREAMER] "filesrc location=clip.mp4 ! decodebin"
+PLAY 1-10 [GSTREAMER] "srtsrc uri=srt://host:9010 ! tsdemux ! h264parse ! avdec_h264"
+PLAY 1-10 [GSTREAMER] "... ! d3d11h264dec" GPU
+ADD  1 GSTREAMER "videoconvert ! x264enc ! mpegtsmux ! srtsink uri=srt://:9020?mode=listener"
+CALL 1-10 PAUSE | RESUME | SEEK <frame> | LENGTH | POSITION
+GST INFO | GST LIST <substring>
+```
+
+It can exist because CasparCG moved to FFmpeg 8: GStreamer ships its own FFmpeg, and at 7.x all
+six base names collided with ours. It carries **NV12 and P010 straight to the mixer as planes**
+rather than converting first, so the mixer's own colour management does the YCbCr conversion and
+10-bit survives.
+
+`GPU` per PLAY keeps a hardware-decoded picture in video memory. Windows only. Measured on both
+mixers: byte-identical to the host path, and 129 of 132 frames GPU-direct on a 10-bit HEVC clip.
+
+Gated by `cli.py gstreamer` in `CasparCG-TestRunner` — 13 cases including a real SRT connection
+from a local sender, and recovery when that sender is killed and restarted.
+
 ### Changed: the FFmpeg consumer records an interlaced channel as field-coded 25 fps, not 50p
 
 **This changes the output of every existing interlaced-channel recording through the FILE/STREAM

@@ -1590,8 +1590,12 @@ vec4 get_rgba_color(vec2 uv)
             // P010 needs no rescaling here: its 10 bits sit in the high bits of
             // each 16-bit word, so the plane is declared bit16 and its
             // precision_factor is 1.0.
+            // chroma_uv, like every other subsampled case in this switch. This one did not
+            // have it, which left semi-planar chroma half a chroma texel from where the
+            // planar path puts it.
+            vec2  cuv  = chroma_uv(plane[0], plane[1], uv);
             float y    = get_sample(plane[0], uv).r * precision_factor[0];
-            vec2  cbcr = get_sample(plane[1], uv).rg * precision_factor[1];
+            vec2  cbcr = get_sample(plane[1], cuv).rg * precision_factor[1];
             return ycbcra_to_rgba(y, cbcr.x, cbcr.y, 1.0);
         }
     }

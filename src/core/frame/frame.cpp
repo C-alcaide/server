@@ -99,6 +99,7 @@ struct const_frame::impl
     const void*                                    tag_;
     frame_geometry                                 geometry_ = frame_geometry::get_default();
     std::any                                       opaque_;
+    std::shared_ptr<const frame_metadata>          metadata_;
     // GPU planes in pixel_format_desc order. Single-texture frames hold exactly
     // one; a hardware NV12 decode holds two (Y and interleaved CbCr).
     std::vector<std::shared_ptr<core::texture>>    textures_;
@@ -307,9 +308,38 @@ const_frame                      const_frame::with_tag(const void* new_tag) cons
     if (impl_->opaque_.has_value()) {
         new_frame.impl_->opaque_ = impl_->opaque_;
     }
+    // Carried, not dropped. A re-tag is a routing operation and must not lose ancillary data
+    // the source is obliged to preserve.
+    new_frame.impl_->metadata_ = impl_->metadata_;
 
     return new_frame;
 }
+const frame_metadata& const_frame::metadata() const
+{
+    // A shared empty rather than one per frame: the overwhelmingly common case is a frame with
+    // no ancillary data at all, and allocating for it would put a cost on every frame in the
+    // server to serve the few that carry captions.
+    static const frame_metadata empty;
+    return impl_->metadata_ ? *impl_->metadata_ : empty;
+}
+
+const std::shared_ptr<const frame_metadata>& const_frame::metadata_ptr() const
+{
+    static const std::shared_ptr<const frame_metadata> none;
+    return impl_ ? impl_->metadata_ : none;
+}
+
+const_frame const_frame::with_metadata(std::shared_ptr<const frame_metadata> metadata) const
+{
+    // Through `with_tag`, with the tag unchanged, rather than copying `impl` directly: `impl`
+    // holds a `std::once_flag` for the lazy readback and is therefore not copyable, and
+    // `with_tag` is the one place that already knows how to reproduce a frame correctly --
+    // including the lazy-image case and the already-resolved result.
+    auto copy = with_tag(stream_tag());
+    copy.impl_->metadata_ = std::move(metadata);
+    return copy;
+}
+
 const frame_geometry& const_frame::geometry() const { return impl_->geometry_; }
 const std::any&       const_frame::opaque() const { return impl_->opaque_; }
 const_frame::operator bool() const { return impl_ != nullptr && impl_->desc_.format != core::pixel_format::invalid; }

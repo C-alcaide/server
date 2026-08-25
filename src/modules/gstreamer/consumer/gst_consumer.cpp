@@ -1,0 +1,734 @@
+/*
+ * Copyright (c) 2011 Sveriges Television AB <info@casparcg.com>
+ *
+ * This file is part of CasparCG (www.casparcg.com).
+ *
+ * CasparCG is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * CasparCG is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with CasparCG. If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#include "../StdAfx.h"
+
+#include "gst_consumer.h"
+
+#include "../util/gst_runtime.h"
+
+#include <core/consumer/channel_info.h>
+#include <core/consumer/frame_consumer.h>
+#include <core/frame/frame.h>
+#include <core/frame/pixel_format.h>
+#include <core/monitor/monitor.h>
+#include <core/video_format.h>
+
+#include <common/diagnostics/graph.h>
+#include <common/except.h>
+#include <common/future.h>
+#include <common/log.h>
+#include <common/param.h>
+#include <common/timer.h>
+#include <common/utf.h>
+
+#include <boost/algorithm/string.hpp>
+#include <boost/property_tree/ptree.hpp>
+#include <boost/lexical_cast.hpp>
+
+// The CUDA egress hands the channel's Vulkan texture to the encoder without a host copy.
+// Guarded rather than stubbed: a build without it must not pretend to have it, because a GPU
+// path that silently does nothing is indistinguishable from one that works.
+#ifdef CASPAR_GST_CUDA_EGRESS
+#include "gst_cuda_egress.h"
+#endif
+
+#include "caption_pacer.h"
+
+#include <gst/app/gstappsrc.h>
+
+#include <thread>
+#include <utility>
+#include <gst/video/video.h>
+#include <gst/gst.h>
+
+#include <algorithm>
+#include <atomic>
+#include <mutex>
+
+namespace caspar { namespace gstreamer {
+
+namespace {
+
+/// The names the consumer looks for after parsing, and writes into the description when it
+/// prepends the source itself. The mirror of the producer's sink names, deliberately: an
+/// operator who has learned one has learned the other.
+constexpr const char* video_src_name = "caspar_video";
+constexpr const char* audio_src_name = "caspar_audio";
+
+/// What gets prepended when the description names no source of its own. `is-live=true` and
+/// `format=time` because the frames arrive at the channel's rate carrying real timestamps,
+/// and an appsrc left on its defaults would let a muxer treat them as a file being written as
+/// fast as it can be read.
+constexpr const char* video_head = "appsrc name=caspar_video is-live=true format=time ! ";
+
+std::wstring describe_message(GstMessage* message)
+{
+    GError* error = nullptr;
+    gchar*  debug = nullptr;
+
+    if (GST_MESSAGE_TYPE(message) == GST_MESSAGE_WARNING)
+        gst_message_parse_warning(message, &error, &debug);
+    else
+        gst_message_parse_error(message, &error, &debug);
+
+    std::wstring text = error ? u16(std::string(error->message)) : L"unknown error";
+    if (debug != nullptr)
+        text += L" (" + u16(std::string(debug)) + L")";
+
+    if (error != nullptr)
+        g_error_free(error);
+    g_free(debug);
+
+    return text;
+}
+
+} // namespace
+
+struct gst_consumer : public core::frame_consumer
+{
+    const std::wstring description_;
+    /// Which mixer this channel runs. The CUDA egress needs an exportable texture and only
+    /// the Vulkan mixer has one.
+    bool               use_vulkan_ = false;
+    int                channel_index_ = -1;
+
+    core::video_format_desc format_desc_;
+
+    GstElement* pipeline_  = nullptr;
+    GstElement* video_src_ = nullptr;
+    GstElement* audio_src_ = nullptr;
+
+    spl::shared_ptr<diagnostics::graph> graph_;
+    timer                               frame_timer_;
+
+    std::atomic<uint64_t> frames_sent_{0};
+    std::atomic<uint64_t> captions_sent_{0};
+    /// Re-paces CEA-708 `cc_data` from the source's rate to the channel's. Only touched from
+    /// `send`, which is one thread.
+    caption_pacer         cc_pacer_;
+    std::atomic<uint64_t> frames_on_gpu_{0};
+
+    /// Opt-in per ADD, like the producer's, and for the same reason: the route changes what the
+    /// pipeline must negotiate. A pipeline whose first element cannot take CUDA memory would
+    /// fail to link, and it should fail because somebody asked for GPU rather than because the
+    /// server decided.
+    const bool want_gpu_ = false;
+
+#ifdef CASPAR_GST_CUDA_EGRESS
+    /// Null when the route is unavailable, refused, or switched off. Its presence is also what
+    /// `needs_cpu_frame_data()` answers on, so the channel stops reading frames back the moment
+    /// this exists -- and starts again if it is dropped.
+    std::unique_ptr<gst_cuda_egress> egress_;
+#endif
+    std::atomic<uint64_t> frames_dropped_{0};
+    std::atomic<bool>     is_failed_{false};
+    mutable std::mutex    mutex_;
+
+  public:
+    explicit gst_consumer(std::wstring description, bool want_gpu)
+        : description_(std::move(description))
+        , want_gpu_(want_gpu)
+    {
+        graph_->set_color("frame-time", diagnostics::color(0.5f, 1.0f, 0.2f));
+        graph_->set_color("dropped-frame", diagnostics::color(0.3f, 0.6f, 0.3f));
+        // How full appsrc's own queue is, normalised to the limit it was configured with.
+        // Every other consumer in the tree graphs its input buffer under this name, and it is
+        // what distinguishes "the encoder is keeping up" from "it is about to start dropping".
+        graph_->set_color("input", diagnostics::color(0.7f, 0.4f, 0.4f));
+    }
+
+    ~gst_consumer()
+    {
+        GstElement* pipeline  = nullptr;
+        GstElement* video_src = nullptr;
+        GstElement* audio_src = nullptr;
+#ifdef CASPAR_GST_CUDA_EGRESS
+        std::unique_ptr<gst_cuda_egress> egress;
+#endif
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            std::swap(pipeline, pipeline_);
+            std::swap(video_src, video_src_);
+            std::swap(audio_src, audio_src_);
+#ifdef CASPAR_GST_CUDA_EGRESS
+            egress = std::move(egress_);
+#endif
+        }
+
+        if (pipeline == nullptr) {
+            CASPAR_LOG(info) << print() << L" Uninitialized.";
+            return;
+        }
+
+        // ── The drain runs on a JANITOR, not here ───────────────────────────────────────
+        // End of stream first, and then wait for it to come back round the bus: a muxer
+        // writing a file finalises on EOS, and going straight to NULL leaves a container with
+        // no index, which plays in some tools and not others -- the worst kind of broken. That
+        // wait is right and it is kept.
+        //
+        // **The thread it ran on was the problem.** A removed consumer is destroyed on the
+        // channel's output thread, so this wait stopped the CHANNEL -- every consumer starved,
+        // IMAGE captures initialising and never completing -- for as long as five seconds,
+        // every time a GStreamer consumer went away without producing EOS promptly.
+        //
+        // Measured 2026-08-25, and it is the single cause behind a whole family of "case A
+        // passes alone and fails after case B" results that cost most of a session: B's
+        // consumer teardown lands inside A.
+        //
+        // The egress travels WITH the pipeline and is destroyed after it. The pipeline still
+        // holds CUDA buffers this object allocated, so freeing the allocator first would pull
+        // memory out from under buffers that are still referenced.
+        std::thread([pipeline, video_src, audio_src,
+#ifdef CASPAR_GST_CUDA_EGRESS
+                     egress = std::move(egress),
+#endif
+                     name = print()]() mutable {
+            if (video_src != nullptr)
+                gst_app_src_end_of_stream(GST_APP_SRC(video_src));
+            if (audio_src != nullptr)
+                gst_app_src_end_of_stream(GST_APP_SRC(audio_src));
+
+            if (auto* bus = gst_element_get_bus(pipeline)) {
+                auto* message = gst_bus_timed_pop_filtered(
+                    bus, 5 * GST_SECOND, static_cast<GstMessageType>(GST_MESSAGE_EOS | GST_MESSAGE_ERROR));
+                if (message == nullptr)
+                    CASPAR_LOG(warning) << name << L" no end-of-stream within 5 s; the output may be unfinished.";
+                else
+                    gst_message_unref(message);
+                gst_object_unref(bus);
+            }
+
+            if (video_src != nullptr)
+                gst_object_unref(video_src);
+            if (audio_src != nullptr)
+                gst_object_unref(audio_src);
+            gst_element_set_state(pipeline, GST_STATE_NULL);
+            gst_object_unref(pipeline);
+
+            CASPAR_LOG(info) << name << L" Uninitialized.";
+        }).detach();
+    }
+
+    void initialize(const core::video_format_desc& format_desc,
+                    const core::channel_info&      channel_info,
+                    int                            port_index) override
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        // The bare `GSTREAMER` form exists so `REMOVE 1 GSTREAMER` can construct one to read
+        // its index; it is not a usable consumer. Rejecting it HERE rather than in the factory
+        // is what lets removal work while `ADD 1 GSTREAMER` with no pipeline still fails.
+        if (description_.empty())
+            CASPAR_THROW_EXCEPTION(user_error()
+                                   << msg_info("The GStreamer pipeline description is empty."));
+
+        format_desc_   = format_desc;
+        channel_index_ = channel_info.index;
+        use_vulkan_    = channel_info.use_vulkan;
+
+        runtime::ensure_initialized();
+        build_pipeline();
+
+        if (gst_element_set_state(pipeline_, GST_STATE_PLAYING) == GST_STATE_CHANGE_FAILURE) {
+            const auto reason = drain_bus_error();
+            destroy_pipeline();
+            CASPAR_LOG(error) << print() << L" Failed to start: " << reason;
+            CASPAR_THROW_EXCEPTION(user_error()
+                                   << msg_info(u8(L"Failed to start GStreamer consumer pipeline: " + reason)));
+        }
+
+        graph_->set_text(print());
+        diagnostics::register_graph(graph_);
+
+        CASPAR_LOG(info) << print() << L" Initialized.";
+    }
+
+    void build_pipeline()
+    {
+        auto launch = u8(description_);
+
+        if (launch.find(video_src_name) == std::string::npos)
+            launch = std::string(video_head) + launch;
+
+        GError* error = nullptr;
+        pipeline_     = gst_parse_launch(launch.c_str(), &error);
+
+        if (pipeline_ == nullptr) {
+            const std::wstring reason = error ? u16(std::string(error->message)) : L"unknown error";
+            if (error != nullptr)
+                g_error_free(error);
+            CASPAR_LOG(error) << L"[gstreamer] Failed to parse consumer pipeline: " << reason;
+            CASPAR_THROW_EXCEPTION(user_error()
+                                   << msg_info(u8(L"Failed to parse GStreamer pipeline: " + reason)));
+        }
+        if (error != nullptr) {
+            // A partial pipeline: an element that could not be created, or a link dropped.
+            // Same reasoning as the producer — it runs, writes nothing and says nothing.
+            const auto reason = u16(std::string(error->message));
+            g_error_free(error);
+            destroy_pipeline();
+            CASPAR_THROW_EXCEPTION(user_error() << msg_info(u8(L"Incomplete GStreamer pipeline: " + reason)));
+        }
+
+        video_src_ = gst_bin_get_by_name(GST_BIN(pipeline_), video_src_name);
+        audio_src_ = gst_bin_get_by_name(GST_BIN(pipeline_), audio_src_name);
+
+        if (video_src_ == nullptr) {
+            destroy_pipeline();
+            CASPAR_THROW_EXCEPTION(user_error() << msg_info(
+                                       "The GStreamer description names no appsrc called caspar_video. Either start "
+                                       "the description after the source and let it be prepended, or include "
+                                       "'appsrc name=caspar_video' yourself."));
+        }
+
+#ifdef CASPAR_GST_CUDA_EGRESS
+        // Opened BEFORE the appsrc is configured: the caps it offers depend on whether the
+        // frames will be CUDA memory or host memory, and negotiating for one and delivering
+        // the other is a link failure at the first buffer.
+        // **The Vulkan check comes FIRST, and it is not redundant with `open()`.** `open()`
+        // asks CUDA whether a device exists, which is true on an OpenGL channel too -- so it
+        // succeeded, the appsrc was then negotiated for `memory:CUDAMemory`, and the first
+        // frame revealed that `ogl::texture` implements no `export_native_handle`. The egress
+        // dropped itself, correctly, and the consumer went on pushing HOST buffers into an
+        // appsrc negotiated for CUDA memory.
+        //
+        // That killed the server outright: `ADD 1 GSTREAMER "videoconvert ! ..." GPU` on an
+        // OpenGL channel, no exception, no fatal line, the log simply stops mid-command.
+        // Measured 2026-08-25.
+        //
+        // A route that cannot work on this mixer must decline BEFORE anything negotiates
+        // against it, not discover it one frame later.
+        if (want_gpu_ && !use_vulkan_) {
+            CASPAR_LOG(info) << print()
+                             << L" GPU was requested but this channel uses the OpenGL mixer, "
+                                L"whose textures are not exportable; frames go through host "
+                                L"memory.";
+        } else if (want_gpu_ && gst_cuda_egress::available()) {
+            auto         candidate = std::make_unique<gst_cuda_egress>();
+            std::wstring reason;
+            if (candidate->open(format_desc_, reason))
+                egress_ = std::move(candidate);
+            else
+                CASPAR_LOG(info) << print() << L" CUDA egress unavailable (" << reason
+                                 << L"); frames go through host memory.";
+        } else if (want_gpu_) {
+            CASPAR_LOG(info) << print() << L" GPU was requested but no CUDA device is usable; "
+                                           L"frames go through host memory.";
+        }
+#endif
+
+        configure_video_src();
+        if (audio_src_ != nullptr)
+            configure_audio_src();
+    }
+
+    void configure_video_src()
+    {
+        // BGRA because that is what a channel frame carries; converting here rather than in
+        // the pipeline would be this module deciding something the operator wrote a pipeline
+        // to decide.
+        const auto caps_text = std::string("video/x-raw, format=(string)BGRA, width=(int)") +
+                               std::to_string(format_desc_.width) + ", height=(int)" +
+                               std::to_string(format_desc_.height) + ", framerate=(fraction)" +
+                               std::to_string(format_desc_.framerate.numerator()) + "/" +
+                               std::to_string(format_desc_.framerate.denominator());
+
+        GstCaps* caps = nullptr;
+#ifdef CASPAR_GST_CUDA_EGRESS
+        if (egress_ && egress_->caps())
+            caps = gst_caps_ref(egress_->caps());
+#endif
+        if (caps == nullptr)
+            caps = gst_caps_from_string(caps_text.c_str());
+
+        g_object_set(G_OBJECT(video_src_),
+                     "caps",
+                     caps,
+                     "is-live",
+                     TRUE,
+                     "format",
+                     GST_FORMAT_TIME,
+                     // Never block the channel. A consumer that stalls its pipeline would
+                     // stall playout, which is a far worse failure than a dropped frame on an
+                     // output that cannot keep up — and the drop is counted rather than
+                     // hidden.
+                     "block",
+                     FALSE,
+                     "max-bytes",
+                     static_cast<guint64>(format_desc_.size) * 4,
+                     nullptr);
+        gst_caps_unref(caps);
+    }
+
+    void configure_audio_src()
+    {
+        const auto caps_text = std::string("audio/x-raw, format=(string)S32LE, layout=(string)interleaved, "
+                                           "rate=(int)") +
+                               std::to_string(format_desc_.audio_sample_rate) + ", channels=(int)" +
+                               std::to_string(format_desc_.audio_channels);
+
+        auto* caps = gst_caps_from_string(caps_text.c_str());
+        g_object_set(G_OBJECT(audio_src_),
+                     "caps", caps,
+                     "is-live", TRUE,
+                     "format", GST_FORMAT_TIME,
+                     "block", FALSE,
+                     nullptr);
+        gst_caps_unref(caps);
+    }
+
+    void destroy_pipeline()
+    {
+        if (video_src_ != nullptr) {
+            gst_object_unref(video_src_);
+            video_src_ = nullptr;
+        }
+        if (audio_src_ != nullptr) {
+            gst_object_unref(audio_src_);
+            audio_src_ = nullptr;
+        }
+        if (pipeline_ != nullptr) {
+            gst_element_set_state(pipeline_, GST_STATE_NULL);
+            gst_object_unref(pipeline_);
+            pipeline_ = nullptr;
+        }
+    }
+
+    std::wstring drain_bus_error()
+    {
+        std::wstring reason = L"no error on the bus";
+
+        auto* bus = gst_element_get_bus(pipeline_);
+        if (bus == nullptr)
+            return reason;
+
+        while (auto* message = gst_bus_pop_filtered(bus, GST_MESSAGE_ERROR)) {
+            reason = describe_message(message);
+            gst_message_unref(message);
+        }
+        gst_object_unref(bus);
+
+        return reason;
+    }
+
+    /// How full appsrc's queue is, as a fraction of the limit it was configured with.
+    ///
+    /// `max-bytes` is set to one frame's BGRA size times four, so this reads 0.25 per frame
+    /// still in flight. A consumer whose encoder is keeping up sits near zero; one about to
+    /// start dropping climbs first, which is the whole point of plotting it rather than only
+    /// counting the drops after they happen.
+    double appsrc_fill() const
+    {
+        if (video_src_ == nullptr)
+            return 0.0;
+        const auto limit = static_cast<guint64>(format_desc_.size) * 4;
+        if (limit == 0)
+            return 0.0;
+        const auto level = gst_app_src_get_current_level_bytes(GST_APP_SRC(video_src_));
+        return std::min(1.0, static_cast<double>(level) / static_cast<double>(limit));
+    }
+
+    void poll_bus()
+    {
+        auto* bus = gst_element_get_bus(pipeline_);
+        if (bus == nullptr)
+            return;
+
+        while (auto* message = gst_bus_pop_filtered(
+                   bus, static_cast<GstMessageType>(GST_MESSAGE_ERROR | GST_MESSAGE_WARNING))) {
+            if (GST_MESSAGE_TYPE(message) == GST_MESSAGE_ERROR) {
+                CASPAR_LOG(error) << print() << L" " << describe_message(message);
+                is_failed_ = true;
+            } else {
+                CASPAR_LOG(warning) << print() << L" " << describe_message(message);
+            }
+            gst_message_unref(message);
+        }
+
+        gst_object_unref(bus);
+    }
+
+    /// Wraps the frame's own pixels — no copy. The `const_frame` is captured by the buffer's
+    /// destroy notify, so the memory outlives the push for exactly as long as GStreamer holds
+    /// it and not one frame longer.
+    GstBuffer* wrap(const core::const_frame& frame)
+    {
+#ifdef CASPAR_GST_CUDA_EGRESS
+        if (egress_) {
+            if (auto* gpu = egress_->wrap(frame)) {
+                ++frames_on_gpu_;
+                return gpu;
+            }
+            // The egress latches itself off after a refusal and says why once. Dropping it
+            // here is what makes `needs_cpu_frame_data()` go true again, so the channel
+            // resumes reading frames back -- otherwise every later frame would arrive with no
+            // host pixels and no GPU route, which is a black picture rather than a fallback.
+            egress_.reset();
+            CASPAR_LOG(info) << print() << L" falling back to host memory for the rest of this "
+                                           L"consumer's life.";
+        }
+#endif
+        auto* held = new core::const_frame(frame);
+        auto  data = frame.image_data(0);
+        if (data.size() == 0 || data.data() == nullptr) {
+            // The channel skipped the readback because this consumer said it did not need one,
+            // and the GPU route has since gone away. One frame is lost rather than a null
+            // pointer being handed to GStreamer; the next tick has the readback back.
+            delete held;
+            return nullptr;
+        }
+
+        return gst_buffer_new_wrapped_full(GST_MEMORY_FLAG_READONLY,
+                                           const_cast<uint8_t*>(data.data()),
+                                           data.size(),
+                                           0,
+                                           data.size(),
+                                           held,
+                                           [](gpointer p) { delete static_cast<core::const_frame*>(p); });
+    }
+
+    // frame_consumer
+
+    std::future<bool> send(const core::video_field field, core::const_frame frame) override
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        if (pipeline_ == nullptr || is_failed_)
+            return make_ready_future(false);
+
+        poll_bus();
+        frame_timer_.restart();
+
+        if (frame.pixel_format_desc().format != core::pixel_format::bgra) {
+            CASPAR_LOG(warning) << print() << L" received a frame that is not BGRA; dropping it.";
+            ++frames_dropped_;
+            return make_ready_future(true);
+        }
+
+        const auto index = frames_sent_.load();
+        auto*      buffer = wrap(frame);
+
+        // Captions the source attached, put back on the way out. Pass-through: the bytes are
+        // the ones that arrived, because every decode-and-re-encode step is a chance to change
+        // what a broadcaster is obliged to preserve.
+        //
+        // This is what makes the channel a caption-transparent path rather than a place
+        // captions go to die -- `h264ccinserter`, `cccombiner` or a mux downstream can now put
+        // them back into a stream.
+        // **Re-PACED, not copied**, and that is a correctness fix rather than a refinement.
+        // CEA-708 carries a fixed number of `cc_data` triplets per frame and the number
+        // depends on the frame rate, so pass-through is correct only when the source and the
+        // channel run at the same rate -- and a 25p source in a 50p channel also delivers
+        // each picture twice, which repeated every control code in the stream. See
+        // `caption_pacer.h`; 608 and CDP are passed through, and why is stated there.
+        for (const auto& cc : frame.metadata().captions) {
+            if (cc.data.empty())
+                continue;
+
+            const auto* paced = &cc.data;
+            std::vector<std::uint8_t> repaced;
+            if (cc.format == 3 /* GST_VIDEO_CAPTION_TYPE_CEA708_RAW */) {
+                // The address of the frame's shared metadata identifies the PICTURE: it
+                // survives copies of one frame and differs between frames, so a repeat adds
+                // nothing to the queue.
+                repaced = cc_pacer_.pace(&frame.metadata(), cc.data,
+                                         format_desc_.framerate.numerator(),
+                                         format_desc_.framerate.denominator());
+                paced   = &repaced;
+                if (repaced.empty())
+                    continue;
+            }
+
+            gst_buffer_add_video_caption_meta(buffer,
+                                              static_cast<GstVideoCaptionType>(cc.format),
+                                              paced->data(),
+                                              paced->size());
+            ++captions_sent_;
+        }
+
+        GST_BUFFER_PTS(buffer)      = gst_util_uint64_scale(index, GST_SECOND * format_desc_.framerate.denominator(),
+                                                            format_desc_.framerate.numerator());
+        GST_BUFFER_DURATION(buffer) = gst_util_uint64_scale(1, GST_SECOND * format_desc_.framerate.denominator(),
+                                                            format_desc_.framerate.numerator());
+
+        if (gst_app_src_push_buffer(GST_APP_SRC(video_src_), buffer) != GST_FLOW_OK) {
+            ++frames_dropped_;
+            graph_->set_tag(diagnostics::tag_severity::WARNING, "dropped-frame");
+        } else {
+            ++frames_sent_;
+        }
+
+        if (audio_src_ != nullptr)
+            push_audio(frame, index);
+
+        graph_->set_value("frame-time", frame_timer_.elapsed() * format_desc_.fps * 0.5);
+        graph_->set_value("input", appsrc_fill());
+
+        return make_ready_future(true);
+    }
+
+    void push_audio(const core::const_frame& frame, uint64_t index)
+    {
+        const auto& samples = frame.audio_data();
+        if (samples.size() == 0)
+            return;
+
+        const auto bytes  = samples.size() * sizeof(int32_t);
+        auto*      held   = new core::const_frame(frame);
+        auto*      buffer = gst_buffer_new_wrapped_full(GST_MEMORY_FLAG_READONLY,
+                                                        const_cast<int32_t*>(samples.data()),
+                                                        bytes,
+                                                        0,
+                                                        bytes,
+                                                        held,
+                                                        [](gpointer p) { delete static_cast<core::const_frame*>(p); });
+
+        GST_BUFFER_PTS(buffer) = gst_util_uint64_scale(index, GST_SECOND * format_desc_.framerate.denominator(),
+                                                       format_desc_.framerate.numerator());
+
+        if (gst_app_src_push_buffer(GST_APP_SRC(audio_src_), buffer) != GST_FLOW_OK)
+            ++frames_dropped_;
+    }
+
+    std::wstring print() const override
+    {
+        return L"gst-out[" + boost::lexical_cast<std::wstring>(channel_index_) + L"|" + description_ + L"]";
+    }
+
+    std::wstring name() const override { return L"gstreamer"; }
+
+    bool has_synchronization_clock() const override { return false; }
+
+    /// Constant, and that is not laziness: output::add keys its map on index() **before**
+    /// calling initialize(), so an index derived from anything initialize() sets is registered
+    /// under one number and reported under another, and REMOVE by index never finds it. The
+    /// map is per-channel, so a constant is unique where it needs to be. 110000 keeps this
+    /// clear of the FFmpeg consumer's 100000 block.
+    /// False while the CUDA egress is up, which is what actually stops the channel reading
+    /// the composited frame back. Everything else here is plumbing; this one line is the
+    /// saving.
+    ///
+    /// Dynamic rather than fixed, and deliberately: the egress can refuse mid-run, and a
+    /// consumer that kept claiming it needed no host pixels after losing its GPU route would
+    /// receive frames with neither.
+    bool needs_cpu_frame_data() const override
+    {
+#ifdef CASPAR_GST_CUDA_EGRESS
+        return egress_ == nullptr;
+#else
+        return true;
+#endif
+    }
+
+    int index() const override { return 110000; }
+
+    core::monitor::state state() const override
+    {
+        core::monitor::state state;
+        state["gstreamer/pipeline"] = u8(description_);
+        state["gstreamer/sent"]     = static_cast<int64_t>(frames_sent_.load());
+        // Not decoration: a caption path that silently carries nothing looks exactly like one
+        // that is working, because the picture is identical either way.
+        state["gstreamer/captions"] = static_cast<int64_t>(captions_sent_.load());
+        // A backlog means the source is producing caption data faster than this channel's
+        // frame rate can carry it -- real, and invisible in the picture. `captions-dropped`
+        // counts what the queue shed to stay current, because text that arrives seconds after
+        // its picture is worse than text that does not arrive.
+        state["gstreamer/captions-queued"]  = static_cast<int64_t>(cc_pacer_.backlog());
+        // The only pair that can tell a paced channel from an unpaced one: every other counter
+        // reads the same either way, because pass-through also attached one meta per frame.
+        state["gstreamer/cc-triplets-in"]   = static_cast<int64_t>(cc_pacer_.triplets_in());
+        state["gstreamer/cc-triplets-out"]  = static_cast<int64_t>(cc_pacer_.triplets_out());
+        state["gstreamer/cc-suppressed"]    = static_cast<int64_t>(cc_pacer_.triplets_suppressed());
+        state["gstreamer/captions-dropped"] = static_cast<int64_t>(cc_pacer_.dropped());
+        // A GPU route that silently stopped engaging looks exactly like one that is working,
+        // because the picture is identical. This is the only thing that can tell them apart.
+        // **`egress-frames`, not `gpu-frames`.** The PRODUCER publishes `gstreamer/gpu-frames`
+        // for the frames its decoder handed to the mixer on the GPU, and `INFO 1-10` returns
+        // the layer's producer state and the channel's consumer state in one response. Two
+        // different counts under one leaf name means whoever reads by tag gets whichever comes
+        // first.
+        //
+        // Measured 2026-08-25, and it cost most of a session: a host consumer (always 0 here)
+        // shadowed a producer running 199/199, which read as "the GPU bridge stopped
+        // recognising the decoder's surface". Four things were investigated and cleared --
+        // the CUDA egress, the caption pipeline, software producers, the leftover consumer --
+        // before the tell was noticed: with a GPU consumer attached the same field read 250
+        // against 200 frames received, a count larger than the frames it was supposedly
+        // counting.
+        state["gstreamer/egress-frames"] = static_cast<int64_t>(frames_on_gpu_.load());
+        state["gstreamer/dropped"]  = static_cast<int64_t>(frames_dropped_.load());
+        state["gstreamer/failed"]   = is_failed_.load();
+        return state;
+    }
+};
+
+spl::shared_ptr<core::frame_consumer>
+create_consumer(const std::vector<std::wstring>&                        params,
+                const core::video_format_repository&                    format_repository,
+                const std::vector<spl::shared_ptr<core::video_channel>>& channels,
+                const core::channel_info&                               channel_info)
+{
+    if (params.empty() || !boost::iequals(params.at(0), L"GSTREAMER"))
+        return core::frame_consumer::empty();
+
+    // **A BARE `GSTREAMER` MUST CONSTRUCT**, and that is not a convenience: `REMOVE 1
+    // GSTREAMER` works by building a consumer from the parameters purely to read its
+    // `index()`, so refusing the one-token form makes the consumer impossible to remove by
+    // name -- `404 REMOVE FAILED`, with the consumer still attached and no way to detach it
+    // short of restarting the channel.
+    //
+    // Measured 2026-08-25. The same shape is documented for the ffmpeg consumer, where the
+    // bare `REMOVE 1 FILE` throws `file_not_found` and leaves the container unfinalised.
+    //
+    // An empty description is rejected at `initialize()` instead, so `ADD 1 GSTREAMER` with no
+    // pipeline still fails -- it just fails at the point that actually needs the description.
+    auto description = params.size() >= 2 ? params.at(1) : std::wstring{};
+    boost::trim(description);
+
+    // `GPU` anywhere after the description, matching `PLAY … GPU` on the producer.
+    bool want_gpu = false;
+    for (std::size_t i = 2; i < params.size(); ++i) {
+        if (boost::iequals(params.at(i), L"GPU"))
+            want_gpu = true;
+    }
+
+    return spl::make_shared<gst_consumer>(std::move(description), want_gpu);
+}
+
+spl::shared_ptr<core::frame_consumer>
+create_preconfigured_consumer(const boost::property_tree::wptree&                      ptree,
+                              const core::video_format_repository&                     format_repository,
+                              const std::vector<spl::shared_ptr<core::video_channel>>& channels,
+                              const core::channel_info&                                channel_info)
+{
+    auto description = ptree.get<std::wstring>(L"pipeline", L"");
+    boost::trim(description);
+
+    if (description.empty())
+        CASPAR_THROW_EXCEPTION(user_error() << msg_info(
+                                   "<gstreamer> consumer needs a <pipeline> element: the gst-launch "
+                                   "description to send this channel through."));
+
+    return spl::make_shared<gst_consumer>(std::move(description),
+                                          ptree.get<bool>(L"gpu", false));
+}
+
+}} // namespace caspar::gstreamer

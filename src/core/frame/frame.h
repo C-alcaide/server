@@ -1,5 +1,6 @@
 #pragma once
 
+#include "frame_metadata.h"
 #include "pixel_format.h"
 
 #include <common/array.h>
@@ -237,6 +238,30 @@ class const_frame final
     const_frame with_tag(const void* new_tag) const;
 
     const std::any& opaque() const;
+
+    /// Ancillary data timed to this frame -- closed captions today. Never null; an empty
+    /// `frame_metadata` is the usual case and costs a shared_ptr dereference to check.
+    ///
+    /// Frames are immutable, so this is set by `with_metadata()` rather than in place, exactly
+    /// as `with_tag()` works. The metadata is shared rather than copied: it is small, it is
+    /// read-only once attached, and a route or a transform that re-tags a frame must not
+    /// silently drop what the source was obliged to preserve.
+    const frame_metadata& metadata() const;
+
+    /// The metadata as it is STORED, shared rather than copied.
+    ///
+    /// Two callers need this rather than `metadata()`. One is the mixer, which passes ancillary
+    /// data through and would otherwise copy it every tick. The other needs the identity: the
+    /// pointer is stable for as long as one picture exists, so a consumer can tell a repeated
+    /// frame from a new one — which is how the GStreamer consumer avoids re-emitting a
+    /// repeated frame's closed captions, and CEA-708 is a command stream where a doubled code
+    /// is a visible fault.
+    ///
+    /// May be null; `metadata()` is the accessor that never is.
+    const std::shared_ptr<const frame_metadata>& metadata_ptr() const;
+
+    /// A copy of this frame carrying `metadata`. Cheap: nothing about the picture is copied.
+    const_frame with_metadata(std::shared_ptr<const frame_metadata> metadata) const;
 
     const class frame_geometry& geometry() const;
 

@@ -343,7 +343,15 @@ boost::tribool has_valid_extension(const boost::filesystem::path& filename)
     return boost::tribool(boost::indeterminate);
 }
 
-bool has_invalid_protocol(const std::wstring& filename) { return boost::algorithm::istarts_with(filename, L"ndi://"); }
+/// URI schemes that belong to another module. FFmpeg would happily *try* several of these and
+/// then fail somewhere far less legible than here, and the producer registry offers no ordering
+/// guarantee to rely on instead -- so the carve-out is explicit rather than a question of which
+/// module happened to register first.
+bool has_invalid_protocol(const std::wstring& filename)
+{
+    return boost::algorithm::istarts_with(filename, L"ndi://") ||
+           boost::algorithm::istarts_with(filename, L"gst://");
+}
 
 bool is_readable(const boost::filesystem::path& filename)
 {

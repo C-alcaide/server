@@ -508,7 +508,7 @@ vec4 get_rgba_color(vec2 uv){
     // PLANE1 = Cb,Cr interleaved at half resolution (an RG texture). P010 needs no
     // rescaling: its 10 bits are high-aligned in each 16-bit word, so the plane is
     // declared bit16 and precision_factor is 1.0.
-    case 15:{float y=texture(textures[PLANE0],uv).r*precision_factor[0];vec2 cbcr=texture(textures[PLANE1],uv).rg*precision_factor[1];return ycbcra_to_rgba(y,cbcr.x,cbcr.y,1.0);}
+    case 15:{vec2 cuv=chroma_uv(uv,PLANE0,PLANE1);float y=texture(textures[PLANE0],uv).r*precision_factor[0];vec2 cbcr=texture(textures[PLANE1],cuv).rg*precision_factor[1];return ycbcra_to_rgba(y,cbcr.x,cbcr.y,1.0);}
     } return vec4(0.0);
 }
 
