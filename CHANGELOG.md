@@ -1,6 +1,28 @@
 CasparVP — Unreleased
 ==========================================
 
+### Added: `GPU BGRA`, a GPU route for sources with no YCbCr to hand over
+
+`PLAY ... "d3d11screencapturesrc ..." GPU BGRA` keeps an RGB source in video memory all the
+way to the mixer. The semi-planar route was the only GPU route, so a screen capture or an RGB
+filter chain — which cannot negotiate those caps at all — fell to host memory and read back a
+full BGRA frame per tick.
+
+BGRA needs no extraction draw: the sample's texture already is the picture, so it is one
+`CopySubresourceRegion` into a texture the mixer can import. No shader, no plane views, and
+therefore no `D3D11_BIND_SHADER_RESOURCE` requirement on the source.
+
+Opt-in, and never offered alongside NV12: a `d3d11h264dec` asked for both would satisfy BGRA
+by having `d3d11convert` inserted, restoring the conversion the GPU route exists to remove,
+with no symptom except the cost.
+
+6/6 frames GPU-direct on both mixers, bars in the right order, matching the host path.
+
+**Known, and not operator-facing**: `videotestsrc` renders black through the GPU bridge — on
+plain `GPU` too, with none of this in the build. Every real source is fine, hardware- and
+software-decoded alike, including through the same `d3d11upload ! d3d11convert`. Tracked in
+the harness handoff.
+
 ### Fixed: a repeated frame repeated its closed captions
 
 **This changes what a caption decoder receives whenever a channel starves.** When the

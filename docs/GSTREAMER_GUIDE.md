@@ -235,6 +235,20 @@ PLAY 1-10 [GSTREAMER] "filesrc location=clip.mp4 ! qtdemux ! h264parse ! d3d11h2
 ```
 
 The `GPU` flag keeps a hardware-decoded picture in video memory all the way to the mixer.
+
+**`GPU BGRA` for sources that have no YCbCr to hand over.** A screen capture or an RGB filter
+chain cannot negotiate the semi-planar caps at all, so plain `GPU` does nothing for them and
+the frame goes through host memory:
+
+```
+PLAY 1-10 [GSTREAMER] "d3d11screencapturesrc monitor-index=0" GPU BGRA
+```
+
+The source's texture is taken as-is — one copy, no extraction draw — and the mixer applies no
+matrix, because the source has already resolved the colour. It is deliberately **not** offered
+alongside NV12: a `d3d11h264dec` asked for both would satisfy BGRA by having `d3d11convert`
+inserted, restoring the conversion the GPU route exists to remove, with no symptom except the
+cost. So ask for it only when the source really is RGB.
 Windows only. It appends a different tail — `d3d11upload ! d3d11convert !
 video/x-raw(memory:D3D11Memory),format={P010_10LE,NV12} ! appsink` — and hands the mixer the
 decoder's own **NV12 or P010 planes**, so the mixer's shader does the colour conversion with the
