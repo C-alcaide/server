@@ -104,6 +104,11 @@ namespace caspar { namespace cuda_prores {
 // (2 frames per tick) drains the queue from 4 to 2, never to 0. This eliminates
 // the queue-fill oscillation seen at speed>=2 on large 12K files.
 // VRAM cost: 2 extra slots x ~638 MB (12K BGRA16) = ~1.3 GB — acceptable on 24GB GPUs.
+//
+// NUM_SLOTS IS THE ARRAY BOUND, not the allocation: `slots_[]`, `cvt_[]` and `cgt_[]` are sized
+// by it at compile time and `num_slots_` picks how many are actually built, per raster, further
+// down. Raising `num_slots_` past this writes off the end of three arrays -- which a 12-slot
+// experiment did until this was raised with it, and it was reverted with the experiment.
 static constexpr int NUM_SLOTS  = 7;
 static constexpr int MAX_QUEUED = 4;
 // (NUM_VK_TEX / ring removed — per-slot cvt_[] used instead)
@@ -298,18 +303,24 @@ struct prores_producer_impl final : public core::frame_producer
         // Threshold: 25 M pixels (~7.5K resolution). Below that the original 2/5
         // depth is sufficient and avoids spending extra VRAM on smaller content.
         //
-        // 4/7 EVERYWHERE WAS TRIED AND REVERTED, 2026-08-25. The theory was that 2 queued
-        // frames is too shallow for MULTI-CHANNEL playout -- the deep branch was tuned for 12K
-        // 360 material and a `speed=2` burst, never for N producers sharing a GPU -- and that
-        // jitter growing with N would turn straight into late frames. `playback-scaling` said
-        // otherwise: the 1080p ceiling stayed at exactly 5 channels, failing at 6 on 6 late
-        // frames against 7 before, while VRAM went 2354 -> 2864 MB. The slots were allocated
-        // and bought nothing.
+        // TWO ENLARGEMENTS WERE TRIED AND BOTH REVERTED. The 1080p ceiling for this route is
+        // 5 playout channels with a screen consumer and 16+ with none, so frames being HELD --
+        // not decode throughput -- is what bounds it. This producer hands the mixer its own
+        // per-slot texture (`gpu_tex = cvt_[ps]->core_texture()` below), so a frame the consumer
+        // is presenting IS a slot and cannot be reused until it has been presented. That is
+        // exactly what `av_vulkan_import.h` refuses to do for the FFmpeg path, and that path
+        // reaches 12 channels on the same clip at an identical 2.5% GPU per channel.
         //
-        // What the ceiling actually is: the SCREEN CONSUMER. The same route with
-        // `--consumer none` holds 16+ channels at 1080p. So do not spend VRAM here looking for
-        // channels -- at 1080p the decode was never the constraint, and at 2160p it is the GPU
-        // at 89% rather than this queue.
+        // The obvious inference is that the pool is too small for the channel's in-flight
+        // depth. It is not the lever:
+        //
+        //   4 queued / 7 slots   -> ceiling still 5, VRAM 2354 -> 2864 MB
+        //   4 queued / 12 slots  -> ceiling still 5, VRAM 2354 -> 4012 MB
+        //
+        // So the mechanism above is described but NOT confirmed, and pool size is ruled out as
+        // the fix. Do not spend VRAM here again without a new hypothesis; the untested ones are
+        // the OpenGL mixer's CUDA-GL path, which was never laddered, and `screen_cpu`, which
+        // reads back instead of consuming the GPU texture and so holds frames differently.
         {
             const int64_t pixels = (int64_t)frame_info_.width * frame_info_.height;
             if (pixels >= 25'000'000) {
