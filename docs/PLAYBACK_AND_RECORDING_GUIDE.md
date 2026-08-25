@@ -179,10 +179,22 @@ the more a GPU route is worth.
 question, and the one an operator asks: how many playout channels before frames go late. 1080p25
 H.264 noise, the Vulkan mixer (`playback-scaling --routes auto,vulkan_video`, 2026-08-25):
 
-| route | with a screen output per channel | decode only, no output |
-| :--- | ---: | ---: |
-| **D3D11VA** (`auto`, the default) | **12** — marginal | **28+** |
-| **Vulkan Video** | **20** | **28+** |
+| route | clip | with a screen output per channel | decode only |
+| :--- | :--- | ---: | ---: |
+| **Vulkan Video** | H.264 | **20** | **28+** |
+| **D3D11VA** (`auto`, the default) | H.264 | **12** — marginal | **28+** |
+| **FFmpeg Vulkan compute** | ProRes | **12** | not run |
+| **CUDA ProRes** | ProRes | **4** | not run |
+| **Software** | ProRes | **4** | not run |
+
+**The two clips are not interchangeable and the groups do not compare across the gap.** No NVIDIA
+GPU decodes ProRes, so D3D11VA cannot be measured on a ProRes fixture at all; the CUDA and
+Vulkan-compute decoders here handle ProRes and nothing else. Reading "Vulkan Video 20 beats CUDA
+ProRes 4" is reading across two different codecs.
+
+Within the ProRes group the ordering is the useful part: `<vulkan-decode>` sustains **three times**
+the channels of the fork's own CUDA decoder, and software manages the same 4 as CUDA while
+spending **4.07 cores** to do it — one full core per channel, against CUDA's 0.44.
 
 ![Playout channels per decode route, and what one channel costs on each](images/playback_ceilings.png)
 

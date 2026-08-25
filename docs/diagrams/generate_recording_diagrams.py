@@ -531,72 +531,75 @@ def ceiling_chart():
 
 # ─────────────────────────────────────────────────────────────────────────────
 def playback_ceiling_chart():
-    """The two comparable DECODE routes as bars, plus what a channel costs on each.
+    """All five decode routes as bars, GROUPED BY CODEC, plus why the H.264 pair differs.
 
-    The recording chart next to this one answers "how many recordings"; nothing answered "how
-    many playout channels", which is the question an operator actually plans to. Only two routes
-    are here because only two are comparable: `auto` (D3D11VA) and Vulkan Video decode the same
-    codecs on the same silicon, where the CUDA and Vulkan-compute routes are ProRes-only and
-    cannot share a fixture with them.
+    The recording chart beside this one answers "how many recordings"; nothing answered "how many
+    playout channels", which is what an operator plans to.
+
+    THE GROUPING IS NOT COSMETIC. No NVIDIA GPU decodes ProRes, so D3D11VA cannot be measured on
+    a ProRes fixture; the CUDA and Vulkan-compute decoders here handle ProRes and nothing else.
+    So five bars on one axis stand for two different clips, and drawing them without saying so
+    invites exactly the comparison the numbers cannot support.
     """
-    lay, fig, ax = _new((12.0, 6.2))
+    lay, fig, ax = _new((12.0, 8.2))
     lay.panel("frame", 1, 1, 98, 98, blocking=False, fc=BG, ec=BORDER_SUBTLE, radius=0.01)
 
-    lay.text("title", 50, 95,
-             "How many simultaneous 1080p25 H.264 playout channels",
+    lay.text("title", 50, 96,
+             "How many simultaneous 1080p25 playout channels",
              parent=None, color=TITLE, size=12.5, weight="bold", ha="center")
-    lay.text("sub", 50, 90,
+    lay.text("sub", 50, 92,
              "with ONE SCREEN OUTPUT per channel — which is what binds, not the decode",
              parent=None, color=MUTED, size=8.2, ha="center", style="italic")
-    lay.text("sub2", 50, 85.5,
-             "decode alone: BOTH routes hold 28+, so neither decoder is the constraint",
+    lay.text("sub2", 50, 88.5,
+             "the two groups are DIFFERENT CLIPS and are not comparable across the gap",
              parent=None, color=WARNING_T, size=7.8, ha="center", style="italic")
 
-    # (label, channels, marginal, note)
+    # (label, sub, channels, colour, note); None starts a group header
     rows = [
-        ("Vulkan Video\n<vulkan-video-decode>", 20, False, "24 channels: 48 late frames"),
-        ("D3D11VA\nthe default", 12, True, "14 channels: 52 late frames"),
+        (None, "H.264 — the codecs a GPU decode block handles", 0, None, ""),
+        ("Vulkan Video", "<vulkan-video-decode>", 20, SUCCESS, "fails at 24"),
+        ("D3D11VA", "the default", 12, ACCENT_HOVER, "fails at 14 — MARGINAL"),
+        (None, "ProRes — no GPU decode block does this codec at all", 0, None, ""),
+        ("FFmpeg Vulkan compute", "<vulkan-decode>", 12, SUCCESS, "fails at 16"),
+        ("CUDA ProRes", "the fork's own decoder", 4, ACCENT_HOVER, "fails at 6"),
+        ("software", "no GPU-direct path", 4, DANGER_T, "fails at 6 — 4.07 cores"),
     ]
-    # The count sits past the END OF THE TRACK, not past the end of the bar: at the bar it
-    # lands inside the grey remainder and the note then runs over it. And the marginal
-    # caveat goes BELOW the bar rather than inside it -- it is longer than the bar it
-    # qualifies, which is how it came to be drawn across both.
-    x0, wmax, cmax = 30.0, 40.0, 24.0
-    for i, (name, n, marginal, note) in enumerate(rows):
-        y = 62 - i * 17.0
-        col = ACCENT_HOVER if marginal else SUCCESS
-        head, sub = name.split(chr(10))
-        _text(ax, x0 - 2.0, y + 4.6, head, color=TEXT, size=8.6, ha="right",
-              weight="bold", z=6)
-        _text(ax, x0 - 2.0, y + 1.6, sub, color=MUTED, size=7.0, ha="right", z=6)
-        _panel(ax, x0, y, wmax, 6.4, fc="#232323", ec=BORDER_SUBTLE, lw=0.5, radius=0.0,
-               z=2)
-        _panel(ax, x0, y, wmax * n / cmax, 6.4, fc=col, ec=col, radius=0.0, z=3)
-        _text(ax, x0 + wmax + 2.5, y + 3.4, str(n), color=col, size=11, weight="bold",
-              z=6)
-        _text(ax, x0 + wmax + 8.0, y + 3.4, note, color=MUTED, size=7.2, z=6)
-        if marginal:
-            _text(ax, x0, y - 3.4,
-                  "MARGINAL: held at 12 in two runs, 73 late frames in a third",
-                  color=ACCENT_HOVER, size=7.4, weight="bold", z=6)
+    x0, wmax, cmax = 32.0, 38.0, 24.0
+    y = 82.0
+    for name, sub, n, col, note in rows:
+        if name is None:
+            y -= 3.0
+            _text(ax, 4, y, sub, color=TITLE, size=8.0, weight="bold", z=6)
+            y -= 7.0
+            continue
+        _text(ax, x0 - 2.0, y + 4.2, name, color=TEXT, size=8.4, ha="right", weight="bold", z=6)
+        _text(ax, x0 - 2.0, y + 1.4, sub, color=MUTED, size=6.8, ha="right", z=6)
+        _panel(ax, x0, y, wmax, 6.0, fc="#232323", ec=BORDER_SUBTLE, lw=0.5, radius=0.0, z=2)
+        _panel(ax, x0, y, wmax * n / cmax, 6.0, fc=col, ec=col, radius=0.0, z=3)
+        _text(ax, x0 + wmax + 2.5, y + 3.2, str(n), color=col, size=10.5, weight="bold", z=6)
+        _text(ax, x0 + wmax + 7.5, y + 3.2, note, color=MUTED, size=7.0, z=6)
+        y -= 8.6
 
-    # WHY the gap exists, measured where the consumer is not in the way: 28 channels of pure
-    # decode on both routes. This is the panel that explains the bars rather than restating
-    # them -- a screen consumer competes for the GPU and its memory, which is exactly what one
-    # route is frugal with and the other is not.
-    lay.panel("per", 4, 6, 92, 22, fc=PANEL, ec=BORDER)
-    _text(ax, 50, 24.5, "why — at 28 channels of DECODE ONLY, where the output is not in the way",
-          color=TITLE, size=8.6, ha="center", weight="bold", z=6)
+    # WHY the H.264 pair differs, measured where the consumer is not in the way. This panel is
+    # about that pair only -- the ProRes routes were not run without a consumer -- and says so,
+    # because a panel under five bars reads as explaining all five.
+    lay.panel("per", 4, 4, 92, 21, fc=PANEL, ec=BORDER)
+    _text(ax, 50, 21.5,
+          "why the H.264 pair differs — at 28 channels of DECODE ONLY, no output in the way",
+          color=TITLE, size=8.4, ha="center", weight="bold", z=6)
     cols = [("host CPU", "1.21 cores", "1.35 cores"),
             ("GPU utilisation", "16 %", "3 %"),
             ("VRAM", "5897 MB", "3317 MB")]
-    for i, (what, d3d, vk) in enumerate(cols):
-        cx = 20 + i * 30
-        _text(ax, cx, 19.5, what, color=MUTED, size=7.6, ha="center", z=6)
-        _text(ax, cx, 15.0, d3d, color=ACCENT_HOVER, size=9.0, ha="center", weight="bold", z=6)
-        _text(ax, cx, 10.5, vk, color=SUCCESS, size=9.0, ha="center", weight="bold", z=6)
-    _text(ax, 5.5, 15.0, "D3D11VA", color=ACCENT_HOVER, size=7.4, weight="bold", z=6)
-    _text(ax, 5.5, 10.5, "Vulkan Video", color=SUCCESS, size=7.4, weight="bold", z=6)
+    for k, (what, d3d, vk) in enumerate(cols):
+        cx = 22 + k * 29
+        _text(ax, cx, 16.5, what, color=MUTED, size=7.4, ha="center", z=6)
+        _text(ax, cx, 12.5, d3d, color=ACCENT_HOVER, size=8.6, ha="center", weight="bold", z=6)
+        _text(ax, cx, 8.8, vk, color=SUCCESS, size=8.6, ha="center", weight="bold", z=6)
+    _text(ax, 6, 12.5, "D3D11VA", color=ACCENT_HOVER, size=7.2, weight="bold", z=6)
+    _text(ax, 6, 8.8, "Vulkan Video", color=SUCCESS, size=7.2, weight="bold", z=6)
+    _text(ax, 50, 5.6,
+          "both hold 28+ channels with no output, so neither decoder is the constraint",
+          color=WARNING_T, size=7.2, ha="center", z=6)
 
     lay.check(name="playback_ceilings")
     _save(fig, "playback_ceilings.png")
