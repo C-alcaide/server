@@ -492,6 +492,43 @@ over them.
 
 ---
 
+## 10a. Network streams are GPU-accelerated too — in and out, on both modules
+
+A reasonable thing to assume is that GPU acceleration is for files and that a live stream
+falls back to the CPU. It does not. **The transport is never the accelerated part**: SRT, UDP
+and RTP move bytes and cost the same whatever the picture is doing. What runs on the GPU is
+the *decode*, the *encode*, and — the part that actually matters — the frame never leaving
+video memory in between.
+
+Measured 2026-08-25, one run, all four:
+
+| path | pipeline | result |
+| :--- | :--- | :--- |
+| **GStreamer in** | `srtsrc … ! tsdemux ! h264parse ! d3d11h264dec` + `GPU` | **249/249 frames GPU-direct** |
+| **GStreamer out** | `nvh264enc ! h264parse ! mpegtsmux ! srtsink …` + `GPU` | **298/298 frames**, no readback |
+| **FFmpeg in** | `PLAY 1-10 "srt://host:port"` | `D3D11→Vulkan GPU-direct bridge initialized` |
+| **FFmpeg out** | `ADD 1 STREAM udp://… -vcodec h264_nvenc -format mpegts` | `GPU-direct recording active … straight to NVENC, with no readback` |
+
+`STREAM` and `FILE` are the same FFmpeg consumer with one flag, and its GPU gate never looks
+at which one you used — so anything true of recording a file is true of sending a stream.
+
+**What decides whether you actually get it**, in each case:
+
+* **GStreamer in** — you must *name a hardware decoder*. `avdec_h264` is software and will
+  quietly work; `d3d11h264dec` is the one that stays on the GPU. Check `gpu-frames`.
+* **GStreamer out** — needs the Vulkan mixer and a CUDA-capable encoder. On OpenGL the egress
+  declines and uses host memory, and says so once.
+* **FFmpeg out** — declines unless the codec is NVENC, the channel is 8-bit, and you pass
+  neither `-vf` nor an explicit `-pix_fmt`. It names the reason in the log.
+* **FFmpeg in** — `<gpu-direct-decode>` must be on, which it is by default.
+
+> **`-format`, not `-f`.** The FFmpeg consumer reads an option called `format`; `-f` reaches
+> `avformat_alloc_output_context2` as nothing and fails with `Invalid argument` on a `udp://`
+> path, which has no extension to guess a container from. The error names the *muxer*, not the
+> argument.
+
+---
+
 ## 10b. Which GStreamer features are actually tested here
 
 Everything below is exercised by `CasparCG-TestRunner`'s `gstreamer` battery on **both**
@@ -508,6 +545,8 @@ and more useful thing.
 | `d3d11av1dec` | AV1 hardware decode over the same bridge, no code of its own | `av1` |
 | `d3d11upload` / `d3d11convert` | software-decoded frames uploaded and converted on the GPU | `gpu-bgra`, and the BGRA route |
 | `srtsrc` (caller) | real SRT ingest, byte-identical to the same pipeline run outside CasparCG | `srt-ingest` |
+| `srtsrc` + `d3d11h264dec` | a NETWORK source decoded on the GPU: 249/249 frames GPU-direct | measured 2026-08-25 |
+| `srtsink` + `nvh264enc` + `GPU` | the channel's texture encoded and streamed with no readback: 298/298 | measured 2026-08-25 |
 | `srtsrc` (listener) | **a listening socket with no caller does not hang the server** — see below | `srt-listener` |
 | SRT recovery | the sender disappearing and returning; picture byte-identical after | `srt-recovery` |
 | `srtsrc` `stats` | RTT, bandwidth and loss into `INFO` and OSC | `GST INFO` |

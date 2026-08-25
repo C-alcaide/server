@@ -277,6 +277,18 @@ Every row is exercised by `CasparCG-TestRunner`'s `gstreamer` battery on **both*
 | `cudadownload` / `nvh264enc` | the channel's texture handed to an encoder as CUDA memory |
 | third-party plugins | a `<plugin-path>` directory loaded and its elements usable |
 
+**Network sources and sinks are GPU-accelerated on the same terms as files.** The transport
+is never the accelerated part; the decode, the encode and staying in video memory are.
+Measured 2026-08-25: `srtsrc … ! d3d11h264dec` with `GPU` gives 249/249 frames GPU-direct, and
+`nvh264enc ! mpegtsmux ! srtsink` with `GPU` sends 298/298 with no readback. The equivalent
+FFmpeg paths do the same — `STREAM` and `FILE` are one consumer with a flag, and its GPU gate
+never inspects it.
+
+The catch is naming a hardware decoder: `avdec_h264` works and is software, `d3d11h264dec` is
+the one that stays on the GPU. `gpu-frames` is how you tell them apart, and the battery's own
+`srt-ingest` case uses the software one deliberately — which is why this combination had never
+been run here until it was measured directly.
+
 **`fallbacksrc` is the one with a caveat.** It takes over from a dead primary correctly and
 shows the fallback file — then, once the dead primary's socket errors, it keeps producing
 frames that carry no picture. `restart-timeout`, `retry-timeout` and `restart-on-eos` do not

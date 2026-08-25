@@ -1,6 +1,27 @@
 CasparVP — Unreleased
 ==========================================
 
+### Measured: network streams are GPU-accelerated in and out, on both modules
+
+Not a change — a claim that had never been checked. Every GPU measurement in this tree used a
+**file**, and the battery's own SRT case decodes in software, so a network source with a
+hardware decoder had never actually been run. "The decline list does not mention URLs" is an
+inference, not a measurement.
+
+All four, one run, 2026-08-25:
+
+| path | result |
+| :--- | :--- |
+| GStreamer in — `srtsrc ! tsdemux ! h264parse ! d3d11h264dec` + `GPU` | 249/249 frames GPU-direct |
+| GStreamer out — CUDA egress → `nvh264enc` → `srtsink`, `GPU` | 298/298 frames, no readback |
+| FFmpeg in — `PLAY 1-10 "srt://…"` | `D3D11→Vulkan GPU-direct bridge initialized` |
+| FFmpeg out — `ADD 1 STREAM udp://… -vcodec h264_nvenc` | `GPU-direct recording active … no readback` |
+
+The transport is never the accelerated part. `STREAM` and `FILE` are the same FFmpeg consumer
+with one flag and its GPU gate never inspects it, so anything true of recording a file is true
+of sending a stream. `docs/GSTREAMER_GUIDE.md` §10a has the conditions that decide whether the
+route actually engages in each case.
+
 ### Fixed: a listening `srtsrc` hung the whole server
 
 `PLAY 1-10 [GSTREAMER] "srtsrc uri=srt://:9000?mode=listener ! ..."` — listen now, let the
