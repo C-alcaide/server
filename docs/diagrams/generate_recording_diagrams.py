@@ -649,36 +649,53 @@ def _ic_cpu(ax, cx, cy, s, col, z=6):
                                            fc=col, ec="none", alpha=0.55, zorder=z))
 
 
-def _picture(ax, cx, cy, w, hh, col, z):
-    """A 16:9-ish frame: the thing a video engine deals in, as opposed to bytes."""
-    ax.add_patch(patches.Rectangle((cx - w / 2, cy - hh / 2), w, hh, fc="none", ec=col,
-                                   lw=1.0, zorder=z))
+def _package(ax, cx, cy, s, col, z):
+    """A packaged part: the die outline, a pin-1 dot, and pads along the bottom edge.
+
+    THE HARDWARE CUE HAS TO BE SOMETHING PRESENT. The first version of these glyphs said
+    "fixed-function block" by drawing the die WITHOUT the pins `cpu` has, on the theory that
+    pins mean socketed and a block on the same die is not. That distinction is real and it
+    communicates nothing: the absence of a feature is not a signal, so a plain square outline
+    around a play mark reads as a play button in a box, which is what it was called.
+
+    A pin-1 dot and a row of pads are present rather than absent, and they are not `cpu`'s
+    four-sided pin fringe -- a surface-mounted block against a socketed part. The mark inside
+    then says which block it is.
+    """
+    w, hh = _die(ax, cx, cy, s, col, z, pins=False)
+    d = w * 0.13
+    ax.add_patch(patches.Ellipse((cx - w * 0.36, cy + hh * 0.36), d, d * _AR, fc=col,
+                                 ec="none", zorder=z))
+    pw, ph = w * 0.13, hh * 0.13
+    for k in range(3):
+        px = cx + w * (-0.22 + k * 0.22) - pw / 2
+        ax.add_patch(patches.Rectangle((px, cy - hh / 2 - ph * 0.85), pw, ph * 0.85,
+                                       fc=col, ec="none", zorder=z))
+    return w, hh
 
 
 def _ic_fixdec(ax, cx, cy, s, col, z=6):
-    """A pinless block holding a picture with a play mark: the GPU's fixed VIDEO DECODE engine.
+    """A packaged block with a play mark: the GPU's fixed-function VIDEO DECODE engine.
 
-    Two attempts preceded this. A bare play triangle said "media" where the point is "a block
-    wired into the GPU that does nothing but video". A three-frame filmstrip said it, and at
-    the four x-units an icon actually gets it rendered as a chip with solder pads -- right
-    shape, unreadable, which is the same as wrong next to an icon that IS a chip.
+    Third attempt, and the first two are worth knowing because each failed differently. A bare
+    play triangle said "media" where the point is "a block that does nothing but video". A
+    three-frame filmstrip said exactly that and, at the four x-units an icon gets, rendered as
+    a chip with solder pads -- unreadable, and unreadable next to an icon that IS a chip.
 
-    A frame plus a play mark survives the size: the frame says pictures, the mark says which
-    direction, and the pinless die keeps it in the hardware family with `cpu` and `fixenc`.
+    The third failed too, for a reason the other two did not: it was a pinless die around a
+    framed play mark, and "pinless" is not visible. See `_package`.
     """
-    w, hh = _die(ax, cx, cy, s, col, z, pins=False)
-    _picture(ax, cx, cy, w * 0.62, hh * 0.50, col, z)
-    ax.add_patch(patches.Polygon([(cx - w * 0.10, cy + hh * 0.15),
-                                  (cx - w * 0.10, cy - hh * 0.15),
-                                  (cx + w * 0.16, cy)],
+    w, hh = _package(ax, cx, cy, s, col, z)
+    ax.add_patch(patches.Polygon([(cx - w * 0.13, cy + hh * 0.19),
+                                  (cx - w * 0.13, cy - hh * 0.19),
+                                  (cx + w * 0.20, cy)],
                                  closed=True, fc=col, ec="none", zorder=z))
 
 
 def _ic_fixenc(ax, cx, cy, s, col, z=6):
-    """The same block with a record dot in the frame: a fixed ENCODE engine -- NVENC."""
-    w, hh = _die(ax, cx, cy, s, col, z, pins=False)
-    _picture(ax, cx, cy, w * 0.62, hh * 0.50, col, z)
-    d = w * 0.22
+    """The same package with a record dot: a fixed ENCODE engine -- NVENC."""
+    w, hh = _package(ax, cx, cy, s, col, z)
+    d = w * 0.34
     ax.add_patch(patches.Ellipse((cx, cy), d, d * _AR, fc=col, ec="none", zorder=z))
 
 
