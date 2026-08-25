@@ -217,29 +217,44 @@ so Vulkan compute's failure going 6 to 8 sits at 768 MB/s of sustained read and 
 no instrument to separate storage from decode. The routes landing on 1, 5 and 6 rules disk out as
 the shared limiter — three decoders would not stop at three different rungs on one disk — but not
 for that particular step.
-### Open: why CUDA ProRes sustains fewer channels than the compute decoder
+### Mostly closed: why CUDA ProRes sustained half the channels of the compute decoder
 
-The two ProRes routes cost **the same per channel to decode** and a very different amount once the
-channel has an output. This is measured, unexplained, and recorded here rather than diagnosed
-because five hypotheses have been tested and all five were wrong.
+The CUDA ProRes producer stopped at **5** playout channels where FFmpeg's Vulkan compute decoder
+reached 12, on the same clip and raster, at an **identical** cost to decode. Five hypotheses were
+tested and all five were wrong. The sixth was right: the producer handed the mixer **twice the
+bytes**, in a texture the mixer has to keep alive rather than copy out of.
 
-1080p ProRes noise, one producer per channel (`playback-scaling`, 2026-08-25):
+It converted every frame to BGRA16 — 16.6 MB at 1080p — where the FFmpeg path hands over planar
+4:2:2 at 8.3 MB. And because this producer publishes its OWN per-slot texture, that doubling is
+paid twice: in the VRAM a slot holds, and again in the bytes the mixer samples every frame.
+4:2:2 now hands over three planes instead (`prores_decode_frame_planar_async`), and the shader
+does the YCbCr→RGB conversion it was already doing for every other planar source.
 
-| route | mixer | output | channels | GPU/channel |
-| :--- | :--- | :--- | ---: | ---: |
-| CUDA ProRes | vulkan | none | 16+ | **2.50 %** |
-| FFmpeg Vulkan compute | vulkan | none | 28+ | **2.54 %** |
-| CUDA ProRes | vulkan | `screen_gpu` | **5** | 5.60 % |
-| CUDA ProRes | vulkan | `screen_cpu` | **5** | 7.80 % |
-| FFmpeg Vulkan compute | vulkan | `screen_gpu` | **12** | 4.25 % |
-| CUDA ProRes | ogl | none | 16+ | **5.94 %** |
-| CUDA ProRes | ogl | `screen_gpu` | *unmeasurable* — see below | — |
+1080p ProRes noise, one producer per channel, Vulkan mixer, `screen` output
+(`playback-scaling`, 2026-08-26):
 
-**Decode alone the two routes are indistinguishable.** Add an output and CUDA costs about a third
-more GPU per channel and sustains fewer than half the channels. So whatever it is lives in what the
-mixer and output do with these frames, not in decoding them.
+| route | channels | cores | GPU | VRAM | VRAM/channel |
+| :--- | ---: | ---: | ---: | ---: | ---: |
+| CUDA ProRes, BGRA16 *(before)* | **5** | — | — | — | — |
+| CUDA ProRes, planar 4:2:2 *(after)* | **9** | 2.70 | 44 % | 3255 MB | 362 MB |
+| FFmpeg Vulkan compute | **12** | 2.48 | 33 % | 4224 MB | 352 MB |
 
-**Ruled out, each by measurement rather than by reading:**
+**A 60 % gain, and the picture improved with it** — `prores-parity` on ProRes 422 against the
+FFmpeg CPU reference went from 0.16 % of samples differing to **0.01 %**, worst 2 LSB and mean
+0.00 throughout. Moving the same conversion into the same shader the reference route uses should
+move the picture towards it, and it did.
+
+**Rung honesty:** 9 held and 10 failed, so 9 is a real ceiling. The compute route held at 12 and
+failed at 14 — **13 was never run**, so its ceiling is 12 or 13.
+
+**4444 is deliberately NOT on this path.** Planar 4:4:4-with-alpha is four full-size 16-bit
+planes: 8 bytes a pixel, exactly what BGRA16 costs. There is nothing to win, and it is not free —
+FFmpeg decodes ProRes 4444 to yuva444p12 while this decoder produces 10-bit planes, so the
+alpha normalises to 0.99904 against the reference's 0.99985 and the straight-alpha premultiply
+lands a fraction low. Measured at `any diff` 0.50 % → 13.87 %, all of it 1 LSB and all of it in
+one alpha band. The halving is a property of **4:2:2**, not of planar.
+
+**Ruled out earlier, each by measurement rather than by reading:**
 
 | hypothesis | how it died |
 | :--- | :--- |
@@ -247,24 +262,28 @@ mixer and output do with these frames, not in decoding them.
 | per-frame locking | that mutex is taken once per producer at setup |
 | the producer's queue depth | 2 → 4 frames: ceiling 5 → 5, VRAM +510 MB |
 | the slot pool being too small | 5 → 12 slots: ceiling 5 → 5, VRAM +1.7 GB |
-| exportable Vulkan memory losing compression | the OpenGL path uses none and is **worse**, at 5.94% GPU/channel against 2.50% |
+| exportable Vulkan memory losing compression | the OpenGL path uses none and is **worse**, at 5.94 % GPU/channel against 2.50 % |
 
-The one structural difference that remains is that this producer hands the mixer **its own**
-per-slot texture (`gpu_tex = cvt_[ps]->core_texture()`), where the FFmpeg path copies into a
-pooled mixer texture — precisely what `av_vulkan_import.h` says it refuses to do, because "the
-decoder's pool is shallow and stalls if its frames are held". Pool size is not the lever, so if
-that is the cause it is through some property of the texture rather than the count of them.
+**What is still open, and it is not bandwidth.** At the new ceiling the GPU sits at **44 %**, so
+nothing is saturated; three channels still separate this route from the compute one. The
+structural difference that remains is the one bandwidth did not explain: this producer's frame
+**is** a slot, so a slot cannot be reused until the mixer has sampled it and the consumer has
+presented it, where `av_vulkan_import.h` deliberately copies into a pooled mixer texture and
+frees its own at once — "the decoder's pool is shallow and stalls if its frames are held".
+Slot *count* is not the lever; that was tested twice above.
 
-**Settling it needs an instrument that does not exist here**: per-pass GPU timing inside the mixer
-for a CUDA-sourced frame against an FFmpeg-sourced one. Everything above compares whole-channel
-cost, which cannot separate sampling from compositing from presenting.
+**Settling the remainder needs an instrument that does not exist here**: per-pass GPU timing
+inside the mixer for a CUDA-sourced frame against an FFmpeg-sourced one. Everything above
+compares whole-channel cost, which cannot separate sampling from compositing from presenting.
 
 **And one measurement limitation worth carrying:** on the **OpenGL mixer a screen consumer cannot
 sustain even one channel** of 1080p25 — `auto` (D3D11VA) fails with 11 late frames at one channel
 and CUDA with 24, as a steady few-per-interval rate rather than a cliff, with no starvation and no
 GL errors. That is the consumer's presentation pacing, not any route, so no OpenGL-mixer ceiling
-*with an output* can be measured on this rig at all. It is also why the OGL row above has no
-output arm.
+*with an output* can be measured on this rig at all. The OpenGL path also still uses BGRA16 by
+design — its interop target is a single opaque `cudaArray_t`, and three planes would mean three
+`cudaGraphicsGLRegisterImage` registrations per slot, the call this module already had to
+serialise behind a process-wide lock after a crash.
 
 
 ---

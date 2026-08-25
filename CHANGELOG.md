@@ -1,6 +1,63 @@
 CasparVP — Unreleased
 ==========================================
 
+### Changed: CUDA ProRes 4:2:2 hands the Vulkan mixer planar YCbCr, and sustains 9 channels instead of 5
+
+**This changes rendered output for every existing config using `CUDA_PRORES` on the Vulkan
+mixer**, by about 1 LSB, and it moves the picture *towards* FFmpeg's CPU decoder rather than away.
+
+The producer used to convert every frame to BGRA16 and hand the mixer one packed texture. At
+1080p that is 16.6 MB a frame where planar 4:2:2 is 8.3 MB — and because this producer publishes
+its OWN per-slot texture rather than copying into a pooled one, the doubling was paid twice: in
+the VRAM a slot holds, and again in the bytes the mixer samples every frame. It now hands over
+Y, Cb and Cr as three 10-bit planes and the shader does the YCbCr→RGB conversion, which is what
+it already did for every other planar source — and which is the only place the channel's colour
+management can reach it.
+
+**Picture**, `prores-parity` on ProRes 422 BT.709 against the FFmpeg CPU reference, Vulkan mixer,
+frame 12. Worst 2 LSB and mean 0.00 both before and after; nothing above 3 LSB either way:
+
+| | any diff |
+| :--- | ---: |
+| BGRA16 (before) | 0.16 % |
+| planar 4:2:2 (after) | **0.01 %** |
+
+**Channels**, 1080p ProRes noise, one producer per channel, `screen` output:
+
+| route | before | after |
+| :--- | ---: | ---: |
+| CUDA ProRes | 5 | **9** |
+| FFmpeg Vulkan compute, for scale | 12 | 12 |
+
+9 held and 10 failed, so 9 is a real ceiling. The compute route held at 12 and failed at 14 —
+**13 was never run**, so its figure is 12 or 13. At the new ceiling the GPU sits at 44 %, so this
+route is still not GPU-bound and the remaining three-channel gap is not bandwidth.
+
+**Unchanged, deliberately, and each for its own reason:**
+
+* **ProRes 4444 keeps the packed route.** Planar 4:4:4-with-alpha is four full-size 16-bit planes
+  — 8 bytes a pixel, exactly what BGRA16 costs — so there is nothing to win. It is also not free:
+  FFmpeg decodes ProRes 4444 to yuva444p12 while this decoder produces 10-bit planes, so alpha
+  normalises to 0.99904 against the reference's 0.99985 and the straight-alpha premultiply lands
+  a fraction low. Measured at `any diff` 0.50 % → 13.87 %, all 1 LSB, all in one alpha band. 4444
+  is back at its baseline 0.50 %.
+* **The OpenGL mixer keeps BGRA16.** Its interop target is a single opaque `cudaArray_t`, so
+  three planes would mean three `cudaGraphicsGLRegisterImage` registrations per slot — the exact
+  call this module already had to serialise behind a process-wide lock after a crash.
+
+**Not covered by this measurement:** one fixture at one raster, `screen` output only, and the
+1 LSB figure is frame 12 of a BT.709 SDR clip — HDR and BT.2020 ProRes take the same code path
+but were not captured. `MIXER CHROMA` and other per-channel operators were not exercised against
+the new plane layout.
+
+**Two defects this surfaced, both fixed here.** `CudaVkTexture::make_channel_desc` tested
+`depth() == bit16` where the Vulkan format table selects its 16-bit row with `!= bit8`, so a
+`bit10` texture was described to CUDA at half the channel width of its own memory — nothing used
+bit10 through that class before, so it had never been wrong. And `color_matrix_override_` reached
+the CUDA kernel as an argument; on the planar path no kernel takes a matrix, so it now travels
+with the frame info instead. Without that it would have gone on working for OpenGL and silently
+stopped working for Vulkan.
+
 ### Added: H.264/HEVC decoded through Vulkan Video, behind `<vulkan-video-decode>`
 
 Off by default. FFmpeg's `VK_KHR_video_decode` decoders on the mixer's own Vulkan device, so
