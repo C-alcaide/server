@@ -172,6 +172,39 @@ is effectively free and what remains is the mixer's own fixed cost. The software
 by contrast, rises with the format's difficulty — which is exactly why the heavier the source,
 the more a GPU route is worth.
 
+
+### How many channels does each route sustain?
+
+`decode-cost` above answers "what does one layer cost, and four". This is the other shape of the
+question, and the one an operator asks: how many playout channels before frames go late.
+1080p25, H.264 noise, the Vulkan mixer, one screen consumer per channel
+(`playback-scaling --routes auto,vulkan_video`, 2026-08-25):
+
+| route | channels | at the ceiling | what stopped it |
+| :--- | ---: | :--- | :--- |
+| **D3D11VA** (`auto`, the default) | **12** | 2.68 cores · 39% GPU · 4099 MB | 14 channels, 52 late frames |
+| **Vulkan Video** | **20** | 3.11 cores · 36% GPU · 5508 MB | 24 channels, 48 late frames |
+
+![Playout channels per decode route, and what one channel costs on each](images/playback_ceilings.png)
+
+Per channel that is **0.156 cores against 0.223, 1.8% GPU against 3.3%, and 275 MB against
+342 MB** — Vulkan Video is cheaper on all three, which is what the four-layer cost figures above
+were also saying in a form that could not be read as channels.
+
+**D3D11VA's 12 is marginal and the number is quoted as measured rather than as a limit.** It held
+at 12 in two runs and took 73 late frames in a third, same binary, same clip, same config — so 12
+is the edge rather than a comfortable figure, and a venue planning to that number has no headroom.
+Vulkan Video's 20 was reached in both runs that tried it.
+
+**One number here was wrong before it was right, and the correction only ever runs one way.** The
+first run had D3D11VA stop at 16 because "0 of 16 producers stayed on the fast path", and the
+server's log for that rung holds twelve activation lines and no stand-downs: engagement was being
+counted from a console buffer that lags at high channel counts. An undercount can only void a rung
+that should have held, so it can only report a ceiling LOWER than the truth — every ladder that
+battery published before 2026-08-25 is a floor rather than a measurement. It reads the log file
+now, and with the fix the real limiter turned out to be late frames at 14 rather than engagement
+at 16.
+
 ---
 
 ## 3. Recording: the four encode routes

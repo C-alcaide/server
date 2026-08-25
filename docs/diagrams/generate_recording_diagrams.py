@@ -530,6 +530,73 @@ def ceiling_chart():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+def playback_ceiling_chart():
+    """The two comparable DECODE routes as bars, plus what a channel costs on each.
+
+    The recording chart next to this one answers "how many recordings"; nothing answered "how
+    many playout channels", which is the question an operator actually plans to. Only two routes
+    are here because only two are comparable: `auto` (D3D11VA) and Vulkan Video decode the same
+    codecs on the same silicon, where the CUDA and Vulkan-compute routes are ProRes-only and
+    cannot share a fixture with them.
+    """
+    lay, fig, ax = _new((12.0, 6.2))
+    lay.panel("frame", 1, 1, 98, 98, blocking=False, fc=BG, ec=BORDER_SUBTLE, radius=0.01)
+
+    lay.text("title", 50, 95,
+             "How many simultaneous 1080p25 H.264 playout channels",
+             parent=None, color=TITLE, size=12.5, weight="bold", ha="center")
+    lay.text("sub", 50, 89,
+             "one screen consumer per channel · the ceiling is the last rung with no late frames",
+             parent=None, color=MUTED, size=8.2, ha="center", style="italic")
+
+    # (label, channels, marginal, note)
+    rows = [
+        ("Vulkan Video\n<vulkan-video-decode>", 20, False, "24 channels: 48 late frames"),
+        ("D3D11VA\nthe default", 12, True, "14 channels: 52 late frames"),
+    ]
+    # The count sits past the END OF THE TRACK, not past the end of the bar: at the bar it
+    # lands inside the grey remainder and the note then runs over it. And the marginal
+    # caveat goes BELOW the bar rather than inside it -- it is longer than the bar it
+    # qualifies, which is how it came to be drawn across both.
+    x0, wmax, cmax = 30.0, 40.0, 24.0
+    for i, (name, n, marginal, note) in enumerate(rows):
+        y = 62 - i * 17.0
+        col = ACCENT_HOVER if marginal else SUCCESS
+        head, sub = name.split(chr(10))
+        _text(ax, x0 - 2.0, y + 4.6, head, color=TEXT, size=8.6, ha="right",
+              weight="bold", z=6)
+        _text(ax, x0 - 2.0, y + 1.6, sub, color=MUTED, size=7.0, ha="right", z=6)
+        _panel(ax, x0, y, wmax, 6.4, fc="#232323", ec=BORDER_SUBTLE, lw=0.5, radius=0.0,
+               z=2)
+        _panel(ax, x0, y, wmax * n / cmax, 6.4, fc=col, ec=col, radius=0.0, z=3)
+        _text(ax, x0 + wmax + 2.5, y + 3.4, str(n), color=col, size=11, weight="bold",
+              z=6)
+        _text(ax, x0 + wmax + 8.0, y + 3.4, note, color=MUTED, size=7.2, z=6)
+        if marginal:
+            _text(ax, x0, y - 3.4,
+                  "MARGINAL: held at 12 in two runs, 73 late frames in a third",
+                  color=ACCENT_HOVER, size=7.4, weight="bold", z=6)
+
+    # What a single channel costs, which is the part that does not depend on where the ceiling
+    # landed -- and the reason to expect the gap rather than merely to have measured it.
+    lay.panel("per", 4, 6, 92, 22, fc=PANEL, ec=BORDER)
+    _text(ax, 50, 24.5, "and what ONE channel costs on each, at the ceiling",
+          color=TITLE, size=8.6, ha="center", weight="bold", z=6)
+    cols = [("host CPU", "0.223 cores", "0.156 cores"),
+            ("GPU utilisation", "3.3 %", "1.8 %"),
+            ("VRAM", "342 MB", "275 MB")]
+    for i, (what, d3d, vk) in enumerate(cols):
+        cx = 20 + i * 30
+        _text(ax, cx, 19.5, what, color=MUTED, size=7.6, ha="center", z=6)
+        _text(ax, cx, 15.0, d3d, color=ACCENT_HOVER, size=9.0, ha="center", weight="bold", z=6)
+        _text(ax, cx, 10.5, vk, color=SUCCESS, size=9.0, ha="center", weight="bold", z=6)
+    _text(ax, 5.5, 15.0, "D3D11VA", color=ACCENT_HOVER, size=7.4, weight="bold", z=6)
+    _text(ax, 5.5, 10.5, "Vulkan Video", color=SUCCESS, size=7.4, weight="bold", z=6)
+
+    lay.check(name="playback_ceilings")
+    _save(fig, "playback_ceilings.png")
+
+
 def which_path():
     """The decision the guide's section 8 makes in prose."""
     lay, fig, ax = _new((12.0, 6.6))
@@ -1092,6 +1159,7 @@ def main():
     three_questions()
     host_memory_routes()
     ceiling_chart()
+    playback_ceiling_chart()
     which_path()
     decode_paths()
     encode_paths()

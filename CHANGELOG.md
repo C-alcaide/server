@@ -26,6 +26,12 @@ measured against it on the same clip and binary, 4 layers, 2 interleaved rounds,
 which follows from there being no D3D11 device, no shared NT handles and no per-producer import
 bridge. And it is the same code off Windows, which D3D11VA can never be.
 
+**In channels rather than percentages**, which is the form that matters operationally: 1080p25
+H.264 with a screen consumer per channel, **D3D11VA sustains 12 and Vulkan Video 20**. D3D11VA's
+12 is marginal -- it held twice and took 73 late frames once on the same binary and clip -- while
+20 was reached in both runs that tried it, failing at 24. Per channel: 0.156 cores against 0.223,
+1.8% GPU against 3.3%, 275 MB against 342 MB.
+
 **Picture: byte-identical to the software path** on 8-bit H.264 and 10-bit HEVC alike — 0
 differing pixels, max delta 0, same frame confirmed from a burnt-in marker, all arms provably on
 different paths. Validation, 4 concurrent producers: 4/4 active, 0 device lost, no SYNC-HAZARD, no

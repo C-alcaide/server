@@ -1394,6 +1394,11 @@ What is per-image and what is per-plane is the whole correctness argument:
 | decode-time, fraction of the frame budget | 0.024-0.046 | **0.002** |
 | producers engaged | - | **4/4** |
 
+**Channels before frames go late**, which is the operator-facing form of the same question
+(`playback-scaling`, 1080p25 H.264, one screen consumer per channel): **D3D11VA 12, Vulkan Video
+20**, the first marginal (12 held twice and took 73 late frames once) and the second reached in
+both runs. Per channel: 0.156 cores against 0.223, 1.8% GPU against 3.3%, 275 MB against 342 MB.
+
 **Picture: byte-identical to the software path** -- 0 differing pixels, max delta 0, on 8-bit
 H.264 *and* 10-bit HEVC, same frame confirmed from the burnt-in marker, with all three arms
 provably on different paths (`gpu-direct-parity --arm vulkan_video`). The 10-bit run is the one
