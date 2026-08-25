@@ -576,23 +576,6 @@ core::draw_frame gst_gpu_bridge::to_frame(void*                       tag,
     if (m.bgra_) {
         {
             gst_d3d11_device_lock(m.gst_device_);
-            {
-                static bool once = false;
-                if (!once) {
-                    once = true;
-                    D3D11_TEXTURE2D_DESC sdesc = {};
-                    surface->GetDesc(&sdesc);
-                    D3D11_TEXTURE2D_DESC ddesc = {};
-                    m.y_tex_->GetDesc(&ddesc);
-                    CASPAR_LOG(info) << L"[gstreamer][bgra] src " << sdesc.Width << L"x" << sdesc.Height
-                                     << L" fmt=" << static_cast<int>(sdesc.Format)
-                                     << L" bind=" << sdesc.BindFlags << L" array=" << sdesc.ArraySize
-                                     << L" sub=" << subresource
-                                     << L" | dst " << ddesc.Width << L"x" << ddesc.Height
-                                     << L" fmt=" << static_cast<int>(ddesc.Format)
-                                     << L" bind=" << ddesc.BindFlags;
-                }
-            }
             m.ctx_->CopySubresourceRegion(m.y_tex_, 0, 0, 0, 0, surface, subresource, nullptr);
             m.ctx_->Flush();
             gst_d3d11_device_unlock(m.gst_device_);
@@ -617,7 +600,7 @@ core::draw_frame gst_gpu_bridge::to_frame(void*                       tag,
         m.failures_ = 0;
 
         // `bgra` and not `rgba`: the mixer's native order, so nothing swizzles on the way in.
-        auto bdesc = core::pixel_format_desc(core::pixel_format::rgba); // EXPERIMENT
+        auto bdesc = core::pixel_format_desc(core::pixel_format::bgra);
         bdesc.planes.push_back(core::pixel_format_desc::plane(m.width_, m.height_, 4));
 
         // No colour metadata is carried, and that is correct rather than an omission: the
