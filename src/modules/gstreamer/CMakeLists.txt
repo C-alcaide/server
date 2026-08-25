@@ -17,6 +17,9 @@ set(SOURCES
 		consumer/gst_consumer.cpp
 		consumer/gst_consumer.h
 
+		consumer/caption_pacer.cpp
+		consumer/caption_pacer.h
+
 		consumer/gst_cuda_egress.cpp
 		consumer/gst_cuda_egress.h
 

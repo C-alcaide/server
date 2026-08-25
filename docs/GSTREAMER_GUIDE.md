@@ -395,6 +395,8 @@ ADD 1 GSTREAMER "videoconvert ! x264enc speed-preset=veryfast ! h264parse ! mp4m
 | `queue`, `queue-peak` | how much runway there is between pipeline and channel |
 | `gpu-frames` | frames the PRODUCER put on the GPU path. 0 with `GPU` asked for means it fell back. The consumer's equivalent is `egress-frames`, named apart because one INFO response carries both |
 | `captions` | caption packets re-emitted by the consumer. The picture looks identical whether captions travel or vanish, so this is the only thing that tells them apart |
+| `cc-triplets-in` / `cc-triplets-out` / `cc-suppressed` | CEA-708 `cc_data` triplets that arrived, were emitted, and were withheld as duplicates. When the channel starves it repeats its last picture, and that picture's captions must **not** be sent again — CEA-708 is a command stream, so a repeated `RollUp` changes what the viewer sees. `cc-suppressed` climbing alongside `starved` is the system working |
+| `captions-queued` / `captions-dropped` | triplets waiting, and triplets shed to stay current. A frame carries a fixed number (12 at 50p, 24 at 25p), so a source sending more than the channel can carry backs up; captions are timed to pictures, and text arriving seconds late is worse than text that does not arrive |
 | `restarts` | pipeline rebuilds after an error |
 | `eos`, `position`, `length` | end of stream, and where you are |
 

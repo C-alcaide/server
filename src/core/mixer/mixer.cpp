@@ -95,7 +95,12 @@ struct mixer::impl
         {
             if (found || frame.metadata().empty())
                 return;
-            found = std::make_shared<const frame_metadata>(frame.metadata());
+            // **Share, do not copy.** A copy per tick is a new object at a new address every
+            // frame, and a consumer that uses the pointer to tell one picture from the next --
+            // the GStreamer consumer does, to avoid re-emitting a repeated frame's captions --
+            // then sees every frame as new. Measured 2026-08-25: 177 repeated frames and not
+            // one duplicate suppressed. Sharing is also simply cheaper.
+            found = frame.metadata_ptr();
         }
     };
 

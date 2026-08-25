@@ -1,6 +1,36 @@
 CasparVP — Unreleased
 ==========================================
 
+### Fixed: a repeated frame repeated its closed captions
+
+**This changes what a caption decoder receives whenever a channel starves.** When the
+GStreamer producer cannot keep up, the channel repeats its last picture — and the consumer
+re-emitted that picture's `cc_data` on every repeat. CEA-708 is a command stream, so a
+doubled `RollUp` or `SetPenLocation` is a visible fault rather than harmless redundancy.
+
+Measured with a source delayed to ~33 fps in a 50p channel: **177 repeated frames, 2100 of
+5376 arriving triplets now withheld as duplicates**, where every one of them used to go out.
+
+Two changes together, and neither works alone:
+
+* The consumer runs `cc_data` through a queue keyed on the frame's identity, so a picture's
+  captions are enqueued once however many times that picture is sent. The queue also holds
+  the per-frame budget the standard defines — 12 triplets at 50p, 24 at 25p, 25 at 24p, from
+  FFmpeg's `libavutil/ccfifo.c` — so a burst is spread rather than truncated.
+* **`core::mixer` shared the frame's metadata instead of copying it.** It built a fresh
+  `frame_metadata` every tick, so the identity above was new on every frame and the queue saw
+  no repeats at all: 177 repeats, zero suppressed. `const_frame::metadata_ptr()` exposes the
+  stored pointer, which is also one allocation and one copy less per frame.
+
+608 and 708-in-CDP are still passed through unpaced — 608 is two bytes per field per frame
+and a CDP carries its own framing and sequence counter, so re-packing either means rewriting
+a header rather than moving triplets. Stated in `caption_pacer.h` rather than left to be
+discovered.
+
+Gated by `cli.py gstreamer --only caption-rate`, which starves the channel deliberately. The
+existing `captions` case cannot fail for this: it runs 50 into 50, and every counter it reads
+is identical whether the channel de-duplicates or not.
+
 ### Changed: the CUDA upload waits for its own copy, not for the whole device
 
 **This affects every NVENC recording, not only the new GStreamer path.**

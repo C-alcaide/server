@@ -49,6 +49,8 @@
 #include "gst_cuda_egress.h"
 #endif
 
+#include "caption_pacer.h"
+
 #include <gst/app/gstappsrc.h>
 
 #include <thread>
@@ -118,6 +120,9 @@ struct gst_consumer : public core::frame_consumer
 
     std::atomic<uint64_t> frames_sent_{0};
     std::atomic<uint64_t> captions_sent_{0};
+    /// Re-paces CEA-708 `cc_data` from the source's rate to the channel's. Only touched from
+    /// `send`, which is one thread.
+    caption_pacer         cc_pacer_;
     std::atomic<uint64_t> frames_on_gpu_{0};
 
     /// Opt-in per ADD, like the producer's, and for the same reason: the route changes what the
@@ -527,13 +532,34 @@ struct gst_consumer : public core::frame_consumer
         // This is what makes the channel a caption-transparent path rather than a place
         // captions go to die -- `h264ccinserter`, `cccombiner` or a mux downstream can now put
         // them back into a stream.
+        // **Re-PACED, not copied**, and that is a correctness fix rather than a refinement.
+        // CEA-708 carries a fixed number of `cc_data` triplets per frame and the number
+        // depends on the frame rate, so pass-through is correct only when the source and the
+        // channel run at the same rate -- and a 25p source in a 50p channel also delivers
+        // each picture twice, which repeated every control code in the stream. See
+        // `caption_pacer.h`; 608 and CDP are passed through, and why is stated there.
         for (const auto& cc : frame.metadata().captions) {
             if (cc.data.empty())
                 continue;
+
+            const auto* paced = &cc.data;
+            std::vector<std::uint8_t> repaced;
+            if (cc.format == 3 /* GST_VIDEO_CAPTION_TYPE_CEA708_RAW */) {
+                // The address of the frame's shared metadata identifies the PICTURE: it
+                // survives copies of one frame and differs between frames, so a repeat adds
+                // nothing to the queue.
+                repaced = cc_pacer_.pace(&frame.metadata(), cc.data,
+                                         format_desc_.framerate.numerator(),
+                                         format_desc_.framerate.denominator());
+                paced   = &repaced;
+                if (repaced.empty())
+                    continue;
+            }
+
             gst_buffer_add_video_caption_meta(buffer,
                                               static_cast<GstVideoCaptionType>(cc.format),
-                                              cc.data.data(),
-                                              cc.data.size());
+                                              paced->data(),
+                                              paced->size());
             ++captions_sent_;
         }
 
@@ -621,6 +647,17 @@ struct gst_consumer : public core::frame_consumer
         // Not decoration: a caption path that silently carries nothing looks exactly like one
         // that is working, because the picture is identical either way.
         state["gstreamer/captions"] = static_cast<int64_t>(captions_sent_.load());
+        // A backlog means the source is producing caption data faster than this channel's
+        // frame rate can carry it -- real, and invisible in the picture. `captions-dropped`
+        // counts what the queue shed to stay current, because text that arrives seconds after
+        // its picture is worse than text that does not arrive.
+        state["gstreamer/captions-queued"]  = static_cast<int64_t>(cc_pacer_.backlog());
+        // The only pair that can tell a paced channel from an unpaced one: every other counter
+        // reads the same either way, because pass-through also attached one meta per frame.
+        state["gstreamer/cc-triplets-in"]   = static_cast<int64_t>(cc_pacer_.triplets_in());
+        state["gstreamer/cc-triplets-out"]  = static_cast<int64_t>(cc_pacer_.triplets_out());
+        state["gstreamer/cc-suppressed"]    = static_cast<int64_t>(cc_pacer_.triplets_suppressed());
+        state["gstreamer/captions-dropped"] = static_cast<int64_t>(cc_pacer_.dropped());
         // A GPU route that silently stopped engaging looks exactly like one that is working,
         // because the picture is identical. This is the only thing that can tell them apart.
         // **`egress-frames`, not `gpu-frames`.** The PRODUCER publishes `gstreamer/gpu-frames`

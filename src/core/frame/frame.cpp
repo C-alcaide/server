@@ -323,6 +323,12 @@ const frame_metadata& const_frame::metadata() const
     return impl_->metadata_ ? *impl_->metadata_ : empty;
 }
 
+const std::shared_ptr<const frame_metadata>& const_frame::metadata_ptr() const
+{
+    static const std::shared_ptr<const frame_metadata> none;
+    return impl_ ? impl_->metadata_ : none;
+}
+
 const_frame const_frame::with_metadata(std::shared_ptr<const frame_metadata> metadata) const
 {
     // Through `with_tag`, with the tag unchanged, rather than copying `impl` directly: `impl`
