@@ -1,6 +1,73 @@
 CasparVP — Unreleased
 ==========================================
 
+### Fixed: a listening `srtsrc` hung the whole server
+
+`PLAY 1-10 [GSTREAMER] "srtsrc uri=srt://:9000?mode=listener ! ..."` — listen now, let the
+encoder connect later, which is the ordinary way to run SRT ingest — made the server stop
+answering AMCP entirely. The process stayed alive, the port kept accepting connections, and
+every later `PLAY`, `INFO` and `CLEAR` went unanswered.
+
+`gst_element_set_state` blocks for a source that waits inside NULL→READY, and it was being
+called on the AMCP thread. The state change now runs on a worker: `PLAY` returns in about 3 s
+and the layer delivers when a caller arrives. Pass `wait-for-connection=false` if you would
+rather it gave up than waited.
+
+### Fixed: `REMOVE 1 GSTREAMER` returned 404
+
+The consumer could not be removed by name at all. AMCP builds a consumer from the parameters
+purely to read its index, and the factory refused the one-token form. The bare form now
+constructs; an empty pipeline description is rejected at `initialize()` instead, so
+`ADD 1 GSTREAMER` with no pipeline still fails — at the point that actually needs it.
+
+### Fixed: two waits that ran on the channel's thread
+
+* **The consumer's end-of-stream drain.** Up to 5 s, so a muxer finalises its file rather than
+  leaving a container with no index. The wait is right; the thread was not — a removed
+  consumer is destroyed on the channel's output thread, so every GStreamer consumer that did
+  not produce EOS promptly stopped the whole channel for as long as five seconds. It now runs
+  on a detached janitor, and the CUDA egress travels with the pipeline so its buffers are
+  freed after, not before.
+* **The element-stats poll.** `state()` called `g_object_get(element, "stats")`, which takes
+  the element's own lock — and `srtsrc` holds that lock across a reconnect, on the path the
+  channel publishes from. It now runs on the producer's own thread, twice a second rather than
+  at frame rate, which also stopped it filling the log at 50 lines a second whenever an SRT
+  source had no connection.
+
+### Fixed: `GPU` on an OpenGL channel killed the server
+
+The CUDA egress asked only whether a CUDA device existed — true on an OpenGL channel too — so
+it opened, the appsrc was negotiated for `memory:CUDAMemory`, and the first frame revealed
+that `ogl::texture` exposes no shareable handle. The egress dropped itself correctly and the
+consumer went on pushing host buffers into an appsrc expecting CUDA memory. It now declines on
+`channel_info::use_vulkan` before anything negotiates against it.
+
+### Fixed: `GST_DEBUG` and `GST_DEBUG_FILE` were silently ignored
+
+The module set its own default threshold unconditionally, and that call updates *every*
+category — so `GST_DEBUG` was overwritten immediately after `gst_init` parsed it and produced
+byte-identical output to not setting it. `GST_DEBUG_FILE` was dead for a second reason: the
+default log function is what writes it, and the module had removed it to route GStreamer into
+the server log.
+
+Both now defer to the environment when it is set, and with `GST_DEBUG_FILE` the detail goes to
+that file *as well as* the summary to the server log. This is the first switch anyone reaches
+for when a pipeline misbehaves; it now works.
+
+### Added: a sample that cannot be made into a frame says so
+
+`make_frame` returns an empty frame for anything it cannot describe, and the producer simply
+does not queue it — so the sample counted as *received*, the channel starved, the picture was
+black, and nothing appeared in the log. That shape has now cost two investigations in this
+tree. The producer logs it once, naming the negotiated format.
+
+### Changed: the consumer's GPU counter is `gstreamer/egress-frames`
+
+It was `gstreamer/gpu-frames`, the same leaf name the **producer** publishes for a different
+count, and one `INFO` response carries both. Anything reading by tag got whichever came first:
+a host consumer's constant 0 hid a producer running 199/199, and was diagnosed as a GPU bridge
+defect that did not exist.
+
 ### Added: `GPU BGRA`, a GPU route for sources with no YCbCr to hand over
 
 `PLAY ... "d3d11screencapturesrc ..." GPU BGRA` keeps an RGB source in video memory all the

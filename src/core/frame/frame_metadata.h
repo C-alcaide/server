@@ -44,10 +44,16 @@ namespace caspar { namespace core {
 ///  1. **Captions are RATE-PACED, not copied.** CEA-708 carries a fixed cc_data budget per
 ///     frame that depends on the frame rate -- fewer triplets per frame at 50p than at 25p --
 ///     so a source and a channel at different rates need the caption stream re-paced through a
-///     queue, popping a field or a frame's worth at a time. This file passes through whatever
-///     arrived on the frame, which is correct **only when the source and channel rates match**.
-///     The end-to-end measurement that validated it was 50 fps into a 50 fps channel and would
-///     not have caught this.
+///     queue, popping a field or a frame's worth at a time.
+///
+///     **The GStreamer consumer now does this** (`gstreamer/consumer/caption_pacer.h`): a
+///     queue keyed on frame identity, releasing at the standard's per-frame budget, so a
+///     repeated frame does not re-issue its captions. That covers the case that actually
+///     arises here -- the channel repeating its last picture when the producer starves -- and
+///     the identity it keys on is why `const_frame::metadata_ptr()` exists.
+///
+///     It is still narrower than #1637: only CEA-708 raw, only that consumer, and no
+///     interlace awareness. 608 and 708-in-CDP are passed through unpaced.
 ///
 ///  2. **Which layer's captions win is an operator decision**, expressed upstream as a float
 ///     priority per layer, with zero/NaN/negative meaning "not a caption source" so captions

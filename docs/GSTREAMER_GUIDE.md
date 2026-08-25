@@ -421,10 +421,31 @@ and `buffer` (queue fill) and tags `dropped-frame`, `audio-underrun`, `starved` 
 WARNING and above. For more, set `GST_DEBUG` before starting the server:
 
 ```
-set GST_DEBUG=3            :: errors, warnings, fixmes
-set GST_DEBUG=4            :: + info, including caps negotiation
-set GST_DEBUG=GST_CAPS:5   :: just negotiation, which is usually what you want
+set GST_DEBUG=3                  :: errors, warnings, fixmes
+set GST_DEBUG=4                  :: + info, including caps negotiation
+set GST_DEBUG=GST_CAPS:5         :: just negotiation, which is usually what you want
+set GST_DEBUG=fallbacksrc:6      :: one element, in full -- usually the fastest route
 ```
+
+Per-element categories are where this earns its keep. `GST_DEBUG=<element>:6` on the one
+element you suspect answers in minutes what guessing does not answer in a day.
+
+**Send it somewhere else when it is verbose**, or it competes with the server log:
+
+```
+set GST_DEBUG_FILE=D:\logs\gst.log
+set GST_DEBUG_NO_COLOR=1
+```
+
+With `GST_DEBUG_FILE` set, GStreamer's own log goes to that file **as well as** into the
+server log, so you keep the summary and get the detail separately.
+
+> **Before 2026-08-25 both of these were silently ignored.** The module set its own default
+> threshold unconditionally, and that call updates *every* category — so `GST_DEBUG` was
+> overwritten immediately after `gst_init` parsed it, and produced byte-identical output to
+> not setting it at all. `GST_DEBUG_FILE` was dead for a second reason: the default log
+> function is what writes it, and the module had removed it. If you are on an older build,
+> neither switch does anything and the absence of extra output means nothing.
 
 **Read the failure messages literally.** Two you will meet:
 
@@ -468,6 +489,50 @@ FFmpeg 7 all six library names collided.
 **A silent fallback is worse than an error.** If you ask for `GPU`, check `gpu-frames`. If you
 expect NV12, check `format`. The module logs its refusals, but it does not fail your command
 over them.
+
+---
+
+## 10b. Which GStreamer features are actually tested here
+
+Everything below is exercised by `CasparCG-TestRunner`'s `gstreamer` battery on **both**
+mixers, or was measured directly and is recorded with what it showed. This is not a list of
+what GStreamer can do — it is the list this module has evidence for, which is a much shorter
+and more useful thing.
+
+| element / feature | what is verified | how |
+| :--- | :--- | :--- |
+| `appsink` / `appsrc` | the producer and consumer negotiate and carry frames | every case |
+| `videotestsrc` | synthetic sources reach the mixer on the **host** path | `synthetic` |
+| `d3d11h264dec` | H.264 hardware decode, NV12 straight to the mixer, byte-identical to the FFmpeg producer | `parity`, `nv12-host`, `gpu` |
+| `d3d11h265dec` | 10-bit HEVC as `P010_10LE`, GPU-direct, levels within 1 LSB of the 8-bit reference | `p010` |
+| `d3d11av1dec` | AV1 hardware decode over the same bridge, no code of its own | `av1` |
+| `d3d11upload` / `d3d11convert` | software-decoded frames uploaded and converted on the GPU | `gpu-bgra`, and the BGRA route |
+| `srtsrc` (caller) | real SRT ingest, byte-identical to the same pipeline run outside CasparCG | `srt-ingest` |
+| `srtsrc` (listener) | **a listening socket with no caller does not hang the server** — see below | `srt-listener` |
+| SRT recovery | the sender disappearing and returning; picture byte-identical after | `srt-recovery` |
+| `srtsrc` `stats` | RTT, bandwidth and loss into `INFO` and OSC | `GST INFO` |
+| `cccombiner` / `capssetter` | CEA-708 `cc_data` carried through the channel and re-emitted | `captions`, `caption-rate` |
+| `fallbacksrc` | takes over from a dead primary — **with a caveat, below** | `fallback` |
+| `cudadownload`, `nvh264enc` | the channel's texture handed to an encoder as CUDA memory | `consumer-gpu` |
+| third-party plugins | a `<plugin-path>` directory is loaded and its elements are usable | `GST LIST` |
+
+### Two behaviours worth knowing before you rely on them
+
+**A listening `srtsrc` used to take the whole server down.** `PLAY … "srtsrc
+uri=srt://:9000?mode=listener …"` — listen now, let the encoder connect later, which is the
+ordinary way to run SRT ingest — blocked inside the pipeline's state change and never
+returned. The server stayed alive, kept accepting connections, and answered no command again.
+Fixed 2026-08-25: the state change runs on a worker, `PLAY` returns in about 3 s, and the
+layer goes live when the caller arrives. If you would rather it gave up instead of waiting,
+pass `wait-for-connection=false`.
+
+**`fallbacksrc` stops serving the fallback file once its primary errors.** It switches over
+correctly and shows the file — then, when the dead primary's socket errors (about four seconds
+for SRT), it keeps producing frames that carry **no picture**. The channel goes black while
+`received` climbs. `restart-timeout`, `retry-timeout` and `restart-on-eos` do not change it.
+This is the element's own behaviour and nothing in CasparCG is involved: the frames arrive and
+are built correctly. If you need a slate that lasts, drive it from a source that does not
+depend on the primary recovering.
 
 ---
 

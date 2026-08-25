@@ -260,10 +260,49 @@ consumer arm worse in every round" survives that; a fixed number decides on mach
 Not covered: several consumers (the module allows one per channel), 4K, or a machine already
 under other load.
 
+## What is verified, and by what
+
+Every row is exercised by `CasparCG-TestRunner`'s `gstreamer` battery on **both** mixers.
+
+| element / feature | verified |
+| :--- | :--- |
+| `d3d11h264dec` | NV12 straight to the mixer, byte-identical to the FFmpeg producer |
+| `d3d11h265dec` | `P010_10LE` GPU-direct, levels within 1 LSB of the 8-bit reference |
+| `d3d11av1dec` | AV1 over the same bridge, no code of its own |
+| `d3d11upload` / `d3d11convert` | software frames uploaded and converted on the GPU (`GPU BGRA`) |
+| `srtsrc` caller / listener | real ingest; and a listener with no caller does not hang the server |
+| SRT recovery | sender lost and returned, picture byte-identical after |
+| `srtsrc` `stats` | RTT, bandwidth and loss into `INFO` and OSC |
+| `cccombiner` / `capssetter` | CEA-708 carried through the channel, and repeats suppressed |
+| `cudadownload` / `nvh264enc` | the channel's texture handed to an encoder as CUDA memory |
+| third-party plugins | a `<plugin-path>` directory loaded and its elements usable |
+
+**`fallbacksrc` is the one with a caveat.** It takes over from a dead primary correctly and
+shows the fallback file — then, once the dead primary's socket errors, it keeps producing
+frames that carry no picture. `restart-timeout`, `retry-timeout` and `restart-on-eos` do not
+change it. Nothing in CasparCG is involved: the frames arrive and are built correctly. Its
+battery case reports rather than gates for that reason.
+
 ## What it reports
 
 `INFO 1-10` carries `received`, `dropped`, `starved`, `queue`, `queue-peak`, `gpu-frames`,
-`restarts`, `underruns`, `audio`, `eos`, `position` and `length`.
+`restarts`, `underruns`, `audio`, `eos`, `position`, `length` and `format` — the last being
+what the sink actually negotiated, which is the difference between "the pipeline names
+`d3d11h264dec`" and "the mixer got NV12".
+
+`INFO 1` carries the **consumer's** counters: `sent`, `dropped`, `captions`,
+`egress-frames`, `captions-queued`, `captions-dropped`, `cc-triplets-in`,
+`cc-triplets-out` and `cc-suppressed`.
+
+**`egress-frames` and not `gpu-frames`**, and the name is load-bearing. The producer publishes
+`gstreamer/gpu-frames` for frames its decoder put on the GPU, one `INFO` response carries both
+halves of the channel, and while they shared a leaf name anything reading by tag got whichever
+came first. A host consumer's constant 0 hid a producer running 199/199 and was diagnosed as a
+GPU bridge defect that did not exist.
+
+**`received` counting up while the picture is black** means samples are arriving that cannot be
+made into frames. The producer now logs that once, naming the negotiated format, because the
+silent version of it has cost two investigations here.
 
 The diag window carries the same story for someone watching rather than polling. The
 **producer** plots `frame-time`, `tick-time` and `buffer` — the queue depth normalised to its
@@ -289,11 +328,27 @@ A source's CEA-608/708 captions reach the mixer, survive compositing and are re-
 consumer. `INFO` reports `captions-in` on the producer and `captions` on the consumer, and the
 pair is the point: the picture is identical whether captions travel or vanish.
 
-**This is rate-naive, and that is a real limitation rather than a rough edge.** CEA-708 carries
-a fixed cc_data budget per frame that depends on the frame rate, so a source and a channel at
-different rates need the caption stream *re-paced* rather than copied. This carries whatever
-arrived on the frame, which is right **only when the two rates match**. The end-to-end
-measurement behind it was 50 fps into a 50 fps channel and could not have caught it.
+**CEA-708 is re-paced, not copied.** A repeated frame must not re-issue its captions: the
+channel repeats its last picture whenever the producer starves, and CEA-708 is a *command*
+stream, so a doubled `RollUp` or `SetPenLocation` changes what the viewer sees. `cc_data` goes
+through a queue keyed on the frame's identity, and comes out at the per-frame budget the
+standard defines — 12 triplets at 50p, 24 at 25p, 25 at 24p, taken from FFmpeg's
+`libavutil/ccfifo.c` rather than derived here.
+
+Measured with a source delayed to ~33 fps in a 50p channel: **177 repeated frames, 2100 of
+5376 arriving triplets withheld as duplicates**, where every one of them used to go out.
+`INFO 1` reports `cc-triplets-in`, `cc-triplets-out` and `cc-suppressed`; those three are the
+only counters that can tell a de-duplicating channel from a copying one, because both attach
+exactly one caption meta per frame.
+
+That fix needed a second one: **`core::mixer` was copying the frame's metadata every tick**, so
+the identity the queue keys on was new on every frame and 177 repeats produced zero
+suppressions. `const_frame::metadata_ptr()` shares the stored pointer instead — one allocation
+and one copy less per frame, as well.
+
+**608 and 708-in-CDP are still passed through unpaced**, and that is stated rather than left to
+be discovered: 608 is two bytes per field per frame and a CDP carries its own framing and
+sequence counter, so re-packing either means rewriting a header rather than moving triplets.
 
 **And it is interim.** Upstream `CasparCG/server#1637` implements a fuller design -- an
 extensible side-data system named after FFmpeg's `AVFrameSideDataType`, a `side_data_mixer`,
