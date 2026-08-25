@@ -492,6 +492,32 @@ over them.
 
 ---
 
+## 10a1. Recording to a file
+
+The consumer writes files as readily as it sends streams — same pipeline shape, a muxer and a
+`filesink` instead of a network sink:
+
+```
+ADD 1 GSTREAMER "videoconvert ! x264enc ! h264parse ! mp4mux ! filesink location=out.mp4"
+ADD 1 GSTREAMER "nvh264enc ! h264parse ! mp4mux ! filesink location=out.mp4" GPU
+```
+
+The `GPU` form is the interesting one: the channel's composited texture goes to NVENC with no
+readback, straight into the muxer. Measured at 1080p50: **55 KiB of h264, 304 frames over
+6.08 s, finalised and decodable**; the host `x264enc` arm records the same length at 117 KiB.
+
+**The file is finalised because the consumer waits for end-of-stream on the way out.** `mp4mux`
+writes its `moov` atom only when it sees EOS, so a consumer that tore down without waiting
+would leave a container with the whole payload and no index — which plays in some tools and
+not others. That drain is worth up to five seconds on `REMOVE`, and it is why removing a
+recording consumer is not instant.
+
+> Do not read the file the instant `REMOVE` returns. The drain runs on a background thread, so
+> for a second or two the file on disk is genuinely unfinalised — and looks exactly like a
+> broken recording rather than one that is about to be fine.
+
+---
+
 ## 10a. Network streams are GPU-accelerated too — in and out, on both modules
 
 A reasonable thing to assume is that GPU acceleration is for files and that a live stream
@@ -539,6 +565,7 @@ and more useful thing.
 | element / feature | what is verified | how |
 | :--- | :--- | :--- |
 | `appsink` / `appsrc` | the producer and consumer negotiate and carry frames | every case |
+| `mp4mux` / `filesink` | a recording that is **finalised and decodable**, not just bytes on disk | `consumer-file` |
 | `videotestsrc` | synthetic sources reach the mixer on the **host** path | `synthetic` |
 | `d3d11h264dec` | H.264 hardware decode, NV12 straight to the mixer, byte-identical to the FFmpeg producer | `parity`, `nv12-host`, `gpu` |
 | `d3d11h265dec` | 10-bit HEVC as `P010_10LE`, GPU-direct, levels within 1 LSB of the 8-bit reference | `p010` |
