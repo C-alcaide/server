@@ -254,6 +254,44 @@ AVBufferRef* make_vulkan_hwdevice_from_mixer(void* vk_device_handle)
         hwctx->nb_qf = 3;
     }
 
+    // AND THE VIDEO DECODE FAMILY, for `h264_vulkan`/`hevc_vulkan` DECODING through
+    // `VK_KHR_video_decode`. Everything said about the encode entry applies unchanged: the
+    // codec asks for VK_QUEUE_VIDEO_DECODE_BIT_KHR plus its own `video_caps`, `ff_vk_qf_find`
+    // walks this list for the first entry carrying both, and the COMPUTE family is not a
+    // substitute -- handing it over is precisely what made VP9 fault rather than decline.
+    //
+    // Placed AFTER the encode entry rather than before it so an index never moves: `qf[2]` is
+    // the encode family or nothing, and a reader comparing this against a log does not have to
+    // work out which slot a device happened to fill.
+    //
+    // The distinctness guard is the same one, for the same VUID
+    // (VUID-VkImageCreateInfo-sharingMode-01420): these indices become an image's
+    // `pQueueFamilyIndices` when it is created CONCURRENT, and that list must be unique. On
+    // this box the four families are distinct -- graphics 0, compute 2, decode 3, encode 4 --
+    // so the guard is for hardware that is not this box.
+    const bool decode_qf_distinct = info.video_decode_qf_present &&
+                                    info.video_decode_qf != info.compute_qf &&
+                                    info.video_decode_qf != info.graphics_qf &&
+                                    (!info.encode_qf_present || info.video_decode_qf != info.encode_qf);
+    if (info.video_decode_qf_present && !decode_qf_distinct) {
+        CASPAR_LOG(info) << L"[vk_hwdevice] this GPU's video-decode queue family ("
+                         << info.video_decode_qf
+                         << L") is shared with another family already declared, so declaring it "
+                            L"would duplicate an index in every concurrent image; the Vulkan "
+                            L"Video decoders are unavailable on this device";
+    }
+
+    if (decode_qf_distinct) {
+        const auto slot         = static_cast<unsigned>(hwctx->nb_qf);
+        hwctx->qf[slot].idx     = static_cast<int>(info.video_decode_qf);
+        hwctx->qf[slot].num     = 1;
+        hwctx->qf[slot].flags   = static_cast<VkQueueFlagBits>(VK_QUEUE_VIDEO_DECODE_BIT_KHR);
+        hwctx->qf[slot].video_caps =
+            static_cast<VkVideoCodecOperationFlagBitsKHR>(VK_VIDEO_CODEC_OPERATION_DECODE_H264_BIT_KHR |
+                                                          VK_VIDEO_CODEC_OPERATION_DECODE_H265_BIT_KHR);
+        hwctx->nb_qf = static_cast<int>(slot) + 1;
+    }
+
     // DECLARE THE ENABLED FEATURES. `device_features` is documented as "the set of features
     // that present and enabled during device creation" -- an application declaration, exactly
     // like `enabled_dev_extensions`, and not something the sharing library can query.

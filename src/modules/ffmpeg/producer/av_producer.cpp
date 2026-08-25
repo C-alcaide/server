@@ -50,6 +50,7 @@
 // translation unit needs neither the Vulkan headers nor its dispatch loader.
 #include <accelerator/vulkan/util/d3d11_import_bridge.h>
 #include <accelerator/vulkan/util/av_vulkan_import.h>
+#include <accelerator/vulkan/util/shared_device_info.h>
 #endif
 #endif
 
@@ -1339,8 +1340,11 @@ describe_av_vulkan_planes(const AVFrame* av, common::bit_depth& depth_out, bool&
         return out;
 
     const int nb_planes = av_pix_fmt_count_planes(fc->sw_format);
-    if (nb_planes != 3 && nb_planes != 4)
-        return out; // only planar YCbCr(A) reaches the mixer's ycbcr shapes
+    // 2 is nv12/p010/p016 -- semi-planar, which is what a VK_KHR_video_decode decoder hands
+    // over and what the mixer's `nv12` pixel format was already written for (it serves the
+    // D3D11VA route). 3 and 4 are the planar YCbCr(A) the compute decoders produce.
+    if (nb_planes != 2 && nb_planes != 3 && nb_planes != 4)
+        return out;
 
     // Each plane's VkFormat is R8_UNORM or R16_UNORM (hwcontext_vulkan's format table), so
     // a 10-bit sample is a code 0..1023 sitting in the LOW bits of a 16-bit word. That is
@@ -1348,6 +1352,22 @@ describe_av_vulkan_planes(const AVFrame* av, common::bit_depth& depth_out, bool&
     // inherits the precision loss recorded above for yuv420p10le -- chroma is upsampled by
     // the texture unit before the multiply, so rounding is amplified 64-fold. The decoder's
     // output format is not ours to choose, and the alternative is a CPU round trip.
+    // MSB-ALIGNED FIRST, and this is not a detail. `comp[0].shift` is how far the samples sit
+    // from the bottom of their word: 0 for yuv420p10le, whose ten bits are LSB-aligned in a
+    // 16-bit word, and **6 for p010**, whose ten bits are in the HIGH bits
+    // (`pixdesc.c`: `{ 0, 2, 0, 6, 10 }`).
+    //
+    // Both report `depth == 10`, so keying on depth alone would give p010 `bit10` and its 64x
+    // precision factor -- applied to data that is already normalised across the full 16-bit
+    // range. The picture would come back roughly 64 times too bright, and the format that got
+    // it would be the hardware one, so it would read as "the Vulkan Video decoder is broken".
+    //
+    // A shifted sample IS a 16-bit sample as far as the mixer is concerned: factor 1, and the
+    // YCbCr decode's depth-derived scale then lands neutral chroma exactly (32768/65535 *
+    // 65535/256 = 128).
+    if (pd->comp[0].shift != 0) {
+        depth_out = common::bit_depth::bit16;
+    } else
     switch (pd->comp[0].depth) {
         case 8:
             depth_out = common::bit_depth::bit8;
@@ -1365,6 +1385,7 @@ describe_av_vulkan_planes(const AVFrame* av, common::bit_depth& depth_out, bool&
             return out;
     }
     alpha_out = nb_planes == 4;
+    const bool semi_planar = nb_planes == 2;
 
     for (int i = 0; i < nb_planes; ++i) {
         accelerator::vulkan::av_plane_source ps;
@@ -1376,7 +1397,11 @@ describe_av_vulkan_planes(const AVFrame* av, common::bit_depth& depth_out, bool&
         const bool sub = i == 1 || i == 2;
         ps.width      = sub ? AV_CEIL_RSHIFT(av->width, pd->log2_chroma_w) : av->width;
         ps.height     = sub ? AV_CEIL_RSHIFT(av->height, pd->log2_chroma_h) : av->height;
-        ps.components = 1;
+        // TWO components on the chroma plane of a semi-planar format: Cb and Cr are
+        // interleaved in it, so the texture is R8G8/R16G16 rather than R8/R16. The mixer's
+        // texture pool indexes by this, so getting it wrong is a wrong-sized texture rather
+        // than a wrong colour.
+        ps.components = (semi_planar && i == 1) ? 2 : 1;
         out.push_back(ps);
     }
 
@@ -1622,6 +1647,16 @@ class Decoder
     /// the OpenGL mixer and on any build without Vulkan. Threaded like decode_adapter_
     /// rather than fetched from a global, for the same reason.
     void* vk_mixer_device_ = nullptr;
+    /// Which Vulkan decoder families this producer may claim, from configuration.
+    ///
+    /// TWO SWITCHES, NOT ONE, and the reason is mechanism rather than taste. The compute
+    /// decoders (prores, prores_raw, ffv1, dpx) need a COMPUTE queue and nothing else, and
+    /// they are measured working. The `VK_KHR_video_decode` codecs need a video-decode queue
+    /// AND a driver willing to accept the profile, and the failure mode when either is absent
+    /// is a FAULT inside FFmpeg rather than a decline -- so one switch would mean a fault in
+    /// the new path taking the working one down with it.
+    bool vk_compute_decode_ = false;
+    bool vk_video_decode_   = false;
 
     Decoder() = default;
 
@@ -1629,10 +1664,16 @@ class Decoder
     /// or -1 for the default. It has to match the mixer's GPU or the decoded
     /// surfaces cannot be imported by the GPU-direct bridge -- see
     /// resolve_decode_adapter.
-    explicit Decoder(AVStream* stream, int decode_adapter = -1, void* vk_mixer_device = nullptr)
+    explicit Decoder(AVStream* stream,
+                     int        decode_adapter    = -1,
+                     void*      vk_mixer_device   = nullptr,
+                     bool       vk_compute_decode = false,
+                     bool       vk_video_decode   = false)
         : st(stream)
         , decode_adapter_(decode_adapter)
         , vk_mixer_device_(vk_mixer_device)
+        , vk_compute_decode_(vk_compute_decode)
+        , vk_video_decode_(vk_video_decode)
     {
         const auto codec = get_decoder(stream->codecpar->codec_id, stream, decode_adapter);
 
@@ -1729,7 +1770,32 @@ class Decoder
                 AV_CODEC_ID_DPX,
             };
 
-            if (vk_mixer_device_ && vulkan_compute_decoders.count(codec->id) > 0) {
+            // THE VIDEO-QUEUE CODECS, the second group the paragraph above separates out.
+            // H.264 and H.265 only: AV1 encode does not exist on Ampere and VP9 is the codec
+            // that FAULTED, so neither goes in without a fixture and a measurement.
+            static const std::set<AVCodecID> vulkan_video_decoders = {
+                AV_CODEC_ID_H264,
+                AV_CODEC_ID_HEVC,
+            };
+
+            // A queue must EXIST, not merely be asked for. `<vulkan-video-decode>` is an
+            // operator's intent; whether this GPU carries a VK_QUEUE_VIDEO_DECODE_BIT_KHR
+            // family is the device's answer, and `make_vulkan_hwdevice_from_mixer` declines to
+            // declare a family it does not have. Checking here as well keeps the refusal on the
+            // side that can explain it, rather than as a decoder that mysteriously did not
+            // engage.
+            const bool video_queue_available = [&] {
+                if (!vk_mixer_device_ || !vk_video_decode_)
+                    return false;
+                const auto info = accelerator::vulkan::describe_shared_device(vk_mixer_device_);
+                return info.valid && info.video_decode_qf_present;
+            }();
+
+            const bool want_compute_family =
+                vk_mixer_device_ && vk_compute_decode_ && vulkan_compute_decoders.count(codec->id) > 0;
+            const bool want_video_family = video_queue_available && vulkan_video_decoders.count(codec->id) > 0;
+
+            if (want_compute_family || want_video_family) {
                 for (int i = 0;; ++i) {
                     const auto* cfg = avcodec_get_hw_config(codec, i);
                     if (!cfg)
@@ -1740,6 +1806,12 @@ class Decoder
                         want_vulkan = true;
                         break;
                     }
+                }
+                if (want_vulkan && want_video_family) {
+                    CASPAR_LOG(info) << L"[av_producer] "
+                                     << u16(avcodec_get_name(codec->id))
+                                     << L" will decode through VK_KHR_video_decode on the mixer's "
+                                        L"own device";
                 }
             }
 
@@ -2417,7 +2489,9 @@ struct Filter
            AVMediaType                    media_type,
            const core::video_format_desc& format_desc,
            int                            decode_adapter    = -1,
-           void*                          vk_mixer_device   = nullptr)
+           void*                          vk_mixer_device   = nullptr,
+           bool                           vk_compute_decode = false,
+           bool                           vk_video_decode   = false)
     {
         // Whether bwdif ends up in the graph. The output format restriction below
         // needs to know, because bwdif's chroma handling is what makes interlaced
@@ -2624,7 +2698,11 @@ struct Filter
                     it = streams
                              .emplace(std::piecewise_construct,
                                       std::forward_as_tuple(index),
-                                      std::forward_as_tuple(input->streams[index], decode_adapter, vk_mixer_device))
+                                      std::forward_as_tuple(input->streams[index],
+                                                            decode_adapter,
+                                                            vk_mixer_device,
+                                                            vk_compute_decode,
+                                                            vk_video_decode))
                              .first;
                 }
 
@@ -3062,6 +3140,8 @@ struct AVProducer::Impl
     const int decode_adapter_ = -1;
     /// The mixer's Vulkan device when the mixer is Vulkan, else null. Used only to let an
     /// FFmpeg Vulkan compute decoder allocate on it; see vulkan_hwdevice.h.
+    const bool                                                   vk_compute_decode_ = false;
+    const bool                                                   vk_video_decode_   = false;
     void* const                                                  vk_mixer_device_ = nullptr;
     std::unique_ptr<accelerator::vulkan::av_vulkan_importer>     vk_importer_;
 
@@ -3341,12 +3421,20 @@ struct AVProducer::Impl
         // and a Vulkan decode plus a readback was measured standalone at 78% BELOW software
         // decode throughput -- the worst of the three arms. Enabling one knob without the
         // other would make the server slower and look like the decoder's fault.
-        , vk_mixer_device_(
-              env::properties().get(L"configuration.ffmpeg.producer.vulkan-decode", false) &&
-                      gpu_direct_decode_requested() && frame_factory &&
-                      frame_factory->gpu_device_backend() == core::gpu_backend::vulkan
-                  ? frame_factory->gpu_device_handle()
-                  : nullptr)
+        , vk_compute_decode_(env::properties().get(L"configuration.ffmpeg.producer.vulkan-decode", false))
+        // A SECOND SWITCH, and `vulkan-decode` deliberately does not imply it. The compute
+        // decoders need a compute queue and are measured working; the VK_KHR_video_decode
+        // codecs need a video-decode queue and a profile the driver accepts, and when either is
+        // missing FFmpeg FAULTS rather than declining. Folding them into one element would let
+        // a fault in the new path switch off the path that works.
+        , vk_video_decode_(env::properties().get(L"configuration.ffmpeg.producer.vulkan-video-decode", false))
+        // EITHER switch takes the handle: it is the same shared device and the same importer,
+        // and which codecs may claim it is the Decoder's decision rather than this one's.
+        , vk_mixer_device_((vk_compute_decode_ || vk_video_decode_) && gpu_direct_decode_requested() &&
+                                   frame_factory &&
+                                   frame_factory->gpu_device_backend() == core::gpu_backend::vulkan
+                               ? frame_factory->gpu_device_handle()
+                               : nullptr)
         , start_(start ? av_rescale_q(*start, format_tb_, TIME_BASE_Q) : AV_NOPTS_VALUE)
         , duration_(duration ? av_rescale_q(*duration, format_tb_, TIME_BASE_Q) : AV_NOPTS_VALUE)
         , loop_(loop)
@@ -4091,11 +4179,18 @@ struct AVProducer::Impl
                                            L"device and copied device-local (no CPU frame, no readback).";
                                 }
 
-                                auto desc = core::pixel_format_desc(has_alpha ? core::pixel_format::ycbcra
-                                                                              : core::pixel_format::ycbcr);
+                                // `nv12` for two planes, which is the same format and the same
+                                // shader case the D3D11VA branch below publishes -- semi-planar
+                                // is semi-planar however it was decoded. `ycbcr`/`ycbcra`
+                                // otherwise, for the planar compute decoders.
+                                const bool semi_planar = planes.size() == 2;
+                                auto       desc        = core::pixel_format_desc(
+                                    semi_planar ? core::pixel_format::nv12
+                                                     : (has_alpha ? core::pixel_format::ycbcra
+                                                                  : core::pixel_format::ycbcr));
                                 for (const auto& pl : planes)
-                                    desc.planes.push_back(
-                                        core::pixel_format_desc::plane(pl.width, pl.height, 1, plane_depth));
+                                    desc.planes.push_back(core::pixel_format_desc::plane(
+                                        pl.width, pl.height, pl.components, plane_depth));
                                 desc.color_space    = get_color_space(frame.video, stream_color_space_);
                                 desc.color_transfer = note_colour(frame.video);
                                 // WITHOUT THIS, ALPHA IS WRONG. `make_frame` sets this for
@@ -5486,7 +5581,7 @@ struct AVProducer::Impl
 
         video_filter_ =
             Filter(vfilter_, input_, decoders_, start_time, AVMEDIA_TYPE_VIDEO, format_desc_, decode_adapter_,
-                   vk_mixer_device_);
+                   vk_mixer_device_, vk_compute_decode_, vk_video_decode_);
         audio_filter_ = Filter(afilter_, input_, decoders_, start_time, AVMEDIA_TYPE_AUDIO, format_desc_);
 
         sources_.clear();
