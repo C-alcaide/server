@@ -60,12 +60,39 @@ struct cuda_vk_uploader::impl
     std::array<slot, kSlots> slots_{};
     int                      next_    = 0;
     CUcontext                context_ = nullptr;
+    /// Our own stream, so the wait below is a wait for OUR copy rather than for the device.
+    /// See `copy_to_device`: on the default stream this synchronised against every other CUDA
+    /// user in the process, and there are several.
+    cudaStream_t             stream_  = nullptr;
+    /// `cudaEventBlockingSync`, and that flag is the entire reason this exists rather than a
+    /// plain `cudaStreamSynchronize`. CUDA's default wait SPINS: the thread burns a core
+    /// polling until the copy lands. At 50 fps that is a per-frame busy-wait on the consumer
+    /// thread, paid to save a readback -- which is how a zero-copy path ends up costing more
+    /// CPU than the copy it removes. A blocking event deschedules instead.
+    cudaEvent_t              done_    = nullptr;
+    /// The mixer's timeline semaphore, imported once. Lets the COPY wait for the render on the
+    /// GPU instead of this thread waiting for it on the CPU -- see `copy_to_device`.
+    cudaExternalSemaphore_t  sem_        = nullptr;
+    void*                    sem_handle_ = nullptr;
     std::string              last_error_;
 
     ~impl() { release(); }
 
     void release()
     {
+        if (sem_) {
+            cudaDestroyExternalSemaphore(sem_);
+            sem_        = nullptr;
+            sem_handle_ = nullptr;
+        }
+        if (done_) {
+            cudaEventDestroy(done_);
+            done_ = nullptr;
+        }
+        if (stream_) {
+            cudaStreamDestroy(stream_);
+            stream_ = nullptr;
+        }
         for (auto& s : slots_) {
             if (s.mipmap)
                 cudaFreeMipmappedArray(s.mipmap);
@@ -234,10 +261,6 @@ bool cuda_vk_uploader::copy_to_device(const std::shared_ptr<core::texture>& tex,
         return false;
     }
 
-    // The mixer may still be rendering into this attachment; the consumer runs on its
-    // own thread. This is what orders the two.
-    tex->ensure_render_complete();
-
     impl::scoped_context ctx(impl_->context_);
 
     auto* s = impl_->find_or_import(handle, size, w, h);
@@ -247,17 +270,84 @@ bool cuda_vk_uploader::copy_to_device(const std::shared_ptr<core::texture>& tex,
     // The attachment is RGBA8, so a texel is four bytes in R,G,B,A order and this is a
     // straight byte move -- which is why the frames context declares AV_PIX_FMT_RGB0
     // and no colour conversion is needed, exactly as on the OpenGL path.
-    auto err = cudaMemcpy2DFromArray(
+    // Created here rather than in the constructor because it must belong to the context
+    // pushed above -- a stream outlives the call but not the context it was made in.
+    if (!impl_->stream_) {
+        auto serr = cudaStreamCreateWithFlags(&impl_->stream_, cudaStreamNonBlocking);
+        if (serr != cudaSuccess) {
+            impl_->last_error_ = std::string("cudaStreamCreateWithFlags: ") + cudaGetErrorString(serr);
+            return false;
+        }
+    }
+    if (!impl_->done_) {
+        auto eerr = cudaEventCreateWithFlags(&impl_->done_,
+                                             cudaEventBlockingSync | cudaEventDisableTiming);
+        if (eerr != cudaSuccess) {
+            impl_->last_error_ = std::string("cudaEventCreateWithFlags: ") + cudaGetErrorString(eerr);
+            return false;
+        }
+    }
+
+    // ── Ordering against the mixer, on the GPU rather than on this thread ────────────────
+    // The mixer may still be rendering into this attachment and the consumer runs on its own
+    // thread, so the two must be ordered. `ensure_render_complete()` does it with a CPU fence
+    // wait, which blocks this thread for as long as the mixer needs -- every frame, at frame
+    // rate. Importing the mixer's timeline semaphore lets the copy wait on the GPU instead, so
+    // the CPU only ever waits for the copy itself.
+    //
+    // Falls back to the CPU wait when the texture exposes no semaphore, which is the case for
+    // any wrapper built by the bare constructor. Correct either way; the semaphore is faster.
+    bool ordered = false;
+    if (auto* sem_handle = tex->render_semaphore_handle()) {
+        if (impl_->sem_ && impl_->sem_handle_ != sem_handle) {
+            cudaDestroyExternalSemaphore(impl_->sem_);
+            impl_->sem_        = nullptr;
+            impl_->sem_handle_ = nullptr;
+        }
+        if (!impl_->sem_) {
+            cudaExternalSemaphoreHandleDesc sd{};
+            sd.type                = cudaExternalSemaphoreHandleTypeTimelineSemaphoreWin32;
+            sd.handle.win32.handle = sem_handle;
+            // NOT `cudaExternalSemaphoreHandleTypeOpaqueWin32`: that is a BINARY semaphore, and
+            // importing a timeline one under it makes every wait return immediately -- an
+            // ordering bug with no error and no symptom until the picture tears.
+            if (cudaImportExternalSemaphore(&impl_->sem_, &sd) == cudaSuccess)
+                impl_->sem_handle_ = sem_handle;
+            else
+                impl_->sem_ = nullptr;
+        }
+        if (impl_->sem_) {
+            cudaExternalSemaphoreWaitParams wp{};
+            wp.params.fence.value = tex->render_semaphore_value();
+            if (cudaWaitExternalSemaphoresAsync(&impl_->sem_, &wp, 1, impl_->stream_) == cudaSuccess)
+                ordered = true;
+        }
+    }
+    if (!ordered)
+        tex->ensure_render_complete();
+
+    auto err = cudaMemcpy2DFromArrayAsync(
         dst, dst_pitch, s->array, 0, 0, static_cast<std::size_t>(w) * 4, static_cast<std::size_t>(h),
-        cudaMemcpyDeviceToDevice);
+        cudaMemcpyDeviceToDevice, impl_->stream_);
     if (err != cudaSuccess) {
-        impl_->last_error_ = std::string("cudaMemcpy2DFromArray: ") + cudaGetErrorString(err);
+        impl_->last_error_ = std::string("cudaMemcpy2DFromArrayAsync: ") + cudaGetErrorString(err);
         return false;
     }
 
-    err = cudaDeviceSynchronize();
+    // **Our stream, not the device.** This was `cudaDeviceSynchronize()`, which blocks until
+    // EVERY context on the device is idle -- and this process runs several CUDA users at once:
+    // the FFmpeg consumer, `cuda_prores`, and, on the GStreamer egress path, the NVENC encoder
+    // consuming the very buffer being filled. So each frame waited on unrelated work, and the
+    // more the GPU was doing the longer it waited.
+    //
+    // Measured on the GStreamer CUDA egress at 1080p50: 2.09 cores device-wide against the host
+    // readback's 1.96, i.e. the "zero-copy" route cost MORE CPU than the readback it replaces.
+    // Correctness never needed the wider wait -- the copy has one producer and one consumer.
+    err = cudaEventRecord(impl_->done_, impl_->stream_);
+    if (err == cudaSuccess)
+        err = cudaEventSynchronize(impl_->done_);
     if (err != cudaSuccess) {
-        impl_->last_error_ = std::string("cudaDeviceSynchronize: ") + cudaGetErrorString(err);
+        impl_->last_error_ = std::string("waiting for the copy: ") + cudaGetErrorString(err);
         return false;
     }
 
