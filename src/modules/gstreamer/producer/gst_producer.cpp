@@ -916,6 +916,10 @@ struct gst_producer : public core::frame_producer
             try {
                 frame_timer_.restart();
 
+                // Here, not in `state()`: this can block on an element's own lock, and this
+                // thread is allowed to block. Internally rate-limited to twice a second.
+                poll_element_stats();
+
                 note_negotiated_format(sample);
 
                 core::draw_frame frame;
@@ -1201,10 +1205,18 @@ struct gst_producer : public core::frame_producer
             std::lock_guard<std::mutex> lock(format_mutex_);
             state["gstreamer/format"] = negotiated_format_.empty() ? std::string("none") : negotiated_format_;
         }
-        // Properties are pulled here rather than on the video thread: they are a read of live
-        // element state, and doing it per frame would cost a recursive bin walk fifty times a
-        // second to publish numbers that update far more slowly than that.
-        const_cast<gst_producer*>(this)->poll_element_stats();
+        // **Read the cache; do not pull.** `poll_element_stats` runs on this producer's own
+        // video thread, and calling it from here was a channel stall waiting to happen:
+        // `g_object_get(element, "stats")` takes the element's lock, `srtsrc` holds that lock
+        // across a reconnect, and `state()` is on the path the channel publishes from. So a
+        // network source losing its peer stopped the CHANNEL, not just the layer.
+        //
+        // Measured 2026-08-25 with `--only p010,srt-listener,consumer-gpu,fallback`: at the
+        // moment the SRT primary timed out and began reconnecting, an IMAGE consumer
+        // initialised and never completed -- the channel had stopped delivering frames
+        // altogether, while the picture on the layer was fine.
+        //
+        // A `state()` call must not block on anything a peer can hold.
         {
             std::lock_guard<std::mutex> lock(element_mutex_);
             for (const auto& [key, value] : element_state_)

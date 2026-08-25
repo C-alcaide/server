@@ -50,6 +50,9 @@
 #endif
 
 #include <gst/app/gstappsrc.h>
+
+#include <thread>
+#include <utility>
 #include <gst/video/video.h>
 #include <gst/gst.h>
 
@@ -99,6 +102,9 @@ std::wstring describe_message(GstMessage* message)
 struct gst_consumer : public core::frame_consumer
 {
     const std::wstring description_;
+    /// Which mixer this channel runs. The CUDA egress needs an exportable texture and only
+    /// the Vulkan mixer has one.
+    bool               use_vulkan_ = false;
     int                channel_index_ = -1;
 
     core::video_format_desc format_desc_;
@@ -145,30 +151,74 @@ struct gst_consumer : public core::frame_consumer
 
     ~gst_consumer()
     {
-        std::lock_guard<std::mutex> lock(mutex_);
+        GstElement* pipeline  = nullptr;
+        GstElement* video_src = nullptr;
+        GstElement* audio_src = nullptr;
+#ifdef CASPAR_GST_CUDA_EGRESS
+        std::unique_ptr<gst_cuda_egress> egress;
+#endif
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            std::swap(pipeline, pipeline_);
+            std::swap(video_src, video_src_);
+            std::swap(audio_src, audio_src_);
+#ifdef CASPAR_GST_CUDA_EGRESS
+            egress = std::move(egress_);
+#endif
+        }
 
-        if (pipeline_ != nullptr) {
-            // End of stream first, and then wait for it to come back round the bus. A muxer
-            // writing a file finalises on EOS; going straight to NULL leaves a container with
-            // no index, which plays in some tools and not others — the worst kind of broken.
-            if (video_src_ != nullptr)
-                gst_app_src_end_of_stream(GST_APP_SRC(video_src_));
-            if (audio_src_ != nullptr)
-                gst_app_src_end_of_stream(GST_APP_SRC(audio_src_));
+        if (pipeline == nullptr) {
+            CASPAR_LOG(info) << print() << L" Uninitialized.";
+            return;
+        }
 
-            if (auto* bus = gst_element_get_bus(pipeline_)) {
+        // ── The drain runs on a JANITOR, not here ───────────────────────────────────────
+        // End of stream first, and then wait for it to come back round the bus: a muxer
+        // writing a file finalises on EOS, and going straight to NULL leaves a container with
+        // no index, which plays in some tools and not others -- the worst kind of broken. That
+        // wait is right and it is kept.
+        //
+        // **The thread it ran on was the problem.** A removed consumer is destroyed on the
+        // channel's output thread, so this wait stopped the CHANNEL -- every consumer starved,
+        // IMAGE captures initialising and never completing -- for as long as five seconds,
+        // every time a GStreamer consumer went away without producing EOS promptly.
+        //
+        // Measured 2026-08-25, and it is the single cause behind a whole family of "case A
+        // passes alone and fails after case B" results that cost most of a session: B's
+        // consumer teardown lands inside A.
+        //
+        // The egress travels WITH the pipeline and is destroyed after it. The pipeline still
+        // holds CUDA buffers this object allocated, so freeing the allocator first would pull
+        // memory out from under buffers that are still referenced.
+        std::thread([pipeline, video_src, audio_src,
+#ifdef CASPAR_GST_CUDA_EGRESS
+                     egress = std::move(egress),
+#endif
+                     name = print()]() mutable {
+            if (video_src != nullptr)
+                gst_app_src_end_of_stream(GST_APP_SRC(video_src));
+            if (audio_src != nullptr)
+                gst_app_src_end_of_stream(GST_APP_SRC(audio_src));
+
+            if (auto* bus = gst_element_get_bus(pipeline)) {
                 auto* message = gst_bus_timed_pop_filtered(
                     bus, 5 * GST_SECOND, static_cast<GstMessageType>(GST_MESSAGE_EOS | GST_MESSAGE_ERROR));
                 if (message == nullptr)
-                    CASPAR_LOG(warning) << print() << L" no end-of-stream within 5 s; the output may be unfinished.";
+                    CASPAR_LOG(warning) << name << L" no end-of-stream within 5 s; the output may be unfinished.";
                 else
                     gst_message_unref(message);
                 gst_object_unref(bus);
             }
-        }
 
-        destroy_pipeline();
-        CASPAR_LOG(info) << print() << L" Uninitialized.";
+            if (video_src != nullptr)
+                gst_object_unref(video_src);
+            if (audio_src != nullptr)
+                gst_object_unref(audio_src);
+            gst_element_set_state(pipeline, GST_STATE_NULL);
+            gst_object_unref(pipeline);
+
+            CASPAR_LOG(info) << name << L" Uninitialized.";
+        }).detach();
     }
 
     void initialize(const core::video_format_desc& format_desc,
@@ -186,6 +236,7 @@ struct gst_consumer : public core::frame_consumer
 
         format_desc_   = format_desc;
         channel_index_ = channel_info.index;
+        use_vulkan_    = channel_info.use_vulkan;
 
         runtime::ensure_initialized();
         build_pipeline();
@@ -246,7 +297,25 @@ struct gst_consumer : public core::frame_consumer
         // Opened BEFORE the appsrc is configured: the caps it offers depend on whether the
         // frames will be CUDA memory or host memory, and negotiating for one and delivering
         // the other is a link failure at the first buffer.
-        if (want_gpu_ && gst_cuda_egress::available()) {
+        // **The Vulkan check comes FIRST, and it is not redundant with `open()`.** `open()`
+        // asks CUDA whether a device exists, which is true on an OpenGL channel too -- so it
+        // succeeded, the appsrc was then negotiated for `memory:CUDAMemory`, and the first
+        // frame revealed that `ogl::texture` implements no `export_native_handle`. The egress
+        // dropped itself, correctly, and the consumer went on pushing HOST buffers into an
+        // appsrc negotiated for CUDA memory.
+        //
+        // That killed the server outright: `ADD 1 GSTREAMER "videoconvert ! ..." GPU` on an
+        // OpenGL channel, no exception, no fatal line, the log simply stops mid-command.
+        // Measured 2026-08-25.
+        //
+        // A route that cannot work on this mixer must decline BEFORE anything negotiates
+        // against it, not discover it one frame later.
+        if (want_gpu_ && !use_vulkan_) {
+            CASPAR_LOG(info) << print()
+                             << L" GPU was requested but this channel uses the OpenGL mixer, "
+                                L"whose textures are not exportable; frames go through host "
+                                L"memory.";
+        } else if (want_gpu_ && gst_cuda_egress::available()) {
             auto         candidate = std::make_unique<gst_cuda_egress>();
             std::wstring reason;
             if (candidate->open(format_desc_, reason))
