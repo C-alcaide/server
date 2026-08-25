@@ -176,34 +176,52 @@ the more a GPU route is worth.
 ### How many channels does each route sustain?
 
 `decode-cost` above answers "what does one layer cost, and four". This is the other shape of the
-question, and the one an operator asks: how many playout channels before frames go late.
-1080p25, H.264 noise, the Vulkan mixer, one screen consumer per channel
-(`playback-scaling --routes auto,vulkan_video`, 2026-08-25):
+question, and the one an operator asks: how many playout channels before frames go late. 1080p25
+H.264 noise, the Vulkan mixer (`playback-scaling --routes auto,vulkan_video`, 2026-08-25):
 
-| route | channels | at the ceiling | what stopped it |
-| :--- | ---: | :--- | :--- |
-| **D3D11VA** (`auto`, the default) | **12** | 2.68 cores · 39% GPU · 4099 MB | 14 channels, 52 late frames |
-| **Vulkan Video** | **20** | 3.11 cores · 36% GPU · 5508 MB | 24 channels, 48 late frames |
+| route | with a screen output per channel | decode only, no output |
+| :--- | ---: | ---: |
+| **D3D11VA** (`auto`, the default) | **12** — marginal | **28+** |
+| **Vulkan Video** | **20** | **28+** |
 
 ![Playout channels per decode route, and what one channel costs on each](images/playback_ceilings.png)
 
-Per channel that is **0.156 cores against 0.223, 1.8% GPU against 3.3%, and 275 MB against
-342 MB** — Vulkan Video is cheaper on all three, which is what the four-layer cost figures above
-were also saying in a form that could not be read as channels.
+**READ THE SECOND COLUMN FIRST, because it says what the first one is measuring.** With no
+consumer both routes hold 28 channels, the top of the ladder — so **neither route's decode is the
+constraint at any channel count this box will reach.** What differs is the room each leaves for
+the output, and at 28 channels of pure decode the reason is plain:
 
-**D3D11VA's 12 is marginal and the number is quoted as measured rather than as a limit.** It held
-at 12 in two runs and took 73 late frames in a third, same binary, same clip, same config — so 12
-is the edge rather than a comfortable figure, and a venue planning to that number has no headroom.
-Vulkan Video's 20 was reached in both runs that tried it.
+| at 28 channels, no output | D3D11VA | Vulkan Video |
+| :--- | ---: | ---: |
+| host CPU | **1.21 cores** | 1.35 cores |
+| GPU utilisation | 16 % | **3 %** |
+| VRAM | 5897 MB | **3317 MB** |
 
-**One number here was wrong before it was right, and the correction only ever runs one way.** The
-first run had D3D11VA stop at 16 because "0 of 16 producers stayed on the fast path", and the
-server's log for that rung holds twelve activation lines and no stand-downs: engagement was being
-counted from a console buffer that lags at high channel counts. An undercount can only void a rung
-that should have held, so it can only report a ceiling LOWER than the truth — every ladder that
-battery published before 2026-08-25 is a floor rather than a measurement. It reads the log file
-now, and with the fix the real limiter turned out to be late frames at 14 rather than engagement
-at 16.
+Vulkan Video spends slightly MORE host CPU and about a fifth of the GPU, for a bit over half the
+VRAM. A screen consumer competes for exactly the two the second route is frugal with, which is
+why it converts into channels: 20 against 12 once every channel has an output to present.
+
+**So these are screen-output ceilings, not decode ceilings**, and a DeckLink channel is a
+different measurement rather than a comparable one — SDI presents differently and this box has two
+cards, so an SDI-per-channel ladder cannot pass 2 whatever the decode does.
+
+**D3D11VA's 12 is quoted as measured, not as a limit.** It held at 12 in two runs and took 73 late
+frames in a third — same binary, same clip, same config — so 12 is the edge rather than a plan-to
+number. Vulkan Video reached 20 in both runs that tried it and failed at 24 on 48 late frames.
+
+**At 2160p, with a screen output per channel: D3D11VA 4, Vulkan Video 6** (failing at 6 on 10 late
+frames and at 8 on 145). Both are properly below their 1080p figures, and the ratio NARROWS —
+1.5x at 4K against 1.67x at 1080p — which was not the prediction: readback and upload scale with
+pixels, so the expectation was the gap widening. Per channel at 4K, Vulkan Video is still ahead on
+all three (0.253 cores against 0.340, 3.0% GPU against 4.0%, 747 MB against 1106), and total VRAM
+is the same for 50% more channels.
+
+**One reading was thrown away rather than published.** The first ladder had D3D11VA stop at 16
+because "0 of 16 producers stayed on the fast path", while the server's log for that rung holds
+twelve activation lines and no stand-downs: engagement was counted from a console buffer that lags
+at high channel counts. An undercount can only void a rung that should have held, so it can only
+report a ceiling LOWER than the truth — every ladder that battery published before 2026-08-25 is a
+floor rather than a measurement. It reads the log file now.
 
 ---
 

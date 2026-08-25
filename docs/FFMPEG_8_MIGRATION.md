@@ -1395,9 +1395,17 @@ What is per-image and what is per-plane is the whole correctness argument:
 | producers engaged | - | **4/4** |
 
 **Channels before frames go late**, which is the operator-facing form of the same question
-(`playback-scaling`, 1080p25 H.264, one screen consumer per channel): **D3D11VA 12, Vulkan Video
-20**, the first marginal (12 held twice and took 73 late frames once) and the second reached in
-both runs. Per channel: 0.156 cores against 0.223, 1.8% GPU against 3.3%, 275 MB against 342 MB.
+(`playback-scaling`, 1080p25 H.264): with a screen output per channel, **D3D11VA 12, Vulkan Video
+20** -- the first marginal (12 held twice and took 73 late frames once), the second reached in both
+runs. At 2160p, 4 and 6.
+
+**But the decode is not what binds.** With `--consumer none` BOTH routes hold 28 channels, the top
+of the ladder, so neither decoder is the constraint at any count this box reaches. What differs is
+the room each leaves for the output, and at 28 channels of pure decode that is: host CPU 1.21 cores
+against 1.35 -- D3D11VA slightly CHEAPER -- but GPU 16% against **3%** and VRAM 5897 MB against
+**3317**. A screen consumer competes for exactly the two Vulkan Video is frugal with, which is how
+a fifth of the GPU turns into eight more channels. The figures above are therefore screen-output
+ceilings, and a DeckLink channel is a different measurement.
 
 **Picture: byte-identical to the software path** -- 0 differing pixels, max delta 0, on 8-bit
 H.264 *and* 10-bit HEVC, same frame confirmed from the burnt-in marker, with all three arms

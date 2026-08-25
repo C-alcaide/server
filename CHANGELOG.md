@@ -27,10 +27,17 @@ which follows from there being no D3D11 device, no shared NT handles and no per-
 bridge. And it is the same code off Windows, which D3D11VA can never be.
 
 **In channels rather than percentages**, which is the form that matters operationally: 1080p25
-H.264 with a screen consumer per channel, **D3D11VA sustains 12 and Vulkan Video 20**. D3D11VA's
-12 is marginal -- it held twice and took 73 late frames once on the same binary and clip -- while
-20 was reached in both runs that tried it, failing at 24. Per channel: 0.156 cores against 0.223,
-1.8% GPU against 3.3%, 275 MB against 342 MB.
+H.264 with a screen consumer per channel, **D3D11VA sustains 12 and Vulkan Video 20**; at 2160p, 4
+and 6. D3D11VA's 12 is marginal -- it held twice and took 73 late frames once on the same binary
+and clip -- while 20 was reached in both runs that tried it.
+
+**Those are screen-output ceilings, not decode ceilings, and the distinction is the finding.**
+With no consumer both routes hold 28 channels, so neither decoder is the constraint at any count
+this box reaches. At 28 channels of pure decode: host CPU 1.21 cores against 1.35 (D3D11VA
+slightly cheaper), GPU 16% against **3%**, VRAM 5897 MB against **3317**. A screen consumer
+competes for the GPU and its memory -- exactly the two Vulkan Video is frugal with -- which is how
+a fifth of the GPU becomes eight more channels. A DeckLink channel is a different measurement
+again, and this box has two cards, so that ladder cannot pass 2 whatever the decode does.
 
 **Picture: byte-identical to the software path** on 8-bit H.264 and 10-bit HEVC alike — 0
 differing pixels, max delta 0, same frame confirmed from a burnt-in marker, all arms provably on

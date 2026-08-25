@@ -545,9 +545,12 @@ def playback_ceiling_chart():
     lay.text("title", 50, 95,
              "How many simultaneous 1080p25 H.264 playout channels",
              parent=None, color=TITLE, size=12.5, weight="bold", ha="center")
-    lay.text("sub", 50, 89,
-             "one screen consumer per channel · the ceiling is the last rung with no late frames",
+    lay.text("sub", 50, 90,
+             "with ONE SCREEN OUTPUT per channel — which is what binds, not the decode",
              parent=None, color=MUTED, size=8.2, ha="center", style="italic")
+    lay.text("sub2", 50, 85.5,
+             "decode alone: BOTH routes hold 28+, so neither decoder is the constraint",
+             parent=None, color=WARNING_T, size=7.8, ha="center", style="italic")
 
     # (label, channels, marginal, note)
     rows = [
@@ -577,14 +580,16 @@ def playback_ceiling_chart():
                   "MARGINAL: held at 12 in two runs, 73 late frames in a third",
                   color=ACCENT_HOVER, size=7.4, weight="bold", z=6)
 
-    # What a single channel costs, which is the part that does not depend on where the ceiling
-    # landed -- and the reason to expect the gap rather than merely to have measured it.
+    # WHY the gap exists, measured where the consumer is not in the way: 28 channels of pure
+    # decode on both routes. This is the panel that explains the bars rather than restating
+    # them -- a screen consumer competes for the GPU and its memory, which is exactly what one
+    # route is frugal with and the other is not.
     lay.panel("per", 4, 6, 92, 22, fc=PANEL, ec=BORDER)
-    _text(ax, 50, 24.5, "and what ONE channel costs on each, at the ceiling",
+    _text(ax, 50, 24.5, "why — at 28 channels of DECODE ONLY, where the output is not in the way",
           color=TITLE, size=8.6, ha="center", weight="bold", z=6)
-    cols = [("host CPU", "0.223 cores", "0.156 cores"),
-            ("GPU utilisation", "3.3 %", "1.8 %"),
-            ("VRAM", "342 MB", "275 MB")]
+    cols = [("host CPU", "1.21 cores", "1.35 cores"),
+            ("GPU utilisation", "16 %", "3 %"),
+            ("VRAM", "5897 MB", "3317 MB")]
     for i, (what, d3d, vk) in enumerate(cols):
         cx = 20 + i * 30
         _text(ax, cx, 19.5, what, color=MUTED, size=7.6, ha="center", z=6)
