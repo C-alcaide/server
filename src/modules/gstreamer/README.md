@@ -277,6 +277,12 @@ Every row is exercised by `CasparCG-TestRunner`'s `gstreamer` battery on **both*
 | `cudadownload` / `nvh264enc` | the channel's texture handed to an encoder as CUDA memory |
 | third-party plugins | a `<plugin-path>` directory loaded and its elements usable |
 
+**Files are written as well as read**, and the recording is finalised: `mp4mux` gets its
+end-of-stream, so the container carries an index rather than only a payload. Measured at
+1080p50 through the CUDA egress: 55 KiB of h264, 304 frames over 6.08 s, decodable. Gated by
+the `consumer-file` case, which is mutation-verified — with the EOS send disabled, `mp4mux`
+writes no file at all and the case fails.
+
 **Network sources and sinks are GPU-accelerated on the same terms as files.** The transport
 is never the accelerated part; the decode, the encode and staying in video memory are.
 Measured 2026-08-25: `srtsrc … ! d3d11h264dec` with `GPU` gives 249/249 frames GPU-direct, and
