@@ -1005,9 +1005,17 @@ private:
                 // UNDAMPED FOR THE FIRST TWO FRAMES, damped for every one after.
                 //
                 // The seed is a constant 12, chosen for no profile and no content, so the loop
-                // always starts wrong and every frame spent walking to the target is oversized.
-                // Steady state was measured at 1.00x of profile on detailed noise; the average
-                // over a WHOLE 10 s recording was 1.14x, and the difference is that walk.
+                // always starts wrong and the first frames are oversized. MEASURED per frame
+                // (`cli.py rate-profile`), detailed noise at 1080p25: frame 1 lands at 150% of
+                // the profile target, then 118, 108, 106, 104 -- converged by about frame 8,
+                // which averages 111.6% over that window and **100.0% from frame 9 on**.
+                //
+                // SO THIS IS WORTH LITTLE, and the number that says so should stay next to it:
+                // eight frames of transient is 0.36% of a ten-second recording, and nothing can
+                // fix frame 1, which is encoded before the loop has seen anything. It was
+                // written believing whole-file output ran 14% over profile; that reading came
+                // from dividing FILE size by frame count, and the file carried 31.6 MB of
+                // 16-channel PCM. Video-only was 100.4% all along.
                 //
                 // A full Newton step (gain 1.0) is the right size when the error is large --
                 // bits fall roughly as 1/q, so `q *= ratio` is the correction rather than an
