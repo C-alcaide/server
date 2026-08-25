@@ -21,6 +21,8 @@
 
 #include "gst_runtime.h"
 
+#include <cstdlib>
+
 #include <common/env.h>
 #include <common/except.h>
 #include <common/log.h>
@@ -145,8 +147,26 @@ void install_log_handler()
 {
     // GStreamer's own categories, routed into our log rather than stderr. WARNING is the
     // default threshold: a failing pipeline says why, and a working one stays quiet.
-    gst_debug_set_default_threshold(GST_LEVEL_WARNING);
-    gst_debug_remove_log_function(gst_debug_log_default);
+    //
+    // **Unless the operator asked for something else.** `gst_debug_set_default_threshold`
+    // updates EVERY category, so calling it unconditionally silently undid whatever
+    // `GST_DEBUG` had just set -- `GST_DEBUG=fallbacksrc:6` produced exactly the same output
+    // as no `GST_DEBUG` at all. That is the first thing anyone reaches for when a pipeline
+    // misbehaves, and it is documented all over the GStreamer world as the way to debug one.
+    const bool debug_requested = std::getenv("GST_DEBUG") != nullptr;
+    if (!debug_requested)
+        gst_debug_set_default_threshold(GST_LEVEL_WARNING);
+
+    // Removing the default handler is what routes GStreamer into our log instead of stderr --
+    // but it is also what writes `GST_DEBUG_FILE`. Keep it when a file was asked for, so the
+    // two do not have to be traded against each other: verbose category output goes to the
+    // file, and the server log keeps the summary it always had.
+    if (std::getenv("GST_DEBUG_FILE") == nullptr)
+        gst_debug_remove_log_function(gst_debug_log_default);
+    else
+        CASPAR_LOG(info) << L"[gstreamer] GST_DEBUG_FILE is set; GStreamer's own log is being "
+                            L"written there as well as here.";
+
     gst_debug_add_log_function(
         [](GstDebugCategory* category,
            GstDebugLevel     level,

@@ -250,6 +250,8 @@ struct gst_producer : public core::frame_producer
     // `starved` counts ticks that found the queue empty and had to repeat the last picture —
     // the direct symptom — and `queue_peak` says how much slack there was when it did not.
     std::atomic<uint64_t> frames_starved_{0};
+    /// Latch for the unbuildable-sample warning; see the video loop.
+    bool                  warned_unbuildable_ = false;
     std::atomic<uint64_t> queue_peak_{0};
     std::atomic<bool>     is_failed_{false};
     std::thread           video_thread_;
@@ -951,6 +953,23 @@ struct gst_producer : public core::frame_producer
 
                 if (!frame)
                     frame = make_frame(this, *frame_factory_, sample, as_av_audio(audio_samples));
+
+                // **A sample that builds nothing must say so.** `make_frame` returns an empty
+                // frame for anything it cannot describe, and the loop below simply does not
+                // queue it -- so the producer counts the sample as *received*, the channel
+                // starves, and the picture is black with not one line in the log. That exact
+                // shape cost a session once already (the caps list in `gst_frame.cpp` carries
+                // the story: 164 perfectly black frames from a format `pixel_format_desc`
+                // called invalid) and it cost another one here.
+                //
+                // Latched, because it would otherwise print at frame rate.
+                if (!frame && !warned_unbuildable_) {
+                    warned_unbuildable_ = true;
+                    CASPAR_LOG(warning)
+                        << print() << L" a sample arrived that could not be made into a frame ("
+                        << u16(negotiated_format_) << L"). The picture will be black while this "
+                           L"lasts, and `received` will keep counting.";
+                }
 
                 if (auto* buffer = gst_sample_get_buffer(sample)) {
                     gpointer st = nullptr;
