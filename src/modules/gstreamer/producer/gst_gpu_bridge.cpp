@@ -461,6 +461,24 @@ core::draw_frame gst_gpu_bridge::to_frame(void*                       tag,
         // the semi-planar path for decoder surfaces.
         m.bgra_ = sd.Format == DXGI_FORMAT_B8G8R8A8_UNORM || sd.Format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
 
+        // **BGRA is Vulkan-only, and this is a hang rather than a preference.** On the OpenGL
+        // mixer the route takes down the GPU: `wglDXLockObjectsNV failed`, then the D3D11 debug
+        // layer reporting `DrawIndexed: Rasterization Unit is enabled (PixelShader is not
+        // bound)`, then `DXGI_ERROR_DEVICE_HUNG` and an access violation. Measured 2026-08-25:
+        // two runs in three.
+        //
+        // The semi-planar route is fine on the same mixer and the same interop -- the `gpu` and
+        // `p010` cases pass every run -- so it is something about a single full-size BGRA
+        // texture through `wglDXLockObjectsNV`, not the interop itself. Not yet understood.
+        //
+        // Declining is the honest state: the frame goes through host memory, the picture is
+        // correct, and it costs a readback rather than the GPU.
+        if (m.bgra_ && m.backend_ == core::gpu_backend::opengl) {
+            m.give_up(L"GPU BGRA is Vulkan-only: on the OpenGL mixer it hangs the GPU device. "
+                      L"Frames go through host memory, which is correct and costs a readback");
+            return core::draw_frame{};
+        }
+
         if (!m.bgra_ && !formats_for(sd.Format, m.planes_)) {
             m.give_up(L"the decoded surface format " + std::to_wstring(static_cast<int>(sd.Format)) +
                       L" is not one of NV12, P010 or P016");

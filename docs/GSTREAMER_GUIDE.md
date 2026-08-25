@@ -245,7 +245,14 @@ PLAY 1-10 [GSTREAMER] "d3d11screencapturesrc monitor-index=0" GPU BGRA
 ```
 
 The source's texture is taken as-is — one copy, no extraction draw — and the mixer applies no
-matrix, because the source has already resolved the colour. It is deliberately **not** offered
+matrix, because the source has already resolved the colour.
+
+**Vulkan mixer only.** On OpenGL it is refused and the frame goes through host memory: the
+route hangs the GPU device there — `wglDXLockObjectsNV failed`, then `DXGI_ERROR_DEVICE_HUNG`,
+in two runs out of three. The semi-planar GPU route is unaffected on the same mixer and the
+same interop, so it is something about a single full-size BGRA texture through
+`wglDXLockObjectsNV` rather than the interop itself. Not yet understood; the refusal is logged
+with its reason. It is deliberately **not** offered
 alongside NV12: a `d3d11h264dec` asked for both would satisfy BGRA by having `d3d11convert`
 inserted, restoring the conversion the GPU route exists to remove, with no symptom except the
 cost. So ask for it only when the source really is RGB.

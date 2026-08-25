@@ -89,6 +89,20 @@ count, and one `INFO` response carries both. Anything reading by tag got whichev
 a host consumer's constant 0 hid a producer running 199/199, and was diagnosed as a GPU bridge
 defect that did not exist.
 
+### Fixed: `GPU BGRA` hung the GPU device on the OpenGL mixer
+
+Two runs in three: `wglDXLockObjectsNV failed`, the D3D11 debug layer reporting `DrawIndexed:
+Rasterization Unit is enabled (PixelShader is not bound)`, then `DXGI_ERROR_DEVICE_HUNG` and an
+access violation. The route is now **Vulkan-only** and declines on OpenGL with its reason, so
+the frame goes through host memory — correct picture, one readback.
+
+The semi-planar GPU route is unaffected on the same mixer and the same interop (`gpu` and
+`p010` pass every run), so it is something about a single full-size BGRA texture through
+`wglDXLockObjectsNV`, not the interop. Not yet understood.
+
+Found by the `gpu-bgra` battery case, which had passed on OpenGL in earlier runs — the hang is
+intermittent, and one green run is not evidence of absence.
+
 ### Added: `GPU BGRA`, a GPU route for sources with no YCbCr to hand over
 
 `PLAY ... "d3d11screencapturesrc ..." GPU BGRA` keeps an RGB source in video memory all the
