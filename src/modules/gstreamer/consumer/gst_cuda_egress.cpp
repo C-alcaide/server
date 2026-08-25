@@ -66,6 +66,19 @@ struct gst_cuda_egress::impl
 
     void close()
     {
+        // **The uploader goes first, and the order is the whole point.** Its imported external
+        // memory and its stream belong to the `CUcontext` that `context_` owns. Unreffing the
+        // GstCudaContext first destroys that context, and the uploader's destructor -- which
+        // runs after this function, because members are destroyed after the body -- then calls
+        // `cuCtxPushCurrent` and `cudaFreeMipmappedArray` on a dangling one.
+        //
+        // `cuda_vk_upload.cpp` names this exactly: destroying the imports "under a different
+        // [context] -- or after FFmpeg's has gone -- is how this takes the process down at
+        // teardown". Measured 2026-08-25: `REMOVE 1-110000` on a GPU consumer killed the
+        // server, and the battery case AFTER this one is what reported it, as a connection
+        // reset with nothing in the log.
+        uploader_.release();
+
         if (pool_) {
             gst_buffer_pool_set_active(pool_, FALSE);
             gst_object_unref(pool_);
