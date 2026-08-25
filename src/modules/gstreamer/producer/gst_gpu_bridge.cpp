@@ -176,6 +176,9 @@ struct gst_gpu_bridge::impl
     int           surface_height_ = 0;
     DXGI_FORMAT   surface_format_ = DXGI_FORMAT_UNKNOWN;
     plane_formats planes_;
+    /// True when the source hands over BGRA rather than semi-planar YCbCr, which takes a
+    /// copy instead of an extraction draw. Decided once, on the first sample.
+    bool          bgra_ = false;
 
     bool        ready_    = false;
     bool        disabled_ = false;
@@ -315,6 +318,13 @@ struct gst_gpu_bridge::impl
             return SUCCEEDED(hr) && *share != nullptr;
         };
 
+        // One target for BGRA, two for semi-planar. The Y slot carries the single texture
+        // rather than adding a third set of members: it is the same lifetime, the same share
+        // handle and the same release path, and a parallel set would have to be kept in step
+        // with all of it.
+        if (bgra_)
+            return make(width_, height_, DXGI_FORMAT_B8G8R8A8_UNORM, &y_tex_, &y_rtv_, &y_share_);
+
         return make(width_, height_, planes_.y, &y_tex_, &y_rtv_, &y_share_) &&
                make(width_ / 2, height_ / 2, planes_.uv, &uv_tex_, &uv_rtv_, &uv_share_);
     }
@@ -444,7 +454,14 @@ core::draw_frame gst_gpu_bridge::to_frame(void*                       tag,
         // discovering it as a view-creation failure per frame.
         m.need_stage_ = (sd.BindFlags & D3D11_BIND_SHADER_RESOURCE) == 0;
 
-        if (!formats_for(sd.Format, m.planes_)) {
+        // BGRA is not semi-planar and needs no extraction: the sample's texture already IS
+        // the picture. One `CopySubresourceRegion` per frame into a texture the mixer can
+        // import, with no shader, no SRV, and therefore no `D3D11_BIND_SHADER_RESOURCE`
+        // requirement on the source -- which is the constraint that forced a staging copy on
+        // the semi-planar path for decoder surfaces.
+        m.bgra_ = sd.Format == DXGI_FORMAT_B8G8R8A8_UNORM || sd.Format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+
+        if (!m.bgra_ && !formats_for(sd.Format, m.planes_)) {
             m.give_up(L"the decoded surface format " + std::to_wstring(static_cast<int>(sd.Format)) +
                       L" is not one of NV12, P010 or P016");
             return core::draw_frame{};
@@ -488,7 +505,14 @@ core::draw_frame gst_gpu_bridge::to_frame(void*                       tag,
                           L"d3d11h264device1dec selects the second one");
                 return core::draw_frame{};
             }
-            if (!m.gl_interop_->register_texture(m.y_tex_) || !m.gl_interop_->register_texture(m.uv_tex_)) {
+            // One texture on the BGRA route, two on the semi-planar one. Registering a null
+            // second texture is what made `GPU BGRA` decline on OpenGL: it fell back to host
+            // memory and rendered a perfectly correct picture, so the only sign was
+            // `gpu-frames` reading 0.
+            const bool registered =
+                m.gl_interop_->register_texture(m.y_tex_) &&
+                (m.bgra_ || m.gl_interop_->register_texture(m.uv_tex_));
+            if (!registered) {
                 m.give_up(L"the plane textures could not be registered with GL");
                 return core::draw_frame{};
             }
@@ -509,7 +533,10 @@ core::draw_frame gst_gpu_bridge::to_frame(void*                       tag,
 
         m.ready_ = true;
         CASPAR_LOG(info) << L"[gstreamer] GPU path active: " << m.width_ << L"x" << m.height_
-                         << L" semi-planar handed to the mixer, which performs the colour conversion.";
+                         << (m.bgra_ ? L" BGRA handed to the mixer as-is; the source resolved the "
+                                       L"colour itself, so the mixer applies no matrix."
+                                     : L" semi-planar handed to the mixer, which performs the "
+                                       L"colour conversion.");
     }
 
     // A mid-stream renegotiation would need new plane textures, new imports and new
@@ -536,6 +563,81 @@ core::draw_frame gst_gpu_bridge::to_frame(void*                       tag,
     if (m.vk_import_)
         m.vk_import_->wait_for_previous_copy();
 #endif
+
+    // ── BGRA: a copy, not an extraction ────────────────────────────────────────────────
+    // Nothing below applies. There are no planes to separate, so there is no draw, no plane
+    // SRV and no `ID3D11Device3` -- and, usefully, no `D3D11_BIND_SHADER_RESOURCE`
+    // requirement on the source, which is the constraint that forces a staging copy on the
+    // semi-planar path when the surface came from a decoder.
+    //
+    // Still inside GStreamer's device lock for the same reason the extraction is: this is
+    // GStreamer's immediate context, shared with its own streaming threads, and it is not
+    // free-threaded.
+    if (m.bgra_) {
+        {
+            gst_d3d11_device_lock(m.gst_device_);
+            {
+                static bool once = false;
+                if (!once) {
+                    once = true;
+                    D3D11_TEXTURE2D_DESC sdesc = {};
+                    surface->GetDesc(&sdesc);
+                    D3D11_TEXTURE2D_DESC ddesc = {};
+                    m.y_tex_->GetDesc(&ddesc);
+                    CASPAR_LOG(info) << L"[gstreamer][bgra] src " << sdesc.Width << L"x" << sdesc.Height
+                                     << L" fmt=" << static_cast<int>(sdesc.Format)
+                                     << L" bind=" << sdesc.BindFlags << L" array=" << sdesc.ArraySize
+                                     << L" sub=" << subresource
+                                     << L" | dst " << ddesc.Width << L"x" << ddesc.Height
+                                     << L" fmt=" << static_cast<int>(ddesc.Format)
+                                     << L" bind=" << ddesc.BindFlags;
+                }
+            }
+            m.ctx_->CopySubresourceRegion(m.y_tex_, 0, 0, 0, 0, surface, subresource, nullptr);
+            m.ctx_->Flush();
+            gst_d3d11_device_unlock(m.gst_device_);
+        }
+        surface->Release();
+
+        std::shared_ptr<core::texture> out;
+        if (m.backend_ == core::gpu_backend::opengl) {
+            // The defaulted 4 components / 8-bit is exactly BGRA, which is why the widened
+            // signature this route needed for NV12 leaves this call reading as it always did.
+            out = m.gl_interop_->copy_to_pooled(m.y_tex_, m.width_, m.height_);
+        } else {
+#ifdef ENABLE_VULKAN
+            if (!m.vk_import_->copy_texture(m.y_share_, m.width_, m.height_, out))
+                out.reset();
+#endif
+        }
+        if (!out) {
+            m.note_failure(L"the mixer would not take the BGRA texture");
+            return core::draw_frame{};
+        }
+        m.failures_ = 0;
+
+        // `bgra` and not `rgba`: the mixer's native order, so nothing swizzles on the way in.
+        auto bdesc = core::pixel_format_desc(core::pixel_format::rgba); // EXPERIMENT
+        bdesc.planes.push_back(core::pixel_format_desc::plane(m.width_, m.height_, 4));
+
+        // No colour metadata is carried, and that is correct rather than an omission: the
+        // source has already resolved to RGB, so there is no matrix or range left for the
+        // mixer to apply. Anything it did here would be a second conversion.
+        // The single-texture constructor and a zero-length-but-valid host plane, exactly as
+        // `html_gpu_bridge` builds its BGRA frames. Not a style choice: that is the only
+        // single-plane GPU frame in this tree known to render, and matching it removes the
+        // question of whether the vector form is equivalent for one plane.
+        auto empty = std::make_shared<std::vector<std::uint8_t>>(0);
+        std::vector<array<const std::uint8_t>> bimage;
+        bimage.emplace_back(empty->data(), 0, std::move(empty));
+
+        array<const std::int32_t> baudio;
+        if (!audio_samples.empty())
+            baudio = array<const std::int32_t>(audio_samples);
+
+        return core::draw_frame(
+            core::const_frame(tag, std::move(bimage), std::move(baudio), bdesc, std::move(out)));
+    }
 
     ID3D11Device3* dev3 = nullptr;
     if (FAILED(m.device_->QueryInterface(__uuidof(ID3D11Device3), reinterpret_cast<void**>(&dev3))) || !dev3) {

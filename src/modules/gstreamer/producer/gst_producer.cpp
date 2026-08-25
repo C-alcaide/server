@@ -135,6 +135,13 @@ constexpr const char* host_tail = " ! videoconvert ! videorate ! appsink name=";
 constexpr const char* gpu_tail =
     " ! d3d11upload ! d3d11convert ! video/x-raw(memory:D3D11Memory),format={P010_10LE,NV12} ! "
     "appsink name=";
+
+/// `GPU BGRA`. `d3d11convert` is still here and still doing work -- an RGB source is rarely
+/// already BGRA -- but the conversion happens once, on the GPU, instead of a readback and a
+/// re-upload per frame.
+constexpr const char* gpu_bgra_tail =
+    " ! d3d11upload ! d3d11convert ! video/x-raw(memory:D3D11Memory),format=BGRA ! "
+    "appsink name=";
 #endif
 
 /// Reads whichever of the two a message actually carries. Parsing a WARNING with
@@ -210,6 +217,8 @@ struct gst_producer : public core::frame_producer
     std::map<std::string, double>          element_state_;
 
     const bool want_gpu_;
+    /// `GPU BGRA`: take the source's texture as-is rather than its planes. See `create`.
+    const bool want_bgra_ = false;
 #ifdef CASPAR_GST_GPU_BRIDGE
     std::unique_ptr<gst_gpu_bridge> gpu_bridge_;
 
@@ -250,12 +259,14 @@ struct gst_producer : public core::frame_producer
     gst_producer(spl::shared_ptr<core::frame_factory> frame_factory,
                  core::video_format_desc              format_desc,
                  std::wstring                         description,
-                 bool                                 want_gpu)
+                 bool                                 want_gpu,
+                 bool                                 want_bgra = false)
         : instance_no_(instances_++)
         , description_(std::move(description))
         , frame_factory_(std::move(frame_factory))
         , format_desc_(std::move(format_desc))
         , want_gpu_(want_gpu)
+        , want_bgra_(want_bgra)
     {
         graph_->set_text(print());
         graph_->set_color("frame-time", diagnostics::color(0.5f, 1.0f, 0.2f));
@@ -384,7 +395,7 @@ struct gst_producer : public core::frame_producer
 
         if (launch.find(video_sink_name) == std::string::npos) {
 #ifdef CASPAR_GST_GPU_BRIDGE
-            const char* tail = want_gpu_ ? gpu_tail : host_tail;
+            const char* tail = !want_gpu_ ? host_tail : (want_bgra_ ? gpu_bgra_tail : gpu_tail);
 #else
             // want_gpu_ is still honoured as far as it can be: the refusal was logged at
             // construction, and the host tail is what a pipeline without the bridge must get.
@@ -444,9 +455,11 @@ struct gst_producer : public core::frame_producer
         // link, which is the difference between an optimisation and a restriction.
 #ifdef CASPAR_GST_GPU_BRIDGE
         const auto gpu_caps =
-            want_gpu_ ? std::string("video/x-raw(memory:D3D11Memory), format=(string){ P010_10LE, NV12 }") +
-                            rate + "; "
-                      : std::string("");
+            !want_gpu_ ? std::string("")
+            : want_bgra_
+                  ? std::string("video/x-raw(memory:D3D11Memory), format=(string)BGRA") + rate + "; "
+                  : std::string("video/x-raw(memory:D3D11Memory), format=(string){ P010_10LE, NV12 }") +
+                        rate + "; ";
 #else
         const std::string gpu_caps;
 #endif
@@ -1267,9 +1280,14 @@ spl::shared_ptr<core::frame_producer> create_producer(const core::frame_producer
     // negotiate with, and a source that cannot reach D3D11 memory pays an upload for nothing —
     // so it is asked for, per PLAY, by a caller who knows the source is decoded on the GPU.
     const bool want_gpu = contains_param(L"GPU", params);
+    // `PLAY ... GPU BGRA`, for a source that has no YCbCr to hand over -- a screen capture, an
+    // RGB filter chain. Opt-in and never offered alongside NV12: a `d3d11h264dec` asked for
+    // both would satisfy BGRA by inserting `d3d11convert`, restoring the conversion the GPU
+    // route exists to remove, with no symptom except the cost.
+    const bool want_bgra = want_gpu && contains_param(L"BGRA", params);
 
     return spl::make_shared<gst_producer>(
-        dependencies.frame_factory, dependencies.format_desc, description, want_gpu);
+        dependencies.frame_factory, dependencies.format_desc, description, want_gpu, want_bgra);
 }
 
 }} // namespace caspar::gstreamer
