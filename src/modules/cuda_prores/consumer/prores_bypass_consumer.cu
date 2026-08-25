@@ -492,6 +492,7 @@ private:
             frame_ctx_.mbs_per_slice * frame_ctx_.slices_per_row * ((enc_height + 15) / 16),
             interlaced ? 2 : 1);
         q_state_           = cfg_.q_auto ? 12.0 : (double)cfg_.q_scale;
+        rc_frames_         = 0;
         frame_ctx_.q_scale = (int)(q_state_ + 0.5);
 
         if (interlaced) {
@@ -703,7 +704,13 @@ private:
             if (mbs > 0) {
                 const double ratio = ((double)encoded_size * 8.0 / (double)mbs)
                                    / (double)target_bits_per_mb_;
-                q_state_ = q_state_ * (1.0 + 0.5 * (ratio - 1.0));
+                // UNDAMPED FOR THE FIRST TWO FRAMES, damped after -- the same cold-start
+                // fix as `prores_consumer.cu`, and it has to be here too because this
+                // consumer keeps its own copy of the loop rather than sharing one. A fix
+                // applied to one and not the other is how the two silently diverge.
+                const double gain = rc_frames_ < 2 ? 1.0 : 0.5;
+                ++rc_frames_;
+                q_state_ = q_state_ * (1.0 + gain * (ratio - 1.0));
                 if (q_state_ < 1.0)  q_state_ = 1.0;
                 if (q_state_ > 128.0) q_state_ = 128.0;
                 frame_ctx_.q_scale = (int)(q_state_ + 0.5);
@@ -793,6 +800,8 @@ private:
     // is not lost to integer rounding on every frame.
     double                   target_bits_per_mb_ = 0.0;
     double                   q_state_            = 12.0;
+    /// Frames the rate-control loop has seen, for the cold-start gain only.
+    int                      rc_frames_          = 0;
 
     // ── DeckLink capture ──────────────────────────────────────────────────
     std::unique_ptr<DecklinkCapture> capture_;

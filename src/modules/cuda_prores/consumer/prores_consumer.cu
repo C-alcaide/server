@@ -386,6 +386,10 @@ public:
     // correction is not lost to integer rounding on every frame.
     double target_bits_per_mb_ = 0.0;
     double q_state_            = 12.0;
+    /// Frames the rate-control loop has seen, for the cold-start gain only. Reset with
+    /// `q_state_` so a re-opened consumer starts its walk again rather than inheriting a
+    /// convergence it did not do.
+    int    rc_frames_          = 0;
 
     ~prores_consumer_impl() override
     {
@@ -467,6 +471,7 @@ public:
         // AUTO starts mid-range and converges in a handful of frames; a pinned QSCALE
         // starts and stays where the operator put it.
         q_state_          = cfg_.q_auto ? 12.0 : (double)cfg_.q_scale;
+        rc_frames_        = 0;
         frame_ctx_.q_scale = (int)(q_state_ + 0.5);
 
         // Patch the context for interlaced so frame headers carry correct full dimensions
@@ -997,7 +1002,22 @@ private:
             if (mbs > 0) {
                 const double actual = (double)encoded_size * 8.0 / (double)mbs;
                 const double ratio  = actual / (double)target_bits_per_mb_;
-                q_state_ = q_state_ * (1.0 + 0.5 * (ratio - 1.0));
+                // UNDAMPED FOR THE FIRST TWO FRAMES, damped for every one after.
+                //
+                // The seed is a constant 12, chosen for no profile and no content, so the loop
+                // always starts wrong and every frame spent walking to the target is oversized.
+                // Steady state was measured at 1.00x of profile on detailed noise; the average
+                // over a WHOLE 10 s recording was 1.14x, and the difference is that walk.
+                //
+                // A full Newton step (gain 1.0) is the right size when the error is large --
+                // bits fall roughly as 1/q, so `q *= ratio` is the correction rather than an
+                // overshoot of it. It is applied for two frames and then never again, which
+                // is what makes this a cold-start fix and not a change to the loop: from
+                // frame 2 on, the arithmetic is identical to before, so the steady-state
+                // figure this doc records cannot move.
+                const double gain = rc_frames_ < 2 ? 1.0 : 0.5;
+                ++rc_frames_;
+                q_state_ = q_state_ * (1.0 + gain * (ratio - 1.0));
                 if (q_state_ < 1.0)  q_state_ = 1.0;
                 if (q_state_ > 128.0) q_state_ = 128.0;
                 frame_ctx_.q_scale = (int)(q_state_ + 0.5);
