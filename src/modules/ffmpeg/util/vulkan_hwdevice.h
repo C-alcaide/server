@@ -37,7 +37,7 @@ namespace caspar { namespace ffmpeg {
 /// mixer. Measured standalone on this hardware, the readback that implies costs 78% of
 /// decode throughput and half the CPU saving -- the whole point of the exercise.
 ///
-/// QUEUES. FFmpeg is given the queue family `device::getDecodeQueue()` reserves, never the
+/// QUEUES. FFmpeg is given the queue family `device::getComputeQueue()` reserves, never the
 /// graphics one. The mixer submits on a single graphics queue with no mutex, relying on
 /// everything going through its dispatch thread; FFmpeg submits from its own decode
 /// threads. Two submitters on one queue is undefined behaviour, and FFmpeg's internal

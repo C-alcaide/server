@@ -43,16 +43,29 @@ struct shared_device_info
     void*    device             = nullptr;  //< VkDevice
     void*    get_proc_addr      = nullptr;  //< PFN_vkGetInstanceProcAddr
     uint32_t graphics_qf        = 0;
-    uint32_t decode_qf         = 0;
+    /// The COMPUTE family, which is what FFmpeg's Vulkan compute decoders (prores, ffv1,
+    /// dpx) and its filters submit on. Named `decode_qf` until 2026-08-25, which was a trap:
+    /// a field called that, sitting beside a real video-decode family, reads as the one thing
+    /// it is not.
+    uint32_t compute_qf         = 0;
     /// False when this GPU has no compute family distinct from graphics, in which case
-    /// `decode_qf == graphics_qf` and sharing would mean sharing a queue.
-    bool     decode_qf_isolated = false;
+    /// `compute_qf == graphics_qf` and sharing would mean sharing a queue.
+    bool     compute_qf_isolated = false;
     /// The VIDEO ENCODE family, for an FFmpeg Vulkan encoder. Only meaningful when
     /// `encode_qf_present`: the `VK_KHR_video_encode` codecs need a family carrying
     /// `VK_QUEUE_VIDEO_ENCODE_BIT_KHR`, and substituting the compute one is what made VP9
     /// fault rather than decline on the decode side.
     uint32_t encode_qf         = 0;
     bool     encode_qf_present = false;
+    /// The VIDEO DECODE family, for `h264_vulkan`/`hevc_vulkan` DECODING through
+    /// `VK_KHR_video_decode`. Same rule as the encode pair: the codec needs a family carrying
+    /// its own bit, and the compute family is not a substitute -- handing one over is what
+    /// made VP9 fault rather than decline.
+    ///
+    /// The QUEUE in this family already exists: vk-bootstrap's default setup creates one from
+    /// every family (VkBootstrap.cpp:1613-1617), so only the index was ever missing.
+    uint32_t video_decode_qf         = 0;
+    bool     video_decode_qf_present = false;
     /// Pointers to the core feature sets the mixer ENABLED, as `VkPhysicalDeviceFeatures`,
     /// `...Vulkan11Features`, `...Vulkan12Features` and `...Vulkan13Features`. `void*` to keep
     /// this header free of Vulkan types, like the handles above.

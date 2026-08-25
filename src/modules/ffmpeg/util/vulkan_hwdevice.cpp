@@ -131,7 +131,7 @@ AVBufferRef* make_vulkan_hwdevice_from_mixer(void* vk_device_handle)
     // VkQueue is undefined behaviour, and FFmpeg's own queue mutexes do not cover the
     // mixer's submissions. A GPU with no separate compute family is a reason to use the
     // existing path, not a reason to race.
-    if (!info.decode_qf_isolated) {
+    if (!info.compute_qf_isolated) {
         CASPAR_LOG(info) << L"[vk_hwdevice] this GPU has no compute queue family separate "
                             L"from graphics, so an FFmpeg decoder would have to share the "
                             L"mixer's queue; declining";
@@ -196,7 +196,7 @@ AVBufferRef* make_vulkan_hwdevice_from_mixer(void* vk_device_handle)
     // understates what the family can do, which is the safe direction: FFmpeg uses less
     // than the device offers rather than calling into something that was never enabled.
     hwctx->nb_qf     = 2;
-    hwctx->qf[0].idx = static_cast<int>(info.decode_qf);
+    hwctx->qf[0].idx = static_cast<int>(info.compute_qf);
     hwctx->qf[0].num = 1;
     hwctx->qf[0].flags =
         static_cast<VkQueueFlagBits>(VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT);
@@ -233,8 +233,8 @@ AVBufferRef* make_vulkan_hwdevice_from_mixer(void* vk_device_handle)
     // graphics(0), transfer(1), compute(0) -- so the shape is real hardware, not a hypothetical.
     //
     // Declining costs a host-path recording. Sharing the mixer's queue with an encoder is the
-    // same hazard `decode_qf_isolated` above refuses for the decoder, and for the same reason.
-    const bool encode_qf_distinct = info.encode_qf_present && info.encode_qf != info.decode_qf &&
+    // same hazard `compute_qf_isolated` above refuses for the decoder, and for the same reason.
+    const bool encode_qf_distinct = info.encode_qf_present && info.encode_qf != info.compute_qf &&
                                     info.encode_qf != info.graphics_qf;
     if (info.encode_qf_present && !encode_qf_distinct) {
         CASPAR_LOG(info) << L"[vk_hwdevice] this GPU's video-encode queue family ("

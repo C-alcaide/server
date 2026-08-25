@@ -175,16 +175,19 @@ struct device::impl : public std::enable_shared_from_this<impl>
     vk::Device                         _device;
     vk::Queue                          _queue;
     uint32_t                           _queue_family = 0;
-    // A queue reserved for another API to submit on -- see `getDecodeQueue`. Null, and
-    // _decode_queue_family == _queue_family, when this GPU has no separate compute family.
-    vk::Queue                          _decode_queue;
-    uint32_t                           _decode_queue_family = 0;
-    bool                               _decode_queue_dedicated = false;
-    // The VIDEO ENCODE family, for an FFmpeg Vulkan encoder. vk-bootstrap creates one queue
-    // for EVERY family by default (VkBootstrap.cpp:1613-1617), so this family already has a
-    // queue on the logical device -- only its index has to be found and handed over.
+    // A queue reserved for another API to submit on -- see `getComputeQueue`. Null, and
+    // _compute_queue_family == _queue_family, when this GPU has no separate compute family.
+    vk::Queue                          _compute_queue;
+    uint32_t                           _compute_queue_family = 0;
+    bool                               _compute_queue_dedicated = false;
+    // The VIDEO families, for an FFmpeg Vulkan encoder or a Vulkan Video decoder.
+    // vk-bootstrap creates one queue for EVERY family by default
+    // (VkBootstrap.cpp:1613-1617), so these families already have a queue on the logical
+    // device -- only their indices have to be found and handed over.
     uint32_t                           _encode_queue_family = 0;
     bool                               _encode_queue_present = false;
+    uint32_t                           _video_decode_queue_family  = 0;
+    bool                               _video_decode_queue_present = false;
     // The device extensions actually enabled, kept because another API sharing this
     // device has to be told what it may rely on -- FFmpeg's `enabled_dev_extensions`
     // is the app's declaration, not a query.
@@ -872,10 +875,10 @@ struct device::impl : public std::enable_shared_from_this<impl>
         //
         // Falls back to the graphics family when the GPU offers no distinct compute
         // family. That is NOT silently equivalent, so it is recorded and reported by
-        // `hasDedicatedDecodeQueue()`; a caller that needs isolation must check rather
+        // `hasDedicatedComputeQueue()`; a caller that needs isolation must check rather
         // than assume.
-        _decode_queue_family    = queue_family;
-        _decode_queue_dedicated = false;
+        _compute_queue_family    = queue_family;
+        _compute_queue_dedicated = false;
         // `get_queue(compute)` and not `get_dedicated_queue(compute)`. vk-bootstrap's
         // "dedicated" means COMPUTE with neither GRAPHICS nor TRANSFER
         // (VkBootstrap.cpp:1047-1055, called with undesired_flags = TRANSFER), and
@@ -887,38 +890,63 @@ struct device::impl : public std::enable_shared_from_this<impl>
         // graphics one.
         if (auto q = vkb_device.get_queue(vkb::QueueType::compute)) {
             if (auto qf = vkb_device.get_queue_index(vkb::QueueType::compute)) {
-                _decode_queue           = vk::Queue(q.value());
-                _decode_queue_family    = qf.value();
-                _decode_queue_dedicated = _decode_queue_family != queue_family;
+                _compute_queue           = vk::Queue(q.value());
+                _compute_queue_family    = qf.value();
+                _compute_queue_dedicated = _compute_queue_family != queue_family;
             }
         }
-        if (!_decode_queue_dedicated) {
+        if (!_compute_queue_dedicated) {
             CASPAR_LOG(info) << L"[vk::device] no dedicated compute queue family on this GPU; "
                                 L"an external decoder would have to share the graphics queue";
         } else {
             CASPAR_LOG(info) << L"[vk::device] reserved compute queue family "
-                             << _decode_queue_family << L" for external decoders (graphics is "
+                             << _compute_queue_family << L" for external decoders (graphics is "
                              << queue_family << L")";
         }
 
-        // The VIDEO ENCODE family, found by querying the physical device: vk-bootstrap has no
-        // notion of video queue types, and the encode codecs need a family carrying
-        // VK_QUEUE_VIDEO_ENCODE_BIT_KHR rather than the compute one reserved above.
+        // The VIDEO families, found by querying the physical device: vk-bootstrap has no notion
+        // of video queue types, so it never names them -- but its default queue setup DOES create
+        // one queue in every family (VkBootstrap.cpp:1613-1617, the `queue_descriptions.empty()`
+        // branch), so the queues themselves already exist and only their indices are missing.
+        //
+        // Worth stating because the opposite was assumed once, and acting on it would have made
+        // things worse: replacing the default with `custom_queue_setup` to "create" these queues
+        // would have created FEWER, since a hand-written list only covers the families it names.
+        //
+        // A video codec needs the family carrying its own bit, not the compute one reserved
+        // above. Handing an encode codec the compute family is what made VP9 FAULT rather than
+        // decline on the decode side.
         {
             const auto families = _physical_device.getQueueFamilyProperties();
-            for (uint32_t i = 0; i < families.size(); ++i) {
-                if (families[i].queueFlags & vk::QueueFlagBits::eVideoEncodeKHR) {
-                    _encode_queue_family  = i;
-                    _encode_queue_present = true;
-                    break;
-                }
-            }
-            if (_encode_queue_present) {
+            const auto find     = [&](vk::QueueFlagBits bit) -> int {
+                for (uint32_t i = 0; i < families.size(); ++i)
+                    if (families[i].queueFlags & bit)
+                        return static_cast<int>(i);
+                return -1;
+            };
+
+            const int encode_family = find(vk::QueueFlagBits::eVideoEncodeKHR);
+            if (encode_family >= 0) {
+                _encode_queue_family  = static_cast<uint32_t>(encode_family);
+                _encode_queue_present = true;
                 CASPAR_LOG(info) << L"[vk::device] video ENCODE queue family "
                                  << _encode_queue_family << L" is available to an external encoder";
             } else {
                 CASPAR_LOG(info) << L"[vk::device] this GPU exposes no video encode queue family; "
                                     L"the VK_KHR_video_encode codecs cannot run on it";
+            }
+
+            const int decode_family = find(vk::QueueFlagBits::eVideoDecodeKHR);
+            if (decode_family >= 0) {
+                _video_decode_queue_family  = static_cast<uint32_t>(decode_family);
+                _video_decode_queue_present = true;
+                CASPAR_LOG(info) << L"[vk::device] video DECODE queue family "
+                                 << _video_decode_queue_family
+                                 << L" is available to an external decoder";
+            } else {
+                CASPAR_LOG(info) << L"[vk::device] this GPU exposes no video decode queue family; "
+                                    L"the VK_KHR_video_decode codecs (H.264, HEVC, AV1, VP9) "
+                                    L"cannot run on it";
             }
         }
 
@@ -1921,28 +1949,35 @@ vk::PhysicalDeviceMemoryProperties device::getMemoryProperties() { return impl_-
 // on this GPU with 5 queue families (graphics/transfer/compute/decode/encode) and 23
 // extensions. This device has ONE graphics family. That is not necessarily a problem for
 // the compute codecs -- `prores_vulkan` declares `VK_QUEUE_COMPUTE_BIT` and NVIDIA's
-// graphics family carries COMPUTE -- but it is why the Vulkan VIDEO codecs (h264/hevc/
-// av1/vp9, which need VK_KHR_video_decode_queue and a decode family) are a separate
-// question from the compute ones.
+// graphics family carries COMPUTE -- and the Vulkan VIDEO codecs (h264/hevc/av1/vp9) were a
+// separate question because they need VK_KHR_video_decode_queue and a family carrying
+// VK_QUEUE_VIDEO_DECODE_BIT_KHR.
+//
+// That question is now answered rather than open: the families are reported by
+// `getVideoDecodeQueueFamily()` / `hasVideoDecodeQueue()`, and their QUEUES already exist --
+// vk-bootstrap's default setup creates one from every family, which is why nothing had to
+// change about device creation to reach them.
 /// A queue another API may submit on without racing the mixer. See the note at its
-/// creation for why this exists rather than a lock. Null when `hasDedicatedDecodeQueue()`
+/// creation for why this exists rather than a lock. Null when `hasDedicatedComputeQueue()`
 /// is false, in which case the family index equals the graphics one.
 const std::vector<std::string>& device::getEnabledDeviceExtensions() const
 {
     return impl_->_enabled_device_extensions;
 }
 
-vk::Queue device::getDecodeQueue() const { return impl_->_decode_queue; }
+vk::Queue device::getComputeQueue() const { return impl_->_compute_queue; }
 
-uint32_t device::getDecodeQueueFamily() const { return impl_->_decode_queue_family; }
+uint32_t device::getComputeQueueFamily() const { return impl_->_compute_queue_family; }
 
-bool device::hasDedicatedDecodeQueue() const { return impl_->_decode_queue_dedicated; }
+bool device::hasDedicatedComputeQueue() const { return impl_->_compute_queue_dedicated; }
 const vk::PhysicalDeviceFeatures& device::getEnabledFeatures10() const { return impl_->_enabled_features10; }
 const vk::PhysicalDeviceVulkan11Features& device::getEnabledFeatures11() const { return impl_->_enabled_features11; }
 const vk::PhysicalDeviceVulkan12Features& device::getEnabledFeatures12() const { return impl_->_enabled_features12; }
 const vk::PhysicalDeviceVulkan13Features& device::getEnabledFeatures13() const { return impl_->_enabled_features13; }
 uint32_t device::getEncodeQueueFamily() const { return impl_->_encode_queue_family; }
 bool     device::hasEncodeQueue() const { return impl_->_encode_queue_present; }
+uint32_t device::getVideoDecodeQueueFamily() const { return impl_->_video_decode_queue_family; }
+bool     device::hasVideoDecodeQueue() const { return impl_->_video_decode_queue_present; }
 
 vk::Instance device::getVkInstance() const { return vk::Instance(impl_->_vkb_instance.instance); }
 

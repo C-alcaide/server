@@ -36,10 +36,12 @@ shared_device_info describe_shared_device(void* vk_device)
     info.device          = static_cast<VkDevice>(dev->getVkDevice());
     info.get_proc_addr   = reinterpret_cast<void*>(dev->getInstanceProcAddr());
     info.graphics_qf     = dev->getGraphicsQueueFamily();
-    info.decode_qf       = dev->getDecodeQueueFamily();
-    info.decode_qf_isolated        = dev->hasDedicatedDecodeQueue();
+    info.compute_qf                = dev->getComputeQueueFamily();
+    info.compute_qf_isolated       = dev->hasDedicatedComputeQueue();
     info.encode_qf                 = dev->getEncodeQueueFamily();
     info.encode_qf_present         = dev->hasEncodeQueue();
+    info.video_decode_qf           = dev->getVideoDecodeQueueFamily();
+    info.video_decode_qf_present   = dev->hasVideoDecodeQueue();
     info.mixer_device              = dev;
     info.lock_queue   = [](void* d) { static_cast<device*>(d)->lock_queue(); };
     info.unlock_queue = [](void* d) { static_cast<device*>(d)->unlock_queue(); };

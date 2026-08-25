@@ -102,9 +102,9 @@ class device final
     /// device.cpp for what FFmpeg's `AVVulkanDeviceContext` asks for and why the single
     /// graphics queue family matters.
     vk::Instance                       getVkInstance() const;
-    /// A queue reserved for another API (an FFmpeg Vulkan decoder) to submit on, so that
-    /// sharing this device does not mean sharing a queue. Check
-    /// `hasDedicatedDecodeQueue()` first: on a GPU with no separate compute family this
+    /// A queue reserved for another API (an FFmpeg Vulkan COMPUTE decoder) to submit on, so
+    /// that sharing this device does not mean sharing a queue. Check
+    /// `hasDedicatedComputeQueue()` first: on a GPU with no separate compute family this
     /// falls back to the graphics queue's family, which is not isolation.
     /// The device extensions this device enabled. Another API sharing it must be told
     /// what it may rely on; FFmpeg's `enabled_dev_extensions` is a declaration by the
@@ -118,9 +118,9 @@ class device final
     const vk::PhysicalDeviceVulkan11Features& getEnabledFeatures11() const;
     const vk::PhysicalDeviceVulkan12Features& getEnabledFeatures12() const;
     const vk::PhysicalDeviceVulkan13Features& getEnabledFeatures13() const;
-    vk::Queue                          getDecodeQueue() const;
-    uint32_t                           getDecodeQueueFamily() const;
-    bool                               hasDedicatedDecodeQueue() const;
+    vk::Queue                          getComputeQueue() const;
+    uint32_t                           getComputeQueueFamily() const;
+    bool                               hasDedicatedComputeQueue() const;
     /// The VIDEO ENCODE queue family, for an FFmpeg Vulkan *encoder* sharing this device.
     ///
     /// Separate from the decode accessors above because it is a different thing: those hand
@@ -133,6 +133,12 @@ class device final
     /// refuse rather than substitute another one.
     uint32_t                           getEncodeQueueFamily() const;
     bool                               hasEncodeQueue() const;
+    /// The VIDEO DECODE queue family, for `h264_vulkan`/`hevc_vulkan` DECODING through
+    /// `VK_KHR_video_decode`. Same distinction as the encode pair above: those codecs need a
+    /// family carrying `VK_QUEUE_VIDEO_DECODE_BIT_KHR`, and the compute family the accessors
+    /// further up hand out is not a substitute for it.
+    uint32_t                           getVideoDecodeQueueFamily() const;
+    bool                               hasVideoDecodeQueue() const;
     uint32_t                           getGraphicsQueueFamily() const;
     PFN_vkGetInstanceProcAddr          getInstanceProcAddr() const;
     vk::CommandPool                    getCommandPool() const;
