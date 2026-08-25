@@ -27,6 +27,7 @@
 #include <common/except.h>
 #include <common/log.h>
 
+#include <algorithm>
 #include <cstdlib>
 #include <exception>
 #include <vector>
@@ -69,13 +70,14 @@ struct av_vulkan_importer::impl
     /// unsatisfiable wait reach the shared graphics queue costs the device.
     bool wait_for_decoder(const std::vector<av_plane_source>& planes)
     {
+        const auto                 images = images_of(planes);
         std::vector<vk::Semaphore> sems;
         std::vector<uint64_t>      values;
-        sems.reserve(planes.size());
-        values.reserve(planes.size());
-        for (const auto& p : planes) {
-            sems.push_back(static_cast<VkSemaphore>(p.semaphore));
-            values.push_back(p.sem_value);
+        sems.reserve(images.size());
+        values.reserve(images.size());
+        for (const auto* p : images) {
+            sems.push_back(static_cast<VkSemaphore>(p->semaphore));
+            values.push_back(p->sem_value);
         }
 
         vk::SemaphoreWaitInfo wi{};
@@ -91,6 +93,26 @@ struct av_vulkan_importer::impl
             return false;
         }
         return true;
+    }
+
+    /// The plane sources that OWN their image, one per distinct `image_index`.
+    ///
+    /// Everything per-image goes through this: the timeline wait, the layout transition and
+    /// the signal. With a multi-planar frame two sources name one image, and doing any of
+    /// those three twice is wrong -- a duplicated transition is a write-after-write hazard on
+    /// the same subresource, and signalling one timeline semaphore twice in a single submit is
+    /// invalid outright.
+    static std::vector<const av_plane_source*> images_of(const std::vector<av_plane_source>& planes)
+    {
+        std::vector<const av_plane_source*> out;
+        for (const auto& p : planes) {
+            const bool seen = std::any_of(out.begin(), out.end(), [&](const av_plane_source* q) {
+                return q->image_index == p.image_index;
+            });
+            if (!seen)
+                out.push_back(&p);
+        }
+        return out;
     }
 
     void wait_for_previous_copy()
@@ -187,14 +209,30 @@ bool av_vulkan_importer::copy_planes(const std::vector<av_plane_source>&        
             cmd.reset(vk::CommandBufferResetFlags{});
             cmd.begin(vk::CommandBufferBeginInfo{vk::CommandBufferUsageFlagBits::eOneTimeSubmit});
 
+            // The whole image for a transition -- eColor covers every aspect plane of a
+            // multi-planar image, and naming one plane's aspect in a barrier would leave the
+            // others in the layout the decoder left them in.
             const auto range = vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1);
+
+            /// FFmpeg's own mapping, `libavutil/vulkan.c`'s `ff_vk_aspect_flag`: a plane that
+            /// has an image to itself is that image's colour aspect, and a plane sharing one is
+            /// an aspect plane of it.
+            const auto aspect_of = [](const av_plane_source& p) {
+                static const vk::ImageAspectFlagBits planes_[] = {vk::ImageAspectFlagBits::ePlane0,
+                                                                  vk::ImageAspectFlagBits::ePlane1,
+                                                                  vk::ImageAspectFlagBits::ePlane2};
+                return p.aspect_plane < 0 ? vk::ImageAspectFlagBits::eColor
+                                          : planes_[std::min(p.aspect_plane, 2)];
+            };
 
             // Sources: from whatever layout FFmpeg left them in, to transfer-read. The
             // layout is carried per plane in AVVkFrame rather than assumed, because the
             // decoder does not promise a particular one.
+            const auto                           src_images = m.images_of(planes);
             std::vector<vk::ImageMemoryBarrier2> pre;
-            pre.reserve(planes.size() * 2);
-            for (const auto& p : planes) {
+            pre.reserve(src_images.size() + planes.size());
+            for (const auto* pp : src_images) {
+                const auto&             p = *pp;
                 vk::ImageMemoryBarrier2 b{};
                 b.oldLayout           = static_cast<vk::ImageLayout>(p.layout);
                 b.newLayout           = vk::ImageLayout::eTransferSrcOptimal;
@@ -229,11 +267,14 @@ bool av_vulkan_importer::copy_planes(const std::vector<av_plane_source>&        
                 cmd.pipelineBarrier2(dep);
             }
 
-            const auto layers = vk::ImageSubresourceLayers(vk::ImageAspectFlagBits::eColor, 0, 0, 1);
+            // The DESTINATION is always a plain single-plane texture, so its aspect is
+            // eColor whatever the source's was.
+            const auto dst_layers = vk::ImageSubresourceLayers(vk::ImageAspectFlagBits::eColor, 0, 0, 1);
             for (size_t i = 0; i < planes.size(); ++i) {
-                vk::ImageCopy c(layers,
+                const auto src_layers = vk::ImageSubresourceLayers(aspect_of(planes[i]), 0, 0, 1);
+                vk::ImageCopy c(src_layers,
                                 vk::Offset3D{},
-                                layers,
+                                dst_layers,
                                 vk::Offset3D{},
                                 vk::Extent3D{static_cast<uint32_t>(planes[i].width),
                                              static_cast<uint32_t>(planes[i].height),
@@ -246,14 +287,15 @@ bool av_vulkan_importer::copy_planes(const std::vector<av_plane_source>&        
             }
 
             std::vector<vk::ImageMemoryBarrier2> post;
-            post.reserve(dst.size() + planes.size());
+            post.reserve(dst.size() + src_images.size());
             // Put the sources back exactly where they were found. `AVVkFrame::layout[]` is
             // documented as updated after every barrier, and a client that moves an image
             // and does not say so leaves FFmpeg's next barrier with a wrong oldLayout --
             // which discards contents rather than transitioning them. Restoring here is
             // preferable to reporting the new layout back, because it cannot be forgotten
             // at a call site.
-            for (const auto& p : planes) {
+            for (const auto* pp : src_images) {
+                const auto&             p = *pp;
                 vk::ImageMemoryBarrier2 b{};
                 b.oldLayout           = vk::ImageLayout::eTransferSrcOptimal;
                 b.newLayout           = static_cast<vk::ImageLayout>(p.layout);
@@ -306,12 +348,15 @@ bool av_vulkan_importer::copy_planes(const std::vector<av_plane_source>&        
             // graphics queue, so an unsatisfiable value would block every other channel
             // behind it. `wait_for_decoder` above does it on the host instead, and declines
             // the frame on timeout rather than risking the queue.
+            // PER IMAGE. Two plane sources of a multi-planar frame carry the same
+            // semaphore, and signalling one timeline twice in a single submit is invalid --
+            // not merely redundant.
             std::vector<vk::Semaphore> sems;
             std::vector<uint64_t>      signal_values;
-            sems.reserve(planes.size());
-            for (const auto& p : planes) {
-                sems.push_back(static_cast<VkSemaphore>(p.semaphore));
-                signal_values.push_back(p.sem_value + 1);
+            sems.reserve(src_images.size());
+            for (const auto* p : src_images) {
+                sems.push_back(static_cast<VkSemaphore>(p->semaphore));
+                signal_values.push_back(p->sem_value + 1);
             }
 
             vk::TimelineSemaphoreSubmitInfo timeline{};

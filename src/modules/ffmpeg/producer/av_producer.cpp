@@ -1387,12 +1387,45 @@ describe_av_vulkan_planes(const AVFrame* av, common::bit_depth& depth_out, bool&
     alpha_out = nb_planes == 4;
     const bool semi_planar = nb_planes == 2;
 
+    // ONE IMAGE PER PLANE, checked rather than assumed. `disable_multiplane` on the frames
+    // context is what asks for that, and asking is not the same as getting: a Vulkan Video
+    // decoder may need a multi-planar format for its decode profile and hand back a single
+    // image with disjoint aspect planes. The importer copies with VK_IMAGE_ASPECT_COLOR_BIT,
+    // so a multiplane frame read plane by plane is wrong size, wrong contents, no error --
+    // and `img[1]` being null makes it "incompletely described" instead, which is the shape
+    // this reported before the check existed.
+    // `AVVkFrame` carries no image COUNT -- `img[]` is a fixed array and the unused entries
+    // are VK_NULL_HANDLE -- so count them.
+    int images = 0;
+    for (int i = 0; i < AV_NUM_DATA_POINTERS; ++i)
+        if (vkf->img[i] != VK_NULL_HANDLE)
+            ++images;
+    if (images < 1) {
+        CASPAR_LOG(debug) << L"[av_producer] the AVVkFrame carries no images";
+        return out;
+    }
+    // FEWER IMAGES THAN PLANES IS NORMAL, not a refusal. A `VK_KHR_video_decode` decoder
+    // hands back ONE multi-planar image whose planes are aspects of it, and no flag changes
+    // that: `avcodec_get_hw_frames_parameters` pre-sets the frames context's `format[0]` to
+    // what the decode profile requires, and `vulkan_frames_init` then passes a literal 0 for
+    // `disable_multiplane` on that branch (hwcontext_vulkan.c). So the mapping below is
+    // FFmpeg's own -- `libavutil/vulkan.c`, `ff_vk_aspect_flag` -- rather than a preference:
+    // a plane with an image to itself is that image's colour aspect, and a plane sharing one
+    // is an aspect plane of it.
+    const bool multiplanar = images < nb_planes;
+
     for (int i = 0; i < nb_planes; ++i) {
         accelerator::vulkan::av_plane_source ps;
-        ps.image     = vkf->img[i];
-        ps.semaphore = vkf->sem[i];
-        ps.sem_value = vkf->sem_value[i];
-        ps.layout    = static_cast<int>(vkf->layout[i]);
+        // `min(plane, images - 1)`, which is one image each when there are enough and image
+        // 0 for every plane when there is one. The semaphore, the value and the layout belong
+        // to the IMAGE, so they follow that index rather than the plane's.
+        const int img   = std::min(i, images - 1);
+        ps.image_index  = img;
+        ps.aspect_plane = multiplanar ? i : -1;
+        ps.image        = vkf->img[img];
+        ps.semaphore    = vkf->sem[img];
+        ps.sem_value    = vkf->sem_value[img];
+        ps.layout       = static_cast<int>(vkf->layout[img]);
         // Chroma planes only; alpha in yuva* is full resolution like luma.
         const bool sub = i == 1 || i == 2;
         ps.width      = sub ? AV_CEIL_RSHIFT(av->width, pd->log2_chroma_w) : av->width;

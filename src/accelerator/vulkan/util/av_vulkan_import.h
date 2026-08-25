@@ -39,13 +39,34 @@ namespace caspar { namespace accelerator { namespace vulkan {
 /// `VkImageLayout` as its integer value.
 struct av_plane_source
 {
-    void*    image     = nullptr; //< VkImage, from AVVkFrame::img[i]
-    void*    semaphore = nullptr; //< VkSemaphore (timeline), from AVVkFrame::sem[i]
-    uint64_t sem_value = 0;       //< AVVkFrame::sem_value[i] -- the value to WAIT on
-    int      layout    = 0;       //< AVVkFrame::layout[i], as a VkImageLayout value
+    void*    image     = nullptr; //< VkImage, from AVVkFrame::img[image_index]
+    void*    semaphore = nullptr; //< VkSemaphore (timeline), from AVVkFrame::sem[image_index]
+    uint64_t sem_value = 0;       //< AVVkFrame::sem_value[image_index] -- the value to WAIT on
+    int      layout    = 0;       //< AVVkFrame::layout[image_index], as a VkImageLayout value
     int      width     = 0;
     int      height    = 0;
     int      components = 1;      //< 1 for Y/Cb/Cr planes; 2 for a semi-planar CbCr plane
+
+    /// WHICH IMAGE, because a plane does not always get one of its own.
+    ///
+    /// FFmpeg hands a frame over as either one image per plane or a single MULTI-PLANAR image
+    /// whose planes are aspects of it, and which one is not ours to choose. The compute
+    /// decoders can be asked for the first via `AV_VK_FRAME_FLAG_DISABLE_MULTIPLANE`; a
+    /// `VK_KHR_video_decode` decoder cannot, because `avcodec_get_hw_frames_parameters`
+    /// pre-sets `AVVulkanFramesContext::format[0]` to the format its decode profile requires
+    /// and `vulkan_frames_init` then passes a literal 0 for `disable_multiplane`
+    /// (hwcontext_vulkan.c, the `format[0] != VK_FORMAT_UNDEFINED` branch). So h264/hevc
+    /// ALWAYS arrive as one image, whatever we ask for.
+    ///
+    /// Several plane sources may therefore name the same image, which is why the importer
+    /// groups by this for anything that is per-image rather than per-plane: the layout
+    /// transition, the timeline wait, and the signal. Transitioning one image twice in a
+    /// batch is a hazard; signalling one timeline twice in a submit is invalid.
+    int image_index = 0;
+    /// -1 for a whole-image plane (`VK_IMAGE_ASPECT_COLOR_BIT`), else the aspect plane index
+    /// 0..2 (`VK_IMAGE_ASPECT_PLANE_0/1/2_BIT`). This mirrors FFmpeg's own mapping in
+    /// `libavutil/vulkan.c`, `ff_vk_aspect_flag`.
+    int aspect_plane = -1;
 };
 
 /// Copies an FFmpeg Vulkan frame's planes into pooled mixer textures.
