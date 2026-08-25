@@ -7,9 +7,18 @@
 
 // cuda_gl_interop_lock.h
 //
-// Process-wide mutex that serialises ALL cudaGraphicsGLRegisterImage and
-// cudaGraphicsUnregisterResource calls across every CUDA producer (ProRes,
-// NotchLC, etc.).
+// Process-wide mutex that serialises every CUDA EXTERNAL-RESOURCE import and release
+// across every CUDA producer (ProRes, NotchLC, etc.). Two pairs of calls, not one:
+//
+//   * cudaGraphicsGLRegisterImage   / cudaGraphicsUnregisterResource   (the OpenGL mixer)
+//   * cudaImportExternalMemory      / cudaDestroyExternalMemory        (the Vulkan mixer)
+//
+// THE SECOND PAIR WAS ADDED 2026-08-25, and the name of this file is now too narrow. The
+// original fix covered only the GL pair because that was the path the crash was reported on;
+// the Vulkan pair does the same job through the same driver interop layer and had no lock at
+// all. Nothing was observed to fault there -- 6 swaps of 12K ProRes against 12K NotchLC on the
+// Vulkan mixer came back clean -- but "not observed" over a handful of millisecond windows is
+// not "safe", and the asymmetry was an accident of which mixer existed when.
 //
 // WHY THIS IS NEEDED
 // ------------------

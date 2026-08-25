@@ -329,7 +329,12 @@ struct notchlc_producer_impl final : public core::frame_producer
                 cvt_[i] = std::make_shared<CudaVkTexture>(vk_tex, static_cast<VkDevice>(vk_device_->getVkDevice()));
             }
             use_host_copy_ = false;
-            CASPAR_LOG(info) << L"[notchlc_producer] Vulkan CUDA zero-copy active"
+            // WORDED LIKE THE PRORES PRODUCER'S LINE, deliberately. The two said the same
+            // thing two ways -- "Vulkan CUDA zero-copy active" here against "Using CUDA-Vulkan
+            // zero-copy interop" there -- and a log-based control in the test harness matched
+            // only one of them, so this producer was counted as never having started while it
+            // plainly had. Two modules doing the same thing should say so the same way.
+            CASPAR_LOG(info) << L"[notchlc_producer] Using CUDA-Vulkan zero-copy interop"
                              << L" (" << num_slots_ << L" per-slot textures)";
         } else
 #endif

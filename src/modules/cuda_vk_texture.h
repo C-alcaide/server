@@ -35,6 +35,10 @@
 
 #ifdef ENABLE_VULKAN
 
+#include <mutex>
+
+#include "cuda_gl_interop_lock.h"
+
 #include <accelerator/vulkan/util/texture.h>
 #include <accelerator/vulkan/util/texture_wrapper.h>
 
@@ -97,7 +101,17 @@ class CudaVkTexture
         extMemDesc.size                = vk_tex_->alloc_size();
         extMemDesc.flags               = 0;
 
-        cuda_vk_check(cudaImportExternalMemory(&ext_mem_, &extMemDesc), "cudaImportExternalMemory");
+        {
+            // SERIALISED against every other CUDA import/release in the process, for the reason
+            // the interop lock header gives: an asynchronous producer swap puts one producer's
+            // import beside another's release, and this driver layer is not thread-safe across
+            // the two even for distinct resources.
+            //
+            // Scoped tightly so the lock does not span the Win32 handle close below, which is
+            // ordinary kernel work rather than driver interop.
+            std::lock_guard<std::mutex> interop_lk(caspar::cuda_gl_interop_mutex());
+            cuda_vk_check(cudaImportExternalMemory(&ext_mem_, &extMemDesc), "cudaImportExternalMemory");
+        }
 
         // Close the Win32 handle — CUDA has imported the memory and no longer
         // needs the handle.  Per the Vulkan spec, each call to
@@ -127,7 +141,13 @@ class CudaVkTexture
         if (mipmap_)
             cudaFreeMipmappedArray(mipmap_);
         if (ext_mem_)
-            cudaDestroyExternalMemory(ext_mem_);
+            {
+                // The release half of the pair above. Taken HERE rather than by the caller so a
+                // new call site cannot forget it -- which is exactly the trap the two copied
+                // `cuda_gl_texture.h` headers document about their own class.
+                std::lock_guard<std::mutex> interop_lk(caspar::cuda_gl_interop_mutex());
+                cudaDestroyExternalMemory(ext_mem_);
+            }
     }
 
     CudaVkTexture(const CudaVkTexture&)            = delete;

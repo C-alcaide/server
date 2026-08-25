@@ -469,7 +469,11 @@ old read_thread_: cudaGraphicsUnregisterResource + wglDeleteContext (teardown)
 
 **Fix:** Added `src/modules/cuda_gl_interop_lock.h` — a single process-wide `std::mutex` that both `prores_producer.cpp` and `notchlc_producer.cpp` acquire around the `cudaGraphicsGLRegisterImage` burst at `read_loop()` startup and the `cudaGraphicsUnregisterResource` burst at `read_loop()` cleanup. The mutex is **not** held during normal frame decode (map/unmap/submit), so there is zero steady-state performance impact.
 
-**Rule for future CUDA-GL producers:** Any new producer that calls `cudaGraphicsGLRegisterImage` or `cudaGraphicsUnregisterResource` must hold `caspar::cuda_gl_interop_mutex()` during those calls.
+**Rule for future CUDA producers:** any code that IMPORTS OR RELEASES a CUDA external resource must hold `caspar::cuda_gl_interop_mutex()` across the call — `cudaGraphicsGLRegisterImage` / `cudaGraphicsUnregisterResource` on the OpenGL mixer, **and `cudaImportExternalMemory` / `cudaDestroyExternalMemory` on the Vulkan one**.
+
+**The narrow version of this rule is what let a gap through.** It named the two GL functions, so `cuda_vk_texture.h` satisfied it while doing the unguarded Vulkan equivalent — and on the Vulkan mixer these producers *always* take that path, so the rule protected what had become the less-used one. Fixed 2026-08-25, with the lock taken inside `CudaVkTexture` rather than by its callers so a new call site cannot forget it.
+
+**Reproducing the pressure this crash needed:** `cli.py producer-swap --clips 12k` alternates 12K ProRes and 12K NotchLC on one layer, and the raster is the point. At 1080p a slot is ~16 MB and nothing is ever exhausted; at 12K one ProRes producer holds 7 × ~604 MB, and because the stage swap is asynchronous both producers hold theirs at once. Measured 2026-08-25: the OpenGL arm **does** exhaust VRAM (`prores_decode_ctx_create: out of memory`) and the producer declines cleanly rather than the driver faulting, while the Vulkan arm completed 6 of 6 swaps without exhausting anything — the zero-copy path needs less. A 1080p run is a check that cannot fail for this defect.
 
 ---
 
