@@ -1,6 +1,48 @@
 CasparVP — Unreleased
 ==========================================
 
+### Added: H.264/HEVC decoded through Vulkan Video, behind `<vulkan-video-decode>`
+
+Off by default. FFmpeg's `VK_KHR_video_decode` decoders on the mixer's own Vulkan device, so
+h264/hevc reach the mixer without a D3D11 interop bridge. This is the second family FFmpeg
+advertises under `AV_HWDEVICE_TYPE_VULKAN`; `<vulkan-decode>` already covered the first (the
+COMPUTE decoders: ProRes, ProRes RAW, FFV1, DPX).
+
+**Two switches, not one.** A compute decoder needs a compute queue; these need a video-decode
+queue AND a profile the driver accepts, and when either is missing FFmpeg *faults* rather than
+declining. One element would let a fault in the new path switch off the path that works.
+
+**What it is for, because it is not what the 10x figures elsewhere suggest.** D3D11VA already
+decodes these codecs to a GPU texture with no host round trip, so there is no host-CPU saving:
+measured against it on the same clip and binary, 4 layers, 2 interleaved rounds, +1% on H.264 and
+-7.4% on HEVC — no reliable difference. What is measurably better is GPU-side:
+
+| | D3D11VA | Vulkan Video |
+| :--- | ---: | ---: |
+| GPU utilisation | 4.4-5.1 % | **3.4-3.8 %** |
+| peak VRAM | 1498 MB | **1347 MB** |
+| decode-time, fraction of the frame budget | 0.024-0.046 | **0.002** |
+
+which follows from there being no D3D11 device, no shared NT handles and no per-producer import
+bridge. And it is the same code off Windows, which D3D11VA can never be.
+
+**Picture: byte-identical to the software path** on 8-bit H.264 and 10-bit HEVC alike — 0
+differing pixels, max delta 0, same frame confirmed from a burnt-in marker, all arms provably on
+different paths. Validation, 4 concurrent producers: 4/4 active, 0 device lost, no SYNC-HAZARD, no
+THREADING ERROR; three VUIDs appear and all three are FFmpeg-side, on
+`vkCmdBeginVideoCodingKHR` and image creation.
+
+Two things inside it are worth knowing before touching this path. A video decoder ALWAYS hands
+back one multi-planar `VkImage` rather than one image per plane -- `disable_multiplane` is ignored
+whenever the frames context's format is pre-set, which it always is for a decode profile -- so the
+importer reads it by aspect plane, per FFmpeg's own `ff_vk_aspect_flag` mapping. And **p010 is not
+`bit10`**: it reports depth 10 with the bits in the HIGH end of each 16-bit word (shift 6), so
+keying on depth alone would apply a 64x precision factor to already-normalised data and produce a
+picture 64 times too bright on the hardware path only. `docs/FFMPEG_8_MIGRATION.md` §12 has both.
+
+AV1 and VP9 use the same queue and are deliberately excluded until there is a fixture and a
+measurement: VP9 is the codec that faulted rather than declining.
+
 ### Measured: network streams are GPU-accelerated in and out, on both modules
 
 Not a change — a claim that had never been checked. Every GPU measurement in this tree used a

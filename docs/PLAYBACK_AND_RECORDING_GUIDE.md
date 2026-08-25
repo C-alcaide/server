@@ -60,14 +60,22 @@ one channel is not necessarily the one that reaches furthest.
 | **Software** | `<gpu-direct-decode>false</gpu-direct-decode>` | nothing | yes — decode and upload |
 | **D3D11VA GPU-direct** | `<gpu-direct-decode>true</gpu-direct-decode>` *(default)* | a codec the GPU decodes (H.264, HEVC, VP9, AV1) | **no** |
 | **CUDA ProRes** | `PLAY 1-1 CUDA_PRORES "clip"` | ProRes source, NVIDIA GPU | no |
-| **FFmpeg Vulkan** | `<vulkan-decode>true</vulkan-decode>` | Vulkan mixer; ProRes, ProRes RAW, DPX or FFV1 | no |
+| **FFmpeg Vulkan compute** | `<vulkan-decode>true</vulkan-decode>` | Vulkan mixer; ProRes, ProRes RAW, DPX or FFV1 | no |
+| **FFmpeg Vulkan Video** | `<vulkan-video-decode>true</vulkan-video-decode>` | Vulkan mixer; H.264 or HEVC; a GPU with a video-decode queue | no |
+| **GStreamer** | `PLAY 1-1 GST "pipeline"` | a GStreamer installation; see `docs/GSTREAMER_GUIDE.md` | no on its GPU route |
+
+**The last two switches are not one switch, and that is deliberate.** `<vulkan-decode>` reaches
+FFmpeg's Vulkan **compute** decoders, which need only a compute queue.
+`<vulkan-video-decode>` reaches `VK_KHR_video_decode`, which needs a video-decode queue *and* a
+profile the driver accepts — and when either is missing FFmpeg **faults** rather than declining.
+Folding them together would let a fault in one switch off the other.
 
 ### The exact path each one takes
 
-![The four decode routes as pipelines, step by step](images/recording_decode_paths.png)
+![The four FFmpeg decode routes as pipelines, step by step](images/recording_decode_paths.png)
 
-The diagram is the summary; the blocks below are the same four paths with the exact formats and
-the reasons each restriction exists.
+The diagram covers the four FFmpeg routes; GStreamer has its own guide. The blocks below are the
+same paths with the exact formats and the reasons each restriction exists.
 
 **Software.** The safe path, and the only one that handles every codec.
 
@@ -117,6 +125,28 @@ file → FFmpeg Vulkan compute decoder (prores · prores_raw · dpx · ffv1)
 
 Because it is a compute shader it needs no ProRes hardware, which is why ProRes decodes on the
 GPU here and cannot on the D3D11VA route.
+
+**FFmpeg Vulkan Video** — H.264 and HEVC on the GPU's own video-decode engine, reached through
+Vulkan instead of D3D11.
+
+```
+file → VK_KHR_video_decode on the mixer's device (h264 · hevc)
+     → ONE multi-planar VkImage: nv12 at 8-bit, p010 at 10-bit
+     → copied plane by plane into mixer textures, by aspect plane
+     → mixer: shader converts YCbCr → RGB
+```
+
+**This is not a CPU saving over D3D11VA**, and the numbers below say so: that route already
+decodes these codecs to a GPU texture with no host round trip. Measured against it on the same
+clip and binary, 4 layers: host CPU +1% on H.264 and −7.4% on HEVC, i.e. no reliable difference.
+What is better is GPU-side — **4.4–5.1% utilisation down to 3.4–3.8%**, **1498 MB peak VRAM down
+to 1347 MB**, and the decode stage down from 0.024–0.046 of the frame budget to **0.002** —
+because there is no D3D11 device, no shared handles and no per-producer import bridge. And it is
+the same code off Windows, which D3D11VA can never be.
+
+The picture is **byte-identical to the software path** on 8-bit H.264 and 10-bit HEVC alike: 0
+differing pixels, max delta 0. `docs/FFMPEG_8_MIGRATION.md` §12 has the mechanism, including why
+the multi-planar image is not optional and the P010 trap that comes with it.
 
 **A fifth route exists for one codec.** `CUDA_NOTCHLC` is a second CUDA decoder in this fork,
 built the same way as the ProRes one and likewise usable on either mixer. It is not in the table

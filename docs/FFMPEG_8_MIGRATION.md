@@ -1312,3 +1312,114 @@ worth finishing before any more hypotheses are tried.
 fences, and the layer tracks objects by handle, so handle reuse could produce a false positive.
 Nothing here distinguishes that from a genuine shared fence yet. The TDR is real either way.
 
+
+---
+
+## 12. H.264/HEVC through Vulkan Video
+
+§6.1 covers the FFmpeg 8 **compute** decoders -- ProRes, ProRes RAW, FFV1, DPX -- which need only
+a compute queue and are reached by `<vulkan-decode>`. This is the other family FFmpeg advertises
+under `AV_HWDEVICE_TYPE_VULKAN`: H.264 and HEVC through `VK_KHR_video_decode`, on the mixer's own
+device, reached by **`<vulkan-video-decode>`**.
+
+Both are off by default and they are **separate switches on purpose**. A compute decoder needs a
+compute queue; these need a video-decode queue *and* a profile the driver accepts, and when
+either is missing FFmpeg **faults** rather than declining -- §6.1.2's VP9 finding. One switch
+would let a fault here take the working path down with it.
+
+### 12.1 What had to change, and what did not
+
+Most of it was already there: the shared `AVHWDeviceContext` on the mixer's `VkDevice`, the
+`AVVkFrame` importer, `core::pixel_format::nv12` in both shaders (the D3D11VA route's format),
+and the depth-derived YCbCr scale. Three things were missing.
+
+**A `qf` entry for the video-decode family.** The queue itself was never the problem --
+vk-bootstrap's default setup creates one queue in every family, so it existed all along -- but
+nothing looked the family up. `find(eVideoEncodeKHR)` existed and `find(eVideoDecodeKHR)` did not.
+Declared with `video_caps` for H.264 and H.265, carrying the same uniqueness guard as the encode
+entry (VUID-VkImageCreateInfo-sharingMode-01420: these indices become an image's
+`pQueueFamilyIndices` under CONCURRENT sharing). Measured on this box: graphics 0, compute 2,
+decode 3, encode 4.
+
+**Semi-planar formats.** `describe_av_vulkan_planes` returned empty for anything but 3 or 4
+planes, so nv12/p010 never reached the mixer. Two planes now publish `nv12` -- the same format and
+shader case D3D11VA has always used -- with 2 components on the interleaved chroma plane.
+
+**P010 IS NOT `bit10`, and this is the trap worth carrying forward.** p010 and yuv420p10le both
+report `depth == 10`, and they are not the same thing: p010's ten bits sit in the HIGH bits of
+each 16-bit word (`pixdesc.c`: `{ 0, 2, 0, 6, 10 }` -- shift 6), where yuv420p10le's are
+LSB-aligned with shift 0. Keying on depth alone gives p010 `bit10` and its 64x precision factor,
+applied to data already normalised across the full 16-bit range -- a picture roughly 64 times too
+bright, arriving *only* on the hardware path, so it reads as "the Vulkan Video decoder is broken".
+Keyed on `shift != 0` instead, which makes it `bit16` with factor 1; the YCbCr decode's
+depth-derived scale then lands neutral chroma exactly (`32768/65535 * 65535/256 = 128`).
+
+### 12.2 One multi-planar image, not one image per plane
+
+This is the part that does not work the way the compute path does, and no flag changes it.
+
+The compute decoders are asked for one image per plane with
+`AV_VK_FRAME_FLAG_DISABLE_MULTIPLANE` and comply. A video decoder **cannot**:
+`avcodec_get_hw_frames_parameters` pre-sets `AVVulkanFramesContext::format[0]` to the format its
+decode profile requires, and `vulkan_frames_init` then takes the `format[0] != VK_FORMAT_UNDEFINED`
+branch, which passes a **literal 0** where the other branch passes `disable_multiplane`
+(`hwcontext_vulkan.c`). So H.264/HEVC arrive as one multi-planar `VkImage` whatever we ask for.
+
+Before this was understood the route engaged and then stood down 4/4 every frame, to a host
+readback, reporting *"a plane is incompletely described"* -- because `img[1]` was null.
+
+The mapping is FFmpeg's own, `libavutil/vulkan.c`'s `ff_vk_aspect_flag`, and the same one
+upstream's Vulkan-decode series uses: image `min(plane, images - 1)`, and the aspect is the
+image's **colour** when a plane has an image to itself, `PLANE_0/1/2` when it shares one. One
+expression covers both shapes rather than branching on which decoder produced the frame.
+
+What is per-image and what is per-plane is the whole correctness argument:
+
+| | scope | why |
+| :--- | :--- | :--- |
+| the copy | per **plane** | each plane goes to its own mixer texture and reads its own aspect. The destination is a plain single-plane texture, so its aspect is always `eColor` |
+| the timeline wait, the layout transition, the restore, the signal | per **image** | two plane sources of a multi-planar frame name one image. A duplicated transition is a write-after-write hazard on one subresource, and signalling one timeline semaphore twice in a single submit is **invalid**, not merely redundant. The barrier uses `eColor` to cover every aspect at once -- naming one plane's aspect would leave the others in the decoder's layout |
+
+### 12.3 Measured
+
+1080p25, 4 layers, 2 interleaved rounds, against **D3D11VA on the same clip and binary**
+(`decode-cost --arms auto,vulkan_video`, 2026-08-25):
+
+| | D3D11VA | Vulkan Video |
+| :--- | ---: | ---: |
+| host CPU, h264 | 1.54 cores | 1.56 (**+1%**) |
+| host CPU, hevc | 1.54 cores | 1.43 (**-7.4%**) |
+| GPU utilisation | 4.4-5.1 % | **3.4-3.8 %** |
+| peak VRAM | 1498 MB | **1347 MB** |
+| decode-time, fraction of the frame budget | 0.024-0.046 | **0.002** |
+| producers engaged | - | **4/4** |
+
+**Picture: byte-identical to the software path** -- 0 differing pixels, max delta 0, on 8-bit
+H.264 *and* 10-bit HEVC, same frame confirmed from the burnt-in marker, with all three arms
+provably on different paths (`gpu-direct-parity --arm vulkan_video`). The 10-bit run is the one
+that exercises §12.1's shift trap, and the log confirms it: `2 planes, depth 3`, i.e. `bit16`.
+
+**Validation: clean on our side.** `vk-decode-soak --route vulkan_video --validate`, 4 concurrent
+producers: 4/4 active, 0 device lost, 0 stood down, no SYNC-HAZARD and no THREADING ERROR. Three
+VUIDs do appear and none is ours -- two on `vkCmdBeginVideoCodingKHR`
+(`pPictureResource-07240`, `flags-07244`, FFmpeg's DPB image-view bindings) and one
+`VkImageCreateInfo-pNext-06811`. Recorded rather than allowlisted, because they are FFmpeg-side.
+
+### 12.4 What this is and is not for
+
+**It is not a host-CPU saving over the default**, and the numbers above say so: D3D11VA already
+decodes these codecs to a GPU texture with no host round trip. What is measurably better is GPU
+side -- about a fifth to a quarter less utilisation, ~150 MB less peak VRAM, and a decode stage
+that costs a twentieth of the frame budget it did -- which follows from there being no D3D11
+device, no shared NT handles and no per-producer import bridge.
+
+**And it is the same code off Windows**, which D3D11VA can never be. That is the durable reason.
+
+**A non-finding, recorded so it is not rediscovered as one:** tick-time max showed a 13-15x
+frame-budget spike in two runs, once on each arm (12.95 on D3D11VA in the hevc run, 15.03 on
+Vulkan Video in an h264 run). It appears on both routes across runs, so it is ambient on this box
+and not attributable to either.
+
+**Still open**: AV1 and VP9 use the same queue and are deliberately excluded. AV1 encode does not
+exist on Ampere, and VP9 is the codec that faulted rather than declining in §6.1.2. Neither goes
+in without a fixture and a measurement.
