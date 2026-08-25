@@ -130,6 +130,34 @@ cudaError_t prores_decode_frame_async(
     bool              is_interlaced,
     cudaArray_t       d_gl_array);
 
+// Planar variant -- writes the decoder's OWN planes out instead of a converted picture, so
+// the MIXER does the YCbCr->RGB conversion from the frame's declared colour space.
+//
+// Half the bytes of the BGRA16 route at 4:2:2 (8.3 MB against 16.6 MB a 1080p frame), in the
+// VRAM a slot holds and again in what the mixer samples every frame. Used by the Vulkan path
+// only: the OpenGL one targets a single opaque `cudaArray_t` per slot, and three of them would
+// mean three `cudaGraphicsGLRegisterImage` registrations per slot -- the call this module has
+// already had to serialise behind a process-wide lock.
+//
+// The planes carry 10-bit LIMITED-RANGE codes clipped to [4, 1019], neutral chroma 512 -- the
+// same convention as FFmpeg's yuv422p10le. The caller must back them with R16 textures DECLARED
+// `bit10`, because the mixer takes its precision factor from the TEXTURE's depth; `bit16` gives
+// a factor of 1 and a picture 4x too dark.
+//
+// Sizes: Y and alpha are width x height. Cb/Cr are width/2 x height for 4:2:2 and width x height
+// for 4444. Pass nullptr for d_alpha_array on anything but 4444.
+//
+// No colour_matrix argument -- that answer belongs to the shader now.
+cudaError_t prores_decode_frame_planar_async(
+    ProResDecodeCtx*  ctx,
+    const uint8_t*    h_icpf_data,
+    size_t            icpf_size,
+    bool              is_interlaced,
+    cudaArray_t       d_y_array,
+    cudaArray_t       d_cb_array,
+    cudaArray_t       d_cr_array,
+    cudaArray_t       d_alpha_array);   // 4444 only; nullptr otherwise
+
 // Headless variant — outputs to a plain host buffer instead of a GL texture.
 // Useful for unit tests and offline processing (no OpenGL context required).
 // h_bgra16_out must point to at least ctx->width * ctx->height * 4 * sizeof(uint16_t) bytes.

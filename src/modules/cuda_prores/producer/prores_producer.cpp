@@ -92,6 +92,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <array>
 #include <cmath>
 #include <thread>
 
@@ -154,8 +155,19 @@ struct prores_producer_impl final : public core::frame_producer
     std::shared_ptr<accelerator::ogl::texture> gl_tex_[NUM_SLOTS];
     std::shared_ptr<CudaGLTexture>             cgt_   [NUM_SLOTS];
 #ifdef ENABLE_VULKAN
-    // Per-slot VK texture: one CudaVkTexture per decode slot (same as GL path).
-    std::shared_ptr<CudaVkTexture>             cvt_[NUM_SLOTS];
+    // Per-slot VK PLANES: Y, Cb, Cr and -- for 4444 only -- alpha, one CudaVkTexture each.
+    //
+    // The GL path above still holds ONE texture a slot, because its interop target is a single
+    // opaque `cudaArray_t` and three planes would mean three `cudaGraphicsGLRegisterImage`
+    // registrations per slot -- the call this module already serialises behind a process-wide
+    // lock after a crash. The Vulkan path has no such constraint and does not pay for it: at
+    // 4:2:2 the planes are half the bytes of a BGRA16 picture, in the VRAM a slot holds AND in
+    // what the mixer samples every frame, and the colour conversion moves into the shader where
+    // the channel's colour management can reach it.
+    //
+    // The asymmetry between the two paths is deliberate. `vk_planes_` is 3 or 4.
+    std::array<std::shared_ptr<CudaVkTexture>, 4> cvt_[NUM_SLOTS];
+    int                                           vk_planes_ = 0;
 #endif
 
     // Shared WGL context (Windows only): owned by read_thread_, shares object
@@ -350,14 +362,34 @@ struct prores_producer_impl final : public core::frame_producer
         // ~~ GPU textures + zero-copy interop ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #ifdef ENABLE_VULKAN
         if (use_vulkan_) {
-            // Vulkan path: one exportable VK texture per decode slot.
-            int fw = frame_info_.width, fh = frame_info_.height;
+            // Vulkan path: one exportable single-component VK texture per PLANE per slot.
+            //
+            // `bit10` rather than `bit16`, and this is the part that silently breaks if it is
+            // got wrong. The decoder's planes hold 10-bit LIMITED-RANGE codes in [4, 1019] --
+            // LSB-aligned, the same convention as FFmpeg's yuv422p10le -- and the mixer takes
+            // its precision factor from the TEXTURE's declared depth, not from the descriptor.
+            // `bit10` yields 64, which with `ycbcr_code_scale` of 65535/256 turns code 940 into
+            // 235. `bit16` yields 1 and a picture four times too dark. Both declare the same
+            // eR16Unorm storage, so nothing about the allocation tells you which you picked.
+            int        fw       = frame_info_.width, fh = frame_info_.height;
+            const bool is_444   = (frame_info_.profile == 4);
+            const int  chroma_w = is_444 ? fw : fw / 2;
+            vk_planes_          = is_444 ? 4 : 3;
+
+            auto make_plane = [&](int w, int h) {
+                auto t = vk_device_->create_exportable_texture(w, h, 1, common::bit_depth::bit10);
+                return std::make_shared<CudaVkTexture>(t, static_cast<VkDevice>(vk_device_->getVkDevice()));
+            };
             for (int i = 0; i < num_slots_; i++) {
-                auto vk_tex = vk_device_->create_exportable_texture(fw, fh, 4, common::bit_depth::bit16);
-                cvt_[i] = std::make_shared<CudaVkTexture>(vk_tex, static_cast<VkDevice>(vk_device_->getVkDevice()));
+                cvt_[i][0] = make_plane(fw, fh);              // Y
+                cvt_[i][1] = make_plane(chroma_w, fh);        // Cb
+                cvt_[i][2] = make_plane(chroma_w, fh);        // Cr
+                if (is_444)
+                    cvt_[i][3] = make_plane(fw, fh);          // A
             }
             CASPAR_LOG(info) << L"[prores_producer] Using CUDA-Vulkan zero-copy interop"
-                             << L" (" << num_slots_ << L" per-slot textures)";
+                             << L" (" << num_slots_ << L" slots x " << vk_planes_
+                             << L" planar 10-bit textures)";
         } else
 #endif
         {
@@ -519,7 +551,7 @@ struct prores_producer_impl final : public core::frame_producer
         auto flush_async_slot = [&](int ps, bool push_result) {
             if (ps < 0 || use_host_copy_) return;
 #ifdef ENABLE_VULKAN
-            if (use_vulkan_ && !cvt_[ps]) return;
+            if (use_vulkan_ && !cvt_[ps][0]) return;
             if (!use_vulkan_ && !cgt_[ps]) return;
 #else
             if (!cgt_[ps]) return;
@@ -548,31 +580,61 @@ struct prores_producer_impl final : public core::frame_producer
                               : (sfi.transfer_func == 18 || sfi.transfer_func == 14) ? core::color_transfer::hlg
                               : core::color_transfer::sdr;
 
-            const auto pf = use_vulkan_ ? core::pixel_format::bgra : core::pixel_format::rgba;
+            // The two paths publish DIFFERENT things, which is the whole of this change: the
+            // Vulkan one hands over the decoder's planes and lets the shader convert, the GL one
+            // hands over a picture the decoder already converted.
+            bool planar = false;
+            bool is_444 = false;
+#ifdef ENABLE_VULKAN
+            planar = use_vulkan_ && vk_planes_ > 0;
+            is_444 = planar && vk_planes_ == 4;
+#endif
+            const auto pf      = !planar ? core::pixel_format::rgba
+                               : is_444  ? core::pixel_format::ycbcra
+                                         : core::pixel_format::ycbcr;
             core::pixel_format_desc pfd(pf, pfd_cs, pfd_ct);
             pfd.is_straight_alpha = straight_alpha_;
-            pfd.planes.push_back(core::pixel_format_desc::plane(
-                sfi.width, sfi.height, 4, common::bit_depth::bit16));
+            if (planar) {
+                // ProRes is limited-range, left-sited chroma. Both are stated rather than left to
+                // the defaults: `color_range` decides whether the shader expands 16..235, and a
+                // wrong `chroma_location` shifts 4:2:2 chroma half a texel -- invisible on greys
+                // and on flat colour, which is most of what the batteries capture.
+                pfd.color_range     = core::color_range::limited;
+                pfd.chroma_location = core::chroma_location::left;
+                const int chroma_w  = is_444 ? sfi.width : sfi.width / 2;
+                pfd.planes.push_back(core::pixel_format_desc::plane(sfi.width, sfi.height, 1, common::bit_depth::bit10));
+                pfd.planes.push_back(core::pixel_format_desc::plane(chroma_w,  sfi.height, 1, common::bit_depth::bit10));
+                pfd.planes.push_back(core::pixel_format_desc::plane(chroma_w,  sfi.height, 1, common::bit_depth::bit10));
+                if (is_444)
+                    pfd.planes.push_back(core::pixel_format_desc::plane(sfi.width, sfi.height, 1, common::bit_depth::bit10));
+            } else {
+                pfd.planes.push_back(core::pixel_format_desc::plane(
+                    sfi.width, sfi.height, 4, common::bit_depth::bit16));
+            }
 
-            auto empty_store = std::make_shared<std::vector<uint8_t>>(0);
-            array<const uint8_t> dummy_img(empty_store->data(), 0, std::move(empty_store));
+            // One empty image array PER PLANE: the GPU constructor still takes the host-side
+            // vector, and a short one would not line up with `pfd.planes`.
             std::vector<array<const uint8_t>> img_vec;
-            img_vec.push_back(std::move(dummy_img));
+            for (size_t p = 0; p < pfd.planes.size(); ++p) {
+                auto empty_store = std::make_shared<std::vector<uint8_t>>(0);
+                img_vec.emplace_back(empty_store->data(), 0, std::move(empty_store));
+            }
 
             auto audio_store = std::make_shared<std::vector<int32_t>>(std::move(slot_audio_[ps]));
             array<const int32_t> audio_arr(audio_store->data(), audio_store->size(), std::move(audio_store));
 
-            std::shared_ptr<core::texture> gpu_tex;
+            std::vector<std::shared_ptr<core::texture>> gpu_tex;
 #ifdef ENABLE_VULKAN
-            if (use_vulkan_) {
-                gpu_tex = cvt_[ps]->core_texture();
+            if (planar) {
+                for (int p = 0; p < vk_planes_; ++p)
+                    gpu_tex.push_back(cvt_[ps][p]->core_texture());
             } else
 #endif
-                gpu_tex = cgt_[ps]->gl_texture();
+                gpu_tex.push_back(cgt_[ps]->gl_texture());
 
             core::draw_frame df(core::const_frame(
                 this, std::move(img_vec), std::move(audio_arr), pfd,
-                gpu_tex));
+                std::move(gpu_tex)));
 
             { std::lock_guard<std::mutex> lk(queue_mutex_); ready_queue_.push(std::move(df)); }
             queue_cv_.notify_one();
@@ -794,7 +856,7 @@ struct prores_producer_impl final : public core::frame_producer
 
             bool use_gpu_zerocopy = false;
 #ifdef ENABLE_VULKAN
-            use_gpu_zerocopy = use_vulkan_ && cvt_[slot];
+            use_gpu_zerocopy = use_vulkan_ && cvt_[slot][0];
 #endif
             if (!use_gpu_zerocopy)
                 use_gpu_zerocopy = !use_host_copy_ && cgt_[slot];
@@ -809,10 +871,11 @@ struct prores_producer_impl final : public core::frame_producer
                 //
                 // GL 2-stage pipeline: flush the previous slot (1 iteration behind).
                 // GL textures must be unmapped promptly, so deep pipelining is not safe.
-                cudaArray_t arr;
+                cudaArray_t arr           = nullptr;
+                bool        planar_submit = false;
 #ifdef ENABLE_VULKAN
-                if (use_vulkan_ && cvt_[slot]) {
-                    arr = cvt_[slot]->array();
+                if (use_vulkan_ && cvt_[slot][0]) {
+                    planar_submit = true;
                 } else
 #endif
                 {
@@ -827,6 +890,17 @@ struct prores_producer_impl final : public core::frame_producer
                 const int cm = (color_matrix_override_ >= 0) ? color_matrix_override_ : (int)fi.color_matrix;
                 slot_dec_timer_[slot].restart();
                 { caspar::timer submit_timer;
+#ifdef ENABLE_VULKAN
+                if (planar_submit) {
+                    // No colour matrix here: the shader converts, from the colour space the
+                    // publish site derives out of `slot_fi_[slot]` -- which is where
+                    // `color_matrix_override_` is applied instead, a few lines below.
+                    err = prores_decode_frame_planar_async(
+                        &ctx, pkt.data.data(), pkt.data.size(), fi.frame_type != 0,
+                        cvt_[slot][0]->array(), cvt_[slot][1]->array(), cvt_[slot][2]->array(),
+                        cvt_[slot][3] ? cvt_[slot][3]->array() : nullptr);
+                } else
+#endif
                 err = prores_decode_frame_async(&ctx, pkt.data.data(), pkt.data.size(),
                                                cm, fi.frame_type != 0, arr);
                 t_submit = submit_timer.elapsed(); }
@@ -874,6 +948,12 @@ struct prores_producer_impl final : public core::frame_producer
 
                 // Save frame state for this slot; it will be pushed when flushed.
                 slot_fi_   [slot] = fi;
+                // On the planar path nobody passes `cm` to a kernel -- the shader converts from
+                // the colour space the publish site derives out of THIS struct. So a forced
+                // matrix has to be written into it here, or `color_matrix_override_` would go on
+                // working for OpenGL and quietly stop working for Vulkan.
+                if (color_matrix_override_ >= 0)
+                    slot_fi_[slot].color_matrix = color_matrix_override_;
                 slot_audio_[slot] = std::move(frame_audio);
 
                 // Skip the synchronous frame-build below — frame will be built in flush.

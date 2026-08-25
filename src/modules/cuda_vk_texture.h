@@ -122,7 +122,11 @@ class CudaVkTexture
         cudaExternalMemoryMipmappedArrayDesc mipmapDesc{};
         mipmapDesc.offset = 0;
         mipmapDesc.formatDesc =
-            make_channel_desc(vk_tex_->stride(), vk_tex_->depth() == common::bit_depth::bit16);
+            // `!= bit8`, NOT `== bit16`, and the difference is not pedantry: `device.cpp`'s
+            // INTERNAL_FORMAT table picks its row with exactly that test, so bit10 and bit12
+            // are backed by R16 storage too. Testing for bit16 alone described a `bit10`
+            // texture to CUDA as 8-bit -- half the channel width of the memory underneath it.
+            make_channel_desc(vk_tex_->stride(), vk_tex_->depth() != common::bit_depth::bit8);
         mipmapDesc.extent.width  = static_cast<unsigned int>(vk_tex_->width());
         mipmapDesc.extent.height = static_cast<unsigned int>(vk_tex_->height());
         mipmapDesc.extent.depth  = 0; // 2D

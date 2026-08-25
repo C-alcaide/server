@@ -611,23 +611,20 @@ cudaError_t prores_decode_frame(
 }
 
 // ---------------------------------------------------------------------------
-// prores_decode_frame_async
+// decode_to_planes -- everything up to and including the planar YCbCr(A) result.
+//
+// Steps 1-4 of every entry point below are identical: slice table, bitstream upload, entropy
+// decode, IDCT/dequant into ctx->d_y / d_cb / d_cr, and the CPU alpha for 4444. What differs is
+// only what happens to those planes afterwards -- a BGRA16 conversion for the GL path, or a
+// straight copy out for the planar one. Factored here when the planar entry point would have
+// made this the FOURTH verbatim copy in the file.
+//
+// Leaves the work queued on ctx->stream; the caller synchronises.
 // ---------------------------------------------------------------------------
-// Identical to prores_decode_frame but WITHOUT the final cudaStreamSynchronize.
-// All GPU work is queued to ctx->stream and returns immediately.
-// The caller MUST:
-//   1. Call cudaStreamSynchronize(ctx->stream) before accessing the GL texture.
-//   2. Call CudaGLTexture::unmap() only AFTER that sync.
-// This allows the caller to overlap CPU work (demuxer read, audio, frame alloc)
-// with the GPU decode of the current frame, forming a 2-stage pipeline that
-// eliminates the idle-GPU gap in the synchronous version.
-cudaError_t prores_decode_frame_async(
-    ProResDecodeCtx* ctx,
-    const uint8_t*   h_icpf_data,
-    size_t           icpf_size,
-    int              color_matrix,
-    bool             is_interlaced,
-    cudaArray_t      d_gl_array)
+static cudaError_t decode_to_planes(ProResDecodeCtx* ctx,
+                                    const uint8_t*   h_icpf_data,
+                                    size_t           icpf_size,
+                                    bool             is_interlaced)
 {
     cudaStream_t s = ctx->stream;
 
@@ -706,6 +703,30 @@ cudaError_t prores_decode_frame_async(
                                    cudaMemcpyHostToDevice, s));
     }
 
+    return cudaSuccess;
+}
+
+// ---------------------------------------------------------------------------
+// Identical to prores_decode_frame but WITHOUT the final cudaStreamSynchronize.
+// All GPU work is queued to ctx->stream and returns immediately.
+// The caller MUST:
+//   1. Call cudaStreamSynchronize(ctx->stream) before accessing the GL texture.
+//   2. Call CudaGLTexture::unmap() only AFTER that sync.
+// This allows the caller to overlap CPU work (demuxer read, audio, frame alloc)
+// with the GPU decode of the current frame, forming a 2-stage pipeline that
+// eliminates the idle-GPU gap in the synchronous version.
+cudaError_t prores_decode_frame_async(
+    ProResDecodeCtx* ctx,
+    const uint8_t*   h_icpf_data,
+    size_t           icpf_size,
+    int              color_matrix,
+    bool             is_interlaced,
+    cudaArray_t      d_gl_array)
+{
+    cudaStream_t s = ctx->stream;
+
+    CUDA_CHECK(decode_to_planes(ctx, h_icpf_data, icpf_size, is_interlaced));
+
     if (ctx->is_444) {
         CUDA_CHECK(launch_ycbcr444_to_bgra16(
             ctx->d_y, ctx->d_cb, ctx->d_cr, ctx->d_alpha,
@@ -728,6 +749,80 @@ cudaError_t prores_decode_frame_async(
     // No cudaStreamSynchronize -- caller is responsible.
     return cudaSuccess;
 }
+
+// ---------------------------------------------------------------------------
+// prores_decode_frame_planar_async
+//
+// Hands the mixer the decoder's OWN planes -- Y, Cb, Cr and, for 4444, alpha -- instead of a
+// BGRA16 picture, and lets the shader do the YCbCr->RGB conversion.
+//
+// WHY, because the BGRA16 route is not wrong, only expensive. At 1080p its single texture is
+// 16.6 MB a frame where 4:2:2 planes are 8.3 MB, and this producer hands the mixer its own
+// per-slot texture rather than copying into a pooled one -- so that doubling is paid twice, once
+// in the VRAM a slot holds and again in the bytes the mixer samples every frame. The BGRA16
+// choice was made for the OpenGL path, where the interop target is one opaque `cudaArray_t` and
+// three planes would mean three `cudaGraphicsGLRegisterImage` registrations per slot -- the exact
+// call that has crashed here before. The Vulkan path inherited the choice without inheriting the
+// constraint.
+//
+// It is also the more FAITHFUL route: the channel's colour management, the working space and the
+// output transform all live in the mixer, so a producer-side conversion to RGB happens before any
+// of them. It is what the FFmpeg path already does with yuv422p10le.
+//
+// FORMAT CONTRACT, and every part of it matters:
+//   * the planes carry 10-bit LIMITED-RANGE codes, clipped to [4, 1019] by the IDCT, with
+//     neutral chroma at 512 -- exactly FFmpeg's yuv422p10le / yuva444p10le;
+//   * they must be sampled from R16 textures DECLARED `bit10`, so the mixer's precision factor
+//     is 64 and `ycbcr_code_scale` is 65535/256. Those two turn a stored code into an
+//     8-bit-equivalent one: 940 * 64 * (65535/256) / 65535 = 235. Declaring them `bit16` gives
+//     a factor of 1 and a picture 4x too dark;
+//   * Cb and Cr are half-width for 4:2:2 and full-width for 4444, which is what the caller must
+//     size the textures to.
+//
+// No colour matrix argument: the conversion is the shader's now, from the frame's declared
+// colour space. Passing one here would be a second, contradictory answer.
+// ---------------------------------------------------------------------------
+cudaError_t prores_decode_frame_planar_async(
+    ProResDecodeCtx* ctx,
+    const uint8_t*   h_icpf_data,
+    size_t           icpf_size,
+    bool             is_interlaced,
+    cudaArray_t      d_y_array,
+    cudaArray_t      d_cb_array,
+    cudaArray_t      d_cr_array,
+    cudaArray_t      d_alpha_array)
+{
+    cudaStream_t s = ctx->stream;
+
+    CUDA_CHECK(decode_to_planes(ctx, h_icpf_data, icpf_size, is_interlaced));
+
+    // The planes are dense int16_t, so the source pitch IS the row width. They are clipped to
+    // [4, 1019] and can never be negative, which is what makes reinterpreting them as the
+    // unsigned samples of an R16 texture safe rather than merely usual.
+    const int    chroma_w   = ctx->is_444 ? ctx->width : ctx->width / 2;
+    const size_t y_row      = (size_t)ctx->width * sizeof(int16_t);
+    const size_t chroma_row = (size_t)chroma_w * sizeof(int16_t);
+
+    CUDA_CHECK(cudaMemcpy2DToArrayAsync(d_y_array, 0, 0, ctx->d_y,
+                                        y_row, y_row, (size_t)ctx->height,
+                                        cudaMemcpyDeviceToDevice, s));
+    CUDA_CHECK(cudaMemcpy2DToArrayAsync(d_cb_array, 0, 0, ctx->d_cb,
+                                        chroma_row, chroma_row, (size_t)ctx->height,
+                                        cudaMemcpyDeviceToDevice, s));
+    CUDA_CHECK(cudaMemcpy2DToArrayAsync(d_cr_array, 0, 0, ctx->d_cr,
+                                        chroma_row, chroma_row, (size_t)ctx->height,
+                                        cudaMemcpyDeviceToDevice, s));
+
+    if (d_alpha_array && ctx->is_444 && ctx->d_alpha) {
+        CUDA_CHECK(cudaMemcpy2DToArrayAsync(d_alpha_array, 0, 0, ctx->d_alpha,
+                                            y_row, y_row, (size_t)ctx->height,
+                                            cudaMemcpyDeviceToDevice, s));
+    }
+
+    // No cudaStreamSynchronize -- caller is responsible.
+    return cudaSuccess;
+}
+
 cudaError_t prores_decode_frame_to_host(
     ProResDecodeCtx* ctx,
     const uint8_t*   h_icpf_data,
