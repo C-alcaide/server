@@ -217,6 +217,56 @@ so Vulkan compute's failure going 6 to 8 sits at 768 MB/s of sustained read and 
 no instrument to separate storage from decode. The routes landing on 1, 5 and 6 rules disk out as
 the shared limiter — three decoders would not stop at three different rungs on one disk — but not
 for that particular step.
+### Open: why CUDA ProRes sustains fewer channels than the compute decoder
+
+The two ProRes routes cost **the same per channel to decode** and a very different amount once the
+channel has an output. This is measured, unexplained, and recorded here rather than diagnosed
+because five hypotheses have been tested and all five were wrong.
+
+1080p ProRes noise, one producer per channel (`playback-scaling`, 2026-08-25):
+
+| route | mixer | output | channels | GPU/channel |
+| :--- | :--- | :--- | ---: | ---: |
+| CUDA ProRes | vulkan | none | 16+ | **2.50 %** |
+| FFmpeg Vulkan compute | vulkan | none | 28+ | **2.54 %** |
+| CUDA ProRes | vulkan | `screen_gpu` | **5** | 5.60 % |
+| CUDA ProRes | vulkan | `screen_cpu` | **5** | 7.80 % |
+| FFmpeg Vulkan compute | vulkan | `screen_gpu` | **12** | 4.25 % |
+| CUDA ProRes | ogl | none | 16+ | **5.94 %** |
+| CUDA ProRes | ogl | `screen_gpu` | *unmeasurable* — see below | — |
+
+**Decode alone the two routes are indistinguishable.** Add an output and CUDA costs about a third
+more GPU per channel and sustains fewer than half the channels. So whatever it is lives in what the
+mixer and output do with these frames, not in decoding them.
+
+**Ruled out, each by measurement rather than by reading:**
+
+| hypothesis | how it died |
+| :--- | :--- |
+| the CUDA-GL interop mutex serialising producers | this ran on the Vulkan mixer, where no producer touches that path |
+| per-frame locking | that mutex is taken once per producer at setup |
+| the producer's queue depth | 2 → 4 frames: ceiling 5 → 5, VRAM +510 MB |
+| the slot pool being too small | 5 → 12 slots: ceiling 5 → 5, VRAM +1.7 GB |
+| exportable Vulkan memory losing compression | the OpenGL path uses none and is **worse**, at 5.94% GPU/channel against 2.50% |
+
+The one structural difference that remains is that this producer hands the mixer **its own**
+per-slot texture (`gpu_tex = cvt_[ps]->core_texture()`), where the FFmpeg path copies into a
+pooled mixer texture — precisely what `av_vulkan_import.h` says it refuses to do, because "the
+decoder's pool is shallow and stalls if its frames are held". Pool size is not the lever, so if
+that is the cause it is through some property of the texture rather than the count of them.
+
+**Settling it needs an instrument that does not exist here**: per-pass GPU timing inside the mixer
+for a CUDA-sourced frame against an FFmpeg-sourced one. Everything above compares whole-channel
+cost, which cannot separate sampling from compositing from presenting.
+
+**And one measurement limitation worth carrying:** on the **OpenGL mixer a screen consumer cannot
+sustain even one channel** of 1080p25 — `auto` (D3D11VA) fails with 11 late frames at one channel
+and CUDA with 24, as a steady few-per-interval rate rather than a cliff, with no starvation and no
+GL errors. That is the consumer's presentation pacing, not any route, so no OpenGL-mixer ceiling
+*with an output* can be measured on this rig at all. It is also why the OGL row above has no
+output arm.
+
+
 ---
 
 ## 3. Recording: the four encode routes
