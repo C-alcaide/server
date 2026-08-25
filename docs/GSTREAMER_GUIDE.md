@@ -268,6 +268,38 @@ The channel arrives as BGRA, so start with `videoconvert` unless your encoder ta
 directly. Only **one** GStreamer consumer per channel: the consumer uses a fixed index, so
 adding a second replaces the first.
 
+### `GPU` on the consumer — and why it is off by default
+
+```
+ADD 1 GSTREAMER "nvh264enc ! h264parse ! mpegtsmux ! srtsink uri=srt://:9020?mode=listener" GPU
+```
+
+With `GPU`, the channel's composited texture is imported into CUDA and handed to the pipeline
+as `memory:CUDAMemory` — no readback to host memory, and no `videoconvert`. It needs the
+Vulkan mixer, an NVIDIA card, and an encoder that takes CUDA memory (`nvh264enc`,
+`nvh265enc`); anything else, and it says why once and uses host memory for the rest of that
+consumer's life.
+
+**It is not currently faster, and you should not enable it expecting it to be.** Measured at
+1080p50 with one consumer and `nvh264enc` on both arms:
+
+| | CPU |
+| :--- | ---: |
+| no consumer | 1.84 cores |
+| host readback | 1.97 cores |
+| `GPU` | 2.04 cores |
+
+So it costs about 0.07 cores *more* than leaving it off, and late frames do not separate the
+two. The picture is byte-identical either way (max 0 LSB against the channel's own capture).
+
+It is here because that measurement is a narrow one — one consumer, 1080p, an otherwise idle
+machine. The readback grows with resolution and with the number of consumers reading the
+channel back; this route's per-frame CPU largely does not. If you run 4K, or several
+consumers, measure it on **your** box rather than trusting either number here.
+
+`INFO 1` reports `gstreamer/gpu-frames`. If you asked for `GPU` and it reads 0, the route
+declined — the reason is in the server log, once.
+
 ---
 
 ## 8. Recipes
@@ -358,6 +390,7 @@ ADD 1 GSTREAMER "videoconvert ! x264enc speed-preset=veryfast ! h264parse ! mp4m
 | `starved` | ticks that found the queue empty and repeated the last picture — the number that shows a dead source |
 | `queue`, `queue-peak` | how much runway there is between pipeline and channel |
 | `gpu-frames` | frames that took the GPU route. 0 with `GPU` asked for means it fell back |
+| `captions` | caption packets re-emitted by the consumer. The picture looks identical whether captions travel or vanish, so this is the only thing that tells them apart |
 | `restarts` | pipeline rebuilds after an error |
 | `eos`, `position`, `length` | end of stream, and where you are |
 

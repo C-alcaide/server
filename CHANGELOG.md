@@ -1,6 +1,52 @@
 CasparVP — Unreleased
 ==========================================
 
+### Changed: the CUDA upload waits for its own copy, not for the whole device
+
+**This affects every NVENC recording, not only the new GStreamer path.**
+`cuda_vk_uploader::copy_to_device` — used by the FFmpeg consumer's GPU-direct NVENC route, the
+DeckLink consumer and now the GStreamer consumer — ended each frame with
+`cudaDeviceSynchronize()`, which blocks until **every context on the device** is idle. This
+process runs several CUDA users at once, so each frame waited on work it had nothing to do
+with, and waited longer the busier the GPU was.
+
+It now issues the copy on its own non-blocking stream and waits on a `cudaEventBlockingSync`
+event. Two changes, both narrowing what is waited for:
+
+* **the device → our stream.** The copy has one producer and one consumer; the wider wait was
+  never needed for correctness.
+* **a spin → a blocking event.** CUDA's default wait spins, burning a core polling at frame
+  rate on the consumer thread.
+
+Ordering against the mixer also moved off the CPU: where the texture exposes a timeline
+semaphore, it is imported and waited on **by the copy, on the GPU**, instead of this thread
+blocking on `ensure_render_complete()`. Textures without one keep the CPU fence wait.
+
+Measured on the GStreamer CUDA egress at 1080p50: 2.24 → 2.03 cores across the three changes.
+Picture unchanged — `encode-parity --codec h264 --gpu-arm nvenc` agrees with libx264 at mean
+1.66 LSB with 48% of significant deltas at chroma transitions, and the GStreamer route is
+byte-identical (max 0 LSB) to the channel's own capture.
+
+**That NVENC arm did not exist before this change.** Every battery touching the FFmpeg
+consumer's GPU path ran the *Vulkan* encoder, which reaches the encoder through entirely
+different code, so `cuda_vk_upload.cpp` had no coverage at all.
+
+### Added: `GPU` on the GStreamer consumer — correct, opt-in, and not currently faster
+
+`ADD 1 GSTREAMER "nvh264enc ! ..." GPU` hands the channel's composited texture to the pipeline
+as `memory:CUDAMemory`, so the frame never goes through host memory. Vulkan mixer, NVIDIA
+card, CUDA-capable encoder; anything else says why once and uses host memory thereafter.
+
+**It costs more CPU than the readback it replaces** — 2.04 cores against 1.97 at 1080p50 with
+one consumer, both arms encoding through `nvh264enc`, against 1.84 with no consumer at all.
+Late frames do not separate the arms. Off unless asked for, and `gstreamer/gpu-frames` in
+`INFO` says whether it engaged.
+
+It ships because the measurement is a narrow one: one consumer, 1080p, an idle machine. The
+readback scales with pixels and with consumer count and this route's per-frame CPU largely
+does not, so the ordering may reverse at 4K or under load. `docs/GSTREAMER_GUIDE.md` §7 has
+the table and the caveat.
+
 ### Changed: semi-planar (NV12/P010) sources now sample chroma where the planar path does
 
 **This changes the rendered output of every hardware-decoded clip.** `get_rgba_color`'s

@@ -17,6 +17,9 @@ set(SOURCES
 		consumer/gst_consumer.cpp
 		consumer/gst_consumer.h
 
+		consumer/gst_cuda_egress.cpp
+		consumer/gst_cuda_egress.h
+
 		producer/gst_producer.cpp
 		producer/gst_producer.h
 
@@ -61,6 +64,7 @@ target_link_libraries(gstreamer PRIVATE
 	${GSTREAMER_ROOT}/lib/gstapp-1.0.lib
 	${GSTREAMER_ROOT}/lib/gstvideo-1.0.lib
 	${GSTREAMER_ROOT}/lib/gstd3d11-1.0.lib
+	${GSTREAMER_ROOT}/lib/gstcuda-1.0.lib
 	${GSTREAMER_ROOT}/lib/gobject-2.0.lib
 	${GSTREAMER_ROOT}/lib/glib-2.0.lib
 )
@@ -76,6 +80,7 @@ if (MSVC)
 		"/DELAYLOAD:gstapp-1.0-0.dll"
 		"/DELAYLOAD:gstvideo-1.0-0.dll"
 		"/DELAYLOAD:gstd3d11-1.0-0.dll"
+		"/DELAYLOAD:gstcuda-1.0-0.dll"
 		"/DELAYLOAD:gobject-2.0-0.dll"
 		"/DELAYLOAD:glib-2.0-0.dll"
 	)
@@ -87,6 +92,20 @@ if (MSVC)
 	# handles the Vulkan import needs.
 	target_link_libraries(gstreamer PRIVATE d3d11 dxgi d3dcompiler)
 	target_compile_definitions(gstreamer PRIVATE CASPAR_GST_GPU_BRIDGE)
+
+	# The CUDA egress needs the CUDA toolkit AND GStreamer's cuda library. Guarded on the same
+	# switch the rest of the tree's CUDA work uses, so a build without CUDA simply does not
+	# have the route rather than failing to configure.
+	if (BUILD_CUDA_MODULES)
+		find_package(CUDAToolkit QUIET)
+		if (CUDAToolkit_FOUND)
+			target_link_libraries(gstreamer PRIVATE CUDA::cuda_driver CUDA::cudart)
+			target_compile_definitions(gstreamer PRIVATE CASPAR_GST_CUDA_EGRESS)
+			message(STATUS "GStreamer: CUDA egress enabled")
+		else()
+			message(STATUS "GStreamer: CUDA toolkit not found, no CUDA egress")
+		endif()
+	endif()
 endif()
 
 # The d3d11 library is declared unstable API upstream and says so at every include. We

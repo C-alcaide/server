@@ -42,6 +42,13 @@
 #include <boost/property_tree/ptree.hpp>
 #include <boost/lexical_cast.hpp>
 
+// The CUDA egress hands the channel's Vulkan texture to the encoder without a host copy.
+// Guarded rather than stubbed: a build without it must not pretend to have it, because a GPU
+// path that silently does nothing is indistinguishable from one that works.
+#ifdef CASPAR_GST_CUDA_EGRESS
+#include "gst_cuda_egress.h"
+#endif
+
 #include <gst/app/gstappsrc.h>
 #include <gst/video/video.h>
 #include <gst/gst.h>
@@ -105,13 +112,28 @@ struct gst_consumer : public core::frame_consumer
 
     std::atomic<uint64_t> frames_sent_{0};
     std::atomic<uint64_t> captions_sent_{0};
+    std::atomic<uint64_t> frames_on_gpu_{0};
+
+    /// Opt-in per ADD, like the producer's, and for the same reason: the route changes what the
+    /// pipeline must negotiate. A pipeline whose first element cannot take CUDA memory would
+    /// fail to link, and it should fail because somebody asked for GPU rather than because the
+    /// server decided.
+    const bool want_gpu_ = false;
+
+#ifdef CASPAR_GST_CUDA_EGRESS
+    /// Null when the route is unavailable, refused, or switched off. Its presence is also what
+    /// `needs_cpu_frame_data()` answers on, so the channel stops reading frames back the moment
+    /// this exists -- and starts again if it is dropped.
+    std::unique_ptr<gst_cuda_egress> egress_;
+#endif
     std::atomic<uint64_t> frames_dropped_{0};
     std::atomic<bool>     is_failed_{false};
     mutable std::mutex    mutex_;
 
   public:
-    explicit gst_consumer(std::wstring description)
+    explicit gst_consumer(std::wstring description, bool want_gpu)
         : description_(std::move(description))
+        , want_gpu_(want_gpu)
     {
         graph_->set_color("frame-time", diagnostics::color(0.5f, 1.0f, 0.2f));
         graph_->set_color("dropped-frame", diagnostics::color(0.3f, 0.6f, 0.3f));
@@ -213,6 +235,24 @@ struct gst_consumer : public core::frame_consumer
                                        "'appsrc name=caspar_video' yourself."));
         }
 
+#ifdef CASPAR_GST_CUDA_EGRESS
+        // Opened BEFORE the appsrc is configured: the caps it offers depend on whether the
+        // frames will be CUDA memory or host memory, and negotiating for one and delivering
+        // the other is a link failure at the first buffer.
+        if (want_gpu_ && gst_cuda_egress::available()) {
+            auto         candidate = std::make_unique<gst_cuda_egress>();
+            std::wstring reason;
+            if (candidate->open(format_desc_, reason))
+                egress_ = std::move(candidate);
+            else
+                CASPAR_LOG(info) << print() << L" CUDA egress unavailable (" << reason
+                                 << L"); frames go through host memory.";
+        } else if (want_gpu_) {
+            CASPAR_LOG(info) << print() << L" GPU was requested but no CUDA device is usable; "
+                                           L"frames go through host memory.";
+        }
+#endif
+
         configure_video_src();
         if (audio_src_ != nullptr)
             configure_audio_src();
@@ -229,7 +269,14 @@ struct gst_consumer : public core::frame_consumer
                                std::to_string(format_desc_.framerate.numerator()) + "/" +
                                std::to_string(format_desc_.framerate.denominator());
 
-        auto* caps = gst_caps_from_string(caps_text.c_str());
+        GstCaps* caps = nullptr;
+#ifdef CASPAR_GST_CUDA_EGRESS
+        if (egress_ && egress_->caps())
+            caps = gst_caps_ref(egress_->caps());
+#endif
+        if (caps == nullptr)
+            caps = gst_caps_from_string(caps_text.c_str());
+
         g_object_set(G_OBJECT(video_src_),
                      "caps",
                      caps,
@@ -342,8 +389,30 @@ struct gst_consumer : public core::frame_consumer
     /// it and not one frame longer.
     GstBuffer* wrap(const core::const_frame& frame)
     {
+#ifdef CASPAR_GST_CUDA_EGRESS
+        if (egress_) {
+            if (auto* gpu = egress_->wrap(frame)) {
+                ++frames_on_gpu_;
+                return gpu;
+            }
+            // The egress latches itself off after a refusal and says why once. Dropping it
+            // here is what makes `needs_cpu_frame_data()` go true again, so the channel
+            // resumes reading frames back -- otherwise every later frame would arrive with no
+            // host pixels and no GPU route, which is a black picture rather than a fallback.
+            egress_.reset();
+            CASPAR_LOG(info) << print() << L" falling back to host memory for the rest of this "
+                                           L"consumer's life.";
+        }
+#endif
         auto* held = new core::const_frame(frame);
         auto  data = frame.image_data(0);
+        if (data.size() == 0 || data.data() == nullptr) {
+            // The channel skipped the readback because this consumer said it did not need one,
+            // and the GPU route has since gone away. One frame is lost rather than a null
+            // pointer being handed to GStreamer; the next tick has the readback back.
+            delete held;
+            return nullptr;
+        }
 
         return gst_buffer_new_wrapped_full(GST_MEMORY_FLAG_READONLY,
                                            const_cast<uint8_t*>(data.data()),
@@ -450,6 +519,22 @@ struct gst_consumer : public core::frame_consumer
     /// under one number and reported under another, and REMOVE by index never finds it. The
     /// map is per-channel, so a constant is unique where it needs to be. 110000 keeps this
     /// clear of the FFmpeg consumer's 100000 block.
+    /// False while the CUDA egress is up, which is what actually stops the channel reading
+    /// the composited frame back. Everything else here is plumbing; this one line is the
+    /// saving.
+    ///
+    /// Dynamic rather than fixed, and deliberately: the egress can refuse mid-run, and a
+    /// consumer that kept claiming it needed no host pixels after losing its GPU route would
+    /// receive frames with neither.
+    bool needs_cpu_frame_data() const override
+    {
+#ifdef CASPAR_GST_CUDA_EGRESS
+        return egress_ == nullptr;
+#else
+        return true;
+#endif
+    }
+
     int index() const override { return 110000; }
 
     core::monitor::state state() const override
@@ -460,6 +545,9 @@ struct gst_consumer : public core::frame_consumer
         // Not decoration: a caption path that silently carries nothing looks exactly like one
         // that is working, because the picture is identical either way.
         state["gstreamer/captions"] = static_cast<int64_t>(captions_sent_.load());
+        // A GPU route that silently stopped engaging looks exactly like one that is working,
+        // because the picture is identical. This is the only thing that can tell them apart.
+        state["gstreamer/gpu-frames"] = static_cast<int64_t>(frames_on_gpu_.load());
         state["gstreamer/dropped"]  = static_cast<int64_t>(frames_dropped_.load());
         state["gstreamer/failed"]   = is_failed_.load();
         return state;
@@ -481,7 +569,14 @@ create_consumer(const std::vector<std::wstring>&                        params,
     if (description.empty())
         CASPAR_THROW_EXCEPTION(user_error() << msg_info("The GStreamer pipeline description is empty."));
 
-    return spl::make_shared<gst_consumer>(std::move(description));
+    // `GPU` anywhere after the description, matching `PLAY … GPU` on the producer.
+    bool want_gpu = false;
+    for (std::size_t i = 2; i < params.size(); ++i) {
+        if (boost::iequals(params.at(i), L"GPU"))
+            want_gpu = true;
+    }
+
+    return spl::make_shared<gst_consumer>(std::move(description), want_gpu);
 }
 
 spl::shared_ptr<core::frame_consumer>
@@ -498,7 +593,8 @@ create_preconfigured_consumer(const boost::property_tree::wptree&               
                                    "<gstreamer> consumer needs a <pipeline> element: the gst-launch "
                                    "description to send this channel through."));
 
-    return spl::make_shared<gst_consumer>(std::move(description));
+    return spl::make_shared<gst_consumer>(std::move(description),
+                                          ptree.get<bool>(L"gpu", false));
 }
 
 }} // namespace caspar::gstreamer
