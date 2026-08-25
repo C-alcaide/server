@@ -14,7 +14,7 @@ Vulkan when it needed OpenGL. The server always says so in its log. §7 is how t
 ## Contents
 
 1. [Three different "how many" questions](#1-three-different-how-many-questions)
-2. [Playback: the four decode routes](#2-playback-the-four-decode-routes)
+2. [Playback: the decode routes](#2-playback-the-decode-routes)
 3. [Recording: the four encode routes](#3-recording-the-four-encode-routes)
 4. [Commands you can paste](#4-commands-you-can-paste)
 5. [Why the pictures differ](#5-why-the-pictures-differ)
@@ -51,7 +51,7 @@ one channel is not necessarily the one that reaches furthest.
 
 ![Which decode and encode routes touch host memory, and which never leave the GPU](images/recording_host_memory.png)
 
-## 2. Playback: the four decode routes
+## 2. Playback: the decode routes
 
 ### At a glance
 
@@ -72,10 +72,14 @@ Folding them together would let a fault in one switch off the other.
 
 ### The exact path each one takes
 
-![The four FFmpeg decode routes as pipelines, step by step](images/recording_decode_paths.png)
+![The FFmpeg decode routes as pipelines, step by step](images/recording_decode_paths.png)
 
-The diagram covers the four FFmpeg routes; GStreamer has its own guide. The blocks below are the
+The diagram covers the five FFmpeg routes; GStreamer has its own guide. The blocks below are the
 same paths with the exact formats and the reasons each restriction exists.
+
+Note that the **same glyph** marks the second and fifth rows' first step. That is not an
+oversight: D3D11VA and Vulkan Video drive the *same* fixed-function video engine, and what differs
+is the API used to reach it and what happens to the frame afterwards.
 
 **Software.** The safe path, and the only one that handles every codec.
 

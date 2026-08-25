@@ -377,29 +377,38 @@ def host_memory_routes():
     # decode routes, left half
     lay.text("dec", 26, 84, "DECODE", parent=None, color=TITLE, size=10,
              weight="bold", ha="center")
+    # FIVE now, so the names shorten rather than the boxes overrunning: the left half is
+    # 4..50 whatever it holds, and `fit_text` reports an overrun rather than drawing one.
     decode = [
         ("software", True, "any codec"),
         ("D3D11VA", False, "H.264 HEVC VP9 AV1"),
         ("CUDA ProRes", False, "ProRes"),
-        ("FFmpeg Vulkan", False, "ProRes, RAW, DPX"),
+        ("VK compute", False, "ProRes RAW DPX"),
+        ("VK video", False, "H.264 HEVC"),
     ]
     # THROUGH lay.fit_text, not the raw helper. The first version called `_text` directly
     # inside this loop, which bypasses the overrun check entirely -- and four of the eight
     # labels ran outside their boxes. Using the checked helper is the whole point of having it.
+    # AND THE TYPE SHRINKS WITH THE COLUMN, not just the box. At five columns the box is 8.4
+    # units and "H.264 HEVC VP9 AV1" at 6.3pt is wider than that -- it rendered past both
+    # edges, which `fit_text` did not catch because it measures against the parent panel it is
+    # given and the overrun was in the note's own line rather than into a sibling.
+    dw, dpitch = (10.5, 11.5) if len(decode) <= 4 else (8.4, 9.2)
+    dt_size, dn_size = (7.4, 6.3) if len(decode) <= 4 else (6.6, 5.5)
     for i, (name, crosses, note) in enumerate(decode):
-        x = 4 + i * 11.5
+        x = 4 + i * dpitch
         col = DANGER_T if crosses else SUCCESS
-        lay.panel(f"d{i}", x, 68, 10.5, 12, fc=PANEL, ec=col, lw=1.4)
-        lay.fit_text(None, x + 5.25, 76, name, parent=f"d{i}", size=7.4, color=col,
+        lay.panel(f"d{i}", x, 68, dw, 12, fc=PANEL, ec=col, lw=1.4)
+        lay.fit_text(None, x + dw / 2, 76, name, parent=f"d{i}", size=dt_size, color=col,
                      ha="center", weight="bold")
-        lay.fit_text(None, x + 5.25, 71, note, parent=f"d{i}", size=6.3, color=MUTED,
+        lay.fit_text(None, x + dw / 2, 71, note, parent=f"d{i}", size=dn_size, color=MUTED,
                      ha="center")
         if crosses:
-            lay.arrow((x + 5.25, 68), (x + 5.25, 43), color=DANGER_T, lw=1.6)
-            lay.text(f"dc{i}", x + 5.25, 40, "a copy", parent=None, color=DANGER_T,
+            lay.arrow((x + dw / 2, 68), (x + dw / 2, 43), color=DANGER_T, lw=1.6)
+            lay.text(f"dc{i}", x + dw / 2, 40, "a copy", parent=None, color=DANGER_T,
                      size=6.8, ha="center")
         else:
-            lay.arrow((x + 5.25, 68), (x + 5.25, 56), color=SUCCESS, lw=1.6)
+            lay.arrow((x + dw / 2, 68), (x + dw / 2, 56), color=SUCCESS, lw=1.6)
 
     # encode routes, right half
     lay.text("enc", 74, 84, "ENCODE", parent=None, color=TITLE, size=10,
@@ -886,18 +895,14 @@ def _icon_legend(lay, ax, y, items, rows=2):
 # ─────────────────────────────────────────────────────────────────────────────
 def decode_paths():
     """Section 2's four pipelines, drawn."""
-    lay, fig, ax = _new((14.0, 8.6))
+    lay, fig, ax = _new((14.0, 10.6))
     lay.panel("frame", 1, 1, 98, 98, blocking=False, fc=BG, ec=BORDER_SUBTLE, radius=0.01)
 
     lay.text("title", 50, 96.5, "Playback: the exact path each decode route takes",
              parent=None, color=TITLE, size=13, weight="bold", ha="center")
     lay.text("sub", 50, 92.5,
-             "the same picture arrives four ways — what differs is how much of it the CPU ever sees",
+             "the same picture arrives five ways — what differs is how much of it the CPU ever sees",
              parent=None, color=MUTED, size=8.4, ha="center", style="italic")
-
-    # 14.25 wide: the repeated first column is gone, so four steps and three gaps fill the
-    # 17..83 the two shared blocks leave -- and each box is wider than the five used to be.
-    W, H, GAP = 14.25, 13.2, 3.0
 
     rows = [
         ("Software", DANGER_T, "every codec, always available", [
@@ -927,12 +932,30 @@ def decode_paths():
             ("bus", ("imported in place", "same device · no copy")),
             ("prism", ("mixer shader", "YCbCr → RGB")),
         ]),
+        ("FFmpeg Vulkan Video", SUCCESS,
+         "H.264 · HEVC · the same engine as D3D11VA, reached through Vulkan", [
+            ("fixdec", ("video decode engine", "NV12 or P010")),
+            ("stack", ("ONE multi-plane image", "3.1 MB/frame at 8-bit")),
+            ("bus", ("copy by aspect plane", "no D3D11 bridge")),
+            ("prism", ("mixer shader", "YCbCr → RGB")),
+        ]),
     ]
+
+    # 14.25 wide: the repeated first column is gone, so four steps and three gaps fill the
+    # 17..83 the two shared blocks leave -- and each box is wider than the five used to be.
+    #
+    # HEIGHT AND PITCH COME FROM THE ROW COUNT, and they are not independent: a row needs its
+    # box plus about 5.5 units above it for the title and the note, and the last row's box has
+    # to clear the legend at 14.5. Four rows fit at 13.2/19.0; five need 9.5/15.0, which is why
+    # the figure above is taller in inches -- the coordinate space is 0..100 either way, so a
+    # taller figure renders the same units bigger rather than giving more of them.
+    W, GAP = 14.25, 3.0
+    H, PITCH, TOP = (13.2, 19.0, 73.0) if len(rows) <= 4 else (9.5, 15.0, 75.6)
 
     for r, (name, col, note, steps) in enumerate(rows):
         # 73, and the note 1.3 above the box: at 0.8 the note's descenders touched the panel's
         # rounded top border, which reads as a strike-through across the line.
-        y = 73 - r * 19.0
+        y = TOP - r * PITCH
         # x=17, over the first step that actually DISTINGUISHES the route. At x=3 the title sat
         # above the shared source block, labelling a column common to all four rows.
         lay.text(f"rn{r}", 17, y + H + 3.7, name, parent=None, color=col, size=9,
@@ -945,11 +968,11 @@ def decode_paths():
                 lay.arrow((x - GAP + 0.4, y + H / 2), (x - 0.4, y + H / 2),
                           color=MUTED, lw=1.2)
 
-    mids = [73 - r * 19.0 + H / 2 for r in range(4)]
-    _shared(lay, ax, "src", 3.0, 16.0, 11.0, 70.2, "file",
+    mids = [TOP - r * PITCH + H / 2 for r in range(len(rows))]
+    _shared(lay, ax, "src", 3.0, mids[-1] - H / 2, 11.0, mids[0] - mids[-1] + H, "file",
             ("on disk", "a clip, or a", "network stream"),
             col=MUTED, rows_y=mids, out=True)
-    _shared(lay, ax, "term", 86.0, 16.0, 11.0, 70.2, "mixer",
+    _shared(lay, ax, "term", 86.0, mids[-1] - H / 2, 11.0, mids[0] - mids[-1] + H, "mixer",
             ("the mixer", "composites this", "layer with the", "others on the channel"),
             col=TITLE, rows_y=mids, out=False)
 
