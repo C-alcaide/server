@@ -55,7 +55,11 @@ struct ProResDecodeCtx {
     int16_t*  d_cb;              // [height × width/2] planar Cb  (422), [height × width] (4444)
     int16_t*  d_cr;              // as d_cb
     int16_t*  d_alpha;           // [height × width] planar alpha — ProRes 4444 only (nullptr for 422)
-    uint16_t* d_bgra16;          // [height × width × 4] output (BGRA16)
+    uint16_t* d_bgra16;          // [height × width × 4] packed output; NULL on the planar path,
+                                  // which copies d_y/d_cb/d_cr out directly and never converts.
+                                  // The largest buffer in the slot -- 16.6 MB at 1080p, four
+                                  // times the luma plane -- so leaving it allocated for a path
+                                  // that cannot write it costs more than everything else here.
 
     // ── Misc ────────────────────────────────────────────────────────────────
     bool      is_444;            // true when profile == 4 (ProRes 4444 / 4444 XQ)
@@ -81,13 +85,18 @@ struct ProResDecodeCtx {
 // Allocate / free a ProResDecodeCtx.
 // Must be called from the CUDA device thread (cudaSetDevice already called).
 // ---------------------------------------------------------------------------
+/// `planar_output` -- true when the caller will only ever use
+/// `prores_decode_frame_planar_async`, which skips the packed BGRA16 buffer entirely. The two
+/// packed entry points then have nothing to write into and REFUSE rather than fault, because a
+/// null dereference in a decode kernel presents as a driver reset with no useful stack.
 cudaError_t prores_decode_ctx_create(ProResDecodeCtx* ctx,
                                      int width, int height,
                                      int profile,
                                      int mbs_per_slice,
                                      int slices_per_row,
                                      int num_slices,
-                                     size_t max_frame_bytes);
+                                     size_t max_frame_bytes,
+                                     bool planar_output = false);
 
 void prores_decode_ctx_destroy(ProResDecodeCtx* ctx);
 

@@ -345,6 +345,19 @@ struct prores_producer_impl final : public core::frame_producer
                 max_queued_ = 4;  // large frame: deeper queue to absorb speed=2 bursts
                 num_slots_  = 7;  // = max_queued_ + 3
             } else {
+                // 2/5, and a THIRD attempt to raise it was withdrawn rather than kept.
+                //
+                // Measured 2026-08-26 at 1080p with the planar route, where a slot is 8.3 MB
+                // rather than 16.6 and ten slots therefore costs ~83 MB a producer: 4/10 read
+                // as a ceiling of 10 against 9, which looked like the depth finally mattering.
+                // Then the SAME BINARY was run four times and gave 8, 10, 8 and 10. The
+                // ladder's resolution on this rig is about +/-2 channels, so a one-run
+                // improvement of one channel is not a measurement of anything, and the deeper
+                // ring costs ~50 MB a channel of real VRAM for it.
+                //
+                // The lesson is about the instrument rather than the depth: any ceiling claim
+                // here needs repeats, and a difference smaller than 2 channels needs a
+                // different instrument entirely.
                 max_queued_ = 2;  // small/medium frame: original behaviour
                 num_slots_  = 5;
             }
@@ -358,7 +371,11 @@ struct prores_producer_impl final : public core::frame_producer
             cudaError_t e = prores_decode_ctx_create(&slots_[i],
                 frame_info_.width, frame_info_.height, frame_info_.profile,
                 frame_info_.mbs_per_slice, frame_info_.slices_per_row,
-                frame_info_.num_slices, max_frame);
+                frame_info_.num_slices, max_frame,
+                // Planar-only when the Vulkan 4:2:2 route will be taken, which is decided by
+                // the same two conditions as the texture allocation below. Getting these out
+                // of step would either waste the buffer or refuse every decode.
+                use_vulkan_ && frame_info_.profile != 4);
             if (e != cudaSuccess)
                 CASPAR_THROW_EXCEPTION(std::runtime_error(
                     std::string("[prores_producer] prores_decode_ctx_create: ") + cudaGetErrorString(e)));

@@ -2137,7 +2137,45 @@ device::create_exportable_texture(int width, int height, int stride, common::bit
             {}, image, vk::ImageViewType::e2D, format, vk::ComponentMapping(), range);
         auto imageView = dev.createImageView(createInfo);
 
-        return std::make_shared<texture>(width, height, stride, depth, image, imageMemory, imageView, dev, memReq.size);
+        auto tex =
+            std::make_shared<texture>(width, height, stride, depth, image, imageMemory, imageView, dev, memReq.size);
+
+        // TRANSITION IT ONCE, HERE, because nothing downstream ever will.
+        //
+        // Every consumer of this function hands the resulting texture straight to the mixer as
+        // a frame plane -- the two CUDA producers, ISF, OFX, remotewall and spout -- and the
+        // mixer binds frame planes with a descriptor that DECLARES eShaderReadOnlyOptimal
+        // (`pipeline.cpp`, `textureInfos[i].imageLayout`). Nothing between creation and that
+        // draw issues a barrier: the pixels arrive by another API writing the memory this
+        // image aliases, which changes the contents without changing the layout Vulkan
+        // believes the image to be in. So without this the mixer sampled an image still in
+        // eUndefined, which is undefined behaviour rather than merely untidy -- it happens to
+        // work on NVIDIA because that hardware is largely layout-indifferent.
+        //
+        // Once is enough, and that is the point rather than an optimisation: an external write
+        // does not move a Vulkan image's layout, so an image put into eShaderReadOnlyOptimal at
+        // creation stays there for its whole life. Doing it per frame would add a submission
+        // per frame per producer to the very path whose reason for existing is not having one.
+        //
+        // Free and safe HERE specifically: a transition out of eUndefined discards contents,
+        // and at creation there are none to discard. The same barrier issued later would throw
+        // away the frame the external API had just written.
+        //
+        // `create_attachment` above does exactly this, to eRenderingLocalRead, for exactly the
+        // same reason.
+        impl_->submitSingleTimeCommands([&](vk::CommandBuffer cmd) {
+            transitionImageLayout(tex->id(),
+                                  vk::ImageLayout::eUndefined,
+                                  vk::AccessFlagBits2::eNone,
+                                  vk::PipelineStageFlagBits2::eTopOfPipe,
+
+                                  vk::ImageLayout::eShaderReadOnlyOptimal,
+                                  vk::AccessFlagBits2::eShaderRead,
+                                  vk::PipelineStageFlagBits2::eFragmentShader,
+                                  cmd);
+        });
+
+        return tex;
     });
 }
 

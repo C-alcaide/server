@@ -1,7 +1,7 @@
 CasparVP — Unreleased
 ==========================================
 
-### Changed: CUDA ProRes 4:2:2 hands the Vulkan mixer planar YCbCr, and sustains 9 channels instead of 5
+### Changed: CUDA ProRes 4:2:2 hands the Vulkan mixer planar YCbCr, and sustains 8 channels instead of 5
 
 **This changes rendered output for every existing config using `CUDA_PRORES` on the Vulkan
 mixer**, by about 1 LSB, and it moves the picture *towards* FFmpeg's CPU decoder rather than away.
@@ -26,12 +26,30 @@ frame 12. Worst 2 LSB and mean 0.00 both before and after; nothing above 3 LSB e
 
 | route | before | after |
 | :--- | ---: | ---: |
-| CUDA ProRes | 5 | **9** |
+| CUDA ProRes | 5 | **8**, range 7–9 |
 | FFmpeg Vulkan compute, for scale | 12 | 12 |
 
-9 held and 10 failed, so 9 is a real ceiling. The compute route held at 12 and failed at 14 —
-**13 was never run**, so its figure is 12 or 13. At the new ceiling the GPU sits at 44 %, so this
-route is still not GPU-bound and the remaining three-channel gap is not bandwidth.
+**The after figure is a range over repeats, and the before figure is not, which is the honest
+shape of this comparison.** A single `playback-scaling` run resolves about ±1 channel, and
+before that was understood it read as ±2 — the ladder's FIRST rung fails far more often than its
+channel count warrants, at 6, 8 or 10 alike, because the first server start of a run pays for
+shader compilation, pipeline creation and a cold page cache. The battery now spends a discarded
+2-channel rung first, which reduced opening-rung failures from 4 in 9 runs to 1 in 6 without
+curing them.
+
+So: six completed runs of the new binary gave 7, 8, 8, 9, 9 and 9. The pre-change 5 was a single
+run, but it was corroborated independently — the earlier queue-depth and slot experiments all
+landed on 5, and 2160p did too. A 3-channel gain is outside the spread; a 1-channel one would
+not have been, and one was reported and withdrawn (see below).
+
+At the ceiling the GPU sits at 32–45 %, so this route is still not GPU-bound and the remaining
+gap to the compute route is not bandwidth. That route held at 12 and failed at 14, so **13 was
+never run** and its figure is 12 or 13.
+
+**Withdrawn, and recorded because the withdrawal is the useful part:** raising the 1080p slot
+ring from 2/5 to 4/10 read as 9 → 10 against one baseline run and was written up as pipeline
+depth finally mattering. Running the same binary four more times gave 8, 10, 8 and 10. It was
+reverted: no demonstrated benefit, and about 50 MB per channel of real VRAM for it.
 
 **Unchanged, deliberately, and each for its own reason:**
 

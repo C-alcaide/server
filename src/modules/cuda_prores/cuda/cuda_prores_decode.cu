@@ -76,7 +76,8 @@ cudaError_t prores_decode_ctx_create(ProResDecodeCtx* ctx,
                                      int mbs_per_slice,
                                      int slices_per_row,
                                      int num_slices,
-                                     size_t max_frame_bytes)
+                                     size_t max_frame_bytes,
+                                     bool planar_output)
 {
     memset(ctx, 0, sizeof(*ctx));
     ctx->width          = width;
@@ -114,7 +115,12 @@ cudaError_t prores_decode_ctx_create(ProResDecodeCtx* ctx,
     ctx->d_alpha = nullptr;
     if (is_444)
         CUDA_CHECK(cudaMalloc((void**)&ctx->d_alpha,    n_pix    * sizeof(int16_t)));
-    CUDA_CHECK(cudaMalloc((void**)&ctx->d_bgra16,       n_pix * 4 * sizeof(uint16_t)));
+    // Not allocated for a planar-only caller. This is the biggest buffer in the context by
+    // a wide margin -- n_pix * 8 bytes, against n_pix * 2 for luma -- so skipping it is what
+    // makes a deeper slot ring affordable rather than a VRAM trade.
+    ctx->d_bgra16 = nullptr;
+    if (!planar_output)
+        CUDA_CHECK(cudaMalloc((void**)&ctx->d_bgra16,   n_pix * 4 * sizeof(uint16_t)));
 
     // Pinned host staging for slice index.
     CUDA_CHECK(cudaMallocHost((void**)&ctx->h_slice_starts, (size_t)num_slices * sizeof(uint32_t)));
@@ -435,6 +441,12 @@ cudaError_t prores_decode_frame(
 {
     cudaStream_t s = ctx->stream;
 
+    if (!ctx->d_bgra16) {
+        PRORES_DEC_LOG_ERROR("[cuda_prores_decode] this context was created planar-only; "
+                             "the packed entry points have no output buffer");
+        return cudaErrorInvalidValue;
+    }
+
     // ── 1. Build slice table (CPU) ─────────────────────────────────────────
     if (!build_slice_table(h_icpf_data, icpf_size,
                            ctx->num_slices,
@@ -725,6 +737,12 @@ cudaError_t prores_decode_frame_async(
 {
     cudaStream_t s = ctx->stream;
 
+    if (!ctx->d_bgra16) {
+        PRORES_DEC_LOG_ERROR("[cuda_prores_decode] this context was created planar-only; "
+                             "the packed entry points have no output buffer");
+        return cudaErrorInvalidValue;
+    }
+
     CUDA_CHECK(decode_to_planes(ctx, h_icpf_data, icpf_size, is_interlaced));
 
     if (ctx->is_444) {
@@ -834,6 +852,12 @@ cudaError_t prores_decode_frame_to_host(
     uint16_t*        h_bgra16_out)
 {
     cudaStream_t s = ctx->stream;
+
+    if (!ctx->d_bgra16) {
+        PRORES_DEC_LOG_ERROR("[cuda_prores_decode] this context was created planar-only; "
+                             "the packed entry points have no output buffer");
+        return cudaErrorInvalidValue;
+    }
 
     if (!build_slice_table(h_icpf_data, icpf_size,
                            ctx->num_slices,

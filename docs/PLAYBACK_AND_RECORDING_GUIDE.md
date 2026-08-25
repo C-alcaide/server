@@ -233,19 +233,28 @@ does the YCbCr→RGB conversion it was already doing for every other planar sour
 1080p ProRes noise, one producer per channel, Vulkan mixer, `screen` output
 (`playback-scaling`, 2026-08-26):
 
-| route | channels | cores | GPU | VRAM | VRAM/channel |
-| :--- | ---: | ---: | ---: | ---: | ---: |
-| CUDA ProRes, BGRA16 *(before)* | **5** | — | — | — | — |
-| CUDA ProRes, planar 4:2:2 *(after)* | **9** | 2.70 | 44 % | 3255 MB | 362 MB |
-| FFmpeg Vulkan compute | **12** | 2.48 | 33 % | 4224 MB | 352 MB |
+| route | channels | cores | GPU | VRAM/channel |
+| :--- | ---: | ---: | ---: | ---: |
+| CUDA ProRes, BGRA16 *(before)* | **5** | — | — | — |
+| CUDA ProRes, planar 4:2:2 *(after)* | **8** (7–9 over six runs) | 2.4–3.1 | 32–45 % | ~290 MB |
+| FFmpeg Vulkan compute | **12** | 2.48 | 33 % | 352 MB |
 
-**A 60 % gain, and the picture improved with it** — `prores-parity` on ProRes 422 against the
-FFmpeg CPU reference went from 0.16 % of samples differing to **0.01 %**, worst 2 LSB and mean
-0.00 throughout. Moving the same conversion into the same shader the reference route uses should
-move the picture towards it, and it did.
+**A 3-channel gain, and the picture improved with it** — `prores-parity` on ProRes 422 against
+the FFmpeg CPU reference went from 0.16 % of samples differing to **0.01 %**, worst 2 LSB and
+mean 0.00 throughout. Moving the same conversion into the same shader the reference route uses
+should move the picture towards it, and it did.
 
-**Rung honesty:** 9 held and 10 failed, so 9 is a real ceiling. The compute route held at 12 and
-failed at 14 — **13 was never run**, so its ceiling is 12 or 13.
+**Read the channel figures as ±1, and read that caveat before the numbers.** A single
+`playback-scaling` run resolves about a channel; the after figure is six runs (7, 8, 8, 9, 9, 9)
+and the before figure is one, corroborated by the earlier queue-depth and slot experiments all
+landing on 5 and by 2160p doing the same. The compute route held at 12 and failed at 14, so
+**13 was never run** and its figure is 12 or 13.
+
+**One claim was made and withdrawn here**, which is worth knowing before trusting a single run:
+raising the slot ring 2/5 → 4/10 read as 9 → 10 and was written up as depth mattering. Four more
+runs of the same binary gave 8, 10, 8, 10, and it was reverted. The cause was largely positional
+— a ladder's FIRST rung fails far more often than its count warrants, because the first server
+start pays for shader compilation and a cold page cache.
 
 **4444 is deliberately NOT on this path.** Planar 4:4:4-with-alpha is four full-size 16-bit
 planes: 8 bytes a pixel, exactly what BGRA16 costs. There is nothing to win, and it is not free —
