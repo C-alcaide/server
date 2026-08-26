@@ -31,6 +31,11 @@ build_custom/
 build_*.txt
 build_*.bat
 build_*.py
+# ...but NOT the documentation manual's build script, which is a deliverable rather than a scratch
+# file. `build_*.py` here targets throwaway build helpers dropped at the repo root; it also matched
+# `docs/build_html.py`, so the commit that claimed to add that script committed only .gitignore and
+# a README telling the reader to run it. Nobody cloning this repo had the script. Found 2026-08-27.
+!docs/build_html.py
 fix*.py
 fix2*.py
 merge_script*.py
