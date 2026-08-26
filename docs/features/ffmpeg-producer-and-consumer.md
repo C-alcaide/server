@@ -84,8 +84,10 @@ run; `vulkan-video-decode` has no dedicated battery.
 
 1. **No A/B for Vulkan Video against D3D11VA.** Both are implemented; nothing compares their cost or
    picture. This is the deliverable the Vulkan Video plan was written for.
-2. **`av_producer.cpp.bak`** — a 95 KB backup file sits in `producer/`, untracked and explicitly
-   gitignored, 8065 lines from the live file, dated 2026-08-23. Not referenced by the build. Left
-   alone because a gitignored file in a shared tree is someone's private working copy, not litter to
-   sweep — but it should not live there indefinitely.
+2. ~~`av_producer.cpp.bak` in `producer/`~~ — **deleted 2026-08-27**, after checking rather than
+   assuming. It was untracked *and* gitignored, so there was no git copy and deletion was permanent:
+   2191 lines against the live file's 5874, matching no commit in the last 60 that touched
+   `av_producer.cpp`. Exactly one symbol existed in it and not in the tree — `get_color_space` — and
+   that had been extracted to `util/av_color.h`, where five call sites still use it. So it held
+   nothing the tree had lost, which is the only basis on which an untracked file should be removed.
 3. **16-channel AAC is broken on FFmpeg 8** (upstream defect, WAV is the workaround).
