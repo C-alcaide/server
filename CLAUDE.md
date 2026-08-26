@@ -65,6 +65,24 @@ Two rules that outrank the table:
   running the nearest battery. That sentence is what turns a gap into a tracked item; the
   Vulkan-consumer-metadata gap below was found exactly that way.
 
+**Known gap, 2026-08-26: nineteen fork-specific AMCP commands are documented nowhere.** Checked
+mechanically against `d:\Github\server-upstream`, so these are this fork's own rather than stock
+CasparCG:
+
+`MIXER PROJECTION_FRUSTUM`, `MIXER PROJECTION_ICVFX`, `MIXER PROJECTION_ICVFX_COLOR`,
+`MIXER PROJECTION_LENS`, `MIXER PROJECTION_OFFSET`, `MIXER FLIP`, `INFO PORTAUDIO`, and every
+one of the twelve `PREVIZ *` commands.
+
+**This is where the defects were.** `MIXER PROJECTION_ICVFX_COLOR` is on that list, and it
+carried a red/blue exchange on the OpenGL mixer that no test could see because no battery drove
+ICVFX at all. Undocumented and untested is the same gap seen twice: nobody writes a check for a
+feature they cannot find, and nobody finds a feature that is not written down. Treat the list
+above as a priority order for both docs and coverage, not as a tidying task.
+
+`icvfx-parity` now covers the gain. The mask geometry, the feather, the inner-frustum
+reprojection, the tweened forms, and all twelve `PREVIZ` commands remain both undocumented and
+uncovered.
+
 **Known gap, 2026-08-26: `vk-validation` reports clean whatever you do.** A deliberate
 `mipLevels = 0` in `device::create_exportable_texture` — an unambiguous stateless VUID, verified
 compiled into the binary and verified reached — came back "0 VUID findings" with no layer output
