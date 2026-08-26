@@ -1531,7 +1531,26 @@ struct device::impl : public std::enable_shared_from_this<impl>
     std::future<std::shared_ptr<texture>>
     copy_compressed_async(const array<const uint8_t>& source, int width, int height, vk::Format format)
     {
-        return dispatch_async(
+        // THE RETURNED TEXTURE MUST NOT OUTRUN ITS OWN UPLOAD, and until 2026-08-26 it could.
+        //
+        // `submitSingleTimeCommands` submits and returns a timeline value; it never waits. And
+        // `texture::impl::~impl()` frees at once -- destroyImageView / freeMemory /
+        // destroyImage -- with no fence, no timeline check and no deferred-destruction sweep.
+        // So a texture released before its copy retired freed the VkImage while the GPU was
+        // still writing into it.
+        //
+        // Nothing had hit it because a published frame outlives its copy by a wide margin: it
+        // crosses the mixer, is drawn, and is released long after. The defect was latent and
+        // any EARLY release exposed it. Found while making the HAP producer discard pre-seek
+        // frames after a SEEK: 1450 `vk::DeviceLostError` in eight minutes on one attempt and
+        // 1749 on a second that released from the opposite thread -- most of them
+        // `vk::Queue::submit: ErrorDeviceLost` -- where binaries without the discard produced
+        // ZERO across comparable runs. The discard was correct; this was the bug under it.
+        //
+        // Waited the way `copy_async` already does: the dispatch lambda hands back its timeline
+        // value and a DEFERRED async waits on the CALLER's thread. Not on the device dispatch
+        // thread, which would serialise every upload behind this one.
+        auto fut = dispatch_async(
             [this, source, width, height, format]() {
             std::shared_ptr<buffer> buf;
 
@@ -1589,7 +1608,7 @@ struct device::impl : public std::enable_shared_from_this<impl>
                                        vk::Offset3D(0, 0, 0),
                                        vk::Extent3D(width, height, 1));
 
-            submitSingleTimeCommands([&](vk::CommandBuffer cmd) {
+            const uint64_t upload_done = submitSingleTimeCommands([&](vk::CommandBuffer cmd) {
                 transitionImageLayout(tex->id(),
                                       vk::ImageLayout::eUndefined,
                                       vk::AccessFlagBits2::eNone,
@@ -1613,9 +1632,18 @@ struct device::impl : public std::enable_shared_from_this<impl>
                                       cmd);
             });
 
-            return tex;
+            return std::make_pair(tex, upload_done);
             },
             dispatch_kind::upload);
+
+        return std::async(std::launch::deferred, [this, fut = std::move(fut)]() mutable {
+            auto pair = fut.get();
+            vk::SemaphoreWaitInfo waitInfo{};
+            waitInfo.setSemaphores(_semaphore);
+            waitInfo.setValues(pair.second);
+            wait_for_semaphores(_device, waitInfo, L"[Vulkan] compressed upload");
+            return pair.first;
+        });
     }
 
     std::shared_ptr<texture> reduce_texture(const std::shared_ptr<texture>& source, int levels)

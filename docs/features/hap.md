@@ -144,28 +144,42 @@ is right. The offset fix is argued from three external sources rather than from 
 comparison — the 14 ffmpeg-rendered `hap_q` / `hap_alpha` ground-truth references now exist in the
 harness, so `output.ground_truth` on those codecs is the next check and has not been run.
 
-**`CALL SEEK` is lost intermittently on the Vulkan path, and it costs about a fifth of the
-battery.** Measured over four runs of six rasters: the Vulkan half captured frame **0** where the
-OpenGL half captured the pinned frame 7 in **5 of 24 captures (~21%)**. OpenGL never did it — 0 of
-24. It moved between rasters run to run (PAL twice, NTSC twice, 2160p once), which is what a race
-looks like rather than a raster-dependent fault.
+**`CALL SEEK` was lost on ~21% of Vulkan captures — fixed, and it uncovered a second defect
+underneath.** Measured before: the Vulkan half captured frame **0** where the OpenGL half captured
+the pinned frame 7, in **5 of 24 captures**; OpenGL never did it, 0 of 24.
 
-**This is not the harness settling too early**, which is what it first looked like. The pin is
-deterministic: `LOAD` pauses the channel on frame 0 and the script then issues `CALL 1-1 SEEK 7`
-(`core/amcp_script.py:352`), so there is no sleep to lose. Frame 0 is precisely the frame `LOAD`
-leaves behind, so the symptom is a **`SEEK` that never took effect** and a pre-seek frame held.
+Not a harness settle problem, which is what it first looked like. The pin is deterministic — `LOAD`
+pauses on frame 0 and the script issues `CALL 1-1 SEEK 7` — so frame 0 is exactly the frame `LOAD`
+leaves behind, and the symptom was a **seek that never took effect**. `gl_loop` validated an item's
+epoch under `done_mutex_`, dropped the lock, decoded (a BC upload, an FBO pass or a CPU
+decompression), and pushed into a queue the seek had emptied in the meantime. `last_frame()` then
+consumed `seek_done_` on that first successful pop, cached the pre-seek picture and cleared the
+flag — so nothing ever revisited it and a paused channel held frame 0 for the rest of the run.
 
-That has happened here before and the shape matches: `hap_producer.cpp:507` carries a fix dated
-2026-08-19 for exactly this — *"`SEEK 7` after a one-second settle showed frame 1 … and held it for
-the rest of the run"* — whose cause was the decoded queue being cleared asynchronously, so the
-channel could pop a stale frame and then stay on it. The suspicion, **not yet confirmed**, is that
-the Vulkan BC-upload publish route (`use_vk_upload_`, `hap_producer.cpp:972-1067`) does not
-participate in that same synchronous invalidation, which would explain why only the Vulkan half is
-affected. Reading the epoch handling on that path is the next step.
+Fixed by tagging each queued frame with its seek epoch and discarding stale ones **at the pop**,
+in `receive_impl` (before its empty test, so a queue of only pre-seek frames reads as an underrun)
+and in `last_frame` (before it consumes `seek_done_`).
 
-Reported honestly rather than fixed: the row now reads `NOT MEASURED` with both frame numbers and
-the pixel figure suppressed, and the raster is excluded from the denominator. It first presented as
-"max diff 255, FAIL", which reads as a catastrophic colour defect.
+**The discard had to move to the consumer, and the reason is the second defect.** Dropping the
+stale frame on the decode thread — the obvious implementation — produced **1450
+`vk::DeviceLostError` in eight minutes**. Rewriting it to release from the mixer thread instead
+still produced 1749. The thread was never the problem: `submitSingleTimeCommands` submits without
+waiting and `texture::impl::~impl()` frees immediately, so **any** early release of an uploaded
+texture frees the `VkImage` while the GPU is still writing into it. That is a latent defect in the
+Vulkan accelerator, not in HAP — a published frame outlives its copy by a wide margin, so nothing
+had ever released one early enough to expose it. `copy_compressed_async` now waits on its timeline
+value the way `copy_async` beside it already did.
+
+| binary | frame mismatches / 24 | `vk::DeviceLostError` |
+| :--- | ---: | ---: |
+| before | 5 | 0 |
+| discard on the decode thread | 0 | **1450** |
+| reverted baseline | 4 | 0 |
+| discard on the consumer thread | 0 | **1749** |
+| + upload wait | **0** | **0** |
+
+The last row is four runs of six rasters with **every raster measured in every run** and the four
+tables byte-for-byte identical. At the observed rate a clean sweep is ~1% likely by chance.
 
 **HAP Q Alpha has no fixture and no reachable code.** ffmpeg's hap encoder writes
 hap/hap_alpha/hap_q only, so `HapM` cannot be produced here. It is also unreachable: nothing in the
@@ -183,10 +197,8 @@ Shader case 14 is dead on **both** mixers.
    `mixer-parity`; `hap_alpha` has a fixture and references but no battery pointed at it.
 3. **HAP Q Alpha (`HapM`) is unreachable and unfixturable** — §4. Shader case 14 is dead on both
    mixers, and the channel-order fix applied to it there is a reading, not a measurement.
-4. **`CALL SEEK` is lost on ~21% of Vulkan captures** (§4), leaving one or two rasters per run
-   unmeasured. Suspected to be the Vulkan publish route missing the seek invalidation that
-   `hap_producer.cpp:507` performs for the other paths — unconfirmed, and the highest-value next
-   piece of work on this module.
+4. ~~`CALL SEEK` is lost on ~21% of Vulkan captures~~ — **fixed**, see §4, along with the Vulkan
+   texture-lifetime defect it exposed.
 5. **No cost measurement** — Snappy worker count versus channel count has never been measured, so
    there is no channel-count ceiling for HAP as there is for ProRes.
 

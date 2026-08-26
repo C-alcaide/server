@@ -223,7 +223,20 @@ struct hap_producer_impl final : public core::frame_producer
     spl::shared_ptr<diagnostics::graph>       graph_;
     core::draw_frame                          cached_frame_;
 
-    std::queue<core::draw_frame>              ready_queue_;
+    //: A decoded frame and the seek epoch it belongs to.
+    //:
+    //: The epoch travels WITH the frame because a stale frame has to be discarded by the
+    //: CONSUMER, not by the decode thread that produced it. Dropping it on the decode thread
+    //: was tried on 2026-08-26 and destroyed the Vulkan texture `copy_compressed_async` had
+    //: just created, off the mixer thread: 1450 `vk::DeviceLostError` in eight minutes, where
+    //: the binary before it produced none in an hour. `receive_impl` and `last_frame` run on
+    //: the thread that releases frames as a matter of course, so discarding there is free.
+    struct QueuedFrame
+    {
+        core::draw_frame df;
+        uint32_t         epoch = 0;
+    };
+    std::queue<QueuedFrame>                   ready_queue_;
     std::mutex                                queue_mutex_;
     std::condition_variable                   queue_cv_;
 
@@ -282,6 +295,9 @@ struct hap_producer_impl final : public core::frame_producer
     std::atomic<int>     st_donepq_{0};      // done_pq_ depth
     std::atomic<int>     st_rawq_{0};        // raw_queue_ depth
     std::atomic<int>     st_readyq_{0};      // ready_queue_ depth
+    //: Pre-seek frames discarded at the pop. Non-zero means the seek invalidation is doing
+    //: its job; it was the absence of this that let `SEEK` land on the wrong frame.
+    std::atomic<int64_t> st_drop_stale_{0};
     std::atomic<int>     st_blocked_workers_{0}; // workers parked on the done_pq_ bound
     // Every route by which a worker consumes a sequence number without
     // delivering it. gl_loop needs the sequence contiguous, so any of these
@@ -507,6 +523,22 @@ struct hap_producer_impl final : public core::frame_producer
             const int64_t seek_target = seek_request_.exchange(-1LL);
             if (seek_target >= 0) {
                 eof_paused_.store(false, std::memory_order_release);
+                // THE EPOCH IS BUMPED FIRST, BEFORE THE QUEUES ARE CLEARED, and the order is
+                // the fix rather than a tidy-up. It used to be bumped at the end of this block,
+                // which left a window between "ready_queue_ cleared" and "epoch incremented":
+                // `gl_loop` could finish decoding a pre-seek frame in that gap, still see the
+                // OLD epoch, and push it into the queue this block had just emptied.
+                //
+                // Nothing could then correct it. `last_frame()` consumes `seek_done_` on the
+                // first pop it manages, so it took that stale frame, cached it, cleared the
+                // flag, and the paused channel sat on the pre-seek picture for the rest of the
+                // run. Measured 2026-08-26: `CALL SEEK 7` after `LOAD` left the channel on
+                // frame 0 -- exactly the frame LOAD leaves -- in 5 of 24 captures on the
+                // Vulkan path, and 0 of 24 on OpenGL, whose decode window is shorter.
+                //
+                // No new-epoch frame can exist yet to be wrongly discarded: packets are only
+                // stamped with the new epoch once this loop reaches its read below.
+                seek_epoch_.fetch_add(1u, std::memory_order_release);
                 {
                     std::lock_guard<std::mutex> lk(raw_mutex_);
                     while (!raw_queue_.empty()) raw_queue_.pop();
@@ -526,7 +558,7 @@ struct hap_producer_impl final : public core::frame_producer
                 pkt_seq        = 0;
                 frame_count_.store(seek_target, std::memory_order_release);
                 fps_frame_acc_ = 0;
-                seek_epoch_.fetch_add(1u, std::memory_order_release);
+                // (seek_epoch_ was incremented at the top of this block -- see there for why.)
                 raw_cv_.notify_all();
                 // gl_loop watches seek_epoch_ from inside its wait on done_cv_,
                 // and the workers that would otherwise have notified it are about
@@ -581,6 +613,11 @@ struct hap_producer_impl final : public core::frame_producer
                     // number nobody was going to send: MEASURED as a reverse loop that held frame
                     // 21 for 269 ticks. That handler's own comment says exactly this, which is why
                     // the answer was to mirror it rather than invent a lighter version.
+                    // Epoch first, then the clear -- mirroring the seek handler above, which is
+                    // what this block's own comment says it must do. Bumping after the clear
+                    // leaves a window for gl_loop to push a pre-seek frame into the emptied
+                    // queue; see the account at the top of the seek handler.
+                    seek_epoch_.fetch_add(1u, std::memory_order_release);
                     {
                         std::lock_guard<std::mutex> lk(queue_mutex_);
                         while (!ready_queue_.empty())
@@ -591,7 +628,6 @@ struct hap_producer_impl final : public core::frame_producer
                     pkt_seq        = 0;
                     frame_count_.store(target, std::memory_order_release);
                     fps_frame_acc_ = 0;
-                    seek_epoch_.fetch_add(1u, std::memory_order_release);
                     raw_cv_.notify_all();
                     done_cv_.notify_all();
                     queue_cv_.notify_all();
@@ -1278,8 +1314,19 @@ struct hap_producer_impl final : public core::frame_producer
             st_decode_us_ += (int64_t)(decode_timer.elapsed() * 1e6);
             st_where_.store(0, std::memory_order_relaxed);
             ++st_pushed_;
-            { std::lock_guard<std::mutex> lk(queue_mutex_); ready_queue_.push(std::move(df));
-              st_readyq_.store((int)ready_queue_.size(), std::memory_order_relaxed); }
+            // Tagged with the epoch it was decoded under, and pushed unconditionally. The
+            // item was checked against the epoch while `done_mutex_` was held, then that lock
+            // was dropped and the decode above ran -- a BC upload, an FBO pass or a CPU
+            // decompression -- so a seek can land in between and this frame can be stale.
+            //
+            // It is NOT dropped here. See `QueuedFrame`: releasing a frame on this thread
+            // destroys a Vulkan texture off the mixer thread and loses the device. The consumer
+            // discards it instead, at the pop, where releasing a frame is routine.
+            {
+                std::lock_guard<std::mutex> lk(queue_mutex_);
+                ready_queue_.push(QueuedFrame{std::move(df), seen_epoch});
+                st_readyq_.store((int)ready_queue_.size(), std::memory_order_relaxed);
+            }
             queue_cv_.notify_one();
         }
 
@@ -1408,6 +1455,11 @@ struct hap_producer_impl final : public core::frame_producer
                                [this] { return !ready_queue_.empty() || stop_flag_ || eof_paused_; });
         }
         ++st_recv_;
+        // Stale frames go first, and BEFORE the empty test: a queue holding nothing but
+        // pre-seek frames has to read as an underrun, not as a frame to serve. Without this the
+        // seek race showed as `CALL SEEK 7` landing on frame 0 in 5 of 24 Vulkan captures.
+        drop_stale_locked();
+
         if (ready_queue_.empty()) {
             ++st_underrun_;
             return cached_frame_;
@@ -1453,7 +1505,7 @@ struct hap_producer_impl final : public core::frame_producer
             ++actually_consumed;
         }
 
-        cached_frame_ = std::move(ready_queue_.front());
+        cached_frame_ = std::move(ready_queue_.front().df);
         ready_queue_.pop();
         lk.unlock();
         queue_cv_.notify_all();
@@ -1489,6 +1541,25 @@ struct hap_producer_impl final : public core::frame_producer
         return cached_frame_;
     }
 
+    //: Discard any stale-epoch frames sitting at the front. MUST be called with
+    //: `queue_mutex_` held, and only from a CONSUMER thread -- popping releases the frame,
+    //: and for the Vulkan path that destroys a texture, which is safe on the mixer thread and
+    //: loses the device on the decode thread. See `QueuedFrame`.
+    //:
+    //: Returns how many it dropped, for the counter.
+    int drop_stale_locked()
+    {
+        const uint32_t cur = seek_epoch_.load(std::memory_order_acquire);
+        int dropped = 0;
+        while (!ready_queue_.empty() && ready_queue_.front().epoch != cur) {
+            ready_queue_.pop();
+            ++dropped;
+        }
+        if (dropped)
+            st_drop_stale_ += dropped;
+        return dropped;
+    }
+
     bool is_ready() override { std::lock_guard<std::mutex> lk(queue_mutex_); return !ready_queue_.empty(); }
 
     // Called by the layer on every tick when the layer is paused
@@ -1505,9 +1576,15 @@ struct hap_producer_impl final : public core::frame_producer
     {
         if (seek_done_.load(std::memory_order_relaxed) || !cached_frame_) {
             std::unique_lock<std::mutex> lk(queue_mutex_);
+            // THIS is where a stale frame did its damage. `seek_done_` is consumed by the first
+            // pop that succeeds, so taking a pre-seek frame here cached it, cleared the flag,
+            // and left a paused channel on the pre-seek picture for the rest of the run --
+            // nothing revisits it. Dropping stale frames first means the flag survives until a
+            // frame from the current epoch actually arrives.
+            drop_stale_locked();
             if (!ready_queue_.empty()) {
                 seek_done_.store(false, std::memory_order_relaxed);
-                cached_frame_ = std::move(ready_queue_.front());
+                cached_frame_ = std::move(ready_queue_.front().df);
                 ready_queue_.pop();
                 lk.unlock();
                 queue_cv_.notify_all();
@@ -1570,6 +1647,7 @@ struct hap_producer_impl final : public core::frame_producer
         monitor_state_["hap/drop-epoch1"]  = static_cast<int64_t>(st_drop_epoch1_);
         monitor_state_["hap/drop-parse"]   = static_cast<int64_t>(st_drop_parse_);
         monitor_state_["hap/drop-epoch2"]  = static_cast<int64_t>(st_drop_epoch2_);
+        monitor_state_["hap/drop-stale"]   = static_cast<int64_t>(st_drop_stale_);
         return monitor_state_;
     }
 

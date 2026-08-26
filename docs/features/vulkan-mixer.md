@@ -41,6 +41,30 @@ lists match.
 These are the reason this document exists rather than only the implementation note. Each has cost
 real time in this tree.
 
+**An uploaded texture must not be released before its copy retires, and until 2026-08-27 nothing
+enforced that.** `submitSingleTimeCommands` submits and returns a timeline value — it never waits —
+and `texture::impl::~impl()` frees at once: `destroyImageView`, `freeMemory`, `destroyImage`, with
+no fence, no timeline check and no deferred-destruction sweep. So releasing a texture while its
+upload was still in flight freed the `VkImage` mid-write, and the GPU took the device down:
+`vk::Queue::submit: ErrorDeviceLost`.
+
+**It survived because nothing ever released one early.** A published frame crosses the mixer, gets
+drawn and is released long after its copy has retired, so the margin hid the defect completely. The
+first code to release one early — the HAP producer discarding pre-seek frames after a `SEEK` — hit
+it immediately: **1450 device-lost errors in eight minutes**, then 1749 on a rewrite that released
+from the other thread, against **zero** on binaries without the discard.
+
+`copy_compressed_async` now waits on its timeline value in a deferred async on the **caller's**
+thread, which is the idiom `copy_async` in the same file already used. **The general fix is still
+owed:** deferring destruction until the timeline passes the value that last touched the image,
+which would make every texture safe rather than this one call site. Every other
+`submitSingleTimeCommands` caller that hands a texture onward carries the same latent risk.
+
+**A defect that only a new caller can reach is not a dormant defect, it is an undiscovered one** —
+and the lesson generalises past Vulkan: when a change makes a previously-unreachable path
+reachable, the failure it produces may belong to the path, not the change. Two attempts here were
+blamed on the discard before the lifetime was suspected.
+
 **Channel order differs between the backends.** The OpenGL mixer carries the pixel in **BGR**
 through the whole grading chain — `col.r` holds blue — while Vulkan grades in **RGB**. So every
 per-channel uniform needs `.bgr` at its call site in `shader.frag`, or reversal on upload, and

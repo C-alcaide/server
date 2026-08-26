@@ -1,6 +1,60 @@
 CasparVP — Unreleased
 ==========================================
 
+### Fixed: an uploaded Vulkan texture could be freed while the GPU was still writing to it
+
+**This is a latent defect in the Vulkan accelerator, not in any one module**, and it had been there
+from the start. `device::copy_compressed_async` handed back a texture whose upload copy was still in
+flight: `submitSingleTimeCommands` submits and returns a timeline value without waiting, and
+`texture::impl::~impl()` frees immediately — `destroyImageView`, `freeMemory`, `destroyImage` — with
+no fence, no timeline check and no deferred-destruction sweep. Releasing such a texture before its
+copy retired freed the `VkImage` mid-write, and the device was lost.
+
+**Nothing had ever hit it, because nothing released a frame early.** A published frame crosses the
+mixer, is drawn, and is released long after the copy has retired. The margin hid the defect
+completely until the HAP producer began discarding pre-seek frames after a `SEEK` — the first code
+in the tree to drop a decoded frame instead of publishing it. Measured, four runs of six rasters
+each time:
+
+| | `vk::DeviceLostError` |
+| :--- | ---: |
+| discarding on the decode thread | 1450 |
+| discarding on the mixer thread instead | 1749 |
+| binaries without any discard | 0 |
+| **with the upload wait** | **0** |
+
+1126 of the first batch were `vk::Queue::submit: ErrorDeviceLost`. The thread was never the issue —
+two attempts were wrongly blamed on where the release happened before the lifetime was suspected.
+
+Fixed the way `copy_async` in the same file already did it: the dispatch lambda returns its timeline
+value and a **deferred** async waits on the caller's thread, via the existing `wait_for_semaphores`.
+Not on the device dispatch thread, which would serialise every upload behind this one.
+
+**What this does NOT fix.** Only `copy_compressed_async`. The general fix — deferring destruction
+until the timeline passes the value that last touched an image — is still owed, and every other
+`submitSingleTimeCommands` caller that hands a texture onward carries the same latent risk. Recorded
+in `docs/features/vulkan-mixer.md` §2.
+
+### Fixed: HAP `CALL SEEK` was silently lost on about a fifth of Vulkan captures
+
+`SEEK` after `LOAD` left the channel on **frame 0** — precisely the frame `LOAD` leaves behind — in
+**5 of 24 Vulkan captures**, and never once in 24 on OpenGL. Not a settling problem: the sequence is
+`LOAD` then `CALL 1-1 SEEK 7`, which is deterministic, so this was a seek that never took effect.
+
+`gl_loop` validated a decoded item's epoch while holding `done_mutex_`, released it, ran the decode,
+and pushed into a `ready_queue_` that a seek had emptied in between. `last_frame()` consumed
+`seek_done_` on that first successful pop, cached the pre-seek picture and cleared the flag — so
+nothing revisited it and a paused channel held the wrong frame for the rest of the run.
+
+Each queued frame now carries its seek epoch, and stale ones are discarded **at the pop** — in
+`receive_impl` before its empty test, so a queue holding only pre-seek frames reads as an underrun
+rather than serving one, and in `last_frame` before it consumes `seek_done_`. Both seek sites also
+bump the epoch **before** clearing the queues rather than after, closing the window in which a push
+could land in a queue that had just been emptied. Counted in `hap/drop-stale`.
+
+After: **0 frame mismatches in 24 captures, 0 device-lost, every raster measured in every run**, and
+the four run tables byte-for-byte identical. At the observed rate a clean sweep is ~1% by chance.
+
 ### Fixed: HAP Q decoded with a chroma offset of 0.5 where the format uses 128/255
 
 **This changes rendered output** for HAP Q and HAP Q Alpha (`HapY`, `HapM`) played on the **Vulkan
