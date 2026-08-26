@@ -502,8 +502,20 @@ vec4 get_rgba_color(vec2 uv){
     case 10:{vec2 cuv=chroma_uv(uv,PLANE0,PLANE1);float y=texture(textures[PLANE0],uv).g*precision_factor[0];float cb=texture(textures[PLANE1],cuv).r*precision_factor[1];float cr=texture(textures[PLANE1],cuv).b*precision_factor[1];return ycbcra_to_rgba(y,cb,cr,1.0);}
     case 11:{float g=texture(textures[PLANE0],uv).r*precision_factor[0];float b=texture(textures[PLANE1],uv).r*precision_factor[1];float r=texture(textures[PLANE2],uv).r*precision_factor[2];return vec4(r,g,b,1.0);}
     case 12:{float g=texture(textures[PLANE0],uv).r*precision_factor[0];float b=texture(textures[PLANE1],uv).r*precision_factor[1];float r=texture(textures[PLANE2],uv).r*precision_factor[2];float a=texture(textures[PLANE3],uv).r*precision_factor[3];return vec4(r,g,b,a);}
-    case 13:{vec4 c=texture(textures[PLANE0],uv);float scale=(c.b*(255.0/8.0))+1.0;float Co=(c.r-0.5)/scale;float Cg=(c.g-0.5)/scale;float Y=c.a;return vec4(clamp(Y+Co-Cg,0.0,1.0),clamp(Y+Cg,0.0,1.0),clamp(Y-Co-Cg,0.0,1.0),1.0);}
-    case 14:{vec4 c=texture(textures[PLANE0],uv);float scale=(c.b*(255.0/8.0))+1.0;float Co=(c.r-0.5)/scale;float Cg=(c.g-0.5)/scale;float Y=c.a;float a=texture(textures[PLANE1],uv).a;return vec4(clamp(Y+Co-Cg,0.0,1.0),clamp(Y+Cg,0.0,1.0),clamp(Y-Co-Cg,0.0,1.0),a);}
+    // ycocg_dxt5 / ycocg_dxt5a (HAP Q, HAP Q Alpha). THE OFFSET IS 128 CODES, NOT 0.5:
+    // the DXT5 blocks carry 8-bit codes and neutral chroma is code 128, so 128/255 =
+    // 0.501961. 0.5 is code 127.5 and not representable. Confirmed by FFmpeg's reference
+    // decoder (libavcodec/texturedsp.c:359-361, `co = (r - 128) / s`) and by this fork's
+    // own hap/gl/hap_gl_decode.cpp FS_YCOCG, which used 128/255 from the start.
+    //
+    // THIS PATH IS LIVE, unlike the OpenGL mixer's copy: hap_producer.cpp:992 publishes
+    // ycocg_dxt5 only under `use_vk_upload_`, which is set when a Vulkan mixer is detected.
+    // So HAP Q reaching this shader was decoded with a chroma offset one half-code low --
+    // exact in red (the Co and Cg errors cancel in Y+Co-Cg), high in green by 0.00196/scale
+    // and low in blue by twice that, worst at scale=1: about 0.5 and 1.0 LSB at 8 bits.
+    // Channel order here is correct as it stands -- this mixer grades in RGB.
+    case 13:{vec4 c=texture(textures[PLANE0],uv);float scale=(c.b*(255.0/8.0))+1.0;float Co=(c.r-(128.0/255.0))/scale;float Cg=(c.g-(128.0/255.0))/scale;float Y=c.a;return vec4(clamp(Y+Co-Cg,0.0,1.0),clamp(Y+Cg,0.0,1.0),clamp(Y-Co-Cg,0.0,1.0),1.0);}
+    case 14:{vec4 c=texture(textures[PLANE0],uv);float scale=(c.b*(255.0/8.0))+1.0;float Co=(c.r-(128.0/255.0))/scale;float Cg=(c.g-(128.0/255.0))/scale;float Y=c.a;float a=texture(textures[PLANE1],uv).a;return vec4(clamp(Y+Co-Cg,0.0,1.0),clamp(Y+Cg,0.0,1.0),clamp(Y-Co-Cg,0.0,1.0),a);}
     // nv12: semi-planar YCbCr as hardware decoders produce it. PLANE0 = Y,
     // PLANE1 = Cb,Cr interleaved at half resolution (an RG texture). P010 needs no
     // rescaling: its 10 bits are high-aligned in each 16-bit word, so the plane is

@@ -1,6 +1,66 @@
 CasparVP — Unreleased
 ==========================================
 
+### Fixed: HAP Q decoded with a chroma offset of 0.5 where the format uses 128/255
+
+**This changes rendered output** for HAP Q and HAP Q Alpha (`HapY`, `HapM`) played on the **Vulkan
+mixer**, which is the only backend that reaches the shader's YCoCg resolve. The OpenGL route was
+already correct and is unchanged.
+
+The DXT5 blocks carry 8-bit codes and neutral chroma is code 128, so the normalised offset is
+`128/255 = 0.501961`. `0.5` is code 127.5 and not representable. Both mixer shaders used `0.5` in
+cases 13 and 14. Three independent sources give 128: the derivation, this fork's **own** OGL module
+shader (`hap/gl/hap_gl_decode.cpp` FS_YCOCG, correct from the start), and FFmpeg's reference decoder
+(`libavcodec/texturedsp.c:359-361`, `co = (r - 128) / s`).
+
+**The error has a signature, and the measurement matched it before anything changed** — which is
+what separates this from a plausible story. Red cancels exactly, because `R = Y + Co - Cg` and both
+terms shift together; blue takes twice the error. Measured at 1920x1080, OGL against Vulkan:
+
+| | R | G | B |
+| :--- | ---: | ---: | ---: |
+| predicted | **0** | `+e/scale` | `-2e/scale` |
+| measured, max LSB | 0 | 0 | **1** |
+| measured, signed mean | +0.000 | +0.000 | **-0.800** |
+
+After the fix the two backends are **byte-identical at every raster that needs no resampling** —
+1 LSB → 0 at `1080p2500` and `1080i5000`, over three consecutive runs.
+
+**A second divergence was measured and deliberately not fixed.** The Vulkan path samples the BC3
+blocks with a LINEAR sampler and resolves in the shader, so `(Co, Cg, scale, Y)` are interpolated
+and the resolve then divides by an *interpolated* `scale`; the OpenGL route resolves at native
+resolution in the module's FBO pass and filters the result, which is the more correct order. The two
+therefore agree exactly at 1:1 and diverge where the raster forces resampling: **5 LSB at PAL, 10 at
+NTSC, 14 at 2600x1500, 16 at 2160p**, over 0.002–0.171% of pixels, against a `png_8` control that is
+byte-identical at the same rasters. Accepted because resolving in the fragment shader is the
+reference approach every HAP implementation uses, the magnitude sits under DXT5 YCoCg's own
+compression error, and the fix costs the zero-copy handoff the path exists for. Reasoning and the
+route back in `docs/features/hap.md` §4.
+
+**Also corrected, unreachable, and therefore a reading rather than a measurement:** the OpenGL
+mixer's cases 13 and 14 returned RGB into a pipeline that carries BGR. Nothing publishes
+`ycocg_dxt5` on OpenGL (`hap_producer.cpp:992` is under `use_vk_upload_`) and nothing publishes
+`ycocg_dxt5a` at all, so both were dead code — but a dead path is not a correct one, and this one
+would have exchanged red and blue the moment anything reached it.
+
+**An unrelated defect surfaced while measuring, and is recorded rather than fixed.** `CALL SEEK`
+is lost intermittently on the Vulkan HAP path: over four runs of six rasters the Vulkan half
+captured frame 0 — the frame `LOAD` leaves behind — where OpenGL captured the pinned frame 7, in
+**5 of 24 captures (~21%)**, never once on OpenGL. The pin is a deterministic `CALL 1-1 SEEK 7`
+rather than a sleep, so this is a seek that did not take effect. `hap_producer.cpp:507` carries a
+2026-08-19 fix for the same symptom on the other paths, and the suspicion — unconfirmed — is that
+the `use_vk_upload_` publish route misses that synchronous invalidation. Details in
+`docs/features/hap.md` §4.
+
+**Why nothing caught either defect.** The only HAP fixture in the harness was `Hap1` — plain RGB
+DXT1, decoded entirely by the texture unit, whose colour never touches our arithmetic. HAP Q had no
+fixture, so the one variant computed by our own code was the one variant never played. Coverage
+added: `mixer-parity --codec hap_q --decoder hap_native`, on `smptehdbars` because greys are
+invariant under a red/blue exchange. The `--decoder` flag is new and load-bearing —
+`hap_producer.cpp:1588` refuses without the `HAP` keyword, so the battery's ffmpeg default decodes
+on the CPU and cases 13/14 never run. The first run on the new fixture reported 6/6 byte-identical,
+which was true and measured nothing.
+
 ### Fixed: ICVFX per-channel gain exchanged red and blue on the OpenGL mixer
 
 **This changes rendered output** for any configuration using `MIXER PROJECTION_ICVFX_COLOR` with

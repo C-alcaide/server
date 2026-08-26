@@ -1563,23 +1563,43 @@ vec4 get_rgba_color(vec2 uv)
 			return vec4(b, g, r, a);
         }
     case 13:    // ycocg_dxt5
+    // The YCoCg offset is 128 CODES, not half of full scale. The DXT5 blocks store 8-bit
+    // codes and the neutral chroma code is 128, so the normalised offset is 128/255 =
+    // 0.501961; 0.5 is code 127.5, which is not representable. Three independent sources
+    // agree: the derivation above, this fork's own OGL module shader
+    // (hap/gl/hap_gl_decode.cpp FS_YCOCG, which had it right all along), and FFmpeg's
+    // reference decoder (libavcodec/texturedsp.c:359-361, `co = (r - 128) / s`).
+    //
+    // The error cancels exactly in RED (R = Y+Co-Cg, and both terms shift together) and
+    // does not in the other two: G is high by 0.00196/scale and B low by twice that, worst
+    // at scale=1 -- about 0.5 and 1.0 LSB at 8 bits.
+    //
+    // AND THE CHANNEL ORDER WAS WRONG HERE, which is a separate defect in the same lines.
+    // This mixer carries BGR (`ycbcra_to_rgba` ends `.bgra`; case 12 returns `vec4(b,g,r,a)`;
+    // FS_PASSTHROUGH in the HAP module says so in a comment) and these two cases returned
+    // RGB. UNREACHABLE TODAY, so this half is a reading and not a measurement: `ycocg_dxt5`
+    // is published only on the Vulkan path (hap_producer.cpp:992, under `use_vk_upload_`),
+    // while the OpenGL route resolves YCoCg in the module's own FBO pass and publishes
+    // ordinary RGBA. A dead path is not a correct one -- if anything ever routes this format
+    // to this mixer, it would have rendered red and blue exchanged.
         {
             vec4 c = get_sample(plane[0], uv);
             float scale = (c.b * (255.0 / 8.0)) + 1.0;
-            float Co = (c.r - 0.5) / scale;
-            float Cg = (c.g - 0.5) / scale;
+            float Co = (c.r - 128.0 / 255.0) / scale;
+            float Cg = (c.g - 128.0 / 255.0) / scale;
             float Y  = c.a;
-            return vec4(clamp(Y + Co - Cg, 0.0, 1.0), clamp(Y + Cg, 0.0, 1.0), clamp(Y - Co - Cg, 0.0, 1.0), 1.0);
+            // BGR, for this mixer's carriage -- (Y-Co-Cg, Y+Cg, Y+Co-Cg) is (B, G, R).
+            return vec4(clamp(Y - Co - Cg, 0.0, 1.0), clamp(Y + Cg, 0.0, 1.0), clamp(Y + Co - Cg, 0.0, 1.0), 1.0);
         }
-    case 14:    // ycocg_dxt5a
+    case 14:    // ycocg_dxt5a -- same two defects as case 13 above, same reasoning.
         {
             vec4 c = get_sample(plane[0], uv);
             float scale = (c.b * (255.0 / 8.0)) + 1.0;
-            float Co = (c.r - 0.5) / scale;
-            float Cg = (c.g - 0.5) / scale;
+            float Co = (c.r - 128.0 / 255.0) / scale;
+            float Cg = (c.g - 128.0 / 255.0) / scale;
             float Y  = c.a;
             float a  = get_sample(plane[1], uv).a;
-            return vec4(clamp(Y + Co - Cg, 0.0, 1.0), clamp(Y + Cg, 0.0, 1.0), clamp(Y - Co - Cg, 0.0, 1.0), a);
+            return vec4(clamp(Y - Co - Cg, 0.0, 1.0), clamp(Y + Cg, 0.0, 1.0), clamp(Y + Co - Cg, 0.0, 1.0), a);
         }
     case 15:    // nv12 -- semi-planar YCbCr (NV12 8-bit, P010/P016 16-bit)
         {
