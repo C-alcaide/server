@@ -480,7 +480,7 @@ small; what matters is *where* the difference sits.
 | route | mean difference | where it sits |
 | :--- | ---: | :--- |
 | `prores_aw` vs `prores_ks` | 0.17 LSB | at colour boundaries |
-| `CUDA_PRORES` | 0.89 LSB | 63% at colour boundaries |
+| `CUDA_PRORES` | 0.85 LSB | 61% at colour boundaries |
 | `prores_ks_vulkan` | 2.55 LSB | 86% at colour boundaries |
 | `h264_vulkan` | 2.70 LSB | 55% at boundaries, rest is block noise |
 | `hevc_nvenc` | 1.64 LSB | 53% at boundaries |

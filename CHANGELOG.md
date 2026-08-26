@@ -1,6 +1,48 @@
 CasparVP — Unreleased
 ==========================================
 
+### Changed: the progressive CUDA ProRes 422 encode no longer packs V210 only to unpack it
+
+**No picture change, and that is the measured result rather than an assumption.** The path went
+BGRA → V210 → planes, and nothing ever read the V210: `k_bgra_to_v210` packed the frame and
+`k_v210_unpack` took it straight back apart into exactly the planes the DCT wanted. It is now one
+kernel into those planes.
+
+Per 1080p frame that removes a 5.3 MB write, a 5.3 MB read, three full-plane `cudaMemsetAsync`
+(~8.3 MB) and a 5.3 MB device buffer — about 19 MB of traffic and **a whole frame of VRAM per
+consumer**, ~21 MB of it at 2160p.
+
+`encode-matrix --codec prores`, CUDA_PRORES arm, 1080p2500, pre-change and post-change binaries
+built and measured back to back:
+
+| | before | after |
+| :--- | :--- | :--- |
+| picture vs the CPU encoder | worst 37, mean 0.85, 0.19% over 3 LSB | **identical** |
+| recording size | 39.6 MB | **39.6 MB** |
+| server CPU | 1.66 cores | 1.61–1.69 cores |
+
+**Bit-identical, by construction as well as by measurement**: the same `bgra8_to_ycbcr10`, which
+clamps Y to [64,940] and chroma to [64,960] — inside ten bits, so the V210 pack truncated nothing
+— the same `(a + b + 1) >> 1` chroma averaging, and the same plane addressing.
+
+**The 19 MB does NOT show up as a saving, and should not be claimed as one.** The DCT and entropy
+stages dominate at this raster, so the CPU figure is unchanged inside run-to-run drift. What this
+buys is the VRAM, the deleted round trip, and the fix below.
+
+**It also fixes a right-edge defect at widths not divisible by six.** The packer sized rows with
+CEIL division, `(width + 5) / 6` groups; the unpack read back with FLOOR, `width / 6`. The last
+`width % 6` luma samples were therefore never written, and the planes had to be pre-zeroed each
+frame so the gap came out black rather than as stale VRAM. 1280, 2048 and 4096 are such widths;
+1920 and 3840 are not, which is why it never showed. Indexing per pixel pair covers every column.
+**Not verified at those rasters** — the measurement above is 1080p only, so the fix is argued from
+the arithmetic and the black sliver it removes has not been photographed.
+
+**One number in `docs/PLAYBACK_AND_RECORDING_GUIDE.md` was stale and is corrected**: that table
+said 0.89 LSB / 63% at boundaries for this arm, measured 2026-08-22. Re-measured today it is 0.85
+/ 61% on the pre-change binary too, so the drift belongs to something between those dates and not
+to any one commit. The 2026-08-22 CHANGELOG entry keeps its 0.89 — it was true when written, and
+a changelog records what was measured then.
+
 ### Changed: CUDA ProRes 4:2:2 hands the Vulkan mixer planar YCbCr, and sustains 8 channels instead of 5
 
 **This changes rendered output for every existing config using `CUDA_PRORES` on the Vulkan
