@@ -109,14 +109,6 @@ static void cuda_check_consumer(cudaError_t e, const char *ctx)
     }
 }
 
-// Returns the V210 row stride for a given width (DeckLink convention).
-static size_t v210_row_bytes(int w) {
-    return static_cast<size_t>((w + 5) / 6) * 16;
-}
-static size_t v210_frame_bytes(int w, int h) {
-    return v210_row_bytes(w) * h;
-}
-
 // ---------------------------------------------------------------------------
 // GPU-direct texture cache: caches CUDA-GL registrations by GL texture ID.
 // The mixer reuses a small pool of textures, so we cache up to 8 slots.
@@ -484,13 +476,13 @@ public:
             frame_ctx_.field_height  = format_desc_.height;
         }
 
-        // Pinned staging buffers: BGRA (input) and V210 (intermediate for progressive 422)
+        // Pinned staging for BGRA input. NO V210 BUFFER any more: progressive 422 was the
+        // only thing that ever allocated one, and it now converts straight into the ctx planes.
+        // That is a frame of VRAM per consumer -- width*height*8/3 bytes, ~5.3 MB at 1080p and
+        // ~21 MB at 2160p -- returned for nothing but deleting a round trip.
         const size_t bgra_bytes = (size_t)format_desc_.width * format_desc_.height * 4;
-        const size_t v210_bytes = v210_frame_bytes(format_desc_.width, format_desc_.height);
         cuda_check_consumer(cudaMallocHost(&h_bgra_, bgra_bytes),  "h_bgra_");
         cuda_check_consumer(cudaMalloc(&d_bgra_, bgra_bytes),      "d_bgra_");
-        if (!is_4444 && !is_interlaced_)
-            cuda_check_consumer(cudaMalloc(&d_v210_, v210_bytes),  "d_v210_");
 
         // Interlaced: additional staging for field A BGRA and YUV422P10 planes
         if (is_interlaced_) {
@@ -970,12 +962,19 @@ private:
                     return false;
                 }
             }
-            err = prores_launch_bgra_to_v210(d_bgra_, d_v210_, fmt.width, fmt.height, encode_stream_);
+            // ONE PASS to the planes the DCT wants. This used to pack BGRA into V210 and
+            // then immediately unpack it again -- nothing read the V210 in between -- which
+            // cost a write, a read, three plane memsets and a whole frame buffer per frame.
+            // `nullptr` for d_v210 tells `prores_encode_frame` the planes are already filled.
+            err = prores_launch_bgra8_to_yuv422p10(d_bgra_,
+                                                   frame_ctx_.d_y, frame_ctx_.d_cb, frame_ctx_.d_cr,
+                                                   fmt.width, fmt.height, encode_stream_);
             if (err != cudaSuccess) {
-                CASPAR_LOG(error) << L"[cuda_prores] launch_bgra_to_v210 failed: " << cudaGetErrorString(err);
+                CASPAR_LOG(error) << L"[cuda_prores] launch_bgra8_to_yuv422p10 failed: "
+                                  << cudaGetErrorString(err);
                 return false;
             }
-            err = prores_encode_frame(&frame_ctx_, (const uint32_t *)d_v210_,
+            err = prores_encode_frame(&frame_ctx_, nullptr,
                                       frame_ctx_.h_frame_buf, &encoded_size,
                                       encode_stream_, color_desc);
         }
@@ -1109,7 +1108,6 @@ private:
         if (frame_ctx_.d_y) free_frame_ctx(frame_ctx_);
         if (h_bgra_) { cudaFreeHost(h_bgra_); h_bgra_ = nullptr; }
         if (d_bgra_) { cudaFree(d_bgra_);     d_bgra_ = nullptr; }
-        if (d_v210_) { cudaFree(d_v210_);     d_v210_ = nullptr; }
 
         // Interlaced staging buffers
         if (h_bgra_a_)     { cudaFreeHost(h_bgra_a_);     h_bgra_a_     = nullptr; }
@@ -1164,7 +1162,6 @@ private:
     ProResFrameCtx           frame_ctx_     = {};
     uint8_t                 *h_bgra_        = nullptr; // pinned staging (field B / progressive)
     uint8_t                 *d_bgra_        = nullptr; // device BGRA    (field B / progressive)
-    uint32_t                *d_v210_        = nullptr; // device V210    (progressive 422 only)
 
     // Interlaced-only: field A BGRA staging and YUV422P10 output planes
     uint8_t                 *h_bgra_a_      = nullptr;

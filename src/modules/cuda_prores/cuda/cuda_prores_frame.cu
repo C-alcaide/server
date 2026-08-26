@@ -31,6 +31,7 @@
 #include "cuda_prores_entropy.cu"    // includes kernel definitions
 #include "cuda_bgra_to_yuva444p10.cuh"  // direct BGRA->4444P10 for ProRes 4444
 #include "cuda_bgra_to_field422p10.cuh" // BGRA->YUV422P10 field extraction
+#include "cuda_bgra_to_yuv422p10.cuh"   // BGRA->YUV422P10 in one pass, progressive
 #include "cuda_swap_rb.cuh"             // R/B exchange for the GPU-direct upload
 
 #include <cub/device/device_scan.cuh>
@@ -399,17 +400,28 @@ cudaError_t prores_encode_frame(
 
     // ── Progressive path ───────────────────────────────────────────────────
 
-    // Phase 0d: zero-init plane buffers before V210 unpack so that edge pixels
-    // (width % 6 != 0, e.g. 1280-wide: last 2 luma samples never written by
-    // the unpack kernel) produce clean zero rather than stale VRAM values.
-    cudaMemsetAsync(ctx->d_y,  0, (size_t)ctx->width       * ctx->height * sizeof(int16_t), stream);
-    cudaMemsetAsync(ctx->d_cb, 0, (size_t)(ctx->width / 2) * ctx->height * sizeof(int16_t), stream);
-    cudaMemsetAsync(ctx->d_cr, 0, (size_t)(ctx->width / 2) * ctx->height * sizeof(int16_t), stream);
+    // 1. V210 unpack -- ONLY when there is V210 to unpack.
+    //
+    // `d_v210 == nullptr` means the caller wrote ctx->d_y/d_cb/d_cr directly, which is what
+    // the progressive consumer now does: one BGRA->planes pass instead of BGRA->V210 followed
+    // by V210->planes. Nothing ever read the V210 in between.
+    //
+    // The memset goes with it, and it was a WORKAROUND rather than hygiene: the packer sized
+    // rows with CEIL division, `(width + 5) / 6` groups, and this unpack reads back with FLOOR,
+    // `width / 6` -- so for a width not divisible by six the last `width % 6` luma samples were
+    // never written and the planes had to be pre-zeroed to keep stale VRAM out of the picture.
+    // 1280, 2048 and 4096 are such widths; 1920 and 3840 are not, which is why it never showed.
+    // The direct kernel indexes per pixel PAIR and covers every column, so there is nothing to
+    // paper over. The V210 route keeps both the memset and the unpack, unchanged.
+    if (d_v210 != nullptr) {
+        cudaMemsetAsync(ctx->d_y,  0, (size_t)ctx->width       * ctx->height * sizeof(int16_t), stream);
+        cudaMemsetAsync(ctx->d_cb, 0, (size_t)(ctx->width / 2) * ctx->height * sizeof(int16_t), stream);
+        cudaMemsetAsync(ctx->d_cr, 0, (size_t)(ctx->width / 2) * ctx->height * sizeof(int16_t), stream);
 
-    // 1. V210 unpack
-    err = launch_v210_unpack(d_v210, ctx->d_y, ctx->d_cb, ctx->d_cr,
-                             ctx->width, ctx->height, stream);
-    if (err != cudaSuccess) return err;
+        err = launch_v210_unpack(d_v210, ctx->d_y, ctx->d_cb, ctx->d_cr,
+                                 ctx->width, ctx->height, stream);
+        if (err != cudaSuccess) return err;
+    }
 
     // 2. DCT + quantise â€” luma
     err = launch_dct_quantise(
@@ -949,6 +961,18 @@ cudaError_t prores_launch_bgra_to_v210(
     cudaStream_t   stream)
 {
     return launch_bgra_to_v210(d_bgra, d_v210, width, height, stream);
+}
+
+cudaError_t prores_launch_bgra8_to_yuv422p10(
+    const uint8_t *d_bgra,
+    int16_t       *d_y,
+    int16_t       *d_cb,
+    int16_t       *d_cr,
+    int            width,
+    int            height,
+    cudaStream_t   stream)
+{
+    return launch_bgra8_to_yuv422p10(d_bgra, d_y, d_cb, d_cr, width, height, stream);
 }
 
 cudaError_t prores_launch_bgra8_to_field422p10(

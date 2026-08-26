@@ -144,7 +144,12 @@ struct ProResFrameCtx {
 // Main encode entry points — defined in cuda_prores_frame.cu
 // ---------------------------------------------------------------------------
 
-// ProRes 422 (proxy / LT / standard / HQ):  input is V210 10-bit packed
+// ProRes 422 (proxy / LT / standard / HQ):  input is V210 10-bit packed.
+//
+// PASS d_v210 = nullptr on the PROGRESSIVE path to mean "ctx->d_y/d_cb/d_cr are already
+// filled" -- the caller converted straight into them and there is no V210 to unpack. The
+// progressive consumer does exactly that via `launch_bgra8_to_yuv422p10`, which is one pass
+// where BGRA->V210->planes was three plus a buffer. Interlaced still requires real V210.
 cudaError_t prores_encode_frame(
     ProResFrameCtx        *ctx,
     const uint32_t        *d_v210,
@@ -204,6 +209,18 @@ cudaError_t prores_launch_swap_rb_8888(
     int           width,
     int           height,
     cudaStream_t  stream);
+
+// BGRA8 -> planar YUV422P10 in one pass, progressive. Replaces
+// `prores_launch_bgra_to_v210` followed by the unpack inside `prores_encode_frame`; see
+// cuda_bgra_to_yuv422p10.cuh for what that round trip cost.
+cudaError_t prores_launch_bgra8_to_yuv422p10(
+    const uint8_t *d_bgra,
+    int16_t       *d_y,
+    int16_t       *d_cb,
+    int16_t       *d_cr,
+    int            width,
+    int            height,
+    cudaStream_t   stream);
 
 cudaError_t prores_launch_bgra8_to_field422p10(
     const uint8_t *d_bgra,

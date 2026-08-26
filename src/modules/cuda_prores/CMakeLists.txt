@@ -98,6 +98,7 @@ set(HEADER_SOURCES
     # BGRA->V210 CUDA kernel
     cuda/cuda_bgra_to_v210.cuh
     cuda/cuda_bgra_to_field422p10.cuh
+    cuda/cuda_bgra_to_yuv422p10.cuh
 )
 
 set(ALL_SOURCES ${CUDA_SOURCES} ${CPU_SOURCES} ${HEADER_SOURCES})
