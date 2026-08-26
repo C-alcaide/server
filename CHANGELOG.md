@@ -68,6 +68,21 @@ reverted: no demonstrated benefit, and about 50 MB per channel of real VRAM for 
 but were not captured. `MIXER CHROMA` and other per-channel operators were not exercised against
 the new plane layout.
 
+**And the producer's own VRAM figure was wrong, in every configuration.** The
+`[prores_producer] queue depth ... VRAM/slot ~N MB` line was a hardcoded `w * h * 8` — one
+BGRA16 buffer — which counted the exported texture and silently omitted both the decoder's own
+planes and the packed intermediate. At 12K it printed **576 MB against a real ~1440**. It also
+printed the same figure on every path, which is how it survived this change: the planar route cut
+the true cost by 2.5× and the number did not move. Now computed per path — 20 bytes/pixel for the
+OpenGL packed route, 24 for Vulkan 4444, 8 for Vulkan 4:2:2 planar — and the producer total is
+reported beside the per-slot figure, because that is the number an operator sizes a show on.
+
+At 12K (12288×6144) that is ~1510 MB → ~604 MB a slot, so ~10.6 GB → ~4.2 GB across the seven
+slots that raster is given. **Stated as arithmetic rather than as a measurement**: the
+`producer-swap --clips 12k` Vulkan arm passes 12/12 swaps with no VRAM exhaustion, but it passed
+before this change too, so it shows no regression rather than demonstrating the reduction. The
+OpenGL arm still exhausts VRAM at 12K and declines cleanly, unchanged and as intended.
+
 **Two defects this surfaced, both fixed here.** `CudaVkTexture::make_channel_desc` tested
 `depth() == bit16` where the Vulkan format table selects its 16-bit row with `!= bit8`, so a
 `bit10` texture was described to CUDA at half the channel width of its own memory — nothing used

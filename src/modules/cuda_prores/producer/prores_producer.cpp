@@ -362,10 +362,31 @@ struct prores_producer_impl final : public core::frame_producer
                 num_slots_  = 5;
             }
         }
+        // PER PATH, because the three paths differ by a factor of three and this number is
+        // what an operator sizes a show on. It used to be a hardcoded `w * h * 8` -- one
+        // BGRA16 buffer -- which counted the exported texture and silently omitted both the
+        // decoder's own planes and the packed intermediate. At 12K it printed 576 MB against a
+        // real 1440, and it printed the SAME figure on every path, which is how it survived:
+        // the planar change cut the true cost by 2.5x and the log line did not move.
+        //
+        // Bytes per pixel, per slot:
+        //   OGL, packed             4 (d_y/cb/cr) +  8 (d_bgra16) + 8 (GL tex)  = 20
+        //   Vulkan 4444, packed     8 (+ alpha)   +  8 (d_bgra16) + 8 (VK tex)  = 24
+        //   Vulkan 4:2:2, planar    4 (d_y/cb/cr) +  0            + 4 (VK planes) = 8
+        //
+        // Excludes the bitstream and coefficient buffers, which scale with slice count rather
+        // than pixels and are small beside these; the tilde is doing real work.
+        const bool planar_slots = use_vulkan_ && frame_info_.profile != 4;
+        const int  bytes_per_px = planar_slots ? 8 : (use_vulkan_ && frame_info_.profile == 4 ? 24 : 20);
         CASPAR_LOG(info) << L"[prores_producer] queue depth: max_queued=" << max_queued_
                          << L" num_slots=" << num_slots_
                          << L" (" << frame_info_.width << L"x" << frame_info_.height << L")"
-                         << L"  VRAM/slot ~" << (frame_info_.width * frame_info_.height * 8 / 1024 / 1024) << L" MB";
+                         << L"  VRAM/slot ~"
+                         << ((int64_t)frame_info_.width * frame_info_.height * bytes_per_px / 1024 / 1024)
+                         << L" MB (" << (planar_slots ? L"planar" : L"packed") << L"), ~"
+                         << ((int64_t)frame_info_.width * frame_info_.height * bytes_per_px * num_slots_
+                             / 1024 / 1024)
+                         << L" MB for the producer";
 
         for (int i = 0; i < num_slots_; i++) {
             cudaError_t e = prores_decode_ctx_create(&slots_[i],

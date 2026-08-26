@@ -52,6 +52,7 @@ catch its mutation cannot fail*.
 | consumer **metadata** — colour signalling, HDR static data | `signalling` (DeckLink), `signalling --stream` (FFmpeg). **Vulkan output has no coverage — see below** |
 | consumer **pixels** | `sdi-output` (`--hdr-metadata` for the DeckLink HDR block), `consumer-view`, or `cli.py run --consumer <name>` |
 | Vulkan API usage rather than picture | `vk-validation` — **but it cannot currently fail; see below** |
+| a GPU interop path — CUDA external memory, an FFmpeg Vulkan decoder, a D3D11 bridge, the encode exporter | `coexistence`, because these now share one `VkDevice` and one graphics queue. A route measured alone says nothing about it running beside the others, and `av_vulkan_import.cpp`'s device-lost at four concurrent producers is what that costs |
 | geometry, rasters, projection | `geometry`, `mixer-parity` |
 | docs only | nothing |
 
