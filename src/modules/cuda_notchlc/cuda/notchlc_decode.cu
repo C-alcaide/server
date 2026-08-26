@@ -70,6 +70,29 @@ using caspar::cuda_notchlc::NotchLCFormat;
         if (_e != cudaSuccess) return _e;                             \
     } while (0)
 
+// Same, but UNWINDS the half-built context. A bare return is right everywhere except
+// allocation: in `notchlc_decode_ctx_create` a failure part-way through left every buffer taken
+// before it allocated forever, because the producer throws and only ever destroys slots whose
+// `slots_init_[i]` was set -- which a failed create never sets.
+//
+// The ProRes decoder had the identical defect and the identical shape; see the longer note
+// there for why a leak on the out-of-memory path turns one refusal into a cascade. Found by
+// audit 2026-08-26, second pass.
+//
+// Safe because `notchlc_decode_ctx_destroy` is entirely guarded -- `safe_cuda_free`,
+// `safe_cuda_free_host`, and `std::free(nullptr)` -- and create already opens with
+// `memset(ctx, 0, sizeof(*ctx))`, which is what makes `std::free(ctx->h_task_buf)` safe on a
+// partial state rather than a free of an indeterminate pointer. That memset was already there;
+// see the ProRes note for the regression that adding a second one caused.
+#define CUDA_CHECK_CTX(call)                                          \
+    do {                                                              \
+        cudaError_t _e = (call);                                      \
+        if (_e != cudaSuccess) {                                      \
+            notchlc_decode_ctx_destroy(ctx);                          \
+            return _e;                                                \
+        }                                                             \
+    } while (0)
+
 #define NVCOMP_CHECK(call)                                            \
     do {                                                              \
         nvcompStatus_t _s = (call);                                   \
@@ -342,14 +365,14 @@ cudaError_t notchlc_decode_ctx_create(NotchLCDecodeCtx* ctx,
     const size_t n_pix = (size_t)width * height;
 
     // ── Pinned staging — compressed input ─────────────────────────────────
-    CUDA_CHECK(cudaMallocHost((void**)&ctx->h_compressed, max_compressed_bytes));
+    CUDA_CHECK_CTX(cudaMallocHost((void**)&ctx->h_compressed, max_compressed_bytes));
 
     // ── Pinned staging — CPU-decompressed uncompressed payload ────────────
     // The LZ4 path decompresses on CPU into this buffer, then the result is
     // uploaded to device via async DMA.  Eliminates the ~1700 ms / frame
     // bottleneck caused by nvcomp BatchedLZ4 on a single monolithic chunk.
     ctx->max_uncompressed_bytes = max_uncompressed_bytes;
-    CUDA_CHECK(cudaMallocHost((void**)&ctx->h_uncompressed, max_uncompressed_bytes));
+    CUDA_CHECK_CTX(cudaMallocHost((void**)&ctx->h_uncompressed, max_uncompressed_bytes));
 
     // ── Heap staging for LZ4 output (cache-friendly for LZ4 back-references) ──
     ctx->h_task_buf = (uint8_t*)std::malloc(max_uncompressed_bytes);
@@ -358,24 +381,24 @@ cudaError_t notchlc_decode_ctx_create(NotchLCDecodeCtx* ctx,
     // ── Device: uncompressed buffer ───────────────────────────────────────
     // Add 16-byte padding so the Y-decode bit-reader can over-read safely.
     ctx->d_uncompressed_alloc  = max_uncompressed_bytes + 16;
-    CUDA_CHECK(cudaMalloc(&ctx->d_uncompressed, ctx->d_uncompressed_alloc));
-    CUDA_CHECK(cudaMemset(ctx->d_uncompressed, 0, ctx->d_uncompressed_alloc));
+    CUDA_CHECK_CTX(cudaMalloc(&ctx->d_uncompressed, ctx->d_uncompressed_alloc));
+    CUDA_CHECK_CTX(cudaMemset(ctx->d_uncompressed, 0, ctx->d_uncompressed_alloc));
 
     // NOTE: d_compressed and the nvcomp batch API arrays are not allocated.
     // GPU-side LZ4 decompression is no longer used (replaced by CPU path).
 
     // ── Decoded planes ─────────────────────────────────────────────────────
-    CUDA_CHECK(cudaMalloc((void**)&ctx->d_y,      n_pix * sizeof(uint16_t)));
-    CUDA_CHECK(cudaMalloc((void**)&ctx->d_u,      n_pix * sizeof(uint16_t)));
-    CUDA_CHECK(cudaMalloc((void**)&ctx->d_v,      n_pix * sizeof(uint16_t)));
-    CUDA_CHECK(cudaMalloc((void**)&ctx->d_a,      n_pix * sizeof(uint16_t)));
-    CUDA_CHECK(cudaMalloc((void**)&ctx->d_bgra16, n_pix * 4 * sizeof(uint16_t)));
+    CUDA_CHECK_CTX(cudaMalloc((void**)&ctx->d_y,      n_pix * sizeof(uint16_t)));
+    CUDA_CHECK_CTX(cudaMalloc((void**)&ctx->d_u,      n_pix * sizeof(uint16_t)));
+    CUDA_CHECK_CTX(cudaMalloc((void**)&ctx->d_v,      n_pix * sizeof(uint16_t)));
+    CUDA_CHECK_CTX(cudaMalloc((void**)&ctx->d_a,      n_pix * sizeof(uint16_t)));
+    CUDA_CHECK_CTX(cudaMalloc((void**)&ctx->d_bgra16, n_pix * 4 * sizeof(uint16_t)));
 
     // ── Y-decode prefix-sum scratch ────────────────────────────────────────
     {
         const size_t n_blocks = ((size_t)width / 4) * ((size_t)height / 4);
-        CUDA_CHECK(cudaMalloc((void**)&ctx->d_y_bit_widths,  n_blocks * sizeof(uint32_t)));
-        CUDA_CHECK(cudaMalloc((void**)&ctx->d_y_bit_offsets, n_blocks * sizeof(uint32_t)));
+        CUDA_CHECK_CTX(cudaMalloc((void**)&ctx->d_y_bit_widths,  n_blocks * sizeof(uint32_t)));
+        CUDA_CHECK_CTX(cudaMalloc((void**)&ctx->d_y_bit_offsets, n_blocks * sizeof(uint32_t)));
     }
 
     // ── Stream ────────────────────────────────────────────────────────────
@@ -383,11 +406,11 @@ cudaError_t notchlc_decode_ctx_create(NotchLCDecodeCtx* ctx,
     {
         int lo = 0, hi = 0;
         cudaDeviceGetStreamPriorityRange(&lo, &hi);
-        CUDA_CHECK(cudaStreamCreateWithPriority(&ctx->stream, cudaStreamNonBlocking, hi));
+        CUDA_CHECK_CTX(cudaStreamCreateWithPriority(&ctx->stream, cudaStreamNonBlocking, hi));
     }
 
     // ── Upload gamma LUT (idempotent — same data every time) ──────────────
-    CUDA_CHECK(caspar::cuda_notchlc::notchlc_upload_gamma_lut());
+    CUDA_CHECK_CTX(caspar::cuda_notchlc::notchlc_upload_gamma_lut());
 
     return cudaSuccess;
 }

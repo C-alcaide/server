@@ -126,8 +126,18 @@ __global__ void k_v210_unpack_field(
     int full_height,
     int field)   // 0 = top (even rows), 1 = bottom (odd rows)
 {
+    // CEIL, matching the words_per_row above and the packer. This used to be `width / 6`
+    // -- FLOOR against a CEIL stride -- so for any width not divisible by six the last
+    // `width % 6` luma samples of each field were never written. The launcher below documented
+    // that as "pre-zeroed by caller"; the interlaced caller in `cuda_prores_frame.cu` does no
+    // such memset, so those columns carried whatever was in VRAM from a previous frame or the
+    // other field. 1920 and 720 divide by six, which is why standard interlaced rasters never
+    // showed it; a DCI width does not. Found by audit 2026-08-26.
+    //
+    // The partial last group is handled by bounds-checking each write below, so there is no
+    // pre-zeroing contract left to violate.
     const int words_per_row  = ((width + 5) / 6) * 4;
-    const int groups_per_row = width / 6;
+    const int groups_per_row = (width + 5) / 6;
     const int field_height   = full_height / 2;
     const int total_groups   = groups_per_row * field_height;
 
@@ -160,14 +170,28 @@ __global__ void k_v210_unpack_field(
     int16_t Cr2 = (int16_t)((w3 >> 10) & 0x3FFu);
     int16_t Y5  = (int16_t)((w3 >> 20) & 0x3FFu);
 
-    int y_base = field_row * width       + col6 * 6;
-    int c_base = field_row * (width / 2) + col6 * 3;
+    const int px    = col6 * 6;             // first luma column of this group
+    const int cx     = col6 * 3;            // first chroma column of this group
+    const int chroma_w = width / 2;
+    int y_base = field_row * width    + px;
+    int c_base = field_row * chroma_w + cx;
 
-    d_y[y_base + 0] = Y0; d_y[y_base + 1] = Y1; d_y[y_base + 2] = Y2;
-    d_y[y_base + 3] = Y3; d_y[y_base + 4] = Y4; d_y[y_base + 5] = Y5;
+    // Bounded per sample, because the last group of a width like 2048 is partial. Writing the
+    // full six would run into the next row -- which is why the old kernel skipped the group
+    // entirely rather than clamping, and why the tail was left to a memset that never came.
+    const int16_t yv[6] = {Y0, Y1, Y2, Y3, Y4, Y5};
+    for (int i = 0; i < 6; ++i)
+        if (px + i < width)
+            d_y[y_base + i] = yv[i];
 
-    d_cb[c_base + 0] = Cb0; d_cb[c_base + 1] = Cb1; d_cb[c_base + 2] = Cb2;
-    d_cr[c_base + 0] = Cr0; d_cr[c_base + 1] = Cr1; d_cr[c_base + 2] = Cr2;
+    const int16_t cbv[3] = {Cb0, Cb1, Cb2};
+    const int16_t crv[3] = {Cr0, Cr1, Cr2};
+    for (int i = 0; i < 3; ++i) {
+        if (cx + i < chroma_w) {
+            d_cb[c_base + i] = cbv[i];
+            d_cr[c_base + i] = crv[i];
+        }
+    }
 }
 
 inline cudaError_t launch_v210_unpack_field(
@@ -176,10 +200,14 @@ inline cudaError_t launch_v210_unpack_field(
     int width, int full_height,
     int field, cudaStream_t stream)
 {
-    // width need not be a multiple of 6 — the kernel only writes full 6-pixel
-    // groups; remaining edge pixels (e.g. 2 for 1280) stay pre-zeroed by caller.
+    // width need not be a multiple of 6, and no longer needs the caller to pre-zero anything:
+    // the kernel covers every column, bounds-checking the partial last group.
+    // CEIL, and it MUST match `groups_per_row` in the kernel. The grid size is computed here
+    // and the group index is recomputed there, so a floor here and a ceil there means the tail
+    // group simply never gets a thread -- the kernel's bounds checks would be dead code and the
+    // edge columns would still be missed. Two places, one number.
     const int field_height = full_height / 2;
-    const int total_groups = (width / 6) * field_height;
+    const int total_groups = ((width + 5) / 6) * field_height;
     int threads = 128;
     int blocks  = (total_groups + threads - 1) / threads;
     k_v210_unpack_field<<<blocks, threads, 0, stream>>>(
@@ -188,6 +216,13 @@ inline cudaError_t launch_v210_unpack_field(
 }
 
 // Convenience launcher: handles grid/block sizing.
+//
+// FLOOR here, unlike the field launcher above, and deliberately: `prores_encode_frame` still
+// zeroes the planes before calling this one, so its tail columns come out black rather than
+// stale. The progressive ENCODE path no longer uses this route at all -- it converts straight
+// to planes -- so this remains only for the V210 bypass consumer, which supplies real V210 and
+// relies on that memset. Left alone rather than "fixed" for consistency: changing it would mean
+// re-verifying the bypass consumer, and the memset already makes it correct.
 // width need not be a multiple of 6 — edge pixels stay pre-zeroed by caller.
 inline cudaError_t launch_v210_unpack(
     const uint32_t *d_v210,

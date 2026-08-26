@@ -276,8 +276,18 @@ cudaError_t prores_encode_frame(
 
         // Per-field host offset arrays (pinned, allocated once per call)
         uint32_t *h_off[2] = {};
-        cudaMallocHost(&h_off[0], (ns + 1) * sizeof(uint32_t));
-        cudaMallocHost(&h_off[1], (ns + 1) * sizeof(uint32_t));
+        // CHECKED. Pinned host memory is a limited resource and this allocation CAN fail --
+        // and on failure the old code read `h_off[0][ns]` a few lines down, which is a null
+        // dereference: a hard crash with nothing in the log, on a path that only fails under
+        // memory pressure. `cudaFreeHost(nullptr)` is safe, so the paired free needs no guard.
+        // Found by audit 2026-08-26, second pass.
+        if (cudaMallocHost(&h_off[0], (ns + 1) * sizeof(uint32_t)) != cudaSuccess ||
+            cudaMallocHost(&h_off[1], (ns + 1) * sizeof(uint32_t)) != cudaSuccess) {
+            fprintf(stderr, "%s\n", "[cuda_prores] cudaMallocHost(h_off) failed");
+            cudaFreeHost(h_off[0]);
+            cudaFreeHost(h_off[1]);
+            return cudaErrorMemoryAllocation;
+        }
 
         // Staging for field 0 bitstream (field 1 stays on GPU until final memcpy)
         uint8_t  *h_f0_bits = nullptr;
@@ -339,7 +349,12 @@ cudaError_t prores_encode_frame(
             if (field == 0) {
                 // Copy field 0 bitstream out before field 1 overwrites d_bitstream
                 f0_bytes = h_off[0][ns];
-                cudaMallocHost(&h_f0_bits, f0_bytes + 1);  // +1 avoids zero-size alloc
+                if (cudaMallocHost(&h_f0_bits, f0_bytes + 1) != cudaSuccess) {
+                    fprintf(stderr, "%s\n", "[cuda_prores] cudaMallocHost(h_f0_bits) failed");
+                    cudaFreeHost(h_off[0]);
+                    cudaFreeHost(h_off[1]);
+                    return cudaErrorMemoryAllocation;
+                }
                 cudaMemcpy(h_f0_bits, ctx->d_bitstream, f0_bytes, cudaMemcpyDeviceToHost);
             }
         }
@@ -495,7 +510,12 @@ cudaError_t prores_encode_frame(
 
     // 7. Sync and copy slice offsets to host (needed for seek table)
     uint32_t *h_offsets = nullptr;
-    cudaMallocHost(&h_offsets, (ctx->num_slices + 1) * sizeof(uint32_t));
+    // CHECKED: `h_offsets[ctx->num_slices]` is read unconditionally below, so a failed
+    // allocation was a null dereference rather than an error.
+    if (cudaMallocHost(&h_offsets, (ctx->num_slices + 1) * sizeof(uint32_t)) != cudaSuccess) {
+        fprintf(stderr, "%s\n", "[cuda_prores] cudaMallocHost(h_offsets) failed");
+        return cudaErrorMemoryAllocation;
+    }
     cudaMemcpyAsync(h_offsets, ctx->d_slice_offsets,
                     (ctx->num_slices + 1) * sizeof(uint32_t),
                     cudaMemcpyDeviceToHost, stream);
@@ -723,7 +743,12 @@ cudaError_t prores_encode_frame_444(
 
     // 8. Sync and transfer slice offsets to host for seek table
     uint32_t *h_offsets = nullptr;
-    cudaMallocHost(&h_offsets, (ctx->num_slices + 1) * sizeof(uint32_t));
+    // CHECKED: `h_offsets[ctx->num_slices]` is read unconditionally below, so a failed
+    // allocation was a null dereference rather than an error.
+    if (cudaMallocHost(&h_offsets, (ctx->num_slices + 1) * sizeof(uint32_t)) != cudaSuccess) {
+        fprintf(stderr, "%s\n", "[cuda_prores] cudaMallocHost(h_offsets) failed");
+        return cudaErrorMemoryAllocation;
+    }
     cudaMemcpyAsync(h_offsets, ctx->d_slice_offsets,
                     (ctx->num_slices + 1) * sizeof(uint32_t),
                     cudaMemcpyDeviceToHost, stream);
@@ -824,8 +849,14 @@ cudaError_t prores_encode_from_yuv_fields_422(
     const int chroma_blocks = blk_rows_c * (ctx->width / 16);
 
     uint32_t *h_off[2] = {nullptr, nullptr};
-    cudaMallocHost(&h_off[0], (ns + 1) * sizeof(uint32_t));
-    cudaMallocHost(&h_off[1], (ns + 1) * sizeof(uint32_t));
+    // CHECKED -- `h_off[0][ns]` is read below. See the note in `prores_encode_frame`.
+    if (cudaMallocHost(&h_off[0], (ns + 1) * sizeof(uint32_t)) != cudaSuccess ||
+        cudaMallocHost(&h_off[1], (ns + 1) * sizeof(uint32_t)) != cudaSuccess) {
+        fprintf(stderr, "%s\n", "[cuda_prores] cudaMallocHost(h_off) failed");
+        cudaFreeHost(h_off[0]);
+        cudaFreeHost(h_off[1]);
+        return cudaErrorMemoryAllocation;
+    }
 
     uint8_t  *h_f0_bits = nullptr;
     uint32_t  f0_bytes  = 0;
@@ -880,7 +911,12 @@ cudaError_t prores_encode_from_yuv_fields_422(
 
         if (field == 0) {
             f0_bytes = h_off[0][ns];
-            cudaMallocHost(&h_f0_bits, f0_bytes + 1);
+            if (cudaMallocHost(&h_f0_bits, f0_bytes + 1) != cudaSuccess) {
+                fprintf(stderr, "%s\n", "[cuda_prores] cudaMallocHost(h_f0_bits) failed");
+                cudaFreeHost(h_off[0]);
+                cudaFreeHost(h_off[1]);
+                return cudaErrorMemoryAllocation;
+            }
             cudaMemcpy(h_f0_bits, ctx->d_bitstream, f0_bytes, cudaMemcpyDeviceToHost);
         }
     }

@@ -57,6 +57,32 @@
         if (_e != cudaSuccess) return _e;                             \
     } while (0)
 
+// Same, but UNWINDS the half-built context first. `CUDA_CHECK` returns bare, which is right
+// everywhere except allocation: in `prores_decode_ctx_create` a failure part-way through left
+// every buffer allocated before it allocated forever. The producer then throws, so nothing ever
+// freed them.
+//
+// AT 12K THAT IS HUNDREDS OF MEGABYTES PER FAILED PLAY, and it compounds: `producer-swap
+// --clips 12k` logged five `prores_decode_ctx_create: out of memory` failures in one OGL run,
+// and each one made the next more likely by leaking what it had already taken. A leak on the
+// out-of-memory path turns a single refusal into a cascade -- which is what that run showed.
+//
+// Safe because `prores_decode_ctx_destroy` is entirely `safe_free`-guarded and create already
+// opens with `memset(ctx, 0, sizeof(*ctx))`, so destroy can be called on any partial state.
+//
+// That memset was ALREADY THERE. A redundant `*ctx = ProResDecodeCtx{}` was added here first
+// and placed after the geometry assignments, wiping width/height/profile/coeff_stride: the
+// decode came back at worst 255 LSB, mean 142, 86% of samples wrong. Caught by prores-parity
+// immediately. Read the top of a function before adding an initialisation to it.
+#define CUDA_CHECK_CTX(call)                                          \
+    do {                                                              \
+        cudaError_t _e = (call);                                      \
+        if (_e != cudaSuccess) {                                      \
+            prores_decode_ctx_destroy(ctx);                           \
+            return _e;                                                \
+        }                                                             \
+    } while (0)
+
 static inline void safe_free(void*& p)
 {
     if (p) { cudaFree(p); p = nullptr; }
@@ -104,33 +130,33 @@ cudaError_t prores_decode_ctx_create(ProResDecodeCtx* ctx,
     const size_t coeff_bytes = (size_t)num_slices * ctx->coeff_stride * sizeof(int16_t);
 
     ctx->max_frame_bytes = max_frame_bytes;
-    CUDA_CHECK(cudaMalloc(&ctx->d_bitstream,   max_frame_bytes));
-    CUDA_CHECK(cudaMalloc((void**)&ctx->d_slice_starts, (size_t)num_slices * sizeof(uint32_t)));
-    CUDA_CHECK(cudaMalloc((void**)&ctx->d_slice_sizes,  (size_t)num_slices * sizeof(uint16_t)));
-    CUDA_CHECK(cudaMalloc((void**)&ctx->d_dec_coeffs,   coeff_bytes));
-    CUDA_CHECK(cudaMalloc((void**)&ctx->d_q_scales,     (size_t)num_slices * sizeof(uint16_t)));
-    CUDA_CHECK(cudaMalloc((void**)&ctx->d_y,            n_pix    * sizeof(int16_t)));
-    CUDA_CHECK(cudaMalloc((void**)&ctx->d_cb,           n_chroma * sizeof(int16_t)));
-    CUDA_CHECK(cudaMalloc((void**)&ctx->d_cr,           n_chroma * sizeof(int16_t)));
+    CUDA_CHECK_CTX(cudaMalloc(&ctx->d_bitstream,   max_frame_bytes));
+    CUDA_CHECK_CTX(cudaMalloc((void**)&ctx->d_slice_starts, (size_t)num_slices * sizeof(uint32_t)));
+    CUDA_CHECK_CTX(cudaMalloc((void**)&ctx->d_slice_sizes,  (size_t)num_slices * sizeof(uint16_t)));
+    CUDA_CHECK_CTX(cudaMalloc((void**)&ctx->d_dec_coeffs,   coeff_bytes));
+    CUDA_CHECK_CTX(cudaMalloc((void**)&ctx->d_q_scales,     (size_t)num_slices * sizeof(uint16_t)));
+    CUDA_CHECK_CTX(cudaMalloc((void**)&ctx->d_y,            n_pix    * sizeof(int16_t)));
+    CUDA_CHECK_CTX(cudaMalloc((void**)&ctx->d_cb,           n_chroma * sizeof(int16_t)));
+    CUDA_CHECK_CTX(cudaMalloc((void**)&ctx->d_cr,           n_chroma * sizeof(int16_t)));
     ctx->d_alpha = nullptr;
     if (is_444)
-        CUDA_CHECK(cudaMalloc((void**)&ctx->d_alpha,    n_pix    * sizeof(int16_t)));
+        CUDA_CHECK_CTX(cudaMalloc((void**)&ctx->d_alpha,    n_pix    * sizeof(int16_t)));
     // Not allocated for a planar-only caller. This is the biggest buffer in the context by
     // a wide margin -- n_pix * 8 bytes, against n_pix * 2 for luma -- so skipping it is what
     // makes a deeper slot ring affordable rather than a VRAM trade.
     ctx->d_bgra16 = nullptr;
     if (!planar_output)
-        CUDA_CHECK(cudaMalloc((void**)&ctx->d_bgra16,   n_pix * 4 * sizeof(uint16_t)));
+        CUDA_CHECK_CTX(cudaMalloc((void**)&ctx->d_bgra16,   n_pix * 4 * sizeof(uint16_t)));
 
     // Pinned host staging for slice index.
-    CUDA_CHECK(cudaMallocHost((void**)&ctx->h_slice_starts, (size_t)num_slices * sizeof(uint32_t)));
-    CUDA_CHECK(cudaMallocHost((void**)&ctx->h_slice_sizes,  (size_t)num_slices * sizeof(uint16_t)));
+    CUDA_CHECK_CTX(cudaMallocHost((void**)&ctx->h_slice_starts, (size_t)num_slices * sizeof(uint32_t)));
+    CUDA_CHECK_CTX(cudaMallocHost((void**)&ctx->h_slice_sizes,  (size_t)num_slices * sizeof(uint16_t)));
 
     // Pinned host staging for CPU-decoded alpha (ProRes 4444 only).
     ctx->h_alpha    = nullptr;
     ctx->alpha_bits = 0;
     if (is_444)
-        CUDA_CHECK(cudaMallocHost((void**)&ctx->h_alpha, n_pix * sizeof(int16_t)));
+        CUDA_CHECK_CTX(cudaMallocHost((void**)&ctx->h_alpha, n_pix * sizeof(int16_t)));
 
     // Use highest-priority stream so decode preempts concurrent VK/GL rendering
     // on the same GPU.  Without this, the VK mixer's composition work (sampling
@@ -139,13 +165,13 @@ cudaError_t prores_decode_ctx_create(ProResDecodeCtx* ctx,
     {
         int lo = 0, hi = 0;
         cudaDeviceGetStreamPriorityRange(&lo, &hi);   // lo = least, hi = greatest (numerically smallest)
-        CUDA_CHECK(cudaStreamCreateWithPriority(&ctx->stream, cudaStreamNonBlocking, hi));
+        CUDA_CHECK_CTX(cudaStreamCreateWithPriority(&ctx->stream, cudaStreamNonBlocking, hi));
     }
 
     // Upload quant tables and scan order to __constant__ memory (first call
     // is a no-op if already done by the encoder init; subsequent calls just
     // overwrite with the same values).
-    CUDA_CHECK(prores_tables_upload());
+    CUDA_CHECK_CTX(prores_tables_upload());
 
     return cudaSuccess;
 }

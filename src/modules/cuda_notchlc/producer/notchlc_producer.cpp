@@ -126,7 +126,16 @@ struct notchlc_producer_impl final : public core::frame_producer
 {
     const std::wstring                        path_;
     const int                                 cuda_device_;
-    bool                                      loop_                   = false;
+    // ATOMIC because `call()` writes it from the AMCP thread while `read_loop()` reads it on
+    // the decode thread. Every other member `call()` touches was already atomic --
+    // `seek_request_`, `pingpong_`, `speed_` all use `.store()` -- and `av_producer` and
+    // `hap_producer` both declare `std::atomic<bool> loop_`. This one was the exception, a
+    // plain `bool` assigned directly, which is a data race: formally UB, and in practice the
+    // decode thread's read can be hoisted out of its loop because nothing there can be seen to
+    // write a non-atomic member. The symptom is `CALL 1-1 LOOP 1` returning 202 and the
+    // producer going on not looping -- the same presentation as the allowlist trap, from a
+    // different cause. Found by audit 2026-08-26, second pass.
+    std::atomic<bool>                     loop_{false};
     // -1=AUTO(709); 1=BT.709; 6=BT.601; 9=BT.2020; 100=LINEAR
     int                                       color_matrix_override_  = -1;
     // Decoded media is straight-alpha; see core/frame/alpha_mode.h.
