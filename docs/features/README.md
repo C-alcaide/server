@@ -83,20 +83,21 @@ nothing drove it. Undocumented and untested proved to be the same gap seen from 
 | :--- | :--- | :--- | :--- |
 | Vulkan mixer | `conformance`, `grading`, `mixer-parity`, `vk-validation` (**cannot currently fail** — see `CLAUDE.md`) | shipped | `VULKAN_MIXER_IMPLEMENTATION.md` |
 | **CUDA ProRes producer + consumer** | `prores-parity`, `producer-swap`, `playback-scaling`, `encode-matrix`, `coexistence` | shipped | **[cuda-prores.md](cuda-prores.md)** |
-| CUDA NotchLC producer | `producer-swap`, `coexistence` | shipped | — |
+| **CUDA NotchLC producer** | `producer-swap`, `coexistence` | shipped | **[cuda-notchlc.md](cuda-notchlc.md)** |
 | Vulkan output consumer | `signalling`, `consumer-view` | partial | `VULKAN_OUTPUT.md` |
 | GPU interop (CUDA↔VK, D3D11↔VK, VK↔GL) | `coexistence`, `gpu-direct-parity` | shipped | `GPU_INTEROP_ARCHITECTURE.md` |
 | GStreamer producer/consumer | `gstreamer`, `gst-consumer-cost`, `gst-dll-probe` | shipped | `GSTREAMER_GUIDE.md` |
-| HAP producer | `loop-boundary` | shipped | — |
+| **HAP producer** | `loop-boundary` | shipped | **[hap.md](hap.md)** |
 | ISF / OpenFX plugin hosts | none | shipped, unmeasured | `OPENFX_INTEGRATION_PLAN.md` |
-| Spout / remotewall | none | shipped, unmeasured | — |
+| **Spout** | **none** | shipped, unmeasured | **[spout.md](spout.md)** |
+| remotewall | none | shipped, unmeasured | `REMOTEWALL_MODULE.md` |
 
 ### Signal, sync and control
 
 | feature | commands | coverage | state | document |
 | :--- | ---: | :--- | :--- | :--- |
-| DMX / Art-Net / sACN | — | `dmx` | shipped | `DMX_LIGHTING.md` |
-| LTC timecode | 2 | none | shipped, unmeasured | — |
+| **DMX / Art-Net / sACN** | — | `dmx` | shipped | **[dmx-sacn-artnet.md](dmx-sacn-artnet.md)** |
+| **LTC timecode** | 2 | **none** | shipped, unmeasured | **[ltc-timecode.md](ltc-timecode.md)** |
 | Cluster sync | — | none | shipped, unmeasured | `CLUSTER_SYNC.md` |
 | Keyframes | — | none | shipped, unmeasured | `KEYFRAMES.md` |
 | PortAudio | 1 | none | shipped, unmeasured | `PORTAUDIO_MODULE.md` |
@@ -116,10 +117,16 @@ Not alphabetical, and not by size. **By where defects have actually hidden**, wh
    document says what a first battery should check and in what order.
 3. **CUDA ProRes** — written. Chosen third because it is the most heavily measured part of the
    fork, so its document is mostly a place to put numbers that were scattered across commits.
-4. **LTC, spout, HAP, NotchLC, dmx_common, sACN** — shipped, and with no document of their own at
-   all. The next batch.
-5. **Keyframes, cluster sync, replay, remotewall, PortAudio, camera tracking** — these have a guide
-   already, so they need a state-and-coverage summary and a pointer, not a rewrite.
+4. **LTC, Spout, HAP, NotchLC, DMX/sACN/Art-Net** — written. Each had no document of its own;
+   each turned out to contain something not written down anywhere, which is the argument for
+   doing the rest. Three examples: the FFmpeg consumer asks LTC for a frame number with a
+   hardcoded `25` and a question mark in the comment; the Spout producer accepts three different
+   syntaxes for the same thing; and the fork's three GPU codec producers use three *different*
+   mixer-handoff strategies, each for a defensible reason and none of them the house style.
+5. **Keyframes, cluster sync, replay, remotewall, PortAudio, camera tracking, ISF/OpenFX** — these
+   have a guide already, so they need a state-and-coverage summary and a pointer, not a rewrite.
+6. **Vulkan output consumer, GStreamer, Vulkan mixer, grading, OCIO** — large, well documented
+   elsewhere, and last precisely because they are the best covered.
 
 ---
 
