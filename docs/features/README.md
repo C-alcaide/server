@@ -69,10 +69,10 @@ nothing drove it. Undocumented and untested proved to be the same gap seen from 
 
 | feature | commands | coverage | state | document |
 | :--- | ---: | :--- | :--- | :--- |
-| Grading chain (CDL, lift/midtone/gain, curves, hue curves, qualifier, split tone, white balance, exposure, gain, RGB levels, tone balance, linear saturation, sharpen, blur, grain, shape) | 20 | `grading`, `grade-extremes`, `grade-window`, `banding`, `bokeh-luma` | shipped | `COLOR_GRADING.md` |
-| ACES / colour management, gamut compression | 2 | `conformance`, `gamut-compress`, `gamut-sweep`, `flat-gamut-compress`, `ws-tonemap` | shipped | `COLOR_GRADING.md`, `HDR_GUIDE.md` |
-| OCIO integration | 4 | `ocio`, `ocio-display`, `ocio-look`, `ocio-lut3d`, `ocio-exposure`, `ocio-gamut-compress` | shipped | `OCIO_USER_GUIDE.md` |
-| 3D LUTs | 1 | `ocio-lut3d`, `cdl-file` | shipped | `COLOR_GRADING.md` |
+| **Grading chain** (CDL, lift/midtone/gain, curves, hue curves, qualifier, split tone, white balance, exposure, gain, RGB levels, tone balance, linear saturation, sharpen, blur, grain, shape) | ~26 | `grading`, `grade-extremes`, `grade-window`, `banding`, `bokeh-luma` | shipped | **[colour-grading-and-ocio.md](colour-grading-and-ocio.md)** |
+| **ACES / colour management, gamut compression** | 2 | `conformance`, `gamut-compress`, `gamut-sweep`, `flat-gamut-compress`, `ws-tonemap` | shipped | **[colour-grading-and-ocio.md](colour-grading-and-ocio.md)** |
+| **OCIO integration** | 4 | `ocio`, `ocio-display`, `ocio-look`, `ocio-lut3d`, `ocio-exposure`, `ocio-gamut-compress` | shipped | **[colour-grading-and-ocio.md](colour-grading-and-ocio.md)** |
+| 3D LUTs | 1 | `ocio-lut3d`, `cdl-file` | shipped | [colour-grading-and-ocio.md](colour-grading-and-ocio.md) |
 
 ### Projection and virtual production
 
@@ -88,12 +88,12 @@ nothing drove it. Undocumented and untested proved to be the same gap seen from 
 
 | feature | coverage | state | document |
 | :--- | :--- | :--- | :--- |
-| Vulkan mixer | `conformance`, `grading`, `mixer-parity`, `vk-validation` (**cannot currently fail** — see `CLAUDE.md`) | shipped | `VULKAN_MIXER_IMPLEMENTATION.md` |
+| **Vulkan mixer** | `conformance`, `grading`, `mixer-parity`, `vk-validation` (**cannot currently fail**) | shipped | **[vulkan-mixer.md](vulkan-mixer.md)** |
 | **CUDA ProRes producer + consumer** | `prores-parity`, `producer-swap`, `playback-scaling`, `encode-matrix`, `coexistence` | shipped | **[cuda-prores.md](cuda-prores.md)** |
 | **CUDA NotchLC producer** | `producer-swap`, `coexistence` | shipped | **[cuda-notchlc.md](cuda-notchlc.md)** |
-| Vulkan output consumer | `signalling`, `consumer-view` | partial | `VULKAN_OUTPUT.md` |
+| **Vulkan output consumer** | `consumer-view` only — **metadata uncovered** | partial | **[vulkan-output.md](vulkan-output.md)** |
 | GPU interop (CUDA↔VK, D3D11↔VK, VK↔GL) | `coexistence`, `gpu-direct-parity` | shipped | `GPU_INTEROP_ARCHITECTURE.md` |
-| GStreamer producer/consumer | `gstreamer`, `gst-consumer-cost`, `gst-dll-probe` | shipped | `GSTREAMER_GUIDE.md` |
+| **GStreamer producer/consumer** | `gstreamer`, `gst-consumer-cost`, `gst-dll-probe`, `coexistence` | shipped | **[gstreamer.md](gstreamer.md)** |
 | **HAP producer** | `loop-boundary` | shipped | **[hap.md](hap.md)** |
 | **ISF / OpenFX plugin hosts** | **none** | shipped, unmeasured | **[isf-and-openfx.md](isf-and-openfx.md)** |
 | **Spout** | **none** | shipped, unmeasured | **[spout.md](spout.md)** |
@@ -137,10 +137,14 @@ Not alphabetical, and not by size. **By where defects have actually hidden**, wh
    including its own guide.
 6. **Replay, remotewall, PortAudio, ISF/OpenFX** — written. Every fork module now has a feature
    document or is covered by one.
-7. **Vulkan output consumer, GStreamer, Vulkan mixer, grading chain, OCIO** — deliberately last.
-   These are the best-documented and best-covered parts of the fork, so a feature document adds
-   least here; what they need is a state-and-coverage summary pointing at the guides and batteries
-   that already exist, not new prose.
+7. **Vulkan mixer, Vulkan output, GStreamer, grading + OCIO** — written, as state-and-coverage
+   summaries pointing at the guides rather than new prose. Even here each surfaced something the
+   guides do not say in one place: the Vulkan output consumer's **signalling has no coverage at
+   all** and a metadata defect leaves the picture correct, which makes it the highest-value missing
+   battery in the fork; and the GStreamer GPU route refuses `d3d11convert` for the same reason CUDA
+   ProRes went planar — two modules reaching one conclusion independently.
+
+**Every fork feature now has a document.** What remains is diagrams and the HTML build, below.
 
 ## What this folder does not yet have
 
