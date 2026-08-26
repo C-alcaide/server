@@ -10,6 +10,11 @@
 > `image_mixer.cpp::apply_grade_node` on each backend for the pass, and
 > `../guides/COLOR_GRADING.md` for the operator documentation.
 >
+> **The composite path is studied but not fixed** — §11, added 2026-08-27. Non-normal blend
+> modes and the additive keyer are wrong for a layer with a graph; the keys and the ordinary
+> normal-keyer layer are exact. Option B recommended, with the battery that would have to
+> come first.
+>
 > **What remains a study** is the rest: more than one operation per node, arbitrary graph topology
 > rather than a chain, window shapes other than an ellipse, and the data-model question below —
 > which the shipped prototype answers only for a fixed-size chain.
@@ -610,6 +615,113 @@ excludes.
 mode with *"Directory …\build\shell\template\ is not writable"* — four servers racing on one
 shared `template/` directory. `--sequential` passes. Unrelated to this change (the directory is
 writable, and a manually started server is fine), but it will bite the next person.
+
+## 11. Fixing the composite path — study, 2026-08-27
+
+The prototype's one correctness hole. Written after reading both kernels rather than from the
+prototype's own comment, which turns out to overstate the damage.
+
+### 11.1 What actually breaks, and what does not
+
+The item draw is a **read-modify-write on the destination**. `background` is bound as the sampler
+source *and* attached as the render target, and the shader's `blend()` composites in place:
+
+```glsl
+vec4 back = texture(background, TexCoord2.st).bgra;      // OGL: shader.frag:992
+if (blend_mode != 0)
+    fore.rgb = get_blend_color(back.rgb/(back.a+eps), fore.rgb/(fore.a+eps)) * fore.a;
+switch (keyer) {
+    case 1:  return fore + back;                 // additive
+    default: return fore + (1.0-fore.a) * back;  // normal
+}
+```
+
+Vulkan is the same shape through `subpassLoad(background)` (`fragment_shader.frag:298`).
+
+With a node graph the item is drawn into a **private, empty attachment**, so `back` is black.
+Working through that, one row per mechanism:
+
+| mechanism | affected? | why |
+| :--- | :--- | :--- |
+| **non-normal blend mode** | **BROKEN** | `get_blend_color(black, fore)` — the blend is computed against nothing, then the result is normal-composited over the real target. Multiply against black is black; screen against black is a no-op |
+| **`keyer::additive`** | **BROKEN** | `fore + back` with `back` black returns `fore`, and the final composite then uses **normal**. The additive-ness is silently discarded |
+| `local_key` / `layer_key` | **fine** | they only scale `col.a` (`shader.frag:2124-2128`). They mask the *item*, not the composite, so an attachment changes nothing |
+| ordinary layer, normal keyer | **fine, exactly** | `fore + (1-a)·0 = fore` into the attachment, then `fore + (1-a)·target` at the composite — algebraically identical to the direct draw |
+
+**So the prototype's own comment is wrong about the keys.** It names `keyer`, `local_key`/`layer_key`
+and blend mode; two of those three are unaffected. The last row is also why `grade-window` passes
+at 0.50 LSB and cannot see any of this: it drives an ordinary opaque layer with the normal keyer,
+which is the one case that *is* equivalent.
+
+### 11.2 Option A — run the chain inside the layer draw
+
+**Every node today is pixel-local**: a mask from `uv` and a scalar exposure. Nothing reads a
+neighbouring pixel. A chain of pixel-local operations does not need multiple passes at all — it is
+a loop in the layer shader, applied to `fore` *before* `blend()`.
+
+This fixes all of §11.1 **by construction**, because `blend()` keeps seeing the real background. It
+also deletes the attachment, the ping-pong and the extra draws.
+
+*Cost, and it is not free.* Per-node uniforms move into the per-draw payload of **every** layer,
+including the overwhelming majority with no graph. 16 nodes × (centre 2, radius 2, feather, exposure,
+invert) ≈ 448 bytes on top of a `uniform_block` that `static_assert`s at 896 — a ~50% larger UBO
+upload per draw to buy a feature almost nothing uses. §4.5 says the fast path must not regress, and
+this regresses it a little for everyone.
+
+*Real limitation.* It forecloses any node that is not pixel-local. A blur, a spatial softening or a
+node that samples its neighbourhood cannot be expressed this way, and the study's §3 window
+primitives stay pixel-local only by luck.
+
+### 11.3 Option B — keep the passes, move the composite
+
+Draw the item into the attachment with **blend mode normal and the linear keyer** — deliberately
+against black, which §11.1's last row shows is exact — run the node chain, then composite the result
+into the target with the layer's **real** `blend_mode` and `keyer`.
+
+That is a small change in shape: `draw(target, src, format_desc, core::blend_mode::normal)` at the
+end of both mixers becomes `draw(target, src, format_desc, layer_blend_mode, layer_keyer)`, and the
+item draw's blend mode is forced to normal instead of being passed through.
+
+*Why it is exact.* The attachment holds the graded item premultiplied, with alpha intact. The final
+composite has both `fore` (from the attachment) and `back` (the real target), which is precisely
+what `get_blend_color` and both keyer branches need. Nothing is approximated.
+
+*Vulkan wrinkle, already solved elsewhere.* §2.4: a `subpassInput` must be an attachment of the same
+render pass read at the same pixel, so the final composite reads the target the ordinary way while
+the node passes sample their source as a `sampler2D` — which is exactly what `apply_calibration_lut`
+and `apply_output_convert` already do. The precedent exists; this is not new machinery.
+
+*Cost.* Unchanged from today for a layer with a graph, and **byte-identical for one without** —
+the fast path never allocates an attachment, so §4.5 holds without qualification.
+
+### 11.4 Recommendation
+
+**Option B**, and not because it is the smaller diff — it is the one that keeps the door open.
+
+Option A is tempting: it is faster, deletes machinery, and fixes the defect by making it
+unrepresentable. But it buys that by asserting *permanently* that no grading node will ever read a
+neighbouring pixel, and it taxes every draw in every production for a feature almost none of them
+enable. Option B leaves both open, costs nothing on the fast path, and reuses a pass shape this
+codebase has shipped six times.
+
+A hybrid — inline when every enabled node is pixel-local, spill to passes otherwise — is the best of
+both and should **not** be built yet. It doubles the code paths that have to agree, on both
+backends, for a feature whose only measured user is one battery. Revisit it when there is a
+non-pixel-local node to justify it.
+
+### 11.5 What to do before any of this
+
+**A battery that can see the defect.** `grade-window` drives an ordinary opaque layer with the
+normal keyer, which §11.1 shows is the one configuration where the current code is already correct —
+so it would pass identically before and after any fix here. A check that cannot fail for the change
+is worse than none.
+
+The missing case is small: one layer with a node graph and `MIXER <ch>-<layer> BLEND SCREEN` (or
+any non-normal mode) over a non-black background, asserted against the same layer without a graph.
+Today those two differ; after Option B they must agree. That comparison is the whole test, and it
+needs no colour model.
+
+---
 
 ## 11. Sources
 

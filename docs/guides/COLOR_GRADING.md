@@ -1241,10 +1241,19 @@ The query returns one line per node — `index enable cx cy rx ry feather exposu
 `node[n].window.field`, which the tween system cannot express. Named as an open question in the
 study rather than half-built.
 
-**Prototype limitations, from the mixers' own comments.** An item with enabled nodes is routed
-through a private attachment, which changes how it meets the composite — so **the keyer, layer keys
-and non-normal blend modes are not exercised by this path**. Treat a node chain plus a blend mode as
-untested rather than supported.
+**Prototype limitation, stated more precisely than the code comment does.** An item with enabled
+nodes renders into a private attachment first, so the layer blends against **black** rather than
+against the scene. Traced in `../plans/GRADING_NODE_GRAPH_STUDY.md` §11:
+
+| | with a node graph |
+| :--- | :--- |
+| non-normal blend mode (`SCREEN`, `MULTIPLY`, …) | **wrong** — computed against black, then normal-composited |
+| `keyer additive` | **wrong** — the additive composite is silently discarded |
+| `local_key` / `layer_key` | fine — they scale the item's alpha, not the composite |
+| ordinary layer, normal keyer | **exact** — algebraically identical to a direct draw |
+
+So a node chain is safe on an ordinary layer and **not** safe combined with a non-normal blend mode
+or the additive keyer. The mixers' own comment says all three break; two of them do not.
 
 **Coverage:** the `grade-window` battery, which is spatial by construction rather than a flat-patch
 check — a flat patch is invariant under any mask covering it, so a single-patch battery could not
