@@ -21,6 +21,29 @@ module directories and registered AMCP command names diffed against `d:\Github\s
 > `src/**/*.cpp` and diffed against upstream's own registrations, which is the only way that
 > holds as modules come and go.
 
+## Every module, and why it is or is not here
+
+Regenerate by diffing `src/modules/*` against `d:\Github\server-upstream`. The point of the table
+is that **omissions are stated rather than inferred from absence** — the previous version of this
+folder had no such list, so five undocumented modules looked exactly like five modules that did not
+need documenting.
+
+| module | vs upstream | document |
+| :--- | ---: | :--- |
+| `ffmpeg` | 10,500 lines | `ffmpeg-producer-and-consumer.md` |
+| `screen` | 2,963 | `screen-consumer.md` |
+| `decklink` | 2,382 | `decklink-output.md` |
+| `image` | 789 | `image-consumer-and-producer.md` |
+| `html` | 282 | `html-gpu-direct.md` |
+| `newtek` | 56 | **none — checked, not overlooked.** NDI wiring only |
+| `oal` | 47 | **none — checked.** audio device plumbing |
+| `bluefish` | 27 | **none — checked.** covered as a gap in `decklink-output.md` §3 |
+| `flash` | **0** | **none — untouched by this fork.** Upstream's document applies verbatim |
+| fork-only modules (19) | n/a | one document each, listed below |
+
+`ofx` and `dmx_common` are fork-only but share documents with their neighbours —
+`isf-and-openfx.md` and `dmx-sacn-artnet.md` — because they are one feature between them.
+
 ---
 
 ## How to read these documents, and why they exist
