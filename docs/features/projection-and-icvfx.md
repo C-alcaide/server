@@ -3,7 +3,7 @@
 > **State:** partial — the geometry and blend commands are shipped and measured; ICVFX is shipped
 > with only its per-channel gain measured
 > **Modules:** `src/accelerator/ogl/image/shader.frag`, `src/accelerator/vulkan/image/fragment_shader.frag`, `src/core/frame/frame_transform.h`
-> **Commands:** 12 fork-specific AMCP commands (10 `PROJECTION_*` + the 2 ICVFX ones)
+> **Commands:** 13 fork-specific AMCP commands (10 `PROJECTION_*`, 2 ICVFX, and `MIXER FLIP`)
 > **Coverage:** `geometry`, `blend-mask`, `calibration`, `venue-test`, `icvfx-parity`
 
 Warps a layer onto a non-planar screen — a cylinder, a dome, a fisheye — soft-edge blends it
@@ -11,8 +11,8 @@ against neighbouring projectors, and applies the in-camera VFX inner/outer frust
 on LED volumes. All of it is per **layer**, composed on the layer's `image_transform`, so two
 layers on one channel can carry different geometry.
 
-**Read §4 before trusting any of it.** Eleven of these twelve commands had no documentation at
-all until 2026-08-26, and the twelfth carried a red/blue exchange on the OpenGL mixer that no
+**Read §4 before trusting any of it.** Twelve of these thirteen commands had no documentation at
+all until 2026-08-26, and the thirteenth carried a red/blue exchange on the OpenGL mixer that no
 test could see.
 
 ---
@@ -34,6 +34,7 @@ another document.
 | `MIXER PROJECTION_DISTORTION` | `k1 k2 k3 [p1 p2] [dur] [tween]` — Brown–Conrady | 5574 |
 | `MIXER PROJECTION_BLEND` | `left right [top] [bottom] [gamma] [dur] [tween]` | 5575 |
 | `MIXER PROJECTION_BLEND_MASK` | `<png path>` \| `NONE` \| *(empty = query)* | 5576 |
+| `MIXER FLIP` | `H` \| `V` \| `HV` \| `NONE` \| *(empty = query)* | 2268 |
 
 **Three details that surprise people, all verified:**
 
@@ -45,6 +46,11 @@ another document.
   rendered with. Both take the same three keywords, which is why they get confused.
 - **`PROJECTION_BLEND_MASK` with no parameters is a query**, and with `NONE` clears. Only a path
   sets a mask.
+- **`MIXER FLIP` is documented here rather than with the grading commands** because it is a
+  geometry operation on the layer's transform (`flip_h` / `flip_v`), and the ICVFX branch of both
+  shaders reads those same flags when reprojecting the inner frustum. Empty is a query returning
+  `H`, `V`, `HV` or nothing; `NONE` clears. It was the last of the fork's 91 AMCP commands with no
+  documentation anywhere.
 
 ---
 

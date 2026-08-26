@@ -95,9 +95,9 @@ nothing drove it. Undocumented and untested proved to be the same gap seen from 
 | GPU interop (CUDA↔VK, D3D11↔VK, VK↔GL) | `coexistence`, `gpu-direct-parity` | shipped | `GPU_INTEROP_ARCHITECTURE.md` |
 | GStreamer producer/consumer | `gstreamer`, `gst-consumer-cost`, `gst-dll-probe` | shipped | `GSTREAMER_GUIDE.md` |
 | **HAP producer** | `loop-boundary` | shipped | **[hap.md](hap.md)** |
-| ISF / OpenFX plugin hosts | none | shipped, unmeasured | `OPENFX_INTEGRATION_PLAN.md` |
+| **ISF / OpenFX plugin hosts** | **none** | shipped, unmeasured | **[isf-and-openfx.md](isf-and-openfx.md)** |
 | **Spout** | **none** | shipped, unmeasured | **[spout.md](spout.md)** |
-| remotewall | none | shipped, unmeasured | `REMOTEWALL_MODULE.md` |
+| **remotewall** | **none** | shipped, unmeasured | **[remotewall-and-portaudio.md](remotewall-and-portaudio.md)** |
 
 ### Signal, sync and control
 
@@ -107,8 +107,8 @@ nothing drove it. Undocumented and untested proved to be the same gap seen from 
 | **LTC timecode** | 2 | **none** | shipped, unmeasured | **[ltc-timecode.md](ltc-timecode.md)** |
 | **Cluster sync** | 4 | **none** | shipped, unmeasured | **[cluster-sync.md](cluster-sync.md)** |
 | **Keyframes** | 8 | **none** | shipped, unmeasured | **[keyframes.md](keyframes.md)** |
-| PortAudio | 1 | none | shipped, unmeasured | `PORTAUDIO_MODULE.md` |
-| Replay | — | none | shipped, unmeasured | — |
+| **PortAudio** | 1 | **none** | shipped, unmeasured | **[remotewall-and-portaudio.md](remotewall-and-portaudio.md)** |
+| **Replay** | — | **none** | shipped, unmeasured | **[replay.md](replay.md)** |
 | AMF / PRINT RAW | 2 | `amf` | shipped | — |
 
 ---
@@ -135,7 +135,24 @@ Not alphabetical, and not by size. **By where defects have actually hidden**, wh
    turned out to be the **second-largest command family in the fork** (18) with no coverage at all,
    and three of its commands (`POSITION_SCALE`, `WORLDALIGN`, `ZOOM_LUT`) appear in no document
    including its own guide.
-6. **Replay, remotewall, PortAudio, ISF/OpenFX** — have a guide, need a state summary. Remaining.
+6. **Replay, remotewall, PortAudio, ISF/OpenFX** — written. Every fork module now has a feature
+   document or is covered by one.
+7. **Vulkan output consumer, GStreamer, Vulkan mixer, grading chain, OCIO** — deliberately last.
+   These are the best-documented and best-covered parts of the fork, so a feature document adds
+   least here; what they need is a state-and-coverage summary pointing at the guides and batteries
+   that already exist, not new prose.
+
+## What this folder does not yet have
+
+**Diagrams.** Five documents record one as owed and name which criterion it meets — projection
+(transform order), PREVIZ (two routes to one state), CUDA ProRes (order, and two handoff paths),
+CUDA NotchLC (a ten-step chain with a host round-trip in the middle), camera tracking (five
+alignment commands composing in an undocumented order). Two more deliberately *defer* rather than
+owe: cluster sync and replay would both illustrate timing that nothing measures, and a diagram is
+a claim like any other.
+
+**An HTML build.** The markdown is the source of truth so it diffs and reviews; a sectioned HTML
+render for reading is a separate step.
 7. **Vulkan output consumer, GStreamer, Vulkan mixer, grading, OCIO** — large, well documented
    elsewhere, and last precisely because they are the best covered.
 
