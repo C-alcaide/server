@@ -47,6 +47,7 @@
 #endif
 
 #include <cuda_runtime.h>
+#include "../../cuda_gl_interop_lock.h"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -160,6 +161,10 @@ struct cuda_vk_strategy::impl
 
         void cleanup()
         {
+            // The release half of this slot's import, serialised for the reason
+            // `cuda_gl_interop_lock.h` gives: a slot being torn down while another producer
+            // or consumer imports is the interleaving that faulted the driver before.
+            std::lock_guard<std::mutex> interop_lk(caspar::cuda_gl_interop_mutex());
             if (surf)    { cudaDestroySurfaceObject(surf); surf = 0; }
             array = nullptr;  // Owned by mipmap
             if (mipmap)  { cudaFreeMipmappedArray(mipmap); mipmap = nullptr; }
@@ -417,6 +422,9 @@ struct cuda_vk_strategy::impl
 #endif
         extMemDesc.size                = alloc_size;
         extMemDesc.flags               = 0;
+        // Serialised: the import half. Per SLOT rather than once, because the DeckLink
+        // consumer re-imports when the mixer's texture behind a slot changes.
+        std::unique_lock<std::mutex> interop_lk(caspar::cuda_gl_interop_mutex());
         auto mem_err = cudaImportExternalMemory(&slot.ext_mem, &extMemDesc);
 #ifndef _WIN32
         // On Linux, cudaImportExternalMemory does NOT consume the fd on failure
@@ -590,6 +598,7 @@ struct cuda_vk_strategy::impl
 #endif
             desc.flags               = 0;
             cudaExternalSemaphore_t new_sem = nullptr;
+            std::lock_guard<std::mutex> interop_lk(caspar::cuda_gl_interop_mutex());
             auto err = cudaImportExternalSemaphore(&new_sem, &desc);
             if (err != cudaSuccess) {
 #ifndef _WIN32

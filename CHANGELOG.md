@@ -1,6 +1,76 @@
 CasparVP — Unreleased
 ==========================================
 
+### Fixed: ICVFX per-channel gain exchanged red and blue on the OpenGL mixer
+
+**This changes rendered output** for any configuration using `MIXER PROJECTION_ICVFX_COLOR` with
+gains that are not equal on all three channels. The OpenGL mixer was applying the red gain to
+blue and the blue gain to red; the Vulkan mixer was always correct.
+
+`icvfx_inner_gain` and `icvfx_outer_gain` were uploaded in RGB order and applied straight —
+`col.rgb *= icvfx_outer_dim * icvfx_outer_gain` — to a pixel the OpenGL shader carries in **BGR**,
+where `col.r` holds blue. Every other per-channel `vec3` in that shader already handles this:
+`lmg_*`, `cdl_*`, `gc_limit` and `luma_coeff` are `.bgr`-swizzled at the call site, and
+`split_*_color` is reversed on upload instead. ICVFX was the only one doing neither.
+
+**Why no test caught it, which is the more useful half of this entry.** Nothing in the harness
+drove `MIXER PROJECTION_ICVFX` at all — no module referenced it. And a white balance is naturally
+set with *equal* gains, which are invariant under exchanging red and blue: the obvious way to
+exercise this feature is the one way that cannot see the defect. Found by code audit, 2026-08-26.
+
+**Coverage added**, because the fix is worth less than the check: `cli.py icvfx-parity` renders
+the same asymmetric gains on both mixers and compares — outer (1.0, 0.6, 0.25), inner
+(0.3, 1.0, 0.7), source #20A0C0, three distinct values so no permutation of channels is
+invariant. After the fix the two mixers are **byte-identical, worst 0 LSB**. It covers the
+per-channel gain only: not the mask geometry, the feather, the inner-frustum reprojection, or the
+tweened form of either command.
+
+`conformance` and `grading` both stay clean on both mixers — worst 0.55 LSB against a 1.0 gate,
+neutrals at 0.00 — so the shader edit did not disturb the colour path.
+
+### Fixed: three more paths imported CUDA external memory without the interop lock
+
+No behaviour change expected and none observed; this closes a rule violation rather than a
+reported fault. `BUILDING_WORKFLOW.md` requires every CUDA external-resource import or release to
+hold `caspar::cuda_gl_interop_mutex()`. Three live paths did not:
+
+* `ffmpeg/consumer/cuda_vk_upload.cpp` — imports on cache miss, destroys on evict and on every
+  failure path after the import
+* `vulkan_output/consumer/vulkan_output_consumer.cpp` — an LRU cache, so evict-then-import recurs
+* `decklink/consumer/cuda_vk_strategy.cpp` — per-slot memory and semaphore imports
+
+**These are not one-time setup.** They are cache-miss paths: the mixer's attachment pool rotates
+and is rebuilt on a raster change, so imports and releases recur for the life of the consumer and
+can interleave across concurrent consumers — which is the hazard the mutex documents.
+
+`vulkan_output/util/cuda_peer_transfer.cpp` is also locked although it is **dead code** —
+`ensure_source_registered` has no callers. It does the `cudaGraphicsGLRegisterImage` pair that
+faulted the NVIDIA driver until the mutex existed, and a dead path is not a correct one: whoever
+makes it reachable inherits whatever it does wrong.
+
+### Fixed: the Vulkan mixer composed `per_channel_levels` by replacement, not intersection
+
+`MIXER LEVELS` per-channel values now narrow the same way on both mixers. Vulkan assigned
+wholesale, innermost-wins; OpenGL intersects the input and output ranges and multiplies gamma,
+per channel — which is also how **both** mixers already compose the master `levels`.
+
+**Single-layer results were identical**, which is why parity checks passed: intersecting against
+the defaults (0, 1, gamma 1) returns the other side's values unchanged. It diverged only when the
+transform was composed twice — a channel-level `MIXER` plus a layer-level one — where OpenGL
+narrowed the range and Vulkan kept only the inner value. Found by audit, not by a test.
+
+### Added: the Vulkan uniform block's std140 layout is now guarded at compile time
+
+`static_assert` on `sizeof(uniform_block) == 896` plus three `offsetof` anchors. No behaviour
+change: the assertions passed first time, so the hand-maintained offset comments were correct.
+
+The point is what they prevent. Measured 2026-08-21 with the size at 884 instead of a multiple of
+16: the mixer logged no error, decoded normally, and produced **no readback at all** —
+conformance 0/4, flat-decoded 0/29, the IMAGE consumer timing out with nothing in the log,
+because `uboInfo.range = sizeof(uniform_block)` described less memory than the shader read. That
+was guarded by nothing but a column of hand-written offset comments, and a comment cannot fail a
+build.
+
 ### Changed: the progressive CUDA ProRes 422 encode no longer packs V210 only to unpack it
 
 **No picture change, and that is the measured result rather than an assumption.** The path went

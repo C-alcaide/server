@@ -21,6 +21,9 @@
 #include <EGL/egl.h>
 #endif
 #include <cuda_runtime.h>
+#include <mutex>
+
+#include "../../cuda_gl_interop_lock.h"
 #include <cuda_gl_interop.h>
 
 #include <stdexcept>
@@ -230,6 +233,11 @@ void cuda_peer_transfer::ensure_source_registered(GLuint texture_id)
 
     unregister_source();
 
+    // UNREACHABLE TODAY -- `ensure_source_registered` has no callers -- and locked anyway.
+    // A dead path is not a correct one: whoever makes this reachable inherits whatever it does
+    // wrong, and this is the exact `cudaGraphicsGLRegisterImage` pair that faulted the NVIDIA
+    // driver until a process-wide mutex serialised it. See BUILDING_WORKFLOW.md pitfall #4.
+    std::lock_guard<std::mutex> interop_lk(caspar::cuda_gl_interop_mutex());
     cudaSetDevice(src_device_);
     cuda_check(
         cudaGraphicsGLRegisterImage(&src_resource_, texture_id, GL_TEXTURE_2D,
@@ -244,6 +252,7 @@ void cuda_peer_transfer::ensure_source_registered(GLuint texture_id)
 void cuda_peer_transfer::unregister_source()
 {
     if (src_resource_) {
+        std::lock_guard<std::mutex> interop_lk(caspar::cuda_gl_interop_mutex());
         cudaSetDevice(src_device_);
         cudaGraphicsUnregisterResource(src_resource_);
         src_resource_   = nullptr;

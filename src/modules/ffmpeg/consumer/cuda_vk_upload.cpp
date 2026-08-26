@@ -28,6 +28,10 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 
+#include <mutex>
+
+#include "../../cuda_gl_interop_lock.h"
+
 #ifndef _WIN32
 #include <unistd.h>
 #endif
@@ -93,12 +97,17 @@ struct cuda_vk_uploader::impl
             cudaStreamDestroy(stream_);
             stream_ = nullptr;
         }
-        for (auto& s : slots_) {
-            if (s.mipmap)
-                cudaFreeMipmappedArray(s.mipmap);
-            if (s.ext)
-                cudaDestroyExternalMemory(s.ext);
-            s = slot{};
+        {
+            // The release half, on teardown. A consumer being destroyed while another is
+            // importing is exactly the interleaving this lock exists for.
+            std::lock_guard<std::mutex> interop_lk(caspar::cuda_gl_interop_mutex());
+            for (auto& s : slots_) {
+                if (s.mipmap)
+                    cudaFreeMipmappedArray(s.mipmap);
+                if (s.ext)
+                    cudaDestroyExternalMemory(s.ext);
+                s = slot{};
+            }
         }
         next_ = 0;
     }
@@ -127,6 +136,17 @@ struct cuda_vk_uploader::impl
 
     slot* find_or_import(void* handle, unsigned long long size, int width, int height)
     {
+        // SERIALISED for the whole routine, not per call. This evicts (destroy) and then
+        // imports, and `cuda_gl_interop_lock.h` covers both halves of that pair -- an
+        // asynchronous swap elsewhere in the process puts its import beside this destroy, and
+        // the driver interop layer is not thread-safe across the two even for distinct
+        // resources. Held across the mapped-array calls too, because the failure paths below
+        // destroy the memory they just imported.
+        //
+        // NOT one-time setup: this is a CACHE MISS path. The mixer's attachment pool rotates
+        // and is rebuilt on a raster change, so imports and evictions recur for the life of
+        // the consumer -- which is what makes the lock load-bearing rather than belt-and-braces.
+        std::lock_guard<std::mutex> interop_lk(caspar::cuda_gl_interop_mutex());
         for (auto& s : slots_) {
             if (s.array && s.handle == handle && s.width == width && s.height == height)
                 return &s;

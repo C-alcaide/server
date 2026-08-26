@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 namespace caspar { namespace accelerator { namespace vulkan {
@@ -247,6 +248,33 @@ struct alignas(16) uniform_block
     int32_t  _pad_to_16[3] = {0, 0, 0};     // 884..895
     // Total: 896 bytes (56 x 16)
 };
+
+// ── Layout guards ───────────────────────────────────────────────────────────
+//
+// THE OFFSET COMMENTS ABOVE WERE THE ONLY THING HOLDING THIS TOGETHER, and the failure they
+// guard against is silent and total rather than a wrong pixel. Measured 2026-08-21 with the
+// size at 884 instead of a multiple of 16: the Vulkan mixer logged no error, decoded normally,
+// and produced NO READBACK AT ALL -- conformance 0/4, flat-decoded 0/29, and the IMAGE consumer
+// timing out with nothing in the log. std140 rounds the block size up to 16, so `uboInfo.range
+// = sizeof(uniform_block)` then described less memory than the shader read.
+//
+// A comment cannot fail a build. These can. Insert a field in the wrong place, or forget the
+// padding, and this stops being a mystery at runtime and becomes an error at compile time.
+//
+// The three anchors are deliberate rather than exhaustive: the FIRST field pins the start, and
+// the last two pin everything after the large projection/ICVFX block -- which is where fields
+// have actually been added. A drift anywhere before them moves at least one.
+static_assert(sizeof(uniform_block) == 896,
+              "uniform_block must stay a multiple of 16 and match ParamsBlock in "
+              "fragment_shader.frag -- see the measurement in the comment above");
+static_assert(offsetof(uniform_block, color_space_index) == 0,
+              "uniform_block: first field moved; every offset comment below it is now wrong");
+static_assert(offsetof(uniform_block, ycbcr_full_range) == 876,
+              "uniform_block: a field was inserted above ycbcr_full_range without updating "
+              "the shader's ParamsBlock");
+static_assert(offsetof(uniform_block, chroma_cosited) == 880,
+              "uniform_block: a field was inserted above chroma_cosited without updating "
+              "the shader's ParamsBlock");
 
 // Bit flags for `flags` field
 enum class shader_flags : uint32_t

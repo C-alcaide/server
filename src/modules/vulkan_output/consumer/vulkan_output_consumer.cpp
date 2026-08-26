@@ -28,6 +28,7 @@
 #ifdef CASPAR_CUDA_PEER_ENABLED
 #include "../util/cuda_peer_transfer.h"
 #include <cuda_runtime.h>
+#include "../../cuda_gl_interop_lock.h"
 #endif
 #include "../util/nvapi_helpers.h"
 #include "../util/color_convert_pipeline.h"
@@ -2664,6 +2665,12 @@ class vulkan_output_consumer : public core::frame_consumer
                 // Not in cache — import this VK texture handle into CUDA
                 cudaSetDevice(cuda_vk_src_device_);
 
+                // SERIALISED across the evict-and-import that follows. This is an LRU
+                // cache, so both halves recur for the life of the consumer rather than
+                // happening once at setup, and `cuda_gl_interop_lock.h` covers the pair:
+                // another consumer's import beside this destroy is not thread-safe in the
+                // driver interop layer even for distinct resources.
+                std::lock_guard<std::mutex> interop_lk(caspar::cuda_gl_interop_mutex());
                 if (cuda_vk_import_count_ >= kMaxCudaVkImports) {
                     // Cache full — evict oldest entry
                     auto& oldest = cuda_vk_imports_[0];
@@ -2965,12 +2972,15 @@ class vulkan_output_consumer : public core::frame_consumer
         }
         cuda_d2h_active_ = false;
 
-        // Free cached CUDA imports
-        for (int i = 0; i < cuda_vk_import_count_; ++i) {
-            auto& e = cuda_vk_imports_[i];
-            if (e.mipmap) cudaFreeMipmappedArray(e.mipmap);
-            if (e.ext_mem) cudaDestroyExternalMemory(e.ext_mem);
-            e = {};
+        // Free cached CUDA imports -- the release half, under the same lock as the import.
+        {
+            std::lock_guard<std::mutex> interop_lk(caspar::cuda_gl_interop_mutex());
+            for (int i = 0; i < cuda_vk_import_count_; ++i) {
+                auto& e = cuda_vk_imports_[i];
+                if (e.mipmap) cudaFreeMipmappedArray(e.mipmap);
+                if (e.ext_mem) cudaDestroyExternalMemory(e.ext_mem);
+                e = {};
+            }
         }
         cuda_vk_import_count_ = 0;
 

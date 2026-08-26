@@ -223,9 +223,29 @@ void apply_transform_colour_values(core::image_transform& self, const core::imag
         self.qual_hue_offset  = other.qual_hue_offset;
     }
 
-    // Per-channel RGB levels
-    if (other.per_channel_levels.enable)
-        self.per_channel_levels = other.per_channel_levels;
+    // Per-channel RGB levels: intersect input range, multiply gamma, intersect output range,
+    // per channel -- the SAME rule as the master `levels` twenty lines above, and the same rule
+    // the OpenGL mixer uses.
+    //
+    // This used to assign wholesale, innermost-wins. That agrees with intersection for a SINGLE
+    // transform, because intersecting against the defaults (0, 1, gamma 1) returns the other
+    // side's values unchanged -- which is why every single-layer parity check passed. It
+    // diverges as soon as the transform is composed TWICE, e.g. a channel-level MIXER plus a
+    // layer-level one: OpenGL narrowed the range and Vulkan took only the inner value. Found by
+    // audit 2026-08-26, not by a test.
+    if (other.per_channel_levels.enable) {
+        self.per_channel_levels.enable = true;
+        auto merge_ch = [](core::rgb_levels_channel& s, const core::rgb_levels_channel& o) {
+            s.min_input  = std::max(s.min_input,  o.min_input);
+            s.max_input  = std::min(s.max_input,  o.max_input);
+            s.gamma     *= o.gamma;
+            s.min_output = std::max(s.min_output, o.min_output);
+            s.max_output = std::min(s.max_output, o.max_output);
+        };
+        merge_ch(self.per_channel_levels.r, other.per_channel_levels.r);
+        merge_ch(self.per_channel_levels.g, other.per_channel_levels.g);
+        merge_ch(self.per_channel_levels.b, other.per_channel_levels.b);
+    }
 
     // Tone curves
     if (other.curves.enable)
