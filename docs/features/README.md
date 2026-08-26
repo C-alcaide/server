@@ -1,8 +1,15 @@
 # CasparVP features — what this fork adds, and what state each part is in
 
-Everything here is **absent from upstream CasparCG**. The list was produced mechanically rather
-than from memory: module directories and registered AMCP command names diffed against
-`d:\Github\server-upstream`, so nothing stock is included and nothing fork-specific is missed.
+Everything here is **fork-specific work**: either a module upstream does not have, or an upstream
+module this fork has substantially rewritten. Produced mechanically rather than from memory —
+module directories and registered AMCP command names diffed against `d:\Github\server-upstream`.
+
+> **The second half of that sentence was added on 2026-08-27, and the omission was the point.** The
+> original rule was "absent from upstream", which is a test for a fork-only *module* and not for
+> fork-specific *work* — so it silently excluded the four heaviest divergences in the tree:
+> `ffmpeg` (**10,500** changed lines), `screen` (2,963), `decklink` (2,382) and `image` (789). The
+> folder claimed "nothing fork-specific is missed" while missing more changed code than everything
+> it covered. A mechanical criterion is only as good as the question it encodes.
 
 **Numbers, so the scale is honest:** 19 fork-only modules, **91 fork-specific AMCP commands**,
 60 documents in `docs/`, 73 harness batteries.
