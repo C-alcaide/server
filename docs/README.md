@@ -28,6 +28,24 @@ measurement four days stale.
 commits rather than from the other folders, and each claim carries its evidence. Everywhere else,
 check the date and check the source.
 
+## Reading it as one document
+
+```
+python docs/build_html.py      ->  docs/features.html
+```
+
+A single self-contained page: every `features/` document in reading order, sidebar navigation, a
+light/dark toggle, no external assets and no server. Open it from the filesystem.
+
+**It is a build output and is not committed** (`.gitignore`). The markdown is the source of truth
+because it diffs, it reviews in a pull request, and it changes in the same commit as the code it
+describes — the rule that stops documentation lagging. A committed HTML copy would be a second
+copy of every claim, which is the duplication this folder exists to remove.
+
+The build **warns loudly** if a document exists in `features/` but is missing from its reading
+order, because a new document silently absent from the manual is exactly the quiet omission the
+whole structure is meant to prevent.
+
 ## Where to start
 
 * **"What does this fork add?"** -> [features/README.md](features/README.md) - the inventory:

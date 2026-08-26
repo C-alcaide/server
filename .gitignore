@@ -64,3 +64,8 @@ __pycache__/
 
 # Per-machine Claude Code permissions, and its backups
 .claude/
+
+# Generated documentation manual — rebuild with `python docs/build_html.py`.
+# Committing it would be a second copy of every claim in docs/features/, which is the
+# duplication that folder exists to avoid.
+docs/features.html
