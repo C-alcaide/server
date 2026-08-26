@@ -148,12 +148,33 @@ Not alphabetical, and not by size. **By where defects have actually hidden**, wh
 
 ## What this folder does not yet have
 
-**Diagrams.** Five documents record one as owed and name which criterion it meets — projection
-(transform order), PREVIZ (two routes to one state), CUDA ProRes (order, and two handoff paths),
-CUDA NotchLC (a ten-step chain with a host round-trip in the middle), camera tracking (five
-alignment commands composing in an undocumented order). Two more deliberately *defer* rather than
-owe: cluster sync and replay would both illustrate timing that nothing measures, and a diagram is
-a claim like any other.
+**Diagrams — three drawn, three still owed, two deliberately deferred.**
+
+Drawn, by `docs/diagrams/generate_feature_diagrams.py`, following the palette and the
+`layout_check.Layout` conventions of the existing generators:
+
+| figure | in | why it earns one |
+| :--- | :--- | :--- |
+| `feature_codec_handoff.png` | ProRes, NotchLC, HAP | three producers hand the mixer three different things — two paths reaching one place |
+| `feature_notchlc_pipeline.png` | NotchLC | ten steps with a host round-trip at step 3; the order is the point |
+| `feature_projection_order.png` | projection and ICVFX | the chain's order is the point |
+
+**The projection figure was drawn wrong first, and that is worth recording.** An earlier draft
+guessed `LENS → CURVE → PROJECTION → DISTORTION` from the command names. The shader does neither:
+the curve is applied to the destination uv *first*, and the distortion is applied *before* the lens
+model, which is one step with the rotation rather than a separate one. Reading `shader.frag` fixed
+it. **A diagram is a claim, and a guessed order is the easiest kind to publish confidently.**
+
+`layout_check` earned its place too: it rejected overlapping panels and arrows crossing label text
+that a renderer would have drawn without complaint.
+
+Still owed: **PREVIZ** (two routes to one piece of ICVFX state) and **camera tracking** (five
+alignment commands composing in an order that is itself undocumented — so drawing it would
+probably answer that gap).
+
+Deliberately deferred: **cluster sync** and **replay**. Both would illustrate timing that nothing
+measures, and per the rule above a diagram is a claim like any other. Worth drawing once their
+first batteries exist.
 
 **An HTML build.** The markdown is the source of truth so it diffs and reviews; a sectioned HTML
 render for reading is a separate step.
