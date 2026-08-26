@@ -793,3 +793,36 @@ CasparCG can drive DMX lighting fixtures directly from video output using the **
 Multiple consumers can run on the same channel for multi-universe rigs, and ArtNet + sACN can be mixed freely.
 
 For full protocol references, fixture parameters, sampling region coordinates, worked examples, and troubleshooting, see [DMX_LIGHTING.md](../guides/DMX_LIGHTING.md).
+
+---
+
+## ICVFX — inner frustum and outer-frustum dimming
+
+**Absent from every guide until 2026-08-27**, though the commands have shipped for some time and
+`../features/projection-and-icvfx.md` carries the reference. These are the commands an LED-volume
+operator reaches for most, so their absence here was the wrong gap to have.
+
+```
+MIXER 1-1 PROJECTION_ICVFX       <enable> [inner_fov_rad] [feather] [outer_dim] [inner_dim] [dur] [tween]
+MIXER 1-1 PROJECTION_ICVFX_COLOR <ir> <ig> <ib> <or> <og> <ob> [dur] [tween]
+MIXER 1-1 PROJECTION_FRUSTUM     <frustum_h> <frustum_v> [dur] [tween]
+```
+
+**`PROJECTION_ICVFX` takes RADIANS where `PROJECTION` takes degrees.** The unit is in the parameter
+name — `inner_fov_rad` — and nowhere else in the command set. This is the single easiest mistake to
+make here.
+
+A soft-edged inner frustum with the outer wall dimmed, then an asymmetric per-channel trim:
+
+```
+MIXER 1-1 PROJECTION_ICVFX 1 0.5 0.1 0.6 1.0
+MIXER 1-1 PROJECTION_ICVFX_COLOR 0.3 1.0 0.7 1.0 0.6 0.25
+```
+
+`_COLOR` takes **inner** RGB first, then **outer** RGB.
+
+> **Set these with unequal channel values when testing.** A neutral white balance uses equal gains,
+> which are invariant under exchanging red and blue — and that is exactly how a red/blue exchange in
+> the OpenGL ICVFX gain survived until 2026-08-26. The `icvfx-parity` battery now covers the gain
+> with three distinct values per channel for this reason; the mask geometry, the feather and the
+> inner-frustum reprojection remain uncovered.

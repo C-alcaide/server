@@ -13,6 +13,15 @@ This is the best-documented and best-covered part of the fork. Detail:
 [`../guides/COLOR_GRADING.md`](../guides/COLOR_GRADING.md),
 [`../guides/HDR_GUIDE.md`](../guides/HDR_GUIDE.md),
 [`../guides/OCIO_USER_GUIDE.md`](../guides/OCIO_USER_GUIDE.md), and
+
+> **Where the 24 grading operators are documented, stated so an audit does not re-flag it.**
+> `MIXER BLUR`, `CDL`, `CDL_FILE`, `CURVES`, `EXPOSURE`, `GAIN`, `GAMUTCOMPRESS`, `GRADE`, `GRAIN`,
+> `HUECURVE`, `HUESHIFT`, `LIFT`, `LINEARSATURATION`, `LUT3D`, `MESH`, `MIDTONE`, `QUALIFIER`,
+> `RGBLEVELS`, `SHAPE`, `SHARPEN`, `SPLITTONE`, `TONEBALANCE`, `WHITEBALANCE`, `OCIO_DISPLAY` and
+> `OCIO_LOOK` are documented **in the guides, not here** — `COLOR_GRADING.md` for the chain,
+> `IMAGE_EFFECTS.md` for blur and sharpen, `MIXER_SHAPE.md` for the mask, `OCIO_USER_GUIDE.md` for
+> the OCIO pair. This document covers state, decisions and measurement; the per-operator syntax
+> lives once, in the guide that owns it. A second copy is a claim that can go stale independently.
 [`../architecture/OCIO_INTEGRATION_STUDY.md`](../architecture/OCIO_INTEGRATION_STUDY.md) — which
 the code cites by section number, so it is a live reference rather than history.
 

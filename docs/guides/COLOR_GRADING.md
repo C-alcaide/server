@@ -1191,3 +1191,52 @@ Isolate and boost the blue sky without affecting other colors:
 ```bash
 MIXER 1-10 QUALIFIER 210 30 0.2 1.0 0.3 1.0 0.1 0.2 0.3 0.0
 ```
+
+---
+
+## MIXER GRADE — windowed grading nodes (prototype)
+
+**Undocumented until 2026-08-27**, and the only fork grading command that was in no document at
+all — while `plans/GRADING_NODE_GRAPH_STUDY.md` still described it as unimplemented. It ships, on
+**both mixers**.
+
+A chain of up to **16 nodes** (index 0-15). Each node is a soft-edged **ellipse in frame space**
+with one operation, **exposure** — deliberately the narrowest surface that exercises the node pass
+and the variable-length data model end to end.
+
+```
+MIXER 1-1 GRADE NODE <n> <cx> <cy> <rx> <ry> <feather> <exposure> [<invert>]
+MIXER 1-1 GRADE CLEAR                     drop the whole chain
+MIXER 1-1 GRADE                           query
+```
+
+| parameter | meaning |
+| :--- | :--- |
+| `n` | node index, 0-15 |
+| `cx` `cy` | window centre, frame space |
+| `rx` `ry` | ellipse radii |
+| `feather` | edge softness |
+| `exposure` | the node's operation, a uniform scale |
+| `invert` | optional, `1` grades everything *outside* the window |
+
+Brighten a soft oval in the centre by one stop, then darken outside it:
+
+```
+MIXER 1-1 GRADE NODE 0 0.5 0.5 0.25 0.18 0.4 1.0
+MIXER 1-1 GRADE NODE 1 0.5 0.5 0.25 0.18 0.4 -0.5 1
+```
+
+The query returns one line per node — `index enable cx cy rx ry feather exposure invert` — or
+`DISABLED` when no chain is set.
+
+**No `DURATION`/tween, and that is deliberate.** Tweening would have to address
+`node[n].window.field`, which the tween system cannot express. Named as an open question in the
+study rather than half-built.
+
+**Prototype limitations, from the mixers' own comments.** An item with enabled nodes is routed
+through a private attachment, which changes how it meets the composite — so **the keyer, layer keys
+and non-normal blend modes are not exercised by this path**. Treat a node chain plus a blend mode as
+untested rather than supported.
+
+**No battery covers it.** Neither `grading` nor `conformance` drives `MIXER GRADE`, on either mixer,
+so the parity that the rest of this document's numbers rest on has not been established here.

@@ -1,6 +1,22 @@
 # Windowed Grading and a Node Graph in the CasparVP Mixer — Design Study
 
-**Status: study. Nothing is implemented.** Written 2026-08-17.
+**Status: study, written 2026-08-17 — and PARTLY OVERTAKEN BY THE CODE.**
+
+> **Corrected 2026-08-27.** This file said "Nothing is implemented ... There is no node graph, no
+> spatial window, and no AMCP command for either." That is no longer true and had not been for some
+> time: **`MIXER GRADE` ships on both mixers** — a 16-node chain, one soft-edged elliptical window
+> in frame space per node, one operation (exposure), with the multi-pass attachment machinery this
+> study proposed. See `AMCPCommandsImpl.cpp:3918` for the command,
+> `image_mixer.cpp::apply_grade_node` on each backend for the pass, and
+> `../guides/COLOR_GRADING.md` for the operator documentation.
+>
+> **What remains a study** is the rest: more than one operation per node, arbitrary graph topology
+> rather than a chain, window shapes other than an ellipse, and the data-model question below —
+> which the shipped prototype answers only for a fixed-size chain.
+>
+> Left in `plans/` rather than moved, because the majority of the document is still unbuilt design.
+> A plan whose status line is wrong is worse than a plan nobody reads: this one asserted the absence
+> of a command that had been accepting traffic.
 
 > There is no node graph, no spatial window, and no AMCP command for either. What exists is a
 > source-level survey of the current mixer, a design for Resolve-style windows and a true node

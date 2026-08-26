@@ -650,3 +650,19 @@ CH4 → Previz output             ←  The previz renderer itself
 - **No multi-mesh import** — Imported OBJ/GLB files are loaded as a single mesh. Scene hierarchy from the source file is not preserved.
 - **Spout texture reception not yet integrated** — The client viewport currently renders with base colours only. Live channel texture display on screen surfaces requires Spout integration (planned).
 - **Reference models are box approximations** — Built-in reference objects use simple box geometry for fast rendering, not detailed meshes.
+
+---
+
+## PREVIZ AUTOPROJECTION
+
+Ships; absent from this guide until 2026-08-27. Reference in `../features/previz.md`.
+
+```
+PREVIZ AUTOPROJECTION ...
+```
+
+`previz.md` records the part that matters and is easy to miss: **`PREVIZ` and `MIXER PROJECTION_*`
+are two routes into one ICVFX state**, so a value set through one is visible to the other. Setting
+the same quantity from both is not additive and not an error — the last write wins.
+
+**No battery drives any of the twelve `PREVIZ` commands.**

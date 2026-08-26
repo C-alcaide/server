@@ -1077,3 +1077,22 @@ VRPN uses a right-hand Y-up coordinate system. Quaternion components in the call
 - **Roll** (X): tilt rotation, positive = clockwise
 
 Position values from VRPN are in metres and are multiplied by 1000 to convert to millimetres before being stored in `camera_data`.
+
+---
+
+## WORLDALIGN and ZOOM_LUT
+
+Both ship and both were absent from this guide until 2026-08-27; the reference is in
+`../features/camera-tracking.md`.
+
+```
+TRACKING <n> WORLDALIGN ...     align the tracker's world origin to the stage's
+TRACKING <n> ZOOM_LUT ...       map the lens's raw zoom reading to a real focal length
+TRACKING <n> POSITION_SCALE ... scale incoming translation
+```
+
+**Order matters and is undocumented anywhere else.** These are three of the five alignment
+commands, and nothing in this tree records the sequence they must be applied in — treat that as an
+open question rather than an omission you can infer around.
+
+**No battery drives any of them.**
