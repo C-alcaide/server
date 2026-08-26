@@ -15,7 +15,7 @@ This is the best-documented and best-covered part of the fork. Detail:
 [`../guides/OCIO_USER_GUIDE.md`](../guides/OCIO_USER_GUIDE.md), and
 
 > **Where the 24 grading operators are documented, stated so an audit does not re-flag it.**
-> `MIXER BLUR`, `CDL`, `CDL_FILE`, `CURVES`, `EXPOSURE`, `GAIN`, `GAMUTCOMPRESS`, `GRADE`, `GRAIN`,
+> `MIXER BLUR`, `CDL`, `CDL_FILE`, `CURVES`, `EXPOSURE`, `GAIN`, `GAMUTCOMPRESS`, `GRADE_NODE`, `GRAIN`,
 > `HUECURVE`, `HUESHIFT`, `LIFT`, `LINEARSATURATION`, `LUT3D`, `MESH`, `MIDTONE`, `QUALIFIER`,
 > `RGBLEVELS`, `SHAPE`, `SHARPEN`, `SPLITTONE`, `TONEBALANCE`, `WHITEBALANCE`, `OCIO_DISPLAY` and
 > `OCIO_LOOK` are documented **in the guides, not here** — `COLOR_GRADING.md` for the chain,

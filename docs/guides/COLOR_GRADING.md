@@ -1194,20 +1194,28 @@ MIXER 1-10 QUALIFIER 210 30 0.2 1.0 0.3 1.0 0.1 0.2 0.3 0.0
 
 ---
 
-## MIXER GRADE — windowed grading nodes (prototype)
+## MIXER GRADE_NODE — windowed grading nodes (prototype)
 
 **Undocumented until 2026-08-27**, and the only fork grading command that was in no document at
-all — while `plans/GRADING_NODE_GRAPH_STUDY.md` still described it as unimplemented. It ships, on
-**both mixers**.
+all — while `../plans/GRADING_NODE_GRAPH_STUDY.md` still described it as unimplemented. It ships,
+on **both mixers**.
+
+> **Renamed from `MIXER GRADE` on 2026-08-27.** The old name sat among `MIXER LIFT`, `GAIN`,
+> `MIDTONE`, `CDL` and `WHITEBALANCE`, so it read as *the* grading command when it is one
+> prototype feature among twenty-odd operators. `GRADE_NODE` matches the fork's underscore
+> convention (`CDL_FILE`, `PROJECTION_BLEND_MASK`, `ZOOM_LUT`) and the code's own vocabulary
+> (`grade_node`, `apply_grade_node`). **No alias was kept** — an alias would preserve exactly the
+> ambiguity the rename removes. It was safe to do now because the feature is a prototype whose
+> only consumer was one battery.
 
 A chain of up to **16 nodes** (index 0-15). Each node is a soft-edged **ellipse in frame space**
 with one operation, **exposure** — deliberately the narrowest surface that exercises the node pass
 and the variable-length data model end to end.
 
 ```
-MIXER 1-1 GRADE NODE <n> <cx> <cy> <rx> <ry> <feather> <exposure> [<invert>]
-MIXER 1-1 GRADE CLEAR                     drop the whole chain
-MIXER 1-1 GRADE                           query
+MIXER 1-1 GRADE_NODE NODE <n> <cx> <cy> <rx> <ry> <feather> <exposure> [<invert>]
+MIXER 1-1 GRADE_NODE CLEAR                     drop the whole chain
+MIXER 1-1 GRADE_NODE                           query
 ```
 
 | parameter | meaning |
@@ -1222,8 +1230,8 @@ MIXER 1-1 GRADE                           query
 Brighten a soft oval in the centre by one stop, then darken outside it:
 
 ```
-MIXER 1-1 GRADE NODE 0 0.5 0.5 0.25 0.18 0.4 1.0
-MIXER 1-1 GRADE NODE 1 0.5 0.5 0.25 0.18 0.4 -0.5 1
+MIXER 1-1 GRADE_NODE NODE 0 0.5 0.5 0.25 0.18 0.4 1.0
+MIXER 1-1 GRADE_NODE NODE 1 0.5 0.5 0.25 0.18 0.4 -0.5 1
 ```
 
 The query returns one line per node — `index enable cx cy rx ry feather exposure invert` — or
@@ -1238,5 +1246,25 @@ through a private attachment, which changes how it meets the composite — so **
 and non-normal blend modes are not exercised by this path**. Treat a node chain plus a blend mode as
 untested rather than supported.
 
-**No battery covers it.** Neither `grading` nor `conformance` drives `MIXER GRADE`, on either mixer,
-so the parity that the rest of this document's numbers rest on has not been established here.
+**Coverage:** the `grade-window` battery, which is spatial by construction rather than a flat-patch
+check — a flat patch is invariant under any mask covering it, so a single-patch battery could not
+tell a correct window from no window at all. It samples inside and outside and asserts the
+*relationship*: `inside ≈ outside × exposure`, `outside ≈ base` (the window does not leak), plus a
+separation control and a restore-after-`CLEAR` check.
+
+Measured 2026-08-27 after the rename, on both mixers:
+
+| | OGL | Vulkan | gate |
+| :--- | ---: | ---: | ---: |
+| worst inside error | 0.50 LSB | 0.50 LSB | 1.0 |
+| worst leak outside | 0.00 LSB | 0.00 LSB | 1.0 |
+| least separation | 77.0 LSB | 77.0 LSB | ≥ 8.0 |
+| worst restore after `CLEAR` | 0.00 LSB | 0.00 LSB | 1.0 |
+
+**The two backends returned identical figures**, which is a parity result the battery does not
+itself assert — it runs one mixer at a time and compares each to a model, not to the other.
+
+**Not covered**, in the battery's own words: window shape beyond a centred ellipse, the feather
+profile itself (both samples sit in flat regions, so the falloff is untested), source-UV windows,
+multiple nodes at once, and every operation but exposure. Add `invert` and the blend-mode
+interaction above to that list.

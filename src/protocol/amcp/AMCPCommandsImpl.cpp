@@ -3915,15 +3915,23 @@ std::future<std::wstring> mixer_qualifier_command(command_context& ctx)
     return make_ready_future<std::wstring>(L"202 MIXER OK\r\n");
 }
 
-// MIXER GRADE — windowed grading node chain (PROTOTYPE)
+// MIXER GRADE_NODE — windowed grading node chain (PROTOTYPE)
+//
+// NAMED `GRADE_NODE` AND NOT `GRADE`. It was `MIXER GRADE` until 2026-08-27, sitting in the
+// same namespace as MIXER LIFT / GAIN / MIDTONE / CDL / WHITEBALANCE -- so it read as "the
+// grading command" when it is one specific, prototype-stage feature among twenty-odd grading
+// operators. Renamed while it is still a prototype and its only consumer is one battery;
+// the underscore matches the fork's own convention (CDL_FILE, PROJECTION_BLEND_MASK,
+// ZOOM_LUT) and the C++ vocabulary underneath it (grade_node, grade_nodes, apply_grade_node).
+// No alias is kept: an alias would preserve exactly the ambiguity the rename removes.
 //
 // One window shape (soft-edged ellipse in FRAME space) and one operation (exposure).
 // The narrowest surface that exercises the node PASS and the variable-length data model
 // end to end; design study in docs/plans/GRADING_NODE_GRAPH_STUDY.md.
 //
-//   MIXER <ch>-<layer> GRADE NODE <n> <cx> <cy> <rx> <ry> <feather> <exposure> [<invert>]
-//   MIXER <ch>-<layer> GRADE CLEAR    — drop the whole chain
-//   MIXER <ch>-<layer> GRADE          — query
+//   MIXER <ch>-<layer> GRADE_NODE NODE <n> <cx> <cy> <rx> <ry> <feather> <exposure> [<invert>]
+//   MIXER <ch>-<layer> GRADE_NODE CLEAR    — drop the whole chain
+//   MIXER <ch>-<layer> GRADE_NODE          — query
 //
 // No DURATION/TWEEN. Tweening would have to address node[n].window.field, which the
 // tween system cannot express -- named as an open question in the study rather than
@@ -3966,12 +3974,12 @@ std::future<std::wstring> mixer_grade_command(command_context& ctx)
 
     if (!boost::iequals(ctx.parameters.at(0), L"NODE"))
         CASPAR_THROW_EXCEPTION(user_error() << msg_info(
-                                   "MIXER GRADE NODE <n> cx cy rx ry feather exposure [invert] | CLEAR"));
+                                   "MIXER GRADE_NODE NODE <n> cx cy rx ry feather exposure [invert] | CLEAR"));
 
-    grade_require(ctx, 8, L"MIXER GRADE NODE <n> cx cy rx ry feather exposure [invert]");
+    grade_require(ctx, 8, L"MIXER GRADE_NODE NODE <n> cx cy rx ry feather exposure [invert]");
     const int index = std::stoi(ctx.parameters.at(1));
     if (index < 0 || index > 15)
-        CASPAR_THROW_EXCEPTION(user_error() << msg_info("MIXER GRADE node index must be 0-15"));
+        CASPAR_THROW_EXCEPTION(user_error() << msg_info("MIXER GRADE_NODE node index must be 0-15"));
 
     const double cx      = grade_param(ctx.parameters.at(2), core::grade_limits::unit, L"centre x");
     const double cy      = grade_param(ctx.parameters.at(3), core::grade_limits::unit, L"centre y");
@@ -5595,7 +5603,7 @@ void register_commands(std::shared_ptr<amcp_command_repository_wrapper>& repo)
     repo->register_channel_command(L"Mixer Commands", L"MIXER SHARPEN",      mixer_sharpen_command,      0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER GRAIN",        mixer_grain_command,        0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER QUALIFIER",    mixer_qualifier_command,    0);
-    repo->register_channel_command(L"Mixer Commands", L"MIXER GRADE",        mixer_grade_command,        0);
+    repo->register_channel_command(L"Mixer Commands", L"MIXER GRADE_NODE",   mixer_grade_command,        0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER RGBLEVELS",    mixer_rgblevels_command,    0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER CURVES",       mixer_curves_command,       0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER VOLUME",      mixer_volume_command,       0);
