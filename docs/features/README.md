@@ -4,8 +4,15 @@ Everything here is **absent from upstream CasparCG**. The list was produced mech
 than from memory: module directories and registered AMCP command names diffed against
 `d:\Github\server-upstream`, so nothing stock is included and nothing fork-specific is missed.
 
-**Numbers, so the scale is honest:** 19 fork-only modules, **58 fork-specific AMCP commands**,
+**Numbers, so the scale is honest:** 19 fork-only modules, **91 fork-specific AMCP commands**,
 60 documents in `docs/`, 73 harness batteries.
+
+> **That command count was 58 until 2026-08-26, and the correction is instructive.** The first
+> count scanned only `AMCPCommandsImpl.cpp` and missed every command a MODULE registers for
+> itself -- tracking (18), keyframes (8), cluster (4), GStreamer (2), Vulkan output (1). A 36 %
+> undercount in the one document whose job is to be the inventory. Counted now across all of
+> `src/**/*.cpp` and diffed against upstream's own registrations, which is the only way that
+> holds as modules come and go.
 
 ---
 
@@ -74,7 +81,7 @@ nothing drove it. Undocumented and untested proved to be the same gap seen from 
 | **Projection warp, blend, curve, distortion, frustum, lens, offset** | 10 | `geometry`, `blend-mask`, `calibration`, `venue-test` | **partial** | **[projection-and-icvfx.md](projection-and-icvfx.md)** |
 | **ICVFX inner/outer frustum** | 2 | `icvfx-parity` (gain only) | **partial** | **[projection-and-icvfx.md](projection-and-icvfx.md)** |
 | **PREVIZ 3D module** | 13 | **none** | **shipped, unmeasured** | **[previz.md](previz.md)** |
-| Camera tracking | — | none | shipped, unmeasured | `CAMERA_TRACKING.md` |
+| **Camera tracking** | **18** | **none** | shipped, unmeasured | **[camera-tracking.md](camera-tracking.md)** |
 | Projection calibration | 1 | `calibration` | shipped | `PROJECTION_CALIBRATION.md` |
 
 ### GPU pipeline
@@ -98,8 +105,8 @@ nothing drove it. Undocumented and untested proved to be the same gap seen from 
 | :--- | ---: | :--- | :--- | :--- |
 | **DMX / Art-Net / sACN** | — | `dmx` | shipped | **[dmx-sacn-artnet.md](dmx-sacn-artnet.md)** |
 | **LTC timecode** | 2 | **none** | shipped, unmeasured | **[ltc-timecode.md](ltc-timecode.md)** |
-| Cluster sync | — | none | shipped, unmeasured | `CLUSTER_SYNC.md` |
-| Keyframes | — | none | shipped, unmeasured | `KEYFRAMES.md` |
+| **Cluster sync** | 4 | **none** | shipped, unmeasured | **[cluster-sync.md](cluster-sync.md)** |
+| **Keyframes** | 8 | **none** | shipped, unmeasured | **[keyframes.md](keyframes.md)** |
 | PortAudio | 1 | none | shipped, unmeasured | `PORTAUDIO_MODULE.md` |
 | Replay | — | none | shipped, unmeasured | — |
 | AMF / PRINT RAW | 2 | `amf` | shipped | — |
@@ -123,10 +130,15 @@ Not alphabetical, and not by size. **By where defects have actually hidden**, wh
    hardcoded `25` and a question mark in the comment; the Spout producer accepts three different
    syntaxes for the same thing; and the fork's three GPU codec producers use three *different*
    mixer-handoff strategies, each for a defensible reason and none of them the house style.
-5. **Keyframes, cluster sync, replay, remotewall, PortAudio, camera tracking, ISF/OpenFX** — these
-   have a guide already, so they need a state-and-coverage summary and a pointer, not a rewrite.
-6. **Vulkan output consumer, GStreamer, Vulkan mixer, grading, OCIO** — large, well documented
+5. **Camera tracking, keyframes, cluster sync** — written. All three register their own AMCP
+   commands, which is how the inventory came to be 36 % short before this batch. Camera tracking
+   turned out to be the **second-largest command family in the fork** (18) with no coverage at all,
+   and three of its commands (`POSITION_SCALE`, `WORLDALIGN`, `ZOOM_LUT`) appear in no document
+   including its own guide.
+6. **Replay, remotewall, PortAudio, ISF/OpenFX** — have a guide, need a state summary. Remaining.
+7. **Vulkan output consumer, GStreamer, Vulkan mixer, grading, OCIO** — large, well documented
    elsewhere, and last precisely because they are the best covered.
+
 
 ---
 

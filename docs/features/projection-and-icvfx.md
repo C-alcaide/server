@@ -24,16 +24,16 @@ another document.
 
 | command | parameters | registered |
 | :--- | :--- | ---: |
-| `PROJECTION` | `yaw pitch roll fov [dur] [tween]` — degrees, converted by `DEG2RAD` | 5567 |
-| `PROJECTION_OFFSET` | `offset_x offset_y [dur] [tween]` | 5568 |
-| `PROJECTION_CURVE` | `CYLINDER\|SPHERE\|FISHEYE arc_deg [arc_v_deg] [eye_distance] [dur] [tween]` | 5569 |
-| `PROJECTION_LENS` | `CYLINDER\|SPHERE\|FISHEYE` — the *source* lens | 5570 |
-| `PROJECTION_ICVFX` | `enable [inner_fov_rad] [feather] [outer_dim] [inner_dim] [dur] [tween]` | 5571 |
-| `PROJECTION_ICVFX_COLOR` | `ir ig ib or og ob [dur] [tween]` | 5572 |
-| `PROJECTION_FRUSTUM` | `frustum_h frustum_v [dur] [tween]` | 5573 |
-| `PROJECTION_DISTORTION` | `k1 k2 k3 [p1 p2] [dur] [tween]` — Brown–Conrady | 5574 |
-| `PROJECTION_BLEND` | `left right [top] [bottom] [gamma] [dur] [tween]` | 5575 |
-| `PROJECTION_BLEND_MASK` | `<png path>` \| `NONE` \| *(empty = query)* | 5576 |
+| `MIXER PROJECTION` | `yaw pitch roll fov [dur] [tween]` — degrees, converted by `DEG2RAD` | 5567 |
+| `MIXER PROJECTION_OFFSET` | `offset_x offset_y [dur] [tween]` | 5568 |
+| `MIXER PROJECTION_CURVE` | `CYLINDER\|SPHERE\|FISHEYE arc_deg [arc_v_deg] [eye_distance] [dur] [tween]` | 5569 |
+| `MIXER PROJECTION_LENS` | `CYLINDER\|SPHERE\|FISHEYE` — the *source* lens | 5570 |
+| `MIXER PROJECTION_ICVFX` | `enable [inner_fov_rad] [feather] [outer_dim] [inner_dim] [dur] [tween]` | 5571 |
+| `MIXER PROJECTION_ICVFX_COLOR` | `ir ig ib or og ob [dur] [tween]` | 5572 |
+| `MIXER PROJECTION_FRUSTUM` | `frustum_h frustum_v [dur] [tween]` | 5573 |
+| `MIXER PROJECTION_DISTORTION` | `k1 k2 k3 [p1 p2] [dur] [tween]` — Brown–Conrady | 5574 |
+| `MIXER PROJECTION_BLEND` | `left right [top] [bottom] [gamma] [dur] [tween]` | 5575 |
+| `MIXER PROJECTION_BLEND_MASK` | `<png path>` \| `NONE` \| *(empty = query)* | 5576 |
 
 **Three details that surprise people, all verified:**
 
