@@ -122,8 +122,8 @@ that single readback is unavoidable for either mixer; the difference is everythi
   DeckLink consumer imports the mixer's VK texture and **packs v210/BGRA in a GPU compute shader**,
   reading back only the packed buffer once. With the Vulkan accelerator the core skips the full‑frame
   host readback entirely (`needs_cpu_frame_data() == false`). See
-  [vk_readback_strategy.cpp](src/modules/decklink/consumer/vk_readback_strategy.cpp) /
-  [cuda_vk_strategy.cpp](src/modules/decklink/consumer/cuda_vk_strategy.cpp).
+  [vk_readback_strategy.cpp](../../src/modules/decklink/consumer/vk_readback_strategy.cpp) /
+  [cuda_vk_strategy.cpp](../../src/modules/decklink/consumer/cuda_vk_strategy.cpp).
 - **OpenGL mixer:** adds a GPU→CPU→GPU round trip on wall ingest *and* a full‑frame CPU readback with
   CPU‑side v210 packing at the consumer.
 

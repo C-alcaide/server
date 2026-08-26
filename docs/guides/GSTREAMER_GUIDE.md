@@ -51,7 +51,7 @@ is optional reading.
 
 ## 2. The one idea you need: a pipeline is a graph
 
-![A GStreamer pipeline is a graph of elements joined by pads](images/gstreamer_pipeline_anatomy.png)
+![A GStreamer pipeline is a graph of elements joined by pads](../images/gstreamer_pipeline_anatomy.png)
 
 FFmpeg gives you **one program with flags**. You describe the *result* — input here, codec
 there, output there — and FFmpeg works out the middle.
@@ -167,7 +167,7 @@ harness tests this module, precisely because a fault the two ends share cannot h
 
 ## 5. Where CasparCG joins in
 
-![Three routes from a decoder to the CasparCG mixer](images/gstreamer_caspar_routes.png)
+![Three routes from a decoder to the CasparCG mixer](../images/gstreamer_caspar_routes.png)
 
 You give CasparCG **everything except the sink**. It appends the sink itself:
 

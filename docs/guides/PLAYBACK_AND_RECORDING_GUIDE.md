@@ -27,7 +27,7 @@ Vulkan when it needed OpenGL. The server always says so in its log. §7 is how t
 
 ## 1. Three different "how many" questions
 
-![The three how-many questions: N playout channels, N ISO recordings, and several outputs sharing one channel's frame budget](images/recording_three_questions.png)
+![The three how-many questions: N playout channels, N ISO recordings, and several outputs sharing one channel's frame budget](../images/recording_three_questions.png)
 
 These get confused constantly, and the numbers are not interchangeable.
 
@@ -49,7 +49,7 @@ one channel is not necessarily the one that reaches furthest.
 
 ---
 
-![Which decode and encode routes touch host memory, and which never leave the GPU](images/recording_host_memory.png)
+![Which decode and encode routes touch host memory, and which never leave the GPU](../images/recording_host_memory.png)
 
 ## 2. Playback: the decode routes
 
@@ -72,7 +72,7 @@ Folding them together would let a fault in one switch off the other.
 
 ### The exact path each one takes
 
-![The FFmpeg decode routes as pipelines, step by step](images/recording_decode_paths.png)
+![The FFmpeg decode routes as pipelines, step by step](../images/recording_decode_paths.png)
 
 The diagram covers the five FFmpeg routes; GStreamer has its own guide. The blocks below are the
 same paths with the exact formats and the reasons each restriction exists.
@@ -320,7 +320,7 @@ their absence costs speed rather than the recording.
 
 ### The exact path each one takes
 
-![The four encode routes as pipelines, step by step](images/recording_encode_paths.png)
+![The four encode routes as pipelines, step by step](../images/recording_encode_paths.png)
 
 **Host.** Everything that has no fast path.
 
@@ -520,7 +520,7 @@ channel is not.
 
 ### Recording — N channels, one recording each
 
-![Measured 1080p25 recording ceilings per encoder, with the rig-bounded results marked](images/recording_ceilings.png)
+![Measured 1080p25 recording ceilings per encoder, with the rig-bounded results marked](../images/recording_ceilings.png)
 
 **Re-measured 2026-08-24, and the previous version of this table was wrong.** It gated on the
 channel's *late-frame* count, which on a recording-only channel measures jitter rather than
@@ -692,7 +692,7 @@ double-unref of the host-mapped packet. **Both are fixed in the patched build**:
 (0.99×), with field order signalled correctly. Written up in
 `docs/upstream/prores_ks_vulkan_qscale_corruption.md`.
 
-![Interlaced recording: two channel ticks become one field-coded frame](images/recording_field_pairing.png)
+![Interlaced recording: two channel ticks become one field-coded frame](../images/recording_field_pairing.png)
 
 **And the FILE consumer now pairs fields for you, so `+ildct` is not something you ask for.**
 An interlaced channel ticks at field rate: 50 full-height frames a second. The consumer holds
@@ -1027,7 +1027,7 @@ Playback:
 
 ## 8. Which path for which job
 
-![Which recording path to use, starting from the mixer and channel depth you have](images/recording_which_path.png)
+![Which recording path to use, starting from the mixer and channel depth you have](../images/recording_which_path.png)
 
 ### If the channel runs the Vulkan mixer
 

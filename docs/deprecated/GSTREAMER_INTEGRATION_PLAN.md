@@ -80,7 +80,7 @@ Three separate motives, in increasing order of how well they are established:
 machine and user PATH before and after. This is deliberate and load-bearing: a global PATH
 entry would put GStreamer's FFmpeg on the DLL search path of every process on the box,
 `casparcg.exe` included. The module must locate GStreamer by explicit path — the pattern
-[`newtek/util/ndi.cpp`](../src/modules/newtek/util/ndi.cpp) already uses for the NDI SDK.
+[`newtek/util/ndi.cpp`](../../src/modules/newtek/util/ndi.cpp) already uses for the NDI SDK.
 
 The installer was checked against its published SHA256 before being run
 (`059251444d1267b486eba390b18d25fed87e10315e72f757ec6c7e912fa746b5`).
@@ -238,7 +238,7 @@ renaming, no helper process and no Cerbero rebuild.
 This is also not a detour: the CasparCG dependency mirror **already hosts**
 `ffmpeg-8.0.1-full_build-shared.7z` and `ffmpeg-8.1.2-full_build-shared.7z` under the
 `ffmpeg` release tag, next to the `ffmpeg-7.0.2-full_build-shared.7z` that
-[`Bootstrap_Windows.cmake:81`](../src/CMakeModules/Bootstrap_Windows.cmake#L81) currently
+[`Bootstrap_Windows.cmake:81`](../../src/CMakeModules/Bootstrap_Windows.cmake#L81) currently
 pins. The packages exist; only the pin and the API migration are missing.
 
 **Cost — investigated 2026-08-17, and smaller than this section originally claimed.** See
@@ -247,8 +247,8 @@ removed in the 8.x cycle, CasparVP references **none**, and the two that would h
 already carry version-guarded dual paths — one of them gated on `LIBAVCODEC_VERSION_MAJOR
 < 62`, i.e. the FFmpeg 8 branch is already written. The real risk is not the API but a
 **swscale engine rewrite**, confined to two call sites
-([`image_converter.cpp`](../src/modules/image/util/image_converter.cpp) and
-[`spout_consumer.cpp`](../src/modules/spout/consumer/spout_consumer.cpp)), neither of which
+([`image_converter.cpp`](../../src/modules/image/util/image_converter.cpp) and
+[`spout_consumer.cpp`](../../src/modules/spout/consumer/spout_consumer.cpp)), neither of which
 is in the 1 LSB path — which also means no existing battery can detect a regression there.
 
 This is no longer the largest unknown in the plan. It also carries gains worth having on
@@ -344,7 +344,7 @@ GStreamer's 14.8, and `avfilter` 39.5 MB against 0.2 — a GPL build with `--ena
 --enable-libx265 --enable-libsrt --enable-nvenc --enable-nvdec --enable-cuda-llvm` across 90
 configure flags, versus a much smaller one. Muxer/demuxer/codec breadth, the file-playback
 semantics `SEEKABLE`/`LOOP`/`PINGPONG`/`SPEED` in
-[`ffmpeg_producer.cpp`](../src/modules/ffmpeg/producer/ffmpeg_producer.cpp) are built on,
+[`ffmpeg_producer.cpp`](../../src/modules/ffmpeg/producer/ffmpeg_producer.cpp) are built on,
 and the existing GPU-direct NVENC consumer all argue for FFmpeg keeping files and encoding.
 
 *(GStreamer's own FFmpeg configure line could not be recovered — no flag strings are present
@@ -379,8 +379,8 @@ mixing into it.
 
 Contrast this with FFmpeg, where a new codec means rebuilding FFmpeg and replacing
 `avcodec-*.dll`. That asymmetry is arguably a bigger deal than any single capability in §6: it
-is why this tree carries [`cuda_prores`](../src/modules/cuda_prores/),
-[`cuda_notchlc`](../src/modules/cuda_notchlc/) and [`hap`](../src/modules/hap/) as bespoke
+is why this tree carries [`cuda_prores`](../../src/modules/cuda_prores/),
+[`cuda_notchlc`](../../src/modules/cuda_notchlc/) and [`hap`](../../src/modules/hap/) as bespoke
 C++ modules — there was no other way in. A GStreamer module gives CasparVP its first plugin
 extension point that does not require recompiling the server.
 
@@ -404,7 +404,7 @@ Confirmed with `gst-inspect-1.0` on this install:
 native and the heavy *engines* are the external part — which is the right shape, because the
 metadata model is the stable interface and the engines are the churn.
 
-`tracking_mtd` matters here specifically: [`tracking`](../src/modules/tracking/) already
+`tracking_mtd` matters here specifically: [`tracking`](../../src/modules/tracking/) already
 exists, and analytics metadata is a documented path from detector → object identity → mixer
 transform, DMX or keyframes.
 
@@ -750,15 +750,15 @@ src/modules/gstreamer/
 
 Three wiring points that are easy to miss:
 
-1. **`casparcg_add_module_project`** in [`modules/CMakeLists.txt`](../src/modules/CMakeLists.txt)
+1. **`casparcg_add_module_project`** in [`modules/CMakeLists.txt`](../../src/modules/CMakeLists.txt)
    generates the include/init/uninit statements — see
-   [`CasparCG_Util.cmake`](../src/CMakeModules/CasparCG_Util.cmake). Nothing in the module
+   [`CasparCG_Util.cmake`](../../src/CMakeModules/CasparCG_Util.cmake). Nothing in the module
    system assumes a single media backend.
 2. **URI ownership.** `producer_factories_` is a vector tried in registration order
-   ([`frame_producer_registry.cpp:40`](../src/core/producer/frame_producer_registry.cpp#L40)),
+   ([`frame_producer_registry.cpp:40`](../../src/core/producer/frame_producer_registry.cpp#L40)),
    and the FFmpeg producer is effectively a catch-all for `://` URIs. There is precedent for
    carving one out: `has_invalid_protocol` at
-   [`ffmpeg_producer.cpp:347`](../src/modules/ffmpeg/producer/ffmpeg_producer.cpp#L347)
+   [`ffmpeg_producer.cpp:347`](../../src/modules/ffmpeg/producer/ffmpeg_producer.cpp#L347)
    exists solely to hand `ndi://` to another module. Use that explicit route rather than
    relying on `add_subdirectory` ordering.
 3. **Adapter selection.** GStreamer enumerates both GPUs on this box by name: plain
@@ -767,7 +767,7 @@ Three wiring points that are easy to miss:
    copy. See [`GPU_AFFINITY_PLAN.md`](../plans/GPU_AFFINITY_PLAN.md).
 
 The frame handoff reuses what CEF already needs:
-[`html_gpu_bridge.h`](../src/modules/html/producer/html_gpu_bridge.h) turns a shared texture
+[`html_gpu_bridge.h`](../../src/modules/html/producer/html_gpu_bridge.h) turns a shared texture
 handle into a mixer-ready `const_frame` on both backends with no host-memory round trip, and
 its interface is deliberately free of platform GPU types (`void*` handle, byte-order enum,
 rect).
@@ -797,7 +797,7 @@ is real and, if it is, names the stage that backs up.
 `d3d12fisheyedewarp` and `d3d12remap` are the most directly relevant elements to the
 projection work, and they are **D3D12**, while the mixers are OpenGL/Vulkan over D3D11
 interop. Sharing D3D12 resources into Vulkan is possible but it is a different bridge from
-the one in [`d3d11_import_bridge.h`](../src/accelerator/vulkan/util/d3d11_import_bridge.h).
+the one in [`d3d11_import_bridge.h`](../../src/accelerator/vulkan/util/d3d11_import_bridge.h).
 Unscoped.
 
 ### 9.3 Other

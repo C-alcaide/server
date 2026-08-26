@@ -62,7 +62,7 @@ Environment overrides (useful for quick tests):
 
 The producer token is **`[OFX]`** followed by the plug-in id.
 
-![OFX producer modes: filter, generator, and transition](images/ofx_modes.png)
+![OFX producer modes: filter, generator, and transition](../images/ofx_modes.png)
 
 **Filter** (wrap a source):
 ```
@@ -123,7 +123,7 @@ The host picks **CUDA → OpenGL → CPU** based on what the plug-in supports *a
 For maximum performance, match the channel accelerator to your plug-ins' GPU support (Vulkan mixer for CUDA
 plug-ins, OpenGL mixer for GL plug-ins).
 
-![How the host selects a backend: host-enable AND plug-in-advertises, then CUDA → OpenGL → CPU](images/ofx_backends.png)
+![How the host selects a backend: host-enable AND plug-in-advertises, then CUDA → OpenGL → CPU](../images/ofx_backends.png)
 
 ## 1.6 Client integration (casparcg-360-client)
 
@@ -178,7 +178,7 @@ importantly how to qualify for the **zero-copy GPU** paths.
 4. **Never crash.** The host catches faults, but repeated crashes blocklist you.
 5. **Honour premultiplication** — the host works in premultiplied alpha.
 
-![The three OFX render paths and where a plug-in's GPU support lets it skip CPU read-back](images/ofx_dataflow.png)
+![The three OFX render paths and where a plug-in's GPU support lets it skip CPU read-back](../images/ofx_dataflow.png)
 
 ## 2.3 Zero-copy OpenGL (OGL mixer)
 

@@ -134,7 +134,7 @@ flowchart TD
 Each channel tab is a vertical workspace split into a viewport/transport column
 on the left and a stack of tool panels on the right.
 
-![Channel workspace layout](images/channel_workspace.png)
+![Channel workspace layout](../images/channel_workspace.png)
 
 
 ### Media & transport
@@ -194,7 +194,7 @@ flowchart LR
 These are the same primary-grade controls you will recognise from any grading
 system — wheels, curves and CDL — wired to AMCP. The concepts are universal:
 
-![Universal colour grading controls](images/grading_controls.png)
+![Universal colour grading controls](../images/grading_controls.png)
 
 Collapsible sections, top to bottom:
 
@@ -339,7 +339,7 @@ reset-to-identity button. Sends `MIXER <ch>-<layer> PERSPECTIVE …`. For an
 *automatic* corner-pin from a camera, use the Projection calibration tab
 (section 12).
 
-![Corner-pin / keystone — mapping source corners to the screen](images/corner_pin.png)
+![Corner-pin / keystone — mapping source corners to the screen](../images/corner_pin.png)
 
 ### Projection (360° / ICVFX)
 
@@ -382,7 +382,7 @@ re-time them.
 The **interpolation** chosen on each key controls how a value travels into it.
 The common eases and a *hold* (step) are shown below; pick per key:
 
-![Keyframe interpolation and easing curves](images/easing_curves.png)
+![Keyframe interpolation and easing curves](../images/easing_curves.png)
 
 ### Worked example — a 1-second push-in with an ease
 
@@ -448,7 +448,7 @@ volume — LED walls, screens, set pieces, reference figures, and the previz
 camera — and optionally mirror it as a **server-side render** on a chosen
 channel.
 
-![Stage tab layout](images/stage_layout.png)
+![Stage tab layout](../images/stage_layout.png)
 
 ### How the scene reaches the wall
 
@@ -501,7 +501,7 @@ flowchart LR
    angle**). The computed real-world size is shown, and the mesh regenerates
    automatically.
 
-![LED screen tiling, pitch and bezel](images/led_tiling.png)
+![LED screen tiling, pitch and bezel](../images/led_tiling.png)
 
 > **Get the real-world scale right.** Pixel pitch × pixel count = physical size.
 > If a wall looks wrong next to a 1.8 m reference figure, your pitch or tile count
@@ -546,7 +546,7 @@ extension** and ambient lighting. The Stage scene supplies the wall geometry and
 the camera; a bound tracker (section 11) keeps the inner frustum locked to the
 real lens.
 
-![ICVFX inner frustum on the LED volume](images/icvfx_frustum.png)
+![ICVFX inner frustum on the LED volume](../images/icvfx_frustum.png)
 
 ### Case study — virtual set for a curved LED volume
 
@@ -595,7 +595,7 @@ real lens.
 The **Tracking** panel (per channel) binds a tracker (e.g. Stype / Mo-Sys / a
 custom UDP or OSC source) and feeds the live **Projection** panel.
 
-![Camera tracking mapped into the virtual scene](images/tracking_coords.png)
+![Camera tracking mapped into the virtual scene](../images/tracking_coords.png)
 
 ```mermaid
 flowchart LR
@@ -668,7 +668,7 @@ Under **🎬 Virtual Production → ▣ Projection**, the workflow is organised 
 progressive phases. A camera films the projected surface; the client solves a
 correction and pushes it over AMCP.
 
-![Projection calibration geometry — camera in the loop](images/projection_geometry.png)
+![Projection calibration geometry — camera in the loop](../images/projection_geometry.png)
 
 | Phase | Goal | Result applied as |
 | :--- | :--- | :--- |
@@ -900,5 +900,5 @@ python docs/diagrams/generate_diagrams.py   # writes docs/images/*.png
 ```
 
 Requires `matplotlib` and `numpy` (already used by the app). Edit
-[docs/diagrams/generate_diagrams.py](diagrams/generate_diagrams.py) to adjust a
+[docs/diagrams/generate_diagrams.py](../diagrams/generate_diagrams.py) to adjust a
 figure, then re-run and commit the updated images.

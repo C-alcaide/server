@@ -69,7 +69,7 @@ positional parameters (`type cx cy w h`).
 
 ## Shape Types
 
-![SDF shape types and gradient fills](images/shape_overlay.png)
+![SDF shape types and gradient fills](../images/shape_overlay.png)
 
 | Value | Description |
 | :--- | :--- |

@@ -42,7 +42,7 @@ rather than by hex value.
 
 This feature maps standard 2D layers onto a virtual 360° sphere, allowing for immersive panning and tilting within an equirectangular video stream. It is ideal for virtual production, dome projection, or 360° video workflows.
 
-![360° equirectangular projection onto a virtual sphere](images/equirect_projection.png)
+![360° equirectangular projection onto a virtual sphere](../images/equirect_projection.png)
 
 ### AMCP Command
 

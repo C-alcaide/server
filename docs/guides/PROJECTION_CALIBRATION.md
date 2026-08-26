@@ -52,7 +52,7 @@ computer, passes through optics and a physical surface, and comes back as
 photons — which is precisely why it can measure lens distortion, focus and screen
 curvature that no amount of inspecting the outgoing frame ever could.
 
-![The calibration loop: a pattern rendered at native resolution goes out through the projector to the physical surface, is filmed by a camera, solved in the client and sent back as MIXER commands. The embedded preview is the signal we sent and is not a measurement.](images/projection_closed_loop.png)
+![The calibration loop: a pattern rendered at native resolution goes out through the projector to the physical surface, is filmed by a camera, solved in the client and sent back as MIXER commands. The embedded preview is the signal we sent and is not a measurement.](../images/projection_closed_loop.png)
 
 Everything the calibration corrects happens on the **projector → surface** edge.
 Comparing the outgoing frame with itself, via the preview, closes no loop at all.
@@ -103,7 +103,7 @@ Each phase measures a different physical error and leaves it in a different mixe
 command, which is why they compose rather than supersede one another — a later
 phase does not re-solve what an earlier one fixed:
 
-![Each calibration phase and the mixer command it leaves its result in: Phase A corner-pin to MIXER PERSPECTIVE, Phase B distortion and blend, Phase C diagnostics which apply nothing, Phase D dense warp to MIXER MESH, Phase E multi-projector plus the per-pixel blend mask.](images/projection_phases.png)
+![Each calibration phase and the mixer command it leaves its result in: Phase A corner-pin to MIXER PERSPECTIVE, Phase B distortion and blend, Phase C diagnostics which apply nothing, Phase D dense warp to MIXER MESH, Phase E multi-projector plus the per-pixel blend mask.](../images/projection_phases.png)
 
 Phase C is the odd one out and deliberately so: it applies nothing, and exists to
 tell you whether the phase before it worked.
@@ -165,7 +165,7 @@ MIXER <ch>-<layer> MESH NONE        # clear
   **overlapping neighbour** (both projecting white). The overlap intersection
   drives the per-edge feather bands. Review then **Apply → BLEND**.
 
-![Edge blend — overlapping projector ramps summing to a uniform image](images/edge_blend.png)
+![Edge blend — overlapping projector ramps summing to a uniform image](../images/edge_blend.png)
 
 ### Auto blend-gamma fit
 

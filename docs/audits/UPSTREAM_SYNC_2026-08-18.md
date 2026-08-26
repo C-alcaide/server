@@ -553,7 +553,7 @@ signal.
   `sc[0], sc[1], sc[2]`; ours as `sc[2], sc[1], sc[0]`. That is `34aae3cb2`, which moved
   every swizzle out of the kernel into the shader. **Our shader has two
   `apply_split_tone` call sites that disagree on purpose** —
-  [`shader.frag:1979`](../src/accelerator/ogl/image/shader.frag#L1979) passes the uniform
+  [`shader.frag:1979`](../../src/accelerator/ogl/image/shader.frag#L1979) passes the uniform
   straight, `:2153` passes `.bgr`, because the first runs where the pixel is BGR and the
   second where it is RGB. A kernel-reversed uniform is correct at **both**. Upstream's
   straight-through upload would have left `:1979` unswapped on a BGR pixel and `:2153`
@@ -587,8 +587,8 @@ after-image is owed and is the next step.
 `FFMPEG_8_MIGRATION.md` §5.1 was corrected as part of this work: it claimed swscale was
 confined to two call sites with "neither in the 1 LSB path", and that `conformance` and
 `grading` "cannot detect a regression here". `convert_image_frame` has **four** callers and
-one is the **IMAGE consumer** ([`image_consumer.cpp:310`](../src/modules/image/consumer/image_consumer.cpp#L310),
-[`:333`](../src/modules/image/consumer/image_consumer.cpp#L333)), which runs it on every
+one is the **IMAGE consumer** ([`image_consumer.cpp:310`](../../src/modules/image/consumer/image_consumer.cpp#L310),
+[`:333`](../../src/modules/image/consumer/image_consumer.cpp#L333)), which runs it on every
 captured frame and takes the `SWS_ACCURATE_RND | SWS_FULL_CHR_H_INT` branch at 16-bit. The
 swscale rewrite is therefore *inside* the tightest gates in the harness, not outside them —
 and because it is common to every battery and to both mixers, a regression there moves

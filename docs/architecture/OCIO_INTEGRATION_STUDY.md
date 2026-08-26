@@ -163,7 +163,7 @@ tuning can close.
 `MIXER COLORSPACE` → integer enums (`input_transfer`, `output_transfer`, `input_gamut`,
 `output_gamut`) → an index into a hardcoded `k_direct[5][5][9]` table of 3x3 matrices,
 set as a `mat3` uniform, plus branch-selected transfer functions inside one shader
-([`image_kernel.cpp:505-671`](../src/accelerator/ogl/image/image_kernel.cpp#L505-L671)).
+([`image_kernel.cpp:505-671`](../../src/accelerator/ogl/image/image_kernel.cpp#L505-L671)).
 
 Everything colour is expressed as *uniforms into one fixed program*. OCIO does not
 produce a matrix and an enum; it produces **source code**. That mismatch is the whole
@@ -171,11 +171,11 @@ integration problem, and §4.4 is the answer to it.
 
 ### 3.2 Blocker A — one process-wide shader singleton
 
-[`image_shader.cpp:34-63`](../src/accelerator/ogl/image/image_shader.cpp#L34-L63): a
+[`image_shader.cpp:34-63`](../../src/accelerator/ogl/image/image_shader.cpp#L34-L63): a
 `std::weak_ptr<shader> g_shader` behind a mutex, compiled once from the build-time
 embedded source and shared by every channel and layer in the process. The Vulkan side is
 the same idea one step earlier — `glslc` runs at **build time**
-([`accelerator/CMakeLists.txt:83-98`](../src/accelerator/CMakeLists.txt#L83-L98)) and the
+([`accelerator/CMakeLists.txt:83-98`](../../src/accelerator/CMakeLists.txt#L83-L98)) and the
 SPIR-V is baked in.
 
 OCIO requires *different shader text per transform*. This must become a keyed cache
@@ -186,9 +186,9 @@ requirement.
 ### 3.3 Blocker B — render targets are normalized integer on both mixers
 
 * OGL: `GL_RGBA8` / `GL_RGBA16` only —
-  [`texture.cpp:35`](../src/accelerator/ogl/util/texture.cpp#L35)
+  [`texture.cpp:35`](../../src/accelerator/ogl/util/texture.cpp#L35)
 * Vulkan: `eR8G8B8A8Unorm` / `eR16G16B16A16Unorm`, with one pipeline pre-created per depth
-  — [`device.cpp:542-543`](../src/accelerator/vulkan/util/device.cpp#L542-L543)
+  — [`device.cpp:542-543`](../../src/accelerator/vulkan/util/device.cpp#L542-L543)
 
 `COLOR_GRADING.md:558-561` already documents the consequence: *"Inputs strictly clip at
 1.0… Super-white and negative values in the source are lost… Do not use Linear EXR or
@@ -204,9 +204,9 @@ precondition** (§4.3).
 
 * **3D LUT texture plumbing, both mixers.** OGL creates a `GL_TEXTURE_3D` with
   `GL_RGB32F` and re-uploads when the data pointer changes
-  ([`image_kernel.cpp:900-904`](../src/accelerator/ogl/image/image_kernel.cpp#L900-L904));
+  ([`image_kernel.cpp:900-904`](../../src/accelerator/ogl/image/image_kernel.cpp#L900-L904));
   Vulkan has `eR32G32B32A32Sfloat` LUT images
-  ([`image_kernel.cpp:743-799`](../src/accelerator/vulkan/image/image_kernel.cpp#L743-L799)).
+  ([`image_kernel.cpp:743-799`](../../src/accelerator/vulkan/image/image_kernel.cpp#L743-L799)).
   OCIO's `get3DTexture()` / `getTexture()` map onto this almost directly. The
   upload-on-change discipline is already the right one.
 * **Per-format pipeline construction on Vulkan** (`device.cpp:542-543`) makes adding a
@@ -229,7 +229,7 @@ pixel.** Every per-frame cost is a uniform update. If a design puts OCIO anywher
 ### 4.2 The insertion points are already carved out — the working space is ACEScg
 
 The single most important structural fact, and it was not obvious until the shader was read
-directly: [`shader.frag:106`](../src/accelerator/ogl/image/shader.frag#L106) is
+directly: [`shader.frag:106`](../../src/accelerator/ogl/image/shader.frag#L106) is
 
 ```glsl
 uniform mat3  input_to_working;  // input gamut -> ACEScg (AP1)
@@ -263,9 +263,9 @@ either mixer today (see §7 Q2 for whether it belongs to the channel or the cons
 #### 4.3.1 Scope: five allocation sites, and `depth_` stops being a depth
 
 Every intermediate in the OGL mixer is created at the channel's `depth_`
-(`bit8`/`bit10`/`bit12`/`bit16`, [`bit_depth.h`](../src/common/bit_depth.h)):
+(`bit8`/`bit10`/`bit12`/`bit16`, [`bit_depth.h`](../../src/common/bit_depth.h)):
 
-| texture | when allocated | [`image_mixer.cpp`](../src/accelerator/ogl/image/image_mixer.cpp) |
+| texture | when allocated | [`image_mixer.cpp`](../../src/accelerator/ogl/image/image_mixer.cpp) |
 | :--- | :--- | :--- |
 | `target_texture` | always — the channel composite | `:259` |
 | `layer_texture` | any layer with a non-normal blend mode | `:370` |
@@ -274,13 +274,13 @@ Every intermediate in the OGL mixer is created at the channel's `depth_`
 | `cal_texture` | LED calibration LUT, final full-screen pass | `:264` |
 
 …plus the Vulkan equivalents and its per-format pipelines
-([`device.cpp:542-543`](../src/accelerator/vulkan/util/device.cpp#L542-L543)).
+([`device.cpp:542-543`](../../src/accelerator/vulkan/util/device.cpp#L542-L543)).
 
 So the change is not "add one internal format". It is that **`depth_` stops being a bit
 depth and becomes a pixel format** (`unorm8` / `unorm16` / `fp16` / `fp32`), threaded
 through both mixers, both accelerators' texture allocators, and the consumer readback
 paths that assume 1 or 2 bytes per component
-([`image_mixer.cpp:836`](../src/accelerator/ogl/image/image_mixer.cpp#L836)).
+([`image_mixer.cpp:836`](../../src/accelerator/ogl/image/image_mixer.cpp#L836)).
 
 #### 4.3.2 What this does **not** fix — do not justify it on grading accuracy
 
@@ -655,7 +655,7 @@ the command; the client's job is to make invalid input unreachable, not to be th
 CVE-2026-42450.
 
 *Investigation says the opposite.* The tree parses `.cube` itself, at
-[`AMCPCommandsImpl.cpp:2624-2669`](../src/protocol/amcp/AMCPCommandsImpl.cpp#L2624-L2669),
+[`AMCPCommandsImpl.cpp:2624-2669`](../../src/protocol/amcp/AMCPCommandsImpl.cpp#L2624-L2669),
 and that parser is weaker than OCIO's post-2.5.2 one:
 
 * **Unbounded allocation.** `lut->size` comes straight from the file and

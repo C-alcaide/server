@@ -262,9 +262,9 @@ When a channel has an `OCIO_DISPLAY` set, the mixer's own output conversion does
 all: not the tone map, not the `working_to_output` gamut matrix, and not the `<color-transfer>`
 OETF. The generated view replaces that whole block rather than following it, in both mixers —
 `do_output_convert` is forced false in
-[image_kernel.cpp:1071-1077](../src/accelerator/ogl/image/image_kernel.cpp#L1071-L1077), and the
+[image_kernel.cpp:1071-1077](../../src/accelerator/ogl/image/image_kernel.cpp#L1071-L1077), and the
 `output_convert` flag is cleared in
-[image_kernel.cpp:1931-1933](../src/accelerator/vulkan/image/image_kernel.cpp#L1931-L1933).
+[image_kernel.cpp:1931-1933](../../src/accelerator/vulkan/image/image_kernel.cpp#L1931-L1933).
 
 So on an OCIO channel, `<auto-tone-map>` and `<display-peak-luminance>` are inert. Choose the
 tone mapping by picking the nits ladder of the view instead.
@@ -316,7 +316,7 @@ flowchart TB
 Nothing cross-checks the two. The DeckLink consumer computes its HDR mode from the channel
 fields alone — the identical `config.hdr = …` expression in both `create_consumer` and
 `create_preconfigured_consumer` in
-[decklink_consumer.cpp](../src/modules/decklink/consumer/decklink_consumer.cpp), reading
+[decklink_consumer.cpp](../../src/modules/decklink/consumer/decklink_consumer.cpp), reading
 `channel_info.depth`, `config.color_space` and `config.color_transfer` and nothing else. So an
 operator can render a PQ picture and signal SDR, or the reverse, and the server will not say a
 word.

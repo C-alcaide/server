@@ -81,7 +81,7 @@ the stages that already exist:
 The input transform is the alternative front end to `MIXER COLORSPACE`. Both write the same
 stage of the chain, so **they are mutually exclusive** — see §7.
 
-![Where each OCIO command acts: MIXER OCIO per layer, OCIO_DISPLAY and OCIO_LOOK per channel after the composite, and consumer views fanning out from that composite](images/ocio_stages.png)
+![Where each OCIO command acts: MIXER OCIO per layer, OCIO_DISPLAY and OCIO_LOOK per channel after the composite, and consumer views fanning out from that composite](../images/ocio_stages.png)
 
 **Which path to use, and what it costs, is documented once** — in
 [`COLOR_GRADING.md` § Which path](COLOR_GRADING.md#which-path--the-short-version), beside the

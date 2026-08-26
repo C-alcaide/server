@@ -20,8 +20,8 @@ instantly exposes a large ecosystem of effects instead of us re-implementing eac
 - OpenFX ships a reusable **`HostSupport`** C++ library (BSD-3, GPL-compatible) that does
   most host plumbing (bundle discovery, suites, param/clip/instance lifecycle).
 - CasparCG `mutable_frame`/`const_frame` already expose **CPU-accessible pixel buffers**
-  (`image_data()` arrays in [pixel_format.h](../src/core/frame/pixel_format.h) /
-  [frame.h](../src/core/frame/frame.h)), which is exactly what the standard OFX render
+  (`image_data()` arrays in [pixel_format.h](../../src/core/frame/pixel_format.h) /
+  [frame.h](../../src/core/frame/frame.h)), which is exactly what the standard OFX render
   model needs.
 - CasparVP's existing **keyframe timeline** maps naturally onto OFX animated parameters.
 
@@ -139,17 +139,17 @@ src/modules/ofx/
 1. **Module registration** — `src/modules/CMakeLists.txt` add `add_subdirectory(ofx)`;
    the module's `CMakeLists.txt` uses `casparcg_add_module_project(ofx SOURCES ...
    INIT_FUNCTION "ofx::init")` (same pattern as
-   [artnet/CMakeLists.txt](../src/modules/artnet/CMakeLists.txt)). The generated
+   [artnet/CMakeLists.txt](../../src/modules/artnet/CMakeLists.txt)). The generated
    `included_modules.h` (via `included_modules.tmpl`) then calls `ofx::init` automatically.
 2. **`ofx::init(const core::module_dependencies&)`** registers a producer factory on
    `dependencies.producer_registry` (same as
-   [image::init](../src/modules/image/image.cpp)) and, later, AMCP commands via the
+   [image::init](../../src/modules/image/image.cpp)) and, later, AMCP commands via the
    command repo.
 3. **Frame creation** — use `frame_factory::create_frame(tag, pixel_format_desc[, depth])`
-   ([frame_factory.h](../src/core/frame/frame_factory.h)) to allocate output buffers.
+   ([frame_factory.h](../../src/core/frame/frame_factory.h)) to allocate output buffers.
 4. **Producer contract** — implement `receive_impl(video_field, nb_samples)` returning a
    `draw_frame`, plus `state()/print()/name()/is_ready()`
-   ([frame_producer.h](../src/core/producer/frame_producer.h)). Hold the source producer
+   ([frame_producer.h](../../src/core/producer/frame_producer.h)). Hold the source producer
    internally and call its `receive`.
 
 ---

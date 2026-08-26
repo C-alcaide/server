@@ -16,7 +16,7 @@ harnesses are in `CasparCG-TestRunner/vkdispatch/`.
 Not composition, not layer pulling, not the mixer's threading. Everything else
 measured under 10 % of a frame even on a channel running at half rate.
 
-![Upload cost and layer ceiling](images/pipeline/capacity.png)
+![Upload cost and layer ceiling](../images/pipeline/capacity.png)
 
 Bytes per frame per layer decide the ceiling, and they are a property of the
 **source file**, not of the server:
@@ -54,7 +54,7 @@ of a PCIe 3.0 x16 link.
 
 ## 2. What the channel does each tick
 
-![Channel tick decomposition](images/pipeline/tick_decomposition.png)
+![Channel tick decomposition](../images/pipeline/tick_decomposition.png)
 
 Four phases, all published under `tick` in `INFO <channel>`:
 
@@ -79,7 +79,7 @@ next increment of `mix` makes the channel late.
 
 ## 3. Getting the efficient producer path
 
-![Producer to mixer](images/pipeline/producer_path.png)
+![Producer to mixer](../images/pipeline/producer_path.png)
 
 Most of this is automatic now. What is worth knowing:
 
@@ -425,7 +425,7 @@ Multiply the format's bytes-per-pixel by the frame size and check it against §1
 
 ## 4. Getting the efficient recording path
 
-![Recording paths](images/pipeline/recording_paths.png)
+![Recording paths](../images/pipeline/recording_paths.png)
 
 By default a recording makes a **round trip**: the channel reads the composited
 frame back to host memory, and the encoder uploads the same pixels again. At 4K
@@ -433,7 +433,7 @@ that is about 14.8 ms of transfer per frame.
 
 GPU-direct recording removes both legs. It engages automatically:
 
-![GPU-direct gating](images/pipeline/gpudirect_gate.png)
+![GPU-direct gating](../images/pipeline/gpudirect_gate.png)
 
 ```
 ADD 1 FILE out.mp4 -vcodec h264_nvenc -b:v 60M
@@ -515,7 +515,7 @@ what the current design avoids.
 fast path requires, and compares cost, GPU block utilisation and picture. 1080p2500, ten seconds
 per round, two interleaved rounds, moving clip for cost and a still for picture.
 
-![Which recording route](images/pipeline/recording_routes.png)
+![Which recording route](../images/pipeline/recording_routes.png)
 
 **The configurations are not interchangeable, and that is the first thing to know.** NVENC
 GPU-direct copies the mixer's RGBA8 texture byte-for-byte, so it needs an **8-bit** channel. The
@@ -617,7 +617,7 @@ ADD 1 FILE out.mov -vcodec h264_vulkan
 ADD 1 FILE out.mov -vcodec hevc_vulkan
 ```
 
-![Vulkan encode gating](images/pipeline/vulkan_encode_gate.png)
+![Vulkan encode gating](../images/pipeline/vulkan_encode_gate.png)
 
 **Two requirements, and both are refusals rather than failures.** The channel must run the
 **Vulkan mixer**, and it must be **16-bit**:

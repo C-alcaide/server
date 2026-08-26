@@ -6,7 +6,7 @@ guide** (how to write/port ISF shaders that run efficiently in CasparCG).
 The ISF module adds an `[ISF]` producer that runs [Interactive Shader Format](https://isf.video)
 GLSL shaders as **generators**, **filters**, and **transitions**, rendered on the GPU.
 
-![ISF render pipeline: source acquisition, shader program, PASSES loop, final texture, and the two mixer delivery paths](images/isf_pipeline.png)
+![ISF render pipeline: source acquisition, shader program, PASSES loop, final texture, and the two mixer delivery paths](../images/isf_pipeline.png)
 
 ---
 
@@ -29,7 +29,7 @@ An optional custom vertex shader may sit next to the fragment shader with the sa
 | Filter | `PLAY 1-10 [ISF] myshader <source-producer...>` | Wraps any producer; its frame is the shader's `inputImage`. |
 | Transition | `PLAY 1-10 [ISF] myshader TRANSITION <from-source> <to-source> [frames]` | Blends `startImage`→`endImage` by `progress` over `frames` (default 25). |
 
-![The three ISF producer modes: generator, filter, and transition](images/isf_modes.png)
+![The three ISF producer modes: generator, filter, and transition](../images/isf_modes.png)
 
 Examples:
 
@@ -71,7 +71,7 @@ ISF works on **both** mixers with identical visual output. On the Vulkan mixer a
 cannot be sampled directly, so such a source passes through unfiltered (use a CPU source — clip,
 image, color — for filters/transitions under Vulkan).
 
-![Mixer delivery paths: OpenGL zero-copy texture vs Vulkan self-contained GL + CPU read-back](images/isf_mixer_paths.png)
+![Mixer delivery paths: OpenGL zero-copy texture vs Vulkan self-contained GL + CPU read-back](../images/isf_mixer_paths.png)
 
 ---
 
@@ -97,7 +97,7 @@ void main()
 }
 ```
 
-![Anatomy of an ISF file: the JSON header maps to auto-declared uniforms consumed by the GLSL body](images/isf_anatomy.png)
+![Anatomy of an ISF file: the JSON header maps to auto-declared uniforms consumed by the GLSL body](../images/isf_anatomy.png)
 
 ### 2.2 Input types
 
@@ -179,7 +179,7 @@ parentheses, and `floor/ceil/abs/sqrt/min/max/mod/pow/sin/cos/clamp`.
 `PASSINDEX` tells the shader which pass is executing. A `PERSISTENT` buffer is read as the *previous*
 frame's content while a new value is rendered, then swapped — ideal for motion trails.
 
-![Multi-pass rendering with TARGET buffers, and PERSISTENT double-buffered feedback](images/isf_passes.png)
+![Multi-pass rendering with TARGET buffers, and PERSISTENT double-buffered feedback](../images/isf_passes.png)
 
 ### 2.7 Imported images
 

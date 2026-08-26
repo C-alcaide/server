@@ -18,7 +18,7 @@ summary it left.
 | | this fork | upstream |
 | :--- | :--- | :--- |
 | Entry point | `frame_factory::gpu_device_handle()` + `gpu_device_backend()` — two virtuals **with defaults** | `frame_factory::import_d3d_texture()` — one **pure virtual** carrying a D3D type |
-| Machinery | [`html/producer/html_gpu_bridge.{h,cpp}`](../src/modules/html/producer/html_gpu_bridge.cpp) (768 lines), `ogl/util/dx_interop`, `vulkan/util/d3d11_import_bridge` | [`accelerator/d3d/{d3d_device,d3d_device_context,d3d_texture2d}`](../src/accelerator/d3d/) (~350 lines) |
+| Machinery | [`html/producer/html_gpu_bridge.{h,cpp}`](../../src/modules/html/producer/html_gpu_bridge.cpp) (768 lines), `ogl/util/dx_interop`, `vulkan/util/d3d11_import_bridge` | [`accelerator/d3d/{d3d_device,d3d_device_context,d3d_texture2d}`](../../src/accelerator/d3d/) (~350 lines) |
 | Where the work happens | the html module | the mixer |
 
 ### 1.1 The two paths, side by side
@@ -69,7 +69,7 @@ Both implementations obey that. They differ in what they pay for it:
 
 * **This fork** copies into its own staging ring, on its own D3D11 device, and waits on its
   own fence. Because the staging texture is ours, **its shared handle is created once and
-  lives for the bridge's life — so the expensive import is cached** ([`html_gpu_bridge.cpp:78-84`](../src/modules/html/producer/html_gpu_bridge.cpp#L78)).
+  lives for the bridge's life — so the expensive import is cached** ([`html_gpu_bridge.cpp:78-84`](../../src/modules/html/producer/html_gpu_bridge.cpp#L78)).
   The second copy, into a pooled mixer texture, runs on the bridge's own worker.
 * **Upstream** registers CEF's texture with GL and copies GL→GL, but does it by a
   **synchronous round trip onto the shared OGL device thread** and blocks on the resulting
@@ -103,7 +103,7 @@ unfinished:
 
 1. `html_producer.cpp`'s `OnAcceleratedPaint` wraps the call in
    `catch (...) { CASPAR_LOG_CURRENT_EXCEPTION(); }`, so the throw is swallowed and repeated.
-2. `is_gpu_shared_texture_enabled()` ([`html.cpp:386`](../src/modules/html/html.cpp#L386))
+2. `is_gpu_shared_texture_enabled()` ([`html.cpp:386`](../../src/modules/html/html.cpp#L386))
    decides whether to request shared textures from **`enable-gpu` plus a D3D device probe
    only**. It never asks which mixer is running.
 3. `src/shell/casparcg.config:6` of this fork is `<accelerator>vulkan</accelerator>`.

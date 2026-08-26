@@ -3,9 +3,16 @@
 **What this file is:** the resume point for the work done on 2026-08-14 → 16, on branch
 `feature/ocio-mixer`. Everything below is pushed.
 
-**What it is not:** the OCIO measurement record. That is
-[`OCIO_HANDOFF_2026-08-11.md`](OCIO_HANDOFF_2026-08-11.md), which holds the numbers and the
-"what is NOT verified" ledger for the whole OCIO arc. This file does not repeat it — two
+**What it is not:** the OCIO measurement record. That was `OCIO_HANDOFF_2026-08-11.md`, which
+held the numbers and the "what is NOT verified" ledger for the whole OCIO arc — and **it no
+longer exists.** It was deleted in `ea7a96c2b`, a commit whose message is entirely about the
+gamut compressor's summary table and never mentions removing 854 lines of measurements;
+`COLOR_GRADING.md` gained 22 lines in the same commit, so it did not absorb them. Recover with
+`git show ea7a96c2b^:docs/OCIO_HANDOFF_2026-08-11.md` if those numbers are needed.
+
+Left as a note rather than a repaired link, because the interesting part is not the dangling
+reference: a measurement ledger was removed as a side effect of a documentation tidy-up, and
+nothing said so. This file does not repeat it — two
 handoffs covering one thing is how the harness repo ended up with four same-dated files and
 no way to tell which was current.
 

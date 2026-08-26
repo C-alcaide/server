@@ -660,7 +660,7 @@ parallel fan-out across layers, on the premise that one producer blocking in
 Worth separating two cases first, because only one of them is a hazard:
 
 - A producer returning an **empty** frame is already harmless.
-  [layer.cpp](../src/core/producer/layer.cpp) substitutes `last_frame()`.
+  [layer.cpp](../../src/core/producer/layer.cpp) substitutes `last_frame()`.
 - A producer that **waits** — stalled read, CEF paint, a lock held by a decoder —
   delays every later layer in the loop.
 
@@ -1853,13 +1853,13 @@ Three things have to line up, and the first two are non-obvious:
 1. **A genuinely packed source.** Nothing in `media/` is one.
    `ffmpeg -i m_h264_8_prog.mp4 -t 3 -c:v rawvideo -pix_fmt uyvy422 uyvy_src.avi`.
 2. **`VF`, not `FILTER`.** `FILTER` sets the audio filter chain too
-   ([ffmpeg_producer.cpp:468](../src/modules/ffmpeg/producer/ffmpeg_producer.cpp#L468)),
+   ([ffmpeg_producer.cpp:468](../../src/modules/ffmpeg/producer/ffmpeg_producer.cpp#L468)),
    and a video `format` filter cannot link to `aresample`: *"Media type mismatch"*, and
    the producer throws.
 3. **`<auto-deinterlace>none</auto-deinterlace>`.** Even with `VF "format=uyvy422"` the
    mixer still saw `yuv422p`. `bwdif` has no packed-4:2:2 support, and the AVI does not
    declare itself progressive, so the skip-the-deinterlacer path
-   ([av_producer.cpp:2039](../src/modules/ffmpeg/producer/av_producer.cpp#L2039)) does not
+   ([av_producer.cpp:2039](../../src/modules/ffmpeg/producer/av_producer.cpp#L2039)) does not
    engage and libavfilter inserts a scale *after* the format filter. Same mechanism the
    NV12 note above describes, observed from the other side.
 

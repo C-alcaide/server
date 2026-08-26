@@ -11,25 +11,25 @@ share a mechanism but are separable, and only the first is cheap.
 ### There is no image-sequence producer
 
 Two producers touch stills, both registered in
-[`image.cpp:34-35`](../src/modules/image/image.cpp#L34-L35):
+[`image.cpp:34-35`](../../src/modules/image/image.cpp#L34-L35):
 
-* **Image Producer** — [`image_producer.cpp`](../src/modules/image/producer/image_producer.cpp)
+* **Image Producer** — [`image_producer.cpp`](../../src/modules/image/producer/image_producer.cpp)
   loads exactly one file in its constructor, builds one `draw_frame`, and `receive_impl`
-  returns that same frame forever ([`:105`](../src/modules/image/producer/image_producer.cpp#L105)).
+  returns that same frame forever ([`:105`](../../src/modules/image/producer/image_producer.cpp#L105)).
   Params: `LENGTH`, `SCALE_MODE`. It is a hold, not a sequence.
 * **Image Scroll Producer** — scrolls one oversize still. Also not a sequence.
 
 ### Why a `frame%04d.dpx` pattern cannot reach FFmpeg's `image2` demuxer
 
-Both the image producer ([`:136`](../src/modules/image/producer/image_producer.cpp#L136))
-and the ffmpeg producer ([`ffmpeg_producer.cpp:406`](../src/modules/ffmpeg/producer/ffmpeg_producer.cpp#L406))
+Both the image producer ([`:136`](../../src/modules/image/producer/image_producer.cpp#L136))
+and the ffmpeg producer ([`ffmpeg_producer.cpp:406`](../../src/modules/ffmpeg/producer/ffmpeg_producer.cpp#L406))
 resolve their filename through `find_file_within_dir_or_absolute` → `probe_path`
-([`filesystem.cpp:33-60`](../src/common/filesystem.cpp#L33-L60)), which directory-iterates
+([`filesystem.cpp:33-60`](../../src/common/filesystem.cpp#L33-L60)), which directory-iterates
 and compares case-insensitively against **real directory entries**. A pattern matches
 nothing, so `create_producer` returns `frame_producer::empty()` and AMCP answers 404.
 
 The only route that skips file resolution is the `://` branch at
-[`ffmpeg_producer.cpp:405-414`](../src/modules/ffmpeg/producer/ffmpeg_producer.cpp#L405-L414).
+[`ffmpeg_producer.cpp:405-414`](../../src/modules/ffmpeg/producer/ffmpeg_producer.cpp#L405-L414).
 It was tested to see whether a URL could smuggle a pattern through. It cannot:
 
 | URL handed to `avformat_open_input` | outcome |
@@ -43,7 +43,7 @@ The two forms that satisfy caspar's `://` test are exactly the two whose Windows
 will not open. There is no usable workaround from the client side.
 
 Separately: `.tga`, `.tiff`, `.tif`, `.jp2` sit on the ffmpeg producer's explicit
-*invalid* extension list ([`:329-330`](../src/modules/ffmpeg/producer/ffmpeg_producer.cpp#L329-L330)),
+*invalid* extension list ([`:329-330`](../../src/modules/ffmpeg/producer/ffmpeg_producer.cpp#L329-L330)),
 so they are declined by that producer on both branches — deliberately, so the image
 producer wins for stills. A sequence unlock has to account for this.
 
@@ -51,7 +51,7 @@ producer wins for stills. A sequence unlock has to account for this.
 
 `f2bc3cac0` "image: Add HDR/16-bit/BT.2020 support to image producer and consumer"
 added `.exr`, `.dpx`, `.hdr` to the accepted extensions
-([`image_loader.cpp:159-161`](../src/modules/image/util/image_loader.cpp#L159-L161)).
+([`image_loader.cpp:159-161`](../../src/modules/image/util/image_loader.cpp#L159-L161)).
 Effect: a **single** DPX or EXR frame plays and passes through the ACES chain. Sequences
 were not part of it. The rest of the fork's work in this module is output-side (16-bit
 PNG in the IMAGE consumer, path containment, Vulkan still-frame fixes).
@@ -180,7 +180,7 @@ the objection. The objections are structural:
 * **Dependency chain.** tlRender requires feather-tk, Imath, minizip-ng and
   OpenTimelineIO, and its build story is a CMake super-build that compiles all
   dependencies from source. This tree currently has *no* image-library dependency at all
-  — `find_package` appears once in [`src/CMakeLists.txt:31`](../src/CMakeLists.txt#L31),
+  — `find_package` appears once in [`src/CMakeLists.txt:31`](../../src/CMakeLists.txt#L31),
   for Git. Every new dependency must build under the MSVC **14.50-from-BuildTools** pin
   that nvcc 12.9 imposes on the whole project (see `BUILDING_WORKFLOW.md`). That cost
   recurs on every toolchain bump, not once.
@@ -273,16 +273,16 @@ is why OIIO is not recommended now. The likeliest trigger for tier 3 is DPX/EXR
 
 ### 4.0 The unlock (small)
 
-In [`ffmpeg_producer.cpp`](../src/modules/ffmpeg/producer/ffmpeg_producer.cpp):
+In [`ffmpeg_producer.cpp`](../../src/modules/ffmpeg/producer/ffmpeg_producer.cpp):
 
 1. Detect a numbered pattern (`av_filename_number_test`-style), or a directory
    containing one, **before** `find_file_within_dir_or_absolute`.
 2. On a match, skip `probe_path` and pass the pattern through to `Input` with
    `av_find_input_format("image2")` forced. The mechanism already exists —
    `PROTOCOLS_TREATED_AS_FORMATS` at
-   [`av_input.cpp:150-165`](../src/modules/ffmpeg/producer/av_input.cpp#L150-L165)
+   [`av_input.cpp:150-165`](../../src/modules/ffmpeg/producer/av_input.cpp#L150-L165)
    does exactly this shape of thing for `dshow`/`v4l2`/`iec61883`.
-3. Teach the extension gate at [`:329-333`](../src/modules/ffmpeg/producer/ffmpeg_producer.cpp#L329-L333)
+3. Teach the extension gate at [`:329-333`](../../src/modules/ffmpeg/producer/ffmpeg_producer.cpp#L329-L333)
    that `.dpx`/`.exr`/`.tif` on a *pattern* are valid even though they are declined for
    single files.
 4. A `FRAMERATE` param, because a sequence carries no frame rate of its own — `image2`
@@ -373,10 +373,10 @@ than an obstacle: **all format-specific mess stays outside the server.**
 ### 5.3 The primitives that already exist
 
 * `PLAY 1-1 clip SEEK n LENGTH m` — one EDL event with source in/out
-* `LOADBG … AUTO` ([`AMCPCommandsImpl.cpp:297`](../src/protocol/amcp/AMCPCommandsImpl.cpp#L297))
+* `LOADBG … AUTO` ([`AMCPCommandsImpl.cpp:297`](../../src/protocol/amcp/AMCPCommandsImpl.cpp#L297))
   — preloaded, frame-accurate auto-follow to the next event
-* [`transition_producer`](../src/core/producer/transition/transition_producer.cpp) /
-  [`sting_producer`](../src/core/producer/transition/sting_producer.cpp) — dissolves, stings
+* [`transition_producer`](../../src/core/producer/transition/transition_producer.cpp) /
+  [`sting_producer`](../../src/core/producer/transition/sting_producer.cpp) — dissolves, stings
 * layers + `MIXER` — the V2/V3 tracks and their opacity, geometry and grade
 
 So conforming an EDL is: parse → resolve reels to absolute paths → emit a chain of
@@ -406,7 +406,7 @@ can be iterated without a 383-target rebuild.
 **Inside the server** — a timeline producer taking that list, owning a global frame
 counter, keeping N child producers preloaded, and cutting frame-exactly. This needs
 **no new third-party dependency**:
-[`isf_producer.cpp:671-690`](../src/modules/isf/isf_producer.cpp#L671-L690) already
+[`isf_producer.cpp:671-690`](../../src/modules/isf/isf_producer.cpp#L671-L690) already
 demonstrates a producer constructing child producers through `frame_producer_registry`,
 which is the mechanism to build on.
 

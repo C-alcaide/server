@@ -127,7 +127,7 @@ is the reason the timing gate in §7 is not optional.
 
 ### 5.1 A converter that does not call swscale
 
-Add to [`src/modules/image/util/image_converter.h`](../src/modules/image/util/image_converter.h)
+Add to [`src/modules/image/util/image_converter.h`](../../src/modules/image/util/image_converter.h)
 alongside its sibling:
 
 ```cpp

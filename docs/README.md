@@ -13,6 +13,7 @@ do today.
 | **[plans/](plans/)** | proposals for work **not yet done**, and studies of approaches not taken | intent, never current state |
 | **[audits/](audits/)** | incidents, crash reports, dumps, defect post-mortems, upstream syncs, handoffs | what happened once, on a date |
 | **[deprecated/](deprecated/)** | superseded, kept for provenance | nothing - see that folder's own README |
+| **[upstream/](upstream/)**, **[swsprobe/](swsprobe/)** | defect reports written for **other projects** (FFmpeg), with their reproduction scripts | filing a bug we found, or checking whether we already did |
 | **[diagrams/](diagrams/)** | generator scripts | regenerating an image |
 | **[images/](images/)** | committed PNGs | embedding in a document |
 

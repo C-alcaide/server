@@ -123,8 +123,8 @@ All 24 removal groups: `FF_API_ALLOW_FLUSH`, `FF_API_AVCODEC_CLOSE`, `FF_API_AVF
 **Intersection with our source: empty.**
 
 `FF_API_LINK_PUBLIC` deserves a note because it looks like it should have hurt — it makes
-`AVFilterLink` members private, and both [`decklink_producer.cpp`](../src/modules/decklink/producer/decklink_producer.cpp)
-and [`ffmpeg_consumer.cpp`](../src/modules/ffmpeg/consumer/ffmpeg_consumer.cpp) drive filter
+`AVFilterLink` members private, and both [`decklink_producer.cpp`](../../src/modules/decklink/producer/decklink_producer.cpp)
+and [`ffmpeg_consumer.cpp`](../../src/modules/ffmpeg/consumer/ffmpeg_consumer.cpp) drive filter
 graphs. They are safe because they already read link properties through the accessors —
 `av_buffersink_get_w`, `av_buffersink_get_h`, `av_buffersink_get_frame_rate`,
 `av_buffersink_get_time_base`, `av_buffersink_get_colorspace`, `av_buffersink_get_ch_layout` —
@@ -134,9 +134,9 @@ rather than touching fields.
 
 | Removal | Site | State |
 | :--- | :--- | :--- |
-| `FF_API_INTERLACED_FRAME` (`AVFrame.interlaced_frame`, `.top_field_first`) | [`av_producer.cpp:1661`](../src/modules/ffmpeg/producer/av_producer.cpp#L1661), [`:1759`](../src/modules/ffmpeg/producer/av_producer.cpp#L1759), [`decklink_producer.cpp:437`](../src/modules/decklink/producer/decklink_producer.cpp#L437), [`:444`](../src/modules/decklink/producer/decklink_producer.cpp#L444) | `#if LIBAVCODEC_VERSION_MAJOR < 61` guards; the ≥61 branch already uses `AV_FRAME_FLAG_INTERLACED` / `AV_FRAME_FLAG_TOP_FIELD_FIRST` |
-| `FF_API_TICKS_PER_FRAME` (`AVCodecContext.ticks_per_frame`) | [`av_producer.cpp:1775`](../src/modules/ffmpeg/producer/av_producer.cpp#L1775) | `#if LIBAVCODEC_VERSION_MAJOR < 62` — the FFmpeg 8 branch derives ticks from `AV_CODEC_PROP_FIELDS`, and cites the upstream commit |
-| `AV_CODEC_ID_TIMECODE` (removed in 7) | [`ffmpeg_consumer.cpp:45`](../src/modules/ffmpeg/consumer/ffmpeg_consumer.cpp#L45) | guarded local sentinel |
+| `FF_API_INTERLACED_FRAME` (`AVFrame.interlaced_frame`, `.top_field_first`) | [`av_producer.cpp:1661`](../../src/modules/ffmpeg/producer/av_producer.cpp#L1661), [`:1759`](../../src/modules/ffmpeg/producer/av_producer.cpp#L1759), [`decklink_producer.cpp:437`](../../src/modules/decklink/producer/decklink_producer.cpp#L437), [`:444`](../../src/modules/decklink/producer/decklink_producer.cpp#L444) | `#if LIBAVCODEC_VERSION_MAJOR < 61` guards; the ≥61 branch already uses `AV_FRAME_FLAG_INTERLACED` / `AV_FRAME_FLAG_TOP_FIELD_FIRST` |
+| `FF_API_TICKS_PER_FRAME` (`AVCodecContext.ticks_per_frame`) | [`av_producer.cpp:1775`](../../src/modules/ffmpeg/producer/av_producer.cpp#L1775) | `#if LIBAVCODEC_VERSION_MAJOR < 62` — the FFmpeg 8 branch derives ticks from `AV_CODEC_PROP_FIELDS`, and cites the upstream commit |
+| `AV_CODEC_ID_TIMECODE` (removed in 7) | [`ffmpeg_consumer.cpp:45`](../../src/modules/ffmpeg/consumer/ffmpeg_consumer.cpp#L45) | guarded local sentinel |
 | `AV_FRAME_FLAG_KEY` | `bluefish_producer.cpp:474`, `decklink_producer.cpp:440` | already the new flag |
 
 `bluefish_producer.cpp` sets only the new flags with no guard, so it is 8.x-ready and
@@ -152,11 +152,11 @@ the FFmpeg 9 bill.
 
 | API | Sites | Replacement |
 | :--- | :--- | :--- |
-| `AVCodec.pix_fmts` | [`ffmpeg_consumer.cpp:421`](../src/modules/ffmpeg/consumer/ffmpeg_consumer.cpp#L421), `:444`, `:478` | `avcodec_get_supported_config(…, AV_CODEC_CONFIG_PIX_FORMAT, …)` |
+| `AVCodec.pix_fmts` | [`ffmpeg_consumer.cpp:421`](../../src/modules/ffmpeg/consumer/ffmpeg_consumer.cpp#L421), `:444`, `:478` | `avcodec_get_supported_config(…, AV_CODEC_CONFIG_PIX_FORMAT, …)` |
 | `AVCodec.sample_fmts` | `ffmpeg_consumer.cpp:526` | `AV_CODEC_CONFIG_SAMPLE_FORMAT` |
 | `AVCodec.supported_samplerates` | `ffmpeg_consumer.cpp:530` | `AV_CODEC_CONFIG_SAMPLE_RATE` |
 | `AVCodec.ch_layouts` | `ffmpeg_consumer.cpp:533` — already a `TODO`, commented out | `AV_CODEC_CONFIG_CHANNEL_LAYOUT` |
-| `av_init_packet` | [`decklink_producer.cpp:401`](../src/modules/decklink/producer/decklink_producer.cpp#L401) — one call | `av_packet_alloc` / zero-init |
+| `av_init_packet` | [`decklink_producer.cpp:401`](../../src/modules/decklink/producer/decklink_producer.cpp#L401) — one call | `av_packet_alloc` / zero-init |
 
 `av_stream_get_parser` (`av_producer.cpp:1784`) is **not** deprecated in 8.1 — it is a plain
 public function. No action.
@@ -189,10 +189,10 @@ callers, and one of them is the **IMAGE consumer**:
 
 | Caller | Conversion | Flags |
 | :--- | :--- | :--- |
-| [`image_consumer.cpp:310`](../src/modules/image/consumer/image_consumer.cpp#L310), [`:333`](../src/modules/image/consumer/image_consumer.cpp#L333) | mixer readback → `AV_PIX_FMT_RGBA` (8-bit) or `AV_PIX_FMT_RGBA64BE` (16-bit), per [`:221`](../src/modules/image/consumer/image_consumer.cpp#L221) | `0` / `SWS_ACCURATE_RND \| SWS_FULL_CHR_H_INT` |
-| [`image_producer.cpp:56`](../src/modules/image/producer/image_producer.cpp#L56), [`:82`](../src/modules/image/producer/image_producer.cpp#L82) | still load: `rgb24`/`bgr24` → `BGRA`; anything >8-bit or undescribable → `GBRAP16LE` | as above, by source depth |
-| [`image_scroll_producer.cpp:143`](../src/modules/image/producer/image_scroll_producer.cpp#L143) | → `BGRA` | `0` |
-| [`isf_image_load.cpp:29`](../src/modules/isf/isf_image_load.cpp#L29) | → `RGBA` | `0` |
+| [`image_consumer.cpp:310`](../../src/modules/image/consumer/image_consumer.cpp#L310), [`:333`](../../src/modules/image/consumer/image_consumer.cpp#L333) | mixer readback → `AV_PIX_FMT_RGBA` (8-bit) or `AV_PIX_FMT_RGBA64BE` (16-bit), per [`:221`](../../src/modules/image/consumer/image_consumer.cpp#L221) | `0` / `SWS_ACCURATE_RND \| SWS_FULL_CHR_H_INT` |
+| [`image_producer.cpp:56`](../../src/modules/image/producer/image_producer.cpp#L56), [`:82`](../../src/modules/image/producer/image_producer.cpp#L82) | still load: `rgb24`/`bgr24` → `BGRA`; anything >8-bit or undescribable → `GBRAP16LE` | as above, by source depth |
+| [`image_scroll_producer.cpp:143`](../../src/modules/image/producer/image_scroll_producer.cpp#L143) | → `BGRA` | `0` |
+| [`isf_image_load.cpp:29`](../../src/modules/isf/isf_image_load.cpp#L29) | → `RGBA` | `0` |
 
 The consumer's call is **unconditional on every captured frame**. The mixer hands it BGRA or
 BGRA64, the PNG target is RGBA or RGBA64BE, so `src->format == pixFmt` is never true and
@@ -223,7 +223,7 @@ footnote:
 | Site | Flags | Covered by |
 | :--- | :--- | :--- |
 | `image_producer` still load — `rgb24`→`BGRA`, `rgb48`→`GBRAP16LE` | `0` / `SWS_ACCURATE_RND \| SWS_FULL_CHR_H_INT` | **nothing** — no battery loads a still through the IMAGE producer |
-| [`spout_consumer.cpp:230`](../src/modules/spout/consumer/spout_consumer.cpp#L230) | `SWS_FAST_BILINEAR` | **nothing** — reachable only via `cli.py run`, and it is the one site that actually *scales* |
+| [`spout_consumer.cpp:230`](../../src/modules/spout/consumer/spout_consumer.cpp#L230) | `SWS_FAST_BILINEAR` | **nothing** — reachable only via `cli.py run`, and it is the one site that actually *scales* |
 | `image_scroll_producer`, `isf_image_load` | `0` | nothing, but both are permutations to 8-bit packed and the least exposed of the set |
 
 `SWS_FAST_BILINEAR` remains the most exposed flag in the tree: it is explicitly a
@@ -256,7 +256,7 @@ FFmpeg removed the whole library in commit `8c920c4c39`, 2025-05-05 — there is
 `libpostproc/` in the 8.1 tree at all, so there is no `postproc-*.dll` to ship.
 
 **Impact: one line.** We reference it only as a file to copy —
-[`Bootstrap_Windows.cmake:97`](../src/CMakeModules/Bootstrap_Windows.cmake#L97),
+[`Bootstrap_Windows.cmake:97`](../../src/CMakeModules/Bootstrap_Windows.cmake#L97),
 `casparcg_add_runtime_dependency(".../postproc-58.dll")`. No source file in the tree
 includes a postproc header or calls into it, so nothing is lost in function; the line just
 has to go, or the copy step fails on a missing file.
@@ -322,7 +322,7 @@ This tree has a Vulkan mixer and an explicit GPU-direct thesis
 | AV1 Vulkan encoder | 8.0 |
 | Vulkan compute codec optimisations | 8.1 |
 
-ProRes on Vulkan is the striking one: [`cuda_prores`](../src/modules/cuda_prores/) exists
+ProRes on Vulkan is the striking one: [`cuda_prores`](../../src/modules/cuda_prores/) exists
 because ProRes needed a GPU path and CUDA was the only one available. A Vulkan hwaccel
 decodes into an image the Vulkan mixer can consume without an interop hop — and unlike the
 CUDA path it is not NVIDIA-only. ProRes **RAW** decoding is a capability the tree does not

@@ -32,7 +32,7 @@ Key properties:
 
 All paths are under `src/modules/ofx/` unless noted.
 
-![OFX host component map: the [OFX] producer, the in-process host (plug-in cache, effect/clip/param instances, stability layer), and the CPU/OpenGL/CUDA render backends](images/ofx_components.png)
+![OFX host component map: the [OFX] producer, the in-process host (plug-in cache, effect/clip/param instances, stability layer), and the CPU/OpenGL/CUDA render backends](../images/ofx_components.png)
 
 | File | Responsibility |
 |------|----------------|
@@ -58,7 +58,7 @@ OpenFX 1.5.1 + libexpat and build the `openfx_host` static library (`OFX_SUPPORT
 
 ## 3. Frame & data flow
 
-![OFX render paths: CPU (bridge + renderAction), zero-copy OpenGL on the OGL mixer, and zero-copy CUDA on the Vulkan mixer](images/ofx_dataflow.png)
+![OFX render paths: CPU (bridge + renderAction), zero-copy OpenGL on the OGL mixer, and zero-copy CUDA on the Vulkan mixer](../images/ofx_dataflow.png)
 
 ### 3.1 Filter (CPU)
 ```
@@ -110,7 +110,7 @@ frame count and set on the plug-in each frame; the plug-in blends. (CPU path.)
 
 ## 4. Contexts, backends & negotiation
 
-![Backend selection: a GPU path is used only if the host enables it AND the plug-in advertises it; priority CUDA → OpenGL → CPU](images/ofx_backends.png)
+![Backend selection: a GPU path is used only if the host enables it AND the plug-in advertises it; priority CUDA → OpenGL → CPU](../images/ofx_backends.png)
 
 | Context | Trigger | Clips |
 |---|---|---|

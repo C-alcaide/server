@@ -22,9 +22,9 @@ Read from source, not from docs. Everything in this section is present on **both
 
 | Mechanism | Geometry | Soft edge | What it drives | Where |
 | :--- | :--- | :--- | :--- | :--- |
-| `apply_qualifier` | none — HSL colour key | `qual_softness`, `smoothstep` | 3 grading ops | [`shader.frag`](../src/accelerator/ogl/image/shader.frag) `apply_qualifier` |
+| `apply_qualifier` | none — HSL colour key | `qual_softness`, `smoothstep` | 3 grading ops | [`shader.frag`](../../src/accelerator/ogl/image/shader.frag) `apply_qualifier` |
 | `icvfx_mask` | **arbitrary quadrilateral**, 4 corners in output NDC, winding-independent half-plane SDF | `icvfx_feather` | ICVFX frustum dim/gain | `icvfx_mask` |
-| `shape` | SDF `rect` / `rounded_rect` / `circle` / `ellipse` | `edge_softness` | draws a fill *over* the result | `shape_config` in [`frame_transform.h`](../src/core/frame/frame_transform.h) |
+| `shape` | SDF `rect` / `rounded_rect` / `circle` / `ellipse` | `edge_softness` | draws a fill *over* the result | `shape_config` in [`frame_transform.h`](../../src/core/frame/frame_transform.h) |
 | `blend_mask` | arbitrary — any PNG, sampled in output space | inherent in the texture | final `col.rgb *=` multiply | `blend_mask_data` |
 
 **Soft edges are not the gap.** Every one of these feathers correctly. The gap is *what they are
@@ -70,7 +70,7 @@ mechanisms sit at positions that structurally prevent them gating a grade: `shap
 ### 1.4 What is exposed
 
 `MIXER QUALIFIER` (10 arguments) is registered in
-[`AMCPCommandsImpl.cpp`](../src/protocol/amcp/AMCPCommandsImpl.cpp) and documented in
+[`AMCPCommandsImpl.cpp`](../../src/protocol/amcp/AMCPCommandsImpl.cpp) and documented in
 [`COLOR_GRADING.md`](../guides/COLOR_GRADING.md#secondary-qualifier) §Secondary Qualifier. That doc
 describes the qualifier accurately and **does not** claim spatial windows, so nothing currently
 overstates this.
@@ -129,7 +129,7 @@ existing post-process passes prove the shape.
 
 Vulkan's `renderpass` also already models a pass as a **list** of `layer_info` records, each with
 its own `uniform_block`, texture views, coords and optionally its own pipeline
-([`renderpass.h`](../src/accelerator/vulkan/util/renderpass.h)). Per-node uniform sets fit that
+([`renderpass.h`](../../src/accelerator/vulkan/util/renderpass.h)). Per-node uniform sets fit that
 model directly.
 
 ### 2.5 Uniform budget is not the constraint
@@ -597,19 +597,19 @@ writable, and a manually started server is fine), but it will bite the next pers
 
 ## 11. Sources
 
-* **Current behaviour** — [`shader.frag`](../src/accelerator/ogl/image/shader.frag) and
-  [`fragment_shader.frag`](../src/accelerator/vulkan/image/fragment_shader.frag);
-  [`frame_transform.h`](../src/core/frame/frame_transform.h) for `image_transform`,
+* **Current behaviour** — [`shader.frag`](../../src/accelerator/ogl/image/shader.frag) and
+  [`fragment_shader.frag`](../../src/accelerator/vulkan/image/fragment_shader.frag);
+  [`frame_transform.h`](../../src/core/frame/frame_transform.h) for `image_transform`,
   `shape_config`, `blend_mask_data`, `shape_type`.
-* **Multi-pass precedents** — [`image_mixer.cpp`](../src/accelerator/ogl/image/image_mixer.cpp)
+* **Multi-pass precedents** — [`image_mixer.cpp`](../../src/accelerator/ogl/image/image_mixer.cpp)
   (`draw(layer)`, `apply_calibration_lut`, `apply_output_convert`) and
-  [`image_mixer.cpp`](../src/accelerator/vulkan/image/image_mixer.cpp) (the per-view `finish`
+  [`image_mixer.cpp`](../../src/accelerator/vulkan/image/image_mixer.cpp) (the per-view `finish`
   lambda, `apply_passthrough`).
-* **Pass/attachment model** — [`renderpass.h`](../src/accelerator/vulkan/util/renderpass.h)
-  (`layer_info`, `create_attachment`), [`device.h`](../src/accelerator/vulkan/util/device.h)
+* **Pass/attachment model** — [`renderpass.h`](../../src/accelerator/vulkan/util/renderpass.h)
+  (`layer_info`, `create_attachment`), [`device.h`](../../src/accelerator/vulkan/util/device.h)
   (attachment pool).
 * **Kernel routing precedent** — `draw_params::output_convert_only` in
-  [`image_kernel.h`](../src/accelerator/ogl/image/image_kernel.h).
+  [`image_kernel.h`](../../src/accelerator/ogl/image/image_kernel.h).
 * **Composition rules** — `apply_transform_colour_values` in
   `accelerator/{ogl,vulkan}/util/transforms.cpp`.
 * **Existing qualifier docs** — [`COLOR_GRADING.md`](../guides/COLOR_GRADING.md) §Secondary Qualifier.

@@ -60,7 +60,7 @@ into a page‑locked buffer, optionally via a DVP DMA, and is wrapped by a custo
 `decklink_frame` whose `GetBytes()` returns the pinned pointer the driver reads directly
 (zero redundant copy — the "Model X" the Blackmagic developer notes describe).
 
-![End‑to‑end data path](images/decklink/datapath.png)
+![End‑to‑end data path](../images/decklink/datapath.png)
 
 The two orthogonal knobs are **`<gpu-pack>`** (where packing happens) and
 **`<gpu-transfer>`** (how the packed bytes reach the pinned buffer). A third knob,
@@ -216,7 +216,7 @@ Robustness details:
 
 `<latency>` selects the scheduling model. Measured output buffering at 1080p25:
 
-![Latency by mode](images/decklink/latency.png)
+![Latency by mode](../images/decklink/latency.png)
 
 | `<latency>` | Driver flag | Model | App‑side buffered | Notes |
 |---|---|---|---|---|
@@ -241,7 +241,7 @@ depth (`GetBufferedVideoFrameCount` / configured `buffer_depth`).
 `<latency>sync</latency>` drives output from worker threads instead of scheduled playback.
 It supports embedded audio and multiple output devices.
 
-![Synchronous‑display threading model](images/decklink/threads.png)
+![Synchronous‑display threading model](../images/decklink/threads.png)
 
 - **Primary loop** (`sync_display_loop`): `prec_timer.tick(1/fps)` → `pop` frame(s) →
   fan‑out to secondaries → GPU pack → `DisplayVideoFrameSync` → `WriteAudioSamplesSync`.

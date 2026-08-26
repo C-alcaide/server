@@ -128,7 +128,7 @@ Design rationale: [`OCIO_INTEGRATION_STUDY.md`](../architecture/OCIO_INTEGRATION
 
 ### The two paths overlap, and they do NOT match
 
-![Two routes into the ACEScg working space: MIXER COLORSPACE and MIXER OCIO are mutually exclusive per layer and rejoin at the working space, after which the grading chain is identical](images/ocio_two_paths.png)
+![Two routes into the ACEScg working space: MIXER COLORSPACE and MIXER OCIO are mutually exclusive per layer and rejoin at the working space, after which the grading chain is identical](../images/ocio_two_paths.png)
 
 Both write steps 4–5 of the [pipeline](#internal-pipeline), so **they are mutually exclusive
 per layer** — setting one while the other is active returns `403 MIXER ERROR` rather than
