@@ -1,4 +1,4 @@
-"""Generate the diagrams for docs/GSTREAMER_GUIDE.md.
+"""Generate the diagrams for docs/guides/GSTREAMER_GUIDE.md.
 
 Run from the repo root:  python docs/diagrams/generate_gstreamer_diagrams.py
 

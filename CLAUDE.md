@@ -496,7 +496,7 @@ So "which doc" is not left to judgment:
 | what changed | where it goes |
 | :--- | :--- |
 | rendered output for an existing config | `CHANGELOG.md`, with the measurement |
-| a new AMCP command or argument | the feature doc that owns it, and `docs/OPERATIONS_GUIDE.md` |
+| a new AMCP command or argument | the feature doc that owns it, and `docs/guides/OPERATIONS_GUIDE.md` |
 | a new `<configuration>` element | the feature doc that owns it, **and the commented block at the bottom of `src/shell/casparcg.config`** |
 | a new battery, or a new number for an existing claim | the doc carrying that claim, **and** the harness `CLAUDE.md` command table |
 | a new stage in a pipeline, or a second route into an existing one | the owning doc, **and its diagram** |

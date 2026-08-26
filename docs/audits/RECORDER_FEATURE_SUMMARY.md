@@ -70,7 +70,7 @@ PLAY 1-10 portaudio DEVICE="Line In" DELAY 50
 *   If you experience periodic underruns, ensure the audio device's sample rate matches the channel configuration (default 48 kHz).
 *   For multi-channel audio capture (e.g., 8-channel Dante), use `CHANNELS` and `FROM`/`MAP` to select the desired subset.
 *   For ASIO devices, multiple producers sharing the same device automatically use shared capture — no manual configuration needed.
-*   See `docs/PORTAUDIO_MODULE.md` for full technical documentation.
+*   See `docs/guides/PORTAUDIO_MODULE.md` for full technical documentation.
 
 ---
 

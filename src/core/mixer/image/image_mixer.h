@@ -127,7 +127,7 @@ class image_mixer
 // frame_factory::import_d3d_texture and implements it here. This fork carries its own
 // GPU-direct HTML path instead (html_gpu_bridge + ogl/util/dx_interop), so the base
 // method is not declared and this override cannot exist. Reconciling the two is
-// tracked; see docs/UPSTREAM_SYNC_2026-08-18.md.
+// tracked; see docs/audits/UPSTREAM_SYNC_2026-08-18.md.
 
     virtual common::bit_depth depth() const = 0;
 

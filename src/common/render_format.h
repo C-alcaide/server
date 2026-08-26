@@ -45,7 +45,7 @@ namespace caspar { namespace common {
 ///
 /// So the format follows the working space, and display-referred channels stay on unorm
 /// and remain bit-identical to before this enum existed. See
-/// docs/OCIO_INTEGRATION_STUDY.md section 4.3.
+/// docs/architecture/OCIO_INTEGRATION_STUDY.md section 4.3.
 enum class render_format : uint8_t
 {
     unorm = 0,

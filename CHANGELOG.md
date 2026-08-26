@@ -107,7 +107,7 @@ frame so the gap came out black rather than as stale VRAM. 1280, 2048 and 4096 a
 **Not verified at those rasters** — the measurement above is 1080p only, so the fix is argued from
 the arithmetic and the black sliver it removes has not been photographed.
 
-**One number in `docs/PLAYBACK_AND_RECORDING_GUIDE.md` was stale and is corrected**: that table
+**One number in `docs/guides/PLAYBACK_AND_RECORDING_GUIDE.md` was stale and is corrected**: that table
 said 0.89 LSB / 63% at boundaries for this arm, measured 2026-08-22. Re-measured today it is 0.85
 / 61% on the pre-change binary too, so the drift belongs to something between those dates and not
 to any one commit. The 2026-08-22 CHANGELOG entry keeps its 0.89 — it was true when written, and
@@ -253,7 +253,7 @@ whenever the frames context's format is pre-set, which it always is for a decode
 importer reads it by aspect plane, per FFmpeg's own `ff_vk_aspect_flag` mapping. And **p010 is not
 `bit10`**: it reports depth 10 with the bits in the HIGH end of each 16-bit word (shift 6), so
 keying on depth alone would apply a 64x precision factor to already-normalised data and produce a
-picture 64 times too bright on the hardware path only. `docs/FFMPEG_8_MIGRATION.md` §12 has both.
+picture 64 times too bright on the hardware path only. `docs/architecture/FFMPEG_8_MIGRATION.md` §12 has both.
 
 AV1 and VP9 use the same queue and are deliberately excluded until there is a fixture and a
 measurement: VP9 is the codec that faulted rather than declining.
@@ -276,7 +276,7 @@ All four, one run, 2026-08-25:
 
 The transport is never the accelerated part. `STREAM` and `FILE` are the same FFmpeg consumer
 with one flag and its GPU gate never inspects it, so anything true of recording a file is true
-of sending a stream. `docs/GSTREAMER_GUIDE.md` §10a has the conditions that decide whether the
+of sending a stream. `docs/guides/GSTREAMER_GUIDE.md` §10a has the conditions that decide whether the
 route actually engages in each case.
 
 ### Fixed: a listening `srtsrc` hung the whole server
@@ -457,7 +457,7 @@ first.
 
 It ships because the measurement is a narrow one: one consumer, 1080p, an idle machine. The
 readback scales with pixels and with consumer count and this route's per-frame CPU largely
-does not, so the ordering may reverse at 4K or under load. `docs/GSTREAMER_GUIDE.md` §7 has
+does not, so the ordering may reverse at 4K or under load. `docs/guides/GSTREAMER_GUIDE.md` §7 has
 the table and the caveat.
 
 ### Changed: semi-planar (NV12/P010) sources now sample chroma where the planar path does
@@ -1693,7 +1693,7 @@ bit-identical either way — and every alpha-carrying test fixture was fully opa
 2026-08-20. HTML was never affected for a different reason: CEF hands over genuinely
 premultiplied BGRA, so `false` was the truth there and stays.
 
-`docs/COLOR_GRADING.md` has described the intended behaviour all along — *"Premultiply if the
+`docs/guides/COLOR_GRADING.md` has described the intended behaviour all along — *"Premultiply if the
 source is straight (default)"*. Only the flag went unset.
 
 **The fix.** Decoded media declares straight, at all 11 sites across the FFmpeg, CUDA ProRes,
@@ -2292,7 +2292,7 @@ silently fell back to OpenGL.
   (`core/config_generator.py`), having measured `Invalid accelerator: ogl` against an
   upstream build on 2026-08-13.
 
-**Measured.** `docs/VULKAN_MIXER_IMPLEMENTATION.md` was the only place in the tree still
+**Measured.** `docs/architecture/VULKAN_MIXER_IMPLEMENTATION.md` was the only place in the tree still
 advertising the alias (`<!-- or "ogl" -->`) and is corrected in the same commit. No `.config`
 in the tree used it. Server starts and answers `201 VERSION OK / 2.6.0 bc94f4713 Dev` with
 `<accelerator>vulkan</accelerator>`.
@@ -2470,7 +2470,7 @@ the server was built — 0.0 / 38.8 / 18.0 for the equivalent ACEScg triples.
 
 The bundled config defines exactly one look, `ACES 1.3 Reference Gamut Compression`, which
 is the **reference** implementation of the algorithm `MIXER GAMUTCOMPRESS` approximates; see
-the gamut-compression entry in `docs/COLOR_GRADING.md` for the measured difference between
+the gamut-compression entry in `docs/guides/COLOR_GRADING.md` for the measured difference between
 them. Custom looks come from `<ocio-config>`.
 
 ### Removed: the screen consumer's explicit VK→GL semaphore wait, which never worked
@@ -3211,7 +3211,7 @@ Default path unregressed: `conformance` 100/100 and `ocio` 18/18 on both mixers,
 both mixers. `k_direct` (auto-color-convert) had **6 of 16 checkable entries wrong**. Found
 while designing the working-space composite, by checking the tables it would sit on.
 
-Full account, evidence and the corrected rows: `docs/GAMUT_MATRIX_DEFECT_2026-08-12.md`.
+Full account, evidence and the corrected rows: `docs/audits/GAMUT_MATRIX_DEFECT_2026-08-12.md`.
 
 **This changes rendered output, and neutrals are exactly where it does not.** Measured, in
 8-bit LSB after the output OETF:

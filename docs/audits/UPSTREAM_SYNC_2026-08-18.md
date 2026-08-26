@@ -221,7 +221,7 @@ as a missing one. The pre-fix code has **zero** timeouts on that same matrix. Tr
 not sufficient evidence: the defect it needed to expose only appears at the full matrix's
 parallelism.
 
-**The plan for landing it is [`PLAN_BGRA64_CAPTURE_FIX.md`](PLAN_BGRA64_CAPTURE_FIX.md)**,
+**The plan for landing it is [`PLAN_BGRA64_CAPTURE_FIX.md`](../plans/PLAN_BGRA64_CAPTURE_FIX.md)**,
 which carries the design, the ruled-out cheap fix, the verification gates and the upstream
 report. In short: Not a raw `std::vector` handed to the encoder. The by-hand
 conversion should fill a properly allocated destination (`av_frame_get_buffer`, 64-byte
@@ -261,7 +261,7 @@ The boundary actually drawn, after the first attempt at it failed to build (§6.
 re-conflict at every sync.
 
 **Investigated 2026-08-18 and decided — see
-[`CEF_GPU_DIRECT_RECONCILIATION.md`](CEF_GPU_DIRECT_RECONCILIATION.md).** Keep this fork's
+[`CEF_GPU_DIRECT_RECONCILIATION.md`](../audits/CEF_GPU_DIRECT_RECONCILIATION.md).** Keep this fork's
 `html_gpu_bridge`: upstream's `import_d3d_texture` is a **throw stub on the Vulkan
 accelerator** (`vulkan/image/image_mixer.cpp:389`) and nothing in their path checks the mixer
 backend before requesting shared textures, so adopting it would mean a per-frame exception on
@@ -803,7 +803,7 @@ all streaming and recording. Two details worth keeping:
      or obtaining a NotchLC fixture is owed before that half means anything.
 4. Reconcile the two GPU-direct HTML paths (§4.1). **Parked by decision, 2026-08-18** — the
    findings, the PR shape and the harness it would need are written up in
-   `docs/CEF_GPU_DIRECT_RECONCILIATION.md`. Not a gap in this sync; a deferred choice.
+   `docs/audits/CEF_GPU_DIRECT_RECONCILIATION.md`. Not a gap in this sync; a deferred choice.
 5. Merge or retire the OAL consumer divergence (§4.2). **Still open, and it is a decision
    rather than a measurement** — both implementations work; what is missing is a ruling on
    which one this fork keeps.
@@ -812,7 +812,7 @@ all streaming and recording. Two details worth keeping:
    consumer, which dithers a conversion that reduces no bit depth. Pre-existing and fork-only:
    upstream's `convert_image_frame` call sites all target 8 bit, where the same permutation is
    exact. OpenGL 16-bit conformance goes **0/100 -> 99/100** within 1.0 LSB, which is exactly
-   the Vulkan figure. Full account in `docs/PLAN_BGRA64_CAPTURE_FIX.md` §8.2, the FFmpeg
+   the Vulkan figure. Full account in `docs/plans/PLAN_BGRA64_CAPTURE_FIX.md` §8.2, the FFmpeg
    reproducer in `docs/swsprobe/`.
 7. ~~A battery for the still-load swscale conversions~~ — **written, `image-convert`**, 4 PNG
    flavours with an `rgba8` control that bypasses swscale, asymmetric per-channel values, and a

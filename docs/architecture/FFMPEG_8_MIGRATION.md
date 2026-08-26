@@ -18,7 +18,7 @@ for was already carried out upstream, and the tree has since been built and run 
 > **IMAGE consumer**, which runs it on every captured frame — so the swscale rewrite sits
 > inside `conformance` and `grading` rather than outside them. See §5.1.
 >
-> This corrects [`GSTREAMER_INTEGRATION_PLAN.md`](GSTREAMER_INTEGRATION_PLAN.md) §4.1, which
+> This corrects [`GSTREAMER_INTEGRATION_PLAN.md`](../deprecated/GSTREAMER_INTEGRATION_PLAN.md) §4.1, which
 > called the migration "the one genuinely large unknown in this plan". On the evidence below
 > it is not.
 
@@ -310,7 +310,7 @@ Beyond making GStreamer conflict-free. We are on 7.0.2, so 7.1 lands too.
 ### 6.1 Vulkan hardware paths — the largest gain for this fork
 
 This tree has a Vulkan mixer and an explicit GPU-direct thesis
-([`GPU_INTEROP_ARCHITECTURE.md`](GPU_INTEROP_ARCHITECTURE.md)). FFmpeg 8 adds:
+([`GPU_INTEROP_ARCHITECTURE.md`](../architecture/GPU_INTEROP_ARCHITECTURE.md)). FFmpeg 8 adds:
 
 | Feature | Version |
 | :--- | :--- |
@@ -1015,7 +1015,7 @@ that a shared problem with one bridge rather than two.
 * **RCWT closed-caption demuxer** (7.1) — the FFmpeg half of the caption story that
   GStreamer's `ccextractor`/`cccombiner` covers from the other side.
 * **HDR10+ metadata passthrough** when decoding/encoding with libaom-av1 (8.0) — relevant to
-  [`HDR_GUIDE.md`](HDR_GUIDE.md).
+  [`HDR_GUIDE.md`](../guides/HDR_GUIDE.md).
 * **EXIF metadata parsing** (8.1); `colordetect` filter (8.0).
 
 ### 6.5 API quality
@@ -1098,7 +1098,7 @@ than a migration.
    per `BUILDING_WORKFLOW.md`.
 5. **Run the full battery set**, both mixers, then re-measure the step 1 swscale fixtures.
 6. **GStreamer is already unblocked** — coexistence with FFmpeg 8 was measured on
-   2026-08-18 and is recorded in [`GSTREAMER_INTEGRATION_PLAN.md`](GSTREAMER_INTEGRATION_PLAN.md)
+   2026-08-18 and is recorded in [`GSTREAMER_INTEGRATION_PLAN.md`](../deprecated/GSTREAMER_INTEGRATION_PLAN.md)
    §3.5. It does not wait on steps 3–5, because it needs only a host built against 8.x, and
    one now exists.
 

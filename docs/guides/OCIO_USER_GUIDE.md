@@ -4,8 +4,8 @@ How to drive OCIO on a running server: the commands, the config elements, what e
 means and how the pieces fit with the rest of the grading chain.
 
 For *why* the integration is shaped this way, see
-[`OCIO_INTEGRATION_STUDY.md`](OCIO_INTEGRATION_STUDY.md). For where OCIO sits in the pixel
-pipeline relative to the built-in tools, see [`COLOR_GRADING.md`](COLOR_GRADING.md).
+[`OCIO_INTEGRATION_STUDY.md`](../architecture/OCIO_INTEGRATION_STUDY.md). For where OCIO sits in the pixel
+pipeline relative to the built-in tools, see [`COLOR_GRADING.md`](../guides/COLOR_GRADING.md).
 
 ---
 
@@ -283,7 +283,7 @@ involved. An AMF differing in exactly one node renders **68 LSB** away, which is
 "the file was read" falsifiable rather than assumed. `cli.py amf`.
 
 > Design rationale and the evidence that the mapping is mechanical:
-> [`AMF_SUPPORT_STUDY.md`](AMF_SUPPORT_STUDY.md).
+> [`AMF_SUPPORT_STUDY.md`](../plans/AMF_SUPPORT_STUDY.md).
 
 ---
 

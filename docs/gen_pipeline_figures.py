@@ -1,4 +1,4 @@
-"""Generate figures for docs/PIPELINE_EFFICIENCY_GUIDE.md.
+"""Generate figures for docs/guides/PIPELINE_EFFICIENCY_GUIDE.md.
 
 Run:  python docs/gen_pipeline_figures.py
 Outputs PNGs into docs/images/pipeline/.

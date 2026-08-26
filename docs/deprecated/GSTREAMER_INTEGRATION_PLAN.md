@@ -155,7 +155,7 @@ throughput was measured, and nothing was run inside `casparcg.exe`.
 
 The §3.4 test, re-run with a host built against FFmpeg 8.1.2 (`proto/gstreamer-ffmpeg8` in
 `d:\Github\CasparCG-server`, off `upstream/master`, which is already pinned to 8.1.2 — see
-[`FFMPEG_8_MIGRATION.md`](FFMPEG_8_MIGRATION.md) §0). Two independent measurements.
+[`FFMPEG_8_MIGRATION.md`](../architecture/FFMPEG_8_MIGRATION.md) §0). Two independent measurements.
 
 **1. In-process dual load.** This is the question that actually matters, because Windows
 keys loaded modules by base name *per process* — an exit code from a helper process does not
@@ -213,7 +213,7 @@ nothing about throughput, latency, or the founding premise in §9.1.
 
 **Status, 2026-08-18: done upstream, and measured.** `upstream/master` has been pinned to
 `ffmpeg-8.1.2-full_build-shared.7z` since before this document was written, so the "migration"
-this route asks for is, for the fork, a **rebase** — see [`FFMPEG_8_MIGRATION.md`](FFMPEG_8_MIGRATION.md)
+this route asks for is, for the fork, a **rebase** — see [`FFMPEG_8_MIGRATION.md`](../architecture/FFMPEG_8_MIGRATION.md)
 §0. A host built from it runs here, and §3.5 measures the coexistence this section predicts:
 `gstlibav` registers, both FFmpeg stacks load into one process, and a libav pipeline runs.
 
@@ -242,7 +242,7 @@ This is also not a detour: the CasparCG dependency mirror **already hosts**
 pins. The packages exist; only the pin and the API migration are missing.
 
 **Cost — investigated 2026-08-17, and smaller than this section originally claimed.** See
-[`FFMPEG_8_MIGRATION.md`](FFMPEG_8_MIGRATION.md). Of the 24 deprecated API groups FFmpeg
+[`FFMPEG_8_MIGRATION.md`](../architecture/FFMPEG_8_MIGRATION.md). Of the 24 deprecated API groups FFmpeg
 removed in the 8.x cycle, CasparVP references **none**, and the two that would have bitten
 already carry version-guarded dual paths — one of them gated on `LIBAVCODEC_VERSION_MAJOR
 < 62`, i.e. the FFmpeg 8 branch is already written. The real risk is not the API but a
@@ -294,7 +294,7 @@ than a fallback.
   rather than managing it. **It is also no longer pending**: upstream carries FFmpeg 8.1.2,
   a host built from it runs here, and §3.5 measures the whole 272-plugin tree registering
   in-process with `gstlibav` intact. What remains is the fork's rebase, not a migration —
-  [`FFMPEG_8_MIGRATION.md`](FFMPEG_8_MIGRATION.md) §0 and §8. FFmpeg **9.0** exists as of
+  [`FFMPEG_8_MIGRATION.md`](../architecture/FFMPEG_8_MIGRATION.md) §0 and §8. FFmpeg **9.0** exists as of
   2026-08-03 and is deliberately not the target; §7 of that document says why.
 * **Route B is then applied selectively**, not as a fallback: freedesktop-built core plugins
   (transport, demux, hardware decode) run in-process; third-party, CV/ML, experimental and
@@ -325,10 +325,10 @@ benchmarked.
 
 | Area | Elements | State in CasparVP |
 | :--- | :--- | :--- |
-| Scheduling / clock | pipeline clock, QoS, latency negotiation; `gst_ptp_clock_new` + `gst-ptp-helper.exe`, `gst_net_client_clock_new` (both in `gstnet-1.0-0.dll`) | no equivalent; adjacent to [`CLUSTER_SYNC.md`](CLUSTER_SYNC.md) |
+| Scheduling / clock | pipeline clock, QoS, latency negotiation; `gst_ptp_clock_new` + `gst-ptp-helper.exe`, `gst_net_client_clock_new` (both in `gstnet-1.0-0.dll`) | no equivalent; adjacent to [`CLUSTER_SYNC.md`](../guides/CLUSTER_SYNC.md) |
 | Observability | 10 tracers: `latency`, `buffer-lateness`, `queue-levels`, `pad-push-timings`, `pcap-writer`, `leaks`, `stats`, `dots`, `log`, `factories`; `GST_DEBUG_BIN_TO_DOT_FILE` | `-loglevel debug` and inference |
 | GPU-resident pipelines | `memory:D3D11Memory` / `memory:CUDAMemory` as negotiated caps; `d3d11ipcsink/src`, `cudaipcsink/src` for cross-process | `hw_frames_ctx`; cross-process is bespoke |
-| Warp / projection | `d3d12fisheyedewarp` (`projection-type`, `fisheye-fov`, `horizontal-fov`, `center-x/y`, `radius-x/y`, `inner-radius`, ROI); `d3d12remap` (arbitrary `ID3D12Resource` UV map, R→U, G→V, **A = mask**) | overlaps [`PROJECTION_CALIBRATION.md`](PROJECTION_CALIBRATION.md) — see §9.2 |
+| Warp / projection | `d3d12fisheyedewarp` (`projection-type`, `fisheye-fov`, `horizontal-fov`, `center-x/y`, `radius-x/y`, `inner-radius`, ROI); `d3d12remap` (arbitrary `ID3D12Resource` UV map, R→U, G→V, **A = mask**) | overlaps [`PROJECTION_CALIBRATION.md`](../guides/PROJECTION_CALIBRATION.md) — see §9.2 |
 | Closed captions | `ccextractor`, `cccombiner`, `ccconverter`, `cea608tocea708` | nothing |
 | SCTE-35 | `gst_mpegts_scte`, `scte_sit` in `gstmpegts-1.0-0.dll` | nothing |
 | Timecode | `timecodestamper` with a dedicated `ltc_sink` pad: `ltc-auto-resync`, `ltc-timeout`, `ltc-daily-jam`, `rtc-max-drift`, `timecode-offset` | `ltc` module exists |
@@ -764,7 +764,7 @@ Three wiring points that are easy to miss:
 3. **Adapter selection.** GStreamer enumerates both GPUs on this box by name: plain
    `d3d11h264dec` binds the RTX A4000, `d3d11h264device1dec` the Quadro P4000. The mixers
    run on adapter 0, so the non-`device1` variants are the ones that avoid a cross-adapter
-   copy. See [`GPU_AFFINITY_PLAN.md`](GPU_AFFINITY_PLAN.md).
+   copy. See [`GPU_AFFINITY_PLAN.md`](../plans/GPU_AFFINITY_PLAN.md).
 
 The frame handoff reuses what CEF already needs:
 [`html_gpu_bridge.h`](../src/modules/html/producer/html_gpu_bridge.h) turns a shared texture
@@ -803,7 +803,7 @@ Unscoped.
 ### 9.3 Other
 
 * ~~Cost of the FFmpeg 7→8 migration (§4.1) — the largest unknown.~~ **Investigated
-  2026-08-17**: [`FFMPEG_8_MIGRATION.md`](FFMPEG_8_MIGRATION.md). No longer the largest
+  2026-08-17**: [`FFMPEG_8_MIGRATION.md`](../architecture/FFMPEG_8_MIGRATION.md). No longer the largest
   unknown; the residual risk is a swscale rewrite over two call sites.
 * ~~Whether analytics metadata crosses the `d3d11ipc` boundary.~~ **Answered from upstream
   source, 2026-08-17: it does not** (§7.5). The live question is now the consequence —

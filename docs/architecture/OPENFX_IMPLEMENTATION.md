@@ -1,7 +1,7 @@
 # CasparCG OpenFX (OFX) Host — Implementation & Current State
 
 > Module: `src/modules/ofx` · Branch: `CasparVPV` · Status: **Production-ready core, verified**
-> Companion document: [OPENFX_USER_AND_PLUGIN_GUIDE.md](OPENFX_USER_AND_PLUGIN_GUIDE.md)
+> Companion document: [OPENFX_USER_AND_PLUGIN_GUIDE.md](../guides/OPENFX_USER_AND_PLUGIN_GUIDE.md)
 
 This document describes *how* the OFX host is built and *what state it is in*. For how to **use** it or
 **author plugins**, read the companion guide.

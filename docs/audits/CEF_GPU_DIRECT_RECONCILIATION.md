@@ -2,7 +2,7 @@
 
 **Status: investigated, decided, NOT acted on. 2026-08-18.** No code changed for this
 document. It exists because the sync onto `upstream/master` put two implementations of the
-same feature in one tree, §4.1 of [`UPSTREAM_SYNC_2026-08-18.md`](UPSTREAM_SYNC_2026-08-18.md)
+same feature in one tree, §4.1 of [`UPSTREAM_SYNC_2026-08-18.md`](../audits/UPSTREAM_SYNC_2026-08-18.md)
 deferred the choice, and the reasoning behind that deferral is worth more than the one-line
 summary it left.
 

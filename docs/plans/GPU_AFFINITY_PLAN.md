@@ -11,7 +11,7 @@ when that relationship is unambiguous, eliminating cross-GPU PCIe copies in mult
 > rather than restated, because a number in the justification reads as the reason to do the
 > work. For scale, the DeckLink VK→CUDA path it is compared against measures **~0.2 ms** per
 > 1080p frame once the instrument could resolve it
-> ([`GPU_INTEROP_ARCHITECTURE.md`](GPU_INTEROP_ARCHITECTURE.md)), so the saving here is worth
+> ([`GPU_INTEROP_ARCHITECTURE.md`](../architecture/GPU_INTEROP_ARCHITECTURE.md)), so the saving here is worth
 > establishing before it is spent.
 
 ---

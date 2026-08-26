@@ -31,7 +31,7 @@ class texture;
  * image's memory, so a GL producer can render straight into what the Vulkan
  * mixer will sample, with no copy in either direction.
  *
- * This is the second half of interop item 2a (see docs/GPU_INTEROP_PLAN.md).
+ * This is the second half of interop item 2a (see docs/plans/GPU_INTEROP_PLAN.md).
  * The mechanism is `GL_EXT_memory_object` plus `VK_KHR_external_memory_win32`
  * (or `_fd` on Linux): Vulkan allocates and exports, GL imports and aliases.
  *

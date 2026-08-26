@@ -62,7 +62,7 @@ one channel is not necessarily the one that reaches furthest.
 | **CUDA ProRes** | `PLAY 1-1 CUDA_PRORES "clip"` | ProRes source, NVIDIA GPU | no |
 | **FFmpeg Vulkan compute** | `<vulkan-decode>true</vulkan-decode>` | Vulkan mixer; ProRes, ProRes RAW, DPX or FFV1 | no |
 | **FFmpeg Vulkan Video** | `<vulkan-video-decode>true</vulkan-video-decode>` | Vulkan mixer; H.264 or HEVC; a GPU with a video-decode queue | no |
-| **GStreamer** | `PLAY 1-1 GST "pipeline"` | a GStreamer installation; see `docs/GSTREAMER_GUIDE.md` | no on its GPU route |
+| **GStreamer** | `PLAY 1-1 GST "pipeline"` | a GStreamer installation; see `docs/guides/GSTREAMER_GUIDE.md` | no on its GPU route |
 
 **The last two switches are not one switch, and that is deliberate.** `<vulkan-decode>` reaches
 FFmpeg's Vulkan **compute** decoders, which need only a compute queue.
@@ -149,7 +149,7 @@ because there is no D3D11 device, no shared handles and no per-producer import b
 the same code off Windows, which D3D11VA can never be.
 
 The picture is **byte-identical to the software path** on 8-bit H.264 and 10-bit HEVC alike: 0
-differing pixels, max delta 0. `docs/FFMPEG_8_MIGRATION.md` §12 has the mechanism, including why
+differing pixels, max delta 0. `docs/architecture/FFMPEG_8_MIGRATION.md` §12 has the mechanism, including why
 the multi-planar image is not optional and the P010 trap that comes with it.
 
 **A fifth route exists for one codec.** `CUDA_NOTCHLC` is a second CUDA decoder in this fork,
@@ -1075,7 +1075,7 @@ Without the swap, use `h264_vulkan` / `hevc_vulkan`. They reach the same silicon
   producer deinterlace. Nothing on the recording side is involved. See §6.
 - **OpenGL mixer, 8-bit** → `CUDA_PRORES`, and its `QSCALE` now defaults to `AUTO`, which holds
   the profile's published data rate instead of whatever the content produces. See
-  `docs/CUDA_PRORES OPERATION_GUIDE.md`.
+  `docs/guides/CUDA_PRORES_OPERATION_GUIDE.md`.
 - **CPU** → `prores_aw`, never `prores_ks`. The latter cannot sustain 1080p25.
 
 ### If a DeckLink output is on air

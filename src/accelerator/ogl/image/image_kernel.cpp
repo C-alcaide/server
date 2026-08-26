@@ -225,7 +225,7 @@ struct image_kernel::impl
     /// is logged: the first frame after a MIXER OCIO command pays a program build, tens to
     /// hundreds of milliseconds. Every later frame is a map lookup. Pre-warming a channel's
     /// transforms at configuration time is the proper fix and is not done here -- see
-    /// docs/OCIO_INTEGRATION_STUDY.md section 8.7.
+    /// docs/architecture/OCIO_INTEGRATION_STUDY.md section 8.7.
     /// `on_frame_path` is what the log line reports, and it is not cosmetic: this function
     /// is the ONLY place a variant is built, so the warning fires for a pre-warm too. Left
     /// as it was, "compiling on the frame path" appeared even when the compile had been
@@ -715,7 +715,7 @@ struct image_kernel::impl
         // config -- the same library and config the server links. Four of the seven original
         // rows were not the matrices they claimed to be (bt2020, dcip3 d65, arri wide gamut 3
         // and sony sgamut3.cine; worst deviation 0.41 per element). See
-        // docs/GAMUT_MATRIX_DEFECT_2026-08-12.md.
+        // docs/audits/GAMUT_MATRIX_DEFECT_2026-08-12.md.
         //
         // Indices 0..6 are the MIXER COLORSPACE gamut enum and must not be reordered.
         // 7 and 8 are new, so a channel configured p3-dci or adobe-rgb has a row at all:

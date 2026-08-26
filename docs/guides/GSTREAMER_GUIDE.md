@@ -776,7 +776,7 @@ analytics metadata.
 
 * `src/modules/gstreamer/README.md` — the reference: exact behaviour, config keys, the
   architecture, and the traps found while building it.
-* `docs/GSTREAMER_INTEGRATION_PLAN.md` — how this came to exist. Superseded in its details;
+* `docs/deprecated/GSTREAMER_INTEGRATION_PLAN.md` — how this came to exist. Superseded in its details;
   accurate about the upstream prototype.
 * [gstreamer.freedesktop.org/documentation](https://gstreamer.freedesktop.org/documentation/) —
   the upstream docs. The *Application Development Manual* is the good introduction; the

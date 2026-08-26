@@ -72,7 +72,7 @@ class device final
     /// shared D3D textures against it. The handle itself is not new -- `impl_` has held it
     /// since dx_interop landed -- only this accessor is, and it is the whole reason those
     /// files can be compiled without adopting upstream's frame-import path. See
-    /// docs/UPSTREAM_SYNC_2026-08-18.md section 4.1.
+    /// docs/audits/UPSTREAM_SYNC_2026-08-18.md section 4.1.
     std::shared_ptr<void> d3d_interop() const;
 #endif
 

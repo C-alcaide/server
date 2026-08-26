@@ -2,7 +2,7 @@
 
 Hardware-accelerated image processing effects for CasparCG layers. All effects run in the GLSL fragment shader at zero CPU cost. Blur and sharpening operate on raw texture samples before color grading; film grain is applied last, after output encoding.
 
-For color grading (CDL, LUT, saturation, split tone, etc.), see [COLOR_GRADING.md](COLOR_GRADING.md).
+For color grading (CDL, LUT, saturation, split tone, etc.), see [COLOR_GRADING.md](../guides/COLOR_GRADING.md).
 
 ## Table of Contents
 

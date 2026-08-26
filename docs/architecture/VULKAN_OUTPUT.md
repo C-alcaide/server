@@ -419,7 +419,7 @@ The `<delay>` parameter introduces a fixed N-frame latency between when a frame 
 
 For example, if an LED processor adds 2 frames of latency, setting `<delay>2</delay>` means the Vulkan output will hold frames 2 frames longer, allowing the combined system latency to align with other outputs (like DeckLink) that may have their own delay compensation.
 
-The `<delay-ms>` parameter adds a sub-frame delay in milliseconds on top of `<delay>`. This is useful for fine-tuning A/V sync when video and audio are routed through different consumers (e.g. Vulkan output + PortAudio). The value is clamped to `[0, one frame period]` — use whole-frame `<delay>` for coarser adjustments. See [PORTAUDIO_MODULE.md](PORTAUDIO_MODULE.md) Scenario 9 for a worked example.
+The `<delay-ms>` parameter adds a sub-frame delay in milliseconds on top of `<delay>`. This is useful for fine-tuning A/V sync when video and audio are routed through different consumers (e.g. Vulkan output + PortAudio). The value is clamped to `[0, one frame period]` — use whole-frame `<delay>` for coarser adjustments. See [PORTAUDIO_MODULE.md](../guides/PORTAUDIO_MODULE.md) Scenario 9 for a worked example.
 
 ### Swapchain
 
@@ -1775,7 +1775,7 @@ The module requires or uses the following Vulkan extensions:
 
 ## Linux Testing
 
-For detailed Linux testing procedures, see [`src/modules/vulkan_output/LINUX_TESTING.md`](../src/modules/vulkan_output/LINUX_TESTING.md).
+For detailed Linux testing procedures, see [`src/modules/vulkan_output/LINUX_TESTING.md`](../../src/modules/vulkan_output/LINUX_TESTING.md).
 
 **Quick start on Linux:**
 

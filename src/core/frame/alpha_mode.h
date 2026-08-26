@@ -49,7 +49,7 @@ namespace caspar { namespace core {
 ///
 /// STRAIGHT IS THE DEFAULT FOR DECODED MEDIA, because that is what the formats store:
 /// FFmpeg has no premultiplied pixel format for these, and every NLE writes ProRes 4444,
-/// QuickTime Animation, NotchLC and PNG with straight alpha. `docs/COLOR_GRADING.md` has
+/// QuickTime Animation, NotchLC and PNG with straight alpha. `docs/guides/COLOR_GRADING.md` has
 /// documented this as the intended behaviour all along — *"Premultiply if the source is
 /// straight (default)"* — it was only ever the flag that went unset.
 ///

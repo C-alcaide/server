@@ -18,7 +18,7 @@ Port the upstream Vulkan image mixer (`src/accelerator/vulkan/`) into CasparVP a
 **Future work (not in this plan):**
 - `VK_KHR_video_encode` for hardware-accelerated FFmpeg/streaming encoding directly from VK textures
 - Vulkan-based screen consumer (replace SFML+OGL preview)
-- ~~VK→D3D interop for Decklink consumer (zero-copy SDI output)~~ → **Superseded**: VK→CUDA timeline semaphore interop implemented in `cuda_vk_strategy.cpp`. GPU-side `cudaWaitExternalSemaphoresAsync` eliminates CPU fence wait (22ms→0.06ms). See [DeckLink CUDA-Vulkan Interop](VULKAN_OUTPUT.md#decklink-cuda-vulkan-interop).
+- ~~VK→D3D interop for Decklink consumer (zero-copy SDI output)~~ → **Superseded**: VK→CUDA timeline semaphore interop implemented in `cuda_vk_strategy.cpp`. GPU-side `cudaWaitExternalSemaphoresAsync` eliminates CPU fence wait (22ms→0.06ms). See [DeckLink CUDA-Vulkan Interop](../architecture/VULKAN_OUTPUT.md#decklink-cuda-vulkan-interop).
 - Spout consumer (inherently OGL, no VK equivalent in protocol)
 - NDI GPU-direct (NDI SDK doesn't support VK yet)
 

@@ -53,7 +53,7 @@ FUNCTION (casparcg_add_library TARGET)
 	# types (std::wstring, spl::shared_ptr, boost::property_tree) do cross it -- every CUDA
 	# module registers a consumer or producer factory. MSVC's library is ABI-compatible
 	# across /std:c++17 and /std:c++20 in practice but does not promise to be. Revisit when
-	# CUDA gains a C++20 host parser; see docs/UPSTREAM_SYNC_2026-08-18.md.
+	# CUDA gains a C++20 host parser; see docs/audits/UPSTREAM_SYNC_2026-08-18.md.
 	set_target_properties(${TARGET} PROPERTIES CUDA_STANDARD 17 CUDA_STANDARD_REQUIRED ON)
 	target_include_directories(${TARGET} SYSTEM PRIVATE
 		${BOOST_INCLUDE_PATH}

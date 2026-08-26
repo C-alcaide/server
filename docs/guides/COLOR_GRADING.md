@@ -2,7 +2,7 @@
 
 GPU-accelerated ACES color management and professional color grading tools for CasparCG Server. All processing runs on the GPU in a single GLSL fragment shader pass, with zero CPU overhead per frame.
 
-For virtual production features (360° projection, curved screen compensation, playback speed, flip), see [VIRTUAL_PRODUCTION_FEATURES.md](VIRTUAL_PRODUCTION_FEATURES.md). For HDR channel configuration, DeckLink/Vulkan HDR output, and file recording metadata, see [HDR_GUIDE.md](HDR_GUIDE.md). For blur, sharpening, and film grain details, see [IMAGE_EFFECTS.md](IMAGE_EFFECTS.md).
+For virtual production features (360° projection, curved screen compensation, playback speed, flip), see [VIRTUAL_PRODUCTION_FEATURES.md](../guides/VIRTUAL_PRODUCTION_FEATURES.md). For HDR channel configuration, DeckLink/Vulkan HDR output, and file recording metadata, see [HDR_GUIDE.md](../guides/HDR_GUIDE.md). For blur, sharpening, and film grain details, see [IMAGE_EFFECTS.md](../guides/IMAGE_EFFECTS.md).
 
 ## Table of Contents
 
@@ -119,8 +119,8 @@ MIXER [channel]-[layer] OCIO NONE                   # back to the built-in path
 OCIO_DISPLAY [channel] "<display>" "<view>"         # channel display rendering
 ```
 
-Full command reference, config elements and refusal codes: **[`OCIO_USER_GUIDE.md`](OCIO_USER_GUIDE.md)**.
-Design rationale: [`OCIO_INTEGRATION_STUDY.md`](OCIO_INTEGRATION_STUDY.md).
+Full command reference, config elements and refusal codes: **[`OCIO_USER_GUIDE.md`](../guides/OCIO_USER_GUIDE.md)**.
+Design rationale: [`OCIO_INTEGRATION_STUDY.md`](../architecture/OCIO_INTEGRATION_STUDY.md).
 
 > ⚠ **Quote the name.** 40 of the 55 colour spaces in the bundled config contain spaces or
 > parentheses. Unquoted, `MIXER 1-1 OCIO ARRI LogC3 (EI800)` returns `404` having looked for

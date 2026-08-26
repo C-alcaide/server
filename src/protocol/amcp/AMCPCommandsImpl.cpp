@@ -3400,7 +3400,7 @@ std::future<std::wstring> ocio_look_command(command_context& ctx)
 //
 // The mapping is mechanical rather than a table. OCIO configs carry the AMF transform ids
 // under `interchange: amf_transform_ids`, so an id resolves through the loaded config and a
-// config change moves the ids with the transforms they name. See docs/AMF_SUPPORT_STUDY.md.
+// config change moves the ids with the transforms they name. See docs/plans/AMF_SUPPORT_STUDY.md.
 //
 // RESOLVE EVERYTHING, THEN APPLY. Three settings from one file must not leave a channel half
 // configured because the third id was unknown -- the operator would be looking at a picture
@@ -3919,7 +3919,7 @@ std::future<std::wstring> mixer_qualifier_command(command_context& ctx)
 //
 // One window shape (soft-edged ellipse in FRAME space) and one operation (exposure).
 // The narrowest surface that exercises the node PASS and the variable-length data model
-// end to end; design study in docs/GRADING_NODE_GRAPH_STUDY.md.
+// end to end; design study in docs/plans/GRADING_NODE_GRAPH_STUDY.md.
 //
 //   MIXER <ch>-<layer> GRADE NODE <n> <cx> <cy> <rx> <ry> <feather> <exposure> [<invert>]
 //   MIXER <ch>-<layer> GRADE CLEAR    — drop the whole chain

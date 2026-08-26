@@ -71,7 +71,7 @@ mechanisms sit at positions that structurally prevent them gating a grade: `shap
 
 `MIXER QUALIFIER` (10 arguments) is registered in
 [`AMCPCommandsImpl.cpp`](../src/protocol/amcp/AMCPCommandsImpl.cpp) and documented in
-[`COLOR_GRADING.md`](COLOR_GRADING.md#secondary-qualifier) §Secondary Qualifier. That doc
+[`COLOR_GRADING.md`](../guides/COLOR_GRADING.md#secondary-qualifier) §Secondary Qualifier. That doc
 describes the qualifier accurately and **does not** claim spatial windows, so nothing currently
 overstates this.
 
@@ -423,8 +423,8 @@ MIXER <ch>-<layer> GRADE                            # query, returns the graph
 
 Two notes: every numeric parameter should tween like the existing grading commands, which means
 the tween system needs to address `node[n].window[w].field`; and per
-[`CLAUDE.md`](../CLAUDE.md), a new command goes in the owning feature doc **and**
-[`OPERATIONS_GUIDE.md`](OPERATIONS_GUIDE.md) in the same commit.
+[`CLAUDE.md`](../../CLAUDE.md), a new command goes in the owning feature doc **and**
+[`OPERATIONS_GUIDE.md`](../guides/OPERATIONS_GUIDE.md) in the same commit.
 
 ---
 
@@ -612,6 +612,6 @@ writable, and a manually started server is fine), but it will bite the next pers
   [`image_kernel.h`](../src/accelerator/ogl/image/image_kernel.h).
 * **Composition rules** — `apply_transform_colour_values` in
   `accelerator/{ogl,vulkan}/util/transforms.cpp`.
-* **Existing qualifier docs** — [`COLOR_GRADING.md`](COLOR_GRADING.md) §Secondary Qualifier.
-* **Traps** — [`CLAUDE.md`](../CLAUDE.md): the allowlist trap, the channel-order trap, and the
+* **Existing qualifier docs** — [`COLOR_GRADING.md`](../guides/COLOR_GRADING.md) §Secondary Qualifier.
+* **Traps** — [`CLAUDE.md`](../../CLAUDE.md): the allowlist trap, the channel-order trap, and the
   rule that a battery which cannot fail for your change is worse than running nothing.

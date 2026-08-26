@@ -856,7 +856,7 @@ struct image_kernel::impl
     /// Builds on a cache miss, which means on the frame path: one device stall to create the
     /// images plus OCIO's generation, logged as a warning. Every later frame is a map lookup.
     /// Pre-warming at MIXER OCIO command time is the proper fix -- see
-    /// docs/OCIO_INTEGRATION_STUDY.md section 8.7 -- and is not done here.
+    /// docs/architecture/OCIO_INTEGRATION_STUDY.md section 8.7 -- and is not done here.
     /// Build and cache an OCIO program WITHOUT drawing -- see the OGL kernel for the
     /// measurement that motivates it. Routed through `select_ocio_variant` so the cache key
     /// is by construction the one the later draw computes.
@@ -1622,7 +1622,7 @@ struct image_kernel::impl
             // config -- the same library and config the server links. Four of the seven original
             // rows were not the matrices they claimed to be (bt2020, dcip3 d65, arri wide gamut 3
             // and sony sgamut3.cine; worst deviation 0.41 per element). See
-            // docs/GAMUT_MATRIX_DEFECT_2026-08-12.md.
+            // docs/audits/GAMUT_MATRIX_DEFECT_2026-08-12.md.
             //
             // Indices 0..6 are the MIXER COLORSPACE gamut enum and must not be reordered.
             // 7 and 8 are new, so a channel configured p3-dci or adobe-rgb has a row at all:

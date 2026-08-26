@@ -298,7 +298,7 @@ class isf_producer : public core::frame_producer
             // Aliasing the source into this context with GL_EXT_memory_object would
             // be better and is the obvious next step, but it needs the source to be
             // an exportable allocation, and the ones that reach here are pooled. See
-            // docs/GPU_OPTIMIZATION_PLAN.md.
+            // docs/plans/GPU_OPTIMIZATION_PLAN.md.
             if (cf.pixel_format_desc().planes.size() == 1 &&
                 cf.pixel_format_desc().planes[0].depth == common::bit_depth::bit8) {
                 auto host = t->read_pixels();

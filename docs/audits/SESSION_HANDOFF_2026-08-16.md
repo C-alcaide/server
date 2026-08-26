@@ -162,8 +162,8 @@ carrying someone else's uncommitted work.
 * **Client:** `casparcg-360-client`, `ocio_panel.py` + wiring in `channel_tab.py`, committed
   on branch **`ui-restyle`**, which has **no upstream** — so that work is local only. It was
   the checked-out branch and is likely another session's; confirm before pushing it anywhere.
-* **Studies, deliberately not implemented:** [`AMF_SUPPORT_STUDY.md`](AMF_SUPPORT_STUDY.md)
+* **Studies, deliberately not implemented:** [`AMF_SUPPORT_STUDY.md`](../plans/AMF_SUPPORT_STUDY.md)
   (built afterwards — kept for the rationale) and
-  [`LED_PROCESSOR_CONTROL_STUDY.md`](LED_PROCESSOR_CONTROL_STUDY.md), which is a file of
+  [`LED_PROCESSOR_CONTROL_STUDY.md`](../plans/LED_PROCESSOR_CONTROL_STUDY.md), which is a file of
   questions because no Brompton or Megapixel hardware is on this machine and a vendor adapter
   written against a PDF is the failure this tree's first page warns about.

@@ -1,7 +1,7 @@
 # Plan: land the BGRA64 capture fix properly
 
 **Status: plan only. 2026-08-18.** The cause is proven and written up in
-[`UPSTREAM_SYNC_2026-08-18.md`](UPSTREAM_SYNC_2026-08-18.md) §3.1.1; two attempts at a fix
+[`UPSTREAM_SYNC_2026-08-18.md`](../audits/UPSTREAM_SYNC_2026-08-18.md) §3.1.1; two attempts at a fix
 were reverted in `c8caa2226`. This is what a third attempt should do differently, and what it
 must prove before it lands.
 
@@ -133,7 +133,7 @@ alongside its sibling:
 ```cpp
 /// Packed 16-bit BGRA/RGBA -> RGBA64BE, without swscale.
 ///
-/// swscale's BGRA64 -> RGBA64 permutation is lossy (see docs/PLAN_BGRA64_CAPTURE_FIX.md),
+/// swscale's BGRA64 -> RGBA64 permutation is lossy (see docs/plans/PLAN_BGRA64_CAPTURE_FIX.md),
 /// and a component permutation plus a byte swap needs no scaler. `swap_br` is true when the
 /// source is BGRA-ordered.
 std::shared_ptr<AVFrame> pack16_to_rgba64be(const std::shared_ptr<AVFrame>& src, bool swap_br);

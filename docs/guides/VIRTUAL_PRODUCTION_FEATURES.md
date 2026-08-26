@@ -2,13 +2,13 @@
 
 This feature set introduces GPU-accelerated 360° projection, curved screen compensation, real-time playback speed control, and layer mirroring to CasparCG Server, designed for virtual production, live events, and advanced broadcast workflows.
 
-For color management and grading features, see [COLOR_GRADING.md](COLOR_GRADING.md). For blur, sharpening, and film grain, see [IMAGE_EFFECTS.md](IMAGE_EFFECTS.md). For keyframe animation, see [KEYFRAMES.md](KEYFRAMES.md). For DMX lighting integration, see [DMX_LIGHTING.md](DMX_LIGHTING.md). For LED-wall color calibration, see [LED_CALIBRATION.md](LED_CALIBRATION.md).
+For color management and grading features, see [COLOR_GRADING.md](../guides/COLOR_GRADING.md). For blur, sharpening, and film grain, see [IMAGE_EFFECTS.md](../guides/IMAGE_EFFECTS.md). For keyframe animation, see [KEYFRAMES.md](../guides/KEYFRAMES.md). For DMX lighting integration, see [DMX_LIGHTING.md](../guides/DMX_LIGHTING.md). For LED-wall color calibration, see [LED_CALIBRATION.md](../guides/LED_CALIBRATION.md).
 
 Two colour docs sit beside `COLOR_GRADING.md` and are easy to miss from here, because
-neither is about a per-layer effect: [OCIO_USER_GUIDE.md](OCIO_USER_GUIDE.md) drives an
+neither is about a per-layer effect: [OCIO_USER_GUIDE.md](../guides/OCIO_USER_GUIDE.md) drives an
 OpenColorIO pipeline — a per-layer input transform plus a **channel** look and display
 transform, which is the ACES route an ICVFX stage usually wants — and
-[HDR_GUIDE.md](HDR_GUIDE.md) covers the channel's colour space, transfer function and what
+[HDR_GUIDE.md](../guides/HDR_GUIDE.md) covers the channel's colour space, transfer function and what
 each consumer signals on the wire.
 
 Most of what this document describes is geometry — where a pixel is sampled from — which
@@ -617,7 +617,7 @@ TRACKING 1-1 TARGET_MAP 0.5 3.0 1.7778
 TRACKING 1-1 GENLOCK 3 ON
 ```
 
-For full protocol details, zoom calibration, axis scaling, latency/nodal/lens/DOF realism, the lens-calibration file format, configuration file setup, and worked examples, see [CAMERA_TRACKING.md](CAMERA_TRACKING.md).
+For full protocol details, zoom calibration, axis scaling, latency/nodal/lens/DOF realism, the lens-calibration file format, configuration file setup, and worked examples, see [CAMERA_TRACKING.md](../guides/CAMERA_TRACKING.md).
 
 ---
 
@@ -646,7 +646,7 @@ MIXER 1-1 SHAPE CIRCLE 0.5 0.5 0.5 0.5 FILL SOLID COLOR1 #FF6600FF DURATION 30 T
 MIXER 1-1 SHAPE NONE
 ```
 
-For full command syntax, all shape types, gradient options, stroke parameters, and worked examples, see [MIXER_SHAPE.md](MIXER_SHAPE.md).
+For full command syntax, all shape types, gradient options, stroke parameters, and worked examples, see [MIXER_SHAPE.md](../guides/MIXER_SHAPE.md).
 
 ---
 
@@ -702,7 +702,7 @@ MIXER 1-10 GRAIN 0.12 2.0
 MIXER 1-10 GRAIN 0
 ```
 
-For full parameter tables, pipeline position details, and additional examples, see [IMAGE_EFFECTS.md](IMAGE_EFFECTS.md).
+For full parameter tables, pipeline position details, and additional examples, see [IMAGE_EFFECTS.md](../guides/IMAGE_EFFECTS.md).
 
 ---
 
@@ -747,7 +747,7 @@ KEYFRAMES CLEAR 1-10
 
 `LINEAR`, `EASEIN`, `EASEOUT`, `EASE`, `EASEINQUAD`, `EASEOUTQUAD`, `EASEINOUTQUAD`, `EASEINCUBIC`, `EASEOUTCUBIC`, `EASEINOUTCUBIC`, `EASEINBACK`, `EASEOUTBOUNCE`, `EASEINELASTIC`, and more — applied per-keyframe to control the interpolation shape between adjacent keyframes.
 
-For the complete field reference, interpolation modes, worked examples, and best practices, see [KEYFRAMES.md](KEYFRAMES.md).
+For the complete field reference, interpolation modes, worked examples, and best practices, see [KEYFRAMES.md](../guides/KEYFRAMES.md).
 
 ---
 
@@ -792,4 +792,4 @@ CasparCG can drive DMX lighting fixtures directly from video output using the **
 
 Multiple consumers can run on the same channel for multi-universe rigs, and ArtNet + sACN can be mixed freely.
 
-For full protocol references, fixture parameters, sampling region coordinates, worked examples, and troubleshooting, see [DMX_LIGHTING.md](DMX_LIGHTING.md).
+For full protocol references, fixture parameters, sampling region coordinates, worked examples, and troubleshooting, see [DMX_LIGHTING.md](../guides/DMX_LIGHTING.md).

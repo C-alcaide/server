@@ -1,6 +1,6 @@
 # Camera-Based Projection Calibration
 
-> Part of the [CasparCG 360° Client Operations Guide](OPERATIONS_GUIDE.md) — this
+> Part of the [CasparCG 360° Client Operations Guide](../guides/OPERATIONS_GUIDE.md) — this
 > is the in-depth reference for the **▣ Projection** tab. For the rest of the app
 > (Stage / previz, tracking, LED calibration, colour pipeline, rundown) start
 > with the operations guide.

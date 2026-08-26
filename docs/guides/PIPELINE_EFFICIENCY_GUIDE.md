@@ -148,7 +148,7 @@ the CPU saving.
 > 2026-08-21, that route drops a frame every ~3 seconds on a 3-second looping clip
 > (28 `fps` samples below nominal in a 24-second window against 0 for software), with
 > `frame-time` spikes of 3.3-3.5 against a 0.51 mean. See
-> [`FFMPEG_8_MIGRATION.md`](FFMPEG_8_MIGRATION.md) §6.1.2; it is why that option stays
+> [`FFMPEG_8_MIGRATION.md`](../architecture/FFMPEG_8_MIGRATION.md) §6.1.2; it is why that option stays
 > opt-in. `gpudirect/cpu_matrix.py` now
 > uses 90-second clips, plays without `LOOP`, and fails the row if the log
 > contains `Waiting for video frame`.

@@ -394,7 +394,7 @@ struct server::impl
             //
             // fp16 is not a free upgrade: near 1.0 its ulp is ~32x coarser than unorm16's,
             // so it is the right format for a linear buffer and the wrong one for a
-            // display-encoded one. See docs/OCIO_INTEGRATION_STUDY.md section 4.3.
+            // display-encoded one. See docs/architecture/OCIO_INTEGRATION_STUDY.md section 4.3.
             auto render_format_str = boost::to_lower_copy(xml_channel.second.get(L"render-format", L"unorm"));
             if (render_format_str != L"unorm" && render_format_str != L"fp16")
                 CASPAR_THROW_EXCEPTION(user_error()

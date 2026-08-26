@@ -2,14 +2,14 @@
 
 This guide covers the HDR-related features added to CasparVP: channel color configuration, automatic color conversion, BT.2020 / PQ / HLG propagation through the pipeline, DeckLink HDR input/output, Vulkan direct-display HDR output, FFmpeg consumer color metadata, and High Frame Rate (HFR) support.
 
-For per-layer color grading and ACES color management (MIXER COLORSPACE, CDL, LUT3D, etc.), see [COLOR_GRADING.md](COLOR_GRADING.md). For Vulkan output architecture details, see [VULKAN_OUTPUT.md](VULKAN_OUTPUT.md).
+For per-layer color grading and ACES color management (MIXER COLORSPACE, CDL, LUT3D, etc.), see [COLOR_GRADING.md](../guides/COLOR_GRADING.md). For Vulkan output architecture details, see [VULKAN_OUTPUT.md](../architecture/VULKAN_OUTPUT.md).
 
 > **There is a second route to an HDR channel**, through OpenColorIO: an `OCIO_DISPLAY` view
 > such as `ACES 2.0 - HDR 1000 nits (Rec.2020)` encodes the picture instead of the channel's
 > own OETF. Everything in this guide describes the built-in route. Where the two meet — and
 > which one decides what the SDI wire says — is [Two routes to an HDR
 > channel](#two-routes-to-an-hdr-channel-built-in-vs-ocio) below. The commands themselves are
-> in [OCIO_USER_GUIDE.md](OCIO_USER_GUIDE.md).
+> in [OCIO_USER_GUIDE.md](../guides/OCIO_USER_GUIDE.md).
 
 ---
 
@@ -289,7 +289,7 @@ reports the same list from a running server, and is what to trust if `<ocio-conf
 a facility config instead.
 
 > **Quote both arguments.** 48 of the 55 colour space names and every display and view name in
-> this config contain spaces or parentheses. See [OCIO_USER_GUIDE.md §1](OCIO_USER_GUIDE.md).
+> this config contain spaces or parentheses. See [OCIO_USER_GUIDE.md §1](../guides/OCIO_USER_GUIDE.md).
 
 ### Where PQ/HLG is decided — pixels and signalling are decided separately
 
@@ -373,7 +373,7 @@ The nits of the *view* (500 vs 4000) do not change the signalling — that is wh
 > measured end-to-end: no battery has yet captured an OCIO HDR view and compared it against the
 > built-in PQ path, and none has read back SDI signalling on an OCIO channel. What *is*
 > measured is that a display transform renders correctly at all — `cli.py ocio-look` and
-> `cli.py amf`, both mixers byte-identical, in [OCIO_USER_GUIDE.md](OCIO_USER_GUIDE.md). Treat
+> `cli.py amf`, both mixers byte-identical, in [OCIO_USER_GUIDE.md](../guides/OCIO_USER_GUIDE.md). Treat
 > the table as the configuration you want, not as a verified claim about the wire.
 
 ---
@@ -548,7 +548,7 @@ If omitted, both values are inherited from the channel defaults.
 
 ## Vulkan Output (Direct Display)
 
-The Vulkan output consumer provides low-latency, direct-to-display HDR output. It performs its own gamut and transfer function conversion via a Vulkan compute shader — or bypasses it entirely using NVIDIA hardware HDR acceleration when available. For full architecture details, see [VULKAN_OUTPUT.md](VULKAN_OUTPUT.md).
+The Vulkan output consumer provides low-latency, direct-to-display HDR output. It performs its own gamut and transfer function conversion via a Vulkan compute shader — or bypasses it entirely using NVIDIA hardware HDR acceleration when available. For full architecture details, see [VULKAN_OUTPUT.md](../architecture/VULKAN_OUTPUT.md).
 
 ### HDR Configuration
 
@@ -1242,7 +1242,7 @@ CasparVP now captures and propagates `AVChromaLocation` metadata from the FFmpeg
 
 - **Dynamic per-frame transfer function switching** is supported on the *input* side (DeckLink capture and file playback detect it per frame). On the *output* side the transfer function is set at channel-start time and is fixed for the session — runtime changes require a channel restart.
 
-- **Tone mapping** is available at two levels: (1) channel-level via `<auto-tone-map>`, applied during auto color conversion when source and channel transfer functions differ; and (2) per-consumer via `<auto-tone-map>` on screen or vulkan-output consumers, applied as a display transform on the final composited output. Without an explicit tone-map setting, the auto path hard-clips to [0,1] (broadcast standard). For per-layer creative tone mapping, use `MIXER COLORSPACE` with a tone mapping operator (see [COLOR_GRADING.md](COLOR_GRADING.md)).
+- **Tone mapping** is available at two levels: (1) channel-level via `<auto-tone-map>`, applied during auto color conversion when source and channel transfer functions differ; and (2) per-consumer via `<auto-tone-map>` on screen or vulkan-output consumers, applied as a display transform on the final composited output. Without an explicit tone-map setting, the auto path hard-clips to [0,1] (broadcast standard). For per-layer creative tone mapping, use `MIXER COLORSPACE` with a tone mapping operator (see [COLOR_GRADING.md](../guides/COLOR_GRADING.md)).
 
 - **`<auto-tone-map>` is inert on a channel with an `OCIO_DISPLAY`**, along with the rest of the built-in output half — the view owns the tone map, the gamut and the encoding. Not a fallback and not a compositor of the two: the generated view *replaces* that block. See [Two routes to an HDR channel](#two-routes-to-an-hdr-channel-built-in-vs-ocio).
 

@@ -12,7 +12,7 @@ toolset: the global **3D Stage / previz**, **camera tracking**, **projection
 calibration**, **LED calibration**, and the **advanced colour pipeline**.
 
 > Looking for the deep projection workflow? The full camera-vision calibration
-> reference lives in [docs/PROJECTION_CALIBRATION.md](PROJECTION_CALIBRATION.md).
+> reference lives in [docs/guides/PROJECTION_CALIBRATION.md](../guides/PROJECTION_CALIBRATION.md).
 > This guide summarises it and points you there for the detail.
 
 ---
@@ -662,7 +662,7 @@ Representative commands: `TRACKING <ch>-<layer> BIND …`, `… UNBIND`,
 ## 12. Projection calibration
 
 > **Advanced.** Camera-vision geometry solve for projection-mapped surfaces.
-> Full reference: [docs/PROJECTION_CALIBRATION.md](PROJECTION_CALIBRATION.md).
+> Full reference: [docs/guides/PROJECTION_CALIBRATION.md](../guides/PROJECTION_CALIBRATION.md).
 
 Under **🎬 Virtual Production → ▣ Projection**, the workflow is organised into
 progressive phases. A camera films the projected surface; the client solves a
@@ -885,7 +885,7 @@ rundown timers. The traffic dot in the OSC widget confirms packets are arriving.
 
 *For the complete projection-calibration workflow — patterns, multi-projector
 alignment, blend masks, bundle adjustment and the SDI closed-loop scan — see*
-*[docs/PROJECTION_CALIBRATION.md](PROJECTION_CALIBRATION.md).*
+*[docs/guides/PROJECTION_CALIBRATION.md](../guides/PROJECTION_CALIBRATION.md).*
 
 ---
 

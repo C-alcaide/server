@@ -217,7 +217,7 @@ struct image_consumer : public core::frame_consumer
                 // What the MIXER handed us, before this consumer touches a byte.
                 //
                 // Kept because it is what identified the swscale BGRA64->RGBA64 defect
-                // described in docs/UPSTREAM_SYNC_2026-08-18.md section 3.1.1: everything
+                // described in docs/audits/UPSTREAM_SYNC_2026-08-18.md section 3.1.1: everything
                 // downstream of here is shared by both mixer backends, so logging the frame
                 // as it arrives is what splits "the mixer produced this" from "this consumer
                 // mangled it". No battery can currently distinguish those, and without this
@@ -341,7 +341,7 @@ struct image_consumer : public core::frame_consumer
                     // and the 133 s beat the unfixed control's 141 s. The 3x was a
                     // first-run-after-build warm-up artefact each time. Measure this path twice
                     // before believing a timing result from it -- see
-                    // docs/PLAN_BGRA64_CAPTURE_FIX.md section 8.2.2.
+                    // docs/plans/PLAN_BGRA64_CAPTURE_FIX.md section 8.2.2.
                     const bool swap_rb = (pix_desc.format == core::pixel_format::bgra);
 
                     for (int y = 0; y < h; ++y) {

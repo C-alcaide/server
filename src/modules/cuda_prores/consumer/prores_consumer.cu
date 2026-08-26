@@ -993,7 +993,7 @@ private:
         // Frame-level rather than per-slice: the reference encoder runs a trellis search
         // per slice, which holds the rate WITHIN a frame as well. This holds a rolling
         // average instead, so a single frame can overshoot -- see the note in
-        // docs/CUDA_PRORES OPERATION_GUIDE.md.
+        // docs/guides/CUDA_PRORES_OPERATION_GUIDE.md.
         if (cfg_.q_auto && encoded_size > 0 && target_bits_per_mb_ > 0) {
             const int mbs = frame_ctx_.mbs_per_slice * frame_ctx_.slices_per_row
                           * ((frame_ctx_.field_height + 15) / 16)

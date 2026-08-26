@@ -47,7 +47,7 @@ namespace caspar { namespace accelerator { namespace vulkan {
  * Vulkan-writes-Vulkan-reads is correct both on a native and on an imported
  * allocation, so Vulkan's plane machinery is sound and self-consistent -- it is
  * specifically D3D11-writes/Vulkan-reads that breaks. See
- * docs/GPU_INTEROP_PLAN.md item 1.
+ * docs/plans/GPU_INTEROP_PLAN.md item 1.
  *
  * So the producer extracts the two planes into two ordinary single-plane D3D11
  * textures first (R8 for Y, R8G8 for interleaved CbCr, which is exactly what

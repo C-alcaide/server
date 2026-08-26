@@ -210,7 +210,7 @@ link_directories(${BINARY_DIR})
 # above relies on. A previously abandoned attempt (b304665b8) instead pulled MSYS2/MinGW64
 # binaries into this MSVC process -- libOpenColorIO plus libstdc++-6, libgcc_s_seh-1 and
 # libwinpthread-1 -- which is two C++ runtimes and two heaps in one address space. Do not
-# do that again; see docs/OCIO_INTEGRATION_STUDY.md section 1.3.
+# do that again; see docs/architecture/OCIO_INTEGRATION_STUDY.md section 1.3.
 #
 # OCIO_INSTALL_EXT_PACKAGES=ALL has OCIO download and statically link its own dependencies
 # (Imath, yaml-cpp, pystring, minizip-ng, expat, zlib) into the one OpenColorIO DLL, so

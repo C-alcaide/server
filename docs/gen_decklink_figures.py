@@ -1,4 +1,4 @@
-"""Generate figures for docs/DECKLINK_GPU_DIRECT_OUTPUT.md.
+"""Generate figures for docs/architecture/DECKLINK_GPU_DIRECT_OUTPUT.md.
 
 Run:  python docs/gen_decklink_figures.py
 Outputs PNGs into docs/images/decklink/.

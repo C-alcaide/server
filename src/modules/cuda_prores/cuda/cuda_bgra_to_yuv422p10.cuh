@@ -38,7 +38,7 @@
 // 3840 are not, which is why it never showed. Indexing per pixel PAIR, as this kernel does,
 // covers every column by construction and needs no pre-zeroing.
 //
-// This is deliberately NOT built on a kernel-fusion framework. `docs/FKL_INTEGRATION_ANALYSIS.md`
+// This is deliberately NOT built on a kernel-fusion framework. `docs/plans/FKL_INTEGRATION_ANALYSIS.md`
 // recommended exactly this change in 2025 as the thing to do WITHOUT one -- a two-kernel
 // element-wise chain collapsing into one is a kernel you write, not a dependency you take.
 //

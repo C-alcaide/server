@@ -132,7 +132,7 @@ const AVRational TIME_BASE_Q = {1, AV_TIME_BASE};
 // Vulkan imports the two single-plane textures rather than the decoded NV12
 // surface as one multi-planar image, because the latter was measured not to
 // work: D3D11 and the Vulkan driver disagree about where plane 1 lives inside a
-// shared allocation. See docs/GPU_INTEROP_PLAN.md item 1 and the comment on
+// shared allocation. See docs/plans/GPU_INTEROP_PLAN.md item 1 and the comment on
 // d3d11_import_bridge.
 #ifdef _WIN32
 class d3d11_bridge
@@ -1618,7 +1618,7 @@ class Decoder
     // the `thread` member while that very member was still being assigned from
     // the boost::thread constructor's result -- a data race on the object the
     // lambda was being stored into. See
-    // docs/CasparCG_HRC_Crash_Report_2026-06-17.md §9.1 fix 4a.
+    // docs/audits/CasparCG_HRC_Crash_Report_2026-06-17.md §9.1 fix 4a.
     std::atomic<bool>         abort_{false};
     std::atomic<bool>         flush_requested_{false};
     boost::mutex              flush_mutex_;
@@ -3547,7 +3547,7 @@ struct AVProducer::Impl
         // executors touch all of them; freeing them in declaration order while
         // any of that is still live is how ffmpeg allocations end up being freed
         // twice or read after free. See
-        // docs/CasparCG_HRC_Crash_Report_2026-06-17.md §9.1 fix 3.
+        // docs/audits/CasparCG_HRC_Crash_Report_2026-06-17.md §9.1 fix 3.
 
         // 0. Give back the shared loop-cache allowance. Before anything else, because it is
         //    accounting rather than teardown and must not be skipped by an exception below.

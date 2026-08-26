@@ -46,7 +46,7 @@ class image_mixer final : public core::image_mixer
     /// is independent of `depth`, which stays the channel's output depth. unorm is
     /// bit-identical to the behaviour before this parameter existed; fp16 buys range
     /// (negatives and values above 1.0) for a linear working space. See
-    /// common/render_format.h and docs/OCIO_INTEGRATION_STUDY.md section 4.3.
+    /// common/render_format.h and docs/architecture/OCIO_INTEGRATION_STUDY.md section 4.3.
     image_mixer(const spl::shared_ptr<class device>& ogl,
                 int                                  channel_id,
                 const size_t                         max_frame_size,

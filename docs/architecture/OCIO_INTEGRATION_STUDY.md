@@ -6,7 +6,7 @@
 > transform, channel display transform, per-consumer views, custom configs and the
 > interactions with the built-in grading chain are all in and measured.
 >
-> * **Using it:** [`OCIO_USER_GUIDE.md`](OCIO_USER_GUIDE.md) — commands, config elements,
+> * **Using it:** [`OCIO_USER_GUIDE.md`](../guides/OCIO_USER_GUIDE.md) — commands, config elements,
 >   refusal codes.
 > * **What changed in rendered output, with the numbers:** `CHANGELOG.md`.
 > * **How it is verified:** §5.4 below.
@@ -142,7 +142,7 @@ There is still no `$OCIO` environment route, and that remains deliberate: the co
 from the config file or the pin, not from the machine's environment.
 
 Operator-facing detail — the element, its failure modes and the worked example — is in
-[`OCIO_USER_GUIDE.md`](OCIO_USER_GUIDE.md) §6.1.
+[`OCIO_USER_GUIDE.md`](../guides/OCIO_USER_GUIDE.md) §6.1.
 
 ### 2.3 The substantive quality argument
 
@@ -508,7 +508,7 @@ run dies mid-way with no error in its own log.
 Phase 0 is worth doing on its own merits even if OCIO is never adopted: it makes the clamp
 documented at `COLOR_GRADING.md:558-561` **opt-out per channel** rather than absolute, which
 unlocks linear EXR and scRGB sources — and that is also what
-[`IMAGE_SEQUENCE_AND_TIMELINE_PLAN.md`](IMAGE_SEQUENCE_AND_TIMELINE_PLAN.md) §4.2 needs for
+[`IMAGE_SEQUENCE_AND_TIMELINE_PLAN.md`](../plans/IMAGE_SEQUENCE_AND_TIMELINE_PLAN.md) §4.2 needs for
 `gbrpf32le` sequence input. **The two projects share this dependency**, which is a reason to
 do phase 0 first regardless of which feature is ultimately wanted.
 
@@ -741,5 +741,5 @@ throughput.
 * [Colorspaces — `isData`](https://opencolorio.readthedocs.io/en/latest/guides/authoring/colorspaces.html)
 * [OCIO 2.0 release notes — data space handling](https://github.com/AcademySoftwareFoundation/OpenColorIO/blob/main/docs/releases/ocio_2_0.rst)
 * [OpenImageIO `colorconvert` / `unpremult`](https://github.com/OpenImageIO/oiio/blob/master/src/include/OpenImageIO/imagebufalgo.h)
-* In-tree: `b304665b8`, `origin/feature/ocio-support`, `docs/COLOR_GRADING.md`,
+* In-tree: `b304665b8`, `origin/feature/ocio-support`, `docs/guides/COLOR_GRADING.md`,
   `BUILDING_WORKFLOW.md`, `OCIO_USER_GUIDE.md`

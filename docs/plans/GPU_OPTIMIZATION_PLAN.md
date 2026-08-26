@@ -5,7 +5,7 @@
 > quality concerns that may not surface immediately during testing.
 
 > **Looking for how to *use* any of this?** See
-> [PIPELINE_EFFICIENCY_GUIDE.md](PIPELINE_EFFICIENCY_GUIDE.md) — which paths
+> [PIPELINE_EFFICIENCY_GUIDE.md](../guides/PIPELINE_EFFICIENCY_GUIDE.md) — which paths
 > exist, how to stay on them, what limits a channel, and how to diagnose one that
 > is late. This document is the reasoning, the measurements and the ideas that
 > were rejected; that one is the operating instructions.

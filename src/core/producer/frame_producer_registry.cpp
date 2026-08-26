@@ -92,7 +92,7 @@ class destroy_producer_proxy : public frame_producer
         // unwinding terminates the process). Report the backlog instead; the
         // queue is unbounded by design (set_capacity above) so there is nothing
         // to protect against here beyond visibility.
-        // See docs/CasparCG_HRC_Crash_Report_2026-06-17.md §9.1 fix 2.
+        // See docs/audits/CasparCG_HRC_Crash_Report_2026-06-17.md §9.1 fix 2.
         const auto backlog = destroyer->size();
         if (backlog >= 8) {
             CASPAR_LOG(warning) << L"Producer destroyer backlog: " << backlog << L" producers awaiting destruction.";

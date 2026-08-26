@@ -53,7 +53,7 @@ set(HEADERS
 # its own GPU-direct HTML path (html_gpu_bridge + ogl/util/dx_interop). These three files
 # are needed anyway because html.cpp's is_gpu_shared_texture_enabled() probes the D3D
 # device to decide whether CEF can hand over a shared texture at all, and without them that
-# is an unresolved symbol at link time. See docs/UPSTREAM_SYNC_2026-08-18.md.
+# is an unresolved symbol at link time. See docs/audits/UPSTREAM_SYNC_2026-08-18.md.
 if (MSVC)
 	list(APPEND SOURCES
 		d3d/d3d_device.cpp

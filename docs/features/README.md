@@ -73,7 +73,7 @@ nothing drove it. Undocumented and untested proved to be the same gap seen from 
 | :--- | ---: | :--- | :--- | :--- |
 | **Projection warp, blend, curve, distortion, frustum, lens, offset** | 10 | `geometry`, `blend-mask`, `calibration`, `venue-test` | **partial** | **[projection-and-icvfx.md](projection-and-icvfx.md)** |
 | **ICVFX inner/outer frustum** | 2 | `icvfx-parity` (gain only) | **partial** | **[projection-and-icvfx.md](projection-and-icvfx.md)** |
-| PREVIZ 3D module | 13 | none | **shipped, unmeasured** | `PREVIZ_3D_MODULE.md` |
+| **PREVIZ 3D module** | 13 | **none** | **shipped, unmeasured** | **[previz.md](previz.md)** |
 | Camera tracking | — | none | shipped, unmeasured | `CAMERA_TRACKING.md` |
 | Projection calibration | 1 | `calibration` | shipped | `PROJECTION_CALIBRATION.md` |
 
@@ -82,7 +82,7 @@ nothing drove it. Undocumented and untested proved to be the same gap seen from 
 | feature | coverage | state | document |
 | :--- | :--- | :--- | :--- |
 | Vulkan mixer | `conformance`, `grading`, `mixer-parity`, `vk-validation` (**cannot currently fail** — see `CLAUDE.md`) | shipped | `VULKAN_MIXER_IMPLEMENTATION.md` |
-| CUDA ProRes producer + consumer | `prores-parity`, `producer-swap`, `playback-scaling`, `encode-matrix` | shipped | `CUDA_PRORES` |
+| **CUDA ProRes producer + consumer** | `prores-parity`, `producer-swap`, `playback-scaling`, `encode-matrix`, `coexistence` | shipped | **[cuda-prores.md](cuda-prores.md)** |
 | CUDA NotchLC producer | `producer-swap`, `coexistence` | shipped | — |
 | Vulkan output consumer | `signalling`, `consumer-view` | partial | `VULKAN_OUTPUT.md` |
 | GPU interop (CUDA↔VK, D3D11↔VK, VK↔GL) | `coexistence`, `gpu-direct-parity` | shipped | `GPU_INTEROP_ARCHITECTURE.md` |
@@ -112,10 +112,14 @@ Not alphabetical, and not by size. **By where defects have actually hidden**, wh
 
 1. **Projection and ICVFX** — 12 commands, all undocumented before this folder existed, one
    carrying a live colour defect. Written; see the document above.
-2. **PREVIZ** — 13 commands, no documentation, no coverage. The largest undocumented surface in
-   the fork and the same shape as ICVFX before it broke.
-3. **LTC, keyframes, cluster sync, replay, spout, remotewall** — shipped, unmeasured, undocumented.
-4. Everything with an existing guide — those need a state summary and a pointer, not a rewrite.
+2. **PREVIZ** — written; see the document above. 13 commands, still **no coverage**, and the
+   document says what a first battery should check and in what order.
+3. **CUDA ProRes** — written. Chosen third because it is the most heavily measured part of the
+   fork, so its document is mostly a place to put numbers that were scattered across commits.
+4. **LTC, spout, HAP, NotchLC, dmx_common, sACN** — shipped, and with no document of their own at
+   all. The next batch.
+5. **Keyframes, cluster sync, replay, remotewall, PortAudio, camera tracking** — these have a guide
+   already, so they need a state-and-coverage summary and a pointer, not a rewrite.
 
 ---
 

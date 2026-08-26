@@ -70,7 +70,7 @@ struct blend_mask_data final
 //     attachments, routed by `draw_params::grade_node_only`.
 //
 // Design study, including the shapes and operators this does NOT implement:
-// docs/GRADING_NODE_GRAPH_STUDY.md.
+// docs/plans/GRADING_NODE_GRAPH_STUDY.md.
 //
 // ⚠ The window is in FRAME space, not the layer's source UV. A node pass draws a
 // full-screen attachment with `frame_geometry::get_default()`, so its UV spans the
@@ -241,7 +241,7 @@ struct color_grade final
 //
 // What this does NOT touch is the creative grading in the middle of the chain. Those tools
 // operate on scene-linear ACEScg either way, so a CDL or a curve means the same thing with
-// OCIO on as with k_direct on -- see docs/OCIO_INTEGRATION_STUDY.md section 4.2.
+// OCIO on as with k_direct on -- see docs/architecture/OCIO_INTEGRATION_STUDY.md section 4.2.
 //
 // `source_space` is a config-defined string, deliberately not an enum: enumerating it would
 // defeat the point of using a config, and the names differ between the CG and Studio

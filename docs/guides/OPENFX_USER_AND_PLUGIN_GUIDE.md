@@ -1,6 +1,6 @@
 # CasparCG OpenFX (OFX) — User Manual & Plugin Author Guide
 
-> Module: `src/modules/ofx` · Companion: [OPENFX_IMPLEMENTATION.md](OPENFX_IMPLEMENTATION.md)
+> Module: `src/modules/ofx` · Companion: [OPENFX_IMPLEMENTATION.md](../architecture/OPENFX_IMPLEMENTATION.md)
 
 This guide has two parts:
 

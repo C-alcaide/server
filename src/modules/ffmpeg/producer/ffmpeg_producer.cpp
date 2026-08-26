@@ -152,7 +152,7 @@ struct ffmpeg_producer : public core::frame_producer
         // mass CLEAR/REMOVE then freed N producers' ffmpeg allocations
         // concurrently on the shared heap, which is the mechanism behind the
         // long-standing 0xc0000374 heap-corruption crashes on this codebase
-        // (see docs/CasparCG_HRC_Crash_Report_2026-06-17.md).
+        // (see docs/audits/CasparCG_HRC_Crash_Report_2026-06-17.md).
         //
         // A small fixed pool keeps teardown off the hot path while bounding how
         // many teardowns can race. It is not a single worker: one slow-to-close
