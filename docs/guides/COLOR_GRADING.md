@@ -1252,7 +1252,7 @@ tell a correct window from no window at all. It samples inside and outside and a
 *relationship*: `inside ≈ outside × exposure`, `outside ≈ base` (the window does not leak), plus a
 separation control and a restore-after-`CLEAR` check.
 
-Measured 2026-08-27 after the rename, on both mixers:
+Measured 2026-08-27, on both mixers:
 
 | | OGL | Vulkan | gate |
 | :--- | ---: | ---: | ---: |
@@ -1260,11 +1260,20 @@ Measured 2026-08-27 after the rename, on both mixers:
 | worst leak outside | 0.00 LSB | 0.00 LSB | 1.0 |
 | least separation | 77.0 LSB | 77.0 LSB | ≥ 8.0 |
 | worst restore after `CLEAR` | 0.00 LSB | 0.00 LSB | 1.0 |
+| **worst chain error** (two nodes) | **0.75 LSB** | **0.75 LSB** | 1.0 |
+| **worst `invert` inside** | **0.00 LSB** | **0.00 LSB** | 1.0 |
+| **least `invert` separation** | **77.0 LSB** | **77.0 LSB** | ≥ 8.0 |
+
+**The chain is now verified rather than advertised.** The two windows are concentric, so a centre
+pixel passes through both nodes and the expectation is `outside × exposure²` — a loop running only
+the first node would land a whole stop away. Node 1 demonstrably executes.
 
 **The two backends returned identical figures**, which is a parity result the battery does not
 itself assert — it runs one mixer at a time and compares each to a model, not to the other.
 
-**Not covered**, in the battery's own words: window shape beyond a centred ellipse, the feather
-profile itself (both samples sit in flat regions, so the falloff is untested), source-UV windows,
-multiple nodes at once, and every operation but exposure. Add `invert` and the blend-mode
-interaction above to that list.
+**Not covered**, and this list is now shorter than it was: window shape beyond a centred ellipse,
+the feather profile itself (both samples sit in flat regions, so the falloff is untested),
+source-UV windows, more than two nodes, non-concentric chains, and every operation but exposure.
+Plus the keyer and non-normal blend modes, which the node pass bypasses by construction — that one
+is a property of the implementation rather than a gap in the battery, and is the thing to settle
+before this is used in a show.
