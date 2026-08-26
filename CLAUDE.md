@@ -51,7 +51,7 @@ catch its mutation cannot fail*.
 | the decode path | `flat-decoded` (the only 1 LSB decode gate), `sdi-input`, `source-colorspace` |
 | consumer **metadata** — colour signalling, HDR static data | `signalling` (DeckLink), `signalling --stream` (FFmpeg). **Vulkan output has no coverage — see below** |
 | consumer **pixels** | `sdi-output` (`--hdr-metadata` for the DeckLink HDR block), `consumer-view`, or `cli.py run --consumer <name>` |
-| Vulkan API usage rather than picture | `vk-validation` |
+| Vulkan API usage rather than picture | `vk-validation` — **but it cannot currently fail; see below** |
 | geometry, rasters, projection | `geometry`, `mixer-parity` |
 | docs only | nothing |
 
@@ -62,6 +62,20 @@ Two rules that outrank the table:
 * **If nothing in the table covers what you changed, say so in the commit** rather than
   running the nearest battery. That sentence is what turns a gap into a tracked item; the
   Vulkan-consumer-metadata gap below was found exactly that way.
+
+**Known gap, 2026-08-26: `vk-validation` reports clean whatever you do.** A deliberate
+`mipLevels = 0` in `device::create_exportable_texture` — an unambiguous stateless VUID, verified
+compiled into the binary and verified reached — came back "0 VUID findings" with no layer output
+at all. So no Vulkan API-usage claim can currently be supported by this battery: a finding it
+reports is real, silence means nothing. Two causes are fixed (deprecated layer-setting names
+that the layer ignores without falling back, and a finding regex blind to `kVUID_Core_*` ids);
+the third is open — core validation emits nothing after device creation, though the layer is in
+the chain and best-practices findings do appear. Tracked in the harness module's docstring.
+
+This is also why the exportable-texture layout fix in `0f1c5fb38` is argued from reading the
+code rather than from a validation run: nothing anywhere issued a barrier for images the mixer
+binds with a descriptor declaring `eShaderReadOnlyOptimal`. The battery was run before and after
+and reported 0 both times, which — now — is exactly what it would report either way.
 
 **Known gap, 2026-08-17: nothing measures Vulkan output consumer metadata.** No harness module
 references `nvapi`, `UHDA` or `edid`; `signalling` drives DeckLink and the FFmpeg stream, and
