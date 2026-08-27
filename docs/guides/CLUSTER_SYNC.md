@@ -219,7 +219,29 @@ For a 50fps channel (`fps_num=50`, `fps_den=1`):
 
 For fractional framerates like 29.97fps (`fps_num=30000`, `fps_den=1001`):
 - Frame period = $\frac{1001 \times 10^9}{30000} = 33{,}366{,}667$ ns ≈ 33.37ms
-- The integer division `(elapsed * 30000) / (1001 * 1'000'000'000)` produces exact frame boundaries with no accumulated error
+> **The code does not evaluate that division directly, and at fractional rates the result is one
+> frame low about half the time.** `elapsed * num` overflows int64 (the source puts it at ~42 h for
+> 59.94), so `ptp_ns_to_frame` splits `elapsed` into whole seconds and a remainder and truncates
+> each part separately -- and two truncated quotients do not always sum to the quotient of the sum.
+> Measured by evaluating both forms at 200,000 random instants: at 29.97 fps the split is **1 frame
+> low for ~50% of instants over a minute, an hour and a day alike**, and the error is **bounded at
+> exactly one frame -- it never accumulates**. At integer rates such as 50 fps the two forms agree
+> everywhere, because `den = 1` leaves nothing to truncate.
+>
+> **This does not affect synchronisation, which is what the subsystem is for.** Every node runs the
+> same arithmetic on the same PTP time, so every node computes the same number; consistency between
+> nodes is exact. What is off by one is the mapping from a frame number to wall-clock time at
+> fractional rates. The inverse, `frame_to_ptp_ns`, splits on `num` instead and **is** exact for all
+> rates -- there the remainder term divides evenly by construction.
+>
+> Worth knowing if you compute an expected frame number externally and compare it against
+> `CLUSTER STATUS`: at 29.97 they will differ by one about half the time, and neither is drifting.
+
+Two further behaviours of `ptp_ns_to_frame`:
+
+- **A PTP time before the epoch origin returns `-1`**, not a negative frame number. So an
+  `<epoch-origin>` set in the future gives `-1` indefinitely rather than counting up to zero.
+- All frame calculations are 64-bit integer throughout; there is no floating-point step to diverge.
 
 ### Epoch Origin
 
@@ -634,6 +656,27 @@ Stop drift monitoring.
 >> CLUSTER UNTRACK 1-10     -- Untrack specific layer
 << 202 CLUSTER UNTRACK OK
 ```
+
+### Refusals
+
+Undocumented until 2026-08-27. **`501` and `400` mean different things and are worth telling
+apart: `501` is about the cluster not being up, `400` about what you sent.**
+
+| code | command | meaning |
+| :--- | :--- | :--- |
+| `501 CLUSTER SCHEDULE FAILED` | `SCHEDULE` | cluster inactive, or no scheduler — nothing was queued |
+| `501 CLUSTER TRACK FAILED` | `TRACK` | cluster inactive |
+| `501 CLUSTER TRACK FAILED - NO WATCHDOG` | `TRACK` | cluster **is** active but the drift watchdog is not running, so there is nothing to track with. A distinct message because the fix is different |
+| `501 CLUSTER UNTRACK FAILED` | `UNTRACK` | cluster inactive **or** no watchdog — this one does not distinguish them |
+| `400 CLUSTER SCHEDULE ERROR` | `SCHEDULE` | fewer than two parameters |
+| `400 CLUSTER SCHEDULE ERROR - INVALID FRAME` | `SCHEDULE` | the `AT <frame>` value did not parse |
+| `400 CLUSTER TRACK ERROR` | `TRACK` | no parameters |
+| `400 CLUSTER TRACK ERROR - INVALID CHANNEL` | `TRACK` | the channel (or `channel-layer`) did not parse, or names no channel |
+| `400 CLUSTER UNTRACK ERROR` | `UNTRACK` | no parameters |
+| `400 CLUSTER UNTRACK ERROR - INVALID CHANNEL` | `UNTRACK` | as above |
+
+`CLUSTER STATUS` has no error path: with the cluster disabled it answers
+`201 CLUSTER STATUS OK` followed by `DISABLED`, which is a success reply, not a refusal.
 
 ---
 
