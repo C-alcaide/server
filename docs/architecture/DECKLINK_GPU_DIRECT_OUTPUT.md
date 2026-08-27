@@ -78,7 +78,7 @@ flowchart TD
     C -->|yes| E[ogl_gl_strategy<br/>GL compute pack]
     C -->|no| F[CPU strategy<br/>AVX2 pack]
     D -->|cuda| G[cuda_vk_strategy]
-    D -->|vulkan / vulkan_dma| H[vk_readback_strategy]
+    D -->|vulkan / vulkan-dma| H[vk_readback_strategy]
     D -->|cpu| F
     E --> T{"&lt;gpu-transfer&gt;"}
     T -->|dvp + available| I[DVP GPU→pinned DMA]
@@ -109,7 +109,7 @@ All elements live inside a `<decklink>` consumer block. Defaults preserve legacy
 | `<pixel-format>` | `yuv` \| `rgba` | `rgba` | `yuv` → `v210` (10‑bit 4:2:2); `rgba` → `BGRA8`. |
 | `<gpu-pack>` | `gpu` \| `cpu` \| `auto` | `auto` (=cpu) | Pack on the GPU (compute) vs CPU (AVX2). OpenGL mixer only. |
 | `<gpu-transfer>` | `copy` \| `dvp` \| `auto` | `auto` | Final GPU→host transfer. `dvp` uses GPUDirect; falls back to `copy` if unavailable. |
-| `<gpu-readback-mode>` | `cuda` \| `vulkan` \| `vulkan_dma` \| `cpu` \| `auto` | `auto` | Vulkan mixer packing/readback strategy. |
+| `<gpu-readback-mode>` | `cuda` \| `vulkan` \| **`vulkan-dma`** \| `cpu` \| `auto` | `auto` | Vulkan mixer packing/readback strategy. **The config value is hyphenated**; `vulkan_dma` with an underscore is the C++ enum name and is **not** accepted here — it falls through to `auto` silently, which is a different path. |
 | `<latency>` | `normal` \| `low` \| `sync` | `normal` | Scheduling model (see §6). |
 | `<buffer-depth>` | int ≥ 3 | 3 | Base preroll depth (scheduled modes). |
 | `<embedded-audio>` | `true`/`false` | `false` | SDI embedded audio. |
