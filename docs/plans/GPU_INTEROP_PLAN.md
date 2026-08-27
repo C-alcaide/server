@@ -1,5 +1,11 @@
 # Closing the Vulkan interop gaps
 
+> **Status:** SHIPPED — verified 2026-08-27 — all three items are struck through in §Ordering with
+> the commits that closed them (`489b02fbc`, `b1f591025`, `9193ea300`); item 3 was closed by item 2
+> removing its reason. Kept here rather than moved to `../deprecated/` because four source files
+> cite it by item number — see the README.
+> **Falsifier:** none — shipped; the design and the reasoning are what this file is still for.
+
 ## Why
 
 Four producers already hand the Vulkan mixer a texture without a host round trip

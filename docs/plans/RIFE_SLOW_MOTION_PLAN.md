@@ -1,7 +1,9 @@
 # RIFE Slow-Motion Frame Interpolation — Implementation Plan
 
-> **STATUS: UNIMPLEMENTED DESIGN, 2026-08-21.** Nothing in `src/` references `rife` — this is a
-> proposal, not a description of the server. Every figure below is a *prediction*: none of it
+> **Status:** UNIMPLEMENTED — verified 2026-08-27 — nothing in `src/` references `rife`.
+> **Falsifier:** `rife`
+>
+> A proposal, not a description of the server. Every figure below is a *prediction*: none of it
 > has been measured on this hardware, and some of it is priced on hardware this rig does not
 > have. Read it as a plan to evaluate, never as a capability to rely on.
 

@@ -33,8 +33,17 @@ vendored third-party code inside a fork is the hardest kind to keep current, and
 which versions these are or when they were taken.
 
 Operator detail: [`../guides/REMOTEWALL_MODULE.md`](../guides/REMOTEWALL_MODULE.md).
-A native rewrite was planned and not done — [`../plans/REMOTEWALL_NATIVE_MODULE_PLAN.md`](../plans/REMOTEWALL_NATIVE_MODULE_PLAN.md),
-which is in `plans/` because it describes intent rather than state.
+
+**This module IS the native rewrite**, and the plan that asked for it —
+[`../plans/REMOTEWALL_NATIVE_MODULE_PLAN.md`](../plans/REMOTEWALL_NATIVE_MODULE_PLAN.md) — is
+delivered: phases 0-4 of its §8 landed as named commits, phase 5 (AV1, 10-bit HDR, multi-GPU) as
+`c58f5f3a1`, and six fixes after that. Every row of the table above is one of its deliverables.
+
+> **Corrected 2026-08-27.** This paragraph read *"a native rewrite was planned and not done"*, and
+> *Known gaps* repeated it. The plan still said "proposal" and this file had copied that claim
+> **while its own evidence table listed the producer and the exportable-texture path the plan asked
+> for** — a document contradicting itself two screens apart. A stale status in `plans/` does not
+> stay in `plans/`; it gets cited as state. `docs/plans/README.md` now carries a check for it.
 
 ## Verification
 
@@ -46,8 +55,9 @@ rather than hanging or presenting black indefinitely.
 
 1. **No coverage**, and no record of the vendored CloudXR/recvwall versions.
 2. **The `eUndefined` layout fix** (`0f1c5fb38`) applies here too and was verified only on ProRes.
-3. **A planned native rewrite** exists as a plan and has not happened; the plan should not be read
-   as describing the module.
+3. **The vendored components are the standing risk**, not the rewrite: the rewrite shipped. Nothing
+   records which CloudXR or `recvwall` revision was taken, so there is no way to tell whether either
+   is current.
 
 ---
 

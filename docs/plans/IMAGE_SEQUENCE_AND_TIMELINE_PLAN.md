@@ -1,8 +1,9 @@
 # Image-Sequence Playout and Timeline (EDL) Playout — Plan
 
-**Status: proposal. Nothing here is implemented.** Written 2026-08-11 from an
-investigation of what the tree can do today. Two related features are described; they
-share a mechanism but are separable, and only the first is cheap.
+> **Status:** UNIMPLEMENTED — verified 2026-08-27 — proposal, written 2026-08-11 from an
+> investigation of what the tree can do today. Two related features are described; they
+> share a mechanism but are separable, and only the first is cheap.
+> **Falsifier:** `image_sequence`, `timeline_producer`
 
 ---
 

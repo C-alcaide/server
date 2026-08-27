@@ -1,6 +1,8 @@
 # Windowed Grading and a Node Graph in the CasparVP Mixer — Design Study
 
-**Status: study, written 2026-08-17 — and PARTLY OVERTAKEN BY THE CODE.**
+> **Status:** PARTIAL — verified 2026-08-27 — written 2026-08-17 as a study, and partly overtaken
+> by the code since.
+> **Falsifier:** none — partly shipped; the note below says which half.
 
 > **Corrected 2026-08-27.** This file said "Nothing is implemented ... There is no node graph, no
 > spatial window, and no AMCP command for either." That is no longer true and had not been for some

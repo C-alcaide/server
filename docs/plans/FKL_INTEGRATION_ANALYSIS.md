@@ -1,8 +1,12 @@
 # Fused Kernel Library (FKL) — Integration Analysis for CasparCG
 
+> **Status:** RESEARCH — reviewed again 2026-08-26, still a *no* — the one item it recommended
+> doing WITHOUT the library is now done. Its conclusion held for reasons that have since changed:
+> the growth has been in Vulkan, which that library has no backend for.
+> **Falsifier:** `fused_kernel`
+
 **Date:** 2025-05-10  
-**Branch:** CasparVP  
-**Status:** Research / Future consideration
+**Branch:** CasparVP
 
 ---
 

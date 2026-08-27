@@ -1,6 +1,15 @@
 # Native `remotewall` Module — Implementation Plan & Benefits
 
-Status: **proposal** · Target: CasparVP (`CasparVPV`) · Author‑context: 2026‑07‑28
+> **Status:** SHIPPED — verified 2026-08-27 — written 2026-07-28 as a proposal, and **built**:
+> `src/modules/remotewall` carries phases 0-4 of §8 as named commits (`79d8af73e`, `57beba84a`,
+> `06c84c5b0`, `e13bb4da9`, `3acdc13d6`), phase 5 as `c58f5f3a1` (AV1, 10-bit HDR, multi-GPU), and
+> six later fixes. It is in the build at `src/modules/CMakeLists.txt:25`.
+> **Falsifier:** none — shipped. Note the commits' phase numbers drifted from §8's.
+
+> **Corrected 2026-08-27.** This line read *"proposal"* for a month after the module shipped, and
+> `../features/remotewall-and-portaudio.md` had copied that claim — while its own evidence table
+> listed the producer and the exportable Vulkan texture path this plan asked for. Fourth stale
+> plan status found in one sweep; the check in the README exists because of it.
 
 A plan to replace the third‑party **RemoteWallSource OFX plugin** (from `remoteAss`) with a
 first‑class CasparCG **producer module** that ingests the cloudXR tile‑wall stream directly, keeps the

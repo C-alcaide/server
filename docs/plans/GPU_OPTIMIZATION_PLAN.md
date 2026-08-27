@@ -1,5 +1,10 @@
 # GPU Resource Optimization — Eliminating Wasteful Roundtrips
 
+> **Status:** PARTIAL — verified 2026-08-27 — this is a **running journal**, not a forward plan:
+> most of it is dated measurement, and the section titles carry their own outcomes. §*Open items
+> from the 2026-08-02 audit* is the live end.
+> **Falsifier:** none — each section states its own outcome and date; read those, not this line.
+
 > Analysis and implementation plan for applying PR #1651's "keep data on GPU"
 > strategy across all custom modules. Covers pitfalls, production risks, and
 > quality concerns that may not surface immediately during testing.

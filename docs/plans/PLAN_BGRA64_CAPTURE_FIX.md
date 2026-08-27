@@ -1,6 +1,10 @@
 # Plan: land the BGRA64 capture fix properly
 
-**Status: plan only. 2026-08-18.** The cause is proven and written up in
+> **Status:** UNIMPLEMENTED — verified 2026-08-27 — plan only, written 2026-08-18.
+> **Falsifier:** none — this is a bug fix rather than a feature, so no identifier appears when it
+> lands. Two attempts were reverted in `c8caa2226`; a third landing is what changes this line.
+
+The cause is proven and written up in
 [`UPSTREAM_SYNC_2026-08-18.md`](../audits/UPSTREAM_SYNC_2026-08-18.md) §3.1.1; two attempts at a fix
 were reverted in `c8caa2226`. This is what a third attempt should do differently, and what it
 must prove before it lands.

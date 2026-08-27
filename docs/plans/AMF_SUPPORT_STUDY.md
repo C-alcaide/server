@@ -1,6 +1,8 @@
 # ACES Metadata File (AMF) support — design study
 
-**Status: SHIPPED. The research below stands; the "not implemented" it used to say does not.**
+> **Status:** SHIPPED — verified 2026-08-27 — the research below stands; the "not implemented"
+> it used to say does not.
+> **Falsifier:** `AMF` is registered — absence of that command would mean this status is wrong.
 
 > **Corrected 2026-08-27.** This line read *"researched 2026-08-16, not implemented"* — and `AMF`
 > was implemented in `180b2fb41` **on 2026-08-16**, the same day. So the status was accurate for a

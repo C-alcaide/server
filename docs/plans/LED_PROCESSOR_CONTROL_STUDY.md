@@ -1,7 +1,10 @@
 # LED processor control — investigation, for future consideration
 
-**Status: not investigated against hardware, and that is the whole point of this file.**
-Written 2026-08-16. Nothing here is a measurement. Where a fact about a vendor protocol
+> **Status:** RESEARCH — written 2026-08-16, unchanged 2026-08-27 — not investigated against
+> hardware, and that is the whole point of this file.
+> **Falsifier:** `led_processor`
+
+Nothing here is a measurement. Where a fact about a vendor protocol
 would normally go, there is a question instead — deliberately, because this repo's standard
 is that a claim carries the measurement that established it, and none of these could.
 

@@ -1,5 +1,10 @@
 # Plan: DeckLink Compositor — Multiple Channels to One Output
 
+> **Status:** UNIMPLEMENTED — verified 2026-08-27 — a sketch of what it would take. Nothing in
+> `src/` composites several channels onto one DeckLink port, and §1 records why the SDK makes it
+> hard rather than merely unwritten.
+> **Falsifier:** `decklink_compositor`
+
 ## Current State (verified)
 - NOT supported. Each `decklink_consumer` calls `EnableVideoOutput` + `StartScheduledPlayback` on its device — these are exclusive operations on a hardware port. A second consumer opening the same device would fail at the DeckLink SDK level.
 - `index()` = `300 + device_index`, but this is per-channel output map — not the real blocker.

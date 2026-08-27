@@ -104,8 +104,9 @@ neither the old look nor the new one.
 Refused with `501` when the server is built without OCIO.
 
 > **Its design study said "not implemented" for eleven days after it shipped** — corrected in
-> [`../plans/AMF_SUPPORT_STUDY.md`](../plans/AMF_SUPPORT_STUDY.md). Second occurrence of that
-> pattern in this tree.
+> [`../plans/AMF_SUPPORT_STUDY.md`](../plans/AMF_SUPPORT_STUDY.md). A sweep on 2026-08-27 found
+> **five of thirteen plans** carrying a wrong status, tabulated in
+> [`../plans/README.md`](../plans/README.md), which now also carries the check that finds them.
 
 ### Windowed grading nodes — `MIXER GRADE_NODE`
 

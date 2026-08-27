@@ -1,5 +1,11 @@
 # Per-Channel GPU Affinity for the Mixer
 
+> **Status:** PARTIAL — verified 2026-08-27 — per-channel `<gpu>`, and the derivation from a
+> channel's consumers when it is unambiguous, both ship: `shell/server.cpp:515-535`, which also
+> logs the assignment. **Phase 4 is not implemented** and `accelerator/accelerator.cpp:67` says so
+> in the source.
+> **Falsifier:** none — partly shipped, so read §Phases against the two sites named above.
+
 ## Goal
 
 Route each channel's image mixer to the same GPU as its vulkan-output consumer
