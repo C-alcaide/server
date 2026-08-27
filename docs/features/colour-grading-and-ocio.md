@@ -77,6 +77,50 @@ Reference Gamut Compress" in three places, which claims conformance the code doe
 Latest, both backends, 2026-08-26: `conformance` 23/23 patches per conversion, worst **0.55 LSB**;
 `grading` 8/8 patches, worst **0.55** against a 1.0 gate, neutrals **0.00**.
 
+### Windowed grading nodes — `MIXER GRADE_NODE`
+
+A prototype, and the one part of this chain that is not a flat per-frame operator: a chain of up to
+**16 nodes**, each a soft-edged ellipse in frame space carrying an exposure and an **ASC CDL**.
+Operator syntax and worked examples live in
+[`../guides/COLOR_GRADING.md`](../guides/COLOR_GRADING.md); the state and the numbers are here.
+
+> **Renamed from `MIXER GRADE` on 2026-08-27, no alias.** The old name sat among `MIXER LIFT`,
+> `GAIN`, `MIDTONE` and `CDL`, so it read as *the* grading command when it is one prototype feature
+> among twenty-odd operators.
+
+| what | OGL | Vulkan | gate |
+| :--- | ---: | ---: | ---: |
+| Window operation inside the mask | 0.50 LSB | 0.50 LSB | 1.0 |
+| Leak outside the mask | 0.00 | 0.00 | 1.0 |
+| Two-node chain (`outside × exposure²`) | 0.75 | 0.75 | 1.0 |
+| `invert` — inside untouched | 0.00 | 0.00 | 1.0 |
+| Per-node CDL, asymmetric operands | 0.38 | 0.38 | 1.0 |
+| CDL saturation 0 must be neutral | 0.00 | 0.00 | 1.0 |
+| Composite under a `screen` blend | 0.00 | 0.00 | 1.0 |
+
+**Three things this feature taught that generalise beyond it:**
+
+**The chain check has to be concentric.** Two overlapping windows make the expectation
+`outside × exposure²`, so a loop running only the first node lands a full stop away. Side-by-side
+windows would have made the same defect a marginal number.
+
+**The CDL check has to be asymmetric in all three operands.** Equal per-channel values are
+invariant under a red/blue exchange — the trap both shaders carry, OGL swizzling `.bgr` at the call
+site and Vulkan not. On its first run this check failed at **47.08 LSB** on Vulkan; the cause was a
+UBO field-order mismatch that had *also* corrupted two YCbCr decode flags, which this battery cannot
+see because its source is BGRA. `flat-decoded` is what covers those.
+
+**A feared defect measured as no defect.** Both mixers warned that routing a node-enabled item
+through a private attachment broke the keyer, the keys and non-normal blend modes. None of the three
+is reachable: a non-normal blend is a *layer* property applied after the layer composites,
+`keyer::additive` belongs to the `is_mix` branch a node graph cannot enter, and the keys only scale
+the item's alpha. The check was built *before* the fix, measured **0.00 LSB** against the unfixed
+binary, and retired the work instead of gating it. Full account in
+[`../plans/GRADING_NODE_GRAPH_STUDY.md`](../plans/GRADING_NODE_GRAPH_STUDY.md) §11.
+
+**Still a prototype:** one window shape, frame space only, no tweening (the tween system cannot
+address `node[n].field`), and no arbitrary graph topology. Those remain design work in the study.
+
 **What every one of those batteries cannot see.** They drive a **colour producer**, which is BGRA —
 so none of them calls the YCbCr decode. That is how `ycbcra_to_rgba` counted in 8-bit codes for
 high-bit-depth sources undetected: exact for an 8-bit texture, and leaving a **−0.4981** chroma
