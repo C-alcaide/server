@@ -36,6 +36,21 @@ them a parity question rather than an implementation detail.
 
 ## 2. Verification
 
+> **The SDI figures below were NOT re-verified on 2026-08-27**, when every other 1 LSB battery was
+> re-measured on a freshly rebuilt binary. **The loopback is not cabled on this rig right now**:
+> `sdi-output` with output 1 and input 2 returns *"the capture is missing or flat — nothing was on
+> the wire, so this is not a measurement"* on both v210 arms, and `Failed to enable external keyer`
+> in the log. The card is present — `cli.py hardware` lists four DeckLink 8K Pro ports — so this is
+> a cable, not a configuration.
+>
+> **What that run produced is worth knowing before anyone repeats it.** The two v210 arms declined
+> correctly. The `rgba@8bit` arm returned **5.74 dB and a FAIL verdict** rather than declining,
+> because a disconnected input delivers noise on the 8-bit read, which passes the harness's
+> flat-or-missing guard while correlating with nothing. The verdict is right and the *reason* is
+> misleading: 5.74 dB sends a reader to the mixer, "not measured" would send them to the cable.
+> Treat any single-arm SDI failure with a plausible-looking dB number as unattributed until a
+> reference arm passes on the same run.
+
 | what | battery |
 | :--- | :--- |
 | Output pixels, including the HDR block | `sdi-output --hdr-metadata` |
