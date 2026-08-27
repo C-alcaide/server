@@ -1134,16 +1134,27 @@ Let the Vulkan consumer decide SDR or HDR based on the connected display:
 
 ### Vulkan DCI-P3 cinema projection
 
-Output for DCI projectors with gamma 2.6:
+Output for DCI projectors with gamma 2.6. **Set it on the CHANNEL**, not on the consumer:
 
 ```xml
-<vulkan-output>
-    <gpu>0</gpu>
-    <device>1</device>
-    <gamut>p3-dci</gamut>
-    <eotf>gamma26</eotf>
-</vulkan-output>
+<channel>
+  <video-mode>2160p2500</video-mode>
+  <color-depth>16</color-depth>
+  <color-space>p3-dci</color-space>
+  <color-transfer>gamma26</color-transfer>
+  <consumers>
+    <vulkan-output>
+      <gpu>0</gpu>
+      <device>1</device>
+    </vulkan-output>
+  </consumers>
+</channel>
 ```
+
+> **This example previously read `<gamut>p3-dci</gamut>` + `<eotf>gamma26</eotf>` on the consumer,
+> and consisted entirely of the two settings that have no effect** — so it configured nothing at
+> all. The channel's `<color-space>` and `<color-transfer>` are what encode the framebuffer; the
+> consumer presents what the mixer produced. Corrected 2026-08-27.
 
 ### Mixed consumer setup — DeckLink SDI + Vulkan HDR + file recording
 
@@ -1208,12 +1219,25 @@ Output for DCI projectors with gamma 2.6:
 
 ### CUDA ProRes producer — bitstream transfer function mapping
 
-| `transfer_func` in bitstream | Reported downstream |
-|-----------------------------|---------------------|
-| `1` (Rec.709 gamma) | `color_transfer::sdr` |
-| `14` (HLG / ARIB STD-B67) | `color_transfer::hlg` |
-| `16` (PQ / SMPTE ST 2084) | `color_transfer::pq` |
-| other / unset | `color_transfer::sdr` |
+| `transfer_func` in bitstream | Reported downstream | per ITU-T H.273 Table 3 this code means |
+|-----------------------------|---------------------|------------------------------------------|
+| `1` | `color_transfer::sdr` | BT.709-6 — correct |
+| `16` | `color_transfer::pq` | SMPTE ST 2084 (PQ) — correct |
+| `18` | `color_transfer::hlg` | ARIB STD-B67 (HLG) — correct |
+| **`14`** | **`color_transfer::hlg`** | **BT.2020-2 (10-bit) — a CONVENTIONAL gamma curve, functionally identical to `1`. Not HLG.** |
+| other / unset | `color_transfer::sdr` | — |
+
+> **⚠ The `14` row is a suspected defect in the code, not just in this table.** This document
+> previously listed `14` as "HLG / ARIB STD-B67" and omitted `18` entirely, which is backwards: the
+> producer tests `transfer_func == 18 || transfer_func == 14` with no comment explaining the second
+> term. If the standard is right, a **BT.2020 SDR** ProRes file declaring `14` is decoded as HLG and
+> has an HLG EOTF applied to conventional-gamma content — a real picture error, in the direction of
+> washed-out highlights.
+>
+> **Not changed here**, because correcting it alters rendered output for existing media and this
+> tree requires a measurement and a `CHANGELOG.md` entry for that. What is needed: a ProRes fixture
+> carrying `transfer_func = 14`, which the harness does not have. Flagged 2026-08-27 by reading the
+> table against H.273 rather than by measurement.
 
 ---
 

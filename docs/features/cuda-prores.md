@@ -133,6 +133,14 @@ and entropy stages dominate. It buys a frame of VRAM per consumer and a right-ed
 
 ## 5. Known gaps
 
+**Suspected: `transfer_func == 14` is decoded as HLG and should be SDR.** The producer tests
+`transfer_func == 18 || transfer_func == 14`; per ITU-T H.273 Table 3, `18` is ARIB STD-B67 (HLG)
+and `14` is BT.2020-2 (10-bit), a conventional gamma curve functionally identical to `1`. So a
+BT.2020 SDR ProRes file would have an HLG EOTF applied. No comment in the source explains the
+second term, and **no fixture carries `14`**, so this is read from the standard rather than
+measured. Fixing it changes rendered output for existing media, so it needs a fixture, a
+measurement and a `CHANGELOG.md` entry. Raised 2026-08-27 while auditing `guides/HDR_GUIDE.md`.
+
 1. **HDR and BT.2020 ProRes are unmeasured** on both decode and encode.
 2. **The right-edge fix at widths not divisible by six** (1280, 2048, 4096) follows from the
    ceil/floor arithmetic and the pre-zeroing that existed to hide it, but **was only measured at
