@@ -232,7 +232,7 @@ FEATURES = [
         next='A trial against real tracking hardware, then a test for the 18 commands',
         covers=['camera-tracking'],
         status=UNTESTED,
-        evidence="18 commands registered · no battery · no hardware trial recorded",
+        evidence="18 commands registered · no automated test · no hardware trial recorded",
     ),
     dict(
         n=7, title="3D pre-visualisation of the stage",
@@ -255,7 +255,7 @@ FEATURES = [
         next='Any coverage at all — 13 commands are driven by nothing',
         covers=['previz'],
         status=UNTESTED,
-        evidence="13 commands registered · no battery references PREVIZ at all",
+        evidence="13 commands registered · no automated test references PREVIZ at all",
     ),
     dict(
         n=8, title="Playback that never touches the CPU",
@@ -340,7 +340,7 @@ FEATURES = [
         covers=['replay'],
         status=UNTESTED,
         evidence="segmented store, LIVE mode and the asynchronous EXPORT with its 400 EXPORT BUSY "
-                 "refusal all read from the source · no battery records to a replay store",
+                 "refusal all read from the source · no automated test records to a replay store",
     ),
     dict(
         n=11, title="GPU-native intermediate codecs",
@@ -489,8 +489,8 @@ FEATURES = [
         ],
         earns="It suits a show where the wall and the room have to agree, and where "
               "repeatability between takes matters more than live operation.",
-        gap="Neither half is driven by a test. The lighting path has a battery; the keyframe "
-            "system has none, and the projection and ICVFX fields it can animate were "
+        gap="Neither half is driven by a test. The lighting path is covered; the keyframe "
+            "system is not, and the projection and ICVFX fields it can animate were "
             "undocumented until this week.",
         market="Elsewhere, Art-Net and sACN are what every lighting desk speaks, and Resolume "
                "and similar tools offer comparable content-to-light features. Timeline "
@@ -499,7 +499,7 @@ FEATURES = [
         next='A test for the keyframe system (8 commands, 184 fields)',
         covers=['keyframes', 'dmx-sacn-artnet'],
         status=PARTIAL,
-        evidence="dmx battery covers the lighting transports · keyframes: 8 commands, 184 fields, "
+        evidence="the dmx test covers the lighting transports · keyframes: 8 commands, 184 fields, "
                  "no coverage",
     ),
     dict(
@@ -535,7 +535,7 @@ FEATURES = [
         status=UNTESTED,
         evidence="PortAudio consumer and producer with channel mapping and shared ASIO capture, "
                  "and the LTC clock with three dependents, all read from the source · "
-                 "PA_USE_ASIO=OFF in this build · no battery",
+                 "PA_USE_ASIO=OFF in this build · no automated test",
     ),
     dict(
         n=18, title="Fitting into the room",
@@ -668,12 +668,14 @@ p.psub{color:var(--muted);font-size:11.3px;margin-bottom:4.5mm;max-width:240mm}
    page and `overflow:hidden` CUT the last rows and the legend -- caught by check_overflow(),
    not by looking at it, which is the entire argument for that gate. */
 table{width:100%;border-collapse:collapse;font-size:10px}
-th,td{text-align:left;padding:1.5mm 3mm;border-bottom:1px solid var(--line);
+th,td{text-align:left;padding:1.25mm 3mm;border-bottom:1px solid var(--line);
   vertical-align:top}
 th{color:var(--muted);text-transform:uppercase;letter-spacing:.09em;font-size:9px;
   border-bottom:1px solid #45454e}
 td.mn{color:var(--muted);font-variant-numeric:tabular-nums;width:9mm}
 td.mg{color:var(--muted);width:105mm}
+.gloss{margin-top:3.6mm;font-size:10.2px;line-height:1.5;color:var(--muted);max-width:215mm}
+.gloss b{color:#c8c8d0;font-weight:600}
 .legend{display:flex;gap:9mm;margin-top:5mm;font-size:10px;color:var(--muted)}
 .legend b{color:var(--text);font-weight:600}
 
@@ -867,6 +869,11 @@ def build():
     <tr><th></th><th>Capability</th><th>Readiness</th><th>The first thing it needs</th></tr>
     {rows}
   </table>
+  <p class="gloss">Each capability page carries an <b>evidence</b> line naming what was actually
+  run, so any figure in this brief can be traced back to a specific check. Where those say
+  <b>&ldquo;within 1 LSB&rdquo;</b>: one LSB is a single step out of 256, the smallest difference
+  an ordinary image can hold &mdash; so a result inside it means there is no visible difference
+  left to find.</p>
   <div class="legend">
     <span><b style="color:#6fbf6f">proven</b> &mdash; a test gates it and was run ({proven})</span>
     <span><b style="color:#d0a02a">partly proven</b> &mdash; some of it is measured ({partial})</span>
