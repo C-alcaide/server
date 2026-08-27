@@ -502,9 +502,12 @@ mermaid form, and forcing them into one loses information.
 
 Two constraints that are not stylistic:
 
-* **`features/` must not use mermaid.** `docs/build_html.py` builds that folder into
-  `features.html` and has **no mermaid renderer**, so a mermaid block ships to the reader as raw
-  source. Use a PNG or a plain fenced block there.
+* **Mermaid renders everywhere now.** `docs/build_html.py` renders every mermaid block to
+  **inline SVG at build time**, so a diagram is a picture in the built page rather than a script
+  that has to run — no read-time JavaScript, no external assets. This line used to forbid mermaid
+  in `features/` because that builder had no renderer; the constraint is gone. If a block fails to
+  render, the build reports it and the harness test fails, so a silent raw-source block cannot
+  reach a reader.
 * **Do not rewrite an existing correct ASCII diagram just to satisfy this rule.** The large box
   diagrams in `VULKAN_OUTPUT.md`, `GPU_INTEROP_ARCHITECTURE.md`, `CUDA_PRORES_IMPLEMENTATION_GUIDE.md`
   and `VULKAN_MIXER_IMPLEMENTATION.md` would be mermaid if written today. **A diagram is a claim**,

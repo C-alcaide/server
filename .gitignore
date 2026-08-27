@@ -70,6 +70,16 @@ __pycache__/
 .claude/
 
 # Generated documentation manual — rebuild with `python docs/build_html.py`.
-# Committing it would be a second copy of every claim in docs/features/, which is the
-# duplication that folder exists to avoid.
+# Committing it would be a second copy of every claim in docs/, which is the duplication
+# that folder exists to avoid: a committed page goes stale the moment the markdown changes
+# without a rebuild, which is precisely the failure the docs themselves keep hitting.
+#
+# The builder now emits six pages rather than one, and caches rendered mermaid SVG. Both are
+# generated from markdown in this tree, so both are that same second copy.
+docs/index.html
+docs/overview.html
 docs/features.html
+docs/guides.html
+docs/architecture.html
+docs/reference.html
+docs/_mermaid_cache/
