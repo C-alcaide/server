@@ -3,9 +3,9 @@
 > **State:** shipped
 > **Module:** `src/modules/screen` — **2,963 lines** different from upstream in two files
 > (`consumer/screen_consumer.cpp`, `consumer/screen.frag`)
-> **Commands:** consumer name and its parameters
-> **Architecture:** none, deliberately — the fork's changes are internal; the structural point (it is the instrument most batteries measure through) is in features/screen-consumer.md
-> **Guide:** none, deliberately — Upstream owns the screen consumer's operation; this fork's changes are internal and the consumer is discussed in context across six guides. No dedicated guide.
+> **Commands:** consumer name and its parameters, including **three the fork adds** — `MONITORING`, `TONE_MAP`, `PEAK_LUMINANCE` (§1b)
+> **Architecture:** none, deliberately — the structural point is §1 below: this is the instrument most batteries measure through
+> **Guide:** none — upstream owns the consumer's operation and it is discussed in context across six guides. **Not because the changes are internal**: §1b documents three fork-only `ADD` parameters that live nowhere else.
 > **Coverage:** used as the capture surface by `playback-scaling`, `mixer-parity`,
 > `consumer-view` and most picture batteries
 
@@ -24,6 +24,27 @@ the decoder. That is the reason this document exists rather than a line in an op
 `screen.frag` carries its own colour handling, so it is a **second place** where the fork's colour
 decisions are implemented — the first being the two mixer shaders. Three implementations of related
 arithmetic is exactly the shape that produced the ICVFX and HAP Q defects.
+
+---
+
+## 1b. Three `ADD` parameters upstream does not have
+
+Checked mechanically against `server-upstream` and documented nowhere until 2026-08-27. This file
+previously said the fork's changes here were *internal*; these three are not.
+
+```
+ADD 1 SCREEN 1 MONITORING
+ADD 1 SCREEN 1 TONE_MAP aces_rrt PEAK_LUMINANCE 600
+```
+
+| parameter | meaning |
+| :--- | :--- |
+| `MONITORING` | a **convenience preset**, not a mode: borderless, always-on-top, hidden from the taskbar, close-proof, no focus steal and no cursor. Equivalent to setting six flags by hand, which is what it exists to avoid |
+| `TONE_MAP <op>` | `reinhard`, `aces_filmic`, `aces_rrt` or `hlg_ootf`, case-insensitive. **An unrecognised value leaves tone mapping unchanged** rather than erroring |
+| `PEAK_LUMINANCE <nits>` | default `1000`. Feeds the **`hlg_ootf` operator only** — it reaches one shader branch, so it does nothing with the other three tone-map operators or with none |
+
+`MONITORING` is the one worth knowing about: a confidence monitor that cannot be closed, cannot
+steal focus and shows no cursor is otherwise six parameters, and nothing pointed at it.
 
 ---
 

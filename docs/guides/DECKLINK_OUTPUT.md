@@ -101,6 +101,26 @@ when one misbehaves, and to make a measurement attributable.
 `<hdr-metadata>` is its own child block, spelled identically to the Vulkan-output and FFmpeg
 consumers on purpose — the same four numbers describe the same mastering display.
 
+### The same two settings on an `ADD` line
+
+Both signalling values can be given per-consumer at `ADD` time instead of in the config, and both
+were undocumented until 2026-08-27:
+
+```
+ADD 1 DECKLINK 1 COLOR_SPACE bt2020 COLOR_TRANSFER pq
+```
+
+| keyword | accepted | default |
+| :--- | :--- | :--- |
+| `COLOR_SPACE` | `bt709`, `bt601`, `bt2020` | the channel's |
+| `COLOR_TRANSFER` | `sdr`, `pq`, `hlg` | the channel's |
+
+**Anything SDI cannot signal is silently dropped, not refused.** `COLOR_SPACE p3-d65` or
+`COLOR_TRANSFER linear` leaves the channel default in place and says nothing — the code drops
+P3/Adobe and linear/gamma24/gamma26 deliberately, because there is no SDI signalling for them. So a
+value that looks accepted may simply not have applied; read the `signalling` battery or the card's
+own status rather than the reply.
+
 `color-transfer` sets what the output **signals**. It does not convert the picture — the channel's
 colour space and transfer determine the pixels, exactly as elsewhere in this fork.
 
