@@ -22,9 +22,24 @@ every group also blacks the surround, so no clear pass is needed.
 an odd destination x inverts the luma/chroma phase against the frame's grid. Keep `dest-x` even.
 That had never been measured about the CPU path either.
 
-`vulkan-dma` and `cuda` are still coerced to the CPU readback: a `VkBufferImageCopy` with one image
-offset cannot express a destination rectangle inside a larger frame, and the CUDA packer has not been
-given the same treatment.
+**Both GPU packers place it**, so `auto` works unchanged:
+
+| mode | coercion |
+| :--- | :--- |
+| `auto` (resolves to `cuda`), `cuda`, `vulkan` | none — placed on the GPU |
+| `cpu` | n/a |
+| `vulkan-dma` | coerced to `cpu`, with a warning |
+
+**CUDA was the one that mattered.** `create_format_strategy` resolves `auto` to CUDA first (P1
+against the Vulkan compute path's P6), so a **default** install with a destination rectangle was
+still coerced to the CPU after the Vulkan fix alone. Implementing the CUDA packer let an earlier
+`auto`→`vulkan` special case be deleted: the coercion is now one comparison against `vulkan_dma`,
+which cannot place a rectangle because a `VkBufferImageCopy` carries a single image offset and has
+no shader.
+
+**The battery could not name `cuda` at all until now**, so the mode a default install uses was
+never swept — and the guard written to prevent that had hardcoded the same incomplete list. It now
+derives the set from `config.cpp`'s parser.
 
 ### Added: the Vulkan output consumer reports what it signals — and it is not what was asked
 

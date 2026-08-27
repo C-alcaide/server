@@ -111,16 +111,20 @@ round trip.
 </decklink>
 ```
 
-| `gpu-readback-mode` | destination placement |
-| :--- | :--- |
-| `cpu` | honoured |
-| `vulkan` | **honoured, on the GPU** |
-| `vulkan-dma` | **not possible** — coerced to `cpu`, with a warning |
-| `cuda` | not implemented — coerced to `cpu`, with a warning |
+| `gpu-readback-mode` | destination placement | measured |
+| :--- | :--- | ---: |
+| `auto` | **on the GPU** (resolves to `cuda`) | 62.92 dB |
+| `cuda` | **on the GPU** | 62.92 dB |
+| `vulkan` | **on the GPU** | 62.92 dB |
+| `cpu` | honoured | 62.92 dB |
+| `vulkan-dma` | **not possible** — coerced to `cpu`, with a warning | 62.92 dB |
 
-`vulkan-dma` is a `VkBufferImageCopy` with a single image offset and no shader, and that copy cannot
-express a destination rectangle inside a larger frame. It is a limit of the mechanism, not a gap in
-effort.
+Every mode gives the same picture; the difference is whether the readback stays on the GPU.
+
+`vulkan-dma` is the one exception and it is a limit of the **mechanism**, not of effort: it copies
+image→buffer with a single `region.imageOffset`, and a `VkBufferImageCopy` cannot express a
+rectangle inside a larger frame. There is no shader in that path to place anything, so it falls back
+to `cpu` and says so.
 
 ### Keep `dest-x` even
 

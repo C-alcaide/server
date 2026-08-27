@@ -69,8 +69,28 @@ than read-modified-written. Writing every group also blacks the surround, so the
 the signature is a precision-independent error (all three wire formats within 0.6 dB, 16-bit gaining
 +0.06 dB over 8-bit instead of +3.94). Nobody had measured that about the CPU path either.
 
-**Still coerced:** `vulkan-dma`, because a `VkBufferImageCopy` with one image offset cannot express
-a destination rectangle inside a larger frame — a mechanism limit; and `cuda`, which is unimplemented.
+**Both GPU packers do it**, measured `subregion 100,200,640,360,114,70` over the SDI loopback:
+
+| mode | | coercion |
+| :--- | ---: | :--- |
+| `auto` (resolves to `cuda`) | 62.92 dB | none |
+| `cuda` | 62.92 dB | none |
+| `vulkan` | 62.92 dB | none |
+| `cpu` | 62.92 dB | n/a |
+| `vulkan-dma` | 62.92 dB | coerced to `cpu` |
+
+**CUDA mattered more than Vulkan here.** `create_format_strategy` resolves `auto` to CUDA first
+(P1 against the Vulkan compute path's P6, from the matrix in `fedf6ce09`), so until the CUDA packer
+placed it too, a **default** install with a destination rectangle was still coerced to the CPU. The
+Vulkan-only version needed `auto` specially resolved to `vulkan`; with both packers placing, that
+special case was deleted and the coercion is one comparison against `vulkan_dma`.
+
+**Still coerced:** `vulkan-dma` alone — a `VkBufferImageCopy` carries one image offset and cannot
+express a rectangle inside a larger frame, so there is no shader in that path to place anything.
+
+**And the battery could not name `cuda` until 2026-08-27** — `--gpu-readback-mode` omitted it, so
+the mode a default install uses was the one mode never swept. The guard meant to prevent exactly
+that had hardcoded the same incomplete list; it now derives the set from `config.cpp`'s parser.
 
 ---
 
