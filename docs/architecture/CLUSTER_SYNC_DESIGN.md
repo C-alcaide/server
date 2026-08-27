@@ -13,14 +13,20 @@ symptom does not tell you which.
 
 ## 1. The three layers
 
-```
-ptp/       ptp_clock          agree on TIME
-             ↓
-sync/      frame_clock        turn time into a frame number
-           command_scheduler  execute a command AT a frame
-             ↓
-relay/     command_relay      get the command to every node with a frame stamp
-           virtual_channel_map  decide which local channel it lands on
+```mermaid
+flowchart TD
+  subgraph ptp["ptp/ - agree on TIME"]
+    A[ptp_clock]
+  end
+  subgraph sync["sync/ - which frame is that?"]
+    B["frame_clock<br/>time to frame number"]
+    C["command_scheduler<br/>execute a command AT a frame"]
+  end
+  subgraph relay["relay/ - did every node get it?"]
+    D["command_relay<br/>forward with a frame stamp"]
+    E["virtual_channel_map<br/>which local channel it lands on"]
+  end
+  A --> B --> C --> D --> E
 ```
 
 | layer | question it answers | failure looks like |

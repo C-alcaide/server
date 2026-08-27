@@ -5,7 +5,8 @@
 > **Commands:** no dedicated `MIXER` command; a consumer name plus configuration
 > **Architecture:** [`../architecture/DECKLINK_GPU_DIRECT_OUTPUT.md`](../architecture/DECKLINK_GPU_DIRECT_OUTPUT.md)
 > **Guide:** [`../guides/DECKLINK_OUTPUT.md`](../guides/DECKLINK_OUTPUT.md)
-> **Coverage:** `sdi-output`, `sdi-input`, `signalling`, `anc-check`, `decklink-input-cost`,
+> **Coverage:** `sdi-output`, `sdi-input`, `signalling` (whose ancillary-data checks live in
+> `core/anc_check.py` — not a subcommand of its own), `decklink-input-cost`,
 > `consumer-scaling`
 
 Gets the composited frame from the mixer to the SDI card without a host round trip, on either
