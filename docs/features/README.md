@@ -152,7 +152,7 @@ nothing drove it. Undocumented and untested proved to be the same gap seen from 
 | **HAP producer** | `loop-boundary` | shipped | **[hap.md](hap.md)** |
 | **ISF / OpenFX plugin hosts** | **none** | shipped, unmeasured | **[isf-and-openfx.md](isf-and-openfx.md)** |
 | **Spout** | **none** | shipped, unmeasured | **[spout.md](spout.md)** |
-| **remotewall** | **none** | shipped, unmeasured | **[remotewall-and-portaudio.md](remotewall-and-portaudio.md)** |
+| **remotewall** | **none** | shipped, unmeasured | **[remotewall.md](remotewall.md)** |
 
 ### Signal, sync and control
 
@@ -162,7 +162,7 @@ nothing drove it. Undocumented and untested proved to be the same gap seen from 
 | **LTC timecode** | 2 | **none** | shipped, unmeasured | **[ltc-timecode.md](ltc-timecode.md)** |
 | **Cluster sync** | 4 | **none** | shipped, unmeasured | **[cluster-sync.md](cluster-sync.md)** |
 | **Keyframes** | 8 | **none** | shipped, unmeasured | **[keyframes.md](keyframes.md)** |
-| **PortAudio** | 1 | **none** | shipped, unmeasured | **[remotewall-and-portaudio.md](remotewall-and-portaudio.md)** |
+| **PortAudio** | 1 | **none** | shipped, unmeasured | **[portaudio.md](portaudio.md)** |
 | **Replay** | — | **none** | shipped, unmeasured | **[replay.md](replay.md)** |
 | AMF / PRINT RAW | 2 | `amf` | shipped | — |
 

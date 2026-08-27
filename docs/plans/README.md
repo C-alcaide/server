@@ -56,7 +56,7 @@ Five of thirteen plans carried a wrong status on 2026-08-27:
 | `GPU_AFFINITY_PLAN.md` | *no status line at all* | partly shipped; `server.cpp:515-535` |
 | `GPU_INTEROP_PLAN.md` | *no status line at all* | all three items shipped, struck through with commits |
 
-Two of them had spread: `features/remotewall-and-portaudio.md` had copied "planned and not done"
+Two of them had spread: the features doc for remotewall had copied "planned and not done"
 into a **features** doc that shipped, and `features/colour-grading-and-ocio.md` and
 `guides/OCIO_USER_GUIDE.md` both cite the AMF study. **A stale status does not stay in `plans/`** -
 it gets read as state and quoted elsewhere, which is why this is checked rather than remembered.

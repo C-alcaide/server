@@ -1,6 +1,6 @@
 # CasparCG `remotewall` Module — User Guide
 
-> **State and measurements:** [`../features/remotewall-and-portaudio.md`](../features/remotewall-and-portaudio.md)
+> **State and measurements:** [`../features/remotewall.md`](../features/remotewall.md)
 > **This document is how-to.** Per [`../README.md`](../README.md), measured figures live once in `features/`; a tolerance an operator acts on may appear here, the measurements behind it should not.
 
 The `remotewall` module is a native CasparCG **producer** that ingests the cloudXR tile‑wall stream

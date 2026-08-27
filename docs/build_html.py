@@ -48,7 +48,7 @@ ORDER = [
       "image-consumer-and-producer.md", "html-gpu-direct.md"]),
     ("Signal, sync and control",
      ["ltc-timecode.md", "dmx-sacn-artnet.md", "keyframes.md", "cluster-sync.md", "replay.md",
-      "remotewall-and-portaudio.md"]),
+      "remotewall.md", "portaudio.md"]),
     ("Template", ["_TEMPLATE.md"]),
 ]
 

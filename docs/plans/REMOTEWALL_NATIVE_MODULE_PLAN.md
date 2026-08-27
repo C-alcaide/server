@@ -7,7 +7,7 @@
 > **Falsifier:** none — shipped. Note the commits' phase numbers drifted from §8's.
 
 > **Corrected 2026-08-27.** This line read *"proposal"* for a month after the module shipped, and
-> `../features/remotewall-and-portaudio.md` had copied that claim — while its own evidence table
+> `../features/remotewall.md` (then `remotewall-and-portaudio.md`) had copied that claim — while its own evidence table
 > listed the producer and the exportable Vulkan texture path this plan asked for. Fourth stale
 > plan status found in one sweep; the check in the README exists because of it.
 

@@ -1,6 +1,6 @@
 # PortAudio Module
 
-> **State and measurements:** [`../features/remotewall-and-portaudio.md`](../features/remotewall-and-portaudio.md)
+> **State and measurements:** [`../features/portaudio.md`](../features/portaudio.md)
 > **This document is how-to.** Per [`../README.md`](../README.md), measured figures live once in `features/`; a tolerance an operator acts on may appear here, the measurements behind it should not.
 
 ## Overview
