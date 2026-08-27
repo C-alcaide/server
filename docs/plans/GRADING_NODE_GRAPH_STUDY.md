@@ -526,7 +526,8 @@ Suggested minimum before any of this is believed:
 
 ## 10. Prototype — what was built
 
-**Built 2026-08-17, on `feature/ocio-mixer`, both backends.** The narrowest end-to-end slice:
+**Built 2026-08-17, both backends** — developed on `feature/ocio-mixer` and present on the
+current branch, where `MIXER GRADE_NODE` ships. The narrowest end-to-end slice:
 **one node, one soft-edged ellipse window, exposure only.** Its purpose was to test the two
 things this document could not answer by reading — whether the `grade_node_only` routing works,
 and what the fingerprint actually requires — and it changed two of the sections above.
