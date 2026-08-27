@@ -523,6 +523,7 @@ So "which doc" is not left to judgment:
 | a new battery, or a new number for an existing claim | the doc carrying that claim, **and** the harness `CLAUDE.md` command table |
 | a new stage in a pipeline, or a second route into an existing one | the owning doc, **and its diagram** |
 | a constant taken from a standard | the owning doc, naming the standard *and its revision* |
+| **a plan's or study's feature shipping** | **that plan's `Status:` line, in the same commit** — nothing else notices, and a stale one gets quoted as state |
 | a trap that cost more than an hour | this file |
 
 **State what the measurement does not cover, in the same paragraph as the number.** A figure
