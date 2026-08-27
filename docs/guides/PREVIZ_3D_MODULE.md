@@ -228,6 +228,7 @@ All commands are prefixed with `PREVIZ <channel>`.
 | `PREVIZ <ch> CAMERA <x> <y> <z> <yaw> <pitch> <roll> <fov>` | Set camera position and orientation |
 | `PREVIZ <ch> CAMERA RESET` | Reset to default (0, 1.5, 5, 0, 0, 0, 60) |
 | `PREVIZ <ch> CAMERA` | Query current camera state |
+| `PREVIZ <ch> CAMERA OVERRIDE <1\|0>` | **Freeze / unfreeze tracker control of the production camera.** `1` locks it so a live tracking feed stops moving it and the values above hold; `0` returns control to the tracker. Any second argument other than `0` — and a missing one — counts as `1`. Undocumented until 2026-08-27 |
 | `PREVIZ <ch> PRESET SAVE <name>` | Save camera state as named preset |
 | `PREVIZ <ch> PRESET RECALL <name>` | Restore camera from preset |
 | `PREVIZ <ch> PRESET LIST` | List all saved presets |

@@ -77,8 +77,8 @@ positional parameters (`type cx cy w h`).
 
 | Value | Description |
 | :--- | :--- |
-| `RECT` | Axis-aligned rectangle |
-| `ROUNDED_RECT` | Rectangle with rounded corners — requires `CORNER_RADIUS` |
+| `RECT` | Axis-aligned rectangle. `RECTANGLE` is accepted as an alias |
+| `ROUNDED_RECT` | Rectangle with rounded corners — requires `CORNER_RADIUS`. `ROUNDEDRECT` is accepted as an alias |
 | `CIRCLE` | Perfect circle — `w` and `h` should be equal; radius = `w / 2` |
 | `ELLIPSE` | Ellipse fitted to the `w × h` bounding box |
 

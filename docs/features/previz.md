@@ -31,7 +31,7 @@ Verified against `src/protocol/amcp/AMCPCommandsImpl.cpp` at the definition line
 | `PREVIZ SCENE` | `<path>` — loads a scene file | 4777 |
 | `PREVIZ MAP` | `<mesh_name> <channel>` — needs ≥2 parameters, else `400` | 4847 |
 | `PREVIZ UNMAP` | `<mesh_name>` | 4869 |
-| `PREVIZ CAMERA` | `RESET` \| camera placement arguments | 4887 |
+| `PREVIZ CAMERA` | `RESET` \| `OVERRIDE 1\|0` \| camera placement arguments | 4887 |
 | `PREVIZ VIEW` | `CLEAR` \| `RESET` \| view arguments | 4938 |
 | `PREVIZ INFO` | — query | 4985 |
 | `PREVIZ SHOW` | `<mesh_name> [1\|0]` | 5011 |

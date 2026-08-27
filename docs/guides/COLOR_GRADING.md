@@ -625,6 +625,46 @@ does the job it always did.
 
 ---
 
+## Tone Curves
+
+A per-channel tone curve: up to 16 control points on `master`, `red`, `green` and `blue`, applied
+as step 19 of the pipeline. Distinct from **Hue Curves** below, which key off hue rather than
+input level.
+
+### AMCP Command
+
+```bash
+MIXER [channel]-[layer] CURVES [ch] [x1] [y1] [x2] [y2] ...   # set one channel
+MIXER [channel]-[layer] CURVES RESET                          # clear all four
+MIXER [channel]-[layer] CURVES [ch]                           # query one channel
+MIXER [channel]-[layer] CURVES                                # query all
+```
+
+### Parameters
+
+| parameter | accepted | notes |
+| :--- | :--- | :--- |
+| `[ch]` | `MASTER`, `R`/`RED`, `G`/`GREEN`, `B`/`BLUE` | case-insensitive; **the long forms are aliases** and were undocumented until 2026-08-27 |
+| `[x] [y]` pairs | **2 to 16 pairs** | fewer than 2, an odd count, or more than 16 returns `400 ERROR` |
+| `x`, `y` | `0.0`-`1.0` | `x` must ascend |
+
+A query returns the active points as `x y x y ...`, or `DISABLED` when no curve is set.
+
+### Usage Examples
+
+```bash
+MIXER 1-1 CURVES MASTER 0.0 0.0 0.5 0.6 1.0 1.0      # lift the midtones
+MIXER 1-1 CURVES BLUE 0.0 0.02 1.0 0.98              # cool the shadows, tame the highlights
+MIXER 1-1 CURVES RESET
+```
+
+> **This command had no documented syntax until 2026-08-27** — it appeared only as one row in the
+> pipeline table above, which is why the mechanical "every command appears in a doc" check passed
+> on it. **A name in a table is not documentation**, and that is the limit of what such a check can
+> see.
+
+---
+
 ## Hue Curves
 
 Four independent curve types for targeted hue, saturation, and luminance adjustments based on input hue or saturation. Each curve is a 256-entry LUT built from control points with linear interpolation. Multiple curve types can be active simultaneously — they are merged into a single texture.
