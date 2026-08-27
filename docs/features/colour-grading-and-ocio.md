@@ -17,7 +17,7 @@ This is the best-documented and best-covered part of the fork. Detail:
 [`../guides/OCIO_USER_GUIDE.md`](../guides/OCIO_USER_GUIDE.md), and
 
 > **Where the 24 grading operators are documented, stated so an audit does not re-flag it.**
-> `MIXER BLUR`, `CDL`, `CDL_FILE`, `CURVES`, `EXPOSURE`, `GAIN`, `GAMUTCOMPRESS`, `GRADE_NODE`, `GRAIN`,
+> `AMF`, `MIXER BLUR`, `CDL`, `CDL_FILE`, `CURVES`, `EXPOSURE`, `GAIN`, `GAMUTCOMPRESS`, `GRADE_NODE`, `GRAIN`,
 > `HUECURVE`, `HUESHIFT`, `LIFT`, `LINEARSATURATION`, `LUT3D`, `MESH`, `MIDTONE`, `QUALIFIER`,
 > `RGBLEVELS`, `SHAPE`, `SHARPEN`, `SPLITTONE`, `TONEBALANCE`, `WHITEBALANCE`, `OCIO_DISPLAY` and
 > `OCIO_LOOK` are documented **in the guides, not here** — `COLOR_GRADING.md` for the chain,
@@ -78,6 +78,34 @@ Reference Gamut Compress" in three places, which claims conformance the code doe
 
 Latest, both backends, 2026-08-26: `conformance` 23/23 patches per conversion, worst **0.55 LSB**;
 `grading` 8/8 patches, worst **0.55** against a 1.0 gate, neutrals **0.00**.
+
+### `AMF` — configure a channel from an ACES Metadata File
+
+An AMF is the document a show carries to say which input transform, look and output transform its
+pipeline uses. `AMF <ch>-<layer> <file.amf>` applies **exactly what `MIXER OCIO`, `OCIO_LOOK` and
+`OCIO_DISPLAY` apply, and nothing else** — so it is a way of *addressing* those three, not a fourth
+colour path. Transform ids resolve through the loaded OCIO config's `interchange:
+amf_transform_ids`, so a config change moves the ids with the transforms they name.
+
+**Resolve everything, then apply.** Three settings from one file must not leave a channel half
+configured because the third id was unknown — the operator would be looking at a picture that is
+neither the old look nor the new one.
+
+**Covered by `cli.py amf`, on two axes, because equivalence alone is not enough:**
+
+* **Equivalence** — applying an AMF must render **byte-identically** to issuing the three commands
+  by hand. Two frames the server produced, so no colour model and no tolerance; and it tests the
+  server's id resolution against the battery's independent one, since both read the config's
+  interchange attributes separately.
+* **Discrimination** — a second AMF differing in exactly **one** node must render **differently**.
+  Without it, "the AMF was read" is unfalsifiable: a server that ignored the file and applied
+  something fixed would pass the equivalence check with both sides the same wrong picture.
+
+Refused with `501` when the server is built without OCIO.
+
+> **Its design study said "not implemented" for eleven days after it shipped** — corrected in
+> [`../plans/AMF_SUPPORT_STUDY.md`](../plans/AMF_SUPPORT_STUDY.md). Second occurrence of that
+> pattern in this tree.
 
 ### Windowed grading nodes — `MIXER GRADE_NODE`
 

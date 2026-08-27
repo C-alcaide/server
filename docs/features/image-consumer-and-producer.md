@@ -35,7 +35,31 @@ mixer-compatible format, preserving bit depth when possible"), `image_algorithms
 
 ---
 
-## 2. The trap worth stating plainly
+## 2. `PRINT RAW` — the producer's frame, before the mixer
+
+```
+PRINT <ch>-<layer> RAW [filename]
+```
+
+Writes the layer's **decoded producer frame, before any mixer transform**, to
+`<media>/_raw/<filename>.png`. Defaults to `raw_<ch>-<layer>`.
+
+**This is the only way to see a producer's output separately from the mixer's**, which makes it the
+tool that splits "the decoder is wrong" from "the mixer is wrong" — the same question §3 says no
+battery can currently answer for the consumers themselves. The harness uses it as its decode
+oracle: `decode.raw_vs_source` compares this frame against the source file.
+
+The output path is resolved inside `<media>/_raw` and checked for escape via `..` or an absolute
+path, mirroring the containment check `MIXER MESH` and `PROJECTION_BLEND_MASK` use for their file
+arguments.
+
+**Fork-only**, and until 2026-08-27 it appeared in no document but the command inventory — found by
+listing fork commands by their registration site rather than by module, since it lives in
+`AMCPCommandsImpl.cpp` under "Basic Commands" and belongs to no module at all.
+
+---
+
+## 3. The trap worth stating plainly
 
 **No battery can currently distinguish a mixer fault from an IMAGE-consumer fault**, because the
 batteries that would notice are the ones capturing through it. The trace line above is the only
@@ -47,7 +71,7 @@ capture route the harness has.
 
 ---
 
-## 3. Known gaps
+## 4. Known gaps
 
 1. **The consumer is never the subject.** Breaking the circularity needs a second, independent
    capture route compared against it — `consumer-view`, or a DeckLink loop.

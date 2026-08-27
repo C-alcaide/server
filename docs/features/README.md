@@ -21,6 +21,31 @@ module directories and registered AMCP command names diffed against `d:\Github\s
 > `src/**/*.cpp` and diffed against upstream's own registrations, which is the only way that
 > holds as modules come and go.
 
+## Enumerate by COMMAND as well as by module
+
+**A module list is not a feature list, and this folder learned that twice on 2026-08-27.**
+
+Of 91 fork AMCP commands, **58 are registered in `AMCPCommandsImpl.cpp`** and belong to no module
+at all — they live in the mixer, the protocol layer or core. So a completeness check that walks
+`src/modules/` cannot see them, and three features had accumulated their documentation elsewhere or
+nowhere:
+
+| missed feature | why the module sweep could not see it | where it went |
+| :--- | :--- | :--- |
+| `CALIBRATION` | a mixer command, no module | **new** `led-calibration.md`; its measurements had built up in the operator guide |
+| `AMF` | a mixer command, no module | `colour-grading-and-ocio.md`; its design study still said *"not implemented"* eleven days after it shipped |
+| `PRINT RAW` | a protocol-layer command, no module | `image-consumer-and-producer.md` §2 |
+
+**The check that works** is the one this folder now uses: list every `register_command` /
+`register_channel_command` in `src/**/*.cpp`, diff against upstream's own registrations, and group
+by **registration site** rather than by directory. Anything registered outside `src/modules/` is a
+feature with no directory, and needs an owner named explicitly.
+
+Also worth a sweep: fork `<configuration>` elements outside any module. Currently three —
+`log-diagnostics`, `log-diagnostics-interval` (core) and `ocio-config` (shell) — all present in
+`src/shell/casparcg.config`, so an operator can find them, though the first two are described only
+in an architecture note and an audit.
+
 ## Every module, and why it is or is not here
 
 Regenerate by diffing `src/modules/*` against `d:\Github\server-upstream`. The point of the table
