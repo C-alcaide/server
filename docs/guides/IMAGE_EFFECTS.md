@@ -25,7 +25,14 @@ Hardware-accelerated OpenGL blurs for creative treatments. The blur modifier man
 ```amcp
 MIXER <channel>-<layer> BLUR <radius> [type] [angle] [center_x] [center_y] [tilt_y] [tilt_h] [duration] [tween]
 ```
-> **Note:** To disable a blur effect entirely, set `radius` to `0`. 
+> **Note:** To disable a blur effect entirely, set `radius` to `0`.
+
+> **An unrecognised `type` is refused, and this is recent.** The reply names the valid set —
+> *"blur type must be one of GAUSSIAN, BOX, DIRECTIONAL, ZOOM, TILT_SHIFT or LENS, got: ‹yours›"*.
+> It used to fall back to the first enum value, so `MIXER BLUR 10 lenz` rendered a **gaussian** and
+> answered `202`, which from the client side is indistinguishable from having worked. Numeric
+> arguments are refused the same way, by name and with their range — see
+> [COLOR_GRADING.md](COLOR_GRADING.md) §*Every Range column below is enforced*.
 
 ### Parameters:
 *   `radius` (Required): The sheer size/intensity of the effect (in pixels).
