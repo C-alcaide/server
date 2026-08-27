@@ -56,9 +56,18 @@ LTC LOAD "Line In (Realtek Audio)"
 INFO LTC
 ```
 
-`LTC LOAD` returns `202 LTC LOAD OK` on success and **`404 LTC LOAD ERROR`** when the device name
-does not match a capture device — a real failure response rather than a silent no-op, which is
-better than most of this fork's runtime commands manage.
+`LTC LOAD` returns `202 LTC LOAD OK` when **a** stream opened and `404 LTC LOAD ERROR` only when
+nothing could open at all.
+
+> **This paragraph said `404` meant "the device name does not match", and called that "a real
+> failure response rather than a silent no-op". It is the exact opposite.** An unmatched name is
+> stored as typed, resolves to index `-1`, and `start_unlocked()` then falls back to
+> `Pa_GetDefaultInputDevice()` — which usually opens, so the reply is `202`. `INFO LTC` then echoes
+> **the name you asked for**, not the device that opened. So a typo returns success, shows your
+> misspelling back to you, and reports `valid = false` — which reads as a cable or level fault.
+> This is a silent no-op of the worst kind, and the doc was recommending it as a virtue.
+> Corrected 2026-08-27; [`../guides/LTC_TIMECODE.md`](../guides/LTC_TIMECODE.md) §2 has the full
+> three-way failure table.
 
 `INFO LTC` reports `ltc.timecode` and `ltc.source`, where source is `LTC` or `System Clock`. **That
 second field is the one to check first**: everything downstream still works when LTC is absent,
@@ -83,10 +92,23 @@ precisely so a caller can tell, and `INFO LTC` surfaces it — but nothing force
 **Nothing.** No battery reads timecode, checks the fallback, or verifies a stamped recording
 carries the timecode it should.
 
-What a first battery could do without hardware: drive `LTC LOAD` with a name that cannot exist and
-assert `404`; then assert `INFO LTC` reports `System Clock` and a plausible timecode. That covers
-the failure path and the fallback — the two things most likely to be silently wrong — and needs no
-audio interface. Real LTC decode needs a signal generator and is a separate problem.
+What a first battery could do without hardware, **corrected 2026-08-27 because the version written
+here would have failed**: it proposed driving `LTC LOAD` with an impossible name and asserting
+`404`. The server answers `202`, so that assertion is false and the natural response to a red test
+would have been to weaken it.
+
+The check worth writing instead asserts the **real** behaviour, which is also the more useful thing
+to pin:
+
+1. `LTC LOAD` an impossible name → expect **`202`**, and then `INFO LTC` reporting **that same
+   impossible name** in `device`. That is the silent-fallback trap, and a test is the only thing
+   that will keep it documented.
+2. `INFO LTC` reports `System Clock` in `source` and a plausible timecode — the fallback.
+3. `LTC LOAD` a name from `INFO LTC`'s own `devices` list → `202`, and `device` echoes it. Proves
+   the reply cannot distinguish (1) from (3), which is the finding.
+
+None of that needs an audio interface. Real LTC decode needs a signal generator and is a separate
+problem.
 
 ---
 
