@@ -6,7 +6,10 @@
 
 **Status: study, and implemented.** Written 2026-08-11; status corrected 2026-08-16.
 
-> **The integration is done on `feature/ocio-mixer`, both mixers, at parity.** Input
+> **The integration is done and is on this branch, both mixers, at parity.** It was developed on
+> `feature/ocio-mixer`, which is where this line still pointed until 2026-08-27; the work is present
+> on `upstream-sync-ffmpeg8` — `src/accelerator/ocio/` and four OCIO command handlers in
+> `AMCPCommandsImpl.cpp` — so a reader does not need to switch branches to see it. Input
 > transform, channel display transform, per-consumer views, custom configs and the
 > interactions with the built-in grading chain are all in and measured.
 >
@@ -539,18 +542,27 @@ in `IMAGE_SEQUENCE_AND_TIMELINE_PLAN.md` §3.5 tier 3.
    ACES pipeline" then yes and this study is the route. If it is "looks right on the wall",
    the existing 1.x approximations may already be sufficient and phase 0 alone (float
    working space) is the higher-value change.
-2. **Does the display transform have to be per channel, or per consumer?** A channel
-   feeding an LED processor and an SDI monitor simultaneously needs two different view
-   transforms from one composite. That argues for the transform living in the consumer,
-   not the channel — which is a larger change than §4.2 describes and should be settled
-   before phase 4.
-3. **What is the tolerance between OCIO GPU and `ocioconvert` CPU?** Unmeasured. It bounds
-   every claim phases 2–4 can make, so it should be measured early on a trivial transform.
-4. **Does the 14.50 pin accept the vcpkg OCIO dependency chain?** Untested, and it is a
-   go/no-go for the whole study.
-5. **Does the existing `MIXER LUT` path stay, or move to OCIO's `FileTransform`?** OCIO
-   would bring better format coverage and, at ≥2.5.2, a hardened parser — but it also
-   makes an operator-facing feature depend on the new stack.
+2. ~~**Does the display transform have to be per channel, or per consumer?**~~
+   **ANSWERED BY THE IMPLEMENTATION, 2026-08-27: both.** `OCIO_DISPLAY <ch>` sets the
+   channel's, and `<ocio-display>` / `<ocio-view>` on the **screen** and **DeckLink**
+   consumers override it per output — both-or-neither, refused otherwise. So the LED-processor
+   and SDI-monitor case this question raised is served, and the transform did not have to move
+   out of the channel to do it.
+3. ~~**What is the tolerance between OCIO GPU and `ocioconvert` CPU?**~~ **MEASURED
+   2026-08-11**, and it is the basis of `cli.py ocio`'s gate: **1.0 LSB, worst observed 0.55**.
+   `CasparCG-TestRunner/docs/ocio_tolerance_2026-08-11.md` records why the number had to be
+   measured rather than derived — the model is OCIO's own CPU processor, not a closed-form
+   transcription, so the 1-LSB-from-first-principles argument `conformance` and `grading` make
+   is unavailable here.
+4. ~~**Does the 14.50 pin accept the vcpkg OCIO dependency chain?**~~ **ANSWERED: yes.**
+   The integration builds and runs on the 14.50 pin — `src/accelerator/ocio/` compiles into
+   the tree and the batteries above drive it. The go/no-go passed.
+5. ~~**Does the existing `MIXER LUT` path stay, or move to OCIO's `FileTransform`?**~~
+   **ANSWERED: it stayed.** `MIXER LUT3D` and `CALIBRATION ... LUT` share the fork's own
+   `.cube` parser, which enforces `LUT_3D_SIZE` 2-128, a single size declaration, an exact
+   value count and a **0..1 domain** — refusing a non-unit domain rather than misapplying it.
+   So the operator-facing feature does not depend on the OCIO stack, which is what the
+   question was weighing. The trade accepted: no `FileTransform` format coverage.
 6. ~~**`fp16` or `fp32` for the float path?**~~ **MEASURED 2026-08-12** —
    `CasparCG-TestRunner/cli.py banding`, and
    `CasparCG-TestRunner/docs/render_format_quantum_2026-08-12.md`.
@@ -568,7 +580,7 @@ in `IMAGE_SEQUENCE_AND_TIMELINE_PLAN.md` §3.5 tier 3.
    **Two corrections to the premise of this entry**, both from trying to run it as written:
 
    * **There is no `bit12` channel.** `<color-depth>` accepts only 8 or 16
-     (`server.cpp:302-304`) and the channel depth is `color_depth == 16 ? bit16 : bit8`.
+     (`server.cpp`, the `Invalid color-depth` throw beside where it is read) and the channel depth is `color_depth == 16 ? bit16 : bit8`.
      `bit12` is only ever a *source* pixel format. §4.3.4's "on a 12-bit path" is an
      argument about a path no configuration produces — 12-bit is a **consumer** property,
      so the answer depends on the deepest consumer a float channel feeds.
