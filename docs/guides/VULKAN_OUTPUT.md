@@ -51,10 +51,35 @@ it starts, which is how you tell four identical screens apart.
 | setting | meaning |
 | :--- | :--- |
 | `transfer` | what the output **signals**: `sdr`, `pq` or `hlg` |
-| `eotf` | transfer function override — `linear`, `pq`/`st2084` |
-| `display-peak-luminance` | the display's peak, in cd/m² |
+| `eotf` | transfer-function override, independent of `transfer`. `srgb`, `linear`, `pq` (or `st2084`), `hlg`, `gamma24` (or `2.4`), `gamma26` (or `2.6`). Omitted, it is inferred from `transfer` |
+| `display-peak-luminance` | **only used when `auto-tone-map` is `hlg_ootf`** — it is that operator's target peak, not a general display-peak declaration. It reaches exactly one shader branch and nothing else |
 | `edid-auto-hdr` | read the display's own HDR limits from its EDID and use those |
 | `auto-tone-map` | tone-map operator for content brighter than the display |
+
+### `<hdr-metadata>` — the mastering-display numbers
+
+`max-cll` and the rest are **not** top-level; they live in their own child block, which is why
+setting them beside `<transfer>` does nothing:
+
+```xml
+<vulkan-output>
+    <transfer>pq</transfer>
+    <hdr-metadata>
+        <max-cll>1000</max-cll>       <!-- content light level, cd/m2 -->
+        <max-fall>400</max-fall>      <!-- frame-average light level -->
+        <min-dml>0.005</min-dml>      <!-- mastering display, min luminance -->
+        <max-dml>1000.0</max-dml>     <!-- mastering display, max luminance -->
+        <transfer>pq</transfer>       <!-- OVERRIDES the outer <transfer>; pq|hlg only -->
+    </hdr-metadata>
+</vulkan-output>
+```
+
+Those four are spelled the same way as in the DeckLink and FFmpeg consumers deliberately — the same
+four numbers describe the same mastering display, and the code says so.
+
+**The inner `<transfer>` wins.** A `pq` or `hlg` inside `<hdr-metadata>` overrides the outer value;
+anything else there is ignored and the outer one stands. Two routes to one setting, so set it in one
+place.
 
 **`edid-auto-hdr` overrides what you configured.** When it is on, the EDID's maximum luminance
 replaces your `max-cll`. So a request for 1000 nits on a 600-nit panel becomes 600 — which is
@@ -66,6 +91,31 @@ because the **channel's** colour space and transfer already determine every pixe
 framebuffer; running a second conversion here would double-convert. Set the **channel's**
 `<color-space>` instead. The server warns about this at startup, and reports `gamut-inert` in its
 state.
+
+---
+
+## 2b. `<subregion>` — crop the channel, place it on the display
+
+Undocumented until 2026-08-27, and its own child block:
+
+```xml
+<vulkan-output>
+    <subregion>
+        <src-x>0</src-x>       <src-y>0</src-y>       <!-- where to read FROM in the channel -->
+        <width>1920</width>    <height>1080</height>  <!-- how much; 0 = the whole frame -->
+        <dest-x>0</dest-x>     <dest-y>0</dest-y>     <!-- where to write TO on the display -->
+    </subregion>
+</vulkan-output>
+```
+
+All six default to `0`, and `width`/`height` of `0` mean "everything" — so an absent block is the
+full frame at the origin, which is what you get today without one.
+
+This is how one channel drives a display wall wider than any single output: give each
+`<vulkan-output>` a different `src-x` and the same `width`, and each output takes its own slice. The
+DeckLink consumer has the same concept and [`DECKLINK_OUTPUT.md`](DECKLINK_OUTPUT.md) covers the
+constraints there; **nothing measures the Vulkan one**, so treat the alignment rules as unestablished
+rather than as matching DeckLink's.
 
 ---
 
@@ -81,9 +131,30 @@ Outputs sharing a `sync-group` present together. Use it when several displays fo
 LED volume made of multiple processors, or a multi-projector blend — so a moving edge does not tear
 across the seam.
 
+### `<gsync>` — configuring Quadro Sync II, not just reading it
+
+`<sync-group>` above is CasparVP's own software grouping. **Genlock to a sync board is a separate
+block**, and it was undocumented until 2026-08-27:
+
+```xml
+<vulkan-output>
+    <gsync>
+        <enabled>true</enabled>          <!-- default false -->
+        <master>true</master>            <!-- default false: this output drives the group -->
+        <reference>house</reference>     <!-- internal (default) | external | house -->
+    </gsync>
+</vulkan-output>
+```
+
+`external` and `house` mean the same thing; anything else falls back to `internal`. Exactly one
+output in a genlocked set should carry `<master>true</master>`.
+
 On Quadro/RTX Pro hardware with a sync board, `INFO`'s state also reports the Quadro Sync status:
 whether a board is present, whether timing is locked, whether house sync is connected, and whether
 this output is master or slave.
+
+**None of this is measured.** `nvapi` remains untested by anything, so `<gsync>` is configuration the
+server accepts and no check confirms took effect.
 
 ---
 
@@ -173,6 +244,7 @@ implementation notes in [`../architecture/VULKAN_OUTPUT.md`](../architecture/VUL
 | `buffer-depth` | presentation queue depth |
 | `display-name` | select the output by name instead of index |
 | `display-blanker` | blank other outputs on the adapter |
+| `enabled` | inside `<gsync>` only — there is no top-level enable |
 
 `delay`, `delay-ms` and `buffer-depth` interact, and their combined behaviour is **not documented in
 one place** — treat a combination of the three as something to measure on your rig rather than to
