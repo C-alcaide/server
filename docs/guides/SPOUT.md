@@ -25,9 +25,9 @@ ADD 1 SPOUT MyChannel MAX_WIDTH 1920 MAX_HEIGHT 1080
 
 | parameter | meaning |
 | :--- | :--- |
-| *(name)* | the **sender name** other applications will see. Optional — omit it and the server picks one |
-| `MAX_WIDTH` | clamp the shared texture's width |
-| `MAX_HEIGHT` | clamp the shared texture's height |
+| *(name)* | the **sender name** other applications will see. Optional — omitted, it is **`CasparCG Spout`** |
+| `MAX_WIDTH` | maximum shared-texture width; the picture is **downscaled** to fit |
+| `MAX_HEIGHT` | maximum shared-texture height; likewise |
 
 Remove it like any consumer:
 
@@ -39,9 +39,19 @@ REMOVE 1 SPOUT
 so an unnamed sender means whoever is configuring the other end has to discover what it was called —
 and the name is the only thing tying the two applications together.
 
-**`MAX_WIDTH` / `MAX_HEIGHT` clamp, they do not scale to fit.** Use them when the receiver cannot
-cope with the channel's full raster; leave them out otherwise, since a clamp is a downgrade of what
-you are sending.
+**`MAX_WIDTH` / `MAX_HEIGHT` are a bounding box, and the picture IS resampled to fit it.** The two
+together give one aspect-preserving scale factor — whichever limit binds harder wins — applied
+through swscale, with the result rounded **down to an even** width and height. Nothing is cropped and
+nothing is letterboxed.
+
+Two consequences:
+
+* **Neither ever upscales.** A cap larger than the channel raster is ignored, so `MAX_WIDTH 3840` on
+  a 1080p channel sends 1920×1080, not a stretched 4K frame.
+* **A cap costs a resample per frame**, so leave both out unless the receiver actually needs a
+  smaller texture. Without them the share is the channel's native raster and format-conversion only,
+  which the consumer splits across four threads; with them it is single-threaded on the assumption
+  that the output is small.
 
 ---
 
@@ -54,6 +64,22 @@ PLAY 1-1 [SPOUT] SenderName
 PLAY 1-1 spout://SenderName
 PLAY 1-1 SPOUT SenderName
 ```
+
+**Type them exactly as written: all three are case-sensitive, and they do not agree on case.**
+AMCP upper-cases the command name only, never the parameters, so the producer sees what you typed.
+`[SPOUT]` and `SPOUT` must be upper-case and `spout://` must be lower-case — `[spout]`, `spout`
+and `SPOUT://Name` all match nothing.
+
+**A mistyped spelling and an absent sender fail differently, and telling them apart saves the
+guessing:**
+
+| what you typed | what happens |
+| :--- | :--- |
+| a spelling that matches no producer | an explicit error — *"No match found for supplied commands. Check syntax."* — because no producer claims it and the registry then refuses |
+| a correct spelling, sender not publishing | **no error, a layer with no picture** (§4). The sender may legitimately appear later |
+
+So if the reply was an error, the problem is your syntax; if the layer is simply black, the problem
+is at the other application.
 
 The `spout://` form is convenient in playlists and rundowns where a single string has to carry the
 whole source.

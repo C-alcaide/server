@@ -24,10 +24,19 @@ LTC arrives as audio, so the device is an audio *input*. Set it in `casparcg.con
 </configuration>
 ```
 
-The name is matched against the audio input devices the machine reports. Get the list with
-`INFO PORTAUDIO`, or from `INFO LTC` (below), which reports the same set.
+The name is matched against every PortAudio device with at least one input channel. Get the list
+from `INFO LTC` (§3) or `INFO PORTAUDIO`, which enumerate the same devices.
 
-Leave `<device>` out and no LTC is read at all — the server runs on the system clock.
+**The match is EXACT — not a partial match**, unlike the PortAudio *consumer*'s `<device>`, which
+`casparcg.config` documents as "partial device name match". The same-looking element behaves
+differently in the two places. Copy the name from `INFO LTC` verbatim, punctuation and case included.
+
+**A name that matches nothing does not disable LTC and does not raise an error — it opens the
+system DEFAULT input device instead.** Read §2 before relying on either the reply or `INFO LTC`'s
+`device` field to tell you which input is open.
+
+Leave `<device>` out entirely and the default input device is opened as well; what stops LTC being
+used is the absence of a decodable signal, which shows as `source = System Clock`.
 
 ---
 
@@ -37,16 +46,28 @@ Leave `<device>` out and no LTC is read at all — the server runs on the system
 LTC LOAD "Line In (Focusrite USB)"
 ```
 
-| reply | meaning |
+| reply | what it actually means |
 | :--- | :--- |
-| `202 LTC LOAD OK` | the device was found and capture started |
-| `404 LTC LOAD ERROR` | **no such device** — the name did not match anything |
+| `202 LTC LOAD OK` | **a** capture stream opened — **not necessarily the one you named** |
+| `404 LTC LOAD ERROR` | no usable input device at all, or the stream failed to open |
 | `400 ERROR` | no device name given |
 
-**A `404` here means the name, not the signal.** The command only opens the device; it does not
-wait for timecode to appear or validate it. A device that opens but carries no LTC returns `202`
-and then reports `valid = false` in `INFO LTC`. Those are two different failures and only the
-second one is about your cable.
+**`202` does not mean your device was found.** An unmatched name is stored as-is, resolves to index
+`-1`, and the input then falls back to `Pa_GetDefaultInputDevice()` — which usually opens fine, so
+the reply is `202`. `404` appears only when *nothing* opens: no input device on the machine, the
+chosen device reporting no input channels, or a stream-open failure.
+
+**And `INFO LTC`'s `device` field echoes the name you asked for, not the device that was opened.**
+A typo therefore comes back to you looking accepted: `202`, your misspelling reflected in `device`,
+and `valid = false` — which reads exactly like a cable or level problem. It is not.
+
+So there are **three** distinct failures, and the reply distinguishes none of them:
+
+| symptom | actual cause |
+| :--- | :--- |
+| `202`, `device` shows your name, `valid = false` | either the signal is bad **or the name never matched** and you are listening to the default input. Compare your string character-for-character against `INFO LTC`'s `devices` list |
+| `202`, `valid = false`, name definitely correct | now it is the signal: generator off, wrong input, or level too quiet or clipped |
+| `404` | no input device is usable at all — a driver or hardware problem, not a name |
 
 ---
 
@@ -74,7 +95,7 @@ INFO LTC
 | `timecode` | the current position as `HH:MM:SS:FF` |
 | `valid` | **is the timecode being decoded?** `false` with a device set means the device opened but the signal is absent, silent, at the wrong level, or not LTC |
 | `source` | **`LTC` or `System Clock`.** This is the field that tells you whether timecode is in use at all |
-| `device` | which input is open |
+| `device` | **the name that was requested**, not the device actually opened — see §2. `Default` means none was ever set |
 | `devices` | every input the machine offers, for `LTC LOAD` |
 
 **`source` is the field to read first.** A server that fell back to `System Clock` keeps running and
@@ -88,10 +109,17 @@ the house. There is no error, because falling back is the designed behaviour.
 1. `INFO LTC` — read `devices` to get the exact device name the machine reports.
 2. `LTC LOAD "<that name>"` — expect `202`.
 3. `INFO LTC` again — check **`source` is `LTC`** and `valid` is `true`.
-4. If `valid` is `false`: the device is open, so it is the signal. Check the generator is running,
-   the cable is on the right input, and the level is sane — LTC decodes poorly when very quiet or
-   clipped.
-5. Put the working device name into `casparcg.config` so it survives a restart.
+4. If `valid` is `false`, **check the name before the cable.** Because an unmatched name silently
+   opens the default input (§2), the first thing to rule out is a mismatch: compare what you sent
+   against the `devices` list character-for-character. Only once it matches exactly is `valid =
+   false` evidence about the signal — generator running, cable on the right input, level neither
+   very quiet nor clipped.
+5. Put the working device name into `casparcg.config` so it survives a restart — exactly as it
+   appears in `devices`, since that match is exact too.
+
+**A runtime `LTC LOAD` wins over the config for the rest of the session.** The configured device is
+applied only when no device name has been set yet, so after an `LTC LOAD` the config value is not
+re-read until the server restarts.
 
 ---
 
