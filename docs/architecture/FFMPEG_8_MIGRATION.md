@@ -1153,7 +1153,7 @@ separate the two.
 
 * ~~Verify gyan 8.1.2's actual configure line (§5.5)~~ — **closed 2026-08-18**. CMake
   extracts the `.7z` during configure, so no 7z extractor was needed; the flags are in §5.5.
-* Whether anything in configs or media paths uses `hls://` (§5.4).
+* ~~Whether anything in configs or media paths uses `hls://` (§5.4)~~ — **closed 2026-08-27: nothing does.** No occurrence in `src/` or in the harness tree, so the protocol's removal cannot affect either.
 * ~~Whether any harness module hashes PNG bytes rather than comparing pixels (§5.2)~~ —
   **closed 2026-08-18: none does, and the two that hash are immune anyway.** No module
   references a stored PNG digest. `core/mix_cases.py`'s `sha256` compares one channel against
@@ -1163,9 +1163,13 @@ separate the two.
   (`media/generate_references.py:162`) digests the **fixture file**, not a render, and
   fixtures come from PATH FFmpeg rather than the server — already 8.1.1 — so the pin bump
   causes no digest churn either.
-* ~~The build itself~~ — **closed for the upstream tree 2026-08-18** (§0): it configures,
-  builds and runs. **Still open for the fork's own modules**, which have not been compiled
-  against 8.x at all.
+* ~~The build itself~~ — **closed 2026-08-18 for the upstream tree** (§0) and **closed
+  2026-08-27 for the fork's own modules**, which said here they had "not been compiled
+  against 8.x at all". They have: `Bootstrap_Windows.cmake` fetches
+  `ffmpeg-8.1.2-full_build-shared`, and the fork's own ffmpeg module uses APIs that exist
+  only in 8.x — `AV_CODEC_CONFIG_SAMPLE_FORMAT`, `AV_CODEC_CONFIG_SAMPLE_RATE`,
+  `AV_CODEC_CONFIG_CHANNEL_LAYOUT` and `AV_FRAME_FLAG_INTERLACED`. It could not compile
+  against 7.x.
 * The §5.1 swscale before/after. **Revised 2026-08-18**: the capture-side path is covered by
   `conformance` + `grading` and needs a re-run, not a battery (§9). What still has no battery
   is the **still-load** path through the IMAGE producer and the **Spout downscale**, and §9
