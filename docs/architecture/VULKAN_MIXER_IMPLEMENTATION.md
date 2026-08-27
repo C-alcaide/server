@@ -4,8 +4,12 @@
 > **This document is why-it-is-shaped-this-way.** Operating instructions live in `guides/`, current state and figures in `features/`.
 
 > **Scope**: This document describes the Vulkan GPU image mixer and its
-> associated readback strategies as implemented on the `CasparVPV` branch.
-> All path references are relative to the CasparVP repository root.
+> associated readback strategies **as implemented in this working tree**. All path references are
+> relative to the CasparVP repository root.
+>
+> It used to scope itself to the `CasparVPV` branch, which on 2026-08-27 was **486 commits behind**
+> the branch this file sits on — an invitation to read it as describing a state the reader is not
+> on. Docs live with the code; the branch that matters is the one you have checked out.
 
 > **Platform support**: The Vulkan mixer runs on both **Windows** and
 > **Linux**. Cross-device interop uses platform-specific external memory
@@ -191,7 +195,7 @@ _pipelines[1] = pipeline(_device, VK_FORMAT_R16G16B16A16_UNORM, ...);
 |---|---|---|---|
 | 0 | 0 | `VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT` | Background (target) texture for blending |
 | 0 | 1 | `VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER` × 8 | Source texture array (Y, CbCr, BGRA, etc.) with partial binding |
-| 0 | 2 | `VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC` | Per-draw `uniform_block` (752 bytes) |
+| 0 | 2 | `VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC` | Per-draw `uniform_block` (944 bytes) |
 | 0 | 3 | `VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT` | Local key attachment |
 | 0 | 4 | `VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT` | Layer key attachment |
 
@@ -225,7 +229,7 @@ compositing where each draw reads the background it composites onto.
 
 Each draw call produces a `layer_info` containing:
 - The target attachment and optional key attachments
-- The 752-byte `uniform_block` filled by `image_kernel`
+- The 944-byte `uniform_block` filled by `image_kernel`
 - Clipped and transformed vertex coordinates
 
 On `commit()`, all layers are batched into a single command buffer recording:
@@ -325,10 +329,10 @@ that need CPU-side sync call `ensure_render_complete()`, which is
 
 A single monolithic GLSL 450 fragment shader handles all compositing,
 effects, and color management. The shader is ~2000 lines and uses the
-752-byte `uniform_block` (§6.1) to select code paths at runtime via
+944-byte `uniform_block` (§6.1) to select code paths at runtime via
 bitfield flags.
 
-### 6.1 uniform_block (752 bytes)
+### 6.1 uniform_block (944 bytes)
 
 **File**: `src/accelerator/vulkan/util/uniform_block.h`
 
@@ -348,6 +352,26 @@ as 3×vec4). All fields have documented byte offsets. Key sections:
 | 604–639 | Blur | Gaussian, directional, radial, tilt-shift |
 | 640–735 | Shape overlay | SDF shapes with gradient/stroke |
 | 736 | `flags2` | Extended feature flags |
+| 740–751 | Curved-screen model | `eye_distance`, `source_lens`, `screen_arc_v` |
+| 752–775 | Inner frustum | `inner_yaw/pitch/roll/fov`, `inner_offset_x/y` |
+| 776–815 | ICVFX mask | the four `icvfx_q‹n›x/y` quad corners, `icvfx_feather`, `icvfx_outer_dim` |
+| 816–823 | Lens tangential | `lens_p1`, `lens_p2` |
+| 824–851 | ICVFX levels | `icvfx_inner_dim` and the six inner/outer RGB gains |
+| 852–883 | Grading node | window centre/radius/feather, exposure, invert, and `ycbcr_full_range` (876) / `chroma_cosited` (880) |
+| 884–927 | Grading-node ASC CDL | `gn_has_cdl`, then slope/offset/power RGB and saturation |
+| 928–943 | `_pad_to_16` | explicit tail padding — std140 rounds the block to a multiple of 16 |
+
+> **The block grew from 752 to 944 bytes and this section said 752 until 2026-08-27.** Everything
+> from offset 740 on — the curved-screen model, the inner frustum, the ICVFX mask and gains, the
+> grading node and its CDL — was missing from the table.
+>
+> **Do not treat the offset comments as decoration.** The header carries `static_assert`s on the
+> first field, on `ycbcr_full_range` at 876, on `chroma_cosited` at 880 and on the total size,
+> because the failure mode is silent and total rather than a wrong pixel: measured 2026-08-21 with
+> the size at 884 instead of a multiple of 16, the mixer logged nothing, decoded normally and
+> produced **no readback at all** — `conformance` 0/4, `flat-decoded` 0/29, the IMAGE consumer
+> timing out. std140 rounds the block size up to 16, so `uboInfo.range = sizeof(uniform_block)`
+> then described less memory than the shader read. A comment cannot fail a build; the asserts can.
 
 ### 6.2 shader_flags Bitfield
 
@@ -864,7 +888,7 @@ The XML parser also accepts `<gpu-strategy>` as a legacy alias for
 | `src/accelerator/vulkan/util/matrix.h/cpp` | 4×4 vertex matrix computation |
 | `src/accelerator/vulkan/util/transforms.h/cpp` | Transform composition, polygon clipping |
 | `src/accelerator/vulkan/util/draw_params.h` | Draw call parameter struct |
-| `src/accelerator/vulkan/util/uniform_block.h` | 752-byte UBO struct + shader_flags enum |
+| `src/accelerator/vulkan/util/uniform_block.h` | 944-byte UBO struct + shader_flags enum, with the offset `static_assert`s |
 
 ### Readback Strategies
 | File | Purpose |
