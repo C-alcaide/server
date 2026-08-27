@@ -1,5 +1,8 @@
 # Keyframes Module
 
+> **State and measurements:** [`../features/keyframes.md`](../features/keyframes.md)
+> **This document is how-to.** Per [`../README.md`](../README.md), measured figures live once in `features/`; a tolerance an operator acts on may appear here, the measurements behind it should not.
+
 The keyframes module provides NLE-style per-property animation on a unified timeline.
 Keyframe timelines are bound to a channel/layer and driven by the media producer's
 playback position, giving frame-accurate animation of any MIXER property — geometry,

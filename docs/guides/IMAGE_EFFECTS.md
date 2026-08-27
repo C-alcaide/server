@@ -1,5 +1,9 @@
 # GPU Image Effects
 
+> **State and measurements:** [`../features/colour-grading-and-ocio.md`](../features/colour-grading-and-ocio.md)
+> **Implementation notes:** [`../architecture/OCIO_INTEGRATION_STUDY.md`](../architecture/OCIO_INTEGRATION_STUDY.md)
+> **This document is how-to.** Per [`../README.md`](../README.md), measured figures live once in `features/`; a tolerance an operator acts on may appear here, the measurements behind it should not.
+
 Hardware-accelerated image processing effects for CasparCG layers. All effects run in the GLSL fragment shader at zero CPU cost. Blur and sharpening operate on raw texture samples before color grading; film grain is applied last, after output encoding.
 
 For color grading (CDL, LUT, saturation, split tone, etc.), see [COLOR_GRADING.md](../guides/COLOR_GRADING.md).

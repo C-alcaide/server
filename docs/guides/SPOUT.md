@@ -1,5 +1,8 @@
 # Spout — sharing video with other Windows applications
 
+> **State and measurements:** [`../features/spout.md`](../features/spout.md)
+> **This document is how-to.** Per [`../README.md`](../README.md), measured figures live once in `features/`; a tolerance an operator acts on may appear here, the measurements behind it should not.
+
 Spout shares GPU textures between applications on the same machine, with no encode, no file and no
 network. CasparVP is **both ends**: it can publish a channel as a Spout sender, and it can play
 another application's Spout sender as a producer.

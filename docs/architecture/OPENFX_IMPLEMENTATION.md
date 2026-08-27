@@ -1,5 +1,9 @@
 # CasparCG OpenFX (OFX) Host — Implementation & Current State
 
+> **State and measurements:** [`../features/isf-and-openfx.md`](../features/isf-and-openfx.md)
+> **Operator guide:** [`../guides/ISF_USER_AND_SHADER_GUIDE.md`](../guides/ISF_USER_AND_SHADER_GUIDE.md), [`../guides/OPENFX_USER_AND_PLUGIN_GUIDE.md`](../guides/OPENFX_USER_AND_PLUGIN_GUIDE.md)
+> **This document is why-it-is-shaped-this-way.** Operating instructions live in `guides/`, current state and figures in `features/`.
+
 > Module: `src/modules/ofx` · Branch: `CasparVPV` · Status: **Production-ready core, verified**
 > Companion document: [OPENFX_USER_AND_PLUGIN_GUIDE.md](../guides/OPENFX_USER_AND_PLUGIN_GUIDE.md)
 

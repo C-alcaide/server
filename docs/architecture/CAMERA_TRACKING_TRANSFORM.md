@@ -1,5 +1,9 @@
 # Camera tracking — the order the transform is composed
 
+> **State and measurements:** [`../features/camera-tracking.md`](../features/camera-tracking.md)
+> **Operator guide:** [`../guides/CAMERA_TRACKING.md`](../guides/CAMERA_TRACKING.md)
+> **This document is why-it-is-shaped-this-way.** Operating instructions live in `guides/`, current state and figures in `features/`.
+
 Eighteen `TRACKING` commands adjust one camera pose, and **the order they apply in was recorded
 nowhere**. Operator documentation is in
 [`../guides/CAMERA_TRACKING.md`](../guides/CAMERA_TRACKING.md); state is in

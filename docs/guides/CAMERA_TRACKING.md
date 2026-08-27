@@ -1,5 +1,9 @@
 # Camera Tracking Module
 
+> **State and measurements:** [`../features/camera-tracking.md`](../features/camera-tracking.md)
+> **Implementation notes:** [`../architecture/CAMERA_TRACKING_TRANSFORM.md`](../architecture/CAMERA_TRACKING_TRANSFORM.md)
+> **This document is how-to.** Per [`../README.md`](../README.md), measured figures live once in `features/`; a tolerance an operator acts on may appear here, the measurements behind it should not.
+
 The `tracking` module enables real-time camera tracking data to drive CasparCG layer transforms — either 2D fill/scale/rotation or full 360° equirectangular projection — all frame-accurately, without round-tripping through AMCP.
 
 ---

@@ -1,5 +1,8 @@
 # Vulkan Mixer Implementation — Technical Reference
 
+> **State and measurements:** [`../features/vulkan-mixer.md`](../features/vulkan-mixer.md)
+> **This document is why-it-is-shaped-this-way.** Operating instructions live in `guides/`, current state and figures in `features/`.
+
 > **Scope**: This document describes the Vulkan GPU image mixer and its
 > associated readback strategies as implemented on the `CasparVPV` branch.
 > All path references are relative to the CasparVP repository root.

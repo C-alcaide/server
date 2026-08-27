@@ -1,5 +1,8 @@
 # CasparCG 360° Client — Operations Guide
 
+> **State and measurements:** no single feature owns this document — it is cross-cutting. Numbers quoted here are owned by the `features/` document for whichever subsystem they describe.
+> **This document is how-to.** Per [`../README.md`](../README.md), measured figures live once in `features/`; a tolerance an operator acts on may appear here, the measurements behind it should not.
+
 > **Note:** This guide documents the companion **CasparCG 360° client** (the
 > [casparcg-360-client](https://github.com/C-alcaide/casparcg-360-client)
 > control application), which drives this CasparVP server over AMCP. It lives

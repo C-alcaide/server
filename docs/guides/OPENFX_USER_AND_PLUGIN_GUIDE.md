@@ -1,5 +1,9 @@
 # CasparCG OpenFX (OFX) — User Manual & Plugin Author Guide
 
+> **State and measurements:** [`../features/isf-and-openfx.md`](../features/isf-and-openfx.md)
+> **Implementation notes:** [`../architecture/OPENFX_IMPLEMENTATION.md`](../architecture/OPENFX_IMPLEMENTATION.md)
+> **This document is how-to.** Per [`../README.md`](../README.md), measured figures live once in `features/`; a tolerance an operator acts on may appear here, the measurements behind it should not.
+
 > Module: `src/modules/ofx` · Companion: [OPENFX_IMPLEMENTATION.md](../architecture/OPENFX_IMPLEMENTATION.md)
 
 This guide has two parts:

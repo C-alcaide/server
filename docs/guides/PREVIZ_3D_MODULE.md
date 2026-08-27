@@ -1,5 +1,8 @@
 # 3D Previz Module
 
+> **State and measurements:** [`../features/previz.md`](../features/previz.md)
+> **This document is how-to.** Per [`../README.md`](../README.md), measured figures live once in `features/`; a tolerance an operator acts on may appear here, the measurements behind it should not.
+
 The previz module adds real-time 3D venue visualisation to CasparCG VP. It renders LED screen surfaces with live channel textures inside a 3D scene, enabling accurate spatial previews of virtual production stages, concert LED walls, and broadcast environments — directly inside CasparCG without external tools.
 
 The system is split between **server-side rendering** (C++/OpenGL) for production output and a **client-side fat application** (Python/PyQt6) for interactive scene authoring and LED wall management.

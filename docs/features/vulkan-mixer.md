@@ -3,6 +3,7 @@
 > **State:** shipped
 > **Modules:** `src/accelerator/vulkan`
 > **Commands:** none of its own — selected by `<accelerator>vulkan</accelerator>`
+> **Architecture:** [`../architecture/UPSTREAM_VULKAN_COMPARISON.md`](../architecture/UPSTREAM_VULKAN_COMPARISON.md), [`../architecture/VULKAN_MIXER_IMPLEMENTATION.md`](../architecture/VULKAN_MIXER_IMPLEMENTATION.md)
 > **Guide:** none, deliberately — the mixer is a backend choice rather than an operator procedure; its configuration is in §1 here
 > **Coverage:** `conformance`, `grading`, `mixer-parity`, and every battery that takes `--mixer vulkan`
 

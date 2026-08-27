@@ -1,5 +1,9 @@
 # Vulkan Output — direct display output
 
+> **State and measurements:** [`../features/vulkan-output.md`](../features/vulkan-output.md)
+> **Implementation notes:** [`../architecture/VULKAN_OUTPUT.md`](../architecture/VULKAN_OUTPUT.md)
+> **This document is how-to.** Per [`../README.md`](../README.md), measured figures live once in `features/`; a tolerance an operator acts on may appear here, the measurements behind it should not.
+
 Presents a channel straight to a display through Vulkan, bypassing the window compositor. Built for
 **LED processors and projectors driven from HDMI/DisplayPort** rather than SDI, with control over HDR
 signalling, sync groups and EDID.

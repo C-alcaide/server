@@ -1,5 +1,9 @@
 # LED-Wall Color Calibration
 
+> **State and measurements:** [`../features/colour-grading-and-ocio.md`](../features/colour-grading-and-ocio.md)
+> **Implementation notes:** [`../architecture/OCIO_INTEGRATION_STUDY.md`](../architecture/OCIO_INTEGRATION_STUDY.md)
+> **This document is how-to.** Per [`../README.md`](../README.md), measured figures live once in `features/`; a tolerance an operator acts on may appear here, the measurements behind it should not.
+
 Channel-master color calibration for LED volumes, applied as a single
 display-to-display 3D LUT over the **final composited channel output**. Every
 consumer attached to the channel (DeckLink SDI, `vulkan_output` HDMI/DP, NDI,

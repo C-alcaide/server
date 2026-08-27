@@ -1,5 +1,8 @@
 # PortAudio Module
 
+> **State and measurements:** [`../features/remotewall-and-portaudio.md`](../features/remotewall-and-portaudio.md)
+> **This document is how-to.** Per [`../README.md`](../README.md), measured figures live once in `features/`; a tolerance an operator acts on may appear here, the measurements behind it should not.
+
 ## Overview
 
 The PortAudio module provides professional audio I/O for CasparCG Server via the PortAudio library (v19.7.0, statically linked). It supports ASIO, WASAPI, and DirectSound host APIs on Windows, and ALSA/JACK on Linux, enabling multi-channel output to professional audio interfaces and low-latency capture from any input device.

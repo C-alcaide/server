@@ -3,6 +3,7 @@
 > **State:** shipped, and the largest single divergence in the tree
 > **Module:** `src/modules/ffmpeg` — **10,500 lines** different from upstream across 20 files
 > **Commands:** no dedicated `MIXER` command; reached through `PLAY`, `ADD` and configuration
+> **Architecture:** [`../architecture/FFMPEG_8_MIGRATION.md`](../architecture/FFMPEG_8_MIGRATION.md)
 > **Guide:** [`../guides/PLAYBACK_AND_RECORDING_GUIDE.md`](../guides/PLAYBACK_AND_RECORDING_GUIDE.md)
 > **Coverage:** `decode-cost`, `gpu-direct-parity`, `encode-matrix`, `encode-parity`, `flat-decoded`,
 > `source-colorspace`, `loop-boundary`, `seek`, `vk-decode-soak`

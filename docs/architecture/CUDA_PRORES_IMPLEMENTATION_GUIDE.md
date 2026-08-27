@@ -1,5 +1,9 @@
 # CUDA ProRes — Implementation Guide
 
+> **State and measurements:** [`../features/cuda-prores.md`](../features/cuda-prores.md)
+> **Operator guide:** [`../guides/CUDA_PRORES_OPERATION_GUIDE.md`](../guides/CUDA_PRORES_OPERATION_GUIDE.md)
+> **This document is why-it-is-shaped-this-way.** Operating instructions live in `guides/`, current state and figures in `features/`.
+
 ## Overview
 
 This module provides three components sharing the same GPU ProRes encode/decode kernel pipeline:

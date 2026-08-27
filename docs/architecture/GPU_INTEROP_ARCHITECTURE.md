@@ -1,5 +1,8 @@
 # GPU Interop Architecture
 
+> **State and measurements:** no single feature owns this document — it is cross-cutting. Numbers quoted here are owned by the `features/` document for whichever subsystem they describe.
+> **This document is why-it-is-shaped-this-way.** Operating instructions live in `guides/`, current state and figures in `features/`.
+
 **Date:** May 2026
 **Scope:** VK→CUDA timeline semaphore interop, async cross-GPU peer copy, GPU topology detection
 

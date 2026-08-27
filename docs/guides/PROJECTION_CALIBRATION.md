@@ -1,5 +1,8 @@
 # Camera-Based Projection Calibration
 
+> **State and measurements:** [`../features/projection-and-icvfx.md`](../features/projection-and-icvfx.md)
+> **This document is how-to.** Per [`../README.md`](../README.md), measured figures live once in `features/`; a tolerance an operator acts on may appear here, the measurements behind it should not.
+
 > Part of the [CasparCG 360° Client Operations Guide](../guides/OPERATIONS_GUIDE.md) — this
 > is the in-depth reference for the **▣ Projection** tab. For the rest of the app
 > (Stage / previz, tracking, LED calibration, colour pipeline, rundown) start

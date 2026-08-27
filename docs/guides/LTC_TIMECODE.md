@@ -1,5 +1,8 @@
 # LTC Timecode
 
+> **State and measurements:** [`../features/ltc-timecode.md`](../features/ltc-timecode.md)
+> **This document is how-to.** Per [`../README.md`](../README.md), measured figures live once in `features/`; a tolerance an operator acts on may appear here, the measurements behind it should not.
+
 Reads **linear timecode** (LTC) from an audio input and makes it the server's clock, so recordings,
 replay and cluster playback can be aligned to a house timecode generator instead of to wall time.
 

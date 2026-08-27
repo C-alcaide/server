@@ -1,5 +1,9 @@
 # Color Grading & Color Management
 
+> **State and measurements:** [`../features/colour-grading-and-ocio.md`](../features/colour-grading-and-ocio.md)
+> **Implementation notes:** [`../architecture/OCIO_INTEGRATION_STUDY.md`](../architecture/OCIO_INTEGRATION_STUDY.md)
+> **This document is how-to.** Per [`../README.md`](../README.md), measured figures live once in `features/`; a tolerance an operator acts on may appear here, the measurements behind it should not.
+
 GPU-accelerated ACES color management and professional color grading tools for CasparCG Server. All processing runs on the GPU in a single GLSL fragment shader pass, with zero CPU overhead per frame.
 
 For virtual production features (360° projection, curved screen compensation, playback speed, flip), see [VIRTUAL_PRODUCTION_FEATURES.md](../guides/VIRTUAL_PRODUCTION_FEATURES.md). For HDR channel configuration, DeckLink/Vulkan HDR output, and file recording metadata, see [HDR_GUIDE.md](../guides/HDR_GUIDE.md). For blur, sharpening, and film grain details, see [IMAGE_EFFECTS.md](../guides/IMAGE_EFFECTS.md).

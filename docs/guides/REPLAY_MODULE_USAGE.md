@@ -1,5 +1,8 @@
 # CasparCG Replay Module
 
+> **State and measurements:** [`../features/replay.md`](../features/replay.md)
+> **This document is how-to.** Per [`../README.md`](../README.md), measured figures live once in `features/`; a tolerance an operator acts on may appear here, the measurements behind it should not.
+
 ## Overview
 
 The Replay module provides high-performance recording and instant playback of video using the VMX (Video Media eXchange) codec and the `.mav` segmented file format. It is designed for live production workflows such as sports replay, time-shift buffering, and highlight export.

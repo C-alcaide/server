@@ -1,5 +1,9 @@
 # Playback and recording — every route, what it costs, and which to pick
 
+> **State and measurements:** [`../features/ffmpeg-producer-and-consumer.md`](../features/ffmpeg-producer-and-consumer.md)
+> **Implementation notes:** [`../architecture/FFMPEG_8_MIGRATION.md`](../architecture/FFMPEG_8_MIGRATION.md)
+> **This document is how-to.** Per [`../README.md`](../README.md), measured figures live once in `features/`; a tolerance an operator acts on may appear here, the measurements behind it should not.
+
 For the person running the machine, not the person building it. Every number here was measured on
 the reference box (RTX A4000 + Quadro P4000, driver 582.53) with the harness batteries named
 beside it, so you can re-measure rather than trust.

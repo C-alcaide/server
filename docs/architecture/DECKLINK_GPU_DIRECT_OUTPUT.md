@@ -1,5 +1,9 @@
 # DeckLink GPU‑Direct Output & Low‑Latency Pipelines
 
+> **State and measurements:** [`../features/decklink-output.md`](../features/decklink-output.md)
+> **Operator guide:** [`../guides/DECKLINK_OUTPUT.md`](../guides/DECKLINK_OUTPUT.md)
+> **This document is why-it-is-shaped-this-way.** Operating instructions live in `guides/`, current state and figures in `features/`.
+
 **Status:** implemented, hardware‑verified (DeckLink 8K Pro + RTX A4000).
 **Scope:** the DeckLink *consumer* (SDI output). Covers GPU‑side packing, page‑locked
 transfer, NVIDIA GPUDirect‑for‑Video (DVP), and the three scheduling/latency modes

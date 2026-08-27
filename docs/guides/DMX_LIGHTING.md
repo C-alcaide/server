@@ -1,5 +1,8 @@
 # DMX Lighting — ArtNet & sACN
 
+> **State and measurements:** [`../features/dmx-sacn-artnet.md`](../features/dmx-sacn-artnet.md)
+> **This document is how-to.** Per [`../README.md`](../README.md), measured figures live once in `features/`; a tolerance an operator acts on may appear here, the measurements behind it should not.
+
 CasparCG supports two modes of DMX output:
 
 1. **Pixel-sampling consumers** — analyse each rendered frame, sample the

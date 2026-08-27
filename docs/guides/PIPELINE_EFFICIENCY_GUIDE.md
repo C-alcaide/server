@@ -1,5 +1,8 @@
 # Pipeline Efficiency — Operations Guide
 
+> **State and measurements:** [`../features/cuda-notchlc.md`](../features/cuda-notchlc.md)
+> **This document is how-to.** Per [`../README.md`](../README.md), measured figures live once in `features/`; a tolerance an operator acts on may appear here, the measurements behind it should not.
+
 > How to get the efficient paths, how to tell whether you are on them, and what
 > limits a channel. Practical companion to `GPU_OPTIMIZATION_PLAN.md`, which
 > carries the reasoning, the measurements and the rejected ideas.

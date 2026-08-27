@@ -1,5 +1,9 @@
 # Migrating CasparVP from FFmpeg 7.0.2 to 8.x — Investigation
 
+> **State and measurements:** [`../features/ffmpeg-producer-and-consumer.md`](../features/ffmpeg-producer-and-consumer.md)
+> **Operator guide:** [`../guides/PLAYBACK_AND_RECORDING_GUIDE.md`](../guides/PLAYBACK_AND_RECORDING_GUIDE.md)
+> **This document is why-it-is-shaped-this-way.** Operating instructions live in `guides/`, current state and figures in `features/`.
+
 **Status: investigation written 2026-08-17, corrected 2026-08-18.** The migration it plans
 for was already carried out upstream, and the tree has since been built and run against
 8.1.2 — see the correction below.

@@ -1,5 +1,8 @@
 # GStreamer in CasparVP — a guide for people who know FFmpeg
 
+> **State and measurements:** [`../features/gstreamer.md`](../features/gstreamer.md)
+> **This document is how-to.** Per [`../README.md`](../README.md), measured figures live once in `features/`; a tolerance an operator acts on may appear here, the measurements behind it should not.
+
 You already know how to get video into CasparCG: you put a file in the media folder, or you
 type an FFmpeg URL, and it plays. This module adds a second way in, and a way out, built on
 **GStreamer** instead.

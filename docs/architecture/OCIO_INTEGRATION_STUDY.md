@@ -1,5 +1,9 @@
 # OpenColorIO in CasparVP — Design Study
 
+> **State and measurements:** [`../features/colour-grading-and-ocio.md`](../features/colour-grading-and-ocio.md)
+> **Operator guide:** [`../guides/COLOR_GRADING.md`](../guides/COLOR_GRADING.md), [`../guides/HDR_GUIDE.md`](../guides/HDR_GUIDE.md), [`../guides/IMAGE_EFFECTS.md`](../guides/IMAGE_EFFECTS.md), [`../guides/LED_CALIBRATION.md`](../guides/LED_CALIBRATION.md), [`../guides/MIXER_SHAPE.md`](../guides/MIXER_SHAPE.md), [`../guides/OCIO_USER_GUIDE.md`](../guides/OCIO_USER_GUIDE.md)
+> **This document is why-it-is-shaped-this-way.** Operating instructions live in `guides/`, current state and figures in `features/`.
+
 **Status: study, and implemented.** Written 2026-08-11; status corrected 2026-08-16.
 
 > **The integration is done on `feature/ocio-mixer`, both mixers, at parity.** Input

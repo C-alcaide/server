@@ -1,5 +1,8 @@
 # Cluster Synchronization Module
 
+> **State and measurements:** [`../features/cluster-sync.md`](../features/cluster-sync.md)
+> **This document is how-to.** Per [`../README.md`](../README.md), measured figures live once in `features/`; a tolerance an operator acts on may appear here, the measurements behind it should not.
+
 Multi-machine synchronized playout for CasparCG using IEEE 1588 PTP clock synchronization, global frame numbering, frame-accurate command scheduling, TCP command relay with virtual channel mapping, and a content sync watchdog for automatic drift detection and correction.
 
 > **Platform support**: The cluster module runs on both **Windows** and **Linux**. Networking uses WinSock2 on Windows and POSIX BSD sockets on Linux (compile-time platform split). No additional dependencies beyond the OS socket API.

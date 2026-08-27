@@ -3,6 +3,7 @@
 > **State:** partial
 > **Modules:** `src/modules/vulkan_output`
 > **Commands:** 1 (`INFO VULKAN_OUTPUT`)
+> **Architecture:** [`../architecture/VULKAN_OUTPUT.md`](../architecture/VULKAN_OUTPUT.md)
 > **Guide:** [`../guides/VULKAN_OUTPUT.md`](../guides/VULKAN_OUTPUT.md)
 > **Coverage:** `consumer-view`, `vulkan-output-signalling`
 

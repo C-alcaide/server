@@ -1,5 +1,8 @@
 # CasparCG `remotewall` Module — User Guide
 
+> **State and measurements:** [`../features/remotewall-and-portaudio.md`](../features/remotewall-and-portaudio.md)
+> **This document is how-to.** Per [`../README.md`](../README.md), measured figures live once in `features/`; a tolerance an operator acts on may appear here, the measurements behind it should not.
+
 The `remotewall` module is a native CasparCG **producer** that ingests the cloudXR tile‑wall stream
 (HEVC/H.264 tiles over UDP/RTP+FEC with in‑band `SyncMeta`), decodes and composites it on the GPU, and —
 on the Vulkan mixer — hands the wall to the compositor **zero‑copy** (no GPU→CPU→GPU round trip). It also

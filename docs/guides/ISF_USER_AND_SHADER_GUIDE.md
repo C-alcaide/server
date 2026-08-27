@@ -1,5 +1,9 @@
 # CasparCG ISF (Interactive Shader Format) Module
 
+> **State and measurements:** [`../features/isf-and-openfx.md`](../features/isf-and-openfx.md)
+> **Implementation notes:** [`../architecture/OPENFX_IMPLEMENTATION.md`](../architecture/OPENFX_IMPLEMENTATION.md)
+> **This document is how-to.** Per [`../README.md`](../README.md), measured figures live once in `features/`; a tolerance an operator acts on may appear here, the measurements behind it should not.
+
 This document is both a **user manual** (how to play ISF shaders from AMCP) and a **shader-author
 guide** (how to write/port ISF shaders that run efficiently in CasparCG).
 

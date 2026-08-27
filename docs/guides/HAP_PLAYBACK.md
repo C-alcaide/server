@@ -1,5 +1,9 @@
 # HAP Playback
 
+> **State and measurements:** [`../features/hap.md`](../features/hap.md)
+> **Implementation notes:** [`../architecture/HAP_DECODE_ROUTES.md`](../architecture/HAP_DECODE_ROUTES.md)
+> **This document is how-to.** Per [`../README.md`](../README.md), measured figures live once in `features/`; a tolerance an operator acts on may appear here, the measurements behind it should not.
+
 HAP is an intermediate codec that keeps its frames as **GPU-compressed textures** all the way to the
 sampler — no full-resolution intermediate anywhere, and no CPU decode of the picture. It is the
 codec of choice for heavy multi-layer playback where ProRes or h264 would exhaust decode headroom.

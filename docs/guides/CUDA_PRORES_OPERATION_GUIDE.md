@@ -1,5 +1,9 @@
 # CasparCG CUDA ProRes — Operation Guide
 
+> **State and measurements:** [`../features/cuda-prores.md`](../features/cuda-prores.md)
+> **Implementation notes:** [`../architecture/CUDA_PRORES_IMPLEMENTATION_GUIDE.md`](../architecture/CUDA_PRORES_IMPLEMENTATION_GUIDE.md)
+> **This document is how-to.** Per [`../README.md`](../README.md), measured figures live once in `features/`; a tolerance an operator acts on may appear here, the measurements behind it should not.
+
 ## Overview
 
 The module provides two recording consumers **and** a GPU-accelerated ProRes playback producer:

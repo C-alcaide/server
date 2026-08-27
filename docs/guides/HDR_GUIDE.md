@@ -1,5 +1,9 @@
 # HDR & Wide-Gamut Guide for CasparVP
 
+> **State and measurements:** [`../features/colour-grading-and-ocio.md`](../features/colour-grading-and-ocio.md)
+> **Implementation notes:** [`../architecture/OCIO_INTEGRATION_STUDY.md`](../architecture/OCIO_INTEGRATION_STUDY.md)
+> **This document is how-to.** Per [`../README.md`](../README.md), measured figures live once in `features/`; a tolerance an operator acts on may appear here, the measurements behind it should not.
+
 This guide covers the HDR-related features added to CasparVP: channel color configuration, automatic color conversion, BT.2020 / PQ / HLG propagation through the pipeline, DeckLink HDR input/output, Vulkan direct-display HDR output, FFmpeg consumer color metadata, and High Frame Rate (HFR) support.
 
 For per-layer color grading and ACES color management (MIXER COLORSPACE, CDL, LUT3D, etc.), see [COLOR_GRADING.md](../guides/COLOR_GRADING.md). For Vulkan output architecture details, see [VULKAN_OUTPUT.md](../architecture/VULKAN_OUTPUT.md).

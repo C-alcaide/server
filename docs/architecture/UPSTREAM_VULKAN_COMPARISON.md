@@ -1,5 +1,8 @@
 # This fork's Vulkan/FFmpeg work against Niklas Andersson's upstream series
 
+> **State and measurements:** [`../features/vulkan-mixer.md`](../features/vulkan-mixer.md)
+> **This document is why-it-is-shaped-this-way.** Operating instructions live in `guides/`, current state and figures in `features/`.
+
 Read 2026-08-24 against `niklaspandersson/casparcg-server`, branches `vulkan-refactor-1`
 (= upstream PR **#1782**, *"Vulkan step 2: internal refactoring"*) and `vulkan-accel-rework-v2`
 (the phase-5 work the PR body describes as still to come). Both were fetched and read; **neither

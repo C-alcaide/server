@@ -1,5 +1,9 @@
 # HAP — three decode routes, and the seek machinery under them
 
+> **State and measurements:** [`../features/hap.md`](../features/hap.md)
+> **Operator guide:** [`../guides/HAP_PLAYBACK.md`](../guides/HAP_PLAYBACK.md)
+> **This document is why-it-is-shaped-this-way.** Operating instructions live in `guides/`, current state and figures in `features/`.
+
 Why this module is shaped the way it is. Operator documentation is in
 [`../guides/PIPELINE_EFFICIENCY_GUIDE.md`](../guides/PIPELINE_EFFICIENCY_GUIDE.md) §HAP; state and
 measurements are in [`../features/hap.md`](../features/hap.md). This file is the part neither has:

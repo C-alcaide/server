@@ -1,5 +1,9 @@
 # Vulkan Output Module
 
+> **State and measurements:** [`../features/vulkan-output.md`](../features/vulkan-output.md)
+> **Operator guide:** [`../guides/VULKAN_OUTPUT.md`](../guides/VULKAN_OUTPUT.md)
+> **This document is why-it-is-shaped-this-way.** Operating instructions live in `guides/`, current state and figures in `features/`.
+
 Low-latency, direct-to-display GPU output consumer for CasparCG. Bypasses the desktop compositor entirely using the Vulkan graphics API, targeting professional broadcast scenarios where frame-accurate timing and deterministic latency are critical.
 
 **Supported platforms**: Windows (via `VK_EXT_full_screen_exclusive` + Win32 surfaces; or `VK_KHR_display` on Windows 11 with Specialized Monitors) and Linux (via `VK_KHR_display` direct scanout).

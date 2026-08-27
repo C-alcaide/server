@@ -1,5 +1,8 @@
 # Virtual Production Features
 
+> **State and measurements:** [`../features/projection-and-icvfx.md`](../features/projection-and-icvfx.md)
+> **This document is how-to.** Per [`../README.md`](../README.md), measured figures live once in `features/`; a tolerance an operator acts on may appear here, the measurements behind it should not.
+
 This feature set introduces GPU-accelerated 360° projection, curved screen compensation, real-time playback speed control, and layer mirroring to CasparCG Server, designed for virtual production, live events, and advanced broadcast workflows.
 
 For color management and grading features, see [COLOR_GRADING.md](../guides/COLOR_GRADING.md). For blur, sharpening, and film grain, see [IMAGE_EFFECTS.md](../guides/IMAGE_EFFECTS.md). For keyframe animation, see [KEYFRAMES.md](../guides/KEYFRAMES.md). For DMX lighting integration, see [DMX_LIGHTING.md](../guides/DMX_LIGHTING.md). For LED-wall color calibration, see [LED_CALIBRATION.md](../guides/LED_CALIBRATION.md).

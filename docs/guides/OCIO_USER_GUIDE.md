@@ -1,5 +1,9 @@
 # OpenColorIO — operator guide
 
+> **State and measurements:** [`../features/colour-grading-and-ocio.md`](../features/colour-grading-and-ocio.md)
+> **Implementation notes:** [`../architecture/OCIO_INTEGRATION_STUDY.md`](../architecture/OCIO_INTEGRATION_STUDY.md)
+> **This document is how-to.** Per [`../README.md`](../README.md), measured figures live once in `features/`; a tolerance an operator acts on may appear here, the measurements behind it should not.
+
 How to drive OCIO on a running server: the commands, the config elements, what each refusal
 means and how the pieces fit with the rest of the grading chain.
 

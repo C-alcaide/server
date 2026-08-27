@@ -1,5 +1,9 @@
 # DeckLink SDI Output
 
+> **State and measurements:** [`../features/decklink-output.md`](../features/decklink-output.md)
+> **Implementation notes:** [`../architecture/DECKLINK_GPU_DIRECT_OUTPUT.md`](../architecture/DECKLINK_GPU_DIRECT_OUTPUT.md)
+> **This document is how-to.** Per [`../README.md`](../README.md), measured figures live once in `features/`; a tolerance an operator acts on may appear here, the measurements behind it should not.
+
 The primary SDI path. This fork rewrote it substantially — **2,382 lines against upstream across 37
 files** — mostly to get the composited frame from the GPU to the card without a host round trip, and
 to signal colour and HDR metadata correctly on the way out.
