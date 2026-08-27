@@ -20,12 +20,6 @@ addressable by name at runtime.
 > correlation was measured rather than assumed. **This file closed the documented half**; the
 > unmeasured half is unchanged.
 
-> **Corrected 2026-08-27.** Three claims in this file's own header were wrong. **`src/modules/previz`
-> does not exist** — PREVIZ is not a module, which is the same blind spot that hid three features
-> from the `features/` inventory; the bridge path was missing its extension; and the *Architecture*
-> field cited this very document, by a section name it does not have. Below, §5.2 claimed the feature
-> was OpenGL-only after the Vulkan route had shipped.
-
 ---
 
 ## 1. What is implemented today

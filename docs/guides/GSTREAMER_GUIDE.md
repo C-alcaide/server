@@ -704,9 +704,8 @@ integrations. Sub-second contribution and distribution, which SRT does not do.
 
 ### Directly relevant to work already done here
 
-**A zero-copy consumer needs CUDA after all — the D3D11 route does not work.** This entry
-previously said the opposite and labelled it a hypothesis; the hypothesis was tested and is
-false, so here is what was actually found.
+**A zero-copy consumer needs CUDA — the D3D11 route does not work.** Tested rather than assumed,
+and this is what was found.
 
 `nvd3d11h264enc` does accept `video/x-raw(memory:D3D11Memory)` with BGRA and it does run here.
 The problem is upstream of it: **the Vulkan mixer exports its textures as

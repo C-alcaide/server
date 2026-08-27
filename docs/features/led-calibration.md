@@ -14,11 +14,9 @@ consumer attached to the channel receives the corrected pixels. Intended for who
 calibration, typically from a LUT solved by [OpenVPCal](https://github.com/Netflix-Skunkworks/OpenVPCal).
 CasparVP *applies* the LUT; it does not perform the colorimetric solve.
 
-> **This document was missing until 2026-08-27.** `features/` was enumerated by **module**, and
-> calibration is a *command* feature living in the mixer rather than a module of its own — so a
-> completeness check over `src/modules/` could not see it, and the measurements below lived in the
-> operator guide instead. Worth remembering when the next inventory is built: not every feature has
-> a directory.
+> **Not every feature has a directory.** Calibration is a *command* feature living in the mixer, so
+> any inventory built by walking `src/modules/` cannot see it. Worth knowing before trusting a
+> completeness check that enumerates by module — `../features/README.md` carries the general form.
 
 ---
 

@@ -1,21 +1,11 @@
 # ACES Metadata File (AMF) support — design study
 
-> **Status:** SHIPPED — verified 2026-08-27 — the research below stands; the "not implemented"
-> it used to say does not.
+> **Status:** SHIPPED — verified 2026-08-27 — implemented in `180b2fb41`; the research below is why
+> it looks as it does. Command at `AMCPCommandsImpl.cpp:5676`, covered by `cli.py amf`.
 > **Falsifier:** `AMF` is registered — absence of that command would mean this status is wrong.
 
-> **Corrected 2026-08-27.** This line read *"researched 2026-08-16, not implemented"* — and `AMF`
-> was implemented in `180b2fb41` **on 2026-08-16**, the same day. So the status was accurate for a
-> few hours and stale for eleven days. The command is registered at
-> `AMCPCommandsImpl.cpp:5676`, its own code comment cites this document, and `cli.py amf` covers it.
->
-> Second time this pattern has appeared: `GRADING_NODE_GRAPH_STUDY.md` also asserted the absence of
-> a command that had been accepting traffic. **A study that becomes an implementation needs its
-> status line changed in the same commit**, because nothing else will notice — the design text stays
-> true, so there is no inconsistency for a reader to trip over.
->
-> Kept in `plans/` rather than moved: the research is why the implementation looks as it does, and
-> the state now lives in [`../features/colour-grading-and-ocio.md`](../features/colour-grading-and-ocio.md).
+Kept in `plans/` rather than moved to `../deprecated/` because a source comment cites it; current
+state is in [`../features/colour-grading-and-ocio.md`](../features/colour-grading-and-ocio.md).
 
 Everything below was measured against the
 pinned config with PyOpenColorIO 2.5.2, not reasoned about.

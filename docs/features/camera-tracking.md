@@ -139,9 +139,3 @@ carries the five-step sequence; what is still missing is the operator-facing ren
 script in `docs/diagrams/`, which is what `CLAUDE.md` asks for on a manual rather than a developer
 note. The two mutually exclusive alignment paths are the part a picture tells better than the table
 does.
-
-> **Corrected 2026-08-27.** §5 item 2 said the composition order was undocumented and item 3 said
-> `POSITION_SCALE`, `WORLDALIGN` and `ZOOM_LUT` appeared in no document at all. Both were true when
-> written and were closed by the architecture note above and by
-> [`../guides/CAMERA_TRACKING.md`](../guides/CAMERA_TRACKING.md), which names all three. All 91
-> fork-specific commands are now documented somewhere.

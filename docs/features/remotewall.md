@@ -12,13 +12,6 @@
 Receives video from a remote source as a layer, over CloudXR. Intended for a wall driven from
 elsewhere on the network rather than from local media.
 
-> **Split out of `remotewall-and-portaudio.md` on 2026-08-27.** That file paired this module with
-> PortAudio on the stated grounds that *"each is small and neither justifies a file of its own"* —
-> true of PortAudio, and no longer true here. The fusion had already produced two errors in one
-> header: this module's **Architecture** field described *"network and audio-device plumbing"*, which
-> is PortAudio's subject, and its **Guide** field linked PortAudio's guide. `guides/` had kept them
-> separate all along.
-
 ---
 
 ## 1. What is implemented today
@@ -38,12 +31,6 @@ elsewhere on the network rather than from local media.
 **This module IS the native rewrite** its plan asked for, and the plan is delivered: phases 0-4 of
 its §8 landed as named commits, phase 5 as `c58f5f3a1`, and six fixes after that. It is in the build
 at `src/modules/CMakeLists.txt:25`.
-
-> **Corrected 2026-08-27.** This section read *"a native rewrite was planned and not done"*, and
-> *Known gaps* repeated it — while the evidence table two screens above listed the producer and the
-> exportable-texture path the plan asked for. The plan itself still said "proposal", a month after
-> the module entered the build. A stale status in `plans/` does not stay in `plans/`; it gets cited
-> as state. `../plans/README.md` now carries a check for it.
 
 ---
 

@@ -10,10 +10,6 @@
 Audio I/O through PortAudio, giving access to host audio APIs that the stock consumer set does not
 reach — which on Windows means WASAPI and ASIO rather than only MME.
 
-> **Split out of `remotewall-and-portaudio.md` on 2026-08-27**, where this module was paired with
-> `remotewall` because both were small. That premise still holds for this one; it stopped holding
-> for the other.
-
 ---
 
 ## 1. What is implemented today

@@ -44,22 +44,9 @@ quoted the phrase it replaced, so the two files that were now right were the two
 check that cannot be made green by fixing the problem gets ignored, and that is worse than no check.
 The doc declares the falsifier; the test checks the declaration.
 
-### What it found
-
-Five of thirteen plans carried a wrong status on 2026-08-27:
-
-| plan | said | actually |
-| :--- | :--- | :--- |
-| `AMF_SUPPORT_STUDY.md` | researched, not implemented | shipped `180b2fb41`, **the same day the study was written** |
-| `GRADING_NODE_GRAPH_STUDY.md` | nothing is implemented | `MIXER GRADE_NODE` ships on both mixers |
-| `REMOTEWALL_NATIVE_MODULE_PLAN.md` | proposal | phases 0-5 built and in the build for a month |
-| `GPU_AFFINITY_PLAN.md` | *no status line at all* | partly shipped; `server.cpp:515-535` |
-| `GPU_INTEROP_PLAN.md` | *no status line at all* | all three items shipped, struck through with commits |
-
-Two of them had spread: the features doc for remotewall had copied "planned and not done"
-into a **features** doc that shipped, and `features/colour-grading-and-ocio.md` and
-`guides/OCIO_USER_GUIDE.md` both cite the AMF study. **A stale status does not stay in `plans/`** -
-it gets read as state and quoted elsewhere, which is why this is checked rather than remembered.
+**A stale status does not stay in `plans/`.** Five of thirteen were wrong when this was
+introduced, and two had already been quoted as state in `features/` - which is why it is
+checked rather than remembered.
 
 Also here: `FKL_INTEGRATION_ANALYSIS.md`, reviewed again on 2026-08-26 and still a *no* - with the
 one item it recommended doing WITHOUT the library now done. Its conclusion held for reasons that

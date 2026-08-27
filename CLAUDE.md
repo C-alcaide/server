@@ -560,6 +560,17 @@ without its limits reads as a stronger claim than it is. `LED_CALIBRATION.md` sa
 layer was composited — so a reader takes it as "the LUT is applied correctly" rather than
 "`CALIBRATION` works".
 
+**Cite a SYMBOL, not a line number.** `hap_producer.cpp:977` was correct when written and
+points at unrelated code now, because a seek fix in the same session inserted lines above it —
+so the doc claimed the HapQAlpha branch and the reader lands on queue clearing. There are 140
+line citations in `docs/` and **every one of them drifts on any edit above it, including yours
+in the same commit.** A function name, a distinctive identifier or a quoted comment survives
+that; a line number is only worth adding when nothing else identifies the spot, and then as a
+range hint rather than the whole citation.
+
+`tests/test_docs_claims.py` checks the two cheap halves — the file exists and is that long —
+and **cannot check that the line says what you claim**, which is the half that actually breaks.
+
 **Re-read a doc immediately before editing it.** Several sessions run against this tree at
 once and docs are the likeliest file for two of them to collide in — editing from a stale
 read put duplicate rows in the harness command table on 2026-08-16. If the file already

@@ -6,11 +6,6 @@
 > six later fixes. It is in the build at `src/modules/CMakeLists.txt:25`.
 > **Falsifier:** none — shipped. Note the commits' phase numbers drifted from §8's.
 
-> **Corrected 2026-08-27.** This line read *"proposal"* for a month after the module shipped, and
-> `../features/remotewall.md` (then `remotewall-and-portaudio.md`) had copied that claim — while its own evidence table
-> listed the producer and the exportable Vulkan texture path this plan asked for. Fourth stale
-> plan status found in one sweep; the check in the README exists because of it.
-
 A plan to replace the third‑party **RemoteWallSource OFX plugin** (from `remoteAss`) with a
 first‑class CasparCG **producer module** that ingests the cloudXR tile‑wall stream directly, keeps the
 picture on the GPU end‑to‑end, and surfaces the stream's rich per‑frame metadata (colour space, SMPTE

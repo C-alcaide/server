@@ -4,13 +4,11 @@
 > by the code since.
 > **Falsifier:** none — partly shipped; the note below says which half.
 
-> **Corrected 2026-08-27.** This file said "Nothing is implemented ... There is no node graph, no
-> spatial window, and no AMCP command for either." That is no longer true and had not been for some
-> time: **`MIXER GRADE_NODE` ships on both mixers** — a 16-node chain, one soft-edged elliptical window
-> in frame space per node, one operation (exposure), with the multi-pass attachment machinery this
-> study proposed. See `AMCPCommandsImpl.cpp:3918` for the command (named `MIXER GRADE` until 2026-08-27),
-> `image_mixer.cpp::apply_grade_node` on each backend for the pass, and
-> `../guides/COLOR_GRADING.md` for the operator documentation.
+> **What shipped, of what this study proposed.** **`MIXER GRADE_NODE` runs on both mixers** — a
+> 16-node chain, one soft-edged elliptical window in frame space per node, one operation (exposure),
+> with the multi-pass attachment machinery proposed below. `AMCPCommandsImpl.cpp:3918` for the
+> command, `image_mixer.cpp::apply_grade_node` on each backend for the pass, and
+> `../guides/COLOR_GRADING.md` for the operator documentation. Everything else here is still design.
 >
 > **The composite path has no defect** — §11, studied and then measured on 2026-08-27. The
 > prototype's warning comment was wrong: a non-normal blend mode is a layer property applied

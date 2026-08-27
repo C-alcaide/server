@@ -58,9 +58,8 @@ misconfiguration is invisible in the picture: the pixels are right and the metad
 | Picture through the consumer | `consumer-view` |
 | **What it signals** — transfer, gamut, HDR metadata, the actual surface | `vulkan-output-signalling` |
 
-**This was the fork's highest-value missing battery until 2026-08-27, and the diagnosis was wrong.**
-It had been recorded since 2026-08-17 as "no test drives the metadata". The real obstacle was that
-**nothing could observe the metadata**:
+**The obstacle here was never a missing test — it was that nothing could OBSERVE the metadata.**
+Worth knowing before recording any gap as "no battery":
 
 * `INFO VULKAN_OUTPUT` enumerates displays and says nothing about colour;
 * `state()` reported presentation, sync and frame counts and not one signalling field;

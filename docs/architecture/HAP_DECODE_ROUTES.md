@@ -47,8 +47,9 @@ is the more correct of the two; the Vulkan one is what every HAP implementation 
 
 ### HAP Q Alpha takes none of them
 
-`hap_producer.cpp:977` sends `HapVariant::HapQAlpha` to the CPU decoder even on Vulkan, because the
-zero-copy path cannot carry two textures. So `pixel_format::ycocg_dxt5a` — shader case 14 on both
+the `use_vk_upload_` branch guards on
+`item.result.variant != HapVariant::HapQAlpha`, so that one variant reaches the CPU decoder even on
+Vulkan — the zero-copy path cannot carry two textures, and its own comment says so. So `pixel_format::ycocg_dxt5a` — shader case 14 on both
 mixers — is **published by nothing**. It is dead code, correct as written, and unreachable.
 
 ---

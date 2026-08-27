@@ -824,9 +824,8 @@ this work:
   NVENC limitation — `hevc_nvenc` does Main 10 — it is the byte-for-byte copy
   that makes the path kernel-free. Ask for `-pix_fmt p010le` and you get 10-bit
   via the host path.
-- GPU-direct **decode** is progressive-only. It is **not** OpenGL-only — this line said so
-  until 2026-08-21 while the same document said "it works on both mixers" 500 lines earlier,
-  and the Vulkan half is what `d3d11_import_bridge` exists for.
+- GPU-direct **decode** is progressive-only. It is **not** OpenGL-only — the Vulkan half is
+  what `d3d11_import_bridge` exists for.
 - **`[ISF]` shaders cost more on the Vulkan mixer** — 20 % more CPU at one layer,
   79 % at four. OpenGL hands the mixer the rendered texture; every other mixer
   renders on a self-contained GL context and reads the result back through host

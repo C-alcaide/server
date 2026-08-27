@@ -116,6 +116,5 @@ the mode rather than a bug. Establish the mode before tuning anything.
 source, and the source is the authority — where this file and `tracker_registry.cpp` disagree, the
 code wins and the disagreement is a finding.
 
-**The alignment order was previously undocumented**, which is why
-[`../guides/CAMERA_TRACKING.md`](../guides/CAMERA_TRACKING.md) says so rather than inventing a
-recommended sequence. That guide can now point here.
+Operator-facing detail is in [`../guides/CAMERA_TRACKING.md`](../guides/CAMERA_TRACKING.md), which
+deliberately does not invent a recommended sequence — §2 above is the order, read from the source.

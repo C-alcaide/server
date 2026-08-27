@@ -149,18 +149,41 @@ There is **no** 6-pixel alignment requirement, despite V210 packing six pixels p
 shaders walk output groups and compute each from scratch, so a region boundary inside a group is
 handled without any special case.
 
-## 4. Genlock / sync devices
+## 4. `<decklink-sync>` — an INPUT setting, listed here because nothing else documents it
+
+**This is not an output option.** It supplies the default `SYNC_GROUP` / `SYNC_PEERS` for a
+DeckLink **producer**, so several capture cards deliver frames as one synchronised set. It has no
+effect on the consumer, and there is no config block that chooses which card carries house
+reference — for output timing see `<wait-for-reference>` in §3.
 
 ```xml
 <configuration>
     <decklink-sync>
-        <device-1>1</device-1>
+        <device-1>
+            <group>1</group>
+            <peers>2</peers>
+        </device-1>
     </decklink-sync>
 </configuration>
 ```
 
-Names the card whose reference is used for timing. Relevant when several cards are in one machine
-and only one carries house reference.
+`device-N` matches the producer's device index, and it is a **subtree**, not a scalar. Read at
+`decklink_producer.cpp:1790-1806`, and only when the `PLAY` line did not already give
+`SYNC_GROUP` — an explicit parameter wins, and a `group` of `0` means no grouping. It is also
+skipped entirely for `device_index` 0.
+
+The equivalent per-`PLAY` form, which is what the config defaults:
+
+```
+PLAY 1-10 decklink 1 SYNC_GROUP 1 SYNC_PEERS 2
+PLAY 1-20 decklink 2 SYNC_GROUP 1 SYNC_PEERS 2
+```
+
+> **A config element whose key is assembled at runtime is invisible to every mechanical check.**
+> This one is built by string concatenation —
+> `L"configuration.decklink-sync.device-" + device_index` — so no audit that greps for a literal
+> config name can find it, in either direction: a sweep for undocumented elements misses it, and a
+> sweep for documented-but-unread elements reports it as unread. Both happened here.
 
 ---
 

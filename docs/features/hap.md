@@ -39,8 +39,7 @@ comment is the only place it was written down before this document.
 
 ## 2. How to drive it
 
-**The `HAP` keyword is required**, and this document said the opposite until it was checked against
-the source. `create_hap_producer` returns `empty()` unless `params[0]` is `HAP`
+**The `HAP` keyword is required.** `create_hap_producer` returns `empty()` unless `params[0]` is `HAP`
 (`hap_producer.cpp:1588-1589`), so a plain `PLAY` of a HAP file **does not reach this module at
 all** — FFmpeg decodes it on the CPU instead, and for HAP Q that means the YCoCg resolve described
 in §1 never runs:
@@ -185,7 +184,9 @@ tables byte-for-byte identical. At the observed rate a clean sweep is ~1% likely
 
 **HAP Q Alpha has no fixture and no reachable code.** ffmpeg's hap encoder writes
 hap/hap_alpha/hap_q only, so `HapM` cannot be produced here. It is also unreachable: nothing in the
-tree publishes `ycocg_dxt5a`, because `hap_producer.cpp:977` sends HapQAlpha to the CPU decoder.
+tree publishes `ycocg_dxt5a`: the `use_vk_upload_` branch tests
+`item.result.variant != HapVariant::HapQAlpha` and falls through to the CPU decoder for that one
+variant, because the zero-copy path cannot carry two textures.
 Shader case 14 is dead on **both** mixers.
 
 ---
