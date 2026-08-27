@@ -3,6 +3,7 @@
 > **State:** shipped
 > **Modules:** `src/modules/gstreamer`
 > **Commands:** 2 (`GST INFO`, `GST LIST`)
+> **Guide:** [`../guides/GSTREAMER_GUIDE.md`](../guides/GSTREAMER_GUIDE.md)
 > **Coverage:** `gstreamer`, `gst-consumer-cost`, `gst-dll-probe`, `coexistence`
 
 Plays and records through GStreamer pipelines, so anything GStreamer can source — SRT, RTSP,

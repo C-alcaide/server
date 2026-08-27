@@ -3,6 +3,7 @@
 > **State:** shipped
 > **Modules:** `src/modules/cuda_notchlc`
 > **Commands:** none of its own — the `CUDA_NOTCHLC` keyword on `PLAY`
+> **Guide:** [`../guides/PIPELINE_EFFICIENCY_GUIDE.md`](../guides/PIPELINE_EFFICIENCY_GUIDE.md) (§NotchLC — no dedicated guide)
 > **Coverage:** `producer-swap`, `coexistence`
 
 Decodes NotchLC entirely on the GPU: nvcomp LZ4 decompression, then CUDA kernels for the Y, UV and

@@ -3,6 +3,7 @@
 > **State:** shipped, unmeasured
 > **Modules:** `src/modules/isf`, `src/modules/ofx`
 > **Commands:** none of their own — producers named `isf` and `ofx`
+> **Guide:** [`../guides/ISF_USER_AND_SHADER_GUIDE.md`](../guides/ISF_USER_AND_SHADER_GUIDE.md), [`../guides/OPENFX_USER_AND_PLUGIN_GUIDE.md`](../guides/OPENFX_USER_AND_PLUGIN_GUIDE.md)
 > **Coverage:** **none**
 
 Two plugin hosts. **ISF** runs Interactive Shader Format shaders as producers or effects, so a

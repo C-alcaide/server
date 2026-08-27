@@ -3,6 +3,7 @@
 > **State:** shipped
 > **Modules:** `src/accelerator/{ogl,vulkan}/image` (the shaders and kernels), `src/accelerator/ocio`
 > **Commands:** ~26 fork-specific AMCP commands — the largest family in the fork
+> **Guide:** [`../guides/COLOR_GRADING.md`](../guides/COLOR_GRADING.md), [`../guides/OCIO_USER_GUIDE.md`](../guides/OCIO_USER_GUIDE.md), [`../guides/HDR_GUIDE.md`](../guides/HDR_GUIDE.md)
 > **Coverage:** 14 batteries, all gating at **1 LSB**
 
 A full grading chain in the mixer — CDL, lift/midtone/gain, curves, hue curves, a qualifier,

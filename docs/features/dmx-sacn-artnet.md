@@ -3,6 +3,7 @@
 > **State:** shipped
 > **Modules:** `src/modules/sacn`, `src/modules/artnet`, `src/modules/dmx_common`
 > **Commands:** none — consumers configured on `ADD` or in the config
+> **Guide:** [`../guides/DMX_LIGHTING.md`](../guides/DMX_LIGHTING.md)
 > **Coverage:** `dmx`
 
 Samples regions of a channel's picture and sends the average colour of each region as DMX, so

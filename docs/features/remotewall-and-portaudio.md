@@ -10,6 +10,7 @@ its own. Both are shipped with no coverage.
 > **State:** shipped, unmeasured
 > **Modules:** `src/modules/remotewall` (producer, with `vendored/cloudxr` and `vendored/recvwall`)
 > **Commands:** none — a producer named `remotewall`
+> **Guide:** [`../guides/REMOTEWALL_MODULE.md`](../guides/REMOTEWALL_MODULE.md), [`../guides/PORTAUDIO_MODULE.md`](../guides/PORTAUDIO_MODULE.md)
 > **Coverage:** **none**
 
 Receives video from a remote source as a layer, over CloudXR. Intended for a wall driven from

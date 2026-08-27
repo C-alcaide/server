@@ -4,6 +4,7 @@
 > with only its per-channel gain measured
 > **Modules:** `src/accelerator/ogl/image/shader.frag`, `src/accelerator/vulkan/image/fragment_shader.frag`, `src/core/frame/frame_transform.h`
 > **Commands:** 13 fork-specific AMCP commands (10 `PROJECTION_*`, 2 ICVFX, and `MIXER FLIP`)
+> **Guide:** [`../guides/VIRTUAL_PRODUCTION_FEATURES.md`](../guides/VIRTUAL_PRODUCTION_FEATURES.md), [`../guides/PROJECTION_CALIBRATION.md`](../guides/PROJECTION_CALIBRATION.md)
 > **Coverage:** `geometry`, `blend-mask`, `calibration`, `venue-test`, `icvfx-parity`
 
 Warps a layer onto a non-planar screen — a cylinder, a dome, a fisheye — soft-edge blends it

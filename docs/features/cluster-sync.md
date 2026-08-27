@@ -3,6 +3,7 @@
 > **State:** shipped, unmeasured
 > **Modules:** `src/modules/cluster`
 > **Commands:** 4 fork-specific AMCP commands, registered by the module
+> **Guide:** [`../guides/CLUSTER_SYNC.md`](../guides/CLUSTER_SYNC.md)
 > **Coverage:** **none**
 
 Keeps playback aligned across several CasparCG servers driving one wall, so a clip started on four

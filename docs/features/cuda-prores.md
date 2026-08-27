@@ -4,6 +4,7 @@
 > **Modules:** `src/modules/cuda_prores` (producer, consumer, bypass consumer, CUDA kernels)
 > **Commands:** reached by the `CUDA_PRORES` / `CUDA_PRORES_BYPASS` keyword on `PLAY`, and by a
 > consumer name; no dedicated `MIXER` command
+> **Guide:** [`../guides/CUDA_PRORES_OPERATION_GUIDE.md`](../guides/CUDA_PRORES_OPERATION_GUIDE.md)
 > **Coverage:** `prores-parity`, `producer-swap`, `playback-scaling`, `encode-matrix`, `coexistence`
 
 A complete ProRes implementation on the GPU: entropy decode, IDCT and colour handled by CUDA

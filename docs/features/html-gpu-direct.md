@@ -4,6 +4,7 @@
 > **Module:** `src/modules/html` — **282 lines** different from upstream across 7 files, plus two
 > fork-only ones: `producer/html_gpu_bridge.{h,cpp}`
 > **Commands:** upstream's `PLAY [HTML]` and the CG interface; the fork adds configuration only
+> **Guide:** none, deliberately — Upstream owns the HTML producer and the CG interface; this fork adds GPU-direct configuration only, documented in §2 here. No separate operator guide.
 > **Coverage:** none dedicated — see §4
 
 Takes CEF's composited page as a **D3D11 shared texture** instead of a host-memory bitmap, so a

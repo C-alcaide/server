@@ -3,6 +3,7 @@
 > **State:** shipped, unmeasured
 > **Modules:** `src/modules/keyframes`
 > **Commands:** 8 fork-specific AMCP commands, registered by the module
+> **Guide:** [`../guides/KEYFRAMES.md`](../guides/KEYFRAMES.md)
 > **Coverage:** **none**
 
 Animates mixer state over time from a keyframe list, rather than one tween per command. Arm a

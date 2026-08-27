@@ -3,6 +3,7 @@
 > **State:** shipped, unmeasured
 > **Modules:** `src/modules/replay`
 > **Commands:** none of its own — a `replay` consumer, a `replay` producer with `CALL` subcommands
+> **Guide:** [`../guides/REPLAY_MODULE_USAGE.md`](../guides/REPLAY_MODULE_USAGE.md)
 > **Coverage:** **none**
 
 Records a channel continuously to a segmented store, then plays any point in that recording back —

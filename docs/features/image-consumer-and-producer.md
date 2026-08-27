@@ -3,6 +3,7 @@
 > **State:** shipped
 > **Module:** `src/modules/image` — **789 lines** different from upstream across 7 files
 > **Commands:** upstream's `ADD n IMAGE`, `PRINT`; no fork-specific command
+> **Guide:** none, deliberately — Upstream owns `ADD n IMAGE` and `PRINT`; this fork adds high-bit-depth capture and byte-order handling, which is state rather than procedure. No operator guide.
 > **Coverage:** indirectly enormous — this consumer is what `conformance`, `grading`, `ocio*`,
 > `blend-domain`, `alpha-domain` and most 1 LSB batteries capture through
 
