@@ -286,6 +286,28 @@ that took neither path and is still display-encoded.
 
 ---
 
+## Every Range column below is enforced, and enforced by refusing
+
+Stated once, because it applies to all ~26 grading commands and appears in none of their tables.
+
+Numeric grading parameters go through one function, and it **rejects rather than clamps**:
+
+| what you send | what happens |
+| :--- | :--- |
+| a value inside the range | applied |
+| a value **outside** it | **refused**, with a message naming the parameter and both bounds — *"slope must be between 0.000000 and 10.000000, got 99"* |
+| something that is not a number | refused as *"‹name› is not a number: ‹text›"* |
+
+So a grade never silently becomes a different grade than the one you asked for — an out-of-range
+value changes nothing at all, and says so.
+
+**Two documented exceptions**, both of which clamp instead:
+
+* **`MIXER CDL_FILE`** clamps every value to the same limits, so a file cannot reach a state the
+  typed command would refuse (see below).
+* **`CALIBRATION ... LUT <file> [strength]`** clamps `strength` into 0–1, which means `-1` loads a
+  LUT that does nothing and still replies `202` — [`LED_CALIBRATION.md`](LED_CALIBRATION.md).
+
 ## ASC CDL
 
 Industry-standard ASC Color Decision List (Slope/Offset/Power) with per-channel control and global saturation. Operates in scene-linear space per the ASC CDL specification.
