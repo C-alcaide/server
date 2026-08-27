@@ -22,7 +22,8 @@ Texture formats, from `hap_frame_parser.h:52-54`:
 | Hap | `Hap1` | `RGB_DXT1` (0x0B) | no alpha |
 | Hap Alpha | `Hap5` | `RGBA_DXT5` (0x0E) | straight alpha |
 | Hap Q | `HapY` | `YCoCg_DXT5` (0x0F) | scaled YCoCg, resolved in the shader |
-| Hap Q Alpha | `HapM` | 0x0D multi-texture container | YCoCg + an alpha-only DXT5 second section (0x0C) |
+| Hap Q Alpha | `HapM` | 0x0D multi-texture container | YCoCg, plus an **alpha-only `A_RGTC1` / BC4** second section (**`0x01`**) |
+| **Hap R** | `HapR` | `RGBA_BC7` | **A fifth variant, absent from this table until 2026-08-27.** Fully wired: the parser maps it, Vulkan uploads `eBc7UnormBlock` as plain `rgba` — no shader resolve, unlike Hap Q — the OpenGL route uses the same passthrough pass as plain Hap, and the CPU path decodes with `bcdec_bc7`. **No coverage of any kind, and no fixture**, which makes it the widest gap in the module: a complete route nothing has ever rendered |
 
 **The shader does the YCoCg resolve, not the producer** — `pixel_format::ycocg_dxt5` and
 `ycocg_dxt5a` exist for exactly this, as shader cases 13 and 14. That keeps the frame compressed

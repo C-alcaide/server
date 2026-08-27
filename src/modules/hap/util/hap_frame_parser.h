@@ -29,8 +29,11 @@
 //   Section types (high nibble = compressor, low nibble = texture format):
 //     Compressor:  0x0 = none, 0xB = Snappy, 0xC = chunked
 //     Texture fmt: 0x0B = RGB DXT1, 0x0E = RGBA DXT5, 0x0F = YCoCg DXT5,
-//                  0x0C = Alpha-only DXT5 (used in HapM second section)
-//                  0x01 = BC7 (HAP R)
+//                  0x01 = A_RGTC1 / BC4, alpha only (HapM second section)
+//                  0x0C = RGBA BPTC / BC7 (HAP R)
+//     These two were swapped here until 2026-08-27, and the comment also called RGTC1
+//     "DXT5". The enum below and the parser's switch are correct and match the Vidvox
+//     spec; the comment did not, and features/hap.md had copied it.
 //     Complex:     0x0D = multi-texture container (HAP Q Alpha / HapM)
 //
 // Reference: https://github.com/Vidvox/hap/blob/master/documentation/HapVideoDRAFT.md
