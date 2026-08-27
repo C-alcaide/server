@@ -55,14 +55,29 @@ setting; `gpu-readback-mode` is the one to use in new work.
 
 | value | what it does |
 | :--- | :--- |
-| `auto` | **default** |
+| `auto` | **default — and it means CPU here.** GL packing runs *only* when you write `gpu` explicitly |
 | `gpu` | pack v210/BGRA in a GL compute shader |
 | `cpu` | pack on the CPU with AVX2 |
 
+**`auto` is not "pick the best" for this one setting.** `ogl_gpu_pack_eligible` returns false unless
+`gpu-pack` is literally `gpu`, so leaving it alone keeps CPU packing. That is the opposite of
+`gpu-readback-mode`, where `auto` does try the GPU first.
+
+**And GL packing switches itself off for any subregion.** It requires `dest-x`, `dest-y`, `width`
+and `height` to all be `0` on the **primary and every secondary port** — one destination offset
+anywhere puts the whole consumer back on CPU packing, silently. (v210 group alignment; §3.)
+
 **Leave all three on `auto` unless you are diagnosing something.** They exist to let you pin a path
-when one misbehaves, and to make a measurement attributable. A pinned value that the hardware cannot
-honour is a refusal, not a silent fallback — which is deliberate, because a silent fallback is how a
-"GPU path" measurement ends up describing the CPU one.
+when one misbehaves, and to make a measurement attributable.
+
+> **A pinned mode is NOT a refusal — it falls back, with a warning.** This section said the opposite
+> until 2026-08-27. Ask for `cuda` in a build without CUDA and you get
+> *"CUDA gpu-readback-mode requested but CUDA not available, trying Vulkan"* and the Vulkan path; ask
+> for Vulkan without Vulkan and you get CPU the same way. Each GPU strategy is also handed the CPU
+> strategy as a runtime fallback, so it can still degrade after start-up.
+>
+> So pinning does **not** by itself make a measurement attributable — **read the log line**, which is
+> the only thing that says which path actually ran.
 
 ---
 
@@ -71,11 +86,20 @@ honour is a refusal, not a silent fallback — which is deliberate, because a si
 ```xml
 <decklink>
     <color-transfer>pq</color-transfer>       <!-- sdr | pq | hlg -->
+    <hdr-metadata>
+        <max-cll>1000</max-cll>
+        <max-fall>400</max-fall>
+        <min-dml>0.005</min-dml>
+        <max-dml>1000.0</max-dml>
+    </hdr-metadata>
     <vanc>
         <hdr-line>9</hdr-line>                <!-- VANC line for the HDR metadata block -->
     </vanc>
 </decklink>
 ```
+
+`<hdr-metadata>` is its own child block, spelled identically to the Vulkan-output and FFmpeg
+consumers on purpose — the same four numbers describe the same mastering display.
 
 `color-transfer` sets what the output **signals**. It does not convert the picture — the channel's
 colour space and transfer determine the pixels, exactly as elsewhere in this fork.
@@ -83,6 +107,25 @@ colour space and transfer determine the pixels, exactly as elsewhere in this for
 **HDR metadata rides in VANC**, on the line given by `hdr-line`. Receivers differ about which line
 they read; if a downstream device shows SDR from an HDR feed, that line number is the first thing
 to check and it is not always the default.
+
+### The rest of `<vanc>` — five keys beyond HDR
+
+This guide documented `hdr-line` alone until 2026-08-27. The block carries **six** settings, and
+several are unrelated to HDR:
+
+| key | what it carries |
+| :--- | :--- |
+| `hdr-line` | the HDR mastering-display metadata block |
+| `op47-line` | **OP-47 teletext / subtitles** |
+| `op47-line-field2` | OP-47's second field, for interlaced signals |
+| `op42-sd-line` | the SD fallback line for OP-42 (default `21`) |
+| `scte104-line` | **SCTE-104 triggers** — ad insertion and splice messaging |
+| `op47-dummy-header` | an optional dummy header string injected into OP-47 packets |
+
+**There is no `<enable>`, for any of them.** Each feature turns on when **its own line number is
+greater than zero**, and the whole VANC path turns on when the `<vanc>` block is merely *present*.
+Two consequences: `<hdr-line>0</hdr-line>` silently disables HDR VANC, and omitting the block
+entirely is how you disable VANC rather than setting something to false.
 
 ### Per-consumer OCIO view
 
@@ -99,11 +142,38 @@ while *looking* configured.
 
 ---
 
-## 3. Subregion output
+## 3. Genlock — waiting for the card's reference
+
+```xml
+<decklink>
+    <wait-for-reference>auto</wait-for-reference>              <!-- auto | enable | disable -->
+    <wait-for-reference-duration>10</wait-for-reference-duration>   <!-- seconds -->
+</decklink>
+```
+
+| value | behaviour |
+| :--- | :--- |
+| `auto` | **default** — and it is also what any unrecognised value falls back to |
+| `enable` (or `enabled`) | hold start-up until the card reports a locked reference |
+| `disable` (or `disabled`) | start immediately, locked or not |
+
+`wait-for-reference-duration` bounds the wait, in seconds.
+
+**This is the only output-side reference setting.** There is no config block that nominates which
+card supplies house reference — that is the card's own genlock input, set in Desktop Video. §5's
+`<decklink-sync>` looks like it might be that and is not: it belongs to the *producer*.
+
+---
+
+## 4. Subregion output
 
 A subregion copies a rectangle of the channel to a position on the DeckLink frame. All six numbers
 are honoured, and since 2026-08-27 the **Vulkan compute readback places them on the GPU** — no host
 round trip.
+
+**On the OpenGL mixer, any subregion disables GL packing** (§1's `gpu-pack`): eligibility requires
+`dest-x`, `dest-y`, `width` and `height` to be `0` on the primary *and every secondary* port. So a
+subregion on one port moves the whole consumer to CPU packing without saying so.
 
 ```xml
 <decklink>
@@ -149,12 +219,15 @@ There is **no** 6-pixel alignment requirement, despite V210 packing six pixels p
 shaders walk output groups and compute each from scratch, so a region boundary inside a group is
 handled without any special case.
 
-## 4. `<decklink-sync>` — an INPUT setting, listed here because nothing else documents it
+## 5. `<decklink-sync>` — an INPUT setting, listed here because nothing else documents it
 
 **This is not an output option.** It supplies the default `SYNC_GROUP` / `SYNC_PEERS` for a
 DeckLink **producer**, so several capture cards deliver frames as one synchronised set. It has no
 effect on the consumer, and there is no config block that chooses which card carries house
 reference — for output timing see `<wait-for-reference>` in §3.
+
+> Renumbered 2026-08-27: this pointer said §3 while §3 was the subregion section, because
+> `<wait-for-reference>` was referenced here and documented nowhere. It now exists.
 
 ```xml
 <configuration>
@@ -187,23 +260,25 @@ PLAY 1-20 decklink 2 SYNC_GROUP 1 SYNC_PEERS 2
 
 ---
 
-## 5. Bring-up order that avoids the usual confusion
+## 6. Bring-up order that avoids the usual confusion
 
 1. Start with **everything on `auto`** and a plain SDR channel. Confirm a picture on the card.
 2. Set `color-transfer` and, if HDR, check the receiver actually reads `hdr-line` — change the line
    before suspecting the metadata.
 3. Only then pin `gpu-readback-mode` if you are chasing performance, and change **one** of the three
    settings at a time. They are orthogonal, so changing two makes the result unattributable.
-4. If you need a subregion, keep `dest-x` **even** (§3) and prefer `gpu-readback-mode=vulkan`,
-   which places it on the GPU. `vulkan-dma` and `cuda` fall back to the CPU path for it.
+4. If you need a subregion, keep `dest-x` **even** (§4). `auto`, `cuda`, `vulkan` and `cpu` all
+   place it correctly; **only `vulkan-dma`** falls back to the CPU path, and it says so. On the
+   OpenGL mixer a subregion also disables `gpu-pack` (§1).
 
 ---
 
-## 6. What is measured, and what is not
+## 7. What is measured, and what is not
 
 Verified by `sdi-output` (pixels, `--hdr-metadata` for the HDR block), `signalling` (colour and HDR
-static metadata read back from the card), `anc-check` (ancillary data), and `sdi-input` /
-`decklink-input-cost` for the input direction. The figures live in
+static metadata read back from the card — its ancillary-data checks live in `core/anc_check.py` and
+are **not** a subcommand of their own), and `sdi-input` / `decklink-input-cost` for the input
+direction. The figures live in
 [`../features/decklink-output.md`](../features/decklink-output.md), which owns them.
 
 **Not measured:**
