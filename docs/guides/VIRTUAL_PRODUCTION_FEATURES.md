@@ -145,8 +145,8 @@ The compensation is **fully independent of 360° mode**: it works on standard fl
 ### AMCP Command
 
 ```bash
-MIXER [channel]-[layer] PROJECTION_CURVE [type] [arc] [eye_distance] [duration] [tween]
-MIXER [channel]-[layer] PROJECTION_CURVE              // Query: type arc eye_distance
+MIXER [channel]-[layer] PROJECTION_CURVE [type] [arc] [arc_v] [eye_distance] [duration] [tween]
+MIXER [channel]-[layer] PROJECTION_CURVE              // Query: type arc arc_v eye_distance
 MIXER [channel]-[layer] PROJECTION_CURVE FLAT 0       // Disable compensation
 ```
 
@@ -155,8 +155,9 @@ MIXER [channel]-[layer] PROJECTION_CURVE FLAT 0       // Disable compensation
 | Parameter | Description | Range / Unit |
 | :--- | :--- | :--- |
 | **type** | Shape of the physical screen | `FLAT`, `CYLINDER`, `SPHERE`, `FISHEYE` |
-| **arc** | Total angular span of the screen surface as seen from the centre of curvature | 0.0 to 360.0 degrees |
-| **eye_distance** | Viewer eye distance expressed as a multiple of the screen radius *R* (`k = Dᵥ / R`) | ≥ 0.05, default `1.0` |
+| **arc** | Total angular span of the screen surface as seen from the centre of curvature. **`0` disables compensation whatever the type is** | 0.0 to 360.0 degrees |
+| **arc_v** | **Vertical** arc, position 2. `0` (default) keeps `SPHERE` radially symmetric; **any non-zero value makes it TOROIDAL** — horizontal and vertical warped by their own arcs independently. Unused by `CYLINDER` and `FISHEYE` | 0.0 to 360.0 degrees |
+| **eye_distance** | Viewer eye distance as a multiple of the screen radius *R* (`k = Dᵥ / R`). **Position 3, not 2.** Clamped to ≥ 0.05 in the shader rather than rejected | default `1.0` |
 | **duration** | Tween duration in frames | Integer |
 | **tween** | Tween curve type | `linear`, `ease`, `ease-in`, `ease-out`, etc. |
 
@@ -206,27 +207,43 @@ MIXER 1-10 PROJECTION_CURVE CYLINDER 140
 ```
 
 **3. Dome / planetarium — spherical screen with viewer set back**
-Viewer twice the screen radius away from the centre of curvature (`k = 2`).
+Viewer twice the screen radius away from the centre of curvature (`k = 2`). **The `0` is required:**
+it is the vertical arc, and omitting it puts `2.0` there instead of into `eye_distance`.
 ```bash
-MIXER 1-10 PROJECTION_CURVE SPHERE 160 2.0
+MIXER 1-10 PROJECTION_CURVE SPHERE 160 0 2.0
+```
+
+**3b. Doubly-curved (toroidal) screen — a non-zero vertical arc**
+A screen curving in both axes by different amounts — a 160° horizontal wrap with a 40° vertical one.
+Each axis is then warped by its own arc rather than radially.
+```bash
+MIXER 1-10 PROJECTION_CURVE SPHERE 160 40 1.0
 ```
 
 **4. Animated arc — live calibration during rehearsal**
 Smoothly sweep the arc value from 0° to 160° over 4 seconds (100 frames at 25 fps) to find the sweet spot without stopping playback. `eye_distance` is held at the default `1.0`.
 ```bash
-MIXER 1-10 PROJECTION_CURVE CYLINDER 160 1.0 100 LINEAR
+MIXER 1-10 PROJECTION_CURVE CYLINDER 160 0 1.0 100 LINEAR
 ```
+
+> **This example used to read `CYLINDER 160 1.0 100 LINEAR`** — five tokens against six positions,
+> shifting everything left: `1.0` landed in `arc_v`, `100` in **`eye_distance`** (a viewer 100 screen
+> radii back, i.e. no visible warp) and `LINEAR` in `duration`, where `std::stoi` throws. Corrected
+> 2026-08-27 along with example 3 and the query reply below.
 
 **5. Query current state**
 ```bash
 MIXER 1-10 PROJECTION_CURVE
 ```
-Response: `201 MIXER OK\r\nCYLINDER 140.0 1.0\r\n`
+Response: `201 MIXER OK\r\nCYLINDER 140.0 0.0 1.0\r\n`
 
 **6. Disable compensation**
 ```bash
 MIXER 1-10 PROJECTION_CURVE FLAT 0
 ```
+Compensation is enabled only when the type is **not** `FLAT` **and** the arc is non-zero, so
+`CYLINDER 0` disables it just as effectively. Any explicit `PROJECTION_CURVE` also **locks out
+auto-projection**, clearing the `curve_auto` flag deliberately.
 
 ### Independence from PROJECTION
 

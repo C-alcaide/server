@@ -266,7 +266,43 @@ radians internally).  Boolean/enum fields use `0.0`/`1.0` (threshold at 0.5).
 | `proj_offset_x`, `proj_offset_y` | 0.0 | Lens shift (NDC) |
 | `proj_screen_arc` | 0.0 | Curved screen arc (degrees, angular) |
 | `proj_curve_enable` | 0 | Enable curve compensation (discrete) |
-| `proj_curve_type` | 0 | 0=flat, 1=cylinder, 2=sphere (discrete) |
+| `proj_curve_type` | 0 | 0=flat, 1=cylinder, 2=sphere, **3=fisheye** (discrete) |
+| `proj_curve_auto` | 0 | Derive the curve from the screen arc rather than from `proj_curve_type` (discrete) |
+| `proj_screen_arc_v` | 0.0 | **Vertical** screen arc, the companion to `proj_screen_arc` (degrees, angular) |
+| `proj_frustum_h`, `proj_frustum_v` | 0.0 | Asymmetric frustum shift |
+| `proj_eye_distance` | 1.0 | Viewer distance used by the curve compensation |
+| `proj_source_lens` | 0.0 | The **source's** projection model, same four values as `proj_curve_type`: 0=flat, 1=cylinder, 2=sphere, 3=fisheye (discrete) |
+
+#### Lens distortion — all five coefficients animate
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `proj_lens_k1`, `proj_lens_k2`, `proj_lens_k3` | 0.0 | Radial distortion |
+| `proj_lens_p1`, `proj_lens_p2` | 0.0 | Tangential distortion |
+
+#### Edge blending
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `proj_edge_blend_left`, `_right`, `_top`, `_bottom` | 0.0 | Blend width per edge |
+| `proj_edge_blend_gamma` | **2.2** | Blend curve gamma — the one field here whose default is not 0 or 1 |
+
+#### ICVFX — including the per-channel gains
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `proj_icvfx_enable` | 0 | Enable the inner/outer frustum split (discrete) |
+| `proj_inner_fov` | 90.0 | Inner-frustum field of view (degrees, angular) |
+| `proj_icvfx_feather` | 0.05 | Softness of the inner/outer boundary |
+| `proj_icvfx_inner_dim`, `proj_icvfx_outer_dim` | 1.0 | Level of each region |
+| `proj_icvfx_inner_gain_r/g/b` | 1.0 | Per-channel gain, inner frustum |
+| `proj_icvfx_outer_gain_r/g/b` | 1.0 | Per-channel gain, outer frustum |
+
+> **These 25 projection fields were undocumented until 2026-08-27**, so keyframing ICVFX gains,
+> edge blends or lens distortion was possible and unfindable. Two cautions before using them:
+> the per-channel ICVFX gains carried a red/blue exchange on the OpenGL mixer until it was found
+> by audit, and **no battery drives any of these through the keyframe path** — `icvfx-parity`
+> covers the gain via `MIXER PROJECTION_ICVFX_COLOR`, not via a keyframe.
 
 ### White/Tone Balance
 
