@@ -69,12 +69,14 @@ extern "C" {
 cudaError_t cuda_vk_launch_surface_to_v210(
     cudaSurfaceObject_t surf, uint32_t* d_v210,
     int src_x, int src_y, int dst_w, int dst_h, int src_w, int src_h,
-    int is_16bit, int use_bt2020, cudaStream_t stream);
+    int is_16bit, int use_bt2020, cudaStream_t stream,
+    int dest_x, int dest_y, int region_w, int region_h);
 
 cudaError_t cuda_vk_launch_surface_to_bgra8(
     cudaSurfaceObject_t surf, uint8_t* d_bgra,
     int src_x, int src_y, int dst_w, int dst_h, int src_w, int src_h,
-    cudaStream_t stream);
+    cudaStream_t stream,
+    int dest_x, int dest_y, int region_w, int region_h);
 }
 
 namespace caspar { namespace decklink {
@@ -696,6 +698,14 @@ struct cuda_vk_strategy::impl
         int src_y = config.src_y;
         int dst_w = decklink_format_desc.width;
         int dst_h = decklink_format_desc.height;
+        // Destination placement -- see cuda_vk_v210.cuh. A region of 0 means the whole
+        // frame, which reduces the kernels' arithmetic to what it was before they
+        // understood placement.
+        int dest_x   = config.dest_x;
+        int dest_y   = config.dest_y;
+        int region_w = config.region_w > 0 ? config.region_w : dst_w;
+        int region_h = config.region_h > 0 ? config.region_h : dst_h;
+
 
         // Import the VK texture into CUDA (cached — effectively free after first few frames)
         step_timer = caspar::timer();
@@ -743,7 +753,8 @@ struct cuda_vk_strategy::impl
             src_w, src_h,
             is_16bit ? 1 : 0,
             use_bt2020_ ? 1 : 0,
-            stream_);
+            stream_,
+            dest_x, dest_y, region_w, region_h);
 
         if (err != cudaSuccess) {
             CASPAR_LOG(warning) << L"[cuda_vk_strategy] kernel launch failed: " << cudaGetErrorString(err);
@@ -832,6 +843,13 @@ struct cuda_vk_strategy::impl
         int src_y = config.src_y;
         int dst_w = decklink_format_desc.width;
         int dst_h = decklink_format_desc.height;
+        // Destination placement -- see cuda_vk_v210.cuh. A region of 0 means the whole
+        // frame, which reduces the kernels' arithmetic to what it was before they
+        // understood placement.
+        int dest_x   = config.dest_x;
+        int dest_y   = config.dest_y;
+        int region_w = config.region_w > 0 ? config.region_w : dst_w;
+        int region_h = config.region_h > 0 ? config.region_h : dst_h;
 
         step_timer = caspar::timer();
         ensure_cuda_device(vk_tex->device_luid());
@@ -867,7 +885,8 @@ struct cuda_vk_strategy::impl
             src_x, src_y,
             dst_w, dst_h,
             src_w, src_h,
-            stream_);
+            stream_,
+            dest_x, dest_y, region_w, region_h);
 
         if (err != cudaSuccess) {
             CASPAR_LOG(warning) << L"[cuda_vk_strategy] BGRA kernel launch failed: " << cudaGetErrorString(err);

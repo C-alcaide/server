@@ -87,7 +87,12 @@ __global__ void k_vk_surface_to_v210(
     int dst_w, int dst_h,
     int src_w, int src_h,
     bool is_16bit,
-    bool use_bt2020)
+    bool use_bt2020,
+    // Destination placement. region_w/h of 0 mean the whole frame, which reduces the
+    // arithmetic below to what it was before these existed. See vk_readback_v210.comp --
+    // this kernel walks OUTPUT groups for the same reason, so a dest_x that is not a
+    // multiple of 6 straddles a group and needs no special case at all.
+    int dest_x = 0, int dest_y = 0, int region_w = 0, int region_h = 0)
 {
     const int group_x = blockIdx.x * blockDim.x + threadIdx.x;
     const int row     = blockIdx.y;
@@ -98,15 +103,23 @@ __global__ void k_vk_surface_to_v210(
     if (group_x >= groups_per_row) return;
 
     const int px_base = group_x * 6;
-    const int sy      = src_y + row;
+    const int rw      = region_w > 0 ? region_w : dst_w;
+    const int rh      = region_h > 0 ? region_h : dst_h;
+    const int ry      = row - dest_y;
+    const int sy      = src_y + ry;
 
     // Load 6 pixels from the surface, converting to 10-bit
     int R[6], G[6], B[6];
 
     #pragma unroll
     for (int i = 0; i < 6; ++i) {
-        const int sx = src_x + px_base + i;
-        if (sx < src_w && sy < src_h && (px_base + i) < dst_w) {
+        // Output pixel -> position within the region -> source pixel. Outside the
+        // rectangle the R/G/B stay 0, which blacks the surround.
+        const int ox = px_base + i;
+        const int rx = ox - dest_x;
+        const int sx = src_x + rx;
+        if (rx >= 0 && rx < rw && ry >= 0 && ry < rh &&
+            sx < src_w && sy < src_h && ox < dst_w) {
             if (is_16bit) {
                 ushort4 pixel;
                 surf2Dread(&pixel, surf, sx * (int)sizeof(ushort4), sy);
@@ -170,20 +183,28 @@ __global__ void k_vk_surface_to_bgra8(
     uint8_t* __restrict__ d_bgra,
     int src_x, int src_y,
     int dst_w, int dst_h,
-    int src_w, int src_h)
+    int src_w, int src_h,
+    // Destination placement -- see the v210 kernel above. No packing constraint here at
+    // all: one pixel is one uint32, so there was never a group to straddle.
+    int dest_x = 0, int dest_y = 0, int region_w = 0, int region_h = 0)
 {
     const int x = blockIdx.x * blockDim.x + threadIdx.x;
     const int y = blockIdx.y * blockDim.y + threadIdx.y;
 
     if (x >= dst_w || y >= dst_h) return;
 
-    const int sx = src_x + x;
-    const int sy = src_y + y;
+    const int rw = region_w > 0 ? region_w : dst_w;
+    const int rh = region_h > 0 ? region_h : dst_h;
+    const int rx = x - dest_x;
+    const int ry = y - dest_y;
+    const int sx = src_x + rx;
+    const int sy = src_y + ry;
 
     uchar4 pixel;
-    if (sx < src_w && sy < src_h) {
+    if (rx >= 0 && rx < rw && ry >= 0 && ry < rh && sx < src_w && sy < src_h) {
         surf2Dread(&pixel, surf, sx * (int)sizeof(uchar4), sy);
     } else {
+        // Black, opaque -- the surround outside the destination rectangle.
         pixel = make_uchar4(0, 0, 0, 255);
     }
 
@@ -207,13 +228,15 @@ static inline cudaError_t launch_vk_surface_to_v210(
     int src_w, int src_h,
     bool is_16bit,
     bool use_bt2020,
-    cudaStream_t stream)
+    cudaStream_t stream,
+    int dest_x = 0, int dest_y = 0, int region_w = 0, int region_h = 0)
 {
     const int groups_per_row = (dst_w + 5) / 6;
     dim3 block(64, 1);
     dim3 grid((groups_per_row + 63) / 64, dst_h);
     k_vk_surface_to_v210<<<grid, block, 0, stream>>>(
-        surf, d_v210, src_x, src_y, dst_w, dst_h, src_w, src_h, is_16bit, use_bt2020);
+        surf, d_v210, src_x, src_y, dst_w, dst_h, src_w, src_h, is_16bit, use_bt2020,
+        dest_x, dest_y, region_w, region_h);
     return cudaGetLastError();
 }
 
@@ -223,11 +246,13 @@ static inline cudaError_t launch_vk_surface_to_bgra8(
     int src_x, int src_y,
     int dst_w, int dst_h,
     int src_w, int src_h,
-    cudaStream_t stream)
+    cudaStream_t stream,
+    int dest_x = 0, int dest_y = 0, int region_w = 0, int region_h = 0)
 {
     dim3 block(16, 16);
     dim3 grid((dst_w + 15) / 16, (dst_h + 15) / 16);
     k_vk_surface_to_bgra8<<<grid, block, 0, stream>>>(
-        surf, d_bgra, src_x, src_y, dst_w, dst_h, src_w, src_h);
+        surf, d_bgra, src_x, src_y, dst_w, dst_h, src_w, src_h,
+        dest_x, dest_y, region_w, region_h);
     return cudaGetLastError();
 }

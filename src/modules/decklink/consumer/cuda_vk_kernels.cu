@@ -16,11 +16,12 @@ cudaError_t cuda_vk_launch_surface_to_v210(
     int src_w, int src_h,
     int is_16bit,
     int use_bt2020,
-    cudaStream_t stream)
+    cudaStream_t stream,
+    int dest_x, int dest_y, int region_w, int region_h)
 {
     return launch_vk_surface_to_v210(
         surf, d_v210, src_x, src_y, dst_w, dst_h, src_w, src_h,
-        is_16bit != 0, use_bt2020 != 0, stream);
+        is_16bit != 0, use_bt2020 != 0, stream, dest_x, dest_y, region_w, region_h);
 }
 
 cudaError_t cuda_vk_launch_surface_to_bgra8(
@@ -29,10 +30,12 @@ cudaError_t cuda_vk_launch_surface_to_bgra8(
     int src_x, int src_y,
     int dst_w, int dst_h,
     int src_w, int src_h,
-    cudaStream_t stream)
+    cudaStream_t stream,
+    int dest_x, int dest_y, int region_w, int region_h)
 {
     return launch_vk_surface_to_bgra8(
-        surf, d_bgra, src_x, src_y, dst_w, dst_h, src_w, src_h, stream);
+        surf, d_bgra, src_x, src_y, dst_w, dst_h, src_w, src_h, stream,
+        dest_x, dest_y, region_w, region_h);
 }
 
 } // extern "C"

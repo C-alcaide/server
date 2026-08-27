@@ -264,15 +264,30 @@ configuration parse_xml_config(const boost::property_tree::wptree&  ptree,
         auto needs_cpu_geometry = [](const port_configuration& p) {
             return p.dest_x != 0 || p.dest_y != 0 || p.region_w != 0 || p.region_h != 0;
         };
+        // ONLY `vulkan-dma` CANNOT PLACE A DESTINATION RECTANGLE, and that is a property of
+        // the mechanism rather than of effort: it copies image->buffer with a single
+        // `region.imageOffset`, and a VkBufferImageCopy cannot express a rectangle inside a
+        // larger frame. There is no shader in that path to place anything.
+        //
+        // `cpu`, `vulkan` and `cuda` all place it. The two GPU packers gained it on
+        // 2026-08-27 by walking OUTPUT groups instead of source pixels -- which also means a
+        // `dest_x` that is not a multiple of 6 needs no special case, despite V210 packing six
+        // pixels per four words. `auto` therefore needs no special handling: it resolves to
+        // `cuda` first (P1 in the 36-scenario matrix of fedf6ce09) and that now places too.
+        //
+        // Keep `dest-x` EVEN regardless of mode. 4:2:2 pairs pixels horizontally, so an odd
+        // destination x inverts the luma/chroma phase against the frame grid and costs about
+        // 20 dB -- measured identically on cpu and vulkan, so it is a wire-format property and
+        // not something a readback mode can fix.
         const bool mode_can_place =
-            config.gpu_readback_mode == configuration::gpu_readback_mode_t::cpu ||
-            config.gpu_readback_mode == configuration::gpu_readback_mode_t::vulkan;
+            config.gpu_readback_mode != configuration::gpu_readback_mode_t::vulkan_dma;
         if (needs_cpu_geometry(config.primary) && !mode_can_place) {
             CASPAR_LOG(warning)
-                << L"[decklink] <subregion> sets dest-x/dest-y/width/height, which this "
-                   L"gpu-readback-mode cannot place (vulkan-dma has no shader; cuda is not "
-                   L"implemented); falling back to gpu-readback-mode=cpu so the geometry is "
-                   L"honoured. gpu-readback-mode=vulkan does support it.";
+                << L"[decklink] <subregion> sets dest-x/dest-y/width/height, which "
+                   L"gpu-readback-mode=vulkan-dma cannot place -- its image-to-buffer copy "
+                   L"carries one offset and cannot express a rectangle inside a larger frame. "
+                   L"Falling back to gpu-readback-mode=cpu so the geometry is honoured; "
+                   L"`vulkan` and `cuda` both place it on the GPU.";
             config.gpu_readback_mode = configuration::gpu_readback_mode_t::cpu;
         }
     }
