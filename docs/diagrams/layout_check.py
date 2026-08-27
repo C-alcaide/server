@@ -139,10 +139,74 @@ class Layout:
         bb = bb.transformed(self.ax.transData.inverted())
         return bb.x0, bb.y0, bb.x1, bb.y1
 
+    def _check_bounds(self, problems):
+        """Flag anything laid out past the axis limits.
+
+        THE THIRD FAILURE MODE, and it went unchecked until 2026-08-27. Patches added to an
+        axes are clipped to it by default while text is not, so a panel running past the
+        limit loses its border and keeps its label -- which reads as a design choice rather
+        than as a mistake. `bbox_inches="tight"` does not save it: tight cropping grows the
+        saved region to include artists, but the patch was already clipped when it was drawn.
+
+        Found by eye twice in one sitting: `exec_scope.png` laid four 21-wide columns from
+        x=7.5 (right edge 100.5) and `exec_hdr.png` five 17.5-wide stages from x=5 with the
+        last at x=91 (right edge 108.5). Both rendered, both looked deliberate, both wrong.
+        """
+        x0, x1 = sorted(self.ax.get_xlim())
+        y0, y1 = sorted(self.ax.get_ylim())
+        tol = 0.05
+
+        def outside(bx0, by0, bx1, by1):
+            return (bx0 < x0 - tol or bx1 > x1 + tol
+                    or by0 < y0 - tol or by1 > y1 + tol)
+
+        for r in self._rects:
+            b = r.bounds
+            if outside(*b):
+                problems.append(
+                    f"panel {r.name!r} extends past the axes "
+                    f"({b[0]:.1f}..{b[2]:.1f} x {b[1]:.1f}..{b[3]:.1f}, "
+                    f"axes {x0:.0f}..{x1:.0f} x {y0:.0f}..{y1:.0f}) — its border will be clipped")
+        for art, _parent, label in self._texts:
+            b = self._text_bounds(art)
+            if outside(*b):
+                problems.append(
+                    f"text {label!r} extends past the axes "
+                    f"({b[0]:.1f}..{b[2]:.1f} x {b[1]:.1f}..{b[3]:.1f})")
+        for p0, p1 in self._arrows:
+            for p in (p0, p1):
+                if outside(p[0], p[1], p[0], p[1]):
+                    problems.append(f"arrow endpoint {p} is past the axes")
+
+    def _check_panel_collisions(self, problems):
+        """Flag two panels that PARTIALLY overlap.
+
+        Nesting is legitimate and common -- an inner box inside an outer one -- so full
+        containment either way is fine. What is never intentional is a partial overlap: it
+        means a column pitch and a column width disagree, and the result is two rounded
+        borders crossing each other a few units in from the edge, which at diagram scale
+        looks like a heavy divider rather than a mistake.
+
+        Added 2026-08-27 after `exec_to_production.png` laid four 24.1-wide panels on a 23.5
+        pitch. Every existing check passed: this class tests panels against TEXT and arrows,
+        and nothing compared a panel with another panel.
+        """
+        for i, a in enumerate(self._rects):
+            for b in self._rects[i + 1:]:
+                if a.contains(b.bounds, tol=0.0) or b.contains(a.bounds, tol=0.0):
+                    continue                      # nested, which is the intended use
+                if a.overlaps(b.bounds, tol=0.0):
+                    problems.append(
+                        f"panels {a.name!r} and {b.name!r} partially overlap "
+                        f"({a.bounds[0]:.1f}..{a.bounds[2]:.1f} against "
+                        f"{b.bounds[0]:.1f}..{b.bounds[2]:.1f}) — check the pitch against the width")
+
     def check(self, *, name: str = "diagram"):
         self.fig.canvas.draw()
         by_name = {r.name: r for r in self._rects}
         problems: list[str] = []
+        self._check_bounds(problems)
+        self._check_panel_collisions(problems)
 
         for art, parent, label in self._texts:
             b = self._text_bounds(art)

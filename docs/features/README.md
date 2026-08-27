@@ -203,7 +203,7 @@ Not alphabetical, and not by size. **By where defects have actually hidden**, wh
 
 ## What this folder does not yet have
 
-**Diagrams — three drawn, three still owed, two deliberately deferred.**
+**Diagrams — three drawn, two still owed, two deliberately deferred.**
 
 Drawn, by `docs/diagrams/generate_feature_diagrams.py`, following the palette and the
 `layout_check.Layout` conventions of the existing generators:
@@ -220,8 +220,24 @@ the curve is applied to the destination uv *first*, and the distortion is applie
 model, which is one step with the rotation rather than a separate one. Reading `shader.frag` fixed
 it. **A diagram is a claim, and a guessed order is the easiest kind to publish confidently.**
 
-`layout_check` earned its place too: it rejected overlapping panels and arrows crossing label text
-that a renderer would have drawn without complaint.
+`layout_check` earned its place too: it rejected label text sitting on an unrelated panel, and
+arrows crossing label text, that a renderer would have drawn without complaint.
+
+**It gained two more checks on 2026-08-27, and how they were found is the point.** Both classes
+were caught by a human looking at a PNG, twice each, while every existing assertion passed:
+
+* **anything laid out past the axis limits.** Patches added to an axes are clipped to it by
+  default and text is not, so a panel running over the edge loses its border and keeps its
+  label — which reads as a design choice. `exec_scope.png` and `exec_hdr.png` both shipped that
+  way.
+* **two panels that PARTIALLY overlap.** Nesting is legitimate, so full containment either way
+  is fine; a partial overlap means a column pitch and a column width disagree. `exec_to_production.png`
+  laid four 24.1-wide panels on a 23.5 pitch. Note that the sentence above this one used to claim
+  the module "rejected overlapping panels" — it never compared a panel with another panel until
+  this change.
+
+Both are mutation-proved (three synthetic faults, all caught) and neither rejects any of the 40
+existing figures, which is the evidence that they are checks rather than noise.
 
 Still owed: **PREVIZ** (two routes to one piece of ICVFX state) and **camera tracking** (five
 alignment commands composing in an order that is itself undocumented — so drawing it would

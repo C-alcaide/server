@@ -1,9 +1,12 @@
 """Build the executive brief: one page per capability, print-ready A4 landscape.
 
 WHO IT IS FOR. Supervisors and heads of department deciding where effort and budget go --
-not operators and not engineers. So every page answers four questions in the same order:
-what it does in plain language, where it earns its keep, what it would take to exploit
-fully, and how the market solves the same problem.
+not operators and not engineers. Every page answers the same four things in the same order --
+what it does, where it earns its keep, what it would still take, and how the market solves the
+same problem -- but it does NOT label them. Headers naming each block read as a form filled in
+rather than as a document, so the prose introduces itself and typography separates the parts:
+a list, then a plain paragraph, then an amber rule for the caveat, then a hairline and muted
+type for the market note.
 
 WHY A GENERATOR rather than hand-written HTML. The content is a table of facts, and a table
 of facts hand-carried into markup is a second copy that drifts -- the failure this doc tree
@@ -61,17 +64,17 @@ FEATURES = [
             "The same transforms the post house already uses — the tooling is shared with "
             "Nuke, Resolve, Maya and Blender.",
         ],
-        earns="A shoot mixing an ARRI camera feed, pre-rendered plates and live graphics on the "
-              "same wall. Without a reference space, matching them is trial and error that has to "
-              "be redone whenever a source changes.",
-        gap="Nothing outstanding for the built-in path — it is gated at 1 LSB on both renderers "
-            "and was re-measured this week. The OCIO half is measured against OCIO's own CPU "
-            "processor; no one has yet compared an OCIO HDR view against the built-in PQ path "
-            "end to end.",
-        market="ACES is the AMPAS standard and OpenColorIO is the ASWF library behind most "
-               "post-production colour tooling. Media servers differ widely here: some expose a "
-               "fixed pipeline, some none at all. Using the standards rather than a private "
-               "pipeline is the point.",
+        earns="It pays for itself on a shoot mixing an ARRI camera feed, pre-rendered plates "
+              "and live graphics on the same wall: without a reference space, matching them is "
+              "trial and error that has to be redone whenever a source changes.",
+        gap="Nothing is outstanding on the built-in path — it is gated at 1 LSB on both "
+            "renderers and was re-measured this week. The OCIO half is measured against OCIO's "
+            "own processor, and no one has yet compared an OCIO HDR view against the built-in "
+            "PQ path end to end.",
+        market="Elsewhere, ACES is the AMPAS standard and OpenColorIO the ASWF library behind "
+               "most post-production colour tooling. Media servers differ widely here — some "
+               "expose a fixed pipeline, some none at all — and using the published standards "
+               "rather than a private pipeline is the point.",
         next='Nothing blocking — compare an OCIO HDR view against the built-in PQ path',
         status=PROVEN,
         evidence="conformance 100/100 conversions within 1 LSB, worst 0.55 · grading 48/48 · "
@@ -89,13 +92,14 @@ FEATURES = [
             "Windowed nodes mean a correction can be confined to part of the frame — a hot "
             "practical, one panel of a wall.",
         ],
-        earns="Live correction during a shoot: the wall reads too warm on camera, and the fix is "
-              "one command against the channel instead of a media turnaround.",
+        earns="It earns its keep in live correction during a shoot: the wall reads too warm on "
+              "camera, and the fix is one command against the channel instead of a media "
+              "turnaround.",
         gap="The operators are measured individually and in stacks. What is not covered is the "
-            "tweened form of each command — animating a grade over time is exercised by nothing — "
-            "and the windowed-node feature is a prototype with one operation.",
-        market="Comparable to the correction layers in disguise and Pixera, and to the CDL "
-               "support in Resolume. The distinguishing part here is that it sits in the same "
+            "animated form of each command, and the windowed-node feature is still a prototype "
+            "with one operation.",
+        market="Elsewhere this looks like the correction layers in disguise and Pixera, or CDL "
+               "support in Resolume. The difference here is that it sits inside the same "
                "colour-managed pipeline as the output transform rather than beside it.",
         next='Cover the animated form of each grading command',
         status=PROVEN,
@@ -114,15 +118,16 @@ FEATURES = [
             "Applied once to the composite rather than per layer, so it cannot drift between "
             "sources.",
         ],
-        earns="A volume whose panels have aged unevenly, or two panel batches that do not match. "
-              "The processor can only do so much; this closes the rest without touching content.",
-        gap="Verified on two of five consumer types. Panel- or tile-level addressing is "
+        earns="It matters most on a volume whose panels have aged unevenly, or where two panel "
+              "batches do not match. The processor can only do so much, and this closes the "
+              "rest without touching content.",
+        gap="It is verified on two of five consumer types. Panel- and tile-level addressing is "
             "deliberately not attempted — that stays the LED processor's job — and the "
             "colorimetric solve itself is not ours.",
-        market="OpenVPCal (Netflix) is the open-source camera-based solve this consumes. "
-               "Brompton Tessera and Megapixel Helios do calibration in the processor. The two "
-               "are complementary: the processor corrects the panel, this corrects what is sent "
-               "to it.",
+        market="Elsewhere, OpenVPCal (Netflix) is the open camera-based solve this consumes, "
+               "while Brompton Tessera and Megapixel Helios calibrate inside the processor. The "
+               "two are complementary: the processor corrects the panel, this corrects what is "
+               "sent to it.",
         next='Verify on the remaining three consumer types',
         status=PROVEN,
         evidence="calibration 32/32 within 1 LSB · proven to be channel-master rather than "
@@ -139,16 +144,17 @@ FEATURES = [
             "the set without polluting the shot.",
             "Per-channel colour trim on inner and outer regions separately.",
         ],
-        earns="Any LED-volume shoot with a moving camera. Without it the wall is a backdrop; "
-              "with it the wall is the set.",
-        gap="This is the largest gap in the brief and the most worth closing. Only the "
+        earns="It applies to any LED-volume shoot with a moving camera. Without it the wall is "
+              "a backdrop; with it the wall is the set.",
+        gap="This is the largest gap in the brief and the most worth closing: only the "
             "per-channel gain is covered by a test. The mask geometry, the feather, the "
             "inner-frustum reprojection and every animated form are driven by nothing — and an "
             "audit found a real colour defect in exactly this area precisely because nothing "
             "drove it.",
-        market="Unreal Engine's nDisplay and disguise are the reference implementations and both "
-               "are mature. This is not a claim to match them; it is a claim that the capability "
-               "exists inside a playout server we control, which changes what a small rig costs.",
+        market="Elsewhere, Unreal Engine's nDisplay and disguise are the reference "
+               "implementations, and both are mature. This is not a claim to match them; it is "
+               "a claim that the capability exists inside a playout server we control, which "
+               "changes what a small rig costs.",
         next='Drive the mask, feather and reprojection in test — not just the colour gain',
         status=PARTIAL,
         evidence="icvfx-parity: gain exchange, worst 0 LSB, both renderers · everything else in "
@@ -164,13 +170,14 @@ FEATURES = [
             "Edge blending across several outputs, so a wide surface reads as one picture.",
             "Lens distortion correction, so a projector's own optics stop being a content problem.",
         ],
-        earns="A curved cyclorama or a dome where the geometry changes between venues. Pre-warping "
-              "media per venue is the alternative, and it does not survive a last-minute change.",
-        gap="The geometry is measured. What is not: the animated forms of these commands, and the "
-            "interaction between a curved warp and a blend mask on the same layer.",
-        market="Projection warping is the core of Pixera, disguise and Watchout. This does not "
-               "replace a dedicated warping suite for a complex install, but it removes the need "
-               "for one on the many jobs that are a single curve.",
+        earns="It pays off on a curved cyclorama or a dome where the geometry changes between "
+              "venues. Pre-warping media per venue is the alternative, and it does not survive "
+              "a last-minute change.",
+        gap="The geometry is measured. What is not: the animated forms of these commands, and "
+            "the interaction between a curved warp and a blend mask on the same layer.",
+        market="Elsewhere, warping is the core of Pixera, disguise and Watchout. This does not "
+               "replace a dedicated warping suite for a complex install, but it removes the "
+               "need for one on the many jobs that are a single curve.",
         next='Cover the animated commands, and warp combined with a blend mask',
         status=PARTIAL,
         evidence="geometry · blend-mask · mixer-parity across six rasters · the tweened forms are "
@@ -188,14 +195,14 @@ FEATURES = [
             "A survey-based world alignment, so the tracker's coordinate system and the stage's "
             "agree without trial and error.",
         ],
-        earns="Any moving-camera virtual production. It is the input the inner frustum needs to "
-              "be worth anything.",
+        earns="It is what any moving-camera virtual production needs — and the input without "
+              "which the inner frustum is worth nothing.",
         gap="No test drives any of the eighteen commands, and none has been run against real "
-            "tracking hardware here. The composition order was undocumented until this week — it "
+            "tracking hardware here. The composition order was undocumented until this week; it "
             "is now written down, read from the source, and verified by nothing.",
-        market="Mo-Sys, stYpe, Vicon, OptiTrack and Ncam supply the tracking; this is the "
-               "consumer of it. The comparable integration in disguise and Unreal is mature and "
-               "supported — that is the gap to be honest about.",
+        market="Elsewhere, Mo-Sys, stYpe, Vicon, OptiTrack and Ncam supply the tracking and "
+               "this is the consumer of it. The comparable integration in disguise and Unreal "
+               "is mature and supported, which is the gap to be honest about.",
         next='A trial against real tracking hardware, then a test for the 18 commands',
         status=UNTESTED,
         evidence="18 commands registered · no battery · no hardware trial recorded",
@@ -211,13 +218,13 @@ FEATURES = [
             "rehearsal can move between looks quickly.",
             "The same ICVFX state the live path uses, so what is previewed is what will run.",
         ],
-        earns="Quoting and de-risking a job. A design error found in previz costs an afternoon; "
-              "the same error found at load-in costs a day of crew.",
-        gap="Thirteen commands and no coverage of any kind — the largest untested surface here. "
-            "It also renders through one graphics API on both renderers, and the consequence of "
-            "that for colour has not been measured.",
-        market="disguise's Designer previz is the benchmark and is a major part of why that "
-               "platform is standard. This is a smaller capability in the same shape.",
+        earns="Its value is in quoting and de-risking a job. A design error found in previz "
+              "costs an afternoon; the same error found at load-in costs a day of crew.",
+        gap="Thirteen commands, and no coverage of any kind — the largest untested surface "
+            "here. It also renders through one graphics API on both renderers, and the "
+            "consequence of that for colour has not been measured.",
+        market="Elsewhere, disguise's Designer previz is the benchmark and a large part of why "
+               "that platform is standard. This is a smaller capability in the same shape.",
         next='Any coverage at all — 13 commands are driven by nothing',
         status=UNTESTED,
         evidence="13 commands registered · no battery references PREVIZ at all",
@@ -234,14 +241,14 @@ FEATURES = [
             "Ten-bit sources stay ten-bit through the transfer, so the saving is not paid for in "
             "precision.",
         ],
-        earns="Any job whose channel count is set by hardware cost. This is the feature that "
-              "changes how many machines a show needs.",
-        gap="Measured and honest. What remains is a decision rather than work: the newest route "
-            "(video decode through Vulkan) has no dedicated test, and the A/B between it and the "
-            "established route has not been run.",
-        market="NVDEC and NVIDIA GPUDirect are the underlying vendor technology, available to "
-               "everyone. What differs between servers is how much of the path avoids host "
-               "memory; this fork's does so end to end for the supported codecs.",
+        earns="It matters on any job whose channel count is set by hardware cost. This is the "
+              "capability that changes how many machines a show needs.",
+        gap="This one is measured and honest. What remains is a decision rather than work: the "
+            "newest route, video decode through Vulkan, has no dedicated test, and the A/B "
+            "against the established route has not been run.",
+        market="Elsewhere, NVDEC and GPUDirect are vendor technology available to everyone. "
+               "What differs between servers is how much of the path avoids host memory, and "
+               "this fork's avoids it end to end for the supported codecs.",
         next='A dedicated test for the newest decode route, and an A/B against the established one',
         status=PROVEN,
         evidence="decode-cost with engagement required, so a silently-declined route cannot be "
@@ -258,14 +265,14 @@ FEATURES = [
             "purpose-built CUDA ProRes recorder.",
             "A capture-card bypass recorder for taking an SDI input straight to disk.",
         ],
-        earns="Deliverables and compliance recording on a show that also needs its channels. The "
-              "usual answer is a second machine.",
-        gap="Well measured for picture and cost. The gap is operational: the quality setting that "
-            "takes this from one recording to eight is raster-dependent and has to be chosen per "
-            "job rather than left at a default.",
-        market="NVENC is the vendor encoder everyone uses. Dedicated recorders (AJA, Blackmagic "
-               "HyperDeck) do this in hardware and remain the right answer for guaranteed "
-               "compliance recording; this removes the need for one per channel.",
+        earns="It earns its keep on deliverables and compliance recording for a show that also "
+              "needs its channels — where the usual answer is a second machine.",
+        gap="Picture and cost are well measured. The gap is operational: the quality setting "
+            "that takes this from one recording to eight is raster-dependent, and has to be "
+            "chosen per job rather than left at a default.",
+        market="Elsewhere, NVENC is the encoder everyone uses, and dedicated recorders — AJA, "
+               "Blackmagic HyperDeck — do this in hardware and remain the right answer for "
+               "guaranteed compliance recording. This removes the need for one per channel.",
         next='Choose the recording quality setting per raster rather than per default',
         status=PROVEN,
         evidence="encode-matrix and encode-parity across four codecs · iso-scaling for capacity",
@@ -281,14 +288,15 @@ FEATURES = [
             "installation tooling plays natively.",
             "NotchLC, so material coming out of Notch does not need transcoding.",
         ],
-        earns="An installation or broadcast job whose content arrives as ProRes or HAP and must "
-              "run many layers deep.",
-        gap="Two specifics. Neither HAP nor NotchLC has ever been compared against a reference "
-            "decoder — only against our other renderer, which cannot catch a fault both share. "
-            "And the newest HAP variant has no test material at all.",
-        market="HAP is Vidvox's open codec, standard in Resolume and VDMX. NotchLC is Notch's. "
-               "ProRes is Apple's. Supporting all three on the GPU is what a modern media server "
-               "is expected to do; the distinguishing part is doing it without a host copy.",
+        earns="It applies to installation and broadcast jobs whose content arrives as ProRes or "
+              "HAP and has to run many layers deep.",
+        gap="Two specifics are outstanding. Neither HAP nor NotchLC has ever been compared "
+            "against a reference decoder — only against our other renderer, which cannot catch "
+            "a fault both share. And the newest HAP variant has no test material at all.",
+        market="Elsewhere, HAP is Vidvox's open codec and standard in Resolume and VDMX, "
+               "NotchLC is Notch's, and ProRes is Apple's. Supporting all three on the GPU is "
+               "expected of a modern media server; doing it without a host copy is the "
+               "distinguishing part.",
         next='Compare HAP and NotchLC against a reference decoder, and obtain BC7 test material',
         status=PARTIAL,
         evidence="prores-parity against FFmpeg's CPU decoder · HAP measured between renderers "
@@ -307,14 +315,14 @@ FEATURES = [
             "Correct colour and HDR signalling on the wire, including the ancillary-data form "
             "broadcast chains expect.",
         ],
-        earns="Broadcast and large-format delivery, where SDI is not optional and the downstream "
-              "chain trusts what the wire says about the picture.",
-        gap="The single-port path is measured to the decimal over a real loopback. Multi-port is "
-            "not driven by any test, and one operational interaction is worth knowing: the "
+        earns="It is what broadcast and large-format delivery need, where SDI is not optional "
+              "and the downstream chain trusts what the wire says about the picture.",
+        gap="The single-port path is measured to the decimal over a real loopback. Multi-port "
+            "is driven by no test, and one operational interaction is worth knowing: the "
             "latency mode that sounds most like 'synchronise' switches the driver's own "
             "multi-port sync off.",
-        market="This is Blackmagic DeckLink hardware, so the card is the same one other servers "
-               "use. The difference is how the frame reaches it — via host memory, or not.",
+        market="Elsewhere this is the same Blackmagic DeckLink hardware other servers use. The "
+               "difference is how the frame reaches it — through host memory, or not.",
         next='Drive the multi-port group in test',
         status=PROVEN,
         evidence="sdi-output over the 1→4 loopback, re-verified this week: 62.92 dB with a "
@@ -332,16 +340,16 @@ FEATURES = [
             "Reports what it actually negotiated — surface format, colour space, HDR state — "
             "rather than what was asked for.",
         ],
-        earns="An LED volume fed from display outputs, which is how most modern processors prefer "
-              "to be driven.",
-        gap="Two concrete blockers, both external. HDR over this path needs Windows 11 — the "
-            "direct-scanout extension does not exist on Windows 10, and the machine falls back to "
-            "a path with no HDR surface. And the genlock and EDID features are untested because "
-            "they need hardware we have not driven.",
-        market="disguise, Pixera and Unreal-based systems all output to processors this way; "
-               "Brompton and Megapixel processors take HDMI/DP natively. This is table stakes for "
-               "LED work rather than a differentiator — which is exactly why it matters that it "
-               "exists here.",
+        earns="It suits an LED volume fed from display outputs, which is how most modern "
+              "processors prefer to be driven.",
+        gap="Two things are outstanding, both outside the code. HDR over this path needs "
+            "Windows 11, because the direct-scanout extension does not exist on Windows 10 and "
+            "the machine falls back to a path with no HDR surface. And the genlock and EDID "
+            "features are untested because they need hardware we have not driven.",
+        market="Elsewhere, disguise, Pixera and Unreal-based systems all output to processors "
+               "this way, and Brompton and Megapixel processors take HDMI or DisplayPort "
+               "natively. This is table stakes for LED work rather than a differentiator — "
+               "which is exactly why it matters that it exists here.",
         next='A Windows 11 machine with an HDR display; then genlock and EDID hardware',
         status=PARTIAL,
         evidence="vulkan-output-signalling 3/3 consistent · the HDR degradation on Windows 10 is "
@@ -358,14 +366,15 @@ FEATURES = [
             "four numbers, spelled the same way in each.",
             "Ingested HDR is read and reported, so an operator can see what arrived.",
         ],
-        earns="Any HDR deliverable, and any LED volume being shot for an HDR finish.",
-        gap="Two halves, differently mature. File, stream and SDI signalling are measured. The "
-            "display-output half is blocked on the Windows 11 point on the previous page, and "
-            "nothing yet reads back what a display actually received.",
-        market="HDR10, PQ and HLG are open standards; the mastering-display metadata is the same "
-               "block every finishing tool writes. Broadcast chains and LED processors both "
-               "expect it, and getting the label wrong is a delivery failure rather than a "
-               "picture one.",
+        earns="It is needed for any HDR deliverable, and for any LED volume being shot for an "
+              "HDR finish.",
+        gap="The two halves are differently mature. File, stream and SDI signalling are "
+            "measured; the display-output half is blocked on the same Windows 11 point as the "
+            "previous page, and nothing yet reads back what a display actually received.",
+        market="Elsewhere, HDR10, PQ and HLG are open standards and the mastering-display block "
+               "is the same one every finishing tool writes. Broadcast chains and LED "
+               "processors both expect it, and getting the label wrong is a delivery failure "
+               "rather than a picture one.",
         next='An instrument that reads back what a display actually received',
         status=PARTIAL,
         evidence="signalling on the card · ffprobe read-back per transport · display-side "
@@ -382,15 +391,14 @@ FEATURES = [
             "instant on every node.",
             "Content drift between nodes is monitored rather than assumed.",
         ],
-        earns="Large volumes and multi-surface venues — the jobs where the alternative is a "
-              "bigger, more expensive single machine.",
-        gap="It has never been run as a cluster. That needs a second machine and nothing else, "
-            "which makes it the cheapest item on this list to move from 'written' to 'proven'. "
+        earns="It is for large volumes and multi-surface venues — the jobs where the "
+              "alternative is a bigger, more expensive single machine.",
+        gap="It has never been run as a cluster, which needs a second machine and nothing else. "
             "The parts a single machine can check are checked.",
-        market="disguise's director/actor model and Unreal's nDisplay clustering are the "
-               "references, both built on the same time-synchronisation standards. Using PTP "
-               "rather than something bespoke means it can share a clock with the rest of the "
-               "facility.",
+        market="Elsewhere, disguise's director/actor model and Unreal's nDisplay clustering are "
+               "the references, both built on the same time-synchronisation standards. Using "
+               "PTP rather than something bespoke means it can share a clock with the rest of "
+               "the facility.",
         next='A second machine — no development needed',
         status=UNTESTED,
         evidence="the frame-number arithmetic is verified against its own model · no multi-machine "
@@ -407,14 +415,15 @@ FEATURES = [
             "and cyc lights follow the content.",
             "Both are standard protocols, so nothing bespoke is needed at the lighting desk.",
         ],
-        earns="A show where the wall and the room have to agree, and where repeatability between "
-              "takes matters more than live operation.",
-        gap="Neither is driven by a test. The lighting path has a battery; the keyframe system "
-            "has none, and the projection and ICVFX fields it can animate were undocumented "
-            "until this week.",
-        market="Art-Net and sACN are what every lighting desk speaks; Resolume and similar tools "
-               "offer comparable content-to-light features. Timeline automation is standard in "
-               "media servers — the unusual part here is how much of the mixer is addressable.",
+        earns="It suits a show where the wall and the room have to agree, and where "
+              "repeatability between takes matters more than live operation.",
+        gap="Neither half is driven by a test. The lighting path has a battery; the keyframe "
+            "system has none, and the projection and ICVFX fields it can animate were "
+            "undocumented until this week.",
+        market="Elsewhere, Art-Net and sACN are what every lighting desk speaks, and Resolume "
+               "and similar tools offer comparable content-to-light features. Timeline "
+               "automation is standard in media servers — the unusual part here is how much of "
+               "the mixer is addressable.",
         next='A test for the keyframe system (8 commands, 184 fields)',
         status=PARTIAL,
         evidence="dmx battery covers the lighting transports · keyframes: 8 commands, 184 fields, "
@@ -432,14 +441,15 @@ FEATURES = [
             "GStreamer pipelines in and out, which covers the transports a broadcast facility "
             "already runs.",
         ],
-        earns="Any job where this is one tool among several. The alternative is a capture card "
-              "and a conversion between every pair of applications.",
-        gap="Mostly a coverage gap rather than a capability one. Texture sharing has no test in "
-            "either direction, and the plug-in hosts are unmeasured. GStreamer is measured.",
-        market="Spout is the Windows standard for this and is what Resolume and TouchDesigner "
-               "use; OpenFX is the Open Effects Association's plug-in standard, hosted by Resolve "
-               "and Nuke; ISF is Vidvox's shader format. Speaking the existing standards is the "
-               "whole feature.",
+        earns="It matters on any job where this is one tool among several. The alternative is a "
+              "capture card and a conversion between every pair of applications.",
+        gap="This is mostly a coverage gap rather than a capability one: texture sharing has no "
+            "test in either direction and the plug-in hosts are unmeasured, while GStreamer is "
+            "measured.",
+        market="Elsewhere, Spout is the Windows standard and what Resolume and TouchDesigner "
+               "use; OpenFX is the Open Effects Association's plug-in standard, hosted by "
+               "Resolve and Nuke; ISF is Vidvox's shader format. Speaking the standards that "
+               "already exist is the whole feature.",
         next='Cover texture sharing in both directions, and the two plug-in hosts',
         status=PARTIAL,
         evidence="gstreamer 14/14 both renderers · spout, ISF and OpenFX: no coverage",
@@ -467,13 +477,9 @@ def _feature_page(f):
   <div class="pbody">
     <figure class="pfig"><img src="images/{f['img']}" alt=""></figure>
     <div class="pcol">
-      <h3>What it buys us</h3>
       <ul>{buys}</ul>
-      <h3>Where it earns its keep</h3>
       <p>{f['earns']}</p>
-      <h3 class="warn">What it would take to use fully</h3>
-      <p>{f['gap']}</p>
-      <h3 class="mkt">How the market solves this</h3>
+      <p class="gapp">{f['gap']}</p>
       <p class="mktp">{f['market']}</p>
     </div>
   </div>
@@ -496,11 +502,13 @@ def _matrix():
 
 CSS = """
 @page { size: A4 landscape; margin: 0; }
-/* --bg is EXACTLY the #1e1e1e the 42 diagrams in docs/images are drawn on, so a figure sits
-   on the page rather than reading as a lighter grey card pasted onto it. Matching the deck to
-   the existing palette is cheaper and more consistent than redrawing the diagrams. */
+/* --bg is #1f1f1f, not the #1e1e1e the diagrams are drawn on, and the one step is deliberate:
+   Chrome's print rasteriser renders a CSS #1e1e1e page as 29,29,29 while a PNG carrying 30,30,30
+   passes through untouched, so matching the values in SOURCE left the figures one code lighter
+   than the page and every one read as a faintly pasted-on card. Measured, then compensated.
+   Verify with the pixel probe if either side's rendering changes. */
 :root{
-  --bg:#1e1e1e; --panel:#262629; --panel2:#2d2d31; --line:#3a3a40;
+  --bg:#1f1f1f; --panel:#262629; --panel2:#2d2d31; --line:#3a3a40;
   --text:#e4e4e7; --muted:#9a9aa4; --title:#67aef5; --accent:#2f6bd0;
   --warn:#d0a02a; --mkt:#8fb8d8; --ok:#6fbf6f;
 }
@@ -514,8 +522,13 @@ html,body{background:var(--bg);color:var(--text);
 .page:last-child{page-break-after:auto;break-after:auto}
 
 /* ── cover ───────────────────────────────────────────────────────────── */
-.cover{justify-content:center;background:
-  radial-gradient(1300px 700px at 14% 8%, #223148 0%, var(--bg) 62%);}
+/* The wash is an IMAGE, not a `radial-gradient`. Over a near-black background the CSS ramp
+   spans about eight 8-bit steps across 300mm, so Chrome's print rasteriser banded it into
+   visible 35mm stripes. No gradient syntax fixes that -- there is not enough bit depth to
+   express the ramp. `exec_cover_bg.png` is the same ramp with about +/-1 code of dither,
+   which is the standard remedy. Generated by docs/diagrams/generate_exec_diagrams.py. */
+.cover{justify-content:center;background:var(--bg) url("images/exec_cover_bg.png") no-repeat;
+  background-size:cover;background-position:left top}
 .cover .cbody{display:flex;gap:14mm;align-items:flex-start}
 .cover .cleft{flex:1 1 auto;min-width:0}
 .cover .cright{flex:0 0 84mm;border-left:1px solid var(--line);padding-left:9mm}
@@ -539,7 +552,7 @@ html,body{background:var(--bg);color:var(--text);
 
 /* ── contents / matrix ───────────────────────────────────────────────── */
 h1.ph{font-size:23px;color:var(--title);margin-bottom:2mm}
-p.psub{color:var(--muted);font-size:12px;margin-bottom:6mm;max-width:230mm}
+p.psub{color:var(--muted);font-size:11.3px;margin-bottom:4.5mm;max-width:240mm}
 /* Padding is 1.5mm rather than 2.1mm because at 2.1mm the 16-row matrix ran 30px past the
    page and `overflow:hidden` CUT the last rows and the legend -- caught by check_overflow(),
    not by looking at it, which is the entire argument for that gate. */
@@ -570,17 +583,16 @@ td.mg{color:var(--muted);width:105mm}
 .pfig{flex:0 0 170mm;display:flex;align-items:flex-start;justify-content:center}
 .pfig img{max-width:100%;max-height:136mm}
 .pcol{flex:1 1 auto;min-width:0}
-.pcol h3{font-size:10.3px;text-transform:uppercase;letter-spacing:.1em;color:var(--title);
-  margin:0 0 2.2mm}
-.pcol h3.warn{color:var(--warn)} .pcol h3.mkt{color:var(--mkt)}
-.pcol h3:not(:first-child){margin-top:5.6mm}
-.pcol ul{list-style:none}
+.pcol ul{list-style:none;margin-bottom:5.2mm}
 .pcol li{position:relative;padding-left:4.6mm;margin-bottom:2.6mm;font-size:11.8px;
   line-height:1.5}
 .pcol li:before{content:"";position:absolute;left:0;top:1.7mm;width:1.7mm;height:1.7mm;
   border-radius:50%;background:var(--accent)}
 .pcol p{font-size:11.8px;line-height:1.5;color:#d2d2d8}
-.pcol p.mktp{color:var(--muted)}
+.pcol p.gapp{margin-top:5.2mm;padding-left:4.6mm;border-left:2px solid var(--warn);
+  color:#cfcfd6}
+.pcol p.mktp{margin-top:5.6mm;padding-top:4mm;border-top:1px solid var(--line);
+  font-size:10.9px;color:var(--muted)}
 .pfoot{border-top:1px solid var(--line);margin-top:4mm;padding-top:3mm;
   color:var(--muted);font-size:9.5px}
 .pfoot .ev{color:var(--ok);text-transform:uppercase;letter-spacing:.1em;font-size:8.5px;
@@ -590,23 +602,30 @@ td.mg{color:var(--muted);width:105mm}
 .two{display:flex;gap:9mm;margin-top:2mm}
 .two>div{flex:1 1 0;min-width:0}
 .box{background:var(--panel);border:1px solid var(--line);border-radius:5px;
-  padding:5mm 5.5mm;margin-bottom:4mm}
-.box h4{color:var(--title);font-size:12px;margin-bottom:2.5mm}
+  padding:3.8mm 4.4mm;margin-bottom:4mm}
+.box h4{color:var(--title);font-size:11.2px;margin-bottom:2.1mm}
 .box.warnb{border-color:#5a4a20} .box.warnb h4{color:var(--warn)}
 .box ul{list-style:none}
-.box li{position:relative;padding-left:4.2mm;margin-bottom:1.8mm;font-size:10.5px;
-  line-height:1.45;color:#d2d2d8}
+.box li{position:relative;padding-left:4mm;margin-bottom:1.35mm;font-size:9.7px;
+  line-height:1.4;color:#d2d2d8}
 .box li:before{content:"";position:absolute;left:0;top:1.6mm;width:1.6mm;height:1.6mm;
   border-radius:50%;background:var(--accent)}
 .box.warnb li:before{background:var(--warn)}
-.box p{font-size:10.5px;line-height:1.5;color:#d2d2d8}
-.closer{margin-top:2mm;border:1px solid #2c4a72;border-left:3px solid var(--title);
+.box p{font-size:9.9px;line-height:1.45;color:#d2d2d8}
+.closer{margin-top:3mm;border:1px solid #2c4a72;border-left:3px solid var(--title);
   border-radius:5px;background:linear-gradient(90deg,#20304a 0%,var(--panel) 70%);
-  padding:5mm 6mm}
-.closer .cq{color:var(--title);text-transform:uppercase;letter-spacing:.13em;font-size:9px;
-  font-weight:700;margin-bottom:2.5mm}
-.closer p{font-size:11.5px;line-height:1.55;color:#dcdce2}
+  padding:3.6mm 5mm}
+.closer .cq{color:var(--title);text-transform:uppercase;letter-spacing:.13em;font-size:8.5px;
+  font-weight:700;margin-bottom:1.8mm}
+.closer p{font-size:10.6px;line-height:1.5;color:#dcdce2}
 .closer b{color:#fff;font-weight:600}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:4mm 7mm;margin-top:0}
+.box h4 .bn{display:inline-block;width:5mm;height:5mm;line-height:5mm;text-align:center;
+  border-radius:50%;background:var(--accent);color:#fff;font-size:8.5px;margin-right:2.4mm;
+  vertical-align:1px}
+.box p.bnote{margin-top:2mm;padding-top:1.8mm;border-top:1px solid var(--line);
+  color:var(--muted);font-size:9.3px}
+.box p+ul{margin-top:1.9mm}
 .foot{position:absolute;left:13mm;right:13mm;bottom:8mm;color:#6a6a74;font-size:8.5px;
   border-top:1px solid var(--line);padding-top:2.5mm;display:flex;
   justify-content:space-between}
@@ -749,61 +768,88 @@ def build():
 
     pages.append(f"""
 <section class="page">
-  <h1 class="ph">What it would take, in order of what it returns</h1>
-  <p class="psub">Every item below came out of a coverage audit rather than a wish list, so each
-  one is a known gap with a known cost.</p>
-  <div class="two">
-    <div>
-      <div class="box"><h4>Cheap, and unlocks the most</h4>
-      <ul>
-        <li><b>A second machine.</b> Multi-machine sync is written and has never been run as a
-        cluster. Nothing else is needed &mdash; no development, no hardware beyond the server.</li>
-        <li><b>One SDI cable.</b> A second loopback pair doubles how much of the SDI matrix can be
-        measured in parallel, and is currently the limit on that.</li>
-        <li><b>A Windows 11 machine with an HDR display.</b> HDR over display outputs is
-        unreachable on Windows 10 &mdash; the extension does not exist there. This is an OS
-        upgrade, not a code change.</li>
-        <li><b>Test material for the newest HAP variant.</b> A complete decode route that nothing
-        has ever rendered.</li>
-      </ul></div>
-      <div class="box"><h4>Development, with a clear return</h4>
-      <ul>
-        <li><b>Drive ICVFX properly in test.</b> The mask, feather and reprojection are the core
-        of the virtual-production offer and only the colour gain is covered. An audit found a real
-        defect here precisely because nothing drove it.</li>
-        <li><b>Cover camera tracking and pre-visualisation.</b> Thirty-one commands between them,
-        zero tests. These are the two capabilities a client is most likely to ask to see.</li>
-      </ul></div>
+  <h1 class="ph">A capable server is not yet a production tool</h1>
+  <p class="psub">Everything in this brief is server work, and server work is the part that is
+  done. What follows is what stands between these capabilities and a tool a production can
+  actually be run on &mdash; and none of it is server work, which is precisely why none of it has
+  happened alongside the server.</p>
+  <figure class="scopefig"><img src="images/exec_to_production.png" alt=""></figure>
+  <div class="foot"><span>Capability brief</span><span>page {n + 4}</span></div>
+</section>
+
+<section class="page">
+  <h1 class="ph">What it would take, and in what order</h1>
+  <p class="psub">Roughly the order they block each other in: without a client nothing else is
+  reachable by an operator, and without machines and training a good client is still not a
+  service.</p>
+  <div class="grid2">
+    <div class="box"><h4><span class="bn">1</span> A client application built for this</h4>
+    <p>The 360 client was written to prove the control surface works, and it does that well. It is
+    lab work: it exposes commands, not a workflow. It is not an events and virtual-production
+    application and was never trying to be one.</p>
+    <ul>
+      <li>A show or project model &mdash; open a venue, reproduce a setup, save it again. Today the
+      state of a channel is a sequence of commands somebody typed.</li>
+      <li>Wizards where an operator should not be handling raw parameters: calibration,
+      projection alignment, inner-frustum setup.</li>
+      <li>Presets that travel between venues, visible state, undo, and errors that say what to do
+      rather than what failed.</li>
+    </ul>
+    <p class="bnote">Nothing is missing in the server for this. Every capability in this brief is
+    addressable; what is missing is something to address them with.</p>
     </div>
-    <div>
-      <div class="box warnb"><h4>Known and deliberately unresolved</h4>
-      <ul>
-        <li>One ProRes colour-tag reading disagrees with the published standard. Correcting it
-        changes existing pictures, so it needs test material and a measurement first &mdash; it is
-        recorded rather than quietly changed.</li>
-        <li>Neither HAP nor NotchLC has been compared against a reference decoder. Comparing our
-        two renderers to each other cannot catch a fault they share.</li>
-        <li>Display-side HDR read-back has no instrument at all &mdash; we can prove what we sent,
-        not what a display received.</li>
-      </ul></div>
-      <div class="box"><h4>How to read the market comparisons</h4>
-      <p>The named products are there to place each capability, not to claim parity.
-      disguise, Pixera and Unreal-based systems are mature platforms with support
-      organisations behind them; this is a playout server we control, which is a different
-      trade rather than a better one.</p>
-      <p style="margin-top:2.5mm">Product capabilities move quickly. Treat every comparison
-      here as a starting point to verify before it is quoted outside this document.</p>
-      </div>
+
+    <div class="box"><h4><span class="bn">2</span> Machines that can carry it</h4>
+    <p>The specification follows from the heaviest cases already measured rather than from a
+    guess &mdash; 12K ProRes, many layers, GPU-direct recording running alongside playback, and
+    several outputs at once.</p>
+    <ul>
+      <li>GPU memory and storage bandwidth are the practical ceilings, not clock speed. The
+      measurements in this brief say where each one binds.</li>
+      <li>A show needs a spare that is identical, not merely similar, and a rehearsed way to
+      switch to it.</li>
+      <li>Multi-machine work needs a second host before it can be proven at all &mdash; that is
+      lab time on our side, not a purchase to argue for.</li>
+    </ul>
+    </div>
+
+    <div class="box"><h4><span class="bn">3</span> Guides and people trained on them</h4>
+    <p>Our documentation is engineer-facing by design: it records what was measured, and why a
+    thing is built the way it is. An operator needs close to the opposite.</p>
+    <ul>
+      <li>Task-based guides &mdash; the ten things someone will actually do, in order, with
+      pictures &mdash; plus a quick reference for the command set.</li>
+      <li>A worked example per scenario: LED volume, projection, broadcast delivery.</li>
+      <li>Teaching. Someone who has run a show on it should train the next person; documentation
+      on its own has never produced an operator.</li>
+    </ul>
+    </div>
+
+    <div class="box"><h4><span class="bn">4</span> A defined way to run it live</h4>
+    <p>The gap between a system that works and a system a crew will take to a paying job is
+    mostly this, and it is the one least visible from inside the code.</p>
+    <ul>
+      <li>Versioned show files and presets, so a venue is re-opened rather than rebuilt.</li>
+      <li>Monitoring an operator can read at a glance: sync, drift, dropped frames, and what the
+      outputs are really signalling. The server reports most of this already and nothing surfaces
+      it.</li>
+      <li>A rollback path &mdash; versioned builds and a known-good one to fall back to &mdash;
+      and a named person who fixes it mid-show.</li>
+      <li>Conventions for how content arrives: codec, colour tagging, naming. Otherwise every job
+      re-derives them, which is where colour errors enter.</li>
+    </ul>
     </div>
   </div>
   <div class="closer">
     <div class="cq">The one-sentence version</div>
-    <p>The capabilities are built and most of them are measured; what is missing is mostly
-    <b>proof rather than function</b> &mdash; and the three cheapest items on this page
-    (a second machine, one SDI cable, a Windows 11 host) convert four of the ten unproven
-    entries into measured ones without a line of new code.</p>
+    <p>The engineering is largely done and largely measured; what remains is <b>not more server
+    features</b> but the four things that turn a capable server into something a crew can be
+    handed &mdash; and the client application is the one that blocks the other three.</p>
   </div>
-  <div class="foot"><span>Capability brief</span><span>page {n + 4}</span></div>
+  <div class="foot"><span>Capability brief</span>
+    <span>market comparisons place each capability rather than claim parity &mdash; verify product
+    specifics before quoting them onward</span>
+    <span>page {n + 5}</span></div>
 </section>""")
 
     html = ("<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">\n"
@@ -812,8 +858,8 @@ def build():
     with open(OUT_HTML, "w", encoding="utf-8", newline="\n") as fh:
         fh.write(html)
     print(f"wrote {os.path.relpath(OUT_HTML, HERE)}  "
-          f"({os.path.getsize(OUT_HTML) // 1024} KB, {n + 4} pages)")
-    return n + 4
+          f"({os.path.getsize(OUT_HTML) // 1024} KB, {n + 5} pages)")
+    return n + 5
 
 
 def to_pdf():

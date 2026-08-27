@@ -110,9 +110,16 @@ meant to prevent.
 python docs/build_exec_brief.py   ->  docs/EXECUTIVE_BRIEF.html + .pdf
 ```
 
-A 20-page A4-landscape deck for supervisors and heads of department rather than operators or
+A 21-page A4-landscape deck for supervisors and heads of department rather than operators or
 engineers: one page per capability, each pairing a diagram with what it buys, where it earns its
-keep, what it would still take to exploit fully, and how the market solves the same problem.
+keep, what it would still take, and how the market solves the same problem. It deliberately does
+not label those four blocks -- headers naming each one read as a form filled in rather than as a
+document, so the prose introduces itself and typography separates the parts.
+
+It closes on the argument that matters more than any single capability: the server work is the
+part that is done, and what stands between it and a production tool is a client application an
+operator can be handed, machines that can carry the load, operator-facing guides with teaching
+behind them, and a defined way to run it live. None of those four is server work.
 
 Its content is **not** derived from these documents — it lives in the generator's own `FEATURES`
 table, because the audience and the level of abstraction differ from every document here. What it

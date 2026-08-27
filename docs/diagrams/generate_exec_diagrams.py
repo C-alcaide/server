@@ -5,12 +5,17 @@ follow `generate_diagrams.py`, so these sit beside the existing 42 figures rathe
 introducing a second look. What differs is what they show: these answer "what does this buy
 us and when", where the others answer "how does it work".
 
-WHY ONLY SIX. Most features in the brief already have a dark-themed diagram in
-`docs/images/` -- ICVFX, LED tiling, OCIO stages, the decode and encode routes, projection
+WHY ONLY SIX FEATURE FIGURES. Most features in the brief already have a dark-themed diagram
+in `docs/images/` -- ICVFX, LED tiling, OCIO stages, the decode and encode routes, projection
 geometry, tracking, previz, grading. Drawing new ones for those would be a second copy of a
 picture, which is the same duplication this doc tree keeps paying for. These six are the
-features that had no figure at all, plus the scope overview a brief needs and the docs do
-not.
+features that had no figure at all.
+
+Eight files, not six: `exec_scope.png` is the scope overview a brief needs and the docs do not,
+`exec_to_production.png` belongs to the closing argument rather than to a feature, and
+`exec_cover_bg.png` is not a diagram at all -- it is a dithered wash, because the CSS gradient
+it replaces banded when Chrome rasterised it for print. See `cover_bg()` for why that cannot be
+fixed in CSS.
 
 Run:  python docs/diagrams/generate_exec_diagrams.py
 """
@@ -215,13 +220,16 @@ def hdr():
     _head(lay, "HDR that survives all the way to the wire",
           "the picture and the label it carries are decided separately — both have to be right")
 
-    stages = [(5, "Source", "camera log\nor HDR file"),
-              (26.5, "Grade", "in scene-linear\nACES"),
-              (48, "Encode", "PQ or HLG\ncurve applied"),
-              (69.5, "Signal", "metadata on\nthe wire"),
-              (91, "Display", "shows HDR\nas graded")]
+    # Pitch 19.9 and width 16.6, so the fifth stage ends at 98.1. It used to start at x=91
+    # with w=17.5 -- right edge 108.5 -- and matplotlib clipped the border while keeping the
+    # labels, which is why it read as a design choice. `layout_check` now refuses it.
+    stages = [(1.9, "Source", "camera log\nor HDR file"),
+              (21.8, "Grade", "in scene-linear\nACES"),
+              (41.7, "Encode", "PQ or HLG\ncurve applied"),
+              (61.6, "Signal", "metadata on\nthe wire"),
+              (81.5, "Display", "shows HDR\nas graded")]
     for i, (x, name, sub) in enumerate(stages):
-        w = 17.5
+        w = 16.6
         colour = SUCCESS if i in (2, 3) else BORDER
         lay.panel(f"s{i}", x, 46, w, 24, fc=PANEL, ec=colour,
                   lw=1.6 if colour is SUCCESS else 1.2)
@@ -319,6 +327,120 @@ def lighting():
     _save(fig, "exec_lighting.png")
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+def cover_bg():
+    """The cover wash, rendered as a dithered image rather than as a CSS gradient.
+
+    WHY NOT CSS. A `radial-gradient` over a near-black background bands severely once Chrome
+    rasterises it for print: the whole ramp spans about eight 8-bit steps across 300mm, so
+    every step is a visible 35mm-wide stripe. Nothing about the CSS is wrong -- there is
+    simply not enough bit depth to express that ramp smoothly, and no gradient syntax fixes
+    an 8-bit output.
+
+    So it is generated with per-pixel noise of about +/-1 code value, which is ordinary
+    dithering: it converts the hard step edges into a fine grain the eye integrates. Costs a
+    ~200 KB PNG and removes the artefact outright.
+    """
+    import numpy as np
+    h, w = 900, 1280
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float64)
+    # centre near the upper-left third, matching where the headline sits
+    cx, cy, rx, ry = 0.17 * w, 0.10 * h, 0.86 * w, 1.05 * h
+    d = np.sqrt(((xx - cx) / rx) ** 2 + ((yy - cy) / ry) ** 2)
+    # smootherstep, so the ramp has no second-derivative discontinuity to band along either
+    s = np.clip(d, 0.0, 1.0)
+    s = s * s * s * (s * (s * 6.0 - 15.0) + 10.0)
+
+    near = np.array([0x22, 0x31, 0x48], dtype=np.float64)   # the tinted corner
+    far = np.array([0x1e, 0x1e, 0x1e], dtype=np.float64)    # the page background, exactly
+    img = near + (far - near) * s[..., None]
+
+    rng = np.random.default_rng(20260827)                   # fixed: the PNG is committed
+    img += rng.uniform(-1.1, 1.1, img.shape)
+    img = np.clip(img, 0, 255).astype(np.uint8)
+
+    fig = plt.figure(figsize=(w / 130, h / 130), dpi=130)
+    fig.patch.set_facecolor(BG)
+    ax = fig.add_axes((0, 0, 1, 1))
+    ax.imshow(img, interpolation="nearest", aspect="auto")
+    ax.set_axis_off()
+    path = os.path.join(OUT_DIR, "exec_cover_bg.png")
+    fig.savefig(path, dpi=130, facecolor=BG, pad_inches=0)
+    plt.close(fig)
+    print("wrote", os.path.normpath(path))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+def to_production():
+    """What stands between a capable server and a tool a production can be run on.
+
+    The point of the figure is the PROPORTION: the server column is done and the four beside
+    it are not, and none of the four is server work. A reader who takes only the shape away
+    should take away that the remaining effort is not in the renderer.
+    """
+    lay, fig, ax = _new((13, 6.4))
+    _head(lay, "Where the remaining effort actually sits",
+          "not in the renderer — the four below are what turn built features into a service")
+
+    lay.panel("srv", 3, 60, 30, 26, fc="#16301b", ec=SUCCESS_T, lw=1.7)
+    lay.text("srvt", 18, 78, "The server", parent="srv", color=SUCCESS_T, size=11.5,
+             weight="bold", ha="center")
+    lay.text("srvs", 18, 71,
+             "16 capabilities, 91 commands\n6 gated by measurement",
+             parent="srv", color=TEXT, size=8.8, ha="center")
+    lay.text("srvd", 18, 64.5, "built", parent="srv", color=SUCCESS_T, size=9,
+             weight="bold", ha="center", style="italic")
+
+    lay.panel("out", 67, 60, 30, 26, fc=PANEL, ec=ACCENT_HOVER, lw=1.7)
+    lay.text("outt", 82, 78, "A production tool", parent="out", color=TITLE, size=11.5,
+             weight="bold", ha="center")
+    lay.text("outs", 82, 70,
+             "something a crew can be\nhanded and be expected\nto deliver a show with",
+             parent="out", color=TEXT, size=8.8, ha="center")
+
+    lay.arrow((33, 73), (44, 73), color=BORDER, lw=1.3)
+    lay.arrow((56, 73), (67, 73), color=BORDER, lw=1.3)
+    lay.panel("gap", 44, 65, 12, 16, fc="#241f14", ec=WARNING, lw=1.4)
+    lay.text("gapt", 50, 72.5, "?", parent="gap", color=WARNING_T, size=17,
+             weight="bold", ha="center")
+
+    # Pitch 23.5 against width 22.5. At width 24.1 on the same pitch the panels OVERLAPPED by
+    # 0.8 and `layout_check` did not object -- it tests text against panels and arrows against
+    # text, not panel against panel. Worth knowing before trusting it on a column layout.
+    #
+    # The state word under each is deliberately not "not started" for all four: the 360 client
+    # exists and the docs exist, they are simply the wrong shape for this audience. Writing them
+    # off as absent would be the same overstatement in the other direction.
+    cols = [
+        (3.5, "A client application", ACCENT_HOVER,
+         "The 360 client proves the\ncommands work. It is lab\nwork, not an operator app.",
+         "exists as lab work"),
+        (27.0, "Machines that keep up", WARNING_T,
+         "12K ProRes and many\nlayers set the spec, and\na show needs spares.",
+         "not yet specified"),
+        (50.5, "Guides and training", WARNING_T,
+         "What we have is written\nfor engineers. Operators\nneed their own.",
+         "engineer-facing only"),
+        (74.0, "A way to run it live", DANGER_T,
+         "Show files, presets, a\nbackup machine, and\nsomeone on call at 2am.",
+         "not defined"),
+    ]
+    for x, name, colour, body, state in cols:
+        lay.panel(f"c{x}", x, 10, 22.5, 40, fc=PANEL, ec=colour, lw=1.5)
+        lay.text(f"ct{x}", x + 11.25, 43, name, parent=f"c{x}", color=colour, size=9.6,
+                 weight="bold", ha="center")
+        lay.text(f"cb{x}", x + 11.25, 28, body, parent=f"c{x}", color=TEXT, size=8.4,
+                 ha="center")
+        lay.text(f"cd{x}", x + 11.25, 15, state, parent=f"c{x}", color=MUTED,
+                 size=8, ha="center", style="italic")
+
+    lay.text("foot", 50, 4.5,
+             "None of these four is server work — which is why none of them has been done alongside it.",
+             parent=None, color=MUTED, size=8.8, ha="center", style="italic")
+    lay.check(name="to_production")
+    _save(fig, "exec_to_production.png")
+
+
 if __name__ == "__main__":
     scope()
     direct_display()
@@ -326,3 +448,5 @@ if __name__ == "__main__":
     hdr()
     multiport()
     lighting()
+    cover_bg()
+    to_production()
