@@ -231,7 +231,7 @@ class vulkan_output_consumer : public core::frame_consumer
         //    for a P3 display got no warning and no conversion, which looks exactly like a
         //    conversion that worked. Same shape as `gpu-transfer` being inert on the Vulkan
         //    mixer: an option that is read, accepted and ignored.
-        if (config_.gamut != output_gamut::bt709) {
+        if (!per_consumer_conversion_enabled() && config_.gamut != output_gamut::bt709) {
             CASPAR_LOG(warning)
                 << print()
                 << L" <gamut> is currently INERT on this consumer: the per-consumer colour "
@@ -443,6 +443,18 @@ class vulkan_output_consumer : public core::frame_consumer
         return caspar::make_ready_future(false);
     }
 
+    /// Is the per-consumer colour conversion pipeline actually running?
+    ///
+    /// It is not: the pass is disabled behind a literal `if (false && ...)` further down, and
+    /// this returns that fact rather than restating it. ONE SOURCE OF TRUTH ON PURPOSE -- the
+    /// startup warning about `<gamut>` being inert and the `gamut-inert` field in `state()`
+    /// both ask this, so they cannot drift apart and start disagreeing about whether a
+    /// documented config element does anything.
+    ///
+    /// When the pipeline is re-enabled, change this and both the warning and the reported
+    /// state follow.
+    static constexpr bool per_consumer_conversion_enabled() { return false; }
+
     /// The formats this consumer can actually pick, by name. Deliberately NOT a full VkFormat
     /// table: `pick_surface_format` chooses from a short preference list, and a name here that
     /// the picker cannot produce would be dead code pretending to be coverage. Anything
@@ -516,6 +528,14 @@ class vulkan_output_consumer : public core::frame_consumer
         s["vulkan-output/transfer"] = config_.transfer == hdr_transfer::pq    ? std::wstring(L"pq")
                                     : config_.transfer == hdr_transfer::hlg   ? std::wstring(L"hlg")
                                                                               : std::wstring(L"sdr");
+        // REPORTED WITH ITS INERTNESS, because reporting it alone was misleading -- which the
+        // server itself had been saying at startup since before these fields existed. The
+        // per-consumer conversion pass is disabled, so `<gamut>` is read, accepted and
+        // ignored; the framebuffer carries the CHANNEL's colour space. A field that shows
+        // `bt2020` for a request that does nothing is exactly the "option that looks like it
+        // worked" this consumer's own startup warning was added to expose.
+        s["vulkan-output/gamut-inert"] =
+            std::wstring(per_consumer_conversion_enabled() ? L"false" : L"true");
         s["vulkan-output/gamut"] =
               config_.gamut == output_gamut::bt2020    ? std::wstring(L"bt2020")
             : config_.gamut == output_gamut::p3_d65    ? std::wstring(L"p3_d65")
