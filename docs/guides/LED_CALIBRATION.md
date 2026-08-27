@@ -19,7 +19,7 @@ The LUT itself is typically solved by [OpenVPCal](https://github.com/Netflix-Sku
 
 ```mermaid
 flowchart LR
-    COMP["Final composited<br/>channel output"] --> LUT["CALIBRATION LUT<br/>display-to-display .cube (33³)"]
+    COMP["Final composited<br/>channel output"] --> LUT["CALIBRATION LUT<br/>display-to-display .cube (size 2-128)"]
     LUT --> BL["strength blend (0–1)"]
     BL --> D["DeckLink SDI"]
     BL --> V["vulkan_output HDMI/DP"]
@@ -53,8 +53,8 @@ CALIBRATION <channel>                                # query (same as INFO)
 
 | Parameter | Description | Range / Unit |
 | :--- | :--- | :--- |
-| **file.cube** | Path to a `.cube` 3D LUT. Absolute, or relative to the media folder. | Path |
-| **strength** | Blend between the input and the LUT result. | 0.0–1.0 (default 1.0) |
+| **file.cube** | Path to a `.cube` 3D LUT. Tried **as given first**, then relative to the media folder. | Path |
+| **strength** | Blend between the input and the LUT result. **Clamped, not rejected** — see below. | 0.0–1.0 (default 1.0) |
 | **0\|1** | `BYPASS 1` disables the LUT without unloading; `BYPASS 0` re-enables. | Flag |
 
 ### Responses
@@ -67,6 +67,37 @@ CALIBRATION <channel>                                # query (same as INFO)
 NONE                               #   no LUT loaded
 ENABLED SIZE 33 STRENGTH 1 BYPASS 0 PATH C:/luts/wall1.cube
 ```
+
+### What the `.cube` file must satisfy
+
+Four rules, all enforced by the parser, and **all four report `404 CALIBRATION LOAD FAILED` with the
+actual reason only in the log** — so read the log rather than guessing which one you hit:
+
+| rule | detail |
+| :--- | :--- |
+| `LUT_3D_SIZE` between **2 and 128** | not fixed at 33; 33 is simply what OpenVPCal exports. `INFO` reports the real size |
+| declared **once** | a second `LUT_3D_SIZE` is an error, not an override |
+| the value count must match | `size³ × 3` floats exactly; too few or too many is refused |
+| **the domain must be 0..1** | see below |
+
+**A non-unit `DOMAIN_MIN` / `DOMAIN_MAX` is refused.** Both shaders index the table with
+`clamp(c, 0, 1)`, so a LUT authored over a wider domain — **routine for log LUTs** — cannot be
+honoured, and the parser refuses rather than misapplying it. The log says *"non-unit domain is not
+supported — the lookup is indexed over [0,1]. Re-export the LUT over a 0..1 domain."* If a LUT that
+works elsewhere fails here, this is the first thing to check.
+
+`LUT_1D_SIZE` sections are **skipped silently**, so a 1D-only `.cube` yields no table and is refused
+for having no size.
+
+### Two things that succeed more quietly than you might expect
+
+**`strength` is clamped to 0..1, not validated against it.** `STRENGTH 5` becomes `1.0` and
+`STRENGTH -1` becomes `0.0`, both replying `202`. The second is the one to watch: the LUT loads,
+`INFO` shows it `ENABLED`, and the picture does not change. A **non-numeric** strength is a real
+`403`, so `0.5x` is rejected while `-1` is not.
+
+**`BYPASS` takes `TRUE` as well as `1`**, case-insensitively; anything else — `0`, `false`, `off` —
+disables the bypass. So there is no way to mistype a bypass into an error, only into the wrong state.
 
 ## Typical Workflow
 

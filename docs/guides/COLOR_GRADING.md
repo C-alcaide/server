@@ -361,7 +361,7 @@ MIXER 1-10 CDL RESET
 
 ## 3D LUT
 
-Load industry-standard `.cube` 3D look-up tables for creative color transforms. Supports any cube size (commonly 17×17×17, 33×33×33, or 65×65×65). LUT data is uploaded as a `GL_TEXTURE_3D` with trilinear interpolation and cached until the LUT changes.
+Load industry-standard `.cube` 3D look-up tables for creative color transforms. **`LUT_3D_SIZE` must be 2–128** (commonly 17×17×17, 33×33×33 or 65×65×65); larger is refused rather than downsampled. LUT data is uploaded as a `GL_TEXTURE_3D` with trilinear interpolation and cached until the LUT changes.
 
 ### AMCP Command
 
@@ -393,7 +393,20 @@ MIXER 1-10 LUT3D NONE
 
 ### File Format
 
-Standard `.cube` format with `LUT_3D_SIZE` header and `R G B` triplets. The parser ignores `TITLE`, `DOMAIN_MIN`, `DOMAIN_MAX`, comments (`#`), and 1D LUT sections.
+Standard `.cube` format with `LUT_3D_SIZE` header and `R G B` triplets. The parser ignores `TITLE`,
+comments (`#`) and 1D LUT sections.
+
+**`DOMAIN_MIN` / `DOMAIN_MAX` are NOT ignored — a non-unit domain is refused.** This line said they
+were ignored until 2026-08-27, which was the behaviour before it was changed and the reason for
+changing it: both shaders index the table with `clamp(c, 0, 1)`, so a LUT authored over a wider
+domain — **routine for log LUTs** — was being silently *misapplied* rather than honoured. It now
+fails to load and the log says *"Re-export the LUT over a 0..1 domain."*
+
+Also refused: a second `LUT_3D_SIZE`, and a value count that is not exactly `size³ × 3`. Every one of
+these is the same reply — the log carries the actual reason.
+
+The same parser and the same rules serve `CALIBRATION <ch> LUT`; see
+[`LED_CALIBRATION.md`](LED_CALIBRATION.md).
 
 ---
 
