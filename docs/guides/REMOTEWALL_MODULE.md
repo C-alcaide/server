@@ -23,7 +23,7 @@ keeps the picture on the GPU and can carry the stream's metadata.
 ## Playing a wall
 
 ```
-PLAY 1-10 REMOTEWALL [PORT <n>] [TILES <n>] [CODEC hevc|h264]
+PLAY 1-10 REMOTEWALL [PORT <n>] [TILES <n>] [CODEC hevc|h264|av1]
                      [DEVICE <cuda-index>] [BINDIP <ip>] [SYNCGROUP <name>]
 ```
 

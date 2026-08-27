@@ -64,6 +64,11 @@ CALL 1-10 ISF SET <name> <v0> [v1 v2 v3]
   - `color`: four values (RGBA 0–1) — `CALL 1-10 ISF SET tint 1 0 0 1`
   - `event`: set to `1` to fire; it auto-resets to `0` after one rendered frame.
 
+**A name the shader does not declare returns `402 CALL ERROR (unknown ISF input)`** — so a typo is
+refused rather than silently ignored, and `ISF LIST` is how you get the exact spelling. An `ISF
+LIST` or `ISF SET` on a layer that is not running an `[ISF]` producer returns an empty result rather
+than an error, because the `CALL` never reaches this producer.
+
 ### 1.4 Mixer support
 
 | Mixer (`<accelerator>`) | Path | Cost |
