@@ -1573,6 +1573,19 @@ struct image_kernel::impl
             uniforms.gn_radius_y = static_cast<float>(n.window.radius[1]);
             uniforms.gn_feather  = static_cast<float>(n.window.feather);
             uniforms.gn_exposure = static_cast<float>(n.exposure);
+            // RGB, unswizzled, because this mixer grades in RGB. The OpenGL kernel uploads the
+            // same values and its shader applies `.bgr`; the asymmetry is the trap.
+            uniforms.gn_has_cdl     = n.has_cdl ? 1 : 0;
+            uniforms.gn_cdl_slope_r = static_cast<float>(n.cdl_slope[0]);
+            uniforms.gn_cdl_slope_g = static_cast<float>(n.cdl_slope[1]);
+            uniforms.gn_cdl_slope_b = static_cast<float>(n.cdl_slope[2]);
+            uniforms.gn_cdl_off_r   = static_cast<float>(n.cdl_offset[0]);
+            uniforms.gn_cdl_off_g   = static_cast<float>(n.cdl_offset[1]);
+            uniforms.gn_cdl_off_b   = static_cast<float>(n.cdl_offset[2]);
+            uniforms.gn_cdl_pow_r   = static_cast<float>(n.cdl_power[0]);
+            uniforms.gn_cdl_pow_g   = static_cast<float>(n.cdl_power[1]);
+            uniforms.gn_cdl_pow_b   = static_cast<float>(n.cdl_power[2]);
+            uniforms.gn_cdl_sat     = static_cast<float>(n.cdl_saturation);
         }
 
         // ── ICVFX inner/outer frustum ─────────────────────────────────

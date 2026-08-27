@@ -3976,10 +3976,63 @@ std::future<std::wstring> mixer_grade_command(command_context& ctx)
         CASPAR_THROW_EXCEPTION(user_error() << msg_info(
                                    "MIXER GRADE_NODE NODE <n> cx cy rx ry feather exposure [invert] | CLEAR"));
 
-    grade_require(ctx, 8, L"MIXER GRADE_NODE NODE <n> cx cy rx ry feather exposure [invert]");
+    if (ctx.parameters.size() < 2)
+        CASPAR_THROW_EXCEPTION(user_error() << msg_info("MIXER GRADE_NODE NODE <n> ..."));
     const int index = std::stoi(ctx.parameters.at(1));
     if (index < 0 || index > 15)
         CASPAR_THROW_EXCEPTION(user_error() << msg_info("MIXER GRADE_NODE node index must be 0-15"));
+
+    // NODE <n> CDL <slope x3> <offset x3> <power x3> <sat> -- the per-node ASC CDL.
+    //
+    // An ADDRESSED sub-form rather than more positional parameters, following the study's
+    // section 6: a node already takes seven numbers for its window, and bolting ten more on the
+    // end produces a command nobody can read or check. The window form below is unchanged, so
+    // `NODE <n> <cx> ...` still sets geometry and exposure and leaves any CDL alone.
+    //
+    // ASC CDL because it is a published standard with an existing implementation in both
+    // shaders (`apply_cdl`), not a shape invented here -- only the operands are new.
+    if (ctx.parameters.size() > 2 && boost::iequals(ctx.parameters.at(2), L"CDL")) {
+        grade_require(ctx, 13,
+                      L"MIXER GRADE_NODE NODE <n> CDL <sR sG sB> <oR oG oB> <pR pG pB> <sat>");
+        double sl[3], of[3], pw[3];
+        for (int i = 0; i < 3; ++i) {
+            sl[i] = grade_param(ctx.parameters.at(3 + i), core::grade_limits::cdl_slope, L"slope");
+            of[i] = grade_param(ctx.parameters.at(6 + i), core::grade_limits::cdl_offset, L"offset");
+            pw[i] = grade_param(ctx.parameters.at(9 + i), core::grade_limits::cdl_power, L"power");
+        }
+        const double sat = grade_param(ctx.parameters.at(12), core::grade_limits::cdl_saturation, L"saturation");
+
+        transforms_applier cdl_transforms(ctx);
+        cdl_transforms.add(stage::transform_tuple_t(
+            ctx.layer_index(),
+            [=](frame_transform transform) -> frame_transform {
+                // Copy-on-write for the same reason as the window form below -- see there.
+                auto next = std::make_shared<core::grade_graph>();
+                if (transform.image_transform.grade_nodes)
+                    next->nodes = transform.image_transform.grade_nodes->nodes;
+                if (next->nodes.size() <= static_cast<size_t>(index))
+                    next->nodes.resize(static_cast<size_t>(index) + 1);
+
+                auto& n  = next->nodes[static_cast<size_t>(index)];
+                n.enable = true;
+                n.has_cdl = true;
+                for (int i = 0; i < 3; ++i) {
+                    n.cdl_slope[i]  = sl[i];
+                    n.cdl_offset[i] = of[i];
+                    n.cdl_power[i]  = pw[i];
+                }
+                n.cdl_saturation = sat;
+
+                transform.image_transform.grade_nodes = next;
+                return transform;
+            },
+            0,
+            L"linear"));
+        cdl_transforms.apply();
+        return make_ready_future<std::wstring>(L"202 MIXER OK\r\n");
+    }
+
+    grade_require(ctx, 8, L"MIXER GRADE_NODE NODE <n> cx cy rx ry feather exposure [invert]");
 
     const double cx      = grade_param(ctx.parameters.at(2), core::grade_limits::unit, L"centre x");
     const double cy      = grade_param(ctx.parameters.at(3), core::grade_limits::unit, L"centre y");
@@ -4005,6 +4058,10 @@ std::future<std::wstring> mixer_grade_command(command_context& ctx)
             if (next->nodes.size() <= static_cast<size_t>(index))
                 next->nodes.resize(static_cast<size_t>(index) + 1);
 
+            // Geometry and exposure only. A CDL already set on this node by the sub-form
+            // above SURVIVES -- the two address different halves of the node, and making
+            // the window form reset the CDL would mean every window nudge silently threw a
+            // grade away.
             auto& n            = next->nodes[static_cast<size_t>(index)];
             n.enable           = true;
             n.window.center    = {cx, cy};

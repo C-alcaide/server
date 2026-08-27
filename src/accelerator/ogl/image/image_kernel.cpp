@@ -1364,6 +1364,21 @@ struct image_kernel::impl
             shader_->set("gn_feather", static_cast<float>(n.window.feather));
             shader_->set("gn_invert", n.window.invert);
             shader_->set("gn_exposure", static_cast<float>(n.exposure));
+            // RGB ON UPLOAD. The shader applies `.bgr` at the call site, like every other
+            // per-channel vec3 here -- see `split_*_color`, which is reversed on upload
+            // instead. Doing BOTH is a double exchange that looks correct on greys and
+            // mirrors every colour; doing NEITHER is the ICVFX defect of 2026-08-26.
+            shader_->set("gn_has_cdl", n.has_cdl);
+            shader_->set("gn_cdl_slope",
+                         static_cast<float>(n.cdl_slope[0]), static_cast<float>(n.cdl_slope[1]),
+                         static_cast<float>(n.cdl_slope[2]));
+            shader_->set("gn_cdl_offset",
+                         static_cast<float>(n.cdl_offset[0]), static_cast<float>(n.cdl_offset[1]),
+                         static_cast<float>(n.cdl_offset[2]));
+            shader_->set("gn_cdl_power",
+                         static_cast<float>(n.cdl_power[0]), static_cast<float>(n.cdl_power[1]),
+                         static_cast<float>(n.cdl_power[2]));
+            shader_->set("gn_cdl_saturation", static_cast<float>(n.cdl_saturation));
         }
 
         // Sharpening

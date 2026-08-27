@@ -121,6 +121,19 @@ layout(scalar, binding = 2) uniform ParamsBlock {
     int   ycbcr_full_range;
     // ── Chroma siting: 1 = co-sited with luma, 0 = centred between the pair ──
     int   chroma_cosited;
+    // ── Per-node ASC CDL ────────────────────────────────────────────────────
+    // DECLARED LAST, matching uniform_block.h, which APPENDS. Putting these straight after
+    // `gn_exposure` -- where they read best -- silently shifted every field after them:
+    // `gn_has_cdl` read `ycbcr_full_range`'s bytes, and `ycbcr_full_range` and
+    // `chroma_cosited` read CDL operands. Measured 2026-08-27 by `grade-window`: node CDL
+    // 47.08 LSB and a desaturation spread of 89.00 where a saturation of 0 must give grey,
+    // on Vulkan only. The YCbCr fields were wrong too and this battery could not see it --
+    // its source is BGRA. Field ORDER here is the memory layout, not documentation.
+    int   gn_has_cdl;
+    float gn_cdl_slope_r; float gn_cdl_slope_g; float gn_cdl_slope_b;
+    float gn_cdl_off_r;   float gn_cdl_off_g;   float gn_cdl_off_b;
+    float gn_cdl_pow_r;   float gn_cdl_pow_g;   float gn_cdl_pow_b;
+    float gn_cdl_sat;
 };
 layout(binding = 3) uniform sampler3D lut3d_tex;
 layout(binding = 4) uniform sampler2D hue_curve_tex;
@@ -580,7 +593,19 @@ void main(){
         float f=max(gn_feather,1e-4);
         float m=1.0-smoothstep(1.0-f,1.0+f,length(d));
         if(flag2(F2_GRADE_NODE_INVERT))m=1.0-m;
-        col.rgb=mix(col.rgb,col.rgb*gn_exposure,m);
+        vec3 graded=col.rgb*gn_exposure;
+        // The per-channel operation the comment above warned about. NO SWIZZLE: this mixer
+        // grades in RGB, so the operands go in as they arrive. The OpenGL copy applies `.bgr`
+        // to all three. Getting this backwards on either side exchanges red and blue, and a
+        // neutral CDL is invariant under that -- which is why the battery uses asymmetric
+        // slope, offset and power.
+        if(gn_has_cdl!=0)
+            graded=apply_cdl(graded,
+                             vec3(gn_cdl_slope_r,gn_cdl_slope_g,gn_cdl_slope_b),
+                             vec3(gn_cdl_off_r,gn_cdl_off_g,gn_cdl_off_b),
+                             vec3(gn_cdl_pow_r,gn_cdl_pow_g,gn_cdl_pow_b),
+                             gn_cdl_sat);
+        col.rgb=mix(col.rgb,graded,m);
         fragColor=flag2(F2_OUTPUT_BGRA)?col.bgra:col;
         return;
     }

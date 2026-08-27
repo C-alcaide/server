@@ -100,6 +100,21 @@ struct grade_node final
     // two backends disagree on this slice, it is the mask and not the swizzle.
     // Any per-channel operation added later inherits the channel-order trap.
     double exposure = 1.0;
+
+    // ASC CDL, per node. THE PER-CHANNEL OPERATION THE COMMENT ABOVE WARNED ABOUT,
+    // added 2026-08-27 -- so it carries the channel-order trap in full: the OpenGL
+    // shader holds the pixel in BGR and needs `.bgr` at the call site, Vulkan grades
+    // in RGB and must not swizzle. `apply_cdl` is the existing function both already
+    // use for the primary CDL; only the operands are new.
+    //
+    // Identity by default, and `has_cdl` decides whether the shader runs it at all --
+    // an identity CDL still costs a pow() per pixel, and almost every node will not
+    // want one.
+    bool   has_cdl    = false;
+    double cdl_slope[3]  = {1.0, 1.0, 1.0};
+    double cdl_offset[3] = {0.0, 0.0, 0.0};
+    double cdl_power[3]  = {1.0, 1.0, 1.0};
+    double cdl_saturation = 1.0;
 };
 
 struct grade_graph final

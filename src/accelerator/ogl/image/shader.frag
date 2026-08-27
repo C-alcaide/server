@@ -191,6 +191,14 @@ uniform vec2  gn_radius;    // frame space, 0..1
 uniform float gn_feather;   // fraction of radius, isotropic
 uniform bool  gn_invert;
 uniform float gn_exposure;
+// Per-node ASC CDL. RGB ON UPLOAD, swizzled to `.bgr` at the call site like every other
+// per-channel vec3 in this shader -- see the ICVFX account below for what happens when one
+// is missed. `gn_has_cdl` gates it because an identity CDL still costs three pow()s.
+uniform bool  gn_has_cdl;
+uniform vec3  gn_cdl_slope;
+uniform vec3  gn_cdl_offset;
+uniform vec3  gn_cdl_power;
+uniform float gn_cdl_saturation;
 
 // Sharpening (unsharp mask)
 uniform bool  sharpen_enable;
@@ -1857,9 +1865,17 @@ void main()
     if (grade_node_only) {
         float m = grade_node_mask(base_uv);
         // Uniform scale, so this is correct whatever order the channels are in --
-        // see the note on grade_node::exposure. A per-channel operation here would
-        // need `.bgr` on this side and no swizzle on Vulkan's.
-        col.rgb = mix(col.rgb, col.rgb * gn_exposure, m);
+        // see the note on grade_node::exposure.
+        vec3 graded = col.rgb * gn_exposure;
+        // ...and here is the per-channel operation that note warned about. `.bgr` on all
+        // three vec3s, because this shader carries the pixel in BGR and an RGB-ordered
+        // slope applied straight exchanges red and blue. Vulkan's copy must NOT swizzle.
+        // Saturation is scalar and needs no swizzle; `working_luma` inside apply_cdl is
+        // already correct for this shader's channel order.
+        if (gn_has_cdl)
+            graded = apply_cdl(graded, gn_cdl_slope.bgr, gn_cdl_offset.bgr, gn_cdl_power.bgr,
+                               gn_cdl_saturation);
+        col.rgb = mix(col.rgb, graded, m);
         fragColor = col.bgra;
         return;
     }

@@ -245,9 +245,46 @@ struct alignas(16) uniform_block
     // no error, decoded normally, and produced NO readback at all -- conformance 0/4,
     // flat-decoded 0/29, and the IMAGE consumer timing out with nothing in the log. The old
     // total of 880 was a multiple of 16 for this reason; it just was not written down.
-    int32_t  _pad_to_16[3] = {0, 0, 0};     // 884..895
-    // Total: 896 bytes (56 x 16)
+    // ── Per-node ASC CDL ────────────────────────────────────────────────
+    // Appended, like every block above it, so no existing offset moves. RGB order on upload
+    // and NO SWIZZLE in the shader -- this mixer grades in RGB. The OpenGL copy needs `.bgr`
+    // at its call site; that asymmetry is the channel-order trap, and it is the reason the
+    // battery for this drives asymmetric per-channel values.
+    //
+    // Laid out as scalars rather than vec3s deliberately: `layout(scalar)` would pack a vec3
+    // tightly, but writing them out one float at a time makes every offset below visible and
+    // keeps the padding arithmetic checkable by eye.
+    int32_t  gn_has_cdl     = 0;            // 884
+    float    gn_cdl_slope_r = 1.0f;         // 888
+    float    gn_cdl_slope_g = 1.0f;         // 892
+    float    gn_cdl_slope_b = 1.0f;         // 896
+    float    gn_cdl_off_r   = 0.0f;         // 900
+    float    gn_cdl_off_g   = 0.0f;         // 904
+    float    gn_cdl_off_b   = 0.0f;         // 908
+    float    gn_cdl_pow_r   = 1.0f;         // 912
+    float    gn_cdl_pow_g   = 1.0f;         // 916
+    float    gn_cdl_pow_b   = 1.0f;         // 920
+    float    gn_cdl_sat     = 1.0f;         // 924
+    // PAD TO A 16-BYTE MULTIPLE -- see the account above. 928 is not a multiple of 16; 944 is.
+    int32_t  _pad_to_16[4] = {0, 0, 0, 0};  // 928..943
+    // Total: 944 bytes (59 x 16)
 };
+
+// ── THE SHADER'S DECLARATION ORDER IS PART OF THIS LAYOUT ───────────────────
+//
+// The asserts below pin this struct. NOTHING pins `ParamsBlock` in fragment_shader.frag against
+// it, and a mismatch there is silent, total, and reads as a maths bug.
+//
+// Measured 2026-08-27 while adding the per-node CDL. The fields were APPENDED here (correctly)
+// and declared in the shader straight after `gn_exposure`, where they read best. Every field
+// after them shifted: `gn_has_cdl` read `ycbcr_full_range`'s bytes, and `ycbcr_full_range` and
+// `chroma_cosited` read CDL operands. `grade-window` caught it at 47.08 LSB on the CDL and 89.00
+// on a desaturation that must be neutral -- but only because it drives colour. THE YCBCR FIELDS
+// WERE ALSO WRONG and that battery cannot see it: its source is BGRA. `flat-decoded` is what
+// covers those, and it was clean before and after only because the order was fixed first.
+//
+// So: APPEND HERE, APPEND THERE, in the same order. The offset comments are the contract, and the
+// shader is the other half of it.
 
 // ── Layout guards ───────────────────────────────────────────────────────────
 //
@@ -264,7 +301,7 @@ struct alignas(16) uniform_block
 // The three anchors are deliberate rather than exhaustive: the FIRST field pins the start, and
 // the last two pin everything after the large projection/ICVFX block -- which is where fields
 // have actually been added. A drift anywhere before them moves at least one.
-static_assert(sizeof(uniform_block) == 896,
+static_assert(sizeof(uniform_block) == 944,
               "uniform_block must stay a multiple of 16 and match ParamsBlock in "
               "fragment_shader.frag -- see the measurement in the comment above");
 static_assert(offsetof(uniform_block, color_space_index) == 0,
