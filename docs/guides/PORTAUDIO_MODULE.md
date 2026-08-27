@@ -240,12 +240,24 @@ ADD 1 PORTAUDIO
 # Named device with keyword params
 ADD 1 PORTAUDIO DEVICE=Focusrite API=asio CHANNELS=8
 
-# Positional device name (first non-keyword arg)
+# Positional device name -- ONLY as the first argument
 ADD 1 PORTAUDIO "Dante Virtual Soundcard" CHANNELS=16
 
 # Channel routing matrix: duplicate L/R to outputs 1-4, silence on 5-8
 ADD 1 PORTAUDIO DEVICE=RME CHANNELS=8 MAP=0,1,0,1,-1,-1,-1,-1
 ```
+
+**Two parsing behaviours worth knowing, neither of them obvious:**
+
+* **A positional device name is read only at the FIRST argument position.** This said "first
+  non-keyword arg" until 2026-08-27, which suggests any position works. It does not:
+  `ADD 1 PORTAUDIO CHANNELS=8 "Dante Virtual Soundcard"` puts the name second and it is **silently
+  discarded**, leaving the default device. Put the name first, or use `DEVICE=`.
+* **A malformed number is silently ignored, not refused.** `CHANNELS=`, `BUFFER=` and `DELAY=`
+  parse inside a `try` whose `catch` does nothing, so `CHANNELS=eight` keeps the default of 2 and
+  the `ADD` still succeeds. Likewise an unrecognised `API=` value falls back to `auto` rather than
+  erroring — `API=asoi` behaves as `API=auto`. This is the opposite of the grading commands, which
+  refuse out-of-range and non-numeric values by name.
 
 ### Producer — AMCP
 
