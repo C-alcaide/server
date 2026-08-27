@@ -110,7 +110,7 @@ meant to prevent.
 python docs/build_exec_brief.py   ->  docs/EXECUTIVE_BRIEF.html + .pdf
 ```
 
-A 21-page A4-landscape deck for supervisors and heads of department rather than operators or
+A 23-page A4-landscape deck for supervisors and heads of department rather than operators or
 engineers: one page per capability, each pairing a diagram with what it buys, where it earns its
 keep, what it would still take, and how the market solves the same problem. It deliberately does
 not label those four blocks -- headers naming each one read as a form filled in rather than as a

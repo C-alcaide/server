@@ -13,6 +13,13 @@ of facts hand-carried into markup is a second copy that drifts -- the failure th
 has paid for repeatedly. The readiness column in particular comes straight from what the
 harness measured, so it has to be editable as data.
 
+THE CAPABILITY LIST IS DERIVED FROM `docs/features/`, NOT FROM THE DIAGRAMS. It was built the
+other way round first, and four capabilities fell out of it -- replay, PortAudio, LTC timecode
+and remotewall, every one `Coverage: none`. A list of features taken from a list of pictures
+selects for what somebody had already drawn. Each entry now declares `covers=`, `FOLDED` names
+the documents deliberately left without a page, and a harness test asserts the two account for
+the whole folder.
+
 READINESS IS NOT MARKETING. `proven` means a battery gates it and was run; `partial` means
 some of it is measured and the doc says which; `untested` means no battery drives it at all.
 An untested capability is not a broken one -- most of these work -- but a supervisor asked
@@ -42,6 +49,20 @@ CHROME_CANDIDATES = [
 PROVEN = ("proven", "#1a6b1a", "#6fbf6f")
 PARTIAL = ("partly proven", "#7a5c00", "#d0a02a")
 UNTESTED = ("not yet measured", "#5a3a1a", "#c88a4a")
+
+#: Documents in `docs/features/` that deliberately get no page of their own, and why. The
+#: harness asserts this plus every entry's `covers=` accounts for the whole folder, so a new
+#: feature document fails until someone decides which side it is on. That check exists because
+#: four capabilities were missed at once -- see the module docstring.
+FOLDED = {
+    "image-consumer-and-producer":
+        "the measurement surface rather than a capability -- it is what most batteries capture "
+        "through. An operator never chooses it and a supervisor has no decision to make about it.",
+    "vulkan-mixer":
+        "the substrate the picture capabilities run on rather than a capability beside them. It "
+        "appears on nearly every page already, as 'both renderers'.",
+}
+
 
 # ── The pages ────────────────────────────────────────────────────────────────────────────
 #
@@ -76,6 +97,7 @@ FEATURES = [
                "expose a fixed pipeline, some none at all — and using the published standards "
                "rather than a private pipeline is the point.",
         next='Nothing blocking — compare an OCIO HDR view against the built-in PQ path',
+        covers=['colour-grading-and-ocio'],
         status=PROVEN,
         evidence="conformance 100/100 conversions within 1 LSB, worst 0.55 · grading 48/48 · "
                  "ocio 18/18 · both renderers",
@@ -102,6 +124,7 @@ FEATURES = [
                "support in Resolume. The difference here is that it sits inside the same "
                "colour-managed pipeline as the output transform rather than beside it.",
         next='Cover the animated form of each grading command',
+        covers=['colour-grading-and-ocio'],
         status=PROVEN,
         evidence="grading 48/48 both renderers, neutrals exactly 0.00 · cdl-file · grade-window "
                  "byte-identical on both",
@@ -129,6 +152,7 @@ FEATURES = [
                "two are complementary: the processor corrects the panel, this corrects what is "
                "sent to it.",
         next='Verify on the remaining three consumer types',
+        covers=['led-calibration'],
         status=PROVEN,
         evidence="calibration 32/32 within 1 LSB · proven to be channel-master rather than "
                  "per-layer, 17.9 LSB apart · verified on a second consumer",
@@ -156,6 +180,7 @@ FEATURES = [
                "a claim that the capability exists inside a playout server we control, which "
                "changes what a small rig costs.",
         next='Drive the mask, feather and reprojection in test — not just the colour gain',
+        covers=['projection-and-icvfx'],
         status=PARTIAL,
         evidence="icvfx-parity: gain exchange, worst 0 LSB, both renderers · everything else in "
                  "the feature: no coverage",
@@ -179,6 +204,7 @@ FEATURES = [
                "replace a dedicated warping suite for a complex install, but it removes the "
                "need for one on the many jobs that are a single curve.",
         next='Cover the animated commands, and warp combined with a blend mask',
+        covers=['projection-and-icvfx'],
         status=PARTIAL,
         evidence="geometry · blend-mask · mixer-parity across six rasters · the tweened forms are "
                  "not driven",
@@ -204,6 +230,7 @@ FEATURES = [
                "this is the consumer of it. The comparable integration in disguise and Unreal "
                "is mature and supported, which is the gap to be honest about.",
         next='A trial against real tracking hardware, then a test for the 18 commands',
+        covers=['camera-tracking'],
         status=UNTESTED,
         evidence="18 commands registered · no battery · no hardware trial recorded",
     ),
@@ -226,6 +253,7 @@ FEATURES = [
         market="Elsewhere, disguise's Designer previz is the benchmark and a large part of why "
                "that platform is standard. This is a smaller capability in the same shape.",
         next='Any coverage at all — 13 commands are driven by nothing',
+        covers=['previz'],
         status=UNTESTED,
         evidence="13 commands registered · no battery references PREVIZ at all",
     ),
@@ -240,6 +268,9 @@ FEATURES = [
             "channel onto the slow path.",
             "Ten-bit sources stay ten-bit through the transfer, so the saving is not paid for in "
             "precision.",
+            "Browser-based graphics take the same route — the composited page arrives as a "
+            "shared GPU texture rather than a host bitmap, so an animated overlay costs no "
+            "per-frame copy either.",
         ],
         earns="It matters on any job whose channel count is set by hardware cost. This is the "
               "capability that changes how many machines a show needs.",
@@ -250,6 +281,7 @@ FEATURES = [
                "What differs between servers is how much of the path avoids host memory, and "
                "this fork's avoids it end to end for the supported codecs.",
         next='A dedicated test for the newest decode route, and an A/B against the established one',
+        covers=['ffmpeg-producer-and-consumer', 'html-gpu-direct'],
         status=PROVEN,
         evidence="decode-cost with engagement required, so a silently-declined route cannot be "
                  "reported as a saving · gpu-direct-parity against a software reference",
@@ -274,11 +306,44 @@ FEATURES = [
                "Blackmagic HyperDeck — do this in hardware and remain the right answer for "
                "guaranteed compliance recording. This removes the need for one per channel.",
         next='Choose the recording quality setting per raster rather than per default',
+        covers=['ffmpeg-producer-and-consumer'],
         status=PROVEN,
         evidence="encode-matrix and encode-parity across four codecs · iso-scaling for capacity",
     ),
     dict(
-        n=10, title="GPU-native intermediate codecs",
+        n=10, title="Instant replay",
+        lead="Record a channel continuously, and play any point back while it is still recording.",
+        img="exec_replay.png",
+        buys=[
+            "A moment can be reviewed, cut and exported without stopping the recording or "
+            "reloading anything — the record keeps running throughout.",
+            "Playback follows the write head, so 'go back twenty seconds' is a command rather "
+            "than a file operation.",
+            "A highlight exports to a file with in and out points while the record continues, "
+            "and a second export is refused outright rather than silently queued.",
+        ],
+        earns="It is the sports and events pattern: a replay, a highlight cut during the show, or "
+              "a compliance review while the show is still running. The alternative is a machine "
+              "that does nothing else.",
+        gap="Nothing tests it, and the behaviour worth testing is the distinguishing one — "
+            "playing a file that is still being written. One machine can check that in seconds: "
+            "record, play LIVE, assert the frame is recent and the picture is not torn. Two "
+            "further gaps sit behind it. Nothing verifies that an interrupted recording leaves a "
+            "readable store, which is the case the segmented design exists for; and there is no "
+            "cost measurement, so there is no guidance on how many replay channels a machine "
+            "sustains.",
+        market="Elsewhere this is EVS at the top of the market and a HyperDeck or a dedicated "
+               "replay controller below it — purpose-built, operationally mature, and a separate "
+               "box. The difference here is that it is a consumer and a producer on a channel "
+               "that is already doing something else.",
+        next='Test LIVE playback of an open recording — the distinguishing behaviour',
+        covers=['replay'],
+        status=UNTESTED,
+        evidence="segmented store, LIVE mode and the asynchronous EXPORT with its 400 EXPORT BUSY "
+                 "refusal all read from the source · no battery records to a replay store",
+    ),
+    dict(
+        n=11, title="GPU-native intermediate codecs",
         lead="ProRes, NotchLC and HAP decoded on the GPU, in the form the mixer wants.",
         img="feature_codec_handoff.png",
         buys=[
@@ -298,12 +363,13 @@ FEATURES = [
                "expected of a modern media server; doing it without a host copy is the "
                "distinguishing part.",
         next='Compare HAP and NotchLC against a reference decoder, and obtain BC7 test material',
+        covers=['cuda-prores', 'cuda-notchlc', 'hap'],
         status=PARTIAL,
         evidence="prores-parity against FFmpeg's CPU decoder · HAP measured between renderers "
                  "only · NotchLC has no reference comparison",
     ),
     dict(
-        n=11, title="SDI output straight from the GPU",
+        n=12, title="SDI output straight from the GPU",
         lead="The composited frame packed and delivered to the card without a host round trip.",
         # NOT decklink/datapath.png -- that one is the engineering diagram, and names
         # cudaMemcpy, SSBOs and AVX2. Correct, and the wrong register for this reader.
@@ -324,12 +390,13 @@ FEATURES = [
         market="Elsewhere this is the same Blackmagic DeckLink hardware other servers use. The "
                "difference is how the frame reaches it — through host memory, or not.",
         next='Drive the multi-port group in test',
+        covers=['decklink-output'],
         status=PROVEN,
         evidence="sdi-output over the 1→4 loopback, re-verified this week: 62.92 dB with a "
                  "placed sub-region, and every documented figure reproduced exactly",
     ),
     dict(
-        n=12, title="Straight to the LED processor",
+        n=13, title="Straight to the LED processor",
         lead="Present a channel to a display output — HDMI or DisplayPort — with no SDI in between.",
         img="exec_direct_display.png",
         buys=[
@@ -351,12 +418,13 @@ FEATURES = [
                "natively. This is table stakes for LED work rather than a differentiator — "
                "which is exactly why it matters that it exists here.",
         next='A Windows 11 machine with an HDR display; then genlock and EDID hardware',
+        covers=['vulkan-output'],
         status=PARTIAL,
         evidence="vulkan-output-signalling 3/3 consistent · the HDR degradation on Windows 10 is "
                  "named by the test rather than hidden",
     ),
     dict(
-        n=13, title="HDR that survives to the wire",
+        n=14, title="HDR that survives to the wire",
         lead="PQ and HLG rendered, and correctly labelled, on SDI and in files and streams.",
         img="exec_hdr.png",
         buys=[
@@ -365,6 +433,8 @@ FEATURES = [
             "Correct signalling on SDI, in recorded files and over SRT/UDP streams — the same "
             "four numbers, spelled the same way in each.",
             "Ingested HDR is read and reported, so an operator can see what arrived.",
+            "A confidence monitor on an ordinary display can tone-map the HDR picture, so an "
+            "operator can judge it without an HDR reference screen in front of them.",
         ],
         earns="It is needed for any HDR deliverable, and for any LED volume being shot for an "
               "HDR finish.",
@@ -376,12 +446,13 @@ FEATURES = [
                "processors both expect it, and getting the label wrong is a delivery failure "
                "rather than a picture one.",
         next='An instrument that reads back what a display actually received',
+        covers=['screen-consumer'],
         status=PARTIAL,
         evidence="signalling on the card · ffprobe read-back per transport · display-side "
                  "read-back has no instrument",
     ),
     dict(
-        n=14, title="More machines, one frame number",
+        n=15, title="More machines, one frame number",
         lead="Frame-accurate playback across servers, with commands scheduled to a target frame.",
         img="exec_cluster.png",
         buys=[
@@ -400,12 +471,13 @@ FEATURES = [
                "PTP rather than something bespoke means it can share a clock with the rest of "
                "the facility.",
         next='A second machine — no development needed',
+        covers=['cluster-sync'],
         status=UNTESTED,
         evidence="the frame-number arithmetic is verified against its own model · no multi-machine "
                  "run exists",
     ),
     dict(
-        n=15, title="Automation and lighting",
+        n=16, title="Automation and lighting",
         lead="Keyframed mixer state, and house lighting driven from the picture itself.",
         img="exec_lighting.png",
         buys=[
@@ -425,12 +497,48 @@ FEATURES = [
                "automation is standard in media servers — the unusual part here is how much of "
                "the mixer is addressable.",
         next='A test for the keyframe system (8 commands, 184 fields)',
+        covers=['keyframes', 'dmx-sacn-artnet'],
         status=PARTIAL,
         evidence="dmx battery covers the lighting transports · keyframes: 8 commands, 184 fields, "
                  "no coverage",
     ),
     dict(
-        n=16, title="Fitting into the room",
+        n=17, title="Audio and timecode into the facility",
+        lead="Many channels out to professional interfaces, and the building's own clock in.",
+        img="exec_audio.png",
+        buys=[
+            "Multi-channel audio out to whatever the facility already runs — a Dante virtual "
+            "soundcard, a MADI or RME interface, any USB or PCIe device — with per-channel "
+            "mapping rather than a fixed stereo pair.",
+            "The audio device can act as the channel's clock, so the picture stays locked to it "
+            "instead of drifting against it.",
+            "Timecode read from an audio input becomes a process-wide clock: recordings are "
+            "stamped with house time, tracking samples align to it, and it reports whether it is "
+            "on real timecode or has fallen back to the system clock.",
+        ],
+        earns="It matters wherever this machine has to live inside an existing facility rather "
+              "than beside one — a Dante plant, a house timecode distribution, an audio "
+              "department that expects discrete channels rather than a stereo mix.",
+        gap="ASIO is the caveat, and it is a build question rather than a development one. The "
+            "code is complete and compiled OUT of the current binary, because the Steinberg SDK "
+            "was absent when this was configured — confirmed in the build cache and in the "
+            "executable's symbols. Enabling it is a free download and a rebuild. Until then a "
+            "Dante virtual soundcard is reachable over WASAPI rather than its own driver, which "
+            "costs latency. Neither half is tested, and one defect is recorded: a frame-number "
+            "call site assumes 25fps and is wrong at any other rate.",
+        market="Elsewhere, Dante is Audinate's and is the de facto standard for facility audio, "
+               "ASIO is Steinberg's low-latency interface, and LTC is SMPTE 12M — all of them "
+               "things a building already speaks. Many media servers offer a stereo pair and "
+               "nothing else.",
+        next='Rebuild with the ASIO SDK, then cover the enumeration and one device open',
+        covers=['portaudio', 'ltc-timecode'],
+        status=UNTESTED,
+        evidence="PortAudio consumer and producer with channel mapping and shared ASIO capture, "
+                 "and the LTC clock with three dependents, all read from the source · "
+                 "PA_USE_ASIO=OFF in this build · no battery",
+    ),
+    dict(
+        n=18, title="Fitting into the room",
         lead="Texture sharing, plug-in hosting, GStreamer pipelines and remote tile-wall input.",
         img="gstreamer_caspar_routes.png",
         buys=[
@@ -440,6 +548,8 @@ FEATURES = [
             "can run live.",
             "GStreamer pipelines in and out, which covers the transports a broadcast facility "
             "already runs.",
+            "A remote source can arrive as a layer over the network, for a wall driven from "
+            "somewhere other than this machine.",
         ],
         earns="It matters on any job where this is one tool among several. The alternative is a "
               "capture card and a conversion between every pair of applications.",
@@ -451,6 +561,7 @@ FEATURES = [
                "Resolve and Nuke; ISF is Vidvox's shader format. Speaking the standards that "
                "already exist is the whole feature.",
         next='Cover texture sharing in both directions, and the two plug-in hosts',
+        covers=['spout', 'isf-and-openfx', 'gstreamer', 'remotewall'],
         status=PARTIAL,
         evidence="gstreamer 14/14 both renderers · spout, ISF and OpenFX: no coverage",
     ),

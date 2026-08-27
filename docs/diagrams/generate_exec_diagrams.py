@@ -5,13 +5,19 @@ follow `generate_diagrams.py`, so these sit beside the existing 42 figures rathe
 introducing a second look. What differs is what they show: these answer "what does this buy
 us and when", where the others answer "how does it work".
 
-WHY ONLY SIX FEATURE FIGURES. Most features in the brief already have a dark-themed diagram
+WHY ONLY EIGHT FEATURE FIGURES. Most features in the brief already have a dark-themed diagram
 in `docs/images/` -- ICVFX, LED tiling, OCIO stages, the decode and encode routes, projection
 geometry, tracking, previz, grading. Drawing new ones for those would be a second copy of a
-picture, which is the same duplication this doc tree keeps paying for. These six are the
+picture, which is the same duplication this doc tree keeps paying for. These eight are the
 features that had no figure at all.
 
-Eight files, not six: `exec_scope.png` is the scope overview a brief needs and the docs do not,
+`replay()` and `audio()` were added last, and why they were missing is worth recording: the
+brief's capability list was assembled from the diagram inventory rather than from
+`docs/features/`, so four capabilities with no existing figure fell straight out -- replay,
+PortAudio, LTC and remotewall, every one of them `Coverage: none`. Deriving a list of features
+from a list of pictures selects for what was easy to illustrate.
+
+Ten files, not eight: `exec_scope.png` is the scope overview a brief needs and the docs do not,
 `exec_to_production.png` belongs to the closing argument rather than to a feature, and
 `exec_cover_bg.png` is not a diagram at all -- it is a dithered wash, because the CSS gradient
 it replaces banded when Chrome rasterised it for print. See `cover_bg()` for why that cannot be
@@ -118,9 +124,11 @@ def scope():
         (28.6, "Virtual production", ACCENT,
          ["ICVFX inner frustum", "Curved / dome warp", "Camera tracking", "3D pre-visualisation"]),
         (52.2, "Capacity", WARNING,
-         ["GPU-direct playback", "GPU-direct recording", "CUDA ProRes + NotchLC", "HAP, 5 variants"]),
+         ["GPU-direct playback", "GPU-direct recording", "CUDA ProRes + NotchLC",
+          "HAP, 5 variants", "Instant replay"]),
         (75.8, "Reach", DANGER,
-         ["Direct-to-LED output", "Multi-port SDI", "Multi-machine sync", "Lighting from content"]),
+         ["Direct-to-LED output", "Multi-port SDI", "Multi-machine sync",
+          "Lighting from content", "Facility audio + LTC"]),
     ]
     # Width 19.2 rather than 21: at 21 the fourth column ran to x=100.5 and its right border
     # was CLIPPED by the axis. `layout_check` tests overlaps, not bounds, so nothing caught it
@@ -130,8 +138,8 @@ def scope():
         lay.text(f"h{x}", x + 9.6, 77, name, parent=f"c{x}", color=colour, size=10,
                  weight="bold", ha="center")
         for i, it in enumerate(items):
-            lay.text(f"i{x}{i}", x + 1.4, 69 - i * 9.5, "•  " + it, parent=f"c{x}",
-                     color=TEXT, size=8.6)
+            lay.text(f"i{x}{i}", x + 1.4, 69 - i * 8.6, "•  " + it, parent=f"c{x}",
+                     color=TEXT, size=8.4)
         lay.arrow((x + 9.6, 26), (x + 9.6, 21.4), color=BORDER, lw=1.1)
 
     lay.check(name="scope")
@@ -441,6 +449,146 @@ def to_production():
     _save(fig, "exec_to_production.png")
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+def replay():
+    """Instant replay: playing back a recording that is still being written.
+
+    `features/replay.md` §7 deliberately deferred a diagram, on the grounds that it would
+    illustrate timing nothing measures. That reasoning holds for the feature document; it does
+    not hold here, because the brief states readiness on every page and this one is marked
+    unmeasured. The figure shows the STRUCTURE -- write head, read head, segment boundaries --
+    and says on its face that the timing is not measured, so it claims no more than is known.
+    """
+    lay, fig, ax = _new((13, 6.4))
+    _head(lay, "Reviewing a moment without stopping the record",
+          "the read head follows the write head, so there is nothing to stop and nothing to reload")
+
+    lay.panel("src", 3, 70, 20, 15, fc=PANEL, ec=BORDER)
+    lay.text("srct", 13, 79.5, "Channel", parent="src", color=TEXT, size=9.5, weight="bold",
+             ha="center")
+    lay.text("srcs", 13, 74, "live output", parent="src", color=MUTED, size=8.2, ha="center")
+    lay.arrow((23, 77.5), (31, 77.5), color=BORDER)
+    lay.panel("rec", 31, 70, 22, 15, fc="#16301b", ec=SUCCESS_T, lw=1.5)
+    lay.text("rect", 42, 79.5, "Recording", parent="rec", color=SUCCESS_T, size=9.5,
+             weight="bold", ha="center")
+    lay.text("recs", 42, 74, "continuous, never stops", parent="rec", color=TEXT, size=8.2,
+             ha="center")
+
+    # the store: segments, with the newest still open
+    lay.panel("store", 3, 34, 94, 24, fc=PANEL, ec=BORDER_SUBTLE, blocking=False)
+    lay.text("storet", 6, 54, "Segmented store", parent="store", color=TITLE, size=9.5,
+             weight="bold")
+    seg_w, seg_x0 = 11.4, 6.0
+    for i in range(7):
+        x = seg_x0 + i * (seg_w + 1.6)
+        open_seg = i == 6
+        lay.panel(f"sg{i}", x, 38, seg_w, 10,
+                  fc="#22303f" if not open_seg else "#2c3a22",
+                  ec=SUCCESS_T if open_seg else BORDER_SUBTLE, lw=1.5 if open_seg else 1.0)
+        lay.text(f"sgl{i}", x + seg_w / 2, 43, "open" if open_seg else f"seg {i + 1}",
+                 parent=f"sg{i}", color=SUCCESS_T if open_seg else MUTED, size=7.8,
+                 ha="center")
+    write_x = seg_x0 + 6 * (seg_w + 1.6) + seg_w / 2
+    lay.arrow((write_x, 62), (write_x, 48.6), color=SUCCESS_T, lw=1.6)
+    lay.text("wh", write_x, 65.5, "write head", parent=None, color=SUCCESS_T, size=8.4,
+             ha="center", weight="bold")
+
+    read_x = seg_x0 + 3 * (seg_w + 1.6) + seg_w / 2
+    lay.arrow((read_x, 24), (read_x, 37.4), color=ACCENT_HOVER, lw=1.6)
+    lay.panel("play", read_x - 16, 10, 32, 13, fc=PANEL, ec=ACCENT_HOVER, lw=1.5)
+    lay.text("playt", read_x, 19, "Playback — any point, any speed", parent="play",
+             color=TITLE, size=9, weight="bold", ha="center")
+    lay.text("plays", read_x, 13.8, "LIVE mode tracks the write head", parent="play",
+             color=TEXT, size=8.2, ha="center")
+
+    lay.panel("exp", 70, 10, 27, 13, fc=PANEL, ec=WARNING, lw=1.4)
+    lay.text("expt", 83.5, 19, "Export a highlight", parent="exp", color=WARNING_T, size=9,
+             weight="bold", ha="center")
+    lay.text("exps", 83.5, 13.8, "in and out points, to a file", parent="exp", color=TEXT,
+             size=8.2, ha="center")
+    lay.arrow((83.5, 37.4), (83.5, 23.6), color=WARNING_T, lw=1.4)
+
+    lay.text("note", 50, 3.5,
+             "Segment boundaries are what make reading an open recording safe. The timing of that "
+             "is not yet measured.",
+             parent=None, color=MUTED, size=8.6, ha="center", style="italic")
+    lay.check(name="replay")
+    _save(fig, "exec_replay.png")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+def audio():
+    """Multi-channel audio out to pro interfaces, and house timecode in.
+
+    ASIO IS DRAWN AMBER ON PURPOSE. The code is complete and correct, and `PA_USE_ASIO` is OFF
+    in this build because the Steinberg SDK was not present at configure time -- verified:
+    `ASIOSDK_ROOT_DIR-NOTFOUND` in CMakeCache and zero ASIO strings in casparcg.exe. Drawing it
+    green would claim a route the shipped binary does not have.
+    """
+    lay, fig, ax = _new((13, 6.6))
+    _head(lay, "The route in each direction",
+          "green is available in the current build — amber needs a rebuild, not development")
+
+    lay.panel("ch", 3, 58, 21, 26, fc=PANEL, ec=BORDER)
+    lay.text("cht", 13.5, 79, "Channel audio", parent="ch", color=TEXT, size=9.5,
+             weight="bold", ha="center")
+    lay.text("chs", 13.5, 70,
+             "as many as the device offers,\nmapped per output",
+             parent="ch", color=MUTED, size=8.2, ha="center")
+
+    lay.arrow((24, 73), (33, 73), color=BORDER)
+    lay.panel("pa", 33, 58, 24, 26, fc="#22303f", ec=ACCENT_HOVER, lw=1.6)
+    lay.text("pat", 45, 79, "PortAudio", parent="pa", color=TITLE, size=9.8,
+             weight="bold", ha="center")
+    apis = [("WASAPI", SUCCESS_T), ("DirectSound", SUCCESS_T), ("MME", SUCCESS_T),
+            ("ASIO — needs a rebuild", WARNING_T)]
+    for i, (nm, col) in enumerate(apis):
+        lay.text(f"api{i}", 35.2, 73.6 - i * 3.6, "• " + nm, parent="pa", color=col, size=7.8)
+
+    lay.arrow((57, 73), (66, 73), color=BORDER)
+    lay.panel("dev", 66, 58, 31, 26, fc=PANEL, ec=BORDER, blocking=False)
+    lay.text("devt", 81.5, 79, "Whatever the facility runs", parent="dev", color=TEXT,
+             size=9.3, weight="bold", ha="center")
+    for i, nm in enumerate(["Dante Virtual Soundcard", "MADI / RME, 64 channels",
+                            "any USB or PCIe interface"]):
+        lay.text(f"dv{i}", 68.2, 73.6 - i * 3.6, "• " + nm, parent="dev", color=MUTED,
+                 size=7.9)
+
+    # the timecode half
+    lay.panel("ltc", 3, 22, 21, 24, fc=PANEL, ec=WARNING, lw=1.4)
+    lay.text("ltct", 13.5, 40, "House timecode", parent="ltc", color=WARNING_T, size=9.5,
+             weight="bold", ha="center")
+    lay.text("ltcs", 13.5, 31,
+             "LTC on an audio input,\nor the system clock",
+             parent="ltc", color=MUTED, size=8.2, ha="center")
+    lay.arrow((24, 34), (33, 34), color=WARNING_T)
+    lay.panel("clk", 33, 22, 24, 24, fc="#241f14", ec=WARNING, lw=1.6)
+    lay.text("clkt", 45, 40, "One clock", parent="clk", color=WARNING_T, size=9.8,
+             weight="bold", ha="center")
+    lay.text("clks", 45, 30.5,
+             "process-wide, and it\nreports which source\nit is actually using",
+             parent="clk", color=TEXT, size=8.2, ha="center")
+    lay.arrow((57, 34), (66, 34), color=WARNING_T)
+    lay.panel("use", 66, 22, 31, 24, fc=PANEL, ec=BORDER, blocking=False)
+    lay.text("uset", 81.5, 40, "Three things already use it", parent="use", color=TEXT,
+             size=9.3, weight="bold", ha="center")
+    for i, nm in enumerate(["recordings stamped with it",
+                            "tracking samples aligned to it",
+                            "reported back on query"]):
+        lay.text(f"us{i}", 68.2, 34.4 - i * 3.6, "• " + nm, parent="use", color=MUTED,
+                 size=7.9)
+
+    lay.text("note", 50, 9,
+             "The audio consumer also becomes the channel's clock, which is how the picture stays "
+             "locked to the audio device rather than drifting against it.",
+             parent=None, color=TEXT, size=8.6, ha="center")
+    lay.text("note2", 50, 3.5,
+             "Neither half is covered by a test, and ASIO is not compiled into the current build.",
+             parent=None, color=WARNING_T, size=8.4, ha="center", style="italic")
+    lay.check(name="audio")
+    _save(fig, "exec_audio.png")
+
+
 if __name__ == "__main__":
     scope()
     direct_display()
@@ -448,5 +596,7 @@ if __name__ == "__main__":
     hdr()
     multiport()
     lighting()
+    replay()
+    audio()
     cover_bg()
     to_production()
