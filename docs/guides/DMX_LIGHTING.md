@@ -27,6 +27,7 @@ and stage wash lighting.
 3. [Fixture Definition](#3-fixture-definition)
 4. [Fixture Types](#4-fixture-types)
 5. [Sampling Regions & Coordinates](#5-sampling-regions--coordinates)
+5b. [Adding a DMX consumer over AMCP](#5b-adding-a-dmx-consumer-over-amcp)
 6. [ArtNet Reference](#6-artnet-reference)
 7. [sACN Reference](#7-sacn-reference)
 8. [Protocol Comparison](#8-protocol-comparison)
@@ -250,6 +251,46 @@ Example: A strip of 8 RGB fixtures across the top edge of a 1920×1080 frame
   own `<fixture>` element.
 - Overlap slightly between adjacent fixture regions if you want smooth
   colour transitions across panel seam lines.
+
+---
+
+## 5b. Adding a DMX consumer over AMCP
+
+Undocumented until 2026-08-27: **both consumers have a runtime factory, and fixtures can be
+declared on the command line.** Everything the XML form does is reachable from `ADD`, which is what
+you want for a rig that changes between rehearsals without a restart.
+
+```
+ADD 1 ARTNET UNIVERSE 0 HOST 192.168.1.50 PORT 6454 REFRESH-RATE 25     FIXTURE RGBW 1  8 4 0.0 0.0 0.25 1.0 0     FIXTURE RGBW 33 8 4 0.75 0.0 0.25 1.0 0
+
+ADD 1 SACN UNIVERSE 1 PRIORITY 120 MULTICAST-TTL 64 REFRESH-RATE 25     FIXTURE DIMMER 1 12 1 0.0 0.9 1.0 0.1 0
+
+REMOVE 1 ARTNET
+```
+
+| parameter | ArtNet | sACN | notes |
+| :--- | :---: | :---: | :--- |
+| `UNIVERSE` | yes | yes | sACN validates 1-63999 and refuses outside it |
+| `HOST` | yes | yes | sACN: omit for multicast |
+| `PORT` | yes | yes | |
+| `PRIORITY` | — | yes | validated 1-200 |
+| `MULTICAST-TTL` | — | yes | |
+| `REFRESH-RATE` | yes | yes | **must be ≥ 1**, refused otherwise. Note the hyphen — the XML element is `<refresh-rate>` and the AMCP keyword matches it |
+| `FIXTURE` | yes | yes | **repeatable**, nine arguments each |
+
+**`FIXTURE` takes exactly nine arguments, in this order:**
+
+```
+FIXTURE <type> <start_addr> <count> <channels> <x> <y> <width> <height> <rotation>
+```
+
+`<type>` is `DIMMER`, `RGB` or `RGBW`, case-insensitive; anything else is refused by name.
+`<start_addr>` is **1-based** and must be ≥ 1 — it is converted to the 0-based wire address
+internally, so use the same number your console shows. Fewer than nine arguments after a `FIXTURE`
+token is refused with the argument list in the message.
+
+**The 8-bit requirement applies here too**, and it is checked before anything else: adding either
+consumer to a 16-bit channel throws *"only supports 8-bit color depth"*.
 
 ---
 
