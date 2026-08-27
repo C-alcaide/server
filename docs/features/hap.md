@@ -3,6 +3,7 @@
 > **State:** shipped
 > **Modules:** `src/modules/hap` (producer; `cpu`, `gl`, `snappy`, `util` subsystems)
 > **Commands:** none of its own — a plain `PLAY` of a HAP file
+> **Architecture:** [`../architecture/HAP_DECODE_ROUTES.md`](../architecture/HAP_DECODE_ROUTES.md)
 > **Coverage:** `loop-boundary`, `mixer-parity --codec hap_q --decoder hap_native`
 
 Plays HAP, HAP Alpha, HAP Q and HAP Q Alpha by handing the compressed DXT blocks straight to the

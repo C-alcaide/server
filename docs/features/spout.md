@@ -3,6 +3,7 @@
 > **State:** shipped, unmeasured
 > **Modules:** `src/modules/spout` (producer and consumer)
 > **Commands:** none of its own — reached by producer syntax on `PLAY` and by consumer name on `ADD`
+> **Guide:** [`../guides/SPOUT.md`](../guides/SPOUT.md)
 > **Coverage:** **none**
 
 Shares frames with other Spout-aware Windows applications over a shared DirectX texture, with no

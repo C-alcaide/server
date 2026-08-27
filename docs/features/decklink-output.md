@@ -3,6 +3,7 @@
 > **State:** shipped
 > **Module:** `src/modules/decklink` — **2,382 lines** different from upstream across 37 files
 > **Commands:** no dedicated `MIXER` command; a consumer name plus configuration
+> **Guide:** [`../guides/DECKLINK_OUTPUT.md`](../guides/DECKLINK_OUTPUT.md)
 > **Coverage:** `sdi-output`, `sdi-input`, `signalling`, `anc-check`, `decklink-input-cost`,
 > `consumer-scaling`
 

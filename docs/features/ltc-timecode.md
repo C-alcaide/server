@@ -3,6 +3,7 @@
 > **State:** shipped, unmeasured
 > **Modules:** `src/modules/ltc`
 > **Commands:** 2 (`LTC LOAD`, `INFO LTC`)
+> **Guide:** [`../guides/LTC_TIMECODE.md`](../guides/LTC_TIMECODE.md)
 > **Coverage:** **none**
 
 Reads linear timecode from an audio input and makes it available process-wide as a clock, so
