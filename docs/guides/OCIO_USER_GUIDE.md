@@ -140,7 +140,7 @@ The intent is that nobody types one — a client populates its controls from the
 INFO OCIO              availability, OCIO version, the loaded config URI, and how many
                        colour spaces and displays it has
 INFO OCIO COLORSPACES  every colour space name in the loaded config
-INFO OCIO DISPLAYS     every display, with its views nested underneath
+INFO OCIO DISPLAYS     # every display, with its views nested underneath
 INFO OCIO LOOKS        every look (LMT) name in the loaded config
 ```
 
@@ -194,8 +194,8 @@ Both arguments are required and both must be quoted.
 
 ```
 OCIO_LOOK 1 "ACES 1.3 Reference Gamut Compression"
-OCIO_LOOK 1 "-ACES 1.3 Reference Gamut Compression"   invert it
-OCIO_LOOK 1 "first,second"                            chain, in order
+OCIO_LOOK 1 "-ACES 1.3 Reference Gamut Compression"   # invert it
+OCIO_LOOK 1 "first,second"                            # chain, in order
 OCIO_LOOK 1 NONE                                      clear (OFF also accepted)
 OCIO_LOOK 1                                           query (INFO also accepted)
 ```
@@ -243,7 +243,7 @@ command from one that returned `202` and did nothing.
 ### 5.4 `AMF <channel>-<layer>` — configure everything from a show's metadata
 
 ```
-AMF 1-10 "show.amf"        input transform, look and display, from one file
+AMF 1-10 "show.amf"        # input transform, look and display, from one file
 ```
 
 An **ACES Metadata File** is the document a production carries to say which input transform,
@@ -381,6 +381,13 @@ uniform and never ran.
 | `404 OCIO_DISPLAY ERROR` | `OCIO_DISPLAY` | that display/view pair is not in the config — check quoting, then `INFO OCIO DISPLAYS` |
 | `403 OCIO_DISPLAY ERROR` | `OCIO_DISPLAY` | the channel does not composite in the working space — add `<working-space-composite>` and its two prerequisites (§3) |
 | `501 OCIO_DISPLAY FAILED` | `OCIO_DISPLAY` | built without OCIO support |
+| `404 OCIO_LOOK ERROR` | `OCIO_LOOK` | a **single** name that is not a look in the config — `INFO OCIO LOOKS` lists them |
+| `404 OCIO_LOOK ERROR` | `OCIO_LOOK` | the look exists but no GPU transform could be built with it. **This is also how a typo inside an expression surfaces**: `-name` and comma-chained forms skip the name check (only the build can judge them), so a misspelling in a chain reports *"exists but no GPU transform could be built"* rather than *"is not a look"* |
+| `403 OCIO_LOOK ERROR` | `OCIO_LOOK` | the channel does not composite in the working space — same prerequisite as `OCIO_DISPLAY` (§3) |
+| `403 OCIO_LOOK ERROR` | `OCIO_LOOK` | **no display transform is set** — a look rides on the display processor, so `OCIO_DISPLAY` must come first (§5) |
+| `400 AMF FAILED` | `AMF` | no file given |
+| `404 AMF ERROR` | `AMF` | the file could not be read; or it carries no `inputTransform`, `lookTransform` or `outputTransform`; or one of those ids resolves to nothing in the config — to no colour space, to no look, or to a display/view pair that is not there. The log names which |
+| `501 AMF FAILED` | `AMF` | built without OCIO support |
 
 Every refusal also writes a `[ocio]` warning naming the cause. When a command returns a code
 you did not expect, the log line is more specific than the code.
@@ -410,10 +417,10 @@ un-tone-mapped for a downstream grade.
 ```
 
 ```
-INFO OCIO COLORSPACES                                   discover the exact spelling
+INFO OCIO COLORSPACES                                   # discover the exact spelling
 PLAY 1-1 DECKLINK DEVICE 2
 MIXER 1-1 OCIO "ARRI LogC3 (EI800)"                     source → ACEScg
-MIXER 1-1 EXPOSURE 1.2                                  a stop and a bit, in the working space
+MIXER 1-1 EXPOSURE 1.2                                  # a stop and a bit, in the working space
 OCIO_DISPLAY 1 "Gamma 2.2 Rec.709 - Display" "ACES 2.0 - SDR 100 nits (Rec.709)"
 ```
 

@@ -1015,7 +1015,7 @@ ProRes 4444 exports are — declare it:
 ```
 PLAY 1-1 "clip"                  straight (default)
 PLAY 1-1 "clip" PREMULTIPLIED    the RGB already carries its alpha
-PLAY 1-1 "clip" STRAIGHT         explicit
+PLAY 1-1 "clip" STRAIGHT         # explicit
 ```
 
 `PREMULTIPLIED` reproduces the pre-2026-08-20 rendering exactly — measured, the old model
@@ -1294,7 +1294,7 @@ and the variable-length data model end to end.
 ```
 MIXER 1-1 GRADE_NODE NODE <n> <cx> <cy> <rx> <ry> <feather> <exposure> [<invert>]
 MIXER 1-1 GRADE_NODE NODE <n> CDL <sR sG sB> <oR oG oB> <pR pG pB> <sat>
-MIXER 1-1 GRADE_NODE CLEAR                     drop the whole chain
+MIXER 1-1 GRADE_NODE CLEAR                     # drop the whole chain
 MIXER 1-1 GRADE_NODE                           query
 ```
 

@@ -1090,8 +1090,8 @@ Both ship and both were absent from this guide until 2026-08-27; the reference i
 `../features/camera-tracking.md`.
 
 ```
-TRACKING <n> WORLDALIGN ...     align the tracker's world origin to the stage's
-TRACKING <n> ZOOM_LUT ...       map the lens's raw zoom reading to a real focal length
+TRACKING <n> WORLDALIGN ...     # align the tracker's world origin to the stage's
+TRACKING <n> ZOOM_LUT ...       # map the lens's raw zoom reading to a real focal length
 TRACKING <n> POSITION_SCALE ... scale incoming translation
 ```
 
