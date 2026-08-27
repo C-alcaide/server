@@ -605,12 +605,27 @@ class image_renderer
                 // chain has something of its own to work on, and the result is then
                 // composited normally.
                 //
-                // ⚠ PROTOTYPE LIMITATION: that intermediate changes how this layer meets
-                // the composite. `keyer`, `local_key`/`layer_key` and a non-normal blend
-                // mode all interact with the target during the item draw, and routing
-                // through an attachment first is only equivalent for an ordinary opaque
-                // layer. Getting this right means running the chain inside the layer draw
-                // rather than after it -- see the study's open questions.
+                // Once feared to break the composite, MEASURED NOT TO. The worry was that
+                // routing through an attachment changes how this layer meets the target --
+                // `keyer`, the keys and a non-normal blend mode all interact with it. Working
+                // through which of those can actually co-occur with a node graph:
+                //
+                //   * a non-normal blend mode is a LAYER property, and such a layer already
+                //     renders into its own `layer_texture` before being composited against the
+                //     real target with that mode. The node attachment nests inside that and is
+                //     invisible to it.
+                //   * `keyer::additive` is set only in the `is_mix` branch above; the node path
+                //     is the final `else`, so the two cannot co-occur.
+                //   * `local_key`/`layer_key` only scale the item's alpha -- they mask the item,
+                //     not the composite.
+                //
+                // What is left is an ordinary item with the linear keyer and normal blend, where
+                // `fore + (1-a)*0` into the attachment followed by `fore + (1-a)*target` at the
+                // composite is algebraically identical to the direct draw.
+                //
+                // Guarded by `grade-window`'s composite check: a two-layer scene under a
+                // `screen` blend, sampled outside the window where the node does nothing, with
+                // and without a graph. 0.00 LSB on both mixers.
                 node_texture = ogl_->create_texture(
                     target_texture->width(), target_texture->height(), 4, depth_, true, render_format_);
                 draw_params.background = node_texture;

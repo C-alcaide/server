@@ -1241,19 +1241,14 @@ The query returns one line per node — `index enable cx cy rx ry feather exposu
 `node[n].window.field`, which the tween system cannot express. Named as an open question in the
 study rather than half-built.
 
-**Prototype limitation, stated more precisely than the code comment does.** An item with enabled
-nodes renders into a private attachment first, so the layer blends against **black** rather than
-against the scene. Traced in `../plans/GRADING_NODE_GRAPH_STUDY.md` §11:
+**Safe with blend modes and keys — measured, not assumed.** The mixers used to warn that routing a
+node-enabled item through a private attachment changed how it met the composite. It does not, and
+`../plans/GRADING_NODE_GRAPH_STUDY.md` §11 records why: a non-normal blend mode is a **layer**
+property, applied after the layer's items composite, against the real target; `keyer additive`
+belongs to the mix branch, which a node graph cannot reach; and the keys only scale the item's
+alpha. Measured at **0.00 LSB on both mixers** and now guarded by a regression check.
 
-| | with a node graph |
-| :--- | :--- |
-| non-normal blend mode (`SCREEN`, `MULTIPLY`, …) | **wrong** — computed against black, then normal-composited |
-| `keyer additive` | **wrong** — the additive composite is silently discarded |
-| `local_key` / `layer_key` | fine — they scale the item's alpha, not the composite |
-| ordinary layer, normal keyer | **exact** — algebraically identical to a direct draw |
-
-So a node chain is safe on an ordinary layer and **not** safe combined with a non-normal blend mode
-or the additive keyer. The mixers' own comment says all three break; two of them do not.
+The real limits are the ordinary ones: one window shape, one operation, frame space only.
 
 **Coverage:** the `grade-window` battery, which is spatial by construction rather than a flat-patch
 check — a flat patch is invariant under any mask covering it, so a single-patch battery could not

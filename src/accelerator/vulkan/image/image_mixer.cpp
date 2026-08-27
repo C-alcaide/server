@@ -637,9 +637,27 @@ class image_renderer
             // straight into the target, no attachment.
             std::shared_ptr<texture> node_texture;
             if (enabled_nodes > 0) {
-                // ⚠ Same prototype limitation as the OpenGL side: routing the item through
-                // a private attachment changes how it meets the composite, so keyer, keys
-                // and non-normal blend modes are not exercised by this slice.
+                // Once feared to break the composite, MEASURED NOT TO. The worry was that
+                // routing through an attachment changes how this layer meets the target --
+                // `keyer`, the keys and a non-normal blend mode all interact with it. Working
+                // through which of those can actually co-occur with a node graph:
+                //
+                //   * a non-normal blend mode is a LAYER property, and such a layer already
+                //     renders into its own `layer_texture` before being composited against the
+                //     real target with that mode. The node attachment nests inside that and is
+                //     invisible to it.
+                //   * `keyer::additive` is set only in the `is_mix` branch above; the node path
+                //     is the final `else`, so the two cannot co-occur.
+                //   * `local_key`/`layer_key` only scale the item's alpha -- they mask the item,
+                //     not the composite.
+                //
+                // What is left is an ordinary item with the linear keyer and normal blend, where
+                // `fore + (1-a)*0` into the attachment followed by `fore + (1-a)*target` at the
+                // composite is algebraically identical to the direct draw.
+                //
+                // Guarded by `grade-window`'s composite check: a two-layer scene under a
+                // `screen` blend, sampled outside the window where the node does nothing, with
+                // and without a graph. 0.00 LSB on both mixers.
                 node_texture           = pass->create_attachment();
                 draw_params.background = node_texture;
             } else {
