@@ -34,6 +34,7 @@ script cannot resolve is reported at the end rather than silently emitted as a d
 the markdown tree has zero broken links and the HTML must not introduce any.
 
 Run:  python docs/build_html.py
+      python docs/build_html.py --watch          (rebuild whenever a .md changes)
       python docs/build_html.py --no-mermaid     (skip rendering; keep the fenced source)
 """
 import hashlib
@@ -475,8 +476,66 @@ and no network.</p>"""
     return out
 
 
-def main():
-    mermaid_enabled = "--no-mermaid" not in sys.argv
+def sources():
+    """Every file a rebuild depends on: the markdown, and this script."""
+    out = [os.path.abspath(__file__)]
+    for dp, dn, fns in os.walk(HERE):
+        dn[:] = [d for d in dn if d not in ("_mermaid_cache", "images", "diagrams")]
+        out += [os.path.join(dp, f) for f in fns if f.endswith(".md")]
+    return out
+
+
+def fingerprint():
+    """mtime+size per source. Cheap enough to poll: ~100 stat calls."""
+    fp = {}
+    for p in sources():
+        try:
+            st = os.stat(p)
+            fp[p] = (st.st_mtime, st.st_size)
+        except OSError:
+            pass
+    return fp
+
+
+def watch(mermaid_enabled):
+    """Rebuild on every change until interrupted.
+
+    A poll rather than a filesystem-watch API: 100 stat calls is nothing next to the 2.4 s
+    rebuild, and it needs no third-party package -- which is the same reason this script uses
+    `markdown` and nothing else. A full rebuild rather than an incremental one for the same
+    reason: at 2.4 s warm, the bookkeeping to work out which page changed would cost more
+    than it saves and could get the answer wrong, which an incremental build does silently.
+    """
+    import time
+    # Line-buffer stdout for the whole session. Python block-buffers when piped, so
+    # `--watch | tee build.log` showed nothing at all until the process died -- and a watch
+    # tool whose progress is invisible is worse than no watch tool.
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except (AttributeError, OSError):
+        pass
+    print("watching docs/**/*.md — Ctrl-C to stop")
+    last = None
+    while True:
+        fp = fingerprint()
+        if fp != last:
+            if last is not None:
+                changed = sorted(
+                    os.path.relpath(p, HERE) for p in set(fp) ^ set(last)
+                ) or sorted(os.path.relpath(p, HERE) for p in fp
+                            if last.get(p) != fp[p])
+                print(f"\n[{time.strftime('%H:%M:%S')}] changed: "
+                      + ", ".join(changed[:4]) + (" …" if len(changed) > 4 else ""))
+            t0 = time.time()
+            rc = build_all(mermaid_enabled, quiet=last is not None)
+            print(f"[{time.strftime('%H:%M:%S')}] "
+                  + ("rebuilt" if rc == 0 else "rebuilt WITH PROBLEMS — see above")
+                  + f" in {time.time() - t0:.1f}s")
+            last = fp
+        time.sleep(1.0)
+
+
+def build_all(mermaid_enabled, quiet=False):
     md = markdown.Markdown(extensions=["tables", "fenced_code", "attr_list", "sane_lists",
                                        "toc", "md_in_html"])
     link_map = build_link_map()
@@ -486,23 +545,35 @@ def main():
     for spec in PAGES:
         written.append(build_page(spec, md, link_map, mermaid_enabled, report))
 
-    total = 0
-    for p in written:
-        kb = os.path.getsize(p) // 1024
-        total += kb
-        print(f"wrote {os.path.relpath(p, HERE):<20} {kb:>5} KB")
-    print(f"\n{report['docs']} documents, {total} KB total")
-    print(f"mermaid: {report['rendered']} rendered to inline SVG, "
-          f"{report['unrendered']} left as source")
+    if not quiet:
+        total = 0
+        for p in written:
+            kb = os.path.getsize(p) // 1024
+            total += kb
+            print(f"wrote {os.path.relpath(p, HERE):<20} {kb:>5} KB")
+        print(f"\n{report['docs']} documents, {total} KB total")
+        print(f"mermaid: {report['rendered']} rendered to inline SVG, "
+              f"{report['unrendered']} left as source")
     if report["missing"]:
-        print(f"\nMISSING ({len(report['missing'])}): {report['missing']}")
+        print(f"MISSING ({len(report['missing'])}): {report['missing']}")
     if report["unresolved"]:
         uniq = sorted(set(report["unresolved"]))
-        print(f"\nUNRESOLVED LINKS ({len(uniq)}) — these became '#':")
+        print(f"UNRESOLVED LINKS ({len(uniq)}) — these became '#':")
         for u in uniq:
             print(f"  {u}")
         return 1
     return 0
+
+
+def main():
+    mermaid_enabled = "--no-mermaid" not in sys.argv
+    if "--watch" in sys.argv:
+        try:
+            watch(mermaid_enabled)
+        except KeyboardInterrupt:
+            print("\nstopped")
+        return 0
+    return build_all(mermaid_enabled)
 
 
 if __name__ == "__main__":
