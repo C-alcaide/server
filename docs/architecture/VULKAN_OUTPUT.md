@@ -86,7 +86,7 @@ The module includes automatic recovery for common display configuration issues:
 flowchart TB
     A["1 · vulkan_output_consumer<br/>present loop · swapchain · hot-plug"] --> B["2 · vk_device_manager<br/>shared VkDevice per GPU"]
     B --> C["3 · gpu_frame_cache (dedup transfer)"]
-    C --> D["4 · color_convert_pipeline (mixer does convert)"]
+    C --> D["4 · color_convert_pipeline<br/><b>DISABLED</b> — the mixer converts"]
     D --> E["5 · vulkan_device<br/>VK_KHR_display / FSE · VBlank fence"]
     E --> F["6 · interop_context<br/>GL blit thread · GL_EXT_memory_object"]
     F --> G["7 · shared_texture_pool<br/>triple-buffered GL↔VK zero-copy"]
@@ -1261,7 +1261,9 @@ All options for the `<vulkan-output>` consumer block in `casparcg.config`:
 | `<hdr-metadata>` | | | |
 | &nbsp;&nbsp;`<max-cll>` | int | `1000` | Maximum Content Light Level (nits) |
 | &nbsp;&nbsp;`<max-fall>` | int | `400` | Maximum Frame-Average Light Level (nits) |
-| &nbsp;&nbsp;`<transfer>` | enum | *(parent)* | Override transfer in metadata |
+| &nbsp;&nbsp;`<min-dml>` | float | `0.005` | Mastering display minimum luminance (nits) |
+| &nbsp;&nbsp;`<max-dml>` | float | `1000.0` | Mastering display maximum luminance (nits) |
+| &nbsp;&nbsp;`<transfer>` | enum | *(none)* | Overrides the parent `<transfer>`. **`pq` or `hlg` only** — any other value, `sdr` included, is inert and leaves the parent standing |
 | `<subregion>` | | | |
 | &nbsp;&nbsp;`<src-x>` | int | `0` | Source X offset |
 | &nbsp;&nbsp;`<src-y>` | int | `0` | Source Y offset |
@@ -1272,7 +1274,7 @@ All options for the `<vulkan-output>` consumer block in `casparcg.config`:
 | `<gsync>` | | | |
 | &nbsp;&nbsp;`<enabled>` | bool | `false` | Enable Quadro Sync framelock |
 | &nbsp;&nbsp;`<master>` | bool | `false` | This output is the sync master |
-| &nbsp;&nbsp;`<reference>` | enum | `internal` | `internal` \| `external` (house sync) |
+| &nbsp;&nbsp;`<reference>` | enum | `internal` | `internal` \| `external` \| `house` (`house` is a synonym for `external`; anything unrecognised falls back to `internal`) |
 | `<sync-group>` | int | `0` | Present barrier group (0 = disabled) |
 
 ---
