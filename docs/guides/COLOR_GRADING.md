@@ -1278,27 +1278,13 @@ tell a correct window from no window at all. It samples inside and outside and a
 *relationship*: `inside ≈ outside × exposure`, `outside ≈ base` (the window does not leak), plus a
 separation control and a restore-after-`CLEAR` check.
 
-Measured 2026-08-27, on both mixers:
+**Verified on both mixers, gated at 1 LSB** — the operator-relevant fact is the tolerance: every
+operation, the two-node chain, `invert`, the per-node CDL and the composite all sit **inside 1 LSB**,
+and the two backends return identical figures.
 
-| | OGL | Vulkan | gate |
-| :--- | ---: | ---: | ---: |
-| worst inside error | 0.50 LSB | 0.50 LSB | 1.0 |
-| worst leak outside | 0.00 LSB | 0.00 LSB | 1.0 |
-| least separation | 77.0 LSB | 77.0 LSB | ≥ 8.0 |
-| worst restore after `CLEAR` | 0.00 LSB | 0.00 LSB | 1.0 |
-| **worst chain error** (two nodes) | **0.75 LSB** | **0.75 LSB** | 1.0 |
-| **worst `invert` inside** | **0.00 LSB** | **0.00 LSB** | 1.0 |
-| **least `invert` separation** | **77.0 LSB** | **77.0 LSB** | ≥ 8.0 |
-| **composite** (`screen` blend, graph vs none) | **0.00 LSB** | **0.00 LSB** | 1.0 |
-| **per-node CDL** (asymmetric, sat 1.0) | **0.38 LSB** | **0.38 LSB** | 1.0 |
-| **CDL saturation 0** (must be neutral) | **0.00 LSB** | **0.00 LSB** | 1.0 |
-
-**The chain is now verified rather than advertised.** The two windows are concentric, so a centre
-pixel passes through both nodes and the expectation is `outside × exposure²` — a loop running only
-the first node would land a whole stop away. Node 1 demonstrably executes.
-
-**The two backends returned identical figures**, which is a parity result the battery does not
-itself assert — it runs one mixer at a time and compares each to a model, not to the other.
+The measured numbers live once, in
+[`../features/colour-grading-and-ocio.md`](../features/colour-grading-and-ocio.md) §2 — a figure in
+two documents goes stale in one, which is the rule stated in [`../README.md`](../README.md).
 
 **The CDL check uses asymmetric values in all three operands on purpose.** Equal per-channel values
 are invariant under a red/blue exchange, which is exactly the trap both shaders carry — OpenGL

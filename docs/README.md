@@ -7,8 +7,8 @@ do today.
 
 | folder | what is in it | trust it for |
 | :--- | :--- | :--- |
-| **[features/](features/)** | one reference per fork feature: what is implemented, how to drive it, what is measured | **current state** - every claim carries a file, a commit, or a battery and its numbers |
-| **[guides/](guides/)** | operator-facing how-to, per feature area | doing the thing |
+| **[features/](features/)** | one reference per fork feature: implementation state, the decisions behind it, and **the measurements** | **current state** - every claim carries a file, a commit, or a battery and its numbers |
+| **[guides/](guides/)** | operator-facing how-to: procedure, full command syntax, worked examples | doing the thing |
 | **[architecture/](architecture/)** | developer implementation notes, and the studies the CODE cites for specific numbers | why the implementation is shaped this way |
 | **[plans/](plans/)** | proposals for work **not yet done**, and studies of approaches not taken | intent, never current state |
 | **[audits/](audits/)** | incidents, crash reports, dumps, defect post-mortems, upstream syncs, handoffs | what happened once, on a date |
@@ -16,6 +16,32 @@ do today.
 | **[upstream/](upstream/)**, **[swsprobe/](swsprobe/)** | defect reports written for **other projects** (FFmpeg), with their reproduction scripts | filing a bug we found, or checking whether we already did |
 | **[diagrams/](diagrams/)** | generator scripts | regenerating an image |
 | **[images/](images/)** | committed PNGs | embedding in a document |
+
+## features/ or guides/ — the line, and why it needs one
+
+Both describe the same features, so the split has to be by QUESTION, not by subject:
+
+| | features/ | guides/ |
+| :--- | :--- | :--- |
+| answers | *is it real, and how well does it work?* | *how do I do it?* |
+| owns | state, decisions, **the numbers** | procedure, full syntax, worked examples |
+| command examples | the minimum to identify the command | as many as the task needs |
+| measurements | **here, once** | **cite, do not restate** |
+
+**A number lives in exactly one place.** The original wording gave `features/` "how to drive it",
+which guarantees overlap on the how-to axis, and said nothing about who owns measurements — so
+guides grew Verification sections and the same figures ended up in two files. On 2026-08-27 the
+seven `MIXER GRADE_NODE` figures were written into both in the same sitting.
+
+That is the failure this tree keeps paying for: a number in two places goes stale in one, and four
+such claims were found in a single sitting on 2026-08-14. A guide may state a **tolerance** an
+operator acts on — "gated at 1 LSB", "expect ±1 channel" — because that changes what they do. The
+measured figures behind it belong in `features/`, with a link.
+
+**Known and not yet reconciled:** `COLOR_GRADING.md`, `HDR_GUIDE.md`,
+`PIPELINE_EFFICIENCY_GUIDE.md`, `PLAYBACK_AND_RECORDING_GUIDE.md` and `LED_CALIBRATION.md` carry
+Verification sections predating this rule. They are not wrong, they are duplication waiting to
+rot; reconcile when next editing one, rather than in a sweep nobody reviews.
 
 ## The one rule worth reading first
 
