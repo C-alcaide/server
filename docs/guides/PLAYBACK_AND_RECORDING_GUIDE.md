@@ -66,7 +66,7 @@ one channel is not necessarily the one that reaches furthest.
 | **CUDA ProRes** | `PLAY 1-1 CUDA_PRORES "clip"` | ProRes source, NVIDIA GPU | no |
 | **FFmpeg Vulkan compute** | `<vulkan-decode>true</vulkan-decode>` | Vulkan mixer; ProRes, ProRes RAW, DPX or FFV1 | no |
 | **FFmpeg Vulkan Video** | `<vulkan-video-decode>true</vulkan-video-decode>` | Vulkan mixer; H.264 or HEVC; a GPU with a video-decode queue | no |
-| **GStreamer** | `PLAY 1-1 GST "pipeline"` | a GStreamer installation; see `docs/guides/GSTREAMER_GUIDE.md` | no on its GPU route |
+| **GStreamer** | `PLAY 1-1 [GSTREAMER] "pipeline"` or `PLAY 1-1 gst://‹pipeline›` | a GStreamer installation; see [`GSTREAMER_GUIDE.md`](GSTREAMER_GUIDE.md) | no on its GPU route |
 
 **The last two switches are not one switch, and that is deliberate.** `<vulkan-decode>` reaches
 FFmpeg's Vulkan **compute** decoders, which need only a compute queue.
@@ -104,9 +104,16 @@ conversion happens. What costs is the decode itself and the upload.
 file → D3D11VA hardware decoder → NV12 texture on the GPU (DXGI_FORMAT_NV12)
      → shared handle → the mixer's device
         (OpenGL: WGL_NV_DX_interop · Vulkan: the D3D11 import bridge)
-     → two plane views: R8_UNORM for Y, R8G8_UNORM for UV
+     → two plane views, by bit depth:
+          8-bit  NV12 → R8_UNORM  (Y) + R8G8_UNORM  (UV)
+          10-bit P010 → R16_UNORM (Y) + R16G16_UNORM (UV), ten bits MSB-aligned
      → mixer: shader converts YCbCr → RGB
 ```
+
+**The 10-bit case is the one worth knowing.** P010 arrives MSB-aligned in 16-bit views, so this
+route avoids the amplification of chroma-upsampling rounding that an LSB-aligned 10-bit path
+carries. For H.264/HEVC on this box it is therefore both zero-copy *and* the more precise of the
+GPU routes — which is why "GPU-direct" here is not a precision compromise.
 
 Only for codecs the GPU's decode block handles. ProRes is **not** one of them — no NVIDIA GPU has
 a ProRes decoder — so a ProRes clip on this route logs *"the decoder has no hardware device"* and
@@ -1138,7 +1145,7 @@ and the two numbers cannot simply be added.
 ```bash
 cd d:\Github\CasparCG-TestRunner
 python cli.py encode-matrix     --server <casparcg.exe> --codec prores    # routes, cost, picture
-python cli.py decode-cost       --server <casparcg.exe> --arms force_cpu,cuda,vulkan
+python cli.py decode-cost       --server <casparcg.exe> --arms force_cpu,cuda,vulkan,vulkan_video
 python cli.py iso-scaling       --server <casparcg.exe> --media media/sources   # ISO recordings
 python cli.py playback-scaling  --server <casparcg.exe>                    # playout channels
 python cli.py consumer-scaling  --server <casparcg.exe> --base decklink    # outputs per channel
