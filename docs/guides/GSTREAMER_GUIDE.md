@@ -292,6 +292,25 @@ The channel arrives as BGRA, so start with `videoconvert` unless your encoder ta
 directly. Only **one** GStreamer consumer per channel: the consumer uses a fixed index, so
 adding a second replaces the first.
 
+### Pre-configuring the consumer in `casparcg.config`
+
+The same consumer can start with the server. **`<pipeline>` is required** — the consumer throws at
+startup without it, naming the element:
+
+```xml
+<consumers>
+    <gstreamer>
+        <pipeline>videoconvert ! nvh264enc ! h264parse ! mpegtsmux ! srtsink uri=srt://:9020?mode=listener</pipeline>
+        <gpu>false</gpu>
+    </gstreamer>
+</consumers>
+```
+
+| element | default | meaning |
+| :--- | :--- | :--- |
+| `<pipeline>` | — | **required.** The `gst-launch` description, minus the source, exactly as in the `ADD` form above. Whitespace is trimmed; empty is a startup error |
+| `<gpu>` | `false` | the same switch as the `GPU` keyword below, and off for the same reason |
+
 ### `GPU` on the consumer — and why it is off by default
 
 ```

@@ -431,6 +431,10 @@ Consumers can be defined in the config to start automatically on launch:
             <codec>mov</codec>
             <qscale>auto</qscale>
             <slices>4</slices>
+            <alpha>1</alpha>
+            <hdr>PQ</hdr>
+            <max_cll>1000</max_cll>
+            <max_fall>400</max_fall>
         </cuda_prores>
     </consumers>
 </channel>
@@ -450,6 +454,20 @@ Consumers can be defined in the config to start automatically on launch:
     </consumers>
 </channel>
 ```
+
+### The four HDR/alpha elements, and one spelling trap
+
+| element | default | meaning |
+| :--- | :--- | :--- |
+| `<alpha>` | `1` | include the alpha channel. Only meaningful for profiles **4** and **5** (4444, 4444XQ) |
+| `<hdr>` | *(absent)* | `SDR`, `HLG` or `PQ`. **Omit the element entirely to inherit the channel's `color-transfer`** — an empty or unrecognised value is treated as SDR, which is not the same as inheriting |
+| `<max_cll>` | `1000` | maximum content light level, nits |
+| `<max_fall>` | `400` | maximum frame-average light level, nits |
+
+> **These two use UNDERSCORES: `max_cll`, `max_fall`.** Every other consumer in the tree spells the
+> same two numbers `max-cll` and `max-fall` with hyphens, inside an `<hdr-metadata>` block. Here they
+> are top-level and underscored. A hyphenated spelling copied from the DeckLink or Vulkan-output
+> block is **silently ignored** and you get 1000/400.
 
 ---
 
