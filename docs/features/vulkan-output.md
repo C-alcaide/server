@@ -83,11 +83,20 @@ consumer takes the fullscreen-exclusive path where no HDR surface is offered. Th
 two `vulkan_out` matrix cases sitting at **18.7 dB against a 40 dB gate** at PQ and HLG while SDR
 passes: the output is 8-bit sRGB where the check's model expects PQ-encoded.
 
-**`<gamut>` is read, accepted and ignored.** The per-consumer colour conversion pass is disabled
-behind a literal `if (false && …)`, so the framebuffer carries the *channel's* colour space. The
-consumer had warned about this at startup for some time; the warning was being handed to a
-verbosity-gated log callback and dropped, so nobody had read it. `gamut-inert` now reports it from
-the same predicate the warning uses, so the two cannot drift.
+**`<gamut>` is read and ignored, and that is deliberate — not a defect.** The per-consumer colour
+conversion pass is disabled behind a literal `if (false && …)`, and the comment at
+`vulkan_output_consumer.cpp:800` explains why: **the channel's colour space and transfer determine
+every pixel value in the framebuffer**, so running this pass on top would **double-convert**.
+Colour belongs to the mixer, and the consumer presents what the mixer produced.
+
+The same comment carries a **FUTURE RE-ENABLEMENT PLAN**, whose key point is that a correct version
+must take its input gamut from `channel_info` rather than from config — because config can disagree
+with what the mixer actually emitted, which is exactly how a double conversion would arise.
+
+So the only real problem was silence: an operator could set `<gamut>p3_d65</gamut>` for a P3 wall
+and get no conversion and no warning, which looks identical to a conversion that worked. That is
+fixed — the startup warning is surfaced and `gamut-inert` is reported every run, both from one
+predicate so they cannot drift. **Enabling the pass as it stands would be a regression**, not a fix.
 
 **The battery gates what is universal and names what is local.** Gated: the config round trip, and
 internal contradictions such as `hw-hdr true` on an SDR surface or an HDR colour space on an 8-bit
@@ -114,10 +123,13 @@ unobservable.
    19045, so every HDR request degrades to an 8-bit sRGB surface. So the HDR *code paths* —
    `hw-hdr`, the ST.2086 block, the scRGB surface — have never executed here, and the battery
    names that rather than pretending to cover it.
-4. **A latent double gamut mapping on the hardware-HDR path.** The consumer presents an scRGB
-   (BT.709-primaries, linear) surface and lets the display engine map it to BT.2020; with a
-   BT.2020 channel those primaries are mapped twice. It warns at startup and is unreachable here
-   because `hw-hdr` is false — it will bite the first time it is true on a non-BT.709 channel.
+4. **A latent double gamut mapping on the hardware-HDR path, and it cannot be verified on this
+   rig.** The consumer presents an scRGB (BT.709-primaries, linear) surface and lets the display
+   engine map it to BT.2020; with a BT.2020 channel those primaries are mapped twice. It warns at
+   startup. **Two independent blockers, not one:** Windows 10 build 19045 has no `VK_KHR_display`,
+   *and* no HDR display is attached — so hardware HDR cannot be reached even after an OS upgrade.
+   Deliberately **not** fixed speculatively: a fix that cannot be measured is a claim, and this
+   session has already had two plausible fixes die on contact with a measurement.
 5. **`consumer-view` covers the picture only**, on one display configuration.
 6. **`delay_frames` / `delay_ms` / `buffer_depth` interact** and their combined behaviour is not
    documented in one place.

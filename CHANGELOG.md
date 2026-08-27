@@ -18,7 +18,7 @@ honest answer to the question, because `pick_surface_format` walks a preference 
 | | |
 | :--- | :--- |
 | PQ/BT.2020 requested | **`bgra8` / `srgb_nonlinear` delivered** — no HDR signalling at all |
-| `<gamut>` | **read, accepted and ignored** — the per-consumer conversion pass is disabled |
+| `<gamut>` | **read and ignored BY DESIGN** — colour belongs to the channel; enabling the pass would double-convert |
 | hardware-HDR path | double-maps primaries on a non-BT.709 channel — latent, warns at startup |
 
 The 8-bit sRGB surface is a platform limit rather than a defect: Windows 10 build 19045 has no
@@ -27,11 +27,14 @@ offered. It also explains the two `vulkan_out` matrix cases sitting at 18.7 dB a
 at PQ and HLG while SDR passes — the output is 8-bit sRGB where the check's model expects PQ. Those
 cases had never been run before, so this is newly discovered rather than newly caused.
 
-**`<gamut>` being inert was surfaced by fixing an unrelated silencing bug.** The consumer has warned
-about it at startup for some time; the warning was handed to a verbosity-gated log callback and
-dropped. Fixing that routing surfaced it, and it immediately contradicted the `gamut` field added an
-hour earlier — which had been reporting a configured value that does nothing. Both now derive from
-one predicate so they cannot drift.
+**`<gamut>` being inert is deliberate, and the fix was to stop it being silent.** The pass is
+disabled because the channel's colour space and transfer already determine every framebuffer value —
+running it on top would double-convert, and `vulkan_output_consumer.cpp:800` carries the reasoning
+and a re-enablement plan. The consumer has warned at startup for some time; the warning was handed
+to a verbosity-gated log callback and dropped, so nobody read it. Fixing that routing surfaced it,
+and it immediately contradicted the `gamut` field added an hour earlier, which had been reporting a
+configured value that does nothing. Both now derive from one predicate. **Enabling the pass as it
+stands would be a regression rather than a fix.**
 
 Covered by `cli.py vulkan-output-signalling`, which gates the config round trip and internal
 contradictions (`hw-hdr` true on an SDR surface, an HDR colour space on an 8-bit format) and *names*
