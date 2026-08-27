@@ -219,10 +219,17 @@ configuration parse_xml_config(const boost::property_tree::wptree&  ptree,
     if (config.primary.device_index == -1)
         config.primary.device_index = 1;
 
-    // The GPU readback strategies implement only the subregion's SOURCE ORIGIN. `src-x` and
-    // `src-y` reach the shaders as push constants and the DMA path as an imageOffset;
-    // `dest-x`, `dest-y`, `width` and `height` reach nothing and are dropped silently, so
-    // the wire carries the whole source from the origin, placed at 0,0.
+    // HISTORY, NOT CURRENT BEHAVIOUR -- read the narrowed rule below for what happens today.
+    //
+    // The GPU readback strategies once implemented only the subregion's SOURCE ORIGIN: `src-x`
+    // and `src-y` reached the shaders as push constants and the DMA path as an imageOffset,
+    // while `dest-x`, `dest-y`, `width` and `height` reached nothing and were dropped
+    // silently, so the wire carried the whole source from the origin, placed at 0,0.
+    //
+    // (That paragraph was read as present tense on 2026-08-27 and written into an operator
+    // guide as a live defect. The measurement below is what motivated the coercion, and the
+    // coercion is what fixed it -- a comment explaining a problem in this file is usually
+    // followed by its fix.)
     //
     // Measured over an SDI loopback with `640x360 from (100,200) placed at (114,70)`: the
     // CPU strategy puts 360x640 at (70,114) and scores 62.92 dB against the frame that
@@ -240,15 +247,32 @@ configuration parse_xml_config(const boost::property_tree::wptree&  ptree,
     // is the same rule for the DeckLink readback. Note neither tests `src_x`/`src_y`: an
     // origin-only subregion IS handled on the GPU, and measures 53.55 dB against its model.
     {
+        // NARROWED 2026-08-27: the Vulkan COMPUTE readback now implements destination
+        // placement, so it is no longer coerced. `vk_readback_v210.comp` and
+        // `vk_readback_bgra.comp` walk OUTPUT pixels and decide per pixel whether one falls
+        // inside the destination rectangle, which is what makes it cheap -- and is why
+        // `dest_x` needs no 6-pixel alignment despite V210 packing six pixels per four words.
+        // Walking the source would need read-modify-write on a straddling group; walking the
+        // destination computes every group from scratch. Writing every group also blacks the
+        // surround, so no clear pass is needed.
+        //
+        // STILL COERCED, for reasons that are mechanism-specific rather than effort:
+        //   * `vulkan-dma` copies image->buffer with a single `region.imageOffset`. There is no
+        //     shader in that path to place anything, and a VkBufferImageCopy cannot express a
+        //     destination rectangle inside a larger frame.
+        //   * `cuda` packs in a CUDA kernel that has not been given the same treatment.
         auto needs_cpu_geometry = [](const port_configuration& p) {
             return p.dest_x != 0 || p.dest_y != 0 || p.region_w != 0 || p.region_h != 0;
         };
-        if (needs_cpu_geometry(config.primary) &&
-            config.gpu_readback_mode != configuration::gpu_readback_mode_t::cpu) {
+        const bool mode_can_place =
+            config.gpu_readback_mode == configuration::gpu_readback_mode_t::cpu ||
+            config.gpu_readback_mode == configuration::gpu_readback_mode_t::vulkan;
+        if (needs_cpu_geometry(config.primary) && !mode_can_place) {
             CASPAR_LOG(warning)
-                << L"[decklink] <subregion> sets dest-x/dest-y/width/height, which the GPU "
-                   L"readback strategies do not implement; falling back to "
-                   L"gpu-readback-mode=cpu so the geometry is honoured.";
+                << L"[decklink] <subregion> sets dest-x/dest-y/width/height, which this "
+                   L"gpu-readback-mode cannot place (vulkan-dma has no shader; cuda is not "
+                   L"implemented); falling back to gpu-readback-mode=cpu so the geometry is "
+                   L"honoured. gpu-readback-mode=vulkan does support it.";
             config.gpu_readback_mode = configuration::gpu_readback_mode_t::cpu;
         }
     }

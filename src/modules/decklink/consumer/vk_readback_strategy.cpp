@@ -612,7 +612,11 @@ struct vk_readback_strategy::impl
         VkPushConstantRange push{};
         push.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
         push.offset     = 0;
-        push.size       = (is_hdr_ || use_bt2020_ || needs_v210_) ? 28 : 16; // v210: 7 ints (28B), BGRA: 4 ints (16B)
+        // v210: 11 ints (44B), BGRA: 8 ints (32B). Both grew by the four destination-placement
+        // fields. THE RANGE HAS TO GROW WITH THEM -- pushing 44 bytes into a 28-byte declared
+        // range is a VUID violation, and the kind that works on one driver and corrupts on the
+        // next rather than failing cleanly.
+        push.size       = (is_hdr_ || use_bt2020_ || needs_v210_) ? 44 : 32;
 
         VkPipelineLayoutCreateInfo pl_ci{};
         pl_ci.sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
@@ -1334,6 +1338,21 @@ struct vk_readback_strategy::impl
         int dst_w = decklink_format_desc.width;
         int dst_h = decklink_format_desc.height;
 
+        // DESTINATION PLACEMENT. `region_w`/`region_h` of 0 mean the whole frame, which is the
+        // no-subregion case; passing dest 0,0 and region dst_w x dst_h then reduces the
+        // shaders' arithmetic to exactly what it was before they understood placement, so that
+        // path stays bit-identical.
+        //
+        // These used to be dropped, and the consumer coerced itself to the CPU readback to
+        // honour them (see config.cpp). They are cheap on the GPU once the shader walks OUTPUT
+        // pixels rather than source ones: a V210 group is 6 pixels, so a dest_x that is not a
+        // multiple of 6 straddles a group -- which needs read-modify-write if you walk the
+        // source, and nothing at all if every output group is computed from scratch.
+        int dest_x   = config.dest_x;
+        int dest_y   = config.dest_y;
+        int region_w = config.region_w > 0 ? config.region_w : dst_w;
+        int region_h = config.region_h > 0 ? config.region_h : dst_h;
+
         // Ensure output buffers
         ensure_buffers(dst_w, dst_h);
 
@@ -1411,15 +1430,17 @@ struct vk_readback_strategy::impl
         // Push constants and dispatch
         if (is_hdr_ || use_bt2020_ || needs_v210_) {
             int groups_per_row = (dst_w + 5) / 6;
-            int push_data[7] = {src_x, src_y, dst_w, dst_h, groups_per_row, use_bt2020_ ? 1 : 0, is_16bit ? 1 : 0};
-            vkCmdPushConstants(slot.cmd, pipe_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, 28, push_data);
+            int push_data[11] = {src_x, src_y, dst_w, dst_h, groups_per_row,
+                                 use_bt2020_ ? 1 : 0, is_16bit ? 1 : 0,
+                                 dest_x, dest_y, region_w, region_h};
+            vkCmdPushConstants(slot.cmd, pipe_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, 44, push_data);
 
             uint32_t gx = (uint32_t)((groups_per_row + 63) / 64);
             uint32_t gy = (uint32_t)dst_h;
             vkCmdDispatch(slot.cmd, gx, gy, 1);
         } else {
-            int push_data[4] = {src_x, src_y, dst_w, dst_h};
-            vkCmdPushConstants(slot.cmd, pipe_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, 16, push_data);
+            int push_data[8] = {src_x, src_y, dst_w, dst_h, dest_x, dest_y, region_w, region_h};
+            vkCmdPushConstants(slot.cmd, pipe_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, 32, push_data);
 
             uint32_t gx = (uint32_t)((dst_w + 15) / 16);
             uint32_t gy = (uint32_t)((dst_h + 15) / 16);

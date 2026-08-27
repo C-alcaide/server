@@ -31,6 +31,24 @@ layout(push_constant) uniform PushConstants {
     int groups_per_row;  // (dst_w + 5) / 6
     int use_bt2020;      // 0 = BT.709, 1 = BT.2020
     int is_16bit;        // 0 = 8-bit (BGRA swizzled), 1 = 16-bit (RGBA direct)
+    // ── Destination placement ───────────────────────────────────────────────
+    // Where the region lands on the DeckLink frame, and how big it is. With no
+    // subregion the strategy passes dest=(0,0) and region=(dst_w,dst_h), which reduces
+    // the arithmetic below to exactly what it was before these existed.
+    //
+    // ITERATING OVER OUTPUT GROUPS IS WHAT MAKES THIS CHEAP, and it is why `dest_x` needs
+    // no 6-pixel alignment. A V210 group is 6 pixels, so a region starting at a `dest_x`
+    // that is not a multiple of 6 straddles a group -- which would need read-modify-write
+    // if we walked the SOURCE. Walking the destination instead, every group is computed in
+    // full from scratch: the pixels inside the region are sampled, the rest are black. A
+    // straddling group is simply a group with both kinds in it.
+    //
+    // Writing every group also fills the area outside the region, so no separate clear
+    // pass is needed and the frame can never carry stale pixels.
+    int dest_x;
+    int dest_y;
+    int region_w;
+    int region_h;
 } pc;
 
 // ─── BT.709 full-range → 10-bit limited-range YCbCr ────────────────────────
@@ -78,11 +96,19 @@ void main()
     int R[6], G[6], B[6];
 
     for (int i = 0; i < 6; ++i) {
-        int sx = pc.src_x + px_base + i;
-        int sy = pc.src_y + row;
+        // Output pixel -> position within the region -> source pixel.
+        int ox = px_base + i;
+        int rx = ox  - pc.dest_x;
+        int ry = row - pc.dest_y;
+        int sx = pc.src_x + rx;
+        int sy = pc.src_y + ry;
 
         vec4 pixel;
-        if ((px_base + i) < pc.dst_w) {
+        // Inside the frame AND inside the destination rectangle. Anything else stays at
+        // the initialised value, which is black -- that is what fills the surround.
+        if (ox < pc.dst_w
+            && rx >= 0 && rx < pc.region_w
+            && ry >= 0 && ry < pc.region_h) {
             pixel = texelFetch(src_tex, ivec2(sx, sy), 0);
         } else {
             pixel = vec4(0.0);

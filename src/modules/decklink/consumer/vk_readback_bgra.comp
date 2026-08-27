@@ -23,6 +23,18 @@ layout(push_constant) uniform PushConstants {
     int src_y;   // subregion origin Y in source texture
     int dst_w;   // DeckLink output width
     int dst_h;   // DeckLink output height
+    // ── Destination placement ───────────────────────────────────────────────
+    // Same scheme as vk_readback_v210.comp: iterate over OUTPUT pixels and decide per
+    // pixel whether it falls inside the destination rectangle. With no subregion the
+    // strategy passes dest=(0,0) and region=(dst_w,dst_h), which reduces to the previous
+    // behaviour exactly.
+    //
+    // No packing constraint here at all -- one pixel is one uint32, so unlike V210 there
+    // was never a 6-pixel group to straddle. This shader could always have done it.
+    int dest_x;
+    int dest_y;
+    int region_w;
+    int region_h;
 } pc;
 
 void main()
@@ -33,10 +45,15 @@ void main()
     if (x >= pc.dst_w || y >= pc.dst_h)
         return;
 
-    int sx = pc.src_x + x;
-    int sy = pc.src_y + y;
+    // Output pixel -> position within the region -> source pixel. Outside the region the
+    // frame is written BLACK rather than left alone, so the surround cannot carry stale
+    // pixels and no separate clear pass is needed.
+    int rx = x - pc.dest_x;
+    int ry = y - pc.dest_y;
 
-    vec4 pixel = texelFetch(src_tex, ivec2(sx, sy), 0);
+    vec4 pixel = vec4(0.0, 0.0, 0.0, 0.0);
+    if (rx >= 0 && rx < pc.region_w && ry >= 0 && ry < pc.region_h)
+        pixel = texelFetch(src_tex, ivec2(pc.src_x + rx, pc.src_y + ry), 0);
 
     // The attachment ALREADY holds BGRA, so this is a straight copy: channel 0 -> byte 0.
     //
