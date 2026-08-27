@@ -257,6 +257,22 @@ All commands are prefixed with `PREVIZ <channel>`.
 
 ---
 
+
+### Refusals
+
+Undocumented until 2026-08-27. Every `PREVIZ` subcommand that touches a file shares this shape.
+
+| code | meaning |
+| :--- | :--- |
+| `501 PREVIZ FAILED` | this server was built **without previz support** — every `PREVIZ` command returns it, including `AUTOPROJECTION` |
+| `400 PREVIZ ERROR` | `SCENE SAVE` or `SCENE LOAD` given with no path. The reply carries the usage inline: *"usage: SCENE SAVE|LOAD ‹path›"* |
+| `403 PREVIZ FORBIDDEN` | **the path resolves outside the media folder.** Paths are resolved with `weakly_canonical`, not just normalised — so a symlink planted *inside* the media folder that points outside is caught too. `SAVE` uses the weak form deliberately, because its target need not exist yet |
+| `404 PREVIZ ERROR` | the scene file does not exist (`LOAD`), or the named scene/screen/preset is not there |
+| `502 PREVIZ FAILED` | the file was found and readable but could not be parsed or applied |
+
+**`403` is about where the path points, not about permissions.** A scene stored outside the media
+folder cannot be loaded or saved at all; move it inside rather than trying to escape with `..`.
+
 ## Client-Side Implementation (360 Client)
 
 The CasparCG 360 Client (`casparcg-360-client`) is a Python/PyQt6 application that provides the interactive 3D authoring interface. The previz system is integrated as a **Stage tab** alongside existing Motion, Color, Shape, and Tracking tabs.

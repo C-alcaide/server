@@ -444,3 +444,18 @@ bundle adjustment refines the *existing* per-view registrations.
   settle.
 * Re-run **Generate + Play** (which resets to identity) before each new solve so
   the homography is measured against undistorted content.
+
+
+### Refusals — `MIXER PROJECTION_BLEND_MASK` and `MIXER MESH`
+
+Both resolve their argument relative to the media folder and share three codes, none of which was
+documented until 2026-08-27:
+
+| code | meaning |
+| :--- | :--- |
+| `404 MIXER ERROR` | the file does not exist |
+| `403 MIXER FORBIDDEN` | **the path resolves outside the media folder.** The path is canonicalised before the check, so a symlink inside the media folder pointing out of it is refused as well |
+| `502 MIXER FAILED` | the file exists and is inside the media folder, but could not be decoded or applied |
+
+`403` therefore means *"not somewhere I am allowed to read"*, and `502` means *"read it and could
+not use it"* — which is the distinction worth having when a mask or mesh will not load.
