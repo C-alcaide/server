@@ -47,7 +47,34 @@ them a parity question rather than an implementation detail.
 
 ---
 
-## 3. Known gaps
+## 3. Subregion placement on the GPU
+
+The four destination fields — `dest-x`, `dest-y`, `width`, `height` — used to coerce the consumer to
+the CPU readback. The Vulkan compute readback implements them as of 2026-08-27, measured identical
+to the CPU path over the SDI loopback:
+
+| `dest-x` | CPU | Vulkan |
+| :--- | ---: | ---: |
+| 114 (even, 6-aligned) | 62.92 dB | **62.92 dB** |
+| 115 (odd, straddles a V210 group) | 42.79 dB | **42.79 dB** |
+
+Against a historical **7.91 dB** for this geometry on `vulkan`.
+
+**Why it was cheap:** both shaders already iterated over *output* V210 groups, so deciding per
+output pixel whether it lies inside the destination rectangle costs four push constants — and
+removes the 6-pixel alignment problem entirely, because every group is computed from scratch rather
+than read-modified-written. Writing every group also blacks the surround, so there is no clear pass.
+
+**The ~20 dB at an odd `dest-x` is inherent to 4:2:2**, not a defect: both paths agree exactly, and
+the signature is a precision-independent error (all three wire formats within 0.6 dB, 16-bit gaining
++0.06 dB over 8-bit instead of +3.94). Nobody had measured that about the CPU path either.
+
+**Still coerced:** `vulkan-dma`, because a `VkBufferImageCopy` with one image offset cannot express
+a destination rectangle inside a larger frame — a mechanism limit; and `cuda`, which is unimplemented.
+
+---
+
+## 4. Known gaps
 
 1. **Not every configuration axis is swept.** Which DeckLink options select genuinely different
    code and which the harness cannot yet reach is tracked separately — several are unreachable

@@ -1,6 +1,31 @@
 CasparVP — Unreleased
 ==========================================
 
+### Added: DeckLink subregion destination placement on the GPU
+
+A subregion setting `dest-x`/`dest-y`/`width`/`height` used to coerce the consumer to the **CPU**
+readback, because the GPU strategies implemented only the source origin. The Vulkan compute readback
+implements all of it now — measured **identical to the CPU path**, against a historical 7.91 dB for
+the same geometry:
+
+| `dest-x` | CPU | Vulkan |
+| :--- | ---: | ---: |
+| 114 (even, 6-aligned) | 62.92 dB | **62.92 dB** |
+| 115 (odd, straddles a V210 group) | 42.79 dB | **42.79 dB** |
+
+**No 6-pixel alignment requirement**, despite V210 packing six pixels per four words: both shaders
+already iterated over *output* groups, so deciding per output pixel whether it lies inside the
+destination rectangle costs four push constants and removes the straddle problem entirely. Writing
+every group also blacks the surround, so no clear pass is needed.
+
+**The ~20 dB drop at an odd `dest-x` is inherent to 4:2:2 and affects the CPU path identically** —
+an odd destination x inverts the luma/chroma phase against the frame's grid. Keep `dest-x` even.
+That had never been measured about the CPU path either.
+
+`vulkan-dma` and `cuda` are still coerced to the CPU readback: a `VkBufferImageCopy` with one image
+offset cannot express a destination rectangle inside a larger frame, and the CUDA packer has not been
+given the same treatment.
+
 ### Added: the Vulkan output consumer reports what it signals — and it is not what was asked
 
 `state()` reported presentation, sync and frame counts and **no colour**. Combined with

@@ -95,38 +95,51 @@ while *looking* configured.
 
 ---
 
-## 3. Subregion output — handled, but it costs you the GPU path
+## 3. Subregion output
 
-A subregion lets one channel drive part of a larger raster. The GPU readback strategies implement
-**only the source origin**, so the server handles the rest by **coercing the readback mode**:
+A subregion copies a rectangle of the channel to a position on the DeckLink frame. All six numbers
+are honoured, and since 2026-08-27 the **Vulkan compute readback places them on the GPU** — no host
+round trip.
 
-| setting | on the GPU paths | result |
-| :--- | :--- | :--- |
-| `src-x`, `src-y` only | **honoured on the GPU** | stays on your chosen `gpu-readback-mode` |
-| `dest-x`, `dest-y`, `width`, `height` | not implemented there | **the consumer falls back to `gpu-readback-mode=cpu`** and logs a warning |
-
-So the geometry is always correct — you simply do not get the GPU path for it. The warning names
-exactly what happened:
-
-```
-[decklink] <subregion> sets dest-x/dest-y/width/height, which the GPU readback
-strategies do not implement; falling back to gpu-readback-mode=cpu so the
-geometry is honoured.
+```xml
+<decklink>
+    <subregion>
+        <src-x>100</src-x>  <src-y>200</src-y>
+        <width>640</width>  <height>360</height>
+        <dest-x>114</dest-x> <dest-y>70</dest-y>
+    </subregion>
+</decklink>
 ```
 
-**What this means in practice:** an origin-only subregion is free — it runs on the GPU and measures
-53.55 dB against its model. A subregion with destination placement or cropping is *correct* but
-CPU-bound, which matters if you were counting on the GPU path for headroom. If a machine is
-unexpectedly CPU-heavy on a DeckLink output, check for `dest-*`/`width`/`height` in its subregion
-before looking anywhere else.
+| `gpu-readback-mode` | destination placement |
+| :--- | :--- |
+| `cpu` | honoured |
+| `vulkan` | **honoured, on the GPU** |
+| `vulkan-dma` | **not possible** — coerced to `cpu`, with a warning |
+| `cuda` | not implemented — coerced to `cpu`, with a warning |
 
-**Why the fallback is decided at config-parse time**, in case you are tempted to move it: by the
-time the format strategy is created, the consumer has already told the mixer that no CPU frame data
-is needed, so substituting the CPU strategy there yields a frame carrying no host pixels and puts
-**nothing** on the wire. Measured — the capture goes flat. Deciding at parse time keeps
-`needs_cpu_frame_data()` consistent with the strategy that will actually run.
+`vulkan-dma` is a `VkBufferImageCopy` with a single image offset and no shader, and that copy cannot
+express a destination rectangle inside a larger frame. It is a limit of the mechanism, not a gap in
+effort.
 
----
+### Keep `dest-x` even
+
+**An odd `dest-x` costs about 20 dB, on every readback mode including `cpu`.** Measured over the SDI
+loopback, `640x360` from `(100,200)`:
+
+| `dest-x` | CPU | Vulkan |
+| :--- | ---: | ---: |
+| 114 (even) | 62.92 dB | 62.92 dB |
+| 115 (odd) | 42.79 dB | 42.79 dB |
+
+This is **not** a bug in either path — they agree exactly. 4:2:2 pairs pixels horizontally, so an
+odd destination x inverts the luma/chroma phase relative to the frame's grid. The tell is that all
+three wire formats land within 0.6 dB of each other and 16-bit gains only +0.06 dB over 8-bit
+instead of its usual +3.94: a precision-independent error swamping a precision-dependent one.
+
+There is **no** 6-pixel alignment requirement, despite V210 packing six pixels per four words. The
+shaders walk output groups and compute each from scratch, so a region boundary inside a group is
+handled without any special case.
 
 ## 4. Genlock / sync devices
 
@@ -150,8 +163,8 @@ and only one carries house reference.
    before suspecting the metadata.
 3. Only then pin `gpu-readback-mode` if you are chasing performance, and change **one** of the three
    settings at a time. They are orthogonal, so changing two makes the result unattributable.
-4. If you need a subregion, read §3: destination placement and cropping are honoured but force
-   the CPU readback path, so budget for that rather than discovering it under load.
+4. If you need a subregion, keep `dest-x` **even** (§3) and prefer `gpu-readback-mode=vulkan`,
+   which places it on the GPU. `vulkan-dma` and `cuda` fall back to the CPU path for it.
 
 ---
 
