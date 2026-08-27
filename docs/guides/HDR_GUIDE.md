@@ -689,24 +689,14 @@ color_transfer=smpte2084    ← PQ
 color_transfer=arib-std-b67 ← HLG
 ```
 
-### Streaming: SRT, UDP, TCP — measured 2026-08-17
+### Streaming: SRT, UDP, TCP
 
-The colour description is in the **video bitstream**, as VUI in H.264/HEVC, not in the
-container. MPEG-TS has no colour signalling of its own, so the transport cannot affect it —
-and since that is a structural argument, it was measured rather than asserted. A channel
-streamed over MPEG-TS and read back with **ffprobe** (which is not our code, so the reading is
-evidence about the stream rather than about our encoder agreeing with our decoder):
+**Colorimetry and transfer survive a stream, exactly as they survive a file.** The colour
+description lives in the **video bitstream** — VUI in H.264/HEVC — not in the container, and MPEG-TS
+has no colour signalling of its own, so the transport cannot affect it.
 
-| channel | over UDP | over SRT |
-| :--- | :--- | :--- |
-| `bt709` / `sdr` | `bt709` / `bt709` / `bt709` | — |
-| `bt2020` / `hlg` | `bt2020` / `arib-std-b67` / `bt2020nc` | — |
-| `bt2020` / `pq` | `bt2020` / `smpte2084` / `bt2020nc` | `bt2020` / `smpte2084` / `bt2020nc` |
-
-So **colorimetry and transfer survive a stream**, exactly as they survive a file.
-
-**Mastering display volume and MaxCLL/MaxFALL travel too, when you ask for them.** Give the
-ffmpeg consumer the same `<hdr-metadata>` block the DeckLink consumer takes:
+**Mastering display volume and MaxCLL/MaxFALL travel too, when you ask for them.** Give the ffmpeg
+consumer the same `<hdr-metadata>` block the DeckLink consumer takes:
 
 ```xml
 <ffmpeg>
@@ -721,11 +711,12 @@ ffmpeg consumer the same `<hdr-metadata>` block the DeckLink consumer takes:
 </ffmpeg>
 ```
 
-and the stream carries ST 2086 mastering display volume and CTA-861.3 content light level --
-which is what HDR10 delivery requires. Measured over UDP, read back with ffprobe: `red_x
-35400/50000` (0.708, BT.2020 red), `white_point 15635/50000` (0.3127, D65), `max_luminance
-10000000/10000` (1000 cd/m2), `min_luminance 50/10000` (0.005), `max_content 1000`,
-`max_average 400`. Both **libx265 and libx264** carry it.
+and the stream carries ST 2086 mastering display volume and CTA-861.3 content light level, which is
+what HDR10 delivery requires. **Both libx265 and libx264 carry it.**
+
+The ffprobe readback that establishes all of the above — per transport, per transfer, with the
+exact mastering-display values — is in
+[`../features/ffmpeg-producer-and-consumer.md`](../features/ffmpeg-producer-and-consumer.md) §5.
 
 Two deliberate constraints:
 

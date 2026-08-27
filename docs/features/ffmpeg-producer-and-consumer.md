@@ -82,7 +82,31 @@ run; `vulkan-video-decode` has no dedicated battery.
 
 ---
 
-## 5. Known gaps
+## 5. HDR signalling survives a stream — measured
+
+The colour description lives in the **video bitstream** as VUI in H.264/HEVC, not in the container.
+MPEG-TS has no colour signalling of its own, so the transport cannot affect it — a structural
+argument, and therefore measured rather than asserted. Read back with **ffprobe**, which is not our
+code, so this is evidence about the stream rather than our encoder agreeing with our decoder.
+
+| channel | over UDP | over SRT |
+| :--- | :--- | :--- |
+| `bt709` / `sdr` | `bt709` / `bt709` / `bt709` | — |
+| `bt2020` / `hlg` | `bt2020` / `arib-std-b67` / `bt2020nc` | — |
+| `bt2020` / `pq` | `bt2020` / `smpte2084` / `bt2020nc` | `bt2020` / `smpte2084` / `bt2020nc` |
+
+**Mastering display volume and MaxCLL/MaxFALL travel too**, given an `<hdr-metadata>` block —
+ST 2086 plus CTA-861.3, which is what HDR10 delivery requires. Measured over UDP via ffprobe:
+`red_x 35400/50000` (0.708, BT.2020 red), `white_point 15635/50000` (0.3127, D65),
+`max_luminance 10000000/10000` (1000 cd/m²), `min_luminance 50/10000` (0.005),
+`max_content 1000`, `max_average 400`. Both **libx265 and libx264** carry it.
+
+Configuration and the two deliberate constraints are in
+[`../guides/HDR_GUIDE.md`](../guides/HDR_GUIDE.md). Measured 2026-08-17 by `signalling --stream`.
+
+---
+
+## 6. Known gaps
 
 1. **No A/B for Vulkan Video against D3D11VA.** Both are implemented; nothing compares their cost or
    picture. This is the deliverable the Vulkan Video plan was written for.

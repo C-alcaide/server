@@ -37,7 +37,7 @@ OUT = os.path.join(HERE, "features.html")
 #: within a group by how much of the fork the reader has to understand first.
 ORDER = [
     ("Start here", ["README.md"]),
-    ("Colour", ["colour-grading-and-ocio.md"]),
+    ("Colour", ["colour-grading-and-ocio.md", "led-calibration.md"]),
     ("Projection and virtual production",
      ["projection-and-icvfx.md", "previz.md", "camera-tracking.md"]),
     ("GPU pipeline",

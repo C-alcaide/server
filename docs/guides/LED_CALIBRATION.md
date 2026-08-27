@@ -1,6 +1,6 @@
 # LED-Wall Color Calibration
 
-> **State and measurements:** [`../features/colour-grading-and-ocio.md`](../features/colour-grading-and-ocio.md)
+> **State and measurements:** [`../features/led-calibration.md`](../features/led-calibration.md)
 > **Implementation notes:** [`../architecture/OCIO_INTEGRATION_STUDY.md`](../architecture/OCIO_INTEGRATION_STUDY.md)
 > **This document is how-to.** Per [`../README.md`](../README.md), measured figures live once in `features/`; a tolerance an operator acts on may appear here, the measurements behind it should not.
 
@@ -102,59 +102,23 @@ ENABLED SIZE 33 STRENGTH 1 BYPASS 0 PATH C:/luts/wall1.cube
 - Calibration state is held on the channel mixer and is identical across the
   OpenGL and Vulkan back-ends. **Measured 2026-08-16**, not asserted — see below.
 
-## Verification — `cli.py calibration`
+## Verification — what you can rely on
 
-Until 2026-08-16 nothing drove this command at all: it is the delivery end of the
-whole colour chain and was the least-measured thing in it. It is now gated at
-**1 LSB, 32/32 cases, byte-identical on both mixers**
-(`CasparCG-TestRunner/core/calibration.py`).
+**Gated at 1 LSB, 32/32 cases, byte-identical on both mixers** (`cli.py calibration`). Two claims
+an operator depends on are measured rather than assumed:
 
-Every expectation is computed from **the frame the server itself rendered with no
-calibration LUT**. The producer, the colour conversion, the OETF and the consumer
-are therefore identical on both sides of the comparison and cancel exactly, so a
-disagreement can only be the calibration pass — which is what makes a 1 LSB gate
-defensible without modelling the entire pipeline.
+* the LUT is applied **once to the composite**, not once per layer — so stacking layers does not
+  stack the correction;
+* it reaches consumers **other than** the capture path, demonstrated on the screen consumer.
 
-Eight cases per patch. Three of them — `strength 0`, `BYPASS 1` and `CLEAR` — are
-identity checks against a frame the server produced, so a wrong model cannot
-satisfy them; all three come back at exactly **0.00 LSB**.
+The figures behind both, the controls that make them falsifiable, and what is still uncovered
+(DeckLink, NDI, mid-range `strength`) live in
+[`../features/led-calibration.md`](../features/led-calibration.md) §2–4. Per
+[`../README.md`](../README.md) the measurements have one home, and it is not this file.
 
-Two controls are asserted by the verdict rather than printed, because 32/32
-against a model is otherwise compatible with a command that did nothing:
-
-| control | why | measured |
-| :--- | :--- | ---: |
-| the LUT must MOVE the picture | else the model is applied to a baseline that equals the measurement | ≥ 61.0 LSB |
-| the two LUTs must DIFFER | `set_calibration_lut` invalidates the still-frame cache **by hand**; a stale fingerprint would replay the previous LUT's frame, and a close pair would hide it inside the gate | ≥ 27.0 LSB (needs ≥ 8.0) |
-
-### The two claims that distinguish it from `MIXER LUT3D`
-
-Neither is visible over one layer through one consumer, so each is its own case and
-both are part of the verdict rather than reported beside it.
-
-**Applied once to the composite, not once per layer.** Two layers blended with
-`MIXER OPACITY`, and a non-linear LUT separates the hypotheses:
-`LUT(blend(a,b))` against `blend(LUT(a), LUT(b))`. Both models are built from
-**measured** frames — each layer alone, and the blend itself — so the server's own
-blend appears on both sides and cancels; nothing assumes a blend domain or a
-rounding rule. The two sit **17.9 LSB** apart, and the answer is
-**channel-master** on both mixers, at **0.35 LSB** against **18.12 LSB** for the
-per-layer alternative.
-
-**Every consumer sees it.** A LUT applied only to the IMAGE consumer would satisfy
-every other case, since IMAGE is how they are all captured — so this reads the
-**screen** window instead, a consumer that is not the capture path. **0.32 LSB**
-from the model, with the LUT moving the screen picture **88 LSB** (a LUT that
-moved nothing would make the claim unfalsifiable). No loosened gate: screen holds
-1 LSB in this rig.
-
-**Still not covered**, so read the above as "channel-master, demonstrated on a
-second consumer" rather than "every consumer":
-
-- **DeckLink and NDI.** `cli.py consumer-view` can drive DeckLink looped back to a
-  second card at a 12 LSB gate; this battery reads screen only, so "every
-  consumer" is an extrapolation from two.
-- **Any cube that is not 9³ or not `.cube`.**
+**The limit worth carrying into a show:** "every consumer" is demonstrated on **two of five**.
+DeckLink and NDI are not covered, so if your delivery is SDI, treat the correction as verified in
+principle and check it on the wire.
 
 ## Client UI (casparcg-360-client)
 

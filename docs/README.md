@@ -38,10 +38,35 @@ such claims were found in a single sitting on 2026-08-14. A guide may state a **
 operator acts on — "gated at 1 LSB", "expect ±1 channel" — because that changes what they do. The
 measured figures behind it belong in `features/`, with a link.
 
-**Known and not yet reconciled:** `COLOR_GRADING.md`, `HDR_GUIDE.md`,
-`PIPELINE_EFFICIENCY_GUIDE.md`, `PLAYBACK_AND_RECORDING_GUIDE.md` and `LED_CALIBRATION.md` carry
-Verification sections predating this rule. They are not wrong, they are duplication waiting to
-rot; reconcile when next editing one, rather than in a sweep nobody reviews.
+### Two kinds of number, and only one of them moves
+
+Reconciling the five guides that predated this rule made the distinction sharper, because three of
+them moved and two of them should not:
+
+| kind | example | lives in |
+| :--- | :--- | :--- |
+| **verification record** — evidence the thing is correct | "32/32 at 1 LSB, byte-identical on both mixers" | **`features/`** |
+| **decision input** — figures an operator chooses between | "`prores_aw` keeps 260 frames, `prores_ks` keeps 138" | **`guides/`**, where the choice is made |
+
+A verification record answers *is it right?* — that is `features/`' question. A decision table
+answers *which should I use?* — and moving it out of the guide would leave the guide unable to
+answer the question it exists for. `PIPELINE_EFFICIENCY_GUIDE.md`'s encoder comparison and
+`PLAYBACK_AND_RECORDING_GUIDE.md`'s route tables are decision inputs and stay where they are.
+
+**All five are now reconciled**, 2026-08-27:
+
+* `COLOR_GRADING.md` — the seven `GRADE_NODE` figures moved; the guide states the tolerance.
+* `LED_CALIBRATION.md` — 12 figures moved into a **new** `features/led-calibration.md`, which had
+  been missing entirely (see below); the guide keeps the two claims an operator relies on and the
+  limit that matters, that "every consumer" is demonstrated on two of five.
+* `HDR_GUIDE.md` — the ffprobe readback moved to `features/ffmpeg-producer-and-consumer.md` §5; the
+  guide keeps the config and the conclusion that colorimetry survives a stream.
+* `PIPELINE_EFFICIENCY_GUIDE.md`, `PLAYBACK_AND_RECORDING_GUIDE.md` — decision inputs, kept.
+
+> **`features/led-calibration.md` was missing, and the reason generalises.** `features/` was
+> enumerated by **module**, and `CALIBRATION` is a *command* feature living in the mixer rather than
+> a module of its own — so a completeness check over `src/modules/` could not see it, and its
+> measurements had accumulated in the operator guide instead. Not every feature has a directory.
 
 ## The one rule worth reading first
 
