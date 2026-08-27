@@ -160,12 +160,58 @@ while *looking* configured.
 `wait-for-reference-duration` bounds the wait, in seconds.
 
 **This is the only output-side reference setting.** There is no config block that nominates which
-card supplies house reference — that is the card's own genlock input, set in Desktop Video. §5's
+card supplies house reference — that is the card's own genlock input, set in Desktop Video. §6's
 `<decklink-sync>` looks like it might be that and is not: it belongs to the *producer*.
 
 ---
 
-## 4. Subregion output
+## 4. Several SDI ports from one consumer
+
+One `<decklink>` consumer can drive **more than one card**, in sync. This is how a channel wider
+than a single SDI link reaches the wall — and it is what §1's "primary *and every secondary* port"
+refers to.
+
+```xml
+<decklink>
+    <device>1</device>                     <!-- the PRIMARY port -->
+    <subregion><width>1920</width></subregion>
+    <ports>
+        <port>
+            <device>2</device>
+            <subregion><src-x>1920</src-x> <width>1920</width></subregion>
+        </port>
+        <port>
+            <device>3</device>
+            <key-only>true</key-only>      <!-- a port can carry the key instead -->
+        </port>
+    </ports>
+</decklink>
+```
+
+Each `<port>` takes the **same** options as the primary: `device`, `key-only`, `video-mode` and its
+own `<subregion>`. Nothing else — colour, HDR, VANC and the GPU settings belong to the consumer as
+a whole, not to a port.
+
+Three things the shape implies:
+
+* **Sync across the outputs is the driver's job.** Adding any secondary port makes the consumer set
+  a DeckLink **playback group**, using the primary's device index as the group id. Guaranteed only on
+  cards that support it, and if setting it fails the consumer **logs an error and carries on
+  unsynchronised** rather than refusing. Not the same mechanism as `<wait-for-reference>` (§3), and
+  not the same as the Vulkan consumer's `<sync-group>`.
+* **`<latency>sync</latency>` turns the playback group OFF.** That value makes the consumer rely on
+  **genlock** instead, by design — the code says so. So the one latency setting that sounds most
+  like "synchronise" is the one that disables the driver's own sync for multi-port output. Choose
+  deliberately: playback group *or* genlock, not both.
+* **A secondary `<video-mode>` may differ from the channel's**, and `casparcg.config` warns that the
+  frame rate must match. **Nothing validates that** — no rate comparison exists in the consumer — so
+  a mismatch is yours to avoid rather than something you will be told about.
+* **The element name is checked.** A child of `<ports>` that is not `<port>` is a startup error, not
+  an ignored typo.
+
+---
+
+## 5. Subregion output
 
 A subregion copies a rectangle of the channel to a position on the DeckLink frame. All six numbers
 are honoured, and since 2026-08-27 the **Vulkan compute readback places them on the GPU** — no host
@@ -219,7 +265,7 @@ There is **no** 6-pixel alignment requirement, despite V210 packing six pixels p
 shaders walk output groups and compute each from scratch, so a region boundary inside a group is
 handled without any special case.
 
-## 5. `<decklink-sync>` — an INPUT setting, listed here because nothing else documents it
+## 6. `<decklink-sync>` — an INPUT setting, listed here because nothing else documents it
 
 **This is not an output option.** It supplies the default `SYNC_GROUP` / `SYNC_PEERS` for a
 DeckLink **producer**, so several capture cards deliver frames as one synchronised set. It has no
@@ -260,20 +306,20 @@ PLAY 1-20 decklink 2 SYNC_GROUP 1 SYNC_PEERS 2
 
 ---
 
-## 6. Bring-up order that avoids the usual confusion
+## 7. Bring-up order that avoids the usual confusion
 
 1. Start with **everything on `auto`** and a plain SDR channel. Confirm a picture on the card.
 2. Set `color-transfer` and, if HDR, check the receiver actually reads `hdr-line` — change the line
    before suspecting the metadata.
 3. Only then pin `gpu-readback-mode` if you are chasing performance, and change **one** of the three
    settings at a time. They are orthogonal, so changing two makes the result unattributable.
-4. If you need a subregion, keep `dest-x` **even** (§4). `auto`, `cuda`, `vulkan` and `cpu` all
+4. If you need a subregion, keep `dest-x` **even** (§5). `auto`, `cuda`, `vulkan` and `cpu` all
    place it correctly; **only `vulkan-dma`** falls back to the CPU path, and it says so. On the
    OpenGL mixer a subregion also disables `gpu-pack` (§1).
 
 ---
 
-## 7. What is measured, and what is not
+## 8. What is measured, and what is not
 
 Verified by `sdi-output` (pixels, `--hdr-metadata` for the HDR block), `signalling` (colour and HDR
 static metadata read back from the card — its ancillary-data checks live in `core/anc_check.py` and
