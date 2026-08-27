@@ -4,7 +4,7 @@
 > with only its per-channel gain measured
 > **Modules:** `src/accelerator/ogl/image/shader.frag`, `src/accelerator/vulkan/image/fragment_shader.frag`, `src/core/frame/frame_transform.h`
 > **Commands:** 13 fork-specific AMCP commands (10 `PROJECTION_*`, 2 ICVFX, and `MIXER FLIP`)
-> **Architecture:** none, deliberately — the shader stage order is the one structural fact, and it is in features/projection-and-icvfx.md with a diagram generated from the shader
+> **Architecture:** none, deliberately — the shader stage order is the one structural fact, and §below carries it with a diagram generated from the shader
 > **Guide:** [`../guides/VIRTUAL_PRODUCTION_FEATURES.md`](../guides/VIRTUAL_PRODUCTION_FEATURES.md), [`../guides/PROJECTION_CALIBRATION.md`](../guides/PROJECTION_CALIBRATION.md)
 > **Coverage:** `geometry`, `blend-mask`, `calibration`, `venue-test`, `icvfx-parity`
 
