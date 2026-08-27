@@ -443,6 +443,45 @@ class vulkan_output_consumer : public core::frame_consumer
         return caspar::make_ready_future(false);
     }
 
+    /// The formats this consumer can actually pick, by name. Deliberately NOT a full VkFormat
+    /// table: `pick_surface_format` chooses from a short preference list, and a name here that
+    /// the picker cannot produce would be dead code pretending to be coverage. Anything
+    /// unexpected reports its numeric value rather than a guess.
+    static std::wstring format_name(VkFormat f)
+    {
+        switch (f) {
+            case VK_FORMAT_UNDEFINED:              return L"none";
+            case VK_FORMAT_B8G8R8A8_UNORM:         return L"bgra8";
+            case VK_FORMAT_B8G8R8A8_SRGB:          return L"bgra8_srgb";
+            case VK_FORMAT_R8G8B8A8_UNORM:         return L"rgba8";
+            case VK_FORMAT_R8G8B8A8_SRGB:          return L"rgba8_srgb";
+            case VK_FORMAT_A2B10G10R10_UNORM_PACK32: return L"rgb10a2";
+            case VK_FORMAT_A2R10G10B10_UNORM_PACK32: return L"bgr10a2";
+            case VK_FORMAT_R16G16B16A16_SFLOAT:    return L"rgba16f";
+            case VK_FORMAT_R16G16B16A16_UNORM:     return L"rgba16";
+            default:                               return std::to_wstring(static_cast<int>(f));
+        }
+    }
+
+    /// Likewise for the colour space. This is the field that tells HDR10 signalling from an
+    /// sRGB fallback, so it is the one worth reading first when a picture looks right on a
+    /// scope and wrong on a display.
+    static std::wstring colorspace_name(VkColorSpaceKHR c)
+    {
+        switch (c) {
+            case VK_COLOR_SPACE_SRGB_NONLINEAR_KHR:          return L"srgb_nonlinear";
+            case VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT:    return L"extended_srgb_linear";
+            case VK_COLOR_SPACE_EXTENDED_SRGB_NONLINEAR_EXT: return L"extended_srgb_nonlinear";
+            case VK_COLOR_SPACE_HDR10_ST2084_EXT:            return L"hdr10_st2084";
+            case VK_COLOR_SPACE_HDR10_HLG_EXT:               return L"hdr10_hlg";
+            case VK_COLOR_SPACE_BT2020_LINEAR_EXT:           return L"bt2020_linear";
+            case VK_COLOR_SPACE_DISPLAY_P3_NONLINEAR_EXT:    return L"display_p3_nonlinear";
+            case VK_COLOR_SPACE_ADOBERGB_NONLINEAR_EXT:      return L"adobergb_nonlinear";
+            case VK_COLOR_SPACE_PASS_THROUGH_EXT:            return L"pass_through";
+            default:                                         return std::to_wstring(static_cast<int>(c));
+        }
+    }
+
     core::monitor::state state() const override
     {
         core::monitor::state s;
@@ -462,6 +501,40 @@ class vulkan_output_consumer : public core::frame_consumer
         s["vulkan-output/present-barrier"] = std::wstring(present_barrier_enabled_ ? L"true" : L"false");
         s["vulkan-output/delay"]           = std::to_wstring(config_.delay_frames);
         s["vulkan-output/delay-ms"]        = std::to_wstring(config_.delay_ms);
+
+        // ── WHAT THIS OUTPUT IS SIGNALLING ──────────────────────────────────────
+        //
+        // Added 2026-08-27. Nothing here was reported before, and nothing else in the tree
+        // exposes it: `INFO VULKAN_OUTPUT` enumerates displays and says nothing about colour.
+        // So a defect in what this consumer SIGNALS -- as opposed to what it renders -- had
+        // no query surface to assert against and therefore no battery could exist.
+        //
+        // The configured and the EFFECTIVE values are both worth having and can differ. The
+        // EDID probe overwrites `config_.max_cll` with the display's own maximum, so an
+        // operator asking for 1000 on a 600-nit panel gets 600 with only a log line to say
+        // so. These report the effective values, which are what leaves the machine.
+        s["vulkan-output/transfer"] = config_.transfer == hdr_transfer::pq    ? std::wstring(L"pq")
+                                    : config_.transfer == hdr_transfer::hlg   ? std::wstring(L"hlg")
+                                                                              : std::wstring(L"sdr");
+        s["vulkan-output/gamut"] =
+              config_.gamut == output_gamut::bt2020    ? std::wstring(L"bt2020")
+            : config_.gamut == output_gamut::p3_d65    ? std::wstring(L"p3_d65")
+            : config_.gamut == output_gamut::p3_dci    ? std::wstring(L"p3_dci")
+            : config_.gamut == output_gamut::adobe_rgb ? std::wstring(L"adobe_rgb")
+                                                       : std::wstring(L"bt709");
+        // `hw-hdr` distinguishes the NvAPI UHDA path -- where the display engine does the PQ
+        // encode at scanout -- from VK_EXT_hdr_metadata, where this consumer encodes. Same
+        // requested transfer, completely different signal chain.
+        s["vulkan-output/hw-hdr"]   = std::wstring(hw_hdr_active_ ? L"true" : L"false");
+        s["vulkan-output/max-cll"]  = std::to_wstring(config_.max_cll);
+        s["vulkan-output/max-fall"] = std::to_wstring(config_.max_fall);
+        s["vulkan-output/min-dml"]  = std::to_wstring(config_.min_dml);
+        s["vulkan-output/max-dml"]  = std::to_wstring(config_.max_dml);
+        // The surface the swapchain actually got. A request for HDR10 that fell back to an
+        // 8-bit sRGB surface is a working picture with the wrong signalling, which is exactly
+        // the class of defect this block exists to make assertable.
+        s["vulkan-output/surface-format"]     = format_name(active_format_);
+        s["vulkan-output/surface-colorspace"] = colorspace_name(active_colorspace_);
 
         // NvAPI Quadro Sync status
         if (nvapi_ && nvapi_->is_available() && config_.gsync_enabled) {
@@ -804,6 +877,15 @@ class vulkan_output_consumer : public core::frame_consumer
 
         // Pick surface format (BGRA8 for SDR, A2B10G10R10 or RGBA16F for HDR)
         VkSurfaceFormatKHR surface_format = pick_surface_format();
+        // KEPT, because it is the only honest answer to "what is this output signalling".
+        // `pick_surface_format` walks a preference list and falls back -- a request for
+        // HDR10 can land on an 8-bit sRGB surface, and until 2026-08-27 that outcome was
+        // visible only in a log line nobody parses. Reported by `state()`.
+        {
+            std::lock_guard<std::mutex> fmt_lock(config_mutex_);
+            active_format_     = surface_format.format;
+            active_colorspace_ = surface_format.colorSpace;
+        }
 
         VkSwapchainCreateInfoKHR create_info{};
         create_info.sType            = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
@@ -4318,6 +4400,10 @@ class vulkan_output_consumer : public core::frame_consumer
     // Hardware HDR (NvAPI display engine)
     uint32_t                         nvapi_display_id_ = 0;  // NvAPI display ID for this output
     bool                             hw_hdr_active_ = false;  // Hardware EOTF active (skip compute shader EOTF)
+    //: What the swapchain ACTUALLY got, as opposed to what was asked for. Guarded by
+    //: `config_mutex_` like the rest of the reported state.
+    VkFormat                         active_format_     = VK_FORMAT_UNDEFINED;
+    VkColorSpaceKHR                  active_colorspace_ = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
 
     // Output identification
     std::atomic<int>                 identify_frames_remaining_{0};
