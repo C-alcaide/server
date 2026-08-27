@@ -112,13 +112,15 @@ None of those needs a camera. All three are absent.
 ## 5. Known gaps
 
 1. **No coverage of any kind**; §4 lists three things testable without hardware.
-2. **The composition order of the five alignment commands is undocumented.** With `image_transform`
-   composition the fork has already been bitten twice by field-by-field merge rules
-   (`per_channel_levels`, `blend_mask`); an 18-command transform stack with no written order is the
-   same hazard with more surface.
-3. **`POSITION_SCALE`, `WORLDALIGN` and `ZOOM_LUT` appear in no document at all**, including the
-   operator guide — they were found by reading registrations for this document.
-4. **Five protocols, one implementation each, none with a fixture.** A regression in any receiver
+2. **The composition order is written down but unmeasured.**
+   [`../architecture/CAMERA_TRACKING_TRANSFORM.md`](../architecture/CAMERA_TRACKING_TRANSFORM.md)
+   reads the sequence out of `tracker_registry.cpp::inject_transform` — including that
+   `WORLDALIGN` **replaces** the legacy per-axis path rather than refining it, and that a lens
+   profile's nodal forward **adds** to a manual `NODAL`. Nothing verifies any of it. With
+   `image_transform` composition the fork has already been bitten twice by field-by-field merge
+   rules (`per_channel_levels`, `blend_mask`); an 18-command stack whose order is documented but
+   untested is the same hazard, one step better.
+3. **Five protocols, one implementation each, none with a fixture.** A regression in any receiver
    would be invisible until a shoot.
 
 ---
@@ -131,7 +133,15 @@ Not traced; the module predates this document.
 
 ## 7. Diagrams
 
-**Owed.** This is the clearest case in the fork for an *order* diagram: five alignment commands, a
-lens model and a delay all compose into one camera transform, and §5.2 records that the order is
-undocumented. Operator-facing — a rendered PNG, and drawing it would likely surface the same
-ordering question the gap names.
+**Owed, and the ordering question it would have surfaced has since been answered in prose.**
+[`../architecture/CAMERA_TRACKING_TRANSFORM.md`](../architecture/CAMERA_TRACKING_TRANSFORM.md) §2
+carries the five-step sequence; what is still missing is the operator-facing rendered PNG from a
+script in `docs/diagrams/`, which is what `CLAUDE.md` asks for on a manual rather than a developer
+note. The two mutually exclusive alignment paths are the part a picture tells better than the table
+does.
+
+> **Corrected 2026-08-27.** §5 item 2 said the composition order was undocumented and item 3 said
+> `POSITION_SCALE`, `WORLDALIGN` and `ZOOM_LUT` appeared in no document at all. Both were true when
+> written and were closed by the architecture note above and by
+> [`../guides/CAMERA_TRACKING.md`](../guides/CAMERA_TRACKING.md), which names all three. All 91
+> fork-specific commands are now documented somewhere.

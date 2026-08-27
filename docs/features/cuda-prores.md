@@ -6,7 +6,8 @@
 > consumer name; no dedicated `MIXER` command
 > **Architecture:** [`../architecture/CUDA_PRORES_IMPLEMENTATION_GUIDE.md`](../architecture/CUDA_PRORES_IMPLEMENTATION_GUIDE.md), [`../architecture/GPU_CODEC_HANDOFF.md`](../architecture/GPU_CODEC_HANDOFF.md)
 > **Guide:** [`../guides/CUDA_PRORES_OPERATION_GUIDE.md`](../guides/CUDA_PRORES_OPERATION_GUIDE.md)
-> **Coverage:** `prores-parity`, `producer-swap`, `playback-scaling`, `encode-matrix`, `coexistence`
+> **Coverage:** `prores-parity`, `producer-swap`, `playback-scaling`, `encode-matrix`, `coexistence`,
+> `decoded-alpha` (the 4444 alpha route)
 
 A complete ProRes implementation on the GPU: entropy decode, IDCT and colour handled by CUDA
 kernels, with the decoded frame handed to the mixer without a host round trip. Encode is the same

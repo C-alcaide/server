@@ -1,9 +1,12 @@
 # PREVIZ — 3D pre-visualisation
 
 > **State:** shipped, unmeasured
-> **Modules:** `src/modules/previz` (bridge in `src/accelerator/ogl/image/image_mixer`)
+> **Modules:** **not a module** — `src/accelerator/ogl/image/previz_renderer.cpp`, `previz_scene.h`,
+> `previz.frag` / `previz.vert`, with the Vulkan route through
+> `src/accelerator/vulkan/image/previz_texture_bridge.cpp`
 > **Commands:** 13 fork-specific AMCP commands
-> **Architecture:** none, deliberately — shares the ICVFX state the projection commands write -- see features/previz.md §on the two routes
+> **Architecture:** none — shares the ICVFX state the projection commands write; the two routes to
+> it are §5.3 below
 > **Guide:** [`../guides/PREVIZ_3D_MODULE.md`](../guides/PREVIZ_3D_MODULE.md)
 > **Coverage:** **none** — no harness battery drives any of these
 
@@ -11,10 +14,17 @@ Loads a 3D scene, maps channel output onto meshes in it, and renders a camera vi
 so a projection design can be checked without the venue. Screens, presets and camera positions are
 addressable by name at runtime.
 
-> **Read §4 first.** This is the largest undocumented and unmeasured surface in the fork: 13
-> commands, none of them exercised by any battery. That combination is exactly what ICVFX was
-> before an audit found a live colour defect in it, and this document exists because that
-> correlation was measured rather than assumed.
+> **Read §4 first.** This is the largest **unmeasured** surface in the fork: 13 commands, none of
+> them exercised by any battery. That combination — undocumented *and* undriven — is exactly what
+> ICVFX was before an audit found a live colour defect in it, and this document exists because that
+> correlation was measured rather than assumed. **This file closed the documented half**; the
+> unmeasured half is unchanged.
+
+> **Corrected 2026-08-27.** Three claims in this file's own header were wrong. **`src/modules/previz`
+> does not exist** — PREVIZ is not a module, which is the same blind spot that hid three features
+> from the `features/` inventory; the bridge path was missing its extension; and the *Architecture*
+> field cited this very document, by a section name it does not have. Below, §5.2 claimed the feature
+> was OpenGL-only after the Vulkan route had shipped.
 
 ---
 
@@ -108,8 +118,8 @@ That is recorded as the finding it is rather than as a to-do. The measured corre
 2026-08-26 audit: of the fork's 58 AMCP commands, the ones carrying defects were the ones that
 were both undocumented and undriven. ICVFX had a red/blue exchange on the OpenGL mixer that
 survived because no battery drove it and because the natural way to test a white balance — equal
-gains — is invariant under exactly that defect. **PREVIZ is the same shape, thirteen times over,
-and on the same OpenGL path.**
+gains — is invariant under exactly that defect. **PREVIZ is the same shape, thirteen times over**, and it
+reaches the same OpenGL renderer from both mixers.
 
 What a first battery should do, in the order that would have caught the ICVFX class:
 
@@ -125,9 +135,14 @@ What a first battery should do, in the order that would have caught the ICVFX cl
 ## 5. Known gaps
 
 1. **No coverage at all** — see §4 for the first three checks worth writing.
-2. **OpenGL-only**, undocumented until now. Either the Vulkan mixer grows the same bridge or the
-   commands should refuse on a Vulkan channel with a message saying why, rather than silently
-   doing nothing.
+2. **The renderer is OpenGL on both mixers, and the parity that implies is unmeasured.** This item
+   read *"OpenGL-only — either the Vulkan mixer grows the same bridge or the commands should
+   refuse"*; the bridge exists (`vulkan/image/image_mixer.cpp:1204-1254`). A Vulkan channel
+   composites in Vulkan, posts the result to the VK→GL bridge, renders the scene on the OGL thread
+   and returns *that* as the channel output — so previz **replaces** the 2D output and skips the
+   working-space composite. Two consequences nothing checks: a Vulkan channel running previz is
+   doing a per-frame round trip through a second API, and its colour handling differs from the same
+   channel with previz off.
 3. **`PREVIZ SCREEN`'s eight subcommands are unenumerated** in any document, including this one:
    the list in §1 was recovered from a dispatch chain, and the parameter shape of each is not
    established. Reading the handler is currently the only way to know.

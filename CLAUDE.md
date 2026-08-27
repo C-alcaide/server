@@ -65,23 +65,31 @@ Two rules that outrank the table:
   running the nearest battery. That sentence is what turns a gap into a tracked item; the
   Vulkan-consumer-metadata gap below was found exactly that way.
 
-**Known gap, 2026-08-26: nineteen fork-specific AMCP commands are documented nowhere.** Checked
-mechanically against `d:\Github\server-upstream`, so these are this fork's own rather than stock
-CasparCG:
+**Closed 2026-08-27: all 91 fork-specific AMCP commands are documented.** This block used to name
+nineteen that were documented nowhere — the twelve `PREVIZ *` commands, `INFO PORTAUDIO`, `MIXER
+FLIP` and five `MIXER PROJECTION_*`. Re-checked mechanically on 2026-08-27, against the same
+`d:\Github\server-upstream` diff that produced the fork-only set: **0 of 91 undocumented.**
 
-`MIXER PROJECTION_FRUSTUM`, `MIXER PROJECTION_ICVFX`, `MIXER PROJECTION_ICVFX_COLOR`,
-`MIXER PROJECTION_LENS`, `MIXER PROJECTION_OFFSET`, `MIXER FLIP`, `INFO PORTAUDIO`, and every
-one of the twelve `PREVIZ *` commands.
+**The undocumented half closed; the untested half did not, and that is the half the defects were
+in.** `MIXER PROJECTION_ICVFX_COLOR` was on the old list and carried a red/blue exchange on the
+OpenGL mixer that no test could see because no battery drove ICVFX at all. Undocumented and
+untested was the same gap seen twice — nobody writes a check for a feature they cannot find, and
+nobody finds a feature that is not written down. **Only the first of those is fixed.** Documentation
+makes the remaining gap findable; it does not make it smaller.
 
-**This is where the defects were.** `MIXER PROJECTION_ICVFX_COLOR` is on that list, and it
-carried a red/blue exchange on the OpenGL mixer that no test could see because no battery drove
-ICVFX at all. Undocumented and untested is the same gap seen twice: nobody writes a check for a
-feature they cannot find, and nobody finds a feature that is not written down. Treat the list
-above as a priority order for both docs and coverage, not as a tidying task.
+Still uncovered, and now the priority order for coverage rather than for docs:
 
-`icvfx-parity` now covers the gain. The mask geometry, the feather, the inner-frustum
-reprojection, the tweened forms, and all twelve `PREVIZ` commands remain both undocumented and
-uncovered.
+* **all thirteen `PREVIZ` commands** — no battery references PREVIZ at all. `features/previz.md`
+  §4 lists the first three checks worth writing, in the order that would have caught the ICVFX
+  class. (Thirteen, not twelve: the old count was short by one.)
+* **all eighteen `TRACKING` commands** — the composition order is now read out of the source in
+  `architecture/CAMERA_TRACKING_TRANSFORM.md` and verified by nothing.
+* **ICVFX beyond the gain** — `icvfx-parity` covers the gain exchange. The mask geometry, the
+  feather, the inner-frustum reprojection and the tweened forms remain uncovered.
+
+**Verifying this block is one command**, and it is worth re-running rather than trusting: extract
+`register_command`/`register_channel_command` names from both trees, subtract upstream's, and grep
+`docs/**/*.md` for each. It went stale in one day of doc work and read as current for ten.
 
 **Known gap, 2026-08-26: `vk-validation` reports clean whatever you do.** A deliberate
 `mipLevels = 0` in `device::create_exportable_texture` — an unambiguous stateless VUID, verified

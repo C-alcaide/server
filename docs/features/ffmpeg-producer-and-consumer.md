@@ -6,7 +6,8 @@
 > **Architecture:** [`../architecture/FFMPEG_8_MIGRATION.md`](../architecture/FFMPEG_8_MIGRATION.md)
 > **Guide:** [`../guides/PLAYBACK_AND_RECORDING_GUIDE.md`](../guides/PLAYBACK_AND_RECORDING_GUIDE.md)
 > **Coverage:** `decode-cost`, `gpu-direct-parity`, `encode-matrix`, `encode-parity`, `flat-decoded`,
-> `source-colorspace`, `loop-boundary`, `seek`, `vk-decode-soak`
+> `source-colorspace`, `source-range`, `chroma-siting`, `decoded-alpha`, `encode-cost`,
+> `loop-boundary`, `seek`, `vk-decode-soak`
 
 **This document exists because the folder's original scope rule excluded it.** `features/` was built
 from *modules absent from upstream*, and `ffmpeg` is not absent — it is merely rewritten. Ten

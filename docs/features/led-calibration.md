@@ -1,6 +1,9 @@
 # LED calibration — channel-master display LUT
 
 > **State:** shipped
+> **Modules:** **not a module** — the channel-master LUT stage declared in
+> `src/core/mixer/image/image_mixer.h` and implemented in both
+> `src/accelerator/{ogl,vulkan}/image/image_mixer.cpp`
 > **Architecture:** none, deliberately — one 3D LUT applied to the composite; the structural facts are the two claims in §3, and both are measured
 > **Guide:** [`../guides/LED_CALIBRATION.md`](../guides/LED_CALIBRATION.md)
 > **Commands:** `CALIBRATION` (fork-only)

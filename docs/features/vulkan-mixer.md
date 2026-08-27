@@ -5,7 +5,7 @@
 > **Commands:** none of its own — selected by `<accelerator>vulkan</accelerator>`
 > **Architecture:** [`../architecture/UPSTREAM_VULKAN_COMPARISON.md`](../architecture/UPSTREAM_VULKAN_COMPARISON.md), [`../architecture/VULKAN_MIXER_IMPLEMENTATION.md`](../architecture/VULKAN_MIXER_IMPLEMENTATION.md)
 > **Guide:** none, deliberately — the mixer is a backend choice rather than an operator procedure; its configuration is in §1 here
-> **Coverage:** `conformance`, `grading`, `mixer-parity`, and every battery that takes `--mixer vulkan`
+> **Coverage:** `conformance`, `grading`, `mixer-parity`, `mix-stage`, and every battery that takes `--mixer vulkan`
 
 A second mixer backend beside the OpenGL one, doing the same compositing and the same grading chain
 through a Vulkan pipeline. It is the backend the fork's GPU-direct work targets: FFmpeg's Vulkan
