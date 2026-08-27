@@ -69,12 +69,44 @@ Reference Gamut Compress" in three places, which claims conformance the code doe
 | Grading operators, single and neutral | `grading` | 1 LSB |
 | Operators at extremes | `grade-extremes` | 1 LSB |
 | Windowed / masked grading | `grade-window` | 1 LSB |
-| Gamut compression | `gamut-compress`, `flat-gamut-compress`, `gamut-sweep` | 1 LSB |
+| Gamut compression | `flat-gamut-compress`, `gamut-sweep` | 1 LSB |
+| Gamut compression, real sources | `gamut-compress` | **currently exits non-zero — see below** |
 | Working-space tone mapping | `ws-tonemap` | 1 LSB |
 | Banding / gradient integrity | `banding` | — |
 | Bokeh / blur luma behaviour | `bokeh-luma` | — |
-| OCIO transforms | `ocio`, `ocio-display`, `ocio-look`, `ocio-lut3d`, `ocio-exposure`, `ocio-gamut-compress` | 1 LSB |
+| OCIO transforms | `ocio`, `ocio-look`, `ocio-lut3d`, `ocio-exposure`, `ocio-gamut-compress` | 1 LSB |
+| OCIO display transform | `ocio-display` | **1 LSB or the fp16 band, whichever is larger** — see below |
 | CDL from file | `cdl-file` | 1 LSB |
+
+> **`ocio-display` is the one entry that is not a flat 1 LSB, and a reader comparing its output
+> against this table will otherwise think it failed.** Its allowance is `max(1 LSB, fp16 band)`,
+> computed **per patch and per view** and always reported. The band is wide only where fp16
+> cancellation is sensitive; a tone map compresses that sensitivity away, so ACES 2.0 views and all
+> greys sit at the ordinary 1 LSB. Measured 2026-08-27: **4/4 views inside their allowance**, worst
+> deviation overall **4.00 LSB** — which is a pass, not a near-miss, because that patch's band is
+> wider than 4.00. `core/ocio_display.py` carries the derivation.
+
+> **`cli.py gamut-compress` exits non-zero on this build, and it is an open item rather than a
+> documented figure.** Measured 2026-08-27, **identically on both mixers**, so it is not a parity or
+> backend fault:
+>
+> * the two **differential** checks the module says carry the meaning both pass — `2/2 pairs show
+>   the flag changing the picture` (255 LSB apart) and `2/2 compressed halves match the model where
+>   the comparison can see` (0.43 vs 0.43 and 0.36 vs 0.35 readback-uncertainties, over ~98k and
+>   ~136k unclipped pixels);
+> * what fails is `0/4 measured cases passed` — the per-case frame-wide PSNR of the **off** rows,
+>   which `cmd_gamut_compress` deliberately keeps in the verdict on the grounds that "nothing is
+>   ill-conditioned about them".
+>
+> The sources are `h265_hdr10` and `prores_422_hlg` into a **BT.709 SDR** channel, i.e. exactly the
+> HDR-to-SDR comparison the same module says its oracle cannot judge for the *on* rows. Whether that
+> reasoning also covers the *off* rows is the open question, and it is a question about the oracle
+> before it is one about the server.
+>
+> **Not resolved here, and not papered over.** `flat-gamut-compress` (4/4) and
+> `ocio-gamut-compress` (3/3) both pass and both gate the compressor itself on flat patches — which
+> is the measurement the module's own text points to when this comparison cannot see. Settling this
+> needs someone to decide what the off rows' PSNR is being compared against, not another run.
 
 Latest, both backends, **re-measured 2026-08-27 on a freshly rebuilt binary**: `conformance`
 100/100 conversions, 23/23 patches each, worst **0.55 LSB**; `grading` 48/48 cases, 8/8 patches,
