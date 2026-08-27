@@ -4,6 +4,7 @@
 > **Module:** `src/modules/screen` — **2,963 lines** different from upstream in two files
 > (`consumer/screen_consumer.cpp`, `consumer/screen.frag`)
 > **Commands:** consumer name and its parameters
+> **Architecture:** none, deliberately — the fork's changes are internal; the structural point (it is the instrument most batteries measure through) is in features/screen-consumer.md
 > **Guide:** none, deliberately — Upstream owns the screen consumer's operation; this fork's changes are internal and the consumer is discussed in context across six guides. No dedicated guide.
 > **Coverage:** used as the capture surface by `playback-scaling`, `mixer-parity`,
 > `consumer-view` and most picture batteries

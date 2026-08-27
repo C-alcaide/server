@@ -3,6 +3,7 @@
 > **State:** shipped
 > **Modules:** `src/modules/cuda_notchlc`
 > **Commands:** none of its own — the `CUDA_NOTCHLC` keyword on `PLAY`
+> **Architecture:** [`../architecture/GPU_CODEC_HANDOFF.md`](../architecture/GPU_CODEC_HANDOFF.md)
 > **Guide:** [`../guides/PIPELINE_EFFICIENCY_GUIDE.md`](../guides/PIPELINE_EFFICIENCY_GUIDE.md) (§NotchLC — no dedicated guide)
 > **Coverage:** `producer-swap`, `coexistence`
 

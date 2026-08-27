@@ -3,6 +3,7 @@
 > **State:** shipped, unmeasured
 > **Modules:** `src/modules/cluster`
 > **Commands:** 4 fork-specific AMCP commands, registered by the module
+> **Architecture:** [`../architecture/CLUSTER_SYNC_DESIGN.md`](../architecture/CLUSTER_SYNC_DESIGN.md)
 > **Guide:** [`../guides/CLUSTER_SYNC.md`](../guides/CLUSTER_SYNC.md)
 > **Coverage:** **none**
 

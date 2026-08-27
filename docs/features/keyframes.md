@@ -3,6 +3,7 @@
 > **State:** shipped, unmeasured
 > **Modules:** `src/modules/keyframes`
 > **Commands:** 8 fork-specific AMCP commands, registered by the module
+> **Architecture:** none, deliberately — a tween table over the existing transform system; no structural decision to record
 > **Guide:** [`../guides/KEYFRAMES.md`](../guides/KEYFRAMES.md)
 > **Coverage:** **none**
 

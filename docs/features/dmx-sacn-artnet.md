@@ -3,6 +3,7 @@
 > **State:** shipped
 > **Modules:** `src/modules/sacn`, `src/modules/artnet`, `src/modules/dmx_common`
 > **Commands:** none — consumers configured on `ADD` or in the config
+> **Architecture:** none, deliberately — two protocol emitters over one shared channel mapping; the guide covers the mapping
 > **Guide:** [`../guides/DMX_LIGHTING.md`](../guides/DMX_LIGHTING.md)
 > **Coverage:** `dmx`
 

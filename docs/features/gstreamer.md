@@ -3,6 +3,7 @@
 > **State:** shipped
 > **Modules:** `src/modules/gstreamer`
 > **Commands:** 2 (`GST INFO`, `GST LIST`)
+> **Architecture:** none, deliberately — its GPU route reuses vulkan::d3d11_import_bridge, covered by GPU_INTEROP_ARCHITECTURE.md
 > **Guide:** [`../guides/GSTREAMER_GUIDE.md`](../guides/GSTREAMER_GUIDE.md)
 > **Coverage:** `gstreamer`, `gst-consumer-cost`, `gst-dll-probe`, `coexistence`
 

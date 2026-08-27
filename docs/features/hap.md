@@ -4,7 +4,7 @@
 > **Modules:** `src/modules/hap` (producer; `cpu`, `gl`, `snappy`, `util` subsystems)
 > **Commands:** none of its own — a plain `PLAY` of a HAP file
 > **Guide:** [`../guides/HAP_PLAYBACK.md`](../guides/HAP_PLAYBACK.md)
-> **Architecture:** [`../architecture/HAP_DECODE_ROUTES.md`](../architecture/HAP_DECODE_ROUTES.md)
+> **Architecture:** [`../architecture/HAP_DECODE_ROUTES.md`](../architecture/HAP_DECODE_ROUTES.md), [`../architecture/GPU_CODEC_HANDOFF.md`](../architecture/GPU_CODEC_HANDOFF.md)
 > **Coverage:** `loop-boundary`, `mixer-parity --codec hap_q --decoder hap_native`
 
 Plays HAP, HAP Alpha, HAP Q and HAP Q Alpha by handing the compressed DXT blocks straight to the

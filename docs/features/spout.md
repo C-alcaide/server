@@ -3,6 +3,7 @@
 > **State:** shipped, unmeasured
 > **Modules:** `src/modules/spout` (producer and consumer)
 > **Commands:** none of its own — reached by producer syntax on `PLAY` and by consumer name on `ADD`
+> **Architecture:** none, deliberately — a thin wrapper over the Spout SDK; the interesting constraint (adapter-bound shared handles) is in the guide
 > **Guide:** [`../guides/SPOUT.md`](../guides/SPOUT.md)
 > **Coverage:** **none**
 

@@ -9,6 +9,17 @@ That distinction was got wrong once during the reorganisation of 2026-08-26 - th
 as deprecated before a check showed eight source comments citing it. **A document the code cites
 by section is not deprecated, whatever its filename suggests.**
 
+**Thirteen documents for twenty-five features, and that ratio is the design.** This folder exists
+for implementations whose SHAPE needs explaining -- not one per module. Every `features/` document
+now carries an `> **Architecture:**` line, and twelve of them say `none, deliberately` with the
+reason: conventional plumbing, a thin SDK wrapper, or a structural point already recorded as state.
+An absence that is stated can be argued with; one that is merely missing reads as an oversight.
+
+`CLUSTER_SYNC_DESIGN.md` and `GPU_CODEC_HANDOFF.md` were added on 2026-08-27 -- the first because
+three independent layers (ptp / sync / relay) mean drift, jumps and ignored commands are three
+different faults the symptom cannot distinguish; the second because this fork has three GPU codec
+producers that hand the mixer three DIFFERENT things, with no house style to copy for a fourth.
+
 `HAP_DECODE_ROUTES.md` was added on 2026-08-27. Nine documents for twenty-three features is
 correct — this folder exists for implementations whose *shape* needs explaining, not for every
 module. HAP earned one because it has **three** decode routes chosen at construction and never

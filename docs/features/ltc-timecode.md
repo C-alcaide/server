@@ -3,6 +3,7 @@
 > **State:** shipped, unmeasured
 > **Modules:** `src/modules/ltc`
 > **Commands:** 2 (`LTC LOAD`, `INFO LTC`)
+> **Architecture:** none, deliberately — one input device and a clock fallback; the guide covers it completely
 > **Guide:** [`../guides/LTC_TIMECODE.md`](../guides/LTC_TIMECODE.md)
 > **Coverage:** **none**
 

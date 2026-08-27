@@ -3,6 +3,7 @@
 > **State:** shipped, unmeasured
 > **Modules:** `src/modules/previz` (bridge in `src/accelerator/ogl/image/image_mixer`)
 > **Commands:** 13 fork-specific AMCP commands
+> **Architecture:** none, deliberately — shares the ICVFX state the projection commands write -- see features/previz.md §on the two routes
 > **Guide:** [`../guides/PREVIZ_3D_MODULE.md`](../guides/PREVIZ_3D_MODULE.md)
 > **Coverage:** **none** — no harness battery drives any of these
 

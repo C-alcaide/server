@@ -4,7 +4,7 @@
 > **Modules:** `src/modules/cuda_prores` (producer, consumer, bypass consumer, CUDA kernels)
 > **Commands:** reached by the `CUDA_PRORES` / `CUDA_PRORES_BYPASS` keyword on `PLAY`, and by a
 > consumer name; no dedicated `MIXER` command
-> **Architecture:** [`../architecture/CUDA_PRORES_IMPLEMENTATION_GUIDE.md`](../architecture/CUDA_PRORES_IMPLEMENTATION_GUIDE.md)
+> **Architecture:** [`../architecture/CUDA_PRORES_IMPLEMENTATION_GUIDE.md`](../architecture/CUDA_PRORES_IMPLEMENTATION_GUIDE.md), [`../architecture/GPU_CODEC_HANDOFF.md`](../architecture/GPU_CODEC_HANDOFF.md)
 > **Guide:** [`../guides/CUDA_PRORES_OPERATION_GUIDE.md`](../guides/CUDA_PRORES_OPERATION_GUIDE.md)
 > **Coverage:** `prores-parity`, `producer-swap`, `playback-scaling`, `encode-matrix`, `coexistence`
 
