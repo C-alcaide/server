@@ -23,7 +23,7 @@ Configuration surface, read from `config_` in `vulkan_output_consumer.cpp`:
 | group | options |
 | :--- | :--- |
 | Display selection | `display_name`, `gpu_index`, `dest_x`, `dest_y` |
-| Signalling | `eotf`, `gamut`, `display_peak_luminance` |
+| Signalling | `transfer` (the one that acts), plus `eotf`, `gamut`, `display_peak_luminance` — **all three inert**, §below |
 | EDID | `edid_emulation`, `edid_auto_hdr` |
 | Sync | `gsync_enabled`, `delay_frames`, `delay_ms`, `buffer_depth` |
 | Misc | `display_blanker` |
@@ -44,10 +44,23 @@ that does not describe what it actually wants; emulating one makes the driver pr
 device needs. The cost is a hard NVIDIA dependency for that feature and behaviour that varies with
 the driver.
 
-**Signalling is configured, not inferred.** `eotf`, `gamut` and `display_peak_luminance` are stated
-rather than derived from the channel's colour space, because the two are genuinely independent — a
-BT.2020 PQ channel may be feeding a device that wants something else. The cost is that a
-misconfiguration is invisible in the picture: the pixels are right and the metadata is wrong.
+**Signalling is configured, not inferred.** These are stated rather than derived from the channel's
+colour space, because the two are genuinely independent — a BT.2020 PQ channel may be feeding a
+device that wants something else. The cost is that a misconfiguration is invisible in the picture:
+the pixels are right and the metadata is wrong.
+
+**But only `transfer` actually acts.** `eotf`, `gamut` and `display_peak_luminance` are all parsed
+and then reach nothing on this consumer:
+
+| setting | what happens to it |
+| :--- | :--- |
+| `transfer` | drives the surface format and colour space the swapchain requests — the live one |
+| `gamut` | read and ignored, deliberately (§below), and it says so via a startup warning and `gamut-inert` |
+| `eotf` | assigned in `config.cpp` and **read nowhere else at all** |
+| `display_peak_luminance` | reaches only the disabled conversion pipeline. Its two use sites are inside `if (false && …)` and behind `if (color_pipeline_ && …)`, and `color_pipeline_` is only ever constructed in the first of those — so it is always null |
+
+`<gamut>`'s inertness was found and documented; the other two were presented here as working until
+2026-08-27. Only `gamut` announces itself, which is why it was the one that got noticed.
 
 ---
 
