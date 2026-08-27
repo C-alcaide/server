@@ -97,11 +97,33 @@ code rather than from a validation run: nothing anywhere issued a barrier for im
 binds with a descriptor declaring `eShaderReadOnlyOptimal`. The battery was run before and after
 and reported 0 both times, which — now — is exactly what it would report either way.
 
-**Known gap, 2026-08-17: nothing measures Vulkan output consumer metadata.** No harness module
-references `nvapi`, `UHDA` or `edid`; `signalling` drives DeckLink and the FFmpeg stream, and
-`vulkan_out` is reachable only through `cli.py run`, which checks pictures. So a change to
-what that consumer *signals* — as opposed to what it renders — currently has no test that can
-fail. Tracked in `CasparCG-TestRunner/docs/handoff_2026-08-15.md` with a `VERIFY` line.
+**Closed 2026-08-27: Vulkan output consumer metadata is measured** — `cli.py
+vulkan-output-signalling`. It was carried as a missing battery from 2026-08-17, and that was the
+wrong diagnosis. **The gap was observability, and no amount of battery-writing would have reached
+it:**
+
+* `INFO VULKAN_OUTPUT` enumerates displays — indices, names, resolution, tier — and says nothing
+  about colour;
+* the consumer's `state()` reported presentation, sync and frame counts and **not one signalling
+  field**;
+* `OscFrameSync` understood frame, fps and producer, and discarded every other OSC address — so
+  even once the server published something, the harness could not read it.
+
+Three walls, none of them a test. The lesson generalises: **before recording a gap as "no battery",
+check whether the thing is observable at all.** A missing battery is a cheap fix; a missing
+observable is the reason the battery was never written.
+
+The consumer now reports transfer, gamut (with `gamut-inert`, because `<gamut>` is read and
+ignored), `hw-hdr`, MaxCLL/MaxFALL, the mastering-luminance pair, and the surface format and colour
+space the swapchain **actually got**. The battery gates the config round trip and internal
+contradictions, and *names* rather than fails the platform degradations.
+
+**What it found immediately, and what remains open:** PQ/BT.2020 requested and
+`bgra8`/`srgb_nonlinear` delivered — Windows 10 build 19045 has no `VK_KHR_display`, so the
+fullscreen-exclusive path offers no HDR surface. That also explains the two `vulkan_out` matrix
+cases sitting at 18.7 dB against a 40 dB gate at PQ and HLG while SDR passes. **Still not covered:**
+whether the signalled metadata reaches a display, which needs NvAPI read-back or a capture device —
+so `nvapi`, `UHDA` and `edid` remain untested by anything.
 
 ## Where the numbers come from — read this before implementing or auditing a standard
 

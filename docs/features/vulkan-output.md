@@ -3,7 +3,7 @@
 > **State:** partial
 > **Modules:** `src/modules/vulkan_output`
 > **Commands:** 1 (`INFO VULKAN_OUTPUT`)
-> **Coverage:** `consumer-view`; **metadata is uncovered — see §3**
+> **Coverage:** `consumer-view`, `vulkan-output-signalling`
 
 Presents a channel straight to a display through Vulkan, bypassing the window compositor, with
 control over the HDR signalling, the colour volume and the sync behaviour. Intended for LED
@@ -49,34 +49,77 @@ misconfiguration is invisible in the picture: the pixels are right and the metad
 
 ---
 
-## 3. Verification — and the gap that matters
+## 3. Verification
 
 | what | battery |
 | :--- | :--- |
 | Picture through the consumer | `consumer-view` |
+| **What it signals** — transfer, gamut, HDR metadata, the actual surface | `vulkan-output-signalling` |
 
-**Nothing measures what this consumer SIGNALS.** That is a known, tracked gap, recorded in
-`CLAUDE.md` since 2026-08-17 and still open: no harness module references `nvapi`, `UHDA` or `edid`.
-`signalling` drives DeckLink and the FFmpeg stream; this consumer is reachable only through
-`cli.py run`, which checks pictures.
+**This was the fork's highest-value missing battery until 2026-08-27, and the diagnosis was wrong.**
+It had been recorded since 2026-08-17 as "no test drives the metadata". The real obstacle was that
+**nothing could observe the metadata**:
 
-So a change to `eotf`, `gamut`, `display_peak_luminance`, `edid_emulation` or `edid_auto_hdr`
-**currently has no test that can fail** — and §2 explains why that is worse here than elsewhere: a
-metadata defect leaves the picture correct.
+* `INFO VULKAN_OUTPUT` enumerates displays and says nothing about colour;
+* `state()` reported presentation, sync and frame counts and not one signalling field;
+* the harness's OSC listener discarded every address but frame, fps and producer.
 
-This is exactly the shape that produced the ICVFX defect (undriven surface, plausible-looking
-output) and it is the highest-value missing battery in the fork, not merely an omission.
+Three walls, none of them a test. `state()` now publishes transfer, gamut, `gamut-inert`, `hw-hdr`,
+MaxCLL/MaxFALL, the mastering-luminance pair, and **the surface format and colour space the
+swapchain actually got** — the last pair being the honest answer to "what is this output
+signalling", because `pick_surface_format` walks a preference list and falls back.
+
+### What it measured on its first run
+
+| | requested | delivered |
+| :--- | :--- | :--- |
+| transfer | `pq` | `transfer=pq` reported |
+| gamut | `bt2020` | **inert** — see below |
+| surface | an HDR10 surface | **`bgra8` / `srgb_nonlinear`** |
+| `hw-hdr` | — | `false` |
+
+**HDR10 requested, 8-bit sRGB delivered.** Windows 10 build 19045 has no `VK_KHR_display`, so the
+consumer takes the fullscreen-exclusive path where no HDR surface is offered. This also explains the
+two `vulkan_out` matrix cases sitting at **18.7 dB against a 40 dB gate** at PQ and HLG while SDR
+passes: the output is 8-bit sRGB where the check's model expects PQ-encoded.
+
+**`<gamut>` is read, accepted and ignored.** The per-consumer colour conversion pass is disabled
+behind a literal `if (false && …)`, so the framebuffer carries the *channel's* colour space. The
+consumer had warned about this at startup for some time; the warning was being handed to a
+verbosity-gated log callback and dropped, so nobody had read it. `gamut-inert` now reports it from
+the same predicate the warning uses, so the two cannot drift.
+
+**The battery gates what is universal and names what is local.** Gated: the config round trip, and
+internal contradictions such as `hw-hdr true` on an SDR surface or an HDR colour space on an 8-bit
+format — wrong on any platform. Named rather than failed: the HDR degradation and the inert gamut,
+because both are the current state of this platform and this code, and a check that can never pass
+here stops being read.
+
+**Still uncovered:** whether the signalled metadata *reaches a display*. That needs NvAPI read-back
+or a capture device, and nothing here has either — so `nvapi`, `UHDA` and `edid` remain untested.
+What is asserted is what the server says it is sending, which is the half that was previously
+unobservable.
 
 ---
 
 ## 4. Known gaps
 
-1. **No metadata coverage at all** — the tracked gap above. It needs a capture path that reads back
-   what was signalled, not what was rendered.
-2. **`consumer-view` covers the picture only**, on one display configuration.
-3. **NVAPI-dependent features degrade silently.** `INFO VULKAN_OUTPUT` reports the resolved state,
-   but nothing asserts that a requested EDID emulation actually happened.
-4. **`delay_frames` / `delay_ms` / `buffer_depth` interact** and their combined behaviour is not
+1. ~~No metadata coverage at all~~ — **closed**, see §3. What replaced it is narrower and worth
+   stating precisely: the battery asserts what the **server says** it is sending. Whether that
+   reaches a display is still unmeasured and needs NvAPI read-back or a capture device.
+2. **`nvapi`, `UHDA` and `edid` are still untested by anything.** `nvapi_helpers` has genuine
+   read-back — `read_edid`, `get_sync_status`, and `set_uhda_hdr` reads back what the driver holds
+   — so the capability exists and nothing calls it from a test. That is the next battery here.
+3. **HDR cannot be reached on this platform at all.** No `VK_KHR_display` on Windows 10 build
+   19045, so every HDR request degrades to an 8-bit sRGB surface. So the HDR *code paths* —
+   `hw-hdr`, the ST.2086 block, the scRGB surface — have never executed here, and the battery
+   names that rather than pretending to cover it.
+4. **A latent double gamut mapping on the hardware-HDR path.** The consumer presents an scRGB
+   (BT.709-primaries, linear) surface and lets the display engine map it to BT.2020; with a
+   BT.2020 channel those primaries are mapped twice. It warns at startup and is unreachable here
+   because `hw-hdr` is false — it will bite the first time it is true on a non-BT.709 channel.
+5. **`consumer-view` covers the picture only**, on one display configuration.
+6. **`delay_frames` / `delay_ms` / `buffer_depth` interact** and their combined behaviour is not
    documented in one place.
 
 ---

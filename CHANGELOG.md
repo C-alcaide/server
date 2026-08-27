@@ -1,6 +1,44 @@
 CasparVP — Unreleased
 ==========================================
 
+### Added: the Vulkan output consumer reports what it signals — and it is not what was asked
+
+`state()` reported presentation, sync and frame counts and **no colour**. Combined with
+`INFO VULKAN_OUTPUT`, which enumerates displays, the server had no query surface for what this
+consumer signals. So the fork's longest-standing "highest-value missing battery" was never a
+missing battery: it was a missing observable, and three walls stood in the way — the AMCP query,
+`state()`, and a harness OSC listener that discarded every address but frame, fps and producer.
+
+Now reported: transfer, gamut, `gamut-inert`, `hw-hdr`, MaxCLL/MaxFALL, the mastering-luminance
+pair, and **the surface format and colour space the swapchain actually got**. That last pair is the
+honest answer to the question, because `pick_surface_format` walks a preference list and falls back.
+
+**What it found on the first run, none of it previously visible:**
+
+| | |
+| :--- | :--- |
+| PQ/BT.2020 requested | **`bgra8` / `srgb_nonlinear` delivered** — no HDR signalling at all |
+| `<gamut>` | **read, accepted and ignored** — the per-consumer conversion pass is disabled |
+| hardware-HDR path | double-maps primaries on a non-BT.709 channel — latent, warns at startup |
+
+The 8-bit sRGB surface is a platform limit rather than a defect: Windows 10 build 19045 has no
+`VK_KHR_display`, so the consumer takes the fullscreen-exclusive path where no HDR surface is
+offered. It also explains the two `vulkan_out` matrix cases sitting at 18.7 dB against a 40 dB gate
+at PQ and HLG while SDR passes — the output is 8-bit sRGB where the check's model expects PQ. Those
+cases had never been run before, so this is newly discovered rather than newly caused.
+
+**`<gamut>` being inert was surfaced by fixing an unrelated silencing bug.** The consumer has warned
+about it at startup for some time; the warning was handed to a verbosity-gated log callback and
+dropped. Fixing that routing surfaced it, and it immediately contradicted the `gamut` field added an
+hour earlier — which had been reporting a configured value that does nothing. Both now derive from
+one predicate so they cannot drift.
+
+Covered by `cli.py vulkan-output-signalling`, which gates the config round trip and internal
+contradictions (`hw-hdr` true on an SDR surface, an HDR colour space on an 8-bit format) and *names*
+rather than fails the platform degradations. **Still uncovered:** whether the metadata reaches a
+display — that needs NvAPI read-back or a capture device, so `nvapi`, `UHDA` and `edid` remain
+untested by anything.
+
 ### Added: per-node ASC CDL, and `MIXER GRADE` renamed to `MIXER GRADE_NODE`
 
 **Breaking:** `MIXER GRADE` is now `MIXER GRADE_NODE`, with no alias. The old name sat among
