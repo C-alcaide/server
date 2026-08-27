@@ -36,6 +36,7 @@ build_*.py
 # `docs/build_html.py`, so the commit that claimed to add that script committed only .gitignore and
 # a README telling the reader to run it. Nobody cloning this repo had the script. Found 2026-08-27.
 !docs/build_html.py
+!docs/build_exec_brief.py
 fix*.py
 fix2*.py
 merge_script*.py
@@ -83,3 +84,12 @@ docs/guides.html
 docs/architecture.html
 docs/reference.html
 docs/_mermaid_cache/
+
+# The executive brief, same reasoning: its content lives in `docs/build_exec_brief.py` (the
+# FEATURES table), so the rendered page and the PDF are a second copy of that -- and they carry
+# readiness claims, which are the claims most likely to be quoted after they stop being true.
+# Rebuild with `python docs/build_exec_brief.py`; the generator and the diagrams it uses are
+# both committed, so anyone cloning this repo can produce the PDF.
+docs/EXECUTIVE_BRIEF.html
+docs/EXECUTIVE_BRIEF.pdf
+docs/EXECUTIVE_BRIEF.__probe.html

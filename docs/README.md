@@ -83,25 +83,56 @@ check the date and check the source.
 ## Reading it as one document
 
 ```
-python docs/build_html.py      ->  docs/features.html
+python docs/build_html.py             ->  docs/{index,overview,features,guides,architecture,reference}.html
+python docs/build_html.py --watch     ->  the same, rebuilt whenever a tracked file changes
 ```
 
-A single self-contained page: every `features/` document in reading order, sidebar navigation, a
-light/dark toggle, no external assets and no server. Open it from the filesystem.
+Six cross-linked pages covering **every** document in this folder, not just `features/`: sidebar
+navigation, a light/dark toggle, verified internal links, mermaid blocks rendered to inline SVG,
+no external assets and no server. Open `docs/index.html` from the filesystem.
+
+`--watch` polls once a second and rebuilds in a couple of seconds, which is what to run while
+editing. There is no live link from markdown to the pages — editing a `.md` changes nothing until
+a rebuild, so either keep `--watch` running or re-run the build.
 
 **It is a build output and is not committed** (`.gitignore`). The markdown is the source of truth
 because it diffs, it reviews in a pull request, and it changes in the same commit as the code it
 describes — the rule that stops documentation lagging. A committed HTML copy would be a second
 copy of every claim, which is the duplication this folder exists to remove.
 
-The build **warns loudly** if a document exists in `features/` but is missing from its reading
-order, because a new document silently absent from the manual is exactly the quiet omission the
-whole structure is meant to prevent.
+The build **warns loudly** if a document exists but is missing from its reading order, because a
+new document silently absent from the manual is exactly the quiet omission the whole structure is
+meant to prevent.
+
+## Reading it as an executive brief
+
+```
+python docs/build_exec_brief.py   ->  docs/EXECUTIVE_BRIEF.html + .pdf
+```
+
+A 20-page A4-landscape deck for supervisors and heads of department rather than operators or
+engineers: one page per capability, each pairing a diagram with what it buys, where it earns its
+keep, what it would still take to exploit fully, and how the market solves the same problem.
+
+Its content is **not** derived from these documents — it lives in the generator's own `FEATURES`
+table, because the audience and the level of abstraction differ from every document here. What it
+does share is the readiness vocabulary: `proven` means a battery gates the capability and was run,
+and nothing in the deck claims more than the harness measured.
+
+The build **fails** if any page overflows. `.page` is a fixed A4 box with `overflow:hidden`, so a
+page that does not fit does not look broken — the surplus is silently cut and the PDF renders a
+tidy page missing its last sentence. Chrome lays the document out and reports the fit, which
+caught the readiness matrix losing its last rows on the gate's first run.
+
+Also a build output, and not committed, for the same reason as the manual — with the extra one
+that a stale readiness claim is the claim most likely to be quoted after it stops being true.
 
 ## Where to start
 
 * **"What does this fork add?"** -> [features/README.md](features/README.md) - the inventory:
-  19 fork-only modules, 58 fork-specific AMCP commands, each with its state and coverage.
+  19 fork-only modules, 91 fork-specific AMCP commands, each with its state and coverage.
+  (58 is the *subset* registered directly in `AMCPCommandsImpl.cpp` and belonging to no module —
+  this line quoted it as the total until 2026-08-27.)
 * **"How do I drive X?"** -> `guides/`, then the feature document for what is actually measured.
 * **"Why is it built this way?"** -> `architecture/`, then the feature document's decisions section.
 * **"Is this planned or done?"** -> if it is only in `plans/`, it is not done.
