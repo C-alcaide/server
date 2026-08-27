@@ -90,6 +90,11 @@ signalling", because `pick_surface_format` walks a preference list and falls bac
 | transfer | `pq` | `transfer=pq` reported |
 | gamut | `bt2020` | **inert** — see below |
 | surface | an HDR10 surface | **`bgra8` / `srgb_nonlinear`** |
+
+**Re-measured 2026-08-27 on a freshly rebuilt binary and unchanged:** `vulkan-output-signalling`
+reports **3/3 cases consistent**, with PQ and HLG both degrading to `bgra8` / `srgb_nonlinear` and
+`hw-hdr false`, MaxCLL 1000 / MaxFALL 400 round-tripping on all three. The two degradations are
+named rather than failed, which is the behaviour the battery was built for.
 | `hw-hdr` | — | `false` |
 
 **HDR10 requested, 8-bit sRGB delivered.** Windows 10 build 19045 has no `VK_KHR_display`, so the
