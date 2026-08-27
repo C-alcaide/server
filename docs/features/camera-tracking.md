@@ -3,6 +3,7 @@
 > **State:** shipped, unmeasured
 > **Modules:** `src/modules/tracking`
 > **Commands:** **18** fork-specific AMCP commands, all registered by the module itself
+> **Architecture:** [`../architecture/CAMERA_TRACKING_TRANSFORM.md`](../architecture/CAMERA_TRACKING_TRANSFORM.md)
 > **Coverage:** **none**
 
 Receives live camera position, rotation and lens data from a tracking system and drives a

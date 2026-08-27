@@ -95,23 +95,36 @@ while *looking* configured.
 
 ---
 
-## 3. Subregion output — and a trap that will cost you a show
+## 3. Subregion output — handled, but it costs you the GPU path
 
-A subregion lets one channel drive part of a larger raster. On this fork's **GPU readback paths only
-the source origin is honoured**:
+A subregion lets one channel drive part of a larger raster. The GPU readback strategies implement
+**only the source origin**, so the server handles the rest by **coercing the readback mode**:
 
-| setting | GPU paths | effect |
+| setting | on the GPU paths | result |
 | :--- | :--- | :--- |
-| `src-x`, `src-y` | **honoured** | reach the shaders as push constants, and the DMA path as an image offset |
-| `dest-x`, `dest-y` | **silently dropped** | |
-| `width`, `height` | **silently dropped** | |
+| `src-x`, `src-y` only | **honoured on the GPU** | stays on your chosen `gpu-readback-mode` |
+| `dest-x`, `dest-y`, `width`, `height` | not implemented there | **the consumer falls back to `gpu-readback-mode=cpu`** and logs a warning |
 
-So the wire carries **the whole source from the origin, placed at 0,0**. If you need real
-destination placement or cropping, use `gpu-readback-mode cpu`, which honours all six — and accept
-its cost.
+So the geometry is always correct — you simply do not get the GPU path for it. The warning names
+exactly what happened:
 
-This is the single most surprising behaviour in the fork's DeckLink path: the config is accepted,
-the output looks plausible, and four of the six numbers you set did nothing.
+```
+[decklink] <subregion> sets dest-x/dest-y/width/height, which the GPU readback
+strategies do not implement; falling back to gpu-readback-mode=cpu so the
+geometry is honoured.
+```
+
+**What this means in practice:** an origin-only subregion is free — it runs on the GPU and measures
+53.55 dB against its model. A subregion with destination placement or cropping is *correct* but
+CPU-bound, which matters if you were counting on the GPU path for headroom. If a machine is
+unexpectedly CPU-heavy on a DeckLink output, check for `dest-*`/`width`/`height` in its subregion
+before looking anywhere else.
+
+**Why the fallback is decided at config-parse time**, in case you are tempted to move it: by the
+time the format strategy is created, the consumer has already told the mixer that no CPU frame data
+is needed, so substituting the CPU strategy there yields a frame carrying no host pixels and puts
+**nothing** on the wire. Measured — the capture goes flat. Deciding at parse time keeps
+`needs_cpu_frame_data()` consistent with the strategy that will actually run.
 
 ---
 
@@ -137,7 +150,8 @@ and only one carries house reference.
    before suspecting the metadata.
 3. Only then pin `gpu-readback-mode` if you are chasing performance, and change **one** of the three
    settings at a time. They are orthogonal, so changing two makes the result unattributable.
-4. If you need a subregion, read §3 first and decide whether you can live with origin-only.
+4. If you need a subregion, read §3: destination placement and cropping are honoured but force
+   the CPU readback path, so budget for that rather than discovering it under load.
 
 ---
 

@@ -1091,8 +1091,13 @@ TRACKING <n> ZOOM_LUT ...       map the lens's raw zoom reading to a real focal 
 TRACKING <n> POSITION_SCALE ... scale incoming translation
 ```
 
-**Order matters and is undocumented anywhere else.** These are three of the five alignment
-commands, and nothing in this tree records the sequence they must be applied in — treat that as an
-open question rather than an omission you can infer around.
+**Order matters, and it is now written down.**
+[`../architecture/CAMERA_TRACKING_TRANSFORM.md`](../architecture/CAMERA_TRACKING_TRANSFORM.md) has
+the sequence read from `tracker_registry.cpp`. The two facts to take from it before touching these:
+
+* **`WORLDALIGN` REPLACES `POSITION_SCALE`** — they are alternative paths selected by
+  `align_enable`, not composable adjustments. Set both and one is silently unused.
+* **Scale applies before offset, per axis**, so an offset is in output units and changing a scale
+  afterwards changes what that offset means.
 
 **No battery drives any of them.**

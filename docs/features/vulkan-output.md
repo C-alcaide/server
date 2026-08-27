@@ -3,6 +3,7 @@
 > **State:** partial
 > **Modules:** `src/modules/vulkan_output`
 > **Commands:** 1 (`INFO VULKAN_OUTPUT`)
+> **Guide:** [`../guides/VULKAN_OUTPUT.md`](../guides/VULKAN_OUTPUT.md)
 > **Coverage:** `consumer-view`, `vulkan-output-signalling`
 
 Presents a channel straight to a display through Vulkan, bypassing the window compositor, with
