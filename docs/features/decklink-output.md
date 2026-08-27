@@ -36,20 +36,31 @@ them a parity question rather than an implementation detail.
 
 ## 2. Verification
 
-> **The SDI figures below were NOT re-verified on 2026-08-27**, when every other 1 LSB battery was
-> re-measured on a freshly rebuilt binary. **The loopback is not cabled on this rig right now**:
-> `sdi-output` with output 1 and input 2 returns *"the capture is missing or flat — nothing was on
-> the wire, so this is not a measurement"* on both v210 arms, and `Failed to enable external keyer`
-> in the log. The card is present — `cli.py hardware` lists four DeckLink 8K Pro ports — so this is
-> a cable, not a configuration.
+> **Re-verified 2026-08-27 on a freshly rebuilt binary, over the DeckLink 1 → 4 loopback. Every
+> figure reproduced to the decimal:**
 >
-> **What that run produced is worth knowing before anyone repeats it.** The two v210 arms declined
-> correctly. The `rgba@8bit` arm returned **5.74 dB and a FAIL verdict** rather than declining,
-> because a disconnected input delivers noise on the 8-bit read, which passes the harness's
-> flat-or-missing guard while correlating with nothing. The verdict is right and the *reason* is
-> misleading: 5.74 dB sends a reader to the mixer, "not measured" would send them to the cable.
-> Treat any single-arm SDI failure with a plausible-looking dB number as unattributed until a
-> reference arm passes on the same run.
+> | case | measured | documented |
+> | :--- | ---: | ---: |
+> | subregion, `dest-x` 114 (even), `auto` | **62.92 dB** | 62.92 dB |
+> | subregion, `dest-x` 114 (even), `cpu` | **62.92 dB** | 62.92 dB |
+> | subregion, `dest-x` 115 (odd), `auto` | **42.79 dB** | 42.79 dB |
+> | 16-bit v210 over 8-bit, even `dest-x` | **+3.94 dB** | +3.94 dB |
+> | 16-bit v210 over 8-bit, odd `dest-x` | **+0.06 dB** | +0.06 dB |
+> | spread across the three wire formats, odd `dest-x` | **0.61 dB** (42.18 / 42.73 / 42.79) | within 0.6 dB |
+>
+> The plain no-subregion run also passes: 37.46 dB (rgba@8bit), 48.28 (yuv@8bit), 52.53 (yuv@16bit).
+>
+> **A correction worth keeping, because it is this tree's own documented trap and I walked into it.**
+> My first attempt used `--decklink-output 1 --decklink-input 2`, got 5.74 dB, and I wrote here that
+> the loopback was uncabled. **Only 1 → 4 is cabled on this rig; 2 → 3 is not** — which
+> `core/sdi_validator.py`'s `DEFAULT_LOOPBACK_PAIRS = ((1, 4),)` states, and which
+> `CasparCG-TestRunner/docs/handoff_2026-08-15.md` spells out with a `VERIFY` line. The information
+> was one grep away and I inferred a hardware fault instead. A plausible number from a
+> misconfigured instrument, exactly as `CLAUDE.md` describes.
+>
+> The observation that came out of it still stands and is recorded in `core/sdi_output_check.py`: on
+> an **uncabled** pair the two v210 arms decline correctly while `rgba@8bit` returns a number,
+> because a disconnected input delivers noise that passes the flat-or-missing guard.
 
 | what | battery |
 | :--- | :--- |
