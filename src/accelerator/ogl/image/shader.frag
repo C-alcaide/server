@@ -124,7 +124,9 @@ uniform mat3  input_to_working;  // input gamut -> ACEScg (AP1)
 uniform mat3  working_to_output; // ACEScg (AP1) -> output gamut
 uniform int   tone_mapping_op;   // 0=none,1=reinhard,2=aces_filmic,3=aces_rrt
 uniform float exposure;          // linear exposure multiplier
-uniform float luminance_scale;   // BT.2408 luminance adaptation (e.g. 0.1 for SDR->HLG)
+uniform float luminance_scale;   // BT.2408 luminance adaptation. SDR->HLG 0.265 (75% signal),
+                                 // HLG->PQ 0.1, PQ->SDR 100.0 -- see image_kernel.cpp's
+                                 // get_luminance_scale, which is the authority.
 uniform float display_peak_luminance; // display nominal peak luminance in nits (default 1000)
 
 // White balance

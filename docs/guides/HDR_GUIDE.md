@@ -114,7 +114,16 @@ Color space and transfer function are declared **once on the channel** and flow 
 
 > `bt601` is supported in the DeckLink input pipeline (auto-detected) but is not a valid channel config value.
 >
-> **DeckLink compatibility**: SDI can only signal BT.709 or BT.2020. If a channel is set to `p3-d65`, `p3-dci`, or `adobe-rgb` and a DeckLink consumer is attached, a warning is logged. The pixel values are still output correctly but SDI metadata will signal BT.2020. For correct SDI signaling, use `bt709` or `bt2020`.
+> **DeckLink compatibility**: SDI can only signal BT.709 or BT.2020. If a channel is set to
+> `p3-d65`, `p3-dci` or `adobe-rgb` and a DeckLink consumer is attached, a warning is logged, the
+> pixel values still go out correctly, and **the SDI metadata signals BT.709 — not BT.2020.**
+>
+> This line said BT.2020 until 2026-08-27, and getting it backwards is the dangerous direction: a P3
+> operator would believe the wire is tagged wide when it is tagged narrow. Both metadata paths fall
+> through to Rec.709 for anything that is not `bt2020` or `bt601` — `GetInt` for
+> `bmdDeckLinkFrameMetadataColorspace` and `GetFloat` for the display primaries — with no coercion
+> anywhere between the channel value and the frame. The consumer's own warning was corrected for
+> exactly this reason; the code comment says so. For correct SDI signalling use `bt709` or `bt2020`.
 
 ### `<color-transfer>` values
 
@@ -195,6 +204,13 @@ When `auto-color-convert` is enabled and cross-domain conversion occurs (e.g. SD
 | `aces_rrt` | ACES RRT+ODT | Reference Rendering Transform + Output Device Transform |
 | `hlg_ootf` | BT.2100 HLG OOTF | Display-referred mapping — uses `<display-peak-luminance>` |
 
+> **The shader has three more operators that nothing can select.** Cases 4, 5 and 6 are
+> `aces_rrt_709`, `aces_rrt_p3` and `aces_rrt_2020_pq` — ODT-specific ACES RRT variants, written and
+> reachable from no configuration element and no AMCP command. `<auto-tone-map>`, the per-consumer
+> override and `ADD ... TONE_MAP` all parse the same five names above and map them to 0/1/2/3/7, so
+> 4-6 are dead code. They exist only in `frame_transform.h`'s comment. Recorded here because a reader
+> who finds them in the shader will otherwise assume there is a way to ask for them.
+
 The `<display-peak-luminance>` setting (in nits, default 1000) controls the gamma exponent in the HLG OOTF formula per BT.2100:
 
 ```
@@ -223,8 +239,13 @@ Individual consumers can override the channel-level tone mapping with their own 
 ```
 
 The per-consumer tone-map is applied as a **display transform** after the mixer's compositing stage:
-- **Screen consumer**: OpenGL fragment shader applies EOTF decode → tone-map → OETF re-encode
-- **Vulkan output**: Compute shader inserts tone-map between gamut conversion and output OETF
+- **Screen consumer**: OpenGL fragment shader applies EOTF decode → tone-map → OETF re-encode. **This
+  one works** — the operator is set on the draw as `tone_map_op`.
+- **Vulkan output**: **currently does nothing.** The compute pass that would insert it is behind an
+  `if (false && …)` guard, and applying `tone_map_op` there is step 5 of the re-enablement plan
+  written in the source, not present behaviour. So `<auto-tone-map>` and `<display-peak-luminance>`
+  on a `<vulkan-output>` block are accepted and inert — the example above is aspirational for that
+  half of it.
 
 Per-consumer tone-mapping is **independent** of both `<auto-color-convert>` and the channel-level `<auto-tone-map>`:
 - It does **not** require `<auto-color-convert>true</auto-color-convert>` — even if channel auto-conversion is off, a consumer can still apply its own display transform on the composited output.
@@ -264,14 +285,22 @@ display and a view, and the view carries the tone map, the gamut and the encodin
 
 When a channel has an `OCIO_DISPLAY` set, the mixer's own output conversion does not run at
 all: not the tone map, not the `working_to_output` gamut matrix, and not the `<color-transfer>`
-OETF. The generated view replaces that whole block rather than following it, in both mixers —
-`do_output_convert` is forced false in
-[image_kernel.cpp:1071-1077](../../src/accelerator/ogl/image/image_kernel.cpp#L1071-L1077), and the
-`output_convert` flag is cleared in
-[image_kernel.cpp:1931-1933](../../src/accelerator/vulkan/image/image_kernel.cpp#L1931-L1933).
+OETF. The generated view replaces that whole block rather than following it, in both mixers. Each backend
+does it in one place, **after** whichever conversion branch ran and unconditionally — in
+`image_kernel.cpp`, look for the `if (ocio_out || ws_composite)` guard: the OpenGL side sets
+`do_output_convert` false there, the Vulkan side clears the `output_convert` flag in `flags2`. The
+Vulkan comment records why it sits outside the branch chain rather than inside it: an earlier
+attempt put it between two `else if` arms and silently gated auto-convert on there being no display
+transform.
 
 So on an OCIO channel, `<auto-tone-map>` and `<display-peak-luminance>` are inert. Choose the
 tone mapping by picking the nits ladder of the view instead.
+
+**`<working-space-composite>` suppresses the same half, for the same reason** — it is the second
+term in that guard. On a working-space channel the output half is skipped on every *layer* draw
+because the channel converts once, post-composite; the post-composite draw itself arrives with
+`output_convert_only` set and is unaffected. So a working-space channel without OCIO still runs the
+built-in OETF, just once at the end instead of per layer.
 
 ### What the pinned config offers for HDR
 
@@ -418,13 +447,22 @@ Frames from a mixed input (e.g. a source that switches between SDR and HDR) will
 
 ### Automatic HDR enabling
 
-When a channel has **16-bit colour depth**, `color-space bt2020`, and `color-transfer pq` or `hlg`, the DeckLink consumer **automatically**:
+When a channel has **16-bit colour depth**, a **wide** `color-space` — `bt2020`, `p3-d65` **or**
+`p3-dci` — and any non-`sdr` `color-transfer`, the DeckLink consumer **automatically**:
 - Switches to HDR v210 10-bit output format
 - Sets `bmdFrameContainsHDRMetadata` on every output frame
 - Signals the correct EOTF via `bmdDeckLinkFrameMetadataHDRElectroOpticalTransferFunc`
 - Signals BT.2020 colour primaries and white point via the HDR static metadata extension
 
-All three conditions must be met — an 8-bit channel with BT.2020/PQ settings will **not** emit HDR metadata (insufficient bit depth), and a 16-bit channel with BT.709/SDR settings will output in SDR mode.
+All three conditions must be met — an 8-bit channel with BT.2020/PQ settings will **not** emit HDR
+metadata (insufficient bit depth), and a 16-bit channel with BT.709/SDR settings will output in SDR
+mode. The identical expression appears in both `create_consumer` and
+`create_preconfigured_consumer`, reading only the channel depth, `color_space` and `color_transfer`.
+
+> **The P3 cases produce a combination nothing flags.** A 16-bit `p3-d65` PQ channel satisfies the
+> HDR test, so the consumer emits HDR metadata and the PQ EOTF — while the primaries it signals fall
+> through to **Rec.709**, per the note in §`<color-space>` values. HDR on, gamut tagged narrow, no
+> error. If the destination is SDI, use `bt2020`.
 
 No explicit `<hdr>true</hdr>` flag is needed — it is derived from the channel's depth and color settings.
 
@@ -582,6 +620,18 @@ When `<gamut>` or `<eotf>` are not explicitly set, they are inferred from `<tran
 | `pq` | bt2020 | pq |
 | `hlg` | bt2020 | hlg |
 
+> **`<gamut>` and `<eotf>` are parsed and then have NO EFFECT on the picture.** The consumer's own
+> conversion pass is compiled out — `per_consumer_conversion_enabled()` returns `false`
+> unconditionally, and the pipeline that would use these two sits behind an `if (false && …)` with a
+> written-out re-enablement plan beside it. The channel's `<color-space>` and `<color-transfer>`
+> determine every pixel in the framebuffer; the code comment says so in those words. `<gamut>` at
+> least announces itself — the consumer logs a startup warning and reports `gamut-inert` in its
+> state; `<eotf>` is assigned in `config.cpp` and read nowhere at all.
+>
+> **`<transfer>` is the one that does something**: it drives the surface format and colour space the
+> swapchain asks for, which is what HDR signalling depends on. Set the channel's colour management
+> and use `<transfer>` here — see [`VULKAN_OUTPUT.md`](VULKAN_OUTPUT.md) §2 and §6.
+
 ### EDID Auto-Detection
 
 The Vulkan consumer can read the connected display's EDID via NvAPI to auto-detect HDR capability:
@@ -604,7 +654,9 @@ Hardware HDR activates automatically when:
 - `<transfer>pq</transfer>` or `<transfer>hlg</transfer>` is set and the display supports ST2084
 - `<edid-auto-hdr>` detects an HDR-capable display
 
-Falls back silently to the compute shader path if the display or driver doesn't support it.
+If the display or driver refuses, `HdrColorControl SET failed` is logged and `hw-hdr` reports
+`false`. **There is no compute-shader path to fall back to** — that pipeline is disabled (below), so
+what remains is the channel's own encoding presented through whatever surface the swapchain got.
 
 ### Color Conversion Architecture
 
@@ -646,8 +698,8 @@ When hardware HDR acceleration (NvAPI UHDA) is active, the display engine perfor
 | Aspect | DeckLink | Vulkan |
 |:---|:---|:---|
 | HDR mode source | Inherited from channel `<color-transfer>` | Set per-consumer via `<transfer>` |
-| Gamut conversion | None (outputs channel gamut directly) | Compute shader or hardware HDR |
-| Channel gamut options | BT.709, BT.2020 (P3/Adobe: warning logged) | All 5 gamuts fully supported |
+| Gamut conversion | None (outputs channel gamut directly) | **None either** — the consumer's pass is disabled; NvAPI UHDA does it at scanout when it engages |
+| Channel gamut options | BT.709, BT.2020 (P3/Adobe: **signals BT.709**, warning logged) | all 5 are accepted by the channel, but `<gamut>` on the consumer is inert |
 | HDR metadata | `<hdr-metadata>` in DeckLink block | `<hdr-metadata>` in vulkan-output block |
 | EDID auto-detect | No | Yes (`<edid-auto-hdr>`) |
 | Hardware acceleration | N/A | NvAPI UHDA display engine (NVIDIA) |

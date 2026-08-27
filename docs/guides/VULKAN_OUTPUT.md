@@ -52,9 +52,9 @@ it starts, which is how you tell four identical screens apart.
 | :--- | :--- |
 | `transfer` | what the output **signals**: `sdr`, `pq` or `hlg` |
 | `eotf` | transfer-function override, independent of `transfer`. `srgb`, `linear`, `pq` (or `st2084`), `hlg`, `gamma24` (or `2.4`), `gamma26` (or `2.6`). Omitted, it is inferred from `transfer` |
-| `display-peak-luminance` | **only used when `auto-tone-map` is `hlg_ootf`** — it is that operator's target peak, not a general display-peak declaration. It reaches exactly one shader branch and nothing else |
+| `display-peak-luminance` | the `hlg_ootf` operator's target peak — not a general display-peak declaration. **Inert on this consumer**, see below |
 | `edid-auto-hdr` | read the display's own HDR limits from its EDID and use those |
-| `auto-tone-map` | tone-map operator for content brighter than the display |
+| `auto-tone-map` | tone-map operator for content brighter than the display. **Inert on this consumer**, see below |
 
 ### `<hdr-metadata>` — the mastering-display numbers
 
@@ -85,6 +85,18 @@ place.
 replaces your `max-cll`. So a request for 1000 nits on a 600-nit panel becomes 600 — which is
 usually what you want, and is worth knowing before you wonder why your number changed. Check the
 effective value with `vulkan-output-signalling` (§7) rather than assuming.
+
+**Three settings here are accepted and do nothing: `<gamut>`, `<eotf>` and `<auto-tone-map>`
+(with its `<display-peak-luminance>`).** The consumer's own conversion pass is compiled out —
+`per_consumer_conversion_enabled()` returns `false` unconditionally and the pipeline that would use
+all four sits behind an `if (false && …)` guard, with a step-by-step re-enablement plan written
+beside it in the source. Only `<gamut>` announces itself, via a startup warning and the
+`gamut-inert` state field; the other three are silent.
+
+**The same three DO work on the `screen` consumer**, whose tone-map operator reaches its fragment
+shader. So a config that tone-maps correctly on a preview window will not tone-map on the
+direct-display output, which is the opposite of what you would assume from them sharing element
+names.
 
 **`<gamut>` is accepted and does nothing.** The per-consumer colour conversion pass is disabled
 because the **channel's** colour space and transfer already determine every pixel in the
