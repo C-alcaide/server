@@ -1214,6 +1214,7 @@ and the variable-length data model end to end.
 
 ```
 MIXER 1-1 GRADE_NODE NODE <n> <cx> <cy> <rx> <ry> <feather> <exposure> [<invert>]
+MIXER 1-1 GRADE_NODE NODE <n> CDL <sR sG sB> <oR oG oB> <pR pG pB> <sat>
 MIXER 1-1 GRADE_NODE CLEAR                     drop the whole chain
 MIXER 1-1 GRADE_NODE                           query
 ```
@@ -1226,6 +1227,27 @@ MIXER 1-1 GRADE_NODE                           query
 | `feather` | edge softness |
 | `exposure` | the node's operation, a uniform scale |
 | `invert` | optional, `1` grades everything *outside* the window |
+
+### The per-node CDL
+
+Each node also carries an **ASC CDL** — the published standard, the same operation as `MIXER CDL`
+but confined to the node's window and applied after its exposure:
+
+```
+MIXER 1-1 GRADE_NODE NODE 0 0.5 0.5 0.25 0.18 0.4 1.0
+MIXER 1-1 GRADE_NODE NODE 0 CDL  1.2 0.9 0.6   0.05 -0.02 0.10   0.9 1.1 1.3   0.8
+```
+
+Slope ×3, offset ×3, power ×3, then saturation — `pow(max(c·slope + offset, 0), power)`, then a
+mix toward luma by `sat`. Ranges follow the primary CDL's: slope 0–10, offset ±1, power 0.01–10,
+saturation 0–10.
+
+**The two forms address different halves of a node.** Setting the window does not disturb a CDL
+already on that node, and setting a CDL does not move the window — so nudging a window mid-grade
+does not throw the grade away.
+
+**It is a separate sub-form rather than more positional numbers** because a node already takes
+seven for its window; nineteen in a row is a command nobody can check.
 
 Brighten a soft oval in the centre by one stop, then darken outside it:
 
@@ -1267,6 +1289,9 @@ Measured 2026-08-27, on both mixers:
 | **worst chain error** (two nodes) | **0.75 LSB** | **0.75 LSB** | 1.0 |
 | **worst `invert` inside** | **0.00 LSB** | **0.00 LSB** | 1.0 |
 | **least `invert` separation** | **77.0 LSB** | **77.0 LSB** | ≥ 8.0 |
+| **composite** (`screen` blend, graph vs none) | **0.00 LSB** | **0.00 LSB** | 1.0 |
+| **per-node CDL** (asymmetric, sat 1.0) | **0.38 LSB** | **0.38 LSB** | 1.0 |
+| **CDL saturation 0** (must be neutral) | **0.00 LSB** | **0.00 LSB** | 1.0 |
 
 **The chain is now verified rather than advertised.** The two windows are concentric, so a centre
 pixel passes through both nodes and the expectation is `outside × exposure²` — a loop running only
@@ -1275,9 +1300,13 @@ the first node would land a whole stop away. Node 1 demonstrably executes.
 **The two backends returned identical figures**, which is a parity result the battery does not
 itself assert — it runs one mixer at a time and compares each to a model, not to the other.
 
-**Not covered**, and this list is now shorter than it was: window shape beyond a centred ellipse,
-the feather profile itself (both samples sit in flat regions, so the falloff is untested),
-source-UV windows, more than two nodes, non-concentric chains, and every operation but exposure.
-Plus the keyer and non-normal blend modes, which the node pass bypasses by construction — that one
-is a property of the implementation rather than a gap in the battery, and is the thing to settle
-before this is used in a show.
+**The CDL check uses asymmetric values in all three operands on purpose.** Equal per-channel values
+are invariant under a red/blue exchange, which is exactly the trap both shaders carry — OpenGL
+swizzles `.bgr` at the call site, Vulkan must not. On its first run this check failed at 47.08 LSB
+on Vulkan, and the saturation-0 case at 89.00 where the answer must be grey; the cause was a UBO
+field-order mismatch rather than the maths, and it had also corrupted the YCbCr decode flags.
+
+**Not covered**: window shape beyond a centred ellipse, the feather profile itself (both samples
+sit in flat regions, so the falloff is untested), source-UV windows, more than two nodes,
+non-concentric chains, tweening (there is none — see above), and `keyer additive`, which a node
+graph cannot reach anyway.

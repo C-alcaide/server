@@ -1,6 +1,50 @@
 CasparVP — Unreleased
 ==========================================
 
+### Added: per-node ASC CDL, and `MIXER GRADE` renamed to `MIXER GRADE_NODE`
+
+**Breaking:** `MIXER GRADE` is now `MIXER GRADE_NODE`, with no alias. The old name sat among
+`MIXER LIFT`, `GAIN`, `MIDTONE`, `CDL` and twenty-odd other grading operators, so it read as *the*
+grading command when it is one prototype feature among them. Renamed while the feature is a
+prototype whose only consumer was one battery; an alias would have preserved the ambiguity.
+
+Each node now carries an **ASC CDL** as well as its exposure:
+
+```
+MIXER 1-1 GRADE_NODE NODE <n> CDL <sR sG sB> <oR oG oB> <pR pG pB> <sat>
+```
+
+An addressed sub-form, and the two forms address different halves of a node — setting a window
+leaves an existing CDL alone, so a window nudge does not throw a grade away.
+
+**Measured, identical on both mixers:** per-node CDL 0.38 LSB against a 1.0 gate with asymmetric
+slope, offset and power; saturation 0 gives a neutral result at 0.00 LSB; the two-node chain 0.75
+LSB; window operation 0.50 LSB; no leak outside the window.
+
+**A UBO field-order mismatch was caught by that battery and is worth recording**, because it did
+not look like what it was. The shader declared the new fields after `gn_exposure` while
+`uniform_block.h` appended them, so every field after shifted: `gn_has_cdl` read
+`ycbcr_full_range`'s bytes, and `ycbcr_full_range` and `chroma_cosited` read CDL operands. It
+presented as 47.08 LSB of colour error on Vulkan — but it had also corrupted two **decode** flags
+that have nothing to do with grading, which `grade-window` cannot see because its source is BGRA.
+`flat-decoded` covers those and is 29/29 clean after the fix. The contract between the struct and
+the shader's `ParamsBlock` is now written where the layout asserts live.
+
+### Fixed: the node graph's composite warning was wrong
+
+Both mixers warned that routing a node-enabled item through a private attachment broke the keyer,
+the keys and non-normal blend modes. **None of the three is reachable.** A non-normal blend mode is
+a *layer* property, and such a layer already renders its items into a private texture before
+compositing against the real target; `keyer::additive` is set only in the `is_mix` branch, which
+the node path cannot enter; the keys only scale the item's alpha. What remains is an ordinary item
+with the linear keyer, where the attachment is algebraically exact.
+
+Measured **0.00 LSB on both mixers** by a check built *before* any fix, on the rule that a battery
+which cannot fail for the change is worse than none — a two-layer scene under `screen`, sampled
+outside the window where the node does nothing. It retired the fix instead of gating it. Had the
+fix gone in first, both backends would have been rewritten and the check would have read 0.00
+before and after.
+
 ### Fixed: an uploaded Vulkan texture could be freed while the GPU was still writing to it
 
 **This is a latent defect in the Vulkan accelerator, not in any one module**, and it had been there

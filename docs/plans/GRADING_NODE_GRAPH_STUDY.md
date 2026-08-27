@@ -15,9 +15,13 @@
 > after the layer composites, and `keyer::additive` belongs to a branch the node path cannot
 > reach. Measured 0.00 LSB, both mixers, and now guarded.
 >
-> **What remains a study** is the rest: more than one operation per node, arbitrary graph topology
-> rather than a chain, window shapes other than an ellipse, and the data-model question below —
-> which the shipped prototype answers only for a fixed-size chain.
+> **A second operation shipped on 2026-08-27**: the per-node ASC CDL of §6, addressed as
+> `NODE <n> CDL <slope×3> <offset×3> <power×3> <sat>`. That closes "one operation per node" and
+> confirms the data model carries a variable-length chain of multi-field nodes end to end.
+>
+> **What remains a study** is the rest: arbitrary graph topology rather than a chain, window shapes
+> other than an ellipse, source-UV space, combine algebra between windows, and tweening — which
+> still needs the tween system to address `node[n].field` and still cannot.
 >
 > Left in `plans/` rather than moved, because the majority of the document is still unbuilt design.
 > A plan whose status line is wrong is worse than a plan nobody reads: this one asserted the absence
