@@ -204,12 +204,21 @@ When `auto-color-convert` is enabled and cross-domain conversion occurs (e.g. SD
 | `aces_rrt` | ACES RRT+ODT | Reference Rendering Transform + Output Device Transform |
 | `hlg_ootf` | BT.2100 HLG OOTF | Display-referred mapping — uses `<display-peak-luminance>` |
 
-> **The shader has three more operators that nothing can select.** Cases 4, 5 and 6 are
-> `aces_rrt_709`, `aces_rrt_p3` and `aces_rrt_2020_pq` — ODT-specific ACES RRT variants, written and
-> reachable from no configuration element and no AMCP command. `<auto-tone-map>`, the per-consumer
-> override and `ADD ... TONE_MAP` all parse the same five names above and map them to 0/1/2/3/7, so
-> 4-6 are dead code. They exist only in `frame_transform.h`'s comment. Recorded here because a reader
-> who finds them in the shader will otherwise assume there is a way to ask for them.
+> **Three more operators exist, and only `MIXER COLORSPACE` can select them.** Cases 4, 5 and 6 are
+> the ODT-specific ACES RRT variants:
+>
+> | operator | `MIXER COLORSPACE` spelling | also accepts |
+> | :--- | :--- | :--- |
+> | 4 | `ACES_RRT_709` | `ACES1_RRT_709` |
+> | 5 | `ACES_RRT_P3` | `ACES1_RRT_P3` |
+> | 6 | `ACES_RRT_2020_PQ` | `ACES1_RRT_2020_PQ` |
+>
+> **They are not reachable from configuration.** `<auto-tone-map>`, the per-consumer override and
+> `ADD … TONE_MAP` all parse the five names in the table above and map them to 0/1/2/3/7 — so an
+> ODT variant can be set per *layer* over AMCP and never per channel or per consumer. Every ACES
+> operator also takes an `ACES1_` spelling, which the five-name parsers do not.
+>
+> An unrecognised name is refused with the valid set named, on both paths.
 
 The `<display-peak-luminance>` setting (in nits, default 1000) controls the gamma exponent in the HLG OOTF formula per BT.2100:
 
