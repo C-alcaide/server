@@ -24,19 +24,27 @@ test could see.
 Every row verified against `src/protocol/amcp/AMCPCommandsImpl.cpp` at the line given, not from
 another document.
 
-| command | parameters | registered |
-| :--- | :--- | ---: |
-| `MIXER PROJECTION` | `yaw pitch roll fov [dur] [tween]` — degrees, converted by `DEG2RAD` | 5567 |
-| `MIXER PROJECTION_OFFSET` | `offset_x offset_y [dur] [tween]` | 5568 |
-| `MIXER PROJECTION_CURVE` | `CYLINDER\|SPHERE\|FISHEYE arc_deg [arc_v_deg] [eye_distance] [dur] [tween]` | 5569 |
-| `MIXER PROJECTION_LENS` | `CYLINDER\|SPHERE\|FISHEYE` — the *source* lens | 5570 |
-| `MIXER PROJECTION_ICVFX` | `enable [inner_fov_rad] [feather] [outer_dim] [inner_dim] [dur] [tween]` | 5571 |
-| `MIXER PROJECTION_ICVFX_COLOR` | `ir ig ib or og ob [dur] [tween]` | 5572 |
-| `MIXER PROJECTION_FRUSTUM` | `frustum_h frustum_v [dur] [tween]` | 5573 |
-| `MIXER PROJECTION_DISTORTION` | `k1 k2 k3 [p1 p2] [dur] [tween]` — Brown–Conrady | 5574 |
-| `MIXER PROJECTION_BLEND` | `left right [top] [bottom] [gamma] [dur] [tween]` | 5575 |
-| `MIXER PROJECTION_BLEND_MASK` | `<png path>` \| `NONE` \| *(empty = query)* | 5576 |
-| `MIXER FLIP` | `H` \| `V` \| `HV` \| `NONE` \| *(empty = query)* | 2268 |
+| command | parameters |
+| :--- | :--- |
+| `MIXER PROJECTION` | `yaw pitch roll fov [dur] [tween]` — degrees, converted by `DEG2RAD` |
+| `MIXER PROJECTION_OFFSET` | `offset_x offset_y [dur] [tween]` |
+| `MIXER PROJECTION_CURVE` | `CYLINDER\|SPHERE\|FISHEYE arc_deg [arc_v_deg] [eye_distance] [dur] [tween]` |
+| `MIXER PROJECTION_LENS` | `CYLINDER\|SPHERE\|FISHEYE` — the *source* lens |
+| `MIXER PROJECTION_ICVFX` | `enable [inner_fov_rad] [feather] [outer_dim] [inner_dim] [dur] [tween]` |
+| `MIXER PROJECTION_ICVFX_COLOR` | `ir ig ib or og ob [dur] [tween]` |
+| `MIXER PROJECTION_FRUSTUM` | `frustum_h frustum_v [dur] [tween]` |
+| `MIXER PROJECTION_DISTORTION` | `k1 k2 k3 [p1 p2] [dur] [tween]` — Brown–Conrady |
+| `MIXER PROJECTION_BLEND` | `left right [top] [bottom] [gamma] [dur] [tween]` |
+| `MIXER PROJECTION_BLEND_MASK` | `<png path>` \| `NONE` \| *(empty = query)* |
+| `MIXER FLIP` | `H` \| `V` \| `HV` \| `NONE` \| *(empty = query)* |
+
+All eleven are registered **consecutively in one block** in `AMCPCommandsImpl.cpp` — search for
+`L"MIXER PROJECTION"`; `MIXER FLIP` follows two lines later.
+
+> **The line numbers this table used to carry had all drifted by exactly +65**, and `FLIP`'s pointed
+> at its handler rather than its registration. Eleven numbers that move together on any insertion
+> above them are eleven things to get wrong at once, so they are gone rather than updated — see the
+> root `CLAUDE.md` on citing a symbol instead of a line.
 
 **Three details that surprise people, all verified:**
 
