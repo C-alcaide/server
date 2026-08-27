@@ -80,6 +80,19 @@ Latest, both backends, **re-measured 2026-08-27 on a freshly rebuilt binary**: `
 100/100 conversions, 23/23 patches each, worst **0.55 LSB**; `grading` 48/48 cases, 8/8 patches,
 worst **0.56** against a 1.0 gate, neutrals **0.00**.
 
+Same run, the batteries around them:
+
+| battery | result |
+| :--- | :--- |
+| `ocio` | **18/18** (channel gamut × colour space) within 1.0 LSB, worst overall **0.55** — the figure the gate was set from, reproduced |
+| `grade-window` | **byte-identical on both mixers**: node CDL **0.38 LSB**, chain error 0.75, invert separation 77.0, and composite **0.00** |
+| `icvfx-parity` | worst **0 LSB**, mean 0.000, **0.00 %** of samples differing |
+| `blend-domain` | controls **2/2** within 1.0 LSB, worst **0.00** — the rig reproduces the ordinary measurement with the blend taken out |
+| `alpha-domain` | controls **10/10** within 1.0 LSB, worst **0.49**; worst deviation from the selected model 0.51 |
+
+`grade-window`'s composite figure of 0.00 is the one to keep: it is the measurement that retired the
+suspected composite-path defect rather than the reading that suggested it.
+
 > `grading`'s worst read **0.55** when recorded on 2026-08-26 and reads **0.56** now, identically on
 > both backends. Nothing about the conclusion changes — the gate is 1.0 and the neutrals are still
 > exactly 0.00 — but the figure is what it is rather than what it was. `conformance` reproduced at

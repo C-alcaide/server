@@ -78,6 +78,18 @@ Measured by `decode-cost` (`force_cpu` / `auto` = D3D11VA / `cuda` / `vulkan` ar
 against a software reference, `encode-matrix` and `encode-parity` for the consumer, and
 `flat-decoded` — the only 1 LSB decode gate.
 
+**Latest, measured 2026-08-27 on a freshly rebuilt binary:**
+
+| battery | result |
+| :--- | :--- |
+| `flat-decoded --mixer ogl` / `--mixer vulkan` | **29/29** measured patches pass on each, 1 skipped |
+| `chroma-siting` | **4/4** sources reconstructed at the siting their codec declares, both mixers. ProRes 4:2:2 (left-sited): **0 of 1428** even columns blended, as required. MJPEG 4:2:2 (centre-sited): **606 of 1367** (44.3%) blended, as required |
+| `source-range` | **3/3** arms correct on the OpenGL mixer at a 1.5 LSB gate, with the full-range and limited-range arms **discriminating in opposite directions** — so breaking the common case to fix the other cannot pass |
+
+The `chroma-siting` pair is the one worth reading twice: a left-sited source must show **no** even-column
+blending and a centre-sited one must show it on most columns, so the two cases fail in opposite
+directions and a single wrong siting uniform cannot satisfy both.
+
 **Not covered:** HDR and BT.2020 on most arms; the A/B between D3D11VA and Vulkan Video has not been
 run; `vulkan-video-decode` has no dedicated battery.
 

@@ -101,6 +101,7 @@ normally, and produced **no readback at all** — conformance 0/4, flat-decoded 
 | :--- | :--- | :--- | :--- |
 | Colour-space conversions, 1 LSB gate | `conformance --mixer vulkan` | 100/100 conversions, 23/23 patches each, worst **0.55 LSB** | 2026-08-27 |
 | Grading operators, 1 LSB gate | `grading --mixer vulkan` | 48/48 cases, 8/8 patches, worst **0.56**, neutrals **0.00** | 2026-08-27 |
+| Composite, blend, keyer, geometry, `route://` | `mix-stage` | **24/24** scenarios, from single-layer identity to a 4-channel identity and a routed channel | 2026-08-27 |
 | Backend agreement | `mixer-parity` | HAP Q, six rasters: **0 LSB at both 1080 rasters**, 5 (PAL), 10 (NTSC), 14 (2600x1500), 16 (2160p) — the accepted YCoCg-filtering divergence, ceiling 24 | 2026-08-27 |
 | Vulkan API usage | `vk-validation` | **cannot currently fail** — see below | 2026-08-26 |
 
