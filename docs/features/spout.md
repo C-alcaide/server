@@ -243,22 +243,37 @@ them. And `acquire` is CPU wall time with no GPU fence, an omission that favours
    out to be correct — confirmed with a spatially asymmetric source rather than a flat one,
    since a flat colour cannot show a flip.
 
-6. **The Vulkan path induces late frames, reproducibly, and `consume_max` cannot see it.**
-   Measured twice by `preview-cost`: five channels publishing over Spout on the Vulkan mixer
-   ran **69 and 124 late frames of ~6265**, where the no-preview baseline ran **0** and a
-   screen consumer ran **1**. Its `consume_max` is the *lowest* of any arm (0.04–0.11 ms), so
-   whatever the cost is, it is not the channel waiting for the consumer to accept the frame.
-   The OpenGL path at the same load runs 0 late.
+6. **The Vulkan path induces late frames past two channels — diagnosed, NOT fixed.**
+   `preview-cost --mixer vulkan --channels N`, Spout against a no-preview baseline that ran
+   0 late at every N:
 
-   **Leading hypothesis, not a diagnosis**: `device::blit_to_shared` runs through
-   `dispatch_sync`, so five consumers each block on the Vulkan device's own dispatch thread
-   once per tick, and that thread is the mixer's too. `CLAUDE.md` names exactly this shape —
-   "these now share one `VkDevice` and one graphics queue… a route measured alone says nothing
-   about it running beside the others" — and `coexistence` is the battery for it. Untested
-   here: I have not varied the channel count, which is the cheap experiment that would
-   confirm or kill it, nor ruled out CPU starvation on a box already at 98%.
+   | channels | 1 | 2 | 3 | 5 |
+   | :--- | ---: | ---: | ---: | ---: |
+   | late frames | 0 / 1003 | 0 / 2008 | **21 / 3008** | **76 / 5009** |
+   | rate | 0% | 0% | 0.70% | 1.52% |
 
-7. **`FPS` rounds down silently** past the log line at `initialize()`. An operator who asks for 30
+   Nothing at one or two, onset at three, doubling by five. **That is contention on
+   something shared, not a per-consumer cost** — a per-consumer cost is visible at N=1 and
+   scales linearly. `consume_max` stays at 0.03–0.15 ms throughout, the lowest of any arm,
+   so the channel is *not* waiting for the consumer to accept the frame.
+
+   **The mechanism.** `device::blit_to_shared` wraps its work in `dispatch_sync`, so every
+   consumer makes a **blocking round trip to the Vulkan device's single dispatch thread**
+   once per tick — and that is the thread the mixer composites on. Five channels at 50 Hz
+   is 250 such round trips a second competing with the compositing they are copying from.
+   The OpenGL path does its blit on the consumer's own GL context and runs **0 late at the
+   same load**, which is the control that makes this reading rather than a guess.
+
+   **Not fixed**, and deliberately not fixed in a hurry: the repair is to get the blit off
+   the shared device thread, and this tree records that exact class of change producing
+   `VK_ERROR_DEVICE_LOST` at four concurrent producers (`av_vulkan_import.cpp`). It wants
+   its own session with `coexistence` run before and after.
+
+   **What to do today**: the OpenGL mixer is unaffected, and up to two Spout consumers on
+   Vulkan measured clean. `EVERY_NTH` would also reduce the round-trip rate — at the cost
+   of the preview frame rate.
+
+7. **`FPS` rounds down silently**7. **`FPS` rounds down silently** past the log line at `initialize()`. An operator who asks for 30
    on a 50p channel gets 25 and only `spout/every-nth` says so.
 
 ---
