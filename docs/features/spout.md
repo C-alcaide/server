@@ -264,10 +264,32 @@ them. And `acquire` is CPU wall time with no GPU fence, an omission that favours
    The OpenGL path does its blit on the consumer's own GL context and runs **0 late at the
    same load**, which is the control that makes this reading rather than a guess.
 
-   **Not fixed**, and deliberately not fixed in a hurry: the repair is to get the blit off
-   the shared device thread, and this tree records that exact class of change producing
-   `VK_ERROR_DEVICE_LOST` at four concurrent producers (`av_vulkan_import.cpp`). It wants
-   its own session with `coexistence` run before and after.
+   **The obvious fix was built, measured and REJECTED.** A `direct_blit` class recorded and
+   submitted the blit on the consumer's own thread using a private command pool, removing
+   the dispatch-thread round trip entirely. It made things **worse**:
+
+   | approach | late / ~5010 at five channels |
+   | :--- | ---: |
+   | `blit_to_shared` — device dispatch thread (shipping) | **48–76** |
+   | `direct_blit` — caller thread, waits on a fence | 211 |
+   | `direct_blit` — caller thread, no completion wait | 242 |
+
+   So the dispatch thread was **not** the bottleneck, and the hypothesis above is only half
+   right: what the consumers contend for is the **queue**, not the thread. Moving the
+   recording off the device thread merely put five consumer threads into direct contention
+   for `device::submit`'s queue lock, where the dispatch thread had been serialising them
+   in one place. Removing the fence wait did not help either, which rules out the added
+   synchronisation as the cause. The code is reverted; this is recorded so the next reader
+   does not spend the same afternoon.
+
+   **Where a real fix would have to go**: the blits are transfer work on the mixer's
+   graphics queue. This GPU has a separate compute/transfer family (NVIDIA's family 2,
+   which carries `TRANSFER`), and moving the blit there would take it off the graphics
+   queue entirely. That needs **queue-family ownership transfers** on the mixer's own
+   attachment, so the mixer has to participate — a cross-queue change of exactly the class
+   this tree records producing `VK_ERROR_DEVICE_LOST` at four concurrent producers
+   (`av_vulkan_import.cpp`). It wants its own session with `coexistence` before and after,
+   not a patch on the end of a benchmark.
 
    **What to do today**: the OpenGL mixer is unaffected, and up to two Spout consumers on
    Vulkan measured clean. `EVERY_NTH` would also reduce the round-trip rate — at the cost
