@@ -855,7 +855,29 @@ sub-command reaches the server.
 | Previz | `PREVIZ <ch> CAMERA/VIEW/SCREEN/SHOW/GRID/WIREFRAME/GIZMO` |
 | Tracking | `TRACKING <ch>-<l> BIND/UNBIND/OFFSET/SCALE/ZERO/INFO`, `TRACKING LIST` |
 | Calibration | `CALIBRATION <ch> LUT/BYPASS/CLEAR/INFO` |
+| Consumers | `ADD <ch> <NAME> …`, `REMOVE <ch> <NAME>` — see the preview senders below |
 | System | `INFO`, `RESTART`, `SHUTDOWN` |
+
+### Preview senders (Spout)
+
+To feed a preview to another application on the same machine without paying for a
+full-resolution frame, cap the size and the rate:
+
+```
+ADD 1 SPOUT preview MAX_WIDTH 256 EVERY_NTH 2
+ADD 1 SPOUT preview MAX_WIDTH 256 FPS 25
+REMOVE 1 SPOUT preview
+```
+
+`MAX_WIDTH` / `MAX_HEIGHT` cap the published size preserving aspect; the reduction runs
+on the GPU on both mixers, so a small sender stays zero-copy instead of dropping to a
+host readback. `EVERY_NTH` sends one frame in N; `FPS` says the same thing as a rate and
+rounds **down** to a whole divisor, so `FPS 30` on a 50p channel publishes at 25.
+
+A CPU fallback produces the same picture at the same size, so check `INFO <ch>` rather
+than the image if it matters: `spout/gpu-path` is true when the frame never reached host
+memory, and `spout/gpu-downscale` when the GPU also did the resize. `spout/every-nth`
+shows the divisor actually in force after `FPS` was resolved.
 
 ### OSC telemetry
 

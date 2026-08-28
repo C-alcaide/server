@@ -207,6 +207,29 @@ class device final
     /// Returns nullptr if the reduction fails.
     std::shared_ptr<class texture> reduce_texture(const std::shared_ptr<class texture>& source, int levels);
 
+    /// Single-pass scaling blit of `source` into a caller-owned `dest`, for a consumer
+    /// that wants the composite at its own size in memory another API can read.
+    /// Blocking; safe to call from a consumer thread.
+    ///
+    /// `dest` must come from create_exportable_texture() if the point is to hand it to
+    /// OpenGL -- reduce_texture() cannot serve that case, because it allocates its
+    /// result through create_attachment() and pooled attachments have no exportable
+    /// memory. It is left in **eGeneral**, which is what a GL_EXT_memory_object
+    /// importer needs in order to read it; GL knows nothing of Vulkan image layouts.
+    ///
+    /// `source` is assumed to arrive in eColorAttachmentOptimal (where the mixer's
+    /// renderpass leaves it) and is **restored to that layout**, unlike
+    /// reduce_texture(), because this is called on a live mixer attachment that the
+    /// mixer goes on using rather than on a private intermediate.
+    ///
+    /// Scaling uses vkCmdBlitImage with eLinear. That aliases on a large reduction:
+    /// prefer reduce_texture()'s box-filtered halvings when the result is measured
+    /// rather than looked at.
+    ///
+    /// Returns false if either texture is missing, compressed, or the blit throws.
+    bool blit_to_shared(const std::shared_ptr<class texture>& source,
+                        const std::shared_ptr<class texture>& dest);
+
     template <typename Func>
     auto dispatch_async(Func&& func)
     {

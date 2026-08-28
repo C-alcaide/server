@@ -1646,6 +1646,101 @@ struct device::impl : public std::enable_shared_from_this<impl>
         });
     }
 
+    bool blit_to_shared(const std::shared_ptr<texture>& source,
+                        const std::shared_ptr<texture>& dest,
+                        vk::ImageLayout                 source_layout)
+    {
+        if (!source || !dest || source->compressed() || dest->compressed())
+            return false;
+
+        const int sw = source->width();
+        const int sh = source->height();
+        const int dw = dest->width();
+        const int dh = dest->height();
+        if (sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0)
+            return false;
+
+        return dispatch_sync([&]() -> bool {
+            try {
+                const auto src_img = source->id();
+                const auto dst_img = dest->id();
+
+                submitSingleTimeCommands([&](vk::CommandBuffer cmd) {
+                    // Source: whatever the mixer left it in -> eTransferSrcOptimal.
+                    transitionImageLayout(src_img,
+                                          source_layout,
+                                          vk::AccessFlagBits2::eMemoryWrite,
+                                          vk::PipelineStageFlagBits2::eAllCommands,
+                                          vk::ImageLayout::eTransferSrcOptimal,
+                                          vk::AccessFlagBits2::eTransferRead,
+                                          vk::PipelineStageFlagBits2::eTransfer,
+                                          cmd);
+                    // Destination is overwritten whole, so eUndefined is honest and
+                    // skips preserving contents.
+                    transitionImageLayout(dst_img,
+                                          vk::ImageLayout::eUndefined,
+                                          vk::AccessFlagBits2::eNone,
+                                          vk::PipelineStageFlagBits2::eTopOfPipe,
+                                          vk::ImageLayout::eTransferDstOptimal,
+                                          vk::AccessFlagBits2::eTransferWrite,
+                                          vk::PipelineStageFlagBits2::eTransfer,
+                                          cmd);
+
+                    const auto     layers = vk::ImageSubresourceLayers(vk::ImageAspectFlagBits::eColor, 0, 0, 1);
+                    vk::ImageBlit2 region{};
+                    region.srcSubresource = layers;
+                    region.dstSubresource = layers;
+                    region.srcOffsets[0]  = vk::Offset3D{0, 0, 0};
+                    region.srcOffsets[1]  = vk::Offset3D{sw, sh, 1};
+                    region.dstOffsets[0]  = vk::Offset3D{0, 0, 0};
+                    region.dstOffsets[1]  = vk::Offset3D{dw, dh, 1};
+
+                    // Blit, not copy: vkCmdCopyImage cannot scale, and scaling is the
+                    // whole point of this function. eLinear weights the contributing
+                    // texels, which is adequate for a preview but aliases on a large
+                    // reduction -- see reduce_texture() for the box-filtered chain.
+                    vk::BlitImageInfo2 blit{};
+                    blit.srcImage       = src_img;
+                    blit.srcImageLayout = vk::ImageLayout::eTransferSrcOptimal;
+                    blit.dstImage       = dst_img;
+                    blit.dstImageLayout = vk::ImageLayout::eTransferDstOptimal;
+                    blit.filter         = vk::Filter::eLinear;
+                    blit.setRegions(region);
+                    cmd.blitImage2(blit);
+
+                    // eGeneral is what an OpenGL importer of this memory needs to read
+                    // it; GL knows nothing of Vulkan layouts, so leaving it in
+                    // eTransferDstOptimal is undefined from GL's side. Same choice
+                    // previz_texture_bridge makes for the same reason.
+                    transitionImageLayout(dst_img,
+                                          vk::ImageLayout::eTransferDstOptimal,
+                                          vk::AccessFlagBits2::eTransferWrite,
+                                          vk::PipelineStageFlagBits2::eTransfer,
+                                          vk::ImageLayout::eGeneral,
+                                          vk::AccessFlagBits2::eNone,
+                                          vk::PipelineStageFlagBits2::eBottomOfPipe,
+                                          cmd);
+
+                    // Put the source back the way it arrived: it is the mixer's live
+                    // attachment, and this consumer is a bystander to it.
+                    transitionImageLayout(src_img,
+                                          vk::ImageLayout::eTransferSrcOptimal,
+                                          vk::AccessFlagBits2::eTransferRead,
+                                          vk::PipelineStageFlagBits2::eTransfer,
+                                          source_layout,
+                                          vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
+                                          vk::PipelineStageFlagBits2::eAllCommands,
+                                          cmd);
+                });
+
+                return true;
+            } catch (const vk::SystemError& e) {
+                CASPAR_LOG(warning) << L"[vulkan::device] blit_to_shared failed: " << u16(e.what());
+                return false;
+            }
+        });
+    }
+
     std::shared_ptr<texture> reduce_texture(const std::shared_ptr<texture>& source, int levels)
     {
         if (!source || source->compressed())
@@ -2225,6 +2320,10 @@ std::future<array<const uint8_t>> device::copy_async(const std::shared_ptr<textu
 std::shared_ptr<texture> device::reduce_texture(const std::shared_ptr<texture>& source, int levels)
 {
     return impl_->reduce_texture(source, levels);
+}
+bool device::blit_to_shared(const std::shared_ptr<texture>& source, const std::shared_ptr<texture>& dest)
+{
+    return impl_->blit_to_shared(source, dest, vk::ImageLayout::eColorAttachmentOptimal);
 }
 void device::dispatch(std::function<void()> func)
 {

@@ -27,12 +27,33 @@
 #include <common/diagnostics/graph.h>
 #include <common/timer.h>
 #include <common/log.h>
+#include <common/utf.h>
 #include <core/frame/frame.h>
 #include <core/frame/pixel_format.h>
 #include <core/consumer/frame_consumer.h>
 #include <core/consumer/channel_info.h>
 #include <core/video_format.h>
+#include <core/monitor/monitor.h>
 #include <accelerator/ogl/util/texture.h>
+
+// The FBO and blit entry points come from the Spout SDK's own extension loader,
+// NOT from GLEW. GLEW macro-renames these names and declares them dllimport while
+// SpoutGLextensions.h declares them as plain extern, so the two cannot share a
+// translation unit -- see the note at the top of producer/spout_gl_bridge.h, where
+// that conflict forced the producer's GL half into a separate file. Here the Spout
+// loader already has everything needed, so no second translation unit is required.
+#include <SpoutGLextensions.h>
+
+#ifdef ENABLE_VULKAN
+// All four of these are deliberately GLEW-free headers, which is what lets the
+// Vulkan interop live in this Spout-including translation unit at all.
+#include <accelerator/vulkan/util/device.h>
+#include <accelerator/vulkan/util/gl_export_bridge.h>
+#include <accelerator/vulkan/util/texture.h>
+#include <accelerator/vulkan/util/texture_wrapper.h>
+#include <common/bit_depth.h>
+#endif
+
 #include <memory>
 #include <atomic>
 #include <chrono>
@@ -197,6 +218,12 @@ struct spout_consumer_impl : public core::frame_consumer
     void* gl_share_context_ = nullptr;
     std::atomic<bool> gpu_path_active_{false};
 
+    // True when the GPU path also did the downscale, i.e. the frame never reached
+    // host memory *and* the send was small. Reported separately from
+    // gpu_path_active_ because "zero-copy" and "cheap" used to be mutually
+    // exclusive here and the difference is the whole point of the change.
+    std::atomic<bool> gpu_downscale_active_{false};
+
     // Optional downscale cap (0 = no cap = native resolution).
     // Set via AMCP: ADD x SPOUT "Name" MAX_WIDTH 1920 MAX_HEIGHT 1080
     int max_w_ = 0;
@@ -205,6 +232,46 @@ struct spout_consumer_impl : public core::frame_consumer
     // Output dimensions (computed in initialize)
     int  out_w_ = 0;
     int  out_h_ = 0;
+
+    // ── Preview frame-rate divisor: send every Nth frame (1 = every frame) ──
+    // A preview does not need 60 Hz, and skipping a send is a branch. Counted on
+    // the calling (video) thread so a skipped frame costs nothing at all -- not
+    // even the executor hand-off.
+    int      every_nth_   = 1;
+    uint64_t frame_index_ = 0;
+
+    // Alternative spelling of the same thing for an operator who knows the rate they
+    // want rather than the divisor. Resolved to every_nth_ in initialize(), because
+    // that is the first point at which the channel's own rate is known.
+    int target_fps_ = 0;
+
+    // ── GPU downscale (both backends): small destination texture + FBO pair ──
+    // Lives in the consumer's own GL context, on the executor thread. Recreated
+    // only when the output dimensions change.
+    unsigned int blit_tex_      = 0;
+    unsigned int blit_fbo_read_ = 0;
+    unsigned int blit_fbo_draw_ = 0;
+    int          blit_w_        = 0;
+    int          blit_h_        = 0;
+    bool         blit_failed_   = false; // sticky: stop retrying a broken FBO every frame
+
+#ifdef ENABLE_VULKAN
+    // ── Vulkan backend: our own exportable image, imported once into GL ──
+    //
+    // The Vulkan mixer exposes NO GL context to share (image_mixer does not override
+    // native_gl_context(), so channel_info::gl_share_context is null on that backend)
+    // and its composite attachment is not exportable memory -- create_attachment()
+    // rather than create_exportable_texture(). So neither half of the OGL path
+    // applies: there is nothing to share a context with, and nothing GL could import
+    // even if there were. Instead the mixer's attachment is blitted into an image
+    // this consumer owns and which IS exportable, and that image is imported into
+    // the consumer's own (unshared) context. GL_EXT_memory_object does not require
+    // context sharing, only that the memory be exportable.
+    void*                                                   vk_device_ = nullptr;
+    std::shared_ptr<accelerator::vulkan::texture>           vk_shared_tex_;
+    std::unique_ptr<accelerator::vulkan::gl_shared_texture> vk_gl_import_;
+    bool                                                    vk_interop_failed_ = false;
+#endif
 
     std::vector<uint8_t> out_buf_;  // top-down BGRA8 output buffer
 
@@ -222,6 +289,104 @@ struct spout_consumer_impl : public core::frame_consumer
 
     void free_sws_ctxs() noexcept {
         for (auto*& c : sws_ctxs_) { if (c) { sws_freeContext(c); c = nullptr; } }
+    }
+
+    // ── GPU downscale helpers. Executor thread only, context current. ──────────
+    //
+    // Freeing has to happen on the same thread that made the names, which is why
+    // the destructor runs its teardown as an executor task rather than inline.
+    void release_gl_blit() noexcept
+    {
+        if (blit_fbo_read_) { glDeleteFramebuffersEXT(1, &blit_fbo_read_); blit_fbo_read_ = 0; }
+        if (blit_fbo_draw_) { glDeleteFramebuffersEXT(1, &blit_fbo_draw_); blit_fbo_draw_ = 0; }
+        if (blit_tex_)      { glDeleteTextures(1, &blit_tex_);             blit_tex_      = 0; }
+        blit_w_ = blit_h_ = 0;
+    }
+
+    /// Lazily (re)create the small destination texture and the FBO pair for it.
+    /// Returns false once and then stays false for a given size, so a driver that
+    /// refuses the FBO does not cost a rebuild attempt on every frame.
+    bool ensure_blit_target(int w, int h)
+    {
+        if (blit_tex_ && blit_w_ == w && blit_h_ == h)
+            return true;
+        if (blit_failed_)
+            return false;
+
+        release_gl_blit();
+
+        glGenTextures(1, &blit_tex_);
+        if (!blit_tex_) { blit_failed_ = true; return false; }
+        glBindTexture(GL_TEXTURE_2D, blit_tex_);
+        // RGBA8 regardless of the channel's depth: this is a preview, and Spout's
+        // shared-texture format is 8-bit anyway.
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glBindTexture(GL_TEXTURE_2D, 0);
+
+        glGenFramebuffersEXT(1, &blit_fbo_read_);
+        glGenFramebuffersEXT(1, &blit_fbo_draw_);
+        if (!blit_fbo_read_ || !blit_fbo_draw_) {
+            release_gl_blit();
+            blit_failed_ = true;
+            return false;
+        }
+
+        // The draw FBO's attachment never changes, so bind it once here. The read
+        // FBO's does change (a different mixer texture each frame), so it is
+        // attached per blit.
+        glBindFramebufferEXT(GL_DRAW_FRAMEBUFFER, blit_fbo_draw_);
+        glFramebufferTexture2DEXT(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, blit_tex_, 0);
+        const auto ok = glCheckFramebufferStatusEXT(GL_DRAW_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE_EXT;
+        glBindFramebufferEXT(GL_DRAW_FRAMEBUFFER, 0);
+
+        if (!ok) {
+            CASPAR_LOG(warning) << L"[spout_consumer] incomplete draw framebuffer for the "
+                                << w << L"x" << h << L" preview; using the readback path.";
+            release_gl_blit();
+            blit_failed_ = true;
+            return false;
+        }
+
+        blit_w_ = w;
+        blit_h_ = h;
+        return true;
+    }
+
+    /// Downscale `src_tex` (`src_w` x `src_h`) into the cached small texture.
+    /// Returns its GL name, or 0 to mean "fall back".
+    ///
+    /// Orientation is preserved: both rectangles are given in the same winding, so a
+    /// top-down source stays top-down and the existing bInvert=false on SendTexture
+    /// keeps its meaning.
+    unsigned int downscale_on_gpu(unsigned int src_tex, int src_w, int src_h)
+    {
+        if (!ensure_blit_target(out_w_, out_h_))
+            return 0;
+
+        glBindFramebufferEXT(GL_READ_FRAMEBUFFER, blit_fbo_read_);
+        glFramebufferTexture2DEXT(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, src_tex, 0);
+        if (glCheckFramebufferStatusEXT(GL_READ_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE_EXT) {
+            glFramebufferTexture2DEXT(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
+            glBindFramebufferEXT(GL_READ_FRAMEBUFFER, 0);
+            return 0;
+        }
+
+        glBindFramebufferEXT(GL_DRAW_FRAMEBUFFER, blit_fbo_draw_);
+        glBlitFramebufferEXT(0, 0, src_w, src_h,
+                             0, 0, out_w_, out_h_,
+                             GL_COLOR_BUFFER_BIT, GL_LINEAR);
+
+        // Detach the source so this FBO holds no reference to a mixer texture that
+        // may be recycled before the next frame.
+        glFramebufferTexture2DEXT(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
+        glBindFramebufferEXT(GL_READ_FRAMEBUFFER, 0);
+        glBindFramebufferEXT(GL_DRAW_FRAMEBUFFER, 0);
+
+        return blit_tex_;
     }
 
     bool init_sws_ctxs(int sw, int sh, AVPixelFormat sfmt, int dw, int dh) {
@@ -293,9 +458,11 @@ struct spout_consumer_impl : public core::frame_consumer
         }
     }
 
-    spout_consumer_impl(std::wstring name, int max_w, int max_h)
+    spout_consumer_impl(std::wstring name, int max_w, int max_h, int every_nth, int target_fps)
         : max_w_(max_w)
         , max_h_(max_h)
+        , every_nth_((std::max)(1, every_nth))
+        , target_fps_((std::max)(0, target_fps))
         , executor_(L"Spout Consumer")
     {
         sender_name_.reserve(name.length());
@@ -321,6 +488,15 @@ struct spout_consumer_impl : public core::frame_consumer
         // wglDeleteContext cross-thread. Run the teardown as an executor task
         // instead of just draining the queue.
         executor_.invoke([this] {
+            // GL names and the imported Vulkan texture belong to this thread's
+            // context, so they have to go before the context does.
+            if (context_)
+                context_->make_current();
+            release_gl_blit();
+#ifdef ENABLE_VULKAN
+            vk_gl_import_.reset();
+            vk_shared_tex_.reset();
+#endif
             if (sender_)
                 sender_->ReleaseSender();
             sender_.reset();
@@ -335,6 +511,13 @@ struct spout_consumer_impl : public core::frame_consumer
 
         // Capture the mixer's GL context handle for shared-context creation.
         gl_share_context_ = channel_info.gl_share_context;
+
+#ifdef ENABLE_VULKAN
+        // Null unless the channel is on the Vulkan mixer. This is what makes the
+        // Vulkan zero-copy path reachable at all -- gl_share_context is always null
+        // there, so is_shared() can never be the gate for that backend.
+        vk_device_ = channel_info.vk_device;
+#endif
 
         // Compute output dimensions (native by default; capped if MAX_WIDTH/MAX_HEIGHT set).
         if (max_w_ > 0 || max_h_ > 0) {
@@ -352,12 +535,112 @@ struct spout_consumer_impl : public core::frame_consumer
             out_h_ = format_desc.height;
         }
 
+        // FPS is a friendlier spelling of EVERY_NTH, resolvable only now that the
+        // channel's rate is known. Rounds down to the nearest achievable rate --
+        // asking for 30 on a 50p channel sends every other frame (25), not 30, since
+        // only whole frames can be skipped. EVERY_NTH wins if both were given.
+        if (target_fps_ > 0 && every_nth_ == 1) {
+            const double channel_fps = format_desc.fps;
+            if (channel_fps > 0.0 && target_fps_ < channel_fps) {
+                every_nth_ = (std::max)(1, static_cast<int>(channel_fps / target_fps_));
+                CASPAR_LOG(info) << L"[spout_consumer] FPS " << target_fps_ << L" on a "
+                                 << channel_fps << L" Hz channel: sending every " << every_nth_
+                                 << L" frames (" << (channel_fps / every_nth_) << L" Hz).";
+            }
+        }
+
         out_buf_.assign(static_cast<size_t>(out_w_) * out_h_ * 4, 0);
 
         // Force swscale rebuild on next frame (dimensions may have changed).
         src_av_fmt_ = AV_PIX_FMT_NONE;
         free_sws_ctxs();
+
+        // The GPU blit target and the Vulkan shared image are both sized from
+        // out_w_/out_h_, so a re-initialise at a new format invalidates them. They
+        // are owned by the executor thread's context, so drop them there.
+        executor_.begin_invoke([this] {
+            if (context_ && context_->make_current()) {
+                release_gl_blit();
+#ifdef ENABLE_VULKAN
+                vk_gl_import_.reset();
+                vk_shared_tex_.reset();
+#endif
+            }
+            blit_failed_ = false;
+        });
     }
+
+#ifdef ENABLE_VULKAN
+    /// Vulkan backend zero-copy send. Executor thread, context current.
+    ///
+    /// Returns false to mean "take the readback path", having logged the reason at
+    /// most once -- a silent fallback here is indistinguishable from the defect this
+    /// exists to fix.
+    bool try_send_vulkan(const std::shared_ptr<core::texture>& core_tex)
+    {
+        if (!vk_device_ || vk_interop_failed_)
+            return false;
+
+        auto* wrapper = dynamic_cast<accelerator::vulkan::texture_wrapper*>(core_tex.get());
+        if (!wrapper)
+            return false;
+
+        if (!accelerator::vulkan::gl_import_supported()) {
+            vk_interop_failed_ = true;
+            CASPAR_LOG(info) << L"[spout_consumer] this GL context cannot import Vulkan memory "
+                                L"(GL_EXT_memory_object missing); the Vulkan zero-copy path is "
+                                L"unavailable and every frame will be read back and converted.";
+            return false;
+        }
+
+        // The mixer's renderpass must have finished before its attachment can be a
+        // blit source.
+        wrapper->ensure_render_complete();
+        auto src = wrapper->vk_texture();
+        if (!src)
+            return false;
+
+        auto* dev = static_cast<accelerator::vulkan::device*>(vk_device_);
+
+        // One exportable image and one GL import per output size, not per frame:
+        // each import creates a GL memory object and a GL texture.
+        if (!vk_shared_tex_ || !vk_gl_import_ || vk_shared_tex_->width() != out_w_ ||
+            vk_shared_tex_->height() != out_h_) {
+            vk_gl_import_.reset();
+            vk_shared_tex_.reset();
+
+            try {
+                vk_shared_tex_ = dev->create_exportable_texture(out_w_, out_h_, 4, common::bit_depth::bit8);
+                if (!vk_shared_tex_)
+                    throw std::runtime_error("create_exportable_texture returned null");
+                vk_gl_import_ = std::make_unique<accelerator::vulkan::gl_shared_texture>(vk_shared_tex_);
+            } catch (const std::exception& e) {
+                vk_gl_import_.reset();
+                vk_shared_tex_.reset();
+                vk_interop_failed_ = true;
+                CASPAR_LOG(info) << L"[spout_consumer] cannot share a Vulkan image with OpenGL ("
+                                 << u16(e.what())
+                                 << L"); the Vulkan zero-copy path is unavailable and every frame "
+                                    L"will be read back and converted.";
+                return false;
+            }
+        }
+
+        // Scaling blit straight into the shared image. This is both halves at once:
+        // the downscale and the escape from swscale.
+        if (!dev->blit_to_shared(src, vk_shared_tex_))
+            return false;
+
+        gpu_path_active_       = true;
+        gpu_downscale_active_  = (src->width() != out_w_ || src->height() != out_h_);
+        sender_->SendTexture(static_cast<GLuint>(vk_gl_import_->gl_id()),
+                             GL_TEXTURE_2D,
+                             static_cast<unsigned int>(out_w_),
+                             static_cast<unsigned int>(out_h_),
+                             false);
+        return true;
+    }
+#endif
 
     std::future<bool> send(const core::video_field field, core::const_frame frame) override
     {
@@ -367,6 +650,13 @@ struct spout_consumer_impl : public core::frame_consumer
 
         const AVPixelFormat src_fmt = caspar_to_av_fmt(frame.pixel_format_desc());
         if (src_fmt == AV_PIX_FMT_NONE)
+            return caspar::make_ready_future(true);
+
+        // Frame-rate divisor. Checked here, on the calling thread, before anything
+        // else: a skipped preview frame then costs one increment and a compare, not
+        // an executor hand-off. Counted rather than timed, so it stays deterministic
+        // and does not drift against the channel's tick.
+        if (every_nth_ > 1 && (frame_index_++ % static_cast<uint64_t>(every_nth_)) != 0)
             return caspar::make_ready_future(true);
 
         // FPS counter — updated every second in the calling (video) thread.
@@ -418,27 +708,65 @@ struct spout_consumer_impl : public core::frame_consumer
             }
 
             // ── GPU texture path: zero-copy via SendTexture() ──
-            // Available when: shared GL context succeeded, no downscaling needed,
-            // and frame carries an OGL texture from the mixer.
-            if (context_->is_shared() && src_w == out_w_ && src_h == out_h_) {
-                if (auto core_tex = frame.texture()) {
-                    auto ogl_tex = std::dynamic_pointer_cast<accelerator::ogl::texture>(core_tex);
-                    if (ogl_tex) {
-                        gpu_path_active_ = true;
-                        sender_->SendTexture(static_cast<GLuint>(ogl_tex->id()),
-                                             GL_TEXTURE_2D,
-                                             static_cast<unsigned int>(ogl_tex->width()),
-                                             static_cast<unsigned int>(ogl_tex->height()),
-                                             false);  // bInvert=false: OGL mixer output is already top-down in texture
-                        graph_->set_value("frame-time", frame_timer_.elapsed() * 1000.0);
-                        busy_ = false;
-                        return;
+            //
+            // The dimension equality that used to guard this is gone. It made
+            // small-and-CPU or full-res-and-GPU the only two choices, and the only
+            // combination that scales to several previews is small-and-GPU: a
+            // 1920x1080 readback costs 3.12 ms (19% of a frame) against 0.088 ms at
+            // 256x144, and the downscale itself is a GPU blit. Requesting MAX_WIDTH
+            // therefore used to disable the very path that made it affordable.
+            if (auto core_tex = frame.texture()) {
+                // OGL mixer: the texture lives in the mixer's context, so this needs
+                // the shared context to name it at all.
+                if (context_->is_shared()) {
+                    if (auto ogl_tex = std::dynamic_pointer_cast<accelerator::ogl::texture>(core_tex)) {
+                        auto send_id = static_cast<unsigned int>(ogl_tex->id());
+                        auto send_w  = ogl_tex->width();
+                        auto send_h  = ogl_tex->height();
+
+                        const bool want_scale = (send_w != out_w_ || send_h != out_h_);
+                        if (want_scale) {
+                            // Not named `small`: <windows.h> drags in rpcndr.h, which
+                            // #defines small as char.
+                            if (auto scaled_id = downscale_on_gpu(send_id, send_w, send_h)) {
+                                send_id = scaled_id;
+                                send_w  = out_w_;
+                                send_h  = out_h_;
+                            } else {
+                                send_id = 0; // FBO unavailable -- fall through to readback
+                            }
+                        }
+
+                        if (send_id) {
+                            gpu_path_active_      = true;
+                            gpu_downscale_active_ = want_scale;
+                            sender_->SendTexture(static_cast<GLuint>(send_id),
+                                                 GL_TEXTURE_2D,
+                                                 static_cast<unsigned int>(send_w),
+                                                 static_cast<unsigned int>(send_h),
+                                                 false);  // bInvert=false: OGL mixer output is already top-down in texture
+                            graph_->set_value("frame-time", frame_timer_.elapsed() * 1000.0);
+                            busy_ = false;
+                            return;
+                        }
                     }
                 }
+
+#ifdef ENABLE_VULKAN
+                // Vulkan mixer: a different mechanism entirely, because there is no
+                // shared context and the composite is not exportable. See
+                // try_send_vulkan().
+                if (try_send_vulkan(core_tex)) {
+                    graph_->set_value("frame-time", frame_timer_.elapsed() * 1000.0);
+                    busy_ = false;
+                    return;
+                }
+#endif
             }
 
             // ── CPU fallback path: swscale + SendImage() ──
-            gpu_path_active_ = false;
+            gpu_path_active_      = false;
+            gpu_downscale_active_ = false;
 
             // Rebuild swscale contexts when format or output dimensions change.
             if (src_fmt != src_av_fmt_ || !sws_ctxs_[0]) {
@@ -534,7 +862,23 @@ struct spout_consumer_impl : public core::frame_consumer
 
     bool needs_cpu_frame_data() const override { return !gpu_path_active_; }
 
-    caspar::core::monitor::state state() const override { return {}; }
+    /// Reported because nothing else can tell zero-copy from a correct-looking CPU
+    /// fallback. Both produce the right picture at the right size; they differ by
+    /// 3.12 ms per frame per preview, and before this the only way to know which one
+    /// ran was a debugger. A check that cannot see which path was taken cannot fail
+    /// for a change that breaks the fast one.
+    caspar::core::monitor::state state() const override
+    {
+        caspar::core::monitor::state state;
+        state["spout/sender-name"]   = sender_name_;
+        state["spout/gpu-path"]      = gpu_path_active_.load();
+        state["spout/gpu-downscale"] = gpu_downscale_active_.load();
+        state["spout/out-width"]     = out_w_;
+        state["spout/out-height"]    = out_h_;
+        state["spout/every-nth"]     = every_nth_;
+        state["spout/fps"]           = current_fps_;
+        return state;
+    }
 };
 
 // ── Helper: read optional integer param from AMCP token list ──────────────────
@@ -563,11 +907,13 @@ spl::shared_ptr<core::frame_consumer> create_spout_consumer(
 
     std::wstring name = (params.size() > 1) ? params[1] : L"";
 
-    // Optional: ADD x SPOUT "Name" MAX_WIDTH 1920 MAX_HEIGHT 1080
-    const int max_w = get_int_param(params, L"MAX_WIDTH");
-    const int max_h = get_int_param(params, L"MAX_HEIGHT");
+    // Optional: ADD x SPOUT "Name" MAX_WIDTH 1920 MAX_HEIGHT 1080 [EVERY_NTH 2 | FPS 30]
+    const int max_w     = get_int_param(params, L"MAX_WIDTH");
+    const int max_h     = get_int_param(params, L"MAX_HEIGHT");
+    const int every_nth = get_int_param(params, L"EVERY_NTH");
+    const int fps       = get_int_param(params, L"FPS");
 
-    return spl::make_shared<spout_consumer_impl>(name, max_w, max_h);
+    return spl::make_shared<spout_consumer_impl>(name, max_w, max_h, every_nth, fps);
 }
 
 }} // namespace caspar::spout

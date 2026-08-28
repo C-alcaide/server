@@ -1,6 +1,49 @@
 CasparVP — Unreleased
 ==========================================
 
+### Changed: a downscaled Spout sender no longer forces a CPU readback, and the Vulkan mixer has a zero-copy path at all
+
+**This changes rendered output for an existing config**: `ADD n SPOUT name MAX_WIDTH …` previously
+published pixels resampled by swscale and now publishes a GPU blit of the mixer's own texture. The
+picture is a linear reduction of the same frame rather than a `SWS_FAST_BILINEAR` one, so it is not
+bit-identical to before.
+
+The GPU path was guarded by `is_shared() && src_w == out_w_ && src_h == out_h_`, which made
+small-and-CPU and full-res-and-GPU the only reachable combinations. Neither scales to several
+previews, measured on this machine (RTX A4000, driver 582.53, GL 4.6):
+
+| path | cost |
+| :--- | ---: |
+| `glReadPixels` 1920×1080 | **3.12 ms** — 19% of a 16.67 ms frame |
+| eight of those | **25 ms** = 1.5 frames |
+| `glReadPixels` 256×144 | 0.088 ms |
+| eight of those | **0.70 ms** = 4% of a frame |
+
+So downscaling before the copy is worth 36×, and not copying is worth the rest. The dimension test
+now chooses *whether to blit*, not whether to use the GPU.
+
+**The Vulkan mixer had no GPU path at all**, and not for the reason it appears: the cast to
+`ogl::texture` never runs, because `vulkan::image_mixer` does not override `native_gl_context()`, so
+`channel_info::gl_share_context` is null there and `is_shared()` is always false. Its composite is
+also allocated by `create_attachment()`, which has no exportable memory, so it cannot be handed to
+GL directly either. It is now blitted into an exportable image the consumer owns
+(`vulkan::device::blit_to_shared`, new — `vkCmdBlitImage`, so it scales in the same pass) and that
+image is imported into the consumer's own context.
+
+**Added**: `EVERY_NTH n` and `FPS n` on the Spout consumer, and a `state()` that reports
+`spout/gpu-path`, `spout/gpu-downscale`, `spout/out-width`, `spout/out-height`, `spout/every-nth`
+and `spout/fps`. `state()` previously returned `{}`, so nothing could distinguish zero-copy from a
+CPU fallback.
+
+**Not measured.** Both backends compile clean and the reasoning is from the source, but no picture
+has been compared and no battery covers Spout — `CasparCG-TestRunner` drives it only as a load
+combination. Two specific risks are called out in `docs/features/spout.md` §5 rather than left to
+the reader: the **channel order** on the Vulkan path (a blit carries BGRA from an 8-bit attachment
+and RGBA from a 16-bit one, so red/blue may differ by depth and by backend — invisible to a grey
+test pattern) and the **vertical orientation** on that path (`bInvert=false` is right for the OGL
+mixer and was carried over unchecked). The frame-time figures the plan asks for, at 0/1/4/8
+attached previews, are **not** in this entry because they have not been taken.
+
 ### Added: DeckLink subregion destination placement on the GPU
 
 A subregion setting `dest-x`/`dest-y`/`width`/`height` used to coerce the consumer to the **CPU**
