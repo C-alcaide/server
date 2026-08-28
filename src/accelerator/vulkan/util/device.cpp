@@ -2193,7 +2193,7 @@ bool device::can_sample_packed(int stride, common::bit_depth depth) const
 }
 
 std::shared_ptr<texture>
-device::create_exportable_texture(int width, int height, int stride, common::bit_depth depth)
+device::create_exportable_texture(int width, int height, int stride, common::bit_depth depth, bool swap_rb)
 {
     return dispatch_sync([&]() -> std::shared_ptr<texture> {
         CASPAR_VERIFY(stride > 0 && stride < 5);
@@ -2212,6 +2212,31 @@ device::create_exportable_texture(int width, int height, int stride, common::bit
 
         auto depth_pool_index = depth == common::bit_depth::bit8 ? 0 : 1;
         auto format           = INTERNAL_FORMAT[depth_pool_index][stride];
+
+        // `swap_rb` exists for one specific caller and one specific measurement; see the
+        // header. The mixer's 8-bit attachment is declared eR8G8B8A8Unorm but HOLDS BGRA
+        // bytes, because only the 8-bit shader path swizzles. A component-wise blit into
+        // another eR8G8B8A8Unorm preserves those bytes, so an OpenGL importer reading the
+        // memory as GL_RGBA8 gets blue where red should be. Giving the destination the
+        // OPPOSITE component order makes the blit physically reorder the bytes into true
+        // RGBA, which is what the importer then reads correctly.
+        //
+        // Measured 2026-08-28 through a real Spout receiver: source #20A0C0 arrived as
+        // RGBA (192, 160, 32) on the Vulkan mixer against (32, 160, 192) on OpenGL --
+        // red and blue exchanged. A grey test pattern is invariant under that and would
+        // have passed.
+        if (swap_rb && stride == 4) {
+            format = depth == common::bit_depth::bit8 ? vk::Format::eB8G8R8A8Unorm
+                                                      : INTERNAL_FORMAT[depth_pool_index][stride];
+            if (depth != common::bit_depth::bit8) {
+                // There is no 16-bit BGRA UNORM format in core Vulkan, and the 16-bit
+                // shader path does not swizzle anyway, so the swap is neither possible
+                // nor needed there.
+                CASPAR_LOG(debug) << L"[vulkan::device] create_exportable_texture: swap_rb "
+                                     L"ignored at 16-bit -- that path is already RGBA.";
+            }
+        }
+
         auto extent = vk::Extent3D{static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1};
         auto dev    = impl_->_device;
 

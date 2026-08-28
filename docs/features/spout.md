@@ -1,11 +1,11 @@
 # Spout — GPU texture sharing with other Windows applications
 
-> **State:** shipped; the consumer's path is measured, its pixels are not
+> **State:** shipped and measured — path by battery, pixels by a real receiver
 > **Modules:** `src/modules/spout` (producer and consumer)
 > **Commands:** none of its own — reached by producer syntax on `PLAY` and by consumer name on `ADD`, with `MAX_WIDTH` / `MAX_HEIGHT` / `EVERY_NTH` / `FPS` as consumer arguments
 > **Architecture:** none, deliberately — a thin wrapper over the Spout SDK; the interesting constraint (adapter-bound shared handles) is in the guide
 > **Guide:** [`../guides/SPOUT.md`](../guides/SPOUT.md)
-> **Coverage:** `cli.py spout-signalling` — **8/8, both mixers**, gating which path was taken. **No pixel coverage**
+> **Coverage:** `cli.py spout-signalling` — **8/8, both mixers**, gating which path was taken; **pixels verified by hand** through a real receiver, both mixers byte-exact
 
 Shares frames with other Spout-aware Windows applications over a shared DirectX texture, with no
 host copy. The consumer publishes a channel as a Spout sender; the producer receives another
@@ -181,22 +181,31 @@ colour **and** `gpu-path`, on both mixers.
 2. **The `eUndefined` layout fix is unverified here**, only on the ProRes path.
 3. **Windows-only**, with no message explaining that on other platforms.
 4. **No documented canonical syntax** — three forms work and none is marked preferred.
-5. **The GPU downscale and the Vulkan path are measured, but only as reported state.**
-   `cli.py spout-signalling` gates `gpu-path`, `gpu-downscale`, the published size and the divisor
-   at 8/8 across both mixers. That is the whole of what any check here can do: a CPU fallback
-   publishes the same picture at the same size, so **no pixel comparison can fail for this
-   change**, and receiving a sender needs `SpoutGL`, which ships no wheel for this machine's
-   Python 3.14. Two things therefore remain unverified and would show up as exactly the kind of
-   defect this tree keeps producing:
-   * **Channel order on the Vulkan path.** `device.h` records that a blit "carries the source's
-     channel order into 8 bits unchanged — BGRA from an 8-bit attachment, RGBA from a 16-bit one,
-     since only the 8-bit shader path swizzles." So the published texture's red/blue order may
-     differ between an 8-bit and a 16-bit channel, and between the two mixers. A grey ramp is
-     invariant under that exchange and would pass; only **asymmetric** per-channel values can see
-     it.
-   * **Vertical orientation on the Vulkan path.** `bInvert=false` is correct for the OGL mixer,
-     whose output is already top-down, and was carried over unchanged. Whether the Vulkan
-     attachment agrees has not been checked against a picture.
+5. **Measured end to end, and it found a real defect.** `cli.py spout-signalling` gates the
+   reported path (8/8, both mixers). Beyond that, a real Spout receiver was built for this
+   machine's Python (`casparcg-360-client/tools/build_spoutgl.md`) and used to read the
+   published pixels back:
+
+   | | OGL | Vulkan (before) | Vulkan (after) |
+   | :--- | :--- | :--- | :--- |
+   | `#20A0C0` received as RGBA | (32, 160, 192) | **(192, 160, 32)** | (32, 160, 192) |
+   | red band on top quarter | top rows | top rows | top rows |
+
+   **The Vulkan path exchanged red and blue.** Cause, exactly as `device.h` had recorded
+   about blits: the mixer's 8-bit attachment is declared `eR8G8B8A8Unorm` but *holds BGRA
+   bytes* — only the 8-bit shader path swizzles — and a component-wise blit preserves the
+   byte order, so an OpenGL importer reading `GL_RGBA8` gets blue where red should be.
+   Fixed by giving the exportable destination the opposite component order
+   (`create_exportable_texture(..., swap_rb=true)`), which makes the blit reorder the
+   bytes into true RGBA. Both mixers are now byte-identical.
+
+   **A grey test pattern is invariant under that exchange and passed everything.** The
+   probe colour has three distinct channels for precisely this reason.
+
+   `bInvert=false` on the Vulkan path, carried over from the OGL mixer unverified, turns
+   out to be correct — confirmed with a spatially asymmetric source rather than a flat one,
+   since a flat colour cannot show a flip.
+
 6. **`FPS` rounds down silently** past the log line at `initialize()`. An operator who asks for 30
    on a 50p channel gets 25 and only `spout/every-nth` says so.
 

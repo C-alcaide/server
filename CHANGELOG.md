@@ -54,14 +54,33 @@ The two bolded columns are the defects: row 2 reported `gpu-path` **false** befo
 every Vulkan row reported false (no GPU path existed). `FPS 5` resolving to a divisor of 5 on a
 25 Hz channel confirms the rate arithmetic.
 
-**What this does NOT cover, and cannot.** Only the reported path — a CPU fallback publishes the
-same picture at the same size, so no pixel comparison can fail for this change, and receiving a
-sender needs `SpoutGL`, which has no wheel for this machine's Python 3.14. So the two live risks
-remain unmeasured and are carried in `docs/features/spout.md` §5: the **channel order** on the
-Vulkan path (a blit carries BGRA from an 8-bit attachment and RGBA from a 16-bit one, so red/blue
-may differ by depth and by backend — invisible to a grey test pattern) and the **vertical
-orientation** on that path (`bInvert=false` is right for the OGL mixer and was carried over
-unchecked). The 0/1/4/8-preview frame-time table is also **not** here: it needs a receiver.
+**A red/blue exchange on the Vulkan path, found by measuring the pixels and fixed.** A real
+Spout receiver was built for this machine's Python (no cp314 wheel exists upstream; see
+`casparcg-360-client/tools/build_spoutgl.md`) and used to read the published frame back:
+
+| | OGL | Vulkan (before) | Vulkan (after) |
+| :--- | :--- | :--- | :--- |
+| `#20A0C0` received as RGBA | (32, 160, 192) | **(192, 160, 32)** | (32, 160, 192) |
+
+Cause, exactly as `device.h` already recorded about blits: the mixer's 8-bit attachment is
+declared `eR8G8B8A8Unorm` but **holds BGRA bytes** — only the 8-bit shader path swizzles — and
+a component-wise blit preserves byte order, so an OpenGL importer reading `GL_RGBA8` gets blue
+where red should be. `create_exportable_texture` takes a new `swap_rb` flag giving the
+destination the opposite component order, which makes the blit reorder the bytes into true
+RGBA. **Both mixers are now byte-identical.** A grey test pattern is invariant under that
+exchange and had passed every check.
+
+**`gpu-path` could report a send that never happened.** `gpu_path_active_` was set before
+`SendTexture` and its return value ignored, so the flag recorded intent rather than outcome —
+on the very field whose purpose is to distinguish the fast path from the fallback. Both call
+sites now check it.
+
+`bInvert=false` on the Vulkan path, carried over from the OGL mixer unverified, is correct —
+confirmed with a red band on the top quarter of the frame, since a flat colour cannot show a
+vertical flip.
+
+**Still not measured**: frame time with 0/1/4/8 previews attached, which needs the client
+running rather than a probe.
 
 ### Added: DeckLink subregion destination placement on the GPU
 

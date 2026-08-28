@@ -281,6 +281,7 @@ struct spout_consumer_impl : public core::frame_consumer
     std::shared_ptr<accelerator::vulkan::texture>           vk_shared_tex_;
     std::unique_ptr<accelerator::vulkan::gl_shared_texture> vk_gl_import_;
     bool                                                    vk_interop_failed_ = false;
+    bool                                                    vk_send_failed_logged_ = false;
 #endif
 
     std::vector<uint8_t> out_buf_;  // top-down BGRA8 output buffer
@@ -620,7 +621,12 @@ struct spout_consumer_impl : public core::frame_consumer
             vk_shared_tex_.reset();
 
             try {
-                vk_shared_tex_ = dev->create_exportable_texture(out_w_, out_h_, 4, common::bit_depth::bit8);
+                // swap_rb: the mixer's 8-bit attachment holds BGRA bytes in an
+                // RGBA-declared image, and a blit preserves byte order, so without this
+                // the published texture arrives red/blue exchanged against the OGL
+                // mixer's. Measured through a real receiver -- see device.h.
+                vk_shared_tex_ =
+                    dev->create_exportable_texture(out_w_, out_h_, 4, common::bit_depth::bit8, true);
                 if (!vk_shared_tex_)
                     throw std::runtime_error("create_exportable_texture returned null");
                 vk_gl_import_ = std::make_unique<accelerator::vulkan::gl_shared_texture>(vk_shared_tex_);
@@ -641,13 +647,29 @@ struct spout_consumer_impl : public core::frame_consumer
         if (!dev->blit_to_shared(src, vk_shared_tex_))
             return false;
 
-        gpu_path_active_       = true;
-        gpu_downscale_active_  = (src->width() != out_w_ || src->height() != out_h_);
-        sender_->SendTexture(static_cast<GLuint>(vk_gl_import_->gl_id()),
-                             GL_TEXTURE_2D,
-                             static_cast<unsigned int>(out_w_),
-                             static_cast<unsigned int>(out_h_),
-                             false);
+        // CHECK THE RETURN VALUE. Setting gpu_path_active_ before this and ignoring the
+        // result made `state()` report a zero-copy send that never happened: measured
+        // 2026-08-28, `spout/gpu-path` true on the Vulkan mixer while `GetSenderList()`
+        // in a receiving process was EMPTY -- no sender had been created at all. A flag
+        // that exists to distinguish the fast path from the fallback must not be set by
+        // intent.
+        if (!sender_->SendTexture(static_cast<GLuint>(vk_gl_import_->gl_id()),
+                                  GL_TEXTURE_2D,
+                                  static_cast<unsigned int>(out_w_),
+                                  static_cast<unsigned int>(out_h_),
+                                  false)) {
+            if (!vk_send_failed_logged_) {
+                vk_send_failed_logged_ = true;
+                CASPAR_LOG(warning)
+                    << L"[spout_consumer] SendTexture refused the imported Vulkan texture ("
+                    << out_w_ << L"x" << out_h_
+                    << L"); falling back to reading the frame back and sending pixels.";
+            }
+            return false;
+        }
+
+        gpu_path_active_      = true;
+        gpu_downscale_active_ = (src->width() != out_w_ || src->height() != out_h_);
         return true;
     }
 #endif
@@ -752,14 +774,16 @@ struct spout_consumer_impl : public core::frame_consumer
                             }
                         }
 
-                        if (send_id) {
+                        // bInvert=false: OGL mixer output is already top-down in texture.
+                        // The return value is checked for the same reason as on the Vulkan
+                        // path below -- a refused send must not report gpu-path true.
+                        if (send_id && sender_->SendTexture(static_cast<GLuint>(send_id),
+                                                            GL_TEXTURE_2D,
+                                                            static_cast<unsigned int>(send_w),
+                                                            static_cast<unsigned int>(send_h),
+                                                            false)) {
                             gpu_path_active_      = true;
                             gpu_downscale_active_ = want_scale;
-                            sender_->SendTexture(static_cast<GLuint>(send_id),
-                                                 GL_TEXTURE_2D,
-                                                 static_cast<unsigned int>(send_w),
-                                                 static_cast<unsigned int>(send_h),
-                                                 false);  // bInvert=false: OGL mixer output is already top-down in texture
                             graph_->set_value("frame-time", frame_timer_.elapsed() * 1000.0);
                             busy_ = false;
                             return;

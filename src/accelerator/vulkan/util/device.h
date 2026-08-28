@@ -168,8 +168,26 @@ class device final
     /// not, so create_texture() throws for one -- from inside the channel's tick, on every
     /// frame, which pinned a CPU core and blanked the output rather than dropping a layer.
     bool can_sample_packed(int stride, common::bit_depth depth) const;
+    /// Exportable-memory texture, for handing a VkImage to another API.
+    ///
+    /// `swap_rb` gives the image the OPPOSITE component order (eB8G8R8A8Unorm rather than
+    /// eR8G8B8A8Unorm), which is only ever wanted as the DESTINATION of a blit from the
+    /// mixer's own 8-bit attachment. That attachment is declared eR8G8B8A8Unorm but holds
+    /// **BGRA bytes** — only the 8-bit shader path swizzles, as `reduce_texture` above also
+    /// records — so a component-wise blit into another eR8G8B8A8Unorm preserves the byte
+    /// order and an OpenGL importer reading GL_RGBA8 gets blue where red should be.
+    /// Reversing the destination's component order makes the blit reorder the bytes into
+    /// true RGBA instead.
+    ///
+    /// Measured 2026-08-28 through a real Spout receiver: `#20A0C0` arrived as
+    /// RGBA (192, 160, 32) from the Vulkan mixer against (32, 160, 192) from OpenGL. **A
+    /// grey pattern is invariant under that exchange and passed every check that existed.**
+    ///
+    /// Ignored at 16-bit: there is no core 16-bit BGRA UNORM format, and that path does not
+    /// swizzle, so it is neither possible nor needed.
     std::shared_ptr<class texture>
-    create_exportable_texture(int width, int height, int stride, common::bit_depth depth);
+    create_exportable_texture(int width, int height, int stride, common::bit_depth depth,
+                              bool swap_rb = false);
     array<uint8_t>                 create_array(int size);
 
     std::future<std::shared_ptr<class texture>>
