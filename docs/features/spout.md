@@ -5,7 +5,7 @@
 > **Commands:** none of its own — reached by producer syntax on `PLAY` and by consumer name on `ADD`, with `MAX_WIDTH` / `MAX_HEIGHT` / `EVERY_NTH` / `FPS` as consumer arguments
 > **Architecture:** none, deliberately — a thin wrapper over the Spout SDK; the interesting constraint (adapter-bound shared handles) is in the guide
 > **Guide:** [`../guides/SPOUT.md`](../guides/SPOUT.md)
-> **Coverage:** `cli.py spout-signalling` — **8/8, both mixers**, gating which path was taken; **pixels verified by hand** through a real receiver, both mixers byte-exact
+> **Coverage:** `cli.py spout-signalling` — **8/8, both mixers**, gating which path was taken; `cli.py preview-cost` — the publishing cost against a screen consumer; **pixels verified by hand** through a real receiver, both mixers byte-exact
 
 Shares frames with other Spout-aware Windows applications over a shared DirectX texture, with no
 host copy. The consumer publishes a channel as a Spout sender; the producer receives another
@@ -175,6 +175,43 @@ colour **and** `gpu-path`, on both mixers.
 
 ---
 
+## 4b. What a preview actually costs, both ends
+
+`cli.py preview-cost` — five channels at 1080p5000 (a 20 ms tick), **full rate, no
+`EVERY_NTH`**, one server per arm. `consume_max` is the longest the channel waited for its
+consumers to take the frame; `penalty` is that above the same mixer's no-preview floor.
+
+| mixer | arm | penalty | % of tick | late frames |
+| :--- | :--- | ---: | ---: | ---: |
+| ogl | `MAX_WIDTH 256` | **+0.140 ms** | 0.70% | 0 / 6264 |
+| ogl | native | +0.120 ms | 0.60% | 0 / 6265 |
+| ogl | screen consumer, same raster | +0.230 ms | 1.15% | 0 / 6267 |
+| vulkan | `MAX_WIDTH 256` | +0.040 ms | 0.20% | **69–124 / ~6265** |
+| vulkan | native | +0.110 ms | 0.55% | **109–124 / ~6265** |
+| vulkan | screen consumer, same raster | +0.250 ms | 1.25% | 1 / 6266 |
+
+And the receive end, `casparcg-360-client/tools/preview_bench.py`, five previews at
+384×216 in one GL context:
+
+| | Spout `receiveTexture` | `PrintWindow` + upload |
+| :--- | ---: | ---: |
+| acquire per frame, mean | **1.96 ms** | **57.20 ms** |
+| p95 | 2.19 ms | 82.65 ms |
+| loop rate achieved | 58.0 fps | 15.7 fps |
+| grabs that returned data | 95% | 70% |
+
+**So: cheaper, not free.** Publishing costs the channel about 0.7% of a tick on OpenGL —
+small, real, and about 1.7× cheaper than a screen consumer at the same raster. The
+receive end is where the difference is decisive: **29× per frame**, and the grab path
+cannot sustain the channel's rate at all.
+
+Two honest limits on those numbers. The box was at **98% CPU on the baseline arm alone**
+— five 1080p50 channels saturate it — so these are costs measured under load, which
+flatters neither arm but does mean the late frames below have a contended machine behind
+them. And `acquire` is CPU wall time with no GPU fence, an omission that favours Spout.
+
+---
+
 ## 5. Known gaps
 
 1. **No coverage.** §4 describes a self-round-trip that would need no second application.
@@ -206,7 +243,22 @@ colour **and** `gpu-path`, on both mixers.
    out to be correct — confirmed with a spatially asymmetric source rather than a flat one,
    since a flat colour cannot show a flip.
 
-6. **`FPS` rounds down silently** past the log line at `initialize()`. An operator who asks for 30
+6. **The Vulkan path induces late frames, reproducibly, and `consume_max` cannot see it.**
+   Measured twice by `preview-cost`: five channels publishing over Spout on the Vulkan mixer
+   ran **69 and 124 late frames of ~6265**, where the no-preview baseline ran **0** and a
+   screen consumer ran **1**. Its `consume_max` is the *lowest* of any arm (0.04–0.11 ms), so
+   whatever the cost is, it is not the channel waiting for the consumer to accept the frame.
+   The OpenGL path at the same load runs 0 late.
+
+   **Leading hypothesis, not a diagnosis**: `device::blit_to_shared` runs through
+   `dispatch_sync`, so five consumers each block on the Vulkan device's own dispatch thread
+   once per tick, and that thread is the mixer's too. `CLAUDE.md` names exactly this shape —
+   "these now share one `VkDevice` and one graphics queue… a route measured alone says nothing
+   about it running beside the others" — and `coexistence` is the battery for it. Untested
+   here: I have not varied the channel count, which is the cheap experiment that would
+   confirm or kill it, nor ruled out CPU starvation on a box already at 98%.
+
+7. **`FPS` rounds down silently** past the log line at `initialize()`. An operator who asks for 30
    on a 50p channel gets 25 and only `spout/every-nth` says so.
 
 ---

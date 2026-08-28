@@ -79,8 +79,34 @@ sites now check it.
 confirmed with a red band on the top quarter of the frame, since a flat colour cannot show a
 vertical flip.
 
-**Still not measured**: frame time with 0/1/4/8 previews attached, which needs the client
-running rather than a probe.
+**Measured: cheaper, not free.** `cli.py preview-cost` — five channels at 1080p5000 (a 20 ms
+tick), full rate, against a no-preview floor and a screen consumer at the same raster:
+
+| mixer | arm | penalty | % of tick | late |
+| :--- | :--- | ---: | ---: | ---: |
+| ogl | `MAX_WIDTH 256` | **+0.140 ms** | 0.70% | 0 / 6264 |
+| ogl | screen, same raster | +0.230 ms | 1.15% | 0 / 6267 |
+| vulkan | `MAX_WIDTH 256` | +0.040 ms | 0.20% | **69–100 / ~6265** |
+| vulkan | screen, same raster | +0.250 ms | 1.25% | 1 / 6266 |
+
+And the receive end (`casparcg-360-client/tools/preview_bench.py`, five previews at 384×216,
+one GL context): **1.96 ms** per frame for `receiveTexture` against **57.20 ms** for
+`PrintWindow` + upload — 29×, and the grab path sustains only 15.7 fps against a 50 fps
+source.
+
+So publishing costs the channel ~0.7% of a tick on OpenGL. Small and about 1.7× cheaper than
+a screen consumer, but **not zero** — the honest claim is "cheaper", and the decisive
+difference is at the receive end rather than the publish end.
+
+**A regression this found, reproduced twice**: the Vulkan path runs **69–124 late frames of
+~6265** where the baseline runs 0 and a screen consumer runs 1, while its `consume_max` is the
+*lowest* of any arm. So the cost is not the channel waiting for the consumer. Leading
+hypothesis — not a diagnosis — is that `blit_to_shared`'s `dispatch_sync` serialises five
+consumers on the Vulkan device's dispatch thread, which is the mixer's too. Tracked in
+`docs/features/spout.md` §5 item 6, with the two experiments that would settle it.
+
+Both figures were taken on a box already at **98% CPU with the five channels alone**, and
+`consume_max` is a wait time rather than GPU occupancy.
 
 ### Added: DeckLink subregion destination placement on the GPU
 
