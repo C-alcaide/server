@@ -1,11 +1,11 @@
 # Spout — GPU texture sharing with other Windows applications
 
-> **State:** shipped, unmeasured
+> **State:** shipped; the consumer's path is measured, its pixels are not
 > **Modules:** `src/modules/spout` (producer and consumer)
 > **Commands:** none of its own — reached by producer syntax on `PLAY` and by consumer name on `ADD`, with `MAX_WIDTH` / `MAX_HEIGHT` / `EVERY_NTH` / `FPS` as consumer arguments
 > **Architecture:** none, deliberately — a thin wrapper over the Spout SDK; the interesting constraint (adapter-bound shared handles) is in the guide
 > **Guide:** [`../guides/SPOUT.md`](../guides/SPOUT.md)
-> **Coverage:** **none** — but `state()` now reports which path ran, which is what a battery would need
+> **Coverage:** `cli.py spout-signalling` — **8/8, both mixers**, gating which path was taken. **No pixel coverage**
 
 Shares frames with other Spout-aware Windows applications over a shared DirectX texture, with no
 host copy. The consumer publishes a channel as a Spout sender; the producer receives another
@@ -146,7 +146,17 @@ single documented form, which is why §1 lists all three rather than picking a f
 
 ## 4. Verification — what is measured, and what is not
 
-**Nothing.** No battery starts a Spout sender or receiver.
+**The path, not the picture.** `cli.py spout-signalling` starts one server per case, adds a Spout
+consumer over AMCP and reads what the consumer reports about itself. **8/8, parity OK**, on both
+mixers: `gpu-path` true in every case, `gpu-downscale` true exactly when a `MAX_WIDTH` was given,
+the published raster 256×144 where 256 was asked for, and `every-nth` 1/2/5 including `FPS 5`
+resolving against a 25 Hz channel.
+
+**No battery receives a Spout sender**, so nothing has compared a pixel. That is not laziness: a
+CPU fallback publishes the same frame at the same size as the zero-copy path — they differ by
+3.12 ms, not by appearance — so a pixel comparison is structurally incapable of failing for the
+change that battery exists to protect. Receiving also needs `SpoutGL`, which ships wheels for
+cp38–cp313 while the 360 client's environment is Python 3.14.
 
 Coverage here needs a second process, which is why it does not exist — but it is not impossible:
 the consumer and producer in one server can be pointed at each other, publishing from channel 1
@@ -171,9 +181,13 @@ colour **and** `gpu-path`, on both mixers.
 2. **The `eUndefined` layout fix is unverified here**, only on the ProRes path.
 3. **Windows-only**, with no message explaining that on other platforms.
 4. **No documented canonical syntax** — three forms work and none is marked preferred.
-5. **The GPU downscale and the Vulkan path are unmeasured.** Both compile and both are argued from
-   the source above, which is not the same as a picture having been compared. Two specific things
-   are unverified and would show up as exactly the kind of defect this tree keeps producing:
+5. **The GPU downscale and the Vulkan path are measured, but only as reported state.**
+   `cli.py spout-signalling` gates `gpu-path`, `gpu-downscale`, the published size and the divisor
+   at 8/8 across both mixers. That is the whole of what any check here can do: a CPU fallback
+   publishes the same picture at the same size, so **no pixel comparison can fail for this
+   change**, and receiving a sender needs `SpoutGL`, which ships no wheel for this machine's
+   Python 3.14. Two things therefore remain unverified and would show up as exactly the kind of
+   defect this tree keeps producing:
    * **Channel order on the Vulkan path.** `device.h` records that a blit "carries the source's
      channel order into 8 bits unchanged — BGRA from an 8-bit attachment, RGBA from a 16-bit one,
      since only the 8-bit shader path swizzles." So the published texture's red/blue order may

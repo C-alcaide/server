@@ -107,7 +107,13 @@ class gl_context
     bool  shared_ = false;
 
   public:
-    gl_context(void* share_context = nullptr)
+    /// `expect_no_share` suppresses the "nothing to share" warning for a backend where
+    /// that is the normal state rather than a fault. On the Vulkan mixer
+    /// `native_gl_context()` is never overridden, so there is deliberately no GL context
+    /// to share and the consumer imports exportable Vulkan memory instead -- warning
+    /// about it on every Vulkan channel made the log triage report an unexplained
+    /// warning on a run where the fast path was working.
+    gl_context(void* share_context = nullptr, bool expect_no_share = false)
     {
         WNDCLASS wc      = {0};
         wc.lpfnWndProc   = DefWindowProc;
@@ -161,6 +167,10 @@ class gl_context
                         // Re-establish bootstrap context on failure
                         wglMakeCurrent(hdc_, temp_ctx);
                     }
+                } else if (expect_no_share) {
+                    CASPAR_LOG(debug)
+                        << L"[spout_consumer] no GL context to share, as expected on this backend; "
+                           L"using the imported-Vulkan-memory path instead.";
                 } else {
                     CASPAR_LOG(warning)
                         << L"[spout_consumer] the channel exposed no GL context to share; falling back to "
@@ -691,7 +701,12 @@ struct spout_consumer_impl : public core::frame_consumer
             const int src_h = format_desc_.height;
 
             if (!context_) {
-                context_ = std::make_unique<gl_context>(gl_share_context_);
+#ifdef ENABLE_VULKAN
+                const bool expect_no_share = (vk_device_ != nullptr);
+#else
+                const bool expect_no_share = false;
+#endif
+                context_ = std::make_unique<gl_context>(gl_share_context_, expect_no_share);
                 if (context_->is_shared()) {
                     CASPAR_LOG(info) << L"[spout_consumer] GL context shared with mixer - GPU texture path available.";
                 }

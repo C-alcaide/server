@@ -35,14 +35,33 @@ image is imported into the consumer's own context.
 and `spout/fps`. `state()` previously returned `{}`, so nothing could distinguish zero-copy from a
 CPU fallback.
 
-**Not measured.** Both backends compile clean and the reasoning is from the source, but no picture
-has been compared and no battery covers Spout — `CasparCG-TestRunner` drives it only as a load
-combination. Two specific risks are called out in `docs/features/spout.md` §5 rather than left to
-the reader: the **channel order** on the Vulkan path (a blit carries BGRA from an 8-bit attachment
-and RGBA from a 16-bit one, so red/blue may differ by depth and by backend — invisible to a grey
-test pattern) and the **vertical orientation** on that path (`bInvert=false` is right for the OGL
-mixer and was carried over unchecked). The frame-time figures the plan asks for, at 0/1/4/8
-attached previews, are **not** in this entry because they have not been taken.
+**Measured**, by a new battery — `cli.py spout-signalling`, which did not exist because until this
+commit `state()` returned `{}` and there was nothing to assert against. **8/8, parity OK**, one
+server per case:
+
+| mixer | case | `gpu-path` | `gpu-downscale` | published | `every-nth` |
+| :--- | :--- | :--- | :--- | ---: | ---: |
+| ogl | native | true | false | 1920×1080 | 1 |
+| ogl | `MAX_WIDTH 256` | **true** | **true** | 256×144 | 1 |
+| ogl | `MAX_WIDTH 256 EVERY_NTH 2` | true | true | 256×144 | 2 |
+| ogl | `MAX_WIDTH 256 FPS 5` | true | true | 256×144 | 5 |
+| vulkan | native | **true** | false | 1920×1080 | 1 |
+| vulkan | `MAX_WIDTH 256` | **true** | **true** | 256×144 | 1 |
+| vulkan | `MAX_WIDTH 256 EVERY_NTH 2` | true | true | 256×144 | 2 |
+| vulkan | `MAX_WIDTH 256 FPS 5` | true | true | 256×144 | 5 |
+
+The two bolded columns are the defects: row 2 reported `gpu-path` **false** before (the guard), and
+every Vulkan row reported false (no GPU path existed). `FPS 5` resolving to a divisor of 5 on a
+25 Hz channel confirms the rate arithmetic.
+
+**What this does NOT cover, and cannot.** Only the reported path — a CPU fallback publishes the
+same picture at the same size, so no pixel comparison can fail for this change, and receiving a
+sender needs `SpoutGL`, which has no wheel for this machine's Python 3.14. So the two live risks
+remain unmeasured and are carried in `docs/features/spout.md` §5: the **channel order** on the
+Vulkan path (a blit carries BGRA from an 8-bit attachment and RGBA from a 16-bit one, so red/blue
+may differ by depth and by backend — invisible to a grey test pattern) and the **vertical
+orientation** on that path (`bInvert=false` is right for the OGL mixer and was carried over
+unchecked). The 0/1/4/8-preview frame-time table is also **not** here: it needs a receiver.
 
 ### Added: DeckLink subregion destination placement on the GPU
 
