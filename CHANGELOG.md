@@ -80,33 +80,38 @@ confirmed with a red band on the top quarter of the frame, since a flat colour c
 vertical flip.
 
 **Measured: cheaper, not free.** `cli.py preview-cost` — five channels at 1080p5000 (a 20 ms
-tick), full rate, against a no-preview floor and a screen consumer at the same raster:
+tick), full rate, against a no-preview floor and a screen consumer at the same raster. Compare
+the **mean**, not `consume_max`: the max is a tail statistic that swapped the two mechanisms'
+order between runs. Means over three runs each, non-overlapping:
 
 | mixer | arm | penalty | % of tick | late |
 | :--- | :--- | ---: | ---: | ---: |
-| ogl | `MAX_WIDTH 256` | **+0.140 ms** | 0.70% | 0 / 6264 |
-| ogl | screen, same raster | +0.230 ms | 1.15% | 0 / 6267 |
-| vulkan | `MAX_WIDTH 256` | +0.040 ms | 0.20% | **69–100 / ~6265** |
-| vulkan | screen, same raster | +0.250 ms | 1.25% | 1 / 6266 |
+| ogl | `MAX_WIDTH 256` | **+0.030 ms** | 0.15% | 0 / 6265 |
+| ogl | screen, same raster | **+0.095 ms** | 0.48% | 0 / 6266 |
+| vulkan | `MAX_WIDTH 256` | ~+0.03 ms | ~0.15% | **48–59 / ~6265** |
+| vulkan | screen, same raster | ~+0.10 ms | ~0.5% | 3 / 6264 |
 
-And the receive end (`casparcg-360-client/tools/preview_bench.py`, five previews at 384×216,
-one GL context): **1.96 ms** per frame for `receiveTexture` against **57.20 ms** for
-`PrintWindow` + upload — 29×, and the grab path sustains only 15.7 fps against a 50 fps
-source.
+Receive end (`casparcg-360-client/tools/preview_bench.py`, five previews at 384×216, one GL
+context): **1.96 ms** per frame for `receiveTexture` against **57.20 ms** for `PrintWindow` +
+upload — 29×, and the grab path sustains only 15.7 fps against a 50 fps source.
 
-So publishing costs the channel ~0.7% of a tick on OpenGL. Small and about 1.7× cheaper than
-a screen consumer, but **not zero** — the honest claim is "cheaper", and the decisive
-difference is at the receive end rather than the publish end.
+So publishing costs about **a third** of a screen consumer and 0.15% of a tick; the decisive
+difference is at the receive end. **And the preview runs at full rate** — new
+`spout/sent-frames` / `spout/dropped-frames` report **5000 sent, 0 dropped over 20 s across
+five channels on both mixers**. `spout/fps` could not answer that: it counts frames *offered*,
+before the drop check.
 
-**A regression this found, reproduced twice**: the Vulkan path runs **69–124 late frames of
-~6265** where the baseline runs 0 and a screen consumer runs 1, while its `consume_max` is the
-*lowest* of any arm. So the cost is not the channel waiting for the consumer. Leading
-hypothesis — not a diagnosis — is that `blit_to_shared`'s `dispatch_sync` serialises five
-consumers on the Vulkan device's dispatch thread, which is the mixer's too. Tracked in
-`docs/features/spout.md` §5 item 6, with the two experiments that would settle it.
-
-Both figures were taken on a box already at **98% CPU with the five channels alone**, and
-`consume_max` is a wait time rather than GPU occupancy.
+**Open: the Vulkan path adds jitter past two channels.** 0 late at 1–2 channels, 21/3008 at 3,
+41–54/5010 at 5, where the baseline is 0. Less severe than "late" suggests — the average period
+stays exactly nominal (`avg=20.00ms (nominal 20.00)`) and no preview frame is dropped; what
+changes is jitter, 2.4–6.1 ms without previews against 4.3–8.7 ms with five. **Four fixes were
+built and measured; all rejected**: caller-thread recording with a private command pool (211,
+4× worse), the same without its fence (242), narrowed barriers (43, no change), and two
+diagnostics that removed half the work each and were *both worse* (101–120 and 59–70). The last
+pair is the informative one — the cost is the phasing of the consumer's GPU work against the
+mixer's on a shared queue, not the blit or the send in isolation. The remaining lever is the
+separate queue family this GPU has, which needs mixer-wide ownership transfers; see
+`docs/features/spout.md` §5 item 6.
 
 ### Added: DeckLink subregion destination placement on the GPU
 

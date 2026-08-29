@@ -178,17 +178,24 @@ colour **and** `gpu-path`, on both mixers.
 ## 4b. What a preview actually costs, both ends
 
 `cli.py preview-cost` — five channels at 1080p5000 (a 20 ms tick), **full rate, no
-`EVERY_NTH`**, one server per arm. `consume_max` is the longest the channel waited for its
+`EVERY_NTH`**, one server per arm. `consume` is how long the channel waited for its
 consumers to take the frame; `penalty` is that above the same mixer's no-preview floor.
 
-| mixer | arm | penalty | % of tick | late frames |
+**Compare the MEAN, not the max.** `consume_max` is a tail statistic over the window's
+reports and it moves between runs: OGL Spout gave 0.14 then 0.20 ms while the screen
+consumer gave 0.23 then 0.14 — **the two swapped order**, so either conclusion could have
+been quoted. The means over three runs each are non-overlapping and stable to the third
+decimal:
+
+| mixer | arm | penalty (mean of 3 runs) | % of tick | late frames |
 | :--- | :--- | ---: | ---: | ---: |
-| ogl | `MAX_WIDTH 256` | **+0.140 ms** | 0.70% | 0 / 6264 |
-| ogl | native | +0.120 ms | 0.60% | 0 / 6265 |
-| ogl | screen consumer, same raster | +0.230 ms | 1.15% | 0 / 6267 |
-| vulkan | `MAX_WIDTH 256` | +0.040 ms | 0.20% | **69–124 / ~6265** |
-| vulkan | native | +0.110 ms | 0.55% | **109–124 / ~6265** |
-| vulkan | screen consumer, same raster | +0.250 ms | 1.25% | 1 / 6266 |
+| ogl | `MAX_WIDTH 256` | **+0.030 ms** | 0.15% | 0 / 6265 |
+| ogl | screen consumer, same raster | **+0.095 ms** | 0.48% | 0 / 6266 |
+| vulkan | `MAX_WIDTH 256` | ~+0.03 ms | ~0.15% | **48–59 / ~6265** |
+| vulkan | screen consumer, same raster | ~+0.10 ms | ~0.5% | 3 / 6264 |
+
+So publishing over Spout costs about **a third** of what a screen consumer costs, and both
+are a fraction of a percent of the tick.
 
 And the receive end, `casparcg-360-client/tools/preview_bench.py`, five previews at
 384×216 in one GL context:
@@ -200,15 +207,21 @@ And the receive end, `casparcg-360-client/tools/preview_bench.py`, five previews
 | loop rate achieved | 58.0 fps | 15.7 fps |
 | grabs that returned data | 95% | 70% |
 
-**So: cheaper, not free.** Publishing costs the channel about 0.7% of a tick on OpenGL —
-small, real, and about 1.7× cheaper than a screen consumer at the same raster. The
-receive end is where the difference is decisive: **29× per frame**, and the grab path
-cannot sustain the channel's rate at all.
+**So: cheaper, not free.** Publishing costs the channel about **0.15% of a tick** on
+OpenGL, roughly a third of a screen consumer at the same raster. The receive end is where
+the difference is decisive: **29× per frame**, and the grab path cannot sustain the
+channel's rate at all.
 
-Two honest limits on those numbers. The box was at **98% CPU on the baseline arm alone**
-— five 1080p50 channels saturate it — so these are costs measured under load, which
-flatters neither arm but does mean the late frames below have a contended machine behind
-them. And `acquire` is CPU wall time with no GPU fence, an omission that favours Spout.
+**The preview itself runs at full rate.** The consumer drops a frame when the previous one
+is still in flight, so "publishes at 50 Hz" needed checking rather than assuming:
+`spout/sent-frames` and `spout/dropped-frames` report **5000 sent, 0 dropped over 20 s
+across five channels on both mixers** — exactly 50 fps per channel. `spout/fps` cannot
+answer this, because it counts frames *offered* and is incremented before the drop check.
+
+Two honest limits. The box was at **98% CPU on the baseline arm alone** — five 1080p50
+channels saturate it — so these are costs under load, which flatters neither arm. And
+`acquire` on the receive side is CPU wall time with no GPU fence, an omission that
+favours Spout.
 
 ---
 
@@ -264,36 +277,46 @@ them. And `acquire` is CPU wall time with no GPU fence, an omission that favours
    The OpenGL path does its blit on the consumer's own GL context and runs **0 late at the
    same load**, which is the control that makes this reading rather than a guess.
 
-   **The obvious fix was built, measured and REJECTED.** A `direct_blit` class recorded and
-   submitted the blit on the consumer's own thread using a private command pool, removing
-   the dispatch-thread round trip entirely. It made things **worse**:
+   **Four fixes tried. All rejected by measurement.** The noise floor was established
+   first — five identical runs gave 41, 47, 48, 53, 54 late, so ±7 on a mean of ~48, and
+   anything inside that is not a difference.
 
-   | approach | late / ~5010 at five channels |
-   | :--- | ---: |
-   | `blit_to_shared` — device dispatch thread (shipping) | **48–76** |
-   | `direct_blit` — caller thread, waits on a fence | 211 |
-   | `direct_blit` — caller thread, no completion wait | 242 |
+   | attempt | late / ~5010 | verdict |
+   | :--- | ---: | :--- |
+   | *(shipping)* blit on the device dispatch thread | **41–54** | the baseline |
+   | record + submit on the **caller's thread**, private command pool | 211 | **4× worse** |
+   | …the same, without the completion fence | 242 | worse still |
+   | **narrow the source barriers** to `eColorAttachmentOutput` from `eAllCommands` | 43 | no change |
+   | *(diagnostic)* blit but **never** `SendTexture` | 101–120 | **worse** |
+   | *(diagnostic)* `SendTexture` but **never** blit | 59–70 | **worse** |
 
-   So the dispatch thread was **not** the bottleneck, and the hypothesis above is only half
-   right: what the consumers contend for is the **queue**, not the thread. Moving the
-   recording off the device thread merely put five consumer threads into direct contention
-   for `device::submit`'s queue lock, where the dispatch thread had been serialising them
-   in one place. Removing the fence wait did not help either, which rules out the added
-   synchronisation as the cause. The code is reverted; this is recorded so the next reader
-   does not spend the same afternoon.
+   The last two are the interesting ones: **removing either half of the work makes it
+   worse, reproducibly.** So the cost is not "the blit" and not "the send" — it is the
+   phasing of the consumer's GPU work against the mixer's on a shared queue, and doing
+   less of it simply moves the collision. That also kills the dispatch-thread hypothesis
+   outright: moving recording off that thread put five consumer threads into direct
+   contention for `device::submit`'s queue lock, where the dispatch thread had at least
+   been serialising them in one place.
 
-   **Where a real fix would have to go**: the blits are transfer work on the mixer's
-   graphics queue. This GPU has a separate compute/transfer family (NVIDIA's family 2,
-   which carries `TRANSFER`), and moving the blit there would take it off the graphics
-   queue entirely. That needs **queue-family ownership transfers** on the mixer's own
-   attachment, so the mixer has to participate — a cross-queue change of exactly the class
-   this tree records producing `VK_ERROR_DEVICE_LOST` at four concurrent producers
-   (`av_vulkan_import.cpp`). It wants its own session with `coexistence` before and after,
-   not a patch on the end of a benchmark.
+   **How bad is it, actually?** Less than "late frames" suggests. The raw TIMING lines show
+   the average period stays exactly nominal — `avg=20.00ms (nominal 20.00)` — in every arm.
+   What changes is **jitter**: 2.4–6.1 ms with no preview against 4.3–8.7 ms with five
+   Spout consumers, which tips ~1% of ticks past 20 ms. The channel does not fall behind
+   and no preview frame is dropped. It is added jitter, not lost output.
 
-   **What to do today**: the OpenGL mixer is unaffected, and up to two Spout consumers on
-   Vulkan measured clean. `EVERY_NTH` would also reduce the round-trip rate — at the cost
-   of the preview frame rate.
+   **What is left to try**, and why it was not attempted here: this GPU has a separate
+   queue family — the server logs `reserved compute queue family 2 for external decoders
+   (graphics is 0)` — and moving the blit there would take it off the mixer's queue
+   entirely, which is the only lever the measurements have not ruled out. Two obstacles,
+   both real: that family is *already reserved* for FFmpeg decoders, so previews would
+   reintroduce the contention the reservation exists to prevent; and reading the mixer's
+   attachment from another family needs **queue-family ownership transfers**, which means
+   the mixer must submit a release barrier every frame — or its attachments must become
+   `VK_SHARING_MODE_CONCURRENT`, which slows compositing for every channel whether or not
+   a preview is attached. Either is a mixer-wide change of the class this tree records
+   producing `VK_ERROR_DEVICE_LOST` at four concurrent producers
+   (`av_vulkan_import.cpp`), and it wants its own session with `coexistence` before and
+   after.
 
 7. **`FPS` rounds down silently**7. **`FPS` rounds down silently** past the log line at `initialize()`. An operator who asks for 30
    on a 50p channel gets 25 and only `spout/every-nth` says so.

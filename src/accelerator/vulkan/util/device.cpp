@@ -1667,10 +1667,18 @@ struct device::impl : public std::enable_shared_from_this<impl>
 
                 submitSingleTimeCommands([&](vk::CommandBuffer cmd) {
                     // Source: whatever the mixer left it in -> eTransferSrcOptimal.
+                    //
+                    // eColorAttachmentOutput/eColorAttachmentWrite, NOT eAllCommands/
+                    // eMemoryWrite. The image is the mixer's live attachment and the only
+                    // thing that writes it is the renderpass, so naming that stage is both
+                    // correct and far narrower -- `reduce_texture` above barriers the same
+                    // image the same way. eAllCommands makes the transfer wait on every
+                    // command previously submitted to a queue shared with the compositing
+                    // of four other channels.
                     transitionImageLayout(src_img,
                                           source_layout,
-                                          vk::AccessFlagBits2::eMemoryWrite,
-                                          vk::PipelineStageFlagBits2::eAllCommands,
+                                          vk::AccessFlagBits2::eColorAttachmentWrite,
+                                          vk::PipelineStageFlagBits2::eColorAttachmentOutput,
                                           vk::ImageLayout::eTransferSrcOptimal,
                                           vk::AccessFlagBits2::eTransferRead,
                                           vk::PipelineStageFlagBits2::eTransfer,
@@ -1728,8 +1736,9 @@ struct device::impl : public std::enable_shared_from_this<impl>
                                           vk::AccessFlagBits2::eTransferRead,
                                           vk::PipelineStageFlagBits2::eTransfer,
                                           source_layout,
-                                          vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
-                                          vk::PipelineStageFlagBits2::eAllCommands,
+                                          vk::AccessFlagBits2::eColorAttachmentRead |
+                                              vk::AccessFlagBits2::eColorAttachmentWrite,
+                                          vk::PipelineStageFlagBits2::eColorAttachmentOutput,
                                           cmd);
                 });
 

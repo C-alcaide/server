@@ -234,6 +234,13 @@ struct spout_consumer_impl : public core::frame_consumer
     // exclusive here and the difference is the whole point of the change.
     std::atomic<bool> gpu_downscale_active_{false};
 
+    //: Frames actually PUBLISHED, and frames refused because the previous one was still
+    //: in flight. `current_fps_` counts frames OFFERED -- it is incremented before the
+    //: busy check -- so it reads the channel's rate whatever the consumer manages, and
+    //: cannot answer "is the preview running at full rate". These can.
+    std::atomic<uint64_t> frames_sent_{0};
+    std::atomic<uint64_t> frames_dropped_{0};
+
     // Optional downscale cap (0 = no cap = native resolution).
     // Set via AMCP: ADD x SPOUT "Name" MAX_WIDTH 1920 MAX_HEIGHT 1080
     int max_w_ = 0;
@@ -282,6 +289,7 @@ struct spout_consumer_impl : public core::frame_consumer
     std::unique_ptr<accelerator::vulkan::gl_shared_texture> vk_gl_import_;
     bool                                                    vk_interop_failed_ = false;
     bool                                                    vk_send_failed_logged_ = false;
+
 #endif
 
     std::vector<uint8_t> out_buf_;  // top-down BGRA8 output buffer
@@ -670,6 +678,7 @@ struct spout_consumer_impl : public core::frame_consumer
 
         gpu_path_active_      = true;
         gpu_downscale_active_ = (src->width() != out_w_ || src->height() != out_h_);
+        frames_sent_.fetch_add(1, std::memory_order_relaxed);
         return true;
     }
 #endif
@@ -714,6 +723,7 @@ struct spout_consumer_impl : public core::frame_consumer
         // the lambda extends its lifetime until the executor finishes with it.
         if (busy_.exchange(true)) {
             graph_->set_tag(diagnostics::tag_severity::WARNING, "dropped-frame");
+            frames_dropped_.fetch_add(1, std::memory_order_relaxed);
             return caspar::make_ready_future(true);  // drop — still processing previous
         }
 
@@ -784,6 +794,7 @@ struct spout_consumer_impl : public core::frame_consumer
                                                             false)) {
                             gpu_path_active_      = true;
                             gpu_downscale_active_ = want_scale;
+                            frames_sent_.fetch_add(1, std::memory_order_relaxed);
                             graph_->set_value("frame-time", frame_timer_.elapsed() * 1000.0);
                             busy_ = false;
                             return;
@@ -872,6 +883,7 @@ struct spout_consumer_impl : public core::frame_consumer
                                static_cast<unsigned int>(out_h_),
                                GL_BGRA_EXT,
                                false);
+            frames_sent_.fetch_add(1, std::memory_order_relaxed);
 
             graph_->set_value("frame-time", frame_timer_.elapsed() * 1000.0);
             busy_ = false;
@@ -915,7 +927,9 @@ struct spout_consumer_impl : public core::frame_consumer
         state["spout/out-width"]     = out_w_;
         state["spout/out-height"]    = out_h_;
         state["spout/every-nth"]     = every_nth_;
-        state["spout/fps"]           = current_fps_;
+        state["spout/fps"]           = current_fps_;   // frames OFFERED per second
+        state["spout/sent-frames"]    = static_cast<int64_t>(frames_sent_.load());
+        state["spout/dropped-frames"] = static_cast<int64_t>(frames_dropped_.load());
         return state;
     }
 };
