@@ -57,6 +57,58 @@ Verified against `src/protocol/amcp/AMCPCommandsImpl.cpp` at the definition line
 
 ---
 
+## The bridge is expensive, and four attempts to fix it all failed
+
+`previz_texture_bridge` costs the channels a great deal, and **the measurement is too
+unstable to rank any fix**. Both halves of that sentence are load-bearing.
+
+**What is solid**, because it reproduces across hours and every build:
+
+| | late frames per ~5010, five channels at 1080p50 |
+| :--- | ---: |
+| previz **off** | **0-2**, every run |
+| previz **on** | **8 to 1175** |
+| previz on, bridge skipped entirely (diagnostic) | **0** |
+| previz on, fence wait skipped (diagnostic, unsafe) | **4** |
+
+So the bridge is the cost, not the 3D render — skipping the bridge while still rendering
+previz gives 0. And even **one** channel with previz on runs 52 late per 1003 (5.2%),
+against 0.02% with it off, so this is not a multi-channel contention story.
+
+**What is not solid**: everything else. The same code path measured 8-46 late in one
+sitting and 65-167 an hour later; an interleaved A/B of old against new bridge, run
+alternately from one binary to cancel the drift, gave legacy 68/402/180/649 against new
+314/114/1175/376 — completely overlapping. The machine was not degrading: the previz-off
+control and the Spout battery were both re-measured at the end at 1-2 late, and the GPU
+was at 54 °C and not throttling.
+
+**Four fixes were built and none could be shown to help:**
+
+| attempt | outcome |
+| :--- | :--- |
+| defer the submission 1 ms, as `device::blit_to_shared` does | no effect — this bridge blocks, it does not merely submit at a bad moment |
+| move the fence wait to the caller's thread after the dispatch | worse: that caller is the deferred future producing the channel's `render_output` |
+| move the fence wait to the OGL thread in `sync_to_store` | no better: previz renders there, and that feeds the channel's output too |
+| **double-buffer** the shared image, plus reuse the command buffer and fence instead of creating and destroying both every frame | picture pixel-identical, timing indistinguishable once interleaved. **Reverted** |
+
+The double-buffer work is the one worth understanding before anyone repeats it. It is
+architecturally right — it removes a blocking wait from the mixer's own thread and four
+Vulkan object lifetimes per channel per frame — and it was verified to produce a
+**pixel-identical** picture. It was still reverted, because a large rewrite of a module
+with no coverage cannot be justified by a measurement that will not hold still.
+
+**Where the cost probably is**, and what nobody has tested: every posted channel runs
+VK composite → VK copy → GL previz render → back, so a five-channel frame ping-pongs
+between the Vulkan and OpenGL contexts ten times. None of the four attempts above changes
+that; all of them keep the VK submit sandwiched inside the GL previz pipeline. Batching
+all channels' copies ahead of any GL work, or rendering previz in Vulkan, would — and
+both are much larger than anything tried here.
+
+**Reproducing any of this** needs the two probes built for it, since previz still has no
+battery: a timing probe (N channels, `PREVIZ n SCENE`/`MAP`, read the server's TIMING
+lines at trace level) and the Spout capture described below. The scene is a two-quad
+`.obj` in the server's media path.
+
 ## Red and blue were exchanged on every mapped screen (fixed 2026-08-29)
 
 A channel playing `#20A0C0` appeared on its previz screen as `#BE9E1E` — the same colour
