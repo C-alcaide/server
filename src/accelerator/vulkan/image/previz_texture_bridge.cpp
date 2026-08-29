@@ -158,7 +158,20 @@ void previz_texture_bridge::create_slot(channel_slot& s, int width, int height, 
     auto vk_dev  = static_cast<VkDevice>(vk_device_->getVkDevice());
     auto vk_phys = static_cast<VkPhysicalDevice>(vk_device_->getVkPhysicalDevice());
 
-    VkFormat format = use_16bit ? VK_FORMAT_R16G16B16A16_UNORM : VK_FORMAT_R8G8B8A8_UNORM;
+    // B8G8R8A8 at 8 bits, NOT R8G8B8A8, and this is a bug fix rather than a preference.
+    //
+    // The mixer's 8-bit attachment is declared eR8G8B8A8Unorm but HOLDS BGRA bytes --
+    // only the 8-bit shader path swizzles, as `vulkan::device`'s reduce_texture and
+    // create_exportable_texture both record. GL imports this memory as GL_RGBA8, so with
+    // a matching R8G8B8A8 destination it read blue where red should be: a channel playing
+    // #20A0C0 appeared on its previz screen as #BE9E1E, which is the same colour with red
+    // and blue exchanged. Measured 2026-08-29 by capturing the previz channel through
+    // Spout -- the first time anything had compared previz's colours to the channel's.
+    //
+    // Giving the destination the OPPOSITE component order makes the blit below reorder
+    // the bytes into true RGBA, which GL_RGBA8 then reads correctly. The 16-bit path is
+    // already RGBA and needs no swap.
+    VkFormat format = use_16bit ? VK_FORMAT_R16G16B16A16_UNORM : VK_FORMAT_B8G8R8A8_UNORM;
 
     // ── VK: Create exportable image ──────────────────────────────────────
 
@@ -405,15 +418,23 @@ void previz_texture_bridge::post_channel(int    channel_id,
                                  0, 0, nullptr, 0, nullptr, 1, &src_barrier);
 
             // Copy
-            VkImageCopy region{};
+            // BLIT, not copy. vkCmdCopyImage moves BYTES and is format-agnostic, so it
+            // would carry the mixer's BGRA byte order straight through and the
+            // destination's component order would change nothing. vkCmdBlitImage maps
+            // COMPONENTS, which is what turns BGRA-in-an-RGBA-image into true RGBA for
+            // the GL importer. Same extents, so the filter never runs.
+            VkImageBlit region{};
             region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
             region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-            region.extent         = {static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1};
+            region.srcOffsets[0]  = {0, 0, 0};
+            region.srcOffsets[1]  = {width, height, 1};
+            region.dstOffsets[0]  = {0, 0, 0};
+            region.dstOffsets[1]  = {width, height, 1};
 
-            vkCmdCopyImage(cmd,
+            vkCmdBlitImage(cmd,
                            source, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                            s.vk_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                           1, &region);
+                           1, &region, VK_FILTER_NEAREST);
 
             // Transition shared image: TRANSFER_DST → GENERAL (for GL reading)
             barrier.oldLayout     = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;

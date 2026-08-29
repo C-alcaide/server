@@ -1,6 +1,26 @@
 CasparVP — Unreleased
 ==========================================
 
+### Fixed: previz showed every mapped screen with red and blue exchanged
+
+A channel playing `#20A0C0` appeared on its previz screen as `#BE9E1E` — the same colour with
+**red and blue swapped** — on the Vulkan mixer, on every mapped screen, for as long as the
+VK→GL bridge has existed. After the fix it renders `#1F9FBF`, the remaining 1 per channel being
+previz's own shading.
+
+The mixer's 8-bit attachment is declared `eR8G8B8A8Unorm` but holds **BGRA bytes** (only the
+8-bit shader path swizzles). `previz_texture_bridge` copied it into another `R8G8B8A8` image
+and imported that as `GL_RGBA8`, so GL read blue as red. The destination is now `B8G8R8A8`
+**and the copy is a `vkCmdBlitImage` rather than a `vkCmdCopyImage`** — a copy moves bytes and
+is format-agnostic, so the format change alone would have done nothing; a blit maps components,
+which is what reorders the bytes. Same extents, so no filtering. The 16-bit path is already
+RGBA and is untouched.
+
+**It survived because nothing had ever looked at previz's output.** No battery drives previz,
+and the defect is invisible to a grey or white test pattern. It was found by publishing the
+previz channel over Spout and reading the pixels back; `docs/features/previz.md` records the
+recipe, which is currently the cheapest way to check previz at all.
+
 ### Changed: a downscaled Spout sender no longer forces a CPU readback, and the Vulkan mixer has a zero-copy path at all
 
 **This changes rendered output for an existing config**: `ADD n SPOUT name MAX_WIDTH …` previously

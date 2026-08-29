@@ -57,6 +57,44 @@ Verified against `src/protocol/amcp/AMCPCommandsImpl.cpp` at the definition line
 
 ---
 
+## Red and blue were exchanged on every mapped screen (fixed 2026-08-29)
+
+A channel playing `#20A0C0` appeared on its previz screen as `#BE9E1E` — the same colour
+with **red and blue exchanged**. Visible on every mapped screen, on the Vulkan mixer, for
+as long as the VK→GL bridge has existed.
+
+| | mapped screen renders | source |
+| :--- | :--- | :--- |
+| before | `#BE9E1E` (190, 158, 30) | `#20A0C0` (32, 160, 192) |
+| after | `#1F9FBF` (31, 159, 191) | `#20A0C0` — the 1/channel is previz's own shading |
+
+**Cause.** The mixer's 8-bit attachment is declared `eR8G8B8A8Unorm` but *holds BGRA
+bytes* — only the 8-bit shader path swizzles, which `vulkan::device` records in two
+places. `previz_texture_bridge` copied it into another `R8G8B8A8` image and imported that
+as `GL_RGBA8`, so GL read blue where red should be.
+
+**Fix.** The destination image is now `B8G8R8A8`, and the copy is a **`vkCmdBlitImage`
+rather than a `vkCmdCopyImage`** — that second half is the part that is easy to get wrong.
+A copy moves *bytes* and is format-agnostic, so changing the destination's component order
+would have changed nothing; a blit maps *components*, which is what reorders BGRA into
+true RGBA for the importer. Same extents, so the filter never runs. The 16-bit path is
+already RGBA and is untouched.
+
+**Why it survived this long: nothing had ever looked at previz's output.** No battery
+drives previz, and the defect is invisible unless you compare a mapped screen's colour to
+the channel's — a grey or white test pattern is invariant under the exchange. It was found
+by publishing the previz channel over Spout and reading the pixels back, which is now the
+cheapest way to check previz at all:
+
+```
+PREVIZ 1 SCENE scene.obj
+PREVIZ 1 MAP screen1 1
+ADD 1 SPOUT previzcap MAX_WIDTH 512
+```
+
+then receive `previzcap` and compare the mapped quad against the channel's colour. The
+scene needs only a two-quad `.obj` inside the server's media path.
+
 ## 2. How to drive it
 
 Load a scene, map channel 1 onto a mesh, look at it:
