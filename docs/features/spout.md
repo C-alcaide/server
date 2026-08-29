@@ -237,6 +237,10 @@ per-consumer frame handoff — the channel waiting for the consumer to accept th
 not the cost of drawing pixels, which happens on the consumer's own thread. `<vsync>`
 already defaults to false, so there is no win there either.
 
+**There is therefore no configuration-level optimisation left for the screen consumer.**
+Every knob it exposes that could plausibly matter has been measured and none moves the
+number. It is also the *smooth* option: 0 late frames on either mixer at five consumers.
+
 That is what leaves Spout's 0.034 ms as the only lever that moves the publish cost at
 all: it is a cheaper handoff, not a smaller picture.
 
@@ -305,48 +309,79 @@ favours Spout.
    The OpenGL path does its blit on the consumer's own GL context and runs **0 late at the
    same load**, which is the control that makes this reading rather than a guess.
 
-   **Four fixes tried. All rejected by measurement.** The noise floor was established
-   first — five identical runs gave 41, 47, 48, 53, 54 late, so ±7 on a mean of ~48, and
-   anything inside that is not a difference.
+   **It is a PER-SUBMISSION cost, and that is now measured rather than inferred.** Two
+   sweeps settle it. Holding the channel count at five and varying only the number of
+   Spout consumers:
+
+   | Spout consumers | 0 | 1 | 2 | 3 | 5 |
+   | :--- | ---: | ---: | ---: | ---: | ---: |
+   | late / ~5010 | 0 | 0 | 0 | **8** | **70** |
+   | `consume_mean` | 0.0000 | 0.0060 | 0.0095 | 0.0135 | 0.0335 |
+
+   …and three channels with three consumers gives **8** as well — the same absolute count
+   as five channels with three consumers. **It tracks consumers, not channels.** Then
+   holding consumers at five and varying the raster:
+
+   | preview width | 64 | 128 | 256 | 512 | 960 | 1920 |
+   | :--- | ---: | ---: | ---: | ---: | ---: | ---: |
+   | late / ~5010 | 44 | 58 | 42 | 69 | 59 | 84 |
+
+   **Flat.** A 64-wide preview costs the same as a 960-wide one. So the cost is not the
+   pixels and not the channel load: it is *one extra `vkQueueSubmit` per consumer per
+   frame*, interleaved into the queue the mixer composites on. Five consumers at 50 Hz is
+   250 extra submissions a second.
+
+   **The OpenGL control makes the mechanism unmistakable**, because its profile is
+   inverted: OGL costs the channel *more* in handoff (`consume_mean` 0.042–0.045 against
+   Vulkan's 0.023–0.034) and is **perfectly smooth — 0 late at five consumers, at 256 and
+   at 1920 wide.** So whatever produces the lateness is not the channel waiting for the
+   consumer; it is the consumer's submissions interfering with the mixer's own work. The
+   GL driver schedules its blits without disturbing the GL mixer; explicit `vkQueueSubmit`
+   into a shared queue does not have that luxury.
+
+   **What has been ruled out, each by measurement rather than argument:**
 
    | attempt | late / ~5010 | verdict |
    | :--- | ---: | :--- |
    | *(shipping)* blit on the device dispatch thread | **41–54** | the baseline |
-   | record + submit on the **caller's thread**, private command pool | 211 | **4× worse** |
+   | record + submit on the **caller's thread**, private pool | 211 | **4× worse** |
    | …the same, without the completion fence | 242 | worse still |
-   | **narrow the source barriers** to `eColorAttachmentOutput` from `eAllCommands` | 43 | no change |
-   | *(diagnostic)* blit but **never** `SendTexture` | 101–120 | **worse** |
-   | *(diagnostic)* `SendTexture` but **never** blit | 59–70 | **worse** |
+   | narrow the source barriers from `eAllCommands` | 43 | no change |
+   | shrink the preview to 64 px wide | 44 | no change |
+   | *(diagnostic)* blit but never `SendTexture` | 101–120 | worse |
+   | *(diagnostic)* `SendTexture` but never blit | 59–70 | worse |
 
-   The last two are the interesting ones: **removing either half of the work makes it
-   worse, reproducibly.** So the cost is not "the blit" and not "the send" — it is the
-   phasing of the consumer's GPU work against the mixer's on a shared queue, and doing
-   less of it simply moves the collision. That also kills the dispatch-thread hypothesis
-   outright: moving recording off that thread put five consumer threads into direct
-   contention for `device::submit`'s queue lock, where the dispatch thread had at least
-   been serialising them in one place.
+   The noise floor is ±7 on a mean of 48 (five identical runs: 41/47/48/53/54), so only
+   the caller-thread rows are outside it.
 
-   **How bad is it, actually?** Less than "late frames" suggests. The raw TIMING lines show
-   the average period stays exactly nominal — `avg=20.00ms (nominal 20.00)` — in every arm.
-   What changes is **jitter**: 2.4–6.1 ms with no preview against 4.3–8.7 ms with five
-   Spout consumers, which tips ~1% of ticks past 20 ms. The channel does not fall behind
-   and no preview frame is dropped. It is added jitter, not lost output.
+   **The two fixes that remain, both structural.** Since the cost is the submission count,
+   the lever is to reduce it:
 
-   **What is left to try**, and why it was not attempted here: this GPU has a separate
-   queue family — the server logs `reserved compute queue family 2 for external decoders
-   (graphics is 0)` — and moving the blit there would take it off the mixer's queue
-   entirely, which is the only lever the measurements have not ruled out. Two obstacles,
-   both real: that family is *already reserved* for FFmpeg decoders, so previews would
-   reintroduce the contention the reservation exists to prevent; and reading the mixer's
-   attachment from another family needs **queue-family ownership transfers**, which means
-   the mixer must submit a release barrier every frame — or its attachments must become
-   `VK_SHARING_MODE_CONCURRENT`, which slows compositing for every channel whether or not
-   a preview is attached. Either is a mixer-wide change of the class this tree records
-   producing `VK_ERROR_DEVICE_LOST` at four concurrent producers
-   (`av_vulkan_import.cpp`), and it wants its own session with `coexistence` before and
-   after.
+   * **Fold the blit into the mixer's own submission.** `previz_texture_bridge` is already
+     called *from* `image_mixer` for exactly this kind of work, so the precedent exists: if
+     the consumer registered its exportable image with the mixer, the blit would ride the
+     command buffer the mixer already submits and add **zero** submissions. It cannot
+     simply import the mixer's attachment instead — those come from a pool and change
+     identity between frames, which is why previz copies rather than aliases.
+   * **A different queue family.** The server logs `reserved compute queue family 2 for
+     external decoders (graphics is 0)`, so the hardware has one. It needs queue-family
+     ownership transfers on the mixer's attachment, which means the mixer submits a release
+     barrier every frame, or its attachments become `VK_SHARING_MODE_CONCURRENT` and every
+     channel pays whether or not a preview is attached.
 
-7. **`FPS` rounds down silently**7. **`FPS` rounds down silently** past the log line at `initialize()`. An operator who asks for 30
+   Either is a mixer-wide change of the class this tree records producing
+   `VK_ERROR_DEVICE_LOST` at four concurrent producers (`av_vulkan_import.cpp`), and wants
+   its own session with `coexistence` before and after.
+
+   **The same pattern is in `previz_texture_bridge`, and it is worse there.** It submits
+   once per posted channel *and* creates a fence, waits on it, destroys it, and frees the
+   command buffer **every frame per channel** — where the Spout path at least reuses
+   command buffers through `submitSingleTimeCommands` and signals a timeline semaphore
+   rather than churning fences. Unmeasured: no battery drives previz at all
+   (`CLAUDE.md` records all thirteen `PREVIZ` commands as uncovered), so this is read from
+   the source and is a prediction, not a result.
+
+7. **`FPS` rounds down silently**7. **`FPS` rounds down silently**7. **`FPS` rounds down silently** past the log line at `initialize()`. An operator who asks for 30
    on a 50p channel gets 25 and only `spout/every-nth` says so.
 
 ---
