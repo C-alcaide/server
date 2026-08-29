@@ -57,57 +57,62 @@ Verified against `src/protocol/amcp/AMCPCommandsImpl.cpp` at the definition line
 
 ---
 
-## The bridge is expensive, and four attempts to fix it all failed
+## Previz costs the channels, and it is the RENDER — not the bridge
 
-`previz_texture_bridge` costs the channels a great deal, and **the measurement is too
-unstable to rank any fix**. Both halves of that sentence are load-bearing.
+**This section previously said the bridge was the cost. That was wrong**, and the way it
+was wrong is worth more than the conclusion: it rested on a single run.
 
-**What is solid**, because it reproduces across hours and every build:
+The claim came from one measurement — "skip the VK→GL bridge entirely and the late frames
+go to 0" — taken once, in a favourable machine state. Four fixes were then built on it
+(deferring the submission, moving the fence wait to two different threads, and a full
+double-buffer rewrite), none of which could be shown to help, which in hindsight is
+exactly what should have been expected.
 
-| | late frames per ~5010, five channels at 1080p50 |
-| :--- | ---: |
-| previz **off** | **0-2**, every run |
-| previz **on** | **8 to 1175** |
-| previz on, bridge skipped entirely (diagnostic) | **0** |
-| previz on, fence wait skipped (diagnostic, unsafe) | **4** |
+Re-measured properly, **interleaving the two conditions** so drift cannot favour either:
 
-So the bridge is the cost, not the 3D render — skipping the bridge while still rendering
-previz gives 0. And even **one** channel with previz on runs 52 late per 1003 (5.2%),
-against 0.02% with it off, so this is not a multi-channel contention story.
+| | previz OFF | previz ON, **bridge removed entirely** |
+| :--- | ---: | ---: |
+| round 1 | 0 / 5012 | **267 / 5016** |
+| round 2 | 1 / 5008 | **548 / 5011** |
+| round 3 | 1 / 5011 | **331 / 5011** |
 
-**What is not solid**: everything else. The same code path measured 8-46 late in one
-sitting and 65-167 an hour later; an interleaved A/B of old against new bridge, run
-alternately from one binary to cancel the drift, gave legacy 68/402/180/649 against new
-314/114/1175/376 — completely overlapping. The machine was not degrading: the previz-off
-control and the Spout battery were both re-measured at the end at 1-2 late, and the GPU
-was at 54 °C and not throttling.
+The bridge is absent from *both* columns of the right-hand condition — `post_channel`
+returns before a slot is ever created — and the channels still run 5-11% of ticks long.
+The only difference between the columns is that previz renders. **So the cost is the
+previz 3D render on the OGL thread**: an extra render pass per channel per frame, whose
+output becomes the channel's output.
 
-**Four fixes were built and none could be shown to help:**
+Splitting the bridge's own two halves confirms it from the other side. Interleaved, all
+four conditions land in the same band:
 
-| attempt | outcome |
-| :--- | :--- |
-| defer the submission 1 ms, as `device::blit_to_shared` does | no effect — this bridge blocks, it does not merely submit at a bad moment |
-| move the fence wait to the caller's thread after the dispatch | worse: that caller is the deferred future producing the channel's `render_output` |
-| move the fence wait to the OGL thread in `sync_to_store` | no better: previz renders there, and that feeds the channel's output too |
-| **double-buffer** the shared image, plus reuse the command buffer and fence instead of creating and destroying both every frame | picture pixel-identical, timing indistinguishable once interleaved. **Reverted** |
+| bridge mode | round 1 | round 2 |
+| :--- | ---: | ---: |
+| none | 452 | 293 |
+| GL samples the imported texture, no VK copy | 380 | 232 |
+| VK copy runs, GL never samples | 368 | 223 |
+| full | 856 | 229 |
 
-The double-buffer work is the one worth understanding before anyone repeats it. It is
-architecturally right — it removes a blocking wait from the mixer's own thread and four
-Vulkan object lifetimes per channel per frame — and it was verified to produce a
-**pixel-identical** picture. It was still reverted, because a large rewrite of a module
-with no coverage cannot be justified by a measurement that will not hold still.
+Nothing separates them.
 
-**Where the cost probably is**, and what nobody has tested: every posted channel runs
-VK composite → VK copy → GL previz render → back, so a five-channel frame ping-pongs
-between the Vulkan and OpenGL contexts ten times. None of the four attempts above changes
-that; all of them keep the VK submit sandwiched inside the GL previz pipeline. Batching
-all channels' copies ahead of any GL work, or rendering previz in Vulkan, would — and
-both are much larger than anything tried here.
+### What this measurement can and cannot answer
 
-**Reproducing any of this** needs the two probes built for it, since previz still has no
-battery: a timing probe (N channels, `PREVIZ n SCENE`/`MAP`, read the server's TIMING
-lines at trace level) and the Spout capture described below. The scene is a two-quad
-`.obj` in the server's media path.
+**Can**: previz on versus off. That comparison is enormous (0-1 against 230-1280) and
+holds in every round, in every build, across hours.
+
+**Cannot**: anything finer. The same code path measured 8-46 late in one sitting, 65-167
+an hour later, and 293-548 later still. Only interleaved conditions mean anything here,
+and even interleaved, differences smaller than about 3x vanish. Any future previz work
+should establish that before believing a result — the failure mode is not noise around a
+number, it is the number moving by 100x between sessions.
+
+### What is left, and it is not in the bridge
+
+The previz render itself is the thing to optimise: an extra pass per channel per frame,
+and at five channels it puts 5-11% of ticks over budget. Nothing here has looked at
+`previz_renderer` at all. The four bridge fixes are recorded in the commit history rather
+than the tree; the double-buffer one is architecturally sound and produced a
+pixel-identical picture, so it is worth reviving *if* the bridge ever turns out to matter,
+but on this evidence it does not.
 
 ## Red and blue were exchanged on every mapped screen (fixed 2026-08-29)
 
