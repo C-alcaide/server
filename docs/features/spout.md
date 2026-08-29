@@ -197,20 +197,48 @@ decimal:
 So publishing over Spout costs about **a third** of what a screen consumer costs, and both
 are a fraction of a percent of the tick.
 
-And the receive end, `casparcg-360-client/tools/preview_bench.py`, five previews at
-384×216 in one GL context:
+### The receive end — and a comparison that was wrong
 
-| | Spout `receiveTexture` | `PrintWindow` + upload |
-| :--- | ---: | ---: |
-| acquire per frame, mean | **1.96 ms** | **57.20 ms** |
-| p95 | 2.19 ms | 82.65 ms |
-| loop rate achieved | 58.0 fps | 15.7 fps |
-| grabs that returned data | 95% | 70% |
+| | Spout `receiveTexture` | `PrintWindow` + upload | **HWND embed** |
+| :--- | ---: | ---: | ---: |
+| acquire per frame | 1.40–1.96 ms | 57.20 ms | **none** |
+| client CPU (5 previews, ~50 Hz) | **17.3%** of a core | — | **0.0%** of a core |
 
-**So: cheaper, not free.** Publishing costs the channel about **0.15% of a tick** on
-OpenGL, roughly a third of a screen consumer at the same raster. The receive end is where
-the difference is decisive: **29× per frame**, and the grab path cannot sustain the
-channel's rate at all.
+**The 29× figure compared the wrong things and is withdrawn.** `PrintWindow` is what the
+client uses for its **scopes**, at 10 Hz — it is not how the embedded preview is
+displayed. The preview is displayed by *not* displaying it: the window belongs to the
+server, DWM composites it into the client's widget tree, and the client does **no
+per-frame work at all**. Measured: an `embed` arm with five reparented windows and an
+empty frame loop costs **0.0% of one core**, against **17.3%** for five Spout receivers
+at the same cadence.
+
+**So Spout is not a client-side performance win. It is a client-side performance
+regression**, bought for architectural reasons: no cross-process `SetWindowLong` /
+`QWindow.fromWinId` (whose deadlock risk `window_embedder` documents and guards against
+with `IsHungAppWindow`), previews composable in one GL surface at any size rather than N
+desktop windows with a 320×180 floor, and no requirement that the windows exist on the
+desktop at all.
+
+### The non-Spout mitigations, both measured and both null
+
+If the screen consumer is kept, can it be made cheaper? Two levers, neither of which
+moves it:
+
+| lever | consume_mean |
+| :--- | ---: |
+| window 256 wide | 0.0965 ms |
+| window 1920 wide | 0.0950 ms |
+| `<gpu-texture>true` | 0.1055 ms |
+| `<gpu-texture>false` | 0.1040 ms |
+
+**The cost does not scale with the window**, so "embed a smaller preview" is not a
+mitigation, and the texture path makes no difference either. The ~0.10 ms is a fixed
+per-consumer frame handoff — the channel waiting for the consumer to accept the frame —
+not the cost of drawing pixels, which happens on the consumer's own thread. `<vsync>`
+already defaults to false, so there is no win there either.
+
+That is what leaves Spout's 0.034 ms as the only lever that moves the publish cost at
+all: it is a cheaper handoff, not a smaller picture.
 
 **The preview itself runs at full rate.** The consumer drops a frame when the previous one
 is still in flight, so "publishes at 50 Hz" needed checking rather than assuming:

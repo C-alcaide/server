@@ -92,11 +92,20 @@ order between runs. Means over three runs each, non-overlapping:
 | vulkan | screen, same raster | ~+0.10 ms | ~0.5% | 3 / 6264 |
 
 Receive end (`casparcg-360-client/tools/preview_bench.py`, five previews at 384×216, one GL
-context): **1.96 ms** per frame for `receiveTexture` against **57.20 ms** for `PrintWindow` +
-upload — 29×, and the grab path sustains only 15.7 fps against a 50 fps source.
+context), **corrected**: the earlier "29× cheaper" compared Spout against `PrintWindow`, which
+is the **scopes** path at 10 Hz and not how the embedded preview is displayed. An embedded
+window is composited by DWM and costs the client **no per-frame work at all** — measured at
+**0.0% of one core** against **17.3%** for five Spout receivers at the same cadence.
 
-So publishing costs about **a third** of a screen consumer and 0.15% of a tick; the decisive
-difference is at the receive end. **And the preview runs at full rate** — new
+So Spout is **not** a client-side performance win; it is a small regression, bought for
+architectural reasons (no cross-process reparenting and its documented deadlock risk, previews
+composable in one GL surface at any size, no desktop windows required). On the server it is
+about **a third** of a screen consumer's cost, and both are under 0.6% of a tick.
+
+**Neither non-Spout mitigation works.** The screen consumer's cost does not scale with its
+window (0.0965 ms at 256 wide, 0.0950 at 1920) and `<gpu-texture>` makes no difference
+(0.1055 vs 0.1040); `<vsync>` already defaults to false. The ~0.10 ms is a fixed per-consumer
+frame handoff, not the cost of drawing pixels. **And the preview runs at full rate** — new
 `spout/sent-frames` / `spout/dropped-frames` report **5000 sent, 0 dropped over 20 s across
 five channels on both mixers**. `spout/fps` could not answer that: it counts frames *offered*,
 before the drop check.
