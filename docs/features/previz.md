@@ -57,62 +57,60 @@ Verified against `src/protocol/amcp/AMCPCommandsImpl.cpp` at the definition line
 
 ---
 
-## Previz costs the channels, and it is the RENDER — not the bridge
+## What previz costs, and why the earlier figures in this file were misleading
 
-**This section previously said the bridge was the cost. That was wrong**, and the way it
-was wrong is worth more than the conclusion: it rested on a single run.
+**In the configuration anyone actually runs — previz on one channel visualising the
+others — it costs almost nothing.** Five 1080p50 channels, previz active on N of them:
 
-The claim came from one measurement — "skip the VK→GL bridge entirely and the late frames
-go to 0" — taken once, in a favourable machine state. Four fixes were then built on it
-(deferring the submission, moving the fence wait to two different threads, and a full
-double-buffer rewrite), none of which could be shown to help, which in hindsight is
-exactly what should have been expected.
+| previz active on | 0 | 1 | 2 | 3 | 5 |
+| :--- | ---: | ---: | ---: | ---: | ---: |
+| late frames / ~5012 | 0 | **2** | **2** | 6 | 14 |
 
-Re-measured properly, **interleaving the two conditions** so drift cannot favour either:
+Earlier revisions of this section reported previz costing 5-11% of ticks and named first
+the bridge and then the render as the culprit. **Both readings came from a machine state
+that could not be reproduced.** The same configurations that measured 267-1280 late frames
+in one session measure 2-14 in another, with the same binary, while the previz-off control
+holds at 0-1 throughout. Nothing has explained that, and it is the largest open question
+about previz — larger than anything in the renderer.
 
-| | previz OFF | previz ON, **bridge removed entirely** |
-| :--- | ---: | ---: |
-| round 1 | 0 / 5012 | **267 / 5016** |
-| round 2 | 1 / 5008 | **548 / 5011** |
-| round 3 | 1 / 5011 | **331 / 5011** |
+### The render itself, measured directly
 
-The bridge is absent from *both* columns of the right-hand condition — `post_channel`
-returns before a slot is ever created — and the channels still run 5-11% of ticks long.
-The only difference between the columns is that previz renders. **So the cost is the
-previz 3D render on the OGL thread**: an extra render pass per channel per frame, whose
-output becomes the channel's output.
+The channel's late-frame count is a threshold effect and useless for anything finer than
+on/off. Timing `previz_renderer::render` directly is stable and is the instrument to use:
 
-Splitting the bridge's own two halves confirms it from the other side. Interleaved, all
-four conditions land in the same band:
+| | p50 | p90 | p99 | max |
+| :--- | ---: | ---: | ---: | ---: |
+| render, 2-mesh scene | **157-175 µs** | 202-268 | 415-948 | 1140-4090 |
+| render, 60-mesh scene | **546-612 µs** | | | |
+| — of which FBO bind/attach/viewport/clear | **3.4 µs** | 5.7 | 6.9 | 92 |
+| — the draw loop | 108 µs | 145-158 | 258-318 | 474-2078 |
+| — the ground grid, within that | ~15-25 µs | | | |
 
-| bridge mode | round 1 | round 2 |
-| :--- | ---: | ---: |
-| none | 452 | 293 |
-| GL samples the imported texture, no VK copy | 380 | 232 |
-| VK copy runs, GL never samples | 368 | 223 |
-| full | 856 | 229 |
+**p50 is reproducible to a few per cent between runs; nothing else here is.** The heavy
+tail lives entirely in the draw loop, is the same at 2 meshes as at 60 — so it is a
+per-render event, not per-mesh — and is what turns into late frames when it happens.
 
-Nothing separates them.
+### Three micro-optimisations, all measured, none worth keeping
 
-### What this measurement can and cannot answer
+| attempt | p50, 2 meshes | p50, 60 meshes |
+| :--- | :--- | :--- |
+| baseline | 174-204 µs | 546-612 µs |
+| cache `u_mvp`/`u_model` locations instead of `glGetUniformLocation` per mesh per frame | 172-221 | 554-650 |
+| drain GL errors once per frame instead of once per screen mesh | (same change set) | (same) |
+| skip the `glGetError` after `glBindTexture` | 103-120 | — |
 
-**Can**: previz on versus off. That comparison is enormous (0-1 against 230-1280) and
-holds in every round, in every build, across hours.
+None of them moves p50, and the first two were marginally *worse* at 60 meshes — the
+switch guarding them costs about what they save. All reverted. Worth knowing so nobody
+spends the afternoon again: the per-mesh cost is roughly **8 µs at 60 meshes**, and it is
+not in the uniform lookups or the error checks.
 
-**Cannot**: anything finer. The same code path measured 8-46 late in one sitting, 65-167
-an hour later, and 293-548 later still. Only interleaved conditions mean anything here,
-and even interleaved, differences smaller than about 3x vanish. Any future previz work
-should establish that before believing a result — the failure mode is not noise around a
-number, it is the number moving by 100x between sessions.
+### Where to look next, if previz ever needs to be faster
 
-### What is left, and it is not in the bridge
-
-The previz render itself is the thing to optimise: an extra pass per channel per frame,
-and at five channels it puts 5-11% of ticks over budget. Nothing here has looked at
-`previz_renderer` at all. The four bridge fixes are recorded in the commit history rather
-than the tree; the double-buffer one is architecturally sound and produced a
-pixel-identical picture, so it is worth reviving *if* the bridge ever turns out to matter,
-but on this evidence it does not.
+Not at micro-optimisation. The two open questions are the **100x instability between
+sessions**, which dominates everything else and is unexplained, and the **heavy tail in
+the draw loop**, which is per-render rather than per-mesh and was not localised further
+than that. The fixed per-render cost outside the draw loop is 3.4 µs and has nothing left
+in it.
 
 ## Red and blue were exchanged on every mapped screen (fixed 2026-08-29)
 
