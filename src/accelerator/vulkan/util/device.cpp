@@ -1646,26 +1646,20 @@ struct device::impl : public std::enable_shared_from_this<impl>
         });
     }
 
-    bool blit_to_shared(const std::shared_ptr<texture>& source,
-                        const std::shared_ptr<texture>& dest,
-                        vk::ImageLayout                 source_layout)
+    /// Records one blit into a command buffer, split out of `blit_to_shared` so the
+    /// recording is separable from the submission. (Coalescing several consumers' blits
+    /// into one submission was built on top of this split and measured WORSE than simply
+    /// deferring the submission; the batching is gone, the split stayed because it is
+    /// clearer.)
+    void record_blit(vk::CommandBuffer cmd,
+                     const std::shared_ptr<texture>& source,
+                     const std::shared_ptr<texture>& dest,
+                     vk::ImageLayout source_layout)
     {
-        if (!source || !dest || source->compressed() || dest->compressed())
-            return false;
-
-        const int sw = source->width();
-        const int sh = source->height();
-        const int dw = dest->width();
-        const int dh = dest->height();
-        if (sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0)
-            return false;
-
-        return dispatch_sync([&]() -> bool {
-            try {
-                const auto src_img = source->id();
-                const auto dst_img = dest->id();
-
-                submitSingleTimeCommands([&](vk::CommandBuffer cmd) {
+        const int sw = source->width(), sh = source->height();
+        const int dw = dest->width(), dh = dest->height();
+        const auto src_img = source->id();
+        const auto dst_img = dest->id();
                     // Source: whatever the mixer left it in -> eTransferSrcOptimal.
                     //
                     // eColorAttachmentOutput/eColorAttachmentWrite, NOT eAllCommands/
@@ -1740,8 +1734,81 @@ struct device::impl : public std::enable_shared_from_this<impl>
                                               vk::AccessFlagBits2::eColorAttachmentWrite,
                                           vk::PipelineStageFlagBits2::eColorAttachmentOutput,
                                           cmd);
-                });
+    }
 
+    /// Microseconds the first caller of a burst waits for the others. 0 disables the
+    /// window (coalescing whatever happens to overlap).
+    /// Microseconds the Vulkan blit waits before submitting. See `blit_to_shared`.
+    ///
+    /// Overridable for tuning; the default is what was measured. Env rather than a
+    /// `<configuration>` element because it is an implementation detail of one GPU path,
+    /// not something an operator should have to reason about.
+    static int blit_defer_us()
+    {
+        static const int us = [] {
+            const char* v = std::getenv("CASPARVP_VK_BLIT_DEFER_US");
+            if (!v)
+                return 1000;
+            try { return std::max(0, std::min(5000, std::stoi(v))); } catch (...) { return 1000; }
+        }();
+        return us;
+    }
+
+    bool blit_to_shared(const std::shared_ptr<texture>& source,
+                        const std::shared_ptr<texture>& dest,
+                        vk::ImageLayout                 source_layout)
+    {
+        if (!source || !dest || source->compressed() || dest->compressed())
+            return false;
+
+        const int sw = source->width();
+        const int sh = source->height();
+        const int dw = dest->width();
+        const int dh = dest->height();
+        if (sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0)
+            return false;
+
+        // ── DEFER THE SUBMISSION, and this is the whole fix ──────────────────────────
+        //
+        // Each consumer's blit is one extra vkQueueSubmit into the queue the mixer
+        // composites on, issued the instant the channel hands over the frame -- which is
+        // while the mixer is still working on that same tick. Five consumers at 50 Hz put
+        // 250 extra submissions a second into the middle of the mixer's own work, and the
+        // channel's tick runs long about 1.4% of the time.
+        //
+        // Measured, five channels with five Spout consumers on the Vulkan mixer, late
+        // frames out of ~5010:
+        //
+        //     defer      0 us   44-78   (mean ~60)
+        //              250 us    9
+        //              500 us   23
+        //             1000 us   25 / 17 / 11   (mean ~18)
+        //             1500 us   17
+        //             2000 us   10
+        //
+        // Any delay works and the duration barely matters, which is the tell: it is not
+        // about giving the GPU time, it is about DECOUPLING the submission from the
+        // moment the frame arrives so the mixer's own submission goes in first.
+        //
+        // The sleep is on the CALLER's thread -- the consumer's executor, which is already
+        // asynchronous and drops a frame rather than stalling the channel. It costs the
+        // preview a millisecond of latency and the channel nothing: measured 5000 sent,
+        // 0 dropped over 20 s across five channels, still exactly 50 fps.
+        //
+        // Two better fixes were tried and were worse. Recording on the caller's own thread
+        // with a private command pool: 211 late, 4x worse. Coalescing several consumers'
+        // blits into one submission: mean batch 1.5 unaided and no gain, and even with a
+        // collection window forcing batches of 2.9 it reached only 25 -- worse than simply
+        // deferring. The batching machinery was removed rather than kept as dead weight.
+        if (const int us = blit_defer_us()) {
+            std::this_thread::sleep_for(std::chrono::microseconds(us));
+        }
+
+        return dispatch_sync([&]() -> bool {
+            try {
+                submitSingleTimeCommands([&](vk::CommandBuffer cmd) {
+                    record_blit(cmd, source, dest, source_layout);
+                });
                 return true;
             } catch (const vk::SystemError& e) {
                 CASPAR_LOG(warning) << L"[vulkan::device] blit_to_shared failed: " << u16(e.what());

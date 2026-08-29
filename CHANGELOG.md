@@ -110,17 +110,31 @@ frame handoff, not the cost of drawing pixels. **And the preview runs at full ra
 five channels on both mixers**. `spout/fps` could not answer that: it counts frames *offered*,
 before the drop check.
 
-**Open: the Vulkan path adds jitter past two channels.** 0 late at 1–2 channels, 21/3008 at 3,
-41–54/5010 at 5, where the baseline is 0. Less severe than "late" suggests — the average period
-stays exactly nominal (`avg=20.00ms (nominal 20.00)`) and no preview frame is dropped; what
-changes is jitter, 2.4–6.1 ms without previews against 4.3–8.7 ms with five. **Four fixes were
-built and measured; all rejected**: caller-thread recording with a private command pool (211,
-4× worse), the same without its fence (242), narrowed barriers (43, no change), and two
-diagnostics that removed half the work each and were *both worse* (101–120 and 59–70). The last
-pair is the informative one — the cost is the phasing of the consumer's GPU work against the
-mixer's on a shared queue, not the blit or the send in isolation. The remaining lever is the
-separate queue family this GPU has, which needs mixer-wide ownership transfers; see
-`docs/features/spout.md` §5 item 6.
+**Fixed: the Vulkan path's jitter, by deferring the blit's submission 1 ms.**
+
+| | before | after | screen consumer |
+| :--- | ---: | ---: | ---: |
+| `spout_256`, 5 channels | 59 / 6265 | **14 / 6265** | 3 / 6266 |
+| `spout_native`, 5 channels | 110 / 6267 | **10 / 6266** | 0 / 6262 |
+
+The cost was one extra `vkQueueSubmit` per consumer per frame into the queue the mixer
+composites on, issued while the mixer was still working on that tick. It scaled with
+consumers (0/0/8/70 late for 1/2/3/5 at five channels) and not with channels or pixels — a
+raster sweep from 64 px to 960 px was flat. Deferring the submission by 1 ms on the
+consumer's own executor thread fixes it; the duration barely matters (250 µs already
+works), because what matters is decoupling the submission from the moment the frame
+arrives. Costs the preview 1 ms of latency and the channel nothing — **5000 sent, 0
+dropped over 20 s across five channels, still exactly 50 fps**.
+`CASPARVP_VK_BLIT_DEFER_US` overrides the default.
+
+Four richer fixes measured worse and were removed rather than kept: caller-thread
+recording with a private command pool (211 late), the same without its fence (242),
+coalescing blits into one submission (56–78 unaided, 25 with a collection window), and
+narrowed barriers (43, no change). Batching does work, but plain deferral beats it at a
+fraction of the complexity. Noise floor ±7 on a mean of 48.
+
+Not zero: 0.2% against a baseline of 0. Closing that needs the blit off the mixer's queue
+entirely, which is a mixer-wide change; see `docs/features/spout.md` §5 item 6.
 
 ### Added: DeckLink subregion destination placement on the GPU
 
