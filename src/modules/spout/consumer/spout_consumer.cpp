@@ -100,6 +100,40 @@ namespace caspar { namespace spout {
 
 namespace {
 
+/// `core::color_space` / `color_transfer` as the strings a state consumer reads. Core has
+/// no to_string for either enum -- checked, not assumed -- and adding one for a single
+/// consumer's state field would put it in the wrong place. `default:` is deliberately
+/// absent so a new enumerator is a compile error here rather than a silent "unknown".
+std::string space_name(core::color_space v)
+{
+    switch (v) {
+        case core::color_space::bt601:     return "bt601";
+        case core::color_space::bt709:     return "bt709";
+        case core::color_space::bt2020:    return "bt2020";
+        case core::color_space::p3_d65:    return "p3-d65";
+        case core::color_space::p3_dci:    return "p3-dci";
+        case core::color_space::adobe_rgb: return "adobe-rgb";
+        // Present and must be handled: the source declared no gamut. Everywhere it is
+        // read as a gamut it falls through to bt709, so it is reported as itself rather
+        // than as bt709 -- "unknown" is the honest answer and bt709 would be a claim.
+        case core::color_space::unknown:   return "unknown";
+    }
+    return "unhandled";
+}
+
+std::string transfer_name(core::color_transfer v)
+{
+    switch (v) {
+        case core::color_transfer::sdr:     return "sdr";
+        case core::color_transfer::pq:      return "pq";
+        case core::color_transfer::hlg:     return "hlg";
+        case core::color_transfer::linear:  return "linear";
+        case core::color_transfer::gamma24: return "gamma24";
+        case core::color_transfer::gamma26: return "gamma26";
+    }
+    return "unhandled";
+}
+
 class gl_context
 {
     HWND  hwnd_ = nullptr;
@@ -224,6 +258,11 @@ struct spout_consumer_impl : public core::frame_consumer
     std::unique_ptr<Spout>      sender_;
     std::unique_ptr<gl_context> context_;
     core::video_format_desc     format_desc_;
+    //: The channel's colour properties, from channel_info. `channel_depth_` is read on the
+    //: frame path (it decides the blit's component order), the other two only by state().
+    common::bit_depth           channel_depth_    = common::bit_depth::bit8;
+    core::color_space           channel_space_    = core::color_space::bt709;
+    core::color_transfer        channel_transfer_ = core::color_transfer::sdr;
 
     // GL context sharing for zero-copy GPU texture path
     void* gl_share_context_ = nullptr;
@@ -531,6 +570,14 @@ struct spout_consumer_impl : public core::frame_consumer
 
         // Capture the mixer's GL context handle for shared-context creation.
         gl_share_context_ = channel_info.gl_share_context;
+        // The channel's colour properties. All three were available here and none was
+        // consulted: the depth decides the exportable texture's component order (see
+        // send_gpu below) and all three are now reported in state(), because Spout can
+        // carry a FORMAT but has no field for transfer or gamut -- so the server's own
+        // state is the only place a caller can learn what it is receiving.
+        channel_depth_    = channel_info.depth;
+        channel_space_    = channel_info.default_color_space;
+        channel_transfer_ = channel_info.default_color_transfer;
 
 #ifdef ENABLE_VULKAN
         // Null unless the channel is on the Vulkan mixer. This is what makes the
@@ -656,8 +703,20 @@ struct spout_consumer_impl : public core::frame_consumer
                 // RGBA-declared image, and a blit preserves byte order, so without this
                 // the published texture arrives red/blue exchanged against the OGL
                 // mixer's. Measured through a real receiver -- see device.h.
-                vk_shared_tex_ =
-                    dev->create_exportable_texture(out_w_, out_h_, 4, common::bit_depth::bit8, true);
+                // swap_rb ONLY WHEN THE SOURCE IS 8-BIT. `device.h` records why: a blit
+                // maps components rather than bytes, and the mixer's attachment holds
+                // BGRA at 8-bit but true RGBA at 16-bit, "since only the 8-bit shader
+                // path swizzles". So reversing the destination's component order corrects
+                // the 8-bit case and CORRUPTS the 16-bit one.
+                //
+                // It was unconditional. Measured 2026-08-31 through a real Spout receiver:
+                // a 16-bit Vulkan channel published red and blue EXCHANGED at bt709/SDR,
+                // bt2020/PQ and bt2020/HLG, while every 8-bit configuration was
+                // byte-exact. Invisible to a grey or symmetric pattern, and invisible to
+                // every battery until one drove a 16-bit channel.
+                const bool swap_rb = channel_depth_ == common::bit_depth::bit8;
+                vk_shared_tex_ = dev->create_exportable_texture(
+                    out_w_, out_h_, 4, common::bit_depth::bit8, swap_rb);
                 if (!vk_shared_tex_)
                     throw std::runtime_error("create_exportable_texture returned null");
                 vk_gl_import_ = std::make_unique<accelerator::vulkan::gl_shared_texture>(vk_shared_tex_);
@@ -953,6 +1012,22 @@ struct spout_consumer_impl : public core::frame_consumer
         state["spout/fps"]           = current_fps_;   // frames OFFERED per second
         state["spout/sent-frames"]    = static_cast<int64_t>(frames_sent_.load());
         state["spout/dropped-frames"] = static_cast<int64_t>(frames_dropped_.load());
+        // WHAT IS BEING PUBLISHED, AND WHAT THE CHANNEL IS. Reported because Spout carries
+        // a DXGI format but has NO field for transfer function or gamut, so a receiver
+        // cannot learn either from the protocol -- the server's state is the only place.
+        //
+        // `published-depth` is 8 whatever the channel is: every path here hands Spout an
+        // 8-bit texture. Saying so is the point. A 16-bit channel is TRUNCATED, and until
+        // this field existed nothing anywhere said it.
+        state["spout/channel-depth"]   = channel_depth_ == common::bit_depth::bit8 ? 8 : 16;
+        state["spout/published-depth"] = 8;
+        state["spout/depth-truncated"] = channel_depth_ != common::bit_depth::bit8;
+        state["spout/color-space"]     = space_name(channel_space_);
+        state["spout/color-transfer"]  = transfer_name(channel_transfer_);
+        // Neither of the two above is signalled to the receiver: Spout has nowhere to put
+        // them. A consumer of this state must treat them as "what the server rendered",
+        // not "what the receiver was told".
+        state["spout/color-signalled"] = false;
         return state;
     }
 };
