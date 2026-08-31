@@ -682,7 +682,7 @@ struct shader::impl
         return t;
     }
 
-    static GLuint make_buffer_tex(int w, int h, bool is_float)
+    static GLuint make_buffer_tex(int w, int h, bool is_float, bool deep = false)
     {
         GLuint t = 0;
         glGenTextures(1, &t);
@@ -690,6 +690,10 @@ struct shader::impl
         set_tex_params();
         if (is_float)
             glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, w, h, 0, GL_RGBA, GL_FLOAT, nullptr);
+        else if (deep)
+            // Only the FINAL pass target asks for this. An intermediate PASSES
+            // buffer's precision is the ISF `FLOAT` attribute's business.
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16, w, h, 0, GL_RGBA, GL_UNSIGNED_SHORT, nullptr);
         else
             glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
         glBindTexture(GL_TEXTURE_2D, 0);
@@ -737,12 +741,22 @@ struct shader::impl
 
     GLuint ensure_final(int w, int h)
     {
-        if (final_tex_ == 0 || final_w_ != w || final_h_ != h) {
+        // THE ROOT SITE, and the DEPTH is part of the cache key. The final pass
+        // renders here, so an 8-bit buffer caps the whole chain -- a 16-bit output
+        // texture would only receive an already-quantised blit.
+        //
+        // The depth is compared HERE rather than acted on in the setter because
+        // `set_output_depth` runs on the producer's thread, where deleting a GL
+        // texture is not safe. Without `final_deep_` in the condition, a depth change
+        // at the same size would keep the old buffer and silently do nothing.
+        const bool deep = out_depth_ != common::bit_depth::bit8;
+        if (final_tex_ == 0 || final_w_ != w || final_h_ != h || final_deep_ != deep) {
             if (final_tex_)
                 glDeleteTextures(1, &final_tex_);
-            final_tex_ = make_buffer_tex(w, h, false);
-            final_w_   = w;
-            final_h_   = h;
+            final_tex_  = make_buffer_tex(w, h, false, deep);
+            final_w_    = w;
+            final_h_    = h;
+            final_deep_ = deep;
         }
         return final_tex_;
     }
@@ -961,12 +975,20 @@ struct shader::impl
     /// This used to be a local, so a 1080p shader allocated and freed 8.3 MB on
     /// every single frame.
     std::vector<unsigned char> readback_tmp_;
+    //: Bits per component for the final pass and every output route. See
+    //: `shader::set_output_depth`.
+    common::bit_depth          out_depth_  = common::bit_depth::bit8;
+    //: The depth `final_tex_` was built with, so a depth change rebuilds it.
+    bool                       final_deep_ = false;
 
     /// Read a raw GL texture (bottom-up RGBA) back into a tightly-packed, top-down BGRA CPU buffer
     /// (the layout a CPU const_frame labelled bgra expects).
     void readback_bgra(GLuint tex, int tw, int th, int out_w, int out_h, unsigned char* dst, int dst_stride)
     {
-        const std::size_t need = static_cast<std::size_t>(tw) * th * 4;
+        // 4 components times the component SIZE. This assumed one byte per
+        // component, so a 16-bit read would have overrun it.
+        const std::size_t comp = out_depth_ == common::bit_depth::bit8 ? 1u : 2u;
+        const std::size_t need = static_cast<std::size_t>(tw) * th * 4 * comp;
         if (readback_tmp_.size() < need)
             readback_tmp_.resize(need);
 
@@ -977,16 +999,22 @@ struct shader::impl
         // swapping afterwards meant a scalar loop over every pixel -- two
         // million iterations a frame at 1080p, four byte moves each -- purely to
         // exchange two channels.
-        glGetTexImage(GL_TEXTURE_2D, 0, GL_BGRA, GL_UNSIGNED_BYTE, readback_tmp_.data());
+        // GL_UNSIGNED_SHORT at 16-bit: the destination frame's planes are declared
+        // 16-bit, so reading bytes would fill half the buffer and leave the rest as
+        // it was -- a picture that is present, wrong, and obviously neither.
+        glGetTexImage(GL_TEXTURE_2D, 0, GL_BGRA,
+                      comp == 1u ? GL_UNSIGNED_BYTE : GL_UNSIGNED_SHORT,
+                      readback_tmp_.data());
         glBindTexture(GL_TEXTURE_2D, 0);
 
         const int w = std::min(tw, out_w);
         const int h = std::min(th, out_h);
         // GL hands back bottom-up, the frame wants top-down, so the rows are
         // walked in reverse -- but each row is now a straight copy.
-        const std::size_t row = static_cast<std::size_t>(w) * 4;
+        const std::size_t row = static_cast<std::size_t>(w) * 4 * comp;
         for (int y = 0; y < h; ++y) {
-            const unsigned char* s = readback_tmp_.data() + static_cast<std::size_t>(th - 1 - y) * tw * 4;
+            const unsigned char* s =
+                readback_tmp_.data() + static_cast<std::size_t>(th - 1 - y) * tw * 4 * comp;
             unsigned char*       d = dst + static_cast<std::size_t>(y) * dst_stride;
             std::memcpy(d, s, row);
         }
@@ -1203,6 +1231,15 @@ bool shader::set_value(const std::string& name, const std::vector<double>& value
     return true;
 }
 
+void shader::set_output_depth(common::bit_depth depth)
+{
+    // A PLAIN ASSIGNMENT, deliberately. The obvious implementation deletes the
+    // final-pass texture so the next render rebuilds it -- and this is called from
+    // the producer's thread, not the GL thread, where deleting a texture is not safe.
+    // `ensure_final` compares the depth it built with instead.
+    impl_->out_depth_ = depth;
+}
+
 void shader::reset_events()
 {
     for (const auto& in : impl_->inputs_)
@@ -1231,7 +1268,7 @@ std::shared_ptr<core::texture> shader::render(const std::shared_ptr<accelerator:
             return nullptr;
 
         // ISF renders bottom-up; the mixer is top-down. Y-flip the final pass into a mixer texture.
-        auto   out_tex = device->create_texture(width, height, 4, common::bit_depth::bit8, false);
+        auto   out_tex = device->create_texture(width, height, 4, p->out_depth_, false);
         GLuint fbos[2] = {0, 0};
         glCreateFramebuffers(2, fbos);
         glNamedFramebufferTexture(fbos[0], GL_COLOR_ATTACHMENT0, last_tex, 0);

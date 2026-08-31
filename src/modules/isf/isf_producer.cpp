@@ -27,6 +27,7 @@
 #include <common/array.h>
 #include <common/env.h>
 #include <common/log.h>
+#include <common/param.h>   // get_param, for BIT_DEPTH
 #include <common/utf.h>
 
 #include <core/frame/draw_frame.h>
@@ -144,6 +145,13 @@ class isf_producer : public core::frame_producer
     spl::shared_ptr<core::frame_factory>      frame_factory_;
     std::shared_ptr<accelerator::ogl::device> ogl_device_;
     std::unique_ptr<shader>                   shader_;
+    //: Bits per component this producer outputs. 8 unless `BIT_DEPTH 16` asked.
+    //:
+    //: NOT taken from the channel, because a producer cannot see it: `frame_factory`
+    //: exposes no accessor for the channel's depth and `frame_producer_dependencies`
+    //: carries none. Following the channel would need a core API change touching both
+    //: mixers, so this is explicit -- the same shape as the Spout consumer's parameter.
+    common::bit_depth            out_depth_ = common::bit_depth::bit8;
     std::wstring                              name_;
     int                                       width_;
     int                                       height_;
@@ -222,6 +230,18 @@ class isf_producer : public core::frame_producer
                    ? static_cast<double>(deps.format_desc.time_scale) / static_cast<double>(deps.format_desc.duration)
                    : 25.0;
         detect_mixer();
+    }
+
+    /// Bits per component this producer outputs, and the shader's final pass with it.
+    ///
+    /// Forwarded to the shader because the FINAL PASS TARGET is where precision is
+    /// actually lost: an 8-bit final pass feeding a 16-bit output texture delivers 256
+    /// levels, which is what an ISF ramp measured before this existed.
+    void set_output_depth(common::bit_depth depth)
+    {
+        out_depth_ = depth;
+        if (shader_)
+            shader_->set_output_depth(depth);
     }
 
     ~isf_producer()
@@ -336,7 +356,9 @@ class isf_producer : public core::frame_producer
     core::draw_frame wrap_texture(std::shared_ptr<core::texture> tex, int w, int h, const core::const_frame* src)
     {
         core::pixel_format_desc pfd(core::pixel_format::bgra);
-        pfd.planes.push_back(core::pixel_format_desc::plane(w, h, 4, common::bit_depth::bit8));
+        // The DECLARED depth has to match the texture's, or the mixer samples 16-bit
+        // storage as though it were 8-bit. This is the descriptor the mixer believes.
+        pfd.planes.push_back(core::pixel_format_desc::plane(w, h, 4, out_depth_));
 
         auto                                   store = std::make_shared<std::vector<std::uint8_t>>(0);
         array<const std::uint8_t>              dummy(store->data(), 0, std::move(store));
@@ -398,7 +420,7 @@ class isf_producer : public core::frame_producer
             if (shared_pool_.size() >= kMaxSlots)
                 return core::draw_frame::empty();
             try {
-                auto vk_tex = vk_device_->create_exportable_texture(w, h, 4, common::bit_depth::bit8);
+                auto vk_tex = vk_device_->create_exportable_texture(w, h, 4, out_depth_);
                 shared_pool_.push_back(
                     std::make_unique<accelerator::vulkan::gl_shared_texture>(std::move(vk_tex)));
                 slot = shared_pool_.back().get();
@@ -472,8 +494,11 @@ class isf_producer : public core::frame_producer
         // mapped memory. Going via an intermediate buffer and copying afterwards
         // cost a second full-frame copy on every frame.
         core::pixel_format_desc pfd(core::pixel_format::bgra);
-        pfd.planes.push_back(core::pixel_format_desc::plane(w, h, 4, common::bit_depth::bit8));
-        auto      frame  = frame_factory_->create_frame(this, pfd);
+        pfd.planes.push_back(core::pixel_format_desc::plane(w, h, 4, out_depth_));
+        // The DEPTH overload: `create_frame(tag, desc)` allocates for the descriptor's
+        // own planes, and the shader writes 16-bit components into this memory, so the
+        // two have to agree or the readback overruns what was allocated.
+        auto      frame  = frame_factory_->create_frame(this, pfd, out_depth_);
         const int stride = frame.pixel_format_desc().planes[0].linesize;
 
         const bool rendered = shader_->render_readback(
@@ -660,7 +685,34 @@ spl::shared_ptr<core::frame_producer> create_producer(const core::frame_producer
     const std::wstring base_path     = std::filesystem::path(path).parent_path().wstring();
     const std::string  vertex_source = load_vertex(path);
 
+    // `BIT_DEPTH 16` renders and outputs at 16 bits per component. Explicit rather
+    // than following the channel because a producer CANNOT see the channel's depth:
+    // `frame_factory` exposes no accessor for it and `frame_producer_dependencies`
+    // carries none, so following it would need a core API change touching both
+    // mixers. Anything other than 16 leaves the default 8, including a typo -- a
+    // shader should not fail to load over a precision hint.
+    const int  requested_depth = get_param(L"BIT_DEPTH", params, 0);
+    const auto out_depth =
+        requested_depth == 16 ? common::bit_depth::bit16 : common::bit_depth::bit8;
+
     std::vector<std::wstring> source_params(params.begin() + 2, params.end());
+
+    // STRIP `BIT_DEPTH <n>` BEFORE the source is resolved. Everything after the shader
+    // name is a source producer here -- filter mode passes it straight to
+    // `create_producer` -- so leaving the option in made `[ISF] shader BIT_DEPTH 16` try
+    // to open a producer called "BIT_DEPTH" and return `404 PLAY FAILED`. `get_param`
+    // reads the value from the full list above; this removes it from the source list.
+    for (std::size_t i = 0; i + 1 < source_params.size();) {
+        if (boost::iequals(source_params[i], L"BIT_DEPTH")) {
+            source_params.erase(source_params.begin() + i, source_params.begin() + i + 2);
+        } else {
+            ++i;
+        }
+    }
+    // A trailing `BIT_DEPTH` with no value: drop it too rather than pass it on as a
+    // source name, which would fail for a reason that names the wrong thing.
+    if (!source_params.empty() && boost::iequals(source_params.back(), L"BIT_DEPTH"))
+        source_params.pop_back();
 
     // Transition mode: [ISF] <shader> TRANSITION <from-source> <to-source> [frames]
     if (!source_params.empty() && boost::iequals(source_params.at(0), L"TRANSITION")) {
@@ -682,7 +734,10 @@ spl::shared_ptr<core::frame_producer> create_producer(const core::frame_producer
                 frames = 25;
             }
         }
-        return spl::make_shared<isf_producer>(dependencies, source, name, base_path, vertex_source, from, to, frames);
+        auto p = spl::make_shared<isf_producer>(dependencies, source, name, base_path,
+                                               vertex_source, from, to, frames);
+        p->set_output_depth(out_depth);
+        return p;
     }
 
     // Filter mode: a source producer follows the shader file.
@@ -692,10 +747,15 @@ spl::shared_ptr<core::frame_producer> create_producer(const core::frame_producer
             CASPAR_LOG(warning) << L"[isf] Could not create source producer for shader '" << params.at(1) << L"'.";
             return core::frame_producer::empty();
         }
-        return spl::make_shared<isf_producer>(dependencies, source, name, base_path, vertex_source, src);
+        auto p = spl::make_shared<isf_producer>(dependencies, source, name, base_path,
+                                               vertex_source, src);
+        p->set_output_depth(out_depth);
+        return p;
     }
 
-    return spl::make_shared<isf_producer>(dependencies, source, name, base_path, vertex_source);
+    auto p = spl::make_shared<isf_producer>(dependencies, source, name, base_path, vertex_source);
+    p->set_output_depth(out_depth);
+    return p;
 }
 
 }} // namespace caspar::isf

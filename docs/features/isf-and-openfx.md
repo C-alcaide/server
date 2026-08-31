@@ -16,6 +16,65 @@ Detail is in [`../guides/ISF_USER_AND_SHADER_GUIDE.md`](../guides/ISF_USER_AND_S
 [`../architecture/OPENFX_IMPLEMENTATION.md`](../architecture/OPENFX_IMPLEMENTATION.md). This
 document is the state and the coverage.
 
+
+## ISF at 16 bits per component
+
+`[ISF] <shader> BIT_DEPTH 16` renders and outputs at 16 bits. Without it the producer is
+8-bit on every route, which is what it always was.
+
+**Found by measuring something else.** An ISF ramp was `spout-depth`'s first fixture and
+delivered **256 distinct levels** through a Spout sender correctly advertising
+`rgba16-unorm` — 192 on the green channel, which is exactly 0.75 x 256 and named the cause.
+Every output site in the ISF path was 8-bit, and one of them made the others irrelevant:
+
+| site | what it is |
+| :--- | :--- |
+| `ensure_final` -> `make_buffer_tex(w, h, false)` | **the shader's FINAL PASS TARGET** |
+| `create_texture(..., bit8, ...)` | the OGL output texture |
+| `wrap_texture`'s `pixel_format_desc` | what the mixer believes it is sampling |
+| `create_exportable_texture(..., bit8)` | the Vulkan shared texture |
+| the CPU readback | the descriptor, the buffer arithmetic, and `glGetTexImage`'s type |
+
+The final pass is the root: a 16-bit output texture fed by an 8-bit final pass receives an
+already-quantised blit and delivers 256 levels, so fixing the visible sites alone changes
+nothing.
+
+**Measured after the fix**, both mixers, a 16-bit channel at 1080p2500, distinct levels
+per channel in a received ramp:
+
+| producer | `BIT_DEPTH 8` | `BIT_DEPTH 16` |
+| :--- | ---: | ---: |
+| ISF shader | 256 | **1920** |
+| 16-bit clip (control) | 256 | **1920** |
+
+1920 is the ramp's width, so at 16 bits every column resolves and the fixture is the limit
+rather than the depth. The ISF arm matches the file producer level for level.
+
+### Why it is a parameter and not automatic
+
+**A producer cannot see the channel's bit depth.** `frame_factory` takes a depth on
+`create_frame` and exposes no accessor for the channel's own; `frame_producer_dependencies`
+carries none; no producer in the tree reads one. Following the channel would need a core
+API change touching both mixers, which is worth doing separately and was not smuggled in
+here.
+
+### Two traps in the implementation
+
+* **`set_output_depth` must not free the final-pass texture.** It runs on the producer's
+  thread, where deleting a GL texture is not safe. The depth is part of `ensure_final`'s
+  cache key instead, so the rebuild happens on the GL thread — and without that key a depth
+  change at the same raster would silently keep the old 8-bit buffer.
+* **`BIT_DEPTH` has to be stripped before the source is resolved.** Everything after the
+  shader name is a source producer in filter mode, so leaving the option in made
+  `[ISF] shader BIT_DEPTH 16` try to open a producer named `BIT_DEPTH` and return
+  `404 PLAY FAILED`.
+
+**Coverage:** `cli.py spout-depth --producer isf` — 8/8 with the file producer as control.
+The ISF arm's source gate is satisfied by construction rather than by parsing, because the
+ISF producer logs no output format; the levels carry the verdict there. A log line naming
+the output depth would make that gate real.
+
+---
 ---
 
 ## 1. What is implemented today

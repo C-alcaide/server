@@ -10,6 +10,7 @@
 
 #pragma once
 
+#include <common/bit_depth.h>
 #include <cstdint>
 #include <map>
 #include <memory>
@@ -88,6 +89,18 @@ class shader
 
     /// Reset all `event`-type inputs to 0 (call once per rendered frame for momentary triggers).
     void reset_events();
+
+    /// Bits per component for the FINAL PASS TARGET and every output route.
+    ///
+    /// Not merely the output texture: the final pass renders into `ensure_final`'s
+    /// buffer, so a 16-bit output with an 8-bit final pass would blit an
+    /// already-quantised result and deliver 256 levels -- which is exactly what an ISF
+    /// ramp measured before this existed, through a Spout sender correctly advertising
+    /// rgba16. Intermediate PASSES buffers keep their own ISF `FLOAT` attribute, which
+    /// is a different question.
+    ///
+    /// Defaults to 8, so a caller that does not ask is byte-identical to before.
+    void set_output_depth(common::bit_depth depth);
 
     /// Render one frame on the device's GL thread into a texture (top-down, BGRA-labelled).
     /// images binds declared image inputs by name. time/time_delta/frame_index feed the standard
