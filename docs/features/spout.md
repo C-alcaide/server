@@ -5,7 +5,7 @@
 > **Commands:** none of its own — reached by producer syntax on `PLAY` and by consumer name on `ADD`, with `MAX_WIDTH` / `MAX_HEIGHT` / `EVERY_NTH` / `FPS` as consumer arguments
 > **Architecture:** none, deliberately — a thin wrapper over the Spout SDK; the interesting constraint (adapter-bound shared handles) is in the guide
 > **Guide:** [`../guides/SPOUT.md`](../guides/SPOUT.md)
-> **Coverage:** `cli.py spout-pixels` — the RECEIVED picture, through a real Spout receiver: **6/6 at 1080p2500 and 6/6 at 5000x3000p50, both mixers, every cell byte-exact**, gating geometry, channel order, size and aspect; `cli.py spout-signalling` — **8/8, both mixers**, gating which path was taken, now at any raster via `--video-mode`; `cli.py preview-cost` — the publishing cost against a screen consumer
+> **Coverage:** `cli.py spout-pixels` — the RECEIVED picture, through a real Spout receiver: **6/6 at 1080p2500 and 6/6 at 5000x3000p50, both mixers, every cell byte-exact**, gating geometry, channel order, size, aspect and the advertised depth, with `--bit-depth` / `--color-space` / `--color-transfer`; `cli.py spout-depth` — **4/4, both mixers**, how many LEVELS survive the share; `cli.py spout-signalling` — **8/8, both mixers**, gating which path was taken, now at any raster via `--video-mode`; `cli.py preview-cost` — the publishing cost against a screen consumer
 
 Shares frames with other Spout-aware Windows applications over a shared DirectX texture, with no
 host copy. The consumer publishes a channel as a Spout sender; the producer receives another
@@ -184,6 +184,73 @@ colour **and** `gpu-path`, on both mixers.
 
 ---
 
+
+## 4a. Bit depth, gamut and transfer — what travels and what cannot
+
+**Every Spout figure in this file above was an 8-bit Rec.709 SDR figure**, and that was
+established by absence: no Spout battery set `bit_depth`, `color_space` or
+`color_transfer`, so all of them inherited the harness's 8/bt709/sdr defaults. Driving a
+16-bit channel found a defect immediately.
+
+### Fixed: 16-bit on the Vulkan mixer published red and blue exchanged
+
+At bt709/SDR, bt2020/PQ and bt2020/HLG alike, while every 8-bit configuration was
+byte-exact. `create_exportable_texture`'s `swap_rb` was passed `true` unconditionally —
+right for the 8-bit attachment, which holds BGRA, and a spurious reorder for the 16-bit
+one, which holds true RGBA. `device.h` states both facts; the consumer consulted neither.
+**Third appearance of this class in the fork**, after previz's VK→GL bridge and the
+DeckLink Vulkan readback, and all three were invisible to a grey or symmetric pattern.
+
+### 16-bit is now published, opt-in
+
+`ADD n SPOUT name BIT_DEPTH 16` publishes a 16-bit channel at 16 bits: the exportable
+texture and the GL blit target follow the depth, and `SetSenderFormat(11)` —
+`DXGI_FORMAT_R16G16B16A16_UNORM` — is called before the first send, because `CheckSender`
+fixes the format when the sender is created.
+
+**Opt-in rather than automatic, deliberately.** Many Spout receivers assume RGBA8 and will
+not read an RGBA16 sender at all, so following the channel silently would break working
+installations. `BIT_DEPTH 8` forces truncation even on a 16-bit channel.
+
+Measured through a real receiver, both mixers, 1080p2500 on a 16-bit channel:
+
+| asked | advertised format | distinct levels per channel |
+| :--- | :--- | ---: |
+| `BIT_DEPTH 8` | `bgra8-unorm` | 256 |
+| `BIT_DEPTH 16` | `rgba16-unorm` | **1920** |
+
+1920 is the ramp's width, so at 16 bits every column resolves distinctly and the fixture
+is the limit rather than the depth — **10x the levels an 8-bit sender carries.**
+
+**The CPU fallback is 8-bit whatever is asked**, and not by choice: `Spout::SendImage`
+takes `unsigned char*` and its own comment says *"Only RGBA, BGRA, RGB, BGR are
+supported"*. So `spout/published-depth` is set by the path that actually sent the frame,
+never from intent — claiming 16 while the fallback is live would be a worse defect than
+the truncation it replaced.
+
+### What Spout cannot carry at all
+
+| property | reaches a receiver? |
+| :--- | :--- |
+| bit depth | **yes** — the DXGI format is in the sender info, readable via `GetSenderInfo` |
+| gamut | **no** — no field exists |
+| transfer function | **no** — no field exists |
+| mastering metadata | **no** — no field exists |
+
+So a PQ or HLG channel published over Spout arrives as pixels a receiver cannot interpret.
+The consumer now reports `spout/color-space`, `spout/color-transfer` and
+`spout/color-signalled` (always **false**) so a caller reading server state can learn what
+was rendered — but those values are *what the server rendered*, never *what the receiver
+was told*, and must not be read as signalling.
+
+### Not covered
+
+Colour accuracy at HDR. `spout-pixels` reports a per-cell deviation of 122 at PQ and 76 at
+HLG **on both mixers** — that is the transfer function, not a defect, since a PQ-encoded
+picture of an SDR fixture genuinely differs, and the 3x3 grid's tolerance cannot separate
+that from garbage. What is established at PQ and HLG is geometry and channel order.
+
+---
 ## 4b. What a preview actually costs, both ends
 
 `cli.py preview-cost` — five channels at 1080p5000 (a 20 ms tick), **full rate, no

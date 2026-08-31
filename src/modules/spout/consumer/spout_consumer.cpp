@@ -261,6 +261,18 @@ struct spout_consumer_impl : public core::frame_consumer
     //: The channel's colour properties, from channel_info. `channel_depth_` is read on the
     //: frame path (it decides the blit's component order), the other two only by state().
     common::bit_depth           channel_depth_    = common::bit_depth::bit8;
+    //: The depth this sender INTENDS to publish: the channel's, unless `BIT_DEPTH`
+    //: overrode it. Distinct from `published_depth_`, which is what the live path managed.
+    common::bit_depth           out_depth_        = common::bit_depth::bit8;
+    //: 0 follow the channel, 8 or 16 force it. From `BIT_DEPTH` on the ADD. Declared
+    //: here, ahead of `executor_`, so the member initialiser list stays in order.
+    int                         depth_override_   = 0;
+    //: 8 or 16 -- what the path that last sent a frame ACTUALLY published. Set at the send
+    //: sites rather than from intent, for the same reason `gpu_path_active_` is: a field
+    //: that exists to tell a caller what it is receiving must never be set by what we
+    //: hoped to send. The CPU fallback forces 8, because `SendImage` cannot do more.
+    std::atomic<int>            published_depth_{8};
+
     core::color_space           channel_space_    = core::color_space::bt709;
     core::color_transfer        channel_transfer_ = core::color_transfer::sdr;
 
@@ -377,9 +389,15 @@ struct spout_consumer_impl : public core::frame_consumer
         glGenTextures(1, &blit_tex_);
         if (!blit_tex_) { blit_failed_ = true; return false; }
         glBindTexture(GL_TEXTURE_2D, blit_tex_);
-        // RGBA8 regardless of the channel's depth: this is a preview, and Spout's
-        // shared-texture format is 8-bit anyway.
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        // FOLLOWS THE DEPTH. This was RGBA8 unconditionally, reasoned as "this is a
+        // preview, and Spout's shared-texture format is 8-bit anyway" -- and the second
+        // half of that is FALSE: `SpoutGL::GLDXformat` maps GL_RGBA16 to
+        // DXGI_FORMAT_R16G16B16A16_UNORM. So a 16-bit channel was truncated on a premise
+        // that did not hold, and a GUI could not tell a 16-bit preview from an 8-bit one.
+        const bool   deep       = out_depth_ != common::bit_depth::bit8;
+        const GLint  internal   = deep ? GL_RGBA16 : GL_RGBA8;
+        const GLenum pixel_type = deep ? GL_UNSIGNED_SHORT : GL_UNSIGNED_BYTE;
+        glTexImage2D(GL_TEXTURE_2D, 0, internal, w, h, 0, GL_RGBA, pixel_type, nullptr);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -517,11 +535,17 @@ struct spout_consumer_impl : public core::frame_consumer
         }
     }
 
-    spout_consumer_impl(std::wstring name, int max_w, int max_h, int every_nth, int target_fps)
+    spout_consumer_impl(std::wstring name, int max_w, int max_h, int every_nth, int target_fps,
+                        int bit_depth = 0)
         : max_w_(max_w)
         , max_h_(max_h)
         , every_nth_((std::max)(1, every_nth))
         , target_fps_((std::max)(0, target_fps))
+        // Anything other than 8 or 16 is ignored rather than rejected: an unparsed or
+        // absent BIT_DEPTH is 0, which means "follow the channel", and that is also the
+        // right behaviour for a typo. Refusing the ADD over a preview's bit depth would
+        // be worse than publishing the channel's own.
+        , depth_override_(bit_depth == 8 || bit_depth == 16 ? bit_depth : 0)
         , executor_(L"Spout Consumer")
     {
         sender_name_.reserve(name.length());
@@ -576,6 +600,13 @@ struct spout_consumer_impl : public core::frame_consumer
         // carry a FORMAT but has no field for transfer or gamut -- so the server's own
         // state is the only place a caller can learn what it is receiving.
         channel_depth_    = channel_info.depth;
+        // Follow the channel unless the caller forced a depth. 16-bit is opt-in BY CHOICE
+        // rather than by accident: many Spout receivers assume RGBA8 and will not read an
+        // RGBA16 sender at all, so following the channel silently would break working
+        // installations. `BIT_DEPTH 16` is how an operator asks for it.
+        out_depth_ = depth_override_ == 16  ? common::bit_depth::bit16
+                     : depth_override_ == 8 ? common::bit_depth::bit8
+                                            : channel_depth_;
         channel_space_    = channel_info.default_color_space;
         channel_transfer_ = channel_info.default_color_transfer;
 
@@ -714,9 +745,13 @@ struct spout_consumer_impl : public core::frame_consumer
                 // bt2020/PQ and bt2020/HLG, while every 8-bit configuration was
                 // byte-exact. Invisible to a grey or symmetric pattern, and invisible to
                 // every battery until one drove a 16-bit channel.
+                // swap_rb only when the SOURCE attachment is 8-bit -- see above. At
+                // 16-bit `create_exportable_texture` ignores it anyway (there is no core
+                // 16-bit BGRA UNORM format), and the source is already true RGBA, so the
+                // two facts agree rather than merely coexisting.
                 const bool swap_rb = channel_depth_ == common::bit_depth::bit8;
                 vk_shared_tex_ = dev->create_exportable_texture(
-                    out_w_, out_h_, 4, common::bit_depth::bit8, swap_rb);
+                    out_w_, out_h_, 4, out_depth_, swap_rb);
                 if (!vk_shared_tex_)
                     throw std::runtime_error("create_exportable_texture returned null");
                 vk_gl_import_ = std::make_unique<accelerator::vulkan::gl_shared_texture>(vk_shared_tex_);
@@ -759,6 +794,7 @@ struct spout_consumer_impl : public core::frame_consumer
         }
 
         gpu_path_active_      = true;
+        published_depth_      = out_depth_ == common::bit_depth::bit8 ? 8 : 16;
         gpu_downscale_active_ = (src->width() != out_w_ || src->height() != out_h_);
         frames_sent_.fetch_add(1, std::memory_order_relaxed);
         return true;
@@ -832,6 +868,20 @@ struct spout_consumer_impl : public core::frame_consumer
 
             if (!sender_) {
                 sender_ = std::make_unique<Spout>();
+                // BEFORE any send: `SetSenderFormat` stores the format `CheckSender`
+                // creates the sender with, so setting it after the first frame would
+                // leave the sender 8-bit for its whole life.
+                //
+                // 11 is DXGI_FORMAT_R16G16B16A16_UNORM, which `SpoutGL::GLDXformat`
+                // pairs with GL_RGBA16. Not called at 8-bit, so an 8-bit sender is
+                // byte-identical to before rather than merely equivalent.
+                if (out_depth_ != common::bit_depth::bit8) {
+                    sender_->SetSenderFormat(static_cast<DWORD>(11));
+                    CASPAR_LOG(info)
+                        << L"[spout_consumer] publishing 16-bit (RGBA16 / "
+                           L"DXGI_FORMAT_R16G16B16A16_UNORM). A receiver that assumes "
+                           L"RGBA8 will not read this sender.";
+                }
                 sender_->SetFrameCount(true);
                 sender_->SetSenderName(sender_name_.c_str());
             }
@@ -875,6 +925,8 @@ struct spout_consumer_impl : public core::frame_consumer
                                                             static_cast<unsigned int>(send_h),
                                                             false)) {
                             gpu_path_active_      = true;
+                            published_depth_      =
+                                out_depth_ == common::bit_depth::bit8 ? 8 : 16;
                             gpu_downscale_active_ = want_scale;
                             frames_sent_.fetch_add(1, std::memory_order_relaxed);
                             graph_->set_value("frame-time", frame_timer_.elapsed() * 1000.0);
@@ -898,6 +950,11 @@ struct spout_consumer_impl : public core::frame_consumer
 
             // ── CPU fallback path: swscale + SendImage() ──
             gpu_path_active_      = false;
+            // 8, ALWAYS, here: `Spout::SendImage` takes `unsigned char*` and its own
+            // comment says "Only RGBA, BGRA, RGB, BGR are supported". A 16-bit
+            // channel that falls back to the CPU is truncated whatever was asked
+            // for, and this is the field that says so.
+            published_depth_      = 8;
             gpu_downscale_active_ = false;
 
             // Rebuild swscale contexts when format or output dimensions change.
@@ -1020,8 +1077,14 @@ struct spout_consumer_impl : public core::frame_consumer
         // 8-bit texture. Saying so is the point. A 16-bit channel is TRUNCATED, and until
         // this field existed nothing anywhere said it.
         state["spout/channel-depth"]   = channel_depth_ == common::bit_depth::bit8 ? 8 : 16;
-        state["spout/published-depth"] = 8;
-        state["spout/depth-truncated"] = channel_depth_ != common::bit_depth::bit8;
+        // From the LIVE PATH, not from intent: the CPU fallback cannot publish more
+        // than 8 bits whatever was requested, so a constant here would claim a depth the
+        // receiver is not getting.
+        const int published_depth = published_depth_.load();
+        state["spout/published-depth"] = published_depth;
+        state["spout/requested-depth"] = out_depth_ == common::bit_depth::bit8 ? 8 : 16;
+        state["spout/depth-truncated"] =
+            (channel_depth_ != common::bit_depth::bit8) && published_depth < 16;
         state["spout/color-space"]     = space_name(channel_space_);
         state["spout/color-transfer"]  = transfer_name(channel_transfer_);
         // Neither of the two above is signalled to the receiver: Spout has nowhere to put
@@ -1059,12 +1122,17 @@ spl::shared_ptr<core::frame_consumer> create_spout_consumer(
     std::wstring name = (params.size() > 1) ? params[1] : L"";
 
     // Optional: ADD x SPOUT "Name" MAX_WIDTH 1920 MAX_HEIGHT 1080 [EVERY_NTH 2 | FPS 30]
+    // `BIT_DEPTH 16` publishes a 16-bit channel at 16 bits; `8` forces truncation even
+    // on a 16-bit channel. Absent means follow the channel, which for an 8-bit channel is
+    // 8 either way. Opt-in because an RGBA16 sender is unreadable to a receiver that
+    // assumes RGBA8.
+    const int bitdepth  = get_int_param(params, L"BIT_DEPTH");
     const int max_w     = get_int_param(params, L"MAX_WIDTH");
     const int max_h     = get_int_param(params, L"MAX_HEIGHT");
     const int every_nth = get_int_param(params, L"EVERY_NTH");
     const int fps       = get_int_param(params, L"FPS");
 
-    return spl::make_shared<spout_consumer_impl>(name, max_w, max_h, every_nth, fps);
+    return spl::make_shared<spout_consumer_impl>(name, max_w, max_h, every_nth, fps, bitdepth);
 }
 
 }} // namespace caspar::spout
