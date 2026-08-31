@@ -5,7 +5,7 @@
 > **Commands:** none of its own — reached by producer syntax on `PLAY` and by consumer name on `ADD`, with `MAX_WIDTH` / `MAX_HEIGHT` / `EVERY_NTH` / `FPS` as consumer arguments
 > **Architecture:** none, deliberately — a thin wrapper over the Spout SDK; the interesting constraint (adapter-bound shared handles) is in the guide
 > **Guide:** [`../guides/SPOUT.md`](../guides/SPOUT.md)
-> **Coverage:** `cli.py spout-pixels` — the RECEIVED picture, through a real Spout receiver: **6/6 at 1080p2500 and 6/6 at 5000x3000p50, both mixers, every cell byte-exact**, gating geometry, channel order, size, aspect and the advertised depth, with `--bit-depth` / `--color-space` / `--color-transfer`; `cli.py spout-depth` — **4/4, both mixers**, how many LEVELS survive the share; `cli.py spout-signalling` — **8/8, both mixers**, gating which path was taken, now at any raster via `--video-mode`; `cli.py preview-cost` — the publishing cost against a screen consumer
+> **Coverage:** `cli.py spout-pixels` — the RECEIVED picture, through a real Spout receiver: **6/6 at 1080p2500 and 6/6 at 5000x3000p50, both mixers, every cell byte-exact**, gating geometry, channel order, size, aspect and the advertised depth; `cli.py spout-colour` — **8/8 both mixers at 1 LSB**, colour transparency at bt2020/PQ/HLG against the closed-form model; `cli.py spout-depth` — **4/4, both mixers**, how many LEVELS survive the share; `cli.py spout-signalling` — **8/8, both mixers**, gating which path was taken, now at any raster via `--video-mode`; `cli.py preview-cost` — the publishing cost against a screen consumer
 
 Shares frames with other Spout-aware Windows applications over a shared DirectX texture, with no
 host copy. The consumer publishes a channel as a Spout sender; the producer receives another
@@ -243,12 +243,47 @@ The consumer now reports `spout/color-space`, `spout/color-transfer` and
 was rendered — but those values are *what the server rendered*, never *what the receiver
 was told*, and must not be read as signalling.
 
+### Colour is transparent at bt2020, PQ and HLG — measured, not assumed
+
+`cli.py spout-colour`, **8/8 both mixers at a 1 LSB gate**: flat patches through
+`MIXER COLORSPACE`, with Spout's output and the IMAGE consumer's **both** compared to the
+same closed-form model `conformance` uses.
+
+| conversion | Spout worst | IMAGE worst |
+| :--- | ---: | ---: |
+| `sdr/bt709 -> bt709/sdr` (control) | 0.50 LSB | 0.50 LSB |
+| `sdr/bt709 -> bt2020/sdr` | 0.68 LSB | 0.68 LSB |
+| `sdr/bt709 -> bt2020/pq` | 0.44 LSB | 0.44 LSB |
+| `sdr/bt709 -> bt2020/hlg` | 0.45 LSB | 0.45 LSB |
+
+**This settles the 122.** `spout-pixels` reports a per-cell deviation of 122 at PQ and 76 at
+HLG, and the reading on file was "probably the transfer function, not a defect" —
+*probably*, because nothing had checked. It is the transfer function: a PQ-encoded picture
+of an SDR fixture genuinely differs, and the 3x3 grid's 85-code tolerance cannot separate
+that from garbage. Spout carries the pixels intact.
+
+**Why the model and not the IMAGE consumer is the reference.** Gating on "Spout equals
+IMAGE" would have been ambiguous: per-consumer OCIO views fan out *after* the composite and
+`<working-space-composite>` moves where display encoding happens, so two consumers can
+legitimately differ and a mismatch would not say which was wrong. Both are compared to the
+model instead, which makes a failure **attributable** — Spout out while IMAGE is within
+tolerance is a Spout defect; both out is the mixer or the model and not Spout. Here they
+agree to two decimal places on every row, which is what transparent should look like.
+
+The control matters as much as the result: an identity conversion at 0.50 LSB is what makes
+the other three rows interpretable rather than a number to argue about.
+
 ### Not covered
 
-Colour accuracy at HDR. `spout-pixels` reports a per-cell deviation of 122 at PQ and 76 at
-HLG **on both mixers** — that is the transfer function, not a defect, since a PQ-encoded
-picture of an SDR fixture genuinely differs, and the 3x3 grid's tolerance cannot separate
-that from garbage. What is established at PQ and HLG is geometry and channel order.
+**Signalling, and it is not fixable** — see the table above. A pass here means the PIXELS
+are right for the channel's configuration; a receiver still cannot learn what that
+configuration was, because Spout has no field for gamut or transfer. For a controller that
+already talks to the server, `spout/color-space` and `spout/color-transfer` over OSC are the
+out-of-band answer.
+
+Also not covered: tone mapping (every row above is `none`), the auto colour path (these
+drive `MIXER COLORSPACE`, the manual one), and any conversion at 16-bit — `spout-colour`
+captures at 8 bits, where a 1 LSB gate is 1/255.
 
 ---
 ## 4b. What a preview actually costs, both ends

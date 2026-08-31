@@ -28,6 +28,44 @@ ADD 1 SPOUT MyChannel MAX_WIDTH 1920 MAX_HEIGHT 1080
 | *(name)* | the **sender name** other applications will see. Optional — omitted, it is **`CasparCG Spout`** |
 | `MAX_WIDTH` | maximum shared-texture width; the picture is **downscaled** to fit |
 | `MAX_HEIGHT` | maximum shared-texture height; likewise |
+| `BIT_DEPTH` | `16` publishes a 16-bit channel at 16 bits per component; `8` forces 8-bit even on a 16-bit channel. Omitted, the channel's own depth is followed — which for an 8-bit channel is 8 either way. **See the warning below before using 16** |
+
+### 16-bit senders, and why they are opt-in
+
+`ADD 1 SPOUT name BIT_DEPTH 16` publishes `DXGI_FORMAT_R16G16B16A16_UNORM` instead of
+8-bit BGRA. Measured through a real receiver, a 16-bit channel at 1080p: **256 distinct
+levels per component at 8-bit against 1920 at 16-bit** — 1920 being the test ramp's width,
+so every column resolved and the fixture ran out before the depth did.
+
+**Many Spout receivers assume RGBA8 and will not read a 16-bit sender at all.** That is
+why this is opt-in rather than automatic: following the channel silently would break
+working installations. Check your receiver before switching a live sender.
+
+**The CPU fallback is always 8-bit**, whatever is asked. Spout's `SendImage` accepts only
+8-bit RGBA/BGRA/RGB/BGR, so a channel that has fallen off the GPU path is truncated by the
+SDK rather than by choice. `spout/published-depth` reports what the live path actually
+sent — check it rather than assuming the request was honoured:
+
+```
+INFO 1                     # spout/published-depth, spout/requested-depth,
+                           # spout/depth-truncated
+```
+
+### What Spout cannot tell a receiver
+
+| property | reaches the receiver? |
+| :--- | :--- |
+| raster and bit depth | **yes** — carried in the sender info as a DXGI format |
+| gamut (BT.709, BT.2020) | **no** — Spout has no field for it |
+| transfer function (SDR, PQ, HLG) | **no** — Spout has no field for it |
+| mastering / MaxCLL metadata | **no** — Spout has no field for it |
+
+So an HDR channel published over Spout arrives as **pixels a receiver cannot interpret**.
+The consumer reports `spout/color-space` and `spout/color-transfer` so a controller reading
+server state can learn what was rendered, alongside `spout/color-signalled`, which is
+**always false**. Those two describe what the server rendered and never what the receiver
+was told; do not read them as signalling. A receiver that needs to know must be told out of
+band.
 
 Remove it like any consumer:
 

@@ -33,6 +33,18 @@ An optional custom vertex shader may sit next to the fragment shader with the sa
 | Filter | `PLAY 1-10 [ISF] myshader <source-producer...>` | Wraps any producer; its frame is the shader's `inputImage`. |
 | Transition | `PLAY 1-10 [ISF] myshader TRANSITION <from-source> <to-source> [frames]` | Blends `startImage`→`endImage` by `progress` over `frames` (default 25). |
 
+Any mode also takes **`BIT_DEPTH 16`**, which renders and outputs at 16 bits per component:
+
+```
+PLAY 1-10 [ISF] myshader BIT_DEPTH 16
+PLAY 1-10 [ISF] myshader BIT_DEPTH 16 mymovie   # filter mode; the option is stripped
+                                                # before the source is resolved
+```
+
+**Without it the producer is 8-bit even on a 16-bit channel**, and a smooth gradient will band. Measured on a 16-bit channel at 1080p: **256 distinct levels per component at 8-bit against 1920 at 16-bit.** The default is 8 because a producer cannot see the channel's depth — see the feature doc for why — so a 16-bit channel needs this said explicitly.
+
+It costs memory and bandwidth: the final pass target, the output texture and any CPU readback all double. Ask for it when the shader produces smooth gradients or feeds a grading chain, not by default.
+
 ![The three ISF producer modes: generator, filter, and transition](../images/isf_modes.png)
 
 Examples:

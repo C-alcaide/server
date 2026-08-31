@@ -866,8 +866,13 @@ full-resolution frame, cap the size and the rate:
 ```
 ADD 1 SPOUT preview MAX_WIDTH 256 EVERY_NTH 2
 ADD 1 SPOUT preview MAX_WIDTH 256 FPS 25
+ADD 1 SPOUT preview BIT_DEPTH 16          # 16-bit; see the warning below
 REMOVE 1 SPOUT preview
 ```
+
+`BIT_DEPTH 16` publishes a 16-bit channel at 16 bits per component instead of truncating to 8 — measured at **1920 distinct levels against 256**. It is **opt-in because many Spout receivers cannot read a 16-bit sender at all**, and the CPU fallback is 8-bit whatever is asked, since Spout's own `SendImage` takes nothing deeper. Read `spout/published-depth` from `INFO <channel>` to see what the live path actually sent.
+
+**Spout carries no gamut or transfer function.** A BT.2020 or PQ channel published this way arrives as pixels the receiver cannot interpret; `spout/color-signalled` is always false and `spout/color-space` / `spout/color-transfer` describe what the server rendered, not what the receiver was told. A 16-bit ISF source needs its own `[ISF] <shader> BIT_DEPTH 16`, since a producer cannot see the channel's depth.
 
 `MAX_WIDTH` / `MAX_HEIGHT` cap the published size preserving aspect; the reduction runs
 on the GPU on both mixers, so a small sender stays zero-copy instead of dropping to a
