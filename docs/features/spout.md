@@ -5,7 +5,7 @@
 > **Commands:** none of its own — reached by producer syntax on `PLAY` and by consumer name on `ADD`, with `MAX_WIDTH` / `MAX_HEIGHT` / `EVERY_NTH` / `FPS` as consumer arguments
 > **Architecture:** none, deliberately — a thin wrapper over the Spout SDK; the interesting constraint (adapter-bound shared handles) is in the guide
 > **Guide:** [`../guides/SPOUT.md`](../guides/SPOUT.md)
-> **Coverage:** `cli.py spout-signalling` — **8/8, both mixers**, gating which path was taken; `cli.py preview-cost` — the publishing cost against a screen consumer; **pixels verified by hand** through a real receiver, both mixers byte-exact
+> **Coverage:** `cli.py spout-pixels` — the RECEIVED picture, through a real Spout receiver: **6/6 at 1080p2500 and 6/6 at 5000x3000p50, both mixers, every cell byte-exact**, gating geometry, channel order, size and aspect; `cli.py spout-signalling` — **8/8, both mixers**, gating which path was taken, now at any raster via `--video-mode`; `cli.py preview-cost` — the publishing cost against a screen consumer
 
 Shares frames with other Spout-aware Windows applications over a shared DirectX texture, with no
 host copy. The consumer publishes a channel as a Spout sender; the producer receives another
@@ -152,19 +152,28 @@ mixers: `gpu-path` true in every case, `gpu-downscale` true exactly when a `MAX_
 the published raster 256×144 where 256 was asked for, and `every-nth` 1/2/5 including `FPS 5`
 resolving against a 25 Hz channel.
 
-**No battery receives a Spout sender**, so nothing has compared a pixel. That is not laziness: a
-CPU fallback publishes the same frame at the same size as the zero-copy path — they differ by
-3.12 ms, not by appearance — so a pixel comparison is structurally incapable of failing for the
-change that battery exists to protect. Receiving also needs `SpoutGL`, which ships wheels for
-cp38–cp313 while the 360 client's environment is Python 3.14.
+**And the picture, since 2026-08-31.** `cli.py spout-pixels` plays a fixture whose geometry is
+known — a 3x3 grid of nine colours — and receives it through a real Spout receiver in the harness's
+own process, using `SpoutGL.createOpenGL()` rather than a toolkit. It then searches the eight
+dihedral transforms crossed with {identity, R↔B exchange} for the one mapping the fixture onto what
+arrived, so a wrong picture is **named** (`flip_v`, `rot90_cw`, `identity + exchanged`) rather than
+merely failed.
 
-Coverage here needs a second process, which is why it does not exist — but it is not impossible:
-the consumer and producer in one server can be pointed at each other, publishing from channel 1
-and receiving on channel 2, and the received frame compared against the source. That is a real
-round-trip check and needs no external application.
+**6/6 at 1080p2500 and 6/6 at 5000x3000p50, both mixers** — native, `MAX_WIDTH 256` and
+`MAX_WIDTH 384`: `identity`, no exchange, and all nine cells matching to **0 codes** — which also rules out a gamma or transfer shift on the share path, since
+the geometry gate alone would not have seen one. That settles the two items this section used to
+carry as unmeasured: channel order and vertical orientation on the Vulkan path.
 
-Until that exists, treat Spout as working because it is in use, not because it is measured — and
-note that the `eUndefined` fix above was never confirmed on this path.
+This section previously said *"no battery receives a Spout sender"* and gave two reasons. **The
+first was right and is not an argument against a pixel check**: a CPU fallback publishes the same
+frame at the same size as the zero-copy path, so a pixel comparison cannot fail for the change
+`spout-signalling` protects — which is why `spout-pixels` is a separate battery gating a separate
+question rather than an extension of it. **The second was simply wrong**: it said `SpoutGL` ships
+wheels for cp38–cp313 against a Python 3.14 environment. It imports and runs on 3.14.4 on this
+machine, and had done for as long as the claim stood.
+
+Still not covered on this path: the `eUndefined` layout fix, alpha, and anything about a second
+simultaneous receiver.
 
 **What changed in favour of a battery**: `state()` returned `{}` until now, so a check could not
 have distinguished zero-copy from a correct CPU fallback even if it had compared pixels — both give
@@ -259,7 +268,9 @@ favours Spout.
 
 ## 5. Known gaps
 
-1. **No coverage.** §4 describes a self-round-trip that would need no second application.
+1. ~~**No coverage.**~~ Closed 2026-08-31 by `cli.py spout-pixels` (§4). The self-round-trip §4
+   used to propose — consumer on channel 1, producer on channel 2 — was never needed: the receiver
+   lives in the harness process. What remains uncovered is **alpha** and **two receivers at once**.
 2. **The `eUndefined` layout fix is unverified here**, only on the ProRes path.
 3. **Windows-only**, with no message explaining that on other platforms.
 4. **No documented canonical syntax** — three forms work and none is marked preferred.

@@ -1,6 +1,6 @@
 # PREVIZ — 3D pre-visualisation
 
-> **State:** shipped, unmeasured
+> **State:** shipped; **cost** measured, **picture** unmeasured
 > **Modules:** **not a module** — `src/accelerator/ogl/image/previz_renderer.cpp`, `previz_scene.h`,
 > `previz.frag` / `previz.vert`, with the Vulkan route through
 > `src/accelerator/vulkan/image/previz_texture_bridge.cpp`
@@ -8,17 +8,19 @@
 > **Architecture:** none — shares the ICVFX state the projection commands write; the two routes to
 > it are §5.3 below
 > **Guide:** [`../guides/PREVIZ_3D_MODULE.md`](../guides/PREVIZ_3D_MODULE.md)
-> **Coverage:** **none** — no harness battery drives any of these
+> **Coverage:** `cli.py preview-cost --arm previz --arm previz_spout --arm previz_screen` — what previz costs the channel, at 1080p50 and at the VP workload; the floor those shares are measured against is `cli.py raster-capacity`. **No picture check of any kind** — see §4
 
 Loads a 3D scene, maps channel output onto meshes in it, and renders a camera view of the result —
 so a projection design can be checked without the venue. Screens, presets and camera positions are
 addressable by name at runtime.
 
-> **Read §4 first.** This is the largest **unmeasured** surface in the fork: 13 commands, none of
-> them exercised by any battery. That combination — undocumented *and* undriven — is exactly what
-> ICVFX was before an audit found a live colour defect in it, and this document exists because that
-> correlation was measured rather than assumed. **This file closed the documented half**; the
-> unmeasured half is unchanged.
+> **Read §4 first.** This is the largest surface in the fork with **no picture check**: 13 commands,
+> five of them now driven by `preview-cost`'s previz arms and **none of them checked against a
+> rendered pixel**. That combination — undocumented *and* undriven — is exactly what ICVFX was
+> before an audit found a live colour defect in it, and this document exists because that
+> correlation was measured rather than assumed. **This file closed the documented half.** Cost
+> coverage arrived on 2026-08-31 and closes none of the ICVFX-class gap: a battery that gates on
+> timing cannot see a channel exchange.
 
 ---
 
@@ -198,10 +200,20 @@ and nothing moves.
 
 ## 4. Verification — what is measured, and what is not
 
-**Nothing.** No battery in the harness references PREVIZ. There is no picture check, no parity
-check between mixers, and no check that a mapped mesh receives the channel's output at all.
+**Cost is measured. The picture is not.** `preview-cost`'s three previz arms drive `PREVIZ SCENE`,
+`MAP`, `SHOW`, `GRID` and `WIREFRAME` against a generated scene (`core/previz_scene.py` — four
+named quads around a stage) and report what previz costs the channel's tick; that is where the
+figures above come from. **They gate on timing and never look at a pixel.** So there is still no
+picture check, no parity check between mixers, and no check that a mapped mesh receives the
+channel's output at all — a previz that rendered the wrong channel onto every mesh, or nothing at
+all, would pass every arm.
 
-That is recorded as the finding it is rather than as a to-do. The measured correlation from the
+This section read *"Nothing. No battery in the harness references PREVIZ"* until 2026-08-31, and
+was already false when the cost figures above were written into this file. The correction is worth
+keeping visible: **a cost battery is not coverage of a feature**, and the two halves went stale in
+opposite directions in one sitting.
+
+The remaining gap is recorded as the finding it is rather than as a to-do. The measured correlation from the
 2026-08-26 audit: of the fork's 58 AMCP commands, the ones carrying defects were the ones that
 were both undocumented and undriven. ICVFX had a red/blue exchange on the OpenGL mixer that
 survived because no battery drove it and because the natural way to test a white balance — equal
@@ -221,7 +233,8 @@ What a first battery should do, in the order that would have caught the ICVFX cl
 
 ## 5. Known gaps
 
-1. **No coverage at all** — see §4 for the first three checks worth writing.
+1. **No picture coverage at all** — cost is measured (§4), and nothing anywhere checks that previz
+   renders the right thing. See §4 for the first three checks worth writing.
 2. **The renderer is OpenGL on both mixers, and the parity that implies is unmeasured.** This item
    read *"OpenGL-only — either the Vulkan mixer grows the same bridge or the commands should
    refuse"*; the bridge exists (`vulkan/image/image_mixer.cpp:1204-1254`). A Vulkan channel

@@ -1,6 +1,44 @@
 CasparVP — Unreleased
 ==========================================
 
+### Fixed: a downscaled Spout sender was vertically squashed, and missed the width it was asked for
+
+**This changes rendered output for an existing config**, but only at a raster where the requested
+width does not divide the channel's evenly. `ADD n SPOUT name MAX_WIDTH 256` on a **5000x3000**
+channel published **256x152** where the aspect-correct height is 153.6; it now publishes **256x154**.
+Every 16:9 case is **bit-identical to before** — 1920 or 3840 to 256 gives exactly 144.00 either way,
+verified through a real receiver on both mixers before and after.
+
+Two defects, one cause. `spout_consumer.cpp` computed the output size by truncating and then
+rounding down again:
+
+```cpp
+const int raw_h = static_cast<int>(sh * scale);   // 153.6 -> 153
+out_h_ = (std::max)(2, raw_h - (raw_h % 2));      // 153   -> 152
+```
+
+* **A vertical squash of up to 1.17 %**, always downward: **1.04 %** at 5000x3000 (152 against
+  153.6), **1.15 %** at 2600x1500, **1.17 %** at 2048x858 DCI scope. On an LED surface that is a
+  preview whose aspect does not match the wall it represents.
+* **The requested cap itself missed by two pixels.** `MAX_WIDTH 384` on a 5000-wide channel gave
+  **382**: `384/5000` has no exact binary representation, so `5000 * 0.0768` lands a hair below 384,
+  the truncation took 383 and the even-rounding took 382.
+
+Now the **nearest** even value, with the cap re-imposed afterwards — rounding to nearest can cross
+an odd cap, and `MAX_WIDTH 255` would otherwise round up to 256. The error is at most one pixel and
+centred rather than always downward.
+
+**Why nothing caught it, which is the more useful half.** `spout-signalling` gated `out-width` and
+**never `out-height` at all**, and it ran only at 1080p2500 — where the true height is already an
+even integer, so both defects are arithmetically invisible. Two independent reasons the same blind
+spot held. Found by `cli.py spout-pixels`, a new battery that plays a 3x3 grid whose geometry is
+known and receives it through a real Spout receiver; the height/aspect gate and a `--video-mode`
+on `spout-signalling` were added in the same change. The measurement that matters beside the fix:
+**12/12 after the fix — 6/6 at 1080p2500 and 6/6 at 5000x3000p50, both mixers, native and both
+downscales — every one of the nine cells byte-exact, `identity`, no red/blue exchange** — so the squash was the only thing wrong with
+that path, and the channel order and vertical orientation the consumer's docs listed as unmeasured
+are now measured and correct.
+
 ### Fixed: previz showed every mapped screen with red and blue exchanged
 
 A channel playing `#20A0C0` appeared on its previz screen as `#BE9E1E` — the same colour with

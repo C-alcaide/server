@@ -63,6 +63,7 @@
 #include <vector>
 #include <iostream>
 #include <algorithm>
+#include <cmath>          // std::lround, for the output-size rounding below
 #include <iterator>
 #include <cstring>
 #include <thread>
@@ -545,10 +546,32 @@ struct spout_consumer_impl : public core::frame_consumer
             double scale = 1.0;
             if (max_w_ > 0 && sw > max_w_) scale = static_cast<double>(max_w_) / sw;
             if (max_h_ > 0 && sh * scale > max_h_) scale = static_cast<double>(max_h_) / sh;
-            const int raw_w = static_cast<int>(sw * scale);
-            const int raw_h = static_cast<int>(sh * scale);
-            out_w_ = (std::max)(2, raw_w - (raw_w % 2));
-            out_h_ = (std::max)(2, raw_h - (raw_h % 2));
+            // NEAREST even, not truncate-then-round-down. Two defects came from the
+            // latter, and both were invisible at 16:9 with a width that divides the
+            // channel's evenly -- which is every case the Spout batteries covered until
+            // `spout-pixels` ran at 5000x3000p50 on 2026-08-31.
+            //
+            //   * `MAX_WIDTH 256` on a 5000x3000 channel: the true height is 153.6, and
+            //     `int()` gave 153, then `- (153 % 2)` gave **152** -- a 1.04% vertical
+            //     SQUASH. At 2600x1500 it was 1.15%, at 2048x858 1.17%. Measured through
+            //     a real Spout receiver on both mixers.
+            //   * `MAX_WIDTH 384` on the same channel produced **382**: 384/5000 is not
+            //     exactly representable, so `5000 * 0.0768` lands just below 384, `int()`
+            //     took 383 and the even-rounding took 382. The requested cap itself was
+            //     missed by two pixels.
+            //
+            // `2 * lround(v / 2)` is the even integer nearest the true ratio, so the
+            // error is at most one pixel and is centred rather than always downward. The
+            // cap is then re-imposed, because rounding to nearest can cross an ODD cap
+            // (`MAX_WIDTH 255` would round to 256).
+            const auto nearest_even_within = [](double v, int cap) {
+                int e = 2 * static_cast<int>(std::lround(v / 2.0));
+                if (cap > 0 && e > cap)
+                    e -= 2;
+                return (std::max)(2, e);
+            };
+            out_w_ = nearest_even_within(sw * scale, max_w_);
+            out_h_ = nearest_even_within(sh * scale, max_h_);
         } else {
             out_w_ = format_desc.width;
             out_h_ = format_desc.height;
