@@ -5,7 +5,7 @@
 > **Commands:** 2 (`GST INFO`, `GST LIST`)
 > **Architecture:** none, deliberately — its GPU route reuses vulkan::d3d11_import_bridge, covered by GPU_INTEROP_ARCHITECTURE.md
 > **Guide:** [`../guides/GSTREAMER_GUIDE.md`](../guides/GSTREAMER_GUIDE.md)
-> **Coverage:** `gstreamer`, `gst-consumer-cost`, `gst-dll-probe`, `coexistence`
+> **Coverage:** `gstreamer`, `gst-consumer-cost`, `gst-dll-probe`, `coexistence`, `source-motion`, `raster-capacity` — the last two drive the producer as a generative load source; see below for the two fixture defects that made a ladder pass while a third of its frames were repeats
 
 Plays and records through GStreamer pipelines, so anything GStreamer can source — SRT, RTSP,
 NDI via a plugin, hardware capture — becomes a producer, and any GStreamer sink becomes a consumer.
@@ -15,6 +15,46 @@ Operator detail is in [`../guides/GSTREAMER_GUIDE.md`](../guides/GSTREAMER_GUIDE
 module's own `src/modules/gstreamer/README.md`. This document is the state and the decisions.
 
 ---
+
+## The producer as a load source, and the two things that made it lie
+
+Added 2026-08-31, for `raster-capacity --producer gst`: `videotestsrc` through the
+GStreamer producer is real frames changing with no file, no codec and no disk, which is
+what a capacity ladder needs and a flat colour cannot give. Two defects in the fixture had
+to be fixed first, and both produced a **passing** ladder.
+
+**The pixel format must be pinned, or the measurement is of `videoconvert`.** Without
+`format=BGRA` in the caps, `videotestsrc` emits its native I420 and `videoconvert`
+converts to what the appsink negotiated — RGBA, confirmed from the server log as
+`pixel_format 2 (1 plane, 4 stride)`, `linesize 20000`. At four channels of 5000x3000p50
+that conversion starved the producer on **~1800 of 5010 ticks per channel**: the channel
+repeated the previous picture a third of the time while reporting **0 late frames and a
+period of exactly 20.00 ms**. Pinning BGRA makes `videotestsrc` generate the format
+directly and `videoconvert` a passthrough; 1080p50 x 4 then starves on **1 tick in
+~20040**.
+
+**Starvation is only visible in `gstreamer/starved`.** A log grep found nothing on the
+run above — it is a guess at what the server prints. The producer already publishes the
+direct symptom, and `gst_producer.cpp` says why `received` cannot substitute:
+
+> Whether the pipeline is keeping ahead of the channel, which "frames received" cannot
+> say: a source delivering 25 fps into a 50 fps channel still counts every frame it sent.
+> `starved` counts ticks that found the queue empty and had to repeat the last picture —
+> the direct symptom — and `queue_peak` says how much slack there was when it did not.
+
+**What the fixed fixture then established.** Four channels, BGRA, `pattern=ball`, both
+mixers: **1080p5000 holds** (1 repeated tick in ~20040); **3840x2160p50 starves at
+21 %/channel** and **5000x3000p50 at 32 %/channel**. So on this rig a CPU-generated
+source cannot saturate the bus above 1080p — producing the frames costs more than
+uploading them — and any ladder above 1080p driven this way is measuring the fixture. The
+evidence that it is the CPU side is the controlled change: removing one colour conversion
+took 1080p from starving to clean.
+
+**Not established:** whether four channels at 5000x3000p50 hold the tick with real
+frames. Both generative sources fail for their own reasons — this one starves, and the ISF
+generator induces a raster-independent ~1.4–5.4 % late-frame rate — so the question is
+open and a GPU-side source (a GPU-direct decoded file, or `route://`) is what would answer
+it.
 
 ## 1. What is implemented today
 
