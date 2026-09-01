@@ -47,7 +47,9 @@ FUNCTION (casparcg_add_library TARGET)
 		ADD_DEPENDENCIES (${TARGET} ${CASPARCG_EXTERNAL_PROJECTS})
 	endif()
 
-	target_compile_options(${TARGET} PRIVATE -Wno-error=deprecated) # C++20 is required, but has some flagged deprecations
+	if (NOT MSVC)
+		target_compile_options(${TARGET} PRIVATE -Wno-error=deprecated) # C++20 is required, but has some flagged deprecations
+	endif()
 
 ENDFUNCTION ()
 

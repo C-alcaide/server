@@ -288,8 +288,9 @@ struct oal_consumer : public core::frame_consumer
             swr_init(swr_.get());
 #endif
 
-            auto num_silence = delay_.in_frames(format_desc_.fps);
-            num_silence      = std::clamp<int>(num_silence, 1, format_desc_.fps);
+            auto num_silence       = delay_.in_frames(format_desc_.fps);
+            auto max_silence_count = static_cast<int>(format_desc_.fps);
+            num_silence            = std::clamp<int>(num_silence, 1, max_silence_count);
 
             CASPAR_LOG(info) << print() << " Latency: " << num_silence << " frames";
 
@@ -351,7 +352,7 @@ struct oal_consumer : public core::frame_consumer
                              audio_out.size() * sizeof(std::int16_t),
                              format_desc_.audio_sample_rate);
                 alSourceQueueBuffers(source_, 1, &buf);
-                free_size = free_.size();
+                free_size = static_cast<double>(free_.size());
 
                 ALenum state = 0;
                 alGetSourcei(source_, AL_SOURCE_STATE, &state);
