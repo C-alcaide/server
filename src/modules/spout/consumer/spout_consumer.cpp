@@ -1223,7 +1223,13 @@ spl::shared_ptr<core::frame_consumer> create_spout_consumer(
                             L"this consumer gets the channel view.";
     const int max_w     = get_int_param(params, L"MAX_WIDTH");
     const int max_h     = get_int_param(params, L"MAX_HEIGHT");
-    const int every_nth = get_int_param(params, L"EVERY_NTH");
+    // Default 1, matching what casparcg.config's reference block declares and what the
+    // consumer effectively does. It read 0 and relied on `std::max(1, ...)` in the
+    // constructor to turn that into 1, which meant the code's stated default and the
+    // documented one disagreed -- caught by the harness's config-reference lint. The
+    // clamp stays, but now it guards against an operator typing 0 rather than supplying
+    // the default.
+    const int every_nth = get_int_param(params, L"EVERY_NTH", 1);
     const int fps       = get_int_param(params, L"FPS");
 
     return spl::make_shared<spout_consumer_impl>(name, max_w, max_h, every_nth, fps,
@@ -1242,7 +1248,11 @@ spl::shared_ptr<core::frame_consumer> create_preconfigured_spout_consumer(
     const auto name      = ptree.get(L"name", std::wstring(L"CasparCG Spout"));
     const int  max_w     = ptree.get(L"max-width", 0);
     const int  max_h     = ptree.get(L"max-height", 0);
-    const int  every_nth = ptree.get(L"every-nth", 0);
+    // 1, not 0: casparcg.config's reference block declares the default as 1, and the
+    // constructor's `std::max(1, ...)` made 0 behave as 1 anyway -- so the stated default
+    // and the real one disagreed. The harness's config-reference lint caught it, which is
+    // what that check is for: the reference block is where an operator reads the default.
+    const int  every_nth = ptree.get(L"every-nth", 1);
     const int  fps       = ptree.get(L"fps", 0);
     const int  bitdepth  = ptree.get(L"bit-depth", 0);
 
