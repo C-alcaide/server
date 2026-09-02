@@ -1203,7 +1203,12 @@ uint32_t nvapi_helpers::resolve_display_id(int, int) { return 0; }
 
 bool nvapi_helpers::supports_hdr_output(uint32_t) { return false; }
 
-bool nvapi_helpers::enable_hdr_output(uint32_t, int, int) { return false; }
+// Five parameters, matching the header. The stub still took three: it was not updated when
+// `min_dml`/`max_dml` were added to the declaration -- the change the header's own comment
+// describes as "they were previously not passed at all" -- because only the Windows
+// definition is ever compiled. Default arguments are declared in the header only, as they
+// must be.
+bool nvapi_helpers::enable_hdr_output(uint32_t, int, int, double, double) { return false; }
 
 bool nvapi_helpers::disable_hdr_output(uint32_t) { return false; }
 

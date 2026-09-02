@@ -614,7 +614,19 @@ bool                     has_colorspace(const std::string&) { return false; }
 bool                     has_display_view(const std::string&, const std::string&) { return false; }
 bool                     has_look(const std::string&) { return false; }
 bool                     build_input_transform(const std::string&, gpu_shader&, gpu_target) { return false; }
-bool build_display_transform(const std::string&, const std::string&, gpu_shader&, gpu_target) { return false; }
+// FIVE parameters, matching the declaration. The stub still took four: it was not updated
+// when the `looks` parameter was added, and only the CASPAR_ENABLE_OCIO definition above is
+// compiled on Windows, where ENABLE_OCIO defaults ON. So nothing ever built this arm, and
+// `ENABLE_OCIO=OFF` did not LINK -- `ocio_display_command` in AMCPCommandsImpl called the
+// five-argument form and nothing defined it.
+//
+// That also corrects a claim in docs/audits/PORTABILITY_LINUX_DOCKER_2026-09-01.md: a Linux
+// build did not "quietly lose OCIO and degrade to 501", it failed at link. The 501 path is
+// real, but it was unreachable because the binary could not be produced.
+bool build_display_transform(const std::string&, const std::string&, gpu_shader&, gpu_target, const std::string&)
+{
+    return false;
+}
 
 #endif // CASPAR_ENABLE_OCIO
 
