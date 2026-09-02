@@ -53,6 +53,24 @@ PLAY 1-1 CUDA_NOTCHLC FILE "clip.mov" DEVICE 0 LOOP
 The long form takes `FILE`, an optional `DEVICE <index>` to pin the CUDA device, and the usual
 `LOOP`.
 
+**`DEVICE` must name the GPU the mixer runs on, and is now refused when it does not.** The
+decode target is a texture *exported by the mixer's device*, and CUDA can only import it on the
+GPU that owns it — so pointing `DEVICE` elsewhere does not move the decode to the other card, it
+costs the zero-copy path. Until 2026-09-02 nothing checked, and the two mixers failed differently:
+the Vulkan path threw a bare CUDA error from `cudaImportExternalMemory` naming neither GPU nor the
+parameter, and the OpenGL path caught the equivalent failure and dropped **silently to host copy** —
+the show continuing at a fraction of the throughput with one error line as the only evidence.
+
+The Vulkan mismatch is now refused at construction with a message naming both GPUs and the index
+to use, matching CUDA and Vulkan by **device UUID** (`cuda_device_for_vk`, the same comparison
+`remotewall_producer` uses). The OpenGL mismatch **warns and still falls back**, because the
+fallback works and making it a refusal is a behaviour change with no measurement behind it.
+
+> **CUDA's device indices are not `nvidia-smi`'s.** With `CUDA_DEVICE_ORDER` unset the runtime
+> sorts FASTEST_FIRST, so on a box with a Quadro P4000 and an RTX A4000 `nvidia-smi` numbers them
+> 0 and 1 while CUDA numbers them **1 and 0**. Read the index out of the server's own startup
+> log, which enumerates CUDA devices in CUDA's order, rather than from `nvidia-smi`.
+
 ---
 
 ## 3. Design decisions, and what they cost
@@ -69,7 +87,37 @@ independently; `hap_producer.cpp:23` records the contrast explicitly.
 
 **Slot depth is 5** and the buffers are sized from the file's own maxima
 (`max_compressed`/`max_uncompressed`), logged at startup. At 12K that is the dominant VRAM cost of
-the module.
+the module — **~26 bytes per pixel per slot**, read out of `notchlc_decode_ctx_create`:
+
+| buffer | bytes/pixel |
+| :--- | ---: |
+| `d_y` / `d_u` / `d_v` / `d_a`, uint16 | 8 |
+| `d_bgra16` | 8 |
+| the exported VK/GL texture | 8 |
+| `d_y_bit_widths` + `d_y_bit_offsets` | 0.5 |
+| `d_uncompressed` (probe-derived, so file-dependent) | ~2 |
+
+Measured against the 12K asset, whose own startup line reports `max_uncompressed=108 MB` at
+**12288×6144**: 604 + 604 + 604 + 38 + 108 = **1958 MB a slot, 9.8 GB for the five**, plus ~1.8 GB
+of pinned host memory. On a 16 GB card (14.89 GB free) one producer of that raster fits and **two do
+not** at 19.6 GB — so a `LOADBG`/`PLAY` onto a layer already playing 12K NotchLC builds the incoming
+producer while the outgoing still holds its pool, and is refused. The refusal now names the raster,
+the per-slot cost, the slot count and the free VRAM, because `cudaGetErrorString` alone ("out of
+memory") is not a diagnosis.
+
+> **That refusal has never been printed by a test.** `producer-swap --clips 12k` is the closest
+> coverage and cannot reach it: it alternates **ProRes with NotchLC**, peaking near 4.5 + 9.8 =
+> 14.3 GB, which *just* fits — so it passes without ever exhausting VRAM. Two concurrent NotchLC
+> producers are the case, and nothing drives that (§5 gap 3).
+
+**The slot count is deliberately NOT adaptive**, unlike `cuda_prores`, which picks 7 above 25 MP
+and 5 below. A greedy allocator that stops at the first `cudaErrorMemoryAllocation` and continues
+with fewer slots exists on an abandoned branch (`origin/feature/cuda-prores`) and was **declined
+on 2026-09-02**: it trades a refusal an operator can see for a degradation they cannot, whether
+this pipeline holds rate on two or three slots is unmeasured, and §5 gap 3 is why — there is no
+`notchlc` route in `playback-scaling` to judge it with. `prores_producer.cpp` also records that
+raising slot depth there did **not** move the channel ceiling, and that the instrument's
+resolution is ±2 channels. Revisit when a `notchlc` scaling route exists, not before.
 
 ---
 

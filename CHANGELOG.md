@@ -1,6 +1,58 @@
 CasparVP — Unreleased
 ==========================================
 
+### Changed: `CUDA_NOTCHLC ... DEVICE <n>` is refused when it is not the mixer's GPU
+
+**This changes behaviour for an existing config, on the Vulkan mixer only**, and the outcome it
+replaces was already a failure. The decode target is a texture exported by the *mixer's* device, so
+CUDA can only import it on the GPU that owns it — `DEVICE` pointing elsewhere never moved the decode
+to the other card. What it did instead differed by mixer, and neither was legible:
+
+* **Vulkan** — `cudaImportExternalMemory` failed inside `CudaVkTexture`, which has no `try`/`catch`,
+  so the `PLAY` was already refused. The message was a bare CUDA error naming neither GPU nor the
+  parameter responsible. It is now refused at construction with both GPU names and the index to use.
+* **OpenGL** — `cudaGraphicsGLRegisterImage` failed, `read_loop` caught it and dropped **silently to
+  host copy**: the show continued at a fraction of the throughput with one error line as the only
+  evidence. This still falls back, and now **warns** first, naming the mixer's device. Left as a
+  warning deliberately — the fallback works, and promoting it to a refusal is a behaviour change
+  with no measurement behind it.
+
+CUDA and Vulkan are matched by **device UUID**, not by index: with `CUDA_DEVICE_ORDER` unset the
+CUDA runtime sorts FASTEST_FIRST, so on this box's Quadro P4000 + RTX A4000 pair `nvidia-smi`
+numbers them 0,1 and CUDA numbers them **1,0**. Any code comparing indices across the two APIs is
+comparing different orderings. The comparison reuses `remotewall_producer`'s.
+
+Two other changes ride along, neither altering behaviour on any working path:
+
+* **The destructor now calls `cudaSetDevice(cuda_device_)` before freeing.** The current CUDA device
+  is per-thread state; the constructor and `read_loop` both set it and the destructor did not, while
+  running on neither of those threads. `notchlc_decode.h` already stated the contract and this was
+  the one caller breaking it. Reachable on the OpenGL mixer with a mismatched `DEVICE`, where the
+  host-copy fallback keeps the producer alive with its pool on device *n* and the frees would have
+  targeted device 0 — leaking the whole pool, ~10 GB at 12K. A no-op on the default path.
+* **A slot-allocation failure now says what did not fit** — the raster, the ~2.0 GB per-slot cost at
+  12288×6144, the slot count, the free VRAM and the device name, instead of `cudaGetErrorString`'s
+  "out of memory" alone. At 12K this is the module's most likely failure and the message named none
+  of the numbers needed to choose between a smaller raster, a bigger card and a different `DEVICE`.
+
+**Verified:** `producer-swap --mixer vulkan --clips 12k --swaps 4` — **4/4 swaps, no fatal line**,
+NotchLC starting twice and reporting `Using CUDA-Vulkan zero-copy interop (5 per-slot textures)`,
+which is what confirms the new `DEVICE` guard does not false-positive on the default path.
+
+That run also **measured the per-slot cost** rather than leaving it derived. The 12K asset logs
+`max_uncompressed=108 MB` at 12288×6144, giving 604 + 604 + 604 + 38 + 108 = **1958 MB a slot and
+9.8 GB for the five** — the figure the new message prints.
+
+**What it does not cover.** `producer-swap`'s `12k` arm is the nearest thing to the failure these
+messages describe and it cannot reach it: it alternates **ProRes with NotchLC**, so the overlap peaks
+near 4.5 + 9.8 = 14.3 GB against 14.89 GB free and *just fits* — which is why it passes. Two
+concurrent **NotchLC** producers would need 19.6 GB and are what the refusal is for, and no battery
+drives that; `playback-scaling` has no `notchlc` route (`docs/features/cuda-notchlc.md` §5 gap 3).
+So the refusal text itself has never been printed by a test. The `DEVICE`-mismatch paths are likewise
+untested — argued from the source and from the CUDA/Vulkan UUID pairing, with the index inversion
+confirmed against both a `cudart` probe and the server's own startup log. A greedy allocator that
+continues with fewer slots was considered and **declined** — see the same doc's §3 for why.
+
 ### Fixed: a downscaled Spout sender was vertically squashed, and missed the width it was asked for
 
 **This changes rendered output for an existing config**, but only at a raster where the requested

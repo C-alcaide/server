@@ -89,6 +89,7 @@
 #include <stdexcept>
 #include <string>
 #include <cmath>
+#include <cstring>
 #include <thread>
 
 namespace caspar { namespace cuda_notchlc {
@@ -229,6 +230,48 @@ struct notchlc_producer_impl final : public core::frame_producer
 
     mutable core::monitor::state              monitor_state_;
 
+#ifdef ENABLE_VULKAN
+    /// The CUDA device index whose UUID matches the Vulkan mixer's physical GPU, or -1 if the
+    /// match cannot be made. SAME UUID COMPARISON AS `remotewall_producer::cuda_device_for_vk`,
+    /// deliberately -- `cudaDeviceProp::uuid` and `VkPhysicalDeviceIDProperties::deviceUUID` are
+    /// the same 16 bytes for the same physical GPU, and that is the only identifier the two APIs
+    /// agree on. CUDA's own index order is NOT it: with `CUDA_DEVICE_ORDER` unset the runtime
+    /// sorts FASTEST_FIRST, so on a P4000 + A4000 box `nvidia-smi` numbers them 0,1 and CUDA
+    /// numbers them 1,0. Anything comparing indices across the two APIs is comparing different
+    /// orderings.
+    int cuda_device_for_vk() const
+    {
+        if (!vk_device_)
+            return -1;
+
+        vk::PhysicalDevice             phys = vk_device_->getVkPhysicalDevice();
+        vk::PhysicalDeviceIDProperties idp{};
+        vk::PhysicalDeviceProperties2  p2{};
+        p2.pNext = &idp;
+        phys.getProperties2(&p2);
+
+        int count = 0;
+        if (cudaGetDeviceCount(&count) != cudaSuccess)
+            return -1;
+        for (int i = 0; i < count; ++i) {
+            cudaDeviceProp prop{};
+            if (cudaGetDeviceProperties(&prop, i) != cudaSuccess)
+                continue;
+            if (std::memcmp(prop.uuid.bytes, idp.deviceUUID.data(), 16) == 0)
+                return i;
+        }
+        return -1;
+    }
+#endif
+
+    static std::string cuda_device_name(int index)
+    {
+        cudaDeviceProp prop{};
+        if (index < 0 || cudaGetDeviceProperties(&prop, index) != cudaSuccess)
+            return "device " + std::to_string(index);
+        return std::string(prop.name) + " (CUDA device " + std::to_string(index) + ")";
+    }
+
     notchlc_producer_impl(const std::wstring& path, int cuda_device, bool loop,
                           bool pingpong, int color_matrix_override, bool straight_alpha,
                           int64_t in_frame, int64_t out_frame, double initial_speed,
@@ -254,6 +297,38 @@ struct notchlc_producer_impl final : public core::frame_producer
             ogl_device_ = ogl_mixer->get_ogl_device();
         }
         format_desc_ = deps.format_desc;
+
+        // ── DEVICE must be the mixer's GPU, and refusing is the honest answer ──
+        // `DEVICE <index>` is an operator-facing parameter (`docs/features/cuda-notchlc.md` §2)
+        // and nothing used to check it against the GPU the mixer runs on. Pointing it elsewhere
+        // does not decode on the other card -- it costs the zero-copy path, because the texture
+        // this producer decodes into is exported by the MIXER's device and CUDA can only import
+        // it on the GPU that owns it:
+        //
+        //   Vulkan mixer -> `cudaImportExternalMemory` fails inside `CudaVkTexture`, which has no
+        //                   try/catch, so the PLAY was already refused -- with a bare CUDA error
+        //                   naming neither GPU nor the parameter that caused it.
+        //   OpenGL mixer -> `cudaGraphicsGLRegisterImage` fails, `read_loop` catches it and
+        //                   silently drops to the host-copy path. The show goes on at a fraction
+        //                   of the throughput and the only evidence is one error line.
+        //
+        // So this REFUSES rather than clamping to the right device. Clamping would ignore an
+        // explicit operator parameter and leave the config looking correct; refusing names both
+        // GPUs and the index to use instead. Only the Vulkan mixer can be checked here -- the
+        // OpenGL equivalent needs a current GL context and so lives in `read_loop`.
+#ifdef ENABLE_VULKAN
+        if (use_vulkan_) {
+            const int mixer_dev = cuda_device_for_vk();
+            if (mixer_dev >= 0 && mixer_dev != cuda_device_)
+                CASPAR_THROW_EXCEPTION(std::runtime_error(
+                    "[notchlc_producer] DEVICE " + std::to_string(cuda_device_) + " is "
+                    + cuda_device_name(cuda_device_) + ", but the Vulkan mixer runs on "
+                    + cuda_device_name(mixer_dev)
+                    + ". The decode target is exported by the mixer's GPU and cannot be imported "
+                      "on another one -- use DEVICE " + std::to_string(mixer_dev)
+                    + ", or omit DEVICE to accept the default."));
+        }
+#endif
 
         cudaSetDevice(cuda_device_);
 
@@ -320,9 +395,45 @@ struct notchlc_producer_impl final : public core::frame_producer
             cudaError_t e = notchlc_decode_ctx_create(&slots_[i],
                 frame_info_.width, frame_info_.height,
                 max_compressed, max_uncompressed);
-            if (e != cudaSuccess)
+            if (e != cudaSuccess) {
+                // ── SAY WHAT DID NOT FIT, because "out of memory" is not a diagnosis ──
+                // This used to report `cudaGetErrorString(e)` alone. At 12K that is the single
+                // most likely failure in the module and the message named neither the raster,
+                // the per-slot cost, how many slots were wanted, nor how much VRAM was left --
+                // so the one number an operator needs to decide between a smaller raster, a
+                // bigger card and a different DEVICE was absent from the only line they get.
+                //
+                // Per-slot device bytes. The first four come from `notchlc_decode_ctx_create`;
+                // the exported texture is allocated by THIS constructor a few lines below and so
+                // is not yet held when this throws -- it is counted anyway, because the figure an
+                // operator needs is what the producer requires, not what it had taken when it
+                // gave up.
+                //   d_y/d_u/d_v/d_a  4 x 2 B/px = 8      d_bgra16          4 x 2 B/px = 8
+                //   bit widths/offsets   0.5 B/px        d_uncompressed  max_uncompressed
+                //   exported VK/GL texture  8 B/px
+                // Measured against the 12K asset (`max_uncompressed=108 MB` from its own log):
+                // 604 + 604 + 604 + 38 + 108 = 1958 MB a slot, 9.8 GB for the five.
+                //
+                // NOT changed to a partial allocation that continues with fewer slots. That
+                // trades a refusal an operator can see for a degradation they cannot, and
+                // whether this pipeline sustains rate on two or three slots is unmeasured --
+                // `playback-scaling` has no notchlc route (`docs/features/cuda-notchlc.md` §5).
+                const size_t n_pix     = (size_t)frame_info_.width * frame_info_.height;
+                const size_t per_slot  = n_pix * 24 + n_pix / 2 + max_uncompressed;
+                size_t       free_vram = 0, total_vram = 0;
+                cudaMemGetInfo(&free_vram, &total_vram);
+
+                const auto mb = [](size_t b) { return std::to_string(b / (1024 * 1024)) + " MB"; };
                 CASPAR_THROW_EXCEPTION(std::runtime_error(
-                    std::string("[notchlc_producer] notchlc_decode_ctx_create: ") + cudaGetErrorString(e)));
+                    std::string("[notchlc_producer] notchlc_decode_ctx_create failed on slot ")
+                    + std::to_string(i) + " of " + std::to_string(num_slots_) + ": "
+                    + cudaGetErrorString(e) + " -- " + std::to_string(frame_info_.width) + "x"
+                    + std::to_string(frame_info_.height) + " needs ~" + mb(per_slot)
+                    + " a slot, ~" + mb(per_slot * (size_t)num_slots_) + " for "
+                    + std::to_string(num_slots_) + "; " + mb(free_vram) + " free of "
+                    + mb(total_vram) + " on " + cuda_device_name(cuda_device_)
+                    + ". A second producer of this raster does not fit beside the first."));
+            }
             slots_init_[i] = true;
         }
 
@@ -455,6 +566,24 @@ struct notchlc_producer_impl final : public core::frame_producer
         if (lz4_thread_c_.joinable()) lz4_thread_c_.join();
         if (lz4_thread_d_.joinable()) lz4_thread_d_.join();
         if (read_thread_.joinable())  read_thread_.join();
+
+        // ── SET THE DEVICE BEFORE FREEING, or the frees land on the wrong GPU ──
+        // The current CUDA device is per-thread state. The constructor and `read_loop` both
+        // call `cudaSetDevice(cuda_device_)`; this destructor did not, and it runs on neither
+        // of those threads -- core destroys producers on a DEDICATED ASYNCHRONOUS DESTRUCTION
+        // THREAD ("cuda_notchlc[...] Destroying on asynchronous destruction thread." in the
+        // server log), which has never selected a device, so CUDA uses index 0.
+        //
+        // `notchlc_decode.h` already states the contract ("Must be called from the CUDA device
+        // thread (cudaSetDevice already called)") and this was the one caller breaking it.
+        //
+        // Reachable on the OPENGL mixer with an explicit `DEVICE <n>` that is not the mixer's
+        // GPU: the constructor guard above cannot see that case, `read_loop` falls back to
+        // host copy and keeps running, and the slots stay on device n -- so these frees would
+        // target device 0 and leak the whole pool, ~10 GB at 12K. On the default path
+        // `cuda_device_` is 0 and this is a no-op, which is why it costs nothing to be right.
+        cudaSetDevice(cuda_device_);
+
         for (int i = 0; i < num_slots_; i++) {
             cudaFreeHost(h_bgra16_[i]);
             if (slots_init_[i]) notchlc_decode_ctx_destroy(&slots_[i]);
@@ -802,6 +931,26 @@ struct notchlc_producer_impl final : public core::frame_producer
                                   << L" -- switching to host-copy fallback";
                 use_host_copy_ = true;
             } else {
+                // ── NAME THE MISMATCH BEFORE IT COSTS THE INTEROP ──
+                // The Vulkan guard in the constructor has no OpenGL equivalent there, because
+                // `cudaGLGetDevices` needs a current GL context and the constructor has none.
+                // Here one is current, so this is the first point the question can be asked.
+                //
+                // Warning rather than a throw, deliberately: the fallback below already keeps
+                // the producer running, and turning a working-but-slow configuration into a
+                // refused PLAY is a behaviour change this has no measurement to justify. What
+                // was missing was not the fallback but the reason -- the operator got
+                // "CUDA-GL register: <cuda error>" and no hint that DEVICE was the cause.
+                const int gl_dev = select_cuda_gl_device();
+                if (gl_dev >= 0 && gl_dev != cuda_device_) {
+                    CASPAR_LOG(warning)
+                        << L"[notchlc_producer] DEVICE " << cuda_device_ << L" is not the "
+                        << L"OpenGL mixer's GPU (that is CUDA device " << gl_dev
+                        << L") -- CUDA-GL interop cannot register the mixer's textures on "
+                        << L"another GPU, so this will fall back to host copy. Use DEVICE "
+                        << gl_dev << L", or omit DEVICE, for the zero-copy path.";
+                }
+
                 try {
                     std::lock_guard<std::mutex> gl_lk(caspar::cuda_gl_interop_mutex());
                     for (int i = 0; i < num_slots_; i++)
