@@ -101,6 +101,17 @@ static constexpr int IO_QUEUE_CAP  = 4;
 // margin; this one has plenty.
 static constexpr int DONE_QUEUE_CAP = 12;
 
+#ifdef ENABLE_VULKAN
+// GUARDED, because it derives from `accelerator::vulkan::VkReadableTextureWrapper`. Its
+// only use is inside the large `#ifdef ENABLE_VULKAN` block further down, so nothing else
+// needs the type -- but the definition itself was unguarded, and with ENABLE_VULKAN off the
+// base class does not exist. The class then failed to open, its `override` members became
+// free functions ("virt-specifiers in 'read_pixels' not allowed outside a class
+// definition"), and the unbalanced brace closed `namespace hap` early: every later
+// diagnostic named `caspar::RawPacket` and suggested `caspar::hap::NUM_SLOTS`, as if the
+// whole file's namespace had moved. About 100 of the 130 errors in this file came from this
+// one missing guard.
+//
 // Hands the Vulkan mixer the zero-copy BC texture, but answers read_pixels()
 // -- PRINT RAW, write_frame_png -- from a host decode of the same compressed
 // bytes rather than from the image.
@@ -166,6 +177,7 @@ class hap_vk_texture_wrapper final : public accelerator::vulkan::VkReadableTextu
     int                                   width_;
     int                                   height_;
 };
+#endif // ENABLE_VULKAN
 
 // Raw packet from I/O thread → Snappy workers.
 struct RawPacket {
@@ -740,7 +752,7 @@ struct hap_producer_impl final : public core::frame_producer
                                                        : in_frame_ + 1;
                     demuxer_->seek_to_frame(io_frame_count);
                 } else if (loop_) {
-                    int64_t target = (out_frame_ >= 0) ? out_frame_ - 1 : std::max(0LL, total_frames_ - 1);
+                    int64_t target = (out_frame_ >= 0) ? out_frame_ - 1 : std::max<int64_t>(0, total_frames_ - 1);
                     demuxer_->seek_to_frame(target);
                     io_frame_count = target;
                     frame_count_.store(target, std::memory_order_release);
@@ -1399,14 +1411,14 @@ struct hap_producer_impl final : public core::frame_producer
                 else if (boost::iequals(val, L"start") || boost::iequals(val, L"in"))
                     target = 0;
                 else if (boost::iequals(val, L"end"))
-                    target = std::max(0LL, total_frames_ - 1);
+                    target = std::max<int64_t>(0, total_frames_ - 1);
                 else
                     target = boost::lexical_cast<int64_t>(val);
 
                 if (params.size() > 2)
                     target += boost::lexical_cast<int64_t>(params[2]);
 
-                target = std::max(0LL, target);
+                target = std::max<int64_t>(0, target);
                 if (total_frames_ > 0)
                     target = std::min(target, total_frames_ - 1);
 

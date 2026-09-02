@@ -82,6 +82,31 @@
 namespace caspar { namespace vulkan_output {
 
 namespace {
+/// Kill the process NOW, without running any teardown.
+///
+/// The destructor below reaches for this when the present thread will not join or
+/// vkQueueWaitIdle wedges. On Windows the reason is specific and stated there: ExitProcess
+/// runs DllMain(DLL_PROCESS_DETACH) on every loaded DLL, the NVIDIA driver's DllMain waits
+/// on our zombie thread, and the process deadlocks inside the exit path -- which can take
+/// the WDDM scheduler, and the desktop, with it. TerminateProcess bypasses DllMain.
+///
+/// `std::_Exit` is the Linux counterpart: it terminates without running atexit handlers or
+/// static destructors, which is the same BYPASS even though the hazard it avoids is not the
+/// same hazard. There is no DllMain on Linux; what there is instead is the ordinary risk of
+/// running the remaining consumers' destructors against a wedged GPU, and skipping them is
+/// exactly what the Windows path skips too.
+[[noreturn]] void terminate_process_now()
+{
+#ifdef _WIN32
+    ::TerminateProcess(::GetCurrentProcess(), 0);
+#endif
+    // Also the fallback on Windows: TerminateProcess is not formally [[noreturn]], so
+    // without this the attribute above would be a lie the compiler is entitled to warn on.
+    std::_Exit(0);
+}
+} // namespace
+
+namespace {
 
 // ─── Cross-platform thread naming ───────────────────────────────────────
 inline void set_thread_name([[maybe_unused]] const wchar_t* name)
@@ -937,10 +962,19 @@ class vulkan_output_consumer : public core::frame_consumer
         // grant exclusive display access. No explicit acquire/release needed.
         // The driver grants exclusivity when the borderless window fully covers
         // the display, and revokes it on focus loss — transparent to the app.
-        VkSurfaceFullScreenExclusiveInfoEXT fse_info{};
-        bool fse_chained = false;
+        // The struct is declared INSIDE the guard, and the retry below restores from
+        // `fse_saved_pnext` rather than from `fse_info.pNext`. Previously the declaration
+        // and the restore sat outside while only the chaining was guarded, so on Linux --
+        // where this SDK does not declare VkSurfaceFullScreenExclusiveInfoEXT -- the type
+        // was missing at the declaration and `fse_info` was then undeclared at the restore.
+        // Saving the original pNext into its own variable makes the restore need no Vulkan
+        // type at all, so the retry path stays identical on both platforms.
+        bool        fse_chained     = false;
+        const void* fse_saved_pnext = nullptr;
 #ifdef _WIN32
+        VkSurfaceFullScreenExclusiveInfoEXT fse_info{};
         if (fse_hwnd_ && device_->has_extension(VK_EXT_FULL_SCREEN_EXCLUSIVE_EXTENSION_NAME)) {
+            fse_saved_pnext              = create_info.pNext;
             fse_info.sType               = VK_STRUCTURE_TYPE_SURFACE_FULL_SCREEN_EXCLUSIVE_INFO_EXT;
             fse_info.pNext               = const_cast<void*>(create_info.pNext);
             fse_info.fullScreenExclusive = VK_FULL_SCREEN_EXCLUSIVE_DEFAULT_EXT;
@@ -955,7 +989,7 @@ class vulkan_output_consumer : public core::frame_consumer
                 // FSE chain caused failure — retry without it
                 CASPAR_LOG(warning) << print() << L" Swapchain creation failed with FSE chain (result="
                                     << result << L"). Retrying without FSE.";
-                create_info.pNext = fse_info.pNext; // restore original pNext
+                create_info.pNext = fse_saved_pnext; // restore original pNext
                 result = vkCreateSwapchainKHR(device_->device(), &create_info, nullptr, &swapchain_.swapchain);
                 if (result != VK_SUCCESS)
                     CASPAR_THROW_EXCEPTION(caspar_exception() << msg_info("Failed to create Vulkan swapchain"));
@@ -4191,12 +4225,12 @@ class vulkan_output_consumer : public core::frame_consumer
                                                     L"Calling TerminateProcess to prevent WDDM kernel deadlock "
                                                     L"(detaching or ExitProcess can hang the OS via DllMain).";
                     boost::log::core::get()->flush();
-                    ::TerminateProcess(::GetCurrentProcess(), 0);
+                    terminate_process_now();
                 }
             } catch (...) {
                 CASPAR_LOG(fatal) << print() << L" Present thread join threw - calling TerminateProcess.";
                 boost::log::core::get()->flush();
-                ::TerminateProcess(::GetCurrentProcess(), 0);
+                terminate_process_now();
             }
             (void)joined;
         }
@@ -4220,7 +4254,7 @@ class vulkan_output_consumer : public core::frame_consumer
                                                     L"GPU subsystem wedged - calling TerminateProcess "
                                                     L"to prevent WDDM kernel deadlock.";
                     boost::log::core::get()->flush();
-                    ::TerminateProcess(::GetCurrentProcess(), 0);
+                    terminate_process_now();
                 } else {
                     idle_future.get(); // Collect result (ignore errors during shutdown)
                 }

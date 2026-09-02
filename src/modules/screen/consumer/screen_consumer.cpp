@@ -1157,7 +1157,7 @@ struct gpu_strategy : public display_strategy
 {
     virtual ~gpu_strategy()
     {
-#ifdef ENABLE_VULKAN
+#if defined(ENABLE_VULKAN) && defined(_WIN32)
         cleanup_vk_interop();
 #endif
     }
@@ -1170,7 +1170,7 @@ struct gpu_strategy : public display_strategy
     int      fallback_h_   = 0;
     bool     fallback_hbd_ = false;
 
-#ifdef ENABLE_VULKAN
+#if defined(ENABLE_VULKAN) && defined(_WIN32)
     // VK→GL interop: import VK texture memory directly into GL (zero-copy).
     GLuint   vk_gl_mem_obj_     = 0;
     GLuint   vk_gl_tex_         = 0;
@@ -1445,7 +1445,7 @@ struct gpu_strategy : public display_strategy
         }
         return true;
     }
-#endif // ENABLE_VULKAN
+#endif // ENABLE_VULKAN && _WIN32
 
     virtual frame init_frame(const configuration& config, const core::video_format_desc& format_desc) override
     {
@@ -1468,7 +1468,7 @@ struct gpu_strategy : public display_strategy
             glDeleteTextures(1, &fallback_tex_);
             fallback_tex_ = 0;
         }
-#ifdef ENABLE_VULKAN
+#if defined(ENABLE_VULKAN) && defined(_WIN32)
         cleanup_vk_interop();
 #endif
     }
@@ -1514,7 +1514,19 @@ struct gpu_strategy : public display_strategy
 
             if (in_frame.texture()) {
                 auto ogl_tex = std::dynamic_pointer_cast<accelerator::ogl::texture>(in_frame.texture());
-                if (ogl_tex && self->window_.shared_) {
+                // `shared_` is a member of `win32_gl_window`, the fork's own WGL window,
+                // which replaces `sf::Window` only on Windows -- see the two declarations
+                // of `window_`. It records whether this context's GL share group is the
+                // mixer's, which is what makes the direct bind below zero-copy. On Linux
+                // `window_` is a plain `sf::Window` with no such sharing, so the answer is
+                // false and the tick falls through to the PBO upload path below, which is
+                // where a non-shared context has always gone.
+#ifdef _WIN32
+                const bool gl_ctx_shared = self->window_.shared_;
+#else
+                const bool gl_ctx_shared = false;
+#endif
+                if (ogl_tex && gl_ctx_shared) {
                     // Order this context's draw behind the mixer's writes. A server-side wait on
                     // a share-group fence the mixer published, so it costs no CPU and does not
                     // block this thread -- the mirror of what the VK interop branch below does
@@ -1545,7 +1557,7 @@ struct gpu_strategy : public display_strategy
                     // flush again. `image_mixer` now calls `publish_render()` on the
                     // no-readback path, and the wait below is this side of that contract.
                                         ogl_tex->bind(0);
-#ifdef ENABLE_VULKAN
+#if defined(ENABLE_VULKAN) && defined(_WIN32)
                 } else if (try_vk_interop(in_frame, self)) {
                     // VK mixer: zero-copy via GL_EXT_memory_object_win32
                     // (texture already bound by try_vk_interop)

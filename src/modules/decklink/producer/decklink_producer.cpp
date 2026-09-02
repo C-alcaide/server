@@ -534,8 +534,26 @@ sdi_signalling read_sdi_signalling(IDeckLinkVideoInputFrame* video, std::wstring
     // Preferring the new IID and falling back keeps this working against both driver
     // generations, which matters because the fix belongs in a regenerated interop header and
     // this is not that.
+    // WINDOWS ONLY, for two reasons rather than one:
+    //
+    //  * `GUID` and its {DWORD, WORD, WORD, BYTE[8]} initialiser are Windows types. The
+    //    DeckLink SDK's LinuxCOM.h has `struct REFIID` -- sixteen flat bytes in a different
+    //    order -- so this literal cannot simply be retyped; it would have to be rewritten,
+    //    and a byte-order mistake here reads as "the interface is not offered" rather than
+    //    as a bug.
+    //  * The workaround exists because the interop header IN THIS TREE is SDK 12.3.1 while
+    //    the driver on the reference machine is 15.3. Neither half of that mismatch is a
+    //    property of Linux: a Linux builder supplies their own SDK and driver, and which
+    //    revision they land on is unknown here. Hard-coding a 15.3 IID for them would be
+    //    asserting a pairing nobody has measured.
+    //
+    // The Linux arm below therefore uses only the header's own
+    // IID_IDeckLinkVideoFrameAncillaryPackets, which is exactly what this code did before
+    // the 15.3 workaround was added -- and it still reports the distinct census either way.
+#ifdef _WIN32
     static const GUID IID_AncillaryPackets_15_3 = {
         0x8A72D630, 0x8070, 0x4D05, {0x8A, 0x93, 0xE6, 0x0C, 0x40, 0xEE, 0x08, 0x8A}};
+#endif
 
     // TWO CONTROLS, because "QueryInterface said no" is only meaningful if QueryInterface
     // ever says yes on this object. Both of these IIDs are byte-identical between the 12.3.1
@@ -575,7 +593,14 @@ sdi_signalling read_sdi_signalling(IDeckLinkVideoInputFrame* video, std::wstring
     }
 
     IDeckLinkVideoFrameAncillaryPackets* raw = nullptr;
+#ifdef _WIN32
     if (FAILED(video->QueryInterface(IID_AncillaryPackets_15_3, (void**)&raw)) || raw == nullptr) {
+#else
+    // No 15.3 attempt on Linux -- see the IID declaration above. The `if (true)` keeps the
+    // nesting and the census messages below identical on both platforms rather than
+    // duplicating the whole block.
+    if (true) {
+#endif
         if (FAILED(video->QueryInterface(IID_IDeckLinkVideoFrameAncillaryPackets, (void**)&raw)) ||
             raw == nullptr) {
             if (census != nullptr) {
@@ -939,6 +964,19 @@ class SharedDeckLinkInput : public IDeckLinkInputCallback
         return S_OK;
     }
 
+    // Two implementations, because REFIID is not the same thing on the two platforms.
+    // On Windows it is `const IID&` and `operator==` compares GUIDs. In the DeckLink SDK's
+    // LinuxCOM.h it is a 16-byte `struct REFIID` PASSED BY VALUE with no comparison
+    // operator at all, so `iid == IID_IUnknown` does not compile -- and the identifiers are
+    // brace-initialiser macros rather than objects, so there is nothing to take an address
+    // of either.
+    //
+    // Upstream's callback answers E_NOINTERFACE unconditionally, which is what the Linux arm
+    // returns to: nothing in this module or in the driver calls QueryInterface on the
+    // callback object, and upstream has shipped that behaviour on both platforms for years.
+    // The Windows arm is kept as written rather than reimplemented with memcmp, so the
+    // platform that is measured here does not change at all.
+#ifdef _WIN32
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, LPVOID* ppv) override
     {
         if (!ppv)
@@ -951,6 +989,9 @@ class SharedDeckLinkInput : public IDeckLinkInputCallback
         }
         return E_NOINTERFACE;
     }
+#else
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID, LPVOID*) override { return E_NOINTERFACE; }
+#endif
     ULONG STDMETHODCALLTYPE AddRef() override { return 1; }
     ULONG STDMETHODCALLTYPE Release() override { return 1; }
 };
