@@ -1,5 +1,15 @@
 # Vulkan Output — Linux Testing Checklist
 
+> **STATUS, 2026-09-01: NOT ONE ITEM BELOW HAS BEEN RUN.** This is a plan, not a record.
+> The Linux port was written in `fc2691acf` and has never been compiled: the fork's VP
+> branches have **zero** runs of `.github/workflows/linux.yml`, and no local Linux or
+> Docker build has been done. Section 1 -- the compile, which needs no GPU -- is the gate
+> everything else waits on.
+>
+> An unticked checklist gets quoted as status by the next reader, which is why this note is
+> here rather than in a commit message. See
+> [`docs/audits/PORTABILITY_LINUX_DOCKER_2026-09-01.md`](../../../docs/audits/PORTABILITY_LINUX_DOCKER_2026-09-01.md).
+
 ## Prerequisites
 
 - NVIDIA GPU with proprietary driver ≥ 535 (for VK_KHR_display and EGL device)

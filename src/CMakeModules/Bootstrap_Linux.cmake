@@ -184,6 +184,65 @@ ELSEIF (CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     add_definitions(-DTBB_USE_GLIBCXX_VERSION=${TBB_USE_GLIBCXX_VERSION})
 ENDIF ()
 
+# OpenColorIO — Linux mirror of the Windows OCIO bootstrap block.
+#
+# THIS OPTION USED TO EXIST ONLY ON WINDOWS. `accelerator/CMakeLists.txt` gates
+# `CASPAR_ENABLE_OCIO` on `ENABLE_OCIO`, so on Linux the variable was undefined, the OCIO
+# sources compiled to their stubs, and the build silently lost OCIO_DISPLAY, OCIO_LOOK, the
+# ACES view transforms and per-consumer OCIO views. It degrades cleanly rather than
+# crashing -- `ocio_display_command` returns 501 and logs "built without OCIO support" --
+# which is correct behaviour and exactly why the gap survived: the server starts, plays and
+# looks healthy.
+#
+# The version is PINNED TO THE SAME v2.5.2 AS WINDOWS, deliberately, and not taken from the
+# distro. Windows pins it for two reasons that apply identically here: 2.5.1 reworked the
+# Vulkan texture binding indices and broke ABI, and 2.5.2 fixes CVE-2026-42450 -- stack
+# buffer overflows in the .spi3d/.spi1d/.cube/.lut parsers, on a server that ingests
+# operator-supplied LUT files. Ubuntu Noble packages an older 2.x, so a system package would
+# both split the platforms' OCIO version and hand Linux the vulnerable parsers.
+#
+# ExternalProject rather than the FetchContent this file uses for OFX: the OFX block already
+# FetchContents `expat`, and OCIO with `OCIO_INSTALL_EXT_PACKAGES=ALL` builds its own, so two
+# targets would share one name and configure would fail. An isolated sub-build shares nothing.
+option(ENABLE_OCIO "Enable OpenColorIO colour management" ON)
+if (ENABLE_OCIO)
+	include(ExternalProject)
+	message(STATUS "CHECKPOINT: Adding OpenColorIO")
+
+	# The Windows block reads a global EXTERNAL_CMAKE_ARGS that only Bootstrap_Windows sets.
+	# Build the equivalent here rather than referencing a variable that is empty on Linux --
+	# an empty CMAKE_BUILD_TYPE gives OCIO an unoptimised build and no warning about it.
+	set(OCIO_EXTERNAL_ARGS
+		"-DCMAKE_BUILD_TYPE:STRING=${CMAKE_BUILD_TYPE}"
+		"-DCMAKE_C_COMPILER:PATH=${CMAKE_C_COMPILER}"
+		"-DCMAKE_CXX_COMPILER:PATH=${CMAKE_CXX_COMPILER}"
+		"-DCMAKE_POSITION_INDEPENDENT_CODE:BOOL=ON"
+	)
+
+	casparcg_add_external_project(opencolorio)
+	ExternalProject_Add(opencolorio
+		GIT_REPOSITORY https://github.com/AcademySoftwareFoundation/OpenColorIO.git
+		GIT_TAG        v2.5.2
+		GIT_SHALLOW    TRUE
+		CMAKE_ARGS     ${OCIO_EXTERNAL_ARGS}
+		               "-DCMAKE_INSTALL_PREFIX:PATH=<INSTALL_DIR>"
+		               -DOCIO_INSTALL_EXT_PACKAGES=ALL
+		               -DOCIO_BUILD_APPS=OFF
+		               -DOCIO_BUILD_PYTHON=OFF
+		               -DOCIO_BUILD_TESTS=OFF
+		               -DOCIO_BUILD_GPU_TESTS=OFF
+		               -DOCIO_BUILD_DOCS=OFF
+		               -DOCIO_BUILD_NUKE=OFF
+		               -DOCIO_WARNING_AS_ERROR=OFF
+	)
+	ExternalProject_Get_Property(opencolorio INSTALL_DIR)
+	set(OCIO_INCLUDE_PATH "${INSTALL_DIR}/include")
+	link_directories("${INSTALL_DIR}/lib")
+	# No runtime-dependency copy step: on Linux the loader finds the .so through the
+	# install layout rather than by sitting beside the executable, which is what
+	# `casparcg_add_runtime_dependency` exists for on Windows.
+endif ()
+
 # OpenFX (host) — Linux mirror of the Windows OFX bootstrap block. Builds the BSD-3 HostSupport
 # C++ library as an internal static lib (openfx_host) plus libexpat (its XML dependency), so the
 # ofx module can load OFX plug-ins. Compiler flags are Linux/GCC-Clang appropriate.

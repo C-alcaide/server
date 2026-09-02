@@ -8,6 +8,12 @@ Low-latency, direct-to-display GPU output consumer for CasparCG. Bypasses the de
 
 **Supported platforms**: Windows (via `VK_EXT_full_screen_exclusive` + Win32 surfaces; or `VK_KHR_display` on Windows 11 with Specialized Monitors) and Linux (via `VK_KHR_display` direct scanout).
 
+> **The Linux half is written but UNBUILT**, as of 2026-09-01. The port exists in source
+> (`fc2691acf`) and has never been compiled: no Linux CI run on any VP branch, no local
+> build. Read every Linux statement below as a design intent rather than a measurement --
+> `src/modules/vulkan_output/LINUX_TESTING.md` §1 is the compile that would change that.
+> See [`../audits/PORTABILITY_LINUX_DOCKER_2026-09-01.md`](../audits/PORTABILITY_LINUX_DOCKER_2026-09-01.md).
+
 ## Table of Contents
 
 - [System Requirements](#system-requirements)
