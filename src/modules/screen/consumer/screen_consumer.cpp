@@ -1633,12 +1633,58 @@ struct screen_consumer_proxy : public core::frame_consumer
     configuration                    config_;
     std::unique_ptr<screen_consumer> consumer_;
     bool                             use_vulkan_ = false;
+    //: Guards `config_.ocio_display` / `config_.ocio_view`, which `call()` writes from the
+    //: AMCP thread and `ocio_view()` reads on the frame path.
+    mutable std::mutex               ocio_mutex_;
 
   public:
-    /// This window's own OCIO view, if it was configured with one.
+    /// This window's own OCIO view, if it was configured with one or given one since.
     std::pair<std::string, std::string> ocio_view() const override
     {
+        // Guarded: `call()` writes these from the AMCP thread while the output reads them
+        // on the frame path. Two strings cannot be atomic.
+        std::lock_guard<std::mutex> lock(ocio_mutex_);
         return {config_.ocio_display, config_.ocio_view};
+    }
+
+    /// `APPLY <channel>-<index> OCIO_VIEW "<display>" "<view>"`, or `OCIO_VIEW NONE`.
+    ///
+    /// The view was settable only in the config, so switching an operator monitor between
+    /// views meant restarting the server. The mixer collects the distinct views at the
+    /// start of a tick, so a change lands on the next one.
+    ///
+    /// Returns false for anything else, so `APPLY` reports a failure rather than silently
+    /// accepting a command this consumer does not implement.
+    std::future<bool> call(const std::vector<std::wstring>& params) override
+    {
+        if (params.empty() || !boost::iequals(params.at(0), L"OCIO_VIEW"))
+            return caspar::make_ready_future(false);
+
+        std::string display, view;
+        if (params.size() == 2 && boost::iequals(params.at(1), L"NONE")) {
+            // Empty pair = "whatever the channel is showing", per the base declaration.
+        } else if (params.size() >= 3) {
+            display = u8(params.at(1));
+            view    = u8(params.at(2));
+            // Both or neither, as the config path already refuses: a display without a
+            // view is not a transform, and accepting one would render the channel's view
+            // while reporting success.
+            if (display.empty() || view.empty())
+                return caspar::make_ready_future(false);
+        } else {
+            return caspar::make_ready_future(false);
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(ocio_mutex_);
+            config_.ocio_display = display;
+            config_.ocio_view    = view;
+        }
+        CASPAR_LOG(info) << L"[screen_consumer] view now "
+                         << (display.empty() ? std::wstring(L"the channel's")
+                                             : u16(display) + L"/" + u16(view))
+                         << L"; takes effect on the next tick.";
+        return caspar::make_ready_future(true);
     }
 
     explicit screen_consumer_proxy(configuration config)
@@ -1718,6 +1764,10 @@ struct screen_consumer_proxy : public core::frame_consumer
     core::monitor::state state() const override
     {
         core::monitor::state state;
+        // The consumer index, so a controller can address this window with
+        // `APPLY <channel>-<index> ...`. Derivable from the device number, but a caller
+        // should not have to reimplement that arithmetic to talk to a consumer.
+        state["screen/index"] = index();
         state["screen/name"]          = config_.name;
         state["screen/index"]         = config_.screen_index;
         state["screen/key_only"]      = config_.key_only;

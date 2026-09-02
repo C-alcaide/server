@@ -31,6 +31,11 @@ void init(const core::module_dependencies& dependencies)
 {
     dependencies.producer_registry->register_producer_factory(L"SPOUT", create_spout_producer);
     dependencies.consumer_registry->register_consumer_factory(L"SPOUT", create_spout_consumer);
+    // `<spout>` in a channel's `<consumers>`. Parity with `screen`, which has had both
+    // an AMCP and a preconfigured factory since it was written -- without this a
+    // `<spout>` element was silently ignored.
+    dependencies.consumer_registry->register_preconfigured_consumer_factory(
+        L"spout", create_preconfigured_spout_consumer);
 }
 
 }}

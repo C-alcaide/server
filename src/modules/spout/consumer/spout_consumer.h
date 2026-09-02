@@ -22,6 +22,8 @@
 
 #pragma once
 
+#include <boost/property_tree/ptree_fwd.hpp>
+
 #include <common/memory.h>
 #include <core/fwd.h>
 #include <string>
@@ -31,6 +33,18 @@ namespace caspar { namespace spout {
 
 spl::shared_ptr<core::frame_consumer> create_spout_consumer(
     const std::vector<std::wstring>&                         params,
+    const core::video_format_repository&                     format_repository,
+    const std::vector<spl::shared_ptr<core::video_channel>>& channels,
+    const core::channel_info&                                channel_info);
+
+/// The `<spout>` element in a channel's `<consumers>`.
+///
+/// Parity with `screen`, which has had both since it was written. Without this a `<spout>`
+/// element did NOTHING -- silently, because an unknown consumer element is not an error --
+/// and a preview sender an operator always wants had to be re-issued over AMCP after every
+/// restart.
+spl::shared_ptr<core::frame_consumer> create_preconfigured_spout_consumer(
+    const boost::property_tree::wptree&                      ptree,
     const core::video_format_repository&                     format_repository,
     const std::vector<spl::shared_ptr<core::video_channel>>& channels,
     const core::channel_info&                                channel_info);

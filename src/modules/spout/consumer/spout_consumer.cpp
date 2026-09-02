@@ -27,6 +27,8 @@
 #include <common/diagnostics/graph.h>
 #include <common/timer.h>
 #include <common/log.h>
+#include <boost/property_tree/ptree.hpp>
+#include <common/param.h>   // get_param, for OCIO_DISPLAY / OCIO_VIEW
 #include <common/utf.h>
 #include <core/frame/frame.h>
 #include <core/frame/pixel_format.h>
@@ -267,6 +269,13 @@ struct spout_consumer_impl : public core::frame_consumer
     //: 0 follow the channel, 8 or 16 force it. From `BIT_DEPTH` on the ADD. Declared
     //: here, ahead of `executor_`, so the member initialiser list stays in order.
     int                         depth_override_   = 0;
+    //: This consumer's own OCIO display/view, empty for the channel's own. Both or
+    //: neither -- a display without a view is not a transform.
+    std::string                 ocio_display_;
+    std::string                 ocio_view_;
+    //: Guards the pair above: `call()` writes from the AMCP thread, `ocio_view()` reads
+    //: on the frame path.
+    mutable std::mutex          ocio_mutex_;
     //: 8 or 16 -- what the path that last sent a frame ACTUALLY published. Set at the send
     //: sites rather than from intent, for the same reason `gpu_path_active_` is: a field
     //: that exists to tell a caller what it is receiving must never be set by what we
@@ -536,7 +545,8 @@ struct spout_consumer_impl : public core::frame_consumer
     }
 
     spout_consumer_impl(std::wstring name, int max_w, int max_h, int every_nth, int target_fps,
-                        int bit_depth = 0)
+                        int bit_depth = 0, std::string ocio_display = {},
+                        std::string ocio_view = {})
         : max_w_(max_w)
         , max_h_(max_h)
         , every_nth_((std::max)(1, every_nth))
@@ -546,6 +556,11 @@ struct spout_consumer_impl : public core::frame_consumer
         // right behaviour for a typo. Refusing the ADD over a preview's bit depth would
         // be worse than publishing the channel's own.
         , depth_override_(bit_depth == 8 || bit_depth == 16 ? bit_depth : 0)
+        // BOTH OR NEITHER, enforced at the call site rather than here: a display
+        // without a view is not a transform, and accepting one would render the
+        // channel's view while looking configured.
+        , ocio_display_(std::move(ocio_display))
+        , ocio_view_(std::move(ocio_view))
         , executor_(L"Spout Consumer")
     {
         sender_name_.reserve(name.length());
@@ -1052,6 +1067,64 @@ struct spout_consumer_impl : public core::frame_consumer
 
     bool needs_cpu_frame_data() const override { return !gpu_path_active_; }
 
+    /// This consumer's own OCIO display/view, or `{}` for the channel's.
+    ///
+    /// The mixer renders one extra post-composite pass from the same working-space
+    /// composite and hands it to this consumer only, so an operator preview can carry
+    /// a viewing transform while an LED processor on the same channel keeps the
+    /// calibrated one. Consumers asking for the same view share a single pass.
+    ///
+    /// **Ignored unless the channel has `<working-space-composite>`** -- without it
+    /// there is no working-space composite to fan out from, and this returns a view
+    /// nothing renders. That is the base declaration's rule, not this consumer's.
+    std::pair<std::string, std::string> ocio_view() const override
+    {
+        // Guarded: `call()` can change these from the AMCP thread while the output reads
+        // them on the frame path. Two strings cannot be atomic.
+        std::lock_guard<std::mutex> lock(ocio_mutex_);
+        return {ocio_display_, ocio_view_};
+    }
+
+    /// `APPLY <channel>-<index> OCIO_VIEW "<display>" "<view>"`, or `OCIO_VIEW NONE`.
+    ///
+    /// Changing the view on a LIVE consumer, which the ADD-time argument cannot do: a
+    /// REMOVE plus ADD drops the sender and disconnects every receiver. The mixer collects
+    /// the distinct views at the start of a tick, so the change lands on the next one.
+    ///
+    /// Returns false for anything else, which is what makes `APPLY` report a failure
+    /// rather than silently accepting a command this consumer does not implement.
+    std::future<bool> call(const std::vector<std::wstring>& params) override
+    {
+        if (params.empty() || !boost::iequals(params.at(0), L"OCIO_VIEW"))
+            return make_ready_future(false);
+
+        std::string display, view;
+        if (params.size() == 2 && boost::iequals(params.at(1), L"NONE")) {
+            // Empty pair = "whatever the channel is showing", per the base declaration.
+        } else if (params.size() >= 3) {
+            display = u8(params.at(1));
+            view    = u8(params.at(2));
+            // BOTH OR NEITHER, as on the ADD: a display without a view is not a
+            // transform, and accepting one would render the channel's view while
+            // reporting success.
+            if (display.empty() || view.empty())
+                return make_ready_future(false);
+        } else {
+            return make_ready_future(false);
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(ocio_mutex_);
+            ocio_display_ = display;
+            ocio_view_    = view;
+        }
+        CASPAR_LOG(info) << L"[spout_consumer] view now "
+                         << (display.empty() ? std::wstring(L"the channel's")
+                                             : u16(display) + L"/" + u16(view))
+                         << L"; takes effect on the next tick.";
+        return make_ready_future(true);
+    }
+
     /// Reported because nothing else can tell zero-copy from a correct-looking CPU
     /// fallback. Both produce the right picture at the right size; they differ by
     /// 3.12 ms per frame per preview, and before this the only way to know which one
@@ -1061,6 +1134,10 @@ struct spout_consumer_impl : public core::frame_consumer
     {
         caspar::core::monitor::state state;
         state["spout/sender-name"]   = sender_name_;
+        // The consumer index, so a controller can address this sender with
+        // `APPLY <channel>-<index> ...`. It is a hash of the sender name and therefore not
+        // typeable by hand -- publishing it is what makes the command usable at all.
+        state["spout/index"]         = index();
         state["spout/gpu-path"]      = gpu_path_active_.load();
         state["spout/gpu-downscale"] = gpu_downscale_active_.load();
         state["spout/out-width"]     = out_w_;
@@ -1127,12 +1204,61 @@ spl::shared_ptr<core::frame_consumer> create_spout_consumer(
     // 8 either way. Opt-in because an RGBA16 sender is unreadable to a receiver that
     // assumes RGBA8.
     const int bitdepth  = get_int_param(params, L"BIT_DEPTH");
+    // A per-consumer OCIO view, so an operator preview can carry a viewing transform
+    // without touching what the other consumers on this channel see. Both or neither:
+    // one alone silently renders the channel's view while reading as configured, which
+    // is what the screen consumer refuses for the same reason.
+    const auto ocio_display = u8(get_param(L"OCIO_DISPLAY", params, std::wstring()));
+    const auto ocio_view    = u8(get_param(L"OCIO_VIEW", params, std::wstring()));
+    if (ocio_display.empty() != ocio_view.empty()) {
+        CASPAR_LOG(error) << L"[spout_consumer] OCIO_DISPLAY and OCIO_VIEW must be "
+                             L"given together, or neither.";
+        return core::frame_consumer::empty();
+    }
+    if (!ocio_display.empty())
+        CASPAR_LOG(info) << L"[spout_consumer] per-consumer OCIO view "
+                         << u16(ocio_display) << L"/" << u16(ocio_view)
+                         << L". Requires <working-space-composite> on the channel; "
+                            L"without it the mixer has nothing to fan out from and "
+                            L"this consumer gets the channel view.";
     const int max_w     = get_int_param(params, L"MAX_WIDTH");
     const int max_h     = get_int_param(params, L"MAX_HEIGHT");
     const int every_nth = get_int_param(params, L"EVERY_NTH");
     const int fps       = get_int_param(params, L"FPS");
 
-    return spl::make_shared<spout_consumer_impl>(name, max_w, max_h, every_nth, fps, bitdepth);
+    return spl::make_shared<spout_consumer_impl>(name, max_w, max_h, every_nth, fps,
+                                                bitdepth, ocio_display, ocio_view);
+}
+
+spl::shared_ptr<core::frame_consumer> create_preconfigured_spout_consumer(
+    const boost::property_tree::wptree&                      ptree,
+    const core::video_format_repository&                     format_repository,
+    const std::vector<spl::shared_ptr<core::video_channel>>& channels,
+    const core::channel_info&                                channel_info)
+{
+    // The same options as the ADD, spelled as elements. `bit-depth` absent means follow the
+    // channel, exactly as an absent `BIT_DEPTH` does -- so a 16-bit channel with no element
+    // is 8-bit here too, and for the same receiver-compatibility reason.
+    const auto name      = ptree.get(L"name", std::wstring(L"CasparCG Spout"));
+    const int  max_w     = ptree.get(L"max-width", 0);
+    const int  max_h     = ptree.get(L"max-height", 0);
+    const int  every_nth = ptree.get(L"every-nth", 0);
+    const int  fps       = ptree.get(L"fps", 0);
+    const int  bitdepth  = ptree.get(L"bit-depth", 0);
+
+    // Both or neither, refused the same way as on the ADD: a display without a view is not
+    // a transform, and accepting one renders the channel's view while looking configured.
+    // `screen` throws here rather than logging; this matches it, because a misconfigured
+    // startup consumer that silently shows the wrong view is worse than a refusal.
+    const auto ocio_display_w = ptree.get(L"ocio-display", std::wstring());
+    const auto ocio_view_w    = ptree.get(L"ocio-view", std::wstring());
+    if (ocio_display_w.empty() != ocio_view_w.empty())
+        CASPAR_THROW_EXCEPTION(user_error() << msg_info(
+            L"spout consumer needs <ocio-display> AND <ocio-view>, or neither."));
+
+    return spl::make_shared<spout_consumer_impl>(name, max_w, max_h, every_nth, fps,
+                                                 bitdepth, u8(ocio_display_w),
+                                                 u8(ocio_view_w));
 }
 
 }} // namespace caspar::spout
