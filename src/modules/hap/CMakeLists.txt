@@ -25,8 +25,19 @@ set(SNAPPY_SOURCES
 )
 
 # Disable warnings-as-errors and the CasparCG forced-include for Snappy sources.
+#
+# Per compiler: `/W0` is MSVC's, and gcc reads it as an input FILE -- "/W0: linker input
+# file not found", on all four Snappy translation units. Same class as the `/WX-` and `/w`
+# in src/core/CMakeLists.txt. gcc gets `-w`, which it needs anyway because
+# Bootstrap_Linux.cmake sets a global -Werror. COMPILE_FLAGS is a plain string and cannot
+# carry a generator expression, hence the `if`.
+if (MSVC)
+    set(SNAPPY_NO_WARN "/W0")
+else ()
+    set(SNAPPY_NO_WARN "-w")
+endif ()
 set_source_files_properties(${SNAPPY_SOURCES} PROPERTIES
-    COMPILE_FLAGS "/W0"
+    COMPILE_FLAGS "${SNAPPY_NO_WARN}"
     SKIP_PRECOMPILE_HEADERS ON
 )
 
