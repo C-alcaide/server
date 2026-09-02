@@ -3,13 +3,21 @@
 **Question.** Upstream CasparCG builds and runs on Linux and in Docker. After ~1000
 commits of fork work, does this tree still?
 
-**Short answer.** Nothing structural has been broken, and **one flagship feature is
-silently absent on Linux**: OpenColorIO. Beyond that, the honest status is *unverified* —
-the fork has never been compiled for Linux, by CI or by hand.
+**Short answer, as first written (2026-09-01).** Nothing structural has been broken, and
+**one flagship feature is silently absent on Linux**: OpenColorIO. Beyond that, the honest
+status is *unverified* — the fork has never been compiled for Linux, by CI or by hand.
 
-Everything below is read from the source tree and from GitHub Actions history. Nothing
-here was measured by running a build, and that distinction is the point of the last
-section.
+**Short answer, after actually building it (2026-09-02).** It builds now, and it did not
+before: **the fork did not compile on Linux at all**, and it took twelve commits' worth of
+fixes to get from "unverified" to a 30.5 MB `shell/casparcg`. The first sentence above was
+too kind and the second was the important one — see §7, added below.
+
+The original audit is left as written from §1 to §6, because the interesting part of this
+document is now the gap between what reading the source predicted and what compiling it
+found. Everything in those sections was read from the tree and from GitHub Actions history,
+and **not one line of it was measured**; §7 is the measurement. Two of the six sections
+turned out to be wrong in ways that reading could not have caught, and one central claim was
+wrong in the other direction — OCIO's absence was worse than "silent".
 
 ---
 
@@ -146,3 +154,140 @@ other:
 3. **Tick or correct `LINUX_TESTING.md`.** An unticked checklist that reads as a plan is
    fine; one that gets quoted as status is not.
 4. Only then consider a runtime container. Compiling is the gate everything else waits on.
+
+---
+
+# 7. The measurement, 2026-09-02
+
+§1–§6 above were read from the source. This section is what happened when the build was
+actually run, and it is a different answer.
+
+## 7.1 What was built, and where
+
+No Docker on this machine, so: **WSL Ubuntu 24.04**, installed for this purpose. 24.04
+deliberately, not the 26.04 that `wsl --install` offers by default — the CI job builds
+`tools/linux/Dockerfile`, whose base image is `buildpack-deps:noble`, and a newer GCC is a
+stricter gate whose failures would not be attributable to CI.
+
+| | |
+| :--- | :--- |
+| distro | Ubuntu 24.04.4 LTS (noble), matching the CI image |
+| toolchain | gcc 13.3.0, cmake 3.28.3, ninja 1.11.1 |
+| dependencies | the repo's own `tools/linux/install-dependencies`, not a set invented here |
+| flags | `-DUSE_STATIC_BOOST=ON -DUSE_SYSTEM_CEF=OFF -DENABLE_VULKAN=ON -DENABLE_OCIO=OFF`, from the fork's own Dockerfile |
+| Vulkan SDK | LunarG 1.4.328.1, the version that Dockerfile pins |
+| FFmpeg | the distribution's, via `find_package(FFmpeg REQUIRED)` — **6.1** (libavutil 58 / libavcodec 60) |
+
+Two environment details that are not findings about the fork but that shaped the work:
+
+* **`git` over HTTPS from this WSL instance fails about half the time**, with "could not read
+  Username for 'https://github.com'". It is not the network — DNS resolves, TCP 443 connects,
+  `curl` gets 200 from the git smart-http endpoint itself, and the TLS peer presents a genuine
+  github.com certificate — and it is not the inherited Windows PATH either, which was the
+  first plausible explanation and was **wrong**: six A/B runs had the full PATH fail then
+  succeed, and the Linux-only PATH succeed then fail. FetchContent retries a clone three
+  times, and three coin flips landing badly is what turns a flaky fetch into a hard configure
+  error. Worked around by copying the eighteen already-populated dependency sources out of the
+  Windows build tree and pointing `FETCHCONTENT_SOURCE_DIR_*` at them, which makes the run
+  offline and deterministic without changing which sources are compiled.
+* **`core.autocrlf=true` gives this Windows checkout CRLF shell scripts.** Running
+  `tools/linux/install-dependencies` from `/mnt/d` therefore failed with `E: Unable to locate
+  package` and *no package name*, because a backslash followed by CR is not a line
+  continuation. The repo blob is LF (`git ls-files --eol` reports `i/lf`), so this is not a
+  defect — but it does mean the mounted tree is not equivalent to a checkout, and the build
+  was done from an `rsync`ed copy, which is also what the Dockerfile's `COPY ./src /source`
+  does.
+
+## 7.2 Result
+
+From an empty build directory, `ENABLE_VULKAN=ON`:
+
+```
+530 targets, 0 failed, 0 warnings       (Bootstrap_Linux.cmake compiles with -Werror)
+shell/casparcg      ELF 64-bit LSB pie executable, x86-64, 30.5 MB
+libvulkan_output.a  3.47 MB
+ldd shell/casparcg | grep "not found"   ->  none
+```
+
+The binary starts, initialises logging and reaches configuration parsing. **That is the whole
+claim.** No channel has been opened, no frame rendered and no consumer instantiated on Linux;
+that needs a GPU and is §7.5.
+
+`ENABLE_VULKAN=OFF` builds too, and separately: 278 targets, 0 failed, a 17.4 MB binary. It
+needed six more fixes of its own (`f82a22e05`), because that arm had never been compiled on
+any platform — Windows defaults the option ON. Two of those six were an unguarded
+*declaration* whose every *use* was already guarded, which is invisible until something
+compiles the other arm: `av_producer`'s Vulkan importer, and the `unique_ptr` member in
+`ffmpeg_consumer` whose destructor nothing defined, which broke the link rather than the
+compile.
+
+## 7.3 The fourteen defects, and what class each belonged to
+
+Reading the source found **one** of these — the missing `ENABLE_OCIO` — and it turned out to
+be the least of them.
+
+| # | what | why Windows never saw it |
+| --: | :--- | :--- |
+| 1 | `display_blanker` added unconditionally, sourcing `../../tools/*` from **outside `src/`** and linking `user32 gdi32 dwmapi` | the Dockerfile does `COPY ./src /source`, so cmake failed at **generate**, before compiling anything |
+| 2 | `-Wno-terminate` (C++-only) in the global options next to `-Werror` | upstream's Linux build has no C targets; the fork added `expat` and `portaudio` |
+| 3 | `/WX-`, `/w` and `/W0` on tinyobjloader, lodepng and Snappy | gcc reads a slash-option as an input **file** — "linker input file not found", naming neither the flag nor the target |
+| 4 | 31 lambdas capturing `this` through `[=]` | C++20 deprecates it; MSVC warns, and `-Werror` does not |
+| 5 | `<cmath>` and `<GL/glew.h>` missing | MSVC supplies both transitively; `ogl/util/device.h` includes glew only under `#ifdef WIN32` |
+| 6 | five `std::ifstream(std::wstring)` | a Microsoft extension. The same file already used `boost::filesystem::ifstream` five lines away |
+| 7 | `std::max(0LL, int64_t)` ×3 | `int64_t` is `long long` on Windows and `long` on LP64 Linux |
+| 8 | DeckLink `GUID` and `REFIID operator==` | LinuxCOM.h makes `REFIID` a by-value 16-byte struct with no comparison operator, and has no `GUID` at all |
+| 9 | the screen consumer's VK→GL interop: WGL, `glImportMemoryWin32HandleEXT`, `DuplicateHandle`, `win32_gl_window::shared_` | guarded on `ENABLE_VULKAN` where it needed `ENABLE_VULKAN && _WIN32` |
+| 10 | `vulkan_output`: `VkSurfaceFullScreenExclusiveInfoEXT` outside the guard that used it, three `TerminateProcess` calls | the module's Linux port had never been compiled — which is exactly what `LINUX_TESTING.md` §1 recorded |
+| 11 | an exported Vulkan memory handle declared `void*` | it is `HANDLE` on Windows and an **fd** on Linux. The validity test was wrong too: invalid is `nullptr` there and `-1` here, so `if (!h)` accepted −1 and would have rejected fd 0 |
+| 12 | five FFmpeg APIs newer than the distribution's, unguarded | Windows pins FFmpeg 8; Linux takes the distro's 6.1, with no pin and no minimum declared anywhere |
+| 13 | two `#else`-arm stubs with signatures two parameters out of date | only the real arm is ever compiled on Windows |
+| 14 | `ENABLE_VULKAN=OFF` did not compile or link — a guarded enumerator with unguarded comparisons, and two unguarded members | the option defaults ON on Windows, so this arm had never been built anywhere |
+
+Thresholds for #12 were taken from FFmpeg's own `doc/APIchanges` rather than guessed —
+`av_frame_side_data_new` at lavu 59.3.100, `AVCodecContext.decoded_side_data` at lavc
+61.2.100, `av_buffersink_get_colorspace` at lavfi 9.16.100 — following this repo's rule that
+a constant comes from the body that defines it.
+
+## 7.4 Where this audit was wrong
+
+Worth stating plainly, because the failure mode is the point.
+
+* **§4 said a Linux build "quietly loses OCIO" and degrades to a `501`.** It does not: with
+  `ENABLE_OCIO` undefined, the `build_display_transform` stub had four parameters where the
+  declaration had five, so **the binary did not link**. The 501 path is real code and it was
+  unreachable. Reading `#ifdef CASPAR_ENABLE_OCIO` and the stub block beneath it — which is
+  what §4 did — cannot see an arity mismatch. A compiler can.
+* **§3, "What the audit found intact", was right about everything it checked, and the checks
+  were not the ones that mattered.** Windows-only *modules* are indeed gated, Windows APIs in
+  portable trees are indeed `#ifdef`-wrapped, and the EGL path is indeed intact. Ten of the
+  fourteen defects are in files that section correctly described as portable — the faults were
+  in compiler flags, lambda captures, integer widths, transitive includes and library
+  versions, none of which a structural read looks at.
+* **§5 named three real classes and implied a handful of instances** — "a missing
+  `find_package`, a header that only Windows pulls in transitively, or a C++20 feature MSVC
+  accepts and GCC does not". The actual count was fourteen classes and roughly seventy
+  individual sites. The direction was right; the magnitude was off by an order.
+
+The one thing §5 got exactly right: *"Reading source proves that nothing is structurally
+Windows-locked. It cannot prove the build succeeds."*
+
+## 7.5 What is still unknown
+
+Unchanged by this work, and now the whole of the remaining list:
+
+* **Does it run?** Nothing beyond process start-up has been exercised. No channel, no
+  producer, no consumer, no frame.
+* **Headless.** The EGL path compiles. Whether a channel initialises with no display is
+  untested, and WSL2's GPU support is not a fair test of a real EGL device.
+* **`vulkan_output` on Linux.** `LINUX_TESTING.md` §1 is now ticked; §2 onwards is not.
+  `VK_KHR_display` needs a directly attached output, which WSL does not have.
+* **Docker.** Nothing has been built through the Dockerfile itself. Defect #1 means the Docker
+  path was broken in a way a non-Docker build would *not* have found — so the container is now
+  the more likely of the two to work, and it remains unrun.
+* **CI.** No VP branch has been pushed, so `.github/workflows/linux.yml` still has zero runs
+  on fork code. That remains the cheapest permanent guard, and it is now cheap in a way it was
+  not on 2026-09-01: the build it would run passes locally.
+* **`ENABLE_OCIO=ON` on Linux.** The bootstrap block added in `deeb168ba` **configures** — the
+  `CHECKPOINT: Adding OpenColorIO` line prints — but its ExternalProject clones OpenColorIO at
+  build time, which the flaky git in §7.1 makes unreliable here. The OCIO sub-build itself is
+  unmeasured.

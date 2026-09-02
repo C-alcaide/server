@@ -1,13 +1,20 @@
 # Vulkan Output — Linux Testing Checklist
 
-> **STATUS, 2026-09-01: NOT ONE ITEM BELOW HAS BEEN RUN.** This is a plan, not a record.
-> The Linux port was written in `fc2691acf` and has never been compiled: the fork's VP
-> branches have **zero** runs of `.github/workflows/linux.yml`, and no local Linux or
-> Docker build has been done. Section 1 -- the compile, which needs no GPU -- is the gate
-> everything else waits on.
+> **STATUS, 2026-09-02: SECTION 1 IS DONE. SECTION 2 ONWARDS HAS STILL NEVER BEEN RUN.**
+>
+> The module compiles and links on Linux, measured rather than assumed -- see section 1. That
+> was the gate; it is open, and it is all that is open. Everything from section 2 down needs a
+> GPU with a display attached, and none of it has been executed even once.
+>
+> Getting there took fourteen classes of fix across the tree, because nothing in this fork had
+> ever been through a Linux compiler. Five were in this module: `VkSurfaceFullScreenExclusiveInfoEXT`
+> declared outside the `_WIN32` guard that used it, three `::TerminateProcess` calls, and an
+> `nvapi_helpers::enable_hdr_output` stub still carrying a signature two parameters out of
+> date. The rest are in `1098f2049`, `66b9f61b3` and their neighbours.
 >
 > An unticked checklist gets quoted as status by the next reader, which is why this note is
-> here rather than in a commit message. See
+> here rather than in a commit message -- and it is why section 1's boxes now name what was
+> measured instead of merely being ticked. See
 > [`docs/audits/PORTABILITY_LINUX_DOCKER_2026-09-01.md`](../../../docs/audits/PORTABILITY_LINUX_DOCKER_2026-09-01.md).
 
 ## Prerequisites
@@ -17,16 +24,41 @@
 - Physical display connected directly to GPU (not through USB or DP MST hub)
 - CasparCG built with `vulkan_output` module (verify in cmake output)
 
-## 1. Basic Compilation (CI — no GPU needed)
+## 1. Basic Compilation (CI — no GPU needed) — DONE 2026-09-02
 
 ```bash
 docker build --target build-casparcg \
   -f tools/linux/Dockerfile.vulkan-output .
 ```
 
-- [ ] Build completes with no errors
-- [ ] `libvulkan_output.a` is produced
-- [ ] No undefined symbols at link time
+- [x] Build completes with no errors
+- [x] `libvulkan_output.a` is produced
+- [x] No undefined symbols at link time
+
+**How it was measured, and what that does and does not cover.** Not through the Dockerfile
+above — there is no Docker on the reference machine — but in WSL Ubuntu 24.04, chosen to
+match the CI image's `buildpack-deps:noble`, with the flags the fork's own
+`tools/linux/Dockerfile` uses (`-DUSE_STATIC_BOOST=ON -DUSE_SYSTEM_CEF=OFF
+-DENABLE_VULKAN=ON`) and the Vulkan SDK it pins (LunarG 1.4.328.1). gcc 13.3, cmake 3.28.3,
+ninja 1.11.1, `-DENABLE_OCIO=OFF`.
+
+From an empty build directory: **530 targets, 0 failed, 0 warnings** — and zero warnings
+means something here, because `Bootstrap_Linux.cmake` compiles with a global `-Werror`.
+
+```
+shell/casparcg                             ELF 64-bit LSB pie executable, x86-64, 30.5 MB
+modules/vulkan_output/libvulkan_output.a                                        3.47 MB
+ldd shell/casparcg | grep "not found"                                              none
+```
+
+The binary also starts: it initialises logging and reaches configuration parsing, then exits
+because the argument it was given is not a config file — upstream's behaviour for an
+unrecognised argument, not a fault.
+
+**It says nothing about whether the module works.** No swapchain has been created, no display
+enumerated and no frame presented on Linux. WSL has no `VK_KHR_display` and no directly
+attached output, which is section 3's prerequisite. Compiling was never evidence of working;
+it is evidence that the port is syntactically real, which until now was unknown.
 
 ## 2. Module Loading
 
