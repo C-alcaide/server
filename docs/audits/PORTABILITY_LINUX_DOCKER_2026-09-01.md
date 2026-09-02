@@ -128,6 +128,8 @@ transitively, or a C++20 feature MSVC accepts and GCC does not would all show up
 compile time.
 
 **Cheapest real verification: push a VP branch to a remote whose Actions are enabled.**
+*(Corrected 2026-09-02 — see §7.5. `origin` is NOT such a remote: Actions is disabled at the
+repository level on `C-alcaide/server`, so the push done that day triggered nothing.)*
 The workflow already exists and triggers on any push, needs no GPU for the compile job, and
 would answer the question in about eight minutes. That is an outward-facing action on a
 shared remote, so it wants a decision rather than an assumption.
@@ -148,6 +150,9 @@ other:
 
 1. **Push a VP branch and let the existing Linux CI compile it.** One push, eight minutes,
    and it converts every "unverified" above into a fact.
+   *(Corrected 2026-09-02: the push is done and it ran nothing — Actions is switched off for
+   the repository. Enabling it is the actual first step, and it is a settings change rather
+   than a code one. See §7.5.)*
 2. **Add `ENABLE_OCIO` to `Bootstrap_Linux.cmake`.** OCIO builds on Linux and is packaged
    by every major distribution; the option is simply absent. Without it a Linux deployment
    quietly loses the fork's colour management — which is most of what makes it a VP server.
@@ -284,9 +289,25 @@ Unchanged by this work, and now the whole of the remaining list:
 * **Docker.** Nothing has been built through the Dockerfile itself. Defect #1 means the Docker
   path was broken in a way a non-Docker build would *not* have found — so the container is now
   the more likely of the two to work, and it remains unrun.
-* **CI.** No VP branch has been pushed, so `.github/workflows/linux.yml` still has zero runs
-  on fork code. That remains the cheapest permanent guard, and it is now cheap in a way it was
-  not on 2026-09-01: the build it would run passes locally.
+* **CI — and this section had the wrong premise until 2026-09-02.** `CasparVPV-GS` HAS now
+  been pushed, and **no workflow ran**, because **GitHub Actions is disabled at the repository
+  level** on `C-alcaide/server`: `gh api repos/C-alcaide/server/actions/permissions` returns
+  `{"enabled": false}`. So §5 and §6's "push a VP branch and let the existing Linux CI compile
+  it — one push, eight minutes" was wrong about the eight minutes. A push alone achieves
+  nothing here; **someone has to turn Actions on in the repository settings first.**
+
+  Note also that `gh run list` in this working tree resolves to **`upstream`**, not to the
+  fork, because the tree has three remotes. §1's table of green runs on `master` and `v2.5.x`
+  is therefore CasparCG's CI, which §1 said, but it is very easy to read a `gh run list`
+  output here as the fork's. The fork's own history is **15 runs, all in March 2026 on
+  `feature/cuda-prores`, and every one of them failed** — Linux *and* Windows. This fork's CI
+  has never been green, on any platform.
+
+  Once Actions is enabled, there are **three** workflows, not the one this audit discussed:
+  `linux.yml`, `linux-system.yml` ("Build Linux with system dependencies") and `windows.yml`.
+  All three trigger on any push, their branch filters being commented out. `linux-system.yml`
+  is the interesting extra one for the FFmpeg-version findings in §7.3 #12, since building
+  against the distribution's libav* is exactly what it does.
 * **`ENABLE_OCIO=ON` on Linux.** The bootstrap block added in `deeb168ba` **configures** — the
   `CHECKPOINT: Adding OpenColorIO` line prints — but its ExternalProject clones OpenColorIO at
   build time, which the flaky git in §7.1 makes unreliable here. The OCIO sub-build itself is
