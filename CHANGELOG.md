@@ -1,6 +1,66 @@
 CasparVP — Unreleased
 ==========================================
 
+### Added: the fork builds on Linux — it did not before, in any configuration
+
+**No rendered output changes on Windows.** Every fix here is conditional compilation, a compiler
+flag, a lambda capture list, an integer width or a missing include; the Windows build keeps the
+identical flags and the identical code on every path. It is listed because what the software can do
+changed: there was no Linux build of this fork, and now there is one.
+
+Measured in WSL Ubuntu 24.04 — chosen to match the CI image's `buildpack-deps:noble` — with gcc
+13.3, cmake 3.28.3, and the flags and pinned LunarG SDK from the fork's own
+`tools/linux/Dockerfile`. From an empty build directory:
+
+| configuration | targets | failed | warnings | binary |
+| :--- | ---: | ---: | ---: | ---: |
+| `ENABLE_VULKAN=ON` | 530 | 0 | 0 | 30.5 MB |
+| `ENABLE_VULKAN=OFF` | 278 | 0 | 0 | 17.4 MB |
+
+Zero warnings is a real number: `Bootstrap_Linux.cmake` compiles with a global `-Werror`, which is
+also why several of the fixes below were hard errors rather than warnings.
+
+**Fourteen classes of defect, across roughly seventy sites.** The ones worth knowing:
+
+* **`display_blanker` broke the build at cmake's *generate* step** — before anything compiled. It
+  was added unconditionally and sources `../../tools/display_blanker.{cpp,rc}` from **outside
+  `src/`**, which the Dockerfile's `COPY ./src /source` does not provide. So the fork's Docker
+  build, and therefore the Linux CI job, had been failing since that target was added.
+* **`ENABLE_OCIO=OFF` did not link**, which corrects a claim in the portability audit: it said a
+  Linux build "quietly loses OCIO" and degrades to a `501`. The `501` path is real code and was
+  unreachable — `build_display_transform`'s stub had four parameters where the declaration had
+  five. A second stub, `nvapi_helpers::enable_hdr_output`, was two parameters out of date the same
+  way. Neither is findable by reading, and neither is findable by testing: only the real arm is ever
+  compiled on Windows.
+* **Five FFmpeg APIs were used without version guards.** Windows pins FFmpeg 8; Linux takes the
+  distribution's through `find_package(FFmpeg REQUIRED)`, with no pin and no declared minimum, and
+  Ubuntu 24.04 ships **6.1**. Thresholds are now taken from FFmpeg's own `doc/APIchanges` rather
+  than guessed. One fallback is a genuine loss of function before FFmpeg 7.0 — HDR10 static
+  metadata is not attached, because there is no pre-7.0 way to reach the encoder's init-time side
+  data — and the rest degrade to what those releases did anyway.
+* **An exported Vulkan memory handle is a `void*` on Windows and a file descriptor on Linux**, and
+  the validity test was wrong in both directions there: invalid is `nullptr` on Windows and `-1` on
+  Linux, so `if (!handle)` accepted −1 and would have rejected fd 0. `platform_handles.h` now
+  carries `to_opaque`/`from_opaque` so the round trip is expressed once.
+* **31 lambdas captured `this` implicitly through `[=]`**, deprecated in C++20. MSVC warns; with
+  `-Werror` each is a build failure. Rewritten as `[=, this]`, which is what `[=]` already meant.
+* **One missing `#ifdef` produced about 100 of 130 errors in a file.** `hap_producer`'s
+  Vulkan-derived wrapper class was unguarded, so with Vulkan off the class failed to open, its
+  `override` members became free functions, and the unbalanced brace closed `namespace hap` early —
+  every later diagnostic named `caspar::RawPacket` and suggested `caspar::hap::NUM_SLOTS`. An error
+  count is not a defect count.
+
+**What this does not cover, and it is most of what matters.** Nothing has *run* on Linux beyond
+process start-up: the binary initialises logging and reaches config parsing, and no channel,
+producer, consumer or frame has been exercised. `vulkan_output`'s `LINUX_TESTING.md` §1 is now
+ticked and §2 onwards is not — `VK_KHR_display` needs a directly attached output, which WSL has
+not got. Nothing has been built through the Dockerfile itself, and no VP branch has been pushed, so
+`.github/workflows/linux.yml` still has zero runs on fork code. Compiling was never evidence of
+working; it is evidence that the port is syntactically real, which until now was unknown.
+
+Full account, including where reading the source predicted the wrong thing, in
+`docs/audits/PORTABILITY_LINUX_DOCKER_2026-09-01.md` §7.
+
 ### Changed: `CUDA_NOTCHLC ... DEVICE <n>` is refused when it is not the mixer's GPU
 
 **This changes behaviour for an existing config, on the Vulkan mixer only**, and the outcome it
