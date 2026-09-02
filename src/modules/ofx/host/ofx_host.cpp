@@ -22,6 +22,14 @@
 #include "ofx_effect_instance.h"
 #include "ofx_includes.h"
 
+// GLEW must precede any other GL header. This file calls GL directly for its OpenGL
+// render backend and used to get the declarations transitively: `ogl/util/device.h`
+// includes <GL/glew.h> only under `#ifdef WIN32`, so on Linux every gl* call and GL_*
+// constant here was undeclared -- about 60 errors from one missing include. `isf_shader.cpp`
+// and `screen_consumer.cpp` include it directly for the same reason, and the ofx module
+// already links GLEW::glew unconditionally, so nothing else changes.
+#include <GL/glew.h>
+
 #include <accelerator/ogl/util/device.h>
 #include <accelerator/ogl/util/texture.h>
 

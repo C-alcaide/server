@@ -15,6 +15,7 @@
 #include <boost/property_tree/json_parser.hpp>
 #include <boost/property_tree/ptree.hpp>
 
+#include <cmath> // std::isfinite — MSVC provides it transitively, libstdc++ does not
 #include <sstream>
 #include <stdexcept>
 
