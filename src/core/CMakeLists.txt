@@ -3,9 +3,22 @@ project (core)
 
 # tinygltf and tinyobjloader are fetched in the top-level CMakeLists.txt
 
-# tinyobjloader compiles sources and inherits global /WX and /FI — fix for third-party code
+# tinyobjloader compiles sources and inherits the global warnings-as-errors and /FI — this
+# relaxes them for third-party code.
+#
+# PER COMPILER, because a bare `/WX-` reaches gcc as a FILENAME. gcc does not reject an
+# unknown slash-option; it treats it as a second input and fails with "cannot specify '-o'
+# with '-c', '-S' or '-E' with multiple files" -- a message that names neither the flag nor
+# this file. It was the first target to build on the first Linux build of this fork, and it
+# failed for a Windows flag.
+#
+# `-w` is the Linux equivalent and is needed on its own account: Bootstrap_Linux.cmake sets
+# a global `-Werror`, so this third-party source is warning-gated there too. `modules/ltc`
+# already carries exactly this pattern; `modules/isf` and `modules/remotewall` guard theirs
+# with `if (MSVC)`. This site was the only unguarded one.
 if(TARGET tinyobjloader)
-    target_compile_options(tinyobjloader PRIVATE /WX-)
+    target_compile_options(tinyobjloader PRIVATE
+        "$<$<CXX_COMPILER_ID:MSVC>:/WX->$<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-w>")
     # Global /FI requires the source root in include path to find disable_silly_warnings.h
     target_include_directories(tinyobjloader PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/..")
 endif()
@@ -100,8 +113,19 @@ set(HEADERS
 casparcg_add_library(core SOURCES ${SOURCES} ${HEADERS}
 	${tinygltf_SOURCE_DIR}/examples/common/lodepng.cpp
 )
+# `/w` is MSVC's "no warnings"; gcc's is `-w`. COMPILE_FLAGS is a plain string, so it
+# cannot carry a generator expression the way COMPILE_OPTIONS above can -- hence the `if`.
+#
+# Unguarded, gcc read `/w` as a LINKER INPUT and failed with "/w: linker input file not
+# found", naming no flag and no cause. Same class as the `/WX-` on tinyobjloader a few
+# lines up, and it is the reason a flag sweep has to include the lowercase form.
+if (MSVC)
+	set(LODEPNG_NO_WARN "/w")
+else ()
+	set(LODEPNG_NO_WARN "-w")
+endif ()
 set_source_files_properties(${tinygltf_SOURCE_DIR}/examples/common/lodepng.cpp PROPERTIES
-	COMPILE_FLAGS "/w"
+	COMPILE_FLAGS "${LODEPNG_NO_WARN}"
 	SKIP_PRECOMPILE_HEADERS ON
 )
 target_include_directories(core PRIVATE ..)

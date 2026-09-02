@@ -175,7 +175,20 @@ IF (ENABLE_VULKAN)
 ENDIF()
 
 IF (CMAKE_CXX_COMPILER_ID MATCHES "GNU")
-    ADD_COMPILE_OPTIONS (-Wno-terminate)
+    # CXX ONLY. `-Wno-terminate` is a C++/ObjC++ option, and gcc does not merely ignore it
+    # on a C file -- it emits "command-line option '-Wno-terminate' is valid for C++/ObjC++
+    # but not for C", which the `-Werror` two lines above turns into a hard error. So every
+    # C translation unit in the build fails, at the command line, before it is even parsed.
+    #
+    # It never fired upstream because upstream's Linux build has no C targets. The fork
+    # added two: `expat` (pulled in by the OpenFX host block below) and `portaudio`. All
+    # three expat objects failed this way on the first Linux build ever attempted of this
+    # fork.
+    #
+    # `-w` on the individual target is not the fix -- the OFX block already does that for
+    # `openfx_host` and it is why only its C dependency broke. Restricting the flag to the
+    # language it belongs to fixes every C target at once, including any added later.
+    ADD_COMPILE_OPTIONS ($<$<COMPILE_LANGUAGE:CXX>:-Wno-terminate>)
 ELSEIF (CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     # Help TBB figure out what compiler support for c++11 features
     # https://github.com/01org/tbb/issues/22
