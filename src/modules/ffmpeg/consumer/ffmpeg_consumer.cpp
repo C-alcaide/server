@@ -1698,7 +1698,9 @@ struct ffmpeg_consumer : public core::frame_consumer
     AVPixelFormat gpu_hw_pix_fmt_ = AV_PIX_FMT_CUDA;
     /// Built lazily on the first frame, because the mixer's `device*` is only reachable through
     /// a composited texture -- the consumer is never handed one directly.
+#ifdef ENABLE_VULKAN
     std::unique_ptr<accelerator::vulkan::av_vulkan_exporter> vk_exporter_;
+#endif
     /// The mixer's `accelerator::vulkan::device*`, from `channel_info`. Null on any other
     /// backend, and the Vulkan encode path declines rather than assuming one.
     void* vk_mixer_device_ = nullptr;
@@ -2105,8 +2107,10 @@ struct ffmpeg_consumer : public core::frame_consumer
 
                             if (vk_decline == nullptr) {
                                 gpu_hw_pix_fmt_ = AV_PIX_FMT_VULKAN;
+#ifdef ENABLE_VULKAN
                                 vk_exporter_ = std::make_unique<accelerator::vulkan::av_vulkan_exporter>(
                                     vk_mixer_device_);
+#endif
                                 vk_convert_filter_ = vk_convert_filter;
                                 gpu_direct_.store(true, std::memory_order_relaxed);
                                 CASPAR_LOG(info) << L"[ffmpeg] Vulkan encode: " << u16(selected_codec)
@@ -2154,7 +2158,17 @@ struct ffmpeg_consumer : public core::frame_consumer
                         }
                     }
 
-                    video_stream.emplace(oc, ":v", oc->oformat->video_codec, format_desc, realtime_, depth_, options, channel_info.default_color_space, channel_info.default_color_transfer, gpu_frames_ctx.get(), &gpu_uploader, &gpu_direct_, &gpu_uploader_vk, gpu_hw_pix_fmt_, vk_exporter_.get(), vk_convert_filter_, field_mode_request);
+                    // The parameter is a pointer to a forward-declared type, so a null one
+                    // compiles with no Vulkan backend present -- which is what `vk_decline`
+                    // above would have produced anyway. Without this the unique_ptr member
+                    // and its destructor were instantiated and the link failed on
+                    // `av_vulkan_exporter::~av_vulkan_exporter`.
+#ifdef ENABLE_VULKAN
+                    auto* vk_exporter_arg = vk_exporter_.get();
+#else
+                    class accelerator::vulkan::av_vulkan_exporter* vk_exporter_arg = nullptr;
+#endif
+                    video_stream.emplace(oc, ":v", oc->oformat->video_codec, format_desc, realtime_, depth_, options, channel_info.default_color_space, channel_info.default_color_transfer, gpu_frames_ctx.get(), &gpu_uploader, &gpu_direct_, &gpu_uploader_vk, gpu_hw_pix_fmt_, vk_exporter_arg, vk_convert_filter_, field_mode_request);
 
                     {
                         std::lock_guard<std::mutex> lock(state_mutex_);

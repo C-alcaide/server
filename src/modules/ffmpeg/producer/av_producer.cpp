@@ -1863,8 +1863,16 @@ class Decoder
             const bool video_queue_available = [&] {
                 if (!vk_mixer_device_ || !vk_video_decode_)
                     return false;
+#ifdef ENABLE_VULKAN
                 const auto info = accelerator::vulkan::describe_shared_device(vk_mixer_device_);
                 return info.valid && info.video_decode_qf_present;
+#else
+                // No Vulkan backend: there is no shared device to describe, and
+                // vk_mixer_device_ is a null `void* const` that nothing can set, so the
+                // early return above already covers every real case. This arm exists so
+                // ENABLE_VULKAN=OFF compiles.
+                return false;
+#endif
             }();
 
             const bool want_compute_family =
@@ -3245,7 +3253,11 @@ struct AVProducer::Impl
     const bool                                                   vk_compute_decode_ = false;
     const bool                                                   vk_video_decode_   = false;
     void* const                                                  vk_mixer_device_ = nullptr;
+#ifdef ENABLE_VULKAN
+    // Guarded, like every USE of it -- all four are inside `_WIN32` and ENABLE_VULKAN
+    // already. Only the declaration was not, so ENABLE_VULKAN=OFF failed here.
     std::unique_ptr<accelerator::vulkan::av_vulkan_importer>     vk_importer_;
+#endif
 
     std::map<int, std::vector<AVFilterContext*>> sources_;
 

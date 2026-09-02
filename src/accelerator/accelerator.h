@@ -33,9 +33,20 @@ enum class accelerator_backend
 {
     invalid = 0,
     opengl,
-#ifdef ENABLE_VULKAN
+    /// NOT guarded on ENABLE_VULKAN, though it once was.
+    ///
+    /// The enumerator costs nothing when there is no Vulkan backend behind it, and guarding
+    /// it broke `ENABLE_VULKAN=OFF`: `accelerator.cpp` compares `backend_` against it at four
+    /// places -- the GPU-affinity refusal and the backend selection -- none of them guarded,
+    /// so the build failed with "'vulkan' is not a member of 'accelerator_backend'". Guarding
+    /// four comparisons instead would say the same thing four times and leave the fifth one
+    /// someone adds to fail again.
+    ///
+    /// `backend_` simply never holds this value without Vulkan: the only assignment, in
+    /// `shell/server.cpp`, is itself inside `#ifdef ENABLE_VULKAN`. So `!= vulkan` is true
+    /// and `== vulkan` is false, which is exactly what those four sites want. Nothing
+    /// switches on this enum exhaustively, so no -Werror warning follows either.
     vulkan,
-#endif
 };
 
 class accelerator
