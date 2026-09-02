@@ -2813,7 +2813,7 @@ std::future<std::wstring> mixer_cdl_file_command(command_context& ctx)
 
     // As-is first, then under <media-path>: the same resolution CALIBRATION LUT performs.
     std::wstring path = ctx.parameters.at(0);
-    if (!std::ifstream(path).is_open())
+    if (!boost::filesystem::ifstream(path).is_open())
         path = caspar::env::media_folder() + L"/" + path;
 
     // A second parameter that parses as a number is a duration, not an id: `MIXER CDL`'s
@@ -3050,7 +3050,7 @@ static bool parse_lut_strength(const std::wstring& text, float& out)
 
 static std::shared_ptr<const core::lut3d_data> parse_cube_file(const std::wstring& path)
 {
-    std::ifstream file(path);
+    boost::filesystem::ifstream file(path);
     if (!file.is_open())
         return nullptr;
 
@@ -3177,7 +3177,7 @@ std::future<std::wstring> mixer_lut3d_command(command_context& ctx)
 
     // Resolve path: try as-is first, then relative to media folder
     std::wstring path = ctx.parameters.at(0);
-    if (!std::ifstream(path).is_open()) {
+    if (!boost::filesystem::ifstream(path).is_open()) {
         auto media = caspar::env::media_folder();
         path = media + L"/" + path;
     }
@@ -3421,7 +3421,7 @@ std::future<std::wstring> amf_command(command_context& ctx)
     // As given, then under <media-path> -- the same resolution CALIBRATION LUT and
     // MIXER CDL_FILE use.
     std::wstring path = ctx.parameters.at(0);
-    if (!std::ifstream(path).is_open())
+    if (!boost::filesystem::ifstream(path).is_open())
         path = caspar::env::media_folder() + L"/" + path;
 
     pt::wptree amf;
@@ -3601,7 +3601,7 @@ std::future<std::wstring> calibration_command(command_context& ctx)
 
         // Resolve path: try as-is first, then relative to media folder
         std::wstring path = ctx.parameters.at(1);
-        if (!std::ifstream(path).is_open()) {
+        if (!boost::filesystem::ifstream(path).is_open()) {
             auto media = caspar::env::media_folder();
             path       = media + L"/" + path;
         }
