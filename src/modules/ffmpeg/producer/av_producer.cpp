@@ -46,12 +46,23 @@
 #include <accelerator/ogl/util/device.h>
 #include <accelerator/ogl/util/texture.h>
 #ifdef ENABLE_VULKAN
+// Windows-only: the D3D11 import bridge exists to open a DXGI shared handle.
 // Header-only in the Vulkan sense: it exposes no Vulkan types, so this
 // translation unit needs neither the Vulkan headers nor its dispatch loader.
 #include <accelerator/vulkan/util/d3d11_import_bridge.h>
+#endif
+#endif
+
+#ifdef ENABLE_VULKAN
+// OUTSIDE the _WIN32 block, because neither of these is Windows-specific and the code that
+// uses them is not guarded on the platform either: `describe_shared_device` is called when
+// deciding whether an FFmpeg Vulkan compute decoder can run, and `av_vulkan_importer` is a
+// plain member of the producer. Nested under _WIN32 they were simply absent on Linux, and
+// the errors -- "'caspar::accelerator::vulkan' has not been declared" -- pointed at the
+// USES rather than at the missing include. Same "no Vulkan types exposed" property as the
+// bridge above, so this still pulls in no Vulkan header or dispatch loader.
 #include <accelerator/vulkan/util/av_vulkan_import.h>
 #include <accelerator/vulkan/util/shared_device_info.h>
-#endif
 #endif
 
 #ifdef _MSC_VER
@@ -74,7 +85,14 @@ extern "C" {
 #include <libavutil/pixfmt.h>
 #include <libavutil/samplefmt.h>
 #include <libavutil/hwcontext.h>
+#ifdef _WIN32
+// This header #includes <d3d11.h> itself, so it needs the same guard as the direct
+// <d3d11.h> above -- which it did not have. Every USE of AVD3D11VADeviceContext in this
+// file is already inside #ifdef _WIN32; only the include was missed, and on Linux it
+// failed as "d3d11.h: No such file or directory" from inside libavutil rather than from
+// anything in this tree.
 #include <libavutil/hwcontext_d3d11va.h>
+#endif
 #if defined(ENABLE_VULKAN) && LIBAVUTIL_VERSION_MAJOR >= 60
 // FFmpeg 8's Vulkan compute decoders. The module gets the Vulkan SDK's include path for
 // this one header alone (see src/modules/ffmpeg/CMakeLists.txt); it touches no Vulkan type
@@ -1532,6 +1550,12 @@ class Decoder
             // for P010 surfaces it made av_hwframe_transfer_data fail outright
             // ("Error transferring the data to system memory: Invalid argument")
             // -- i.e. it broke the ordinary CPU path for 10-bit HEVC.
+            // _WIN32 only: AVD3D11VAFramesContext and D3D11_BIND_SHADER_RESOURCE come from
+            // libavutil's d3d11va header and from <d3d11.h>, both of which exist only on
+            // Windows. The enclosing loop compiles anywhere -- AV_PIX_FMT_D3D11 is a plain
+            // enumerator -- and on Linux it is unreachable, because no D3D11 hwdevice can be
+            // created there for the decoder to offer the format from.
+#ifdef _WIN32
             if (gpu_direct_decode_requested() && !ctx->hw_frames_ctx && ctx->hw_device_ctx) {
                 AVBufferRef* frames_ref = nullptr;
                 if (avcodec_get_hw_frames_parameters(ctx, ctx->hw_device_ctx, AV_PIX_FMT_D3D11, &frames_ref) >= 0 &&
@@ -1557,6 +1581,7 @@ class Decoder
                     }
                 }
             }
+#endif // _WIN32
 
             return *p;
         }
@@ -1657,13 +1682,22 @@ class Decoder
     // deinterlacer back rather than playing combed forever.
     std::atomic<bool> saw_interlaced_frame_{false};
 
-#ifdef _WIN32
-    // When true, D3D11 frames are kept as-is (no CPU transfer) and placed in hw_output.
-    std::atomic<bool>                         gpu_direct_mode_{false};
     /// Armed by a flush (seek or loop wrap), cleared by the first frame that arrives. See the
     /// receive call: it selects AV_CODEC_RECEIVE_FRAME_FLAG_SYNCHRONOUS for exactly the
     /// frames a cue is waiting on, and nothing else.
-    bool                                      sync_receive_ = false;
+    ///
+    /// OUTSIDE the _WIN32 block below, where it used to sit among the GPU-direct members.
+    /// It has nothing to do with GPU-direct or with Windows: it is an FFmpeg 8 seek
+    /// optimisation, and its three uses are all platform-independent. On Linux the
+    /// declaration was therefore absent while the assignment at the flush was still
+    /// compiled. The two uses at the receive call are additionally behind an FFmpeg 8
+    /// version check, so on the CI image's FFmpeg 6.1 only the flush site failed -- with
+    /// FFmpeg 8 on Linux all three would have.
+    bool sync_receive_ = false;
+
+#ifdef _WIN32
+    // When true, D3D11 frames are kept as-is (no CPU transfer) and placed in hw_output.
+    std::atomic<bool>                         gpu_direct_mode_{false};
     // Set when the decoder emits an ordinary frame while it was asked to produce
     // hardware surfaces -- i.e. hardware decoding declined after the fact. The
     // producer watches this so it stops waiting for surfaces that never come.
@@ -1796,9 +1830,18 @@ class Decoder
             // prores and ffv1 are measured working here (engagement 2/2, clean). prores_raw
             // and dpx are compute decoders by the same FFmpeg configuration but are UNTESTED:
             // there is no ProRes RAW encoder to make a fixture with, and no DPX asset here.
+            // AV_CODEC_ID_PRORES_RAW is FFmpeg 8 (libavutil 60). Guarded the way
+            // ffmpeg_consumer.cpp already guards its FFmpeg 8 symbols, because the Linux
+            // build takes libav* from the distribution -- `find_package(FFmpeg REQUIRED)`,
+            // no pin -- and Ubuntu 24.04, the CI image, ships FFmpeg 6.1. Dropping the
+            // entry on an older libavutil costs nothing real: it is one of the two
+            // compute decoders in this list marked UNTESTED just above, for want of a
+            // ProRes RAW encoder to make a fixture with.
             static const std::set<AVCodecID> vulkan_compute_decoders = {
                 AV_CODEC_ID_PRORES,
+#if LIBAVUTIL_VERSION_MAJOR >= 60 // FFmpeg 8
                 AV_CODEC_ID_PRORES_RAW,
+#endif
                 AV_CODEC_ID_FFV1,
                 AV_CODEC_ID_DPX,
             };
@@ -1991,7 +2034,7 @@ class Decoder
             output_capacity = ctx->thread_count;
         }
 
-        thread = boost::thread([=]() {
+        thread = boost::thread([=, this]() {
             while (!abort_.load(std::memory_order_relaxed)) {
                 // Named so the catch below can say WHERE, which is the only reason the
                 // prores_vulkan fault could be attributed at all: "Decoder thread
@@ -2200,8 +2243,17 @@ class Decoder
 #endif
                             ;
 
+                        // _WIN32, matching where both flags are declared. Every other use of
+                        // them, and every assignment that ever sets gpu_direct_mode_ true, is
+                        // already inside #ifdef _WIN32 -- this was the one use that was not,
+                        // so on Linux it referenced members that do not exist. Moving the
+                        // declarations out instead would leave flags nothing ever sets.
+#ifdef _WIN32
                         if (!hw_surface && gpu_direct_mode_.load())
                             saw_software_frame_.store(true, std::memory_order_relaxed);
+#else
+                        (void)hw_surface;
+#endif
 
                         // sw_pix_fmt is probed from the hardware frames context when the
                         // decoder is opened, before anyone knows whether hardware decoding
@@ -2813,17 +2865,34 @@ struct Filter
                     // Declared on the buffersrc so the graph carries it: AVFilterLink has an
                     // alpha_mode of its own, and a link left unspecified hands the sink
                     // frames that no longer say what the decoder said.
-                    int src_alpha = AVALPHA_MODE_UNSPECIFIED;
+                    // AVALPHA_MODE_UNSPECIFIED is itself FFmpeg 8, so it cannot be the
+                    // initialiser on an older libavutil. Its value is 0 and the guarded
+                    // load below is the only thing that ever changes it, so on FFmpeg 6/7
+                    // `src_alpha` stays 0 and the `!=` test that follows is always false --
+                    // exactly the "no alpha mode to declare" behaviour that release has.
 #if LIBAVUTIL_VERSION_MAJOR >= 60
-                    src_alpha = it->second.frame_alpha_mode.load(std::memory_order_relaxed);
+                    int src_alpha = AVALPHA_MODE_UNSPECIFIED;
+                    src_alpha     = it->second.frame_alpha_mode.load(std::memory_order_relaxed);
+#else
+                    int src_alpha = 0;
 #endif
 
+                    // `src_alpha != 0` rather than `!= AVALPHA_MODE_UNSPECIFIED`, which does
+                    // not exist before FFmpeg 8. The enumerator's value IS 0, so this is the
+                    // same test wherever both compile.
                     if (src_csp != AVCOL_SPC_UNSPECIFIED || src_rng != AVCOL_RANGE_UNSPECIFIED ||
-                        src_alpha != AVALPHA_MODE_UNSPECIFIED) {
+                        src_alpha != 0) {
                         AVBufferSrcParameters* par = av_buffersrc_parameters_alloc();
                         if (par) {
+                            // AVBufferSrcParameters gained color_space/color_range in
+                            // FFmpeg 7.1 (libavutil 59.39). Older libavfilter has no field
+                            // to carry them, so the declaration is simply skipped -- the
+                            // graph then falls back to the frame's own metadata, which is
+                            // what this code exists to make explicit rather than to change.
+#if LIBAVUTIL_VERSION_MAJOR > 59 || (LIBAVUTIL_VERSION_MAJOR == 59 && LIBAVUTIL_VERSION_MINOR >= 39)
                             par->color_space = src_csp;
                             par->color_range = src_rng;
+#endif
 #if LIBAVUTIL_VERSION_MAJOR >= 60
                             par->alpha_mode = static_cast<AVAlphaMode>(src_alpha);
 #endif

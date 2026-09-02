@@ -24,7 +24,8 @@
 #include "../util/av_assert.h"
 #include "../util/av_util.h"
 #include "cuda_gl_upload.h"
-#include "cuda_vk_upload.h"
+#include "cuda_vk_upload.h"
+
 #include <accelerator/vulkan/util/av_vulkan_export.h>
 #include "../util/vulkan_hwdevice.h"
 
@@ -87,9 +88,18 @@ extern "C" {
 #include <libavutil/csp.h>
 #include <libavutil/mastering_display_metadata.h>
 #include <libavutil/hwcontext.h>
-#include <libavutil/hwcontext_cuda.h>
-#if LIBAVUTIL_VERSION_MAJOR >= 60
-#include <libavutil/hwcontext_vulkan.h>
+// This header #includes <cuda.h>, so it needs the CUDA toolkit's include path. The ffmpeg
+// module only adds that (and only defines CASPAR_FFMPEG_HAS_CUDA) when CUDAToolkit is
+// found, which today happens only inside its `if (MSVC)` block -- so on Linux the include
+// failed as "cuda.h: No such file or directory" from inside libavutil.
+#ifdef CASPAR_FFMPEG_HAS_CUDA
+#include <libavutil/hwcontext_cuda.h>
+#endif
+
+#if LIBAVUTIL_VERSION_MAJOR >= 60
+
+#include <libavutil/hwcontext_vulkan.h>
+
 #endif
 #include <libavutil/opt.h>
 #include <libavutil/pixdesc.h>
@@ -958,7 +968,15 @@ struct Stream
                 const auto* d      = av_pix_fmt_desc_get(enc->pix_fmt);
                 const bool  is_hw  = d && (d->flags & AV_PIX_FMT_FLAG_HWACCEL);
                 const bool  is_rgb = d && (d->flags & AV_PIX_FMT_FLAG_RGB);
+                // lavfi 9.16.100 per FFmpeg's own doc/APIchanges. The CI image (Ubuntu
+                // 24.04) ships FFmpeg 6.1 at lavfi 9.12, so this is guarded rather than
+                // required -- the line is a diagnostic, and losing the matrix from it is
+                // not worth refusing to build.
+#if LIBAVFILTER_VERSION_INT >= AV_VERSION_INT(9, 16, 100)
                 const auto neg_cs = av_buffersink_get_colorspace(sink);
+#else
+                const auto neg_cs = AVCOL_SPC_UNSPECIFIED;
+#endif
                 CASPAR_LOG(info) << L"[ffmpeg] " << u16(codec->name) << L" input format " << u16(fmt_name)
                                  << (is_hw    ? L" (device frames, no readback)"
                                      : is_rgb ? L" (no host conversion)"
@@ -1035,7 +1053,19 @@ struct Stream
                     // during INIT, from `avctx->decoded_side_data`, so anything arriving with
                     // the frames is too late and is simply ignored -- silently, which is why
                     // this needed a stream capture to notice rather than a return code.
+                    // Two APIs, two versions, both from FFmpeg's doc/APIchanges:
+                    // av_frame_side_data_new and AV_FRAME_SIDE_DATA_FLAG_UNIQUE arrived in
+                    // lavu 59.3.100, and AVCodecContext.[nb_]decoded_side_data in lavc
+                    // 61.2.100 -- both FFmpeg 7.0. Ubuntu 24.04, which is the Linux CI
+                    // image, ships 6.1 (lavu 58.29 / lavc 60), so neither exists there.
+                    //
+                    // The fallback returns nullptr, which every caller below already
+                    // handles -- the HDR10 static metadata is simply not attached. That is
+                    // a real loss of function on an old FFmpeg, and the honest one: there
+                    // is no pre-7.0 way to reach the encoder's init-time side data, which
+                    // is the whole finding this block records.
                     const auto add_side_data = [&](AVFrameSideDataType type, size_t size) -> void* {
+#if LIBAVUTIL_VERSION_INT >= AV_VERSION_INT(59, 3, 100) &&                                             LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(61, 2, 100)
                         auto* sd = av_frame_side_data_new(&enc->decoded_side_data,
                                                           &enc->nb_decoded_side_data, type, size,
                                                           AV_FRAME_SIDE_DATA_FLAG_UNIQUE);
@@ -1043,6 +1073,11 @@ struct Stream
                             std::memset(sd->data, 0, size);
                         }
                         return sd != nullptr ? sd->data : nullptr;
+#else
+                        (void)type;
+                        (void)size;
+                        return nullptr;
+#endif
                     };
 
                     if (auto* raw = add_side_data(AV_FRAME_DATA_MASTERING_DISPLAY_METADATA,
@@ -1779,10 +1814,15 @@ struct ffmpeg_consumer : public core::frame_consumer
         // not an option: the DeckLink DVP and CUDA ProRes modules have already
         // activated it by now, and FFmpeg refuses with "Primary context already
         // active with incompatible flags".
+        // AVCUDADeviceContext comes from the header guarded above. Without CUDA the
+        // uploaders are stubs and av_hwdevice_ctx_create(AV_HWDEVICE_TYPE_CUDA) at the top
+        // of this function has already failed, so there is nothing to hand a context to.
+#ifdef CASPAR_FFMPEG_HAS_CUDA
         auto* hw_dev  = reinterpret_cast<AVHWDeviceContext*>(gpu_device_ctx->data);
         auto* cuda_hw = static_cast<AVCUDADeviceContext*>(hw_dev->hwctx);
         gpu_uploader.set_context(cuda_hw->cuda_ctx);
         gpu_uploader_vk.set_context(cuda_hw->cuda_ctx);
+#endif
 
         return owned;
     }
@@ -1851,7 +1891,7 @@ struct ffmpeg_consumer : public core::frame_consumer
 
         graph_->set_text(print());
 
-        frame_thread_ = std::thread([=] {
+        frame_thread_ = std::thread([=, this] {
             caspar::set_thread_name(L"ffmpeg_consumer_frame_thread");
             caspar::set_thread_realtime_priority();
             try {
