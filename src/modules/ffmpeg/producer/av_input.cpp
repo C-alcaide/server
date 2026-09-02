@@ -32,7 +32,10 @@ Input::Input(const std::string& filename, std::shared_ptr<diagnostics::graph> gr
     graph_->set_color("input", diagnostics::color(0.7f, 0.4f, 0.4f));
 
     buffer_.set_capacity(256);
-    thread_ = boost::thread([=] {
+    // [this], not [=]: implicit capture of `this` through `[=]` is deprecated in C++20 and
+    // Bootstrap_Linux.cmake's global -Werror rejects it. Behaviour-identical -- the body
+    // touches only members, which is exactly what `[=]` was capturing `this` for.
+    thread_ = boost::thread([this] {
         set_thread_name(L"[ffmpeg::av_producer::Input]");
 
         int consecutive_enomem = 0;

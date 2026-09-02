@@ -760,7 +760,7 @@ struct stage::impl : public std::enable_shared_from_this<impl>
 
     std::future<std::wstring> call(int index, const std::vector<std::wstring>& params)
     {
-        return flatten(executor_.begin_invoke([=] {
+        return flatten(executor_.begin_invoke([=, this] {
             auto result = get_layer(index).foreground()->call(params).share();
 
             // Detect seek commands for keyframe media time tracking.
@@ -800,7 +800,7 @@ struct stage::impl : public std::enable_shared_from_this<impl>
 
     std::future<void> kf_set(int layer, std::shared_ptr<void> data)
     {
-        return executor_.begin_invoke([=] {
+        return executor_.begin_invoke([=, this] {
             auto tl = std::static_pointer_cast<caspar::keyframes::keyframe_timeline>(data);
             kf_timelines_[layer] = *tl;
             kf_armed_.erase(layer);       // disarm on new SET (protocol rule)
@@ -812,7 +812,7 @@ struct stage::impl : public std::enable_shared_from_this<impl>
 
     std::future<bool> kf_arm(int layer)
     {
-        return executor_.begin_invoke([=] {
+        return executor_.begin_invoke([=, this] {
             if (kf_timelines_.count(layer)) {
                 kf_armed_.insert(layer);
                 return true;
@@ -823,7 +823,7 @@ struct stage::impl : public std::enable_shared_from_this<impl>
 
     std::future<void> kf_disarm(int layer)
     {
-        return executor_.begin_invoke([=] {
+        return executor_.begin_invoke([=, this] {
             kf_armed_.erase(layer);
             kf_last_values_.erase(layer);
         });
@@ -831,7 +831,7 @@ struct stage::impl : public std::enable_shared_from_this<impl>
 
     std::future<void> kf_clear(int layer)
     {
-        return executor_.begin_invoke([=] {
+        return executor_.begin_invoke([=, this] {
             kf_timelines_.erase(layer);
             kf_armed_.erase(layer);
             kf_last_values_.erase(layer);
@@ -842,7 +842,7 @@ struct stage::impl : public std::enable_shared_from_this<impl>
 
     std::future<std::shared_ptr<void>> kf_get(int layer)
     {
-        return executor_.begin_invoke([=]() -> std::shared_ptr<void> {
+        return executor_.begin_invoke([=, this]() -> std::shared_ptr<void> {
             auto it = kf_timelines_.find(layer);
             if (it == kf_timelines_.end())
                 return nullptr;
@@ -852,17 +852,17 @@ struct stage::impl : public std::enable_shared_from_this<impl>
 
     std::future<bool> kf_has(int layer)
     {
-        return executor_.begin_invoke([=] { return kf_timelines_.count(layer) > 0; });
+        return executor_.begin_invoke([=, this] { return kf_timelines_.count(layer) > 0; });
     }
 
     std::future<bool> kf_is_armed(int layer)
     {
-        return executor_.begin_invoke([=] { return kf_armed_.count(layer) > 0; });
+        return executor_.begin_invoke([=, this] { return kf_armed_.count(layer) > 0; });
     }
 
     std::future<bool> kf_patch(int layer, double time_secs, std::shared_ptr<void> patch_data)
     {
-        return executor_.begin_invoke([=] {
+        return executor_.begin_invoke([=, this] {
             auto it = kf_timelines_.find(layer);
             if (it == kf_timelines_.end())
                 return false;
@@ -876,7 +876,7 @@ struct stage::impl : public std::enable_shared_from_this<impl>
 
     std::future<void> kf_set_media_time(int layer, double time_secs)
     {
-        return executor_.begin_invoke([=] {
+        return executor_.begin_invoke([=, this] {
             kf_media_time_override_[layer] = time_secs;
             kf_last_values_.erase(layer); // force re-evaluation
         });
@@ -884,7 +884,7 @@ struct stage::impl : public std::enable_shared_from_this<impl>
 
     std::future<std::shared_ptr<void>> kf_get_status(int layer)
     {
-        return executor_.begin_invoke([=]() -> std::shared_ptr<void> {
+        return executor_.begin_invoke([=, this]() -> std::shared_ptr<void> {
             auto s = std::make_shared<caspar::keyframes::kf_status>();
             auto it = kf_timelines_.find(layer);
             s->has_timeline   = (it != kf_timelines_.end());
@@ -1114,43 +1114,43 @@ std::future<void> stage_delayed::execute(std::function<void()> func)
 // ── Keyframe management (stage_delayed forwarding) ───────────────────────
 std::future<void> stage_delayed::set_keyframe_data(int layer, std::shared_ptr<void> data)
 {
-    return executor_.begin_invoke([=]() { return stage_->set_keyframe_data(layer, data).get(); });
+    return executor_.begin_invoke([=, this]() { return stage_->set_keyframe_data(layer, data).get(); });
 }
 std::future<bool> stage_delayed::arm_keyframes(int layer)
 {
-    return executor_.begin_invoke([=]() { return stage_->arm_keyframes(layer).get(); });
+    return executor_.begin_invoke([=, this]() { return stage_->arm_keyframes(layer).get(); });
 }
 std::future<void> stage_delayed::disarm_keyframes(int layer)
 {
-    return executor_.begin_invoke([=]() { return stage_->disarm_keyframes(layer).get(); });
+    return executor_.begin_invoke([=, this]() { return stage_->disarm_keyframes(layer).get(); });
 }
 std::future<void> stage_delayed::clear_keyframes(int layer)
 {
-    return executor_.begin_invoke([=]() { return stage_->clear_keyframes(layer).get(); });
+    return executor_.begin_invoke([=, this]() { return stage_->clear_keyframes(layer).get(); });
 }
 std::future<std::shared_ptr<void>> stage_delayed::get_keyframe_data(int layer)
 {
-    return executor_.begin_invoke([=]() -> std::shared_ptr<void> { return stage_->get_keyframe_data(layer).get(); });
+    return executor_.begin_invoke([=, this]() -> std::shared_ptr<void> { return stage_->get_keyframe_data(layer).get(); });
 }
 std::future<bool> stage_delayed::has_keyframe_data(int layer)
 {
-    return executor_.begin_invoke([=]() { return stage_->has_keyframe_data(layer).get(); });
+    return executor_.begin_invoke([=, this]() { return stage_->has_keyframe_data(layer).get(); });
 }
 std::future<bool> stage_delayed::is_keyframes_armed(int layer)
 {
-    return executor_.begin_invoke([=]() { return stage_->is_keyframes_armed(layer).get(); });
+    return executor_.begin_invoke([=, this]() { return stage_->is_keyframes_armed(layer).get(); });
 }
 std::future<bool> stage_delayed::patch_keyframe(int layer, double time_secs, std::shared_ptr<void> patch_data)
 {
-    return executor_.begin_invoke([=]() { return stage_->patch_keyframe(layer, time_secs, patch_data).get(); });
+    return executor_.begin_invoke([=, this]() { return stage_->patch_keyframe(layer, time_secs, patch_data).get(); });
 }
 std::future<void> stage_delayed::set_media_time_override(int layer, double time_secs)
 {
-    return executor_.begin_invoke([=]() { return stage_->set_media_time_override(layer, time_secs).get(); });
+    return executor_.begin_invoke([=, this]() { return stage_->set_media_time_override(layer, time_secs).get(); });
 }
 std::future<std::shared_ptr<void>> stage_delayed::get_keyframe_status(int layer)
 {
-    return executor_.begin_invoke([=]() -> std::shared_ptr<void> { return stage_->get_keyframe_status(layer).get(); });
+    return executor_.begin_invoke([=, this]() -> std::shared_ptr<void> { return stage_->get_keyframe_status(layer).get(); });
 }
 
 }} // namespace caspar::core

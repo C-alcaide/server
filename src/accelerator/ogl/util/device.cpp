@@ -326,7 +326,7 @@ struct device::impl : public std::enable_shared_from_this<impl>
 
     std::future<array<const uint8_t>> copy_async(const std::shared_ptr<texture>& source)
     {
-        return spawn_async([=](yield_context yield) { return read_back(source, yield); });
+        return spawn_async([=, this](yield_context yield) { return read_back(source, yield); });
     }
 
     /// Downscale by successive exact halvings, then read the small result back.
@@ -340,7 +340,7 @@ struct device::impl : public std::enable_shared_from_this<impl>
     std::future<std::tuple<array<const uint8_t>, int, int>>
     reduce_and_copy_async(GLuint source_id, int source_width, int source_height, int levels)
     {
-        return spawn_async([=](yield_context yield) -> std::tuple<array<const uint8_t>, int, int> {
+        return spawn_async([=, this](yield_context yield) -> std::tuple<array<const uint8_t>, int, int> {
             const int n = std::clamp(levels, 0, 8);
 
             std::vector<std::pair<int, int>> chain;

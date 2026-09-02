@@ -88,7 +88,7 @@ struct client::impl : public spl::enable_shared_from_this<client::impl>
         , socket_(*io_context_, udp::v4())
         , buffer_(1000000)
     {
-        thread_ = std::thread([=] {
+        thread_ = std::thread([=, this] {
             // The try sits INSIDE the loop deliberately. It used to wrap the loop, so
             // any throw logged once and ended the thread -- OSC feedback was then dead
             // for the rest of the process's life with nothing further to indicate it.

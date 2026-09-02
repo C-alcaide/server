@@ -322,7 +322,7 @@ class image_renderer
         auto ch_look      = ocio_look;
 
         auto f = std::move(
-            ogl_->dispatch_async([=, layers = std::move(layers)]() mutable -> core::render_output {
+            ogl_->dispatch_async([=, this, layers = std::move(layers)]() mutable -> core::render_output {
                 auto target_texture =
                     ogl_->create_texture(format_desc.width, format_desc.height, 4, depth_, true, render_format_);
                 draw(target_texture, std::move(layers), format_desc);

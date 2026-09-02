@@ -223,7 +223,10 @@ struct oal_consumer : public core::frame_consumer
 
     ~oal_consumer() override
     {
-        executor_.invoke([=] { destroy_al_objects(); });
+        // [this], not [=]: implicit capture of `this` through `[=]` is deprecated in C++20,
+        // and Bootstrap_Linux.cmake's global -Werror makes gcc reject it outright. MSVC only
+        // warns, so this compiled on Windows. Upstream captures `[this]` at this site.
+        executor_.invoke([this] { destroy_al_objects(); });
     }
 
     // frame consumer
@@ -236,7 +239,8 @@ struct oal_consumer : public core::frame_consumer
         channel_index_ = channel_info.index;
         graph_->set_text(print());
 
-        executor_.begin_invoke([=] {
+        // [this] for the same reason as the destructor above; the body touches only members.
+        executor_.begin_invoke([this] {
             // initialize() is re-entered on a live consumer whenever the channel
             // format changes (core/consumer/output.cpp re-initialises every consumer,
             // which "SET <channel> MODE <format>" triggers at runtime). alGenBuffers

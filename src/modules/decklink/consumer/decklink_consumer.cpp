@@ -1674,7 +1674,7 @@ struct decklink_consumer_proxy : public core::frame_consumer
         CASPAR_LOG(info) << L"[decklink_proxy] initialize: channel=" << channel_info.index
                          << L" use_vulkan=" << (use_vulkan_ ? L"true" : L"false")
                          << L" needs_cpu=" << (needs_cpu_frame_data() ? L"true" : L"false");
-        executor_.invoke([=] {
+        executor_.invoke([=, this] {
             consumer_.reset();
             consumer_ = std::make_unique<decklink_consumer>(config_, format_desc, channel_info.index, use_vulkan_);
         });
