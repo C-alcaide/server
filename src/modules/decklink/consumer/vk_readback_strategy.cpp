@@ -861,7 +861,7 @@ struct vk_readback_strategy::impl
         import_info.handleType = platform::kExternalMemoryHandleType;
         import_info.handle     = win32_handle;
 #else
-        int dup_fd = dup(static_cast<int>(reinterpret_cast<intptr_t>(win32_handle)));
+        int dup_fd = dup(vulkan_common::platform::from_opaque(win32_handle));
         if (dup_fd < 0)
             throw std::runtime_error("[vk_readback] Failed to dup fd for VK import");
 
@@ -1131,8 +1131,13 @@ struct vk_readback_strategy::impl
         auto vk_tex = wrapper->vk_texture();
         if (!vk_tex) return {};
 
-        void* mem_handle = vk_tex->export_native_handle();
-        if (!mem_handle) return {};
+        // export_native_handle() returns native_handle_t: void* on Windows, an int fd on
+        // Linux. Declaring it `void*` did not compile there. The validity test stays on the
+        // NATIVE value because the invalid handle is nullptr on Windows and -1 on Linux, so
+        // `!mem_handle` was wrong in both directions on Linux.
+        const auto native_mem = vk_tex->export_native_handle();
+        if (native_mem == vulkan_common::platform::kInvalidHandle) return {};
+        void* mem_handle = vulkan_common::platform::to_opaque(native_mem);
 
         const uint8_t* luid = vk_tex->device_luid();
         if (!luid) return {};
@@ -1315,8 +1320,11 @@ struct vk_readback_strategy::impl
         auto vk_tex = wrapper->vk_texture();
         if (!vk_tex) return nullptr;
 
-        void* mem_handle = vk_tex->export_native_handle();
-        if (!mem_handle) return nullptr;
+        // See the note at the other call site: native_handle_t is an fd on Linux, and the
+        // invalid value is -1 rather than 0.
+        const auto native_mem = vk_tex->export_native_handle();
+        if (native_mem == vulkan_common::platform::kInvalidHandle) return nullptr;
+        void* mem_handle = vulkan_common::platform::to_opaque(native_mem);
 
         const uint8_t* luid = vk_tex->device_luid();
         if (!luid) return nullptr;
