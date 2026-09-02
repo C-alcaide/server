@@ -43,7 +43,19 @@ if(NOT SFML_FOUND)
 endif()
 
 IF (ENABLE_VULKAN)
-    find_package(Vulkan REQUIRED)
+    # COMPONENTS shaderc_combined, matching Bootstrap_Windows.cmake. Without it CMake's
+    # FindVulkan never defines the `Vulkan::shaderc_combined` imported target, and
+    # `accelerator/CMakeLists.txt` links that target unconditionally under ENABLE_VULKAN --
+    # so configure failed at the GENERATE step with "links to Vulkan::shaderc_combined but
+    # the target was not found". Same shape as the missing ENABLE_OCIO: a dependency the
+    # Windows bootstrap declares and this one did not.
+    #
+    # Requested as a COMPONENT rather than found separately for the reason the Windows side
+    # gives: a missing shaderc is then a clear configure-time error instead of an
+    # unresolved symbol at link time. It is needed because a generated colour transform
+    # arrives as GLSL text and is compiled to SPIR-V at runtime; the mixer's own shader is
+    # still built by glslc and embedded.
+    find_package(Vulkan REQUIRED COMPONENTS shaderc_combined)
 
     FetchContent_Declare(vk_bootstrap
             URL ${CASPARCG_DOWNLOAD_MIRROR}/vk-bootstrap/vk-bootstrap-1.4.328.tar.gz
