@@ -4,10 +4,29 @@ CasparVP — Unreleased
 ### Changed: a producer can see its channel's bit depth — and ISF follows it instead of defaulting to 8
 
 **This changes rendered output for an existing config.** `PLAY 1-10 [ISF] <shader>` on a 16-bit
-channel rendered 8-bit before and renders 16-bit now. Measured on a 16-bit channel at 1080p2500,
-distinct levels per component in a received ramp: **256 before, 1920 after** (1920 is the ramp's
-width, so every column resolves and the fixture is the limit rather than the path). A smooth
-gradient banded at 256.
+channel rendered 8-bit before and renders 16-bit now.
+
+Measured 2026-09-04 with `spout-depth`, a ramp rendered by the mixer and read back from a
+`GL_RGBA16` texture, 16-bit channel at 1080p2500, **both mixers, 12/12 cases**. Distinct levels per
+component:
+
+| what the producer was told | levels R/G/B | |
+| :--- | :--- | :--- |
+| **nothing** (the new default) | **1920 / 1920 / 1920** | follows the channel |
+| `BIT_DEPTH 16` | 1920 / 1920 / 1920 | override, unchanged |
+| `BIT_DEPTH 8`, **16-bit share** | 256 / 192 / 256 | downgrade override, proved on its own |
+
+1920 is the ramp's width, so every column resolves and the fixture is the limit rather than the
+path. The 8-bit row is what the old default delivered — it is the same `bit8` code path, now
+reachable only by asking — and a smooth gradient bands visibly at 256. The green channel's 192 is
+0.75 x 256, which is what named the original cause.
+
+The bottom row is the one that isolates the producer: the share publishes 16-bit and the levels are
+still 256, so the cap is the producer rather than the consumer. No arm that sets the producer's and
+the consumer's depth together can show that, which is why two arms were added to the battery —
+`spout-depth --producer isf-default` and `--producer isf-force8`. **The pre-existing arms could not
+fail for this change**: they state `BIT_DEPTH` explicitly, so they measure the override and pass
+whatever the default does.
 
 `frame_producer_dependencies` now carries the channel's `core::channel_info` — the same `depth`,
 `default_color_space` and `default_color_transfer` a *consumer* on that channel already received.
@@ -24,11 +43,10 @@ than forcing 8.
 no longer consumer-only. No behaviour change, 5 call sites.
 
 **What is NOT covered.** Only the *depth* is wired up: the gamut and transfer function are now
-reachable by a producer and **no producer reads either**. And only ISF was changed — every other
+reachable by a producer and **no producer reads either**. Only ISF was changed — every other
 producer keeps the default it had, which for decoders comes from the file and was never the
-problem. Verified by compiling all 188 targets; the final link could not be measured because
-another session held `casparcg.exe`, so the *behavioural* numbers above are the pre-existing
-`BIT_DEPTH 16` measurements, re-attributed to the new default rather than re-measured.
+problem. And the measurement is through the **Spout** consumer on one raster: it establishes the
+producer's depth, not that every consumer carries it.
 
 ### Added: the fork builds on Linux — it did not before, in any configuration
 

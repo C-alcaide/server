@@ -44,13 +44,21 @@ nothing.
 **Measured after the fix**, both mixers, a 16-bit channel at 1080p2500, distinct levels
 per channel in a received ramp:
 
-| producer | `BIT_DEPTH 8` | `BIT_DEPTH 16` |
-| :--- | ---: | ---: |
-| ISF shader | 256 | **1920** |
-| 16-bit clip (control) | 256 | **1920** |
+| producer | `BIT_DEPTH 8` | `BIT_DEPTH 16` | **nothing said** |
+| :--- | ---: | ---: | ---: |
+| ISF shader | 256 | **1920** | **1920** |
+| 16-bit clip (control) | 256 | **1920** | 1920 |
 
 1920 is the ramp's width, so at 16 bits every column resolves and the fixture is the limit
 rather than the depth. The ISF arm matches the file producer level for level.
+
+**The third column is the one that needed a new arm**, added 2026-09-04 as `spout-depth
+--producer isf-default`. The two `BIT_DEPTH` columns state the depth explicitly, so they
+measure the override and would read 1920 whatever the default did — a check that cannot fail
+for a change to the default. A fourth arm, `--producer isf-force8`, pins the producer to 8
+while the share stays 16-bit and reads **256 with `published-depth` 16**: that is the only
+cell which shows the cap is the *producer* and not the consumer truncating. 12/12 across the
+three ISF arms, both mixers.
 
 ### The depth follows the channel, and the parameter overrides it
 
