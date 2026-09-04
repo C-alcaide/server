@@ -21,6 +21,7 @@
 
 #pragma once
 
+#include "../consumer/channel_info.h"
 #include "../fwd.h"
 #include "../monitor/monitor.h"
 
@@ -163,13 +164,22 @@ struct frame_producer_dependencies
     video_format_desc                              format_desc;
     spl::shared_ptr<const frame_producer_registry> producer_registry;
     spl::shared_ptr<const cg_producer_registry>    cg_registry;
+    /// The channel's own bit depth, gamut and transfer -- the same `channel_info` a
+    /// consumer on this channel receives. A producer that GENERATES rather than decodes
+    /// has no other way to learn them, and assuming 8-bit/SDR truncates silently on a
+    /// 16-bit channel: the ISF producer did exactly that, and its only fix was an
+    /// explicit `BIT_DEPTH 16` that made the operator restate what the channel already
+    /// knew. An explicit parameter still overrides this -- it was the DEFAULT that was
+    /// missing, not the override.
+    core::channel_info                             channel_info;
 
     frame_producer_dependencies(const spl::shared_ptr<core::frame_factory>&           frame_factory,
                                 const std::vector<spl::shared_ptr<video_channel>>&    channels,
                                 const video_format_repository&                        format_repository,
                                 const video_format_desc&                              format_desc,
                                 const spl::shared_ptr<const frame_producer_registry>& producer_registry,
-                                const spl::shared_ptr<const cg_producer_registry>&    cg_registry);
+                                const spl::shared_ptr<const cg_producer_registry>&    cg_registry,
+                                const core::channel_info&                             channel_info);
 };
 
 }} // namespace caspar::core

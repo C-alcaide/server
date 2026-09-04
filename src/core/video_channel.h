@@ -100,7 +100,7 @@ class video_channel final
 
     int index() const;
 
-    [[nodiscard]] channel_info get_consumer_channel_info() const;
+    [[nodiscard]] channel_info get_channel_info() const;
 
     std::shared_ptr<core::route> route(int index = -1, route_mode mode = route_mode::foreground, bool raw = false);
 

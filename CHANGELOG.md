@@ -1,6 +1,35 @@
 CasparVP — Unreleased
 ==========================================
 
+### Changed: a producer can see its channel's bit depth — and ISF follows it instead of defaulting to 8
+
+**This changes rendered output for an existing config.** `PLAY 1-10 [ISF] <shader>` on a 16-bit
+channel rendered 8-bit before and renders 16-bit now. Measured on a 16-bit channel at 1080p2500,
+distinct levels per component in a received ramp: **256 before, 1920 after** (1920 is the ramp's
+width, so every column resolves and the fixture is the limit rather than the path). A smooth
+gradient banded at 256.
+
+`frame_producer_dependencies` now carries the channel's `core::channel_info` — the same `depth`,
+`default_color_space` and `default_color_transfer` a *consumer* on that channel already received.
+Producers had no way to learn any of it: `frame_factory` takes a `bit_depth` on `create_frame` and
+exposed no accessor for the channel's own, and the dependencies carried `format_desc` and nothing
+about colour. So a generative producer's only honest default was 8-bit, and **a 16-bit channel was
+8-bit by default for every generator**, truncating with no warning.
+
+`BIT_DEPTH` remains an override in both directions — `BIT_DEPTH 8` is a legitimate request for a
+receiver that cannot take 16 bits. An absent or unparseable value now follows the channel rather
+than forcing 8.
+
+`video_channel::get_consumer_channel_info()` is renamed `get_channel_info()`; the information is
+no longer consumer-only. No behaviour change, 5 call sites.
+
+**What is NOT covered.** Only the *depth* is wired up: the gamut and transfer function are now
+reachable by a producer and **no producer reads either**. And only ISF was changed — every other
+producer keeps the default it had, which for decoders comes from the file and was never the
+problem. Verified by compiling all 188 targets; the final link could not be measured because
+another session held `casparcg.exe`, so the *behavioural* numbers above are the pre-existing
+`BIT_DEPTH 16` measurements, re-attributed to the new default rather than re-measured.
+
 ### Added: the fork builds on Linux — it did not before, in any configuration
 
 **No rendered output changes on Windows.** Every fix here is conditional compilation, a compiler

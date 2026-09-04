@@ -223,7 +223,8 @@ core::frame_producer_dependencies get_producer_dependencies(const std::shared_pt
                                              ctx.static_context->format_repository,
                                              channel->stage()->video_format_desc(),
                                              ctx.static_context->producer_registry,
-                                             ctx.static_context->cg_registry);
+                                             ctx.static_context->cg_registry,
+                                             channel->get_channel_info());
 }
 
 bool try_match_sting(const std::vector<std::wstring>& params, sting_info& stingInfo)
@@ -525,7 +526,7 @@ std::wstring add_command(command_context& ctx)
         ctx.static_context->consumer_registry->create_consumer(ctx.parameters,
                                                                ctx.static_context->format_repository,
                                                                get_channels(ctx),
-                                                               ctx.channel.raw_channel->get_consumer_channel_info());
+                                                               ctx.channel.raw_channel->get_channel_info());
     ctx.channel.raw_channel->output().add(ctx.layer_index(consumer->index()), consumer);
 
     return L"202 ADD OK\r\n";
@@ -546,7 +547,7 @@ std::wstring remove_command(command_context& ctx)
                     ->create_consumer(ctx.parameters,
                                       ctx.static_context->format_repository,
                                       get_channels(ctx),
-                                      ctx.channel.raw_channel->get_consumer_channel_info())
+                                      ctx.channel.raw_channel->get_channel_info())
                     ->index();
     }
 
@@ -569,7 +570,7 @@ std::wstring print_command(command_context& ctx)
         ctx.static_context->consumer_registry->create_consumer(params,
                                                                ctx.static_context->format_repository,
                                                                get_channels(ctx),
-                                                               ctx.channel.raw_channel->get_consumer_channel_info()));
+                                                               ctx.channel.raw_channel->get_channel_info()));
 
     return L"202 PRINT OK\r\n";
 }
@@ -4332,7 +4333,7 @@ std::wstring channel_grid_command(command_context& ctx)
         ctx.static_context->consumer_registry->create_consumer(params,
                                                                ctx.static_context->format_repository,
                                                                get_channels(ctx),
-                                                               self.raw_channel->get_consumer_channel_info());
+                                                               self.raw_channel->get_channel_info());
 
     self.raw_channel->output().add(screen);
 
@@ -5423,7 +5424,8 @@ std::wstring previz_autoprojection_command(command_context& ctx)
                                             format_repository,
                                             dst_ch->stage()->video_format_desc(),
                                             producer_registry,
-                                            cg_registry);
+                                            cg_registry,
+                                            dst_ch->get_channel_info());
 
                                         std::vector<std::wstring> route_params = {
                                             L"route://" + std::to_wstring(source_channel)

@@ -41,7 +41,7 @@ PLAY 1-10 [ISF] myshader BIT_DEPTH 16 mymovie   # filter mode; the option is str
                                                 # before the source is resolved
 ```
 
-**Without it the producer is 8-bit even on a 16-bit channel**, and a smooth gradient will band. Measured on a 16-bit channel at 1080p: **256 distinct levels per component at 8-bit against 1920 at 16-bit.** The default is 8 because a producer cannot see the channel's depth — see the feature doc for why — so a 16-bit channel needs this said explicitly.
+**The depth follows the channel**, so a 16-bit channel renders 16-bit ISF with nothing said. `BIT_DEPTH` overrides it in either direction — `BIT_DEPTH 8` truncates for a receiver that needs 8, `BIT_DEPTH 16` forces precision on an 8-bit channel. The difference is visible rather than academic: measured on a 16-bit channel at 1080p, **256 distinct levels per component at 8-bit against 1920 at 16-bit**, and a smooth gradient bands at 256. Until this followed the channel the default was 8 whatever the channel was, so a 16-bit channel needed the parameter said explicitly.
 
 It costs memory and bandwidth: the final pass target, the output texture and any CPU readback all double. Ask for it when the shader produces smooth gradients or feeds a grading chain, not by default.
 

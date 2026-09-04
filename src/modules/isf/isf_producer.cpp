@@ -145,12 +145,13 @@ class isf_producer : public core::frame_producer
     spl::shared_ptr<core::frame_factory>      frame_factory_;
     std::shared_ptr<accelerator::ogl::device> ogl_device_;
     std::unique_ptr<shader>                   shader_;
-    //: Bits per component this producer outputs. 8 unless `BIT_DEPTH 16` asked.
+    //: Bits per component this producer outputs. FOLLOWS THE CHANNEL unless `BIT_DEPTH`
+    //: overrides it.
     //:
-    //: NOT taken from the channel, because a producer cannot see it: `frame_factory`
-    //: exposes no accessor for the channel's depth and `frame_producer_dependencies`
-    //: carries none. Following the channel would need a core API change touching both
-    //: mixers, so this is explicit -- the same shape as the Spout consumer's parameter.
+    //: The 8-bit initialiser here is only the value before `set_output_depth` runs --
+    //: `create_producer` always calls it. It used to be the effective default, because a
+    //: producer could not see its channel's depth, and a 16-bit channel therefore
+    //: rendered 8-bit ISF and truncated in silence.
     common::bit_depth            out_depth_ = common::bit_depth::bit8;
     std::wstring                              name_;
     int                                       width_;
@@ -685,15 +686,22 @@ spl::shared_ptr<core::frame_producer> create_producer(const core::frame_producer
     const std::wstring base_path     = std::filesystem::path(path).parent_path().wstring();
     const std::string  vertex_source = load_vertex(path);
 
-    // `BIT_DEPTH 16` renders and outputs at 16 bits per component. Explicit rather
-    // than following the channel because a producer CANNOT see the channel's depth:
-    // `frame_factory` exposes no accessor for it and `frame_producer_dependencies`
-    // carries none, so following it would need a core API change touching both
-    // mixers. Anything other than 16 leaves the default 8, including a typo -- a
-    // shader should not fail to load over a precision hint.
+    // The depth FOLLOWS THE CHANNEL, and `BIT_DEPTH` overrides it in either direction.
+    //
+    // It did not always: `frame_producer_dependencies` carried no colour information, so
+    // this defaulted to 8 and an operator had to write `BIT_DEPTH 16` to restate what the
+    // channel already knew -- which also made a 16-bit channel 8-bit by default for every
+    // generator, truncating with no warning. The dependencies now carry the channel's
+    // `channel_info`, the same one a consumer gets.
+    //
+    // An unparseable or absent value follows the channel rather than forcing 8: a shader
+    // should not fail to load over a precision hint, and on a 16-bit channel the channel's
+    // own depth is the better guess than a typo's.
     const int  requested_depth = get_param(L"BIT_DEPTH", params, 0);
-    const auto out_depth =
-        requested_depth == 16 ? common::bit_depth::bit16 : common::bit_depth::bit8;
+    const auto out_depth       = requested_depth == 16 ? common::bit_depth::bit16
+                                 : requested_depth == 8
+                                     ? common::bit_depth::bit8
+                                     : dependencies.channel_info.depth;
 
     std::vector<std::wstring> source_params(params.begin() + 2, params.end());
 

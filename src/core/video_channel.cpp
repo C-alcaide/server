@@ -446,7 +446,7 @@ struct video_channel::impl final
 
     int index() const { return channel_info_.index; }
 
-    channel_info get_consumer_channel_info() const { return channel_info_; }
+    channel_info get_channel_info() const { return channel_info_; }
 };
 
 video_channel::video_channel(int                                       index,
@@ -474,7 +474,7 @@ const output&                       video_channel::output() const { return impl_
 output&                             video_channel::output() { return impl_->output_; }
 spl::shared_ptr<frame_factory>      video_channel::frame_factory() { return impl_->image_mixer_; }
 int                                 video_channel::index() const { return impl_->index(); }
-channel_info         video_channel::get_consumer_channel_info() const { return impl_->get_consumer_channel_info(); };
+channel_info         video_channel::get_channel_info() const { return impl_->get_channel_info(); };
 core::monitor::state video_channel::state() const { return impl_->state_; }
 
 std::shared_ptr<route> video_channel::route(int index, route_mode mode, bool raw) { return impl_->route(index, mode, raw); }

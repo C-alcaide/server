@@ -19,8 +19,10 @@ document is the state and the coverage.
 
 ## ISF at 16 bits per component
 
-`[ISF] <shader> BIT_DEPTH 16` renders and outputs at 16 bits. Without it the producer is
-8-bit on every route, which is what it always was.
+`[ISF] <shader> BIT_DEPTH 16` renders and outputs at 16 bits. **Without it the producer now
+follows the channel** — 16-bit on a 16-bit channel, 8-bit on an 8-bit one. It did not always:
+the depth defaulted to 8 whatever the channel was, and the parameter was the only way to
+reach 16. See *The depth follows the channel* below.
 
 **Found by measuring something else.** An ISF ramp was `spout-depth`'s first fixture and
 delivered **256 distinct levels** through a Spout sender correctly advertising
@@ -50,13 +52,25 @@ per channel in a received ramp:
 1920 is the ramp's width, so at 16 bits every column resolves and the fixture is the limit
 rather than the depth. The ISF arm matches the file producer level for level.
 
-### Why it is a parameter and not automatic
+### The depth follows the channel, and the parameter overrides it
 
-**A producer cannot see the channel's bit depth.** `frame_factory` takes a depth on
-`create_frame` and exposes no accessor for the channel's own; `frame_producer_dependencies`
-carries none; no producer in the tree reads one. Following the channel would need a core
-API change touching both mixers, which is worth doing separately and was not smuggled in
-here.
+`frame_producer_dependencies` carries the channel's `channel_info` — the same `depth`,
+`default_color_space` and `default_color_transfer` a consumer on that channel receives — so a
+producer reads the depth from the dependencies it is already handed.
+
+**Why it was a parameter first.** A producer genuinely could not see the depth: `frame_factory`
+takes one on `create_frame` and exposed no accessor for the channel's own, and the dependencies
+carried `format_desc` and nothing about colour. So the depth defaulted to 8, an operator had to
+restate what the channel already knew, and **a 16-bit channel was 8-bit by default for every
+generator** — truncating in silence, which is how this was found at all.
+
+**The override is kept deliberately**, in both directions: `BIT_DEPTH 8` on a 16-bit channel is
+a legitimate request for a receiver that cannot take 16 bits, and forcing 16 on an 8-bit channel
+costs only memory. An absent or unparseable value follows the channel rather than forcing 8 — a
+shader should not fail to load over a precision hint.
+
+**What this does not do.** `channel_info` also carries the gamut and the transfer function, and
+**no producer reads either yet**. The plumbing is there; only the depth is wired to it.
 
 ### Two traps in the implementation
 

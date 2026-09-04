@@ -652,7 +652,7 @@ struct server::impl
                                                                     xml_consumer.second,
                                                                     video_format_repository_,
                                                                     channels_vec,
-                                                                    channel.raw_channel->get_consumer_channel_info()));
+                                                                    channel.raw_channel->get_channel_info()));
                     } catch (...) {
                         CASPAR_LOG_CURRENT_EXCEPTION();
                     }
