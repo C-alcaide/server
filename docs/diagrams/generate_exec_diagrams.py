@@ -147,6 +147,74 @@ def scope():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+def control_api():
+    """One state, two facades. The point is the SHAPE, not the sequence."""
+    lay, fig, ax = _new((13, 7.0))
+    _head(lay, "One server state, addressable instead of guessed at",
+          "the same state AMCP writes and OSC broadcasts, now with a name for every parameter")
+
+    # what writes
+    lay.panel("amcp", 6, 63, 40, 17, fc=PANEL, ec=SUCCESS, lw=1.6)
+    lay.text("amcph", 26, 75, "AMCP  -  today", parent="amcp", color=SUCCESS_T, size=10,
+             weight="bold", ha="center")
+    lay.text("amcp1", 8.5, 70.4, "MIXER 1-10 OPACITY 0.5   ·   PLAY   ·   CALL",
+             parent="amcp", color=TEXT, size=8.4)
+    lay.text("amcp2", 8.5, 66.2, "positional text; a client hard-codes every argument order",
+             parent="amcp", color=MUTED, size=8.0, style="italic")
+
+    lay.panel("api", 54, 63, 40, 17, fc=PANEL, ec=WARNING, lw=1.6)
+    lay.text("apih", 74, 75, "Control API  -  writes still to come", parent="api",
+             color=WARNING_T, size=10, weight="bold", ha="center")
+    lay.text("api1", 56.5, 70.4, "PUT /v1/value/channel/1/.../mixer/opacity",
+             parent="api", color=TEXT, size=8.4)
+    lay.text("api2", 56.5, 66.2, "validated against the range the server itself declares",
+             parent="api", color=MUTED, size=8.0, style="italic")
+
+    lay.arrow((26, 63), (34, 55.5), color=SUCCESS, lw=1.5)
+    lay.arrow((74, 63), (66, 55.5), color=WARNING, lw=1.3)
+
+    # the one state
+    lay.panel("state", 18, 38, 64, 17, fc=PANEL, ec=ACCENT, lw=1.8)
+    lay.text("stateh", 50, 50.5, "The channel's state  -  rebuilt every frame",
+             parent="state", color=TITLE, size=10.5, weight="bold", ha="center")
+    lay.text("state1", 50, 45.4,
+             "every layer, every producer, every mixer parameter, in one snapshot",
+             parent="state", color=TEXT, size=8.8, ha="center")
+    lay.text("state2", 50, 41.2,
+             "there is only ever one of these, which is why both facades agree by construction",
+             parent="state", color=MUTED, size=8.2, ha="center", style="italic")
+
+    lay.arrow((34, 38), (26, 30.5), color=BORDER, lw=1.4)
+    lay.arrow((66, 38), (74, 30.5), color=BORDER, lw=1.4)
+
+    # what reads
+    lay.panel("osc", 6, 13, 40, 17, fc=PANEL, ec=BORDER, lw=1.4)
+    lay.text("osch", 26, 25, "OSC  -  today", parent="osc", color=TEXT, size=10,
+             weight="bold", ha="center")
+    lay.text("osc1", 8.5, 20.4, "broadcast to whoever is listening", parent="osc",
+             color=TEXT, size=8.4)
+    lay.text("osc2", 8.5, 16.2, "no way to ask what exists, or for only part of it",
+             parent="osc", color=MUTED, size=8.0, style="italic")
+
+    lay.panel("tree", 54, 13, 40, 17, fc=PANEL, ec=ACCENT_HOVER, lw=1.6)
+    lay.text("treeh", 74, 25, "Control API  -  working now", parent="tree",
+             color=TITLE, size=10, weight="bold", ha="center")
+    lay.text("tree1", 56.5, 20.4, "GET /v1/tree   ·   247 addressable values on one layer",
+             parent="tree", color=TEXT, size=8.4)
+    lay.text("tree2", 56.5, 16.2, "each with its type, its limits and what animates it",
+             parent="tree", color=MUTED, size=8.0, style="italic")
+
+    lay.text("note", 50, 6.5,
+             "What this buys: a control surface generated from what the server says it has, "
+             "rather than written against a list that goes stale.",
+             parent=None, color=TEXT, size=8.8, ha="center")
+    lay.check(name="control_api")
+    _save(fig, "exec_control_api.png")
+
+
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 def direct_display():
     """Feeding an LED processor over HDMI/DP instead of through an SDI chain."""
     lay, fig, ax = _new((13, 6.4))
@@ -598,5 +666,6 @@ if __name__ == "__main__":
     lighting()
     replay()
     audio()
+    control_api()
     cover_bg()
     to_production()

@@ -565,6 +565,40 @@ FEATURES = [
         status=PARTIAL,
         evidence="gstreamer 14/14 both renderers · spout, ISF and OpenFX: no coverage",
     ),
+    dict(
+        n=19, title="Being controllable by something other than a script",
+        lead="The server's own state, addressable and self-describing, over HTTP.",
+        img="exec_control_api.png",
+        buys=[
+            "A control surface that is GENERATED from what the server says it has, instead "
+            "of written against a list of commands that goes stale the day a parameter is added.",
+            "One fetch answers what exists, what type it is, what its limits are and what can "
+            "animate it — so a client stops keeping its own copy of the answer.",
+            "The same state AMCP writes, so a value changed from a script and a value changed "
+            "from a panel cannot disagree.",
+            "Every reply names which server answered, which is what makes one operator's "
+            "screen able to drive two machines without confusing them.",
+        ],
+        earns="It is the prerequisite for a purpose-built operator interface. Without it every "
+              "client re-implements a private model of the server and drifts from it; the "
+              "existing ones do exactly that, which is why they show parameters the server no "
+              "longer has and miss the ones it gained.",
+        gap="Read-only in this build, and that is the honest headline. Fetching the tree, "
+            "reading any value and probing the server all work; writing, subscribing to "
+            "changes and authenticating do not exist yet, and mixer values in the tree still "
+            "read as their defaults until the tick publishes the changed ones. There is also "
+            "no automated test — the numbers here are one manual run on one machine.",
+        market="Elsewhere, OSCQuery is Vidvox's published format and is what ossia, Vezér and "
+               "several VJ tools already speak, so a client written against it is not written "
+               "against us. Media servers mostly expose either a proprietary API or a text "
+               "protocol; a self-describing tree is the thing that lets a UI be generated "
+               "rather than maintained.",
+        next='Publish changed mixer values from the tick, then writes and a subscription socket',
+        covers=['control-api'],
+        status=PARTIAL,
+        evidence="247 addressable values on one layer, all resolving · 177 mixer descriptors · "
+                 "75 KB, 14 ms per full tree · no automated test; measured by hand 2026-09-05",
+    ),
 ]
 
 

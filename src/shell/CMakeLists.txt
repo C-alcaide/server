@@ -48,6 +48,7 @@ target_link_libraries(casparcg
 		common
 		core
 		protocol
+		protocol_http
 
 		"${CASPARCG_MODULE_TARGETS}"
 

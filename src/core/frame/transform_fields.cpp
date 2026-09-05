@@ -13,6 +13,8 @@
 
 #include <core/mixer/image/blend_modes.h>
 
+#include <common/except.h>
+
 #include <algorithm>
 #include <cmath>
 #include <random>
@@ -325,10 +327,10 @@ const std::vector<field_desc>& all()
     // clang-format off
     static const std::vector<field_desc> table = {
         // ---- basic ---------------------------------------------------------------------
-        F("opacity",           opacity,           1.0, std::nullopt,        clip, multiply, none, nullptr, "", "opacity",           continuous),
-        F("brightness",        brightness,        1.0, std::nullopt,        clip, multiply, none, nullptr, "", "brightness",        continuous),
-        F("contrast",          contrast,          1.0, std::nullopt,        clip, multiply, none, nullptr, "", "contrast",          continuous),
-        F("saturation",        saturation,        1.0, std::nullopt,        clip, multiply, none, nullptr, "", "saturation",        continuous),
+        F("opacity",           opacity,           1.0, std::nullopt,        free, multiply, none, nullptr, "", "opacity",           continuous),
+        F("brightness",        brightness,        1.0, std::nullopt,        free, multiply, none, nullptr, "", "brightness",        continuous),
+        F("contrast",          contrast,          1.0, std::nullopt,        free, multiply, none, nullptr, "", "contrast",          continuous),
+        F("saturation",        saturation,        1.0, std::nullopt,        free, multiply, none, nullptr, "", "saturation",        continuous),
         F("exposure",          exposure,          1.0, lim::exposure,       clip, multiply, none, nullptr, "", nullptr,             continuous),
 
         // ---- geometry (composed elsewhere; here to be described and animated) -----------
@@ -468,11 +470,11 @@ const std::vector<field_desc>& all()
         F("proj_yaw",          projection.yaw,     0.0,           std::nullopt, wrap, innermost_wins, projection_enable, nullptr, "rad", "proj_yaw",       angular_rad),
         F("proj_pitch",        projection.pitch,   0.0,           std::nullopt, wrap, innermost_wins, projection_enable, nullptr, "rad", "proj_pitch",     angular_rad),
         F("proj_roll",         projection.roll,    0.0,           std::nullopt, wrap, innermost_wins, projection_enable, nullptr, "rad", "proj_roll",      angular_rad),
-        F("proj_fov",          projection.fov,     1.57079632679, std::nullopt, clip, innermost_wins, projection_enable, nullptr, "rad", "proj_fov",       angular_rad),
-        F("proj_offset_x",     projection.offset_x,  0.0, std::nullopt, clip, innermost_wins, projection_enable, nullptr, "", "proj_offset_x",  continuous),
-        F("proj_offset_y",     projection.offset_y,  0.0, std::nullopt, clip, innermost_wins, projection_enable, nullptr, "", "proj_offset_y",  continuous),
-        F("proj_frustum_h",    projection.frustum_h, 0.0, std::nullopt, clip, innermost_wins, projection_enable, nullptr, "", "proj_frustum_h", continuous),
-        F("proj_frustum_v",    projection.frustum_v, 0.0, std::nullopt, clip, innermost_wins, projection_enable, nullptr, "", "proj_frustum_v", continuous),
+        F("proj_fov",          projection.fov,     1.57079632679, std::nullopt, free, innermost_wins, projection_enable, nullptr, "rad", "proj_fov",       angular_rad),
+        F("proj_offset_x",     projection.offset_x,  0.0, std::nullopt, free, innermost_wins, projection_enable, nullptr, "", "proj_offset_x",  continuous),
+        F("proj_offset_y",     projection.offset_y,  0.0, std::nullopt, free, innermost_wins, projection_enable, nullptr, "", "proj_offset_y",  continuous),
+        F("proj_frustum_h",    projection.frustum_h, 0.0, std::nullopt, free, innermost_wins, projection_enable, nullptr, "", "proj_frustum_h", continuous),
+        F("proj_frustum_v",    projection.frustum_v, 0.0, std::nullopt, free, innermost_wins, projection_enable, nullptr, "", "proj_frustum_v", continuous),
         F("proj_lens_k1",      projection.lens_k1,   0.0, std::nullopt, free, innermost_wins, projection_enable, nullptr, "", "proj_lens_k1",   continuous),
         F("proj_lens_k2",      projection.lens_k2,   0.0, std::nullopt, free, innermost_wins, projection_enable, nullptr, "", "proj_lens_k2",   continuous),
         F("proj_lens_k3",      projection.lens_k3,   0.0, std::nullopt, free, innermost_wins, projection_enable, nullptr, "", "proj_lens_k3",   continuous),
@@ -483,9 +485,9 @@ const std::vector<field_desc>& all()
         // ---- projection: curved screen compensation (merges independently of 360) ---------------------
         B("proj_curve_enable", projection.curve_enable, false, or_, none, nullptr, "proj_curve_enable"),
         E("proj_curve_type",   projection.curve_type, screen_curve_type, screen_curve_type::flat, CURVE_TYPES, innermost_wins, curve_enable, "proj_curve_type"),
-        F("proj_screen_arc",   projection.screen_arc,   0.0, std::nullopt, clip, innermost_wins, curve_enable, nullptr, "rad", "proj_screen_arc",   angular_rad),
-        F("proj_screen_arc_v", projection.screen_arc_v, 0.0, std::nullopt, clip, innermost_wins, curve_enable, nullptr, "rad", "proj_screen_arc_v", angular_rad),
-        F("proj_eye_distance", projection.eye_distance, 1.0, std::nullopt, clip, innermost_wins, curve_enable, nullptr, "",    "proj_eye_distance", continuous),
+        F("proj_screen_arc",   projection.screen_arc,   0.0, std::nullopt, free, innermost_wins, curve_enable, nullptr, "rad", "proj_screen_arc",   angular_rad),
+        F("proj_screen_arc_v", projection.screen_arc_v, 0.0, std::nullopt, free, innermost_wins, curve_enable, nullptr, "rad", "proj_screen_arc_v", angular_rad),
+        F("proj_eye_distance", projection.eye_distance, 1.0, std::nullopt, free, innermost_wins, curve_enable, nullptr, "",    "proj_eye_distance", continuous),
         B("proj_curve_auto",   projection.curve_auto, false, innermost_wins, curve_enable, nullptr, "proj_curve_auto"),
 
         // ---- projection: edge blending (a GROUP gate; see compose_colour) -----------------------------
@@ -493,7 +495,7 @@ const std::vector<field_desc>& all()
         F("proj_edge_blend_right",  projection.edge_blend_right,  0.0, lim::unit,    clip, innermost_wins, edge_blend_any, nullptr, "", "proj_edge_blend_right",  continuous),
         F("proj_edge_blend_top",    projection.edge_blend_top,    0.0, lim::unit,    clip, innermost_wins, edge_blend_any, nullptr, "", "proj_edge_blend_top",    continuous),
         F("proj_edge_blend_bottom", projection.edge_blend_bottom, 0.0, lim::unit,    clip, innermost_wins, edge_blend_any, nullptr, "", "proj_edge_blend_bottom", continuous),
-        F("proj_edge_blend_gamma",  projection.edge_blend_gamma,  2.2, std::nullopt, clip, innermost_wins, edge_blend_any, nullptr, "", "proj_edge_blend_gamma",  continuous),
+        F("proj_edge_blend_gamma",  projection.edge_blend_gamma,  2.2, std::nullopt, free, innermost_wins, edge_blend_any, nullptr, "", "proj_edge_blend_gamma",  continuous),
 
         // ---- projection: ICVFX inner/outer frustum ------------------------------------------------------
         // The gains are per-channel and asymmetric by nature. A red/blue exchange here was
@@ -502,10 +504,10 @@ const std::vector<field_desc>& all()
         F("proj_inner_yaw",          projection.inner_yaw,          0.0,           std::nullopt, wrap, innermost_wins, icvfx_enable, nullptr, "rad", nullptr,            angular_rad),
         F("proj_inner_pitch",        projection.inner_pitch,        0.0,           std::nullopt, wrap, innermost_wins, icvfx_enable, nullptr, "rad", nullptr,            angular_rad),
         F("proj_inner_roll",         projection.inner_roll,         0.0,           std::nullopt, wrap, innermost_wins, icvfx_enable, nullptr, "rad", nullptr,            angular_rad),
-        F("proj_inner_fov",          projection.inner_fov,          1.57079632679, std::nullopt, clip, innermost_wins, icvfx_enable, nullptr, "rad", "proj_inner_fov",   angular_rad),
-        F("proj_inner_eye_distance", projection.inner_eye_distance, 1.0,           std::nullopt, clip, innermost_wins, icvfx_enable, nullptr, "",    nullptr,            continuous),
-        F("proj_inner_offset_x",     projection.inner_offset_x,     0.0,           std::nullopt, clip, innermost_wins, icvfx_enable, nullptr, "",    nullptr,            continuous),
-        F("proj_inner_offset_y",     projection.inner_offset_y,     0.0,           std::nullopt, clip, innermost_wins, icvfx_enable, nullptr, "",    nullptr,            continuous),
+        F("proj_inner_fov",          projection.inner_fov,          1.57079632679, std::nullopt, free, innermost_wins, icvfx_enable, nullptr, "rad", "proj_inner_fov",   angular_rad),
+        F("proj_inner_eye_distance", projection.inner_eye_distance, 1.0,           std::nullopt, free, innermost_wins, icvfx_enable, nullptr, "",    nullptr,            continuous),
+        F("proj_inner_offset_x",     projection.inner_offset_x,     0.0,           std::nullopt, free, innermost_wins, icvfx_enable, nullptr, "",    nullptr,            continuous),
+        F("proj_inner_offset_y",     projection.inner_offset_y,     0.0,           std::nullopt, free, innermost_wins, icvfx_enable, nullptr, "",    nullptr,            continuous),
         F("proj_icvfx_q0x",          projection.icvfx_q0x,         -1.0,           std::nullopt, free, innermost_wins, icvfx_enable, nullptr, "",    nullptr,            continuous),
         F("proj_icvfx_q0y",          projection.icvfx_q0y,          1.0,           std::nullopt, free, innermost_wins, icvfx_enable, nullptr, "",    nullptr,            continuous),
         F("proj_icvfx_q1x",          projection.icvfx_q1x,          1.0,           std::nullopt, free, innermost_wins, icvfx_enable, nullptr, "",    nullptr,            continuous),
@@ -556,6 +558,24 @@ const std::vector<field_desc>& all()
         BLOB("grade_nodes",    grade_nodes,       grade_nodes_present),
     };
     // clang-format on
+
+    // A `clip` with nothing to clip against is not a rule, it is a gap -- and a generated
+    // control surface would read it as "clamp to [?]" and either invent limits or refuse
+    // the field. Seventeen rows declared exactly that on their first outing (opacity,
+    // brightness, contrast, saturation and the whole projection block), because `clip`
+    // reads as the safe default when writing a table row. It is not: the server accepts
+    // any value for those fields, and `free` is what says so.
+    //
+    // Enumerations are the deliberate exception: their bound is the `values` list, which
+    // is a range in every sense except MIN/MAX.
+    for (const auto& f : table) {
+        const bool bounded = f.range.has_value() || (f.type == value_type::enumeration && f.values);
+        if (f.bounding != bounding_t::free && f.bounding != bounding_t::wrap && !bounded)
+            CASPAR_THROW_EXCEPTION(programming_error()
+                                   << msg_info(std::string("transform field '") + f.path +
+                                               "' declares a bounding rule with no range to bound it"));
+    }
+
     return table;
 }
 

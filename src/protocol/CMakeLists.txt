@@ -74,3 +74,6 @@ source_group(sources\\util util/*)
 source_group(sources ./*)
 
 target_link_libraries(protocol PRIVATE common core accelerator)
+
+# The control API. A sibling library rather than part of `protocol`; see its CMakeLists.
+add_subdirectory(http)

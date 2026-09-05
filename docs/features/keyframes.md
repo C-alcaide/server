@@ -31,15 +31,20 @@ Eight commands (`keyframe_commands.cpp`):
 | `KEYFRAMES SEEK` | move the timeline position |
 | `KEYFRAMES STATUS` | query armed state and position |
 
-**The field vocabulary is the substance: 200 entries in `keyframe_fields.cpp`.** It covers the
-geometry (`anchor_x`, `fill_x`, `fill_sx`, `clip_x`…), the basic mixer state (`opacity`,
-`contrast`, `brightness`, `saturation`), and — critically — the fork's own grading and projection
-fields. **This is the only place in the fork where the whole `image_transform` surface is
-enumerated by name in one table**, which makes it the de facto index of what is animatable.
+**The field vocabulary is the substance: 193 animatable names.** It covers the geometry
+(`anchor_x`, `fill_x`, `fill_sx`, `clip_x`…), the basic mixer state (`opacity`, `contrast`,
+`brightness`, `saturation`), and — critically — the fork's own grading and projection fields.
 
-**It auto-enables the flags a field needs.** `keyframe_fields.cpp:430` sets
+**The table is no longer written here.** It is DERIVED from `core::fields::all()`, the transform
+field registry, and the names are checked at startup against `FROZEN_KF_NAMES` — 193 of them — so a
+rename or a dropped entry in the registry fails immediately rather than silently changing what a
+saved timeline animates. That check earned its place on its first run: a `std::vector` holding the
+generated name strings reallocated as it grew, invalidating every `c_str()` already handed to the
+table, and the names came out wrong with no crash to say so.
+
+**It auto-enables the flags a field needs.** `apply_kf_to_transform` in `keyframe_fields.cpp` sets
 `enable_geometry_modifiers = true` when any geometry field is animated
-(`keyframe_fields.h:64` documents the rule). Without that, animating a geometry field would set a
+(`keyframe_fields.h` documents the rule). Without that, animating a geometry field would set a
 value the mixer's geometry gate never reads — the same class of silent no-op as the transform
 allowlist trap.
 
@@ -60,15 +65,18 @@ The keyframe list syntax is in the operator guide and is not duplicated here.
 
 ## 3. Design decisions, and what they cost
 
-**A parallel field vocabulary, not a reflection over `image_transform`.** 200 hand-written entries
-mean a new `image_transform` field is *not* animatable until someone adds it here — a third place
-to remember alongside the two mixer allowlists. `CLAUDE.md` already documents what forgetting one
-of those costs: a command that returns `202` and changes nothing. This is the same trap with a
-third door.
+**A declared vocabulary, not a reflection over `image_transform` — but no longer a SECOND one.**
+C++20 has no reflection, so the animatable names have to be written down somewhere; the names are
+not derivable from the members in any case (`fill_x` is `fill_translation[0]`, `mid_r` is
+`midtone[0]`). What changed is *where*: this used to be ~200 hand-written entries, a third list to
+remember alongside both mixers' `apply_transform_colour_values`, and a new `image_transform` field
+was not animatable until someone added it here. It is now a projection of
+`core::fields::all()` — the same declaration the control API describes fields from and the mixers'
+composition is checked against.
 
-The upside is that the table can carry per-field metadata (defaults, and which enable flag to set)
-that reflection could not supply, and the auto-enable in §1 is exactly that metadata earning its
-keep.
+The cost is a layer of indirection between a keyframe name and the member it moves, and one real
+constraint: the registry stores angles in radians, so the projection into keyframe names converts
+to degrees on the way out and back on the way in, because that is what saved timelines contain.
 
 **Arm/disarm separate from set.** A list can be built and inspected before it drives anything,
 which matters when the alternative is discovering a bad cue live.
@@ -81,11 +89,12 @@ which matters when the alternative is discovering a bad cue live.
 
 Two things make this a worse gap than the raw command count suggests:
 
-1. **The 200-entry field table has no consistency check** against `image_transform`. A field
-   removed or renamed in the struct leaves a dead entry here; a field added leaves a missing one,
-   and the missing case is silent.
+1. **The field table now has one consistency check, and it is a name check rather than a
+   coverage check.** `FROZEN_KF_NAMES` fails startup if the registry stops generating a name that
+   saved timelines use. What it still cannot see is a field ADDED to `image_transform` and left out
+   of the registry — the missing case, which stays silent.
 
-   **That check was run by hand on 2026-08-26** and the table is in good shape: of 71
+   **A coverage check was run by hand on 2026-08-26** and the table is in good shape: of 71
    `image_transform` fields, 8 are absent and **7 of those are legitimately not animatable** —
    `blend_mask` (a texture), `grade_nodes` (a node graph), `geometry_override`, `is_key`, `is_mix`
    and `layer_depth` (modes and ordering, not continuous values), and `ocio` (a config selection).
@@ -102,8 +111,11 @@ Two things make this a worse gap than the raw command count suggests:
 ## 5. Known gaps
 
 1. **No coverage.** §4.1 describes a cheap mechanical check worth having first.
-2. **A third allowlist.** Any new `image_transform` field must be added here as well as to both
-   mixers' `apply_transform_colour_values`; nothing enforces or reports that.
+2. **Still an allowlist, now shared.** A new `image_transform` field must be added to
+   `core::fields` or it is animatable nowhere and describable nowhere — which is an improvement on
+   three separate lists, but is not the same as being enforced. Both mixers still carry their own
+   hand-written composition tables; the registry asserts agreement with them rather than replacing
+   them.
 3. **No tween-shape verification.** The tween functions are shared with the `MIXER` commands'
    `[tween]` argument, which is itself untested fork-wide.
 
@@ -117,5 +129,5 @@ Not traced; the module predates this document.
 
 ## 7. Diagrams
 
-Not warranted. The interesting content is a 200-row table and a state machine with two states
+Not warranted. The interesting content is a 193-name table and a state machine with two states
 (armed/disarmed) — neither benefits from a picture.

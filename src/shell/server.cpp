@@ -43,6 +43,9 @@
 #include <core/producer/color/color_producer.h>
 #include <core/producer/frame_producer.h>
 #include <core/video_channel.h>
+
+#include <protocol/http/http_server.h>
+#include <protocol/http/state_hub.h>
 #include <core/video_format.h>
 
 #include <modules/image/consumer/image_consumer.h>
@@ -72,6 +75,19 @@
 namespace caspar {
 using namespace core;
 using namespace protocol;
+
+/// The default `<name>` of an `<http>` controller.
+///
+/// A client attached to two servers has to tell their replies and their events apart, and
+/// the hostname is the one identifier that is already unique on a network and already
+/// means something to the operator reading it. An operator running two servers on one box
+/// gives at least one of them an explicit `<name>`.
+std::wstring default_server_name()
+{
+    boost::system::error_code ec;
+    const auto                host = boost::asio::ip::host_name(ec);
+    return ec || host.empty() ? std::wstring(L"casparcg") : u16(host);
+}
 
 std::shared_ptr<boost::asio::io_context> create_io_context_with_running_service()
 {
@@ -115,6 +131,12 @@ struct server::impl
     std::vector<spl::shared_ptr<IO::AsyncEventServer>>     async_servers_;
     std::shared_ptr<IO::AsyncEventServer>                  primary_amcp_server_;
     std::shared_ptr<osc::client>                           osc_client_ = std::make_shared<osc::client>(io_context_);
+    // The control API's view of the channel snapshots. Constructed unconditionally and
+    // fed by every channel tick whether or not an <http> controller exists: the cost is
+    // one atomic pointer store per channel per frame, and making it conditional would
+    // mean the channels had to be built after the controllers, which they are not.
+    std::shared_ptr<http::state_hub>                       state_hub_  = std::make_shared<http::state_hub>();
+    std::shared_ptr<http::http_server>                     http_server_;
     std::vector<std::shared_ptr<void>>                     predefined_osc_subscriptions_;
     spl::shared_ptr<std::vector<protocol::amcp::channel_context>> channels_;
     spl::shared_ptr<core::cg_producer_registry>                   cg_registry_;
@@ -179,6 +201,8 @@ struct server::impl
         io_context_.reset();
         predefined_osc_subscriptions_.clear();
         osc_client_.reset();
+
+        http_server_.reset();
 
         amcp_command_repo_wrapper_.reset();
         amcp_command_repo_.reset();
@@ -380,6 +404,7 @@ struct server::impl
                 CASPAR_THROW_EXCEPTION(user_error() << msg_info(L"Invalid video-mode: " + format_desc_str));
 
             auto weak_client = std::weak_ptr<osc::client>(osc_client_);
+            auto weak_hub    = std::weak_ptr<http::state_hub>(state_hub_);
             auto channel_id  = static_cast<int>(channels_->size() + 1);
             auto depth       = color_depth == 16 ? common::bit_depth::bit16 : common::bit_depth::bit8;
 
@@ -533,8 +558,14 @@ struct server::impl
                                                 default_color_space,
                                                 accelerator_.create_image_mixer(
                                                     channel_id, depth, gpu_index, gpu_index_explicit, render_format),
-                                                [channel_id, weak_client](
+                                                [channel_id, weak_client, weak_hub](
                                                     const std::shared_ptr<const core::monitor::state>& channel_state) {
+                                                    // The API's copy is a pointer store; the
+                                                    // OSC copy below is the one that costs,
+                                                    // and it is unchanged.
+                                                    if (auto hub = weak_hub.lock())
+                                                        hub->publish(channel_id, channel_state);
+
                                                     monitor::state state;
                                                     state[""]["channel"][channel_id] = *channel_state;
                                                     auto client                      = weak_client.lock();
@@ -718,11 +749,15 @@ struct server::impl
     {
         using boost::property_tree::wptree;
         for (auto& xml_controller : pt | witerate_children(L"configuration.controllers") | welement_context_iteration) {
-            auto name     = xml_controller.first;
-            auto protocol = ptree_get<std::wstring>(xml_controller.second, L"protocol");
+            auto name = xml_controller.first;
 
             if (name == L"tcp") {
-                auto port = ptree_get<unsigned int>(xml_controller.second, L"port");
+                // Read INSIDE the branch. `<protocol>` is a TCP-controller element, and
+                // reading it before the name was tested made every other controller throw
+                // "Missing parameter: protocol" -- a message naming a parameter that the
+                // controller in question does not have.
+                auto protocol = ptree_get<std::wstring>(xml_controller.second, L"protocol");
+                auto port     = ptree_get<unsigned int>(xml_controller.second, L"port");
                 auto host = xml_controller.second.get(L"host", L"");
 
                 try {
@@ -740,6 +775,42 @@ struct server::impl
                                       << boost::lexical_cast<std::wstring>(port) << L". It is likely already in use";
                     throw;
                     // CASPAR_LOG_CURRENT_EXCEPTION();
+                }
+            } else if (name == L"http") {
+                http::http_config cfg;
+                cfg.port         = xml_controller.second.get<unsigned short>(L"port", 5254);
+                cfg.host         = xml_controller.second.get(L"host", L"0.0.0.0");
+                cfg.name         = xml_controller.second.get(L"name", default_server_name());
+                cfg.auth         = boost::to_lower_copy(xml_controller.second.get(L"auth", L"off"));
+                cfg.password     = xml_controller.second.get(L"password", L"");
+                cfg.extent       = boost::to_lower_copy(xml_controller.second.get(L"extent", L"mixer"));
+                cfg.max_prefixes = xml_controller.second.get(L"max-prefixes", 32);
+
+                if (cfg.extent != L"state" && cfg.extent != L"mixer")
+                    CASPAR_THROW_EXCEPTION(user_error()
+                                           << msg_info(L"Invalid <extent>, must be state or mixer: " + cfg.extent));
+
+                // `auth=password` is refused rather than ignored. Accepting a mode that is
+                // not implemented would leave an operator who deliberately configured
+                // authentication with a wide-open port and nothing in the log to say so --
+                // which is strictly worse than the same port with `off` written in the
+                // config, because there the operator knows.
+                if (cfg.auth != L"off") {
+                    CASPAR_LOG(fatal) << L"[http-api] <auth>" << cfg.auth
+                                      << L"</auth> is not implemented in this build. Only 'off' is accepted; "
+                                         L"do not expose this port off-segment.";
+                    CASPAR_THROW_EXCEPTION(user_error() << msg_info(L"Unsupported <auth> mode: " + cfg.auth));
+                }
+
+                try {
+                    http_server_ = std::make_shared<http::http_server>(io_context_, state_hub_, cfg);
+                    CASPAR_LOG(info) << L"[http-api] Listening on " << cfg.host << L":" << cfg.port << L" as '"
+                                     << cfg.name << L"' (extent " << cfg.extent << L", auth " << cfg.auth << L").";
+                } catch (...) {
+                    CASPAR_LOG(fatal) << L"Failed to setup control API on port "
+                                      << boost::lexical_cast<std::wstring>(cfg.port)
+                                      << L". It is likely already in use";
+                    throw;
                 }
             } else
                 CASPAR_LOG(warning) << "Invalid controller: " << name;
