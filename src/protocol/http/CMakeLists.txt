@@ -14,6 +14,7 @@ set(SOURCES
 		api_action.cpp
 		api_auth.cpp
 		api_events.cpp
+		api_openapi.cpp
 		api_status.cpp
 		api_tree.cpp
 		api_value.cpp
@@ -27,6 +28,7 @@ set(HEADERS
 		api_action.h
 		api_auth.h
 		api_events.h
+		api_openapi.h
 		api_status.h
 		api_context.h
 		api_tree.h

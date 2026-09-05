@@ -14,6 +14,7 @@
 #include "api_action.h"
 #include "api_auth.h"
 #include "api_events.h"
+#include "api_openapi.h"
 #include "api_status.h"
 #include "api_tree.h"
 #include "api_value.h"
@@ -422,6 +423,9 @@ struct http_server::impl : public std::enable_shared_from_this<http_server::impl
         if (path == "/" || path == "/v1")
             return api_reply::ok_with(host_info(config_, count_subscriptions()));
 
+        if (path == "/v1/openapi.json")
+            return api_reply::ok_with(openapi(config_));
+
         if (path == "/v1/tree")
             return api_reply::ok_with(build_tree(*hub_, config_));
 
@@ -543,6 +547,24 @@ struct http_server::impl : public std::enable_shared_from_this<http_server::impl
 
         // Off the io_context thread from here. Nothing below touches the socket until the
         // reply is posted back onto its strand.
+        // `/v1/docs` is the one endpoint that is not an envelope: it is a page for a person,
+        // and wrapping HTML in `{"status":...,"result":"<!doctype html>..."}` would make it
+        // unreadable in the one client it exists for -- a browser.
+        if (target.path == "/v1/docs" && (method == bhttp::verb::get || method == bhttp::verb::head)) {
+            const bool ok = auth_.check(authorization);
+            auto       body =
+                ok ? docs_page(config_)
+                   : std::string("<!doctype html><meta charset=\"utf-8\"><title>401</title>"
+                                 "<p style=\"font:14px system-ui;padding:2rem\">This server requires "
+                                 "authentication. <code>GET /v1/auth</code> for a challenge.");
+            const auto st = ok ? bhttp::status::ok : bhttp::status::unauthorized;
+            asio::post(stream->get_executor(),
+                       [self, stream, buffer, st, body = std::move(body), method, keep, ver]() mutable {
+                           self->write(stream, buffer, st, std::move(body), method, keep, ver, "text/html; charset=utf-8");
+                       });
+            return;
+        }
+
         api_executor_.begin_invoke(
             [self, stream, buffer, target, method, keep, ver, reqbody, peer, authorization]() {
             api_reply reply;
@@ -569,12 +591,13 @@ struct http_server::impl : public std::enable_shared_from_this<http_server::impl
                std::string                                body,
                bhttp::verb                                method,
                bool                                       keep_alive,
-               unsigned                                   version)
+               unsigned                                   version,
+               const char*                                content_type = "application/json")
     {
         auto self = shared_from_this();
         auto res  = std::make_shared<bhttp::response<bhttp::string_body>>(status, version);
         res->set(bhttp::field::server, "CasparCG");
-        res->set(bhttp::field::content_type, "application/json");
+        res->set(bhttp::field::content_type, content_type);
         // The tree is fetched by a browser-based client as often as by a native one, and
         // without this every such fetch fails in a way that looks like the server is down.
         res->set(bhttp::field::access_control_allow_origin, "*");

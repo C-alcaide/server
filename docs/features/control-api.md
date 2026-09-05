@@ -35,6 +35,7 @@ any of it**.
 | `op`: `set`, `toggle`, `add`, `cas` -- one closure on the stage executor | implemented | same |
 | `POST /v1/action/.../{verb}` -- transport, clear; clip loads delegated to AMCP | implemented | `run_action` in `api_action.cpp` |
 | `POST /v1/batch` -- validate-all-then-apply, one frame across channels | implemented | `run_batch`, same file |
+| `GET /v1/openapi.json` -- generated, and `GET /v1/docs` | implemented | `openapi` and `docs_page` in `api_openapi.cpp` |
 | `at_frame` / `in_frames` on a batch | implemented | `park_batch` and `drain_batches` in `http_server.cpp` |
 | `WS /v1/events` -- prefix subscription with a per-connection diff | implemented | `collect_events` in `api_events.cpp`, `ws_session` in `http_server.cpp` |
 | `throttle_ms`, `repetition_filter`, revert events | implemented | same |
@@ -265,6 +266,25 @@ Two limits, both deliberate:
   breaking the guarantee. `POST` it to `/v1/action` first, then batch the rest.
 * **`queue` is accepted and echoed, and there is one queue.** The field is reserved now so a client
   written today does not have to change when independent queues arrive.
+
+### The API describes itself
+
+`GET /v1/openapi.json` is an OpenAPI 3.1 document, **generated**. The eight endpoints are written
+out in the source because there are eight of them and they do not change on their own; the field
+list is not -- every mixer parameter, its JSON type, its arity, its range, its enumeration values,
+its composition rule and its keyframe names come from `core::fields::all()`. The document cannot
+describe a field the server does not have, or miss one it does, and there is no `.yaml` in the
+repository to go stale.
+
+`GET /v1/docs` renders the same thing as a page: the endpoint table and all 177 fields. It is
+plain HTML with **no script and no external reference**, so it works on a server with no route to
+the internet -- which is most of them.
+
+**It is not Swagger UI**, which this branch's plan called for. Swagger UI is around 1.5 MB of
+third-party JavaScript and CSS that would be vendored into the repository and embedded in the
+binary, carrying its own licence, to give a developer a form to click; the alternative is loading
+it from a CDN, which the machine it runs on cannot reach. 27 KB of generated HTML answers the same
+question.
 
 ### Authentication
 
@@ -576,6 +596,8 @@ and Linux and leaves both bootstraps untouched.
 | scheduling refusals | **none -- checked by hand** | a frame in the past, `at_frame` and `in_frames` together, and an invalid op in a scheduled batch: each refused before anything was queued, and the value read back unchanged | 2026-09-05 |
 | `MIXER FIELD` reaches every field, and both facades agree | **none -- checked by hand** | inventory 177 rows; scalar, vec2, boolean, enum-by-name and enum-by-ordinal all set and read back; `MIXER 1-10 FIELD opacity 0.37` read back 0.37 through `MIXER FIELD`, through the old `MIXER OPACITY`, **and** through `/v1/value`; out-of-range, read-only, unknown field and short arity each refused with the value unchanged; a 50-frame tween settled at 0.0 | 2026-09-05 |
 | **the frame path is unchanged** | `conformance` + `grading`, **both mixers** | conformance **100/100 within 1.0 LSB** on opengl and on vulkan; grading **48/48 inside their gate** on both | 2026-09-05 |
+| **the generated OpenAPI document is valid** | **none -- checked by hand, with a real validator** | `openapi-spec-validator` accepts it as OpenAPI 3.1. 43 KB, 8 paths, **177 field schemas**, 15 status codes; `lut3d` carries `readOnly: true`, `blend_mode` carries its 25 value names, `fill_translation` its `minItems`/`maxItems` of 2 | 2026-09-05 |
+| the docs page is self-contained | **none -- checked by hand** | 27 KB, **0 `<script>` tags, 0 external references**, 189 table rows | 2026-09-05 |
 | authentication | **none -- checked by hand** | no header, a replayed answer, a corrupted answer, the wrong password, a malformed header and an unauthenticated WebSocket upgrade: **all six 401**. A correct answer: 200. **A corrupted answer consumed its challenge**, so the correct answer to that same challenge was then refused -- which is the property, and the first version failed it | 2026-09-05 |
 | the vendored SHA-256 is SHA-256 | **none -- implicitly, by the handshake** | the client hashes with Python's `hashlib` and the server with `common/sha256.h`; the handshake succeeds, which it cannot if the two disagree on a single bit | 2026-09-05 |
 | KEYFRAMES still round-trips | **none -- checked by hand** | `KEYFRAMES 1-10 SET`/`GET` with `opacity`, `rgb_r_gamma`, `proj_yaw` and `blur_type`: exact, including `proj_yaw` 90 on the wire and radians in the struct. The frozen-name check passes at 193 | 2026-09-05 |
