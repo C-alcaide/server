@@ -43,6 +43,7 @@ set(SOURCES
 
 		stage/stage_math.cpp
 		stage/stage_math_self_test.cpp
+		stage/stage_fields.cpp
 
 		mixer/audio/audio_mixer.cpp
 		mixer/image/blend_modes.cpp
@@ -110,6 +111,7 @@ set(HEADERS
 		stage/stage_model.h
 		stage/stage_math.h
 		stage/stage_math_self_test.h
+		stage/stage_fields.h
 
 		fwd.h
 		module_dependencies.h
