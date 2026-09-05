@@ -36,6 +36,7 @@ set(SOURCES
 		frame/blend_mask_loader.cpp
 		frame/frame.cpp
 		frame/frame_transform.cpp
+		frame/transform_fields.cpp
 		frame/geometry.cpp
 		frame/mesh_loader.cpp
 		frame/write_frame.cpp
@@ -74,6 +75,7 @@ set(HEADERS
 		frame/frame_metadata.h
 		frame/frame_factory.h
 		frame/frame_transform.h
+		frame/transform_fields.h
 		frame/frame_visitor.h
 		frame/geometry.h
 		frame/blend_mask_loader.h
