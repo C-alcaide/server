@@ -43,7 +43,7 @@ json::array vector_to_oscquery_value(const core::monitor::vector_t& v);
 
 /// The type tag a descriptor declares, before any value exists. Needed because the tree
 /// describes fields that have never been published.
-std::string osc_tags_for(const core::fields::field_desc& f);
+std::string osc_tags_for(const core::fields::field_meta& f);
 
 /// The wire name of a `value_type`, for the vendor block.
 const char* type_name(core::fields::value_type t);

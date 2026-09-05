@@ -84,7 +84,7 @@ json::array vector_to_oscquery_value(const core::monitor::vector_t& v)
     return a;
 }
 
-std::string osc_tags_for(const core::fields::field_desc& f)
+std::string osc_tags_for(const core::fields::field_meta& f)
 {
     using core::fields::value_type;
 

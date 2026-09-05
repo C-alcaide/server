@@ -108,7 +108,7 @@ void fill_telemetry_leaf(json::object& node, const core::monitor::vector_t& v)
 
 /// OSCQuery's `RANGE` is an array parallel to `VALUE`, one entry per component -- so a
 /// vec3 gets three, even when all three share one limit.
-json::array range_for(const fields::field_desc& f)
+json::array range_for(const fields::field_meta& f)
 {
     json::array ranges;
     if (!f.range && !(f.type == fields::value_type::enumeration && f.values))
@@ -137,7 +137,10 @@ json::array range_for(const fields::field_desc& f)
 /// The alternative -- inventing top-level keys -- makes this server's tree invalid against
 /// the spec, and a strict client is entitled to reject the whole node. ossia and Vezér
 /// both extend the format exactly this way.
-json::object vendor_block(const fields::field_desc& f)
+/// The default arrives as a VALUE rather than being read from the descriptor, because
+/// `defaults()` is the one accessor that depends on which struct the field belongs to. Passing it
+/// in is what keeps this function usable for any table rather than only the transform's.
+json::object vendor_block(const fields::field_meta& f, const core::monitor::vector_t& defaults)
 {
     json::object c;
     c["type"]     = type_name(f.type);
@@ -146,7 +149,7 @@ json::object vendor_block(const fields::field_desc& f)
     c["kind"]     = kind_name(f.kind);
     c["step"]     = f.step;
     c["arity"]    = static_cast<int>(f.arity);
-    c["default"]  = vector_to_oscquery_value(f.defaults());
+    c["default"]  = vector_to_oscquery_value(defaults);
     c["writable"] = (static_cast<uint8_t>(f.access) & static_cast<uint8_t>(fields::access_t::write)) != 0;
 
     if (f.unit)
@@ -192,7 +195,7 @@ const json::object& mixer_template()
             leaf["CLIPMODE"] = clipmode_name(f.bounding, f.range.has_value());
             if (f.description)
                 leaf["DESCRIPTION"] = f.description;
-            leaf["casparcg"] = vendor_block(f);
+            leaf["casparcg"] = vendor_block(f, f.defaults());
             contents.emplace(f.path, std::move(leaf));
         }
 
@@ -338,7 +341,15 @@ json::object host_info(const http_config& cfg, int subscriptions)
     ext["ACCESS"]      = true;
     ext["VALUE"]       = true;
     ext["RANGE"]       = true;
-    ext["DESCRIPTION"] = true;
+    // DERIVED, not asserted. This read `true` while all 177 macro rows passed `nullptr` for
+    // `description`, so the guard at the leaf never fired and the server advertised an extension
+    // it never once used -- an OSCQuery client that branches on this flag took the branch that
+    // finds nothing. Computing it from the table means it says what is true on the day it is
+    // asked, and turns itself on when the first described field lands rather than needing anyone
+    // to remember.
+    const auto& all         = fields::all();
+    ext["DESCRIPTION"]      = std::any_of(all.begin(), all.end(),
+                                     [](const fields::field_desc& f) { return f.description != nullptr; });
     ext["CLIPMODE"]    = true;
     ext["TAGS"]        = false;
     // Live values arrive on `/v1/events` as a prefix subscription, which is a different

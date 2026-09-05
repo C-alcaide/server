@@ -41,7 +41,7 @@ api_reply resolve_write_target(const std::string& path, write_target& out);
 /// This is where a client's `"0.5"` is refused rather than quietly parsed: a control
 /// surface that sends a string for a real number has a bug, and accepting it moves the
 /// failure to somewhere much harder to find.
-api_reply json_to_value(const core::fields::field_desc& f, const json::value& v, core::monitor::vector_t& out);
+api_reply json_to_value(const core::fields::field_meta& f, const json::value& v, core::monitor::vector_t& out);
 
 /// Range-check against the descriptor, component by component.
 ///
@@ -50,7 +50,7 @@ api_reply json_to_value(const core::fields::field_desc& f, const json::value& v,
 /// normalised into range first, because for a periodic quantity 400 degrees is a legal way
 /// to say 40, not an error. The failure carries the component index and the limits, so a
 /// generated control can put its slider back where it was and say why.
-api_reply check_and_bound(const core::fields::field_desc& f, core::monitor::vector_t& v);
+api_reply check_and_bound(const core::fields::field_meta& f, core::monitor::vector_t& v);
 
 /// A validated `set`, ready to apply to any stage.
 ///

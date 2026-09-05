@@ -113,7 +113,7 @@ std::vector<const json::value*> elements(const json::value& v, std::vector<const
     return storage;
 }
 
-json::object range_detail(const fields::field_desc& f, std::size_t component, double got)
+json::object range_detail(const fields::field_meta& f, std::size_t component, double got)
 {
     json::object d;
     d["component"] = static_cast<std::int64_t>(component);
@@ -153,7 +153,7 @@ api_reply resolve_write_target(const std::string& path, write_target& out)
     return api_reply{};
 }
 
-api_reply json_to_value(const fields::field_desc& f, const json::value& v, core::monitor::vector_t& out)
+api_reply json_to_value(const fields::field_meta& f, const json::value& v, core::monitor::vector_t& out)
 {
     using fields::value_type;
 
@@ -207,7 +207,7 @@ api_reply json_to_value(const fields::field_desc& f, const json::value& v, core:
     return api_reply{};
 }
 
-api_reply check_and_bound(const fields::field_desc& f, core::monitor::vector_t& v)
+api_reply check_and_bound(const fields::field_meta& f, core::monitor::vector_t& v)
 {
     if (!f.range)
         return api_reply{};

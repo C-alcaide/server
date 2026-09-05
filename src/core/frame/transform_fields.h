@@ -145,7 +145,20 @@ enum class guard_t : uint8_t
     grain_size_set,     // != 1.0
 };
 
-struct field_desc
+/// Everything about a field that does not depend on WHICH STRUCT the field belongs to.
+///
+/// Split out so a second struct can be described with the same machinery and read by the same
+/// presentation layer. The HTTP layer already touched only these members -- `range_for`,
+/// `vendor_block`, `osc_tags_for`, `clipmode_name`, `json_to_value`, `check_and_bound` and the
+/// OpenAPI generator never see an `image_transform` -- so widening them to `field_meta` is a
+/// change of parameter type and nothing else.
+///
+/// `compose`, `guard`, `enables` and `kf_names` are meaningless for a struct that does not
+/// compose, and they stay HERE anyway. That is deliberate: leaving them in the base means the
+/// 177 existing rows and all eleven macros initialise it by brace elision exactly as they
+/// already do, so this split edits no row and no macro body. A table for a struct with no
+/// composition simply leaves them at `none` / `nullptr`.
+struct field_meta
 {
     /// The state key under `channel/N/stage/layer/M/mixer/`, and the API path segment.
     const char* path;
@@ -187,15 +200,27 @@ struct field_desc
     /// job is to describe what the mixers do, so the exception is declared here and the
     /// question is recorded in the feature document.
     bool compose_clamps;
+};
 
+/// `field_meta` plus the three accessors that DO depend on the struct.
+///
+/// Aggregate, and deliberately: `typed_field<T>{ "opacity", value_type::real, ..., get, set,
+/// defaults }` initialises the base from the leading members and the pointers from the trailing
+/// ones by C++17 brace elision, which is what lets the whole table stay as it was written.
+template <class T>
+struct typed_field : field_meta
+{
     // Type-erased accessors. The value carrier IS `monitor::vector_t`, so a read is
     // directly publishable and a write is directly what arrived off the wire.
-    monitor::vector_t (*get)(const image_transform&);
+    monitor::vector_t (*get)(const T&);
     /// Returns false if the value has the wrong type or arity. Does not range-check --
     /// that is the caller's job, using `range` and `bounding`.
-    bool (*set)(image_transform&, const monitor::vector_t&);
+    bool (*set)(T&, const monitor::vector_t&);
     monitor::vector_t (*defaults)();
 };
+
+/// The transform table's row type. Every existing caller names this and is unaffected.
+using field_desc = typed_field<image_transform>;
 
 /// Every field, in table order.
 const std::vector<field_desc>& all();

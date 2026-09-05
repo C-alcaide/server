@@ -625,17 +625,22 @@ Numbers taken by hand and not by a battery, kept because nothing re-runs them:
    item here unverifiable rather than merely incomplete.
 2. **Only mixer fields are writable.** `PUT` resolves `/channel/{n}/stage/layer/{m}/mixer/{field}`
    and nothing else.
-3. **`HOST_INFO` advertises `EXTENSIONS.DESCRIPTION: true` and not one field emits a
-   description.** The `field_desc` column exists, `api_tree.cpp` emits `DESCRIPTION` when it is
-   non-null, and **every row of the table passes `nullptr`** — all eleven macros have a literal
-   `nullptr` in that slot. So the guard never fires, no leaf carries the key, and the capability
-   probe says otherwise.
+3. **No field emits a `DESCRIPTION`** — still true. **What is fixed is the lie about it.**
 
-   Found 2026-09-06 while enumerating previz. It is the same class as `LISTEN`, which is
-   advertised `false` precisely so a client does not wait for something that never comes — and
-   this one got the care backwards. The fix is descriptions rather than a `false`, because the
-   mechanism works and the text is what a generated control surface shows an operator; that means
-   a slot in the macros and ~177 short strings, so it is its own commit.
+   As found on 2026-09-06: the `field_desc` column existed, `api_tree.cpp` emitted `DESCRIPTION`
+   when it was non-null, **every row passed `nullptr`**, and `HOST_INFO` nevertheless advertised
+   `EXTENSIONS.DESCRIPTION: true`. So the guard never fired, no leaf carried the key, and the
+   capability probe said otherwise. Same class as `LISTEN`, which is advertised `false` precisely
+   so a client does not wait for something that never comes — this one had the care backwards.
+
+   `host_info` now **derives** the flag from the table rather than asserting it, so it reports
+   `false` today and turns itself on when the first described field lands. That is the half worth
+   fixing immediately: a client branching on the flag now takes the branch that matches what it
+   will actually receive. Filling the ~177 strings still needs a slot in the eleven macros and is
+   still its own commit — but it is no longer racing a false advertisement.
+
+   **Not covered by any battery.** `api-tree` reads `HOST_INFO` and asserts nothing about
+   `EXTENSIONS`, so nothing would have caught the original and nothing gates the derivation now.
 4. **A clip load goes through AMCP**, so its failures carry AMCP's detail rather than this API's,
    and it cannot take part in an atomic batch.
 5. **`at_frame` is this server's own frame counter, so two servers cannot yet be told to change
