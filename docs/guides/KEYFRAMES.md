@@ -58,12 +58,18 @@ color grading, blur, shapes, projection, and more.
 
 All commands target a specific channel and layer: `KEYFRAMES <verb> <channel>-<layer> [args]`
 
+> **The channel/layer comes BEFORE the verb**, as it does for `MIXER` and every other
+> channel command: `KEYFRAMES 1-10 SET`, not `KEYFRAMES SET 1-10`. Every example in this
+> guide had it the other way round until 2026-09-05, and the wrong form is not an error
+> message a reader can act on -- the parser answers `400 ERROR` and echoes the line back,
+> which reads as "the module is not loaded" rather than "the words are in the wrong order".
+
 ### KEYFRAMES SET
 
 Upload a keyframe timeline.  The layer is automatically **disarmed** after SET.
 
 ```
-KEYFRAMES SET 1-10 ({"keyframes":[
+KEYFRAMES 1-10 SET ({"keyframes":[
   {"time_secs":0.0, "easing":"LINEAR", "opacity":1.0, "fill_x":0.0},
   {"time_secs":2.0, "easing":"EASEINOUTCUBIC", "opacity":0.0, "fill_x":0.5},
   {"time_secs":5.0, "easing":"LINEAR", "opacity":1.0, "fill_x":0.0}
@@ -83,7 +89,7 @@ KEYFRAMES SET 1-10 ({"keyframes":[
 Activate keyframe evaluation for the layer.  Returns `404` if no timeline has been SET.
 
 ```
-KEYFRAMES ARM 1-10
+KEYFRAMES 1-10 ARM
 ```
 
 **Response:** `202 KEYFRAMES OK` or `404 KEYFRAMES ERROR ...`
@@ -93,7 +99,7 @@ KEYFRAMES ARM 1-10
 Stop keyframe evaluation.  The timeline is preserved — ARM again to resume.
 
 ```
-KEYFRAMES DISARM 1-10
+KEYFRAMES 1-10 DISARM
 ```
 
 **Response:** `202 KEYFRAMES OK`
@@ -103,7 +109,7 @@ KEYFRAMES DISARM 1-10
 Remove the timeline and all associated state for the layer.
 
 ```
-KEYFRAMES CLEAR 1-10
+KEYFRAMES 1-10 CLEAR
 ```
 
 **Response:** `202 KEYFRAMES OK`
@@ -113,7 +119,7 @@ KEYFRAMES CLEAR 1-10
 Retrieve the current timeline as JSON.
 
 ```
-KEYFRAMES GET 1-10
+KEYFRAMES 1-10 GET
 ```
 
 **Response:** `201 KEYFRAMES OK` followed by JSON, or `404` if no timeline is set.
@@ -123,7 +129,7 @@ KEYFRAMES GET 1-10
 Update specific fields of the keyframe nearest to the given time (within 1 ms).
 
 ```
-KEYFRAMES PATCH 1-10 2.0 ({"opacity":0.75, "fill_x":0.25})
+KEYFRAMES 1-10 PATCH 2.0 ({"opacity":0.75, "fill_x":0.25})
 ```
 
 - Only the fields in the patch are modified; existing fields are preserved.
@@ -137,7 +143,7 @@ Override the media time used for keyframe evaluation.  Useful for scrubbing the
 timeline while the producer is paused.
 
 ```
-KEYFRAMES SEEK 1-10 3.5
+KEYFRAMES 1-10 SEEK 3.5
 ```
 
 The override is automatically cleared when the producer's `frame_number` advances
@@ -150,7 +156,7 @@ The override is automatically cleared when the producer's `frame_number` advance
 Query armed state and keyframe count (single atomic snapshot).
 
 ```
-KEYFRAMES STATUS 1-10
+KEYFRAMES 1-10 STATUS
 ```
 
 **Response:** `201 KEYFRAMES OK` followed by `{"armed":true,"keyframe_count":3}`
@@ -161,22 +167,22 @@ KEYFRAMES STATUS 1-10
 
 ```
 1.  PLAY 1-10 myVideo                          ← load and play media
-2.  KEYFRAMES SET 1-10 ({"keyframes":[...]})    ← upload timeline
-3.  KEYFRAMES ARM 1-10                          ← activate
+2.  KEYFRAMES 1-10 SET ({"keyframes":[...]})    ← upload timeline
+3.  KEYFRAMES 1-10 ARM                          ← activate
 4.  (playback runs — keyframes auto-evaluate)
-5.  KEYFRAMES PATCH 1-10 2.0 ({"opacity":0.8}) ← live adjustment
-6.  KEYFRAMES DISARM 1-10                       ← pause animation
-7.  KEYFRAMES ARM 1-10                          ← resume
-8.  KEYFRAMES CLEAR 1-10                        ← clean up
+5.  KEYFRAMES 1-10 PATCH 2.0 ({"opacity":0.8}) ← live adjustment
+6.  KEYFRAMES 1-10 DISARM                       ← pause animation
+7.  KEYFRAMES 1-10 ARM                          ← resume
+8.  KEYFRAMES 1-10 CLEAR                        ← clean up
 ```
 
 ### Scrubbing While Paused
 
 ```
 PAUSE 1-10
-KEYFRAMES SEEK 1-10 0.0     ← jump to start of timeline
-KEYFRAMES SEEK 1-10 1.5     ← preview at 1.5 seconds
-KEYFRAMES SEEK 1-10 3.0     ← preview at 3.0 seconds
+KEYFRAMES 1-10 SEEK 0.0     ← jump to start of timeline
+KEYFRAMES 1-10 SEEK 1.5     ← preview at 1.5 seconds
+KEYFRAMES 1-10 SEEK 3.0     ← preview at 3.0 seconds
 RESUME 1-10                  ← override auto-clears on next frame
 ```
 
@@ -479,19 +485,19 @@ To explicitly control the enable state, include the enable field in your keyfram
 ### Fade In/Out with Position Slide
 
 ```
-KEYFRAMES SET 1-10 ({"keyframes":[
+KEYFRAMES 1-10 SET ({"keyframes":[
   {"time_secs":0.0,  "easing":"EASEINOUTSINE", "opacity":0.0, "fill_x":-0.2},
   {"time_secs":1.0,  "easing":"LINEAR",        "opacity":1.0, "fill_x":0.0},
   {"time_secs":9.0,  "easing":"EASEINOUTSINE", "opacity":1.0, "fill_x":0.0},
   {"time_secs":10.0, "easing":"LINEAR",        "opacity":0.0, "fill_x":0.2}
 ]})
-KEYFRAMES ARM 1-10
+KEYFRAMES 1-10 ARM
 ```
 
 ### Animated Color Grade Over Time
 
 ```
-KEYFRAMES SET 1-20 ({"keyframes":[
+KEYFRAMES 1-20 SET ({"keyframes":[
   {"time_secs":0.0, "easing":"EASEINOUTCUBIC",
    "temperature":0.0, "saturation":1.0, "contrast":1.0},
   {"time_secs":5.0, "easing":"EASEINOUTCUBIC",
@@ -499,45 +505,45 @@ KEYFRAMES SET 1-20 ({"keyframes":[
   {"time_secs":10.0, "easing":"LINEAR",
    "temperature":0.0, "saturation":1.0, "contrast":1.0}
 ]})
-KEYFRAMES ARM 1-20
+KEYFRAMES 1-20 ARM
 ```
 
 ### Rotating Projection (Virtual Camera Pan)
 
 ```
-KEYFRAMES SET 1-10 ({"keyframes":[
+KEYFRAMES 1-10 SET ({"keyframes":[
   {"time_secs":0.0,  "easing":"EASEINOUTQUAD", "proj_enable":1, "proj_yaw":0.0},
   {"time_secs":3.0,  "easing":"EASEINOUTQUAD", "proj_yaw":45.0},
   {"time_secs":6.0,  "easing":"EASEINOUTQUAD", "proj_yaw":-30.0},
   {"time_secs":10.0, "easing":"LINEAR",        "proj_yaw":0.0}
 ]})
-KEYFRAMES ARM 1-10
+KEYFRAMES 1-10 ARM
 ```
 
 ### Shape Wipe Transition
 
 ```
-KEYFRAMES SET 1-10 ({"keyframes":[
+KEYFRAMES 1-10 SET ({"keyframes":[
   {"time_secs":0.0, "easing":"EASEINOUTCUBIC",
    "shape_enable":1, "shape_size_x":0.0, "shape_size_y":0.0,
    "shape_edge_softness":0.05},
   {"time_secs":2.0, "easing":"LINEAR",
    "shape_size_x":1.0, "shape_size_y":1.0}
 ]})
-KEYFRAMES ARM 1-10
+KEYFRAMES 1-10 ARM
 ```
 
 ### Live Adjustment with PATCH
 
 ```
-KEYFRAMES SET 1-10 ({"keyframes":[
+KEYFRAMES 1-10 SET ({"keyframes":[
   {"time_secs":0.0, "easing":"LINEAR", "opacity":1.0, "blur_radius":0.0},
   {"time_secs":5.0, "easing":"LINEAR", "opacity":0.5, "blur_radius":10.0}
 ]})
-KEYFRAMES ARM 1-10
+KEYFRAMES 1-10 ARM
 
 REM  Adjust the second keyframe without re-uploading the entire timeline:
-KEYFRAMES PATCH 1-10 5.0 ({"opacity":0.8, "blur_radius":5.0})
+KEYFRAMES 1-10 PATCH 5.0 ({"opacity":0.8, "blur_radius":5.0})
 ```
 
 ---

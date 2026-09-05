@@ -149,12 +149,19 @@ bool guard_holds(guard_t g, const IT& o)
 // a whole class of macro bug.
 // ---------------------------------------------------------------------------------------
 
-/// A plain `double` member.
+/// A plain `double` member. `F` composes with clamping; `FU` does not -- see
+/// `field_desc::compose_clamps`, and use `FU` only where a mixer demonstrably does not clamp.
 #define F(NAME, MEMBER, DEF, RANGE, BOUND, RULE, GUARD, ENABLES, UNIT, KF, KIND)                                       \
+    F_(NAME, MEMBER, DEF, RANGE, BOUND, RULE, GUARD, ENABLES, UNIT, KF, KIND, true)
+
+#define FU(NAME, MEMBER, DEF, RANGE, BOUND, RULE, GUARD, ENABLES, UNIT, KF, KIND)                                      \
+    F_(NAME, MEMBER, DEF, RANGE, BOUND, RULE, GUARD, ENABLES, UNIT, KF, KIND, false)
+
+#define F_(NAME, MEMBER, DEF, RANGE, BOUND, RULE, GUARD, ENABLES, UNIT, KF, KIND, CLAMPS)                                       \
     field_desc                                                                                                         \
     {                                                                                                                  \
         NAME, value_type::real, access_t::read_write, RANGE, bounding_t::BOUND, compose_t::RULE, guard_t::GUARD,        \
-            ENABLES, UNIT, nullptr, nullptr, KF, kf_kind::KIND, 0.0, 1,                                                 \
+            ENABLES, UNIT, nullptr, nullptr, KF, kf_kind::KIND, 0.0, 1, CLAMPS,                                         \
             [](const IT& t) { return monitor::vector_t{t.MEMBER}; },                                                    \
             [](IT& t, const monitor::vector_t& v) {                                                                     \
                 double d;                                                                                              \
@@ -171,7 +178,7 @@ bool guard_holds(guard_t g, const IT& o)
     field_desc                                                                                                         \
     {                                                                                                                  \
         NAME, value_type::real, access_t::read_write, RANGE, bounding_t::BOUND, compose_t::RULE, guard_t::GUARD,        \
-            ENABLES, UNIT, nullptr, nullptr, KF, kf_kind::KIND, 0.0, 1,                                                 \
+            ENABLES, UNIT, nullptr, nullptr, KF, kf_kind::KIND, 0.0, 1, true,                                           \
             [](const IT& t) { return monitor::vector_t{static_cast<double>(t.MEMBER)}; },                               \
             [](IT& t, const monitor::vector_t& v) {                                                                     \
                 double d;                                                                                              \
@@ -188,11 +195,29 @@ bool guard_holds(guard_t g, const IT& o)
     field_desc                                                                                                         \
     {                                                                                                                  \
         NAME, value_type::boolean, access_t::read_write, std::nullopt, bounding_t::free, compose_t::RULE,               \
-            guard_t::GUARD, ENABLES, "", nullptr, nullptr, KF, kf_kind::discrete, 1.0, 1,                               \
+            guard_t::GUARD, ENABLES, "", nullptr, nullptr, KF, kf_kind::discrete, 1.0, 1, true,                         \
             [](const IT& t) { return monitor::vector_t{t.MEMBER}; },                                                    \
             [](IT& t, const monitor::vector_t& v) {                                                                     \
                 bool b;                                                                                                \
                 if (v.size() != 1 || !as_bool(v[0], b))                                                                \
+                    return false;                                                                                      \
+                t.MEMBER = b;                                                                                          \
+                return true;                                                                                           \
+            },                                                                                                         \
+            []() { return monitor::vector_t{DEF}; }                                                                     \
+    }
+
+/// A `bool` member with a composition GUARD -- the same body as `B`, and the only reason
+/// it is separate is that `B` predates any boolean needing one.
+#define B_G(NAME, MEMBER, DEF, RULE, GUARD, ENABLES, KF)                                                               \
+    field_desc                                                                                                         \
+    {                                                                                                                  \
+        NAME, value_type::boolean, access_t::read_write, std::nullopt, bounding_t::free, compose_t::RULE,               \
+            guard_t::GUARD, ENABLES, "", nullptr, nullptr, KF, kf_kind::discrete, 1.0, 1, true,                         \
+            [](const IT& t) { return monitor::vector_t{t.MEMBER}; },                                                    \
+            [](IT& t, const monitor::vector_t& v) {                                                                     \
+                bool b;                                                                                                \
+                if (v.size() != 1 || !as_bool(v[0], b))                                                                 \
                     return false;                                                                                      \
                 t.MEMBER = b;                                                                                          \
                 return true;                                                                                           \
@@ -205,7 +230,7 @@ bool guard_holds(guard_t g, const IT& o)
     field_desc                                                                                                         \
     {                                                                                                                  \
         NAME, value_type::vec##N, access_t::read_write, RANGE, bounding_t::BOUND, compose_t::RULE, guard_t::GUARD,      \
-            ENABLES, UNIT, nullptr, nullptr, KF, kf_kind::KIND, 0.0, N,                                                 \
+            ENABLES, UNIT, nullptr, nullptr, KF, kf_kind::KIND, 0.0, N, true,                                           \
             [](const IT& t) {                                                                                          \
                 monitor::vector_t r;                                                                                   \
                 for (std::size_t i = 0; i < (N); ++i)                                                                  \
@@ -232,7 +257,7 @@ bool guard_holds(guard_t g, const IT& o)
     field_desc                                                                                                         \
     {                                                                                                                  \
         NAME, value_type::enumeration, access_t::read_write, std::nullopt, bounding_t::clip, compose_t::RULE,           \
-            guard_t::GUARD, nullptr, "", NAMES, nullptr, KF, kf_kind::discrete, 1.0, 1,                                 \
+            guard_t::GUARD, nullptr, "", NAMES, nullptr, KF, kf_kind::discrete, 1.0, 1, true,                           \
             [](const IT& t) {                                                                                          \
                 const auto names = split_list(NAMES);                                                                  \
                 const auto idx   = static_cast<std::size_t>(static_cast<int>(t.MEMBER));                               \
@@ -273,7 +298,7 @@ bool guard_holds(guard_t g, const IT& o)
     field_desc                                                                                                         \
     {                                                                                                                  \
         NAME, value_type::integer, access_t::read_write, std::nullopt, bounding_t::free, compose_t::RULE,               \
-            guard_t::GUARD, nullptr, "", nullptr, nullptr, KF, kf_kind::discrete, 1.0, 1,                               \
+            guard_t::GUARD, nullptr, "", nullptr, nullptr, KF, kf_kind::discrete, 1.0, 1, true,                         \
             [](const IT& t) { return monitor::vector_t{static_cast<int32_t>(t.MEMBER)}; },                              \
             [](IT& t, const monitor::vector_t& v) {                                                                     \
                 double d;                                                                                              \
@@ -292,7 +317,7 @@ bool guard_holds(guard_t g, const IT& o)
     field_desc                                                                                                         \
     {                                                                                                                  \
         NAME, value_type::string, access_t::read, std::nullopt, bounding_t::free, compose_t::innermost_wins,            \
-            guard_t::GUARD, nullptr, "", nullptr, nullptr, nullptr, kf_kind::discrete, 0.0, 1,                          \
+            guard_t::GUARD, nullptr, "", nullptr, nullptr, nullptr, kf_kind::discrete, 0.0, 1, true,                    \
             [](const IT& t) { return monitor::vector_t{t.MEMBER}; },                                                    \
             [](IT&, const monitor::vector_t&) { return false; },                                                        \
             []() { return monitor::vector_t{std::string()}; }                                                           \
@@ -307,7 +332,7 @@ bool guard_holds(guard_t g, const IT& o)
     field_desc                                                                                                         \
     {                                                                                                                  \
         NAME, value_type::blob, access_t::read, std::nullopt, bounding_t::free, compose_t::innermost_wins,              \
-            guard_t::GUARD, nullptr, "", nullptr, nullptr, nullptr, kf_kind::discrete, 0.0, 1,                          \
+            guard_t::GUARD, nullptr, "", nullptr, nullptr, nullptr, kf_kind::discrete, 0.0, 1, true,                    \
             [](const IT& t) { return monitor::vector_t{static_cast<bool>(t.MEMBER)}; },                                 \
             [](IT&, const monitor::vector_t&) { return false; },                                                        \
             []() { return monitor::vector_t{false}; }                                                                   \
@@ -346,12 +371,16 @@ const std::vector<field_desc>& all()
         A("perspective_ur",    perspective.ur,    2, ({1.0, 0.0}), std::nullopt, free, none, none, "enable_geometry_modifiers", "", "persp_ur_x,persp_ur_y",   continuous),
         A("perspective_lr",    perspective.lr,    2, ({1.0, 1.0}), std::nullopt, free, none, none, "enable_geometry_modifiers", "", "persp_lr_x,persp_lr_y",   continuous),
         A("perspective_ll",    perspective.ll,    2, ({0.0, 1.0}), std::nullopt, free, none, none, "enable_geometry_modifiers", "", "persp_ll_x,persp_ll_y",   continuous),
-        B("enable_geometry_modifiers", enable_geometry_modifiers, false, or_, none, nullptr, "enable_geometry"),
+        // NOT composed here. It is a geometry flag, and `apply_transform_colour_values`
+        // never touches it -- `combine_transform` reads it to decide whether to apply the
+        // crop and perspective, which is the separate flow the header describes. Declared
+        // `or_` at first, and the self-test disagreed on every iteration.
+        B("enable_geometry_modifiers", enable_geometry_modifiers, false, none, none, nullptr, "enable_geometry"),
 
         // ---- levels (master): ranges intersect, gamma multiplies ------------------------
         F("levels_min_input",  levels.min_input,  0.0, lim::level,          clip, max_,     none, nullptr, "", "levels_min_in",     continuous),
         F("levels_max_input",  levels.max_input,  1.0, lim::level,          clip, min_,     none, nullptr, "", "levels_max_in",     continuous),
-        F("levels_gamma",      levels.gamma,      1.0, lim::level_gamma,    clip, multiply, none, nullptr, "", "levels_gamma",      continuous),
+        FU("levels_gamma",      levels.gamma,      1.0, lim::level_gamma,    clip, multiply, none, nullptr, "", "levels_gamma",      continuous),
         F("levels_min_output", levels.min_output, 0.0, lim::level,          clip, max_,     none, nullptr, "", "levels_min_out",    continuous),
         F("levels_max_output", levels.max_output, 1.0, lim::level,          clip, min_,     none, nullptr, "", "levels_max_out",    continuous),
 
@@ -391,9 +420,9 @@ const std::vector<field_desc>& all()
         F("gc_yellow",         gc_yellow,         1.312, lim::gamut_limit,  clip, innermost_wins, gamut_compress, nullptr, "", "gc_yellow",  continuous),
 
         // ---- image effects -------------------------------------------------------------------
-        F("sharpen_amount",    sharpen_amount,    0.0, lim::sharpen_amount,  clip, add,            none,               nullptr, "",   "sharpen_amount",  continuous),
+        FU("sharpen_amount",    sharpen_amount,    0.0, lim::sharpen_amount,  clip, add,            none,               nullptr, "",   "sharpen_amount",  continuous),
         F("sharpen_radius",    sharpen_radius,    1.0, lim::sharpen_radius,  clip, innermost_wins, sharpen_radius_set, nullptr, "px", "sharpen_radius",  continuous),
-        F("grain_intensity",   grain_intensity,   0.0, lim::grain_intensity, clip, add,            none,               nullptr, "",   "grain_intensity", continuous),
+        FU("grain_intensity",   grain_intensity,   0.0, lim::grain_intensity, clip, add,            none,               nullptr, "",   "grain_intensity", continuous),
         F("grain_size",        grain_size,        1.0, lim::grain_size,      clip, innermost_wins, grain_size_set,     nullptr, "",   "grain_size",      continuous),
 
         // ---- blur --------------------------------------------------------------------------
@@ -408,22 +437,28 @@ const std::vector<field_desc>& all()
         F("blur_tilt_h",       blur.tilt_h,       0.2, lim::unit,           clip, innermost_wins, blur_enable, "blur.enable", "",    "blur_tilt_h", continuous),
 
         // ---- per-channel RGB levels ----------------------------------------------------------
-        B("rgb_levels_enable", per_channel_levels.enable, false, or_, none, nullptr, "rgb_enable"),
-        F("rgb_r_min_input",   per_channel_levels.r.min_input,  0.0, lim::level,       clip, max_,     rgb_levels_enable, "per_channel_levels.enable", "", "rgb_r_min_in",  continuous),
-        F("rgb_r_max_input",   per_channel_levels.r.max_input,  1.0, lim::level,       clip, min_,     rgb_levels_enable, "per_channel_levels.enable", "", "rgb_r_max_in",  continuous),
-        F("rgb_r_gamma",       per_channel_levels.r.gamma,      1.0, lim::level_gamma, clip, multiply, rgb_levels_enable, "per_channel_levels.enable", "", "rgb_r_gamma",   continuous),
-        F("rgb_r_min_output",  per_channel_levels.r.min_output, 0.0, lim::level,       clip, max_,     rgb_levels_enable, "per_channel_levels.enable", "", "rgb_r_min_out", continuous),
-        F("rgb_r_max_output",  per_channel_levels.r.max_output, 1.0, lim::level,       clip, min_,     rgb_levels_enable, "per_channel_levels.enable", "", "rgb_r_max_out", continuous),
-        F("rgb_g_min_input",   per_channel_levels.g.min_input,  0.0, lim::level,       clip, max_,     rgb_levels_enable, "per_channel_levels.enable", "", "rgb_g_min_in",  continuous),
-        F("rgb_g_max_input",   per_channel_levels.g.max_input,  1.0, lim::level,       clip, min_,     rgb_levels_enable, "per_channel_levels.enable", "", "rgb_g_max_in",  continuous),
-        F("rgb_g_gamma",       per_channel_levels.g.gamma,      1.0, lim::level_gamma, clip, multiply, rgb_levels_enable, "per_channel_levels.enable", "", "rgb_g_gamma",   continuous),
-        F("rgb_g_min_output",  per_channel_levels.g.min_output, 0.0, lim::level,       clip, max_,     rgb_levels_enable, "per_channel_levels.enable", "", "rgb_g_min_out", continuous),
-        F("rgb_g_max_output",  per_channel_levels.g.max_output, 1.0, lim::level,       clip, min_,     rgb_levels_enable, "per_channel_levels.enable", "", "rgb_g_max_out", continuous),
-        F("rgb_b_min_input",   per_channel_levels.b.min_input,  0.0, lim::level,       clip, max_,     rgb_levels_enable, "per_channel_levels.enable", "", "rgb_b_min_in",  continuous),
-        F("rgb_b_max_input",   per_channel_levels.b.max_input,  1.0, lim::level,       clip, min_,     rgb_levels_enable, "per_channel_levels.enable", "", "rgb_b_max_in",  continuous),
-        F("rgb_b_gamma",       per_channel_levels.b.gamma,      1.0, lim::level_gamma, clip, multiply, rgb_levels_enable, "per_channel_levels.enable", "", "rgb_b_gamma",   continuous),
-        F("rgb_b_min_output",  per_channel_levels.b.min_output, 0.0, lim::level,       clip, max_,     rgb_levels_enable, "per_channel_levels.enable", "", "rgb_b_min_out", continuous),
-        F("rgb_b_max_output",  per_channel_levels.b.max_output, 1.0, lim::level,       clip, min_,     rgb_levels_enable, "per_channel_levels.enable", "", "rgb_b_max_out", continuous),
+        // The whole per-channel block is composed by ONE group rule in `compose_colour`,
+        // mirroring the mixers' `if (other.per_channel_levels.enable) { merge_ch(...) }`.
+        // Every row below therefore declares `none`: leaving them with individual rules
+        // applied the merge TWICE, and while max/min are idempotent the gamma multiply is
+        // not -- it came out squared. 116 of 256 iterations, on both mixers, and only the
+        // three gamma rows named, which is exactly what a double-apply looks like.
+        B("rgb_levels_enable", per_channel_levels.enable, false, none, none, nullptr, "rgb_enable"),
+        F("rgb_r_min_input",   per_channel_levels.r.min_input,  0.0, lim::level,       clip, none,     rgb_levels_enable, "per_channel_levels.enable", "", "rgb_r_min_in",  continuous),
+        F("rgb_r_max_input",   per_channel_levels.r.max_input,  1.0, lim::level,       clip, none,     rgb_levels_enable, "per_channel_levels.enable", "", "rgb_r_max_in",  continuous),
+        FU("rgb_r_gamma",       per_channel_levels.r.gamma,      1.0, lim::level_gamma, clip, none,     rgb_levels_enable, "per_channel_levels.enable", "", "rgb_r_gamma",   continuous),
+        F("rgb_r_min_output",  per_channel_levels.r.min_output, 0.0, lim::level,       clip, none,     rgb_levels_enable, "per_channel_levels.enable", "", "rgb_r_min_out", continuous),
+        F("rgb_r_max_output",  per_channel_levels.r.max_output, 1.0, lim::level,       clip, none,     rgb_levels_enable, "per_channel_levels.enable", "", "rgb_r_max_out", continuous),
+        F("rgb_g_min_input",   per_channel_levels.g.min_input,  0.0, lim::level,       clip, none,     rgb_levels_enable, "per_channel_levels.enable", "", "rgb_g_min_in",  continuous),
+        F("rgb_g_max_input",   per_channel_levels.g.max_input,  1.0, lim::level,       clip, none,     rgb_levels_enable, "per_channel_levels.enable", "", "rgb_g_max_in",  continuous),
+        FU("rgb_g_gamma",       per_channel_levels.g.gamma,      1.0, lim::level_gamma, clip, none,     rgb_levels_enable, "per_channel_levels.enable", "", "rgb_g_gamma",   continuous),
+        F("rgb_g_min_output",  per_channel_levels.g.min_output, 0.0, lim::level,       clip, none,     rgb_levels_enable, "per_channel_levels.enable", "", "rgb_g_min_out", continuous),
+        F("rgb_g_max_output",  per_channel_levels.g.max_output, 1.0, lim::level,       clip, none,     rgb_levels_enable, "per_channel_levels.enable", "", "rgb_g_max_out", continuous),
+        F("rgb_b_min_input",   per_channel_levels.b.min_input,  0.0, lim::level,       clip, none,     rgb_levels_enable, "per_channel_levels.enable", "", "rgb_b_min_in",  continuous),
+        F("rgb_b_max_input",   per_channel_levels.b.max_input,  1.0, lim::level,       clip, none,     rgb_levels_enable, "per_channel_levels.enable", "", "rgb_b_max_in",  continuous),
+        FU("rgb_b_gamma",       per_channel_levels.b.gamma,      1.0, lim::level_gamma, clip, none,     rgb_levels_enable, "per_channel_levels.enable", "", "rgb_b_gamma",   continuous),
+        F("rgb_b_min_output",  per_channel_levels.b.min_output, 0.0, lim::level,       clip, none,     rgb_levels_enable, "per_channel_levels.enable", "", "rgb_b_min_out", continuous),
+        F("rgb_b_max_output",  per_channel_levels.b.max_output, 1.0, lim::level,       clip, none,     rgb_levels_enable, "per_channel_levels.enable", "", "rgb_b_max_out", continuous),
 
         // ---- secondary qualifier (a group; see compose_colour) ---------------------------------
         B("qualifier_enable",  qualifier_enable,  false, or_, none, nullptr, "qualifier_enable"),
@@ -459,7 +494,12 @@ const std::vector<field_desc>& all()
         F("shape_edge_softness",  shape.edge_softness,  0.005, lim::unit,       clip, innermost_wins, shape_enable, "shape.enable", "",    "shape_edge_softness",  continuous),
         F("shape_gradient_angle", shape.gradient_angle, 0.0,   lim::blur_angle, wrap, innermost_wins, shape_enable, "shape.enable", "deg", "shape_gradient_angle", angular),
         A("shape_gradient_center", shape.gradient_center, 2, ({0.5, 0.5}), lim::unit, clip, innermost_wins, shape_enable, "shape.enable", "", "shape_gradient_cx,shape_gradient_cy", continuous),
-        B("shape_stroke_enable",  shape.stroke_enable,  false, or_, none, nullptr, "shape_stroke_enable"),
+        // Follows the rest of the shape block rather than OR-ing on its own: the mixers
+        // replace `shape` wholesale when the INNER layer has `shape.enable`, so a stroke
+        // flag on a layer whose shape is off must not leak upward. `shape_enable` itself
+        // can stay `or_` because OR and the whole-struct replacement agree for it; this one
+        // is where they part company, which is what the self-test reported.
+        B_G("shape_stroke_enable", shape.stroke_enable, false, innermost_wins, shape_enable, nullptr, "shape_stroke_enable"),
         F("shape_stroke_width",   shape.stroke_width,   0.0, lim::unit, clip, innermost_wins, shape_enable, "shape.enable", "", "shape_stroke_width", continuous),
         A("shape_color1",      shape.color1,      4, ({1.0, 1.0, 1.0, 1.0}), lim::unit, clip, innermost_wins, shape_enable, "shape.enable", "", "shape_color1_r,shape_color1_g,shape_color1_b,shape_color1_a", continuous),
         A("shape_color2",      shape.color2,      4, ({0.0, 0.0, 0.0, 0.0}), lim::unit, clip, innermost_wins, shape_enable, "shape.enable", "", "shape_color2_r,shape_color2_g,shape_color2_b,shape_color2_a", continuous),
@@ -580,8 +620,11 @@ const std::vector<field_desc>& all()
 }
 
 #undef F
+#undef F_
+#undef FU
 #undef FL
 #undef B
+#undef B_G
 #undef A
 #undef E
 #undef I
@@ -693,10 +736,11 @@ void compose_field(const field_desc& f, image_transform& self, const image_trans
         if (!as_num(sv[i], s) || !as_num(ov[i], o))
             return;
         switch (f.compose) {
-            case compose_t::multiply: s = clamp_opt(f.range, s * o); break;
+            case compose_t::multiply: s = f.compose_clamps ? clamp_opt(f.range, s * o) : s * o; break;
             case compose_t::add:
-                s = f.bounding == bounding_t::wrap && f.range ? std::remainder(s + o, f.range->hi - f.range->lo)
-                                                              : clamp_opt(f.range, s + o);
+                s = f.bounding == bounding_t::wrap && f.range
+                        ? std::remainder(s + o, f.range->hi - f.range->lo)
+                        : (f.compose_clamps ? clamp_opt(f.range, s + o) : s + o);
                 break;
             case compose_t::min_: s = std::min(s, o); break;
             case compose_t::max_: s = std::max(s, o); break;

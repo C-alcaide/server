@@ -35,6 +35,7 @@ set(HEADERS
 	ogl/util/shader.h
 	ogl/util/texture.h
 	ogl/util/matrix.h
+	compose_self_test.h
 	ogl/util/transforms.h
 
 	ogl_image_vertex.h

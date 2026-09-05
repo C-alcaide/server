@@ -1,6 +1,10 @@
 
 #include "transforms.h"
 
+#include <common/log.h>
+#include <common/utf.h>
+#include <core/frame/transform_fields.h>
+
 #include <algorithm>
 #include <cmath>
 #include <unordered_set>
@@ -40,6 +44,10 @@ void draw_crop_region::apply_transform(const caspar::accelerator::ogl::t_matrix&
     coords[1] = coords[1] * matrix;
     coords[2] = coords[2] * matrix;
     coords[3] = coords[3] * matrix;
+}
+
+namespace {
+constexpr const wchar_t* BACKEND_NAME = L"opengl";
 }
 
 void apply_transform_colour_values(core::image_transform& self, const core::image_transform& other)
@@ -724,6 +732,33 @@ draw_transforms::transform_coords(const std::vector<core::frame_geometry::coord>
     }
 
     return result;
+}
+
+
+void run_compose_self_test()
+{
+    const auto rep = core::fields::compose_self_test(&apply_transform_colour_values);
+
+    if (rep.divergences == 0) {
+        CASPAR_LOG(info) << L"[core] compose self-test: " << BACKEND_NAME << L" " << rep.fields << L" fields, "
+                         << rep.iterations << L" iterations, 0 divergences.";
+        return;
+    }
+
+    std::wstring names;
+    for (const auto& n : rep.diverged) {
+        if (!names.empty())
+            names += L", ";
+        names += u16(n);
+    }
+
+    // A warning rather than a throw. The generated composition is not on the frame path
+    // yet, so a divergence here breaks nothing that is running -- but it means the registry
+    // and this backend disagree about a rule, and whichever of them a reader trusts is
+    // now wrong. It becomes fatal on the commit that makes the mixer CALL the generated
+    // version.
+    CASPAR_LOG(warning) << L"[core] compose self-test: " << BACKEND_NAME << L" " << rep.divergences << L" of "
+                        << rep.iterations << L" iterations diverged, in: " << names;
 }
 
 } // namespace caspar::accelerator::ogl

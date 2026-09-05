@@ -172,6 +172,22 @@ struct field_desc
     double      step;
     uint8_t     arity;
 
+    /// Does COMPOSITION clamp the combined value back into `range`?
+    ///
+    /// Separate from `bounding`, which is about a WRITE and is what a control surface
+    /// applies to its own slider. Composition is a different question, and the two mixers
+    /// answer it per field: they clamp the grading block -- "two layers at the edge of
+    /// legal would otherwise reach a value no single command could set" -- and do NOT clamp
+    /// `levels.gamma`, the three per-channel gammas, `sharpen_amount` or `grain_intensity`.
+    ///
+    /// This column exists because `compose_self_test` FOUND that difference, not because
+    /// anyone chose it: all six were declared clamped, all six diverged on every one of 256
+    /// iterations, and both mixers agreed with each other against the table. Whether those
+    /// six SHOULD be clamped is a real question and a rendered-output change; this table's
+    /// job is to describe what the mixers do, so the exception is declared here and the
+    /// question is recorded in the feature document.
+    bool compose_clamps;
+
     // Type-erased accessors. The value carrier IS `monitor::vector_t`, so a read is
     // directly publishable and a write is directly what arrived off the wire.
     monitor::vector_t (*get)(const image_transform&);

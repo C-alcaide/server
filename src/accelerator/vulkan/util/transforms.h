@@ -14,6 +14,22 @@
 
 namespace caspar::accelerator::vulkan {
 
+/// This backend's hand-written layer composition.
+///
+/// Declared here only so `run_compose_self_test` can pass it to the registry's generated
+/// equivalent. Nothing else should call it -- `combine_transform` is the entry point.
+void apply_transform_colour_values(core::image_transform& self, const core::image_transform& other);
+
+/// Compare this backend's composition against `core::fields::compose_colour` on randomised
+/// transform pairs, and log the result.
+///
+/// The point is NOT that the generated version is used -- it is not, yet. The point is that
+/// the registry's declared rules and the hand-written table are checked against each other
+/// on every start, so the two cannot quietly diverge in the window before the swap. A
+/// divergence names the FIELD, so the report says which rule disagrees rather than only
+/// that one does.
+void run_compose_self_test();
+
 struct draw_crop_region
 {
     explicit draw_crop_region(double left, double top, double right, double bottom);

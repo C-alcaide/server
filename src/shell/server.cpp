@@ -44,6 +44,8 @@
 #include <core/producer/frame_producer.h>
 #include <core/video_channel.h>
 
+#include <accelerator/compose_self_test.h>
+
 #include <protocol/http/http_server.h>
 #include <protocol/http/state_hub.h>
 #include <core/video_format.h>
@@ -169,6 +171,17 @@ struct server::impl
 
         setup_accelerator(env::properties());
         CASPAR_LOG(info) << L"Initialized accelerator.";
+
+        // Both backends' hand-written layer composition, checked against the registry's
+        // generated one on randomised transform pairs. Neither mixer CALLS the generated
+        // version yet -- this is what has to be green before one does, and running it every
+        // start is what stops the two drifting in the meantime.
+        //
+        // Run for BOTH backends regardless of which one this server configured. A
+        // divergence in the backend nobody selected is still a divergence, and a check that
+        // only runs on the configured mixer would report parity that was never tested.
+        accelerator::ogl::run_compose_self_test();
+        accelerator::vulkan::run_compose_self_test();
 
         // Before the channels: a channel may carry <ocio-display>/<ocio-view> on a consumer,
         // and those are validated against the loaded config.

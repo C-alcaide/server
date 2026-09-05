@@ -53,10 +53,10 @@ allowlist trap.
 ## 2. How to drive it
 
 ```
-KEYFRAMES SET 1-1 ...
-KEYFRAMES ARM 1-1
-KEYFRAMES SEEK 1-1 0
-KEYFRAMES STATUS 1-1
+KEYFRAMES 1-1 SET ...
+KEYFRAMES 1-1 ARM
+KEYFRAMES 1-1 SEEK 0
+KEYFRAMES 1-1 STATUS
 ```
 
 The keyframe list syntax is in the operator guide and is not duplicated here.

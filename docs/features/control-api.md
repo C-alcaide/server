@@ -360,6 +360,25 @@ a `try` block that reported it as `internal`. One channel worked; two did not. T
 held by value, which costs one atomic increment per batch and removes a trap that was waiting for
 whoever wrote the second caller.
 
+**The composition self-test runs on every start, for BOTH backends, whichever one is
+configured.** It is the exit criterion for a later change -- making the mixers CALL
+`core::fields::compose_colour` instead of their own hand-written tables -- and it is worth its
+milliseconds before then, because it is the only thing stopping the registry and the mixers
+drifting in the meantime. A divergence names the field, not just the fact.
+
+Its first run said so eight times over, and every one was the registry's error rather than a
+mixer's: `enable_geometry_modifiers` declared `or_` when the colour composition never touches it
+at all; `shape_stroke_enable` declared `or_` when the mixers replace the whole `shape` struct;
+the fifteen per-channel-levels rows declared individual rules **on top of** a group rule that
+already merged the block, which is idempotent for the min/max rows and squares the gamma; and six
+fields -- `levels_gamma`, the three per-channel gammas, `sharpen_amount`, `grain_intensity` --
+declared that composition clamps them when neither mixer does. The last of those is now a
+declared column rather than an assumption, and **whether the mixers should clamp those six is a
+real open question**: their own comment says combined grading values are clamped so that "two
+layers at the edge of legal would otherwise reach a value no single command could set", and these
+six sit outside that rule for no stated reason. Answering it changes rendered output for stacked
+layers and needs its own measurement.
+
 **The diff is per connection, not per server.** Rejected: one server-side "last published" set
 that every subscriber diffs against. Two clients with different `throttle_ms` are at different
 points in time, so a shared set hands one of them a diff computed against the other's view -- and
@@ -420,6 +439,8 @@ and Linux and leaves both bootstraps untouched.
 | **a two-channel batch lands on one frame** | **none -- checked by hand** | two `set` ops on different channels: both events carried **frame 434**, and both values were correct. This is the assertion the whole `stage_delayed` dance exists for | 2026-09-05 |
 | a failed batch applies nothing | **none -- checked by hand** | `[ok, ok, unknown_path]` answered `batch_op_failed` with `details[0].index == 2`, and **both valid ops read back unapplied**; a range violation at index 1 behaved the same | 2026-09-05 |
 | actions inside a batch | **none -- checked by hand** | two `pause` ops on different channels: both layers read back `paused` | 2026-09-05 |
+| **the registry agrees with both mixers** | `compose self-test`, at every startup | 177 fields, 256 randomised transform pairs, **0 divergences on opengl and 0 on vulkan**. Its first run reported 8 diverging fields on both, every one of them a registry error -- see below | 2026-09-05 |
+| KEYFRAMES still round-trips | **none -- checked by hand** | `KEYFRAMES 1-10 SET`/`GET` with `opacity`, `rgb_r_gamma`, `proj_yaw` and `blur_type`: exact, including `proj_yaw` 90 on the wire and radians in the struct. The frozen-name check passes at 193 | 2026-09-05 |
 
 **What these numbers do not cover, and it is most of it.** They were taken by hand from one server
 on one machine, not by a battery, so nothing re-runs them and nothing will notice when they stop
