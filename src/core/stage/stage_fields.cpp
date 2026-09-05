@@ -344,6 +344,122 @@ const std::vector<camera_field>& camera_fields()
     return camera_table();
 }
 
+namespace {
+
+bool same_camera(const previz_camera& a, const previz_camera& b)
+{
+    for (const auto& f : camera_fields())
+        if (f.get(a) != f.get(b))
+            return false;
+    return true;
+}
+
+bool same_screen(const screen_meta& a, const screen_meta& b)
+{
+    for (const auto& f : screen_fields())
+        if (f.get(a) != f.get(b))
+            return false;
+    return true;
+}
+
+} // namespace
+
+bool same_stage(const stage_snapshot& a, const stage_snapshot& b)
+{
+    const auto& fa = a.flags;
+    const auto& fb = b.flags;
+    if (fa.active != fb.active || fa.auto_projection != fb.auto_projection ||
+        fa.show_grid != fb.show_grid || fa.show_wireframe != fb.show_wireframe ||
+        fa.show_gizmo != fb.show_gizmo || fa.camera_locked != fb.camera_locked ||
+        fa.has_view_override != fb.has_view_override)
+        return false;
+
+    if (a.scene_path != b.scene_path)
+        return false;
+
+    if (!same_camera(a.camera, b.camera) || !same_camera(a.view_camera, b.view_camera))
+        return false;
+
+    // Compared as a SET, not pairwise by position: screens are named and created at runtime, so
+    // a rename or a removal changes the key set and must count as a change even when every
+    // remaining screen is untouched.
+    if (a.screens.size() != b.screens.size())
+        return false;
+    for (const auto& [name, s] : a.screens) {
+        const auto it = b.screens.find(name);
+        if (it == b.screens.end() || !same_screen(s, it->second))
+            return false;
+    }
+    return true;
+}
+
+namespace {
+
+/// Write one object's fields under `prefix`, omitting any that sit at their default.
+///
+/// "At its default" is decided against a DEFAULT-CONSTRUCTED OBJECT, not against `f.defaults()`,
+/// and the difference is not pedantic. Every member here is a `float` and the accessors widen to
+/// `double`, so a descriptor default of `0.1` compares unequal to the stored `0.1f` widened --
+/// 0.1 against 0.10000000149011612. Measured: `near_clip` and `far_clip` published on every
+/// camera and every view camera while sitting untouched at their defaults, because the test could
+/// never be true for them. Reading the fresh object through the same accessor makes the
+/// comparison exact for any member type, and keeps the descriptor's default a readable `0.1`
+/// rather than forcing the float's decimal expansion into the tree.
+template <class T>
+void publish_object(monitor::state&                       st,
+                    const std::string&                    prefix,
+                    const T&                              obj,
+                    const std::vector<typed_field<T>>&    table)
+{
+    static const T fresh{};
+    for (const auto& f : table) {
+        auto v = f.get(obj);
+        if (v == f.get(fresh))
+            continue;
+        st[prefix + "/" + f.path] = std::move(v);
+    }
+}
+
+} // namespace
+
+void stage_publisher::refresh(const stage_snapshot& snap)
+{
+    if (have_ && same_stage(last_, snap))
+        return;
+
+    last_ = snap;
+    have_ = true;
+    ++rebuilds_;
+
+    monitor::state st;
+
+    // Always published: no descriptor table stands behind these, so an absent key would leave a
+    // reader with nothing to fall back on.
+    st["active"]          = snap.flags.active;
+    st["auto_projection"] = snap.flags.auto_projection;
+    st["show_grid"]       = snap.flags.show_grid;
+    st["show_wireframe"]  = snap.flags.show_wireframe;
+    st["show_gizmo"]      = snap.flags.show_gizmo;
+    st["camera_locked"]   = snap.flags.camera_locked;
+    st["view_override"]   = snap.flags.has_view_override;
+    st["scene_path"]      = snap.scene_path;
+
+    // The enumeration of named children. Always published, including when empty: a screen every
+    // one of whose fields happened to sit at its default would otherwise not appear at all.
+    monitor::vector_t names;
+    names.reserve(snap.screens.size());
+    for (const auto& [name, sm] : snap.screens)
+        names.emplace_back(name);
+    st["screens"] = std::move(names);
+
+    publish_object(st, "camera", snap.camera, camera_fields());
+    publish_object(st, "view_camera", snap.view_camera, camera_fields());
+    for (const auto& [name, sm] : snap.screens)
+        publish_object(st, "screen/" + name, sm, screen_fields());
+
+    state_ = std::move(st);
+}
+
 void log_stage_fields()
 {
     CASPAR_LOG(info) << L"[core] stage fields: " << screen_fields().size() << L" screen, "

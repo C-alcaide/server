@@ -38,6 +38,7 @@
 
 #include "stage_model.h"
 
+#include <cstdint>
 #include <string_view>
 #include <vector>
 
@@ -56,11 +57,58 @@ const std::vector<screen_field>& screen_fields();
 /// viewport camera -- they are the same struct and differ only in what reads them.
 const std::vector<camera_field>& camera_fields();
 
+/// Are two stage snapshots equal, compared THROUGH THE TABLES?
+///
+/// Every screen field's `get()` and every camera field's `get()` is evaluated on both sides and
+/// the resulting `monitor::vector_t`s compared, plus the flags and the scene path. So a field
+/// added to a table is part of the comparison the moment it is declared, and cannot be forgotten
+/// the way a hand-written member-by-member `operator==` would forget it.
+///
+/// This is the guard on the publication path: it decides whether the per-tick state needs
+/// REBUILDING. A false negative here is a value that silently stops updating.
+bool same_stage(const stage_snapshot& a, const stage_snapshot& b);
+
 /// Validate both tables and log their sizes at startup, in the shape `run_compose_self_test`
 /// established. Throws `programming_error` on a malformed row -- a bounding rule with nothing to
 /// bound, or a missing description -- because both are mistakes in a table that is compiled in,
 /// so failing at boot is failing at the only moment anyone can act on it.
 void log_stage_fields();
+
+/// Builds the stage's per-tick `monitor::state`, rebuilding only when something changed.
+///
+/// The REBUILD/WRITE SPLIT this implements is load-bearing and was learned the hard way on the
+/// mixer fields: publishing only on change made values BLINK, because the same request returned
+/// `0.5` or "absent, therefore default" depending on which frame it landed on. A per-frame
+/// snapshot must be COMPLETE. Only the WORK of building it may be skipped -- so `refresh()` does
+/// nothing when `same_stage()` holds, and the caller assigns `published()` into the channel's
+/// state on EVERY tick regardless.
+///
+/// What is sparse and what is not follows one rule: a field is published sparsely -- omitted when
+/// it equals its default -- exactly when a reader can look its default up in a table. Screen and
+/// camera fields have descriptors, so `/v1/value` answers an absent path with the default and
+/// flags it `is_default`, the same contract the mixer fields already use. The stage FLAGS and the
+/// scene path have no table, so omitting them would leave a reader with nothing to fall back on;
+/// they are published always. `screens` is published always for the same reason -- it is the
+/// enumeration of which named children exist, and a screen whose every field happened to sit at
+/// its default would otherwise vanish from the tree entirely.
+class stage_publisher
+{
+  public:
+    /// Rebuild the rows if and only if `snap` differs from the last one seen.
+    void refresh(const stage_snapshot& snap);
+
+    /// The complete published subtree. Assign it every tick.
+    const monitor::state& published() const { return state_; }
+
+    /// How many times `refresh` actually rebuilt. For measurement only.
+    std::uint64_t rebuilds() const { return rebuilds_; }
+
+  private:
+    stage_snapshot last_;
+    bool           have_     = false;
+    std::uint64_t  rebuilds_ = 0;
+    monitor::state state_;
+};
 
 const screen_field* find_screen_field(std::string_view path);
 const camera_field* find_camera_field(std::string_view path);

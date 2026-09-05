@@ -119,7 +119,18 @@ class previz_renderer
                 int                                height);
 
     /// Get a snapshot of the current scene (thread-safe copy).
+    ///
+    /// DEEP-COPIES EVERY MESH, including its full vertex vector, under the scene lock. Fine for
+    /// the AMCP queries and the layout save that use it; unusable on the channel tick. Use
+    /// `stage_snapshot()` for anything per-frame.
     previz_scene scene() const;
+
+    /// The narrow view: screens, the two cameras and the flags, and no geometry at all.
+    ///
+    /// This is what the per-tick publication reads and diffs. It exists because `scene()` above
+    /// cannot be called 50 times a second, and the six floats a publisher wants are a rounding
+    /// error next to the vertex data it would copy to get them.
+    core::stage_snapshot stage_snapshot() const;
 
     /// Whether a scene is loaded and active.
     bool active() const;

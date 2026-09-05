@@ -19,6 +19,7 @@
 
 #pragma once
 
+#include <map>
 #include <string>
 
 /// The 3D stage's DESCRIPTION, with none of its rendering.
@@ -107,5 +108,42 @@ struct screen_projection
     float icvfx_feather   = 0.05f; // mask edge feather (NDC units)
     float icvfx_outer_dim = 1.0f;  // outer-region brightness multiplier (0..1)
 };
+
+/// The stage-level flags that belong to the scene rather than to any one screen or camera.
+///
+/// BRIEF SS5: "diagnostic overlays are parameters on the object, not a debug menu" -- so the grid,
+/// the wireframe and the gizmo are fields here rather than three more bespoke verbs.
+struct previz_flags
+{
+    bool active            = false;
+    bool auto_projection   = false;
+    bool show_grid         = true;
+    bool show_wireframe    = false;
+    bool show_gizmo        = true; // written by PREVIZ GIZMO and read by nothing -- see stage.md
+    bool camera_locked     = false;
+    bool has_view_override = false;
+};
+
+/// Everything about the stage that is worth publishing every tick, and nothing that is not.
+///
+/// Deliberately NOT `previz_scene`: that carries every mesh with its full vertex vector, and
+/// `previz_renderer::scene()` deep-copies the lot under the scene lock. Taking that 50 times a
+/// second to read six floats would be absurd. This is the narrow view -- screens, the two
+/// cameras and the flags -- and it is what the cache-compare in the publication path diffs.
+struct stage_snapshot
+{
+    previz_flags                       flags;
+    previz_camera                      camera;      // the PRODUCTION camera: what compute_frustum reads
+    previz_camera                      view_camera; // the operator's viewport
+    std::map<std::string, screen_meta> screens;
+    std::string                        scene_path;
+};
+
+// Equality is deliberately NOT defined here. Comparing these structs member by member would be a
+// fourth hand-written list of a screen's properties, and a field added to the table but missed in
+// it would make the publication path stop noticing that field had changed -- silently, and with
+// exactly the shape of the `image_transform` composition-allowlist trap. `same_stage()` in
+// `stage_fields.h` compares through the REGISTRY instead, so a new row is part of the comparison
+// the moment it is declared.
 
 }} // namespace caspar::core

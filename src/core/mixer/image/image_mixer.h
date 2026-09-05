@@ -25,6 +25,7 @@
 #include <core/frame/frame_factory.h>
 #include <core/frame/frame_visitor.h>
 #include <core/frame/pixel_format.h>
+#include <core/monitor/monitor.h>
 
 #include <cstdint>
 #include <future>
@@ -115,6 +116,18 @@ class image_mixer
     void pop() override                                     = 0;
 
     virtual void update_aspect_ratio(double aspect_ratio) = 0;
+
+    /// What this backend wants published under `channel/{n}/mixer/`, every tick.
+    ///
+    /// A VIRTUAL rather than a `dynamic_cast` in the channel tick, and that is forced rather than
+    /// preferred: AMCP reaches the previz renderer with `dynamic_cast<ogl::image_mixer*>` because
+    /// `protocol` links `accelerator`. `core` does NOT and must not, so the same trick in
+    /// `video_channel::impl::tick()` would invert the dependency. This interface is already the
+    /// one thing both backends implement and `core` may name.
+    ///
+    /// Default is empty, so a backend with nothing to say costs nothing: assigning an empty state
+    /// writes no keys at all.
+    virtual monitor::state state() const { return {}; }
 
     virtual std::future<render_output> render(const struct video_format_desc& format_desc) = 0;
 

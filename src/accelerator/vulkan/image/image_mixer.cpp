@@ -32,6 +32,8 @@
 
 #include "../../ogl/image/previz_renderer.h"
 #include "../../ogl/image/previz_scene.h"
+
+#include <core/stage/stage_fields.h>
 #include "../../ogl/util/device.h"
 #include "../../ogl/util/texture.h"
 
@@ -904,6 +906,8 @@ struct image_mixer::impl
     std::unique_ptr<ogl::previz_renderer>        previz_renderer_;
     std::shared_ptr<previz_texture_bridge>       previz_bridge_;
     std::once_flag                               previz_init_flag_;
+    std::atomic<ogl::previz_renderer*>           previz_ready_{nullptr};
+    mutable core::fields::stage_publisher        previz_publisher_;
     int                                          channel_id_ = 0;
 
   public:
@@ -1391,9 +1395,27 @@ struct image_mixer::impl
                 return;
             previz_renderer_ = std::make_unique<ogl::previz_renderer>(
                 spl::make_shared_ptr(previz_ogl_device_));
+            // Published AFTER the unique_ptr is set, and read by `stage_state()` below from a
+            // different thread. `previz_renderer_` itself cannot be read from there: this
+            // `call_once` runs on whichever thread asked for the renderer first, so a plain read
+            // of the pointer racing this write is undefined.
+            previz_ready_.store(previz_renderer_.get(), std::memory_order_release);
             CASPAR_LOG(info) << L"[vk_mixer] Created previz renderer for channel " << channel_id_;
         });
         return previz_renderer_.get();
+    }
+
+    core::monitor::state stage_state() const
+    {
+        // Deliberately NOT `get_previz_renderer()`. That CREATES the renderer on first call, and
+        // a per-tick publisher must not be the thing that brings a GL device into existence on a
+        // Vulkan channel that never uses previz. Until somebody asks for previz, this publishes
+        // nothing and costs an atomic load.
+        auto* r = previz_ready_.load(std::memory_order_acquire);
+        if (!r)
+            return {};
+        previz_publisher_.refresh(r->stage_snapshot());
+        return previz_publisher_.published();
     }
 };
 
@@ -1455,6 +1477,8 @@ ogl::previz_renderer* image_mixer::get_previz_renderer()
 {
     return impl_->get_previz_renderer();
 }
+
+core::monitor::state image_mixer::state() const { return impl_->stage_state(); }
 
 void image_mixer::set_target_color(core::color_space cs, core::color_transfer ct, bool auto_convert, int auto_tone_map, float peak_luminance, float sdr_reference_white, bool auto_gamut_compress, bool straight_alpha_grading, bool working_space_composite)
 {

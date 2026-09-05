@@ -322,6 +322,23 @@ struct video_channel::impl final
                     monitor::state state = {};
                     state["stage"]       = stage_->state();
                     state["mixer"]       = mixer_.state();
+
+                    // The stage, from the IMAGE MIXER rather than from `mixer_`, and deliberately
+                    // out here rather than inside it.
+                    //
+                    // `mixer_(...)` above runs only `if (has_consumers)`. Publishing the stage
+                    // from there made a screen's position invisible on a channel with no output
+                    // -- which is exactly the channel an operator is most likely to be
+                    // configuring, and it presented as the publication silently not working at
+                    // all. Here it runs on every tick of every channel.
+                    //
+                    // WRITE EVERY TICK, unconditionally. The backend decides whether to REBUILD
+                    // -- the previz publisher skips that when nothing changed -- but the write is
+                    // not skippable: a per-frame snapshot must be COMPLETE. Publishing on change
+                    // only makes values blink, the same request returning a value or "absent,
+                    // therefore default" depending on which frame it lands on. A backend with
+                    // nothing to say returns an empty state, which writes no keys at all.
+                    state["mixer"]["previz"] = image_mixer_->state();
                     state["output"]      = output_.state();
 
                     if (tick_published_valid_ && tick_published_.ticks > 0) {

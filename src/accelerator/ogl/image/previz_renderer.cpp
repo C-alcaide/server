@@ -1351,6 +1351,27 @@ previz_scene previz_renderer::scene() const
     return impl_->scene_;
 }
 
+core::stage_snapshot previz_renderer::stage_snapshot() const
+{
+    std::lock_guard<std::mutex> lock(impl_->scene_mutex_);
+
+    const auto& sc = impl_->scene_;
+
+    core::stage_snapshot out;
+    out.flags.active            = sc.active;
+    out.flags.auto_projection   = sc.auto_projection;
+    out.flags.show_grid         = sc.show_grid;
+    out.flags.show_wireframe    = sc.show_wireframe;
+    out.flags.show_gizmo        = sc.show_gizmo;
+    out.flags.camera_locked     = sc.camera_locked;
+    out.flags.has_view_override = sc.has_view_override;
+    out.camera                  = sc.camera;
+    out.view_camera             = sc.view_camera;
+    out.scene_path              = sc.scene_path;
+    out.screens                 = sc.screens;
+    return out;
+}
+
 bool previz_renderer::active() const
 {
     std::lock_guard<std::mutex> lock(impl_->scene_mutex_);

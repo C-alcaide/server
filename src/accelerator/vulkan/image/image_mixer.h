@@ -91,6 +91,9 @@ class image_mixer final : public core::image_mixer
     void set_previz_bridge(const std::shared_ptr<class previz_texture_bridge>& bridge);
     ogl::previz_renderer* get_previz_renderer();
 
+    /// The previz stage, published every tick. See `core::image_mixer::state()`.
+    core::monitor::state state() const override;
+
     void set_target_color(core::color_space cs, core::color_transfer ct, bool auto_convert, int auto_tone_map, float peak_luminance, float sdr_reference_white, bool auto_gamut_compress, bool straight_alpha_grading, bool working_space_composite) override;
 
     void set_calibration_lut(std::shared_ptr<const core::lut3d_data> lut, float strength, const std::wstring& path) override;

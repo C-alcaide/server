@@ -23,6 +23,8 @@
 
 #include "image_kernel.h"
 #include "previz_renderer.h"
+
+#include <core/stage/stage_fields.h>
 #include "previz_scene.h"
 
 #include "../util/buffer.h"
@@ -869,6 +871,9 @@ struct image_mixer::impl
     int                          channel_id_;
     image_renderer               renderer_;
     previz_renderer              previz_renderer_;
+    // `mutable` because `state()` is const and the publisher's whole job is to CACHE. It is
+    // touched only from the channel tick, which is the same thread that calls `state()`.
+    mutable core::fields::stage_publisher previz_publisher_;
     std::shared_ptr<channel_texture_store> channel_tex_store_;
     std::vector<draw_transforms> transform_stack_;
     std::vector<layer>           layers_; // layer/stream/items
@@ -1333,6 +1338,12 @@ void* image_mixer::native_gl_context() const { return impl_->ogl_->native_gl_con
 void* image_mixer::native_egl_display() const { return impl_->ogl_->native_egl_display(); }
 
 void image_mixer::set_cpu_readback_needed(bool needed) { impl_->renderer_.set_cpu_readback_needed(needed); }
+
+core::monitor::state image_mixer::state() const
+{
+    impl_->previz_publisher_.refresh(impl_->previz_renderer_.stage_snapshot());
+    return impl_->previz_publisher_.published();
+}
 
 previz_renderer& image_mixer::get_previz_renderer() { return impl_->previz_renderer_; }
 
