@@ -583,21 +583,24 @@ FEATURES = [
               "client re-implements a private model of the server and drifts from it; the "
               "existing ones do exactly that, which is why they show parameters the server no "
               "longer has and miss the ones it gained.",
-        gap="Read-only in this build, and that is the honest headline. Fetching the tree, "
-            "reading any value and probing the server all work; writing, subscribing to "
-            "changes and authenticating do not exist yet, and mixer values in the tree still "
-            "read as their defaults until the tick publishes the changed ones. There is also "
-            "no automated test — the numbers here are one manual run on one machine.",
+        gap="One gap matters more than the rest, and it is not a missing feature. Six "
+            "automated checks cover this on both renderers and none of them looks at a "
+            "picture: a parameter that stores correctly and renders nothing passes every "
+            "one. That is the same class of fault this was partly built to prevent, and "
+            "closing it means capturing a frame per parameter. Beyond that: two machines "
+            "cannot yet be told to change on the same frame, and the password protection "
+            "keeps the password off the wire without encrypting anything after it.",
         market="Elsewhere, OSCQuery is Vidvox's published format and is what ossia, Vezér and "
                "several VJ tools already speak, so a client written against it is not written "
                "against us. Media servers mostly expose either a proprietary API or a text "
                "protocol; a self-describing tree is the thing that lets a UI be generated "
                "rather than maintained.",
-        next='Publish changed mixer values from the tick, then writes and a subscription socket',
+        next='Capture a frame per parameter — the checks confirm the value, not the picture',
         covers=['control-api'],
         status=PARTIAL,
-        evidence="247 addressable values on one layer, all resolving · 177 mixer descriptors · "
-                 "75 KB, 14 ms per full tree · no automated test; measured by hand 2026-09-05",
+        evidence="six automated checks, both renderers, all passing · 500 addressable values "
+                 "resolving · 172 parameters written and read back through two interfaces · "
+                 "200 concurrent edits with no lost update · two channels changed on one frame",
     ),
 ]
 
