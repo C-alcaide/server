@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include "api_context.h"
 #include "http_config.h"
 #include "state_hub.h"
 
@@ -41,7 +42,8 @@ class http_server
   public:
     http_server(std::shared_ptr<boost::asio::io_context> io_context,
                 std::shared_ptr<state_hub>               hub,
-                http_config                              config);
+                http_config                              config,
+                api_context                              context);
     ~http_server();
 
     http_server(const http_server&)            = delete;

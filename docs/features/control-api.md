@@ -11,8 +11,8 @@ exists, its type, its arity, its legal range and what animates it — instead of
 of `MIXER` commands and their argument orders. Turned on by an `<http>` block under
 `<controllers>`; absent by default, so a server that does not configure one opens no port.
 
-**This build is read-only.** Reading and subscribing work; writing and batching are named as gaps
-in §5 rather than implied by the word "API".
+**Reading, subscribing and writing a mixer value work.** Actions and atomic batches do not, and
+are named as gaps in §5 rather than implied by the word "API".
 
 ---
 
@@ -29,7 +29,9 @@ in §5 rather than implied by the word "API".
 | `<http>` controller, `<port> <host> <name> <extent> <max-prefixes>` | implemented | the `http` branch of `setup_controllers`, `server.cpp` |
 | Live mixer values, published sparsely by the tick | implemented | `publish_layer_transform` in `stage.cpp` |
 | `<auth>password</auth>` | **refused at startup**, with a fatal log | same branch — see §3 |
-| `PUT /v1/value`, `POST /v1/action`, `POST /v1/batch` | **not implemented**; answered `bad_request` | `route()` in `http_server.cpp` |
+| `PUT /v1/value/.../mixer/{field}` -- validated, with `duration` and `tween` | implemented | `write_value` in `api_value.cpp` |
+| `op`: `set`, `toggle`, `add`, `cas` -- one closure on the stage executor | implemented | same |
+| `POST /v1/action`, `POST /v1/batch` | **not implemented**; answered `bad_request` | `route()` in `http_server.cpp` |
 | `WS /v1/events` -- prefix subscription with a per-connection diff | implemented | `collect_events` in `api_events.cpp`, `ws_session` in `http_server.cpp` |
 | `throttle_ms`, `repetition_filter`, revert events | implemented | same |
 
@@ -140,6 +142,67 @@ OSCQuery's per-path `LISTEN`/`IGNORE`, which is a different mechanism from a pre
 and claiming it would leave a standard client waiting on a socket that is never going to answer
 it.
 
+### Writing a value
+
+`PUT /v1/value/channel/{n}/stage/layer/{m}/mixer/{field}` -- mixer fields only in this build.
+
+```bash
+curl -X PUT http://127.0.0.1:5254/v1/value/channel/1/stage/layer/10/mixer/opacity \
+     -d '{"value": 0.42, "label": "vt roll-in"}'
+
+curl -X PUT http://127.0.0.1:5254/v1/value/channel/1/stage/layer/10/mixer/opacity \
+     -d '{"value": 0.0, "duration": 50, "tween": "easeoutsine"}'
+
+curl -X PUT http://127.0.0.1:5254/v1/value/channel/1/stage/layer/10/mixer/fill_translation \
+     -d '{"value": [0.1, 0.2]}'
+
+curl -X PUT http://127.0.0.1:5254/v1/value/channel/1/stage/layer/10/mixer/blend_mode \
+     -d '{"value": "screen"}'
+```
+
+| body field | meaning |
+| :--- | :--- |
+| `value` | A bare value for a scalar field, an array for a vector one. A scalar also accepts a one-element array, because `/v1/value` reports scalars bare and the tree reports them as arrays -- a client writing back what it read from either is right. |
+| `duration`, `tween` | Frames and a tween name, exactly as the `MIXER` commands' optional arguments. An unknown tween is `bad_request` rather than silently linear. |
+| `label` | Free text, logged with the write and the client's address. A show that goes wrong is reconstructed from that log, and a label the operator chose beats any identifier the server could invent. |
+| `op` | `set` (the default), `toggle`, `add` or `cas`. |
+
+**An enumeration takes a name or its ordinal**, and the reply reports the **name** either way --
+the reply echoes what the field now HOLDS, not what arrived, so a client can store the answer.
+
+**Out of range is refused, never clipped**, with the component and the limits:
+
+```json
+{"status":{"code":"field_out_of_range","message":"value out of range for chroma_min_brightness",
+           "details":[{"component":0,"min":0.0,"max":1.0,"got":5.0,"path":"chroma_min_brightness"}]},
+ "server":"stage-left","result":null}
+```
+
+That matches `grade_param`, the single place every `MIXER` command validates, so the two facades
+cannot disagree about what is legal. `bounding` in the descriptor is what a control surface
+applies to its own slider; it is not what the server does to a value. **Wrapped fields are the
+exception**: a periodic quantity is normalised into range first, so `hue_shift` 400 is 40 and -400
+is -40 rather than two errors.
+
+**`toggle`, `add` and `cas` read and write inside one closure on the stage executor**, so no other
+client's write can interleave between the read and the write:
+
+```bash
+curl -X PUT .../mixer/invert   -d '{"op":"toggle"}'
+curl -X PUT .../mixer/opacity  -d '{"op":"add","value":0.25}'
+curl -X PUT .../mixer/opacity  -d '{"op":"cas","expect":0.75,"value":0.3}'
+```
+
+A `cas` whose `expect` does not match answers `field_conflict` and carries both values; nothing is
+written. `add` and `toggle` range-check the COMPUTED value, because the client did not know what
+the old one was.
+
+**A write is applied immediately and readable through `/v1/value` on the next tick.** The reply's
+`value` is authoritative and needs no round trip; the state is a per-frame snapshot and is at most
+one frame behind. Read back too fast and you get the previous frame's value -- which is a correct
+answer to a different question.
+
+
 Every reply carries the same envelope:
 
 ```json
@@ -209,6 +272,21 @@ when the transform CHANGES, and write the cached keys into the state on every ti
 §4 and in `CHANGELOG.md`; the projection block was moved onto the same rule, which is a cadence
 change for existing OSC consumers and is why it has a `CHANGELOG.md` entry of its own.
 
+**Out of range is refused rather than clipped.** Rejected: clamping to the descriptor's range,
+which is friendlier and is a different server. `grade_param` refuses, so clipping here would mean
+`MIXER 1-10 CHROMA ... 5.0` and `PUT .../chroma_min_brightness 5.0` doing different things -- and
+the whole argument for one state is that the two facades cannot disagree. The `bounding` column is
+what a control surface applies to its own slider; it is not what the server does to a value that
+arrives out of range.
+
+**The read and the write of an in-place operation are the same closure.** `toggle`, `add` and
+`cas` compute inside `apply_transform`'s function, on the stage executor, against the transform
+the write lands on. Rejected: read via `get_current_transform`, compute, write -- which is two
+tasks with a gap, and the gap is exactly where another client's write goes. Measured with two
+clients issuing 100 toggles each: every reply's `value` equalled the next reply's `previous`, one
+unbroken chain of 200. **A parity check would have passed either way**, which is why the chain is
+the assertion.
+
 **The diff is per connection, not per server.** Rejected: one server-side "last published" set
 that every subscriber diffs against. Two clients with different `throttle_ms` are at different
 points in time, so a shared set hands one of them a diff computed against the other's view -- and
@@ -258,6 +336,12 @@ and Linux and leaves both bootstraps untouched.
 | throttle | **none -- checked by hand** | driven as fast as the client could ask: 51 messages at min gap 78 ms with `throttle_ms:0` (the client's own floor), 15 at min gap **277 ms** at 250, 8 at min gap **511 ms** at 500. **No gap fell below the requested interval**, and the last value delivered was the final one | 2026-09-05 |
 | revert | **none -- checked by hand** | `MIXER 1-10 OPACITY 1.0` produced one event carrying the default and `reverted: true` | 2026-09-05 |
 | teardown | **none -- checked by hand** | `HOST_INFO.SUBSCRIPTIONS` went 3 to 1 to 0 as sockets closed | 2026-09-05 |
+| a write lands, and both facades agree | **none -- checked by hand** | `PUT opacity 0.42` read back 0.42 through `/v1/value` AND `0.41999999999999998` through `MIXER 1-10 OPACITY` | 2026-09-05 |
+| a refused write changes nothing | **none -- checked by hand** | out of range, wrong type, wrong arity, read-only blob, read-only string, unknown field, unknown channel: each returned its own code, and the value was **read back unchanged afterwards** | 2026-09-05 |
+| enumerations canonicalise | **none -- checked by hand** | `"screen"` and `5` both accepted; the reply reports the name, not the ordinal | 2026-09-05 |
+| wrap normalises | **none -- checked by hand** | `hue_shift` 400 to 40.0, -400 to -40.0. `proj_yaw` 7.5 stays 7.5, because it declares `wrap` with no range -- and so does AMCP | 2026-09-05 |
+| tween | **none -- checked by hand** | `{"value":0.0,"duration":50,"tween":"easeoutsine"}` sampled 14 times over 2.1 s: 0.937, 0.813, 0.691 ... 0.012, 0.0005, 0.0 -- **14 distinct values, monotone**, so the curve is running rather than the endpoints being written | 2026-09-05 |
+| **no lost updates under contention** | **none -- checked by hand** | 2 clients x 100 `{"op":"toggle"}` on one boolean: 200 replies, every one flipped its own `previous`, and **every reply's `value` equalled the next reply's `previous`** -- one unbroken chain. A lost update breaks the chain; a parity check would pass by luck | 2026-09-05 |
 
 **What these numbers do not cover, and it is most of it.** They were taken by hand from one server
 on one machine, not by a battery, so nothing re-runs them and nothing will notice when they stop
@@ -278,28 +362,36 @@ being true. Specifically:
 
 ## 5. Known gaps
 
-1. **No writes.** `PUT /v1/value`, `POST /v1/action` and `POST /v1/batch` answer `bad_request`, so
-   everything above is observation only.
-2. **No authentication.** `<auth>password</auth>` is refused at startup. Until it exists this port
+1. **No actions and no batches.** `POST /v1/action` and `POST /v1/batch` answer `bad_request`, so
+   `PLAY`, `STOP` and anything that must land on one frame across two channels still go through
+   AMCP.
+2. **Only mixer fields are writable.** `PUT` resolves `/channel/{n}/stage/layer/{m}/mixer/{field}`
+   and nothing else; there is no writable path outside a layer's transform.
+3. **No authentication.** `<auth>password</auth>` is refused at startup. Until it exists this port
    must not be bound to an interface reachable off-segment -- and that applies to the WebSocket
    too, which is the same port.
-3. **No battery.** See section 4 -- this is the gap that makes every other item here unverifiable
-   rather than merely incomplete. The WebSocket half is the more urgent of the two, because a
-   subscription defect looks exactly like a quiet server.
-4. **A subscription is not resumable.** A dropped socket loses the per-connection diff, so a client
+4. **No battery.** See section 4 -- this is the gap that makes every other item here unverifiable
+   rather than merely incomplete. The subscription half is the more urgent, because a subscription
+   defect looks exactly like a quiet server.
+5. **A subscription is not resumable.** A dropped socket loses the per-connection diff, so a client
    must re-subscribe and take the full set again. That is correct, and it is undocumented on the
    wire: there is no session id to resume, and there deliberately is not one yet.
-5. **`throttle_ms` is per message, not per path.** A subscription covering a busy prefix and a
+6. **`throttle_ms` is per message, not per path.** A subscription covering a busy prefix and a
    quiet one throttles both together.
-6. **The blob fields report presence, not content.** `lut3d`, `hue_curves`, `blend_mask` and
-   `grade_nodes` appear as `blob` descriptors; loading one stays a `MIXER` command.
-7. **`ocio.source_space` is read-only** even once writes land -- validating a colour-space name
-   against the loaded OCIO config stays on the AMCP side for now.
-8. **No discovery.** There is no mDNS/Zeroconf anywhere in the fork, so a client is told where the
-   server is rather than finding it.
-9. **The projection block is published twice**, under its historical `projection/*` names for
-   existing OSC consumers and under its registry names in `mixer/proj_*`. Both are live and they
-   agree; retiring the first changes a published interface and is deliberately not done here.
+7. **A `wrap` field with no declared range is not normalised.** The projection angles are the whole
+   set: they declare `wrap` because they are periodic and carry no limits, so `proj_yaw` 7.5 rad
+   stays 7.5 rad. AMCP stores it the same way, so the two agree -- but a client cannot rely on
+   getting a canonical representative back.
+8. **The blob fields report presence, not content.** `lut3d`, `hue_curves`, `blend_mask` and
+   `grade_nodes` appear as `blob` descriptors and refuse a `PUT`; loading one stays a `MIXER`
+   command.
+9. **`ocio.source_space` is read-only** -- validating a colour-space name against the loaded OCIO
+   config lives in the accelerator layer, which this library does not link.
+10. **No discovery.** There is no mDNS/Zeroconf anywhere in the fork, so a client is told where the
+    server is rather than finding it.
+11. **The projection block is published twice**, under its historical `projection/*` names for
+    existing OSC consumers and under its registry names in `mixer/proj_*`. Both are live and they
+    agree; retiring the first changes a published interface and is deliberately not done here.
 
 ---
 
@@ -327,7 +419,7 @@ being true. Specifically:
 ```mermaid
 flowchart LR
     AMCP["AMCP<br/>MIXER, PLAY, CALL"] --> STAGE["stage executor<br/>apply_transform"]
-    API["Control API<br/>PUT / POST — not yet"] -.-> STAGE
+    API["Control API<br/>PUT /v1/value"] --> STAGE
     STAGE --> TICK["channel tick<br/>monitor::state, once per frame"]
     TICK --> SNAP["immutable snapshot<br/>shared_ptr, atomic"]
     SNAP --> OSC["OSC client<br/>broadcast"]

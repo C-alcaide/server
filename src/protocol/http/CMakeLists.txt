@@ -14,6 +14,7 @@ set(SOURCES
 		api_events.cpp
 		api_status.cpp
 		api_tree.cpp
+		api_value.cpp
 		boost_json_src.cpp
 		http_server.cpp
 		json_state.cpp
@@ -23,7 +24,9 @@ set(SOURCES
 set(HEADERS
 		api_events.h
 		api_status.h
+		api_context.h
 		api_tree.h
+		api_value.h
 		boost_prelude.h
 		http_config.h
 		http_server.h

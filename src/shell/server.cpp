@@ -802,8 +802,19 @@ struct server::impl
                     CASPAR_THROW_EXCEPTION(user_error() << msg_info(L"Unsupported <auth> mode: " + cfg.auth));
                 }
 
+                // A lookup rather than the channel vector itself: `protocol_http` links
+                // core and common only, and taking `amcp::channel_context` would put the
+                // whole AMCP command layer on its include path to obtain one stage pointer.
+                http::api_context api_ctx;
+                auto              channels = channels_;
+                api_ctx.stage = [channels](int index) -> std::shared_ptr<core::stage_base> {
+                    if (index < 1 || index > static_cast<int>(channels->size()))
+                        return nullptr;
+                    return channels->at(static_cast<std::size_t>(index - 1)).stage;
+                };
+
                 try {
-                    http_server_ = std::make_shared<http::http_server>(io_context_, state_hub_, cfg);
+                    http_server_ = std::make_shared<http::http_server>(io_context_, state_hub_, cfg, api_ctx);
                     CASPAR_LOG(info) << L"[http-api] Listening on " << cfg.host << L":" << cfg.port << L" as '"
                                      << cfg.name << L"' (extent " << cfg.extent << L", auth " << cfg.auth << L").";
                 } catch (...) {
