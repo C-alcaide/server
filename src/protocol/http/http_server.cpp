@@ -16,6 +16,7 @@
 #include "api_status.h"
 #include "api_tree.h"
 #include "api_value.h"
+#include "json_state.h"
 #include "boost_prelude.h"
 
 #include <common/except.h>
@@ -144,6 +145,10 @@ struct http_server::impl : public std::enable_shared_from_this<http_server::impl
     std::mutex                             ws_mutex_;
     std::vector<std::weak_ptr<ws_session>>  ws_sessions_;
 
+    /// Batches waiting for a frame. Touched only on the API executor -- posted there by
+    /// the request that created one, and drained there by the per-tick fan-out.
+    std::vector<batch_plan> pending_batches_;
+
     /// Set while a fan-out is queued. Without it a 25 Hz tick on four channels queues 100
     /// tasks a second onto the API executor whether or not the previous one has run, and a
     /// momentarily slow subscriber turns into an unbounded queue.
@@ -190,10 +195,100 @@ struct http_server::impl : public std::enable_shared_from_this<http_server::impl
         accept();
     }
 
+    /// Resolve a deferred batch's target frame and queue it. On the API executor, which
+    /// is also where `drain_batches` runs, so `pending_batches_` needs no lock.
+    ///
+    /// `in_frames` arrives negated from `validate_batch` -- the validator has no idea what
+    /// frame the server is on, and giving it one would mean handing the whole hub to a
+    /// function whose entire job is to touch nothing.
+    api_reply park_batch(batch_plan plan)
+    {
+        std::int64_t now = 0;
+        if (const auto snap = hub_->get(plan.reference_channel)) {
+            for (const auto& kv : *snap) {
+                if (kv.first == "frame" && !kv.second.empty()) {
+                    const auto v = data_to_json(kv.second.front());
+                    if (v.is_int64() || v.is_uint64() || v.is_double())
+                        now = static_cast<std::int64_t>(v.to_number<double>());
+                    break;
+                }
+            }
+        }
+
+        if (plan.at_frame < 0)
+            plan.at_frame = now - plan.at_frame; //< in_frames, negated by the validator
+        else if (plan.at_frame <= now)
+            // Already gone. Refused rather than applied immediately: a cue that missed its
+            // frame is a timing failure the operator has to know about, and quietly firing
+            // it late is how a show ends up out of sync with nothing in the log.
+            return api_reply::fail(api_code::bad_request,
+                                   "at_frame " + std::to_string(plan.at_frame) + " is not in the future; channel " +
+                                       std::to_string(plan.reference_channel) + " is on frame " + std::to_string(now));
+
+        json::object r;
+        r["scheduled"] = true;
+        r["at_frame"]  = plan.at_frame;
+        r["channel"]   = plan.reference_channel;
+        r["now"]       = now;
+        r["ops"]       = static_cast<std::int64_t>(plan.ops.size());
+
+        pending_batches_.push_back(std::move(plan));
+        return api_reply::ok_with(std::move(r));
+    }
+
+    /// Fire every parked batch whose frame has arrived. On the API executor, once per tick.
+    void drain_batches()
+    {
+        if (pending_batches_.empty())
+            return;
+
+        std::vector<batch_plan> keep;
+        keep.reserve(pending_batches_.size());
+
+        for (auto& plan : pending_batches_) {
+            std::int64_t now = -1;
+            if (const auto snap = hub_->get(plan.reference_channel)) {
+                for (const auto& kv : *snap) {
+                    if (kv.first == "frame" && !kv.second.empty()) {
+                        const auto v = data_to_json(kv.second.front());
+                        if (v.is_int64() || v.is_uint64() || v.is_double())
+                            now = static_cast<std::int64_t>(v.to_number<double>());
+                        break;
+                    }
+                }
+            }
+            if (now < 0) {
+                // The reference channel stopped publishing -- it was cleared, or the server
+                // is shutting down. Drop the batch and say so rather than holding it for a
+                // frame that will never arrive.
+                CASPAR_LOG(warning) << L"[api] dropping a batch scheduled for frame " << plan.at_frame
+                                    << L": channel " << plan.reference_channel << L" is not publishing";
+                continue;
+            }
+            if (now < plan.at_frame) {
+                keep.push_back(std::move(plan));
+                continue;
+            }
+
+            if (now > plan.at_frame)
+                CASPAR_LOG(warning) << L"[api] batch late by " << (now - plan.at_frame) << L" frame(s): scheduled for "
+                                    << plan.at_frame << L", applying on " << now;
+
+            const auto reply = apply_batch(context_, plan);
+            if (reply.code != api_code::ok)
+                CASPAR_LOG(error) << L"[api] a scheduled batch failed on frame " << now << L": "
+                                  << u16(reply.message);
+        }
+
+        pending_batches_ = std::move(keep);
+    }
+
     /// Give every live subscriber whatever its prefixes say it is owed. On the API
     /// executor.
     void fan_out()
     {
+        drain_batches();
+
         std::vector<std::shared_ptr<ws_session>> live;
         {
             std::lock_guard<std::mutex> lock(ws_mutex_);
@@ -288,8 +383,13 @@ struct http_server::impl : public std::enable_shared_from_this<http_server::impl
         if (method == bhttp::verb::post) {
             if (starts_with(path, "/v1/action/"))
                 return run_action(context_, path.substr(std::string("/v1/action").size()), body, peer);
-            if (path == "/v1/batch")
-                return run_batch(context_, body, peer);
+            if (path == "/v1/batch") {
+                batch_plan deferred;
+                auto       reply = run_batch(context_, body, peer, deferred);
+                if (reply.code == api_code::ok && !deferred.ops.empty())
+                    return park_batch(std::move(deferred));
+                return reply;
+            }
             return api_reply::fail(api_code::unknown_path, "nothing accepts POST at " + path);
         }
 

@@ -34,6 +34,7 @@ any of it**.
 | `op`: `set`, `toggle`, `add`, `cas` -- one closure on the stage executor | implemented | same |
 | `POST /v1/action/.../{verb}` -- transport, clear; clip loads delegated to AMCP | implemented | `run_action` in `api_action.cpp` |
 | `POST /v1/batch` -- validate-all-then-apply, one frame across channels | implemented | `run_batch`, same file |
+| `at_frame` / `in_frames` on a batch | implemented | `park_batch` and `drain_batches` in `http_server.cpp` |
 | `WS /v1/events` -- prefix subscription with a per-connection diff | implemented | `collect_events` in `api_events.cpp`, `ws_session` in `http_server.cpp` |
 | `throttle_ms`, `repetition_filter`, revert events | implemented | same |
 
@@ -264,6 +265,47 @@ Two limits, both deliberate:
 * **`queue` is accepted and echoed, and there is one queue.** The field is reserved now so a client
   written today does not have to change when independent queues arrive.
 
+### Scheduling a batch on a frame
+
+`at_frame` names a frame from **this server's own `/channel/{n}/frame`**; `in_frames` counts from
+now. Give one or the other, never both.
+
+```json
+{"label":"go cue 12","at_frame":451,"ops":[ ... ]}
+{"label":"go cue 12","in_frames":50,"ops":[ ... ]}
+```
+
+The reply comes back at once -- holding an HTTP socket open for fifty frames to avoid saying so
+would be a worse trade than any it saves:
+
+```json
+{"status":{"code":"ok","message":""},"server":"stage-left",
+ "result":{"scheduled":true,"at_frame":451,"channel":1,"now":401,"ops":2}}
+```
+
+`channel` is the **lowest channel the batch touches**, chosen by the server rather than the caller
+so that two clients naming the same frame mean the same instant.
+
+**Measured, six runs, two channels:** the change becomes observable **2 frames after `at_frame`**,
+every time, and the **spread between the two channels is 0 frames**, every time. The offset is the
+publication pipeline -- a batch applied after the server observes frame N appears in a later
+snapshot -- and it is **not compensated for**, deliberately: the constant is stable on this machine
+and guessing it into the scheduler would be over-fitting. A client that needs a value visible on
+frame F asks for F-2; a client that needs two channels to change *together* -- which is what a cue
+actually needs -- gets that exactly.
+
+**A frame that has already passed is refused**, with the frame the server is on:
+
+```json
+{"status":{"code":"bad_request",
+           "message":"at_frame 1 is not in the future; channel 1 is on frame 503"}}
+```
+
+Quietly firing a missed cue late is how a show ends up out of sync with nothing in the log.
+
+**Validation still happens before scheduling**, so a batch with a bad op is refused immediately
+rather than at the frame it was aimed at.
+
 
 
 Every reply carries the same envelope:
@@ -440,6 +482,8 @@ and Linux and leaves both bootstraps untouched.
 | a failed batch applies nothing | **none -- checked by hand** | `[ok, ok, unknown_path]` answered `batch_op_failed` with `details[0].index == 2`, and **both valid ops read back unapplied**; a range violation at index 1 behaved the same | 2026-09-05 |
 | actions inside a batch | **none -- checked by hand** | two `pause` ops on different channels: both layers read back `paused` | 2026-09-05 |
 | **the registry agrees with both mixers** | `compose self-test`, at every startup | 177 fields, 256 randomised transform pairs, **0 divergences on opengl and 0 on vulkan**. Its first run reported 8 diverging fields on both, every one of them a registry error -- see below | 2026-09-05 |
+| **a scheduled batch fires together on both channels** | **none -- checked by hand** | six runs, `at_frame` 40 frames ahead on two channels: the change became observable **2 frames after the named frame every time**, with a **spread of 0 frames between the channels every time**. The offset is the publication pipeline and is not compensated for -- see section 2 | 2026-09-05 |
+| scheduling refusals | **none -- checked by hand** | a frame in the past, `at_frame` and `in_frames` together, and an invalid op in a scheduled batch: each refused before anything was queued, and the value read back unchanged | 2026-09-05 |
 | KEYFRAMES still round-trips | **none -- checked by hand** | `KEYFRAMES 1-10 SET`/`GET` with `opacity`, `rgb_r_gamma`, `proj_yaw` and `blur_type`: exact, including `proj_yaw` 90 on the wire and radians in the struct. The frozen-name check passes at 193 | 2026-09-05 |
 
 **What these numbers do not cover, and it is most of it.** They were taken by hand from one server
@@ -468,27 +512,35 @@ being true. Specifically:
    and nothing else.
 3. **A clip load goes through AMCP**, so its failures carry AMCP's detail rather than this API's,
    and it cannot take part in an atomic batch.
-4. **No `at_frame`.** A batch lands on the next frame it can, not on a frame the client names --
-   so two servers cannot be told to change together.
-5. **No authentication.** `<auth>password</auth>` is refused at startup. Until it exists this port
+4. **`at_frame` is this server's own frame counter, so two servers cannot yet be told to change
+   together.** Each server counts from its own start, and nothing aligns them; the cluster module
+   has a PTP-derived frame clock that would, and the API does not use it. That is the gap between
+   "two channels change together", which is measured and works, and "two machines change
+   together", which does not.
+5. **The 2-frame offset is not compensated for.** Measured stable, and named in section 2 rather
+   than corrected, because the constant is this machine's pipeline rather than a property of the
+   protocol.
+6. **No `sleep_frames`.** A batch is one instant; a sequence with waits inside it needs independent
+   queues, which is the same deferral as `queue`.
+7. **No authentication.** `<auth>password</auth>` is refused at startup. Until it exists this port
    must not be bound to an interface reachable off-segment -- and that applies to the WebSocket
    too, which is the same port.
-6. **A subscription is not resumable.** A dropped socket loses the per-connection diff, so a client
+8. **A subscription is not resumable.** A dropped socket loses the per-connection diff, so a client
    must re-subscribe and take the full set again. There is no session id to resume, deliberately.
-7. **`throttle_ms` is per message, not per path.** A subscription covering a busy prefix and a
+9. **`throttle_ms` is per message, not per path.** A subscription covering a busy prefix and a
    quiet one throttles both together.
-8. **A `wrap` field with no declared range is not normalised.** The projection angles are the whole
+10. **A `wrap` field with no declared range is not normalised.** The projection angles are the whole
    set: they declare `wrap` because they are periodic and carry no limits, so `proj_yaw` 7.5 rad
    stays 7.5 rad. AMCP stores it the same way, so the two agree -- but a client cannot rely on
    getting a canonical representative back.
-9. **The blob fields report presence, not content.** `lut3d`, `hue_curves`, `blend_mask` and
+11. **The blob fields report presence, not content.** `lut3d`, `hue_curves`, `blend_mask` and
    `grade_nodes` appear as `blob` descriptors and refuse a `PUT`; loading one stays a `MIXER`
    command.
-10. **`ocio.source_space` is read-only** -- validating a colour-space name against the loaded OCIO
+12. **`ocio.source_space` is read-only** -- validating a colour-space name against the loaded OCIO
     config lives in the accelerator layer, which this library does not link.
-11. **No discovery.** There is no mDNS/Zeroconf anywhere in the fork, so a client is told where the
+13. **No discovery.** There is no mDNS/Zeroconf anywhere in the fork, so a client is told where the
     server is rather than finding it.
-12. **The projection block is published twice**, under its historical `projection/*` names for
+14. **The projection block is published twice**, under its historical `projection/*` names for
     existing OSC consumers and under its registry names in `mixer/proj_*`. Both are live and they
     agree; retiring the first changes a published interface and is deliberately not done here.
 

@@ -42,13 +42,6 @@ std::vector<std::string> split_path(std::string_view p)
 
 bool is_number(const std::string& s) { return !s.empty() && s.find_first_not_of("0123456789") == std::string::npos; }
 
-struct action_target
-{
-    int         channel = 0;
-    int         layer   = -1; //< -1 when the verb addresses the whole channel
-    std::string verb;
-};
-
 api_reply parse_action_path(const std::string& path, action_target& out)
 {
     const auto seg = split_path(path);
@@ -253,7 +246,7 @@ api_reply run_action(const api_context& ctx, const std::string& path, const std:
 // Batch
 // -----------------------------------------------------------------------------------------
 
-api_reply run_batch(const api_context& ctx, const std::string& body, const std::string& peer)
+api_reply validate_batch(const api_context& ctx, const std::string& body, batch_plan& out)
 {
     json::value doc;
     try {
@@ -272,23 +265,10 @@ api_reply run_batch(const api_context& ctx, const std::string& body, const std::
     // `queue` is accepted and echoed but not acted on. The field is reserved now so a
     // client written today does not change when independent queues arrive; pretending it
     // works would be worse than saying it is one queue.
-    const std::string queue =
+    out.queue =
         o.if_contains("queue") && o.at("queue").is_string() ? std::string(o.at("queue").as_string().c_str()) : "";
-    const std::string label =
+    out.label =
         o.if_contains("label") && o.at("label").is_string() ? std::string(o.at("label").as_string().c_str()) : "";
-
-    // ---- validate everything, apply nothing ------------------------------------------
-    struct planned
-    {
-        std::size_t  index = 0;
-        bool         is_set = false;
-        prepared_set set;
-        std::string   action_path;
-        int           action_target_channel = 0;
-        action_target action_verb;
-        int           channel = 0;
-    };
-    std::vector<planned> plan;
 
     const auto& arr = ops->as_array();
     for (std::size_t i = 0; i < arr.size(); ++i) {
@@ -315,7 +295,7 @@ api_reply run_batch(const api_context& ctx, const std::string& body, const std::
             return fail(api_reply::fail(api_code::field_missing, "an op needs a path"));
         const std::string path = p->as_string().c_str();
 
-        planned pl;
+        batch_op pl;
         pl.index = i;
         if (kind == "set") {
             pl.is_set = true;
@@ -326,8 +306,7 @@ api_reply run_batch(const api_context& ctx, const std::string& body, const std::
             // An action is validated only as far as its path -- whether a `play` will
             // succeed is not knowable without running it, and pretending otherwise would
             // make the all-or-nothing promise a lie rather than a limit.
-            action_target t;
-            if (auto r = parse_action_path(path, t); r.code != api_code::ok)
+            if (auto r = parse_action_path(path, pl.action); r.code != api_code::ok)
                 return fail(std::move(r));
 
             // A clip load inside a batch is refused rather than half-supported. It has to
@@ -340,35 +319,56 @@ api_reply run_batch(const api_context& ctx, const std::string& body, const std::
                                             "a clip load cannot be part of an atomic batch; "
                                             "POST it to /v1/action first, then batch the rest"));
 
-            pl.action_path = path;
-            pl.action_target_channel = t.channel;
-            pl.action_verb           = t;
-            pl.channel               = t.channel;
+            pl.channel = pl.action.channel;
         } else {
             return fail(api_reply::fail(api_code::bad_request, "unknown op in a batch: " + kind));
         }
 
         if (!ctx.stage || !ctx.stage(pl.channel))
             return fail(api_reply::fail(api_code::channel_not_found, "no channel " + std::to_string(pl.channel)));
-        plan.push_back(std::move(pl));
+        out.ops.push_back(std::move(pl));
     }
 
+    // The reference channel for `at_frame` is the LOWEST channel the batch touches, chosen
+    // rather than left to the caller so two clients naming the same frame mean the same
+    // instant. Every channel this server drives advances on the same tick, so the choice is
+    // only visible if a channel is added or removed mid-show.
+    out.reference_channel = out.ops.front().channel;
+    for (const auto& op : out.ops)
+        out.reference_channel = std::min(out.reference_channel, op.channel);
+
+    if (auto* at = o.if_contains("at_frame")) {
+        if (!at->is_int64() && !at->is_uint64() && !at->is_double())
+            return api_reply::fail(api_code::field_wrong_type, "at_frame must be a frame number");
+        out.at_frame = static_cast<std::int64_t>(at->to_number<double>());
+    }
+    if (auto* in = o.if_contains("in_frames")) {
+        if (out.at_frame != 0)
+            return api_reply::fail(api_code::bad_request, "give at_frame or in_frames, not both");
+        if (!in->is_int64() && !in->is_uint64() && !in->is_double())
+            return api_reply::fail(api_code::field_wrong_type, "in_frames must be a number of frames");
+        out.at_frame = -static_cast<std::int64_t>(in->to_number<double>()); //< resolved by the caller
+    }
+
+    return api_reply{};
+}
+
+api_reply apply_batch(const api_context& ctx, const batch_plan& plan)
+{
     if (!ctx.concrete_stage || !ctx.channel_count)
         return api_reply::fail(api_code::internal, "the API was built without batch support");
 
-    // ---- apply ------------------------------------------------------------------------
-    //
     // One `stage_delayed` per channel, each holding a blocked executor. Every op is QUEUED
     // against its channel's delayed stage, every touched channel is then locked, and only
     // then are the executors released -- so a channel's tick cannot run between the first
     // op landing and the last. That is what makes a two-channel batch land on one frame.
-    const int                                        n = ctx.channel_count();
+    const int                                          n = ctx.channel_count();
     std::map<int, std::shared_ptr<core::stage_delayed>> delayed;
-    std::vector<std::future<void>>                   results;
-    std::vector<std::unique_lock<std::mutex>>        locks;
+    std::vector<std::future<void>>                     results;
+    std::vector<std::unique_lock<std::mutex>>          locks;
 
     try {
-        for (const auto& pl : plan) {
+        for (const auto& pl : plan.ops) {
             if (delayed.find(pl.channel) != delayed.end())
                 continue;
             if (pl.channel < 1 || pl.channel > n)
@@ -379,16 +379,16 @@ api_reply run_batch(const api_context& ctx, const std::string& body, const std::
             delayed[pl.channel] = std::make_shared<core::stage_delayed>(st, pl.channel);
         }
 
-        for (const auto& pl : plan) {
+        for (const auto& pl : plan.ops) {
             auto& st = delayed[pl.channel];
             if (pl.is_set) {
-                results.push_back(st->apply_transform(
-                    pl.set.target.layer, set_closure(pl.set), pl.set.duration, pl.set.tween));
+                results.push_back(
+                    st->apply_transform(pl.set.target.layer, set_closure(pl.set), pl.set.duration, pl.set.tween));
             } else {
                 // The same verb table a lone action uses, queued rather than waited on --
                 // see `queue_verb`.
                 std::future<void> f;
-                if (auto r = queue_verb(st, pl.action_verb, f); r.code != api_code::ok) {
+                if (auto r = queue_verb(st, pl.action, f); r.code != api_code::ok) {
                     json::object dd;
                     dd["index"]   = static_cast<std::int64_t>(pl.index);
                     dd["code"]    = to_string(r.code);
@@ -432,15 +432,35 @@ api_reply run_batch(const api_context& ctx, const std::string& body, const std::
         return api_reply::fail(api_code::internal, std::string("the batch threw while settling: ") + e.what());
     }
 
-    CASPAR_LOG(info) << L"[api] " << u16(peer) << L" POST /v1/batch ops=" << plan.size() << L" channels="
-                     << delayed.size() << (label.empty() ? L"" : (L" label=\"" + u16(label) + L"\""));
+    CASPAR_LOG(info) << L"[api] " << u16(plan.peer) << L" batch ops=" << plan.ops.size() << L" channels="
+                     << delayed.size() << (plan.at_frame > 0 ? (L" at_frame=" + std::to_wstring(plan.at_frame)) : L"")
+                     << (plan.label.empty() ? L"" : (L" label=\"" + u16(plan.label) + L"\""));
 
     json::object r;
-    r["ops"]      = static_cast<std::int64_t>(plan.size());
+    r["ops"]      = static_cast<std::int64_t>(plan.ops.size());
     r["channels"] = static_cast<std::int64_t>(delayed.size());
-    if (!queue.empty())
-        r["queue"] = queue;
+    if (!plan.queue.empty())
+        r["queue"] = plan.queue;
+    if (plan.at_frame > 0)
+        r["at_frame"] = plan.at_frame;
     return api_reply::ok_with(std::move(r));
+}
+
+api_reply run_batch(const api_context& ctx, const std::string& body, const std::string& peer, batch_plan& deferred)
+{
+    batch_plan plan;
+    plan.peer = peer;
+    if (auto r = validate_batch(ctx, body, plan); r.code != api_code::ok)
+        return r;
+
+    if (plan.at_frame == 0)
+        return apply_batch(ctx, plan);
+
+    // Deferred. The caller owns the waiting -- it is the only part of this file that knows
+    // what frame the server is on, and holding an HTTP socket open for fifty frames to
+    // avoid telling it would be a worse trade than any it saves.
+    deferred = std::move(plan);
+    return api_reply{};
 }
 
 }}} // namespace caspar::protocol::http
