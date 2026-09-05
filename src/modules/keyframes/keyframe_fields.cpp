@@ -11,421 +11,369 @@
 
 #include "keyframe_fields.h"
 
+#include <core/frame/transform_fields.h>
+
+#include <common/log.h>
+
+#include <algorithm>
 #include <cmath>
 #include <unordered_map>
 
 namespace caspar { namespace keyframes {
 
-using IT = core::image_transform;
+namespace fields = core::fields;
 
-static constexpr double DEG2RAD = 3.141592653589793 / 180.0;
 static constexpr double RAD2DEG = 180.0 / 3.141592653589793;
+static constexpr double DEG2RAD = 3.141592653589793 / 180.0;
 
 // ---------------------------------------------------------------------------
-// Helper macros for compact field definitions
-// ---------------------------------------------------------------------------
-
-#define KF_D(n, member, def) \
-    {n, [](const IT& t) -> double { return t.member; }, [](IT& t, double v) { t.member = v; }, def, field_kind::continuous}
-
-#define KF_A2(n, member, idx, def) \
-    {n, [](const IT& t) -> double { return t.member[idx]; }, [](IT& t, double v) { t.member[idx] = v; }, def, field_kind::continuous}
-
-#define KF_A3(n, member, idx, def) \
-    {n, [](const IT& t) -> double { return t.member[idx]; }, [](IT& t, double v) { t.member[idx] = v; }, def, field_kind::continuous}
-
-#define KF_B(n, member) \
-    {n, [](const IT& t) -> double { return t.member ? 1.0 : 0.0; }, [](IT& t, double v) { t.member = (v >= 0.5); }, 0.0, field_kind::discrete}
-
-#define KF_B1(n, member, def) \
-    {n, [](const IT& t) -> double { return t.member ? 1.0 : 0.0; }, [](IT& t, double v) { t.member = (v >= 0.5); }, def, field_kind::discrete}
-
-#define KF_RAD(n, member, def_deg) \
-    {n, [](const IT& t) -> double { return t.member * RAD2DEG; }, [](IT& t, double v) { t.member = v * DEG2RAD; }, def_deg, field_kind::angular}
-
-#define KF_F(n, member, def) \
-    {n, [](const IT& t) -> double { return static_cast<double>(t.member); }, [](IT& t, double v) { t.member = static_cast<float>(v); }, def, field_kind::continuous}
-
-#define KF_I(n, member, def) \
-    {n, [](const IT& t) -> double { return static_cast<double>(t.member); }, [](IT& t, double v) { t.member = static_cast<int>(v + 0.5); }, def, field_kind::discrete}
-
-// ---------------------------------------------------------------------------
-// The field descriptor table — single source of truth
+// The table is DERIVED from `core::fields::all()` rather than written here.
 //
-// To add a new animatable property: add ONE line here.
+// It used to be the source of truth for what a keyframe can animate, and it was
+// one of four hand-written descriptions of `image_transform` that had to be kept
+// aligned by hand. It is now a projection of the registry: one flat entry per
+// (field, component), with the component names the registry declares.
+//
+// Two conversions happen in this projection and nowhere else, which is why the
+// projection exists at all rather than KEYFRAMES using the registry directly:
+//
+//   * ANGLES. The registry stores what `image_transform` stores -- radians for
+//     `angle` and the projection fields. KEYFRAMES has always spoken degrees, and
+//     saved timelines are full of degrees, so `angular_rad` fields convert on the
+//     way in and out. A saved timeline from before this change animates exactly
+//     what it animated before.
+//   * ARITY. The registry declares `lift` once with three components; KEYFRAMES
+//     addresses `lift_r`, `lift_g`, `lift_b` separately, because a keyframe track
+//     is a scalar.
+//
+// The names are not derivable from the members -- `fill_x` is
+// `fill_translation[0]`, `mid_r` is `midtone[0]`, `rgb_r_min_in` is
+// `per_channel_levels.r.min_input` -- so the registry carries them explicitly and
+// this file reads them.
 // ---------------------------------------------------------------------------
 
-static const std::vector<kf_field>& build_field_table()
+namespace {
+
+/// The KEYFRAMES names as they stood when this table was hand-written, in table order.
+/// Checked against what the registry generates at startup: a rename, a dropped row or a
+/// mistyped alias changes what a SAVED TIMELINE animates, which is the one failure here
+/// that is silent and irreversible. 193 names -- the figure is not 205; that count
+/// included the twelve geometry names which also appear in `is_geometry_field`'s map.
+constexpr const char* FROZEN_KF_NAMES[] = {
+    "opacity", "contrast", "brightness", "saturation", "anchor_x", "anchor_y", "fill_x", "fill_y", "fill_sx",
+    "fill_sy", "clip_x", "clip_y", "clip_sx", "clip_sy", "angle", "crop_ul_x", "crop_ul_y", "crop_lr_x", "crop_lr_y",
+    "persp_ul_x", "persp_ul_y", "persp_ur_x", "persp_ur_y", "persp_lr_x", "persp_lr_y", "persp_ll_x", "persp_ll_y",
+    "proj_enable", "proj_yaw", "proj_pitch", "proj_roll", "proj_fov", "proj_offset_x", "proj_offset_y",
+    "proj_frustum_h", "proj_frustum_v", "proj_lens_k1", "proj_lens_k2", "proj_lens_k3", "proj_lens_p1",
+    "proj_lens_p2", "proj_screen_arc", "proj_screen_arc_v", "proj_eye_distance", "proj_curve_enable",
+    "proj_curve_auto", "proj_edge_blend_left", "proj_edge_blend_right", "proj_edge_blend_top",
+    "proj_edge_blend_bottom", "proj_edge_blend_gamma", "proj_icvfx_enable", "proj_inner_fov", "proj_icvfx_feather",
+    "proj_icvfx_outer_dim", "proj_icvfx_inner_dim", "proj_icvfx_inner_gain_r", "proj_icvfx_inner_gain_g",
+    "proj_icvfx_inner_gain_b", "proj_icvfx_outer_gain_r", "proj_icvfx_outer_gain_g", "proj_icvfx_outer_gain_b",
+    "temperature", "tint", "shadows", "highlights", "lift_r", "lift_g", "lift_b", "mid_r", "mid_g", "mid_b",
+    "gain_r", "gain_g", "gain_b", "hue_shift", "invert", "flip_h", "flip_v", "linear_saturation", "levels_min_in",
+    "levels_max_in", "levels_gamma", "levels_min_out", "levels_max_out", "rgb_r_min_in", "rgb_r_max_in",
+    "rgb_r_gamma", "rgb_r_min_out", "rgb_r_max_out", "rgb_g_min_in", "rgb_g_max_in", "rgb_g_gamma", "rgb_g_min_out",
+    "rgb_g_max_out", "rgb_b_min_in", "rgb_b_max_in", "rgb_b_gamma", "rgb_b_min_out", "rgb_b_max_out", "blur_radius",
+    "blur_angle", "blur_center_x", "blur_center_y", "blur_tilt_y", "blur_tilt_h", "cdl_slope_r", "cdl_slope_g",
+    "cdl_slope_b", "cdl_offset_r", "cdl_offset_g", "cdl_offset_b", "cdl_power_r", "cdl_power_g", "cdl_power_b",
+    "cdl_saturation", "split_shadow_r", "split_shadow_g", "split_shadow_b", "split_highlight_r",
+    "split_highlight_g", "split_highlight_b", "split_balance", "gamut_compress", "gc_cyan", "gc_magenta",
+    "gc_yellow", "lut3d_strength", "sharpen_amount", "sharpen_radius", "grain_intensity", "grain_size",
+    "qualifier_enable", "qual_target_hue", "qual_hue_width", "qual_min_sat", "qual_max_sat", "qual_min_lum",
+    "qual_max_lum", "qual_softness", "qual_exposure", "qual_sat_offset", "qual_hue_offset", "color_grade_enable",
+    "color_grade_exposure", "color_grade_input_transfer", "color_grade_input_gamut", "color_grade_tone_mapping",
+    "color_grade_output_gamut", "color_grade_output_transfer", "shape_enable", "shape_center_x", "shape_center_y",
+    "shape_size_x", "shape_size_y", "shape_corner_radius", "shape_edge_softness", "shape_gradient_angle",
+    "shape_gradient_cx", "shape_gradient_cy", "shape_stroke_width", "shape_stroke_enable", "shape_color1_r",
+    "shape_color1_g", "shape_color1_b", "shape_color1_a", "shape_color2_r", "shape_color2_g", "shape_color2_b",
+    "shape_color2_a", "shape_stroke_r", "shape_stroke_g", "shape_stroke_b", "shape_stroke_a", "chroma_enable",
+    "chroma_target_hue", "chroma_hue_width", "chroma_min_sat", "chroma_min_bright", "chroma_softness",
+    "chroma_spill", "chroma_spill_sat", "enable_geometry", "blur_enable", "rgb_enable", "curves_enable",
+    "chroma_show_mask", "blur_type", "shape_type", "shape_fill_type", "proj_curve_type", "proj_source_lens",
+    "blend_mode",
+};
+
+/// The projection's per-entry state. A `kf_field` carries only function pointers, so the
+/// field and component a generated accessor refers to have to be reachable from a
+/// non-capturing lambda -- hence a side table indexed by the entry's position.
+struct kf_binding
 {
-    static const std::vector<kf_field> fields = {
-        // ── Basic ───────────────────────────────────────────────────
-        KF_D("opacity",    opacity,    1.0),
-        KF_D("contrast",   contrast,   1.0),
-        KF_D("brightness", brightness, 1.0),
-        KF_D("saturation", saturation, 1.0),
+    const fields::field_desc* field;
+    uint8_t                   component;
+    bool                      to_degrees;
+};
 
-        // ── Geometry ────────────────────────────────────────────────
-        KF_A2("anchor_x",  anchor, 0, 0.0),
-        KF_A2("anchor_y",  anchor, 1, 0.0),
-        KF_A2("fill_x",    fill_translation, 0, 0.0),
-        KF_A2("fill_y",    fill_translation, 1, 0.0),
-        KF_A2("fill_sx",   fill_scale, 0, 1.0),
-        KF_A2("fill_sy",   fill_scale, 1, 1.0),
-        KF_A2("clip_x",    clip_translation, 0, 0.0),
-        KF_A2("clip_y",    clip_translation, 1, 0.0),
-        KF_A2("clip_sx",   clip_scale, 0, 1.0),
-        KF_A2("clip_sy",   clip_scale, 1, 1.0),
-
-        // angle: stored as radians in image_transform, degrees in JSON
-        KF_RAD("angle", angle, 0.0),
-
-        // ── Crop ────────────────────────────────────────────────────
-        KF_A2("crop_ul_x", crop.ul, 0, 0.0),
-        KF_A2("crop_ul_y", crop.ul, 1, 0.0),
-        KF_A2("crop_lr_x", crop.lr, 0, 1.0),
-        KF_A2("crop_lr_y", crop.lr, 1, 1.0),
-
-        // ── Perspective ─────────────────────────────────────────────
-        KF_A2("persp_ul_x", perspective.ul, 0, 0.0),
-        KF_A2("persp_ul_y", perspective.ul, 1, 0.0),
-        KF_A2("persp_ur_x", perspective.ur, 0, 1.0),
-        KF_A2("persp_ur_y", perspective.ur, 1, 0.0),
-        KF_A2("persp_lr_x", perspective.lr, 0, 1.0),
-        KF_A2("persp_lr_y", perspective.lr, 1, 1.0),
-        KF_A2("persp_ll_x", perspective.ll, 0, 0.0),
-        KF_A2("persp_ll_y", perspective.ll, 1, 1.0),
-
-        // ── Projection (degrees in JSON, radians in IT) ─────────────
-        KF_B("proj_enable", projection.enable),
-        KF_RAD("proj_yaw",   projection.yaw,   0.0),
-        KF_RAD("proj_pitch", projection.pitch,  0.0),
-        KF_RAD("proj_roll",  projection.roll,   0.0),
-        KF_RAD("proj_fov",   projection.fov,   90.0),
-        KF_D("proj_offset_x", projection.offset_x, 0.0),
-        KF_D("proj_offset_y", projection.offset_y, 0.0),
-        KF_D("proj_frustum_h", projection.frustum_h, 0.0),
-        KF_D("proj_frustum_v", projection.frustum_v, 0.0),
-        KF_D("proj_lens_k1", projection.lens_k1, 0.0),
-        KF_D("proj_lens_k2", projection.lens_k2, 0.0),
-        KF_D("proj_lens_k3", projection.lens_k3, 0.0),
-        KF_D("proj_lens_p1", projection.lens_p1, 0.0),
-        KF_D("proj_lens_p2", projection.lens_p2, 0.0),
-        KF_RAD("proj_screen_arc", projection.screen_arc, 0.0),
-        KF_RAD("proj_screen_arc_v", projection.screen_arc_v, 0.0),
-        KF_D("proj_eye_distance", projection.eye_distance, 1.0),
-        KF_B("proj_curve_enable", projection.curve_enable),
-        KF_B("proj_curve_auto", projection.curve_auto),
-        KF_D("proj_edge_blend_left",   projection.edge_blend_left,   0.0),
-        KF_D("proj_edge_blend_right",  projection.edge_blend_right,  0.0),
-        KF_D("proj_edge_blend_top",    projection.edge_blend_top,    0.0),
-        KF_D("proj_edge_blend_bottom", projection.edge_blend_bottom, 0.0),
-        KF_D("proj_edge_blend_gamma",  projection.edge_blend_gamma,  2.2),
-
-        // ── ICVFX inner/outer frustum ───────────────────────────────
-        KF_B("proj_icvfx_enable",     projection.icvfx_enable),
-        KF_RAD("proj_inner_fov",      projection.inner_fov,  90.0),
-        KF_D("proj_icvfx_feather",    projection.icvfx_feather,   0.05),
-        KF_D("proj_icvfx_outer_dim",  projection.icvfx_outer_dim, 1.0),
-        KF_D("proj_icvfx_inner_dim",  projection.icvfx_inner_dim, 1.0),
-        KF_D("proj_icvfx_inner_gain_r", projection.icvfx_inner_gain_r, 1.0),
-        KF_D("proj_icvfx_inner_gain_g", projection.icvfx_inner_gain_g, 1.0),
-        KF_D("proj_icvfx_inner_gain_b", projection.icvfx_inner_gain_b, 1.0),
-        KF_D("proj_icvfx_outer_gain_r", projection.icvfx_outer_gain_r, 1.0),
-        KF_D("proj_icvfx_outer_gain_g", projection.icvfx_outer_gain_g, 1.0),
-        KF_D("proj_icvfx_outer_gain_b", projection.icvfx_outer_gain_b, 1.0),
-
-        // ── White balance ───────────────────────────────────────────
-        KF_D("temperature", temperature, 0.0),
-        KF_D("tint",        tint,        0.0),
-
-        // ── Tone balance ────────────────────────────────────────────
-        KF_D("shadows",    shadows,    0.0),
-        KF_D("highlights", highlights, 0.0),
-
-        // ── 3-Way colour corrector ──────────────────────────────────
-        KF_A3("lift_r", lift, 0, 0.0),
-        KF_A3("lift_g", lift, 1, 0.0),
-        KF_A3("lift_b", lift, 2, 0.0),
-        KF_A3("mid_r",  midtone, 0, 1.0),
-        KF_A3("mid_g",  midtone, 1, 1.0),
-        KF_A3("mid_b",  midtone, 2, 1.0),
-        KF_A3("gain_r", gain, 0, 1.0),
-        KF_A3("gain_g", gain, 1, 1.0),
-        KF_A3("gain_b", gain, 2, 1.0),
-
-        // ── Hue / Invert / Flip ─────────────────────────────────────
-        {"hue_shift",
-         [](const IT& t) -> double { return t.hue_shift; },
-         [](IT& t, double v) { t.hue_shift = v; },
-         0.0, field_kind::angular},
-        KF_B("invert", invert),
-        KF_B("flip_h", flip_h),
-        KF_B("flip_v", flip_v),
-
-        // ── Linear saturation ───────────────────────────────────────
-        KF_D("linear_saturation", linear_saturation, 1.0),
-
-        // ── Levels (master) ─────────────────────────────────────────
-        KF_D("levels_min_in",  levels.min_input,  0.0),
-        KF_D("levels_max_in",  levels.max_input,  1.0),
-        KF_D("levels_gamma",   levels.gamma,      1.0),
-        KF_D("levels_min_out", levels.min_output,  0.0),
-        KF_D("levels_max_out", levels.max_output,  1.0),
-
-        // ── Per-channel RGB levels ──────────────────────────────────
-        KF_D("rgb_r_min_in",  per_channel_levels.r.min_input,  0.0),
-        KF_D("rgb_r_max_in",  per_channel_levels.r.max_input,  1.0),
-        KF_D("rgb_r_gamma",   per_channel_levels.r.gamma,      1.0),
-        KF_D("rgb_r_min_out", per_channel_levels.r.min_output, 0.0),
-        KF_D("rgb_r_max_out", per_channel_levels.r.max_output, 1.0),
-        KF_D("rgb_g_min_in",  per_channel_levels.g.min_input,  0.0),
-        KF_D("rgb_g_max_in",  per_channel_levels.g.max_input,  1.0),
-        KF_D("rgb_g_gamma",   per_channel_levels.g.gamma,      1.0),
-        KF_D("rgb_g_min_out", per_channel_levels.g.min_output, 0.0),
-        KF_D("rgb_g_max_out", per_channel_levels.g.max_output, 1.0),
-        KF_D("rgb_b_min_in",  per_channel_levels.b.min_input,  0.0),
-        KF_D("rgb_b_max_in",  per_channel_levels.b.max_input,  1.0),
-        KF_D("rgb_b_gamma",   per_channel_levels.b.gamma,      1.0),
-        KF_D("rgb_b_min_out", per_channel_levels.b.min_output, 0.0),
-        KF_D("rgb_b_max_out", per_channel_levels.b.max_output, 1.0),
-
-        // ── Blur ────────────────────────────────────────────────────
-        KF_D("blur_radius",   blur.radius,    0.0),
-        {"blur_angle", [](const IT& t) -> double { return t.blur.angle; },
-                       [](IT& t, double v) { t.blur.angle = v; }, 0.0, field_kind::angular},
-        KF_A2("blur_center_x", blur.center, 0, 0.5),
-        KF_A2("blur_center_y", blur.center, 1, 0.5),
-        KF_D("blur_tilt_y", blur.tilt_y, 0.5),
-        KF_D("blur_tilt_h", blur.tilt_h, 0.2),
-
-        // ── ASC CDL ─────────────────────────────────────────────────
-        KF_A3("cdl_slope_r",  cdl_slope,  0, 1.0),
-        KF_A3("cdl_slope_g",  cdl_slope,  1, 1.0),
-        KF_A3("cdl_slope_b",  cdl_slope,  2, 1.0),
-        KF_A3("cdl_offset_r", cdl_offset, 0, 0.0),
-        KF_A3("cdl_offset_g", cdl_offset, 1, 0.0),
-        KF_A3("cdl_offset_b", cdl_offset, 2, 0.0),
-        KF_A3("cdl_power_r",  cdl_power,  0, 1.0),
-        KF_A3("cdl_power_g",  cdl_power,  1, 1.0),
-        KF_A3("cdl_power_b",  cdl_power,  2, 1.0),
-        KF_D("cdl_saturation", cdl_saturation, 1.0),
-
-        // ── Split toning ────────────────────────────────────────────
-        KF_A3("split_shadow_r",    split_shadow_color,    0, 0.0),
-        KF_A3("split_shadow_g",    split_shadow_color,    1, 0.0),
-        KF_A3("split_shadow_b",    split_shadow_color,    2, 0.0),
-        KF_A3("split_highlight_r", split_highlight_color, 0, 0.0),
-        KF_A3("split_highlight_g", split_highlight_color, 1, 0.0),
-        KF_A3("split_highlight_b", split_highlight_color, 2, 0.0),
-        KF_D("split_balance", split_balance, 0.5),
-
-        // ── Gamut compression ───────────────────────────────────────
-        KF_B("gamut_compress", gamut_compress),
-        KF_D("gc_cyan",    gc_cyan,    1.147),
-        KF_D("gc_magenta", gc_magenta, 1.264),
-        KF_D("gc_yellow",  gc_yellow,  1.312),
-
-        // ── LUT strength ────────────────────────────────────────────
-        KF_F("lut3d_strength", lut3d_strength, 1.0),
-
-        // ── Sharpening ──────────────────────────────────────────────
-        KF_D("sharpen_amount", sharpen_amount, 0.0),
-        KF_D("sharpen_radius", sharpen_radius, 1.0),
-
-        // ── Film grain ──────────────────────────────────────────────
-        KF_D("grain_intensity", grain_intensity, 0.0),
-        KF_D("grain_size",      grain_size,      1.0),
-
-        // ── Secondary qualifier ─────────────────────────────────────
-        KF_B("qualifier_enable", qualifier_enable),
-        KF_D("qual_target_hue", qual_target_hue, 0.0),
-        KF_D("qual_hue_width",  qual_hue_width,  0.1),
-        KF_D("qual_min_sat",    qual_min_sat,     0.2),
-        KF_D("qual_max_sat",    qual_max_sat,     1.0),
-        KF_D("qual_min_lum",    qual_min_lum,     0.0),
-        KF_D("qual_max_lum",    qual_max_lum,     1.0),
-        KF_D("qual_softness",   qual_softness,    0.1),
-        KF_D("qual_exposure",   qual_exposure,    0.0),
-        KF_D("qual_sat_offset", qual_sat_offset,  0.0),
-        KF_D("qual_hue_offset", qual_hue_offset,  0.0),
-
-        // ── Color grade ─────────────────────────────────────────────
-        KF_B("color_grade_enable", color_grade.enable),
-        KF_F("color_grade_exposure", color_grade.exposure, 1.0),
-        KF_I("color_grade_input_transfer",  color_grade.input_transfer,  0),
-        KF_I("color_grade_input_gamut",     color_grade.input_gamut,     0),
-        KF_I("color_grade_tone_mapping",    color_grade.tone_mapping,    0),
-        KF_I("color_grade_output_gamut",    color_grade.output_gamut,    0),
-        KF_I("color_grade_output_transfer", color_grade.output_transfer, 0),
-
-        // ── Shape ───────────────────────────────────────────────────
-        KF_B("shape_enable", shape.enable),
-        KF_A2("shape_center_x", shape.center, 0, 0.5),
-        KF_A2("shape_center_y", shape.center, 1, 0.5),
-        KF_A2("shape_size_x",   shape.size,   0, 0.5),
-        KF_A2("shape_size_y",   shape.size,   1, 0.5),
-        KF_D("shape_corner_radius", shape.corner_radius, 0.0),
-        KF_D("shape_edge_softness", shape.edge_softness, 0.005),
-        {"shape_gradient_angle",
-         [](const IT& t) -> double { return t.shape.gradient_angle; },
-         [](IT& t, double v) { t.shape.gradient_angle = v; }, 0.0, field_kind::angular},
-        KF_A2("shape_gradient_cx", shape.gradient_center, 0, 0.5),
-        KF_A2("shape_gradient_cy", shape.gradient_center, 1, 0.5),
-        KF_D("shape_stroke_width", shape.stroke_width, 0.0),
-        KF_B("shape_stroke_enable", shape.stroke_enable),
-        KF_A2("shape_color1_r", shape.color1, 0, 1.0),  // Note: array<double,4>
-        KF_A2("shape_color1_g", shape.color1, 1, 1.0),
-        KF_A2("shape_color1_b", shape.color1, 2, 1.0),
-        KF_A2("shape_color1_a", shape.color1, 3, 1.0),
-        KF_A2("shape_color2_r", shape.color2, 0, 0.0),
-        KF_A2("shape_color2_g", shape.color2, 1, 0.0),
-        KF_A2("shape_color2_b", shape.color2, 2, 0.0),
-        KF_A2("shape_color2_a", shape.color2, 3, 0.0),
-        KF_A2("shape_stroke_r", shape.stroke_color, 0, 1.0),
-        KF_A2("shape_stroke_g", shape.stroke_color, 1, 1.0),
-        KF_A2("shape_stroke_b", shape.stroke_color, 2, 1.0),
-        KF_A2("shape_stroke_a", shape.stroke_color, 3, 1.0),
-
-        // ── Chroma ──────────────────────────────────────────────────
-        KF_B("chroma_enable",    chroma.enable),
-        KF_D("chroma_target_hue",   chroma.target_hue,   0.0),
-        KF_D("chroma_hue_width",    chroma.hue_width,    0.0),
-        KF_D("chroma_min_sat",      chroma.min_saturation, 0.0),
-        KF_D("chroma_min_bright",   chroma.min_brightness, 0.0),
-        KF_D("chroma_softness",     chroma.softness,     0.0),
-        KF_D("chroma_spill",        chroma.spill_suppress, 0.0),
-        KF_D("chroma_spill_sat",    chroma.spill_suppress_saturation, 1.0),
-
-        // ── Subsystem enables ───────────────────────────────────────
-        KF_B1("enable_geometry", enable_geometry_modifiers, 0.0),
-        KF_B("blur_enable",  blur.enable),
-        KF_B("rgb_enable",   per_channel_levels.enable),
-        KF_B("curves_enable", curves.enable),
-        KF_B("chroma_show_mask", chroma.show_mask),
-
-        // ── Enum type selectors (discrete) ──────────────────────────
-        {"blur_type",
-         [](const IT& t) -> double { return static_cast<double>(static_cast<int>(t.blur.type)); },
-         [](IT& t, double v) { t.blur.type = static_cast<core::blur_type>(static_cast<int>(v + 0.5)); },
-         0.0, field_kind::discrete},
-        {"shape_type",
-         [](const IT& t) -> double { return static_cast<double>(static_cast<int>(t.shape.type)); },
-         [](IT& t, double v) { t.shape.type = static_cast<core::shape_type>(static_cast<int>(v + 0.5)); },
-         0.0, field_kind::discrete},
-        {"shape_fill_type",
-         [](const IT& t) -> double { return static_cast<double>(static_cast<int>(t.shape.fill_type)); },
-         [](IT& t, double v) { t.shape.fill_type = static_cast<core::shape_fill_type>(static_cast<int>(v + 0.5)); },
-         0.0, field_kind::discrete},
-        {"proj_curve_type",
-         [](const IT& t) -> double { return static_cast<double>(static_cast<int>(t.projection.curve_type)); },
-         [](IT& t, double v) { t.projection.curve_type = static_cast<core::screen_curve_type>(static_cast<int>(v + 0.5)); },
-         0.0, field_kind::discrete},
-        {"proj_source_lens",
-         [](const IT& t) -> double { return static_cast<double>(static_cast<int>(t.projection.source_lens)); },
-         [](IT& t, double v) { t.projection.source_lens = static_cast<core::screen_curve_type>(static_cast<int>(v + 0.5)); },
-         0.0, field_kind::discrete},
-        {"blend_mode",
-         [](const IT& t) -> double { return static_cast<double>(static_cast<int>(t.blend_mode)); },
-         [](IT& t, double v) { t.blend_mode = static_cast<core::blend_mode>(static_cast<int>(v + 0.5)); },
-         static_cast<double>(static_cast<int>(core::blend_mode::normal)), field_kind::discrete},
-    };
-    return fields;
+std::vector<kf_binding>& bindings()
+{
+    static std::vector<kf_binding> b;
+    return b;
 }
 
-#undef KF_D
-#undef KF_A2
-#undef KF_A3
-#undef KF_B
-#undef KF_B1
-#undef KF_RAD
-#undef KF_F
-#undef KF_I
+/// Read component `c` of a field as a double. Enum and blob fields read as their ordinal
+/// or presence, which is what the previous hand-written table did.
+double read_component(const kf_binding& b, const core::image_transform& t)
+{
+    const auto v = b.field->get(t);
+    if (b.component >= v.size())
+        return 0.0;
 
-// ---------------------------------------------------------------------------
-// Name → field descriptor lookup (built once)
-// ---------------------------------------------------------------------------
+    const auto& e = v[b.component];
 
-static const std::unordered_map<std::string, size_t>& build_name_index()
+    // An enum reads back by name; KEYFRAMES wants the ordinal it has always used.
+    if (const auto* s = boost::get<std::string>(&e)) {
+        const auto names = fields::split_list(b.field->values);
+        for (std::size_t i = 0; i < names.size(); ++i)
+            if (names[i] == *s)
+                return static_cast<double>(i);
+        return 0.0;
+    }
+
+    double d = 0.0;
+    if (const auto* pd = boost::get<double>(&e))
+        d = *pd;
+    else if (const auto* pf = boost::get<float>(&e))
+        d = *pf;
+    else if (const auto* pi = boost::get<int32_t>(&e))
+        d = *pi;
+    else if (const auto* pb = boost::get<bool>(&e))
+        d = *pb ? 1.0 : 0.0;
+
+    return b.to_degrees ? d * RAD2DEG : d;
+}
+
+void write_component(const kf_binding& b, core::image_transform& t, double value)
+{
+    auto v = b.field->get(t);
+    if (b.component >= v.size())
+        return;
+
+    const double d = b.to_degrees ? value * DEG2RAD : value;
+
+    switch (b.field->type) {
+        case fields::value_type::boolean: v[b.component] = (d >= 0.5); break;
+        case fields::value_type::integer: v[b.component] = static_cast<int32_t>(d + (d < 0 ? -0.5 : 0.5)); break;
+        case fields::value_type::enumeration: {
+            // Written by ordinal, snapped -- the setter accepts a number as well as a name.
+            const auto names = fields::split_list(b.field->values);
+            const auto n     = static_cast<int>(d + 0.5);
+            if (n < 0 || static_cast<std::size_t>(n) >= names.size())
+                return;
+            v[b.component] = static_cast<int32_t>(n);
+            break;
+        }
+        default: v[b.component] = d; break;
+    }
+
+    b.field->set(t, v);
+}
+
+field_kind to_field_kind(fields::kf_kind k)
+{
+    switch (k) {
+        case fields::kf_kind::continuous: return field_kind::continuous;
+        case fields::kf_kind::angular:
+        case fields::kf_kind::angular_rad: return field_kind::angular;
+        case fields::kf_kind::discrete: return field_kind::discrete;
+    }
+    return field_kind::continuous;
+}
+
+/// Non-capturing trampolines. `kf_field` predates this projection and holds raw function
+/// pointers, so the binding is looked up by index at call time. The index is baked in by
+/// the generator below through a small dispatch table.
+constexpr std::size_t MAX_KF_FIELDS = 256;
+
+template <std::size_t I>
+double kf_get(const core::image_transform& t)
+{
+    return read_component(bindings()[I], t);
+}
+
+template <std::size_t I>
+void kf_set(core::image_transform& t, double v)
+{
+    write_component(bindings()[I], t, v);
+}
+
+template <std::size_t... Is>
+constexpr auto make_getters(std::index_sequence<Is...>)
+{
+    return std::array<double (*)(const core::image_transform&), sizeof...(Is)>{&kf_get<Is>...};
+}
+
+template <std::size_t... Is>
+constexpr auto make_setters(std::index_sequence<Is...>)
+{
+    return std::array<void (*)(core::image_transform&, double), sizeof...(Is)>{&kf_set<Is>...};
+}
+
+const auto& getters()
+{
+    static const auto g = make_getters(std::make_index_sequence<MAX_KF_FIELDS>{});
+    return g;
+}
+
+const auto& setters()
+{
+    static const auto s = make_setters(std::make_index_sequence<MAX_KF_FIELDS>{});
+    return s;
+}
+
+const std::vector<kf_field>& build_field_table()
+{
+    static const std::vector<kf_field> table = [] {
+        std::vector<kf_field> out;
+        auto&                 binds = bindings();
+        binds.clear();
+
+        // `kf_field::name` is a raw `const char*`, so the strings it points at must never
+        // move. A `vector` that grows reallocates and invalidates every pointer already
+        // handed out -- which is not a crash, it is silently wrong names, and the frozen
+        // check caught exactly that on the first run of this table. Reserving to the
+        // bound the loop already enforces makes the addresses stable.
+        static std::vector<std::string> storage;
+        storage.clear();
+        storage.reserve(MAX_KF_FIELDS);
+        binds.reserve(MAX_KF_FIELDS);
+
+        for (const auto& f : fields::all()) {
+            const auto names = fields::split_list(f.kf_names);
+            for (std::size_t c = 0; c < names.size(); ++c) {
+                if (binds.size() >= MAX_KF_FIELDS) {
+                    CASPAR_LOG(error) << L"[keyframes] more than " << MAX_KF_FIELDS
+                                      << L" animatable components; raise MAX_KF_FIELDS";
+                    break;
+                }
+
+                const auto idx = binds.size();
+                binds.push_back(kf_binding{&f, static_cast<uint8_t>(c), f.kind == fields::kf_kind::angular_rad});
+
+                // The name must outlive the table. The registry's `kf_names` is a literal
+                // with static storage, but `split_list` gives a view into it that is not
+                // null-terminated at the component boundary -- so this owns a copy.
+                storage.emplace_back(names[c]);
+
+                double def = 0.0;
+                {
+                    const auto dv = f.defaults();
+                    if (c < dv.size()) {
+                        core::image_transform probe;
+                        f.set(probe, dv);
+                        def = read_component(binds.back(), probe);
+                    }
+                }
+
+                out.push_back(kf_field{storage.back().c_str(),
+                                       getters()[idx],
+                                       setters()[idx],
+                                       def,
+                                       to_field_kind(f.kind)});
+            }
+        }
+        return out;
+    }();
+    return table;
+}
+
+const std::unordered_map<std::string, std::size_t>& build_name_index()
 {
     static const auto idx = [] {
-        std::unordered_map<std::string, size_t> m;
-        const auto& fields = build_field_table();
-        for (size_t i = 0; i < fields.size(); ++i)
+        std::unordered_map<std::string, std::size_t> m;
+        const auto&                                  fields = build_field_table();
+        for (std::size_t i = 0; i < fields.size(); ++i)
             m[fields[i].name] = i;
         return m;
     }();
     return idx;
 }
 
+} // namespace
+
 const std::vector<kf_field>& kf_all_fields() { return build_field_table(); }
 
 const kf_field* kf_find_field(const std::string& name)
 {
     const auto& idx = build_name_index();
-    auto it = idx.find(name);
+    const auto  it  = idx.find(name);
     if (it == idx.end())
         return nullptr;
     return &build_field_table()[it->second];
 }
 
-// ---------------------------------------------------------------------------
-// Geometry field names (for auto-enabling enable_geometry_modifiers)
-// ---------------------------------------------------------------------------
-
-static bool is_geometry_field(const std::string& name)
+bool kf_verify_frozen_names(std::vector<std::string>& missing, std::vector<std::string>& added)
 {
-    static const std::unordered_map<std::string, bool> geo = {
-        {"anchor_x", true}, {"anchor_y", true},
-        {"fill_x", true},   {"fill_y", true},
-        {"fill_sx", true},  {"fill_sy", true},
-        {"clip_x", true},   {"clip_y", true},
-        {"clip_sx", true},  {"clip_sy", true},
-        {"angle", true},
-        {"crop_ul_x", true}, {"crop_ul_y", true},
-        {"crop_lr_x", true}, {"crop_lr_y", true},
-        {"persp_ul_x", true}, {"persp_ul_y", true},
-        {"persp_ur_x", true}, {"persp_ur_y", true},
-        {"persp_lr_x", true}, {"persp_lr_y", true},
-        {"persp_ll_x", true}, {"persp_ll_y", true},
-    };
-    return geo.count(name) > 0;
-}
+    const auto& idx = build_name_index();
 
-static bool is_rgb_levels_field(const std::string& name)
-{
-    return name.size() >= 5 && name.compare(0, 4, "rgb_") == 0;
+    std::unordered_map<std::string, bool> frozen;
+    for (const char* n : FROZEN_KF_NAMES) {
+        frozen.emplace(n, true);
+        if (idx.find(n) == idx.end())
+            missing.emplace_back(n);
+    }
+    for (const auto& f : build_field_table())
+        if (frozen.find(f.name) == frozen.end())
+            added.emplace_back(f.name);
+
+    std::sort(missing.begin(), missing.end());
+    std::sort(added.begin(), added.end());
+    return missing.empty();
 }
 
 // ---------------------------------------------------------------------------
-// apply_kf_to_transform — apply sparse values via field descriptors
+// Geometry / RGB / blur grouping, for the auto-enable rule below.
+//
+// These read the registry's `enables` column rather than a second hand-written
+// list of names, so a field that gains a subsystem enable gets the auto-enable
+// behaviour without this file being touched.
 // ---------------------------------------------------------------------------
+
+namespace {
+
+/// Which subsystem enable, if any, a KEYFRAMES name belongs to.
+const char* enables_for(const std::string& name)
+{
+    const auto ref = fields::find_kf(name);
+    if (!ref)
+        return nullptr;
+    return ref->field->enables;
+}
+
+} // namespace
 
 void apply_kf_to_transform(const kf_values& vals, core::image_transform& tf)
 {
-    bool has_geometry = false;
-    bool has_rgb      = false;
-    bool has_blur     = false;
-    bool explicit_geo_enable = false;
+    bool has_geometry         = false;
+    bool has_rgb              = false;
+    bool has_blur             = false;
+    bool explicit_geo_enable  = false;
     bool explicit_blur_enable = false;
-    bool explicit_rgb_enable = false;
+    bool explicit_rgb_enable  = false;
 
     for (const auto& [name, value] : vals) {
-        // Check for explicit enable overrides
-        if (name == "enable_geometry") explicit_geo_enable = true;
-        if (name == "blur_enable")     explicit_blur_enable = true;
-        if (name == "rgb_enable")      explicit_rgb_enable = true;
+        // An explicit enable in the same value set wins over the inference below: a
+        // timeline that animates `blur_enable` to 0 while animating `blur_radius` means it.
+        if (name == "enable_geometry")
+            explicit_geo_enable = true;
+        if (name == "blur_enable")
+            explicit_blur_enable = true;
+        if (name == "rgb_enable")
+            explicit_rgb_enable = true;
 
-        // Track field groups
-        if (is_geometry_field(name))   has_geometry = true;
-        if (is_rgb_levels_field(name)) has_rgb = true;
-        if (name.size() >= 4 && name.compare(0, 4, "blur") == 0 && name != "blur_enable") has_blur = true;
+        if (const char* e = enables_for(name)) {
+            const std::string_view ev{e};
+            if (ev == "enable_geometry_modifiers")
+                has_geometry = true;
+            else if (ev == "per_channel_levels.enable")
+                has_rgb = true;
+            else if (ev == "blur.enable" && name != "blur_enable")
+                has_blur = true;
+        }
 
-        const kf_field* f = kf_find_field(name);
-        if (f)
+        if (const kf_field* f = kf_find_field(name))
             f->set(tf, value);
     }
 
-    // Auto-enable subsystems if fields were set but enable wasn't explicit
     if (has_geometry && !explicit_geo_enable)
         tf.enable_geometry_modifiers = true;
     if (has_blur && !explicit_blur_enable)
@@ -434,16 +382,12 @@ void apply_kf_to_transform(const kf_values& vals, core::image_transform& tf)
         tf.per_channel_levels.enable = true;
 }
 
-// ---------------------------------------------------------------------------
-// capture_from_transform — read image_transform into sparse values
-// ---------------------------------------------------------------------------
-
 kf_values capture_from_transform(const core::image_transform& tf, bool only_non_default)
 {
-    kf_values vals;
+    kf_values   vals;
     const auto& fields = kf_all_fields();
     for (const auto& f : fields) {
-        double v = f.get(tf);
+        const double v = f.get(tf);
         if (!only_non_default || std::abs(v - f.default_val) > 1e-9)
             vals[f.name] = v;
     }

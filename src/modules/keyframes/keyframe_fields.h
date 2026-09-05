@@ -54,6 +54,14 @@ struct kf_field
 /// All registered field descriptors.
 const std::vector<kf_field>& kf_all_fields();
 
+/// Check the generated names against the frozen list this table used to hold by hand.
+/// A rename, a dropped row or a mistyped alias changes what a SAVED TIMELINE animates,
+/// which is the one failure here that is silent and irreversible -- so it is checked at
+/// startup rather than trusted. Returns false when a frozen name is no longer generated;
+/// `added` carries names the registry now produces that the frozen list did not have,
+/// which is informational rather than a failure.
+bool kf_verify_frozen_names(std::vector<std::string>& missing, std::vector<std::string>& added);
+
 /// Look up a field descriptor by JSON key name.  Returns nullptr if unknown.
 const kf_field* kf_find_field(const std::string& name);
 
