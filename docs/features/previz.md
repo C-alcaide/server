@@ -28,34 +28,117 @@ addressable by name at runtime.
 
 Verified against `src/protocol/amcp/AMCPCommandsImpl.cpp` at the definition line given.
 
-| command | shape | def |
-| :--- | :--- | ---: |
-| `PREVIZ SCENE` | `<path>` — loads a scene file | 4777 |
-| `PREVIZ MAP` | `<mesh_name> <channel>` — needs ≥2 parameters, else `400` | 4847 |
-| `PREVIZ UNMAP` | `<mesh_name>` | 4869 |
-| `PREVIZ CAMERA` | `RESET` \| `OVERRIDE 1\|0` \| camera placement arguments | 4887 |
-| `PREVIZ VIEW` | `CLEAR` \| `RESET` \| view arguments | 4938 |
-| `PREVIZ INFO` | — query | 4985 |
-| `PREVIZ SHOW` | `<mesh_name> [1\|0]` | 5011 |
-| `PREVIZ GRID` | `[1\|0]` | 5028 |
-| `PREVIZ WIREFRAME` | `[1\|0]` | 5041 |
-| `PREVIZ GIZMO` | `[1\|0]` | 5054 |
-| `PREVIZ PRESET` | `RECALL <name>` \| `LIST` | 5069 |
-| `PREVIZ SCREEN` | `<name> REMOVE` \| `LIST` \| `ROTATION` \| `RESOLUTION` \| `CHANNEL` \| `EYEMODE` \| `ARCV` \| `ICVFX` | 5110 |
-| `PREVIZ AUTOPROJECTION` | `[1\|0]` — defaults to **on** when no parameter is given | 5252 |
+**The wire form is `PREVIZ <channel>[-<layer>] <SUBCOMMAND> [args]`** — the channel comes *before*
+the verb, as it does for `MIXER`. The layer index parses and **no previz command reads it**.
+
+| command | shape | handler |
+| :--- | :--- | :--- |
+| `PREVIZ SCENE` | *(query)* \| `NONE` \| `SAVE <path>` \| `LOAD <path>` \| `<path>` | `previz_scene_command` |
+| `PREVIZ MAP` | `<mesh_name> <channel>` — needs ≥2 parameters, else `400` | `previz_map_command` |
+| `PREVIZ UNMAP` | `<mesh_name>` | `previz_unmap_command` |
+| `PREVIZ CAMERA` | *(query)* \| `RESET` \| `OVERRIDE [1\|0]` \| `<x> <y> <z> <yaw> <pitch> <roll> <fov>` | `previz_camera_command` |
+| `PREVIZ VIEW` | *(query)* \| `CLEAR` \| `RESET` \| `<x> <y> <z> <yaw> <pitch> <roll> <fov>` | `previz_view_command` |
+| `PREVIZ INFO` | — query | `previz_info_command` |
+| `PREVIZ SHOW` | `<mesh_name> [1\|0]` | `previz_show_command` |
+| `PREVIZ GRID` | `[1\|0]` | `previz_grid_command` |
+| `PREVIZ WIREFRAME` | `[1\|0]` | `previz_wireframe_command` |
+| `PREVIZ GIZMO` | `[1\|0]` | `previz_gizmo_command` |
+| `PREVIZ PRESET` | `SAVE <name>` \| `RECALL <name>` \| `LIST` | `previz_preset_command` |
+| `PREVIZ SCREEN` | a family of twelve — see below | `previz_screen_command` |
+| `PREVIZ AUTOPROJECTION` | `[1\|0] [SOURCE <ch>-<layer>]` — defaults to **on** when no parameter is given | `previz_autoprojection_command` |
+
+> **The `def` column used to hold line numbers, and all thirteen were wrong** by the time anyone
+> read them — commits elsewhere in `AMCPCommandsImpl.cpp` shifted every one. `CLAUDE.md` says to
+> cite a symbol rather than a line for exactly this reason; the handler names above survive any
+> edit above them.
 
 **Details that are not guessable from the names:**
 
-- **`PREVIZ SCREEN` is a command family, not one command.** It dispatches on a second keyword —
-  eight of them, including `ICVFX` and `EYEMODE`, which means per-screen ICVFX state is reachable
-  from here as well as from `MIXER PROJECTION_ICVFX`. Two routes to one piece of state is the
-  pattern `CLAUDE.md` says earns a diagram; §7 records that as owed.
+- **`PREVIZ SCREEN` is a command family of twelve, not one command** — enumerated in §1.1 below.
+  It includes `ICVFX` and `EYEMODE`, which means per-screen ICVFX state is reachable from here as
+  well as from `MIXER PROJECTION_ICVFX`. Two routes to one piece of state is the pattern
+  `CLAUDE.md` says earns a diagram; §7 records that as owed, and §5.4 records that the precedence
+  between them is **not** what a reader would guess.
 - **`PREVIZ AUTOPROJECTION` with no argument turns it ON** — `ctx.parameters.empty() || at(0) != "0"`.
   Toggles that default to enabled are unusual in this command set and easy to trip over in a
   startup script.
 - **The `[1|0]` commands are all "anything but `0` is on"**, not strict boolean parsing.
 - **`PREVIZ MAP` requires two parameters and returns `400`**; most of the others accept an empty
   parameter list as a query or a default.
+
+### 1.1 `PREVIZ SCREEN` — the twelve subcommands
+
+Read out of `previz_screen_command`'s dispatch chain on 2026-09-06 and checked against it
+argument by argument. This is the enumeration §5.3 recorded as owed, and `BRIEF.md` requires it
+**before** anything re-models how screens are described.
+
+The whole body is inside one `try`, so any unparseable number answers `502 PREVIZ FAILED <what>`
+rather than `400`.
+
+| subcommand | full grammar | writes | recomputes projections |
+| :--- | :--- | :--- | :---: |
+| `LIST` | `SCREEN LIST` | — | — |
+| `ADD … FLAT` | `SCREEN ADD <name> FLAT <width_m> <height_m>` | a fresh `screen_meta` with only name and size; generates the mesh; sets the scene active | **no** |
+| `ADD … CURVED` | `SCREEN ADD <name> CURVED <width_m> <height_m> <radius_m> <arc_deg>` | as above plus `arc_deg`; **`radius_m` is recomputed, see below** | **no** |
+| `POSITION` | `SCREEN <name> POSITION <x> <y> <z>` | `pos_x/y/z`, re-applies the mesh transform | yes |
+| `ROTATION` | `SCREEN <name> ROTATION <yaw> <pitch> <roll>` | `rot_yaw/pitch/roll`, re-applies the mesh transform | yes |
+| `RESOLUTION` | `SCREEN <name> RESOLUTION <w_px> <h_px>` | `res_w`, `res_h` | **no** |
+| `CHANNEL` | `SCREEN <name> CHANNEL <ch>` | `channel`; maps the mesh when `ch >= 0`, unmaps otherwise | yes |
+| `REMOVE` | `SCREEN <name> REMOVE` | erases the screen, its mapping and its mesh | **no** |
+| `EYEMODE` | `SCREEN <name> EYEMODE CAMERA` \| `SCREEN <name> EYEMODE FIXED [x y z]` | `eye_mode`, and `design_eye_*` only when `FIXED` **and** at least three coordinates were given | yes |
+| `ARCV` | `SCREEN <name> ARCV <arc_v_deg>` — 0 means a single-curved cylinder | `arc_v_deg` | yes |
+| `ICVFX` | `SCREEN <name> ICVFX 1\|0` — also accepts `true` | `icvfx_enable` | yes |
+| *(anything else)* | — | `400 PREVIZ ERROR unknown screen subcommand` | — |
+
+`LIST` answers `201` followed by one line per screen and a blank line:
+
+```
+<name> <width>x<height>m[ curved r=<radius>m][ ch=<channel>]
+```
+
+**Seven things the grammar does not tell you, each verified against the handler:**
+
+1. **`LIST` reports four of a screen's fifteen properties.** Position, rotation, vertical arc,
+   resolution, eye mode, design eye and ICVFX are **write-only over AMCP** — settable, and
+   readable nowhere. There is no `SCREEN <name> INFO`.
+2. **`ADD … CURVED` discards the `radius_m` you give it.** `add_screen_curved` computes
+   `radius = width / 2 / sin(arc / 2)` and uses the supplied value only when that sine is within
+   `1e-6` of zero. The argument is in the grammar and is almost never the value stored.
+3. **`EYEMODE` accepts any word.** The test is `== "FIXED"`; **everything else, including a typo,
+   silently means `CAMERA`**. `SCREEN wall EYEMODE FIXXED 0 1.5 3` returns `202` and sets camera
+   mode with the coordinates ignored.
+4. **`EYEMODE FIXED` with one or two coordinates silently uses the defaults** `(0, 1.5, 3)` — the
+   guard is `size() >= 6`, so a partial coordinate list is neither used nor refused.
+5. **`LIST` and `ADD` are matched before `<name>`**, so a screen called `list` or `add` is
+   unaddressable by every other subcommand.
+6. **Four subcommands do not recompute projections**: `ADD` (either form), `RESOLUTION` and
+   `REMOVE`. Adding a screen and mapping it with `CHANNEL` works because `CHANNEL` recomputes;
+   adding one whose `channel` is set only by `PREVIZ MAP` does not, because `MAP` does not either.
+7. **`res_w`/`res_h` are stored and persisted and read by nothing.** No renderer path and no
+   projection calculation consults them.
+
+### 1.2 `PREVIZ CAMERA` and `PREVIZ VIEW`
+
+Both are families of four, and both were listed in §1 as *"placement arguments"*.
+
+| form | `CAMERA` | `VIEW` |
+| :--- | :--- | :--- |
+| *(no parameters)* | query: `201` then `<x> <y> <z> <yaw> <pitch> <roll> <fov>` | query: `201` then `<override 1\|0> <x> <y> <z> <yaw> <pitch> <roll> <fov>` |
+| `RESET` | camera back to its default, projections recomputed | same as `CLEAR` |
+| `CLEAR` | — | drops the view override |
+| `OVERRIDE [1\|0]` | freezes tracker control of the production camera | — |
+| `<x> <y> <z> <yaw> <pitch> <roll> <fov>` | sets the **production** camera; recomputes projections | sets the **viewport** camera; **deliberately does not recompute** |
+
+* **`OVERRIDE` with no argument locks.** The test is `size() < 2 || at(1) != "0"`, so only the exact
+  string `0` unlocks — `false` and `off` both lock.
+* **The two cameras are not interchangeable.** `compute_frustum` always uses the production camera,
+  so orbiting the viewport never moves a projection. That is the point of the split, and it is why
+  `VIEW` omits the recompute.
+* **Neither reports `near_clip`/`far_clip`, and neither can set them.** `set_camera` hard-codes
+  `0.1` and `100`, and the layout file does not carry them.
+* **With a tracker bound in `PREVIZ` mode, `set_camera` runs per tracker sample** — so
+  `update_projections()`, and one `apply_transform` per mapped screen, run at the tracker's rate
+  rather than the channel's.
 
 ---
 
@@ -274,8 +357,9 @@ Two consequences:
 
 1. **Picture coverage exists for `MAP` only, since 2026-09-05** — `cli.py previz-picture`, §4.
    Arrival, component order and per-mesh identity are gated on both mixers. The other twelve
-   commands still have no picture check, and §4's third check (`PREVIZ SCREEN ... ICVFX` against
-   `MIXER PROJECTION_ICVFX`) is blocked on §5.3.
+   commands still have no picture check. §4's third check (`PREVIZ SCREEN ... ICVFX` against
+   `MIXER PROJECTION_ICVFX`) **was** blocked on §5.3 and is now unblocked — §1.1 gives its exact
+   grammar — but it is still unwritten, and §5.4 says what it would find.
 2. **The renderer is OpenGL on both mixers, and the parity that implies is unmeasured.** This item
    read *"OpenGL-only — either the Vulkan mixer grows the same bridge or the commands should
    refuse"*; the bridge exists (`vulkan/image/image_mixer.cpp:1204-1254`). A Vulkan channel
@@ -284,11 +368,50 @@ Two consequences:
    working-space composite. Two consequences nothing checks: a Vulkan channel running previz is
    doing a per-frame round trip through a second API, and its colour handling differs from the same
    channel with previz off.
-3. **`PREVIZ SCREEN`'s eight subcommands are unenumerated** in any document, including this one:
-   the list in §1 was recovered from a dispatch chain, and the parameter shape of each is not
-   established. Reading the handler is currently the only way to know.
-4. **Two routes to per-screen ICVFX state** (`PREVIZ SCREEN ... ICVFX` and
-   `MIXER PROJECTION_ICVFX`) with no documented precedence.
+3. ~~**`PREVIZ SCREEN`'s eight subcommands are unenumerated**~~ — **CLOSED 2026-09-06**, and
+   there were **twelve**, not eight. §1.1 enumerates all of them argument by argument, and §1.2
+   does the same for `CAMERA` and `VIEW`, which §1 had described as *"placement arguments"*. Seven
+   behaviours that the grammar does not imply are recorded there; four of them are defects rather
+   than surprises, listed in §5.5.
+4. **Two routes to per-screen ICVFX state**, and the precedence is now known: **auto-projection
+   silently wins.** `PREVIZ AUTOPROJECTION` writes the ICVFX block on every recompute with no guard,
+   whereas the *curve* block beside it is protected by `curve_auto` — an explicit
+   `MIXER PROJECTION_CURVE` clears that flag and freezes the operator's values, and nothing does
+   the same for ICVFX. So a hand-set `MIXER PROJECTION_ICVFX` survives exactly until the next
+   camera move. **Not measured, and not changed**: making ICVFX follow the curve block's rule would
+   alter rendered output for any show that sets it manually, so it needs its own commit and its own
+   before/after. §4's check 3 is what would measure it, and §1.1 has unblocked it.
+
+### 5.5 Five defects in the command surface, from reading the handler
+
+Found while enumerating §1.1 on 2026-09-06. None is fixed here; each is recorded so the next reader
+does not have to rediscover it.
+
+1. **`ADD … CURVED` discards the `radius_m` argument** — it is recomputed from width and arc. The
+   parameter is in the grammar, is accepted, and is almost never the value stored. The layout file
+   round-trips through the same path, so a saved curved screen reloads with a re-derived radius.
+2. **`EYEMODE` accepts any word as `CAMERA`.** The test is `== "FIXED"`, so a typo returns `202`
+   and silently selects the other mode. And `FIXED` with fewer than three coordinates uses the
+   defaults rather than refusing.
+3. **A scene reload keeps the old screens.** `PREVIZ SCENE <path>` clears `meshes` but not
+   `screens` or `mesh_to_channel` — only `SCENE NONE` clears those. So after loading a second
+   model, `screens` still describes screens whose meshes are gone, and `update_projections()`
+   iterates `screens`, so those phantoms keep writing projections to their mapped channels.
+4. **`show_gizmo` is written and never read**, and `res_w`/`res_h` are stored, persisted and never
+   read. `PREVIZ GIZMO` and `SCREEN … RESOLUTION` both answer `202` and change nothing that
+   renders.
+5. **`PREVIZ MAP` and `PREVIZ SCREEN … CHANNEL` are not the same operation, and the difference is
+   silent.** `map_mesh` writes `mesh_to_channel[name]` and `mesh.is_screen`; it never touches
+   `screens[name].channel`. `set_screen_channel` writes **both**, then recomputes projections. And
+   `update_projections` iterates `screens`, skipping any whose `channel < 1`.
+
+   So on a procedurally added screen, `PREVIZ 1 MAP back 3` **textures the mesh and leaves
+   auto-projection off for it** — the screen still reads `channel = -1`, and no frustum is ever
+   written to channel 3. `PREVIZ 1 SCREEN back CHANNEL 3` does both. Both answer `202`, and
+   nothing reports which one you got.
+
+   `previz-picture` cannot see this: it uses `MAP` and asserts the **texture arrives**, which it
+   does. What does not arrive is the projection, and no battery looks at that.
 
 ---
 

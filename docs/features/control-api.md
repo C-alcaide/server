@@ -625,37 +625,48 @@ Numbers taken by hand and not by a battery, kept because nothing re-runs them:
    item here unverifiable rather than merely incomplete.
 2. **Only mixer fields are writable.** `PUT` resolves `/channel/{n}/stage/layer/{m}/mixer/{field}`
    and nothing else.
-3. **A clip load goes through AMCP**, so its failures carry AMCP's detail rather than this API's,
+3. **`HOST_INFO` advertises `EXTENSIONS.DESCRIPTION: true` and not one field emits a
+   description.** The `field_desc` column exists, `api_tree.cpp` emits `DESCRIPTION` when it is
+   non-null, and **every row of the table passes `nullptr`** — all eleven macros have a literal
+   `nullptr` in that slot. So the guard never fires, no leaf carries the key, and the capability
+   probe says otherwise.
+
+   Found 2026-09-06 while enumerating previz. It is the same class as `LISTEN`, which is
+   advertised `false` precisely so a client does not wait for something that never comes — and
+   this one got the care backwards. The fix is descriptions rather than a `false`, because the
+   mechanism works and the text is what a generated control surface shows an operator; that means
+   a slot in the macros and ~177 short strings, so it is its own commit.
+4. **A clip load goes through AMCP**, so its failures carry AMCP's detail rather than this API's,
    and it cannot take part in an atomic batch.
-4. **`at_frame` is this server's own frame counter, so two servers cannot yet be told to change
+5. **`at_frame` is this server's own frame counter, so two servers cannot yet be told to change
    together.** Each server counts from its own start, and nothing aligns them; the cluster module
    has a PTP-derived frame clock that would, and the API does not use it. That is the gap between
    "two channels change together", which is measured and works, and "two machines change
    together", which does not.
-5. **The 2-frame offset is not compensated for.** Measured stable, and named in section 2 rather
+6. **The 2-frame offset is not compensated for.** Measured stable, and named in section 2 rather
    than corrected, because the constant is this machine's pipeline rather than a property of the
    protocol.
-6. **No `sleep_frames`.** A batch is one instant; a sequence with waits inside it needs independent
+7. **No `sleep_frames`.** A batch is one instant; a sequence with waits inside it needs independent
    queues, which is the same deferral as `queue`.
-7. **Authentication is a handshake, not a channel.** Everything after it is cleartext, and the
+8. **Authentication is a handshake, not a channel.** Everything after it is cleartext, and the
    password is plain text in the config. It protects against listening, not against reading the
    config, and it is not a reason to expose the port off-segment.
-8. **A subscription is not resumable.** A dropped socket loses the per-connection diff, so a client
+9. **A subscription is not resumable.** A dropped socket loses the per-connection diff, so a client
    must re-subscribe and take the full set again. There is no session id to resume, deliberately.
-9. **`throttle_ms` is per message, not per path.** A subscription covering a busy prefix and a
+10. **`throttle_ms` is per message, not per path.** A subscription covering a busy prefix and a
    quiet one throttles both together.
-10. **A `wrap` field with no declared range is not normalised.** The projection angles are the whole
+11. **A `wrap` field with no declared range is not normalised.** The projection angles are the whole
    set: they declare `wrap` because they are periodic and carry no limits, so `proj_yaw` 7.5 rad
    stays 7.5 rad. AMCP stores it the same way, so the two agree -- but a client cannot rely on
    getting a canonical representative back.
-11. **The blob fields report presence, not content.** `lut3d`, `hue_curves`, `blend_mask` and
+12. **The blob fields report presence, not content.** `lut3d`, `hue_curves`, `blend_mask` and
    `grade_nodes` appear as `blob` descriptors and refuse a `PUT`; loading one stays a `MIXER`
    command.
-12. **`ocio.source_space` is read-only** -- validating a colour-space name against the loaded OCIO
+13. **`ocio.source_space` is read-only** -- validating a colour-space name against the loaded OCIO
     config lives in the accelerator layer, which this library does not link.
-13. **No discovery.** There is no mDNS/Zeroconf anywhere in the fork, so a client is told where the
+14. **No discovery.** There is no mDNS/Zeroconf anywhere in the fork, so a client is told where the
     server is rather than finding it.
-14. **The projection block is published twice**, under its historical `projection/*` names for
+15. **The projection block is published twice**, under its historical `projection/*` names for
     existing OSC consumers and under its registry names in `mixer/proj_*`. Both are live and they
     agree; retiring the first changes a published interface and is deliberately not done here.
 
