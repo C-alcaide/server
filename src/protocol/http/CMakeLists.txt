@@ -11,6 +11,7 @@ project (protocol_http)
 #     to one small target keeps the rest of the tree unaffected either way.
 
 set(SOURCES
+		api_events.cpp
 		api_status.cpp
 		api_tree.cpp
 		boost_json_src.cpp
@@ -20,6 +21,7 @@ set(SOURCES
 )
 
 set(HEADERS
+		api_events.h
 		api_status.h
 		api_tree.h
 		boost_prelude.h

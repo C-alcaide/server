@@ -11,8 +11,8 @@ exists, its type, its arity, its legal range and what animates it — instead of
 of `MIXER` commands and their argument orders. Turned on by an `<http>` block under
 `<controllers>`; absent by default, so a server that does not configure one opens no port.
 
-**This build is read-only.** `GET` works; writing, subscribing and batching are named as gaps in
-§5 rather than implied by the word "API".
+**This build is read-only.** Reading and subscribing work; writing and batching are named as gaps
+in §5 rather than implied by the word "API".
 
 ---
 
@@ -30,7 +30,8 @@ of `MIXER` commands and their argument orders. Turned on by an `<http>` block un
 | Live mixer values, published sparsely by the tick | implemented | `publish_layer_transform` in `stage.cpp` |
 | `<auth>password</auth>` | **refused at startup**, with a fatal log | same branch — see §3 |
 | `PUT /v1/value`, `POST /v1/action`, `POST /v1/batch` | **not implemented**; answered `bad_request` | `route()` in `http_server.cpp` |
-| `WS /v1/events` | **not implemented**; `HOST_INFO.EXTENSIONS.LISTEN` is `false` | §5 gap 1 |
+| `WS /v1/events` -- prefix subscription with a per-connection diff | implemented | `collect_events` in `api_events.cpp`, `ws_session` in `http_server.cpp` |
+| `throttle_ms`, `repetition_filter`, revert events | implemented | same |
 
 **Three sources are joined to build the tree**, and none of them alone describes the address space:
 
@@ -97,8 +98,47 @@ curl "http://127.0.0.1:5254/v1/tree?HOST_INFO"
 ```
 
 The last one is answered on **any** path, which is what makes it usable as a liveness and identity
-check before a client knows the address space — `HOST_INFO.PID` is how a test fixture confirms it
+check before a client knows the address space -- `HOST_INFO.PID` is how a test fixture confirms it
 is talking to the server it started rather than to somebody else's on the same port.
+
+**Live values arrive on a WebSocket at `/v1/events`.** Connect, send one `subscribe`, and every
+change under those prefixes is pushed:
+
+```json
+-> {"op":"subscribe","id":"s1",
+    "prefixes":["/channel/1/stage/layer/10/mixer/","/channel/1/frame"],
+    "throttle_ms":40,"repetition_filter":true}
+
+<- {"status":{"code":"ok","message":""},"server":"stage-left",
+    "result":{"subscribed":true,"id":"s1","prefixes":2}}
+
+<- {"id":"s1","server":"stage-left","frame":{"1":365},
+    "events":[{"path":"/channel/1/stage/layer/10/mixer/opacity","value":0.5}]}
+```
+
+| field | meaning |
+| :--- | :--- |
+| `prefixes` | Each must start `/channel/{index}` -- that is what bounds the per-tick scan to the channels asked for, so it is a requirement rather than a convention. Matching is on **segment boundaries**: `/channel/1` does not match `/channel/10`. At most `<max-prefixes>` of them. |
+| `throttle_ms` | Minimum interval between messages, default 0. Changes are coalesced rather than dropped: the diff is against what this client was last **sent**, so the message that does arrive carries the latest value. |
+| `repetition_filter` | Default true -- a key republished with an unchanged value produces no event. |
+| `id` | Echoed on every message, so a client multiplexing several subscriptions can route them. |
+| `server` | On every message, so a client attached to two servers can tell them apart without tracking which socket is which. |
+| `frame` | The frame number of every channel the subscription touched, so an event can be tied to a picture. |
+
+**The first message after subscribing is the whole subscribed set**, not a diff -- the
+per-connection diff starts empty, so every matching key reads as changed. That is a client's
+initial state without a second REST round trip.
+
+**A field that returns to its default produces `{"path": ..., "value": <default>, "reverted": true}`.**
+It stops being published, and silence would otherwise leave the client showing the old value
+forever. A path with no descriptor default -- a layer that was cleared -- reports `value: null`
+alongside `reverted`, which is honest about the difference.
+
+`op: "unsubscribe"` stops the flow without closing the socket. `HOST_INFO.SUBSCRIPTIONS` counts
+the live ones. `HOST_INFO.EXTENSIONS.LISTEN` stays **false** on purpose: that advertises
+OSCQuery's per-path `LISTEN`/`IGNORE`, which is a different mechanism from a prefix subscription,
+and claiming it would leave a standard client waiting on a socket that is never going to answer
+it.
 
 Every reply carries the same envelope:
 
@@ -169,6 +209,19 @@ when the transform CHANGES, and write the cached keys into the state on every ti
 §4 and in `CHANGELOG.md`; the projection block was moved onto the same rule, which is a cadence
 change for existing OSC consumers and is why it has a `CHANGELOG.md` entry of its own.
 
+**The diff is per connection, not per server.** Rejected: one server-side "last published" set
+that every subscriber diffs against. Two clients with different `throttle_ms` are at different
+points in time, so a shared set hands one of them a diff computed against the other's view -- and
+the value it skipped is never sent again, because as far as the server is concerned it has already
+been published. The cost is one `map<path, value>` per connection, sized by what that connection
+actually subscribed to.
+
+**One collect at a time per session, and one fan-out queued at a time per server.** Ticks arrive
+faster than a slow client drains, so both are guarded by an atomic flag and a second request is
+skipped rather than queued. Skipping is safe precisely because the diff is against `last_values`:
+the collect that does run carries everything the skipped one would have. Without the guards, four
+channels at 25 fps queue a hundred tasks a second whether or not the previous ones have run.
+
 **`auth=password` is refused at startup rather than ignored.** Accepting a mode that is not
 implemented would leave an operator who deliberately configured authentication with a wide-open
 port and nothing in the log to say so — strictly worse than the same port with `off` written in the
@@ -198,7 +251,13 @@ and Linux and leaves both bootstraps untouched.
 | readiness is observable | **none — checked by hand** | `foreground/ready` `true` and `foreground/transport` `playing` for a `PLAY`ed layer | 2026-09-05 |
 | an AMCP change reaches the API | **none — checked by hand** | `MIXER 1-10 OPACITY` at 0.5, 0.4 and 0.3 in turn: each read back correctly, and **10 consecutive reads returned the same value every time** — the check that catches a value published only on the tick it changed | 2026-09-05 |
 | a reverted field disappears | **none — checked by hand** | `MIXER 1-10 OPACITY 1.0` returns the path to `is_default` | 2026-09-05 |
-| tick cost of sparse publication | **none — checked by hand** | 16 layers, `tick/produce` mean: +0.322 ms with static fields set, +0.436 ms with every transform tweening; `tick/total` unchanged at 39.6 ms in all six arms. Full table in `CHANGELOG.md` | 2026-09-05 |
+| tick cost of sparse publication | **none -- checked by hand** | 16 layers, `tick/produce` mean: +0.322 ms with static fields set, +0.436 ms with every transform tweening; `tick/total` unchanged at 39.6 ms in all six arms. Full table in `CHANGELOG.md` | 2026-09-05 |
+| an AMCP change reaches a WS subscriber | **none -- checked by hand** | `MIXER 1-10 OPACITY 0.5` produced one event with the correct path and value, carrying `frame` and `server` | 2026-09-05 |
+| prefix exclusion, **with a positive control** | **none -- checked by hand** | a change on channel 2 produced 0 events for a channel-1 subscriber, and a change on channel 1 immediately after produced 1. Absence without a control is not a result | 2026-09-05 |
+| segment-bounded matching | **none -- checked by hand** | a `/channel/1` subscriber received nothing from channel 2 | 2026-09-05 |
+| throttle | **none -- checked by hand** | driven as fast as the client could ask: 51 messages at min gap 78 ms with `throttle_ms:0` (the client's own floor), 15 at min gap **277 ms** at 250, 8 at min gap **511 ms** at 500. **No gap fell below the requested interval**, and the last value delivered was the final one | 2026-09-05 |
+| revert | **none -- checked by hand** | `MIXER 1-10 OPACITY 1.0` produced one event carrying the default and `reverted: true` | 2026-09-05 |
+| teardown | **none -- checked by hand** | `HOST_INFO.SUBSCRIPTIONS` went 3 to 1 to 0 as sockets closed | 2026-09-05 |
 
 **What these numbers do not cover, and it is most of it.** They were taken by hand from one server
 on one machine, not by a battery, so nothing re-runs them and nothing will notice when they stop
@@ -219,25 +278,28 @@ being true. Specifically:
 
 ## 5. Known gaps
 
-1. **`WS /v1/events` does not exist.** `HOST_INFO` advertises `LISTEN: false`, so a standard client
-   is told the truth rather than left waiting. Closing it needs the per-connection diff, prefix
-   matching that is segment-bounded (`/channel/1` must not match `/channel/10`), and a throttle.
-   Until then a client that wants live values polls, which is what the tree is cheap enough for and
-   is still the wrong answer at 25 fps.
-2. **No writes.** `PUT /v1/value`, `POST /v1/action` and `POST /v1/batch` answer `bad_request`.
-3. **No authentication.** `<auth>password</auth>` is refused at startup. Until it exists this port
-   must not be bound to an interface reachable off-segment.
-4. **No battery.** See §4 — this is the gap that makes every other item here unverifiable rather
-   than merely incomplete.
-5. **The blob fields report presence, not content.** `lut3d`, `hue_curves`, `blend_mask` and
+1. **No writes.** `PUT /v1/value`, `POST /v1/action` and `POST /v1/batch` answer `bad_request`, so
+   everything above is observation only.
+2. **No authentication.** `<auth>password</auth>` is refused at startup. Until it exists this port
+   must not be bound to an interface reachable off-segment -- and that applies to the WebSocket
+   too, which is the same port.
+3. **No battery.** See section 4 -- this is the gap that makes every other item here unverifiable
+   rather than merely incomplete. The WebSocket half is the more urgent of the two, because a
+   subscription defect looks exactly like a quiet server.
+4. **A subscription is not resumable.** A dropped socket loses the per-connection diff, so a client
+   must re-subscribe and take the full set again. That is correct, and it is undocumented on the
+   wire: there is no session id to resume, and there deliberately is not one yet.
+5. **`throttle_ms` is per message, not per path.** A subscription covering a busy prefix and a
+   quiet one throttles both together.
+6. **The blob fields report presence, not content.** `lut3d`, `hue_curves`, `blend_mask` and
    `grade_nodes` appear as `blob` descriptors; loading one stays a `MIXER` command.
-6. **`ocio.source_space` is read-only** even once writes land — validating a colour-space name
+7. **`ocio.source_space` is read-only** even once writes land -- validating a colour-space name
    against the loaded OCIO config stays on the AMCP side for now.
-7. **No discovery.** There is no mDNS/Zeroconf anywhere in the fork, so a client is told where the
+8. **No discovery.** There is no mDNS/Zeroconf anywhere in the fork, so a client is told where the
    server is rather than finding it.
-8. **The projection block is published twice**, under its historical `projection/*` names for
+9. **The projection block is published twice**, under its historical `projection/*` names for
    existing OSC consumers and under its registry names in `mixer/proj_*`. Both are live and they
-   agree; retiring the first is a change to a published interface and is deliberately not made here.
+   agree; retiring the first changes a published interface and is deliberately not done here.
 
 ---
 
@@ -271,7 +333,7 @@ flowchart LR
     SNAP --> OSC["OSC client<br/>broadcast"]
     SNAP --> HUB["state_hub"]
     HUB --> TREE["GET /v1/tree<br/>GET /v1/value"]
-    HUB -.-> WS["WS /v1/events<br/>not yet"]
+    HUB --> WS["WS /v1/events<br/>prefix subscription"]
     REG["core::fields registry<br/>~150 descriptors"] --> TREE
 ```
 

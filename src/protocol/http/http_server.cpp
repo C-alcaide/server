@@ -11,6 +11,7 @@
 
 #include "http_server.h"
 
+#include "api_events.h"
 #include "api_status.h"
 #include "api_tree.h"
 #include "boost_prelude.h"
@@ -23,7 +24,11 @@
 #include <boost/asio/io_context.hpp>
 
 #include <atomic>
+#include <deque>
+#include <memory>
+#include <mutex>
 #include <string>
+#include <vector>
 
 namespace caspar { namespace protocol { namespace http {
 
@@ -74,6 +79,53 @@ bool starts_with(const std::string& s, const char* p)
 
 } // namespace
 
+/// One live `/v1/events` connection.
+///
+/// The subscription and its per-connection diff live here rather than in the hub, because
+/// two clients with different throttles are at DIFFERENT POINTS IN TIME: a shared
+/// server-side "last published" set would hand one of them a diff computed against the
+/// other's view, and the value it skipped would never be sent again.
+///
+/// Lifetime is by `shared_ptr` from the session's own async operations; the server holds
+/// only a `weak_ptr`, so a client that disappears is collected on the next fan-out with no
+/// explicit deregistration to get wrong.
+class ws_session : public std::enable_shared_from_this<ws_session>
+{
+  public:
+    ws_session(websocket::stream<beast::tcp_stream> ws, std::shared_ptr<http_server::impl> owner)
+        : ws_(std::move(ws))
+        , owner_(std::move(owner))
+    {
+    }
+
+    void run(bhttp::request<bhttp::string_body> req);
+    void notify();
+    void close();
+
+    bool subscribed() const { return subscribed_.load(std::memory_order_acquire); }
+
+  private:
+    void read();
+    void handle_text(std::string text);
+    void send(std::string payload);
+    void write_next();
+
+    websocket::stream<beast::tcp_stream> ws_;
+    std::shared_ptr<http_server::impl>   owner_;
+    beast::flat_buffer                   buffer_;
+
+    // Touched only on the API executor. `notify()` is called from anywhere and only posts.
+    subscription      sub_;
+    std::atomic<bool> subscribed_{false};
+    std::atomic<bool> collecting_{false};
+
+    // Serialises writes: Beast permits exactly one outstanding write per stream, and a
+    // 25 Hz fan-out will absolutely produce a second one while the first is in flight.
+    std::deque<std::string> outbox_;
+    bool                    writing_ = false;
+    std::atomic<bool>       closed_{false};
+};
+
 struct http_server::impl : public std::enable_shared_from_this<http_server::impl>
 {
     std::shared_ptr<boost::asio::io_context> io_context_;
@@ -86,7 +138,13 @@ struct http_server::impl : public std::enable_shared_from_this<http_server::impl
     // Every request body runs here, never on an `io_context` thread. See the header.
     executor api_executor_{L"http-api"};
 
-    std::atomic<int> subscriptions_{0};
+    std::mutex                             ws_mutex_;
+    std::vector<std::weak_ptr<ws_session>>  ws_sessions_;
+
+    /// Set while a fan-out is queued. Without it a 25 Hz tick on four channels queues 100
+    /// tasks a second onto the API executor whether or not the previous one has run, and a
+    /// momentarily slow subscriber turns into an unbounded queue.
+    std::atomic<bool> fanout_queued_{false};
 
     impl(std::shared_ptr<boost::asio::io_context> io_context, std::shared_ptr<state_hub> hub, http_config config)
         : io_context_(std::move(io_context))
@@ -105,12 +163,85 @@ struct http_server::impl : public std::enable_shared_from_this<http_server::impl
         acceptor_.listen(asio::socket_base::max_listen_connections);
     }
 
-    void start() { accept(); }
+    void start()
+    {
+        // The hub calls this on the TICK THREAD. It sets a flag and posts; everything real
+        // happens on the API executor.
+        std::weak_ptr<impl> weak = shared_from_this();
+        hub_->set_observer([weak](int) {
+            auto self = weak.lock();
+            if (!self)
+                return;
+            if (self->fanout_queued_.exchange(true, std::memory_order_acq_rel))
+                return;
+            self->api_executor_.begin_invoke([self] {
+                self->fanout_queued_.store(false, std::memory_order_release);
+                self->fan_out();
+            });
+        });
+
+        accept();
+    }
+
+    /// Give every live subscriber whatever its prefixes say it is owed. On the API
+    /// executor.
+    void fan_out()
+    {
+        std::vector<std::shared_ptr<ws_session>> live;
+        {
+            std::lock_guard<std::mutex> lock(ws_mutex_);
+            live.reserve(ws_sessions_.size());
+            for (auto it = ws_sessions_.begin(); it != ws_sessions_.end();) {
+                if (auto s = it->lock()) {
+                    live.push_back(std::move(s));
+                    ++it;
+                } else {
+                    it = ws_sessions_.erase(it);
+                }
+            }
+        }
+        for (auto& s : live)
+            s->notify();
+    }
+
+    void add_ws_session(const std::shared_ptr<ws_session>& s)
+    {
+        std::lock_guard<std::mutex> lock(ws_mutex_);
+        ws_sessions_.push_back(s);
+    }
+
+    int count_subscriptions()
+    {
+        std::lock_guard<std::mutex> lock(ws_mutex_);
+        int n = 0;
+        for (auto it = ws_sessions_.begin(); it != ws_sessions_.end();) {
+            if (auto s = it->lock()) {
+                if (s->subscribed())
+                    ++n;
+                ++it;
+            } else {
+                it = ws_sessions_.erase(it);
+            }
+        }
+        return n;
+    }
 
     void stop()
     {
         boost::system::error_code ec;
         acceptor_.close(ec);
+        hub_->set_observer(nullptr);
+
+        std::vector<std::shared_ptr<ws_session>> live;
+        {
+            std::lock_guard<std::mutex> lock(ws_mutex_);
+            for (auto& w : ws_sessions_)
+                if (auto s = w.lock())
+                    live.push_back(std::move(s));
+            ws_sessions_.clear();
+        }
+        for (auto& s : live)
+            s->close();
     }
 
     void accept()
@@ -141,14 +272,14 @@ struct http_server::impl : public std::enable_shared_from_this<http_server::impl
         // what the spec says and what makes it usable as a liveness check without knowing
         // the address space first.
         if (query == "HOST_INFO")
-            return api_reply::ok_with(host_info(config_, subscriptions_.load()));
+            return api_reply::ok_with(host_info(config_, count_subscriptions()));
 
         if (method != bhttp::verb::get && method != bhttp::verb::head)
             return api_reply::fail(api_code::bad_request,
                                    "only GET is implemented in this build; writes arrive in a later commit");
 
         if (path == "/" || path == "/v1")
-            return api_reply::ok_with(host_info(config_, subscriptions_.load()));
+            return api_reply::ok_with(host_info(config_, count_subscriptions()));
 
         if (path == "/v1/tree")
             return api_reply::ok_with(build_tree(*hub_, config_));
@@ -217,6 +348,30 @@ struct http_server::impl : public std::enable_shared_from_this<http_server::impl
     {
         auto       self   = shared_from_this();
         const auto target = split_target(std::string(req->target()));
+
+        if (websocket::is_upgrade(*req)) {
+            if (target.path != "/v1/events") {
+                // An upgrade on any other path is answered as an ordinary request, so a
+                // client that mistyped the path gets `unknown_path` and its message rather
+                // than a socket that opens and then says nothing.
+                auto reply  = api_reply::fail(api_code::unknown_path,
+                                              "the event socket is at /v1/events, not " + target.path);
+                auto body   = json::serialize(json::value(envelope(reply, server_name_)));
+                const auto v = req->version();
+                asio::post(stream->get_executor(), [self, stream, buffer, body = std::move(body), v]() mutable {
+                    self->write(stream, buffer, bhttp::status::not_found, std::move(body), bhttp::verb::get, false, v);
+                });
+                return;
+            }
+
+            // The stream moves into the session and this HTTP loop ends here.
+            auto session = std::make_shared<ws_session>(
+                websocket::stream<beast::tcp_stream>(std::move(*stream)), self);
+            add_ws_session(session);
+            session->run(std::move(*req));
+            return;
+        }
+
         const auto method = req->method();
         const auto keep   = req->keep_alive();
         const auto ver    = req->version();
@@ -284,6 +439,171 @@ struct http_server::impl : public std::enable_shared_from_this<http_server::impl
         stream->socket().shutdown(tcp::socket::shutdown_send, ec);
     }
 };
+
+// -----------------------------------------------------------------------------------------
+// ws_session
+// -----------------------------------------------------------------------------------------
+
+void ws_session::run(bhttp::request<bhttp::string_body> req)
+{
+    ws_.set_option(websocket::stream_base::timeout::suggested(beast::role_type::server));
+    ws_.set_option(websocket::stream_base::decorator(
+        [](websocket::response_type& res) { res.set(bhttp::field::server, "CasparCG"); }));
+
+    auto self = shared_from_this();
+    ws_.async_accept(req, [self](boost::system::error_code ec) {
+        if (ec) {
+            CASPAR_LOG(debug) << L"[http-api] ws accept: " << u16(ec.message());
+            return;
+        }
+        self->read();
+    });
+}
+
+void ws_session::read()
+{
+    auto self = shared_from_this();
+    ws_.async_read(buffer_, [self](boost::system::error_code ec, std::size_t) {
+        if (ec) {
+            if (ec != websocket::error::closed && ec != asio::error::operation_aborted)
+                CASPAR_LOG(debug) << L"[http-api] ws read: " << u16(ec.message());
+            self->closed_.store(true, std::memory_order_release);
+            return;
+        }
+        auto text = beast::buffers_to_string(self->buffer_.data());
+        self->buffer_.consume(self->buffer_.size());
+        self->handle_text(std::move(text));
+        self->read();
+    });
+}
+
+void ws_session::handle_text(std::string text)
+{
+    auto self = shared_from_this();
+
+    // Onto the API executor, for the same reason a request body goes there: parsing and
+    // the first collect walk the state, and this handler is running on an `io_context`
+    // thread that AMCP and OSC share.
+    owner_->api_executor_.begin_invoke([self, text = std::move(text)] {
+        api_reply   reply;
+        json::value msg;
+        try {
+            msg = json::parse(text);
+        } catch (...) {
+            reply = api_reply::fail(api_code::bad_request, "message is not valid JSON");
+            self->send(json::serialize(json::value(envelope(reply, self->owner_->server_name_))));
+            return;
+        }
+
+        const std::string op =
+            msg.is_object() && msg.as_object().if_contains("op") && msg.as_object().at("op").is_string()
+                ? std::string(msg.as_object().at("op").as_string().c_str())
+                : std::string();
+
+        if (op == "subscribe") {
+            subscription sub;
+            reply = parse_subscribe(msg, self->owner_->config_.max_prefixes, sub);
+            if (reply.code == api_code::ok) {
+                self->sub_ = std::move(sub);
+                self->subscribed_.store(true, std::memory_order_release);
+
+                json::object r;
+                r["subscribed"] = true;
+                r["id"]         = self->sub_.id;
+                r["prefixes"]   = static_cast<std::int64_t>(self->sub_.prefixes.size());
+                reply.result    = std::move(r);
+            }
+        } else if (op == "unsubscribe") {
+            self->subscribed_.store(false, std::memory_order_release);
+            self->sub_ = subscription{};
+            json::object r;
+            r["subscribed"] = false;
+            reply.result    = std::move(r);
+        } else {
+            reply = api_reply::fail(api_code::bad_request, "unknown op; this build accepts subscribe and unsubscribe");
+        }
+
+        self->send(json::serialize(json::value(envelope(reply, self->owner_->server_name_))));
+
+        // The first message after subscribing is the whole subscribed set, not a diff --
+        // `last_values` is empty, so every matching key reads as changed. That is what
+        // gives a client its initial state without a second REST round trip.
+        if (self->subscribed())
+            self->notify();
+    });
+}
+
+void ws_session::notify()
+{
+    if (!subscribed() || closed_.load(std::memory_order_acquire))
+        return;
+
+    // One collect at a time per session. Ticks arrive faster than a slow client drains,
+    // and queueing a collect per tick would grow without bound; skipping is correct
+    // because the next collect diffs against the same `last_values` and therefore carries
+    // whatever this one would have.
+    if (collecting_.exchange(true, std::memory_order_acq_rel))
+        return;
+
+    auto self = shared_from_this();
+    owner_->api_executor_.begin_invoke([self] {
+        json::object msg;
+        try {
+            msg = collect_events(self->sub_, *self->owner_->hub_, self->owner_->server_name_);
+        } catch (...) {
+            CASPAR_LOG_CURRENT_EXCEPTION();
+        }
+        self->collecting_.store(false, std::memory_order_release);
+        if (!msg.empty())
+            self->send(json::serialize(json::value(std::move(msg))));
+    });
+}
+
+void ws_session::send(std::string payload)
+{
+    auto self = shared_from_this();
+    asio::post(ws_.get_executor(), [self, payload = std::move(payload)]() mutable {
+        if (self->closed_.load(std::memory_order_acquire))
+            return;
+        self->outbox_.push_back(std::move(payload));
+        if (!self->writing_)
+            self->write_next();
+    });
+}
+
+void ws_session::write_next()
+{
+    if (outbox_.empty()) {
+        writing_ = false;
+        return;
+    }
+    writing_ = true;
+
+    auto self = shared_from_this();
+    ws_.text(true);
+    ws_.async_write(asio::buffer(outbox_.front()), [self](boost::system::error_code ec, std::size_t) {
+        self->outbox_.pop_front();
+        if (ec) {
+            if (ec != websocket::error::closed && ec != asio::error::operation_aborted)
+                CASPAR_LOG(debug) << L"[http-api] ws write: " << u16(ec.message());
+            self->closed_.store(true, std::memory_order_release);
+            self->writing_ = false;
+            return;
+        }
+        self->write_next();
+    });
+}
+
+void ws_session::close()
+{
+    if (closed_.exchange(true, std::memory_order_acq_rel))
+        return;
+    auto self = shared_from_this();
+    asio::post(ws_.get_executor(), [self] {
+        boost::system::error_code ec;
+        self->ws_.close(websocket::close_code::going_away, ec);
+    });
+}
 
 http_server::http_server(std::shared_ptr<boost::asio::io_context> io_context,
                          std::shared_ptr<state_hub>               hub,

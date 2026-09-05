@@ -26,6 +26,8 @@ class io_context;
 
 namespace caspar { namespace protocol { namespace http {
 
+class ws_session;
+
 /// The control API listener.
 ///
 /// Accept, read and write run on the shell's shared `io_context` -- exactly the shape
@@ -48,6 +50,11 @@ class http_server
     unsigned short port() const;
 
   private:
+    // The WebSocket session reaches into the server's executor, config and hub. It is part
+    // of the same object in every way except allocation -- it just cannot be a member,
+    // because there is one per connection.
+    friend class ws_session;
+
     struct impl;
     std::shared_ptr<impl> impl_;
 };

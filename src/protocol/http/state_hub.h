@@ -14,6 +14,7 @@
 #include <core/monitor/monitor.h>
 
 #include <atomic>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -41,11 +42,18 @@ class state_hub
     /// Every channel index that has published at least once, ascending.
     std::vector<int> channels() const;
 
+    /// Called on the TICK THREAD immediately after a snapshot is stored, with the channel
+    /// index. Whatever it does must be a hand-off -- a post onto another executor -- and
+    /// never work: this runs inside the frame.
+    using observer_t = std::function<void(int)>;
+    void set_observer(observer_t observer);
+
   private:
     // A map rather than a vector because channel indices are 1-based and need not be
     // contiguous -- a config can define channels 1 and 3.
-    mutable std::mutex            mutex_;
-    std::map<int, snapshot>       latest_;
+    mutable std::mutex      mutex_;
+    std::map<int, snapshot> latest_;
+    observer_t              observer_;
 };
 
 }}} // namespace caspar::protocol::http

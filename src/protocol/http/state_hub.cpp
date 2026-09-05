@@ -19,8 +19,23 @@ void state_hub::publish(int channel_index, snapshot s)
     // pointer assignment against a map that is only ever grown at startup, so it is
     // uncontended in steady state -- and it is a lock rather than a per-channel atomic
     // only because the map itself has to be safe to iterate while a late channel is added.
+    observer_t observer;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        latest_[channel_index] = std::move(s);
+        observer               = observer_;
+    }
+
+    // Outside the lock. The observer posts onto another executor, and calling it under the
+    // hub's own mutex would let that executor's work deadlock against a reader here.
+    if (observer)
+        observer(channel_index);
+}
+
+void state_hub::set_observer(observer_t observer)
+{
     std::lock_guard<std::mutex> lock(mutex_);
-    latest_[channel_index] = std::move(s);
+    observer_ = std::move(observer);
 }
 
 state_hub::snapshot state_hub::get(int channel_index) const
