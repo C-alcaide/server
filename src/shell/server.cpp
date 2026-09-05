@@ -812,6 +812,56 @@ struct server::impl
                         return nullptr;
                     return channels->at(static_cast<std::size_t>(index - 1)).stage;
                 };
+                api_ctx.concrete_stage = [channels](int index) -> std::shared_ptr<core::stage> {
+                    if (index < 1 || index > static_cast<int>(channels->size()))
+                        return nullptr;
+                    return channels->at(static_cast<std::size_t>(index - 1)).raw_channel->stage();
+                };
+                api_ctx.channel_count = [channels] { return static_cast<int>(channels->size()); };
+
+                // The re-entrant AMCP bridge, for the two actions that need a producer
+                // built from a string. Same shape as `cluster.cpp`'s scheduler executor:
+                // tokenize, parse against an internal client, execute, read the reply.
+                auto repo   = amcp_command_repo_;
+                auto client = std::make_shared<IO::ConsoleClientInfo>();
+                api_ctx.amcp =
+                    [repo, client](const std::wstring& line) -> http::api_context::amcp_reply {
+                    http::api_context::amcp_reply out;
+                    try {
+                        std::list<std::wstring> tokens;
+                        IO::tokenize(line, tokens);
+                        auto command = repo->parse_command(
+                            spl::shared_ptr<IO::client_connection<wchar_t>>(
+                                std::static_pointer_cast<IO::client_connection<wchar_t>>(client)),
+                            std::move(tokens),
+                            L"");
+                        if (!command) {
+                            out.code = 400;
+                            out.text = L"could not be parsed as an AMCP command";
+                            return out;
+                        }
+                        out.text = command->Execute(repo->channels()).get();
+                        // "202 PLAY OK" -- the leading integer is the status.
+                        out.code = std::wcstol(out.text.c_str(), nullptr, 10);
+                    } catch (const caspar::file_not_found&) {
+                        // AMCP's own handlers turn this into `404 ... ERROR` before the
+                        // reply string exists, so a bridge that only reads the string sees
+                        // nothing and reports `internal` -- which tells a client to retry
+                        // something that will never work.
+                        out.code = 404;
+                        out.text = L"file not found";
+                    } catch (const caspar::user_error& e) {
+                        out.code = 400;
+                        out.text = u16(e.what());
+                    } catch (const std::exception& e) {
+                        out.code = 500;
+                        out.text = u16(e.what());
+                    } catch (...) {
+                        out.code = 500;
+                        out.text = L"unhandled exception";
+                    }
+                    return out;
+                };
 
                 try {
                     http_server_ = std::make_shared<http::http_server>(io_context_, state_hub_, cfg, api_ctx);

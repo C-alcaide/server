@@ -243,6 +243,47 @@ api_reply check_and_bound(const fields::field_desc& f, core::monitor::vector_t& 
     return api_reply{};
 }
 
+api_reply prepare_set(const std::string& path, const json::object& op, prepared_set& out)
+{
+    if (auto r = resolve_write_target(path, out.target); r.code != api_code::ok)
+        return r;
+
+    const auto* v = op.if_contains("value");
+    if (!v)
+        return api_reply::fail(api_code::field_missing, "no value for " + path);
+    if (auto r = json_to_value(*out.target.field, *v, out.value); r.code != api_code::ok)
+        return r;
+    if (auto r = check_and_bound(*out.target.field, out.value); r.code != api_code::ok)
+        return r;
+
+    if (auto* d = op.if_contains("duration")) {
+        if (!d->is_int64() && !d->is_uint64() && !d->is_double())
+            return api_reply::fail(api_code::field_wrong_type, "duration must be a number of frames");
+        out.duration = static_cast<unsigned>(std::max(0.0, d->to_number<double>()));
+    }
+    if (auto* t = op.if_contains("tween")) {
+        if (!t->is_string())
+            return api_reply::fail(api_code::field_wrong_type, "tween must be a name");
+        try {
+            out.tween = caspar::tweener(u16(std::string(t->as_string().c_str())));
+        } catch (...) {
+            return api_reply::fail(api_code::bad_request, std::string("no such tween: ") + t->as_string().c_str());
+        }
+    }
+    return api_reply{};
+}
+
+core::stage_base::transform_func_t set_closure(const prepared_set& p)
+{
+    const auto* f = p.target.field;
+    auto        v = p.value;
+    return [f, v](core::frame_transform t) {
+        f->set(t.image_transform, v);
+        core::fields::apply_enables(t.image_transform, *f);
+        return t;
+    };
+}
+
 api_reply write_value(const api_context& ctx,
                       const state_hub&,
                       const std::string& path,

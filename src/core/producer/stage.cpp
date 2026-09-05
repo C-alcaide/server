@@ -1082,7 +1082,7 @@ std::future<void>                  stage::set_media_time_override(int layer, dou
 std::future<std::shared_ptr<void>> stage::get_keyframe_status(int layer) { return impl_->kf_get_status(layer); }
 
 // STAGE DELAYED (For batching operations)
-stage_delayed::stage_delayed(std::shared_ptr<stage>& st, int index)
+stage_delayed::stage_delayed(const std::shared_ptr<stage>& st, int index)
     : executor_{L"batch stage " + boost::lexical_cast<std::wstring>(index)}
     , stage_(st)
 {

@@ -15,7 +15,9 @@
 #include "api_status.h"
 #include "state_hub.h"
 
+#include <common/tweener.h>
 #include <core/frame/transform_fields.h>
+#include <core/producer/stage.h>
 
 #include <string>
 
@@ -49,6 +51,28 @@ api_reply json_to_value(const core::fields::field_desc& f, const json::value& v,
 /// to say 40, not an error. The failure carries the component index and the limits, so a
 /// generated control can put its slider back where it was and say why.
 api_reply check_and_bound(const core::fields::field_desc& f, core::monitor::vector_t& v);
+
+/// A validated `set`, ready to apply to any stage.
+///
+/// Split out of `write_value` so a batch can validate every op BEFORE applying any of
+/// them. That ordering is the batch's whole guarantee, and it is only possible if
+/// validation and application are separable -- which they were not while the two were one
+/// function.
+struct prepared_set
+{
+    write_target            target;
+    core::monitor::vector_t value;
+    unsigned                duration = 0;
+    caspar::tweener         tween;
+};
+
+/// Validate one `{"path": ..., "value": ..., "duration": ..., "tween": ...}` object.
+/// Touches no stage and has no side effects.
+api_reply prepare_set(const std::string& path, const json::object& op, prepared_set& out);
+
+/// The closure a prepared set applies. Handed to `apply_transform` on whichever stage --
+/// the channel's own, or a `stage_delayed` standing in for it inside a batch.
+core::stage_base::transform_func_t set_closure(const prepared_set& p);
 
 /// `PUT /v1/value/{path}`.
 ///

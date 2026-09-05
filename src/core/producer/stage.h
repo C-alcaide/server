@@ -196,7 +196,7 @@ class stage final : public stage_base
 class stage_delayed final : public stage_base
 {
   public:
-    stage_delayed(std::shared_ptr<stage>& st, int index);
+    stage_delayed(const std::shared_ptr<stage>& st, int index);
 
     int64_t count_queued() const { return executor_.size(); }
     void    release() { waiter_.set_value(); }
@@ -251,9 +251,17 @@ class stage_delayed final : public stage_base
     std::unique_lock<std::mutex> get_lock() const { return stage_->get_lock(); }
 
   private:
-    std::promise<void>      waiter_;
-    std::shared_ptr<stage>& stage_;
-    executor                executor_;
+    std::promise<void>     waiter_;
+    // BY VALUE, and it has to be. This was a reference to the caller's `shared_ptr`, which
+    // is safe only while that particular variable outlives the batch -- true for
+    // `AMCPCommandQueue`, which passes a channel's own member, and false for any caller
+    // holding the pointer in a local. It failed as `resource_deadlock_would_occur` from
+    // `get_lock()` on a two-channel batch: the dangling reference read whatever was left on
+    // the stack, both delayed stages resolved to the same `stage`, and the second lock hit
+    // a mutex this thread already held. A reference member that only works for one caller
+    // is a trap for the second; the cost of owning it is one atomic increment per batch.
+    std::shared_ptr<stage> stage_;
+    executor               executor_;
 };
 
 }} // namespace caspar::core

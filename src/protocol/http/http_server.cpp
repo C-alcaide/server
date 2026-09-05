@@ -11,6 +11,7 @@
 
 #include "http_server.h"
 
+#include "api_action.h"
 #include "api_events.h"
 #include "api_status.h"
 #include "api_tree.h"
@@ -284,6 +285,14 @@ struct http_server::impl : public std::enable_shared_from_this<http_server::impl
         if (query == "HOST_INFO")
             return api_reply::ok_with(host_info(config_, count_subscriptions()));
 
+        if (method == bhttp::verb::post) {
+            if (starts_with(path, "/v1/action/"))
+                return run_action(context_, path.substr(std::string("/v1/action").size()), body, peer);
+            if (path == "/v1/batch")
+                return run_batch(context_, body, peer);
+            return api_reply::fail(api_code::unknown_path, "nothing accepts POST at " + path);
+        }
+
         if (method == bhttp::verb::put) {
             if (starts_with(path, "/v1/value/"))
                 return write_value(context_, *hub_, path.substr(std::string("/v1/value").size()), body, peer);
@@ -291,8 +300,7 @@ struct http_server::impl : public std::enable_shared_from_this<http_server::impl
         }
 
         if (method != bhttp::verb::get && method != bhttp::verb::head)
-            return api_reply::fail(api_code::bad_request,
-                                   "this build accepts GET and PUT; POST arrives with actions and batches");
+            return api_reply::fail(api_code::bad_request, "this build accepts GET, PUT and POST");
 
         if (path == "/" || path == "/v1")
             return api_reply::ok_with(host_info(config_, count_subscriptions()));

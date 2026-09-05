@@ -11,8 +11,9 @@ exists, its type, its arity, its legal range and what animates it — instead of
 of `MIXER` commands and their argument orders. Turned on by an `<http>` block under
 `<controllers>`; absent by default, so a server that does not configure one opens no port.
 
-**Reading, subscribing and writing a mixer value work.** Actions and atomic batches do not, and
-are named as gaps in §5 rather than implied by the word "API".
+Reading, subscribing, writing, transport actions and atomic batches all work. What is missing is
+named in §5 rather than implied by the word "API" -- above all, **there is no automated test for
+any of it**.
 
 ---
 
@@ -31,7 +32,8 @@ are named as gaps in §5 rather than implied by the word "API".
 | `<auth>password</auth>` | **refused at startup**, with a fatal log | same branch — see §3 |
 | `PUT /v1/value/.../mixer/{field}` -- validated, with `duration` and `tween` | implemented | `write_value` in `api_value.cpp` |
 | `op`: `set`, `toggle`, `add`, `cas` -- one closure on the stage executor | implemented | same |
-| `POST /v1/action`, `POST /v1/batch` | **not implemented**; answered `bad_request` | `route()` in `http_server.cpp` |
+| `POST /v1/action/.../{verb}` -- transport, clear; clip loads delegated to AMCP | implemented | `run_action` in `api_action.cpp` |
+| `POST /v1/batch` -- validate-all-then-apply, one frame across channels | implemented | `run_batch`, same file |
 | `WS /v1/events` -- prefix subscription with a per-connection diff | implemented | `collect_events` in `api_events.cpp`, `ws_session` in `http_server.cpp` |
 | `throttle_ms`, `repetition_filter`, revert events | implemented | same |
 
@@ -202,6 +204,67 @@ the old one was.
 one frame behind. Read back too fast and you get the previous frame's value -- which is a correct
 answer to a different question.
 
+### Actions
+
+`POST /v1/action/channel/{n}/stage/layer/{m}/{verb}` -- `play`, `stop`, `pause`, `resume`,
+`preview`, `clear`, `clear_transforms`. `POST /v1/action/channel/{n}/{verb}` takes `clear` and
+`clear_transforms` for the whole channel.
+
+```bash
+curl -X POST .../v1/action/channel/1/stage/layer/10/play -d '{"clip":"AMB","loop":true}'
+curl -X POST .../v1/action/channel/1/stage/layer/10/pause
+curl -X POST .../v1/action/channel/1/clear
+```
+
+Everything the API can do through `stage_base` it does directly -- the same object AMCP's handlers
+call. The two forms that need a producer built from a string, `play` and `load` **with a clip**,
+are delegated to AMCP and say so in the reply:
+
+```json
+{"status":{"code":"ok","message":""},"server":"stage-left",
+ "result":{"via":"amcp","sent":"PLAY 1-10 bars LOOP","code":202,"reply":"202 PLAY OK"}}
+```
+
+Parsing a clip name into a producer is the producer registry's job, and a second implementation of
+`LOOP`/`SEEK`/`LENGTH` beside the original is exactly the duplication that let `MIXER EXPOSURE`
+diverge. The cost is that a delegated failure carries AMCP's detail rather than this API's: a
+missing file is `unknown_path`, a bad argument is `bad_request`, and neither says which argument.
+
+### Batches
+
+`POST /v1/batch` applies several ops **inside one frame, across every channel they touch**.
+
+```json
+{"label":"go cue 12","ops":[
+  {"op":"set","path":"/channel/1/stage/layer/10/mixer/opacity","value":0.25},
+  {"op":"set","path":"/channel/2/stage/layer/10/mixer/opacity","value":0.75},
+  {"op":"action","path":"/channel/1/stage/layer/10/pause"}
+]}
+```
+
+**Every op is validated before any op is applied.** A failure answers `batch_op_failed` with the
+failing index and that op's own status, and **nothing is written**:
+
+```json
+{"status":{"code":"batch_op_failed","message":"op 2 is invalid; nothing was applied",
+           "details":[{"index":2,"code":"unknown_path","message":"no such mixer field: nope"}]}}
+```
+
+The atomicity is real rather than nominal: each touched channel gets a `core::stage_delayed`
+holding a blocked executor, every op is queued against it, every touched channel is then locked,
+and only then are the executors released -- so no channel's tick can run between the first op
+landing and the last. Measured on two channels: both events carried **the same frame number**.
+
+Two limits, both deliberate:
+
+* **A clip load cannot be inside a batch.** It has to go through AMCP to build the producer, which
+  runs against the channel's real stage, so it would land whenever AMCP got to it -- outside the
+  frame the rest of the batch is pinned to. It is refused at validation rather than silently
+  breaking the guarantee. `POST` it to `/v1/action` first, then batch the rest.
+* **`queue` is accepted and echoed, and there is one queue.** The field is reserved now so a client
+  written today does not have to change when independent queues arrive.
+
+
 
 Every reply carries the same envelope:
 
@@ -287,6 +350,16 @@ clients issuing 100 toggles each: every reply's `value` equalled the next reply'
 unbroken chain of 200. **A parity check would have passed either way**, which is why the chain is
 the assertion.
 
+**A batch owns its delayed stages, and finding out why cost an hour.** `core::stage_delayed` held
+its channel's `shared_ptr<stage>` **by reference**, which is safe only while the caller's own
+variable outlives the batch. That is true for `AMCPCommandQueue`, which passes a channel's member,
+and false for anything holding the pointer in a local -- and the failure is not a crash. Both
+delayed stages resolved through a dangling reference to the same `stage`, so locking the second
+channel hit a mutex this thread already held and threw `resource_deadlock_would_occur` from inside
+a `try` block that reported it as `internal`. One channel worked; two did not. The member is now
+held by value, which costs one atomic increment per batch and removes a trap that was waiting for
+whoever wrote the second caller.
+
 **The diff is per connection, not per server.** Rejected: one server-side "last published" set
 that every subscriber diffs against. Two clients with different `throttle_ms` are at different
 points in time, so a shared set hands one of them a diff computed against the other's view -- and
@@ -342,6 +415,11 @@ and Linux and leaves both bootstraps untouched.
 | wrap normalises | **none -- checked by hand** | `hue_shift` 400 to 40.0, -400 to -40.0. `proj_yaw` 7.5 stays 7.5, because it declares `wrap` with no range -- and so does AMCP | 2026-09-05 |
 | tween | **none -- checked by hand** | `{"value":0.0,"duration":50,"tween":"easeoutsine"}` sampled 14 times over 2.1 s: 0.937, 0.813, 0.691 ... 0.012, 0.0005, 0.0 -- **14 distinct values, monotone**, so the curve is running rather than the endpoints being written | 2026-09-05 |
 | **no lost updates under contention** | **none -- checked by hand** | 2 clients x 100 `{"op":"toggle"}` on one boolean: 200 replies, every one flipped its own `previous`, and **every reply's `value` equalled the next reply's `previous`** -- one unbroken chain. A lost update breaks the chain; a parity check would pass by luck | 2026-09-05 |
+| actions | **none -- checked by hand** | `play` with a clip, then `pause`, `resume`, `stop`: `foreground/transport` read back `playing`, `paused`, `playing`, `stopped` | 2026-09-05 |
+| action refusals | **none -- checked by hand** | unknown verb, unknown channel, malformed path and a missing clip each returned their own code | 2026-09-05 |
+| **a two-channel batch lands on one frame** | **none -- checked by hand** | two `set` ops on different channels: both events carried **frame 434**, and both values were correct. This is the assertion the whole `stage_delayed` dance exists for | 2026-09-05 |
+| a failed batch applies nothing | **none -- checked by hand** | `[ok, ok, unknown_path]` answered `batch_op_failed` with `details[0].index == 2`, and **both valid ops read back unapplied**; a range violation at index 1 behaved the same | 2026-09-05 |
+| actions inside a batch | **none -- checked by hand** | two `pause` ops on different channels: both layers read back `paused` | 2026-09-05 |
 
 **What these numbers do not cover, and it is most of it.** They were taken by hand from one server
 on one machine, not by a battery, so nothing re-runs them and nothing will notice when they stop
@@ -362,34 +440,34 @@ being true. Specifically:
 
 ## 5. Known gaps
 
-1. **No actions and no batches.** `POST /v1/action` and `POST /v1/batch` answer `bad_request`, so
-   `PLAY`, `STOP` and anything that must land on one frame across two channels still go through
-   AMCP.
+1. **No battery.** Every number in section 4 is one manual run on one machine. Nothing re-runs
+   them, and nothing will notice when they stop being true. This is the gap that makes every other
+   item here unverifiable rather than merely incomplete.
 2. **Only mixer fields are writable.** `PUT` resolves `/channel/{n}/stage/layer/{m}/mixer/{field}`
-   and nothing else; there is no writable path outside a layer's transform.
-3. **No authentication.** `<auth>password</auth>` is refused at startup. Until it exists this port
+   and nothing else.
+3. **A clip load goes through AMCP**, so its failures carry AMCP's detail rather than this API's,
+   and it cannot take part in an atomic batch.
+4. **No `at_frame`.** A batch lands on the next frame it can, not on a frame the client names --
+   so two servers cannot be told to change together.
+5. **No authentication.** `<auth>password</auth>` is refused at startup. Until it exists this port
    must not be bound to an interface reachable off-segment -- and that applies to the WebSocket
    too, which is the same port.
-4. **No battery.** See section 4 -- this is the gap that makes every other item here unverifiable
-   rather than merely incomplete. The subscription half is the more urgent, because a subscription
-   defect looks exactly like a quiet server.
-5. **A subscription is not resumable.** A dropped socket loses the per-connection diff, so a client
-   must re-subscribe and take the full set again. That is correct, and it is undocumented on the
-   wire: there is no session id to resume, and there deliberately is not one yet.
-6. **`throttle_ms` is per message, not per path.** A subscription covering a busy prefix and a
+6. **A subscription is not resumable.** A dropped socket loses the per-connection diff, so a client
+   must re-subscribe and take the full set again. There is no session id to resume, deliberately.
+7. **`throttle_ms` is per message, not per path.** A subscription covering a busy prefix and a
    quiet one throttles both together.
-7. **A `wrap` field with no declared range is not normalised.** The projection angles are the whole
+8. **A `wrap` field with no declared range is not normalised.** The projection angles are the whole
    set: they declare `wrap` because they are periodic and carry no limits, so `proj_yaw` 7.5 rad
    stays 7.5 rad. AMCP stores it the same way, so the two agree -- but a client cannot rely on
    getting a canonical representative back.
-8. **The blob fields report presence, not content.** `lut3d`, `hue_curves`, `blend_mask` and
+9. **The blob fields report presence, not content.** `lut3d`, `hue_curves`, `blend_mask` and
    `grade_nodes` appear as `blob` descriptors and refuse a `PUT`; loading one stays a `MIXER`
    command.
-9. **`ocio.source_space` is read-only** -- validating a colour-space name against the loaded OCIO
-   config lives in the accelerator layer, which this library does not link.
-10. **No discovery.** There is no mDNS/Zeroconf anywhere in the fork, so a client is told where the
+10. **`ocio.source_space` is read-only** -- validating a colour-space name against the loaded OCIO
+    config lives in the accelerator layer, which this library does not link.
+11. **No discovery.** There is no mDNS/Zeroconf anywhere in the fork, so a client is told where the
     server is rather than finding it.
-11. **The projection block is published twice**, under its historical `projection/*` names for
+12. **The projection block is published twice**, under its historical `projection/*` names for
     existing OSC consumers and under its registry names in `mixer/proj_*`. Both are live and they
     agree; retiring the first changes a published interface and is deliberately not done here.
 
